@@ -50,7 +50,10 @@ changed default key never reaches existing users by itself.
 
 ## Building and testing
 
-`cargo build`, `cargo test` (what CI runs, on Linux).
+`just build`, `just test` (what CI runs, on Linux), `just check` (the tests).
+`just install` uses the platform installer on Linux/macOS and
+`cargo install` on Windows. Windows recipes use PowerShell by default;
+`just --shell pwsh --shell-arg -Command <recipe>` uses pwsh.
 
 Never run a bare `target/*/herdr-app` (no arguments) on a machine where you
 also use the app without `HERDR_APP_HOME` pointing at a scratch home: it
