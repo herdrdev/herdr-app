@@ -3714,13 +3714,10 @@ impl AppWindow {
                         .into_any_element(),
                 ),
                 OverlayKind::Popup => {
-                    let (x, y) = match o.top {
+                    let at = match o.top {
                         // Centered, hanging from `offset` px below the top (a drop-down from a bar).
-                        Some(off) => ((viewport.width - w) / 2.0, settings::z(off)),
-                        None => (
-                            o.at.x.min(viewport.width - w - px(8.0)).max(px(8.0)),
-                            o.at.y.min(viewport.height - h - px(8.0)).max(px(8.0)),
-                        ),
+                        Some(off) => point((viewport.width - w) / 2.0, settings::z(off)),
+                        None => o.at,
                     };
                     out.push(
                         div()
@@ -3731,7 +3728,7 @@ impl AppWindow {
                                 let id = o.id.clone();
                                 move |this, _, w, cx| this.close_overlay(&id, w, cx)
                             }))
-                            .child(div().absolute().left(x).top(y).child(body))
+                            .child(position_popup(at, body))
                             .into_any_element(),
                     );
                 }
@@ -3842,6 +3839,13 @@ fn agent_name(app: &str) -> String {
         "grok" => "Grok".into(),
         other => other.to_owned(),
     }
+}
+
+fn position_popup(at: Point<Pixels>, body: Stateful<Div>) -> Anchored {
+    anchored()
+        .position(point(at.x.max(px(8.0)), at.y.max(px(8.0))))
+        .snap_to_window_with_margin(px(8.0))
+        .child(body)
 }
 
 /// An overlay's blocks get ids of their own (`<overlay>/<id>`), and its mods learn the overlay.
@@ -4133,6 +4137,53 @@ impl Render for AppWindow {
 
 #[cfg(test)]
 mod tests {
+    use gpui::{div, point, px, size, Context, IntoElement, Render, TestAppContext, Window};
+    use gpui::prelude::*;
+
+    #[gpui::test]
+    fn fitted_popups_use_their_rendered_size_at_the_window_edge(cx: &mut TestAppContext) {
+        struct Popup {
+            height: f32,
+            edge: bool,
+        }
+        impl Render for Popup {
+            fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let viewport = window.viewport_size();
+                let at = if self.edge {
+                    point(viewport.width - px(40.0), viewport.height - px(40.0))
+                } else {
+                    point(px(100.0), px(200.0))
+                };
+                div().size_full().child(super::position_popup(
+                    at,
+                    div()
+                        .id("popup")
+                        .debug_selector(|| "popup".into())
+                        .w(px(220.0))
+                        .max_h(viewport.height * 0.85)
+                        .child(div().h(px(self.height))),
+                ))
+            }
+        }
+        let (view, cx) = cx.add_window_view(|_, _| Popup { height: 72.0, edge: false });
+        for (height, edge) in [(72.0, false), (72.0, true), (300.0, true)] {
+            view.update(cx, |view, cx| {
+                view.height = height;
+                view.edge = edge;
+                cx.notify();
+            });
+            cx.run_until_parked();
+            let bounds = cx.debug_bounds("popup").unwrap();
+            assert_eq!(bounds.size, size(px(220.0), px(height)));
+            if edge {
+                let viewport = cx.update(|window, _| window.viewport_size());
+                assert_eq!(bounds.bottom_right(), point(viewport.width - px(8.0), viewport.height - px(8.0)));
+            } else {
+                assert_eq!(bounds.origin, point(px(100.0), px(200.0)));
+            }
+        }
+    }
+
     #[test]
     fn shipped_layouts_parse_and_show_what_they_promise() {
         let main = super::default_layout("main");
