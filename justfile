@@ -19,4 +19,4 @@ install:
 
 [windows]
 install:
-    cargo install --path . --locked
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/install-windows.ps1
