@@ -573,6 +573,7 @@ impl Behavior {
             || !self.on_mouse_up.is_empty()
             || self.on_mouse_down_out.is_some()
             || self.on_scroll_wheel.is_some()
+            || self.on_hover.is_some()
     }
 
     /// Whether focus or accessibility gave this element a reason to be
@@ -1756,7 +1757,7 @@ fn with_gpui_focus<E: InteractiveElement>(
 /// focus is.
 fn with_input_handlers<E>(element: E, behavior: &Behavior, runtime: &Rc<ShellRuntime>) -> E
 where
-    E: InteractiveElement + ParentElement,
+    E: StatefulInteractiveElement + ParentElement,
 {
     let mut element = element;
     if let Some(callback) = behavior.on_key_down {
@@ -1790,6 +1791,19 @@ where
         let writer = Rc::clone(&bounds);
         element = element.on_prepaint(move |value, _, _| writer.set(Some(value)));
 
+        // HERDR: controls need the same hover callbacks as plain layout elements.
+        if let Some(callback) = behavior.on_hover {
+            let runtime = Rc::downgrade(runtime);
+            let bounds = Rc::clone(&bounds);
+            element = element.on_hover(move |hovered, window, cx| {
+                if !should_dispatch_hover(*hovered, bounds.get(), window.mouse_position()) {
+                    return;
+                }
+                if let Some(runtime) = runtime.upgrade() {
+                    runtime.dispatch_change(callback, *hovered, window, cx);
+                }
+            });
+        }
         for (button, callback) in behavior.on_mouse_down.iter().copied() {
             let runtime = Rc::downgrade(runtime);
             let bounds = Rc::clone(&bounds);
@@ -2131,29 +2145,16 @@ fn flex_element(
             dispatch_click(&runtime, callback, event, window, cx);
         });
     }
-    let bounds = Rc::new(Cell::new(None::<Bounds<Pixels>>));
-    let bounds_writer = Rc::clone(&bounds);
-    let mut stateful = stateful.on_prepaint(move |value, _, _| bounds_writer.set(Some(value)));
     if let Some(callback) = behavior.on_mouse_move {
+        let bounds = Rc::new(Cell::new(None::<Bounds<Pixels>>));
+        let bounds_writer = Rc::clone(&bounds);
+        stateful = stateful.on_prepaint(move |value, _, _| bounds_writer.set(Some(value)));
         let runtime = Rc::downgrade(runtime);
-        let bounds = Rc::clone(&bounds);
         stateful = stateful.on_mouse_move(move |event, window, cx| {
             let Some(bounds) = bounds.get() else { return };
             let local = event.position - bounds.origin;
             if let Some(runtime) = runtime.upgrade() {
                 runtime.dispatch_mouse_move(callback, event, local, bounds, window, cx);
-            }
-        });
-    }
-    if let Some(callback) = behavior.on_hover {
-        let runtime = Rc::downgrade(runtime);
-        let bounds = Rc::clone(&bounds);
-        stateful = stateful.on_hover(move |hovered, window, cx| {
-            if !should_dispatch_hover(*hovered, bounds.get(), window.mouse_position()) {
-                return;
-            }
-            if let Some(runtime) = runtime.upgrade() {
-                runtime.dispatch_change(callback, *hovered, window, cx);
             }
         });
     }

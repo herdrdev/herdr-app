@@ -2197,6 +2197,8 @@ export default class PointerRebuild extends View {
     this.hoverEvents = 0;
     this.moveFunction = null;
     this.clickFunction = null;
+    this.buttonHovered = false;
+    this.buttonHoverEvents = 0;
   }
   render(cx) {
     return v_flex()
@@ -2224,12 +2226,17 @@ export default class PointerRebuild extends View {
         Button.new("after-hover")
           .w(300)
           .h(80)
+          .on_hover((hovered, cx) => {
+            this.buttonHoverEvents += 1;
+            this.buttonHovered = hovered;
+            cx.notify();
+          })
           .on_click((event, cx) => {
             this.clicks += 1;
             this.clickFunction = event.modifiers.function;
             cx.notify();
           })
-          .child(`Clicks: ${this.clicks}; Click function: ${this.clickFunction}`),
+          .child(`Clicks: ${this.clicks}; Click function: ${this.clickFunction}; Button hovered: ${this.buttonHovered}; Button hover events: ${this.buttonHoverEvents}`),
       );
   }
 }
@@ -2271,10 +2278,18 @@ export default class PointerRebuild extends View {
     context.run_until_parked();
     context.update(|window, cx| window.draw(cx).clear(cx));
     assert!(tree(&mut context).contains("Hovered: false"));
+    assert!(tree(&mut context).contains("Button hovered: true"));
+    assert!(tree(&mut context).contains("Button hover events: 1"));
     assert!(
         tree(&mut context).contains("Hover events: 2"),
         "leaving the element must still dispatch a real exit"
     );
+
+    context.simulate_mouse_move(point(px(20.), px(200.)), None, Modifiers::default());
+    context.run_until_parked();
+    context.update(|window, cx| window.draw(cx).clear(cx));
+    assert!(tree(&mut context).contains("Button hovered: false"));
+    assert!(tree(&mut context).contains("Button hover events: 2"));
 
     context.simulate_click(point(px(20.), px(120.)), Modifiers::default());
     context.run_until_parked();
