@@ -1287,10 +1287,13 @@ mod tests {
 
     #[test]
     fn replayed_shortcut_prefixes_keep_terminal_encoding() {
-        let modes: [(&[u8], &[u8], &[u8]); 3] = [
+        let modes: [(&[u8], &[u8], &[u8]); 6] = [
             (b"", b"\x0b", b"a"),
             (b"\x1b[>1u", b"\x1b[107;5u", b"a"),
             (b"\x1b[>9u", b"\x1b[107;5u", b"\x1b[97u"),
+            (b"\x1b[?9001h", b"\x0b", b"a"),
+            (b"\x1b[?9001h\x1b[>1u", b"\x1b[107;5u", b"a"),
+            (b"\x1b[?9001h\x1b[>9u", b"\x1b[107;5u", b"\x1b[97u"),
         ];
         for (setup, control_k, letter_a) in modes {
             let mut vt = Vt::new(20, 3);
