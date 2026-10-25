@@ -2057,13 +2057,10 @@ impl AppWindow {
     }
 
     /// Starts a terminal for `space`, on `on` (another machine) or here. An
-    /// empty `cwd`: the machine's home. Another machine's shell is its own
-    /// (no argv: its core picks it).
+    /// empty `cwd`: the machine's home. With no argv, that machine's core
+    /// picks its own shell.
     fn spawn(&self, argv: Option<Vec<String>>, cwd: String, space: &str, ctx: &str, on: Option<&str>) -> Result<String, String> {
-        let argv = argv.filter(|a| !a.is_empty()).unwrap_or_else(|| match on {
-            Some(_) => vec![],
-            None => vec![shell()],
-        });
+        let argv = argv.unwrap_or_default();
         let cwd = Some(cwd).filter(|c| !c.is_empty());
         self.require_document(on)?;
         let labels = json!({ "herdr.space": crate::mirror::local(space, on), "herdr.tab": crate::mirror::local(ctx, on) });
