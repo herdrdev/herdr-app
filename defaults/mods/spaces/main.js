@@ -1,29 +1,32 @@
 // Workspace spaces: stable colored avatars, worktrees under their checkout,
-// grouped by machine when more than one is known. After a space's name, dim, the
-// repo its first terminal is in now: branch, ahead/behind, uncommitted
-// changes. Click to switch, right-click for its menu, drag to reorder.
+// grouped by machine when more than one is known. After a space's name, the repo
+// its first terminal is in now, only where unusual: branch, ahead/behind. Agent state lives in the agents list, not here. Click to
+// switch, right-click for its menu, drag to reorder.
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { spaces, machines, panes, run, openOverlay, exec, hc, theme, shared, setShared, watchFolder } from "herdr";
+import { spaces, machines, panes, run, openOverlay, exec, hc, theme, shared, setShared, watchFolder, window } from "herdr";
 
 // Where a space is now: its first terminal's live folder, else where it was made.
-function place(s) {
+// `ps`: panes(), read once by the caller (each read copies every pane).
+function place(s, ps) {
   const tabs = new Set((s.tabs ?? []).map((c) => c.id));
-  return panes().find((p) => tabs.has(p.tab) && p.cwd)?.cwd || s.folder;
+  return ps.find((p) => tabs.has(p.tab) && p.cwd)?.cwd || s.folder;
 }
 const rowHeight = ({ tree }) => (tree ? 28 : 30);
-const where = (s) => JSON.stringify([s.machine ?? null, place(s)]);
+const where = (s, ps) => JSON.stringify([s.machine ?? null, place(s, ps)]);
 const base = (path) => path.replace(/\/+$/, "").split("/").pop();
+// Changes made outside Herdr (an editor's save, a commit in another app): looked
+// for this often, in repos the list shows, while the window is in front.
+const FALLBACK = 60000;
 
 // What a stored color name looks like on an avatar (the same in every mod
 // that draws space avatars): one strong color per hue, light and dark alike.
 const MARK = { ansi6: "#22a99a", ansi3: "#e3814f", ansi4: "#5b8def", ansi5: "#8b7cf6", ansi2: "#3fae6a", ansi1: "#d9649a" };
 
+// A space speaks up only when something in it needs you.
 export function glyph(status) {
-  if (status === "blocked" || status === "done") return "●";
-  if (status === "idle") return "○";
-  return "·";
+  return status === "blocked" || status === "done" ? "●" : "·";
 }
 
 export function tone(t, status) {
@@ -32,7 +35,13 @@ export function tone(t, status) {
 
 export default class Spaces extends View {
   init(_props, cx) {
-    this.git = {}; // where() -> { name, branch, ahead, behind, dirty, repo, linked }
+    this.git = {}; // where() -> { name, branch, ahead, behind, repo, linked }, null: not a repo
+    this.checked = {}; // where() -> when it was last looked at
+    this.unsure = new Set(); // where()s git couldn't answer for (a machine away)
+    this.pending = new Set(); // where()s to look at next
+    this.busy = {}; // pane -> an agent working or a program in front of its shell
+    this.ready = {}; // machine -> its layout was readable at the last look
+    this.at = {}; // space -> its where() at the last look
     this.watching = new Set(); // local repos' git folders
     // Spaces made while this runs wait (at most a moment) for their git, so a
     // worktree appears under its repo instead of jumping there.
@@ -44,26 +53,58 @@ export default class Spaces extends View {
     this.folded = new Set(JSON.parse(localStorage.getItem("machines.folded") ?? "[]"));
     this.refreshMachines(cx);
     cx.timer.every(15000, cx => this.refreshMachines(cx));
-    this.refreshGit(cx);
-    // `git status` walks the whole tree: not too often. A new space or a cd
-    // is checked at once, a commit or push too (the repo's git folder is watched).
-    cx.timer.every(10000, (cx) => this.refreshGit(cx));
+    // `git status` walks the whole tree, on another machine a process there:
+    // only when its answer could have changed (see `due`).
     cx.timer.every(250, (cx) => this.checkNew(cx));
   }
 
   checkNew(cx) {
     const now = Date.now();
-    for (const s of spaces()) if (!this.shown.has(s.id)) this.born[s.id] ??= now;
-    const fresh = [...new Set(spaces().map(where))].filter((k) => JSON.parse(k)[1] && !(k in this.git));
-    if (fresh.length && !this.checking) {
-      this.checking = true;
-      cx.spawn(async (cx) => {
-        for (const key of fresh) await this.check(key, cx);
-        this.checking = false;
-        cx.notify();
-      });
+    const sp = spaces();
+    for (const s of sp) if (!this.shown.has(s.id)) this.born[s.id] ??= now;
+    const due = this.due(now, sp, panes());
+    if (due.size) this.refreshGit(due, cx);
+    if (sp.some((s) => !this.shown.has(s.id))) cx.notify();
+  }
+
+  // Places whose git could have changed: new ones (a new space, a cd), where a
+  // command or an agent's turn just ended (a checkout, a commit, edits), those on
+  // a machine that is back, and repos in view whose fallback is due.
+  due(now, sp, ps) {
+    // Moved there: what it knew of that place may be old.
+    const at = {};
+    for (const s of sp) at[s.id] = where(s, ps);
+    const keys = new Set(Object.values(at).filter((k) => JSON.parse(k)[1]));
+    const due = new Set([...keys].filter((k) => !(k in this.git)));
+    for (const [id, k] of Object.entries(at)) if (this.at[id] && this.at[id] !== k && keys.has(k)) due.add(k);
+    this.at = at;
+    const spaceOf = {};
+    for (const s of sp) for (const t of s.tabs ?? []) spaceOf[t.id] = s;
+    const busy = {};
+    for (const p of ps) {
+      if (!p.terminal || !spaceOf[p.tab]) continue;
+      busy[p.pane] = p.status === "working" || !(p.program?.shell || p.program?.agent);
+      if (this.busy[p.pane] && !busy[p.pane]) this.sameRepo(at[spaceOf[p.tab].id], keys).forEach((k) => due.add(k));
     }
-    if (spaces().some((s) => !this.shown.has(s.id))) cx.notify();
+    this.busy = busy;
+    for (const m of machines()) {
+      const ready = m.layout === "ready";
+      if (ready && this.ready[m.name] === false) for (const k of keys) if (JSON.parse(k)[0] === m.name) due.add(k);
+      this.ready[m.name] = ready;
+    }
+    if (window().active) {
+      for (const k of keys) {
+        const asks = this.git[k] || this.unsure.has(k);
+        if (asks && !this.folded.has(JSON.parse(k)[0]) && now - (this.checked[k] ?? 0) > FALLBACK) due.add(k);
+      }
+    }
+    return due;
+  }
+
+  // `key` and the other places in its repo (a commit there moves their ahead/behind).
+  sameRepo(key, keys) {
+    const repo = this.git[key]?.repo;
+    return [key, ...(repo ? [...keys].filter((k) => this.git[k]?.repo === repo) : [])];
   }
 
   refreshMachines(cx) {
@@ -73,30 +114,35 @@ export default class Spaces extends View {
     });
   }
 
-  refreshGit(cx) {
-    if (this.refreshing) return void (this.again = true);
+  // One look at a time, each place once however often it was asked for meanwhile.
+  refreshGit(keys, cx) {
+    for (const k of keys) this.pending.add(k);
+    if (this.refreshing) return;
     this.refreshing = true;
-    const cwds = [...new Set(spaces().map(where))].filter((k) => JSON.parse(k)[1]);
     cx.spawn(async (cx) => {
-      for (const key of cwds) await this.check(key, cx);
+      while (this.pending.size) {
+        const keys = [...this.pending];
+        this.pending.clear();
+        for (const key of keys) await this.check(key, cx);
+      }
       const used = new Set(Object.values(this.git).filter(Boolean).map((g) => JSON.parse(g.repo)).filter(([on]) => !on).map(([, repo]) => repo));
       for (const repo of this.watching) if (!used.has(repo)) this.watching.delete(repo);
       this.refreshing = false;
       cx.notify();
-      if (this.again) {
-        this.again = false;
-        this.refreshGit(cx);
-      }
     });
   }
 
-  // One place's git: branch, ahead/behind, uncommitted changes, its repo.
+  // One place's git: branch, ahead/behind, its repo.
   async check(key, cx) {
     const [on, cwd] = JSON.parse(key);
+    this.checked[key] = Date.now();
+    this.unsure.delete(key);
     try {
       // No optional locks: a status that touched the index would wake the watch again.
       const r = await exec("git", ["--no-optional-locks", "status", "--porcelain=v2", "--branch"], { cwd, on });
       if (r.code !== 0) {
+        // Only git's own "no" is remembered as no repo; anything else is asked again.
+        if (!/not a git repository/i.test(r.stderr)) this.unsure.add(key);
         this.git[key] = null;
         return;
       }
@@ -105,18 +151,22 @@ export default class Spaces extends View {
       const common = await exec("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd, on });
       const repo = common.stdout.trim();
       const name = repo.endsWith("/.git") ? base(repo.slice(0, -5)) : base(repo).replace(/\.git$/, "");
-      const info = { name, branch: null, ahead: 0, behind: 0, dirty: false, repo: JSON.stringify([on, repo]), linked: repo !== `${top.stdout.trim()}/.git` };
+      const info = { name, branch: null, ahead: 0, behind: 0, repo: JSON.stringify([on, repo]), linked: repo !== `${top.stdout.trim()}/.git` };
       for (const line of r.stdout.split("\n")) {
         if (line.startsWith("# branch.head ")) info.branch = line.slice(14);
         else if (line.startsWith("# branch.ab ")) {
           const [a, b] = line.slice(12).split(" ");
           info.ahead = Math.abs(parseInt(a, 10)) || 0;
           info.behind = Math.abs(parseInt(b, 10)) || 0;
-        } else if (line && !line.startsWith("#")) info.dirty = true;
+        }
       }
       this.git[key] = info;
       if (!on) this.watch(repo, cx);
-    } catch { this.git[key] = null; }
+    } catch {
+      // Couldn't ask (the machine is away): keep what it showed, look again later.
+      this.git[key] ??= null;
+      this.unsure.add(key);
+    }
   }
 
   watch(repo, cx) {
@@ -126,7 +176,8 @@ export default class Spaces extends View {
       try {
         while (this.watching.has(repo)) {
           await watchFolder(repo);
-          if (this.watching.has(repo)) this.refreshGit(cx);
+          const mine = JSON.stringify([null, repo]);
+          if (this.watching.has(repo)) this.refreshGit(Object.keys(this.git).filter((k) => this.git[k]?.repo === mine), cx);
         }
       } catch { this.watching.delete(repo); }
     });
@@ -139,9 +190,10 @@ export default class Spaces extends View {
 
   // Spaces in order, each worktree space moved under its main checkout's.
   ordered() {
-    const ready = (w) => this.shown.has(w.id) || where(w) in this.git || Date.now() - (this.born[w.id] ??= Date.now()) > 1500;
-    for (const w of spaces()) if (!this.shown.has(w.id) && ready(w)) this.shown.add(w.id);
-    const list = spaces().map((w, i) => ({ w, i, g: this.git[where(w)] ?? null })).filter((r) => this.shown.has(r.w.id));
+    const sp = spaces(), ps = panes();
+    const ready = (w) => this.shown.has(w.id) || where(w, ps) in this.git || Date.now() - (this.born[w.id] ??= Date.now()) > 1500;
+    for (const w of sp) if (!this.shown.has(w.id) && ready(w)) this.shown.add(w.id);
+    const list = sp.map((w, i) => ({ w, i, g: this.git[where(w, ps)] ?? null })).filter((r) => this.shown.has(r.w.id));
     const mains = new Set(list.filter((r) => r.g && !r.g.linked).map((r) => r.g.repo));
     const nested = (r) => r.g?.linked && mains.has(r.g.repo);
     const out = [];
@@ -187,7 +239,7 @@ export default class Spaces extends View {
           .when(!connected, el => el.child(div().flex_none().child((machine?.state ?? "asleep").replace(/_/g, " "))))
           .when(connected, el => el.child(div().id(`machine-add-${m ?? "local"}`).flex_none().px(4).rounded(4).hover(s => s.bg(t.hover).text_color(t.foreground))
             .on_click((_e, cx) => { cx.stop_propagation(); run("space.new", m ? { machine: m } : {}); }).child("+")))
-          .child(div().size(6).rounded(3).flex_none().bg(connected ? t.done : t.dim))
+          .child(div().size(6).rounded(3).flex_none().bg(connected ? t.ansi2 : t.dim))
           .child(svg(`mods/workspace-chrome/chevron-${folded ? "right" : "down"}.svg`).size(11).flex_none()));
       const empty = h_flex().id(`machine-new-${m ?? "local"}`).h(28).flex_none().px(8).gap(7).items_center().rounded(7)
         .text_size(12).text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground))
@@ -197,12 +249,15 @@ export default class Spaces extends View {
     });
   }
 
-  // Where the space is, dim after its name: "herdr \u00b7 main \u21912 \u21931 \u25cf". The repo
-  // or branch goes when the name already says it (a worktree is named after its branch).
+  // Only what's unusual, after the name: "herdr \u00b7 spike \u21912 \u21931". The repo or
+  // branch goes when the name already says it (a worktree is named after its branch),
+  // and master/main go: nearly every space is on one.
   gitTail(g, tree, name, t) {
-    const branch = g.branch ?? "detached";
+    const raw = g.branch ?? "detached";
     const same = (a) => a.toLowerCase() === name.toLowerCase();
-    const where = tree ? (same(branch) ? "" : branch) : same(g.name) ? branch : `${g.name} \u00b7 ${branch}`;
+    const branch = same(raw) || raw === "master" || raw === "main" ? "" : raw;
+    const repo = tree || same(g.name) ? "" : g.name;
+    const where = [repo, branch].filter(Boolean).join(" \u00b7 ");
     return h_flex()
       .flex_1()
       .min_w(0)
@@ -212,9 +267,8 @@ export default class Spaces extends View {
       .text_size(11.5)
       .text_color(t.dim)
       .when(Boolean(where), (el) => el.child(div().min_w(0).truncate().child(where)))
-      .when(g.ahead > 0, (el) => el.child(div().flex_none().child(`\u2191${g.ahead}`)))
-      .when(g.behind > 0, (el) => el.child(div().flex_none().child(`\u2193${g.behind}`)))
-      .when(g.dirty, (el) => el.child(div().flex_none().size(6).rounded(3).bg(t.ansi3)));
+      .when(g.ahead > 0, (el) => el.child(div().flex_none().text_color(t.ansi2).child(`\u2191${g.ahead}`)))
+      .when(g.behind > 0, (el) => el.child(div().flex_none().text_color(t.ansi1).child(`\u2193${g.behind}`)));
   }
 
   row({ w, i, g, tree }, t) {
@@ -252,10 +306,7 @@ export default class Spaces extends View {
           .when(Boolean(tree), el => el.pl(22).child(svg("mods/workspace-chrome/branch.svg").size(13).text_color(t.dim)))
           .when(!tree, el => el.child(h_flex().size(18).flex_none().rounded(5).bg(fill).items_center().justify_center().text_size(10.5).font_bold().text_color("#ffffff").child(w.name[0]?.toUpperCase() ?? "?")))
           .child(div().flex_shrink(0).max_w(150).truncate().text_color(t.foreground).child(w.name))
-          .child(g ? this.gitTail(g, tree, w.name, t) : div().flex_1())
-          .when(w.status === "working", el => el.child(svg("mods/workspace-chrome/spinner.svg").flex_none().size(12).text_color(t.working).spin(900)))
-          .when(w.status === "blocked", el => el.child(div().flex_none().px(6).h(18).rounded(5).bg(t.blocked + "26").text_size(10.5).font_semibold().text_color(t.blocked).flex().items_center().child("Needs you")))
-          .when(w.status === "done", el => el.child(div().flex_none().size(6).rounded(3).bg(t.done))),
+          .child(g ? this.gitTail(g, tree, w.name, t) : div().flex_1()),
       );
   }
 
@@ -270,17 +321,18 @@ export default class Spaces extends View {
       .hover((s) => s.bg(t.hover))
       .on_click(() => run("space.select", { id: w.id }))
       .child(div().text_color(w.active ? t.foreground : t.muted).child(String(i + 1)))
-      .child(w.status === "working" ? svg("mods/workspace-chrome/spinner.svg").size(12).text_color(t.working).spin(900) : div().text_color(tone(t, w.status)).child(glyph(w.status)));
+      .child(div().text_color(tone(t, w.status)).child(glyph(w.status)));
   }
 
   render() {
     const t = theme();
     const collapsed = shared("sidebar.collapsed") === true;
     const palette = ["ansi6", "ansi3", "ansi4", "ansi5", "ansi2", "ansi1"];
-    const ids = new Set(spaces().map(p => p.id));
+    const sp = spaces();
+    const ids = new Set(sp.map(p => p.id));
     const kept = Object.fromEntries(Object.entries(shared("space.colors") ?? {}).filter(([id]) => ids.has(id)));
     let changed = Object.keys(kept).length !== Object.keys(shared("space.colors") ?? {}).length;
-    for (const p of spaces()) {
+    for (const p of sp) {
       if (kept[p.id] || p.name === "~") continue;
       const uses = c => Object.values(kept).filter(v => v === c).length;
       kept[p.id] = palette.reduce((best, c) => uses(c) < uses(best) ? c : best);

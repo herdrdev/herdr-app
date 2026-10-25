@@ -254,7 +254,7 @@ export default class Welcome extends View {
       .child(svg(W(icon)).size(15).text_color(t.muted))
       .child(div().flex_1().min_w(0).truncate().text_size(13).text_color(t.foreground).child(name))
       .child(div().text_size(12).text_color(t.dim).child(note))
-      .child(div().w(8).h(8).rounded(4).bg(ok ? t.done : t.dim));
+      .child(div().w(8).h(8).rounded(4).bg(ok ? t.ansi2 : t.dim));
   }
 
   pageTwo(t) {
@@ -402,8 +402,8 @@ export default class Welcome extends View {
                 .cursor_pointer()
                 .text_size(12.5)
                 .font_medium()
-                .bg(this.copied ? t.done + "22" : t.raised)
-                .text_color(this.copied ? t.done : t.foreground)
+                .bg(this.copied ? t.ansi2 + "22" : t.raised)
+                .text_color(this.copied ? t.ansi2 : t.foreground)
                 .border_1()
                 .border_color(t.border)
                 .hover((s) => s.bg(t.hover))

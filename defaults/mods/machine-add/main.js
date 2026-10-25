@@ -239,7 +239,7 @@ export default class MachineAdd extends View {
     const st = this.state[target];
     const done = this.isAdded(target);
     const right = done
-      ? h_flex().gap(5).items_center().text_size(12).text_color(t.done).child(svg(I("circle-check")).size(13)).child("Added")
+      ? h_flex().gap(5).items_center().text_size(12).text_color(t.ansi2).child(svg(I("circle-check")).size(13)).child("Added")
       : st === "adding"
         ? h_flex().gap(6).items_center().text_size(12).text_color(t.muted).child(svg(I("spinner")).size(12).text_color(t.working).spin(900)).child("Connecting")
         : st === "terminal"

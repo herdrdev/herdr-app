@@ -373,6 +373,9 @@ pub struct Node {
     /// relative to the app's folder: `layouts/<name>.svg`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub preview: Option<String>,
+    /// Root only: the terminal right-click menu's mod (default: `menu`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_menu: Option<String>,
     /// Dragging this node moves the window; a double-click maximizes it.
     #[serde(default, skip_serializing_if = "is_false")]
     pub window_drag: bool,
@@ -411,6 +414,7 @@ impl Node {
             titlebar: None,
             traffic_lights: None,
             preview: None,
+            terminal_menu: None,
             window_drag: false,
         }
     }

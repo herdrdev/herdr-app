@@ -3,12 +3,12 @@ set -euo pipefail
 
 [[ $(uname -s) == Darwin ]] || { echo 'This installer requires macOS.' >&2; exit 1; }
 cd "$(dirname "$0")/.."
-cargo build
+cargo build --release
 
 app="$HOME/Applications/Herdr.app"
 mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources" "$HOME/.local/bin"
 # Replace atomically so installing does not interrupt a running Herdr.
-cp target/debug/herdr-app "$app/Contents/MacOS/Herdr.new"
+cp target/release/herdr-app "$app/Contents/MacOS/Herdr.new"
 mv -f "$app/Contents/MacOS/Herdr.new" "$app/Contents/MacOS/Herdr"
 chmod +x "$app/Contents/MacOS/Herdr"
 cp assets/icons/Herdr.icns "$app/Contents/Resources/Herdr.icns"

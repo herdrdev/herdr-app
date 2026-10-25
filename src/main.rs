@@ -31,6 +31,7 @@ mod feedback;
 mod terminal;
 mod update;
 mod vt;
+mod win32_keys;
 mod window;
 
 use gpui::*;

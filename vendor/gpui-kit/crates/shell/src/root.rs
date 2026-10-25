@@ -764,6 +764,7 @@ impl ShellRoot {
 
 impl Drop for ShellRoot {
     fn drop(&mut self) {
+        crate::materialize::forget_spins(self.content.entity_id());
         if let Some(application) = self.application_generation.take() {
             crate::engine::quickjs::cancel_application_tasks(&application);
         }
@@ -868,6 +869,11 @@ impl Render for ShellRoot {
                     .clone()
                     .cached(StyleRefinement::default().size_full())
                     .into_any_element()
+            })
+            // HERDR: its view's spinners, so a step doesn't rebuild the view.
+            .child({
+                crate::materialize::show_spins_of(self.content.entity_id());
+                crate::materialize::spin_layer(self.content.entity_id())
             })
             .children(self.sheet_layer(&colors, &spacing, cx))
             .children(self.dialog_layer(&colors, &radius, &spacing, cx))

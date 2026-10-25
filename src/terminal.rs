@@ -217,8 +217,7 @@ impl TerminalView {
                 }
                 drop(g);
                 if let Some(t) = attached.terminal.get("title").and_then(|t| t.as_str()).filter(|t| !t.is_empty()) {
-                    self.title = t.to_owned();
-                    cx.emit(TerminalEvent::TitleChanged);
+                    self.set_title(t, cx);
                 }
                 Some(attached.stream)
             }
@@ -244,6 +243,15 @@ impl TerminalView {
         }
     }
 
+    /// Its title as shown (see `shown_title`); news only when that changed.
+    fn set_title(&mut self, title: &str, cx: &mut Context<Self>) {
+        let shown = shown_title(title);
+        if shown != self.title {
+            self.title = shown.to_owned();
+            cx.emit(TerminalEvent::TitleChanged);
+        }
+    }
+
     pub fn focus_handle(&self) -> &FocusHandle {
         &self.focus
     }
@@ -258,7 +266,7 @@ impl TerminalView {
     /// Feeds relayed bytes in; returns false once the stream is over.
     fn ingest(&mut self, batch: Vec<Stream>, cx: &mut Context<Self>) -> bool {
         let mut open = true;
-        {
+        let title = {
             let mut g = self.grid.borrow_mut();
             for item in batch {
                 match item {
@@ -284,17 +292,19 @@ impl TerminalView {
                     }
                 }
             }
-            if let Some(title) = g.vt.take_title() {
-                self.title = if title.is_empty() { self.address.clone() } else { title };
-                cx.emit(TerminalEvent::TitleChanged);
-            }
+            g.vt.take_title()
+        };
+        if let Some(title) = title {
+            let title = if title.is_empty() { self.address.clone() } else { title };
+            self.set_title(&title, cx);
         }
         if !open {
             cx.emit(TerminalEvent::Ended);
         }
         // Output in a terminal nobody sees doesn't redraw the window; it's
-        // drawn fresh when shown again.
-        if self.shown_in.get() == FRAME.load(Ordering::Relaxed) {
+        // drawn fresh when shown again. Nor does output that changed nothing
+        // on screen (an agent spinning its title).
+        if self.shown_in.get() == FRAME.load(Ordering::Relaxed) && self.grid.borrow_mut().vt.shows_change() {
             self.redraw_soon(cx);
         }
         open
@@ -550,6 +560,20 @@ impl TerminalView {
 /// Ctrl on Linux, Cmd on macOS, alone: hovering shows links and a click opens one (as in Ghostty).
 /// Paths as a shell reads them, space-separated with a trailing space: bare
 /// when plain, else single-quoted (`'` escaped as the shell wants it).
+/// A title as it's shown: an agent's spinner in front of it (`\u{2733} Fix the
+/// tests`, braille dots) is no part of it. Herdr draws its own, and a title
+/// that spins would redraw every mod that shows titles, 10 times a second.
+pub(crate) fn shown_title(title: &str) -> &str {
+    // Frames agents spin, not status icons (\u{2713} build stays): braille dots,
+    // Claude Code's stars and its half circles.
+    let spinner = |c: char| {
+        matches!(c, '\u{2800}'..='\u{28ff}' | '\u{00b7}' | '\u{2722}' | '\u{2733}' | '\u{2736}' | '\u{273b}' | '\u{273d}' | '\u{25d0}'..='\u{25d3}')
+    };
+    let rest = title.trim_start_matches(|c: char| spinner(c) || c.is_whitespace());
+    let led = title.len() - rest.len();
+    if rest.is_empty() || !title[..led].chars().any(spinner) || !title[..led].ends_with(char::is_whitespace) { title } else { rest }
+}
+
 fn quote_paths(paths: impl IntoIterator<Item = String>) -> String {
     let quote = |p: String| {
         if !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+=,:@%~".contains(c)) {
@@ -662,6 +686,9 @@ fn key_bytes(vt: &mut vt::Vt, ev: &KeyDownEvent) -> Option<Vec<u8>> {
     }
     let k = &ev.keystroke;
     let m = k.modifiers;
+    if k.key == "enter" && vt.win32.on && (m.shift || m.control || m.alt) {
+        return Some(crate::win32_keys::enter(m.shift, m.control, m.alt));
+    }
     let Some((key, shifted, unshifted)) = map_key(&k.key) else {
         return k.key_char.as_ref().map(|text| text.as_bytes().to_vec());
     };
@@ -1201,6 +1228,19 @@ impl Focusable for TerminalView {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_titles_spinner_is_not_part_of_it() {
+        use super::shown_title;
+        assert_eq!(shown_title("\u{2733} Fix the tests"), "Fix the tests", "Claude Code's");
+        assert_eq!(shown_title("\u{280b} working"), "working", "braille");
+        assert_eq!(shown_title("\u{25d0} \u{2733}  two of them"), "two of them");
+        assert_eq!(shown_title("~/Projects/herdr"), "~/Projects/herdr", "a folder keeps its ~");
+        assert_eq!(shown_title("\u{03c0} - pi"), "\u{03c0} - pi", "a letter is no spinner");
+        assert_eq!(shown_title("\u{2733}"), "\u{2733}", "nothing after it: kept");
+        assert_eq!(shown_title("\u{2713} build"), "\u{2713} build", "a status icon stays");
+        assert_eq!(shown_title("\u{2717} build"), "\u{2717} build");
+    }
+
     use super::key_bytes;
     use crate::vt::Vt;
     use gpui::{KeyDownEvent, Keystroke, Modifiers};
@@ -1311,5 +1351,22 @@ mod tests {
             }
         }
         assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
+    }
+
+    /// Windows' ConPTY drops Shift+Enter as Ghostty sends it; when the program
+    /// asks for win32-input-mode (even split across reads), Enter with a
+    /// modifier goes as a key event instead.
+    #[test]
+    fn enter_with_a_modifier_goes_as_a_windows_key_event_when_the_program_asks() {
+        let mut vt = Vt::new(20, 3);
+        let send = |vt: &mut Vt, spec| String::from_utf8(key_bytes(vt, &press(spec, None)).unwrap()).unwrap();
+        assert_eq!(send(&mut vt, "shift-enter"), "\x1b[27;2;13~");
+        vt.write(b"\x1b[?90");
+        vt.write(b"01h");
+        assert_eq!(send(&mut vt, "shift-enter"), "\x1b[13;28;13;1;16;1_\x1b[13;28;13;0;16;1_");
+        assert_eq!(send(&mut vt, "ctrl-enter"), "\x1b[13;28;10;1;8;1_\x1b[13;28;10;0;8;1_");
+        assert_eq!(send(&mut vt, "enter"), "\r");
+        vt.write(b"\x1b[?9001l");
+        assert_eq!(send(&mut vt, "shift-enter"), "\x1b[27;2;13~");
     }
 }

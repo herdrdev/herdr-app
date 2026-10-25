@@ -24,11 +24,11 @@ struct Palette {
     cursor: Option<u32>,
     ansi: [u32; 16],
     /// working, blocked, done: the presets pick their own; theme files take
-    /// them from ansi (blue, yellow, green).
+    /// them from ansi (yellow, red, blue). Idle is grey: it needs nobody.
     status: Option<[u32; 3]>,
 }
 
-const DARK_STATUS: Option<[u32; 3]> = Some([0x76a8ff, 0xf2a33c, 0x4cc48c]);
+const DARK_STATUS: Option<[u32; 3]> = Some([0xe5c07b, 0xf0705f, 0x76a8ff]);
 
 const GRAPHITE: Palette = Palette {
     background: 0x17191d,
@@ -71,7 +71,7 @@ const PAPER: Palette = Palette {
     foreground: 0x25272c,
     selection: 0xcfdcf5,
     cursor: Some(0x25272c),
-    status: Some([0x2f6fe4, 0xb86b06, 0x1b955b]),
+    status: Some([0x9a6700, 0xc93c2c, 0x2f6fe4]),
     ansi: [
         0x25272c, 0xc62a2a, 0x1a7f37, 0x8f5d00, 0x1f62d0, 0x7a45c8, 0x0f6f74, 0x5f6068, 0x7b7e87, 0xd1242f, 0x1f883d, 0x9a6700, 0x0969da,
         0x8250df, 0x1b7c83, 0x111214,
@@ -237,7 +237,7 @@ fn resolve(p: &Palette, overrides: &BTreeMap<String, String>) -> Theme {
     let bg = p.background;
     let light = is_light(bg);
     let fg = if light { 0x1b1b1e } else { 0xeeeeef };
-    let [working, blocked, done] = p.status.unwrap_or([p.ansi[4], p.ansi[3], p.ansi[2]]);
+    let [working, blocked, done] = p.status.unwrap_or([p.ansi[3], p.ansi[1], p.ansi[4]]);
     let (popover, raised, hover, selected, border, input, canvas, chrome) = if light {
         let warm = 0xe8e8e2;
         (hex(bg), hex(mix(bg, 0, 0.035)), "#0000000c".into(), "#00000012".into(), "#00000017".into(), "#00000026".into(), mix(bg, warm, 0.2), mix(bg, warm, 0.6))

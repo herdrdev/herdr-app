@@ -341,8 +341,8 @@ pub struct AppWindow {
     listed_once: bool,
     /// Live folders by address (from the shell process).
     cwds: HashMap<String, String>,
-    /// When each terminal's repo and branch were last read.
-    folders_checked: HashMap<String, Instant>,
+    /// When each terminal's repo and branch were last read, and what it was doing.
+    folders_checked: HashMap<String, FolderCheck>,
     /// When Herdr started each terminal: a listing already in flight can't know them yet.
     born: RefCell<HashMap<String, Instant>>,
     /// Connection epoch: ignore replies from an old connection.
@@ -515,9 +515,13 @@ impl AppWindow {
             }
         }));
         w._tasks.push(cx.spawn_in(window, async move |this, cx| {
+            // The terminals come from the core's events (a snapshot, then each
+            // change), not from listing them all every tick; machines, which
+            // send no events, are asked now and then.
             let mut subscription = None;
             let mut subscribed_generation = u64::MAX;
             let mut event_lines = crate::hc::EventLines::default();
+            let (mut tick, mut relist) = (0u64, false);
             loop {
                 let Ok((core, generation)) = this.update(cx, |this, _| {
                     (this.core.clone(), this.core_generation)
@@ -534,7 +538,11 @@ impl AppWindow {
                         });
                         (sub, result)
                     }).await;
-                    subscription = sub;
+                    subscription = sub.map(|(channel, events, snapshot)| {
+                        event_lines = crate::hc::EventLines::new(&snapshot);
+                        (channel, events)
+                    });
+                    (tick, relist) = (0, true);
                     if this.update_in(cx, |this, window, cx| {
                         if generation != this.core_generation { return; }
                         this.documents.entry(String::new()).or_default().connection(true, None, None);
@@ -542,22 +550,33 @@ impl AppWindow {
                         this.sync(window, cx);
                     }).is_err() { break; }
                 }
+                let ask_machines = tick.is_multiple_of(5);
+                tick += 1;
+                let relisting = std::mem::take(&mut relist);
                 let (sub, machines, refresh, listed, lines) = cx.background_executor().spawn(async move {
-                    // Subscribe before reading. The local stream forwards remote doc events too.
-                    let fresh_subscription = subscription.is_none();
-                    if fresh_subscription { event_lines = crate::hc::EventLines::default(); }
-                    let sub = subscription.or_else(|| core.subscribe().ok());
-                    let mut refresh = fresh_subscription;
+                    // The local stream forwards remote doc events too.
+                    let mut sub = subscription;
+                    let (mut refresh, mut terminals) = (false, relisting);
+                    if sub.is_none() && let Ok((channel, events, snapshot)) = core.subscribe() {
+                        event_lines = crate::hc::EventLines::new(&snapshot);
+                        sub = Some((channel, events));
+                        (refresh, terminals) = (true, true);
+                    }
+                    let mut closed = false;
                     if let Some((channel, events)) = &sub {
                         while let Ok(event) = events.try_recv() {
                             if let crate::hc::Stream::Data(bytes) = event {
-                                refresh |= event_lines.push(&bytes);
+                                let pushed = event_lines.push(&bytes);
+                                refresh |= pushed.docs;
+                                terminals |= pushed.terminals;
                                 core.credit(*channel, bytes.len());
-                            } else { refresh = true; }
+                            } else { (refresh, closed) = (true, true); }
                         }
                     }
-                    let machines = core.call("machine.list", json!({})).ok();
-                    let listed = core.call("terminal.list", json!({"all":false}));
+                    // A stream that ended is subscribed to again, with a fresh snapshot.
+                    if closed { sub = None; }
+                    let machines = if ask_machines || terminals { core.call("machine.list", json!({})).ok() } else { None };
+                    let listed = terminals.then(|| event_lines.live());
                     (sub, machines, refresh, listed, event_lines)
                 }).await;
                 let watching = sub.is_some();
@@ -568,7 +587,10 @@ impl AppWindow {
                     this.documents_watching = watching;
                     if watching { this.documents.entry(String::new()).or_default().connection(true, None, None); }
                     let changed = this.documents_updated(machines, vec![], window, cx);
-                    if let Ok(v) = listed { this.terminals_listed(v, window, cx); }
+                    match listed {
+                        Some(v) => this.terminals_listed(v, window, cx),
+                        None => this.tend_terminals(false, window, cx),
+                    }
                     if changed { this.sync(window, cx); }
                     this.flush_documents(refresh, window, cx);
                 }).is_err() { break; }
@@ -1581,6 +1603,12 @@ impl AppWindow {
     fn documents_updated(&mut self, machines: Option<Value>, results: Vec<(String, crate::mirror_sync::Outcome)>, window: &mut Window, cx: &mut Context<Self>) -> bool {
         use crate::mirror_sync::Outcome;
         let mut changed = false;
+        // The listing every 500 ms brings the machines alone: redraw only when
+        // one's state moved, or the whole window draws twice a second for nothing.
+        let shown = |d: &std::collections::BTreeMap<String, crate::mirror_sync::Slot>| {
+            d.iter().map(|(m, s)| (m.clone(), s.connected, s.available, s.blocked, s.error.clone(), s.layout())).collect::<Vec<_>>()
+        };
+        let (listing, was) = (results.is_empty(), shown(&self.documents));
         for (machine, result) in results {
             let Some(slot) = self.documents.get_mut(&machine) else { continue };
             let first = slot.document.is_none();
@@ -1654,8 +1682,10 @@ impl AppWindow {
             self.model.spaces.retain(|s| s.machine.as_deref().is_none_or(|m| states.contains_key(m)));
             changed |= before != self.model.spaces.len();
         }
-        self.publish(cx);
-        cx.notify();
+        if !listing || changed || shown(&self.documents) != was {
+            self.publish(cx);
+            cx.notify();
+        }
         changed
     }
 
@@ -1681,11 +1711,28 @@ impl AppWindow {
             obj.insert("status".into(), word);
             obj.insert("program".into(), program_of(&report, running_argv(obj)));
             obj.insert("report".into(), report);
+            // As the panes show it: a spinning title would change every listing.
+            if let Some(title) = obj.get("title").and_then(Value::as_str).map(|t| crate::terminal::shown_title(t).to_owned()) {
+                obj.insert("title".into(), title.into());
+            }
             if let Some(a) = obj.get("address").and_then(Value::as_str) {
                 live.insert(a.to_owned(), Value::Object(obj.clone()));
             }
         }
         self.live = live;
+        // A new sub-agent changes only this list; mods that show teams need to redraw.
+        let terminals_changed = mods::publish_terminals(list);
+        self.tend_terminals(true, window, cx);
+        if terminals_changed {
+            self.refresh_mods(cx);
+        }
+    }
+
+    /// Every tick, with or without news from the core: where the terminals go
+    /// (a layout that arrived late can place one now), what they mean now (a
+    /// finished agent you're looking at is no longer news), their folders, their
+    /// streams. `listed`: the list itself changed.
+    fn tend_terminals(&mut self, listed: bool, window: &mut Window, cx: &mut Context<Self>) {
         // Place newly labeled terminals first: one that is blocked on its first
         // listing is ours, and must ring.
         let mut changed = self.reconcile(window, cx);
@@ -1716,15 +1763,10 @@ impl AppWindow {
             self.tell_term(&t.view, &t.address, cx);
         }
         self.listed_once = true;
-        // A new sub-agent changes only this list; mods that show teams need to redraw.
-        let terminals_changed = mods::publish_terminals(list);
         if changed {
             self.sync(window, cx);
-        } else {
+        } else if listed {
             self.publish(cx);
-        }
-        if terminals_changed {
-            self.refresh_mods(cx);
         }
     }
 
@@ -1877,7 +1919,7 @@ impl AppWindow {
     /// Reads each terminal's live folder, and its repo and branch for mods.
     fn track_folders(&mut self, cx: &mut Context<Self>) {
         let home = mods::home().to_string_lossy().into_owned();
-        let mut todo = Vec::new();
+        let mut todo: HashMap<(Option<String>, String), Vec<String>> = HashMap::new();
         let mut moved = false;
         for (addr, rec) in &self.live {
             // Core's live folder of what runs there (any machine), else the shell's (local).
@@ -1890,13 +1932,17 @@ impl AppWindow {
                 .or_else(|| rec.get("pid").and_then(Value::as_u64).filter(|_| !addr.contains('/')).and_then(crate::process_cwd::read).map(|p| p.to_string_lossy().into_owned()))
                 .or_else(|| rec.get("cwd").and_then(Value::as_str).map(str::to_owned));
             let Some(cwd) = cwd else { continue };
-            // A checkout changes the branch without moving the folder: look again now and then.
-            let stale = self.folders_checked.get(addr).is_none_or(|t| t.elapsed() > FOLDER_RECHECK);
-            if self.cwds.get(addr) != Some(&cwd) || stale {
+            let busy = busy(rec);
+            let last = self.folders_checked.get_mut(addr);
+            if recheck(last.as_deref(), &cwd, busy, self.window_active) {
                 moved |= self.cwds.get(addr) != Some(&cwd);
                 self.cwds.insert(addr.clone(), cwd.clone());
-                self.folders_checked.insert(addr.clone(), Instant::now());
-                todo.push((addr.clone(), cwd));
+                let repo = last.as_ref().is_none_or(|l| l.cwd != cwd || l.repo); // until git says otherwise
+                self.folders_checked.insert(addr.clone(), FolderCheck { at: Instant::now(), cwd: cwd.clone(), busy, repo });
+                // Another machine's terminal (`vps/t7`): git runs there.
+                todo.entry((addr.split_once('/').map(|(m, _)| m.to_owned()), cwd)).or_insert_with(Vec::new).push(addr.clone());
+            } else if let Some(last) = last {
+                last.busy = busy;
             }
         }
         self.folders_checked.retain(|a, _| self.live.contains_key(a));
@@ -1904,15 +1950,25 @@ impl AppWindow {
         if moved {
             self.save();
         }
-        for (addr, cwd) in todo {
+        // Once per machine and folder, however many terminals are there.
+        for ((on, cwd), addrs) in todo {
             let home = home.clone();
             cx.spawn(async move |this, cx| {
-                // Another machine's terminal (`vps/t7`): git runs there.
-                let on = addr.split_once('/').map(|(m, _)| m.to_owned());
-                let info = cx.background_executor().spawn(async move { folder_info(&cwd, &home, on.as_deref()) }).await;
+                let asked = cwd.clone();
+                let (info, repo) = cx.background_executor().spawn(async move { folder_info(&asked, &home, on.as_deref()) }).await;
                 let _ = this.update(cx, |this, cx| {
-                    if this.model.folder_info.get(&addr) != Some(&info) {
-                        this.model.folder_info.insert(addr, info);
+                    let mut changed = false;
+                    // Not one that moved on meanwhile: its own answer is coming.
+                    for addr in addrs.into_iter().filter(|a| this.cwds.get(a) == Some(&cwd)) {
+                        if let Some(check) = this.folders_checked.get_mut(&addr) {
+                            check.repo = repo;
+                        }
+                        if this.model.folder_info.get(&addr) != Some(&info) {
+                            this.model.folder_info.insert(addr, info.clone());
+                            changed = true;
+                        }
+                    }
+                    if changed {
                         this.publish(cx);
                         cx.notify();
                     }
@@ -2790,8 +2846,7 @@ impl AppWindow {
             "mod.open" => {
                 let name = Self::arg(a, "name").unwrap_or_default();
                 let Some(f) = self.folders.get(name) else { return self.fail(format!("no mod folder {name:?}")) };
-                let meta: Value = std::fs::read_to_string(f.dir.join("mod.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
-                let mut spec = meta.get("overlay").cloned().filter(Value::is_object).unwrap_or_else(|| json!({}));
+                let mut spec = mod_overlay(&f.dir);
                 spec["mod"] = json!(name);
                 self.open_overlay(mods::new_overlay_id(), spec, window, cx);
             }
@@ -2940,7 +2995,15 @@ impl AppWindow {
         if let Some(p) = at {
             self.pointer = p;
         }
-        let spec = json!({ "mod": "menu", "kind": "popup", "width": 220, "height": 260, "props": { "tab": tab, "target": target } });
+        let requested = self.chrome.terminal_menu.as_deref().unwrap_or("menu");
+        let name = if self.folders.contains_key(requested) {
+            requested
+        } else {
+            tracing::warn!(mod_name = requested, "terminal menu mod not found; using menu");
+            "menu"
+        };
+        let defaults = self.folders.get(name).map(|f| mod_overlay(&f.dir)).unwrap_or_else(|| json!({}));
+        let spec = terminal_menu_spec(name, &defaults, tab, target);
         self.open_overlay(mods::new_overlay_id(), spec, window, cx);
     }
 
@@ -3542,7 +3605,10 @@ impl AppWindow {
                 })
                 // Popups size to their content, up to the window: a column, so a mod
                 // root with `min_h(0)` can shrink and scroll. Layout mods fill their block.
-                .map(|d| if in_overlay { d.h_auto().min_h_0().flex().flex_col().child(root.clone()) } else { d.child(cached(root)) })
+                // Not cached here: ShellRoot caches the mod's view itself and draws its
+                // spinners over it, waking only itself (GPUI rebuilds all under a cached
+                // view that changed, so a spinner step would rebuild the mod).
+                .map(|d| if in_overlay { d.h_auto().min_h_0().flex().flex_col().child(root.clone()) } else { d.child(root.clone()) })
                 .into_any_element(),
             Some(Copy { error, inst, .. }) => div()
                 .id(SharedString::from(format!("err-{slot}")))
@@ -3714,13 +3780,10 @@ impl AppWindow {
                         .into_any_element(),
                 ),
                 OverlayKind::Popup => {
-                    let (x, y) = match o.top {
+                    let at = match o.top {
                         // Centered, hanging from `offset` px below the top (a drop-down from a bar).
-                        Some(off) => ((viewport.width - w) / 2.0, settings::z(off)),
-                        None => (
-                            o.at.x.min(viewport.width - w - px(8.0)).max(px(8.0)),
-                            o.at.y.min(viewport.height - h - px(8.0)).max(px(8.0)),
-                        ),
+                        Some(off) => point((viewport.width - w) / 2.0, settings::z(off)),
+                        None => o.at,
                     };
                     out.push(
                         div()
@@ -3731,7 +3794,7 @@ impl AppWindow {
                                 let id = o.id.clone();
                                 move |this, _, w, cx| this.close_overlay(&id, w, cx)
                             }))
-                            .child(div().absolute().left(x).top(y).child(body))
+                            .child(position_popup(at, body))
                             .into_any_element(),
                     );
                 }
@@ -3844,6 +3907,13 @@ fn agent_name(app: &str) -> String {
     }
 }
 
+fn position_popup(at: Point<Pixels>, body: Stateful<Div>) -> Anchored {
+    anchored()
+        .position(point(at.x.max(px(8.0)), at.y.max(px(8.0))))
+        .snap_to_window_with_margin(px(8.0))
+        .child(body)
+}
+
 /// An overlay's blocks get ids of their own (`<overlay>/<id>`), and its mods learn the overlay.
 fn overlay_layout(mut n: Node, overlay: &str) -> Node {
     fn walk(n: &mut Node, overlay: &str, seq: &mut usize) {
@@ -3863,34 +3933,78 @@ fn overlay_layout(mut n: Node, overlay: &str) -> Node {
     n
 }
 
+/// What a terminal's folder last said about its repo, and what ran there then.
+struct FolderCheck {
+    at: Instant,
+    cwd: String,
+    busy: bool,
+    /// A repo, or git couldn't say (a machine unreachable): worth a look again.
+    repo: bool,
+}
+
+/// Changes made outside Herdr (a commit in another app): looked for this often,
+/// in repos, while the window is in front.
+const FOLDER_FALLBACK: Duration = Duration::from_secs(60);
+
+/// An agent working, or a program other than the shell in front (an agent
+/// between turns isn't, even started from a shell).
+fn busy(rec: &Value) -> bool {
+    let program = |k: &str| rec["program"][k].as_bool() == Some(true);
+    rec["status"] == "working" || !(program("shell") || program("agent"))
+}
+
+/// Whether to ask a terminal's folder for its repo and branch again: only when
+/// the answer could have changed. It moved, a command or an agent's turn just
+/// ended there (a checkout, a commit), or a repo's fallback is due.
+fn recheck(last: Option<&FolderCheck>, cwd: &str, busy: bool, active: bool) -> bool {
+    let Some(last) = last else { return true };
+    last.cwd != cwd || (last.busy && !busy) || (active && last.repo && last.at.elapsed() > FOLDER_FALLBACK)
+}
+
 /// The repo a folder is in (a worktree counts as its main checkout's), else the
-/// folder itself, and the branch.
-const FOLDER_RECHECK: Duration = Duration::from_secs(10);
+/// folder itself, and the branch; and whether it is a repo (or git couldn't say).
 /// How long a missing terminal the core couldn't answer for waits before the next look.
 
 /// Set once the app starts quitting, the OS ending the session included: the
 /// saved layout stays as it was.
 pub static QUITTING: std::sync::atomic::AtomicBool = std::sync::atomic::AtomicBool::new(false);
 
-fn folder_info(cwd: &str, home: &str, on: Option<&str>) -> model::FolderInfo {
+fn folder_info(cwd: &str, home: &str, on: Option<&str>) -> (model::FolderInfo, bool) {
+    let none = model::FolderInfo { top: cwd.into(), branch: None };
     if on.is_none() && cwd == home {
-        return model::FolderInfo { top: cwd.into(), branch: None };
+        return (none, false);
     }
     let args = ["-C", cwd, "rev-parse", "--show-toplevel", "--abbrev-ref", "HEAD"].map(str::to_owned);
-    let stdout = match on {
-        Some(m) => mods::run_remote(m, "git", &args, None).ok().filter(|(code, ..)| *code == 0).map(|(_, out, _)| out),
-        None => crate::spawn::command("git").args(&args).output().ok().filter(|o| o.status.success()).map(|o| o.stdout),
+    let ran = match on {
+        Some(m) => mods::run_remote(m, "git", &args, None).ok().map(|(code, out, err)| (code == 0, out, err)),
+        None => crate::spawn::command("git").args(&args).output().ok().map(|o| (o.status.success(), o.stdout, o.stderr)),
     };
-    let out = stdout.map(|o| String::from_utf8_lossy(&o).lines().map(str::to_owned).collect::<Vec<_>>()).unwrap_or_default();
-    let [top, head] = out.as_slice() else {
-        return model::FolderInfo { top: cwd.into(), branch: None };
+    let Some((true, out, _)) = ran else {
+        // Only git's own "no" means no repo; a failed run, a repo without commits
+        // or one git won't read are asked again.
+        let no = ran.is_some_and(|(_, _, err)| String::from_utf8_lossy(&err).to_lowercase().contains("not a git repository"));
+        return (none, !no);
     };
+    let out: Vec<String> = String::from_utf8_lossy(&out).lines().map(str::to_owned).collect();
+    let [top, head] = out.as_slice() else { return (none, true) };
     let branch = (head != "HEAD").then(|| head.clone());
-    model::FolderInfo { top: top.clone(), branch }
+    (model::FolderInfo { top: top.clone(), branch }, true)
 }
 
 fn home() -> String {
     mods::home().to_string_lossy().into_owned()
+}
+
+fn mod_overlay(dir: &std::path::Path) -> Value {
+    let meta: Value = std::fs::read_to_string(dir.join("mod.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+    meta.get("overlay").cloned().filter(Value::is_object).unwrap_or_else(|| json!({}))
+}
+
+fn terminal_menu_spec(name: &str, defaults: &Value, tab: &str, target: Value) -> Value {
+    json!({ "mod": name, "kind": "popup",
+        "width": defaults.get("width").and_then(Value::as_f64).unwrap_or(220.0),
+        "height": defaults.get("height").and_then(Value::as_f64).unwrap_or(260.0),
+        "props": { "tab": tab, "target": target } })
 }
 
 fn num_in(v: &Value, k: &str) -> f32 {
@@ -4133,6 +4247,108 @@ impl Render for AppWindow {
 
 #[cfg(test)]
 mod tests {
+    use gpui::{div, point, px, size, Context, IntoElement, Render, TestAppContext, Window};
+    use gpui::prelude::*;
+
+    #[gpui::test]
+    fn fitted_popups_use_their_rendered_size_at_the_window_edge(cx: &mut TestAppContext) {
+        struct Popup {
+            height: f32,
+            edge: bool,
+        }
+        impl Render for Popup {
+            fn render(&mut self, window: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let viewport = window.viewport_size();
+                let at = if self.edge {
+                    point(viewport.width - px(40.0), viewport.height - px(40.0))
+                } else {
+                    point(px(100.0), px(200.0))
+                };
+                div().size_full().child(super::position_popup(
+                    at,
+                    div()
+                        .id("popup")
+                        .debug_selector(|| "popup".into())
+                        .w(px(220.0))
+                        .max_h(viewport.height * 0.85)
+                        .child(div().h(px(self.height))),
+                ))
+            }
+        }
+        let (view, cx) = cx.add_window_view(|_, _| Popup { height: 72.0, edge: false });
+        for (height, edge) in [(72.0, false), (72.0, true), (300.0, true)] {
+            view.update(cx, |view, cx| {
+                view.height = height;
+                view.edge = edge;
+                cx.notify();
+            });
+            cx.run_until_parked();
+            let bounds = cx.debug_bounds("popup").unwrap();
+            assert_eq!(bounds.size, size(px(220.0), px(height)));
+            if edge {
+                let viewport = cx.update(|window, _| window.viewport_size());
+                assert_eq!(bounds.bottom_right(), point(viewport.width - px(8.0), viewport.height - px(8.0)));
+            } else {
+                assert_eq!(bounds.origin, point(px(100.0), px(200.0)));
+            }
+        }
+    }
+
+    #[test]
+    fn terminal_menu_is_a_root_layout_choice_that_roundtrips() {
+        let mut root = super::default_layout("main");
+        assert_eq!(root.terminal_menu, None);
+        assert!(serde_json::to_value(&root).unwrap().get("terminal_menu").is_none());
+        root.terminal_menu = Some("personal-menu".into());
+        let restored: super::Node = serde_json::from_value(serde_json::to_value(&root).unwrap()).unwrap();
+        assert_eq!(restored.terminal_menu.as_deref(), Some("personal-menu"));
+    }
+
+    #[test]
+    fn terminal_menu_preserves_clicked_target_and_uses_mod_dimensions() {
+        use serde_json::json;
+        let target = json!({ "pane": "p2", "terminal": "t8" });
+        let stock = super::terminal_menu_spec("menu", &json!({}), "pane", target.clone());
+        assert_eq!(stock["width"], 220.0);
+        assert_eq!(stock["height"], 260.0);
+        let custom = super::terminal_menu_spec("personal-menu", &json!({"kind": "dialog", "width": 310, "height": 120}), "pane", target.clone());
+        assert_eq!(custom["mod"], "personal-menu");
+        assert_eq!(custom["kind"], "popup");
+        assert_eq!(custom["width"], 310.0);
+        assert_eq!(custom["height"], 120.0);
+        assert_eq!(custom["props"], json!({"tab": "pane", "target": target}));
+        let partial = super::terminal_menu_spec("personal-menu", &json!({"width": 0.4}), "pane", json!({}));
+        assert_eq!(partial["width"], 0.4);
+        assert_eq!(partial["height"], 260.0);
+    }
+
+    #[test]
+    fn a_folder_is_asked_again_only_when_its_answer_could_have_changed() {
+        use super::{FOLDER_FALLBACK, FolderCheck, recheck};
+        use std::time::{Duration, Instant};
+        let checked = |busy, repo, ago: Duration| FolderCheck { at: Instant::now() - ago, cwd: "/src".into(), busy, repo };
+        let (now, later) = (Duration::ZERO, FOLDER_FALLBACK + Duration::from_secs(1));
+        assert!(recheck(None, "/src", false, false), "never asked");
+        assert!(!recheck(Some(&checked(false, true, now)), "/src", false, true), "nothing happened");
+        assert!(recheck(Some(&checked(false, true, now)), "/elsewhere", false, false), "it moved");
+        assert!(recheck(Some(&checked(true, true, now)), "/src", false, false), "a command or turn ended");
+        assert!(!recheck(Some(&checked(false, true, now)), "/src", true, true), "one started");
+        assert!(recheck(Some(&checked(false, true, later)), "/src", false, true), "a repo, a minute on, in front");
+        assert!(!recheck(Some(&checked(false, true, later)), "/src", false, false), "not while the window is behind");
+        assert!(!recheck(Some(&checked(false, false, later)), "/src", false, true), "not a repo: never on a timer");
+    }
+
+    #[test]
+    fn busy_is_an_agent_working_or_a_program_in_front_of_the_shell() {
+        let rec = |status: &str, shell: bool, agent: bool| {
+            serde_json::json!({ "status": status, "program": { "shell": shell, "agent": agent } })
+        };
+        assert!(super::busy(&rec("working", false, true)), "an agent's turn");
+        assert!(!super::busy(&rec("done", false, true)), "an agent started from a shell, its turn over");
+        assert!(super::busy(&rec("", false, false)), "vim in front of the shell");
+        assert!(!super::busy(&rec("", true, false)), "the shell's prompt");
+    }
+
     #[test]
     fn shipped_layouts_parse_and_show_what_they_promise() {
         let main = super::default_layout("main");

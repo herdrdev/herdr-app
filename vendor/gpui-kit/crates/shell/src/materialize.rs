@@ -250,6 +250,8 @@ impl<'a> ChildSpecs<'a> {
             );
         }
         let inherited = refinement.text.color.unwrap_or(self.inherited);
+        // HERDR: for hosted spinners (see `Spin`).
+        let _fade = Fade::enter(&refinement, &states);
         let children: Children = node
             .children()
             .iter()
@@ -573,6 +575,7 @@ impl Behavior {
             || !self.on_mouse_up.is_empty()
             || self.on_mouse_down_out.is_some()
             || self.on_scroll_wheel.is_some()
+            || self.on_hover.is_some()
     }
 
     /// Whether focus or accessibility gave this element a reason to be
@@ -774,6 +777,19 @@ fn materialize_node(
     let motion_identity = motion_element_id(id, behavior.key.clone(), &component);
     apply_motion(motion_identity, &motions, &mut refinement, window, cx);
     let frame_text = apply_loops(&behavior, &mut refinement, window, cx);
+    // HERDR: for hosted spinners (see `Spin`).
+    let _fade = Fade::enter(&refinement, &states);
+    if matches!(
+        component,
+        Component::Popover(_)
+            | Component::HoverCard(_)
+            | Component::Popup(_)
+            | Component::Select(_)
+            | Component::Combobox(_)
+            | Component::DatePicker(..)
+    ) {
+        KEEP_INLINE.with(|o| o.set(true));
+    }
     let inherited = refinement.text.color.unwrap_or(inherited);
 
     // `SmallVec` rather than `Vec`: this runs per node, per frame, and the
@@ -1420,10 +1436,17 @@ fn materialize_component(
             // accounts for this node's own `text_color`, so an explicit color
             // still wins and an icon in a dark button comes out light.
             warn_unhonoured_a11y(&behavior, "svg", &[]);
-            let mut image = gpui::svg().path(SharedString::from(path));
+            let path = SharedString::from(path);
+            // HERDR: `spin`.
+            if let Some(ms) = behavior.spin
+                && HOSTED.with(|h| h.get())
+                && !checking()
+            {
+                return spin_slot(window.current_view(), path, inherited, ms, &refinement);
+            }
+            let mut image = gpui::svg().path(path);
             image.style().refine(&refinement);
             image.style().text.color = Some(inherited);
-            // HERDR: `spin`.
             if let Some(ms) = behavior.spin {
                 let turn = (loop_clock_ms() % ms) / ms;
                 image = image.with_transformation(gpui::Transformation::rotate(gpui::radians((turn * std::f64::consts::TAU) as f32)));
@@ -1756,7 +1779,7 @@ fn with_gpui_focus<E: InteractiveElement>(
 /// focus is.
 fn with_input_handlers<E>(element: E, behavior: &Behavior, runtime: &Rc<ShellRuntime>) -> E
 where
-    E: InteractiveElement + ParentElement,
+    E: StatefulInteractiveElement + ParentElement,
 {
     let mut element = element;
     if let Some(callback) = behavior.on_key_down {
@@ -1790,6 +1813,19 @@ where
         let writer = Rc::clone(&bounds);
         element = element.on_prepaint(move |value, _, _| writer.set(Some(value)));
 
+        // HERDR: controls need the same hover callbacks as plain layout elements.
+        if let Some(callback) = behavior.on_hover {
+            let runtime = Rc::downgrade(runtime);
+            let bounds = Rc::clone(&bounds);
+            element = element.on_hover(move |hovered, window, cx| {
+                if !should_dispatch_hover(*hovered, bounds.get(), window.mouse_position()) {
+                    return;
+                }
+                if let Some(runtime) = runtime.upgrade() {
+                    runtime.dispatch_change(callback, *hovered, window, cx);
+                }
+            });
+        }
         for (button, callback) in behavior.on_mouse_down.iter().copied() {
             let runtime = Rc::downgrade(runtime);
             let bounds = Rc::clone(&bounds);
@@ -2131,29 +2167,16 @@ fn flex_element(
             dispatch_click(&runtime, callback, event, window, cx);
         });
     }
-    let bounds = Rc::new(Cell::new(None::<Bounds<Pixels>>));
-    let bounds_writer = Rc::clone(&bounds);
-    let mut stateful = stateful.on_prepaint(move |value, _, _| bounds_writer.set(Some(value)));
     if let Some(callback) = behavior.on_mouse_move {
+        let bounds = Rc::new(Cell::new(None::<Bounds<Pixels>>));
+        let bounds_writer = Rc::clone(&bounds);
+        stateful = stateful.on_prepaint(move |value, _, _| bounds_writer.set(Some(value)));
         let runtime = Rc::downgrade(runtime);
-        let bounds = Rc::clone(&bounds);
         stateful = stateful.on_mouse_move(move |event, window, cx| {
             let Some(bounds) = bounds.get() else { return };
             let local = event.position - bounds.origin;
             if let Some(runtime) = runtime.upgrade() {
                 runtime.dispatch_mouse_move(callback, event, local, bounds, window, cx);
-            }
-        });
-    }
-    if let Some(callback) = behavior.on_hover {
-        let runtime = Rc::downgrade(runtime);
-        let bounds = Rc::clone(&bounds);
-        stateful = stateful.on_hover(move |hovered, window, cx| {
-            if !should_dispatch_hover(*hovered, bounds.get(), window.mouse_position()) {
-                return;
-            }
-            if let Some(runtime) = runtime.upgrade() {
-                runtime.dispatch_change(callback, *hovered, window, cx);
             }
         });
     }
@@ -2659,6 +2682,144 @@ fn loop_clock_ms() -> f64 {
 thread_local! {
     static LOOP_WAKES: RefCell<std::collections::HashMap<gpui::EntityId, std::time::Instant>> =
         RefCell::new(std::collections::HashMap::new());
+}
+
+// HERDR: a spinner in a view a ShellRoot shows is drawn by that ShellRoot.
+// The view lays out an empty slot that says where it is; ShellRoot paints it
+// turned, on top of its cached content, and wakes only itself. A step then
+// redraws ShellRoot's thin layers instead of rebuilding the whole view: GPUI
+// rebuilds everything under a cached view that changed, so a spinner that
+// woke its view cost the view's whole materialize, layout and paint 10 times
+// a second.
+// Painted above the whole view, a spinner would show through anything in the
+// view drawn over it, and keeps only the opacity it was built with: a view with
+// a popover, a select or the like, opacity that changes on hover, press or
+// focus (or an error banner, see ScriptView) keeps its spinners inline.
+#[derive(Clone)]
+struct Spin {
+    bounds: Bounds<Pixels>,
+    mask: gpui::ContentMask<Pixels>,
+    path: SharedString,
+    color: gpui::Hsla,
+    ms: f64,
+}
+
+thread_local! {
+    static SPINS: RefCell<std::collections::HashMap<gpui::EntityId, Vec<Spin>>> =
+        RefCell::new(std::collections::HashMap::new());
+    /// Views ShellRoots show as their content.
+    static SHOWN: RefCell<std::collections::HashSet<gpui::EntityId>> =
+        RefCell::new(std::collections::HashSet::new());
+    /// Views whose last build had something that may cover a spinner.
+    static INLINE: RefCell<std::collections::HashSet<gpui::EntityId>> =
+        RefCell::new(std::collections::HashSet::new());
+    static HOSTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    static KEEP_INLINE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// The opacity the node being built is painted with (its ancestors' and its own).
+    static FADE: std::cell::Cell<f32> = const { std::cell::Cell::new(1.0) };
+}
+
+/// A ShellRoot shows `view` as its content (and draws its spinners).
+pub(crate) fn show_spins_of(view: gpui::EntityId) {
+    SHOWN.with(|s| s.borrow_mut().insert(view));
+}
+
+pub(crate) fn forget_spins(view: gpui::EntityId) {
+    SPINS.with(|s| s.borrow_mut().remove(&view));
+    SHOWN.with(|s| s.borrow_mut().remove(&view));
+    INLINE.with(|s| s.borrow_mut().remove(&view));
+}
+
+/// Materializes `view`; `may_host`: its spinners may be left to its ShellRoot's
+/// [`spin_layer`]. True when it must be built again at once: something that
+/// may cover a spinner appeared, so they go back inline.
+pub(crate) fn build_view<T>(view: gpui::EntityId, may_host: bool, build: impl FnOnce() -> T) -> (T, bool) {
+    let hosted = may_host
+        && SHOWN.with(|s| s.borrow().contains(&view))
+        && !INLINE.with(|s| s.borrow().contains(&view));
+    SPINS.with(|s| s.borrow_mut().remove(&view));
+    HOSTED.with(|h| h.set(hosted));
+    KEEP_INLINE.with(|o| o.set(false));
+    let built = build();
+    HOSTED.with(|h| h.set(false));
+    let inline = KEEP_INLINE.with(|o| o.get());
+    INLINE.with(|s| if inline { s.borrow_mut().insert(view) } else { s.borrow_mut().remove(&view) });
+    (built, hosted && inline)
+}
+
+/// Builds the view being rendered again on the next frame.
+pub(crate) fn wake_view_now(window: &Window, cx: &mut App) {
+    wake_view_after(Duration::ZERO, window, cx);
+}
+
+/// While a node is built: the opacity it's painted with, for a spinner in it.
+struct Fade(f32);
+
+impl Fade {
+    fn enter(refinement: &StyleRefinement, states: &StateStyles) -> Self {
+        let changes = |s: &Option<StyleRefinement>| s.as_ref().is_some_and(|s| s.opacity.is_some() || s.visibility.is_some());
+        if changes(&states.hover) || changes(&states.active) || changes(&states.focus) {
+            KEEP_INLINE.with(|o| o.set(true));
+        }
+        let hidden = refinement.visibility == Some(gpui::Visibility::Hidden);
+        let own = if hidden { 0.0 } else { refinement.opacity.unwrap_or(1.0) };
+        Fade(FADE.with(|f| f.replace(f.get() * own)))
+    }
+}
+
+impl Drop for Fade {
+    fn drop(&mut self) {
+        FADE.with(|f| f.set(self.0));
+    }
+}
+
+fn spin_slot(
+    view: gpui::EntityId,
+    path: SharedString,
+    color: gpui::Hsla,
+    ms: f64,
+    refinement: &StyleRefinement,
+) -> AnyElement {
+    let color = color.opacity(FADE.with(|f| f.get()));
+    let mut slot = gpui::canvas(
+        move |bounds, window, _| {
+            let spin = Spin { bounds, mask: window.content_mask(), path, color, ms };
+            SPINS.with(|s| s.borrow_mut().entry(view).or_default().push(spin));
+        },
+        |_, _, _, _| {},
+    );
+    slot.style().refine(refinement);
+    slot.into_any_element()
+}
+
+/// `view`'s spinners, turned to now; while there are any, the view this is
+/// drawn in (a ShellRoot) is woken for the next step.
+pub(crate) fn spin_layer(view: gpui::EntityId) -> AnyElement {
+    gpui::canvas(
+        |_, _, _| {},
+        move |_, _, window, cx| {
+            let spins = SPINS.with(|s| s.borrow().get(&view).cloned()).unwrap_or_default();
+            if spins.is_empty() || INLINE.with(|s| s.borrow().contains(&view)) {
+                return;
+            }
+            let scale = window.scale_factor();
+            for s in spins {
+                let turn = (loop_clock_ms() % s.ms) / s.ms;
+                let center = s.bounds.center();
+                let matrix = gpui::TransformationMatrix::unit()
+                    .translate(center.scale(scale))
+                    .rotate(gpui::radians((turn * std::f64::consts::TAU) as f32))
+                    .translate(center.scale(-scale));
+                window.with_content_mask(Some(s.mask), |window| {
+                    let _ = window.paint_svg(s.bounds, s.path, None, matrix, s.color, cx);
+                });
+            }
+            wake_view_after(Duration::from_millis(100), window, cx);
+        },
+    )
+    .absolute()
+    .size_full()
+    .into_any_element()
 }
 
 /// Draws the view being rendered again after `delay`, once, however many of

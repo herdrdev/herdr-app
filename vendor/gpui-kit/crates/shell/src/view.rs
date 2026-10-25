@@ -24,7 +24,7 @@
 
 use std::rc::Rc;
 
-use gpui::{Context, EntityId, IntoElement, ParentElement as _, Render, Styled as _, Window, div};
+use gpui::{AnyElement, Context, EntityId, IntoElement, ParentElement as _, Render, Styled as _, Window, div};
 
 use crate::{
     engine::{ShellRuntime, ViewObject},
@@ -297,7 +297,19 @@ impl Render for ScriptView {
         if self.is_dirty() {
             self.rebuild(window, cx);
         }
+        // HERDR: the view a ShellRoot shows leaves its spinners to it; not over an
+        // error banner, which must cover them.
+        let may_host = matches!(self.ownership, ViewOwnership::Root) && self.error.is_none();
+        let (built, again) = crate::materialize::build_view(cx.entity_id(), may_host, || self.draw(window, cx));
+        if again {
+            crate::materialize::wake_view_now(window, cx);
+        }
+        built
+    }
+}
 
+impl ScriptView {
+    fn draw(&mut self, window: &mut Window, cx: &mut Context<Self>) -> AnyElement {
         match (self.error.as_deref(), self.current.as_ref()) {
             (None, Some(snapshot)) => materialize(&self.runtime, snapshot, window, cx),
             // A build that failed left the last good snapshot in place, so the

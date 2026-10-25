@@ -22,7 +22,13 @@ pub trait ElementExt: ParentElement + Sized {
                 move |bounds, window, cx| callback(bounds, window, cx),
                 |_, _, _, _| {},
             )
+            // HERDR: pinned to the corner. Without an inset an absolute child
+            // starts after the padding but is still as wide as the element, so
+            // the reported box hung past the right and bottom edges by the
+            // padding (a hover exit there looked stale and was dropped).
             .absolute()
+            .top_0()
+            .left_0()
             .size_full(),
         )
     }

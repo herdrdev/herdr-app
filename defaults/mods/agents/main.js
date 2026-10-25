@@ -2,9 +2,10 @@
 // reports a status, with its space and tab, the agent's name, and its
 // state, and how long it has been in that state. "done" means it finished
 // while you weren't looking. Two views (the button by the title picks,
-// `shared("agents.sort")`): grouped, under a header per space; or priority,
-// under Needs you, Done, Working, Idle, the latest change first in each (a
-// done agent you look at stays with Done until you leave it). A header folds its
+// `shared("agents.sort")`): priority, under Needs you (blocked), Done, Working
+// and Idle, the latest change first in each; or grouped, under a header per
+// space. In priority an agent sits where its most urgent sub-agent would (a done
+// agent you look at stays with Done until you leave it). A header folds its
 // group. Hovering a row shows a pin: pinned agents sit in Pinned on top in both
 // views, in the order pinned (this screen only; a pin goes when its agent
 // ends). Click a row to jump there.
@@ -31,9 +32,15 @@ function title(tab, l) {
   return tab.name === prog && telling ? live : tab.name;
 }
 const RANK = { blocked: 4, done: 3, working: 2, idle: 1 };
+// A sub-agent without a pane isn't in agents(): its raw word, error counting as
+// blocked. It's never done: it reports to its parent, and the parent's done is the news.
+const kidStatus = (k, listed) => {
+  const s = listed.get(k.address) ?? k.status;
+  return s === "error" ? "blocked" : s === "done" ? "idle" : s;
+};
 const SORTS = [
-  { id: "grouped", label: "Grouped by space", icon: "layers" },
   { id: "priority", label: "Priority", icon: "clock" },
+  { id: "grouped", label: "Grouped by space", icon: "layers" },
 ];
 const sortOf = () => SORTS.find((s) => s.id === shared("agents.sort")) ?? SORTS[0];
 const SECTION = { 4: "Needs you", 3: "Done", 2: "Working", 1: "Idle" };
@@ -167,9 +174,9 @@ export default class Agents extends View {
     });
   }
 
-  subRow(t, s, shown) {
+  subRow(t, s, shown, compact) {
     const k = s.t;
-    const st = agents().find((a) => a.address === k.address)?.status ?? k.status;
+    const st = kidStatus(k, this.listed);
     const pic = icon(k.program, 14, t.foreground);
     const on = k.address === shown;
     return h_flex()
@@ -190,14 +197,14 @@ export default class Agents extends View {
         .when(l === "└" || l === "├", el => el.border_b(1.5).rounded_bl(6))))
       .when(Boolean(pic), el => el.child(div().mr(8).child(pic)))
       .child(div().flex_1().truncate().text_color(on ? t.foreground : t.muted).child(k.name || k.template || k.program?.name || k.address))
-      .child(this.status(t, { status: st }));
+      .child(this.status(t, { status: st }, compact));
   }
 
-  // compact: a dot for blocked where a header already says "Needs you".
+  // compact: a ! for blocked where a header already says "Needs you".
   status(t, a, compact = false) {
     const color = t[a.status] ?? t.dim;
     if (a.status === "working") return svg("mods/workspace-chrome/spinner.svg").size(12).mx(1).flex_none().text_color(t.working).spin(900);
-    if (a.status === "blocked" && compact) return div().size(7).mx(3).flex_none().rounded(4).bg(color);
+    if (a.status === "blocked" && compact) return div().size(14).flex_none().rounded(4).bg(t.blocked + "26").text_size(10.5).font_bold().text_color(t.blocked).flex().items_center().justify_center().child("!");
     if (a.status === "blocked") return div().flex_none().px(6).h(18).rounded(5).bg(t.blocked + "26").text_size(10.5).font_semibold().text_color(t.blocked).flex().items_center().child("Needs you");
     // Idle: a ring (as zen's ○); done (finished while you weren't looking): a dot.
     if (a.status === "idle") return div().size(7).mx(3).flex_none().rounded(4).border(1.5).border_color(t.idle ?? t.dim);
@@ -210,13 +217,16 @@ export default class Agents extends View {
     const collapsed = shared("sidebar.collapsed") === true;
     const sort = sortOf();
     let list = agents();
+    this.listed = new Map(list.map((a) => [a.address, a.status]));
     const all = terminals();
     const shown = focused()?.agent;
     const now = Date.now();
     this.track(list, now);
     this.hold(list);
     const byPriority = sort.id === "priority";
-    if (byPriority) list = [...list].sort((x, y) => this.rank(y) - this.rank(x) || this.since(y) - this.since(x) || y.seq - x.seq);
+    const urgency = new Map(list.map((a) => [a.address, Math.max(this.rank(a), ...this.tree(all, a.address).map((s) => RANK[kidStatus(s.t, this.listed)] ?? 0))]));
+    const rankOf = (a) => urgency.get(a.address);
+    if (byPriority) list = [...list].sort((x, y) => rankOf(y) - rankOf(x) || this.since(y) - this.since(x) || y.seq - x.seq);
     this.prunePins(all);
     const pinned = this.pins.map((p) => list.find((a) => a.address === p)).filter(Boolean);
     const rest = list.filter((a) => !this.pins.includes(a.address));
@@ -227,12 +237,12 @@ export default class Agents extends View {
       const subs = collapsed ? [] : this.tree(all, a.address);
       const r = row(a, i, subs);
       if (this.folded.has(a.address)) return [r];
-      return [r, ...subs.map((s) => this.subRow(t, s, shown))];
+      return [r, ...subs.map((s) => this.subRow(t, s, shown, byPriority))];
     };
 
     // The fold chevron; folded, the count too, colored by the most urgent one.
     const fold = (a, subs) => {
-      const sts = subs.map((s) => agents().find((x) => x.address === s.t.address)?.status ?? s.t.status);
+      const sts = subs.map((s) => kidStatus(s.t, this.listed));
       const top = sts.reduce((m, s) => ((RANK[s] ?? 0) > (RANK[m] ?? 0) ? s : m), null);
       const open = !this.folded.has(a.address);
       return div()
@@ -345,10 +355,10 @@ export default class Agents extends View {
     // space are next to each other in agents(), so neighbours make a group.
     const groups = pinned.length ? [{ id: "pinned", label: "Pinned", status: null, members: pinned }] : [];
     for (const a of rest) {
-      const r = this.rank(a);
+      const r = rankOf(a) || RANK.idle;
       const id = byPriority ? `sec-${r}` : `sp-${a.space}`;
       if (groups.at(-1)?.id === id) groups.at(-1).members.push(a);
-      else groups.push({ id, label: byPriority ? SECTION[r] ?? "Other" : a.space_name || "", status: byPriority ? SECTION_STATUS[r] : null, members: [a] });
+      else groups.push({ id, label: byPriority ? SECTION[r] : a.space_name || "", status: byPriority ? SECTION_STATUS[r] : null, members: [a] });
     }
 
     // A group's header; it folds the group. Folded, it says how many and the most urgent state.

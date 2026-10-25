@@ -148,8 +148,8 @@ shown one's name. Herdr ships `main` ("Herdr": spaces by machine and the
 agents list on the left, `workspace-chrome`; tabs as pills with a + menu
 that starts a terminal or any installed agent, `new-menu`; panes as cards
 with a header; Files and Changes panels on the right, `files` and
-`changes`, opened from the tab bar (which ones: shared
-`"workspace.panels"`, set by the welcome); a status bar,
+`changes`, opened from the tab bar and remembered per space (which ones:
+shared `"workspace.panels"`, set by the welcome); a status bar,
 `workspace-status`), and as examples `t-rex` (tabs in the title bar,
 panes as cards, a space picker) and `win98`
 ("Herdr 98": a whole desktop in one mod, `win98`). Add a layout by
@@ -224,7 +224,34 @@ Properties any node can have:
   settings screen shows for this layout. Draw one when you make a layout;
   without it the person sees a plain frame. New layouts and `themes/*.json`
   show up in settings by themselves.
+- Root only: `"terminal_menu": "my-menu"` chooses the mod for terminal
+  right-clicks (including Shift+right-click). Omit it for the shipped `menu`;
+  an unknown mod logs a warning and falls back to `menu`. Clone a shipped
+  layout before changing this field. Other menus are unchanged.
 - Colors are theme names (`border`, `accent`, `surface`, ...) or `#rrggbb[aa]`.
+
+A personal terminal menu replaces the whole menu; it doesn't merge items.
+Create `mods/my-menu/main.js` and `mod.json` (e.g.
+`{"place":"none","overlay":{"width":280,"height":100}}`), then set the layout root's
+`"terminal_menu": "my-menu"`. It opens as a pointer popup, default 220×260 px;
+its `mod.json` overlay width/height override those defaults. It gets
+`props()` = `{tab: "pane", target: {pane, terminal}, overlay}`. Always use
+`target.terminal` or `target.pane` in actions, not the focused terminal:
+right-clicking a different terminal must act on the one clicked. For example:
+
+```js
+import { View, div } from "gpui-kit";
+import { props, run, closeOverlay } from "herdr";
+export default class MyMenu extends View {
+  render() {
+    return div().id("split-target").child("Split this pane").on_click(() => {
+      const {target, overlay} = props();
+      closeOverlay(overlay);
+      run("pane.split", {pane: target.pane, direction: "right"});
+    });
+  }
+}
+```
 
 ### The look: on the layout, cascading
 
@@ -616,6 +643,8 @@ Chained builders with GPUI's snake_case names: `div()`, `h_flex()`,
 `.rounded(n)`; `.id("unique")` then `.on_click(...)`, `.on_mouse_down("right", ...)`,
 `.hover((s) => s.bg(c))`, `.on_scroll_wheel(...)`; keyboard: `this.h = cx.focus_handle()`
 in init, `.track_focus(this.h).on_key_down((e, cx) => …)`, `this.h.focus()`.
+`.on_hover((hovered, cx) => …)` reports pointer entry and exit on buttons
+and other interactive controls too.
 `.when(cond, (el) => …)`, `.children([...])`. Controls from `gpui-base`
 (`Button`, `Checkbox`, `Switch`, `InputState` + `Input`) are unstyled: style
 them. Text: `TextView.markdown(id, text)` renders markdown; `EditorState.new({

@@ -213,7 +213,10 @@ export function terminals(): any[];
 /** `shown`: the terminal terminal.show put in the pane in place of its own, if any. */
 export function focused(): { space: string; tab: string; pane: string; terminal: string; shown: string | null; agent: string | null; cwd: string | null } | null;
 
-/** The shown layout (layouts/<name>.json). Its name is shared("layout"). */
+/** The shown layout (layouts/<name>.json). Its name is shared("layout").
+ *  Root `terminal_menu?: string` chooses a terminal right-click menu mod (default: "menu").
+ *  Unknown names warn and fall back to "menu". This replaces the menu, not its items.
+ *  Opens a pointer popup with mod.json overlay width/height (default 220×260). */
 export function layout(): unknown;
 
 /** The names of every layout in layouts/ (main first). */
@@ -355,7 +358,10 @@ export function notify(n: {
   action?: { name: string; args?: Record<string, unknown> };
 }): string;
 
-/** The props this copy of the mod was given in the layout (or overlay). */
+/** The props this copy of the mod was given in the layout (or overlay).
+ *  A layout's terminal_menu mod gets {tab: "pane", target: {pane: string, terminal: string}, overlay: string}.
+ *  Target names the clicked pane/terminal, not necessarily the focused one; pass it to actions.
+ *  Close the popup with closeOverlay(props().overlay). */
 export function props(): any;
 
 /** Reads a value every mod can see (persisted). */

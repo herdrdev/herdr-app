@@ -582,7 +582,7 @@ export default class Settings extends View {
     const busy = this.machineBusy[m.name];
     const edit = this.machineEdit?.machine === m.name ? this.machineEdit : null;
     const state = String(m.state ?? "unknown").replace(/[_-]/g, " ");
-    const color = ["connected", "online"].includes(m.state) ? t.done : ["connecting", "reconnecting"].includes(m.state) ? t.working : t.blocked;
+    const color = ["connected", "online"].includes(m.state) ? t.ansi2 : ["connecting", "reconnecting"].includes(m.state) ? t.working : t.blocked;
     const result = this.machineResults[m.name];
     const controls = h_flex().gap(6).items_center();
     if (busy) controls.child(svg("mods/workspace-chrome/spinner.svg").size(12).text_color(t.working).spin(900)).child(div().text_size(12).text_color(t.muted).child(busy === "update" ? "Updating…" : busy === "rename" ? "Renaming…" : "Removing…"));
@@ -620,7 +620,7 @@ export default class Settings extends View {
           .child(Input.new(this.renameInput).flex_1().min_w(0).h(32).px(10).rounded(7).border_1().border_color(this.renameFocused ? t.accent : t.input).bg(t.background).text_size(13).text_color(t.foreground))
           .child(cancel).child(this.button(t, `st-m-save-${m.name}`, "Save", (_e, cx) => this.machineAction(m.name, "rename", cx, edit.name)))));
     }
-    if (result) row.child(div().text_size(12.5).text_color(result.ok ? t.done : t.blocked).child(result.message));
+    if (result) row.child(div().text_size(12.5).text_color(result.ok ? t.ansi2 : t.blocked).child(result.message));
     return row;
   }
 
@@ -629,12 +629,12 @@ export default class Settings extends View {
     return v_flex().w_full()
       .child(this.heading(t, "Machines"))
       .child(div().pb(8).text_size(12.5).line_height("18px").text_color(t.dim).child("Your computers, reached over ssh. Their terminals keep running when you disconnect."))
-      .child(this.row(t, "This computer", `Connected · ${version ? `hc ${version}` : "hc version unknown"}`, div().w(7).h(7).rounded(4).bg(t.done)))
+      .child(this.row(t, "This computer", `Connected · ${version ? `hc ${version}` : "hc version unknown"}`, div().w(7).h(7).rounded(4).bg(t.ansi2)))
       .children((this.machineList ?? []).map((m) => this.machineRow(t, m, version)))
       .when(this.machineList === null && !this.machineError, (el) => el.child(h_flex().py(14).gap(8).items_center().child(svg("mods/workspace-chrome/spinner.svg").size(12).text_color(t.working).spin(900)).child(div().text_size(12.5).text_color(t.dim).child("Reading machines…"))))
       .when(this.machineList?.length === 0, (el) => el.child(div().py(14).text_size(12.5).text_color(t.dim).child("No other machines yet.")))
       .when(Boolean(this.machineError), (el) => el.child(div().py(10).text_size(12.5).text_color(t.blocked).child(this.machineError)))
-      .when(Boolean(this.machineNotice), (el) => el.child(div().py(10).text_size(12.5).text_color(t.done).child(this.machineNotice)))
+      .when(Boolean(this.machineNotice), (el) => el.child(div().py(10).text_size(12.5).text_color(t.ansi2).child(this.machineNotice)))
       .child(h_flex().pt(16).child(this.button(t, "st-m-add", "Add a machine", () => run("mod.open", { name: "machine-add" }))));
   }
 
@@ -678,7 +678,7 @@ export default class Settings extends View {
         : u.checking && this.asked
           ? div().px(12).py(5).text_size(13).text_color(t.dim).child("Checking\u2026")
           : asked
-            ? div().px(12).py(5).text_size(13).text_color(t.done).child("\u2713 Up to date")
+            ? div().px(12).py(5).text_size(13).text_color(t.ansi2).child("\u2713 Up to date")
             : this.button(t, id, "Check now", (_e, cx) => {
                 this.asked = Date.now();
                 run("app.check_updates");

@@ -31,22 +31,114 @@ pub enum Stream {
 #[derive(Default)]
 pub struct EventLines {
     pending: Vec<u8>,
+    /// The last event applied: older ones were in the snapshot.
+    seq: u64,
+    /// Every terminal the stream describes, in its order (schema/README.md, Events).
+    terminals: Vec<Value>,
+}
+
+/// What a push changed.
+#[derive(Default)]
+pub struct Pushed {
+    /// A layout document changed, or events were missed: read them again.
+    pub docs: bool,
+    pub terminals: bool,
 }
 
 impl EventLines {
-    pub fn push(&mut self, bytes: &[u8]) -> bool {
+    /// From `events.subscribe`'s reply: its `seq` and `terminals`.
+    pub fn new(snapshot: &Value) -> Self {
+        let terminals = snapshot["terminals"].as_array().cloned().unwrap_or_default();
+        EventLines { pending: Vec::new(), seq: snapshot["seq"].as_u64().unwrap_or(0), terminals }
+    }
+
+    /// The live terminals, as `terminal.list` puts them.
+    pub fn live(&self) -> Value {
+        let live: Vec<&Value> = self.terminals.iter().filter(|t| t["state"] == "live").collect();
+        json!({ "terminals": live })
+    }
+
+    pub fn push(&mut self, bytes: &[u8]) -> Pushed {
         self.pending.extend_from_slice(bytes);
         let mut consumed = 0;
-        let mut refresh = false;
-        for (i, byte) in self.pending.iter().enumerate() {
-            if *byte != b'\n' { continue; }
-            if let Ok(event) = serde_json::from_slice::<Value>(&self.pending[consumed..i]) {
-                refresh |= event["params"]["type"] == "doc" || event["method"] == "missed";
-            }
-            consumed = i + 1;
-        }
+        let mut pushed = Pushed::default();
+        let lines: Vec<Value> = self
+            .pending
+            .iter()
+            .enumerate()
+            .filter(|(_, b)| **b == b'\n')
+            .map(|(i, _)| {
+                let line = serde_json::from_slice::<Value>(&self.pending[consumed..i]).unwrap_or_default();
+                consumed = i + 1;
+                line
+            })
+            .collect();
         self.pending.drain(..consumed);
-        refresh
+        for line in lines {
+            let p = &line["params"];
+            match line["method"].as_str() {
+                Some("missed") => {
+                    self.terminals = p["terminals"].as_array().cloned().unwrap_or_default();
+                    self.seq = p["seq"].as_u64().unwrap_or(self.seq);
+                    pushed.docs = true;
+                    pushed.terminals = true;
+                }
+                Some("event") if p["seq"].as_u64().is_none_or(|s| s > self.seq) => {
+                    self.seq = p["seq"].as_u64().unwrap_or(self.seq);
+                    if p["type"] == "doc" {
+                        pushed.docs = true;
+                    } else {
+                        pushed.terminals |= self.apply(p);
+                    }
+                }
+                _ => {}
+            }
+        }
+        pushed
+    }
+
+    /// One event's change to the terminal it names (schema/README.md, Events).
+    fn apply(&mut self, p: &Value) -> bool {
+        let (kind, address, data) = (p["type"].as_str().unwrap_or_default(), &p["terminal"], &p["data"]);
+        let at = self.terminals.iter().position(|t| &t["address"] == address);
+        let whole = match kind {
+            "created" | "restarted" => Some(data),
+            "labels" => data.get("record"),
+            _ => None,
+        };
+        if let Some(record) = whole {
+            match at {
+                Some(i) => self.terminals[i] = record.clone(),
+                None => self.terminals.push(record.clone()),
+            }
+            return true;
+        }
+        let Some(i) = at else { return false };
+        if kind == "removed" {
+            self.terminals.remove(i);
+            return true;
+        }
+        let t = &mut self.terminals[i];
+        let mut set = |keys: &[&str]| keys.iter().for_each(|k| t[*k] = data[*k].clone());
+        match kind {
+            "finished" | "lost" => {
+                set(&["reason", "exit_code", "signal", "finished_ms"]);
+                t["state"] = if kind == "lost" { "live" } else { "finished" }.into();
+                if kind == "lost" {
+                    t["pid"] = Value::Null;
+                }
+                t.as_object_mut().map(|r| r.remove("foreground"));
+            }
+            "status" => set(&["status", "records", "reported"]),
+            "turn" => set(&["turn"]),
+            "title" => set(&["title"]),
+            "labels" => set(&["labels"]),
+            "keep" => set(&["keep"]),
+            "size" => set(&["cols", "rows"]),
+            "foreground" => t["foreground"] = data.clone(),
+            _ => return false,
+        }
+        true
     }
 }
 
@@ -286,7 +378,8 @@ impl Core {
     }
 
     /// One subscription includes local and forwarded remote events.
-    pub fn subscribe(&self) -> Result<(u32, async_channel::Receiver<Stream>)> {
+    /// The event stream, and its snapshot (`seq`, `terminals`) to apply it to.
+    pub fn subscribe(&self) -> Result<(u32, async_channel::Receiver<Stream>, Value)> {
         let result = self.call("events.subscribe", json!({}))?;
         let channel = result["channel"].as_u64().ok_or_else(|| anyhow!("subscription returned no channel"))? as u32;
         let (tx, rx) = async_channel::unbounded();
@@ -295,7 +388,7 @@ impl Core {
         r.streams.insert(channel, tx);
         drop(r);
         self.credit(channel, 1024 * 1024);
-        Ok((channel, rx))
+        Ok((channel, rx, result))
     }
 
     pub fn attach(&self, terminal: &str, cols: u16, rows: u16, display: Value) -> Result<Attached> {
@@ -353,23 +446,52 @@ mod tests {
     use super::*;
 
     #[test]
+    fn the_event_stream_keeps_the_terminals_as_the_core_has_them() {
+        let event = |seq: u64, kind: &str, t: &str, data: Value| {
+            format!("{}\n", json!({"method": "event", "params": {"seq": seq, "type": kind, "terminal": t, "data": data}}))
+        };
+        let rec = |a: &str| json!({"address": a, "state": "live", "title": "", "labels": {}, "status": null});
+        let mut lines = EventLines::new(&json!({"seq": 5, "terminals": [rec("t1")]}));
+        let addresses = |l: &EventLines| l.live()["terminals"].as_array().unwrap().iter().map(|t| t["address"].as_str().unwrap().to_owned()).collect::<Vec<_>>();
+        assert_eq!(addresses(&lines), ["t1"]);
+        assert!(!lines.push(event(5, "title", "t1", json!({"title": "old"})).as_bytes()).terminals, "not newer than the snapshot");
+        let got = lines.push(format!("{}{}", event(6, "created", "t2", rec("t2")), event(7, "title", "t1", json!({"title": "hi"}))).as_bytes());
+        assert!(got.terminals && !got.docs);
+        assert_eq!(addresses(&lines), ["t1", "t2"]);
+        assert_eq!(lines.live()["terminals"][0]["title"], "hi");
+        lines.push(event(8, "status", "t2", json!({"status": {"state": "working"}, "records": {}, "reported": true})).as_bytes());
+        lines.push(event(9, "foreground", "t2", json!({"pid": 7, "name": "vim", "argv": ["vim"], "cwd": "/src"})).as_bytes());
+        assert_eq!(lines.live()["terminals"][1]["status"]["state"], "working");
+        assert_eq!(lines.live()["terminals"][1]["foreground"]["cwd"], "/src");
+        lines.push(event(10, "finished", "t1", json!({"reason": "exited", "exit_code": 0, "signal": null, "finished_ms": 1})).as_bytes());
+        assert_eq!(addresses(&lines), ["t2"], "finished: no longer live");
+        lines.push(event(11, "removed", "t2", json!({})).as_bytes());
+        assert!(addresses(&lines).is_empty());
+        let missed = format!("{}\n", json!({"method": "missed", "params": {"seq": 20, "terminals": [rec("t9")]}}));
+        let got = lines.push(missed.as_bytes());
+        assert!(got.terminals && got.docs, "missed: everything again");
+        assert_eq!(addresses(&lines), ["t9"]);
+        assert!(lines.push(format!("{}\n", json!({"method": "event", "params": {"seq": 21, "type": "doc"}})).as_bytes()).docs);
+    }
+
+    #[test]
     fn document_and_missed_events_survive_arbitrary_frame_boundaries() {
         for line in [b"{\"method\":\"event\",\"params\":{\"type\":\"doc\"}}\n".as_slice(), b"{\"method\":\"missed\",\"params\":{\"terminals\":[]}}\n".as_slice()] {
             for at in 1..line.len() {
                 let mut lines = EventLines::default();
-                assert!(!lines.push(&line[..at]));
-                assert!(lines.push(&line[at..]));
+                assert!(!lines.push(&line[..at]).docs);
+                assert!(lines.push(&line[at..]).docs);
                 assert!(lines.pending.is_empty());
             }
             let mut lines = EventLines::default();
             let mut refresh = false;
-            for chunk in line.chunks(3) { refresh |= lines.push(chunk); }
+            for chunk in line.chunks(3) { refresh |= lines.push(chunk).docs; }
             assert!(refresh);
         }
         let mut old = EventLines::default();
         old.push(b"{\"method\":\"mis");
         let mut replacement = EventLines::default();
-        assert!(replacement.push(b"{\"method\":\"missed\"}\n"));
+        assert!(replacement.push(b"{\"method\":\"missed\"}\n").docs);
     }
 
     #[test]

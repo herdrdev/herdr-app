@@ -187,7 +187,15 @@ pub struct Vt {
     press: GhosttySelectionGestureEvent,
     drag: GhosttySelectionGestureEvent,
     release: GhosttySelectionGestureEvent,
+    /// The cursor, the kitty images and the colors as last drawn: changes to
+    /// them don't mark the render state dirty.
+    drawn: (CursorKey, u64, u64),
+    /// Whether the program wants win32 key events (Ghostty doesn't track it).
+    pub win32: crate::win32_keys::Win32Input,
 }
+
+/// What of the cursor a frame shows: (on screen, x, y, visible, style).
+type CursorKey = (bool, u16, u16, bool, i32);
 
 /// Where a link shows: (viewport row, first column, last column) per row.
 pub type Spans = Vec<(u16, u16, u16)>;
@@ -312,6 +320,8 @@ impl Vt {
                 press,
                 drag,
                 release,
+                drawn: Default::default(),
+                win32: Default::default(),
             };
             vt.apply_theme();
             vt
@@ -626,6 +636,7 @@ impl Vt {
     }
 
     pub fn write(&mut self, bytes: &[u8]) {
+        self.win32.watch(bytes);
         unsafe { ghostty_terminal_vt_write(self.term, bytes.as_ptr(), bytes.len()) };
     }
 
@@ -694,6 +705,45 @@ impl Vt {
         }
     }
 
+    /// Whether output since the last frame changed what's on screen: a title,
+    /// or a cursor parked where it was, needs no frame.
+    pub fn shows_change(&mut self) -> bool {
+        if self.shared.held_since.is_some() {
+            return true;
+        }
+        unsafe {
+            let state = self.shared.state;
+            ghostty_render_state_update(state, self.term);
+            let mut dirty: GhosttyRenderStateDirty = GHOSTTY_RENDER_STATE_DIRTY_FULL;
+            ghostty_render_state_get(state, GHOSTTY_RENDER_STATE_DATA_DIRTY, &mut dirty as *mut _ as *mut c_void);
+            dirty != GHOSTTY_RENDER_STATE_DIRTY_FALSE || self.drawable() != self.drawn
+        }
+    }
+
+    /// The cursor and the colors (from the updated render state), and the kitty
+    /// images' generation.
+    unsafe fn drawable(&self) -> (CursorKey, u64, u64) {
+        unsafe {
+            let mut cur = GhosttyRenderStateCursor { size: std::mem::size_of::<GhosttyRenderStateCursor>(), ..Default::default() };
+            ghostty_render_state_get(self.shared.state, GHOSTTY_RENDER_STATE_DATA_CURSOR, &mut cur as *mut _ as *mut c_void);
+            let cursor = (cur.viewport_has_value, cur.viewport_x, cur.viewport_y, cur.visible, cur.visual_style as i32);
+            let mut c = GhosttyRenderStateColors { size: std::mem::size_of::<GhosttyRenderStateColors>(), ..Default::default() };
+            ghostty_render_state_get(self.shared.state, GHOSTTY_RENDER_STATE_DATA_COLORS, &mut c as *mut _ as *mut c_void);
+            let mut h = std::hash::DefaultHasher::new();
+            let rgb = |h: &mut std::hash::DefaultHasher, x: GhosttyColorRgb| std::hash::Hash::hash(&(x.r, x.g, x.b), h);
+            for x in [c.background, c.foreground].into_iter().chain(c.palette).chain(c.cursor_has_value.then_some(c.cursor)) {
+                rgb(&mut h, x);
+            }
+            let colors = std::hash::Hasher::finish(&h);
+            let mut generation = 0u64;
+            let mut g: GhosttyKittyGraphics = std::ptr::null_mut();
+            if ghostty_terminal_get(self.term, GHOSTTY_TERMINAL_DATA_KITTY_GRAPHICS, &mut g as *mut _ as *mut c_void) == GHOSTTY_SUCCESS && !g.is_null() {
+                ghostty_kitty_graphics_get(g, GHOSTTY_KITTY_GRAPHICS_DATA_GENERATION, &mut generation as *mut _ as *mut c_void);
+            }
+            (cursor, generation, colors)
+        }
+    }
+
     /// Updates the render state (respecting synchronized output) and reads one frame.
     pub fn frame(&mut self) -> Frame {
         unsafe {
@@ -744,6 +794,7 @@ impl Vt {
                 color: if colors.cursor_has_value { colors.cursor.into() } else { fg_default },
             });
 
+            self.drawn = self.drawable();
             ghostty_render_state_clean(state);
             let cursor_cell = cur.viewport_has_value.then_some((cur.viewport_x, cur.viewport_y));
             Frame { rows, cursor, cursor_cell, bg: bg_default }

@@ -123,11 +123,68 @@ jobs:
           if-no-files-found: error
           retention-days: 7
 
-  publish:
+  # Signs herdr-app.exe with Azure Artifact Signing and repacks it, on Can's
+  # tag pushes and manual runs (to test signing without publishing). Azure
+  # trusts only jobs in the signing environment (v* tags and master). The
+  # Azure IDs are signing environment variables; the certificate profile is a
+  # repository variable (job-level `if` can't see environment ones), and
+  # while it's unset this is skipped and releases go out unsigned.
+  sign-windows:
     needs: build
+    if: >-
+      github.triggering_actor == 'ogulcancelik' && vars.AZURE_SIGNING_PROFILE != ''
+      && ((github.event_name == 'push' && github.ref_type == 'tag') || github.event_name == 'workflow_dispatch')
+    environment: signing
+    runs-on: windows-2022
+    timeout-minutes: 15
+    permissions:
+      contents: read
+      id-token: write
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: herdr-app-windows-x86_64
+          path: dist
+      - run: tar -xzf dist/herdr-app-windows-x86_64.tar.gz -C dist
+      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
+        with:
+          client-id: ${{ vars.AZURE_CLIENT_ID }}
+          tenant-id: ${{ vars.AZURE_TENANT_ID }}
+          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
+      - uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
+        with:
+          endpoint: https://eus.codesigning.azure.net/
+          signing-account-name: herdrsigning
+          certificate-profile-name: ${{ vars.AZURE_SIGNING_PROFILE }}
+          files: ${{ github.workspace }}\dist\herdr-app\herdr-app.exe
+          description: Herdr
+          description-url: https://herdr.dev
+      - name: Check the signature
+        shell: pwsh
+        run: |
+          $sig = Get-AuthenticodeSignature dist\herdr-app\herdr-app.exe
+          $sig | Format-List Status, StatusMessage, SignerCertificate
+          if ($sig.Status -ne 'Valid') { exit 1 }
+      - run: tar -czf dist/herdr-app-windows-x86_64.tar.gz -C dist herdr-app
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: herdr-app-windows-x86_64
+          path: dist/herdr-app-windows-x86_64.tar.gz
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+
+  publish:
+    needs: [build, sign-windows]
     # Only a tag push by Can publishes: anyone with write access can re-run an
     # old tag's run, which would point latest.json back at that version.
-    if: github.event_name == 'push' && github.ref_type == 'tag' && github.triggering_actor == 'ogulcancelik'
+    # sign-windows may be skipped, not failed.
+    if: >-
+      !cancelled() && needs.build.result == 'success' && needs.sign-windows.result != 'failure'
+      && github.event_name == 'push' && github.ref_type == 'tag' && github.triggering_actor == 'ogulcancelik'
     # The R2 keys live here, usable only from v* tags.
     environment: release
     runs-on: ubuntu-latest
