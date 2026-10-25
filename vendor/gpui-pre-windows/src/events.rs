@@ -1783,7 +1783,7 @@ mod dead_key_tests {
             let mut text = Vec::new();
             let mut message = MSG::default();
             while unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE) }.as_bool() {
-                dead_keys.observe(message.message);
+                dead_keys.observe(&message);
                 if matches!(message.message, WM_CHAR | WM_SYSCHAR) {
                     text.push(message.wParam.0 as u16);
                 }
@@ -1851,6 +1851,10 @@ mod dead_key_tests {
                         ..plain
                     };
                     assert!(!queue.preview(VK_P, control, dead_keys).1);
+                    assert_eq!(
+                        queue.translate(&queue.message(0, VK_P), dead_keys),
+                        "\u{10}"
+                    );
                     for functional in [VK_RETURN, VK_TAB, VK_ESCAPE, VK_BACK] {
                         let preview = queue.preview(functional, plain, dead_keys);
                         assert!(!preview.1, "functional key {functional:?}: {preview:?}");

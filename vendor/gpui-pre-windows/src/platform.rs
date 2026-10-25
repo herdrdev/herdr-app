@@ -496,7 +496,7 @@ impl WindowsPlatform {
 }
 
 fn translate_accelerator(msg: &MSG) -> Option<()> {
-    DEAD_KEYS.with(|state| state.observe(msg.message));
+    DEAD_KEYS.with(|state| state.observe(msg));
     if msg.message != WM_KEYDOWN && msg.message != WM_SYSKEYDOWN {
         return None;
     }

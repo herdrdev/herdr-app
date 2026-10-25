@@ -8,7 +8,7 @@ use windows::Win32::UI::{
         VK_CONTROL, VK_MENU, VK_OEM_1, VK_OEM_2, VK_OEM_3, VK_OEM_4, VK_OEM_5, VK_OEM_6, VK_OEM_7,
         VK_OEM_8, VK_OEM_102, VK_OEM_COMMA, VK_OEM_MINUS, VK_OEM_PERIOD, VK_OEM_PLUS, VK_SHIFT,
     },
-    WindowsAndMessaging::{KL_NAMELENGTH, WM_CHAR, WM_DEADCHAR, WM_SYSCHAR, WM_SYSDEADCHAR},
+    WindowsAndMessaging::{KL_NAMELENGTH, MSG, WM_CHAR, WM_DEADCHAR, WM_SYSCHAR, WM_SYSDEADCHAR},
 };
 
 use gpui::{
@@ -24,10 +24,15 @@ thread_local! {
 pub(crate) struct DeadKeyState(Cell<bool>);
 
 impl DeadKeyState {
-    pub(crate) fn observe(&self, message: u32) {
-        match message {
+    pub(crate) fn observe(&self, message: &MSG) {
+        match message.message {
             WM_DEADCHAR | WM_SYSDEADCHAR => self.0.set(true),
-            WM_CHAR | WM_SYSCHAR => self.clear(),
+            // Control characters can leave Windows' pending accent unchanged.
+            WM_CHAR | WM_SYSCHAR
+                if !char::from_u32(message.wParam.0 as u32).is_some_and(char::is_control) =>
+            {
+                self.clear()
+            }
             _ => {}
         }
     }
