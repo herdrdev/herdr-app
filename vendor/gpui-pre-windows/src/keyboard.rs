@@ -1,5 +1,6 @@
 use anyhow::Result;
 use collections::HashMap;
+use std::cell::Cell;
 use windows::Win32::UI::{
     Input::KeyboardAndMouse::{
         GetKeyboardLayoutNameW, MAPVK_VK_TO_CHAR, MAPVK_VK_TO_VSC, MapVirtualKeyW, ToUnicode,
@@ -7,12 +8,45 @@ use windows::Win32::UI::{
         VK_CONTROL, VK_MENU, VK_OEM_1, VK_OEM_2, VK_OEM_3, VK_OEM_4, VK_OEM_5, VK_OEM_6, VK_OEM_7,
         VK_OEM_8, VK_OEM_102, VK_OEM_COMMA, VK_OEM_MINUS, VK_OEM_PERIOD, VK_OEM_PLUS, VK_SHIFT,
     },
-    WindowsAndMessaging::KL_NAMELENGTH,
+    WindowsAndMessaging::{KL_NAMELENGTH, WM_CHAR, WM_DEADCHAR, WM_SYSCHAR, WM_SYSDEADCHAR},
 };
 
 use gpui::{
     KeybindingKeystroke, Keystroke, Modifiers, PlatformKeyboardLayout, PlatformKeyboardMapper,
 };
+
+thread_local! {
+    // HERDR: Native dead-key state belongs to the UI thread, across windows and input handlers.
+    pub(crate) static DEAD_KEYS: DeadKeyState = const { DeadKeyState(Cell::new(false)) };
+}
+
+#[derive(Default)]
+pub(crate) struct DeadKeyState(Cell<bool>);
+
+impl DeadKeyState {
+    pub(crate) fn observe(&self, message: u32) {
+        match message {
+            WM_DEADCHAR | WM_SYSDEADCHAR => self.0.set(true),
+            WM_CHAR | WM_SYSCHAR => self.clear(),
+            _ => {}
+        }
+    }
+
+    pub(crate) fn clear(&self) {
+        self.0.set(false);
+    }
+
+    pub(crate) fn prefers_text(&self, keystroke: &Keystroke) -> bool {
+        self.0.get()
+            && keystroke
+                .key_char
+                .as_ref()
+                .is_some_and(|text| !text.chars().any(char::is_control))
+            && !keystroke.modifiers.control
+            && !keystroke.modifiers.alt
+            && !keystroke.modifiers.platform
+    }
+}
 
 pub(crate) struct WindowsKeyboardLayout {
     id: String,

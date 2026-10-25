@@ -366,6 +366,7 @@ Sidebar on the right: swap the two children of `root`. No sidebar: set
   and letters type characters on many Mac keyboards (`[`, `@`). Don't pick
   these on your own. If the person asks for one, bind it and tell them what
   it takes from typing.
+- Windows AltGr and dead-key compositions type text in terminals.
 
 ## Commands
 

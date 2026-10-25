@@ -436,6 +436,8 @@ impl WindowsWindowInner {
             lparam,
             &self.state,
             |keystroke, prefer_character_input| {
+                let prefer_character_input = prefer_character_input
+                    || DEAD_KEYS.with(|state| state.prefers_text(&keystroke));
                 PlatformInput::KeyDown(KeyDownEvent {
                     keystroke,
                     is_held: lparam.0 & (0x1 << 30) > 0,
@@ -1692,6 +1694,219 @@ fn process_key(vkey: VIRTUAL_KEY, scan_code: u16) -> (Option<String>, bool) {
         key_char,
         result_c != result_c_no_modifiers || c != c_no_modifiers,
     )
+}
+
+#[cfg(test)]
+mod dead_key_tests {
+    use super::parse_normal_key;
+    use crate::{DEAD_KEYS, DeadKeyState};
+    use gpui::{Keystroke, Modifiers};
+    use windows::Win32::{
+        Foundation::*,
+        UI::{Input::KeyboardAndMouse::*, WindowsAndMessaging::*},
+    };
+    use windows::core::w;
+
+    struct KeyboardQueue {
+        original_layout: HKL,
+        layout: HKL,
+        already_loaded: bool,
+        windows: [HWND; 2],
+    }
+
+    impl KeyboardQueue {
+        fn new() -> Self {
+            unsafe {
+                let original_layout = GetKeyboardLayout(0);
+                let mut loaded = vec![HKL::default(); GetKeyboardLayoutList(None) as usize];
+                GetKeyboardLayoutList(Some(&mut loaded));
+                let layout = LoadKeyboardLayoutW(w!("00020409"), KLF_NOTELLSHELL).unwrap();
+                ActivateKeyboardLayout(layout, ACTIVATE_KEYBOARD_LAYOUT_FLAGS(0)).unwrap();
+                assert_eq!(GetKeyboardLayout(0), layout);
+                let windows = [0, 1].map(|_| {
+                    CreateWindowExW(
+                        WINDOW_EX_STYLE(0),
+                        w!("STATIC"),
+                        w!("dead-key-test"),
+                        WINDOW_STYLE(0),
+                        0,
+                        0,
+                        0,
+                        0,
+                        Some(HWND_MESSAGE),
+                        None,
+                        None,
+                        None,
+                    )
+                    .unwrap()
+                });
+                Self {
+                    original_layout,
+                    layout,
+                    already_loaded: loaded.contains(&layout),
+                    windows,
+                }
+            }
+        }
+
+        fn state(&self, modifiers: Modifiers) {
+            let mut state = [0; 256];
+            for (pressed, key) in [
+                (modifiers.shift, VK_SHIFT),
+                (modifiers.control, VK_CONTROL),
+                (modifiers.alt, VK_MENU),
+                (modifiers.platform, VK_LWIN),
+            ] {
+                if pressed {
+                    state[key.0 as usize] = 0x80;
+                }
+            }
+            unsafe {
+                SetKeyboardState(&state).unwrap();
+            }
+        }
+
+        fn message(&self, window: usize, key: VIRTUAL_KEY) -> MSG {
+            let scan =
+                unsafe { MapVirtualKeyExW(key.0 as u32, MAPVK_VK_TO_VSC, Some(self.layout)) };
+            MSG {
+                hwnd: self.windows[window],
+                message: WM_KEYDOWN,
+                wParam: WPARAM(key.0 as usize),
+                lParam: LPARAM((1 | scan << 16) as isize),
+                ..Default::default()
+            }
+        }
+
+        fn translate(&self, message: &MSG, dead_keys: &DeadKeyState) -> String {
+            assert!(unsafe { TranslateMessage(message) }.as_bool());
+            let mut text = Vec::new();
+            let mut message = MSG::default();
+            while unsafe { PeekMessageW(&mut message, None, 0, 0, PM_REMOVE) }.as_bool() {
+                dead_keys.observe(message.message);
+                if matches!(message.message, WM_CHAR | WM_SYSCHAR) {
+                    text.push(message.wParam.0 as u16);
+                }
+            }
+            String::from_utf16(&text).unwrap()
+        }
+
+        fn preview(
+            &self,
+            key: VIRTUAL_KEY,
+            modifiers: Modifiers,
+            dead_keys: &DeadKeyState,
+        ) -> (Keystroke, bool) {
+            self.state(modifiers);
+            let message = self.message(1, key);
+            let (keystroke, prefer_text) =
+                parse_normal_key(key, message.lParam, modifiers).unwrap();
+            let prefer_text = prefer_text || dead_keys.prefers_text(&keystroke);
+            (keystroke, prefer_text)
+        }
+    }
+
+    impl Drop for KeyboardQueue {
+        fn drop(&mut self) {
+            unsafe {
+                let mut text = [0; 8];
+                ToUnicodeEx(
+                    VK_SPACE.0 as u32,
+                    0,
+                    &[0; 256],
+                    &mut text,
+                    0,
+                    Some(self.layout),
+                );
+                SetKeyboardState(&[0; 256]).unwrap();
+                for window in self.windows {
+                    DestroyWindow(window).unwrap();
+                }
+                ActivateKeyboardLayout(self.original_layout, ACTIVATE_KEYBOARD_LAYOUT_FLAGS(0))
+                    .unwrap();
+                if !self.already_loaded {
+                    UnloadKeyboardLayout(self.layout).unwrap();
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn dead_key_completion_uses_native_text_across_windows() {
+        std::thread::spawn(|| {
+            let queue = KeyboardQueue::new();
+            DEAD_KEYS.with(|dead_keys| {
+                for (key, shift, expected) in [
+                    (VK_E, false, "è"),
+                    (VK_T, false, "`t"),
+                    (VK_SPACE, false, "`"),
+                    (VK_A, true, "À"),
+                ] {
+                    let plain = Modifiers::default();
+                    assert!(!queue.preview(VK_E, plain, dead_keys).1);
+                    queue.state(plain);
+                    assert_eq!(queue.translate(&queue.message(0, VK_OEM_3), dead_keys), "");
+                    let control = Modifiers {
+                        control: true,
+                        ..plain
+                    };
+                    assert!(!queue.preview(VK_P, control, dead_keys).1);
+                    for functional in [VK_RETURN, VK_TAB, VK_ESCAPE, VK_BACK] {
+                        let preview = queue.preview(functional, plain, dead_keys);
+                        assert!(!preview.1, "functional key {functional:?}: {preview:?}");
+                    }
+                    let modifiers = Modifiers { shift, ..plain };
+                    let (keystroke, prefer_text) = queue.preview(key, modifiers, dead_keys);
+                    assert_eq!(keystroke.key_char.as_deref(), Some(expected));
+                    let emitted = if prefer_text {
+                        queue.translate(&queue.message(1, key), dead_keys)
+                    } else {
+                        keystroke.key_char.unwrap_or_default()
+                    };
+                    assert_eq!(emitted, expected);
+                    let (keystroke, prefer_text) = queue.preview(VK_E, plain, dead_keys);
+                    assert_eq!(keystroke.key_char.as_deref(), Some("e"));
+                    assert!(!prefer_text);
+                }
+                if queue.original_layout != queue.layout {
+                    let plain = Modifiers::default();
+                    unsafe {
+                        ActivateKeyboardLayout(
+                            queue.original_layout,
+                            ACTIVATE_KEYBOARD_LAYOUT_FLAGS(0),
+                        )
+                        .unwrap();
+                    }
+                    queue.state(plain);
+                    let ordinary = queue.translate(&queue.message(1, VK_E), dead_keys);
+                    unsafe {
+                        ActivateKeyboardLayout(queue.layout, ACTIVATE_KEYBOARD_LAYOUT_FLAGS(0))
+                            .unwrap();
+                    }
+                    queue.state(plain);
+                    queue.translate(&queue.message(0, VK_OEM_3), dead_keys);
+                    unsafe {
+                        ActivateKeyboardLayout(
+                            queue.original_layout,
+                            ACTIVATE_KEYBOARD_LAYOUT_FLAGS(0),
+                        )
+                        .unwrap();
+                    }
+                    dead_keys.clear();
+                    let (keystroke, prefer_text) = queue.preview(VK_E, plain, dead_keys);
+                    let translated = queue.translate(&queue.message(1, VK_E), dead_keys);
+                    assert_eq!(keystroke.key_char.as_deref(), Some(translated.as_str()));
+                    assert_eq!(
+                        prefer_text,
+                        translated != ordinary,
+                        "layout change: native {translated:?}, ordinary {ordinary:?}"
+                    );
+                }
+            });
+        })
+        .join()
+        .unwrap();
+    }
 }
 
 fn parse_ime_composition_string(ctx: HIMC, comp_type: IME_COMPOSITION_STRING) -> Option<Vec<u16>> {
