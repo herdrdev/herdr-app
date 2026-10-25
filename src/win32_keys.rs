@@ -1,8 +1,8 @@
 //! Windows' ConPTY asks its viewer for win32-input-mode (`CSI ?9001h`): key
 //! events with their modifiers, which it otherwise loses (Shift+Enter as
 //! Ghostty sends it never reaches the program). herdr-core replays the request
-//! to every new viewer. We answer it only where the plain bytes lose
-//! something: Enter with a modifier.
+//! to every new viewer. Used for modified Enter when no Kitty keyboard mode
+//! is active; negotiated Kitty input stays with Ghostty's encoder.
 
 const ON: &[u8] = b"\x1b[?9001h";
 const OFF: &[u8] = b"\x1b[?9001l";

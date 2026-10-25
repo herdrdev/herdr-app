@@ -686,7 +686,7 @@ fn key_bytes(vt: &mut vt::Vt, ev: &KeyDownEvent) -> Option<Vec<u8>> {
     }
     let k = &ev.keystroke;
     let m = k.modifiers;
-    if k.key == "enter" && vt.win32.on && (m.shift || m.control || m.alt) {
+    if k.key == "enter" && vt.win32.on && (m.shift || m.control || m.alt) && vt.kitty_keyboard_flags() == 0 {
         return Some(crate::win32_keys::enter(m.shift, m.control, m.alt));
     }
     let Some((key, shifted, unshifted)) = map_key(&k.key) else {
@@ -1356,9 +1356,9 @@ mod tests {
         assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
     }
 
-    /// Windows' ConPTY drops Shift+Enter as Ghostty sends it; when the program
-    /// asks for win32-input-mode (even split across reads), Enter with a
-    /// modifier goes as a key event instead.
+    /// Without Kitty, Windows' ConPTY drops Shift+Enter as Ghostty sends it;
+    /// a win32-input-mode request (even split across reads) sends modified
+    /// Enter as a native key event instead.
     #[test]
     fn enter_with_a_modifier_goes_as_a_windows_key_event_when_the_program_asks() {
         let mut vt = Vt::new(20, 3);
@@ -1371,5 +1371,45 @@ mod tests {
         assert_eq!(send(&mut vt, "enter"), "\r");
         vt.write(b"\x1b[?9001l");
         assert_eq!(send(&mut vt, "shift-enter"), "\x1b[27;2;13~");
+    }
+
+    #[test]
+    fn kitty_input_takes_precedence_over_win32() {
+        for flags in 1..=31 {
+            for win32_first in [false, true] {
+                let mut vt = Vt::new(20, 3);
+                if win32_first { vt.write(b"\x1b[?9001h"); }
+                vt.write(format!("\x1b[>{flags}u").as_bytes());
+                if !win32_first { vt.write(b"\x1b[?9001h"); }
+                for (spec, expected) in [
+                    ("shift-enter", b"\x1b[13;2u".as_slice()),
+                    ("ctrl-enter", b"\x1b[13;5u"),
+                    ("alt-enter", b"\x1b[13;3u"),
+                ] {
+                    assert_eq!(key_bytes(&mut vt, &press(spec, None)).as_deref(), Some(expected), "flags={flags}, win32_first={win32_first}, {spec}");
+                }
+            }
+        }
+    }
+
+    #[test]
+    fn kitty_input_tracks_terminal_mode_changes() {
+        let mut vt = Vt::new(20, 3);
+        vt.write(b"\x1b[?9001h");
+        let win32 = b"\x1b[13;28;13;1;16;1_\x1b[13;28;13;0;16;1_".as_slice();
+        let kitty = b"\x1b[13;2u".as_slice();
+        for (output, expected) in [
+            (b"\x1b[>5u".as_slice(), kitty),
+            (b"\x1b[>0u", win32),
+            (b"\x1b[<u", kitty),
+            (b"\x1b[<u", win32),
+            (b"\x1b[=0;1u\x1b[=5;1u\x1b[?9001h", kitty),
+            (b"\x1b[?1049h", win32),
+            (b"\x1b[?1049l", kitty),
+            (b"\x1b[=0;1u", win32),
+        ] {
+            vt.write(output);
+            assert_eq!(key_bytes(&mut vt, &press("shift-enter", None)).as_deref(), Some(expected), "output={output:?}");
+        }
     }
 }

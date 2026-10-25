@@ -662,6 +662,12 @@ impl Vt {
         Some(String::from_utf8_lossy(bytes).into_owned())
     }
 
+    pub fn kitty_keyboard_flags(&self) -> u8 {
+        let mut flags = 0u8;
+        unsafe { ghostty_terminal_get(self.term, GHOSTTY_TERMINAL_DATA_KITTY_KEYBOARD_FLAGS, &mut flags as *mut _ as *mut c_void) };
+        flags
+    }
+
     fn get_bool(&self, data: GhosttyTerminalData) -> bool {
         let mut v = false;
         unsafe { ghostty_terminal_get(self.term, data, &mut v as *mut _ as *mut c_void) };

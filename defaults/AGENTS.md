@@ -420,6 +420,7 @@ It shows up at herdr.dev/layouts within the hour.
   these on your own. If the person asks for one, bind it and tell them what
   it takes from typing.
 - Windows AltGr and dead-key compositions type text in terminals.
+- Terminal keys honor the program's negotiated Kitty mode, including on Windows.
 
 ## Commands
 
