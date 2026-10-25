@@ -654,7 +654,10 @@ fn is_icon(text: &str) -> bool {
 /// What a key press sends to the program: the key described to libghostty,
 /// which encodes it once, in the mode the program asked for (as Ghostty does).
 fn key_bytes(vt: &mut vt::Vt, ev: &KeyDownEvent) -> Option<Vec<u8>> {
-    if ev.prefer_character_input {
+    // GPUI sets this preference on replayed shortcut prefixes too; only
+    // Windows' native composition previews defer to the text input handler.
+    #[cfg(windows)]
+    if ev.prefer_character_input && gpui_windows::is_native_character_input(ev) {
         return None;
     }
     let k = &ev.keystroke;
@@ -986,7 +989,7 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
 }
 
 /// OS text input (AltGr, Pinyin, Japanese, Korean, dead keys) types here.
-/// Keys marked as character input reach this handler; other keys go through
+/// Native Windows composition previews reach this handler; other keys go through
 /// `key_bytes`. The program gets the finished text as it is.
 impl EntityInputHandler for TerminalView {
     fn text_for_range(&mut self, range: std::ops::Range<usize>, adjusted: &mut Option<std::ops::Range<usize>>, _w: &mut Window, _cx: &mut Context<Self>) -> Option<String> {
@@ -1243,18 +1246,26 @@ mod tests {
     }
 
     #[test]
-    fn character_input_is_not_encoded_as_a_shortcut() {
-        for setup in [b"".as_slice(), b"\x1b[>1u", b"\x1b[>9u"] {
+    fn replayed_shortcut_prefixes_keep_terminal_encoding() {
+        let modes: [(&[u8], &[u8], &[u8]); 3] = [
+            (b"", b"\x0b", b"a"),
+            (b"\x1b[>1u", b"\x1b[107;5u", b"a"),
+            (b"\x1b[>9u", b"\x1b[107;5u", b"\x1b[97u"),
+        ];
+        for (setup, control_k, letter_a) in modes {
             let mut vt = Vt::new(20, 3);
             vt.write(setup);
-            for text in ["\\", "~", "{", "}", "[", "]", "@", "|"] {
-                let mut event = press(&format!("ctrl-alt-{text}"), Some(text));
-                event.prefer_character_input = true;
-                assert_eq!(key_bytes(&mut vt, &event), None, "AltGr {text}");
+            // replay_pending_input clones the original keystroke and sets
+            // prefer_character_input, even for non-character shortcuts.
+            for (spec, text, expected) in [
+                ("ctrl-k", None, control_k),
+                ("ctrl-k", Some("k"), control_k),
+                ("a", Some("a"), letter_a),
+            ] {
+                let mut replay = press(spec, text);
+                replay.prefer_character_input = true;
+                assert_eq!(key_bytes(&mut vt, &replay).as_deref(), Some(expected), "{spec}");
             }
-            let mut dead_key = press("alt-^", None);
-            dead_key.prefer_character_input = true;
-            assert_eq!(key_bytes(&mut vt, &dead_key), None, "dead key");
         }
     }
 

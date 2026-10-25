@@ -44,6 +44,7 @@ gpui-shell = { path = "vendor/gpui-kit/crates/shell", features = ["render-test-s
 libc = "0.2"
 
 [target.'cfg(windows)'.dependencies]
+gpui_windows = { package = "gpui-pre-windows", version = "=0.3.8" }
 uds_windows = "1.2"
 raw-window-handle = "0.6"
 windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Console", "Win32_Media_Multimedia"] }

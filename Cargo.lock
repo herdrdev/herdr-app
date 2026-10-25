@@ -3706,6 +3706,7 @@ dependencies = [
  "gpui-base",
  "gpui-pre",
  "gpui-pre-platform",
+ "gpui-pre-windows",
  "gpui-shell",
  "image",
  "libc",

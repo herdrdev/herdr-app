@@ -1,6 +1,6 @@
 use anyhow::Result;
 use collections::HashMap;
-use std::cell::Cell;
+use std::cell::{Cell, RefCell};
 use windows::Win32::UI::{
     Input::KeyboardAndMouse::{
         GetKeyboardLayoutNameW, MAPVK_VK_TO_CHAR, MAPVK_VK_TO_VSC, MapVirtualKeyW, ToUnicode,
@@ -12,12 +12,73 @@ use windows::Win32::UI::{
 };
 
 use gpui::{
-    KeybindingKeystroke, Keystroke, Modifiers, PlatformKeyboardLayout, PlatformKeyboardMapper,
+    KeyDownEvent, KeybindingKeystroke, Keystroke, Modifiers, PlatformInput, PlatformKeyboardLayout,
+    PlatformKeyboardMapper,
 };
 
 thread_local! {
     // HERDR: Native dead-key state belongs to the UI thread, across windows and input handlers.
     pub(crate) static DEAD_KEYS: DeadKeyState = const { DeadKeyState(Cell::new(false)) };
+    static NATIVE_CHARACTER_INPUT: RefCell<Option<Keystroke>> = const { RefCell::new(None) };
+}
+
+/// Whether this native keydown will commit text through Windows messages.
+/// GPUI also marks replayed shortcut prefixes as preferring character input.
+pub fn is_native_character_input(event: &KeyDownEvent) -> bool {
+    NATIVE_CHARACTER_INPUT.with_borrow(|native| native.as_ref() == Some(&event.keystroke))
+}
+
+pub(crate) fn with_native_character_input<R>(
+    input: PlatformInput,
+    dispatch: impl FnOnce(PlatformInput) -> R,
+) -> R {
+    struct Restore(Option<Keystroke>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            NATIVE_CHARACTER_INPUT.replace(self.0.take());
+        }
+    }
+    // GPUI may replay a pending shortcut synchronously during this dispatch;
+    // only the native keystroke, not that prefix, should defer to native text.
+    let keystroke = match &input {
+        PlatformInput::KeyDown(event) if event.prefer_character_input => {
+            Some(event.keystroke.clone())
+        }
+        _ => None,
+    };
+    let _restore = Restore(NATIVE_CHARACTER_INPUT.replace(keystroke));
+    dispatch(input)
+}
+
+#[cfg(test)]
+mod native_character_input_tests {
+    use super::{is_native_character_input, with_native_character_input};
+    use gpui::{KeyDownEvent, Keystroke, PlatformInput};
+
+    #[test]
+    fn native_text_dispatch_does_not_mark_replayed_prefixes() {
+        let event = KeyDownEvent {
+            keystroke: Keystroke::parse("ctrl-alt-q").unwrap(),
+            is_held: false,
+            prefer_character_input: true,
+        };
+        let original = event.clone();
+        let mut prefix = event.clone();
+        prefix.keystroke = Keystroke::parse("ctrl-k").unwrap();
+        assert!(!is_native_character_input(&event));
+        with_native_character_input(PlatformInput::KeyDown(event), |input| {
+            let PlatformInput::KeyDown(event) = input else { unreachable!() };
+            assert!(is_native_character_input(&event));
+            assert!(!is_native_character_input(&prefix));
+            assert!(is_native_character_input(&event.clone()));
+            with_native_character_input(PlatformInput::KeyDown(prefix.clone()), |_| {
+                assert!(!is_native_character_input(&event));
+            });
+            assert!(is_native_character_input(&event));
+        });
+        assert!(!is_native_character_input(&original));
+        assert!(!is_native_character_input(&prefix));
+    }
 }
 
 #[derive(Default)]

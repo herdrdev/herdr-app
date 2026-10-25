@@ -452,7 +452,7 @@ impl WindowsWindowInner {
             return Some(1);
         };
 
-        let handled = !func(input).propagate;
+        let handled = crate::with_native_character_input(input, |input| !func(input).propagate);
 
         self.state.callbacks.input.set(Some(func));
 
