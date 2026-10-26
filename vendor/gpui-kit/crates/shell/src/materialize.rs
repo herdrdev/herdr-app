@@ -2182,46 +2182,27 @@ fn flex_element(
             }
         });
     }
-    if let Some(callback) = behavior.on_size_change
-        && !checking()
-    {
-        let last = window.use_keyed_state((identity.clone(), "size-change"), cx, |_, _| {
-            Rc::new(Cell::new(None::<(Option<u64>, gpui::Size<Pixels>)>))
-        }).read(cx).clone();
-        let application = runtime.callback_application_id(callback);
-        let runtime = Rc::downgrade(runtime);
-        stateful = stateful.on_prepaint(move |bounds, window, cx| {
-            let current = (application, bounds.size);
-            if last.replace(Some(current)) != Some(current) {
-                let runtime = runtime.clone();
-                window.defer(cx, move |window, cx| {
-                    if let Some(runtime) = runtime.upgrade() {
-                        runtime.dispatch_size_change(callback, bounds.size, window, cx);
-                    }
-                });
-            }
-        });
-    }
     let stateful = components::tooltip::with_tooltip(stateful, &behavior);
     if behavior.scrollbar {
         let mut stateful = stateful;
         stateful.style().refine(&refinement);
         stateful.extend(children);
-        return match (scroll_x, scroll_y) {
+        let element = match (scroll_x, scroll_y) {
             (true, true) => Scrollable::new(stateful, ScrollbarAxis::Both)
-                .id(identity)
+                .id(identity.clone())
                 .mode(behavior.scrollbar_mode)
                 .into_any_element(),
             (true, false) => Scrollable::new(stateful, ScrollbarAxis::Horizontal)
-                .id(identity)
+                .id(identity.clone())
                 .mode(behavior.scrollbar_mode)
                 .into_any_element(),
             (false, true) => Scrollable::new(stateful, ScrollbarAxis::Vertical)
-                .id(identity)
+                .id(identity.clone())
                 .mode(behavior.scrollbar_mode)
                 .into_any_element(),
             (false, false) => stateful.into_any_element(),
         };
+        return observe_size(element, identity, behavior.on_size_change, runtime, window, cx);
     }
     // The scroll position lives in window element state under this element's
     // own identity, which is the slot an explicit `Scrollbar` elsewhere in the
@@ -2243,7 +2224,75 @@ fn flex_element(
         }
         (false, false) => stateful,
     };
-    finish(stateful, refinement, children)
+    observe_size(finish(stateful, refinement, children), identity, behavior.on_size_change, runtime, window, cx)
+}
+
+fn observe_size(
+    element: AnyElement, identity: gpui::ElementId, callback: Option<CallbackId>,
+    runtime: &Rc<ShellRuntime>, window: &mut Window, cx: &mut App,
+) -> AnyElement {
+    let Some(callback) = callback.filter(|_| !checking()) else { return element };
+    let last = window.use_keyed_state((identity, "size-change"), cx, |_, _| {
+        Rc::new(Cell::new(None::<(Option<u64>, gpui::Size<Pixels>)>))
+    }).read(cx).clone();
+    SizeObserver {
+        element, last, callback,
+        application: runtime.callback_application_id(callback),
+        runtime: Rc::downgrade(runtime),
+    }.into_any_element()
+}
+
+// Reuse the element's layout node: a full-size canvas child excludes its borders.
+struct SizeObserver {
+    element: AnyElement,
+    last: Rc<Cell<Option<(Option<u64>, gpui::Size<Pixels>)>>>,
+    application: Option<u64>,
+    callback: CallbackId,
+    runtime: Weak<ShellRuntime>,
+}
+
+impl IntoElement for SizeObserver {
+    type Element = Self;
+    fn into_element(self) -> Self { self }
+}
+
+impl gpui::Element for SizeObserver {
+    type RequestLayoutState = ();
+    type PrepaintState = ();
+
+    fn id(&self) -> Option<gpui::ElementId> { None }
+    fn source_location(&self) -> Option<&'static std::panic::Location<'static>> { None }
+
+    fn request_layout(
+        &mut self, _: Option<&gpui::GlobalElementId>, _: Option<&gpui::InspectorElementId>,
+        window: &mut Window, cx: &mut App,
+    ) -> (gpui::LayoutId, ()) {
+        (self.element.request_layout(window, cx), ())
+    }
+
+    fn prepaint(
+        &mut self, _: Option<&gpui::GlobalElementId>, _: Option<&gpui::InspectorElementId>,
+        bounds: Bounds<Pixels>, _: &mut (), window: &mut Window, cx: &mut App,
+    ) {
+        self.element.prepaint(window, cx);
+        let current = (self.application, bounds.size);
+        if self.last.replace(Some(current)) != Some(current) {
+            let runtime = self.runtime.clone();
+            let callback = self.callback;
+            window.defer(cx, move |window, cx| {
+                if let Some(runtime) = runtime.upgrade() {
+                    runtime.dispatch_size_change(callback, bounds.size, window, cx);
+                }
+            });
+        }
+    }
+
+    fn paint(
+        &mut self, _: Option<&gpui::GlobalElementId>, _: Option<&gpui::InspectorElementId>,
+        _: Bounds<Pixels>, _: &mut (), _: &mut (), window: &mut Window, cx: &mut App,
+    ) {
+        self.element.paint(window, cx);
+    }
 }
 
 /// Whether a hover transition from this snapshot still describes the pointer.

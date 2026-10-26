@@ -39,7 +39,7 @@ import { View, div } from "gpui-kit";
 import { note } from "fixture";
 export default class extends View {
   render() {
-    return div().id("root").size_full()
+    return div().id("root").size_full().border(3).p(7)
       .on_size_change((size, cx) => { note(size.width, size.height); cx.notify(); });
   }
 }"#);
