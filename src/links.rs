@@ -96,7 +96,8 @@ pub fn resolve(link: &str, cwd: Option<&Path>) -> Option<Target> {
         PathBuf::from(link)
     };
     let full = if expanded.is_absolute() { expanded } else { cwd?.join(expanded) };
-    if full.exists() {
+    // Windows ignores a trailing period when checking whether a path exists.
+    if !(cfg!(windows) && full.extension().is_some_and(|ext| ext.is_empty())) && full.exists() {
         return Some(Target::File(full));
     }
     // The period ending a sentence, or `:42` / `:42:7` naming a place in the file.
@@ -314,11 +315,19 @@ mod tests {
         assert_eq!(resolve("src/main.rs", Some(&dir)), Some(file.clone()));
         assert_eq!(resolve("src/main.rs:42:7", Some(&dir)), Some(file.clone()));
         assert_eq!(resolve("src/main.rs.", Some(&dir)), Some(file.clone()));
+        assert_eq!(resolve("src/.", Some(&dir)), Some(Target::File(dir.join("src/."))));
+        assert_eq!(resolve("src/..", Some(&dir)), Some(Target::File(dir.join("src/.."))));
         assert_eq!(resolve("$PWD/src/main.rs", Some(&dir)), Some(file.clone()));
         assert_eq!(resolve(dir.join("src/main.rs").to_str().unwrap(), None), Some(file));
         assert_eq!(resolve("src/gone.rs", Some(&dir)), None);
         assert_eq!(resolve("src/main.rs", None), None);
         assert_eq!(resolve("https://a.com/x", None), Some(Target::Url("https://a.com/x".into())));
+        #[cfg(unix)]
+        {
+            let dotted = dir.join("src/main.rs.");
+            std::fs::write(&dotted, "").unwrap();
+            assert_eq!(resolve("src/main.rs.", Some(&dir)), Some(Target::File(dotted)));
+        }
         std::fs::remove_dir_all(dir).unwrap();
     }
 }
