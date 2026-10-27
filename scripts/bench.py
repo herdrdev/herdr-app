@@ -251,7 +251,7 @@ def frames_since(offset):
     n = max(len(rows), 1)
     totals = {k: sum(r.get(k, 0) for r in rows) for k in ("window", "terminal", "grid", "rows", "window_ms", "frame_ms", "scripts", "script_ms", "materialize", "materialize_ms")}
     result = {k: round(v / n, 1) for k, v in totals.items()}
-    result["cpu_frame_ms"] = round(totals["frame_ms"] / totals["window"], 3) if totals["window"] else None
+    result["render_to_paint_ms"] = round(totals["frame_ms"] / totals["window"], 3) if totals["window"] else None
     return result
 
 
@@ -305,7 +305,7 @@ def measure(name, app, seconds, sample):
     if "minstr" in row:
         print(f"{name:16} {row['minstr']:7.1f} Minstr/s {row['mw']:6.1f} mW {row['wakeups']:6.1f} wakeups/s  (app+core+holder)  "
               f"app: user {row['app_user_ms']} ms/s, kernel {row['app_system_ms']} ms/s", flush=True)
-    print(f"{name:16} window {row['window_end']} CPU render-to-paint {row['cpu_frame_ms']} ms/draw", flush=True)
+    print(f"{name:16} window {row['window_end']} render-to-paint elapsed {row['render_to_paint_ms']} ms/draw", flush=True)
     print(f"{name:16} app {row['app_cpu']:5.1f}%  core {row['core_cpu']:5.1f}%  holder {row['holder_cpu']:5.1f}%  "
           f"draws/s window {row['window']:5.1f} terminal {row['terminal']:5.1f} grid {row['grid']:5.1f} rows {row['rows']:6.1f}  "
           f"render {row['window_ms']:5.1f} frame {row['frame_ms']:5.1f} ms/s  "

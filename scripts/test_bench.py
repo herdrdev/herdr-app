@@ -11,7 +11,7 @@ import bench
 
 
 class BenchmarkTest(unittest.TestCase):
-    def test_frame_cost_uses_unrounded_draw_totals(self):
+    def test_elapsed_per_draw_uses_unrounded_draw_totals(self):
         with tempfile.TemporaryDirectory(prefix="herdr-bench-test-") as root:
             with open(os.path.join(root, "frames.jsonl"), "w") as f:
                 f.write('{"window":100,"frame_ms":800}\n')
@@ -19,7 +19,7 @@ class BenchmarkTest(unittest.TestCase):
             with patch.object(bench, "ROOT", root):
                 result = bench.frames_since(1)
         self.assertEqual(result["window"], 1)
-        self.assertEqual(result["cpu_frame_ms"], 0.02)
+        self.assertEqual(result["render_to_paint_ms"], 0.02)
 
     @unittest.skipUnless(sys.platform == "win32", "native Windows process accounting")
     def test_native_cpu_and_memory_account_for_real_work(self):
