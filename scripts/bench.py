@@ -3,8 +3,10 @@
 
     scripts/bench.py [--bin target/release/herdr-app] [--seconds 20] [--sample]
 
-Runs the app on its own home and core (/var/tmp/herdr-app-bench, core
-session hb): nothing of yours is touched. The window must stay
+Runs the app on its own temporary home and core session, so nothing of yours
+is touched; prints the artifact folder and keeps it after cleanup. Requires hc
+on PATH and the Python running this script. --set all also requires btop;
+--set spinners is Python-only. The window must stay
 visible while it runs (hidden windows aren't drawn, which flatters the
 numbers). Per scenario: CPU % of the app, the core and its holder
 (averaged over the run, 100 = one core), and draws per second (window
@@ -13,14 +15,18 @@ macOS `sample` profile per scenario into the bench folder.
 """
 
 import argparse
+import ctypes
+from ctypes import wintypes
 import json
 import os
 import shutil
 import subprocess
 import sys
 import time
+import tempfile
 
-ROOT = "/var/tmp/herdr-app-bench"
+ROOT = None
+SESSION = None
 HERE = os.path.dirname(os.path.abspath(__file__))
 
 # Like an agent: a spinner line redrawn in place, text streaming below it.
@@ -77,11 +83,16 @@ def env():
     e = dict(os.environ)
     e.update(
         HERDR_APP_HOME=f"{ROOT}/home",
-        HC_SESSION="hb",  # Short name avoids macOS socket-path limits.
+        HC_SESSION=SESSION,  # Short name avoids macOS socket-path limits.
+        XDG_STATE_HOME=f"{ROOT}/state",
+        PYTHONIOENCODING="utf-8",
         HERDR_APP_NO_SOUND="1",
         HERDR_APP_BENCH=f"{ROOT}/frames.jsonl",
         WAYLAND_DISPLAY=e.get("WAYLAND_DISPLAY", ""),
     )
+    for key in ("HC_SOCKET", "HC_TERMINAL_ID", "HC_TERMINAL_SOCKET", "HC_SCOPE"):
+        e.pop(key, None)
+    e["XDG_CONFIG_HOME"] = f"{ROOT}/config"
     return e
 
 
@@ -98,8 +109,87 @@ def do(bin, command, args=None):
     return json.loads(out.stdout or "{}")
 
 
+def windows_process(pid):
+    """Process CPU seconds and working set, using the same one-core CPU scale as ps."""
+    kernel = ctypes.WinDLL("kernel32", use_last_error=True)
+    kernel.OpenProcess.restype = wintypes.HANDLE
+    kernel.OpenProcess.argtypes = [wintypes.DWORD, wintypes.BOOL, wintypes.DWORD]
+    kernel.CloseHandle.argtypes = [wintypes.HANDLE]
+    kernel.GetProcessTimes.argtypes = [wintypes.HANDLE] + [ctypes.POINTER(wintypes.FILETIME)] * 4
+
+    class Memory(ctypes.Structure):
+        _fields_ = [("cb", wintypes.DWORD), ("faults", wintypes.DWORD)] + [
+            (name, ctypes.c_size_t) for name in (
+                "peak", "working", "pool_peak", "pool", "nonpaged_peak", "nonpaged", "pagefile", "pagefile_peak")]
+
+    memory = Memory()
+    memory.cb = ctypes.sizeof(memory)
+    psapi = ctypes.WinDLL("psapi", use_last_error=True)
+    psapi.GetProcessMemoryInfo.argtypes = [wintypes.HANDLE, ctypes.POINTER(Memory), wintypes.DWORD]
+    handle = kernel.OpenProcess(0x0400 | 0x0010, False, pid)
+    if not handle:
+        return None, None
+    try:
+        created, exited, system, user = (wintypes.FILETIME() for _ in range(4))
+        cpu = None
+        if kernel.GetProcessTimes(handle, ctypes.byref(created), ctypes.byref(exited), ctypes.byref(system), ctypes.byref(user)):
+            ticks = lambda t: (t.dwHighDateTime << 32) + t.dwLowDateTime
+            cpu = (ticks(system) + ticks(user)) / 1e7
+        rss = memory.working / 1024**2 if psapi.GetProcessMemoryInfo(handle, ctypes.byref(memory), memory.cb) else None
+        return cpu, rss
+    finally:
+        kernel.CloseHandle(handle)
+
+
+def window_state(pid):
+    """Windows observations only: visible does not imply unoccluded or presented."""
+    if sys.platform != "win32":
+        return {"visibility": "unavailable", "activity": "unavailable", "display_hz": None, "occlusion": "unavailable"}
+    user = ctypes.WinDLL("user32")
+    user.GetForegroundWindow.restype = wintypes.HWND
+    user.GetWindow.argtypes = [wintypes.HWND, wintypes.UINT]
+    user.GetWindow.restype = wintypes.HWND
+    user.GetWindowThreadProcessId.argtypes = [wintypes.HWND, ctypes.POINTER(wintypes.DWORD)]
+    for name in ("IsWindowVisible", "IsIconic"):
+        getattr(user, name).argtypes = [wintypes.HWND]
+    windows = []
+    callback_type = ctypes.WINFUNCTYPE(wintypes.BOOL, wintypes.HWND, wintypes.LPARAM)
+    def visit(hwnd, _):
+        owner = wintypes.DWORD()
+        user.GetWindowThreadProcessId(hwnd, ctypes.byref(owner))
+        if owner.value == pid and not user.GetWindow(hwnd, 4):  # unowned top-level window
+            windows.append(hwnd)
+        return True
+    user.EnumWindows(callback_type(visit), 0)
+    if not windows:
+        return {"visibility": "no-window", "activity": "unavailable", "display_hz": None, "occlusion": "unavailable"}
+    hwnd = next((w for w in windows if user.IsWindowVisible(w)), windows[0])
+    class Monitor(ctypes.Structure):
+        _fields_ = [("cb", wintypes.DWORD), ("monitor", wintypes.RECT), ("work", wintypes.RECT),
+                    ("flags", wintypes.DWORD), ("device", wintypes.WCHAR * 32)]
+    user.MonitorFromWindow.argtypes = [wintypes.HWND, wintypes.DWORD]
+    user.MonitorFromWindow.restype = wintypes.HANDLE
+    user.GetMonitorInfoW.argtypes = [wintypes.HANDLE, ctypes.POINTER(Monitor)]
+    monitor = Monitor()
+    monitor.cb = ctypes.sizeof(monitor)
+    gdi = ctypes.WinDLL("gdi32")
+    gdi.CreateDCW.argtypes = [wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPCWSTR, wintypes.LPVOID]
+    gdi.CreateDCW.restype = wintypes.HDC
+    gdi.GetDeviceCaps.argtypes = [wintypes.HDC, ctypes.c_int]
+    gdi.DeleteDC.argtypes = [wintypes.HDC]
+    dc = gdi.CreateDCW("DISPLAY", monitor.device, None, None) if user.GetMonitorInfoW(user.MonitorFromWindow(hwnd, 2), ctypes.byref(monitor)) else None
+    hz = gdi.GetDeviceCaps(dc, 116) if dc else 0
+    if dc:
+        gdi.DeleteDC(dc)
+    return {"visibility": "minimized" if user.IsIconic(hwnd) else "visible" if user.IsWindowVisible(hwnd) else "hidden",
+            "activity": "foreground" if user.GetForegroundWindow() == hwnd else "background",
+            "display_hz": hz if hz > 1 else None, "occlusion": "unavailable"}
+
+
 def cpu_seconds(pid):
     """Total CPU time of a process so far ([[dd-]hh:]mm:ss[.ff])."""
+    if sys.platform == "win32":
+        return windows_process(pid)[0]
     out = subprocess.run(["ps", "-o", "time=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
     if not out:
         return None
@@ -132,6 +222,9 @@ def rusage(pid):
 
 
 def rss_mb(pid):
+    if sys.platform == "win32":
+        rss = windows_process(pid)[1]
+        return round(rss) if rss is not None else None
     out = subprocess.run(["ps", "-o", "rss=", "-p", str(pid)], capture_output=True, text=True).stdout.strip()
     return round(int(out) / 1024) if out else None
 
@@ -156,7 +249,10 @@ def frames_since(offset):
         lines = f.readlines()[offset:]
     rows = [json.loads(l) for l in lines if l.strip()]
     n = max(len(rows), 1)
-    return {k: round(sum(r.get(k, 0) for r in rows) / n, 1) for k in ("window", "terminal", "grid", "rows", "window_ms", "frame_ms", "scripts", "script_ms", "materialize", "materialize_ms")}
+    totals = {k: sum(r.get(k, 0) for r in rows) for k in ("window", "terminal", "grid", "rows", "window_ms", "frame_ms", "scripts", "script_ms", "materialize", "materialize_ms")}
+    result = {k: round(v / n, 1) for k, v in totals.items()}
+    result["cpu_frame_ms"] = round(totals["frame_ms"] / totals["window"], 3) if totals["window"] else None
+    return result
 
 
 def frame_lines():
@@ -179,12 +275,13 @@ def measure(name, app, seconds, sample):
     every = [p for ps in procs.values() for p in ps]
     before = {k: [cpu_seconds(p) or 0 for p in ps] for k, ps in procs.items()}
     ru_before = [rusage(p) for p in every]
-    start, offset = time.time(), frame_lines()
+    row = {"scenario": name, "window_start": window_state(app)}
+    start, offset = time.monotonic(), frame_lines()
     time.sleep(seconds)
-    took = time.time() - start
+    took = time.monotonic() - start
     after = {k: [cpu_seconds(p) or 0 for p in ps] for k, ps in procs.items()}
     ru_after = [rusage(p) for p in every]
-    row = {"scenario": name}
+    row["window_end"] = window_state(app)
     for k in procs:
         row[k + "_cpu"] = round(100 * (sum(after[k]) - sum(before[k])) / took, 1)
     if all(ru_before) and all(ru_after):
@@ -208,6 +305,7 @@ def measure(name, app, seconds, sample):
     if "minstr" in row:
         print(f"{name:16} {row['minstr']:7.1f} Minstr/s {row['mw']:6.1f} mW {row['wakeups']:6.1f} wakeups/s  (app+core+holder)  "
               f"app: user {row['app_user_ms']} ms/s, kernel {row['app_system_ms']} ms/s", flush=True)
+    print(f"{name:16} window {row['window_end']} CPU render-to-paint {row['cpu_frame_ms']} ms/draw", flush=True)
     print(f"{name:16} app {row['app_cpu']:5.1f}%  core {row['core_cpu']:5.1f}%  holder {row['holder_cpu']:5.1f}%  "
           f"draws/s window {row['window']:5.1f} terminal {row['terminal']:5.1f} grid {row['grid']:5.1f} rows {row['rows']:6.1f}  "
           f"render {row['window_ms']:5.1f} frame {row['frame_ms']:5.1f} ms/s  "
@@ -218,8 +316,8 @@ def measure(name, app, seconds, sample):
 
 
 def main():
-    ap = argparse.ArgumentParser()
-    ap.add_argument("--bin", default=os.path.join(HERE, "..", "target", "release", "herdr-app"))
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("--bin", default=os.path.join(HERE, "..", "target", "release", "herdr-app.exe" if sys.platform == "win32" else "herdr-app"))
     ap.add_argument("--seconds", type=int, default=20)
     ap.add_argument("--sample", action="store_true")
     ap.add_argument("--zoom", type=float, default=1.0)
@@ -227,13 +325,19 @@ def main():
                     help="spinners: many spaces of idle agents, one agent working on screen")
     ap.add_argument("--only", help="measure only this scenario, e.g. spinners+stream")
     a = ap.parse_args()
-    global ONLY
+    if a.seconds <= 0:
+        ap.error("--seconds must be positive")
+    if a.set == "all" and not shutil.which("btop"):
+        ap.error("the all scenario set requires btop; use --set spinners for Python-only workloads")
+    global ONLY, ROOT, SESSION
     ONLY = a.only
     bin = os.path.abspath(a.bin)
 
-    end_terminals()
-    subprocess.run(["hc", "server", "stop"], env=env(), capture_output=True)
-    shutil.rmtree(ROOT, ignore_errors=True)
+    ROOT = tempfile.mkdtemp(prefix="herdr-app-bench-", dir=None if sys.platform == "win32" else "/var/tmp")
+    SESSION = "hb" + os.path.basename(ROOT)[-6:]
+    print(f"bench: {ROOT}", flush=True)
+    with open(f"{ROOT}/run.json", "w") as f:
+        json.dump(dict(vars(a), bin=bin, python=sys.executable, platform=sys.platform, session=SESSION), f, indent=1)
     os.makedirs(f"{ROOT}/home")
     with open(f"{ROOT}/home/shared.json", "w") as f:
         json.dump({"frame.welcomed": True, "layout": "main"}, f)
@@ -245,23 +349,31 @@ def main():
         f.write(REPORTS)
     with open(f"{ROOT}/tui.py", "w") as f:
         f.write(TUI)
-    agent = ["python3", f"{ROOT}/agent.py"]
-    reports = lambda state: ["python3", f"{ROOT}/reports.py", state]
+    agent = [sys.executable, "-u", f"{ROOT}/agent.py"]
+    reports = lambda state: [sys.executable, "-u", f"{ROOT}/reports.py", state]
 
     log = open(f"{ROOT}/app.log", "w")
-    app = subprocess.Popen([bin], env=env(), stdin=subprocess.DEVNULL, stdout=log, stderr=log)
-    awake = None
-    if shutil.which("caffeinate"):  # the display must stay on, or nothing is drawn
-        awake = subprocess.Popen(["caffeinate", "-d", "-w", str(app.pid)])
-    for _ in range(100):
-        if subprocess.run([bin, "status"], env=env(), capture_output=True).returncode == 0:
-            break
-        time.sleep(0.2)
-    else:
-        sys.exit("bench: the app didn't come up; see " + ROOT + "/app.log")
-
+    app = awake = None
     rows = []
     try:
+        core = subprocess.run(["hc", "server", "start"], env=env(), capture_output=True, text=True)
+        if core.returncode:
+            sys.exit(f"bench: core startup failed: {core.stdout}{core.stderr}")
+        app = subprocess.Popen([bin], env=env(), stdin=subprocess.DEVNULL, stdout=log, stderr=log)
+        print(f"app pid: {app.pid}", flush=True)
+        if shutil.which("caffeinate"):  # the display must stay on, or nothing is drawn
+            awake = subprocess.Popen(["caffeinate", "-d", "-w", str(app.pid)])
+        deadline = time.monotonic() + 20
+        while time.monotonic() < deadline:
+            try:
+                if subprocess.run([bin, "status"], env=env(), capture_output=True, timeout=2).returncode == 0:
+                    break
+            except subprocess.TimeoutExpired:
+                pass
+            time.sleep(0.2)
+        else:
+            sys.exit("bench: the app didn't come up; see " + ROOT + "/app.log")
+
         if a.set == "spinners":
             for i in range(10):
                 do(bin, "space.new", {"name": f"idle{i}", "folder": ROOT, "argv": reports("idle")})
@@ -270,7 +382,7 @@ def main():
             rows.append(measure("all-idle", app.pid, a.seconds, a.sample))
             do(bin, "tab.new", {"name": "quiet", "argv": reports("quiet")})
             rows.append(measure("spinners", app.pid, a.seconds, a.sample))
-            do(bin, "tab.new", {"name": "tui", "argv": ["python3", f"{ROOT}/tui.py"]})
+            do(bin, "tab.new", {"name": "tui", "argv": [sys.executable, "-u", f"{ROOT}/tui.py"]})
             rows.append(measure("spinners+tui", app.pid, a.seconds, a.sample))
             do(bin, "tab.new", {"name": "stream", "argv": agent})
             rows.append(measure("spinners+stream", app.pid, a.seconds, a.sample))
@@ -301,13 +413,20 @@ def main():
     finally:
         with open(f"{ROOT}/results.json", "w") as f:
             json.dump(rows, f, indent=1)
-        app.terminate()
-        app.wait(timeout=10)
+        if app and app.poll() is None:
+            app.terminate()
+            try:
+                app.wait(timeout=10)
+            except subprocess.TimeoutExpired:
+                app.kill()
+                app.wait()
+        log.close()
         if awake:
             awake.terminate()
+            awake.wait()
         end_terminals()
         subprocess.run(["hc", "server", "stop"], env=env(), capture_output=True)
-    print(f"results: {ROOT}/results.json")
+        print(f"results: {ROOT}/results.json", flush=True)
 
 
 if __name__ == "__main__":

@@ -3,12 +3,13 @@
 measured the same way (macOS: instructions, energy, wakeups) for a CPU
 baseline comparison.
 
-    scripts/bench_compare.py ghostty|herdr
+    scripts/bench_compare.py ghostty|herdr --root <bench artifact folder>
 
 Herdr 1.x runs in a throwaway session (`herdr --session hb1`), stopped and
 deleted after. Run `scripts/bench.py` first: it writes the fake agent.
 """
 
+import argparse
 import json
 import os
 import subprocess
@@ -18,7 +19,6 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 import bench  # noqa: E402
 
-AGENT = f"{bench.ROOT}/agent.py"
 GHOSTTY = "/Applications/Ghostty.app"
 
 
@@ -49,10 +49,15 @@ def kill(pid):
 
 
 def main():
+    ap = argparse.ArgumentParser(description=__doc__)
+    ap.add_argument("target", choices=["ghostty", "herdr"])
+    ap.add_argument("--root", required=True, help="artifact folder printed by scripts/bench.py")
+    args = ap.parse_args()
+    AGENT = os.path.join(args.root, "agent.py")
     if not os.path.exists(AGENT):
         sys.exit("run scripts/bench.py once first (it writes the fake agent)")
     py = "/opt/homebrew/bin/python3" if os.path.exists("/opt/homebrew/bin/python3") else "python3"
-    if sys.argv[1:] == ["ghostty"]:
+    if args.target == "ghostty":
         g = ghostty("/bin/zsh")
         measure("idle-shell", [g])
         kill(g)

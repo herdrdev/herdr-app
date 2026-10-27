@@ -122,3 +122,13 @@ On Linux it links to this checkout, so keep the checkout in place.
 Quit and reopen Herdr to use the new build.
 
 Documentation checks also need [Bun](https://bun.sh): `just docs-check` checks generated pages and CLI examples; `just docs-generate` refreshes the reference pages.
+
+To compare drawing changes on Windows, Linux or macOS, run the same fixed workloads against each build:
+
+```sh
+python scripts/bench.py --bin <app executable> --set spinners --seconds 20
+```
+
+The runner requires `hc` on PATH and uses the Python executable running the script. It prints a unique artifact folder with the run settings, counters and results, then stops its private app, terminals and core. The default `--set all` also requires `btop`. `--only spinners` measures just the quiet native spinner scenario. Keep the window visible and the display awake, and compare the same window activity and display settings; inactive windows may draw at a lower rate. Windows records visibility, foreground activity and display Hz at each measurement boundary; other platforms mark these observations unavailable. Visibility does not establish occlusion. Draws are window render calls, and CPU frame cost ends at paint before GPU work; neither measures physical presentation or the FPS HUD’s derived MAX FPS.
+
+`python scripts/bench_compare.py ghostty --root <artifact folder>` reuses a run’s fake agent for the macOS comparison. Benchmark checks: `python -m unittest discover -s scripts -p test_bench.py`.
