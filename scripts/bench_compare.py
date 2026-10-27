@@ -12,6 +12,7 @@ deleted after. Run `scripts/bench.py` first: it writes the fake agent.
 import argparse
 import json
 import os
+import shlex
 import subprocess
 import sys
 import time
@@ -54,9 +55,10 @@ def main():
     ap.add_argument("--root", required=True, help="artifact folder printed by scripts/bench.py")
     args = ap.parse_args()
     AGENT = os.path.join(args.root, "agent.py")
+    TUI = os.path.join(args.root, "tui.py")
     if not os.path.exists(AGENT):
         sys.exit("run scripts/bench.py once first (it writes the fake agent)")
-    py = "/opt/homebrew/bin/python3" if os.path.exists("/opt/homebrew/bin/python3") else "python3"
+    py = sys.executable
     if args.target == "ghostty":
         g = ghostty("/bin/zsh")
         measure("idle-shell", [g])
@@ -64,8 +66,8 @@ def main():
         g = ghostty(py, AGENT)
         measure("agent", [g])
         kill(g)
-        g = ghostty("/opt/homebrew/bin/btop")
-        measure("btop", [g])
+        g = ghostty(py, TUI)
+        measure("tui", [g])
         kill(g)
         return
     env = dict(os.environ, HERDR_SESSION="hb1", PATH=os.path.expanduser("~/.local/bin") + ":/opt/homebrew/bin:" + os.environ["PATH"])
@@ -77,25 +79,25 @@ def main():
     focused = lambda: [p["pane_id"] for p in h("pane", "list")["result"]["panes"] if p["focused"]][0]
     try:
         measure("idle-shell", procs)
-        h("pane", "run", focused(), f"python3 {AGENT}")
+        h("pane", "run", focused(), shlex.join([py, AGENT]))
         measure("agent", procs)
         h("tab", "create", "--focus")
-        h("pane", "run", focused(), "btop")
-        measure("btop", procs)
+        h("pane", "run", focused(), shlex.join([py, TUI]))
+        measure("tui", procs)
         h("tab", "create", "--focus")
         p1 = focused()
-        h("pane", "run", p1, f"python3 {AGENT}")
+        h("pane", "run", p1, shlex.join([py, AGENT]))
         p2 = h("pane", "split", p1, "--direction", "right")["result"]["pane"]["pane_id"]
-        h("pane", "run", p2, "btop")
+        h("pane", "run", p2, shlex.join([py, TUI]))
         p3 = h("pane", "split", p2, "--direction", "down")["result"]["pane"]["pane_id"]
-        h("pane", "run", p3, f"python3 {AGENT}")
+        h("pane", "run", p3, shlex.join([py, AGENT]))
         h("pane", "split", p3, "--direction", "down")
         measure("four-panes", procs)
         h("tab", "create", "--focus")
         measure("idle-busy-bg", procs)
         for _ in range(7):
             h("tab", "create", "--focus")
-            h("pane", "run", focused(), f"python3 {AGENT}")
+            h("pane", "run", focused(), shlex.join([py, AGENT]))
         measure("ten-agents", procs)
     finally:
         kill(g)

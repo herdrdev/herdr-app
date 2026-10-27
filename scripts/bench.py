@@ -5,8 +5,8 @@
 
 Runs the app on its own temporary home and core session, so nothing of yours
 is touched; prints the artifact folder and keeps it after cleanup. Requires hc
-on PATH and the Python running this script. --set all also requires btop;
---set spinners is Python-only. The window must stay
+on PATH and the Python running this script. Both scenario sets use only Python
+fixture programs. The window must stay
 visible while it runs (hidden windows aren't drawn, which flatters the
 numbers). Per scenario: CPU % of the app, the core and its holder
 (averaged over the run, 100 = one core), and draws per second (window
@@ -327,8 +327,6 @@ def main():
     a = ap.parse_args()
     if a.seconds <= 0:
         ap.error("--seconds must be positive")
-    if a.set == "all" and not shutil.which("btop"):
-        ap.error("the all scenario set requires btop; use --set spinners for Python-only workloads")
     global ONLY, ROOT, SESSION
     ONLY = a.only
     bin = os.path.abspath(a.bin)
@@ -350,6 +348,7 @@ def main():
     with open(f"{ROOT}/tui.py", "w") as f:
         f.write(TUI)
     agent = [sys.executable, "-u", f"{ROOT}/agent.py"]
+    tui = [sys.executable, "-u", f"{ROOT}/tui.py"]
     reports = lambda state: [sys.executable, "-u", f"{ROOT}/reports.py", state]
 
     log = open(f"{ROOT}/app.log", "w")
@@ -382,7 +381,7 @@ def main():
             rows.append(measure("all-idle", app.pid, a.seconds, a.sample))
             do(bin, "tab.new", {"name": "quiet", "argv": reports("quiet")})
             rows.append(measure("spinners", app.pid, a.seconds, a.sample))
-            do(bin, "tab.new", {"name": "tui", "argv": [sys.executable, "-u", f"{ROOT}/tui.py"]})
+            do(bin, "tab.new", {"name": "tui", "argv": tui})
             rows.append(measure("spinners+tui", app.pid, a.seconds, a.sample))
             do(bin, "tab.new", {"name": "stream", "argv": agent})
             rows.append(measure("spinners+stream", app.pid, a.seconds, a.sample))
@@ -396,10 +395,10 @@ def main():
             rows.append(measure(f"idle-{layout}", app.pid, a.seconds, a.sample))
         do(bin, "tab.new", {"name": "agent", "argv": agent})
         rows.append(measure("agent", app.pid, a.seconds, a.sample))
-        do(bin, "tab.new", {"name": "btop", "argv": ["btop"]})
-        rows.append(measure("btop", app.pid, a.seconds, a.sample))
+        do(bin, "tab.new", {"name": "tui", "argv": tui})
+        rows.append(measure("tui", app.pid, a.seconds, a.sample))
         do(bin, "tab.new", {"name": "four", "argv": agent})
-        do(bin, "pane.split", {"direction": "right", "argv": ["btop"]})
+        do(bin, "pane.split", {"direction": "right", "argv": tui})
         do(bin, "pane.split", {"direction": "down", "argv": agent})
         do(bin, "pane.split", {"direction": "down"})
         rows.append(measure("four-panes", app.pid, a.seconds, a.sample))
