@@ -165,4 +165,3 @@ Exactly which WGSL features `wgpu` supports depends on how you are using it:
 [wgsl spec]: https://gpuweb.github.io/gpuweb/wgsl/
 [naga]: https://github.com/gfx-rs/wgpu/tree/trunk/naga/
 [naga bugs]: https://github.com/gfx-rs/wgpu/issues?q=is%3Aissue%20state%3Aopen%20label%3A%22naga%22
-
