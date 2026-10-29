@@ -24,9 +24,9 @@ Additionally, [WebGPU Fundamentals] is a tutorial for WebGPU which is very simil
 
 ### Wiki
 
-We have a [wiki](https://github.com/gfx-rs/wgpu/wiki) which has information on useful architecture patterns, debugging tips, and more getting started information. 
+We have a [wiki](https://github.com/gfx-rs/wgpu/wiki) which has information on useful architecture patterns, debugging tips, and more getting started information.
 
-### Need Help? Want to Contribute? 
+### Need Help? Want to Contribute?
 
 The wgpu community uses Matrix and Discord to discuss.
 
@@ -38,7 +38,7 @@ The wgpu community uses Matrix and Discord to discuss.
 
 ### Other Languages
 
-To use wgpu in C or dozens of other languages, look at [wgpu-native](https://github.com/gfx-rs/wgpu-native). These are C bindings to wgpu and has an up-to-date list of libraries bringing support to other languages. 
+To use wgpu in C or dozens of other languages, look at [wgpu-native](https://github.com/gfx-rs/wgpu-native). These are C bindings to wgpu and has an up-to-date list of libraries bringing support to other languages.
 
 [Learn WebGPU (for C++)] is a good resource for learning how to use wgpu-native from C++.
 
@@ -72,10 +72,10 @@ Contributors are welcome! See [CONTRIBUTING.md][contrib] for more information.
 | OpenGL |    🆗 (GL 3.3+)    |  🆗 (GL ES 3.0+)   |         📐         |    🆗 (WebGL2)     |
 | WebGPU |                    |                    |                    |         ✅         |
 
-✅ = First Class Support  
-🆗 = Downlevel/Best Effort Support  
-📐 = Requires the [ANGLE](https://github.com/gfx-rs/wgpu/wiki/Running-on-ANGLE) translation layer (GL ES 3.0 only)  
-🌋 = Requires the [MoltenVK](https://vulkan.lunarg.com/sdk/home#mac) translation layer  
+✅ = First Class Support
+🆗 = Downlevel/Best Effort Support
+📐 = Requires the [ANGLE](https://github.com/gfx-rs/wgpu/wiki/Running-on-ANGLE) translation layer (GL ES 3.0 only)
+🌋 = Requires the [MoltenVK](https://vulkan.lunarg.com/sdk/home#mac) translation layer
 🛠️ = Unsupported, though open to contributions
 
 ## Environment Variables

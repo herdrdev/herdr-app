@@ -42,7 +42,7 @@ fn high(a: u32) -> u32 {
     return a >> 16;
 }
 
-/// Combines two 16bit words into a single 32bit word. 
+/// Combines two 16bit words into a single 32bit word.
 /// `w1` is the upper 16 bits and `w0` is the lower 16 bits.
 ///
 /// The high 16 bits of each argument are discarded.
