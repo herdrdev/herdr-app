@@ -17,6 +17,7 @@ pub const CREDIT: u8 = 1;
 pub const CLOSE: u8 = 2;
 pub const RESIZE: u8 = 3;
 pub const FOCUS: u8 = 4;
+pub const FACTS: u8 = 5;
 
 pub enum Stream {
     Data(Vec<u8>),
@@ -418,6 +419,12 @@ impl Core {
         let mut p = cols.to_le_bytes().to_vec();
         p.extend(rows.to_le_bytes());
         self.send(channel, RESIZE, &p);
+    }
+
+    /// This viewer's display facts changed (colors, cell size): the core
+    /// answers the program's queries with them.
+    pub fn facts(&self, channel: u32, display: &Value) {
+        self.send(channel, FACTS, display.to_string().as_bytes());
     }
 
     pub fn focus(&self, channel: u32, focused: bool) {

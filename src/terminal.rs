@@ -47,6 +47,13 @@ struct Grid {
     core: Arc<Core>,
     channel: Option<u32>,
     cell: Size<Pixels>,
+    /// The window's scale factor, from the last prepaint. Programs see cells,
+    /// images and pixel mouse reports in device pixels, as in Ghostty.
+    scale: f32,
+    /// The cell in device pixels the local screen was sized with.
+    vt_cell: (u32, u32),
+    /// The cell in device pixels the core was last told.
+    told_cell: Option<(u32, u32)>,
     /// Top-left of the cell grid in window coordinates, from the last paint.
     origin: Point<Pixels>,
     buttons_down: usize,
@@ -112,10 +119,17 @@ pub fn next_frame() {
 
 impl EventEmitter<TerminalEvent> for TerminalView {}
 
-fn display_facts() -> serde_json::Value {
+/// `cell`: in device pixels, what the core reports to programs (CSI 14t, 16t).
+fn display_facts(cell: (u32, u32)) -> serde_json::Value {
     let hex = |c: Rgb| format!("#{:02x}{:02x}{:02x}", c.0, c.1, c.2);
     let t = vt::theme();
-    json!({"fg": hex(t.fg), "bg": hex(t.bg), "cursor": hex(t.cursor)})
+    json!({"fg": hex(t.fg), "bg": hex(t.bg), "cursor": hex(t.cursor), "cell": [cell.0, cell.1]})
+}
+
+/// A cell in device pixels.
+fn device_cell(cell: Size<Pixels>, scale: f32) -> (u32, u32) {
+    let px = |v: Pixels| (f32::from(v) * scale).round().max(1.0) as u32;
+    (px(cell.width), px(cell.height))
 }
 
 impl TerminalView {
@@ -138,6 +152,9 @@ impl TerminalView {
                 core: core.clone(),
                 channel: None,
                 cell: size(px(9.0), px(18.0)),
+                scale: 1.0,
+                vt_cell: (9, 18),
+                told_cell: None,
                 origin: Point::default(),
                 buttons_down: 0,
                 images: HashMap::new(),
@@ -179,18 +196,20 @@ impl TerminalView {
     /// take seconds, and the window must keep drawing meanwhile.
     /// `announce_end`: emit Ended if the terminal turns out to be gone.
     fn connect(&mut self, core: Arc<Core>, announce_end: bool, cx: &mut Context<Self>) {
-        let (cols, rows) = {
+        let (cols, rows, cell) = {
             let mut g = self.grid.borrow_mut();
             let (cols, rows) = (g.vt.cols, g.vt.rows);
             // The core repaints the whole screen (and history) on attach.
-            let (cw, ch) = (f32::from(g.cell.width) as u32, f32::from(g.cell.height) as u32);
+            let cell = device_cell(g.cell, g.scale);
             g.vt = Vt::new(cols, rows);
-            g.vt.resize(cols, rows, cw, ch);
+            g.vt.resize(cols, rows, cell.0, cell.1);
+            g.vt_cell = cell;
+            g.told_cell = Some(cell);
             g.core = core.clone();
             g.channel = None;
-            (cols, rows)
+            (cols, rows, cell)
         };
-        let (address, facts) = (self.address.clone(), display_facts());
+        let (address, facts) = (self.address.clone(), display_facts(cell));
         // Replacing the task drops an attach still in flight for an older connection.
         self._reader = Some(cx.spawn(async move |this, cx| {
             let attached = cx.background_executor().spawn(async move { core.attach(&address, cols, rows, facts) }).await;
@@ -492,9 +511,8 @@ impl TerminalView {
         }
         let up = steps > 0;
         if g.vt.mouse_tracking() {
-            let (x, y) = local(&g, ev.position);
+            let ((x, y), size) = mouse_at(&g, ev.position);
             let button = if up { GHOSTTY_MOUSE_BUTTON_FOUR } else { GHOSTTY_MOUSE_BUTTON_FIVE };
-            let size = grid_size(&g);
             let mut out = Vec::new();
             for _ in 0..n {
                 out.extend(g.vt.encode_mouse(GHOSTTY_MOUSE_ACTION_PRESS, Some(button), 0, x, y, size, false));
@@ -540,8 +558,7 @@ impl TerminalView {
             MouseButton::Middle => GHOSTTY_MOUSE_BUTTON_MIDDLE,
             _ => GHOSTTY_MOUSE_BUTTON_UNKNOWN,
         });
-        let (x, y) = local(&g, pos);
-        let size = grid_size(&g);
+        let ((x, y), size) = mouse_at(&g, pos);
         let any = g.buttons_down > 0;
         let bytes = g.vt.encode_mouse(action, b, 0, x, y, size, any);
         if let Some(ch) = g.channel {
@@ -684,9 +701,11 @@ fn scroll_steps(scrolled: &mut f32, phase: TouchPhase, lines: f32, rows: f32) ->
     }
 }
 
-/// (columns, rows, cell width, cell height) for mouse reports.
-fn grid_size(g: &Grid) -> (u32, u32, f32, f32) {
-    (g.vt.cols as u32, g.vt.rows as u32, f32::from(g.cell.width), f32::from(g.cell.height))
+/// A pointer position and the grid for mouse reports, in device pixels
+/// (SGR-pixels mode reports pixels, as in Ghostty).
+fn mouse_at(g: &Grid, p: Point<Pixels>) -> ((f32, f32), (u32, u32, f32, f32)) {
+    let ((x, y), s) = (local(g, p), g.scale);
+    ((x * s, y * s), (g.vt.cols as u32, g.vt.rows as u32, f32::from(g.cell.width) * s, f32::from(g.cell.height) * s))
 }
 
 /// An icon's glyph in the bundled symbols font, with its outline's bounds in
@@ -980,7 +999,9 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
         }
         if let Some(img) = g.images.get(&key) {
             let pos = origin + point(cell.width * p.col as f32, cell.height * p.row as f32);
-            images.push((p.z, Bounds::new(pos, size(px(p.width as f32), px(p.height as f32))), img.clone()));
+            // Placements are in device pixels.
+            let shown = size(px(p.width as f32 / scale), px(p.height as f32 / scale));
+            images.push((p.z, Bounds::new(pos, shown), img.clone()));
         }
     }
     g.images.retain(|k, _| keep.contains(k));
@@ -1278,16 +1299,25 @@ impl Render for TerminalView {
             }))
             .child(
                 canvas(
-                    move |bounds, _window, _cx| {
+                    move |bounds, window, _cx| {
                         let mut g = grid.borrow_mut();
                         g.vt.set_theme(vt::theme());
                         g.cell = cell;
+                        g.scale = window.scale_factor();
+                        let dev = device_cell(cell, g.scale);
+                        // Before the size, so a program woken by it asks for the new cell.
+                        if let Some(chan) = g.channel
+                            && g.told_cell != Some(dev)
+                        {
+                            g.core.facts(chan, &display_facts(dev));
+                            g.told_cell = Some(dev);
+                        }
                         let (px_, py_) = pad();
                         let cols = ((f32::from(bounds.size.width) - 2.0 * px_) / f32::from(cell.width)).floor().max(2.0) as u16;
                         let rows = ((f32::from(bounds.size.height) - 2.0 * py_) / f32::from(cell.height)).floor().max(1.0) as u16;
-                        if (cols, rows) != (g.vt.cols, g.vt.rows) {
-                            let (cw, ch) = (f32::from(cell.width) as u32, f32::from(cell.height) as u32);
-                            g.vt.resize(cols, rows, cw, ch);
+                        if (cols, rows) != (g.vt.cols, g.vt.rows) || dev != g.vt_cell {
+                            g.vt.resize(cols, rows, dev.0, dev.1);
+                            g.vt_cell = dev;
                             if let Some(chan) = g.channel {
                                 g.core.resize(chan, cols, rows);
                                 // Mode 2048 programs wait for this report, not SIGWINCH.
@@ -1612,5 +1642,14 @@ mod tests {
             vt.write(output);
             assert_eq!(key_bytes(&mut vt, &press("shift-enter", None)).as_deref(), Some(expected), "output={output:?}");
         }
+    }
+
+    #[test]
+    fn programs_are_told_the_cell_in_device_pixels() {
+        let cell = gpui::size(gpui::px(8.4), gpui::px(21.5));
+        assert_eq!(super::device_cell(cell, 1.0), (8, 22));
+        assert_eq!(super::device_cell(cell, 2.0), (17, 43));
+        assert_eq!(super::device_cell(gpui::size(gpui::px(0.0), gpui::px(0.0)), 2.0), (1, 1));
+        assert_eq!(super::display_facts((17, 43))["cell"], serde_json::json!([17, 43]));
     }
 }
