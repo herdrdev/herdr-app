@@ -630,6 +630,10 @@ What's about the user, never a look:
   background; this is a threshold, not a guaranteed resulting ratio.
   Box/block, Powerline and sprite glyph colors are never adjusted.
   Changes apply immediately, including text already on screen.
+- `key_timeout` (0.2..60, default 1): seconds a multi-key binding such as
+  `"ctrl-b c"` in keys.json waits for its next key. When it runs out, the
+  keys typed so far go to the focused terminal or input. Changes apply
+  immediately.
 - `clipboard_write`: `false` blocks terminal programs from writing the local
   clipboard (default `true`, including remote terminals attached in this window).
   OSC 52 accepts base64 UTF-8 text up to 1 MiB: `c` writes the system clipboard,

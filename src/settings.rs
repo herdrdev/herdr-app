@@ -389,6 +389,8 @@ pub struct Person {
     pub clipboard_write: bool,
     /// Minimum terminal text contrast ratio; 1 leaves program colors unchanged.
     pub minimum_contrast: f32,
+    /// Seconds a multi-key binding (`ctrl-b c`) waits for its next key.
+    pub key_timeout: f32,
     /// macOS Option sends Alt shortcuts, or follows the keyboard layout.
     #[serde(skip_serializing_if = "OptionAsAlt::is_auto")]
     pub option_as_alt: OptionAsAlt,
@@ -447,6 +449,7 @@ impl Default for Person {
             telemetry: true,
             clipboard_write: true,
             minimum_contrast: 1.0,
+            key_timeout: 1.0,
             option_as_alt: OptionAsAlt::Auto,
             appearance: Appearance::System,
             theme: None,
@@ -481,6 +484,7 @@ pub struct Settings {
     pub terminal_opacity: f32,
     pub clipboard_write: bool,
     pub minimum_contrast: f32,
+    pub key_timeout: f32,
     pub option_as_alt: OptionAsAlt,
     pub sounds: Sounds,
 }
@@ -521,6 +525,7 @@ impl Default for Settings {
             terminal_opacity: 1.0,
             clipboard_write: true,
             minimum_contrast: 1.0,
+            key_timeout: 1.0,
             option_as_alt: OptionAsAlt::Auto,
             sounds: Sounds::default(),
         }
@@ -558,6 +563,7 @@ impl Settings {
             sounds: person.sounds.clone(),
             clipboard_write: person.clipboard_write,
             minimum_contrast: person.minimum_contrast,
+            key_timeout: person.key_timeout,
             option_as_alt: person.option_as_alt,
         }
     }
@@ -605,6 +611,9 @@ impl Settings {
         }
         if !(1.0..=21.0).contains(&self.minimum_contrast) {
             out.push(format!("minimum_contrast {} is outside 1..21", self.minimum_contrast));
+        }
+        if !KEY_TIMEOUT.contains(&self.key_timeout) {
+            out.push(format!("key_timeout {} is outside 0.2..60", self.key_timeout));
         }
         if !(6.0..=72.0).contains(&self.font_size) {
             out.push(format!("font_size {} is outside 6..72", self.font_size));
@@ -674,8 +683,13 @@ pub fn write_person(person: &Person) -> std::io::Result<()> {
     crate::persist::write_atomic(&path(), serde_json::to_string_pretty(person).unwrap_or_default() + "\n")
 }
 
+const KEY_TIMEOUT: std::ops::RangeInclusive<f32> = 0.2..=60.0;
+
 /// Installs new settings; returns whether anything changed.
 pub fn set(s: Settings) -> bool {
+    gpui::set_pending_input_timeout(std::time::Duration::from_secs_f32(
+        s.key_timeout.clamp(*KEY_TIMEOUT.start(), *KEY_TIMEOUT.end()),
+    ));
     #[cfg(target_os = "macos")]
     gpui_macos::set_option_as_alt(match s.option_as_alt {
         OptionAsAlt::Auto => None,
@@ -871,6 +885,20 @@ mod tests {
             assert_eq!(settings.minimum_contrast, ratio);
             assert_eq!(serde_json::to_value(person).unwrap()["minimum_contrast"], serde_json::json!(ratio));
             assert_eq!(settings.problems().is_empty(), (1.0..=21.0).contains(&ratio));
+        }
+    }
+
+    #[test]
+    fn key_timeout_defaults_to_a_second_and_validates_the_range() {
+        let default: Person = serde_json::from_str("{}").unwrap();
+        assert_eq!(Settings::compose(&default, &crate::layout::Look::default(), true).key_timeout, 1.0);
+        for seconds in [0.2, 10.0, 60.0, 0.1, 61.0] {
+            let person: Person = serde_json::from_value(serde_json::json!({"key_timeout": seconds})).unwrap();
+            let settings = Settings::compose(&person, &crate::layout::Look::default(), true);
+            assert_eq!(settings.key_timeout, seconds);
+            assert_eq!(settings.problems().is_empty(), (0.2..=60.0).contains(&seconds));
+            set(settings);
+            assert_eq!(gpui::pending_input_timeout().as_secs_f32(), seconds.clamp(0.2, 60.0));
         }
     }
 

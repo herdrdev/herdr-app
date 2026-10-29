@@ -1317,6 +1317,20 @@ pub(crate) enum DrawPhase {
 
 pub(crate) const PENDING_INPUT_TIMEOUT: Duration = Duration::from_secs(1);
 
+thread_local! {
+    static PENDING_INPUT_TIMEOUT_DURATION: Cell<Duration> = const { Cell::new(PENDING_INPUT_TIMEOUT) };
+}
+
+/// Sets how long pending input for a multi-stroke key binding waits for its next keystroke.
+pub fn set_pending_input_timeout(duration: Duration) {
+    PENDING_INPUT_TIMEOUT_DURATION.set(duration);
+}
+
+/// How long pending input for a multi-stroke key binding waits for its next keystroke.
+pub fn pending_input_timeout() -> Duration {
+    PENDING_INPUT_TIMEOUT_DURATION.get()
+}
+
 /// Pending input for a potential multi-stroke key binding.
 pub struct PendingInputStatus<'a> {
     keystrokes: &'a [Keystroke],
@@ -6002,12 +6016,12 @@ impl Window {
             currently_pending.timeout = if needs_timeout {
                 match previous_timeout {
                     Some(mut timeout) if timeout.is_paused() => {
-                        timeout.reset_duration(PENDING_INPUT_TIMEOUT);
+                        timeout.reset_duration(pending_input_timeout());
                         Some(timeout)
                     }
                     previous_timeout => {
                         drop(previous_timeout);
-                        Some(self.new_pending_input_timeout(PENDING_INPUT_TIMEOUT, cx))
+                        Some(self.new_pending_input_timeout(pending_input_timeout(), cx))
                     }
                 }
             } else {
