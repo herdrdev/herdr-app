@@ -600,6 +600,10 @@ What's about the user, never a look:
   Mods use `updates().notes` and `presentUpdateNotes([version])` only
   for spotlight entries actually shown expanded, not collapsed headlines.
   macOS releases require Apple Silicon; Intel Macs must build from source.
+  Homebrew installs the release DMG (`brew tap herdrdev/herdr-app
+  https://github.com/herdrdev/herdr-app`, then `brew install --cask
+  herdr-app`) into `/Applications/Herdr.app`; it updates itself like any
+  other install.
   Keep signed macOS bundles unchanged: don't edit their Info.plist or
   re-sign them. On launch, an installed macOS bundle creates or repairs its
   own `~/.local/bin/herdr-app` symlink, leaving personal files and other

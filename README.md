@@ -17,6 +17,15 @@ Add that folder to your PATH if the installer asks.
 On macOS the app lives in `~/Applications/Herdr.app`.
 For drag-and-drop installation on Apple Silicon, download [Herdr.dmg](https://releases.herdr.dev/app/Herdr.dmg) and drag Herdr to Applications.
 
+### Homebrew (macOS)
+
+```sh
+brew tap herdrdev/herdr-app https://github.com/herdrdev/herdr-app
+brew install --cask herdr-app
+```
+
+The cask installs the same DMG into `/Applications/Herdr.app` and links `herdr-app` into Homebrew's bin. Herdr updates itself after that; `brew upgrade` leaves it alone.
+
 ### Windows
 
 Run in PowerShell on x64 Windows with curl and tar installed (Windows 10 1803 or newer):
