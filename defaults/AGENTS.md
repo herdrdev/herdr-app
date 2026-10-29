@@ -27,6 +27,7 @@ from the same parts you have.
 On OpenBSD, the source checkout's `scripts/run-openbsd` launcher makes
 Xenocara's Vulkan driver manifests discoverable. The existing Herdr 0.9.x
 terminal app is separate; it is not a substitute for `hc`.
+Personal binary packages install the same launcher as `/usr/local/bin/herdr-app`.
 
 ## What you can and can't do
 

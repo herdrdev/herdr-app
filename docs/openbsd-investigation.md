@@ -18,7 +18,9 @@ scripts/run-openbsd
 
 Run from an X11 desktop session. `DISPLAY` must name that session. The launcher
 adds Xenocara's `/usr/X11R6/share` to `XDG_DATA_DIRS` so the Vulkan loader finds
-Mesa's ICD manifests. The build recipe uses the packaged rustfmt: a successful
+Mesa's ICD manifests. It also supplies OpenBSD cursor search paths and uses
+Adwaita when no cursor theme is selected. Explicit cursor settings are kept.
+The build recipe uses the packaged rustfmt: a successful
 formatter shim that writes no output otherwise causes bindgen to emit empty
 bindings. No shell profile or global tool configuration is changed.
 
@@ -43,6 +45,30 @@ scripts/build-openbsd build --locked --config 'profile.dev.package."*".opt-level
 - Process working directories come from `KERN_PROC_CWD`, with the existing
   change-directory and missing-process tests enabled on OpenBSD. Terminal copy
   also updates the X11 primary selection.
+
+## Personal binary packages
+
+`scripts/package-openbsd` uses native `pkg_create` to package the tested app
+and companion core binaries. It does not modify or submit anything to the
+official OpenBSD ports tree. Binary archives and their SHA-256 files go under
+the ignored `dist/openbsd/` directory; the PR contains source changes only.
+
+```sh
+scripts/package-openbsd
+doas pkg_add -D unsigned ./dist/openbsd/herdr-core-0.1.13.tgz ./dist/openbsd/herdr-app-0.1.7.tgz
+```
+
+The app package includes a launcher, menu entry, icon and documentation, and
+declares its core, xkbcommon, Vulkan-loader and cursor-theme dependencies.
+Both packages record the native shared-library ABI requirements. These local
+experimental binaries are for the tested OpenBSD 8.0 amd64/current environment,
+not a claim of compatibility with older OpenBSD releases. They package the
+validated development builds after stripping symbols; they are not optimized
+upstream release builds.
+
+Graphical file/folder dialogs need a working xdg-desktop-portal backend, for
+example `xdg-desktop-portal-gtk`. It is not installed or enabled by this recipe.
+Without it the desktop-portal warning can remain and those dialogs may fail.
 
 ## Validation
 

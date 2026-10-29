@@ -1,0 +1,123 @@
+#!/usr/bin/env python3
+"""Package tested native binaries without modifying the OpenBSD ports tree."""
+
+import argparse
+import hashlib
+import os
+from pathlib import Path
+import platform
+import re
+import shutil
+import subprocess
+import tempfile
+
+
+def run(*args, **kwargs):
+    return subprocess.run(args, check=True, **kwargs)
+
+
+def version(binary, program):
+    text = subprocess.check_output([str(binary), "--version"], text=True).strip()
+    match = re.fullmatch(re.escape(program) + r" (\d+\.\d+\.\d+)", text)
+    if not match:
+        raise ValueError(f"unexpected version: {text}")
+    return match[1]
+
+
+def dependency(stem):
+    entries = [p for p in Path("/var/db/pkg").glob(stem + "-*")
+               if re.fullmatch(re.escape(stem) + r"-[0-9].*", p.name) and (p / "+CONTENTS").is_file()]
+    if len(entries) != 1:
+        raise ValueError(f"expected one installed {stem} package, found {len(entries)}")
+    contents = (entries[0] / "+CONTENTS").read_text()
+    pkgpath = re.search(r"^@comment pkgpath=(\S+)", contents, re.M).group(1)
+    return f"{pkgpath}:{stem}-*:{entries[0].name}"
+
+
+def libraries(binary):
+    linked = subprocess.check_output(["ldd", str(binary)], text=True)
+    return sorted(set(".".join(m) for m in re.findall(r"/lib([^/\s]+)\.so\.(\d+)\.(\d+)", linked)))
+
+
+def write(path, text, mode=0o644):
+    path.parent.mkdir(parents=True, exist_ok=True)
+    path.write_text(text)
+    path.chmod(mode)
+
+
+def package(out, name, stage, description, files, wanted, dependencies):
+    plist = stage.parent / (name + ".plist")
+    plist.write_text("@owner root\n@group bin\n" + "\n".join(files) + "\n")
+    desc = stage.parent / (name + ".descr")
+    desc.write_text(description + "\nLocal experimental OpenBSD build; not an official ports package.\n")
+    command = ["pkg_create", "-A", "amd64", "-B", str(stage), "-p", "/usr/local",
+               "-D", "COMMENT=" + description, "-D", "MAINTAINER=rpx99",
+               "-D", "FULLPKGPATH=local/" + name.rsplit("-", 1)[0],
+               "-d", str(desc), "-f", str(plist)]
+    for dep in dependencies:
+        command.extend(["-P", dep])
+    for lib in wanted:
+        command.extend(["-W", lib])
+    artifact = out / (name + ".tgz")
+    if artifact.exists():
+        raise FileExistsError(artifact)
+    run(*command, str(artifact))
+    digest = hashlib.sha256(artifact.read_bytes()).hexdigest()
+    artifact.with_suffix(".tgz.sha256").write_text(f"SHA256 ({artifact.name}) = {digest}\n")
+    print(artifact, flush=True)
+
+
+def main():
+    if platform.system() != "OpenBSD" or platform.machine() != "amd64":
+        raise SystemExit("This recipe requires native OpenBSD amd64 binaries.")
+    root = Path(__file__).resolve().parent.parent
+    parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--app-bin", type=Path, default=root / "target/debug/herdr-app")
+    parser.add_argument("--core-bin", type=Path, default=root.parent / "herdr-core/target/debug/herdr-core")
+    parser.add_argument("--output", type=Path, default=root / "dist/openbsd")
+    args = parser.parse_args()
+    args.app_bin = args.app_bin.resolve()
+    args.core_bin = args.core_bin.resolve()
+    args.output = args.output.resolve()
+    args.output.mkdir(parents=True, exist_ok=True)
+    app_version, core_version = version(args.app_bin, "herdr-app"), version(args.core_bin, "hc")
+    with tempfile.TemporaryDirectory(prefix="herdr-package-", dir="/var/tmp") as work:
+        work = Path(work)
+        for kind, binary, number in [("core", args.core_bin, core_version), ("app", args.app_bin, app_version)]:
+            stage = work / kind
+            prefix = stage / "usr/local"
+            name = "herdr-" + kind + "-" + number
+            target = prefix / ("bin/herdr-core" if kind == "core" else "libexec/herdr-app/herdr-app-bin")
+            target.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copy2(binary, target)
+            target.chmod(0o555)
+            run("strip", "-s", str(target))
+            wanted = libraries(target)
+            if kind == "core":
+                os.symlink("herdr-core", prefix / "bin/hc")
+                doc = prefix / "share/doc/herdr-core"
+                doc.mkdir(parents=True)
+                shutil.copy2(root.parent / "herdr-core/LICENSE", doc / "LICENSE")
+                files = ["@bin bin/herdr-core", "bin/hc", "share/doc/herdr-core/LICENSE"]
+                deps = []
+                description = "terminal runtime for coding agents"
+            else:
+                shutil.copy2(root / "scripts/openbsd-env", target.parent / "env.sh")
+                write(prefix / "bin/herdr-app", '#!/bin/sh\nset -eu\n. /usr/local/libexec/herdr-app/env.sh\nexec /usr/local/libexec/herdr-app/herdr-app-bin "$@"\n', 0o555)
+                write(prefix / "share/applications/herdr-app.desktop", "[Desktop Entry]\nType=Application\nName=Herdr\nComment=Desktop workspace for terminals and coding agents\nExec=/usr/local/bin/herdr-app\nIcon=herdr-app\nTerminal=false\nCategories=Development;TerminalEmulator;\nStartupWMClass=herdr-app\n")
+                icon = prefix / "share/pixmaps/herdr-app.png"
+                icon.parent.mkdir(parents=True)
+                shutil.copy2(root / "assets/icons/herdr-ui-icon-clean.png", icon)
+                doc = prefix / "share/doc/herdr-app"
+                doc.mkdir(parents=True)
+                shutil.copy2(root / "LICENSE", doc / "LICENSE")
+                shutil.copy2(root / "docs/openbsd-investigation.md", doc / "README.md")
+                shutil.copy2(root / "docs/openbsd-terminal.png", doc / "openbsd-terminal.png")
+                files = ["bin/herdr-app", "@bin libexec/herdr-app/herdr-app-bin", "libexec/herdr-app/env.sh", "share/applications/herdr-app.desktop", "share/pixmaps/herdr-app.png", "share/doc/herdr-app/LICENSE", "share/doc/herdr-app/README.md", "share/doc/herdr-app/openbsd-terminal.png"]
+                deps = [f"local/herdr-core:herdr-core->=0.1.11:herdr-core-{core_version}", dependency("libxkbcommon"), dependency("vulkan-loader"), dependency("adwaita-icon-theme")]
+                description = "desktop workspace for terminals and coding agents"
+            package(args.output, name, stage, description, files, wanted, deps)
+
+
+if __name__ == "__main__":
+    main()

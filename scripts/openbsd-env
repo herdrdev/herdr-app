@@ -1,0 +1,7 @@
+# Shared environment for the source and packaged OpenBSD launchers.
+export XDG_DATA_DIRS="/usr/X11R6/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/X11R6/bin:$PATH"
+export XCURSOR_PATH="${XCURSOR_PATH:-$HOME/.local/share/icons:$HOME/.icons:/usr/local/share/icons:/usr/X11R6/lib/X11/icons}"
+if [ -z "${XCURSOR_THEME:-}" ] && [ -r /usr/local/share/icons/Adwaita/cursors/left_ptr ]; then
+    export XCURSOR_THEME=Adwaita
+fi
