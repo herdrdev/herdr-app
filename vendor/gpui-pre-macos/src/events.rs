@@ -463,6 +463,10 @@ unsafe fn parse_keystroke(native_event: id) -> Keystroke {
                     if alt {
                         mods |= OPTION_MOD;
                     }
+                    // Caps Lock changes the typed text, though not the key.
+                    if modifiers.contains(NSEventModifierFlags::NSAlphaShiftKeyMask) {
+                        mods |= CAPS_LOCK_MOD;
+                    }
 
                     // Keep dead keys for NSTextInputClient instead of sending their
                     // spacing accent to key-down listeners before composition starts.
@@ -511,6 +515,7 @@ const NO_MOD: u32 = 0;
 const CMD_MOD: u32 = 1;
 const SHIFT_MOD: u32 = 2;
 const OPTION_MOD: u32 = 8;
+const CAPS_LOCK_MOD: u32 = 4;
 
 fn chars_for_modified_key(code: CGKeyCode, modifiers: u32) -> String {
     translate_key(code, modifiers, true)
