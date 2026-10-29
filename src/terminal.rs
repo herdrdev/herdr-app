@@ -481,11 +481,12 @@ impl TerminalView {
     fn scroll(&mut self, ev: &ScrollWheelEvent, _w: &mut Window, cx: &mut Context<Self>) {
         cx.stop_propagation();
         let mut g = self.grid.borrow_mut();
-        let lines = match ev.delta {
-            ScrollDelta::Lines(p) => p.y,
-            ScrollDelta::Pixels(p) => p.y / g.cell.height,
+        let rows = g.vt.rows as f32;
+        let steps = match ev.delta {
+            ScrollDelta::Lines(p) if cfg!(target_os = "macos") => macos_wheel_steps(p.y),
+            ScrollDelta::Lines(p) => scroll_steps(&mut self.scrolled, ev.touch_phase, p.y, rows),
+            ScrollDelta::Pixels(p) => scroll_steps(&mut self.scrolled, ev.touch_phase, p.y / g.cell.height, rows),
         };
-        let steps = scroll_steps(&mut self.scrolled, ev.touch_phase, lines, g.vt.rows as f32);
         let n = steps.unsigned_abs() as usize;
         if n == 0 {
             return;
@@ -682,6 +683,18 @@ fn scroll_steps(scrolled: &mut f32, phase: TouchPhase, lines: f32, rows: f32) ->
         }
         _ => 0,
     }
+}
+
+/// Lines for a macOS mouse wheel event, as Ghostty scrolls them. macOS reports
+/// wheel ticks, a slow notch as a fraction of one (often 0.1), so an event counts
+/// as at least one tick, times Ghostty's default wheel multiplier of 3, with the
+/// fraction dropped.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn macos_wheel_steps(ticks: f32) -> i32 {
+    if ticks == 0.0 {
+        return 0;
+    }
+    (ticks.signum() * ticks.abs().max(1.0) * 3.0).trunc() as i32
 }
 
 /// (columns, rows, cell width, cell height) for mouse reports.
@@ -1433,10 +1446,18 @@ mod tests {
         assert_eq!(super::scroll_steps(&mut s, Started, 0.0, 40.0), 0);
         let total: i32 = (0..12).map(|_| super::scroll_steps(&mut s, Moved, 0.25, 40.0)).sum();
         assert_eq!(total, 3, "twelve quarter lines: not twelve lines");
-        assert_eq!(super::scroll_steps(&mut s, Moved, 3.0, 40.0), 3, "a mouse wheel's notch");
         assert_eq!(super::scroll_steps(&mut s, Started, 0.0, 40.0), 0);
         assert_eq!(super::scroll_steps(&mut s, Moved, -0.5, 40.0), 0, "a new gesture forgets the last one's leftover");
         assert_eq!(super::scroll_steps(&mut s, Moved, -0.6, 40.0), -1);
+    }
+
+    #[test]
+    fn macos_wheel_events_scroll_as_in_ghostty() {
+        use super::macos_wheel_steps as steps;
+        assert_eq!(steps(0.1), 3, "a slow notch");
+        assert_eq!(steps(-0.1), -3);
+        assert_eq!(steps(1.5), 4, "a fast spin's tick, its half line dropped");
+        assert_eq!(steps(0.0), 0);
     }
 
     #[test]
