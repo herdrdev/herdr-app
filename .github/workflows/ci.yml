@@ -1,15 +1,12 @@
-# Build and test on Linux; release.yml builds release targets.
+# Build and test every supported platform; release.yml handles packaging.
 #
-# Cache rules: one pinned toolchain so caches
-# don't die on a stable bump; only master pushes save, so PR and branch
-# caches can't evict the ones everybody restores; libghostty's Zig build
-# lives in Cargo's OUT_DIR, kept with the workspace crates.
+# Rust caches use one pinned toolchain and only master pushes save, so PR
+# caches can't evict the ones everybody restores. setup-zig caches separately.
 name: ci
 
 on:
   push:
     branches: [master]
-    paths-ignore: [".brain/**"]
   # No paths-ignore here: CI is required to merge, so every PR needs it.
   pull_request:
 
@@ -30,10 +27,21 @@ env:
   SAVE_CACHES: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
 
 jobs:
-  test:
-    # Release's Linux build runs on 22.04 (glibc floor): test on the same.
-    runs-on: ubuntu-22.04
-    timeout-minutes: 30
+  platform-tests:
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          # Match release's glibc floor and native platform runners.
+          - { platform: linux-x86_64, runner: ubuntu-22.04 }
+          - { platform: linux-aarch64, runner: ubuntu-22.04-arm }
+          - { platform: macos-aarch64, runner: macos-15 }
+          - { platform: windows-x86_64, runner: windows-2022 }
+    runs-on: ${{ matrix.runner }}
+    timeout-minutes: 45
+    defaults:
+      run:
+        shell: bash
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
@@ -47,22 +55,58 @@ jobs:
           version: 0.16.0
       - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
         with:
-          key: linux-x86_64-dev
+          key: ${{ matrix.platform }}-dev
           cache-workspace-crates: true
           cache-bin: false
           save-if: ${{ env.SAVE_CACHES }}
-      - name: Build dependencies
+      - name: Linux build dependencies
+        if: runner.os == 'Linux'
         run: |
           sudo apt-get update
           sudo apt-get install -y --no-install-recommends \
             pkg-config clang libclang-dev \
             libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
             libvulkan-dev mesa-vulkan-drivers libfontconfig-dev libfreetype-dev
+      - name: Windows build dependencies
+        if: runner.os == 'Windows'
+        run: echo "LIBCLANG_PATH=C:\\Program Files\\LLVM\\bin" >> "$GITHUB_ENV"
+      # Compile the screenshot harness everywhere, even without a desktop.
       # Disable optimized dev dependencies in CI to reduce test compile time.
-      - run: cargo test --locked --config 'profile.dev.package."*".opt-level=0'
+      - name: Build tests
+        run: cargo test --locked --config 'profile.dev.package."*".opt-level=0' --no-run
+      - name: Tests
+        run: |
+          only=()
+          if [ "$RUNNER_OS" != Linux ]; then
+            for t in tests/*.rs; do
+              name=$(basename "$t" .rs)
+              [ "$name" = shot_pixels ] || only+=(--test "$name")
+            done
+            only+=(--bins)
+          fi
+          cargo test --locked --config 'profile.dev.package."*".opt-level=0' "${only[@]}"
+      # Windows runners lack an interactive desktop. Linux uses headless Vulkan
+      # in the suite above; macOS exercises the native window renderer here.
+      - name: Screenshot pixels
+        if: runner.os == 'macOS'
+        timeout-minutes: 5
+        env:
+          HERDR_SHOT_NATIVE_TEST: "1"
+        run: cargo test --locked --config 'profile.dev.package."*".opt-level=0' --test shot_pixels
       - name: Install Bun
+        if: matrix.platform == 'linux-x86_64'
         run: curl -fsSL https://bun.sh/install | bash -s "bun-v1.4.4"
       - name: Check documentation
+        if: matrix.platform == 'linux-x86_64'
         run: |
           ~/.bun/bin/bun test scripts/docs.test.ts
           ~/.bun/bin/bun scripts/docs.ts check
+
+  # Keep the required check name stable while requiring every platform.
+  test:
+    needs: platform-tests
+    if: always()
+    runs-on: ubuntu-latest
+    timeout-minutes: 5
+    steps:
+      - run: '[ "${{ needs.platform-tests.result }}" = success ]'

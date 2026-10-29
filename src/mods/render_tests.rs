@@ -18,7 +18,7 @@ impl Staged {
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
-        std::fs::create_dir(&path).unwrap();
+        std::fs::create_dir_all(&path).unwrap();
         let staged = Self(path);
         for (folder, files) in [("mods", DEFAULT_MODS), ("frame", FRAME_MODS)] {
             for (name, bytes) in files {
