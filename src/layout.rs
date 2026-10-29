@@ -162,6 +162,9 @@ pub struct Look {
     pub font: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub font_size: Option<f32>,
+    /// The terminals' row height, as a multiple of the font's height.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub line_height: Option<f32>,
     /// The mods' font.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui_font: Option<String>,
@@ -755,13 +758,14 @@ mod tests {
 
     #[test]
     fn nodes_carry_looks_backgrounds_padding_and_shadows() {
-        let json = r##"{ "id": "root", "type": "column", "theme": "ink", "font": "Berkeley Mono", "font_size": 13,
+        let json = r##"{ "id": "root", "type": "column", "theme": "ink", "font": "Berkeley Mono", "font_size": 13, "line_height": 1.0,
           "terminal_opacity": 0.85, "padding": [16, 12], "shadow": "lg",
           "background": { "gradient": ["#123a6e", "#2a6db3"], "angle": 160 },
           "children": [ { "id": "a", "type": "block", "content": { "mod": "x" }, "background": "surface", "padding": 8 },
                         { "id": "b", "type": "block", "content": { "mod": "y" }, "background": { "image": "bg/sky.jpg" } } ] }"##;
         let n: Node = serde_json::from_str(json).unwrap();
         assert_eq!((n.look.theme.as_ref().map(|t| t.pick(true)), n.look.font_size, n.look.terminal_opacity), (Some("ink"), Some(13.0), Some(0.85)));
+        assert_eq!(n.look.line_height, Some(1.0));
         assert_eq!(n.padding.map(Padding::axes), Some((16.0, 12.0)));
         assert!(matches!(n.background, Some(Background::Gradient { angle, .. }) if angle == 160.0));
         assert_eq!(n.find("a").unwrap().background, Some(Background::Color("surface".into())));

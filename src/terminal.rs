@@ -851,7 +851,7 @@ pub fn cell_size(window: &Window) -> Size<Pixels> {
     // grid once it drifts over 1px, so a rounded width made text wobble.
     // Boxes snap their edges instead (`snap_box`).
     let scale = window.scale_factor();
-    size(w, px((f32::from(h) * 1.15 * scale).ceil() / scale))
+    size(w, px((f32::from(h) * crate::settings::get().line_height * scale).ceil() / scale))
 }
 
 /// One piece of a row's drawing, in cells from the row's start.
