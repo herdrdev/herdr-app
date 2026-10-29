@@ -1,0 +1,7 @@
+#!/bin/sh
+set -eu
+root=$(CDPATH= cd -- "$(dirname "$0")/.." && pwd)
+# Mesa's ICD manifests are part of Xenocara rather than /usr/local/share.
+export XDG_DATA_DIRS="/usr/X11R6/share:${XDG_DATA_DIRS:-/usr/local/share:/usr/share}"
+export PATH="$HOME/.local/bin:/usr/local/bin:/usr/bin:/bin:/usr/X11R6/bin:$PATH"
+exec "$root/target/debug/herdr-app" "$@"

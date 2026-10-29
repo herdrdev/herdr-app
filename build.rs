@@ -34,6 +34,10 @@ fn embed(base: &Path, folder: &str, name: &str, file: &str) {
 }
 
 fn main() {
+    // OpenBSD packages install xkbcommon outside the base/X11 linker paths.
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("openbsd") {
+        println!("cargo:rustc-link-search=native=/usr/local/lib");
+    }
     let base = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     embed(&base, "defaults/mods", "DEFAULT_MODS", "default_mods.rs");
     embed(&base, "defaults/icons", "DEFAULT_ICONS", "default_icons.rs");

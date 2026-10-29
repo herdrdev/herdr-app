@@ -449,7 +449,7 @@ impl TerminalView {
     pub fn copy(&mut self, cx: &mut Context<Self>) {
         if let Some(text) = self.grid.borrow().vt.selection_text() {
             cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-            #[cfg(target_os = "linux")]
+            #[cfg(any(target_os = "linux", target_os = "openbsd"))]
             cx.write_to_primary(ClipboardItem::new_string(text));
         }
     }

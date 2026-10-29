@@ -106,6 +106,11 @@ See the [command reference](docs/commands.md) for arguments.
 
 ## Build from source
 
+An experimental native OpenBSD amd64 port is available in this fork. It uses
+X11 and Vulkan; see [the OpenBSD build and validation notes](docs/openbsd-investigation.md).
+Use `scripts/build-openbsd`, install a compatible `herdr-core` alongside the
+existing Herdr TUI, then launch with `scripts/run-openbsd` from your desktop.
+
 Clone this repo with its submodules. Use Rust 1.95.0 and Zig 0.16.0, the versions used in [CI](.github/workflows/ci.yml).
 Linux needs the development packages listed in that workflow.
 

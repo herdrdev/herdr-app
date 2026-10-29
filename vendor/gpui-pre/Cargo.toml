@@ -533,7 +533,7 @@ default-features = false
 [target.'cfg(any(target_os = "linux", target_os = "android"))'.dependencies.libc]
 version = "0.2"
 
-[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "windows"))'.dependencies.scap]
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd", target_os = "windows"))'.dependencies.scap]
 version = "0.0.8-zed"
 optional = true
 default-features = false

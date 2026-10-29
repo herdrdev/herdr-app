@@ -705,7 +705,7 @@ fn display_modifiers(modifiers: &Modifiers, f: &mut std::fmt::Formatter<'_>) -> 
         #[cfg(target_os = "macos")]
         f.write_char('⌘')?;
 
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
         f.write_char('❖')?;
 
         #[cfg(target_os = "windows")]
@@ -768,7 +768,7 @@ fn unparse(modifiers: &Modifiers, key: &str) -> String {
         #[cfg(target_os = "macos")]
         result.push_str("cmd-");
 
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
         result.push_str("super-");
 
         #[cfg(target_os = "windows")]

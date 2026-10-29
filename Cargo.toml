@@ -1,6 +1,6 @@
 [workspace]
 members = ["crates/ghostty-sys"]
-exclude = ["vendor/gpui-kit", "vendor/gpui-pre", "vendor/gpui-pre-wgpu", "vendor/gpui-pre-apple", "vendor/gpui-pre-linux", "vendor/gpui-pre-macos", "vendor/gpui-pre-windows", "vendor/taffy", "vendor/quickjs-jit-runtime"]
+exclude = ["vendor/wgpu-core-deps-windows-linux-android", "vendor/wgpu", "vendor/wgpu-core", "vendor/gpui-kit", "vendor/gpui-pre", "vendor/gpui-pre-platform", "vendor/gpui-pre-wgpu", "vendor/gpui-pre-apple", "vendor/gpui-pre-linux", "vendor/gpui-pre-macos", "vendor/gpui-pre-windows", "vendor/taffy", "vendor/quickjs-jit-runtime"]
 resolver = "2"
 
 [workspace.package]
@@ -49,6 +49,11 @@ gpui-shell = { path = "vendor/gpui-kit/crates/shell", features = ["render-test-s
 [target.'cfg(target_os = "linux")'.dependencies]
 gpui_linux = { package = "gpui-pre-linux", version = "=0.3.8", features = ["render-to-image"] }
 
+[target.'cfg(target_os = "openbsd")'.dependencies]
+libc = "0.2"
+rquickjs = { package = "quickjs-jit", version = "0.12.11", git = "https://github.com/longbridge/quickjs-jit", rev = "96593cd7a54440ac060a391b8baea7e9a3cf1393", features = ["bindgen"] }
+gpui_linux = { package = "gpui-pre-linux", version = "=0.3.8", features = ["render-to-image"] }
+
 [target.'cfg(target_os = "macos")'.dependencies]
 gpui_macos = { package = "gpui-pre-macos", version = "=0.3.8", features = ["render-to-image"] }
 libc = "0.2"
@@ -64,8 +69,13 @@ winresource = "0.1"
 
 # gpui-shell's LLRT modules must share its quickjs-jit VM; gpui-kit's own workspace does the same.
 [patch.crates-io]
+# OpenBSD uses the existing Unix Vulkan backend.
+wgpu = { path = "vendor/wgpu" }
+wgpu-core = { path = "vendor/wgpu-core" }
+wgpu-core-deps-windows-linux-android = { path = "vendor/wgpu-core-deps-windows-linux-android" }
 # HERDR: production frame capture without test-support dependencies.
 gpui-pre = { path = "vendor/gpui-pre" }
+gpui-pre-platform = { path = "vendor/gpui-pre-platform" }
 gpui-pre-wgpu = { path = "vendor/gpui-pre-wgpu" }
 gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
 rquickjs = { path = "vendor/gpui-kit/crates/shell/rquickjs-compat" }

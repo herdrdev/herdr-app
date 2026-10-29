@@ -32,14 +32,14 @@ impl KeyContext {
         let mut context = Self::default();
         #[cfg(target_os = "macos")]
         context.set("os", "macos");
-        #[cfg(any(target_os = "linux", target_os = "freebsd"))]
+        #[cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))]
         context.set("os", "linux");
         #[cfg(target_os = "windows")]
         context.set("os", "windows");
         #[cfg(not(any(
             target_os = "macos",
             target_os = "linux",
-            target_os = "freebsd",
+            target_os = "freebsd", target_os = "openbsd",
             target_os = "windows"
         )))]
         context.set("os", "unknown");

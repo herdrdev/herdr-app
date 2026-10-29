@@ -82,21 +82,21 @@ name = "gpui_linux"
 path = "src/gpui_linux.rs"
 doctest = false
 
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.accesskit]
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies.accesskit]
 version = "0.24.0"
 features = ["enumn"]
 
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.accesskit_unix]
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies.accesskit_unix]
 version = "0.22"
 
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.anyhow]
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies.anyhow]
 version = "1.0.86"
 
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.as-raw-xcb-connection]
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies.as-raw-xcb-connection]
 version = "1"
 optional = true
 
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.ashpd]
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies.ashpd]
 version = "0.13"
 features = [
     "async-io",
@@ -110,60 +110,60 @@ features = [
 optional = true
 default-features = false
 
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.bytemuck]
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies.bytemuck]
 version = "1"
 
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.calloop]
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies.calloop]
 version = "0.14.3"
 
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.calloop-wayland-source]
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies.calloop-wayland-source]
 version = "0.4.1"
 optional = true
 
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.collections]
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies.collections]
 version = "=0.3.8"
 package = "gpui-pre-collections"
 
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.filedescriptor]
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies.filedescriptor]
 version = "0.8.2"
 optional = true
 
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.futures]
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies.futures]
 version = "0.3.34"
 
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.gpui]
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies.gpui]
 version = "=0.3.8"
 default-features = false
 package = "gpui-pre"
 
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.gpui_util]
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies.gpui_util]
 version = "=0.3.8"
 package = "gpui-pre-util"
 
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.gpui_wgpu]
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies.gpui_wgpu]
 version = "=0.3.8"
 features = ["font-kit"]
 optional = true
 package = "gpui-pre-wgpu"
 
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.http_client]
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies.http_client]
 version = "=0.3.8"
 package = "gpui-pre-http-client"
 
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.libc]
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies.libc]
 version = "0.2"
 
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.log]
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies.log]
 version = "0.4.16"
 features = [
     "kv_unstable_serde",
     "serde",
 ]
 
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.notify-rust]
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies.notify-rust]
 version = "4"
 
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.oo7]
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies.oo7]
 version = "0.6"
 features = [
     "async-std",
@@ -171,40 +171,40 @@ features = [
 ]
 default-features = false
 
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.open]
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies.open]
 version = "5.2.0"
 optional = true
 
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.parking_lot]
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies.parking_lot]
 version = "0.12.1"
 
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.raw-window-handle]
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies.raw-window-handle]
 version = "0.6"
 
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.scap]
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies.scap]
 version = "0.0.8-zed"
 optional = true
 default-features = false
 package = "zed-scap"
 
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.smallvec]
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies.smallvec]
 version = "1.6"
 features = [
     "union",
     "const_new",
 ]
 
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.smol]
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies.smol]
 version = "2.0"
 
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.strum]
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies.strum]
 version = "0.28"
 features = ["derive"]
 
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.url]
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies.url]
 version = "2.2"
 
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.uuid]
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies.uuid]
 version = "1.1.2"
 features = [
     "v4",
@@ -213,7 +213,7 @@ features = [
     "serde",
 ]
 
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.wayland-backend]
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies.wayland-backend]
 version = "0.3.15"
 features = [
     "client_system",
@@ -222,15 +222,15 @@ features = [
 ]
 optional = true
 
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.wayland-client]
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies.wayland-client]
 version = "0.31.11"
 optional = true
 
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.wayland-cursor]
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies.wayland-cursor]
 version = "0.31.11"
 optional = true
 
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.wayland-protocols]
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies.wayland-protocols]
 version = "0.32.9"
 features = [
     "client",
@@ -239,17 +239,17 @@ features = [
 ]
 optional = true
 
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.wayland-protocols-plasma]
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies.wayland-protocols-plasma]
 version = "0.3.9"
 features = ["client"]
 optional = true
 
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.wayland-protocols-wlr]
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies.wayland-protocols-wlr]
 version = "0.3.9"
 features = ["client"]
 optional = true
 
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.x11rb]
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies.x11rb]
 version = "0.13.1"
 features = [
     "allow-unsafe-code",
@@ -263,7 +263,7 @@ features = [
 ]
 optional = true
 
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.xim]
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies.xim]
 version = "0.4.0-zed"
 features = [
     "x11rb-xcb",
@@ -272,7 +272,7 @@ features = [
 optional = true
 package = "zed-xim"
 
-[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.xkbcommon]
+[target.'cfg(any(target_os = "linux", target_os = "freebsd", target_os = "openbsd"))'.dependencies.xkbcommon]
 version = "0.8.0"
 optional = true
 default-features = false

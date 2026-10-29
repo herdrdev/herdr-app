@@ -24,6 +24,10 @@ from the same parts you have.
 
 `herdr-app` controls this app; `hc` controls herdr-core.
 
+On OpenBSD, the source checkout's `scripts/run-openbsd` launcher makes
+Xenocara's Vulkan driver manifests discoverable. The existing Herdr 0.9.x
+terminal app is separate; it is not a substitute for `hc`.
+
 ## What you can and can't do
 
 You can: rearrange and restyle the whole window (layouts), rebind any key,

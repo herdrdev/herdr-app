@@ -1,0 +1,17 @@
+#!/bin/sh
+set -eu
+cd "$(dirname "$0")/.."
+test "$(uname -s)" = OpenBSD || { echo 'This recipe requires OpenBSD.' >&2; exit 1; }
+# Prefer the packaged tools over compatibility shims in ~/.cargo/bin.
+export PATH="/usr/local/bin:/usr/bin:/bin:/usr/X11R6/bin:$PATH"
+export RUSTFMT=/usr/local/bin/rustfmt
+if [ -z "${LIBCLANG_PATH:-}" ]; then
+    for clang_dir in /usr/local/llvm*/lib; do
+        if ls "$clang_dir"/libclang.so.* >/dev/null 2>&1; then
+            LIBCLANG_PATH=$clang_dir
+        fi
+    done
+    export LIBCLANG_PATH
+fi
+if [ "$#" = 0 ]; then set -- build --locked; fi
+exec cargo "$@"

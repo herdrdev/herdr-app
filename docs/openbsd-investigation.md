@@ -1,134 +1,78 @@
-# OpenBSD feasibility check
+# OpenBSD desktop port
 
-Checked locally on 2026-10-29, against upstream commit
-`863b270b9914e073ad60b33d1cc69d015bdd3bbf` (app version 0.1.7).
+Native source build tested on OpenBSD 8.0 amd64, with Rust 1.99.1 and Zig
+0.16.0. This branch extends the existing BSD/X11 GPUI path and enables the
+Unix Vulkan backend in wgpu. The existing Herdr 0.9.x TUI remains separate.
 
-## Result
+## Build and run
 
-The desktop app does not currently provide an OpenBSD build path. Getting
-it running requires a port of its dependencies, plus a separate installation
-of the new herdr-core. The existing Herdr terminal application is not that
-core and was not replaced or reconfigured during this investigation.
-
-No desktop executable or working app window has been produced. The observations
-below distinguish executed probes from source inspection.
-
-## Local environment: executed probes
-
-- `uname -a`: OpenBSD 8.0, amd64.
-- `rustc --version`: 1.99.1; `cargo --version`: 1.99.1.
-- Xorg and an Xfce session are running on display `:0`.
-  This agent does not inherit `DISPLAY`.
-- Vulkan headers and loader are installed; Mesa ICD manifests are under
-  `/usr/X11R6/share/vulkan/icd.d`. The GPU is an AMD Cezanne integrated GPU.
-- A minimal Vulkan instance probe using Python ctypes returned
-  `VK_ERROR_INCOMPATIBLE_DRIVER` (-9) with default environment discovery.
-  With `VK_DRIVER_FILES=/usr/X11R6/share/vulkan/icd.d/radeon_icd.x86_64.json`,
-  `vkCreateInstance` and `vkEnumeratePhysicalDevices` both returned success,
-  and one physical device was found. This establishes instance/device
-  enumeration only, not GPUI rendering, presentation, or application startup.
-- `/usr/local/bin/herdr --version`: `herdr 0.9.3`.
-  Neither `hc` nor `herdr-core` is on this agent's PATH.
-- Zig and just are absent. The configured package repository lists
-  `zig-0.16.0`, matching upstream's requested Zig version; it was not installed.
-- The repository and its pinned Ghostty submodule were cloned successfully.
-- The unmodified `cargo check --locked` exited with status 101. The first
-  compiler error was a missing
-  `quickjs-jit-…/sys/src/bindings/x86_64-unknown-openbsd.rs` file.
-  The build itself recommended the `bindgen` feature. The local log is
-  `/tmp/herdr-app-openbsd-check.log`.
-
-## Binding-generation experiment
-
-An experimental OpenBSD-only QuickJS dependency enabled `bindgen` for the
-same pinned QuickJS revision already used by gpui-shell. No dependency versions
-were upgraded. This experimental change was removed after the isolated probe
-below failed; this branch retains the investigation report only.
-
-The follow-up command uses the installed libclang explicitly:
+Install Rust, rustfmt, LLVM/libclang, Zig 0.16, pkg-config, xkbcommon and Vulkan
+loader/headers through OpenBSD packages. X11, fontconfig and FreeType are also
+required. Clone with the pinned Ghostty submodule initialized.
 
 ```sh
-LIBCLANG_PATH=/usr/local/llvm22/lib cargo check
+scripts/build-openbsd
+# Install a compatible native herdr-core separately; its version must be >= 0.1.11.
+scripts/run-openbsd
 ```
 
-The follow-up exited with status 101 at the Ghostty build script:
+Run from an X11 desktop session. `DISPLAY` must name that session. The launcher
+adds Xenocara's `/usr/X11R6/share` to `XDG_DATA_DIRS` so the Vulkan loader finds
+Mesa's ICD manifests. The build recipe uses the packaged rustfmt: a successful
+formatter shim that writes no output otherwise causes bindgen to emit empty
+bindings. No shell profile or global tool configuration is changed.
 
-```text
-ghostty-sys: no Zig target for x86_64-unknown-openbsd
+For a faster development build, the validated command was:
+
+```sh
+scripts/build-openbsd build --locked --config 'profile.dev.package."*".opt-level=0' --config profile.dev.debug=0
 ```
 
-Its local log is `/tmp/herdr-app-openbsd-bindgen-check.log`.
+## Changes
 
-An additional isolated check with the experimental manifest,
-`LIBCLANG_PATH=/usr/local/llvm22/lib cargo check --locked -p quickjs-jit-sys`,
-also exited with status 101. Bindgen wrote an effectively empty bindings file;
-the Rust compiler then reported missing types such as `JSJitRuntimeAPI` and
-`JSValue`. Its log is `/tmp/herdr-app-openbsd-quickjs-check.log`. Enabling
-`bindgen` alone is therefore insufficient with the tested toolchain. The
-underlying cause of the empty output has not been established.
+- Ghostty VT maps the native OpenBSD Rust target to Zig's target.
+- QuickJS generates bindings for OpenBSD from the same pinned headers. Its
+  existing interpreter fallback is used; no executable-memory/JIT workaround
+  or system security setting is added.
+- Vendored GPUI platform/base/Linux crates include OpenBSD in the existing BSD
+  paths; the portable priority queue and Wayland protocol types are available
+  when their features are enabled. Headless frame capture is enabled too.
+- Vendored wgpu, wgpu-core and their platform-feature helper enable the Vulkan
+  backend on OpenBSD, preserving other OS conditions. The application links
+  against the normal `/usr/local/lib` package directory.
+- Process working directories come from `KERN_PROC_CWD`, with the existing
+  change-directory and missing-process tests enabled on OpenBSD. Terminal copy
+  also updates the X11 primary selection.
 
-`cargo metadata --locked --format-version 1 --no-deps` and
-`git diff --check` passed. These checks do not establish build success.
+## Validation
 
-## Remaining porting requirements
+`cargo check` and native `cargo build` passed. `cargo test` passed, including
+162 unit tests, CLI/manual checks and production pixel-capture tests.
+`git diff --check` and shell syntax checks passed.
 
-### GPUI platform selection
+The runtime probe used a private Xvfb display, `HERDR_APP_HOME`, `HC_SESSION`
+and XDG paths. The actual window rendered. A new space and terminal displayed
+`OPENBSD_TERMINAL_OK`; a sent shell command returned `INPUT_ROUNDTRIP_OK`.
+`status.errors` was empty. The screenshot was inspected, and the private app,
+core and display were stopped afterwards.
 
-`gpui-pre-platform` 0.3.8 has branches for macOS, Windows, Linux/FreeBSD,
-and WebAssembly in `current_platform`. It has no OpenBSD branch. Its
-`gpui_linux` dependency is also gated to Linux/FreeBSD.
+![OpenBSD terminal smoke](openbsd-terminal.png)
 
-The vendored `vendor/gpui-pre-linux/src/gpui_linux.rs` gates the entire crate
-to Linux/FreeBSD, and the crate's dependency table uses the same condition.
-The vendored base GPUI crate has corresponding platform gates. Adding an OS
-name only in the application's Cargo.toml cannot make these crates work.
+Xvfb reports no physical mouse/DRI3; the desktop portal is absent in the sandbox,
+and the app uses its existing filesystem polling fallback for a socket. These
+are sandbox diagnostics, not successful checks of physical input, desktop
+portals or native Xorg presentation. Wayland was compiled but not runtime
+tested. Other operating systems were not tested locally.
 
-An initial port should target X11, then check the event loop, platform
-dispatcher, font system, clipboard, notifications, renderer and frame capture.
-Linux-specific assumptions need individual review; for example,
-`vendor/gpui-pre-linux/src/linux/x11/client.rs` constructs `/proc/self/fd/…`
-paths. Whether that path is exercised by the app remains untested.
+The accompanying separate herdr-core port passes 82 unit tests (one ignored),
+foreground/run/keep integration tests, and eight of nine exec tests. Its stalled
+reader/backpressure integration test remains unresolved; see that fork's PR.
 
-### Ghostty VT library
+## Initial failures reproduced
 
-`crates/ghostty-sys/build.rs::zig_target` has an exhaustive mapping of supported
-Rust triples. `x86_64-unknown-openbsd` falls into
-`panic!("ghostty-sys: no Zig target for {other}")` before Zig is invoked.
-
-This panic was also observed in the follow-up build. The target mapping must
-be extended, Zig 0.16 installed, and the pinned
-Ghostty VT library built and linked on OpenBSD. A mapping change alone does
-not establish that Ghostty's Zig dependencies support this target.
-
-### JavaScript runtime
-
-`vendor/quickjs-jit-runtime/src/platform/mod.rs` selects native executable
-memory backends for Linux, macOS and Windows; OpenBSD selects `unsupported`.
-The runtime also has interpreter paths. Verify interpreter initialization and
-mod execution before deciding whether a native JIT port is necessary.
-No JIT failure has been observed at runtime in this investigation.
-
-### Separate herdr-core
-
-`src/core_bin.rs::version` accepts binaries reporting a version starting with
-`hc `. The installed `herdr 0.9.3` does not satisfy that check.
-`distribution/core-version` requires core 0.1.11 or newer, and `src/hc.rs`
-requires API generation 1 and the listed terminal/document/event methods.
-
-Build or port herdr-core separately, install it alongside the existing
-`herdr`, and test with an isolated core and `HERDR_APP_HOME`. Do not substitute
-a symlink from `hc` to the existing `herdr` binary.
-
-## Suggested validation order
-
-1. Build the standalone Ghostty VT library on OpenBSD using Zig 0.16.
-2. Add an OpenBSD X11 path across GPUI platform/base/Linux dependencies and
-   resolve the first compiler errors without changing other platforms.
-3. Verify the JavaScript interpreter and shipped mods on OpenBSD.
-4. Build a compatible herdr-core alongside the existing Herdr installation.
-5. Start the app with an isolated home/core and a private test display.
-   Verify drawing, keyboard input, terminal output, resize and reconnection.
-6. Add OpenBSD installation instructions only after the runtime checks pass.
-
-Upstream documents desktop releases for Linux, macOS and Windows:
-<https://github.com/herdrdev/herdr-app#install>.
+The unmodified upstream source first failed on missing QuickJS bindings for
+`x86_64-unknown-openbsd`. Enabling binding generation exposed the local rustfmt
+shim. After using real rustfmt, the next failures were the Ghostty target
+mapping and GPUI platform gates. The first executable then exposed wgpu's
+missing backend target gates. These were repaired and the native runtime probe
+above was executed.
