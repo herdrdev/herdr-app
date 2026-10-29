@@ -7,8 +7,7 @@ export default class Prompt extends View {
   init(_props, cx) {
     this.text = props()?.value ?? "";
     this.input = InputState.new({ value: this.text });
-    // Input ranges use UTF-8 bytes, not JavaScript's UTF-16 length.
-    if (this.text) this.input.set_selected_range({ start: 0, end: encodeURIComponent(this.text).replace(/%[0-9A-F]{2}/g, "_").length });
+    if (this.text) this.input.set_selected_range({ start: 0, end: this.text.length });
     this.input.on("change", (_e, cx) => { this.text = this.input.value(); cx.notify(); });
     this.input.on("submit", () => this.submit());
     this.inputFocused = true;
