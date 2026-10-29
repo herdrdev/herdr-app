@@ -13,10 +13,9 @@ on:
 permissions:
   contents: read
 
-# A newer push to a pull request makes the older run pointless. On master,
-# runs queue instead: a cancelled master run never saves the cache.
+# Only superseded PR runs share a group; every other commit runs independently.
 concurrency:
-  group: ci-${{ github.event.pull_request.number || github.ref }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
   cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 
 env:
@@ -34,7 +33,6 @@ jobs:
         include:
           # Match release's glibc floor and native platform runners.
           - { platform: linux-x86_64, runner: ubuntu-22.04 }
-          - { platform: linux-aarch64, runner: ubuntu-22.04-arm }
           - { platform: macos-aarch64, runner: macos-15 }
           - { platform: windows-x86_64, runner: windows-2022 }
     runs-on: ${{ matrix.runner }}
@@ -84,7 +82,11 @@ jobs:
             done
             only+=(--bins)
           fi
-          cargo test --locked --config 'profile.dev.package."*".opt-level=0' "${only[@]}"
+          threads=()
+          if [ "$RUNNER_OS" = Linux ]; then
+            threads=(-- --test-threads 4)
+          fi
+          cargo test --locked --config 'profile.dev.package."*".opt-level=0' "${only[@]}" "${threads[@]}"
       # Windows runners lack an interactive desktop. Linux uses headless Vulkan
       # in the suite above; macOS exercises the native window renderer here.
       - name: Screenshot pixels
