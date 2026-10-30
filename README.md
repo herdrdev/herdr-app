@@ -120,6 +120,8 @@ just install
 ```
 
 Install [just](https://github.com/casey/just) to use these recipes.
+`just dev` builds and runs a development copy beside the installed app: its own
+home, dock icon and a Dev badge in the title bar, so the two never mix.
 The platform installer builds a release and adds the app to your desktop.
 On Linux it links to this checkout, so keep the checkout in place.
 Quit and reopen Herdr to use the new build.

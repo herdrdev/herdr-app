@@ -125,10 +125,16 @@ fn checks_core() -> bool {
     option_env!("HERDR_APP_RELEASE").is_some() || std::env::var_os("HERDR_RELEASES_URL").is_some()
 }
 
+/// A development build: nothing set `HERDR_APP_RELEASE` (only `scripts/package`, the release
+/// builds, does). The window marks one so it's easy to tell from the installed app.
+pub fn dev() -> bool {
+    option_env!("HERDR_APP_RELEASE").is_none()
+}
+
 /// For the settings screen: both programs, what's waiting, when we last looked.
 pub fn status() -> serde_json::Value {
     serde_json::json!({
-        "app": { "version": env!("CARGO_PKG_VERSION"), "ready": ready(), "updates": checks_app().is_some() },
+        "app": { "version": env!("CARGO_PKG_VERSION"), "ready": ready(), "updates": checks_app().is_some(), "dev": dev() },
         "notes": crate::update_notes::notes(ready().as_deref()),
         "core": core(),
         "checked": *CHECKED.lock().unwrap(),
