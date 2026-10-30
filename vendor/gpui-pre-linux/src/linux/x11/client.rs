@@ -1151,6 +1151,7 @@ impl X11Client {
                 state.pre_key_char_down.take();
                 let key_event_state = xkb_state_for_key_event(&state.xkb, event.state);
 
+                let mut composed_text = None;
                 let keystroke = {
                     let code = event.detail.into();
                     let mut keystroke = keystroke_from_xkb(&key_event_state, modifiers, code);
@@ -1169,6 +1170,7 @@ impl X11Client {
                                 if let Some(keysym) = compose_state.keysym() {
                                     keystroke.key = xkbc::keysym_get_name(keysym);
                                 }
+                                composed_text = keystroke.key_char.clone();
                             }
                             xkbc::Status::Composing => {
                                 keystroke.key_char = None;
@@ -1183,11 +1185,13 @@ impl X11Client {
                             }
                             xkbc::Status::Cancelled => {
                                 let pre_edit = state.pre_edit_text.take();
+                                let new_pre_edit = keystroke_underlying_dead_key(keysym);
+                                state.pre_edit_text = new_pre_edit.clone();
                                 drop(state);
                                 if let Some(pre_edit) = pre_edit {
                                     window.handle_ime_commit(pre_edit);
                                 }
-                                if let Some(current_key) = keystroke_underlying_dead_key(keysym) {
+                                if let Some(current_key) = new_pre_edit {
                                     window.handle_ime_preedit(current_key);
                                 }
                                 state = self.0.borrow_mut();
@@ -1195,16 +1199,26 @@ impl X11Client {
                             }
                             _ => {}
                         }
+                        let composing = compose_state.status() == xkbc::Status::Composing;
                         state.compose_state = Some(compose_state);
+                        // HERDR: a dead key's physical US key must not reach Kitty input.
+                        if composing {
+                            return Some(());
+                        }
                     }
                     keystroke
                 };
                 drop(state);
-                window.handle_input(PlatformInput::KeyDown(gpui::KeyDownEvent {
-                    keystroke,
-                    is_held: false,
-                    prefer_character_input: false,
-                }));
+                if let Some(text) = composed_text {
+                    // Commit through IME so the marked accent is replaced and cleared.
+                    window.handle_ime_commit(text);
+                } else {
+                    window.handle_input(PlatformInput::KeyDown(gpui::KeyDownEvent {
+                        keystroke,
+                        is_held: false,
+                        prefer_character_input: false,
+                    }));
+                }
             }
             Event::KeyRelease(event) => {
                 let window = self.get_window(event.event)?;
