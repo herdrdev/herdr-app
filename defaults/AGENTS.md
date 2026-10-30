@@ -105,7 +105,10 @@ the highlighted line shows where it will land. Spaces group into folders:
 drag a space or folder header onto a folder ("Move to top level" takes it
 out). Folders nest and collapse with a click; they live in
 `shared("space.folders")` as `[{name, collapsed, ids: [spaceId], parent}]`,
-and a folder stays while it holds a space or a folder that does.
+and a folder stays while it holds a space or a folder that does. When folders
+change, the sidebar moves spaces so their order is the list's (worktrees under
+their checkout, each folder's spaces together), so `space.select {index}` and
+`space.next` go the way the list reads; a `space.move` on its own stays.
 
 - A **space** is a place to work, on one machine: this one, or another
   from `hc machine ls` (`spaces()[i].machine`). Herdr leaves out machines

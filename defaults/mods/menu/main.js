@@ -1,5 +1,6 @@
 // Context menus (Herdr's items). Opened as a popup with
-// props { tab: "pane" | "tab" | "space" | "folder" | "global", target }.
+// props { tab: "pane" | "tab" | "space" | "folder" | "global", target }; a space's
+// target { id, worktree } (worktree: shown under its checkout, so no folder of its own).
 // ↑/↓ move, Enter runs, Esc closes. An item is [label, command, args];
 // a command "worktree" opens the worktree dialog instead, "folder" the space-folder dialog.
 
@@ -58,7 +59,7 @@ function items(p, git) {
         ["Rename", "space.rename", { id: tg.id }],
         ...(git ? [["New worktree", "worktree", { space: tg.id, action: "new" }], ["Open worktree", "worktree", { space: tg.id, action: "open" }]] : []),
         ...(git === "linked" ? [["Remove worktree", "worktree", { space: tg.id, action: "remove" }]] : []),
-        ["Move to folder...", "folder", { space: tg.id }],
+        ...(tg.worktree ? [] : [["Move to folder...", "folder", { space: tg.id }]]),
         ["Close", "space.close", { id: tg.id }],
       ];
     case "folder":

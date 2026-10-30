@@ -1,22 +1,40 @@
 // Puts a space, or a folder, in a folder of the spaces sidebar. Enter saves, Esc
 // cancels. props { space } or { folder }. An empty name puts it at the top; a new
 // name makes a folder there. Empty folders go away.
-// Folders live in shared("space.folders"): [{ name, collapsed, ids, parent }].
-// moveToFolder, lineage and prune are the same in the spaces mod.
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { props, closeOverlay, theme, shared, setShared } from "herdr";
 
+// --- Folders: the same in the spaces and space-folder mods (scripts/space-folders.test.ts checks).
+// shared("space.folders") = [{ name, collapsed, ids: [spaceId], parent: folderName | null }].
 const folders = () => shared("space.folders") ?? [];
+const folderOf = (id) => folders().find((f) => f.ids.includes(id))?.name ?? null;
+const named = (list, name) => list.find((f) => f.name.toLowerCase() === name.toLowerCase());
 
+// Puts space `id` in the folder named `name` ("" or null: in none); a new name
+// makes a folder at the top.
 function moveToFolder(id, name) {
   const list = folders().map((f) => ({ ...f, ids: f.ids.filter((x) => x !== id) }));
   name = (name ?? "").trim();
   if (name) {
-    const into = list.find((f) => f.name.toLowerCase() === name.toLowerCase());
+    const into = named(list, name);
     if (into) into.ids.push(id);
     else list.push({ name, collapsed: false, ids: [id], parent: null });
   }
+  setShared("space.folders", prune(list));
+}
+
+// Puts folder `name` in the folder named `into` ("" or null: at the top), never
+// inside itself; a new name makes a folder where `name` was.
+function moveFolder(name, into) {
+  const list = folders().map((f) => ({ ...f }));
+  const self = list.find((f) => f.name === name);
+  if (!self) return;
+  into = (into ?? "").trim();
+  let target = into ? named(list, into) : null;
+  if (into && !target) list.push((target = { name: into, collapsed: false, ids: [], parent: self.parent ?? null }));
+  if (target && lineage(list, target.name).includes(name)) return;
+  self.parent = target?.name ?? null;
   setShared("space.folders", prune(list));
 }
 
@@ -27,27 +45,16 @@ function lineage(list, name) {
   return path;
 }
 
-// Puts folder `name` in the folder named `into` ("" puts it at the top), never inside itself.
-function moveFolder(name, into) {
-  const list = folders().map((f) => ({ ...f }));
-  const self = list.find((f) => f.name === name);
-  if (!self) return;
-  into = into.trim();
-  let target = into ? list.find((f) => f.name.toLowerCase() === into.toLowerCase()) : null;
-  if (into && !target) list.push((target = { name: into, collapsed: false, ids: [], parent: self.parent ?? null }));
-  if (target && lineage(list, target.name).includes(name)) return;
-  self.parent = target?.name ?? null;
-  setShared("space.folders", prune(list));
-}
-
-// A folder stays while it holds a space or a folder that stays.
+// A folder stays while it holds a space or a folder that stays; one that only
+// holds itself in a loop goes.
 function prune(list) {
   for (;;) {
-    const kept = list.filter((f) => f.ids.length || list.some((c) => c.parent === f.name));
+    const kept = list.filter((f) => f.ids.length || list.some((c) => c.parent === f.name && c !== f && !lineage(list, f.name).includes(c.name)));
     if (kept.length === list.length) return kept.map((f) => (f.parent && !kept.some((p) => p.name === f.parent) ? { ...f, parent: null } : f));
     list = kept;
   }
 }
+// --- end folders
 
 export default class SpaceFolder extends View {
   init(_props, cx) {
