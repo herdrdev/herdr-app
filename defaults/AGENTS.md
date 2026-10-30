@@ -661,6 +661,13 @@ What's about the user, never a look:
   background; this is a threshold, not a guaranteed resulting ratio.
   Box/block, Powerline and sprite glyph colors are never adjusted.
   Changes apply immediately, including text already on screen.
+- `window_opacity` (0..1): below 1 the desktop shows through the window, at
+  that opacity. Terminals, cards and bars become see-through together, and
+  `terminal_opacity` stops applying; dialogs and menus stay solid. Colors a
+  program sets itself stay solid too. Literal colors in a layout or mod stay
+  as written. 1 (default) is an ordinary window.
+- `window_blur`: `true` blurs what shows through, on systems that can (macOS,
+  Windows, some Linux compositors); it needs `window_opacity` below 1.
 - `clipboard_write`: `false` blocks terminal programs from writing the local
   clipboard (default `true`, including remote terminals attached in this window).
   OSC 52 accepts base64 UTF-8 text up to 1 MiB: `c` writes the system clipboard,
