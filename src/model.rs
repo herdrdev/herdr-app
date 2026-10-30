@@ -77,6 +77,8 @@ pub struct Model {
     pub recent: Vec<Recent>,
     /// Each pane's live folder, for its display name.
     pub pane_folders: BTreeMap<String, String>,
+    /// Each terminal's live title, for its tab's display name.
+    pub titles: BTreeMap<String, String>,
     pub agents: HashMap<String, Agent>,
     seq: u64,
     /// Where each terminal works now: its repo (worktrees included) and branch.
@@ -242,10 +244,16 @@ impl Model {
         folder_name(&folder, home)
     }
 
-    /// What a tab is called: its name, else its place in its space (1, 2, ...).
-    pub fn tab_name(p: &Space, c: &Tab) -> String {
+    /// What a tab is called: its name, else the title its first terminal
+    /// reports (an agent session titles itself, `pi -n testname`), else its
+    /// place in its space (1, 2, ...).
+    pub fn tab_name(&self, p: &Space, c: &Tab) -> String {
         if !c.name.is_empty() {
             return c.name.clone();
+        }
+        let title = c.root.terminals().iter().find_map(|n| n.terminal().and_then(|a| self.titles.get(a)));
+        if let Some(title) = title.filter(|t| !t.is_empty()) {
+            return title.clone();
         }
         (p.tabs.iter().position(|x| x.id == c.id).unwrap_or(0) + 1).to_string()
     }
@@ -574,7 +582,7 @@ pub fn space_json(m: &Model, p: &Space, index: usize, branch: Option<&str>, home
             json!({
                 "id": c.id,
                 "index": i + 1,
-                "name": Model::tab_name(p, c),
+                "name": m.tab_name(p, c),
                 "named": !c.name.is_empty(),
                 "active": Some(&c.id) == active.as_ref(),
                 "status": m.rollup(&addresses(&c.root)),
@@ -630,10 +638,28 @@ mod tests {
         assert_eq!(m.space_name(&p, "/home/me"), "notes");
         m.folder_info.insert("t1".into(), FolderInfo { top: "/src/herdr".into(), branch: Some("main".into()) });
         assert_eq!(m.space_name(&p, "/home/me"), "herdr");
-        let names: Vec<String> = p.tabs.iter().map(|c| Model::tab_name(&p, c)).collect();
+        let names: Vec<String> = p.tabs.iter().map(|c| m.tab_name(&p, c)).collect();
         assert_eq!(names.iter().map(String::as_str).collect::<Vec<_>>(), ["1", "review", "3"]);
         m.space_mut("p1").unwrap().name = "api".into();
         assert_eq!(m.space_name(m.space("p1").unwrap(), "/home/me"), "api");
+    }
+
+    #[test]
+    fn an_unnamed_tab_is_called_by_its_terminals_title() {
+        let mut m = Model::default();
+        m.add_space("p1", "", "/home/me", Tab::new("c1", "", "x1", "t1"));
+        m.add_tab("p1", Tab::new("c2", "review", "x2", "t2"));
+        let p = m.space("p1").unwrap().clone();
+        let tab = |m: &Model, id: &str| m.tab_name(&p, m.tab(id).unwrap());
+        assert_eq!(tab(&m, "c1"), "1", "no title yet: its place");
+        m.titles.insert("t1".into(), "π - testname - notes".into());
+        assert_eq!(tab(&m, "c1"), "π - testname - notes");
+        m.titles.insert("t1".into(), "π - foobar - notes".into());
+        assert_eq!(tab(&m, "c1"), "π - foobar - notes", "it follows the title");
+        m.titles.insert("t2".into(), "x".into());
+        assert_eq!(tab(&m, "c2"), "review", "a tab someone named keeps its name");
+        m.titles.insert("t1".into(), String::new());
+        assert_eq!(tab(&m, "c1"), "1", "an empty title says nothing");
     }
 
     #[test]

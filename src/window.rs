@@ -1365,11 +1365,17 @@ impl AppWindow {
             let dim = |k: &str, d: u64| rec.and_then(|r| r.get(k)).and_then(Value::as_u64).unwrap_or(d) as u16;
             let size_hint = (dim("cols", 120), dim("rows", 40));
             let view = cx.new(|cx| TerminalView::attach(self.core.clone(), address.clone(), size_hint, cx));
+            self.model.titles.insert(address.clone(), view.read(cx).title.clone());
             self.tell_term(&view, &address, cx);
             let (block, addr) = (id.clone(), address.clone());
             let sub = cx.subscribe_in(&view, window, move |this, _, ev: &TerminalEvent, window, cx| match ev {
                 TerminalEvent::Peek(address) => this.peek_terminal(address, window, cx),
-                TerminalEvent::TitleChanged => this.publish(cx),
+                TerminalEvent::TitleChanged => {
+                    if let Some(title) = this.terms.get(&block).map(|t| t.view.read(cx).title.clone()) {
+                        this.model.titles.insert(addr.clone(), title);
+                    }
+                    this.publish(cx)
+                }
                 TerminalEvent::Ended => this.terminal_ended(&block, window, cx),
                 TerminalEvent::ContextMenu(at) => {
                     this.open_menu("pane", json!({ "pane": block.trim_end_matches(SWAP), "terminal": addr }), Some(*at), window, cx)
@@ -1564,7 +1570,7 @@ impl AppWindow {
                     let Some(status) = m.status(addr) else { continue };
                     agents.push(json!({
                         "address": addr, "pane": p.id, "space": pr.id, "space_name": m.space_name(pr, &home),
-                        "tab": ctx.id, "tab_index": ci + 1, "tab_name": Model::tab_name(pr, ctx),
+                        "tab": ctx.id, "tab_index": ci + 1, "tab_name": m.tab_name(pr, ctx),
                         "status": status, "app": a.and_then(|a| a.app.clone()), "program": self.program(addr), "title": title.unwrap_or_default(),
                         "seq": a.map(|a| a.seq).unwrap_or(0),
                         "focused": m.active.as_deref() == Some(pr.id.as_str()) && focused_pane.as_deref() == Some(p.id.as_str()),
@@ -1613,7 +1619,7 @@ impl AppWindow {
             let name = m.space_name(p, &home);
             for c in &p.tabs {
                 for a in model::addresses(&c.root) {
-                    want.insert(a, format!("{name} / {}", Model::tab_name(p, c)));
+                    want.insert(a, format!("{name} / {}", m.tab_name(p, c)));
                 }
             }
         }
@@ -1928,7 +1934,7 @@ impl AppWindow {
         let home = self.root_agent(addr);
         let place = self.model.pane_of(&home).and_then(|pane| {
             let (p, c) = (self.model.space_of(&pane)?, self.model.tab_of(&pane)?);
-            Some(format!("{} / {}", self.model.space_name(p, &self::home()), Model::tab_name(p, c)))
+            Some(format!("{} / {}", self.model.space_name(p, &self::home()), self.model.tab_name(p, c)))
         });
         let (title, level) = match alert {
             model::Alert::Blocked => (format!("{name} needs you"), "error"),
@@ -3474,7 +3480,7 @@ impl AppWindow {
                     .iter()
                     .map(|c| {
                         let terms: Vec<Value> = c.root.terminals().iter().filter_map(|n| Some(terminal(&n.id, n.terminal()?))).collect();
-                        json!({ "id": c.id, "name": Model::tab_name(p, c), "active": Some(&c.id) == active.as_ref(), "settled": c.settled.is_some(), "terminals": terms })
+                        json!({ "id": c.id, "name": m.tab_name(p, c), "active": Some(&c.id) == active.as_ref(), "settled": c.settled.is_some(), "terminals": terms })
                     })
                     .collect();
                 json!({ "id": p.id, "name": m.space_name(p, &home()), "folder": p.folder, "machine": p.machine, "active": m.active.as_deref() == Some(&p.id), "tabs": tabs })
