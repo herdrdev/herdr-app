@@ -3557,6 +3557,10 @@ impl AppWindow {
         if changed.iter().any(|p| matches!(top(p).as_str(), "settings.json" | "keys.json" | "programs.json" | "themes")) {
             self.reload_config(window, cx);
         }
+        // The theme showing may be the file that changed.
+        if changed.iter().any(|p| top(p) == "themes") {
+            self.apply_look(window, cx);
+        }
         if changed.iter().any(|p| top(p) == "layouts") {
             self.check_layout_file(window, cx);
         }
