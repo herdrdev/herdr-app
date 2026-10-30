@@ -33,7 +33,31 @@ fn embed(base: &Path, folder: &str, name: &str, file: &str) {
     std::fs::write(Path::new(&std::env::var("OUT_DIR").unwrap()).join(file), code).unwrap();
 }
 
+fn build_macos_notifications() {
+    if std::env::var("CARGO_CFG_TARGET_OS").as_deref() != Ok("macos") { return; }
+    println!("cargo:rerun-if-changed=src/notifications/macos.m");
+    println!("cargo:rerun-if-env-changed=MACOSX_DEPLOYMENT_TARGET");
+    let arch = match std::env::var("CARGO_CFG_TARGET_ARCH").unwrap().as_str() {
+        "aarch64" => "arm64", "x86_64" => "x86_64", other => panic!("unsupported macOS architecture: {other}"),
+    };
+    let deployment = std::env::var("MACOSX_DEPLOYMENT_TARGET").unwrap_or_else(|_| "11.0".into());
+    let out = std::path::PathBuf::from(std::env::var_os("OUT_DIR").unwrap());
+    let object = out.join("notifications.o");
+    let library = out.join("libherdr_notifications.a");
+    let status = std::process::Command::new("xcrun")
+        .args(["clang", "-fobjc-arc", "-fblocks", "-Wall", "-Wextra", "-Werror", "-Wno-unused-parameter", "-target", &format!("{arch}-apple-macos{deployment}"), "-c", "src/notifications/macos.m", "-o"])
+        .arg(&object).status().expect("cannot run Apple's clang for notifications");
+    assert!(status.success(), "cannot compile macOS notifications");
+    let status = std::process::Command::new("xcrun").args(["ar", "crs"]).arg(&library).arg(&object).status().expect("cannot archive macOS notifications");
+    assert!(status.success(), "cannot archive macOS notifications");
+    println!("cargo:rustc-link-search=native={}", out.display());
+    println!("cargo:rustc-link-lib=static=herdr_notifications");
+    println!("cargo:rustc-link-lib=framework=Foundation");
+    println!("cargo:rustc-link-lib=framework=UserNotifications");
+}
+
 fn main() {
+    build_macos_notifications();
     let base = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     embed(&base, "defaults/mods", "DEFAULT_MODS", "default_mods.rs");
     embed(&base, "defaults/icons", "DEFAULT_ICONS", "default_icons.rs");

@@ -451,6 +451,12 @@ Open the settings (section: look, alerts, updates).
 |---|---|
 | `section` | no |
 
+## `app.test_notification`
+
+Send a test macOS system notification (asks for permission if needed).
+
+No arguments.
+
 ## `app.check_updates`
 
 Look for a newer Herdr and herdr-core now.
