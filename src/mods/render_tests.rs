@@ -228,6 +228,17 @@ fn describe_with_values(
     values: BTreeMap<String, Value>,
     setup: Option<&str>,
 ) -> anyhow::Result<String> {
+    describe_capturing(cx, staged, entry, values, setup).map(|(tree, _)| tree)
+}
+
+// As describe_with_values, but it hands back the calls the mod made.
+fn describe_capturing(
+    cx: &mut TestAppContext,
+    staged: &Staged,
+    entry: &str,
+    values: BTreeMap<String, Value>,
+    setup: Option<&str>,
+) -> anyhow::Result<(String, Rc<RefCell<Calls>>)> {
     let calls = Rc::new(RefCell::new(Calls::default()));
     static NEXT_STORE: AtomicU64 = AtomicU64::new(0);
     let policy = Policy::new()
@@ -237,7 +248,7 @@ fn describe_with_values(
     let runtime = ShellRuntime::new_isolated()?;
     let root = setup.map(|s| staged.wrapper(entry, s)).unwrap_or_else(|| staged.0.join(entry));
     let window = cx.add_window(|_, _| Empty);
-    let result = window.update(cx, |_, window, cx| {
+    let result = window.update(cx, |_, window, cx| -> anyhow::Result<String> {
         let mut session = DescriptionSession::load(runtime, root, policy, window, cx)?;
         let first = session.describe(window, cx)?;
         let second = session.describe(window, cx)?;
@@ -246,7 +257,7 @@ fn describe_with_values(
     })?;
     window.update(cx, |_, window, _| window.remove_window())?;
     assert!(calls.borrow().unexpected.is_empty(), "{entry}: {:?}", calls.borrow().unexpected);
-    result
+    Ok((result?, calls))
 }
 
 fn props() -> Value {
@@ -487,6 +498,10 @@ fn local_state_and_overlay_initial_descriptions(cx: &mut TestAppContext) {
         ("mods/menu", json!({"tab":"pane","target":{"pane":"p1","terminal":"t1"}})),
         ("mods/menu", json!({"tab":"tab","target":{"id":"tab1","space":"s1"}})),
         ("mods/menu", json!({"tab":"space","target":{"id":"s1"}})),
+        (
+            "mods/menu",
+            json!({"tab":"file","target":{"path":"/fixture/project/src/README.md","relative":"src/README.md","name":"README.md"}}),
+        ),
         ("mods/prompt", json!({"machines":true})),
         (
             "mods/confirm",
@@ -509,6 +524,96 @@ fn local_state_and_overlay_initial_descriptions(cx: &mut TestAppContext) {
         describe(cx, &staged, entry, true, p, updates("current", "current"), None).unwrap();
     }
     eprintln!("18 local-state/overlay cases, each twice: {:?}", start.elapsed());
+}
+
+#[gpui::test]
+fn the_file_menu_offers_the_paths_to_copy(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let file = |path: &str, relative: &str, name: &str| {
+        json!({"tab":"file","target":{"path":path,"relative":relative,"name":name}})
+    };
+    let tree = describe(
+        cx,
+        &staged,
+        "mods/menu",
+        true,
+        file("/fixture/project/src/README.md", "src/README.md", "README.md"),
+        updates("current", "current"),
+        None,
+    )
+    .unwrap();
+    for want in ["Copy Path", "Copy Relative Path", "Copy Name"] {
+        assert!(tree.contains(want), "{want}: {tree}");
+    }
+    // A top-level row's relative path is its name: the menu says it once.
+    let tree = describe(
+        cx,
+        &staged,
+        "mods/menu",
+        true,
+        file("/fixture/project/README.md", "README.md", "README.md"),
+        updates("current", "current"),
+        None,
+    )
+    .unwrap();
+    assert!(tree.contains("Copy Path") && tree.contains("Copy Relative Path"), "{tree}");
+    assert_eq!(tree.matches("Copy Name").count(), 0, "{tree}");
+}
+
+#[gpui::test]
+fn a_file_row_offers_the_paths_to_copy(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    // What a right-click on a row does, so the popup it opens can be read.
+    let opened = |calls: &Rc<RefCell<Calls>>| -> Value {
+        let recorded = calls.borrow();
+        let (_, args) = recorded
+            .effects
+            .iter()
+            .find(|(name, _)| name == "openOverlay")
+            .expect("the row menu did not open");
+        args[0]["props"]["target"].clone()
+    };
+    let mut row = |entry: &str, setup: &str| {
+        describe_capturing(
+            cx,
+            &staged,
+            entry,
+            fixture(true, props(), updates("current", "current")),
+            Some(setup),
+        )
+        .unwrap()
+        .1
+    };
+    // The Files panel: the paths of a row, relative to the folder it shows.
+    let target = opened(&row("mods/files", r#"this.rowMenu("src/main.rs", { name: "main.rs" });"#));
+    assert_eq!(target["path"], json!("/fixture/project/src/main.rs"));
+    assert_eq!(target["relative"], json!("src/main.rs"));
+    assert_eq!(target["name"], json!("main.rs"));
+    // A folder that is the filesystem root takes one separator, not two.
+    let target = opened(&row("mods/files", r#"this.root = "/"; this.rowMenu("a.txt", { name: "a.txt" });"#));
+    assert_eq!(target["path"], json!("/a.txt"));
+    assert_eq!(target["relative"], json!("a.txt"));
+    // The Changes panel: a changed file, relative to the repository root.
+    let target = opened(&row("mods/changes", r#"this.root = "/fixture/project"; this.rowMenu({ path: "src/main.rs" });"#));
+    assert_eq!(target["path"], json!("/fixture/project/src/main.rs"));
+    assert_eq!(target["relative"], json!("src/main.rs"));
+    assert_eq!(target["name"], json!("main.rs"));
+    // Windows: the paths are joined the way Windows writes them, whatever the
+    // separator the folder arrived with. Nothing here depends on the machine
+    // the test runs on: it is string work, so it holds on Windows too.
+    let target = opened(&row("mods/files", r#"this.root = "C:\\Users\\me\\project"; this.rowMenu("src/main.rs", { name: "main.rs" });"#));
+    assert_eq!(target["path"], json!("C:\\Users\\me\\project\\src\\main.rs"));
+    assert_eq!(target["relative"], json!("src\\main.rs"));
+    // Git writes Windows folders with forward slashes.
+    let target = opened(&row("mods/changes", r#"this.root = "C:/Users/me/project"; this.rowMenu({ path: "src/main.rs" });"#));
+    assert_eq!(target["path"], json!("C:\\Users\\me\\project\\src\\main.rs"));
+    assert_eq!(target["relative"], json!("src\\main.rs"));
+    // A drive root takes one separator, not two.
+    let target = opened(&row("mods/files", r#"this.root = "C:\\"; this.rowMenu("a.txt", { name: "a.txt" });"#));
+    assert_eq!(target["path"], json!("C:\\a.txt"));
+    assert_eq!(target["relative"], json!("a.txt"));
 }
 
 #[gpui::test]

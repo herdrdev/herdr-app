@@ -1,6 +1,15 @@
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar, v_virtual_list } from "gpui-base";
-import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings } from "herdr";
+import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings, openOverlay } from "herdr";
+
+// A Windows path, however it was written: the shell says "C:\x", git "C:/x".
+const windows = (p) => p.includes("\\") || /^[A-Za-z]:/.test(p);
+// The folder and the separator to join a path with it: one separator, no more.
+const joiner = (root) => {
+  const sep = windows(root) ? "\\" : "/";
+  const base = sep === "\\" ? root.replaceAll("/", "\\") : root;
+  return { sep, base: base.endsWith(sep) ? base : base + sep };
+};
 
 function location() {
   const space = spaces().find((s) => s.active), f = focused();
@@ -136,6 +145,15 @@ export default class Changes extends View {
     this.diffWidth = Math.max(300, ...lines.map(line => line.length * 7 + 50));
   }
 
+  // The row's menu, in the same popup as the Files panel's: the paths of a
+  // changed file, relative to the repository root.
+  rowMenu(file) {
+    if (!this.root) return;
+    const { sep, base } = joiner(this.root);
+    const relative = file.path.replaceAll("/", sep);
+    openOverlay({ mod: "menu", kind: "popup", width: 210, props: { tab: "file", target: { path: base + relative, relative, name: file.path.split("/").pop() } } });
+  }
+
   pick(path, cx) {
     this.open = this.open === path ? null : path; this.setLines([]); this.note = null;
     this.closed = !this.open;
@@ -187,6 +205,7 @@ export default class Changes extends View {
       .child(v_flex().id("changes-list").flex_none().h(Math.min(200, Math.max(44, this.files.length * 28 + 12))).overflow_y_scrollbar().p(6).border_b(1).border_color(t.border).children(this.files.map((f) => {
         const parts = f.path.split("/"), name = parts.pop();
         return h_flex().id(`change-${f.path}`).h(28).flex_none().px(8).gap(8).items_center().rounded(7).cursor_pointer().when(this.open === f.path, (e) => e.bg(t.selected)).hover((s) => s.bg(t.hover)).on_click((_e, cx) => this.pick(f.path, cx))
+          .on_mouse_down("right", () => this.rowMenu(f))
           .child(div().w(14).text_size(11).text_color(f.status === "A" ? t.ansi2 : f.status === "D" ? t.ansi1 : f.status === "U" ? t.ansi1 : t.blocked).child(f.status))
           .child(h_flex().flex_1().min_w(0).child(div().text_color(t.dim).truncate().child(parts.length ? parts.join("/") + "/" : "")).child(div().max_w(260).min_w(0).truncate().child(name)))
           .when(f.add > 0, (e) => e.child(div().text_size(11).text_color(t.ansi2).child(`+${f.add}`))).when(f.del > 0, (e) => e.child(div().text_size(11).text_color(t.ansi1).child(`−${f.del}`)));

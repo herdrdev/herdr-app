@@ -61,14 +61,16 @@ function items(p, git) {
         ...(git === "linked" ? [["Remove worktree", "worktree", { space: tg.id, action: "remove" }]] : []),
         ["Close", "space.close", { id: tg.id }],
       ];
-    case "file":
+    case "file": {
       // A tree row: the paths to paste into a shell, or just the name. A
       // top-level row's relative path is its name, so it's listed once.
-      return [
+      const rows = [
         ["Copy Path", "copy", { text: tg.path }],
         ["Copy Relative Path", "copy", { text: tg.relative }],
         ["Copy Name", "copy", { text: tg.name }],
-      ].filter((it, i, all) => it[2].text && all.findIndex((o) => o[2].text === it[2].text) === i);
+      ];
+      return rows.filter((it, i, all) => it[2].text && all.findIndex((o) => o[2].text === it[2].text) === i);
+    }
     default:
       return [
         ["New space", "space.new", {}],
@@ -131,6 +133,7 @@ export default class Menu extends View {
       .bg(t.popover)
       .text_size(12.8)
       .on_key_down((e, cx) => {
+        if (!list.length) return;
         if (e.key === "down") this.at = (this.at + 1) % list.length;
         else if (e.key === "up") this.at = (this.at + list.length - 1) % list.length;
         else if (e.key === "enter") this.choose(this.at, cx);

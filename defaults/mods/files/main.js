@@ -3,6 +3,15 @@ import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState } from "gpui-base";
 import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings, window, openOverlay } from "herdr";
 
+// A Windows path, however it was written: the shell says "C:\x", git "C:/x".
+const windows = (p) => p.includes("\\") || /^[A-Za-z]:/.test(p);
+// The folder and the separator to join a path with it: one separator, no more.
+const joiner = (root) => {
+  const sep = windows(root) ? "\\" : "/";
+  const base = sep === "\\" ? root.replaceAll("/", "\\") : root;
+  return { sep, base: base.endsWith(sep) ? base : base + sep };
+};
+
 function location() {
   const space = spaces().find(s => s.active), f = focused();
   const pane = f?.pane ? panes().find(p => p.pane === f.pane) : null;
@@ -107,8 +116,9 @@ export default class Files extends View {
   // The row's menu, in the same popup as the window's other context menus.
   rowMenu(path, entry) {
     if (!this.root) return;
-    const sep = this.root.includes("\\") ? "\\" : "/";
-    openOverlay({ mod: "menu", kind: "popup", width: 210, props: { tab: "file", target: { path: `${this.root}${sep}${path.replaceAll("/", sep)}`, relative: path.replaceAll("/", sep), name: entry.name } } });
+    const { sep, base } = joiner(this.root);
+    const relative = path.replaceAll("/", sep);
+    openOverlay({ mod: "menu", kind: "popup", width: 210, props: { tab: "file", target: { path: base + relative, relative, name: entry.name } } });
   }
 
   show(path, cx) {
