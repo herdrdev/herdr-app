@@ -434,7 +434,27 @@ fn settings_sections_and_updates(cx: &mut TestAppContext) {
             }
         }
     }
-    eprintln!("19 settings cases, each twice: {:?}", start.elapsed());
+    for (checking, checked, asked) in [
+        (false, None, false), (false, None, true),
+        (true, None, false), (true, None, true),
+        (true, Some(1700000000u64), false), (true, Some(1700000000), true),
+        (false, Some(1700000000), false), (false, Some(1700000000), true),
+    ] {
+        let mut p = props();
+        p["section"] = json!("updates");
+        let mut u = updates("current", "current");
+        u["checked"] = json!(checked);
+        u["checking"] = json!(checking);
+        let setup = asked.then_some("this.asked = Date.now();");
+        let tree = describe(cx, &staged, "frame/settings", true, p, u, setup).unwrap();
+        let succeeded = !checking && checked.is_some();
+        assert_eq!(tree.contains("Up to date"), succeeded, "success requires a completed, successful check: {tree}");
+        if !checking && checked.is_none() {
+            assert!(tree.contains("check-app") && tree.contains("check-core"), "failed checks must remain retryable: {tree}");
+        }
+        assert!(tree.contains(if checking { "Checking" } else if succeeded { "Up to date" } else { "Check your connection" }), "check status missing: {tree}");
+    }
+    eprintln!("27 settings cases, each twice: {:?}", start.elapsed());
 }
 
 #[gpui::test]

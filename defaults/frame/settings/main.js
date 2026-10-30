@@ -666,6 +666,9 @@ export default class Settings extends View {
       return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
     };
     const checked = u.checked ? ` Checked at ${at(u.checked)}.` : "";
+    const result = u.checking ? "Checking\u2026" : u.checked
+      ? `Up to date.${checked}`
+      : "No successful check. Check your connection and try again.";
     // Pressed: "Checking\u2026" while it looks, then "Up to date" for a moment
     // (a find changes the row instead). One per row: an element shows once.
     const asked = this.asked && Date.now() - this.asked < 3000;
@@ -674,7 +677,7 @@ export default class Settings extends View {
         ? null
         : u.checking && this.asked
           ? div().px(12).py(5).text_size(13).text_color(t.dim).child("Checking\u2026")
-          : asked
+          : asked && u.checked && !u.checking
             ? div().px(12).py(5).text_size(13).text_color(t.ansi2).child("\u2713 Up to date")
             : this.button(t, id, "Check now", (_e, cx) => {
                 this.asked = Date.now();
@@ -687,7 +690,7 @@ export default class Settings extends View {
       ? ["A build from source: it updates with git, not here.", null]
       : u.app.ready
         ? [`${u.app.ready} is ready. Restart to switch now; it also switches when you quit.`, primary("st-app-update", "Restart to update", () => run("app.update"))]
-        : [`Up to date.${checked}`, check("st-check-app")];
+        : [result, check("st-check-app")];
     const c = u.core;
     const core = c.managed
       ? [`Managed by ${c.managed}: update it there.`, null]
@@ -698,7 +701,7 @@ export default class Settings extends View {
           : c.ready
             ? [`${c.ready} is ready. Your terminals keep running through it.`, primary("st-core-update", "Update herdr-core", () => run("app.update_core"))]
             : u.checks
-              ? [`Up to date.${checked}`, check("st-check-core")]
+              ? [result, check("st-check-core")]
               : ["Not checked: a build from source looks for no updates.", null];
     return v_flex()
       .w_full()
