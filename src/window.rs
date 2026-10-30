@@ -2918,6 +2918,26 @@ impl AppWindow {
                 }
                 return;
             }
+            "terminal.zoom_in" | "terminal.zoom_out" | "terminal.zoom_reset" => {
+                let view = match Self::arg(a, "pane") {
+                    Some(pane) => self.pane_term(pane).map(|t| t.view.clone()),
+                    None => self.focused_terminal(window).map(|t| t.view.clone()),
+                };
+                let Some(view) = view else {
+                    return self.fail(match Self::arg(a, "pane") {
+                        Some(pane) => format!("pane {pane:?} does not show a terminal"),
+                        None => "no focused terminal".into(),
+                    });
+                };
+                let steps = match name {
+                    "terminal.zoom_in" => 1,
+                    "terminal.zoom_out" => -1,
+                    _ => 0,
+                };
+                let (zoom, font_size) = view.update(cx, |v, cx| v.zoom_font(steps, cx));
+                self.answer(Ok(json!({ "zoom": zoom, "font_size": font_size })));
+                return;
+            }
             // ---- agents
             "agent.focus" => {
                 let t = Self::arg(a, "terminal").unwrap_or_default().to_owned();
@@ -4699,7 +4719,10 @@ mod tests {
             assert!(!super::needs_model_pane(name, &json!({})), "{name}");
             assert!(!super::needs_model_pane(name, &json!({"place": "tab"})), "{name}");
         }
-        for name in ["pane.focus", "terminal.copy", "terminal.paste", "terminal.paste_image", "terminal.right_click"] {
+        for name in [
+            "pane.focus", "terminal.copy", "terminal.paste", "terminal.paste_image", "terminal.zoom_in", "terminal.zoom_out",
+            "terminal.zoom_reset", "terminal.right_click",
+        ] {
             assert!(!super::needs_model_pane(name, &json!({})), "{name}");
         }
     }

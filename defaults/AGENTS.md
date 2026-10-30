@@ -539,6 +539,9 @@ The main ones:
   Windows, clipboard text is pasted; otherwise Ctrl+V goes to the program, which
   reads the clipboard itself). TIFF and BMP clipboard
   images are converted to PNG before sending,
+  `terminal.zoom_in {pane?}`, `terminal.zoom_out {pane?}`, `terminal.zoom_reset {pane?}`
+  (change one terminal view's text size for this app session; default: the focused
+  terminal; unlike `app.zoom_in`, this does not scale the rest of the window),
   `terminal.right_click {to: "program" | "menu", terminal?}` (where right-clicks go
   when the program takes the mouse; kept as its label `herdr.right-click=program`;
   Shift+right-click is always Herdr's menu). Copy, paste, paste-image and implicit
