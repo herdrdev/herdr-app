@@ -3032,7 +3032,13 @@ impl AppWindow {
                 let Some(f) = self.folders.get(name) else { return self.fail(format!("no mod folder {name:?}")) };
                 let mut spec = mod_overlay(&f.dir);
                 spec["mod"] = json!(name);
-                self.open_overlay(mods::new_overlay_id(), spec, window, cx);
+                // One popup per mod: running mod.open again toggles it, like app.settings.
+                let id = format!("mod-{name}");
+                if self.overlays.iter().any(|o| o.id == id) {
+                    self.close_overlay(&id, window, cx);
+                } else {
+                    self.open_overlay(id, spec, window, cx);
+                }
             }
             "overlay.close" => {
                 let id = Self::owned(a, "id").or_else(|| self.overlays.iter().rev().find(|o| o.kind.modal_keys()).map(|o| o.id.clone()));
@@ -3051,8 +3057,13 @@ impl AppWindow {
                 return;
             }
             "app.palette" => {
-                let spec = json!({ "mod": "frame-palette", "kind": "popup", "at": "top", "offset": 60, "width": 620, "height": 0.85 });
-                self.open_overlay(mods::new_overlay_id(), spec, window, cx);
+                // Once: a second press closes the palette instead of stacking another.
+                if self.overlays.iter().any(|o| o.id == "palette") {
+                    self.close_overlay("palette", window, cx);
+                } else {
+                    let spec = json!({ "mod": "frame-palette", "kind": "popup", "at": "top", "offset": 60, "width": 620, "height": 0.85 });
+                    self.open_overlay("palette".into(), spec, window, cx);
+                }
                 return;
             }
             "app.feedback" => {
