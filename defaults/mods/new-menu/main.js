@@ -33,7 +33,7 @@ export default class NewMenu extends View {
         const agent = /^[1-9]$/.test(e.key) ? installed[Number(e.key) - 1] : null;
         if (!agent && e.key !== "t" && e.key !== "n") return;
         closeOverlay(props().overlay);
-        if (agent) run("tab.new", { name: agent.name, space: space?.id, argv: agent.run });
+        if (agent) run("tab.new", { space: space?.id, argv: agent.run });
         else if (e.key === "t") run("tab.new", { space: space?.id });
         else run("space.new");
       })
@@ -41,7 +41,7 @@ export default class NewMenu extends View {
       .child(div().px(9).pt(8).pb(4).text_size(11).text_color(t.dim).child("Start an agent"))
       .child(v_flex().flex_1().min_h(0).overflow_y_scrollbar()
         .children(choices.map((a, i) => this.row(a.key, a.tint ? svg(a.icon).size(14).text_color(t.foreground) : image(a.icon).size(14), a.name,
-          () => run("tab.new", { name: a.name, space: space?.id, argv: a.run }), a.installed ? (i < 9 ? `${mod} ${i + 1}` : "") : "not installed", a.installed)))
+          () => run("tab.new", { space: space?.id, argv: a.run }), a.installed ? (i < 9 ? `${mod} ${i + 1}` : "") : "not installed", a.installed)))
         .when(this.agents.length === 0, el => el.child(div().px(9).py(6).text_color(t.dim).child(this.failed ? "Could not load agents" : "Checking installed agents…"))))
       .child(div().h(1).mx(4).my(5).bg(t.border))
       .child(this.row("space", div().w(14).child("+"), "New space", () => run("space.new"), `${mod} N`))

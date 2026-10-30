@@ -1,5 +1,6 @@
 // Terminals pane header; props: { pane, terminal }.
 
+import { paneTitle } from "./titles.js";
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
 import { panes, props, run, home } from "herdr";
@@ -38,7 +39,7 @@ export default class TerminalsPane extends View {
     const g = p.program;
     const where = folder(p.cwd);
     // Shells often put the folder in their title already.
-    const title = p.title || "shell";
+    const title = paneTitle(p);
     const dir = where && !title.includes(where) && !/^[~/]/.test(title) ? where : "";
     return h_flex()
       .id(`tm-head-${pane}`)

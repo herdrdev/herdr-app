@@ -50,6 +50,7 @@ function items(p, git) {
     case "tab":
       return [
         ["Rename", "tab.rename", { id: tg.id }],
+        ["Use automatic title", "tab.rename", { id: tg.id, name: "" }],
         ["New tab", "tab.new", { space: tg.space }],
         ["Close", "tab.close", { id: tg.id }],
       ];

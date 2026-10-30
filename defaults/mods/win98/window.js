@@ -1,3 +1,4 @@
+import { paneTitle as automaticPaneTitle, taskTitle } from "./titles.js";
 // A pane's title bar (the layout's pane header): the focused pane's is blue,
 // the others gray. _ minimizes the tab to the taskbar (settle), [] maximizes
 // the pane (zoom), x closes it. Double-click maximizes; right-click is the
@@ -11,9 +12,9 @@ export function paneTitle(p) {
   if (!p) return "";
   if (p.mod) return p.title || p.mod;
   const prog = p.program;
+  if (taskTitle(p)) return taskTitle(p);
   if (!prog || prog.shell) return `DOS Prompt - ${dosPath(p.cwd, home())}`;
-  const t = (p.title ?? "").trim();
-  return t && t !== prog.name ? `${prog.name} - ${t}` : `${prog.name} - ${dosPath(p.cwd, home())}`;
+  return automaticPaneTitle(p);
 }
 
 export default class PaneWindow {

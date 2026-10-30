@@ -1,0 +1,12 @@
+# Herdr automatic titles
+
+Unnamed tabs follow useful agent terminal titles, then program/folder fallbacks.
+Manual names always win; an empty name resumes automatic titles. Spaces keep their
+existing repository/folder naming. No LLM calls or transcript uploads are used.
+
+| Action | JSON API | MCP tool |
+|---|---|---|
+| inspect titles | GET /v1/titles | herdr_titles_list |
+| Rename, Use automatic title | POST /v1/tab-title | herdr_tab_title_set |
+
+See [full API reference](llms-full.txt) and [agent workflow](SKILL.md).

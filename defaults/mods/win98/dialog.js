@@ -1,3 +1,4 @@
+import { terminalTitle } from "./titles.js";
 // Win98 dialogs, one overlay each: props { kind, ... }.
 //   prompt    a name: { title, text, icon, value, command: { name, args }, machines }
 //   confirm   { title, text, icon, buttons: [{ label, default, act }] }
@@ -224,8 +225,7 @@ export default class Dialog {
     const hist = [cmd, ...(shared("win98.run") ?? []).filter((c) => c !== cmd)].slice(0, 12);
     setShared("win98.run", hist);
     this.close();
-    const name = cmd.split(/\s+/)[0].split("/").pop();
-    run("tab.new", { name, argv: ["sh", "-c", `${cmd}\nexec "\${SHELL:-sh}"`] });
+    run("tab.new", { argv: ["sh", "-c", `${cmd}\nexec "\${SHELL:-sh}"`] });
   }
 
   shutdown() {
@@ -247,7 +247,7 @@ export default class Dialog {
   tasks() {
     return terminals()
       .filter((t) => t.state !== "finished")
-      .map((t) => ({ address: t.address, name: t.program?.name ?? t.name ?? t.address, program: t.program, status: t.status }));
+      .map((t) => ({ address: t.address, name: terminalTitle(t), program: t.program, status: t.status }));
   }
 
   endTask() {

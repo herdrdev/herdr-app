@@ -23,8 +23,11 @@ its terminals.
 ## Show something when asked
 
 New spaces and tabs are shown immediately: only create them when asked.
-Pick an explicit, useful name for every new space and tab; don't rely on
-default names. Use IDs from `ls` rather than guessing or acting on the wrong
+Leave `name` out for automatic titles, or supply a useful name to pin it.
+Shipped mods use the live agent task title, then program/folder fallbacks.
+`herdr-app do tab.rename '{"id":"tb1","name":""}'` resumes automatic titles.
+For JSON title inspection and MCP tools, read
+`~/.config/herdr-app/mods/tabs/SKILL.md` (under `$HERDR_APP_HOME` if set). Use IDs from `ls` rather than guessing or acting on the wrong
 focused pane.
 
 ```sh

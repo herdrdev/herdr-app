@@ -1,0 +1,19 @@
+[
+  {
+    "name": "herdr_titles_list",
+    "description": "Read the last rendered automatic/manual titles for spaces, tabs, panes and terminals. Herdr must be running with a shipped tab bar.",
+    "inputSchema": {"type":"object","properties":{},"additionalProperties":false},
+    "annotations": {"readOnlyHint":true,"openWorldHint":false},
+    "http": {"method":"GET","path":"/v1/titles"},
+    "uiActions": ["inspect titles"]
+  },
+  {
+    "name": "herdr_tab_title_set",
+    "description": "Pin a tab's manual title, or pass an empty name to resume automatic titles. Use the exact tab ID, including any remote machine prefix.",
+    "inputSchema": {"type":"object","properties":{"id":{"type":"string","minLength":1},"name":{"type":"string"}},"required":["id","name"],"additionalProperties":false},
+    "annotations": {"readOnlyHint":false,"destructiveHint":false,"idempotentHint":true,"openWorldHint":false},
+    "http": {"method":"POST","path":"/v1/tab-title"},
+    "command": "tab.rename",
+    "uiActions": ["Rename", "Use automatic title"]
+  }
+]

@@ -70,6 +70,10 @@ jobs:
         run: echo "LIBCLANG_PATH=C:\\Program Files\\LLVM\\bin" >> "$GITHUB_ENV"
       # Compile the screenshot harness everywhere, even without a desktop.
       # Disable optimized dev dependencies in CI to reduce test compile time.
+      - name: Title policy and agent interface
+        run: |
+          node --test scripts/titles.test.mjs
+          node scripts/title-agent-docs.mjs --check
       - name: Build tests
         run: cargo test --locked --config 'profile.dev.package."*".opt-level=0' --no-run
       - name: Tests

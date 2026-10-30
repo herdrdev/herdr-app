@@ -1,8 +1,9 @@
 // Terminals layout's draggable top bar: space picker, tabs, and window controls.
 
+import { tabTitle, titleSnapshot } from "./titles.js";
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { spaces, panes, run, theme, home, openOverlay, window as win } from "herdr";
+import { spaces, panes, run, theme, home, shared, setShared, terminals, openOverlay, window as win } from "herdr";
 
 const C = {
   tray: "#1d1f22",
@@ -98,6 +99,10 @@ export default class TerminalsBar extends View {
     if (!space) return div();
     const all = panes();
     const w = win() ?? {};
+    const snapshot = titleSnapshot(spaces(), panes(), terminals());
+    if (JSON.stringify(shared("titles.snapshot")?.data) !== JSON.stringify(snapshot))
+      setShared("titles.snapshot", { updated_at: new Date().toISOString(), data: snapshot });
+
 
     const tab = (c) => {
       const p = lead(all, c.id);
@@ -128,7 +133,7 @@ export default class TerminalsBar extends View {
             .min_w(0)
             .gap(6)
             .truncate()
-            .child(div().flex_none().text_color(c.active ? C.text : "#c4c6ca").child(c.name))
+            .child(div().min_w(0).truncate().text_color(c.active ? C.text : "#c4c6ca").child(tabTitle(c, all)))
             .when(Boolean(where), (el) => el.child(div().truncate().text_color(C.dim).child(where))),
         );
     };

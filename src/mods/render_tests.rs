@@ -169,6 +169,11 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
                 "hc" if first == json!(["machine", "ls", "--json"]) => {
                     Some(json!({"code":0,"stdout":"{\"machines\":[{\"name\":\"remote\",\"state\":\"online\"}]}","stderr":""}))
                 }
+                // Win98's taskbar discovers agents and checks the app's age on init.
+                "exec" if first == "sh" && a.get(1).map(from_host).is_some_and(|v| {
+                    v == json!(["-c", "ps -o etime= -p \"$PPID\""])
+                        || v == json!(["-c", "for c in claude codex pi opencode amp gemini cursor-agent copilot grok kimi crush; do command -v \"$c\" >/dev/null 2>&1 && echo \"$c\"; done"])
+                }) => Some(json!({"code":1,"stdout":"","stderr":"fixture: no installed agents or process age"})),
                 // The files panel lists a folder with sh: kind and name pairs.
                 "exec" if first == "sh" && a.get(1).map(from_host).and_then(|v| v.get(2).cloned()) == Some(json!("files")) => {
                     Some(json!({"code":0,"stdout":"d\u{0}src\u{0}f\u{0}README.md\u{0}","stderr":""}))
@@ -272,6 +277,43 @@ fn shipped_initial_descriptions(cx: &mut TestAppContext) {
         entries.len(),
         start.elapsed()
     );
+}
+
+#[gpui::test]
+fn automatic_titles_render_across_layouts_and_manual_names_win(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for (entry, role) in [
+        ("mods/tabs", None), ("mods/agents", None), ("mods/pane", None),
+        ("mods/terminals-bar", None), ("mods/terminals-pane", None),
+        ("mods/picker", None), ("mods/peek", None),
+        ("mods/win98", Some("taskbar")), ("mods/win98", Some("window")),
+    ] {
+        let mut p = props();
+        if let Some(role) = role { p["role"] = json!(role); }
+        let mut values = fixture(true, p, updates("current", "current"));
+        values.get_mut("spaces").unwrap()[0]["tabs"][0]["name"] = json!("1");
+        values.get_mut("spaces").unwrap()[0]["tabs"][0]["named"] = json!(false);
+        for key in ["panes", "agents", "terminals"] {
+            values.get_mut(key).unwrap()[0]["title"] = json!("⠋ Repair login");
+        }
+        values.get_mut("terminals").unwrap()[0]["name"] = Value::Null;
+        let tree = describe_with_values(cx, &staged, entry, values.clone(), None).unwrap();
+        assert!(tree.contains("Repair login"), "{entry}/{role:?}: {tree}");
+        assert!(!tree.contains("⠋ Repair login"), "spinner in {entry}/{role:?}: {tree}");
+        if role == Some("window") {
+            let mut shell = values.clone();
+            shell.get_mut("panes").unwrap()[0]["program"] = json!({"name":"Bash","key":"bash","shell":true,"agent":false});
+            let tree = describe_with_values(cx, &staged, entry, shell, None).unwrap();
+            assert!(tree.contains("Repair login"), "shell task title lost: {tree}");
+        }
+        if matches!(entry, "mods/tabs" | "mods/agents" | "mods/terminals-bar" | "mods/picker") || role == Some("taskbar") {
+            values.get_mut("spaces").unwrap()[0]["tabs"][0]["name"] = json!("Pinned title");
+            values.get_mut("spaces").unwrap()[0]["tabs"][0]["named"] = json!(true);
+            let tree = describe_with_values(cx, &staged, entry, values, None).unwrap();
+            assert!(tree.contains("Pinned title"), "manual name lost in {entry}/{role:?}: {tree}");
+        }
+    }
 }
 
 #[gpui::test]

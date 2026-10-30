@@ -1,3 +1,4 @@
+import { tabTitle, titleSnapshot } from "./titles.js";
 // The taskbar: Start, Quick Launch, the shown space's tabs as windows (the
 // shown one pressed in; click it to minimize = settle), open games, and the
 // tray: agents, the speaker, the clock. It also owns the layout's key
@@ -5,7 +6,7 @@
 
 import { div, svg } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
-import { spaces, panes, agents, run, shared, setShared, nextCommand, exec, layouts, home, settings, openOverlay, closeOverlay } from "herdr";
+import { spaces, panes, terminals, agents, run, shared, setShared, nextCommand, exec, layouts, home, settings, openOverlay, closeOverlay } from "herdr";
 import {
   C, ASSETS, unit, root, bevel, button, etch, grip, icon, programIcon, sfx, apps, setApp, label, own,
   fitLayout, openMenu, openDialog, dither, perform,
@@ -199,7 +200,7 @@ export default class Taskbar {
     const agentItems = AGENTS.filter((a) => this.installed.includes(a[0])).map(([cmd, name, ico]) => ({
       label: name,
       img: ico,
-      act: { run: ["tab.new", { name, argv: [cmd] }] },
+      act: { run: ["tab.new", { argv: [cmd] }] },
     }));
     const spaceItems = spaces().map((p, i) => ({
       label: `${i < 9 ? `&${i + 1} ` : ""}${p.name}`,
@@ -232,7 +233,7 @@ export default class Taskbar {
             ],
           },
           { label: "Agents", icon: "programs", sub: agentItems.length ? agentItems : [{ label: "(Empty)", disabled: true }] },
-          { label: "DOS Prompt", icon: "dos", act: { run: ["tab.new", { name: "DOS Prompt" }] } },
+          { label: "DOS Prompt", icon: "dos", act: { run: ["tab.new", {}] } },
           { label: "New Space...", icon: "folder", act: { dialog: { kind: "prompt", title: "New Space", text: "Type a name for the new space:", icon: "folder", machines: true, command: { name: "space.new", args: {} } } } },
         ],
       },
@@ -306,7 +307,7 @@ export default class Taskbar {
             ),
           ),
       )
-      .child(div().relative().flex_1().min_w(0).truncate().text_color(fg).when(pressed, (el) => el.font_weight(700)).child(t.name));
+      .child(div().relative().flex_1().min_w(0).truncate().text_color(fg).when(pressed, (el) => el.font_weight(700)).child(tabTitle(t, all)));
     return button(
       u,
       `tb-${t.id}`,
@@ -319,7 +320,7 @@ export default class Taskbar {
         toggled: pressed,
         pad: [0, 3],
         h: 22,
-        tooltip: `${t.name}${p?.program ? ` - ${p.program.name}` : ""}${t.status ? ` (${t.status})` : ""}`,
+        tooltip: `${tabTitle(t, all)}${p?.program ? ` - ${p.program.name}` : ""}${t.status ? ` (${t.status})` : ""}`,
         onRight: () =>
           openMenu([
             { label: "&Restore", act: { run: ["tab.select", { id: t.id }] }, disabled: pressed },
@@ -328,6 +329,7 @@ export default class Taskbar {
             { sep: true },
             { label: "Re&name...", act: { dialog: { kind: "prompt", title: "Rename", text: "Type a new name for this tab:", icon: "rename", value: t.name, command: { name: "tab.rename", args: { id: t.id } } } } },
             { sep: true },
+            { label: "Use &automatic title", act: { run: ["tab.rename", { id: t.id, name: "" }] } },
             { label: "&Close", bold: true, shortcut: "Alt+F4", act: { run: ["tab.close", { id: t.id }] } },
           ]),
       },
@@ -359,7 +361,8 @@ export default class Taskbar {
           { label: "&Restore", act: { app: key }, disabled: open },
           { label: "Mi&nimize", act: { shared: ["win98.apps", { ...apps(), [key]: "min" }] }, disabled: !open },
           { sep: true },
-          { label: "&Close", bold: true, act: { shared: ["win98.apps", Object.fromEntries(Object.entries(apps()).filter(([k]) => k !== key))] } },
+          { label: "Use &automatic title", act: { run: ["tab.rename", { id: t.id, name: "" }] } },
+            { label: "&Close", bold: true, act: { shared: ["win98.apps", Object.fromEntries(Object.entries(apps()).filter(([k]) => k !== key))] } },
         ]),
     })
       .flex_1()
@@ -407,7 +410,7 @@ export default class Taskbar {
           .id(`tray-${a.address}`)
           .relative()
           .flex_none()
-          .tooltip(`${a.program?.name ?? a.app ?? "Agent"}: ${a.status} - ${a.space_name} \\ ${a.tab_name}`)
+          .tooltip(`${a.program?.name ?? a.app ?? "Agent"}: ${a.status} - ${a.space_name} \\ ${tabTitle(spaces().flatMap(s => s.tabs).find(t => t.id === a.tab) ?? { name: a.tab_name }, panes())}`)
           .on_click(() => run("agent.focus", { terminal: a.address }))
           .child(programIcon(u, a.program, 16))
           .when(Boolean(badge), (el) =>
@@ -443,6 +446,10 @@ export default class Taskbar {
   }
 
   render(cx) {
+
+    const snapshot = titleSnapshot(spaces(), panes(), terminals());
+    if (JSON.stringify(shared("titles.snapshot")?.data) !== JSON.stringify(snapshot))
+      setShared("titles.snapshot", { updated_at: new Date().toISOString(), data: snapshot });
     const u = unit();
     // Keep the bars whole Win98 pixels when the zoom or the scale changes.
     const z = settings()?.zoom;
@@ -478,10 +485,10 @@ export default class Taskbar {
     ).flex_none();
 
     const ql = [
-      this.quick(u, "dos", "dos", "DOS Prompt", { run: ["tab.new", { name: "DOS Prompt" }] }),
+      this.quick(u, "dos", "dos", "DOS Prompt", { run: ["tab.new", {}] }),
       ...AGENTS.filter((a) => this.installed.includes(a[0]))
         .slice(0, 2)
-        .map(([cmd, name, ico]) => this.quick(u, cmd, programIcon(u, { icon: ico, tint: false }, 16), name, { run: ["tab.new", { name, argv: [cmd] }] })),
+        .map(([cmd, name, ico]) => this.quick(u, cmd, programIcon(u, { icon: ico, tint: false }, 16), name, { run: ["tab.new", { argv: [cmd] }] })),
       this.quick(u, "mines", "mines", "Mines", { app: "mines" }),
     ];
 

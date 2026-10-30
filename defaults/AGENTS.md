@@ -110,9 +110,21 @@ machine first, then machines by name; `space.move` stays inside its machine's bl
   space's repo from its first terminal.
 - A **tab** is a piece of work in a space: its terminals and how they're
   split right and down. One nobody named is called by its place (1, 2,
-  ...), as in Herdr; `tab.rename` names it ("fix login"). A space
+  ...), in the model. Shipped mods automatically show its agent task title,
+  otherwise its program and folder. `tab.rename` names it ("fix login"). A space
   has one or more; closing the last one closes the space (it stays in
-  `recent`).
+  `recent`). Manual names always win, even "Codex" or "1". Use the tab menu's
+  **Use automatic title**, or `tab.rename {id, name: ""}`, to resume automatic
+  titles. Agent launch menus leave names automatic; older named tabs stay named.
+  Task titles come from the program's live terminal title, with spinner/status
+  noise removed. Programs that do not report a task title use program/folder
+  fallbacks; no model calls or transcript uploads are made. Split focus does not
+  change the tab's title; each agent row still identifies its own task.
+  The shipped tab bars publish their title projection in shared `titles.snapshot`.
+  Run `node mods/tabs/agent.mjs` for its MCP tools, or add `--http 0` for a
+  loopback JSON API (prints the port). See `mods/tabs/SKILL.md`, `llms.txt`, and
+  `llms-full.txt`; generated from `agent-tools.json`. The adapter needs Node 22+.
+  Title actions use the existing `herdr-app do tab.rename` command.
 - A tab can be **settled** (`tab.settle`): put away on this screen, still running;
   `settled` on each tab. The shipped layouts don't use it (they list every
   tab); a mod that does can hide or fold settled tabs. Showing one, or an

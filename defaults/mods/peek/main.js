@@ -3,6 +3,7 @@
 // go to its pane (or, without one, keep it as a tab of the shown space), ✕ to
 // close. Props: { terminal, overlay }.
 
+import { terminalTitle } from "./titles.js";
 import { View, div, image, svg } from "gpui-kit";
 import { h_flex } from "gpui-base";
 import { agents, terminals, panes, run, theme, props, closeOverlay } from "herdr";
@@ -61,9 +62,9 @@ export default class Peek extends View {
       .text_size(12)
       .child(div().w(12).flex_none().text_color(t[st] ?? t.dim).when(st === "working", (el) => el.frames(SPIN, 90)).child(glyph))
       .when(Boolean(pic), (el) => el.child(pic))
-      .child(div().truncate().font_semibold().text_color(t.foreground).child(k?.name || k?.template || k?.program?.name || terminal || ""))
+      .child(div().truncate().font_semibold().text_color(t.foreground).child(k ? terminalTitle(k) : terminal || ""))
       .when(Boolean(st), (el) => el.child(div().flex_none().text_color(t[st] ?? t.dim).child(WORDS[st] ?? st)))
-      .when(Boolean(parent), (el) => el.child(div().truncate().text_color(t.dim).child(`from ${parent.name || parent.address}`)))
+      .when(Boolean(parent), (el) => el.child(div().truncate().text_color(t.dim).child(`from ${terminalTitle(parent)}`)))
       .child(div().flex_1())
       .child(
         this.button(t, "keep", home ? "↗ go to" : "↗ keep", () => {
