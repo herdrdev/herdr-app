@@ -667,11 +667,14 @@ fn local(g: &Grid, p: Point<Pixels>) -> (f32, f32) {
     (f32::from(p.x - g.origin.x).max(0.0), f32::from(p.y - g.origin.y).max(0.0))
 }
 
-/// Whole lines for one macOS mouse wheel event. macOS reports a slow click as
-/// a tenth of a line and ramps up as the wheel speeds up, so each click scrolls
-/// at least one line (as in Ghostty).
+/// Lines one mouse wheel click scrolls on macOS, Ghostty's default.
+const WHEEL_LINES: f32 = 3.0;
+
+/// Whole lines for one macOS mouse wheel event, counted as Ghostty counts them.
+/// macOS reports a slow click as a tenth of a line and ramps up as the wheel
+/// speeds up, so each click counts as at least one.
 fn wheel_steps(lines: f32) -> i32 {
-    if lines == 0.0 { 0 } else { (lines.signum() * lines.abs().max(1.0)).round() as i32 }
+    if lines == 0.0 { 0 } else { (lines.signum() * lines.abs().max(1.0) * WHEEL_LINES).round() as i32 }
 }
 
 /// Whole lines to scroll for one scroll event. A touchpad sends many small
@@ -1451,11 +1454,11 @@ mod tests {
 
     #[test]
     fn each_wheel_click_scrolls_at_least_a_line() {
-        assert_eq!(super::wheel_steps(0.1), 1, "macOS's slow single click");
-        assert_eq!(super::wheel_steps(-0.1), -1);
+        assert_eq!(super::wheel_steps(0.1), 3, "macOS's slow single click");
+        assert_eq!(super::wheel_steps(-0.1), -3);
         assert_eq!(super::wheel_steps(0.0), 0);
-        assert_eq!(super::wheel_steps(4.25), 4, "a fast spin keeps its speed");
-        assert_eq!(super::wheel_steps(-7.09), -7);
+        assert_eq!(super::wheel_steps(4.25), 13, "a fast spin, three times its lines");
+        assert_eq!(super::wheel_steps(-7.09), -21);
     }
 
     #[test]
