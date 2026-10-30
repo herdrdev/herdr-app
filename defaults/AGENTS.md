@@ -706,8 +706,10 @@ has 120 programs (agents, editors, runtimes, tools, databases, infra);
   inside `programs`. Use programs or shell functions, not aliases (the launcher
   does not expand them). On macOS the menu launcher loads login profiles before
   running the agent and leaves an interactive login shell when it ends.
-  Linux keeps interactive non-login shells. Local checks include functions in shells such as bash
-  and zsh; fish and remote checks find executables only. Installation
+  Linux keeps interactive non-login shells. Checks and starts use the person's
+  shell, on another machine too (its `$SHELL`), so a PATH set in `.bashrc` or
+  `.zshrc` counts; they include functions in shells such as bash and zsh, and
+  fish checks find executables only. Installation
   checks are cached for up to a minute; changing the commands checks again.
   Invalid JSON is reported in `programs.error` (a valid file has no error).
 - It follows what runs in the terminal now (lazygit, nvim), else what it

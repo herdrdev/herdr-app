@@ -84,20 +84,15 @@ pub fn startable() -> Vec<Value> {
 
 /// Which of `commands` this machine can start, asked of the shell agents start
 /// in (so an app opened from the Dock finds what the person's terminal finds).
-/// On another machine (`on`): its `sh`, as remote agents start.
+/// On another machine (`on`): the person's shell there, as remote agents start.
 pub fn installed(commands: &[String], on: Option<&str>) -> Vec<String> {
     if commands.is_empty() {
         return Vec::new();
     }
     // Each found one as a marked line: an interactive shell may print its own
     // things (a prompt's escapes, a greeting) around the answer.
-    let check = "for c; do command -v \"$c\" >/dev/null 2>&1 && echo \"herdr-has:$c\"; done";
     let out = match on {
-        Some(m) => {
-            let mut args = vec!["-c".to_owned(), check.to_owned(), "sh".to_owned()];
-            args.extend(commands.iter().cloned());
-            crate::mods::run_on(m, "sh", &args).unwrap_or_default()
-        }
+        Some(m) => crate::mods::run_on(m, "sh", &remote_installed_args(commands)).unwrap_or_default(),
         None if cfg!(windows) => {
             let list = commands.iter().map(|c| format!("'{}'", c.replace('\'', "''"))).collect::<Vec<_>>().join(",");
             let script = format!("foreach($c in @({list})){{ if(Get-Command $c -ErrorAction SilentlyContinue){{ \"herdr-has:$c\" }} }}");
@@ -111,6 +106,21 @@ pub fn installed(commands: &[String], on: Option<&str>) -> Vec<String> {
     };
     let found: std::collections::HashSet<&str> = out.split("herdr-has:").skip(1).filter_map(|s| s.split_whitespace().next()).collect();
     commands.iter().filter(|c| found.contains(c.as_str())).cloned().collect()
+}
+
+/// `sh` arguments for the check on another machine: in the person's shell
+/// there, else (a shell neither line speaks) in `sh` itself.
+fn remote_installed_args(commands: &[String]) -> Vec<String> {
+    let script = in_their_shell("\"$1\"", "\"$2\"", "eval \"$2\"");
+    vec!["-c".into(), script, "sh".into(), installed_line(commands, true), installed_line(commands, false)]
+}
+
+/// A `sh` script that hands over to the person's shell (`$SHELL`, interactive
+/// like their terminals, so it finds what they find: a PATH set in `.bashrc`)
+/// with the `fish` or `posix` script and `"$SHELL" "$@"`. `other` runs in `sh`
+/// itself, for shells neither script speaks.
+pub fn in_their_shell(fish: &str, posix: &str, other: &str) -> String {
+    format!("case \"${{SHELL##*/}}\" in fish) exec \"$SHELL\" -ic {fish} \"$SHELL\" \"$@\";; sh|ash|dash|bash|ksh|zsh) exec \"$SHELL\" -ic {posix} \"$SHELL\" \"$@\";; esac; {other}")
 }
 
 /// Check in the shell itself for functions, but not aliases (`"$@"` cannot run them).
@@ -380,6 +390,38 @@ mod tests {
             .output()
             .unwrap();
         assert_eq!(String::from_utf8(out.stdout).unwrap(), "herdr-has:issue57_function\nherdr-has:printf\n");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_checks_find_what_the_persons_shell_finds() {
+        use std::os::unix::fs::PermissionsExt;
+        // A core started over ssh has a bare PATH; the agent's folder is added in
+        // `.bashrc`, past Debian's "not interactive: stop" guard.
+        let home = std::env::temp_dir().join(format!("herdr-remote-check-{}", std::process::id()));
+        let bin = home.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        let rc = format!("case $- in *i*) ;; *) return;; esac\nexport PATH=\"{}:$PATH\"\nrc_function() {{ :; }}\n", bin.display());
+        std::fs::write(home.join(".bashrc"), rc).unwrap();
+        std::fs::write(bin.join("rc_agent"), "#!/bin/sh\n").unwrap();
+        std::fs::set_permissions(bin.join("rc_agent"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let commands = ["rc_agent", "rc_function", "printf", "missing_agent"].map(String::from);
+        let found = |shell: &str| {
+            let out = std::process::Command::new("sh")
+                .args(remote_installed_args(&commands))
+                .env("HOME", &home)
+                .env("SHELL", shell)
+                .env("PATH", "/usr/bin:/bin")
+                .stdin(std::process::Stdio::null())
+                .output()
+                .unwrap();
+            // A system rc file may print around the marked lines.
+            String::from_utf8(out.stdout).unwrap().split("herdr-has:").skip(1).filter_map(|s| s.split_whitespace().next()).map(str::to_owned).collect::<Vec<_>>()
+        };
+        assert_eq!(found("/bin/bash"), ["rc_agent", "rc_function", "printf"]);
+        // A shell neither line speaks: `sh` itself, with its own PATH.
+        assert_eq!(found("/opt/nu"), ["printf"]);
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
