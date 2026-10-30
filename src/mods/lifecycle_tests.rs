@@ -190,12 +190,13 @@ export default class extends View {
         HostModule::new("fixture").async_function("start", move |_| {
             call.set(true);
             let complete = complete.clone();
-            let (tx, rx) = async_channel::bounded(1);
             std::thread::spawn(move || {
                 complete.store(true, Ordering::SeqCst);
-                let _ = tx.send_blocking(());
             });
-            Ok(async move { let _ = rx.recv().await; Ok(HostValue::Null) })
+            // close() deliberately doesn't await this call. The real worker must
+            // survive releasing the copy, but must not wake GPUI's deterministic
+            // test scheduler from an unmanaged thread.
+            Ok(async { Ok(HostValue::Null) })
         })
     ).unwrap());
     let runtime = ShellRuntime::new_isolated().unwrap();
