@@ -86,6 +86,8 @@ On macOS, Cmd+A selects the terminal's whole screen and scrollback, ready for Cm
 In vim and other alternate-screen apps, it selects only that screen.
 Linux and Windows keep Ctrl+A for the shell; bind `terminal.select_all` in `keys.json` if desired.
 
+On macOS, `quick_terminal` in `settings.json` turns the window into a drop-down terminal, like iTerm2's hotkey window: a key of your choice brings it down from the top of the screen in any app and puts it away again. See [the settings section](defaults/AGENTS.md#the-person-settingsjson) of the mod guide.
+
 [Layouts and mods](docs/mods.md) · [Commands](docs/commands.md)
 
 ## Updates and privacy
