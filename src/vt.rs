@@ -526,11 +526,24 @@ fn link_text(rows: &[Row]) -> (String, Vec<Spot>) {
     (text, spots)
 }
 
-/// The run of text without whitespace around byte `at`.
-fn word_at(text: &str, at: usize) -> &str {
+impl Row {
+    /// Whether the row runs on into the next: the terminal wrapped it, or it
+    /// reaches the right edge, where a program breaks a line too long to fit.
+    fn full(&self, cols: u16) -> bool {
+        // Cells a program may leave blank at the edge of its own width.
+        const EDGE: u16 = 4;
+        self.wraps || self.spots.iter().rev().find(|s| !self.text[s.byte..].starts_with(' ')).is_some_and(|s| s.x + s.width + EDGE >= cols)
+    }
+}
+
+/// The run of text without whitespace at byte `at`; empty on whitespace.
+fn word_range(text: &str, at: usize) -> std::ops::Range<usize> {
+    if text[at..].starts_with(char::is_whitespace) {
+        return at..at;
+    }
     let start = text[..at].rfind(char::is_whitespace).map_or(0, |i| i + text[i..].chars().next().map_or(1, char::len_utf8));
     let end = text[at..].find(char::is_whitespace).map_or(text.len(), |i| at + i);
-    &text[start..end]
+    start..end
 }
 
 /// A link found in the terminal: what it says, and where it shows.
@@ -1007,46 +1020,64 @@ impl Vt {
             return hit;
         }
 
-        // Lines a program broke itself, joined: fewest first, so a word on
-        // the line above doesn't glue onto a path starting this one. A join
-        // that leaves the hovered word as it was can't find anything new.
+        // Lines a program broke itself, joined: only across rows that reach
+        // the right edge, and only where the hovered word runs into one.
         const BROKEN: u32 = 4;
-        let above: Vec<Row> = (first.saturating_sub(BROKEN)..first).rev().map_while(|y| self.link_row(y)).collect();
-        let below = (last + 1..=last + BROKEN).map_while(|y| self.link_row(y));
-        let (group, up_most) = (rows.len(), above.len() as u32);
+        let word = word_range(&text, spots[at].byte);
+        let mut above = Vec::new();
+        if text[..word.start].trim().is_empty() {
+            for y in (first.saturating_sub(BROKEN)..first).rev() {
+                match self.link_row(y) {
+                    Some(row) if row.full(self.cols) => above.push(row),
+                    _ => break,
+                }
+            }
+        }
+        let mut below = Vec::new();
+        if text[word.end..].trim().is_empty() && rows.last().is_some_and(|row| row.full(self.cols)) {
+            for y in last + 1..=last + BROKEN {
+                let Some(row) = self.link_row(y) else { break };
+                let full = row.full(self.cols);
+                below.push(row);
+                if !full {
+                    break;
+                }
+            }
+        }
+        let (group, up_most, down_most) = (rows.len(), above.len(), below.len());
         rows.splice(0..0, above.into_iter().rev());
         rows.extend(below);
-        let down_most = (rows.len() - group) as u32 - up_most;
-        let mut tried = vec![word_at(&text, spots[at].byte).to_owned()];
-        let mut stale = false;
-        'joins: for joined in 1..=2 * BROKEN {
-            for up in joined.saturating_sub(BROKEN)..=joined.min(BROKEN) {
-                let down = joined - up;
-                if up > up_most || down > down_most {
-                    continue;
-                }
-                let start = (up_most - up) as usize;
-                let (text, spots) = link_text(&rows[start..start + group + joined as usize]);
+        // Fewest rows first; the longest link wins, so a break next to a
+        // slash doesn't stop at the folder before it. A join that leaves the
+        // hovered word as it was can't find anything new.
+        let mut tried = vec![text[word].to_owned()];
+        let mut best: Option<(LinkHit, String, Vec<Spot>, usize)> = None;
+        // Whether `find` last saw the link we'd return: it may keep what it saw.
+        let mut fresh = true;
+        for joined in 1..=up_most + down_most {
+            for up in joined.saturating_sub(down_most)..=joined.min(up_most) {
+                let start = up_most - up;
+                let (text, spots) = link_text(&rows[start..start + group + joined]);
                 let Some(at) = spots.iter().position(|s| s.y == hovered && s.x <= col && col < s.x + s.width) else { continue };
-                let word = word_at(&text, spots[at].byte);
+                let word = &text[word_range(&text, spots[at].byte)];
                 if tried.iter().any(|t| t == word) {
                     continue;
                 }
                 tried.push(word.to_owned());
-                if let Some(joined) = self.link_in(&text, &spots, top, at, &mut find, true) {
-                    if hit.as_ref().is_none_or(|hit| joined.target.len() > hit.target.len()) {
-                        return Some(joined);
-                    }
-                    stale = true;
-                    break 'joins;
+                let Some(found) = self.link_in(&text, &spots, top, at, &mut find, true) else { continue };
+                let longest = best.as_ref().map(|b| &b.0).or(hit.as_ref()).map_or(0, |h| h.target.len());
+                fresh = found.target.len() > longest;
+                if fresh {
+                    best = Some((found, text, spots, at));
                 }
             }
         }
-        // `find` may keep what it saw last: show it the first link again.
-        if stale {
-            return self.link_in(&text, &spots, top, at, &mut find, false);
+        match best {
+            Some((found, ..)) if fresh => Some(found),
+            Some((_, text, spots, at)) => self.link_in(&text, &spots, top, at, &mut find, true),
+            None if fresh => hit,
+            None => self.link_in(&text, &spots, top, at, &mut find, false),
         }
-        hit
     }
 
     /// Whether the terminal wrapped screen row `y` onto the next.
@@ -1969,7 +2000,7 @@ mod tests {
             assert_eq!(hit.spans, vec![(0, 6, 16), (1, 2, 9)]);
         }
         // A word ending the line above stays out of it.
-        let mut vt = Vt::new(20, 4);
+        let mut vt = Vt::new(16, 4);
         vt.write(b"> I think when\r\n  /tmp/abc/de\r\n  fg/x.png ok");
         let hit = vt.link_at(3, 1, whole).unwrap();
         assert_eq!(hit.spans, vec![(1, 2, 12), (2, 2, 9)]);
@@ -1983,22 +2014,39 @@ mod tests {
     }
 
     #[test]
-    fn joined_lines_prefer_the_longer_link() {
-        // Broken next to a slash: the first half names a folder that exists.
-        let mut vt = Vt::new(20, 4);
-        vt.write(b"  see /tmp/ab\r\n  /cd/x.png ok");
+    fn joined_lines_prefer_the_longest_link() {
+        // Broken next to slashes: the first rows name folders that exist.
+        let mut vt = Vt::new(15, 4);
+        vt.write(b"  /Users/me/ab\r\n  /Workspace/o\r\n  /x.rs end");
         let exists = |text: &str, at: usize, _| {
             let range = crate::links::find(text, at)?;
-            ["/tmp/ab", "/tmp/ab/cd/x.png"].contains(&&text[range.clone()]).then_some(range)
+            ["/Users/me/ab", "/Users/me/ab/Workspace/o", "/Users/me/ab/Workspace/o/x.rs"].contains(&&text[range.clone()]).then_some(range)
         };
-        for (col, row) in [(8, 0), (4, 1)] {
-            assert_eq!(vt.link_at(col, row, exists).unwrap().target, "/tmp/ab/cd/x.png");
+        for (col, row) in [(4, 0), (4, 1), (3, 2)] {
+            assert_eq!(vt.link_at(col, row, exists).unwrap().target, "/Users/me/ab/Workspace/o/x.rs");
         }
     }
 
     #[test]
-    fn joined_lines_tell_find() {
+    fn only_rows_reaching_the_edge_join() {
+        let exists = |text: &str, at: usize, _| {
+            let range = crate::links::find(text, at)?;
+            ["src/", "src/vt.rs", "/tmp/ab", "/tmp/ab/cd/x.png"].contains(&&text[range.clone()]).then_some(range)
+        };
+        // A folder an agent lists, its files below: not one path.
         let mut vt = Vt::new(30, 4);
+        vt.write(b"src/\r\n  vt.rs");
+        assert_eq!(vt.link_at(1, 0, exists), None);
+        assert_eq!(vt.link_at(3, 1, exists), None);
+        // A blank line ends what a program broke.
+        let mut vt = Vt::new(11, 4);
+        vt.write(b"see /tmp/ab\r\n\r\n/cd/x.png");
+        assert_eq!(vt.link_at(6, 0, exists).unwrap().target, "/tmp/ab");
+    }
+
+    #[test]
+    fn joined_lines_tell_find() {
+        let mut vt = Vt::new(26, 4);
         vt.write(b"Visit https://example.com\r\n  and then run it");
         // Glued, the URL would take in the word below it.
         assert_eq!(vt.link_at(3, 1, found).unwrap().target, "https://example.comand");
@@ -2008,8 +2056,23 @@ mod tests {
     }
 
     #[test]
+    fn find_last_sees_the_link_returned() {
+        let mut vt = Vt::new(6, 4);
+        vt.write(b"  xx/a\r\n  b");
+        let seen = std::cell::RefCell::new(String::new());
+        // Joined, a shorter link than the row's own: the row's wins.
+        let find = |text: &str, at: usize, joined: bool| {
+            let range = if joined { at..at + 1 } else { crate::links::word(text, at)? };
+            *seen.borrow_mut() = text[range.clone()].to_owned();
+            Some(range)
+        };
+        assert_eq!(vt.link_at(3, 0, find).unwrap().target, "xx/a");
+        assert_eq!(*seen.borrow(), "xx/a");
+    }
+
+    #[test]
     fn joins_that_leave_the_word_alone_skip_find() {
-        let mut vt = Vt::new(20, 4);
+        let mut vt = Vt::new(13, 4);
         vt.write(b"one two three\r\nfour five six\r\nseven");
         let mut calls = 0;
         assert_eq!(vt.link_at(6, 1, |_: &str, _, _| { calls += 1; None }), None);
