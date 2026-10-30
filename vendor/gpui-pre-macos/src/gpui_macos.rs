@@ -11,6 +11,7 @@ mod display_link;
 mod events;
 mod keyboard;
 mod pasteboard;
+mod quick;
 mod system_notifications;
 
 #[cfg(feature = "screen-capture")]
@@ -58,6 +59,7 @@ pub(crate) use text_system::*;
 
 pub use platform::MacPlatform;
 pub use events::{option_as_alt, set_option_as_alt};
+pub use quick::{QuickPanel, set_hotkey};
 
 trait BoolExt {
     fn to_objc(self) -> BOOL;

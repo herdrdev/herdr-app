@@ -106,6 +106,10 @@ fn write(p: &Place) {
 /// After the window moved or resized: written once it settles (the task
 /// replaces the last one, which cancels it).
 pub fn changed(window: &Window, cx: &App) -> Option<Task<()>> {
+    // The quick terminal's strip isn't where the window goes next start.
+    if crate::quick::on() {
+        return None;
+    }
     let p = note(window, cx)?;
     let ex = cx.background_executor().clone();
     Some(cx.background_executor().spawn(async move {
@@ -116,6 +120,9 @@ pub fn changed(window: &Window, cx: &App) -> Option<Task<()>> {
 
 /// Writes it now (the window is closing).
 pub fn save(window: &Window, cx: &App) {
+    if crate::quick::on() {
+        return;
+    }
     note(window, cx);
     if let Some(p) = NOW.with(|n| n.borrow().clone()) {
         write(&p);

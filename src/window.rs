@@ -441,6 +441,8 @@ pub struct AppWindow {
     /// Remembers where the window is (`place.rs`); the write waiting to settle.
     _place: Option<Subscription>,
     place_write: Option<Task<()>>,
+    /// The quick terminal's `auto_hide` (quick.rs).
+    _quick: Option<Subscription>,
 }
 
 impl AppWindow {
@@ -519,6 +521,7 @@ impl AppWindow {
             _focus_lost: None,
             _place: None,
             place_write: None,
+            _quick: None,
         };
         w._focus_lost = Some(cx.on_focus_lost(window, |this, window, cx| this.restore_focus(window, cx)));
         w._place = Some(cx.observe_window_bounds(window, |this, window, cx| {
@@ -526,6 +529,10 @@ impl AppWindow {
                 this.place_write = Some(t);
             }
         }));
+        if crate::quick::on() {
+            crate::quick::install(window, cx);
+            w._quick = Some(cx.observe_window_activation(window, |_, window, cx| crate::quick::focus_changed(window.is_window_active(), cx)));
+        }
         let closing = cx.weak_entity();
         window.on_window_should_close(cx, move |window, cx| {
             // macOS: the red button hides the app instead, so alerts keep ringing;
@@ -813,7 +820,10 @@ impl AppWindow {
             mods::note_fonts(cx);
         }
         let s = settings::Settings::compose(&self.person, &self.chrome.look, self.system_dark);
-        let problems = s.problems();
+        let mut problems = s.problems();
+        if let Err(e) = crate::quick::set_key(s.quick_terminal.as_ref().and_then(|q| q.key.as_deref())) {
+            problems.push(e);
+        }
         if !problems.is_empty() {
             self.report_layout(&problems.join("; "));
         }
@@ -3134,6 +3144,7 @@ impl AppWindow {
                 self.write_person(|p| p.zoom = zoom, window, cx);
             }
             "app.quit" => cx.quit(),
+            "app.toggle" => return self.toggle(window, cx),
             "app.update" => {
                 if !crate::update::apply() {
                     return self.fail("no update is ready yet");
@@ -3407,6 +3418,24 @@ impl AppWindow {
         }
     }
 
+    /// `app.toggle`: the quick terminal drops down or goes up; else the app
+    /// hides or comes to the front.
+    fn toggle(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if crate::quick::on() {
+            crate::quick::toggle(cx);
+        } else if window.is_window_active() {
+            // Only macOS hides an app; elsewhere `hide` does nothing.
+            if cfg!(target_os = "macos") {
+                cx.hide();
+            } else {
+                window.minimize_window();
+            }
+        } else {
+            cx.activate(true);
+            window.activate_window();
+        }
+    }
+
     fn control(&mut self, cmd: Value, window: &mut Window, cx: &mut Context<Self>) -> Value {
         if let Some(name) = cmd.get("do").and_then(Value::as_str) {
             let args = cmd.get("args").cloned().unwrap_or(Value::Null);
@@ -3423,8 +3452,12 @@ impl AppWindow {
         }
         // Herdr was launched again: this window comes to the front instead.
         if cmd.get("raise").is_some() {
-            cx.activate(true);
-            window.activate_window();
+            if crate::quick::on() {
+                crate::quick::show(cx);
+            } else {
+                cx.activate(true);
+                window.activate_window();
+            }
             return json!({ "ok": true });
         }
         if cmd.get("ls").is_some() {

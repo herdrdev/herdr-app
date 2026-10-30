@@ -75,6 +75,8 @@ A broken edit keeps the last good version and reports the error.
 
 Ctrl+Shift+P shows every command and its key (Cmd+Shift+P on macOS). Change any key in `keys.json`; see [the keys section](defaults/AGENTS.md#keys-keysjson) of the mod guide for the format.
 
+On macOS, `quick_terminal` in `settings.json` turns the window into a drop-down terminal, like iTerm2's hotkey window: a key of your choice brings it down from the top of the screen in any app and puts it away again. See [the settings section](defaults/AGENTS.md#the-person-settingsjson) of the mod guide.
+
 [Layouts and mods](docs/mods.md) · [Commands](docs/commands.md)
 
 ## Updates and privacy
