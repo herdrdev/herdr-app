@@ -486,6 +486,15 @@ type CursorKey = (bool, u16, u16, bool, i32);
 /// Where a link shows: (viewport row, first column, last column) per row.
 pub type Spans = Vec<(u16, u16, u16)>;
 
+/// A character of link text and the cell it shows in.
+struct Spot {
+    y: u32,
+    x: u16,
+    width: u16,
+    byte: usize,
+    uri: Option<String>,
+}
+
 /// A link found in the terminal: what it says, and where it shows.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LinkHit {
@@ -924,8 +933,10 @@ impl Vt {
 
     /// The link at a viewport cell: a link the program marked (OSC 8), or a
     /// URL or path in the text. Follows lines the terminal wrapped, also into
-    /// rows scrolled out of view.
-    pub fn link_at(&self, col: u16, row: u16, find: impl FnOnce(&str, usize) -> Option<std::ops::Range<usize>>) -> Option<LinkHit> {
+    /// rows scrolled out of view. When nothing is found there, tries again
+    /// with the lines around joined, their indentation dropped: programs
+    /// like Claude Code break long paths onto new lines themselves.
+    pub fn link_at(&self, col: u16, row: u16, mut find: impl FnMut(&str, usize) -> Option<std::ops::Range<usize>>) -> Option<LinkHit> {
         if col >= self.cols || row >= self.rows {
             return None;
         }
@@ -958,17 +969,34 @@ impl Vt {
             last += 1;
         }
 
-        struct Spot {
-            y: u32,
-            x: u16,
-            width: u16,
-            byte: usize,
-            uri: Option<String>,
+        let (text, spots) = self.link_text(first, last, |_| false);
+        if let Some(hit) = self.link_in(&text, &spots, top, col, hovered, &mut find) {
+            return Some(hit);
         }
+        // Lines a program broke itself, joined: fewest first, so a word on
+        // the line above doesn't glue onto a path starting this one.
+        const BROKEN: u32 = 4;
+        for joined in 1..=2 * BROKEN {
+            for up in joined.saturating_sub(BROKEN)..=joined.min(BROKEN) {
+                let (Some(first), down) = (first.checked_sub(up), joined - up) else { continue };
+                let (text, spots) = self.link_text(first, last + down, |y| !wraps(y));
+                if let Some(hit) = self.link_in(&text, &spots, top, col, hovered, &mut find) {
+                    return Some(hit);
+                }
+            }
+        }
+        None
+    }
+
+    /// The text of screen rows `first..=last` and where each character shows.
+    /// A row that `breaks` loses its trailing blanks and the next row its
+    /// leading ones, so a path broken across them reads whole.
+    fn link_text(&self, first: u32, last: u32, breaks: impl Fn(u32) -> bool) -> (String, Vec<Spot>) {
         let mut text = String::new();
         let mut spots: Vec<Spot> = Vec::new();
         for y in first..=last {
-            let mut r = self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, 0, y)?;
+            let Some(mut r) = self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, 0, y) else { break };
+            let row_start = spots.len();
             for x in 0..self.cols {
                 r.x = x;
                 let (wide, linked) = unsafe {
@@ -987,16 +1015,35 @@ impl Vt {
                 let mut cps = [0u32; 16];
                 let mut len = 0usize;
                 unsafe { ghostty_grid_ref_graphemes(&r, cps.as_mut_ptr(), cps.len(), &mut len) };
-                let before = text.len();
                 text.extend(cps[..len.min(cps.len())].iter().filter_map(|c| char::from_u32(*c)));
-                if text.len() == before {
+                if text.len() == byte {
                     text.push(' ');
                 }
                 let uri = linked.then(|| hyperlink_uri(&r)).flatten();
                 let width = if wide == GHOSTTY_CELL_WIDE_WIDE { 2 } else { 1 };
                 spots.push(Spot { y, x, width, byte, uri });
             }
+            if y > first && breaks(y - 1) {
+                let blank = spots[row_start..].iter().take_while(|s| text[s.byte..].starts_with(' ')).count();
+                if blank > 0 {
+                    let cut = spots[row_start].byte..spots.get(row_start + blank).map_or(text.len(), |s| s.byte);
+                    let n = cut.len();
+                    text.replace_range(cut, "");
+                    spots.drain(row_start..row_start + blank);
+                    spots[row_start..].iter_mut().for_each(|s| s.byte -= n);
+                }
+            }
+            if y < last && breaks(y) {
+                while spots.len() > row_start && text[spots[spots.len() - 1].byte..].starts_with(' ') {
+                    text.truncate(spots.pop().unwrap().byte);
+                }
+            }
         }
+        (text, spots)
+    }
+
+    /// The link `find` sees in `text` at the hovered cell.
+    fn link_in(&self, text: &str, spots: &[Spot], top: u32, col: u16, hovered: u32, find: &mut impl FnMut(&str, usize) -> Option<std::ops::Range<usize>>) -> Option<LinkHit> {
         let at = spots.iter().position(|s| s.y == hovered && s.x <= col && col < s.x + s.width)?;
         let (target, chosen): (String, Vec<&Spot>) = match spots[at].uri.clone() {
             Some(uri) => {
@@ -1006,7 +1053,7 @@ impl Vt {
                 (uri, spots[start..end].iter().collect())
             }
             None => {
-                let range = find(&text, spots[at].byte)?;
+                let range = find(text, spots[at].byte)?;
                 (text[range.clone()].to_owned(), spots.iter().filter(|s| range.contains(&s.byte)).collect())
             }
         };
@@ -1853,6 +1900,33 @@ mod tests {
         let hit = vt.link_at(2, 0, crate::links::find).unwrap();
         assert_eq!(hit.target, "https://example.com/abcdefgh");
         assert_eq!(hit.spans, vec![(0, 0, 9), (1, 0, 7)]);
+    }
+
+    #[test]
+    fn links_join_lines_a_program_broke() {
+        let mut vt = Vt::new(20, 4);
+        // Broken by the program, as Claude Code does: a newline, then indentation.
+        vt.write(b"  see /tmp/abc/de\r\n  fg/x.png ok");
+        let whole = |text: &str, at: usize| {
+            let range = crate::links::find(text, at)?;
+            (&text[range.clone()] == "/tmp/abc/defg/x.png").then_some(range)
+        };
+        for (col, row) in [(8, 0), (3, 1)] {
+            let hit = vt.link_at(col, row, whole).unwrap();
+            assert_eq!(hit.target, "/tmp/abc/defg/x.png");
+            assert_eq!(hit.spans, vec![(0, 6, 16), (1, 2, 9)]);
+        }
+        // A word ending the line above stays out of it.
+        let mut vt = Vt::new(20, 4);
+        vt.write(b"> I think when\r\n  /tmp/abc/de\r\n  fg/x.png ok");
+        let hit = vt.link_at(3, 1, whole).unwrap();
+        assert_eq!(hit.spans, vec![(1, 2, 12), (2, 2, 9)]);
+        assert_eq!(vt.link_at(3, 2, whole).unwrap().target, "/tmp/abc/defg/x.png");
+        let mut vt = Vt::new(20, 4);
+        vt.write(b"  see /tmp/abc/de\r\n  fg/x.png ok");
+        // What reads as a link on its own line keeps it.
+        assert_eq!(vt.link_at(8, 0, crate::links::find).unwrap().target, "/tmp/abc/de");
+        assert_eq!(vt.link_at(13, 1, whole), None);
     }
 
     #[test]
