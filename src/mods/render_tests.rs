@@ -593,3 +593,23 @@ fn shipped_layouts_and_keys() {
         }
     }
 }
+
+#[gpui::test]
+fn picker_scrolls_the_selection_into_view(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut values = fixture(true, props(), updates("current", "current"));
+    let tabs: Vec<Value> = (1..=12)
+        .map(|i| json!({"id":format!("tab{i}"),"index":i,"name":format!("Task {i}"),"active":i==1,"status":"done","panes":1,"zoomed":false,"settled":false,"settled_at":null,"changed_at":null,"working_since":null}))
+        .collect();
+    values.insert("spaces".into(), json!([
+        {"id":"s1","index":1,"name":"Local","folder":"/fixture/project","machine":null,"branch":"main","active":true,"status":"working","tabs":tabs}
+    ]));
+    // Selecting the last row (with the arrows) must scroll it into the visible 320px.
+    let tree = describe_with_values(cx, &staged, "mods/picker", values, Some("this.at = 999; cx.notify();")).unwrap();
+    let top = tree.lines()
+        .find(|l| l.contains("pk-space-here"))
+        .unwrap_or_else(|| panic!("selected row missing: {tree}"));
+    let px: f64 = top.split(".top[Number(").nth(1).unwrap_or_else(|| panic!("selected row must be placed inside the scrolled list: {tree}")).split(")").next().unwrap().parse().unwrap();
+    assert!(px <= 320.0 - 32.0, "selected row at {px}px is below the visible list: {tree}");
+}
