@@ -653,6 +653,14 @@ impl Vt {
     }
 
 
+    /// Kitty images from files, for a program on this machine: it sends the
+    /// file's name, not the pixels. Files, not shared memory: every viewer of
+    /// the terminal reads the same file, while shared memory goes once read.
+    /// A program elsewhere names its own machine's files, so it sends pixels.
+    pub fn allow_local_image_files(&mut self, on: bool) {
+        unsafe { ghostty_terminal_set(self.term, GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_MEDIUM_FILE, &on as *const _ as *const c_void) };
+    }
+
     /// What the terminal wants to say back to the program since the last call.
     pub fn take_replies(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.shared.replies)
@@ -1612,6 +1620,24 @@ mod tests {
         vt.select(Select::Drag, 39, 0, x, 5.0, cw, 40.0);
         vt.select(Select::Release, 39, 0, x, 5.0, cw, 40.0);
         assert_eq!(vt.selection_text().as_deref(), Some(&line[..39]));
+    }
+
+    #[test]
+    fn local_programs_can_send_images_as_files() {
+        use base64::Engine;
+        let file = std::env::temp_dir().join(format!("herdr-vt-image-{}", std::process::id()));
+        std::fs::write(&file, [255u8, 0, 0]).unwrap();
+        let path = base64::engine::general_purpose::STANDARD.encode(file.to_string_lossy().as_bytes());
+        let ask = format!("\x1b_Gi=31,s=1,v=1,a=q,t=f,f=24;{path}\x1b\\");
+        let answer = |local: bool| {
+            let mut vt = Vt::new(20, 3);
+            vt.allow_local_image_files(local);
+            vt.write(ask.as_bytes());
+            String::from_utf8_lossy(&vt.take_replies()).into_owned()
+        };
+        assert_eq!(answer(true), "\x1b_Gi=31;OK\x1b\\");
+        assert!(!answer(false).contains("OK"), "a program elsewhere sends pixels");
+        std::fs::remove_file(file).unwrap();
     }
 
     #[test]

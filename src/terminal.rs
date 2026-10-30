@@ -219,6 +219,8 @@ impl TerminalView {
             g.vt.resize(cols, rows, cell.0, cell.1);
             g.vt_cell = cell;
             g.told_cell = Some(cell);
+            // Addresses on other machines are `machine/tN`.
+            g.vt.allow_local_image_files(!self.address.contains('/'));
             g.core = core.clone();
             g.channel = None;
             (cols, rows, cell)
