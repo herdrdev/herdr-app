@@ -439,13 +439,17 @@ impl TerminalView {
         .detach();
     }
 
-    /// Text as a paste; an image alone (a screenshot) for a terminal on another machine.
+    /// Text as a paste; copied files (Finder, a clipboard manager's image) as
+    /// if dropped; an image alone (a screenshot) as Ctrl+V pastes it.
     pub fn paste(&mut self, cx: &mut Context<Self>) {
-        if let Some(text) = cx.read_from_clipboard().and_then(|c| c.text()) {
+        let Some(item) = cx.read_from_clipboard() else { return };
+        if let Some(paths) = copied_files(&item) {
+            self.dropped(paths, cx);
+        } else if let Some(text) = item.text() {
             let bytes = self.grid.borrow().vt.paste_bytes(&text);
             self.send(&bytes);
-        } else {
-            self.send_image(cx);
+        } else if item.entries().iter().any(|e| matches!(e, ClipboardEntry::Image(_))) {
+            self.paste_image(cx);
         }
     }
 
@@ -500,11 +504,12 @@ impl TerminalView {
     fn scroll(&mut self, ev: &ScrollWheelEvent, _w: &mut Window, cx: &mut Context<Self>) {
         cx.stop_propagation();
         let mut g = self.grid.borrow_mut();
-        let lines = match ev.delta {
-            ScrollDelta::Lines(p) => p.y,
-            ScrollDelta::Pixels(p) => p.y / g.cell.height,
+        let rows = g.vt.rows as f32;
+        let steps = match ev.delta {
+            ScrollDelta::Lines(p) if cfg!(target_os = "macos") => macos_wheel_steps(p.y),
+            ScrollDelta::Lines(p) => scroll_steps(&mut self.scrolled, ev.touch_phase, p.y, rows),
+            ScrollDelta::Pixels(p) => scroll_steps(&mut self.scrolled, ev.touch_phase, p.y / g.cell.height, rows),
         };
-        let steps = scroll_steps(&mut self.scrolled, ev.touch_phase, lines, g.vt.rows as f32);
         let n = steps.unsigned_abs() as usize;
         if n == 0 {
             return;
@@ -640,6 +645,15 @@ fn quote_paths(paths: impl IntoIterator<Item = String>) -> String {
     out
 }
 
+/// Files on the clipboard: their text is only the bare path, which an agent
+/// reads as words, not as an image to attach.
+fn copied_files(item: &ClipboardItem) -> Option<Vec<std::path::PathBuf>> {
+    item.entries().iter().find_map(|e| match e {
+        ClipboardEntry::ExternalPaths(p) if !p.paths().is_empty() => Some(p.paths().to_vec()),
+        _ => None,
+    })
+}
+
 /// The clipboard's image saved to a file of its own, for its path to be pasted.
 fn image_file(item: &ClipboardItem) -> Option<std::path::PathBuf> {
     let image = item.entries().iter().find_map(|e| match e {
@@ -699,6 +713,18 @@ fn scroll_steps(scrolled: &mut f32, phase: TouchPhase, lines: f32, rows: f32) ->
         }
         _ => 0,
     }
+}
+
+/// Lines for a macOS mouse wheel event, as Ghostty scrolls them. macOS reports
+/// wheel ticks, a slow notch as a fraction of one (often 0.1), so an event counts
+/// as at least one tick, times Ghostty's default wheel multiplier of 3, with the
+/// fraction dropped.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+fn macos_wheel_steps(ticks: f32) -> i32 {
+    if ticks == 0.0 {
+        return 0;
+    }
+    (ticks.signum() * ticks.abs().max(1.0) * 3.0).trunc() as i32
 }
 
 /// A pointer position and the grid for mouse reports, in device pixels
@@ -775,10 +801,9 @@ fn key_bytes(vt: &mut vt::Vt, ev: &KeyDownEvent) -> Option<Vec<u8>> {
         "space" => Some(" ".to_owned()),
         _ => k.key_char.clone(),
     };
-    // The modifiers that went into the text are used up, as Ghostty reports
-    // them: Shift always (";" -> ":"); Alt/Option when it made a special
-    // character (Option-s -> "\u{df}" on a Mac), not when it didn't (Alt-b on
-    // Linux stays Alt-b).
+    // macOS translates Option into text unless it is configured as Alt.
+    // That text can be ASCII too (Slovenian Shift-Option-2 -> "@").
+    // Other platforms keep Alt shortcuts unless they produced non-ASCII text.
     let mut consumed = mods & GHOSTTY_MODS_SHIFT as GhosttyMods;
     let option_as_alt = {
         #[cfg(target_os = "macos")]
@@ -786,7 +811,7 @@ fn key_bytes(vt: &mut vt::Vt, ev: &KeyDownEvent) -> Option<Vec<u8>> {
         #[cfg(not(target_os = "macos"))]
         { false }
     };
-    if m.alt && !option_as_alt && text.as_deref().is_some_and(|t| !t.is_ascii()) {
+    if m.alt && !option_as_alt && text.as_deref().is_some_and(|t| !t.is_empty() && (cfg!(target_os = "macos") || !t.is_ascii())) {
         consumed |= GHOSTTY_MODS_ALT as GhosttyMods;
     }
     Some(vt.encode_key(key, mods, consumed, text.as_deref(), unshifted))
@@ -1464,10 +1489,18 @@ mod tests {
         assert_eq!(super::scroll_steps(&mut s, Started, 0.0, 40.0), 0);
         let total: i32 = (0..12).map(|_| super::scroll_steps(&mut s, Moved, 0.25, 40.0)).sum();
         assert_eq!(total, 3, "twelve quarter lines: not twelve lines");
-        assert_eq!(super::scroll_steps(&mut s, Moved, 3.0, 40.0), 3, "a mouse wheel's notch");
         assert_eq!(super::scroll_steps(&mut s, Started, 0.0, 40.0), 0);
         assert_eq!(super::scroll_steps(&mut s, Moved, -0.5, 40.0), 0, "a new gesture forgets the last one's leftover");
         assert_eq!(super::scroll_steps(&mut s, Moved, -0.6, 40.0), -1);
+    }
+
+    #[test]
+    fn macos_wheel_events_scroll_as_in_ghostty() {
+        use super::macos_wheel_steps as steps;
+        assert_eq!(steps(0.1), 3, "a slow notch");
+        assert_eq!(steps(-0.1), -3);
+        assert_eq!(steps(1.5), 4, "a fast spin's tick, its half line dropped");
+        assert_eq!(steps(0.0), 0);
     }
 
     #[test]
@@ -1477,6 +1510,20 @@ mod tests {
         assert_eq!(q(&["/tmp/shot.png"]), "/tmp/shot.png ");
         assert_eq!(q(&["/tmp/my shot.png", "/a/b"]), "'/tmp/my shot.png' /a/b ");
         assert_eq!(q(&["/tmp/it's.png"]), "'/tmp/it'\\''s.png' ");
+    }
+
+    #[test]
+    fn copied_files_paste_as_files_not_their_bare_path_text() {
+        use gpui::{ClipboardEntry, ClipboardItem, ExternalPaths};
+        let shot = std::path::PathBuf::from("/Users/me/Library/Application Support/clip/file-1.png");
+        let item = ClipboardItem {
+            entries: vec![
+                ClipboardEntry::ExternalPaths(ExternalPaths(smallvec::smallvec![shot.clone()])),
+                ClipboardItem::new_string(shot.to_string_lossy().into_owned()).entries.remove(0),
+            ],
+        };
+        assert_eq!(super::copied_files(&item), Some(vec![shot]));
+        assert_eq!(super::copied_files(&ClipboardItem::new_string("hello".into())), None);
     }
 
     /// A key as the OS hands it over: "shift-;" with what it typed (":"), as
@@ -1497,9 +1544,13 @@ mod tests {
         }
     }
 
+    #[cfg(target_os = "macos")]
+    static OPTION_AS_ALT_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
     #[test]
     #[cfg(target_os = "macos")]
     fn option_as_alt_encodes_legacy_and_kitty_shortcuts() {
+        let _guard = OPTION_AS_ALT_TEST_LOCK.lock().unwrap();
         gpui_macos::set_option_as_alt(Some(true));
         let mut vt = Vt::new(20, 3);
         for (key, text, bytes) in [("alt-p", "p", b"\x1bp"), ("alt-e", "e", b"\x1be"), ("alt-b", "b", b"\x1bb")] {
@@ -1510,6 +1561,18 @@ mod tests {
         vt.write(b"\x1b[<u");
         gpui_macos::set_option_as_alt(Some(false));
         assert_eq!(key_bytes(&mut vt, &press("alt-p", Some("π"))).unwrap(), "π".as_bytes());
+        for setup in [b"".as_slice(), b"\x1b[>1u"] {
+            let mut vt = Vt::new(20, 3);
+            vt.write(setup);
+            for (key, text) in [
+                ("alt-shift-2", "@"), ("alt-l", "@"), ("alt-5", "["),
+                ("alt-6", "]"), ("alt-7", "|"), ("alt-8", "{"),
+                ("alt-9", "}"), ("alt-shift-7", "\\"), ("alt-n", "~"),
+            ] {
+                assert_eq!(key_bytes(&mut vt, &press(key, Some(text))).unwrap(), text.as_bytes(), "{key}, mode={setup:?}");
+            }
+            assert_eq!(key_bytes(&mut vt, &press("alt-left", None)).unwrap(), b"\x1b[1;3D");
+        }
     }
 
     #[test]
@@ -1544,9 +1607,14 @@ mod tests {
     /// editor.
     #[test]
     fn keys_send_what_ghostty_sends() {
+        #[cfg(target_os = "macos")]
+        let _guard = OPTION_AS_ALT_TEST_LOCK.lock().unwrap();
+        #[cfg(target_os = "macos")]
+        gpui_macos::set_option_as_alt(Some(false));
         // Herdr keeps native Option text on macOS (libghostty's default
         // option-as-alt=false); other platforms prefix an unconsumed Alt.
         const ALT_B: &[u8] = if cfg!(target_os = "macos") { b"b" } else { b"\x1bb" };
+        const KITTY_ALT_B: &[u8] = if cfg!(target_os = "macos") { b"b" } else { b"\x1b[98;3u" };
         const KEYS: &[(&str, Option<&str>, &[u8], &[u8], &[u8])] = &[
             // key, typed, plain, kitty disambiguate (>1u, Neovim), kitty report-all (>9u)
             ("a", Some("a"), b"a", b"a", b"\x1b[97u"),
@@ -1557,7 +1625,7 @@ mod tests {
             ("space", Some(" "), b" ", b" ", b"\x1b[32u"),
             ("ctrl-c", None, b"\x03", b"\x1b[99;5u", b"\x1b[99;5u"),
             ("ctrl-space", None, b"\x00", b"\x1b[32;5u", b"\x1b[32;5u"),
-            ("alt-b", Some("b"), ALT_B, b"\x1b[98;3u", b"\x1b[98;3u"),
+            ("alt-b", Some("b"), ALT_B, KITTY_ALT_B, b"\x1b[98;3u"),
             ("alt-b", Some("∫"), "∫".as_bytes(), "∫".as_bytes(), b"\x1b[98;3u"),
             ("alt-s", Some("\u{df}"), "\u{df}".as_bytes(), "\u{df}".as_bytes(), b"\x1b[115;3u"),
             ("escape", None, b"\x1b", b"\x1b[27u", b"\x1b[27u"),

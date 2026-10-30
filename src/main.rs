@@ -111,6 +111,10 @@ fn main() {
         )
         .init();
 
+    if update::apply_on_startup() {
+        return;
+    }
+
     telemetry::clock();
     // A first start sizes the app to the screen and the system's text size.
     let fresh = !settings::path().exists();

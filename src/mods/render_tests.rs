@@ -179,8 +179,8 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
                             json!(["rev-parse", "--show-toplevel"]),
                             json!(["rev-parse", "--path-format=absolute", "--git-common-dir"]),
                             json!(["status", "--porcelain=v2", "--branch"]),
-                            json!(["--no-optional-locks", "status", "--porcelain=v2", "--branch"]),
-                            json!(["status", "--porcelain"]),
+                            json!(["--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain=v2", "--branch"]),
+                            json!(["--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain"]),
                             json!(["rev-parse", "--abbrev-ref", "HEAD"]),
                         ]
                         .contains(&a.get(1).map(from_host).unwrap_or(Value::Null)) =>

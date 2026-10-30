@@ -3,7 +3,8 @@
 //! after it opens and every hour, downloads a newer build for this
 //! machine, checks its sha256 and unpacks it next to itself (`<install>.new`).
 //! The frame then shows "Restart"; the swap happens on restart or the next
-//! quit. The first start after a swap runs `hc update` for the core.
+//! quit, or before opening the next window after a crash. The first start
+//! after a swap runs `hc update` for the core.
 //!
 //! A build from source never updates: only `scripts/package` (the release
 //! builds) sets `HERDR_APP_RELEASE`. `scripts/install-macos` makes a
@@ -271,7 +272,7 @@ fn check(root: &Path) -> Result<Option<String>, String> {
         crate::update_notes::cache(&text);
     }
     let staged = beside(root, ".new");
-    if version_of(&staged).as_deref() == Some(version) {
+    if staged_version(root).as_deref() == Some(version) {
         return Ok(Some(version.to_owned()));
     }
     let entry = &manifest["targets"][target()];
@@ -286,8 +287,11 @@ fn check(root: &Path) -> Result<Option<String>, String> {
         if version_of(&unpacked).as_deref() != Some(version) {
             return Err(format!("the download doesn't run as {version}"));
         }
+        let _ = std::fs::remove_file(beside(root, ".new.json"));
         let _ = std::fs::remove_dir_all(&staged);
-        std::fs::rename(&unpacked, &staged).map_err(|e| format!("{}: {e}", staged.display()))
+        std::fs::rename(&unpacked, &staged).map_err(|e| format!("{}: {e}", staged.display()))?;
+        // Outside the bundle: writing a receipt must not change its signature.
+        std::fs::write(beside(root, ".new.json"), serde_json::json!({ "version": version }).to_string()).map_err(|e| e.to_string())
     });
     let _ = std::fs::remove_dir_all(&work);
     result.map(|()| Some(version.to_owned()))
@@ -304,23 +308,37 @@ fn unpack(url: &str, sha: &str, work: &Path) -> Result<PathBuf, String> {
     run(crate::spawn::command(system("tar")).arg("-xzf").arg(&tarball).arg("-C").arg(work))?;
     let app = work.join(PACKED);
     if cfg!(target_os = "macos") {
-        let signature = Command::new("codesign").arg("-dv").arg(&app).output().map_err(|e| format!("codesign: {e}"))?;
-        if certificate_signed(&String::from_utf8_lossy(&signature.stderr)) {
-            run(Command::new("codesign").args(["--verify", "--deep", "--strict"]).arg(&app))?;
-        } else {
-            // Only dev builds may change the plist and lose their signature.
-            let home = std::env::var("HOME").unwrap_or_default();
-            let path = format!("{home}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin");
-            let plist = app.join("Contents/Info.plist");
-            run(Command::new("/usr/libexec/PlistBuddy").arg("-c").arg(format!("Add :LSEnvironment:PATH string {path}")).arg(&plist))?;
-            run(Command::new("codesign").args(["--force", "--sign", "-"]).arg(&app))?;
-        }
+        // Authority is absent at -dv, even for a Developer ID release.
+        let signature = Command::new("/usr/bin/codesign").arg("-dvv").arg(&app).output().map_err(|e| format!("codesign: {e}"))?;
+        prepare_macos_bundle(&app, &signature)?;
     }
     Ok(app)
 }
 
-fn certificate_signed(signature: &str) -> bool {
-    signature.lines().any(|line| line.starts_with("Authority="))
+fn prepare_macos_bundle(app: &Path, signature: &std::process::Output) -> Result<(), String> {
+    if release_signature(signature.status.success(), &String::from_utf8_lossy(&signature.stderr))? {
+        run(Command::new("/usr/bin/codesign").args(["--verify", "--deep", "--strict"]).arg(app))?;
+    } else {
+        // Only known dev builds may change the plist and lose their signature.
+        let home = std::env::var("HOME").unwrap_or_default();
+        let path = format!("{home}/.local/bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin");
+        let plist = app.join("Contents/Info.plist");
+        run(Command::new("/usr/libexec/PlistBuddy").arg("-c").arg(format!("Add :LSEnvironment:PATH string {path}")).arg(&plist))?;
+        run(Command::new("/usr/bin/codesign").args(["--force", "--sign", "-"]).arg(app))?;
+    }
+    Ok(())
+}
+
+fn release_signature(success: bool, signature: &str) -> Result<bool, String> {
+    if success && signature.lines().any(|line| line.starts_with("Authority=Developer ID Application:")) {
+        Ok(true)
+    } else if (success && signature.lines().any(|line| line == "Signature=adhoc"))
+        || (!success && signature.lines().any(|line| line.ends_with(": code object is not signed at all")))
+    {
+        Ok(false)
+    } else {
+        Err(format!("cannot determine app signature: {}", signature.trim()))
+    }
 }
 
 /// curl and tar: on Windows its own (System32), since Git's tar, often first
@@ -389,59 +407,133 @@ pub(crate) fn newer(a: &str, b: &str) -> bool {
     }
 }
 
+/// A receipt is published only after the archive and its executable were verified.
+/// Legacy stages without one are left for the normal checker to download again.
+fn staged_version(root: &Path) -> Option<String> {
+    let staged = beside(root, ".new");
+    let receipt = beside(root, ".new.json");
+    let version = std::fs::read(&receipt).ok().and_then(|bytes| serde_json::from_slice::<serde_json::Value>(&bytes).ok())
+        .and_then(|value| value["version"].as_str().map(str::to_owned));
+    let version = version?;
+    if version_of(&staged).as_deref() != Some(&version) {
+        tracing::warn!("update: staged executable does not match its verified manifest; discarding it");
+        let _ = std::fs::remove_file(receipt);
+        let _ = std::fs::remove_dir_all(staged);
+        return None;
+    }
+    Some(version)
+}
+
+fn startup_target<'a>(running: &str, staged: Option<&'a str>, relaunched: Option<&str>) -> Option<&'a str> {
+    if relaunched.is_some() {
+        return None;
+    }
+    staged.filter(|version| newer(version, running))
+}
+
+/// Recover a staged hotfix even when the previous window never quit cleanly.
+/// The inherited expected version allows only one automatic relaunch.
+pub fn apply_on_startup() -> bool {
+    let expected = std::env::var("HERDR_APP_UPDATE_EXPECTED").ok();
+    if let Some(expected) = &expected {
+        // SAFETY: startup runs before any app threads. Do not leak the guard
+        // into the core's environment and every terminal it later starts.
+        unsafe { std::env::remove_var("HERDR_APP_UPDATE_EXPECTED") };
+        if expected != env!("CARGO_PKG_VERSION") {
+            tracing::warn!("update: relaunched as {}, expected {expected}; not retrying", env!("CARGO_PKG_VERSION"));
+        }
+        return false;
+    }
+    let Some(root) = checks_app() else { return false };
+    let staged = staged_version(&root);
+    let Some(version) = startup_target(env!("CARGO_PKG_VERSION"), staged.as_deref(), expected.as_deref()) else { return false };
+    if !swap(&root) {
+        return false;
+    }
+    relaunch_expected(Some(version))
+}
+
 /// Puts the downloaded version in place of this one. The running app keeps
 /// its files open, so it can go on until it quits. True if it swapped.
 /// Windows lets a running program's folder be renamed, not deleted: the old
 /// one goes on the next start (`after_update`).
 pub fn apply() -> bool {
     let Some(root) = root() else { return false };
-    let staged = beside(&root, ".new");
-    if ready().is_none() || !staged.is_dir() {
+    let staged = staged_version(&root);
+    if ready().as_deref() != staged.as_deref() || !staged.as_deref().is_some_and(|version| newer(version, env!("CARGO_PKG_VERSION"))) {
         return false;
     }
-    let old = beside(&root, ".old");
+    swap(&root)
+}
+
+fn swap(root: &Path) -> bool {
+    let staged = beside(root, ".new");
+    let old = beside(root, ".old");
     let _ = std::fs::remove_dir_all(&old);
-    if let Err(e) = std::fs::rename(&root, &old) {
+    if let Err(e) = std::fs::rename(root, &old) {
         tracing::warn!("update: cannot move {} aside: {e}", root.display());
         return false;
     }
-    if let Err(e) = std::fs::rename(&staged, &root) {
+    if let Err(e) = std::fs::rename(&staged, root) {
         tracing::warn!("update: cannot put the new version in place: {e}");
-        let _ = std::fs::rename(&old, &root);
+        if let Err(rollback) = std::fs::rename(&old, root) {
+            tracing::error!("update: cannot restore the previous version: {rollback}");
+        }
         return false;
     }
-    let _ = std::fs::remove_dir_all(&old);
+    let _ = std::fs::remove_file(beside(root, ".new.json"));
     *READY.lock().unwrap() = None;
     let _ = std::fs::write(marker(), "");
     true
 }
 
 /// Opens the app again once this process has exited (after `apply`).
-#[cfg(windows)]
 pub fn relaunch() {
-    let Some(root) = root() else { return };
+    relaunch_expected(None);
+}
+
+#[cfg(windows)]
+fn relaunch_expected(expected: Option<&str>) -> bool {
+    let Some(root) = root() else { return false };
     let exe = exe_in(&root).to_string_lossy().replace('\'', "''");
     let script = format!("Wait-Process -Id {} -ErrorAction SilentlyContinue; Start-Process '{exe}'", std::process::id());
-    let spawned = crate::spawn::command("powershell")
+    let mut command = crate::spawn::command("powershell");
+    if let Some(expected) = expected {
+        command.env("HERDR_APP_UPDATE_EXPECTED", expected);
+    }
+    let spawned = command
         .args(["-NoProfile", "-NonInteractive", "-Command", &script])
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
         .spawn();
-    if let Err(e) = spawned {
-        tracing::warn!("update: cannot reopen the app: {e}");
+    match spawned {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::warn!("update: cannot reopen the app: {e}");
+            false
+        }
     }
 }
 
 /// Opens the app again once this process has exited (after `apply`).
 #[cfg(unix)]
-pub fn relaunch() {
-    let Some(root) = root() else { return };
-    let open = if cfg!(target_os = "macos") { "open \"$1\"" } else { "exec \"$1/herdr-app\"" };
+fn relaunch_expected(expected: Option<&str>) -> bool {
+    let Some(root) = root() else { return false };
+    // LaunchServices need not preserve the startup guard or an isolated home.
+    let open = if cfg!(target_os = "macos") {
+        if expected.is_some() { "exec \"$1/Contents/MacOS/Herdr\"" } else { "open \"$1\"" }
+    } else {
+        "exec \"$1/herdr-app\""
+    };
     let script = format!("while kill -0 \"$0\" 2>/dev/null; do sleep 0.1; done; {open}");
     let spawned = {
         use std::os::unix::process::CommandExt;
-        Command::new("sh")
+        let mut command = Command::new("sh");
+        if let Some(expected) = expected {
+            command.env("HERDR_APP_UPDATE_EXPECTED", expected);
+        }
+        command
             .arg("-c")
             .arg(script)
             .arg(std::process::id().to_string())
@@ -452,8 +544,12 @@ pub fn relaunch() {
             .process_group(0)
             .spawn()
     };
-    if let Err(e) = spawned {
-        tracing::warn!("update: cannot reopen the app: {e}");
+    match spawned {
+        Ok(_) => true,
+        Err(e) => {
+            tracing::warn!("update: cannot reopen the app: {e}");
+            false
+        }
     }
 }
 
@@ -471,9 +567,6 @@ pub fn after_update() {
     if std::fs::remove_file(marker()).is_err() {
         return;
     }
-    if let Some(root) = root() {
-        let _ = std::fs::remove_dir_all(beside(&root, ".old"));
-    }
     std::thread::spawn(|| {
         let have = crate::core_bin::version(&crate::core_bin::path()).unwrap_or_default();
         CORE.lock().unwrap().updating = true;
@@ -484,6 +577,9 @@ pub fn after_update() {
         core.updating = false;
         match result {
             Ok(now) => {
+                if let Some(root) = root() {
+                    let _ = std::fs::remove_dir_all(beside(&root, ".old"));
+                }
                 tracing::info!("herdr-core is {now}");
                 core.version = Some(now.trim_start_matches("hc ").to_owned());
                 core.error = None;
@@ -501,10 +597,122 @@ mod tests {
     use super::*;
 
     #[test]
-    fn certificate_signatures_are_preserved() {
-        assert!(certificate_signed("Executable=/Herdr.app/Contents/MacOS/Herdr\nAuthority=Developer ID Application: Herdr (TEAM)\nAuthority=Developer ID Certification Authority\n"));
-        assert!(!certificate_signed("Executable=/Herdr.app/Contents/MacOS/Herdr\nSignature=adhoc\nTeamIdentifier=not set\n"));
-        assert!(!certificate_signed("/Herdr.app: code object is not signed at all\n"));
+    fn startup_applies_only_a_newer_version_and_never_relaunches_twice() {
+        assert_eq!(startup_target("0.1.7", Some("0.1.8"), None), Some("0.1.8"));
+        for staged in [None, Some("0.1.6"), Some("0.1.7")] {
+            assert_eq!(startup_target("0.1.7", staged, None), None);
+        }
+        for expected in ["0.1.7", "0.1.8", "0.1.9"] {
+            assert_eq!(startup_target("0.1.7", Some("0.1.8"), Some(expected)), None);
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn stages_need_a_receipt_and_a_matching_executable() {
+        use std::os::unix::fs::PermissionsExt;
+        let work = std::env::temp_dir().join(format!("herdr-update-{}", std::process::id()));
+        let root = work.join(PACKED);
+        let staged = beside(&root, ".new");
+        let receipt = beside(&root, ".new.json");
+        let exe = exe_in(&staged);
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, "#!/bin/sh\necho herdr-app 0.1.8\n").unwrap();
+        std::fs::set_permissions(&exe, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(staged_version(&root), None);
+        assert!(staged.is_dir()); // Legacy stages are left for the checker.
+        std::fs::write(&receipt, r#"{"version":"0.1.8"}"#).unwrap();
+        assert_eq!(staged_version(&root).as_deref(), Some("0.1.8"));
+        std::fs::write(&receipt, r#"{"version":"0.1.9"}"#).unwrap();
+        assert_eq!(staged_version(&root), None);
+        assert!(!staged.exists());
+        assert!(!receipt.exists());
+        std::fs::create_dir_all(exe.parent().unwrap()).unwrap();
+        std::fs::write(&exe, "corrupt").unwrap();
+        std::fs::write(&receipt, r#"{"version":"0.1.8"}"#).unwrap();
+        assert_eq!(staged_version(&root), None);
+        assert!(!staged.exists());
+        std::fs::remove_dir_all(work).unwrap();
+    }
+
+    #[test]
+    fn signature_inspection_fails_closed() {
+        let release = include_str!("../scripts/fixtures/codesign/developer-id.txt");
+        let adhoc = include_str!("../scripts/fixtures/codesign/adhoc.txt");
+        let unsigned = include_str!("../scripts/fixtures/codesign/unsigned.txt");
+        assert_eq!(release_signature(true, release), Ok(true));
+        assert_eq!(release_signature(true, adhoc), Ok(false));
+        assert_eq!(release_signature(false, unsigned), Ok(false));
+        for (success, output) in [(false, release), (false, adhoc), (true, unsigned), (true, ""), (false, "codesign: internal error"), (true, "Authority=Apple Development: Someone")] {
+            assert!(release_signature(success, output).unwrap_err().starts_with("cannot determine app signature:"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn unknown_signature_does_not_modify_the_bundle() {
+        use std::os::unix::process::ExitStatusExt;
+        let work = std::env::temp_dir().join(format!("herdr-unknown-signature-{}", std::process::id()));
+        let plist = work.join("Contents/Info.plist");
+        std::fs::create_dir_all(plist.parent().unwrap()).unwrap();
+        std::fs::write(&plist, "unchanged plist").unwrap();
+        let signature = std::process::Output {
+            status: std::process::ExitStatus::from_raw(1 << 8),
+            stdout: Vec::new(),
+            stderr: b"codesign: internal error".to_vec(),
+        };
+        assert_eq!(prepare_macos_bundle(&work, &signature), Err("cannot determine app signature: codesign: internal error".into()));
+        assert_eq!(std::fs::read_to_string(plist).unwrap(), "unchanged plist");
+        assert_eq!(std::fs::read_dir(work.join("Contents")).unwrap().count(), 1);
+        std::fs::remove_dir_all(work).unwrap();
+    }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "downloads the current release; runs real codesign on isolated bundles"]
+    fn macos_unpack_preserves_release_signature_and_prepares_dev_builds() {
+        let version = env!("CARGO_PKG_VERSION");
+        let manifest: serde_json::Value = serde_json::from_str(&curl_text(&format!("{}/app/{version}/manifest.json", releases())).unwrap()).unwrap();
+        let work = std::env::temp_dir().join(format!("herdr-signature-test-{}", std::process::id()));
+        let signed = work.join("signed");
+        let reference = work.join("reference");
+        std::fs::create_dir_all(&signed).unwrap();
+        std::fs::create_dir_all(&reference).unwrap();
+        let entry = &manifest["targets"][target()];
+        let app = unpack(entry["url"].as_str().unwrap(), entry["sha256"].as_str().unwrap(), &signed).unwrap();
+        let signature = Command::new("/usr/bin/codesign").arg("-dvv").arg(&app).output().unwrap();
+        assert_eq!(release_signature(signature.status.success(), &String::from_utf8_lossy(&signature.stderr)), Ok(true));
+        run(Command::new("/usr/bin/codesign").args(["--verify", "--deep", "--strict"]).arg(&app)).unwrap();
+        run(Command::new("tar").arg("-xzf").arg(signed.join("app.tar.gz")).arg("-C").arg(&reference)).unwrap();
+        for file in ["Contents/Info.plist", "Contents/MacOS/Herdr", "Contents/_CodeSignature/CodeResources"] {
+            assert_eq!(std::fs::read(app.join(file)).unwrap(), std::fs::read(reference.join(PACKED).join(file)).unwrap(), "{file} was modified");
+        }
+        for kind in ["adhoc", "unsigned"] {
+            let source = reference.join(PACKED);
+            let mut codesign = Command::new("/usr/bin/codesign");
+            if kind == "adhoc" {
+                codesign.args(["--force", "--sign", "-"]);
+            } else {
+                codesign.arg("--remove-signature");
+            }
+            run(codesign.arg(&source)).unwrap();
+            let archive = work.join(format!("{kind}.tar.gz"));
+            run(Command::new("tar").arg("-czf").arg(&archive).arg("-C").arg(&reference).arg(PACKED)).unwrap();
+            let dev = work.join(kind);
+            std::fs::create_dir_all(&dev).unwrap();
+            let sha = sha256(&std::fs::read(&archive).unwrap());
+            let app = unpack(&format!("file://{}", archive.display()), &sha, &dev).unwrap();
+            let signature = Command::new("/usr/bin/codesign").arg("-dvv").arg(&app).output().unwrap();
+            assert!(signature.status.success());
+            let signature = String::from_utf8_lossy(&signature.stderr);
+            assert_eq!(release_signature(true, &signature), Ok(false));
+            assert!(signature.lines().any(|line| line == "Signature=adhoc"));
+            run(Command::new("/usr/bin/codesign").args(["--verify", "--deep", "--strict"]).arg(&app)).unwrap();
+            let path = Command::new("/usr/libexec/PlistBuddy").args(["-c", "Print :LSEnvironment:PATH"]).arg(app.join("Contents/Info.plist")).output().unwrap();
+            assert!(path.status.success());
+            assert!(String::from_utf8_lossy(&path.stdout).contains("/opt/homebrew/bin"));
+        }
+        std::fs::remove_dir_all(work).unwrap();
     }
 
     #[test]

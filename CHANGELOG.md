@@ -1,5 +1,31 @@
 # Herdr changelog
 
+## [0.1.9] - 2026-10-30
+
+### Fixed
+- On macOS, updates keep Herdr's Apple signature again, so macOS stops forgetting the permissions you gave Herdr.
+- Herdr no longer uses CPU in the background when the Changes or Files panel is open in a git repo.
+- Mods use less CPU while they wait for work.
+
+## [0.1.8] - 2026-10-30
+
+### New
+- **Option works as Alt on macOS.** Claude Code's Option shortcuts work, automatically on US keyboards. Change it with `option_as_alt` in settings.json.
+- **Programs can copy to your clipboard,** also from other machines. Pi's or Claude Code's own mouse selection lands on your clipboard.
+- **Your own commands in the + menu.** Entries in programs.json show up, shell functions included.
+
+### Fixed
+- Accent keys work on macOS and with ibus on Linux, and Caps Lock types capitals on macOS.
+- @, [ and friends type on Slovenian, German and other Mac layouts in every program.
+- Terminal colors show exactly as programs set them, so powerline prompts look right.
+- Double-click selects a word, triple-click a line.
+- Agents start from the + menu under fish, and one that fails at launch says why.
+- On macOS, the window buttons stay clear of a narrow sidebar and the tabs.
+- You can type a commit message in the Changes panel.
+- Spaces named with emoji or accents work everywhere.
+- The font list in Settings scrolls on its own.
+- A downloaded update installs at the next start, even after a crash.
+
 ## [0.1.7] - 2026-10-29
 
 ### Fixed

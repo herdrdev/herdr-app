@@ -3,6 +3,7 @@
 Run: uv run --no-project python -m unittest discover -s scripts -p test_distribution.py
 """
 
+import hashlib
 import os
 import shutil
 import tarfile
@@ -62,6 +63,139 @@ exit 97''')
                 self.assertIn("Installing Herdr test for macos-aarch64", result.stdout)
                 self.assertIn("download is damaged", result.stderr)
                 self.assertNotIn("Intel Macs", result.stderr)
+
+    def download_url(self, url, releases="https://releases.example", installed=False):
+        """The URL install.sh downloads the app from, for a manifest giving `url`."""
+        home = Path(self.work.name) / "home"
+        data = home / ".local/share"
+        shutil.rmtree(data / "herdr-app", ignore_errors=True)
+        (data / "herdr-app" if installed else data).mkdir(parents=True, exist_ok=True)
+        log = Path(self.work.name) / "urls"
+        log.unlink(missing_ok=True)
+        manifest = Path(self.work.name) / "latest.json"
+        manifest.write_text('{"version":"1.0.0","targets":{"linux-x86_64":{"url":"%s","sha256":"x"}}}' % url)
+        self.stub("curl", f'''out=; url=; prev=
+for a; do
+  if [ "$prev" = -o ]; then out=$a; else case $a in -*) ;; *) url=$a ;; esac; fi
+  prev=$a
+done
+echo "$url" >> "{log}"
+case $url in */latest.json) cp "{manifest}" "$out"; exit 0 ;; esac
+exit 22''')
+        env = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}", TEST_OS="Linux", TEST_ARCH="x86_64",
+                   HOME=str(home), XDG_DATA_HOME=str(data), HERDR_RELEASES_URL=releases)
+        result = subprocess.run([str(ROOT / "distribution/install.sh")], cwd=ROOT, env=env,
+                                capture_output=True, text=True, check=False)
+        self.assertIn("download failed", result.stderr)
+        return log.read_text().splitlines()[-1]
+
+    def test_installer_marks_plain_release_downloads_for_the_counter(self):
+        r = "https://releases.example"
+        tarball = f"{r}/app/1.0.0/herdr-app-linux-x86_64.tar.gz"
+        self.assertEqual(self.download_url(tarball), f"{tarball}?src=install")
+        self.assertEqual(self.download_url(tarball, installed=True), f"{tarball}?src=reinstall")
+        # A mirror's query (a signed URL) or fragment, or another host: exactly as given.
+        for url in (f"{tarball}?sig=a%2Fb&exp=1", f"{tarball}?src=update", f"{tarball}#x",
+                    "https://mirror.example/app/1.0.0/herdr-app-linux-x86_64.tar.gz",
+                    "https://releases.example.evil/app/1.0.0/herdr-app-linux-x86_64.tar.gz"):
+            with self.subTest(url=url):
+                self.assertEqual(self.download_url(url), url)
+        # A test server elsewhere marks its own URLs.
+        local = "http://127.0.0.1:8000/e2e"
+        self.assertEqual(self.download_url(f"{local}/app/1.0.0/a.tar.gz", releases=local), f"{local}/app/1.0.0/a.tar.gz?src=install")
+
+    def mac_installer(self, signature, status, verify_status=0):
+        home = self.bin / "home"
+        (home / ".local/bin").mkdir(parents=True)
+        (home / ".local/bin/herdr-core").touch()
+        source = self.bin / "source/Herdr.app/Contents"
+        source.mkdir(parents=True)
+        plist = b"signed release plist must stay unchanged"
+        (source / "Info.plist").write_bytes(plist)
+        archive = self.bin / "release.tar.gz"
+        with tarfile.open(archive, "w:gz") as tar:
+            tar.add(source.parent, arcname="Herdr.app")
+        sha = hashlib.sha256(archive.read_bytes()).hexdigest()
+        manifest = self.bin / "manifest.json"
+        manifest.write_text('{"version":"1.0.0","targets":{"macos-aarch64":{"url":"release","sha256":"%s"}}}' % sha)
+        self.stub("curl", f'''url=; out=; prev=
+for a; do
+  if [ "$prev" = -o ]; then out=$a; else case $a in -*) ;; *) url=$a ;; esac; fi
+  prev=$a
+done
+case $url in */latest.json) cp "{manifest}" "$out" ;; release) cp "{archive}" "$out" ;; *) exit 97 ;; esac''')
+        installed = home / "Applications/Herdr.app/Contents/Info.plist"
+        installed.parent.mkdir(parents=True)
+        installed.write_bytes(b"previous installed app")
+        fixture = self.bin / "signature.txt"
+        fixture.write_text(signature)
+        log = self.bin / "codesign.log"
+        self.stub("codesign", f'''echo "$*" >> "{log}"
+case "$1" in
+  -dvv) cat "{fixture}" >&2; exit {status} ;;
+  --verify) exit {verify_status} ;;
+  --force) exit 0 ;;
+  *) exit 97 ;;
+esac''')
+        plist_log = self.bin / "plist.log"
+        self.stub("PlistBuddy", f'''echo "$*" >> "{plist_log}"
+printf 'dev PATH added' >> "$3"''')
+        # Remap only the system tools in a scratch copy; production uses absolute paths.
+        script = (ROOT / "distribution/install.sh").read_text()
+        self.assertNotIn("\n    codesign ", script)
+        script = script.replace("/usr/bin/codesign", str(self.bin / "codesign"))
+        script = script.replace("/usr/libexec/PlistBuddy", str(self.bin / "PlistBuddy"))
+        installer = self.bin / "install.sh"
+        installer.write_text(script)
+        env = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}", TEST_OS="Darwin",
+                   TEST_ARCH="arm64", HOME=str(home))
+        result = subprocess.run(["sh", str(installer)], cwd=ROOT, env=env,
+                                capture_output=True, text=True, check=False)
+        return result, installed.read_bytes(), log.read_text().splitlines(), plist_log.exists(), plist
+
+    def test_mac_installer_preserves_certificate_signed_bundle(self):
+        fixture = (ROOT / "scripts/fixtures/codesign/developer-id.txt").read_text()
+        result, installed, calls, edited, plist = self.mac_installer(fixture, 0)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(installed, plist)
+        self.assertFalse(edited)
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(calls[0].startswith("-dvv "))
+        self.assertTrue(calls[1].startswith("--verify --deep --strict "))
+
+    def test_mac_installer_prepares_adhoc_bundle(self):
+        self.check_dev_installer("adhoc", 0)
+
+    def test_mac_installer_prepares_unsigned_bundle(self):
+        self.check_dev_installer("unsigned", 1)
+
+    def check_dev_installer(self, fixture_name, status):
+        fixture = (ROOT / f"scripts/fixtures/codesign/{fixture_name}.txt").read_text()
+        result, installed, calls, edited, plist = self.mac_installer(fixture, status)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertEqual(installed, plist + b"dev PATH added")
+        self.assertTrue(edited)
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(calls[1].startswith("--force --sign - "))
+
+    def test_mac_installer_unknown_signature_leaves_installed_app_untouched(self):
+        result, installed, calls, edited, _ = self.mac_installer("codesign: internal error", 1)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("cannot determine app signature: codesign: internal error", result.stderr)
+        self.assertEqual(installed, b"previous installed app")
+        self.assertFalse(edited)
+        self.assertEqual(len(calls), 1)
+        self.assertTrue(calls[0].startswith("-dvv "))
+
+    def test_mac_installer_invalid_release_leaves_installed_app_untouched(self):
+        fixture = (ROOT / "scripts/fixtures/codesign/developer-id.txt").read_text()
+        result, installed, calls, edited, _ = self.mac_installer(fixture, 0, verify_status=1)
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("invalid app signature", result.stderr)
+        self.assertEqual(installed, b"previous installed app")
+        self.assertFalse(edited)
+        self.assertEqual(len(calls), 2)
+        self.assertTrue(calls[1].startswith("--verify --deep --strict "))
 
     def test_intel_mac_package_stops_before_build(self):
         for args in ((), ("x86_64-apple-darwin",)):

@@ -279,7 +279,7 @@ No arguments.
 
 ## `terminal.paste`
 
-Paste into the focused terminal (an image alone, into one on another machine, as a file there).
+Paste into the focused terminal (copied files as if dropped; an image alone as terminal.paste_image pastes it).
 
 No arguments.
 

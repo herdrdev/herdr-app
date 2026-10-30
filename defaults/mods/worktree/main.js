@@ -142,7 +142,7 @@ export default class Worktree extends View {
         // The repo is set last: Enter does nothing until the warnings it consents to are known.
         const repo = await repoOf(this.folder, this.on);
         if (repo && props().action === "remove") {
-          this.dirty = (await git(repo.top, ["status", "--porcelain"], this.on)).out !== "";
+          this.dirty = (await git(repo.top, ["--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain"], this.on)).out !== "";
           this.unpushed = (await submodules(repo.top, this.on)).unpushed;
         }
         if (repo && this.opening) this.list = await checkouts(repo, this.on);
@@ -208,7 +208,7 @@ export default class Worktree extends View {
 
   async remove() {
     const s = this.space();
-    const status = await git(this.repo.top, ["status", "--porcelain"], this.on);
+    const status = await git(this.repo.top, ["--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain"], this.on);
     if (!status.ok) return status.err || "git status failed.";
     // git refuses a worktree with submodules unless forced, because their
     // history goes with it. The popup already showed what's at risk; only

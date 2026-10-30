@@ -1,0 +1,11 @@
+Executable=/private/tmp/herdr-codesign2/Herdr.app/Contents/MacOS/Herdr
+Identifier=dev.herdr.app
+Format=app bundle with Mach-O thin (arm64)
+CodeDirectory v=20400 size=124710 flags=0x2(adhoc) hashes=3891+3 location=embedded
+Signature=adhoc
+Info.plist entries=11
+TeamIdentifier=not set
+Sealed Resources version=2 rules=13 files=3
+Internal requirements count=0 size=12
+Total signatures=1
+Chosen signature=1
