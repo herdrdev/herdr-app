@@ -13,10 +13,11 @@ on:
 permissions:
   contents: read
 
-# Only superseded PR runs share a group; every other commit runs independently.
+# A newer push cancels older runs, on a PR and on master: PRs were tested
+# before merging, so only master's newest commit needs a run.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 env:
   RUST_TOOLCHAIN: 1.95.0

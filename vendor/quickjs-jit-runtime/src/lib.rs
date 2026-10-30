@@ -3536,7 +3536,10 @@ impl ProductionBackend {
 ))]
 unsafe impl rquickjs_core::runtime::JitBackend for ProductionBackend {
     fn poll(&mut self) {
-        self.maintenance();
+        // HERDR: rquickjs polls before and after every pending job. A full pass
+        // each time cloned the whole feedback table hundreds of times a second
+        // in busy promise loops; the gate still runs it for pending compiles.
+        self.maintenance_if_due(false);
     }
 
     fn record_hot(&mut self, event: &rquickjs_core::qjs::JSJitHotEvent) -> u32 {

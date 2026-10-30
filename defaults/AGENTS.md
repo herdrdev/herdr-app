@@ -96,6 +96,8 @@ is no `spaces.json`. On simultaneous edits the newest accepted document wins
 (no merging); structural commands fail while that machine's layout is unavailable.
 Mod pane props are stored as given, never machine-qualified. Space order is local
 machine first, then machines by name; `space.move` stays inside its machine's block.
+In the expanded Spaces sidebar, drag a space to reorder it within its machine;
+the highlighted line shows where it will land.
 
 - A **space** is a place to work, on one machine: this one, or another
   from `hc machine ls` (`spaces()[i].machine`). Herdr leaves out machines
@@ -399,13 +401,16 @@ Narrower than 160px, the sidebar mods draw a compact rail; folding resizes
 `sidebar` to 44 (76 on macOS, room for the traffic lights). On macOS,
 the tabs also leave room for the window buttons when the sidebar is narrower.
 
-### Layouts other people made
+### Layouts and mods other people made
 
-People share layouts at herdr.dev/layouts. Each is a folder laid out like
-this home: `layouts/<name>.json`, the `mods/<name>/` it needs, a
-`RECIPE.md` (the brief to build it from scratch) and a `preview.png`. The
-files are one build of the recipe. Asked to add one
-(`herdr.dev/layouts/<owner>/<name>`, or a folder on GitHub):
+People share layouts at herdr.dev/layouts and mods at herdr.dev/mods. Each
+is a folder laid out like this home: a layout has `layouts/<name>.json` and
+the `mods/<name>/` it needs; a mod is a piece for the person's own window,
+so it has only `mods/<name>/` and maybe a `keys.json` with the keys it
+expects. Both have a `RECIPE.md` (the brief to build it from scratch) and a
+`preview.png`. The files are one build of the recipe. Asked to add one
+(`herdr.dev/layouts/<owner>/<name>`, `herdr.dev/mods/<owner>/<name>`, or a
+folder on GitHub):
 
 1. Read the recipe and every file before writing anything. Before adding,
    tell the person if a mod reaches the network, runs programs (`exec`,
@@ -418,17 +423,20 @@ files are one build of the recipe. Asked to add one
    program, a name clash) or the person asks. If the files don't work on
    this version, or the person wants it different, build it from the
    recipe instead.
-4. `herdr-app check` each mod, then `layout.switch {name}`. The person's
-   own layout stays as it was; `ctrl-shift-l` switches back, and deleting
-   the files removes it.
+4. A mod's `keys.json`: merge it into the person's. Add its sections and
+   keys, and ask before replacing a key they already use.
+5. `herdr-app check` each mod; for a layout, then `layout.switch {name}`.
+   The person's own layout stays as it was; `ctrl-shift-l` switches back,
+   and deleting the files removes it.
 
-To share one: put that folder in a public GitHub repo (one folder per
-layout if there are several), write its `RECIPE.md`, save a screenshot of
-it as `preview.png` and add the repo topic `herdr-layout`. It shows up at
-herdr.dev/layouts within the hour.
+To share one: put that folder in a public GitHub repo (one folder each if
+there are several), write its `RECIPE.md`, save a screenshot of it as
+`preview.png` and add the repo topic `herdr-layout` for a layout or
+`herdr-mod` for a mod. It shows up at herdr.dev/layouts or herdr.dev/mods
+within the hour.
 
 A `RECIPE.md` is a brief: another agent with an empty folder builds the
-layout from it. Write it from the real files, in this order:
+layout or mod from it. Write it from the real files, in this order:
 
 1. `# Name`, one paragraph of what the person sees, `![Name](preview.png)`.
 2. **What you see:** the regions top to bottom or left to right, their
@@ -517,10 +525,11 @@ The main ones:
 - Terminals: `terminal.open {argv?, folder?, place?, name?}`, `terminal.kill {terminal}`,
   `terminal.keep {terminal, place?}`, `terminal.park {terminal}`,
   `terminal.peek {terminal}` (peek over the tab, with keep-as-tab and close),
-  `terminal.show {terminal?, pane?}`, `terminal.copy`, `terminal.paste` (an image
-  alone, into a terminal on another machine: copied there, its path pasted; a
-  local program reads the clipboard itself), `terminal.paste_image` (Ctrl+V: the
-  same for an image; otherwise Ctrl+V goes to the program). TIFF and BMP clipboard
+  `terminal.show {terminal?, pane?}`, `terminal.copy`, `terminal.paste` (copied
+  files, such as Finder's or a clipboard manager's image, as if dropped; an image
+  alone as `terminal.paste_image` pastes it), `terminal.paste_image` (Ctrl+V: an
+  image, into a terminal on another machine: copied there, its path pasted;
+  otherwise Ctrl+V goes to the program, which reads the clipboard itself). TIFF and BMP clipboard
   images are converted to PNG before sending,
   `terminal.right_click {to: "program" | "menu", terminal?}` (where right-clicks go
   when the program takes the mouse; kept as its label `herdr.right-click=program`;

@@ -1,0 +1,16 @@
+Executable=/private/tmp/herdr-codesign2/Herdr.app/Contents/MacOS/Herdr
+Identifier=dev.herdr.app
+Format=app bundle with Mach-O thin (arm64)
+CodeDirectory v=20500 size=498361 flags=0x10000(runtime) hashes=15563+7 location=embedded
+Signature size=9042
+Authority=Developer ID Application: Herdr, Inc. (2W9652Q7QR)
+Authority=Developer ID Certification Authority
+Authority=Apple Root CA
+Timestamp=30 Oct 2026 at 01:45:11
+Info.plist entries=11
+TeamIdentifier=2W9652Q7QR
+Runtime Version=15.5.0
+Sealed Resources version=2 rules=13 files=3
+Internal requirements count=1 size=176
+Total signatures=1
+Chosen signature=1

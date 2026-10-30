@@ -36,8 +36,16 @@ try {
     $t = $m.targets.$target
     if (-not $t.url -or -not $t.sha256) { Fail "no build for $target yet" }
 
+    # Tells the release server's download counter a new install from a
+    # reinstall; the file is the same either way. Only plain URLs on the
+    # release server in use are marked: one with a query or fragment (a
+    # mirror's signed URL) is fetched exactly as the manifest gives it.
+    $src = if (Test-Path $dir) { "reinstall" } else { "install" }
+    $plain = $t.url.StartsWith("$releases/", [StringComparison]::Ordinal) -and $t.url.IndexOfAny([char[]]"?#") -lt 0
+    $download = if ($plain) { "$($t.url)?src=$src" } else { $t.url }
+
     Write-Host "Installing Herdr $($m.version) for $target..."
-    curl.exe -fsSL $t.url -o "$tmp\app.tar.gz"
+    curl.exe -fsSL $download -o "$tmp\app.tar.gz"
     if ($LASTEXITCODE) { Fail "download failed: $($t.url)" }
     # .NET, not Get-FileHash: that one fails when PowerShell 7 starts 5.1.
     $stream = [IO.File]::OpenRead("$tmp\app.tar.gz")
