@@ -32,7 +32,7 @@ pub const DEFAULTS: &str = include_str!("../defaults/keys.json");
 #[cfg(target_os = "macos")]
 pub const DEFAULTS: &str = include_str!("../defaults/keys.macos.json");
 
-// Exact originals from release tags, deduplicated across v0.1.4–v0.1.12.
+// Previous default keys, including release originals deduplicated across v0.1.4–v0.1.12.
 // Keep these when defaults change: only untouched shipped files may migrate.
 #[cfg(any(not(target_os = "macos"), test))]
 const SHIPPED_KEYS: &[&str] = &[

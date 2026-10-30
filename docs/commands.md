@@ -315,6 +315,30 @@ Search the focused terminal's screen and scrollback; the find bar and query stay
 
 No arguments.
 
+## `terminal.zoom_in`
+
+Make one terminal's text bigger for this app session (default: the focused terminal).
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
+## `terminal.zoom_out`
+
+Make one terminal's text smaller for this app session (default: the focused terminal).
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
+## `terminal.zoom_reset`
+
+Reset one terminal's text size for this app session (default: the focused terminal).
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
 ## `agent.focus`
 
 Show an agent (sub-agents too).
