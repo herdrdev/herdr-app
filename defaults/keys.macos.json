@@ -59,6 +59,10 @@
     "ctrl-9": "space.select:9"
   },
   "terminal": {
+    "cmd-shift-+": "terminal.zoom_in",
+    "cmd-shift-=": "terminal.zoom_in",
+    "cmd-shift--": "terminal.zoom_out",
+    "cmd-shift-0": "terminal.zoom_reset",
     "cmd-c": "terminal.copy",
     "cmd-v": "terminal.paste",
     "ctrl-v": "terminal.paste_image",

@@ -16,6 +16,16 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
+const FONT_ZOOM_MIN: f32 = 0.5;
+const FONT_ZOOM_MAX: f32 = 3.0;
+
+fn next_font_zoom(current: f32, steps: i32) -> f32 {
+    if steps == 0 {
+        return 1.0;
+    }
+    ((current * 10.0).round() + steps as f32).clamp(FONT_ZOOM_MIN * 10.0, FONT_ZOOM_MAX * 10.0) / 10.0
+}
+
 fn pad() -> (f32, f32) {
     let p = crate::settings::get().terminal_padding;
     let zoom = crate::settings::zoom();
@@ -102,6 +112,8 @@ pub struct TerminalView {
     typed_at: Cell<Option<Instant>>,
     /// Scrolled this gesture, in lines, toward the next whole one.
     scrolled: f32,
+    /// This view's session-only font scale; the layout/app size is 1.
+    font_zoom: f32,
     _reader: Option<Task<()>>,
 }
 
@@ -170,6 +182,7 @@ impl TerminalView {
             shown_in: Cell::new(0),
             typed_at: Cell::new(None),
             scrolled: 0.0,
+            font_zoom: 1.0,
             _reader: None,
         };
         view.connect(core, false, cx);
@@ -293,6 +306,13 @@ impl TerminalView {
         if let Some(ch) = g.channel {
             g.core.detach(ch);
         }
+    }
+
+    /// Changes only this terminal view's font size for this app session.
+    pub fn zoom_font(&mut self, steps: i32, cx: &mut Context<Self>) -> (f32, f32) {
+        self.font_zoom = next_font_zoom(self.font_zoom, steps);
+        cx.notify();
+        (self.font_zoom, crate::settings::font_size() * self.font_zoom)
     }
 
     /// Feeds relayed bytes in; returns false once the stream is over.
@@ -891,11 +911,11 @@ fn cell_font(bold: bool, italic: bool) -> Font {
     f
 }
 
-pub fn cell_size(window: &Window) -> Size<Pixels> {
+pub fn cell_size(window: &Window, font_size: f32) -> Size<Pixels> {
     let ts = window.text_system();
     let f = cell_font(false, false);
     let id = ts.resolve_font(&f);
-    let fs = px(crate::settings::font_size());
+    let fs = px(font_size);
     let w = ts.advance(id, fs, 'M').map(|s| s.width).unwrap_or(fs * 0.6);
     let h = ts.ascent(id, fs) + ts.descent(id, fs).abs();
     // The width stays the font's own advance: GPUI only moves a glyph onto the
@@ -915,7 +935,7 @@ enum RowOp {
 
 /// A row's drawing: its backgrounds, merged into runs of one color, then its
 /// text in runs of one style (wide characters, sprites and icons on their own).
-fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, window: &mut Window) -> Vec<RowOp> {
+fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, font_size: f32, window: &mut Window) -> Vec<RowOp> {
     crate::bench::count(&crate::bench::ROWS);
     let mut ops = Vec::new();
     let mut x = 0;
@@ -998,13 +1018,13 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, window: &mut Window) -> Vec<Row
             strikethrough: c.strike.then(|| StrikethroughStyle { thickness: px(1.0), color: Some(color) }),
         };
         let force = (!c.wide).then_some(cell.width);
-        let line = window.text_system().shape_line(text.into(), px(crate::settings::font_size()), &[run], force);
+        let line = window.text_system().shape_line(text.into(), px(font_size), &[run], force);
         ops.push(RowOp::Text { x: start, line });
     }
     ops
 }
 
-fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, window: &mut Window, cx: &mut App) {
+fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, font_size: f32, focused: bool, window: &mut Window, cx: &mut App) {
     crate::bench::count(&crate::bench::GRID);
     let mut g = grid.borrow_mut();
     let cell = g.cell;
@@ -1067,7 +1087,7 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     // Each row's drawing is built once and painted again while the row is the
     // same (`Vt::frame` keeps a row libghostty didn't change): an agent's spinner
     // line rebuilds one row, not the whole screen.
-    let with = (crate::settings::font_size().to_bits(), cell, crate::settings::terminal_font(), crate::settings::fonts_added());
+    let with = (font_size.to_bits(), cell, crate::settings::terminal_font(), crate::settings::fonts_added());
     // When every row changed (output scrolling), nothing is kept: the next
     // frame would find none of them the same.
     let mut painted = std::mem::take(&mut grid.borrow_mut().painted);
@@ -1078,11 +1098,11 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     for (y, row) in frame.rows.iter().enumerate() {
         let fresh;
         let ops = if frame.all {
-            fresh = row_ops(row, cell, window);
+            fresh = row_ops(row, cell, font_size, window);
             &fresh
         } else {
             if painted.get(y).is_none_or(|(r, _)| !Rc::ptr_eq(r, row)) {
-                let ops = row_ops(row, cell, window);
+                let ops = row_ops(row, cell, font_size, window);
                 if y < painted.len() {
                     painted[y] = (row.clone(), ops);
                 } else {
@@ -1140,7 +1160,7 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
                         underline: None,
                         strikethrough: None,
                     };
-                    let line = window.text_system().shape_line(c.text.clone().into(), px(crate::settings::font_size()), &[run], None);
+                    let line = window.text_system().shape_line(c.text.clone().into(), px(font_size), &[run], None);
                     let _ = line.paint(p, cell.height, TextAlign::Left, None, window, cx);
                 }
             }
@@ -1166,7 +1186,7 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
             underline: Some(UnderlineStyle { thickness: px(1.0), color: Some(fg), wavy: false }),
             strikethrough: None,
         };
-        let line = window.text_system().shape_line(text.into(), px(crate::settings::font_size()), &[run], None);
+        let line = window.text_system().shape_line(text.into(), px(font_size), &[run], None);
         window.paint_quad(fill(snap_box(Bounds::new(p, size(line.width, cell.height))), hsla(frame.bg)));
         let _ = line.paint(p, cell.height, TextAlign::Left, None, window, cx);
     }
@@ -1239,7 +1259,8 @@ impl Render for TerminalView {
                 g.core.focus(ch, focused);
             }
         }
-        let cell = cell_size(window);
+        let font_size = crate::settings::font_size() * self.font_zoom;
+        let cell = cell_size(window, font_size);
         let hover = self.grid.borrow().hover;
         let found = hover.filter(|_| link_mods(&window.modifiers())).and_then(|pos| self.link_at(pos));
         let (link, spans) = found.unzip();
@@ -1365,7 +1386,7 @@ impl Render for TerminalView {
                         }
                     },
                     move |bounds, _, window, cx| {
-                        paint_grid(bounds, &grid_paint, focused, window, cx);
+                        paint_grid(bounds, &grid_paint, font_size, focused, window, cx);
                         // While focused, the OS input methods (Pinyin, Japanese,
                         // dead keys) type into this terminal.
                         if focused {
@@ -1408,6 +1429,15 @@ mod tests {
         }
     }
 
+    #[test]
+    fn per_terminal_font_zoom_steps_resets_and_clamps() {
+        assert_eq!(super::next_font_zoom(1.0, 1), 1.1);
+        assert_eq!(super::next_font_zoom(1.1, -1), 1.0);
+        assert_eq!(super::next_font_zoom(2.4, 0), 1.0);
+        assert_eq!(super::next_font_zoom(3.0, 1), 3.0);
+        assert_eq!(super::next_font_zoom(0.5, -1), 0.5);
+    }
+
     #[gpui::test]
     fn missing_icons_render_as_text_at_every_position(cx: &mut gpui::TestAppContext) {
         let window = cx.add_window(|_, _| Empty);
@@ -1420,7 +1450,7 @@ mod tests {
                         let row: Vec<_> = text.chars().map(|c| crate::vt::Cell {
                             text: c.to_string(), underline, strike, ..Default::default()
                         }).collect();
-                        let ops = super::row_ops(&row, gpui::size(gpui::px(8.0), gpui::px(16.0)), window);
+                        let ops = super::row_ops(&row, gpui::size(gpui::px(8.0), gpui::px(16.0)), 14.0, window);
                         let rendered: String = ops.iter().filter_map(|op| match op {
                             super::RowOp::Text { line, .. } => Some(line.text.as_ref()),
                             _ => None,
@@ -1447,7 +1477,7 @@ mod tests {
                 let text = char::from_u32(code).unwrap().to_string();
                 for decorated in [false, true] {
                     let row = [crate::vt::Cell { text: text.clone(), underline: decorated, strike: decorated, ..Default::default() }];
-                    let ops = super::row_ops(&row, gpui::size(gpui::px(8.0), gpui::px(16.0)), window);
+                    let ops = super::row_ops(&row, gpui::size(gpui::px(8.0), gpui::px(16.0)), 14.0, window);
                     assert_eq!(ops.len(), 1, "U+{code:X}");
                     match &ops[0] {
                         super::RowOp::Text { x, line } => { assert_eq!(*x, 0); assert_eq!(line.text.as_ref(), text); }

@@ -60,6 +60,10 @@
     "shift-f2": "space.rename"
   },
   "terminal": {
+    "ctrl-shift-+": "terminal.zoom_in",
+    "ctrl-shift-=": "terminal.zoom_in",
+    "ctrl-shift--": "terminal.zoom_out",
+    "ctrl-shift-0": "terminal.zoom_reset",
     "ctrl-backspace": "send:\u0017",
     "ctrl-left": "send:\u001bb",
     "ctrl-right": "send:\u001bf",

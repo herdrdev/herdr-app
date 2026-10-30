@@ -32,6 +32,7 @@ herdr-app do space.new --name api --folder /path/to/api
 herdr-app do tab.new --name "fix login" --argv '["claude"]' --task "Look at the login bug"
 herdr-app do pane.split --direction right --pane p12
 herdr-app do agent.focus --terminal t7
+herdr-app do terminal.zoom_in --pane p12  # this session; only that terminal's text
 ```
 
 For a remote space:
