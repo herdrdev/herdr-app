@@ -283,6 +283,26 @@ Paste into the focused terminal (copied files as if dropped; an image alone as t
 
 No arguments.
 
+## `terminal.find`
+
+Find text in the focused terminal and its scrollback: opens its find bar (with text: finds that). ASCII letters match in any case, the rest exactly.
+
+| Argument | Required |
+|---|---|
+| `text` | no |
+
+## `terminal.find_next`
+
+Select the focused terminal's next match up, toward older output, scrolling to it (its find bar must be open).
+
+No arguments.
+
+## `terminal.find_prev`
+
+Select the focused terminal's previous match, back toward newer output.
+
+No arguments.
+
 ## `terminal.paste_image`
 
 Ctrl+V: the clipboard's image as a file on the focused terminal's machine, when that's another one; on Windows, paste clipboard text; otherwise Ctrl+V goes to the terminal.

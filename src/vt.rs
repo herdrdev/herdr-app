@@ -56,6 +56,9 @@ pub struct Theme {
     pub bg: Rgb,
     pub cursor: Rgb,
     pub selection_bg: Rgb,
+    /// Behind the matches of a find, and behind the one it selected.
+    pub find_match: Rgb,
+    pub find_active: Rgb,
     pub palette16: [Rgb; 16],
     pub minimum_contrast: f32,
 }
@@ -69,7 +72,16 @@ pub fn theme() -> Theme {
     for (i, c) in palette16.iter_mut().enumerate() {
         *c = get(&format!("ansi{i}"));
     }
-    Theme { fg: get("terminal_foreground"), bg: get("background"), cursor: get("cursor"), selection_bg: get("selection"), palette16, minimum_contrast: crate::settings::get().minimum_contrast }
+    Theme {
+        fg: get("terminal_foreground"),
+        bg: get("background"),
+        cursor: get("cursor"),
+        selection_bg: get("selection"),
+        find_match: get("find_match"),
+        find_active: get("find_active"),
+        palette16,
+        minimum_contrast: crate::settings::get().minimum_contrast,
+    }
 }
 
 #[derive(Clone, Default, PartialEq)]
@@ -470,18 +482,54 @@ pub struct Vt {
     /// The cursor, the kitty images and the colors as last drawn: changes to
     /// them don't mark the render state dirty.
     drawn: (CursorKey, u64, u64),
-    /// The rows read last frame by libghostty's row id, with their selection:
-    /// one that isn't dirty is the same row and isn't read again.
-    seen: HashMap<[u64; 2], (Rc<Vec<Cell>>, Option<(u16, u16)>)>,
+    /// The rows read last frame by libghostty's row id, with their selection
+    /// and find marks: one that isn't dirty is the same row and isn't read again.
+    seen: HashMap<[u64; 2], (Rc<Vec<Cell>>, Option<(u16, u16)>, Marks)>,
     /// The width and colors they were read with: a change reads every row.
     seen_with: (u16, u64),
     placements_cache: RefCell<Option<Vec<Placement>>>,
     /// Whether the program wants win32 key events (Ghostty doesn't track it).
     pub win32: crate::win32_keys::Win32Input,
+    /// Find in the terminal and its scrollback: libghostty's search, made on first use.
+    search: GhosttySearch,
+    /// The search has a needle: frames feed it and mark its matches.
+    find_on: bool,
+    /// A new needle selects the newest match as soon as one is found.
+    find_select: bool,
+    /// The matches on each viewport row, as of the last frame.
+    find_marks: Vec<Marks>,
 }
 
 /// What of the cursor a frame shows: (on screen, x, y, visible, style).
 type CursorKey = (bool, u16, u16, bool, i32);
+
+/// A row's find matches: (first column, last column, the selected match).
+type Marks = Vec<(u16, u16, bool)>;
+
+/// What a find has found so far.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub struct FindStatus {
+    pub total: usize,
+    /// The selected match: 0 is the newest (nearest the prompt).
+    pub selected: Option<usize>,
+    /// Scrollback still being read: more matches may come.
+    pub busy: bool,
+}
+
+/// What colors a cell's background, strongest first.
+#[derive(Clone, Copy, PartialEq)]
+enum Mark {
+    None,
+    Match,
+    Active,
+    Selected,
+}
+
+/// How long a frame may spend reading scrollback for a find; the rest waits
+/// for the next frame, so a long history doesn't stall the window.
+const FIND_BUDGET: Duration = Duration::from_millis(4);
+/// Text on a find highlight stays readable, whatever the program colored it.
+const FIND_CONTRAST: f32 = 3.0;
 
 /// Where a link shows: (viewport row, first column, last column) per row.
 pub type Spans = Vec<(u16, u16, u16)>;
@@ -620,6 +668,10 @@ impl Vt {
                 seen_with: (0, 0),
                 placements_cache: RefCell::new(None),
                 win32: Default::default(),
+                search: std::ptr::null_mut(),
+                find_on: false,
+                find_select: false,
+                find_marks: Vec::new(),
             };
             vt.apply_theme();
             vt
@@ -1104,6 +1156,149 @@ impl Vt {
         unsafe { ghostty_terminal_scroll_viewport(self.term, s) };
     }
 
+    /// Finds `needle` on screen and in the scrollback (ASCII letters in any
+    /// case, the rest exactly); frames mark its matches. Empty: stops finding.
+    /// `select`: the newest match is selected (and shown) once there is one.
+    pub fn find(&mut self, needle: &str, select: bool) {
+        unsafe {
+            if self.search.is_null() {
+                if needle.is_empty() {
+                    return;
+                }
+                ok(ghostty_search_new(std::ptr::null(), &mut self.search, self.term), "search_new");
+            }
+            let s = GhosttyString { ptr: needle.as_ptr(), len: needle.len() };
+            let value = if needle.is_empty() { std::ptr::null() } else { &s as *const _ as *const c_void };
+            ghostty_search_set(self.search, GHOSTTY_SEARCH_OPT_NEEDLE, value);
+        }
+        self.find_on = !needle.is_empty();
+        self.find_select = self.find_on && select;
+        self.find_marks.clear();
+    }
+
+    /// Selects the next match toward older output (`older`) or toward newer,
+    /// wrapping around, and scrolls it into view. False when nothing matches.
+    pub fn find_step(&mut self, older: bool) -> bool {
+        if !self.find_on {
+            return false;
+        }
+        self.placements_cache.get_mut().take();
+        let opt = if older { GHOSTTY_SEARCH_OPT_SELECT_NEXT } else { GHOSTTY_SEARCH_OPT_SELECT_PREV };
+        let selected = unsafe { ghostty_search_set(self.search, opt, std::ptr::null()) == GHOSTTY_SUCCESS };
+        // Before the scrollback is read there may be nothing to select yet:
+        // the first match found is selected then.
+        if selected {
+            self.find_select = false;
+        }
+        selected
+    }
+
+    /// What the find has found, as of the last frame.
+    pub fn find_status(&self) -> FindStatus {
+        if !self.find_on {
+            return FindStatus::default();
+        }
+        unsafe {
+            let s = self.search;
+            let mut status: GhosttySearchStatus = GHOSTTY_SEARCH_STATUS_COMPLETE;
+            ghostty_search_get(s, GHOSTTY_SEARCH_DATA_STATUS, &mut status as *mut _ as *mut c_void);
+            let mut total = 0usize;
+            ghostty_search_get(s, GHOSTTY_SEARCH_DATA_TOTAL_MATCHES, &mut total as *mut _ as *mut c_void);
+            let mut index = 0usize;
+            let selected = (ghostty_search_get(s, GHOSTTY_SEARCH_DATA_SELECTED_INDEX, &mut index as *mut _ as *mut c_void) == GHOSTTY_SUCCESS)
+                .then_some(index);
+            FindStatus { total, selected, busy: status != GHOSTTY_SEARCH_STATUS_COMPLETE }
+        }
+    }
+
+    /// Catches the find up with the terminal, reading scrollback for at most
+    /// `FIND_BUDGET`, and selects the newest match for a new needle once one
+    /// is found. Before the render state is read: selecting may scroll.
+    fn find_pump(&mut self) {
+        unsafe {
+            let s = self.search;
+            ghostty_search_feed(s);
+            let started = Instant::now();
+            loop {
+                let mut status: GhosttySearchStatus = GHOSTTY_SEARCH_STATUS_COMPLETE;
+                if ghostty_search_tick(s, &mut status) != GHOSTTY_SUCCESS || started.elapsed() >= FIND_BUDGET {
+                    break;
+                }
+                match status {
+                    GHOSTTY_SEARCH_STATUS_RUNNING => {}
+                    GHOSTTY_SEARCH_STATUS_FEED_REQUIRED => {
+                        ghostty_search_feed(s);
+                    }
+                    _ => break,
+                }
+            }
+            if self.find_select {
+                let found = self.find_status();
+                if found.total > 0 && found.selected.is_none() && self.find_step(true) {
+                    // The match list is as of the last feed, and selecting may have scrolled.
+                    ghostty_search_feed(s);
+                }
+            }
+        }
+    }
+
+    /// Where a match shows in the viewport, by row: libghostty finds them a
+    /// page at a time, so some are outside it.
+    fn find_read_marks(&mut self) {
+        let rows = self.rows as usize;
+        self.find_marks.clear();
+        self.find_marks.resize(rows, Vec::new());
+        unsafe {
+            let s = self.search;
+            let sized = GhosttySelection { size: std::mem::size_of::<GhosttySelection>(), ..Default::default() };
+            let mut found = vec![sized; 64];
+            let mut buf = GhosttySelectionBuffer { ptr: found.as_mut_ptr(), cap: found.len(), len: 0 };
+            let mut r = ghostty_search_get(s, GHOSTTY_SEARCH_DATA_VIEWPORT_MATCHES, &mut buf as *mut _ as *mut c_void);
+            if r == GHOSTTY_OUT_OF_SPACE {
+                found.resize(buf.len, sized);
+                buf = GhosttySelectionBuffer { ptr: found.as_mut_ptr(), cap: found.len(), len: 0 };
+                r = ghostty_search_get(s, GHOSTTY_SEARCH_DATA_VIEWPORT_MATCHES, &mut buf as *mut _ as *mut c_void);
+            }
+            if r != GHOSTTY_SUCCESS {
+                return;
+            }
+            found.truncate(buf.len);
+            let mut chosen = sized;
+            let chosen = (ghostty_search_get(s, GHOSTTY_SEARCH_DATA_SELECTED_MATCH, &mut chosen as *mut _ as *mut c_void) == GHOSTTY_SUCCESS)
+                .then(|| self.screen_span(&chosen))
+                .flatten();
+            // Screen rows count from the top of the scrollback; the viewport starts at `top`.
+            let Some(top) = self.grid_ref(GHOSTTY_POINT_TAG_VIEWPORT, 0, 0).and_then(|r| {
+                let mut p = GhosttyPointCoordinate::default();
+                (ghostty_terminal_point_from_grid_ref(self.term, &r, GHOSTTY_POINT_TAG_SCREEN, &mut p) == GHOSTTY_SUCCESS).then_some(p.y)
+            }) else {
+                return;
+            };
+            let last = self.cols.saturating_sub(1);
+            for m in &found {
+                let Some(((x0, y0), (x1, y1))) = self.screen_span(m) else { continue };
+                let active = chosen == Some(((x0, y0), (x1, y1)));
+                for y in y0..=y1 {
+                    let Some(vy) = y.checked_sub(top).map(|v| v as usize).filter(|v| *v < rows) else { continue };
+                    let from = if y == y0 { x0 } else { 0 };
+                    let to = if y == y1 { x1 } else { last };
+                    self.find_marks[vy].push((from, to.min(last), active));
+                }
+            }
+        }
+    }
+
+    /// A match's first and last cell in screen coordinates (top of the
+    /// scrollback is row 0), first one first.
+    fn screen_span(&self, m: &GhosttySelection) -> Option<((u16, u32), (u16, u32))> {
+        let at = |r: &GhosttyGridRef| unsafe {
+            let mut p = GhosttyPointCoordinate::default();
+            (ghostty_terminal_point_from_grid_ref(self.term, r, GHOSTTY_POINT_TAG_SCREEN, &mut p) == GHOSTTY_SUCCESS).then_some((p.x, p.y))
+        };
+        let (a, b) = (at(&m.start)?, at(&m.end)?);
+        Some(if (a.1, a.0) <= (b.1, b.0) { (a, b) } else { (b, a) })
+    }
+
     /// Wraps pasted text the way the program asked (bracketed paste or not).
     pub fn paste_bytes(&self, text: &str) -> Vec<u8> {
         if self.mode(BRACKETED_PASTE) {
@@ -1164,8 +1359,18 @@ impl Vt {
                 self.shared.held_since = None;
             }
             let state = self.shared.state;
-            if self.shared.held_since.is_none() {
+            // While output is held, the screen stays as it was, and so do its marks.
+            let live = self.shared.held_since.is_none();
+            if live && self.find_on {
+                self.find_pump();
+            }
+            if live {
                 ghostty_render_state_update(state, self.term);
+            }
+            if !self.find_on {
+                self.find_marks.clear();
+            } else if live {
+                self.find_read_marks();
             }
 
             let mut colors = GhosttyRenderStateColors { size: std::mem::size_of::<GhosttyRenderStateColors>(), ..Default::default() };
@@ -1190,27 +1395,48 @@ impl Vt {
                 let selection = selected.then_some((sel.start_x, sel.end_x));
                 let mut id = GhosttyRenderStateRowId::default();
                 let known = ghostty_render_state_row_get(self.rows_it, GHOSTTY_RENDER_STATE_ROW_DATA_ID, &mut id as *mut _ as *mut c_void) == GHOSTTY_SUCCESS;
+                // Held, the screen is the one the hold started with, maybe scrolled
+                // since the marks were read: a row keeps the marks it had, by its id.
+                let marks = if live {
+                    self.find_marks.get(rows.len()).cloned().unwrap_or_default()
+                } else {
+                    known.then(|| self.seen.get(&id.bits).map(|s| s.2.clone())).flatten().unwrap_or_default()
+                };
                 // Everything changed: no row is kept (but each is remembered).
                 let mut row_dirty = true;
                 if !all {
                     ghostty_render_state_row_get(self.rows_it, GHOSTTY_RENDER_STATE_ROW_DATA_DIRTY, &mut row_dirty as *mut _ as *mut c_void);
                 }
-                let same = (known && !row_dirty).then(|| self.seen.get(&id.bits)).flatten().filter(|(_, s)| *s == selection);
+                let same = (known && !row_dirty).then(|| self.seen.get(&id.bits)).flatten().filter(|(_, s, m)| *s == selection && *m == marks);
                 let row = match same {
-                    Some((row, _)) => row.clone(),
+                    Some((row, _, _)) => row.clone(),
                     None => {
                         ghostty_render_state_row_get(self.rows_it, GHOSTTY_RENDER_STATE_ROW_DATA_CELLS, &mut self.cells as *mut _ as *mut c_void);
                         let mut row = Vec::with_capacity(self.cols as usize);
                         let mut x: u16 = 0;
+                        // A wide character's second cell is marked as its first.
+                        let mut tail = Mark::None;
                         while ghostty_render_state_row_cells_next(self.cells) {
-                            row.push(self.read_cell(fg_default, selected && x >= sel.start_x && x <= sel.end_x));
+                            let mark = if tail != Mark::None {
+                                tail
+                            } else if selected && x >= sel.start_x && x <= sel.end_x {
+                                Mark::Selected
+                            } else {
+                                marks.iter().filter(|(a, b, _)| *a <= x && x <= *b).fold(Mark::None, |m, (_, _, active)| {
+                                    let this = if *active { Mark::Active } else { Mark::Match };
+                                    if m == Mark::Active { m } else { this }
+                                })
+                            };
+                            let cell = self.read_cell(fg_default, mark);
+                            tail = if cell.wide { mark } else { Mark::None };
+                            row.push(cell);
                             x += 1;
                         }
                         Rc::new(row)
                     }
                 };
                 if known {
-                    seen.insert(id.bits, (row.clone(), selection));
+                    seen.insert(id.bits, (row.clone(), selection, marks));
                 }
                 rows.push(row);
             }
@@ -1237,7 +1463,7 @@ impl Vt {
         }
     }
 
-    unsafe fn read_cell(&mut self, fg_default: Rgb, selected: bool) -> Cell {
+    unsafe fn read_cell(&mut self, fg_default: Rgb, mark: Mark) -> Cell {
         unsafe {
             let c = self.cells;
             let mut raw: GhosttyCell = Default::default();
@@ -1267,8 +1493,11 @@ impl Vt {
                 bg = Some(fg);
                 fg = new_fg;
             }
-            if selected {
-                bg = Some(self.theme.selection_bg);
+            match mark {
+                Mark::Selected => bg = Some(self.theme.selection_bg),
+                Mark::Active => bg = Some(self.theme.find_active),
+                Mark::Match => bg = Some(self.theme.find_match),
+                Mark::None => {}
             }
             let mut text = String::new();
             if wide != GHOSTTY_CELL_WIDE_SPACER_TAIL && wide != GHOSTTY_CELL_WIDE_SPACER_HEAD && !style.invisible {
@@ -1288,8 +1517,10 @@ impl Vt {
             }
 
             // Contrast adjustment is opt-in; graphics always keep their colors.
-            if self.theme.minimum_contrast > 1.0 && !preserves_graphics_color(&text) {
-                fg = readable(fg, bg.unwrap_or(self.theme.bg), self.theme.minimum_contrast);
+            let found = matches!(mark, Mark::Match | Mark::Active);
+            let minimum = if found { self.theme.minimum_contrast.max(FIND_CONTRAST) } else { self.theme.minimum_contrast };
+            if minimum > 1.0 && !preserves_graphics_color(&text) {
+                fg = readable(fg, bg.unwrap_or(self.theme.bg), minimum);
             }
 
             Cell {
@@ -1412,6 +1643,8 @@ impl Drop for Vt {
             ghostty_key_encoder_free(self.keys);
             ghostty_render_state_row_cells_free(self.cells);
             ghostty_render_state_row_iterator_free(self.rows_it);
+            // Before the terminal: it releases what it tracks in there.
+            ghostty_search_free(self.search);
             ghostty_terminal_free(self.term);
             ghostty_render_state_free(self.shared.state);
         }
@@ -1474,6 +1707,118 @@ mod tests {
         vt.write(b"\x1b]4;1;rgb:12/34/56\x1b\\");
         let recolored = vt.frame();
         assert!(!Rc::ptr_eq(&after.rows[0], &recolored.rows[0]), "a palette change reads every row");
+    }
+
+    fn line(f: &Frame, y: usize) -> String {
+        f.rows[y].iter().map(|c| if c.text.is_empty() { " " } else { c.text.as_str() }).collect()
+    }
+
+    /// The columns of row `y` with a find highlight: (column, the selected match).
+    fn marked(vt: &Vt, f: &Frame, y: usize) -> Vec<(usize, bool)> {
+        f.rows[y]
+            .iter()
+            .enumerate()
+            .filter_map(|(x, c)| match c.bg {
+                Some(bg) if bg == vt.theme.find_active => Some((x, true)),
+                Some(bg) if bg == vt.theme.find_match => Some((x, false)),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn find_marks_each_match_in_any_ascii_case_and_selects_the_newest() {
+        let mut vt = Vt::new(20, 4);
+        vt.write(b"an error\r\nERROR again\r\nfine");
+        vt.find("error", true);
+        let f = vt.frame();
+        assert_eq!(marked(&vt, &f, 0), (3..8).map(|x| (x, false)).collect::<Vec<_>>());
+        assert_eq!(marked(&vt, &f, 1), (0..5).map(|x| (x, true)).collect::<Vec<_>>(), "the newest match is the one selected");
+        assert!(marked(&vt, &f, 2).is_empty());
+        assert_eq!(vt.find_status(), FindStatus { total: 2, selected: Some(0), busy: false });
+    }
+
+    #[test]
+    fn find_steps_toward_older_matches_and_wraps() {
+        let mut vt = Vt::new(20, 4);
+        vt.write(b"a1 x\r\na2 x\r\na3 x");
+        vt.find("x", true);
+        vt.frame();
+        assert_eq!(vt.find_status().selected, Some(0));
+        assert!(vt.find_step(true));
+        let f = vt.frame();
+        assert_eq!(vt.find_status().selected, Some(1));
+        assert_eq!(marked(&vt, &f, 1), vec![(3, true)]);
+        vt.find_step(true);
+        vt.find_step(true);
+        vt.frame();
+        assert_eq!(vt.find_status().selected, Some(0), "past the oldest it wraps to the newest");
+        vt.find_step(false);
+        vt.frame();
+        assert_eq!(vt.find_status().selected, Some(2), "and back toward newer it wraps the other way");
+    }
+
+    #[test]
+    fn find_scrolls_to_a_match_in_the_scrollback() {
+        let mut vt = Vt::new(30, 5);
+        vt.write(b"the needle is here\r\n");
+        for i in 0..200 {
+            vt.write(format!("line {i}\r\n").as_bytes());
+        }
+        vt.find("needle", true);
+        // Reading a long scrollback can take a few frames.
+        let mut f = vt.frame();
+        for _ in 0..50 {
+            if vt.find_status().selected.is_some() {
+                break;
+            }
+            f = vt.frame();
+        }
+        assert_eq!(vt.find_status().total, 1);
+        let y = (0..5).find(|y| line(&f, *y).starts_with("the needle")).expect("the viewport scrolled to the match");
+        assert_eq!(marked(&vt, &f, y), (4..10).map(|x| (x, true)).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn a_match_wrapped_onto_the_next_row_marks_both_parts() {
+        let mut vt = Vt::new(10, 3);
+        vt.write(b"abcdefghNEEDLE");
+        vt.find("needle", true);
+        let f = vt.frame();
+        assert_eq!(marked(&vt, &f, 0), vec![(8, true), (9, true)]);
+        assert_eq!(marked(&vt, &f, 1), (0..4).map(|x| (x, true)).collect::<Vec<_>>());
+    }
+
+    #[test]
+    fn stopping_a_find_clears_its_marks_and_a_selection_wins_over_them() {
+        let mut vt = Vt::new(20, 3);
+        vt.write(b"find me");
+        vt.find("me", true);
+        let f = vt.frame();
+        assert_eq!(marked(&vt, &f, 0).len(), 2);
+        vt.select(Select::Press, 5, 0, 5.0 * 8.0 + 1.0, 1.0, 8.0, 48.0);
+        vt.select(Select::Drag, 6, 0, 6.0 * 8.0 + 7.0, 1.0, 8.0, 48.0);
+        let f = vt.frame();
+        assert!(f.rows[0][5].bg == Some(vt.theme.selection_bg) || f.rows[0][6].bg == Some(vt.theme.selection_bg), "{:?}", marked(&vt, &f, 0));
+        vt.clear_selection();
+        vt.find("", true);
+        let f = vt.frame();
+        assert!(marked(&vt, &f, 0).is_empty());
+        assert_eq!(vt.find_status(), FindStatus::default());
+    }
+
+    #[test]
+    fn rows_are_read_again_when_their_marks_change() {
+        let mut vt = Vt::new(20, 3);
+        vt.write(b"one\r\ntwo");
+        let before = vt.frame();
+        vt.find("two", true);
+        let found = vt.frame();
+        assert!(Rc::ptr_eq(&before.rows[0], &found.rows[0]), "a row without matches is kept");
+        assert!(!Rc::ptr_eq(&before.rows[1], &found.rows[1]));
+        vt.find("", true);
+        let cleared = vt.frame();
+        assert!(marked(&vt, &cleared, 1).is_empty());
     }
 
     #[test]

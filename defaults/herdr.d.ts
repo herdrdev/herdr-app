@@ -260,7 +260,8 @@ export function placement(): {
 /** Every theme color by name: background (the terminals'), surface, canvas (behind cards),
  *  chrome (sidebars and bars), popover, raised, hover, selected, border, input, foreground,
  *  muted, dim, accent, accent_foreground, solid and solid_foreground (a primary button: ink on
- *  paper, paper on ink), selection, working, blocked, done, idle, unknown, ansi0..ansi15.
+ *  paper, paper on ink), selection, find_match and find_active (a terminal find's matches,
+ *  the selected one), working, blocked, done, idle, unknown, ansi0..ansi15.
  *  Light and dark themes name the same colors, so a mod that uses them follows both. */
 export function theme(): Record<string, string>;
 
