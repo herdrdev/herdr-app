@@ -402,6 +402,14 @@ Open a mod as the overlay its mod.json describes.
 |---|---|
 | `name` | yes |
 
+## `import.herdr`
+
+Bring herdr's workspaces over: a space per workspace, its tabs, and each agent resumed on the session it left.
+
+| Argument | Required |
+|---|---|
+| `file` | no |
+
 ## `overlay.close`
 
 Close an overlay (default: the top dialog or popup).
