@@ -388,7 +388,6 @@ export default class Spaces extends View {
       .on_mouse_down("right", () => openOverlay({ mod: "menu", kind: "popup", width: 200, height: 260, props: { tab: "folder", target: { name: f.name } } }))
       .child(svg(`mods/workspace-chrome/chevron-${f.collapsed ? "right" : "down"}.svg`).size(11).flex_none())
       .when(!collapsed, (el) => el
-        .child(svg("mods/workspace-chrome/folder.svg").size(13).flex_none())
         .child(div().flex_1().min_w(0).truncate().font_medium().child(f.name))
         .when(f.collapsed, (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child(String(count))))
         .child(div().flex_none().text_color(tone(t, status)).child(glyph(status))));
