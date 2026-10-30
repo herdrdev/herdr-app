@@ -40,18 +40,18 @@ const base = (path) => path.replace(/\/+$/, "").split("/").pop();
 // for this often, in repos the list shows, while the window is in front.
 const FALLBACK = 60000;
 
-// What a stored color name looks like on an avatar (the same in every mod
-// that draws space avatars): one strong color per hue, light and dark alike.
 // The most urgent first, as a space's own status goes.
 const URGENCY = ["blocked", "done", "working", "idle"];
 
-// Puts space `id` in the folder named `name` ("" or null: in none).
+// Puts space `id` in the folder named `name` ("" or null: in none). The same
+// in the space-folder dialog.
 function moveToFolder(id, name) {
   const list = (shared("space.folders") ?? []).map((f) => ({ ...f, ids: f.ids.filter((x) => x !== id) }));
+  name = (name ?? "").trim();
   if (name) {
     const into = list.find((f) => f.name.toLowerCase() === name.toLowerCase());
     if (into) into.ids.push(id);
-    else list.push({ name, collapsed: false, ids: [id] });
+    else list.push({ name, collapsed: false, ids: [id], parent: null });
   }
   setShared("space.folders", prune(list));
 }
@@ -68,10 +68,11 @@ function lineage(list, name) {
 function nestFolder(name, parent) {
   const list = shared("space.folders") ?? [];
   if (name === parent || (parent && lineage(list, parent).includes(name))) return;
-  setShared("space.folders", list.map((f) => (f.name === name ? { ...f, parent } : f)));
+  setShared("space.folders", prune(list.map((f) => (f.name === name ? { ...f, parent } : f))));
 }
 
-// A folder stays while it holds a space or a folder that stays.
+// A folder stays while it holds a space or a folder that stays. The same in the
+// space-folder dialog.
 function prune(list) {
   for (;;) {
     const kept = list.filter((f) => f.ids.length || list.some((c) => c.parent === f.name));
@@ -80,6 +81,8 @@ function prune(list) {
   }
 }
 
+// What a stored color name looks like on an avatar (the same in every mod
+// that draws space avatars): one strong color per hue, light and dark alike.
 const MARK = { ansi6: "#22a99a", ansi3: "#e3814f", ansi4: "#5b8def", ansi5: "#8b7cf6", ansi2: "#3fae6a", ansi1: "#d9649a" };
 
 // A space speaks up only when something in it needs you.
@@ -282,7 +285,7 @@ export default class Spaces extends View {
         || spaces().some(s => (s.machine ?? null) === m && !this.shown.has(s.id));
     };
     const loadingRow = m => div().id(`machine-loading-${m ?? "local"}`).h(28).flex_none().px(8).text_size(12).text_color(t.dim).child(collapsed ? "…" : "Loading…");
-    if (!remote.length) return loading(null) && !rows.length ? [loadingRow(null)] : this.foldered(rows, t, collapsed, draw);
+    if (!remote.length) return loading(null) && !rows.length ? [loadingRow(null)] : this.foldered(rows, t, collapsed, draw, null);
     const machineNames = [null, ...remote];
     return machineNames.flatMap((m) => {
       const mine = rows.filter((r) => (r.w.machine ?? null) === m);
@@ -307,13 +310,14 @@ export default class Spaces extends View {
         .text_size(12).text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground))
         .on_click(() => run("space.new", m ? { machine: m } : {}))
         .child(svg("mods/workspace-chrome/plus.svg").size(12)).when(!collapsed, el => el.child("New space there"));
-      return [head, ...(folded ? [] : mine.length ? this.foldered(mine, t, collapsed, draw) : [loading(m) ? loadingRow(m) : empty])];
+      return [head, ...(folded ? [] : mine.length ? this.foldered(mine, t, collapsed, draw, m) : [loading(m) ? loadingRow(m) : empty])];
     });
   }
 
   // Rows with each folder's spaces (and their worktrees, and its folders) moved
-  // under its header, where the first of them sits.
-  foldered(rows, t, collapsed, draw) {
+  // under its header, where the first of them sits. A folder with spaces on two
+  // machines has a header in each machine's block.
+  foldered(rows, t, collapsed, draw, m) {
     const folders = shared("space.folders") ?? [];
     if (!folders.length) return rows.map(draw);
     // A worktree row goes with the space above it.
@@ -337,7 +341,7 @@ export default class Spaces extends View {
         const inside = list.filter((v) => v.path[depth] === name);
         const members = inside.flatMap((v) => v.rows);
         const status = URGENCY.find((s) => members.some((r) => r.w.status === s)) ?? "idle";
-        out.push(this.folderHead(f, depth, members.length, status, t, collapsed));
+        out.push(this.folderHead(f, depth, members.length, status, t, collapsed, m));
         if (!f.collapsed) emit(inside, depth + 1);
       }
     };
@@ -345,7 +349,7 @@ export default class Spaces extends View {
     return out;
   }
 
-  folderHead(f, depth, count, status, t, collapsed) {
+  folderHead(f, depth, count, status, t, collapsed, m) {
     const toggle = (_e, cx) => {
       if (this.ghost) return; // the end of a drag, not a click
       const list = (shared("space.folders") ?? []).map((g) => (g.name === f.name ? { ...g, collapsed: !g.collapsed } : g));
@@ -353,10 +357,11 @@ export default class Spaces extends View {
       cx.notify();
     };
     const dragging = this.pressed !== null || (this.pressedFolder !== null && this.pressedFolder !== f.name);
-    return h_flex().id(`folder-${f.name}`).h(26).flex_none().pl(collapsed ? 2 : 8 + 12 * depth).pr(collapsed ? 2 : 8).gap(7).items_center()
+    return h_flex().id(`folder-${m ?? "local"}-${f.name}`).h(26).flex_none().pl(collapsed ? 2 : 8 + 12 * depth).pr(collapsed ? 2 : 8).gap(7).items_center()
       .rounded(7).text_size(12).text_color(t.muted).cursor_pointer().hover((s) => s.bg(t.hover))
       .when(collapsed, (el) => el.justify_center())
       .when(dragging, (el) => el.hover((s) => s.bg(t.selected).text_color(t.foreground)))
+      .when(this.pressedFolder === f.name && Boolean(this.ghost), (el) => el.opacity(0.5))
       .on_mouse_down("left", (e) => {
         this.pressedFolder = f.name;
         this.start = e.position;
@@ -413,6 +418,18 @@ export default class Spaces extends View {
       .when(Boolean(where), (el) => el.child(div().min_w(0).truncate().child(where)))
       .when(g.ahead > 0, (el) => el.child(div().flex_none().text_color(t.ansi2).child(`\u2191${g.ahead}`)))
       .when(g.behind > 0, (el) => el.child(div().flex_none().text_color(t.ansi1).child(`\u2193${g.behind}`)));
+  }
+
+  // Closed spaces leave their folders (so a folder goes with its last space). Not
+  // those on a machine whose spaces aren't known now: away, or still loading.
+  forgetClosed(sp) {
+    const list = shared("space.folders") ?? [];
+    if (!list.length) return;
+    const ids = new Set(sp.map((s) => s.id));
+    const ready = new Set(machines().filter((k) => k.layout === "ready").map((k) => k.name ?? null));
+    // A space on another machine has an id "machine/id".
+    const gone = (id) => !ids.has(id) && ready.has(id.includes("/") ? id.slice(0, id.indexOf("/")) : null);
+    if (list.some((f) => f.ids.some(gone))) setShared("space.folders", prune(list.map((f) => ({ ...f, ids: f.ids.filter((id) => !gone(id)) }))));
   }
 
   avatar(w, t) {
@@ -549,6 +566,7 @@ export default class Spaces extends View {
       changed = true;
     }
     if (changed) setShared("space.colors", kept);
+    this.forgetClosed(sp);
     if (this.pressed === null && this.pressedFolder === null) this.ghost = null;
     const card = this.dragCard(t);
     return v_flex().id("spaces-root").relative().size_full().min_h(0).bg(t.chrome).text_size(13)

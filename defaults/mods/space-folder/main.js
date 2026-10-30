@@ -1,20 +1,21 @@
 // Puts a space, or a folder, in a folder of the spaces sidebar. Enter saves, Esc
 // cancels. props { space } or { folder }. An empty name puts it at the top; a new
 // name makes a folder there. Empty folders go away.
-// Folders live in shared("space.folders"): [{ name, collapsed, ids }].
+// Folders live in shared("space.folders"): [{ name, collapsed, ids, parent }].
+// moveToFolder, lineage and prune are the same in the spaces mod.
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
 import { props, closeOverlay, theme, shared, setShared } from "herdr";
 
 const folders = () => shared("space.folders") ?? [];
 
-function moveToFolder(space, name) {
-  const list = folders().map((f) => ({ ...f, ids: f.ids.filter((id) => id !== space) }));
-  name = name.trim();
+function moveToFolder(id, name) {
+  const list = folders().map((f) => ({ ...f, ids: f.ids.filter((x) => x !== id) }));
+  name = (name ?? "").trim();
   if (name) {
     const into = list.find((f) => f.name.toLowerCase() === name.toLowerCase());
-    if (into) into.ids.push(space);
-    else list.push({ name, collapsed: false, ids: [space] });
+    if (into) into.ids.push(id);
+    else list.push({ name, collapsed: false, ids: [id], parent: null });
   }
   setShared("space.folders", prune(list));
 }
