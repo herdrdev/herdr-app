@@ -1462,7 +1462,7 @@ impl AppWindow {
         self.focused_pane = focused.clone();
         let no_dialog = !self.overlays.iter().any(|o| o.kind.modal_keys());
         if terminal_block(&self.chrome, focused.as_deref()).is_some() {
-            if pane_changed && no_dialog && let Some(f) = focused.as_deref().and_then(|p| self.pane_focus(p)) {
+            if pane_changed && no_dialog && let Some(f) = focused.as_deref().and_then(|p| self.pane_focus(p, cx)) {
                 f.focus(window, cx);
             }
         } else if let Some(block) = self.agent_block() {
@@ -1479,7 +1479,7 @@ impl AppWindow {
             // A mod pane takes the keyboard on a click; until then the window holds
             // it, so another tab's terminal can't keep it (and pull its tab back).
             if no_dialog {
-                focused.and_then(|p| self.pane_focus(&p)).unwrap_or_else(|| self.focus.clone()).focus(window, cx);
+                focused.and_then(|p| self.pane_focus(&p, cx)).unwrap_or_else(|| self.focus.clone()).focus(window, cx);
             }
         }
         if self.window_active {
@@ -1542,11 +1542,11 @@ impl AppWindow {
             return self.hand_keyboard();
         }
         let shown = if terminal_block(&self.chrome, self.focused_pane.as_deref()).is_some() {
-            self.focused_pane.as_deref().and_then(|p| self.pane_focus(p))
+            self.focused_pane.as_deref().and_then(|p| self.pane_focus(p, cx))
         } else if let Some(block) = self.agent_block() {
             self.shown_agent().and_then(|a| self.agent_view(&block, &a)).map(|t| t.focus.clone())
         } else if self.shows_tab() {
-            self.model.focused_pane().and_then(|p| self.pane_focus(&p))
+            self.model.focused_pane().and_then(|p| self.pane_focus(&p, cx))
         } else {
             None
         };
@@ -1561,7 +1561,7 @@ impl AppWindow {
     /// Key path for `terminal.copy`. Copies and clears when there is a selection.
     /// Returns whether it copied. False means the key should reach the program.
     fn copy_key(&mut self, window: &Window, cx: &mut Context<Self>) -> bool {
-        let Some(t) = self.focused_terminal(window) else { return true };
+        let Some(t) = self.focused_terminal(window, cx) else { return true };
         t.view.update(cx, |v, cx| {
             if !v.copy(cx) {
                 return false;
@@ -1572,14 +1572,17 @@ impl AppWindow {
     }
 
     /// Peeks, floats and swapped-in views own keyboard focus without changing the model pane.
-    fn focused_terminal(&self, window: &Window) -> Option<&Term> {
-        self.terms.values().find(|t| t.focus.is_focused(window))
+    /// The terminal with the keys: its own, or its find bar's.
+    fn focused_terminal(&self, window: &Window, cx: &App) -> Option<&Term> {
+        self.terms.values().find(|t| t.focus.contains_focused(window, cx))
             .or_else(|| self.focused_pane.as_deref().and_then(|p| self.pane_term(p)))
             .or_else(|| self.model.focused_pane().and_then(|p| self.pane_term(&p)))
     }
 
-    fn pane_focus(&self, pane: &str) -> Option<FocusHandle> {
-        self.pane_term(pane).map(|t| t.focus.clone())
+    /// What gives a pane the keys: its terminal, or that terminal's find bar
+    /// when the bar had them last.
+    fn pane_focus(&self, pane: &str, cx: &App) -> Option<FocusHandle> {
+        self.pane_term(pane).map(|t| t.view.read(cx).focus_target(cx))
     }
 
     fn load(&self, inst: Instance, window: &mut Window, cx: &mut Context<Self>) -> Copy {
@@ -2928,7 +2931,7 @@ impl AppWindow {
                     self.focused_block = None;
                     self.focused_pane = Some(id.clone());
                     self.synced_model_pane = self.model.focused_pane();
-                    if !self.overlays.iter().any(|o| o.kind.modal_keys()) && let Some(f) = self.pane_focus(&id) {
+                    if !self.overlays.iter().any(|o| o.kind.modal_keys()) && let Some(f) = self.pane_focus(&id, cx) {
                         f.focus(window, cx);
                     }
                     self.publish(cx);
@@ -2982,7 +2985,7 @@ impl AppWindow {
                     Some("menu") => "",
                     other => return self.fail(format!("terminal.right_click to is \"program\" or \"menu\", not {other:?}")),
                 };
-                let t = Self::owned(a, "terminal").or_else(|| self.focused_terminal(window).map(|t| t.address.clone()));
+                let t = Self::owned(a, "terminal").or_else(|| self.focused_terminal(window, cx).map(|t| t.address.clone()));
                 let Some(t) = t.filter(|t| self.live.contains_key(t)) else { return self.fail("no such running terminal") };
                 // Off the UI thread: a terminal on a slow machine answers late.
                 let core = self.core.clone();
@@ -3047,12 +3050,26 @@ impl AppWindow {
                 }
             }
             "terminal.copy" | "terminal.paste" | "terminal.paste_image" => {
-                if let Some(t) = self.focused_terminal(window) {
+                if let Some(t) = self.focused_terminal(window, cx) {
                     t.view.update(cx, |v, cx| match name {
                         "terminal.paste" => v.paste(cx),
                         "terminal.paste_image" => v.paste_image(cx),
                         // A command, not a key: copy and leave the selection.
                         _ => { let _ = v.copy(cx); }
+                    });
+                }
+                return;
+            }
+            "terminal.find" | "terminal.find_next" | "terminal.find_prev" => {
+                if let Some(t) = self.focused_terminal(window, cx) {
+                    let text = Self::owned(a, "text");
+                    // An agent's find doesn't take the keys from the person, nor
+                    // anyone's from an open dialog.
+                    let take_keys = person && !self.overlays.iter().any(|o| o.kind.modal_keys());
+                    t.view.clone().update(cx, |v, cx| match name {
+                        "terminal.find_next" => v.find_step(true, cx),
+                        "terminal.find_prev" => v.find_step(false, cx),
+                        _ => v.find_open(text, take_keys, window, cx),
                     });
                 }
                 return;
@@ -3831,7 +3848,7 @@ impl AppWindow {
 
     // ---- rendering ---------------------------------------------------------
 
-    fn focused_path(&self, window: &Window) -> HashSet<String> {
+    fn focused_path(&self, window: &Window, cx: &App) -> HashSet<String> {
         let mut out = HashSet::new();
         // A mod block in the layout holding the keyboard: its `focus` looks, not the pane's.
         if let Some(path) = self.focused_block.as_ref().and_then(|b| self.chrome.path_to(b)) {
@@ -3840,7 +3857,8 @@ impl AppWindow {
         }
         if let Some(p) = &self.focused_pane {
             // Pane selection survives an input, float or dialog taking the keyboard.
-            if self.pane_focus(p).is_some_and(|f| !f.is_focused(window)) {
+            // Its terminal's find bar having the keys still counts as the pane.
+            if self.pane_term(p).is_some_and(|t| !t.focus.contains_focused(window, cx)) {
                 return out;
             }
             if let Some(c) = self.model.active_tab()
@@ -4046,7 +4064,7 @@ impl AppWindow {
                             if !dialog
                                 && this.focused_block.is_none()
                                 && (window.focused(cx).is_none() || this.focus.is_focused(window))
-                                && let Some(f) = this.focused_pane.as_ref().and_then(|p| this.pane_focus(p))
+                                && let Some(f) = this.focused_pane.as_ref().and_then(|p| this.pane_focus(p, cx))
                                 && !f.is_focused(window)
                             {
                                 f.focus(window, cx);
@@ -4694,11 +4712,11 @@ impl Render for AppWindow {
         crate::bench::frame_start();
         crate::terminal::next_frame();
         window.set_rem_size(px(settings::ui_font_size()));
-        // A terminal the person clicked into becomes the focused pane.
+        // A terminal the person clicked into (or its find bar) becomes the focused pane.
         let clicked = self
             .terms
             .iter()
-            .find(|(_, t)| t.focus.is_focused(window))
+            .find(|(_, t)| t.focus.contains_focused(window, cx))
             .map(|(id, _)| id.clone());
         if clicked.is_some() && self.focused_block.take().is_some() {
             self.publish(cx);
@@ -4717,7 +4735,7 @@ impl Render for AppWindow {
         if mods::publish_window(self.window_json(window)) {
             self.refresh_snapshot_mods(cx);
         }
-        let focused = self.focused_path(window);
+        let focused = self.focused_path(window, cx);
         let tree = self.render_node(&self.chrome, &focused, None, cx);
         let tree = self.window_frame(tree, window, cx);
         let overlays = self.render_overlays(window.viewport_size(), cx);
@@ -5176,19 +5194,19 @@ mod tests {
         }));
         cx.update(|window, cx| view.update(cx, |this, cx| {
             this.focused_pane = Some("pane".into());
-            let pane = this.pane_focus("pane").unwrap();
+            let pane = this.pane_focus("pane", cx).unwrap();
             pane.focus(window, cx);
-            assert!(this.focused_path(window).contains("pane"));
+            assert!(this.focused_path(window, cx).contains("pane"));
             let input = cx.focus_handle();
             input.focus(window, cx);
-            assert!(this.focused_path(window).is_empty());
+            assert!(this.focused_path(window, cx).is_empty());
             assert_eq!(this.focused_pane.as_deref(), Some("pane"));
             pane.focus(window, cx);
-            assert!(this.focused_path(window).contains("pane"));
+            assert!(this.focused_path(window, cx).contains("pane"));
         }));
         cx.deactivate_window();
-        cx.update(|window, cx| view.update(cx, |this, _| {
-            assert!(this.focused_path(window).contains("pane"));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            assert!(this.focused_path(window, cx).contains("pane"));
         }));
     }
 
@@ -5292,7 +5310,7 @@ export default class Probe extends View {
             assert!(!super::needs_model_pane(name, &json!({})), "{name}");
             assert!(!super::needs_model_pane(name, &json!({"place": "tab"})), "{name}");
         }
-        for name in ["pane.focus", "terminal.copy", "terminal.paste", "terminal.paste_image", "terminal.right_click"] {
+        for name in ["pane.focus", "terminal.copy", "terminal.paste", "terminal.paste_image", "terminal.find", "terminal.find_next", "terminal.find_prev", "terminal.right_click"] {
             assert!(!super::needs_model_pane(name, &json!({})), "{name}");
         }
     }

@@ -59,6 +59,9 @@
     "ctrl-9": "space.select:9"
   },
   "terminal": {
+    "cmd-f": "terminal.find",
+    "cmd-g": "terminal.find_next",
+    "cmd-shift-g": "terminal.find_prev",
     "cmd-c": "terminal.copy",
     "cmd-v": "terminal.paste",
     "ctrl-v": "terminal.paste_image",
