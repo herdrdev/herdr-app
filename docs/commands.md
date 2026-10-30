@@ -246,6 +246,18 @@ Focus the pane to the "left", "right", "up" or "down".
 |---|---|
 | `direction` | yes |
 
+## `pane.next`
+
+Focus the next pane in the tab's tree order, wrapping around.
+
+No arguments.
+
+## `pane.prev`
+
+Focus the previous pane in the tab's tree order, wrapping around.
+
+No arguments.
+
 ## `pane.swap`
 
 Swap the focused pane with its neighbor in a direction.
