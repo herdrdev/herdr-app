@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { readFile, mkdtemp, writeFile, rm } from 'node:fs/promises';
+import { readFile, mkdtemp, writeFile, mkdir, rm } from 'node:fs/promises';
 import { tmpdir } from 'node:os';
 import { join } from 'node:path';
 import { spawn } from 'node:child_process';
@@ -119,4 +119,23 @@ test('HTTP provides equivalent tools and rejects browser cross-origin writes', a
     assert.equal(status,403);
     assert.equal(calls.length,1);
   } finally { server.closeAllConnections(); await new Promise(resolve=>server.close(resolve)); }
+});
+
+test('generated-doc checks accept Windows line endings but reject content drift', async () => {
+  const dir=await mkdtemp(join(tmpdir(),'herdr-title-docs-'));
+  try {
+    for (const file of ['scripts/title-agent-docs.mjs', ...['agent.mjs','agent-tools.json','llms.txt','llms-full.txt','SKILL.md'].map(n=>'defaults/mods/tabs/'+n)]) {
+      const target=join(dir,file);
+      await mkdir(join(target,'..'),{recursive:true});
+      const text=await readFile(new URL('../'+file,import.meta.url),'utf8');
+      await writeFile(target,text.replace(/\r?\n/g,'\r\n'));
+    }
+    const check=async()=>{
+      const child=spawn(process.execPath,[join(dir,'scripts/title-agent-docs.mjs'),'--check'],{stdio:'ignore'});
+      return (await once(child,'exit'))[0];
+    };
+    assert.equal(await check(),0);
+    await writeFile(join(dir,'defaults/mods/tabs/llms.txt'),'outdated');
+    assert.notEqual(await check(),0);
+  } finally { await rm(dir,{recursive:true,force:true}); }
 });

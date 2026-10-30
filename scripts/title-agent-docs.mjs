@@ -13,6 +13,6 @@ const files = {
 for (const [name, text] of Object.entries(files)) {
   const url = new URL(name, folder);
   if (process.argv.includes('--check')) {
-    if (await readFile(url, 'utf8') !== text) throw new Error(`${name} is stale; run node scripts/title-agent-docs.mjs`);
+    if ((await readFile(url, 'utf8')).replace(/\r\n/g, '\n') !== text) throw new Error(`${name} is stale; run node scripts/title-agent-docs.mjs`);
   } else await writeFile(url, text);
 }
