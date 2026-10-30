@@ -573,7 +573,10 @@ fn local_state_and_overlay_initial_descriptions(cx: &mut TestAppContext) {
         ("mods/menu", json!({"tab":"pane","target":{"pane":"p1","terminal":"t1"}})),
         ("mods/menu", json!({"tab":"tab","target":{"id":"tab1","space":"s1"}})),
         ("mods/menu", json!({"tab":"space","target":{"id":"s1"}})),
+        ("mods/menu", json!({"tab":"folder","target":{"name":"work"}})),
         ("mods/prompt", json!({"machines":true})),
+        ("mods/space-folder", json!({"space":"s1"})),
+        ("mods/space-folder", json!({"folder":"work"})),
         (
             "mods/confirm",
             json!({"title":"Close space?","command":{"name":"space.close","args":{"id":"s1"}}}),

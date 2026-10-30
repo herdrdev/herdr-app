@@ -2,6 +2,14 @@
 // grouped by machine when more than one is known. After a space's name, the repo
 // its first terminal is in now, only where unusual: branch, ahead/behind. Agent state lives in the agents list, not here. Click to
 // switch, right-click for its menu, drag to reorder.
+// Folders (shared "space.folders", set by the space-folder dialog) gather their
+// spaces under a header where the first of them sits; click it to fold. Drop a
+// space on a header to put it in that folder, or on a space to join that space's
+// folder (or leave its own, if that space has none). Folders nest the same way:
+// drag a header onto another header, or onto a space to sit in that space's folder.
+// Dropped on its own parent's header a folder goes up a level; dropped on the
+// "Spaces" title, an empty part of the list or the drop zone shown while dragging,
+// a folder or space goes to the top.
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
@@ -34,6 +42,44 @@ const FALLBACK = 60000;
 
 // What a stored color name looks like on an avatar (the same in every mod
 // that draws space avatars): one strong color per hue, light and dark alike.
+// The most urgent first, as a space's own status goes.
+const URGENCY = ["blocked", "done", "working", "idle"];
+
+// Puts space `id` in the folder named `name` ("" or null: in none).
+function moveToFolder(id, name) {
+  const list = (shared("space.folders") ?? []).map((f) => ({ ...f, ids: f.ids.filter((x) => x !== id) }));
+  if (name) {
+    const into = list.find((f) => f.name.toLowerCase() === name.toLowerCase());
+    if (into) into.ids.push(id);
+    else list.push({ name, collapsed: false, ids: [id] });
+  }
+  setShared("space.folders", prune(list));
+}
+const folderOf = (id) => (shared("space.folders") ?? []).find((f) => f.ids.includes(id))?.name ?? null;
+
+// The folders holding `name`, innermost first: [name, its parent, ...].
+function lineage(list, name) {
+  const path = [];
+  for (let at = name; at && !path.includes(at); at = list.find((f) => f.name === at)?.parent ?? null) path.push(at);
+  return path;
+}
+
+// Puts folder `name` inside folder `parent` (null: at the top), never inside itself.
+function nestFolder(name, parent) {
+  const list = shared("space.folders") ?? [];
+  if (name === parent || (parent && lineage(list, parent).includes(name))) return;
+  setShared("space.folders", list.map((f) => (f.name === name ? { ...f, parent } : f)));
+}
+
+// A folder stays while it holds a space or a folder that stays.
+function prune(list) {
+  for (;;) {
+    const kept = list.filter((f) => f.ids.length || list.some((c) => c.parent === f.name));
+    if (kept.length === list.length) return kept.map((f) => (f.parent && !kept.some((p) => p.name === f.parent) ? { ...f, parent: null } : f));
+    list = kept;
+  }
+}
+
 const MARK = { ansi6: "#22a99a", ansi3: "#e3814f", ansi4: "#5b8def", ansi5: "#8b7cf6", ansi2: "#3fae6a", ansi1: "#d9649a" };
 
 // A space speaks up only when something in it needs you.
@@ -61,6 +107,9 @@ export default class Spaces extends View {
     this.born = {};
     this.pressed = null;
     this.over = null;
+    this.pressedFolder = null; // a folder header being dragged
+    this.start = null; // where the press began (window px)
+    this.ghost = null; // where the dragged space's card follows the pointer (sidebar px)
     this.machines = [];
     this.folded = new Set(JSON.parse(localStorage.getItem("machines.folded") ?? "[]"));
     this.refreshMachines(cx);
@@ -233,7 +282,7 @@ export default class Spaces extends View {
         || spaces().some(s => (s.machine ?? null) === m && !this.shown.has(s.id));
     };
     const loadingRow = m => div().id(`machine-loading-${m ?? "local"}`).h(28).flex_none().px(8).text_size(12).text_color(t.dim).child(collapsed ? "…" : "Loading…");
-    if (!remote.length) return loading(null) && !rows.length ? [loadingRow(null)] : rows.map(draw);
+    if (!remote.length) return loading(null) && !rows.length ? [loadingRow(null)] : this.foldered(rows, t, collapsed, draw);
     const machineNames = [null, ...remote];
     return machineNames.flatMap((m) => {
       const mine = rows.filter((r) => (r.w.machine ?? null) === m);
@@ -258,8 +307,91 @@ export default class Spaces extends View {
         .text_size(12).text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground))
         .on_click(() => run("space.new", m ? { machine: m } : {}))
         .child(svg("mods/workspace-chrome/plus.svg").size(12)).when(!collapsed, el => el.child("New space there"));
-      return [head, ...(folded ? [] : mine.length ? mine.map(draw) : [loading(m) ? loadingRow(m) : empty])];
+      return [head, ...(folded ? [] : mine.length ? this.foldered(mine, t, collapsed, draw) : [loading(m) ? loadingRow(m) : empty])];
     });
+  }
+
+  // Rows with each folder's spaces (and their worktrees, and its folders) moved
+  // under its header, where the first of them sits.
+  foldered(rows, t, collapsed, draw) {
+    const folders = shared("space.folders") ?? [];
+    if (!folders.length) return rows.map(draw);
+    // A worktree row goes with the space above it.
+    const units = [];
+    for (const r of rows) {
+      if (r.tree && units.length) units[units.length - 1].rows.push(r);
+      else units.push({ path: lineage(folders, folderOf(r.w.id)).reverse(), rows: [r] });
+    }
+    const out = [];
+    const emit = (list, depth) => {
+      const placed = new Set();
+      for (const u of list) {
+        const name = u.path[depth];
+        if (!name) {
+          for (const r of u.rows) out.push(collapsed || !depth ? draw(r) : div().id(`in-folder-${r.w.id}`).flex_none().pl(12 * depth).child(draw(r)));
+          continue;
+        }
+        if (placed.has(name)) continue;
+        placed.add(name);
+        const f = folders.find((g) => g.name === name);
+        const inside = list.filter((v) => v.path[depth] === name);
+        const members = inside.flatMap((v) => v.rows);
+        const status = URGENCY.find((s) => members.some((r) => r.w.status === s)) ?? "idle";
+        out.push(this.folderHead(f, depth, members.length, status, t, collapsed));
+        if (!f.collapsed) emit(inside, depth + 1);
+      }
+    };
+    emit(units, 0);
+    return out;
+  }
+
+  folderHead(f, depth, count, status, t, collapsed) {
+    const toggle = (_e, cx) => {
+      if (this.ghost) return; // the end of a drag, not a click
+      const list = (shared("space.folders") ?? []).map((g) => (g.name === f.name ? { ...g, collapsed: !g.collapsed } : g));
+      setShared("space.folders", list);
+      cx.notify();
+    };
+    const dragging = this.pressed !== null || (this.pressedFolder !== null && this.pressedFolder !== f.name);
+    return h_flex().id(`folder-${f.name}`).h(26).flex_none().pl(collapsed ? 2 : 8 + 12 * depth).pr(collapsed ? 2 : 8).gap(7).items_center()
+      .rounded(7).text_size(12).text_color(t.muted).cursor_pointer().hover((s) => s.bg(t.hover))
+      .when(collapsed, (el) => el.justify_center())
+      .when(dragging, (el) => el.hover((s) => s.bg(t.selected).text_color(t.foreground)))
+      .on_mouse_down("left", (e) => {
+        this.pressedFolder = f.name;
+        this.start = e.position;
+        this.ghost = null;
+      })
+      .on_mouse_move((_e, cx) => {
+        if (this.over === null) return;
+        this.over = null;
+        cx.notify();
+      })
+      .on_mouse_up("left", (_e, cx) => {
+        const space = this.pressed !== null ? spaces()[this.pressed]?.id : null;
+        const folder = this.pressedFolder;
+        this.pressed = null;
+        this.over = null;
+        this.pressedFolder = null;
+        if (space) moveToFolder(space, f.name);
+        else if (folder && folder !== f.name) {
+          const list = shared("space.folders") ?? [];
+          const parent = list.find((g) => g.name === folder)?.parent ?? null;
+          nestFolder(folder, parent === f.name ? list.find((g) => g.name === f.name)?.parent ?? null : f.name);
+        } else return;
+        this.pressedFolder = null;
+        this.ghost = null;
+        cx.stop_propagation();
+        cx.notify();
+      })
+      .on_click(toggle)
+      .on_mouse_down("right", () => openOverlay({ mod: "menu", kind: "popup", width: 200, height: 260, props: { tab: "folder", target: { name: f.name } } }))
+      .child(svg(`mods/workspace-chrome/chevron-${f.collapsed ? "right" : "down"}.svg`).size(11).flex_none())
+      .when(!collapsed, (el) => el
+        .child(svg("mods/workspace-chrome/folder.svg").size(13).flex_none())
+        .child(div().flex_1().min_w(0).truncate().font_medium().child(f.name))
+        .when(f.collapsed, (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child(String(count))))
+        .child(div().flex_none().text_color(tone(t, status)).child(glyph(status))));
   }
 
   // Only what's unusual, after the name: "herdr \u00b7 spike \u21912 \u21931". The repo or
@@ -284,11 +416,53 @@ export default class Spaces extends View {
       .when(g.behind > 0, (el) => el.child(div().flex_none().text_color(t.ansi1).child(`\u2193${g.behind}`)));
   }
 
+  avatar(w, t) {
+    const color = (shared("space.colors") ?? {})[w.id] ?? "ansi6";
+    const fill = color.startsWith("#") ? color : (MARK[color] ?? t[color]);
+    return h_flex().size(18).flex_none().rounded(5).bg(fill).items_center().justify_center().text_size(10.5).font_bold().text_color("#ffffff").child([...w.name][0]?.toUpperCase() ?? "?");
+  }
+
+  // Whether what's being dragged sits in a folder (so the top is somewhere to go).
+  draggingNested() {
+    if (!this.ghost) return false;
+    if (this.pressedFolder !== null) return Boolean((shared("space.folders") ?? []).find((f) => f.name === this.pressedFolder)?.parent);
+    const w = this.pressed !== null && spaces()[this.pressed];
+    return Boolean(w && folderOf(w.id));
+  }
+
+  // A drop on the title, an empty part of the list or the drop zone: to the top.
+  dropTop(cx) {
+    const space = this.pressed !== null && this.ghost ? spaces()[this.pressed]?.id : null;
+    if (this.pressedFolder !== null && this.ghost) nestFolder(this.pressedFolder, null);
+    else if (space && folderOf(space)) moveToFolder(space, null);
+    this.pressed = null;
+    this.over = null;
+    this.pressedFolder = null;
+    cx.notify();
+  }
+
+  topZone(t) {
+    return h_flex().id("drop-top").h(28).mt(4).flex_none().px(8).gap(7).items_center().justify_center().rounded(7)
+      .border_1().border_dashed().border_color(t.accent).text_size(12).text_color(t.muted)
+      .hover((s) => s.bg(t.selected).text_color(t.foreground))
+      .child("Move to top level");
+  }
+
+  // The dragged space, beside the pointer (never under it: the drop goes to what's under it).
+  dragCard(t) {
+    if (!this.ghost) return null;
+    const w = this.pressed !== null && spaces()[this.pressed];
+    const folder = this.pressedFolder;
+    if (!w && !folder) return null;
+    return h_flex().id("drag-card").absolute().left(this.ghost.x + 14).top(this.ghost.y + 6)
+      .h(28).px(8).gap(9).items_center().rounded(8).bg(t.raised).border_1().border_color(t.accent)
+      .shadow_md().opacity(0.92).text_size(13).text_color(t.foreground)
+      .child(w ? this.avatar(w, t) : svg("mods/workspace-chrome/folder.svg").size(14).flex_none().text_color(t.muted))
+      .child(div().max_w(150).truncate().child(w ? w.name : folder));
+  }
+
   row({ w, i, g, tree }, t) {
     const on = w.active;
-    const colors = shared("space.colors") ?? {};
-    const color = colors[w.id] ?? "ansi6";
-    const fill = color.startsWith("#") ? color : (MARK[color] ?? t[color]);
     return v_flex()
       .relative()
       .id(`space-${w.id}`)
@@ -305,9 +479,11 @@ export default class Spaces extends View {
           .when(this.pressed < i, line => line.bottom(0))
           .when(this.pressed > i, line => line.top(0)),
       ))
-      .on_mouse_down("left", () => {
+      .on_mouse_down("left", (e) => {
         this.pressed = i;
         this.over = i;
+        this.start = e.position;
+        this.ghost = null;
       })
       .on_mouse_move((_e, cx) => {
         const source = spaces()[this.pressed];
@@ -322,8 +498,14 @@ export default class Spaces extends View {
         const over = this.over;
         this.pressed = null;
         this.over = null;
-        if (from !== null && over === i && from !== i) run("space.move", { id: spaces()[from].id, index: i + 1 });
-        else if (from === i) run("space.select", { id: w.id });
+        if (this.pressedFolder !== null) {
+          nestFolder(this.pressedFolder, folderOf(w.id));
+          this.pressedFolder = null;
+        } else if (from !== null && over === i && from !== i) {
+          const dragged = spaces()[from].id;
+          run("space.move", { id: dragged, index: i + 1 });
+          if (folderOf(dragged) !== folderOf(w.id)) moveToFolder(dragged, folderOf(w.id));
+        } else if (from === i) run("space.select", { id: w.id });
         cx.notify();
       })
       .on_mouse_down("right", () => this.menu(w))
@@ -332,9 +514,10 @@ export default class Spaces extends View {
           .gap(9)
           .items_center()
           .when(Boolean(tree), el => el.pl(22).child(svg("mods/workspace-chrome/branch.svg").size(13).text_color(t.dim)))
-          .when(!tree, el => el.child(h_flex().size(18).flex_none().rounded(5).bg(fill).items_center().justify_center().text_size(10.5).font_bold().text_color("#ffffff").child([...w.name][0]?.toUpperCase() ?? "?")))
+          .when(!tree, el => el.child(this.avatar(w, t)))
           .child(div().flex_shrink(0).max_w(150).truncate().text_color(t.foreground).child(w.name))
-          .child(g ? this.gitTail(g, tree, w.name, t) : div().flex_1()),
+          .child(g ? this.gitTail(g, tree, w.name, t) : div().flex_1())
+          .when(w.status === "blocked" || w.status === "done", (el) => el.child(div().flex_none().text_color(tone(t, w.status)).child(glyph(w.status)))),
       );
   }
 
@@ -367,13 +550,31 @@ export default class Spaces extends View {
       changed = true;
     }
     if (changed) setShared("space.colors", kept);
-    return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13)
-      .child(h_flex().h(31).pl(16).pr(10).items_center().justify_between().text_size(11.5).text_color(t.dim)
+    if (this.pressed === null && this.pressedFolder === null) this.ghost = null;
+    const card = this.dragCard(t);
+    return v_flex().id("spaces-root").relative().size_full().min_h(0).bg(t.chrome).text_size(13)
+      .on_mouse_move((e, cx) => {
+        if ((this.pressed === null && this.pressedFolder === null) || !this.start) return;
+        if (!this.ghost && Math.hypot(e.position.x - this.start.x, e.position.y - this.start.y) < 4) return;
+        this.ghost = e.local_position;
+        cx.notify();
+      })
+      .on_hover((hovered, cx) => {
+        if (hovered || (this.pressed === null && this.pressedFolder === null)) return;
+        this.pressed = null;
+        this.over = null;
+        this.pressedFolder = null;
+        cx.notify();
+      })
+      .child(h_flex().id("spaces-title").h(31).pl(16).pr(10).items_center().justify_between().text_size(11.5).text_color(t.dim)
+        .on_mouse_up("left", (_e, cx) => this.dropTop(cx))
         .when(!collapsed, el => el.child("Spaces"))
         .child(div().id("space-new").size(26).flex_none().flex().items_center().justify_center().rounded(6).hover(s => s.bg(t.hover).text_color(t.foreground))
           .on_click(() => run("space.new")).child(svg("mods/workspace-chrome/plus.svg").size(14))))
       .child(v_flex().flex_1().min_h(0).px(8).pb(14).overflow_y_scrollbar().mode("always")
-        .on_mouse_up("left", (_e, cx) => { this.pressed = null; cx.notify(); })
-        .children(this.grouped(t, collapsed)));
+        .on_mouse_up("left", (_e, cx) => this.dropTop(cx))
+        .children(this.grouped(t, collapsed))
+        .when(this.draggingNested(), (el) => el.child(this.topZone(t))))
+      .when(Boolean(card), (el) => el.child(card));
   }
 }

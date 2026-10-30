@@ -100,7 +100,12 @@ is no `spaces.json`. On simultaneous edits the newest accepted document wins
 Mod pane props are stored as given, never machine-qualified. Space order is local
 machine first, then machines by name; `space.move` stays inside its machine's block.
 In the expanded Spaces sidebar, drag a space to reorder it within its machine;
-the highlighted line shows where it will land.
+the highlighted line shows where it will land. Spaces group into folders:
+"Move to folder..." in a space's or a folder header's right-click menu, or
+drag a space or folder header onto a folder ("Move to top level" takes it
+out). Folders nest and collapse with a click; they live in
+`shared("space.folders")` as `[{name, collapsed, ids: [spaceId], parent}]`,
+and a folder stays while it holds a space or a folder that does.
 
 - A **space** is a place to work, on one machine: this one, or another
   from `hc machine ls` (`spaces()[i].machine`). Herdr leaves out machines
@@ -740,7 +745,8 @@ has 120 programs (agents, editors, runtimes, tools, databases, infra);
   (tinted with the text color).
 - The defaults are mods too, read them as examples: `spaces`, `agents`,
   `tabs` (the tab bar), `menu`, `prompt`, `confirm`, `help`, `toast`,
-  Terminals' `picker`, `peek`, and `pane` (an
+  Terminals' `picker`, `peek`, `space-folder` (the Move to folder dialog,
+  props `{space}` or `{folder}`), and `pane` (an
   example pane header, not used by the default layouts), and `worktree`
   (git worktrees as spaces: the space menu's and the + menu's New worktree,
   Open worktree (the repo's checkouts, filtered; one already shown is gone
