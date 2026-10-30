@@ -56,7 +56,7 @@ impl AppWindow {
         Some(div().id(SharedString::from(format!("grip-{pane}")))
             .absolute().top(settings::z((row - 18.) / 2.)).left(relative(0.5)).ml(-settings::z(14.))
             .w(settings::z(28.)).h(settings::z(18.)).rounded(settings::z(4.))
-            .bg(c("background").opacity(0.85))
+            .bg(settings::solid("background").opacity(0.85))
             .hover(|s| s.bg(c("hover")))
             .flex().flex_col().items_center().justify_center().gap(settings::z(3.)).occlude()
             .group("pane-grip")
