@@ -22,6 +22,7 @@ mod mods;
 mod mod_files;
 mod process_cwd;
 mod programs;
+mod quick;
 mod remote_shell;
 mod settings;
 mod setup;
@@ -143,13 +144,20 @@ fn main() {
     }
     update::start();
     telemetry::start(settings::telemetry_setting(&person));
+    quick::start(person.as_ref().is_ok_and(|p| p.quick_terminal.is_some()));
     bench::start();
     if let Err(e) = mods::write_workspace() {
         eprintln!("herdr-app: cannot write {}: {e}", mods::app_dir().display());
     }
 
-    gpui_platform::application()
-        .with_assets(gpui_shell::AppAssets::new(mods::app_dir()))
+    let app = gpui_platform::application().with_assets(gpui_shell::AppAssets::new(mods::app_dir()));
+    // macOS: the Dock icon while the quick terminal is up and away brings it down.
+    app.on_reopen(|cx| {
+        if quick::on() {
+            quick::show(cx);
+        }
+    });
+    app
         .run(move |cx| {
             let fonts = settings::BUNDLED_FONTS.iter().map(|f| std::borrow::Cow::Borrowed(*f)).collect();
             if let Err(e) = cx.text_system().add_fonts(fonts) {
@@ -199,24 +207,32 @@ fn main() {
 
 /// The main window, on a connected core.
 pub fn open_main(core: std::sync::Arc<hc::Core>, requests: async_channel::Receiver<mods::Request>, cx: &mut App) {
-            let (window_bounds, display_id) = place::initial(cx);
-            let options = WindowOptions {
-                window_bounds: Some(window_bounds),
-                display_id,
-                // macOS: always see-through, so a layout can draw its own title bar
-                // live; the app drags the window (window/titlebar.rs).
-                titlebar: Some(TitlebarOptions {
-                    title: Some("Herdr".into()),
-                    // Windows: hidden for good (it can't change live); the app draws it.
-                    appears_transparent: cfg!(any(target_os = "macos", windows)),
-                    traffic_light_position: cfg!(target_os = "macos").then(|| point(px(12.0), px(7.0))),
-                }),
-                app_owns_titlebar_drag: cfg!(target_os = "macos"),
-                // Herdr Dev and other side-by-side builds get their own dock icon.
-                app_id: Some(std::env::var("HERDR_APP_ID").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "herdr-app".into())),
-                ..Default::default()
+            // Herdr Dev and other side-by-side builds get their own dock icon.
+            let app_id = std::env::var("HERDR_APP_ID").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "herdr-app".into());
+            let options = if quick::on() {
+                quick::options(app_id)
+            } else {
+                let (window_bounds, display_id) = place::initial(cx);
+                WindowOptions {
+                    window_bounds: Some(window_bounds),
+                    display_id,
+                    // macOS: always see-through, so a layout can draw its own title bar
+                    // live; the app drags the window (window/titlebar.rs).
+                    titlebar: Some(TitlebarOptions {
+                        title: Some("Herdr".into()),
+                        // Windows: hidden for good (it can't change live); the app draws it.
+                        appears_transparent: cfg!(any(target_os = "macos", windows)),
+                        traffic_light_position: cfg!(target_os = "macos").then(|| point(px(12.0), px(7.0))),
+                    }),
+                    app_owns_titlebar_drag: cfg!(target_os = "macos"),
+                    app_id: Some(app_id),
+                    ..Default::default()
+                }
             };
             cx.open_window(options, |window, cx| cx.new(|cx| window::AppWindow::new(core, requests, window, cx)))
                 .expect("cannot open the Herdr window");
-            cx.activate(true);
+            // The quick terminal leaves the app in front frontmost while it's down.
+            if !quick::on() {
+                cx.activate(true);
+            }
 }

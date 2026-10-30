@@ -872,8 +872,14 @@ impl MacWindowState {
         }
 
         unsafe {
+            // HERDR: a window off every screen (the quick terminal, put away
+            // above the top) has no screen; asking it for one panicked.
+            let screen = self.native_window.screen();
+            if screen.is_null() {
+                return false;
+            }
             let bounds = self.bounds();
-            let screen_size = rect_to_size(self.native_window.screen().visibleFrame());
+            let screen_size = rect_to_size(screen.visibleFrame());
             bounds.size == screen_size
         }
     }
