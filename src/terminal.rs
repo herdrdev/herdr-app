@@ -481,11 +481,14 @@ impl TerminalView {
     fn scroll(&mut self, ev: &ScrollWheelEvent, _w: &mut Window, cx: &mut Context<Self>) {
         cx.stop_propagation();
         let mut g = self.grid.borrow_mut();
-        let lines = match ev.delta {
-            ScrollDelta::Lines(p) => p.y,
-            ScrollDelta::Pixels(p) => p.y / g.cell.height,
+        let steps = match ev.delta {
+            ScrollDelta::Lines(p) if cfg!(target_os = "macos") => {
+                self.scrolled = 0.0;
+                wheel_steps(p.y)
+            }
+            ScrollDelta::Lines(p) => scroll_steps(&mut self.scrolled, ev.touch_phase, p.y, g.vt.rows as f32),
+            ScrollDelta::Pixels(p) => scroll_steps(&mut self.scrolled, ev.touch_phase, p.y / g.cell.height, g.vt.rows as f32),
         };
-        let steps = scroll_steps(&mut self.scrolled, ev.touch_phase, lines, g.vt.rows as f32);
         let n = steps.unsigned_abs() as usize;
         if n == 0 {
             return;
@@ -662,6 +665,13 @@ fn link_mods(m: &Modifiers) -> bool {
 
 fn local(g: &Grid, p: Point<Pixels>) -> (f32, f32) {
     (f32::from(p.x - g.origin.x).max(0.0), f32::from(p.y - g.origin.y).max(0.0))
+}
+
+/// Whole lines for one macOS mouse wheel event. macOS reports a slow click as
+/// a tenth of a line and ramps up as the wheel speeds up, so each click scrolls
+/// at least one line (as in Ghostty).
+fn wheel_steps(lines: f32) -> i32 {
+    if lines == 0.0 { 0 } else { (lines.signum() * lines.abs().max(1.0)).round() as i32 }
 }
 
 /// Whole lines to scroll for one scroll event. A touchpad sends many small
@@ -1437,6 +1447,15 @@ mod tests {
         assert_eq!(super::scroll_steps(&mut s, Started, 0.0, 40.0), 0);
         assert_eq!(super::scroll_steps(&mut s, Moved, -0.5, 40.0), 0, "a new gesture forgets the last one's leftover");
         assert_eq!(super::scroll_steps(&mut s, Moved, -0.6, 40.0), -1);
+    }
+
+    #[test]
+    fn each_wheel_click_scrolls_at_least_a_line() {
+        assert_eq!(super::wheel_steps(0.1), 1, "macOS's slow single click");
+        assert_eq!(super::wheel_steps(-0.1), -1);
+        assert_eq!(super::wheel_steps(0.0), 0);
+        assert_eq!(super::wheel_steps(4.25), 4, "a fast spin keeps its speed");
+        assert_eq!(super::wheel_steps(-7.09), -7);
     }
 
     #[test]
