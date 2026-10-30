@@ -314,13 +314,25 @@ pub(crate) fn version(v: &str) -> String {
     if parts.len() == 3 && parts.iter().all(|p| number(p)) && pre_ok { v.to_owned() } else { "other".into() }
 }
 
-/// Whether keys.json differs from the shipped one.
+/// Whether keys.json differs from the shipped one. keys.json is installed
+/// once, so one shipped before the find keys and left alone isn't custom.
 fn keys_custom() -> bool {
     let parse = |s: &str| serde_json::from_str::<Value>(s).ok();
     match std::fs::read_to_string(crate::keys::path()) {
-        Ok(text) => parse(&text) != parse(crate::keys::DEFAULTS),
+        Ok(text) => {
+            let (mine, shipped) = (parse(&text), parse(crate::keys::DEFAULTS));
+            mine != shipped && mine != shipped.map(without_find_keys)
+        }
         Err(_) => false,
     }
+}
+
+/// The shipped keys as they were before terminal find.
+fn without_find_keys(mut keys: Value) -> Value {
+    if let Some(terminal) = keys.get_mut("terminal").and_then(Value::as_object_mut) {
+        terminal.retain(|_, action| !action.as_str().is_some_and(|a| a.starts_with("terminal.find")));
+    }
+    keys
 }
 
 // ---- dates (UTC, no calendar crate) ------------------------------------------
@@ -699,6 +711,18 @@ fn post(url: &str, body: &str) -> Option<u16> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_shipped_keys_before_terminal_find_lack_only_its_keys() {
+        let shipped: Value = serde_json::from_str(crate::keys::DEFAULTS).unwrap();
+        let before = without_find_keys(shipped.clone());
+        assert!(!before.to_string().contains("terminal.find"));
+        let count = |v: &Value| v["terminal"].as_object().unwrap().len();
+        let find_keys = shipped["terminal"].as_object().unwrap().values().filter(|a| a.as_str().unwrap().starts_with("terminal.find")).count();
+        assert!(find_keys > 0);
+        assert_eq!(count(&before) + find_keys, count(&shipped));
+        assert_eq!(before["global"], shipped["global"]);
+    }
 
     #[test]
     fn dates_are_utc_calendar_days() {

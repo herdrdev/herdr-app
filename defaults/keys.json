@@ -60,6 +60,7 @@
     "shift-f2": "space.rename"
   },
   "terminal": {
+    "ctrl-shift-f": "terminal.find",
     "ctrl-backspace": "send:\u0017",
     "ctrl-left": "send:\u001bb",
     "ctrl-right": "send:\u001bf",
