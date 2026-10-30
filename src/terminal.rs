@@ -12,6 +12,7 @@ use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use std::collections::HashMap;
 use crate::links;
+use gpui_base::input::{InputEvent, InputState};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
@@ -73,6 +74,8 @@ struct Grid {
     painted: Vec<(Rc<Vec<vt::Cell>>, Vec<RowOp>)>,
     /// The font size, cell size, font and fonts loaded the drawings were built with.
     painted_with: (u32, Size<Pixels>, String, u64),
+    /// What the find bar's count shows, as of the last paint.
+    find_status: vt::FindStatus,
 }
 
 pub struct TerminalView {
@@ -104,6 +107,12 @@ pub struct TerminalView {
     typed_at: Cell<Option<Instant>>,
     /// Scrolled this gesture, in lines, toward the next whole one.
     scrolled: f32,
+    /// The find bar's text field, while the bar is open.
+    find: Option<Entity<InputState>>,
+    /// The find bar had the keys last (not the terminal): focusing the pane
+    /// again (a dialog closed, back from another tab) gives them back to it.
+    find_keys: bool,
+    _find_events: Option<Subscription>,
     _reader: Option<Task<()>>,
 }
 
@@ -168,12 +177,16 @@ impl TerminalView {
                 cursor_at: None,
                 painted: Vec::new(),
                 painted_with: (0, Size::default(), String::new(), 0),
+                find_status: vt::FindStatus::default(),
             })),
             focus: cx.focus_handle(),
             was_focused: false,
             shown_in: Cell::new(0),
             typed_at: Cell::new(None),
             scrolled: 0.0,
+            find: None,
+            find_keys: false,
+            _find_events: None,
             _reader: None,
         };
         view.connect(core, false, cx);
@@ -200,12 +213,17 @@ impl TerminalView {
     /// take seconds, and the window must keep drawing meanwhile.
     /// `announce_end`: emit Ended if the terminal turns out to be gone.
     fn connect(&mut self, core: Arc<Core>, announce_end: bool, cx: &mut Context<Self>) {
+        let needle = self.find.as_ref().map(|f| f.read(cx).value().to_string());
         let (cols, rows, cell) = {
             let mut g = self.grid.borrow_mut();
             let (cols, rows) = (g.vt.cols, g.vt.rows);
             // The core repaints the whole screen (and history) on attach.
             let cell = device_cell(g.cell, g.scale);
             g.vt = Vt::new(cols, rows);
+            // An open find bar goes on finding in what the core sends.
+            if let Some(needle) = &needle {
+                g.vt.find(needle, false);
+            }
             g.vt.resize(cols, rows, cell.0, cell.1);
             g.vt_cell = cell;
             g.told_cell = Some(cell);
@@ -490,7 +508,143 @@ impl TerminalView {
         }
     }
 
-    fn key_down(&mut self, ev: &KeyDownEvent, _w: &mut Window, cx: &mut Context<Self>) {
+    /// Opens the find bar; `text`: find that. `take_keys`: the bar gets the
+    /// keys, its text selected (not when an agent opens it behind a dialog).
+    pub fn find_open(&mut self, text: Option<String>, take_keys: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let input = match &self.find {
+            Some(input) => input.clone(),
+            None => {
+                let input = cx.new(|cx| InputState::new(window, cx).placeholder("Find"));
+                self._find_events = Some(cx.subscribe_in(&input, window, |this, input, ev: &InputEvent, _window, cx| match ev {
+                    InputEvent::Change => {
+                        let needle = input.read(cx).value().to_string();
+                        this.grid.borrow_mut().vt.find(&needle, true);
+                        cx.notify();
+                    }
+                    // Enter: the next match up toward older output; Shift+Enter: back down.
+                    InputEvent::PressEnter { shift, .. } => this.find_step(!shift, cx),
+                    InputEvent::Focus => this.find_keys = true,
+                    InputEvent::PasteWithoutText | InputEvent::Blur => {}
+                }));
+                self.find = Some(input.clone());
+                input
+            }
+        };
+        input.update(cx, |state, cx| {
+            if let Some(text) = &text {
+                state.set_value(text.clone(), window, cx);
+            }
+            if take_keys {
+                state.focus(window, cx);
+                state.select_all(window, cx);
+            }
+        });
+        if let Some(text) = text {
+            self.grid.borrow_mut().vt.find(&text, true);
+        }
+        cx.notify();
+    }
+
+    /// The next match toward older output (`older`) or newer, scrolled into view.
+    pub fn find_step(&mut self, older: bool, cx: &mut Context<Self>) {
+        if self.find.is_some() {
+            self.grid.borrow_mut().vt.find_step(older);
+            cx.notify();
+        }
+    }
+
+    /// Closes the find bar: its marks go, the keys go back to the terminal.
+    /// The view stays where the find took it.
+    pub fn find_close(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.find.take().is_some() {
+            self._find_events = None;
+            self.find_keys = false;
+            self.grid.borrow_mut().vt.find("", false);
+            self.focus.focus(window, cx);
+            cx.notify();
+        }
+    }
+
+    /// What to focus to give this pane the keys: the terminal, or its find bar
+    /// if that had them last.
+    pub fn focus_target(&self, cx: &App) -> FocusHandle {
+        match &self.find {
+            Some(input) if self.find_keys => input.read(cx).focus_handle(cx),
+            _ => self.focus.clone(),
+        }
+    }
+
+    /// The find bar has the keys (not the terminal it's in).
+    fn finding(&self, window: &Window, cx: &App) -> bool {
+        self.find.is_some() && !self.focus.is_focused(window) && self.focus.contains_focused(window, cx)
+    }
+
+    fn find_bar(&self, input: &Entity<InputState>, cx: &mut Context<Self>) -> AnyElement {
+        let status = self.grid.borrow().find_status;
+        let has_text = !input.read(cx).value().is_empty();
+        let count = match (has_text, status.total, status.selected) {
+            (false, ..) => String::new(),
+            (true, 0, _) if status.busy => "…".into(),
+            (true, 0, _) => "No results".into(),
+            (true, total, Some(i)) => format!("{}/{total}{}", i + 1, if status.busy { "+" } else { "" }),
+            (true, total, None) => format!("{total}{}", if status.busy { "+" } else { "" }),
+        };
+        let muted = crate::settings::color("muted");
+        let button = |id: &'static str, label: &'static str| {
+            div()
+                .id(id)
+                .px_1p5()
+                .rounded_sm()
+                .cursor_pointer()
+                .text_color(muted)
+                .hover(|s| s.bg(crate::settings::color("hover")).text_color(crate::settings::color("foreground")))
+                .child(label)
+        };
+        div()
+            .id(SharedString::from(format!("find-{}", self.address)))
+            .absolute()
+            .top_2()
+            .right_3()
+            .flex()
+            .items_center()
+            .gap_1p5()
+            .pl_2p5()
+            .pr_1()
+            .py_1()
+            .rounded_md()
+            .border_1()
+            .border_color(crate::settings::color("border"))
+            .bg(crate::settings::color("popover"))
+            .text_color(crate::settings::color("foreground"))
+            // The interface's own text size (Settings → Look), like the sidebars'.
+            .text_size(rems(1.0))
+            .cursor_default()
+            // Presses here are the bar's: they don't select text, paste, open the
+            // pane menu or reach the program. Releases and moves pass on, for
+            // gestures that started elsewhere (a program's drag, a divider).
+            .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Middle, |_, _, cx| cx.stop_propagation())
+            .on_mouse_down(MouseButton::Right, |_, _, cx| cx.stop_propagation())
+            .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
+            .on_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
+                if ev.keystroke.key == "escape" {
+                    cx.stop_propagation();
+                    this.find_close(window, cx);
+                }
+            }))
+            .child(div().w(rems(15.0)).child(gpui_base::Input::new(input)))
+            .child(div().min_w(rems(4.0)).text_color(muted).child(count))
+            .child(button("find-older", "↑").on_click(cx.listener(|this, _, _, cx| this.find_step(true, cx))))
+            .child(button("find-newer", "↓").on_click(cx.listener(|this, _, _, cx| this.find_step(false, cx))))
+            .child(button("find-close", "×").on_click(cx.listener(|this, _, window, cx| this.find_close(window, cx))))
+            .into_any_element()
+    }
+
+    fn key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        // Keys typed in the find bar are the bar's, never the program's.
+        if !self.focus.is_focused(window) {
+            return;
+        }
         let k = &ev.keystroke;
         // Typing clears a selection, as in Herdr.
         if !k.key.starts_with("shift") && !k.key.starts_with("control") && !k.key.starts_with("alt") {
@@ -1068,6 +1222,13 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     let origin = point(snap(origin.x), snap(origin.y));
     g.origin = origin;
     let frame = g.vt.frame();
+    // A find reads the scrollback a frame at a time: draw again until it's
+    // done, and whenever its count changed (the bar shows it).
+    let found = g.vt.find_status();
+    if found.busy || found != g.find_status {
+        g.find_status = found;
+        window.request_animation_frame();
+    }
     let placements = g.vt.placements();
     let mut images: Vec<(bool, Bounds<Pixels>, Arc<RenderImage>)> = Vec::new();
     let mut keep = std::collections::HashSet::new();
@@ -1282,7 +1443,16 @@ impl EntityInputHandler for TerminalView {
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::bench::count(&crate::bench::TERMINAL);
-        let focused = self.focus.is_focused(window);
+        // Typing in its find bar, the terminal still counts as focused (for its
+        // program and its cursor); only the input methods stay with the bar.
+        let typing = self.focus.is_focused(window);
+        if typing {
+            self.find_keys = false;
+        }
+        // The bar's own field counts at once: until a frame shows it, the
+        // terminal's tree doesn't know it's inside.
+        let in_bar = self.find.as_ref().is_some_and(|f| f.read(cx).focus_handle(cx).is_focused(window));
+        let focused = typing || in_bar || self.focus.contains_focused(window, cx);
         if focused != self.was_focused {
             self.was_focused = focused;
             let g = self.grid.borrow();
@@ -1301,6 +1471,7 @@ impl Render for TerminalView {
         let selection_view = cx.entity().downgrade();
         let (input_focus, input_view) = (self.focus.clone(), cx.entity());
         let ended = self.ended.clone().or_else(|| self.lost.then(|| "reconnecting to core…".to_owned()));
+        let find_bar = self.find.clone().map(|input| self.find_bar(&input, cx));
 
         div()
             .id(SharedString::from(format!("term-{}", self.address)))
@@ -1310,7 +1481,25 @@ impl Render for TerminalView {
             .relative()
             // Below 1, the layout's background shows through (cells a program colors stay solid).
             .bg(hsla(vt::theme().bg).opacity(crate::settings::get().terminal_opacity))
-            .on_action(cx.listener(|this, a: &gpui_shell::action::ShellAction, _, cx| {
+            .on_action(cx.listener(|this, a: &gpui_shell::action::ShellAction, window, cx| {
+                if this.finding(window, cx) {
+                    // The terminal's keys don't type into its program from the find
+                    // bar; pasting there pastes into the bar.
+                    match a.id() {
+                        id if id.starts_with("send:") => {}
+                        "terminal.paste" | "terminal.paste_image" => {
+                            let text = cx.read_from_clipboard().and_then(|c| c.text()).map(|t| t.replace(['\r', '\n'], " "));
+                            if let (Some(text), Some(input)) = (text, this.find.clone()) {
+                                input.update(cx, |state, cx| state.insert(text, window, cx));
+                                let needle = input.read(cx).value().to_string();
+                                this.grid.borrow_mut().vt.find(&needle, true);
+                                cx.notify();
+                            }
+                        }
+                        _ => cx.propagate(),
+                    }
+                    return;
+                }
                 // `send:<text>` bindings from keys.json type into this terminal.
                 match a.id().strip_prefix("send:") {
                     Some(text) => this.send(text.as_bytes()),
@@ -1441,13 +1630,14 @@ impl Render for TerminalView {
                         });
                         // While focused, the OS input methods (Pinyin, Japanese,
                         // dead keys) type into this terminal.
-                        if focused {
+                        if typing {
                             window.handle_input(&input_focus, ElementInputHandler::new(bounds, input_view), cx);
                         }
                     },
                 )
                 .size_full(),
             )
+            .when_some(find_bar, |d, bar| d.child(bar))
             .when_some(ended, |d, why| {
                 d.child(
                     div()
