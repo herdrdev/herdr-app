@@ -1196,7 +1196,7 @@ fn materialize_component(
 
             let button = with_hover(button, &states);
             let button = with_active_and_focus(button, &states);
-            let button = components::tooltip::with_tooltip(button, &behavior);
+            let button = components::tooltip::with_tooltip(button, &behavior, window);
             let button = with_input_handlers(button, &behavior, runtime);
             finish(button, refinement, children)
         }
@@ -2194,7 +2194,7 @@ fn flex_element(
             }
         });
     }
-    let stateful = components::tooltip::with_tooltip(stateful, &behavior);
+    let stateful = components::tooltip::with_tooltip(stateful, &behavior, window);
     if behavior.scrollbar {
         let mut stateful = stateful;
         stateful.style().refine(&refinement);

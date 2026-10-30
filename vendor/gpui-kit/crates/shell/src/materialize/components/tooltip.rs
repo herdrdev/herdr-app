@@ -92,13 +92,18 @@ impl Render for TooltipLabel {
 /// Takes the whole [`Behavior`] rather than the text so that an element with no
 /// `tooltip` pays nothing: the listeners, the prepaint canvas and the shared
 /// cell are all built only on the branch that has something to show.
-pub(in crate::materialize) fn with_tooltip<E>(element: E, behavior: &Behavior) -> E
+pub(in crate::materialize) fn with_tooltip<E>(element: E, behavior: &Behavior, window: &Window) -> E
 where
     E: StatefulInteractiveElement + ParentElement,
 {
     let Some(text) = behavior.tooltip.clone() else {
         return element;
     };
+
+    // HERDR: embedded mods have an AppWindow root, so use GPUI's window-owned tooltip.
+    if window.root::<ShellRoot>().flatten().is_none() {
+        return element.tooltip(move |_, cx| cx.new(|_| TooltipLabel { text: text.clone() }).into());
+    }
 
     // The trigger's own box, written during prepaint and read when the pointer
     // arrives. A cell rather than a value because the two happen in different
