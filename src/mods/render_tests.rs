@@ -593,3 +593,20 @@ fn shipped_layouts_and_keys() {
         }
     }
 }
+
+#[gpui::test]
+fn status_bar_shows_the_real_palette_key(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut bound = fixture(true, props(), updates("current", "current"));
+    bound.insert("keys".into(), json!([{"section":"global","keys":"ctrl-p","action":"app.palette"}]));
+    let tree = describe_with_values(cx, &staged, "mods/workspace-status", bound, None).unwrap();
+    assert!(tree.contains("Ctrl+P"), "hint must show the real binding: {tree}");
+    assert!(!tree.contains("Shift P"), "stale hardcoded hint: {tree}");
+
+    let mut unbound = fixture(true, props(), updates("current", "current"));
+    unbound.insert("keys".into(), json!([{"section":"global","keys":"ctrl-k","action":"app.help"}]));
+    let tree = describe_with_values(cx, &staged, "mods/workspace-status", unbound, None).unwrap();
+    assert!(tree.contains("commands"), "unbound hint still offers commands: {tree}");
+    assert!(!tree.contains("Shift P"), "unbound hint must not invent a key: {tree}");
+}
