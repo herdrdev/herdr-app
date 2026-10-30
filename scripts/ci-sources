@@ -28,8 +28,16 @@ case "${1:-}" in
     ;;
   restore)
     if [[ ! -f $note ]]; then
-      echo "ci-sources: no note in target/, everything builds"
-      exit 0
+      if [[ -e target ]]; then
+        echo "ci-sources: no note in target/, everything builds"
+        exit 0
+      fi
+      # No cached build: everything builds anyway, but give every file the
+      # old time first. Cargo remembers the newest file time of crates whose
+      # build script names no inputs, and later restores give old times.
+      echo "ci-sources: no cached build, everything builds"
+      mkdir target
+      sources > "$note"
     fi
     now=$(mktemp)
     trap 'rm -f "$now"' EXIT

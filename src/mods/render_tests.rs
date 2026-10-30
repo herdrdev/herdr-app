@@ -169,6 +169,9 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
                 "hc" if first == json!(["machine", "ls", "--json"]) => {
                     Some(json!({"code":0,"stdout":"{\"machines\":[{\"name\":\"remote\",\"state\":\"online\"}]}","stderr":""}))
                 }
+                "hc" if first.as_array().and_then(|a| a.first()).and_then(Value::as_str) == Some("run") => {
+                    Some(json!({"code":0,"stdout":"{\"address\":\"t-setup\"}","stderr":""}))
+                }
                 // The files panel lists a folder with sh: kind and name pairs.
                 "exec" if first == "sh" && a.get(1).map(from_host).and_then(|v| v.get(2).cloned()) == Some(json!("files")) => {
                     Some(json!({"code":0,"stdout":"d\u{0}src\u{0}f\u{0}README.md\u{0}","stderr":""}))
@@ -318,6 +321,27 @@ fn tabs_leave_room_for_macos_traffic_lights(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn windows_tab_buttons_use_matching_vector_icons(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for platform in ["windows", "linux"] {
+        for maximized in [false, true] {
+            let mut values = fixture(true, props(), updates("current", "current"));
+            values.insert("window".into(), json!({"platform":platform,"buttons":true,"maximized":maximized}));
+            let tree = describe_with_values(cx, &staged, "mods/tabs", values, None).unwrap();
+            if platform == "windows" {
+                for icon in ["win-min.svg", if maximized { "win-restore.svg" } else { "win-max.svg" }, "win-close.svg"] {
+                    assert!(tree.contains(icon), "missing {icon}: {tree}");
+                }
+            } else {
+                assert!(!tree.contains("mods/tabs/win-"), "{tree}");
+                assert!(tree.contains("mods/pane/close.svg"), "{tree}");
+            }
+        }
+    }
+}
+
+#[gpui::test]
 fn font_pickers_contain_scroll_on_the_wrapper(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
@@ -333,6 +357,68 @@ fn font_pickers_contain_scroll_on_the_wrapper(cx: &mut TestAppContext) {
         assert!(!scroll.contains("on_scroll_wheel"), "the native scroller must receive the event: {tree}");
         assert_eq!(tree.matches("on_scroll_wheel").count(), 1, "the wrapper must stop scroll chaining: {tree}");
     }
+}
+
+#[gpui::test]
+fn check_materializes_retained_elements_in_a_rendered_view(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for body in [
+        "v_flex().h(400).child(v_virtual_list('rows', 0, 28, (i) => 'a', () => { throw new Error('deferred rows ran'); }))",
+        "v_flex().h(400).child(v_virtual_list('rows', 1, 28, (i) => 'a', () => { throw new Error('deferred rows ran'); }))",
+        "div().w(100).h(50).left(10).transition('left', 200)",
+        "div().w(100).h(50).transition('width', 200)",
+        "div().w(100).h(50).left(10).spring('left')",
+        "div().opacity(0.5).transition('opacity', 200)",
+    ] {
+        std::fs::write(staged.0.join("main.js"), format!(
+            "import {{ View, div }} from 'gpui-kit'; import {{ v_flex, v_virtual_list }} from 'gpui-base'; export default class Demo extends View {{ render() {{ return {body}; }} }}"
+        )).unwrap();
+        let runtime = ShellRuntime::new_isolated().unwrap();
+        let window = cx.add_window(|_, _| Empty);
+        let description = window.update(cx, |_, window, cx| runtime.check(&staged.0, window, cx)).unwrap().unwrap();
+        assert!(!description.is_empty(), "{body}");
+        gpui::AnyWindowHandle::from(window).update(cx, |_, window, _| window.remove_window()).unwrap();
+    }
+}
+
+#[gpui::test]
+fn machine_picker_keeps_long_lists_scrollable(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let tree = describe(
+        cx, &staged, "mods/machine-add", false, props(), updates("current", "current"),
+        Some("this.hosts = Array.from({length: 30}, (_, i) => ({alias: `host-${i}`, aliases: []}));"),
+    ).unwrap();
+    let scroll = tree.lines().find(|line| line.contains("ma-hosts")).unwrap();
+    assert!(scroll.contains("overflow_y_scroll") && !scroll.contains("overflow_y_scrollbar"), "{tree}");
+    assert!(scroll.contains(".min_h[Number(0.0)]"), "{tree}");
+    assert!(tree.contains("ma-row-host-29"), "{tree}");
+    assert_eq!(tree.matches(".flex_none").count(), 60, "rows must not shrink into the viewport: {tree}");
+}
+
+#[gpui::test]
+fn machine_setup_prompt_stacks_above_the_picker(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let calls = Rc::new(RefCell::new(Calls::default()));
+    let policy = Policy::new().with_host_module(module(fixture(false, props(), updates("current", "current")), calls.clone())).unwrap();
+    let root = staged.wrapper("mods/machine-add", "cx.spawn(async () => { await this.inTerminal('host'); });");
+    let window = cx.add_window(|_, _| Empty);
+    let mut session = window.update(cx, |_, window, cx| {
+        DescriptionSession::load(ShellRuntime::new_isolated().unwrap(), root, policy, window, cx).unwrap()
+    }).unwrap();
+    cx.run_until_parked();
+    window.update(cx, |_, window, cx| {
+        session.describe(window, cx).unwrap();
+        window.remove_window();
+    }).unwrap();
+    let calls = calls.borrow();
+    assert!(calls.unexpected.is_empty(), "{:?}", calls.unexpected);
+    let spec = &calls.effects.iter().find(|(name, _)| name == "openOverlay").unwrap().1[0];
+    assert_eq!(spec["kind"], "dialog");
+    assert_eq!(spec["layout"]["children"][1]["content"]["terminal"], "t-setup");
+    assert!(!calls.effects.iter().any(|(name, _)| name == "closeOverlay"), "the picker must keep monitoring setup");
 }
 
 #[gpui::test]

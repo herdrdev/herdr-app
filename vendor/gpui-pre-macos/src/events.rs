@@ -30,8 +30,7 @@ pub fn set_option_as_alt(value: Option<bool>) {
 }
 
 fn layout_uses_option_as_alt(id: &str) -> bool {
-    matches!(id, "com.apple.keylayout.US" | "com.apple.keylayout.USInternational" | "com.apple.keylayout.ABC")
-        || id.starts_with("com.apple.keylayout.ABC-")
+    matches!(id, "com.apple.keylayout.US" | "com.apple.keylayout.USInternational" | "com.apple.keylayout.ABC" | "com.apple.keylayout.ABC-India")
 }
 
 /// Resolved against the current layout so input-source switches take effect immediately.
@@ -486,7 +485,8 @@ unsafe fn parse_keystroke(native_event: id) -> Keystroke {
                     chars_ignoring_modifiers = chars_with_cmd;
                 }
 
-                if !control && !command && !function {
+                // Fn can accompany printable keys from programmable keyboards.
+                if !control && !command {
                     let caps_lock = modifiers.contains(NSEventModifierFlags::NSAlphaShiftKeyMask);
                     let mods = text_modifiers(shift, alt && !option_as_alt(), caps_lock);
 
@@ -632,7 +632,7 @@ mod tests {
         for id in ["US", "USInternational", "ABC", "ABC-India"] {
             assert!(layout_uses_option_as_alt(&format!("com.apple.keylayout.{id}")));
         }
-        for id in ["Turkish-Q-PC", "German", "ABCother", ""] {
+        for id in ["Turkish-Q-PC", "German", "ABC-QWERTZ", "ABC-AZERTY", "ABC-other", "ABCother", ""] {
             assert!(!layout_uses_option_as_alt(&format!("com.apple.keylayout.{id}")));
         }
         assert!(!layout_uses_option_as_alt("com.apple.inputmethod.Kotoeri.RomajiTyping.Japanese"));

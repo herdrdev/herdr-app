@@ -13,16 +13,21 @@ on:
 permissions:
   contents: read
 
-# Only superseded PR runs share a group; every other commit runs independently.
+# A newer push cancels older runs, on a PR and on master: PRs were tested
+# before merging, so only master's newest commit needs a run.
 concurrency:
-  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.sha }}
-  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
+  group: ${{ github.workflow }}-${{ github.event_name == 'pull_request' && github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 env:
   RUST_TOOLCHAIN: 1.95.0
+  # In the cache key: ghostty-sys can't tell when Zig changes.
+  ZIG_VERSION: 0.16.0
   # File/line backtraces without full debug info: smaller target, faster cache.
   CARGO_PROFILE_DEV_DEBUG: "1"
   CARGO_PROFILE_TEST_DEBUG: "1"
+  # Incremental state only bloats a cache: CI builds each commit once.
+  CARGO_INCREMENTAL: "0"
   SAVE_CACHES: ${{ github.event_name == 'push' && github.ref == 'refs/heads/master' }}
 
 jobs:
@@ -50,13 +55,21 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
-          version: 0.16.0
-      - uses: Swatinem/rust-cache@6323deb102c322ba6fcbdcafc7e3dddab59af2b6 # v2.9.2
+          version: ${{ env.ZIG_VERSION }}
+      # The whole target/, like release.yml: rust-cache drops the vendored crates.
+      # Keyed by what the dependencies build from, so a source-only push
+      # restores an exact hit and saves nothing (no cache per commit).
+      - name: Restore build cache
+        id: cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
-          key: ${{ matrix.platform }}-dev
-          cache-workspace-crates: true
-          cache-bin: false
-          save-if: ${{ env.SAVE_CACHES }}
+          path: &cache-paths |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: ci-v2-${{ matrix.platform }}-${{ env.RUST_TOOLCHAIN }}-zig${{ env.ZIG_VERSION }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'vendor/**', 'crates/**', '.github/workflows/ci.yml') }}
+          restore-keys: ci-v2-${{ matrix.platform }}-${{ env.RUST_TOOLCHAIN }}-zig${{ env.ZIG_VERSION }}-
       - name: Linux build dependencies
         if: runner.os == 'Linux'
         run: |
@@ -68,10 +81,21 @@ jobs:
       - name: Windows build dependencies
         if: runner.os == 'Windows'
         run: echo "LIBCLANG_PATH=C:\\Program Files\\LLVM\\bin" >> "$GITHUB_ENV"
+      - name: Keep unchanged sources fresh
+        run: scripts/ci-sources restore
       # Compile the screenshot harness everywhere, even without a desktop.
       # Disable optimized dev dependencies in CI to reduce test compile time.
       - name: Build tests
         run: cargo test --locked --config 'profile.dev.package."*".opt-level=0' --no-run
+      - name: Note the sources the cache was built from
+        if: env.SAVE_CACHES == 'true' && steps.cache.outputs.cache-hit != 'true'
+        run: scripts/ci-sources record
+      - name: Save build cache
+        if: env.SAVE_CACHES == 'true' && steps.cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: *cache-paths
+          key: ${{ steps.cache.outputs.cache-primary-key }}
       - name: Tests
         run: |
           only=()

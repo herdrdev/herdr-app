@@ -705,8 +705,7 @@ pub(crate) fn try_materialize(
     window: &mut Window,
     cx: &mut App,
 ) -> anyhow::Result<AnyElement> {
-    // HERDR: a check builds the elements outside any view's draw, so
-    // nothing can be woken for the next frame (`frames`, `loop`).
+    // HERDR: a check constructs elements once; it must not schedule animation frames.
     CHECKING.with(|c| c.set(true));
     let built = with_error_frame(|| materialize(runtime, snapshot, window, cx));
     CHECKING.with(|c| c.set(false));

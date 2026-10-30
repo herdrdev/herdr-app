@@ -41,6 +41,9 @@ herdr-app do space.new --name "remote api" --machine vps --folder /srv/api
 ```
 
 The folder is on that machine; tabs and splits in the space stay there.
+`terminal.open --folder /path --place down` starts the split in that folder,
+including when `--argv` supplies a program. Without `--folder`, it follows the
+focused terminal's folder.
 `hc machine ls` lists machines. Use `hc run --on vps ...`, `hc exec --on vps ...`
 and `hc file ... --on vps ...` for remote work, not your local file tools.
 

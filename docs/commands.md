@@ -279,13 +279,13 @@ No arguments.
 
 ## `terminal.paste`
 
-Paste into the focused terminal (an image alone, into one on another machine, as a file there).
+Paste into the focused terminal (copied files as if dropped; an image alone as terminal.paste_image pastes it).
 
 No arguments.
 
 ## `terminal.paste_image`
 
-Ctrl+V: the clipboard's image as a file on the focused terminal's machine, when that's another one; otherwise Ctrl+V goes to the terminal.
+Ctrl+V: the clipboard's image as a file on the focused terminal's machine, when that's another one; on Windows, paste clipboard text; otherwise Ctrl+V goes to the terminal.
 
 No arguments.
 

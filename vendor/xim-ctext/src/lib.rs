@@ -92,6 +92,7 @@ impl fmt::Display for DecodeError {
 pub fn compound_text_to_utf8(mut bytes: &[u8]) -> Result<String, DecodeError> {
     let mut out = String::new();
     let mut charset: Option<&'static encoding_rs::Encoding> = None;
+    let mut gl: Option<&'static encoding_rs::Encoding> = None;
     while !bytes.is_empty() {
         if bytes.starts_with(UTF8_START) {
             bytes = &bytes[UTF8_START.len()..];
@@ -104,6 +105,7 @@ pub fn compound_text_to_utf8(mut bytes: &[u8]) -> Result<String, DecodeError> {
                 &[]
             };
         } else if bytes.starts_with(b"\x1b(B") {
+            gl = None;
             bytes = &bytes[3..];
         } else if bytes.starts_with(b"\x1b-") {
             let designation = *bytes.get(2).ok_or(DecodeError::InvalidEncoding)?;
@@ -126,21 +128,45 @@ pub fn compound_text_to_utf8(mut bytes: &[u8]) -> Result<String, DecodeError> {
                 _ => return Err(DecodeError::UnsupportedEncoding),
             };
             bytes = &bytes[3..];
-        } else if bytes.starts_with(b"\x1b$(B") || bytes.starts_with(b"\x1b$B") {
-            // Preserve the upstream JIS X 0208 support. ISO-2022-JP uses
-            // ESC $ B for COMPOUND_TEXT's ESC $ ( B designation.
-            let prefix_len = if bytes.starts_with(b"\x1b$(B") { 4 } else { 3 };
-            let mut jis = b"\x1b$B".to_vec();
-            jis.extend_from_slice(&bytes[prefix_len..]);
-            out.push_str(&encoding_rs::ISO_2022_JP.decode_without_bom_handling(&jis).0);
-            bytes = &[];
+        } else if bytes.starts_with(b"\x1b$") {
+            let (index, right) = match bytes.get(2) {
+                Some(b'(') => (3, false),
+                Some(b')') => (3, true),
+                _ => (2, false),
+            };
+            let encoding = match bytes.get(index).ok_or(DecodeError::InvalidEncoding)? {
+                b'A' => encoding_rs::GBK,
+                b'B' => encoding_rs::EUC_JP,
+                b'C' => encoding_rs::EUC_KR,
+                _ => return Err(DecodeError::UnsupportedEncoding),
+            };
+            if right {
+                charset = Some(encoding);
+            } else {
+                gl = Some(encoding);
+            }
+            bytes = &bytes[index + 1..];
         } else if bytes[0] == 0x1b {
             return Err(DecodeError::UnsupportedEncoding);
+        } else if bytes[0] < 0x20 {
+            out.push(char::from(bytes[0]));
+            bytes = &bytes[1..];
         } else {
-            let len = bytes.iter().position(|b| *b == 0x1b).unwrap_or(bytes.len());
+            let right = bytes[0] >= 0x80;
+            let len = bytes.iter().position(|b| *b < 0x20 || (*b >= 0x80) != right).unwrap_or(bytes.len());
             let run = &bytes[..len];
-            if let Some(charset) = charset {
-                out.push_str(&charset.decode_without_bom_handling(run).0);
+            if let Some(encoding) = if right { charset } else { gl } {
+                // EUC encodings use the high bit for COMPOUND_TEXT's GL pairs.
+                let high;
+                let encoded = if right { run } else {
+                    high = run.iter().map(|b| b | 0x80).collect::<Vec<_>>();
+                    &high
+                };
+                let (decoded, errors) = encoding.decode_without_bom_handling(encoded);
+                if errors {
+                    return Err(DecodeError::InvalidEncoding);
+                }
+                out.push_str(&decoded);
             } else {
                 out.extend(run.iter().map(|byte| char::from(*byte)));
             }
@@ -177,6 +203,20 @@ mod tests {
             "á"
         );
         assert_eq!(crate::compound_text_to_utf8(b"\x1b%G\x1b%@").unwrap(), "");
+    }
+
+    #[test]
+    fn cjk_designations_can_switch_mid_commit() {
+        assert_eq!(crate::compound_text_to_utf8(b"\x1b$(ADc\x1b$(B9%\x1b(B!").unwrap(), "你好!");
+        assert_eq!(crate::compound_text_to_utf8(b"\x1b$(ADc:C\x1b(B!").unwrap(), "你好!");
+        assert_eq!(crate::compound_text_to_utf8(b"\x1b$)A\xc4\xe3\xba\xc3!").unwrap(), "你好!");
+        assert_eq!(crate::compound_text_to_utf8(b"\x1b$(C0!\x1b(B!").unwrap(), "가!");
+    }
+
+    #[test]
+    fn controls_do_not_change_the_graphic_charset() {
+        assert_eq!(crate::compound_text_to_utf8(b"\x1b$(ADc\n:C").unwrap(), "你\n好");
+        assert_eq!(crate::compound_text_to_utf8(b"\x1b$(BEl\t5~").unwrap(), "東\t京");
     }
 
     #[test]

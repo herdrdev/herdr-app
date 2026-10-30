@@ -12,6 +12,9 @@
 # The cache is the whole target/, with scripts/ci-sources keeping unchanged
 # files fresh to Cargo: the vendored crates (gpui-kit, taffy, ghostty) are
 # the slow part, and a fresh checkout would otherwise rebuild them all.
+#
+# Tests (the native screenshot test too) run only in ci.yml: a tag publishes
+# once ci.yml has passed for its commit.
 name: build and release
 # Master pushes only build (to keep the cache warm); tags publish.
 run-name: ${{ github.ref_type == 'tag' && format('release {0}', github.ref_name) || format('build {0}', github.ref_name) }}
@@ -51,6 +54,8 @@ concurrency:
 
 env:
   RUST_TOOLCHAIN: 1.95.0
+  # In the cache key: ghostty-sys can't tell when Zig changes.
+  ZIG_VERSION: 0.16.0
   IS_TAG: ${{ github.ref_type == 'tag' }}
 
 jobs:
@@ -82,7 +87,7 @@ jobs:
           toolchain: ${{ env.RUST_TOOLCHAIN }}
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
-          version: 0.16.0
+          version: ${{ env.ZIG_VERSION }}
       - name: Restore build cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -91,10 +96,10 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: release-v1-${{ matrix.target }}-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          key: release-v2-${{ matrix.target }}-${{ env.RUST_TOOLCHAIN }}-zig${{ env.ZIG_VERSION }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
           restore-keys: |
-            release-v1-${{ matrix.target }}-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}-
-            release-v1-${{ matrix.target }}-${{ env.RUST_TOOLCHAIN }}-
+            release-v2-${{ matrix.target }}-${{ env.RUST_TOOLCHAIN }}-zig${{ env.ZIG_VERSION }}-${{ hashFiles('Cargo.lock') }}-
+            release-v2-${{ matrix.target }}-${{ env.RUST_TOOLCHAIN }}-zig${{ env.ZIG_VERSION }}-
       - name: Linux build dependencies
         if: runner.os == 'Linux'
         run: |
@@ -114,18 +119,6 @@ jobs:
           [ "$want" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME but Cargo.toml says $want"; exit 1; }
       - name: Keep unchanged sources fresh
         run: scripts/ci-sources restore
-      # Screenshot tests run natively on macOS.
-      # Windows runners lack an interactive desktop.
-      - name: Build the screenshot test
-        if: runner.os == 'macOS'
-        run: cargo test --locked --test shot_pixels --no-run
-      # The limit catches a hung window, not a slow build.
-      - name: Screenshot pixels
-        if: runner.os == 'macOS'
-        timeout-minutes: 5
-        env:
-          HERDR_SHOT_NATIVE_TEST: "1"
-        run: cargo test --locked --test shot_pixels
       - name: Build and pack
         env:
           RELEASES_URL: ${{ vars.RELEASES_URL }}
@@ -150,13 +143,38 @@ jobs:
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: *cache-paths
-          key: release-v1-${{ matrix.target }}-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          key: release-v2-${{ matrix.target }}-${{ env.RUST_TOOLCHAIN }}-zig${{ env.ZIG_VERSION }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: herdr-app-${{ matrix.target }}
           path: dist/herdr-app-${{ matrix.target }}.tar.gz
           if-no-files-found: error
           retention-days: 7
+
+  # ci.yml runs when the tagged commit reaches master; wait for its result.
+  # A newer push cancels it: rerun it and this job carries on.
+  ci-passed:
+    if: github.event_name == 'push' && github.ref_type == 'tag'
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    permissions:
+      actions: read
+    steps:
+      - name: Wait for ci on this commit
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          while :; do
+            run=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&event=push&per_page=1" \
+              --jq '.workflow_runs[0] | "\(.status) \(.conclusion) \(.id)"') || run="api error"
+            echo "ci for $GITHUB_SHA: $run"
+            case "$run" in
+              "completed success "*) exit 0 ;;
+              "completed cancelled "*) echo "cancelled by a newer push: rerun that ci run, this job keeps waiting" ;;
+              completed*) exit 1 ;;
+            esac
+            sleep 30
+          done
 
   # Signs herdr-app.exe with Azure Artifact Signing and repacks it, on Can's
   # tag pushes and manual runs (to test signing without publishing). Azure
@@ -214,7 +232,7 @@ jobs:
 
   # A website download, never a dependency of update publishing below.
   mac-dmg:
-    needs: build
+    needs: [build, ci-passed]
     if: github.event_name == 'push' && github.ref_type == 'tag' && github.triggering_actor == 'ogulcancelik'
     environment: release
     runs-on: macos-15
@@ -253,12 +271,13 @@ jobs:
           aws s3 cp --endpoint-url "$ENDPOINT" dist/Herdr.dmg "s3://$BUCKET/app/Herdr.dmg" --cache-control "no-cache" --content-type application/x-apple-diskimage
 
   publish:
-    needs: [build, sign-windows]
+    needs: [build, sign-windows, ci-passed]
     # Only a tag push by Can publishes: anyone with write access can re-run an
     # old tag's run, which would point latest.json back at that version.
     # sign-windows may be skipped, not failed.
     if: >-
       !cancelled() && needs.build.result == 'success' && needs.sign-windows.result != 'failure'
+      && needs.ci-passed.result == 'success'
       && github.event_name == 'push' && github.ref_type == 'tag' && github.triggering_actor == 'ogulcancelik'
     # The R2 keys live here, usable only from v* tags.
     environment: release

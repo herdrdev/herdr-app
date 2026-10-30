@@ -16,7 +16,7 @@ function location() {
   const space = spaces().find(s => s.active), f = focused();
   const pane = f?.pane ? panes().find(p => p.pane === f.pane) : null;
   const on = f?.pane === null ? (f.terminal?.includes("/") ? f.terminal.split("/")[0] : null) : space?.machine ?? null;
-  return { cwd: pane?.cwd || f?.cwd || space?.folder, on };
+  return { cwd: pane?.cwd || f?.cwd || space?.folder, on, space: space?.id };
 }
 const key = () => JSON.stringify(location());
 const LANG = { ts: "js", tsx: "js", mts: "js", cts: "js", jsx: "js", mjs: "js", toml: "yaml", jsonc: "json", svelte: "html", vue: "html" };
@@ -24,7 +24,7 @@ const PER_FOLDER = 500, TOTAL = 5000;
 
 async function directory(path, on) {
   if (!on && window()?.platform === "windows") {
-    const r = await exec("powershell", ["-NoProfile", "-Command", "& { param($p) @(Get-ChildItem -LiteralPath $p -Force -ErrorAction Stop | Where-Object Name -ne '.git' | Select-Object -First 501 | ForEach-Object { @{ name=$_.Name; dir=($_.PSIsContainer -and -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint)) } }) | ConvertTo-Json -Compress }", path]);
+    const r = await exec("powershell", ["-NoProfile", "-Command", "& { param($p) @(Get-ChildItem -LiteralPath $p -Force -ErrorAction Stop | Where-Object Name -ne '.git' | Select-Object -First 501 | ForEach-Object { @{ name=$_.Name; dir=($_.PSIsContainer -and -not ($_.Attributes -band [IO.FileAttributes]::ReparsePoint)) } }) | ConvertTo-Json -Compress } '" + path.replaceAll("'", "''") + "'"]);
     if (r.code !== 0) throw new Error(r.stderr || "Cannot list this folder");
     const result = JSON.parse(r.stdout || "[]");
     return Array.isArray(result) ? result : [result];
@@ -39,6 +39,7 @@ async function directory(path, on) {
 
 export default class Files extends View {
   init(_props, cx) {
+    this.saved = new Map();
     this.entries = new Map(); this.folders = new Set(); this.pending = new Set(); this.marks = {};
     this.refresh(cx);
     cx.timer.every(10000, cx => this.refresh(cx));
@@ -47,34 +48,46 @@ export default class Files extends View {
   watch(root, cx) {
     if (this.on || this.watched === root) return;
     this.watched = root;
+    const context = this.context;
     cx.spawn(async cx => {
-      try { while (this.watched === root) { await watchFolder(root); if (this.watched === root) this.refresh(cx); } }
-      catch { if (this.watched === root) this.watched = null; }
+      try { while (this.context === context) { await watchFolder(root); if (this.current(context)) this.refresh(cx); } }
+      catch { if (this.context === context) this.watched = null; }
     });
   }
 
+  current(context) {
+    return this.context === context && key() === context.key;
+  }
+
   async loadFolder(path, context) {
-    const on = this.on, root = this.root;
+    const { on, cwd: root } = context;
     const entries = await directory(path ? `${root}/${path}` : root, on);
-    if (key() !== context || (path && !this.folders.has(path))) return;
+    if (!this.current(context) || (path && !this.folders.has(path))) return;
     const used = [...this.entries.entries()].filter(([p]) => p !== path).reduce((n, [, e]) => n + e.length, 0);
     this.entries.set(path, entries.slice(0, Math.max(0, Math.min(PER_FOLDER, TOTAL - used))).sort((a, b) => Number(b.dir) - Number(a.dir) || a.name.localeCompare(b.name)));
     if (entries.length > PER_FOLDER || used + entries.length > TOTAL) this.limited = true;
   }
 
   refresh(cx) {
-    if (this.loading) return;
-    const { cwd, on } = location(), context = key();
-    if (context !== this.context) {
-      this.context = context; this.root = cwd; this.on = on; this.entries = new Map(); this.folders = new Set();
+    const { cwd, on } = location(), next = key();
+    if (next !== this.context?.key) {
+      if (this.context) this.saved.set(this.context.key, { folders: this.folders, file: this.file });
+      const saved = this.saved.get(next);
+      this.context = { key: next, cwd, on }; this.root = cwd; this.on = on; this.entries = new Map(); this.folders = new Set(saved?.folders);
       this.pending = new Set(); this.marks = {}; this.show(null); this.watched = null; this.error = null; this.limited = false;
+      this.loading = false;
+      if (saved?.file) this.show(saved.file, cx);
     }
-    if (!cwd) return;
+    if (!cwd || this.loading) return;
+    const context = this.context;
     this.loading = true;
     this.limited = false;
     cx.spawn(async cx => {
       try {
-        for (const path of ["", ...this.folders]) await this.loadFolder(path, context);
+        for (const path of ["", ...this.folders]) {
+          if (!this.current(context)) return;
+          await this.loadFolder(path, context);
+        }
         const top = await exec("git", ["rev-parse", "--show-toplevel"], { cwd, on }).catch(() => null);
         const marks = {};
         if (top?.code === 0) {
@@ -85,10 +98,10 @@ export default class Files extends View {
             marks[`${top.stdout.trim()}/${entry.slice(3)}`] = xy === "??" || xy.includes("A") ? "A" : xy.includes("U") ? "U" : xy.includes("D") ? "D" : "M";
           }
         }
-        if (key() !== context) return;
+        if (!this.current(context)) return;
         this.marks = marks; this.error = null; this.watch(cwd, cx);
-      } catch (e) { if (key() === context) this.error = String(e); }
-      finally { this.loading = false; cx.notify(); }
+      } catch (e) { if (this.current(context)) this.error = String(e); }
+      finally { if (this.context === context) this.loading = false; cx.notify(); }
     });
   }
 
@@ -105,8 +118,8 @@ export default class Files extends View {
         this.pending.add(path);
         cx.spawn(async cx => {
           try { await this.loadFolder(path, context); }
-          catch (e) { if (key() === context) this.error = String(e); }
-          finally { this.pending.delete(path); cx.notify(); }
+          catch (e) { if (this.current(context)) this.error = String(e); }
+          finally { if (this.context === context) this.pending.delete(path); cx.notify(); }
         });
       }
     }
@@ -128,7 +141,7 @@ export default class Files extends View {
     cx.spawn(async cx => {
       try {
         const text = await readTextFile(`${root}/${path}`, { on });
-        if (this.file !== path || key() !== context) return;
+        if (this.file !== path || !this.current(context)) return;
         if (text === null) { this.fileError = "This file is no longer available"; return; }
         if (text.includes("\0")) { this.fileError = "Binary file · no text preview"; return; }
         const t = theme(), ext = path.includes(".") ? path.split(".").pop() : "txt";
@@ -136,7 +149,7 @@ export default class Files extends View {
           value: text.length > 400000 ? text.slice(0, 400000) + "\n… (file truncated)" : text,
           font_family: settings().font_family, font_size: 12,
           syntax: { keyword: t.ansi5, string: t.ansi2, comment: t.dim, function: t.ansi4, type: t.ansi3, number: t.ansi1, constant: t.ansi6 } });
-      } catch { if (this.file === path && key() === context) this.fileError = "Cannot preview this file (binary, too large, or unreadable)"; }
+      } catch { if (this.file === path && this.current(context)) this.fileError = "Cannot preview this file (binary, too large, or unreadable)"; }
       finally { cx.notify(); }
     });
   }
@@ -159,7 +172,7 @@ export default class Files extends View {
   }
 
   render(cx) {
-    if (key() !== this.context) this.refresh(cx);
+    if (key() !== this.context?.key) this.refresh(cx);
     const t = theme();
     return v_flex().id("files").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
       .child(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
