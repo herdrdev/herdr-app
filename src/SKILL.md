@@ -46,6 +46,7 @@ herdr-app do tab.new --name "fix login" --argv '["claude"]' --task "Look at the 
 herdr-app do pane.split --direction right --pane p12
 herdr-app do agent.focus --terminal t7
 herdr-app do agent.select --index 3
+herdr-app do terminal.zoom_in --pane p12  # this session; only that terminal's text
 ```
 
 `agent.select` uses the same navigation order as `agent.next` (1 = first).
