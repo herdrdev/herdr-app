@@ -34,6 +34,37 @@ fn lines(c: char) -> Option<[u8; 4]> {
     Some(out)
 }
 
+/// Rounded corners (╭╮╯╰): which way their two arms leave the center,
+/// (right or left, down or up). Drawn as arcs, as Ghostty does.
+fn arc(c: char) -> Option<(f32, f32)> {
+    match c {
+        '╭' => Some((1.0, 1.0)),
+        '╮' => Some((-1.0, 1.0)),
+        '╯' => Some((-1.0, -1.0)),
+        '╰' => Some((1.0, -1.0)),
+        _ => None,
+    }
+}
+
+/// Dashed lines: (dashes per cell, heavy, horizontal), as Ghostty draws them.
+fn dashes(c: char) -> Option<(u8, bool, bool)> {
+    Some(match c {
+        '┄' => (3, false, true),
+        '┅' => (3, true, true),
+        '┆' => (3, false, false),
+        '┇' => (3, true, false),
+        '┈' => (4, false, true),
+        '┉' => (4, true, true),
+        '┊' => (4, false, false),
+        '┋' => (4, true, false),
+        '╌' => (2, false, true),
+        '╍' => (2, true, true),
+        '╎' => (2, false, false),
+        '╏' => (2, true, false),
+        _ => return None,
+    })
+}
+
 /// Rectangles in cell fractions (x0, y0, x1, y1) and an alpha, for block elements.
 fn blocks(c: char) -> Option<(Vec<[f32; 4]>, f32)> {
     let e = 1.0 / 8.0;
@@ -120,10 +151,42 @@ pub fn paint(text: &str, cell: Bounds<Pixels>, color: Hsla, window: &mut Window)
         }
         return;
     }
-    let Some(dirs) = lines(c) else { return };
     let light = (w / 8.0).round().max(1.0 / scale);
-    let thick = |k: u8| if k == 2 { light * 2.0 } else { light };
     let (cx, cy) = (snap(x + w / 2.0), snap(y + h / 2.0));
+    if let Some((sx, sy)) = arc(c) {
+        // Straight in from both edges, then a quarter turn through the
+        // center's corner (Ghostty's control points), so it meets ─ and │.
+        let (r, k) = (w.min(h) / 2.0, 0.25);
+        let mut path = PathBuilder::stroke(px(light));
+        path.move_to(point(px(cx), px(if sy > 0.0 { y + h } else { y })));
+        path.line_to(point(px(cx), px(cy + sy * r)));
+        path.cubic_bezier_to(point(px(cx + sx * r), px(cy)), point(px(cx), px(cy + sy * k * r)), point(px(cx + sx * k * r), px(cy)));
+        path.line_to(point(px(if sx > 0.0 { x + w } else { x }), px(cy)));
+        if let Ok(path) = path.build() {
+            window.paint_path(path, color);
+        }
+        return;
+    }
+    if let Some((n, heavy, horizontal)) = dashes(c) {
+        // Gaps are at most half the cell. A horizontal line keeps half a gap
+        // at each end and a vertical one its gap below, so neighbors tile evenly.
+        let t = if heavy { light * 2.0 } else { light };
+        let (len, from) = if horizontal { (w, x) } else { (h, y) };
+        let gap = (len / (2.0 * n as f32)).min(light.max(4.0 / scale));
+        let dash = (len - gap * n as f32) / n as f32;
+        let mut at = from + if horizontal { gap / 2.0 } else { 0.0 };
+        for _ in 0..n {
+            if horizontal {
+                rect(at, cy - t / 2.0, at + dash, cy + t / 2.0, color);
+            } else {
+                rect(cx - t / 2.0, at, cx + t / 2.0, at + dash, color);
+            }
+            at += dash + gap;
+        }
+        return;
+    }
+    let Some(dirs) = lines(c) else { return };
+    let thick = |k: u8| if k == 2 { light * 2.0 } else { light };
     // Where a line along an arm starts, measured from the center toward the
     // arm: `before` and `after` are the crossing arms on this line's side and
     // the other side. Negative reaches past the center so joins close.
@@ -232,5 +295,17 @@ mod tests {
         for c in '\u{2580}'..='\u{259F}' {
             assert!(blocks(c).is_some(), "{c} has no entry");
         }
+    }
+
+    #[test]
+    fn rounded_corners_and_dashes_have_their_own_shapes() {
+        for c in ['╭', '╮', '╯', '╰'] {
+            assert!(arc(c).is_some() && is_sprite(&c.to_string()), "{c}");
+        }
+        for c in ['┄', '┅', '┆', '┇', '┈', '┉', '┊', '┋', '╌', '╍', '╎', '╏'] {
+            assert!(dashes(c).is_some() && is_sprite(&c.to_string()), "{c}");
+        }
+        assert_eq!(arc('┌'), None);
+        assert_eq!(dashes('─'), None);
     }
 }
