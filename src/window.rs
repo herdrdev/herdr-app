@@ -107,13 +107,17 @@ pub fn shell() -> String {
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
 }
 
+/// Runs the command, then stays: given the shell and the command as arguments.
+const SH_RUN: &str = "\"$@\"; exec \"$0\" -i";
+const FISH_RUN: &str = "command $argv[2..]; exec $argv[1] -i";
+
 fn unix_agent_argv(sh: String, cmd: Vec<String>, login: bool) -> Vec<String> {
     let fish = std::path::Path::new(&sh).file_name().and_then(|s| s.to_str()) == Some("fish");
     let script = match (fish, login) {
         (true, true) => "command $argv[2..]; exec $argv[1] -li",
-        (true, false) => "command $argv[2..]; exec $argv[1] -i",
+        (true, false) => FISH_RUN,
         (false, true) => "\"$@\"; exec \"$0\" -li",
-        (false, false) => "\"$@\"; exec \"$0\" -i",
+        (false, false) => SH_RUN,
     };
     let mut run = vec![sh.clone(), if login { "-lic" } else { "-ic" }.into(), script.into(), sh];
     run.extend(cmd);
@@ -2231,7 +2235,9 @@ impl AppWindow {
         argv.filter(|a| !a.is_empty()).map(|mut cmd| {
             cmd.extend(task.map(str::to_owned));
             if on.is_some() {
-                let mut run = vec!["sh".into(), "-c".into(), "\"$@\"; exec \"${SHELL:-sh}\" -i".into(), "sh".into()];
+                // `sh` finds the person's shell there; unknown ones run it from `sh`, then stay.
+                let script = crate::programs::in_their_shell(&format!("'{FISH_RUN}'"), &format!("'{SH_RUN}'"), "\"$@\"; exec \"${SHELL:-sh}\" -i");
+                let mut run = vec!["sh".into(), "-c".into(), script, "sh".into()];
                 run.extend(cmd);
                 return run;
             }
@@ -4567,6 +4573,34 @@ mod tests {
                 assert_eq!(run[2], expected);
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_agents_start_in_the_persons_shell_there() {
+        use std::os::unix::fs::PermissionsExt;
+        let task = "a 'quoted' task; $(not-a-command)";
+        let run = super::AppWindow::agent_argv(Some(vec!["rc_agent".into()]), Some(task), Some("vps")).unwrap();
+        assert_eq!(run[..2], ["sh", "-c"]);
+        assert_eq!(run[3..], ["sh", "rc_agent", task]);
+        assert_eq!(crate::programs::of(None, &run)["name"], "rc_agent");
+        // The agent's folder is only on the PATH an interactive bash sets up.
+        let home = std::env::temp_dir().join(format!("herdr-remote-start-{}", std::process::id()));
+        let bin = home.join("bin");
+        std::fs::create_dir_all(&bin).unwrap();
+        std::fs::write(home.join(".bashrc"), format!("case $- in *i*) ;; *) return;; esac\nexport PATH=\"{}:$PATH\"\n", bin.display())).unwrap();
+        std::fs::write(bin.join("rc_agent"), "#!/bin/sh\nprintf 'ran:%s\\n' \"$@\"\n").unwrap();
+        std::fs::set_permissions(bin.join("rc_agent"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let out = std::process::Command::new(&run[0])
+            .args(&run[1..])
+            .env("HOME", &home)
+            .env("SHELL", "/bin/bash")
+            .env("PATH", "/usr/bin:/bin")
+            .stdin(std::process::Stdio::null())
+            .output()
+            .unwrap();
+        assert!(String::from_utf8_lossy(&out.stdout).contains(&format!("ran:{task}\n")), "{out:?}");
+        let _ = std::fs::remove_dir_all(&home);
     }
 
     #[test]
