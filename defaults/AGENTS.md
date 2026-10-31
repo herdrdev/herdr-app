@@ -719,8 +719,18 @@ has 120 programs (agents, editors, runtimes, tools, databases, infra);
 ~/.config/herdr-app/mods/<name>/
   main.js       the mod (required)
   mod.json    where it first appears: { "place": "right" | "left" | "top" | "bottom" | "none", "size": 320 }
+              and an optional tab-bar button: "button": { "label": "PRs", "icon": "pr.svg", "opens": "panel" | "tab", "order": 10 }
   *.js, *.svg   more modules ("./ui.js"), its own icons
 ```
+
+- A `"button"` puts the mod in the tab bar, next to Files and Changes, without
+  cloning a layout. `"opens": "panel"` (the default) shows it in the side panel:
+  Herdr adds a block for it to every `panel-body` stack (id `mod-panel-<name>`,
+  props `{ "slot": "panel" }`), in Herdr's own layouts too, and remembers per
+  space which panel shows. `"tab"` opens it as a tab named after the label, or
+  selects that tab. `icon` is an SVG in the mod's folder; `order` sorts them
+  (default 100). Use `"place": "none"` with it. Installing or removing such a mod
+  shows at once. A layout's own tab bar reads them with `modButtons()`.
 
 - The first time Herdr sees a folder, it docks one copy per `mod.json` into
   the shown layout (`"none"`: only where a layout or another mod puts it).
