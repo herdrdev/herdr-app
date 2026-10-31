@@ -224,8 +224,8 @@ unsafe fn slide(window: id, to: NSRect) {
     }
 }
 
-/// The screen the pointer is on: all of it, or the part the menu bar and the
-/// Dock leave.
+/// The screen the pointer is on: all of it (below the camera's notch), or the
+/// part the menu bar and the Dock leave.
 unsafe fn screen_under_pointer(full: bool) -> NSRect {
     unsafe {
         let at: NSPoint = msg_send![class!(NSEvent), mouseLocation];
@@ -239,10 +239,33 @@ unsafe fn screen_under_pointer(full: bool) -> NSRect {
                 && at.y >= f.origin.y
                 && at.y <= f.origin.y + f.size.height;
             if inside {
-                return if full { f } else { msg_send![screen, visibleFrame] };
+                return area(screen, full);
             }
         }
-        let main: id = msg_send![class!(NSScreen), mainScreen];
-        if full { msg_send![main, frame] } else { msg_send![main, visibleFrame] }
+        area(msg_send![class!(NSScreen), mainScreen], full)
+    }
+}
+
+#[repr(C)]
+struct NSEdgeInsets {
+    top: f64,
+    left: f64,
+    bottom: f64,
+    right: f64,
+}
+
+unsafe fn area(screen: id, full: bool) -> NSRect {
+    unsafe {
+        if !full {
+            return msg_send![screen, visibleFrame];
+        }
+        let mut f: NSRect = msg_send![screen, frame];
+        // A MacBook's notch hides the top row; only it has a top safe area (macOS 12+).
+        let knows: BOOL = msg_send![screen, respondsToSelector: sel!(safeAreaInsets)];
+        if knows == YES {
+            let insets: NSEdgeInsets = msg_send![screen, safeAreaInsets];
+            f.size.height -= insets.top;
+        }
+        f
     }
 }

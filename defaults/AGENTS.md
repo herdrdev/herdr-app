@@ -659,7 +659,7 @@ What's about the user, never a look:
   has the keys again. `key` (keys.json's form) works from any app and
   is taken from all of them; without it, `app.toggle` still works. `height` is
   the share of the screen, 0.1 to 1. `fullscreen` covers the whole screen,
-  over the menu bar and the Dock; `window.maximize` switches it on and off
+  over the menu bar and the Dock (below the notch on a MacBook with one); `window.maximize` switches it on and off
   (bind it in keys.json). `slide: false` makes it appear and go at once.
   `auto_hide` puts it away when another window takes the keys. Adding or
   removing `quick_terminal` applies at the next start; `key`, `height`,
