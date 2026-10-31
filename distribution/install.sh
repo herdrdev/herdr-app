@@ -23,7 +23,8 @@ need tar
 case "$(uname -s)" in
   Linux) os=linux ;;
   Darwin) os=macos ;;
-  *) fail "the app runs on Linux and macOS for now" ;;
+  MINGW* | MSYS* | CYGWIN*) fail "this installer is for Linux and macOS; on Windows, run this in PowerShell: irm $releases/app/install.ps1 | iex" ;;
+  *) fail "no build for $(uname -s)" ;;
 esac
 case "$(uname -m)" in
   x86_64 | amd64) arch=x86_64 ;;
