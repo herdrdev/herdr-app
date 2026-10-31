@@ -2837,6 +2837,24 @@ impl AppWindow {
                     }
                 }
             }
+            "pane.next" | "pane.prev" => {
+                if let Some(tab) = self.model.active_tab()
+                    && let Some(from) = tab.focused_pane()
+                    && let panes = tab.root.panes()
+                    && panes.len() > 1
+                    && let Some(i) = panes.iter().position(|p| p.id == from)
+                {
+                    let step = if name == "pane.next" { 1 } else { panes.len() - 1 };
+                    let to = panes[(i + step) % panes.len()].id.clone();
+                    let tab_id = tab.id.clone();
+
+                    self.model.focus_pane(&to);
+                    if let Some(tab) = self.model.tab_mut(&tab_id) {
+                        tab.zoomed = None;
+                    }
+                    self.focused_pane = None;
+                }
+            }
             // ---- terminals
             "terminal.open" => {
                 let argv = Self::argv(a);
@@ -4256,7 +4274,7 @@ fn terminal_block<'a>(chrome: &'a Node, focused: Option<&str>) -> Option<&'a Nod
 fn needs_model_pane(name: &str, args: &Value) -> bool {
     match name {
         "pane.split" | "pane.close" | "pane.zoom" | "terminal.show" => AppWindow::arg(args, "pane").is_none(),
-        "pane.go" | "pane.swap" => true,
+        "pane.go" | "pane.next" | "pane.prev" | "pane.swap" => true,
         "terminal.open" | "terminal.keep" => matches!(AppWindow::arg(args, "place"), Some("right" | "down")),
         _ => false,
     }
@@ -4699,7 +4717,7 @@ mod tests {
     #[test]
     fn composition_commands_never_default_to_a_source_pane() {
         use serde_json::json;
-        for name in ["pane.split", "pane.close", "pane.zoom", "pane.go", "pane.swap", "terminal.show"] {
+        for name in ["pane.split", "pane.close", "pane.zoom", "pane.go", "pane.next", "pane.prev", "pane.swap", "terminal.show"] {
             assert!(super::needs_model_pane(name, &json!({})), "{name}");
             assert!(super::needs_model_pane(name, &json!({"pane": null})), "{name}");
         }

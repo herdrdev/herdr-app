@@ -58,6 +58,8 @@ pub const COMMANDS: &[Command] = &[
     cmd("pane.zoom", &[opt("pane")], "Show only this pane of its tab, or all again."),
     cmd("pane.focus", &[opt("pane"), opt("terminal")], "Focus a pane (or the pane showing a terminal)."),
     cmd("pane.go", &[req("direction")], "Focus the pane to the \"left\", \"right\", \"up\" or \"down\"."),
+    cmd("pane.next", &[], "Focus the next pane in the tab's tree order, wrapping around."),
+    cmd("pane.prev", &[], "Focus the previous pane in the tab's tree order, wrapping around."),
     cmd("pane.swap", &[req("direction")], "Swap the focused pane with its neighbor in a direction."),
     cmd("terminal.peek", &[req("terminal")], "Peek at a running terminal over the tab, with keep-as-tab and close controls."),
     cmd("terminal.show", &[opt("terminal"), opt("pane")], "Show a terminal in a pane for now, in place of its own (no terminal: back)."),
