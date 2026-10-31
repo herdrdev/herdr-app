@@ -160,6 +160,44 @@
                       "content": {
                         "mod": "changes"
                       }
+                    },
+                    {
+                      "id": "context",
+                      "type": "block",
+                      "content": {
+                        "mod": "context"
+                      }
+                    },
+                    {
+                      "id": "skills",
+                      "type": "block",
+                      "content": {
+                        "mod": "agent-setup"
+                      }
+                    },
+                    {
+                      "id": "launch",
+                      "type": "block",
+                      "content": {
+                        "mod": "launch"
+                      }
+                    },
+                    {
+                      "id": "commands",
+                      "type": "block",
+                      "content": {
+                        "mod": "launch",
+                        "props": {
+                          "mode": "commands"
+                        }
+                      }
+                    },
+                    {
+                      "id": "desk",
+                      "type": "block",
+                      "content": {
+                        "mod": "desk"
+                      }
                     }
                   ]
                 }
