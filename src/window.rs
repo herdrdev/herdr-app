@@ -4253,6 +4253,7 @@ fn agent_name(app: &str) -> String {
         "claude" | "claude-code" => "Claude Code".into(),
         "codex" => "Codex".into(),
         "pi" => "Pi".into(),
+        "pig" => "PiG".into(),
         "opencode" => "OpenCode".into(),
         "cursor" | "cursor-agent" => "Cursor".into(),
         "amp" => "Amp".into(),
