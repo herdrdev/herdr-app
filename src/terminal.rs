@@ -52,8 +52,8 @@ struct Grid {
     scale: f32,
     /// The cell in device pixels the local screen was sized with.
     vt_cell: (u32, u32),
-    /// The cell in device pixels the core was last told.
-    told_cell: Option<(u32, u32)>,
+    /// The colors and device-pixel cell size the core was last told.
+    told_display: Option<DisplayFacts>,
     /// Top-left of the cell grid in window coordinates, from the last paint.
     origin: Point<Pixels>,
     buttons_down: Vec<MouseButton>,
@@ -117,11 +117,35 @@ pub fn next_frame() {
 
 impl EventEmitter<TerminalEvent> for TerminalView {}
 
-/// `cell`: in device pixels, what the core reports to programs (CSI 14t, 16t).
-fn display_facts(cell: (u32, u32)) -> serde_json::Value {
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct DisplayFacts {
+    fg: Rgb,
+    bg: Rgb,
+    cursor: Rgb,
+    /// In device pixels, what the core reports to programs (CSI 14t, 16t).
+    cell: (u32, u32),
+}
+
+/// Only send changed facts; a theme switch need not change the cell size.
+fn display_update(told: &mut Option<DisplayFacts>, theme: &vt::Theme, cell: (u32, u32)) -> Option<serde_json::Value> {
+    let facts = DisplayFacts { fg: theme.fg, bg: theme.bg, cursor: theme.cursor, cell };
+    if *told == Some(facts) {
+        return None;
+    }
+    *told = Some(facts);
     let hex = |c: Rgb| format!("#{:02x}{:02x}{:02x}", c.0, c.1, c.2);
-    let t = vt::theme();
-    json!({"fg": hex(t.fg), "bg": hex(t.bg), "cursor": hex(t.cursor), "cell": [cell.0, cell.1]})
+    Some(json!({"fg": hex(facts.fg), "bg": hex(facts.bg), "cursor": hex(facts.cursor), "cell": [cell.0, cell.1]}))
+}
+
+impl Grid {
+    fn refresh_theme(&mut self, theme: &vt::Theme, cell: (u32, u32)) {
+        self.vt.set_theme(theme.clone());
+        if let Some(chan) = self.channel
+            && let Some(facts) = display_update(&mut self.told_display, theme, cell)
+        {
+            self.core.facts(chan, &facts);
+        }
+    }
 }
 
 /// A cell in device pixels.
@@ -168,7 +192,7 @@ impl TerminalView {
                 cell: size(px(9.0), px(18.0)),
                 scale: 1.0,
                 vt_cell: (9, 18),
-                told_cell: None,
+                told_display: None,
                 origin: Point::default(),
                 buttons_down: Vec::new(),
                 images: HashMap::new(),
@@ -210,7 +234,7 @@ impl TerminalView {
     /// take seconds, and the window must keep drawing meanwhile.
     /// `announce_end`: emit Ended if the terminal turns out to be gone.
     fn connect(&mut self, core: Arc<Core>, announce_end: bool, cx: &mut Context<Self>) {
-        let (cols, rows, cell) = {
+        let (cols, rows, facts) = {
             let mut g = self.grid.borrow_mut();
             let (cols, rows) = (g.vt.cols, g.vt.rows);
             // The core repaints the whole screen (and history) on attach.
@@ -218,14 +242,15 @@ impl TerminalView {
             g.vt = Vt::new(cols, rows);
             g.vt.resize(cols, rows, cell.0, cell.1);
             g.vt_cell = cell;
-            g.told_cell = Some(cell);
+            g.told_display = None;
+            let facts = display_update(&mut g.told_display, &vt::theme(), cell).unwrap();
             // Addresses on other machines are `machine/tN`.
             g.vt.allow_local_image_files(!self.address.contains('/'));
             g.core = core.clone();
             g.channel = None;
-            (cols, rows, cell)
+            (cols, rows, facts)
         };
-        let (address, facts) = (self.address.clone(), display_facts(cell));
+        let address = self.address.clone();
         // Replacing the task drops an attach still in flight for an older connection.
         self._reader = Some(cx.spawn(async move |this, cx| {
             let attached = cx.background_executor().spawn(async move { core.attach(&address, cols, rows, facts) }).await;
@@ -258,6 +283,9 @@ impl TerminalView {
                 self.lost = false;
                 let mut g = self.grid.borrow_mut();
                 g.channel = Some(attached.channel);
+                // The theme or cell may have changed while the attach was in flight.
+                let cell = device_cell(g.cell, g.scale);
+                g.refresh_theme(&vt::theme(), cell);
                 // The pane may have been laid out while the attach was in flight.
                 let now = (g.vt.cols, g.vt.rows);
                 if now != attached_size {
@@ -289,6 +317,13 @@ impl TerminalView {
                 None
             }
         }
+    }
+
+    /// Attached tabs follow the window's theme even when they are not drawn.
+    pub fn refresh_theme(&self) {
+        let mut g = self.grid.borrow_mut();
+        let cell = device_cell(g.cell, g.scale);
+        g.refresh_theme(&vt::theme(), cell);
     }
 
     /// Its title as shown (see `shown_title`); news only when that changed.
@@ -1383,17 +1418,11 @@ impl Render for TerminalView {
                 canvas(
                     move |bounds, window, _cx| {
                         let mut g = grid.borrow_mut();
-                        g.vt.set_theme(vt::theme());
                         g.cell = cell;
                         g.scale = window.scale_factor();
                         let dev = device_cell(cell, g.scale);
                         // Before the size, so a program woken by it asks for the new cell.
-                        if let Some(chan) = g.channel
-                            && g.told_cell != Some(dev)
-                        {
-                            g.core.facts(chan, &display_facts(dev));
-                            g.told_cell = Some(dev);
-                        }
+                        g.refresh_theme(&vt::theme(), dev);
                         let (px_, py_) = pad();
                         let cols = ((f32::from(bounds.size.width) - 2.0 * px_) / f32::from(cell.width)).floor().max(2.0) as u16;
                         let rows = ((f32::from(bounds.size.height) - 2.0 * py_) / f32::from(cell.height)).floor().max(1.0) as u16;
@@ -1859,6 +1888,34 @@ mod tests {
         assert_eq!(super::device_cell(cell, 1.0), (8, 22));
         assert_eq!(super::device_cell(cell, 2.0), (17, 43));
         assert_eq!(super::device_cell(gpui::size(gpui::px(0.0), gpui::px(0.0)), 2.0), (1, 1));
-        assert_eq!(super::display_facts((17, 43))["cell"], serde_json::json!([17, 43]));
+        assert_eq!(super::display_update(&mut None, &crate::vt::theme(), (17, 43)).unwrap()["cell"], serde_json::json!([17, 43]));
+    }
+
+    #[test]
+    fn theme_changes_update_core_facts_without_resizing() {
+        use crate::vt::{theme, Rgb};
+        let mut theme = theme();
+        let cell = (9, 18);
+        let mut told = None;
+        let first = super::display_update(&mut told, &theme, cell).unwrap();
+        assert_eq!(first["cell"], serde_json::json!([9, 18]));
+        assert!(super::display_update(&mut told, &theme, cell).is_none());
+
+        for background in [Rgb(255, 255, 255), Rgb(23, 25, 29)] {
+            theme.bg = background;
+            let update = super::display_update(&mut told, &theme, cell)
+                .expect("a theme-only change must reach the core");
+            assert_eq!(update["bg"], format!("#{:02x}{:02x}{:02x}", background.0, background.1, background.2));
+            assert_eq!(update["cell"], first["cell"]);
+            assert!(super::display_update(&mut told, &theme, cell).is_none());
+        }
+
+        theme.fg = Rgb(1, 2, 3);
+        assert_eq!(super::display_update(&mut told, &theme, cell).unwrap()["fg"], "#010203");
+        theme.cursor = Rgb(4, 5, 6);
+        assert_eq!(super::display_update(&mut told, &theme, cell).unwrap()["cursor"], "#040506");
+        assert_eq!(super::display_update(&mut told, &theme, (17, 43)).unwrap()["cell"], serde_json::json!([17, 43]));
+        theme.selection_bg = Rgb(7, 8, 9);
+        assert!(super::display_update(&mut told, &theme, (17, 43)).is_none(), "local selection colors are not core display facts");
     }
 }

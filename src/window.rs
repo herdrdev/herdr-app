@@ -820,6 +820,9 @@ impl AppWindow {
             self.report_layout(&problems.join("; "));
         }
         if settings::set(s) {
+            for term in self.terms.values() {
+                term.view.read(cx).refresh_theme();
+            }
             mods::apply_theme(cx);
             self.refresh_mods(cx);
             window.refresh();

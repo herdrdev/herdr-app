@@ -4,6 +4,8 @@ Herdr is built to be changed by your agent. If what you want can be done with a 
 
 Issues that ask for a custom mod, or for a feature a mod can already do, get closed.
 
+The same goes for pull requests: the layouts and mods Herdr ships take fixes only. Build the features you want as your own mod.
+
 Please open an issue for:
 - bugs in Herdr itself or in the layouts and mods it ships with;
 - things a mod cannot do yet (a missing API, an event, a setting).
