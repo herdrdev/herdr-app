@@ -30,3 +30,20 @@ test("Files lists literal folder names, not shell expressions", async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("Files preserves Unicode names when listing and expanding folders", async () => {
+  const root = await mkdtemp(join(tmpdir(), "herdr-files-unicode-"));
+  try {
+    const folder = "中文目录 O'Brien (测试)", file = "项目说明.txt", child = "子文件.txt";
+    await mkdir(join(root, folder));
+    await writeFile(join(root, file), "hello");
+    await writeFile(join(root, folder, child), "hello");
+    const entries = await directory(root, null);
+    expect(entries).toHaveLength(2);
+    expect(entries).toContainEqual({ name: folder, dir: true });
+    expect(entries).toContainEqual({ name: file, dir: false });
+    expect(await directory(join(root, folder), null)).toEqual([{ name: child, dir: false }]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
