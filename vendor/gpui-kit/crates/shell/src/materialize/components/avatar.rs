@@ -119,7 +119,7 @@ fn avatar_image(
         return None;
     };
     let (refinement, _, _) = resolve_slot(arena, slot, "AvatarImage", window, cx);
-    let mut image = AvatarImage::new(gpui::SharedString::from(path.clone()));
+    let mut image = AvatarImage::new(crate::materialize::image::source(path));
     image.style().refine(&refinement);
     Some(image)
 }

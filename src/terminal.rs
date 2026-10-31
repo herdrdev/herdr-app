@@ -210,6 +210,11 @@ impl TerminalView {
             scrolled: 0.0,
             _reader: None,
         };
+        cx.on_release(|view, cx| {
+            for (_, image) in view.grid.borrow_mut().images.drain() {
+                cx.drop_image(image, None);
+            }
+        }).detach();
         view.connect(core, false, cx);
         view
     }
@@ -1136,7 +1141,11 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
             images.push((below, Bounds::new(pos, size(px(width), px(height))), img.clone()));
         }
     }
-    g.images.retain(|k, _| keep.contains(k));
+    g.images.retain(|key, image| {
+        if keep.contains(key) { return true; }
+        cx.drop_image(image.clone(), Some(window));
+        false
+    });
     let link_spans = g.link_spans.clone();
     let marked = g.marked.clone();
     drop(g);

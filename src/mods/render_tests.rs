@@ -463,10 +463,11 @@ fn animated_images_advance_with_explicit_and_implicit_ids(cx: &mut TestAppContex
         let source = format!("import {{ View, image }} from 'gpui-kit'; export default class Demo extends View {{ render() {{ return image('{url}'){}.size(20); }} }}", if explicit { ".id('clip')" } else { "" });
         std::fs::write(staged.0.join("main.js"), source).unwrap();
         let context = cx.add_empty_window();
-        let view = context.update(|window, cx| {
+        let (session, view) = context.update(|window, cx| {
             window.activate_window();
-            let root = runtime.try_load(&staged.0, window, cx).unwrap();
-            root.read(cx).content().clone()
+            let session = DescriptionSession::load(runtime, &staged.0, Policy::new(), window, cx).unwrap();
+            let view = session.view().clone();
+            (session, view)
         });
         let draw = |context: &mut gpui::VisualTestContext| {
             let view = view.clone();
@@ -476,8 +477,7 @@ fn animated_images_advance_with_explicit_and_implicit_ids(cx: &mut TestAppContex
         context.run_until_parked();
         draw(context);
         assert!(context.update(|window, _| window.is_window_active()));
-        let resource = gpui::Resource::Uri(url.into());
-        let data: Arc<gpui::RenderImage> = context.update(|_, cx| cx.fetch_asset::<gpui::ImgResourceLoader>(&resource).unwrap().unwrap());
+        let data: Arc<gpui::RenderImage> = context.update(|window, cx| session.loaded_images(window, cx).pop().unwrap());
         assert_eq!(data.frame_count(), 2);
         assert!(!context.update(|window, _| window.has_image_atlas_entry(&data)));
         // GPUI's image clock is wall time, not the test executor's clock.
@@ -606,6 +606,129 @@ fn duplicate_element_negative_control(cx: &mut TestAppContext) {
     std::fs::write(dir.join("main.js"), "import { View, div } from 'gpui-kit'; export default class Bad extends View { render() { const child = div().child('reused'); return div().child(div().child(child)).child(div().child(child)); } }").unwrap();
     let error = describe(cx, &staged, "negative", false, props(), updates("current", "current"), None).unwrap_err();
     assert!(format!("{error:#}").contains("already added to a parent"), "{error:#}");
+}
+
+#[gpui::test]
+fn mod_images_share_across_keyed_rows_and_retire_after_removal(cx: &mut TestAppContext) {
+    use gpui::{ParentElement as _, Styled as _, VisualTestContext};
+    use gpui::http_client::{AsyncBody, FakeHttpClient, Response};
+    use std::sync::{Arc, Mutex};
+
+    struct ImageMod(DescriptionSession);
+    impl gpui::Render for ImageMod {
+        fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+            gpui::div().child(gpui::AnyView::from(self.0.view().clone())
+                .cached(gpui::StyleRefinement::default().size_full()))
+        }
+    }
+    fn frame(cx: &mut VisualTestContext) {
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.run_until_parked();
+    }
+    fn draw(cx: &mut VisualTestContext) {
+        for _ in 0..4 {
+            frame(cx);
+        }
+    }
+    fn tick(cx: &mut VisualTestContext) {
+        cx.executor().advance_clock(Duration::from_secs(5));
+        cx.run_until_parked();
+    }
+
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    std::fs::write(staged.0.join("main.js"), r#"
+        import { View, div, image } from 'gpui-kit';
+        import { images } from 'fixture';
+        export default class ImageMod extends View {
+            render() {
+                const { path, mount } = images();
+                return div().flex().children(path ? Array.from({length: 50}, (_, i) =>
+                    div().id(`${mount}-${i}`).child(image(path).size(8))) : []);
+            }
+        }
+    "#).unwrap();
+    let state = Rc::new(RefCell::new(json!({"path":"https://images.example/first.svg", "mount":0})));
+    let shared = state.clone();
+    let policy = Policy::new().with_host_module(HostModule::new("fixture")
+        .function("images", move |_| Ok(to_host(&shared.borrow())))).unwrap();
+    let requests = Arc::new(Mutex::new(Vec::new()));
+    let recorded = requests.clone();
+    cx.update(|cx| cx.set_http_client(FakeHttpClient::create(move |request| {
+        recorded.lock().unwrap().push(request.uri().to_string());
+        async {
+            Ok(Response::builder().status(200).body(AsyncBody::from(
+                br##"<svg xmlns="http://www.w3.org/2000/svg" width="8" height="8"><rect width="8" height="8" fill="#123456"/></svg>"##.to_vec()
+            )).unwrap())
+        }
+    })));
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let (root, context) = cx.add_window_view(|window, cx| {
+        ImageMod(DescriptionSession::load(runtime, &staged.0, policy, window, cx).unwrap())
+    });
+    let view = root.read_with(context, |root, _| root.0.view().clone());
+    draw(context);
+    assert_eq!(requests.lock().unwrap().len(), 1, "50 keyed rows share one load");
+    let mut loaded = context.update(|window, cx| root.read(cx).0.loaded_images(window, cx));
+    assert_eq!(loaded.len(), 1, "50 keyed rows share one decoded image");
+    let first = loaded.pop().unwrap();
+    context.update(|window, _| assert!(window.has_image_atlas_entry(&first)));
+
+    // A cached visible subtree must survive timers without reloading or losing its texture.
+    for _ in 0..3 { tick(context); }
+    draw(context);
+    context.update(|window, _| assert!(window.has_image_atlas_entry(&first)));
+    assert_eq!(requests.lock().unwrap().len(), 1);
+
+    state.borrow_mut()["path"] = Value::Null;
+    view.update(context, |view, cx| view.refresh(cx));
+    frame(context);
+    tick(context);
+    state.borrow_mut()["path"] = json!("https://images.example/first.svg");
+    state.borrow_mut()["mount"] = json!(1);
+    view.update(context, |view, cx| view.refresh(cx));
+    draw(context);
+    assert_eq!(requests.lock().unwrap().len(), 1, "remounts reuse the loaded image");
+    let loaded = context.update(|window, cx| root.read(cx).0.loaded_images(window, cx));
+    assert_eq!(loaded[0].id, first.id);
+    drop(loaded);
+
+    state.borrow_mut()["path"] = json!("https://images.example/second.svg");
+    view.update(context, |view, cx| view.refresh(cx));
+    draw(context);
+    for _ in 0..2 { tick(context); }
+    context.update(|window, _| assert!(!window.has_image_atlas_entry(&first), "retired atlas entry released"));
+    let retired = Arc::downgrade(&first);
+    drop(first);
+    assert!(retired.upgrade().is_none(), "retired image data released");
+    let mut loaded = context.update(|window, cx| root.read(cx).0.loaded_images(window, cx));
+    assert_eq!(loaded.len(), 1);
+    let second = loaded.pop().unwrap();
+    context.update(|window, _| assert!(window.has_image_atlas_entry(&second)));
+    assert_eq!(requests.lock().unwrap().len(), 2);
+
+    state.borrow_mut()["path"] = Value::Null;
+    view.update(context, |view, cx| view.refresh(cx));
+    frame(context);
+    // No further frame is needed for the timer to release the last removed image.
+    for _ in 0..2 { tick(context); }
+    context.update(|window, _| assert!(!window.has_image_atlas_entry(&second)));
+    let retired = Arc::downgrade(&second);
+    drop(second);
+    assert!(retired.upgrade().is_none(), "removed image data released");
+    context.update(|window, cx| assert!(root.read(cx).0.loaded_images(window, cx).is_empty()));
+
+    state.borrow_mut()["path"] = json!("https://images.example/first.svg");
+    view.update(context, |view, cx| view.refresh(cx));
+    draw(context);
+    let retired = context.update(|window, cx| {
+        let images = root.read(cx).0.loaded_images(window, cx);
+        assert_eq!(images.len(), 1);
+        Arc::downgrade(&images[0])
+    });
+    context.update(|window, _| window.remove_window());
+    context.run_until_parked();
+    assert!(retired.upgrade().is_none(), "closing the window releases its cache");
 }
 
 #[test]
