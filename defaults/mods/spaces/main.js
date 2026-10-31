@@ -1,7 +1,8 @@
 // Workspace spaces: stable colored avatars, worktrees under their checkout,
 // grouped by machine when more than one is known. After a space's name, the repo
-// its first terminal is in now, only where unusual: branch, ahead/behind. Agent state lives in the agents list, not here. Click to
-// switch, right-click for its menu, drag to reorder.
+// its first terminal is in now, only where unusual: branch, ahead/behind. Each
+// row ends with the space's rollup agent status as a dot. Click to switch,
+// right-click for its menu, drag to reorder.
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
@@ -36,9 +37,10 @@ const FALLBACK = 60000;
 // that draws space avatars): one strong color per hue, light and dark alike.
 const MARK = { ansi6: "#22a99a", ansi3: "#e3814f", ansi4: "#5b8def", ansi5: "#8b7cf6", ansi2: "#3fae6a", ansi1: "#d9649a" };
 
-// A space speaks up only when something in it needs you.
+// Compact rail: blocked/done/working a filled dot in the status color,
+// idle a ring, no agent a faint middle dot.
 export function glyph(status) {
-  return status === "blocked" || status === "done" ? "●" : "·";
+  return status === "idle" ? "○" : status ? "●" : "·";
 }
 
 export function tone(t, status) {
@@ -284,6 +286,15 @@ export default class Spaces extends View {
       .when(g.behind > 0, (el) => el.child(div().flex_none().text_color(t.ansi1).child(`\u2193${g.behind}`)));
   }
 
+  // The space's rollup agent status, drawn as the agents list draws one
+  // agent's: blocked/done/working a filled dot in its color, idle a quiet
+  // ring, no agent an empty slot so the dots stay in one column.
+  statusDot(status, t) {
+    if (!status) return div().size(7).flex_none();
+    if (status === "idle") return div().size(7).flex_none().rounded(4).border(1.5).border_color(t.idle ?? t.dim);
+    return div().size(7).flex_none().rounded(4).bg(tone(t, status));
+  }
+
   row({ w, i, g, tree }, t) {
     const on = w.active;
     const colors = shared("space.colors") ?? {};
@@ -334,7 +345,8 @@ export default class Spaces extends View {
           .when(Boolean(tree), el => el.pl(22).child(svg("mods/workspace-chrome/branch.svg").size(13).text_color(t.dim)))
           .when(!tree, el => el.child(h_flex().size(18).flex_none().rounded(5).bg(fill).items_center().justify_center().text_size(10.5).font_bold().text_color("#ffffff").child([...w.name][0]?.toUpperCase() ?? "?")))
           .child(div().flex_shrink(0).max_w(150).truncate().text_color(t.foreground).child(w.name))
-          .child(g ? this.gitTail(g, tree, w.name, t) : div().flex_1()),
+          .child(g ? this.gitTail(g, tree, w.name, t) : div().flex_1())
+          .child(this.statusDot(w.status, t)),
       );
   }
 
