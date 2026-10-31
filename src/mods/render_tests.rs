@@ -172,8 +172,18 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
                 "hc" if first.as_array().and_then(|a| a.first()).and_then(Value::as_str) == Some("run") => {
                     Some(json!({"code":0,"stdout":"{\"address\":\"t-setup\"}","stderr":""}))
                 }
-                // The files panel lists a folder with sh: kind and name pairs.
-                "exec" if first == "sh" && a.get(1).map(from_host).and_then(|v| v.get(2).cloned()) == Some(json!("files")) => {
+                // The cd picker reads the focused terminal: a shell at its prompt.
+                "hc" if first.as_array().and_then(|a| a.first()).and_then(Value::as_str) == Some("get") => {
+                    let shell = json!({"state":"live","pid":7,"argv":["zsh"],"cwd":"/fixture/project",
+                        "foreground":{"name":"zsh","pid":7,"argv":["zsh"],"cwd":"/fixture/project"}});
+                    Some(json!({"code":0,"stdout":shell.to_string(),"stderr":""}))
+                }
+                // The files panel and the cd picker list a folder with sh: kind and name pairs.
+                "exec"
+                    if first == "sh"
+                        && a.get(1).map(from_host).and_then(|v| v.get(2).cloned())
+                            .is_some_and(|name| name == "files" || name == "cd-picker") =>
+                {
                     Some(json!({"code":0,"stdout":"d\u{0}src\u{0}f\u{0}README.md\u{0}","stderr":""}))
                 }
                 "exec"

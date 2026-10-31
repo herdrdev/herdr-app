@@ -752,8 +752,13 @@ has 120 programs (agents, editors, runtimes, tools, databases, infra);
   `~/.herdr/worktrees/<repo>/<branch>` on the space's machine, a constant
   at its top; the
   `spaces` sidebar nests worktree spaces under their repo's and shows each
-  space's repo, branch, ahead/behind and uncommitted changes). Shipped mods
-  are Herdr's; duplicate with `mod.clone` before editing.
+  space's repo, branch, ahead/behind and uncommitted changes), and
+  `cd-picker` (go to a folder without typing cd: Cmd+G, Ctrl+Shift+G on
+  Linux and Windows, over a terminal at a shell prompt lists its folder;
+  search or type a path, Tab looks inside, Enter types the `cd`. It types
+  only into the terminal's shell idle at its prompt, never into a program
+  or agent). Shipped mods are Herdr's; duplicate with `mod.clone` before
+  editing.
 
 ### Check before you finish
 
