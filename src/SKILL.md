@@ -20,6 +20,9 @@ prints the built-in command list even without an open window. Do not launch bare
 signal or restart the person's app or core. A window closing does not kill
 its terminals.
 
+`app.check_updates` checks for newer releases. Settings reports "Up to date"
+only after a successful check; on failure, check the connection and retry.
+
 ## Show something when asked
 
 New spaces and tabs are shown immediately: only create them when asked.
@@ -41,6 +44,9 @@ herdr-app do space.new --name "remote api" --machine vps --folder /srv/api
 ```
 
 The folder is on that machine; tabs and splits in the space stay there.
+`terminal.open --folder /path --place down` starts the split in that folder,
+including when `--argv` supplies a program. Without `--folder`, it follows the
+focused terminal's folder.
 `hc machine ls` lists machines. Use `hc run --on vps ...`, `hc exec --on vps ...`
 and `hc file ... --on vps ...` for remote work, not your local file tools.
 

@@ -182,7 +182,7 @@ export default class MachineAdd extends View {
       return;
     }
     openOverlay({
-      kind: "window",
+      kind: "dialog",
       key: `machine-add-${target}`,
       width: 640,
       height: 300,
@@ -262,6 +262,7 @@ export default class MachineAdd extends View {
               .child("Add");
     const idle = !done && !st;
     return v_flex()
+      .flex_none()
       .child(
         h_flex()
           .id(`ma-row-${target}`)
@@ -290,6 +291,7 @@ export default class MachineAdd extends View {
       .track_focus(this.handle)
       .on_key_down((e, cx) => this.key(e, cx))
       .w_full()
+      .min_h(0)
       .p(18)
       .bg(t.popover)
       .text_color(t.foreground)
@@ -307,7 +309,9 @@ export default class MachineAdd extends View {
         v_flex()
           .id("ma-hosts")
           .max_h(280)
-          .overflow_y_scrollbar()
+          .min_h(0)
+          .flex_shrink(1)
+          .overflow_y_scroll()
           .children(
             this.hosts === null
               ? [div().px(10).py(8).text_size(12.5).text_color(t.dim).child("Reading ~/.ssh/config…")]

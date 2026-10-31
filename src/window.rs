@@ -107,13 +107,15 @@ pub fn shell() -> String {
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
 }
 
-fn unix_agent_argv(sh: String, cmd: Vec<String>) -> Vec<String> {
-    let script = if std::path::Path::new(&sh).file_name().and_then(|s| s.to_str()) == Some("fish") {
-        "command $argv[2..]; exec $argv[1] -i"
-    } else {
-        "\"$@\"; exec \"$0\" -i"
+fn unix_agent_argv(sh: String, cmd: Vec<String>, login: bool) -> Vec<String> {
+    let fish = std::path::Path::new(&sh).file_name().and_then(|s| s.to_str()) == Some("fish");
+    let script = match (fish, login) {
+        (true, true) => "command $argv[2..]; exec $argv[1] -li",
+        (true, false) => "command $argv[2..]; exec $argv[1] -i",
+        (false, true) => "\"$@\"; exec \"$0\" -li",
+        (false, false) => "\"$@\"; exec \"$0\" -i",
     };
-    let mut run = vec![sh.clone(), "-ic".into(), script.into(), sh];
+    let mut run = vec![sh.clone(), if login { "-lic" } else { "-ic" }.into(), script.into(), sh];
     run.extend(cmd);
     run
 }
@@ -410,6 +412,8 @@ pub struct AppWindow {
     documents_watching: bool,
     draining: bool,
     changing_terminals: HashSet<String>,
+    /// Closed terminals stay excluded until kill completes and a listing drops them.
+    closing_terminals: HashMap<String, bool>,
     pending_terminals: std::collections::BTreeMap<String, PendingTerminalChange>,
     /// Each machine owns a document; the empty key is this core.
     documents: std::collections::BTreeMap<String, crate::mirror_sync::Slot>,
@@ -491,6 +495,7 @@ impl AppWindow {
             documents_watching: false,
             draining: false,
             changing_terminals: HashSet::new(),
+            closing_terminals: HashMap::new(),
             pending_terminals: Default::default(),
             documents: {
                 let mut local = crate::mirror_sync::Slot::default();
@@ -815,6 +820,9 @@ impl AppWindow {
             self.report_layout(&problems.join("; "));
         }
         if settings::set(s) {
+            for term in self.terms.values() {
+                term.view.read(cx).refresh_theme();
+            }
             mods::apply_theme(cx);
             self.refresh_mods(cx);
             window.refresh();
@@ -1851,6 +1859,7 @@ impl AppWindow {
             }
         }
         self.live = live;
+        self.closing_terminals.retain(|addr, completed| !*completed || self.live.contains_key(addr));
         // A new sub-agent changes only this list; mods that show teams need to redraw.
         let terminals_changed = mods::publish_terminals(list);
         self.tend_terminals(true, window, cx);
@@ -1957,7 +1966,7 @@ impl AppWindow {
             self.check_closed(missing, window, cx);
         }
         let mut orphans = self.live.iter()
-            .filter(|(a, _)| self.model.pane_of(a).is_none() && !self.changing_terminals.contains(*a))
+            .filter(|(a, _)| self.model.pane_of(a).is_none() && !self.changing_terminals.contains(*a) && !self.closing_terminals.contains_key(*a))
             .filter_map(|(a, r)| {
                 let machine = a.split_once('/').map(|(m, _)| m);
                 if !self.documents.get(machine.unwrap_or("")).is_some_and(|s| s.available) { return None; }
@@ -2122,7 +2131,7 @@ impl AppWindow {
             let id = o.id.clone();
             return self.close_overlay(&id, window, cx);
         }
-        if self.chrome.find(block).is_some() {
+        if self.chrome.find(block).is_some_and(|n| n.terminal().is_some()) {
             self.chrome.remove(block);
             self.sync(window, cx);
         }
@@ -2231,7 +2240,8 @@ impl AppWindow {
                 // PowerShell has no `-ic`: run it, then stay. `&` finds npm's `.cmd` shims too.
                 return vec![sh, "-NoExit".into(), "-Command".into(), crate::programs::powershell_line(&cmd)];
             }
-            unix_agent_argv(sh, cmd)
+            // macOS terminal sessions load login profiles (including Homebrew's PATH).
+            unix_agent_argv(sh, cmd, cfg!(target_os = "macos"))
         })
     }
 
@@ -2286,12 +2296,12 @@ impl AppWindow {
         Ok(json!({ "space": space, "tab": ctx, "pane": pane }))
     }
 
-    fn split(&mut self, pane: Option<String>, axis: Axis, argv: Option<Vec<String>>) -> Result<Value, String> {
+    fn split(&mut self, pane: Option<String>, axis: Axis, argv: Option<Vec<String>>, folder: Option<String>) -> Result<Value, String> {
         let target = pane.or_else(|| self.model.focused_pane()).ok_or("no pane to split")?;
         let (Some(p), Some(c)) = (self.model.space_of(&target), self.model.tab_of(&target)) else { return Err(format!("no pane {target:?}")) };
-        let (space, ctx, folder) = (p.id.clone(), c.id.clone(), p.folder.clone());
+        let (space, ctx, fallback) = (p.id.clone(), c.id.clone(), p.folder.clone());
         let target_addr = self.model.address_of(&target);
-        let cwd = target_addr.as_ref().and_then(|a| self.cwds.get(a).cloned()).unwrap_or(folder);
+        let cwd = folder.unwrap_or_else(|| target_addr.as_ref().and_then(|a| self.cwds.get(a).cloned()).unwrap_or(fallback));
         // A split stays on the machine of the pane it splits (else its space's).
         let on = target_addr.and_then(|a| a.split_once('/').map(|(m, _)| m.to_owned())).or_else(|| self.machine_of(&space));
         let new = self.model.fresh_id_on("p", on.as_deref());
@@ -2461,7 +2471,7 @@ impl AppWindow {
     /// Kills terminals and their sub-agents, all the way down. Core keeps a
     /// sub-agent running when its parent dies; closing one here means done with
     /// its whole tree. Kept sub-agents (given a tab) are the person's: spared.
-    fn kill(&self, addresses: &[String]) {
+    fn kill(&mut self, addresses: &[String], cx: &mut Context<Self>) {
         let mut doomed: Vec<String> = addresses.to_vec();
         let mut i = 0;
         while i < doomed.len() {
@@ -2475,13 +2485,26 @@ impl AppWindow {
             }
             i += 1;
         }
+        self.closing_terminals.extend(doomed.iter().cloned().map(|a| (a, false)));
         // Off the UI thread: a kill waits for the program to go, and for slow machines.
         let core = self.core.clone();
-        std::thread::spawn(move || {
-            for a in &doomed {
-                let _ = core.call("terminal.kill", json!({ "terminal": a }));
+        cx.spawn(async move |this, cx| {
+            for address in doomed {
+                let core = core.clone();
+                let addr = address.clone();
+                let result = cx.background_executor().spawn(async move {
+                    core.call("terminal.kill", json!({ "terminal": addr }))
+                }).await;
+                let _ = this.update(cx, |this, _| {
+                    if result.is_ok() && this.live.contains_key(&address) {
+                        // The live snapshot may still predate the kill's reply.
+                        this.closing_terminals.insert(address, true);
+                    } else {
+                        this.closing_terminals.remove(&address);
+                    }
+                });
             }
-        });
+        }).detach();
     }
 
     // ---- commands ----------------------------------------------------------
@@ -2642,7 +2665,7 @@ impl AppWindow {
                     return;
                 }
                 let addrs = self.model.remove_space(&id);
-                self.kill(&addrs);
+                self.kill(&addrs, cx);
             }
             "space.rename" => {
                 let Some(id) = Self::owned(a, "id").or_else(|| self.model.active.clone()) else { return self.fail("no space to rename") };
@@ -2690,7 +2713,7 @@ impl AppWindow {
                     return self.dispatch("space.close", &args, person, window, cx);
                 }
                 let (addrs, _) = self.model.remove_tab(&id);
-                self.kill(&addrs);
+                self.kill(&addrs, cx);
             }
             "tab.rename" => {
                 let Some(id) = Self::owned(a, "id").or(active_ctx) else { return self.fail("no tab to rename") };
@@ -2744,7 +2767,7 @@ impl AppWindow {
                 };
                 let r = match Self::owned(a, "mod") {
                     Some(name) => self.split_mod(Self::owned(a, "pane"), axis, name, a.get("props").cloned().unwrap_or(Value::Null)),
-                    None => self.split(Self::owned(a, "pane"), axis, Self::argv(a)),
+                    None => self.split(Self::owned(a, "pane"), axis, Self::argv(a), None),
                 };
                 self.answer(r);
             }
@@ -2760,7 +2783,7 @@ impl AppWindow {
                 }
                 let addr = self.model.address_of(&pane);
                 self.model.remove_pane(&pane);
-                self.kill(&addr.into_iter().collect::<Vec<_>>());
+                self.kill(&addr.into_iter().collect::<Vec<_>>(), cx);
             }
             "pane.zoom" => {
                 let pane = Self::owned(a, "pane").or_else(|| self.model.focused_pane());
@@ -2818,8 +2841,8 @@ impl AppWindow {
             "terminal.open" => {
                 let argv = Self::argv(a);
                 let r = match Self::arg(a, "place").unwrap_or("tab") {
-                    "right" => self.split(None, Axis::Row, argv),
-                    "down" => self.split(None, Axis::Column, argv),
+                    "right" => self.split(None, Axis::Row, argv, Self::owned(a, "folder")),
+                    "down" => self.split(None, Axis::Column, argv, Self::owned(a, "folder")),
                     _ => {
                         let name = Self::owned(a, "name")
                             .or_else(|| argv.as_ref().and_then(|v| v.first()).map(|p| p.rsplit('/').next().unwrap_or(p).to_owned()))
@@ -2861,7 +2884,7 @@ impl AppWindow {
                 if !self.live.contains_key(t) {
                     return self.fail(format!("no running terminal {t:?}"));
                 }
-                self.kill(&[t.to_owned()]);
+                self.kill(&[t.to_owned()], cx);
             }
             "terminal.peek" => {
                 let t = Self::arg(a, "terminal").unwrap_or_default();
@@ -3032,7 +3055,13 @@ impl AppWindow {
                 let Some(f) = self.folders.get(name) else { return self.fail(format!("no mod folder {name:?}")) };
                 let mut spec = mod_overlay(&f.dir);
                 spec["mod"] = json!(name);
-                self.open_overlay(mods::new_overlay_id(), spec, window, cx);
+                // One popup per mod: running mod.open again toggles it, like app.settings.
+                let id = format!("mod-{name}");
+                if self.overlays.iter().any(|o| o.id == id) {
+                    self.close_overlay(&id, window, cx);
+                } else {
+                    self.open_overlay(id, spec, window, cx);
+                }
             }
             "overlay.close" => {
                 let id = Self::owned(a, "id").or_else(|| self.overlays.iter().rev().find(|o| o.kind.modal_keys()).map(|o| o.id.clone()));
@@ -3051,8 +3080,13 @@ impl AppWindow {
                 return;
             }
             "app.palette" => {
-                let spec = json!({ "mod": "frame-palette", "kind": "popup", "at": "top", "offset": 60, "width": 620, "height": 0.85 });
-                self.open_overlay(mods::new_overlay_id(), spec, window, cx);
+                // Once: a second press closes the palette instead of stacking another.
+                if self.overlays.iter().any(|o| o.id == "palette") {
+                    self.close_overlay("palette", window, cx);
+                } else {
+                    let spec = json!({ "mod": "frame-palette", "kind": "popup", "at": "top", "offset": 60, "width": 620, "height": 0.85 });
+                    self.open_overlay("palette".into(), spec, window, cx);
+                }
                 return;
             }
             "app.feedback" => {
@@ -3536,6 +3570,10 @@ impl AppWindow {
         let top = |p: &std::path::PathBuf| p.components().next().and_then(|c| c.as_os_str().to_str().map(str::to_owned)).unwrap_or_default();
         if changed.iter().any(|p| matches!(top(p).as_str(), "settings.json" | "keys.json" | "programs.json" | "themes")) {
             self.reload_config(window, cx);
+        }
+        // The theme showing may be the file that changed.
+        if changed.iter().any(|p| top(p) == "themes") {
+            self.apply_look(window, cx);
         }
         if changed.iter().any(|p| top(p) == "layouts") {
             self.check_layout_file(window, cx);
@@ -4513,13 +4551,21 @@ mod tests {
     #[test]
     fn agent_commands_keep_arguments_out_of_shell_source() {
         let cmd = vec!["agent".to_owned(), "a 'quoted' task; $(not-a-command)\nnext line".to_owned(), "".to_owned()];
-        for sh in ["/bin/bash", "/bin/zsh", "/bin/sh", "/bin/dash", "/bin/fish"] {
-            let run = super::unix_agent_argv(sh.into(), cmd.clone());
-            assert_eq!(run[0], sh);
-            assert_eq!(run[1], "-ic");
-            assert_eq!(run[3], sh);
-            assert_eq!(run[4..], cmd);
-            assert_eq!(run[2], if sh.ends_with("/fish") { "command $argv[2..]; exec $argv[1] -i" } else { "\"$@\"; exec \"$0\" -i" });
+        for login in [false, true] {
+            for sh in ["/bin/bash", "/bin/zsh", "/bin/sh", "/bin/dash", "/bin/fish"] {
+                let run = super::unix_agent_argv(sh.into(), cmd.clone(), login);
+                assert_eq!(run[0], sh);
+                assert_eq!(run[1], if login { "-lic" } else { "-ic" });
+                assert_eq!(run[3], sh);
+                assert_eq!(run[4..], cmd);
+                let expected = match (sh.ends_with("/fish"), login) {
+                    (true, true) => "command $argv[2..]; exec $argv[1] -li",
+                    (true, false) => "command $argv[2..]; exec $argv[1] -i",
+                    (false, true) => "\"$@\"; exec \"$0\" -li",
+                    (false, false) => "\"$@\"; exec \"$0\" -i",
+                };
+                assert_eq!(run[2], expected);
+            }
         }
     }
 

@@ -30,6 +30,11 @@ pub struct Keystroke {
     /// this binding was pressed.
     /// e.g. for s this is "s", for option-s "ß", and cmd-s None
     pub key_char: Option<String>,
+
+    /// The layout's base key when macOS folds Shift into `key`.
+    #[cfg(target_os = "macos")]
+    #[serde(default)]
+    pub unshifted_key: Option<String>,
 }
 
 /// Represents a keystroke that can be used in keybindings and displayed to the user.
@@ -105,6 +110,17 @@ impl Keystroke {
         {
             // On Windows, if key_char is set, then the typed keystroke produced the key_char
             if &target.inner.key == key_char && target.inner.modifiers == Modifiers::none() {
+                return true;
+            }
+        }
+
+        #[cfg(target_os = "macos")]
+        if let Some(unshifted_key) = &self.unshifted_key {
+            let modifiers = Modifiers {
+                shift: true,
+                ..self.modifiers
+            };
+            if target.inner.modifiers == modifiers && target.inner.key == *unshifted_key {
                 return true;
             }
         }
@@ -216,6 +232,8 @@ impl Keystroke {
             modifiers,
             key,
             key_char,
+            #[cfg(target_os = "macos")]
+            unshifted_key: None,
         })
     }
 

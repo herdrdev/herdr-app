@@ -40,6 +40,7 @@ build:
     cargo build --locked
 
 test:
+    bun test scripts/files.test.ts
     cargo test --locked
 
 docs-generate: build

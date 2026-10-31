@@ -5907,6 +5907,7 @@ impl Window {
                         key: key.to_string(),
                         key_char: None,
                         modifiers: Modifiers::default(),
+                        ..Default::default()
                     });
                 }
             }

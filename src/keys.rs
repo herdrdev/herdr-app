@@ -203,6 +203,33 @@ mod tests {
         assert_eq!(super::current("pane.zoom"), "pane.zoom");
     }
 
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn mac_shifted_punctuation_matches_existing_keys_files() {
+        use gpui::{KeybindingKeystroke, Keystroke};
+        let bindings = super::parse(include_str!("../defaults/keys.macos.json")).unwrap();
+        for (base, shifted) in [("]", "}"), ("[", "{")] {
+            let event = Keystroke {
+                unshifted_key: Some(base.into()),
+                ..Keystroke::parse(&format!("cmd-{shifted}")).unwrap()
+            };
+            assert!(bindings.iter().any(|binding| binding.match_keystrokes(&[event.clone()]) == Some(false)));
+        }
+        // Layout-derived aliases, not a US punctuation lookup table.
+        for (base, shifted) in [("=", "+"), ("-", "_"), ("ö", "Ö"), ("č", "Č"), ("7", "/")] {
+            let event = Keystroke {
+                unshifted_key: Some(base.into()),
+                ..Keystroke::parse(&format!("cmd-{shifted}")).unwrap()
+            };
+            for keys in [format!("cmd-shift-{base}"), format!("cmd-{shifted}")] {
+                let target = KeybindingKeystroke::from_keystroke(Keystroke::parse(&keys).unwrap());
+                assert!(event.should_match(&target), "{keys}");
+            }
+        }
+        assert!(Keystroke::parse("cmd-shift-]").unwrap().unshifted_key.is_none());
+        assert!(Keystroke::default().unshifted_key.is_none());
+    }
+
     #[test]
     fn shipped_keys_load() {
         for keys in [include_str!("../defaults/keys.json"), include_str!("../defaults/keys.macos.json")] {

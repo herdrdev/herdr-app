@@ -237,7 +237,9 @@ export default class extends View {
     let window = cx.add_window(|_, _| Empty);
     let root = window.update(cx, |_, window, cx| runtime.try_load(&fixture.0, window, cx).unwrap()).unwrap();
     window.update(cx, |_, window, cx| {
-        runtime.close_now(&root, Instant::now() + Duration::from_millis(250), window, cx);
+        // Each native await runs on its own thread; on a loaded runner that took up to 205ms for the
+        // whole close. The deadline only bounds a hang, and the pump returns as soon as both finish.
+        runtime.close_now(&root, Instant::now() + Duration::from_secs(5), window, cx);
         assert_eq!(completed.get(), 2, "both native awaits must finish before window destruction");
         window.remove_window();
     }).unwrap();

@@ -32,9 +32,10 @@ pub fn play(sound: &str) {
         return;
     }
     let sound = sound.to_owned();
+    let attention = matches!(sound.as_str(), "done" | "blocked");
+    // Settings are local to the UI thread; resolve them before handing playback off.
+    let chosen = if attention { custom(&sound) } else { Some(resolve(&sound)) };
     std::thread::spawn(move || {
-        let attention = matches!(sound.as_str(), "done" | "blocked");
-        let chosen = if attention { custom(&sound) } else { Some(resolve(&sound)) };
         if let Some(path) = chosen {
             match play_file(&path) {
                 Ok(()) => return,

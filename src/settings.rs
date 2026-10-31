@@ -683,12 +683,14 @@ pub fn set(s: Settings) -> bool {
         OptionAsAlt::On => Some(true),
     });
     CURRENT.with(|c| {
-        if *c.borrow().0 == s {
-            return false;
-        }
+        // Read the theme even when the settings are the same: its file may
+        // have new colors under the same name.
         let (p, mut colors) = palette(&s.theme).unwrap_or_else(|_| (GRAPHITE.clone(), BTreeMap::new()));
         colors.extend(s.colors.clone());
         let theme = resolve(&p, &colors);
+        if *c.borrow().0 == s && *c.borrow().1 == theme {
+            return false;
+        }
         gpui_shell::set_pixel_scale(s.zoom);
         *c.borrow_mut() = (Rc::new(s), Rc::new(theme));
         true
