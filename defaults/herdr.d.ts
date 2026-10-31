@@ -29,7 +29,8 @@ export function writeTextFile(path: string, text: string, expected: string | nul
 
 /** The agents people can start from a menu (entries with `run` in programs.json), most picked
  *  first, and whether each is installed: asked of the shell agents start in (on another machine,
- *  `on`, its `sh`), at most once a minute per machine. Start one with its `run` as `argv`. */
+ *  `on`, its login/interactive shell when supported), at most once a minute per machine.
+ *  Start one with its `run` as `argv`. */
 export function knownAgents(options?: { on?: string | null }): Promise<(Program & { run: string[]; installed: boolean })[]>;
 
 /** Opens the system's folder picker (this machine). Resolves with the chosen folder, or null
