@@ -44,6 +44,9 @@ herdr-app do space.new --name "remote api" --machine vps --folder /srv/api
 ```
 
 The folder is on that machine; tabs and splits in the space stay there.
+The agent menu checks and starts agents in the remote Unix user's
+login/interactive shell (sh, bash, zsh, dash, ksh or fish), including its
+configured PATH. Other shells keep the sh launcher.
 `terminal.open --folder /path --place down` starts the split in that folder,
 including when `--argv` supplies a program. Without `--folder`, it follows the
 focused terminal's folder.

@@ -706,8 +706,11 @@ has 120 programs (agents, editors, runtimes, tools, databases, infra);
   inside `programs`. Use programs or shell functions, not aliases (the launcher
   does not expand them). On macOS the menu launcher loads login profiles before
   running the agent and leaves an interactive login shell when it ends.
-  Linux keeps interactive non-login shells. Local checks include functions in shells such as bash
-  and zsh; fish and remote checks find executables only. Installation
+  On remote Unix machines, both the installed-agent check and launcher load
+  that user's login/interactive shell for sh, bash, zsh, dash, ksh and fish, so
+  its PATH includes shell-configured tools. Other shells keep the sh launcher.
+  Local Linux launches keep interactive non-login shells. Local and remote checks
+  include functions in bash and zsh; fish checks find executables only. Installation
   checks are cached for up to a minute; changing the commands checks again.
   Invalid JSON is reported in `programs.error` (a valid file has no error).
 - It follows what runs in the terminal now (lazygit, nvim), else what it
@@ -911,7 +914,8 @@ All of it is in `herdr.d.ts`. In short:
   `home()`, `appHome()`, `playSound("done" | "blocked" | file)`.
   `knownAgents({ on })`: the agents people can start (programs.json's
   `run`), most picked first, each `installed` or not there (asked of the
-  shell agents start in); start one with `argv: agent.run`.
+  shell agents start in; a remote Unix machine's login/interactive shell when supported);
+  start one with `argv: agent.run`.
   `pickFolder({ prompt })`: the system's folder picker (here only),
   resolves with the folder or null.
 - Files: `readTextFile(path, { on })` (here, or on that machine),
