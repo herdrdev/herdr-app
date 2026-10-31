@@ -86,6 +86,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("app.feedback", &[opt("message"), opt("from")], "Draft feedback for the person to review and send (from: person or agent)."),
     cmd("app.palette", &[], "Open the command palette: every command by name, with its key."),
     cmd("app.settings", &[opt("section")], "Open the settings (section: look, alerts, updates)."),
+    cmd("app.test_notification", &[], "Send a test macOS system notification (asks for permission if needed)."),
     cmd("app.check_updates", &[], "Look for a newer Herdr and herdr-core now."),
     cmd("app.update_core", &[], "Update herdr-core to its latest release of this generation; terminals keep running."),
     cmd("app.reset", &[], "The escape hatch: set the shown layout and keys aside, back to the default screen."),

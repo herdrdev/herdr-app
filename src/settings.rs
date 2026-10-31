@@ -370,6 +370,8 @@ pub struct Person {
     /// How big the whole app is drawn (1 = as designed). The zoom keys change it.
     pub zoom: f32,
     pub sounds: Sounds,
+    /// Opt in to native macOS agent notifications, in addition to in-app notes.
+    pub system_notifications: bool,
     /// The herdr-core to use, when it isn't where Herdr looks (core_bin.rs).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub core: Option<String>,
@@ -440,6 +442,7 @@ impl Default for Person {
         Person {
             zoom: 1.0,
             sounds: Sounds::default(),
+            system_notifications: false,
             core: None,
             font: None,
             font_size: None,
@@ -902,6 +905,16 @@ mod tests {
         let clicks = crate::layout_sync::State { theme: Some(ThemeChoice::One("ink".into())), ..Default::default() };
         clicks.apply(&mut win98);
         assert_eq!(Settings::compose(&person, &win98.look, true).theme, "ink");
+    }
+
+    #[test]
+    fn existing_settings_do_not_opt_into_system_notifications() {
+        let old: Person = serde_json::from_str(r#"{"sounds":{"enabled":true},"font_size":15}"#).unwrap();
+        assert!(!old.system_notifications);
+        let enabled: Person = serde_json::from_str(r#"{"system_notifications":true}"#).unwrap();
+        assert!(enabled.system_notifications);
+        let roundtrip: Person = serde_json::from_value(serde_json::to_value(&enabled).unwrap()).unwrap();
+        assert!(roundtrip.system_notifications);
     }
 
     /// The guide agents read (written to the home folder) explains every

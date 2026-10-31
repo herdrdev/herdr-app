@@ -123,3 +123,7 @@ Never experiment with pointer/key automation on the person's real display.
 When developing the app on Linux, its `scripts/sandbox` provides an isolated
 home, core and display: `up`, `do`, `status`, `shot`, then `down` when done.
 Never stop a server or session you didn't start.
+
+On macOS, Settings → Alerts can opt in to system notifications with
+`system_notifications: true` in settings.json. `herdr-app do app.test_notification`
+sends a test (and requests permission if needed); use a signed Herdr.app bundle.

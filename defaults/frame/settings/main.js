@@ -2,7 +2,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input } from "gpui-base";
-import { hc, run, theme, themes, fonts, updates, telemetry, settings, layouts, shared, appHome, readTextFile, writeTextFile, playSound, props, closeOverlay } from "herdr";
+import { window as appWindow, hc, run, theme, themes, fonts, updates, telemetry, settings, layouts, shared, appHome, readTextFile, writeTextFile, playSound, props, closeOverlay } from "herdr";
 
 const I = (name) => `frame/settings/${name}.svg`;
 
@@ -643,6 +643,12 @@ export default class Settings extends View {
     const file = (f) => (f ? f.split(/[\\/]/).pop() : "Herdr's sound");
     return v_flex()
       .w_full()
+      .when(appWindow()?.platform === "macos", el => el
+        .child(this.heading(t, "System notifications"))
+        .child(this.row(t, "Notify when agents need you", "Also show a macOS notification when an agent finishes or needs input while you're looking elsewhere. macOS will ask for permission.",
+          this.toggle(t, "st-system-notifications", this.person.system_notifications === true, (_e, cx) => this.change(p => { p.system_notifications = p.system_notifications !== true; }, cx))))
+        .child(this.row(t, "Test notification", "If notifications are blocked, allow Herdr in System Settings → Notifications.",
+          this.button(t, "st-test-notification", "Send test", () => run("app.test_notification")))))
       .child(this.heading(t, "Sounds"))
       .child(
         this.row(

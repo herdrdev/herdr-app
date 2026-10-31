@@ -810,6 +810,7 @@ impl AppWindow {
 
     /// Runs with the shown layout's look (its root node) at the person's zoom.
     fn apply_look(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        crate::notifications::configure(self.person.system_notifications);
         // A layout's fonts arrive with its mod: added since the start, they load now.
         if settings::load_home_fonts(cx) {
             mods::note_fonts(cx);
@@ -1947,7 +1948,18 @@ impl AppWindow {
             "title": title, "body": place, "level": level,
             "action": { "name": "agent.focus", "args": { "terminal": addr } },
         });
+        if self.person.system_notifications && let Some(target) = self.notification_target(addr) {
+            crate::notifications::post(&target, &title, place.as_deref().unwrap_or(""), false);
+        }
         self.open_overlay(mods::new_overlay_id(), json!({ "kind": "toast", "notification": notification }), window, cx);
+    }
+
+    fn notification_target(&self, addr: &str) -> Option<crate::notifications::Target> {
+        Some(crate::notifications::Target {
+            terminal: addr.to_owned(),
+            created_ms: self.live.get(addr)?.get("created_ms")?.as_u64()?,
+            home: crate::mods::app_dir().to_string_lossy().into_owned(),
+        })
     }
 
     /// Keeps the model true to core, on every listing: drops panes whose terminal
@@ -3114,6 +3126,17 @@ impl AppWindow {
                 self.open_overlay(mods::new_overlay_id(), spec, window, cx);
                 return;
             }
+            "app.test_notification" => {
+                if !cfg!(target_os = "macos") {
+                    return self.fail("System notifications are currently available on macOS only");
+                }
+                let target = self.shown_agent().and_then(|addr| self.notification_target(&addr))
+                    .unwrap_or(crate::notifications::Target {
+                        terminal: String::new(), created_ms: 0,
+                        home: crate::mods::app_dir().to_string_lossy().into_owned(),
+                    });
+                crate::notifications::post(&target, "Herdr notifications are working", "Agents can notify you here when they finish or need input.", true);
+            }
             "app.reset" => self.reset(window, cx),
             "app.theme" => {
                 let name = Self::arg(a, "name").unwrap_or_default().to_owned();
@@ -3509,6 +3532,28 @@ impl AppWindow {
     // ---- mods on disk ----------------------------------------------------
 
     fn poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for event in crate::notifications::take_events() {
+            match event {
+                crate::notifications::Event::Clicked { target, test } => {
+                    let created = self.live.get(&target.terminal).and_then(|v| v.get("created_ms")).and_then(Value::as_u64);
+                    let home = crate::mods::app_dir().to_string_lossy().into_owned();
+                    if test && target.terminal.is_empty() && target.home == home {
+                        cx.activate(true);
+                        window.activate_window();
+                    } else if (self.person.system_notifications || test) && crate::notifications::target_matches(&target, &home, created)
+                        && self.model.pane_of(&self.root_agent(&target.terminal)).is_some()
+                    {
+                        cx.activate(true);
+                        window.activate_window();
+                        self.run("agent.focus", json!({"terminal": target.terminal}), window, cx);
+                    }
+                }
+                crate::notifications::Event::Error(message) => {
+                    tracing::warn!("system notifications: {message}");
+                    self.layout_notice("System notifications", &message, window, cx);
+                }
+            }
+        }
         self.flush_documents(false, window, cx);
         let ready = Self::update_label();
         if ready != self.update_ready {
