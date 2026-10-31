@@ -10,7 +10,7 @@ mod movable;
 mod pane_drag;
 mod titlebar;
 
-use crate::layout::{Axis, Background as Paint, Content, Fit, HeaderContent, Kind, Line, Node, PaneFrame, Size as Span};
+use crate::layout::{Axis, Background as Paint, Content, Fit, HeaderContent, Kind, Line, Node, PaneFrame, Side, Size as Span};
 use crate::model::{self, Tab, Model};
 use crate::mods::{self, Found, Instance, Request};
 use crate::settings;
@@ -427,6 +427,8 @@ pub struct AppWindow {
     drag_from: Option<Point<Pixels>>,
     titlebar_applied: Option<(crate::layout::Titlebar, Option<[f32; 2]>)>,
     focused_pane: Option<String>,
+    /// The mod block holding the keyboard: `focused().block`.
+    focused_block: Option<String>,
     synced_model_pane: Option<String>,
     window_active: bool,
     /// The system's appearance; a layout with a light and a dark theme follows it.
@@ -513,6 +515,7 @@ impl AppWindow {
             drag_from: None,
             titlebar_applied: None,
             focused_pane: None,
+            focused_block: None,
             synced_model_pane: None,
             window_active: true,
             system_dark: is_dark(window.appearance()),
@@ -1420,7 +1423,7 @@ impl AppWindow {
         let want: HashMap<String, Instance> = mods_visible.into_iter().collect();
         for (slot, inst) in want {
             if !self.copies.contains_key(&slot) {
-                let copy = self.load(inst, window, cx);
+                let copy = self.load(&slot, inst, window, cx);
                 if slot.starts_with("float:")
                     && let Some(root) = &copy.root
                 {
@@ -1442,6 +1445,10 @@ impl AppWindow {
         self.synced_model_pane = model_pane;
         let pane_changed = focused != self.focused_pane;
         self.focused_pane = focused.clone();
+        // A pane focused some other way, or the block leaving, ends it.
+        if (pane_changed && self.focused_block != focused) || self.focused_block.as_ref().is_some_and(|b| !self.mod_block_shown(b)) {
+            self.focused_block = None;
+        }
         let no_dialog = !self.overlays.iter().any(|o| o.kind.modal_keys());
         if terminal_block(&self.chrome, focused.as_deref()).is_some() {
             if pane_changed && no_dialog && let Some(f) = focused.as_deref().and_then(|p| self.pane_focus(p)) {
@@ -1518,6 +1525,11 @@ impl AppWindow {
     /// else the window, where the app's keys work.
     fn restore_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let dialog = self.overlays.iter().rev().find(|o| o.kind.modal_keys()).map(|o| o.focus.clone());
+        // A mod block holding the keyboard gets it back (a popup over it closed).
+        if dialog.is_none() && self.focused_block.as_ref().is_some_and(|b| self.mod_block_shown(b)) {
+            self.focus.focus(window, cx);
+            return self.hand_keyboard();
+        }
         let shown = if terminal_block(&self.chrome, self.focused_pane.as_deref()).is_some() {
             self.focused_pane.as_deref().and_then(|p| self.pane_focus(p))
         } else if let Some(block) = self.agent_block() {
@@ -1546,13 +1558,13 @@ impl AppWindow {
         self.pane_term(pane).map(|t| t.focus.clone())
     }
 
-    fn load(&self, inst: Instance, window: &mut Window, cx: &mut Context<Self>) -> Copy {
+    fn load(&self, slot: &str, inst: Instance, window: &mut Window, cx: &mut Context<Self>) -> Copy {
         let mut copy = Copy { inst, id: 0, root: None, _watch: None, error: None };
         let (Some(runtime), Some(folder)) = (&self.runtime, self.folders.get(&copy.inst.name)) else {
             copy.error = Some(format!("no mod folder ~/.config/herdr-app/mods/{}", copy.inst.name));
             return copy;
         };
-        copy.id = mods::prepare_load(&copy.inst);
+        copy.id = mods::prepare_load(&copy.inst, slot);
         match runtime.try_load(&folder.dir, window, cx) {
             Ok(root) => {
                 if self.file_events.is_none() {
@@ -1641,12 +1653,12 @@ impl AppWindow {
             if let Some(block) = block {
                 let address = block.terminal()?;
                 return Some(json!({ "space": p.id, "tab": ctx.id, "pane": null, "terminal": address,
-                    "shown": null, "agent": self.shown_agent(), "cwd": self.cwds.get(address) }));
+                    "shown": null, "agent": self.shown_agent(), "cwd": self.cwds.get(address), "block": self.focused_block }));
             }
             let pane = ctx.focused_pane()?;
             let cwd = (if self.shows_agent() { self.shown_agent() } else { m.address_of(&pane) }).and_then(|a| self.cwds.get(&a).cloned());
             Some(json!({ "space": p.id, "tab": ctx.id, "terminal": m.address_of(&pane), "shown": self.swapped.get(&pane),
-                "pane": pane, "agent": self.shown_agent(), "cwd": cwd }))
+                "pane": pane, "agent": self.shown_agent(), "cwd": cwd, "block": self.focused_block }))
         });
         let machines = self.documents.iter().map(|(name, slot)| json!({
             "name": (!name.is_empty()).then_some(name), "layout": slot.layout(),
@@ -2855,45 +2867,43 @@ impl AppWindow {
                 }
             }
             "pane.focus" => {
+                if let Some(block) = Self::owned(a, "block") {
+                    if !self.mod_block_shown(&block) {
+                        return self.fail(format!("no shown mod block {block:?}"));
+                    }
+                    return self.focus_block(&block, window, cx);
+                }
+                self.focused_block = None;
                 if Self::arg(a, "pane").is_none()
                     && let Some(terminal) = Self::arg(a, "terminal")
                     && let Some(block) = self.chrome.visible_blocks().into_iter().find(|n| n.terminal() == Some(terminal))
                 {
                     let id = block.id.clone();
-                    self.focused_pane = Some(id.clone());
-                    self.synced_model_pane = self.model.focused_pane();
-                    if !self.overlays.iter().any(|o| o.kind.modal_keys()) && let Some(f) = self.pane_focus(&id) {
-                        f.focus(window, cx);
-                    }
+                    self.focus_pane_id(&id, window, cx);
                     self.publish(cx);
                     cx.notify();
                     return;
                 }
                 let pane = Self::owned(a, "pane").or_else(|| Self::arg(a, "terminal").and_then(|t| self.model.pane_of(t)));
                 let Some(p) = pane.filter(|p| self.model.tab_of(p).is_some()) else { return self.fail("no such pane") };
-                self.model.focus_pane(&p);
-                self.focused_pane = None;
-                self.agent = self.model.address_of(&p);
-                self.swapped.remove(&p);
+                self.focus_pane_id(&p, window, cx);
             }
-            "pane.go" | "pane.swap" => {
+            "pane.go" | "pane.swap" | "pane.resize" => {
                 let dir = Self::arg(a, "direction").unwrap_or_default();
                 if !matches!(dir, "left" | "right" | "up" | "down") {
                     return self.fail(format!("{name} direction is left, right, up or down, not {dir:?}"));
                 }
-                if let Some(from) = self.model.focused_pane()
+                if name == "pane.go" {
+                    return self.go(dir, window, cx);
+                }
+                if name == "pane.resize" {
+                    self.resize_pane(dir);
+                } else if let Some(from) = self.model.focused_pane()
                     && let Some(to) = self.neighbor(&from, dir)
+                    && let Some(ctx) = self.model.tab_of(&from).map(|c| c.id.clone())
+                    && let Some(c) = self.model.tab_mut(&ctx)
                 {
-                    if name == "pane.swap" {
-                        if let Some(ctx) = self.model.tab_of(&from).map(|c| c.id.clone())
-                            && let Some(c) = self.model.tab_mut(&ctx)
-                        {
-                            c.root.swap(&from, &to);
-                        }
-                    } else {
-                        self.model.focus_pane(&to);
-                        self.focused_pane = None;
-                    }
+                    c.root.swap(&from, &to);
                 }
             }
             // ---- terminals
@@ -3254,15 +3264,26 @@ impl AppWindow {
 
     /// The nearest visible pane in a direction, by what's on screen.
     fn neighbor(&self, from: &str, dir: &str) -> Option<String> {
+        let c = self.model.active_tab()?;
+        let candidates = c.shown().visible_blocks().iter().filter(|n| n.is_pane()).map(|n| n.id.clone()).collect();
+        self.nearest_in(from, dir, candidates)
+    }
+
+    /// The nearest candidate in a direction, by what's on screen. One that
+    /// contains `from`'s center holds it (the sidebar around a list), not a neighbor.
+    fn nearest_in(&self, from: &str, dir: &str, candidates: Vec<String>) -> Option<String> {
         let bounds = self.bounds.borrow();
         let cur = *bounds.get(from)?;
-        let c = self.model.active_tab()?;
-        let candidates: Vec<String> = c.shown().visible_blocks().iter().filter(|n| n.is_pane() && n.id != from).map(|n| n.id.clone()).collect();
+        let center = cur.center();
         let overlap = |a0: Pixels, a1: Pixels, b0: Pixels, b1: Pixels| f32::from(a1.min(b1) - a0.max(b0)).max(0.0);
         candidates
             .into_iter()
+            .filter(|id| id != from)
             .filter_map(|id| {
                 let r = *bounds.get(&id)?;
+                if r.contains(&center) {
+                    return None;
+                }
                 let (gap, ov) = match dir {
                     "left" => (f32::from(cur.left() - r.right()), overlap(cur.top(), cur.bottom(), r.top(), r.bottom())),
                     "right" => (f32::from(r.left() - cur.right()), overlap(cur.top(), cur.bottom(), r.top(), r.bottom())),
@@ -3271,8 +3292,109 @@ impl AppWindow {
                 };
                 (gap > -2.0 && ov > 0.0).then_some((gap, -ov, id))
             })
-            .min_by(|a, b| a.partial_cmp(b).unwrap())
+            .min_by(|a, b| a.0.total_cmp(&b.0).then(a.1.total_cmp(&b.1)))
             .map(|(_, _, id)| id)
+    }
+
+    /// `pane.go`: the nearest pane, layout terminal block or focusable mod.
+    fn go(&mut self, dir: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(from) = self.focused_block.clone().or_else(|| self.focused_pane.clone()).or_else(|| self.model.focused_pane()) else { return };
+        let mut candidates: Vec<String> = self
+            .chrome
+            .visible_blocks()
+            .into_iter()
+            .filter(|n| n.terminal().is_some() || self.focusable(&n.id))
+            .map(|n| n.id.clone())
+            .collect();
+        if let Some(c) = self.model.active_tab() {
+            candidates.extend(c.shown().visible_blocks().iter().filter(|n| n.is_pane()).map(|n| n.id.clone()));
+        }
+        let Some(to) = self.nearest_in(&from, dir, candidates) else { return };
+        if self.focusable(&to) {
+            return self.focus_block(&to, window, cx);
+        }
+        self.focused_block = None;
+        self.focus_pane_id(&to, window, cx);
+        self.sync(window, cx);
+    }
+
+    /// Focuses a tab's pane, or else a layout terminal block.
+    fn focus_pane_id(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.model.tab_of(id).is_some() {
+            self.model.focus_pane(id);
+            self.focused_pane = None;
+            self.agent = self.model.address_of(id);
+            self.swapped.remove(id);
+            return;
+        }
+        self.focused_pane = Some(id.to_owned());
+        self.synced_model_pane = self.model.focused_pane();
+        if !self.overlays.iter().any(|o| o.kind.modal_keys()) && let Some(f) = self.pane_focus(id) {
+            f.focus(window, cx);
+        }
+    }
+
+    /// Until the mod takes the keyboard, the window holds the keys.
+    fn focus_block(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.model.tab_of(id).is_some() {
+            self.focus_pane_id(id, window, cx);
+        }
+        self.focused_block = Some(id.to_owned());
+        if !self.overlays.iter().any(|o| o.kind.modal_keys()) {
+            self.focus.focus(window, cx);
+            self.hand_keyboard();
+        }
+        self.sync(window, cx);
+    }
+
+    /// Its copy gets `focus` from `nextCommand()`.
+    fn hand_keyboard(&self) {
+        if let Some(copy) = self.focused_block.as_ref().and_then(|b| self.copies.get(b)) {
+            mods::send_command_to(copy.id, "focus");
+        }
+    }
+
+    /// A mod block on screen: in the layout, or a mod pane of the shown tab.
+    fn mod_block_shown(&self, id: &str) -> bool {
+        self.copies.contains_key(id)
+            && (self.chrome.visible_blocks().iter().any(|n| n.id == id && matches!(n.content(), Some(Content::Mod { .. })))
+                || self.model.active_tab().is_some_and(|t| t.shown().visible_blocks().iter().any(|n| n.id == id)))
+    }
+
+    fn focusable(&self, id: &str) -> bool {
+        self.copies.get(id).and_then(|c| self.folders.get(&c.inst.name)).is_some_and(|f| f.hint.focusable) && self.mod_block_shown(id)
+    }
+
+    /// The split around a pane on an axis: the nearest ancestor row (or
+    /// column) with more than one child, and the child that holds the pane.
+    fn split_of(root: &Node, pane: &str, axis: Axis) -> Option<(String, String)> {
+        let path = root.path_to(pane)?;
+        path.windows(2).rev().find_map(|w| {
+            let parent = root.find(&w[0])?;
+            (parent.axis() == Some(axis) && parent.children().len() > 1).then(|| (w[0].clone(), w[1].clone()))
+        })
+    }
+
+    /// Moves the focused pane's divider as a drag would.
+    fn resize_pane(&mut self, dir: &str) {
+        const STEP: f32 = 32.0;
+        let axis = if dir == "left" || dir == "right" { Axis::Row } else { Axis::Column };
+        let Some(pane) = self.model.focused_pane() else { return };
+        let Some(root) = self.model.tab_of(&pane).map(|c| &c.root) else { return };
+        let Some((parent, child)) = Self::split_of(root, &pane, axis) else { return };
+        let Some(node) = root.find(&parent) else { return };
+        let shown: Vec<&str> = node.children().iter().filter(|c| !c.hidden).map(|c| c.id.as_str()).collect();
+        let Some(i) = shown.iter().position(|id| *id == child) else { return };
+        // The divider after it, or before it when it's last (that one grows it the other way).
+        let (index, sign) = if i + 1 < shown.len() { (i, 1.0) } else { (i - 1, -1.0) };
+        let Some(b) = self.bounds.borrow().get(shown[index]).copied() else { return };
+        let grow = if dir == "right" || dir == "down" { 1.0 } else { -1.0 };
+        let step = px(STEP * settings::zoom() * grow * sign);
+        let pos = match axis {
+            Axis::Row => point(b.right() + step, b.center().y),
+            Axis::Column => point(b.center().x, b.bottom() + step),
+        };
+        self.move_divider(&parent, index, axis, pos);
     }
 
     // ---- overlays ----------------------------------------------------------
@@ -3360,7 +3482,7 @@ impl AppWindow {
             focus.focus(window, cx);
         }
         if layout.is_none() {
-            let copy = self.load(Instance { name, props }, window, cx);
+            let copy = self.load(&slot, Instance { name, props }, window, cx);
             // Popups (menus) are as tall as what's in them; `height` is the most.
             if fit
                 && let Some(root) = &copy.root
@@ -3717,6 +3839,11 @@ impl AppWindow {
 
     fn focused_path(&self) -> HashSet<String> {
         let mut out = HashSet::new();
+        // A mod block in the layout holding the keyboard: its `focus` looks, not the pane's.
+        if let Some(path) = self.focused_block.as_ref().and_then(|b| self.chrome.path_to(b)) {
+            out.extend(path);
+            return out;
+        }
         if let Some(p) = &self.focused_pane {
             if let Some(c) = self.model.active_tab()
                 && let Some(path) = c.root.path_to(p)
@@ -3923,6 +4050,7 @@ impl AppWindow {
                         cx.defer_in(window, |this, window, cx| {
                             let dialog = this.overlays.iter().any(|o| o.kind.modal_keys());
                             if !dialog
+                                && this.focused_block.is_none()
                                 && (window.focused(cx).is_none() || this.focus.is_focused(window))
                                 && let Some(f) = this.focused_pane.as_ref().and_then(|p| this.pane_focus(p))
                                 && !f.is_focused(window)
@@ -4016,7 +4144,13 @@ impl AppWindow {
     fn drag_to(&mut self, pos: Point<Pixels>) {
         let Some(d) = &self.drag else { return };
         let (container, index, axis) = (d.container.clone(), d.index, d.axis);
-        let Some(node) = self.find_node_mut(&container).map(|n| n.clone()) else { return };
+        self.move_divider(&container, index, axis, pos);
+    }
+
+    /// Puts the divider after shown child `index` of `container` at `pos`
+    /// (window px), within the children's `min`/`max`.
+    fn move_divider(&mut self, container: &str, index: usize, axis: Axis, pos: Point<Pixels>) {
+        let Some(node) = self.find_node_mut(container).map(|n| n.clone()) else { return };
         let shown: Vec<&Node> = node.children().iter().filter(|c| !c.hidden).collect();
         let (Some(a), Some(b)) = (shown.get(index), shown.get(index + 1)) else { return };
         let bounds = self.bounds.borrow();
@@ -4044,7 +4178,7 @@ impl AppWindow {
         let new_a = new_a.min(total - 24.0);
         let (a_id, b_id) = (a.id.clone(), b.id.clone());
         let (sa, sb) = (a.size, b.size);
-        let Some(parent) = self.find_node_mut(&container) else { return };
+        let Some(parent) = self.find_node_mut(container) else { return };
         let Some(children) = parent.children_mut() else { return };
         let set = |children: &mut Vec<Node>, id: &str, s: Span| {
             if let Some(n) = children.iter_mut().find(|n| n.id == id) {
@@ -4351,7 +4485,7 @@ fn terminal_block<'a>(chrome: &'a Node, focused: Option<&str>) -> Option<&'a Nod
 fn needs_model_pane(name: &str, args: &Value) -> bool {
     match name {
         "pane.split" | "pane.close" | "pane.zoom" | "terminal.show" => AppWindow::arg(args, "pane").is_none(),
-        "pane.go" | "pane.swap" => true,
+        "pane.swap" | "pane.resize" => true,
         "terminal.open" | "terminal.keep" => matches!(AppWindow::arg(args, "place"), Some("right" | "down")),
         _ => false,
     }
@@ -4493,8 +4627,23 @@ fn apply_look(el: Div, n: &Node, focused: bool) -> Div {
     } else if let Some(bg) = &n.background {
         el = paint(el, bg);
     }
-    if let Some(line) = focus.and_then(|f| f.border.as_ref()).or(n.border.as_ref()) {
-        el = el.border(settings::z(line.width)).border_color(c(&line.color));
+    let focus_line = focus.and_then(|f| f.border.as_ref());
+    if let Some(line) = focus_line.or(n.border.as_ref()) {
+        let width = settings::z(line.width);
+        match focus.and_then(|f| f.sides.as_ref()).filter(|_| focus_line.is_some()) {
+            Some(sides) => {
+                for side in sides {
+                    el = match side {
+                        Side::Top => el.border_t(width),
+                        Side::Right => el.border_r(width),
+                        Side::Bottom => el.border_b(width),
+                        Side::Left => el.border_l(width),
+                    };
+                }
+            }
+            None => el = el.border(width),
+        }
+        el = el.border_color(c(&line.color));
     }
     if let Some(r) = n.radius {
         el = el.rounded(settings::z(r));
@@ -4544,6 +4693,9 @@ impl Render for AppWindow {
             .iter()
             .find(|(_, t)| t.focus.is_focused(window))
             .map(|(id, _)| id.clone());
+        if clicked.is_some() && self.focused_block.take().is_some() {
+            self.publish(cx);
+        }
         if let Some(id) = clicked
             && self.focused_pane.as_deref() != Some(id.as_str())
             && (self.model.tab_of(&id).is_some() || terminal_block(&self.chrome, Some(&id)).is_some())
@@ -4764,6 +4916,20 @@ mod tests {
     }
 
     #[test]
+    fn pane_resize_finds_the_split_on_its_axis() {
+        use crate::layout::{Axis, Content, Node};
+        let term = |id: &str| Node::block(id, Content::Terminal { terminal: format!("t-{id}") });
+        // a | (b over c): c resizes the column on up/down and the row on left/right.
+        let root = Node::container("row", Axis::Row, vec![term("a"), Node::container("col", Axis::Column, vec![term("b"), term("c")])]);
+        let split = |pane, axis| super::AppWindow::split_of(&root, pane, axis);
+        assert_eq!(split("c", Axis::Column), Some(("col".into(), "c".into())));
+        assert_eq!(split("c", Axis::Row), Some(("row".into(), "col".into())));
+        assert_eq!(split("a", Axis::Column), None);
+        let lone = Node::container("row", Axis::Row, vec![term("a")]);
+        assert_eq!(super::AppWindow::split_of(&lone, "a", Axis::Row), None);
+    }
+
+    #[test]
     fn agent_commands_keep_arguments_out_of_shell_source() {
         let cmd = vec!["agent".to_owned(), "a 'quoted' task; $(not-a-command)\nnext line".to_owned(), "".to_owned()];
         for login in [false, true] {
@@ -4929,7 +5095,9 @@ mod tests {
     #[test]
     fn composition_commands_never_default_to_a_source_pane() {
         use serde_json::json;
-        for name in ["pane.split", "pane.close", "pane.zoom", "pane.go", "pane.swap", "terminal.show"] {
+        // pane.go starts from the focused block itself, never from its source pane.
+        assert!(!super::needs_model_pane("pane.go", &json!({})));
+        for name in ["pane.split", "pane.close", "pane.zoom", "pane.swap", "pane.resize", "terminal.show"] {
             assert!(super::needs_model_pane(name, &json!({})), "{name}");
             assert!(super::needs_model_pane(name, &json!({"pane": null})), "{name}");
         }

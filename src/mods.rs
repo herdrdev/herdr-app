@@ -338,6 +338,9 @@ pub struct Hint {
     pub place: Option<String>,
     #[serde(default)]
     pub size: Option<f32>,
+    /// `pane.go` can give it the keyboard (`focused().block`).
+    #[serde(default)]
+    pub focusable: bool,
 }
 
 #[derive(Clone)]
@@ -637,6 +640,19 @@ pub fn send_command(name: &str, command: &str) -> bool {
     })
 }
 
+/// Delivers `command` to one shown copy (the block given the keyboard, not
+/// every copy of its mod).
+pub fn send_command_to(copy: u64, command: &str) -> bool {
+    if !SHOWN_COPIES.with(|s| s.borrow().contains(&copy)) {
+        return false;
+    }
+    COMMANDS.with(|c| {
+        let mut c = c.borrow_mut();
+        c.retain(|(_, _, tx)| !tx.is_closed());
+        c.iter().any(|(id, _, tx)| *id == copy && tx.try_send(command.to_owned()).is_ok())
+    })
+}
+
 /// The copies on screen now (`prepare_load` numbers them).
 pub fn set_shown_copies(copies: std::collections::HashSet<u64>) {
     SHOWN_COPIES.with(|s| *s.borrow_mut() = copies);
@@ -823,8 +839,10 @@ fn exec_future(command: String, args: Vec<String>, cwd: Option<String>, on: Opti
     }
 }
 
-fn module(inst: Instance, copy: u64) -> HostModule {
-    let props = inst.props.clone();
+fn module(inst: Instance, copy: u64, slot: String) -> HostModule {
+    // Told its block id here, not in `inst.props`: those name its storage file.
+    let mut props = if inst.props.is_object() { inst.props.clone() } else { json!({}) };
+    props["block"] = json!(slot);
     let feedback_frame = inst.name == "frame-feedback";
     let feedback_from = inst.props.get("from").and_then(Value::as_str).unwrap_or("person").to_owned();
     let feedback_layout = inst.props.get("layout").and_then(Value::as_str).unwrap_or("other").to_owned();
@@ -1074,7 +1092,7 @@ fn capabilities() -> Capabilities {
 pub fn install_policy() -> async_channel::Receiver<Request> {
     gpui_shell::policy::update_default(|p| {
         p.with_capabilities(capabilities())
-            .with_host_module(module(Instance { name: String::new(), props: Value::Null }, 0))
+            .with_host_module(module(Instance { name: String::new(), props: Value::Null }, 0, String::new()))
             .expect("herdr module is valid")
     });
     let (tx, rx) = async_channel::unbounded();
@@ -1087,7 +1105,7 @@ pub fn install_policy() -> async_channel::Receiver<Request> {
 /// view a copy of the default that *shares* modules and storage, so each copy
 /// needs a fresh default rather than an edit of the old one.
 /// Readies the next load of `inst`; returns the copy's number (for commands).
-pub fn prepare_load(inst: &Instance) -> u64 {
+pub fn prepare_load(inst: &Instance, slot: &str) -> u64 {
     let copy = COPY_SEQ.with(|s| {
         s.set(s.get() + 1);
         s.get()
@@ -1106,7 +1124,7 @@ pub fn prepare_load(inst: &Instance) -> u64 {
         .with_application(inst.key())
         .with_capabilities(capabilities())
         .with_storage_path(dir.join(file))
-        .with_host_module(module(inst.clone(), copy))
+        .with_host_module(module(inst.clone(), copy, slot.to_owned()))
         .expect("herdr module is valid");
     gpui_shell::policy::set_default(policy);
     copy
