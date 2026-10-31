@@ -232,7 +232,7 @@ export function layouts(): string[];
 
 /** The tab-bar buttons installed mods declare in mod.json (`"button"`), in `order`, then
  *  label order. `icon`: a path for `svg()`. `opens: "panel"`: Herdr adds the mod to every
- *  `panel-body` stack (block id = the mod's name, props `{ slot: "panel" }`); `"tab"`: the
+ *  `panel-body` stack (block id `mod-panel-<mod>`, props `{ slot: "panel" }`); `"tab"`: the
  *  layout opens it as a tab. Herdr's own tab bar draws them next to Files and Changes. Live. */
 export function modButtons(): { mod: string; label: string; icon: string | null; opens: "panel" | "tab"; order: number }[];
 

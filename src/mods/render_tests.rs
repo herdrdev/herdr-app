@@ -324,7 +324,7 @@ fn tabs_show_buttons_that_mods_declare(cx: &mut TestAppContext) {
         let layout = values.get_mut("layout").unwrap();
         fn add(n: &mut Value) {
             if n["id"] == "panel-body" {
-                n["children"].as_array_mut().unwrap().push(json!({"id":"board","type":"block","content":{"mod":"board","props":{"slot":"panel"}}}));
+                n["children"].as_array_mut().unwrap().push(json!({"id":"mod-panel-board","type":"block","content":{"mod":"board","props":{"slot":"panel"}}}));
             }
             for c in n["children"].as_array_mut().into_iter().flatten() {
                 add(c);
@@ -333,10 +333,10 @@ fn tabs_show_buttons_that_mods_declare(cx: &mut TestAppContext) {
         add(layout);
         describe_with_values(cx, &staged, "mods/tabs", values, None).unwrap()
     };
-    assert!(tree.contains("panel-board") && tree.contains("mods/board/board.svg"), "{tree}");
+    assert!(tree.contains("panel-mod-panel-board") && tree.contains("mods/board/board.svg"), "{tree}");
     assert!(tree.contains("tab-mod-notes"), "{tree}");
     assert!(!tree.contains("Gone"), "{tree}");
-    let (files, board, notes) = (tree.find("panel-files").unwrap(), tree.find("panel-board").unwrap(), tree.find("tab-mod-notes").unwrap());
+    let (files, board, notes) = (tree.find("panel-files").unwrap(), tree.find("panel-mod-panel-board").unwrap(), tree.find("tab-mod-notes").unwrap());
     assert!(files < board && board < notes, "buttons follow Files and Changes, in order: {tree}");
 }
 

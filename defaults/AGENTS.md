@@ -725,7 +725,7 @@ has 120 programs (agents, editors, runtimes, tools, databases, infra);
 
 - A `"button"` puts the mod in the tab bar, next to Files and Changes, without
   cloning a layout. `"opens": "panel"` (the default) shows it in the side panel:
-  Herdr adds a block for it to every `panel-body` stack (id: the mod's name,
+  Herdr adds a block for it to every `panel-body` stack (id `mod-panel-<name>`,
   props `{ "slot": "panel" }`), in Herdr's own layouts too, and remembers per
   space which panel shows. `"tab"` opens it as a tab named after the label, or
   selects that tab. `icon` is an SVG in the mod's folder; `order` sorts them
