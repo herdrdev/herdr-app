@@ -114,10 +114,11 @@ the highlighted line shows where it will land.
   tabs start where its focused pane is, and the default mods take a
   space's repo from its first terminal.
 - A **tab** is a piece of work in a space: its terminals and how they're
-  split right and down. One nobody named is called by its place (1, 2,
-  ...), as in Herdr; `tab.rename` names it ("fix login"). A space
-  has one or more; closing the last one closes the space (it stays in
-  `recent`).
+  split right and down. One nobody named is called by the title its terminal
+  reports, which an agent session sets for itself (`pi -n testname`,
+  `/session-title`), else by its place (1, 2, ...); `tab.rename` names it
+  ("fix login"). A space has one or more; closing the last one closes the
+  space (it stays in `recent`).
 - A tab can be **settled** (`tab.settle`): put away on this screen, still running;
   `settled` on each tab. The shipped layouts don't use it (they list every
   tab); a mod that does can hide or fold settled tabs. Showing one, or an
