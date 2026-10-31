@@ -268,6 +268,13 @@ printf 'dev PATH added' >> "$3"''')
                 self.assertIn("unexpected build", result.stderr)
                 self.assertNotIn("Intel Macs", result.stderr)
 
+    def test_cask_installs_the_published_dmg(self):
+        cask = (ROOT / "Casks/herdr-app.rb").read_text()
+        release = (ROOT / ".github/workflows/release.yml").read_text()
+        self.assertIn('url "https://releases.herdr.dev/app/Herdr.dmg"', cask)
+        self.assertIn('"s3://$BUCKET/app/Herdr.dmg"', release)
+        self.assertIn("depends_on arch: :arm64", cask)
+
 
 if __name__ == "__main__":
     unittest.main()
