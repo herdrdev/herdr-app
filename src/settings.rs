@@ -392,6 +392,9 @@ pub struct Person {
     /// macOS Option sends Alt shortcuts, or follows the keyboard layout.
     #[serde(skip_serializing_if = "OptionAsAlt::is_auto")]
     pub option_as_alt: OptionAsAlt,
+    /// macOS: the window drops down from the top of the screen (quick.rs).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub quick_terminal: Option<QuickTerminal>,
     /// Light or dark: the system's, or one always.
     #[serde(skip_serializing_if = "Appearance::is_system")]
     pub appearance: Appearance,
@@ -431,6 +434,26 @@ impl OptionAsAlt {
     }
 }
 
+/// The quick terminal: `key` shows and hides it from any app, `height` is
+/// its share of the screen, `fullscreen` covers all of it (menu bar and Dock
+/// too), `slide` animates it, `auto_hide` puts it away when it loses the keys.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct QuickTerminal {
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub key: Option<String>,
+    pub height: f32,
+    pub fullscreen: bool,
+    pub slide: bool,
+    pub auto_hide: bool,
+}
+
+impl Default for QuickTerminal {
+    fn default() -> Self {
+        QuickTerminal { key: None, height: 0.5, fullscreen: false, slide: true, auto_hide: false }
+    }
+}
+
 fn is_true(b: &bool) -> bool {
     *b
 }
@@ -448,6 +471,7 @@ impl Default for Person {
             clipboard_write: true,
             minimum_contrast: 1.0,
             option_as_alt: OptionAsAlt::Auto,
+            quick_terminal: None,
             appearance: Appearance::System,
             theme: None,
             colors: BTreeMap::new(),
@@ -482,6 +506,7 @@ pub struct Settings {
     pub clipboard_write: bool,
     pub minimum_contrast: f32,
     pub option_as_alt: OptionAsAlt,
+    pub quick_terminal: Option<QuickTerminal>,
     pub sounds: Sounds,
 }
 
@@ -522,6 +547,7 @@ impl Default for Settings {
             clipboard_write: true,
             minimum_contrast: 1.0,
             option_as_alt: OptionAsAlt::Auto,
+            quick_terminal: None,
             sounds: Sounds::default(),
         }
     }
@@ -559,6 +585,7 @@ impl Settings {
             clipboard_write: person.clipboard_write,
             minimum_contrast: person.minimum_contrast,
             option_as_alt: person.option_as_alt,
+            quick_terminal: person.quick_terminal.clone(),
         }
     }
 }
@@ -608,6 +635,17 @@ impl Settings {
         }
         if !(6.0..=72.0).contains(&self.font_size) {
             out.push(format!("font_size {} is outside 6..72", self.font_size));
+        }
+        if let Some(q) = &self.quick_terminal {
+            if !cfg!(target_os = "macos") {
+                out.push("quick_terminal works on macOS only".into());
+            }
+            if let Some(key) = q.key.as_deref().filter(|k| crate::quick::keycode(k).is_none()) {
+                out.push(format!("quick_terminal.key: {key:?} is not a key like \"cmd-.\" or \"ctrl-alt-space\""));
+            }
+            if !(0.1..=1.0).contains(&q.height) {
+                out.push(format!("quick_terminal.height {} is outside 0.1..1", q.height));
+            }
         }
         out
     }
@@ -886,6 +924,26 @@ mod tests {
     }
 
     #[test]
+    fn quick_terminal_is_off_by_default_and_validates_its_key_and_height() {
+        let default: Person = serde_json::from_str("{}").unwrap();
+        assert_eq!(default.quick_terminal, None);
+        assert!(!serde_json::to_value(&default).unwrap().as_object().unwrap().contains_key("quick_terminal"));
+        let bare: Person = serde_json::from_str(r#"{"quick_terminal":{}}"#).unwrap();
+        assert_eq!(bare.quick_terminal, Some(QuickTerminal { key: None, height: 0.5, fullscreen: false, slide: true, auto_hide: false }));
+        let person: Person = serde_json::from_str(r#"{"quick_terminal":{"key":"cmd-.","height":0.4,"fullscreen":true,"slide":false,"auto_hide":true}}"#).unwrap();
+        let settings = Settings::compose(&person, &crate::layout::Look::default(), true);
+        assert_eq!(settings.quick_terminal, Some(QuickTerminal { key: Some("cmd-.".into()), height: 0.4, fullscreen: true, slide: false, auto_hide: true }));
+        assert_eq!(serde_json::to_value(&person).unwrap()["quick_terminal"]["key"], "cmd-.");
+        let mac_only = usize::from(!cfg!(target_os = "macos"));
+        assert_eq!(settings.problems().len(), mac_only);
+        for (key, height, problems) in [("cmd+.", 0.5, 1), ("ctrl-alt-space", 0.05, 1), ("f13", 1.0, 0), ("fn-q", 2.0, 2)] {
+            let q = QuickTerminal { key: Some(key.into()), height, ..QuickTerminal::default() };
+            let settings = Settings { quick_terminal: Some(q), ..Settings::default() };
+            assert_eq!(settings.problems().len(), problems + mac_only, "{key} {height}");
+        }
+    }
+
+    #[test]
     fn shipped_looks_and_theme_clicks_have_the_same_precedence() {
         use crate::layout::{Node, ThemeChoice};
         let person = Person { font_size: Some(19.0), theme: Some(ThemeChoice::One("moss".into())), ..Person::default() };
@@ -910,7 +968,7 @@ mod tests {
     /// settings.json key.
     #[test]
     fn the_guide_explains_every_setting() {
-        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), ui_font: Some(String::new()), telemetry: false, clipboard_write: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), ..Person::default() };
+        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), ui_font: Some(String::new()), telemetry: false, clipboard_write: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), quick_terminal: Some(QuickTerminal::default()), ..Person::default() };
         let keys: Vec<String> = serde_json::to_value(&all).unwrap().as_object().unwrap().keys().cloned().collect();
         let guide = include_str!("../defaults/AGENTS.md");
         let section = guide.split("## The person").nth(1).and_then(|s| s.split("\n## ").next()).unwrap_or_default();

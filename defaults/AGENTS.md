@@ -568,7 +568,11 @@ The main ones:
   Add machine lists all named ssh-config hosts in a scrollable list. Setup
   prompts open above the picker; close the setup terminal to return to the
   updated list and any machine-specific guidance.
-- Window: `window.minimize`, `window.maximize` (or back), `window.close`.
+- Window: `window.minimize`, `window.maximize` (or back), `window.close`,
+  `app.toggle` (hide Herdr when it's in front, else bring it there; another
+  tool's key can run `herdr-app do app.toggle`; with `quick_terminal` the
+  drop-down goes down or up, `window.close` puts it away and
+  `window.maximize` makes it cover the whole screen, or not).
 - macOS: `app.quit`, `app.hide`, `app.hide_others`, `app.show_all`.
 
 When the user runs a command without a required name (a key, a click), Herdr
@@ -655,6 +659,19 @@ What's about the user, never a look:
   Alt shortcuts (including Option+E without composition); `"off"` keeps native
   Option input on every layout. Changes apply immediately, including layout
   switches. Linux and Windows are unchanged.
+- `quick_terminal`: macOS only, a drop-down terminal like iTerm2's hotkey
+  window: `{ "key": "cmd-.", "height": 0.5, "fullscreen": false, "slide": true, "auto_hide": false }`. The window
+  drops down from the top of the screen under the pointer, on the current
+  Space (also over full screen apps); when it goes up, the app you were in
+  has the keys again. `key` (keys.json's form) works from any app and
+  is taken from all of them; without it, `app.toggle` still works. `height` is
+  the share of the screen, 0.1 to 1. `fullscreen` covers the whole screen,
+  over the menu bar and the Dock (below the notch on a MacBook with one); `window.maximize` switches it on and off
+  (bind it in keys.json). `slide: false` makes it appear and go at once.
+  `auto_hide` puts it away when another window takes the keys. Adding or
+  removing `quick_terminal` applies at the next start; `key`, `height`,
+  `fullscreen`, `slide` and `auto_hide` apply immediately. The window
+  has no title bar or buttons and isn't saved to `window.json`.
 - `minimum_contrast`: terminal text contrast ratio, `1` (default) leaves
   program colors unchanged. Set it to `1.6` to enable the previous readability
   adjustment, or another number from `1` to `21`. Text below that ratio is
