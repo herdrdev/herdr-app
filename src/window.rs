@@ -443,6 +443,11 @@ pub struct AppWindow {
     /// Remembers where the window is (`place.rs`); the write waiting to settle.
     _place: Option<Subscription>,
     place_write: Option<Task<()>>,
+    /// Browser panes: one native WKWebView per web-pane id, synced to its rect.
+    #[cfg(target_os = "macos")]
+    webviews: HashMap<String, crate::webview::WebView>,
+    /// Web panes shown this frame (id, url); filled in render_block, consumed in render().
+    web_shown: Rc<RefCell<Vec<(String, String)>>>,
 }
 
 impl AppWindow {
@@ -453,6 +458,9 @@ impl AppWindow {
         let mut w = AppWindow {
             core,
             runtime,
+            #[cfg(target_os = "macos")]
+            webviews: HashMap::new(),
+            web_shown: Rc::new(RefCell::new(Vec::new())),
             chrome: default_layout("main"),
             layout_name: "main".into(),
             agent: None,
@@ -1553,6 +1561,13 @@ impl AppWindow {
                 for p in ctx.root.panes() {
                     let focused = m.active.as_deref() == Some(pr.id.as_str()) && focused_pane.as_deref() == Some(p.id.as_str());
                     let zoomed = ctx.zoomed.as_deref() == Some(p.id.as_str());
+                    // A web pane: a browser, no terminal; give its tab a globe icon.
+                    if let Some(Content::Web { url }) = p.content() {
+                        panes.push(json!({ "pane": p.id, "terminal": null, "web": url, "tab": ctx.id, "title": "",
+                            "program": { "icon": "icons/globe.svg", "tint": true },
+                            "focused": focused, "zoomed": zoomed, "movable": self.pane_movable(&p.id) }));
+                        continue;
+                    }
                     // A mod pane: what it shows, no terminal.
                     if let Some(Content::Mod { name, .. }) = p.content() {
                         panes.push(json!({ "pane": p.id, "terminal": null, "mod": name, "tab": ctx.id, "title": name, "focused": focused, "zoomed": zoomed, "movable": self.pane_movable(&p.id) }));
@@ -2296,6 +2311,20 @@ impl AppWindow {
         Ok(json!({ "space": space, "tab": ctx, "pane": pane }))
     }
 
+    /// A tab whose only pane is a web page (a browser pane), shown at once.
+    fn new_web_tab(&mut self, space: Option<String>, url: &str) -> Result<Value, String> {
+        let space = space.or_else(|| self.model.active_space().map(|p| p.id.clone())).ok_or("no space yet: make one first (space.new)")?;
+        if self.model.space(&space).is_none() {
+            return Err(format!("no space {space:?}"));
+        }
+        let machine = self.machine_of(&space);
+        self.require_document(machine.as_deref())?;
+        let (ctx, pane) = (self.model.fresh_id_on("tb", machine.as_deref()), self.model.fresh_id_on("p", machine.as_deref()));
+        self.model.add_tab(&space, Tab::with_pane(&ctx, "", Node::block(pane.clone(), Content::Web { url: url.to_owned() })));
+        self.model.active = Some(space.clone());
+        Ok(json!({ "space": space, "tab": ctx, "pane": pane }))
+    }
+
     fn split(&mut self, pane: Option<String>, axis: Axis, argv: Option<Vec<String>>, folder: Option<String>) -> Result<Value, String> {
         let target = pane.or_else(|| self.model.focused_pane()).ok_or("no pane to split")?;
         let (Some(p), Some(c)) = (self.model.space_of(&target), self.model.tab_of(&target)) else { return Err(format!("no pane {target:?}")) };
@@ -2594,6 +2623,15 @@ impl AppWindow {
             self.ask_name(name, args, window, cx);
             return json!({ "asked": "name" });
         }
+        // web.open with no URL asks for one (the prompt returns it as `name`).
+        if person
+            && name == "web.open"
+            && args.get("url").is_none_or(Value::is_null)
+            && args.get("name").is_none_or(Value::is_null)
+        {
+            self.ask_url(args, window, cx);
+            return json!({ "asked": "url" });
+        }
         if let Some(arg) = crate::commands::missing(command, &args) {
             return json!({ "error": format!("{name} needs {arg}") });
         }
@@ -2640,6 +2678,17 @@ impl AppWindow {
         };
         let spec = json!({ "mod": "prompt", "kind": "dialog", "width": 380,
             "props": { "title": title, "value": current.as_deref().unwrap_or(""), "hint": hint, "command": { "name": name, "args": args } } });
+        self.open_overlay(mods::new_overlay_id(), spec, window, cx);
+    }
+
+    /// Asks the person for a URL, then opens a browser tab to it (the prompt
+    /// returns the typed value as `name`, which web.open reads as the URL).
+    fn ask_url(&mut self, mut args: Value, window: &mut Window, cx: &mut Context<Self>) {
+        if !args.is_object() {
+            args = json!({});
+        }
+        let spec = json!({ "mod": "prompt", "kind": "dialog", "width": 460,
+            "props": { "title": "Open URL", "value": "https://", "hint": "a web address", "command": { "name": "web.open", "args": args } } });
         self.open_overlay(mods::new_overlay_id(), spec, window, cx);
     }
 
@@ -2701,6 +2750,17 @@ impl AppWindow {
                     Some(m) => self.new_mod_tab(Self::owned(a, "space"), name, m, a.get("props").cloned().unwrap_or(Value::Null)),
                     None => self.new_tab(Self::owned(a, "space"), name, Self::owned(a, "folder"), Self::argv(a), Self::arg(a, "task")),
                 };
+                self.answer(r);
+            }
+            "web.open" => {
+                let raw = Self::arg(a, "url")
+                    .or_else(|| Self::arg(a, "name"))
+                    .map(str::trim)
+                    .filter(|u| !u.is_empty())
+                    .unwrap_or("https://herdr.dev");
+                // A bare host typed into the prompt gets a scheme so WKWebView loads it.
+                let url = if raw.contains("://") { raw.to_owned() } else { format!("https://{raw}") };
+                let r = self.new_web_tab(Self::owned(a, "space"), &url);
                 self.answer(r);
             }
             "tab.close" => {
@@ -3782,6 +3842,23 @@ impl AppWindow {
                 }
                 None => div().into_any_element(),
             },
+            Content::Web { url } => {
+                // Record that this web pane is shown this frame, and capture its
+                // rect each paint; the WebView itself is created/synced in render().
+                let id = n.id.clone();
+                self.web_shown.borrow_mut().push((id.clone(), url.clone()));
+                let bounds_map = self.bounds.clone();
+                let cid = id.clone();
+                div()
+                    .size_full()
+                    .bg(c("background"))
+                    .child(
+                        gpui::canvas(move |b, _, _| { bounds_map.borrow_mut().insert(cid.clone(), b); }, |_, _, _, _| {})
+                            .absolute()
+                            .size_full(),
+                    )
+                    .into_any_element()
+            }
             Content::Mod { .. } => self.render_slot(&n.id, cx),
             Content::Agent { .. } => match self.shown_agent() {
                 Some(addr) => match self.agent_view(&n.id, &addr) {
@@ -4451,6 +4528,53 @@ fn shadow(el: Div, s: Option<&str>) -> Div {
     }
 }
 
+impl AppWindow {
+    /// Create, position, hide, or drop native WebViews for web panes, from what
+    /// render_block recorded this frame and what the model still holds.
+    #[cfg(target_os = "macos")]
+    fn sync_webviews(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let shown: Vec<(String, String)> = self.web_shown.borrow().clone();
+        let mut created = false;
+        for (id, url) in &shown {
+            if !self.webviews.contains_key(id)
+                && let Some(wv) = crate::webview::WebView::new(window, url)
+            {
+                self.webviews.insert(id.clone(), wv);
+                created = true;
+            }
+            if let Some(b) = self.bounds.borrow().get(id).copied()
+                && let Some(wv) = self.webviews.get_mut(id)
+            {
+                wv.sync(b);
+            }
+        }
+        // A new view has no rect until the next paint records one; ask for
+        // another frame so sync() can position and reveal it.
+        if created {
+            cx.notify();
+        }
+        // Web panes the model still holds, across tabs, so a background tab's page
+        // survives hidden instead of being destroyed.
+        let alive: std::collections::HashSet<String> = self
+            .model
+            .tabs()
+            .flat_map(|c| c.root.walk())
+            .filter(|n| matches!(n.content(), Some(Content::Web { .. })))
+            .map(|n| n.id.clone())
+            .collect();
+        let shown_ids: std::collections::HashSet<&str> = shown.iter().map(|(id, _)| id.as_str()).collect();
+        self.webviews.retain(|id, wv| {
+            if !alive.contains(id) {
+                return false; // pane closed: Drop removes the subview
+            }
+            if !shown_ids.contains(id.as_str()) {
+                wv.hide();
+            }
+            true
+        });
+    }
+}
+
 impl Render for AppWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::bench::count(&crate::bench::WINDOW);
@@ -4458,6 +4582,10 @@ impl Render for AppWindow {
         crate::bench::frame_start();
         crate::terminal::next_frame();
         window.set_rem_size(px(settings::ui_font_size()));
+        // Browser panes: cleared each frame; render_block repopulates which web
+        // panes are shown, and sync_webviews (after the tree is built) creates,
+        // positions, hides, or drops their native WebViews.
+        self.web_shown.borrow_mut().clear();
         // A terminal the person clicked into becomes the focused pane.
         let clicked = self
             .terms
@@ -4480,6 +4608,8 @@ impl Render for AppWindow {
         }
         let focused = self.focused_path();
         let tree = self.render_node(&self.chrome, &focused, None, cx);
+        #[cfg(target_os = "macos")]
+        self.sync_webviews(window, cx);
         let tree = self.window_frame(tree, window, cx);
         let overlays = self.render_overlays(window.viewport_size(), cx);
         let tracker = self.float_tracker(cx);

@@ -11,6 +11,8 @@ use serde_json::Value;
 #[serde(untagged)]
 pub enum Content {
     Terminal { terminal: String },
+    /// A browser pane showing a web page (native WKWebView overlay on macOS).
+    Web { url: String },
     Mod {
         #[serde(rename = "mod")]
         name: String,
@@ -465,9 +467,9 @@ impl Node {
         }
     }
 
-    /// A pane in a tab: a terminal, or a mod beside them (a viewer, a board).
+    /// A pane in a tab: a terminal, a web page, or a mod beside them (a viewer, a board).
     pub fn is_pane(&self) -> bool {
-        matches!(self.content(), Some(Content::Terminal { .. } | Content::Mod { .. }))
+        matches!(self.content(), Some(Content::Terminal { .. } | Content::Web { .. } | Content::Mod { .. }))
     }
 
     pub fn closable(&self) -> bool {
