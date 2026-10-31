@@ -273,9 +273,26 @@ export default class Welcome extends View {
           .child(svg(I("terminal")).size(16).text_color(t.muted))
           .child(div().text_size(13.5).font_semibold().text_color(t.foreground).child("Coming from herdr?")),
       )
-      .child(this.para(t, "This is a new app on a new core. Your herdr workspaces stay where they are; nothing moves over."))
-      .child(this.para(t, "Same idea as before: spaces, tabs and terminals."))
-      .child(this.para(t, "Want your keybinds and settings carried over? Give your agent this line:"))
+      .child(this.para(t, "This is a new app on a new core. Same idea as before: spaces, tabs and terminals."))
+      .child(this.para(t, "Your herdr workspaces can come with you: a space per workspace, its tabs, and each agent resumed on the conversation it left. herdr is left as it is, so you can go back."))
+      .child(
+        h_flex()
+          .id("w-import-herdr")
+          .h(38)
+          .px(12)
+          .gap(10)
+          .items_center()
+          .rounded(8)
+          .cursor_pointer()
+          .text_size(13)
+          .text_color(t.accent)
+          .hover((s) => s.bg(t.hover))
+          .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+          .on_click(() => run("import.herdr"))
+          .child(svg(I("terminal")).size(15))
+          .child("Bring my herdr workspaces over"),
+      )
+      .child(this.para(t, "Want your keybinds and settings carried over too? Give your agent this line:"))
       .child(this.copyLine(t, MIGRATE, "w-migrate-copy"));
   }
 
