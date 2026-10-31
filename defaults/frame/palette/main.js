@@ -50,6 +50,7 @@ const NAMED = [
   ["window.minimize", {}, "Window", "Minimize window", ""],
   ["window.maximize", {}, "Window", "Maximize window", "restore"],
   ["window.close", {}, "Window", "Close window", "quit"],
+  ["app.ask", {}, "App", "Change anything…", "agent ask chat customize mod"],
   ["app.settings", {}, "App", "Settings", "preferences options config look font theme sound"],
   ["app.help", {}, "App", "Keys", "keybindings shortcuts help"],
   ["app.welcome", {}, "App", "Welcome", "intro start onboarding"],

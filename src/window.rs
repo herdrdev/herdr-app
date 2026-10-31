@@ -5,6 +5,7 @@
 //! anything: keys, mods, menus and agents all run them.
 
 use crate::hc::Core;
+mod ask;
 mod floats;
 mod movable;
 mod pane_drag;
@@ -543,6 +544,7 @@ impl AppWindow {
             crate::place::save(window, cx);
             true
         });
+        Self::forget_ask();
         settings::install_themes();
         crate::programs::install_icons();
         w.reload_config(window, cx);
@@ -1896,6 +1898,7 @@ impl AppWindow {
             }
         }
         self.track_folders(cx);
+        self.watch_ask();
         for t in self.terms.values() {
             if self.live.get(&t.address).is_some_and(|r| r["pid"].as_u64().is_some()) {
                 t.view.update(cx, |v, cx| v.reattach_if_needed(self.core.clone(), cx));
@@ -3071,6 +3074,10 @@ impl AppWindow {
             }
             "app.whats_new" => {
                 self.open_whats_new(true, window, cx);
+                return;
+            }
+            "app.ask" => {
+                self.ask(a, window, cx);
                 return;
             }
             "app.palette" => {

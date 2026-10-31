@@ -437,6 +437,14 @@ Draft feedback for the person to review and send (from: person or agent).
 | `message` | no |
 | `from` | no |
 
+## `app.ask`
+
+Ask an agent to change Herdr: a one-line box, or this session's conversation once there is one (argv: start it with this agent command, from the app's folder).
+
+| Argument | Required |
+|---|---|
+| `argv` | no |
+
 ## `app.palette`
 
 Open the command palette: every command by name, with its key.

@@ -84,6 +84,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("app.welcome", &[], "Show the welcome again."),
     cmd("app.whats_new", &[], "Show what this release brought (it opens once by itself after an update)."),
     cmd("app.feedback", &[opt("message"), opt("from")], "Draft feedback for the person to review and send (from: person or agent)."),
+    cmd("app.ask", &[opt("argv")], "Ask an agent to change Herdr: a one-line box, or this session's conversation once there is one (argv: start it with this agent command, from the app's folder)."),
     cmd("app.palette", &[], "Open the command palette: every command by name, with its key."),
     cmd("app.settings", &[opt("section")], "Open the settings (section: look, alerts, updates)."),
     cmd("app.check_updates", &[], "Look for a newer Herdr and herdr-core now."),
