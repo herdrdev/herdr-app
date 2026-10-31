@@ -1,0 +1,24 @@
+#!/usr/bin/env bash
+# Prints the Zig that ghostty's build.zig.zon pins, downloading it into the
+# cache the first time (a package manager's Zig may be newer than the pin).
+set -euo pipefail
+root=$(cd "$(dirname "$0")/.." && pwd)
+version=$(sed -n 's/.*minimum_zig_version = "\(.*\)".*/\1/p' "$root/vendor/ghostty/build.zig.zon" | head -1)
+[ -n "$version" ] || { echo "no minimum_zig_version in vendor/ghostty/build.zig.zon" >&2; exit 1; }
+case "$(uname -sm)" in
+  "Darwin arm64") target=aarch64-macos ;;
+  "Darwin x86_64") target=x86_64-macos ;;
+  "Linux aarch64" | "Linux arm64") target=aarch64-linux ;;
+  "Linux x86_64") target=x86_64-linux ;;
+  *) echo "no Zig build for $(uname -sm)" >&2; exit 1 ;;
+esac
+cache="${XDG_CACHE_HOME:-$HOME/.cache}/herdr-app/zig/$version"
+if [ ! -x "$cache/zig" ]; then
+  echo "downloading Zig $version ($target)" >&2
+  tmp=$(mktemp -d)
+  trap 'rm -rf "$tmp"' EXIT
+  curl -fsSL "https://ziglang.org/download/$version/zig-$target-$version.tar.xz" | tar -xJ -C "$tmp"
+  mkdir -p "$cache"
+  cp -R "$tmp/zig-$target-$version/." "$cache/"
+fi
+echo "$cache/zig"
