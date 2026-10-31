@@ -609,6 +609,9 @@ What's about the user, never a look:
   cargo). Read at start.
 - `font`, `font_size`, `ui_font`: used where the layout doesn't set its
   own. Herdr (main) leaves these unset. Bigger panels: `zoom`.
+- `font_ligatures`: `true` enables programming ligatures in terminal fonts such
+  as JetBrains Mono and Fira Code; default `false`. The cursor and background
+  changes (including selections) break ligatures so individual cells stay clear.
 - `theme`: a theme name or `{light, dark}`; used where the layout sets none.
   The theme picker overrides any layout and stays on that layout.
 - `colors`: theme color overrides (`{"accent":"#ff8800"}`), with the same
