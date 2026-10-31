@@ -903,6 +903,9 @@ impl AppWindow {
         } else {
             fill_ids(&mut chrome, &mut self.model);
         }
+        let buttons = mods::buttons(self.folders.values());
+        add_mod_panels(&mut chrome, &buttons);
+        mods::publish_buttons(&buttons);
         self.file_chrome = chrome.clone();
         let mut state = read_state(name);
         if self.layout_file_ok {
@@ -976,6 +979,7 @@ impl AppWindow {
                 let was_broken = !self.layout_file_ok;
                 self.layout_file_ok = true;
                 self.keep_ids(&mut n);
+                add_mod_panels(&mut n, &mods::buttons(self.folders.values()));
                 // What the file now sets on purpose wins over a click on it.
                 // Coming back from a broken file, the clicks are the saved ones
                 // (what showed meanwhile was only the shipped stand-in).
@@ -2995,6 +2999,7 @@ impl AppWindow {
                     }
                     self.written_layout = text;
                     self.layout_file_ok = true;
+                    add_mod_panels(&mut n, &mods::buttons(self.folders.values()));
                     self.file_chrome = n.clone();
                     self.chrome = n;
                     self.picked_theme = None;
@@ -3588,7 +3593,15 @@ impl AppWindow {
         let added = found.keys().any(|k| !self.folders.contains_key(k));
         let removed = self.folders.keys().any(|k| !found.contains_key(k));
         let fresh: Vec<Found> = found.values().filter(|f| !self.seen.contains(&f.id)).cloned().collect();
+        let buttons_changed = mods::buttons(self.folders.values()) != mods::buttons(found.values());
         self.folders = found;
+        // A mod that declares a panel button (or stops to) shows in the layout's side panel
+        // now: the layout is read again, with the person's clicks on it.
+        if buttons_changed {
+            self.save();
+            let name = self.layout_name.clone();
+            self.load_layout(&name);
+        }
 
         // Copies that failed get another try when their folder changes; loaded ones hot-reload.
         let retry: Vec<String> = self.copies.iter().filter(|(_, c)| c.root.is_none() && (edited.contains(&c.inst.name) || added)).map(|(s, _)| s.clone()).collect();
@@ -3610,7 +3623,7 @@ impl AppWindow {
                 dock(&mut self.chrome, block, place, self.model.fresh_id("r"));
             }
         }
-        if !retry.is_empty() || added || removed {
+        if !retry.is_empty() || added || removed || buttons_changed {
             self.sync(window, cx);
         }
     }
@@ -4320,6 +4333,27 @@ fn fill_ids(n: &mut Node, m: &mut Model) {
     n.fill_ids(&mut || m.fresh_id("n"));
 }
 
+/// Adds a block to every `panel-body` stack for each mod that declares a panel button
+/// and isn't in it yet (its id is the mod's name). Only the shown tree gets it: a
+/// layout's file, Herdr's own included, stays as it is.
+fn add_mod_panels(root: &mut Node, buttons: &[mods::Button]) {
+    if root.id == "panel-body"
+        && matches!(root.kind, Kind::Stack { .. })
+        && let Some(children) = root.children_mut()
+    {
+        for b in buttons.iter().filter(|b| b.opens == "panel") {
+            let shown = children.iter().any(|c| c.id == b.name || matches!(c.content(), Some(Content::Mod { name, .. }) if *name == b.name));
+            if !shown {
+                children.push(Node::block(b.name.clone(), Content::Mod { name: b.name.clone(), props: json!({ "slot": "panel" }) }));
+            }
+        }
+        return;
+    }
+    for c in root.children_mut().into_iter().flatten() {
+        add_mod_panels(c, buttons);
+    }
+}
+
 /// Puts a block along one side of the chrome.
 fn dock(root: &mut Node, block: Node, place: &str, wrapper_id: String) {
     let axis = if matches!(place, "top" | "bottom") { Axis::Column } else { Axis::Row };
@@ -4529,6 +4563,24 @@ impl Render for AppWindow {
 mod tests {
     use gpui::{div, point, px, size, Context, IntoElement, Render, TestAppContext, Window};
     use gpui::prelude::*;
+
+    #[test]
+    fn mod_panels_join_the_panel_body_stack_once() {
+        let button = |name: &str, opens: &'static str| crate::mods::Button { name: name.into(), label: name.into(), icon: None, opens, order: 100.0 };
+        let buttons = [button("prs", "panel"), button("issues", "tab"), button("files", "panel")];
+        let mut main = super::default_layout("main");
+        super::add_mod_panels(&mut main, &buttons);
+        super::add_mod_panels(&mut main, &buttons);
+        let body = main.find("panel-body").unwrap();
+        let ids: Vec<&str> = body.children().iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["files", "changes", "prs"]);
+        assert!(matches!(body.children()[2].content(), Some(super::Content::Mod { name, props }) if name == "prs" && props["slot"] == "panel"));
+        // A layout without a panel-body stack stays as it is.
+        let mut terminals = super::default_layout("terminals");
+        let before = terminals.clone();
+        super::add_mod_panels(&mut terminals, &buttons);
+        assert!(terminals == before);
+    }
 
     #[test]
     fn agent_commands_keep_arguments_out_of_shell_source() {
