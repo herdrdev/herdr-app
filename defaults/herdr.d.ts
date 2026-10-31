@@ -272,12 +272,13 @@ export function themes(): { name: string; light: boolean; colors: Record<string,
 export function fonts(): string[];
 
 /** Herdr's and herdr-core's versions and what's waiting. `app.updates`: false for a build from
- *  source (it never updates). `core.managed`: the package manager that owns the core (homebrew,
+ *  source (it never updates). `app.dev`: true for a development build (not one `scripts/package`
+ *  made). `core.managed`: the package manager that owns the core (homebrew,
  *  nix, mise), which the app never updates. `checked`: unix seconds of the last look.
  *  `checks`: anything is checked at all (not in a build from source); `checking`: looking now
  *  (`app.check_updates` starts a look). */
 export function updates(): {
-  app: { version: string; ready: string | null; updates: boolean };
+  app: { version: string; ready: string | null; updates: boolean; dev: boolean };
   notes: { version: string; date: string; items: { headline: string; detail: string; fixed: boolean; media: { path: string; width: number; height: number }[] }[]; spotlight: boolean }[];
   core: { version: string | null; managed: string | null; ready: string | null; updating: boolean; error: string | null };
   checked: number | null;

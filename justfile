@@ -39,6 +39,18 @@ pre-release: test docs-check
 build:
     cargo build --locked
 
+# Development build: runs it side-by-side (its own home in the system temp and
+# its own dock icon), so the installed app and its setup are never touched.
+[unix]
+dev: build
+    HERDR_APP_HOME="${HERDR_APP_HOME:-/var/tmp/herdr-dev/home}" HERDR_APP_ID=herdr-dev target/debug/herdr-app
+
+[windows]
+dev: build
+    if (-not $env:HERDR_APP_HOME) { $env:HERDR_APP_HOME = "$env:TEMP\herdr-dev\home" }
+    $env:HERDR_APP_ID = 'herdr-dev'
+    .\target\debug\herdr-app.exe
+
 test:
     bun test scripts/files.test.ts
     cargo test --locked

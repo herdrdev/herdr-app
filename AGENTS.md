@@ -66,6 +66,10 @@ On Windows it updates `%LOCALAPPDATA%\Programs\herdr-app` and the Start menu;
 quit and reopen Herdr to use the new build. Windows recipes use PowerShell by default;
 `just --shell pwsh --shell-arg -Command <recipe>` uses pwsh.
 
+`just dev` builds and runs a development copy beside the installed app: its own
+home and dock icon, so it never opens a second window on your real setup (the
+Dev badge in its title bar tells the two apart).
+
 Never run a bare `target/*/herdr-app` (no arguments) on a machine where you
 also use the app without `HERDR_APP_HOME` pointing at a scratch home: it
 opens a second window on your real setup. Subcommands and `--help` only
