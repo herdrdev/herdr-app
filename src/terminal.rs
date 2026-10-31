@@ -886,8 +886,14 @@ fn key_bytes(vt: &mut vt::Vt, ev: &KeyDownEvent) -> Option<Vec<u8>> {
     }
     let k = &ev.keystroke;
     let m = k.modifiers;
-    if k.key == "enter" && vt.win32.on && (m.shift || m.control || m.alt) && vt.kitty_keyboard_flags() == 0 {
-        return Some(crate::win32_keys::enter(m.shift, m.control, m.alt));
+    if vt.win32.on && vt.kitty_keyboard_flags() == 0 {
+        if k.key == "enter" && (m.shift || m.control || m.alt) {
+            return Some(crate::win32_keys::enter(m.shift, m.control, m.alt));
+        }
+        // ConPTY combines a bare Escape with the next key as an Alt chord.
+        if k.key == "escape" {
+            return Some(crate::win32_keys::escape(m.shift, m.control, m.alt));
+        }
     }
     let Some((key, shifted, unshifted)) = map_key(&k.key) else {
         return k.key_char.as_ref().map(|text| text.as_bytes().to_vec());
@@ -1848,6 +1854,45 @@ mod tests {
     }
 
     #[test]
+    fn escape_keeps_the_next_key_separate_in_each_keyboard_mode() {
+        for flags in [0, 1, 9] {
+            for win32 in [false, true] {
+                let mut vt = Vt::new(20, 3);
+                if win32 { vt.write(b"\x1b[?9001h"); }
+                vt.write(format!("\x1b[>{flags}u").as_bytes());
+                let escape: &[u8] = if flags != 0 {
+                    b"\x1b[27u".as_slice()
+                } else if win32 {
+                    b"\x1b[27;1;27;1;0;1_\x1b[27;1;27;0;0;1_"
+                } else {
+                    b"\x1b"
+                };
+                for (next, text, expected) in [
+                    ("ctrl-c", None, if flags == 0 { b"\x03".as_slice() } else { b"\x1b[99;5u" }),
+                    ("ctrl-c", Some("c"), if flags == 0 { b"\x03".as_slice() } else { b"\x1b[99;5u" }),
+                    ("a", Some("a"), if flags & 8 == 0 { b"a".as_slice() } else { b"\x1b[97u" }),
+                    ("space", Some(" "), if flags & 8 == 0 { b" ".as_slice() } else { b"\x1b[32u" }),
+                    ("escape", None, escape),
+                ] {
+                    assert_eq!(key_bytes(&mut vt, &press("escape", None)).as_deref(), Some(escape), "flags={flags}, win32={win32}");
+                    assert_eq!(key_bytes(&mut vt, &press(next, text)).as_deref(), Some(expected), "flags={flags}, win32={win32}, {next}");
+                }
+                vt.write(b"\x1b[<u");
+                let restored = if win32 { b"\x1b[27;1;27;1;0;1_\x1b[27;1;27;0;0;1_".as_slice() } else { b"\x1b" };
+                assert_eq!(key_bytes(&mut vt, &press("escape", None)).as_deref(), Some(restored));
+                vt.write(b"\x1b[?9001l");
+                assert_eq!(key_bytes(&mut vt, &press("escape", None)).unwrap(), b"\x1b");
+            }
+        }
+        let mut vt = Vt::new(20, 3);
+        vt.write(b"\x1b[?9001h");
+        for (spec, held) in [("shift-escape", 16), ("ctrl-escape", 8), ("alt-escape", 2)] {
+            let expected = format!("\x1b[27;1;27;1;{held};1_\x1b[27;1;27;0;{held};1_");
+            assert_eq!(key_bytes(&mut vt, &press(spec, None)).unwrap(), expected.as_bytes());
+        }
+    }
+
+    #[test]
     fn kitty_input_takes_precedence_over_win32() {
         for flags in 1..=31 {
             for win32_first in [false, true] {
@@ -1856,6 +1901,7 @@ mod tests {
                 vt.write(format!("\x1b[>{flags}u").as_bytes());
                 if !win32_first { vt.write(b"\x1b[?9001h"); }
                 for (spec, expected) in [
+                    ("escape", b"\x1b[27u".as_slice()),
                     ("shift-enter", b"\x1b[13;2u".as_slice()),
                     ("ctrl-enter", b"\x1b[13;5u"),
                     ("alt-enter", b"\x1b[13;3u"),

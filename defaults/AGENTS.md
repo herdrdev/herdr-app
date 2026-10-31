@@ -493,6 +493,7 @@ the build doesn't do.
   current layout: `cmd-shift-]` and `cmd-}` match the same US-layout keypress.
   Existing `keys.json` files don't need to change.
 - Terminal keys honor the program's negotiated Kitty mode, including on Windows.
+- Windows terminal Escape stays separate from the following key.
 
 ## Commands
 
