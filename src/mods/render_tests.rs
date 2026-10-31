@@ -342,7 +342,6 @@ fn font_pickers_contain_scroll_on_the_wrapper(cx: &mut TestAppContext) {
             Some(&format!("this.picking = '{which}';")),
         ).unwrap();
         let scroll = tree.lines().find(|line| line.contains(&format!("st-fl-{which}"))).unwrap();
-        assert!(scroll.contains("overflow_y_scrollbar"), "{tree}");
         assert!(!scroll.contains("on_scroll_wheel"), "the native scroller must receive the event: {tree}");
         assert_eq!(tree.matches("on_scroll_wheel").count(), 1, "the wrapper must stop scroll chaining: {tree}");
     }

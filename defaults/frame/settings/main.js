@@ -1,7 +1,7 @@
 // App-owned settings mod. Writes changes immediately; no Save step.
 
 import { View, div, svg, image } from "gpui-kit";
-import { v_flex, h_flex, Scrollbar, InputState, Input } from "gpui-base";
+import { v_flex, h_flex, Scrollbar, InputState, Input, Popup, v_virtual_list, VirtualListScrollHandle } from "gpui-base";
 import { hc, run, theme, themes, fonts, updates, telemetry, settings, layouts, shared, appHome, readTextFile, writeTextFile, playSound, props, closeOverlay } from "herdr";
 
 const I = (name) => `frame/settings/${name}.svg`;
@@ -30,9 +30,13 @@ export default class Settings extends View {
     const asked = props()?.section;
     this.section = SECTIONS.some((s) => s.id === asked) ? asked : "look";
     this.picking = null; // "font" | "ui_font" while its list is open
+    this.closedAt = 0; // when a press outside last closed the list
+    this.fontHi = 0; // the highlighted row of the open list
+    this.fontScroll = VirtualListScrollHandle.new();
     this.filter = "";
     this.fontInput = InputState.new({ placeholder: "Type to search fonts" });
-    this.fontInput.on("change", (_e, cx) => { this.filter = this.fontInput.value(); cx.notify(); });
+    this.fontInput.on("change", (_e, cx) => { this.filter = this.fontInput.value(); this.fontHi = 0; this.fontScroll.scroll_to_item(0); cx.notify(); });
+    this.fontInput.on("submit", (_e, cx) => this.chooseFont(this.fontItems()[this.fontHi], cx));
     this.renameInput = InputState.new();
     this.renameInput.on("focus", (_e, cx) => { this.renameFocused = true; cx.notify(); });
     this.renameInput.on("blur", (_e, cx) => { this.renameFocused = false; cx.notify(); });
@@ -394,8 +398,11 @@ export default class Settings extends View {
       .cursor_pointer()
       .hover((s) => s.bg(t.hover))
       .on_click((_e, cx) => {
-        this.picking = open ? null : which;
+        // This press also closed the list as a press outside it: don't open it again.
+        const justClosed = this.picking === null && Date.now() - this.closedAt < 300;
+        this.picking = open || justClosed ? null : which;
         this.filter = "";
+        this.fontHi = 0;
         this.fontInput.set_value("");
         if (this.picking) this.fontInput.focus();
         else this.handle.focus();
@@ -404,35 +411,53 @@ export default class Settings extends View {
       .child(div().font_family(family).text_size(13.5).text_color(t.foreground).child(family));
   }
 
-  fontList(t, which, def) {
+  // The open list's rows: the default first, then the matches.
+  fontItems() {
     const q = this.filter.toLowerCase();
     const matches = fonts().filter((f) => f.toLowerCase().includes(q)).slice(0, 200);
-    const choose = (name, cx) => {
-      this.change((p) => {
-        if (name === null) delete p[which];
-        else p[which] = name;
-      }, cx);
+    return q ? matches : [null, ...matches];
+  }
+
+  chooseFont(name, cx) {
+    if (name === undefined) return;
+    this.change((p) => {
+      if (name === null) delete p[this.picking];
+      else p[this.picking] = name;
+    }, cx);
+    this.picking = null;
+    this.handle.focus();
+    cx.notify();
+  }
+
+  fontList(t, which, def) {
+    const items = this.fontItems();
+    const move = (d, cx) => {
+      this.fontHi = Math.max(0, Math.min(this.fontHi + d, items.length - 1));
+      this.fontScroll.scroll_to_item(this.fontHi);
+      cx.notify();
+    };
+    const close = (cx) => {
       this.picking = null;
       this.handle.focus();
       cx.notify();
     };
-    const item = (id, label, family, onClick) =>
-      div()
-        .id(id)
-        .px(10)
-        .py(5)
-        .rounded(6)
-        .cursor_pointer()
-        .hover((s) => s.bg(t.hover))
-        .on_click(onClick)
-        .child(div().font_family(family).text_size(13.5).text_color(t.foreground).child(label));
     return v_flex()
-      .w_full()
-      .mb(8)
+      .w(320)
+      .mt(4)
       .rounded(8)
       .border_1()
       .border_color(t.border)
       .bg(t.background)
+      .shadow_lg()
+      .on_mouse_down_out((_e, cx) => {
+        this.closedAt = Date.now();
+        close(cx);
+      })
+      .on_key_down((e, cx) => {
+        if (e.key !== "down" && e.key !== "up") return;
+        move(e.key === "down" ? 1 : -1, cx);
+        cx.stop_propagation();
+      })
       // Let the child's native scroll run before stopping the page's wheel event.
       .on_scroll_wheel((_e, cx) => cx.stop_propagation())
       .child(
@@ -446,12 +471,29 @@ export default class Settings extends View {
       )
       .child(
         div()
-          .id(`st-fl-${which}`)
+          .relative()
           .h(200)
-          .p(4)
-          .overflow_y_scrollbar()
-          .when(!q, (el) => el.child(item(`st-fd-${which}`, `Default (${def})`, def, (_e, cx) => choose(null, cx))))
-          .children(matches.map((f, i) => item(`st-fi-${which}-${i}`, f, f, (_e, cx) => choose(f, cx)))),
+          .child(
+            v_virtual_list(`st-fl-${which}`, items.length, 30, (i) => String(i), (range) =>
+              items.slice(range.start, range.end).map((f, i) =>
+                div()
+                  .h(30)
+                  .mx(4)
+                  .px(10)
+                  .flex()
+                  .items_center()
+                  .rounded(6)
+                  .cursor_pointer()
+                  .hover((s) => s.bg(t.hover))
+                  .when(range.start + i === this.fontHi, (el) => el.bg(t.hover))
+                  .child(div().font_family(f ?? def).text_size(13.5).text_color(t.foreground).child(f ?? `Default (${def})`)),
+              ),
+            )
+              .track_scroll(this.fontScroll)
+              .on_item_click((key, cx) => this.chooseFont(this.fontItems()[Number(key)], cx))
+              .size_full(),
+          )
+          .child(Scrollbar.vertical(`st-fl-${which}`).viewport_from_layout().absolute().inset_0()),
       );
   }
 
@@ -471,12 +513,15 @@ export default class Settings extends View {
             h_flex()
               .gap(8)
               .items_center()
-              .child(this.fontButton(t, which, family))
+              .child(
+                Popup.new(`st-fp-${which}`, this.fontButton(t, which, family))
+                  .anchor("bottom_left")
+                  .when(this.picking === which, (el) => el.content(this.fontList(t, which, def))),
+              )
               // The panels' text follows zoom: they size their rows to it.
               .when(Boolean(sizeKey), (el) => el.child(this.stepper(t, `st-${sizeKey}`, `${Math.round(sizeNow)}`, (_e, cx) => size(sizeKey, sizeNow, -1, cx), (_e, cx) => size(sizeKey, sizeNow, 1, cx)))),
           ),
-        )
-        .when(this.picking === which, (el) => el.child(this.fontList(t, which, def)));
+        );
     return v_flex()
       .w_full()
       .child(this.heading(t, "Layout"))
