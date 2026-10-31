@@ -494,7 +494,13 @@ unsafe fn parse_keystroke(native_event: id) -> Keystroke {
                     // Keep dead keys for NSTextInputClient instead of sending their
                     // spacing accent to key-down listeners before composition starts.
                     let text = translate_key(native_event.keyCode(), mods, false);
-                    key_char = (!text.is_empty()).then_some(text);
+                    // Input methods post finished text on a key code that types
+                    // something else; NSTextInputClient types the event's own text.
+                    // Option is left out: as Alt it leaves mods but not the event's text.
+                    let event_text = native_event.characters();
+                    let event_text = event_text.to_str();
+                    let posted = !alt && !event_text.is_empty() && event_text != text;
+                    key_char = (!text.is_empty() && !posted).then_some(text);
                 }
 
                 if shift
@@ -636,13 +642,17 @@ mod tests {
     static NATIVE_KEY_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
 
     fn native_key(code: u16, modifiers: NSEventModifierFlags) -> Keystroke {
+        native_key_with_text(code, modifiers, &chars_for_modified_key(code, SHIFT_MOD))
+    }
+
+    fn native_key_with_text(code: u16, modifiers: NSEventModifierFlags, text: &str) -> Keystroke {
         use cocoa::{
             base::{nil, NO},
             foundation::{NSAutoreleasePool, NSPoint, NSString},
         };
         unsafe {
             let pool = NSAutoreleasePool::new(nil);
-            let chars = NSString::alloc(nil).init_str(&chars_for_modified_key(code, SHIFT_MOD));
+            let chars = NSString::alloc(nil).init_str(text);
             let event = NSEvent::keyEventWithType_location_modifierFlags_timestamp_windowNumber_context_characters_charactersIgnoringModifiers_isARepeat_keyCode_(
                 nil, NSEventType::NSKeyDown, NSPoint::new(0., 0.), modifiers,
                 0., 0, nil, chars, chars, NO, code,
@@ -738,5 +748,46 @@ mod tests {
         assert_eq!(text_modifiers(false, false, true), CAPS_LOCK_MOD);
         assert_eq!(text_modifiers(true, false, true), SHIFT_MOD | CAPS_LOCK_MOD);
         assert_eq!(text_modifiers(false, true, true), OPTION_MOD | CAPS_LOCK_MOD);
+    }
+
+    #[test]
+    fn posted_text_is_left_to_text_input() {
+        let _guard = NATIVE_KEY_TEST.lock().unwrap();
+        let none = NSEventModifierFlags::empty();
+        // Input methods post finished text on a key code that types something else.
+        assert_eq!(native_key_with_text(0x00, none, "ê").key_char, None);
+        // A key code no keyboard sends.
+        assert_eq!(native_key_with_text(0x6C, none, "ê").key_char, None);
+        // The space bar.
+        assert_eq!(native_key_with_text(0x31, none, "ê").key_char, None);
+        assert_eq!(native_key_with_text(0x00, NSEventModifierFlags::NSShiftKeyMask, "Ê").key_char, None);
+        assert_eq!(native_key_with_text(0x00, none, "ường").key_char, None);
+    }
+
+    #[test]
+    fn typed_text_keeps_its_key_char() {
+        let _guard = NATIVE_KEY_TEST.lock().unwrap();
+        set_option_as_alt(Some(false));
+        for (flags, mods) in [
+            (NSEventModifierFlags::empty(), NO_MOD),
+            (NSEventModifierFlags::NSShiftKeyMask, SHIFT_MOD),
+            (NSEventModifierFlags::NSAlphaShiftKeyMask, CAPS_LOCK_MOD),
+        ] {
+            for code in 0..=50 {
+                let text = translate_key(code, mods, false);
+                // Return and other control keys take the named-key branch.
+                if text.is_empty() || text.chars().any(char::is_control) {
+                    continue;
+                }
+                assert_eq!(native_key_with_text(code, flags, &text).key_char, Some(text), "code {code}");
+            }
+        }
+        // An event without text keeps what its key types.
+        let own = translate_key(0x00, NO_MOD, false);
+        assert_eq!(native_key_with_text(0x00, NSEventModifierFlags::empty(), "").key_char, Some(own.clone()));
+        // Option as Alt drops Option from the key's text but not from the event's characters.
+        set_option_as_alt(Some(true));
+        assert_eq!(native_key_with_text(0x00, NSEventModifierFlags::NSAlternateKeyMask, "å").key_char, Some(own));
+        set_option_as_alt(Some(false));
     }
 }
