@@ -954,8 +954,6 @@ mod tests {
         assert_eq!(Settings::compose(&person, &win98.look, true).theme, "ink");
     }
 
-    /// The guide agents read (written to the home folder) explains every
-    /// settings.json key.
     #[test]
     fn a_see_through_window_paints_its_background_once() {
         let person = Person { window_opacity: 0.8, ..Person::default() };
@@ -977,6 +975,8 @@ mod tests {
         assert_eq!(Settings::compose(&Person::default(), &look, true).terminal_opacity, 0.85);
     }
 
+    /// The guide agents read (written to the home folder) explains every
+    /// settings.json key.
     #[test]
     fn the_guide_explains_every_setting() {
         let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), ui_font: Some(String::new()), telemetry: false, clipboard_write: false, window_opacity: 0.5, window_blur: true, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), ..Person::default() };
