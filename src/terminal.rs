@@ -1,6 +1,8 @@
 //! A pane showing one core terminal: bytes in from the core, frames drawn
 //! with GPUI, keys and mouse encoded by libghostty-vt and sent back.
 
+mod drag_paths;
+
 use crate::hc::{Core, Stream};
 use crate::vt::{self, CursorShape, Rgb, Select, Vt};
 use ghostty_sys::*;
@@ -444,14 +446,36 @@ impl TerminalView {
         }
     }
 
+    fn paste_paths(&self, paths: impl IntoIterator<Item = String>) {
+        match drag_paths::quote_paths(paths, &self.address, cfg!(windows)) {
+            Ok(text) => {
+                let bytes = self.grid.borrow().vt.paste_bytes(&text);
+                self.send(&bytes);
+            }
+            Err(body) => drag_paths::unavailable(body),
+        }
+    }
+
+    fn dropped_from_files(&mut self, paths: &gpui_shell::DraggedPaths, window: &mut Window, cx: &mut Context<Self>) {
+        match drag_paths::same_machine(paths, &self.address) {
+            Ok(same) => {
+                self.focus.focus(window, cx);
+                if same {
+                    self.paste_paths(paths.paths.clone());
+                } else {
+                    self.dropped(paths.paths.iter().map(PathBuf::from).collect(), cx);
+                }
+            }
+            Err(body) => drag_paths::unavailable(body),
+        }
+    }
+
     /// Files dropped on the terminal: their paths typed in, quoted, as a paste
     /// (agents read a dropped image that way). A terminal on another machine
     /// gets each file copied there first (`hc put`), and its path there.
     fn dropped(&mut self, paths: Vec<std::path::PathBuf>, cx: &mut Context<Self>) {
         if !self.address.contains('/') {
-            let text = quote_paths(paths.iter().map(|p| p.to_string_lossy().into_owned()));
-            let bytes = self.grid.borrow().vt.paste_bytes(&text);
-            return self.send(&bytes);
+            return self.paste_paths(paths.iter().map(|p| p.to_string_lossy().into_owned()));
         }
         self.put_there(paths, false, cx);
     }
@@ -461,27 +485,41 @@ impl TerminalView {
     fn put_there(&self, paths: Vec<std::path::PathBuf>, copies: bool, cx: &mut Context<Self>) {
         let addr = self.address.clone();
         cx.spawn(async move |this, cx| {
-            let there = cx
+            let result = cx
                 .background_executor()
                 .spawn(async move {
-                    paths
+                    drag_paths::validate_upload(&paths)?;
+                    let mut failed = false;
+                    let there = paths
                         .iter()
                         .filter_map(|p| {
                             let out = crate::spawn::command(crate::core_bin::path()).args(["put", "--json", &addr]).arg(p).output();
                             if copies {
                                 let _ = std::fs::remove_file(p);
                             }
-                            let out = out.ok()?;
-                            let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
-                            v.get("path").and_then(|p| p.as_str()).map(str::to_owned)
+                            let path = out.ok().filter(|out| out.status.success())
+                                .and_then(|out| serde_json::from_slice::<serde_json::Value>(&out.stdout).ok())
+                                .and_then(|v| v.get("path").and_then(|p| p.as_str()).map(str::to_owned));
+                            failed |= path.is_none();
+                            path
                         })
-                        .collect::<Vec<_>>()
+                        .collect::<Vec<_>>();
+                    Ok((there, failed))
                 })
                 .await;
+            let (there, failed) = match result {
+                Ok(result) => result,
+                Err(body) => return drag_paths::unavailable(body),
+            };
+            if failed {
+                crate::mods::request(crate::mods::Request::OpenOverlay {
+                    id: crate::mods::new_overlay_id(),
+                    spec: json!({"kind":"toast", "notification":{"title":"File transfer failed", "body":"One or more files could not be copied to the terminal's machine.", "level":"info"}}),
+                });
+            }
             if !there.is_empty() {
                 let _ = this.update(cx, |this, _| {
-                    let bytes = this.grid.borrow().vt.paste_bytes(&quote_paths(there));
-                    this.send(&bytes);
+                    this.paste_paths(there);
                 });
             }
         })
@@ -719,20 +757,6 @@ pub(crate) fn shown_title(title: &str) -> &str {
     let rest = title.trim_start_matches(|c: char| spinner(c) || c.is_whitespace());
     let led = title.len() - rest.len();
     if rest.is_empty() || !title[..led].chars().any(spinner) || !title[..led].ends_with(char::is_whitespace) { title } else { rest }
-}
-
-/// Paths as a shell reads them, space-separated with a trailing space: bare
-/// when plain, else single-quoted (`'` escaped as the shell wants it).
-fn quote_paths(paths: impl IntoIterator<Item = String>) -> String {
-    let quote = |p: String| {
-        if !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+=,:@%~".contains(c)) {
-            return p;
-        }
-        if cfg!(windows) { format!("'{}'", p.replace('\'', "''")) } else { format!("'{}'", p.replace('\'', "'\\''")) }
-    };
-    let mut out: String = paths.into_iter().map(quote).collect::<Vec<_>>().join(" ");
-    out.push(' ');
-    out
 }
 
 /// Files on the clipboard: their text is only the bare path, which an agent
@@ -1406,6 +1430,7 @@ impl Render for TerminalView {
             }))
             .on_key_down(cx.listener(Self::key_down))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| this.dropped(paths.paths().to_vec(), cx)))
+            .on_drop(cx.listener(Self::dropped_from_files))
             .on_scroll_wheel(cx.listener(Self::scroll))
             .when(self.link.is_some(), |d| d.cursor_pointer())
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
@@ -1757,15 +1782,6 @@ mod tests {
         assert_eq!(steps(-0.1), -3);
         assert_eq!(steps(1.5), 4, "a fast spin's tick, its half line dropped");
         assert_eq!(steps(0.0), 0);
-    }
-
-    #[test]
-    #[cfg(not(windows))]
-    fn dropped_paths_are_typed_as_the_shell_reads_them() {
-        let q = |v: &[&str]| super::quote_paths(v.iter().map(|s| s.to_string()));
-        assert_eq!(q(&["/tmp/shot.png"]), "/tmp/shot.png ");
-        assert_eq!(q(&["/tmp/my shot.png", "/a/b"]), "'/tmp/my shot.png' /a/b ");
-        assert_eq!(q(&["/tmp/it's.png"]), "'/tmp/it'\\''s.png' ");
     }
 
     #[test]
