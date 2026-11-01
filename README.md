@@ -31,6 +31,37 @@ Both installers download and run code. Read the [shell installer](distribution/i
 They also install [herdr-core](https://github.com/herdrdev/herdr-core) if it is missing.
 The app can help install or update a core it cannot use.
 
+### Nix
+
+With Nix flakes enabled, run Herdr without installing it:
+
+```sh
+nix run github:herdrdev/herdr-app
+```
+
+Or install it in your profile:
+
+```sh
+nix profile install github:herdrdev/herdr-app
+herdr-app
+```
+
+The flake provides `default` and `herdr-app` packages for x86-64 and ARM64 Linux
+and Apple Silicon macOS. It builds from source, so the first run can take a while.
+To build without launching, use `nix build github:herdrdev/herdr-app`; the executable is
+`./result/bin/herdr-app`. Arguments pass through, for example:
+
+```sh
+nix run github:herdrdev/herdr-app -- --skill
+```
+
+The Nix package does not include herdr-core: install it separately and put `hc`
+on PATH, or set `core` to its path in `settings.json`. On NixOS, use a Nix-compatible
+core build rather than the generic Linux installer. Linux still needs a desktop
+session and Vulkan drivers; on non-NixOS distributions you may need
+[nixGL](https://github.com/nix-community/nixGL) for host graphics drivers.
+Update the Nix package through Nix, not the in-app updater.
+
 ## Find your work
 
 A **space** holds work on one machine, usually in one repo. Each space has **tabs**. Split a tab into **panes** to put terminals or mod panels beside each other.
@@ -125,6 +156,43 @@ On Linux it links to this checkout, so keep the checkout in place.
 Quit and reopen Herdr to use the new build.
 
 Documentation checks also need [Bun](https://bun.sh): `just docs-check` checks generated pages and CLI examples; `just docs-generate` refreshes the reference pages.
+
+### Develop with Nix
+
+From a clone with its submodules initialized:
+
+```sh
+nix develop
+just build
+just test
+```
+
+The shell provides the pinned Rust and Zig toolchains, native libraries, just,
+Bun and Python. With direnv and [nix-direnv](https://github.com/nix-community/nix-direnv)
+enabled in your shell, run `direnv allow` to load it automatically.
+
+These development apps run against the checkout, from its root:
+
+| Command | Purpose |
+| --- | --- |
+| `nix run .#dev` | Build and run from source; arguments go to Herdr. |
+| `nix run .#build` | Run `just build`. |
+| `nix run .#test -- <filter>` | Run the Rust tests, optionally filtered. |
+| `nix run .#check` | Run `just check`. |
+| `nix run .#fmt` | Format workspace Rust sources, excluding vendor code. |
+| `nix run .#fmt-check` | Check workspace Rust formatting. |
+| `nix fmt` | Format the Nix files. |
+
+`nix build` builds the release package; `nix flake check` builds it and runs its
+packaging checks, including CLI and headless GPU integration tests on Linux.
+Run the full debug test suite with `nix develop --command just test`: some unit
+tests need debug-only UI instrumentation and a writable `/var/tmp`, outside the
+Nix build sandbox. macOS packaging checks only exercise the CLI because the GPU
+tests need a window-server session.
+`flake.lock` pins Nixpkgs and the Ghostty source, including the submodule content
+needed by GitHub archive builds. When updating the `vendor/ghostty` submodule,
+also update the `ghostty` input in `flake.nix`, its lock entry, and the Zig
+dependency hash in `nix/package.nix`. Cargo Git dependency hashes live there too.
 
 To compare drawing changes on Windows, Linux or macOS, run the same fixed workloads against each build:
 

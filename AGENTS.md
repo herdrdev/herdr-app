@@ -61,6 +61,10 @@ checked on those systems, not only by cross-compiling.
 ## Building and testing
 
 `just build`, `just test` (what CI runs, on Linux), `just check` (the tests).
+`nix develop` supplies the build environment; `nix build` packages the app and
+`nix flake check` runs packaging checks. Keep the `ghostty` flake input and Zig
+dependency hash in sync with the `vendor/ghostty` submodule. Format Nix changes
+with `nix fmt`.
 `just install` builds and installs the desktop app using the platform installer.
 On Windows it updates `%LOCALAPPDATA%\Programs\herdr-app` and the Start menu;
 quit and reopen Herdr to use the new build. Windows recipes use PowerShell by default;
