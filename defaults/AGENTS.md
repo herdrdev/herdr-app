@@ -405,7 +405,9 @@ The default window:
 Sidebar on the right: swap the two children of `root`. No sidebar: set
 `"hidden": true` on `sidebar` (the user can toggle it: `ctrl-shift-b`).
 Narrower than 160px, the sidebar mods draw a compact rail; folding resizes
-`sidebar` to 44 (76 on macOS, room for the traffic lights). On macOS,
+`sidebar` to 44 (76 on macOS, room for the traffic lights). A `sidebar`
+resized to between the rail and 160px snaps to the nearer of the two
+(`workspace-chrome` does it). On macOS,
 the tabs also leave room for the window buttons when the sidebar is narrower.
 
 ### Layouts and mods other people made

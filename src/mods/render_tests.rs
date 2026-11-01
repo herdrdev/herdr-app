@@ -291,6 +291,32 @@ fn brand_leaves_room_for_macos_traffic_lights_only_outside_full_screen(cx: &mut 
 }
 
 #[gpui::test]
+fn sidebar_keeps_a_toggle_at_every_width(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    // (platform, fullscreen, width) -> toggle, search, logo, agents expand button
+    for (platform, fullscreen, width, toggle, search, logo, expand) in [
+        ("macos", false, 268, true, true, true, false),
+        ("macos", false, 172, true, true, true, false),
+        ("macos", false, 160, true, true, false, false),
+        ("macos", false, 76, false, false, false, true),
+        ("macos", true, 76, true, false, false, false),
+        ("linux", false, 44, true, false, false, false),
+    ] {
+        let mut values = fixture(true, props(), updates("current", "current"));
+        values.insert("window".into(), json!({"platform":platform,"titlebar":"none","fullscreen":fullscreen,"buttons":false}));
+        values.get_mut("layout").unwrap()["children"][0]["size"]["px"] = json!(width);
+        let case = format!("{platform}/fullscreen={fullscreen}/{width}");
+        let brand = describe_with_values(cx, &staged, "mods/workspace-chrome", values.clone(), None).unwrap();
+        assert_eq!(brand.contains("sidebar-toggle"), toggle, "{case} toggle: {brand}");
+        assert_eq!(brand.contains("\"search\""), search, "{case} search: {brand}");
+        assert_eq!(brand.contains("herdr.png"), logo, "{case} logo: {brand}");
+        let agents = describe_with_values(cx, &staged, "mods/agents", values, None).unwrap();
+        assert_eq!(agents.contains("\"collapse\""), expand, "{case} expand: {agents}");
+    }
+}
+
+#[gpui::test]
 fn tabs_leave_room_for_macos_traffic_lights(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
