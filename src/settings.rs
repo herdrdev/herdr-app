@@ -585,14 +585,19 @@ impl Settings {
     }
 }
 
-pub fn parse_hex(s: &str) -> Option<Hsla> {
+/// A `#rrggbb[aa]` value as its color and alpha.
+fn hex_parts(s: &str) -> Option<(u32, u32)> {
     let h = s.trim().trim_start_matches('#');
     let v = u32::from_str_radix(h, 16).ok()?;
-    let (rgb, a) = match h.len() {
-        6 => (v, 255),
-        8 => (v >> 8, v & 255),
-        _ => return None,
-    };
+    match h.len() {
+        6 => Some((v, 255)),
+        8 => Some((v >> 8, v & 255)),
+        _ => None,
+    }
+}
+
+pub fn parse_hex(s: &str) -> Option<Hsla> {
+    let (rgb, a) = hex_parts(s)?;
     Some(
         Rgba {
             r: ((rgb >> 16) & 255) as f32 / 255.0,
@@ -606,7 +611,7 @@ pub fn parse_hex(s: &str) -> Option<Hsla> {
 
 pub fn rgb(s: &str) -> Rgb {
     let h = s.trim().trim_start_matches('#');
-    let v = u32::from_str_radix(&h[..h.len().min(6)], 16).unwrap_or(0xff00ff);
+    let v = h.get(..h.len().min(6)).and_then(|h| u32::from_str_radix(h, 16).ok()).unwrap_or(0xff00ff);
     Rgb((v >> 16) as u8, (v >> 8) as u8, v as u8)
 }
 
@@ -707,12 +712,14 @@ pub fn write_person(person: &Person) -> std::io::Result<()> {
 /// The window's root paints the one background of a see-through window: these
 /// layers stack on it (cards on canvas on the root), and alpha at each would
 /// add up to nearly opaque. Overlays stay on `popover`, so they stay readable.
-/// The color stays beside its zero alpha for what reads it as a color.
+/// The color stays beside its zero alpha for what reads it as a color. A value
+/// that is no color stays as written: `problems` reports it.
 fn see_through(theme: &mut Theme) {
     for name in ["background", "surface", "canvas", "chrome"] {
         if let Some(v) = theme.get_mut(name) {
-            v.truncate(7);
-            v.push_str("00");
+            if let Some((rgb, _)) = hex_parts(v) {
+                *v = format!("#{rgb:06x}00");
+            }
         }
     }
 }
@@ -967,6 +974,35 @@ mod tests {
             assert_eq!(rgb(&theme[name]), rgb(&opaque[name]), "{name}");
         }
         assert_eq!(theme["popover"], opaque["popover"]);
+    }
+
+    #[test]
+    fn see_through_leaves_a_value_that_is_no_color_as_written() {
+        let colors = [("background".to_owned(), "日本語x".to_owned())].into();
+        let mut theme = resolve(&GRAPHITE, &colors);
+        see_through(&mut theme);
+        assert_eq!(theme["background"], "日本語x");
+    }
+
+    #[test]
+    fn see_through_clears_every_form_of_color_that_paints() {
+        let forms = ["12345678", " #123456", "#123456", "#12345678"];
+        let cleared = forms.map(|v| {
+            let colors = [("background".to_owned(), v.to_owned())].into();
+            let mut theme = resolve(&GRAPHITE, &colors);
+            see_through(&mut theme);
+            theme["background"].clone()
+        });
+        assert_eq!(cleared, ["#12345600"; 4]);
+        for v in &cleared {
+            assert_eq!(parse_hex(v).unwrap().a, 0.0);
+            assert_eq!(rgb(v), Rgb(0x12, 0x34, 0x56));
+        }
+    }
+
+    #[test]
+    fn rgb_shows_magenta_for_text_cut_inside_a_character() {
+        assert_eq!(rgb("ab日本"), Rgb(0xff, 0x00, 0xff));
     }
 
     #[test]
