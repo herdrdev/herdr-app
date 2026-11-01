@@ -87,7 +87,7 @@ fn main() {
     if matches!(args.get(1).map(String::as_str), Some("check" | "types")) {
         mods::install_policy();
         if args.get(1).map(String::as_str) == Some("check") {
-            check_mod::run(&args);
+            check_mod::run();
             return;
         }
         gpui_shell::host::main_with_components(gpui_shell::FrozenComponentRegistry::default());
