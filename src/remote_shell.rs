@@ -48,12 +48,12 @@ mod tests {
             let dir = std::env::temp_dir().join(format!("herdr-shell-{}-{} 'home", std::process::id(), NEXT.fetch_add(1, Ordering::Relaxed)));
             std::fs::create_dir_all(dir.join("agent bin")).unwrap();
             let login = "export HERDR_TEST_LOGIN=loaded\nexport HERDR_TEST_BIN=\"$HOME/agent bin\"\n";
-            let interactive = "export PATH=\"$HERDR_TEST_BIN:$PATH\"\nfixture_function() { :; }\nalias missing_agent='printf alias'\n";
+            let interactive = "export PATH=\"$HERDR_TEST_BIN:$PATH\"\nprintf 'rc greeting without newline'\nsleep 0.1\nfixture_function() { :; }\nalias missing_agent='printf alias'\n";
             for (file, text) in [
                 (".zprofile", login.to_owned()),
                 (".zshrc", interactive.to_owned()),
                 (".bash_profile", format!("{login}. \"$HOME/.bashrc\"\n")),
-                (".bashrc", interactive.to_owned()),
+                (".bashrc", format!("case $- in *i*) ;; *) return;; esac\n{interactive}")),
             ] {
                 std::fs::write(dir.join(file), text).unwrap();
             }
@@ -74,6 +74,19 @@ mod tests {
                 .stdin(Stdio::null());
             if let Some(shell) = shell {
                 cmd.env("SHELL", shell);
+            }
+            // Interactive zsh otherwise opens the test runner's controlling tty.
+            use std::os::unix::process::CommandExt;
+            unsafe extern "C" {
+                fn setsid() -> std::ffi::c_int;
+            }
+            unsafe {
+                cmd.pre_exec(|| {
+                    if setsid() == -1 {
+                        return Err(std::io::Error::last_os_error());
+                    }
+                    Ok(())
+                });
             }
             cmd.output().unwrap()
         }
@@ -113,16 +126,37 @@ mod tests {
         launches_agent("/bin/bash");
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn zsh_detects_agents_from_login_and_interactive_profiles() {
-        finds_agents("/bin/zsh");
+        if std::path::Path::new("/bin/zsh").exists() {
+            finds_agents("/bin/zsh");
+        }
     }
 
-    #[cfg(target_os = "macos")]
     #[test]
     fn zsh_launches_agents_with_literal_arguments() {
-        launches_agent("/bin/zsh");
+        if std::path::Path::new("/bin/zsh").exists() {
+            launches_agent("/bin/zsh");
+        }
+    }
+
+    #[test]
+    fn fish_detects_and_launches_agents_with_literal_arguments() {
+        let shell = "/usr/bin/fish";
+        if !std::path::Path::new(shell).exists() {
+            return;
+        }
+        let home = Home::new();
+        let config = home.0.join(".config/fish");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(config.join("config.fish"), "if status is-interactive\nset -gx PATH \"$HOME/agent bin\" $PATH\necho rc greeting\nsleep 0.1\nend\n").unwrap();
+        let out = home.run(check(&["fixture_agent".into(), "missing_agent".into()]), Some(shell));
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        assert!(stdout.contains("herdr-has:fixture_agent\n"), "{stdout:?}");
+        assert!(!stdout.contains("herdr-has:missing"), "{stdout:?}");
+        let out = home.run(launch(vec!["fixture_agent".into(), "a 'quoted' task; $(not-a-command)".into(), "".into()]), Some(shell));
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        assert!(stdout.contains("<a 'quoted' task; $(not-a-command)>\n<>\n"), "{stdout:?}");
     }
 
     #[test]
