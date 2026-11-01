@@ -119,6 +119,61 @@ impl Render for PathDropTarget {
     }
 }
 
+fn assert_path_drag_preview_at(visual: &mut VisualTestContext, cursor: gpui::Point<gpui::Pixels>) {
+    visual.update(|window, cx| {
+        assert!(cx.has_active_drag());
+        window.draw(cx).clear(cx);
+        let scale = window.scale_factor();
+        let mut badges: Vec<_> = window.painted_quads().into_iter().filter(|quad|
+            quad.corner_radii.top_left == gpui::px(6.).scale(scale)
+                && quad.border_widths.top == gpui::px(1.).scale(scale)
+        ).map(|quad| quad.bounds).collect();
+        // Border sides may be separate quads with the same badge bounds.
+        badges.dedup();
+        assert_eq!(badges.len(), 1, "one compact file drag badge is painted");
+        assert_eq!(badges[0].origin, (cursor + gpui::point(gpui::px(12.), gpui::px(12.))).scale(scale),
+            "the compact badge follows the pointer, not the source element's grab offset");
+    });
+}
+
+#[gpui::test]
+fn file_drag_preview_follows_the_pointer_from_either_end_of_wide_sources(cx: &mut TestAppContext) {
+    use gpui::{MouseButton, point, px};
+    cx.update(gpui_shell::init);
+    for width in [180., 800.] {
+        let fixture = Fixture::new(&format!(r#"
+import {{ View, div }} from "gpui-kit";
+export default class extends View {{
+  render() {{
+    return div().id("source").w({width}).h(42).text_right()
+      .drag_paths(["/work/notes.txt"]).child("notes.txt");
+  }}
+}}"#));
+        let runtime = ShellRuntime::new_isolated().unwrap();
+        let window = cx.add_window(|window, cx| Mounted(runtime.try_load(&fixture.0, window, cx).unwrap()));
+        let mut visual = VisualTestContext::from_window(*window.deref(), cx);
+        visual.simulate_resize(gpui::size(px(1000.), px(600.)));
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        visual.run_until_parked();
+        for scale in [1., 2.] {
+            visual.simulate_scale_factor_change(scale);
+            for x in [20., width - 20.] {
+                visual.simulate_mouse_down(point(px(x), px(20.)), MouseButton::Left, Default::default());
+                let start = point(px(x + 10.), px(25.));
+                visual.simulate_mouse_move(start, MouseButton::Left, Default::default());
+                assert_path_drag_preview_at(&mut visual, start);
+                for cursor in [point(px(350.), px(150.)), point(px(80.), px(200.))] {
+                    visual.simulate_mouse_move(cursor, MouseButton::Left, Default::default());
+                    assert_path_drag_preview_at(&mut visual, cursor);
+                }
+                visual.update(|window, cx| assert!(cx.stop_active_drag(window)));
+                visual.simulate_mouse_up(point(px(80.), px(200.)), MouseButton::Left, Default::default());
+                visual.update(|window, cx| window.draw(cx).clear(cx));
+            }
+        }
+    }
+}
+
 #[gpui::test]
 fn file_tree_native_drags_keep_origin_and_do_not_click_on_drop_or_cancel(cx: &mut TestAppContext) {
     use gpui::{MouseButton, point, px};
@@ -160,11 +215,8 @@ export default class extends View {
         for attempt in 0..3 {
             visual.simulate_mouse_down(point(px(20.), px(20.)), MouseButton::Left, Default::default());
             visual.simulate_mouse_move(point(px(35.), px(35.)), MouseButton::Left, Default::default());
-            visual.update(|window, cx| {
-                assert!(cx.has_active_drag());
-                window.draw(cx).clear(cx);
-                if attempt == 2 { assert!(cx.stop_active_drag(window)); }
-            });
+            assert_path_drag_preview_at(&mut visual, point(px(35.), px(35.)));
+            if attempt == 2 { visual.update(|window, cx| assert!(cx.stop_active_drag(window))); }
             let end = if attempt == 1 { point(px(500.), px(400.)) } else { point(px(250.), px(150.)) };
             visual.simulate_mouse_move(end, MouseButton::Left, Default::default());
             visual.simulate_mouse_up(end, MouseButton::Left, Default::default());
@@ -176,6 +228,74 @@ export default class extends View {
             paths: vec!["/work/中文 O'Brien/file name.txt".into(), "/work/a folder".into()],
             on: source.map(str::to_owned),
         }], "only the completed drop delivers the original snapshot");
+    }
+}
+
+#[gpui::test]
+fn files_preview_header_drags_the_open_file_without_dragging_the_editor_or_back_button(cx: &mut TestAppContext) {
+    use gpui::{MouseButton, point, px};
+    cx.update(gpui_shell::init);
+    for source in [None, Some("server")] {
+        let (root, path) = ("/work/中文 O'Brien", "scripts/a file.txt");
+        let mut module = HostModule::new("herdr");
+        for (name, value) in [
+            ("spaces", json!([{"id":"s1", "active":true, "folder":root, "machine":source}])),
+            ("panes", json!([])), ("focused", Value::Null),
+            ("theme", serde_json::to_value(&*crate::settings::theme()).unwrap()),
+            ("settings", json!({})), ("window", json!({"platform":std::env::consts::OS})),
+        ] {
+            module = module.function(name, move |_| Ok(to_host(&value)));
+        }
+        for name in ["exec", "readTextFile", "watchFolder"] {
+            module = module.function(name, move |_| panic!("unexpected I/O while dragging a preview: {name}"));
+        }
+        gpui_shell::policy::set_default(Policy::new().with_host_module(module).unwrap());
+        let fixture = Fixture::new(&format!(r#"
+import Files from "./files.js";
+import {{ EditorState }} from "gpui-base";
+export default class extends Files {{
+  init() {{
+    const {{ root, on, path }} = {};
+    this.root = root; this.on = on; this.file = path;
+    this.context = {{key: JSON.stringify({{cwd: root, on, space: "s1"}})}};
+    this.entries = new Map(); this.folders = new Set(); this.marks = {{}};
+    this.code = EditorState.new({{value: "select this text", readonly: true, language: "txt"}});
+  }}
+}}"#, json!({"root":root, "on":source, "path":path})));
+        std::fs::write(fixture.0.join("files.js"), include_str!("../../defaults/mods/files/main.js")).unwrap();
+        let runtime = ShellRuntime::new_isolated().unwrap();
+        let drops = Rc::new(RefCell::new(Vec::new()));
+        let observed = drops.clone();
+        let window = cx.add_window(|window, cx| PathDropTarget {
+            root: runtime.try_load(&fixture.0, window, cx).unwrap(), drops: observed,
+        });
+        let mut visual = VisualTestContext::from_window(*window.deref(), cx);
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        visual.run_until_parked();
+        // The editor is selectable content, not a file drag source.
+        visual.simulate_mouse_down(point(px(30.), px(65.)), MouseButton::Left, Default::default());
+        visual.simulate_mouse_move(point(px(100.), px(65.)), MouseButton::Left, Default::default());
+        visual.update(|_, cx| assert!(!cx.has_active_drag()));
+        visual.simulate_mouse_up(point(px(100.), px(65.)), MouseButton::Left, Default::default());
+        visual.simulate_mouse_down(point(px(360.), px(20.)), MouseButton::Left, Default::default());
+        visual.simulate_mouse_move(point(px(375.), px(25.)), MouseButton::Left, Default::default());
+        assert_path_drag_preview_at(&mut visual, point(px(375.), px(25.)));
+        visual.simulate_mouse_move(point(px(250.), px(150.)), MouseButton::Left, Default::default());
+        assert_path_drag_preview_at(&mut visual, point(px(250.), px(150.)));
+        visual.simulate_mouse_up(point(px(250.), px(150.)), MouseButton::Left, Default::default());
+        visual.run_until_parked();
+        assert_eq!(*drops.borrow(), vec![gpui_shell::DraggedPaths {
+            paths: vec![format!("{root}/{path}")], on: source.map(str::to_owned),
+        }]);
+        // Going back removes the file-path drag source without starting another drop.
+        visual.simulate_click(point(px(24.), px(20.)), Default::default());
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        visual.run_until_parked();
+        visual.simulate_mouse_down(point(px(250.), px(20.)), MouseButton::Left, Default::default());
+        visual.simulate_mouse_move(point(px(270.), px(25.)), MouseButton::Left, Default::default());
+        visual.update(|_, cx| assert!(!cx.has_active_drag(), "the folder label is not a file drag source"));
+        visual.simulate_mouse_up(point(px(270.), px(25.)), MouseButton::Left, Default::default());
+        assert_eq!(drops.borrow().len(), 1);
     }
 }
 

@@ -51,12 +51,15 @@ test("Files preserves Unicode names when listing and expanding folders", async (
 
 function fileRows(root: string, on: string | null) {
   const build = () => {
-    const calls: Record<string, unknown[]> = {};
-    const element: any = new Proxy({ calls }, {
+    const calls: Record<string, unknown[]> = {}, nodes: unknown[] = [];
+    const element: any = new Proxy({ calls, nodes }, {
       get(target, name: string) {
         if (name === "calls") return target.calls;
+        if (name === "nodes") return target.nodes;
         return (...args: unknown[]) => {
           calls[name] = args;
+          if (name === "child") nodes.push(args[0]);
+          if (name === "children") nodes.push(...args[0] as unknown[]);
           if (name === "when" && args[0]) (args[1] as Function)(element);
           return element;
         };
@@ -64,11 +67,13 @@ function fileRows(root: string, on: string | null) {
     });
     return element;
   };
-  const Files = new Function("View", "div", "svg", "h_flex",
-    source.replace(/^import .*;$/gm, "").replace("export default class", "class") + "; return Files;",
-  )(class {}, build, build, build);
+  const { Files, key } = new Function("View", "div", "svg", "h_flex", "v_flex", "theme", "spaces", "panes", "focused", "Editor",
+    source.replace(/^import .*;$/gm, "").replace("export default class", "class") + "; return { Files, key };",
+  )(class {}, build, build, build, build, () => ({}),
+    () => [{ id: "s1", active: true, folder: root, machine: on }], () => [], () => null,
+    { new: () => build().id("preview-editor") });
   const files = new Files();
-  files.root = root; files.on = on; files.marks = {};
+  files.root = root; files.on = on; files.marks = {}; files.context = { key: key() };
   files.entries = new Map([
     ["", [{ name: "中文 O'Brien", dir: true }, { name: "hello world.txt", dir: false }]],
     ["中文 O'Brien", [{ name: "子文件.txt", dir: false }]],
@@ -94,6 +99,55 @@ test("Files retains folder expansion and file preview click handlers", () => {
   files.show = (path: string) => clicks.push(["show", path]);
   rows.forEach((row: any) => row.calls.on_click[0]({}, {}));
   expect(clicks).toEqual([["toggle", "中文 O'Brien"], ["show", "中文 O'Brien/子文件.txt"], ["show", "hello world.txt"]]);
+});
+
+function renderedElements(root: any): any[] {
+  return root?.nodes ? [root, ...root.nodes.flatMap(renderedElements)] : [];
+}
+
+test("Files preview path drags the full path and source machine, not the displayed relative name", () => {
+  for (const [root, on] of [["/work", null], ["/remote/work", "server"], ["C:/Project O'Brien", null], ["C:\\Project\\中文", null]] as const) {
+    const { files } = fileRows(root, on), path = "scripts/中文 O'Brien/notes.txt";
+    files.file = path;
+    for (const error of [null, "Binary file · no text preview", "This file is no longer available"]) {
+      files.fileError = error;
+      const elements = renderedElements(files.render({}));
+      const label = elements.find(el => el.calls.id?.[0] === "files-preview-path");
+      expect(label.calls.drag_paths).toEqual([[`${root}/${path}`], { on }]);
+      expect(label.calls.cursor_pointer).toEqual([]);
+      expect(label.nodes).toEqual([path]);
+      expect(elements.filter(el => el.calls.drag_paths)).toHaveLength(1);
+    }
+  }
+});
+
+test("Files preview rerender updates the path without changing an earlier drag payload", () => {
+  const { files } = fileRows("/remote/work", "server");
+  files.file = "first.txt";
+  const first = renderedElements(files.render({})).find(el => el.calls.id?.[0] === "files-preview-path");
+  files.file = "other/second.txt";
+  const second = renderedElements(files.render({})).find(el => el.calls.id?.[0] === "files-preview-path");
+  expect(first.calls.drag_paths).toEqual([["/remote/work/first.txt"], { on: "server" }]);
+  expect(second.calls.drag_paths).toEqual([["/remote/work/other/second.txt"], { on: "server" }]);
+});
+
+test("Files preview drag is confined to the path label and preserves Back and the editor", () => {
+  const { files } = fileRows("/work", null);
+  let released = 0, notified = 0;
+  files.file = "notes.txt";
+  files.code = { release: () => released++ };
+  const elements = renderedElements(files.render({}));
+  const editor = elements.find(el => el.calls.id?.[0] === "preview-editor");
+  const back = elements.find(el => el.calls.id?.[0] === "files-back");
+  expect(editor.calls.drag_paths).toBeUndefined();
+  expect(back.calls.drag_paths).toBeUndefined();
+  expect(elements.filter(el => el.calls.drag_paths)).toHaveLength(1);
+  back.calls.on_click[0]({}, { notify: () => notified++ });
+  expect(files.file).toBeNull();
+  expect(files.code).toBeNull();
+  expect(released).toBe(1);
+  expect(notified).toBe(1);
+  expect(renderedElements(files.render({})).find(el => el.calls.id?.[0] === "files-preview-path")).toBeUndefined();
 });
 
 test("Files follows directory links one level at a time", async () => {

@@ -1792,9 +1792,9 @@ where
 {
     let mut element = element;
     if let Some(paths) = &behavior.drag_paths {
-        element = element.on_drag(paths.clone(), |paths, _, _, cx| {
+        element = element.on_drag(paths.clone(), |paths, cursor_offset, _, cx| {
             cx.stop_propagation();
-            cx.new(|_| paths.clone())
+            cx.new(|_| crate::drag_paths::DraggedPathsPreview { paths: paths.clone(), cursor_offset })
         });
     }
     if let Some(callback) = behavior.on_drop {

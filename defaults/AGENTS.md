@@ -179,7 +179,9 @@ writing a new file. The Files panel supports Windows folder paths with spaces,
 parentheses and apostrophes, and preserves Unicode file and folder names
 (including Chinese). Directory links expand as folders; their contents load
 only when expanded. Drag a file or folder into a terminal to paste its quoted
-path without pressing Enter. Local paths work in local terminals; remote
+path without pressing Enter. With a file preview open, drag its path label in
+the Files header; the preview text remains selectable and Back still returns
+to the tree. Local paths work in local terminals; remote
 paths work in terminals on that same machine. Local files dropped onto a
 remote terminal are copied there first; copying local folders or dragging
 remote paths onto a different machine is not supported and shows an explanation.
