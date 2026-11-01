@@ -323,6 +323,40 @@ fn tabs_leave_room_for_macos_traffic_lights(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn terminals_bar_leaves_room_for_macos_traffic_lights(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    // Terminals' lights sit at x 16 in window px; its root pads the bar 6 px in.
+    for (platform, titlebar, fullscreen, lights, zoom, expected) in [
+        ("macos", "none", false, true, 1.0, Some(74)),
+        ("macos", "none", false, true, 0.8, Some(94)),
+        ("macos", "none", false, true, 0.5, Some(154)),
+        ("macos", "none", false, true, 2.0, Some(34)),
+        ("macos", "none", false, false, 1.0, Some(70)),
+        ("macos", "none", true, true, 1.0, None),
+        ("macos", "system", false, true, 1.0, None),
+        ("linux", "none", false, true, 1.0, None),
+        ("windows", "none", false, true, 1.0, None),
+    ] {
+        let mut values = fixture(true, props(), updates("current", "current"));
+        values.insert("window".into(), json!({"platform":platform,"titlebar":titlebar,"fullscreen":fullscreen,"buttons":false}));
+        values.get_mut("settings").unwrap()["zoom"] = json!(zoom);
+        let mut layout: Value = serde_json::from_str(include_str!("../../defaults/layouts/terminals.json")).unwrap();
+        if !lights {
+            layout.as_object_mut().unwrap().remove("traffic_lights");
+        }
+        values.insert("layout".into(), layout);
+        let tree = describe_with_values(cx, &staged, "mods/terminals-bar", values, None).unwrap();
+        let root = tree.lines().next().unwrap();
+        match expected {
+            Some(px) => assert!(root.contains(&format!(".pl[Number({px}.0)]")), "{platform}/{titlebar}/{fullscreen}/{lights}/{zoom}: {tree}"),
+            None => assert!(!root.contains(".pl["), "{platform}/{titlebar}/{fullscreen}/{lights}/{zoom}: {tree}"),
+        }
+        assert!(tree.contains("tm-space"), "the space picker must remain: {tree}");
+    }
+}
+
+#[gpui::test]
 fn windows_tab_buttons_use_matching_vector_icons(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
