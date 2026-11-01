@@ -64,6 +64,7 @@
     "ctrl-left": "send:\u001bb",
     "ctrl-right": "send:\u001bf",
     "ctrl-shift-c": "terminal.copy",
+    "ctrl-shift-g": "mod.open:cd-picker",
     "ctrl-shift-v": "terminal.paste",
     "ctrl-v": "terminal.paste_image",
     "ctrl-insert": "terminal.copy",
