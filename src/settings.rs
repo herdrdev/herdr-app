@@ -704,7 +704,6 @@ pub fn write_person(person: &Person) -> std::io::Result<()> {
     crate::persist::write_atomic(&path(), serde_json::to_string_pretty(person).unwrap_or_default() + "\n")
 }
 
-/// Installs new settings; returns whether anything changed.
 /// The window's root paints the one background of a see-through window: these
 /// layers stack on it (cards on canvas on the root), and alpha at each would
 /// add up to nearly opaque. Overlays stay on `popover`, so they stay readable.
@@ -718,6 +717,7 @@ fn see_through(theme: &mut Theme) {
     }
 }
 
+/// Installs new settings; returns whether anything changed.
 pub fn set(s: Settings) -> bool {
     #[cfg(target_os = "macos")]
     gpui_macos::set_option_as_alt(match s.option_as_alt {
