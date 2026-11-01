@@ -54,8 +54,10 @@ focused terminal's folder.
 and `hc file ... --on vps ...` for remote work, not your local file tools.
 
 `do` accepts `--key value` arguments (JSON for arrays/objects) or one JSON
-object. Unknown argument names fail and list valid names; they never target the
-current space or pane instead. Use `commands` to confirm the command's exact shape:
+object. Unknown argument names fail and list valid names. Target IDs (`id`,
+`pane`, `space`, `terminal`) must be strings; other non-null types fail before
+the current-target default can apply. Null keeps its omitted-argument meaning.
+Use `commands` to confirm the command's exact shape:
 
 ```sh
 herdr-app do pane.split '{"direction":"right","pane":"p12"}'

@@ -503,6 +503,8 @@ you use the same list. `herdr-app commands` prints every one with its arguments
 (which are required) and what it does. Unknown argument names are errors and list
 valid names; they never fall back to the current target. For example, closing a
 space uses `herdr-app do space.close --id <id> --confirmed true`, not `--space`.
+Target IDs (`id`, `pane`, `space`, `terminal`) must be strings. Other non-null
+types are rejected before a current-target default applies; null means omitted.
 The main ones:
 
 - Spaces: `space.new {name?, folder?, tab?, argv?, task?, machine?}`

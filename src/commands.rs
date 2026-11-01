@@ -127,11 +127,15 @@ pub fn validate_args(c: &Command, args: &Value) -> Result<(), String> {
         Value::Null => Ok(()),
         Value::Object(args) => {
             let unknown: Vec<_> = args.keys().filter(|key| !c.args.iter().any(|a| a.name == key.as_str())).map(String::as_str).collect();
-            if unknown.is_empty() {
-                Ok(())
-            } else {
-                Err(format!("{}: unknown argument(s): {}; valid arguments: {valid}", c.name, unknown.join(", ")))
+            if !unknown.is_empty() {
+                return Err(format!("{}: unknown argument(s): {}; valid arguments: {valid}", c.name, unknown.join(", ")));
             }
+            for (key, value) in args {
+                if matches!(key.as_str(), "id" | "pane" | "space" | "terminal") && !value.is_string() && !value.is_null() {
+                    return Err(format!("{}: argument {key} must be a string (or null to omit it)", c.name));
+                }
+            }
+            Ok(())
         }
         _ => Err(format!("{}: arguments must be an object; valid arguments: {valid}", c.name)),
     }
@@ -188,6 +192,21 @@ mod tests {
         assert_eq!(validate_args(close, &json!({"space": "X", "confirmed": true})),
             Err("space.close: unknown argument(s): space; valid arguments: id, confirmed".into()));
         assert!(validate_args(close, &json!({"id": "X", "confirmed": true})).is_ok());
+    }
+
+    #[test]
+    fn malformed_targets_cannot_fall_back_to_the_current_work() {
+        for (name, arg) in [("tab.close", "id"), ("pane.close", "pane"), ("space.close", "id"), ("tab.new", "space"), ("terminal.show", "terminal")] {
+            let c = find(name).unwrap();
+            for value in [json!(123), json!(false), json!([]), json!({"id": "target"})] {
+                let error = validate_args(c, &json!({arg: value})).unwrap_err();
+                assert!(error.contains(name) && error.contains(arg), "{error}");
+            }
+            // Null keeps its existing omitted-argument meaning for optional targets.
+            for value in [Value::Null, json!("target")] {
+                assert!(validate_args(c, &json!({arg: value})).is_ok());
+            }
+        }
     }
 
     #[test]
