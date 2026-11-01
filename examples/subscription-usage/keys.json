@@ -1,0 +1,5 @@
+{
+  "global": {
+    "ctrl-shift-f8": "mod.open:subscription-usage"
+  }
+}

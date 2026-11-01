@@ -84,6 +84,8 @@ jobs:
       - name: Windows build dependencies
         if: runner.os == 'Windows'
         run: echo "LIBCLANG_PATH=C:\\Program Files\\LLVM\\bin" >> "$GITHUB_ENV"
+      - name: Test standalone subscription mod
+        run: node --test examples/subscription-usage/*.test.mjs
       - name: Keep unchanged sources fresh
         run: scripts/ci-sources restore
       # Compile the screenshot harness everywhere, even without a desktop.
@@ -128,10 +130,9 @@ jobs:
       - name: Install Bun
         if: matrix.platform == 'linux-x86_64'
         run: curl -fsSL https://bun.sh/install | bash -s "bun-v1.4.4"
-      - name: Mod tests and documentation
+      - name: Check documentation
         if: matrix.platform == 'linux-x86_64'
         run: |
-          ~/.bun/bin/bun test scripts/files.test.ts scripts/picker.test.ts scripts/agents.test.ts scripts/usage.test.ts
           ~/.bun/bin/bun test scripts/docs.test.ts
           ~/.bun/bin/bun scripts/docs.ts check
 

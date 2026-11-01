@@ -1,6 +1,6 @@
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { agents, appHome, exec, theme, shared, setShared } from "herdr";
+import { agents, appHome, exec, theme, shared, setShared, run, props, closeOverlay, window } from "herdr";
 import { providerOf, resetLabel } from "./quota.js";
 
 const CACHE = "subscription-usage.result";
@@ -10,8 +10,17 @@ const unavailable = () => ({ status: "unavailable", message: "Requires Node.js 1
 
 export default class SubscriptionUsage extends View {
   init(_props, cx) {
+    // The standalone checker renders without a live app window. Do not leave
+    // a persisted busy lock behind when its async work is never driven.
+    if (!window()) return;
     this.refresh(cx);
-    cx.timer.every(120000, cx => this.refresh(cx));
+    cx.timer.every(5000, cx => {
+      const now = Date.now(), started = shared(BUSY) ?? 0;
+      // A reload/closed view can cancel its promise. Retry its expired lock
+      // without leaving an empty dialog waiting for the two-minute poll.
+      if ((started > 0 && now - started >= 35000) || now - (shared(ATTEMPT) ?? 0) >= 120000) this.refresh(cx);
+      cx.notify();
+    });
   }
 
   refresh(cx) {
@@ -46,12 +55,12 @@ export default class SubscriptionUsage extends View {
     const list = agents();
     const card = (id, name) => {
       const result = data[id];
-      const count = list.filter(a => providerOf(a) === id).length;
+      const local = list.filter(a => providerOf(a) === id);
       const stale = result?.status === "ok" && now - result.checkedAt > 300000;
       return v_flex().gap(9).p(14).rounded(10).border(1).border_color(t.border).bg(t.raised)
         .child(h_flex().justify_between().items_center()
           .child(div().font_semibold().child(name))
-          .child(div().text_size(11).text_color(t.dim).child(`${count} local agents`)))
+          .child(div().text_size(11).text_color(t.dim).child(`${local.length} local agents`)))
         .when(!result || result.status !== "ok", el => el.child(div().text_size(12).text_color(t.muted).child(result?.message ?? (busy ? "Checking subscription…" : "Not checked"))))
         .when(result?.status === "ok", el => el.children((result?.windows ?? []).map(w => {
           const expired = w.resetsAt !== null && w.resetsAt <= now;
@@ -65,7 +74,16 @@ export default class SubscriptionUsage extends View {
               .when(w.remaining < 100, bar => bar.child(div().h_full().flex_grow(100 - w.remaining).flex_basis(0))))
             .child(div().text_size(10.5).text_color(t.dim).child(resetLabel(w.resetsAt, now)));
         })))
-        .when(Boolean(result?.checkedAt), el => el.child(div().text_size(10.5).text_color(t.dim).child(`Checked ${new Date(result.checkedAt).toLocaleTimeString()}`)));
+        .when(Boolean(result?.checkedAt), el => el.child(div().text_size(10.5).text_color(t.dim).child(`Checked ${new Date(result.checkedAt).toLocaleTimeString()}`)))
+        .when(local.length > 0, el => el
+          .child(div().text_size(10.5).text_color(t.dim).child("Local sessions · account matching not verified"))
+          .children(local.map(a => h_flex().id(`usage-agent-${a.address}`).gap(8).justify_between().cursor_pointer()
+            .on_click(() => {
+              run("agent.focus", { terminal: a.address });
+              if (props()?.overlay) closeOverlay(props().overlay);
+            })
+            .child(div().flex_1().truncate().text_size(11.5).text_color(t.muted).child(a.name || a.title || a.address))
+            .child(div().text_size(10.5).text_color(t[a.status] ?? t.dim).child(a.status || "unknown")))));
     };
     return v_flex().size_full().p(18).gap(12).bg(t.popover).text_color(t.foreground).text_size(13)
       .child(h_flex().items_center().justify_between()

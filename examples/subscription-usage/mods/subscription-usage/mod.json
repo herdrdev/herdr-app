@@ -1,0 +1,5 @@
+{
+  "place": "none",
+  "title": "Subscription usage",
+  "overlay": { "kind": "dialog", "width": 510, "height": 640 }
+}

@@ -121,14 +121,6 @@ export default class Agents extends View {
     return this.changed[a.address]?.at ?? 0;
   }
 
-  quota(a, now) {
-    if (a.address.includes("/") || !["claude", "codex"].includes(a.program?.key)) return null;
-    const result = shared("subscription-usage.result")?.[a.program.key];
-    if (result?.status !== "ok" || !result.windows?.length || now - result.checkedAt > 300000) return null;
-    if (result.windows.some(w => w.resetsAt !== null && w.resetsAt <= now)) return null;
-    return `Default ${Math.floor(Math.min(...result.windows.map(w => w.remaining)))}%`;
-  }
-
   // Looking at a done agent makes it idle; it stays with Done until you leave
   // it rather than drop away under you. Any other change moves it at once.
   hold(list) {
@@ -293,7 +285,6 @@ export default class Agents extends View {
     }
 
     const row = (a, i, subs = []) => {
-      const quota = this.quota(a, now);
       const pic = icon(a.program, 16, t.foreground);
       const more = detail.get(a.address);
       // An agent on another machine (`vps/t7`) says which.
@@ -362,10 +353,6 @@ export default class Agents extends View {
           .child(div().min_w(0).max_w(full && more ? 120 : 200).truncate().text_color(idle ? t.muted : t.foreground).child(name))
           .when(full && Boolean(more), el => el.child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(`\u00b7 ${more}`))))
         .when(Boolean(machine), el => el.child(div().text_size(10).text_color(t.dim).child(machine)))
-        .when(Boolean(quota), el => el.child(div().id(`quota-${a.address}`).text_size(10).text_color(t.muted)
-          .tooltip("Local default account quota, shared across agents; terminal account overrides are not detected")
-          .on_click((_e, cx) => { cx.stop_propagation(); run("mod.open", { name: "subscription-usage" }); })
-          .child(quota)))
         .when(subs.length > 0, el => el.child(fold(a, subs)))
         .when(this.hovered === a.address, el => el.child(pin))
         .when(this.hovered !== a.address && Boolean(when), el => el.child(div().flex_none().text_size(11).text_color(t.dim).child(duration(now - when))))
@@ -431,11 +418,6 @@ export default class Agents extends View {
             .items_center()
             .justify_between()
             .child(div().text_size(11.5).font_medium().text_color(t.dim).child("Agents"))
-            .child(div().id("ag-usage").text_size(11).text_color(t.dim).cursor_pointer()
-              .tooltip("Subscription limits for local default accounts")
-              .hover(el => el.text_color(t.foreground))
-              .on_click(() => run("mod.open", { name: "subscription-usage" }))
-              .child("Usage"))
             .child(
               div()
                 .id("ag-sort")

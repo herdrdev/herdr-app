@@ -2,14 +2,14 @@ import { test, expect } from "bun:test";
 import { readFile } from "node:fs/promises";
 
 const source = (await readFile(new URL("../defaults/mods/agents/main.js", import.meta.url), "utf8"))
-  .replace(/^import .*;\r?\n/gm, "").replace("export default class Agents", "class Agents");
+  .replace(/^import .*;\n/gm, "").replace("export default class Agents", "class Agents");
 
-function harness(pins: string[], quota: unknown = {}) {
+function harness(pins: string[]) {
   const data = new Map([["pins", JSON.stringify(pins)]]);
   const writes: unknown[] = [];
   const storage = { getItem: (k: string) => data.get(k) ?? null, setItem: (k: string, v: string) => data.set(k, v), removeItem: (k: string) => data.delete(k) };
-  const Agents = new Function("View", "localStorage", "props", "run", "shared", `${source}; return Agents;`)(
-    class {}, storage, () => ({}), (...args: unknown[]) => writes.push(args), () => quota,
+  const Agents = new Function("View", "localStorage", "props", "run", `${source}; return Agents;`)(
+    class {}, storage, () => ({}), (...args: unknown[]) => writes.push(args),
   );
   const agents = new Agents();
   agents.init({}, { timer: { every() {} } });
@@ -32,18 +32,6 @@ test("legacy pins migrate once listed, retaining offline pins until their labels
   expect(writes).toHaveLength(2);
   agents.migratePins([{ ...remote, labels: { "herdr.pinned": "1" } }]);
   expect(data.has("pins")).toBe(false);
-});
-
-test("quota badges label default accounts and omit remote, stale, failed or reset windows", () => {
-  const now = 2000000000000;
-  const result = { status: "ok", checkedAt: now, windows: [{ remaining: 47, resetsAt: now + 100000 }] };
-  const local = { address: "t1", program: { key: "codex" } };
-  expect(harness([], { codex: result }).agents.quota(local, now)).toBe("Default 47%");
-  expect(harness([], { codex: result }).agents.quota({ ...local, address: "vps/t1" }, now)).toBeNull();
-  for (const changed of [{ ...result, status: "unavailable" }, { ...result, checkedAt: now - 300001 }, { ...result, windows: [] }]) {
-    expect(harness([], { codex: changed }).agents.quota(local, now)).toBeNull();
-  }
-  expect(harness([], { codex: result }).agents.quota(local, now + 100000)).toBeNull();
 });
 
 test("already shared pins need no write and pending writes survive restart", () => {
