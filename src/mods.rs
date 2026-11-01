@@ -543,6 +543,7 @@ thread_local! {
     /// Snapshots the window publishes; mods read them synchronously and
     /// re-render when they change.
     static SNAPSHOT: RefCell<Snapshot> = RefCell::new(Snapshot::default());
+    static CONDITION_CONTEXT: RefCell<crate::conditions::Context> = RefCell::default();
     static AGENT_ORDER: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     static SHARED: RefCell<Option<SharedStore>> = const { RefCell::new(None) };
     /// Where key commands for each loaded copy go: (copy, mod, sender).
@@ -625,6 +626,14 @@ pub fn publish_window(v: Value) -> bool {
 }
 pub fn publish_focused(v: Value) -> bool {
     publish("focused", |s| (std::mem::replace(&mut s.focused, v.clone()), v))
+}
+
+pub fn condition_context() -> crate::conditions::Context {
+    CONDITION_CONTEXT.with(|context| context.borrow().clone())
+}
+
+pub fn set_condition_context(context: crate::conditions::Context) {
+    CONDITION_CONTEXT.with(|current| *current.borrow_mut() = context);
 }
 
 #[derive(Default)]
@@ -893,6 +902,20 @@ fn module(inst: Instance, copy: u64) -> HostModule {
     COMMANDS.with(|c| c.borrow_mut().push((copy, inst.name.clone(), cmd_tx)));
     HostModule::new("herdr")
         .declarations(DECLARATIONS)
+        .async_function("findUp", |a| {
+            let context = condition_context();
+            let option = |key: &str, default: Option<String>| -> Result<Option<String>, HostError> {
+                match a.get(1).and_then(|options| options.get(key)) {
+                    None => Ok(default),
+                    Some(HostValue::Null) => Ok(None),
+                    Some(HostValue::Str(value)) => Ok(Some(value.clone())),
+                    Some(_) => Err(HostError::new(format!("findUp {key} must be a string or null"))),
+                }
+            };
+            let folder = option("folder", context.folder)?;
+            let machine = option("machine", context.machine)?;
+            Ok(crate::find_up::find(a.string(0)?.to_owned(), folder, machine))
+        })
         .async_function("exec", |a| {
             let command = a.string(0)?.to_owned();
             Ok(exec_future(command, strings(a.get(1)), opt_str(a.get(2), "cwd"), opt_str(a.get(2), "on")))

@@ -598,6 +598,15 @@ impl CheckOutcome {
 }
 
 /// Installs the storage location and the capability grant for a local run.
+/// Applies the CLI checker's palette, storage and local capability policy to
+/// an embedding checker that also validates application-specific exports.
+pub fn configure_local_check(root: &Path, cx: &mut App) -> anyhow::Result<()> {
+    install_palette(cx);
+    let manifest = read_local_manifest(root).map_err(anyhow::Error::msg)?;
+    grant_local_access(root, manifest.as_ref());
+    Ok(())
+}
+
 fn grant_local_access(root: &Path, manifest: Option<&crate::plugin::PluginManifest>) {
     // A directory this command was pointed at has no name of its own, so its
     // path is its identity — which is right while someone is editing it, and is

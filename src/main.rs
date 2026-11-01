@@ -3,9 +3,12 @@
 
 mod bench;
 mod commands;
+mod check_mod;
+mod conditions;
 mod control;
 mod core_bin;
 mod files;
+mod find_up;
 mod hc;
 mod keys;
 mod layout;
@@ -83,6 +86,10 @@ fn main() {
     // `herdr-app check <mod>` / `herdr-app types <mod>`: gpui-shell's own checker, with Herdr's module installed.
     if matches!(args.get(1).map(String::as_str), Some("check" | "types")) {
         mods::install_policy();
+        if args.get(1).map(String::as_str) == Some("check") {
+            check_mod::run(&args);
+            return;
+        }
         gpui_shell::host::main_with_components(gpui_shell::FrozenComponentRegistry::default());
         return;
     }

@@ -283,6 +283,7 @@ struct Copy {
     id: u64,
     root: Option<Entity<ShellRoot>>,
     _watch: Option<Watcher>,
+    condition: Option<crate::conditions::Panel>,
     error: Option<String>,
 }
 
@@ -374,6 +375,11 @@ pub struct AppWindow {
     terms: HashMap<String, Term>,
     /// Mod copies by slot (block id, `<stack>#header`, or `overlay:<id>`).
     copies: HashMap<String, Copy>,
+    condition_revisions: [u64; 5],
+    condition_overrides: crate::conditions::Overrides,
+    condition_semantics: (Value, Value),
+    condition_context: crate::conditions::Context,
+    condition_focus: Option<String>,
     overlays: Vec<Overlay>,
     folders: BTreeMap<String, Found>,
     /// Mods placed once; later the layout decides where (or whether) they show.
@@ -477,6 +483,11 @@ impl AppWindow {
             model: Model::default(),
             terms: HashMap::new(),
             copies: HashMap::new(),
+            condition_revisions: [0; 5],
+            condition_overrides: crate::conditions::Overrides::default(),
+            condition_semantics: (Value::Null, Value::Null),
+            condition_context: crate::conditions::Context::default(),
+            condition_focus: None,
             overlays: Vec::new(),
             folders: mods::scan().into_iter().map(|f| (f.id.clone(), f)).collect(),
             seen,
@@ -1275,6 +1286,7 @@ impl AppWindow {
     /// Another layout: its mods start fresh. Pane mods (they belong to their
     /// tab) and overlays stay.
     fn drop_layout_copies(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.condition_overrides.clear();
         let gone: Vec<_> = self.copies.keys().filter(|s| {
             self.model.tab_of(s).is_none() && !self.overlays.iter().any(|o| o.slot == **s || o.layout.as_ref().is_some_and(|l| l.find(s).is_some()))
         }).cloned().collect();
@@ -1284,6 +1296,7 @@ impl AppWindow {
     }
 
     fn remove_copy(&mut self, slot: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.condition_overrides.set(slot, false);
         if let Some(copy) = self.copies.remove(slot)
             && let (Some(runtime), Some(root)) = (&self.runtime, copy.root)
         {
@@ -1425,7 +1438,8 @@ impl AppWindow {
         let want: HashMap<String, Instance> = mods_visible.into_iter().collect();
         for (slot, inst) in want {
             if !self.copies.contains_key(&slot) {
-                let copy = self.load(inst, window, cx);
+                let ordinary = self.chrome.find(&slot).is_some_and(|n| matches!(n.content(), Some(Content::Mod { .. })));
+                let copy = if ordinary { self.load_panel(inst, window, cx) } else { self.load(inst, window, cx) };
                 if slot.starts_with("float:")
                     && let Some(root) = &copy.root
                 {
@@ -1568,7 +1582,7 @@ impl AppWindow {
     }
 
     fn load(&self, inst: Instance, window: &mut Window, cx: &mut Context<Self>) -> Copy {
-        let mut copy = Copy { inst, id: 0, root: None, _watch: None, error: None };
+        let mut copy = Copy { inst, id: 0, root: None, _watch: None, condition: None, error: None };
         let (Some(runtime), Some(folder)) = (&self.runtime, self.folders.get(&copy.inst.name)) else {
             copy.error = Some(format!("no mod folder ~/.config/herdr-app/mods/{}", copy.inst.name));
             return copy;
@@ -1587,6 +1601,159 @@ impl AppWindow {
             }
         }
         copy
+    }
+
+    fn load_panel(&self, inst: Instance, window: &mut Window, cx: &mut Context<Self>) -> Copy {
+        let mut copy = Copy { inst, id: 0, root: None, _watch: None, condition: None, error: None };
+        let (Some(runtime), Some(folder)) = (&self.runtime, self.folders.get(&copy.inst.name)) else {
+            copy.error = Some(format!("no mod folder ~/.config/herdr-app/mods/{}", copy.inst.name));
+            return copy;
+        };
+        copy.id = mods::prepare_load(&copy.inst);
+        let loaded = (|| -> gpui_shell::anyhow::Result<()> {
+            let entry = if folder.dir.join("gpui-shell.json").is_file() {
+                gpui_shell::plugin::PluginManifest::read(&folder.dir)?.entry().to_owned()
+            } else { "main.js".to_owned() };
+            let mut application = runtime.prepare_application(&folder.dir, &entry, window, cx)?;
+            let enabled = application.has_export("when", window, cx)?;
+            if enabled {
+                let watch = crate::conditions::watch(application.export("watch", window, cx)?)
+                    .map_err(gpui_shell::anyhow::Error::msg)?;
+                copy.condition = Some(crate::conditions::Panel {
+                    application, enabled, state: crate::conditions::State::new(watch), task: None,
+                });
+            } else {
+                let root = application.mount(window, cx)?;
+                if self.file_events.is_none() {
+                    copy._watch = runtime.watch(&root, window, cx).ok();
+                }
+                copy.root = Some(root);
+                copy.condition = Some(crate::conditions::Panel {
+                    application, enabled, state: crate::conditions::State::new([false; 4]), task: None,
+                });
+            }
+            Ok(())
+        })();
+        copy.error = loaded.err().map(|e| format!("{e:#}"));
+        copy
+    }
+
+    fn reload_unmounted(copy: &mut Copy, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(panel) = &mut copy.condition else { return };
+        let result = (|| -> gpui_shell::anyhow::Result<()> {
+            panel.application.reload(window, cx)?;
+            panel.task = None;
+            panel.enabled = panel.application.has_export("when", window, cx)?;
+            let watch = if panel.enabled {
+                crate::conditions::watch(panel.application.export("watch", window, cx)?)
+                    .map_err(gpui_shell::anyhow::Error::msg)?
+            } else { [false; 4] };
+            panel.state = crate::conditions::State::new(watch);
+            if !panel.enabled { copy.root = Some(panel.application.mount(window, cx)?); }
+            Ok(())
+        })();
+        copy.error = result.err().map(|error| format!("{error:#}"));
+        cx.notify();
+    }
+
+    fn effectively_hidden(&self, node: &Node) -> bool {
+        node.hidden || self.copies.get(&node.id).and_then(|copy| copy.condition.as_ref())
+            .is_some_and(|panel| panel.enabled && !panel.state.visible())
+    }
+
+    fn run_conditions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Use the terminal actually holding focus, including a chrome terminal,
+        // swapped view or remote pane in a local space.
+        let address = self.focused_terminal(window).map(|term| term.address.clone());
+        let context = crate::conditions::Context {
+            folder: address.as_ref().and_then(|address| self.cwds.get(address).cloned())
+                .or_else(|| self.model.active_space().map(|space| space.folder.clone()).filter(|folder| !folder.is_empty())),
+            machine: address.as_deref().and_then(|address| address.split_once('/').map(|(machine, _)| machine.to_owned()))
+                .or_else(|| address.is_none().then(|| self.model.active_space().and_then(|space| space.machine.clone())).flatten()),
+        };
+        if context != self.condition_context {
+            self.condition_revisions[0] += 1;
+            self.condition_context = context.clone();
+            crate::find_up::invalidate();
+        }
+        if address != self.condition_focus {
+            self.condition_revisions[1] += 1;
+            self.condition_focus = address;
+        }
+        mods::set_condition_context(context.clone());
+        self.condition_overrides.observe(&context);
+        let eligible: HashSet<String> = self.chrome.visible_blocks().into_iter()
+            .filter(|node| matches!(node.content(), Some(Content::Mod { .. })))
+            .map(|node| node.id.clone()).collect();
+        for (slot, copy) in &mut self.copies {
+            let Some(panel) = &mut copy.condition else { continue };
+            if let Some(root) = &copy.root {
+                match panel.application.sync_mounted(root, window, cx) {
+                    Ok(true) => {
+                        panel.task = None;
+                        let metadata = (|| -> gpui_shell::anyhow::Result<_> {
+                            let enabled = panel.application.has_export("when", window, cx)?;
+                            let watch = if enabled {
+                                crate::conditions::watch(panel.application.export("watch", window, cx)?)
+                                    .map_err(gpui_shell::anyhow::Error::msg)?
+                            } else { [false; 4] };
+                            Ok((enabled, watch))
+                        })();
+                        match metadata {
+                            Ok((enabled, watch)) => {
+                                panel.enabled = enabled;
+                                panel.state = crate::conditions::State::new(watch);
+                                copy.error = None;
+                            }
+                            Err(error) => { copy.error = Some(format!("{error:#}")); }
+                        }
+                    }
+                    Err(error) => { copy.error = Some(format!("{error:#}")); }
+                    _ => {}
+                }
+            }
+            if !panel.enabled { continue; }
+            panel.state.observe(&context, self.condition_revisions, eligible.contains(slot));
+            panel.state.manual(self.condition_overrides.shown(slot));
+            if panel.state.visible() && eligible.contains(slot) && copy.root.is_none() && copy.error.is_none() {
+                match panel.application.mount(window, cx) {
+                    Ok(root) => {
+                        if self.file_events.is_none() {
+                            copy._watch = self.runtime.as_ref().and_then(|runtime| runtime.watch(&root, window, cx).ok());
+                        }
+                        copy.root = Some(root);
+                    }
+                    Err(error) => copy.error = Some(format!("{error:#}")),
+                }
+            }
+            let Some(revision) = panel.state.begin() else { continue };
+            let argument = mods::to_host(&json!({
+                "folder": context.folder, "machine": context.machine, "props": copy.inst.props,
+            }));
+            match panel.application.call("when", argument, window, cx) {
+                Ok(call) => {
+                    let slot = slot.clone();
+                    let id = copy.id;
+                    panel.task = Some(cx.spawn(async move |this, cx| {
+                        let result = call.resolve(Duration::from_secs(5)).await.map_err(|error| format!("{error:#}"));
+                        let _ = this.update(cx, |this, cx| {
+                            if let Some(copy) = this.copies.get_mut(&slot).filter(|copy| copy.id == id)
+                                && let Some(panel) = &mut copy.condition
+                            {
+                                panel.state.finish(revision, result);
+                                cx.notify();
+                            }
+                        });
+                    }));
+                }
+                Err(error) => { panel.state.finish(revision, Err(format!("{error:#}"))); }
+            }
+        }
+        self.publish_shown_copies();
+        if self.focused_block.as_ref().is_some_and(|id| !self.mod_block_shown(id)) {
+            self.focused_block = None;
+            self.restore_focus(window, cx);
+        }
     }
 
     fn refresh_mods(&self, cx: &mut Context<Self>) {
@@ -1948,6 +2115,11 @@ impl AppWindow {
         self.live = live;
         self.closing_terminals.retain(|addr, completed| !*completed || self.live.contains_key(addr));
         // A new sub-agent changes only this list; mods that show teams need to redraw.
+        let semantics = crate::conditions::semantic(&list);
+        if semantics != self.condition_semantics { cx.notify(); }
+        if semantics.0 != self.condition_semantics.0 { self.condition_revisions[2] += 1; }
+        if semantics.1 != self.condition_semantics.1 { self.condition_revisions[3] += 1; }
+        self.condition_semantics = semantics;
         let terminals_changed = mods::publish_terminals(list);
         self.tend_terminals(true, window, cx);
         if terminals_changed {
@@ -3119,12 +3291,17 @@ impl AppWindow {
             },
             "layout.toggle" | "layout.show" | "layout.hide" => {
                 let id = Self::arg(a, "id").unwrap_or_default();
-                let Some(n) = self.chrome.find_mut(id) else { return self.fail(format!("no node {id:?} in the shown layout")) };
-                n.hidden = match name {
-                    "layout.toggle" => !n.hidden,
-                    "layout.show" => false,
-                    _ => true,
+                let Some(node) = self.chrome.find(id) else { return self.fail(format!("no node {id:?} in the shown layout")) };
+                let show = match name {
+                    "layout.toggle" => self.effectively_hidden(node),
+                    "layout.show" => true,
+                    _ => false,
                 };
+                self.condition_overrides.set(id, show);
+                if let Some(panel) = self.copies.get_mut(id).and_then(|copy| copy.condition.as_mut()) {
+                    panel.state.manual(show);
+                }
+                self.chrome.find_mut(id).unwrap().hidden = !show;
             }
             "layout.resize" => {
                 let id = Self::arg(a, "id").unwrap_or_default();
@@ -3296,7 +3473,7 @@ impl AppWindow {
             .flat_map(|c| c.shown().visible_blocks().into_iter().filter(|n| n.is_pane()).map(|n| n.id.clone()))
             .collect();
         if use_history {
-            candidates.extend(self.chrome.visible_blocks().into_iter().filter(|n| self.focusable(&n.id)).map(|n| n.id.clone()));
+            candidates.extend(self.chrome.visible_blocks().into_iter().filter(|n| self.focusable(&n.id) && self.condition_shown(&n.id)).map(|n| n.id.clone()));
         }
         let candidates = candidates.into_iter().filter(|id| id != from).filter_map(|id| Some((id.clone(), *bounds.get(&id)?)));
         nearest(cur, dir, candidates, if use_history { &self.pane_history } else { &[] })
@@ -3339,6 +3516,7 @@ impl AppWindow {
     /// A mod block on screen: in the layout, or a mod pane of the shown tab.
     fn mod_block_shown(&self, id: &str) -> bool {
         self.copies.contains_key(id)
+            && self.condition_shown(id)
             && (self.chrome.visible_blocks().iter().any(|n| n.id == id && matches!(n.content(), Some(Content::Mod { .. })))
                 || self.model.active_tab().is_some_and(|t| t.shown().visible_blocks().iter().any(|n| n.id == id)))
     }
@@ -3511,7 +3689,7 @@ impl AppWindow {
     /// Which copies are on screen, for `<mod>.<command>` (`mods::send_command`).
     fn publish_shown_copies(&self) {
         let (_, shown) = self.visible();
-        mods::set_shown_copies(shown.iter().filter_map(|(s, i)| self.copies.get(s).filter(|c| c.inst == *i)).map(|c| c.id).collect());
+        mods::set_shown_copies(shown.iter().filter_map(|(s, i)| self.copies.get(s).filter(|c| c.inst == *i && c.condition.as_ref().is_none_or(|p| !p.enabled || p.state.visible()))).map(|c| c.id).collect());
     }
 
     /// Closes an overlay; a kept window stays closed on the next start too.
@@ -3612,6 +3790,7 @@ impl AppWindow {
                 .iter()
                 .filter_map(|w| std::fs::read_to_string(file(&format!("{w}.error"))).ok())
                 .chain(self.copies.values().filter_map(|c| Some(format!("mod {}: {}", c.inst.name, c.error.as_ref()?))))
+                .chain(self.copies.iter().filter_map(|(slot, c)| c.condition.as_ref()?.state.error.as_ref().map(|error| format!("mod {} block {slot}: {error}", c.inst.name))))
                 .chain(self.documents.iter().filter_map(|(m, s)| s.error.as_ref().map(|e| format!("layout {}: {e}", if m.is_empty() { "local" } else { m }))))
                 .collect();
             return json!({
@@ -3714,6 +3893,8 @@ impl AppWindow {
         if active != self.window_active {
             self.window_active = active;
             if active {
+                self.condition_revisions[4] += 1;
+                crate::find_up::invalidate();
                 self.sync(window, cx);
             } else {
                 self.looked.clear();
@@ -3748,11 +3929,14 @@ impl AppWindow {
         }
         // Copies that load now (a new folder, a fixed failed load) already run the
         // saved code: reloading them too would start them twice.
-        let loaded: BTreeSet<u64> = self.copies.values().filter(|c| c.root.is_some()).map(|c| c.id).collect();
+        let loaded: BTreeSet<u64> = self.copies.values().filter(|c| c.root.is_some() || c.condition.is_some()).map(|c| c.id).collect();
         self.sync_folders(window, cx);
         let Some(runtime) = self.runtime.clone() else { return };
         for copy in self.copies.values_mut().filter(|c| edited.contains(&c.inst.name) && loaded.contains(&c.id)) {
-            let Some(root) = &copy.root else { continue };
+            let Some(root) = &copy.root else {
+                Self::reload_unmounted(copy, window, cx);
+                continue;
+            };
             let error = runtime.reload_now(root, window, cx).err().map(|e| format!("{e:#}"));
             if let Some(e) = &error {
                 tracing::warn!("mod reload failed: {e}");
@@ -3771,9 +3955,14 @@ impl AppWindow {
         let removed = self.folders.keys().any(|k| !found.contains_key(k));
         let fresh: Vec<Found> = found.values().filter(|f| !self.seen.contains(&f.id)).cloned().collect();
         self.folders = found;
+        if self.file_events.is_none() {
+            for copy in self.copies.values_mut().filter(|copy| copy.root.is_none() && copy.condition.is_some() && edited.contains(&copy.inst.name)) {
+                Self::reload_unmounted(copy, window, cx);
+            }
+        }
 
         // Copies that failed get another try when their folder changes; loaded ones hot-reload.
-        let retry: Vec<String> = self.copies.iter().filter(|(_, c)| c.root.is_none() && (edited.contains(&c.inst.name) || added)).map(|(s, _)| s.clone()).collect();
+        let retry: Vec<String> = self.copies.iter().filter(|(_, c)| c.root.is_none() && c.condition.is_none() && (edited.contains(&c.inst.name) || added)).map(|(s, _)| s.clone()).collect();
         for slot in &retry {
             self.copies.remove(slot);
         }
@@ -3858,6 +4047,9 @@ impl AppWindow {
 
     /// `frame`: how panes are wrapped here (inside a framed tab), else None.
     fn render_node(&self, n: &Node, focused: &HashSet<String>, frame: Option<&PaneFrame>, cx: &mut Context<Self>) -> AnyElement {
+        if self.copies.get(&n.id).and_then(|copy| copy.condition.as_ref()).is_some_and(|panel| panel.enabled && !panel.state.visible()) {
+            return div().into_any_element();
+        }
         let mut el = div().relative().overflow_hidden().size_full().flex();
         let bounds_map = self.bounds.clone();
         let id = n.id.clone();
@@ -3877,7 +4069,7 @@ impl AppWindow {
             Kind::Row { children } | Kind::Column { children } => {
                 let axis = n.axis().unwrap();
                 el = if axis == Axis::Row { el.flex_row() } else { el.flex_col() };
-                let shown: Vec<&Node> = children.iter().filter(|c| !c.hidden).collect();
+                let shown: Vec<&Node> = children.iter().filter(|c| !self.effectively_hidden(c)).collect();
                 let gap = n.gap.or(frame.and_then(|f| f.gap)).unwrap_or(0.0);
                 // Weights are shares of what the fixed-size siblings leave, so they always fill it.
                 let total: f32 = shown
@@ -4075,7 +4267,7 @@ impl AppWindow {
         if let Some((w, color)) = line {
             let top = traffic_light_divider_inset(n, axis, index, cfg!(target_os = "macos"), zoom) * zoom;
             if top > 0.0
-                && let Some(Paint::Color(background)) = n.children().iter().filter(|child| !child.hidden).nth(index).and_then(|child| child.background.as_ref())
+                && let Some(Paint::Color(background)) = n.children().iter().filter(|child| !self.effectively_hidden(child)).nth(index).and_then(|child| child.background.as_ref())
             {
                 sep = sep.bg(c(background));
             }
@@ -4107,7 +4299,7 @@ impl AppWindow {
         let Some(d) = &self.drag else { return };
         let (container, index, axis) = (d.container.clone(), d.index, d.axis);
         let Some(node) = self.find_node_mut(&container).map(|n| n.clone()) else { return };
-        let shown: Vec<&Node> = node.children().iter().filter(|c| !c.hidden).collect();
+        let shown: Vec<&Node> = node.children().iter().filter(|c| !self.effectively_hidden(c)).collect();
         let (Some(a), Some(b)) = (shown.get(index), shown.get(index + 1)) else { return };
         let bounds = self.bounds.borrow();
         let (Some(ba), Some(bb)) = (bounds.get(&a.id).copied(), bounds.get(&b.id).copied()) else { return };
@@ -4687,6 +4879,7 @@ impl Render for AppWindow {
         if mods::publish_window(self.window_json(window)) {
             self.refresh_snapshot_mods(cx);
         }
+        self.run_conditions(window, cx);
         let focused = self.focused_path();
         let tree = self.render_node(&self.chrome, &focused, None, cx);
         let tree = self.window_frame(tree, window, cx);

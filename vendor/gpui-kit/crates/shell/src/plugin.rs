@@ -1361,6 +1361,15 @@ impl ShellRuntime {
         cx: &mut App,
     ) -> Result<String> {
         let root = self.try_load(root, window, cx)?;
+        self.check_root(&root, window, cx)
+    }
+
+    pub(crate) fn check_root(
+        self: &Rc<Self>,
+        root: &Entity<ShellRoot>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<String> {
         let view = root
             .read(cx)
             .application()

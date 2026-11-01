@@ -464,6 +464,19 @@ thread_local! {
     /// Monotonic identity for host-initiated evaluations that have no GPUI call
     /// scope. Scoped calls already carry their own generation in `scope`.
     static DETACHED_EXECUTION: Cell<u64> = const { Cell::new(0) };
+    static HOST_DEADLINE: Cell<Option<Instant>> = const { Cell::new(None) };
+}
+
+/// Limits one synchronous entry and its immediate jobs without changing the
+/// phase or the budget of later asynchronous continuations.
+pub(super) fn with_deadline<T>(duration: Duration, body: impl FnOnce() -> T) -> T {
+    struct Restore(Option<Instant>);
+    impl Drop for Restore {
+        fn drop(&mut self) { HOST_DEADLINE.with(|deadline| deadline.set(self.0)); }
+    }
+    let previous = HOST_DEADLINE.with(|deadline| deadline.replace(Some(Instant::now() + duration)));
+    let _restore = Restore(previous);
+    body()
 }
 
 /// Starts one host-initiated entry into the JavaScript context.
@@ -495,6 +508,9 @@ fn deadline(budgets: Budgets) -> impl FnMut() -> bool + 'static {
     let mut started = Instant::now();
 
     move || {
+        if HOST_DEADLINE.with(|deadline| deadline.get().is_some_and(|deadline| Instant::now() >= deadline)) {
+            return true;
+        }
         if scope::current_application_generation()
             .and_then(|application| application.close_deadline.get())
             .is_some_and(|deadline| Instant::now() >= deadline)

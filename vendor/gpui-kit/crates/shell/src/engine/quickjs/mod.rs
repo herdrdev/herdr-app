@@ -925,6 +925,7 @@ impl std::fmt::Debug for ViewType {
 #[derive(Clone)]
 pub struct ViewObject {
     value: Persistent<Object<'static>>,
+    namespace: Option<Persistent<Object<'static>>>,
     #[allow(dead_code)] // Its drop owns the resolver registration lifetime.
     module_lease: Option<ApplicationModuleLease>,
     application: Option<Rc<ApplicationGeneration>>,
@@ -941,6 +942,7 @@ impl ViewObject {
     fn unscoped(value: Persistent<Object<'static>>) -> Self {
         Self {
             value,
+            namespace: None,
             module_lease: None,
             application: None,
             jit_warm: Rc::new(Cell::new(false)),
@@ -953,6 +955,10 @@ impl ViewObject {
 
     pub(crate) fn application_generation(&self) -> Option<Rc<ApplicationGeneration>> {
         self.application.clone()
+    }
+
+    pub(crate) fn retains_exports(&self) -> bool {
+        self.namespace.is_some()
     }
 }
 
@@ -2182,6 +2188,14 @@ impl ShellRuntime {
     /// its own files and the built-in modules, and nothing else. That is
     /// the first half of the sandbox's module policy (design doc §19.1).
     pub(crate) fn load_app(self: &Rc<Self>, dir: &Path, entry: &str) -> Result<ViewType> {
+        self.load_app_internal(dir, entry, false)
+    }
+
+    pub(crate) fn load_app_prepared(self: &Rc<Self>, dir: &Path, entry: &str) -> Result<ViewType> {
+        self.load_app_internal(dir, entry, true)
+    }
+
+    fn load_app_internal(self: &Rc<Self>, dir: &Path, entry: &str, retain_exports: bool) -> Result<ViewType> {
         let root = crate::runtime::resolve_app_root(dir, entry)?;
         if let Err(error) = self.write_type_declarations(&root) {
             tracing::debug!(
@@ -2231,11 +2245,12 @@ impl ShellRuntime {
         // other, and a reload that re-read every import but served a stale
         // `main.js` would be the same bug one level up.
         let _application_scope = scope::enter_application(application.clone());
-        let loaded = self.load_source_with_lease(
+        let loaded = self.load_source_with_namespace(
             &format!("{}?v={}", entry.to_string_lossy(), generation),
             &source,
             Some(module_lease),
             Some(application.clone()),
+            retain_exports,
         );
         if loaded.is_err() {
             self.release_application_generation_without_context(&application);
@@ -2250,12 +2265,24 @@ impl ShellRuntime {
         self.load_source_with_lease(name, source, None, None)
     }
 
+    #[cfg(test)]
     fn load_source_with_lease(
         self: &Rc<Self>,
         name: &str,
         source: &str,
         module_lease: Option<ApplicationModuleLease>,
         application: Option<Rc<ApplicationGeneration>>,
+    ) -> Result<ViewType> {
+        self.load_source_with_namespace(name, source, module_lease, application, false)
+    }
+
+    fn load_source_with_namespace(
+        self: &Rc<Self>,
+        name: &str,
+        source: &str,
+        module_lease: Option<ApplicationModuleLease>,
+        application: Option<Rc<ApplicationGeneration>>,
+        retain_exports: bool,
     ) -> Result<ViewType> {
         self.with_jit_suspended(|| {
             self.with_js(|ctx| {
@@ -2272,7 +2299,7 @@ impl ShellRuntime {
                 };
                 Ok(ViewType {
                     value: Persistent::save(ctx, class.clone()),
-                    namespace: Some(Persistent::save(ctx, module.namespace()?)),
+                    namespace: if retain_exports { Some(Persistent::save(ctx, module.namespace()?)) } else { None },
                     module_lease,
                     application,
                 })
@@ -3007,6 +3034,7 @@ impl ShellRuntime {
                 Ok(ViewObject {
                     value: Persistent::save(ctx, instance),
                     module_lease: view_type.module_lease.clone(),
+                    namespace: view_type.namespace.clone(),
                     application: view_type.application.clone(),
                     jit_warm: Rc::new(Cell::new(false)),
                 })

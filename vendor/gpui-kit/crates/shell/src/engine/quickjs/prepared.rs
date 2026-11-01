@@ -16,10 +16,13 @@ struct Rejected(String);
 impl<'js> FromJs<'js> for Rejected {
     fn from_js(ctx: &Ctx<'js>, value: Value<'js>) -> JsResult<Self> {
         let message = if let Some(error) = value.as_exception() {
-            error
-                .stack()
-                .or_else(|| error.message())
-                .unwrap_or_else(|| "application Promise rejected".into())
+            let message = error
+                .message()
+                .unwrap_or_else(|| "application Promise rejected".into());
+            match error.stack() {
+                Some(stack) => format!("{message}\n{stack}"),
+                None => message,
+            }
         } else if let Some(text) = value.as_string() {
             text.to_string()?
         } else {
@@ -33,13 +36,14 @@ impl<'js> FromJs<'js> for Rejected {
 
 /// An evaluated application, with its own policy and module generation.
 /// Dropping an unmounted application cancels its asynchronous work.
+/// Hosts must not enter this facade from inside a JavaScript/host callback.
 pub struct PreparedApplication {
-    runtime: Rc<ShellRuntime>,
     view_type: ViewType,
     policy: Rc<Policy>,
     directory: PathBuf,
     entry: String,
     mounted: bool,
+    runtime: Rc<ShellRuntime>,
 }
 
 /// One invocation. Dropping it makes any late result inert.
@@ -48,6 +52,8 @@ pub struct ApplicationCall {
     live: Rc<Cell<bool>>,
     application: Option<Rc<ApplicationGeneration>>,
     _promise: Option<Persistent<Value<'static>>>,
+    _runtime: Rc<ShellRuntime>,
+    started: std::time::Instant,
 }
 
 impl ApplicationCall {
@@ -61,7 +67,7 @@ impl ApplicationCall {
                     .map_err(|_| anyhow!("application invocation was cancelled"))?
             },
             async {
-                smol::Timer::after(timeout).await;
+                smol::Timer::after(timeout.saturating_sub(self.started.elapsed())).await;
                 Err(anyhow!("application invocation timed out"))
             },
         )
@@ -102,7 +108,13 @@ impl ShellRuntime {
         cx: &mut App,
     ) -> Result<PreparedApplication> {
         let directory = crate::runtime::resolve_app_root(directory.as_ref(), entry)?;
-        self.prepare_application_with_policy(directory, entry, crate::policy::default(), window, cx)
+        let policy = Rc::new(crate::policy::default().duplicate());
+        let result =
+            self.prepare_application_with_policy(directory, entry, policy.clone(), window, cx);
+        if result.is_err() {
+            super::cancel_policy_tasks(&policy);
+        }
+        result
     }
 
     fn prepare_application_with_policy(
@@ -116,8 +128,9 @@ impl ShellRuntime {
         let view_type = {
             let (_guard, _) =
                 scope::enter_with_runtime(self, window, cx, ScopePhase::Task, None, policy.clone());
-            self.load_app(&directory, entry)?
+            self.load_app_prepared(&directory, entry)
         };
+        let view_type = view_type?;
         Ok(PreparedApplication {
             runtime: self.clone(),
             view_type,
@@ -198,47 +211,53 @@ impl PreparedApplication {
         let (sender, receiver) = async_channel::bounded(1);
         let live = Rc::new(Cell::new(true));
         let (_guard, _) = self.enter(window, cx);
-        let promise = self.runtime.with_js(|ctx| {
-            let namespace = self
-                .view_type
-                .namespace
-                .as_ref()
-                .expect("prepared module")
-                .clone()
-                .restore(ctx)?;
-            let function: Function = namespace.get(name)?;
-            let argument = super::host_modules::into_js(ctx, argument)?;
-            let value: Value = function.call((argument,))?;
-            if let Some(promise) = value.as_promise() {
-                let success_sender = sender.clone();
-                let success_live = live.clone();
-                let success = Function::new(ctx.clone(), move |result: Settled| {
-                    if success_live.get() {
-                        let _ = success_sender.try_send(result.0);
-                    }
-                })?;
-                let failure_live = live.clone();
-                let failure = Function::new(ctx.clone(), move |error: Rejected| {
-                    if failure_live.get() {
-                        let _ = sender.try_send(Err(anyhow!("{}", error.0)));
-                    }
-                })?;
-                let _: Value = promise
-                    .then()?
-                    .call((This(promise.clone()), success, failure))?;
-                Ok(Some(Persistent::save(ctx, value)))
-            } else {
-                let result = super::host_modules::from_js(ctx, value, 0)?;
-                let _ = sender.try_send(Ok(result));
-                Ok(None)
-            }
+        let promise = sandbox::with_deadline(Duration::from_millis(50), || {
+            let promise = self.runtime.with_js(|ctx| {
+                let namespace = self
+                    .view_type
+                    .namespace
+                    .as_ref()
+                    .expect("prepared module")
+                    .clone()
+                    .restore(ctx)?;
+                let function: Function = namespace.get(name)?;
+                let argument = super::host_modules::into_js(ctx, argument)?;
+                let value: Value = function.call((argument,))?;
+                if let Some(promise) = value.as_promise() {
+                    let success_sender = sender.clone();
+                    let success_live = live.clone();
+                    let success = Function::new(ctx.clone(), move |result: Settled| {
+                        if success_live.get() {
+                            let _ = success_sender.try_send(result.0);
+                        }
+                    })?;
+                    let failure_live = live.clone();
+                    let failure = Function::new(ctx.clone(), move |error: Rejected| {
+                        if failure_live.get() {
+                            let _ = sender.try_send(Err(anyhow!("{}", error.0)));
+                        }
+                    })?;
+                    let _: Value =
+                        promise
+                            .then()?
+                            .call((This(promise.clone()), success, failure))?;
+                    Ok(Some(Persistent::save(ctx, value)))
+                } else {
+                    let result = super::host_modules::from_js(ctx, value, 0)?;
+                    let _ = sender.try_send(Ok(result));
+                    Ok(None)
+                }
+            });
+            scheduler::drain_runtime_jobs(&self.runtime, window, cx);
+            promise
         })?;
-        scheduler::drain_runtime_jobs(&self.runtime, window, cx);
         Ok(ApplicationCall {
             receiver,
             live,
             application: self.view_type.application.clone(),
             _promise: promise,
+            _runtime: self.runtime.clone(),
+            started: std::time::Instant::now(),
         })
     }
 
@@ -250,12 +269,18 @@ impl PreparedApplication {
         );
         // A failed constructor also retires its generation; do not retry it.
         self.mounted = true;
-        let view = self.runtime.instantiate_view_with_policy(
+        let view = match self.runtime.instantiate_view_with_policy(
             &self.view_type,
             self.policy.clone(),
             window,
             cx,
-        )?;
+        ) {
+            Ok(view) => view,
+            Err(error) => {
+                super::cancel_policy_tasks(&self.policy);
+                return Err(error);
+            }
+        };
         Ok(cx.new(|cx| {
             ShellRoot::with_application(
                 view,
@@ -266,6 +291,69 @@ impl PreparedApplication {
                 cx,
             )
         }))
+    }
+
+    /// Constructs and checks this application's eager native description.
+    pub fn check(&mut self, window: &mut Window, cx: &mut App) -> Result<String> {
+        let root = self.mount(window, cx)?;
+        self.runtime.check_root(&root, window, cx)
+    }
+
+    /// Follows a root reloaded by the ordinary shell watcher. Named calls use
+    /// the new module without replacing the root or constructing another View.
+    pub fn sync_mounted(
+        &mut self,
+        root: &Entity<ShellRoot>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<bool> {
+        anyhow::ensure!(self.mounted, "prepared application has not been mounted");
+        let view = root
+            .read(cx)
+            .application()
+            .context("root has no application")?
+            .view
+            .clone();
+        anyhow::ensure!(
+            Rc::ptr_eq(&view.read(cx).runtime(), &self.runtime),
+            "root belongs to a different runtime"
+        );
+        let object = view.read(cx).object().clone();
+        let actual = object.application_generation();
+        if actual
+            .as_ref()
+            .zip(self.view_type.application.as_ref())
+            .is_some_and(|(actual, expected)| Rc::ptr_eq(actual, expected))
+        {
+            return Ok(false);
+        }
+        let namespace = object
+            .namespace
+            .clone()
+            .context("root has no module exports")?;
+        let (_guard, _) = scope::enter_with_application(
+            &self.runtime,
+            window,
+            cx,
+            ScopePhase::Task,
+            Some(view.clone()),
+            self.policy.clone(),
+            actual.clone(),
+        );
+        let value = self.runtime.with_js(|ctx| {
+            let namespace = namespace.clone().restore(ctx)?;
+            Ok(Persistent::save(
+                ctx,
+                namespace.get::<_, Object>("default")?,
+            ))
+        })?;
+        self.view_type = ViewType {
+            value,
+            namespace: Some(namespace),
+            module_lease: object.module_lease.clone(),
+            application: actual,
+        };
+        Ok(true)
     }
 
     /// Replaces an unmounted module after a source change. A failed replacement
@@ -282,6 +370,9 @@ impl PreparedApplication {
             window,
             cx,
         )?;
+        if let Some(previous) = &self.view_type.application {
+            self.runtime.release_application_generation(previous, cx);
+        }
         *self = replacement;
         Ok(())
     }
@@ -338,6 +429,306 @@ mod tests {
         }
     "#;
 
+    fn probe_policy(
+        source: &Source,
+        receiver: async_channel::Receiver<()>,
+        seen: Rc<RefCell<Vec<String>>>,
+    ) {
+        let module = crate::HostModule::new("probe")
+            .async_function("pending", move |_| {
+                let receiver = receiver.clone();
+                Ok(async move {
+                    receiver
+                        .recv()
+                        .await
+                        .map_err(|_| crate::HostError::new("probe closed"))?;
+                    Ok(HostValue::Null)
+                })
+            })
+            .function("mark", move |args| {
+                seen.borrow_mut().push(args.string(0)?.to_owned());
+                Ok(HostValue::Null)
+            });
+        crate::policy::set_default(
+            Policy::new()
+                .with_application("prepared-equivalence")
+                .with_storage_path(source.0.join("store.json"))
+                .with_host_module(module)
+                .unwrap(),
+        );
+    }
+
+    #[gpui::test]
+    fn plain_panels_match_try_load_and_keep_independent_timers_and_host_work(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::init);
+        let plain = |name| {
+            format!(
+                r#"
+            import {{ View, div }} from "gpui-kit";
+            import {{ pending, mark }} from "probe";
+            export default class App extends View {{
+                init(props, cx) {{
+                    this.timer = cx.timer.every(10, () => mark("{name}-timer"));
+                    pending().then(() => mark("{name}-fetch"));
+                }}
+                render() {{ return div(); }}
+            }}
+        "#
+            )
+        };
+        let a = Source::new(&plain("a"));
+        let b = Source::new(&plain("b"));
+        let standard = Source::new(
+            r#"import { View, div } from "gpui-kit"; export default class App extends View { render() { return div(); } }"#,
+        );
+        let (tx, rx) = async_channel::unbounded();
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        probe_policy(&a, rx, seen.clone());
+        let runtime = ShellRuntime::new_isolated().unwrap();
+        let window = cx.add_window(|_, _| gpui::Empty);
+        let mut context = VisualTestContext::from_window(*window.deref(), cx);
+        let (prepared_a, root_a, prepared_b, root_b) = context.update(|window, cx| {
+            let mut a = runtime
+                .prepare_application(&a.0, "main.js", window, cx)
+                .unwrap();
+            let mut b = runtime
+                .prepare_application(&b.0, "main.js", window, cx)
+                .unwrap();
+            assert!(!a.has_export("when", window, cx).unwrap());
+            assert!(!Rc::ptr_eq(&a.policy, &b.policy));
+            let ordinary = runtime.try_load(&standard.0, window, cx).unwrap();
+            let ordinary_view = ordinary.read(cx).application().unwrap().view.clone();
+            let ordinary_policy = ordinary_view.read(cx).policy();
+            assert_eq!(ordinary_policy.application(), a.policy.application());
+            assert!(
+                ordinary_view.read(cx).object().namespace.is_none(),
+                "legacy loads must not retain exports"
+            );
+            a.policy
+                .with_local_storage(|store| {
+                    store.set("equivalence".into(), serde_json::json!("shared"))
+                })
+                .unwrap()
+                .unwrap();
+            assert_eq!(
+                ordinary_policy
+                    .with_local_storage(|store| store.values().unwrap()["equivalence"].clone()),
+                Some(serde_json::json!("shared"))
+            );
+            let root_a = a.mount(window, cx).unwrap();
+            let root_b = b.mount(window, cx).unwrap();
+            (a, root_a, b, root_b)
+        });
+        context.run_until_parked();
+        drop(root_b);
+        drop(prepared_b);
+        context.update(|_, _| {});
+        context.run_until_parked();
+        tx.try_send(()).unwrap();
+        context.executor().advance_clock(Duration::from_millis(30));
+        context.run_until_parked();
+        assert!(
+            seen.borrow().iter().any(|item| item == "a-timer"),
+            "{:?}",
+            seen.borrow()
+        );
+        assert!(
+            seen.borrow().iter().any(|item| item == "a-fetch"),
+            "{:?}",
+            seen.borrow()
+        );
+        assert!(
+            !seen.borrow().iter().any(|item| item.starts_with("b-")),
+            "{:?}",
+            seen.borrow()
+        );
+        drop(root_a);
+        drop(prepared_a);
+        context.update(|_, _| {});
+        crate::policy::set_default(Policy::new());
+    }
+
+    #[gpui::test]
+    fn prepared_and_pending_call_can_be_the_last_runtime_owners(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let source = Source::new(SOURCE);
+        let runtime = ShellRuntime::new_isolated().unwrap();
+        let weak = Rc::downgrade(&runtime);
+        let window = cx.add_window(|_, _| gpui::Empty);
+        let mut context = VisualTestContext::from_window(*window.deref(), cx);
+        let (prepared, call) = context.update(|window, cx| {
+            let prepared = runtime
+                .prepare_application(&source.0, "main.js", window, cx)
+                .unwrap();
+            let call = prepared.call("never", HostValue::Null, window, cx).unwrap();
+            (prepared, call)
+        });
+        drop(runtime);
+        drop(prepared);
+        assert!(
+            weak.upgrade().is_some(),
+            "call must keep the VM alive for its Persistent"
+        );
+        drop(call);
+        assert!(weak.upgrade().is_none());
+
+        let runtime = ShellRuntime::new_isolated().unwrap();
+        let weak = Rc::downgrade(&runtime);
+        let prepared = context.update(|window, cx| {
+            runtime
+                .prepare_application(&source.0, "main.js", window, cx)
+                .unwrap()
+        });
+        drop(runtime);
+        drop(prepared);
+        assert!(
+            weak.upgrade().is_none(),
+            "prepared handles must drop before their last runtime owner"
+        );
+    }
+
+    #[gpui::test]
+    fn synchronous_call_has_a_tighter_deadline_without_changing_task_budget(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::init);
+        let source = Source::new(
+            r#"
+            import { View } from "gpui-kit";
+            export function when() { for (;;) {} }
+            export default class App extends View {}
+        "#,
+        );
+        let runtime = ShellRuntime::new_isolated().unwrap();
+        let window = cx.add_window(|_, _| gpui::Empty);
+        let mut context = VisualTestContext::from_window(*window.deref(), cx);
+        context.update(|window, cx| {
+            let prepared = runtime
+                .prepare_application(&source.0, "main.js", window, cx)
+                .unwrap();
+            let started = std::time::Instant::now();
+            let error = match prepared.call("when", HostValue::Null, window, cx) {
+                Ok(_) => panic!("infinite when must be interrupted"),
+                Err(error) => error,
+            };
+            assert!(error.to_string().contains("interrupt"), "{error:#}");
+            assert!(
+                started.elapsed() < Duration::from_millis(400),
+                "condition used the 500 ms Task budget"
+            );
+            let (_guard, _) = scope::enter_with_runtime(
+                &runtime,
+                window,
+                cx,
+                ScopePhase::Task,
+                None,
+                prepared.policy.clone(),
+            );
+            runtime
+                .with_js(|ctx| {
+                    ctx.eval::<(), _>(
+                        "const start = Date.now(); while (Date.now() - start < 80) {}",
+                    )
+                })
+                .unwrap();
+        });
+    }
+
+    #[gpui::test]
+    fn a_throwing_call_drains_jobs_under_its_own_policy(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let source = Source::new(
+            r#"
+            import { View } from "gpui-kit";
+            import { mark } from "probe";
+            export function when() { Promise.resolve().then(() => mark("own-reaction")); throw new Error("thrown"); }
+            export default class App extends View {}
+        "#,
+        );
+        let (_tx, rx) = async_channel::unbounded();
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        probe_policy(&source, rx, seen.clone());
+        let runtime = ShellRuntime::new_isolated().unwrap();
+        let window = cx.add_window(|_, _| gpui::Empty);
+        let mut context = VisualTestContext::from_window(*window.deref(), cx);
+        context.update(|window, cx| {
+            let prepared = runtime
+                .prepare_application(&source.0, "main.js", window, cx)
+                .unwrap();
+            assert!(prepared.call("when", HostValue::Null, window, cx).is_err());
+            assert_eq!(*seen.borrow(), vec!["own-reaction"]);
+        });
+        crate::policy::set_default(Policy::new());
+    }
+
+    #[gpui::test]
+    fn dropping_unmounted_app_cancels_real_work_and_dropped_call_ignores_late_result(
+        cx: &mut TestAppContext,
+    ) {
+        cx.update(crate::init);
+        let source = Source::new(
+            r#"
+            import { View } from "gpui-kit";
+            import { pending, mark } from "probe";
+            pending().then(() => mark("unmounted-resumed"));
+            export async function when() { await pending(); return true; }
+            export default class App extends View {}
+        "#,
+        );
+        let (tx, rx) = async_channel::unbounded();
+        let seen = Rc::new(RefCell::new(Vec::new()));
+        probe_policy(&source, rx.clone(), seen.clone());
+        let runtime = ShellRuntime::new_isolated().unwrap();
+        let window = cx.add_window(|_, _| gpui::Empty);
+        let mut context = VisualTestContext::from_window(*window.deref(), cx);
+        let prepared = context.update(|window, cx| {
+            runtime
+                .prepare_application(&source.0, "main.js", window, cx)
+                .unwrap()
+        });
+        context.run_until_parked();
+        drop(prepared);
+        context.run_until_parked();
+        tx.try_send(()).unwrap();
+        context.run_until_parked();
+        assert_eq!(
+            rx.try_recv(),
+            Ok(()),
+            "cancelled top-level work must not consume a message"
+        );
+        assert!(seen.borrow().is_empty());
+
+        source.write(
+            r#"
+            import { View } from "gpui-kit";
+            import { pending } from "probe";
+            export async function when() { await pending(); return true; }
+            export default class App extends View {}
+        "#,
+        );
+        let (prepared, call) = context.update(|window, cx| {
+            let prepared = runtime
+                .prepare_application(&source.0, "main.js", window, cx)
+                .unwrap();
+            let call = prepared.call("when", HostValue::Null, window, cx).unwrap();
+            (prepared, call)
+        });
+        let receiver = call.receiver.clone();
+        drop(call);
+        context.run_until_parked();
+        tx.try_send(()).unwrap();
+        context.run_until_parked();
+        assert!(
+            receiver.try_recv().is_err(),
+            "a dropped invocation must not deliver a late answer"
+        );
+        drop(prepared);
+        context.run_until_parked();
+        crate::policy::set_default(Policy::new());
+    }
+
     #[gpui::test]
     fn prepared_application_defers_construction_and_mounts_once(cx: &mut TestAppContext) {
         cx.update(crate::init);
@@ -388,7 +779,14 @@ mod tests {
                 HostValue::Bool(true)
             );
             let call = prepared.call("bad", HostValue::Null, window, cx).unwrap();
-            assert!(call.receiver.try_recv().unwrap().is_err());
+            assert!(
+                call.receiver
+                    .try_recv()
+                    .unwrap()
+                    .unwrap_err()
+                    .to_string()
+                    .contains("probe failed")
+            );
             let call = prepared.call("never", HostValue::Null, window, cx).unwrap();
             assert!(
                 smol::block_on(call.resolve(Duration::ZERO))
@@ -396,6 +794,33 @@ mod tests {
                     .to_string()
                     .contains("timed out")
             );
+        });
+    }
+
+    #[gpui::test]
+    fn prepared_follows_the_existing_mounted_reload_path(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let source = Source::new(SOURCE);
+        let runtime = ShellRuntime::new_isolated().unwrap();
+        let window = cx.add_window(|_, _| gpui::Empty);
+        let mut context = VisualTestContext::from_window(*window.deref(), cx);
+        context.update(|window, cx| {
+            let mut prepared = runtime
+                .prepare_application(&source.0, "main.js", window, cx)
+                .unwrap();
+            let root = prepared.mount(window, cx).unwrap();
+            assert!(!prepared.sync_mounted(&root, window, cx).unwrap());
+            let old = prepared.call("later", HostValue::Null, window, cx).unwrap();
+            source.write(&SOURCE.replace("return constructed === 0", "return false"));
+            runtime.reload_now(&root, window, cx).unwrap();
+            assert!(prepared.sync_mounted(&root, window, cx).unwrap());
+            assert!(!prepared.sync_mounted(&root, window, cx).unwrap());
+            let call = prepared.call("when", HostValue::Null, window, cx).unwrap();
+            assert_eq!(
+                call.receiver.try_recv().unwrap().unwrap(),
+                HostValue::Bool(false)
+            );
+            assert!(smol::block_on(old.resolve(Duration::ZERO)).is_err());
         });
     }
 
