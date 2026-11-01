@@ -240,16 +240,17 @@ Show only this pane of its tab, or all again.
 
 ## `pane.focus`
 
-Focus a pane (or the pane showing a terminal).
+Focus a pane (or the pane showing a terminal), or give a shown mod block the keyboard.
 
 | Argument | Required |
 |---|---|
 | `pane` | no |
 | `terminal` | no |
+| `block` | no |
 
 ## `pane.go`
 
-Focus the pane to the "left", "right", "up" or "down".
+Focus the pane or focusable mod to the "left", "right", "up" or "down".
 
 | Argument | Required |
 |---|---|
