@@ -1092,6 +1092,7 @@ impl MacWindow {
             let native_view: id = msg_send![VIEW_CLASS, alloc];
             let native_view = NSView::initWithFrame_(native_view, NSView::bounds(content_view));
             assert!(!native_view.is_null());
+            disable_input_method_document_access(native_view);
 
             let state = Arc::new(Mutex::new(MacWindowState {
                 handle,
@@ -2594,6 +2595,57 @@ extern "C" fn handle_key_up(this: &Object, _: Sel, native_event: id) {
     handle_key_event(this, native_event, false);
 }
 
+#[link(name = "Carbon", kind = "framework")]
+unsafe extern "C" {
+    fn TSMRemoveDocumentProperty(document: *mut c_void, tag: u32) -> i32;
+}
+
+/// `kTSMDocumentSupportDocumentAccessPropertyTag`.
+const TSM_DOCUMENT_ACCESS_PROPERTY: u32 = u32::from_be_bytes(*b"dapy");
+
+/// AppKit tells input methods they may read and replace text already typed
+/// (TSM document access). The Korean input method uses that to commit the
+/// first jamo after it's selected and compose the rest around it, but a
+/// terminal can't take back what it sent: `한` typed `ㅎㅏㄴ`. Without the
+/// property it composes in marked text from the first key. It must go before
+/// the context's first activation, where an input method caches it.
+unsafe fn disable_input_method_document_access(view: id) {
+    unsafe {
+        let context: id = msg_send![view, inputContext];
+        if !context.is_null() {
+            disable_document_access(context);
+        }
+    }
+}
+
+unsafe fn disable_document_access(context: id) {
+    unsafe {
+        if let Some(document) = input_context_document(context) {
+            TSMRemoveDocumentProperty(document, TSM_DOCUMENT_ACCESS_PROPERTY);
+        }
+    }
+}
+
+/// The TSM document of an input context that may not be active yet. Only
+/// AppKit's private `_documentID` reaches it that early, so its type and
+/// place are checked first and anything unexpected leaves AppKit's default.
+unsafe fn input_context_document(context: id) -> Option<*mut c_void> {
+    unsafe {
+        let class = class!(NSTextInputContext);
+        let ivar = class.instance_variable("_documentID")?;
+        let offset = ivar.offset();
+        if ivar.type_encoding().as_str() != "^v"
+            || offset < 0
+            || offset as usize % mem::align_of::<*mut c_void>() != 0
+            || offset as usize + mem::size_of::<*mut c_void>() > class.instance_size()
+        {
+            return None;
+        }
+        let document = *((context as *const u8).offset(offset) as *const *mut c_void);
+        (!document.is_null()).then_some(document)
+    }
+}
+
 // Things to test if you're modifying this method:
 //  U.S. layout:
 //   - The IME consumes characters like 'j' and 'k', which makes paging through `less` in
@@ -3975,5 +4027,54 @@ mod tests {
     #[test]
     fn display_id_for_screen_returns_none_for_null_screen() {
         assert_eq!(display_id_for_screen(nil), None);
+    }
+
+    #[link(name = "Carbon", kind = "framework")]
+    unsafe extern "C" {
+        fn TSMGetDocumentProperty(
+            document: *mut c_void,
+            tag: u32,
+            buffer_size: u32,
+            actual_size: *mut u32,
+            buffer: *mut c_void,
+        ) -> i32;
+    }
+
+    fn offers_document_access(document: *mut c_void) -> bool {
+        let (mut size, mut value) = (0u32, 0u32);
+        let status = unsafe {
+            TSMGetDocumentProperty(
+                document,
+                TSM_DOCUMENT_ACCESS_PROPERTY,
+                mem::size_of::<u32>() as u32,
+                &mut size,
+                &mut value as *mut u32 as *mut c_void,
+            )
+        };
+        const NOT_FOUND: i32 = -2528; // tsmDocPropertyNotFoundErr
+        assert!(status == 0 || status == NOT_FOUND, "TSMGetDocumentProperty: {status}");
+        status == 0
+    }
+
+    // The Korean input method commits the first jamo of a syllable when the
+    // document offers access (#239): the terminal's context must not offer it,
+    // and taking it away must not need the context to be active.
+    #[test]
+    fn input_context_stops_offering_document_access_before_activation() {
+        unsafe {
+            let pool = NSAutoreleasePool::new(nil);
+            let client: id = msg_send![class!(NSTextView), new];
+            let context: id = msg_send![class!(NSTextInputContext), alloc];
+            let context: id = msg_send![context, initWithClient: client];
+            let document = input_context_document(context).expect("AppKit's _documentID");
+            assert!(offers_document_access(document), "AppKit offers document access by default");
+
+            disable_document_access(context);
+
+            assert!(!offers_document_access(document));
+            let () = msg_send![context, release];
+            let () = msg_send![client, release];
+            pool.drain();
+        }
     }
 }
