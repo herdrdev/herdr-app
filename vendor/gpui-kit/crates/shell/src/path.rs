@@ -114,7 +114,10 @@ impl NativePath {
         Some(background.opacity(self.background.opacity))
     }
 
-    fn build(&self, bounds: Bounds<Pixels>) -> Option<gpui::Path<Pixels>> {
+    fn build(&self, bounds: Bounds<Pixels>, window: &Window) -> Option<gpui::Path<Pixels>> {
+        let command_point = |args: &[Bridged], offset, bounds| {
+            command_point(args, offset, bounds).map(|p| p.map(|c| window.pixel_snap(c)))
+        };
         let mut builder = if self.fill {
             gpui::PathBuilder::fill()
         } else {
@@ -194,10 +197,10 @@ impl Element for NativePath {
         _: Option<&InspectorElementId>,
         bounds: Bounds<Pixels>,
         _: &mut Self::RequestLayoutState,
-        _: &mut Window,
+        window: &mut Window,
         _: &mut App,
     ) -> Self::PrepaintState {
-        self.build(bounds)
+        self.build(bounds, window)
     }
 
     fn paint(
