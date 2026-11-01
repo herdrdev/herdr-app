@@ -1444,17 +1444,20 @@ impl AppWindow {
         } else {
             model_pane.clone()
         };
-        self.pane_history.retain(|id| self.model.spaces.iter().any(|s| s.tabs.iter().any(|t| t.root.find(id).is_some())));
-        if let Some(id) = model_pane.as_ref() {
-            remember_pane(&mut self.pane_history, id);
-        }
-        self.synced_model_pane = model_pane;
         let pane_changed = focused != self.focused_pane;
-        self.focused_pane = focused.clone();
         // A pane focused some other way, or the block leaving, ends it.
         if (pane_changed && self.focused_block != focused) || self.focused_block.as_ref().is_some_and(|b| !self.mod_block_shown(b)) {
             self.focused_block = None;
         }
+        // Mod blocks too, so `pane.go` goes back to a mod it came from.
+        self.pane_history.retain(|id| {
+            self.copies.contains_key(id) || self.model.spaces.iter().any(|s| s.tabs.iter().any(|t| t.root.find(id).is_some()))
+        });
+        if let Some(id) = self.focused_block.as_ref().or(model_pane.as_ref()) {
+            remember_pane(&mut self.pane_history, id);
+        }
+        self.synced_model_pane = model_pane;
+        self.focused_pane = focused.clone();
         let no_dialog = !self.overlays.iter().any(|o| o.kind.modal_keys());
         if terminal_block(&self.chrome, focused.as_deref()).is_some() {
             if pane_changed && no_dialog && let Some(f) = focused.as_deref().and_then(|p| self.pane_focus(p)) {
