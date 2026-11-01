@@ -18,6 +18,7 @@ function find(node, id) {
 const narrow = () => (find(layout(), "sidebar")?.size?.px ?? Infinity) < 160;
 
 // To the rail (on macOS wide enough for the traffic lights), or back to the width it had.
+// The same as workspace-chrome's toggle.
 function toggleSidebar() {
   const width = find(layout(), "sidebar")?.size?.px;
   if (!narrow()) setShared("sidebar.width", width);
@@ -289,17 +290,22 @@ export default class Agents extends View {
       const more = detail.get(a.address);
       // An agent on another machine (`vps/t7`) says which.
       const machine = a.address.includes("/") ? a.address.split("/")[0] : null;
+      // The rail: the agent's icon and its state, centered; its name in a tooltip.
       if (collapsed) {
         return h_flex()
           .id(`ag-${a.address}`)
-          .h(26)
-          .px(8)
+          .h(30)
           .flex_none()
+          .rounded(8)
           .items_center()
-          .gap(4)
-          .hover((s) => s.bg(t.hover))
+          .justify_center()
+          .gap(3)
+          .tooltip(a.space_name && a.space_name !== label(a) ? `${a.space_name} \u00b7 ${label(a)}` : label(a))
+          .when(a.focused, (el) => el.bg(t.selected))
+          .when(!a.focused, (el) => el.hover((s) => s.bg(t.hover)))
+          .cursor_pointer()
           .on_click(() => run("pane.focus", { pane: a.pane }))
-          .child(div().flex_1().min_w(0).whitespace_nowrap().text_right().text_color(t.muted).child(String(i + 1)))
+          .child(pic ?? div().w(16).flex_none().text_center().text_size(11).text_color(t.muted).child(String(i + 1)))
           .child(h_flex().w(14).flex_none().items_center().justify_center().child(this.status(t, a, true)));
       }
       const when = this.since(a);
@@ -433,21 +439,29 @@ export default class Agents extends View {
       .when(list.length === 0 && !collapsed, (el) =>
         el.child(div().px(12).text_size(12).text_color(t.dim).child("No agent status yet. Agents show up here when they report their status. Older versions and agents inside tmux may not.")),
       )
-      .child(v_flex().id("ag-list").flex_1().min_h(0).px(collapsed ? 0 : 8).overflow_y_scrollbar().mode("always").children(rows))
-      .when(collapsed, (el) =>
+      .child(v_flex().id("ag-list").flex_1().min_h(0).px(collapsed ? 4 : 8).when(collapsed, (el) => el.pt(6).gap(2)).overflow_y_scrollbar().mode("always").children(rows))
+      // On the macOS rail the traffic lights fill the brand row, so the toggle
+      // that folded the sidebar comes back here, as the same button.
+      .when(collapsed && window()?.platform === "macos" && !window()?.fullscreen, (el) =>
         el.child(
           h_flex()
-            .h(28)
+            .h(36)
+            .flex_none()
             .items_center()
             .justify_center()
             .child(
               div()
                 .id("collapse")
-                .text_size(13)
-                .text_color(t.dim)
-                .hover((s) => s.text_color(t.foreground))
+                .size(26)
+                .flex()
+                .items_center()
+                .justify_center()
+                .rounded(6)
+                .text_color(t.muted)
+                .hover((s) => s.bg(t.hover).text_color(t.foreground))
+                .tooltip("Expand sidebar")
                 .on_click(toggleSidebar)
-                .child("»"),
+                .child(svg("mods/workspace-chrome/sidebar.svg").size(15)),
             ),
         ),
       );
