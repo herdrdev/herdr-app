@@ -389,6 +389,12 @@ pub struct Person {
     pub clipboard_write: bool,
     /// Minimum terminal text contrast ratio; 1 leaves program colors unchanged.
     pub minimum_contrast: f32,
+    /// 0..1: below 1, the desktop shows through the window.
+    #[serde(skip_serializing_if = "is_one")]
+    pub window_opacity: f32,
+    /// Blur what shows through the window (where the system can).
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub window_blur: bool,
     /// macOS Option sends Alt shortcuts, or follows the keyboard layout.
     #[serde(skip_serializing_if = "OptionAsAlt::is_auto")]
     pub option_as_alt: OptionAsAlt,
@@ -433,6 +439,10 @@ impl OptionAsAlt {
     }
 }
 
+fn is_one(v: &f32) -> bool {
+    *v == 1.0
+}
+
 fn is_true(b: &bool) -> bool {
     *b
 }
@@ -449,6 +459,8 @@ impl Default for Person {
             telemetry: true,
             clipboard_write: true,
             minimum_contrast: 1.0,
+            window_opacity: 1.0,
+            window_blur: false,
             option_as_alt: OptionAsAlt::Auto,
             appearance: Appearance::System,
             theme: None,
@@ -481,6 +493,9 @@ pub struct Settings {
     pub terminal_padding: [f32; 2],
     /// 0..1: below 1, what's behind a terminal shows through.
     pub terminal_opacity: f32,
+    /// 0..1: below 1, the desktop shows through the window.
+    pub window_opacity: f32,
+    pub window_blur: bool,
     pub clipboard_write: bool,
     pub minimum_contrast: f32,
     pub option_as_alt: OptionAsAlt,
@@ -521,6 +536,8 @@ impl Default for Settings {
             colors: BTreeMap::new(),
             terminal_padding: [10.0, 6.0],
             terminal_opacity: 1.0,
+            window_opacity: 1.0,
+            window_blur: false,
             clipboard_write: true,
             minimum_contrast: 1.0,
             option_as_alt: OptionAsAlt::Auto,
@@ -556,7 +573,10 @@ impl Settings {
             dark,
             colors,
             terminal_padding: look.terminal_padding.unwrap_or(d.terminal_padding),
-            terminal_opacity: look.terminal_opacity.unwrap_or(1.0).clamp(0.0, 1.0),
+            // A see-through window is painted once, at its root (see_through).
+            terminal_opacity: if person.window_opacity < 1.0 { 0.0 } else { look.terminal_opacity.unwrap_or(1.0).clamp(0.0, 1.0) },
+            window_opacity: person.window_opacity,
+            window_blur: person.window_blur,
             sounds: person.sounds.clone(),
             clipboard_write: person.clipboard_write,
             minimum_contrast: person.minimum_contrast,
@@ -565,14 +585,19 @@ impl Settings {
     }
 }
 
-pub fn parse_hex(s: &str) -> Option<Hsla> {
+/// A `#rrggbb[aa]` value as its color and alpha.
+fn hex_parts(s: &str) -> Option<(u32, u32)> {
     let h = s.trim().trim_start_matches('#');
     let v = u32::from_str_radix(h, 16).ok()?;
-    let (rgb, a) = match h.len() {
-        6 => (v, 255),
-        8 => (v >> 8, v & 255),
-        _ => return None,
-    };
+    match h.len() {
+        6 => Some((v, 255)),
+        8 => Some((v >> 8, v & 255)),
+        _ => None,
+    }
+}
+
+pub fn parse_hex(s: &str) -> Option<Hsla> {
+    let (rgb, a) = hex_parts(s)?;
     Some(
         Rgba {
             r: ((rgb >> 16) & 255) as f32 / 255.0,
@@ -584,9 +609,14 @@ pub fn parse_hex(s: &str) -> Option<Hsla> {
     )
 }
 
+/// A theme value without its alpha; one that is no color stays as written.
+pub fn opaque(v: &str) -> String {
+    hex_parts(v).map_or_else(|| v.to_owned(), |(rgb, _)| format!("#{rgb:06x}"))
+}
+
 pub fn rgb(s: &str) -> Rgb {
     let h = s.trim().trim_start_matches('#');
-    let v = u32::from_str_radix(&h[..h.len().min(6)], 16).unwrap_or(0xff00ff);
+    let v = h.get(..h.len().min(6)).and_then(|h| u32::from_str_radix(h, 16).ok()).unwrap_or(0xff00ff);
     Rgb((v >> 16) as u8, (v >> 8) as u8, v as u8)
 }
 
@@ -607,6 +637,9 @@ impl Settings {
         }
         if !(1.0..=21.0).contains(&self.minimum_contrast) {
             out.push(format!("minimum_contrast {} is outside 1..21", self.minimum_contrast));
+        }
+        if !(0.0..=1.0).contains(&self.window_opacity) {
+            out.push(format!("window_opacity {} is outside 0..1", self.window_opacity));
         }
         if !(6.0..=72.0).contains(&self.font_size) {
             out.push(format!("font_size {} is outside 6..72", self.font_size));
@@ -639,6 +672,11 @@ pub fn theme() -> Rc<Theme> {
 /// A theme color as GPUI paint (magenta if missing, so mistakes show).
 pub fn color(name: &str) -> Hsla {
     theme().get(name).and_then(|v| parse_hex(v)).unwrap_or(gpui::hsla(0.83, 1.0, 0.5, 1.0))
+}
+
+/// A theme color without its alpha, for what must stay readable in a see-through window.
+pub fn solid(name: &str) -> Hsla {
+    Hsla { a: 1.0, ..color(name) }
 }
 
 /// A theme color name, or a literal `#rrggbb[aa]`.
@@ -676,6 +714,21 @@ pub fn write_person(person: &Person) -> std::io::Result<()> {
     crate::persist::write_atomic(&path(), serde_json::to_string_pretty(person).unwrap_or_default() + "\n")
 }
 
+/// The window's root paints the one background of a see-through window: these
+/// layers stack on it (cards on canvas on the root), and alpha at each would
+/// add up to nearly opaque. Overlays stay on `popover`, so they stay readable.
+/// The color stays beside its zero alpha for what reads it as a color. A value
+/// that is no color stays as written: `problems` reports it.
+fn see_through(theme: &mut Theme) {
+    for name in ["background", "surface", "canvas", "chrome"] {
+        if let Some(v) = theme.get_mut(name) {
+            if let Some((rgb, _)) = hex_parts(v) {
+                *v = format!("#{rgb:06x}00");
+            }
+        }
+    }
+}
+
 /// Installs new settings; returns whether anything changed.
 pub fn set(s: Settings) -> bool {
     #[cfg(target_os = "macos")]
@@ -691,7 +744,10 @@ pub fn set(s: Settings) -> bool {
         // have new colors under the same name.
         let (p, mut colors) = palette(&s.theme).unwrap_or_else(|_| (GRAPHITE.clone(), BTreeMap::new()));
         colors.extend(s.colors.clone());
-        let theme = resolve(&p, &colors);
+        let mut theme = resolve(&p, &colors);
+        if s.window_opacity < 1.0 {
+            see_through(&mut theme);
+        }
         if *c.borrow().0 == s && *c.borrow().1 == theme {
             return false;
         }
@@ -910,11 +966,71 @@ mod tests {
         assert_eq!(Settings::compose(&person, &win98.look, true).theme, "ink");
     }
 
+    #[test]
+    fn a_see_through_window_paints_its_background_once() {
+        let person = Person { window_opacity: 0.8, ..Person::default() };
+        let s = Settings::compose(&person, &crate::layout::Look::default(), true);
+        assert_eq!(s.terminal_opacity, 0.0);
+        let opaque = resolve(&GRAPHITE, &BTreeMap::new());
+        let mut theme = opaque.clone();
+        see_through(&mut theme);
+        for name in ["background", "surface", "canvas", "chrome"] {
+            assert_eq!(parse_hex(&theme[name]).unwrap().a, 0.0, "{name}");
+            assert_eq!(rgb(&theme[name]), rgb(&opaque[name]), "{name}");
+        }
+        assert_eq!(theme["popover"], opaque["popover"]);
+    }
+
+    #[test]
+    fn see_through_leaves_a_value_that_is_no_color_as_written() {
+        let colors = [("background".to_owned(), "日本語x".to_owned())].into();
+        let mut theme = resolve(&GRAPHITE, &colors);
+        see_through(&mut theme);
+        assert_eq!(theme["background"], "日本語x");
+    }
+
+    #[test]
+    fn see_through_clears_every_form_of_color_that_paints() {
+        let forms = ["12345678", " #123456", "#123456", "#12345678"];
+        let cleared = forms.map(|v| {
+            let colors = [("background".to_owned(), v.to_owned())].into();
+            let mut theme = resolve(&GRAPHITE, &colors);
+            see_through(&mut theme);
+            theme["background"].clone()
+        });
+        assert_eq!(cleared, ["#12345600"; 4]);
+        for v in &cleared {
+            assert_eq!(parse_hex(v).unwrap().a, 0.0);
+            assert_eq!(rgb(v), Rgb(0x12, 0x34, 0x56));
+        }
+    }
+
+    #[test]
+    fn setting_the_same_see_through_settings_again_changes_nothing() {
+        let (before, person) = (get(), Person { window_opacity: 0.8, ..Person::default() });
+        let s = Settings::compose(&person, &crate::layout::Look::default(), true);
+        set(s.clone());
+        let again = set(s);
+        set((*before).clone());
+        assert!(!again);
+    }
+
+    #[test]
+    fn rgb_shows_magenta_for_text_cut_inside_a_character() {
+        assert_eq!(rgb("ab日本"), Rgb(0xff, 0x00, 0xff));
+    }
+
+    #[test]
+    fn an_opaque_window_keeps_the_layouts_terminal_opacity() {
+        let look = crate::layout::Look { terminal_opacity: Some(0.85), ..Default::default() };
+        assert_eq!(Settings::compose(&Person::default(), &look, true).terminal_opacity, 0.85);
+    }
+
     /// The guide agents read (written to the home folder) explains every
     /// settings.json key.
     #[test]
     fn the_guide_explains_every_setting() {
-        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), ui_font: Some(String::new()), telemetry: false, clipboard_write: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), ..Person::default() };
+        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), ui_font: Some(String::new()), telemetry: false, clipboard_write: false, window_opacity: 0.5, window_blur: true, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), ..Person::default() };
         let keys: Vec<String> = serde_json::to_value(&all).unwrap().as_object().unwrap().keys().cloned().collect();
         let guide = include_str!("../defaults/AGENTS.md");
         let section = guide.split("## The person").nth(1).and_then(|s| s.split("\n## ").next()).unwrap_or_default();

@@ -833,7 +833,13 @@ impl AppWindow {
         if !problems.is_empty() {
             self.report_layout(&problems.join("; "));
         }
+        let background = match (s.window_opacity < 1.0, s.window_blur) {
+            (false, _) => WindowBackgroundAppearance::Opaque,
+            (true, false) => WindowBackgroundAppearance::Transparent,
+            (true, true) => WindowBackgroundAppearance::Blurred,
+        };
         if settings::set(s) {
+            window.set_background_appearance(background);
             for term in self.terms.values() {
                 term.view.read(cx).refresh_theme();
             }
@@ -4572,7 +4578,7 @@ impl Render for AppWindow {
             .key_context(format!("Herdr layout = {}", self.layout_name).as_str())
             .size_full()
             .relative()
-            .bg(c("background"))
+            .bg(settings::solid("background").opacity(settings::get().window_opacity))
             .text_color(c("foreground"))
             .font_family(settings::get().ui_font_family.clone())
             .on_action(cx.listener(|this, a: &ShellAction, w, cx| this.run_action(a.id(), w, cx)))

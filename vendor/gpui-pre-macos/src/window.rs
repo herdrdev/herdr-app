@@ -88,6 +88,15 @@ static mut WINDOW_CLASS: *const Class = ptr::null();
 static mut PANEL_CLASS: *const Class = ptr::null();
 static mut VIEW_CLASS: *const Class = ptr::null();
 static mut BLURRED_VIEW_CLASS: *const Class = ptr::null();
+
+// HERDR: what a blurred window's background uses (points).
+const BLUR_RADIUS: i32 = 30;
+
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn CGSMainConnectionID() -> u32;
+    fn CGSSetWindowBackgroundBlurRadius(connection: u32, window: NSInteger, radius: i32) -> i32;
+}
 static mut WINDOW_STATE_ARCHIVER_DELEGATE_CLASS: *const Class = ptr::null();
 static mut WINDOW_STATE_UNARCHIVER_CLASS: *const Class = ptr::null();
 
@@ -1884,6 +1893,12 @@ impl PlatformWindow for MacWindow {
                 NSColor::colorWithSRGBRed_green_blue_alpha_(nil, 0f64, 0f64, 0f64, 0.0001)
             };
             this.native_window.setBackgroundColor_(background_color);
+
+            // HERDR: the window server's own blur. The effect view below alone
+            // shows no blur on macOS 27.
+            let radius = if background_appearance == WindowBackgroundAppearance::Blurred { BLUR_RADIUS } else { 0 };
+            let number: NSInteger = msg_send![this.native_window, windowNumber];
+            CGSSetWindowBackgroundBlurRadius(CGSMainConnectionID(), number, radius);
 
             if background_appearance != WindowBackgroundAppearance::Blurred {
                 if let Some(blur_view) = this.blurred_view {

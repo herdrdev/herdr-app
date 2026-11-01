@@ -1037,18 +1037,7 @@ pub fn init(cx: &mut App) {
 /// Maps the theme onto the tokens mods read through `cx.theme().colors`.
 pub fn apply_theme(cx: &mut App) {
     let t = crate::settings::theme();
-    let g = |k: &str| t.get(k).cloned().unwrap_or_default();
-    let palette = json!({
-        "background": g("background"), "foreground": g("foreground"),
-        "surface": g("surface"), "surface_foreground": g("foreground"),
-        "primary": g("accent"), "primary_foreground": g("accent_foreground"),
-        "secondary": g("raised"), "secondary_foreground": g("foreground"),
-        "muted": g("raised"), "muted_foreground": g("muted"),
-        "accent": g("hover"), "accent_foreground": g("foreground"),
-        "destructive": g("blocked"), "destructive_foreground": g("background"),
-        "border": g("border"), "input": g("input"), "ring": g("ring"),
-        "selection": g("selection"),
-    });
+    let palette = kit_palette(&t, crate::settings::get().window_opacity < 1.0);
     match serde_json::from_value::<gpui_base::ColorTokens>(palette) {
         Ok(colors) => {
             let theme = gpui_base::Theme::global_mut(cx);
@@ -1057,6 +1046,26 @@ pub fn apply_theme(cx: &mut App) {
         }
         Err(e) => tracing::error!("theme did not map onto mod tokens: {e}"),
     }
+}
+
+/// The theme as the kit's tokens. A see-through window clears `background` and
+/// `surface` from the theme, but the kit paints its own boxes (tooltips,
+/// dialogs, toasts) with `surface` and danger text with `destructive_foreground`,
+/// so those two stay solid here.
+fn kit_palette(t: &crate::settings::Theme, see_through: bool) -> Value {
+    let g = |k: &str| t.get(k).cloned().unwrap_or_default();
+    let (surface, destructive_foreground) = if see_through { (g("popover"), crate::settings::opaque(&g("background"))) } else { (g("surface"), g("background")) };
+    json!({
+        "background": g("background"), "foreground": g("foreground"),
+        "surface": surface, "surface_foreground": g("foreground"),
+        "primary": g("accent"), "primary_foreground": g("accent_foreground"),
+        "secondary": g("raised"), "secondary_foreground": g("foreground"),
+        "muted": g("raised"), "muted_foreground": g("muted"),
+        "accent": g("hover"), "accent_foreground": g("foreground"),
+        "destructive": g("blocked"), "destructive_foreground": destructive_foreground,
+        "border": g("border"), "input": g("input"), "ring": g("ring"),
+        "selection": g("selection"),
+    })
 }
 
 fn capabilities() -> Capabilities {
@@ -1115,6 +1124,23 @@ pub fn prepare_load(inst: &Instance) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_kits_boxes_and_danger_text_stay_solid_in_a_see_through_window() {
+        let mut t = (*crate::settings::theme()).clone();
+        for (name, value) in [("background", "#11223300"), ("surface", "#44556600"), ("popover", "#778899")] {
+            t.insert(name.to_owned(), value.to_owned());
+        }
+        let clear = kit_palette(&t, true);
+        assert_eq!((clear["surface"].as_str(), clear["destructive_foreground"].as_str()), (Some("#778899"), Some("#112233")));
+        let colors = serde_json::from_value::<gpui_base::ColorTokens>(clear).unwrap();
+        assert_eq!((colors.surface.a, colors.destructive_foreground.a), (1.0, 1.0));
+        let window = kit_palette(&t, false);
+        assert_eq!((window["surface"].as_str(), window["destructive_foreground"].as_str()), (Some("#44556600"), Some("#11223300")));
+        // The test's own colors would show the same if the parser dropped alpha.
+        let as_written = serde_json::from_value::<gpui_base::ColorTokens>(window).unwrap();
+        assert_eq!((as_written.surface.a, as_written.destructive_foreground.a), (0.0, 0.0));
+    }
 
     #[cfg(unix)]
     #[test]
