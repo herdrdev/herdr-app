@@ -99,7 +99,7 @@ export default class AgentSetup extends View {
   }
 
   button(t, id, label, onClick, primary = false, enabled = true) {
-    return div().id(id).px(10).h(26).flex().items_center().rounded(6).text_size(12).flex_none()
+    return div().id(id).px(8).h(22).flex().items_center().rounded(6).text_size(12).flex_none()
       .bg(primary && enabled ? t.accent : t.raised).text_color(primary && enabled ? t.background : enabled ? t.foreground : t.dim)
       .when(enabled, (el) => el.cursor_pointer().hover((s) => s.opacity(0.85))
         .on_click((_e, cx) => { cx.stop_propagation(); onClick(cx); }))
@@ -116,11 +116,9 @@ export default class AgentSetup extends View {
   }
 
   card(t, id, title, sub, right) {
-    return h_flex().id(id).w_full().flex_none().gap(6).pl(10).pr(6).py(6).items_center()
-      .border_b(1).border_color(t.border)
-      .child(v_flex().flex_1().min_w(0)
-        .child(div().truncate().text_size(12.5).text_color(t.foreground).child(title))
-        .when(Boolean(sub), (el) => el.child(div().truncate().text_size(11).text_color(t.dim).child(sub))))
+    return h_flex().id(id).w_full().flex_none().h(24).gap(8).px(4).items_center().rounded(4)
+      .child(div().flex_none().max_w(150).truncate().text_size(13).text_color(t.foreground).child(title))
+      .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.dim).child(sub || ""))
       .children(right);
   }
 
@@ -129,7 +127,7 @@ export default class AgentSetup extends View {
   }
 
   box(t) {
-    return v_flex().w_full().flex_none().rounded(8).border(1).border_color(t.border).bg(t.surface).overflow_hidden();
+    return v_flex().w_full().flex_none();
   }
 
   render(cx) {
@@ -145,7 +143,7 @@ export default class AgentSetup extends View {
     const inst = this.box(t).children(installed.length ? installed.map((x) => this.card(t, `as-i-${x.id}`,
       x.name || x.id, mcp ? `${x.summary} · ${x.sources.join(", ")}` : x.description, [
         this.copyBtn(t, `i-${this.kind}-${x.id}`, x.copy),
-        this.button(t, `as-rm-${x.id}`, "Remove", (cx) => this.act(cx, mcp ? ["rm-mcp", this.project, x.id] : ["rm-skill", this.project, x.path])),
+        this.button(t, `as-rm-${x.id}`, "×", (cx) => this.act(cx, mcp ? ["rm-mcp", this.project, x.id] : ["rm-skill", this.project, x.path])),
       ]))
       : [div().w_full().min_h(32).p(10).text_size(12).text_color(t.dim).child(d ? `No ${mcp ? "MCP servers" : "skills"} in this project` : "Loading…")]);
 
@@ -163,8 +161,8 @@ export default class AgentSetup extends View {
       ? ["add-mcp", this.project, this.always ? "1" : "0", ...this.selected]
       : ["add-skills", this.project, ...this.selected]);
 
-    return v_flex().id("agent-setup").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background)
-      .border_1().border_color(t.border).text_color(t.foreground).text_size(13)
+    return v_flex().id("agent-setup").size_full().min_h(0).overflow_hidden().bg(t.background)
+      .text_color(t.foreground).text_size(13)
       .child(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
         .child(div().font_semibold().child("Skills & MCP"))
         .child(div().flex_1().min_w(0).truncate().text_right().text_size(12).text_color(t.dim).child(this.project ? short(this.project) : "")))

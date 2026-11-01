@@ -18,9 +18,12 @@ FIXED = ("System prompt", "System tools", "MCP tools", "MCP server instructions"
 
 
 def num(s):
-    s = s.strip().lstrip("~").lower().replace(",", "")
-    mult = 1_000_000 if s.endswith("m") else 1000 if s.endswith("k") else 1
-    return int(float(s.rstrip("km") or 0) * mult)
+    # "12.3k", "~1.2m", "4,096", "< 20" (Claude Code prints tiny counts as "< 20").
+    m = re.search(r"([\d.]+)\s*([km]?)", s.lower().replace(",", ""))
+    if not m:
+        return 0
+    mult = {"m": 1_000_000, "k": 1000}.get(m.group(2), 1)
+    return int(float(m.group(1)) * mult)
 
 
 def slug(cwd):

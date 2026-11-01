@@ -111,15 +111,14 @@ export default class Launch extends View {
   }
 
   row(t, id, { icon, title, sub, count, extra = [], onClick, onEdit, tip, depth = 0 }) {
-    return h_flex().id(id).w_full().flex_none().min_h(52).pl(12 + depth * 8).pr(8).gap(12).items_center()
-      .rounded(8).cursor_pointer().hover((s) => s.bg(t.hover))
+    return h_flex().id(id).w_full().flex_none().h(24).pl(6 + depth * 18).pr(4).gap(8).items_center()
+      .rounded(4).cursor_pointer().hover((s) => s.bg(t.hover))
       .on_click((_e, cx) => onClick(cx))
       .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); onEdit(); })
       .tooltip(tip)
       .when(Boolean(icon), (el) => el.child(icon))
-      .child(v_flex().flex_1().min_w(0)
-        .child(div().truncate().text_size(13.5).font_medium().text_color(t.foreground).child(title))
-        .child(div().truncate().text_size(11.5).text_color(t.dim).child(sub)))
+      .child(div().flex_none().max_w(140).truncate().text_size(13).text_color(t.foreground).child(title))
+      .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(t.dim).child(sub))
       .when(count > 0, (el) => el.child(div().flex_none().text_size(11.5).text_color(t.dim).child(String(count))))
       .children(extra);
   }
@@ -129,7 +128,7 @@ export default class Launch extends View {
     if (this.mode === "edit") return this.renderEdit(t);
     const d = this.data, n = running();
     const chat = this.mode === "commands";
-    const sep = () => div().flex_none().h(1).mx(8).bg(t.border);
+    const sep = () => div().flex_none().h(4);
     const a = chat ? target() : null;
 
     const rows = [];
@@ -138,7 +137,7 @@ export default class Launch extends View {
         const main = g[0], key = main.command, open = this.open.has(key);
         if (gi) rows.push(sep());
         rows.push(this.row(t, `ln-${main.id}`, {
-          icon: this.icon(t, main, 26), title: cap(main.label), sub: main.line, count: n[main.command] ?? 0,
+          icon: this.icon(t, main, 15), title: cap(main.label), sub: main.line, count: n[main.command] ?? 0,
           tip: main.line, onClick: () => this.start(main), onEdit: () => this.dialog("launcher", main),
           extra: g.length > 1 ? [
             this.iconBtn(t, `ln-start-${key}`, "+", `Start ${main.label}`, () => this.start(main)),
@@ -146,7 +145,7 @@ export default class Launch extends View {
               (cx) => { open ? this.open.delete(key) : this.open.add(key); cx.notify(); }),
           ] : [],
         }));
-        if (open) rows.push(v_flex().flex_none().mx(6).rounded(8).bg(t.surface).children(g.slice(1).map((v) =>
+        if (open) rows.push(v_flex().flex_none().children(g.slice(1).map((v) =>
           this.row(t, `ln-${v.id}`, { title: cap(v.label), sub: v.line, tip: v.line, depth: 1,
             onClick: () => this.start(v), onEdit: () => this.dialog("launcher", v) }))));
       });
@@ -155,7 +154,7 @@ export default class Launch extends View {
       d.chat.forEach((c, i) => {
         if (i) rows.push(sep());
         rows.push(this.row(t, `ch-${c.id}`, {
-          icon: div().w(26).flex_none().text_size(15).font_semibold().text_color(t.accent).child(c.text.trim().startsWith("/") ? "/" : "›"),
+          icon: div().w(15).flex_none().text_size(13).font_semibold().text_color(t.accent).child(c.text.trim().startsWith("/") ? "/" : "›"),
           title: c.label, sub: c.text.trim() + (c.submit ? "" : "  (types, no Enter)"),
           tip: a ? `Send to ${a.program?.name || a.title}` : "No agent in this tab",
           onClick: (cx) => this.send(cx, c), onEdit: () => this.dialog("chat", c),
@@ -165,8 +164,8 @@ export default class Launch extends View {
     }
 
     const where = chat ? (a ? `→ ${a.program?.name || a.title}` : "no agent here") : (folder() ? `in ${folder().split("/").pop() || "/"}` : "");
-    return v_flex().id(`launch-${this.mode}`).size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background)
-      .border_1().border_color(t.border).text_color(t.foreground).text_size(13)
+    return v_flex().id(`launch-${this.mode}`).size_full().min_h(0).overflow_hidden().bg(t.background)
+      .text_color(t.foreground).text_size(13)
       .child(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
         .child(div().font_semibold().child(chat ? "Chat commands" : "Launch"))
         .child(div().flex_1().min_w(0).truncate().text_size(11.5).text_color(chat && !a ? t.blocked : t.dim).child(where))

@@ -77,8 +77,8 @@ export default class Context extends View {
         .on_click((_e, cx) => { cx.stop_propagation(); this.load(cx, true); }).child(this.busy ? "…" : "↻"));
 
     const body = v_flex().id("ctx-body").flex_1().min_h(0).p(14).gap(10).overflow_y_scroll();
-    const frame = (inner) => v_flex().id("context").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background)
-      .border_1().border_color(t.border).text_color(t.foreground).text_size(13).child(head).when(Boolean(inner), (el) => el.child(inner));
+    const frame = (inner) => v_flex().id("context").size_full().min_h(0).overflow_hidden().bg(t.background)
+      .text_color(t.foreground).text_size(13).child(head).when(Boolean(inner), (el) => el.child(inner));
 
     if (this.folded) return frame(null);
     if (!d) return frame(body.child(div().text_size(12).text_color(this.error ? t.blocked : t.dim)
