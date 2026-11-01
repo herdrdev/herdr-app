@@ -84,6 +84,8 @@ jobs:
       - name: Windows build dependencies
         if: runner.os == 'Windows'
         run: echo "LIBCLANG_PATH=C:\\Program Files\\LLVM\\bin" >> "$GITHUB_ENV"
+      - name: Test standalone subscription mod
+        run: node --test examples/subscription-usage/*.test.mjs
       - name: Keep unchanged sources fresh
         run: scripts/ci-sources restore
       # Compile the screenshot harness everywhere, even without a desktop.
