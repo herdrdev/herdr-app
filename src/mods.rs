@@ -4,7 +4,7 @@
 use crate::layout::Node;
 use gpui::App;
 use gpui_shell::{Capabilities, ExecuteGrant, HostError, HostModule, HostObject, HostValue, NetworkGrant};
-use serde::Deserialize;
+use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::cell::RefCell;
 use std::path::{Path, PathBuf};
@@ -338,6 +338,50 @@ pub struct Hint {
     pub place: Option<String>,
     #[serde(default)]
     pub size: Option<f32>,
+    /// A tab-bar button for the mod: `{ label, icon?, opens?: "panel" | "tab", order? }`.
+    /// Kept loose so a bad button never loses `place`; [`buttons`] checks it.
+    #[serde(default)]
+    pub button: Option<Value>,
+}
+
+/// A button a mod declares in its mod.json, for layouts' tab bars (`modButtons()`).
+#[derive(Serialize, Clone, PartialEq, Debug)]
+pub struct Button {
+    #[serde(rename = "mod")]
+    pub name: String,
+    pub label: String,
+    /// The icon's path from the app home (`mods/<name>/<icon>`), for `svg()`.
+    pub icon: Option<String>,
+    /// `"panel"`: shown in the side panel (a `panel-body` stack); `"tab"`: a tab of its own.
+    pub opens: &'static str,
+    pub order: f64,
+}
+
+/// The buttons that installed mods declare, in `order`, then label order.
+/// Herdr's own frame mods don't get one.
+pub fn buttons<'a>(found: impl IntoIterator<Item = &'a Found>) -> Vec<Button> {
+    let mut out: Vec<Button> = found
+        .into_iter()
+        .filter(|f| f.dir.parent() == Some(mods_dir().as_path()))
+        .filter_map(|f| {
+            let b = f.hint.button.as_ref()?.as_object()?;
+            let label = b.get("label")?.as_str()?.trim();
+            if label.is_empty() {
+                return None;
+            }
+            // Only an SVG in the mod's own folder.
+            let icon = b.get("icon").and_then(Value::as_str).filter(|i| i.ends_with(".svg") && valid_name(i.trim_end_matches(".svg")) && f.dir.join(i).is_file());
+            Some(Button {
+                name: f.id.clone(),
+                label: label.to_owned(),
+                icon: icon.map(|i| format!("mods/{}/{i}", f.id)),
+                opens: if b.get("opens").and_then(Value::as_str) == Some("tab") { "tab" } else { "panel" },
+                order: b.get("order").and_then(Value::as_f64).unwrap_or(100.0),
+            })
+        })
+        .collect();
+    out.sort_by(|a, b| a.order.total_cmp(&b.order).then_with(|| a.label.cmp(&b.label)));
+    out
 }
 
 #[derive(Clone)]
@@ -562,12 +606,14 @@ pub struct Snapshot {
     pub floats: Value,
     /// { platform, titlebar, buttons, maximized, fullscreen, active }.
     pub window: Value,
+    /// The tab-bar buttons installed mods declare ([`Button`]).
+    pub buttons: Value,
 }
 
 impl Default for Snapshot {
     /// Lists start empty, never null, so mods can map over them right away.
     fn default() -> Self {
-        Snapshot { layout: Value::Null, spaces: json!([]), machines: json!([]), agents: json!([]), panes: json!([]), terminals: json!([]), focused: Value::Null, floats: json!({}), window: Value::Null }
+        Snapshot { layout: Value::Null, spaces: json!([]), machines: json!([]), agents: json!([]), panes: json!([]), terminals: json!([]), focused: Value::Null, floats: json!({}), window: Value::Null, buttons: json!([]) }
     }
 }
 
@@ -612,6 +658,10 @@ pub fn publish_floats(v: Value) -> bool {
 }
 pub fn publish_window(v: Value) -> bool {
     publish(|s| (std::mem::replace(&mut s.window, v.clone()), v))
+}
+pub fn publish_buttons(buttons: &[Button]) -> bool {
+    let v = serde_json::to_value(buttons).unwrap_or_else(|_| json!([]));
+    publish(|s| (std::mem::replace(&mut s.buttons, v.clone()), v))
 }
 pub fn publish_focused(v: Value) -> bool {
     publish(|s| (std::mem::replace(&mut s.focused, v.clone()), v))
@@ -964,6 +1014,7 @@ fn module(inst: Instance, copy: u64) -> HostModule {
         .function("focused", |_| Ok(read(|s| &s.focused)))
         .function("layout", |_| Ok(read(|s| &s.layout)))
         .function("layouts", |_| Ok(to_host(&json!(crate::window::layout_names()))))
+        .function("modButtons", |_| Ok(read(|s| &s.buttons)))
         .function("commands", |_| {
             let list: Vec<Value> = crate::commands::COMMANDS
                 .iter()

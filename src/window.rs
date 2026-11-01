@@ -920,6 +920,9 @@ impl AppWindow {
         } else {
             fill_ids(&mut chrome, &mut self.model);
         }
+        let buttons = mods::buttons(self.folders.values());
+        add_mod_panels(&mut chrome, &buttons);
+        mods::publish_buttons(&buttons);
         self.file_chrome = chrome.clone();
         let mut state = read_state(name);
         if self.layout_file_ok {
@@ -993,6 +996,7 @@ impl AppWindow {
                 let was_broken = !self.layout_file_ok;
                 self.layout_file_ok = true;
                 self.keep_ids(&mut n);
+                add_mod_panels(&mut n, &mods::buttons(self.folders.values()));
                 // What the file now sets on purpose wins over a click on it.
                 // Coming back from a broken file, the clicks are the saved ones
                 // (what showed meanwhile was only the shipped stand-in).
@@ -1058,7 +1062,7 @@ impl AppWindow {
             if !self.written_layout.is_empty() && on_disk != self.written_layout {
                 tracing::info!("layouts/{}.json changed meanwhile: not overwritten", self.layout_name);
             } else {
-                let layout = layout_sync::text_of(&edited);
+                let layout = layout_sync::text_of(&without_mod_panels(&edited));
                 if write_atomic(&path, &layout) {
                     self.written_layout = layout;
                     self.file_chrome = edited;
@@ -3048,7 +3052,9 @@ impl AppWindow {
                 if let Err(e) = mods::clone_mod(name, &to) {
                     return self.fail(format!("cannot clone mod: {e}"));
                 }
+                let before = mods::buttons(self.folders.values());
                 self.folders = mods::scan().into_iter().map(|f| (f.id.clone(), f)).collect();
+                self.buttons_changed(&before, window, cx);
             }
             "layout.set" if shipped_layouts().contains(&self.layout_name.as_str()) => {
                 let n = match serde_json::from_value::<Node>(a.get("layout").cloned().unwrap_or_default()) {
@@ -3069,7 +3075,9 @@ impl AppWindow {
             }
             // A deliberate edit: the file becomes this tree, clicks start over.
             "layout.set" => match serde_json::from_value::<Node>(a.get("layout").cloned().unwrap_or_default()) {
-                Ok(mut n) => {
+                Ok(n) => {
+                    // `layout()` shows the panel blocks Herdr adds; they don't belong in the file.
+                    let mut n = without_mod_panels(&n);
                     fill_ids(&mut n, &mut self.model);
                     let text = layout_sync::text_of(&n);
                     if !write_atomic(&layout_path(&self.layout_name), &text) {
@@ -3077,6 +3085,7 @@ impl AppWindow {
                     }
                     self.written_layout = text;
                     self.layout_file_ok = true;
+                    add_mod_panels(&mut n, &mods::buttons(self.folders.values()));
                     self.file_chrome = n.clone();
                     self.chrome = n;
                     self.picked_theme = None;
@@ -3681,6 +3690,21 @@ impl AppWindow {
         }
     }
 
+    /// When the buttons mods declare differ from `before`: the layout is read again
+    /// with the person's clicks (so panel blocks come and go) and every mod re-renders
+    /// (a tab button changes no layout). Returns whether they differed.
+    fn buttons_changed(&mut self, before: &[mods::Button], window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if mods::buttons(self.folders.values()) == before {
+            return false;
+        }
+        self.save();
+        let name = self.layout_name.clone();
+        self.load_layout(&name);
+        self.apply_look(window, cx);
+        self.refresh_mods(cx);
+        true
+    }
+
     fn sync_folders(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.runtime.is_none() {
             return;
@@ -3690,7 +3714,9 @@ impl AppWindow {
         let added = found.keys().any(|k| !self.folders.contains_key(k));
         let removed = self.folders.keys().any(|k| !found.contains_key(k));
         let fresh: Vec<Found> = found.values().filter(|f| !self.seen.contains(&f.id)).cloned().collect();
+        let before = mods::buttons(self.folders.values());
         self.folders = found;
+        let buttons_changed = self.buttons_changed(&before, window, cx);
 
         // Copies that failed get another try when their folder changes; loaded ones hot-reload.
         let retry: Vec<String> = self.copies.iter().filter(|(_, c)| c.root.is_none() && (edited.contains(&c.inst.name) || added)).map(|(s, _)| s.clone()).collect();
@@ -3712,7 +3738,7 @@ impl AppWindow {
                 dock(&mut self.chrome, block, place, self.model.fresh_id("r"));
             }
         }
-        if !retry.is_empty() || added || removed {
+        if !retry.is_empty() || added || removed || buttons_changed {
             self.sync(window, cx);
         }
     }
@@ -4423,6 +4449,56 @@ fn fill_ids(n: &mut Node, m: &mut Model) {
     n.fill_ids(&mut || m.fresh_id("n"));
 }
 
+/// The id of the block Herdr adds to `panel-body` for a mod's panel button.
+fn mod_panel_id(name: &str) -> String {
+    format!("mod-panel-{name}")
+}
+
+/// Whether `n` is a block that `add_mod_panels` added.
+fn is_mod_panel(n: &Node) -> bool {
+    matches!(n.content(), Some(Content::Mod { name, .. }) if n.id == mod_panel_id(name))
+}
+
+/// Adds a block (id `mod-panel-<name>`) to every `panel-body` stack for each mod that
+/// declares a panel button and isn't in it yet. Only the shown tree gets it: `save`
+/// and `layout.set` leave it out of a layout's file (`without_mod_panels`).
+fn add_mod_panels(root: &mut Node, buttons: &[mods::Button]) {
+    let ids: HashSet<String> = root.walk().iter().map(|n| n.id.clone()).collect();
+    fn add(n: &mut Node, buttons: &[mods::Button], ids: &HashSet<String>) {
+        if n.id == "panel-body"
+            && matches!(n.kind, Kind::Stack { .. })
+            && let Some(children) = n.children_mut()
+        {
+            for b in buttons.iter().filter(|b| b.opens == "panel") {
+                let id = mod_panel_id(&b.name);
+                let shown = children.iter().any(|c| matches!(c.content(), Some(Content::Mod { name, .. }) if *name == b.name));
+                // An id the layout already uses elsewhere would make two nodes answer to it.
+                if !shown && !ids.contains(&id) {
+                    children.push(Node::block(id, Content::Mod { name: b.name.clone(), props: json!({ "slot": "panel" }) }));
+                }
+            }
+            return;
+        }
+        for c in n.children_mut().into_iter().flatten() {
+            add(c, buttons, ids);
+        }
+    }
+    add(root, buttons, &ids);
+}
+
+/// `root` without the blocks `add_mod_panels` added: what a layout's file keeps.
+fn without_mod_panels(root: &Node) -> Node {
+    let mut out = root.clone();
+    fn strip(n: &mut Node) {
+        if let Some(children) = n.children_mut() {
+            children.retain(|c| !is_mod_panel(c));
+            children.iter_mut().for_each(strip);
+        }
+    }
+    strip(&mut out);
+    out
+}
+
 /// Puts a block along one side of the chrome.
 fn dock(root: &mut Node, block: Node, place: &str, wrapper_id: String) {
     let axis = if matches!(place, "top" | "bottom") { Axis::Column } else { Axis::Row };
@@ -4766,6 +4842,31 @@ mod tests {
             let tile = atlas.get_or_insert_with(key.clone(), &mut build).unwrap().unwrap();
             assert_eq!(tile == tiles[index], index >= 3);
         }
+    }
+
+    #[test]
+    fn mod_panels_join_the_panel_body_stack_once() {
+        let button = |name: &str, opens: &'static str| crate::mods::Button { name: name.into(), label: name.into(), icon: None, opens, order: 100.0 };
+        let buttons = [button("prs", "panel"), button("issues", "tab"), button("files", "panel")];
+        let mut main = super::default_layout("main");
+        super::add_mod_panels(&mut main, &buttons);
+        super::add_mod_panels(&mut main, &buttons);
+        let body = main.find("panel-body").unwrap();
+        let ids: Vec<&str> = body.children().iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(ids, ["files", "changes", "mod-panel-prs"]);
+        assert!(matches!(body.children()[2].content(), Some(super::Content::Mod { name, props }) if name == "prs" && props["slot"] == "panel"));
+        // What a layout's file keeps: the shipped tree, without the added block.
+        assert!(super::without_mod_panels(&main) == super::default_layout("main"));
+        // A mod named like a layout node gets its own id, never a second "status".
+        let mut main = super::default_layout("main");
+        super::add_mod_panels(&mut main, &[button("status", "panel")]);
+        assert_eq!(main.walk().iter().filter(|n| n.id == "status").count(), 1);
+        assert!(main.find("mod-panel-status").is_some());
+        // A layout without a panel-body stack stays as it is.
+        let mut terminals = super::default_layout("terminals");
+        let before = terminals.clone();
+        super::add_mod_panels(&mut terminals, &buttons);
+        assert!(terminals == before);
     }
 
     #[test]

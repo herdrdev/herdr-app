@@ -78,7 +78,7 @@ fn fixture(populated: bool, props: Value, update: Value) -> BTreeMap<String, Val
         ("machines".into(), json!([{ "name": null, "layout": "ready" }])),
         ("spaces".into(), json!([])), ("agents".into(), json!([])), ("terminals".into(), json!([])), ("panes".into(), json!([])), ("focused".into(), Value::Null),
         ("layout".into(), serde_json::from_str(include_str!("../../defaults/layouts/main.json")).unwrap()),
-        ("layouts".into(), json!(crate::window::shipped_layouts())),
+        ("layouts".into(), json!(crate::window::shipped_layouts())), ("modButtons".into(), json!([])),
         ("theme".into(), serde_json::to_value(&*crate::settings::theme()).unwrap()),
         ("settings".into(), serde_json::to_value(crate::settings::Settings::default()).unwrap()),
         ("themes".into(), json!([{"name":"graphite", "colors": &*crate::settings::theme()}])),  ("fonts".into(), json!(["Monospace", "Sans"])),
@@ -320,6 +320,37 @@ fn tabs_leave_room_for_macos_traffic_lights(cx: &mut TestAppContext) {
         assert!(root.contains(&format!(".pl[Number({expected}.0)]")), "{platform}/{titlebar}/{fullscreen}/{width}/{lights}: {tree}");
         assert!(tree.contains("tab-tab1"), "first tab must remain visible: {tree}");
     }
+}
+
+#[gpui::test]
+fn tabs_show_buttons_that_mods_declare(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut values = fixture(true, props(), updates("current", "current"));
+    values.insert("modButtons".into(), json!([
+        {"mod":"board","label":"Board","icon":"mods/board/board.svg","opens":"panel","order":10},
+        {"mod":"notes","label":"Notes","icon":null,"opens":"tab","order":20},
+        {"mod":"gone","label":"Gone","icon":null,"opens":"panel","order":30},
+    ]));
+    // Herdr adds the panel block of "board"; "gone" has none, so it gets no button.
+    let tree = {
+        let layout = values.get_mut("layout").unwrap();
+        fn add(n: &mut Value) {
+            if n["id"] == "panel-body" {
+                n["children"].as_array_mut().unwrap().push(json!({"id":"mod-panel-board","type":"block","content":{"mod":"board","props":{"slot":"panel"}}}));
+            }
+            for c in n["children"].as_array_mut().into_iter().flatten() {
+                add(c);
+            }
+        }
+        add(layout);
+        describe_with_values(cx, &staged, "mods/tabs", values, None).unwrap()
+    };
+    assert!(tree.contains("panel-mod-panel-board") && tree.contains("mods/board/board.svg"), "{tree}");
+    assert!(tree.contains("tab-mod-notes"), "{tree}");
+    assert!(!tree.contains("Gone"), "{tree}");
+    let (files, board, notes) = (tree.find("panel-files").unwrap(), tree.find("panel-mod-panel-board").unwrap(), tree.find("tab-mod-notes").unwrap());
+    assert!(files < board && board < notes, "buttons follow Files and Changes, in order: {tree}");
 }
 
 #[gpui::test]

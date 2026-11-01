@@ -1,6 +1,6 @@
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { spaces, panes, run, openOverlay, theme, window, shared, layout, settings } from "herdr";
+import { spaces, panes, run, openOverlay, theme, window, shared, layout, settings, modButtons } from "herdr";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -78,16 +78,29 @@ export default class Tabs extends View {
       : 10;
     const panel = find(root, "panel"), body = find(root, "panel-body");
     const enabled = shared("workspace.panels") ?? ["files", "changes"];
-    this.syncPanel(space, panel, body, enabled);
+    // Buttons that installed mods declare in mod.json. A "panel" one shows the
+    // panel-body child that holds the mod (Herdr adds it); a "tab" one, its own tab.
+    const declared = (modButtons() ?? []).map(b => ({ ...b, id: b.opens === "panel" ? (body?.children ?? []).find(c => c.content?.mod === b.mod)?.id : null }))
+      .filter(b => b.opens === "tab" || b.id);
+    this.syncPanel(space, panel, body, [...enabled, ...declared.filter(b => b.id).map(b => b.id)]);
+    const chip = (id, label, icon, on, click) => h_flex().id(id).h(26).px(8).gap(5).flex_none().items_center().rounded(6)
+      .text_size(12).bg(on ? t.selected : t.chrome).text_color(on ? t.foreground : t.muted)
+      .hover(s => s.bg(t.hover)).on_mouse_down("left", stop).on_click(click)
+      .when(Boolean(icon), el => el.child(svg(icon).size(14))).child(label);
     const panelButton = (id, label, icon) => {
       const on = panel && !panel.hidden && body?.active === id;
-      return h_flex().id(`panel-${id}`).h(26).px(8).gap(5).flex_none().items_center().rounded(6)
-        .text_size(12).bg(on ? t.selected : t.chrome).text_color(on ? t.foreground : t.muted)
-        .hover(s => s.bg(t.hover)).on_mouse_down("left", stop)
-        .on_click(() => {
-          if (on) run("layout.hide", { id: "panel" });
-          else { run("layout.select", { stack: "panel-body", child: id }); run("layout.show", { id: "panel" }); }
-        }).child(svg(icon).size(14)).child(label);
+      return chip(`panel-${id}`, label, icon, on, () => {
+        if (on) run("layout.hide", { id: "panel" });
+        else { run("layout.select", { stack: "panel-body", child: id }); run("layout.show", { id: "panel" }); }
+      });
+    };
+    // The tab named after the button that shows the mod, in this space, or a new one.
+    const tabButton = b => {
+      const tab = shown.find(c => c.name === b.label && panes().some(p => p.tab === c.id && p.mod === b.mod));
+      return chip(`tab-mod-${b.mod}`, b.label, b.icon, Boolean(tab?.active), () => {
+        if (tab) run("tab.select", { id: tab.id });
+        else run("tab.new", { name: b.label, mod: b.mod });
+      });
     };
     return h_flex().size_full().min_w(0).px(10).pl(lightsPadding).gap(3).items_center().bg(t.chrome).border_b(1).border_color(t.border)
       .on_mouse_up("left", () => { this.pressed = null; })
@@ -96,6 +109,7 @@ export default class Tabs extends View {
       .child(button("tab-new", "+", () => openOverlay({ mod: "new-menu", kind: "popup", width: 250, height: 512 })))
       .when(enabled.includes("files"), el => el.child(panelButton("files", "Files", "mods/files/file.svg")))
       .when(enabled.includes("changes"), el => el.child(panelButton("changes", "Changes", "mods/changes/changes.svg")))
+      .children(declared.map(b => (b.opens === "tab" ? tabButton(b) : panelButton(b.id, b.label, b.icon))))
       .when(w?.buttons, el => el.child(button("minimize", w.platform === "windows" ? svg("mods/tabs/win-min.svg").size(16) : "−", () => run("window.minimize")))
         .child(button("maximize", w.platform === "windows" ? svg(`mods/tabs/${w.maximized ? "win-restore" : "win-max"}.svg`).size(16) : "□", () => run("window.maximize")))
         .child(button("close-window", w.platform === "windows" ? svg("mods/tabs/win-close.svg").size(16) : svg("mods/pane/close.svg").size(13), () => run("window.close"))));

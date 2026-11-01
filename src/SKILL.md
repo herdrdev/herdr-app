@@ -88,6 +88,8 @@ those files or the generated guide. The app rewrites them on start.
 - Home defaults to `~/.config/herdr-app`; `HERDR_APP_HOME` selects another.
 - Mods live in `mods/<name>/` with `main.js` and optional `mod.json`.
   They are trusted JavaScript with command and network access.
+  A `button` in `mod.json` puts a mod in the tab bar (side panel or tab)
+  without cloning a layout.
 - Shipped mods belong to Herdr: duplicate with `mod.clone` before editing.
   Shipped layouts likewise use `layout.clone` for a personal copy.
   Discover required arguments with `herdr-app commands`.
