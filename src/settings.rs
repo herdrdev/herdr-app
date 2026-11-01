@@ -1006,6 +1006,16 @@ mod tests {
     }
 
     #[test]
+    fn setting_the_same_see_through_settings_again_changes_nothing() {
+        let (before, person) = (get(), Person { window_opacity: 0.8, ..Person::default() });
+        let s = Settings::compose(&person, &crate::layout::Look::default(), true);
+        set(s.clone());
+        let again = set(s);
+        set((*before).clone());
+        assert!(!again);
+    }
+
+    #[test]
     fn rgb_shows_magenta_for_text_cut_inside_a_character() {
         assert_eq!(rgb("ab日本"), Rgb(0xff, 0x00, 0xff));
     }
