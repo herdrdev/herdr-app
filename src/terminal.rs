@@ -1913,6 +1913,36 @@ fn fallback_size(c: &vt::Cell, font: &Font, width: Pixels, ts: &gpui::WindowText
     (line.width() > width).then(|| size * f32::from(width) / f32::from(line.width()))
 }
 
+/// An input method's composing text laid on the grid as the terminal lays
+/// out committed text: a wide character (kana, kanji, Hangul) takes two
+/// cells, a combining mark stays with the character before it. Each piece
+/// as (column, byte range), and the columns in all.
+fn marked_cells(text: &str) -> (Vec<(usize, std::ops::Range<usize>)>, usize) {
+    use unicode_width::UnicodeWidthChar as _;
+    let mut pieces: Vec<(usize, std::ops::Range<usize>)> = Vec::new();
+    let mut cols = 0;
+    for (i, ch) in text.char_indices() {
+        let end = i + ch.len_utf8();
+        match (ch.width().unwrap_or(0), pieces.last_mut()) {
+            (0, Some((_, range))) => range.end = end,
+            (w, _) => {
+                pieces.push((cols, i..end));
+                cols += w.max(1);
+            }
+        }
+    }
+    (pieces, cols)
+}
+
+/// The column of the composing text's UTF-16 offset `at` (input methods count in UTF-16).
+fn marked_column(text: &str, at: usize) -> usize {
+    let (pieces, cols) = marked_cells(text);
+    pieces
+        .iter()
+        .find(|(_, range)| text[..range.end].encode_utf16().count() > at)
+        .map_or(cols, |(col, _)| *col)
+}
+
 /// One piece of a row's drawing, in cells from the row's start.
 enum RowOp {
     Bg { from: usize, to: usize, color: Hsla },
@@ -2286,22 +2316,28 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     }
     // What an input method is composing, at the cursor (hidden or not):
     // underlined, on the terminal's background so the cells under it don't
-    // show through.
+    // show through. On the grid as the committed text will be (kana and kanji
+    // two cells each), so committing doesn't move the characters.
     if let (Some((cx_, cy_)), Some(text)) = (frame.cursor_cell, marked.filter(|t| !t.is_empty())) {
-        let p = at(cx_ as usize, cy_ as usize);
+        let (x, y) = (cx_ as usize, cy_ as usize);
         let fg = hsla(vt::theme().fg);
-        let run = TextRun {
-            len: text.len(),
-            font: cell_font(false, false),
-            color: fg,
-            background_color: None,
-            underline: None,
-            strikethrough: None,
-        };
-        let line = window.text_system().shape_line(text.into(), px(crate::settings::font_size()), &[run], None);
-        window.paint_quad(fill(snap_box(Bounds::new(p, size(line.width, cell.height))), hsla(frame.bg)));
-        paint_cell_text(&line, p, metrics, window, cx);
-        let underline = Bounds::new(p + point(px(0.0), metrics.underline), size(line.width, metrics.underline_thickness));
+        let (pieces, cols) = marked_cells(&text);
+        let width = cell.width * cols as f32;
+        window.paint_quad(fill(snap_box(Bounds::new(at(x, y), size(width, cell.height))), hsla(frame.bg)));
+        for (col, range) in pieces {
+            let run = TextRun {
+                len: range.len(),
+                font: cell_font(false, false),
+                color: fg,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let line = window.text_system().shape_line(text[range].to_owned().into(), px(crate::settings::font_size()), &[run], None);
+            paint_cell_text(&line, at(x + col, y), metrics, window, cx);
+        }
+        // One line under the whole text, not one per character.
+        let underline = Bounds::new(at(x, y) + point(px(0.0), metrics.underline), size(width, metrics.underline_thickness));
         window.paint_quad(fill(snap_box(underline), fg));
     }
     {
@@ -2388,7 +2424,9 @@ impl EntityInputHandler for TerminalView {
     fn bounds_for_range(&mut self, range: std::ops::Range<usize>, _element: Bounds<Pixels>, _w: &mut Window, _cx: &mut Context<Self>) -> Option<Bounds<Pixels>> {
         let g = self.grid.borrow();
         let at = g.cursor_at?;
-        Some(Bounds::new(at.origin + point(g.cell.width * range.start as f32, px(0.0)), at.size))
+        // The candidate window goes under the character being converted, in cells.
+        let col = g.marked.as_deref().map_or(range.start, |m| marked_column(m, range.start));
+        Some(Bounds::new(at.origin + point(g.cell.width * col as f32, px(0.0)), at.size))
     }
 
     fn character_index_for_point(&mut self, _point: Point<Pixels>, _w: &mut Window, _cx: &mut Context<Self>) -> Option<usize> {
@@ -3548,6 +3586,26 @@ mod tests {
         cx.run_until_parked();
         root.read_with(cx, |root, cx| assert!(root.0.read(cx).search_open));
         assert!(cx.debug_bounds("find-bar").is_some());
+    }
+
+    #[test]
+    fn composing_text_takes_the_cells_committed_text_will() {
+        use super::{marked_cells, marked_column};
+        let cols = |t: &str| marked_cells(t).0.iter().map(|(c, _)| *c).collect::<Vec<_>>();
+        // Kana are two cells each, as the terminal draws them once committed.
+        assert_eq!(cols("おはよう"), vec![0, 2, 4, 6]);
+        assert_eq!(marked_cells("おはよう").1, 8);
+        // Romaji still being typed, mixed with kana.
+        assert_eq!(cols("おhay"), vec![0, 2, 3, 4]);
+        // A combining mark (か + ゛) stays in its character's cells.
+        let (pieces, n) = marked_cells("か\u{3099}う");
+        assert_eq!((pieces, n), (vec![(0, 0..6), (2, 6..9)], 4));
+        // The candidate window goes under the clause being converted.
+        assert_eq!(marked_column("今日は", 0), 0);
+        assert_eq!(marked_column("今日は", 2), 4);
+        assert_eq!(marked_column("今日は", 3), 6);
+        // Outside the BMP: two UTF-16 units, still one wide character.
+        assert_eq!(marked_column("𠮷野", 2), 2);
     }
 
     #[test]
