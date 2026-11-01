@@ -139,20 +139,20 @@ export default class extends View {
 }
 
 #[gpui::test]
-fn props_name_the_block_and_keep_what_the_layout_gave(cx: &mut TestAppContext) {
+fn block_id_names_the_copy_and_props_stay_as_given(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let fixture = Fixture::new(r#"
 import { View, div } from "gpui-kit";
-import { props } from "herdr";
+import { props, blockId } from "herdr";
 import { note } from "fixture";
 export default class extends View {
-  init() { note(JSON.stringify(props())); }
+  init() { note(JSON.stringify([props(), blockId()])); }
   render() { return div(); }
 }"#);
     let runtime = ShellRuntime::new_isolated().unwrap();
     let window = cx.add_window(|_, _| Empty);
-    // No props, an object, and a value that isn't one (left as it was).
-    for (given, seen) in [(Value::Null, json!({"block": "side"})), (json!({"x": 1}), json!({"x": 1, "block": "side"})), (json!("plain"), json!("plain"))] {
+    for given in [Value::Null, json!({"x": 1}), json!("plain")] {
+        let seen = json!([given.clone(), "side"]);
         let notes = Rc::new(RefCell::new(Vec::new()));
         let calls = notes.clone();
         gpui_shell::policy::set_default(Policy::new()

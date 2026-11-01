@@ -338,7 +338,7 @@ pub struct Hint {
     pub place: Option<String>,
     #[serde(default)]
     pub size: Option<f32>,
-    /// `pane.go` can give it the keyboard (`focused().block`).
+    /// `pane.go` can give it the keyboard (`focused().blockId`).
     #[serde(default)]
     pub focusable: bool,
 }
@@ -840,12 +840,8 @@ fn exec_future(command: String, args: Vec<String>, cwd: Option<String>, on: Opti
 }
 
 fn module(inst: Instance, copy: u64, slot: &str) -> HostModule {
-    // Told its block id here, not in `inst.props`: those name its storage file.
-    // Props that aren't an object stay as the layout gave them.
-    let mut props = if inst.props.is_null() { json!({}) } else { inst.props.clone() };
-    if let Some(o) = props.as_object_mut() {
-        o.insert("block".into(), json!(slot));
-    }
+    let props = inst.props.clone();
+    let slot = slot.to_owned();
     let feedback_frame = inst.name == "frame-feedback";
     let feedback_from = inst.props.get("from").and_then(Value::as_str).unwrap_or("person").to_owned();
     let feedback_layout = inst.props.get("layout").and_then(Value::as_str).unwrap_or("other").to_owned();
@@ -1031,6 +1027,7 @@ fn module(inst: Instance, copy: u64, slot: &str) -> HostModule {
             move |_| Ok(float.as_ref().map_or(HostValue::Null, |id| read(|s| s.floats.get(id).unwrap_or(&Value::Null))))
         })
         .function("props", move |_| Ok(to_host(&props)))
+        .function("blockId", move |_| Ok(to_host(&json!(slot))))
         .function("shared", |a| {
             let k = a.string(0)?;
             Ok(with_shared(|s| s.values.get(k).map(to_host).unwrap_or(HostValue::Null)))

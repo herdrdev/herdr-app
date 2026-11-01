@@ -223,10 +223,10 @@ export function terminals(): any[];
  *  pane.focus {terminal} prefers the first visible layout terminal block, then a model pane.
  *  `shown`: terminal.show replacement, if any. `agent`: the agent an agent block shows.
  *  `terminal` is null for mod panes.
- *  `block`: the mod block holding the keyboard (pane.focus {block}, pane.go onto a mod whose
- *  mod.json says "focusable": true), else null; compare with props().block.
+ *  `blockId`: the mod block holding the keyboard (pane.focus {block}, pane.go onto a mod whose
+ *  mod.json says "focusable": true), else null; compare with blockId().
  *  That copy also gets `focus` from nextCommand() (again after a popup over it closes). Live. */
-export function focused(): { space: string; tab: string; pane: string | null; terminal: string | null; shown: string | null; agent: string | null; cwd: string | null; block: string | null } | null;
+export function focused(): { space: string; tab: string; pane: string | null; terminal: string | null; shown: string | null; agent: string | null; cwd: string | null; blockId: string | null } | null;
 
 /** The shown layout (layouts/<name>.json). Its name is shared("layout").
  *  Root `terminal_menu?: string` chooses a terminal right-click menu mod (default: "menu").
@@ -383,12 +383,14 @@ export function notify(n: {
 /** The props this copy of the mod was given in the layout (or overlay).
  *  A layout's terminal_menu mod gets {tab: "pane", target: {pane: string, terminal: string}, overlay: string}.
  *  Target names the clicked pane/terminal, not necessarily the focused one; pass it to actions.
- *  Close the popup with closeOverlay(props().overlay).
- *  `block`: this copy's block id (its pane id in a tab); `focused().block === props().block`
- *  when it has the keyboard. */
+ *  Close the popup with closeOverlay(props().overlay). */
 /** Size is not a prop: root div/h_flex/v_flex.on_size_change reports logical px.
  * The exported View may implement async close(cx) for bounded final cleanup. */
 export function props(): any;
+
+/** This copy's block id in the layout (its pane id in a tab).
+ *  `focused().blockId === blockId()`: this copy has the keyboard. */
+export function blockId(): string;
 
 /** Reads a value every mod can see (persisted). */
 export function shared(key: string): unknown;

@@ -427,7 +427,7 @@ pub struct AppWindow {
     drag_from: Option<Point<Pixels>>,
     titlebar_applied: Option<(crate::layout::Titlebar, Option<[f32; 2]>)>,
     focused_pane: Option<String>,
-    /// The mod block holding the keyboard: `focused().block`.
+    /// The mod block holding the keyboard: `focused().blockId`.
     focused_block: Option<String>,
     synced_model_pane: Option<String>,
     window_active: bool,
@@ -1653,12 +1653,12 @@ impl AppWindow {
             if let Some(block) = block {
                 let address = block.terminal()?;
                 return Some(json!({ "space": p.id, "tab": ctx.id, "pane": null, "terminal": address,
-                    "shown": null, "agent": self.shown_agent(), "cwd": self.cwds.get(address), "block": self.focused_block }));
+                    "shown": null, "agent": self.shown_agent(), "cwd": self.cwds.get(address), "blockId": self.focused_block }));
             }
             let pane = ctx.focused_pane()?;
             let cwd = (if self.shows_agent() { self.shown_agent() } else { m.address_of(&pane) }).and_then(|a| self.cwds.get(&a).cloned());
             Some(json!({ "space": p.id, "tab": ctx.id, "terminal": m.address_of(&pane), "shown": self.swapped.get(&pane),
-                "pane": pane, "agent": self.shown_agent(), "cwd": cwd, "block": self.focused_block }))
+                "pane": pane, "agent": self.shown_agent(), "cwd": cwd, "blockId": self.focused_block }))
         });
         let machines = self.documents.iter().map(|(name, slot)| json!({
             "name": (!name.is_empty()).then_some(name), "layout": slot.layout(),
@@ -2658,7 +2658,11 @@ impl AppWindow {
         if let Err(error) = crate::commands::validate_args(command, &args) {
             return json!({ "error": error });
         }
-        if terminal_block(&self.chrome, self.focused_pane.as_deref()).is_some() && needs_model_pane(name, &args) {
+        // pane.go from a mod block starts at the block, not at the terminal block focused before it.
+        if terminal_block(&self.chrome, self.focused_pane.as_deref()).is_some()
+            && needs_model_pane(name, &args)
+            && !(name == "pane.go" && self.focused_block.is_some())
+        {
             return json!({ "error": "a terminal layout block is focused, not a pane; focus a pane or pass an explicit pane id" });
         }
         if person && name.ends_with(".rename") && args.get("name").is_none_or(Value::is_null) {
@@ -3293,14 +3297,14 @@ impl AppWindow {
             .map(|(_, _, id)| id)
     }
 
-    /// `pane.go`: the nearest pane, layout terminal block or focusable mod.
+    /// `pane.go`: the nearest pane or focusable mod.
     fn go(&mut self, dir: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(from) = self.focused_block.clone().or_else(|| self.focused_pane.clone()).or_else(|| self.model.focused_pane()) else { return };
+        let Some(from) = self.focused_block.clone().or_else(|| self.model.focused_pane()) else { return };
         let mut candidates: Vec<String> = self
             .chrome
             .visible_blocks()
             .into_iter()
-            .filter(|n| n.terminal().is_some() || self.focusable(&n.id))
+            .filter(|n| self.focusable(&n.id))
             .map(|n| n.id.clone())
             .collect();
         if let Some(c) = self.model.active_tab() {
@@ -4497,7 +4501,7 @@ fn terminal_block<'a>(chrome: &'a Node, focused: Option<&str>) -> Option<&'a Nod
 fn needs_model_pane(name: &str, args: &Value) -> bool {
     match name {
         "pane.split" | "pane.close" | "pane.zoom" | "terminal.show" => AppWindow::arg(args, "pane").is_none(),
-        "pane.swap" | "pane.resize" => true,
+        "pane.go" | "pane.swap" | "pane.resize" => true,
         "terminal.open" | "terminal.keep" => matches!(AppWindow::arg(args, "place"), Some("right" | "down")),
         _ => false,
     }
@@ -5113,9 +5117,7 @@ mod tests {
     #[test]
     fn composition_commands_never_default_to_a_source_pane() {
         use serde_json::json;
-        // pane.go starts from the focused block itself, never from its source pane.
-        assert!(!super::needs_model_pane("pane.go", &json!({})));
-        for name in ["pane.split", "pane.close", "pane.zoom", "pane.swap", "pane.resize", "terminal.show"] {
+        for name in ["pane.split", "pane.close", "pane.zoom", "pane.go", "pane.swap", "pane.resize", "terminal.show"] {
             assert!(super::needs_model_pane(name, &json!({})), "{name}");
             assert!(super::needs_model_pane(name, &json!({"pane": null})), "{name}");
         }

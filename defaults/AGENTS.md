@@ -533,10 +533,10 @@ The main ones:
   `pane.focus {terminal}` prefers the first visible layout terminal block showing that
   address, then its model pane. Clicking a terminal block focuses it too.
   `pane.focus {block}` gives a shown mod block (a layout block or a mod pane, by id) the
-  keyboard: `focused().block` names it and its copy gets `focus` from `nextCommand()`.
-  `pane.go` moves by what's on screen to the nearest pane, layout terminal block or
-  focusable mod (mod.json `"focusable": true`), from whichever of them has the keyboard.
-  While a layout terminal block is focused, implicit split/close/zoom/swap/resize and
+  keyboard: `focused().blockId` names it and its copy gets `focus` from `nextCommand()`.
+  `pane.go` moves by what's on screen to the nearest pane or focusable mod (mod.json
+  `"focusable": true`), from whichever of them has the keyboard.
+  While a layout terminal block is focused, implicit split/close/zoom/go/swap/resize and
   `terminal.show` fail, as do `terminal.open`/`terminal.keep` with place right/down.
   They never act on the terminal's source pane. An explicit `pane` still targets that
   model pane; composition edits belong to the mod (edit its layout instead).
@@ -741,8 +741,8 @@ has 120 programs (agents, editors, runtimes, tools, databases, infra);
 
 - `"focusable": true` in `mod.json`: `pane.go` can move to the mod's blocks. A click
   leaves the keyboard where it is (a tab or space click goes on to its pane); a mod
-  that wants it on click asks: `run("pane.focus", {block: props().block})`. Either
-  way `focused().block` becomes that block's id (compare it with `props().block`) and the copy gets `focus` from
+  that wants it on click asks: `run("pane.focus", {block: blockId()})`. Either
+  way `focused().blockId` becomes that block's id (compare it with `blockId()`) and the copy gets `focus` from
   `nextCommand()`, also when the keyboard comes back to it after a popup: focus
   your own handle then (`this.handle.focus()`) and handle the keys
   (`on_key_down`). Leave with `run("pane.go", {direction})`, or
@@ -914,7 +914,7 @@ All of it is in `herdr.d.ts`. In short:
   not its source pane. Check `focused()?.pane` before offering pane controls.
   `panes()` still lists only model panes; none is focused while a terminal block is.
   For composition navigation: `run("pane.focus", {terminal: nextAddress})`.
-  `focused().block`: the mod block holding the keyboard (`pane.focus {block}`, `pane.go`
+  `focused().blockId`: the mod block holding the keyboard (`pane.focus {block}`, `pane.go`
   onto a focusable mod), else null; `pane` stays the tab's pane.
   Terminal copy/paste and implicit right-click routing follow the focused block.
 - Floating: `placement()` (null unless this copy floats).
@@ -955,7 +955,7 @@ All of it is in `herdr.d.ts`. In short:
   Files also refreshes on its 10-second timer:
   `cx.spawn(async (cx) => { for (;;) { await watchFolder(dir); this.reload(); cx.notify(); } })`.
 - `notify({ ..., action: { name, args } })`: the toast runs the command when clicked.
-- This copy: `props()` (with `block`: its block id in the layout, or its pane id), `shared(key)` / `setShared(key, value)` (every mod
+- This copy: `blockId()` (its block id in the layout, or its pane id), `props()`, `shared(key)` / `setShared(key, value)` (every mod
   sees it; setting re-renders all), `nextCommand()` (key commands for this
   mod: `cx.spawn(async (cx) => { for (;;) { const c = await nextCommand(); …; cx.notify(); } })`).
 

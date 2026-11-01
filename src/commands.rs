@@ -58,7 +58,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("tab.prev", &[], "Show the previous tab."),
     cmd("pane.zoom", &[opt("pane")], "Show only this pane of its tab, or all again."),
     cmd("pane.focus", &[opt("pane"), opt("terminal"), opt("block")], "Focus a pane (or the pane showing a terminal), or give a shown mod block the keyboard."),
-    cmd("pane.go", &[req("direction")], "Focus the pane, layout terminal block or focusable mod to the \"left\", \"right\", \"up\" or \"down\"."),
+    cmd("pane.go", &[req("direction")], "Focus the pane or focusable mod to the \"left\", \"right\", \"up\" or \"down\"."),
     cmd("pane.swap", &[req("direction")], "Swap the focused pane with its neighbor in a direction."),
     cmd("pane.resize", &[req("direction")], "Resize the focused pane in the nearest split on that axis: \"right\"/\"down\" grow it, \"left\"/\"up\" shrink it."),
     cmd("terminal.peek", &[req("terminal")], "Peek at a running terminal over the tab, with keep-as-tab and close controls."),
