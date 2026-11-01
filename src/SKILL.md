@@ -44,6 +44,8 @@ herdr-app do space.new --name "remote api" --machine vps --folder /srv/api
 ```
 
 The folder is on that machine; tabs and splits in the space stay there.
+New-space keys and clicks follow the focused space's machine. Script commands
+without `--machine` still use this computer; `--machine ''` explicitly chooses it.
 The agent menu checks and starts agents in the remote Unix user's
 login/interactive shell (sh, bash, zsh, dash, ksh or fish), including its
 configured PATH. Other shells keep the sh launcher.
@@ -54,8 +56,10 @@ focused terminal's folder.
 and `hc file ... --on vps ...` for remote work, not your local file tools.
 
 `do` accepts `--key value` arguments (JSON for arrays/objects) or one JSON
-object. Unknown argument names fail and list valid names; they never target the
-current space or pane instead. Use `commands` to confirm the command's exact shape:
+object. Unknown argument names fail and list valid names. Target IDs (`id`,
+`pane`, `space`, `terminal`) must be strings; other non-null types fail before
+the current-target default can apply. Null keeps its omitted-argument meaning.
+Use `commands` to confirm the command's exact shape:
 
 ```sh
 herdr-app do pane.split '{"direction":"right","pane":"p12"}'

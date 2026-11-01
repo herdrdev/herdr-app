@@ -27,6 +27,10 @@ pub struct Media {
 }
 
 pub fn parse(text: &str) -> Vec<Note> {
+    parse_for_os(text, std::env::consts::OS)
+}
+
+fn parse_for_os(text: &str, os: &str) -> Vec<Note> {
     let mut notes: Vec<Note> = Vec::new();
     let mut fixed = false;
     for line in text.lines().map(str::trim) {
@@ -36,8 +40,8 @@ pub fn parse(text: &str) -> Vec<Note> {
                 fixed = false;
             }
         } else if let Some(note) = notes.last_mut() {
-            if line == "<!-- spotlight -->" {
-                note.spotlight = true;
+            if let Some(platforms) = line.strip_prefix("<!-- spotlight ").and_then(|s| s.strip_suffix("-->")) {
+                note.spotlight |= platforms.trim().is_empty() || platforms.split_whitespace().any(|platform| platform == os);
             } else if line.starts_with("### ") {
                 fixed = line == "### Fixed";
             } else if let Some(url) = line.strip_prefix("![").and_then(|s| s.split_once("](")).and_then(|(_, s)| s.strip_suffix(')')) {
@@ -245,6 +249,33 @@ mod tests {
     }
     fn from(version: Option<&str>, running: &str, fresh: bool) -> Launch {
         Launch::new(Record { last_run: version.map(str::to_owned), ..Record::default() }, running, fresh)
+    }
+    #[test]
+    fn platform_spotlight_is_recognized() {
+        let text = format!("## [1.8.0] - 2026-10-23\n<!-- spotlight {} -->\n- New thing\n", std::env::consts::OS);
+        assert!(parse(&text)[0].spotlight);
+    }
+    #[test]
+    fn spotlight_platform_filter_keeps_normal_notes() {
+        for platforms in ["", "macos", "linux", "windows", "macos linux", "macos linux windows", "plan9"] {
+            let text = format!("## [1.8.0] - 2026-10-23\n<!-- spotlight {platforms} -->\n### New\n- **New thing.** Still visible.\n## [1.7.0] - 2026-10-22\n- Older thing.\n");
+            for os in ["macos", "linux", "windows"] {
+                let notes = parse_for_os(&text, os);
+                assert_eq!(notes[0].spotlight, platforms.is_empty() || platforms.split_whitespace().any(|p| p == os), "{platforms:?} on {os}");
+                assert_eq!(notes[0].items[0].headline, "New thing.");
+                assert_eq!(notes[0].items[0].detail, "Still visible.");
+                assert!(!notes[1].spotlight);
+                let launch = from(Some("1.7.0"), "1.8.0", false);
+                assert_eq!(launch.range(&notes, None).len(), 1);
+            }
+        }
+    }
+    #[test]
+    fn spotlight_requires_its_own_comment() {
+        for marker in ["<!-- spotlightmacos -->", "<!-- spotlighted -->", "<!-- spotlight macos", "- <!-- spotlight macos -->"] {
+            let text = format!("## [1.8.0] - 2026-10-23\n{marker}\n");
+            assert!(!parse_for_os(&text, "macos")[0].spotlight);
+        }
     }
     #[test]
     fn cached_notes_are_version_specific() {

@@ -21,12 +21,13 @@ class Element {
 }
 const source = await readFile(new URL("../defaults/mods/picker/main.js", import.meta.url), "utf8");
 const element = () => new Element();
+const commands: unknown[][] = [];
 const values: Record<string, any> = {
   View: class {}, div: element, svg: element, v_flex: element, h_flex: element,
   Input: { new: element }, InputState: { new: () => ({ on() {}, focus() {} }) },
   agents: () => [], spaces: () => [], terminals: () => [], theme: () => ({}),
   settings: () => ({ zoom: 1.2 }), props: () => ({}), shared: () => ({}),
-  setShared() {}, closeOverlay() {}, openOverlay() {}, run() {}, hc() {},
+  setShared() {}, closeOverlay() {}, openOverlay() {}, run(...args: unknown[]) { commands.push(args); }, hc() {},
 };
 const Picker = new Function(...Object.keys(values), source.replace(/^import .*;\n/gm, "").replace("export default class Picker", "return class Picker"))(...Object.values(values));
 const cx = { notify() {}, stop_propagation() {}, timer: { after() {} }, focus_handle() {}, spawn() {} };
@@ -69,6 +70,17 @@ test("picker reveals keyboard selection in its measured, constrained list", () =
     expect(first.calls.top[0]).toBeGreaterThanOrEqual(0);
     expect(first.calls.bottom[0]).toBeGreaterThanOrEqual(0);
   }
+});
+
+test("picker space choices explicitly target this computer or the selected machine", () => {
+  const view = picker();
+  commands.length = 0;
+  view.go({ kind: "space", machine: null });
+  view.go({ kind: "space", machine: "cloud" });
+  expect(commands).toEqual([
+    ["space.new", { machine: "" }],
+    ["space.new", { machine: "cloud" }],
+  ]);
 });
 
 test("picker preserves small pixel touchpad deltas", () => {

@@ -30,12 +30,12 @@ const fn cmd(name: &'static str, args: &'static [Arg], about: &'static str) -> C
 pub const COMMANDS: &[Command] = &[
     // What exists.
     cmd("space.new", &[opt("name"), opt("folder"), opt("tab"), opt("argv"), opt("task"), opt("machine")],
-        "Make a space: its name (default: none, so it's called after where its first terminal is), the folder its terminals start in (default: the focused terminal's), its first tab's name (default: none, so it's called by its number), optionally an agent (argv) and its first message (task), and the machine it lives on (`hc machine ls`; default this one; its terminals start in that machine's home unless folder)."),
+        "Make a space: its name (default: none, so it's called after where its first terminal is), the folder its terminals start in (default: the focused terminal's), its first tab's name (default: none, so it's called by its number), optionally an agent (argv) and its first message (task), and the machine it lives on (`hc machine ls`; default the focused space's machine for keys and clicks, this computer for scripts; empty string: this computer; its terminals start in that machine's home unless folder)."),
     cmd("space.close", &[opt("id"), opt("confirmed")], "Close a space and end its terminals (asks first unless confirmed)."),
     cmd("space.rename", &[opt("id"), opt("name")], "Rename a space (asks the person when no name; an empty name: called after where its first terminal is again)."),
     cmd("space.move", &[req("id"), req("index")], "Move a space to a position (1 = first)."),
     cmd("tab.new", &[opt("name"), opt("space"), opt("folder"), opt("argv"), opt("task"), opt("mod"), opt("props")],
-        "Make a tab in a space (default: the selected one; name default: none, so it's called by its number) with a terminal in folder (default: the focused terminal's), optionally an agent (argv) and its first message (task); or with a mod as its only pane (`mod`, its `props`: a file, a board)."),
+        "Make a tab in a space (default: the selected one; name default: none, so it's called by its number) with a terminal in folder (default: the focused terminal's), optionally an agent (argv) and its first message (task); or with a mod as its only pane (`mod`, its `props`: a file, a board). With no space open, a person's new tab starts a space (as space.new)."),
     cmd("tab.close", &[opt("id"), opt("confirmed")], "Close a tab and end its terminals."),
     cmd("tab.rename", &[opt("id"), opt("name")], "Rename a tab (asks the person when no name; an empty name: called by its number again)."),
     cmd("tab.move", &[req("id"), req("index")], "Move a tab to a position in its space (1 = first)."),
@@ -127,11 +127,15 @@ pub fn validate_args(c: &Command, args: &Value) -> Result<(), String> {
         Value::Null => Ok(()),
         Value::Object(args) => {
             let unknown: Vec<_> = args.keys().filter(|key| !c.args.iter().any(|a| a.name == key.as_str())).map(String::as_str).collect();
-            if unknown.is_empty() {
-                Ok(())
-            } else {
-                Err(format!("{}: unknown argument(s): {}; valid arguments: {valid}", c.name, unknown.join(", ")))
+            if !unknown.is_empty() {
+                return Err(format!("{}: unknown argument(s): {}; valid arguments: {valid}", c.name, unknown.join(", ")));
             }
+            for (key, value) in args {
+                if matches!(key.as_str(), "id" | "pane" | "space" | "terminal") && !value.is_string() && !value.is_null() {
+                    return Err(format!("{}: argument {key} must be a string (or null to omit it)", c.name));
+                }
+            }
+            Ok(())
         }
         _ => Err(format!("{}: arguments must be an object; valid arguments: {valid}", c.name)),
     }
@@ -188,6 +192,21 @@ mod tests {
         assert_eq!(validate_args(close, &json!({"space": "X", "confirmed": true})),
             Err("space.close: unknown argument(s): space; valid arguments: id, confirmed".into()));
         assert!(validate_args(close, &json!({"id": "X", "confirmed": true})).is_ok());
+    }
+
+    #[test]
+    fn malformed_targets_cannot_fall_back_to_the_current_work() {
+        for (name, arg) in [("tab.close", "id"), ("pane.close", "pane"), ("space.close", "id"), ("tab.new", "space"), ("terminal.show", "terminal")] {
+            let c = find(name).unwrap();
+            for value in [json!(123), json!(false), json!([]), json!({"id": "target"})] {
+                let error = validate_args(c, &json!({arg: value})).unwrap_err();
+                assert!(error.contains(name) && error.contains(arg), "{error}");
+            }
+            // Null keeps its existing omitted-argument meaning for optional targets.
+            for value in [Value::Null, json!("target")] {
+                assert!(validate_args(c, &json!({arg: value})).is_ok());
+            }
+        }
     }
 
     #[test]

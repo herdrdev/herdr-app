@@ -177,7 +177,8 @@ the title bar, panes as cards, a space picker) and `win98`
 ("Herdr 98": a whole desktop in one mod, `win98`). Add a layout by
 writing a new file. The Files panel supports Windows folder paths with spaces,
 parentheses and apostrophes, and preserves Unicode file and folder names
-(including Chinese).
+(including Chinese). Directory links expand as folders; their contents load
+only when expanded.
 
 **Herdr's own layouts and mods are read-only.** They are replaced whole
 on every start. Use settings.json for look (fonts, sizes, theme, colors,
@@ -504,10 +505,14 @@ you use the same list. `herdr-app commands` prints every one with its arguments
 (which are required) and what it does. Unknown argument names are errors and list
 valid names; they never fall back to the current target. For example, closing a
 space uses `herdr-app do space.close --id <id> --confirmed true`, not `--space`.
+Target IDs (`id`, `pane`, `space`, `terminal`) must be strings. Other non-null
+types are rejected before a current-target default applies; null means omitted.
 The main ones:
 
 - Spaces: `space.new {name?, folder?, tab?, argv?, task?, machine?}`
-  (machine: another machine from `hc machine ls`; the space lives there, its
+  (machine: another machine from `hc machine ls`; omitted: the focused space's
+  machine for keys and clicks, this computer for scripts; `""`: this computer.
+  The space lives there, its
   terminals start in that machine's home unless folder, and its tabs and
   splits stay there; `spaces()` gives each space's `machine`, null here),
   `space.close {id?, confirmed?}`, `space.rename {id?, name}` ("": Herdr's name again),
@@ -528,6 +533,9 @@ The main ones:
 - Panes: `pane.split {direction: "right" | "down", pane?, argv? | mod?, props?}` (a new
   terminal, or a mod pane), `pane.close {pane?}`,
   `pane.zoom {pane?}`, `pane.focus {pane | terminal | block}`, `pane.go {direction}`, `pane.swap {direction}`.
+  `pane.go` prefers the most recently focused pane along the nearest edge in that
+  direction; unvisited panes fall back to overlap, then top/left layout order.
+  `pane.swap` uses geometry only. Focus history lasts until the window closes.
   `pane.focus {terminal}` prefers the first visible layout terminal block showing that
   address, then its model pane. Clicking a terminal block focuses it too.
   `pane.focus {block}` gives a shown mod block (a layout block or a mod pane, by id) the
@@ -577,7 +585,10 @@ The main ones:
   `app.update` (restart into a downloaded update).
   Add machine lists all named ssh-config hosts in a scrollable list. Setup
   prompts open above the picker; close the setup terminal to return to the
-  updated list and any machine-specific guidance.
+  updated list and any machine-specific guidance. If a remote machine was rebuilt
+  or replaced and a different core answers there, its sidebar offers Connect:
+  explicitly forget the old identity and pair again with the same name and target.
+  Other unreachable machines don't offer this.
 - Window: `window.minimize`, `window.maximize` (or back), `window.close`.
 - macOS: `app.quit`, `app.hide`, `app.hide_others`, `app.show_all`.
 

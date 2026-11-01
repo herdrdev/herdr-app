@@ -385,6 +385,28 @@ fn check_materializes_retained_elements_in_a_rendered_view(cx: &mut TestAppConte
 }
 
 #[gpui::test]
+fn rebuilt_machine_offers_connect_only_for_identity_mismatch(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for (state, why, offered) in [
+        ("unreachable", "a different core answers there (\"new-id\")", true),
+        ("unreachable", "connection refused", false),
+        ("unreachable", "a different core answers there", false),
+        ("connected", "a different core answers there (\"new-id\")", false),
+    ] {
+        let setup = format!(
+            "this.machines = [{{name:'cloud', state:{}, why:{}, target:'host'}}]; this.folded.add('cloud');",
+            json!(state), json!(why)
+        );
+        let tree = describe(cx, &staged, "mods/spaces", false, props(), updates("current", "current"), Some(&setup)).unwrap();
+        assert_eq!(tree.contains("machine-connect-cloud"), offered, "{state}/{why}: {tree}");
+        assert_eq!(tree.contains("rebuilt ·"), offered, "{tree}");
+        assert_eq!(tree.contains("This machine was rebuilt or replaced. Click to connect to the new one."), offered, "{tree}");
+        assert!(!tree.contains("machine-reconnect-"), "reconnect belongs in the machine row: {tree}");
+    }
+}
+
+#[gpui::test]
 fn machine_picker_keeps_long_lists_scrollable(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();

@@ -350,6 +350,7 @@ mod tests {
     #[test]
     fn agents_shells_tools_and_what_interpreters_run() {
         assert_eq!(key(Some("claude-code"), &["/bin/zsh"]), "claude");
+        assert_eq!(key(Some("grok-build"), &["/bin/zsh"]), "grok");
         assert_eq!(key(Some("newagent"), &[]), "agent");
         assert_eq!(key(None, &["/bin/zsh"]), "shell");
         assert_eq!(key(None, &["-zsh"]), "shell");

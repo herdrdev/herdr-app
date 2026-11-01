@@ -45,6 +45,14 @@ test("gate checks only the requested entry and deduplicates images", () => {
   expect(() => mediaUrls(notes + "## [0.1.4] - duplicate\n", "0.1.4")).toThrow();
 });
 
+test("spotlight platform comments do not interfere with the release media gate", () => {
+  for (const marker of ["<!-- spotlight -->", "<!-- spotlight macos -->", "<!-- spotlight macos linux -->"]) {
+    const notes = `## [0.1.4] - today\n${marker}\n### New\n- A change.\n`;
+    expect(mediaUrls(notes, "0.1.4")).toEqual([]);
+    expect(mediaUrls(notes + "![demo](https://media.herdr.dev/0.1.4/peek.webp)\n", "0.1.4")).toEqual(["https://media.herdr.dev/0.1.4/peek.webp"]);
+  }
+});
+
 test("media-free entries pass but malformed images cannot disappear", () => {
   expect(mediaUrls("## [0.1.4] - today\n- No clip.\n", "0.1.4")).toEqual([]);
   expect(() => mediaUrls("## [0.1.4] - today\n![broken]\n", "0.1.4")).toThrow();

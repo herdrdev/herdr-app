@@ -47,3 +47,12 @@ test("already shared pins need no write and pending writes survive restart", () 
   restarted.agents.migratePins([{ address: "t2", state: "live", labels: {} }]);
   expect(restarted.writes).toHaveLength(1);
 });
+
+test("an unnamed tab's row reads its terminal's title, not the tab number", () => {
+  const title = new Function("View", "localStorage", "props", "run", `${source}; return title;`)(class {}, {}, () => ({}), () => {});
+  const claude = { program: { name: "claude", key: "claude" }, title: "Herdr session names" };
+  expect(title({ name: "3", named: false }, claude)).toBe("Herdr session names");
+  expect(title({ name: "claude", named: true }, claude)).toBe("Herdr session names");
+  expect(title({ name: "fix login", named: true }, claude)).toBe("fix login");
+  expect(title({ name: "3", named: false }, { ...claude, title: "claude" })).toBe("3");
+});

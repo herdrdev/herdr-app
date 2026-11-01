@@ -465,7 +465,7 @@ impl Element for VirtualList {
             |style, window, cx| {
                 size_layout = window.with_element_state(
                     global_id.unwrap(),
-                    |state: Option<ItemSizeLayout>, _window| {
+                    |state: Option<ItemSizeLayout>, window| {
                         let mut state = state.unwrap_or(ItemSizeLayout::default());
 
                         // Including the gap between items for calculate the item size
@@ -482,7 +482,7 @@ impl Element for VirtualList {
                                 .iter()
                                 .enumerate()
                                 .map(|(i, size)| {
-                                    let size = size.along(self.axis);
+                                    let size = window.pixel_snap(size.along(self.axis));
                                     if i + 1 == self.items_count {
                                         size
                                     } else {

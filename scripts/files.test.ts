@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { readFile, mkdtemp, mkdir, writeFile, rm } from "node:fs/promises";
+import { readFile, mkdtemp, mkdir, writeFile, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 
@@ -44,6 +44,46 @@ test("Files preserves Unicode names when listing and expanding folders", async (
     expect(entries).toContainEqual({ name: folder, dir: true });
     expect(entries).toContainEqual({ name: file, dir: false });
     expect(await directory(join(root, folder), null)).toEqual([{ name: child, dir: false }]);
+  } finally {
+    await rm(root, { recursive: true, force: true });
+  }
+});
+
+test("Files follows directory links one level at a time", async () => {
+  const root = await mkdtemp(join(tmpdir(), "herdr-files-links-"));
+  try {
+    const target = join(root, "versions");
+    await mkdir(target);
+    for (let minor = 1; minor <= 9; minor++) {
+      await mkdir(join(target, `0.${minor}.0`));
+    }
+    await writeFile(join(target, "0.9.0", "STORY.md"), "story preview");
+    await mkdir(join(root, ".hidden"));
+    await writeFile(join(root, "ordinary.txt"), "ordinary");
+    await symlink("versions", join(root, ".kb"), "dir");
+    if (process.platform === "win32") await symlink(target, join(root, "junction"), "junction");
+    await symlink(join(root, "ordinary.txt"), join(root, "file-link"), "file");
+    await symlink(join(root, "missing"), join(root, "dangling"), "dir");
+    // A cycle must be listed without recursively walking it.
+    await symlink(target, join(target, "loop"), "dir");
+
+    const entries = await directory(root, null);
+    expect(entries).toHaveLength(process.platform === "win32" ? 7 : 6);
+    if (process.platform === "win32") expect(entries).toContainEqual({ name: "junction", dir: true });
+    expect(entries).toContainEqual({ name: ".kb", dir: true });
+    expect(entries).toContainEqual({ name: "versions", dir: true });
+    expect(entries).toContainEqual({ name: ".hidden", dir: true });
+    expect(entries).toContainEqual({ name: "ordinary.txt", dir: false });
+    expect(entries).toContainEqual({ name: "file-link", dir: false });
+    expect(entries).toContainEqual({ name: "dangling", dir: false });
+    const versions = await directory(join(root, ".kb"), null);
+    expect(versions).toHaveLength(10);
+    for (let minor = 1; minor <= 9; minor++) {
+      expect(versions).toContainEqual({ name: `0.${minor}.0`, dir: true });
+    }
+    expect(versions).toContainEqual({ name: "loop", dir: true });
+    expect(await directory(join(root, ".kb", "0.9.0"), null)).toEqual([{ name: "STORY.md", dir: false }]);
+    expect(await readFile(join(root, ".kb", "0.9.0", "STORY.md"), "utf8")).toBe("story preview");
   } finally {
     await rm(root, { recursive: true, force: true });
   }
