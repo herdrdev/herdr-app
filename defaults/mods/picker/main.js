@@ -6,7 +6,7 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { agents, spaces, terminals, run, hc, theme, props, closeOverlay, openOverlay, shared, setShared } from "herdr";
+import { agents, spaces, terminals, run, hc, theme, settings, props, closeOverlay, openOverlay, shared, setShared } from "herdr";
 
 const MARK = { ansi6: "#22a99a", ansi3: "#e3814f", ansi4: "#5b8def", ansi5: "#8b7cf6", ansi2: "#3fae6a", ansi1: "#d9649a" };
 
@@ -43,6 +43,7 @@ export default class Picker extends View {
     this.input.focus();
     cx.timer.after(600, () => this.input.focus());
     this.at = null;
+    this.scroll = 0;
     this.showEarlier = false;
     this.machines = [];
     this.handle = cx.focus_handle();
@@ -118,6 +119,28 @@ export default class Picker extends View {
     if (this.at === null) this.at = Math.max(0, pickable.findIndex((r) => r.kind === "ctx" && r.w.active && r.ctx.active));
     this.at = Math.min(this.at, pickable.length - 1);
     const sel = pickable[this.at];
+    // One continuous strip: each row (and the group title before it) at a fixed
+    // y. Scrolling moves the strip only as far as it takes to keep the selected
+    // row in view, so the arrows can't run the selection off the list.
+    const H = { head: 29, earlier: 35, new: 36, ctx: 32, space: 32 };
+    const tops = [];
+    let y = 0;
+    rows.forEach((r) => { tops.push(y); y += H[r.kind] ?? 32; });
+    const total = y;
+    const height = Math.min(320, this.listHeight ?? 320);
+    const fixed = total > height;
+    const maxScroll = Math.max(0, total - height);
+    this.scroll = Math.max(0, Math.min(this.scroll, maxScroll));
+    const si = rows.indexOf(sel);
+    if (si >= 0) {
+      if (tops[si] < this.scroll) this.scroll = tops[si];
+      if (tops[si] + (H[sel.kind] ?? 32) > this.scroll + height) this.scroll = tops[si] + (H[sel.kind] ?? 32) - height;
+    }
+    const place = (el, i) =>
+      fixed
+        ? el.absolute().left(0).right(0).top(tops[i] - this.scroll).bottom(height - (tops[i] + (H[rows[i].kind] ?? 32) - this.scroll))
+        : el;
+    const visible = (i) => !fixed || (tops[i] + (H[rows[i].kind] ?? 32) > this.scroll && tops[i] < this.scroll + height);
 
     const row = (r) => {
       if (r.kind === "head") {
@@ -221,7 +244,25 @@ export default class Picker extends View {
           .child(svg("mods/workspace-chrome/search.svg").size(15).text_color(t.dim))
           .child(Input.new(this.input).flex_1().h_full().text_size(12.8).text_color(t.foreground)),
       )
-      .child(v_flex().h(Math.min(320, 6 + rows.reduce((h, r) => h + (r.kind === "head" ? 29 : r.kind === "earlier" ? 35 : r.kind === "new" ? 36 : 32), 0))).min_h(0).flex_shrink(1).pb(6).overflow_y_scrollbar().children(rows.map(row)));
-
+      .child(
+        v_flex()
+          .id("pk-list")
+          .on_size_change((size, cx) => {
+            this.listHeight = size.height / settings().zoom;
+            cx.notify();
+          })
+          .h(Math.min(320, total))
+          .min_h(0)
+          .mb(6)
+          .when(fixed, (el) =>
+            el.overflow_hidden().on_scroll_wheel((e, cx) => {
+              this.scroll = Math.max(0, Math.min(this.scroll - e.delta.y, maxScroll));
+              // The selection follows the wheel, so the next frame doesn't scroll back to it.
+              while (this.at < pickable.length - 1 && tops[rows.indexOf(pickable[this.at])] < this.scroll) this.at++;
+              while (this.at > 0 && tops[rows.indexOf(pickable[this.at])] + (H[pickable[this.at].kind] ?? 32) > this.scroll + height) this.at--;
+              cx.notify();
+            }))
+          .children(rows.map((r, i) => (visible(i) ? place(row(r), i) : null)).filter(Boolean)),
+      );
   }
 }

@@ -1,8 +1,8 @@
 //! Windows' ConPTY asks its viewer for win32-input-mode (`CSI ?9001h`): key
 //! events with their modifiers, which it otherwise loses (Shift+Enter as
 //! Ghostty sends it never reaches the program). herdr-core replays the request
-//! to every new viewer. Used for modified Enter when no Kitty keyboard mode
-//! is active; negotiated Kitty input stays with Ghostty's encoder.
+//! to every new viewer. Used for Escape and modified Enter without Kitty;
+//! negotiated Kitty input stays with Ghostty's encoder.
 
 const ON: &[u8] = b"\x1b[?9001h";
 const OFF: &[u8] = b"\x1b[?9001l";
@@ -42,7 +42,15 @@ fn latest(bytes: &[u8]) -> Option<bool> {
 /// `CSI Vk;Sc;Uc;Kd;Cs;Rc _` (VK_RETURN, its scan code, the character
 /// Windows types, down or up, Shift/left Ctrl/left Alt held, once).
 pub fn enter(shift: bool, ctrl: bool, alt: bool) -> Vec<u8> {
-    let held = (shift as u32) * 0x10 | (ctrl as u32) * 0x08 | (alt as u32) * 0x02;
     let typed = if ctrl { 10 } else { 13 };
-    [1, 0].iter().flat_map(|down| format!("\x1b[13;28;{typed};{down};{held};1_").into_bytes()).collect()
+    key(13, 28, typed, shift, ctrl, alt)
+}
+
+pub fn escape(shift: bool, ctrl: bool, alt: bool) -> Vec<u8> {
+    key(27, 1, 27, shift, ctrl, alt)
+}
+
+fn key(vk: u32, scan: u32, typed: u32, shift: bool, ctrl: bool, alt: bool) -> Vec<u8> {
+    let held = (shift as u32) * 0x10 | (ctrl as u32) * 0x08 | (alt as u32) * 0x02;
+    [1, 0].iter().flat_map(|down| format!("\x1b[{vk};{scan};{typed};{down};{held};1_").into_bytes()).collect()
 }

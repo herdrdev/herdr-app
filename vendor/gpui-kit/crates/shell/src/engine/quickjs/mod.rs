@@ -31,7 +31,9 @@ use rquickjs::{
     module::Declared,
     module::{Declarations, Exports, Module, ModuleDef},
 };
-use rquickjs_jit::{JitConfig, JitRuntime};
+#[cfg(test)]
+use rquickjs_jit::JitConfig;
+use rquickjs_jit::JitRuntime;
 use smallvec::SmallVec;
 
 use crate::{
@@ -248,7 +250,7 @@ mod jit_suspension_tests {
 
     #[test]
     fn nested_suspension_preserves_the_outer_state() {
-        let runtime = ShellRuntime::new_isolated().unwrap();
+        let runtime = ShellRuntime::new_isolated_jit().unwrap();
 
         runtime
             .with_jit_suspended(|| {
@@ -1600,7 +1602,21 @@ impl ShellRuntime {
         Self::new_isolated_with_components_and_dependency_store(
             FrozenComponentRegistry::default(),
             GitDependencyStore::for_user()?,
-            shell_jit_config()?,
+        )
+    }
+
+    /// A runtime with the JIT attached, for the tests and benchmarks that
+    /// compare against it.
+    #[cfg(test)]
+    pub(crate) fn new_isolated_jit() -> Result<Rc<Self>> {
+        let js_runtime = JitRuntime::builder()
+            .config(shell_jit_config()?)
+            .build()
+            .map_err(|error| anyhow!("failed to start the JavaScript JIT runtime: {error}"))?;
+        Self::new_isolated_with_components_dependency_store_and_runtime(
+            FrozenComponentRegistry::default(),
+            GitDependencyStore::for_user()?,
+            js_runtime,
         )
     }
 
@@ -1620,7 +1636,6 @@ impl ShellRuntime {
         Self::new_isolated_with_components_and_dependency_store(
             components,
             GitDependencyStore::for_user()?,
-            shell_jit_config()?,
         )
     }
 
@@ -1631,19 +1646,20 @@ impl ShellRuntime {
         Self::new_isolated_with_components_and_dependency_store(
             FrozenComponentRegistry::default(),
             dependency_store,
-            shell_jit_config()?,
         )
     }
 
+    // HERDR: the plain interpreter. In a long-lived window the JIT's upkeep ran
+    // on the main thread and grew with every loaded mod copy (module
+    // generations are never freed), freezing the window for seconds; mod JS
+    // ran no faster with it outside tight numeric loops.
     fn new_isolated_with_components_and_dependency_store(
         components: FrozenComponentRegistry,
         dependency_store: GitDependencyStore,
-        jit_config: JitConfig,
     ) -> Result<Rc<Self>> {
         let js_runtime = JitRuntime::builder()
-            .config(jit_config)
-            .build()
-            .map_err(|error| anyhow!("failed to start the JavaScript JIT runtime: {error}"))?;
+            .build_interpreter()
+            .map_err(|error| anyhow!("failed to start the JavaScript interpreter: {error}"))?;
         Self::new_isolated_with_components_dependency_store_and_runtime(
             components,
             dependency_store,
@@ -5203,6 +5219,7 @@ impl ShellRuntime {
     }
 }
 
+#[cfg(test)]
 fn shell_jit_config() -> Result<JitConfig> {
     let builder = JitConfig::builder();
 

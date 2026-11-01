@@ -84,19 +84,17 @@ pub fn startable() -> Vec<Value> {
 
 /// Which of `commands` this machine can start, asked of the shell agents start
 /// in (so an app opened from the Dock finds what the person's terminal finds).
-/// On another machine (`on`): its `sh`, as remote agents start.
+/// On another machine (`on`): its login/interactive shell, as remote agents start.
 pub fn installed(commands: &[String], on: Option<&str>) -> Vec<String> {
     if commands.is_empty() {
         return Vec::new();
     }
     // Each found one as a marked line: an interactive shell may print its own
     // things (a prompt's escapes, a greeting) around the answer.
-    let check = "for c; do command -v \"$c\" >/dev/null 2>&1 && echo \"herdr-has:$c\"; done";
     let out = match on {
         Some(m) => {
-            let mut args = vec!["-c".to_owned(), check.to_owned(), "sh".to_owned()];
-            args.extend(commands.iter().cloned());
-            crate::mods::run_on(m, "sh", &args).unwrap_or_default()
+            let argv = crate::remote_shell::check(commands);
+            crate::mods::run_on(m, &argv[0], &argv[1..]).unwrap_or_default()
         }
         None if cfg!(windows) => {
             let list = commands.iter().map(|c| format!("'{}'", c.replace('\'', "''"))).collect::<Vec<_>>().join(",");

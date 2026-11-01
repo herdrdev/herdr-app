@@ -85,5 +85,12 @@ Work on a branch and open a pull request to `master`. CI must pass and Can
 approves; merges are squashed. Commit messages: lowercase conventional
 commits, single line, no AI co-author lines. Only Can releases (a `v*` tag).
 
+CHANGELOG.md: every release gets a `## [x.y.z] - YYYY-MM-DD` section
+(`### New` / `### Fixed`), written at release time from the commits since the
+last tag; Herdr shows it as the update notes. One line per change, in user
+words (what a person notices, not code), with the issue or PR number and
+`thanks @name` for contributors. Leave out internal changes and fixes for bugs
+that never shipped.
+
 Never stop, signal, or restart someone else's app or core. Use an isolated
 app home and core session for testing.

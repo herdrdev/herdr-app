@@ -278,6 +278,19 @@ fn shipped_initial_descriptions(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn brand_leaves_room_for_macos_traffic_lights_only_outside_full_screen(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for (fullscreen, inset) in [(false, true), (true, false)] {
+        let mut values = fixture(true, props(), updates("current", "current"));
+        values.insert("window".into(), json!({"platform":"macos","titlebar":"none","fullscreen":fullscreen,"buttons":false}));
+        let tree = describe_with_values(cx, &staged, "mods/workspace-chrome", values, None).unwrap();
+        let root = tree.lines().next().unwrap();
+        assert_eq!(root.contains(".pl[Number(76.0)]"), inset, "fullscreen={fullscreen}: {tree}");
+    }
+}
+
+#[gpui::test]
 fn tabs_leave_room_for_macos_traffic_lights(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
@@ -411,6 +424,23 @@ fn machine_setup_prompt_stacks_above_the_picker(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn option_key_settings_are_only_shown_on_macos(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for platform in ["linux", "windows", "macos"] {
+        let mut p = props();
+        p["section"] = json!("keyboard");
+        let mut values = fixture(true, p, updates("current", "current"));
+        values.insert("window".into(), json!({"platform":platform}));
+        let tree = describe_with_values(cx, &staged, "frame/settings", values, None).unwrap();
+        for value in ["auto", "on", "off", "left", "right"] {
+            assert_eq!(tree.contains(&format!("st-option-{value}")), platform == "macos", "{platform}: {tree}");
+        }
+        assert_eq!(tree.contains("st-s-keyboard"), platform == "macos", "{platform}: {tree}");
+    }
+}
+
+#[gpui::test]
 fn settings_sections_and_updates(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let start = Instant::now();
@@ -434,7 +464,27 @@ fn settings_sections_and_updates(cx: &mut TestAppContext) {
             }
         }
     }
-    eprintln!("19 settings cases, each twice: {:?}", start.elapsed());
+    for (checking, checked, asked) in [
+        (false, None, false), (false, None, true),
+        (true, None, false), (true, None, true),
+        (true, Some(1700000000u64), false), (true, Some(1700000000), true),
+        (false, Some(1700000000), false), (false, Some(1700000000), true),
+    ] {
+        let mut p = props();
+        p["section"] = json!("updates");
+        let mut u = updates("current", "current");
+        u["checked"] = json!(checked);
+        u["checking"] = json!(checking);
+        let setup = asked.then_some("this.asked = Date.now();");
+        let tree = describe(cx, &staged, "frame/settings", true, p, u, setup).unwrap();
+        let succeeded = !checking && checked.is_some();
+        assert_eq!(tree.contains("Up to date"), succeeded, "success requires a completed, successful check: {tree}");
+        if !checking && checked.is_none() {
+            assert!(tree.contains("check-app") && tree.contains("check-core"), "failed checks must remain retryable: {tree}");
+        }
+        assert!(tree.contains(if checking { "Checking" } else if succeeded { "Up to date" } else { "Check your connection" }), "check status missing: {tree}");
+    }
+    eprintln!("27 settings cases, each twice: {:?}", start.elapsed());
 }
 
 #[gpui::test]
@@ -678,4 +728,41 @@ fn shipped_layouts_and_keys() {
             }
         }
     }
+}
+
+#[gpui::test]
+fn picker_scrolls_the_selection_into_view(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut values = fixture(true, props(), updates("current", "current"));
+    let tabs: Vec<Value> = (1..=12)
+        .map(|i| json!({"id":format!("tab{i}"),"index":i,"name":format!("Task {i}"),"active":i==1,"status":"done","panes":1,"zoomed":false,"settled":false,"settled_at":null,"changed_at":null,"working_since":null}))
+        .collect();
+    values.insert("spaces".into(), json!([
+        {"id":"s1","index":1,"name":"Local","folder":"/fixture/project","machine":null,"branch":"main","active":true,"status":"working","tabs":tabs}
+    ]));
+    // Selecting the last row (with the arrows) must scroll it into the visible 320px.
+    let tree = describe_with_values(cx, &staged, "mods/picker", values, Some("this.at = 999; cx.notify();")).unwrap();
+    let top = tree.lines()
+        .find(|l| l.contains("pk-space-here"))
+        .unwrap_or_else(|| panic!("selected row missing: {tree}"));
+    let px: f64 = top.split(".top[Number(").nth(1).unwrap_or_else(|| panic!("selected row must be placed inside the scrolled list: {tree}")).split(")").next().unwrap().parse().unwrap();
+    assert!(px <= 320.0 - 32.0, "selected row at {px}px is below the visible list: {tree}");
+}
+
+#[gpui::test]
+fn status_bar_shows_the_real_palette_key(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut bound = fixture(true, props(), updates("current", "current"));
+    bound.insert("keys".into(), json!([{"section":"global","keys":"ctrl-p","action":"app.palette"}]));
+    let tree = describe_with_values(cx, &staged, "mods/workspace-status", bound, None).unwrap();
+    assert!(tree.contains("Ctrl+P"), "hint must show the real binding: {tree}");
+    assert!(!tree.contains("Shift P"), "stale hardcoded hint: {tree}");
+
+    let mut unbound = fixture(true, props(), updates("current", "current"));
+    unbound.insert("keys".into(), json!([{"section":"global","keys":"ctrl-k","action":"app.help"}]));
+    let tree = describe_with_values(cx, &staged, "mods/workspace-status", unbound, None).unwrap();
+    assert!(tree.contains("commands"), "unbound hint still offers commands: {tree}");
+    assert!(!tree.contains("Shift P"), "unbound hint must not invent a key: {tree}");
 }

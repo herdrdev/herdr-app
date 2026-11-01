@@ -36,6 +36,12 @@ pub struct EventLines {
     seq: u64,
     /// Every terminal the stream describes, in its order (schema/README.md, Events).
     terminals: Vec<Value>,
+    /// Each terminal's highest `herdr.seen` among the label changes since the
+    /// last `take_seen`: `terminals` keeps only the last, which may hide a
+    /// write of ours under a later, lower one (docs/labels.md).
+    seen: HashMap<String, u64>,
+    /// A fresh snapshot replaced the terminals since the last `take_seen`.
+    resynced: bool,
 }
 
 /// What a push changed.
@@ -50,7 +56,18 @@ impl EventLines {
     /// From `events.subscribe`'s reply: its `seq` and `terminals`.
     pub fn new(snapshot: &Value) -> Self {
         let terminals = snapshot["terminals"].as_array().cloned().unwrap_or_default();
-        EventLines { pending: Vec::new(), seq: snapshot["seq"].as_u64().unwrap_or(0), terminals }
+        EventLines { seq: snapshot["seq"].as_u64().unwrap_or(0), terminals, resynced: true, ..Default::default() }
+    }
+
+    /// The `herdr.seen` values that went by, and whether a snapshot replaced everything.
+    pub fn take_seen(&mut self) -> (HashMap<String, u64>, bool) {
+        (std::mem::take(&mut self.seen), std::mem::take(&mut self.resynced))
+    }
+
+    fn note_seen(&mut self, address: &Value, labels: &Value) {
+        let (Some(address), Some(seen)) = (address.as_str(), labels["herdr.seen"].as_str().and_then(|s| s.parse::<u64>().ok())) else { return };
+        let high = self.seen.entry(address.to_owned()).or_default();
+        *high = (*high).max(seen);
     }
 
     /// The live terminals, as `terminal.list` puts them.
@@ -81,6 +98,7 @@ impl EventLines {
                 Some("missed") => {
                     self.terminals = p["terminals"].as_array().cloned().unwrap_or_default();
                     self.seq = p["seq"].as_u64().unwrap_or(self.seq);
+                    self.resynced = true;
                     pushed.docs = true;
                     pushed.terminals = true;
                 }
@@ -101,6 +119,9 @@ impl EventLines {
     /// One event's change to the terminal it names (schema/README.md, Events).
     fn apply(&mut self, p: &Value) -> bool {
         let (kind, address, data) = (p["type"].as_str().unwrap_or_default(), &p["terminal"], &p["data"]);
+        if matches!(kind, "created" | "restarted" | "labels") {
+            self.note_seen(address, &data["labels"]);
+        }
         let at = self.terminals.iter().position(|t| &t["address"] == address);
         let whole = match kind {
             "created" | "restarted" => Some(data),
@@ -477,6 +498,22 @@ mod tests {
         assert!(got.terminals && got.docs, "missed: everything again");
         assert_eq!(addresses(&lines), ["t9"]);
         assert!(lines.push(format!("{}\n", json!({"method": "event", "params": {"seq": 21, "type": "doc"}})).as_bytes()).docs);
+    }
+
+    #[test]
+    fn a_seen_write_stays_known_under_a_later_lower_one() {
+        let labels = |seq: u64, seen: &str| {
+            format!("{}\n", json!({"method": "event", "params": {"seq": seq, "type": "labels", "terminal": "t1", "data": {"labels": {"herdr.seen": seen}}}}))
+        };
+        let mut lines = EventLines::new(&json!({"seq": 1, "terminals": [{"address": "t1", "state": "live", "labels": {}}]}));
+        assert_eq!(lines.take_seen(), (HashMap::new(), true), "a snapshot: can't tell");
+        // Ours (5), then another client's mark unread (4), in one drain.
+        lines.push(format!("{}{}", labels(2, "5"), labels(3, "4")).as_bytes());
+        assert_eq!(lines.live()["terminals"][0]["labels"]["herdr.seen"], "4");
+        assert_eq!(lines.take_seen(), (HashMap::from([("t1".to_owned(), 5)]), false));
+        assert_eq!(lines.take_seen(), (HashMap::new(), false));
+        lines.push(format!("{}\n", json!({"method": "missed", "params": {"seq": 9, "terminals": []}})).as_bytes());
+        assert!(lines.take_seen().1, "missed: can't tell");
     }
 
     #[test]

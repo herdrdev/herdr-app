@@ -429,6 +429,8 @@ pub enum OptionAsAlt {
     Auto,
     Off,
     On,
+    Left,
+    Right,
 }
 
 impl OptionAsAlt {
@@ -720,18 +722,22 @@ pub fn set(s: Settings) -> bool {
     #[cfg(target_os = "macos")]
     gpui_macos::set_option_as_alt(match s.option_as_alt {
         OptionAsAlt::Auto => None,
-        OptionAsAlt::Off => Some(false),
-        OptionAsAlt::On => Some(true),
+        OptionAsAlt::Off => Some(gpui_macos::OptionAsAlt::None),
+        OptionAsAlt::On => Some(gpui_macos::OptionAsAlt::Both),
+        OptionAsAlt::Left => Some(gpui_macos::OptionAsAlt::Left),
+        OptionAsAlt::Right => Some(gpui_macos::OptionAsAlt::Right),
     });
     CURRENT.with(|c| {
-        if *c.borrow().0 == s {
-            return false;
-        }
+        // Read the theme even when the settings are the same: its file may
+        // have new colors under the same name.
         let (p, mut colors) = palette(&s.theme).unwrap_or_else(|_| (GRAPHITE.clone(), BTreeMap::new()));
         colors.extend(s.colors.clone());
         let mut theme = resolve(&p, &colors);
         if s.window_opacity < 1.0 {
             see_through(&mut theme);
+        }
+        if *c.borrow().0 == s && *c.borrow().1 == theme {
+            return false;
         }
         gpui_shell::set_pixel_scale(s.zoom);
         *c.borrow_mut() = (Rc::new(s), Rc::new(theme));
@@ -895,13 +901,13 @@ mod tests {
     fn option_as_alt_defaults_to_auto_and_round_trips() {
         let default: Person = serde_json::from_str("{}").unwrap();
         assert_eq!(default.option_as_alt, OptionAsAlt::Auto);
-        for (value, expected) in [("auto", OptionAsAlt::Auto), ("off", OptionAsAlt::Off), ("on", OptionAsAlt::On)] {
+        for (value, expected) in [("auto", OptionAsAlt::Auto), ("off", OptionAsAlt::Off), ("on", OptionAsAlt::On), ("left", OptionAsAlt::Left), ("right", OptionAsAlt::Right)] {
             let person: Person = serde_json::from_value(serde_json::json!({"option_as_alt": value})).unwrap();
             let settings = Settings::compose(&person, &crate::layout::Look::default(), true);
             assert_eq!(settings.option_as_alt, expected);
             assert_eq!(serde_json::to_value(settings).unwrap()["option_as_alt"], value);
         }
-        assert!(serde_json::from_value::<Person>(serde_json::json!({"option_as_alt": "left"})).is_err());
+        assert!(serde_json::from_value::<Person>(serde_json::json!({"option_as_alt": "invalid"})).is_err());
     }
 
     #[test]

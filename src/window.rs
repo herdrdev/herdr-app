@@ -396,6 +396,10 @@ pub struct AppWindow {
     reply: Option<Value>,
     /// The `where` label last written per terminal address.
     written_where: HashMap<String, String>,
+    /// `herdr.seen` turns written but not yet back from the core.
+    written_seen: HashMap<String, u64>,
+    /// Agents the person is looking at, and the turn they were shared as seen at.
+    looked: HashMap<String, u64>,
     watched: Watched,
     /// Core's terminal records by address.
     live: HashMap<String, Value>,
@@ -484,6 +488,8 @@ impl AppWindow {
             person: settings::Person::default(),
             reply: None,
             written_where: HashMap::new(),
+            written_seen: HashMap::new(),
+            looked: HashMap::new(),
             watched: Watched::default(),
             live: HashMap::new(),
             listed_once: false,
@@ -656,8 +662,16 @@ impl AppWindow {
                 let watching = sub.is_some();
                 subscription = sub;
                 event_lines = lines;
+                let (seen, resynced) = event_lines.take_seen();
                 if this.update_in(cx, |this, window, cx| {
                     if generation != this.core_generation { return; }
+                    // Our seen writes the core has applied (or, after a fresh
+                    // snapshot, can't tell): its labels decide again.
+                    if resynced {
+                        this.written_seen.clear();
+                    } else {
+                        this.written_seen.retain(|a, w| seen.get(a).is_none_or(|s| s < w));
+                    }
                     this.documents_watching = watching;
                     if watching { this.documents.entry(String::new()).or_default().connection(true, None, None); }
                     let changed = this.documents_updated(machines, vec![], window, cx);
@@ -826,6 +840,9 @@ impl AppWindow {
         };
         if settings::set(s) {
             window.set_background_appearance(background);
+            for term in self.terms.values() {
+                term.view.read(cx).refresh_theme();
+            }
             mods::apply_theme(cx);
             self.refresh_mods(cx);
             window.refresh();
@@ -1320,8 +1337,10 @@ impl AppWindow {
 
     /// What's on screen now, for done-vs-seen.
     fn visible_addresses(&self) -> Vec<String> {
-        let mut out = if self.shows_tab() { self.model.visible_addresses() } else { Vec::new() };
-        out.extend(self.chrome.visible_blocks().into_iter().filter_map(|n| n.terminal().map(str::to_owned)));
+        let (terms, _) = self.visible();
+        // A swapped-in terminal is drawn instead of its pane's own.
+        let covered: HashSet<&str> = terms.iter().filter_map(|(slot, _)| slot.strip_suffix(SWAP)).collect();
+        let mut out: Vec<String> = terms.iter().filter(|(slot, _)| !covered.contains(slot.as_str())).map(|(_, a)| a.clone()).collect();
         if self.shows_agent() {
             out.extend(self.shown_agent());
         }
@@ -1455,9 +1474,48 @@ impl AppWindow {
             let visible = self.visible_addresses();
             self.model.mark_seen(&visible);
         }
+        self.share_seen(cx);
         self.publish(cx);
         self.save();
         cx.notify();
+    }
+
+    /// Shares what the person looks at as `herdr.seen` (docs/labels.md): an
+    /// agent on screen in the active window, once per turn while it stays
+    /// there, so a phone marking it unread isn't undone by a screen nobody
+    /// watches. Only ever raises it. True when a status changed.
+    fn share_seen(&mut self, cx: &mut Context<Self>) -> bool {
+        let looking: HashSet<String> = if self.window_active { self.visible_addresses().into_iter().collect() } else { HashSet::new() };
+        self.looked.retain(|a, _| looking.contains(a));
+        let mut changed = false;
+        for addr in looking {
+            let Some(a) = self.model.agents.get(&addr) else { continue };
+            let turn = a.turn;
+            if a.word.is_none() || !self.live.contains_key(&addr) || self.looked.get(&addr) == Some(&turn) {
+                continue;
+            }
+            self.looked.insert(addr.clone(), turn);
+            if a.seen_turn.is_some_and(|s| s >= turn) {
+                continue;
+            }
+            // Shown as seen now, not after the core's round trip.
+            changed |= self.model.set_turn(&addr, turn, Some(turn));
+            self.written_seen.insert(addr.clone(), turn);
+            let core = self.core.clone();
+            cx.spawn(async move |this, cx| {
+                let params = json!({ "terminal": addr, "labels": { "herdr.seen": turn.to_string() } });
+                let Err(e) = cx.background_executor().spawn(async move { core.call("terminal.label", params) }).await else { return };
+                tracing::warn!("seen label for {addr}: {e:#}");
+                let _ = this.update(cx, |this, _| {
+                    if this.written_seen.get(&addr) == Some(&turn) {
+                        this.written_seen.remove(&addr);
+                        this.looked.remove(&addr);
+                    }
+                });
+            })
+            .detach();
+        }
+        changed
     }
 
     /// The keyboard never ends up nowhere. When what had it leaves the screen (a
@@ -1578,6 +1636,7 @@ impl AppWindow {
                         "tab": ctx.id, "tab_index": ci + 1, "tab_name": Model::tab_name(pr, ctx),
                         "status": status, "app": a.and_then(|a| a.app.clone()), "program": self.program(addr), "title": title.unwrap_or_default(),
                         "seq": a.map(|a| a.seq).unwrap_or(0),
+                        "pinned": self.live.get(addr).and_then(|r| r.pointer("/labels/herdr.pinned")).and_then(Value::as_str).is_some_and(|v| !v.is_empty()),
                         "focused": m.active.as_deref() == Some(pr.id.as_str()) && focused_pane.as_deref() == Some(p.id.as_str()),
                     }));
                 }
@@ -1891,7 +1950,12 @@ impl AppWindow {
                 alerts.push((addr.clone(), alert, looking));
             }
             changed |= self.model.set_word(addr, word, app, looking);
+            let turn = rec.get("turn").and_then(Value::as_u64).unwrap_or(0);
+            let label = rec.pointer("/labels/herdr.seen").and_then(Value::as_str).and_then(|s| s.parse::<u64>().ok());
+            changed |= self.model.set_turn(addr, turn, label.max(self.written_seen.get(addr).copied()));
         }
+        self.written_seen.retain(|a, _| self.live.contains_key(a));
+        changed |= self.share_seen(cx);
         // Changes already made before Herdr started aren't news.
         if self.listed_once {
             for (addr, alert, looking) in alerts {
@@ -2207,7 +2271,7 @@ impl AppWindow {
         let argv = argv.unwrap_or_default();
         let cwd = Some(cwd).filter(|c| !c.is_empty());
         self.require_document(on)?;
-        let labels = json!({ "herdr.space": crate::mirror::local(space, on), "herdr.tab": crate::mirror::local(ctx, on) });
+        let labels = json!({ "herdr.space": crate::mirror::local(space, on), "herdr.tab": crate::mirror::local(ctx, on), "herdr.seen": "0" });
         let addr = match self.core.run(argv.clone(), cwd.clone(), labels.clone(), on) {
             // An agent on a machine without `sh` (Windows): in its PowerShell instead.
             Err(e) if on.is_some() && argv.first().map(String::as_str) == Some("sh") && format!("{e:#}").contains("not found") => {
@@ -2234,9 +2298,7 @@ impl AppWindow {
         argv.filter(|a| !a.is_empty()).map(|mut cmd| {
             cmd.extend(task.map(str::to_owned));
             if on.is_some() {
-                let mut run = vec!["sh".into(), "-c".into(), "\"$@\"; exec \"${SHELL:-sh}\" -i".into(), "sh".into()];
-                run.extend(cmd);
-                return run;
+                return crate::remote_shell::launch(cmd);
             }
             let sh = shell();
             if cfg!(windows) {
@@ -2882,6 +2944,22 @@ impl AppWindow {
                     })
                     .detach();
             }
+            "terminal.pin" => {
+                let Some(pinned) = a.get("pinned").and_then(Value::as_bool) else { return self.fail("terminal.pin pinned is true or false") };
+                let t = Self::arg(a, "terminal").unwrap_or_default().to_owned();
+                if !self.live.contains_key(&t) {
+                    return self.fail(format!("no running terminal {t:?}"));
+                }
+                let core = self.core.clone();
+                let params = json!({ "terminal": t, "labels": { "herdr.pinned": if pinned { "1" } else { "" } } });
+                cx.background_executor()
+                    .spawn(async move {
+                        if let Err(e) = core.call("terminal.label", params) {
+                            tracing::warn!("pin label: {e:#}");
+                        }
+                    })
+                    .detach();
+            }
             "terminal.kill" => {
                 let t = Self::arg(a, "terminal").unwrap_or_default();
                 if !self.live.contains_key(t) {
@@ -3058,7 +3136,13 @@ impl AppWindow {
                 let Some(f) = self.folders.get(name) else { return self.fail(format!("no mod folder {name:?}")) };
                 let mut spec = mod_overlay(&f.dir);
                 spec["mod"] = json!(name);
-                self.open_overlay(mods::new_overlay_id(), spec, window, cx);
+                // One popup per mod: running mod.open again toggles it, like app.settings.
+                let id = format!("mod-{name}");
+                if self.overlays.iter().any(|o| o.id == id) {
+                    self.close_overlay(&id, window, cx);
+                } else {
+                    self.open_overlay(id, spec, window, cx);
+                }
             }
             "overlay.close" => {
                 let id = Self::owned(a, "id").or_else(|| self.overlays.iter().rev().find(|o| o.kind.modal_keys()).map(|o| o.id.clone()));
@@ -3077,8 +3161,13 @@ impl AppWindow {
                 return;
             }
             "app.palette" => {
-                let spec = json!({ "mod": "frame-palette", "kind": "popup", "at": "top", "offset": 60, "width": 620, "height": 0.85 });
-                self.open_overlay(mods::new_overlay_id(), spec, window, cx);
+                // Once: a second press closes the palette instead of stacking another.
+                if self.overlays.iter().any(|o| o.id == "palette") {
+                    self.close_overlay("palette", window, cx);
+                } else {
+                    let spec = json!({ "mod": "frame-palette", "kind": "popup", "at": "top", "offset": 60, "width": 620, "height": 0.85 });
+                    self.open_overlay("palette".into(), spec, window, cx);
+                }
                 return;
             }
             "app.feedback" => {
@@ -3548,6 +3637,8 @@ impl AppWindow {
             self.window_active = active;
             if active {
                 self.sync(window, cx);
+            } else {
+                self.looked.clear();
             }
         }
         let dark = is_dark(window.appearance());
@@ -3559,9 +3650,16 @@ impl AppWindow {
 
     /// Files people or agents edited: apply what they change.
     fn files_changed(&mut self, changed: Vec<std::path::PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        for path in changed_asset_paths(&mods::app_dir(), &changed) {
+            invalidate_asset(&path, window, cx);
+        }
         let top = |p: &std::path::PathBuf| p.components().next().and_then(|c| c.as_os_str().to_str().map(str::to_owned)).unwrap_or_default();
         if changed.iter().any(|p| matches!(top(p).as_str(), "settings.json" | "keys.json" | "programs.json" | "themes")) {
             self.reload_config(window, cx);
+        }
+        // The theme showing may be the file that changed.
+        if changed.iter().any(|p| top(p) == "themes") {
+            self.apply_look(window, cx);
         }
         if changed.iter().any(|p| top(p) == "layouts") {
             self.check_layout_file(window, cx);
@@ -4531,10 +4629,145 @@ impl Render for AppWindow {
     }
 }
 
+fn invalidate_asset(path: &std::path::Path, window: &mut Window, cx: &mut gpui::App) {
+    let key = gpui_shell::AppAssets::cache_key(&path.to_string_lossy());
+    invalidate_image(&gpui::Resource::Embedded(key.clone()), window, cx);
+    window.invalidate_svg(&key);
+}
+
+fn invalidate_image(resource: &gpui::Resource, window: &mut Window, cx: &mut gpui::App) {
+    if let Some(Ok(old)) = cx.cached_asset::<gpui::ImgResourceLoader>(resource) {
+        cx.drop_image(old, Some(window));
+    }
+    cx.remove_asset::<gpui::ImgResourceLoader>(resource);
+}
+
+/// The changed paths, plus the files inside changed mod folders (a folder
+/// renamed into place arrives as one event). Runs on the UI thread: skips what
+/// the watcher ignores (hidden, `node_modules`) and stops at a mod-sized limit.
+fn changed_asset_paths(home: &std::path::Path, changed: &[std::path::PathBuf]) -> Vec<std::path::PathBuf> {
+    const MAX_FILES: usize = 2000;
+    let mut paths: std::collections::BTreeSet<_> = changed.iter().cloned().collect();
+    let mut seen = std::collections::HashSet::new();
+    let mut pending: Vec<_> = changed.iter().filter(|p| p.starts_with("mods")).cloned().collect();
+    while let Some(path) = pending.pop() {
+        // Do not follow symlinks out of the mod folder (or into a cycle).
+        if !seen.insert(path.clone()) || !home.join(&path).symlink_metadata().is_ok_and(|m| m.is_dir()) { continue; }
+        let Ok(entries) = std::fs::read_dir(home.join(&path)) else { continue };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with('.') || name == "node_modules" { continue; }
+            let child = path.join(&*name);
+            let Ok(kind) = entry.file_type() else { continue };
+            if kind.is_dir() {
+                pending.push(child);
+            } else if paths.len() < MAX_FILES {
+                paths.insert(child);
+            } else {
+                return paths.into_iter().collect();
+            }
+        }
+    }
+    paths.into_iter().collect()
+}
+
 #[cfg(test)]
 mod tests {
     use gpui::{div, point, px, size, Context, IntoElement, Render, TestAppContext, Window};
     use gpui::prelude::*;
+
+    #[gpui::test]
+    fn image_invalidation_drops_cached_atlas_tiles_without_loading_missing_assets(cx: &mut TestAppContext) {
+        use gpui::{ImgResourceLoader, Resource};
+        let temp = if cfg!(target_os = "linux") { std::path::PathBuf::from("/var/tmp") } else { std::env::temp_dir() };
+        let home = temp.join(format!("herdr-image-atlas-test-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let file = home.join("image.gif");
+        let mut encoder = image::codecs::gif::GifEncoder::new(std::fs::File::create(&file).unwrap());
+        for color in [[255, 0, 0, 255], [0, 255, 0, 255]] {
+            encoder.encode_frame(image::Frame::new(image::RgbaImage::from_pixel(2, 2, image::Rgba(color)))).unwrap();
+        }
+        drop(encoder);
+        let resource = Resource::Path(file.into());
+        cx.update(|cx| { cx.fetch_asset::<ImgResourceLoader>(&resource); });
+        cx.background_executor.run_until_parked();
+        let old = cx.update(|cx| cx.cached_asset::<ImgResourceLoader>(&resource)).unwrap().unwrap();
+        let context = cx.add_empty_window();
+        let displayed = old.clone();
+        assert_eq!(old.frame_count(), 2);
+        context.draw(point(px(0.0), px(0.0)), size(px(20.0), px(20.0)), move |_, _| {
+            gpui::canvas(|_, _, _| (), move |bounds, _, window, _| {
+                for frame in 0..displayed.frame_count() {
+                    window.paint_image(bounds, bounds, gpui::Corners::default(), displayed.clone(), frame, false).unwrap();
+                }
+            }).size_full()
+        });
+        context.update(|window, cx| {
+            assert!(window.has_image_atlas_entry(&old));
+            super::invalidate_image(&resource, window, cx);
+            assert!(!window.has_image_atlas_entry(&old));
+            assert!(!cx.has_asset::<ImgResourceLoader>(&resource));
+            let missing = Resource::Embedded("mods/missing.png".into());
+            super::invalidate_image(&missing, window, cx);
+            assert!(!cx.has_asset::<ImgResourceLoader>(&missing));
+        });
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn directory_changes_include_nested_assets() {
+        let temp = if cfg!(target_os = "linux") { std::path::PathBuf::from("/var/tmp") } else { std::env::temp_dir() };
+        let home = temp.join(format!("herdr-image-directory-test-{}", std::process::id()));
+        std::fs::create_dir_all(home.join("mods/probe/nested")).unwrap();
+        std::fs::write(home.join("mods/probe/nested/icon.svg"), "svg").unwrap();
+        for ignored in ["node_modules/pkg", ".git"] {
+            std::fs::create_dir_all(home.join("mods/probe").join(ignored)).unwrap();
+            std::fs::write(home.join("mods/probe").join(ignored).join("logo.svg"), "svg").unwrap();
+        }
+        let changed = vec![std::path::PathBuf::from("mods/probe")];
+        // A repeated root and a covered child are walked once.
+        let events = [changed[0].clone(), changed[0].clone(), "mods/probe/nested".into()];
+        let paths = super::changed_asset_paths(&home, &events);
+        assert!(paths.contains(&std::path::PathBuf::from("mods/probe/nested/icon.svg")));
+        assert!(paths.contains(&changed[0]));
+        assert!(!paths.iter().any(|p| p.to_string_lossy().contains("node_modules") || p.to_string_lossy().contains(".git")));
+        assert_eq!(paths.iter().filter(|p| p.ends_with("icon.svg")).count(), 1);
+        std::fs::remove_dir_all(&home).unwrap();
+        assert_eq!(super::changed_asset_paths(&home, &changed), changed);
+    }
+
+    #[test]
+    fn asset_cache_keys_match_file_events_without_requiring_the_file() {
+        use gpui_shell::AppAssets;
+        let expected = AppAssets::cache_key("mods/probe/icon.svg");
+        for alias in ["./mods/probe/icon.svg", "/mods/probe/icon.svg", "mods//probe/./icon.svg"] {
+            assert_eq!(AppAssets::cache_key(alias), expected);
+        }
+        // Traversal remains invalid, rather than becoming a valid cache hit.
+        assert_eq!(AppAssets::cache_key("mods/probe/../icon.svg").as_ref(), "mods/probe/../icon.svg");
+        #[cfg(windows)]
+        assert_eq!(AppAssets::cache_key(r"mods\probe\icon.svg"), expected);
+    }
+
+    #[test]
+    fn svg_invalidation_removes_every_size_but_preserves_other_assets() {
+        use gpui::{AtlasKey, DevicePixels, HeadlessAtlas, PlatformAtlas, RenderSvgParams, Size};
+        let atlas = HeadlessAtlas::default();
+        let key = |path: &str, size| AtlasKey::Svg(RenderSvgParams {
+            path: path.to_owned().into(), size: Size::new(DevicePixels(size), DevicePixels(size)),
+        });
+        let keys = [key("icons/icon.svg", 16), key("icons/icon.svg", 32), key("icons/nested/icon.svg", 16), key("icons-other/icon.svg", 16), AtlasKey::Image(gpui::RenderImageParams { image_id: gpui::ImageId(1), frame_index: 0 })];
+        let mut build = || Ok(Some((Size::new(DevicePixels(1), DevicePixels(1)), std::borrow::Cow::Borrowed(&[255u8][..]))));
+        let tiles: Vec<_> = keys.iter().map(|key| atlas.get_or_insert_with(key.clone(), &mut build).unwrap().unwrap()).collect();
+        atlas.remove_svg("icons");
+        atlas.remove_svg("icons");
+        for (index, key) in keys.iter().enumerate() {
+            assert_eq!(atlas.contains(key), index >= 3);
+            let tile = atlas.get_or_insert_with(key.clone(), &mut build).unwrap().unwrap();
+            assert_eq!(tile == tiles[index], index >= 3);
+        }
+    }
 
     #[test]
     fn agent_commands_keep_arguments_out_of_shell_source() {

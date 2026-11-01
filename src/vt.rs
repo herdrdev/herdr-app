@@ -486,6 +486,66 @@ type CursorKey = (bool, u16, u16, bool, i32);
 /// Where a link shows: (viewport row, first column, last column) per row.
 pub type Spans = Vec<(u16, u16, u16)>;
 
+/// A character of link text and the cell it shows in.
+#[derive(Clone)]
+struct Spot {
+    y: u32,
+    x: u16,
+    width: u16,
+    byte: usize,
+    uri: Option<String>,
+}
+
+/// A screen row's text, where each character shows, and whether the
+/// terminal wrapped it onto the next.
+struct Row {
+    text: String,
+    spots: Vec<Spot>,
+    wraps: bool,
+}
+
+/// The text of `rows` and where each character shows. Where a row doesn't
+/// wrap, it loses its trailing blanks and the next row its leading ones, so
+/// a path a program broke across them reads whole.
+fn link_text(rows: &[Row]) -> (String, Vec<Spot>) {
+    let mut text = String::new();
+    let mut spots = Vec::new();
+    for (i, row) in rows.iter().enumerate() {
+        let blank = |s: &Spot| row.text[s.byte..].starts_with(' ');
+        let start = if i > 0 && !rows[i - 1].wraps { row.spots.iter().position(|s| !blank(s)).unwrap_or(row.spots.len()) } else { 0 };
+        let end = if i + 1 < rows.len() && !row.wraps { row.spots.iter().rposition(|s| !blank(s)).map_or(0, |e| e + 1) } else { row.spots.len() };
+        if start >= end {
+            continue;
+        }
+        let from = row.spots[start].byte;
+        let to = row.spots.get(end).map_or(row.text.len(), |s| s.byte);
+        let base = text.len();
+        text.push_str(&row.text[from..to]);
+        spots.extend(row.spots[start..end].iter().map(|s| Spot { byte: base + s.byte - from, ..s.clone() }));
+    }
+    (text, spots)
+}
+
+impl Row {
+    /// Whether the row runs on into the next: the terminal wrapped it, or it
+    /// reaches the right edge, where a program breaks a line too long to fit.
+    fn full(&self, cols: u16) -> bool {
+        // Cells a program may leave blank at the edge of its own width.
+        const EDGE: u16 = 4;
+        self.wraps || self.spots.iter().rev().find(|s| !self.text[s.byte..].starts_with(' ')).is_some_and(|s| s.x + s.width + EDGE >= cols)
+    }
+}
+
+/// The run of text without whitespace at byte `at`; empty on whitespace.
+fn word_range(text: &str, at: usize) -> std::ops::Range<usize> {
+    if text[at..].starts_with(char::is_whitespace) {
+        return at..at;
+    }
+    let start = text[..at].rfind(char::is_whitespace).map_or(0, |i| i + text[i..].chars().next().map_or(1, char::len_utf8));
+    let end = text[at..].find(char::is_whitespace).map_or(text.len(), |i| at + i);
+    start..end
+}
+
 /// A link found in the terminal: what it says, and where it shows.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LinkHit {
@@ -924,8 +984,11 @@ impl Vt {
 
     /// The link at a viewport cell: a link the program marked (OSC 8), or a
     /// URL or path in the text. Follows lines the terminal wrapped, also into
-    /// rows scrolled out of view.
-    pub fn link_at(&self, col: u16, row: u16, find: impl FnOnce(&str, usize) -> Option<std::ops::Range<usize>>) -> Option<LinkHit> {
+    /// rows scrolled out of view. Then tries the lines around joined, their
+    /// indentation dropped: programs like Claude Code break long paths onto
+    /// new lines themselves. `find` is told when its text holds lines joined; a
+    /// link found there wins when it's longer.
+    pub fn link_at(&self, col: u16, row: u16, mut find: impl FnMut(&str, usize, bool) -> Option<std::ops::Range<usize>>) -> Option<LinkHit> {
         if col >= self.cols || row >= self.rows {
             return None;
         }
@@ -939,65 +1002,132 @@ impl Vt {
             p.y
         };
         let hovered = top + row as u32;
-        let wraps = |y: u32| unsafe {
+        // A URL longer than this many rows isn't one worth finding.
+        const REACH: u32 = 32;
+        let mut first = hovered;
+        while first > 0 && hovered - first < REACH && self.wraps(first - 1) {
+            first -= 1;
+        }
+        let mut last = hovered;
+        while last - hovered < REACH && self.wraps(last) && self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, 0, last + 1).is_some() {
+            last += 1;
+        }
+        let mut rows: Vec<Row> = (first..=last).map_while(|y| self.link_row(y)).collect();
+        let (text, spots) = link_text(&rows);
+        let at = spots.iter().position(|s| s.y == hovered && s.x <= col && col < s.x + s.width)?;
+        let hit = self.link_in(&text, &spots, top, at, &mut find, false);
+        if spots[at].uri.is_some() {
+            return hit;
+        }
+
+        // Lines a program broke itself, joined: only across rows that reach
+        // the right edge, and only where the hovered word runs into one.
+        const BROKEN: u32 = 4;
+        let word = word_range(&text, spots[at].byte);
+        let mut above = Vec::new();
+        if text[..word.start].trim().is_empty() {
+            for y in (first.saturating_sub(BROKEN)..first).rev() {
+                match self.link_row(y) {
+                    Some(row) if row.full(self.cols) => above.push(row),
+                    _ => break,
+                }
+            }
+        }
+        let mut below = Vec::new();
+        if text[word.end..].trim().is_empty() && rows.last().is_some_and(|row| row.full(self.cols)) {
+            for y in last + 1..=last + BROKEN {
+                let Some(row) = self.link_row(y) else { break };
+                let full = row.full(self.cols);
+                below.push(row);
+                if !full {
+                    break;
+                }
+            }
+        }
+        let (group, up_most, down_most) = (rows.len(), above.len(), below.len());
+        rows.splice(0..0, above.into_iter().rev());
+        rows.extend(below);
+        // Fewest rows first; the longest link wins, so a break next to a
+        // slash doesn't stop at the folder before it. A join that leaves the
+        // hovered word as it was can't find anything new.
+        let mut tried = vec![text[word].to_owned()];
+        let mut best: Option<(LinkHit, String, Vec<Spot>, usize)> = None;
+        // Whether `find` last saw the link we'd return: it may keep what it saw.
+        let mut fresh = true;
+        for joined in 1..=up_most + down_most {
+            for up in joined.saturating_sub(down_most)..=joined.min(up_most) {
+                let start = up_most - up;
+                let (text, spots) = link_text(&rows[start..start + group + joined]);
+                let Some(at) = spots.iter().position(|s| s.y == hovered && s.x <= col && col < s.x + s.width) else { continue };
+                let word = &text[word_range(&text, spots[at].byte)];
+                if tried.iter().any(|t| t == word) {
+                    continue;
+                }
+                tried.push(word.to_owned());
+                let Some(found) = self.link_in(&text, &spots, top, at, &mut find, true) else { continue };
+                let longest = best.as_ref().map(|b| &b.0).or(hit.as_ref()).map_or(0, |h| h.target.len());
+                fresh = found.target.len() > longest;
+                if fresh {
+                    best = Some((found, text, spots, at));
+                }
+            }
+        }
+        match best {
+            Some((found, ..)) if fresh => Some(found),
+            Some((_, text, spots, at)) => self.link_in(&text, &spots, top, at, &mut find, true),
+            None if fresh => hit,
+            None => self.link_in(&text, &spots, top, at, &mut find, false),
+        }
+    }
+
+    /// Whether the terminal wrapped screen row `y` onto the next.
+    fn wraps(&self, y: u32) -> bool {
+        unsafe {
             let Some(r) = self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, 0, y) else { return false };
             let mut line: GhosttyRow = Default::default();
             let mut wrap = false;
             ghostty_grid_ref_row(&r, &mut line) == GHOSTTY_SUCCESS
                 && ghostty_row_get(line, GHOSTTY_ROW_DATA_WRAP, &mut wrap as *mut _ as *mut c_void) == GHOSTTY_SUCCESS
                 && wrap
-        };
-        // A URL longer than this many rows isn't one worth finding.
-        const REACH: u32 = 32;
-        let mut first = hovered;
-        while first > 0 && hovered - first < REACH && wraps(first - 1) {
-            first -= 1;
         }
-        let mut last = hovered;
-        while last - hovered < REACH && wraps(last) && self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, 0, last + 1).is_some() {
-            last += 1;
-        }
+    }
 
-        struct Spot {
-            y: u32,
-            x: u16,
-            width: u16,
-            byte: usize,
-            uri: Option<String>,
-        }
+    /// The text of screen row `y` and where each character shows.
+    fn link_row(&self, y: u32) -> Option<Row> {
+        let mut r = self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, 0, y)?;
         let mut text = String::new();
         let mut spots: Vec<Spot> = Vec::new();
-        for y in first..=last {
-            let mut r = self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, 0, y)?;
-            for x in 0..self.cols {
-                r.x = x;
-                let (wide, linked) = unsafe {
-                    let mut cell: GhosttyCell = Default::default();
-                    ghostty_grid_ref_cell(&r, &mut cell);
-                    let mut wide: GhosttyCellWide = GHOSTTY_CELL_WIDE_NARROW;
-                    ghostty_cell_get(cell, GHOSTTY_CELL_DATA_WIDE, &mut wide as *mut _ as *mut c_void);
-                    let mut linked = false;
-                    ghostty_cell_get(cell, GHOSTTY_CELL_DATA_HAS_HYPERLINK, &mut linked as *mut _ as *mut c_void);
-                    (wide, linked)
-                };
-                if wide == GHOSTTY_CELL_WIDE_SPACER_TAIL || wide == GHOSTTY_CELL_WIDE_SPACER_HEAD {
-                    continue;
-                }
-                let byte = text.len();
-                let mut cps = [0u32; 16];
-                let mut len = 0usize;
-                unsafe { ghostty_grid_ref_graphemes(&r, cps.as_mut_ptr(), cps.len(), &mut len) };
-                let before = text.len();
-                text.extend(cps[..len.min(cps.len())].iter().filter_map(|c| char::from_u32(*c)));
-                if text.len() == before {
-                    text.push(' ');
-                }
-                let uri = linked.then(|| hyperlink_uri(&r)).flatten();
-                let width = if wide == GHOSTTY_CELL_WIDE_WIDE { 2 } else { 1 };
-                spots.push(Spot { y, x, width, byte, uri });
+        for x in 0..self.cols {
+            r.x = x;
+            let (wide, linked) = unsafe {
+                let mut cell: GhosttyCell = Default::default();
+                ghostty_grid_ref_cell(&r, &mut cell);
+                let mut wide: GhosttyCellWide = GHOSTTY_CELL_WIDE_NARROW;
+                ghostty_cell_get(cell, GHOSTTY_CELL_DATA_WIDE, &mut wide as *mut _ as *mut c_void);
+                let mut linked = false;
+                ghostty_cell_get(cell, GHOSTTY_CELL_DATA_HAS_HYPERLINK, &mut linked as *mut _ as *mut c_void);
+                (wide, linked)
+            };
+            if wide == GHOSTTY_CELL_WIDE_SPACER_TAIL || wide == GHOSTTY_CELL_WIDE_SPACER_HEAD {
+                continue;
             }
+            let byte = text.len();
+            let mut cps = [0u32; 16];
+            let mut len = 0usize;
+            unsafe { ghostty_grid_ref_graphemes(&r, cps.as_mut_ptr(), cps.len(), &mut len) };
+            text.extend(cps[..len.min(cps.len())].iter().filter_map(|c| char::from_u32(*c)));
+            if text.len() == byte {
+                text.push(' ');
+            }
+            let uri = linked.then(|| hyperlink_uri(&r)).flatten();
+            let width = if wide == GHOSTTY_CELL_WIDE_WIDE { 2 } else { 1 };
+            spots.push(Spot { y, x, width, byte, uri });
         }
-        let at = spots.iter().position(|s| s.y == hovered && s.x <= col && col < s.x + s.width)?;
+        Some(Row { text, spots, wraps: self.wraps(y) })
+    }
+
+    /// The link `find` sees in `text` at spot `at`.
+    fn link_in(&self, text: &str, spots: &[Spot], top: u32, at: usize, find: &mut impl FnMut(&str, usize, bool) -> Option<std::ops::Range<usize>>, joined: bool) -> Option<LinkHit> {
         let (target, chosen): (String, Vec<&Spot>) = match spots[at].uri.clone() {
             Some(uri) => {
                 let same = |s: &&Spot| s.uri.as_deref() == Some(uri.as_str());
@@ -1006,7 +1136,7 @@ impl Vt {
                 (uri, spots[start..end].iter().collect())
             }
             None => {
-                let range = find(&text, spots[at].byte)?;
+                let range = find(text, spots[at].byte, joined)?;
                 (text[range.clone()].to_owned(), spots.iter().filter(|s| range.contains(&s.byte)).collect())
             }
         };
@@ -1315,7 +1445,12 @@ impl Vt {
             ghostty_key_encoder_setopt_from_terminal(self.keys, self.term);
             #[cfg(target_os = "macos")]
             {
-                let option = if gpui_macos::option_as_alt() { GHOSTTY_OPTION_AS_ALT_TRUE } else { GHOSTTY_OPTION_AS_ALT_FALSE };
+                let option = match gpui_macos::option_as_alt() {
+                    gpui_macos::OptionAsAlt::None => GHOSTTY_OPTION_AS_ALT_FALSE,
+                    gpui_macos::OptionAsAlt::Both => GHOSTTY_OPTION_AS_ALT_TRUE,
+                    gpui_macos::OptionAsAlt::Left => GHOSTTY_OPTION_AS_ALT_LEFT,
+                    gpui_macos::OptionAsAlt::Right => GHOSTTY_OPTION_AS_ALT_RIGHT,
+                };
                 ghostty_key_encoder_setopt(self.keys, GHOSTTY_KEY_ENCODER_OPT_MACOS_OPTION_AS_ALT, &option as *const _ as *const c_void);
             }
             let e = self.key_event;
@@ -1643,6 +1778,14 @@ mod tests {
     }
 
     #[test]
+    fn button_motion_needs_the_views_press_ownership_gate() {
+        let mut vt = Vt::new(80, 2);
+        vt.write(b"\x1b[?1002h\x1b[?1006h");
+        // Ghostty trusts the event's button even if this pane never saw a press.
+        assert_eq!(vt.encode_mouse(GHOSTTY_MOUSE_ACTION_MOTION, Some(GHOSTTY_MOUSE_BUTTON_LEFT), 0, 35.0, 5.0, (80, 2, 10.0, 20.0), false), b"\x1b[<32;4;1M");
+    }
+
+    #[test]
     fn dragging_selects_and_copies_text() {
         let mut vt = Vt::new(20, 3);
         vt.write(b"hello world\r\nsecond");
@@ -1838,11 +1981,11 @@ mod tests {
     fn links_follow_wrapped_lines() {
         let mut vt = Vt::new(20, 4);
         vt.write(b"go https://example.com/a/long/path ok");
-        let hit = vt.link_at(5, 1, crate::links::find).unwrap();
+        let hit = vt.link_at(5, 1, found).unwrap();
         assert_eq!(hit.target, "https://example.com/a/long/path");
         assert_eq!(hit.spans, vec![(0, 3, 19), (1, 0, 13)]);
-        assert_eq!(vt.link_at(1, 0, crate::links::find), None);
-        assert_eq!(vt.link_at(16, 1, crate::links::find), None);
+        assert_eq!(vt.link_at(1, 0, found), None);
+        assert_eq!(vt.link_at(16, 1, found), None);
     }
 
     #[test]
@@ -1850,19 +1993,117 @@ mod tests {
         let mut vt = Vt::new(10, 2);
         vt.write(b"https://example.com/abcdefgh");
         // Three rows of link on a two-row screen: the first scrolled away.
-        let hit = vt.link_at(2, 0, crate::links::find).unwrap();
+        let hit = vt.link_at(2, 0, found).unwrap();
         assert_eq!(hit.target, "https://example.com/abcdefgh");
         assert_eq!(hit.spans, vec![(0, 0, 9), (1, 0, 7)]);
+    }
+
+    #[test]
+    fn links_join_lines_a_program_broke() {
+        let mut vt = Vt::new(20, 4);
+        // Broken by the program, as Claude Code does: a newline, then indentation.
+        vt.write(b"  see /tmp/abc/de\r\n  fg/x.png ok");
+        let whole = |text: &str, at: usize, _| {
+            let range = crate::links::find(text, at)?;
+            (&text[range.clone()] == "/tmp/abc/defg/x.png").then_some(range)
+        };
+        for (col, row) in [(8, 0), (3, 1)] {
+            let hit = vt.link_at(col, row, whole).unwrap();
+            assert_eq!(hit.target, "/tmp/abc/defg/x.png");
+            assert_eq!(hit.spans, vec![(0, 6, 16), (1, 2, 9)]);
+        }
+        // A word ending the line above stays out of it.
+        let mut vt = Vt::new(16, 4);
+        vt.write(b"> I think when\r\n  /tmp/abc/de\r\n  fg/x.png ok");
+        let hit = vt.link_at(3, 1, whole).unwrap();
+        assert_eq!(hit.spans, vec![(1, 2, 12), (2, 2, 9)]);
+        assert_eq!(vt.link_at(3, 2, whole).unwrap().target, "/tmp/abc/defg/x.png");
+        let mut vt = Vt::new(20, 4);
+        vt.write(b"  see /tmp/abc/de\r\n  fg/x.png ok");
+        // What reads as a link on its own line keeps it unless the join is one.
+        let unjoined = |text: &str, at: usize, joined: bool| crate::links::find(text, at).filter(|_| !joined);
+        assert_eq!(vt.link_at(8, 0, unjoined).unwrap().target, "/tmp/abc/de");
+        assert_eq!(vt.link_at(13, 1, whole), None);
+    }
+
+    #[test]
+    fn joined_lines_prefer_the_longest_link() {
+        // Broken next to slashes: the first rows name folders that exist.
+        let mut vt = Vt::new(15, 4);
+        vt.write(b"  /Users/me/ab\r\n  /Workspace/o\r\n  /x.rs end");
+        let exists = |text: &str, at: usize, _| {
+            let range = crate::links::find(text, at)?;
+            ["/Users/me/ab", "/Users/me/ab/Workspace/o", "/Users/me/ab/Workspace/o/x.rs"].contains(&&text[range.clone()]).then_some(range)
+        };
+        for (col, row) in [(4, 0), (4, 1), (3, 2)] {
+            assert_eq!(vt.link_at(col, row, exists).unwrap().target, "/Users/me/ab/Workspace/o/x.rs");
+        }
+    }
+
+    #[test]
+    fn only_rows_reaching_the_edge_join() {
+        let exists = |text: &str, at: usize, _| {
+            let range = crate::links::find(text, at)?;
+            ["src/", "src/vt.rs", "/tmp/ab", "/tmp/ab/cd/x.png"].contains(&&text[range.clone()]).then_some(range)
+        };
+        // A folder an agent lists, its files below: not one path.
+        let mut vt = Vt::new(30, 4);
+        vt.write(b"src/\r\n  vt.rs");
+        assert_eq!(vt.link_at(1, 0, exists), None);
+        assert_eq!(vt.link_at(3, 1, exists), None);
+        // A blank line ends what a program broke.
+        let mut vt = Vt::new(11, 4);
+        vt.write(b"see /tmp/ab\r\n\r\n/cd/x.png");
+        assert_eq!(vt.link_at(6, 0, exists).unwrap().target, "/tmp/ab");
+    }
+
+    #[test]
+    fn joined_lines_tell_find() {
+        let mut vt = Vt::new(26, 4);
+        vt.write(b"Visit https://example.com\r\n  and then run it");
+        // Glued, the URL would take in the word below it.
+        assert_eq!(vt.link_at(3, 1, found).unwrap().target, "https://example.comand");
+        let unjoined = |text: &str, at: usize, joined: bool| crate::links::find(text, at).filter(|_| !joined);
+        assert_eq!(vt.link_at(3, 1, unjoined), None);
+        assert_eq!(vt.link_at(8, 0, unjoined).unwrap().target, "https://example.com");
+    }
+
+    #[test]
+    fn find_last_sees_the_link_returned() {
+        let mut vt = Vt::new(6, 4);
+        vt.write(b"  xx/a\r\n  b");
+        let seen = std::cell::RefCell::new(String::new());
+        // Joined, a shorter link than the row's own: the row's wins.
+        let find = |text: &str, at: usize, joined: bool| {
+            let range = if joined { at..at + 1 } else { crate::links::word(text, at)? };
+            *seen.borrow_mut() = text[range.clone()].to_owned();
+            Some(range)
+        };
+        assert_eq!(vt.link_at(3, 0, find).unwrap().target, "xx/a");
+        assert_eq!(*seen.borrow(), "xx/a");
+    }
+
+    #[test]
+    fn joins_that_leave_the_word_alone_skip_find() {
+        let mut vt = Vt::new(13, 4);
+        vt.write(b"one two three\r\nfour five six\r\nseven");
+        let mut calls = 0;
+        assert_eq!(vt.link_at(6, 1, |_: &str, _, _| { calls += 1; None }), None);
+        assert_eq!(calls, 1);
+    }
+
+    fn found(text: &str, at: usize, _: bool) -> Option<std::ops::Range<usize>> {
+        crate::links::find(text, at)
     }
 
     #[test]
     fn marked_links_open_their_uri() {
         let mut vt = Vt::new(30, 2);
         vt.write(b"see \x1b]8;;https://herdr.dev\x1b\\the docs\x1b]8;;\x1b\\ now");
-        let hit = vt.link_at(6, 0, crate::links::find).unwrap();
+        let hit = vt.link_at(6, 0, found).unwrap();
         assert_eq!(hit.target, "https://herdr.dev");
         assert_eq!(hit.spans, vec![(0, 4, 11)]);
-        assert_eq!(vt.link_at(13, 0, crate::links::find), None);
+        assert_eq!(vt.link_at(13, 0, found), None);
     }
 
     #[test]

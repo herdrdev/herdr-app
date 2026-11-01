@@ -2,12 +2,13 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input } from "gpui-base";
-import { hc, run, theme, themes, fonts, updates, telemetry, settings, layouts, shared, appHome, readTextFile, writeTextFile, playSound, props, closeOverlay } from "herdr";
+import { hc, run, theme, themes, fonts, updates, telemetry, settings, layouts, shared, appHome, readTextFile, writeTextFile, playSound, props, closeOverlay, window } from "herdr";
 
 const I = (name) => `frame/settings/${name}.svg`;
 
 const SECTIONS = [
   { id: "look", title: "Look", icon: "palette" },
+  ...(window()?.platform === "macos" ? [{ id: "keyboard", title: "Keyboard", icon: "keyboard" }] : []),
   { id: "machines", title: "Machines", icon: "server" },
   { id: "alerts", title: "Alerts", icon: "bell" },
   { id: "updates", title: "Updates", icon: "refresh" },
@@ -507,6 +508,35 @@ export default class Settings extends View {
       .child(fontRow("ui_font", null, "Interface font", s.ui_font_family, DEFAULT_UI_FONT));
   }
 
+  keyboard(t) {
+    const choices = [
+      ["auto", "Automatic (Alt on US keyboards)"],
+      ["on", "Alt"],
+      ["off", "Types characters"],
+      ["left", "Left Option is Alt"],
+      ["right", "Right Option is Alt"],
+    ];
+    return v_flex()
+      .w_full()
+      .child(this.heading(t, "Option key"))
+      .child(div().pb(12).text_size(13).text_color(t.dim).child("Use Option for terminal shortcuts or to type accents and special characters."))
+      .children(choices.map(([value, label]) => {
+        const on = (this.person.option_as_alt ?? "auto") === value;
+        return h_flex()
+          .id(`st-option-${value}`)
+          .gap(10)
+          .px(12)
+          .py(10)
+          .rounded(7)
+          .items_center()
+          .cursor_pointer()
+          .hover((s) => s.bg(t.hover))
+          .on_click((_e, cx) => this.change((p) => { p.option_as_alt = value; }, cx))
+          .child(div().text_color(on ? t.accent : t.muted).child(on ? "◉" : "○"))
+          .child(div().text_size(14).text_color(t.foreground).child(label));
+      }));
+  }
+
   // Machines -------------------------------------------------------------
 
   async loadMachines() {
@@ -666,6 +696,9 @@ export default class Settings extends View {
       return `${String(d.getHours()).padStart(2, "0")}:${String(d.getMinutes()).padStart(2, "0")}`;
     };
     const checked = u.checked ? ` Checked at ${at(u.checked)}.` : "";
+    const result = u.checking ? "Checking\u2026" : u.checked
+      ? `Up to date.${checked}`
+      : "No successful check. Check your connection and try again.";
     // Pressed: "Checking\u2026" while it looks, then "Up to date" for a moment
     // (a find changes the row instead). One per row: an element shows once.
     const asked = this.asked && Date.now() - this.asked < 3000;
@@ -674,7 +707,7 @@ export default class Settings extends View {
         ? null
         : u.checking && this.asked
           ? div().px(12).py(5).text_size(13).text_color(t.dim).child("Checking\u2026")
-          : asked
+          : asked && u.checked && !u.checking
             ? div().px(12).py(5).text_size(13).text_color(t.ansi2).child("\u2713 Up to date")
             : this.button(t, id, "Check now", (_e, cx) => {
                 this.asked = Date.now();
@@ -687,7 +720,7 @@ export default class Settings extends View {
       ? ["A build from source: it updates with git, not here.", null]
       : u.app.ready
         ? [`${u.app.ready} is ready. Restart to switch now; it also switches when you quit.`, primary("st-app-update", "Restart to update", () => run("app.update"))]
-        : [`Up to date.${checked}`, check("st-check-app")];
+        : [result, check("st-check-app")];
     const c = u.core;
     const core = c.managed
       ? [`Managed by ${c.managed}: update it there.`, null]
@@ -698,7 +731,7 @@ export default class Settings extends View {
           : c.ready
             ? [`${c.ready} is ready. Your terminals keep running through it.`, primary("st-core-update", "Update herdr-core", () => run("app.update_core"))]
             : u.checks
-              ? [`Up to date.${checked}`, check("st-check-core")]
+              ? [result, check("st-check-core")]
               : ["Not checked: a build from source looks for no updates.", null];
     return v_flex()
       .w_full()
@@ -867,6 +900,8 @@ export default class Settings extends View {
                   .child(
                     this.section === "look"
                       ? this.look(t, cx)
+                      : this.section === "keyboard"
+                        ? this.keyboard(t)
                       : this.section === "machines"
                         ? this.machines(t)
                       : this.section === "alerts"

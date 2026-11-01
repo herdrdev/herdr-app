@@ -4854,6 +4854,12 @@ impl Window {
         Ok(())
     }
 
+    /// Invalidate SVG assets at or beneath this path and redraw their consumers.
+    pub fn invalidate_svg(&mut self, path: &str) {
+        self.sprite_atlas.remove_svg(path);
+        self.refresh();
+    }
+
     /// Paint a monochrome SVG into the scene for the next frame at the current stacking context.
     ///
     /// This method should only be called as part of the paint phase of element drawing.

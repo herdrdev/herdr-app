@@ -92,7 +92,7 @@ pub struct CoreInfo {
 }
 
 static CORE: Mutex<CoreInfo> = Mutex::new(CoreInfo { version: None, managed: None, ready: None, updating: false, error: None });
-/// When the last check finished (unix seconds), for "checked at".
+/// When the last check succeeded (unix seconds); a failed check clears it.
 static CHECKED: Mutex<Option<u64>> = Mutex::new(None);
 /// "Check now" wakes the checker early.
 static WAKE: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
@@ -160,11 +160,13 @@ pub fn start() {
         return;
     }
     RUNNING.store(true, Ordering::Relaxed);
+    CHECKING.store(true, Ordering::Relaxed);
     std::thread::spawn(move || {
         sleep(Duration::from_secs(10));
         loop {
             CHECKING.store(true, Ordering::Relaxed);
             let mut wait = EVERY;
+            let mut succeeded = true;
             if let Some(root) = &app {
                 match check(root) {
                     Ok(found) => {
@@ -176,19 +178,25 @@ pub fn start() {
                         tracing::warn!("update check: {e}");
                         crate::telemetry::count("app_update_failed");
                         wait = RETRY;
+                        succeeded = false;
                     }
                 }
             }
             if core && let Err(e) = check_core() {
                 tracing::warn!("core update check: {e}");
                 wait = RETRY;
+                succeeded = false;
             }
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-            *CHECKED.lock().unwrap() = Some(now);
+            *CHECKED.lock().unwrap() = checked_at(succeeded, now);
             CHECKING.store(false, Ordering::Relaxed);
             sleep(wait);
         }
     });
+}
+
+fn checked_at(succeeded: bool, now: u64) -> Option<u64> {
+    succeeded.then_some(now)
 }
 
 /// Looks for a newer core of this app's generation.
@@ -258,8 +266,12 @@ pub fn update_core() {
 
 /// Downloads the latest release if it's newer. Ok(Some): a version is ready.
 fn check(root: &Path) -> Result<Option<String>, String> {
+    check_from(root, &releases())
+}
+
+fn check_from(root: &Path, releases: &str) -> Result<Option<String>, String> {
     let path = "app/latest.json";
-    let text = curl_text(&format!("{}/{path}", releases()))?;
+    let text = curl_text(&format!("{releases}/{path}"))?;
     let manifest: serde_json::Value = serde_json::from_str(&text).map_err(|e| format!("{path}: {e}"))?;
     let version = manifest["version"].as_str().ok_or(format!("{path}: no version"))?;
     if !newer(version, env!("CARGO_PKG_VERSION")) {
@@ -267,7 +279,7 @@ fn check(root: &Path) -> Result<Option<String>, String> {
     }
     // Notes are optional: a missing feed must never hold up the update.
     if !crate::update_notes::has(version)
-        && let Ok(text) = curl_text(&format!("{}/app/{version}/changelog.md", releases()))
+        && let Ok(text) = curl_text(&format!("{releases}/app/{version}/changelog.md"))
     {
         crate::update_notes::cache(&text);
     }
@@ -595,6 +607,46 @@ pub fn after_update() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn failed_check_clears_success_and_recovery_records_a_new_time() {
+        use std::io::{Read, Write};
+        use std::net::TcpListener;
+
+        // An isolated release server drops the first connection, then recovers.
+        // No environment changes, app window, core, or installed files are involved.
+        let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+        let url = format!("http://{}", listener.local_addr().unwrap());
+        let server = std::thread::spawn(move || {
+            for recover in [false, true] {
+                let (mut stream, _) = listener.accept().unwrap();
+                stream.set_read_timeout(Some(Duration::from_secs(5))).unwrap();
+                let mut request = Vec::new();
+                while !request.ends_with(b"\r\n\r\n") {
+                    let mut byte = [0];
+                    stream.read_exact(&mut byte).unwrap();
+                    request.push(byte[0]);
+                }
+                assert!(request.starts_with(b"GET /app/latest.json HTTP/1.1\r\n"));
+                if recover {
+                    let body = format!(r#"{{"version":"{}"}}"#, env!("CARGO_PKG_VERSION"));
+                    write!(stream, "HTTP/1.1 200 OK\r\nContent-Length: {}\r\nConnection: close\r\n\r\n{body}", body.len()).unwrap();
+                }
+            }
+        });
+        let home = std::env::temp_dir().join(format!("herdr-offline-check-{}", std::process::id()));
+        let mut checked = checked_at(true, 100);
+        assert_eq!(checked, Some(100));
+        let failed = check_from(&home, &url);
+        assert!(failed.is_err(), "a dropped connection must fail: {failed:?}");
+        checked = checked_at(failed.is_ok(), 200);
+        assert_eq!(checked, None);
+        let recovered = check_from(&home, &url);
+        assert_eq!(recovered, Ok(None));
+        checked = checked_at(recovered.is_ok(), 300);
+        assert_eq!(checked, Some(300));
+        server.join().unwrap();
+    }
 
     #[test]
     fn startup_applies_only_a_newer_version_and_never_relaunches_twice() {

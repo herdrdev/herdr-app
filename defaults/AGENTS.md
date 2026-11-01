@@ -176,7 +176,8 @@ shared `"workspace.panels"`, set by the welcome); a status bar,
 the title bar, panes as cards, a space picker) and `win98`
 ("Herdr 98": a whole desktop in one mod, `win98`). Add a layout by
 writing a new file. The Files panel supports Windows folder paths with spaces,
-parentheses and apostrophes.
+parentheses and apostrophes, and preserves Unicode file and folder names
+(including Chinese).
 
 **Herdr's own layouts and mods are read-only.** They are replaced whole
 on every start. Use settings.json for look (fonts, sizes, theme, colors,
@@ -493,6 +494,7 @@ the build doesn't do.
   current layout: `cmd-shift-]` and `cmd-}` match the same US-layout keypress.
   Existing `keys.json` files don't need to change.
 - Terminal keys honor the program's negotiated Kitty mode, including on Windows.
+- Windows terminal Escape stays separate from the following key.
 
 ## Commands
 
@@ -544,12 +546,16 @@ The main ones:
   images are converted to PNG before sending,
   `terminal.right_click {to: "program" | "menu", terminal?}` (where right-clicks go
   when the program takes the mouse; kept as its label `herdr.right-click=program`;
-  Shift+right-click is always Herdr's menu). Copy, paste, paste-image and implicit
+  Shift+right-click is always Herdr's menu),
+  `terminal.pin {terminal, pinned}` (pins an agent to the top of the agent lists;
+  kept on the terminal as `herdr.pinned`, so every Herdr client shows it, and
+  gone when the terminal ends; read it as `agents()` `pinned`). Copy, paste, paste-image and implicit
   right-click targeting follow keyboard focus, including peek and floating terminals;
   with no terminal holding keyboard focus, they use the focused pane or block.
   Dragging a text selection past the terminal's top or bottom scrolls while held;
   releasing stops it. Programs that track the mouse still get their mouse events
-  (hold Shift to select text instead).
+  (hold Shift to select text instead). A drag stays with the terminal where it
+  started, including its release outside the pane; other panes don't receive it.
   Terminals display Kitty graphics, including Unicode placeholder images used by
   programs such as yazi; partial images and scrolling follow the placeholder cells.
 - Agents: `agent.next`, `agent.prev`, `agent.focus {terminal}`.
@@ -558,9 +564,9 @@ The main ones:
   (personal tree edits; on shipped layouts only click/look fields change),
   `layout.reset {name?}` (reset a shipped layout and its clicks),
   `layout.clone {name, as?}` (duplicate, then switch; default `<name>-copy`).
-- App: `mod.clone {name, as?}` (duplicate; default `<name>-copy`), `mod.open {name}`, `overlay.close {id?}`, `app.help`, `app.palette`, `app.settings {section?}`
+- App: `mod.clone {name, as?}` (duplicate; default `<name>-copy`), `mod.open {name}` (again: closes it), `overlay.close {id?}`, `app.help`, `app.palette` (again: closes it), `app.settings {section?}`
   (sections: `look`, `machines`, `alerts`, `updates`, `privacy`; Machines lists, updates, renames and removes ssh machines; settings edit the same files you do).
-  `app.check_updates`, `app.update_core` (a newer herdr-core of this generation, terminals kept;
+  `app.check_updates` (only a successful check reports Up to date; a failed check clears the checked time and can be retried), `app.update_core` (a newer herdr-core of this generation, terminals kept;
   never one a package manager owns), `app.welcome`, `app.whats_new`, `app.feedback {message?, from?}` (from `"person"` or `"agent"`; opens a review window, where the person can paste up to 3 screenshots; never sends until the person clicks Send), `app.reset`,
   `app.theme {name}`, `app.zoom_in`, `app.zoom_out`, `app.zoom_reset`,
   `app.update` (restart into a downloaded update).
@@ -648,11 +654,13 @@ What's about the user, never a look:
   apps' links alone. Disk-image and translocated launches don't create it.
   Finder launches load the login shell's PATH, with the usual install
   folders as a fallback.
-- `option_as_alt`: macOS only, `"auto"` (default), `"on"`, or `"off"`.
+- `option_as_alt`: macOS only, `"auto"` (default), `"on"`, `"off"`, `"left"`, or `"right"`.
+  Available in Settings → Keyboard.
   `"auto"` sends Option as Alt on US, US International, ABC and ABC-India;
   other layouts keep native Option text and dead keys. `"on"` enables terminal
   Alt shortcuts (including Option+E without composition); `"off"` keeps native
-  Option input on every layout. Changes apply immediately, including layout
+  Option input on every layout. `"left"` / `"right"` makes only that Option
+  key act as Alt; the other types characters. Changes apply immediately, including layout
   switches. Linux and Windows are unchanged.
 - `minimum_contrast`: terminal text contrast ratio, `1` (default) leaves
   program colors unchanged. Set it to `1.6` to enable the previous readability
@@ -712,8 +720,11 @@ has 120 programs (agents, editors, runtimes, tools, databases, infra);
   inside `programs`. Use programs or shell functions, not aliases (the launcher
   does not expand them). On macOS the menu launcher loads login profiles before
   running the agent and leaves an interactive login shell when it ends.
-  Linux keeps interactive non-login shells. Local checks include functions in shells such as bash
-  and zsh; fish and remote checks find executables only. Installation
+  On remote Unix machines, both the installed-agent check and launcher load
+  that user's login/interactive shell for sh, bash, zsh, dash, ksh and fish, so
+  its PATH includes shell-configured tools. Other shells keep the sh launcher.
+  Local Linux launches keep interactive non-login shells. Local and remote checks
+  include functions in bash and zsh; fish checks find executables only. Installation
   checks are cached for up to a minute; changing the commands checks again.
   Invalid JSON is reported in `programs.error` (a valid file has no error).
 - It follows what runs in the terminal now (lazygit, nvim), else what it
@@ -744,7 +755,8 @@ has 120 programs (agents, editors, runtimes, tools, databases, infra);
   another mod or props starts over. `<mod>.<command>` reaches shown copies only.
 - Images and SVGs are referenced from `~/.config/herdr-app`:
   `image("mods/<name>/logo.svg")` (full color), `svg("mods/<name>/icon.svg")`
-  (tinted with the text color).
+  (tinted with the text color). Saving an asset under `mods/` updates every
+  mod showing it, including images that were missing or invalid on first load.
 - The defaults are mods too, read them as examples: `spaces`, `agents`,
   `tabs` (the tab bar), `menu`, `prompt`, `confirm`, `help`, `toast`,
   Terminals' `picker`, `peek`, and `pane` (an
@@ -876,7 +888,8 @@ All of it is in `herdr.d.ts`. In short:
   machine, branch), `machines()` (name, null for this computer; layout:
   `loading`, `ready`, or `unavailable` on this connection; loading ends on
   the first read even if it fails, and offline machines are unavailable),
-  `agents()` (status, app, space, tab, focused), `terminals()`
+  `agents()` (status, app, space, tab, pinned, focused; "done" turns "idle"
+  once someone looks at it on any Herdr client), `terminals()`
   (every core terminal), `focused()`, `layout()`, `theme()` (every color by
   name: background (the terminals', cards), canvas (behind cards), chrome
   (sidebars, bars), surface, popover, raised, hover, selected, border,
@@ -917,14 +930,18 @@ All of it is in `herdr.d.ts`. In short:
   `home()`, `appHome()`, `playSound("done" | "blocked" | file)`.
   `knownAgents({ on })`: the agents people can start (programs.json's
   `run`), most picked first, each `installed` or not there (asked of the
-  shell agents start in); start one with `argv: agent.run`.
+  shell agents start in; a remote Unix machine's login/interactive shell when supported);
+  start one with `argv: agent.run`.
   `pickFolder({ prompt })`: the system's folder picker (here only),
   resolves with the folder or null.
 - Files: `readTextFile(path, { on })` (here, or on that machine),
   `writeTextFile(path, text, expected)` (here only), and
   `watchFolder(dir)` (here only; poll a remote space's folder): resolves with the changed paths the next time anything
-  under `dir` changes (none missed between calls), so a file tree, a board
-  or a git panel stays live without polling:
+  under `dir` changes. On Linux, Git-ignored directories and Git objects are skipped,
+  and trees above 4096 non-ignored directories reject the watch; use a timer fallback.
+  macOS and Windows watch recursively, including ignored directories.
+  A returned root path means refresh everything (the pending paths are bounded).
+  Files also refreshes on its 10-second timer:
   `cx.spawn(async (cx) => { for (;;) { await watchFolder(dir); this.reload(); cx.notify(); } })`.
 - `notify({ ..., action: { name, args } })`: the toast runs the command when clicked.
 - This copy: `props()`, `shared(key)` / `setShared(key, value)` (every mod

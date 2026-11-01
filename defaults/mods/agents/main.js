@@ -74,7 +74,9 @@ export default class Agents extends View {
     this.folded = new Set();
     // Each agent's last state and when it changed (ms), kept across restarts.
     this.changed = JSON.parse(localStorage.getItem("changed") ?? "{}");
-    this.pins = JSON.parse(localStorage.getItem("pins") ?? "[]");
+    this.pendingPins = JSON.parse(localStorage.getItem("pins") ?? "[]");
+    if (!this.pendingPins.length) localStorage.removeItem("pins");
+    this.migratingPins = new Set();
     cx.timer.every(30000, (cx) => cx.notify());
   }
 
@@ -95,19 +97,24 @@ export default class Agents extends View {
     localStorage.setItem("changed", JSON.stringify(this.changed));
   }
 
-  setPins(pins) {
-    this.pins = pins;
-    localStorage.setItem("pins", JSON.stringify(pins));
-  }
-
-  // Drops pins of agents that ended. Only for machines the list has heard from:
-  // right after a start, or while a machine connects, its agents aren't listed yet.
-  prunePins(all) {
-    const machine = (addr) => (addr.includes("/") ? addr.split("/")[0] : "");
-    const heard = new Set(all.map((k) => machine(k.address)));
-    const live = new Set(all.filter((k) => k.state === "live").map((k) => k.address));
-    const kept = this.pins.filter((p) => !heard.has(machine(p)) || live.has(p));
-    if (kept.length !== this.pins.length) this.setPins(kept);
+  // Keep offline pins until their terminal returns, and keep each pending until
+  // core echoes the label so a failed write doesn't erase the old pin.
+  migratePins(all) {
+    const listed = new Map(all.filter((t) => t.state === "live").map((t) => [t.address, t]));
+    const pending = this.pendingPins.filter((address) => {
+      const terminal = listed.get(address);
+      if (!terminal) return true;
+      if (terminal.labels?.["herdr.pinned"]) return false;
+      if (!this.migratingPins.has(address)) {
+        this.migratingPins.add(address);
+        run("terminal.pin", { terminal: address, pinned: true });
+      }
+      return true;
+    });
+    if (pending.length === this.pendingPins.length) return;
+    this.pendingPins = pending;
+    if (pending.length) localStorage.setItem("pins", JSON.stringify(pending));
+    else localStorage.removeItem("pins");
   }
 
   since(a) {
@@ -215,6 +222,7 @@ export default class Agents extends View {
     let list = agents();
     this.listed = new Map(list.map((a) => [a.address, a.status]));
     const all = terminals();
+    this.migratePins(all);
     const shown = focused()?.agent;
     const now = Date.now();
     this.track(list, now);
@@ -223,9 +231,8 @@ export default class Agents extends View {
     const urgency = new Map(list.map((a) => [a.address, Math.max(this.rank(a), ...this.tree(all, a.address).map((s) => RANK[kidStatus(s.t, this.listed)] ?? 0))]));
     const rankOf = (a) => urgency.get(a.address);
     if (byPriority) list = [...list].sort((x, y) => rankOf(y) - rankOf(x) || this.since(y) - this.since(x) || y.seq - x.seq);
-    this.prunePins(all);
-    const pinned = this.pins.map((p) => list.find((a) => a.address === p)).filter(Boolean);
-    const rest = list.filter((a) => !this.pins.includes(a.address));
+    const pinned = list.filter((a) => a.pinned);
+    const rest = list.filter((a) => !a.pinned);
     list = [...pinned, ...rest];
     setAgentOrder(list.map((a) => a.address));
 
@@ -297,7 +304,7 @@ export default class Agents extends View {
       }
       const when = this.since(a);
       const idle = a.status === "idle" && !a.focused;
-      const isPinned = this.pins.includes(a.address);
+      const isPinned = a.pinned;
       const pin = div()
         .id(`pin-${a.address}`)
         .flex_none()
@@ -309,7 +316,7 @@ export default class Agents extends View {
         .tooltip(isPinned ? "Unpin" : "Pin to the top")
         .on_click((_e, cx) => {
           cx.stop_propagation();
-          this.setPins(isPinned ? this.pins.filter((p) => p !== a.address) : [...this.pins, a.address]);
+          run("terminal.pin", { terminal: a.address, pinned: !isPinned });
           // The row moves away from under the pointer, and no hover-out comes.
           this.hovered = null;
           cx.notify();
@@ -427,22 +434,22 @@ export default class Agents extends View {
         el.child(div().px(12).text_size(12).text_color(t.dim).child("No agent status yet. Agents show up here when they report their status. Older versions and agents inside tmux may not.")),
       )
       .child(v_flex().id("ag-list").flex_1().min_h(0).px(collapsed ? 0 : 8).overflow_y_scrollbar().mode("always").children(rows))
-      .child(
-        h_flex()
-          .h(28)
-          .px(12)
-          .items_center()
-          .justify_end()
-          .when(collapsed, (el) => el.justify_center().px(0))
-          .child(
-            div()
-              .id("collapse")
-              .text_size(13)
-              .text_color(t.dim)
-              .hover((s) => s.text_color(t.foreground))
-              .on_click(toggleSidebar)
-              .child(collapsed ? "»" : ""),
-          ),
+      .when(collapsed, (el) =>
+        el.child(
+          h_flex()
+            .h(28)
+            .items_center()
+            .justify_center()
+            .child(
+              div()
+                .id("collapse")
+                .text_size(13)
+                .text_color(t.dim)
+                .hover((s) => s.text_color(t.foreground))
+                .on_click(toggleSidebar)
+                .child("»"),
+            ),
+        ),
       );
   }
 }

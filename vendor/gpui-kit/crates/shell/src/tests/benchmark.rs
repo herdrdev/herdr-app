@@ -645,7 +645,7 @@ fn runtime_with_source(
     let runtime = if interpreter {
         ShellRuntime::new_isolated_interpreter().expect("interpreter runtime")
     } else {
-        ShellRuntime::new_isolated().expect("automatic JIT runtime")
+        ShellRuntime::new_isolated_jit().expect("automatic JIT runtime")
     };
     cx.update(|cx| runtime.set_global(cx));
 

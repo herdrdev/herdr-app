@@ -34,6 +34,37 @@ fn lines(c: char) -> Option<[u8; 4]> {
     Some(out)
 }
 
+/// Rounded corners (╭╮╯╰): which way their two arms leave the center,
+/// (right or left, down or up). Drawn as arcs, as Ghostty does.
+fn arc(c: char) -> Option<(f32, f32)> {
+    match c {
+        '╭' => Some((1.0, 1.0)),
+        '╮' => Some((-1.0, 1.0)),
+        '╯' => Some((-1.0, -1.0)),
+        '╰' => Some((1.0, -1.0)),
+        _ => None,
+    }
+}
+
+/// Dashed lines: (dashes per cell, heavy, horizontal), as Ghostty draws them.
+fn dashes(c: char) -> Option<(u8, bool, bool)> {
+    Some(match c {
+        '┄' => (3, false, true),
+        '┅' => (3, true, true),
+        '┆' => (3, false, false),
+        '┇' => (3, true, false),
+        '┈' => (4, false, true),
+        '┉' => (4, true, true),
+        '┊' => (4, false, false),
+        '┋' => (4, true, false),
+        '╌' => (2, false, true),
+        '╍' => (2, true, true),
+        '╎' => (2, false, false),
+        '╏' => (2, true, false),
+        _ => return None,
+    })
+}
+
 /// Rectangles in cell fractions (x0, y0, x1, y1) and an alpha, for block elements.
 fn blocks(c: char) -> Option<(Vec<[f32; 4]>, f32)> {
     let e = 1.0 / 8.0;
@@ -120,10 +151,48 @@ pub fn paint(text: &str, cell: Bounds<Pixels>, color: Hsla, window: &mut Window)
         }
         return;
     }
-    let Some(dirs) = lines(c) else { return };
     let light = (w / 8.0).round().max(1.0 / scale);
-    let thick = |k: u8| if k == 2 { light * 2.0 } else { light };
     let (cx, cy) = (snap(x + w / 2.0), snap(y + h / 2.0));
+    if let Some((sx, sy)) = arc(c) {
+        // Like Ghostty, center the stroke between its pixel-aligned edges.
+        // The solid arms snap both edges, not the path center.
+        let (x0, x1) = (snap(cx - light / 2.0), snap(cx + light / 2.0));
+        let (y0, y1) = (snap(cy - light / 2.0), snap(cy + light / 2.0));
+        let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+        let ex = snap(if sx > 0.0 { x + w } else { x });
+        let ey = snap(if sy > 0.0 { y + h } else { y });
+        // Keep the turn inside the snapped cell, without doubling back.
+        let (r, k) = ((ex - cx).abs().min((ey - cy).abs()), 0.25);
+        let mut path = PathBuilder::stroke(px(x1 - x0));
+        path.move_to(point(px(cx), px(ey)));
+        path.line_to(point(px(cx), px(cy + sy * r)));
+        path.cubic_bezier_to(point(px(cx + sx * r), px(cy)), point(px(cx), px(cy + sy * k * r)), point(px(cx + sx * k * r), px(cy)));
+        path.line_to(point(px(ex), px(cy)));
+        if let Ok(path) = path.build() {
+            window.paint_path(path, color);
+        }
+        return;
+    }
+    if let Some((n, heavy, horizontal)) = dashes(c) {
+        // Gaps are at most half the cell. A horizontal line keeps half a gap
+        // at each end and a vertical one its gap below, so neighbors tile evenly.
+        let t = if heavy { light * 2.0 } else { light };
+        let (len, from) = if horizontal { (w, x) } else { (h, y) };
+        let gap = (len / (2.0 * n as f32)).min(light.max(4.0 / scale));
+        let dash = (len - gap * n as f32) / n as f32;
+        let mut at = from + if horizontal { gap / 2.0 } else { 0.0 };
+        for _ in 0..n {
+            if horizontal {
+                rect(at, cy - t / 2.0, at + dash, cy + t / 2.0, color);
+            } else {
+                rect(cx - t / 2.0, at, cx + t / 2.0, at + dash, color);
+            }
+            at += dash + gap;
+        }
+        return;
+    }
+    let Some(dirs) = lines(c) else { return };
+    let thick = |k: u8| if k == 2 { light * 2.0 } else { light };
     // Where a line along an arm starts, measured from the center toward the
     // arm: `before` and `after` are the crossing arms on this line's side and
     // the other side. Negative reaches past the center so joins close.
@@ -232,5 +301,81 @@ mod tests {
         for c in '\u{2580}'..='\u{259F}' {
             assert!(blocks(c).is_some(), "{c} has no entry");
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rendered_rounded_corners_join_straight_lines() {
+        use gpui::{prelude::*, *};
+
+        struct BoxScene { w: f32, h: f32 }
+        impl Render for BoxScene {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let (w, h) = (self.w, self.h);
+                div().size_full().bg(rgb(0)).child(canvas(|_, _, _| {}, move |_, _, window, _| {
+                    for (row, text) in ["╭─╮", "│ │", "╰─╯"].iter().enumerate() {
+                        for (col, c) in text.chars().enumerate() {
+                            paint(&c.to_string(), Bounds::new(
+                                point(px(7.3 + col as f32 * w), px(5.7 + row as f32 * h)),
+                                size(px(w), px(h)),
+                            ), rgb(0xffffff).into(), window);
+                        }
+                    }
+                }).size_full())
+            }
+        }
+
+        let mut cx = HeadlessAppContext::with_platform(
+            gpui_platform::current_platform(true).text_system(),
+            std::sync::Arc::new(()),
+            gpui_platform::current_headless_renderer,
+        );
+        // The headless platform renders at 2x. Include half-sized cells to
+        // exercise the one-device-pixel strokes used at 14 and 18.2px.
+        for (w, h) in [(4.2, 11.), (5.46, 14.3), (8.4, 22.), (10.92, 28.6), (16., 32.)] {
+            let handle = cx.open_window(size(px(80.), px(120.)), |_, cx| cx.new(|_| BoxScene { w, h })).unwrap();
+            cx.update_window(handle.into(), |_, window, cx| {
+                let scale = window.scale_factor();
+                let _ = window.draw(cx);
+                let image = window.render_to_image().unwrap();
+                let snap = |v: f32| (v * scale).round() as u32;
+                // Compare each arc endpoint with the neighboring solid arm,
+                // including the background on either side of the stroke.
+                for row in [0, 2] {
+                    let cy = snap(5.7 + row as f32 * h + h / 2.);
+                    for boundary in [1, 2] {
+                        let edge = snap(7.3 + boundary as f32 * w);
+                        for y in cy - 3..=cy + 3 {
+                            let a = image.get_pixel(edge - 1, y).0[0];
+                            let b = image.get_pixel(edge, y).0[0];
+                            assert!(a.abs_diff(b) <= 24, "horizontal join: {w}x{h} scale {scale}, row {row}, edge {boundary}, y {y}: {a} != {b}");
+                        }
+                    }
+                }
+                for col in [0, 2] {
+                    let cx = snap(7.3 + col as f32 * w + w / 2.);
+                    for boundary in [1, 2] {
+                        let edge = snap(5.7 + boundary as f32 * h);
+                        for x in cx - 3..=cx + 3 {
+                            let a = image.get_pixel(x, edge - 1).0[0];
+                            let b = image.get_pixel(x, edge).0[0];
+                            assert!(a.abs_diff(b) <= 24, "vertical join: {w}x{h} scale {scale}, col {col}, edge {boundary}, x {x}: {a} != {b}");
+                        }
+                    }
+                }
+            }).unwrap();
+        }
+    }
+
+    #[test]
+    fn rounded_corners_and_dashes_have_their_own_shapes() {
+        for c in ['╭', '╮', '╯', '╰'] {
+            assert!(arc(c).is_some() && is_sprite(&c.to_string()), "{c}");
+        }
+        for c in ['┄', '┅', '┆', '┇', '┈', '┉', '┊', '┋', '╌', '╍', '╎', '╏'] {
+            assert!(dashes(c).is_some() && is_sprite(&c.to_string()), "{c}");
+        }
+        assert_eq!(arc('┌'), None);
+        assert_eq!(dashes('─'), None);
     }
 }

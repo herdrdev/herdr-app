@@ -44,6 +44,27 @@ impl AppAssets {
         &self.root
     }
 
+    /// The cache identity of a local asset, using the same spelling as its
+    /// resolved path. This is lexical so missing/deleted files keep their key.
+    pub fn cache_key(path: &str) -> SharedString {
+        Self::relative_path(path)
+            .map(|path| path.to_string_lossy().into_owned())
+            .unwrap_or_else(|| path.to_owned())
+            .into()
+    }
+
+    fn relative_path(path: &str) -> Option<PathBuf> {
+        let mut resolved = PathBuf::new();
+        for component in std::path::Path::new(path).components() {
+            match component {
+                std::path::Component::ParentDir => return None,
+                std::path::Component::CurDir | std::path::Component::RootDir => {}
+                other => resolved.push(other),
+            }
+        }
+        (!resolved.as_os_str().is_empty()).then_some(resolved)
+    }
+
     /// Opens the application directory and answers the path within it.
     ///
     /// The same shape the `fs` capability uses, and for the same reason: a
@@ -56,21 +77,7 @@ impl AppAssets {
     /// The lexical pass stays as the cheap half: it turns `../..` into a refusal
     /// here rather than an `errno` from below.
     fn resolve(&self, path: &str) -> Option<(Dir, PathBuf)> {
-        let mut resolved = PathBuf::new();
-        for component in std::path::Path::new(path).components() {
-            match component {
-                // The path is being built relative to the root, so `..` can only
-                // mean "leave it". Refusing here rather than popping gives the
-                // reason; `Dir` would refuse it too, with an `errno`.
-                std::path::Component::ParentDir => return None,
-                std::path::Component::CurDir | std::path::Component::RootDir => {}
-                other => resolved.push(other),
-            }
-        }
-        if resolved.as_os_str().is_empty() {
-            return None;
-        }
-
+        let resolved = Self::relative_path(path)?;
         let dir = Dir::open_ambient_dir(&self.root, ambient_authority()).ok()?;
         Some((dir, resolved))
     }
