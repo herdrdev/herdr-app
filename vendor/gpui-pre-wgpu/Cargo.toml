@@ -136,6 +136,9 @@ features = [
 [dependencies.swash]
 version = "0.2.6"
 
+[dependencies.ttf-parser]
+version = "0.25"
+
 [dependencies.unicode-bidi]
 version = "0.3.18"
 features = ["hardcoded-data"]
