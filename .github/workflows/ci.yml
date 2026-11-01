@@ -131,7 +131,7 @@ jobs:
       - name: Check documentation
         if: matrix.platform == 'linux-x86_64'
         run: |
-          ~/.bun/bin/bun test scripts/docs.test.ts
+          ~/.bun/bin/bun test scripts/docs.test.ts scripts/spaces-status.test.ts
           ~/.bun/bin/bun scripts/docs.ts check
 
   # Keep the required check name stable while requiring every platform.
