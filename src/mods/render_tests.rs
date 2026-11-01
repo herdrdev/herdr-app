@@ -60,6 +60,7 @@ struct Calls {
     unexpected: Vec<String>,
     effects: Vec<(String, Vec<Value>)>,
     shared: BTreeMap<String, Value>,
+    quota_reply: Option<Value>,
 }
 
 fn updates(app: &str, core: &str) -> Value {
@@ -159,6 +160,14 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
         module = module.async_function(name, move |a| {
             let first = a.get(0).map(from_host).unwrap_or(Value::Null);
             let reply = match name {
+                // The usage helper is mocked: render tests must never read logins or contact providers.
+                "exec" if first == "node" && a.get(1).map(from_host) == Some(json!(["/fixture/app/mods/subscription-usage/query.mjs"])) => {
+                    let quota = calls.borrow().quota_reply.clone().unwrap_or_else(|| json!({
+                        "claude": {"status":"unavailable", "message":"Fixture: not signed in", "windows":[]},
+                        "codex": {"status":"unavailable", "message":"Fixture: not signed in", "windows":[]}
+                    }));
+                    Some(json!({"code":0,"stdout":quota.to_string(),"stderr":""}))
+                }
                 "readTextFile" if first == "/fixture/app/settings.json" || first == "/fixture/.ssh/config" => Some(Value::Null),
                 "readTextFile" => first
                     .as_str()
@@ -275,6 +284,47 @@ fn shipped_initial_descriptions(cx: &mut TestAppContext) {
         entries.len(),
         start.elapsed()
     );
+}
+
+#[gpui::test]
+fn subscription_quota_renders_remaining_windows_and_unavailable_accounts(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_millis() as u64;
+    for available in [true, false] {
+        let unavailable = json!({"status":"unavailable","message":"Subscription login required","windows":[]});
+        let claude = if available {
+            json!({"status":"ok","checkedAt":now,"windows":[
+                {"label":"5 hours","used":100,"remaining":0,"resetsAt":now + 3600000},
+                {"label":"7 days","used":20,"remaining":80,"resetsAt":null}
+            ]})
+        } else { unavailable.clone() };
+        let calls = Rc::new(RefCell::new(Calls {
+            quota_reply: Some(json!({"claude":claude,"codex":unavailable})),
+            ..Default::default()
+        }));
+        let policy = Policy::new().with_host_module(module(fixture(false, props(), updates("current", "current")), calls.clone())).unwrap();
+        let window = cx.add_window(|_, _| Empty);
+        let mut session = window.update(cx, |_, window, cx| {
+            DescriptionSession::load(ShellRuntime::new_isolated().unwrap(), staged.0.join("mods/subscription-usage"), policy, window, cx).unwrap()
+        }).unwrap();
+        cx.run_until_parked();
+        let tree = window.update(cx, |_, window, cx| {
+            let tree = session.describe(window, cx).unwrap();
+            window.remove_window();
+            tree
+        }).unwrap();
+        assert!(calls.borrow().unexpected.is_empty(), "{:?}", calls.borrow().unexpected);
+        assert!(tree.contains("Subscription login required"), "{tree}");
+        assert_eq!(tree.contains("80% left"), available, "{tree}");
+        if available {
+            for text in ["0% left", "5 hours", "7 days", "Resets in", "Reset time unavailable"] {
+                assert!(tree.contains(text), "missing {text}: {tree}");
+            }
+        } else {
+            assert!(!tree.contains("% left"), "unknown usage must not show an allowance: {tree}");
+        }
+    }
 }
 
 #[gpui::test]
