@@ -1458,13 +1458,18 @@ impl Render for TerminalView {
                         let (px_, py_) = pad();
                         let cols = ((f32::from(bounds.size.width) - 2.0 * px_) / f32::from(cell.width)).floor().max(2.0) as u16;
                         let rows = ((f32::from(bounds.size.height) - 2.0 * py_) / f32::from(cell.height)).floor().max(1.0) as u16;
-                        if (cols, rows) != (g.vt.cols, g.vt.rows) || dev != g.vt_cell {
+                        let grid_changed = (cols, rows) != (g.vt.cols, g.vt.rows);
+                        if grid_changed || dev != g.vt_cell {
                             g.vt.resize(cols, rows, dev.0, dev.1);
                             g.vt_cell = dev;
-                            if let Some(chan) = g.channel {
+                            // Mode 2048 programs wait for this report, not SIGWINCH.
+                            let replies = g.vt.take_replies();
+                            // Only a new grid is sent: resizing makes this viewer the one whose
+                            // size counts, and a new cell alone already went out as facts. With
+                            // another viewer attached (herdr-core#69), a cell-only change would
+                            // take the size from it, so its report is dropped too.
+                            if grid_changed && let Some(chan) = g.channel {
                                 g.core.resize(chan, cols, rows);
-                                // Mode 2048 programs wait for this report, not SIGWINCH.
-                                let replies = g.vt.take_replies();
                                 g.core.input(chan, &replies);
                             }
                         }
