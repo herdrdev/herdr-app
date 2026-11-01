@@ -282,7 +282,7 @@ Show a terminal in a pane for now, in place of its own (no terminal: back).
 
 ## `terminal.copy`
 
-Copy the focused terminal's selection.
+Copy the focused terminal's selection. With nothing selected, that key goes to the program.
 
 No arguments.
 
