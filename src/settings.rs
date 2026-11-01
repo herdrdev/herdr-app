@@ -609,6 +609,11 @@ pub fn parse_hex(s: &str) -> Option<Hsla> {
     )
 }
 
+/// A theme value without its alpha; one that is no color stays as written.
+pub fn opaque(v: &str) -> String {
+    hex_parts(v).map_or_else(|| v.to_owned(), |(rgb, _)| format!("#{rgb:06x}"))
+}
+
 pub fn rgb(s: &str) -> Rgb {
     let h = s.trim().trim_start_matches('#');
     let v = h.get(..h.len().min(6)).and_then(|h| u32::from_str_radix(h, 16).ok()).unwrap_or(0xff00ff);
