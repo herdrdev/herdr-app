@@ -4621,10 +4621,14 @@ impl Render for AppWindow {
                     }
                 }
             }))
-            .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
-                if ev.keystroke.key == "escape" && this.pane_drag.is_some() {
-                    this.cancel_pane_drag(cx);
-                    cx.stop_propagation();
+            .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
+                if ev.keystroke.key == "escape" {
+                    if this.pane_drag.is_some() {
+                        this.cancel_pane_drag(cx);
+                        cx.stop_propagation();
+                    } else if cx.stop_active_drag(window) {
+                        cx.stop_propagation();
+                    }
                 }
             }))
             .capture_any_mouse_down(cx.listener(|this, ev: &MouseDownEvent, _, _| this.pointer = ev.position))

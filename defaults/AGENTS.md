@@ -178,7 +178,13 @@ the title bar, panes as cards, a space picker) and `win98`
 writing a new file. The Files panel supports Windows folder paths with spaces,
 parentheses and apostrophes, and preserves Unicode file and folder names
 (including Chinese). Directory links expand as folders; their contents load
-only when expanded.
+only when expanded. Drag a file or folder into a terminal to paste its quoted
+path without pressing Enter. Local paths work in local terminals; remote
+paths work in terminals on that same machine. Local files dropped onto a
+remote terminal are copied there first; copying local folders or dragging
+remote paths onto a different machine is not supported and shows an explanation.
+Paths containing control characters are rejected for safety, including files
+pasted from the clipboard.
 
 **Herdr's own layouts and mods are read-only.** They are replaced whole
 on every start. Use settings.json for look (fonts, sizes, theme, colors,
@@ -873,6 +879,10 @@ in init, `.track_focus(this.h).on_key_down((e, cx) => …)`, `this.h.focus()`.
 `.on_drop((event, cx) => …)` on a plain layout element receives external files as
 `event.paths` (absolute paths). The feedback form accepts dropped images with
 the same limits, previews and removal as picked images.
+`.id("file-row").drag_paths([absolutePath], { on: machine })` makes a plain layout
+element a native file/folder drag source for terminals. Omit `on` (or use null)
+for local paths; remote paths retain their source machine. Ordinary clicks
+still work; dropping outside a terminal cancels without pasting.
 `.on_hover((hovered, cx) => …)` reports pointer entry and exit on buttons
 and other interactive controls too.
 `.when(cond, (el) => …)`, `.children([...])`. Controls from `gpui-base`

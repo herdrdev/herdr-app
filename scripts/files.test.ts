@@ -49,6 +49,53 @@ test("Files preserves Unicode names when listing and expanding folders", async (
   }
 });
 
+function fileRows(root: string, on: string | null) {
+  const build = () => {
+    const calls: Record<string, unknown[]> = {};
+    const element: any = new Proxy({ calls }, {
+      get(target, name: string) {
+        if (name === "calls") return target.calls;
+        return (...args: unknown[]) => {
+          calls[name] = args;
+          if (name === "when" && args[0]) (args[1] as Function)(element);
+          return element;
+        };
+      },
+    });
+    return element;
+  };
+  const Files = new Function("View", "div", "svg", "h_flex",
+    source.replace(/^import .*;$/gm, "").replace("export default class", "class") + "; return Files;",
+  )(class {}, build, build, build);
+  const files = new Files();
+  files.root = root; files.on = on; files.marks = {};
+  files.entries = new Map([
+    ["", [{ name: "中文 O'Brien", dir: true }, { name: "hello world.txt", dir: false }]],
+    ["中文 O'Brien", [{ name: "子文件.txt", dir: false }]],
+  ]);
+  files.folders = new Set(["中文 O'Brien"]);
+  return { files, rows: files.rows("", 0, [], {}) };
+}
+
+test("Files makes folders and nested files draggable with their source machine", () => {
+  for (const [root, on] of [["/work", null], ["/remote/work", "server"], ["C:/Project", null]] as const) {
+    const { rows } = fileRows(root, on);
+    expect(rows.map((row: any) => row.calls.drag_paths)).toEqual([
+      [[`${root}/中文 O'Brien`], { on }],
+      [[`${root}/中文 O'Brien/子文件.txt`], { on }],
+      [[`${root}/hello world.txt`], { on }],
+    ]);
+  }
+});
+
+test("Files retains folder expansion and file preview click handlers", () => {
+  const { files, rows } = fileRows("/work", null), clicks: unknown[] = [];
+  files.toggle = (path: string) => clicks.push(["toggle", path]);
+  files.show = (path: string) => clicks.push(["show", path]);
+  rows.forEach((row: any) => row.calls.on_click[0]({}, {}));
+  expect(clicks).toEqual([["toggle", "中文 O'Brien"], ["show", "中文 O'Brien/子文件.txt"], ["show", "hello world.txt"]]);
+});
+
 test("Files follows directory links one level at a time", async () => {
   const root = await mkdtemp(join(tmpdir(), "herdr-files-links-"));
   try {
