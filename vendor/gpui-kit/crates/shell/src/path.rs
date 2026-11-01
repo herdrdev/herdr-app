@@ -7,7 +7,7 @@ use gpui::{
 
 use crate::{
     spec::{BackgroundKind, BackgroundSpec, SpecOp},
-    value::Bridged,
+    value::{Bridged, scaled_px},
 };
 
 #[derive(Clone, Copy)]
@@ -31,7 +31,7 @@ impl Coordinate {
 
     fn resolve(self, start: Pixels, length: Pixels) -> Pixels {
         match self {
-            Self::Pixels(value) => start + px(value),
+            Self::Pixels(value) => start + scaled_px(value),
             Self::Percent(value) => start + length * value,
         }
     }
@@ -77,7 +77,7 @@ impl NativePath {
         Self {
             fill,
             background,
-            stroke_width: px(stroke_width),
+            stroke_width: scaled_px(stroke_width),
             dash_array,
             commands,
             style,
