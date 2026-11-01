@@ -945,6 +945,25 @@ Mods are trusted code: commands and network access (including `fetch`) are unres
 Other built-ins: `localStorage` (per mod copy), `console.log`, `fetch`,
 `import * as fs from "fs/promises"` (read in home, write under `~/.config/herdr-app`).
 
+## Subscription usage
+
+The Agents header's **Usage** opens `subscription-usage`: remaining quota and
+reset times for the local default Claude Code and Codex accounts. Node.js 18+
+must be on PATH. It refreshes while open (every two minutes); manual refreshes
+are limited to once per 30 seconds. Agent badges show the lowest remaining
+window after a successful check and disappear when stale or past reset.
+These are shared account quotas, not each terminal's consumption. Remote agents,
+per-terminal account overrides, and other providers are not measured.
+
+The helper reads Claude's existing OAuth credentials (respects
+`CLAUDE_CONFIG_DIR`; default macOS Keychain also supported) and requests its
+usage endpoint. Codex uses the installed CLI's `account/rateLimits/read` RPC,
+respecting its own account/configuration. No inference is run. Tokens, account
+identifiers and raw service errors are never returned to mods or persisted.
+Login/service failures display unavailable, never a fabricated zero usage.
+Claude's OAuth usage endpoint is not a stable public API; see
+`mods/subscription-usage/README.md` for support boundaries.
+
 ## herdr-core (`hc`)
 
 `herdr-app --skill` prints the manual for driving this window;

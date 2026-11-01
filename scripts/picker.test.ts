@@ -28,7 +28,7 @@ const values: Record<string, any> = {
   settings: () => ({ zoom: 1.2 }), props: () => ({}), shared: () => ({}),
   setShared() {}, closeOverlay() {}, openOverlay() {}, run() {}, hc() {},
 };
-const Picker = new Function(...Object.keys(values), source.replace(/^import .*;\n/gm, "").replace("export default class Picker", "return class Picker"))(...Object.values(values));
+const Picker = new Function(...Object.keys(values), source.replace(/^import .*;\r?\n/gm, "").replace("export default class Picker", "return class Picker"))(...Object.values(values));
 const cx = { notify() {}, stop_propagation() {}, timer: { after() {} }, focus_handle() {}, spawn() {} };
 function picker(machines = 12) {
   const view = new Picker();
