@@ -60,6 +60,7 @@ const MAX_MODULE_BYTES: u64 = 8 * 1024 * 1024;
 #[derive(Clone)]
 pub struct ViewType {
     value: Persistent<Object<'static>>,
+    namespace: Option<Persistent<Object<'static>>>,
     module_lease: Option<ApplicationModuleLease>,
     application: Option<Rc<ApplicationGeneration>>,
 }
@@ -907,6 +908,7 @@ impl ViewType {
     fn from_panel_class(class: Persistent<Object<'static>>) -> Self {
         Self {
             value: class,
+            namespace: None,
             module_lease: None,
             application: scope::current_application_generation(),
         }
@@ -1071,6 +1073,8 @@ mod dock_api;
 mod entity_api;
 pub(crate) mod host;
 mod host_modules;
+mod prepared;
+pub use prepared::{ApplicationCall, PreparedApplication};
 mod overlay;
 pub(crate) mod sandbox;
 mod scheduler;
@@ -2268,6 +2272,7 @@ impl ShellRuntime {
                 };
                 Ok(ViewType {
                     value: Persistent::save(ctx, class.clone()),
+                    namespace: Some(Persistent::save(ctx, module.namespace()?)),
                     module_lease,
                     application,
                 })
@@ -2510,6 +2515,7 @@ impl ShellRuntime {
                 owner: parent,
                 view_type: ViewType {
                     value: class,
+                    namespace: None,
                     module_lease: provenance.module_lease.clone(),
                     application,
                 },
