@@ -211,7 +211,7 @@ impl ThemeChoice {
 pub struct FocusLook {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub border: Option<Line>,
-    /// Which sides the focus border draws on; none named: all four.
+    /// Which sides the focus border draws on; left out: all four, `[]`: none.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub sides: Option<Vec<Side>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

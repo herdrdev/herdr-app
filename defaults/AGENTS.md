@@ -231,8 +231,8 @@ Properties any node can have:
   or `{ "image": "backgrounds/sky.jpg", "fit": "cover" | "contain" }`, a path in
   the home folder), `border` (`{ "width": 1, "color": "border" }`), `radius`,
   `shadow` (`"sm" | "md" | "lg"`), `focus` (`{ "border": {...}, "sides": ["right"] }`
-  when the focused pane or block is inside; `sides` defaults to all four, so a
-  bar can outline only its inner edge).
+  when the focused pane or block is inside; `sides` left out means all four and
+  `[]` none, so a bar can outline only its inner edge).
 - `padding`: space inside the node's edge, px: `16` or `[vertical, horizontal]`.
 - row/column: `gap` (px between children), `divider` (`{ "width": 1, "color": "border" }`),
   `resizable` (default true: drag the boundary). This applies to that row/column only.

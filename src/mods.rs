@@ -839,10 +839,13 @@ fn exec_future(command: String, args: Vec<String>, cwd: Option<String>, on: Opti
     }
 }
 
-fn module(inst: Instance, copy: u64, slot: String) -> HostModule {
+fn module(inst: Instance, copy: u64, slot: &str) -> HostModule {
     // Told its block id here, not in `inst.props`: those name its storage file.
-    let mut props = if inst.props.is_object() { inst.props.clone() } else { json!({}) };
-    props["block"] = json!(slot);
+    // Props that aren't an object stay as the layout gave them.
+    let mut props = if inst.props.is_null() { json!({}) } else { inst.props.clone() };
+    if let Some(o) = props.as_object_mut() {
+        o.insert("block".into(), json!(slot));
+    }
     let feedback_frame = inst.name == "frame-feedback";
     let feedback_from = inst.props.get("from").and_then(Value::as_str).unwrap_or("person").to_owned();
     let feedback_layout = inst.props.get("layout").and_then(Value::as_str).unwrap_or("other").to_owned();
@@ -1092,7 +1095,7 @@ fn capabilities() -> Capabilities {
 pub fn install_policy() -> async_channel::Receiver<Request> {
     gpui_shell::policy::update_default(|p| {
         p.with_capabilities(capabilities())
-            .with_host_module(module(Instance { name: String::new(), props: Value::Null }, 0, String::new()))
+            .with_host_module(module(Instance { name: String::new(), props: Value::Null }, 0, ""))
             .expect("herdr module is valid")
     });
     let (tx, rx) = async_channel::unbounded();
@@ -1124,7 +1127,7 @@ pub fn prepare_load(inst: &Instance, slot: &str) -> u64 {
         .with_application(inst.key())
         .with_capabilities(capabilities())
         .with_storage_path(dir.join(file))
-        .with_host_module(module(inst.clone(), copy, slot.to_owned()))
+        .with_host_module(module(inst.clone(), copy, slot))
         .expect("herdr module is valid");
     gpui_shell::policy::set_default(policy);
     copy

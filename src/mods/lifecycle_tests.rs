@@ -124,7 +124,7 @@ export default class extends View {
     let seen = Rc::new(RefCell::new(Vec::new()));
     let calls = seen.clone();
     gpui_shell::policy::set_default(Policy::new()
-        .with_host_module(module(Instance { name: "test".into(), props: Value::Null }, 0, "test".into())).unwrap()
+        .with_host_module(module(Instance { name: "test".into(), props: Value::Null }, 0, "test")).unwrap()
         .with_host_module(HostModule::new("fixture").function("note", move |a| {
             calls.borrow_mut().push(a.string(0)?.to_owned());
             Ok(HostValue::Null)
@@ -136,6 +136,36 @@ export default class extends View {
     assert_eq!(seen.len(), 2);
     assert!(seen[0].contains("space.close: unknown argument(s): space; valid arguments: id, confirmed"), "{}", seen[0]);
     assert!(seen[1].contains("terminal.kill: unknown argument(s): id; valid arguments: terminal"), "{}", seen[1]);
+}
+
+#[gpui::test]
+fn props_name_the_block_and_keep_what_the_layout_gave(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let fixture = Fixture::new(r#"
+import { View, div } from "gpui-kit";
+import { props } from "herdr";
+import { note } from "fixture";
+export default class extends View {
+  init() { note(JSON.stringify(props())); }
+  render() { return div(); }
+}"#);
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|_, _| Empty);
+    // No props, an object, and a value that isn't one (left as it was).
+    for (given, seen) in [(Value::Null, json!({"block": "side"})), (json!({"x": 1}), json!({"x": 1, "block": "side"})), (json!("plain"), json!("plain"))] {
+        let notes = Rc::new(RefCell::new(Vec::new()));
+        let calls = notes.clone();
+        gpui_shell::policy::set_default(Policy::new()
+            .with_host_module(module(Instance { name: "test".into(), props: given }, 0, "side")).unwrap()
+            .with_host_module(HostModule::new("fixture").function("note", move |a| {
+                calls.borrow_mut().push(a.string(0)?.to_owned());
+                Ok(HostValue::Null)
+            })).unwrap());
+        let _root = window.update(cx, |_, window, cx| runtime.try_load(&fixture.0, window, cx).unwrap()).unwrap();
+        let notes = notes.borrow();
+        assert_eq!(notes.len(), 1);
+        assert_eq!(serde_json::from_str::<Value>(&notes[0]).unwrap(), seen);
+    }
 }
 
 #[gpui::test]
