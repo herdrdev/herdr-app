@@ -154,14 +154,20 @@ pub fn paint(text: &str, cell: Bounds<Pixels>, color: Hsla, window: &mut Window)
     let light = (w / 8.0).round().max(1.0 / scale);
     let (cx, cy) = (snap(x + w / 2.0), snap(y + h / 2.0));
     if let Some((sx, sy)) = arc(c) {
-        // Straight in from both edges, then a quarter turn through the
-        // center's corner (Ghostty's control points), so it meets ─ and │.
-        let (r, k) = (w.min(h) / 2.0, 0.25);
-        let mut path = PathBuilder::stroke(px(light));
-        path.move_to(point(px(cx), px(if sy > 0.0 { y + h } else { y })));
+        // Like Ghostty, center the stroke between its pixel-aligned edges.
+        // The solid arms snap both edges, not the path center.
+        let (x0, x1) = (snap(cx - light / 2.0), snap(cx + light / 2.0));
+        let (y0, y1) = (snap(cy - light / 2.0), snap(cy + light / 2.0));
+        let (cx, cy) = ((x0 + x1) / 2.0, (y0 + y1) / 2.0);
+        let ex = snap(if sx > 0.0 { x + w } else { x });
+        let ey = snap(if sy > 0.0 { y + h } else { y });
+        // Keep the turn inside the snapped cell, without doubling back.
+        let (r, k) = ((ex - cx).abs().min((ey - cy).abs()), 0.25);
+        let mut path = PathBuilder::stroke(px(x1 - x0));
+        path.move_to(point(px(cx), px(ey)));
         path.line_to(point(px(cx), px(cy + sy * r)));
         path.cubic_bezier_to(point(px(cx + sx * r), px(cy)), point(px(cx), px(cy + sy * k * r)), point(px(cx + sx * k * r), px(cy)));
-        path.line_to(point(px(if sx > 0.0 { x + w } else { x }), px(cy)));
+        path.line_to(point(px(ex), px(cy)));
         if let Ok(path) = path.build() {
             window.paint_path(path, color);
         }
@@ -294,6 +300,70 @@ mod tests {
         }
         for c in '\u{2580}'..='\u{259F}' {
             assert!(blocks(c).is_some(), "{c} has no entry");
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rendered_rounded_corners_join_straight_lines() {
+        use gpui::{prelude::*, *};
+
+        struct BoxScene { w: f32, h: f32 }
+        impl Render for BoxScene {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let (w, h) = (self.w, self.h);
+                div().size_full().bg(rgb(0)).child(canvas(|_, _, _| {}, move |_, _, window, _| {
+                    for (row, text) in ["╭─╮", "│ │", "╰─╯"].iter().enumerate() {
+                        for (col, c) in text.chars().enumerate() {
+                            paint(&c.to_string(), Bounds::new(
+                                point(px(7.3 + col as f32 * w), px(5.7 + row as f32 * h)),
+                                size(px(w), px(h)),
+                            ), rgb(0xffffff).into(), window);
+                        }
+                    }
+                }).size_full())
+            }
+        }
+
+        let mut cx = HeadlessAppContext::with_platform(
+            gpui_platform::current_platform(true).text_system(),
+            std::sync::Arc::new(()),
+            gpui_platform::current_headless_renderer,
+        );
+        // The headless platform renders at 2x. Include half-sized cells to
+        // exercise the one-device-pixel strokes used at 14 and 18.2px.
+        for (w, h) in [(4.2, 11.), (5.46, 14.3), (8.4, 22.), (10.92, 28.6), (16., 32.)] {
+            let handle = cx.open_window(size(px(80.), px(120.)), |_, cx| cx.new(|_| BoxScene { w, h })).unwrap();
+            cx.update_window(handle.into(), |_, window, cx| {
+                let scale = window.scale_factor();
+                let _ = window.draw(cx);
+                let image = window.render_to_image().unwrap();
+                let snap = |v: f32| (v * scale).round() as u32;
+                // Compare each arc endpoint with the neighboring solid arm,
+                // including the background on either side of the stroke.
+                for row in [0, 2] {
+                    let cy = snap(5.7 + row as f32 * h + h / 2.);
+                    for boundary in [1, 2] {
+                        let edge = snap(7.3 + boundary as f32 * w);
+                        for y in cy - 3..=cy + 3 {
+                            let a = image.get_pixel(edge - 1, y).0[0];
+                            let b = image.get_pixel(edge, y).0[0];
+                            assert!(a.abs_diff(b) <= 24, "horizontal join: {w}x{h} scale {scale}, row {row}, edge {boundary}, y {y}: {a} != {b}");
+                        }
+                    }
+                }
+                for col in [0, 2] {
+                    let cx = snap(7.3 + col as f32 * w + w / 2.);
+                    for boundary in [1, 2] {
+                        let edge = snap(5.7 + boundary as f32 * h);
+                        for x in cx - 3..=cx + 3 {
+                            let a = image.get_pixel(x, edge - 1).0[0];
+                            let b = image.get_pixel(x, edge).0[0];
+                            assert!(a.abs_diff(b) <= 24, "vertical join: {w}x{h} scale {scale}, col {col}, edge {boundary}, x {x}: {a} != {b}");
+                        }
+                    }
+                }
+            }).unwrap();
         }
     }
 
