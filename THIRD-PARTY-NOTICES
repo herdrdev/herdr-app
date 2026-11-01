@@ -3,7 +3,7 @@ Herdr third-party notices
 Regenerate with just notices. See licenses/README.md.
 
 Input-SHA256: 6a3b4177337bfb82680d2992e24b5f948c0c4ce524bafa5b1c8cf8090f45adba Cargo.lock
-Input-SHA256: 7b5c770b621f5b2a0f52313a1ac017983ea8f262b08da164a33b00ae1e662ab3 Cargo.toml
+Input-SHA256: 4389af063b375c2800b23fc9cb33e5d31e40a3becf495e7714e1c9250bea6980 Cargo.toml
 Input-SHA256: c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4 LICENSE
 Input-SHA256: e58cb0de2dde300bcda769ca993fde2737f42c0274082f038621ab22975a49e2 about.toml
 Input-SHA256: 84a7a98c82140fb12c37fe42b93805baa16024cb3e5acc599b7ffe612c55d847 assets/fonts/LICENSE-SymbolsNerdFont.txt
@@ -2752,7 +2752,7 @@ Apache License 2.0 (Apache-2.0)
 
 ----------------------------------------------------------------------
 Apache License 2.0 (Apache-2.0)
-  herdr-app 0.1.7
+  herdr-app 0.1.11
 
                                  Apache License
                            Version 2.0, January 2004
@@ -2958,7 +2958,7 @@ Apache License 2.0 (Apache-2.0)
 
 ----------------------------------------------------------------------
 Apache License 2.0 (Apache-2.0)
-  herdr-app 0.1.7
+  herdr-app 0.1.11
   codespan-reporting 0.13.1 — https://github.com/brendanzab/codespan
   crypto-primes 0.7.2 — https://github.com/entropyxyz/crypto-primes
   self_cell 1.3.0 — https://github.com/Voultapher/self_cell
@@ -12014,12 +12014,12 @@ limitations under the License.
 
 ----------------------------------------------------------------------
 Apache License 2.0 (Apache-2.0)
-  herdr-app 0.1.7
-  herdr-app 0.1.7
-  herdr-app 0.1.7
-  herdr-app 0.1.7
-  herdr-app 0.1.7
-  herdr-app 0.1.7
+  herdr-app 0.1.11
+  herdr-app 0.1.11
+  herdr-app 0.1.11
+  herdr-app 0.1.11
+  herdr-app 0.1.11
+  herdr-app 0.1.11
   gpui-pre 0.3.8 — https://github.com/zed-industries/zed
   gpui-pre-apple 0.3.8 — https://github.com/zed-industries/zed
   gpui-pre-linux 0.3.8 — https://github.com/zed-industries/zed
@@ -12269,8 +12269,8 @@ Apache License
 
 ----------------------------------------------------------------------
 Apache License 2.0 (Apache-2.0)
-  herdr-app 0.1.7
-  herdr-app 0.1.7
+  herdr-app 0.1.11
+  herdr-app 0.1.11
   gpui-base 0.7.1 — https://github.com/longbridge/gpui-kit
 
 Copyright 2024 - 2026 Longbridge <https://longbridge.com>
