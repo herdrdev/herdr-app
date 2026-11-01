@@ -294,12 +294,11 @@ fn brand_leaves_room_for_macos_traffic_lights_only_outside_full_screen(cx: &mut 
 fn sidebar_keeps_a_toggle_at_every_width(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
-    // (platform, fullscreen, sidebar width) -> the brand row's toggle, search and logo; the agents list's expand button.
+    // (platform, fullscreen, width) -> toggle, search, logo, agents expand button
     for (platform, fullscreen, width, toggle, search, logo, expand) in [
         ("macos", false, 268, true, true, true, false),
         ("macos", false, 172, true, true, true, false),
         ("macos", false, 160, true, true, false, false),
-        // The macOS rail: the traffic lights fill the brand row, so the agents list draws the toggle.
         ("macos", false, 76, false, false, false, true),
         ("macos", true, 76, true, false, false, false),
         ("linux", false, 44, true, false, false, false),

@@ -6,7 +6,6 @@ const source = (await readFile(new URL("../defaults/mods/workspace-chrome/main.j
   .replace("export default class WorkspaceChrome", "class WorkspaceChrome")
   .replace(/^export function/gm, "function");
 
-// The mod with its host stubbed: the sidebar is `px` wide on `platform`.
 function harness(px: number, platform = "macos", fullscreen = false) {
   const runs: unknown[] = [];
   const layout = { id: "root", children: [{ id: "sidebar", size: { px } }] };
@@ -18,26 +17,21 @@ function harness(px: number, platform = "macos", fullscreen = false) {
 
 test("a sidebar let go between the rail and the full sidebar snaps to the nearer one", () => {
   const { snapWidth } = harness(268);
-  // macOS rail: 76.
-  expect(snapWidth(44, 76)).toBe(76); // narrower than the rail: the traffic lights would spill onto the tabs
+  expect(snapWidth(44, 76)).toBe(76);
   expect(snapWidth(100, 76)).toBe(76);
   expect(snapWidth(117, 76)).toBe(76);
   expect(snapWidth(118, 76)).toBe(160);
   expect(snapWidth(159, 76)).toBe(160);
-  // Linux and Windows rail: 44.
   expect(snapWidth(80, 44)).toBe(44);
   expect(snapWidth(120, 44)).toBe(160);
-  // The rail itself, a full sidebar, and a layout without a sidebar stay as they are.
   for (const [px, rail] of [[76, 76], [44, 44], [160, 76], [268, 76], [480, 44], [Infinity, 76]]) expect(snapWidth(px, rail)).toBeNull();
 });
 
 test("the brand row drops the name, then the logo, never its buttons", () => {
   const { brandFits } = harness(268);
-  // macOS windowed: 76px for the traffic lights.
   expect(brandFits(268, 76)).toEqual({ logo: true, name: true });
   expect(brandFits(190, 76)).toEqual({ logo: true, name: false });
   expect(brandFits(160, 76)).toEqual({ logo: false, name: false });
-  // Full screen, Linux, Windows: 14px.
   expect(brandFits(160, 14)).toEqual({ logo: true, name: true });
 });
 
@@ -47,10 +41,10 @@ test("the brand row snaps once per width, so a resize that doesn't land isn't re
   chrome.snap();
   chrome.snap();
   expect(runs).toEqual([["layout.resize", { id: "sidebar", px: 76 }]]);
-  layout.children[0].size.px = 76; // the resize landed
+  layout.children[0].size.px = 76;
   chrome.snap();
   expect(runs.length).toBe(1);
-  layout.children[0].size.px = 140; // dragged again
+  layout.children[0].size.px = 140;
   chrome.snap();
   expect(runs.at(-1)).toEqual(["layout.resize", { id: "sidebar", px: 160 }]);
 });

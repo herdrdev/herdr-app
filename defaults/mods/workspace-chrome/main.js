@@ -15,12 +15,10 @@ function find(node, id) {
 const RAIL_BELOW = 160;
 const width = () => find(layout(), "sidebar")?.size?.px ?? Infinity;
 const narrow = () => width() < RAIL_BELOW;
-// The rail's width: on macOS wide enough for the traffic lights.
 const railWidth = () => (window()?.platform === "macos" ? 76 : 44);
-// macOS draws the traffic lights over the brand row unless in full screen.
-const lights = () => window()?.platform === "macos" && !window()?.fullscreen;
+const trafficLights = () => window()?.platform === "macos" && !window()?.fullscreen;
 
-// To the rail, or back to the width it had.
+// To the rail (on macOS wide enough for the traffic lights), or back to the width it had.
 function toggleSidebar() {
   if (!narrow()) setShared("sidebar.width", width());
   // Mods edited before the rail went by width still read the flag.
@@ -28,17 +26,12 @@ function toggleSidebar() {
   run("layout.resize", { id: "sidebar", px: narrow() ? (shared("sidebar.width") ?? 268) : railWidth() });
 }
 
-// A drag let go between the rail and the full sidebar draws neither well (and
-// on macOS, narrower than the rail, the traffic lights spill onto the tabs):
-// it snaps to whichever is nearer. Divider drags publish the layout once, on
-// release, so this never fights the pointer. Returns the width to snap to.
+// Divider drags publish the layout only on release, so snapping never fights the pointer.
 export function snapWidth(px, rail) {
   if (!Number.isFinite(px) || px === rail || px >= RAIL_BELOW) return null;
   return px < (rail + RAIL_BELOW) / 2 ? rail : RAIL_BELOW;
 }
 
-// What fits in the brand row beside its two buttons, most important first:
-// the buttons, then the logo, then the name. Nothing is drawn half-hidden.
 export function brandFits(px, inset) {
   const room = px - inset - 10 - 26 - 4 - 26 - 4; // right padding, two buttons and gaps
   return { logo: room >= 20, name: room >= 20 + 8 + 40 };
@@ -50,7 +43,7 @@ export default class WorkspaceChrome extends View {
     return div().id(id).size(26).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.muted).hover(s => s.bg(t.hover).text_color(t.foreground))
       .tooltip(tip).on_mouse_down("left", (_e, cx) => cx.stop_propagation()).on_click(action).child(label);
   }
-  // One copy (the brand row's) snaps the sidebar; once per width, so a failed resize isn't retried every frame.
+  // Once per width, so a resize that doesn't land isn't retried every frame.
   snap() {
     const px = width();
     const to = snapWidth(px, railWidth());
@@ -62,7 +55,6 @@ export default class WorkspaceChrome extends View {
     const t = theme();
     const collapsed = narrow();
     if (props()?.footer) {
-      // On the rail: the icons alone, centered, their names in tooltips.
       const row = (id, icon, label, dim, action, dot) => h_flex().id(id).h(28).px(collapsed ? 0 : 8).gap(9).items_center().rounded(8)
         .when(collapsed, el => el.justify_center().tooltip(label))
         .text_color(dim ? t.dim : t.muted).hover(s => s.bg(t.hover).text_color(t.foreground)).cursor_pointer()
@@ -77,12 +69,10 @@ export default class WorkspaceChrome extends View {
     this.snap();
     const toggle = this.button("sidebar-toggle", svg("mods/workspace-chrome/sidebar.svg").size(15), collapsed ? "Expand sidebar" : "Collapse sidebar", toggleSidebar);
     if (collapsed) {
-      // The rail's row: its toggle, centered, where the traffic lights leave room
-      // (the agents list draws it at the bottom of the rail where they don't).
       return h_flex().size_full().bg(t.chrome).items_center().justify_center()
-        .when(!lights(), el => el.child(toggle));
+        .when(!trafficLights(), el => el.child(toggle));
     }
-    const inset = lights() ? 76 : 14;
+    const inset = trafficLights() ? 76 : 14;
     const fits = brandFits(width(), inset);
     return h_flex().size_full().bg(t.chrome).pl(inset).pr(10).gap(4).items_center().text_size(13.5)
       .child(h_flex().flex_1().min_w(0).gap(8).items_center().overflow_hidden()
