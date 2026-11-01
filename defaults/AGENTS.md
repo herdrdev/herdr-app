@@ -527,16 +527,14 @@ The main ones:
   skip settled tabs).
 - Panes: `pane.split {direction: "right" | "down", pane?, argv? | mod?, props?}` (a new
   terminal, or a mod pane), `pane.close {pane?}`,
-  `pane.zoom {pane?}`, `pane.focus {pane | terminal | block}`, `pane.go {direction}`, `pane.swap {direction}`,
-  `pane.resize {direction}` (one step in the nearest split on that axis: `right`/`down`
-  grow the pane, `left`/`up` shrink it).
+  `pane.zoom {pane?}`, `pane.focus {pane | terminal | block}`, `pane.go {direction}`, `pane.swap {direction}`.
   `pane.focus {terminal}` prefers the first visible layout terminal block showing that
   address, then its model pane. Clicking a terminal block focuses it too.
   `pane.focus {block}` gives a shown mod block (a layout block or a mod pane, by id) the
   keyboard: `focused().blockId` names it and its copy gets `focus` from `nextCommand()`.
   `pane.go` moves by what's on screen to the nearest pane or focusable mod (mod.json
   `"focusable": true`), from whichever of them has the keyboard.
-  While a layout terminal block is focused, implicit split/close/zoom/go/swap/resize and
+  While a layout terminal block is focused, implicit split/close/zoom/go/swap and
   `terminal.show` fail, as do `terminal.open`/`terminal.keep` with place right/down.
   They never act on the terminal's source pane. An explicit `pane` still targets that
   model pane; composition edits belong to the mod (edit its layout instead).

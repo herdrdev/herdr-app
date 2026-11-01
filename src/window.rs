@@ -2896,16 +2896,15 @@ impl AppWindow {
                 self.focused_block = None;
                 self.focus_pane_id(&p, window, cx);
             }
-            "pane.go" | "pane.swap" | "pane.resize" => {
+            "pane.go" | "pane.swap" => {
                 let dir = Self::arg(a, "direction").unwrap_or_default();
                 if !matches!(dir, "left" | "right" | "up" | "down") {
                     return self.fail(format!("{name} direction is left, right, up or down, not {dir:?}"));
                 }
-                match name {
-                    "pane.go" => return self.go(dir, window, cx),
-                    "pane.swap" => self.swap_pane(dir),
-                    _ => self.resize_pane(dir),
+                if name == "pane.go" {
+                    return self.go(dir, window, cx);
                 }
+                self.swap_pane(dir);
             }
             // ---- terminals
             "terminal.open" => {
@@ -3371,18 +3370,6 @@ impl AppWindow {
         self.copies.get(id).and_then(|c| self.folders.get(&c.inst.name)).is_some_and(|f| f.hint.focusable)
     }
 
-    /// The split around a pane on an axis: the nearest ancestor row (or
-    /// column) with more than one shown child, those children, and which holds the pane.
-    fn split_of(root: &Node, pane: &str, axis: Axis) -> Option<(String, Vec<String>, usize)> {
-        let path = root.path_to(pane)?;
-        path.windows(2).rev().find_map(|w| {
-            let parent = root.find(&w[0]).filter(|n| n.axis() == Some(axis))?;
-            let shown: Vec<String> = parent.children().iter().filter(|c| !c.hidden).map(|c| c.id.clone()).collect();
-            let i = shown.iter().position(|id| *id == w[1])?;
-            (shown.len() > 1).then(|| (w[0].clone(), shown, i))
-        })
-    }
-
     /// Swaps the focused pane with its neighbor in a direction.
     fn swap_pane(&mut self, dir: &str) {
         if let Some(from) = self.model.focused_pane()
@@ -3392,25 +3379,6 @@ impl AppWindow {
         {
             c.root.swap(&from, &to);
         }
-    }
-
-    /// Moves the focused pane's divider as a drag would.
-    fn resize_pane(&mut self, dir: &str) {
-        const STEP: f32 = 32.0;
-        let axis = if dir == "left" || dir == "right" { Axis::Row } else { Axis::Column };
-        let Some(pane) = self.model.focused_pane() else { return };
-        let Some(root) = self.model.tab_of(&pane).map(|c| &c.root) else { return };
-        let Some((parent, shown, i)) = Self::split_of(root, &pane, axis) else { return };
-        // The divider after it, or before it when it's last (that one grows it the other way).
-        let (index, sign) = if i + 1 < shown.len() { (i, 1.0) } else { (i - 1, -1.0) };
-        let Some(b) = self.bounds.borrow().get(&shown[index]).copied() else { return };
-        let grow = if dir == "right" || dir == "down" { 1.0 } else { -1.0 };
-        let step = px(STEP * settings::zoom() * grow * sign);
-        let pos = match axis {
-            Axis::Row => point(b.right() + step, b.center().y),
-            Axis::Column => point(b.center().x, b.bottom() + step),
-        };
-        self.move_divider(&parent, index, axis, pos);
     }
 
     // ---- overlays ----------------------------------------------------------
@@ -4160,13 +4128,7 @@ impl AppWindow {
     fn drag_to(&mut self, pos: Point<Pixels>) {
         let Some(d) = &self.drag else { return };
         let (container, index, axis) = (d.container.clone(), d.index, d.axis);
-        self.move_divider(&container, index, axis, pos);
-    }
-
-    /// Puts the divider after shown child `index` of `container` at `pos`
-    /// (window px), within the children's `min`/`max`.
-    fn move_divider(&mut self, container: &str, index: usize, axis: Axis, pos: Point<Pixels>) {
-        let Some(node) = self.find_node_mut(container).map(|n| n.clone()) else { return };
+        let Some(node) = self.find_node_mut(&container).map(|n| n.clone()) else { return };
         let shown: Vec<&Node> = node.children().iter().filter(|c| !c.hidden).collect();
         let (Some(a), Some(b)) = (shown.get(index), shown.get(index + 1)) else { return };
         let bounds = self.bounds.borrow();
@@ -4194,7 +4156,7 @@ impl AppWindow {
         let new_a = new_a.min(total - 24.0);
         let (a_id, b_id) = (a.id.clone(), b.id.clone());
         let (sa, sb) = (a.size, b.size);
-        let Some(parent) = self.find_node_mut(container) else { return };
+        let Some(parent) = self.find_node_mut(&container) else { return };
         let Some(children) = parent.children_mut() else { return };
         let set = |children: &mut Vec<Node>, id: &str, s: Span| {
             if let Some(n) = children.iter_mut().find(|n| n.id == id) {
@@ -4501,7 +4463,7 @@ fn terminal_block<'a>(chrome: &'a Node, focused: Option<&str>) -> Option<&'a Nod
 fn needs_model_pane(name: &str, args: &Value) -> bool {
     match name {
         "pane.split" | "pane.close" | "pane.zoom" | "terminal.show" => AppWindow::arg(args, "pane").is_none(),
-        "pane.go" | "pane.swap" | "pane.resize" => true,
+        "pane.go" | "pane.swap" => true,
         "terminal.open" | "terminal.keep" => matches!(AppWindow::arg(args, "place"), Some("right" | "down")),
         _ => false,
     }
@@ -4932,26 +4894,6 @@ mod tests {
     }
 
     #[test]
-    fn pane_resize_finds_the_split_on_its_axis() {
-        use crate::layout::{Axis, Content, Node};
-        let term = |id: &str| Node::block(id, Content::Terminal { terminal: format!("t-{id}") });
-        // a | (b over c): c resizes the column on up/down and the row on left/right.
-        let root = Node::container("row", Axis::Row, vec![term("a"), Node::container("col", Axis::Column, vec![term("b"), term("c")])]);
-        let split = |pane, axis| super::AppWindow::split_of(&root, pane, axis);
-        let ids = |ids: &[&str]| ids.iter().map(|s| s.to_string()).collect::<Vec<_>>();
-        assert_eq!(split("c", Axis::Column), Some(("col".into(), ids(&["b", "c"]), 1)));
-        assert_eq!(split("c", Axis::Row), Some(("row".into(), ids(&["a", "col"]), 1)));
-        assert_eq!(split("a", Axis::Column), None);
-        let lone = Node::container("row", Axis::Row, vec![term("a")]);
-        assert_eq!(super::AppWindow::split_of(&lone, "a", Axis::Row), None);
-        // A hidden sibling doesn't make a split: there's no divider to move.
-        let mut hidden = term("b");
-        hidden.hidden = true;
-        let alone = Node::container("row", Axis::Row, vec![term("a"), hidden]);
-        assert_eq!(super::AppWindow::split_of(&alone, "a", Axis::Row), None);
-    }
-
-    #[test]
     fn agent_commands_keep_arguments_out_of_shell_source() {
         let cmd = vec!["agent".to_owned(), "a 'quoted' task; $(not-a-command)\nnext line".to_owned(), "".to_owned()];
         for login in [false, true] {
@@ -5117,7 +5059,7 @@ mod tests {
     #[test]
     fn composition_commands_never_default_to_a_source_pane() {
         use serde_json::json;
-        for name in ["pane.split", "pane.close", "pane.zoom", "pane.go", "pane.swap", "pane.resize", "terminal.show"] {
+        for name in ["pane.split", "pane.close", "pane.zoom", "pane.go", "pane.swap", "terminal.show"] {
             assert!(super::needs_model_pane(name, &json!({})), "{name}");
             assert!(super::needs_model_pane(name, &json!({"pane": null})), "{name}");
         }
