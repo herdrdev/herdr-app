@@ -2262,18 +2262,7 @@ impl ShellRuntime {
     /// class.
     #[cfg(test)]
     pub(crate) fn load_source(self: &Rc<Self>, name: &str, source: &str) -> Result<ViewType> {
-        self.load_source_with_lease(name, source, None, None)
-    }
-
-    #[cfg(test)]
-    fn load_source_with_lease(
-        self: &Rc<Self>,
-        name: &str,
-        source: &str,
-        module_lease: Option<ApplicationModuleLease>,
-        application: Option<Rc<ApplicationGeneration>>,
-    ) -> Result<ViewType> {
-        self.load_source_with_namespace(name, source, module_lease, application, false)
+        self.load_source_with_namespace(name, source, None, None, false)
     }
 
     fn load_source_with_namespace(
@@ -10580,11 +10569,12 @@ export default class Panel extends View { render() { return div(); } }
             .register_with_dependencies(application.clone(), dependencies);
         let generation = lease.generation();
         let view_type = runtime
-            .load_source_with_lease(
+            .load_source_with_namespace(
                 &format!("{}/main.js?v={generation}", application.display()),
                 "import { label } from 'omarchy-ui'; import { tone } from 'omarchy-ui/theme.js'; export default class Panel { static label() { return `${label}:${tone}`; } }",
                 Some(lease),
                 None,
+                false,
             )
             .expect("third-party module graph");
 
@@ -10634,11 +10624,12 @@ export default class Panel extends View { render() { return div(); } }
             .register_with_dependencies(application.clone(), dependencies);
         let generation = lease.generation();
         let error = runtime
-            .load_source_with_lease(
+            .load_source_with_namespace(
                 &format!("{}/main.js?v={generation}", application.display()),
                 "import 'third-party'; export default class Panel {}",
                 Some(lease),
                 None,
+                false,
             )
             .expect_err("dependency traversal must be refused");
 

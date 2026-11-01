@@ -287,6 +287,15 @@ struct Copy {
     error: Option<String>,
 }
 
+fn condition_metadata(application: &gpui_shell::PreparedApplication, window: &mut Window, cx: &mut App) -> gpui_shell::anyhow::Result<(bool, [bool; 4])> {
+    let enabled = application.has_export("when", window, cx)?;
+    let watch = if enabled {
+        crate::conditions::watch(application.export("watch", window, cx)?)
+            .map_err(gpui_shell::anyhow::Error::msg)?
+    } else { [false; 4] };
+    Ok((enabled, watch))
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum OverlayKind {
     Dialog,
@@ -453,6 +462,7 @@ pub struct AppWindow {
     _tasks: Vec<Task<()>>,
     /// Gives the keyboard back when what had it leaves the screen (`restore_focus`).
     _focus_lost: Option<Subscription>,
+    _condition_activation: Option<Subscription>,
     /// Remembers where the window is (`place.rs`); the write waiting to settle.
     _place: Option<Subscription>,
     place_write: Option<Task<()>>,
@@ -541,10 +551,18 @@ impl AppWindow {
             focus: cx.focus_handle(),
             _tasks: Vec::new(),
             _focus_lost: None,
+            _condition_activation: None,
             _place: None,
             place_write: None,
         };
         w._focus_lost = Some(cx.on_focus_lost(window, |this, window, cx| this.restore_focus(window, cx)));
+        w._condition_activation = Some(cx.observe_window_activation(window, |this, window, cx| {
+            if window.is_window_active() {
+                this.condition_revisions[4] += 1;
+                crate::find_up::invalidate();
+                cx.notify();
+            }
+        }));
         w._place = Some(cx.observe_window_bounds(window, |this, window, cx| {
             if let Some(t) = crate::place::changed(window, cx) {
                 this.place_write = Some(t);
@@ -1615,10 +1633,8 @@ impl AppWindow {
                 gpui_shell::plugin::PluginManifest::read(&folder.dir)?.entry().to_owned()
             } else { "main.js".to_owned() };
             let mut application = runtime.prepare_application(&folder.dir, &entry, window, cx)?;
-            let enabled = application.has_export("when", window, cx)?;
+            let (enabled, watch) = condition_metadata(&application, window, cx)?;
             if enabled {
-                let watch = crate::conditions::watch(application.export("watch", window, cx)?)
-                    .map_err(gpui_shell::anyhow::Error::msg)?;
                 copy.condition = Some(crate::conditions::Panel {
                     application, enabled, state: crate::conditions::State::new(watch), task: None,
                 });
@@ -1643,11 +1659,8 @@ impl AppWindow {
         let result = (|| -> gpui_shell::anyhow::Result<()> {
             panel.application.reload(window, cx)?;
             panel.task = None;
-            panel.enabled = panel.application.has_export("when", window, cx)?;
-            let watch = if panel.enabled {
-                crate::conditions::watch(panel.application.export("watch", window, cx)?)
-                    .map_err(gpui_shell::anyhow::Error::msg)?
-            } else { [false; 4] };
+            let (enabled, watch) = condition_metadata(&panel.application, window, cx)?;
+            panel.enabled = enabled;
             panel.state = crate::conditions::State::new(watch);
             if !panel.enabled { copy.root = Some(panel.application.mount(window, cx)?); }
             Ok(())
@@ -1656,9 +1669,14 @@ impl AppWindow {
         cx.notify();
     }
 
+    fn condition_shown(&self, slot: &str) -> bool {
+        let automatic = self.copies.get(slot).and_then(|copy| copy.condition.as_ref())
+            .is_none_or(|panel| !panel.enabled || panel.state.visible());
+        self.condition_overrides.visible(slot, automatic)
+    }
+
     fn effectively_hidden(&self, node: &Node) -> bool {
-        node.hidden || self.copies.get(&node.id).and_then(|copy| copy.condition.as_ref())
-            .is_some_and(|panel| panel.enabled && !panel.state.visible())
+        node.hidden || !self.condition_shown(&node.id)
     }
 
     fn run_conditions(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -1691,14 +1709,7 @@ impl AppWindow {
                 match panel.application.sync_mounted(root, window, cx) {
                     Ok(true) => {
                         panel.task = None;
-                        let metadata = (|| -> gpui_shell::anyhow::Result<_> {
-                            let enabled = panel.application.has_export("when", window, cx)?;
-                            let watch = if enabled {
-                                crate::conditions::watch(panel.application.export("watch", window, cx)?)
-                                    .map_err(gpui_shell::anyhow::Error::msg)?
-                            } else { [false; 4] };
-                            Ok((enabled, watch))
-                        })();
+                        let metadata = condition_metadata(&panel.application, window, cx);
                         match metadata {
                             Ok((enabled, watch)) => {
                                 panel.enabled = enabled;
@@ -1714,8 +1725,7 @@ impl AppWindow {
             }
             if !panel.enabled { continue; }
             panel.state.observe(&context, self.condition_revisions, eligible.contains(slot));
-            panel.state.manual(self.condition_overrides.shown(slot));
-            if panel.state.visible() && eligible.contains(slot) && copy.root.is_none() && copy.error.is_none() {
+            if self.condition_overrides.visible(slot, panel.state.visible()) && eligible.contains(slot) && copy.root.is_none() && copy.error.is_none() {
                 match panel.application.mount(window, cx) {
                     Ok(root) => {
                         if self.file_events.is_none() {
@@ -3298,9 +3308,6 @@ impl AppWindow {
                     _ => false,
                 };
                 self.condition_overrides.set(id, show);
-                if let Some(panel) = self.copies.get_mut(id).and_then(|copy| copy.condition.as_mut()) {
-                    panel.state.manual(show);
-                }
                 self.chrome.find_mut(id).unwrap().hidden = !show;
             }
             "layout.resize" => {
@@ -3689,7 +3696,7 @@ impl AppWindow {
     /// Which copies are on screen, for `<mod>.<command>` (`mods::send_command`).
     fn publish_shown_copies(&self) {
         let (_, shown) = self.visible();
-        mods::set_shown_copies(shown.iter().filter_map(|(s, i)| self.copies.get(s).filter(|c| c.inst == *i && c.condition.as_ref().is_none_or(|p| !p.enabled || p.state.visible()))).map(|c| c.id).collect());
+        mods::set_shown_copies(shown.iter().filter_map(|(s, i)| self.copies.get(s).filter(|c| c.inst == *i && self.condition_shown(s))).map(|c| c.id).collect());
     }
 
     /// Closes an overlay; a kept window stays closed on the next start too.
@@ -3893,8 +3900,6 @@ impl AppWindow {
         if active != self.window_active {
             self.window_active = active;
             if active {
-                self.condition_revisions[4] += 1;
-                crate::find_up::invalidate();
                 self.sync(window, cx);
             } else {
                 self.looked.clear();
@@ -4047,7 +4052,7 @@ impl AppWindow {
 
     /// `frame`: how panes are wrapped here (inside a framed tab), else None.
     fn render_node(&self, n: &Node, focused: &HashSet<String>, frame: Option<&PaneFrame>, cx: &mut Context<Self>) -> AnyElement {
-        if self.copies.get(&n.id).and_then(|copy| copy.condition.as_ref()).is_some_and(|panel| panel.enabled && !panel.state.visible()) {
+        if !self.condition_shown(&n.id) {
             return div().into_any_element();
         }
         let mut el = div().relative().overflow_hidden().size_full().flex();

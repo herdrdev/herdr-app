@@ -3,17 +3,40 @@ use gpui::{AppContext, WindowOptions};
 use gpui_shell::{HostValue, ShellRuntime};
 use std::{path::PathBuf, time::Duration};
 
-pub fn run(args: &[String]) {
-    let Some(path) = args.get(2).filter(|path| !path.starts_with('-')) else {
-        eprintln!("usage: herdr-app check <mod folder> [--print-spec]");
-        std::process::exit(2);
-    };
-    if args.iter().skip(3).any(|arg| arg != "--print-spec") {
-        eprintln!("unknown check argument");
-        std::process::exit(2);
+fn arguments(args: &[String]) -> Result<(PathBuf, bool), &'static str> {
+    let mut directory = None;
+    let mut print_spec = false;
+    for argument in args.iter().skip(2) {
+        match argument.as_str() {
+            "--print-spec" => print_spec = true,
+            path if !path.starts_with('-') && directory.is_none() => {
+                directory = Some(PathBuf::from(path))
+            }
+            _ => return Err("unknown check argument"),
+        }
     }
-    let print_spec = args.iter().any(|arg| arg == "--print-spec");
-    let directory = PathBuf::from(path);
+    Ok((
+        directory.ok_or("usage: herdr-app check <mod folder> [--print-spec]")?,
+        print_spec,
+    ))
+}
+
+pub fn run(args: &[String]) {
+    if args
+        .iter()
+        .skip(2)
+        .any(|arg| matches!(arg.as_str(), "-h" | "--help" | "-V" | "--version"))
+    {
+        gpui_shell::host::main_with_components(gpui_shell::FrozenComponentRegistry::default());
+        return;
+    }
+    let (directory, print_spec) = match arguments(args) {
+        Ok(arguments) => arguments,
+        Err(error) => {
+            eprintln!("{error}");
+            std::process::exit(2);
+        }
+    };
     let root = match gpui_shell::resolve_app_root(&directory, "main.js") {
         Ok(root) => root,
         Err(error) => {
@@ -100,4 +123,30 @@ pub fn run(args: &[String]) {
             })
             .detach();
         });
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    #[test]
+    fn print_spec_accepts_the_existing_shell_checker_flag_order() {
+        for command in [
+            ["herdr-app", "check", "--print-spec", "probe"],
+            ["herdr-app", "check", "probe", "--print-spec"],
+        ] {
+            let args = command.map(str::to_owned);
+            assert_eq!(arguments(&args), Ok((PathBuf::from("probe"), true)));
+        }
+        let args = ["herdr-app", "check", "probe"].map(str::to_owned);
+        assert_eq!(arguments(&args), Ok((PathBuf::from("probe"), false)));
+    }
+    #[test]
+    fn check_rejects_unknown_flags_and_extra_folders() {
+        for command in [
+            ["herdr-app", "check", "probe", "--unknown"],
+            ["herdr-app", "check", "probe", "other"],
+        ] {
+            assert!(arguments(&command.map(str::to_owned)).is_err());
+        }
+    }
 }

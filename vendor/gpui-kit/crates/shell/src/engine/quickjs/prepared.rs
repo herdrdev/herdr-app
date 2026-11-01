@@ -356,12 +356,18 @@ impl PreparedApplication {
         Ok(true)
     }
 
-    /// Replaces an unmounted module after a source change. A failed replacement
-    /// leaves the previous generation available. Hosts supply file notifications.
+    /// Replaces an unmounted or retired module after a source change. A failed
+    /// replacement keeps the previous generation. A failed mount retires its
+    /// generation too, so fixing its source can construct a fresh View.
     pub fn reload(&mut self, window: &mut Window, cx: &mut App) -> Result<()> {
         anyhow::ensure!(
-            !self.mounted,
-            "reload mounted applications through their root"
+            !self.mounted
+                || self
+                    .view_type
+                    .application
+                    .as_ref()
+                    .is_some_and(|application| !application.is_active()),
+            "reload active mounted applications through their root"
         );
         let replacement = self.runtime.prepare_application_with_policy(
             self.directory.clone(),
@@ -794,6 +800,39 @@ mod tests {
                     .to_string()
                     .contains("timed out")
             );
+        });
+    }
+
+    #[gpui::test]
+    fn a_failed_first_mount_can_recover_after_a_source_fix(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let source = Source::new(
+            r#"
+            import { View } from "gpui-kit";
+            export function when() { return true; }
+            export default class App extends View { init() { throw new Error("broken constructor"); } }
+        "#,
+        );
+        let runtime = ShellRuntime::new_isolated().unwrap();
+        let window = cx.add_window(|_, _| gpui::Empty);
+        let mut context = VisualTestContext::from_window(*window.deref(), cx);
+        context.update(|window, cx| {
+            let mut prepared = runtime
+                .prepare_application(&source.0, "main.js", window, cx)
+                .unwrap();
+            assert!(prepared.mount(window, cx).is_err());
+            assert!(
+                prepared.mount(window, cx).is_err(),
+                "one mount attempt per generation"
+            );
+            source.write(SOURCE);
+            prepared.reload(window, cx).unwrap();
+            let root = prepared.mount(window, cx).unwrap();
+            assert!(
+                prepared.reload(window, cx).is_err(),
+                "active mounted roots still own reload"
+            );
+            assert!(!prepared.sync_mounted(&root, window, cx).unwrap());
         });
     }
 

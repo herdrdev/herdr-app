@@ -56,8 +56,8 @@ impl Overrides {
             self.shown.remove(slot);
         }
     }
-    pub fn shown(&self, slot: &str) -> bool {
-        self.shown.contains(slot)
+    pub fn visible(&self, slot: &str, automatic: bool) -> bool {
+        self.shown.contains(slot) || automatic
     }
     pub fn clear(&mut self) {
         self.shown.clear();
@@ -80,7 +80,6 @@ pub struct State {
     completed: u64,
     eligible: bool,
     answer: Option<bool>,
-    override_show: bool,
     pub error: Option<String>,
 }
 
@@ -95,17 +94,12 @@ impl State {
             completed: 0,
             eligible: false,
             answer: None,
-            override_show: false,
             error: None,
         }
     }
 
     pub fn visible(&self) -> bool {
-        self.override_show || self.answer == Some(true)
-    }
-
-    pub fn manual(&mut self, show: bool) {
-        self.override_show = show;
+        self.answer == Some(true)
     }
 
     pub fn observe(&mut self, context: &Context, revisions: [u64; 5], eligible: bool) {
@@ -120,7 +114,6 @@ impl State {
             self.context = Some(context.clone());
             self.answer = None;
             self.error = None;
-            self.override_show = false;
         }
         if changed_context || changed || (eligible && !self.eligible) {
             self.revision += 1;
@@ -205,19 +198,23 @@ mod tests {
     }
     #[test]
     fn show_override_ends_only_on_context_change() {
+        let mut overrides = Overrides::default();
         let mut state = State::new([true, true, true, true]);
+        overrides.observe(&folder("a"));
         state.observe(&folder("a"), [0; 5], true);
-        state.manual(true);
+        overrides.set("panel", true);
         let first = state.begin().unwrap();
         state.finish(first, Err("offline".into()));
-        assert!(state.visible());
+        assert!(overrides.visible("panel", state.visible()));
         state.observe(&folder("a"), [0, 1, 1, 1, 1], true);
-        assert!(state.visible());
-        state.manual(false);
-        assert!(!state.visible());
-        state.manual(true);
+        overrides.observe(&folder("a"));
+        assert!(overrides.visible("panel", state.visible()));
+        overrides.set("panel", false);
+        assert!(!overrides.visible("panel", state.visible()));
+        overrides.set("panel", true);
         state.observe(&folder("b"), [0, 1, 1, 1, 1], true);
-        assert!(!state.visible());
+        overrides.observe(&folder("b"));
+        assert!(!overrides.visible("panel", state.visible()));
     }
     #[test]
     fn eligibility_and_same_context_errors() {
@@ -243,28 +240,25 @@ mod tests {
         overrides.set("panel", true);
         let mut first = State::new([true, false, false, false]);
         first.observe(&context, [0; 5], true);
-        first.manual(overrides.shown("panel"));
         let call = first.begin().unwrap();
         first.finish(call, Ok(HostValue::Bool(false)));
         assert!(
-            first.visible(),
+            overrides.visible("panel", first.visible()),
             "Show must also work for a previously unloaded copy"
         );
         let mut reloaded = State::new([true, false, false, false]);
         reloaded.observe(&context, [0; 5], true);
         overrides.observe(&context);
-        reloaded.manual(overrides.shown("panel"));
         assert!(
-            reloaded.visible(),
+            overrides.visible("panel", reloaded.visible()),
             "hot reload must not end the Show override"
         );
         overrides.observe(&folder("other"));
         reloaded.observe(&folder("other"), [1, 0, 0, 0, 0], true);
-        reloaded.manual(overrides.shown("panel"));
-        assert!(!reloaded.visible());
+        assert!(!overrides.visible("panel", reloaded.visible()));
         overrides.set("panel", true);
         overrides.set("panel", false);
-        assert!(!overrides.shown("panel"));
+        assert!(!overrides.visible("panel", false));
     }
 
     #[test]
