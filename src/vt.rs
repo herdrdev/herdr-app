@@ -592,6 +592,8 @@ unsafe extern "C" fn on_title(_t: GhosttyTerminal, userdata: *mut c_void) {
 }
 
 const SYNC_OUTPUT: GhosttyMode = 2026;
+/// On from the start, as in Ghostty: VS16 makes ✍️ two cells wide and in color.
+const GRAPHEME_CLUSTER: GhosttyMode = 2027;
 const BRACKETED_PASTE: GhosttyMode = 2004;
 const MAX_HOLD: Duration = Duration::from_millis(1000);
 const SCROLLBACK_MAX_LINES: usize = 10_000;
@@ -605,6 +607,8 @@ impl Vt {
         unsafe {
             let mut term = std::ptr::null_mut();
             ok(ghostty_terminal_new(std::ptr::null(), &mut term, cols.max(1), rows.max(1)), "terminal_new");
+            let cluster = GhosttyTerminalModeConfig { mode: GRAPHEME_CLUSTER, value: true };
+            ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_MODE_DEFAULT, &cluster as *const _ as *const c_void);
             let mut state = std::ptr::null_mut();
             ok(ghostty_render_state_new(std::ptr::null(), &mut state), "render_state_new");
             let mut rows_it = std::ptr::null_mut();
@@ -1574,6 +1578,16 @@ mod tests {
                 vt.scroll_viewport(25);
             }
         }
+    }
+
+    #[test]
+    fn vs16_makes_an_emoji_two_cells_wide() {
+        let mut vt = Vt::new(10, 2);
+        vt.write("\u{270d}\u{fe0f}!\x1bc\u{270d}\u{fe0f}!".as_bytes());
+        let f = vt.frame();
+        assert!(f.rows[0][0].wide, "also after a reset");
+        assert_eq!(f.rows[0][0].text, "\u{270d}\u{fe0f}");
+        assert_eq!(f.rows[0][2].text, "!");
     }
 
     #[test]
