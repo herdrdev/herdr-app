@@ -7,8 +7,34 @@ use calloop::channel::{Channel, Sender};
 use calloop::{EventSource, Poll, PostAction, Readiness, Token, TokenFactory};
 use futures::future::BoxFuture;
 use smol::stream::StreamExt;
+use std::{future::Future, time::Duration};
 
 use gpui::{BackgroundExecutor, Task, WindowAppearance};
+
+// HERDR: seed the first window before the event loop starts. The portal's
+// initial event otherwise arrives after a light frame has already been shown.
+// A missing or unresponsive portal must not hold up opening the app.
+pub(super) fn initial_appearance() -> WindowAppearance {
+    smol::block_on(appearance_before_deadline(
+        async {
+            let settings = Settings::new().await.ok()?;
+            settings.color_scheme().await.ok()
+        },
+        Duration::from_millis(250),
+    ))
+}
+
+async fn appearance_before_deadline(
+    query: impl Future<Output = Option<ColorScheme>>,
+    timeout: Duration,
+) -> WindowAppearance {
+    let scheme = smol::future::race(query, async {
+        smol::Timer::after(timeout).await;
+        None
+    })
+    .await;
+    window_appearance_from_color_scheme(scheme.unwrap_or(ColorScheme::NoPreference))
+}
 
 pub enum Event {
     WindowAppearance(WindowAppearance),
@@ -188,5 +214,39 @@ fn window_appearance_from_color_scheme(cs: ColorScheme) -> WindowAppearance {
         ColorScheme::PreferDark => WindowAppearance::Dark,
         ColorScheme::PreferLight => WindowAppearance::Light,
         ColorScheme::NoPreference => WindowAppearance::Light,
+    }
+}
+
+#[cfg(test)]
+mod startup_tests {
+    use super::*;
+
+    #[test]
+    fn first_window_uses_the_portal_appearance() {
+        for (scheme, expected) in [
+            (Some(ColorScheme::PreferDark), WindowAppearance::Dark),
+            (Some(ColorScheme::PreferLight), WindowAppearance::Light),
+            (Some(ColorScheme::NoPreference), WindowAppearance::Light),
+            (None, WindowAppearance::Light),
+        ] {
+            assert_eq!(
+                smol::block_on(appearance_before_deadline(
+                    std::future::ready(scheme),
+                    Duration::from_secs(1),
+                )),
+                expected,
+            );
+        }
+    }
+
+    #[test]
+    fn an_unresponsive_portal_does_not_block_startup() {
+        assert_eq!(
+            smol::block_on(appearance_before_deadline(
+                std::future::pending(),
+                Duration::from_millis(1),
+            )),
+            WindowAppearance::Light,
+        );
     }
 }
