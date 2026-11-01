@@ -129,15 +129,6 @@ pub enum Fit {
     Contain,
 }
 
-#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Side {
-    Top,
-    Right,
-    Bottom,
-    Left,
-}
-
 /// Space inside a node's edge, px: one number, or `[vertical, horizontal]`.
 #[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(untagged)]
@@ -211,9 +202,6 @@ impl ThemeChoice {
 pub struct FocusLook {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub border: Option<Line>,
-    /// Which sides the focus border draws on; left out: all four, `[]`: none.
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub sides: Option<Vec<Side>>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub background: Option<String>,
 }
@@ -778,16 +766,6 @@ mod tests {
         assert!(matches!(n.background, Some(Background::Gradient { angle, .. }) if angle == 160.0));
         assert_eq!(n.find("a").unwrap().background, Some(Background::Color("surface".into())));
         assert!(matches!(&n.find("b").unwrap().background, Some(Background::Image { fit: Fit::Cover, .. })));
-        let back: Node = serde_json::from_str(&serde_json::to_string(&n).unwrap()).unwrap();
-        assert_eq!(back, n);
-    }
-
-    #[test]
-    fn focus_looks_can_name_their_sides() {
-        let json = r#"{ "id": "bar", "type": "column", "children": [],
-          "focus": { "border": { "width": 1, "color": "accent" }, "sides": ["right", "bottom"] } }"#;
-        let n: Node = serde_json::from_str(json).unwrap();
-        assert_eq!(n.focus.as_ref().and_then(|f| f.sides.clone()), Some(vec![Side::Right, Side::Bottom]));
         let back: Node = serde_json::from_str(&serde_json::to_string(&n).unwrap()).unwrap();
         assert_eq!(back, n);
     }

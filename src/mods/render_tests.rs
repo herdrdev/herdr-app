@@ -74,7 +74,7 @@ fn fixture(populated: bool, props: Value, update: Value) -> BTreeMap<String, Val
     let program =
         json!({"key":"pi", "name":"Pi", "icon":null, "tint":true, "tile":"#334455", "color":"#aabbcc", "shell":false, "agent":true});
     let mut values = BTreeMap::from([
-        ("props".into(), props), ("blockId".into(), json!("fixture")),
+        ("props".into(), props),
         ("machines".into(), json!([{ "name": null, "layout": "ready" }])),
         ("spaces".into(), json!([])), ("agents".into(), json!([])), ("terminals".into(), json!([])), ("panes".into(), json!([])), ("focused".into(), Value::Null),
         ("layout".into(), serde_json::from_str(include_str!("../../defaults/layouts/main.json")).unwrap()),

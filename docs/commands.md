@@ -240,13 +240,12 @@ Show only this pane of its tab, or all again.
 
 ## `pane.focus`
 
-Focus a pane (or the pane showing a terminal), or give a shown mod block the keyboard.
+Focus a pane (or the pane showing a terminal).
 
 | Argument | Required |
 |---|---|
 | `pane` | no |
 | `terminal` | no |
-| `block` | no |
 
 ## `pane.go`
 

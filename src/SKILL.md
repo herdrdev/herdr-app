@@ -90,6 +90,8 @@ those files or the generated guide. The app rewrites them on start.
 - Home defaults to `~/.config/herdr-app`; `HERDR_APP_HOME` selects another.
 - Mods live in `mods/<name>/` with `main.js` and optional `mod.json`.
   They are trusted JavaScript with command and network access.
+  `"focusable": true` in `mod.json` lets `pane.go` move onto a copy; it receives
+  `"focus"` from `nextCommand()` and focuses its own keyboard handle.
 - Shipped mods belong to Herdr: duplicate with `mod.clone` before editing.
   Shipped layouts likewise use `layout.clone` for a personal copy.
   Discover required arguments with `herdr-app commands`.

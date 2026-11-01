@@ -338,7 +338,7 @@ pub struct Hint {
     pub place: Option<String>,
     #[serde(default)]
     pub size: Option<f32>,
-    /// `pane.go` can give it the keyboard (`focused().blockId`).
+    /// `pane.go` can give it the keyboard.
     #[serde(default)]
     pub focusable: bool,
 }
@@ -839,9 +839,8 @@ fn exec_future(command: String, args: Vec<String>, cwd: Option<String>, on: Opti
     }
 }
 
-fn module(inst: Instance, copy: u64, slot: &str) -> HostModule {
+fn module(inst: Instance, copy: u64) -> HostModule {
     let props = inst.props.clone();
-    let slot = slot.to_owned();
     let feedback_frame = inst.name == "frame-feedback";
     let feedback_from = inst.props.get("from").and_then(Value::as_str).unwrap_or("person").to_owned();
     let feedback_layout = inst.props.get("layout").and_then(Value::as_str).unwrap_or("other").to_owned();
@@ -1027,7 +1026,6 @@ fn module(inst: Instance, copy: u64, slot: &str) -> HostModule {
             move |_| Ok(float.as_ref().map_or(HostValue::Null, |id| read(|s| s.floats.get(id).unwrap_or(&Value::Null))))
         })
         .function("props", move |_| Ok(to_host(&props)))
-        .function("blockId", move |_| Ok(to_host(&json!(slot))))
         .function("shared", |a| {
             let k = a.string(0)?;
             Ok(with_shared(|s| s.values.get(k).map(to_host).unwrap_or(HostValue::Null)))
@@ -1092,7 +1090,7 @@ fn capabilities() -> Capabilities {
 pub fn install_policy() -> async_channel::Receiver<Request> {
     gpui_shell::policy::update_default(|p| {
         p.with_capabilities(capabilities())
-            .with_host_module(module(Instance { name: String::new(), props: Value::Null }, 0, ""))
+            .with_host_module(module(Instance { name: String::new(), props: Value::Null }, 0))
             .expect("herdr module is valid")
     });
     let (tx, rx) = async_channel::unbounded();
@@ -1105,7 +1103,7 @@ pub fn install_policy() -> async_channel::Receiver<Request> {
 /// view a copy of the default that *shares* modules and storage, so each copy
 /// needs a fresh default rather than an edit of the old one.
 /// Readies the next load of `inst`; returns the copy's number (for commands).
-pub fn prepare_load(inst: &Instance, slot: &str) -> u64 {
+pub fn prepare_load(inst: &Instance) -> u64 {
     let copy = COPY_SEQ.with(|s| {
         s.set(s.get() + 1);
         s.get()
@@ -1124,7 +1122,7 @@ pub fn prepare_load(inst: &Instance, slot: &str) -> u64 {
         .with_application(inst.key())
         .with_capabilities(capabilities())
         .with_storage_path(dir.join(file))
-        .with_host_module(module(inst.clone(), copy, slot))
+        .with_host_module(module(inst.clone(), copy))
         .expect("herdr module is valid");
     gpui_shell::policy::set_default(policy);
     copy
@@ -1133,6 +1131,38 @@ pub fn prepare_load(inst: &Instance, slot: &str) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keyboard_focus_is_opt_in_and_commands_only_reach_the_shown_copy() {
+        for metadata in [json!({}), json!({"focusable": false})] {
+            assert!(!serde_json::from_value::<Hint>(metadata).unwrap().focusable);
+        }
+        assert!(serde_json::from_value::<Hint>(json!({"focusable": true})).unwrap().focusable);
+
+        let (first_tx, first) = async_channel::unbounded();
+        let (second_tx, second) = async_channel::unbounded();
+        let (hidden_tx, hidden) = async_channel::unbounded();
+        COMMANDS.with_borrow_mut(|c| *c = vec![
+            (1, "same-mod".into(), first_tx),
+            (2, "same-mod".into(), second_tx),
+            (3, "same-mod".into(), hidden_tx),
+        ]);
+        set_shown_copies([1, 2].into());
+        assert!(send_command_to(2, "focus"));
+        assert_eq!(second.try_recv().unwrap(), "focus");
+        assert!(first.is_empty());
+        assert!(hidden.is_empty());
+        assert!(!send_command_to(3, "focus"));
+        assert!(!send_command_to(99, "focus"));
+        // Existing mod key bindings still broadcast to every shown copy.
+        assert!(send_command("same-mod", "existing-key"));
+        assert_eq!(first.try_recv().unwrap(), "existing-key");
+        assert_eq!(second.try_recv().unwrap(), "existing-key");
+        assert!(hidden.is_empty());
+        COMMANDS.with_borrow_mut(Vec::clear);
+        set_shown_copies(Default::default());
+    }
+
 
     #[cfg(unix)]
     #[test]

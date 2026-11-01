@@ -231,9 +231,8 @@ Properties any node can have:
 - Paint: `background` (a color; `{ "gradient": ["#2a6cbd", "#0b2a57"], "angle": 165 }`;
   or `{ "image": "backgrounds/sky.jpg", "fit": "cover" | "contain" }`, a path in
   the home folder), `border` (`{ "width": 1, "color": "border" }`), `radius`,
-  `shadow` (`"sm" | "md" | "lg"`), `focus` (`{ "border": {...}, "sides": ["right"] }`
-  when the focused pane or block is inside; `sides` left out means all four and
-  `[]` none, so a bar can outline only its inner edge).
+  `shadow` (`"sm" | "md" | "lg"`), `focus` (`{ "border": {...} }` when the
+  focused pane is inside).
 - `padding`: space inside the node's edge, px: `16` or `[vertical, horizontal]`.
 - row/column: `gap` (px between children), `divider` (`{ "width": 1, "color": "border" }`),
   `resizable` (default true: drag the boundary). This applies to that row/column only.
@@ -532,16 +531,14 @@ The main ones:
   skip settled tabs).
 - Panes: `pane.split {direction: "right" | "down", pane?, argv? | mod?, props?}` (a new
   terminal, or a mod pane), `pane.close {pane?}`,
-  `pane.zoom {pane?}`, `pane.focus {pane | terminal | block}`, `pane.go {direction}`, `pane.swap {direction}`.
-  `pane.go` prefers the most recently focused pane (or focusable mod) along the nearest
-  edge in that direction; unvisited panes fall back to overlap, then top/left layout order.
+  `pane.zoom {pane?}`, `pane.focus {pane | terminal}`, `pane.go {direction}`, `pane.swap {direction}`.
+  `pane.go` prefers the most recently focused pane along the nearest edge in that
+  direction; unvisited panes fall back to overlap, then top/left layout order.
+  `pane.go` also reaches visible mods whose `mod.json` says `"focusable": true`, and
+  starts from that mod while it holds the keyboard.
   `pane.swap` uses geometry only. Focus history lasts until the window closes.
   `pane.focus {terminal}` prefers the first visible layout terminal block showing that
   address, then its model pane. Clicking a terminal block focuses it too.
-  `pane.focus {block}` gives a shown mod block (a layout block or a mod pane, by id) the
-  keyboard: `focused().blockId` names it and its copy gets `focus` from `nextCommand()`.
-  `pane.go` moves by what's on screen to the nearest pane or focusable mod (mod.json
-  `"focusable": true`), from whichever of them has the keyboard.
   While a layout terminal block is focused, implicit split/close/zoom/go/swap and
   `terminal.show` fail, as do `terminal.open`/`terminal.keep` with place right/down.
   They never act on the terminal's source pane. An explicit `pane` still targets that
@@ -748,14 +745,11 @@ has 120 programs (agents, editors, runtimes, tools, databases, infra);
   *.js, *.svg   more modules ("./ui.js"), its own icons
 ```
 
-- `"focusable": true` in `mod.json`: `pane.go` can move to the mod's blocks. A click
-  leaves the keyboard where it is (a tab or space click goes on to its pane); a mod
-  that wants it on click asks: `run("pane.focus", {block: blockId()})`. Either
-  way `focused().blockId` becomes that block's id (compare it with `blockId()`) and the copy gets `focus` from
-  `nextCommand()`, also when the keyboard comes back to it after a popup: focus
-  your own handle then (`this.handle.focus()`) and handle the keys
-  (`on_key_down`). Leave with `run("pane.go", {direction})`, or
-  `run("pane.focus", {pane})` to go back.
+- `"focusable": true` in `mod.json` lets `pane.go` give a shown copy the keyboard.
+  It gets `"focus"` from `nextCommand()`: focus your own handle then
+  (`this.handle.focus()`) and handle keys with `on_key_down`. The copy gets `"focus"`
+  again after a popup over it closes. Leave with `run("pane.go", {direction})`.
+  Without this opt-in, navigation and clicks stay unchanged.
 
 - The first time Herdr sees a folder, it docks one copy per `mod.json` into
   the shown layout (`"none"`: only where a layout or another mod puts it).
@@ -923,8 +917,6 @@ All of it is in `herdr.d.ts`. In short:
   not its source pane. Check `focused()?.pane` before offering pane controls.
   `panes()` still lists only model panes; none is focused while a terminal block is.
   For composition navigation: `run("pane.focus", {terminal: nextAddress})`.
-  `focused().blockId`: the mod block holding the keyboard (`pane.focus {block}`, `pane.go`
-  onto a focusable mod), else null; `pane` stays the tab's pane.
   Terminal copy/paste and implicit right-click routing follow the focused block.
 - Floating: `placement()` (null unless this copy floats).
 - Act: `run(command, args)`.
@@ -964,7 +956,7 @@ All of it is in `herdr.d.ts`. In short:
   Files also refreshes on its 10-second timer:
   `cx.spawn(async (cx) => { for (;;) { await watchFolder(dir); this.reload(); cx.notify(); } })`.
 - `notify({ ..., action: { name, args } })`: the toast runs the command when clicked.
-- This copy: `blockId()` (its block id in the layout, or its pane id), `props()`, `shared(key)` / `setShared(key, value)` (every mod
+- This copy: `props()`, `shared(key)` / `setShared(key, value)` (every mod
   sees it; setting re-renders all), `nextCommand()` (key commands for this
   mod: `cx.spawn(async (cx) => { for (;;) { const c = await nextCommand(); …; cx.notify(); } })`).
 

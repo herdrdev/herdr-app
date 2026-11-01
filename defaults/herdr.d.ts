@@ -55,7 +55,7 @@ export function playSound(sound: string): null;
  *   tab.close {id?}, tab.rename {id?, name}, tab.move {id, index}, tab.select {index | id},
  *   tab.next, tab.prev.
  * Panes: pane.split {direction: "right" | "down", pane?}, pane.close {pane?}, pane.zoom {pane?},
- *   pane.focus {pane | terminal | block}, pane.go {direction}, pane.swap {direction}. Pane menus get target { pane, terminal }.
+ *   pane.focus {pane | terminal}, pane.go {direction}, pane.swap {direction}. Pane menus get target { pane, terminal }.
  * Terminals: terminal.open {argv?, folder?, place?: "tab" | "right" | "down"}, terminal.kill {terminal},
  *   terminal.keep {terminal, place?} (a running one without a pane, e.g. a sub-agent, gets one),
  *   terminal.park {terminal} (its pane goes, it keeps running; the menu's "Send back"),
@@ -222,11 +222,8 @@ export function terminals(): any[];
  *  terminal.open/keep with place right/down. An explicit pane id targets a model pane.
  *  pane.focus {terminal} prefers the first visible layout terminal block, then a model pane.
  *  `shown`: terminal.show replacement, if any. `agent`: the agent an agent block shows.
- *  `terminal` is null for mod panes.
- *  `blockId`: the mod block holding the keyboard (pane.focus {block}, pane.go onto a mod whose
- *  mod.json says "focusable": true), else null; compare with blockId().
- *  That copy also gets `focus` from nextCommand() (again after a popup over it closes). Live. */
-export function focused(): { space: string; tab: string; pane: string | null; terminal: string | null; shown: string | null; agent: string | null; cwd: string | null; blockId: string | null } | null;
+ *  `terminal` is null for mod panes. Live. */
+export function focused(): { space: string; tab: string; pane: string | null; terminal: string | null; shown: string | null; agent: string | null; cwd: string | null } | null;
 
 /** The shown layout (layouts/<name>.json). Its name is shared("layout").
  *  Root `terminal_menu?: string` chooses a terminal right-click menu mod (default: "menu").
@@ -388,10 +385,6 @@ export function notify(n: {
  * The exported View may implement async close(cx) for bounded final cleanup. */
 export function props(): any;
 
-/** This copy's block id in the layout (its pane id in a tab).
- *  `focused().blockId === blockId()`: this copy has the keyboard. */
-export function blockId(): string;
-
 /** Reads a value every mod can see (persisted). */
 export function shared(key: string): unknown;
 
@@ -400,6 +393,9 @@ export function setShared(key: string, value: unknown): null;
 
 /**
  * Waits for the next key command for this mod ("alt-s": "<mod>:<command>" in keys.json).
+ * With "focusable": true in mod.json, pane.go can move onto this copy and send "focus".
+ * Focus your own handle then (this.handle.focus()) and handle keys with on_key_down.
+ * The copy gets "focus" again when a popup over it closes. Leave with pane.go.
  *   cx.spawn(async (cx) => { for (;;) { const c = await nextCommand(); ...; cx.notify(); } });
  */
 export function nextCommand(): Promise<string>;

@@ -10,7 +10,7 @@ mod movable;
 mod pane_drag;
 mod titlebar;
 
-use crate::layout::{Axis, Background as Paint, Content, Fit, HeaderContent, Kind, Line, Node, PaneFrame, Side, Size as Span};
+use crate::layout::{Axis, Background as Paint, Content, Fit, HeaderContent, Kind, Line, Node, PaneFrame, Size as Span};
 use crate::model::{self, Tab, Model};
 use crate::mods::{self, Found, Instance, Request};
 use crate::settings;
@@ -427,7 +427,7 @@ pub struct AppWindow {
     drag_from: Option<Point<Pixels>>,
     titlebar_applied: Option<(crate::layout::Titlebar, Option<[f32; 2]>)>,
     focused_pane: Option<String>,
-    /// The mod block holding the keyboard: `focused().blockId`.
+    /// The mod block holding the keyboard for directional navigation.
     focused_block: Option<String>,
     synced_model_pane: Option<String>,
     pane_history: Vec<String>,
@@ -1425,7 +1425,7 @@ impl AppWindow {
         let want: HashMap<String, Instance> = mods_visible.into_iter().collect();
         for (slot, inst) in want {
             if !self.copies.contains_key(&slot) {
-                let copy = self.load(&slot, inst, window, cx);
+                let copy = self.load(inst, window, cx);
                 if slot.starts_with("float:")
                     && let Some(root) = &copy.root
                 {
@@ -1567,13 +1567,13 @@ impl AppWindow {
         self.pane_term(pane).map(|t| t.focus.clone())
     }
 
-    fn load(&self, slot: &str, inst: Instance, window: &mut Window, cx: &mut Context<Self>) -> Copy {
+    fn load(&self, inst: Instance, window: &mut Window, cx: &mut Context<Self>) -> Copy {
         let mut copy = Copy { inst, id: 0, root: None, _watch: None, error: None };
         let (Some(runtime), Some(folder)) = (&self.runtime, self.folders.get(&copy.inst.name)) else {
             copy.error = Some(format!("no mod folder ~/.config/herdr-app/mods/{}", copy.inst.name));
             return copy;
         };
-        copy.id = mods::prepare_load(&copy.inst, slot);
+        copy.id = mods::prepare_load(&copy.inst);
         match runtime.try_load(&folder.dir, window, cx) {
             Ok(root) => {
                 if self.file_events.is_none() {
@@ -1662,12 +1662,12 @@ impl AppWindow {
             if let Some(block) = block {
                 let address = block.terminal()?;
                 return Some(json!({ "space": p.id, "tab": ctx.id, "pane": null, "terminal": address,
-                    "shown": null, "agent": self.shown_agent(), "cwd": self.cwds.get(address), "blockId": self.focused_block }));
+                    "shown": null, "agent": self.shown_agent(), "cwd": self.cwds.get(address) }));
             }
             let pane = ctx.focused_pane()?;
             let cwd = (if self.shows_agent() { self.shown_agent() } else { m.address_of(&pane) }).and_then(|a| self.cwds.get(&a).cloned());
             Some(json!({ "space": p.id, "tab": ctx.id, "terminal": m.address_of(&pane), "shown": self.swapped.get(&pane),
-                "pane": pane, "agent": self.shown_agent(), "cwd": cwd, "blockId": self.focused_block }))
+                "pane": pane, "agent": self.shown_agent(), "cwd": cwd }))
         });
         let machines = self.documents.iter().map(|(name, slot)| json!({
             "name": (!name.is_empty()).then_some(name), "layout": slot.layout(),
@@ -2889,22 +2889,17 @@ impl AppWindow {
                 }
             }
             "pane.focus" => {
-                if let Some(block) = Self::owned(a, "block") {
-                    if Self::arg(a, "pane").is_some() || Self::arg(a, "terminal").is_some() {
-                        return self.fail("pane.focus takes a block, a pane or a terminal, not more than one");
-                    }
-                    if !self.mod_block_shown(&block) {
-                        return self.fail(format!("no shown mod block {block:?}"));
-                    }
-                    return self.focus_block(&block, window, cx);
-                }
                 if Self::arg(a, "pane").is_none()
                     && let Some(terminal) = Self::arg(a, "terminal")
                     && let Some(block) = self.chrome.visible_blocks().into_iter().find(|n| n.terminal() == Some(terminal))
                 {
                     let id = block.id.clone();
                     self.focused_block = None;
-                    self.focus_pane_id(&id, window, cx);
+                    self.focused_pane = Some(id.clone());
+                    self.synced_model_pane = self.model.focused_pane();
+                    if !self.overlays.iter().any(|o| o.kind.modal_keys()) && let Some(f) = self.pane_focus(&id) {
+                        f.focus(window, cx);
+                    }
                     self.publish(cx);
                     cx.notify();
                     return;
@@ -2912,7 +2907,10 @@ impl AppWindow {
                 let pane = Self::owned(a, "pane").or_else(|| Self::arg(a, "terminal").and_then(|t| self.model.pane_of(t)));
                 let Some(p) = pane.filter(|p| self.model.tab_of(p).is_some()) else { return self.fail("no such pane") };
                 self.focused_block = None;
-                self.focus_pane_id(&p, window, cx);
+                self.model.focus_pane(&p);
+                self.focused_pane = None;
+                self.agent = self.model.address_of(&p);
+                self.swapped.remove(&p);
             }
             "pane.go" | "pane.swap" => {
                 let dir = Self::arg(a, "direction").unwrap_or_default();
@@ -3280,81 +3278,45 @@ impl AppWindow {
         self.model.spaces.iter_mut().flat_map(|p| p.tabs.iter_mut()).find_map(|c| c.root.find_mut(id))
     }
 
-    /// The nearest visible pane in a direction, by what's on screen.
-    fn neighbor(&self, from: &str, dir: &str) -> Option<String> {
-        let c = self.model.active_tab()?;
-        let candidates = c.shown().visible_blocks().iter().filter(|n| n.is_pane()).map(|n| n.id.clone()).collect();
-        self.nearest_in(from, dir, candidates, false)
-    }
-
-    /// The nearest candidate in a direction, by what's on screen (`nearest`,
-    /// with focus history for `pane.go`). One that contains `from`'s center
-    /// holds it (the sidebar around a list), not a neighbor.
-    fn nearest_in(&self, from: &str, dir: &str, candidates: Vec<String>, use_history: bool) -> Option<String> {
+    /// The nearest visible pane, also considering focusable mods for `pane.go`.
+    fn neighbor(&self, from: &str, dir: &str, use_history: bool) -> Option<String> {
         let bounds = self.bounds.borrow();
         let cur = *bounds.get(from)?;
-        let center = cur.center();
-        let candidates = candidates
-            .into_iter()
-            .filter(|id| id != from)
-            .filter_map(|id| Some((id.clone(), *bounds.get(&id)?)))
-            .filter(|(_, r)| !r.contains(&center));
+        let mut candidates: Vec<String> = self.model.active_tab().into_iter()
+            .flat_map(|c| c.shown().visible_blocks().into_iter().filter(|n| n.is_pane()).map(|n| n.id.clone()))
+            .collect();
+        if use_history {
+            candidates.extend(self.chrome.visible_blocks().into_iter().filter(|n| self.focusable(&n.id)).map(|n| n.id.clone()));
+        }
+        let candidates = candidates.into_iter().filter(|id| id != from).filter_map(|id| Some((id.clone(), *bounds.get(&id)?)));
         nearest(cur, dir, candidates, if use_history { &self.pane_history } else { &[] })
     }
 
     /// `pane.go`: the nearest pane or focusable mod.
     fn go(&mut self, dir: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(from) = self.focused_block.clone().or_else(|| self.model.focused_pane()) else { return };
-        let mut candidates: Vec<String> = self
-            .chrome
-            .visible_blocks()
-            .into_iter()
-            .filter(|n| self.focusable(&n.id))
-            .map(|n| n.id.clone())
-            .collect();
-        if let Some(c) = self.model.active_tab() {
-            candidates.extend(c.shown().visible_blocks().iter().filter(|n| n.is_pane()).map(|n| n.id.clone()));
-        }
-        let Some(to) = self.nearest_in(&from, dir, candidates, true) else { return };
+        let Some(to) = self.neighbor(&from, dir, true) else { return };
         if self.focusable(&to) {
             return self.focus_block(&to, window, cx);
         }
         self.focused_block = None;
-        self.focus_pane_id(&to, window, cx);
+        self.model.focus_pane(&to);
+        self.focused_pane = None;
         self.sync(window, cx);
-    }
-
-    /// Focuses a tab's pane, or else a layout terminal block.
-    fn focus_pane_id(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if self.model.tab_of(id).is_some() {
-            self.model.focus_pane(id);
-            self.focused_pane = None;
-            self.agent = self.model.address_of(id);
-            self.swapped.remove(id);
-            // Directly: when it was focused already, sync sees no change to act on.
-            if !self.overlays.iter().any(|o| o.kind.modal_keys()) {
-                self.pane_focus(id).unwrap_or_else(|| self.focus.clone()).focus(window, cx);
-            }
-            return;
-        }
-        self.focused_pane = Some(id.to_owned());
-        self.synced_model_pane = self.model.focused_pane();
-        if !self.overlays.iter().any(|o| o.kind.modal_keys()) && let Some(f) = self.pane_focus(id) {
-            f.focus(window, cx);
-        }
     }
 
     /// Until the mod takes the keyboard, the window holds the keys.
     fn focus_block(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         if self.model.tab_of(id).is_some() {
-            self.focus_pane_id(id, window, cx);
+            self.model.focus_pane(id);
+            self.focused_pane = None;
         }
         self.focused_block = Some(id.to_owned());
+        self.sync(window, cx);
         if !self.overlays.iter().any(|o| o.kind.modal_keys()) {
             self.focus.focus(window, cx);
             self.hand_keyboard();
         }
-        self.sync(window, cx);
     }
 
     /// Its copy gets `focus` from `nextCommand()`.
@@ -3379,7 +3341,7 @@ impl AppWindow {
     /// Swaps the focused pane with its neighbor in a direction.
     fn swap_pane(&mut self, dir: &str) {
         if let Some(from) = self.model.focused_pane()
-            && let Some(to) = self.neighbor(&from, dir)
+            && let Some(to) = self.neighbor(&from, dir, false)
             && let Some(ctx) = self.model.tab_of(&from).map(|c| c.id.clone())
             && let Some(c) = self.model.tab_mut(&ctx)
         {
@@ -3472,7 +3434,7 @@ impl AppWindow {
             focus.focus(window, cx);
         }
         if layout.is_none() {
-            let copy = self.load(&slot, Instance { name, props }, window, cx);
+            let copy = self.load(Instance { name, props }, window, cx);
             // Popups (menus) are as tall as what's in them; `height` is the most.
             if fit
                 && let Some(root) = &copy.root
@@ -4647,23 +4609,8 @@ fn apply_look(el: Div, n: &Node, focused: bool) -> Div {
     } else if let Some(bg) = &n.background {
         el = paint(el, bg);
     }
-    let focus_line = focus.and_then(|f| f.border.as_ref());
-    if let Some(line) = focus_line.or(n.border.as_ref()) {
-        let width = settings::z(line.width);
-        match focus.and_then(|f| f.sides.as_ref()).filter(|_| focus_line.is_some()) {
-            Some(sides) => {
-                for side in sides {
-                    el = match side {
-                        Side::Top => el.border_t(width),
-                        Side::Right => el.border_r(width),
-                        Side::Bottom => el.border_b(width),
-                        Side::Left => el.border_l(width),
-                    };
-                }
-            }
-            None => el = el.border(width),
-        }
-        el = el.border_color(c(&line.color));
+    if let Some(line) = focus.and_then(|f| f.border.as_ref()).or(n.border.as_ref()) {
+        el = el.border(settings::z(line.width)).border_color(c(&line.color));
     }
     if let Some(r) = n.radius {
         el = el.rounded(settings::z(r));
