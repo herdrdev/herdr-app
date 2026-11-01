@@ -673,7 +673,10 @@ What's about the user, never a look:
   that opacity. Terminals, cards and bars become see-through together, and
   `terminal_opacity` stops applying; dialogs and menus stay solid. Colors a
   program sets itself stay solid too. Literal colors in a layout or mod stay
-  as written. 1 (default) is an ordinary window.
+  as written. The theme's `background`, `surface`, `canvas` and `chrome` stop
+  being separate surfaces: all four show the one `background` color, painted
+  at the window root, so a layout or theme that tells them apart loses that
+  difference. 1 (default) is an ordinary window.
 - `window_blur`: `true` blurs what shows through, on systems that can (macOS,
   Windows, some Linux compositors); it needs `window_opacity` below 1.
 - `clipboard_write`: `false` blocks terminal programs from writing the local
