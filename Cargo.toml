@@ -46,6 +46,12 @@ gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8", features = 
 gpui = { package = "gpui-pre", version = "=0.3.8", features = ["test-support"] }
 gpui-shell = { path = "vendor/gpui-kit/crates/shell", features = ["render-test-support"] }
 
+[target.'cfg(target_os = "linux")'.dev-dependencies]
+gpui_wgpu = { package = "gpui-pre-wgpu", path = "vendor/gpui-pre-wgpu", features = ["test-support"] }
+skrifa = "=0.44.0"
+swash = "=0.2.10"
+tiny-skia = { version = "=0.11.4", default-features = false, features = ["std", "simd"] }
+
 [target.'cfg(target_os = "linux")'.dependencies]
 gpui_linux = { package = "gpui-pre-linux", version = "=0.3.8", features = ["render-to-image"] }
 

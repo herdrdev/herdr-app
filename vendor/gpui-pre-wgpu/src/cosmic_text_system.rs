@@ -6,7 +6,7 @@ use cosmic_text::{
 };
 use gpui::{
     Bounds, DevicePixels, FallbackFontClass, Font, FontFallbacks, FontFeatures, FontId,
-    FontMetrics, FontRun, GlyphId, IsZero as _, LineLayout, MissingGlyph, MissingGlyphSink, Pixels,
+    FontMetrics, FontRun, GlyphId, LineLayout, MissingGlyph, MissingGlyphSink, Pixels,
     PlatformTextSystem, RenderGlyphParams, SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ShapedGlyph,
     ShapedRun, SharedString, Size, TextRenderingMode, point, size,
 };
@@ -28,6 +28,7 @@ struct FontKey {
     family: SharedString,
     features: FontFeatures,
     fallbacks: Option<FontFallbacks>,
+    is_fallback: bool,
 }
 
 impl FontKey {
@@ -36,6 +37,7 @@ impl FontKey {
             family,
             features,
             fallbacks,
+            is_fallback: false,
         }
     }
 }
@@ -46,11 +48,16 @@ struct LoadedFontKey {
     font: FontKey,
 }
 
+type ColorFallback = Vec<(Range<usize>, FontId)>;
+
 struct CosmicTextSystemState {
     font_system: FontSystem,
     scratch: ShapeBuffer,
+    color_fallbacks: HashMap<(FontId, u32, String), Option<ColorFallback>>,
     swash_scale_context: ScaleContext,
-    pending_glyph_images: HashMap<RenderGlyphParams, swash::scale::image::Image>,
+    pending_glyph_image: Option<(RenderGlyphParams, swash::scale::image::Image)>,
+    #[cfg(feature = "test-support")]
+    glyph_image_renders: usize,
     /// Contains all already loaded fonts, including all faces. Indexed by `FontId`.
     loaded_fonts: Vec<LoadedFont>,
     loaded_font_ids_by_key: HashMap<LoadedFontKey, FontId>,
@@ -63,8 +70,11 @@ struct CosmicTextSystemState {
 
 struct LoadedFont {
     font: Arc<CosmicTextFont>,
+    empty_color_glyphs: HashMap<(u16, u32), bool>,
     features: CosmicFontFeatures,
     is_known_emoji_font: bool,
+    color_fallback_alias: Option<FontId>,
+    foreground_glyphs: HashMap<(u32, u32), bool>,
     /// resolved at load time so `layout_line` shares one chain across faces.
     /// `Arc` keeps clone cheap on the per-run hot path.
     user_fallback_chain: Arc<[(FontId, SharedString)]>,
@@ -92,6 +102,11 @@ impl FontMatchProperties {
 }
 
 impl CosmicTextSystem {
+    #[cfg(feature = "test-support")]
+    pub fn glyph_image_render_count(&self) -> usize {
+        self.0.read().glyph_image_renders
+    }
+
     /// Returns the selected face's weight and style, which may differ from the request.
     pub fn font_weight_and_style(
         &self,
@@ -134,8 +149,11 @@ impl CosmicTextSystem {
         Self(RwLock::new(CosmicTextSystemState {
             font_system,
             scratch: ShapeBuffer::default(),
+            color_fallbacks: HashMap::default(),
             swash_scale_context: ScaleContext::new(),
-            pending_glyph_images: HashMap::default(),
+            pending_glyph_image: None,
+            #[cfg(feature = "test-support")]
+            glyph_image_renders: 0,
             loaded_fonts: Vec::new(),
             loaded_font_ids_by_key: HashMap::default(),
             font_ids_by_family_cache: HashMap::default(),
@@ -153,8 +171,11 @@ impl CosmicTextSystem {
         Self(RwLock::new(CosmicTextSystemState {
             font_system,
             scratch: ShapeBuffer::default(),
+            color_fallbacks: HashMap::default(),
             swash_scale_context: ScaleContext::new(),
-            pending_glyph_images: HashMap::default(),
+            pending_glyph_image: None,
+            #[cfg(feature = "test-support")]
+            glyph_image_renders: 0,
             loaded_fonts: Vec::new(),
             loaded_font_ids_by_key: HashMap::default(),
             font_ids_by_family_cache: HashMap::default(),
@@ -165,6 +186,41 @@ impl CosmicTextSystem {
 }
 
 impl PlatformTextSystem for CosmicTextSystem {
+    fn glyph_uses_foreground(&self, params: &RenderGlyphParams) -> bool {
+        let mut state = self.0.write();
+        if !params.is_emoji {
+            return false;
+        }
+        let key = (
+            params.glyph_id.0,
+            (f32::from(params.font_size) * params.scale_factor).to_bits(),
+        );
+        if let Some(uses) = state.loaded_fonts[params.font_id.0]
+            .foreground_glyphs
+            .get(&key)
+        {
+            return *uses;
+        }
+        let uses = state.render_glyph_image(params).is_ok_and(|image| {
+            let is_mask = image.content == swash::scale::image::Content::Mask;
+            state.pending_glyph_image = Some((params.clone(), image));
+            is_mask
+                || crate::colr::uses_foreground(
+                    state.loaded_fonts[params.font_id.0].font.data(),
+                    state
+                        .font_system
+                        .db()
+                        .face(state.loaded_fonts[params.font_id.0].font.id())
+                        .map_or(0, |face| face.index),
+                    params.glyph_id.0,
+                )
+        });
+        state.loaded_fonts[params.font_id.0]
+            .foreground_glyphs
+            .insert(key, uses);
+        uses
+    }
+
     fn add_fonts(&self, fonts: Vec<Cow<'static, [u8]>>) -> Result<()> {
         self.0.write().add_fonts(fonts)
     }
@@ -174,12 +230,18 @@ impl PlatformTextSystem for CosmicTextSystem {
     }
 
     fn all_font_names(&self) -> Vec<String> {
-        let mut result = self
-            .0
-            .read()
+        let state = self.0.read();
+        let aliases: Vec<_> = state
+            .loaded_fonts
+            .iter()
+            .filter_map(|font| font.color_fallback_alias)
+            .map(|id| state.loaded_fonts[id.0].font.id())
+            .collect();
+        let mut result = state
             .font_system
             .db()
             .faces()
+            .filter(|face| !aliases.contains(&face.id))
             .filter_map(|face| face.families.first().map(|family| family.0.clone()))
             .collect_vec();
         result.sort_unstable();
@@ -198,7 +260,7 @@ impl PlatformTextSystem for CosmicTextSystem {
             font_ids.as_slice()
         } else {
             let font_ids =
-                state.load_family(&font.family, &font.features, font.fallbacks.as_ref())?;
+                state.load_family(&font.family, &font.features, font.fallbacks.as_ref(), false)?;
             state.font_ids_by_family_cache.insert(key.clone(), font_ids);
             state.font_ids_by_family_cache[&key].as_ref()
         };
@@ -328,6 +390,7 @@ impl CosmicTextSystemState {
     #[profiling::function]
     fn add_fonts(&mut self, fonts: Vec<Cow<'static, [u8]>>) -> Result<()> {
         self.font_ids_by_family_cache.clear();
+        self.color_fallbacks.clear();
         let db = self.font_system.db_mut();
         for bytes in fonts {
             db.load_font_source(cosmic_text::fontdb::Source::Binary(Arc::new(bytes)));
@@ -341,12 +404,14 @@ impl CosmicTextSystemState {
         name: &str,
         features: &FontFeatures,
         fallbacks: Option<&FontFallbacks>,
+        is_fallback: bool,
     ) -> Result<SmallVec<[FontId; 4]>> {
-        let loaded_font_key = FontKey::new(
+        let mut loaded_font_key = FontKey::new(
             SharedString::from(name.to_owned()),
             features.clone(),
             fallbacks.cloned(),
         );
+        loaded_font_key.is_fallback = is_fallback;
 
         // recurse with `fallbacks = None` so a fallback family cannot pull in
         // another chain. missing fallback families are dropped so a typo in
@@ -355,15 +420,16 @@ impl CosmicTextSystemState {
             Some(fallbacks) if !fallbacks.fallback_list().is_empty() => {
                 let mut chain: Vec<(FontId, SharedString)> = Vec::new();
                 for fallback_name in fallbacks.fallback_list() {
-                    let fb_key = FontKey::new(
+                    let mut fb_key = FontKey::new(
                         SharedString::from(fallback_name.clone()),
                         features.clone(),
                         None,
                     );
+                    fb_key.is_fallback = true;
                     let fb_ids = if let Some(cached) = self.font_ids_by_family_cache.get(&fb_key) {
                         cached.clone()
                     } else {
-                        let loaded = self.load_family(fallback_name, features, None)?;
+                        let loaded = self.load_family(fallback_name, features, None, true)?;
                         self.font_ids_by_family_cache
                             .insert(fb_key.clone(), loaded.clone());
                         loaded
@@ -418,10 +484,12 @@ impl CosmicTextSystemState {
                 "Segoe Fluent Icons",
             ];
 
-            if font.as_swash().charmap().map('m') == 0
+            if !is_fallback
+                && font.as_swash().charmap().map('m') == 0
                 && !allowed_bad_font_names.contains(&postscript_name.as_str())
             {
-                self.font_system.db_mut().remove_face(font.id());
+                // Primary terminal fonts supply cell metrics. An emoji-only
+                // face is still valid as a fallback, even after this rejection.
                 continue;
             };
 
@@ -429,8 +497,11 @@ impl CosmicTextSystemState {
             loaded_font_ids.push(font_id);
             self.loaded_fonts.push(LoadedFont {
                 font,
+                empty_color_glyphs: HashMap::default(),
                 features: cosmic_features.clone(),
                 is_known_emoji_font: check_is_known_emoji_font(&postscript_name),
+                color_fallback_alias: None,
+                foreground_glyphs: HashMap::default(),
                 user_fallback_chain: Arc::clone(&user_fallback_chain),
             });
             self.loaded_font_ids_by_key.insert(key, font_id);
@@ -457,14 +528,20 @@ impl CosmicTextSystemState {
     }
 
     fn raster_bounds(&mut self, params: &RenderGlyphParams) -> Result<Bounds<DevicePixels>> {
-        let image = self.render_glyph_image(params)?;
+        // Policy discovery may already have rendered this exact variant.
+        if !self
+            .pending_glyph_image
+            .as_ref()
+            .is_some_and(|(key, _)| key == params)
+        {
+            let image = self.render_glyph_image(params)?;
+            self.pending_glyph_image = Some((params.clone(), image));
+        }
+        let image = &self.pending_glyph_image.as_ref().unwrap().1;
         let bounds = Bounds {
             origin: point(image.placement.left.into(), (-image.placement.top).into()),
             size: size(image.placement.width.into(), image.placement.height.into()),
         };
-        if !bounds.is_zero() {
-            self.pending_glyph_images.insert(params.clone(), image);
-        }
         Ok(bounds)
     }
 
@@ -478,7 +555,12 @@ impl CosmicTextSystemState {
             anyhow::bail!("glyph bounds are empty");
         }
 
-        let mut image = match self.pending_glyph_images.remove(params) {
+        let mut image = match self
+            .pending_glyph_image
+            .take()
+            .filter(|(key, _)| key == params)
+            .map(|(_, image)| image)
+        {
             Some(image) => image,
             None => self.render_glyph_image(params)?,
         };
@@ -492,7 +574,21 @@ impl CosmicTextSystemState {
                 Ok((bitmap_size, image.data))
             }
             swash::scale::image::Content::Mask => {
-                if params.subpixel_rendering {
+                if params.is_emoji {
+                    let [r, g, b, a] = params.foreground;
+                    let expanded = image
+                        .data
+                        .iter()
+                        .flat_map(|&coverage| {
+                            let alpha = (u16::from(coverage) * u16::from(a) + 127) / 255;
+                            [b, g, r]
+                                .map(|c| ((u16::from(c) * alpha + 127) / 255) as u8)
+                                .into_iter()
+                                .chain(std::iter::once(alpha as u8))
+                        })
+                        .collect();
+                    Ok((bitmap_size, expanded))
+                } else if params.subpixel_rendering {
                     // We must always return RGBA data when subpixel rendering is requested.
                     let expanded = image.data.iter().flat_map(|&a| [a, a, a, a]).collect();
                     Ok((bitmap_size, expanded))
@@ -507,9 +603,28 @@ impl CosmicTextSystemState {
         &mut self,
         params: &RenderGlyphParams,
     ) -> Result<swash::scale::image::Image> {
+        #[cfg(feature = "test-support")]
+        {
+            self.glyph_image_renders += 1;
+        }
         let loaded_font = &self.loaded_fonts[params.font_id.0];
         let font_ref = loaded_font.font.as_swash();
         let pixel_size = f32::from(params.font_size);
+
+        if params.is_emoji
+            && let Some(image) = crate::colr::render_with_foreground(
+                font_ref.data,
+                self.font_system
+                    .db()
+                    .face(loaded_font.font.id())
+                    .map_or(0, |face| face.index),
+                params.glyph_id.0,
+                pixel_size * params.scale_factor,
+                params.foreground,
+            )
+        {
+            return Ok(image);
+        }
 
         let subpixel_offset = Vector::new(
             params.subpixel_variant.x as f32 / SUBPIXEL_VARIANTS_X as f32 / params.scale_factor,
@@ -578,8 +693,11 @@ impl CosmicTextSystemState {
             let font_id = FontId(self.loaded_fonts.len());
             self.loaded_fonts.push(LoadedFont {
                 font,
+                empty_color_glyphs: HashMap::default(),
                 features: CosmicFontFeatures::new(),
                 is_known_emoji_font: check_is_known_emoji_font(&face.post_script_name),
+                color_fallback_alias: None,
+                foreground_glyphs: HashMap::default(),
                 user_fallback_chain: Arc::from(Vec::new()),
             });
 
@@ -683,6 +801,176 @@ impl CosmicTextSystemState {
         layout.descent = layout.descent.max(segment.descent);
     }
 
+    fn empty_color_glyph(&mut self, glyph: &cosmic_text::LayoutGlyph) -> bool {
+        let std::result::Result::Ok(font_id) = self.font_id_for_cosmic_id(glyph.font_id) else {
+            return false;
+        };
+        if let Some(empty) = self.loaded_fonts[font_id.0]
+            .empty_color_glyphs
+            .get(&(glyph.glyph_id, glyph.font_size.to_bits()))
+        {
+            return *empty;
+        }
+        let font = self.loaded_fonts[font_id.0].font.clone();
+        let scaler = self
+            .swash_scale_context
+            .builder(font.as_swash())
+            .size(glyph.font_size)
+            .build();
+        if !scaler.has_color_outlines() && !scaler.has_color_bitmaps() {
+            self.loaded_fonts[font_id.0]
+                .empty_color_glyphs
+                .insert((glyph.glyph_id, glyph.font_size.to_bits()), false);
+            return false;
+        }
+        drop(scaler);
+        let params = RenderGlyphParams {
+            font_id,
+            glyph_id: GlyphId(u32::from(glyph.glyph_id)),
+            font_size: glyph.font_size.into(),
+            scale_factor: 1.0,
+            subpixel_variant: point(0, 0),
+            is_emoji: true,
+            subpixel_rendering: false,
+            dilation: 0,
+            foreground: [255; 4],
+        };
+        let index = self
+            .font_system
+            .db()
+            .face(glyph.font_id)
+            .map_or(0, |face| face.index);
+        // A valid transparent composition (for example opaque SrcOut) is
+        // drawable. Only traversal/budget failures should reject that face.
+        let valid_colrv1 = crate::colr::render_with_foreground(
+            font.data(),
+            index,
+            u32::from(glyph.glyph_id),
+            glyph.font_size,
+            [255; 4],
+        )
+        .is_some();
+        let empty = !valid_colrv1
+            && self.render_glyph_image(&params).map_or(true, |image| {
+                image.placement.width == 0
+                    || image.placement.height == 0
+                    || !image.data.iter().any(|byte| *byte != 0)
+            });
+        self.loaded_fonts[font_id.0]
+            .empty_color_glyphs
+            .insert((glyph.glyph_id, glyph.font_size.to_bits()), empty);
+        empty
+    }
+
+    fn color_fallback_alias(&mut self, id: cosmic_text::fontdb::ID) -> Option<FontId> {
+        let original = self.font_id_for_cosmic_id(id).ok()?;
+        if let Some(alias) = self.loaded_fonts[original.0].color_fallback_alias {
+            return Some(alias);
+        }
+        // A family/style request cannot distinguish duplicate faces. Give the
+        // validated face its own family so final shaping preserves that face.
+        let mut face = self.font_system.db().face(id)?.clone();
+        face.families = vec![(
+            format!("__gpui_color_fallback_{}", original.0),
+            cosmic_text::fontdb::Language::English_UnitedStates,
+        )];
+        let alias = self.font_system.db_mut().push_face_info(face);
+        let alias = self.font_id_for_cosmic_id(alias).ok()?;
+        self.loaded_fonts[original.0].color_fallback_alias = Some(alias);
+        self.loaded_fonts[alias.0].color_fallback_alias = Some(alias);
+        Some(alias)
+    }
+
+    fn resolve_empty_color_cluster(
+        &mut self,
+        cluster: &str,
+        requested: FontId,
+        pixels: f32,
+        rejected: &[cosmic_text::fontdb::ID],
+    ) -> Option<ColorFallback> {
+        let key = (requested, pixels.to_bits(), cluster.to_string());
+        if let Some(resolution) = self.color_fallbacks.get(&key) {
+            return resolution.clone();
+        }
+        let properties = self.font_match_properties(requested)?;
+        let mut db = self.font_system.db().clone();
+        for id in rejected {
+            db.remove_face(*id);
+        }
+        let mut fallback = FontSystem::new_with_locale_and_db("en-US".to_string(), db);
+        let candidates: Vec<_> = properties
+            .fallback_chain
+            .iter()
+            .cloned()
+            .chain(std::iter::once((
+                requested,
+                properties.primary_family_name.clone(),
+            )))
+            .collect();
+        let mut resolution = None;
+        for (candidate, family) in candidates {
+            let explicit = candidate != requested;
+            for _ in 0..8 {
+                let attrs = AttrsList::new(&properties.attributes(requested, &family));
+                let line = ShapeLine::new(
+                    &mut fallback,
+                    cluster,
+                    &attrs,
+                    cosmic_text::Shaping::Advanced,
+                    4,
+                );
+                let mut lines = Vec::new();
+                line.layout_to_buffer(
+                    &mut ShapeBuffer::default(),
+                    pixels,
+                    None,
+                    cosmic_text::Wrap::None,
+                    Ellipsize::None,
+                    None,
+                    &mut lines,
+                    None,
+                    cosmic_text::Hinting::Disabled,
+                );
+                let Some(line) = lines.first().filter(|l| !l.glyphs.is_empty()) else {
+                    break;
+                };
+                if explicit
+                    && line.glyphs.iter().any(|g| {
+                        !self.font_system.db().face(g.font_id).is_some_and(|face| {
+                            face.families.iter().any(|f| f.0 == family.as_ref())
+                        })
+                    })
+                {
+                    break;
+                }
+                let failed: Vec<_> = line
+                    .glyphs
+                    .iter()
+                    .filter(|g| g.glyph_id == 0 || self.empty_color_glyph(g))
+                    .map(|g| g.font_id)
+                    .collect();
+                if !failed.is_empty() {
+                    for id in failed {
+                        fallback.db_mut().remove_face(id);
+                    }
+                    continue;
+                }
+                let spans: Option<Vec<_>> = line
+                    .glyphs
+                    .iter()
+                    .map(|g| Some((g.start..g.end, self.color_fallback_alias(g.font_id)?)))
+                    .collect();
+                resolution = spans;
+                break;
+            }
+            if resolution.is_some() {
+                break;
+            }
+        }
+        self.color_fallbacks.insert(key, resolution.clone());
+        resolution
+    }
+
     fn layout_line_no_separators(
         &mut self,
         text: &str,
@@ -758,7 +1046,7 @@ impl CosmicTextSystemState {
             cosmic_text::Hinting::Disabled,
         );
 
-        let Some(layout) = layout_lines.first() else {
+        let Some(layout) = layout_lines.first_mut() else {
             return LineLayout {
                 font_size,
                 width: Pixels::ZERO,
@@ -768,6 +1056,93 @@ impl CosmicTextSystemState {
                 len: text.len(),
             };
         };
+
+        // Resolve fonts first, then shape the entire line again. Cosmic-text
+        // owns advances, bidi positioning and ascent/descent, not the repair.
+        let mut repairs = Vec::new();
+        let mut start = 0;
+        while start < layout.glyphs.len() {
+            let glyph = &layout.glyphs[start];
+            let (from, to) = (glyph.start, glyph.end);
+            let mut run_end = 0;
+            let requested = font_runs
+                .iter()
+                .find_map(|run| {
+                    run_end += run.len;
+                    (from < run_end).then_some(run.font_id)
+                })
+                .unwrap_or(FontId(glyph.metadata));
+            let mut end = start + 1;
+            while end < layout.glyphs.len()
+                && layout.glyphs[end].start == from
+                && layout.glyphs[end].end == to
+            {
+                end += 1;
+            }
+            let cluster = &text[from..to];
+            let visible = cluster.chars().any(|ch| {
+                !ch.is_whitespace()
+                    && !ch.is_control()
+                    && ch != '\u{200d}'
+                    && ch != '\u{200c}'
+                    && !('\u{fe00}'..='\u{fe0f}').contains(&ch)
+                    && !('\u{e0100}'..='\u{e01ef}').contains(&ch)
+            });
+            if visible
+                && layout.glyphs[start..end]
+                    .iter()
+                    .all(|g| self.empty_color_glyph(g))
+            {
+                let rejected: Vec<_> = layout.glyphs[start..end]
+                    .iter()
+                    .map(|g| g.font_id)
+                    .collect();
+                if let Some(spans) = self.resolve_empty_color_cluster(
+                    cluster,
+                    requested,
+                    f32::from(font_size),
+                    &rejected,
+                ) {
+                    for (range, id) in spans {
+                        repairs.push((from + range.start..from + range.end, requested, id));
+                    }
+                }
+            }
+            start = end;
+        }
+        if !repairs.is_empty() {
+            for (range, requested, resolved) in repairs {
+                if let (Some(properties), Some(face)) = (
+                    self.font_match_properties(requested),
+                    self.font_system
+                        .db()
+                        .face(self.loaded_fonts[resolved.0].font.id()),
+                ) && let Some(family) = face.families.first()
+                {
+                    attrs_list.add_span(range, &properties.attributes(requested, &family.0));
+                }
+            }
+            let line = ShapeLine::new(
+                &mut self.font_system,
+                text,
+                &attrs_list,
+                cosmic_text::Shaping::Advanced,
+                4,
+            );
+            layout_lines.clear();
+            line.layout_to_buffer(
+                &mut self.scratch,
+                f32::from(font_size),
+                None,
+                cosmic_text::Wrap::None,
+                Ellipsize::None,
+                None,
+                &mut layout_lines,
+                None,
+                cosmic_text::Hinting::Disabled,
+            );
+        }
+        let layout = &layout_lines[0];
 
         let missing_glyphs = self.missing_glyph_sink.as_ref().map(|_| {
             self.missing_glyphs(
@@ -800,10 +1175,18 @@ impl CosmicTextSystemState {
                     }
                 }
             }
-            let is_emoji = loaded_font.is_known_emoji_font;
+            let is_emoji = loaded_font.is_known_emoji_font
+                || crate::colr::has_glyph(
+                    loaded_font.font.data(),
+                    self.font_system
+                        .db()
+                        .face(glyph.font_id)
+                        .map_or(0, |face| face.index),
+                    u32::from(glyph.glyph_id),
+                );
 
             // HACK: Prevent crash caused by variation selectors.
-            if glyph.glyph_id == 3 && is_emoji {
+            if glyph.glyph_id == 3 && loaded_font.is_known_emoji_font {
                 continue;
             }
 

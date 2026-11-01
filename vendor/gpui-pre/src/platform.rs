@@ -1456,6 +1456,10 @@ pub trait PlatformTextSystem: Send + Sync {
     fn advance(&self, font_id: FontId, glyph_id: GlyphId) -> Result<Size<f32>>;
     /// Get the glyph ID for a character.
     fn glyph_for_char(&self, font_id: FontId, ch: char) -> Option<GlyphId>;
+    /// Whether this backend's color glyph pixels depend on the run foreground.
+    fn glyph_uses_foreground(&self, _params: &RenderGlyphParams) -> bool {
+        false
+    }
     /// Get raster bounds for a glyph.
     fn glyph_raster_bounds(&self, params: &RenderGlyphParams) -> Result<Bounds<DevicePixels>>;
     /// Rasterize a glyph.

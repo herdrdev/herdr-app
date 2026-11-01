@@ -136,6 +136,14 @@ features = [
 [dependencies.swash]
 version = "0.2.6"
 
+[dependencies.skrifa]
+version = "0.44.0"
+
+[dependencies.tiny-skia]
+version = "0.11.4"
+default-features = false
+features = ["std", "simd"]
+
 [dependencies.unicode-bidi]
 version = "0.3.18"
 features = ["hardcoded-data"]
