@@ -18,6 +18,8 @@ mod place;
 mod persist;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "macos")]
+mod webview;
 mod mods;
 mod mod_files;
 mod process_cwd;

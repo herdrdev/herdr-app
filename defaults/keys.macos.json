@@ -4,6 +4,7 @@
     "cmd-h": "app.hide",
     "cmd-alt-h": "app.hide_others",
     "cmd-t": "tab.new",
+    "cmd-shift-b": "web.open",
     "cmd-w": "tab.close",
     "ctrl-tab": "tab.next",
     "ctrl-shift-tab": "tab.prev",
