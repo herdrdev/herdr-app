@@ -42,30 +42,17 @@ fn without(rect: Bounds<Pixels>, hole: Bounds<Pixels>) -> Vec<Bounds<Pixels>> {
         .collect()
 }
 
-/// A window's one background cut up: each terminal's own color where it's drawn
-/// (`Some`), the theme's everywhere else (`None`). No point is covered twice, so
-/// nothing adds up to more than the window's opacity. Where terminals overlap,
-/// the smaller one wins: that's the float above a pane.
-fn partition(window: Bounds<Pixels>, mut own: Vec<(Bounds<Pixels>, Rgb)>) -> Vec<(Bounds<Pixels>, Option<Rgb>)> {
-    let area = |r: &Bounds<Pixels>| f32::from(r.size.width) * f32::from(r.size.height);
-    own.sort_by(|a, b| area(&a.0).total_cmp(&area(&b.0)));
-    let mut out = Vec::new();
-    let mut rest = vec![window];
-    for (hole, color) in own {
-        let hole = hole.intersect(&window);
-        if hole.is_empty() {
-            continue;
-        }
-        let taken: Vec<_> = out.iter().map(|(r, _): &(Bounds<Pixels>, Option<Rgb>)| *r).collect();
-        let mut visible = vec![hole];
-        for t in taken {
-            visible = visible.into_iter().flat_map(|r| without(r, t)).collect();
-        }
-        out.extend(visible.into_iter().map(|r| (r, Some(color))));
-        rest = rest.into_iter().flat_map(|r| without(r, hole)).collect();
-    }
-    out.extend(rest.into_iter().map(|r| (r, None)));
-    out
+/// The window minus the terminals that paint their own background.
+fn background_rects(window: Bounds<Pixels>, holes: Vec<Bounds<Pixels>>) -> Vec<Bounds<Pixels>> {
+    holes.into_iter().fold(vec![window], |rects, hole| rects.into_iter().flat_map(|r| without(r, hole)).collect())
+}
+
+/// How solid a terminal paints its default background. A see-through window
+/// painted the theme's at its root, and left a hole for one a program set
+/// (OSC 11), so that one goes here at the window's opacity, stacked on nothing.
+/// Painting it here, not at the root, keeps it above a layout's solid surfaces.
+fn default_bg_opacity(own: bool, terminal_opacity: f32, window_opacity: f32) -> f32 {
+    if own { window_opacity } else { terminal_opacity }
 }
 
 /// A see-through window's background, as the root's first child: it paints after
@@ -74,11 +61,10 @@ pub fn window_background(views: Vec<Entity<TerminalView>>) -> impl IntoElement {
     canvas(
         |_, _, _| {},
         move |bounds, _, window, cx| {
-            let theme_bg = vt::theme().bg;
-            let opacity = crate::settings::get().window_opacity;
-            let own = views.iter().filter_map(|v| v.read(cx).own_background(theme_bg)).collect();
-            for (rect, color) in partition(bounds, own) {
-                window.paint_quad(fill(rect, hsla(color.unwrap_or(theme_bg)).opacity(opacity)));
+            let color = hsla(vt::theme().bg).opacity(crate::settings::get().window_opacity);
+            let holes = views.iter().filter_map(|v| v.read(cx).background_hole()).collect();
+            for rect in background_rects(bounds, holes) {
+                window.paint_quad(fill(rect, color));
             }
         },
     )
@@ -117,6 +103,9 @@ struct Grid {
     /// Where it's drawn, clipped. A cached terminal keeps this, and its bounds
     /// changing redraws it.
     drawn_at: Option<Bounds<Pixels>>,
+    /// In a see-through window, it paints a background a program set. Read when
+    /// it's drawn, so the window's hole and this paint can't disagree.
+    own_background: bool,
     /// Top-left of the cell grid in window coordinates, from the last paint.
     origin: Point<Pixels>,
     buttons_down: Vec<MouseButton>,
@@ -257,6 +246,7 @@ impl TerminalView {
                 vt_cell: (9, 18),
                 told_display: None,
                 drawn_at: None,
+                own_background: false,
                 origin: Point::default(),
                 buttons_down: Vec::new(),
                 images: HashMap::new(),
@@ -497,14 +487,10 @@ impl TerminalView {
         self.shown_in.set(FRAME.load(Ordering::Relaxed));
     }
 
-    /// Where it's on screen with a background a program set, and that color.
-    fn own_background(&self, theme_bg: Rgb) -> Option<(Bounds<Pixels>, Rgb)> {
-        if self.shown_in.get() != FRAME.load(Ordering::Relaxed) {
-            return None;
-        }
+    /// Where the window's background must leave room for this terminal's own.
+    fn background_hole(&self) -> Option<Bounds<Pixels>> {
         let g = self.grid.borrow();
-        let bg = g.vt.background();
-        Some((g.drawn_at?, bg)).filter(|_| bg != theme_bg)
+        g.drawn_at.filter(|_| g.own_background && self.shown_in.get() == FRAME.load(Ordering::Relaxed))
     }
 
     fn send(&self, bytes: &[u8]) {
@@ -1268,7 +1254,9 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     let marked = g.marked.clone();
     drop(g);
 
-    window.paint_quad(fill(bounds, hsla(frame.bg).opacity(crate::settings::get().terminal_opacity)));
+    let s = crate::settings::get();
+    let opacity = default_bg_opacity(grid.borrow().own_background, s.terminal_opacity, s.window_opacity);
+    window.paint_quad(fill(bounds, hsla(frame.bg).opacity(opacity)));
     let at = |x: usize, y: usize| origin + point(cell.width * x as f32, cell.height * y as f32);
     // Edges round to device pixels, so cells side by side meet without seams.
     let snap_box = |b: Bounds<Pixels>| {
@@ -1548,7 +1536,9 @@ impl Render for TerminalView {
                         g.drawn_at = Some(bounds.intersect(&window.content_mask().bounds));
                         let dev = device_cell(cell, g.scale);
                         // Before the size, so a program woken by it asks for the new cell.
-                        g.refresh_theme(&vt::theme(), dev);
+                        let theme = vt::theme();
+                        g.refresh_theme(&theme, dev);
+                        g.own_background = crate::settings::get().window_opacity < 1.0 && g.vt.background() != theme.bg;
                         let (px_, py_) = pad();
                         let cols = ((f32::from(bounds.size.width) - 2.0 * px_) / f32::from(cell.width)).floor().max(2.0) as u16;
                         let rows = ((f32::from(bounds.size.height) - 2.0 * py_) / f32::from(cell.height)).floor().max(1.0) as u16;
@@ -1644,47 +1634,35 @@ mod tests {
         assert_eq!(vt.background(), theme_bg);
     }
 
-    /// Every point of the window exactly once, sampled, in the color it should be.
-    fn assert_covers(window: gpui::Bounds<gpui::Pixels>, parts: &[(gpui::Bounds<gpui::Pixels>, Option<crate::vt::Rgb>)], color_at: impl Fn(f32, f32) -> Option<crate::vt::Rgb>) {
-        for x in (0..f32::from(window.size.width) as u32).step_by(5) {
-            for y in (0..f32::from(window.size.height) as u32).step_by(5) {
-                let p = gpui::point(gpui::px(x as f32 + 0.5), gpui::px(y as f32 + 0.5));
-                let hits: Vec<_> = parts.iter().filter(|(r, _)| r.contains(&p)).map(|(_, c)| *c).collect();
-                assert_eq!(hits, [color_at(x as f32, y as f32)], "at {x},{y}");
-            }
-        }
-    }
-
     #[test]
-    fn a_see_through_background_covers_each_point_once() {
+    fn a_see_through_background_leaves_a_hole_for_each_own_background() {
         use super::*;
         let rect = |x: f32, y: f32, w: f32, h: f32| Bounds::new(point(px(x), px(y)), size(px(w), px(h)));
         let window = rect(0.0, 0.0, 100.0, 80.0);
-        let (red, blue) = (Rgb(255, 0, 0), Rgb(0, 0, 255));
+        let inside = |r: Bounds<Pixels>, x: f32, y: f32| r.contains(&point(px(x), px(y)));
+        // Each sampled point is painted once, or not at all inside a hole.
+        let check = |holes: Vec<Bounds<Pixels>>| {
+            let rects = background_rects(window, holes.clone());
+            for x in (0..100).step_by(5).map(|x| x as f32 + 0.5) {
+                for y in (0..80).step_by(5).map(|y| y as f32 + 0.5) {
+                    let painted = rects.iter().filter(|r| inside(**r, x, y)).count();
+                    assert_eq!(painted, usize::from(!holes.iter().any(|h| inside(*h, x, y))), "at {x},{y}");
+                }
+            }
+        };
+        assert_eq!(background_rects(window, Vec::new()), [window]);
+        check(vec![rect(0.0, 0.0, 40.0, 80.0), rect(40.0, 20.0, 30.0, 30.0)]); // touching, and on an edge
+        check(vec![rect(10.0, 10.0, 60.0, 60.0), rect(50.0, 30.0, 40.0, 20.0)]); // overlapping
+        check(vec![rect(90.0, 70.0, 50.0, 50.0)]); // hanging off the window
+        assert_eq!(background_rects(window, vec![rect(200.0, 0.0, 10.0, 10.0)]), [window]);
+    }
 
-        let none = partition(window, Vec::new());
-        assert_eq!(none, [(window, None)]);
-
-        // Side by side and touching the window's edge.
-        let parts = partition(window, vec![(rect(0.0, 0.0, 40.0, 80.0), red), (rect(40.0, 20.0, 30.0, 30.0), blue)]);
-        assert_covers(window, &parts, |x, y| match (x, y) {
-            (x, _) if x < 40.0 => Some(red),
-            (x, y) if x < 70.0 && (20.0..50.0).contains(&y) => Some(blue),
-            _ => None,
-        });
-
-        // A float above a pane: the smaller one wins where they overlap, in either order.
-        let (pane, float) = ((rect(10.0, 10.0, 60.0, 60.0), red), (rect(50.0, 30.0, 40.0, 20.0), blue));
-        for own in [vec![pane, float], vec![float, pane]] {
-            assert_covers(window, &partition(window, own), |x, y| {
-                let inside = |r: Bounds<Pixels>| (f32::from(r.origin.x)..f32::from(r.origin.x + r.size.width)).contains(&x) && (f32::from(r.origin.y)..f32::from(r.origin.y + r.size.height)).contains(&y);
-                if inside(float.0) { Some(blue) } else if inside(pane.0) { Some(red) } else { None }
-            });
-        }
-
-        // Clipped away, or hanging off the window.
-        assert_eq!(partition(window, vec![(rect(200.0, 0.0, 10.0, 10.0), red)]), [(window, None)]);
-        assert_covers(window, &partition(window, vec![(rect(90.0, 70.0, 50.0, 50.0), red)]), |x, y| (x >= 90.0 && y >= 70.0).then_some(red));
+    #[test]
+    fn a_background_a_program_set_paints_at_the_windows_opacity() {
+        use super::*;
+        assert_eq!(default_bg_opacity(true, 0.0, 0.9), 0.9);
+        assert_eq!(default_bg_opacity(false, 0.0, 0.9), 0.0, "the window already painted the theme's");
+        assert_eq!(default_bg_opacity(false, 0.85, 1.0), 0.85, "an opaque window keeps the layout's terminal_opacity");
     }
 
     #[test]
