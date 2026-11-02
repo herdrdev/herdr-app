@@ -19,7 +19,7 @@ Mods can add their own actions, which are not listed here.
 
 ## `space.new`
 
-Make a space: its name (default: none, so it's called after where its first terminal is), the folder its terminals start in (default: the focused terminal's), its first tab's name (default: none, so it's called by its number), optionally an agent (argv) and its first message (task), and the machine it lives on (`hc machine ls`; default this one; its terminals start in that machine's home unless folder).
+Make a space: its name (default: none, so it's called after where its first terminal is), the folder its terminals start in (default: the focused terminal's), its first tab's name (default: none, so it's called by its number), optionally an agent (argv) and its first message (task), and the machine it lives on (`hc machine ls`; default the focused space's machine for keys and clicks, this computer for scripts; empty string: this computer; its terminals start in that machine's home unless folder).
 
 | Argument | Required |
 |---|---|
@@ -59,7 +59,7 @@ Move a space to a position (1 = first).
 
 ## `tab.new`
 
-Make a tab in a space (default: the selected one; name default: none, so it's called by its number) with a terminal in folder (default: the focused terminal's), optionally an agent (argv) and its first message (task); or with a mod as its only pane (`mod`, its `props`: a file, a board).
+Make a tab in a space (default: the selected one; name default: none, so it's called by its number) with a terminal in folder (default: the focused terminal's), optionally an agent (argv) and its first message (task); or with a mod as its only pane (`mod`, its `props`: a file, a board). With no space open, a person's new tab starts a space (as space.new).
 
 | Argument | Required |
 |---|---|
@@ -155,6 +155,15 @@ Where right-clicks in a terminal (default: the focused one) go when its program 
 | `to` | yes |
 | `terminal` | no |
 
+## `terminal.pin`
+
+Pin an agent to the top of the agent lists (pinned true) or unpin it (false). Pins are kept with the terminal, so every Herdr client shows them, and end with it.
+
+| Argument | Required |
+|---|---|
+| `terminal` | yes |
+| `pinned` | yes |
+
 ## `terminal.kill`
 
 End a terminal and its sub-agents.
@@ -240,7 +249,7 @@ Focus a pane (or the pane showing a terminal).
 
 ## `pane.go`
 
-Focus the pane to the "left", "right", "up" or "down".
+Focus the pane or focusable mod to the "left", "right", "up" or "down".
 
 | Argument | Required |
 |---|---|
@@ -273,7 +282,7 @@ Show a terminal in a pane for now, in place of its own (no terminal: back).
 
 ## `terminal.copy`
 
-Copy the focused terminal's selection.
+Copy the focused terminal's selection. With nothing selected, that key goes to the program.
 
 No arguments.
 
@@ -396,7 +405,7 @@ Reset a shipped layout and its clicks (the old file is kept aside).
 
 ## `mod.open`
 
-Open a mod as the overlay its mod.json describes.
+Toggle a mod as the overlay its mod.json describes; calling again closes it.
 
 | Argument | Required |
 |---|---|
@@ -412,7 +421,7 @@ Close an overlay (default: the top dialog or popup).
 
 ## `app.help`
 
-Show the keys.
+Toggle the keys dialog.
 
 No arguments.
 
@@ -439,7 +448,7 @@ Draft feedback for the person to review and send (from: person or agent).
 
 ## `app.palette`
 
-Open the command palette: every command by name, with its key.
+Toggle the command palette: every command by name, with its key; calling again closes it.
 
 No arguments.
 

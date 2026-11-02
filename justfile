@@ -1,5 +1,8 @@
 set windows-shell := ["powershell.exe", "-NoLogo", "-NoProfile", "-Command"]
 
+default:
+    @just --list
+
 notes-clip scene version="":
     bun scripts/notes-media.ts clip "{{scene}}" "{{version}}"
 
@@ -52,7 +55,7 @@ dev: build
     .\target\debug\herdr-app.exe
 
 test:
-    bun test scripts/files.test.ts
+    bun test scripts/files.test.ts scripts/picker.test.ts scripts/palette.test.ts scripts/agents.test.ts scripts/spaces.test.ts
     cargo test --locked
 
 docs-generate: build

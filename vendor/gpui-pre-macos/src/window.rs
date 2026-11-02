@@ -2685,7 +2685,7 @@ extern "C" fn handle_key_event(this: &Object, native_event: id, key_equivalent: 
             // Alt shortcuts must never enter AppKit's Option/dead-key composition.
             if key_down_event.keystroke.modifiers.alt
                 && !key_down_event.keystroke.modifiers.platform
-                && crate::events::option_as_alt()
+                && crate::events::option_as_alt().uses_alt(key_down_event.keystroke.option_side)
             {
                 return run_callback(PlatformInput::KeyDown(key_down_event));
             }

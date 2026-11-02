@@ -964,7 +964,8 @@ impl WaylandConnection {
         globals.contents().with_list(|list| -> anyhow::Result<()> {
             for global in list {
                 match &global.interface[..] {
-                    "wl_seat" => {
+                    // Until multi-seat support exists, keep all input devices on the first seat.
+                    "wl_seat" if seat.is_none() => {
                         seat = Some(globals.registry().bind::<wl_seat::WlSeat, _, _>(
                             global.name,
                             wl_seat_version(global.version)?,
@@ -1555,20 +1556,8 @@ impl Dispatch<wl_registry::WlRegistry, GlobalListContents> for WaylandClientStat
                 interface,
                 version,
             } => match &interface[..] {
-                "wl_seat" => {
-                    let Ok(version) = wl_seat_version(version) else {
-                        log::error!("ignoring wl_seat below the required version");
-                        return;
-                    };
-                    if let Some(wl_pointer) = state.wl_pointer.take() {
-                        wl_pointer.release();
-                    }
-                    if let Some(wl_keyboard) = state.wl_keyboard.take() {
-                        wl_keyboard.release();
-                    }
-                    state.wl_seat.release();
-                    state.wl_seat = registry.bind::<wl_seat::WlSeat, _, _>(name, version, qh, ());
-                }
+                // A new seat must not replace the seat used by our input and data devices.
+                "wl_seat" => {}
                 "wl_output" => {
                     let Ok(version) = wl_output_version(version) else {
                         log::error!("ignoring wl_output below the required version");

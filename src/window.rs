@@ -8,6 +8,7 @@ use crate::hc::Core;
 mod floats;
 mod movable;
 mod pane_drag;
+mod pane_size;
 mod titlebar;
 
 use crate::layout::{Axis, Background as Paint, Content, Fit, HeaderContent, Kind, Line, Node, PaneFrame, Size as Span};
@@ -396,6 +397,10 @@ pub struct AppWindow {
     reply: Option<Value>,
     /// The `where` label last written per terminal address.
     written_where: HashMap<String, String>,
+    /// `herdr.seen` turns written but not yet back from the core.
+    written_seen: HashMap<String, u64>,
+    /// Agents the person is looking at, and the turn they were shared as seen at.
+    looked: HashMap<String, u64>,
     watched: Watched,
     /// Core's terminal records by address.
     live: HashMap<String, Value>,
@@ -423,7 +428,10 @@ pub struct AppWindow {
     drag_from: Option<Point<Pixels>>,
     titlebar_applied: Option<(crate::layout::Titlebar, Option<[f32; 2]>)>,
     focused_pane: Option<String>,
+    /// The mod block holding the keyboard for directional navigation.
+    focused_block: Option<String>,
     synced_model_pane: Option<String>,
+    pane_history: Vec<String>,
     window_active: bool,
     /// The system's appearance; a layout with a light and a dark theme follows it.
     system_dark: bool,
@@ -484,6 +492,8 @@ impl AppWindow {
             person: settings::Person::default(),
             reply: None,
             written_where: HashMap::new(),
+            written_seen: HashMap::new(),
+            looked: HashMap::new(),
             watched: Watched::default(),
             live: HashMap::new(),
             listed_once: false,
@@ -507,7 +517,9 @@ impl AppWindow {
             drag_from: None,
             titlebar_applied: None,
             focused_pane: None,
+            focused_block: None,
             synced_model_pane: None,
+            pane_history: Vec::new(),
             window_active: true,
             system_dark: is_dark(window.appearance()),
             file_events: crate::files::watch(&mods::app_dir()),
@@ -656,8 +668,16 @@ impl AppWindow {
                 let watching = sub.is_some();
                 subscription = sub;
                 event_lines = lines;
+                let (seen, resynced) = event_lines.take_seen();
                 if this.update_in(cx, |this, window, cx| {
                     if generation != this.core_generation { return; }
+                    // Our seen writes the core has applied (or, after a fresh
+                    // snapshot, can't tell): its labels decide again.
+                    if resynced {
+                        this.written_seen.clear();
+                    } else {
+                        this.written_seen.retain(|a, w| seen.get(a).is_none_or(|s| s < w));
+                    }
                     this.documents_watching = watching;
                     if watching { this.documents.entry(String::new()).or_default().connection(true, None, None); }
                     let changed = this.documents_updated(machines, vec![], window, cx);
@@ -692,6 +712,7 @@ impl AppWindow {
         }));
         Self::note_core(&w.core);
         w.sync(window, cx);
+        w.restore_focus(window, cx);
         // The first time the app opens: the frame's welcome (it sets
         // "frame.welcomed" when you start or skip).
         cx.defer_in(window, |this, window, cx| this.open_kept_windows(window, cx));
@@ -820,6 +841,9 @@ impl AppWindow {
             self.report_layout(&problems.join("; "));
         }
         if settings::set(s) {
+            for term in self.terms.values() {
+                term.view.read(cx).refresh_theme();
+            }
             mods::apply_theme(cx);
             self.refresh_mods(cx);
             window.refresh();
@@ -1314,8 +1338,10 @@ impl AppWindow {
 
     /// What's on screen now, for done-vs-seen.
     fn visible_addresses(&self) -> Vec<String> {
-        let mut out = if self.shows_tab() { self.model.visible_addresses() } else { Vec::new() };
-        out.extend(self.chrome.visible_blocks().into_iter().filter_map(|n| n.terminal().map(str::to_owned)));
+        let (terms, _) = self.visible();
+        // A swapped-in terminal is drawn instead of its pane's own.
+        let covered: HashSet<&str> = terms.iter().filter_map(|(slot, _)| slot.strip_suffix(SWAP)).collect();
+        let mut out: Vec<String> = terms.iter().filter(|(slot, _)| !covered.contains(slot.as_str())).map(|(_, a)| a.clone()).collect();
         if self.shows_agent() {
             out.extend(self.shown_agent());
         }
@@ -1420,8 +1446,19 @@ impl AppWindow {
         } else {
             model_pane.clone()
         };
-        self.synced_model_pane = model_pane;
         let pane_changed = focused != self.focused_pane;
+        // A pane focused some other way, or the block leaving, ends it.
+        if (pane_changed && self.focused_block != focused) || self.focused_block.as_ref().is_some_and(|b| !self.mod_block_shown(b)) {
+            self.focused_block = None;
+        }
+        // Mod blocks too, so `pane.go` goes back to a mod it came from.
+        self.pane_history.retain(|id| {
+            self.copies.contains_key(id) || self.model.spaces.iter().any(|s| s.tabs.iter().any(|t| t.root.find(id).is_some()))
+        });
+        if let Some(id) = self.focused_block.as_ref().or(model_pane.as_ref()) {
+            remember_pane(&mut self.pane_history, id);
+        }
+        self.synced_model_pane = model_pane;
         self.focused_pane = focused.clone();
         let no_dialog = !self.overlays.iter().any(|o| o.kind.modal_keys());
         if terminal_block(&self.chrome, focused.as_deref()).is_some() {
@@ -1449,9 +1486,48 @@ impl AppWindow {
             let visible = self.visible_addresses();
             self.model.mark_seen(&visible);
         }
+        self.share_seen(cx);
         self.publish(cx);
         self.save();
         cx.notify();
+    }
+
+    /// Shares what the person looks at as `herdr.seen` (docs/labels.md): an
+    /// agent on screen in the active window, once per turn while it stays
+    /// there, so a phone marking it unread isn't undone by a screen nobody
+    /// watches. Only ever raises it. True when a status changed.
+    fn share_seen(&mut self, cx: &mut Context<Self>) -> bool {
+        let looking: HashSet<String> = if self.window_active { self.visible_addresses().into_iter().collect() } else { HashSet::new() };
+        self.looked.retain(|a, _| looking.contains(a));
+        let mut changed = false;
+        for addr in looking {
+            let Some(a) = self.model.agents.get(&addr) else { continue };
+            let turn = a.turn;
+            if a.word.is_none() || !self.live.contains_key(&addr) || self.looked.get(&addr) == Some(&turn) {
+                continue;
+            }
+            self.looked.insert(addr.clone(), turn);
+            if a.seen_turn.is_some_and(|s| s >= turn) {
+                continue;
+            }
+            // Shown as seen now, not after the core's round trip.
+            changed |= self.model.set_turn(&addr, turn, Some(turn));
+            self.written_seen.insert(addr.clone(), turn);
+            let core = self.core.clone();
+            cx.spawn(async move |this, cx| {
+                let params = json!({ "terminal": addr, "labels": { "herdr.seen": turn.to_string() } });
+                let Err(e) = cx.background_executor().spawn(async move { core.call("terminal.label", params) }).await else { return };
+                tracing::warn!("seen label for {addr}: {e:#}");
+                let _ = this.update(cx, |this, _| {
+                    if this.written_seen.get(&addr) == Some(&turn) {
+                        this.written_seen.remove(&addr);
+                        this.looked.remove(&addr);
+                    }
+                });
+            })
+            .detach();
+        }
+        changed
     }
 
     /// The keyboard never ends up nowhere. When what had it leaves the screen (a
@@ -1460,6 +1536,11 @@ impl AppWindow {
     /// else the window, where the app's keys work.
     fn restore_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let dialog = self.overlays.iter().rev().find(|o| o.kind.modal_keys()).map(|o| o.focus.clone());
+        // A mod block holding the keyboard gets it back (a popup over it closed).
+        if dialog.is_none() && self.focused_block.as_ref().is_some_and(|b| self.mod_block_shown(b)) {
+            self.focus.focus(window, cx);
+            return self.hand_keyboard();
+        }
         let shown = if terminal_block(&self.chrome, self.focused_pane.as_deref()).is_some() {
             self.focused_pane.as_deref().and_then(|p| self.pane_focus(p))
         } else if let Some(block) = self.agent_block() {
@@ -1475,6 +1556,19 @@ impl AppWindow {
     /// The terminal view a pane shows: the swapped-in one, else its own.
     fn pane_term(&self, pane: &str) -> Option<&Term> {
         self.swapped.get(pane).and_then(|_| self.terms.get(&format!("{pane}{SWAP}"))).or_else(|| self.terms.get(pane))
+    }
+
+    /// Key path for `terminal.copy`. Copies and clears when there is a selection.
+    /// Returns whether it copied. False means the key should reach the program.
+    fn copy_key(&mut self, window: &Window, cx: &mut Context<Self>) -> bool {
+        let Some(t) = self.focused_terminal(window) else { return true };
+        t.view.update(cx, |v, cx| {
+            if !v.copy(cx) {
+                return false;
+            }
+            v.clear_selection(cx);
+            true
+        })
     }
 
     /// Peeks, floats and swapped-in views own keyboard focus without changing the model pane.
@@ -1511,9 +1605,19 @@ impl AppWindow {
     }
 
     fn refresh_mods(&self, cx: &mut Context<Self>) {
+        self.refresh_mods_matching(|_| true, cx);
+    }
+
+    fn refresh_snapshot_mods(&self, cx: &mut Context<Self>) {
+        self.refresh_mods_matching(mods::snapshot_changed, cx);
+    }
+
+    fn refresh_mods_matching(&self, changed: impl Fn(u64) -> bool, cx: &mut Context<Self>) {
         if let Some(runtime) = &self.runtime {
             for c in self.copies.values() {
-                if let Some(root) = &c.root {
+                if let Some(root) = &c.root
+                    && changed(c.id)
+                {
                     let _ = runtime.refresh(root, cx);
                 }
             }
@@ -1572,6 +1676,7 @@ impl AppWindow {
                         "tab": ctx.id, "tab_index": ci + 1, "tab_name": Model::tab_name(pr, ctx),
                         "status": status, "app": a.and_then(|a| a.app.clone()), "program": self.program(addr), "title": title.unwrap_or_default(),
                         "seq": a.map(|a| a.seq).unwrap_or(0),
+                        "pinned": self.live.get(addr).and_then(|r| r.pointer("/labels/herdr.pinned")).and_then(Value::as_str).is_some_and(|v| !v.is_empty()),
                         "focused": m.active.as_deref() == Some(pr.id.as_str()) && focused_pane.as_deref() == Some(p.id.as_str()),
                     }));
                 }
@@ -1600,7 +1705,7 @@ impl AppWindow {
         changed |= mods::publish_floats(self.float_placements());
         changed |= mods::publish_layout(&self.chrome);
         if changed {
-            self.refresh_mods(cx);
+            self.refresh_snapshot_mods(cx);
         }
         self.write_where(cx);
     }
@@ -1861,7 +1966,7 @@ impl AppWindow {
         let terminals_changed = mods::publish_terminals(list);
         self.tend_terminals(true, window, cx);
         if terminals_changed {
-            self.refresh_mods(cx);
+            self.refresh_snapshot_mods(cx);
         }
     }
 
@@ -1885,7 +1990,12 @@ impl AppWindow {
                 alerts.push((addr.clone(), alert, looking));
             }
             changed |= self.model.set_word(addr, word, app, looking);
+            let turn = rec.get("turn").and_then(Value::as_u64).unwrap_or(0);
+            let label = rec.pointer("/labels/herdr.seen").and_then(Value::as_str).and_then(|s| s.parse::<u64>().ok());
+            changed |= self.model.set_turn(addr, turn, label.max(self.written_seen.get(addr).copied()));
         }
+        self.written_seen.retain(|a, _| self.live.contains_key(a));
+        changed |= self.share_seen(cx);
         // Changes already made before Herdr started aren't news.
         if self.listed_once {
             for (addr, alert, looking) in alerts {
@@ -2197,15 +2307,15 @@ impl AppWindow {
     /// Starts a terminal for `space`, on `on` (another machine) or here. An
     /// empty `cwd`: the machine's home. With no argv, that machine's core
     /// picks its own shell.
-    fn spawn(&self, argv: Option<Vec<String>>, cwd: String, space: &str, ctx: &str, on: Option<&str>) -> Result<String, String> {
+    fn spawn(&self, argv: Option<Vec<String>>, cwd: String, space: &str, ctx: &str, on: Option<&str>, size: Option<(u16, u16)>) -> Result<String, String> {
         let argv = argv.unwrap_or_default();
         let cwd = Some(cwd).filter(|c| !c.is_empty());
         self.require_document(on)?;
-        let labels = json!({ "herdr.space": crate::mirror::local(space, on), "herdr.tab": crate::mirror::local(ctx, on) });
-        let addr = match self.core.run(argv.clone(), cwd.clone(), labels.clone(), on) {
+        let labels = json!({ "herdr.space": crate::mirror::local(space, on), "herdr.tab": crate::mirror::local(ctx, on), "herdr.seen": "0" });
+        let addr = match self.core.run(argv.clone(), cwd.clone(), labels.clone(), on, size) {
             // An agent on a machine without `sh` (Windows): in its PowerShell instead.
             Err(e) if on.is_some() && argv.first().map(String::as_str) == Some("sh") && format!("{e:#}").contains("not found") => {
-                self.core.run(Self::powershell_argv(&argv), cwd, labels, on)
+                self.core.run(Self::powershell_argv(&argv), cwd, labels, on, size)
             }
             r => r,
         }
@@ -2228,9 +2338,7 @@ impl AppWindow {
         argv.filter(|a| !a.is_empty()).map(|mut cmd| {
             cmd.extend(task.map(str::to_owned));
             if on.is_some() {
-                let mut run = vec!["sh".into(), "-c".into(), "\"$@\"; exec \"${SHELL:-sh}\" -i".into(), "sh".into()];
-                run.extend(cmd);
-                return run;
+                return crate::remote_shell::launch(cmd);
             }
             let sh = shell();
             if cfg!(windows) {
@@ -2244,7 +2352,7 @@ impl AppWindow {
 
     /// A space with its first tab and terminal, shown at once.
     /// `machine`: another machine (`hc machine ls`); its space starts in that machine's home.
-    fn new_space(&mut self, name: &str, folder: Option<String>, ctx_name: Option<&str>, argv: Option<Vec<String>>, task: Option<&str>, machine: Option<String>) -> Result<Value, String> {
+    fn new_space(&mut self, name: &str, folder: Option<String>, ctx_name: Option<&str>, argv: Option<Vec<String>>, task: Option<&str>, machine: Option<String>, window: &Window) -> Result<Value, String> {
         let on = machine.as_deref();
         // The focused pane's folder only means something on its own machine.
         let here = || self.model.focused_pane().and_then(|p| self.model.address_of(&p))
@@ -2252,7 +2360,8 @@ impl AppWindow {
             .and_then(|a| self.cwds.get(&a).cloned());
         let folder = folder.or_else(here).unwrap_or_else(|| if on.is_some() { String::new() } else { home() });
         let (space, ctx, pane) = (self.model.fresh_id_on("sp", on), self.model.fresh_id_on("tb", on), self.model.fresh_id_on("p", on));
-        let addr = self.spawn(Self::agent_argv(argv.clone(), task, on).or(argv), folder.clone(), &space, &ctx, on)?;
+        let size = self.initial_size(&Tab::new(&ctx, "", &pane, "").root, &pane, window);
+        let addr = self.spawn(Self::agent_argv(argv.clone(), task, on).or(argv), folder.clone(), &space, &ctx, on, size)?;
         let ctx_name = ctx_name.map(str::trim).unwrap_or_default();
         self.model.add_space(&space, name.trim(), &folder, Tab::new(&ctx, ctx_name, &pane, &addr));
         if let Some(p) = self.model.space_mut(&space) {
@@ -2262,7 +2371,7 @@ impl AppWindow {
     }
 
     /// A tab in a space (default: the shown one), shown at once.
-    fn new_tab(&mut self, space: Option<String>, name: &str, folder: Option<String>, argv: Option<Vec<String>>, task: Option<&str>) -> Result<Value, String> {
+    fn new_tab(&mut self, space: Option<String>, name: &str, folder: Option<String>, argv: Option<Vec<String>>, task: Option<&str>, window: &Window) -> Result<Value, String> {
         let space = space.or_else(|| self.model.active_space().map(|p| p.id.clone())).ok_or("no space yet: make one first (space.new)")?;
         if self.model.space(&space).is_none() {
             return Err(format!("no space {space:?}"));
@@ -2270,7 +2379,8 @@ impl AppWindow {
         let folder = folder.unwrap_or_else(|| self.folder_for(&space));
         let on = self.machine_of(&space);
         let (ctx, pane) = (self.model.fresh_id_on("tb", on.as_deref()), self.model.fresh_id_on("p", on.as_deref()));
-        let addr = self.spawn(Self::agent_argv(argv.clone(), task, on.as_deref()).or(argv), folder, &space, &ctx, on.as_deref())?;
+        let size = self.initial_size(&Tab::new(&ctx, "", &pane, "").root, &pane, window);
+        let addr = self.spawn(Self::agent_argv(argv.clone(), task, on.as_deref()).or(argv), folder, &space, &ctx, on.as_deref(), size)?;
         self.model.add_tab(&space, Tab::new(&ctx, name.trim(), &pane, &addr));
         self.model.active = Some(space.clone());
         Ok(json!({ "space": space, "tab": ctx, "terminal": addr }))
@@ -2293,7 +2403,7 @@ impl AppWindow {
         Ok(json!({ "space": space, "tab": ctx, "pane": pane }))
     }
 
-    fn split(&mut self, pane: Option<String>, axis: Axis, argv: Option<Vec<String>>, folder: Option<String>) -> Result<Value, String> {
+    fn split(&mut self, pane: Option<String>, axis: Axis, argv: Option<Vec<String>>, folder: Option<String>, window: &Window) -> Result<Value, String> {
         let target = pane.or_else(|| self.model.focused_pane()).ok_or("no pane to split")?;
         let (Some(p), Some(c)) = (self.model.space_of(&target), self.model.tab_of(&target)) else { return Err(format!("no pane {target:?}")) };
         let (space, ctx, fallback) = (p.id.clone(), c.id.clone(), p.folder.clone());
@@ -2302,7 +2412,11 @@ impl AppWindow {
         // A split stays on the machine of the pane it splits (else its space's).
         let on = target_addr.and_then(|a| a.split_once('/').map(|(m, _)| m.to_owned())).or_else(|| self.machine_of(&space));
         let new = self.model.fresh_id_on("p", on.as_deref());
-        let addr = self.spawn(argv, cwd, &space, &ctx, on.as_deref())?;
+        let mut root = self.model.tab(&ctx).expect("target tab").root.clone();
+        root.split(&target, axis, Node::block(new.clone(), Content::Terminal { terminal: String::new() }), "initial-size".into());
+        let size = self.model.active_tab().filter(|tab| tab.id == ctx)
+            .and_then(|_| self.initial_size(&root, &new, window));
+        let addr = self.spawn(argv, cwd, &space, &ctx, on.as_deref(), size)?;
         self.model.split(&target, axis, &new, &addr);
         Ok(json!({ "pane": new, "terminal": addr }))
     }
@@ -2584,7 +2698,11 @@ impl AppWindow {
         if let Err(error) = crate::commands::validate_args(command, &args) {
             return json!({ "error": error });
         }
-        if terminal_block(&self.chrome, self.focused_pane.as_deref()).is_some() && needs_model_pane(name, &args) {
+        // pane.go from a mod block starts at the block, not at the terminal block focused before it.
+        if terminal_block(&self.chrome, self.focused_pane.as_deref()).is_some()
+            && needs_model_pane(name, &args)
+            && !(name == "pane.go" && self.focused_block.is_some())
+        {
             return json!({ "error": "a terminal layout block is focused, not a pane; focus a pane or pass an explicit pane id" });
         }
         if person && name.ends_with(".rename") && args.get("name").is_none_or(Value::is_null) {
@@ -2596,6 +2714,11 @@ impl AppWindow {
         }
         if person {
             crate::telemetry::command(command.name);
+        }
+        if name == "space.new" {
+            let machine = new_space_machine(&args, person, &self.model);
+            if !args.is_object() { args = json!({}); }
+            args["machine"] = json!(machine);
         }
         if matches!(name, "space.new" | "space.close" | "space.rename" | "space.move" | "tab.new" | "tab.close" | "tab.rename" | "tab.move" | "pane.split" | "pane.close" | "pane.swap" | "terminal.keep" | "terminal.park") {
             let node = ["id", "space", "pane"].into_iter().find_map(|k| Self::arg(&args, k));
@@ -2646,7 +2769,7 @@ impl AppWindow {
             // ---- spaces
             "space.new" => {
                 let name = Self::arg(a, "name").unwrap_or_default();
-                let r = self.new_space(name, Self::owned(a, "folder"), Self::arg(a, "tab"), Self::argv(a), Self::arg(a, "task"), Self::owned(a, "machine").filter(|m| !m.is_empty()));
+                let r = self.new_space(name, Self::owned(a, "folder"), Self::arg(a, "tab"), Self::argv(a), Self::arg(a, "task"), Self::owned(a, "machine").filter(|m| !m.is_empty()), window);
                 self.answer(r);
             }
             "space.close" => {
@@ -2696,7 +2819,11 @@ impl AppWindow {
                 let name = Self::arg(a, "name").unwrap_or_default();
                 let r = match Self::owned(a, "mod") {
                     Some(m) => self.new_mod_tab(Self::owned(a, "space"), name, m, a.get("props").cloned().unwrap_or(Value::Null)),
-                    None => self.new_tab(Self::owned(a, "space"), name, Self::owned(a, "folder"), Self::argv(a), Self::arg(a, "task")),
+                    // A person's new tab with no space open starts one, as space.new does.
+                    None if person && a.get("space").is_none() && self.model.active_space().is_none() => {
+                        self.new_space("", Self::owned(a, "folder"), Some(name), Self::argv(a), Self::arg(a, "task"), None, window)
+                    }
+                    None => self.new_tab(Self::owned(a, "space"), name, Self::owned(a, "folder"), Self::argv(a), Self::arg(a, "task"), window),
                 };
                 self.answer(r);
             }
@@ -2764,7 +2891,7 @@ impl AppWindow {
                 };
                 let r = match Self::owned(a, "mod") {
                     Some(name) => self.split_mod(Self::owned(a, "pane"), axis, name, a.get("props").cloned().unwrap_or(Value::Null)),
-                    None => self.split(Self::owned(a, "pane"), axis, Self::argv(a), None),
+                    None => self.split(Self::owned(a, "pane"), axis, Self::argv(a), None, window),
                 };
                 self.answer(r);
             }
@@ -2798,6 +2925,7 @@ impl AppWindow {
                     && let Some(block) = self.chrome.visible_blocks().into_iter().find(|n| n.terminal() == Some(terminal))
                 {
                     let id = block.id.clone();
+                    self.focused_block = None;
                     self.focused_pane = Some(id.clone());
                     self.synced_model_pane = self.model.focused_pane();
                     if !self.overlays.iter().any(|o| o.kind.modal_keys()) && let Some(f) = self.pane_focus(&id) {
@@ -2809,6 +2937,7 @@ impl AppWindow {
                 }
                 let pane = Self::owned(a, "pane").or_else(|| Self::arg(a, "terminal").and_then(|t| self.model.pane_of(t)));
                 let Some(p) = pane.filter(|p| self.model.tab_of(p).is_some()) else { return self.fail("no such pane") };
+                self.focused_block = None;
                 self.model.focus_pane(&p);
                 self.focused_pane = None;
                 self.agent = self.model.address_of(&p);
@@ -2819,32 +2948,22 @@ impl AppWindow {
                 if !matches!(dir, "left" | "right" | "up" | "down") {
                     return self.fail(format!("{name} direction is left, right, up or down, not {dir:?}"));
                 }
-                if let Some(from) = self.model.focused_pane()
-                    && let Some(to) = self.neighbor(&from, dir)
-                {
-                    if name == "pane.swap" {
-                        if let Some(ctx) = self.model.tab_of(&from).map(|c| c.id.clone())
-                            && let Some(c) = self.model.tab_mut(&ctx)
-                        {
-                            c.root.swap(&from, &to);
-                        }
-                    } else {
-                        self.model.focus_pane(&to);
-                        self.focused_pane = None;
-                    }
+                if name == "pane.go" {
+                    return self.go(dir, window, cx);
                 }
+                self.swap_pane(dir);
             }
             // ---- terminals
             "terminal.open" => {
                 let argv = Self::argv(a);
                 let r = match Self::arg(a, "place").unwrap_or("tab") {
-                    "right" => self.split(None, Axis::Row, argv, Self::owned(a, "folder")),
-                    "down" => self.split(None, Axis::Column, argv, Self::owned(a, "folder")),
+                    "right" => self.split(None, Axis::Row, argv, Self::owned(a, "folder"), window),
+                    "down" => self.split(None, Axis::Column, argv, Self::owned(a, "folder"), window),
                     _ => {
                         let name = Self::owned(a, "name")
                             .or_else(|| argv.as_ref().and_then(|v| v.first()).map(|p| p.rsplit('/').next().unwrap_or(p).to_owned()))
                             .unwrap_or_else(|| "shell".into());
-                        self.new_tab(None, &name, Self::owned(a, "folder"), argv, None)
+                        self.new_tab(None, &name, Self::owned(a, "folder"), argv, None, window)
                     }
                 };
                 self.answer(r);
@@ -2872,6 +2991,22 @@ impl AppWindow {
                     .spawn(async move {
                         if let Err(e) = core.call("terminal.label", params) {
                             tracing::warn!("right-click label: {e:#}");
+                        }
+                    })
+                    .detach();
+            }
+            "terminal.pin" => {
+                let Some(pinned) = a.get("pinned").and_then(Value::as_bool) else { return self.fail("terminal.pin pinned is true or false") };
+                let t = Self::arg(a, "terminal").unwrap_or_default().to_owned();
+                if !self.live.contains_key(&t) {
+                    return self.fail(format!("no running terminal {t:?}"));
+                }
+                let core = self.core.clone();
+                let params = json!({ "terminal": t, "labels": { "herdr.pinned": if pinned { "1" } else { "" } } });
+                cx.background_executor()
+                    .spawn(async move {
+                        if let Err(e) = core.call("terminal.label", params) {
+                            tracing::warn!("pin label: {e:#}");
                         }
                     })
                     .detach();
@@ -2916,7 +3051,8 @@ impl AppWindow {
                     t.view.update(cx, |v, cx| match name {
                         "terminal.paste" => v.paste(cx),
                         "terminal.paste_image" => v.paste_image(cx),
-                        _ => v.copy(cx),
+                        // A command, not a key: copy and leave the selection.
+                        _ => { let _ = v.copy(cx); }
                     });
                 }
                 return;
@@ -3052,7 +3188,13 @@ impl AppWindow {
                 let Some(f) = self.folders.get(name) else { return self.fail(format!("no mod folder {name:?}")) };
                 let mut spec = mod_overlay(&f.dir);
                 spec["mod"] = json!(name);
-                self.open_overlay(mods::new_overlay_id(), spec, window, cx);
+                // One popup per mod: running mod.open again toggles it, like app.settings.
+                let id = format!("mod-{name}");
+                if self.overlays.iter().any(|o| o.id == id) {
+                    self.close_overlay(&id, window, cx);
+                } else {
+                    self.open_overlay(id, spec, window, cx);
+                }
             }
             "overlay.close" => {
                 let id = Self::owned(a, "id").or_else(|| self.overlays.iter().rev().find(|o| o.kind.modal_keys()).map(|o| o.id.clone()));
@@ -3071,8 +3213,13 @@ impl AppWindow {
                 return;
             }
             "app.palette" => {
-                let spec = json!({ "mod": "frame-palette", "kind": "popup", "at": "top", "offset": 60, "width": 620, "height": 0.85 });
-                self.open_overlay(mods::new_overlay_id(), spec, window, cx);
+                // Once: a second press closes the palette instead of stacking another.
+                if self.overlays.iter().any(|o| o.id == "palette") {
+                    self.close_overlay("palette", window, cx);
+                } else {
+                    let spec = json!({ "mod": "frame-palette", "kind": "popup", "at": "top", "offset": 60, "width": 620, "height": 0.85 });
+                    self.open_overlay("palette".into(), spec, window, cx);
+                }
                 return;
             }
             "app.feedback" => {
@@ -3107,8 +3254,12 @@ impl AppWindow {
                 crate::update::update_core();
             }
             "app.help" => {
-                let spec = json!({ "mod": "help", "kind": "dialog", "width": 640, "height": 520 });
-                self.open_overlay(mods::new_overlay_id(), spec, window, cx);
+                if self.overlays.iter().any(|o| o.id == "help") {
+                    self.close_overlay("help", window, cx);
+                } else {
+                    let spec = json!({ "mod": "help", "kind": "dialog", "width": 640, "height": 520 });
+                    self.open_overlay("help".into(), spec, window, cx);
+                }
                 return;
             }
             "app.reset" => self.reset(window, cx),
@@ -3163,27 +3314,75 @@ impl AppWindow {
         self.model.spaces.iter_mut().flat_map(|p| p.tabs.iter_mut()).find_map(|c| c.root.find_mut(id))
     }
 
-    /// The nearest visible pane in a direction, by what's on screen.
-    fn neighbor(&self, from: &str, dir: &str) -> Option<String> {
+    /// The nearest visible pane, also considering focusable mods for `pane.go`.
+    fn neighbor(&self, from: &str, dir: &str, use_history: bool) -> Option<String> {
         let bounds = self.bounds.borrow();
         let cur = *bounds.get(from)?;
-        let c = self.model.active_tab()?;
-        let candidates: Vec<String> = c.shown().visible_blocks().iter().filter(|n| n.is_pane() && n.id != from).map(|n| n.id.clone()).collect();
-        let overlap = |a0: Pixels, a1: Pixels, b0: Pixels, b1: Pixels| f32::from(a1.min(b1) - a0.max(b0)).max(0.0);
-        candidates
-            .into_iter()
-            .filter_map(|id| {
-                let r = *bounds.get(&id)?;
-                let (gap, ov) = match dir {
-                    "left" => (f32::from(cur.left() - r.right()), overlap(cur.top(), cur.bottom(), r.top(), r.bottom())),
-                    "right" => (f32::from(r.left() - cur.right()), overlap(cur.top(), cur.bottom(), r.top(), r.bottom())),
-                    "up" => (f32::from(cur.top() - r.bottom()), overlap(cur.left(), cur.right(), r.left(), r.right())),
-                    _ => (f32::from(r.top() - cur.bottom()), overlap(cur.left(), cur.right(), r.left(), r.right())),
-                };
-                (gap > -2.0 && ov > 0.0).then_some((gap, -ov, id))
-            })
-            .min_by(|a, b| a.partial_cmp(b).unwrap())
-            .map(|(_, _, id)| id)
+        let mut candidates: Vec<String> = self.model.active_tab().into_iter()
+            .flat_map(|c| c.shown().visible_blocks().into_iter().filter(|n| n.is_pane()).map(|n| n.id.clone()))
+            .collect();
+        if use_history {
+            candidates.extend(self.chrome.visible_blocks().into_iter().filter(|n| self.focusable(&n.id)).map(|n| n.id.clone()));
+        }
+        let candidates = candidates.into_iter().filter(|id| id != from).filter_map(|id| Some((id.clone(), *bounds.get(&id)?)));
+        nearest(cur, dir, candidates, if use_history { &self.pane_history } else { &[] })
+    }
+
+    /// `pane.go`: the nearest pane or focusable mod.
+    fn go(&mut self, dir: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(from) = self.focused_block.clone().or_else(|| self.model.focused_pane()) else { return };
+        let Some(to) = self.neighbor(&from, dir, true) else { return };
+        if self.focusable(&to) {
+            return self.focus_block(&to, window, cx);
+        }
+        self.focused_block = None;
+        self.model.focus_pane(&to);
+        self.focused_pane = None;
+        self.sync(window, cx);
+    }
+
+    /// Until the mod takes the keyboard, the window holds the keys.
+    fn focus_block(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.model.tab_of(id).is_some() {
+            self.model.focus_pane(id);
+            self.focused_pane = None;
+        }
+        self.focused_block = Some(id.to_owned());
+        self.sync(window, cx);
+        if !self.overlays.iter().any(|o| o.kind.modal_keys()) {
+            self.focus.focus(window, cx);
+            self.hand_keyboard();
+        }
+    }
+
+    /// Its copy gets `focus` from `nextCommand()`.
+    fn hand_keyboard(&self) {
+        if let Some(copy) = self.focused_block.as_ref().and_then(|b| self.copies.get(b)) {
+            mods::send_command_to(copy.id, "focus");
+        }
+    }
+
+    /// A mod block on screen: in the layout, or a mod pane of the shown tab.
+    fn mod_block_shown(&self, id: &str) -> bool {
+        self.copies.contains_key(id)
+            && (self.chrome.visible_blocks().iter().any(|n| n.id == id && matches!(n.content(), Some(Content::Mod { .. })))
+                || self.model.active_tab().is_some_and(|t| t.shown().visible_blocks().iter().any(|n| n.id == id)))
+    }
+
+    /// Its mod.json says `"focusable": true` (`go` asks only of visible blocks).
+    fn focusable(&self, id: &str) -> bool {
+        self.copies.get(id).and_then(|c| self.folders.get(&c.inst.name)).is_some_and(|f| f.hint.focusable)
+    }
+
+    /// Swaps the focused pane with its neighbor in a direction.
+    fn swap_pane(&mut self, dir: &str) {
+        if let Some(from) = self.model.focused_pane()
+            && let Some(to) = self.neighbor(&from, dir, false)
+            && let Some(ctx) = self.model.tab_of(&from).map(|c| c.id.clone())
+            && let Some(c) = self.model.tab_mut(&ctx)
+        {
+            c.root.swap(&from, &to);
+        }
     }
 
     // ---- overlays ----------------------------------------------------------
@@ -3542,6 +3741,14 @@ impl AppWindow {
             self.window_active = active;
             if active {
                 self.sync(window, cx);
+            } else {
+                self.looked.clear();
+            }
+            // Tell mods now: render publishes window() too, but a mod it refreshes
+            // waits for another frame, which an idle window that just lost focus
+            // may not draw for a long time.
+            if mods::publish_window(self.window_json(window)) {
+                self.refresh_snapshot_mods(cx);
             }
         }
         let dark = is_dark(window.appearance());
@@ -3553,9 +3760,16 @@ impl AppWindow {
 
     /// Files people or agents edited: apply what they change.
     fn files_changed(&mut self, changed: Vec<std::path::PathBuf>, window: &mut Window, cx: &mut Context<Self>) {
+        for path in changed_asset_paths(&mods::app_dir(), &changed) {
+            invalidate_asset(&path, window, cx);
+        }
         let top = |p: &std::path::PathBuf| p.components().next().and_then(|c| c.as_os_str().to_str().map(str::to_owned)).unwrap_or_default();
         if changed.iter().any(|p| matches!(top(p).as_str(), "settings.json" | "keys.json" | "programs.json" | "themes")) {
             self.reload_config(window, cx);
+        }
+        // The theme showing may be the file that changed.
+        if changed.iter().any(|p| top(p) == "themes") {
+            self.apply_look(window, cx);
         }
         if changed.iter().any(|p| top(p) == "layouts") {
             self.check_layout_file(window, cx);
@@ -3617,9 +3831,18 @@ impl AppWindow {
 
     // ---- rendering ---------------------------------------------------------
 
-    fn focused_path(&self) -> HashSet<String> {
+    fn focused_path(&self, window: &Window) -> HashSet<String> {
         let mut out = HashSet::new();
+        // A mod block in the layout holding the keyboard: its `focus` looks, not the pane's.
+        if let Some(path) = self.focused_block.as_ref().and_then(|b| self.chrome.path_to(b)) {
+            out.extend(path);
+            return out;
+        }
         if let Some(p) = &self.focused_pane {
+            // Pane selection survives an input, float or dialog taking the keyboard.
+            if self.pane_focus(p).is_some_and(|f| !f.is_focused(window)) {
+                return out;
+            }
             if let Some(c) = self.model.active_tab()
                 && let Some(path) = c.root.path_to(p)
             {
@@ -3644,7 +3867,7 @@ impl AppWindow {
     /// A pane in its frame: the look, and the header mod above or below it
     /// (on hover: drawn over the terminal, so it never resizes).
     fn frame_pane(&self, n: &Node, f: &PaneFrame, on: bool, inner: AnyElement, cx: &mut Context<Self>) -> AnyElement {
-        let line = if on { f.focus.as_ref().or(f.border.as_ref()) } else { f.border.as_ref() };
+        let line = pane_size::frame_border(f, on);
         let group = SharedString::from(format!("pane-{}", n.id));
         let mut el = div().size_full().relative().flex().flex_col().overflow_hidden().group(group.clone());
         if let Some(r) = f.radius {
@@ -3659,7 +3882,7 @@ impl AppWindow {
         el = shadow(el, f.shadow.as_deref());
         let body = div().flex_1().min_h_0().flex().child(inner);
         let Some(h) = &f.header else { return el.child(body).into_any_element() };
-        let head = div().flex_none().h(settings::z(h.height.unwrap_or(HEADER_HEIGHT))).w_full().flex()
+        let head = div().flex_none().h(settings::z(pane_size::header_height(h))).w_full().flex()
             .child(self.render_slot(&format!("{}#frame", n.id), cx));
         if h.hover() {
             let head = head.absolute().left_0().right_0().opacity(0.).group_hover(group, |s| s.opacity(1.));
@@ -3691,15 +3914,11 @@ impl AppWindow {
                 let axis = n.axis().unwrap();
                 el = if axis == Axis::Row { el.flex_row() } else { el.flex_col() };
                 let shown: Vec<&Node> = children.iter().filter(|c| !c.hidden).collect();
-                let gap = n.gap.or(frame.and_then(|f| f.gap)).unwrap_or(0.0);
+                let gap = pane_size::gap(n, frame);
                 // Weights are shares of what the fixed-size siblings leave, so they always fill it.
                 let total: f32 = shown
                     .iter()
-                    .filter_map(|c| match c.size {
-                        Some(Span::Px { .. }) => None,
-                        Some(Span::Weight { weight }) => Some(weight),
-                        None => Some(1.0),
-                    })
+                    .map(|c| pane_size::weight(c))
                     .sum::<f32>()
                     .max(f32::EPSILON);
                 for (i, child) in shown.iter().enumerate() {
@@ -3716,7 +3935,7 @@ impl AppWindow {
             Kind::Stack { header, .. } => {
                 el = el.flex_col();
                 let head = header.as_ref().map(|h| {
-                    let height = h.height.unwrap_or(HEADER_HEIGHT);
+                    let height = pane_size::header_height(h);
                     let head: AnyElement = match &h.content {
                         HeaderContent::Mod { .. } => self.render_slot(&format!("{}#header", n.id), cx),
                         HeaderContent::Builtin(_) => self.builtin_tabs(n, cx),
@@ -3735,7 +3954,7 @@ impl AppWindow {
                 }
             }
         };
-        let row = frame.and_then(|f| f.header.as_ref()).filter(|h| !h.bottom() && !h.hover()).map(|h| h.height.unwrap_or(HEADER_HEIGHT));
+        let row = frame.and_then(|f| f.header.as_ref()).filter(|h| !h.bottom() && !h.hover()).map(pane_size::header_height);
         el.children(self.render_floats(n, cx)).children(self.pane_grip(&n.id, row, cx)).into_any_element()
     }
 
@@ -3825,6 +4044,7 @@ impl AppWindow {
                         cx.defer_in(window, |this, window, cx| {
                             let dialog = this.overlays.iter().any(|o| o.kind.modal_keys());
                             if !dialog
+                                && this.focused_block.is_none()
                                 && (window.focused(cx).is_none() || this.focus.is_focused(window))
                                 && let Some(f) = this.focused_pane.as_ref().and_then(|p| this.pane_focus(p))
                                 && !f.is_focused(window)
@@ -3881,7 +4101,7 @@ impl AppWindow {
         let row = axis == Axis::Row;
         let zoom = settings::zoom();
         let line = n.divider.as_ref().map(|d| (d.width * zoom, c(&d.color)));
-        let width = gap * zoom + line.map_or(0.0, |l| l.0);
+        let width = pane_size::separator_width(n, gap) * zoom;
         let mut sep = div().flex_none().relative().flex().items_center().justify_center();
         sep = if row { sep.w(px(width)).h_full() } else { sep.h(px(width)).w_full() };
         if let Some((w, color)) = line {
@@ -4155,12 +4375,43 @@ fn agent_name(app: &str) -> String {
         "claude" | "claude-code" => "Claude Code".into(),
         "codex" => "Codex".into(),
         "pi" => "Pi".into(),
+        "pig" => "PiG".into(),
         "opencode" => "OpenCode".into(),
         "cursor" | "cursor-agent" => "Cursor".into(),
         "amp" => "Amp".into(),
         "grok" => "Grok".into(),
+        "dsh-tui" => "DeepSeek Harness".into(),
         other => other.to_owned(),
     }
+}
+
+fn remember_pane(history: &mut Vec<String>, id: &str) {
+    if history.last().is_some_and(|last| last == id) {
+        return;
+    }
+    history.retain(|pane| pane != id);
+    history.push(id.to_owned());
+}
+
+/// Prefer the most recently focused pane along the nearest edge. Unvisited
+/// panes fall back to overlap and layout order, ignoring subpixel split noise.
+fn nearest(cur: Bounds<Pixels>, dir: &str, candidates: impl IntoIterator<Item = (String, Bounds<Pixels>)>, history: &[String]) -> Option<String> {
+    let overlap = |a0: Pixels, a1: Pixels, b0: Pixels, b1: Pixels| f32::from(a1.min(b1) - a0.max(b0)).max(0.0);
+    let cmp = |a: f32, b: f32| if (a - b).abs() < 1.0 { std::cmp::Ordering::Equal } else { a.total_cmp(&b) };
+    candidates
+        .into_iter()
+        .filter_map(|(id, r)| {
+            let (gap, ov) = match dir {
+                "left" => (f32::from(cur.left() - r.right()), overlap(cur.top(), cur.bottom(), r.top(), r.bottom())),
+                "right" => (f32::from(r.left() - cur.right()), overlap(cur.top(), cur.bottom(), r.top(), r.bottom())),
+                "up" => (f32::from(cur.top() - r.bottom()), overlap(cur.left(), cur.right(), r.left(), r.right())),
+                _ => (f32::from(r.top() - cur.bottom()), overlap(cur.left(), cur.right(), r.left(), r.right())),
+            };
+            let recent = history.iter().position(|pane| pane == &id);
+            (gap > -2.0 && ov > 0.0).then_some((gap, recent, ov, id))
+        })
+        .reduce(|best, next| if cmp(next.0, best.0).then(best.1.cmp(&next.1)).then(cmp(best.2, next.2)).is_lt() { next } else { best })
+        .map(|(_, _, _, id)| id)
 }
 
 fn position_popup(at: Point<Pixels>, body: Stateful<Div>) -> Anchored {
@@ -4259,6 +4510,12 @@ fn needs_model_pane(name: &str, args: &Value) -> bool {
     }
 }
 
+fn new_space_machine(args: &Value, person: bool, model: &Model) -> Option<String> {
+    args.get("machine").and_then(Value::as_str)
+        .or_else(|| if person { model.active_space().and_then(|s| s.machine.as_deref()) } else { None })
+        .filter(|m| !m.is_empty()).map(str::to_owned)
+}
+
 fn home() -> String {
     mods::home().to_string_lossy().into_owned()
 }
@@ -4344,11 +4601,8 @@ fn sized(slot: Div, n: &Node, axis: Axis, total_weight: f32) -> Div {
             slot = slot.flex_none();
             slot = if row { slot.w(settings::z(v)).h_full() } else { slot.h(settings::z(v)).w_full() };
         }
-        other => {
-            let w = match other {
-                Some(Span::Weight { weight }) => weight,
-                _ => 1.0,
-            };
+        _ => {
+            let w = pane_size::weight(n);
             let s = slot.style();
             s.flex_grow = Some(w / total_weight);
             s.flex_shrink = Some(1.0);
@@ -4395,14 +4649,14 @@ fn apply_look(el: Div, n: &Node, focused: bool) -> Div {
     } else if let Some(bg) = &n.background {
         el = paint(el, bg);
     }
-    if let Some(line) = focus.and_then(|f| f.border.as_ref()).or(n.border.as_ref()) {
+    if let Some(line) = pane_size::node_border(n, focused) {
         el = el.border(settings::z(line.width)).border_color(c(&line.color));
     }
     if let Some(r) = n.radius {
         el = el.rounded(settings::z(r));
     }
-    if let Some(p) = n.padding {
-        let (y, x) = p.axes();
+    if n.padding.is_some() {
+        let (y, x) = pane_size::padding(n);
         el = el.py(settings::z(y)).px(settings::z(x));
     }
     shadow(el, n.shadow.as_deref())
@@ -4446,6 +4700,9 @@ impl Render for AppWindow {
             .iter()
             .find(|(_, t)| t.focus.is_focused(window))
             .map(|(id, _)| id.clone());
+        if clicked.is_some() && self.focused_block.take().is_some() {
+            self.publish(cx);
+        }
         if let Some(id) = clicked
             && self.focused_pane.as_deref() != Some(id.as_str())
             && (self.model.tab_of(&id).is_some() || terminal_block(&self.chrome, Some(&id)).is_some())
@@ -4458,9 +4715,9 @@ impl Render for AppWindow {
         self.tick_floats(window);
         self.apply_titlebar(window);
         if mods::publish_window(self.window_json(window)) {
-            self.refresh_mods(cx);
+            self.refresh_snapshot_mods(cx);
         }
-        let focused = self.focused_path();
+        let focused = self.focused_path(window);
         let tree = self.render_node(&self.chrome, &focused, None, cx);
         let tree = self.window_frame(tree, window, cx);
         let overlays = self.render_overlays(window.viewport_size(), cx);
@@ -4477,7 +4734,16 @@ impl Render for AppWindow {
             .bg(c("background"))
             .text_color(c("foreground"))
             .font_family(settings::get().ui_font_family.clone())
-            .on_action(cx.listener(|this, a: &ShellAction, w, cx| this.run_action(a.id(), w, cx)))
+            .on_action(cx.listener(|this, a: &ShellAction, w, cx| {
+                // Nothing selected: the copy chord goes to the program (#216).
+                if a.id() == "terminal.copy" {
+                    if !this.copy_key(w, cx) {
+                        cx.propagate();
+                    }
+                    return;
+                }
+                this.run_action(a.id(), w, cx);
+            }))
             // Ctrl (Cmd) alone shows links in the pane under the pointer, focused or not.
             .on_modifiers_changed(cx.listener(|this, _: &ModifiersChangedEvent, _, cx| {
                 for t in this.terms.values() {
@@ -4525,10 +4791,201 @@ impl Render for AppWindow {
     }
 }
 
+fn invalidate_asset(path: &std::path::Path, window: &mut Window, cx: &mut gpui::App) {
+    let key = gpui_shell::AppAssets::cache_key(&path.to_string_lossy());
+    invalidate_image(&gpui::Resource::Embedded(key.clone()), window, cx);
+    window.invalidate_svg(&key);
+}
+
+fn invalidate_image(resource: &gpui::Resource, window: &mut Window, cx: &mut gpui::App) {
+    if let Some(Ok(old)) = cx.cached_asset::<gpui::ImgResourceLoader>(resource) {
+        cx.drop_image(old, Some(window));
+    }
+    cx.remove_asset::<gpui::ImgResourceLoader>(resource);
+}
+
+/// The changed paths, plus the files inside changed mod folders (a folder
+/// renamed into place arrives as one event). Runs on the UI thread: skips what
+/// the watcher ignores (hidden, `node_modules`) and stops at a mod-sized limit.
+fn changed_asset_paths(home: &std::path::Path, changed: &[std::path::PathBuf]) -> Vec<std::path::PathBuf> {
+    const MAX_FILES: usize = 2000;
+    let mut paths: std::collections::BTreeSet<_> = changed.iter().cloned().collect();
+    let mut seen = std::collections::HashSet::new();
+    let mut pending: Vec<_> = changed.iter().filter(|p| p.starts_with("mods")).cloned().collect();
+    while let Some(path) = pending.pop() {
+        // Do not follow symlinks out of the mod folder (or into a cycle).
+        if !seen.insert(path.clone()) || !home.join(&path).symlink_metadata().is_ok_and(|m| m.is_dir()) { continue; }
+        let Ok(entries) = std::fs::read_dir(home.join(&path)) else { continue };
+        for entry in entries.flatten() {
+            let name = entry.file_name();
+            let name = name.to_string_lossy();
+            if name.starts_with('.') || name == "node_modules" { continue; }
+            let child = path.join(&*name);
+            let Ok(kind) = entry.file_type() else { continue };
+            if kind.is_dir() {
+                pending.push(child);
+            } else if paths.len() < MAX_FILES {
+                paths.insert(child);
+            } else {
+                return paths.into_iter().collect();
+            }
+        }
+    }
+    paths.into_iter().collect()
+}
+
 #[cfg(test)]
 mod tests {
     use gpui::{div, point, px, size, Context, IntoElement, Render, TestAppContext, Window};
     use gpui::prelude::*;
+
+    #[test]
+    fn going_back_into_a_split_column_takes_its_top_pane_whatever_the_fractions() {
+        let r = |x: f32, y: f32, w: f32, h: f32| gpui::Bounds::new(point(px(x), px(y)), size(px(w), px(h)));
+        // An odd height splits into halves a fraction apart, the bottom one larger.
+        let column = || vec![("top".to_owned(), r(0.0, 0.0, 400.0, 300.4)), ("bottom".to_owned(), r(0.0, 300.4, 400.0, 300.6))];
+        assert_eq!(super::nearest(r(401.0, 0.0, 399.0, 601.0), "left", column(), &[]).as_deref(), Some("top"));
+        // More overlap by a pixel or more still decides.
+        assert_eq!(super::nearest(r(401.0, 250.0, 399.0, 351.0), "left", column(), &[]).as_deref(), Some("bottom"));
+        // A visited pane wins even when an unvisited pane has more overlap.
+        assert_eq!(super::nearest(r(401.0, 250.0, 399.0, 351.0), "left", column(), &["top".to_owned()]).as_deref(), Some("top"));
+    }
+
+    #[test]
+    fn directional_round_trips_return_to_the_recent_pane_in_either_split() {
+        let r = |x: f32, y: f32, w: f32, h: f32| gpui::Bounds::new(point(px(x), px(y)), size(px(w), px(h)));
+        for (a, b, other, out, back) in [
+            (r(0.0, 0.0, 400.0, 300.4), r(0.0, 300.4, 400.0, 300.6), r(401.0, 0.0, 399.0, 601.0), "right", "left"),
+            (r(0.0, 0.0, 300.4, 400.0), r(300.4, 0.0, 300.6, 400.0), r(0.0, 401.0, 601.0, 399.0), "down", "up"),
+        ] {
+            let split = || vec![("a".to_owned(), a), ("b".to_owned(), b)];
+            assert_eq!(super::nearest(other, back, split(), &[]).as_deref(), Some("a"));
+            let mut history = Vec::new();
+            for (id, bounds) in [("a", a), ("b", b), ("a", a)] {
+                super::remember_pane(&mut history, id);
+                assert_eq!(super::nearest(bounds, out, vec![("other".to_owned(), other)], &history).as_deref(), Some("other"));
+                super::remember_pane(&mut history, "other");
+                assert_eq!(super::nearest(other, back, split(), &history).as_deref(), Some(id));
+                super::remember_pane(&mut history, id);
+            }
+            assert_eq!(history.len(), 3);
+            // Recency cannot select a pane outside the requested direction.
+            assert_eq!(super::nearest(other, out, split(), &history), None);
+        }
+    }
+
+    #[test]
+    fn new_spaces_follow_the_persons_active_machine_but_keep_explicit_targets() {
+        use serde_json::json;
+        let mut model = crate::model::Model::default();
+        assert_eq!(super::new_space_machine(&json!({}), true, &model), None);
+        model.add_space("remote", "", "", crate::model::Tab::new("tab", "", "pane", "second/t1"));
+        model.space_mut("remote").unwrap().machine = Some("second".into());
+        for args in [json!({}), json!({"machine": null})] {
+            assert_eq!(super::new_space_machine(&args, true, &model).as_deref(), Some("second"));
+            assert_eq!(super::new_space_machine(&args, false, &model), None);
+        }
+        for person in [true, false] {
+            assert_eq!(super::new_space_machine(&json!({"machine": "other"}), person, &model).as_deref(), Some("other"));
+            assert_eq!(super::new_space_machine(&json!({"machine": ""}), person, &model), None);
+        }
+        model.add_space("local", "", "", crate::model::Tab::new("local-tab", "", "local-pane", "t1"));
+        assert_eq!(super::new_space_machine(&json!({}), true, &model), None);
+        model.active = Some("remote".into());
+        assert_eq!(super::new_space_machine(&json!({}), true, &model).as_deref(), Some("second"));
+    }
+
+    #[gpui::test]
+    fn image_invalidation_drops_cached_atlas_tiles_without_loading_missing_assets(cx: &mut TestAppContext) {
+        use gpui::{ImgResourceLoader, Resource};
+        let temp = if cfg!(target_os = "linux") { std::path::PathBuf::from("/var/tmp") } else { std::env::temp_dir() };
+        let home = temp.join(format!("herdr-image-atlas-test-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let file = home.join("image.gif");
+        let mut encoder = image::codecs::gif::GifEncoder::new(std::fs::File::create(&file).unwrap());
+        for color in [[255, 0, 0, 255], [0, 255, 0, 255]] {
+            encoder.encode_frame(image::Frame::new(image::RgbaImage::from_pixel(2, 2, image::Rgba(color)))).unwrap();
+        }
+        drop(encoder);
+        let resource = Resource::Path(file.into());
+        cx.update(|cx| { cx.fetch_asset::<ImgResourceLoader>(&resource); });
+        cx.background_executor.run_until_parked();
+        let old = cx.update(|cx| cx.cached_asset::<ImgResourceLoader>(&resource)).unwrap().unwrap();
+        let context = cx.add_empty_window();
+        let displayed = old.clone();
+        assert_eq!(old.frame_count(), 2);
+        context.draw(point(px(0.0), px(0.0)), size(px(20.0), px(20.0)), move |_, _| {
+            gpui::canvas(|_, _, _| (), move |bounds, _, window, _| {
+                for frame in 0..displayed.frame_count() {
+                    window.paint_image(bounds, bounds, gpui::Corners::default(), displayed.clone(), frame, false).unwrap();
+                }
+            }).size_full()
+        });
+        context.update(|window, cx| {
+            assert!(window.has_image_atlas_entry(&old));
+            super::invalidate_image(&resource, window, cx);
+            assert!(!window.has_image_atlas_entry(&old));
+            assert!(!cx.has_asset::<ImgResourceLoader>(&resource));
+            let missing = Resource::Embedded("mods/missing.png".into());
+            super::invalidate_image(&missing, window, cx);
+            assert!(!cx.has_asset::<ImgResourceLoader>(&missing));
+        });
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[test]
+    fn directory_changes_include_nested_assets() {
+        let temp = if cfg!(target_os = "linux") { std::path::PathBuf::from("/var/tmp") } else { std::env::temp_dir() };
+        let home = temp.join(format!("herdr-image-directory-test-{}", std::process::id()));
+        std::fs::create_dir_all(home.join("mods/probe/nested")).unwrap();
+        std::fs::write(home.join("mods/probe/nested/icon.svg"), "svg").unwrap();
+        for ignored in ["node_modules/pkg", ".git"] {
+            std::fs::create_dir_all(home.join("mods/probe").join(ignored)).unwrap();
+            std::fs::write(home.join("mods/probe").join(ignored).join("logo.svg"), "svg").unwrap();
+        }
+        let changed = vec![std::path::PathBuf::from("mods/probe")];
+        // A repeated root and a covered child are walked once.
+        let events = [changed[0].clone(), changed[0].clone(), "mods/probe/nested".into()];
+        let paths = super::changed_asset_paths(&home, &events);
+        assert!(paths.contains(&std::path::PathBuf::from("mods/probe/nested/icon.svg")));
+        assert!(paths.contains(&changed[0]));
+        assert!(!paths.iter().any(|p| p.to_string_lossy().contains("node_modules") || p.to_string_lossy().contains(".git")));
+        assert_eq!(paths.iter().filter(|p| p.ends_with("icon.svg")).count(), 1);
+        std::fs::remove_dir_all(&home).unwrap();
+        assert_eq!(super::changed_asset_paths(&home, &changed), changed);
+    }
+
+    #[test]
+    fn asset_cache_keys_match_file_events_without_requiring_the_file() {
+        use gpui_shell::AppAssets;
+        let expected = AppAssets::cache_key("mods/probe/icon.svg");
+        for alias in ["./mods/probe/icon.svg", "/mods/probe/icon.svg", "mods//probe/./icon.svg"] {
+            assert_eq!(AppAssets::cache_key(alias), expected);
+        }
+        // Traversal remains invalid, rather than becoming a valid cache hit.
+        assert_eq!(AppAssets::cache_key("mods/probe/../icon.svg").as_ref(), "mods/probe/../icon.svg");
+        #[cfg(windows)]
+        assert_eq!(AppAssets::cache_key(r"mods\probe\icon.svg"), expected);
+    }
+
+    #[test]
+    fn svg_invalidation_removes_every_size_but_preserves_other_assets() {
+        use gpui::{AtlasKey, DevicePixels, HeadlessAtlas, PlatformAtlas, RenderSvgParams, Size};
+        let atlas = HeadlessAtlas::default();
+        let key = |path: &str, size| AtlasKey::Svg(RenderSvgParams {
+            path: path.to_owned().into(), size: Size::new(DevicePixels(size), DevicePixels(size)),
+        });
+        let keys = [key("icons/icon.svg", 16), key("icons/icon.svg", 32), key("icons/nested/icon.svg", 16), key("icons-other/icon.svg", 16), AtlasKey::Image(gpui::RenderImageParams { image_id: gpui::ImageId(1), frame_index: 0 })];
+        let mut build = || Ok(Some((Size::new(DevicePixels(1), DevicePixels(1)), std::borrow::Cow::Borrowed(&[255u8][..]))));
+        let tiles: Vec<_> = keys.iter().map(|key| atlas.get_or_insert_with(key.clone(), &mut build).unwrap().unwrap()).collect();
+        atlas.remove_svg("icons");
+        atlas.remove_svg("icons");
+        for (index, key) in keys.iter().enumerate() {
+            assert_eq!(atlas.contains(key), index >= 3);
+            let tile = atlas.get_or_insert_with(key.clone(), &mut build).unwrap().unwrap();
+            assert_eq!(tile == tiles[index], index >= 3);
+        }
+    }
 
     #[test]
     fn agent_commands_keep_arguments_out_of_shell_source() {
@@ -4657,6 +5114,131 @@ mod tests {
         let restored: super::Node = serde_json::from_value(serde_json::to_value(&root).unwrap()).unwrap();
         assert_eq!(restored.terminal_menu.as_deref(), Some("personal-menu"));
     }
+
+    /// Runs `window::tests::<name>` alone in a test process of its own, on a
+    /// fresh app home: a window takes process-wide things (the app home, the
+    /// mods' request channel) that tests beside it would otherwise share.
+    fn in_own_process(name: &str) {
+        let home = std::path::PathBuf::from(format!("/var/tmp/herdr-window-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &format!("window::tests::{name}"), "--nocapture", "--test-threads=1"])
+            .env("HERDR_APP_HOME", &home)
+            .env("HERDR_TEST_WINDOW", name)
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&home);
+        let log = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success() && log.contains("1 passed"), "{log}");
+    }
+
+    /// In the process `in_own_process` started for `name`: whether to go on.
+    fn running_alone(name: &str) -> bool {
+        std::env::var("HERDR_TEST_WINDOW").as_deref() == Ok(name)
+    }
+
+    /// The window on a core that's never there (`hc::offline`), showing
+    /// `layout` with `mod_name` (its `main.js`) in the home, past the first-run
+    /// welcome (it lists machines through the core). No other mods: the
+    /// shipped ones run programs on threads of their own, which the test
+    /// executor refuses.
+    fn open_window<'a>(cx: &'a mut gpui::TestAppContext, mod_name: &str, main_js: &str, layout: serde_json::Value) -> (gpui::Entity<super::AppWindow>, &'a mut gpui::VisualTestContext) {
+        use serde_json::json;
+        let home = crate::mods::app_dir();
+        crate::mods::write_workspace().unwrap();
+        let folder = home.join("mods").join(mod_name);
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("mod.json"), r#"{ "place": "none" }"#).unwrap();
+        std::fs::write(folder.join("main.js"), main_js).unwrap();
+        std::fs::create_dir_all(home.join("layouts")).unwrap();
+        std::fs::write(home.join("layouts/test.json"), layout.to_string()).unwrap();
+        cx.update(crate::mods::init);
+        let requests = crate::mods::install_policy();
+        crate::mods::set_shared("layout".into(), json!("test"));
+        crate::mods::set_shared("frame.welcomed".into(), json!("test"));
+        let (view, cx) = cx.add_window_view(|window, cx| super::AppWindow::new(crate::hc::offline(), requests, window, cx));
+        assert_eq!(view.update(cx, |this, _| this.layout_name.clone()), "test");
+        (view, cx)
+    }
+
+    #[test]
+    fn pane_ring_follows_keyboard_focus() {
+        in_own_process("pane_ring_focus");
+    }
+
+    #[gpui::test]
+    fn pane_ring_focus(cx: &mut gpui::TestAppContext) {
+        if !running_alone("pane_ring_focus") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "unused", "", serde_json::json!({
+            "id": "pane", "type": "block", "content": { "terminal": "t1" }
+        }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.focused_pane = Some("pane".into());
+            let pane = this.pane_focus("pane").unwrap();
+            pane.focus(window, cx);
+            assert!(this.focused_path(window).contains("pane"));
+            let input = cx.focus_handle();
+            input.focus(window, cx);
+            assert!(this.focused_path(window).is_empty());
+            assert_eq!(this.focused_pane.as_deref(), Some("pane"));
+            pane.focus(window, cx);
+            assert!(this.focused_path(window).contains("pane"));
+        }));
+        cx.deactivate_window();
+        cx.update(|window, cx| view.update(cx, |this, _| {
+            assert!(this.focused_path(window).contains("pane"));
+        }));
+    }
+
+    /// Mods see window().active follow the focus, losing it too: a probe mod
+    /// notes every value it renders with while the window is focused and
+    /// blurred, and the poll that checks the focus runs in between.
+    #[test]
+    fn mods_see_the_window_lose_and_regain_focus() {
+        in_own_process("focus_window");
+    }
+
+    #[gpui::test]
+    fn focus_window(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("focus_window") {
+            return;
+        }
+        let probe = r#"import { View, div } from "gpui-kit";
+import { window, shared, setShared } from "herdr";
+
+export default class Probe extends View {
+  render() {
+    const active = window().active;
+    if (active !== this.last) {
+      this.last = active;
+      setShared("probe.seen", [...(shared("probe.seen") ?? []), active]);
+    }
+    return div();
+  }
+}
+"#;
+        let layout = json!({ "id": "root", "type": "row", "children": [
+            { "id": "probe", "type": "block", "content": { "mod": "active-probe" } }
+        ] });
+        let (_view, cx) = open_window(cx, "active-probe", probe, layout);
+        // What the probe saw last, after the focus poll (every 400 ms) had its turn.
+        let seen = |cx: &mut gpui::VisualTestContext| {
+            cx.executor().advance_clock(std::time::Duration::from_secs(1));
+            cx.run_until_parked();
+            crate::mods::shared("probe.seen").and_then(|v| v.as_array()?.last().cloned())
+        };
+        for _ in 0..2 {
+            cx.update(|window, _| window.activate_window());
+            assert_eq!(seen(cx), Some(json!(true)), "focused: {:?}", crate::mods::shared("probe.seen"));
+            cx.deactivate_window();
+            assert_eq!(seen(cx), Some(json!(false)), "blurred: {:?}", crate::mods::shared("probe.seen"));
+        }
+    }
+
+    include!("window/pane_size_tests.rs");
 
     #[test]
     fn terminal_menu_preserves_clicked_target_and_uses_mod_dimensions() {

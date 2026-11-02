@@ -3,7 +3,7 @@
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -18,6 +18,7 @@ pub const CLOSE: u8 = 2;
 pub const RESIZE: u8 = 3;
 pub const FOCUS: u8 = 4;
 pub const FACTS: u8 = 5;
+pub const AUTOMATIC_INPUT: u8 = 6;
 
 pub enum Stream {
     Data(Vec<u8>),
@@ -36,6 +37,12 @@ pub struct EventLines {
     seq: u64,
     /// Every terminal the stream describes, in its order (schema/README.md, Events).
     terminals: Vec<Value>,
+    /// Each terminal's highest `herdr.seen` among the label changes since the
+    /// last `take_seen`: `terminals` keeps only the last, which may hide a
+    /// write of ours under a later, lower one (docs/labels.md).
+    seen: HashMap<String, u64>,
+    /// A fresh snapshot replaced the terminals since the last `take_seen`.
+    resynced: bool,
 }
 
 /// What a push changed.
@@ -50,7 +57,18 @@ impl EventLines {
     /// From `events.subscribe`'s reply: its `seq` and `terminals`.
     pub fn new(snapshot: &Value) -> Self {
         let terminals = snapshot["terminals"].as_array().cloned().unwrap_or_default();
-        EventLines { pending: Vec::new(), seq: snapshot["seq"].as_u64().unwrap_or(0), terminals }
+        EventLines { seq: snapshot["seq"].as_u64().unwrap_or(0), terminals, resynced: true, ..Default::default() }
+    }
+
+    /// The `herdr.seen` values that went by, and whether a snapshot replaced everything.
+    pub fn take_seen(&mut self) -> (HashMap<String, u64>, bool) {
+        (std::mem::take(&mut self.seen), std::mem::take(&mut self.resynced))
+    }
+
+    fn note_seen(&mut self, address: &Value, labels: &Value) {
+        let (Some(address), Some(seen)) = (address.as_str(), labels["herdr.seen"].as_str().and_then(|s| s.parse::<u64>().ok())) else { return };
+        let high = self.seen.entry(address.to_owned()).or_default();
+        *high = (*high).max(seen);
     }
 
     /// The live terminals, as `terminal.list` puts them.
@@ -81,6 +99,7 @@ impl EventLines {
                 Some("missed") => {
                     self.terminals = p["terminals"].as_array().cloned().unwrap_or_default();
                     self.seq = p["seq"].as_u64().unwrap_or(self.seq);
+                    self.resynced = true;
                     pushed.docs = true;
                     pushed.terminals = true;
                 }
@@ -101,6 +120,9 @@ impl EventLines {
     /// One event's change to the terminal it names (schema/README.md, Events).
     fn apply(&mut self, p: &Value) -> bool {
         let (kind, address, data) = (p["type"].as_str().unwrap_or_default(), &p["terminal"], &p["data"]);
+        if matches!(kind, "created" | "restarted" | "labels") {
+            self.note_seen(address, &data["labels"]);
+        }
         let at = self.terminals.iter().position(|t| &t["address"] == address);
         let whole = match kind {
             "created" | "restarted" => Some(data),
@@ -146,6 +168,7 @@ impl EventLines {
 #[derive(Default)]
 struct Routes {
     closed: bool,
+    automatic_input: HashSet<u32>,
     replies: HashMap<u64, mpsc::Sender<Result<Value, Value>>>,
     streams: HashMap<u32, async_channel::Sender<Stream>>,
     /// Frames for a channel whose attach reply hasn't been handled yet.
@@ -316,12 +339,14 @@ impl Core {
                     None => r.early.entry(channel).or_default().push(item),
                 }
                 if closing {
+                    r.automatic_input.remove(&channel);
                     r.streams.remove(&channel);
                 }
             }
             // The core went away: tell every pane, and fail calls still waiting.
             let mut r = routes.lock().unwrap();
             r.closed = true;
+            r.automatic_input.clear();
             for (_, tx) in r.streams.drain() {
                 let _ = tx.try_send(Stream::Lost);
             }
@@ -367,9 +392,14 @@ impl Core {
 
     /// Starts a program in a new core terminal and returns its address (`tN`).
     /// Starts a terminal, here or on another machine (`on`: its name in `hc machine ls`).
-    pub fn run(&self, argv: Vec<String>, cwd: Option<String>, labels: Value, on: Option<&str>) -> Result<String> {
+    pub fn run(&self, argv: Vec<String>, cwd: Option<String>, labels: Value, on: Option<&str>, size: Option<(u16, u16)>) -> Result<String> {
         let env = json!({"TERM": "xterm-256color", "COLORTERM": "truecolor", "TERM_PROGRAM": "herdr"});
-        let r = self.call("terminal.run", json!({"argv": argv, "cwd": cwd, "env": env, "labels": labels, "on": on, "keep": true}))?;
+        let mut params = json!({"argv": argv, "cwd": cwd, "env": env, "labels": labels, "on": on, "keep": true});
+        // Released cores ignore unknown parameters, including when forwarding to another machine.
+        if let Some((cols, rows)) = size {
+            params["size"] = json!({"cols": cols, "rows": rows});
+        }
+        let r = self.call("terminal.run", params)?;
         r.get("address")
             .and_then(Value::as_str)
             .map(str::to_owned)
@@ -402,12 +432,23 @@ impl Core {
             let _ = tx.try_send(item);
         }
         r.streams.insert(channel, tx);
+        if self.hello["features"].as_array().is_some_and(|features| features.iter().any(|f| f == "automatic_input")) && result["automatic_input"] == true {
+            r.automatic_input.insert(channel);
+        }
         Ok(Attached { channel, stream: rx, terminal: result["terminal"].clone() })
     }
 
     pub fn input(&self, channel: u32, bytes: &[u8]) {
         if !bytes.is_empty() {
             self.send(channel, DATA, bytes);
+        }
+    }
+
+    /// Terminal-engine replies are not typing. Older paths require legacy DATA.
+    pub fn automatic_input(&self, channel: u32, bytes: &[u8]) {
+        if !bytes.is_empty() {
+            let kind = if self.routes.lock().unwrap().automatic_input.contains(&channel) { AUTOMATIC_INPUT } else { DATA };
+            self.send(channel, kind, bytes);
         }
     }
 
@@ -432,7 +473,10 @@ impl Core {
     }
 
     pub fn detach(&self, channel: u32) {
-        self.routes.lock().unwrap().streams.remove(&channel);
+        let mut routes = self.routes.lock().unwrap();
+        routes.streams.remove(&channel);
+        routes.automatic_input.remove(&channel);
+        drop(routes);
         self.send(channel, CLOSE, &[]);
     }
 }
@@ -444,6 +488,25 @@ impl Drop for Core {
             let _ = child.wait();
         }
     }
+}
+
+/// A core that is never there, for tests that open the window: every call
+/// fails at once, and it never reports the loss (so nothing reconnects).
+#[cfg(test)]
+pub fn offline() -> Arc<Core> {
+    let (writer, frames) = mpsc::channel();
+    std::mem::forget(frames);
+    let (lost_tx, lost) = async_channel::bounded(1);
+    std::mem::forget(lost_tx);
+    let child = std::process::Command::new(std::env::current_exe().unwrap()).arg("--help").stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+    Arc::new(Core {
+        hello: Value::Null,
+        writer,
+        routes: Arc::new(Mutex::new(Routes { closed: true, ..Default::default() })),
+        next_id: AtomicU64::new(1),
+        child: Mutex::new(child),
+        lost,
+    })
 }
 
 #[cfg(test)]
@@ -477,6 +540,22 @@ mod tests {
         assert!(got.terminals && got.docs, "missed: everything again");
         assert_eq!(addresses(&lines), ["t9"]);
         assert!(lines.push(format!("{}\n", json!({"method": "event", "params": {"seq": 21, "type": "doc"}})).as_bytes()).docs);
+    }
+
+    #[test]
+    fn a_seen_write_stays_known_under_a_later_lower_one() {
+        let labels = |seq: u64, seen: &str| {
+            format!("{}\n", json!({"method": "event", "params": {"seq": seq, "type": "labels", "terminal": "t1", "data": {"labels": {"herdr.seen": seen}}}}))
+        };
+        let mut lines = EventLines::new(&json!({"seq": 1, "terminals": [{"address": "t1", "state": "live", "labels": {}}]}));
+        assert_eq!(lines.take_seen(), (HashMap::new(), true), "a snapshot: can't tell");
+        // Ours (5), then another client's mark unread (4), in one drain.
+        lines.push(format!("{}{}", labels(2, "5"), labels(3, "4")).as_bytes());
+        assert_eq!(lines.live()["terminals"][0]["labels"]["herdr.seen"], "4");
+        assert_eq!(lines.take_seen(), (HashMap::from([("t1".to_owned(), 5)]), false));
+        assert_eq!(lines.take_seen(), (HashMap::new(), false));
+        lines.push(format!("{}\n", json!({"method": "missed", "params": {"seq": 9, "terminals": []}})).as_bytes());
+        assert!(lines.take_seen().1, "missed: can't tell");
     }
 
     #[test]
@@ -516,6 +595,91 @@ mod tests {
         assert!(core.call("doc.get", json!({"name":"herdr-app"})).unwrap_err().to_string().contains("lost the core"));
         assert!(start.elapsed() < Duration::from_secs(1));
         assert!(core.routes.lock().unwrap().replies.is_empty());
+    }
+
+    #[test]
+    fn replies_are_tagged_only_on_capable_attach_channels() {
+        let (writer, frames) = mpsc::channel();
+        let (_lost_tx, lost) = async_channel::bounded(1);
+        let child = std::process::Command::new(std::env::current_exe().unwrap()).arg("--help").stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+        let core = Core {
+            hello: Value::Null, writer, routes: Arc::new(Mutex::new(Routes::default())),
+            next_id: AtomicU64::new(1), child: Mutex::new(child), lost,
+        };
+        core.routes.lock().unwrap().automatic_input.insert(7);
+        core.automatic_input(7, b"\x1b");
+        core.automatic_input(7, b"[48;24;80t");
+        core.input(7, b"x");
+        core.automatic_input(8, b"old core reply");
+        core.automatic_input(7, b"");
+        let sent: Vec<_> = frames.try_iter().map(|frame| (frame[4], frame[HEADER..].to_vec())).collect();
+        assert_eq!(sent, vec![
+            (AUTOMATIC_INPUT, b"\x1b".to_vec()),
+            (AUTOMATIC_INPUT, b"[48;24;80t".to_vec()),
+            (DATA, b"x".to_vec()),
+            (DATA, b"old core reply".to_vec()),
+        ]);
+    }
+
+    #[test]
+    #[ignore = "requires an isolated HC_SESSION=test-* and a running hc on PATH"]
+    fn two_app_viewers_answer_queries_without_idle_size_theft() {
+        assert!(std::env::var("HC_SESSION").unwrap().starts_with("test-"));
+        let root = std::path::PathBuf::from(std::env::var_os("XDG_STATE_HOME").unwrap());
+        std::fs::create_dir_all(&root).unwrap();
+        let core = Core::connect().unwrap();
+        let program = format!(
+            "stty raw -echo; cat </dev/tty > {0}/received & printf ready; for n in 0 1 2; do \
+             while [ ! -e {0}/query$n ]; do sleep 0.02; done; \
+             printf '\\033[?2048l\\033[?2048h\\033_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\\033\\\\'; done; wait",
+            root.display()
+        );
+        let result = core.call("terminal.run", json!({"argv": ["sh", "-c", program]})).unwrap();
+        let t = result["address"].as_str().unwrap();
+        let idle = core.attach(t, 80, 24, json!({})).unwrap();
+        let leader = core.attach(t, 100, 30, json!({})).unwrap();
+        let capable = core.routes.lock().unwrap().automatic_input.contains(&idle.channel);
+        let mut idle_vt = crate::vt::Vt::new(80, 24);
+        let mut leader_vt = crate::vt::Vt::new(100, 30);
+        idle_vt.resize(80, 24, 10, 20);
+        leader_vt.resize(100, 30, 10, 20);
+        for round in 0..3 {
+            std::fs::write(root.join(format!("query{round}")), "").unwrap();
+            for (name, viewer, vt, expected) in [
+                ("idle", &idle, &mut idle_vt, if capable { 100 } else { 80 }),
+                ("leader", &leader, &mut leader_vt, 100),
+            ] {
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                let mut replies = Vec::new();
+                while !replies.windows(3).any(|w| w == b";OK") {
+                    assert!(std::time::Instant::now() < deadline, "query never reached {name}");
+                    match viewer.stream.try_recv() {
+                        Ok(Stream::Data(bytes)) => {
+                            vt.write(&bytes);
+                            core.credit(viewer.channel, bytes.len());
+                            replies.extend(vt.take_replies());
+                        }
+                        Ok(_) => panic!("viewer disconnected"),
+                        Err(_) => std::thread::sleep(Duration::from_millis(10)),
+                    }
+                }
+                core.automatic_input(viewer.channel, &replies);
+                let size = core.call("terminal.get", json!({"terminal": t})).unwrap();
+                eprintln!("round {round} {name}: {}x{}, replies {:?}", size["cols"], size["rows"], String::from_utf8_lossy(&replies));
+                assert_eq!(size["cols"], expected);
+            }
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let received = std::fs::read(root.join("received")).unwrap_or_default();
+            if received.windows(3).filter(|w| *w == b";OK").count() == 6 {
+                eprintln!("program received six kitty replies (two per query): {:?}", String::from_utf8_lossy(&received));
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        core.call("terminal.kill", json!({"terminal": t})).unwrap();
     }
 
     fn hello(generation: u64, version: &str, methods: &[&str]) -> Value {

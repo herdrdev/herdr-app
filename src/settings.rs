@@ -378,6 +378,8 @@ pub struct Person {
     pub font: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font_size: Option<f32>,
+    /// Enable programming ligatures in terminal fonts.
+    pub font_ligatures: bool,
     /// The panels' font (their sizes follow zoom).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ui_font: Option<String>,
@@ -423,6 +425,8 @@ pub enum OptionAsAlt {
     Auto,
     Off,
     On,
+    Left,
+    Right,
 }
 
 impl OptionAsAlt {
@@ -443,6 +447,7 @@ impl Default for Person {
             core: None,
             font: None,
             font_size: None,
+            font_ligatures: false,
             ui_font: None,
             telemetry: true,
             clipboard_write: true,
@@ -462,6 +467,7 @@ impl Default for Person {
 pub struct Settings {
     pub font_family: String,
     pub font_size: f32,
+    pub font_ligatures: bool,
     pub ui_font_family: String,
     pub ui_font_size: f32,
     /// How big the whole app is drawn (1 = as designed). The zoom keys change it.
@@ -509,6 +515,7 @@ impl Default for Settings {
         Settings {
             font_family: DEFAULT_FONT.into(),
             font_size: 14.0,
+            font_ligatures: false,
             ui_font_family: "Geist".into(),
             ui_font_size: 13.0,
             zoom: 1.0,
@@ -545,6 +552,7 @@ impl Settings {
             // The layout's own, else the person's, else Herdr's.
             font_family: look.font.clone().or(person.font.clone()).unwrap_or(d.font_family),
             font_size: look.font_size.or(person.font_size).unwrap_or(d.font_size),
+            font_ligatures: person.font_ligatures,
             ui_font_family: look.ui_font.clone().or(person.ui_font.clone()).unwrap_or(d.ui_font_family),
             ui_font_size: d.ui_font_size,
             zoom: person.zoom,
@@ -679,16 +687,20 @@ pub fn set(s: Settings) -> bool {
     #[cfg(target_os = "macos")]
     gpui_macos::set_option_as_alt(match s.option_as_alt {
         OptionAsAlt::Auto => None,
-        OptionAsAlt::Off => Some(false),
-        OptionAsAlt::On => Some(true),
+        OptionAsAlt::Off => Some(gpui_macos::OptionAsAlt::None),
+        OptionAsAlt::On => Some(gpui_macos::OptionAsAlt::Both),
+        OptionAsAlt::Left => Some(gpui_macos::OptionAsAlt::Left),
+        OptionAsAlt::Right => Some(gpui_macos::OptionAsAlt::Right),
     });
     CURRENT.with(|c| {
-        if *c.borrow().0 == s {
-            return false;
-        }
+        // Read the theme even when the settings are the same: its file may
+        // have new colors under the same name.
         let (p, mut colors) = palette(&s.theme).unwrap_or_else(|_| (GRAPHITE.clone(), BTreeMap::new()));
         colors.extend(s.colors.clone());
         let theme = resolve(&p, &colors);
+        if *c.borrow().0 == s && *c.borrow().1 == theme {
+            return false;
+        }
         gpui_shell::set_pixel_scale(s.zoom);
         *c.borrow_mut() = (Rc::new(s), Rc::new(theme));
         true
@@ -822,6 +834,19 @@ pub const DEFAULT_FONT: &str = "JetBrains Mono";
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn terminal_ligatures_default_off_and_can_be_enabled() {
+        use super::*;
+        let person: Person = serde_json::from_str("{}").unwrap();
+        assert!(!Settings::compose(&person, &crate::layout::Look::default(), true).font_ligatures);
+        assert!(!Settings::default().font_ligatures);
+        let person: Person = serde_json::from_str(r#"{"font_ligatures":true}"#).unwrap();
+        let saved = serde_json::to_string(&person).unwrap();
+        let restored: Person = serde_json::from_str(&saved).unwrap();
+        assert!(Settings::compose(&restored, &crate::layout::Look::default(), true).font_ligatures);
+        assert!(serde_json::from_str::<Person>(r#"{"font_ligatures":"yes"}"#).is_err());
+    }
+
     use super::*;
 
     #[test]
@@ -851,13 +876,13 @@ mod tests {
     fn option_as_alt_defaults_to_auto_and_round_trips() {
         let default: Person = serde_json::from_str("{}").unwrap();
         assert_eq!(default.option_as_alt, OptionAsAlt::Auto);
-        for (value, expected) in [("auto", OptionAsAlt::Auto), ("off", OptionAsAlt::Off), ("on", OptionAsAlt::On)] {
+        for (value, expected) in [("auto", OptionAsAlt::Auto), ("off", OptionAsAlt::Off), ("on", OptionAsAlt::On), ("left", OptionAsAlt::Left), ("right", OptionAsAlt::Right)] {
             let person: Person = serde_json::from_value(serde_json::json!({"option_as_alt": value})).unwrap();
             let settings = Settings::compose(&person, &crate::layout::Look::default(), true);
             assert_eq!(settings.option_as_alt, expected);
             assert_eq!(serde_json::to_value(settings).unwrap()["option_as_alt"], value);
         }
-        assert!(serde_json::from_value::<Person>(serde_json::json!({"option_as_alt": "left"})).is_err());
+        assert!(serde_json::from_value::<Person>(serde_json::json!({"option_as_alt": "invalid"})).is_err());
     }
 
     #[test]

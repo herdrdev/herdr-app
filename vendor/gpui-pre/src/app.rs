@@ -2900,6 +2900,14 @@ impl App {
         self.loading_assets.contains_key(&asset_id)
     }
 
+    /// Return a completed cached asset without starting a load.
+    pub fn cached_asset<A: Asset>(&self, source: &A::Source) -> Option<A::Output> {
+        let asset_id = (TypeId::of::<A>(), hash(source));
+        self.loading_assets.get(&asset_id)
+            .and_then(|entry| entry.downcast_ref::<CachedLoad<A::Output>>())
+            .and_then(CachedLoad::get)
+    }
+
     /// Starts loading an uncached asset and returns its result once available.
     ///
     /// Pending loads and completed results are cached until [`Self::remove_asset`].

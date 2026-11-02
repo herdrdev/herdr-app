@@ -72,9 +72,12 @@ jobs:
           restore-keys: ci-v2-${{ matrix.platform }}-${{ env.RUST_TOOLCHAIN }}-zig${{ env.ZIG_VERSION }}-
       - name: Linux build dependencies
         if: runner.os == 'Linux'
+        # A stuck package mirror fails here in minutes, not at the job's limit.
+        timeout-minutes: 10
         run: |
-          sudo apt-get update
-          sudo apt-get install -y --no-install-recommends \
+          apt="-o Acquire::Retries=3 -o Acquire::http::Timeout=30 -o Acquire::https::Timeout=30"
+          sudo apt-get $apt update
+          sudo apt-get $apt install -y --no-install-recommends \
             pkg-config clang libclang-dev \
             libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
             libvulkan-dev mesa-vulkan-drivers libfontconfig-dev libfreetype-dev

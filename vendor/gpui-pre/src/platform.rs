@@ -1456,6 +1456,10 @@ pub trait PlatformTextSystem: Send + Sync {
     fn advance(&self, font_id: FontId, glyph_id: GlyphId) -> Result<Size<f32>>;
     /// Get the glyph ID for a character.
     fn glyph_for_char(&self, font_id: FontId, ch: char) -> Option<GlyphId>;
+    /// Whether this backend's color glyph pixels depend on the run foreground.
+    fn glyph_uses_foreground(&self, _params: &RenderGlyphParams) -> bool {
+        false
+    }
     /// Get raster bounds for a glyph.
     fn glyph_raster_bounds(&self, params: &RenderGlyphParams) -> Result<Bounds<DevicePixels>>;
     /// Rasterize a glyph.
@@ -1695,6 +1699,8 @@ pub trait PlatformAtlas {
         build: &mut dyn FnMut() -> Result<Option<(Size<DevicePixels>, Cow<'a, [u8]>)>>,
     ) -> Result<Option<AtlasTile>>;
     fn remove(&self, key: &AtlasKey);
+    /// Remove every cached size of SVG assets at or beneath this path.
+    fn remove_svg(&self, path: &str);
 
     #[cfg(any(test, feature = "test-support", feature = "bench-support"))]
     fn contains(&self, _key: &AtlasKey) -> bool {
@@ -1771,6 +1777,18 @@ impl<Backend: AtlasBackend> AtlasState<Backend> {
             self.backend.remove(tile);
         }
     }
+
+    /// Remove SVGs at or beneath this path, releasing all their atlas tiles.
+    pub fn remove_svg(&mut self, path: &str) {
+        self.tiles_by_key.retain(|key, tile| {
+            if matches!(key, AtlasKey::Svg(params) if std::path::Path::new(params.path.as_ref()).starts_with(path)) {
+                self.backend.remove(*tile);
+                false
+            } else {
+                true
+            }
+        });
+    }
 }
 
 /// A sprite atlas for windows without a GPU. It hands out uniquely identified
@@ -1824,6 +1842,10 @@ impl PlatformAtlas for HeadlessAtlas {
 
     fn remove(&self, key: &AtlasKey) {
         self.0.lock().remove(key);
+    }
+
+    fn remove_svg(&self, path: &str) {
+        self.0.lock().remove_svg(path);
     }
 
     #[cfg(any(test, feature = "test-support", feature = "bench-support"))]

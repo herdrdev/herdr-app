@@ -235,17 +235,11 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn only_a_binary_that_says_hc_counts() {
-        let dir = std::env::temp_dir().join(format!("herdr-core-find-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let fake = dir.join("hc");
-        std::fs::write(&fake, "#!/bin/sh\necho 'herbstclient 0.9'\n").unwrap();
-        std::fs::set_permissions(&fake, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
-        assert_eq!(version(&fake), None);
+        // Runtime writes can leave a writer fd in a parallel fork, causing ETXTBSY.
+        let dir = Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/core-bin");
+        assert_eq!(version(&dir.join("hc")), None);
         let real = dir.join("herdr-core");
-        std::fs::write(&real, "#!/bin/sh\necho 'hc 0.1.1'\n").unwrap();
-        std::fs::set_permissions(&real, std::os::unix::fs::PermissionsExt::from_mode(0o755)).unwrap();
         assert_eq!(version(&real).as_deref(), Some("hc 0.1.1"));
-        assert_eq!(find(Some(real.to_str().unwrap())), Some(real.clone()));
-        let _ = std::fs::remove_dir_all(&dir);
+        assert_eq!(find(Some(real.to_str().unwrap())), Some(real));
     }
 }

@@ -62,6 +62,8 @@ export default class Spaces extends View {
     this.pressed = null;
     this.over = null;
     this.machines = [];
+    this.reconnecting = JSON.parse(localStorage.getItem("machines.reconnecting") ?? "{}");
+    for (const state of Object.values(this.reconnecting)) state.busy = false;
     this.folded = new Set(JSON.parse(localStorage.getItem("machines.folded") ?? "[]"));
     this.refreshMachines(cx);
     cx.timer.every(15000, cx => this.refreshMachines(cx));
@@ -76,7 +78,7 @@ export default class Spaces extends View {
     for (const s of sp) if (!this.shown.has(s.id)) this.born[s.id] ??= now;
     const due = this.due(now, sp, panes());
     if (due.size) this.refreshGit(due, cx);
-    if (sp.some((s) => !this.shown.has(s.id))) cx.notify();
+    if (sp.some((s) => !this.shown.has(s.id)) || this.orderingDue(now)) cx.notify();
   }
 
   // Places whose git could have changed: new ones (a new space, a cd), where a
@@ -122,6 +124,53 @@ export default class Spaces extends View {
   refreshMachines(cx) {
     cx.spawn(async cx => {
       try { const r = await hc(["machine", "ls", "--json"]); if (r.code === 0) this.machines = (JSON.parse(r.stdout).machines ?? []).filter((m) => !m.temporary); } catch {}
+      cx.notify();
+    });
+  }
+
+  rebuilt(machine) {
+    return machine?.state === "unreachable" && /^a different core answers there \("[^"]+"\)$/.test(machine.why ?? "");
+  }
+
+  reconnect(machine, cx) {
+    const name = machine.name;
+    if (this.reconnecting[name]?.busy) return;
+    const state = this.reconnecting[name] ??= { machine, removed: false };
+    state.busy = true;
+    state.error = null;
+    localStorage.setItem("machines.reconnecting", JSON.stringify(this.reconnecting));
+    cx.notify();
+    cx.spawn(async cx => {
+      try {
+        const ask = async args => {
+          const r = await hc([...args, "--json"]);
+          if (r.code !== 0) {
+            let error;
+            try { error = JSON.parse(r.stdout || r.stderr).error?.message; } catch {}
+            throw new Error(error || r.stderr || r.stdout || "Couldn't connect.");
+          }
+        };
+        if (!state.removed) {
+          await ask(["machine", "rm", name]);
+          state.removed = true;
+          localStorage.setItem("machines.reconnecting", JSON.stringify(this.reconnecting));
+        }
+        const args = ["machine", "add"];
+        if (machine.via) args.push("--via", machine.target);
+        else args.push(machine.target);
+        args.push("--name", name);
+        if (machine.session) args.push("--session", machine.session);
+        if (machine.temporary) args.push("--temp");
+        await ask(args);
+        this.folded.delete(name);
+        localStorage.setItem("machines.folded", JSON.stringify([...this.folded]));
+        delete this.reconnecting[name];
+      } catch (e) {
+        state.error = String(e.message ?? e);
+        state.busy = false;
+      }
+      localStorage.setItem("machines.reconnecting", JSON.stringify(this.reconnecting));
+      this.refreshMachines(cx);
       cx.notify();
     });
   }
@@ -201,12 +250,17 @@ export default class Spaces extends View {
     openOverlay({ mod: "menu", kind: "popup", width: 200, height: 260, props: { tab: "space", target: { id: w.id } } });
   }
 
+  orderingDue(now) {
+    return this.ordering && now - this.ordering.at >= 1000
+      && this.ordering.machines.every(name => machines().some(m => m.name === name && m.layout === "ready"));
+  }
+
   // Spaces in order, each worktree space moved under its main checkout's.
   ordered() {
     const sp = spaces(), ps = panes();
     const ready = (w) => this.shown.has(w.id) || where(w, ps) in this.git || Date.now() - (this.born[w.id] ??= Date.now()) > 1500;
     for (const w of sp) if (!this.shown.has(w.id) && ready(w)) this.shown.add(w.id);
-    const list = sp.map((w, i) => ({ w, i, g: this.git[where(w, ps)] ?? null })).filter((r) => this.shown.has(r.w.id));
+    const list = sp.map((w, i) => ({ w, i, g: this.git[where(w, ps)] ?? null }));
     const mains = new Set(list.filter((r) => r.g && !r.g.linked).map((r) => r.g.repo));
     const nested = (r) => r.g?.linked && mains.has(r.g.repo);
     const out = [];
@@ -219,14 +273,33 @@ export default class Spaces extends View {
       const kids = list.filter((k) => nested(k) && k.g.repo === r.g.repo);
       kids.forEach((k, n) => out.push({ ...k, tree: n === kids.length - 1 ? "└─" : "├─" }));
     }
-    return out;
+    // Simulate the batch so later indexes include earlier moves. An attempted
+    // write can lose a sync conflict: allow the echo to settle before retrying.
+    const order = sp.map(w => w.id);
+    const target = out.map(r => r.w.id);
+    const key = JSON.stringify([order, target, machines()]);
+    if (order.every((id, i) => id === target[i])) {
+      this.ordering = null;
+    } else if (this.ordering?.key !== key || this.orderingDue(Date.now())) {
+      const moved = new Set();
+      this.ordering = { key, at: Date.now(), machines: [] };
+      for (let i = 0; i < out.length; i++) {
+        const from = order.indexOf(out[i].w.id);
+        if (from === i) continue;
+        run("space.move", { id: out[i].w.id, index: i + 1 });
+        moved.add(out[i].w.machine ?? null);
+        order.splice(i, 0, order.splice(from, 1)[0]);
+      }
+      this.ordering.machines = [...moved];
+    }
+    return out.filter(r => this.shown.has(r.w.id));
   }
 
   // The rows, under a header per machine once one isn't this computer.
   grouped(t, collapsed) {
     const rows = this.ordered();
     const draw = (r) => (collapsed ? this.compact(r, t) : this.row(r, t));
-    const remote = [...new Set([...rows.map(r => r.w.machine).filter(Boolean), ...this.machines.map(m => m.name)])].sort();
+    const remote = [...new Set([...rows.map(r => r.w.machine).filter(Boolean), ...this.machines.map(m => m.name), ...Object.keys(this.reconnecting)])].sort();
     const loading = m => {
       const layout = machines().find(k => k.name === m)?.layout;
       return layout === "loading" || (!layout && this.machines.some(k => k.name === m && k.state === "connected"))
@@ -237,8 +310,10 @@ export default class Spaces extends View {
     const machineNames = [null, ...remote];
     return machineNames.flatMap((m) => {
       const mine = rows.filter((r) => (r.w.machine ?? null) === m);
-      const machine = this.machines.find(k => k.name === m);
+      const repair = this.reconnecting[m];
+      const machine = this.machines.find(k => k.name === m) ?? repair?.machine;
       const connected = !m || machine?.state === "connected";
+      const rebuilt = this.rebuilt(machine) || !!repair;
       const folded = this.folded.has(m);
       const head = h_flex().id(`machine-${m ?? "local"}`).h(26).flex_none().px(collapsed ? 2 : 8).gap(7).items_center().text_size(11).text_color(t.dim)
         .cursor_pointer().hover(s => s.bg(t.hover))
@@ -249,15 +324,23 @@ export default class Spaces extends View {
         })
         .child(svg(`mods/workspace-chrome/${m ? "server" : "monitor"}.svg`).size(13).flex_none())
         .when(!collapsed, el => el.child(div().flex_1().truncate().child(m ?? "This computer"))
-          .when(!connected, el => el.child(div().flex_none().child((machine?.state ?? "asleep").replace(/_/g, " "))))
+          .when(!connected && !rebuilt, el => el.child(div().flex_none().child((machine?.state ?? "asleep").replace(/_/g, " "))))
+          .when(rebuilt, el => el.child(h_flex().flex_none().gap(3).items_center()
+            .child(div().max_w(140).truncate().child(repair?.error || "rebuilt ·"))
+            .child(div().id(`machine-connect-${m}`).text_color(repair?.error ? t.blocked : t.muted)
+              .hover(s => s.text_color(t.foreground))
+              .tooltip(repair?.error || "This machine was rebuilt or replaced. Click to connect to the new one.")
+              .on_click((_e, cx) => { cx.stop_propagation(); this.reconnect(machine, cx); })
+              .child(repair?.busy ? "Connecting…" : "Connect"))))
           .when(connected, el => el.child(div().id(`machine-add-${m ?? "local"}`).flex_none().px(4).rounded(4).hover(s => s.bg(t.hover).text_color(t.foreground))
-            .on_click((_e, cx) => { cx.stop_propagation(); run("space.new", m ? { machine: m } : {}); }).child("+")))
+            .on_click((_e, cx) => { cx.stop_propagation(); run("space.new", { machine: m ?? "" }); }).child("+")))
           .child(div().size(6).rounded(3).flex_none().bg(connected ? t.ansi2 : t.dim))
           .child(svg(`mods/workspace-chrome/chevron-${folded ? "right" : "down"}.svg`).size(11).flex_none()));
       const empty = h_flex().id(`machine-new-${m ?? "local"}`).h(28).flex_none().px(8).gap(7).items_center().rounded(7)
         .text_size(12).text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground))
-        .on_click(() => run("space.new", m ? { machine: m } : {}))
+        .on_click(() => run("space.new", { machine: m ?? "" }))
         .child(svg("mods/workspace-chrome/plus.svg").size(12)).when(!collapsed, el => el.child("New space there"));
+      if (!collapsed && rebuilt) return [head];
       return [head, ...(folded ? [] : mine.length ? mine.map(draw) : [loading(m) ? loadingRow(m) : empty])];
     });
   }
@@ -286,6 +369,7 @@ export default class Spaces extends View {
 
   row({ w, i, g, tree }, t) {
     const on = w.active;
+    const fromIndex = this.pressed === null ? -1 : spaces().findIndex(s => s.id === this.pressed);
     const colors = shared("space.colors") ?? {};
     const color = colors[w.id] ?? "ansi6";
     const fill = color.startsWith("#") ? color : (MARK[color] ?? t[color]);
@@ -299,19 +383,19 @@ export default class Spaces extends View {
       .rounded(8)
       .when(on, (el) => el.bg(t.selected))
       .when(!on, (el) => el.hover((s) => s.bg(t.hover)))
-      .when(this.pressed === i && this.over !== i, (el) => el.opacity(0.5))
-      .when(this.pressed !== null && this.over === i && this.pressed !== i, (el) => el.child(
+      .when(this.pressed === w.id && this.over !== w.id, (el) => el.opacity(0.5))
+      .when(this.pressed !== null && this.over === w.id && this.pressed !== w.id, (el) => el.child(
         div().absolute().left(0).right(0).h(2).bg(t.accent)
-          .when(this.pressed < i, line => line.bottom(0))
-          .when(this.pressed > i, line => line.top(0)),
+          .when(fromIndex < i, line => line.bottom(0))
+          .when(fromIndex > i, line => line.top(0)),
       ))
       .on_mouse_down("left", () => {
-        this.pressed = i;
-        this.over = i;
+        this.pressed = w.id;
+        this.over = w.id;
       })
       .on_mouse_move((_e, cx) => {
-        const source = spaces()[this.pressed];
-        const over = source && (source.machine ?? null) === (w.machine ?? null) ? i : null;
+        const source = spaces().find(s => s.id === this.pressed);
+        const over = source && (source.machine ?? null) === (w.machine ?? null) ? w.id : null;
         if (this.pressed !== null && this.over !== over) {
           this.over = over;
           cx.notify();
@@ -322,8 +406,10 @@ export default class Spaces extends View {
         const over = this.over;
         this.pressed = null;
         this.over = null;
-        if (from !== null && over === i && from !== i) run("space.move", { id: spaces()[from].id, index: i + 1 });
-        else if (from === i) run("space.select", { id: w.id });
+        if (from !== null && over === w.id && from !== w.id) {
+          const index = spaces().findIndex(s => s.id === w.id);
+          if (index !== -1) run("space.move", { id: from, index: index + 1 });
+        } else if (from === w.id) run("space.select", { id: w.id });
         cx.notify();
       })
       .on_mouse_down("right", () => this.menu(w))

@@ -86,6 +86,10 @@ impl PlatformAtlas for DirectXAtlas {
     fn remove(&self, key: &AtlasKey) {
         self.0.lock().remove(key);
     }
+
+    fn remove_svg(&self, path: &str) {
+        self.0.lock().remove_svg(path);
+    }
 }
 
 impl AtlasBackend for DirectXAtlasTextures {

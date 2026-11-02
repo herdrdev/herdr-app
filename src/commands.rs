@@ -30,12 +30,12 @@ const fn cmd(name: &'static str, args: &'static [Arg], about: &'static str) -> C
 pub const COMMANDS: &[Command] = &[
     // What exists.
     cmd("space.new", &[opt("name"), opt("folder"), opt("tab"), opt("argv"), opt("task"), opt("machine")],
-        "Make a space: its name (default: none, so it's called after where its first terminal is), the folder its terminals start in (default: the focused terminal's), its first tab's name (default: none, so it's called by its number), optionally an agent (argv) and its first message (task), and the machine it lives on (`hc machine ls`; default this one; its terminals start in that machine's home unless folder)."),
+        "Make a space: its name (default: none, so it's called after where its first terminal is), the folder its terminals start in (default: the focused terminal's), its first tab's name (default: none, so it's called by its number), optionally an agent (argv) and its first message (task), and the machine it lives on (`hc machine ls`; default the focused space's machine for keys and clicks, this computer for scripts; empty string: this computer; its terminals start in that machine's home unless folder)."),
     cmd("space.close", &[opt("id"), opt("confirmed")], "Close a space and end its terminals (asks first unless confirmed)."),
     cmd("space.rename", &[opt("id"), opt("name")], "Rename a space (asks the person when no name; an empty name: called after where its first terminal is again)."),
     cmd("space.move", &[req("id"), req("index")], "Move a space to a position (1 = first)."),
     cmd("tab.new", &[opt("name"), opt("space"), opt("folder"), opt("argv"), opt("task"), opt("mod"), opt("props")],
-        "Make a tab in a space (default: the selected one; name default: none, so it's called by its number) with a terminal in folder (default: the focused terminal's), optionally an agent (argv) and its first message (task); or with a mod as its only pane (`mod`, its `props`: a file, a board)."),
+        "Make a tab in a space (default: the selected one; name default: none, so it's called by its number) with a terminal in folder (default: the focused terminal's), optionally an agent (argv) and its first message (task); or with a mod as its only pane (`mod`, its `props`: a file, a board). With no space open, a person's new tab starts a space (as space.new)."),
     cmd("tab.close", &[opt("id"), opt("confirmed")], "Close a tab and end its terminals."),
     cmd("tab.rename", &[opt("id"), opt("name")], "Rename a tab (asks the person when no name; an empty name: called by its number again)."),
     cmd("tab.move", &[req("id"), req("index")], "Move a tab to a position in its space (1 = first)."),
@@ -45,6 +45,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("terminal.keep", &[req("terminal"), opt("place")], "Give a running terminal without a pane (a sub-agent) a pane: a new tab, or \"right\"/\"down\"."),
     cmd("terminal.park", &[req("terminal")], "Take a terminal's pane away and disable core keep; it keeps running (a sub-agent shows under its parent again)."),
     cmd("terminal.right_click", &[req("to"), opt("terminal")], "Where right-clicks in a terminal (default: the focused one) go when its program takes the mouse: \"program\" or \"menu\" (Herdr's, the default). Shift+right-click is always the menu."),
+    cmd("terminal.pin", &[req("terminal"), req("pinned")], "Pin an agent to the top of the agent lists (pinned true) or unpin it (false). Pins are kept with the terminal, so every Herdr client shows them, and end with it."),
     cmd("terminal.kill", &[req("terminal")], "End a terminal and its sub-agents."),
     // What you see.
     cmd("space.select", &[opt("index"), opt("id")], "Show a space (by position or id)."),
@@ -57,11 +58,11 @@ pub const COMMANDS: &[Command] = &[
     cmd("tab.prev", &[], "Show the previous tab."),
     cmd("pane.zoom", &[opt("pane")], "Show only this pane of its tab, or all again."),
     cmd("pane.focus", &[opt("pane"), opt("terminal")], "Focus a pane (or the pane showing a terminal)."),
-    cmd("pane.go", &[req("direction")], "Focus the pane to the \"left\", \"right\", \"up\" or \"down\"."),
+    cmd("pane.go", &[req("direction")], "Focus the pane or focusable mod to the \"left\", \"right\", \"up\" or \"down\"."),
     cmd("pane.swap", &[req("direction")], "Swap the focused pane with its neighbor in a direction."),
     cmd("terminal.peek", &[req("terminal")], "Peek at a running terminal over the tab, with keep-as-tab and close controls."),
     cmd("terminal.show", &[opt("terminal"), opt("pane")], "Show a terminal in a pane for now, in place of its own (no terminal: back)."),
-    cmd("terminal.copy", &[], "Copy the focused terminal's selection."),
+    cmd("terminal.copy", &[], "Copy the focused terminal's selection. With nothing selected, that key goes to the program."),
     cmd("terminal.paste", &[], "Paste into the focused terminal (copied files as if dropped; an image alone as terminal.paste_image pastes it)."),
     cmd("terminal.paste_image", &[], "Ctrl+V: the clipboard's image as a file on the focused terminal's machine, when that's another one; on Windows, paste clipboard text; otherwise Ctrl+V goes to the terminal."),
     cmd("agent.focus", &[req("terminal")], "Show an agent (sub-agents too)."),
@@ -77,14 +78,14 @@ pub const COMMANDS: &[Command] = &[
     cmd("layout.resize", &[req("id"), opt("px"), opt("weight")], "Size a layout node."),
     cmd("layout.select", &[req("stack"), req("child")], "Show one child of a stack."),
     cmd("layout.reset", &[opt("name")], "Reset a shipped layout and its clicks (the old file is kept aside)."),
-    cmd("mod.open", &[req("name")], "Open a mod as the overlay its mod.json describes."),
+    cmd("mod.open", &[req("name")], "Toggle a mod as the overlay its mod.json describes; calling again closes it."),
     cmd("overlay.close", &[opt("id")], "Close an overlay (default: the top dialog or popup)."),
     // The app.
-    cmd("app.help", &[], "Show the keys."),
+    cmd("app.help", &[], "Toggle the keys dialog."),
     cmd("app.welcome", &[], "Show the welcome again."),
     cmd("app.whats_new", &[], "Show what this release brought (it opens once by itself after an update)."),
     cmd("app.feedback", &[opt("message"), opt("from")], "Draft feedback for the person to review and send (from: person or agent)."),
-    cmd("app.palette", &[], "Open the command palette: every command by name, with its key."),
+    cmd("app.palette", &[], "Toggle the command palette: every command by name, with its key; calling again closes it."),
     cmd("app.settings", &[opt("section")], "Open the settings (section: look, alerts, updates)."),
     cmd("app.check_updates", &[], "Look for a newer Herdr and herdr-core now."),
     cmd("app.update_core", &[], "Update herdr-core to its latest release of this generation; terminals keep running."),
@@ -126,11 +127,15 @@ pub fn validate_args(c: &Command, args: &Value) -> Result<(), String> {
         Value::Null => Ok(()),
         Value::Object(args) => {
             let unknown: Vec<_> = args.keys().filter(|key| !c.args.iter().any(|a| a.name == key.as_str())).map(String::as_str).collect();
-            if unknown.is_empty() {
-                Ok(())
-            } else {
-                Err(format!("{}: unknown argument(s): {}; valid arguments: {valid}", c.name, unknown.join(", ")))
+            if !unknown.is_empty() {
+                return Err(format!("{}: unknown argument(s): {}; valid arguments: {valid}", c.name, unknown.join(", ")));
             }
+            for (key, value) in args {
+                if matches!(key.as_str(), "id" | "pane" | "space" | "terminal") && !value.is_string() && !value.is_null() {
+                    return Err(format!("{}: argument {key} must be a string (or null to omit it)", c.name));
+                }
+            }
+            Ok(())
         }
         _ => Err(format!("{}: arguments must be an object; valid arguments: {valid}", c.name)),
     }
@@ -187,6 +192,21 @@ mod tests {
         assert_eq!(validate_args(close, &json!({"space": "X", "confirmed": true})),
             Err("space.close: unknown argument(s): space; valid arguments: id, confirmed".into()));
         assert!(validate_args(close, &json!({"id": "X", "confirmed": true})).is_ok());
+    }
+
+    #[test]
+    fn malformed_targets_cannot_fall_back_to_the_current_work() {
+        for (name, arg) in [("tab.close", "id"), ("pane.close", "pane"), ("space.close", "id"), ("tab.new", "space"), ("terminal.show", "terminal")] {
+            let c = find(name).unwrap();
+            for value in [json!(123), json!(false), json!([]), json!({"id": "target"})] {
+                let error = validate_args(c, &json!({arg: value})).unwrap_err();
+                assert!(error.contains(name) && error.contains(arg), "{error}");
+            }
+            // Null keeps its existing omitted-argument meaning for optional targets.
+            for value in [Value::Null, json!("target")] {
+                assert!(validate_args(c, &json!({arg: value})).is_ok());
+            }
+        }
     }
 
     #[test]

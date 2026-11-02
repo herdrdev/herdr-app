@@ -46,6 +46,20 @@ class DistributionTests(unittest.TestCase):
                 self.assertIn("Intel Macs aren't supported; build from source", result.stderr)
                 self.assertNotIn("unexpected download", result.stderr)
 
+    def test_windows_shells_are_pointed_at_the_powershell_installer(self):
+        for os_name in ("MINGW64_NT-10.0-26300", "MSYS_NT-10.0-26300", "CYGWIN_NT-10.0-26300"):
+            with self.subTest(os_name=os_name):
+                result = self.run_script("distribution/install.sh", os_name, "x86_64")
+                self.assertEqual(result.returncode, 1)
+                self.assertIn("/app/install.ps1 | iex", result.stderr)
+                self.assertNotIn("unexpected download", result.stderr)
+
+    def test_unknown_os_installer_names_it(self):
+        result = self.run_script("distribution/install.sh", "FreeBSD", "x86_64")
+        self.assertEqual(result.returncode, 1)
+        self.assertIn("no build for FreeBSD", result.stderr)
+        self.assertNotIn("unexpected download", result.stderr)
+
     def test_rosetta_mac_installer_uses_arm64(self):
         for key in ("hw.optional.arm64", "sysctl.proc_translated"):
             with self.subTest(key=key):

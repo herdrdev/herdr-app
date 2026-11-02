@@ -20,6 +20,9 @@ prints the built-in command list even without an open window. Do not launch bare
 signal or restart the person's app or core. A window closing does not kill
 its terminals.
 
+`app.check_updates` checks for newer releases. Settings reports "Up to date"
+only after a successful check; on failure, check the connection and retry.
+
 ## Show something when asked
 
 New spaces and tabs are shown immediately: only create them when asked.
@@ -41,6 +44,11 @@ herdr-app do space.new --name "remote api" --machine vps --folder /srv/api
 ```
 
 The folder is on that machine; tabs and splits in the space stay there.
+New-space keys and clicks follow the focused space's machine. Script commands
+without `--machine` still use this computer; `--machine ''` explicitly chooses it.
+The agent menu checks and starts agents in the remote Unix user's
+login/interactive shell (sh, bash, zsh, dash, ksh or fish), including its
+configured PATH. Other shells keep the sh launcher.
 `terminal.open --folder /path --place down` starts the split in that folder,
 including when `--argv` supplies a program. Without `--folder`, it follows the
 focused terminal's folder.
@@ -48,8 +56,10 @@ focused terminal's folder.
 and `hc file ... --on vps ...` for remote work, not your local file tools.
 
 `do` accepts `--key value` arguments (JSON for arrays/objects) or one JSON
-object. Unknown argument names fail and list valid names; they never target the
-current space or pane instead. Use `commands` to confirm the command's exact shape:
+object. Unknown argument names fail and list valid names. Target IDs (`id`,
+`pane`, `space`, `terminal`) must be strings; other non-null types fail before
+the current-target default can apply. Null keeps its omitted-argument meaning.
+Use `commands` to confirm the command's exact shape:
 
 ```sh
 herdr-app do pane.split '{"direction":"right","pane":"p12"}'
@@ -80,6 +90,8 @@ those files or the generated guide. The app rewrites them on start.
 - Home defaults to `~/.config/herdr-app`; `HERDR_APP_HOME` selects another.
 - Mods live in `mods/<name>/` with `main.js` and optional `mod.json`.
   They are trusted JavaScript with command and network access.
+  `"focusable": true` in `mod.json` lets `pane.go` move onto a copy; it receives
+  `"focus"` from `nextCommand()` and focuses its own keyboard handle.
 - Shipped mods belong to Herdr: duplicate with `mod.clone` before editing.
   Shipped layouts likewise use `layout.clone` for a personal copy.
   Discover required arguments with `herdr-app commands`.
