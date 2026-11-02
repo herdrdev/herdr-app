@@ -684,9 +684,11 @@ What's about the user, never a look:
   Changes apply immediately, including text already on screen.
 - `window_opacity` (0..1): below 1 the desktop shows through the window, at
   that opacity. Terminals, cards and bars become see-through together, and
-  `terminal_opacity` stops applying; dialogs and menus stay solid. Colors a
-  program sets itself stay solid too. Literal colors in a layout or mod stay
-  as written. The theme's `background`, `surface`, `canvas` and `chrome` stop
+  `terminal_opacity` stops applying; dialogs and menus stay solid. Cells a
+  program colors stay solid too. A default background a program sets (OSC 11)
+  shows at `window_opacity` on top of the window's background, so that
+  terminal looks denser than the rest of the window. Literal colors in a
+  layout or mod stay as written. The theme's `background`, `surface`, `canvas` and `chrome` stop
   being separate surfaces: all four show the one `background` color, painted
   at the window root, so a layout or theme that tells them apart loses that
   difference. 1 (default) is an ordinary window.

@@ -26,6 +26,13 @@ pub fn hsla(c: Rgb) -> Hsla {
     Rgba { r: c.0 as f32 / 255.0, g: c.1 as f32 / 255.0, b: c.2 as f32 / 255.0, a: 1.0 }.into()
 }
 
+/// How solid a terminal paints its default background. A see-through window
+/// already painted the theme's at its root. One a program set (OSC 11) goes on
+/// top of that at the window's opacity, so it comes out denser than the window.
+fn default_bg_opacity(bg: Rgb, theme_bg: Rgb, terminal_opacity: f32, window_opacity: f32) -> f32 {
+    if window_opacity < 1.0 && bg != theme_bg { window_opacity } else { terminal_opacity }
+}
+
 #[derive(Clone, Debug, PartialEq)]
 enum LinkTarget {
     External(links::Target),
@@ -1194,7 +1201,8 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     let marked = g.marked.clone();
     drop(g);
 
-    window.paint_quad(fill(bounds, hsla(frame.bg).opacity(crate::settings::get().terminal_opacity)));
+    let s = crate::settings::get();
+    window.paint_quad(fill(bounds, hsla(frame.bg).opacity(default_bg_opacity(frame.bg, vt::theme().bg, s.terminal_opacity, s.window_opacity))));
     let at = |x: usize, y: usize| origin + point(cell.width * x as f32, cell.height * y as f32);
     // Edges round to device pixels, so cells side by side meet without seams.
     let snap_box = |b: Bounds<Pixels>| {
@@ -1558,6 +1566,19 @@ impl Focusable for TerminalView {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn a_background_a_program_sets_shows_in_a_see_through_window() {
+        use super::*;
+        let mut vt = Vt::new(10, 2);
+        let theme_bg = vt.frame().bg;
+        assert_eq!(default_bg_opacity(theme_bg, theme_bg, 0.0, 0.8), 0.0, "the window root already painted this one");
+        vt.write(b"\x1b]11;#24283b\x1b\\");
+        let set = vt.frame().bg;
+        assert_eq!(set, Rgb(0x24, 0x28, 0x3b));
+        assert_eq!(default_bg_opacity(set, theme_bg, 0.0, 0.8), 0.8);
+        assert_eq!(default_bg_opacity(set, theme_bg, 0.85, 1.0), 0.85, "an opaque window keeps the layout's terminal_opacity");
+    }
+
     #[test]
     fn mouse_buttons_only_follow_the_pane_that_took_each_press() {
         use super::*;
