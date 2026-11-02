@@ -360,7 +360,33 @@ fn resolve(p: &Palette, overrides: &BTreeMap<String, String>) -> Theme {
     for (k, v) in overrides {
         t.insert(k.clone(), v.clone());
     }
+    // A find's matches: yellow over the background the terminal is drawn on
+    // (a theme's colors may override it), the selected one stronger.
+    let parsed = |k: &str| t.get(k).map(|v| rgb(v)).map(|c| (c.0 as u32) << 16 | (c.1 as u32) << 8 | c.2 as u32);
+    let (base, yellow) = (parsed("background").unwrap_or(bg), parsed("ansi3").unwrap_or(p.ansi[3]));
+    let light = is_light(base);
+    for (k, amount) in [("find_match", if light { 0.45 } else { 0.35 }), ("find_active", if light { 0.8 } else { 0.75 })] {
+        if !overrides.contains_key(k) {
+            t.insert(k.to_owned(), hex(mix(base, yellow, amount)));
+        }
+    }
     t
+}
+
+#[test]
+fn a_finds_selected_match_stands_out_more_than_the_others_in_every_shipped_theme() {
+    let luminance = |s: &str| {
+        let c = rgb(s);
+        0.2126 * c.0 as f32 + 0.7152 * c.1 as f32 + 0.0722 * c.2 as f32
+    };
+    let shipped = THEMES.iter().map(|(n, text)| (n.to_string(), parse_theme_file(n, text).unwrap()));
+    let presets = PRESETS.iter().map(|n| (n.to_string(), palette(n).unwrap()));
+    for (name, (p, o)) in presets.chain(shipped) {
+        let t = resolve(&p, &o);
+        let bg = luminance(&t["background"]);
+        let (all, one) = ((luminance(&t["find_match"]) - bg).abs(), (luminance(&t["find_active"]) - bg).abs());
+        assert!(one > all, "{name}: the selected match ({}) must stand out more than the others ({}) on {}", t["find_active"], t["find_match"], t["background"]);
+    }
 }
 
 /// settings.json: preferences used where a layout leaves its look unset.

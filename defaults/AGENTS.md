@@ -562,6 +562,18 @@ The main ones:
   gone when the terminal ends; read it as `agents()` `pinned`). Copy, paste, paste-image and implicit
   right-click targeting follow keyboard focus, including peek and floating terminals;
   with no terminal holding keyboard focus, they use the focused pane or block.
+  `terminal.find {text?}` opens the focused terminal's find bar (Cmd+F on macOS,
+  Ctrl+Shift+F on Linux and Windows; with `text`, it finds that): it searches the
+  screen and the scrollback, ASCII letters in any case and the rest exactly, marks
+  every match and selects the newest. In the bar, Enter goes up to the next older
+  match and Shift+Enter back down, both wrapping and scrolling to it; Esc closes the
+  bar and gives the keys back. `terminal.find_next` / `terminal.find_prev` do the same
+  from anywhere (Cmd+G / Cmd+Shift+G on macOS; no default key elsewhere). Keys in the
+  bar never reach the program. Run by an agent (`herdr-app do`), or behind a dialog,
+  `terminal.find` opens the bar without taking the person's keys. keys.json is
+  installed once, so an older one has none of these keys: add `"cmd-f":
+  "terminal.find"`, `"cmd-g": "terminal.find_next"` and `"cmd-shift-g":
+  "terminal.find_prev"` (or `"ctrl-shift-f": "terminal.find"`) to its `terminal` section.
   Dragging a text selection past the terminal's top or bottom scrolls while held;
   releasing stops it. Programs that track the mouse still get their mouse events
   (hold Shift to select text instead). A drag stays with the terminal where it
@@ -907,7 +919,8 @@ All of it is in `herdr.d.ts`. In short:
   (sidebars, bars), surface, popover, raised, hover, selected, border,
   input (a stronger border), foreground, muted, dim, accent,
   accent_foreground, solid and solid_foreground (a primary button),
-  selection, working, blocked, done, idle, unknown, ansi0..15; light and
+  selection, find_match and find_active (a terminal find's matches, the selected
+  one), working, blocked, done, idle, unknown, ansi0..15; light and
   dark themes name the same ones), `settings()` (with `dark`: the
   appearance now), `keys()`, `commands()` (every app
   command, its arguments and what it does), `layouts()` (the layout names).
