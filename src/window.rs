@@ -8,6 +8,7 @@ use crate::hc::Core;
 mod floats;
 mod movable;
 mod pane_drag;
+mod pane_size;
 mod titlebar;
 
 use crate::layout::{Axis, Background as Paint, Content, Fit, HeaderContent, Kind, Line, Node, PaneFrame, Size as Span};
@@ -2306,15 +2307,15 @@ impl AppWindow {
     /// Starts a terminal for `space`, on `on` (another machine) or here. An
     /// empty `cwd`: the machine's home. With no argv, that machine's core
     /// picks its own shell.
-    fn spawn(&self, argv: Option<Vec<String>>, cwd: String, space: &str, ctx: &str, on: Option<&str>) -> Result<String, String> {
+    fn spawn(&self, argv: Option<Vec<String>>, cwd: String, space: &str, ctx: &str, on: Option<&str>, size: Option<(u16, u16)>) -> Result<String, String> {
         let argv = argv.unwrap_or_default();
         let cwd = Some(cwd).filter(|c| !c.is_empty());
         self.require_document(on)?;
         let labels = json!({ "herdr.space": crate::mirror::local(space, on), "herdr.tab": crate::mirror::local(ctx, on), "herdr.seen": "0" });
-        let addr = match self.core.run(argv.clone(), cwd.clone(), labels.clone(), on) {
+        let addr = match self.core.run(argv.clone(), cwd.clone(), labels.clone(), on, size) {
             // An agent on a machine without `sh` (Windows): in its PowerShell instead.
             Err(e) if on.is_some() && argv.first().map(String::as_str) == Some("sh") && format!("{e:#}").contains("not found") => {
-                self.core.run(Self::powershell_argv(&argv), cwd, labels, on)
+                self.core.run(Self::powershell_argv(&argv), cwd, labels, on, size)
             }
             r => r,
         }
@@ -2351,7 +2352,7 @@ impl AppWindow {
 
     /// A space with its first tab and terminal, shown at once.
     /// `machine`: another machine (`hc machine ls`); its space starts in that machine's home.
-    fn new_space(&mut self, name: &str, folder: Option<String>, ctx_name: Option<&str>, argv: Option<Vec<String>>, task: Option<&str>, machine: Option<String>) -> Result<Value, String> {
+    fn new_space(&mut self, name: &str, folder: Option<String>, ctx_name: Option<&str>, argv: Option<Vec<String>>, task: Option<&str>, machine: Option<String>, window: &Window) -> Result<Value, String> {
         let on = machine.as_deref();
         // The focused pane's folder only means something on its own machine.
         let here = || self.model.focused_pane().and_then(|p| self.model.address_of(&p))
@@ -2359,7 +2360,8 @@ impl AppWindow {
             .and_then(|a| self.cwds.get(&a).cloned());
         let folder = folder.or_else(here).unwrap_or_else(|| if on.is_some() { String::new() } else { home() });
         let (space, ctx, pane) = (self.model.fresh_id_on("sp", on), self.model.fresh_id_on("tb", on), self.model.fresh_id_on("p", on));
-        let addr = self.spawn(Self::agent_argv(argv.clone(), task, on).or(argv), folder.clone(), &space, &ctx, on)?;
+        let size = self.initial_size(&Tab::new(&ctx, "", &pane, "").root, &pane, window);
+        let addr = self.spawn(Self::agent_argv(argv.clone(), task, on).or(argv), folder.clone(), &space, &ctx, on, size)?;
         let ctx_name = ctx_name.map(str::trim).unwrap_or_default();
         self.model.add_space(&space, name.trim(), &folder, Tab::new(&ctx, ctx_name, &pane, &addr));
         if let Some(p) = self.model.space_mut(&space) {
@@ -2369,7 +2371,7 @@ impl AppWindow {
     }
 
     /// A tab in a space (default: the shown one), shown at once.
-    fn new_tab(&mut self, space: Option<String>, name: &str, folder: Option<String>, argv: Option<Vec<String>>, task: Option<&str>) -> Result<Value, String> {
+    fn new_tab(&mut self, space: Option<String>, name: &str, folder: Option<String>, argv: Option<Vec<String>>, task: Option<&str>, window: &Window) -> Result<Value, String> {
         let space = space.or_else(|| self.model.active_space().map(|p| p.id.clone())).ok_or("no space yet: make one first (space.new)")?;
         if self.model.space(&space).is_none() {
             return Err(format!("no space {space:?}"));
@@ -2377,7 +2379,8 @@ impl AppWindow {
         let folder = folder.unwrap_or_else(|| self.folder_for(&space));
         let on = self.machine_of(&space);
         let (ctx, pane) = (self.model.fresh_id_on("tb", on.as_deref()), self.model.fresh_id_on("p", on.as_deref()));
-        let addr = self.spawn(Self::agent_argv(argv.clone(), task, on.as_deref()).or(argv), folder, &space, &ctx, on.as_deref())?;
+        let size = self.initial_size(&Tab::new(&ctx, "", &pane, "").root, &pane, window);
+        let addr = self.spawn(Self::agent_argv(argv.clone(), task, on.as_deref()).or(argv), folder, &space, &ctx, on.as_deref(), size)?;
         self.model.add_tab(&space, Tab::new(&ctx, name.trim(), &pane, &addr));
         self.model.active = Some(space.clone());
         Ok(json!({ "space": space, "tab": ctx, "terminal": addr }))
@@ -2400,7 +2403,7 @@ impl AppWindow {
         Ok(json!({ "space": space, "tab": ctx, "pane": pane }))
     }
 
-    fn split(&mut self, pane: Option<String>, axis: Axis, argv: Option<Vec<String>>, folder: Option<String>) -> Result<Value, String> {
+    fn split(&mut self, pane: Option<String>, axis: Axis, argv: Option<Vec<String>>, folder: Option<String>, window: &Window) -> Result<Value, String> {
         let target = pane.or_else(|| self.model.focused_pane()).ok_or("no pane to split")?;
         let (Some(p), Some(c)) = (self.model.space_of(&target), self.model.tab_of(&target)) else { return Err(format!("no pane {target:?}")) };
         let (space, ctx, fallback) = (p.id.clone(), c.id.clone(), p.folder.clone());
@@ -2409,7 +2412,11 @@ impl AppWindow {
         // A split stays on the machine of the pane it splits (else its space's).
         let on = target_addr.and_then(|a| a.split_once('/').map(|(m, _)| m.to_owned())).or_else(|| self.machine_of(&space));
         let new = self.model.fresh_id_on("p", on.as_deref());
-        let addr = self.spawn(argv, cwd, &space, &ctx, on.as_deref())?;
+        let mut root = self.model.tab(&ctx).expect("target tab").root.clone();
+        root.split(&target, axis, Node::block(new.clone(), Content::Terminal { terminal: String::new() }), "initial-size".into());
+        let size = self.model.active_tab().filter(|tab| tab.id == ctx)
+            .and_then(|_| self.initial_size(&root, &new, window));
+        let addr = self.spawn(argv, cwd, &space, &ctx, on.as_deref(), size)?;
         self.model.split(&target, axis, &new, &addr);
         Ok(json!({ "pane": new, "terminal": addr }))
     }
@@ -2762,7 +2769,7 @@ impl AppWindow {
             // ---- spaces
             "space.new" => {
                 let name = Self::arg(a, "name").unwrap_or_default();
-                let r = self.new_space(name, Self::owned(a, "folder"), Self::arg(a, "tab"), Self::argv(a), Self::arg(a, "task"), Self::owned(a, "machine").filter(|m| !m.is_empty()));
+                let r = self.new_space(name, Self::owned(a, "folder"), Self::arg(a, "tab"), Self::argv(a), Self::arg(a, "task"), Self::owned(a, "machine").filter(|m| !m.is_empty()), window);
                 self.answer(r);
             }
             "space.close" => {
@@ -2814,9 +2821,9 @@ impl AppWindow {
                     Some(m) => self.new_mod_tab(Self::owned(a, "space"), name, m, a.get("props").cloned().unwrap_or(Value::Null)),
                     // A person's new tab with no space open starts one, as space.new does.
                     None if person && a.get("space").is_none() && self.model.active_space().is_none() => {
-                        self.new_space("", Self::owned(a, "folder"), Some(name), Self::argv(a), Self::arg(a, "task"), None)
+                        self.new_space("", Self::owned(a, "folder"), Some(name), Self::argv(a), Self::arg(a, "task"), None, window)
                     }
-                    None => self.new_tab(Self::owned(a, "space"), name, Self::owned(a, "folder"), Self::argv(a), Self::arg(a, "task")),
+                    None => self.new_tab(Self::owned(a, "space"), name, Self::owned(a, "folder"), Self::argv(a), Self::arg(a, "task"), window),
                 };
                 self.answer(r);
             }
@@ -2884,7 +2891,7 @@ impl AppWindow {
                 };
                 let r = match Self::owned(a, "mod") {
                     Some(name) => self.split_mod(Self::owned(a, "pane"), axis, name, a.get("props").cloned().unwrap_or(Value::Null)),
-                    None => self.split(Self::owned(a, "pane"), axis, Self::argv(a), None),
+                    None => self.split(Self::owned(a, "pane"), axis, Self::argv(a), None, window),
                 };
                 self.answer(r);
             }
@@ -2950,13 +2957,13 @@ impl AppWindow {
             "terminal.open" => {
                 let argv = Self::argv(a);
                 let r = match Self::arg(a, "place").unwrap_or("tab") {
-                    "right" => self.split(None, Axis::Row, argv, Self::owned(a, "folder")),
-                    "down" => self.split(None, Axis::Column, argv, Self::owned(a, "folder")),
+                    "right" => self.split(None, Axis::Row, argv, Self::owned(a, "folder"), window),
+                    "down" => self.split(None, Axis::Column, argv, Self::owned(a, "folder"), window),
                     _ => {
                         let name = Self::owned(a, "name")
                             .or_else(|| argv.as_ref().and_then(|v| v.first()).map(|p| p.rsplit('/').next().unwrap_or(p).to_owned()))
                             .unwrap_or_else(|| "shell".into());
-                        self.new_tab(None, &name, Self::owned(a, "folder"), argv, None)
+                        self.new_tab(None, &name, Self::owned(a, "folder"), argv, None, window)
                     }
                 };
                 self.answer(r);
@@ -3860,7 +3867,7 @@ impl AppWindow {
     /// A pane in its frame: the look, and the header mod above or below it
     /// (on hover: drawn over the terminal, so it never resizes).
     fn frame_pane(&self, n: &Node, f: &PaneFrame, on: bool, inner: AnyElement, cx: &mut Context<Self>) -> AnyElement {
-        let line = if on { f.focus.as_ref().or(f.border.as_ref()) } else { f.border.as_ref() };
+        let line = pane_size::frame_border(f, on);
         let group = SharedString::from(format!("pane-{}", n.id));
         let mut el = div().size_full().relative().flex().flex_col().overflow_hidden().group(group.clone());
         if let Some(r) = f.radius {
@@ -3875,7 +3882,7 @@ impl AppWindow {
         el = shadow(el, f.shadow.as_deref());
         let body = div().flex_1().min_h_0().flex().child(inner);
         let Some(h) = &f.header else { return el.child(body).into_any_element() };
-        let head = div().flex_none().h(settings::z(h.height.unwrap_or(HEADER_HEIGHT))).w_full().flex()
+        let head = div().flex_none().h(settings::z(pane_size::header_height(h))).w_full().flex()
             .child(self.render_slot(&format!("{}#frame", n.id), cx));
         if h.hover() {
             let head = head.absolute().left_0().right_0().opacity(0.).group_hover(group, |s| s.opacity(1.));
@@ -3907,15 +3914,11 @@ impl AppWindow {
                 let axis = n.axis().unwrap();
                 el = if axis == Axis::Row { el.flex_row() } else { el.flex_col() };
                 let shown: Vec<&Node> = children.iter().filter(|c| !c.hidden).collect();
-                let gap = n.gap.or(frame.and_then(|f| f.gap)).unwrap_or(0.0);
+                let gap = pane_size::gap(n, frame);
                 // Weights are shares of what the fixed-size siblings leave, so they always fill it.
                 let total: f32 = shown
                     .iter()
-                    .filter_map(|c| match c.size {
-                        Some(Span::Px { .. }) => None,
-                        Some(Span::Weight { weight }) => Some(weight),
-                        None => Some(1.0),
-                    })
+                    .map(|c| pane_size::weight(c))
                     .sum::<f32>()
                     .max(f32::EPSILON);
                 for (i, child) in shown.iter().enumerate() {
@@ -3932,7 +3935,7 @@ impl AppWindow {
             Kind::Stack { header, .. } => {
                 el = el.flex_col();
                 let head = header.as_ref().map(|h| {
-                    let height = h.height.unwrap_or(HEADER_HEIGHT);
+                    let height = pane_size::header_height(h);
                     let head: AnyElement = match &h.content {
                         HeaderContent::Mod { .. } => self.render_slot(&format!("{}#header", n.id), cx),
                         HeaderContent::Builtin(_) => self.builtin_tabs(n, cx),
@@ -3951,7 +3954,7 @@ impl AppWindow {
                 }
             }
         };
-        let row = frame.and_then(|f| f.header.as_ref()).filter(|h| !h.bottom() && !h.hover()).map(|h| h.height.unwrap_or(HEADER_HEIGHT));
+        let row = frame.and_then(|f| f.header.as_ref()).filter(|h| !h.bottom() && !h.hover()).map(pane_size::header_height);
         el.children(self.render_floats(n, cx)).children(self.pane_grip(&n.id, row, cx)).into_any_element()
     }
 
@@ -4098,7 +4101,7 @@ impl AppWindow {
         let row = axis == Axis::Row;
         let zoom = settings::zoom();
         let line = n.divider.as_ref().map(|d| (d.width * zoom, c(&d.color)));
-        let width = gap * zoom + line.map_or(0.0, |l| l.0);
+        let width = pane_size::separator_width(n, gap) * zoom;
         let mut sep = div().flex_none().relative().flex().items_center().justify_center();
         sep = if row { sep.w(px(width)).h_full() } else { sep.h(px(width)).w_full() };
         if let Some((w, color)) = line {
@@ -4598,11 +4601,8 @@ fn sized(slot: Div, n: &Node, axis: Axis, total_weight: f32) -> Div {
             slot = slot.flex_none();
             slot = if row { slot.w(settings::z(v)).h_full() } else { slot.h(settings::z(v)).w_full() };
         }
-        other => {
-            let w = match other {
-                Some(Span::Weight { weight }) => weight,
-                _ => 1.0,
-            };
+        _ => {
+            let w = pane_size::weight(n);
             let s = slot.style();
             s.flex_grow = Some(w / total_weight);
             s.flex_shrink = Some(1.0);
@@ -4649,14 +4649,14 @@ fn apply_look(el: Div, n: &Node, focused: bool) -> Div {
     } else if let Some(bg) = &n.background {
         el = paint(el, bg);
     }
-    if let Some(line) = focus.and_then(|f| f.border.as_ref()).or(n.border.as_ref()) {
+    if let Some(line) = pane_size::node_border(n, focused) {
         el = el.border(settings::z(line.width)).border_color(c(&line.color));
     }
     if let Some(r) = n.radius {
         el = el.rounded(settings::z(r));
     }
-    if let Some(p) = n.padding {
-        let (y, x) = p.axes();
+    if n.padding.is_some() {
+        let (y, x) = pane_size::padding(n);
         el = el.py(settings::z(y)).px(settings::z(x));
     }
     shadow(el, n.shadow.as_deref())
@@ -5237,6 +5237,8 @@ export default class Probe extends View {
             assert_eq!(seen(cx), Some(json!(false)), "blurred: {:?}", crate::mods::shared("probe.seen"));
         }
     }
+
+    include!("window/pane_size_tests.rs");
 
     #[test]
     fn terminal_menu_preserves_clicked_target_and_uses_mod_dimensions() {

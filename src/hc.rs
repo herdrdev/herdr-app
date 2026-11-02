@@ -388,9 +388,14 @@ impl Core {
 
     /// Starts a program in a new core terminal and returns its address (`tN`).
     /// Starts a terminal, here or on another machine (`on`: its name in `hc machine ls`).
-    pub fn run(&self, argv: Vec<String>, cwd: Option<String>, labels: Value, on: Option<&str>) -> Result<String> {
+    pub fn run(&self, argv: Vec<String>, cwd: Option<String>, labels: Value, on: Option<&str>, size: Option<(u16, u16)>) -> Result<String> {
         let env = json!({"TERM": "xterm-256color", "COLORTERM": "truecolor", "TERM_PROGRAM": "herdr"});
-        let r = self.call("terminal.run", json!({"argv": argv, "cwd": cwd, "env": env, "labels": labels, "on": on, "keep": true}))?;
+        let mut params = json!({"argv": argv, "cwd": cwd, "env": env, "labels": labels, "on": on, "keep": true});
+        // Released cores ignore unknown parameters, including when forwarding to another machine.
+        if let Some((cols, rows)) = size {
+            params["size"] = json!({"cols": cols, "rows": rows});
+        }
+        let r = self.call("terminal.run", params)?;
         r.get("address")
             .and_then(Value::as_str)
             .map(str::to_owned)

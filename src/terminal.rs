@@ -22,6 +22,13 @@ fn pad() -> (f32, f32) {
     (p[0] * zoom, p[1] * zoom)
 }
 
+pub(crate) fn grid_size(bounds: Size<Pixels>, cell: Size<Pixels>) -> (u16, u16) {
+    let (px_, py_) = pad();
+    let cols = ((f32::from(bounds.width) - 2.0 * px_) / f32::from(cell.width)).floor().max(2.0) as u16;
+    let rows = ((f32::from(bounds.height) - 2.0 * py_) / f32::from(cell.height)).floor().max(1.0) as u16;
+    (cols, rows)
+}
+
 pub fn hsla(c: Rgb) -> Hsla {
     Rgba { r: c.0 as f32 / 255.0, g: c.1 as f32 / 255.0, b: c.2 as f32 / 255.0, a: 1.0 }.into()
 }
@@ -331,6 +338,12 @@ impl TerminalView {
             self.title = shown.to_owned();
             cx.emit(TerminalEvent::TitleChanged);
         }
+    }
+
+    #[cfg(test)]
+    pub(crate) fn dimensions(&self) -> (u16, u16) {
+        let grid = self.grid.borrow();
+        (grid.vt.cols, grid.vt.rows)
     }
 
     pub fn focus_handle(&self) -> &FocusHandle {
@@ -1524,9 +1537,7 @@ impl Render for TerminalView {
                         let dev = device_cell(cell, g.scale);
                         // Before the size, so a program woken by it asks for the new cell.
                         g.refresh_theme(&vt::theme(), dev);
-                        let (px_, py_) = pad();
-                        let cols = ((f32::from(bounds.size.width) - 2.0 * px_) / f32::from(cell.width)).floor().max(2.0) as u16;
-                        let rows = ((f32::from(bounds.size.height) - 2.0 * py_) / f32::from(cell.height)).floor().max(1.0) as u16;
+                        let (cols, rows) = grid_size(bounds.size, cell);
                         if (cols, rows) != (g.vt.cols, g.vt.rows) || dev != g.vt_cell {
                             g.vt.resize(cols, rows, dev.0, dev.1);
                             g.vt_cell = dev;
