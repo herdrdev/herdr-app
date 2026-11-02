@@ -49,7 +49,7 @@ fn background_rects(window: Bounds<Pixels>, holes: Vec<Bounds<Pixels>>) -> Vec<B
 
 /// How solid a terminal paints its default background. A see-through window
 /// painted the theme's at its root, and left a hole for one a program set
-/// (OSC 11), so that one goes here at the window's opacity, stacked on nothing.
+/// (OSC 11), so that one goes here at the window's opacity, not stacked on it.
 /// Painting it here, not at the root, keeps it above a layout's solid surfaces.
 fn default_bg_opacity(own: bool, terminal_opacity: f32, window_opacity: f32) -> f32 {
     if own { window_opacity } else { terminal_opacity }
