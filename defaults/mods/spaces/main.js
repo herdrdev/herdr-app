@@ -76,10 +76,11 @@ export default class Spaces extends View {
     const now = Date.now();
     const sp = spaces();
     for (const s of sp) if (!this.shown.has(s.id)) this.born[s.id] ??= now;
-    const due = this.due(now, sp, panes());
+    const ps = panes();
+    const due = this.due(now, sp, ps);
     if (due.size) this.refreshGit(due, cx);
     if (sp.some((s) => !this.shown.has(s.id))) cx.notify();
-    this.follow();
+    this.follow(sp, ps);
   }
 
   // Places whose git could have changed: new ones (a new space, a cd), where a
@@ -252,8 +253,7 @@ export default class Spaces extends View {
   }
 
   // Spaces in order, each worktree space moved under its main checkout's.
-  ordered() {
-    const sp = spaces(), ps = panes();
+  ordered(sp = spaces(), ps = panes()) {
     const ready = (w) => this.shown.has(w.id) || where(w, ps) in this.git || Date.now() - (this.born[w.id] ??= Date.now()) > 1500;
     for (const w of sp) if (!this.shown.has(w.id) && ready(w)) this.shown.add(w.id);
     const list = sp.map((w, i) => ({ w, i, g: this.git[where(w, ps)] ?? null })).filter((r) => this.shown.has(r.w.id));
@@ -274,9 +274,10 @@ export default class Spaces extends View {
 
   // Number keys, space.next/prev and the rail's numbers go by the spaces' own
   // order: keep it the order shown here, each worktree under its checkout.
-  follow() {
-    const sp = spaces();
-    const shown = this.ordered().map((r) => r.w.id);
+  follow(sp = spaces(), ps = panes()) {
+    // A drag holds a row by its place: nothing moves under it.
+    if (this.pressed !== null) return;
+    const shown = this.ordered(sp, ps).map((r) => r.w.id);
     const listed = new Set(shown);
     let k = 0;
     const want = sp.map((w) => (listed.has(w.id) ? shown[k++] : w.id));

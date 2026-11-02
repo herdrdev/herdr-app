@@ -115,12 +115,18 @@ test("number keys and space.next follow the sidebar: a worktree moves under its 
   };
   const { view } = harness([], new Map(), list, run);
   view.shown = new Set(list.map((s) => s.id));
+  view.pressed = null;
   const repo = JSON.stringify([null, "/.git"]);
   view.git = {
     [JSON.stringify([null, "/src/repo"])]: { repo, linked: false },
     [JSON.stringify([null, "/src/other"])]: null,
     [JSON.stringify([null, "/src/repo-wt"])]: { repo, linked: true },
   };
+  // A row held for a drag is found by its place: nothing moves under it.
+  view.pressed = 1;
+  view.follow();
+  expect(moves).toEqual([]);
+  view.pressed = null;
   view.follow();
   expect(moves).toEqual([["space.move", { id: "wt", index: 2 }]]);
   expect(list.map((s) => s.id)).toEqual(["repo", "wt", "other"]);
