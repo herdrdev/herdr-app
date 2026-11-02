@@ -397,6 +397,9 @@ pub struct Person {
     /// macOS Option sends Alt shortcuts, or follows the keyboard layout.
     #[serde(skip_serializing_if = "OptionAsAlt::is_auto")]
     pub option_as_alt: OptionAsAlt,
+    /// The system-wide key that shows or hides Herdr (hotkey.rs); off unless set.
+    #[serde(skip_serializing_if = "crate::hotkey::Setting::is_off")]
+    pub hotkey: crate::hotkey::Setting,
     /// Light or dark: the system's, or one always.
     #[serde(skip_serializing_if = "Appearance::is_system")]
     pub appearance: Appearance,
@@ -457,6 +460,7 @@ impl Default for Person {
             pane_scrollbars: true,
             minimum_contrast: 1.0,
             option_as_alt: OptionAsAlt::Auto,
+            hotkey: crate::hotkey::Setting::Off,
             appearance: Appearance::System,
             theme: None,
             colors: BTreeMap::new(),
@@ -894,6 +898,19 @@ mod tests {
     }
 
     #[test]
+    fn hotkey_is_off_and_unwritten_by_default() {
+        let default = Person::default();
+        assert!(default.hotkey.is_off());
+        assert!(!serde_json::to_value(&default).unwrap().as_object().unwrap().contains_key("hotkey"));
+        let on: Person = serde_json::from_value(serde_json::json!({"hotkey": true})).unwrap();
+        assert_eq!(on.hotkey.key(), Some(crate::hotkey::DEFAULT));
+        assert_eq!(serde_json::to_value(&on).unwrap()["hotkey"], serde_json::json!(true));
+        let own: Person = serde_json::from_value(serde_json::json!({"hotkey": "ctrl-alt-space"})).unwrap();
+        assert_eq!(own.hotkey.key(), Some("ctrl-alt-space"));
+        assert!(serde_json::from_value::<Person>(serde_json::json!({"hotkey": 1})).is_err());
+    }
+
+    #[test]
     fn minimum_contrast_defaults_off_and_validates_the_ratio() {
         let default: Person = serde_json::from_str("{}").unwrap();
         assert_eq!(default.minimum_contrast, 1.0);
@@ -941,7 +958,7 @@ mod tests {
     /// settings.json key.
     #[test]
     fn the_guide_explains_every_setting() {
-        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), ui_font: Some(String::new()), telemetry: false, clipboard_write: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), ..Person::default() };
+        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), ui_font: Some(String::new()), telemetry: false, clipboard_write: false, hotkey: crate::hotkey::Setting::Default, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), ..Person::default() };
         let keys: Vec<String> = serde_json::to_value(&all).unwrap().as_object().unwrap().keys().cloned().collect();
         let guide = include_str!("../defaults/AGENTS.md");
         let section = guide.split("## The person").nth(1).and_then(|s| s.split("\n## ").next()).unwrap_or_default();
