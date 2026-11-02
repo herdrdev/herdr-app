@@ -680,7 +680,8 @@ What's about the user, never a look:
   switches. Linux and Windows are unchanged.
 - `smooth_scrolling`: `true` enables pixel-continuous terminal-owned scrollback
   and bounded wheel animation (off by default). Pixel history events follow
-  directly; line events, including fractional X11 input, ease over 120 ms.
+  directly; line events, including fractional X11 input, ease over 160 ms,
+  preserving speed across repeated wheel events and stopping without overshoot.
   For mouse-reporting or alternate-screen programs, recognizable text-region
   scroll redraws after wheel input are animated; fixed headers/composers stay
   put, and wheel events keep their existing routing. Typing, pointer interaction

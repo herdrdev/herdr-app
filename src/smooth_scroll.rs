@@ -4,8 +4,43 @@
 
 use std::time::Duration;
 
-const TRANSITION: Duration = Duration::from_millis(120);
+const TRANSITION: Duration = Duration::from_millis(160);
 const EPSILON: f64 = 1e-9;
+
+/// A bounded Hermite curve: start and stop gently, preserving velocity when
+/// wheel input retargets a moving view. Clamp its tangent to remain monotone.
+#[derive(Clone, Copy, Debug)]
+pub(crate) struct ScrollAnimation {
+    from: f64,
+    to: f64,
+    tangent: f64,
+    started: Duration,
+}
+
+impl ScrollAnimation {
+    pub(crate) fn new(from: f64, to: f64, velocity: f64, now: Duration) -> Self {
+        let distance = to - from;
+        let tangent = if distance * velocity > 0.0 {
+            velocity.signum() * (velocity.abs() * TRANSITION.as_secs_f64()).min(3.0 * distance.abs())
+        } else { 0.0 };
+        Self { from, to, tangent, started: now }
+    }
+
+    /// Position, rows per second, and whether another frame is needed.
+    pub(crate) fn sample(self, now: Duration) -> (f64, f64, bool) {
+        let elapsed = now.saturating_sub(self.started);
+        if elapsed >= TRANSITION { return (self.to, 0.0, false); }
+        let t = elapsed.as_secs_f64() / TRANSITION.as_secs_f64();
+        let distance = self.to - self.from;
+        let position = self.from + distance * t * t * (3.0 - 2.0 * t)
+            + self.tangent * t * (1.0 - t) * (1.0 - t);
+        let velocity = (distance * 6.0 * t * (1.0 - t)
+            + self.tangent * (1.0 - t) * (1.0 - 3.0 * t)) / TRANSITION.as_secs_f64();
+        (position, velocity, true)
+    }
+
+    fn shift(&mut self, rows: f64) { self.from += rows; self.to += rows; }
+}
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ScrollOwner {
@@ -46,18 +81,12 @@ impl Presentation {
     }
 }
 
-#[derive(Clone, Copy, Debug)]
-struct Transition {
-    from: f64,
-    started: Duration,
-}
-
 #[derive(Debug)]
 pub struct SmoothScroll {
     position: f64,
     target: f64,
     extent_rows: u32,
-    transition: Option<Transition>,
+    transition: Option<ScrollAnimation>,
     animate_wheel: bool,
 }
 
@@ -88,16 +117,10 @@ impl SmoothScroll {
         let Some(transition) = self.transition else {
             return false;
         };
-        let elapsed = now.saturating_sub(transition.started);
-        if elapsed >= TRANSITION {
-            self.position = self.target;
-            self.transition = None;
-            return false;
-        }
-        let t = elapsed.as_secs_f64() / TRANSITION.as_secs_f64();
-        let eased = 1.0 - (1.0 - t).powi(3);
-        self.position = self.bounded(transition.from + (self.target - transition.from) * eased);
-        true
+        let (position, _, active) = transition.sample(now);
+        self.position = self.bounded(position);
+        if !active { self.transition = None; }
+        active
     }
 
     /// High-resolution gestures already carry OS momentum. Follow their pixel
@@ -118,6 +141,7 @@ impl SmoothScroll {
             return;
         }
         self.advance(now);
+        let velocity = self.transition.map_or(0.0, |motion| motion.sample(now).1);
         let pending = self.target - self.position;
         let anchor = if pending * delta_rows < 0.0 {
             self.position
@@ -129,10 +153,7 @@ impl SmoothScroll {
             self.position = self.target;
             self.transition = None;
         } else {
-            self.transition = Some(Transition {
-                from: self.position,
-                started: now,
-            });
+            self.transition = Some(ScrollAnimation::new(self.position, self.target, velocity, now));
         }
     }
 
@@ -155,7 +176,7 @@ impl SmoothScroll {
             self.position += added;
             self.target += added;
             if let Some(transition) = &mut self.transition {
-                transition.from += added;
+                transition.shift(added);
             }
         }
         self.position = self.bounded(self.position);
@@ -230,7 +251,7 @@ mod tests {
         scroll.wheel_rows(3.0, ms(0));
         assert!(scroll.advance(ms(60)));
         assert!(scroll.position > 0.0 && scroll.position < 3.0);
-        assert!(!scroll.advance(ms(120)));
+        assert!(!scroll.advance(ms(160)));
         close(scroll.position, 3.0);
         assert!(!scroll.advance(ms(1000)));
     }
@@ -255,13 +276,14 @@ mod tests {
     #[test]
     fn opposite_input_immediately_reverses_pending_motion() {
         let mut scroll = SmoothScroll::new(100, true);
+        scroll.jump_to(10.0);
         scroll.wheel_rows(12.0, ms(0));
         scroll.advance(ms(30));
         let reversed_at = scroll.position;
         scroll.wheel_rows(-3.0, ms(30));
         scroll.advance(ms(31));
         assert!(scroll.position < reversed_at);
-        scroll.advance(ms(150));
+        scroll.advance(ms(200));
         close(scroll.position, reversed_at - 3.0);
     }
 
@@ -273,7 +295,7 @@ mod tests {
         let before = scroll.position;
         scroll.wheel_rows(3.0, ms(30));
         close(scroll.position, before);
-        scroll.advance(ms(150));
+        scroll.advance(ms(200));
         close(scroll.position, 6.0);
     }
 
@@ -311,7 +333,7 @@ mod tests {
         scroll.touchpad_pixels(-100.0, 20.0);
         close(scroll.position, 0.0);
         scroll.wheel_rows(1000.0, ms(0));
-        scroll.advance(ms(120));
+        scroll.advance(ms(160));
         close(scroll.position, 5.0);
         scroll.touchpad_pixels(10000.0, 20.0);
         close(scroll.position, 5.0);
@@ -441,5 +463,36 @@ mod tests {
         scroll.wheel_rows(3.0, ms(0));
         assert!(!scroll.advance(ms(10)));
         close(scroll.position, 5.0);
+    }
+
+    #[test]
+    fn retargeting_keeps_velocity_and_has_no_position_jump() {
+        let mut scroll = SmoothScroll::new(100, true);
+        scroll.wheel_rows(3.0, ms(0));
+        scroll.advance(ms(40));
+        let position = scroll.position;
+        let velocity = scroll.transition.unwrap().sample(ms(40)).1;
+        scroll.wheel_rows(3.0, ms(40));
+        let (after, after_velocity, _) = scroll.transition.unwrap().sample(ms(40));
+        close(after, position);
+        close(after_velocity, velocity);
+        assert!(velocity > 0.0);
+    }
+
+    #[test]
+    fn motion_starts_and_ends_at_rest_and_cannot_overshoot() {
+        for (from, to) in [(0.0, 3.0), (3.0, 0.0)] {
+            let gentle = ScrollAnimation::new(from, to, 0.0, ms(0));
+            close(gentle.sample(ms(0)).1, 0.0);
+            close(gentle.sample(ms(160)).1, 0.0);
+            for velocity in [-1000.0, 0.0, 1000.0] {
+                let animation = ScrollAnimation::new(from, to, velocity, ms(0));
+                for t in 0..=160 {
+                    let (position, speed, _) = animation.sample(ms(t));
+                    assert!(position >= from.min(to) - 1e-9 && position <= from.max(to) + 1e-9);
+                    assert!(speed * (to - from) >= -1e-9);
+                }
+            }
+        }
     }
 }

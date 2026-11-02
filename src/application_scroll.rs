@@ -1,11 +1,12 @@
 //! Presentation of application-owned scroll redraws. Input remains the
 //! application's: only coherent row movement after wheel input is animated.
 
+use crate::smooth_scroll::ScrollAnimation;
 use std::collections::HashSet;
 use std::ops::Range;
+use std::rc::Rc;
 use std::time::Duration;
 
-const ANIMATION: Duration = Duration::from_millis(120);
 const RESPONSE_WINDOW: Duration = Duration::from_millis(500);
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -34,10 +35,29 @@ fn detect<R: PartialEq>(
             .rev()
             .take_while(|(a, b)| a == b)
             .count();
-    let keys: Vec<_> = new.iter().map(&mut anchor).collect();
+    // Static rows cannot establish motion. Check that enough changed anchors
+    // exist before comparing offsets, and avoid rechecking them in every run.
+    let keys: Vec<_> = old.iter().zip(new)
+        .map(|(a, b)| (a != b).then(|| anchor(b)).flatten()).collect();
+    let mut distinct = [0; 3];
+    let mut count = 0;
+    for &key in keys.iter().flatten() {
+        if !distinct[..count].contains(&key) {
+            distinct[count] = key;
+            count += 1;
+            if count == 3 { break; }
+        }
+    }
+    if count < 3 { return None; }
     let mut best: Option<(usize, ScrollRegion)> = None;
     let mut ambiguous = false;
     for distance in 1..=(end - start) / 2 {
+        // Even a perfect remaining run cannot beat this match. This bounds
+        // full-screen, small wheel steps by their distance instead of height².
+        // Keep equal scores in play so ambiguity still falls back immediately.
+        if best.as_ref().is_some_and(|(score, _)| *score > 3 * (end - start - distance)) {
+            break;
+        }
         let delta = distance as isize * direction.signum();
         let mut run = start;
         while run < end {
@@ -54,10 +74,8 @@ fn detect<R: PartialEq>(
             let first = run;
             let mut anchors = HashSet::new();
             while run < end && matches(run) {
-                if old[run] != new[run] {
-                    if let Some(key) = keys[run] {
-                        anchors.insert(key);
-                    }
+                if let Some(key) = keys[run] {
+                    anchors.insert(key);
                 }
                 run += 1;
             }
@@ -96,14 +114,13 @@ pub struct Layer<R> {
     pub region: Range<usize>,
     /// Absolute screen row of rows[0], including outgoing guard rows.
     pub first_row: isize,
-    pub rows: Vec<R>,
+    pub rows: Rc<[R]>,
     pub offset_rows: f64,
 }
 
 struct Motion<R> {
     layer: Layer<R>,
-    from: f64,
-    started: Duration,
+    animation: ScrollAnimation,
 }
 
 pub struct ApplicationScroll<R> {
@@ -143,13 +160,12 @@ impl<R: Clone + PartialEq> ApplicationScroll<R> {
 
     fn advance(&mut self, now: Duration) {
         if let Some(motion) = &mut self.motion {
-            let elapsed = now.saturating_sub(motion.started);
-            if elapsed >= ANIMATION {
+            let (offset, _, active) = motion.animation.sample(now);
+            if !active {
                 self.motion = None;
                 return;
             }
-            let remaining = 1.0 - elapsed.as_secs_f64() / ANIMATION.as_secs_f64();
-            motion.layer.offset_rows = motion.from * remaining.powi(3);
+            motion.layer.offset_rows = offset;
         }
     }
 
@@ -183,11 +199,12 @@ impl<R: Clone + PartialEq> ApplicationScroll<R> {
         let observed = detected.clone();
         if let Some(scroll) = detected {
             let prior = self.motion.take().filter(|m| m.layer.region == scroll.rows);
-            let (first, old, offset) = match prior {
-                Some(m) => (m.layer.first_row, m.layer.rows, m.layer.offset_rows),
+            let (first, old, offset, velocity) = match prior {
+                Some(m) => (m.layer.first_row, m.layer.rows, m.layer.offset_rows, m.animation.sample(now).1),
                 None => (
                     scroll.rows.start as isize,
-                    self.previous[scroll.rows.clone()].to_vec(),
+                    Rc::from(&self.previous[scroll.rows.clone()]),
+                    0.0,
                     0.0,
                 ),
             };
@@ -195,7 +212,7 @@ impl<R: Clone + PartialEq> ApplicationScroll<R> {
             if offset.abs() > 1e-9 && offset.abs() < scroll.rows.len() as f64 {
                 let top = scroll.rows.start as isize - offset.max(0.0).ceil() as isize;
                 let bottom = scroll.rows.end as isize + (-offset).max(0.0).ceil() as isize;
-                let mut buffer = Vec::new();
+                let mut buffer = Vec::with_capacity((bottom - top) as usize);
                 for at in top..bottom {
                     let value = if scroll.rows.contains(&(at as usize)) && at >= 0 {
                         rows.get(at as usize)
@@ -214,11 +231,10 @@ impl<R: Clone + PartialEq> ApplicationScroll<R> {
                         layer: Layer {
                             region: scroll.rows,
                             first_row: top,
-                            rows: buffer,
+                            rows: buffer.into(),
                             offset_rows: offset,
                         },
-                        from: offset,
-                        started: now,
+                        animation: ScrollAnimation::new(offset, 0.0, velocity, now),
                     });
                 }
             }
@@ -241,7 +257,8 @@ impl<R: Clone + PartialEq> ApplicationScroll<R> {
             // An unrelated redraw is not evidence of scrolling.
             self.motion = None;
         }
-        self.previous = rows.to_vec();
+        self.previous.clear();
+        self.previous.extend_from_slice(rows);
         observed
     }
 
@@ -316,7 +333,7 @@ mod tests {
         assert_eq!(start.rows.last().unwrap(), "chat row 111");
         assert_eq!(start.rows[3], "chat row 100");
         assert!(s.layer(ms(62)).unwrap().offset_rows > -3.0);
-        assert!(s.layer(ms(122)).is_none());
+        assert!(s.layer(ms(162)).is_none());
         assert!(s.layer(ms(1000)).is_none());
     }
 
@@ -338,9 +355,11 @@ mod tests {
         s.wheel(3, ms(0));
         s.update(&frame(97), ms(1), key);
         let old = s.layer(ms(31)).unwrap();
+        let velocity = s.motion.as_ref().unwrap().animation.sample(ms(31)).1;
         s.wheel(3, ms(31));
         s.update(&frame(94), ms(31), key);
         let new = s.layer(ms(31)).unwrap();
+        assert!((s.motion.as_ref().unwrap().animation.sample(ms(31)).1 - velocity).abs() < 1e-9);
         assert!((new.offset_rows - (old.offset_rows - 3.0)).abs() < 1e-9);
         for (i, row) in old.rows.iter().enumerate() {
             let y = old.first_row as f64 + i as f64 + old.offset_rows;
@@ -451,5 +470,21 @@ mod tests {
         new = old.clone();
         new[0] = "only one anchor".into();
         assert!(detect(&old, &new, -1, key).is_none());
+    }
+
+    #[test]
+    fn animation_frames_share_the_retained_rows() {
+        let mut s = started();
+        s.wheel(3, ms(0));
+        s.update(&frame(97), ms(1), key);
+        let a = s.layer(ms(10)).unwrap();
+        let b = s.layer(ms(20)).unwrap();
+        assert!(Rc::ptr_eq(&a.rows, &b.rows));
+        assert!(b.offset_rows > a.offset_rows);
+    }
+
+    #[test]
+    fn colliding_anchor_hashes_still_require_equal_rows() {
+        assert!(detect(&frame(100), &frame(97), -1, |_| Some(42)).is_none());
     }
 }

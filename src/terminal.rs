@@ -81,6 +81,9 @@ struct Grid {
     cursor_at: Option<Bounds<Pixels>>,
     /// Each row's drawing by position, kept while the row is the same (`Rc`).
     painted: Vec<(Rc<Vec<vt::Cell>>, Vec<RowOp>, Option<usize>)>,
+    /// Outgoing application rows also keep their shaped drawing during motion.
+    application_painted: Vec<(Rc<Vec<vt::Cell>>, Vec<RowOp>)>,
+    application_rows: Vec<ApplicationRow>,
     /// Font size, cell size, font, loaded fonts and ligature setting used to draw.
     painted_with: (u32, Size<Pixels>, String, u64, bool),
     history_scroll: Option<HistoryScroll>,
@@ -285,6 +288,8 @@ impl TerminalView {
                 marked: None,
                 cursor_at: None,
                 painted: Vec::new(),
+                application_painted: Vec::new(),
+                application_rows: Vec::new(),
                 painted_with: (0, Size::default(), String::new(), 0, false),
                 history_scroll: None,
                 scroll_offset: 0.0,
@@ -1399,8 +1404,11 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
         && !link_mods(&window.modifiers()) && g.marked.is_none() && !g.vt.has_image_placements();
     let mut application_layer = if application_enabled {
         if !g.vt.render_held() {
-            let rows: Vec<_> = frame.rows.iter().cloned().map(ApplicationRow).collect();
+            let mut rows = std::mem::take(&mut g.application_rows);
+            rows.clear();
+            rows.extend(frame.rows.iter().cloned().map(ApplicationRow));
             let matched = g.application_scroll.update_with_overlays(&rows, now, application_row_anchor, application_overlay_row);
+            g.application_rows = rows;
             if matched.is_some() { tracing::debug!(?matched, cursor = ?frame.cursor_cell, "application scroll redraw"); }
         }
         g.application_scroll.layer(now)
@@ -1474,9 +1482,17 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     // When every row changed (output scrolling), nothing is kept: the next
     // frame would find none of them the same.
     let mut painted = std::mem::take(&mut grid.borrow_mut().painted);
-    if grid.borrow().painted_with != with || frame.all {
+    let mut application_painted = std::mem::take(&mut grid.borrow_mut().application_painted);
+    if grid.borrow().painted_with != with {
+        application_painted.clear();
         painted.clear();
     }
+    if frame.all {
+        painted.clear();
+    }
+    application_painted.retain(|(row, _)| application_layer.as_ref().is_some_and(|layer| {
+        layer.rows.iter().any(|r| Rc::ptr_eq(&r.0, row))
+    }));
     painted.truncate(frame.rows.len());
     for (y, row) in frame.rows.iter().enumerate() {
         let moving = application_layer.as_ref().is_some_and(|layer| layer.region.contains(&y));
@@ -1507,12 +1523,18 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
                 let y = layer.first_row + i as isize;
                 let shown = y as f32 + layer.offset_rows as f32;
                 if shown + 1.0 <= layer.region.start as f32 || shown >= layer.region.end as f32 { continue; }
-                let fresh;
                 let cached = (y >= 0).then(|| painted.get(y as usize)).flatten()
                     .filter(|(r, _, column)| Rc::ptr_eq(r, row) && column.is_none());
                 let ops = match cached {
                     Some((_, ops, _)) => ops,
-                    None => { fresh = row_ops(row, cell, None, window); &fresh }
+                    None => {
+                        let index = application_painted.iter().position(|(r, _)| Rc::ptr_eq(r, row))
+                            .unwrap_or_else(|| {
+                                application_painted.push((row.clone(), row_ops(row, cell, None, window)));
+                                application_painted.len() - 1
+                            });
+                        &application_painted[index].1
+                    }
                 };
                 let pos = origin + point(px(0.0), cell.height * shown);
                 paint_row_ops(ops, pos, cell, scale, window, cx);
@@ -1545,6 +1567,7 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     {
         let mut g = grid.borrow_mut();
         (g.painted, g.painted_with) = (painted, with);
+        g.application_painted = application_painted;
     }
 
     for &(y, x0, x1) in &link_spans {
@@ -1942,7 +1965,7 @@ mod tests {
             terminal.update(cx, |terminal, cx| {
                 let mut g = terminal.grid.borrow_mut();
                 let history = g.history_scroll.as_mut().unwrap();
-                history.controller.advance(history.epoch.elapsed() + Duration::from_millis(120));
+                history.controller.advance(history.epoch.elapsed() + Duration::from_millis(160));
                 let p = history.controller.presentation(height as f64).unwrap();
                 assert!((p.translate_y_px + height as f64 * 0.5).abs() < 0.001);
                 cx.notify();
