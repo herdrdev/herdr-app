@@ -1818,6 +1818,26 @@ impl EntityInputHandler for TerminalView {
     }
 }
 
+/// What dictation apps (Monologue, Wispr Flow) and screen readers see of a
+/// terminal: a text area (`AXTextArea` on macOS), focused with the pane. They
+/// type only where they find one; without it dictated text stayed on the
+/// clipboard. The screen's text is not exposed, so the area reads as empty,
+/// and text set on it is typed in as a paste, for apps that set the value
+/// rather than pressing Cmd+V.
+fn text_target(d: Stateful<Div>, view: WeakEntity<TerminalView>) -> Stateful<Div> {
+    d.role(Role::Terminal)
+        .aria_label("Terminal")
+        .aria_value("")
+        .on_a11y_action(accesskit::Action::SetValue, move |data, _, cx| {
+            if let Some(accesskit::ActionData::Value(text)) = data {
+                let _ = view.update(cx, |this, _| {
+                    let bytes = this.grid.borrow().vt.paste_bytes(text);
+                    this.send(&bytes);
+                });
+            }
+        })
+}
+
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::bench::count(&crate::bench::TERMINAL);
@@ -1864,8 +1884,7 @@ impl Render for TerminalView {
         };
         let address = self.address.clone();
 
-        div()
-            .id(SharedString::from(format!("term-{}", self.address)))
+        text_target(div().id(SharedString::from(format!("term-{}", self.address))), cx.entity().downgrade())
             .track_focus(&self.focus)
             .key_context("Terminal")
             .size_full()
@@ -2631,6 +2650,20 @@ mod tests {
         cx.run_until_parked();
         root.read_with(cx, |root, cx| assert!(root.0.read(cx).search_open));
         assert!(cx.debug_bounds("find-bar").is_some());
+    }
+
+    /// Dictation apps (Monologue, Wispr Flow) type only into a focused text
+    /// area they can see through accessibility; without a role the pane was
+    /// invisible to them and the text stayed on the clipboard.
+    #[test]
+    fn the_terminal_is_a_text_area_that_dictation_can_type_into() {
+        use super::*;
+        let element = text_target(div().id("term"), WeakEntity::new_invalid());
+        assert_eq!(element.a11y_role(), Some(gpui::Role::Terminal));
+        let mut node = gpui::accesskit::Node::new(gpui::Role::Unknown);
+        element.write_a11y_info(&mut node);
+        assert!(node.supports_action(gpui::accesskit::Action::SetValue));
+        assert_eq!(node.value(), Some(""));
     }
 
     #[test]
