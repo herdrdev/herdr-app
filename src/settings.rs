@@ -380,6 +380,8 @@ pub struct Person {
     pub font_size: Option<f32>,
     /// Enable programming ligatures in terminal fonts.
     pub font_ligatures: bool,
+    /// Pixel-continuous terminal-owned scrollback; disabled for application-owned scrolling.
+    pub smooth_scrolling: bool,
     /// The panels' font (their sizes follow zoom).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ui_font: Option<String>,
@@ -448,6 +450,7 @@ impl Default for Person {
             font: None,
             font_size: None,
             font_ligatures: false,
+            smooth_scrolling: false,
             ui_font: None,
             telemetry: true,
             clipboard_write: true,
@@ -468,6 +471,8 @@ pub struct Settings {
     pub font_family: String,
     pub font_size: f32,
     pub font_ligatures: bool,
+    /// Pixel-continuous terminal-owned scrollback; disabled for application-owned scrolling.
+    pub smooth_scrolling: bool,
     pub ui_font_family: String,
     pub ui_font_size: f32,
     /// How big the whole app is drawn (1 = as designed). The zoom keys change it.
@@ -516,6 +521,7 @@ impl Default for Settings {
             font_family: DEFAULT_FONT.into(),
             font_size: 14.0,
             font_ligatures: false,
+            smooth_scrolling: false,
             ui_font_family: "Geist".into(),
             ui_font_size: 13.0,
             zoom: 1.0,
@@ -553,6 +559,7 @@ impl Settings {
             font_family: look.font.clone().or(person.font.clone()).unwrap_or(d.font_family),
             font_size: look.font_size.or(person.font_size).unwrap_or(d.font_size),
             font_ligatures: person.font_ligatures,
+            smooth_scrolling: person.smooth_scrolling,
             ui_font_family: look.ui_font.clone().or(person.ui_font.clone()).unwrap_or(d.ui_font_family),
             ui_font_size: d.ui_font_size,
             zoom: person.zoom,
@@ -940,4 +947,12 @@ mod tests {
         let missing: Vec<&String> = keys.iter().filter(|k| !section.contains(&format!("`{k}`"))).collect();
         assert!(missing.is_empty(), "defaults/AGENTS.md (## The person) doesn't explain: {missing:?}");
     }
+}
+
+#[test]
+fn smooth_scrolling_is_an_opt_in_live_preference() {
+    assert!(!Person::default().smooth_scrolling);
+    let person: Person = serde_json::from_str(r#"{"smooth_scrolling":true}"#).unwrap();
+    assert!(person.smooth_scrolling);
+    assert!(serde_json::to_value(person).unwrap()["smooth_scrolling"].as_bool().unwrap());
 }

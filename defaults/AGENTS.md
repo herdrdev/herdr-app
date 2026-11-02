@@ -678,6 +678,12 @@ What's about the user, never a look:
   Option input on every layout. `"left"` / `"right"` makes only that Option
   key act as Alt; the other types characters. Changes apply immediately, including layout
   switches. Linux and Windows are unchanged.
+- `smooth_scrolling`: `true` enables pixel-continuous terminal-owned scrollback
+  and bounded wheel animation (off by default). Pixel events follow directly;
+  line events, including fractional X11 input, ease over 120 ms. Reduced-motion
+  preferences disable wheel easing.
+  Mouse-reporting programs, alternate screens and terminals containing Kitty
+  image placements keep their existing row-based scrolling. Changes apply live.
 - `minimum_contrast`: terminal text contrast ratio, `1` (default) leaves
   program colors unchanged. Set it to `1.6` to enable the previous readability
   adjustment, or another number from `1` to `21`. Text below that ratio is

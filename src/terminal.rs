@@ -2,6 +2,7 @@
 //! with GPUI, keys and mouse encoded by libghostty-vt and sent back.
 
 use crate::hc::{Core, Stream};
+use crate::smooth_scroll::{SmoothScroll, ScrollOwner, scroll_owner};
 use crate::vt::{self, CursorShape, Rgb, Select, Vt};
 use ghostty_sys::*;
 use gpui::prelude::FluentBuilder as _;
@@ -80,6 +81,8 @@ struct Grid {
     painted: Vec<(Rc<Vec<vt::Cell>>, Vec<RowOp>, Option<usize>)>,
     /// Font size, cell size, font, loaded fonts and ligature setting used to draw.
     painted_with: (u32, Size<Pixels>, String, u64, bool),
+    history_scroll: Option<HistoryScroll>,
+    scroll_offset: f32,
 }
 
 pub struct TerminalView {
@@ -144,7 +147,57 @@ fn display_update(told: &mut Option<DisplayFacts>, theme: &vt::Theme, cell: (u32
     Some(json!({"fg": hex(facts.fg), "bg": hex(facts.bg), "cursor": hex(facts.cursor), "cell": [cell.0, cell.1]}))
 }
 
+struct HistoryScroll {
+    controller: SmoothScroll,
+    epoch: Instant,
+    metrics: (u32, u32),
+}
+
 impl Grid {
+    fn cancel_smooth_scroll(&mut self) {
+        self.history_scroll = None;
+        self.origin.y -= px(self.scroll_offset);
+        self.scroll_offset = 0.0;
+    }
+
+    /// Follow Ghostty's real viewport when output, keys or other actions move
+    /// it. While reading history, output moves the live bottom, not the text
+    /// under the reader. No child input or terminal resize is involved.
+    fn sync_smooth_scroll(&mut self) -> bool {
+        if !crate::settings::get().smooth_scrolling
+            || scroll_owner(self.vt.mouse_tracking(), self.vt.alt_screen()) != ScrollOwner::NativeHistory
+            || self.vt.render_held() || self.vt.has_image_placements() {
+            self.cancel_smooth_scroll();
+            return false;
+        }
+        let metrics = self.vt.scroll_metrics();
+        if let Some(history) = &mut self.history_scroll {
+            if history.metrics != metrics {
+                if metrics.0 >= history.metrics.0 && metrics.1 >= history.metrics.1 {
+                    history.controller.output_appended(metrics.0, metrics.1 - history.metrics.1);
+                } else {
+                    history.controller.set_extent(metrics.0);
+                    history.controller.jump_to(metrics.1 as f64);
+                }
+                history.metrics = metrics;
+            }
+        } else {
+            let mut controller = SmoothScroll::new(metrics.0, true);
+            controller.jump_to(metrics.1 as f64);
+            self.history_scroll = Some(HistoryScroll { controller, epoch: Instant::now(), metrics });
+        }
+        true
+    }
+
+    fn stop_scroll_animation(&mut self) {
+        let metrics = self.vt.scroll_metrics();
+        let shown = metrics.1 as f64 + self.scroll_offset as f64 / f32::from(self.cell.height) as f64;
+        if let Some(history) = &mut self.history_scroll {
+            history.controller.jump_to(shown);
+            history.metrics = metrics;
+        }
+    }
+
     fn refresh_theme(&mut self, theme: &vt::Theme, cell: (u32, u32)) {
         self.vt.set_theme(theme.clone());
         if let Some(chan) = self.channel
@@ -209,6 +262,8 @@ impl TerminalView {
                 cursor_at: None,
                 painted: Vec::new(),
                 painted_with: (0, Size::default(), String::new(), 0, false),
+                history_scroll: None,
+                scroll_offset: 0.0,
             })),
             focus: cx.focus_handle(),
             was_focused: false,
@@ -246,6 +301,7 @@ impl TerminalView {
             let (cols, rows) = (g.vt.cols, g.vt.rows);
             // The core repaints the whole screen (and history) on attach.
             let cell = device_cell(g.cell, g.scale);
+            g.cancel_smooth_scroll();
             g.vt = Vt::new(cols, rows);
             g.vt.resize(cols, rows, cell.0, cell.1);
             g.vt_cell = cell;
@@ -452,6 +508,7 @@ impl TerminalView {
         if let Some(ch) = g.channel
             && !bytes.is_empty()
         {
+            g.cancel_smooth_scroll();
             g.vt.scroll_to_bottom();
             g.core.input(ch, bytes);
         }
@@ -573,6 +630,27 @@ impl TerminalView {
     fn scroll(&mut self, ev: &ScrollWheelEvent, _w: &mut Window, cx: &mut Context<Self>) {
         cx.stop_propagation();
         let mut g = self.grid.borrow_mut();
+        if g.sync_smooth_scroll() {
+            let height = f32::from(g.cell.height) as f64;
+            // X11 reports high-resolution valuators as fractional Lines too.
+            // Preserve that distance instead of quantizing it through scroll_steps.
+            let wheel = match ev.delta {
+                ScrollDelta::Lines(p) if cfg!(target_os = "macos") => macos_wheel_steps(p.y) as f64,
+                ScrollDelta::Lines(p) if ev.touch_phase == TouchPhase::Moved => p.y as f64,
+                _ => 0.0,
+            };
+            let history = g.history_scroll.as_mut().unwrap();
+            history.controller.set_animate_wheel(!cx.reduce_motion());
+            match (ev.delta, ev.touch_phase) {
+                (ScrollDelta::Pixels(p), TouchPhase::Moved) => history.controller.touchpad_pixels(f32::from(p.y) as f64, height),
+                (ScrollDelta::Pixels(_), TouchPhase::Started) => history.controller.touchpad_pixels(0.0, height),
+                (ScrollDelta::Lines(_), _) => history.controller.wheel_rows(wheel, history.epoch.elapsed()),
+                _ => {},
+            }
+            drop(g);
+            cx.notify();
+            return;
+        }
         let steps = scroll_delta_steps(&mut self.scrolled, ev.delta, ev.touch_phase, g.cell, g.vt.cols, g.vt.rows);
         let n = steps.y.unsigned_abs() as usize;
         if steps.x == 0 && n == 0 {
@@ -666,6 +744,7 @@ impl TerminalView {
     }
 
     fn start_selection(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
+        self.grid.borrow_mut().stop_scroll_animation();
         self.selecting = true;
         self.selection_pointer = pos;
         self.select(Select::Press, pos, cx);
@@ -679,9 +758,10 @@ impl TerminalView {
                         return false;
                     }
                     let mut g = this.grid.borrow_mut();
-                    let y = f32::from(this.selection_pointer.y - g.origin.y);
+                    let y = f32::from(this.selection_pointer.y - g.origin.y) + g.scroll_offset;
                     let lines = selection_scroll_lines(y, f32::from(g.cell.height), g.vt.rows);
                     if lines != 0 {
+                        g.cancel_smooth_scroll();
                         g.vt.scroll_viewport(lines);
                         drop(g);
                         this.select(Select::Drag, this.selection_pointer, cx);
@@ -711,8 +791,12 @@ impl TerminalView {
         let mut g = self.grid.borrow_mut();
         let (x, y) = local(&g, pos);
         let (cw, ch) = (f32::from(g.cell.width), f32::from(g.cell.height));
-        let (col, row) = ((x / cw) as u16, (y / ch) as u16);
-        let height = ch * g.vt.rows as f32;
+        let col = (x / cw) as u16;
+        let row = g.history_scroll.as_ref()
+            .and_then(|h| h.controller.presentation(ch as f64))
+            .and_then(|p| p.displayed_row_at((y + g.scroll_offset) as f64, ch as f64))
+            .map_or((y / ch) as u16, |r| r.min(u16::MAX as u32) as u16);
+        let height = ch * (g.vt.rows as f32 + if g.scroll_offset != 0.0 { 1.0 } else { 0.0 });
         g.vt.select(step, col, row, x, y, cw, height);
         drop(g);
         if matches!(step, Select::Release) {
@@ -1222,8 +1306,26 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     let snap = |v: Pixels| px((f32::from(v) * scale).round() / scale);
     let origin = bounds.origin + point(px(pad_x), px(pad_y + (spare / 2.0).floor()));
     let origin = point(snap(origin.x), snap(origin.y));
+    let smooth = g.sync_smooth_scroll();
+    let (active, presentation) = if let Some(history) = &mut g.history_scroll {
+        history.controller.set_animate_wheel(!cx.reduce_motion());
+        let active = history.controller.advance(history.epoch.elapsed());
+        (active, history.controller.presentation(f32::from(cell.height) as f64))
+    } else { (false, None) };
+    if let Some(p) = presentation { g.vt.scroll_to_position(p.anchor_rows_above_bottom); }
+    let metrics = g.vt.scroll_metrics();
+    if let Some(history) = &mut g.history_scroll { history.metrics = metrics; }
+    let viewport_rows = g.vt.rows;
+    let viewport_cols = g.vt.cols;
+    let guard = smooth && presentation.is_some_and(|p| p.needs_bottom_guard_row);
+    let frame = if guard { g.vt.frame_with_overscan(true) } else { g.vt.frame() };
+    let offset = presentation.filter(|_| frame.rows.len() > viewport_rows as usize)
+        .map_or(0.0, |p| p.translate_y_px as f32);
+    g.scroll_offset = offset;
+    let base_origin = origin;
+    let origin = origin + point(px(0.0), px(offset));
     g.origin = origin;
-    let frame = g.vt.frame();
+    if active { window.request_animation_frame(); }
     let placements = g.vt.placements();
     let mut images: Vec<(bool, Bounds<Pixels>, Arc<RenderImage>)> = Vec::new();
     let mut keep = std::collections::HashSet::new();
@@ -1255,6 +1357,10 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     drop(g);
 
     window.paint_quad(fill(bounds, hsla(frame.bg).opacity(crate::settings::get().terminal_opacity)));
+    let mask = if smooth {
+        Bounds::new(base_origin, size(cell.width * viewport_cols as f32, cell.height * viewport_rows as f32))
+    } else { bounds };
+    window.with_content_mask(Some(ContentMask { bounds: mask }), |window| {
     let at = |x: usize, y: usize| origin + point(cell.width * x as f32, cell.height * y as f32);
     // Edges round to device pixels, so cells side by side meet without seams.
     let snap_box = |b: Bounds<Pixels>| {
@@ -1381,6 +1487,7 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
         let _ = line.paint(p, cell.height, TextAlign::Left, None, window, cx);
     }
     grid.borrow_mut().cursor_at = frame.cursor_cell.map(|(x, y)| Bounds::new(at(x as usize, y as usize), cell));
+    });
 }
 
 /// OS text input (AltGr, Pinyin, Japanese, Korean, dead keys) types here.
@@ -1539,6 +1646,7 @@ impl Render for TerminalView {
                         g.refresh_theme(&vt::theme(), dev);
                         let (cols, rows) = grid_size(bounds.size, cell);
                         if (cols, rows) != (g.vt.cols, g.vt.rows) || dev != g.vt_cell {
+                            g.cancel_smooth_scroll();
                             g.vt.resize(cols, rows, dev.0, dev.1);
                             g.vt_cell = dev;
                             if let Some(chan) = g.channel {
@@ -1619,6 +1727,59 @@ impl Focusable for TerminalView {
 
 #[cfg(test)]
 mod tests {
+    #[gpui::test]
+    fn smooth_scrolling_paints_subrow_input_and_yields_to_mouse_apps(cx: &mut gpui::TestAppContext) {
+        use super::*;
+        let original = crate::settings::get();
+        let mut settings = (*original).clone();
+        settings.smooth_scrolling = true;
+        crate::settings::set(settings);
+        cx.update(gpui_base::init);
+        let (terminal, cx) = cx.add_window_view(|_, cx| TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 5), cx));
+        cx.run_until_parked();
+        terminal.update(cx, |terminal, cx| {
+            let mut g = terminal.grid.borrow_mut();
+            for n in 0..1000 { g.vt.write(format!("row {n}\r\n").as_bytes()); }
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let (position, height) = terminal.read_with(cx, |terminal, _| {
+            let g = terminal.grid.borrow();
+            (g.origin + point(px(10.), px(10.)), f32::from(g.cell.height))
+        });
+        let delta = height / 4.0;
+        cx.simulate_event(ScrollWheelEvent { position, delta: ScrollDelta::Pixels(point(px(0.), px(delta))), modifiers: Modifiers::default(), touch_phase: TouchPhase::Moved });
+        cx.run_until_parked();
+        terminal.read_with(cx, |terminal, _| {
+            let g = terminal.grid.borrow();
+            assert_eq!(g.vt.scroll_metrics().1, 1);
+            assert!((g.scroll_offset + height * 0.75).abs() < 0.001);
+        });
+        if !cfg!(target_os = "macos") {
+            cx.simulate_event(ScrollWheelEvent { position, delta: ScrollDelta::Lines(point(0.0, 0.25)), modifiers: Modifiers::default(), touch_phase: TouchPhase::Moved });
+            terminal.update(cx, |terminal, cx| {
+                let mut g = terminal.grid.borrow_mut();
+                let history = g.history_scroll.as_mut().unwrap();
+                history.controller.advance(history.epoch.elapsed() + Duration::from_millis(120));
+                let p = history.controller.presentation(height as f64).unwrap();
+                assert!((p.translate_y_px + height as f64 * 0.5).abs() < 0.001);
+                cx.notify();
+            });
+            cx.run_until_parked();
+        }
+        terminal.update(cx, |terminal, cx| {
+            terminal.grid.borrow_mut().vt.write(b"\x1b[?1000h");
+            cx.notify();
+        });
+        cx.run_until_parked();
+        terminal.read_with(cx, |terminal, _| {
+            let g = terminal.grid.borrow();
+            assert!(g.history_scroll.is_none());
+            assert_eq!(g.scroll_offset, 0.0);
+        });
+        crate::settings::set((*original).clone());
+    }
+
     #[gpui::test]
     fn terminal_release_ends_window_text_selection(cx: &mut gpui::TestAppContext) {
         use gpui::*;
