@@ -2666,6 +2666,92 @@ mod tests {
         assert_eq!(node.value(), Some(""));
     }
 
+    /// Terminals are cached views, drawn again from their last frame while
+    /// idle. Such a frame used to leave the pane out of the accessibility
+    /// tree, so a dictation app asking for the focused element found none.
+    #[gpui::test]
+    fn an_idle_terminal_stays_the_focused_text_area(cx: &mut gpui::TestAppContext) {
+        use super::*;
+        use gpui::accesskit::{Action, ActionData, ActionRequest, NodeId, TreeId};
+
+        struct Pane {
+            focus: FocusHandle,
+            renders: Rc<Cell<usize>>,
+            typed: Rc<RefCell<Vec<String>>>,
+        }
+        impl Render for Pane {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                self.renders.set(self.renders.get() + 1);
+                let typed = self.typed.clone();
+                div().id("pane").role(Role::Terminal).track_focus(&self.focus).size_full().on_a11y_action(
+                    Action::SetValue,
+                    move |data, _, _| {
+                        if let Some(ActionData::Value(text)) = data {
+                            typed.borrow_mut().push(text.to_string());
+                        }
+                    },
+                )
+            }
+        }
+        struct Frame {
+            pane: Entity<Pane>,
+        }
+        impl Render for Frame {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(crate::window::cached(&self.pane))
+            }
+        }
+
+        let renders = Rc::new(Cell::new(0));
+        let typed = Rc::new(RefCell::new(Vec::new()));
+        let window: AnyWindowHandle = cx
+            .add_window({
+                let (renders, typed) = (renders.clone(), typed.clone());
+                move |window, cx| {
+                    let focus = cx.focus_handle();
+                    focus.focus(window, cx);
+                    Frame { pane: cx.new(|_| Pane { focus, renders, typed }) }
+                }
+            })
+            .into();
+        let draw = |cx: &mut gpui::TestAppContext| cx.update_window(window, |_, window, cx| window.draw(cx).clear(cx)).unwrap();
+        let focused_pane = |cx: &gpui::TestAppContext, frame: &str| -> NodeId {
+            let tree = cx.a11y_tree(window).unwrap_or_else(|| panic!("{frame}: no tree sent"));
+            let (id, _) = *tree
+                .nodes
+                .iter()
+                .find(|(_, n)| n.role() == Role::Terminal)
+                .unwrap_or_else(|| panic!("{frame}: the pane is not in the tree"));
+            assert!(tree.nodes.iter().any(|(_, n)| n.children().contains(&id)), "{frame}: the pane has no parent");
+            assert_eq!(tree.focus, id, "{frame}: the pane is not the focused element");
+            id
+        };
+
+        cx.simulate_a11y_activation(window);
+        cx.run_until_parked();
+        let rendered = renders.get();
+        cx.update_window(window, |_, window, cx| {
+            window.refresh();
+            window.draw(cx).clear(cx);
+        })
+        .unwrap();
+        assert_eq!(renders.get(), rendered + 1, "a refresh renders the pane");
+        focused_pane(cx, "rendered");
+
+        let rendered = renders.get();
+        draw(cx);
+        assert_eq!(renders.get(), rendered, "the idle pane was drawn from its last frame");
+        let id = focused_pane(cx, "reused");
+        cx.simulate_a11y_action(window, ActionRequest {
+            action: Action::SetValue,
+            target_tree: TreeId::ROOT,
+            target_node: id,
+            data: Some(ActionData::Value("hello".into())),
+        });
+        cx.run_until_parked();
+        assert_eq!(*typed.borrow(), ["hello"], "the reused pane still takes typed text");
+    }
+
     #[test]
     fn mouse_buttons_only_follow_the_pane_that_took_each_press() {
         use super::*;

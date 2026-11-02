@@ -107,6 +107,7 @@ use accesskit::{Action, NodeId, TreeUpdate};
 use collections::{FxHashMap, FxHashSet};
 use smallvec::SmallVec;
 use std::hash::{Hash, Hasher};
+use std::ops::Range;
 use std::sync::{
     Arc,
     atomic::{AtomicBool, Ordering},
@@ -158,6 +159,8 @@ pub(crate) struct A11y {
     /// Retains the last tree update (and, in debug builds, per-node provenance)
     /// so it can be dumped via [`crate::Window::debug_a11y_tree_json`].
     debug: debug::A11yDebug,
+    /// HERDR: what the last frame built, for cached views drawn again from it.
+    rendered: Rendered,
     /// Maps a view's [`EntityId`] to its `Render` type name
     #[cfg(debug_assertions)]
     pub(crate) view_type_names: FxHashMap<EntityId, &'static str>,
@@ -180,6 +183,7 @@ impl A11y {
             window_title,
             last_focus_without_node: None,
             debug: debug::A11yDebug::default(),
+            rendered: Rendered::default(),
             #[cfg(debug_assertions)]
             view_type_names: FxHashMap::default(),
         }
@@ -273,15 +277,18 @@ impl A11y {
 
     /// Clear per-frame state and push the root node to start a new frame.
     pub(crate) fn begin_frame(&mut self) {
-        self.focus_ids.clear();
-        self.node_bounds.clear();
-        self.action_listeners.clear();
+        // HERDR: kept for cached views this frame draws from the last one.
+        self.rendered.focus_ids = std::mem::take(&mut self.focus_ids);
+        self.rendered.node_bounds = std::mem::take(&mut self.node_bounds);
+        self.rendered.action_listeners = std::mem::take(&mut self.action_listeners);
         self.nodes.begin_frame(self.window_title.as_ref());
     }
 
     /// Finalize the tree and produce a [`TreeUpdate`] for the platform adapter.
     pub(crate) fn end_frame(&mut self, frame: debug::FrameDebugInfo) -> TreeUpdate {
         let update = self.nodes.finalize();
+        self.rendered.nodes = update.nodes.clone();
+        self.rendered.valid = true;
         self.debug.capture(
             &update,
             self.nodes.focus,
@@ -297,6 +304,79 @@ impl A11y {
     pub(crate) fn debug_tree_json(&self) -> Option<String> {
         self.debug.to_json()
     }
+
+    /// HERDR: a frame built no tree, so cached views have no nodes to reuse.
+    pub(crate) fn forget_rendered(&mut self) {
+        self.rendered.valid = false;
+        self.rendered.nodes.clear();
+        self.rendered.action_listeners.clear();
+    }
+
+    /// HERDR: whether a cached view may be drawn from the last frame: not
+    /// when that frame built no tree for its nodes to come from.
+    pub(crate) fn can_reuse_cached(&self) -> bool {
+        !self.active_this_frame || self.rendered.valid
+    }
+
+    /// HERDR: where the next node goes in this frame's list, which a cached
+    /// view's prepaint range records.
+    pub(crate) fn nodes_index(&self) -> usize {
+        self.nodes.all_nodes.len()
+    }
+
+    /// HERDR: a cached view drawn from the last frame keeps the nodes it built
+    /// then (`range`, in that frame's list), with their focus, bounds and
+    /// action listeners. Without this it left the tree whenever it was not
+    /// rendered, and a focused terminal pane read as no element at all.
+    ///
+    /// A view's nodes are contiguous in the list (each is added when popped,
+    /// after its children), so the ones no other node in the range has as a
+    /// child are the view's top nodes, which join the current parent.
+    pub(crate) fn reuse_nodes(&mut self, range: Range<usize>, focus: Option<FocusId>) {
+        if !self.active_this_frame || !self.rendered.valid {
+            return;
+        }
+        let Some(nodes) = self.rendered.nodes.get(range) else {
+            return;
+        };
+        let children: FxHashSet<NodeId> = nodes
+            .iter()
+            .flat_map(|(_, node)| node.children().iter().copied())
+            .collect();
+        let mut focused = None;
+        for (id, node) in nodes {
+            let id = *id;
+            if !self.nodes.push_reused(id, node.clone(), !children.contains(&id)) {
+                continue;
+            }
+            if let Some(bounds) = self.rendered.node_bounds.get(&id) {
+                self.node_bounds.insert(id, *bounds);
+            }
+            if let Some(listeners) = self.rendered.action_listeners.remove(&id) {
+                self.action_listeners.insert(id, listeners);
+            }
+            if let Some(focus_id) = self.rendered.focus_ids.get(&id).copied() {
+                self.focus_ids.insert(id, focus_id);
+                if focus == Some(focus_id) {
+                    focused = Some(id);
+                }
+            }
+        }
+        if let Some(id) = focused {
+            self.set_focus(id);
+        }
+    }
+}
+
+/// HERDR: the last frame's tree and per-node state, for [`A11y::reuse_nodes`].
+#[derive(Default)]
+struct Rendered {
+    /// False when the last frame built no tree (accessibility was off).
+    valid: bool,
+    nodes: Vec<(NodeId, accesskit::Node)>,
+    focus_ids: FxHashMap<NodeId, FocusId>,
+    node_bounds: FxHashMap<NodeId, Bounds<Pixels>>,
+    action_listeners: FxHashMap<NodeId, Vec<(Action, A11yActionListener)>>,
 }
 
 /// Builder API for synthetic children. See the docs for
@@ -450,6 +530,20 @@ impl A11yNodeBuilder {
         }
 
         if let Some(parent) = self.nodes_stack.last_mut() {
+            parent.push_child(id);
+        }
+        self.all_nodes.push((id, node));
+        true
+    }
+
+    /// HERDR: a node from the last frame, for a cached view drawn from it.
+    /// A `top` node joins the current node's children; the others keep the
+    /// parent they came with.
+    fn push_reused(&mut self, id: NodeId, node: accesskit::Node, top: bool) -> bool {
+        if !self.can_push(id) {
+            return false;
+        }
+        if top && let Some(parent) = self.nodes_stack.last_mut() {
             parent.push_child(id);
         }
         self.all_nodes.push((id, node));
