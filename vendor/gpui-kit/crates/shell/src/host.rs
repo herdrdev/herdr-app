@@ -51,10 +51,44 @@ pub fn main_with_components(components: crate::FrozenComponentRegistry) {
     main_with_brand_and_components(HostBrand::gpui_shell(), components);
 }
 
+type CheckExtension = Rc<
+    dyn Fn(
+        &crate::PreparedApplication,
+        &mut Window,
+        &mut App,
+    ) -> anyhow::Result<Option<gpui::Task<anyhow::Result<()>>>>,
+>;
+
+/// Adds application-specific validation to the shared checker. Returning None
+/// keeps checking synchronous and constructs the already-evaluated default View.
+pub fn main_with_components_and_check(
+    components: crate::FrozenComponentRegistry,
+    extension: impl Fn(
+        &crate::PreparedApplication,
+        &mut Window,
+        &mut App,
+    ) -> anyhow::Result<Option<gpui::Task<anyhow::Result<()>>>>
+    + 'static,
+) {
+    main_with_brand_components_and_check(
+        HostBrand::gpui_shell(),
+        components,
+        Some(Rc::new(extension)),
+    );
+}
+
 /// Runs the shared host under an embedding command's public name and version.
 pub fn main_with_brand_and_components(
     brand: HostBrand,
     components: crate::FrozenComponentRegistry,
+) {
+    main_with_brand_components_and_check(brand, components, None);
+}
+
+fn main_with_brand_components_and_check(
+    brand: HostBrand,
+    components: crate::FrozenComponentRegistry,
+    extension: Option<CheckExtension>,
 ) {
     let arguments = match parse(std::env::args().skip(1), brand) {
         Ok(Invocation::Run(arguments)) => arguments,
@@ -76,7 +110,7 @@ pub fn main_with_brand_and_components(
             // A check reports diagnostics, not progress, so only warnings and
             // errors reach the terminal.
             install_log_sink(Level::WARN);
-            check(arguments, components);
+            check(arguments, components, extension);
         }
         Ok(Invocation::Print(text)) => {
             println!("{text}");
@@ -450,7 +484,11 @@ fn run(arguments: Arguments, components: crate::FrozenComponentRegistry, brand: 
 
 /// Checks the application description and eager native materialization in a
 /// hidden window. This does not draw or validate a complete frame.
-fn check(arguments: CheckArguments, components: crate::FrozenComponentRegistry) -> ! {
+fn check(
+    arguments: CheckArguments,
+    components: crate::FrozenComponentRegistry,
+    extension: Option<CheckExtension>,
+) -> ! {
     let directory = arguments.directory.clone();
 
     // Assets are served from the application directory, so the source has to be
@@ -508,22 +546,65 @@ fn check(arguments: CheckArguments, components: crate::FrozenComponentRegistry) 
                 None => cx.open_window(options, build).map(Into::into),
             };
 
-            let result = opened.and_then(|window| {
-                window.update(cx, |_, window, cx| runtime.check(&root, window, cx))?
-            });
-            match result {
-                Ok(spec) => outcome.succeed(spec, arguments.print_spec),
-                Err(error) => outcome.fail(format!("{error:#}")),
-            }
-
-            // Reporting and exiting happen here rather than after `run` returns:
-            // an application loop that has opened a window does not unwind just
-            // because nothing is shown, and a check that never terminates is worse
-            // than one that reports nothing.
-            outcome.exit(&directory);
+            let result = if let Some(extension) = &extension {
+                let loaded = opened.and_then(|window| {
+                    let entry = manifest
+                        .as_ref()
+                        .map(|manifest| manifest.entry())
+                        .unwrap_or(ENTRY);
+                    let (application, task) =
+                        window.update(cx, |_, window, cx| -> anyhow::Result<_> {
+                            let application =
+                                runtime.prepare_application(&root, entry, window, cx)?;
+                            let task = extension(&application, window, cx)?;
+                            Ok((application, task))
+                        })??;
+                    Ok((window, application, task))
+                });
+                let (window, mut application, task) = match loaded {
+                    Ok(loaded) => loaded,
+                    Err(error) => {
+                        finish_check(outcome, Err(error), &directory, arguments.print_spec)
+                    }
+                };
+                if let Some(task) = task {
+                    cx.spawn(async move |cx| {
+                        let result = match task.await {
+                            Ok(()) => window
+                                .update(cx, |_, window, cx| application.check(window, cx))
+                                .and_then(|result| result),
+                            Err(error) => Err(error),
+                        };
+                        finish_check(outcome, result, &directory, arguments.print_spec);
+                    })
+                    .detach();
+                    return;
+                }
+                window
+                    .update(cx, |_, window, cx| application.check(window, cx))
+                    .and_then(|result| result)
+            } else {
+                opened.and_then(|window| {
+                    window.update(cx, |_, window, cx| runtime.check(&root, window, cx))?
+                })
+            };
+            finish_check(outcome, result, &directory, arguments.print_spec);
         });
 
     unreachable!("the check exits from inside the application loop")
+}
+
+fn finish_check(
+    mut outcome: CheckOutcome,
+    result: anyhow::Result<String>,
+    directory: &Path,
+    print_spec: bool,
+) -> ! {
+    match result {
+        Ok(spec) => outcome.succeed(spec, print_spec),
+        Err(error) => outcome.fail(format!("{error:#}")),
+    }
+    outcome.exit(directory)
 }
 
 /// A window is needed to render, but nothing should appear on screen for a

@@ -1,5 +1,5 @@
 use super::*;
-use gpui::{IntoElement, Render, TestAppContext, VisualTestContext};
+use gpui::{IntoElement, ParentElement, Render, Styled, TestAppContext, VisualTestContext};
 use std::ops::Deref;
 use gpui_shell::{ShellRoot, ShellRuntime, policy::Policy};
 use std::{cell::Cell, rc::Rc, sync::atomic::{AtomicU64, Ordering}, time::Instant};
@@ -181,6 +181,88 @@ export default class extends View {
     visual.run_until_parked();
     assert_eq!(*notes.borrow(), vec!["focus", "down", "up"]);
     set_shown_copies(Default::default());
+}
+
+#[gpui::test]
+fn prepared_panels_keep_live_reads_and_keyboard_capture(cx: &mut TestAppContext) {
+    struct Deferred(Option<gpui::Entity<ShellRoot>>);
+    impl Render for Deferred {
+        fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+            gpui::div().size_full().children(self.0.clone())
+        }
+    }
+    cx.update(gpui_shell::init);
+    for conditional in [false, true] {
+        let source = format!(r#"
+import {{ View, div }} from "gpui-kit";
+import {{ focused, nextCommand }} from "herdr";
+import {{ note }} from "fixture";
+{}
+export default class extends View {{
+  init(_props, cx) {{
+    this.handle = cx.focus_handle();
+    note("mounted");
+    cx.spawn(async (cx) => {{
+      for (;;) {{
+        if (await nextCommand() === "focus") {{ this.handle.focus(); note("focus"); }}
+        cx.notify();
+      }}
+    }});
+  }}
+  render() {{
+    focused();
+    return div().size_full().track_focus(this.handle)
+      .on_key_down((e, cx) => {{ note(e.key); cx.stop_propagation(); }});
+  }}
+}}"#, if conditional { "export function when() { return true; }" } else { "" });
+        let fixture = Fixture::new(&source);
+        let notes = Rc::new(RefCell::new(Vec::new()));
+        let calls = notes.clone();
+        let copy = if conditional { 901 } else { 900 };
+        gpui_shell::policy::set_default(Policy::new()
+            .with_host_module(module(Instance { name: "prepared-test".into(), props: Value::Null }, copy)).unwrap()
+            .with_host_module(HostModule::new("fixture").function("note", move |a| {
+                calls.borrow_mut().push(a.string(0)?.to_owned());
+                Ok(HostValue::Null)
+            })).unwrap());
+        publish_focused(json!({"terminal": "before"}));
+        let runtime = ShellRuntime::new_isolated().unwrap();
+        let window = cx.add_window(|_, _| Deferred(None));
+        let mut visual = VisualTestContext::from_window(*window.deref(), cx);
+        let mut prepared = visual.update(|window, cx|
+            runtime.prepare_application(&fixture.0, "main.js", window, cx).unwrap());
+        assert_eq!(visual.update(|window, cx| prepared.has_export("when", window, cx).unwrap()), conditional);
+        assert!(notes.borrow().is_empty(), "preparing must not construct the View");
+        if conditional {
+            let call = visual.update(|window, cx| prepared.call("when", HostValue::Null, window, cx).unwrap());
+            visual.run_until_parked();
+            drop(call);
+        }
+        let root = visual.update(|window, cx| prepared.mount(window, cx).unwrap());
+        window.update(&mut visual, |view, _, cx| {
+            view.0 = Some(root.clone());
+            cx.notify();
+        }).unwrap();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        visual.run_until_parked();
+        assert_eq!(*notes.borrow(), vec!["mounted"]);
+        assert!(!snapshot_changed(copy));
+        publish_agents(json!([{"status": "working"}]));
+        assert!(!snapshot_changed(copy), "unrelated snapshot updates must skip prepared panels");
+        publish_focused(json!({"terminal": "after"}));
+        assert!(snapshot_changed(copy), "mounted prepared panels must track their live reads");
+        set_shown_copies([copy].into());
+        assert!(send_command_to(copy, "focus"));
+        visual.run_until_parked();
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        visual.simulate_keystrokes("down up");
+        visual.run_until_parked();
+        assert_eq!(*notes.borrow(), vec!["mounted", "focus", "down", "up"]);
+        set_shown_copies(Default::default());
+        drop(root);
+        drop(prepared);
+        gpui_shell::policy::set_default(Policy::new());
+    }
 }
 
 #[gpui::test]
