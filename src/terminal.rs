@@ -365,7 +365,11 @@ impl TerminalView {
             for item in batch {
                 match item {
                     Stream::Data(bytes) => {
-                        g.vt.allow_clipboard_write(crate::settings::get().clipboard_write);
+                        let set = crate::settings::get();
+                        g.vt.allow_clipboard_write(set.clipboard_write);
+                        // A program's read is answered mid-batch, so the clipboard
+                        // comes along before the bytes do.
+                        g.vt.allow_clipboard_read(set.clipboard_read.then(|| cx.read_from_clipboard().and_then(|i| i.text()).unwrap_or_default()));
                         g.vt.write(&bytes);
                         let [clipboard, primary] = g.vt.take_clipboard();
                         if let Some(text) = clipboard {

@@ -124,6 +124,9 @@ struct Shared {
     replies: Vec<u8>,
     clipboard_write: bool,
     clipboard: [Option<String>; 2],
+    /// The local clipboard as of this batch, when the person allows reads.
+    /// `None` keeps the read callback uninstalled, so reads stay ignored.
+    clipboard_read: Option<String>,
 }
 
 /// One kitty graphics image on screen, in cells of the viewport.
@@ -413,6 +416,39 @@ unsafe extern "C" fn on_clipboard_write(_t: GhosttyTerminal, userdata: *mut c_vo
     }
 }
 
+/// Answers OSC 52 `?` from the snapshot taken before this batch. The reply has
+/// to go out before this returns, so nothing can be fetched from the system
+/// here; the window refreshes the snapshot as it feeds bytes in. Only the
+/// system clipboard is served, never the Linux primary selection.
+unsafe extern "C" fn on_clipboard_read(_t: GhosttyTerminal, userdata: *mut c_void, request: *const GhosttyClipboardRead) {
+    let shared = unsafe { &mut *(userdata as *mut Shared) };
+    let request = unsafe { &*request };
+    if request.size < std::mem::size_of::<GhosttyClipboardRead>() {
+        return;
+    }
+    match request.location {
+        GHOSTTY_CLIPBOARD_LOCATION_STANDARD => {}
+        _ => return,
+    }
+    let Some(text) = shared.clipboard_read.as_deref() else { return };
+    let Some(reply) = request.reply else { return };
+    const MIME: &[u8] = b"text/plain";
+    let content = GhosttyClipboardContent {
+        mime: GhosttyString { ptr: MIME.as_ptr(), len: MIME.len() },
+        data: GhosttyString { ptr: text.as_ptr(), len: text.len() },
+    };
+    let answer = GhosttyClipboardReadReply {
+        size: std::mem::size_of::<GhosttyClipboardReadReply>(),
+        result: GHOSTTY_CLIPBOARD_READ_RESULT_SUCCESS,
+        contents: &content,
+        contents_len: 1,
+        available: std::ptr::null(),
+        available_len: 0,
+        remember: false,
+    };
+    unsafe { reply(request, &answer) };
+}
+
 /// PNG decoding for kitty graphics (libghostty-vt leaves it to the embedder).
 unsafe extern "C" fn decode_png(_ud: *mut c_void, alloc: *const GhosttyAllocator, data: *const u8, len: usize, out: *mut GhosttySysImage) -> bool {
     let bytes = unsafe { std::slice::from_raw_parts(data, len) };
@@ -635,7 +671,7 @@ impl Vt {
             ok(ghostty_mouse_event_new(std::ptr::null(), &mut mouse_event), "mouse_event_new");
 
             install_png_decoder();
-            let mut shared = Box::new(Shared { state, size: GhosttySizeReportSize { rows: rows.max(1), columns: cols.max(1), cell_width: 0, cell_height: 0 }, held_since: None, title_changed: false, replies: Vec::new(), clipboard_write: true, clipboard: [None, None] });
+            let mut shared = Box::new(Shared { state, size: GhosttySizeReportSize { rows: rows.max(1), columns: cols.max(1), cell_width: 0, cell_height: 0 }, held_since: None, title_changed: false, replies: Vec::new(), clipboard_write: true, clipboard: [None, None], clipboard_read: None });
             let ud = &mut *shared as *mut Shared as *const c_void;
             ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_USERDATA, ud);
             let hold: GhosttyTerminalRenderHoldFn = Some(on_render_hold);
@@ -650,7 +686,8 @@ impl Vt {
             ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE, std::mem::transmute::<GhosttyTerminalClipboardWriteFn, *const c_void>(clipboard));
             let max_clipboard: usize = MAX_CLIPBOARD_BYTES;
             ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_CLIPBOARD_WRITE_MAX_BYTES, &max_clipboard as *const _ as *const c_void);
-            // No read callback: programs can never read the local clipboard.
+            // The read callback goes in only while the person allows reads
+            // (allow_clipboard_read): unset, libghostty-vt ignores OSC 52 `?`.
             let images: u64 = 128 << 20;
             ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_STORAGE_LIMIT, &images as *const _ as *const c_void);
 
@@ -1180,6 +1217,21 @@ impl Vt {
 
     pub fn allow_clipboard_write(&mut self, allow: bool) {
         self.shared.clipboard_write = allow;
+    }
+
+    /// The clipboard a program may read with OSC 52 `?`, or `None` to refuse:
+    /// the callback is installed and dropped with it, so a refused read is
+    /// ignored rather than answered empty.
+    pub fn allow_clipboard_read(&mut self, text: Option<String>) {
+        let was = self.shared.clipboard_read.is_some();
+        self.shared.clipboard_read = text;
+        let now = self.shared.clipboard_read.is_some();
+        if was != now {
+            let read: GhosttyTerminalClipboardReadFn = if now { Some(on_clipboard_read) } else { None };
+            unsafe {
+                ghostty_terminal_set(self.term, GHOSTTY_TERMINAL_OPT_CLIPBOARD_READ, std::mem::transmute::<GhosttyTerminalClipboardReadFn, *const c_void>(read))
+            };
+        }
     }
 
     pub fn take_clipboard(&mut self) -> [Option<String>; 2] {
@@ -2174,6 +2226,30 @@ mod tests {
         vt.write(b"\x1b]52;p;\x1b\\");
         let expected = if cfg!(target_os = "linux") { Some(String::new()) } else { None };
         assert_eq!(vt.take_clipboard(), [None, expected]);
+    }
+
+    #[test]
+    fn osc52_reads_are_answered_only_while_allowed() {
+        let mut vt = Vt::new(80, 24);
+        vt.write(b"\x1b]52;c;?\x07");
+        assert!(vt.take_replies().is_empty(), "a read is ignored until the person allows it");
+        vt.allow_clipboard_read(Some("hi".into()));
+        vt.write(b"\x1b]52;c;?\x07");
+        assert_eq!(String::from_utf8(vt.take_replies()).unwrap(), "\x1b]52;c;aGk=\x07");
+        vt.write(b"\x1b]52;c;?\x1b\\");
+        assert_eq!(String::from_utf8(vt.take_replies()).unwrap(), "\x1b]52;c;aGk=\x1b\\", "the answer ends the way the request did");
+        vt.allow_clipboard_read(Some(String::new()));
+        vt.write(b"\x1b]52;c;?\x07");
+        assert_eq!(String::from_utf8(vt.take_replies()).unwrap(), "\x1b]52;c;\x07");
+        vt.allow_clipboard_read(Some("hi".into()));
+        vt.write(b"\x1b]52;p;?\x07");
+        assert_eq!(String::from_utf8(vt.take_replies()).unwrap(), "\x1b]52;p;\x07", "only the system clipboard is served: a primary read comes back empty");
+        vt.allow_clipboard_read(None);
+        vt.write(b"\x1b]52;c;?\x07");
+        assert!(vt.take_replies().is_empty(), "turning it off goes back to silence");
+        vt.allow_clipboard_read(Some("😀".into()));
+        vt.write(b"\x1b]52;c;?\x07");
+        assert_eq!(String::from_utf8(vt.take_replies()).unwrap(), "\x1b]52;c;8J+YgA==\x07");
     }
 
     #[test]
