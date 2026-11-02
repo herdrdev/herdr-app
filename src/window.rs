@@ -3732,6 +3732,12 @@ impl AppWindow {
             } else {
                 self.looked.clear();
             }
+            // Tell mods now: render publishes window() too, but a mod it refreshes
+            // waits for another frame, which an idle window that just lost focus
+            // may not draw for a long time.
+            if mods::publish_window(self.window_json(window)) {
+                self.refresh_snapshot_mods(cx);
+            }
         }
         let dark = is_dark(window.appearance());
         if dark != self.system_dark {
@@ -5098,6 +5104,98 @@ mod tests {
         root.terminal_menu = Some("personal-menu".into());
         let restored: super::Node = serde_json::from_value(serde_json::to_value(&root).unwrap()).unwrap();
         assert_eq!(restored.terminal_menu.as_deref(), Some("personal-menu"));
+    }
+
+    /// Runs `window::tests::<name>` alone in a test process of its own, on a
+    /// fresh app home: a window takes process-wide things (the app home, the
+    /// mods' request channel) that tests beside it would otherwise share.
+    fn in_own_process(name: &str) {
+        let home = std::path::PathBuf::from(format!("/var/tmp/herdr-window-test-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        let out = std::process::Command::new(std::env::current_exe().unwrap())
+            .args(["--exact", &format!("window::tests::{name}"), "--nocapture", "--test-threads=1"])
+            .env("HERDR_APP_HOME", &home)
+            .env("HERDR_TEST_WINDOW", name)
+            .output()
+            .unwrap();
+        let _ = std::fs::remove_dir_all(&home);
+        let log = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+        assert!(out.status.success() && log.contains("1 passed"), "{log}");
+    }
+
+    /// In the process `in_own_process` started for `name`: whether to go on.
+    fn running_alone(name: &str) -> bool {
+        std::env::var("HERDR_TEST_WINDOW").as_deref() == Ok(name)
+    }
+
+    /// The window on a core that's never there (`hc::offline`), showing
+    /// `layout` with `mod_name` (its `main.js`) in the home, past the first-run
+    /// welcome (it lists machines through the core). No other mods: the
+    /// shipped ones run programs on threads of their own, which the test
+    /// executor refuses.
+    fn open_window<'a>(cx: &'a mut gpui::TestAppContext, mod_name: &str, main_js: &str, layout: serde_json::Value) -> (gpui::Entity<super::AppWindow>, &'a mut gpui::VisualTestContext) {
+        use serde_json::json;
+        let home = crate::mods::app_dir();
+        crate::mods::write_workspace().unwrap();
+        let folder = home.join("mods").join(mod_name);
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("mod.json"), r#"{ "place": "none" }"#).unwrap();
+        std::fs::write(folder.join("main.js"), main_js).unwrap();
+        std::fs::create_dir_all(home.join("layouts")).unwrap();
+        std::fs::write(home.join("layouts/test.json"), layout.to_string()).unwrap();
+        cx.update(crate::mods::init);
+        let requests = crate::mods::install_policy();
+        crate::mods::set_shared("layout".into(), json!("test"));
+        crate::mods::set_shared("frame.welcomed".into(), json!("test"));
+        let (view, cx) = cx.add_window_view(|window, cx| super::AppWindow::new(crate::hc::offline(), requests, window, cx));
+        assert_eq!(view.update(cx, |this, _| this.layout_name.clone()), "test");
+        (view, cx)
+    }
+
+    /// Mods see window().active follow the focus, losing it too: a probe mod
+    /// notes every value it renders with while the window is focused and
+    /// blurred, and the poll that checks the focus runs in between.
+    #[test]
+    fn mods_see_the_window_lose_and_regain_focus() {
+        in_own_process("focus_window");
+    }
+
+    #[gpui::test]
+    fn focus_window(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("focus_window") {
+            return;
+        }
+        let probe = r#"import { View, div } from "gpui-kit";
+import { window, shared, setShared } from "herdr";
+
+export default class Probe extends View {
+  render() {
+    const active = window().active;
+    if (active !== this.last) {
+      this.last = active;
+      setShared("probe.seen", [...(shared("probe.seen") ?? []), active]);
+    }
+    return div();
+  }
+}
+"#;
+        let layout = json!({ "id": "root", "type": "row", "children": [
+            { "id": "probe", "type": "block", "content": { "mod": "active-probe" } }
+        ] });
+        let (_view, cx) = open_window(cx, "active-probe", probe, layout);
+        // What the probe saw last, after the focus poll (every 400 ms) had its turn.
+        let seen = |cx: &mut gpui::VisualTestContext| {
+            cx.executor().advance_clock(std::time::Duration::from_secs(1));
+            cx.run_until_parked();
+            crate::mods::shared("probe.seen").and_then(|v| v.as_array()?.last().cloned())
+        };
+        for _ in 0..2 {
+            cx.update(|window, _| window.activate_window());
+            assert_eq!(seen(cx), Some(json!(true)), "focused: {:?}", crate::mods::shared("probe.seen"));
+            cx.deactivate_window();
+            assert_eq!(seen(cx), Some(json!(false)), "blurred: {:?}", crate::mods::shared("probe.seen"));
+        }
     }
 
     #[test]
