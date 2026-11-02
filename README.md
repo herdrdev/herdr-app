@@ -17,6 +17,12 @@ Add that folder to your PATH if the installer asks.
 On macOS the app lives in `~/Applications/Herdr.app`.
 For drag-and-drop installation on Apple Silicon, download [Herdr.dmg](https://releases.herdr.dev/app/Herdr.dmg) and drag Herdr to Applications.
 
+On macOS (Apple Silicon), you can also install with [Homebrew](https://brew.sh/):
+
+```sh
+brew install --cask herdr-app
+```
+
 ### Windows
 
 Run in PowerShell on x64 Windows with curl and tar installed (Windows 10 1803 or newer):
@@ -29,7 +35,7 @@ Herdr appears in the Start menu. The installer adds `%LOCALAPPDATA%\Programs\her
 
 On Windows 11, signed releases offer an optional **Open in Herdr** action in File Explorer's main context menu, for folders and folder backgrounds. Installation or the first launch of a new release asks before enabling it; declining is remembered. See [Explorer setup](docs/windows-explorer.md) to enable, disable or repair it later.
 
-Both installers download and run code. Read the [shell installer](distribution/install.sh) or [PowerShell installer](distribution/install.ps1) first if you prefer.
+The shell and PowerShell installers download and run code. Read the [shell installer](distribution/install.sh) or [PowerShell installer](distribution/install.ps1) first if you prefer.
 They also install [herdr-core](https://github.com/herdrdev/herdr-core) if it is missing.
 The app can help install or update a core it cannot use.
 

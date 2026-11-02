@@ -1,5 +1,46 @@
 # Herdr changelog
 
+## [0.1.12] - 2026-11-02
+<!-- spotlight macos -->
+
+### New
+- **On macOS, your agents now run fully apart from the app.** Close Herdr, quit it, update it: your agents keep running. Agents already running pick this up the next time they start.
+- On macOS, the system may ask once if **herdr-core** can access a folder like Documents. That's Herdr; click Allow.
+- On macOS, Settings > Keyboard chooses what Option does: Alt, typing characters like á and €, or left or right Option as Alt.
+- A machine that was rebuilt or replaced shows "rebuilt · Connect" in the sidebar: one click connects to the new one.
+- Seen and pinned agents are shared between Herdr windows and the phone app.
+- Mods can take the keyboard, so moving focus can land on them. (#283, thanks @Osc100)
+- PiG agents have their own icon. (#299, thanks @balcsida)
+- Add machine takes a port, like `can@server:2222`.
+
+### Fixed
+- On Linux, color emoji show in color instead of blank (Fedora's emoji font).
+- Emoji like ✍️ and ❤️ take two cells and draw in color. (#287, thanks @occultsound)
+- On macOS, programs in Herdr terminals can ask for the microphone, camera and to control other apps. (#137, thanks @shivanandasai-altir; #252)
+- Agents on another machine find the commands their shell setup puts on PATH. (#262, thanks @tajchert)
+- New spaces open on the machine you're looking at.
+- Horizontal scrolling reaches programs like vim and less.
+- Clicks work in Textual apps.
+- btop's braille graphs draw without gaps.
+- Nerd Font icons use your terminal font.
+- Rounded corners and dashed lines in boxes draw like Ghostty. (#255, thanks @occultsound)
+- Herdr uses less CPU with many busy agents.
+- A big project no longer makes the folder watcher burn a CPU core. (#263, #257)
+- Mod pictures and icons update when their file is saved.
+- Moving focus back into a split returns to the pane you came from. (#304, thanks @sundarshahi)
+- Unnamed tabs show what their agent is doing in the agents list. (#281, thanks @sundarshahi)
+- A new tab with no space open starts a space. (#303, thanks @sundarshahi)
+- Files marks the files inside a new folder, and opens folder symlinks. (#309, thanks @Nagell; #301, thanks @azaeldrm)
+- Lists in mods follow the zoom. (#296, thanks @Calonca)
+- The + menu shows your agents right away. (#251, thanks @shellscape)
+- Grok shows its own icon. (#293, thanks @Zynoo71)
+- A malformed command can't close the tab you're on. (#297, thanks @chanyang721)
+- On Linux, Ctrl+Insert and Shift+Insert copy and paste in new installs; add them to your keys.json to get them on an existing one. (#258, thanks @dr-moreira)
+- In full screen on macOS, the sidebar header lines up. (#261, thanks @runkids)
+- On Windows, file names in Korean, Chinese and other languages show and open in Files. (#236, thanks @loonslo)
+- On Windows, Esc then Ctrl+C reach the program as two keys. (#162, thanks @JJLiebig)
+- In Git Bash on Windows, the installer points to the PowerShell one. (#238, thanks @sundarshahi)
+
 ## [0.1.11] - 2026-10-31
 
 ### Fixed

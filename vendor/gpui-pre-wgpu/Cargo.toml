@@ -144,6 +144,9 @@ version = "0.11.4"
 default-features = false
 features = ["std", "simd"]
 
+[dependencies.ttf-parser]
+version = "0.25"
+
 [dependencies.unicode-bidi]
 version = "0.3.18"
 features = ["hardcoded-data"]

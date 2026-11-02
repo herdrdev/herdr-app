@@ -12,18 +12,38 @@ import { hc, exec, home, readTextFile, theme, props, closeOverlay, openOverlay }
 
 const I = (name) => `mods/workspace-chrome/${name}.svg`;
 
-// Host entries people can pick: named ones, not patterns.
-function parseConfig(text) {
-  const hosts = [];
+// An Include's files, as ssh finds them: ~ is home, a relative path is
+// under ~/.ssh, and a pattern matches files (through sh; none where there's no sh).
+async function includeFiles(value) {
+  const paths = (value.match(/"[^"]*"|\S+/g) ?? [])
+    .map((p) => p.replace(/^"|"$/g, ""))
+    .map((p) => (p.startsWith("~/") ? `${home()}/${p.slice(2)}` : p.startsWith("/") || /^[a-z]:[\\/]/i.test(p) ? p : `${home()}/.ssh/${p}`));
+  const files = [];
+  for (const p of paths) {
+    if (!/[*?[]/.test(p)) {
+      files.push(p);
+      continue;
+    }
+    const r = await exec("sh", ["-c", 'for f in $1; do [ -f "$f" ] && printf "%s\\n" "$f"; done', "sh", p]).catch(() => null);
+    files.push(...(r?.stdout ?? "").split("\n").filter(Boolean));
+  }
+  return files;
+}
+
+// Host entries people can pick: named ones, not patterns, from the file
+// and the files it includes (ssh stops 16 deep).
+async function parseConfig(text, hosts = [], depth = 0) {
   let cur = null;
   for (const raw of (text ?? "").split("\n")) {
     const m = raw.trim().match(/^([^\s#=]+)\s*=?\s*(.*)$/);
     if (!m) continue;
     const [key, value] = [m[1].toLowerCase(), m[2].trim()];
     if (key === "host" || key === "match") {
-      const names = key === "host" ? value.split(/\s+/).filter((h) => h && !/[*?!]/.test(h)) : [];
+      const names = key === "host" ? value.split(/\s+/).filter((h) => h && !/[*?!]/.test(h) && !hosts.some((x) => x.alias === h || x.aliases.includes(h))) : [];
       cur = names.length ? { alias: names[0], aliases: names.slice(1), hostname: null, user: null } : null;
       if (cur) hosts.push(cur);
+    } else if (key === "include" && depth < 16) {
+      for (const f of await includeFiles(value)) await parseConfig(await readTextFile(f).catch(() => null), hosts, depth + 1);
     } else if (cur && key === "hostname") cur.hostname = value;
     else if (cur && key === "user") cur.user = value;
   }
@@ -50,7 +70,7 @@ export default class MachineAdd extends View {
     this.opened = {};
     this.handle = cx.focus_handle();
     cx.spawn(async (cx) => {
-      this.hosts = parseConfig(await readTextFile(`${home()}/.ssh/config`).catch(() => null));
+      this.hosts = await parseConfig(await readTextFile(`${home()}/.ssh/config`).catch(() => null));
       await this.refresh();
       cx.notify();
     });
