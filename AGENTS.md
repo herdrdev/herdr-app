@@ -66,6 +66,11 @@ On Windows it updates `%LOCALAPPDATA%\Programs\herdr-app` and the Start menu;
 quit and reopen Herdr to use the new build. Windows recipes use PowerShell by default;
 `just --shell pwsh --shell-arg -Command <recipe>` uses pwsh.
 
+ghostty pins Zig (`vendor/ghostty/build.zig.zon`); `just zig` prints that
+Zig, downloading it into `~/.cache/herdr-app/zig` when it isn't there, and
+cargo's build script picks it up when the Zig on `PATH` is newer.
+
+
 Never run a bare `target/*/herdr-app` (no arguments) on a machine where you
 also use the app without `HERDR_APP_HOME` pointing at a scratch home: it
 opens a second window on your real setup. Subcommands and `--help` only

@@ -9,6 +9,11 @@ notes-upload version:
 notes-check version:
     bun scripts/notes-media.ts check "{{version}}"
 
+# The Zig ghostty pins, downloaded into the cache when it isn't there yet:
+# a package manager's Zig may already be newer than the pin.
+zig:
+    @scripts/zig
+
 check: test
 
 notices:

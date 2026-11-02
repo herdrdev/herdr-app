@@ -1,6 +1,6 @@
 //! Builds libghostty-vt from vendor/ghostty with Zig and generates bindings from its headers.
 
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::process::Command;
 
 // Zig builds for the machine it runs on unless told otherwise: its CPU's
@@ -17,6 +17,38 @@ fn zig_target(target: &str) -> &'static str {
     }
 }
 
+/// The Zig ghostty pins: `ZIG`, the one on PATH, or the one `scripts/zig` put
+/// in the cache (a package manager's Zig moves ahead of the pin).
+fn zig(src: &Path) -> PathBuf {
+    let zon = std::fs::read_to_string(src.join("build.zig.zon")).expect("vendor/ghostty/build.zig.zon");
+    let pin = zon
+        .lines()
+        .find_map(|l| l.split_once("minimum_zig_version = \""))
+        .and_then(|(_, rest)| rest.split('"').next())
+        .expect("ghostty's build.zig.zon names no minimum_zig_version")
+        .to_owned();
+    let cached = std::env::var("XDG_CACHE_HOME")
+        .map(PathBuf::from)
+        .or_else(|_| std::env::var("HOME").map(|h| PathBuf::from(h).join(".cache")))
+        .map(|c| c.join("herdr-app/zig").join(&pin).join("zig"));
+    let candidates = std::env::var_os("ZIG").map(PathBuf::from).into_iter().chain([PathBuf::from("zig")]).chain(cached);
+    let mut tried = Vec::new();
+    for candidate in candidates {
+        match Command::new(&candidate).arg("version").output() {
+            Ok(out) if out.status.success() => {
+                let found = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+                // Zig compares the release its builds meet, not the patch.
+                if found.split('.').take(2).eq(pin.split('.').take(2)) {
+                    return candidate;
+                }
+                tried.push(format!("{} is {found}", candidate.display()));            }
+            Ok(out) => tried.push(format!("{}: {}", candidate.display(), String::from_utf8_lossy(&out.stderr).trim())),
+            Err(e) => tried.push(format!("{}: {e}", candidate.display())),
+        }
+    }
+    panic!("ghostty needs Zig {pin}. Tried {}. Run `scripts/zig` or set ZIG to one.", tried.join(", "));
+}
+
 fn main() {
     let manifest = PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     let src = manifest
@@ -30,8 +62,9 @@ fn main() {
         println!("cargo:rerun-if-changed={}", src.join(path).display());
     }
     println!("cargo:rerun-if-env-changed=ZIG");
+    println!("cargo:rerun-if-env-changed=XDG_CACHE_HOME");
 
-    let zig = std::env::var("ZIG").unwrap_or_else(|_| "zig".into());
+    let zig = zig(&src);
     let status = Command::new(&zig)
         .current_dir(&src)
         .args(["build", "-Demit-lib-vt", "-Doptimize=ReleaseFast"])
@@ -41,7 +74,7 @@ fn main() {
         .arg("--cache-dir")
         .arg(out.join("zig-cache"))
         .status()
-        .unwrap_or_else(|e| panic!("cannot run {zig:?} (Zig 0.16 required): {e}"));
+        .unwrap_or_else(|e| panic!("cannot run {zig:?}: {e}"));
     assert!(status.success(), "zig build of libghostty-vt failed: {status}");
 
     // Only the static archive in the search path, so the linker can't pick the shared one.
