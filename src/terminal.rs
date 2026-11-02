@@ -1933,7 +1933,10 @@ impl Render for TerminalView {
                     return;
                 }
                 drop(g);
-                if !this.mouse(GHOSTTY_MOUSE_ACTION_PRESS, Some(ev.button), ev.position, ev.modifiers) {
+                if this.mouse(GHOSTTY_MOUSE_ACTION_PRESS, Some(ev.button), ev.position, ev.modifiers) {
+                    // The program took the click: Herdr's old selection ends, so a copy can't repeat it.
+                    this.clear_selection(cx);
+                } else {
                     this.start_selection(ev.position, cx);
                 }
             }))
@@ -2849,6 +2852,37 @@ mod tests {
             }
         }).unwrap();
         crate::settings::set((*original).clone());
+    }
+
+    #[gpui::test]
+    fn a_click_the_program_takes_ends_the_selection(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        struct Root(Entity<super::TerminalView>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().w(px(400.)).h(px(100.)).child(self.0.clone())
+            }
+        }
+        cx.update(gpui_base::init);
+        let (root, cx) = cx.add_window_view(|_, cx| {
+            Root(cx.new(|cx| super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 5), cx)))
+        });
+        cx.run_until_parked();
+        let terminal = root.read_with(cx, |root, _| root.0.clone());
+        terminal.update(cx, |t, _| {
+            let mut g = t.grid.borrow_mut();
+            // The program tracks the mouse, and a Shift+drag selected some text.
+            g.vt.write(b"\x1b[?1000hold text");
+            g.vt.select(super::Select::Press, 0, 0, 0., 5., 10., 60.);
+            g.vt.select(super::Select::Drag, 2, 0, 25., 5., 10., 60.);
+            g.vt.select(super::Select::Release, 2, 0, 25., 5., 10., 60.);
+            assert!(g.vt.mouse_tracking());
+            assert!(g.vt.selection_text().is_some());
+        });
+        cx.simulate_mouse_down(point(px(50.), px(50.)), MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(point(px(50.), px(50.)), MouseButton::Left, Modifiers::default());
+        assert_eq!(terminal.read_with(cx, |t, _| t.grid.borrow().vt.selection_text()), None);
     }
 
     #[gpui::test]
