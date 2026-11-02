@@ -62,7 +62,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("pane.swap", &[req("direction")], "Swap the focused pane with its neighbor in a direction."),
     cmd("terminal.peek", &[req("terminal")], "Peek at a running terminal over the tab, with keep-as-tab and close controls."),
     cmd("terminal.show", &[opt("terminal"), opt("pane")], "Show a terminal in a pane for now, in place of its own (no terminal: back)."),
-    cmd("terminal.copy", &[], "Copy the focused terminal's selection."),
+    cmd("terminal.copy", &[], "Copy the focused terminal's selection. With nothing selected, that key goes to the program."),
     cmd("terminal.paste", &[], "Paste into the focused terminal (copied files as if dropped; an image alone as terminal.paste_image pastes it)."),
     cmd("terminal.paste_image", &[], "Ctrl+V: the clipboard's image as a file on the focused terminal's machine, when that's another one; on Windows, paste clipboard text; otherwise Ctrl+V goes to the terminal."),
     cmd("agent.focus", &[req("terminal")], "Show an agent (sub-agents too)."),
