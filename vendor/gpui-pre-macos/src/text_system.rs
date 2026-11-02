@@ -60,8 +60,8 @@ fn variation_weight(font: &CTFont) -> Option<i64> {
     let variations = font.copy_descriptor().attributes().find(key)?.downcast::<CFDictionary>()?;
     let wght = CFNumber::from(0x7767_6874_i64);
     let value = variations.find(wght.as_CFTypeRef() as *const std::ffi::c_void)?;
-    let value = unsafe { CFNumber::wrap_under_get_rule(*value as core_foundation::number::CFNumberRef) };
-    value.to_f64().map(|w| w.round() as i64)
+    let value = unsafe { CFType::wrap_under_get_rule(*value as core_foundation::base::CFTypeRef) };
+    value.downcast::<CFNumber>()?.to_f64().map(|w| w.round() as i64)
 }
 
 // HERDR: for drawing a variable face at a requested weight (`at_weight`).
@@ -98,7 +98,10 @@ struct MacTextSystemState {
     font_ids_by_postscript_name: HashMap<String, FontId>,
     font_ids_by_font_key: HashMap<FontKey, SmallVec<[FontId; 4]>>,
     postscript_names_by_font_id: HashMap<FontId, String>,
-    // HERDR: variable faces drawn at a weight share their PostScript name.
+    // HERDR: variable faces drawn at a weight. Keyed by the base face, which
+    // carries its `FontKey`'s features and fallbacks; and by PostScript name
+    // for mapping CoreText's runs back, where only the outlines matter.
+    font_ids_by_weighted_base: HashMap<(FontId, i64), FontId>,
     font_ids_by_weighted_name: HashMap<(String, i64), FontId>,
 }
 
@@ -113,6 +116,7 @@ impl MacTextSystem {
             font_ids_by_postscript_name: HashMap::default(),
             font_ids_by_font_key: HashMap::default(),
             postscript_names_by_font_id: HashMap::default(),
+            font_ids_by_weighted_base: HashMap::default(),
             font_ids_by_weighted_name: HashMap::default(),
         }))
     }
@@ -199,8 +203,8 @@ impl PlatformTextSystem for MacTextSystem {
 
             let font_id = candidates[ix];
             // HERDR: a variable face (one file with a weight axis, like the
-            // bundled JetBrains Mono) is the only candidate for every weight,
-            // so draw it at the weight asked for.
+            // bundled JetBrains Mono, Geist or the system font) is the only
+            // candidate for every weight, so draw it at the weight asked for.
             let font_id = lock.at_weight(font_id, font.weight).unwrap_or(font_id);
             lock.font_selections.insert(font.clone(), font_id);
             Ok(font_id)
@@ -442,11 +446,16 @@ impl MacTextSystemState {
         let bound = |k| axis.find(key(k)).and_then(|v| v.downcast::<CFNumber>()).and_then(|v| v.to_f64());
         let min = bound(unsafe { kCTFontVariationAxisMinimumValueKey })?;
         let max = bound(unsafe { kCTFontVariationAxisMaximumValueKey })?;
+        // Only axes on the CSS weight scale; some (Skia's) use their own.
+        if max < 100.0 || min > 900.0 {
+            return None;
+        }
         let wanted = (weight.0 as f64).clamp(min, max);
-        let name = self.postscript_names_by_font_id.get(&font_id).cloned()?;
-        if let Some(id) = self.font_ids_by_weighted_name.get(&(name.clone(), wanted.round() as i64)) {
+        let rounded = wanted.round() as i64;
+        if let Some(id) = self.font_ids_by_weighted_base.get(&(font_id, rounded)) {
             return Some(*id);
         }
+        let name = self.postscript_names_by_font_id.get(&font_id).cloned()?;
         let variations = CFDictionary::from_CFType_pairs(&[(CFNumber::from(WGHT), CFNumber::from(wanted))]);
         let attributes = CFDictionary::from_CFType_pairs(&[(
             key(unsafe { kCTFontVariationAttribute }),
@@ -462,7 +471,8 @@ impl MacTextSystemState {
             ))
         };
         let id = FontId(self.fonts.len());
-        self.font_ids_by_weighted_name.insert((name.clone(), wanted.round() as i64), id);
+        self.font_ids_by_weighted_base.insert((font_id, rounded), id);
+        self.font_ids_by_weighted_name.insert((name.clone(), rounded), id);
         self.postscript_names_by_font_id.insert(id, name);
         self.fonts.push(unsafe { FontKitFont::from_native_font(&native) });
         Some(id)
@@ -471,7 +481,8 @@ impl MacTextSystemState {
     fn id_for_native_font(&mut self, requested_font: CTFont) -> FontId {
         let postscript_name = requested_font.postscript_name();
         // HERDR: a run in a weighted variable face maps back to that face.
-        if let Some(weight) = variation_weight(&requested_font)
+        if !self.font_ids_by_weighted_name.is_empty()
+            && let Some(weight) = variation_weight(&requested_font)
             && let Some(font_id) = self.font_ids_by_weighted_name.get(&(postscript_name.clone(), weight))
         {
             return *font_id;
