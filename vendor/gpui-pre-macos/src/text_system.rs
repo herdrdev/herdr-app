@@ -5,6 +5,7 @@ use core_foundation::{
     array::{CFArray, CFArrayRef},
     attributed_string::CFMutableAttributedString,
     base::{CFRange, CFType, TCFType},
+    dictionary::CFDictionary,
     number::CFNumber,
     string::CFString,
 };
@@ -53,6 +54,32 @@ use crate::open_type::apply_features_and_fallbacks;
 #[allow(non_upper_case_globals)]
 const kCGImageAlphaOnly: u32 = 7;
 
+/// HERDR: the `wght` value a variable face is drawn at, if it has one set.
+fn variation_weight(font: &CTFont) -> Option<i64> {
+    let key = unsafe { CFString::wrap_under_get_rule(kCTFontVariationAttribute) };
+    let variations = font.copy_descriptor().attributes().find(key)?.downcast::<CFDictionary>()?;
+    let wght = CFNumber::from(0x7767_6874_i64);
+    let value = variations.find(wght.as_CFTypeRef() as *const std::ffi::c_void)?;
+    let value = unsafe { CFNumber::wrap_under_get_rule(*value as core_foundation::number::CFNumberRef) };
+    value.to_f64().map(|w| w.round() as i64)
+}
+
+// HERDR: for drawing a variable face at a requested weight (`at_weight`).
+#[allow(non_upper_case_globals)]
+#[link(name = "CoreText", kind = "framework")]
+unsafe extern "C" {
+    static kCTFontVariationAttribute: core_foundation::string::CFStringRef;
+    static kCTFontVariationAxisIdentifierKey: core_foundation::string::CFStringRef;
+    static kCTFontVariationAxisMinimumValueKey: core_foundation::string::CFStringRef;
+    static kCTFontVariationAxisMaximumValueKey: core_foundation::string::CFStringRef;
+    fn CTFontCreateCopyWithAttributes(
+        font: core_text::font::CTFontRef,
+        size: CGFloat,
+        matrix: *const core_graphics::geometry::CGAffineTransform,
+        attributes: core_text::font_descriptor::CTFontDescriptorRef,
+    ) -> core_text::font::CTFontRef;
+}
+
 /// macOS text system using CoreText for font shaping.
 pub struct MacTextSystem(RwLock<MacTextSystemState>);
 
@@ -71,6 +98,8 @@ struct MacTextSystemState {
     font_ids_by_postscript_name: HashMap<String, FontId>,
     font_ids_by_font_key: HashMap<FontKey, SmallVec<[FontId; 4]>>,
     postscript_names_by_font_id: HashMap<FontId, String>,
+    // HERDR: variable faces drawn at a weight share their PostScript name.
+    font_ids_by_weighted_name: HashMap<(String, i64), FontId>,
 }
 
 impl MacTextSystem {
@@ -84,6 +113,7 @@ impl MacTextSystem {
             font_ids_by_postscript_name: HashMap::default(),
             font_ids_by_font_key: HashMap::default(),
             postscript_names_by_font_id: HashMap::default(),
+            font_ids_by_weighted_name: HashMap::default(),
         }))
     }
 }
@@ -168,6 +198,10 @@ impl PlatformTextSystem for MacTextSystem {
             )?;
 
             let font_id = candidates[ix];
+            // HERDR: a variable face (one file with a weight axis, like the
+            // bundled JetBrains Mono) is the only candidate for every weight,
+            // so draw it at the weight asked for.
+            let font_id = lock.at_weight(font_id, font.weight).unwrap_or(font_id);
             lock.font_selections.insert(font.clone(), font_id);
             Ok(font_id)
         }
@@ -392,8 +426,56 @@ impl MacTextSystemState {
         self.fonts[font_id.0].glyph_for_char(ch).map(GlyphId)
     }
 
+    /// HERDR: `font_id` drawn at `weight` on its `wght` axis, or None when
+    /// the face has no weight axis.
+    fn at_weight(&mut self, font_id: FontId, weight: FontWeight) -> Option<FontId> {
+        const WGHT: i64 = 0x7767_6874;
+        let base = self.fonts[font_id.0].native_font();
+        let key = |k| unsafe { CFString::wrap_under_get_rule(k) };
+        let axes = base.get_variation_axes()?;
+        let axis = axes.iter().find(|axis| {
+            axis.find(key(unsafe { kCTFontVariationAxisIdentifierKey }))
+                .and_then(|id| id.downcast::<CFNumber>())
+                .and_then(|id| id.to_i64())
+                == Some(WGHT)
+        })?;
+        let bound = |k| axis.find(key(k)).and_then(|v| v.downcast::<CFNumber>()).and_then(|v| v.to_f64());
+        let min = bound(unsafe { kCTFontVariationAxisMinimumValueKey })?;
+        let max = bound(unsafe { kCTFontVariationAxisMaximumValueKey })?;
+        let wanted = (weight.0 as f64).clamp(min, max);
+        let name = self.postscript_names_by_font_id.get(&font_id).cloned()?;
+        if let Some(id) = self.font_ids_by_weighted_name.get(&(name.clone(), wanted.round() as i64)) {
+            return Some(*id);
+        }
+        let variations = CFDictionary::from_CFType_pairs(&[(CFNumber::from(WGHT), CFNumber::from(wanted))]);
+        let attributes = CFDictionary::from_CFType_pairs(&[(
+            key(unsafe { kCTFontVariationAttribute }),
+            variations.as_CFType(),
+        )]);
+        let descriptor = core_text::font_descriptor::new_from_attributes(&attributes);
+        let native = unsafe {
+            CTFont::wrap_under_create_rule(CTFontCreateCopyWithAttributes(
+                base.as_concrete_TypeRef(),
+                0.0,
+                std::ptr::null(),
+                descriptor.as_concrete_TypeRef(),
+            ))
+        };
+        let id = FontId(self.fonts.len());
+        self.font_ids_by_weighted_name.insert((name.clone(), wanted.round() as i64), id);
+        self.postscript_names_by_font_id.insert(id, name);
+        self.fonts.push(unsafe { FontKitFont::from_native_font(&native) });
+        Some(id)
+    }
+
     fn id_for_native_font(&mut self, requested_font: CTFont) -> FontId {
         let postscript_name = requested_font.postscript_name();
+        // HERDR: a run in a weighted variable face maps back to that face.
+        if let Some(weight) = variation_weight(&requested_font)
+            && let Some(font_id) = self.font_ids_by_weighted_name.get(&(postscript_name.clone(), weight))
+        {
+            return *font_id;
+        }
         if let Some(font_id) = self.font_ids_by_postscript_name.get(&postscript_name) {
             *font_id
         } else {
