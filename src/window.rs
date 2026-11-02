@@ -608,7 +608,6 @@ impl AppWindow {
             let mut subscription = None;
             let mut subscribed_generation = u64::MAX;
             let mut event_lines = crate::hc::EventLines::default();
-            let mut first_event = None;
             let mut relist = false;
             let mut next_machine_poll = Instant::now();
             loop {
@@ -617,7 +616,6 @@ impl AppWindow {
                 }) else { break };
                 if generation != subscribed_generation {
                     drop(subscription.take());
-                    first_event = None;
                     event_lines = crate::hc::EventLines::default();
                     subscribed_generation = generation;
                     let local_core = core.clone();
@@ -643,7 +641,8 @@ impl AppWindow {
                 }
                 let ask_machines = core_events::machines_due(&mut next_machine_poll, Instant::now());
                 let relisting = std::mem::take(&mut relist);
-                let (sub, machines, refresh, listed, lines) = cx.background_executor().spawn(async move {
+                let executor = cx.background_executor().clone();
+                let (sub, machines, refresh, listed, lines) = executor.clone().spawn(async move {
                     // The local stream forwards remote doc events too.
                     let mut sub = subscription;
                     let (mut refresh, mut terminals) = (false, relisting);
@@ -654,14 +653,12 @@ impl AppWindow {
                     }
                     let mut closed = false;
                     if let Some((channel, events)) = &sub {
-                        for event in first_event.take().into_iter().chain(std::iter::from_fn(|| events.try_recv().ok())) {
-                            if let crate::hc::Stream::Data(bytes) = event {
-                                let pushed = event_lines.push(&bytes);
-                                refresh |= pushed.docs;
-                                terminals |= pushed.terminals;
-                                core.credit(*channel, bytes.len());
-                            } else { (refresh, closed) = (true, true); }
-                        }
+                        let (pushed, ended) = core_events::batch(events, &mut event_lines, &executor, refresh || relisting, |bytes| core.credit(*channel, bytes)).await;
+                        refresh |= pushed.docs || ended;
+                        terminals |= pushed.terminals;
+                        closed = ended;
+                    } else {
+                        executor.timer(core_events::IDLE_TICK).await;
                     }
                     // A stream that ended is subscribed to again, with a fresh snapshot.
                     if closed { sub = None; }
@@ -692,13 +689,6 @@ impl AppWindow {
                     if changed { this.sync(window, cx); }
                     this.flush_documents(refresh, window, cx);
                 }).is_err() { break; }
-                // Keep the event that wakes us for the next drain; idle maintenance still ticks.
-                first_event = if let Some((_, events)) = &subscription {
-                    core_events::next(events, cx.background_executor()).await
-                } else {
-                    cx.background_executor().timer(core_events::IDLE_TICK).await;
-                    None
-                };
             }
         }));
         w._tasks.push(cx.spawn_in(window, async move |this, cx| {
@@ -1854,8 +1844,7 @@ impl AppWindow {
     fn documents_updated(&mut self, machines: Option<Value>, results: Vec<(String, crate::mirror_sync::Outcome)>, window: &mut Window, cx: &mut Context<Self>) -> bool {
         use crate::mirror_sync::Outcome;
         let mut changed = false;
-        // The listing every 500 ms brings the machines alone: redraw only when
-        // one's state moved, or the whole window draws twice a second for nothing.
+        // Machine listings alone redraw only when a connection's state moved.
         let shown = |d: &std::collections::BTreeMap<String, crate::mirror_sync::Slot>| {
             d.iter().map(|(m, s)| (m.clone(), s.connected, s.available, s.blocked, s.error.clone(), s.layout())).collect::<Vec<_>>()
         };

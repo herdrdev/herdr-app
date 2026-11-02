@@ -51,6 +51,8 @@ pub struct Pushed {
     /// A layout document changed, or events were missed: read them again.
     pub docs: bool,
     pub terminals: bool,
+    /// Lifecycle/attention changes should reach the UI before the next cosmetic batch.
+    pub urgent: bool,
 }
 
 impl EventLines {
@@ -108,6 +110,7 @@ impl EventLines {
                     if p["type"] == "doc" {
                         pushed.docs = true;
                     } else {
+                        pushed.urgent |= self.urgent(p);
                         pushed.terminals |= self.apply(p);
                     }
                 }
@@ -115,6 +118,26 @@ impl EventLines {
             }
         }
         pushed
+    }
+
+    fn urgent(&self, event: &Value) -> bool {
+        match event["type"].as_str() {
+            Some("status") => {
+                let Some(old) = self.terminals.iter().find(|t| t["address"] == event["terminal"]) else { return false };
+                let data = &event["data"];
+                let changed = |a: &Value, b: &Value| a["state"] != b["state"] || a["app"] != b["app"];
+                if changed(&old["status"], &data["status"]) { return true; }
+                match (old["records"].as_object(), data["records"].as_object()) {
+                    (Some(before), Some(after)) => before.len() != after.len() || after.iter().any(|(id, report)| {
+                        before.get(id).is_none_or(|old| changed(old, report))
+                    }),
+                    (Some(records), None) | (None, Some(records)) => !records.is_empty(),
+                    (None, None) => false,
+                }
+            }
+            Some("created" | "restarted" | "removed" | "finished" | "lost" | "foreground" | "turn" | "labels" | "keep") => true,
+            _ => false,
+        }
     }
 
     /// One event's change to the terminal it names (schema/README.md, Events).
@@ -512,6 +535,27 @@ pub fn offline() -> Arc<Core> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn lifecycle_changes_are_urgent_but_cosmetic_reports_are_not() {
+        let mut lines = EventLines::new(&json!({"seq": 0, "terminals": [{"address": "t1", "state": "live", "status": {"state": "working", "app": "custom-agent"}, "records": {}}]}));
+        let mut seq = 0;
+        let mut push = |kind: &str, data: Value| {
+            seq += 1;
+            lines.push(format!("{}\n", json!({"method": "event", "params": {"seq": seq, "type": kind, "terminal": "t1", "data": data}})).as_bytes())
+        };
+        assert!(!push("title", json!({"title": "spinner frame"})).urgent);
+        assert!(!push("status", json!({"status": {"state": "working", "app": "custom-agent", "title": "progress 2", "progress": 0.2}, "records": {}})).urgent);
+        assert!(push("status", json!({"status": {"state": "blocked", "app": "custom-agent"}, "records": {}})).urgent);
+        assert!(push("status", json!({"status": {"state": "blocked", "app": "another-agent"}, "records": {}})).urgent);
+        assert!(push("status", json!({"status": {"state": "blocked", "app": "another-agent"}, "records": {"child": {"state": "working"}}})).urgent);
+        assert!(!push("status", json!({"status": {"state": "blocked", "app": "another-agent"}, "records": {"child": {"state": "working", "title": "progress"}}})).urgent);
+        assert!(push("status", json!({"status": {"state": "blocked", "app": "another-agent"}, "records": {"child": {"state": "idle"}}})).urgent);
+        assert!(push("status", json!({"status": null, "records": {}})).urgent);
+        for kind in ["created", "restarted", "removed", "finished", "lost", "foreground", "turn", "labels", "keep"] {
+            assert!(push(kind, json!({})).urgent, "{kind} must reach the UI promptly");
+        }
+    }
 
     #[test]
     fn the_event_stream_keeps_the_terminals_as_the_core_has_them() {
