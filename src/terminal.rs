@@ -1063,34 +1063,12 @@ fn cell_font(bold: bool, italic: bool) -> Font {
     f
 }
 
-// Keep changing counters outside the cached ligature span, without creating
-// a separate drawing for every operator. JetBrains Mono only joins punctuation;
-// other fonts keep their own shaping rules.
-fn ligature_runs<'a>(text: &'a str, font: &Font, enabled: bool) -> impl Iterator<Item = (usize, &'a str, bool)> {
-    let split = enabled && font.family.as_ref() == crate::settings::DEFAULT_FONT && text.is_ascii();
-    let mut pairs = text.as_bytes().windows(2).enumerate()
-        .filter(|(_, pair)| pair[0].is_ascii_punctuation() && pair[1].is_ascii_punctuation());
-    let joined = split.then(|| {
-        pairs.next().map(|(first, _)| first..pairs.next_back().map_or(first + 2, |(last, _)| last + 2))
-    }).flatten();
-    let mut start = 0;
-    std::iter::from_fn(move || {
-        if start == text.len() {
-            return None;
-        }
-        let (end, enabled) = if !split {
-            (text.len(), enabled)
-        } else {
-            match &joined {
-                Some(range) if start < range.start => (range.start, false),
-                Some(range) if start == range.start => (range.end, true),
-                _ => (text.len(), false),
-            }
-        };
-        let from = start;
-        start = end;
-        Some((from, &text[from..end], enabled))
-    })
+// JetBrains Mono joins punctuation, so ordinary ASCII output can keep using
+// the ligatures-off font even when the setting is enabled.
+fn needs_ligatures(text: &str, font: &Font) -> bool {
+    font.family.as_ref() != crate::settings::DEFAULT_FONT
+        || !text.is_ascii()
+        || text.as_bytes().windows(2).any(|pair| pair[0].is_ascii_punctuation() && pair[1].is_ascii_punctuation())
 }
 
 pub fn cell_size(window: &Window) -> Size<Pixels> {
@@ -1151,7 +1129,7 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
             ops.push(RowOp::Sprite { x: start, text: c.text.clone(), color });
             continue;
         }
-        let text_font = cell_font(c.bold, c.italic);
+        let mut text_font = cell_font(c.bold, c.italic);
         if let Some(icon) = fallback_icon(&c.text, &text_font, window.text_system()) {
             // Fit missing icons from the bundled font by their outlines:
             // centered, as tall as fits, two cells wide when a space
@@ -1195,21 +1173,20 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
         if text.trim().is_empty() && !c.underline && !c.strike {
             continue;
         }
-        for (offset, text, joined) in ligature_runs(&text, &text_font, ligatures) {
-            let mut text_font = text_font.clone();
-            text_font.features = ligature_features(joined);
-            let run = TextRun {
-                len: text.len(),
-                font: text_font,
-                color,
-                background_color: None,
-                underline: c.underline.then(|| UnderlineStyle { thickness: px(1.0), color: Some(color), wavy: false }),
-                strikethrough: c.strike.then(|| StrikethroughStyle { thickness: px(1.0), color: Some(color) }),
-            };
-            let force = (!c.wide).then_some(cell.width);
-            let line = window.text_system().shape_line(text.to_owned().into(), px(crate::settings::font_size()), &[run], force);
-            ops.push(RowOp::Text { x: start + offset, line });
+        if ligatures && needs_ligatures(&text, &text_font) {
+            text_font.features = ligature_features(true);
         }
+        let run = TextRun {
+            len: text.len(),
+            font: text_font,
+            color,
+            background_color: None,
+            underline: c.underline.then(|| UnderlineStyle { thickness: px(1.0), color: Some(color), wavy: false }),
+            strikethrough: c.strike.then(|| StrikethroughStyle { thickness: px(1.0), color: Some(color) }),
+        };
+        let force = (!c.wide).then_some(cell.width);
+        let line = window.text_system().shape_line(text.into(), px(crate::settings::font_size()), &[run], force);
+        ops.push(RowOp::Text { x: start, line });
     }
     ops
 }
@@ -1705,12 +1682,33 @@ mod tests {
     fn ordinary_output_does_not_enable_ligature_shaping() {
         use super::*;
         let font = font(crate::settings::DEFAULT_FONT);
-        assert_eq!(ligature_runs("hello world 123 www", &font, true).collect::<Vec<_>>(), vec![(0, "hello world 123 www", false)]);
-        assert_eq!(ligature_runs("a=>b -> c", &font, true).collect::<Vec<_>>(), vec![(0, "a", false), (1, "=>b ->", true), (7, " c", false)]);
-        assert_eq!(ligature_runs("a=>b", &font, false).collect::<Vec<_>>(), vec![(0, "a=>b", false)]);
-        assert_eq!(ligature_runs("界=>", &font, true).collect::<Vec<_>>(), vec![(0, "界=>", true)]);
-        let other = gpui::font("Fira Code");
-        assert_eq!(ligature_runs("fi ->", &other, true).collect::<Vec<_>>(), vec![(0, "fi ->", true)]);
+        assert!(!needs_ligatures("hello world 123 www", &font));
+        assert!(!needs_ligatures("a=b - c", &font));
+        assert!(needs_ligatures("a=>b -> c", &font));
+        assert!(needs_ligatures("界=>", &font));
+        assert!(needs_ligatures("fi ->", &gpui::font("Fira Code")));
+        assert!(needs_ligatures("fi", &gpui::font("Fira Code")));
+    }
+
+    #[gpui::test]
+    fn ligatures_off_keeps_one_style_run_across_backgrounds(cx: &mut gpui::TestAppContext) {
+        use super::*;
+        let original = crate::settings::get();
+        let mut settings = (*original).clone();
+        settings.font_ligatures = false;
+        crate::settings::set(settings);
+        let mut row: Vec<_> = "a=>b 42".chars().map(|ch| vt::Cell { text: ch.to_string(), ..Default::default() }).collect();
+        row[2].bg = Some(vt::Rgb(10, 20, 30));
+        let window = cx.add_window(|_, _| Empty);
+        window.update(cx, |_, window, _| {
+            let ops = row_ops(&row, size(px(8.), px(16.)), None, window);
+            let runs: Vec<_> = ops.iter().filter_map(|op| match op {
+                RowOp::Text { x, line } => Some((*x, line.text.as_ref())),
+                _ => None,
+            }).collect();
+            assert_eq!(runs, vec![(0, "a=>b 42")]);
+        }).unwrap();
+        crate::settings::set((*original).clone());
     }
 
     #[gpui::test]
@@ -1725,7 +1723,7 @@ mod tests {
 
         window.update(cx, |_, window, _| {
             for (cursor, expected) in [
-                (None, vec![(0, "a"), (1, "=>"), (3, "b")]),
+                (None, vec![(0, "a=>b")]),
                 (Some(1), vec![(0, "a"), (1, "="), (2, ">b")]),
                 (Some(2), vec![(0, "a="), (2, ">"), (3, "b")]),
             ] {
@@ -1785,7 +1783,7 @@ mod tests {
                     RowOp::Text { x, line } => Some((*x, line.text.as_ref())),
                     _ => None,
                 }).collect();
-                assert_eq!(runs, vec![(0, "界"), (2, "->"), (4, "😀"), (6, "=>"), (8, "中"), (10, "!="), (12, "x")]);
+                assert_eq!(runs, vec![(0, "界"), (2, "->"), (4, "😀"), (6, "=>"), (8, "中"), (10, "!=x")]);
             }
         }).unwrap();
         crate::settings::set((*original).clone());
