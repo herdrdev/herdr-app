@@ -1063,36 +1063,33 @@ fn cell_font(bold: bool, italic: bool) -> Font {
     f
 }
 
-// JetBrains Mono's programming ligatures join punctuation, not ordinary words.
-// Shape those short runs separately so changing a counter doesn't reshape a
-// whole line's ligatures, and plain output uses the ligatures-off font/cache.
+// Keep changing counters outside the cached ligature span, without creating
+// a separate drawing for every operator. JetBrains Mono only joins punctuation;
+// other fonts keep their own shaping rules.
 fn ligature_runs<'a>(text: &'a str, font: &Font, enabled: bool) -> impl Iterator<Item = (usize, &'a str, bool)> {
     let split = enabled && font.family.as_ref() == crate::settings::DEFAULT_FONT && text.is_ascii();
-    let bytes = text.as_bytes();
+    let mut pairs = text.as_bytes().windows(2).enumerate()
+        .filter(|(_, pair)| pair[0].is_ascii_punctuation() && pair[1].is_ascii_punctuation());
+    let joined = split.then(|| {
+        pairs.next().map(|(first, _)| first..pairs.next_back().map_or(first + 2, |(last, _)| last + 2))
+    }).flatten();
     let mut start = 0;
     std::iter::from_fn(move || {
-        if start == bytes.len() {
+        if start == text.len() {
             return None;
         }
-        if !split {
-            start = bytes.len();
-            return Some((0, text, enabled));
-        }
-        let pair = |i: usize| bytes[i].is_ascii_punctuation() && bytes.get(i + 1).is_some_and(u8::is_ascii_punctuation);
-        let joined = pair(start);
-        let mut end = start + 1;
-        if joined {
-            while end < bytes.len() && bytes[end].is_ascii_punctuation() {
-                end += 1;
-            }
+        let (end, enabled) = if !split {
+            (text.len(), enabled)
         } else {
-            while end < bytes.len() && !pair(end) {
-                end += 1;
+            match &joined {
+                Some(range) if start < range.start => (range.start, false),
+                Some(range) if start == range.start => (range.end, true),
+                _ => (text.len(), false),
             }
-        }
+        };
         let from = start;
         start = end;
-        Some((from, &text[from..end], joined))
+        Some((from, &text[from..end], enabled))
     })
 }
 
@@ -1709,7 +1706,7 @@ mod tests {
         use super::*;
         let font = font(crate::settings::DEFAULT_FONT);
         assert_eq!(ligature_runs("hello world 123 www", &font, true).collect::<Vec<_>>(), vec![(0, "hello world 123 www", false)]);
-        assert_eq!(ligature_runs("a=>b -> c", &font, true).collect::<Vec<_>>(), vec![(0, "a", false), (1, "=>", true), (3, "b ", false), (5, "->", true), (7, " c", false)]);
+        assert_eq!(ligature_runs("a=>b -> c", &font, true).collect::<Vec<_>>(), vec![(0, "a", false), (1, "=>b ->", true), (7, " c", false)]);
         assert_eq!(ligature_runs("a=>b", &font, false).collect::<Vec<_>>(), vec![(0, "a=>b", false)]);
         assert_eq!(ligature_runs("界=>", &font, true).collect::<Vec<_>>(), vec![(0, "界=>", true)]);
         let other = gpui::font("Fira Code");
