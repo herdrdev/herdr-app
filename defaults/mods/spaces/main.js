@@ -79,6 +79,7 @@ export default class Spaces extends View {
     const due = this.due(now, sp, panes());
     if (due.size) this.refreshGit(due, cx);
     if (sp.some((s) => !this.shown.has(s.id))) cx.notify();
+    this.follow();
   }
 
   // Places whose git could have changed: new ones (a new space, a cd), where a
@@ -269,6 +270,31 @@ export default class Spaces extends View {
       kids.forEach((k, n) => out.push({ ...k, tree: n === kids.length - 1 ? "└─" : "├─" }));
     }
     return out;
+  }
+
+  // Number keys, space.next/prev and the rail's numbers go by the spaces' own
+  // order: keep it the order shown here, each worktree under its checkout.
+  follow() {
+    const sp = spaces();
+    const shown = this.ordered().map((r) => r.w.id);
+    const listed = new Set(shown);
+    let k = 0;
+    const want = sp.map((w) => (listed.has(w.id) ? shown[k++] : w.id));
+    const have = sp.map((w) => w.id);
+    if (have.join() === want.join()) {
+      this.followed = null;
+      return;
+    }
+    // Asked once per mismatch: a move the app refuses isn't asked again every tick.
+    const asked = `${have}>${want}`;
+    if (asked === this.followed) return;
+    this.followed = asked;
+    want.forEach((id, i) => {
+      if (have[i] === id) return;
+      run("space.move", { id, index: i + 1 });
+      have.splice(have.indexOf(id), 1);
+      have.splice(i, 0, id);
+    });
   }
 
   // The rows, under a header per machine once one isn't this computer.

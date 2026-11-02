@@ -4,10 +4,10 @@ import { readFile } from "node:fs/promises";
 const source = (await readFile(new URL("../defaults/mods/spaces/main.js", import.meta.url), "utf8"))
   .replace(/^import .*;\n/gm, "").replace("export default class Spaces", "class Spaces").replace(/^export /gm, "");
 
-function harness(replies: unknown[] = [], storage = new Map<string, string>()) {
+function harness(replies: unknown[] = [], storage = new Map<string, string>(), list: { id: string; folder: string }[] = [], run = (..._: unknown[]) => {}) {
   const calls: string[][] = [];
   const tasks: Promise<unknown>[] = [];
-  const Spaces = new Function("View", "hc", "localStorage", "spaces", `${source}; return Spaces;`)(
+  const Spaces = new Function("View", "hc", "localStorage", "spaces", "panes", "run", `${source}; return Spaces;`)(
     class {},
     async (args: string[]) => {
       calls.push(args);
@@ -16,7 +16,9 @@ function harness(replies: unknown[] = [], storage = new Map<string, string>()) {
       return reply ?? { code: 0, stdout: "{}", stderr: "" };
     },
     { setItem(key: string, value: string) { storage.set(key, value); }, getItem(key: string) { return storage.get(key) ?? null; } },
+    () => list,
     () => [],
+    run,
   );
   const view = new Spaces();
   view.reconnecting = {};
@@ -100,4 +102,33 @@ test("unexpected transport failures clear the busy state", async () => {
   await Promise.all(tasks);
   expect(view.reconnecting.cloud.busy).toBe(false);
   expect(view.reconnecting.cloud.error).toBe("offline");
+});
+
+test("number keys and space.next follow the sidebar: a worktree moves under its checkout", () => {
+  // In the order they were made: the repo, another space, then a worktree of the repo.
+  const list = [{ id: "repo", folder: "/src/repo" }, { id: "other", folder: "/src/other" }, { id: "wt", folder: "/src/repo-wt" }];
+  const moves: unknown[] = [];
+  const run = (name: string, args: { id: string; index: number }) => {
+    moves.push([name, args]);
+    const [space] = list.splice(list.findIndex((s) => s.id === args.id), 1);
+    list.splice(args.index - 1, 0, space);
+  };
+  const { view } = harness([], new Map(), list, run);
+  view.shown = new Set(list.map((s) => s.id));
+  const repo = JSON.stringify([null, "/.git"]);
+  view.git = {
+    [JSON.stringify([null, "/src/repo"])]: { repo, linked: false },
+    [JSON.stringify([null, "/src/other"])]: null,
+    [JSON.stringify([null, "/src/repo-wt"])]: { repo, linked: true },
+  };
+  view.follow();
+  expect(moves).toEqual([["space.move", { id: "wt", index: 2 }]]);
+  expect(list.map((s) => s.id)).toEqual(["repo", "wt", "other"]);
+  view.follow();
+  expect(moves).toHaveLength(1);
+  // Dragged away again, it goes back again.
+  run("space.move", { id: "wt", index: 3 });
+  moves.length = 0;
+  view.follow();
+  expect(moves).toEqual([["space.move", { id: "wt", index: 2 }]]);
 });
