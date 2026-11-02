@@ -1679,7 +1679,8 @@ fn ligature_features(enabled: bool) -> FontFeatures {
 fn cell_font(bold: bool, italic: bool) -> Font {
     let mut f = font(crate::settings::terminal_font());
     f.features = ligature_features(false);
-    f.weight = if bold { FontWeight::BOLD } else { FontWeight::MEDIUM };
+    let weight = crate::settings::get().font_weight.clamp(100, 900);
+    f.weight = FontWeight(if bold { weight.max(700) } else { weight } as f32);
     f.style = if italic { FontStyle::Italic } else { FontStyle::Normal };
     f
 }
