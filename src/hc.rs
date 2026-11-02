@@ -467,6 +467,25 @@ impl Drop for Core {
     }
 }
 
+/// A core that is never there, for tests that open the window: every call
+/// fails at once, and it never reports the loss (so nothing reconnects).
+#[cfg(test)]
+pub fn offline() -> Arc<Core> {
+    let (writer, frames) = mpsc::channel();
+    std::mem::forget(frames);
+    let (lost_tx, lost) = async_channel::bounded(1);
+    std::mem::forget(lost_tx);
+    let child = std::process::Command::new(std::env::current_exe().unwrap()).arg("--help").stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+    Arc::new(Core {
+        hello: Value::Null,
+        writer,
+        routes: Arc::new(Mutex::new(Routes { closed: true, ..Default::default() })),
+        next_id: AtomicU64::new(1),
+        child: Mutex::new(child),
+        lost,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
