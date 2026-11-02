@@ -1,4 +1,4 @@
-import { test, expect } from "bun:test";
+import { test, expect, spyOn } from "bun:test";
 import { readFile } from "node:fs/promises";
 
 const source = (await readFile(new URL("../defaults/mods/spaces/main.js", import.meta.url), "utf8"))
@@ -215,6 +215,60 @@ test("a machine becoming ready retries a previously rejected batch", () => {
   h.flush();
   h.rows();
   expect(h.moves).toEqual([]);
+});
+
+test("a lost write retries after settling even without an intermediate ordered render", () => {
+  const now = spyOn(Date, "now").mockReturnValue(10000);
+  try {
+    const h = orderedHarness(["topic", "main"]);
+    h.git("main", "repo", false);
+    h.git("topic", "repo", true);
+    h.rows();
+    h.flush();
+    // A mirror conflict restores the original same-ID order before rendering.
+    h.snapshot.reverse();
+    now.mockReturnValue(10999);
+    h.rows();
+    expect(h.moves).toEqual([]);
+    now.mockReturnValue(11000);
+    let notified = false;
+    h.view.due = () => new Set();
+    h.view.checkNew({ notify() { notified = true; } });
+    expect(notified).toBe(true);
+    h.rows();
+    expect(h.moves).toEqual([{ id: "main", index: 1 }]);
+    h.rows();
+    expect(h.moves).toHaveLength(1);
+    h.flush();
+    h.rows();
+    now.mockReturnValue(12000);
+    h.rows();
+    expect(h.moves).toEqual([]);
+    expect(h.view.ordering).toBeNull();
+  } finally {
+    now.mockRestore();
+  }
+});
+
+test("settled retries wait for the affected machine to be ready", () => {
+  const now = spyOn(Date, "now").mockReturnValue(10000);
+  try {
+    const h = orderedHarness(["topic", "main"]);
+    h.git("main", "repo", false);
+    h.git("topic", "repo", true);
+    h.availability[0].layout = "unavailable";
+    h.rows();
+    h.moves.splice(0);
+    now.mockReturnValue(12000);
+    expect(h.view.orderingDue(Date.now())).toBe(false);
+    h.rows();
+    expect(h.moves).toEqual([]);
+    h.availability[0].layout = "ready";
+    h.rows();
+    expect(h.moves).toEqual([{ id: "main", index: 1 }]);
+  } finally {
+    now.mockRestore();
+  }
 });
 
 test("no reconciliation without a rendered sidebar", () => {

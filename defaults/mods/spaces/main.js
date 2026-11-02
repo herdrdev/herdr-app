@@ -78,7 +78,7 @@ export default class Spaces extends View {
     for (const s of sp) if (!this.shown.has(s.id)) this.born[s.id] ??= now;
     const due = this.due(now, sp, panes());
     if (due.size) this.refreshGit(due, cx);
-    if (sp.some((s) => !this.shown.has(s.id))) cx.notify();
+    if (sp.some((s) => !this.shown.has(s.id)) || this.orderingDue(now)) cx.notify();
   }
 
   // Places whose git could have changed: new ones (a new space, a cd), where a
@@ -250,6 +250,11 @@ export default class Spaces extends View {
     openOverlay({ mod: "menu", kind: "popup", width: 200, height: 260, props: { tab: "space", target: { id: w.id } } });
   }
 
+  orderingDue(now) {
+    return this.ordering && now - this.ordering.at >= 1000
+      && this.ordering.machines.every(name => machines().some(m => m.name === name && m.layout === "ready"));
+  }
+
   // Spaces in order, each worktree space moved under its main checkout's.
   ordered() {
     const sp = spaces(), ps = panes();
@@ -268,18 +273,24 @@ export default class Spaces extends View {
       const kids = list.filter((k) => nested(k) && k.g.repo === r.g.repo);
       kids.forEach((k, n) => out.push({ ...k, tree: n === kids.length - 1 ? "└─" : "├─" }));
     }
-    // Keep the shared model's indexes in step with the rows. Queue each move
-    // once, simulating the whole batch so later indexes include earlier moves.
+    // Simulate the batch so later indexes include earlier moves. An attempted
+    // write can lose a sync conflict: allow the echo to settle before retrying.
     const order = sp.map(w => w.id);
-    const key = JSON.stringify([order, out.map(r => r.w.id), machines()]);
-    if (this.ordering !== key) {
-      this.ordering = key;
+    const target = out.map(r => r.w.id);
+    const key = JSON.stringify([order, target, machines()]);
+    if (order.every((id, i) => id === target[i])) {
+      this.ordering = null;
+    } else if (this.ordering?.key !== key || this.orderingDue(Date.now())) {
+      const moved = new Set();
+      this.ordering = { key, at: Date.now(), machines: [] };
       for (let i = 0; i < out.length; i++) {
         const from = order.indexOf(out[i].w.id);
         if (from === i) continue;
         run("space.move", { id: out[i].w.id, index: i + 1 });
+        moved.add(out[i].w.machine ?? null);
         order.splice(i, 0, order.splice(from, 1)[0]);
       }
+      this.ordering.machines = [...moved];
     }
     return out.filter(r => this.shown.has(r.w.id));
   }
