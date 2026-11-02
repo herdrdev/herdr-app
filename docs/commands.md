@@ -421,7 +421,7 @@ Close an overlay (default: the top dialog or popup).
 
 ## `app.help`
 
-Show the keys.
+Toggle the keys dialog.
 
 No arguments.
 
