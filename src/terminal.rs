@@ -920,16 +920,16 @@ fn key_bytes(vt: &mut vt::Vt, ev: &KeyDownEvent) -> Option<Vec<u8>> {
     let k = &ev.keystroke;
     let m = k.modifiers;
     // libghostty leaves these aliases to fixterms, but GPUI drops their
-    // control text. Describe the legacy keys explicitly; Kitty keeps the chord.
+    // control text. Legacy needs explicit aliases; negotiated modes keep the chord.
     if !vt.win32.on && vt.kitty_keyboard_flags() == 0 && m.control && !m.shift && !m.alt && !m.platform && !m.function {
         let alias = match k.key.as_str() {
-            "[" => Some(GHOSTTY_KEY_ESCAPE),
-            "i" => Some(GHOSTTY_KEY_TAB),
-            "m" => Some(GHOSTTY_KEY_ENTER),
+            "[" => Some((GHOSTTY_KEY_BRACKET_LEFT, GHOSTTY_KEY_ESCAPE)),
+            "i" => Some((GHOSTTY_KEY_I, GHOSTTY_KEY_TAB)),
+            "m" => Some((GHOSTTY_KEY_M, GHOSTTY_KEY_ENTER)),
             _ => None,
         };
-        if let Some(key) = alias {
-            return Some(vt.encode_key(key, 0, 0, None, None));
+        if let Some((key, alias)) = alias {
+            return Some(control_alias_bytes(vt, key, &k.key, alias));
         }
     }
     if vt.win32.on && vt.kitty_keyboard_flags() == 0 {
@@ -981,6 +981,13 @@ fn key_bytes(vt: &mut vt::Vt, ev: &KeyDownEvent) -> Option<Vec<u8>> {
         consumed |= GHOSTTY_MODS_ALT as GhosttyMods;
     }
     Some(vt.encode_key(key, mods, consumed, text.as_deref(), unshifted))
+}
+
+fn control_alias_bytes(vt: &mut vt::Vt, key: GhosttyKey, text: &str, alias: GhosttyKey) -> Vec<u8> {
+    // libghostty has no mode-2 getter. Probe with printable base text so its
+    // encoder can preserve the chord when modifyOtherKeys requests CSI 27.
+    let encoded = vt.encode_key(key, GHOSTTY_MODS_CTRL as GhosttyMods, 0, Some(text), text.chars().next());
+    if encoded.starts_with(b"\x1b[27;") { encoded } else { vt.encode_key(alias, 0, 0, None, None) }
 }
 
 fn map_key(key: &str) -> Option<(GhosttyKey, bool, Option<char>)> {
@@ -1986,6 +1993,24 @@ mod tests {
             }
         }
         assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
+    }
+
+    #[test]
+    fn control_aliases_respect_modify_other_keys() {
+        for (setup, expected) in [
+            (b"".as_slice(), [b"\x1b".as_slice(), b"\t", b"\r"]),
+            (b"\x1b[>4;2m".as_slice(), [b"\x1b[27;5;91~".as_slice(), b"\x1b[27;5;105~", b"\x1b[27;5;109~"]),
+            (b"\x1b[>4;2m\x1b[>4;0m".as_slice(), [b"\x1b".as_slice(), b"\t", b"\r"]),
+            (b"\x1b[>4;1m".as_slice(), [b"\x1b".as_slice(), b"\t", b"\r"]),
+            (b"\x1b[>1u".as_slice(), [b"\x1b[91;5u".as_slice(), b"\x1b[105;5u", b"\x1b[109;5u"]),
+            (b"\x1b[>4;2m\x1b[>1u".as_slice(), [b"\x1b[91;5u".as_slice(), b"\x1b[105;5u", b"\x1b[109;5u"]),
+        ] {
+            let mut vt = Vt::new(20, 3);
+            vt.write(setup);
+            for (spec, want) in ["ctrl-[", "ctrl-i", "ctrl-m"].into_iter().zip(expected) {
+                assert_eq!(key_bytes(&mut vt, &press(spec, None)).as_deref(), Some(want), "{spec}, setup={setup:?}");
+            }
+        }
     }
 
     /// Without Kitty, Windows' ConPTY drops Shift+Enter as Ghostty sends it;
