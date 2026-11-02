@@ -116,7 +116,7 @@ pub use component_registry::{
     MethodDescriptor, RegistryError, StateDescriptor, StateMethodDescriptor,
 };
 pub(crate) use component_registry::{ComponentCallbackValue, ComponentId, RecordedComponentMethod};
-pub use engine::{LoadedApplication, ShellRuntime};
+pub use engine::{ApplicationCall, LoadedApplication, PreparedApplication, ShellRuntime};
 pub use error::ShellError;
 #[cfg(not(feature = "gpui-fast"))]
 pub use gpui;

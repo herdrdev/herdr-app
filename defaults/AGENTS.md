@@ -752,7 +752,8 @@ has 120 programs (agents, editors, runtimes, tools, databases, infra);
   Without this opt-in, navigation and clicks stay unchanged.
 
 - The first time Herdr sees a folder, it docks one copy per `mod.json` into
-  the shown layout (`"none"`: only where a layout or another mod puts it).
+  the shown personal layout (`"none"`: only where a layout or another mod puts
+  it). Shipped layouts are never changed: clone a layout to add your mods.
   After that, the layouts decide. Saving any file reloads every copy in place
   (not files the app writes: `jsconfig.json`, `.d.ts`, hidden ones,
   `node_modules`). The old build's tasks and timers stop: a loop ends at its
@@ -765,6 +766,56 @@ has 120 programs (agents, editors, runtimes, tools, databases, infra);
   timers keep running while hidden, so poll gently. Another layout starts its
   mods fresh (pane mods belong to their tab and stay); a block removed or given
   another mod or props starts over. `<mod>.<command>` reaches shown copies only.
+- Optional conditions keep a panel out of unrelated folders:
+
+  ```js
+  import { findUp } from "herdr";
+  export const watch = ["folder"]; // optional; this is the default
+  export async function when({ folder, machine, props }) {
+    return (await findUp(".wandb", { folder, machine })) !== null;
+  }
+  // export default class ... extends View, as usual
+  ```
+
+  `when` is a reserved named export. Without it, loading and lifetime stay
+  unchanged. Return a boolean or Promise<boolean>, never a truthy value.
+  Context uses the focused terminal's live folder and machine (null means
+  this computer), falling back to the space's folder; an unknown folder is
+  null. Props are the block's supplied props. There is no `cx` or View API,
+  but `herdr` functions work. Capture live state before awaiting.
+  `watch` accepts `"folder"`, `"focus"`, `"terminals"`, `"agents"`:
+  folder/machine, focused terminal, terminal lifetime/program, reported agent
+  status. Titles never trigger a check. Bursts share a frame. One call runs at
+  a time; changed inputs discard its stale result and run once more.
+  Layout switches, becoming eligible, source reloads and window reactivation
+  also check. A Promise has a five-second deadline. Its initial synchronous
+  call and immediate jobs share 50 ms; later async slices use the usual Task
+  budget. Errors and invalid watch entries appear in status.
+
+  Only ordinary mod blocks in the window layout use conditions. A user-hidden
+  block, hidden ancestor or inactive stack child does not start or check.
+  Pane mods, pane headers, floats, overlays and `mod.open` ignore `when`.
+  The module evaluates when it would normally load; the View waits for the
+  first true, without flashing. False later hides but keeps state and timers.
+  Unknown/new context is hidden; a same-context last good answer may stand
+  after an error. Automatic hiding never changes saved `hidden`. A user hide
+  always wins, including after restart. `layout.show` temporarily shows a
+  condition-hidden block until its folder/machine changes. Toggle uses actual
+  visibility; Hide clears the override. The override is not saved.
+
+  `findUp(name, {folder?, machine?})` finds the nearest folder containing an
+  entry with that single name, or null, including a dangling symlink. Names
+  cannot be paths, "." or "..". An unenterable starting folder is an error.
+  It walks lexical parents,
+  stopping at home if home is an ancestor, otherwise the filesystem root.
+  Local checks use native metadata. Remote checks use one bounded POSIX
+  request, never a local fallback; Windows remote folders are unsupported.
+  Remote results and in-flight calls are shared. Folder re-entry and window
+  reactivation revalidate; errors are not cached as missing. A marker created
+  while sitting still is noticed on the next folder change or reactivation,
+  not by polling. The panel can call `findUp` too. `herdr-app check <mod>`
+  validates watch and prints one when result using a home context.
+
 - Images and SVGs are referenced from `~/.config/herdr-app`:
   `image("mods/<name>/logo.svg")` (full color), `svg("mods/<name>/icon.svg")`
   (tinted with the text color). Saving an asset under `mods/` updates every

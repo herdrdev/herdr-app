@@ -544,8 +544,12 @@ pub(crate) fn reload(
             Some(view.clone()),
             policy.clone(),
         );
-        runtime
-            .load_app(directory, entry)
+        let loaded = if view.read(cx).object().retains_exports() {
+            runtime.load_app_prepared(directory, entry)
+        } else {
+            runtime.load_app(directory, entry)
+        };
+        loaded
             .with_context(|| format!("reloading {}", directory.display()))
             .and_then(|view_type| {
                 runtime

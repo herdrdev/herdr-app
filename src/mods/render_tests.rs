@@ -154,7 +154,7 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
     for name in ["nextCommand", "watchFolder"] {
         module = module.async_function(name, |_| Ok(std::future::pending::<gpui_shell::HostResult>()));
     }
-    for name in ["exec", "hc", "readTextFile", "writeTextFile", "sendFeedback"] {
+    for name in ["exec", "hc", "findUp", "readTextFile", "writeTextFile", "sendFeedback"] {
         let calls = calls.clone();
         module = module.async_function(name, move |a| {
             let first = a.get(0).map(from_host).unwrap_or(Value::Null);
