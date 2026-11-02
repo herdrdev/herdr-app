@@ -62,7 +62,8 @@ export default class Spaces extends View {
     this.pressed = null;
     this.over = null;
     this.machines = [];
-    this.reconnecting = {};
+    this.reconnecting = JSON.parse(localStorage.getItem("machines.reconnecting") ?? "{}");
+    for (const state of Object.values(this.reconnecting)) state.busy = false;
     this.folded = new Set(JSON.parse(localStorage.getItem("machines.folded") ?? "[]"));
     this.refreshMachines(cx);
     cx.timer.every(15000, cx => this.refreshMachines(cx));
@@ -137,6 +138,7 @@ export default class Spaces extends View {
     const state = this.reconnecting[name] ??= { machine, removed: false };
     state.busy = true;
     state.error = null;
+    localStorage.setItem("machines.reconnecting", JSON.stringify(this.reconnecting));
     cx.notify();
     cx.spawn(async cx => {
       try {
@@ -151,12 +153,14 @@ export default class Spaces extends View {
         if (!state.removed) {
           await ask(["machine", "rm", name]);
           state.removed = true;
+          localStorage.setItem("machines.reconnecting", JSON.stringify(this.reconnecting));
         }
         const args = ["machine", "add"];
         if (machine.via) args.push("--via", machine.target);
         else args.push(machine.target);
         args.push("--name", name);
         if (machine.session) args.push("--session", machine.session);
+        if (machine.temporary) args.push("--temp");
         await ask(args);
         this.folded.delete(name);
         localStorage.setItem("machines.folded", JSON.stringify([...this.folded]));
@@ -165,6 +169,7 @@ export default class Spaces extends View {
         state.error = String(e.message ?? e);
         state.busy = false;
       }
+      localStorage.setItem("machines.reconnecting", JSON.stringify(this.reconnecting));
       this.refreshMachines(cx);
       cx.notify();
     });
@@ -297,7 +302,7 @@ export default class Spaces extends View {
         .when(!collapsed, el => el.child(div().flex_1().truncate().child(m ?? "This computer"))
           .when(!connected && !rebuilt, el => el.child(div().flex_none().child((machine?.state ?? "asleep").replace(/_/g, " "))))
           .when(rebuilt, el => el.child(h_flex().flex_none().gap(3).items_center()
-            .child("rebuilt ·")
+            .child(div().max_w(140).truncate().child(repair?.error || "rebuilt ·"))
             .child(div().id(`machine-connect-${m}`).text_color(repair?.error ? t.blocked : t.muted)
               .hover(s => s.text_color(t.foreground))
               .tooltip(repair?.error || "This machine was rebuilt or replaced. Click to connect to the new one.")

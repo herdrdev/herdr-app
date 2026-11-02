@@ -358,15 +358,17 @@ impl ColorPainter for BoundsPainter<'_> {
     fn fill(&mut self, _: Brush<'_>) {
         match self.clips.last() {
             Some(Some(rect)) => {
-                self.bounds = Some(self.bounds.map_or(*rect, |b| {
+                self.bounds = self.bounds.map_or(Some(*rect), |b| {
                     Rect::from_ltrb(
                         b.left().min(rect.left()),
                         b.top().min(rect.top()),
                         b.right().max(rect.right()),
                         b.bottom().max(rect.bottom()),
                     )
-                    .unwrap()
-                }));
+                });
+                if self.bounds.is_none() {
+                    self.failed = true;
+                }
             }
             Some(None) => {}
             None => self.failed = true,
@@ -622,6 +624,27 @@ mod tests {
             image: Pixmap::new(8, 8).unwrap(),
             failed: false,
         }
+    }
+
+    #[test]
+    fn overflowing_bounds_union_fails_instead_of_panicking() {
+        let mut p = BoundsPainter {
+            font: FontRef::new(FONT).unwrap(),
+            transforms: vec![Transform::identity()],
+            clips: vec![],
+            bounds: None,
+            failed: false,
+        };
+        for (left, right) in [(-3.0e38, -2.0e38), (2.0e38, 3.0e38)] {
+            p.clips
+                .push(Some(Rect::from_ltrb(left, 0.0, right, 1.0).unwrap()));
+            p.fill(Brush::Solid {
+                palette_index: 0,
+                alpha: 1.0,
+            });
+            p.pop_clip();
+        }
+        assert!(p.failed);
     }
 
     fn font_with_colr(table: &[u8]) -> Vec<u8> {

@@ -4,10 +4,10 @@ import { readFile } from "node:fs/promises";
 const source = (await readFile(new URL("../defaults/mods/spaces/main.js", import.meta.url), "utf8"))
   .replace(/^import .*;\n/gm, "").replace("export default class Spaces", "class Spaces").replace(/^export /gm, "");
 
-function harness(replies: unknown[] = []) {
+function harness(replies: unknown[] = [], storage = new Map<string, string>()) {
   const calls: string[][] = [];
   const tasks: Promise<unknown>[] = [];
-  const Spaces = new Function("View", "hc", "localStorage", `${source}; return Spaces;`)(
+  const Spaces = new Function("View", "hc", "localStorage", "spaces", `${source}; return Spaces;`)(
     class {},
     async (args: string[]) => {
       calls.push(args);
@@ -15,14 +15,15 @@ function harness(replies: unknown[] = []) {
       if (reply instanceof Error) throw reply;
       return reply ?? { code: 0, stdout: "{}", stderr: "" };
     },
-    { setItem() {} },
+    { setItem(key: string, value: string) { storage.set(key, value); }, getItem(key: string) { return storage.get(key) ?? null; } },
+    () => [],
   );
   const view = new Spaces();
   view.reconnecting = {};
   view.folded = new Set(["cloud"]);
   view.refreshMachines = () => {};
-  const cx = { notify() {}, spawn(fn: (cx: unknown) => Promise<unknown>) { tasks.push(fn(cx)); } };
-  return { view, calls, tasks, cx };
+  const cx = { timer: { every() {} }, notify() {}, spawn(fn: (cx: unknown) => Promise<unknown>) { tasks.push(fn(cx)); } };
+  return { view, calls, tasks, cx, storage };
 }
 
 const machine = { name: "cloud", id: "old", target: "user@host", session: null, via: false };
@@ -67,6 +68,30 @@ test("a failed removal never adds, and a failed add remains retryable without an
   await Promise.all(added.tasks);
   expect(added.calls.map(c => c[1])).toEqual(["rm", "add", "add"]);
   expect(added.view.reconnecting).toEqual({});
+});
+
+test("temporary reconnects remain temporary", async () => {
+  const { view, calls, tasks, cx } = harness();
+  view.reconnect({ ...machine, temporary: true }, cx);
+  await Promise.all(tasks);
+  expect(calls[1]).toContain("--temp");
+});
+
+test("failed pairing survives a sidebar restart and retries without removal", async () => {
+  const failed = harness([{ code: 0 }, { code: 1, stderr: "core too old" }]);
+  failed.view.reconnect(machine, failed.cx);
+  await Promise.all(failed.tasks);
+  const restarted = harness([], failed.storage);
+  restarted.view.init({}, restarted.cx);
+  expect(restarted.view.reconnecting.cloud.machine).toEqual(machine);
+  expect(restarted.view.reconnecting.cloud.error).toBe("core too old");
+  expect(restarted.view.reconnecting.cloud.busy).toBe(false);
+  restarted.view.reconnect(machine, restarted.cx);
+  await Promise.all(restarted.tasks);
+  expect(restarted.calls.map(c => c[1])).toEqual(["add"]);
+  const completed = harness([], failed.storage);
+  completed.view.init({}, completed.cx);
+  expect(completed.view.reconnecting).toEqual({});
 });
 
 test("unexpected transport failures clear the busy state", async () => {

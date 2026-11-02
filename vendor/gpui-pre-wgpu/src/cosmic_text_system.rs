@@ -187,10 +187,10 @@ impl CosmicTextSystem {
 
 impl PlatformTextSystem for CosmicTextSystem {
     fn glyph_uses_foreground(&self, params: &RenderGlyphParams) -> bool {
-        let mut state = self.0.write();
         if !params.is_emoji {
             return false;
         }
+        let mut state = self.0.write();
         let key = (
             params.glyph_id.0,
             (f32::from(params.font_size) * params.scale_factor).to_bits(),
