@@ -22,7 +22,12 @@ fn initial_pane_size(cx: &mut gpui::TestAppContext) {
         ("lone", plain.clone(), vec![]),
         ("right", plain.clone(), vec![Row]),
         ("down", plain.clone(), vec![Column]),
-        ("nested", plain, vec![Row, Column, Row]),
+        ("nested", plain.clone(), vec![Row, Column, Row]),
+        ("constrained-max", plain.clone(), vec![Row]),
+        ("constrained-min", plain.clone(), vec![Row]),
+        ("constrained-mixed", plain.clone(), vec![Row, Row]),
+        ("thick-border", json!({"id": "context", "type": "block", "padding": [8, 10],
+            "border": {"width": 20, "color": "border"}, "content": {"tab": "active"}}), vec![Row]),
         ("headers-padding", framed, vec![Row, Column]),
         ("main-right", main.clone(), vec![Row]),
         ("main-down", main.clone(), vec![Column]),
@@ -51,6 +56,15 @@ fn initial_pane_size(cx: &mut gpui::TestAppContext) {
             root.split(&target, axis, crate::model::pane("new", "probe-new"), "last".into());
             target = "new".into();
         }
+        match label {
+            "constrained-max" => root.find_mut("a").unwrap().max = Some(100.0),
+            "constrained-min" => root.find_mut("a").unwrap().min = Some(1000.0),
+            "constrained-mixed" => {
+                root.find_mut("a").unwrap().min = Some(1100.0);
+                root.find_mut("p0").unwrap().max = Some(100.0);
+            }
+            _ => {}
+        }
         let predicted = view.update_in(cx, |this, window, _| this.initial_size(&root, &target, window)).expect(label);
         view.update_in(cx, |this, window, cx| {
             let tab = &mut this.model.spaces[0].tabs[0];
@@ -62,6 +76,6 @@ fn initial_pane_size(cx: &mut gpui::TestAppContext) {
         let actual = view.update(cx, |this, cx| this.terms[&target].view.read(cx).dimensions());
         let delta = (predicted.0.abs_diff(actual.0), predicted.1.abs_diff(actual.1));
         eprintln!("{label}: initial {predicted:?}, rendered {actual:?}, delta {delta:?} cells");
-        assert!(delta.0 <= 1 && delta.1 <= 1, "{label}: initial {predicted:?}, rendered {actual:?}");
+        assert_eq!(predicted, actual, "{label}: initial size must match the rendered grid exactly");
     }
 }

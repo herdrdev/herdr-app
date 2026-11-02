@@ -60,17 +60,23 @@ fn shares(children: &[&Node], available: f32, zoom: f32) -> Vec<f32> {
             _ => pending.push(i),
         }
     }
+    let total_weight = pending.iter().map(|&i| weight(children[i])).sum::<f32>().max(f32::EPSILON);
+    let initial_free = left.max(0.0);
     while !pending.is_empty() {
         let total = pending.iter().map(|&i| weight(children[i])).sum::<f32>().max(f32::EPSILON);
-        let mut pinned = Vec::new();
+        // Grow factors stay normalized to the original siblings after an item freezes.
+        let free = left.max(0.0).min(initial_free * (total / total_weight));
+        let mut violations = Vec::new();
         for &i in &pending {
             let n = children[i];
-            let share = left.max(0.0) * weight(n) / total;
-            sizes[i] = share.max(n.min.unwrap_or(0.0) * zoom).min(n.max.unwrap_or(f32::INFINITY) * zoom);
-            if sizes[i] != share { pinned.push(i); }
+            let share = free * weight(n) / total;
+            sizes[i] = share.min(n.max.unwrap_or(f32::INFINITY) * zoom).max(n.min.unwrap_or(0.0) * zoom);
+            violations.push((i, sizes[i] - share));
         }
-        if pinned.is_empty() { break; }
-        for i in pinned {
+        let total_violation = violations.iter().map(|(_, violation)| violation).sum::<f32>();
+        if total_violation == 0.0 { break; }
+        for (i, violation) in violations {
+            if (total_violation > 0.0 && violation <= 0.0) || (total_violation < 0.0 && violation >= 0.0) { continue; }
             left -= sizes[i];
             pending.retain(|&j| j != i);
         }
@@ -120,7 +126,9 @@ impl AppWindow {
         };
         let zoom = settings::zoom();
         let focused = root.path_to(pane)?.into_iter().collect();
-        let size = content_size(context, bounds.size, false, zoom);
+        // The absolute bounds canvas already excludes the context border (padding box).
+        let (y, x) = padding(context);
+        let size = inset(bounds.size, 2.0 * x * zoom, 2.0 * y * zoom);
         let size = pane_size(root, size, pane, frame, &focused, zoom)?;
         Some(crate::terminal::grid_size(size, crate::terminal::cell_size(window)))
     }
