@@ -3247,8 +3247,12 @@ impl AppWindow {
                 crate::update::update_core();
             }
             "app.help" => {
-                let spec = json!({ "mod": "help", "kind": "dialog", "width": 640, "height": 520 });
-                self.open_overlay(mods::new_overlay_id(), spec, window, cx);
+                if self.overlays.iter().any(|o| o.id == "help") {
+                    self.close_overlay("help", window, cx);
+                } else {
+                    let spec = json!({ "mod": "help", "kind": "dialog", "width": 640, "height": 520 });
+                    self.open_overlay("help".into(), spec, window, cx);
+                }
                 return;
             }
             "app.reset" => self.reset(window, cx),

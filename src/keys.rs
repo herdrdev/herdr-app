@@ -230,6 +230,20 @@ mod tests {
         assert!(Keystroke::default().unshifted_key.is_none());
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_help_binding_matches_shifted_slash() {
+        // Linux reports Ctrl+Shift+/ as Ctrl+? without the Shift modifier.
+        let event = gpui::Keystroke::parse("ctrl-?").unwrap();
+        let defaults: serde_json::Value = serde_json::from_str(super::DEFAULTS).unwrap();
+        let help = defaults["global"].as_object().unwrap().iter()
+            .filter(|(_, action)| action.as_str() == Some("app.help"))
+            .map(|(keys, action)| (keys.clone(), action.clone()))
+            .collect::<serde_json::Map<_, _>>();
+        let bindings = super::parse(&serde_json::json!({ "global": help }).to_string()).unwrap();
+        assert!(bindings.iter().any(|binding| binding.match_keystrokes(&[event.clone()]) == Some(false)));
+    }
+
     #[test]
     fn shipped_keys_load() {
         for keys in [include_str!("../defaults/keys.json"), include_str!("../defaults/keys.macos.json")] {
