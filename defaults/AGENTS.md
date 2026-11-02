@@ -820,7 +820,13 @@ What's about the user, never a look:
   OSC 52 accepts base64 UTF-8 text up to 1 MiB: `c` writes the system clipboard,
   `p` writes Linux primary selection. `s` is ignored; cut buffers `0`–`7`
   are treated as the system clipboard.
-  Clipboard reads (`?`) are never allowed.
+- `clipboard_read`: `true` lets terminal programs read the local clipboard
+  when they ask for it with OSC 52 `?` (default `false`: the request is
+  ignored, and nothing is sent back). It covers remote terminals attached in
+  this window, where a program has no other way to this computer's clipboard.
+  Anything that writes to the terminal can ask, so whatever is on the
+  clipboard, passwords included, is readable while this is on. Only the
+  system clipboard answers, never the Linux primary selection.
 - `copy_on_select`: copy a mouse selection to the clipboard on release (default
   `true`). Set `false` to leave the clipboard untouched while keeping the selection
   visible; `terminal.copy` (Cmd+C/Ctrl+Shift+C) still copies it. Where Linux
