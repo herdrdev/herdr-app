@@ -162,6 +162,9 @@ pub struct Look {
     pub font: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub font_size: Option<f32>,
+    /// The terminals' text weight, 100 to 900.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_weight: Option<u16>,
     /// Cell height multiplier, 0.8..2 (1 keeps the font's natural rows).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_line_height: Option<f32>,
