@@ -1608,6 +1608,52 @@ impl Focusable for TerminalView {
 
 #[cfg(test)]
 mod tests {
+    #[gpui::test]
+    fn terminal_release_ends_window_text_selection(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+        use gpui_base::{TextSelectionLayer, TextView, TextViewState};
+
+        struct Root {
+            terminal: Entity<super::TerminalView>,
+            text: Entity<TextViewState>,
+        }
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().flex().flex_col().w(px(400.)).child(TextSelectionLayer)
+                    .child(div().w_full().h(px(100.)).child(self.terminal.clone()))
+                    // Separate mod roots install layers on both sides of the terminal.
+                    .child(TextSelectionLayer)
+                    .child(TextView::new(&self.text).scrollable(false).selectable(true))
+                    .child(TextSelectionLayer)
+            }
+        }
+        cx.update(gpui_base::init);
+        let (root, cx) = cx.add_window_view(|_, cx| Root {
+            terminal: cx.new(|cx| super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 5), cx)),
+            text: cx.new(|cx| TextViewState::markdown("Move the pointer over this selectable text.", cx)),
+        });
+        cx.run_until_parked();
+        let terminal = point(px(50.), px(50.));
+        let (start, end) = root.read_with(cx, |root, cx| {
+            let bounds = root.text.read(cx).bounds();
+            assert!(bounds.size.height > px(0.));
+            (point(bounds.left() + px(2.), bounds.top() + px(10.)),
+             point(bounds.left() + px(150.), bounds.top() + px(10.)))
+        });
+        for _ in 0..2 {
+            cx.simulate_mouse_down(terminal, MouseButton::Left, Modifiers::default());
+            cx.simulate_mouse_up(terminal, MouseButton::Left, Modifiers::default());
+            cx.simulate_mouse_move(start, None, Modifiers::default());
+            cx.simulate_mouse_move(end, None, Modifiers::default());
+            assert!(root.read_with(cx, |root, cx| root.text.read(cx).selected_text()).is_empty());
+
+            cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+            cx.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::default());
+            cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
+            assert!(!root.read_with(cx, |root, cx| root.text.read(cx).selected_text()).is_empty());
+        }
+    }
+
     #[test]
     fn mouse_buttons_only_follow_the_pane_that_took_each_press() {
         use super::*;
