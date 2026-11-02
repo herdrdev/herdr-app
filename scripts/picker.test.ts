@@ -22,19 +22,21 @@ class Element {
 const source = await readFile(new URL("../defaults/mods/picker/main.js", import.meta.url), "utf8");
 const element = () => new Element();
 const commands: unknown[][] = [];
+let machineList: { name: string | null; layout: string }[] = [];
 const values: Record<string, any> = {
   View: class {}, div: element, svg: element, v_flex: element, h_flex: element,
-  Input: { new: element }, InputState: { new: () => ({ on() {}, focus() {} }) },
+  Input: { new: element }, InputState: { new: () => ({ on(event: string, handler: any) { (this as any)[event] = handler; }, focus() {}, value: () => "" }) },
   agents: () => [], spaces: () => [], terminals: () => [], theme: () => ({}),
+  machines: () => machineList,
   settings: () => ({ zoom: 1.2 }), props: () => ({}), shared: () => ({}),
-  setShared() {}, closeOverlay() {}, openOverlay() {}, run(...args: unknown[]) { commands.push(args); }, hc() {},
+  setShared() {}, closeOverlay() {}, openOverlay() {}, run(...args: unknown[]) { commands.push(args); },
 };
 const Picker = new Function(...Object.keys(values), source.replace(/^import .*;\n/gm, "").replace("export default class Picker", "return class Picker"))(...Object.values(values));
-const cx = { notify() {}, stop_propagation() {}, timer: { after() {} }, focus_handle() {}, spawn() {} };
+const cx = { notify() {}, stop_propagation() {}, timer: { after() {} }, focus_handle() {} };
 function picker(machines = 12) {
+  machineList = Array.from({ length: machines }, (_, i) => ({ name: `machine-${i}`, layout: "ready" }));
   const view = new Picker();
   view.init({}, cx);
-  view.machines = Array.from({ length: machines }, (_, i) => `machine-${i}`);
   return view;
 }
 function find(root: Element, id: string): Element {
@@ -50,6 +52,54 @@ function measure(view: any, height: number) {
   expect(list).toBeDefined();
   list.calls.on_size_change[0]({ width: 500, height: height * 1.2 }, cx);
 }
+
+test("picker updates ready machines live and follows the selected machine", () => {
+  const view = picker(2);
+  const tree = view.render();
+  tree.calls.on_key_down[0]({ key: "up" }, cx);
+  view.render();
+  expect(view.pickable[view.at].machine).toBe("machine-1");
+  machineList = [
+    { name: null, layout: "ready" },
+    { name: "cloud", layout: "ready" },
+    ...machineList,
+    { name: "loading", layout: "loading" },
+    { name: "offline", layout: "unavailable" },
+  ];
+  view.render();
+  expect(view.pickable.filter((r: any) => r.kind === "space").map((r: any) => r.machine)).toEqual([null, "cloud", "machine-0", "machine-1"]);
+  expect(view.at).toBe(4);
+  expect(view.pickable[view.at].machine).toBe("machine-1");
+  // Enter also reconciles a machine change that arrived before the next render.
+  machineList = machineList.filter(m => m.name !== "cloud");
+  commands.length = 0;
+  view.input.submit();
+  expect(commands).toEqual([["space.new", { machine: "machine-1" }]]);
+  machineList = [];
+  view.render();
+  expect(view.pickable[view.at]).toEqual({ kind: "space", machine: null });
+});
+
+test("changing the filter resets selection instead of preserving the previous row", () => {
+  const view = picker(2);
+  view.render().calls.on_key_down[0]({ key: "up" }, cx);
+  view.render();
+  view.input.change({}, cx);
+  view.render();
+  expect(view.pickable[view.at]).toEqual({ kind: "new" });
+});
+
+test("a growing picker draws new rows before its next size callback", () => {
+  // Fractional zoom can round the measured height slightly below the request.
+  for (const height of [68, 67.9]) {
+    const view = picker(0);
+    measure(view, height);
+    machineList = [{ name: "cloud", layout: "ready" }];
+    const tree = view.render();
+    expect(find(tree, "pk-list").calls.h[0]).toBe(100);
+    expect(find(tree, "pk-space-cloud")).toBeDefined();
+  }
+});
 
 test("picker reveals keyboard selection in its measured, constrained list", () => {
   for (const [machines, height] of [[12, 144], [0, 48]]) {
