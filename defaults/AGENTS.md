@@ -151,6 +151,15 @@ the highlighted line shows where it will land.
   `working`, `blocked`, `idle`, or `done` = finished while the user wasn't
   looking (it becomes `idle` once they look). A space's and a tab's
   status is the most urgent of its agents: blocked > done > working > idle.
+  The shipped Agents sidebar also lists live foreground `omo` and `gjc` in
+  placed panes without a status report. These rows show `?` (Status unreported),
+  under **Unreported** in priority order, not Idle or Working. They support the
+  same pane focus, shared pinning and space grouping as reported agents.
+  Recognition uses the current executable, omo's package launcher, or its
+  Senpi CLI with the matching `omo-ai/plugin` extension; generic Bun/Node
+  processes and original launch commands left behind in a shell do not qualify.
+  This sidebar-only recognition does not add status to `agents()`, space/tab
+  summaries, or core agent navigation; reported status takes precedence.
 - **Sub-agents** are terminals an agent started with `hc run`: the core
   records the starter as `parent` (see `terminals()`). They belong to their
   parent's tab without a pane; the `agents` mod shows them,
@@ -733,6 +742,9 @@ has 120 programs (agents, editors, runtimes, tools, databases, infra);
   include functions in bash and zsh; fish checks find executables only. Installation
   checks are cached for up to a minute; changing the commands checks again.
   Invalid JSON is reported in `programs.error` (a valid file has no error).
+- `omo` and `gjc` ship as launch choices using the generic agent icon.
+  Availability still depends on the selected machine's shell. A launch-menu
+  entry alone does not provide status reporting; see Agents above.
 - It follows what runs in the terminal now (lazygit, nvim), else what it
   started with.
 
