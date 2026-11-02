@@ -378,6 +378,9 @@ pub struct Person {
     pub font: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font_size: Option<f32>,
+    /// Weight of normal terminal text, 100 to 900; bold text is at least 700.
+    #[serde(skip_serializing_if = "is_default_font_weight")]
+    pub font_weight: u16,
     /// The panels' font (their sizes follow zoom).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ui_font: Option<String>,
@@ -437,6 +440,12 @@ fn is_true(b: &bool) -> bool {
     *b
 }
 
+const DEFAULT_FONT_WEIGHT: u16 = 500;
+
+fn is_default_font_weight(v: &u16) -> bool {
+    *v == DEFAULT_FONT_WEIGHT
+}
+
 impl Default for Person {
     fn default() -> Self {
         Person {
@@ -445,6 +454,7 @@ impl Default for Person {
             core: None,
             font: None,
             font_size: None,
+            font_weight: DEFAULT_FONT_WEIGHT,
             ui_font: None,
             telemetry: true,
             clipboard_write: true,
@@ -464,6 +474,7 @@ impl Default for Person {
 pub struct Settings {
     pub font_family: String,
     pub font_size: f32,
+    pub font_weight: u16,
     pub ui_font_family: String,
     pub ui_font_size: f32,
     /// How big the whole app is drawn (1 = as designed). The zoom keys change it.
@@ -511,6 +522,7 @@ impl Default for Settings {
         Settings {
             font_family: DEFAULT_FONT.into(),
             font_size: 14.0,
+            font_weight: DEFAULT_FONT_WEIGHT,
             ui_font_family: "Geist".into(),
             ui_font_size: 13.0,
             zoom: 1.0,
@@ -547,6 +559,7 @@ impl Settings {
             // The layout's own, else the person's, else Herdr's.
             font_family: look.font.clone().or(person.font.clone()).unwrap_or(d.font_family),
             font_size: look.font_size.or(person.font_size).unwrap_or(d.font_size),
+            font_weight: person.font_weight,
             ui_font_family: look.ui_font.clone().or(person.ui_font.clone()).unwrap_or(d.ui_font_family),
             ui_font_size: d.ui_font_size,
             zoom: person.zoom,
@@ -607,6 +620,9 @@ impl Settings {
         }
         if !(1.0..=21.0).contains(&self.minimum_contrast) {
             out.push(format!("minimum_contrast {} is outside 1..21", self.minimum_contrast));
+        }
+        if !(100..=900).contains(&self.font_weight) {
+            out.push(format!("font_weight {} is outside 100..900", self.font_weight));
         }
         if !(6.0..=72.0).contains(&self.font_size) {
             out.push(format!("font_size {} is outside 6..72", self.font_size));
@@ -864,6 +880,19 @@ mod tests {
             assert_eq!(serde_json::to_value(settings).unwrap()["option_as_alt"], value);
         }
         assert!(serde_json::from_value::<Person>(serde_json::json!({"option_as_alt": "invalid"})).is_err());
+    }
+
+    #[test]
+    fn font_weight_defaults_to_medium_and_validates_the_range() {
+        let default: Person = serde_json::from_str("{}").unwrap();
+        assert_eq!(default.font_weight, 500);
+        assert!(serde_json::to_value(&default).unwrap().get("font_weight").is_none());
+        for weight in [100, 300, 400, 900, 50, 950] {
+            let person: Person = serde_json::from_value(serde_json::json!({"font_weight": weight})).unwrap();
+            let settings = Settings::compose(&person, &crate::layout::Look::default(), true);
+            assert_eq!(settings.font_weight, weight);
+            assert_eq!(settings.problems().is_empty(), (100..=900).contains(&weight));
+        }
     }
 
     #[test]
