@@ -231,6 +231,7 @@ printf 'dev PATH added' >> "$3"''')
         checkout = self.bin / "checkout"
         for path in [
             "Cargo.toml", "LICENSE", "THIRD-PARTY-NOTICES", "scripts/package",
+            "scripts/build-windows-shell.ps1", "scripts/windows-explorer.ps1",
             "assets/icons/herdr-ui-icon-clean.svg", "assets/icons/Herdr.icns",
         ]:
             destination = checkout / path
@@ -244,6 +245,11 @@ printf 'dev PATH added' >> "$3"''')
         for name in ("herdr-app", "herdr-app.exe"):
             (release / name).write_bytes(b"test binary")
         self.stub("cargo", "exit 0")
+        # Native shell compilation is checked on Windows; this fixture checks the archive.
+        self.stub("powershell.exe", '''mkdir -p target/windows-shell
+for name in herdr-explorer.dll Herdr.Explorer.msix logo.png version.txt; do
+  printf 'test shell artifact: %s' "$name" > "target/windows-shell/$name"
+done''')
         for os_name, arch, target, prefix in (
             ("Linux", "x86_64", "linux-x86_64", "herdr-app"),
             ("Darwin", "arm64", "macos-aarch64", "Herdr.app/Contents/Resources"),
@@ -258,6 +264,16 @@ printf 'dev PATH added' >> "$3"''')
                             archive.extractfile(f"{prefix}/{name}").read(),
                             (ROOT / name).read_bytes(),
                         )
+                    if target == "windows-x86_64":
+                        self.assertEqual(
+                            archive.extractfile("herdr-app/windows-explorer.ps1").read(),
+                            (ROOT / "scripts/windows-explorer.ps1").read_bytes(),
+                        )
+                        for name in ("herdr-explorer.dll", "Herdr.Explorer.msix", "logo.png", "version.txt"):
+                            self.assertEqual(
+                                archive.extractfile(f"herdr-app/shell/{name}").read(),
+                                (checkout / "target/windows-shell" / name).read_bytes(),
+                            )
         self.stub("cargo", 'echo "unexpected build" >&2; exit 97')
         for name in ("LICENSE", "THIRD-PARTY-NOTICES"):
             notice = checkout / name
