@@ -153,6 +153,26 @@ impl Grid {
             self.core.facts(chan, &facts);
         }
     }
+
+    /// Sizes the screen to `cols` x `rows` of `cell` at `scale`; the program hears of a change.
+    fn fit(&mut self, cols: u16, rows: u16, cell: Size<Pixels>, scale: f32) {
+        self.cell = cell;
+        self.scale = scale;
+        let dev = device_cell(cell, scale);
+        // Before the size, so a program woken by it asks for the new cell.
+        self.refresh_theme(&vt::theme(), dev);
+        if (cols, rows) == (self.vt.cols, self.vt.rows) && dev == self.vt_cell {
+            return;
+        }
+        self.vt.resize(cols, rows, dev.0, dev.1);
+        self.vt_cell = dev;
+        if let Some(chan) = self.channel {
+            self.core.resize(chan, cols, rows);
+            // Mode 2048 programs wait for this report, not SIGWINCH.
+            let replies = self.vt.take_replies();
+            self.core.automatic_input(chan, &replies);
+        }
+    }
 }
 
 /// A cell in device pixels.
@@ -444,6 +464,11 @@ impl TerminalView {
     /// The window puts this terminal on screen in the frame it's building.
     pub fn mark_shown(&self) {
         self.shown_in.set(FRAME.load(Ordering::Relaxed));
+    }
+
+    /// Sizes a terminal that isn't on screen as its pane would be (`AppWindow::fit_hidden_tabs`).
+    pub fn fit(&self, cols: u16, rows: u16, cell: Size<Pixels>, scale: f32) {
+        self.grid.borrow_mut().fit(cols, rows, cell, scale);
     }
 
     fn send(&self, bytes: &[u8]) {
@@ -1531,23 +1556,8 @@ impl Render for TerminalView {
             .child(
                 canvas(
                     move |bounds, window, _cx| {
-                        let mut g = grid.borrow_mut();
-                        g.cell = cell;
-                        g.scale = window.scale_factor();
-                        let dev = device_cell(cell, g.scale);
-                        // Before the size, so a program woken by it asks for the new cell.
-                        g.refresh_theme(&vt::theme(), dev);
                         let (cols, rows) = grid_size(bounds.size, cell);
-                        if (cols, rows) != (g.vt.cols, g.vt.rows) || dev != g.vt_cell {
-                            g.vt.resize(cols, rows, dev.0, dev.1);
-                            g.vt_cell = dev;
-                            if let Some(chan) = g.channel {
-                                g.core.resize(chan, cols, rows);
-                                // Mode 2048 programs wait for this report, not SIGWINCH.
-                                let replies = g.vt.take_replies();
-                                g.core.automatic_input(chan, &replies);
-                            }
-                        }
+                        grid.borrow_mut().fit(cols, rows, cell, window.scale_factor());
                     },
                     move |bounds, _, window, cx| {
                         paint_grid(bounds, &grid_paint, focused, window, cx);
