@@ -5,6 +5,7 @@
 //! anything: keys, mods, menus and agents all run them.
 
 use crate::hc::Core;
+mod core_events;
 mod floats;
 mod movable;
 mod pane_drag;
@@ -607,13 +608,16 @@ impl AppWindow {
             let mut subscription = None;
             let mut subscribed_generation = u64::MAX;
             let mut event_lines = crate::hc::EventLines::default();
-            let (mut tick, mut relist) = (0u64, false);
+            let mut first_event = None;
+            let mut relist = false;
+            let mut next_machine_poll = Instant::now();
             loop {
                 let Ok((core, generation)) = this.update(cx, |this, _| {
                     (this.core.clone(), this.core_generation)
                 }) else { break };
                 if generation != subscribed_generation {
                     drop(subscription.take());
+                    first_event = None;
                     event_lines = crate::hc::EventLines::default();
                     subscribed_generation = generation;
                     let local_core = core.clone();
@@ -628,7 +632,8 @@ impl AppWindow {
                         event_lines = crate::hc::EventLines::new(&snapshot);
                         (channel, events)
                     });
-                    (tick, relist) = (0, true);
+                    next_machine_poll = Instant::now();
+                    relist = true;
                     if this.update_in(cx, |this, window, cx| {
                         if generation != this.core_generation { return; }
                         this.documents.entry(String::new()).or_default().connection(true, None, None);
@@ -636,8 +641,7 @@ impl AppWindow {
                         this.sync(window, cx);
                     }).is_err() { break; }
                 }
-                let ask_machines = tick.is_multiple_of(5);
-                tick += 1;
+                let ask_machines = core_events::machines_due(&mut next_machine_poll, Instant::now());
                 let relisting = std::mem::take(&mut relist);
                 let (sub, machines, refresh, listed, lines) = cx.background_executor().spawn(async move {
                     // The local stream forwards remote doc events too.
@@ -650,7 +654,7 @@ impl AppWindow {
                     }
                     let mut closed = false;
                     if let Some((channel, events)) = &sub {
-                        while let Ok(event) = events.try_recv() {
+                        for event in first_event.take().into_iter().chain(std::iter::from_fn(|| events.try_recv().ok())) {
                             if let crate::hc::Stream::Data(bytes) = event {
                                 let pushed = event_lines.push(&bytes);
                                 refresh |= pushed.docs;
@@ -661,7 +665,7 @@ impl AppWindow {
                     }
                     // A stream that ended is subscribed to again, with a fresh snapshot.
                     if closed { sub = None; }
-                    let machines = if ask_machines || terminals { core.call("machine.list", json!({})).ok() } else { None };
+                    let machines = if ask_machines { core.call("machine.list", json!({})).ok() } else { None };
                     let listed = terminals.then(|| event_lines.live());
                     (sub, machines, refresh, listed, event_lines)
                 }).await;
@@ -688,7 +692,13 @@ impl AppWindow {
                     if changed { this.sync(window, cx); }
                     this.flush_documents(refresh, window, cx);
                 }).is_err() { break; }
-                cx.background_executor().timer(Duration::from_millis(500)).await;
+                // Keep the event that wakes us for the next drain; idle maintenance still ticks.
+                first_event = if let Some((_, events)) = &subscription {
+                    core_events::next(events, cx.background_executor()).await
+                } else {
+                    cx.background_executor().timer(core_events::IDLE_TICK).await;
+                    None
+                };
             }
         }));
         w._tasks.push(cx.spawn_in(window, async move |this, cx| {
