@@ -1,6 +1,6 @@
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { spaces, panes, run, openOverlay, theme, window, shared, layout, settings } from "herdr";
+import { spaces, panes, terminals, run, openOverlay, theme, window, shared, layout, settings } from "herdr";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -53,7 +53,20 @@ export default class Tabs extends View {
     const button = (id, label, action) => div().id(id).size(26).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground))
       .on_mouse_down("left", stop).on_click(action).child(label);
     const item = (c, i) => {
-      const program = panes().find(p => p.tab === c.id && p.program?.agent)?.program ?? panes().find(p => p.tab === c.id)?.program;
+      const pane = panes().find(p => p.tab === c.id && p.program?.agent) ?? panes().find(p => p.tab === c.id);
+      let program = pane?.program;
+      // Presentation only: reported agents win, and old launch argv is never evidence.
+      if (!program?.agent || program.key === "omo") {
+        const terminal = terminals().find(t => t.address === pane?.terminal && t.state === "live");
+        const argv = terminal?.foreground?.argv ?? [];
+        const exe = argv[0]?.split("/").pop();
+        const root = argv[1]?.match(/^(.*\/omo-ai)\/node_modules\/@code-yeongyu\/senpi\/dist\/bundle\/cli\.js$/)?.[1];
+        if (exe === "omo" || ((exe === "bun" || exe === "node") &&
+            (/\/omo-ai\/bin\/omo\.js$/.test(argv[1] ?? "") ||
+             (root && argv[2] === "--extension" && argv[3] === `${root}/plugin`)))) {
+          program = { key: "omo", name: "omo", icon: "icons/omo.svg", tint: false };
+        }
+      }
       const name = /^tb\d+$/.test(c.name) ? program?.name ?? "Terminal" : c.name;
       return h_flex().id(`tab-${c.id}`).h(29).px(10).gap(7).rounded(7).items_center().flex_none().text_size(12.8)
         .border(1).border_color(c.active ? t.border : t.chrome).bg(c.active ? t.raised : t.chrome).text_color(c.active ? t.foreground : t.muted)

@@ -3,8 +3,10 @@ import { readFile } from "node:fs/promises";
 
 const source = (await readFile(new URL("../defaults/mods/agents/main.js", import.meta.url), "utf8"))
   .replace(/^import .*;\n/gm, "").replace("export default class Agents", "class Agents");
+const tabsSource = (await readFile(new URL("../defaults/mods/tabs/main.js", import.meta.url), "utf8"))
+  .replace(/^import .*;\n/gm, "").replace("export default class Tabs", "class Agents");
 
-function harness(pins: string[], snapshots = {}) {
+function harness(pins: string[], snapshots = {}, modSource = source) {
   const data = new Map([["pins", JSON.stringify(pins)]]);
   const writes: unknown[] = [];
   const storage = { getItem: (k: string) => data.get(k) ?? null, setItem: (k: string, v: string) => data.set(k, v), removeItem: (k: string) => data.delete(k) };
@@ -31,11 +33,12 @@ function harness(pins: string[], snapshots = {}) {
   const api = {
     agents: () => [], terminals: () => [], panes: () => [], spaces: () => [],
     focused: () => null, theme: () => ({ dim: "#888" }), shared: () => null,
+    window: () => ({}), settings: () => ({ zoom: 1 }),
     layout: () => ({}), setAgentOrder: (addresses: string[]) => order.push(addresses),
     div: element, h_flex: element, v_flex: element, svg: element, image: element,
     ...snapshots,
   };
-  const Agents = new Function("View", "localStorage", "props", "run", ...Object.keys(api), `${source}; return Agents;`)(
+  const Agents = new Function("View", "localStorage", "props", "run", ...Object.keys(api), `${modSource}; return Agents;`)(
     class {}, storage, () => ({}), (...args: unknown[]) => writes.push(args),
     ...Object.values(api),
   );
@@ -86,6 +89,8 @@ test("live omo and gjc panes render unreported rows with focus and pin commands"
   expect(order).toEqual([["remote/gjc", "omo"]]);
   expect(nodes).toContain("Unreported");
   expect(nodes.filter((node) => node === "?")).toHaveLength(2);
+  expect(nodes.filter((node) => typeof node === "object" && node !== null && "asset" in node && node.asset === "icons/omo.svg")).toHaveLength(1);
+  expect(nodes.filter((node) => typeof node === "object" && node !== null && "asset" in node && node.asset === "icons/agent.svg")).toHaveLength(1);
   // The real render's callbacks, not a separate detector test seam.
   if (!row || !pin) throw new TypeError("Missing live sidebar controls");
   Reflect.get(row, "handlers").on_click();
@@ -117,6 +122,31 @@ test.each([
   const { agents, order } = harness([], { terminals: () => [terminal], panes: () => [pane("t")], spaces: () => [space()] });
   agents.render({});
   expect(order).toEqual([admitted ? ["t"] : []]);
+  const omo = admitted && argv[0]?.split("/").pop() !== "gjc";
+  const { agents: tabs } = harness([], {
+    terminals: () => [terminal], panes: () => [{ ...pane("t"), program: { key: "bun", name: "Bun", icon: "icons/bun.svg", tint: true } }],
+    spaces: () => [{ ...space(), active: true, tabs: [{ id: "tab", name: "tb1" }] }],
+  }, tabsSource);
+  const nodes = descendants(tabs.render());
+  expect(nodes).toContain(omo ? "omo" : "Bun");
+  expect(nodes.filter((node) => typeof node === "object" && node !== null && "asset" in node && node.asset === (omo ? "icons/omo.svg" : "icons/bun.svg"))).toHaveLength(1);
+});
+
+test.each([
+  { scenario: "reported Claude", address: "t", argv: omoForeground, state: "live", program: { key: "claude", name: "Claude", icon: "icons/claude.svg", agent: true }, name: "tb1", label: "Claude", asset: "icons/claude.svg" },
+  { scenario: "other terminal", address: "other", argv: omoForeground, state: "live", program: { key: "bun", name: "Bun", icon: "icons/bun.svg", agent: false }, name: "tb1", label: "Bun", asset: "icons/bun.svg" },
+  { scenario: "missing foreground", address: "t", argv: null, state: "live", program: { key: "bun", name: "Bun", icon: "icons/bun.svg", agent: false }, name: "tb1", label: "Bun", asset: "icons/bun.svg" },
+  { scenario: "exited omo", address: "t", argv: ["omo"], state: "exited", program: { key: "bun", name: "Bun", icon: "icons/bun.svg", agent: false }, name: "tb1", label: "Bun", asset: "icons/bun.svg" },
+  { scenario: "named tab", address: "t", argv: omoForeground, state: "live", program: { key: "bun", name: "Bun", icon: "icons/bun.svg", agent: false }, name: "my work", label: "my work", asset: "icons/omo.svg" },
+])("tabs preserve $scenario identity and naming", ({ address, argv, state, program, name, label, asset }) => {
+  const { agents: tabs } = harness([], {
+    terminals: () => [{ ...live(address, []), state, foreground: argv === null ? null : { argv } }],
+    panes: () => [...(program.agent ? [{ ...pane("decoy"), program: { key: "bun", name: "Bun", icon: "icons/bun.svg" } }] : []), { ...pane("t"), program }],
+    spaces: () => [{ ...space(), active: true, tabs: [{ id: "tab", name }] }],
+  }, tabsSource);
+  const nodes = descendants(tabs.render());
+  expect(nodes).toContain(label);
+  expect(nodes.filter((node) => typeof node === "object" && node !== null && "asset" in node && node.asset === asset)).toHaveLength(1);
 });
 
 test("a missing foreground never reuses the original launch command", () => {
@@ -141,11 +171,11 @@ test("the narrow rail keeps an unreported marker and pane focus", () => {
   expect(writes).toEqual([["pane.focus", { pane: "pane-gjc" }]]);
 });
 
-test("omo and gjc registry defaults supply launch commands and shipped generic icons", async () => {
+test("omo and gjc registry defaults supply launch commands and shipped identity icons", async () => {
   const registry = JSON.parse(await readFile(new URL("../defaults/programs.json", import.meta.url), "utf8"));
   for (const key of ["omo", "gjc"]) {
     expect(registry.programs[key].run).toEqual([key]);
-    expect(registry.programs[key].icon).toBe("icons/agent.svg");
+    expect(registry.programs[key].icon).toBe(key === "omo" ? "icons/omo.svg" : "icons/agent.svg");
     expect(await readFile(new URL(`../defaults/${registry.programs[key].icon}`, import.meta.url), "utf8")).toContain("<svg");
   }
 });

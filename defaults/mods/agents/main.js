@@ -250,7 +250,7 @@ export default class Agents extends View {
           tab: tab.id, tab_index: tab.index, tab_name: tab.name, title: p.title,
           status: null, app: null, seq: 0, focused: p.focused,
           pinned: Boolean(terminal.labels?.["herdr.pinned"]),
-          program: { key, name: key, icon: "icons/agent.svg", tint: true },
+          program: { key, name: key, icon: key === "omo" ? "icons/omo.svg" : "icons/agent.svg", tint: key !== "omo" },
         }];
       })));
     this.listed = new Map(list.map((a) => [a.address, a.status]));

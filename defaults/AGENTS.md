@@ -158,7 +158,11 @@ the highlighted line shows where it will land.
   Recognition uses the current executable, omo's package launcher, or its
   Senpi CLI with the matching `omo-ai/plugin` extension; generic Bun/Node
   processes and original launch commands left behind in a shell do not qualify.
-  This sidebar-only recognition does not add status to `agents()`, space/tab
+  omo uses the cat icon (`icons/omo.svg`); gjc keeps the generic agent icon.
+  The default tab bar also uses omo's cat icon and automatic name for the
+  chosen pane's live omo foreground, without replacing other reported agents
+  or unrelated Bun/Node icons. Named tabs keep their names.
+  This presentation-only recognition does not add status to `agents()`, space/tab
   summaries, or core agent navigation; reported status takes precedence.
 - **Sub-agents** are terminals an agent started with `hc run`: the core
   records the starter as `parent` (see `terminals()`). They belong to their
@@ -742,7 +746,7 @@ has 120 programs (agents, editors, runtimes, tools, databases, infra);
   include functions in bash and zsh; fish checks find executables only. Installation
   checks are cached for up to a minute; changing the commands checks again.
   Invalid JSON is reported in `programs.error` (a valid file has no error).
-- `omo` and `gjc` ship as launch choices using the generic agent icon.
+- `omo` and `gjc` ship as launch choices, with omo's cat mark and gjc's generic agent icon.
   Availability still depends on the selected machine's shell. A launch-menu
   entry alone does not provide status reporting; see Agents above.
 - It follows what runs in the terminal now (lazygit, nvim), else what it

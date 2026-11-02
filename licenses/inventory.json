@@ -45,6 +45,13 @@
   ],
   "components": [
     {
+      "name": "omo icon",
+      "source": "https://github.com/code-yeongyu/oh-my-openagent/blob/dev/.github/assets/omo-icon-light.svg",
+      "files": [
+        "licenses/omo-icon.txt"
+      ]
+    },
+    {
       "name": "Ghostty (libghostty-vt)",
       "source": "https://github.com/ghostty-org/ghostty/tree/291fd050b9e9c293c8adb6a140742649b7e42d3a",
       "files": [
