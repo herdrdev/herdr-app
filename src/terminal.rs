@@ -921,15 +921,21 @@ fn key_bytes(vt: &mut vt::Vt, ev: &KeyDownEvent) -> Option<Vec<u8>> {
     let m = k.modifiers;
     // libghostty leaves these aliases to fixterms, but GPUI drops their
     // control text. Legacy needs explicit aliases; negotiated modes keep the chord.
-    if !vt.win32.on && vt.kitty_keyboard_flags() == 0 && m.control && !m.shift && !m.alt && !m.platform && !m.function {
+    if !vt.win32.on && vt.kitty_keyboard_flags() == 0 && m.control && !m.alt && !m.platform && !m.function {
         let alias = match k.key.as_str() {
-            "[" => Some((GHOSTTY_KEY_BRACKET_LEFT, GHOSTTY_KEY_ESCAPE)),
-            "i" => Some((GHOSTTY_KEY_I, GHOSTTY_KEY_TAB)),
-            "m" => Some((GHOSTTY_KEY_M, GHOSTTY_KEY_ENTER)),
+            "[" if !m.shift => Some((GHOSTTY_KEY_BRACKET_LEFT, GHOSTTY_KEY_ESCAPE)),
+            "i" if !m.shift => Some((GHOSTTY_KEY_I, GHOSTTY_KEY_TAB)),
+            "m" if !m.shift => Some((GHOSTTY_KEY_M, GHOSTTY_KEY_ENTER)),
             _ => None,
         };
         if let Some((key, alias)) = alias {
-            return Some(control_alias_bytes(vt, key, &k.key, alias));
+            let legacy = vt.encode_key(alias, 0, 0, None, None);
+            return Some(control_alias_bytes(vt, key, &k.key, false, legacy));
+        }
+        if matches!(k.key.as_str(), "-" | "_") {
+            let shifted = m.shift || k.key == "_";
+            let text = if shifted { "_" } else { "-" };
+            return Some(control_alias_bytes(vt, GHOSTTY_KEY_MINUS, text, shifted, vec![0x1f]));
         }
     }
     if vt.win32.on && vt.kitty_keyboard_flags() == 0 {
@@ -983,11 +989,12 @@ fn key_bytes(vt: &mut vt::Vt, ev: &KeyDownEvent) -> Option<Vec<u8>> {
     Some(vt.encode_key(key, mods, consumed, text.as_deref(), unshifted))
 }
 
-fn control_alias_bytes(vt: &mut vt::Vt, key: GhosttyKey, text: &str, alias: GhosttyKey) -> Vec<u8> {
+fn control_alias_bytes(vt: &mut vt::Vt, key: GhosttyKey, text: &str, shifted: bool, legacy: Vec<u8>) -> Vec<u8> {
     // libghostty has no mode-2 getter. Probe with printable base text so its
     // encoder can preserve the chord when modifyOtherKeys requests CSI 27.
-    let encoded = vt.encode_key(key, GHOSTTY_MODS_CTRL as GhosttyMods, 0, Some(text), text.chars().next());
-    if encoded.starts_with(b"\x1b[27;") { encoded } else { vt.encode_key(alias, 0, 0, None, None) }
+    let mods = GHOSTTY_MODS_CTRL as GhosttyMods | if shifted { GHOSTTY_MODS_SHIFT as GhosttyMods } else { 0 };
+    let encoded = vt.encode_key(key, mods, 0, Some(text), text.chars().next());
+    if encoded.starts_with(b"\x1b[27;") { encoded } else { legacy }
 }
 
 fn map_key(key: &str) -> Option<(GhosttyKey, bool, Option<char>)> {
@@ -2134,6 +2141,12 @@ mod tests {
             ("space", Some(" "), b" ", b" ", b"\x1b[32u"),
             ("ctrl-c", None, b"\x03", b"\x1b[99;5u", b"\x1b[99;5u"),
             ("ctrl-[", None, b"\x1b", b"\x1b[91;5u", b"\x1b[91;5u"),
+            // GPUI strips Shift from punctuation; control text is absent.
+            ("ctrl-_", None, b"\x1f", b"\x1b[45;6u", b"\x1b[45;6u"),
+            ("ctrl--", None, b"\x1f", b"\x1b[45;5u", b"\x1b[45;5u"),
+            // Also accept backends that retain the physical minus and Shift.
+            ("ctrl-shift--", None, b"\x1f", b"\x1b[45;6u", b"\x1b[45;6u"),
+            ("ctrl-/", None, b"\x1f", b"\x1b[47;5u", b"\x1b[47;5u"),
             ("ctrl-i", None, b"\t", b"\x1b[105;5u", b"\x1b[105;5u"),
             ("ctrl-m", None, b"\r", b"\x1b[109;5u", b"\x1b[109;5u"),
             ("ctrl-]", None, b"\x1d", b"\x1b[93;5u", b"\x1b[93;5u"),
@@ -2167,6 +2180,29 @@ mod tests {
             }
         }
         assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
+    }
+
+    #[test]
+    fn minus_control_aliases_respect_modify_other_keys() {
+        for (spec, typed, modified) in [
+            ("ctrl--", None, b"\x1b[27;5;45~".as_slice()),
+            ("ctrl--", Some("-"), b"\x1b[27;5;45~"),
+            ("ctrl-_", None, b"\x1b[27;6;95~"),
+            ("ctrl-_", Some("_"), b"\x1b[27;6;95~"),
+            ("ctrl-shift--", None, b"\x1b[27;6;95~"),
+            ("ctrl-shift--", Some("_"), b"\x1b[27;6;95~"),
+        ] {
+            for (setup, expected) in [
+                (b"".as_slice(), b"\x1f".as_slice()),
+                (b"\x1b[>4;1m", b"\x1f"),
+                (b"\x1b[>4;2m", modified),
+                (b"\x1b[>4;2m\x1b[>4;0m", b"\x1f"),
+            ] {
+                let mut vt = Vt::new(20, 3);
+                vt.write(setup);
+                assert_eq!(key_bytes(&mut vt, &press(spec, typed)).as_deref(), Some(expected), "{spec}, typed={typed:?}, setup={setup:?}");
+            }
+        }
     }
 
     #[test]
