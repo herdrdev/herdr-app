@@ -919,6 +919,19 @@ fn key_bytes(vt: &mut vt::Vt, ev: &KeyDownEvent) -> Option<Vec<u8>> {
     }
     let k = &ev.keystroke;
     let m = k.modifiers;
+    // libghostty leaves these aliases to fixterms, but GPUI drops their
+    // control text. Describe the legacy keys explicitly; Kitty keeps the chord.
+    if !vt.win32.on && vt.kitty_keyboard_flags() == 0 && m.control && !m.shift && !m.alt && !m.platform && !m.function {
+        let alias = match k.key.as_str() {
+            "[" => Some(GHOSTTY_KEY_ESCAPE),
+            "i" => Some(GHOSTTY_KEY_TAB),
+            "m" => Some(GHOSTTY_KEY_ENTER),
+            _ => None,
+        };
+        if let Some(key) = alias {
+            return Some(vt.encode_key(key, 0, 0, None, None));
+        }
+    }
     if vt.win32.on && vt.kitty_keyboard_flags() == 0 {
         if k.key == "enter" && (m.shift || m.control || m.alt) {
             return Some(crate::win32_keys::enter(m.shift, m.control, m.alt));
@@ -1939,6 +1952,11 @@ mod tests {
             ("shift-1", Some("!"), b"!", b"!", b"\x1b[49;2u"),
             ("space", Some(" "), b" ", b" ", b"\x1b[32u"),
             ("ctrl-c", None, b"\x03", b"\x1b[99;5u", b"\x1b[99;5u"),
+            ("ctrl-[", None, b"\x1b", b"\x1b[91;5u", b"\x1b[91;5u"),
+            ("ctrl-i", None, b"\t", b"\x1b[105;5u", b"\x1b[105;5u"),
+            ("ctrl-m", None, b"\r", b"\x1b[109;5u", b"\x1b[109;5u"),
+            ("ctrl-]", None, b"\x1d", b"\x1b[93;5u", b"\x1b[93;5u"),
+            ("ctrl-\\", None, b"\x1c", b"\x1b[92;5u", b"\x1b[92;5u"),
             ("ctrl-space", None, b"\x00", b"\x1b[32;5u", b"\x1b[32;5u"),
             ("alt-b", Some("b"), ALT_B, KITTY_ALT_B, b"\x1b[98;3u"),
             ("alt-b", Some("∫"), "∫".as_bytes(), "∫".as_bytes(), b"\x1b[98;3u"),
