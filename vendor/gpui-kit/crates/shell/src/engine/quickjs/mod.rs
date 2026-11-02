@@ -9071,9 +9071,10 @@ fn virtual_list_constructor(
                     // other is inferred by measuring one item. Writing zero
                     // there says so, rather than inventing a number base would
                     // ignore.
+                    let extent = crate::value::scaled_px(value as f32);
                     Ok(match axis {
-                        gpui::Axis::Vertical => gpui::size(gpui::px(0.), gpui::px(value as f32)),
-                        gpui::Axis::Horizontal => gpui::size(gpui::px(value as f32), gpui::px(0.)),
+                        gpui::Axis::Vertical => gpui::size(gpui::px(0.), extent),
+                        gpui::Axis::Horizontal => gpui::size(extent, gpui::px(0.)),
                     })
                 };
 

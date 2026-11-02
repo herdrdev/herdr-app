@@ -2040,6 +2040,7 @@ mod tests {
                 is_emoji: true,
                 subpixel_rendering: false,
                 dilation: 0,
+                foreground: [0, 0, 0, 255],
             };
             let raster_bounds = text_system.glyph_raster_bounds(&params)?;
             if raster_bounds.size.width.0 == 0 || raster_bounds.size.height.0 == 0 {

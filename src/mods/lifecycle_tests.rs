@@ -139,6 +139,51 @@ export default class extends View {
 }
 
 #[gpui::test]
+fn focus_command_lets_a_mod_take_arrow_keys(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let fixture = Fixture::new(r#"
+import { View, div } from "gpui-kit";
+import { nextCommand } from "herdr";
+import { note } from "fixture";
+export default class extends View {
+  init(_props, cx) {
+    this.handle = cx.focus_handle();
+    cx.spawn(async (cx) => {
+      for (;;) {
+        const command = await nextCommand();
+        if (command === "focus") { this.handle.focus(); note(command); }
+        cx.notify();
+      }
+    });
+  }
+  render() {
+    return div().size_full().track_focus(this.handle)
+      .on_key_down((e, cx) => { note(e.key); cx.stop_propagation(); });
+  }
+}"#);
+    let notes = Rc::new(RefCell::new(Vec::new()));
+    let calls = notes.clone();
+    gpui_shell::policy::set_default(Policy::new()
+        .with_host_module(module(Instance { name: "focus-test".into(), props: Value::Null }, 42)).unwrap()
+        .with_host_module(HostModule::new("fixture").function("note", move |a| {
+            calls.borrow_mut().push(a.string(0)?.to_owned());
+            Ok(HostValue::Null)
+        })).unwrap());
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|window, cx| Mounted(runtime.try_load(&fixture.0, window, cx).unwrap()));
+    let mut visual = VisualTestContext::from_window(*window.deref(), cx);
+    visual.run_until_parked();
+    set_shown_copies([42].into());
+    assert!(send_command_to(42, "focus"));
+    visual.run_until_parked();
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    visual.simulate_keystrokes("down up");
+    visual.run_until_parked();
+    assert_eq!(*notes.borrow(), vec!["focus", "down", "up"]);
+    set_shown_copies(Default::default());
+}
+
+#[gpui::test]
 fn close_is_once_and_awaits_its_promise(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let fixture = Fixture::new(r#"

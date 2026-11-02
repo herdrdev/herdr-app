@@ -1,4 +1,4 @@
-//! Box drawing and block characters drawn as shapes that fill their cell
+//! Box drawing, block and braille characters drawn as shapes that fit their cell
 //! exactly, as Ghostty does. Font glyphs for these rarely span the whole
 //! cell, so tables get gaps between rows and block art gets seams.
 
@@ -107,6 +107,57 @@ fn blocks(c: char) -> Option<(Vec<[f32; 4]>, f32)> {
     })
 }
 
+/// Ghostty's dot sizing, with vertical spacing even across adjacent cells.
+/// Bit order is 1,2,3,7 down the left, 4,5,6,8 down the right.
+fn braille(c: char, width: i32, height: i32) -> Option<Vec<[i32; 4]>> {
+    if !('\u{2800}'..='\u{28FF}').contains(&c) {
+        return None;
+    }
+    let mut dot = (width / 4).min(height / 8);
+    let (mut xs, ys) = (width / 4, height / 8);
+    let (mut xm, ym) = (xs / 2, ys / 2);
+    let mut xr = width - 2 * xm - xs - 2 * dot;
+    let mut yr = height - 2 * ym - 3 * ys - 4 * dot;
+    if xr >= 2 && yr >= 4 && dot == 0 {
+        dot += 1;
+        xr -= 2;
+        yr -= 4;
+    }
+    if xr >= 2 && xm == 0 {
+        xm = 1;
+        xr -= 2;
+    }
+    if yr >= 2 && ym == 0 {
+        yr -= 2;
+    }
+    if xr >= 1 {
+        xs += 1;
+        xr -= 1;
+    }
+    if yr >= 3 {
+        yr -= 3;
+    }
+    if xr >= 2 {
+        xm += 1;
+        xr -= 2;
+    }
+    if yr >= 2 {
+        yr -= 2;
+    }
+    if xr >= 2 && yr >= 4 {
+        dot += 1;
+    }
+    let mut rects = Vec::new();
+    for (bit, col, row) in [(0, 0, 0), (1, 0, 1), (2, 0, 2), (3, 1, 0), (4, 1, 1), (5, 1, 2), (6, 0, 3), (7, 1, 3)] {
+        if (c as u32) & (1 << bit) != 0 {
+            let x = xm + col * (dot + xs);
+            let y = ((2 * row + 1) * height - 4 * dot + 4) / 8;
+            rects.push([x, y, x + dot, y + dot]);
+        }
+    }
+    Some(rects)
+}
+
 /// ⏺ (Claude Code marks every step with it): few terminal fonts have it, and
 /// the fallback may draw nothing.
 const RECORD: char = '\u{23FA}';
@@ -114,7 +165,7 @@ const RECORD: char = '\u{23FA}';
 pub fn is_sprite(text: &str) -> bool {
     let mut chars = text.chars();
     match (chars.next(), chars.next()) {
-        (Some(c), None) => lines(c).is_some() || blocks(c).is_some() || ('\u{E0B0}'..='\u{E0BF}').contains(&c) || c == RECORD,
+        (Some(c), None) => lines(c).is_some() || blocks(c).is_some() || ('\u{2800}'..='\u{28FF}').contains(&c) || ('\u{E0B0}'..='\u{E0BF}').contains(&c) || c == RECORD,
         _ => false,
     }
 }
@@ -132,6 +183,15 @@ pub fn paint(text: &str, cell: Bounds<Pixels>, color: Hsla, window: &mut Window)
         }
     };
 
+    let (dx, dy) = ((x * scale).round(), (y * scale).round());
+    let (dw, dh) = (((x + w) * scale).round() - dx, ((y + h) * scale).round() - dy);
+    if let Some(dots) = braille(c, dw as i32, dh as i32) {
+        for [x0, y0, x1, y1] in dots {
+            rect((dx + x0 as f32) / scale, (dy + y0 as f32) / scale,
+                (dx + x1 as f32) / scale, (dy + y1 as f32) / scale, color);
+        }
+        return;
+    }
     if c == RECORD {
         let d = snap((w * 0.62).min(h * 0.5));
         let (x0, y0) = (snap(x + (w - d) / 2.0), snap(y + (h - d) / 2.0));
@@ -280,6 +340,81 @@ fn powerline(c: char, (x, y, w, h): (f32, f32, f32, f32), line: f32, color: Hsla
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn braille_patterns_use_all_eight_bits_and_stay_in_the_cell() {
+        assert!(!is_sprite("\u{27FF}") && !is_sprite("\u{2900}"));
+        assert!(!is_sprite("⠁⠂") && !is_sprite("⠁\u{FE0F}"));
+        assert_eq!(braille('A', 8, 22), None);
+        let positions = [(1, 2), (1, 7), (1, 13), (5, 2), (5, 7), (5, 13), (1, 18), (5, 18)];
+        for pattern in 0u32..256 {
+            let c = char::from_u32(0x2800 + pattern).unwrap();
+            assert!(is_sprite(&c.to_string()));
+            let expected: Vec<_> = positions.iter().enumerate()
+                .filter(|(bit, _)| pattern & (1 << bit) != 0)
+                .map(|(_, &(x, y))| [x, y, x + 2, y + 2]).collect();
+            assert_eq!(braille(c, 8, 22).unwrap(), expected);
+        }
+        for w in 0..80 {
+            for h in 0..160 {
+                for [x0, y0, x1, y1] in braille('⣿', w, h).unwrap() {
+                    assert!(0 <= x0 && x0 <= x1 && x1 <= w);
+                    assert!(0 <= y0 && y0 <= y1 && y1 <= h);
+                    assert_eq!(x1 - x0, y1 - y0);
+                }
+                let dots = braille('⡇', w, h).unwrap();
+                let gaps = [dots[1][1] - dots[0][1], dots[2][1] - dots[1][1], dots[3][1] - dots[2][1], h + dots[0][1] - dots[3][1]];
+                assert!(gaps.iter().max().unwrap() - gaps.iter().min().unwrap() <= 1, "{w}x{h}: {gaps:?}");
+            }
+        }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn rendered_braille_matches_device_pixel_layout() {
+        use gpui::{prelude::*, *};
+
+        struct BrailleScene { w: f32, h: f32 }
+        impl Render for BrailleScene {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let (w, h) = (self.w, self.h);
+                div().size_full().bg(rgb(0)).child(canvas(|_, _, _| {}, move |_, _, window, _| {
+                    for (col, c) in ['⠀', '⠁', '⠂', '⠄', '⠈', '⠐', '⠠', '⡀', '⢀', '⣿'].into_iter().enumerate() {
+                        paint(&c.to_string(), Bounds::new(
+                            point(px(7.3 + col as f32 * w), px(5.7)),
+                            size(px(w), px(h)),
+                        ), rgb(0xffffff).into(), window);
+                    }
+                }).size_full())
+            }
+        }
+        let mut cx = HeadlessAppContext::with_platform(
+            gpui_platform::current_platform(true).text_system(),
+            std::sync::Arc::new(()),
+            gpui_platform::current_headless_renderer,
+        );
+        for (w, h) in [(4.2, 11.), (5.04, 13.2), (8.4, 22.), (10.08, 26.4)] {
+            let handle = cx.open_window(size(px(120.), px(40.)), |_, cx| cx.new(|_| BrailleScene { w, h })).unwrap();
+            cx.update_window(handle.into(), |_, window, cx| {
+                let scale = window.scale_factor();
+                let _ = window.draw(cx);
+                let image = window.render_to_image().unwrap();
+                let snap = |v: f32| (v * scale).round() as i32;
+                for (col, c) in ['⠀', '⠁', '⠂', '⠄', '⠈', '⠐', '⠠', '⡀', '⢀', '⣿'].into_iter().enumerate() {
+                    let (x, y) = (snap(7.3 + col as f32 * w), snap(5.7));
+                    let (dw, dh) = (snap(7.3 + (col + 1) as f32 * w) - x, snap(5.7 + h) - y);
+                    let dots = braille(c, dw, dh).unwrap();
+                    for py in 0..dh {
+                        for px in 0..dw {
+                            let on = dots.iter().any(|&[x0, y0, x1, y1]| x0 <= px && px < x1 && y0 <= py && py < y1);
+                            let actual = image.get_pixel((x + px) as u32, (y + py) as u32).0[0];
+                            assert_eq!(actual, if on { 255 } else { 0 }, "{c}: {w}x{h} at {px},{py}");
+                        }
+                    }
+                }
+            }).unwrap();
+        }
+    }
 
     #[test]
     fn tables_cover_their_ranges() {

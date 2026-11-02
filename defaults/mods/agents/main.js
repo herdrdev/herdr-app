@@ -37,7 +37,7 @@ function title(tab, l) {
   const prog = l?.program?.name;
   const live = clean(l?.title);
   const telling = live && live !== prog && !/^[~/]|^[A-Za-z]:\\/.test(live) && !live.includes("@") && live.toLowerCase() !== l?.program?.key;
-  return tab.name === prog && telling ? live : tab.name;
+  return (tab.name === prog || !tab.named) && telling ? live : tab.name;
 }
 const RANK = { blocked: 4, done: 3, working: 2, idle: 1 };
 // A sub-agent without a pane isn't in agents(): its raw word, error counting as

@@ -527,12 +527,21 @@ impl TerminalView {
     }
 
     /// Copies the selection to the clipboard (and the primary selection on Linux).
-    pub fn copy(&mut self, cx: &mut Context<Self>) {
-        if let Some(text) = self.grid.borrow().vt.selection_text() {
-            cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
-            #[cfg(target_os = "linux")]
-            cx.write_to_primary(ClipboardItem::new_string(text));
-        }
+    /// Returns whether anything was copied. Does not clear the selection: mouse
+    /// copy-on-select uses this and keeps the highlight.
+    pub fn copy(&mut self, cx: &mut Context<Self>) -> bool {
+        let Some(text) = self.grid.borrow().vt.selection_text() else {
+            return false;
+        };
+        cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
+        #[cfg(target_os = "linux")]
+        cx.write_to_primary(ClipboardItem::new_string(text));
+        true
+    }
+
+    pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
+        self.grid.borrow_mut().vt.clear_selection();
+        cx.notify();
     }
 
     fn key_down(&mut self, ev: &KeyDownEvent, _w: &mut Window, cx: &mut Context<Self>) {
@@ -874,11 +883,20 @@ fn icon_glyph(c: char) -> Option<IconGlyph> {
     })
 }
 
-/// A Nerd Font icon (Unicode private use areas). Drawn from the bundled
-/// symbols font and fitted to the cell, whatever the terminal font.
+/// A Nerd Font icon (Unicode private use areas).
 fn is_icon(text: &str) -> bool {
     let mut chars = text.chars();
     matches!((chars.next(), chars.next()), (Some(c), None) if matches!(c as u32, 0xE000..=0xF8FF | 0xF0000..=0x10FFFD))
+}
+
+/// Keep the configured font’s icon proportions; only fit bundled fallback glyphs.
+fn fallback_icon(text: &str, font: &Font, ts: &gpui::TextSystem) -> Option<IconGlyph> {
+    let c = text.chars().next().filter(|_| is_icon(text))?;
+    let id = ts.resolve_font(font);
+    if ts.advance(id, px(crate::settings::font_size()), c).is_ok() {
+        return None;
+    }
+    icon_glyph(c)
 }
 
 fn paste_image_fallback(vt: &mut vt::Vt, text: Option<&str>) -> Option<Vec<u8>> {
@@ -1076,8 +1094,9 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, window: &mut Window) -> Vec<Row
             ops.push(RowOp::Sprite { x: start, text: c.text.clone(), color });
             continue;
         }
-        if let Some(icon) = c.text.chars().next().filter(|_| is_icon(&c.text)).and_then(icon_glyph) {
-            // Fitted to the cell by its real outline, as Ghostty does:
+        let text_font = cell_font(c.bold, c.italic);
+        if let Some(icon) = fallback_icon(&c.text, &text_font, window.text_system()) {
+            // Fit missing icons from the bundled font by their outlines:
             // centered, as tall as fits, two cells wide when a space
             // follows (prompts, statuslines, file trees).
             let room = if row.get(x).is_none_or(|d| d.text.trim().is_empty()) { 2.0 } else { 1.0 };
@@ -1106,8 +1125,8 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, window: &mut Window) -> Vec<Row
                     && d.faint == c.faint
                     && d.underline == c.underline
                     && d.strike == c.strike;
-                // A missing icon breaks the run too; the next outer pass draws it as text.
-                if !same || (d.text.is_empty() && !d.underline && !d.strike) || crate::sprites::is_sprite(&d.text) || is_icon(&d.text) {
+                // Bundled fallback icons are fitted separately from the text run.
+                if !same || (d.text.is_empty() && !d.underline && !d.strike) || crate::sprites::is_sprite(&d.text) || fallback_icon(&d.text, &text_font, window.text_system()).is_some() {
                     break;
                 }
                 text.push_str(if d.text.is_empty() { " " } else { &d.text });
@@ -1119,7 +1138,7 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, window: &mut Window) -> Vec<Row
         }
         let run = TextRun {
             len: text.len(),
-            font: cell_font(c.bold, c.italic),
+            font: text_font,
             color,
             background_color: None,
             underline: c.underline.then(|| UnderlineStyle { thickness: px(1.0), color: Some(color), wavy: false }),
@@ -1601,7 +1620,8 @@ mod tests {
                             _ => None,
                         }).collect();
                         assert!(rendered.contains(missing), "{text:?}, underline={underline}, strike={strike}");
-                        assert!(ops.iter().any(|op| matches!(op, super::RowOp::Icon { .. })));
+                        assert!(rendered.contains('\u{f10d}'));
+                        assert!(!ops.iter().any(|op| matches!(op, super::RowOp::Icon { .. })));
                         let positions: Vec<_> = ops.iter().filter_map(|op| match op {
                             super::RowOp::Text { x, line } => { assert!(!line.text.is_empty()); Some(*x) }
                             super::RowOp::Icon { x, .. } => Some(*x),
@@ -1609,6 +1629,26 @@ mod tests {
                         }).collect();
                         assert!(positions.windows(2).all(|pair| pair[0] < pair[1]));
                     }
+                }
+            }
+        }).unwrap();
+    }
+
+    #[gpui::test]
+    fn icons_available_in_the_terminal_font_stay_in_one_text_run(cx: &mut gpui::TestAppContext) {
+        let window = cx.add_window(|_, _| Empty);
+        window.update(cx, |_, window, _| {
+            // The test text system supplies every glyph in the requested font.
+            for (bold, italic) in [(false, false), (true, false), (false, true)] {
+                for text in ["\u{f1c0}\u{f0e7} 99.6%", "\u{f0e4} 54 t/s", "\u{f233} \u{f0e7}"] {
+                    let row: Vec<_> = text.chars().map(|c| crate::vt::Cell {
+                        text: c.to_string(), bold, italic, ..Default::default()
+                    }).collect();
+                    let ops = super::row_ops(&row, gpui::size(gpui::px(8.0), gpui::px(16.0)), window);
+                    assert_eq!(ops.len(), 1, "{text:?}");
+                    let super::RowOp::Text { x, line } = &ops[0] else { panic!("configured font was bypassed") };
+                    assert_eq!(*x, 0);
+                    assert_eq!(line.text.as_ref(), text);
                 }
             }
         }).unwrap();

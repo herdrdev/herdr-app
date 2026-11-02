@@ -117,6 +117,7 @@ pub struct Frame {
 /// Holds what the terminal's callbacks write into; boxed so its address is stable.
 struct Shared {
     state: GhosttyRenderState,
+    size: GhosttySizeReportSize,
     held_since: Option<Instant>,
     title_changed: bool,
     /// Replies the terminal writes back to the program (e.g. kitty graphics acks).
@@ -586,12 +587,23 @@ unsafe extern "C" fn on_render_hold(_t: GhosttyTerminal, userdata: *mut c_void, 
     }
 }
 
+unsafe extern "C" fn on_size(_t: GhosttyTerminal, userdata: *mut c_void, out: *mut GhosttySizeReportSize) -> bool {
+    let shared = unsafe { &*(userdata as *const Shared) };
+    if shared.size.cell_width == 0 || shared.size.cell_height == 0 {
+        return false;
+    }
+    unsafe { *out = shared.size };
+    true
+}
+
 unsafe extern "C" fn on_title(_t: GhosttyTerminal, userdata: *mut c_void) {
     let shared = unsafe { &mut *(userdata as *mut Shared) };
     shared.title_changed = true;
 }
 
 const SYNC_OUTPUT: GhosttyMode = 2026;
+/// On from the start, as in Ghostty: VS16 makes ✍️ two cells wide and in color.
+const GRAPHEME_CLUSTER: GhosttyMode = 2027;
 const BRACKETED_PASTE: GhosttyMode = 2004;
 const MAX_HOLD: Duration = Duration::from_millis(1000);
 const SCROLLBACK_MAX_LINES: usize = 10_000;
@@ -605,6 +617,8 @@ impl Vt {
         unsafe {
             let mut term = std::ptr::null_mut();
             ok(ghostty_terminal_new(std::ptr::null(), &mut term, cols.max(1), rows.max(1)), "terminal_new");
+            let cluster = GhosttyTerminalModeConfig { mode: GRAPHEME_CLUSTER, value: true };
+            ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_MODE_DEFAULT, &cluster as *const _ as *const c_void);
             let mut state = std::ptr::null_mut();
             ok(ghostty_render_state_new(std::ptr::null(), &mut state), "render_state_new");
             let mut rows_it = std::ptr::null_mut();
@@ -621,13 +635,15 @@ impl Vt {
             ok(ghostty_mouse_event_new(std::ptr::null(), &mut mouse_event), "mouse_event_new");
 
             install_png_decoder();
-            let mut shared = Box::new(Shared { state, held_since: None, title_changed: false, replies: Vec::new(), clipboard_write: true, clipboard: [None, None] });
+            let mut shared = Box::new(Shared { state, size: GhosttySizeReportSize { rows: rows.max(1), columns: cols.max(1), cell_width: 0, cell_height: 0 }, held_since: None, title_changed: false, replies: Vec::new(), clipboard_write: true, clipboard: [None, None] });
             let ud = &mut *shared as *mut Shared as *const c_void;
             ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_USERDATA, ud);
             let hold: GhosttyTerminalRenderHoldFn = Some(on_render_hold);
             ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_RENDER_HOLD, std::mem::transmute(hold));
             let title: GhosttyTerminalTitleChangedFn = Some(on_title);
             ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_TITLE_CHANGED, std::mem::transmute(title));
+            let size: GhosttyTerminalSizeFn = Some(on_size);
+            ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_SIZE, std::mem::transmute(size));
             let write: GhosttyTerminalWritePtyFn = Some(on_write_pty);
             ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_WRITE_PTY, std::mem::transmute(write));
             let clipboard: GhosttyTerminalClipboardWriteFn = Some(on_clipboard_write);
@@ -1177,6 +1193,7 @@ impl Vt {
         self.placements_cache.get_mut().take();
         self.cols = cols;
         self.rows = rows;
+        self.shared.size = GhosttySizeReportSize { rows, columns: cols, cell_width: cell_w.max(1), cell_height: cell_h.max(1) };
         unsafe { ghostty_terminal_resize(self.term, cols, rows, cell_w.max(1), cell_h.max(1)) };
     }
 
@@ -1577,6 +1594,16 @@ mod tests {
     }
 
     #[test]
+    fn vs16_makes_an_emoji_two_cells_wide() {
+        let mut vt = Vt::new(10, 2);
+        vt.write("\u{270d}\u{fe0f}!\x1bc\u{270d}\u{fe0f}!".as_bytes());
+        let f = vt.frame();
+        assert!(f.rows[0][0].wide, "also after a reset");
+        assert_eq!(f.rows[0][0].text, "\u{270d}\u{fe0f}");
+        assert_eq!(f.rows[0][2].text, "!");
+    }
+
+    #[test]
     fn styled_text_reaches_the_frame() {
         let mut vt = Vt::new(20, 3);
         vt.write(b"hi \x1b[1;31mred\x1b[0m\r\n\xe4\xb8\xad!");
@@ -1617,7 +1644,7 @@ mod tests {
         vt.resize(30, 5, 9, 18);
         assert!(vt.take_replies().is_empty(), "a shell receives no resize input");
         vt.write(b"\x1b[?2048h");
-        vt.take_replies();
+        assert_eq!(vt.take_replies(), b"\x1b[48;5;30;90;270t", "enabling reports current geometry before pixel mouse input");
         vt.resize(40, 6, 9, 18);
         assert_eq!(vt.take_replies(), b"\x1b[48;6;40;108;360t");
         assert!(vt.take_replies().is_empty(), "the report is sent only once");
