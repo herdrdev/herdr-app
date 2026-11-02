@@ -4715,6 +4715,8 @@ impl Render for AppWindow {
         let tracker = self.float_tracker(cx);
         let win_tracker = self.window_tracker(cx);
         let pane_drag = self.pane_drag_layer(cx);
+        let see_through = settings::get().window_opacity < 1.0;
+        let terminals: Vec<_> = self.terms.values().map(|t| t.view.clone()).collect();
         div()
             .id("herdr")
             .track_focus(&self.focus)
@@ -4722,7 +4724,8 @@ impl Render for AppWindow {
             .key_context(format!("Herdr layout = {}", self.layout_name).as_str())
             .size_full()
             .relative()
-            .bg(settings::solid("background").opacity(settings::get().window_opacity))
+            .when(!see_through, |root| root.bg(settings::solid("background")))
+            .when(see_through, |root| root.child(crate::terminal::window_background(terminals)))
             .text_color(c("foreground"))
             .font_family(settings::get().ui_font_family.clone())
             .on_action(cx.listener(|this, a: &ShellAction, w, cx| {
