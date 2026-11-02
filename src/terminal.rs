@@ -3,6 +3,8 @@
 
 use crate::hc::{Core, Stream};
 use crate::smooth_scroll::{SmoothScroll, ScrollOwner, scroll_owner};
+use crate::application_scroll::ApplicationScroll;
+use std::hash::{Hash, Hasher};
 use crate::vt::{self, CursorShape, Rgb, Select, Vt};
 use ghostty_sys::*;
 use gpui::prelude::FluentBuilder as _;
@@ -83,6 +85,8 @@ struct Grid {
     painted_with: (u32, Size<Pixels>, String, u64, bool),
     history_scroll: Option<HistoryScroll>,
     scroll_offset: f32,
+    application_scroll: ApplicationScroll<ApplicationRow>,
+    application_epoch: Instant,
 }
 
 pub struct TerminalView {
@@ -145,6 +149,26 @@ fn display_update(told: &mut Option<DisplayFacts>, theme: &vt::Theme, cell: (u32
     *told = Some(facts);
     let hex = |c: Rgb| format!("#{:02x}{:02x}{:02x}", c.0, c.1, c.2);
     Some(json!({"fg": hex(facts.fg), "bg": hex(facts.bg), "cursor": hex(facts.cursor), "cell": [cell.0, cell.1]}))
+}
+
+#[derive(Clone)]
+struct ApplicationRow(Rc<Vec<vt::Cell>>);
+
+fn same_application_cell(a: &vt::Cell, b: &vt::Cell) -> bool {
+    let blank = |c: &vt::Cell| c.text.is_empty() || (!c.underline && !c.strike && c.text.chars().all(char::is_whitespace));
+    a.bg == b.bg && if blank(a) && blank(b) { true } else { a == b }
+}
+
+impl PartialEq for ApplicationRow {
+    fn eq(&self, other: &Self) -> bool {
+        Rc::ptr_eq(&self.0, &other.0) || (self.0.len() == other.0.len()
+            && self.0.iter().zip(other.0.iter()).all(|(a, b)| same_application_cell(a, b)))
+    }
+}
+
+fn application_overlay_row(base: &ApplicationRow, current: &ApplicationRow) -> bool {
+    base.0.len() == current.0.len() && base.0.iter().zip(current.0.iter())
+        .all(|(old, new)| same_application_cell(old, new) || (new.bg.is_some() && new.bg != old.bg))
 }
 
 struct HistoryScroll {
@@ -264,6 +288,8 @@ impl TerminalView {
                 painted_with: (0, Size::default(), String::new(), 0, false),
                 history_scroll: None,
                 scroll_offset: 0.0,
+                application_scroll: ApplicationScroll::default(),
+                application_epoch: Instant::now(),
             })),
             focus: cx.focus_handle(),
             was_focused: false,
@@ -302,6 +328,7 @@ impl TerminalView {
             // The core repaints the whole screen (and history) on attach.
             let cell = device_cell(g.cell, g.scale);
             g.cancel_smooth_scroll();
+            g.application_scroll.reset();
             g.vt = Vt::new(cols, rows);
             g.vt.resize(cols, rows, cell.0, cell.1);
             g.vt_cell = cell;
@@ -509,6 +536,7 @@ impl TerminalView {
             && !bytes.is_empty()
         {
             g.cancel_smooth_scroll();
+            g.application_scroll.finish();
             g.vt.scroll_to_bottom();
             g.core.input(ch, bytes);
         }
@@ -600,6 +628,7 @@ impl TerminalView {
     /// Returns whether anything was copied. Does not clear the selection: mouse
     /// copy-on-select uses this and keeps the highlight.
     pub fn copy(&mut self, cx: &mut Context<Self>) -> bool {
+        if self.grid.borrow_mut().application_scroll.finish() { cx.notify(); }
         let Some(text) = self.grid.borrow().vt.selection_text() else {
             return false;
         };
@@ -610,11 +639,13 @@ impl TerminalView {
     }
 
     pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
+        self.grid.borrow_mut().application_scroll.finish();
         self.grid.borrow_mut().vt.clear_selection();
         cx.notify();
     }
 
     fn key_down(&mut self, ev: &KeyDownEvent, _w: &mut Window, cx: &mut Context<Self>) {
+        if self.grid.borrow_mut().application_scroll.finish() { cx.notify(); }
         let k = &ev.keystroke;
         // Typing clears a selection, as in Herdr.
         if !k.key.starts_with("shift") && !k.key.starts_with("control") && !k.key.starts_with("alt") {
@@ -630,6 +661,7 @@ impl TerminalView {
     fn scroll(&mut self, ev: &ScrollWheelEvent, _w: &mut Window, cx: &mut Context<Self>) {
         cx.stop_propagation();
         let mut g = self.grid.borrow_mut();
+        tracing::debug!(mouse = g.vt.mouse_tracking(), alternate = g.vt.alt_screen(), images = g.vt.has_image_placements(), "terminal wheel dispatch");
         if g.sync_smooth_scroll() {
             let height = f32::from(g.cell.height) as f64;
             // X11 reports high-resolution valuators as fractional Lines too.
@@ -657,6 +689,11 @@ impl TerminalView {
             return;
         }
         let up = steps.y > 0;
+        if crate::settings::get().smooth_scrolling && !cx.reduce_motion() && !self.selecting
+            && (g.vt.mouse_tracking() || g.vt.alt_screen()) && !g.vt.has_image_placements() {
+            let now = g.application_epoch.elapsed();
+            g.application_scroll.wheel(steps.y, now);
+        }
         if g.vt.mouse_tracking() {
             let ((x, y), size) = mouse_at(&g, ev.position);
             let out = scroll_mouse_bytes(&mut g.vt, steps, x, y, size);
@@ -689,6 +726,7 @@ impl TerminalView {
     /// (shift keeps the mouse for Herdr: selecting, the menu).
     fn mouse(&mut self, action: GhosttyMouseAction, button: Option<MouseButton>, pos: Point<Pixels>, mods: Modifiers) -> bool {
         let mut g = self.grid.borrow_mut();
+        g.application_scroll.finish();
         if !track_mouse_button(&mut g.buttons_down, action, button) {
             return false;
         }
@@ -745,6 +783,7 @@ impl TerminalView {
 
     fn start_selection(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
         self.grid.borrow_mut().stop_scroll_animation();
+        self.grid.borrow_mut().application_scroll.finish();
         self.selecting = true;
         self.selection_pointer = pos;
         self.select(Select::Press, pos, cx);
@@ -1295,6 +1334,35 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
     ops
 }
 
+fn application_row_anchor(row: &ApplicationRow) -> Option<u64> {
+    let row = &row.0;
+    if !row.iter().any(|c| c.text.chars().any(|ch| !ch.is_whitespace())) { return None; }
+    let mut hasher = std::collections::hash_map::DefaultHasher::new();
+    for cell in row.iter() {
+        let blank = cell.text.is_empty() || (!cell.underline && !cell.strike && cell.text.chars().all(char::is_whitespace));
+        if blank { "".hash(&mut hasher); } else { cell.text.hash(&mut hasher); }
+    }
+    Some(hasher.finish())
+}
+
+fn paint_row_ops(ops: &[RowOp], origin: Point<Pixels>, cell: Size<Pixels>, scale: f32, window: &mut Window, cx: &mut App) {
+    let at = |x: usize| origin + point(cell.width * x as f32, px(0.0));
+    let snap = |v: Pixels| px((f32::from(v) * scale).round() / scale);
+    let snap_box = |b: Bounds<Pixels>| {
+        let (x0, x1) = (snap(b.origin.x), snap(b.origin.x + b.size.width));
+        let (y0, y1) = (snap(b.origin.y), snap(b.origin.y + b.size.height));
+        Bounds::new(point(x0, y0), size(x1 - x0, y1 - y0))
+    };
+    for op in ops {
+        match op {
+            RowOp::Bg { from, to, color } => window.paint_quad(fill(snap_box(Bounds::new(at(*from), size(cell.width * (to - from) as f32, cell.height))), *color)),
+            RowOp::Sprite { x, text, color } => crate::sprites::paint(text, Bounds::new(at(*x), cell), *color, window),
+            RowOp::Icon { x, offset, font, glyph, size, color } => { let _ = window.paint_glyph(at(*x) + *offset, *font, *glyph, *size, *color); }
+            RowOp::Text { x, line } => { let _ = line.paint(at(*x), cell.height, TextAlign::Left, None, window, cx); }
+        }
+    }
+}
+
 fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, window: &mut Window, cx: &mut App) {
     crate::bench::count(&crate::bench::GRID);
     let mut g = grid.borrow_mut();
@@ -1325,7 +1393,27 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     let base_origin = origin;
     let origin = origin + point(px(0.0), px(offset));
     g.origin = origin;
-    if active { window.request_animation_frame(); }
+    let now = g.application_epoch.elapsed();
+    let application_enabled = crate::settings::get().smooth_scrolling
+        && (g.vt.mouse_tracking() || g.vt.alt_screen()) && !cx.reduce_motion()
+        && !link_mods(&window.modifiers()) && g.marked.is_none() && !g.vt.has_image_placements();
+    let mut application_layer = if application_enabled {
+        if !g.vt.render_held() {
+            let rows: Vec<_> = frame.rows.iter().cloned().map(ApplicationRow).collect();
+            let matched = g.application_scroll.update_with_overlays(&rows, now, application_row_anchor, application_overlay_row);
+            if matched.is_some() { tracing::debug!(?matched, cursor = ?frame.cursor_cell, "application scroll redraw"); }
+        }
+        g.application_scroll.layer(now)
+    } else {
+        g.application_scroll.reset();
+        None
+    };
+    if application_layer.as_ref().is_some_and(|layer| frame.cursor_cell.is_some_and(|(_, y)| layer.region.contains(&(y as usize)))) {
+        tracing::debug!(cursor = ?frame.cursor_cell, "application scroll cursor exclusion");
+        g.application_scroll.finish();
+        application_layer = None;
+    }
+    if active || application_layer.is_some() { window.request_animation_frame(); }
     let placements = g.vt.placements();
     let mut images: Vec<(bool, Bounds<Pixels>, Arc<RenderImage>)> = Vec::new();
     let mut keep = std::collections::HashSet::new();
@@ -1391,6 +1479,8 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     }
     painted.truncate(frame.rows.len());
     for (y, row) in frame.rows.iter().enumerate() {
+        let moving = application_layer.as_ref().is_some_and(|layer| layer.region.contains(&y));
+        if moving && frame.all { continue; }
         let column = cursor.filter(|(_, cy)| *cy as usize == y).map(|(x, _)| x as usize);
         let fresh;
         let ops = if frame.all {
@@ -1407,19 +1497,48 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
             }
             &painted[y].1
         };
-        for op in ops {
-            match op {
-                RowOp::Bg { from, to, color } => {
-                    let b = Bounds::new(at(*from, y), size(cell.width * (to - from) as f32, cell.height));
-                    window.paint_quad(fill(snap_box(b), *color));
-                }
-                RowOp::Sprite { x, text, color } => crate::sprites::paint(text, Bounds::new(at(*x, y), cell), *color, window),
-                RowOp::Icon { x, offset, font, glyph, size, color } => {
-                    let _ = window.paint_glyph(at(*x, y) + *offset, *font, *glyph, *size, *color);
-                }
-                RowOp::Text { x, line } => {
-                    let _ = line.paint(at(*x, y), cell.height, TextAlign::Left, None, window, cx);
-                }
+        if !moving { paint_row_ops(ops, at(0, y), cell, scale, window, cx); }
+    }
+    if let Some(layer) = &application_layer {
+        let clip = Bounds::new(at(0, layer.region.start), size(cell.width * viewport_cols as f32, cell.height * layer.region.len() as f32));
+        window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
+            for (i, application_row) in layer.rows.iter().enumerate() {
+                let row = &application_row.0;
+                let y = layer.first_row + i as isize;
+                let shown = y as f32 + layer.offset_rows as f32;
+                if shown + 1.0 <= layer.region.start as f32 || shown >= layer.region.end as f32 { continue; }
+                let fresh;
+                let cached = (y >= 0).then(|| painted.get(y as usize)).flatten()
+                    .filter(|(r, _, column)| Rc::ptr_eq(r, row) && column.is_none());
+                let ops = match cached {
+                    Some((_, ops, _)) => ops,
+                    None => { fresh = row_ops(row, cell, None, window); &fresh }
+                };
+                let pos = origin + point(px(0.0), cell.height * shown);
+                paint_row_ops(ops, pos, cell, scale, window, cx);
+            }
+        });
+        // UI overlays such as a jump-to-bottom button can arrive one frame
+        // after the scroll itself. Draw only their changed cells without
+        // shifting the overlay or snapping the moving transcript.
+        for y in layer.region.clone() {
+            let base = &layer.rows[(y as isize - layer.first_row) as usize].0;
+            let row = &frame.rows[y];
+            if Rc::ptr_eq(base, row) { continue; }
+            let mut x = 0;
+            while x < row.len() {
+                if same_application_cell(&base[x], &row[x]) { x += 1; continue; }
+                let from = x;
+                while x < row.len() && !same_application_cell(&base[x], &row[x]) { x += 1; }
+                let clip = Bounds::new(at(from, y), size(cell.width * (x-from) as f32, cell.height));
+                let fresh;
+                let ops = match painted.get(y).filter(|(r, _, _)| Rc::ptr_eq(r, row)) {
+                    Some((_, ops, _)) => ops,
+                    None => { fresh = row_ops(row, cell, None, window); &fresh }
+                };
+                window.with_content_mask(Some(ContentMask { bounds: clip }), |window| {
+                    paint_row_ops(ops, at(0, y), cell, scale, window, cx);
+                });
             }
         }
     }
@@ -1597,6 +1716,7 @@ impl Render for TerminalView {
             }))
             .on_mouse_down(MouseButton::Left, cx.listener(|this, ev: &MouseDownEvent, window, cx| {
                 this.focus.focus(window, cx);
+                if this.grid.borrow_mut().application_scroll.finish() { cx.notify(); }
                 if link_mods(&ev.modifiers)
                     && let Some((target, _)) = this.link_at(ev.position)
                 {
@@ -1615,6 +1735,7 @@ impl Render for TerminalView {
             // sends right-clicks to its program.
             .on_mouse_down(MouseButton::Right, cx.listener(|this, ev: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
+                if this.grid.borrow_mut().application_scroll.finish() { cx.notify(); }
                 if this.right_click_to_program && this.takes_mouse(ev.modifiers) {
                     this.mouse(GHOSTTY_MOUSE_ACTION_PRESS, Some(ev.button), ev.position, ev.modifiers);
                 } else {
@@ -1647,6 +1768,7 @@ impl Render for TerminalView {
                         let (cols, rows) = grid_size(bounds.size, cell);
                         if (cols, rows) != (g.vt.cols, g.vt.rows) || dev != g.vt_cell {
                             g.cancel_smooth_scroll();
+                            g.application_scroll.reset();
                             g.vt.resize(cols, rows, dev.0, dev.1);
                             g.vt_cell = dev;
                             if let Some(chan) = g.channel {
@@ -1727,6 +1849,66 @@ impl Focusable for TerminalView {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn application_scroll_compares_visible_cells_without_blank_foreground_noise() {
+        use super::*;
+        let cell = vt::Cell { text: String::new(), fg: vt::Rgb(255, 0, 0), bold: true, ..Default::default() };
+        let a = ApplicationRow(Rc::new(vec![cell.clone()]));
+        let b = ApplicationRow(Rc::new(vec![vt::Cell { text: " ".into(), fg: vt::Rgb(0, 0, 255), ..Default::default() }]));
+        assert!(a == b);
+        let background = ApplicationRow(Rc::new(vec![vt::Cell { bg: Some(vt::Rgb(50, 50, 50)), ..cell.clone() }]));
+        assert!(a != background);
+        let underline = ApplicationRow(Rc::new(vec![vt::Cell { text: " ".into(), underline: true, ..cell.clone() }]));
+        assert!(a != underline);
+        let text = ApplicationRow(Rc::new(vec![vt::Cell { text: "x".into(), ..cell }]));
+        assert!(a != text);
+        let a = ApplicationRow(Rc::new(vec![text.0[0].clone(), a.0[0].clone()]));
+        let b = ApplicationRow(Rc::new(vec![text.0[0].clone(), b.0[0].clone()]));
+        assert!(a == b);
+        assert_eq!(application_row_anchor(&a), application_row_anchor(&b));
+    }
+
+    #[test]
+    fn application_overlay_requires_a_visible_background_for_changed_cells() {
+        use super::*;
+        let cell = vt::Cell { text: "a".into(), fg: vt::Rgb(200, 200, 200), ..Default::default() };
+        let base = ApplicationRow(Rc::new(vec![cell.clone()]));
+        let text = ApplicationRow(Rc::new(vec![vt::Cell { text: "b".into(), ..cell.clone() }]));
+        let button = ApplicationRow(Rc::new(vec![vt::Cell { text: "b".into(), bg: Some(vt::Rgb(50, 50, 50)), ..cell }]));
+        assert!(!application_overlay_row(&base, &text));
+        assert!(application_overlay_row(&base, &button));
+        // Editing text in an existing colored code block is content, not a HUD.
+        let colored = ApplicationRow(Rc::new(vec![vt::Cell { text: "a".into(), ..button.0[0].clone() }]));
+        assert!(!application_overlay_row(&colored, &button));
+    }
+
+    #[test]
+    fn application_scroll_uses_real_ghostty_rows_and_preserves_mouse_encoding() {
+        use super::*;
+        fn redraw(vt: &mut Vt, first: usize) {
+            let mut bytes = String::from("\x1b[?2026h\x1b[1;1Hheader\x1b[K");
+            for i in 0..12 { bytes.push_str(&format!("\x1b[{};1Hchat row {}\x1b[K", i+2, first+i)); }
+            bytes.push_str("\x1b[14;1Hseparator\x1b[K\x1b[15;1Hcomposer\x1b[K\x1b[16;1Hstatus\x1b[K\x1b[15;10H\x1b[?2026l");
+            vt.write(bytes.as_bytes());
+        }
+        let mut vt = Vt::new(60, 16);
+        vt.write(b"\x1b[?1049h\x1b[?1000h\x1b[?1006h\x1b[?25l");
+        redraw(&mut vt, 100);
+        let mut motion = ApplicationScroll::default();
+        motion.update(&vt.frame().rows.into_iter().map(ApplicationRow).collect::<Vec<_>>(), Duration::ZERO, application_row_anchor);
+        motion.wheel(3, Duration::from_millis(1));
+        let encoded = scroll_mouse_bytes(&mut vt, point(0, 3), 15.0, 25.0, (60, 16, 10.0, 20.0));
+        assert_eq!(encoded, b"\x1b[<64;2;2M".repeat(3));
+        redraw(&mut vt, 97);
+        let frame = vt.frame();
+        motion.update(&frame.rows.iter().cloned().map(ApplicationRow).collect::<Vec<_>>(), Duration::from_millis(2), application_row_anchor);
+        let layer = motion.layer(Duration::from_millis(2)).unwrap();
+        assert_eq!(layer.region, 1..13);
+        assert_eq!(layer.offset_rows, -3.0);
+        assert!(!layer.region.contains(&(frame.cursor_cell.unwrap().1 as usize)));
+        assert!(vt.mouse_tracking() && vt.alt_screen());
+    }
+
     #[gpui::test]
     fn smooth_scrolling_paints_subrow_input_and_yields_to_mouse_apps(cx: &mut gpui::TestAppContext) {
         use super::*;

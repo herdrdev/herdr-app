@@ -1575,6 +1575,14 @@ impl Vt {
         let (x, y) = (x / cw.max(1.0) * cwi, y / ch.max(1.0) * chi);
         unsafe {
             ghostty_mouse_encoder_setopt_from_terminal(self.mouse, self.term);
+            // Core snapshots can restore both extended formats in numeric
+            // order, losing which one the program selected last. Prefer the
+            // advertised SGR format over urxvt in that mixed state; direct
+            // attach clients parse SGR, and urxvt-only/pixel modes stay intact.
+            if self.mode(1006) && self.mode(1015) && !self.mode(1016) {
+                let format: GhosttyMouseFormat = GHOSTTY_MOUSE_FORMAT_SGR;
+                ghostty_mouse_encoder_setopt(self.mouse, GHOSTTY_MOUSE_ENCODER_OPT_FORMAT, &format as *const _ as *const c_void);
+            }
             let s = GhosttyMouseEncoderSize {
                 size: std::mem::size_of::<GhosttyMouseEncoderSize>(),
                 screen_width: cols * cwi as u32,
@@ -1845,6 +1853,25 @@ mod tests {
         let x = 39.0 * cw + 5.0; // inside column 39 (1-based 40)
         let bytes = vt.encode_mouse(GHOSTTY_MOUSE_ACTION_PRESS, Some(GHOSTTY_MOUSE_BUTTON_LEFT), 0, x, 10.0, (80, 2, cw, ch), false);
         assert_eq!(String::from_utf8_lossy(&bytes), "\x1b[<0;40;1M");
+    }
+
+    #[test]
+    fn restored_mixed_mouse_formats_prefer_advertised_sgr() {
+        for setup in [b"\x1b[?1000h\x1b[?1006h\x1b[?1015h".as_slice(), b"\x1b[?1000h\x1b[?1015h\x1b[?1006h"] {
+            let mut vt = Vt::new(80, 24);
+            vt.write(setup);
+            assert_eq!(vt.encode_mouse(GHOSTTY_MOUSE_ACTION_PRESS, Some(GHOSTTY_MOUSE_BUTTON_FOUR), 0, 15.0, 25.0, (80, 24, 10.0, 20.0), false), b"\x1b[<64;2;2M");
+            assert_eq!(vt.encode_mouse(GHOSTTY_MOUSE_ACTION_RELEASE, Some(GHOSTTY_MOUSE_BUTTON_LEFT), 0, 15.0, 25.0, (80, 24, 10.0, 20.0), false), b"\x1b[<0;2;2m");
+        }
+    }
+
+    #[test]
+    fn mixed_format_compatibility_preserves_urxvt_only_and_pixel_modes() {
+        let mut vt = Vt::new(80, 24);
+        vt.write(b"\x1b[?1000h\x1b[?1015h");
+        assert_eq!(vt.encode_mouse(GHOSTTY_MOUSE_ACTION_PRESS, Some(GHOSTTY_MOUSE_BUTTON_FOUR), 0, 15.0, 25.0, (80, 24, 10.0, 20.0), false), b"\x1b[96;2;2M");
+        vt.write(b"\x1b[?1006h\x1b[?1016h");
+        assert_eq!(vt.encode_mouse(GHOSTTY_MOUSE_ACTION_PRESS, Some(GHOSTTY_MOUSE_BUTTON_FOUR), 0, 15.0, 25.0, (80, 24, 10.0, 20.0), false), b"\x1b[<64;15;25M");
     }
 
     #[test]

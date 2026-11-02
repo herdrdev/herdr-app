@@ -380,7 +380,7 @@ pub struct Person {
     pub font_size: Option<f32>,
     /// Enable programming ligatures in terminal fonts.
     pub font_ligatures: bool,
-    /// Pixel-continuous terminal-owned scrollback; disabled for application-owned scrolling.
+    /// Pixel-continuous history and animation of recognized application scrolls.
     pub smooth_scrolling: bool,
     /// The panels' font (their sizes follow zoom).
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -471,7 +471,7 @@ pub struct Settings {
     pub font_family: String,
     pub font_size: f32,
     pub font_ligatures: bool,
-    /// Pixel-continuous terminal-owned scrollback; disabled for application-owned scrolling.
+    /// Pixel-continuous history and animation of recognized application scrolls.
     pub smooth_scrolling: bool,
     pub ui_font_family: String,
     pub ui_font_size: f32,
