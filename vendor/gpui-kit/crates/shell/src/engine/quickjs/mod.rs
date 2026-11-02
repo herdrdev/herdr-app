@@ -3893,6 +3893,53 @@ impl ShellRuntime {
         scheduler::drain_runtime_jobs(self, window, cx);
     }
 
+    // HERDR: calls a code editor's script handler with JSON. A `reply` means the
+    // editor is waiting for an answer, which the handler sends through `settle`.
+    pub(super) fn dispatch_editor_call(
+        self: &Rc<Self>,
+        handler: &Persistent<Function<'static>>,
+        owner: &InputCallbackOwner,
+        json: String,
+        reply: Option<crate::editor_language::ScriptReply>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        if owner
+            .application
+            .as_ref()
+            .is_some_and(|application| !application.is_active())
+        {
+            return;
+        }
+        let view = owner.view.as_ref().and_then(WeakEntity::upgrade);
+        let (_guard, generation) = scope::enter_with_application(
+            self,
+            window,
+            cx,
+            ScopePhase::Event,
+            view,
+            owner.policy.clone(),
+            owner.application.clone(),
+        );
+        let result = self.with_js(|ctx| {
+            let settle = Func::from(move |json: Option<String>, error: Option<String>| {
+                if let Some(reply) = &reply {
+                    let answer = json.ok_or_else(|| error.unwrap_or_default());
+                    reply.try_send(answer).ok();
+                }
+            });
+            handler.clone().restore(ctx)?.call::<_, ()>((
+                json,
+                context_object(ctx, ContextBinding::Call(generation))?,
+                settle,
+            ))
+        });
+        if let Err(error) = result {
+            tracing::error!("error in editor handler: {error}");
+        }
+        scheduler::drain_runtime_jobs(self, window, cx);
+    }
+
     /// Delivers a slider event to a long-lived script subscription.
     ///
     /// The value is the whole payload rather than a field of an object,
@@ -6171,6 +6218,43 @@ globalThis.__gpui = (() => {
 
   // The multi-line state shares almost all of its surface with the single-line
   // one, and adds the three calls that only mean anything once text can wrap.
+  // HERDR: Rust sends a code editor's requests here as JSON. A task rather than a
+  // plain call so an answering handler can await, with a `cx` that survives it.
+  const editorLanguage = (lsp) => {
+    const known = [
+      "hover",
+      "completion",
+      "completion_accepted",
+      "definition",
+      "code_actions",
+      "perform_code_action",
+      "show_document",
+    ];
+    for (const name of Object.keys(lsp)) {
+      if (name !== "completion_triggers" && !known.includes(name)) {
+        throw new TypeError(
+          "unknown lsp handler `" + name + "`; expected one of: " + known.join(", "),
+        );
+      }
+    }
+    if (lsp.code_actions && !lsp.perform_code_action) {
+      throw new TypeError("lsp.code_actions needs lsp.perform_code_action to run what it lists");
+    }
+    const handlers = { completion_triggers: lsp.completion_triggers ?? [] };
+    for (const name of known) {
+      if (!lsp[name]) continue;
+      handlers[name] = (json, cx, settle) =>
+        cx.spawn(async (cx) => {
+          try {
+            settle(JSON.stringify((await lsp[name](JSON.parse(json), cx)) ?? null), null);
+          } catch (error) {
+            settle(null, String(error?.stack ?? error));
+          }
+        });
+    }
+    return handlers;
+  };
+
   const textareaState = (handle) => ({
     ...tokenStateMethods(handle, __textarea_token_call),
     __handle: handle,
@@ -7029,12 +7113,29 @@ globalThis.__gpui = (() => {
     // HERDR: code editor uses the same value/event lifecycle as TextareaState.
     EditorState: {
       new: (options = {}) => {
-        const handle = __editor_state_new(JSON.stringify(options));
+        const { lsp, ...rest } = options;
+        const handle = __editor_state_new(JSON.stringify(rest));
+        if (lsp) __editor_set_language(handle, editorLanguage(lsp));
+        const write = (what, value) => __editor_write(handle, what, JSON.stringify(value ?? null));
         return {
           __handle: handle,
           value: () => __editor_value(handle),
           set_value: (value) => __editor_set_value(handle, String(value)),
-          on: (event, handler) => __editor_on(handle, String(event), handler),
+          cursor: () => JSON.parse(__editor_read(handle, "cursor")),
+          selection: () => JSON.parse(__editor_read(handle, "selection")),
+          set_cursor: (position) => write("set_selection", { start: position, end: position }),
+          set_selection: (range) => write("set_selection", range),
+          set_diagnostics: (list) => write("set_diagnostics", list),
+          set_semantic_tokens: (list) => write("set_semantic_tokens", list),
+          apply_edits: (edits) => write("apply_edits", edits),
+          show_completions: () => write("show_completions"),
+          show_code_actions: () => write("show_code_actions"),
+          go_to_definition: () => write("go_to_definition"),
+          focus: () => write("focus"),
+          on: (event, handler) =>
+            event === "cursor"
+              ? __editor_on_cursor(handle, (json, cx) => handler(JSON.parse(json), cx))
+              : __editor_on(handle, String(event), handler),
           release: () => __editor_release(handle),
         };
       },

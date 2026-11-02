@@ -955,6 +955,11 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.mode.ensure_highlighter_factory(factory);
     }
 
+    /// The style painting uses now, with unset colours resolved from the palette.
+    pub fn editor_style(&self) -> &InputEditorStyle {
+        &self.editor_style
+    }
+
     pub fn set_editor_style(&mut self, style: InputEditorStyle) {
         self.editor_style = style.clone();
         self.projected_editor_style = style;
@@ -3559,10 +3564,8 @@ impl<M: InputModeKind> InputBaseState<M> {
     }
 
     fn on_blur(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if M::is_context_menu_open(self, cx) {
-            return;
-        }
-
+        // HERDR: no early return for an open menu, which assumed the menu takes
+        // the keyboard. Herdr's popups never do, so a blur means the person left.
         M::hide_context_menu(self, cx);
         self.undo_manager.break_transaction_coalescing();
 

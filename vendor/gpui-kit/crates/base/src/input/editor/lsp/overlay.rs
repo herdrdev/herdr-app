@@ -10,6 +10,9 @@ pub struct CompletionMenuState {
     pub trigger_start_offset: Option<usize>,
     pub query: String,
     pub items: Vec<CompletionItem>,
+    /// HERDR: open until an edit closed it, so typing on through the word can
+    /// keep the menu up while the next answer is on its way.
+    pub(super) was_open: bool,
     revision: u64,
 }
 
