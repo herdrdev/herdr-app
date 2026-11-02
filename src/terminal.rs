@@ -103,6 +103,10 @@ pub struct TerminalView {
     pub cwd: Option<PathBuf>,
     /// The link under the pointer while the link modifier is held.
     link: Option<LinkTarget>,
+    /// Where that link goes, shown under it.
+    preview: Option<Preview>,
+    /// Redraws when the preview's moment is up, and that moment.
+    preview_timer: Option<(Instant, Task<()>)>,
     /// Right-clicks go to the program when it takes the mouse (Shift: the menu).
     pub right_click_to_program: bool,
     grid: Rc<RefCell<Grid>>,
@@ -232,6 +236,8 @@ impl TerminalView {
             selection_scroll: None,
             cwd: None,
             link: None,
+            preview: None,
+            preview_timer: None,
             right_click_to_program: false,
             grid: Rc::new(RefCell::new(Grid {
                 vt: Vt::new(size_hint.0.max(2), size_hint.1.max(1)),
@@ -1097,6 +1103,74 @@ fn link_mods(m: &Modifiers) -> bool {
     key && !m.alt && !m.shift
 }
 
+/// Where the link under the pointer goes, shown while the link key is held:
+/// an OSC 8 link's text can say anything.
+fn link_preview(link: &LinkTarget) -> Option<String> {
+    match link {
+        LinkTarget::External(links::Target::Url(url)) => Some(url.clone()),
+        LinkTarget::External(links::Target::File(path)) => Some(path.display().to_string()),
+        LinkTarget::Terminal(_) => None,
+    }
+}
+
+/// Where a link's preview goes, as (column, row, above): under the link's last
+/// row so a wrapped link stays clickable, or above its first row when the
+/// last row is the bottom one.
+fn preview_anchor(spans: &[(u16, u16, u16)], rows: u16) -> Option<(u16, u16, bool)> {
+    let (first, last) = (spans.first()?, spans.last()?);
+    Some(if last.0 + 1 < rows { (last.1, last.0 + 1, false) } else { (first.1, first.0, true) })
+}
+
+/// How long a link's preview stays once the link is left, to reach it.
+const PREVIEW_LINGER: Duration = Duration::from_secs(1);
+
+/// A link's target under the link. It stays a moment after the link is left
+/// and while the pointer is on it, so it can be reached and clicked to copy.
+struct Preview {
+    target: String,
+    /// Its top-left corner (bottom-left when `above`), in window coordinates.
+    at: Point<Pixels>,
+    above: bool,
+    /// When it goes; None while the link is under the pointer.
+    until: Option<Instant>,
+    hovered: bool,
+    copied: bool,
+}
+
+impl Preview {
+    fn new(target: String, at: Point<Pixels>) -> Self {
+        Preview { target, at, above: false, until: None, hovered: false, copied: false }
+    }
+
+    fn shown(&self, now: Instant) -> bool {
+        self.hovered || self.until.is_none_or(|until| now < until)
+    }
+
+    /// The link is no longer under the pointer with the link key held.
+    fn left(&mut self, now: Instant) {
+        self.until.get_or_insert(now + PREVIEW_LINGER);
+    }
+
+    /// The link is under the pointer with the link key held again.
+    fn back(&mut self) {
+        self.until = None;
+    }
+
+    /// Whether `m` is where the preview can be drawn: up to its 640px width
+    /// either side of `at`, as it's pushed left to stay in the window.
+    fn near(&self, m: Point<Pixels>, row: Pixels) -> bool {
+        let h = row * 2.0;
+        m.x >= self.at.x - px(648.0) && m.x <= self.at.x + px(648.0) && if self.above { m.y >= self.at.y - h && m.y <= self.at.y } else { m.y >= self.at.y && m.y <= self.at.y + h }
+    }
+
+    fn hover(&mut self, on: bool, now: Instant) {
+        self.hovered = on;
+        if !on {
+            self.until = Some(now + PREVIEW_LINGER);
+        }
+    }
+}
+
 fn local(g: &Grid, p: Point<Pixels>) -> (f32, f32) {
     (f32::from(p.x - g.origin.x).max(0.0), f32::from(p.y - g.origin.y).max(0.0))
 }
@@ -1863,6 +1937,53 @@ impl Render for TerminalView {
             format!("{} matches", search_progress.total)
         };
         let address = self.address.clone();
+        let now = Instant::now();
+        if let Some(p) = self.preview.as_mut().filter(|p| p.hovered) {
+            // A hover can end unseen (the pane hidden under the pointer): only near it is it still on.
+            if !p.near(window.mouse_position(), cell.height) {
+                p.hover(false, now);
+            }
+        }
+        if self.preview.as_ref().is_some_and(|p| p.hovered) {
+            // On the preview: the link under it (another row's) isn't the one being read.
+            self.link = None;
+            self.grid.borrow_mut().link_spans.clear();
+        }
+        let under = {
+            let g = self.grid.borrow();
+            self.link.as_ref().and_then(link_preview).zip(preview_anchor(&g.link_spans, g.vt.rows)).map(|(target, (x, y, above))| {
+                let at = g.origin + point(g.cell.width * x as f32, g.cell.height * y as f32);
+                (target, at, above)
+            })
+        };
+        match under {
+            Some((target, at, above)) => match &mut self.preview {
+                Some(p) if p.target == target => {
+                    p.back();
+                    (p.at, p.above) = (at, above);
+                }
+                _ => self.preview = Some(Preview { above, ..Preview::new(target, at) }),
+            },
+            None => {
+                if let Some(p) = &mut self.preview {
+                    p.left(now);
+                }
+            }
+        }
+        if self.preview.as_ref().is_some_and(|p| !p.shown(now)) {
+            self.preview = None;
+        }
+        let due = self.preview.as_ref().filter(|p| !p.hovered).and_then(|p| p.until);
+        if due != self.preview_timer.as_ref().map(|(at, _)| *at) {
+            self.preview_timer = due.map(|until| {
+                let task = cx.spawn(async move |this, cx| {
+                    cx.background_executor().timer(until.saturating_duration_since(Instant::now())).await;
+                    let _ = this.update(cx, |_, cx| cx.notify());
+                });
+                (until, task)
+            });
+        }
+        let preview = self.preview.as_ref().map(|p| (p.target.clone(), p.at, p.above, p.copied));
 
         div()
             .id(SharedString::from(format!("term-{}", self.address)))
@@ -2122,6 +2243,42 @@ impl Render for TerminalView {
                         .text_xs()
                         .child(format!("[{why}]")),
                 )
+            })
+            // Under the link (above it on the bottom row); a click copies where it goes.
+            .when_some(preview, |d, (target, at, above, copied)| {
+                let corner = if above { Anchor::BottomLeft } else { Anchor::TopLeft };
+                d.child(deferred(
+                    anchored().anchor(corner).position(at).snap_to_window_with_margin(px(4.0)).child(
+                        div()
+                            .id("link-preview")
+                            .max_w(px(640.0))
+                            .px_2()
+                            .py_1()
+                            .rounded_md()
+                            .bg(crate::settings::color("raised"))
+                            .text_color(hsla(vt::theme().fg))
+                            .text_xs()
+                            .truncate()
+                            .cursor_pointer()
+                            .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
+                                if let Some(p) = &mut this.preview {
+                                    p.hover(*hovered, Instant::now());
+                                }
+                                cx.notify();
+                            }))
+                            .on_mouse_down(MouseButton::Left, cx.listener(|this, _: &MouseDownEvent, _, cx| {
+                                cx.stop_propagation();
+                                if let Some(p) = &mut this.preview {
+                                    cx.write_to_clipboard(ClipboardItem::new_string(p.target.clone()));
+                                    #[cfg(target_os = "linux")]
+                                    cx.write_to_primary(ClipboardItem::new_string(p.target.clone()));
+                                    p.copied = true;
+                                }
+                                cx.notify();
+                            }))
+                            .child(if copied { format!("Copied: {target}") } else { target }),
+                    ),
+                ))
             })
     }
 }
@@ -3552,5 +3709,65 @@ mod tests {
         assert_eq!(pages_to_lines(-0.5, 24), -12);
         assert_eq!(pages_to_lines(-0.5, 25), -13, "half of an odd row count rounds away from zero");
         assert_eq!(pages_to_lines(0.02, 24), 0);
+    }
+
+    #[test]
+    fn the_link_preview_shows_where_an_external_link_goes() {
+        use super::*;
+        // An OSC 8 link whose text says something else previews its real target.
+        let url = LinkTarget::External(links::Target::Url("https://example.com/definitely-not-github".into()));
+        assert_eq!(link_preview(&url).as_deref(), Some("https://example.com/definitely-not-github"));
+        let file = LinkTarget::External(links::Target::File(PathBuf::from("/tmp/notes.md")));
+        assert_eq!(link_preview(&file).as_deref(), Some("/tmp/notes.md"));
+        // A terminal address peeks inside Herdr: the underline says enough.
+        assert_eq!(link_preview(&LinkTarget::Terminal("t7".into())), None);
+    }
+
+    #[test]
+    fn the_link_preview_waits_a_moment_and_while_hovered() {
+        use super::*;
+        let t0 = Instant::now();
+        let s = |n: f32| t0 + Duration::from_secs_f32(n);
+        let mut p = Preview::new("https://example.com".into(), Point::default());
+        assert!(p.shown(t0), "shows while the link is under the pointer");
+        // The link key is let go (or the pointer leaves the link): it stays a moment.
+        p.left(t0);
+        assert!(p.shown(s(0.9)));
+        assert!(!p.shown(s(1.1)));
+        // Reaching the preview in that moment keeps it up for as long as it's hovered.
+        p.hover(true, s(0.5));
+        assert!(p.shown(s(10.0)));
+        p.hover(false, s(10.0));
+        assert!(p.shown(s(10.9)));
+        assert!(!p.shown(s(11.1)));
+        // The link under the pointer again: no countdown.
+        p.back();
+        assert!(p.shown(s(60.0)));
+    }
+
+    #[test]
+    fn the_link_preview_goes_under_the_link_or_above_it_on_the_last_row() {
+        use super::*;
+        // Under the last row of a link that wraps, so it never covers the link.
+        assert_eq!(preview_anchor(&[(3, 70, 79), (4, 0, 12)], 24), Some((0, 5, false)));
+        assert_eq!(preview_anchor(&[(0, 5, 20)], 24), Some((5, 1, false)));
+        // No row below: above the link's first row.
+        assert_eq!(preview_anchor(&[(22, 70, 79), (23, 0, 12)], 24), Some((70, 22, true)));
+        assert_eq!(preview_anchor(&[], 24), None);
+    }
+
+    #[test]
+    fn the_link_preview_is_near_where_it_can_be_drawn() {
+        use super::*;
+        let row = px(20.0);
+        let p = Preview::new("https://example.com".into(), point(px(1000.0), px(100.0)));
+        assert!(p.near(point(px(1200.0), px(110.0)), row));
+        // Pushed left to stay in the window, it is still under the pointer there.
+        assert!(p.near(point(px(500.0), px(110.0)), row));
+        assert!(!p.near(point(px(300.0), px(110.0)), row));
+        assert!(!p.near(point(px(1200.0), px(150.0)), row), "rows below it");
+        let above = Preview { above: true, ..Preview::new("https://example.com".into(), point(px(1000.0), px(100.0))) };
+        assert!(above.near(point(px(1200.0), px(90.0)), row));
+        assert!(!above.near(point(px(1200.0), px(110.0)), row));
     }
 }
