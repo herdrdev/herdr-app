@@ -14,16 +14,20 @@ const key = () => JSON.stringify(location());
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
 const countLines = (text) => text ? text.split("\n").length - Number(text.endsWith("\n")) : 0;
 
+// A text element draws a tab with no width, so tabs become spaces up to the next stop
+// (2 columns, the kit editor's tab size).
+const untab = (text) => text.includes("\t") ? text.split("\t").reduce((out, part) => out + " ".repeat(2 - out.length % 2) + part) : text;
+
 // Numbers each diff line once, so a frame only draws the rows on screen.
 function diffRows(lines) {
   let old = 0, next = 0;
   return lines.map((line) => {
     const match = /^@@ -(\d+)(?:,\d+)? \+(\d+)/.exec(line);
     if (match) { old = +match[1]; next = +match[2]; return { kind: "@", text: line }; }
-    const kind = line[0];
-    if (kind === "-") return { kind, number: old++, text: line.slice(1) || " " };
-    if (kind === "+") return { kind, number: next++, text: line.slice(1) || " " };
-    if (kind === " ") { old++; return { kind, number: next++, text: line.slice(1) || " " }; }
+    const kind = line[0], text = untab(line.slice(1)) || " ";
+    if (kind === "-") return { kind, number: old++, text };
+    if (kind === "+") return { kind, number: next++, text };
+    if (kind === " ") { old++; return { kind, number: next++, text }; }
     return { kind: "", text: line };
   });
 }
@@ -133,7 +137,7 @@ export default class Changes extends View {
 
   setLines(lines) {
     this.rows = diffRows(lines);
-    this.diffWidth = Math.max(300, ...lines.map(line => line.length * 7 + 50));
+    this.diffWidth = Math.max(300, ...this.rows.map(row => row.text.length * 7 + 57));
   }
 
   pick(path, cx) {
