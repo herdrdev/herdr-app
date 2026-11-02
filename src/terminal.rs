@@ -1034,14 +1034,20 @@ pub fn cell_size(window: &Window) -> Size<Pixels> {
     let id = ts.resolve_font(&f);
     let fs = px(crate::settings::font_size());
     let advance = ts.advance(id, fs, 'M').map(|s| s.width).unwrap_or(fs * 0.6);
-    let spacing = crate::settings::z(crate::settings::get().letter_spacing.clamp(-2.0, 10.0));
-    let w = (advance + spacing).max(px(1.0));
+    let w = spaced_width(advance, crate::settings::z(crate::settings::get().letter_spacing));
     let h = ts.ascent(id, fs) + ts.descent(id, fs).abs();
-    // The width is the font's advance plus letter_spacing, not rounded: glyphs
-    // sit exactly on their cells (gpui-pre `apply_force_width_to_layout`), and
-    // boxes snap their edges instead (`snap_box`).
+    // The width is not rounded: glyphs sit exactly on their cells (gpui-pre
+    // `apply_force_width_to_layout`), and boxes snap their edges (`snap_box`).
     let scale = window.scale_factor();
     size(w, px((f32::from(h) * 1.15 * scale).ceil() / scale))
+}
+
+/// The font's advance plus letter_spacing, kept within half to one and a half
+/// advances. gpui-pre's force-width pass takes a glyph less than half a cell
+/// past the previous letter for a combining mark, so cells twice the advance
+/// would draw every other letter off the grid.
+fn spaced_width(advance: Pixels, spacing: Pixels) -> Pixels {
+    (advance + spacing).max(advance * 0.5).min(advance * 1.5)
 }
 
 /// One piece of a row's drawing, in cells from the row's start.
@@ -1551,6 +1557,17 @@ impl Focusable for TerminalView {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn letter_spacing_keeps_cells_within_half_to_one_and_a_half_advances() {
+        use gpui::px;
+        let advance = px(8.);
+        assert_eq!(super::spaced_width(advance, px(0.)), advance);
+        assert_eq!(super::spaced_width(advance, px(-0.25)), px(7.75));
+        assert_eq!(super::spaced_width(advance, px(2.)), px(10.));
+        assert_eq!(super::spaced_width(advance, px(10.)), px(12.));
+        assert_eq!(super::spaced_width(advance, px(-10.)), px(4.));
+    }
+
     #[test]
     fn mouse_buttons_only_follow_the_pane_that_took_each_press() {
         use super::*;

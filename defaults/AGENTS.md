@@ -317,7 +317,7 @@ layout's look and a block can differ:
   are upgraded to readable terminal colors; edited theme files are kept.
   A theme named like a layout (`themes/win98.json`) is
   that layout's own: Settings offers it only there.
-- `font` / `font_size`: the terminals' (px at zoom 1); `ui_font`: the mods'
+- `font` / `font_size` / `letter_spacing`: the terminals' (px at zoom 1); `ui_font`: the mods'
   (their text sizes are their own, in px, and follow zoom). Optional: without
   them a layout uses settings.json's, else Herdr's (JetBrains Mono 14, Geist).
   Herdr (main) leaves these unset; Terminals sets text size 15, and Herdr 98
@@ -625,7 +625,7 @@ What's about the user, never a look:
 - `core`: the herdr-core binary to use, when it isn't where Herdr looks
   (PATH, the login shell's PATH, `~/.local/bin`, Homebrew, mise, Nix,
   cargo). Read at start.
-- `font`, `font_size`, `ui_font`: used where the layout doesn't set its
+- `font`, `font_size`, `letter_spacing`, `ui_font`: used where the layout doesn't set its
   own. Herdr (main) leaves these unset. Bigger panels: `zoom`.
 - `theme`: a theme name or `{light, dark}`; used where the layout sets none.
   The theme picker overrides any layout and stays on that layout.
@@ -682,11 +682,11 @@ What's about the user, never a look:
   background; this is a threshold, not a guaranteed resulting ratio.
   Box/block, Powerline and sprite glyph colors are never adjusted.
   Changes apply immediately, including text already on screen.
-- `letter_spacing`: pixels added to the terminal cell width, from `-2` to `10`
-  (default `0`, the font's own advance). Negative values tighten the grid:
-  JetBrains Mono at 12 is 7.2px wide, so `-0.2` gives the 7px cells of
-  terminals that round down, such as Ghostty. Scales with zoom. Changes apply
-  immediately.
+- `letter_spacing`: px (at zoom 1, like `font_size`) added to the terminal
+  cell width, from `-2` to `10` (default `0`, the font's own advance).
+  Negative values tighten the grid: JetBrains Mono at 12 is 7.2px wide, so
+  `-0.2` gives 7px cells. The cell stays between half and one and a half of
+  the font's advance. Scales with zoom. Changes apply immediately.
 - `clipboard_write`: `false` blocks terminal programs from writing the local
   clipboard (default `true`, including remote terminals attached in this window).
   OSC 52 accepts base64 UTF-8 text up to 1 MiB: `c` writes the system clipboard,

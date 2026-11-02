@@ -389,9 +389,9 @@ pub struct Person {
     pub clipboard_write: bool,
     /// Minimum terminal text contrast ratio; 1 leaves program colors unchanged.
     pub minimum_contrast: f32,
-    /// Pixels added to (or, negative, taken from) the terminal cell width.
-    #[serde(skip_serializing_if = "is_zero")]
-    pub letter_spacing: f32,
+    /// Px (at zoom 1) added to (or, negative, taken from) the terminal cell width.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub letter_spacing: Option<f32>,
     /// macOS Option sends Alt shortcuts, or follows the keyboard layout.
     #[serde(skip_serializing_if = "OptionAsAlt::is_auto")]
     pub option_as_alt: OptionAsAlt,
@@ -440,10 +440,6 @@ fn is_true(b: &bool) -> bool {
     *b
 }
 
-fn is_zero(v: &f32) -> bool {
-    *v == 0.0
-}
-
 impl Default for Person {
     fn default() -> Self {
         Person {
@@ -456,7 +452,7 @@ impl Default for Person {
             telemetry: true,
             clipboard_write: true,
             minimum_contrast: 1.0,
-            letter_spacing: 0.0,
+            letter_spacing: None,
             option_as_alt: OptionAsAlt::Auto,
             appearance: Appearance::System,
             theme: None,
@@ -570,7 +566,7 @@ impl Settings {
             sounds: person.sounds.clone(),
             clipboard_write: person.clipboard_write,
             minimum_contrast: person.minimum_contrast,
-            letter_spacing: person.letter_spacing,
+            letter_spacing: look.letter_spacing.or(person.letter_spacing).unwrap_or(d.letter_spacing),
             option_as_alt: person.option_as_alt,
         }
     }
@@ -883,7 +879,8 @@ mod tests {
     #[test]
     fn letter_spacing_defaults_to_zero_and_validates_the_range() {
         let default: Person = serde_json::from_str("{}").unwrap();
-        assert_eq!(default.letter_spacing, 0.0);
+        assert_eq!(default.letter_spacing, None);
+        assert_eq!(Settings::default().letter_spacing, 0.0);
         assert!(serde_json::to_value(&default).unwrap().get("letter_spacing").is_none());
         for spacing in [-2.0, -0.2, 0.0, 1.5, 10.0, -2.5, 10.5] {
             let person: Person = serde_json::from_value(serde_json::json!({"letter_spacing": spacing})).unwrap();
@@ -891,6 +888,10 @@ mod tests {
             assert_eq!(settings.letter_spacing, spacing);
             assert_eq!(settings.problems().is_empty(), (-2.0..=10.0).contains(&spacing));
         }
+        let person = Person { letter_spacing: Some(1.0), ..Person::default() };
+        let look = crate::layout::Look { letter_spacing: Some(-0.5), ..Default::default() };
+        assert_eq!(Settings::compose(&person, &crate::layout::Look::default(), true).letter_spacing, 1.0);
+        assert_eq!(Settings::compose(&person, &look, true).letter_spacing, -0.5);
     }
 
     #[test]

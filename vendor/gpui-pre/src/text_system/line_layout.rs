@@ -1198,4 +1198,16 @@ mod tests {
         let positions = glyph_x_positions(&layout);
         assert_eq!(positions, vec![0., 7., 14., 21., 28., 35.]);
     }
+
+    #[test]
+    fn test_force_width_wider_cells_keep_every_letter_a_base() {
+        // A 7px font on 10.5px cells, the widest Herdr's letter_spacing allows.
+        let cell_width = px(10.5);
+        let mut layout = make_layout((0..4).map(|i| glyph_at(i as f32 * 7., i)).collect());
+
+        apply_force_width_to_layout(&mut layout, cell_width);
+
+        let positions = glyph_x_positions(&layout);
+        assert_eq!(positions, vec![0., 10.5, 21., 31.5]);
+    }
 }

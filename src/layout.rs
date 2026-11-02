@@ -162,6 +162,9 @@ pub struct Look {
     pub font: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub font_size: Option<f32>,
+    /// Px (at zoom 1) added to (or, negative, taken from) the terminal cell width.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub letter_spacing: Option<f32>,
     /// The mods' font.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui_font: Option<String>,
