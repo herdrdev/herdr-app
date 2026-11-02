@@ -3381,6 +3381,12 @@ impl Window {
             .find_map(|h| h.take())
         {
             let accepts_text_input = input_handler.accepts_text_input(self, cx);
+            // HERDR: the input method learns the caret position only when the
+            // app pushes it (the X11 spot location, the Wayland cursor
+            // rectangle). Keep the candidate window anchored as it moves.
+            if let Some(bounds) = input_handler.selected_bounds(self, cx) {
+                self.platform_window.update_ime_position(bounds);
+            }
             self.platform_window.set_input_handler(input_handler);
             accepts_text_input
         } else {
