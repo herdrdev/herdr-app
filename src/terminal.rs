@@ -1048,13 +1048,52 @@ fn map_key(key: &str) -> Option<(GhosttyKey, bool, Option<char>)> {
     Some((code, shifted, Some(base)))
 }
 
+fn ligature_features(enabled: bool) -> FontFeatures {
+    static FEATURES: std::sync::LazyLock<[FontFeatures; 2]> = std::sync::LazyLock::new(|| {
+        [0, 1].map(|value| FontFeatures(Arc::new(vec![("calt".into(), value), ("liga".into(), value), ("dlig".into(), 0)])))
+    });
+    FEATURES[usize::from(enabled)].clone()
+}
+
 fn cell_font(bold: bool, italic: bool) -> Font {
     let mut f = font(crate::settings::terminal_font());
-    let ligatures = u32::from(crate::settings::get().font_ligatures);
-    f.features = FontFeatures(Arc::new(vec![("calt".into(), ligatures), ("liga".into(), ligatures), ("dlig".into(), 0)]));
+    f.features = ligature_features(false);
     f.weight = if bold { FontWeight::BOLD } else { FontWeight::MEDIUM };
     f.style = if italic { FontStyle::Italic } else { FontStyle::Normal };
     f
+}
+
+// JetBrains Mono's programming ligatures join punctuation, not ordinary words.
+// Shape those short runs separately so changing a counter doesn't reshape a
+// whole line's ligatures, and plain output uses the ligatures-off font/cache.
+fn ligature_runs<'a>(text: &'a str, font: &Font, enabled: bool) -> impl Iterator<Item = (usize, &'a str, bool)> {
+    let split = enabled && font.family.as_ref() == crate::settings::DEFAULT_FONT && text.is_ascii();
+    let bytes = text.as_bytes();
+    let mut start = 0;
+    std::iter::from_fn(move || {
+        if start == bytes.len() {
+            return None;
+        }
+        if !split {
+            start = bytes.len();
+            return Some((0, text, enabled));
+        }
+        let pair = |i: usize| bytes[i].is_ascii_punctuation() && bytes.get(i + 1).is_some_and(u8::is_ascii_punctuation);
+        let joined = pair(start);
+        let mut end = start + 1;
+        if joined {
+            while end < bytes.len() && bytes[end].is_ascii_punctuation() {
+                end += 1;
+            }
+        } else {
+            while end < bytes.len() && !pair(end) {
+                end += 1;
+            }
+        }
+        let from = start;
+        start = end;
+        Some((from, &text[from..end], joined))
+    })
 }
 
 pub fn cell_size(window: &Window) -> Size<Pixels> {
@@ -1159,17 +1198,21 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
         if text.trim().is_empty() && !c.underline && !c.strike {
             continue;
         }
-        let run = TextRun {
-            len: text.len(),
-            font: text_font,
-            color,
-            background_color: None,
-            underline: c.underline.then(|| UnderlineStyle { thickness: px(1.0), color: Some(color), wavy: false }),
-            strikethrough: c.strike.then(|| StrikethroughStyle { thickness: px(1.0), color: Some(color) }),
-        };
-        let force = (!c.wide).then_some(cell.width);
-        let line = window.text_system().shape_line(text.into(), px(crate::settings::font_size()), &[run], force);
-        ops.push(RowOp::Text { x: start, line });
+        for (offset, text, joined) in ligature_runs(&text, &text_font, ligatures) {
+            let mut text_font = text_font.clone();
+            text_font.features = ligature_features(joined);
+            let run = TextRun {
+                len: text.len(),
+                font: text_font,
+                color,
+                background_color: None,
+                underline: c.underline.then(|| UnderlineStyle { thickness: px(1.0), color: Some(color), wavy: false }),
+                strikethrough: c.strike.then(|| StrikethroughStyle { thickness: px(1.0), color: Some(color) }),
+            };
+            let force = (!c.wide).then_some(cell.width);
+            let line = window.text_system().shape_line(text.to_owned().into(), px(crate::settings::font_size()), &[run], force);
+            ops.push(RowOp::Text { x: start + offset, line });
+        }
     }
     ops
 }
@@ -1621,41 +1664,56 @@ mod tests {
         assert_eq!(lines(10_000.0, 20.0, 40), 5);
     }
 
-    #[cfg(not(windows))]
+    // The native macOS text system is private to GPUI; creating MacPlatform here
+    // requires the main thread. Exercise real shaping directly on Linux instead.
+    #[cfg(target_os = "linux")]
     #[test]
     fn ligatures_change_glyphs_without_moving_terminal_cells() {
         use super::*;
         use std::borrow::Cow;
 
-        let system = Arc::new(TextSystem::new(gpui_platform::current_platform(true).text_system()));
+        let system = Arc::new(TextSystem::new(Arc::new(gpui_wgpu::CosmicTextSystem::new_without_system_fonts(crate::settings::DEFAULT_FONT))));
         system.add_fonts(vec![Cow::Borrowed(include_bytes!("../assets/fonts/JetBrainsMono-Variable.ttf"))]).unwrap();
         let text_system = WindowTextSystem::new(system);
         let original = crate::settings::get();
         let mut settings = (*original).clone();
         settings.font_family = crate::settings::DEFAULT_FONT.into();
-        let font_size = px(crate::settings::font_size());
+        for font_size in [px(10.0), px(14.0), px(24.0), px(36.0)] {
+            for text in ["a=>b", "a!=b", "a===b", "a->b", "a<=b", "a>=b", "a|>b"] {
+                let mut variants = Vec::new();
+                for enabled in [false, true] {
+                    settings.font_ligatures = enabled;
+                    crate::settings::set(settings.clone());
+                    let mut font = cell_font(false, false);
+                    font.features = ligature_features(enabled);
+                    let font_id = text_system.resolve_font(&font);
+                    let width = text_system.advance(font_id, font_size, 'M').unwrap().width;
+                    let run = TextRun { len: text.len(), font, ..Default::default() };
+                    let line = text_system.shape_line(text.into(), font_size, &[run], Some(width));
 
-        for text in ["a=>b", "a!=b", "a===b", "a->b"] {
-            let mut variants = Vec::new();
-            for enabled in [false, true] {
-                settings.font_ligatures = enabled;
-                crate::settings::set(settings.clone());
-                let font = cell_font(false, false);
-                let font_id = text_system.resolve_font(&font);
-                let width = text_system.advance(font_id, font_size, 'M').unwrap().width;
-                let run = TextRun { len: text.len(), font, ..Default::default() };
-                let line = text_system.shape_line(text.into(), font_size, &[run], Some(width));
-
-                assert!(f32::from(line.width() - width * text.len() as f32).abs() < 0.1, "{text}: width drift");
-                let glyphs: Vec<_> = line.runs.iter().flat_map(|run| &run.glyphs).collect();
-                for glyph in &glyphs {
-                    assert!(f32::from(glyph.position.x - width * glyph.index as f32).abs() < 0.1, "{text}: glyph drift");
+                    assert!(f32::from(line.width() - width * text.len() as f32).abs() < 0.1, "{text}: width drift");
+                    let glyphs: Vec<_> = line.runs.iter().flat_map(|run| &run.glyphs).collect();
+                    for glyph in &glyphs {
+                        assert!(f32::from(glyph.position.x - width * glyph.index as f32).abs() < 0.1, "{text}: glyph drift");
+                    }
+                    variants.push(glyphs.iter().map(|glyph| glyph.id).collect::<Vec<_>>());
                 }
-                variants.push(glyphs.iter().map(|glyph| glyph.id).collect::<Vec<_>>());
+                assert_ne!(variants[0], variants[1], "{text}: ligatures must change the glyphs");
             }
-            assert_ne!(variants[0], variants[1], "{text}: ligatures must change the glyphs");
         }
         crate::settings::set((*original).clone());
+    }
+
+    #[test]
+    fn ordinary_output_does_not_enable_ligature_shaping() {
+        use super::*;
+        let font = font(crate::settings::DEFAULT_FONT);
+        assert_eq!(ligature_runs("hello world 123 www", &font, true).collect::<Vec<_>>(), vec![(0, "hello world 123 www", false)]);
+        assert_eq!(ligature_runs("a=>b -> c", &font, true).collect::<Vec<_>>(), vec![(0, "a", false), (1, "=>", true), (3, "b ", false), (5, "->", true), (7, " c", false)]);
+        assert_eq!(ligature_runs("a=>b", &font, false).collect::<Vec<_>>(), vec![(0, "a=>b", false)]);
+        assert_eq!(ligature_runs("界=>", &font, true).collect::<Vec<_>>(), vec![(0, "界=>", true)]);
+        let other = gpui::font("Fira Code");
+        assert_eq!(ligature_runs("fi ->", &other, true).collect::<Vec<_>>(), vec![(0, "fi ->", true)]);
     }
 
     #[gpui::test]
@@ -1670,7 +1728,7 @@ mod tests {
 
         window.update(cx, |_, window, _| {
             for (cursor, expected) in [
-                (None, vec![(0, "a=>b")]),
+                (None, vec![(0, "a"), (1, "=>"), (3, "b")]),
                 (Some(1), vec![(0, "a"), (1, "="), (2, ">b")]),
                 (Some(2), vec![(0, "a="), (2, ">"), (3, "b")]),
             ] {
@@ -1707,6 +1765,31 @@ mod tests {
                 _ => None,
             }).collect();
             assert_eq!(runs, vec![(0, "a="), (2, ">"), (3, "b")]);
+        }).unwrap();
+        crate::settings::set((*original).clone());
+    }
+
+    #[gpui::test]
+    fn ligatures_keep_wide_neighbors_in_their_columns(cx: &mut gpui::TestAppContext) {
+        use super::*;
+        let original = crate::settings::get();
+        let window = cx.add_window(|_, _| Empty);
+        let mut vt = Vt::new(30, 2);
+        vt.write("界->😀=>中!=x".as_bytes());
+        window.update(cx, |_, window, _| {
+            for (font_size, zoom) in [(10.0, 1.0), (18.0, 1.5), (24.0, 2.0)] {
+                let mut settings = (*original).clone();
+                settings.font_ligatures = true;
+                settings.font_size = font_size;
+                settings.zoom = zoom;
+                crate::settings::set(settings);
+                let ops = row_ops(&vt.frame().rows[0], size(px(8.), px(16.)), None, window);
+                let runs: Vec<_> = ops.iter().filter_map(|op| match op {
+                    RowOp::Text { x, line } => Some((*x, line.text.as_ref())),
+                    _ => None,
+                }).collect();
+                assert_eq!(runs, vec![(0, "界"), (2, "->"), (4, "😀"), (6, "=>"), (8, "中"), (10, "!="), (12, "x")]);
+            }
         }).unwrap();
         crate::settings::set((*original).clone());
     }
@@ -1760,7 +1843,7 @@ mod tests {
                     let row: Vec<_> = text.chars().map(|c| crate::vt::Cell {
                         text: c.to_string(), bold, italic, ..Default::default()
                     }).collect();
-                    let ops = super::row_ops(&row, gpui::size(gpui::px(8.0), gpui::px(16.0)), window);
+                    let ops = super::row_ops(&row, gpui::size(gpui::px(8.0), gpui::px(16.0)), None, window);
                     assert_eq!(ops.len(), 1, "{text:?}");
                     let super::RowOp::Text { x, line } = &ops[0] else { panic!("configured font was bypassed") };
                     assert_eq!(*x, 0);

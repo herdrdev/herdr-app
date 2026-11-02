@@ -447,7 +447,7 @@ impl Default for Person {
             core: None,
             font: None,
             font_size: None,
-            font_ligatures: false,
+            font_ligatures: true,
             ui_font: None,
             telemetry: true,
             clipboard_write: true,
@@ -515,7 +515,7 @@ impl Default for Settings {
         Settings {
             font_family: DEFAULT_FONT.into(),
             font_size: 14.0,
-            font_ligatures: false,
+            font_ligatures: true,
             ui_font_family: "Geist".into(),
             ui_font_size: 13.0,
             zoom: 1.0,
@@ -835,14 +835,15 @@ pub const DEFAULT_FONT: &str = "JetBrains Mono";
 #[cfg(test)]
 mod tests {
     #[test]
-    fn terminal_ligatures_are_opt_in_and_survive_settings_roundtrip() {
+    fn terminal_ligatures_default_on_and_can_be_disabled() {
         use super::*;
         let person: Person = serde_json::from_str("{}").unwrap();
-        assert!(!Settings::compose(&person, &crate::layout::Look::default(), true).font_ligatures);
-        let person: Person = serde_json::from_str(r#"{"font_ligatures":true}"#).unwrap();
+        assert!(Settings::compose(&person, &crate::layout::Look::default(), true).font_ligatures);
+        assert!(Settings::default().font_ligatures);
+        let person: Person = serde_json::from_str(r#"{"font_ligatures":false}"#).unwrap();
         let saved = serde_json::to_string(&person).unwrap();
         let restored: Person = serde_json::from_str(&saved).unwrap();
-        assert!(Settings::compose(&restored, &crate::layout::Look::default(), true).font_ligatures);
+        assert!(!Settings::compose(&restored, &crate::layout::Look::default(), true).font_ligatures);
         assert!(serde_json::from_str::<Person>(r#"{"font_ligatures":"yes"}"#).is_err());
     }
 
