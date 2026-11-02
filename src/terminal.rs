@@ -115,8 +115,8 @@ struct Grid {
     track: Option<Bounds<Pixels>>,
     /// Each row's drawing by position, kept while the row is the same (`Rc`).
     painted: Vec<(Rc<Vec<vt::Cell>>, Vec<RowOp>, Option<usize>)>,
-    /// Font size, cell size, font, loaded fonts and ligature setting used to draw.
-    painted_with: (u32, Size<Pixels>, String, u64, bool),
+    /// Font size, cell size, cell font, loaded fonts and ligature setting used to draw.
+    painted_with: (u32, Size<Pixels>, Font, u64, bool),
 }
 
 pub struct TerminalView {
@@ -297,7 +297,7 @@ impl TerminalView {
                 thumb: None,
                 track: None,
                 painted: Vec::new(),
-                painted_with: (0, Size::default(), String::new(), 0, false),
+                painted_with: (0, Size::default(), font(""), 0, false),
             })),
             focus: cx.focus_handle(),
             was_focused: false,
@@ -2066,7 +2066,8 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     // line rebuilds one row, not the whole screen.
     let ligatures = crate::settings::get().font_ligatures;
     let cursor = frame.cursor_cell.filter(|_| ligatures);
-    let with = (crate::settings::font_size().to_bits(), cell, crate::settings::terminal_font(), crate::settings::fonts_added(), ligatures);
+    // The whole cell font, so a weight change redraws kept rows too.
+    let with = (crate::settings::font_size().to_bits(), cell, cell_font(false, false), crate::settings::fonts_added(), ligatures);
     // When every row changed (output scrolling), nothing is kept: the next
     // frame would find none of them the same.
     let mut painted = std::mem::take(&mut grid.borrow_mut().painted);
