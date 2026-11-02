@@ -1,5 +1,5 @@
 # Builds this checkout and installs it for the current Windows user.
-function Install-HerdrAppFiles($Binary, $Icon, $Destination) {
+function Install-HerdrAppFiles($Binary, $Icon, $Destination, $ShellDirectory) {
     $ErrorActionPreference = "Stop"
     $Destination = [IO.Path]::GetFullPath($Destination)
     $stage = "$Destination.install-$([guid]::NewGuid().ToString('N'))"
@@ -9,6 +9,13 @@ function Install-HerdrAppFiles($Binary, $Icon, $Destination) {
         New-Item -ItemType Directory -Path $stage -Force | Out-Null
         Copy-Item -LiteralPath $Binary -Destination "$stage\herdr-app.exe"
         Copy-Item -LiteralPath $Icon -Destination "$stage\herdr-app.svg"
+        Copy-Item -LiteralPath "$PSScriptRoot\windows-explorer.ps1" -Destination $stage
+        if ($ShellDirectory) {
+            New-Item -ItemType Directory -Path "$stage\shell" | Out-Null
+            foreach ($name in @('herdr-explorer.dll', 'Herdr.Explorer.msix', 'logo.png', 'version.txt')) {
+                Copy-Item -LiteralPath (Join-Path $ShellDirectory $name) -Destination "$stage\shell"
+            }
+        }
         # Renaming the folder leaves an already running app alive.
         if (Test-Path -LiteralPath $Destination) {
             Rename-Item -LiteralPath $Destination -NewName (Split-Path $backup -Leaf)
@@ -47,8 +54,9 @@ Push-Location "$PSScriptRoot\.."
 try {
     cargo build --release --locked --target-dir target
     if ($LASTEXITCODE) { throw "Herdr build failed (exit $LASTEXITCODE)." }
+    & "$PSScriptRoot\build-windows-shell.ps1"
     $dir = Join-Path $env:LOCALAPPDATA "Programs\herdr-app"
-    Install-HerdrAppFiles "target\release\herdr-app.exe" "assets\icons\herdr-ui-icon-clean.svg" $dir
+    Install-HerdrAppFiles "target\release\herdr-app.exe" "assets\icons\herdr-ui-icon-clean.svg" $dir "target\windows-shell"
 } finally {
     Pop-Location
 }
@@ -75,4 +83,5 @@ try {
     $key.Close()
 }
 if (($env:Path -split ";") -notcontains $dir) { $env:Path += ";$dir" }
+& powershell.exe -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File "$dir\windows-explorer.ps1" -Action Offer -InstallRoot $dir
 Write-Host "Installed herdr-app. Quit and reopen Herdr to use the new build."

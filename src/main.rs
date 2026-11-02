@@ -4,6 +4,8 @@
 mod bench;
 mod commands;
 mod control;
+#[cfg(windows)]
+mod explorer;
 mod core_bin;
 mod files;
 mod hc;
@@ -12,6 +14,7 @@ mod layout;
 mod layout_sync;
 mod links;
 mod model;
+mod open;
 mod mirror;
 mod mirror_sync;
 mod place;
@@ -44,6 +47,7 @@ herdr-app: the Herdr desktop app. With no arguments it opens the window.
 
 Usage:
   herdr-app                        open the window
+  herdr-app open <folder>          open a local folder in a new space
   herdr-app ls                     spaces, their tabs and terminals, in the open window
   herdr-app do <command> [args]    run a command: --name api --argv '[\"pi\"]', or one JSON object
   herdr-app feedback <text>        draft feedback for the person to review and send
@@ -89,11 +93,40 @@ fn main() {
     if matches!(args.get(1).map(String::as_str), Some("do" | "status" | "ls" | "commands" | "feedback" | "shot")) {
         std::process::exit(control::client(&args[1..]));
     }
-    // Anything else from a shell answers in the shell; only a bare launch opens the window.
+    let mut opening = None;
+    let mut opening_lock = None;
+    let explorer = args.get(2).is_some_and(|arg| arg == "--explorer");
+    if args.get(1).is_some_and(|arg| arg == "open") {
+        let rest = &args[if explorer { 3 } else { 2 }..];
+        let folder = match rest {
+            [folder] => open::folder(folder),
+            _ => Err("usage: herdr-app open [--explorer] <folder>".into()),
+        };
+        let folder = match folder {
+            Ok(folder) => folder,
+            Err(error) => { open::report(&error, explorer); std::process::exit(2); }
+        };
+        opening_lock = match open::launch_lock(&mods::app_dir()) {
+            Ok(lock) => Some(lock),
+            Err(error) => { open::report(&error, explorer); std::process::exit(1); }
+        };
+        match control::open_running(&folder) {
+            Ok(Some(reply)) => {
+                if let Some(error) = reply.get("error").and_then(serde_json::Value::as_str) {
+                    open::report(error, explorer);
+                    std::process::exit(1);
+                }
+                return;
+            }
+            Ok(None) => opening = Some(folder),
+            Err(error) => { open::report(&error, explorer); std::process::exit(1); }
+        }
+    }
     match args.get(1).map(String::as_str) {
         // Already open on this home: that window comes to the front.
         None if control::raise_running() => return,
         None => {}
+        Some("open") => {}
         Some("-h" | "--help" | "help") => return print!("{HELP}"),
         Some("--skill") => return print!("{}", include_str!("SKILL.md")),
         Some("-V" | "--version" | "version") => return println!("herdr-app {}", env!("CARGO_PKG_VERSION")),
@@ -112,9 +145,12 @@ fn main() {
         )
         .init();
 
-    if update::apply_on_startup() {
+    // The updater relaunches without CLI arguments; apply after this folder has been opened.
+    if opening.is_none() && update::apply_on_startup() {
         return;
     }
+    #[cfg(windows)]
+    explorer::offer();
 
     telemetry::clock();
     // A first start sizes the app to the screen and the system's text size.
@@ -188,7 +224,33 @@ fn main() {
             }
             let requests = mods::install_policy();
             if let Some(tx) = mods::request_sender() {
-                control::listen(tx);
+                if let Err(error) = control::listen(tx.clone()) {
+                    if opening.is_some() {
+                        open::report(&error, explorer);
+                        cx.quit();
+                        return;
+                    }
+                    tracing::warn!("{error}");
+                }
+                drop(opening_lock);
+                if let Some(folder) = opening {
+                    let (reply, answer) = std::sync::mpsc::channel();
+                    match tx.try_send(mods::Request::Control { cmd: open::request(&folder), reply }) {
+                        Ok(()) => { std::thread::spawn(move || {
+                            match open::wait_for_reply(answer, open::WAIT + std::time::Duration::from_secs(5)) {
+                                Ok(reply) => {
+                                    if let Some(error) = reply.get("error").and_then(serde_json::Value::as_str) { open::report(error, explorer); }
+                                }
+                                Err(error) => open::report(&error, explorer),
+                            }
+                        }); }
+                        Err(error) => open::report(&format!("cannot queue folder opening: {error}"), explorer),
+                    }
+                }
+            } else if opening.is_some() {
+                open::report("cannot initialize the folder-opening request channel", explorer);
+                cx.quit();
+                return;
             }
             match core {
                 Ok(core) => open_main(core, requests, cx),

@@ -16,11 +16,29 @@ try {
     Install-HerdrAppFiles $binary $icon $destination
     Assert ((Get-Content "$destination\herdr-app.exe") -eq "first build") "First install lost the binary"
     Assert ((Get-Content "$destination\herdr-app.svg") -eq "icon") "First install lost the icon"
+    Assert (Test-Path "$destination\windows-explorer.ps1") "Installer omitted the Explorer helper"
+
+    $payload = Join-Path $tmp 'shell'
+    New-Item -ItemType Directory -Path $payload | Out-Null
+    foreach ($name in @('herdr-explorer.dll', 'Herdr.Explorer.msix', 'logo.png', 'version.txt')) {
+        Set-Content -LiteralPath (Join-Path $payload $name) -Value $name
+    }
+    Install-HerdrAppFiles $binary $icon $destination $payload
+    Assert ((Get-Content "$destination\shell\herdr-explorer.dll") -eq 'herdr-explorer.dll') "Installer omitted the Explorer payload"
+
+    # A shell host can keep this sibling DLL loaded across app replacements.
+    $extension = Join-Path $tmp 'Programs\herdr-app-shell\1.0.0.0'
+    New-Item -ItemType Directory -Path $extension -Force | Out-Null
+    $extensionDll = Join-Path $extension 'herdr-explorer.dll'
+    Set-Content -LiteralPath $extensionDll -Value 'loaded extension'
+    $loaded = [IO.File]::Open($extensionDll, 'Open', 'Read', 'Read')
 
     Set-Content -LiteralPath $binary -Value "new build"
     Install-HerdrAppFiles $binary $icon $destination
     Assert ((Get-Content "$destination\herdr-app.exe") -eq "new build") "Replacement kept the old binary"
-    Assert ((Get-ChildItem (Split-Path $destination)).Count -eq 1) "Replacement left temporary files"
+    Assert ((Get-ChildItem (Split-Path $destination)).Count -eq 2) "Replacement left temporary files"
+    Assert ((Get-Content $extensionDll) -eq 'loaded extension') "App replacement modified the loaded shell extension"
+    $loaded.Dispose()
 
     # Fail the promotion, then the rollback too, using real moves otherwise.
     function Rename-Item {
@@ -48,6 +66,7 @@ try {
     }
     Write-Host "Installer file replacement and rollback checks passed."
 } finally {
+    if ($loaded) { $loaded.Dispose() }
     Remove-Item Function:Rename-Item -ErrorAction SilentlyContinue
     Remove-Item -LiteralPath $tmp -Recurse -Force
 }

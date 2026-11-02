@@ -27,6 +27,8 @@ irm https://releases.herdr.dev/app/install.ps1 | iex
 
 Herdr appears in the Start menu. The installer adds `%LOCALAPPDATA%\Programs\herdr-app` to your user PATH. Open a new terminal to pick it up.
 
+On Windows 11, signed releases offer an optional **Open in Herdr** action in File Explorer's main context menu, for folders and folder backgrounds. Installation or the first launch of a new release asks before enabling it; declining is remembered. See [Explorer setup](docs/windows-explorer.md) to enable, disable or repair it later.
+
 Both installers download and run code. Read the [shell installer](distribution/install.sh) or [PowerShell installer](distribution/install.ps1) first if you prefer.
 They also install [herdr-core](https://github.com/herdrdev/herdr-core) if it is missing.
 The app can help install or update a core it cannot use.
@@ -37,6 +39,8 @@ A **space** holds work on one machine, usually in one repo. Each space has **tab
 
 An unnamed space follows its first terminal's folder. Name a space or tab when you want a label that stays.
 New tabs start in the focused terminal's folder.
+
+To open a folder from a terminal, run `herdr-app open "/path/to/project"` (on Windows, for example `herdr-app open "D:\Project\my app"`). This starts or raises Herdr and creates a visible local space, even if the selected space is on another machine. The terminal uses the shell configured by herdr-core in `config.toml`, including Git Bash; no app shell setting is needed.
 
 The agents sidebar brings agents from your spaces into one list, including workers started by another agent.
 Agents that report status show as:
@@ -125,6 +129,8 @@ On Linux it links to this checkout, so keep the checkout in place.
 Quit and reopen Herdr to use the new build.
 
 Documentation checks also need [Bun](https://bun.sh): `just docs-check` checks generated pages and CLI examples; `just docs-generate` refreshes the reference pages.
+
+Building the Windows Explorer command also needs Visual Studio C++ build tools and the Windows SDK. Source installs include an unsigned package; the main-menu integration requires a trusted signed release.
 
 To compare drawing changes on Windows, Linux or macOS, run the same fixed workloads against each build:
 

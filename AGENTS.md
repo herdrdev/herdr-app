@@ -68,8 +68,9 @@ quit and reopen Herdr to use the new build. Windows recipes use PowerShell by de
 
 Never run a bare `target/*/herdr-app` (no arguments) on a machine where you
 also use the app without `HERDR_APP_HOME` pointing at a scratch home: it
-opens a second window on your real setup. Subcommands and `--help` only
-talk.
+opens a second window on your real setup. `open <folder>` also opens or raises
+a window: test it with a scratch home and core session. Inspection subcommands
+and `--help` only talk.
 
 On Linux, test UI changes in the sandbox: `scripts/sandbox up`, then `do
 <command> [json]`, `status`, `shot` (screenshot), `move|click|drag`
