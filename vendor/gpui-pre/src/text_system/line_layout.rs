@@ -907,10 +907,10 @@ fn apply_force_width_to_layout(layout: &mut LineLayout, force_width: Pixels) {
             let shaped_x = glyph.position.x;
 
             if shaped_x > last_base_shaped_x + force_width * 0.5 {
-                let forced_x = glyph_pos * force_width;
-                if (shaped_x - forced_x).abs() > px(1.) {
-                    glyph.position.x = forced_x;
-                }
+                // HERDR: every base glyph goes on its cell. A 1px tolerance let
+                // glyphs creep then jump when the cell width differs from the
+                // font's advance (letter_spacing), so text wobbled.
+                glyph.position.x = glyph_pos * force_width;
                 last_base_shaped_x = shaped_x;
                 last_base_actual_x = glyph.position.x;
                 glyph_pos += 1;
@@ -1164,27 +1164,38 @@ mod tests {
         let cell_width = px(8.);
         // Font metrics don't perfectly match cell grid — glyphs drift >1px from cell boundary
         let mut layout = make_layout(vec![
-            glyph_at(0.5, 0),  // within 1px tolerance, kept as-is
-            glyph_at(10.2, 1), // >1px off from 8.0, corrected
-            glyph_at(19.8, 2), // >1px off from 16.0, corrected
+            glyph_at(0.5, 0),
+            glyph_at(10.2, 1),
+            glyph_at(19.8, 2),
         ]);
 
         apply_force_width_to_layout(&mut layout, cell_width);
 
         let positions = glyph_x_positions(&layout);
-        assert_eq!(positions, vec![0.5, 8., 16.]);
+        assert_eq!(positions, vec![0., 8., 16.]);
     }
 
     #[test]
-    fn test_force_width_combining_mark_after_within_tolerance_base() {
+    fn test_force_width_combining_mark_follows_snapped_base() {
         let cell_width = px(8.);
-        // Base glyph is within 1px of grid so it keeps its shaped position.
-        // The combining mark must align to the base's actual position, not the grid slot.
-        let mut layout = make_layout(vec![glyph_at(0.5, 0), glyph_at(0.5, 3)]);
+        // The combining mark keeps its offset from the base, which is on the grid.
+        let mut layout = make_layout(vec![glyph_at(8.5, 0), glyph_at(8.75, 3)]);
 
         apply_force_width_to_layout(&mut layout, cell_width);
 
         let positions = glyph_x_positions(&layout);
-        assert_eq!(positions, vec![0.5, 0.5]);
+        assert_eq!(positions, vec![0., 0.25]);
+    }
+
+    #[test]
+    fn test_force_width_narrower_cells_stay_even() {
+        // A 7.2px font on 7px cells (letter_spacing -0.2): no creep, no jumps.
+        let cell_width = px(7.);
+        let mut layout = make_layout((0..6).map(|i| glyph_at(i as f32 * 7.2, i)).collect());
+
+        apply_force_width_to_layout(&mut layout, cell_width);
+
+        let positions = glyph_x_positions(&layout);
+        assert_eq!(positions, vec![0., 7., 14., 21., 28., 35.]);
     }
 }

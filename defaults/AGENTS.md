@@ -682,6 +682,11 @@ What's about the user, never a look:
   background; this is a threshold, not a guaranteed resulting ratio.
   Box/block, Powerline and sprite glyph colors are never adjusted.
   Changes apply immediately, including text already on screen.
+- `letter_spacing`: pixels added to the terminal cell width, from `-2` to `10`
+  (default `0`, the font's own advance). Negative values tighten the grid:
+  JetBrains Mono at 12 is 7.2px wide, so `-0.2` gives the 7px cells of
+  terminals that round down, such as Ghostty. Scales with zoom. Changes apply
+  immediately.
 - `clipboard_write`: `false` blocks terminal programs from writing the local
   clipboard (default `true`, including remote terminals attached in this window).
   OSC 52 accepts base64 UTF-8 text up to 1 MiB: `c` writes the system clipboard,

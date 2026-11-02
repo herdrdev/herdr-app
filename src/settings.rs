@@ -389,6 +389,9 @@ pub struct Person {
     pub clipboard_write: bool,
     /// Minimum terminal text contrast ratio; 1 leaves program colors unchanged.
     pub minimum_contrast: f32,
+    /// Pixels added to (or, negative, taken from) the terminal cell width.
+    #[serde(skip_serializing_if = "is_zero")]
+    pub letter_spacing: f32,
     /// macOS Option sends Alt shortcuts, or follows the keyboard layout.
     #[serde(skip_serializing_if = "OptionAsAlt::is_auto")]
     pub option_as_alt: OptionAsAlt,
@@ -437,6 +440,10 @@ fn is_true(b: &bool) -> bool {
     *b
 }
 
+fn is_zero(v: &f32) -> bool {
+    *v == 0.0
+}
+
 impl Default for Person {
     fn default() -> Self {
         Person {
@@ -449,6 +456,7 @@ impl Default for Person {
             telemetry: true,
             clipboard_write: true,
             minimum_contrast: 1.0,
+            letter_spacing: 0.0,
             option_as_alt: OptionAsAlt::Auto,
             appearance: Appearance::System,
             theme: None,
@@ -483,6 +491,7 @@ pub struct Settings {
     pub terminal_opacity: f32,
     pub clipboard_write: bool,
     pub minimum_contrast: f32,
+    pub letter_spacing: f32,
     pub option_as_alt: OptionAsAlt,
     pub sounds: Sounds,
 }
@@ -523,6 +532,7 @@ impl Default for Settings {
             terminal_opacity: 1.0,
             clipboard_write: true,
             minimum_contrast: 1.0,
+            letter_spacing: 0.0,
             option_as_alt: OptionAsAlt::Auto,
             sounds: Sounds::default(),
         }
@@ -560,6 +570,7 @@ impl Settings {
             sounds: person.sounds.clone(),
             clipboard_write: person.clipboard_write,
             minimum_contrast: person.minimum_contrast,
+            letter_spacing: person.letter_spacing,
             option_as_alt: person.option_as_alt,
         }
     }
@@ -607,6 +618,9 @@ impl Settings {
         }
         if !(1.0..=21.0).contains(&self.minimum_contrast) {
             out.push(format!("minimum_contrast {} is outside 1..21", self.minimum_contrast));
+        }
+        if !(-2.0..=10.0).contains(&self.letter_spacing) {
+            out.push(format!("letter_spacing {} is outside -2..10", self.letter_spacing));
         }
         if !(6.0..=72.0).contains(&self.font_size) {
             out.push(format!("font_size {} is outside 6..72", self.font_size));
@@ -864,6 +878,19 @@ mod tests {
             assert_eq!(serde_json::to_value(settings).unwrap()["option_as_alt"], value);
         }
         assert!(serde_json::from_value::<Person>(serde_json::json!({"option_as_alt": "invalid"})).is_err());
+    }
+
+    #[test]
+    fn letter_spacing_defaults_to_zero_and_validates_the_range() {
+        let default: Person = serde_json::from_str("{}").unwrap();
+        assert_eq!(default.letter_spacing, 0.0);
+        assert!(serde_json::to_value(&default).unwrap().get("letter_spacing").is_none());
+        for spacing in [-2.0, -0.2, 0.0, 1.5, 10.0, -2.5, 10.5] {
+            let person: Person = serde_json::from_value(serde_json::json!({"letter_spacing": spacing})).unwrap();
+            let settings = Settings::compose(&person, &crate::layout::Look::default(), true);
+            assert_eq!(settings.letter_spacing, spacing);
+            assert_eq!(settings.problems().is_empty(), (-2.0..=10.0).contains(&spacing));
+        }
     }
 
     #[test]

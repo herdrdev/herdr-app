@@ -1033,11 +1033,13 @@ pub fn cell_size(window: &Window) -> Size<Pixels> {
     let f = cell_font(false, false);
     let id = ts.resolve_font(&f);
     let fs = px(crate::settings::font_size());
-    let w = ts.advance(id, fs, 'M').map(|s| s.width).unwrap_or(fs * 0.6);
+    let advance = ts.advance(id, fs, 'M').map(|s| s.width).unwrap_or(fs * 0.6);
+    let spacing = crate::settings::z(crate::settings::get().letter_spacing.clamp(-2.0, 10.0));
+    let w = (advance + spacing).max(px(1.0));
     let h = ts.ascent(id, fs) + ts.descent(id, fs).abs();
-    // The width stays the font's own advance: GPUI only moves a glyph onto the
-    // grid once it drifts over 1px, so a rounded width made text wobble.
-    // Boxes snap their edges instead (`snap_box`).
+    // The width is the font's advance plus letter_spacing, not rounded: glyphs
+    // sit exactly on their cells (gpui-pre `apply_force_width_to_layout`), and
+    // boxes snap their edges instead (`snap_box`).
     let scale = window.scale_factor();
     size(w, px((f32::from(h) * 1.15 * scale).ceil() / scale))
 }
