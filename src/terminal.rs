@@ -381,7 +381,7 @@ impl TerminalView {
                             g.core.credit(ch, bytes.len());
                             // What the core leaves to viewers (e.g. kitty graphics replies).
                             let replies = g.vt.take_replies();
-                            g.core.input(ch, &replies);
+                            g.core.automatic_input(ch, &replies);
                         }
                     }
                     Stream::Closed(why) => {
@@ -1545,7 +1545,7 @@ impl Render for TerminalView {
                                 g.core.resize(chan, cols, rows);
                                 // Mode 2048 programs wait for this report, not SIGWINCH.
                                 let replies = g.vt.take_replies();
-                                g.core.input(chan, &replies);
+                                g.core.automatic_input(chan, &replies);
                             }
                         }
                     },

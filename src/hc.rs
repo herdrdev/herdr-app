@@ -3,7 +3,7 @@
 
 use anyhow::{Context as _, Result, anyhow, bail};
 use serde_json::{Value, json};
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use std::io::{BufRead, BufReader, Read, Write};
 use std::process::{Child, Stdio};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -18,6 +18,7 @@ pub const CLOSE: u8 = 2;
 pub const RESIZE: u8 = 3;
 pub const FOCUS: u8 = 4;
 pub const FACTS: u8 = 5;
+pub const AUTOMATIC_INPUT: u8 = 6;
 
 pub enum Stream {
     Data(Vec<u8>),
@@ -167,6 +168,7 @@ impl EventLines {
 #[derive(Default)]
 struct Routes {
     closed: bool,
+    automatic_input: HashSet<u32>,
     replies: HashMap<u64, mpsc::Sender<Result<Value, Value>>>,
     streams: HashMap<u32, async_channel::Sender<Stream>>,
     /// Frames for a channel whose attach reply hasn't been handled yet.
@@ -337,12 +339,14 @@ impl Core {
                     None => r.early.entry(channel).or_default().push(item),
                 }
                 if closing {
+                    r.automatic_input.remove(&channel);
                     r.streams.remove(&channel);
                 }
             }
             // The core went away: tell every pane, and fail calls still waiting.
             let mut r = routes.lock().unwrap();
             r.closed = true;
+            r.automatic_input.clear();
             for (_, tx) in r.streams.drain() {
                 let _ = tx.try_send(Stream::Lost);
             }
@@ -428,12 +432,23 @@ impl Core {
             let _ = tx.try_send(item);
         }
         r.streams.insert(channel, tx);
+        if self.hello["features"].as_array().is_some_and(|features| features.iter().any(|f| f == "automatic_input")) && result["automatic_input"] == true {
+            r.automatic_input.insert(channel);
+        }
         Ok(Attached { channel, stream: rx, terminal: result["terminal"].clone() })
     }
 
     pub fn input(&self, channel: u32, bytes: &[u8]) {
         if !bytes.is_empty() {
             self.send(channel, DATA, bytes);
+        }
+    }
+
+    /// Terminal-engine replies are not typing. Older paths require legacy DATA.
+    pub fn automatic_input(&self, channel: u32, bytes: &[u8]) {
+        if !bytes.is_empty() {
+            let kind = if self.routes.lock().unwrap().automatic_input.contains(&channel) { AUTOMATIC_INPUT } else { DATA };
+            self.send(channel, kind, bytes);
         }
     }
 
@@ -458,7 +473,10 @@ impl Core {
     }
 
     pub fn detach(&self, channel: u32) {
-        self.routes.lock().unwrap().streams.remove(&channel);
+        let mut routes = self.routes.lock().unwrap();
+        routes.streams.remove(&channel);
+        routes.automatic_input.remove(&channel);
+        drop(routes);
         self.send(channel, CLOSE, &[]);
     }
 }
@@ -577,6 +595,91 @@ mod tests {
         assert!(core.call("doc.get", json!({"name":"herdr-app"})).unwrap_err().to_string().contains("lost the core"));
         assert!(start.elapsed() < Duration::from_secs(1));
         assert!(core.routes.lock().unwrap().replies.is_empty());
+    }
+
+    #[test]
+    fn replies_are_tagged_only_on_capable_attach_channels() {
+        let (writer, frames) = mpsc::channel();
+        let (_lost_tx, lost) = async_channel::bounded(1);
+        let child = std::process::Command::new(std::env::current_exe().unwrap()).arg("--help").stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+        let core = Core {
+            hello: Value::Null, writer, routes: Arc::new(Mutex::new(Routes::default())),
+            next_id: AtomicU64::new(1), child: Mutex::new(child), lost,
+        };
+        core.routes.lock().unwrap().automatic_input.insert(7);
+        core.automatic_input(7, b"\x1b");
+        core.automatic_input(7, b"[48;24;80t");
+        core.input(7, b"x");
+        core.automatic_input(8, b"old core reply");
+        core.automatic_input(7, b"");
+        let sent: Vec<_> = frames.try_iter().map(|frame| (frame[4], frame[HEADER..].to_vec())).collect();
+        assert_eq!(sent, vec![
+            (AUTOMATIC_INPUT, b"\x1b".to_vec()),
+            (AUTOMATIC_INPUT, b"[48;24;80t".to_vec()),
+            (DATA, b"x".to_vec()),
+            (DATA, b"old core reply".to_vec()),
+        ]);
+    }
+
+    #[test]
+    #[ignore = "requires an isolated HC_SESSION=test-* and a running hc on PATH"]
+    fn two_app_viewers_answer_queries_without_idle_size_theft() {
+        assert!(std::env::var("HC_SESSION").unwrap().starts_with("test-"));
+        let root = std::path::PathBuf::from(std::env::var_os("XDG_STATE_HOME").unwrap());
+        std::fs::create_dir_all(&root).unwrap();
+        let core = Core::connect().unwrap();
+        let program = format!(
+            "stty raw -echo; cat </dev/tty > {0}/received & printf ready; for n in 0 1 2; do \
+             while [ ! -e {0}/query$n ]; do sleep 0.02; done; \
+             printf '\\033[?2048l\\033[?2048h\\033_Gi=31,s=1,v=1,a=q,t=d,f=24;AAAA\\033\\\\'; done; wait",
+            root.display()
+        );
+        let result = core.call("terminal.run", json!({"argv": ["sh", "-c", program]})).unwrap();
+        let t = result["address"].as_str().unwrap();
+        let idle = core.attach(t, 80, 24, json!({})).unwrap();
+        let leader = core.attach(t, 100, 30, json!({})).unwrap();
+        let capable = core.routes.lock().unwrap().automatic_input.contains(&idle.channel);
+        let mut idle_vt = crate::vt::Vt::new(80, 24);
+        let mut leader_vt = crate::vt::Vt::new(100, 30);
+        idle_vt.resize(80, 24, 10, 20);
+        leader_vt.resize(100, 30, 10, 20);
+        for round in 0..3 {
+            std::fs::write(root.join(format!("query{round}")), "").unwrap();
+            for (name, viewer, vt, expected) in [
+                ("idle", &idle, &mut idle_vt, if capable { 100 } else { 80 }),
+                ("leader", &leader, &mut leader_vt, 100),
+            ] {
+                let deadline = std::time::Instant::now() + Duration::from_secs(5);
+                let mut replies = Vec::new();
+                while !replies.windows(3).any(|w| w == b";OK") {
+                    assert!(std::time::Instant::now() < deadline, "query never reached {name}");
+                    match viewer.stream.try_recv() {
+                        Ok(Stream::Data(bytes)) => {
+                            vt.write(&bytes);
+                            core.credit(viewer.channel, bytes.len());
+                            replies.extend(vt.take_replies());
+                        }
+                        Ok(_) => panic!("viewer disconnected"),
+                        Err(_) => std::thread::sleep(Duration::from_millis(10)),
+                    }
+                }
+                core.automatic_input(viewer.channel, &replies);
+                let size = core.call("terminal.get", json!({"terminal": t})).unwrap();
+                eprintln!("round {round} {name}: {}x{}, replies {:?}", size["cols"], size["rows"], String::from_utf8_lossy(&replies));
+                assert_eq!(size["cols"], expected);
+            }
+        }
+        let deadline = std::time::Instant::now() + Duration::from_secs(5);
+        loop {
+            let received = std::fs::read(root.join("received")).unwrap_or_default();
+            if received.windows(3).filter(|w| *w == b";OK").count() == 6 {
+                eprintln!("program received six kitty replies (two per query): {:?}", String::from_utf8_lossy(&received));
+                break;
+            }
+            assert!(std::time::Instant::now() < deadline);
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        core.call("terminal.kill", json!({"terminal": t})).unwrap();
     }
 
     fn hello(generation: u64, version: &str, methods: &[&str]) -> Value {
