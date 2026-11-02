@@ -1,6 +1,10 @@
 //! Real GPU readback, not a mocked image. Linux CI uses Vulkan software rendering.
 use gpui::{prelude::*, *};
 
+#[path = "../src/sprites.rs"]
+#[allow(unused_imports)]
+mod sprites;
+
 struct Scene;
 impl Render for Scene {
     fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
@@ -48,10 +52,32 @@ impl Render for Scene {
                     .size(px(4.))
                     .bg(rgb(0xf08020)),
             )
+            .child(
+                canvas(
+                    |_, _, _| {},
+                    |_, _, window, _| {
+                        for (x, width) in [(110., 9.), (119., 9.5)] {
+                            for row in 0..2 {
+                                sprites::paint(
+                                    "⡇",
+                                    Bounds::new(
+                                        point(px(x), px(4. + row as f32 * 24.)),
+                                        size(px(width), px(24.)),
+                                    ),
+                                    rgb(0xffffff).into(),
+                                    window,
+                                );
+                            }
+                        }
+                    },
+                )
+                .size_full(),
+            )
     }
 }
 
 fn check(window: &mut Window, cx: &mut App) {
+    assert!(sprites::is_sprite("⡇"));
     let _ = window.draw(cx);
     let image = window.render_to_image().expect("real GPU screenshot");
     let scale = window.scale_factor();
@@ -77,6 +103,22 @@ fn check(window: &mut Window, cx: &mut App) {
             expected,
             "pixel ({x}, {y}) at scale {scale}"
         );
+    }
+    // The four dots in each Braille row should keep the same spacing across rows.
+    for x in [112., 121.5] {
+        for dot in 0..8 {
+            let x = (x * scale) as u32;
+            let y = ((7. + dot as f32 * 6.) * scale) as u32;
+            assert_eq!(image.get_pixel(x, y).0, [255, 255, 255, 255], "dot {dot}");
+            if dot < 7 {
+                let gap = ((10. + dot as f32 * 6.) * scale) as u32;
+                assert_eq!(
+                    image.get_pixel(x, gap).0,
+                    [0x12, 0x34, 0x56, 255],
+                    "gap after dot {dot}"
+                );
+            }
+        }
     }
     // Capture must not consume the frame or change the next result.
     assert_eq!(image, window.render_to_image().unwrap());

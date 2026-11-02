@@ -107,15 +107,15 @@ fn blocks(c: char) -> Option<(Vec<[f32; 4]>, f32)> {
     })
 }
 
-/// Ghostty's integer-pixel layout (font/sprite/draw/braille.zig).
+/// Ghostty's dot sizing, with vertical spacing even across adjacent cells.
 /// Bit order is 1,2,3,7 down the left, 4,5,6,8 down the right.
 fn braille(c: char, width: i32, height: i32) -> Option<Vec<[i32; 4]>> {
     if !('\u{2800}'..='\u{28FF}').contains(&c) {
         return None;
     }
     let mut dot = (width / 4).min(height / 8);
-    let (mut xs, mut ys) = (width / 4, height / 8);
-    let (mut xm, mut ym) = (xs / 2, ys / 2);
+    let (mut xs, ys) = (width / 4, height / 8);
+    let (mut xm, ym) = (xs / 2, ys / 2);
     let mut xr = width - 2 * xm - xs - 2 * dot;
     let mut yr = height - 2 * ym - 3 * ys - 4 * dot;
     if xr >= 2 && yr >= 4 && dot == 0 {
@@ -128,7 +128,6 @@ fn braille(c: char, width: i32, height: i32) -> Option<Vec<[i32; 4]>> {
         xr -= 2;
     }
     if yr >= 2 && ym == 0 {
-        ym = 1;
         yr -= 2;
     }
     if xr >= 1 {
@@ -136,7 +135,6 @@ fn braille(c: char, width: i32, height: i32) -> Option<Vec<[i32; 4]>> {
         xr -= 1;
     }
     if yr >= 3 {
-        ys += 1;
         yr -= 3;
     }
     if xr >= 2 {
@@ -144,7 +142,6 @@ fn braille(c: char, width: i32, height: i32) -> Option<Vec<[i32; 4]>> {
         xr -= 2;
     }
     if yr >= 2 {
-        ym += 1;
         yr -= 2;
     }
     if xr >= 2 && yr >= 4 {
@@ -153,7 +150,8 @@ fn braille(c: char, width: i32, height: i32) -> Option<Vec<[i32; 4]>> {
     let mut rects = Vec::new();
     for (bit, col, row) in [(0, 0, 0), (1, 0, 1), (2, 0, 2), (3, 1, 0), (4, 1, 1), (5, 1, 2), (6, 0, 3), (7, 1, 3)] {
         if (c as u32) & (1 << bit) != 0 {
-            let (x, y) = (xm + col * (dot + xs), ym + row * (dot + ys));
+            let x = xm + col * (dot + xs);
+            let y = ((2 * row + 1) * height - 4 * dot + 4) / 8;
             rects.push([x, y, x + dot, y + dot]);
         }
     }
@@ -348,7 +346,7 @@ mod tests {
         assert!(!is_sprite("\u{27FF}") && !is_sprite("\u{2900}"));
         assert!(!is_sprite("⠁⠂") && !is_sprite("⠁\u{FE0F}"));
         assert_eq!(braille('A', 8, 22), None);
-        let positions = [(1, 2), (1, 7), (1, 12), (5, 2), (5, 7), (5, 12), (1, 17), (5, 17)];
+        let positions = [(1, 2), (1, 7), (1, 13), (5, 2), (5, 7), (5, 13), (1, 18), (5, 18)];
         for pattern in 0u32..256 {
             let c = char::from_u32(0x2800 + pattern).unwrap();
             assert!(is_sprite(&c.to_string()));
@@ -364,6 +362,9 @@ mod tests {
                     assert!(0 <= y0 && y0 <= y1 && y1 <= h);
                     assert_eq!(x1 - x0, y1 - y0);
                 }
+                let dots = braille('⡇', w, h).unwrap();
+                let gaps = [dots[1][1] - dots[0][1], dots[2][1] - dots[1][1], dots[3][1] - dots[2][1], h + dots[0][1] - dots[3][1]];
+                assert!(gaps.iter().max().unwrap() - gaps.iter().min().unwrap() <= 1, "{w}x{h}: {gaps:?}");
             }
         }
     }
