@@ -1,5 +1,8 @@
 set windows-shell := ["powershell.exe", "-NoLogo", "-NoProfile", "-Command"]
 
+default:
+    @just --list
+
 notes-clip scene version="":
     bun scripts/notes-media.ts clip "{{scene}}" "{{version}}"
 
