@@ -627,8 +627,8 @@ What's about the user, never a look:
   cargo). Read at start.
 - `font`, `font_size`, `ui_font`: used where the layout doesn't set its
   own. Herdr (main) leaves these unset. Bigger panels: `zoom`.
-- `font_ligatures`: programming ligatures are on by default in terminal fonts
-  such as JetBrains Mono and Fira Code; set `false` to turn them off. The cursor
+- `font_ligatures`: programming ligatures are off by default; set `true` to
+  enable them in terminal fonts such as JetBrains Mono and Fira Code. The cursor
   and background changes (including selections) break ligatures so individual cells stay clear.
 - `theme`: a theme name or `{light, dark}`; used where the layout sets none.
   The theme picker overrides any layout and stays on that layout.
