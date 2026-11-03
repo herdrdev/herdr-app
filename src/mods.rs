@@ -21,6 +21,9 @@ include!(concat!(env!("OUT_DIR"), "/frame_mods.rs"));
 mod render_tests;
 #[cfg(test)]
 mod lifecycle_tests;
+#[cfg(test)]
+mod exec_tests;
+mod exec_reader;
 
 /// The frame's own mods (welcome, ...): the app's, not the person's. Written
 /// from the binary on every start, so no edit or broken mod can break them.
@@ -765,7 +768,6 @@ fn exec_limit(options: Option<&HostValue>) -> Result<Duration, HostError> {
 }
 
 fn run_blocking(command: &str, args: &[String], cwd: Option<String>, limit: Duration) -> Result<(i32, String, String), String> {
-    use std::io::Read;
     let mut child = crate::spawn::command(command)
         .args(args)
         .current_dir(cwd.map(PathBuf::from).unwrap_or_else(home))
@@ -774,32 +776,35 @@ fn run_blocking(command: &str, args: &[String], cwd: Option<String>, limit: Dura
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("cannot run {command}: {e}"))?;
-    // Bounded: a chatty command can't fill memory; the rest is drained and dropped.
-    let drain = |r: Box<dyn Read + Send>| {
-        std::thread::spawn(move || {
-            let mut buf = Vec::new();
-            let mut r = r;
-            let _ = (&mut r).take(EXEC_OUTPUT).read_to_end(&mut buf);
-            let _ = std::io::copy(&mut r, &mut std::io::sink());
-            String::from_utf8_lossy(&buf).into_owned()
-        })
-    };
-    let out = drain(Box::new(child.stdout.take().unwrap()));
-    let err = drain(Box::new(child.stderr.take().unwrap()));
     let start = std::time::Instant::now();
-    let status = loop {
-        match child.try_wait() {
-            Ok(Some(s)) => break s,
-            Ok(None) if start.elapsed() > limit => {
-                let _ = child.kill();
-                let _ = child.wait();
-                return Err(format!("{command} took longer than {} s and was stopped", limit.as_secs_f64()));
+    let result = (|| {
+        let out = exec_reader::Reader::new(child.stdout.take().unwrap(), EXEC_OUTPUT)?;
+        let err = exec_reader::Reader::new(child.stderr.take().unwrap(), EXEC_OUTPUT)?;
+        let mut status = None;
+        loop {
+            if status.is_none() {
+                status = child.try_wait().map_err(|e| e.to_string())?;
             }
-            Ok(None) => std::thread::sleep(Duration::from_millis(10)),
-            Err(e) => return Err(e.to_string()),
+            if let Some(status) = status {
+                if out.is_finished() && err.is_finished() {
+                    return Ok((status.code().unwrap_or(-1), out.finish(), err.finish()));
+                }
+            }
+            if start.elapsed() >= limit {
+                return Err(if status.is_some() {
+                    format!("{command} output pipes did not close within {} s", limit.as_secs_f64())
+                } else {
+                    format!("{command} took longer than {} s and was stopped", limit.as_secs_f64())
+                });
+            }
+            std::thread::sleep(Duration::from_millis(10));
         }
-    };
-    Ok((status.code().unwrap_or(-1), out.join().unwrap_or_default(), err.join().unwrap_or_default()))
+    })();
+    if result.is_err() {
+        let _ = child.kill();
+        let _ = child.wait();
+    }
+    result
 }
 
 /// Runs a program on another machine through the core's exec: its exact output.
