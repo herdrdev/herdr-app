@@ -18,6 +18,7 @@ const directory = new Function("exec", "window", `${directorySource}; return dir
   () => ({ platform: process.platform === "win32" ? "windows" : process.platform }),
 );
 
+// Three PowerShell launches can exceed Bun's 5 s default on a cold Windows runner.
 test("Files lists literal folder names, not shell expressions", async () => {
   const root = await mkdtemp(join(process.platform === "linux" ? "/var/tmp" : tmpdir(), "herdr-files-"));
   try {
@@ -33,7 +34,7 @@ test("Files lists literal folder names, not shell expressions", async () => {
   } finally {
     await rm(root, { recursive: true, force: true });
   }
-});
+}, 20000);
 
 test("Files preserves Unicode names when listing and expanding folders", async () => {
   const root = await mkdtemp(join(tmpdir(), "herdr-files-unicode-"));
