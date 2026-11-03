@@ -150,6 +150,10 @@ fn display_update(told: &mut Option<DisplayFacts>, theme: &vt::Theme, cell: (u32
     Some(json!({"fg": hex(facts.fg), "bg": hex(facts.bg), "cursor": hex(facts.cursor), "cell": [cell.0, cell.1]}))
 }
 
+pub fn initial_display(window: &Window) -> serde_json::Value {
+    display_update(&mut None, &vt::theme(), device_cell(cell_size(window), window.scale_factor())).unwrap()
+}
+
 impl Grid {
     fn refresh_theme(&mut self, theme: &vt::Theme, cell: (u32, u32)) {
         self.vt.set_theme(theme.clone());
