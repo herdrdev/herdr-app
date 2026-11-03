@@ -92,14 +92,11 @@ pub fn installed(commands: &[String], on: Option<&str>) -> Vec<String> {
     // Each found one as a marked line: an interactive shell may print its own
     // things (a prompt's escapes, a greeting) around the answer.
     let out = match on {
-        Some(m) => {
-            let argv = crate::remote_shell::check(commands);
-            crate::mods::run_on(m, &argv[0], &argv[1..]).unwrap_or_default()
-        }
+        Some(m) => remote_installed(commands, |command, args| {
+            crate::mods::run_remote(m, command, args, None).map(|(_, out, _)| String::from_utf8_lossy(&out).into_owned())
+        }),
         None if cfg!(windows) => {
-            let list = commands.iter().map(|c| format!("'{}'", c.replace('\'', "''"))).collect::<Vec<_>>().join(",");
-            let script = format!("foreach($c in @({list})){{ if(Get-Command $c -ErrorAction SilentlyContinue){{ \"herdr-has:$c\" }} }}");
-            crate::mods::run_here(&crate::window::shell(), &["-NoLogo".into(), "-Command".into(), script]).unwrap_or_default()
+            crate::mods::run_here(&crate::window::shell(), &["-NoLogo".into(), "-Command".into(), powershell_check(commands)]).unwrap_or_default()
         }
         None => {
             let shell = crate::window::shell();
@@ -109,6 +106,25 @@ pub fn installed(commands: &[String], on: Option<&str>) -> Vec<String> {
     };
     let found: std::collections::HashSet<&str> = out.split("herdr-has:").skip(1).filter_map(|s| s.split_whitespace().next()).collect();
     commands.iter().filter(|c| found.contains(c.as_str())).cloned().collect()
+}
+
+/// On another machine: its login shell, or its PowerShell where `sh` can't start
+/// (Windows), as `Window::spawn` falls back when it launches agents there.
+fn remote_installed(commands: &[String], run: impl Fn(&str, &[String]) -> Result<String, String>) -> String {
+    let argv = crate::remote_shell::check(commands);
+    match run(&argv[0], &argv[1..]) {
+        Ok(out) => out,
+        Err(e) if e.contains("cannot start") => {
+            run("powershell.exe", &["-NoLogo".into(), "-Command".into(), powershell_check(commands)]).unwrap_or_default()
+        }
+        Err(_) => String::new(),
+    }
+}
+
+/// PowerShell finds programs, `.cmd` shims and functions the same way it would run them.
+fn powershell_check(commands: &[String]) -> String {
+    let list = commands.iter().map(|c| format!("'{}'", c.replace('\'', "''"))).collect::<Vec<_>>().join(",");
+    format!("foreach($c in @({list})){{ if(Get-Command $c -ErrorAction SilentlyContinue){{ \"herdr-has:$c\" }} }}")
 }
 
 /// Check in the shell itself for functions, but not aliases (`"$@"` cannot run them).
@@ -369,6 +385,35 @@ mod tests {
         let line = powershell_line(&["codex".into(), "fix it".into()]);
         assert_eq!(key(None, &["pwsh.exe", "-NoExit", "-Command", &line]), "codex");
         assert_eq!(key(None, &[r"C:\Windows\powershell.exe"]), "shell");
+    }
+
+    #[test]
+    fn remote_check_falls_back_to_powershell_where_sh_cannot_start() {
+        let commands = ["claude", "it's"].map(String::from);
+        let calls = RefCell::new(Vec::new());
+        let out = remote_installed(&commands, |command, args| {
+            calls.borrow_mut().push(command.to_owned());
+            match command {
+                "sh" => Err("cannot start sh: program not found".into()),
+                _ => {
+                    assert_eq!(args.last().unwrap(), &powershell_check(&commands));
+                    Ok("herdr-has:claude\r\n".into())
+                }
+            }
+        });
+        assert_eq!(*calls.borrow(), ["sh", "powershell.exe"]);
+        assert_eq!(out, "herdr-has:claude\r\n");
+        assert!(powershell_check(&commands).contains("@('claude','it''s')"));
+    }
+
+    #[test]
+    fn remote_check_does_not_retry_other_failures() {
+        let calls = RefCell::new(0);
+        let out = remote_installed(&["claude".into()], |_, _| {
+            *calls.borrow_mut() += 1;
+            Err("machine unreachable".into())
+        });
+        assert_eq!((out.as_str(), *calls.borrow()), ("", 1));
     }
 
     #[cfg(unix)]
