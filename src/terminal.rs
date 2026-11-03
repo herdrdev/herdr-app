@@ -79,6 +79,7 @@ struct Grid {
     /// The scroll thumb's grabbable lane from the last paint, in window
     /// coordinates (wider than the few px drawn).
     thumb: Option<Bounds<Pixels>>,
+    track: Option<Bounds<Pixels>>,
     /// Each row's drawing by position, kept while the row is the same (`Rc`).
     painted: Vec<(Rc<Vec<vt::Cell>>, Vec<RowOp>, Option<usize>)>,
     /// Font size, cell size, font, loaded fonts and ligature setting used to draw.
@@ -234,6 +235,7 @@ impl TerminalView {
                 marked: None,
                 cursor_at: None,
                 thumb: None,
+                track: None,
                 painted: Vec::new(),
                 painted_with: (0, Size::default(), String::new(), 0, false),
             })),
@@ -773,6 +775,18 @@ fn scrollbar_thumb(total: u64, offset: u64, len: u64, track: f32, min: f32) -> O
     let travel = track - thumb;
     let top = if travel <= 0.0 { 0.0 } else { offset.min(total - len) as f32 / (total - len) as f32 * travel };
     Some((top, thumb))
+}
+
+// Use existing padding when possible, otherwise overlay the last few pixels.
+// Scrollback appearing must not resize the terminal or reflow its output.
+fn scrollbar_lane(bounds: Bounds<Pixels>, origin: Point<Pixels>, text_width: Pixels, height: Pixels) -> Bounds<Pixels> {
+    let edge = bounds.origin.x + bounds.size.width;
+    let left = (origin.x + text_width).min(edge - px(8.0)).max(bounds.origin.x);
+    Bounds::new(point(left, origin.y), size(edge - left, height))
+}
+
+fn scrollbar_grab_at(top: f32, len: f32, y: f32) -> f32 {
+    if y >= top && y < top + len { y - top } else { len / 2.0 }
 }
 
 /// The scroll position a thumb dragged to `top` px lands on, as a row offset
@@ -1440,9 +1454,9 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     {
         let mut g = grid.borrow_mut();
         g.cursor_at = frame.cursor_cell.map(|(x, y)| Bounds::new(at(x as usize, y as usize), cell));
-        // A thin thumb in the right padding while scrollback exists; as in
-        // Herdr it hides on the alternate screen and below five columns.
+        // As in Herdr, hide on the alternate screen and below five columns.
         g.thumb = None;
+        g.track = None;
         let sb = g.vt.scrollbar();
         let track = f32::from(cell.height) * f32::from(g.vt.rows);
         if crate::settings::get().pane_scrollbars
@@ -1450,13 +1464,16 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
             && g.vt.cols > 4
             && let Some((top, len)) = scrollbar_thumb(sb.total, sb.offset, sb.len, track, f32::from(cell.height))
         {
-            let edge = bounds.origin.x + bounds.size.width;
-            let lane_x = origin.x + cell.width * f32::from(g.vt.cols);
+            let lane = scrollbar_lane(bounds, origin, cell.width * f32::from(g.vt.cols), px(track));
             let w = px(4.0);
-            let thumb = Bounds::new(point((edge - w - px(2.0)).max(lane_x), origin.y + px(top)), size(w, px(len)));
-            window.paint_quad(fill(snap_box(thumb), crate::settings::color("muted")).corner_radii(w / 2.0));
-            // Grabbing gets the whole padding lane: the drawn thumb is too thin to aim at.
-            g.thumb = Some(Bounds::new(point(lane_x, thumb.origin.y), size(edge - lane_x, thumb.size.height)));
+            let x = lane.origin.x + lane.size.width - w - px(2.0);
+            let color = crate::settings::color("muted");
+            let rail = Bounds::new(point(x + w / 2.0 - px(0.5), origin.y), size(px(1.0), px(track)));
+            window.paint_quad(fill(snap_box(rail), color.opacity(0.35)));
+            let thumb = Bounds::new(point(x, origin.y + px(top)), size(w, px(len)));
+            window.paint_quad(fill(snap_box(thumb), color).corner_radii(w / 2.0));
+            g.thumb = Some(Bounds::new(point(lane.origin.x, thumb.origin.y), size(lane.size.width, thumb.size.height)));
+            g.track = Some(lane);
         }
     }
 }
@@ -1577,14 +1594,24 @@ impl Render for TerminalView {
                     }
                     return;
                 }
-                // A press on the scroll thumb drags it instead of selecting.
-                if let Some(thumb) = this.grid.borrow().thumb
-                    && thumb.contains(&ev.position)
+                let mut g = this.grid.borrow_mut();
+                if let (Some(track), Some(thumb)) = (g.track, g.thumb)
+                    && track.contains(&ev.position)
                 {
-                    this.scrollbar_grab = Some(f32::from(ev.position.y - thumb.origin.y));
+                    let grab = scrollbar_grab_at(f32::from(thumb.origin.y), f32::from(thumb.size.height), f32::from(ev.position.y));
+                    this.scrollbar_grab = Some(grab);
+                    if !thumb.contains(&ev.position) {
+                        let sb = g.vt.scrollbar();
+                        let top = f32::from(ev.position.y - track.origin.y) - grab;
+                        let min = f32::from(g.cell.height);
+                        g.vt.scroll_to_row(scrollbar_row_at(sb.total, sb.len, f32::from(track.size.height), min, top));
+                    }
+                    drop(g);
+                    cx.notify();
                     cx.stop_propagation();
                     return;
                 }
+                drop(g);
                 if !this.mouse(GHOSTTY_MOUSE_ACTION_PRESS, Some(ev.button), ev.position, ev.modifiers) {
                     this.start_selection(ev.position, cx);
                 }
@@ -2129,6 +2156,35 @@ mod tests {
         assert_eq!(thumb(80, 40, 40, 100.0, 4.0), Some((50.0, 50.0)));
         // A huge scrollback still leaves a grabbable thumb.
         assert_eq!(thumb(10_000, 0, 40, 100.0, 4.0), Some((0.0, 4.0)));
+    }
+
+    #[test]
+    fn scrollbar_lane_survives_zero_and_small_padding_without_resizing() {
+        use gpui::{point, px, size, Bounds};
+        let bounds = Bounds::new(point(px(20.0), px(30.0)), size(px(400.0), px(200.0)));
+        for padding in [0.0, 1.0, 2.0, 14.0] {
+            for remainder in [0.0, 0.5, 7.0] {
+                let origin = bounds.origin + point(px(padding), px(padding));
+                let width = px(400.0 - padding * 2.0 - remainder);
+                let lane = super::scrollbar_lane(bounds, origin, width, px(160.0));
+                assert!(lane.size.width >= px(8.0));
+                assert_eq!(lane.origin.x + lane.size.width, px(420.0));
+                assert_eq!(lane.origin.y, origin.y);
+                assert_eq!(lane.size.height, px(160.0));
+            }
+        }
+    }
+
+    #[test]
+    fn track_click_centers_the_thumb_and_preserves_a_thumb_grab() {
+        use super::{scrollbar_grab_at as grab, scrollbar_row_at as row_at, scrollbar_thumb as thumb};
+        let (top, len) = thumb(1000, 800, 40, 100.0, 4.0).unwrap();
+        assert_eq!(grab(top, len, top + 1.0), 1.0);
+        let offset = grab(top, len, 50.0);
+        assert_eq!(offset, len / 2.0);
+        assert_eq!(row_at(1000, 40, 100.0, 4.0, 50.0 - offset), 480);
+        assert_eq!(row_at(1000, 40, 100.0, 4.0, -offset), 0);
+        assert_eq!(row_at(1000, 40, 100.0, 4.0, 100.0 - offset), 960);
     }
 
     #[test]
