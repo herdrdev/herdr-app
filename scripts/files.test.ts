@@ -18,7 +18,7 @@ const directory = new Function("exec", "window", `${directorySource}; return dir
 test("Files lists literal folder names, not shell expressions", async () => {
   const root = await mkdtemp(join(process.platform === "linux" ? "/var/tmp" : tmpdir(), "herdr-files-"));
   try {
-    for (const name of ["Test Folder (ACME)", "O'Brien $folder; (ACME)"]) {
+    for (const name of ["Test Folder (ACME)", "O'Brien $folder; (ACME)", "O’Brien ‘quoted’ ‚low‛"]) {
       const folder = join(root, name);
       await mkdir(join(folder, "child"), { recursive: true });
       await writeFile(join(folder, "hello.txt"), "hello");

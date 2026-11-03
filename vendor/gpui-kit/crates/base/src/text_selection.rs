@@ -3016,7 +3016,8 @@ fn paint_text_selection(state: &Entity<WindowSelectionState>, window: &mut Windo
 
     let mouse_up_state = state.downgrade();
     window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
-        if phase.bubble()
+        // A control can consume the release after selection began on its press.
+        if phase.capture()
             && let Some(state) = mouse_up_state.upgrade()
         {
             state.update(cx, |state, cx| {

@@ -381,6 +381,8 @@ pub struct Person {
     /// The terminals' text weight, 100 to 900; bold text is at least 700.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font_weight: Option<u16>,
+    /// Enable programming ligatures in terminal fonts.
+    pub font_ligatures: bool,
     /// The panels' font (their sizes follow zoom).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ui_font: Option<String>,
@@ -449,6 +451,7 @@ impl Default for Person {
             font: None,
             font_size: None,
             font_weight: None,
+            font_ligatures: false,
             ui_font: None,
             telemetry: true,
             clipboard_write: true,
@@ -470,6 +473,7 @@ pub struct Settings {
     pub font_size: f32,
     /// The terminals' text weight (bold text is at least 700).
     pub font_weight: u16,
+    pub font_ligatures: bool,
     pub ui_font_family: String,
     pub ui_font_size: f32,
     /// How big the whole app is drawn (1 = as designed). The zoom keys change it.
@@ -518,6 +522,7 @@ impl Default for Settings {
             font_family: DEFAULT_FONT.into(),
             font_size: 14.0,
             font_weight: 500,
+            font_ligatures: false,
             ui_font_family: "Geist".into(),
             ui_font_size: 13.0,
             zoom: 1.0,
@@ -555,6 +560,7 @@ impl Settings {
             font_family: look.font.clone().or(person.font.clone()).unwrap_or(d.font_family),
             font_size: look.font_size.or(person.font_size).unwrap_or(d.font_size),
             font_weight: look.font_weight.or(person.font_weight).unwrap_or(d.font_weight),
+            font_ligatures: person.font_ligatures,
             ui_font_family: look.ui_font.clone().or(person.ui_font.clone()).unwrap_or(d.ui_font_family),
             ui_font_size: d.ui_font_size,
             zoom: person.zoom,
@@ -839,6 +845,19 @@ pub const DEFAULT_FONT: &str = "JetBrains Mono";
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn terminal_ligatures_default_off_and_can_be_enabled() {
+        use super::*;
+        let person: Person = serde_json::from_str("{}").unwrap();
+        assert!(!Settings::compose(&person, &crate::layout::Look::default(), true).font_ligatures);
+        assert!(!Settings::default().font_ligatures);
+        let person: Person = serde_json::from_str(r#"{"font_ligatures":true}"#).unwrap();
+        let saved = serde_json::to_string(&person).unwrap();
+        let restored: Person = serde_json::from_str(&saved).unwrap();
+        assert!(Settings::compose(&restored, &crate::layout::Look::default(), true).font_ligatures);
+        assert!(serde_json::from_str::<Person>(r#"{"font_ligatures":"yes"}"#).is_err());
+    }
+
     use super::*;
 
     #[test]
