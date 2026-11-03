@@ -1,6 +1,8 @@
 // Windows: a window app, no console of its own (see `attach_console`).
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+#[cfg(any(target_os = "macos", test))]
+mod app_badge;
 mod bench;
 mod commands;
 mod control;

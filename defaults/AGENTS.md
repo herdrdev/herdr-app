@@ -102,6 +102,12 @@ machine first, then machines by name; `space.move` stays inside its machine's bl
 In the expanded Spaces sidebar, drag a space to reorder it within its machine;
 the highlighted line shows where it will land.
 
+On macOS, the Dock icon counts distinct live agents in your spaces whose
+status is `blocked` or `done`, across connected local and remote machines.
+It uses the same seen rules as the sidebar: looking clears `done`, not
+`blocked`. The number disappears at zero and does not require notification
+permission. Duplicate panes and mod windows do not multiply the count.
+
 - A **space** is a place to work, on one machine: this one, or another
   from `hc machine ls` (`spaces()[i].machine`). Herdr leaves out machines
   added with `--temp` (an agent's short-lived sandbox): no spaces, not in

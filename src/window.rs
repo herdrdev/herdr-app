@@ -456,6 +456,8 @@ pub struct AppWindow {
 
 impl AppWindow {
     pub fn new(core: Arc<Core>, requests: async_channel::Receiver<Request>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        #[cfg(target_os = "macos")]
+        cx.on_release(|_, _| crate::app_badge::show(0)).detach();
         let runtime = ShellRuntime::new(cx).map_err(|e| tracing::error!("script runtime failed, mods are off: {e:#}")).ok();
         mods::note_fonts(cx);
         let seen = std::fs::read_to_string(file("seen.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
@@ -681,6 +683,8 @@ impl AppWindow {
                         this.written_seen.retain(|a, w| seen.get(a).is_none_or(|s| s < w));
                     }
                     this.documents_watching = watching;
+                    #[cfg(target_os = "macos")]
+                    if !watching { crate::app_badge::show(0); }
                     if watching { this.documents.entry(String::new()).or_default().connection(true, None, None); }
                     let changed = this.documents_updated(machines, vec![], window, cx);
                     match listed {
@@ -1636,6 +1640,12 @@ impl AppWindow {
     /// Tells mods what changed (they re-render only if something did).
     fn publish(&mut self, cx: &mut Context<Self>) {
         let m = &self.model;
+        #[cfg(target_os = "macos")]
+        crate::app_badge::show(crate::app_badge::count(
+            m,
+            |machine| self.documents_watching && self.documents.get(machine.unwrap_or("")).is_some_and(|slot| slot.connected),
+            |address| self.live.contains_key(address),
+        ));
         let home = home();
         let spaces: Vec<Value> = m
             .spaces
