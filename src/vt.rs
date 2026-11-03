@@ -1296,6 +1296,7 @@ impl Vt {
             let mut search = std::ptr::null_mut();
             let result = unsafe { ghostty_search_new(std::ptr::null(), &mut search, self.term) };
             if result != GHOSTTY_SUCCESS || search.is_null() {
+                tracing::warn!("terminal search: ghostty_search_new failed: {result:?}");
                 return;
             }
             self.search = Some(search);

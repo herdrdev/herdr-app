@@ -584,19 +584,7 @@ impl TerminalView {
         let input = if let Some(input) = self.search_input.clone() {
             input
         } else {
-            let input = cx.new(|cx| {
-                let mut state = InputState::new(window, cx).placeholder("Find in terminal");
-                state.set_editor_style(InputEditorStyle {
-                    foreground: crate::settings::color("foreground"),
-                    muted_foreground: crate::settings::color("muted"),
-                    background: crate::settings::color("input"),
-                    border: crate::settings::color("border"),
-                    selection: crate::settings::color("selection"),
-                    caret: crate::settings::color("foreground"),
-                    ..InputEditorStyle::default()
-                });
-                state
-            });
+            let input = cx.new(|cx| InputState::new(window, cx).placeholder("Find in terminal"));
             cx.subscribe(&input, |this, input, event: &InputEvent, cx| match event {
                 InputEvent::Change => {
                     this.search_query = input.read(cx).value().to_string();
@@ -612,6 +600,9 @@ impl TerminalView {
             self.search_input = Some(input.clone());
             input
         };
+        // Re-applied on every open, so a theme change while the bar was closed
+        // doesn't leave the field with the old colors.
+        input.update(cx, |state, _| state.set_editor_style(find_input_style()));
 
         self.search_open = true;
         self.search_query = input.read(cx).value().to_string();
@@ -1349,6 +1340,19 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
     ops
 }
 
+/// The find field's editor colors, following the theme at open time.
+fn find_input_style() -> InputEditorStyle {
+    InputEditorStyle {
+        foreground: crate::settings::color("foreground"),
+        muted_foreground: crate::settings::color("muted"),
+        background: crate::settings::color("input"),
+        border: crate::settings::color("border"),
+        selection: crate::settings::color("selection"),
+        caret: crate::settings::color("foreground"),
+        ..InputEditorStyle::default()
+    }
+}
+
 fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, window: &mut Window, cx: &mut App) {
     crate::bench::count(&crate::bench::GRID);
     let mut g = grid.borrow_mut();
@@ -1571,7 +1575,11 @@ impl EntityInputHandler for TerminalView {
 
     fn replace_text_in_range(&mut self, _range: Option<std::ops::Range<usize>>, text: &str, _w: &mut Window, cx: &mut Context<Self>) {
         self.grid.borrow_mut().marked = None;
-        self.send(text.as_bytes());
+        // The find bar being open contains every keystroke (see `key_down`);
+        // the input-method path must not be a way around that.
+        if !self.search_open {
+            self.send(text.as_bytes());
+        }
         cx.notify();
     }
 
@@ -1583,6 +1591,10 @@ impl EntityInputHandler for TerminalView {
         _w: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Composition previews stay out of the terminal too while its find bar is open.
+        if self.search_open {
+            return;
+        }
         self.grid.borrow_mut().marked = (!text.is_empty()).then(|| text.to_owned());
         cx.notify();
     }
@@ -2021,6 +2033,61 @@ mod tests {
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
         root.read_with(cx, |root, cx| assert!(!root.0.read(cx).search_open));
+    }
+
+    #[gpui::test]
+    fn terminal_input_methods_are_contained_while_its_find_bar_is_open(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        struct Root(Entity<super::TerminalView>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(self.0.clone())
+            }
+        }
+
+        cx.update(gpui_base::init);
+        let (root, cx) = cx.add_window_view(|_, cx| Root(cx.new(|cx| {
+            super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 6), cx)
+        })));
+        cx.run_until_parked();
+
+        // The bar is open and the terminal canvas was clicked, so the terminal
+        // root (not the find field) owns keyboard focus: text input methods
+        // must not become a way around the find bar's containment.
+        cx.update(|window, app| {
+            root.update(app, |root, app| {
+                root.0.update(app, |terminal, cx| {
+                    terminal.open_search(window, cx);
+                    terminal.focus.focus(window, cx);
+                });
+            });
+        });
+        cx.run_until_parked();
+        cx.update(|window, app| {
+            root.update(app, |root, app| {
+                root.0.update(app, |terminal, cx| {
+                    gpui::EntityInputHandler::replace_text_in_range(terminal, None, "leak", window, cx);
+                    gpui::EntityInputHandler::replace_and_mark_text_in_range(terminal, None, "leak", None, window, cx);
+                });
+            });
+        });
+        root.read_with(cx, |root, cx| {
+            let terminal = root.0.read(cx);
+            assert!(terminal.typed_at.get().is_none(), "text reached the program while the find bar was open");
+            assert!(terminal.grid.borrow().marked.is_none(), "composition previewed while the find bar was open");
+        });
+
+        // With the bar closed, the same text reaches the program again.
+        cx.update(|window, app| {
+            root.update(app, |root, app| {
+                root.0.update(app, |terminal, cx| {
+                    terminal.close_search(window, cx);
+                    gpui::EntityInputHandler::replace_text_in_range(terminal, None, "typed", window, cx);
+                });
+            });
+        });
+        root.read_with(cx, |root, cx| assert!(root.0.read(cx).typed_at.get().is_some()));
     }
 
     #[cfg(target_os = "macos")]
