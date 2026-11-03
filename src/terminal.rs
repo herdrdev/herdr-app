@@ -7,7 +7,7 @@ use ghostty_sys::*;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_base::input::{Input, InputEditorStyle, InputEvent, InputState};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -520,6 +520,10 @@ impl TerminalView {
         self.grid.borrow_mut().fit(cols, rows, cell, scale);
     }
 
+    pub fn on_screen_this_frame(&self) -> bool {
+        self.shown_in.get() == FRAME.load(Ordering::Relaxed)
+    }
+
     fn send(&self, bytes: &[u8]) {
         self.typed_at.set(Some(Instant::now()));
         let mut g = self.grid.borrow_mut();
@@ -793,6 +797,19 @@ impl TerminalView {
         cx.notify();
     }
 
+    pub fn scroll_history(&mut self, target: ScrollTarget, cx: &mut Context<Self>) {
+        let mut g = self.grid.borrow_mut();
+        let rows = g.vt.rows;
+
+        match target {
+            ScrollTarget::Lines(lines) => g.vt.scroll_viewport(lines),
+            ScrollTarget::Pages(pages) => g.vt.scroll_viewport(pages_to_lines(pages, rows)),
+            ScrollTarget::Top => g.vt.scroll_to_top(),
+            ScrollTarget::Bottom => g.vt.scroll_to_bottom(),
+        }
+        cx.notify();
+    }
+
     /// The program tracks the mouse and Shift isn't held (Shift keeps the mouse Herdr's).
     fn takes_mouse(&self, mods: Modifiers) -> bool {
         self.grid.borrow().vt.mouse_tracking() && !mods.shift
@@ -912,6 +929,52 @@ impl TerminalView {
         }
         cx.notify();
     }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum ScrollTarget {
+    Lines(isize),
+    Pages(f64),
+    Top,
+    Bottom,
+}
+
+pub fn scroll_target(args: &Value) -> Result<ScrollTarget, String> {
+    let given: Vec<&str> = ["lines", "pages", "to"].into_iter().filter(|key| is_given(args, key)).collect();
+    match given.as_slice() {
+        [] => Err("terminal.scroll needs one of lines, pages, to".into()),
+        ["lines"] => whole_lines_arg(args).map(ScrollTarget::Lines),
+        ["pages"] => pages_arg(args).map(ScrollTarget::Pages),
+        ["to"] => edge_arg(args),
+        _ => Err(format!("terminal.scroll takes one of lines, pages, to, not {}", given.join(" and "))),
+    }
+}
+
+fn is_given(args: &Value, key: &str) -> bool {
+    args.get(key).is_some_and(|value| !value.is_null())
+}
+
+fn whole_lines_arg(args: &Value) -> Result<isize, String> {
+    let value = &args["lines"];
+    value.as_i64().and_then(|lines| isize::try_from(lines).ok()).ok_or_else(|| format!("terminal.scroll lines is not a whole number: {value}"))
+}
+
+fn pages_arg(args: &Value) -> Result<f64, String> {
+    let value = &args["pages"];
+    value.as_f64().filter(|pages| pages.is_finite()).ok_or_else(|| format!("terminal.scroll pages is not a finite number: {value}"))
+}
+
+fn edge_arg(args: &Value) -> Result<ScrollTarget, String> {
+    let value = &args["to"];
+    match value.as_str() {
+        Some("top") => Ok(ScrollTarget::Top),
+        Some("bottom") => Ok(ScrollTarget::Bottom),
+        _ => Err(format!("terminal.scroll to is \"top\" or \"bottom\", not {value}")),
+    }
+}
+
+fn pages_to_lines(pages: f64, rows: u16) -> isize {
+    (pages * f64::from(rows)).round() as isize
 }
 
 fn selection_scroll_lines(y: f32, cell_height: f32, rows: u16) -> isize {
@@ -2039,6 +2102,9 @@ impl Focusable for TerminalView {
 
 #[cfg(test)]
 mod tests {
+    use super::{ScrollTarget, pages_to_lines, scroll_target};
+    use serde_json::{Value, json};
+
     #[gpui::test]
     fn terminal_release_ends_window_text_selection(cx: &mut gpui::TestAppContext) {
         use gpui::*;
@@ -3242,5 +3308,42 @@ mod tests {
         assert_eq!(super::display_update(&mut told, &theme, (17, 43)).unwrap()["cell"], serde_json::json!([17, 43]));
         theme.selection_bg = Rgb(7, 8, 9);
         assert!(super::display_update(&mut told, &theme, (17, 43)).is_none(), "local selection colors are not core display facts");
+    }
+
+    #[test]
+    fn scroll_takes_exactly_one_of_lines_pages_or_to() {
+        assert_eq!(scroll_target(&json!({ "lines": -5 })), Ok(ScrollTarget::Lines(-5)));
+        assert_eq!(scroll_target(&json!({ "pages": -0.5 })), Ok(ScrollTarget::Pages(-0.5)));
+        assert_eq!(scroll_target(&json!({ "to": "top" })), Ok(ScrollTarget::Top));
+        assert_eq!(scroll_target(&json!({ "to": "bottom", "terminal": "t1" })), Ok(ScrollTarget::Bottom));
+        assert_eq!(scroll_target(&json!({ "lines": null, "to": "top" })), Ok(ScrollTarget::Top), "null is omitted");
+    }
+
+    #[test]
+    fn scroll_names_missing_and_repeated_targets() {
+        let needs_one = "terminal.scroll needs one of lines, pages, to";
+        assert_eq!(scroll_target(&json!({})), Err(needs_one.into()));
+        assert_eq!(scroll_target(&json!({ "terminal": "t1", "lines": null })), Err(needs_one.into()));
+        assert_eq!(scroll_target(&json!({ "lines": 1, "to": "top" })), Err("terminal.scroll takes one of lines, pages, to, not lines and to".into()));
+        assert_eq!(scroll_target(&json!({ "lines": 1, "pages": 1, "to": "top" })), Err("terminal.scroll takes one of lines, pages, to, not lines and pages and to".into()));
+    }
+
+    #[test]
+    fn scroll_rejects_values_the_target_does_not_take() {
+        let error = |args: Value| scroll_target(&args).unwrap_err();
+        assert_eq!(error(json!({ "lines": 1.5 })), "terminal.scroll lines is not a whole number: 1.5");
+        assert_eq!(error(json!({ "lines": "5" })), "terminal.scroll lines is not a whole number: \"5\"");
+        assert_eq!(error(json!({ "pages": "half" })), "terminal.scroll pages is not a finite number: \"half\"");
+        assert_eq!(error(json!({ "to": "middle" })), "terminal.scroll to is \"top\" or \"bottom\", not \"middle\"");
+        assert_eq!(error(json!({ "to": 5 })), "terminal.scroll to is \"top\" or \"bottom\", not 5");
+    }
+
+    #[test]
+    fn pages_become_whole_lines_of_the_terminals_rows() {
+        assert_eq!(pages_to_lines(1.0, 24), 24);
+        assert_eq!(pages_to_lines(-1.0, 24), -24);
+        assert_eq!(pages_to_lines(-0.5, 24), -12);
+        assert_eq!(pages_to_lines(-0.5, 25), -13, "half of an odd row count rounds away from zero");
+        assert_eq!(pages_to_lines(0.02, 24), 0);
     }
 }
