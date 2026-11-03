@@ -182,12 +182,14 @@ export function agents(): AgentInfo[];
 export interface PaneInfo {
   pane: string;
   /** null for a mod pane (`pane.split {mod}`): then `mod` names it, and only
-   *  pane, mod, tab, title, focused and zoomed are set. */
+   *  pane, mod, tab, title, name, focused and zoomed are set. */
   terminal: string | null;
   mod?: string;
   tab: string;
   /** The terminal's title (what the program set), or the mod's name. */
   title: string;
+  /** The name given with pane.rename; null: none, show the program's. */
+  name: string | null;
   /** Its live folder, and the git branch there. */
   cwd: string | null;
   branch: string | null;

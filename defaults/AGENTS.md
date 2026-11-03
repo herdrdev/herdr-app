@@ -123,7 +123,10 @@ the highlighted line shows where it will land.
   tab); a mod that does can hide or fold settled tabs. Showing one, or an
   agent in it needing the user, brings it back.
 - A **pane** is a terminal on screen, or a **mod** beside them (a markdown
-  viewer, a board, a git panel): `pane.split {direction, mod, props}`. A
+  viewer, a board, a git panel): `pane.split {direction, mod, props}`. One
+  nobody named shows its program (an agent's name, else the terminal's
+  title); `pane.rename` names it ("server"), saved with its tab, and
+  `panes()[i].name` gives the name (null: none). A
   mod pane splits, zooms, closes and gets a header like any pane, keeps
   the keyboard when clicked, and is saved with its tab; its `props` tell
   it what to show (a file, a folder). Closing a terminal pane ends its
@@ -350,7 +353,7 @@ The tab block says how each pane of the shown tab is wrapped:
   pane has the keyboard; `gap` is the space between panes.
 - `header`: a mod drawn on each pane, one copy per pane, with
   `props().pane` and `props().terminal`. It reads its live facts from
-  `panes()` (title, folder, branch, agent status, focused, zoomed) and its
+  `panes()` (name, title, folder, branch, agent status, focused, zoomed) and its
   buttons run pane commands with that pane (`pane.split`, `pane.zoom`,
   `pane.close`). `position`: `top` or `bottom`; `reveal: "hover"` shows it
   only while the pointer is on the pane, drawn over the terminal so the
@@ -530,7 +533,7 @@ The main ones:
   `tab.settle {id?}`, `tab.unsettle {id?}` (index, next and prev
   skip settled tabs).
 - Panes: `pane.split {direction: "right" | "down", pane?, argv? | mod?, props?}` (a new
-  terminal, or a mod pane), `pane.close {pane?}`,
+  terminal, or a mod pane), `pane.close {pane?}`, `pane.rename {pane?, name}` ("": its program's name again),
   `pane.zoom {pane?}`, `pane.focus {pane | terminal}`, `pane.go {direction}`, `pane.swap {direction}`.
   `pane.go` prefers the most recently focused pane along the nearest edge in that
   direction; unvisited panes fall back to overlap, then top/left layout order.
