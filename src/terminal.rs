@@ -117,6 +117,8 @@ pub struct TerminalView {
     /// Search UI and query belong to this terminal view, not the window. Each
     /// terminal in a tab therefore keeps its own query and match position.
     search_open: bool,
+    /// Restore the last keyboard target when returning to this pane.
+    search_keys: bool,
     search_query: String,
     search_input: Option<Entity<InputState>>,
     pending_search_nav: Option<bool>,
@@ -257,6 +259,7 @@ impl TerminalView {
             typed_at: Cell::new(None),
             scrolled: point(0.0, 0.0),
             search_open: false,
+            search_keys: false,
             search_query: String::new(),
             search_input: None,
             pending_search_nav: None,
@@ -400,6 +403,15 @@ impl TerminalView {
     /// input owns keyboard focus (notably for search, copy and paste commands).
     pub fn owns_keyboard_focus(&self, window: &Window, cx: &App) -> bool {
         self.focus.is_focused(window) || self.find_field_focused(window, cx)
+    }
+
+    pub fn focus_target(&self, cx: &App) -> FocusHandle {
+        if self.search_open && self.search_keys
+            && let Some(input) = &self.search_input
+        {
+            return input.read(cx).focus_handle(cx);
+        }
+        self.focus.clone()
     }
 
     fn find_field_focused(&self, window: &Window, cx: &App) -> bool {
@@ -636,6 +648,7 @@ impl TerminalView {
                     cx.notify();
                 }
                 InputEvent::PressEnter { shift, .. } => this.queue_search_navigation(*shift, cx),
+                InputEvent::Focus => this.search_keys = true,
                 _ => {}
             })
             .detach();
@@ -647,6 +660,7 @@ impl TerminalView {
         input.update(cx, |state, _| state.set_editor_style(find_input_style()));
 
         self.search_open = true;
+        self.search_keys = true;
         self.search_query = input.read(cx).value().to_string();
         self.grid.borrow_mut().vt.start_search(&self.search_query);
         self.focus_search_input(window, cx);
@@ -1725,6 +1739,9 @@ impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::bench::count(&crate::bench::TERMINAL);
         let terminal_focused = self.focus.is_focused(window);
+        if terminal_focused {
+            self.search_keys = false;
+        }
         let search_focused = self.find_field_focused(window, cx);
         // The find input is part of this terminal's interaction, not a loss of
         // attention to the terminal itself. Keep core focus/cursor state, while
@@ -2377,9 +2394,8 @@ mod tests {
         root.read_with(cx, |root, cx| assert!(!root.0.read(cx).search_open));
     }
 
-    #[cfg(target_os = "macos")]
     #[gpui::test]
-    fn macos_cmd_f_shipped_binding_opens_search_in_the_focused_terminal(cx: &mut gpui::TestAppContext) {
+    fn shipped_find_binding_opens_search_but_ctrl_f_reaches_the_program(cx: &mut gpui::TestAppContext) {
         use gpui::*;
 
         struct Root(Entity<super::TerminalView>);
@@ -2400,7 +2416,7 @@ mod tests {
         }
 
         cx.update(gpui_base::init);
-        let bindings = crate::keys::parse(crate::keys::DEFAULTS).expect("shipped macOS keys parse");
+        let bindings = crate::keys::parse(crate::keys::DEFAULTS).expect("shipped keys parse");
         cx.update(|app| crate::keys::install(bindings, app));
         let (root, cx) = cx.add_window_view(|_, cx| {
             Root(cx.new(|cx| super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 6), cx)))
@@ -2412,7 +2428,14 @@ mod tests {
             });
         });
 
-        cx.simulate_keystrokes("cmd-f");
+        cx.simulate_keystrokes("ctrl-f");
+        cx.run_until_parked();
+        root.read_with(cx, |root, cx| {
+            let terminal = root.0.read(cx);
+            assert!(!terminal.search_open);
+            assert!(terminal.typed_at.get().is_some(), "Ctrl+F must reach the program");
+        });
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") { "cmd-f" } else { "ctrl-shift-f" });
         cx.run_until_parked();
         root.read_with(cx, |root, cx| assert!(root.0.read(cx).search_open));
         assert!(cx.debug_bounds("find-bar").is_some());
