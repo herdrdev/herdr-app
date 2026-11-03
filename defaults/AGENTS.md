@@ -647,6 +647,7 @@ What's about the user, never a look:
   Rare spotlight releases open What’s new after restart, once; otherwise a
   quiet Updated pill lasts for that launch. A build from source never updates;
   an app or core from homebrew, nix or mise is updated there, and Settings says so.
+  A package-managed source build shows its manager too, even with app updates disabled.
   Curated notes come from the bundled root `CHANGELOG.md`; remote notes and
   media are optional. `update-notes.json` records the last successful app
   version and presented spotlights; `update-notes-cache.md` caches remote

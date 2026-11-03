@@ -22,6 +22,8 @@ its terminals.
 
 `app.check_updates` checks for newer releases. Settings reports "Up to date"
 only after a successful check; on failure, check the connection and retry.
+Apps managed by homebrew, nix or mise are updated there. Settings identifies the
+manager even for a source build that does not check for app updates.
 
 ## Show something when asked
 

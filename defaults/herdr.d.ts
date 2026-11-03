@@ -277,7 +277,8 @@ export function fonts(): string[];
 
 /** Herdr's and herdr-core's versions and what's waiting. `app.updates`: false for a build from
  *  source (it never updates). `app.managed` / `core.managed`: the package manager that owns it
- *  (homebrew, nix, mise), which the app never updates. `checked`: unix seconds of the last successful
+ *  (homebrew, nix, mise), which the app never updates. `app.managed` is also reported when
+ *  `app.updates` is false, including package-managed source builds. `checked`: unix seconds of the last successful
  *  check; null before success or after a failed check.
  *  `checks`: anything is checked at all (not in a build from source); `checking`: looking now
  *  (`app.check_updates` starts a look). */
