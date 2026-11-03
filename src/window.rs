@@ -2943,12 +2943,27 @@ impl AppWindow {
                 self.agent = self.model.address_of(&p);
                 self.swapped.remove(&p);
             }
-            "pane.go" | "pane.swap" => {
+            "pane.navigate" | "pane.go" | "pane.swap" => {
                 let dir = Self::arg(a, "direction").unwrap_or_default();
                 if !matches!(dir, "left" | "right" | "up" | "down") {
                     return self.fail(format!("{name} direction is left, right, up or down, not {dir:?}"));
                 }
-                if name == "pane.go" {
+                if name == "pane.navigate" {
+                    let Some(t) = self.focused_terminal(window) else { return };
+                    if let Some(origin) = a.get("terminal") {
+                        // A delayed editor handoff must not move another pane or an open dialog.
+                        if origin.as_str() != Some(t.address.as_str()) || !t.focus.is_focused(window) { return; }
+                    } else if self.live.get(&t.address).is_some_and(|r| r["program"]["key"] == "nvim") {
+                        t.view.read(cx).send(match dir {
+                            "left" => b"\x08",
+                            "down" => b"\x0a",
+                            "up" => b"\x0b",
+                            _ => b"\x0c",
+                        });
+                        return;
+                    }
+                }
+                if name != "pane.swap" {
                     return self.go(dir, window, cx);
                 }
                 self.swap_pane(dir);
@@ -4504,7 +4519,7 @@ fn terminal_block<'a>(chrome: &'a Node, focused: Option<&str>) -> Option<&'a Nod
 fn needs_model_pane(name: &str, args: &Value) -> bool {
     match name {
         "pane.split" | "pane.close" | "pane.zoom" | "terminal.show" => AppWindow::arg(args, "pane").is_none(),
-        "pane.go" | "pane.swap" => true,
+        "pane.navigate" | "pane.go" | "pane.swap" => true,
         "terminal.open" | "terminal.keep" => matches!(AppWindow::arg(args, "place"), Some("right" | "down")),
         _ => false,
     }

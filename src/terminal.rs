@@ -446,7 +446,7 @@ impl TerminalView {
         self.shown_in.set(FRAME.load(Ordering::Relaxed));
     }
 
-    fn send(&self, bytes: &[u8]) {
+    pub(crate) fn send(&self, bytes: &[u8]) {
         self.typed_at.set(Some(Instant::now()));
         let mut g = self.grid.borrow_mut();
         if let Some(ch) = g.channel
