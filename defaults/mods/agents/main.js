@@ -51,7 +51,7 @@ const SORTS = [
   { id: "grouped", label: "Grouped by space", icon: "layers" },
 ];
 const sortOf = () => SORTS.find((s) => s.id === shared("agents.sort")) ?? SORTS[0];
-const SECTION = { 4: "Needs you", 3: "Done", 2: "Working", 1: "Idle" };
+const SECTION = { 4: "Needs you", 3: "Done", 2: "Working", 1: "Idle", 0: "Unreported" };
 const SECTION_STATUS = { 4: "blocked", 3: "done", 2: "working" };
 
 function duration(ms) {
@@ -85,6 +85,7 @@ export default class Agents extends View {
   track(list, now) {
     let dirty = false;
     for (const a of list) {
+      if (a.status == null) continue;
       const s = a.status === "done" ? "idle" : a.status;
       if (this.changed[a.address]?.s === s) continue;
       this.changed[a.address] = { s, at: now };
@@ -206,6 +207,7 @@ export default class Agents extends View {
   // compact: a ! for blocked where a header already says "Needs you".
   status(t, a, compact = false) {
     const color = t[a.status] ?? t.dim;
+    if (a.status == null) return div().size(14).flex_none().text_size(11).text_color(t.dim).text_center().tooltip("Status unreported").child("?");
     if (a.status === "working") return svg("mods/workspace-chrome/spinner.svg").size(12).mx(1).flex_none().text_color(t.working).spin(900);
     if (a.status === "blocked" && compact) return div().size(14).flex_none().rounded(4).bg(t.blocked + "26").text_size(10.5).font_bold().text_color(t.blocked).flex().items_center().justify_center().child("!");
     if (a.status === "blocked") return div().flex_none().px(6).h(18).rounded(5).bg(t.blocked + "26").text_size(10.5).font_semibold().text_color(t.blocked).flex().items_center().child("Needs you");
@@ -219,9 +221,39 @@ export default class Agents extends View {
     if (props()?.sortMenu) return this.sortMenu(t);
     const collapsed = narrow();
     const sort = sortOf();
-    let list = agents();
-    this.listed = new Map(list.map((a) => [a.address, a.status]));
     const all = terminals();
+    const allPanes = panes();
+    const places = spaces();
+    const reported = new Map(agents().map((a) => [a.address, a]));
+    const live = new Map(all.filter((a) => a.state === "live").map((a) => [a.address, a]));
+    // Walk placement order so grouped rows stay together. Reported rows always win.
+    const added = new Set();
+    let list = places.flatMap((space) => space.tabs.flatMap((tab) =>
+      allPanes.filter((p) => p.tab === tab.id && p.terminal).flatMap((p) => {
+        if (added.has(p.terminal)) return [];
+        const known = reported.get(p.terminal);
+        if (known) { added.add(p.terminal); return [known]; }
+        const terminal = live.get(p.terminal);
+        // Never reuse original argv: an exited agent may have left a live shell.
+        const argv = terminal?.foreground?.argv ?? [];
+        const exe = argv[0]?.split("/").pop();
+        let key = exe === "omo" || exe === "gjc" ? exe : null;
+        if (exe === "bun" || exe === "node") {
+          const root = argv[1]?.match(/^(.*\/omo-ai)\/node_modules\/@code-yeongyu\/senpi\/dist\/bundle\/cli\.js$/)?.[1];
+          if (/\/omo-ai\/bin\/omo\.js$/.test(argv[1] ?? "") ||
+              (root && argv[2] === "--extension" && argv[3] === `${root}/plugin`)) key = "omo";
+        }
+        if (!key) return [];
+        added.add(p.terminal);
+        return [{
+          address: p.terminal, pane: p.pane, space: space.id, space_name: space.name,
+          tab: tab.id, tab_index: tab.index, tab_name: tab.name, title: p.title,
+          status: null, app: null, seq: 0, focused: p.focused,
+          pinned: Boolean(terminal.labels?.["herdr.pinned"]),
+          program: { key, name: key, icon: key === "omo" ? "icons/omo.svg" : "icons/agent.svg", tint: key !== "omo" },
+        }];
+      })));
+    this.listed = new Map(list.map((a) => [a.address, a.status]));
     this.migratePins(all);
     const shown = focused()?.agent;
     const now = Date.now();
@@ -272,7 +304,7 @@ export default class Agents extends View {
     // A row reads "space \u00b7 detail": the detail is a tab someone named or the
     // agent's own title, never an automatic tab number unless two rows would
     // otherwise read the same.
-    const tabs = spaces().flatMap(s => s.tabs);
+    const tabs = places.flatMap(s => s.tabs);
     const label = (a) => {
       const tab = tabs.find(tab => tab.id === a.tab);
       return tab ? title(tab, lead(tab)) : a.title || a.program?.name || "";
@@ -355,7 +387,7 @@ export default class Agents extends View {
         .when(Boolean(machine), el => el.child(div().text_size(10).text_color(t.dim).child(machine)))
         .when(subs.length > 0, el => el.child(fold(a, subs)))
         .when(this.hovered === a.address, el => el.child(pin))
-        .when(this.hovered !== a.address && Boolean(when), el => el.child(div().flex_none().text_size(11).text_color(t.dim).child(duration(now - when))))
+        .when(this.hovered !== a.address && a.status != null && Boolean(when), el => el.child(div().flex_none().text_size(11).text_color(t.dim).child(duration(now - when))))
         .child(this.status(t, a, byPriority && !isPinned));
     };
 
@@ -363,7 +395,7 @@ export default class Agents extends View {
     // space are next to each other in agents(), so neighbours make a group.
     const groups = pinned.length ? [{ id: "pinned", label: "Pinned", status: null, members: pinned }] : [];
     for (const a of rest) {
-      const r = rankOf(a) || RANK.idle;
+      const r = rankOf(a) ?? 0;
       const id = byPriority ? `sec-${r}` : `sp-${a.space}`;
       if (groups.at(-1)?.id === id) groups.at(-1).members.push(a);
       else groups.push({ id, label: byPriority ? SECTION[r] : a.space_name || "", status: byPriority ? SECTION_STATUS[r] : null, members: [a] });
