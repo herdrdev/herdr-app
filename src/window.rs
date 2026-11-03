@@ -1561,7 +1561,7 @@ impl AppWindow {
     /// Key path for `terminal.copy`. Copies and clears when there is a selection.
     /// Returns whether it copied. False means the key should reach the program.
     fn copy_key(&mut self, window: &Window, cx: &mut Context<Self>) -> bool {
-        let Some(t) = self.focused_terminal(window) else { return true };
+        let Some(t) = self.focused_terminal(window, cx) else { return true };
         t.view.update(cx, |v, cx| {
             if !v.copy(cx) {
                 return false;
@@ -1572,8 +1572,8 @@ impl AppWindow {
     }
 
     /// Peeks, floats and swapped-in views own keyboard focus without changing the model pane.
-    fn focused_terminal(&self, window: &Window) -> Option<&Term> {
-        self.terms.values().find(|t| t.focus.is_focused(window))
+    fn focused_terminal(&self, window: &Window, cx: &App) -> Option<&Term> {
+        self.terms.values().find(|t| t.view.read(cx).owns_keyboard_focus(window, cx))
             .or_else(|| self.focused_pane.as_deref().and_then(|p| self.pane_term(p)))
             .or_else(|| self.model.focused_pane().and_then(|p| self.pane_term(&p)))
     }
@@ -2982,7 +2982,7 @@ impl AppWindow {
                     Some("menu") => "",
                     other => return self.fail(format!("terminal.right_click to is \"program\" or \"menu\", not {other:?}")),
                 };
-                let t = Self::owned(a, "terminal").or_else(|| self.focused_terminal(window).map(|t| t.address.clone()));
+                let t = Self::owned(a, "terminal").or_else(|| self.focused_terminal(window, cx).map(|t| t.address.clone()));
                 let Some(t) = t.filter(|t| self.live.contains_key(t)) else { return self.fail("no such running terminal") };
                 // Off the UI thread: a terminal on a slow machine answers late.
                 let core = self.core.clone();
@@ -3046,8 +3046,13 @@ impl AppWindow {
                     self.focused_pane = None;
                 }
             }
+            "terminal.search" => {
+                let Some(t) = self.focused_terminal(window, cx) else { return self.fail("no focused terminal to search") };
+                t.view.update(cx, |view, cx| view.open_search(window, cx));
+                return;
+            }
             "terminal.copy" | "terminal.paste" | "terminal.paste_image" => {
-                if let Some(t) = self.focused_terminal(window) {
+                if let Some(t) = self.focused_terminal(window, cx) {
                     t.view.update(cx, |v, cx| match name {
                         "terminal.paste" => v.paste(cx),
                         "terminal.paste_image" => v.paste_image(cx),

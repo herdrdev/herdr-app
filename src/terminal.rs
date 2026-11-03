@@ -6,6 +6,7 @@ use crate::vt::{self, CursorShape, Rgb, Select, Vt};
 use ghostty_sys::*;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
+use gpui_base::input::{Input, InputEditorStyle, InputEvent, InputState};
 use serde_json::json;
 use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicU64, Ordering};
@@ -107,6 +108,13 @@ pub struct TerminalView {
     typed_at: Cell<Option<Instant>>,
     /// Scrolled this gesture, in lines, toward the next whole one.
     scrolled: Point<f32>,
+    /// Search UI and query belong to this terminal view, not the window. Each
+    /// terminal in a tab therefore keeps its own query and match position.
+    search_open: bool,
+    search_query: String,
+    search_input: Option<Entity<InputState>>,
+    pending_search_nav: Option<bool>,
+    search_task: Option<Task<()>>,
     _reader: Option<Task<()>>,
 }
 
@@ -215,6 +223,11 @@ impl TerminalView {
             shown_in: Cell::new(0),
             typed_at: Cell::new(None),
             scrolled: point(0.0, 0.0),
+            search_open: false,
+            search_query: String::new(),
+            search_input: None,
+            pending_search_nav: None,
+            search_task: None,
             _reader: None,
         };
         view.connect(core, false, cx);
@@ -348,6 +361,14 @@ impl TerminalView {
 
     pub fn focus_handle(&self) -> &FocusHandle {
         &self.focus
+    }
+
+    /// The focused terminal remains the action target while its local find
+    /// input owns keyboard focus (notably for search, copy and paste commands).
+    pub fn owns_keyboard_focus(&self, window: &Window, cx: &App) -> bool {
+        self.focus.is_focused(window)
+            || self.search_open
+                && self.search_input.as_ref().is_some_and(|input| input.read(cx).focus_handle(cx).is_focused(window))
     }
 
     pub fn detach(&self) {
@@ -557,7 +578,124 @@ impl TerminalView {
         cx.notify();
     }
 
-    fn key_down(&mut self, ev: &KeyDownEvent, _w: &mut Window, cx: &mut Context<Self>) {
+    /// Opens the find bar inside this terminal view. Keeping the input entity
+    /// here means its query and selection survive tab switches independently.
+    pub fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let input = if let Some(input) = self.search_input.clone() {
+            input
+        } else {
+            let input = cx.new(|cx| {
+                let mut state = InputState::new(window, cx).placeholder("Find in terminal");
+                state.set_editor_style(InputEditorStyle {
+                    foreground: crate::settings::color("foreground"),
+                    muted_foreground: crate::settings::color("muted"),
+                    background: crate::settings::color("input"),
+                    border: crate::settings::color("border"),
+                    selection: crate::settings::color("selection"),
+                    caret: crate::settings::color("foreground"),
+                    ..InputEditorStyle::default()
+                });
+                state
+            });
+            cx.subscribe(&input, |this, input, event: &InputEvent, cx| match event {
+                InputEvent::Change => {
+                    this.search_query = input.read(cx).value().to_string();
+                    this.pending_search_nav = None;
+                    this.grid.borrow_mut().vt.set_search_needle(&this.search_query);
+                    this.ensure_search_task(cx);
+                    cx.notify();
+                }
+                InputEvent::PressEnter { shift, .. } => this.queue_search_navigation(*shift, cx),
+                _ => {}
+            })
+            .detach();
+            self.search_input = Some(input.clone());
+            input
+        };
+
+        self.search_open = true;
+        self.search_query = input.read(cx).value().to_string();
+        self.grid.borrow_mut().vt.start_search(&self.search_query.clone());
+        self.focus_search_input(window, cx);
+        self.ensure_search_task(cx);
+        cx.notify();
+    }
+
+    fn focus_search_input(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(input) = &self.search_input {
+            input.update(cx, |state, cx| state.focus(window, cx));
+        }
+    }
+
+    fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_open = false;
+        self.pending_search_nav = None;
+        self.search_task.take();
+        self.grid.borrow_mut().vt.clear_search();
+        self.focus.focus(window, cx);
+        cx.notify();
+    }
+
+    fn queue_search_navigation(&mut self, previous: bool, cx: &mut Context<Self>) {
+        if !self.search_open || self.search_query.is_empty() {
+            return;
+        }
+        if self.grid.borrow().vt.search_progress().complete {
+            self.pending_search_nav = None;
+            if self.grid.borrow_mut().vt.search_navigate(previous) {
+                cx.notify();
+            }
+        } else {
+            self.pending_search_nav = Some(previous);
+            self.ensure_search_task(cx);
+        }
+    }
+
+    fn ensure_search_task(&mut self, cx: &mut Context<Self>) {
+        if !self.search_open || self.search_query.is_empty() || self.search_task.is_some() {
+            return;
+        }
+        self.search_task = Some(cx.spawn(async move |this, cx| loop {
+            let delay = this.update(cx, |this, cx| {
+                if !this.search_open {
+                    return None;
+                }
+                if this.shown_in.get() != FRAME.load(Ordering::Relaxed) {
+                    return Some(Duration::from_millis(250));
+                }
+                if this.search_query.is_empty() {
+                    return Some(Duration::from_millis(200));
+                }
+
+                let mut grid = this.grid.borrow_mut();
+                let mut changed = grid.vt.progress_search();
+                if grid.vt.search_progress().complete
+                    && let Some(previous) = this.pending_search_nav.take()
+                {
+                    changed |= grid.vt.search_navigate(previous);
+                }
+                let busy = !grid.vt.search_progress().complete || this.pending_search_nav.is_some();
+                drop(grid);
+                if changed {
+                    cx.notify();
+                }
+                Some(if busy { Duration::from_millis(33) } else { Duration::from_millis(200) })
+            }).unwrap_or(None);
+            let Some(delay) = delay else { break };
+            cx.background_executor().timer(delay).await;
+        }));
+    }
+
+    fn key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.search_open {
+            if ev.keystroke.key == "escape" {
+                self.close_search(window, cx);
+                cx.stop_propagation();
+            }
+            // The input entity owns text editing and Enter navigation; never
+            // leak its keystrokes into the shell running in this terminal.
+            return;
+        }
         let k = &ev.keystroke;
         // Typing clears a selection, as in Herdr.
         if !k.key.starts_with("shift") && !k.key.starts_with("control") && !k.key.starts_with("alt") {
@@ -1286,27 +1424,49 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     painted.truncate(frame.rows.len());
     for (y, row) in frame.rows.iter().enumerate() {
         let column = cursor.filter(|(_, cy)| *cy as usize == y).map(|(x, _)| x as usize);
-        let fresh;
-        let ops = if frame.all {
-            fresh = row_ops(row, cell, column, window);
-            &fresh
-        } else {
-            if painted.get(y).is_none_or(|(r, _, c)| !Rc::ptr_eq(r, row) || *c != column) {
-                let ops = row_ops(row, cell, column, window);
-                if y < painted.len() {
-                    painted[y] = (row.clone(), ops, column);
-                } else {
-                    painted.push((row.clone(), ops, column));
-                }
+        if frame.all || painted.get(y).is_none_or(|(r, _, c)| !Rc::ptr_eq(r, row) || *c != column) {
+            let ops = row_ops(row, cell, column, window);
+            if y < painted.len() {
+                painted[y] = (row.clone(), ops, column);
+            } else {
+                painted.push((row.clone(), ops, column));
             }
-            &painted[y].1
-        };
+        }
+    }
+
+    // Paint all program backgrounds first, then search overlays, then text.
+    // This lets a match highlight sit below glyphs without contaminating
+    // cached RowOps or the terminal's own selection/copy state.
+    for (y, (_, ops, _)) in painted.iter().enumerate() {
         for op in ops {
             match op {
                 RowOp::Bg { from, to, color } => {
                     let b = Bounds::new(at(*from, y), size(cell.width * (to - from) as f32, cell.height));
                     window.paint_quad(fill(snap_box(b), *color));
                 }
+                _ => {}
+            }
+        }
+    }
+    for selected in [false, true] {
+        for span in frame.search_spans.iter().filter(|span| span.selected == selected) {
+            let y = span.row as usize;
+            let Some(row) = frame.rows.get(y) else { continue };
+            let start = span.start as usize;
+            let end = (span.end as usize + 1).min(row.len());
+            if start >= end {
+                continue;
+            }
+            let opacity = if selected { 0.55 } else { 0.28 };
+            let highlight = crate::settings::color("accent").opacity(opacity);
+            let b = Bounds::new(at(start, y), size(cell.width * (end - start) as f32, cell.height));
+            window.paint_quad(fill(snap_box(b), highlight));
+        }
+    }
+    for (y, (_, ops, _)) in painted.iter().enumerate() {
+        for op in ops {
+            match op {
+                RowOp::Bg { .. } => {}
                 RowOp::Sprite { x, text, color } => crate::sprites::paint(text, Bounds::new(at(*x, y), cell), *color, window),
                 RowOp::Icon { x, offset, font, glyph, size, color } => {
                     let _ = window.paint_glyph(at(*x, y) + *offset, *font, *glyph, *size, *color);
@@ -1441,7 +1601,14 @@ impl EntityInputHandler for TerminalView {
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::bench::count(&crate::bench::TERMINAL);
-        let focused = self.focus.is_focused(window);
+        let terminal_focused = self.focus.is_focused(window);
+        let search_focused = self.search_open
+            && self.search_input.as_ref().is_some_and(|input| input.read(cx).focus_handle(cx).is_focused(window));
+        // The find input is part of this terminal's interaction, not a loss of
+        // attention to the terminal itself. Keep core focus/cursor state, while
+        // only installing the terminal's IME handler when its own focus handle
+        // owns keyboard input.
+        let focused = terminal_focused || search_focused;
         if focused != self.was_focused {
             self.was_focused = focused;
             let g = self.grid.borrow();
@@ -1460,6 +1627,20 @@ impl Render for TerminalView {
         let selection_view = cx.entity().downgrade();
         let (input_focus, input_view) = (self.focus.clone(), cx.entity());
         let ended = self.ended.clone().or_else(|| self.lost.then(|| "reconnecting to core…".to_owned()));
+        let search_input = self.search_open.then(|| self.search_input.clone()).flatten();
+        let search_progress = self.grid.borrow().vt.search_progress();
+        let search_label = if self.search_query.is_empty() {
+            String::new()
+        } else if !search_progress.complete {
+            if search_progress.total == 0 { "Searching…".to_owned() } else { format!("{}+", search_progress.total) }
+        } else if search_progress.total == 0 {
+            "No matches".to_owned()
+        } else if let Some(selected) = search_progress.selected {
+            format!("{} / {}", selected + 1, search_progress.total)
+        } else {
+            format!("{} matches", search_progress.total)
+        };
+        let address = self.address.clone();
 
         div()
             .id(SharedString::from(format!("term-{}", self.address)))
@@ -1472,6 +1653,7 @@ impl Render for TerminalView {
             .on_action(cx.listener(|this, a: &gpui_shell::action::ShellAction, _, cx| {
                 // `send:<text>` bindings from keys.json type into this terminal.
                 match a.id().strip_prefix("send:") {
+                    Some(_) if this.search_open => cx.stop_propagation(),
                     Some(text) => this.send(text.as_bytes()),
                     None => cx.propagate(),
                 }
@@ -1586,13 +1768,86 @@ impl Render for TerminalView {
                         });
                         // While focused, the OS input methods (Pinyin, Japanese,
                         // dead keys) type into this terminal.
-                        if focused {
+                        if terminal_focused {
                             window.handle_input(&input_focus, ElementInputHandler::new(bounds, input_view), cx);
                         }
                     },
                 )
                 .size_full(),
             )
+            .when_some(search_input, |d, input| {
+                d.child(
+                    div()
+                        .flex()
+                        .id(SharedString::from(format!("find-bar-{address}")))
+                        .debug_selector(|| "find-bar".to_owned())
+                        .absolute()
+                        .top_2()
+                        .right_2()
+                        .w_full()
+                        .max_w(px(460.0))
+                        .h(px(38.0))
+                        .gap_1()
+                        .items_center()
+                        .px_1()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(crate::settings::color("border"))
+                        .bg(crate::settings::color("popover"))
+                        .shadow_md()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(div().flex_1().min_w(px(48.0)).h_full().child(Input::new(&input)))
+                        .child(div().w(px(58.0)).text_xs().text_color(crate::settings::color("muted")).child(search_label))
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("find-prev-{address}")))
+                                .w(px(26.0))
+                                .h(px(26.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_sm()
+                                .hover(|d| d.bg(crate::settings::color("hover")))
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.queue_search_navigation(true, cx);
+                                    this.focus_search_input(window, cx);
+                                }))
+                                .child("↑"),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("find-next-{address}")))
+                                .w(px(26.0))
+                                .h(px(26.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_sm()
+                                .hover(|d| d.bg(crate::settings::color("hover")))
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.queue_search_navigation(false, cx);
+                                    this.focus_search_input(window, cx);
+                                }))
+                                .child("↓"),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("find-close-{address}")))
+                                .w(px(26.0))
+                                .h(px(26.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_sm()
+                                .hover(|d| d.bg(crate::settings::color("hover")))
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _, window, cx| this.close_search(window, cx)))
+                                .child("×"),
+                        ),
+                )
+            })
             .when_some(ended, |d, why| {
                 d.child(
                     div()
@@ -1663,6 +1918,150 @@ mod tests {
             cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
             assert!(!root.read_with(cx, |root, cx| root.text.read(cx).selected_text()).is_empty());
         }
+    }
+
+    #[gpui::test]
+    fn each_terminal_keeps_its_find_bar_inside_its_own_pane(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        struct Root {
+            first: Entity<super::TerminalView>,
+            second: Entity<super::TerminalView>,
+        }
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().flex().size_full()
+                    .child(div().w(px(320.0)).h(px(150.0)).child(self.first.clone()))
+                    .child(div().w(px(320.0)).h(px(150.0)).child(self.second.clone()))
+            }
+        }
+
+        cx.update(gpui_base::init);
+        let (root, cx) = cx.add_window_view(|_, cx| Root {
+            first: cx.new(|cx| {
+                let terminal = super::TerminalView::attach(crate::hc::offline(), "t1".into(), (32, 6), cx);
+                terminal.grid.borrow_mut().vt.write(b"alpha result");
+                terminal
+            }),
+            second: cx.new(|cx| {
+                let terminal = super::TerminalView::attach(crate::hc::offline(), "t2".into(), (32, 6), cx);
+                terminal.grid.borrow_mut().vt.write(b"beta result");
+                terminal
+            }),
+        });
+        cx.run_until_parked();
+
+        cx.update(|window, app| {
+            root.update(app, |root, app| {
+                root.first.update(app, |terminal, cx| terminal.open_search(window, cx));
+            });
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("a l p h a");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("find-bar").is_some());
+        root.read_with(cx, |root, cx| {
+            assert!(root.first.read(cx).search_open);
+            assert!(!root.second.read(cx).search_open);
+            assert_eq!(root.first.read(cx).search_query, "alpha");
+        });
+
+        cx.update(|window, app| {
+            root.update(app, |root, app| {
+                root.second.update(app, |terminal, cx| terminal.open_search(window, cx));
+            });
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("b e t a");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("find-bar").is_some());
+        root.read_with(cx, |root, cx| {
+            assert!(root.first.read(cx).search_open);
+            assert!(root.second.read(cx).search_open);
+            assert_eq!(root.first.read(cx).search_query, "alpha");
+            assert_eq!(root.second.read(cx).search_query, "beta");
+        });
+    }
+
+    #[gpui::test]
+    fn find_input_does_not_type_into_terminal_and_escape_closes_it(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        struct Root(Entity<super::TerminalView>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(self.0.clone())
+            }
+        }
+
+        cx.update(gpui_base::init);
+        let (root, cx) = cx.add_window_view(|_, cx| Root(cx.new(|cx| {
+            let terminal = super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 6), cx);
+            terminal.grid.borrow_mut().vt.write(b"needle appears here");
+            terminal
+        })));
+        cx.run_until_parked();
+
+        cx.update(|window, app| {
+            root.update(app, |root, app| {
+                root.0.update(app, |terminal, cx| terminal.open_search(window, cx));
+            });
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("n e e d l e enter");
+        cx.run_until_parked();
+        root.read_with(cx, |root, cx| {
+            let terminal = root.0.read(cx);
+            assert_eq!(terminal.search_query, "needle");
+            let frame = terminal.grid.borrow_mut().vt.frame();
+            let text: String = frame.rows[0].iter().map(|cell| cell.text.as_str()).collect();
+            assert!(text.starts_with("needle appears here"), "search input leaked into the shell: {text:?}");
+        });
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        root.read_with(cx, |root, cx| assert!(!root.0.read(cx).search_open));
+    }
+
+    #[cfg(target_os = "macos")]
+    #[gpui::test]
+    fn macos_cmd_f_shipped_binding_opens_search_in_the_focused_terminal(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        struct Root(Entity<super::TerminalView>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .key_context("Herdr")
+                    .size_full()
+                    .on_action(cx.listener(|this, action: &gpui_shell::action::ShellAction, window, cx| {
+                        if action.id() == "terminal.search" {
+                            this.0.update(cx, |terminal, cx| terminal.open_search(window, cx));
+                        } else {
+                            cx.propagate();
+                        }
+                    }))
+                    .child(self.0.clone())
+            }
+        }
+
+        cx.update(gpui_base::init);
+        let bindings = crate::keys::parse(crate::keys::DEFAULTS).expect("shipped macOS keys parse");
+        cx.update(|app| crate::keys::install(bindings, app));
+        let (root, cx) = cx.add_window_view(|_, cx| {
+            Root(cx.new(|cx| super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 6), cx)))
+        });
+        cx.run_until_parked();
+        cx.update(|window, app| {
+            root.update(app, |root, app| {
+                root.0.update(app, |terminal, cx| terminal.focus.focus(window, cx));
+            });
+        });
+
+        cx.simulate_keystrokes("cmd-f");
+        cx.run_until_parked();
+        root.read_with(cx, |root, cx| assert!(root.0.read(cx).search_open));
+        assert!(cx.debug_bounds("find-bar").is_some());
     }
 
     #[test]
