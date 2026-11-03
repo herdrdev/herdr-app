@@ -959,6 +959,11 @@ fn key_bytes(vt: &mut vt::Vt, ev: &KeyDownEvent) -> Option<Vec<u8>> {
         if k.key == "escape" {
             return Some(crate::win32_keys::escape(m.shift, m.control, m.alt));
         }
+        // Send Ctrl+J explicitly instead of asking ConPTY to reconstruct
+        // its key identity from LF. Only use the negotiated Win32 mode.
+        if k.key == "j" && m.control && !(m.shift || m.alt || m.platform || m.function) {
+            return Some(crate::win32_keys::ctrl_j());
+        }
     }
     let Some((key, shifted, unshifted)) = map_key(&k.key) else {
         return k.key_char.as_ref().map(|text| text.as_bytes().to_vec());
@@ -2208,6 +2213,8 @@ mod tests {
             ("ctrl-m", None, b"\r", b"\x1b[109;5u", b"\x1b[109;5u"),
             ("ctrl-]", None, b"\x1d", b"\x1b[93;5u", b"\x1b[93;5u"),
             ("ctrl-\\", None, b"\x1c", b"\x1b[92;5u", b"\x1b[92;5u"),
+            ("ctrl-j", None, b"\n", b"\x1b[106;5u", b"\x1b[106;5u"),
+            ("ctrl-m", Some("m"), b"\r", b"\x1b[109;5u", b"\x1b[109;5u"),
             ("ctrl-space", None, b"\x00", b"\x1b[32;5u", b"\x1b[32;5u"),
             ("alt-b", Some("b"), ALT_B, KITTY_ALT_B, b"\x1b[98;3u"),
             ("alt-b", Some("∫"), "∫".as_bytes(), "∫".as_bytes(), b"\x1b[98;3u"),
@@ -2298,6 +2305,48 @@ mod tests {
     }
 
     #[test]
+    fn ctrl_j_keeps_its_identity_only_in_win32_mode_without_kitty() {
+        for flags in [0, 1, 9] {
+            for win32 in [false, true] {
+                let mut vt = Vt::new(20, 3);
+                if win32 { vt.write(b"\x1b[?9001h"); }
+                if flags != 0 { vt.write(format!("\x1b[>{flags}u").as_bytes()); }
+                let expected: &[u8] = if flags != 0 {
+                    b"\x1b[106;5u"
+                } else if win32 {
+                    b"\x1b[74;36;10;1;8;1_\x1b[74;36;10;0;8;1_"
+                } else {
+                    b"\n"
+                };
+                for text in [None, Some("j")] {
+                    assert_eq!(key_bytes(&mut vt, &press("ctrl-j", text)).as_deref(), Some(expected), "flags={flags}, win32={win32}, text={text:?}");
+                }
+                // These chords keep their existing encoder, even if they
+                // happen to produce the same legacy byte as Ctrl+J.
+                let mut plain = Vt::new(20, 3);
+                if flags != 0 { plain.write(format!("\x1b[>{flags}u").as_bytes()); }
+                for (spec, text) in [
+                    ("ctrl-shift-j", None), ("ctrl-alt-j", None), ("cmd-ctrl-j", None),
+                    ("enter", None), ("ctrl-c", None), ("j", Some("j")),
+                ] {
+                    let event = press(spec, text);
+                    assert_eq!(key_bytes(&mut vt, &event), key_bytes(&mut plain, &event), "flags={flags}, win32={win32}, {spec}");
+                }
+                // Upstream's legacy Ctrl+M alias is intentionally disabled
+                // in negotiated Win32 mode; keep both baselines unchanged.
+                let ctrl_m: &[u8] = if flags != 0 { b"\x1b[109;5u" } else if win32 { b"" } else { b"\r" };
+                assert_eq!(key_bytes(&mut vt, &press("ctrl-m", None)).as_deref(), Some(ctrl_m), "flags={flags}, win32={win32}, Ctrl+M");
+                let mut function = press("ctrl-j", None);
+                function.keystroke.modifiers.function = true;
+                assert_eq!(key_bytes(&mut vt, &function), key_bytes(&mut plain, &function), "Fn+Ctrl+J, flags={flags}, win32={win32}");
+                vt.write(b"\x1b[?9001l");
+                let restored: &[u8] = if flags == 0 { b"\n" } else { b"\x1b[106;5u" };
+                assert_eq!(key_bytes(&mut vt, &press("ctrl-j", None)).as_deref(), Some(restored));
+            }
+        }
+    }
+
+    #[test]
     fn escape_keeps_the_next_key_separate_in_each_keyboard_mode() {
         for flags in [0, 1, 9] {
             for win32 in [false, true] {
@@ -2349,6 +2398,7 @@ mod tests {
                     ("shift-enter", b"\x1b[13;2u".as_slice()),
                     ("ctrl-enter", b"\x1b[13;5u"),
                     ("alt-enter", b"\x1b[13;3u"),
+                    ("ctrl-j", b"\x1b[106;5u"),
                 ] {
                     assert_eq!(key_bytes(&mut vt, &press(spec, None)).as_deref(), Some(expected), "flags={flags}, win32_first={win32_first}, {spec}");
                 }

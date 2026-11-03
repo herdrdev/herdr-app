@@ -1831,6 +1831,24 @@ mod dead_key_tests {
         }
     }
 
+    // HERDR: Ctrl+J must reach the terminal encoder as a key, not native text.
+    #[test]
+    fn ctrl_j_keeps_its_native_key_identity() {
+        std::thread::spawn(|| {
+            let queue = KeyboardQueue::new();
+            let ctrl = Modifiers { control: true, ..Default::default() };
+            queue.state(ctrl);
+            let message = queue.message(0, VK_J);
+            let (keystroke, prefer_text) = parse_normal_key(VK_J, message.lParam, ctrl).unwrap();
+            assert_eq!(keystroke.key, "j");
+            assert_eq!(keystroke.modifiers, ctrl);
+            assert_eq!(keystroke.key_char, None);
+            assert!(!prefer_text);
+        })
+        .join()
+        .unwrap();
+    }
+
     #[test]
     fn dead_key_completion_uses_native_text_across_windows() {
         std::thread::spawn(|| {
