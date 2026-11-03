@@ -20,7 +20,7 @@ class Element {
 }
 const source = await readFile(new URL("../defaults/frame/palette/main.js", import.meta.url), "utf8");
 const element = () => new Element();
-const values = { View: class {}, div: element, svg: element, v_flex: element, h_flex: element, Input: { new: element }, theme: () => ({}), keys: () => [] };
+const values = { View: class {}, div: element, svg: element, v_flex: element, h_flex: element, Input: { new: element }, theme: () => ({}), keys: () => [], win: () => ({}) };
 const Palette = new Function(...Object.keys(values), source.replace(/^import .*;\n/gm, "").replace("export default class Palette", "return class Palette"))(...Object.values(values));
 function find(root: Element, id: string): Element | undefined {
   if (root?.calls?.id?.[0] === id) return root;
