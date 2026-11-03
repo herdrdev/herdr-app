@@ -72,9 +72,86 @@ pub enum Target {
     File(PathBuf),
 }
 
+fn is_line_span(s: &str) -> bool {
+    match s.split_once('-') {
+        Some((a, b)) => !a.is_empty() && !b.is_empty() && a.bytes().all(|c| c.is_ascii_digit()) && b.bytes().all(|c| c.is_ascii_digit()),
+        None => !s.is_empty() && s.bytes().all(|c| c.is_ascii_digit()),
+    }
+}
+
+fn is_line_anchor(s: &str) -> bool {
+    let Some(rest) = s.strip_prefix('L') else { return false };
+    match rest.split_once('-') {
+        Some((a, b)) => {
+            let b = b.strip_prefix('L').unwrap_or(b);
+            !a.is_empty() && !b.is_empty() && a.bytes().all(|c| c.is_ascii_digit()) && b.bytes().all(|c| c.is_ascii_digit())
+        }
+        None => !rest.is_empty() && rest.bytes().all(|c| c.is_ascii_digit()),
+    }
+}
+
+fn percent_decode(s: &str) -> Option<String> {
+    let bytes = s.as_bytes();
+    let mut out = Vec::with_capacity(bytes.len());
+    let mut i = 0;
+    while i < bytes.len() {
+        if bytes[i] == b'%' && i + 2 < bytes.len() {
+            let hi = (bytes[i + 1] as char).to_digit(16)?;
+            let lo = (bytes[i + 2] as char).to_digit(16)?;
+            out.push(((hi << 4) | lo) as u8);
+            i += 3;
+        } else {
+            out.push(bytes[i]);
+            i += 1;
+        }
+    }
+    String::from_utf8(out).ok()
+}
+
+fn file_url_path(link: &str) -> Option<PathBuf> {
+    let rest = link.strip_prefix("file://")?;
+    let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+    if !rest.starts_with('/') {
+        return None;
+    }
+    let decoded = percent_decode(rest)?;
+    #[cfg(windows)]
+    if let Some(drive) = decoded.strip_prefix('/')
+        && drive.as_bytes().get(1) == Some(&b':')
+        && drive.as_bytes()[0].is_ascii_alphabetic()
+    {
+        return Some(PathBuf::from(drive));
+    }
+    Some(PathBuf::from(decoded))
+}
+
+fn resolve_file(full: PathBuf) -> Option<Target> {
+    // Windows ignores a trailing period when checking whether a path exists.
+    if !(cfg!(windows) && full.extension().is_some_and(|ext| ext.is_empty())) && full.exists() {
+        return Some(Target::File(full));
+    }
+    // The period ending a sentence, or `:42` / `:42:7` / `:5-12` / `#L5-L12` naming a place in the file.
+    let mut bare = full.to_str()?.strip_suffix('.').unwrap_or(full.to_str()?);
+    if let Some((head, frag)) = bare.rsplit_once('#')
+        && is_line_anchor(frag)
+    {
+        bare = head;
+    }
+    for _ in 0..2 {
+        match bare.rsplit_once(':') {
+            Some((head, n)) if is_line_span(n) => bare = head,
+            _ => break,
+        }
+    }
+    Path::new(bare).exists().then(|| Target::File(PathBuf::from(bare)))
+}
+
 /// What a link opens. File paths count only when they exist here; relative
 /// ones need the terminal's folder.
 pub fn resolve(link: &str, cwd: Option<&Path>) -> Option<Target> {
+    if let Some(full) = file_url_path(link) {
+        return resolve_file(full);
+    }
     let scheme = link.split_once(':').is_some_and(|(s, _)| {
         s.len() > 1 && s.starts_with(|c: char| c.is_ascii_alphabetic()) && s.chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
     });
@@ -96,19 +173,7 @@ pub fn resolve(link: &str, cwd: Option<&Path>) -> Option<Target> {
         PathBuf::from(link)
     };
     let full = if expanded.is_absolute() { expanded } else { cwd?.join(expanded) };
-    // Windows ignores a trailing period when checking whether a path exists.
-    if !(cfg!(windows) && full.extension().is_some_and(|ext| ext.is_empty())) && full.exists() {
-        return Some(Target::File(full));
-    }
-    // The period ending a sentence, or `:42` / `:42:7` naming a place in the file.
-    let mut bare = full.to_str()?.strip_suffix('.').unwrap_or(full.to_str()?);
-    for _ in 0..2 {
-        match bare.rsplit_once(':') {
-            Some((head, n)) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => bare = head,
-            _ => break,
-        }
-    }
-    Path::new(bare).exists().then(|| Target::File(PathBuf::from(bare)))
+    resolve_file(full)
 }
 
 /// Hands the target to the system's default handler.
@@ -353,12 +418,23 @@ mod tests {
         let file = Target::File(dir.join("src/main.rs"));
         assert_eq!(resolve("src/main.rs", Some(&dir)), Some(file.clone()));
         assert_eq!(resolve("src/main.rs:42:7", Some(&dir)), Some(file.clone()));
+        assert_eq!(resolve("src/main.rs:5-12", Some(&dir)), Some(file.clone()));
+        assert_eq!(resolve("src/main.rs:5-12.", Some(&dir)), Some(file.clone()));
+        assert_eq!(resolve("src/main.rs#L42", Some(&dir)), Some(file.clone()));
+        assert_eq!(resolve("src/main.rs#L5-L12", Some(&dir)), Some(file.clone()));
+        assert_eq!(resolve("src/main.rs#L5-12", Some(&dir)), Some(file.clone()));
         assert_eq!(resolve("src/main.rs.", Some(&dir)), Some(file.clone()));
         assert_eq!(resolve("src/.", Some(&dir)), Some(Target::File(dir.join("src/."))));
         assert_eq!(resolve("src/..", Some(&dir)), Some(Target::File(dir.join("src/.."))));
         assert_eq!(resolve("$PWD/src/main.rs", Some(&dir)), Some(file.clone()));
+        let abs = dir.join("src/main.rs").to_str().unwrap().replace('\\', "/");
+        let file_url = if abs.starts_with('/') { format!("file://{abs}") } else { format!("file:///{abs}") };
+        assert_eq!(resolve(&file_url, None), Some(file.clone()));
+        assert_eq!(resolve(&format!("{file_url}#L5-L12"), None), Some(file.clone()));
+        assert_eq!(resolve(&format!("{file_url}:5-12"), None), Some(file.clone()));
         assert_eq!(resolve(dir.join("src/main.rs").to_str().unwrap(), None), Some(file));
         assert_eq!(resolve("src/gone.rs", Some(&dir)), None);
+        assert_eq!(resolve("src/gone.rs:5-12", Some(&dir)), None);
         assert_eq!(resolve("src/main.rs", None), None);
         assert_eq!(resolve("https://a.com/x", None), Some(Target::Url("https://a.com/x".into())));
         #[cfg(unix)]
