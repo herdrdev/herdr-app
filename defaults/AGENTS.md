@@ -547,7 +547,10 @@ The main ones:
   starting directory for tabs and right/down splits, with or without `argv`), `terminal.kill {terminal}`,
   `terminal.keep {terminal, place?}`, `terminal.park {terminal}`,
   `terminal.peek {terminal}` (peek over the tab, with keep-as-tab and close),
-  `terminal.show {terminal?, pane?}`, `terminal.copy`, `terminal.paste` (copied
+  `terminal.show {terminal?, pane?}`, `terminal.copy` (a successful copy briefly
+  shows “copied to clipboard” in that terminal, as do mouse copy-on-select and a
+  program's own clipboard write),
+  `terminal.paste` (copied
   files, such as Finder's or a clipboard manager's image, as if dropped; an image
   alone as `terminal.paste_image` pastes it), `terminal.paste_image` (Ctrl+V: an
   image, into a terminal on another machine: copied there, its path pasted; on

@@ -16,6 +16,8 @@ use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
 
+const COPY_NOTICE_DURATION: Duration = Duration::from_secs(2);
+
 fn pad() -> (f32, f32) {
     let p = crate::settings::get().terminal_padding;
     let zoom = crate::settings::zoom();
@@ -92,6 +94,8 @@ pub struct TerminalView {
     selecting: bool,
     selection_pointer: Point<Pixels>,
     selection_scroll: Option<Task<()>>,
+    /// Keeping the task shows the notice; replacing it restarts its timer.
+    copy_notice: Option<Task<()>>,
     /// The terminal's folder, for links to relative paths.
     pub cwd: Option<PathBuf>,
     /// The link under the pointer while the link modifier is held.
@@ -189,6 +193,7 @@ impl TerminalView {
             selecting: false,
             selection_pointer: Point::default(),
             selection_scroll: None,
+            copy_notice: None,
             cwd: None,
             link: None,
             right_click_to_program: false,
@@ -360,6 +365,7 @@ impl TerminalView {
     /// Feeds relayed bytes in; returns false once the stream is over.
     fn ingest(&mut self, batch: Vec<Stream>, cx: &mut Context<Self>) -> bool {
         let mut open = true;
+        let mut copied = false;
         let title = {
             let mut g = self.grid.borrow_mut();
             for item in batch {
@@ -370,6 +376,7 @@ impl TerminalView {
                         let [clipboard, primary] = g.vt.take_clipboard();
                         if let Some(text) = clipboard {
                             cx.write_to_clipboard(ClipboardItem::new_string(text));
+                            copied = true;
                         }
                         #[cfg(target_os = "linux")]
                         if let Some(text) = primary {
@@ -399,6 +406,9 @@ impl TerminalView {
             }
             g.vt.take_title()
         };
+        if copied {
+            self.show_copy_notice(cx);
+        }
         if let Some(title) = title {
             let title = if title.is_empty() { self.address.clone() } else { title };
             self.set_title(&title, cx);
@@ -549,7 +559,20 @@ impl TerminalView {
         cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
         #[cfg(target_os = "linux")]
         cx.write_to_primary(ClipboardItem::new_string(text));
+        self.show_copy_notice(cx);
         true
+    }
+
+    /// Shows "copied to clipboard" for a while; another copy restarts it.
+    fn show_copy_notice(&mut self, cx: &mut Context<Self>) {
+        self.copy_notice = Some(cx.spawn(async |this, cx| {
+            cx.background_executor().timer(COPY_NOTICE_DURATION).await;
+            let _ = this.update(cx, |this, cx| {
+                this.copy_notice = None;
+                cx.notify();
+            });
+        }));
+        cx.notify();
     }
 
     pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
@@ -1593,6 +1616,25 @@ impl Render for TerminalView {
                 )
                 .size_full(),
             )
+            .when(self.copy_notice.is_some(), |d| {
+                let accent = crate::settings::color("done");
+                let (padding, _) = pad();
+                d.child(
+                    div().absolute().bottom(px(12.0))
+                        .left(px(padding)).right(px(padding))
+                        .px(px(12.0)).flex().justify_center().overflow_hidden()
+                        .child(
+                            div().debug_selector(|| "copy-notice".into())
+                                .min_w_0().flex().items_center().gap(px(8.0))
+                                .px(px(12.0)).py(px(6.0)).rounded_md()
+                                .border_1().border_color(accent)
+                                .bg(crate::settings::color("surface"))
+                                .text_color(crate::settings::color("foreground"))
+                                .child(div().size(px(6.0)).flex_none().rounded_full().bg(accent))
+                                .child(div().truncate().child("copied to clipboard")),
+                        ),
+                )
+            })
             .when_some(ended, |d, why| {
                 d.child(
                     div()
@@ -1619,6 +1661,52 @@ impl Focusable for TerminalView {
 
 #[cfg(test)]
 mod tests {
+    #[gpui::test]
+    fn terminal_copy_notice_follows_clipboard_writes_and_expires(cx: &mut gpui::TestAppContext) {
+        let (view, cx) = cx.add_window_view(|_, cx| {
+            super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 5), cx)
+        });
+        cx.run_until_parked();
+        // Nothing selected: nothing copied, nothing shown.
+        view.update(cx, |view, cx| assert!(!view.copy(cx)));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("copy-notice").is_none());
+        // A program's own clipboard write (OSC 52, e.g. an agent's selection) is a copy too.
+        view.update(cx, |view, cx| {
+            view.ingest(vec![crate::hc::Stream::Data(b"\x1b]52;c;aGk=\x07".to_vec())], cx);
+            assert_eq!(cx.read_from_clipboard().unwrap().text().as_deref(), Some("hi"));
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("copy-notice").is_some());
+        cx.executor().advance_clock(super::COPY_NOTICE_DURATION);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("copy-notice").is_none());
+        view.update(cx, |view, cx| {
+            {
+                let mut grid = view.grid.borrow_mut();
+                grid.vt.write(b"a=>b");
+                grid.vt.select(super::Select::Press, 2, 0, 25., 5., 10., 60.);
+                grid.vt.select(super::Select::Drag, 3, 0, 30., 5., 10., 60.);
+                grid.vt.select(super::Select::Release, 3, 0, 30., 5., 10., 60.);
+            }
+            assert!(view.copy(cx));
+            assert_eq!(cx.read_from_clipboard().unwrap().text().as_deref(), Some(">"));
+        });
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("copy-notice").is_some());
+        cx.executor().advance_clock(super::COPY_NOTICE_DURATION / 2);
+        cx.run_until_parked();
+        // A second successful copy starts a fresh two seconds.
+        view.update(cx, |view, cx| assert!(view.copy(cx)));
+        cx.run_until_parked();
+        cx.executor().advance_clock(super::COPY_NOTICE_DURATION / 2);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("copy-notice").is_some());
+        cx.executor().advance_clock(super::COPY_NOTICE_DURATION / 2);
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("copy-notice").is_none());
+    }
+
     #[gpui::test]
     fn terminal_release_ends_window_text_selection(cx: &mut gpui::TestAppContext) {
         use gpui::*;
