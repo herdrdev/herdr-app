@@ -6386,6 +6386,17 @@ globalThis.__gpui = (() => {
     __apply(this.__id, "toggle_zoom", [dockTarget(group, api), groupNode(group, api)]);
     return this;
   };
+  methods.drag_paths = function (paths, options = {}) {
+    if (!Array.isArray(paths) || paths.length === 0 || paths.some(p => typeof p !== "string" || !p || p.includes("\0"))) {
+      throw new TypeError("drag_paths(paths, options) expects non-empty paths without NUL characters");
+    }
+    const on = options.on ?? null;
+    if (on !== null && (typeof on !== "string" || !on)) {
+      throw new TypeError("drag_paths options.on must be a machine name or null");
+    }
+    __apply(this.__id, "drag_paths", [JSON.stringify({paths, on})]);
+    return this;
+  };
   methods.drag_tab = function (group, index) {
     const api = "drag_tab(group, index)";
     __apply(this.__id, "drag_tab", [dockTarget(group, api), groupNode(group, api), wholeAt(index, api)]);
@@ -8252,6 +8263,7 @@ impl ShellRuntime {
             | "tab_index"
             | "tab_stop"
             | "href"
+            | "drag_paths"
             | "id"
             | "overflow_scroll"
             | "overflow_x_scroll"
@@ -8343,6 +8355,7 @@ impl ShellRuntime {
                     "spin" => "spin",
                     "loop" => "loop",
                     "href" => "href",
+                    "drag_paths" => "drag_paths",
                     _ => "accessibility_label",
                 };
                 if name == "id"

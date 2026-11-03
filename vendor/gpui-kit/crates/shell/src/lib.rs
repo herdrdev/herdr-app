@@ -72,6 +72,8 @@ pub use input_tokens::{
 };
 pub(crate) mod dependencies;
 pub mod dock;
+mod drag_paths;
+pub use drag_paths::DraggedPaths;
 pub(crate) mod engine;
 pub(crate) mod entities;
 pub(crate) mod error;
