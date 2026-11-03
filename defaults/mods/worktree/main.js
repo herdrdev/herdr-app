@@ -3,7 +3,7 @@
 
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar } from "gpui-base";
-import { run, props, closeOverlay, theme, spaces, panes, exec, home } from "herdr";
+import { run, props, closeOverlay, theme, spaces, panes, exec, home, window } from "herdr";
 
 // Where a space is now: its first terminal's live folder, else where it was made.
 function place(s) {
@@ -92,6 +92,37 @@ async function submodules(top, on) {
     if (local.out) unpushed.push(m.name);
   }
   return { mods, unpushed };
+}
+
+// git deletes every file of a worktree before it forgets it, and exec stops a
+// command after 30 s: a checkout with a big node_modules was left half deleted
+// and still listed. Renamed aside first (next to itself, so on the same disk),
+// git only has to forget it and the files go in the background. True once
+// it's removed; false if it was left as it was, for the plain remove.
+async function removeAside(main, top, args) {
+  // git refuses the main checkout, and other spaces may sit in it: never move it.
+  if (top === main) return false;
+  // git checks a folder only while it's there: without --force, what it would
+  // refuse (changes, or a repo checked out inside with its own history) goes
+  // to the plain remove.
+  if (!args.includes("--force")) {
+    const clean = await exec("sh", ["-c", 'cd "$1" && s=$(git --no-optional-locks -c core.fsmonitor=false status --porcelain --ignore-submodules=none) && [ -z "$s" ] && l=$(git -c core.quotePath=false ls-files --stage) || exit 1; printf "%s\\n" "$l" | grep "^160000 " | cut -f2- | while IFS= read -r p; do [ ! -e "$p/.git" ] || exit 1; done', "worktree", top]);
+    if (clean.code !== 0) return false;
+  }
+  const moved = await exec("sh", ["-c", 'd=$(mktemp -d "$1.removing-XXXXXX") || exit 1; mv -- "$1" "$d/" || { rmdir -- "$d"; exit 1; }; printf %s "$d"', "worktree", top]);
+  if (moved.code !== 0 || !moved.stdout) return false;
+  const aside = moved.stdout;
+  const r = await git(main, args).catch(() => ({ ok: false }));
+  if (r.ok) {
+    // No stream left open: exec waits for its pipes to close, not only for sh.
+    // Files rm can't delete stay in the visible <name>.removing-* folder.
+    await exec("sh", ["-c", '(rm -rf -- "$1" </dev/null >/dev/null 2>&1 &)', "worktree", aside]).catch(() => {});
+    return true;
+  }
+  // Locked, or anything else git refuses: put it back, and the plain remove says why.
+  const back = await exec("sh", ["-c", 'mv -- "$1/${2##*/}" "$2" && rmdir -- "$1"', "worktree", aside, top]);
+  if (back.code !== 0) throw new Error(`Couldn't move ${top} back from ${aside}.`);
+  return false;
 }
 
 // The repo a folder belongs to: its main checkout and name, and whether
@@ -221,7 +252,11 @@ export default class Worktree extends View {
     // Terminals first: a shell sitting in the folder keeps it busy on Windows.
     run("space.close", { id: s.id, confirmed: true });
     const force = this.dirty || mods.length > 0;
-    const r = await git(this.repo.main, ["worktree", "remove", ...(force ? ["--force"] : []), this.repo.top], this.on);
+    const args = ["worktree", "remove", ...(force ? ["--force"] : []), this.repo.top];
+    // Windows and other machines keep the plain remove: Windows has no sh, and
+    // on another machine hc exec ends what a command started once its time is up.
+    if (!this.on && window()?.platform !== "windows" && (await removeAside(this.repo.main, this.repo.top, args))) return "";
+    const r = await git(this.repo.main, args, this.on);
     return r.ok ? "" : r.err || "git worktree remove failed.";
   }
 
