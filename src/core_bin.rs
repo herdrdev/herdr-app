@@ -226,12 +226,28 @@ pub fn update_to(at_least: Option<&str>) -> Result<String, String> {
 #[cfg(any(target_os = "macos", all(test, unix)))]
 const BUNDLE_INSTALL_SCRIPT: &str = "installer=$(curl -fsSL \"$1/core/install.sh\") && case \"$installer\" in *HC_BUNDLE_ONLY*) printf '%s\\n' \"$installer\" | sh ;; *) exit 0 ;; esac";
 
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn bundle_completion_path(bin: &Path, home: &Path) -> bool {
+    bin.starts_with(home)
+        && !bin.ends_with("Contents/MacOS/herdr-core")
+        && !["/Cellar/", "/nix/store/", "/mise/installs/"]
+            .iter().any(|marker| bin.to_string_lossy().contains(marker))
+}
+
+#[cfg(any(target_os = "macos", all(test, unix)))]
+fn bundle_completion_writable(bin: &Path) -> bool {
+    bin.parent().is_some_and(|dir| {
+        Command::new("/bin/test").arg("-w").arg(dir).status().is_ok_and(|status| status.success())
+    })
+}
+
 /// Old core updaters copied only the bare executable. Finish that upgrade
 /// with the current installer, which retains the complete signed app bundle.
 #[cfg(target_os = "macos")]
 fn ensure_core_bundle(version: &str) -> Result<(), String> {
     let bin = path();
-    if bin.canonicalize().ok().is_some_and(|p| p.ends_with("Contents/MacOS/herdr-core")) {
+    let resolved = bin.canonicalize().unwrap_or_else(|_| bin.clone());
+    if !bundle_completion_path(&resolved, &crate::mods::home()) || !bundle_completion_writable(&resolved) {
         return Ok(());
     }
     // Never replace a contributor's build, package-manager core, or a host app.
@@ -291,6 +307,33 @@ mod tests {
         assert_eq!(std::env::split_paths(&merged).collect::<Vec<_>>(), ["/custom/bin", "/opt/homebrew/bin", "/usr/bin", "/home/test/.local/bin", "/bin"].map(PathBuf::from));
         let fallback = merged_path(None, &usual, &current).unwrap();
         assert_eq!(std::env::split_paths(&fallback).collect::<Vec<_>>(), ["/home/test/.local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin"].map(PathBuf::from));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bundle_completion_skips_managed_and_system_paths() {
+        let home = Path::new("/Users/test");
+        assert!(bundle_completion_path(&home.join(".local/bin/herdr-core"), home));
+        for bin in [
+            "/usr/local/bin/herdr-core",
+            "/opt/homebrew/Cellar/herdr-core/1/bin/herdr-core",
+            "/nix/store/abc/bin/herdr-core",
+            "/Users/test/.local/share/mise/installs/herdr-core/1/herdr-core",
+            "/Users/test/.local/share/herdr-core/current/Contents/MacOS/herdr-core",
+        ] {
+            assert!(!bundle_completion_path(Path::new(bin), home), "{bin}");
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bundle_completion_skips_unwritable_directories() {
+        assert!(bundle_completion_writable(&std::env::temp_dir().join("herdr-core")));
+        assert!(!bundle_completion_writable(Path::new("/nonexistent/herdr-core")));
+        let root = Command::new("id").arg("-u").output().unwrap().stdout == b"0\n";
+        if !root {
+            assert!(!bundle_completion_writable(Path::new("/usr/bin/herdr-core")));
+        }
     }
 
     #[cfg(unix)]
