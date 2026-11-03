@@ -23,6 +23,10 @@ its terminals.
 `app.check_updates` checks for newer releases. Settings reports "Up to date"
 only after a successful check; on failure, check the connection and retry.
 
+On macOS the Dock badge counts blocked and unseen-done agents across all
+connected machines' spaces, once per terminal. It clears at zero and works
+without notification permission; it follows the sidebar's agent statuses.
+
 ## Show something when asked
 
 New spaces and tabs are shown immediately: only create them when asked.
