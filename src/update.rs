@@ -117,7 +117,21 @@ pub fn set_core(version: Option<String>, managed: Option<String>) {
 }
 
 fn checks_app() -> Option<PathBuf> {
-    root().filter(|_| option_env!("HERDR_APP_RELEASE").is_some() || std::env::var_os("HERDR_RELEASES_URL").is_some())
+    root().filter(|_| (option_env!("HERDR_APP_RELEASE").is_some() || std::env::var_os("HERDR_RELEASES_URL").is_some()) && managed().is_none())
+}
+
+/// The package manager this app came from (`homebrew`, `nix`, `mise`), by where
+/// its binary lives, as herdr-core's `installed_by` finds its own. It updates the app.
+fn managed() -> Option<&'static str> {
+    let exe = std::env::current_exe().ok()?;
+    manager_of(&exe.canonicalize().unwrap_or(exe).display().to_string())
+}
+
+fn manager_of(path: &str) -> Option<&'static str> {
+    [("/Cellar/", "homebrew"), ("/nix/store/", "nix"), ("/mise/installs/", "mise")]
+        .into_iter()
+        .find(|(mark, _)| path.contains(mark))
+        .map(|(_, manager)| manager)
 }
 
 /// A release build checks the core; a source build only when pointed at a test release server.
@@ -128,7 +142,7 @@ fn checks_core() -> bool {
 /// For the settings screen: both programs, what's waiting, when we last looked.
 pub fn status() -> serde_json::Value {
     serde_json::json!({
-        "app": { "version": env!("CARGO_PKG_VERSION"), "ready": ready(), "updates": checks_app().is_some() },
+        "app": { "version": env!("CARGO_PKG_VERSION"), "ready": ready(), "updates": checks_app().is_some(), "managed": managed() },
         "notes": crate::update_notes::notes(ready().as_deref()),
         "core": core(),
         "checked": *CHECKED.lock().unwrap(),
@@ -607,6 +621,14 @@ pub fn after_update() {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn the_package_manager_is_read_from_the_path() {
+        assert_eq!(manager_of("/nix/store/abc-herdr-app-0.1.12/bin/herdr-app"), Some("nix"));
+        assert_eq!(manager_of("/opt/homebrew/Cellar/herdr-app/0.1.12/bin/herdr-app"), Some("homebrew"));
+        assert_eq!(manager_of("/home/me/.local/share/mise/installs/herdr-app/0.1.12/herdr-app"), Some("mise"));
+        assert_eq!(manager_of("/home/me/.local/share/herdr-app/herdr-app"), None);
+    }
 
     #[test]
     fn failed_check_clears_success_and_recovery_records_a_new_time() {
