@@ -215,7 +215,7 @@ export default class Files extends View {
     choices.push({ name: "Other…", app: null, other: true });
     this.at = Math.min(this.at, choices.length - 1);
     const choose = (choice, cx) => this.openInApplication(choice.app, cx, true, choice.other);
-    return v_flex().id("files-open-with").size_full().p(6).gap(4).bg(t.popover).text_color(t.foreground).text_size(13)
+    return v_flex().id("files-open-with").w_full().h(350).p(6).gap(4).bg(t.popover).text_color(t.foreground).text_size(13)
       .track_focus(this.handle).on_key_down((e, cx) => {
         if (e.key === "escape") closeOverlay(p.overlay);
         else if (e.key === "up") this.at = (this.at + choices.length - 1) % choices.length;
