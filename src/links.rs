@@ -123,7 +123,10 @@ pub fn open(target: &Target) {
 #[cfg(windows)]
 fn open_system(arg: &std::ffi::OsStr) {
     use std::os::windows::ffi::OsStrExt;
-    use windows_sys::Win32::UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL};
+    use windows_sys::Win32::{
+        System::Com::{COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize},
+        UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL},
+    };
 
     let mut wide: Vec<u16> = arg.encode_wide().collect();
     if wide.contains(&0) {
@@ -131,14 +134,20 @@ fn open_system(arg: &std::ffi::OsStr) {
         return;
     }
     wide.push(0);
-    // Explorer interprets '=' in URLs as its own arguments. Pass the whole
-    // target to the registered handler without a command-line parser instead.
-    let result = unsafe {
-        ShellExecuteW(std::ptr::null_mut(), std::ptr::null(), wide.as_ptr(), std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL)
-    } as isize;
-    if result <= 32 {
-        tracing::warn!("cannot open link: ShellExecuteW returned {result}");
-    }
+    // ShellExecuteW can pump messages; never reenter GPUI while it handles a click.
+    std::thread::spawn(move || {
+        let initialized = unsafe { CoInitializeEx(std::ptr::null(), (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) as u32) };
+        // Explorer interprets '=' as its own arguments; the handler gets a literal target.
+        let result = unsafe {
+            ShellExecuteW(std::ptr::null_mut(), std::ptr::null(), wide.as_ptr(), std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL)
+        } as isize;
+        if result <= 32 {
+            tracing::warn!("cannot open link: ShellExecuteW returned {result}");
+        }
+        if initialized >= 0 {
+            unsafe { CoUninitialize() };
+        }
+    });
 }
 
 #[cfg(not(windows))]

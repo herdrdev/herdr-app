@@ -63,7 +63,7 @@ libc = "0.2"
 gpui_windows = { package = "gpui-pre-windows", version = "=0.3.8", features = ["render-to-image"] }
 uds_windows = "1.2"
 raw-window-handle = "0.6"
-windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Console", "Win32_Media_Multimedia"] }
+windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_WindowsAndMessaging", "Win32_UI_Shell", "Win32_UI_Input_KeyboardAndMouse", "Win32_System_Console", "Win32_System_Com", "Win32_Media_Multimedia"] }
 
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
