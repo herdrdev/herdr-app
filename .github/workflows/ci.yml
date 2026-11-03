@@ -126,13 +126,16 @@ jobs:
         if: matrix.platform == 'linux-x86_64'
         run: python3 -m unittest discover -s scripts -p test_distribution.py
       - name: Install Bun
-        if: matrix.platform == 'linux-x86_64'
-        run: curl -fsSL https://bun.sh/install | bash -s "bun-v1.4.4"
+        uses: oven-sh/setup-bun@0c5077e51419868618aeaa5fe8019c62421857d6 # v2
+        with:
+          bun-version: 1.4.4
+      - name: Mod tests
+        run: bun test scripts/files.test.ts scripts/picker.test.ts scripts/palette.test.ts scripts/agents.test.ts scripts/spaces.test.ts
       - name: Check documentation
         if: matrix.platform == 'linux-x86_64'
         run: |
-          ~/.bun/bin/bun test scripts/docs.test.ts
-          ~/.bun/bin/bun scripts/docs.ts check
+          bun test scripts/docs.test.ts
+          bun scripts/docs.ts check
 
   # Keep the required check name stable while requiring every platform.
   test:

@@ -178,7 +178,16 @@ the title bar, panes as cards, a space picker) and `win98`
 writing a new file. The Files panel supports Windows folder paths with spaces,
 parentheses and apostrophes, and preserves Unicode file and folder names
 (including Chinese). Directory links expand as folders; their contents load
-only when expanded.
+only when expanded. Local previews offer **Open in <application>**, following
+that file type's system default. The arrow opens **Open with**, listing the
+applications the system associates with the current file, plus **Other…** to
+choose an application with a system picker. A successful selection is remembered
+per extension in shared `"files.openWith"` (entries contain `id`, `name`, and
+`kind`); choosing the system-default row removes that override. Remote files
+have no external-open button. On Linux, the application list uses GIO and
+xdg-utils; the Other picker uses zenity or kdialog. Open previews refresh when
+the folder changes and on the existing 10-second timer; unchanged content
+keeps its current view.
 
 **Herdr's own layouts and mods are read-only.** They are replaced whole
 on every start. Use settings.json for look (fonts, sizes, theme, colors,
