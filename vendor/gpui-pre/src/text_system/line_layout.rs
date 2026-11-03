@@ -702,7 +702,7 @@ impl LineLayoutCache {
                 .layout_line(&text, font_size, runs);
 
             if let Some(force_width) = force_width {
-                apply_force_width_to_layout(&mut layout, force_width);
+                apply_force_width_to_layout(&mut layout, &text, force_width);
             }
 
             let key = Arc::new(CacheKey {
@@ -853,7 +853,7 @@ impl LineLayoutCache {
             .layout_line(&text, font_size, runs);
 
         if let Some(force_width) = force_width {
-            apply_force_width_to_layout(&mut layout, force_width);
+            apply_force_width_to_layout(&mut layout, &text, force_width);
         }
 
         let key = Arc::new(HashedCacheKey {
@@ -896,7 +896,12 @@ impl LineLayoutCache {
 // loop must not advance the cell counter for these zero-advance glyphs,
 // otherwise they get displaced into the next cell. We detect them by checking
 // whether shaped x has advanced by at least half a cell beyond the last base.
-fn apply_force_width_to_layout(layout: &mut LineLayout, force_width: Pixels) {
+//
+// HERDR: CoreText draws a mark it has no precomposed glyph for (q + U+0301 in
+// JetBrains Mono) at the pen position after its base, with no advance and its
+// outline hanging back over the base, so its x is a whole advance past the
+// base. A glyph for a mark character therefore stays with its base too.
+fn apply_force_width_to_layout(layout: &mut LineLayout, text: &str, force_width: Pixels) {
     let mut glyph_pos: usize = 0;
     // NEG_INFINITY ensures the first glyph is always classified as a base.
     let mut last_base_shaped_x = px(f32::NEG_INFINITY);
@@ -906,7 +911,9 @@ fn apply_force_width_to_layout(layout: &mut LineLayout, force_width: Pixels) {
         for glyph in run.glyphs.iter_mut() {
             let shaped_x = glyph.position.x;
 
-            if shaped_x > last_base_shaped_x + force_width * 0.5 {
+            if shaped_x > last_base_shaped_x + force_width * 0.5
+                && (glyph_pos == 0 || !is_mark(text, glyph.index))
+            {
                 // HERDR: every base glyph goes on its cell. A 1px tolerance let
                 // glyphs creep then jump when the cell width differs from the
                 // font's advance (letter_spacing), so text wobbled.
@@ -919,6 +926,15 @@ fn apply_force_width_to_layout(layout: &mut LineLayout, force_width: Pixels) {
             }
         }
     }
+}
+
+// HERDR: whether the character at `index` is a combining mark (\p{M}).
+fn is_mark(text: &str, index: usize) -> bool {
+    static MARK: std::sync::LazyLock<regex::Regex> =
+        std::sync::LazyLock::new(|| regex::Regex::new(r"^\p{M}").unwrap());
+    text.get(index..)
+        .and_then(|rest| rest.chars().next())
+        .is_some_and(|c| !c.is_ascii() && MARK.is_match(c.encode_utf8(&mut [0; 4])))
 }
 
 /// A run of text with a single font.
@@ -1110,7 +1126,7 @@ mod tests {
         let cell_width = px(8.);
         let mut layout = make_layout(vec![glyph_at(0., 0), glyph_at(8., 1), glyph_at(16., 2)]);
 
-        apply_force_width_to_layout(&mut layout, cell_width);
+        apply_force_width_to_layout(&mut layout, "", cell_width);
 
         let positions = glyph_x_positions(&layout);
         assert_eq!(positions, vec![0., 8., 16.]);
@@ -1125,7 +1141,7 @@ mod tests {
             glyph_at(0., 3), // ี (combining mark, same x)
         ]);
 
-        apply_force_width_to_layout(&mut layout, cell_width);
+        apply_force_width_to_layout(&mut layout, "", cell_width);
 
         let positions = glyph_x_positions(&layout);
         assert_eq!(positions, vec![0., 0.]);
@@ -1136,7 +1152,7 @@ mod tests {
         let cell_width = px(8.);
         let mut layout = make_layout(vec![glyph_at(0., 0), glyph_at(0., 3), glyph_at(8., 6)]);
 
-        apply_force_width_to_layout(&mut layout, cell_width);
+        apply_force_width_to_layout(&mut layout, "", cell_width);
 
         let positions = glyph_x_positions(&layout);
         assert_eq!(positions, vec![0., 0., 8.]);
@@ -1153,7 +1169,7 @@ mod tests {
             glyph_at(8., 9), // next base
         ]);
 
-        apply_force_width_to_layout(&mut layout, cell_width);
+        apply_force_width_to_layout(&mut layout, "", cell_width);
 
         let positions = glyph_x_positions(&layout);
         assert_eq!(positions, vec![0., 0., 0., 8.]);
@@ -1169,7 +1185,7 @@ mod tests {
             glyph_at(19.8, 2),
         ]);
 
-        apply_force_width_to_layout(&mut layout, cell_width);
+        apply_force_width_to_layout(&mut layout, "", cell_width);
 
         let positions = glyph_x_positions(&layout);
         assert_eq!(positions, vec![0., 8., 16.]);
@@ -1181,7 +1197,7 @@ mod tests {
         // The combining mark keeps its offset from the base, which is on the grid.
         let mut layout = make_layout(vec![glyph_at(8.5, 0), glyph_at(8.75, 3)]);
 
-        apply_force_width_to_layout(&mut layout, cell_width);
+        apply_force_width_to_layout(&mut layout, "", cell_width);
 
         let positions = glyph_x_positions(&layout);
         assert_eq!(positions, vec![0., 0.25]);
@@ -1193,7 +1209,7 @@ mod tests {
         let cell_width = px(7.);
         let mut layout = make_layout((0..6).map(|i| glyph_at(i as f32 * 7.2, i)).collect());
 
-        apply_force_width_to_layout(&mut layout, cell_width);
+        apply_force_width_to_layout(&mut layout, "", cell_width);
 
         let positions = glyph_x_positions(&layout);
         assert_eq!(positions, vec![0., 7., 14., 21., 28., 35.]);
@@ -1205,9 +1221,22 @@ mod tests {
         let cell_width = px(10.5);
         let mut layout = make_layout((0..4).map(|i| glyph_at(i as f32 * 7., i)).collect());
 
-        apply_force_width_to_layout(&mut layout, cell_width);
+        apply_force_width_to_layout(&mut layout, "", cell_width);
 
         let positions = glyph_x_positions(&layout);
         assert_eq!(positions, vec![0., 10.5, 21., 31.5]);
+    }
+
+    #[test]
+    fn test_force_width_mark_at_the_pen_position_stays_with_its_base() {
+        // CoreText puts U+0301 after q at the pen position, one advance (7)
+        // past q, with no advance of its own; r follows at the same x.
+        let text = "q\u{301}rs";
+        let shaped = || make_layout(vec![glyph_at(0., 0), glyph_at(7., 1), glyph_at(7., 3), glyph_at(14., 4)]);
+        for (cell_width, expected) in [(7., vec![0., 7., 7., 14.]), (10.5, vec![0., 7., 10.5, 21.]), (5., vec![0., 7., 5., 10.])] {
+            let mut layout = shaped();
+            apply_force_width_to_layout(&mut layout, text, px(cell_width));
+            assert_eq!(glyph_x_positions(&layout), expected, "cells of {cell_width}");
+        }
     }
 }
