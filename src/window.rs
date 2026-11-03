@@ -1611,6 +1611,13 @@ impl AppWindow {
         self.pane_term(pane).map(|t| t.view.read(cx).focus_target(cx))
     }
 
+    /// The block showing `terminal` in the topmost overlay layout that has one.
+    fn window_terminal_block(&self, terminal: &str) -> Option<String> {
+        self.overlays.iter().rev().filter_map(|o| o.layout.as_ref()).find_map(|l| {
+            l.visible_blocks().into_iter().find(|n| n.terminal() == Some(terminal)).map(|n| n.id.clone())
+        })
+    }
+
     fn load(&self, inst: Instance, window: &mut Window, cx: &mut Context<Self>) -> Copy {
         let mut copy = Copy { inst, id: 0, root: None, _watch: None, error: None };
         let (Some(runtime), Some(folder)) = (&self.runtime, self.folders.get(&copy.inst.name)) else {
@@ -2965,6 +2972,19 @@ impl AppWindow {
                         f.focus(window, cx);
                     }
                     self.publish(cx);
+                    cx.notify();
+                    return;
+                }
+                // A window's terminal block, the topmost first: the keyboard goes
+                // there as a click would, so a mod can hand the keyboard to the
+                // window it brings forward. Model focus stays, as with a click.
+                if Self::arg(a, "pane").is_none()
+                    && let Some(terminal) = Self::arg(a, "terminal")
+                    && let Some(id) = self.window_terminal_block(terminal)
+                {
+                    if !self.overlays.iter().any(|o| o.kind.modal_keys()) && let Some(f) = self.pane_focus(&id, cx) {
+                        f.focus(window, cx);
+                    }
                     cx.notify();
                     return;
                 }
@@ -5296,6 +5316,40 @@ mod tests {
         cx.run_until_parked();
         cx.update(|window, cx| view.update(cx, |this, _| {
             assert!(this.pane_term("pa").unwrap().focus.is_focused(window));
+        }));
+    }
+
+    #[test]
+    fn pane_focus_reaches_a_window_terminal() {
+        in_own_process("window_terminal_focus");
+    }
+
+    #[gpui::test]
+    fn window_terminal_focus(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("window_terminal_focus") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "unused", "", json!({
+            "id": "pane", "type": "block", "content": { "terminal": "t1" }
+        }));
+        let window_with = |terminal: &str, key: &str| json!({ "kind": "window", "key": key, "width": 300, "height": 200,
+            "layout": { "id": "body", "type": "block", "content": { "terminal": terminal } } });
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.open_overlay("w1".into(), window_with("t2", "one"), window, cx);
+            this.open_overlay("w2".into(), window_with("t2", "two"), window, cx);
+            this.focused_pane = Some("pane".into());
+            this.pane_focus("pane", cx).unwrap().focus(window, cx);
+            this.dispatch("pane.focus", &json!({ "terminal": "t2" }), false, window, cx);
+            // The topmost window showing it has the keyboard; the pane stays selected.
+            let top = this.window_terminal_block("t2").unwrap();
+            assert!(top.starts_with("ovw2"), "{top}");
+            assert!(this.pane_focus(&top, cx).unwrap().is_focused(window));
+            assert_eq!(this.focused_pane.as_deref(), Some("pane"));
+            // A terminal in the layout itself still wins.
+            this.open_overlay("w3".into(), window_with("t1", "three"), window, cx);
+            this.dispatch("pane.focus", &json!({ "terminal": "t1" }), false, window, cx);
+            assert!(this.pane_focus("pane", cx).unwrap().is_focused(window));
         }));
     }
 

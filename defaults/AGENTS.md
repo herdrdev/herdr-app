@@ -554,7 +554,9 @@ The main ones:
   starts from that mod while it holds the keyboard.
   `pane.swap` uses geometry only. Focus history lasts until the window closes.
   `pane.focus {terminal}` prefers the first visible layout terminal block showing that
-  address, then its model pane. Clicking a terminal block focuses it too.
+  address, then a terminal block in a window (the topmost first: the keyboard goes
+  there as a click would, the focused pane stays), then its model pane. Clicking a
+  terminal block focuses it too.
   While a layout terminal block is focused, implicit split/close/zoom/go/swap and
   `terminal.show` fail, as do `terminal.open`/`terminal.keep` with place right/down.
   They never act on the terminal's source pane. An explicit `pane` still targets that
