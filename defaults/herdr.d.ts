@@ -354,6 +354,9 @@ export interface OverlaySpec {
   /** With `key`: the window also reopens on the next start (and when its layout shows again),
    *  until it's closed. Only the window comes back: a mod keeps its own state (`shared`). */
   keep?: boolean;
+  /** A window drawn above the other windows (still under dialogs, popups and toasts), however
+   *  recently they were pressed; among such windows the one pressed last is on top. */
+  on_top?: boolean;
   /** px, or up to 1: a share of the window. */
   width?: number;
   height?: number;
