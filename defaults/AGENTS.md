@@ -263,6 +263,14 @@ Properties any node can have:
   right-clicks (including Shift+right-click). Omit it for the shipped `menu`;
   an unknown mod logs a warning and falls back to `menu`. Clone a shipped
   layout before changing this field. Other menus are unchanged.
+- Root only: `"toast": "my-toast"` chooses the mod for all notifications,
+  including agent attention, errors and layout notes. Omit it for the shipped
+  `toast`; an unknown mod logs a warning and falls back to `toast`. Clone a
+  shipped layout before changing this field. Create your own mod folder rather
+  than editing the shipped `toast`, which is restored on start. The mod receives
+  the notification fields and `overlay` in `props()`; use
+  `closeOverlay(props().overlay)` to dismiss it. Toast size and bottom-right
+  placement are unchanged.
 - Colors are theme names (`border`, `accent`, `surface`, ...) or `#rrggbb[aa]`.
 
 A personal terminal menu replaces the whole menu; it doesn't merge items.

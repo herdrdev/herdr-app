@@ -228,7 +228,9 @@ export function focused(): { space: string; tab: string; pane: string | null; te
 /** The shown layout (layouts/<name>.json). Its name is shared("layout").
  *  Root `terminal_menu?: string` chooses a terminal right-click menu mod (default: "menu").
  *  Unknown names warn and fall back to "menu". This replaces the menu, not its items.
- *  Opens a pointer popup with mod.json overlay width/height (default 220×260). */
+ *  Opens a pointer popup with mod.json overlay width/height (default 220×260).
+ *  Root `toast?: string` chooses the mod for all notifications (default: "toast").
+ *  Unknown names warn and fall back to "toast"; size and placement are unchanged. */
 export function layout(): unknown;
 
 /** The names of every layout in layouts/ (main first). */
@@ -366,7 +368,9 @@ export function openOverlay(spec: OverlaySpec): string;
  *  dialog or popup. A kept window closed this way stays closed. */
 export function closeOverlay(id: string): null;
 
-/** Posts a notification. Shown by the `toast` mod (replaceable), which runs `action` when clicked.
+/** Posts a notification. Shown by the layout root's `toast` mod choice (default: "toast").
+ *  Unknown mod names warn and fall back to the shipped `toast`, which runs `action` when clicked.
+ *  The mod receives notification fields and `overlay` in props(); closeOverlay dismisses it.
  *  Herdr posts one itself when an agent needs you or finished while you weren't looking. Returns its id. */
 export function notify(n: {
   title: string;
