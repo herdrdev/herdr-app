@@ -486,6 +486,14 @@ the build doesn't do.
   command's first argument), `send:<text>` (types into the terminal),
   `<mod>.<command>` (delivered to that mod's `nextCommand()`), or `terminal`
   (the program gets the key).
+- Named, typed command arguments use an object instead of a string:
+  `"ctrl-shift-r": {"command": "layout.resize", "args": {"id": "sidebar", "px": 240}}`.
+  `command` names an app command; `args` is an object (optional, defaults to `{}`).
+  It can pass several arguments, numbers, booleans, arrays or nested objects.
+  String actions keep their literal first-argument shorthand, including numeric
+  indexes: `space.new:{work}` names a space `{work}`, and `space.new:{}` names it `{}`.
+  Invalid binding objects or rejected arguments show an error toast when pressed;
+  the key does not go to the terminal program.
 - Plain ctrl+letters go to the program unless bound. Programs rely on
   ctrl+c, ctrl+d, ctrl+l, ctrl+r, ctrl+w, ctrl+a, ctrl+e, ctrl+u, ctrl+k,
   ctrl+z and ctrl+[ (Escape); ctrl+alt is AltGr on Windows; option+digits

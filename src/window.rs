@@ -2660,9 +2660,13 @@ impl AppWindow {
     fn run(&mut self, name: &str, args: Value, window: &mut Window, cx: &mut Context<Self>) {
         // A click or key has nobody to read the reply: show why it failed.
         if let Some(error) = self.run_as(name, args, true, window, cx).get("error").and_then(Value::as_str) {
-            let spec = json!({"kind":"toast", "notification":{"title":format!("{name} failed"),"body":error,"level":"error"}});
-            self.open_overlay(mods::new_overlay_id(), spec, window, cx);
+            self.command_error(name, error, window, cx);
         }
+    }
+
+    fn command_error(&mut self, name: &str, error: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let spec = json!({"kind":"toast", "notification":{"title":format!("{name} failed"),"body":error,"level":"error"}});
+        self.open_overlay(mods::new_overlay_id(), spec, window, cx);
     }
 
     /// Runs a command and says what it made or why not. Scripts and agents
@@ -4746,6 +4750,19 @@ impl Render for AppWindow {
                     return;
                 }
                 this.run_action(a.id(), w, cx);
+            }))
+            .on_action(cx.listener(|this, a: &crate::keys::CommandBinding, w, cx| {
+                match a.command() {
+                    Ok((name, args)) => {
+                        #[cfg(target_os = "macos")]
+                        if let Some(action) = crate::macos::action(&name) {
+                            w.dispatch_action(action, cx);
+                            return;
+                        }
+                        this.run(&name, args, w, cx);
+                    }
+                    Err(error) => this.command_error("Key binding", &error, w, cx),
+                }
             }))
             // Ctrl (Cmd) alone shows links in the pane under the pointer, focused or not.
             .on_modifiers_changed(cx.listener(|this, _: &ModifiersChangedEvent, _, cx| {
