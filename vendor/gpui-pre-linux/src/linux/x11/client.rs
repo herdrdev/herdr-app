@@ -290,8 +290,10 @@ impl X11ClientStatePtr {
         }
 
         let scaled_bounds = bounds.scale(state.scale_factor);
+        // The spot is the insertion point's lower left corner: the candidate
+        // window hugs the preedit text from below.
         let spot = (
-            u32::from(scaled_bounds.origin.x + scaled_bounds.size.width) as i16,
+            u32::from(scaled_bounds.origin.x) as i16,
             u32::from(scaled_bounds.origin.y + scaled_bounds.size.height) as i16,
         );
         if state.last_ime_spot == Some(spot) {
@@ -862,7 +864,7 @@ impl X11Client {
             };
             if let Some(scaled_area) = window.get_ime_area() {
                 let point = xim::Point {
-                    x: u32::from(scaled_area.origin.x + scaled_area.size.width) as i16,
+                    x: u32::from(scaled_area.origin.x) as i16,
                     y: u32::from(scaled_area.origin.y + scaled_area.size.height) as i16,
                 };
                 spot = Some((point.x, point.y));
@@ -1636,7 +1638,7 @@ impl X11Client {
                     b.push(
                         xim::AttributeName::SpotLocation,
                         xim::Point {
-                            x: u32::from(scaled_area.origin.x + scaled_area.size.width) as i16,
+                            x: u32::from(scaled_area.origin.x) as i16,
                             y: u32::from(scaled_area.origin.y + scaled_area.size.height) as i16,
                         },
                     );
