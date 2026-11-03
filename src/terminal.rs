@@ -1396,6 +1396,22 @@ pub fn cell_size(window: &Window) -> Size<Pixels> {
     size(w, px((f32::from(h) * 1.15 * scale).ceil() / scale))
 }
 
+// Force-width shaping moves glyph origins, but does not resize fallback glyphs.
+fn fallback_size(c: &vt::Cell, font: &Font, width: Pixels, ts: &gpui::WindowTextSystem) -> Option<Pixels> {
+    if c.wide || c.text.is_ascii() {
+        return None;
+    }
+    let first = c.text.chars().next()?;
+    let size = px(crate::settings::font_size());
+    let primary = ts.resolve_font(font);
+    if ts.advance(primary, size, first).is_ok() {
+        return None;
+    }
+    let run = TextRun { len: c.text.len(), font: font.clone(), ..Default::default() };
+    let line = ts.shape_line(c.text.clone().into(), size, &[run], None);
+    (line.width() > width).then(|| size * f32::from(width) / f32::from(line.width()))
+}
+
 /// One piece of a row's drawing, in cells from the row's start.
 enum RowOp {
     Bg { from: usize, to: usize, color: Hsla },
@@ -1460,9 +1476,10 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
             ops.push(RowOp::Icon { x: start, offset: point(px(left), px(baseline)), font, glyph: GlyphId(icon.id), size, color });
             continue;
         }
+        let fitted_size = fallback_size(c, &text_font, cell.width, window.text_system());
         let mut text = if c.text.is_empty() { " ".to_owned() } else { c.text.clone() };
         // Shape the cursor cell separately, so its plain glyph doesn't cover a ligature.
-        if !c.wide && cursor != Some(start) {
+        if !c.wide && fitted_size.is_none() && cursor != Some(start) {
             while x < row.len() {
                 let d = &row[x];
                 let same = !d.wide
@@ -1474,7 +1491,7 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
                     && d.underline == c.underline
                     && d.strike == c.strike;
                 // Bundled fallback icons are fitted separately from the text run.
-                if !same || cursor == Some(x) || (d.text.is_empty() && !d.underline && !d.strike) || crate::sprites::is_sprite(&d.text) || fallback_icon(&d.text, &text_font, window.text_system()).is_some() {
+                if !same || cursor == Some(x) || (d.text.is_empty() && !d.underline && !d.strike) || crate::sprites::is_sprite(&d.text) || fallback_icon(&d.text, &text_font, window.text_system()).is_some() || fallback_size(d, &text_font, cell.width, window.text_system()).is_some() {
                     break;
                 }
                 text.push_str(if d.text.is_empty() { " " } else { &d.text });
@@ -1496,7 +1513,7 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
             strikethrough: c.strike.then(|| StrikethroughStyle { thickness: px(1.0), color: Some(color) }),
         };
         let force = (!c.wide).then_some(cell.width);
-        let line = window.text_system().shape_line(text.into(), px(crate::settings::font_size()), &[run], force);
+        let line = window.text_system().shape_line(text.into(), fitted_size.unwrap_or_else(|| px(crate::settings::font_size())), &[run], force);
         ops.push(RowOp::Text { x: start, line });
     }
     ops
@@ -2581,6 +2598,90 @@ mod tests {
                 assert_ne!(variants[0], variants[1], "{text}: ligatures must change the glyphs");
             }
         }
+        crate::settings::set((*original).clone());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fallback_symbols_fit_their_terminal_cells_pixels() {
+        use super::*;
+        use std::borrow::Cow;
+
+        struct Symbols;
+        impl Render for Symbols {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().bg(rgb(0x000000)).child(canvas(
+                    |_, _, _| {},
+                    |_, _, window, cx| {
+                        let cell = cell_size(window);
+                        for (y, text) in ["🕹", "🖥", "🌡", "🕹\u{fe0f}", "🖥\u{fe0f}", "🌡\u{fe0f}", "M"].iter().enumerate() {
+                            let wide = text.contains('\u{fe0f}');
+                            let mut row = vec![vt::Cell { text: text.to_string(), wide, fg: vt::Rgb(255, 0, 0), ..Default::default() }];
+                            if wide { row.push(vt::Cell::default()); }
+                            row.push(vt::Cell { text: "a".into(), fg: vt::Rgb(255, 255, 255), ..Default::default() });
+                            for op in row_ops(&row, cell, None, window) {
+                                if let RowOp::Text { x, line } = op {
+                                    line.paint(point(px(4.) + cell.width * x as f32, cell.height * y as f32), cell.height, TextAlign::Left, None, window, cx).unwrap();
+                                }
+                            }
+                        }
+                    },
+                ).size_full())
+            }
+        }
+
+        let platform = Arc::new(gpui_wgpu::CosmicTextSystem::new_without_system_fonts(crate::settings::DEFAULT_FONT));
+        let system = TextSystem::new(platform.clone());
+        system.add_fonts(vec![
+            Cow::Borrowed(include_bytes!("../assets/fonts/JetBrainsMono-Variable.ttf")),
+            Cow::Borrowed(include_bytes!("../vendor/ghostty/src/font/res/NotoEmoji-Regular.ttf")),
+        ]).unwrap();
+        let mut cx = HeadlessAppContext::with_platform(platform, Arc::new(()), gpui_platform::current_headless_renderer);
+        let original = crate::settings::get();
+        let mut settings = (*original).clone();
+        settings.font_family = crate::settings::DEFAULT_FONT.into();
+        settings.font_size = 24.;
+        crate::settings::set(settings);
+        let window = cx.open_window(size(px(120.), px(280.)), |_, cx| cx.new(|_| Symbols)).unwrap();
+        cx.update_window(window.into(), |_, window, cx| {
+            let _ = window.draw(cx);
+            let image = window.render_to_image().unwrap();
+            let row: Vec<_> = ["a", "🕹", "a", "🖥", "a", "🌡", "a"].into_iter()
+                .map(|text| vt::Cell { text: text.into(), ..Default::default() }).collect();
+            let ops = row_ops(&row, cell_size(window), None, window);
+            let text: Vec<_> = ops.iter().filter_map(|op| match op {
+                RowOp::Text { x, line } => Some((*x, line.font_size)),
+                _ => None,
+            }).collect();
+            assert_eq!(text.len(), 7, "oversized fallback must break a same-style run");
+            for (x, size) in text {
+                if x % 2 == 0 { assert_eq!(size, px(24.)); }
+                else { assert!(size < px(24.)); }
+            }
+            for text in ["🕹\u{fe0f}", "🖥\u{fe0f}", "🌡\u{fe0f}"] {
+                let row = [vt::Cell { text: text.into(), wide: true, ..Default::default() }];
+                for op in row_ops(&row, cell_size(window), None, window) {
+                    if let RowOp::Text { line, .. } = op { assert_eq!(line.font_size, px(24.)); }
+                }
+            }
+            if let Ok(path) = std::env::var("HERDR_SYMBOL_PIXELS") { image.save(path).unwrap(); }
+            let scale = window.scale_factor();
+            let cell = cell_size(window);
+            for (y, slots) in [1, 1, 1, 2, 2, 2, 1].into_iter().enumerate() {
+                let mut inside = 0;
+                let mut outside = 0;
+                for (x, py, pixel) in image.enumerate_pixels() {
+                    let logical_y = py as f32 / scale;
+                    if logical_y < f32::from(cell.height) * y as f32 || logical_y >= f32::from(cell.height) * (y + 1) as f32 { continue; }
+                    if pixel[0] > 80 && pixel[1] < 20 && pixel[2] < 20 {
+                        if x as f32 / scale < 4. + f32::from(cell.width) * slots as f32 { inside += 1; } else { outside += 1; }
+                    }
+                }
+                println!("symbol row {y}: inside={inside}, overflow={outside}");
+                assert!(inside > 10, "fixture must draw row {y}");
+                assert_eq!(outside, 0, "row {y} glyph must fit its {slots} cell(s)");
+            }
+        }).unwrap();
         crate::settings::set((*original).clone());
     }
 
