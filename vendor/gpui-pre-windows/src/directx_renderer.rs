@@ -606,37 +606,13 @@ impl DirectXRenderer {
             .batch_params_buffer
             .as_ref()
             .context("batch params buffer missing")?;
-        let pipelines = &self.pipelines;
-        // HERDR: draw runs of plain quads with the plain shaders. Runs keep
-        // the batch's order, so overlapping quads still blend the same way.
-        let mut run_start = 0;
-        while run_start < quads.len() {
-            let plain = is_plain_quad(&quads[run_start]);
-            let run_len = quads[run_start..]
-                .iter()
-                .take_while(|quad| is_plain_quad(quad) == plain)
-                .count();
-            let first = (start + run_start) as u32;
-            if plain {
-                pipelines.quad_pipeline.draw_range_with_shaders(
-                    &devices.device_context,
-                    batch_params,
-                    first,
-                    run_len as u32,
-                    &pipelines.plain_quad_vertex,
-                    &pipelines.plain_quad_fragment,
-                )?;
-            } else {
-                pipelines.quad_pipeline.draw_range(
-                    &devices.device_context,
-                    batch_params,
-                    first,
-                    run_len as u32,
-                )?;
-            }
-            run_start += run_len;
-        }
-        Ok(())
+        draw_quad_runs(
+            &self.pipelines,
+            &devices.device_context,
+            batch_params,
+            quads,
+            start,
+        )
     }
 
     fn draw_paths_to_intermediate(&mut self, paths: &[Path<ScaledPixels>]) -> Result<()> {
@@ -1708,12 +1684,64 @@ fn update_buffer<T>(
 // HERDR: a solid background with no border and no rounded corner, which
 // `quad_fragment` would fill with exactly its solid color.
 fn is_plain_quad(quad: &Quad) -> bool {
+    // Every field by name: a new `Quad` field fails to build here, so whoever
+    // adds it decides whether the plain shaders must handle it.
+    let Quad {
+        order: _,
+        border_style: _,
+        bounds: _,
+        content_mask: _,
+        background,
+        border_color: _,
+        corner_radii,
+        border_widths,
+    } = quad;
     let zero = ScaledPixels(0.0);
-    let r = &quad.corner_radii;
-    let b = &quad.border_widths;
-    quad.background.as_solid().is_some()
+    let r = corner_radii;
+    let b = border_widths;
+    background.as_solid().is_some()
         && [r.top_left, r.top_right, r.bottom_right, r.bottom_left] == [zero; 4]
         && [b.top, b.right, b.bottom, b.left] == [zero; 4]
+}
+
+// HERDR: draw a quad batch as runs of plain quads (plain shaders) and other
+// quads (full shaders). Runs keep the batch's order, so overlapping quads
+// still blend the same way. `start` is the batch's offset in the quad buffer.
+fn draw_quad_runs(
+    pipelines: &DirectXRenderPipelines,
+    device_context: &ID3D11DeviceContext,
+    batch_params: &ID3D11Buffer,
+    quads: &[Quad],
+    start: usize,
+) -> Result<()> {
+    let mut run_start = 0;
+    while run_start < quads.len() {
+        let plain = is_plain_quad(&quads[run_start]);
+        let run_len = quads[run_start..]
+            .iter()
+            .take_while(|quad| is_plain_quad(quad) == plain)
+            .count();
+        let first = (start + run_start) as u32;
+        if plain {
+            pipelines.quad_pipeline.draw_range_with_shaders(
+                device_context,
+                batch_params,
+                first,
+                run_len as u32,
+                &pipelines.plain_quad_vertex,
+                &pipelines.plain_quad_fragment,
+            )?;
+        } else {
+            pipelines.quad_pipeline.draw_range(
+                device_context,
+                batch_params,
+                first,
+                run_len as u32,
+            )?;
+        }
+        run_start += run_len;
+    }
+    Ok(())
 }
 
 fn update_batch_start(
@@ -2139,5 +2167,242 @@ mod dxgi {
             (number >> 16) & 0xFFFF,
             number & 0xFFFF
         ))
+    }
+}
+
+// HERDR: plain quads must look exactly like `quad_fragment` draws them, and
+// the plain pixel shader must stay tiny: WARP (no GPU) runs it on the CPU.
+#[cfg(test)]
+mod plain_quad_tests {
+    use super::*;
+    use windows::Win32::{Foundation::HMODULE, Graphics::Direct3D::Fxc::D3DReflect};
+
+    const WIDTH: u32 = 96;
+    const HEIGHT: u32 = 64;
+
+    fn scaled_bounds(x: f32, y: f32, width: f32, height: f32) -> Bounds<ScaledPixels> {
+        Bounds {
+            origin: point(ScaledPixels(x), ScaledPixels(y)),
+            size: size(ScaledPixels(width), ScaledPixels(height)),
+        }
+    }
+
+    fn quad(x: f32, y: f32, width: f32, height: f32, background: Background) -> Quad {
+        Quad {
+            order: 0,
+            border_style: BorderStyle::Solid,
+            bounds: scaled_bounds(x, y, width, height),
+            content_mask: ContentMask {
+                bounds: scaled_bounds(0., 0., WIDTH as f32, HEIGHT as f32),
+            },
+            background,
+            border_color: Hsla::default(),
+            corner_radii: Corners::default(),
+            border_widths: Edges::default(),
+        }
+    }
+
+    /// Plain and other quads, overlapping, so the runs must keep their order.
+    fn scene() -> Vec<Quad> {
+        let rounded = Quad {
+            corner_radii: Corners::all(ScaledPixels(8.)),
+            ..quad(4., 4., 40., 30., hsla(0.6, 0.7, 0.5, 1.).into())
+        };
+        let bordered = Quad {
+            border_widths: Edges::all(ScaledPixels(2.)),
+            border_color: hsla(0.3, 0.8, 0.3, 1.),
+            ..quad(50., 6., 30., 20., hsla(0.1, 0.5, 0.8, 1.).into())
+        };
+        let gradient = quad(
+            24.,
+            40.,
+            24.,
+            20.,
+            linear_gradient(
+                90.,
+                linear_color_stop(hsla(0., 1., 0.5, 1.), 0.),
+                linear_color_stop(hsla(0.6, 1., 0.5, 1.), 1.),
+            ),
+        );
+        let clipped = Quad {
+            content_mask: ContentMask {
+                bounds: scaled_bounds(60., 30., 20., 20.),
+            },
+            ..quad(50., 25., 40., 35., hsla(0.8, 0.6, 0.5, 1.).into())
+        };
+        vec![
+            quad(
+                0.,
+                0.,
+                WIDTH as f32,
+                HEIGHT as f32,
+                hsla(0., 0., 0.95, 1.).into(),
+            ),
+            rounded,
+            // Half transparent, over the rounded quad.
+            quad(20.3, 10.6, 30.5, 25.2, hsla(0., 0.8, 0.5, 0.5).into()),
+            bordered,
+            quad(2., 40., 20., 20., hsla(0.5, 0.6, 0.4, 1.).into()),
+            gradient,
+            clipped,
+        ]
+    }
+
+    /// Draws `quads` into a WIDTH x HEIGHT target, either through
+    /// `draw_quad_runs` or all with the full quad shaders, and reads it back.
+    fn render(quads: &[Quad], runs: bool) -> Vec<u8> {
+        let mut device: Option<ID3D11Device> = None;
+        let mut context: Option<ID3D11DeviceContext> = None;
+        unsafe {
+            D3D11CreateDevice(
+                None,
+                D3D_DRIVER_TYPE_WARP,
+                HMODULE::default(),
+                D3D11_CREATE_DEVICE_BGRA_SUPPORT,
+                None,
+                D3D11_SDK_VERSION,
+                Some(&mut device),
+                None,
+                Some(&mut context),
+            )
+        }
+        .expect("WARP device");
+        let (device, context) = (device.unwrap(), context.unwrap());
+        let mut pipelines = DirectXRenderPipelines::new(&device).unwrap();
+        let globals = DirectXGlobalElements::new(&device).unwrap();
+
+        let desc = D3D11_TEXTURE2D_DESC {
+            Width: WIDTH,
+            Height: HEIGHT,
+            MipLevels: 1,
+            ArraySize: 1,
+            Format: RENDER_TARGET_FORMAT,
+            SampleDesc: DXGI_SAMPLE_DESC {
+                Count: 1,
+                Quality: 0,
+            },
+            Usage: D3D11_USAGE_DEFAULT,
+            BindFlags: D3D11_BIND_RENDER_TARGET.0 as u32,
+            CPUAccessFlags: 0,
+            MiscFlags: 0,
+        };
+        let mut target: Option<ID3D11Texture2D> = None;
+        unsafe { device.CreateTexture2D(&desc, None, Some(&mut target)) }.unwrap();
+        let target = target.unwrap();
+        let mut view: Option<ID3D11RenderTargetView> = None;
+        unsafe { device.CreateRenderTargetView(&target, None, Some(&mut view)) }.unwrap();
+        let viewport = D3D11_VIEWPORT {
+            TopLeftX: 0.,
+            TopLeftY: 0.,
+            Width: WIDTH as f32,
+            Height: HEIGHT as f32,
+            MinDepth: 0.,
+            MaxDepth: 1.,
+        };
+        update_buffer(
+            &context,
+            globals.global_params_buffer.as_ref().unwrap(),
+            &[GlobalParams {
+                viewport_size: [WIDTH as f32, HEIGHT as f32],
+                ..Default::default()
+            }],
+        )
+        .unwrap();
+        unsafe {
+            context.ClearRenderTargetView(view.as_ref().unwrap(), &[0.2, 0.3, 0.4, 1.0]);
+            context.OMSetRenderTargets(Some(slice::from_ref(&view)), None);
+            context.RSSetViewports(Some(slice::from_ref(&viewport)));
+            context.VSSetConstantBuffers(0, Some(slice::from_ref(&globals.global_params_buffer)));
+            context.VSSetConstantBuffers(1, Some(slice::from_ref(&globals.batch_params_buffer)));
+            context.PSSetConstantBuffers(0, Some(slice::from_ref(&globals.global_params_buffer)));
+        }
+        if !quads.is_empty() {
+            pipelines
+                .quad_pipeline
+                .update_buffer(&device, &context, quads)
+                .unwrap();
+            let batch_params = globals.batch_params_buffer.as_ref().unwrap();
+            if runs {
+                draw_quad_runs(&pipelines, &context, batch_params, quads, 0).unwrap();
+            } else {
+                pipelines
+                    .quad_pipeline
+                    .draw_range(&context, batch_params, 0, quads.len() as u32)
+                    .unwrap();
+            }
+        }
+
+        let staging_desc = D3D11_TEXTURE2D_DESC {
+            Usage: D3D11_USAGE_STAGING,
+            BindFlags: 0,
+            CPUAccessFlags: D3D11_CPU_ACCESS_READ.0 as u32,
+            ..desc
+        };
+        let mut staging: Option<ID3D11Texture2D> = None;
+        unsafe { device.CreateTexture2D(&staging_desc, None, Some(&mut staging)) }.unwrap();
+        let staging = staging.unwrap();
+        let row_bytes = WIDTH as usize * 4;
+        let mut pixels = vec![0u8; row_bytes * HEIGHT as usize];
+        unsafe {
+            context.CopyResource(&staging, &target);
+            let mut mapped = D3D11_MAPPED_SUBRESOURCE::default();
+            context
+                .Map(&staging, 0, D3D11_MAP_READ, 0, Some(&mut mapped))
+                .unwrap();
+            for row in 0..HEIGHT as usize {
+                let source = (mapped.pData as *const u8).add(row * mapped.RowPitch as usize);
+                std::ptr::copy_nonoverlapping(
+                    source,
+                    pixels.as_mut_ptr().add(row * row_bytes),
+                    row_bytes,
+                );
+            }
+            context.Unmap(&staging, 0);
+        }
+        pixels
+    }
+
+    #[::core::prelude::v1::test]
+    fn plain_quads_are_solid_unrounded_and_borderless() {
+        let plain: Vec<bool> = scene().iter().map(is_plain_quad).collect();
+        assert_eq!(plain, [true, false, true, false, true, false, true]);
+    }
+
+    #[::core::prelude::v1::test]
+    fn plain_quad_runs_draw_the_same_pixels_as_the_quad_shader() {
+        let quads = scene();
+        let with_runs = render(&quads, true);
+        let full = render(&quads, false);
+        assert_ne!(full, render(&[], false), "the scene must draw something");
+        let differing = with_runs
+            .chunks_exact(4)
+            .zip(full.chunks_exact(4))
+            .filter(|(a, b)| a != b)
+            .count();
+        assert_eq!(differing, 0, "{differing} pixels differ");
+    }
+
+    #[::core::prelude::v1::test]
+    fn plain_quad_fragment_stays_small() {
+        let raw = RawShaderBytes::new(ShaderModule::PlainQuad, ShaderTarget::Fragment).unwrap();
+        let bytes = raw.as_bytes();
+        let reflection: ID3D11ShaderReflection = unsafe {
+            let mut out = std::ptr::null_mut();
+            D3DReflect(
+                bytes.as_ptr().cast(),
+                bytes.len(),
+                &ID3D11ShaderReflection::IID,
+                &mut out,
+            )
+            .unwrap();
+            ID3D11ShaderReflection::from_raw(out)
+        };
+        let mut desc = D3D11_SHADER_DESC::default();
+        unsafe { reflection.GetDesc(&mut desc) }.unwrap();
+        assert!(
+            desc.InstructionCount <= 4,
+            "plain_quad_fragment has {} instructions; WARP runs each of them for every pixel",
+            desc.InstructionCount
+        );
     }
 }
