@@ -366,9 +366,12 @@ impl TerminalView {
     /// The focused terminal remains the action target while its local find
     /// input owns keyboard focus (notably for search, copy and paste commands).
     pub fn owns_keyboard_focus(&self, window: &Window, cx: &App) -> bool {
-        self.focus.is_focused(window)
-            || self.search_open
-                && self.search_input.as_ref().is_some_and(|input| input.read(cx).focus_handle(cx).is_focused(window))
+        self.focus.is_focused(window) || self.find_field_focused(window, cx)
+    }
+
+    fn find_field_focused(&self, window: &Window, cx: &App) -> bool {
+        self.search_open
+            && self.search_input.as_ref().is_some_and(|input| input.read(cx).focus_handle(cx).is_focused(window))
     }
 
     pub fn detach(&self) {
@@ -684,11 +687,12 @@ impl TerminalView {
     }
 
     fn key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if self.search_open {
-            if ev.keystroke.key == "escape" {
-                self.close_search(window, cx);
-                cx.stop_propagation();
-            }
+        if self.search_open && ev.keystroke.key == "escape" {
+            self.close_search(window, cx);
+            cx.stop_propagation();
+            return;
+        }
+        if self.find_field_focused(window, cx) {
             // The input entity owns text editing and Enter navigation; never
             // leak its keystrokes into the shell running in this terminal.
             return;
@@ -1579,11 +1583,12 @@ impl EntityInputHandler for TerminalView {
         cx.notify();
     }
 
-    fn replace_text_in_range(&mut self, _range: Option<std::ops::Range<usize>>, text: &str, _w: &mut Window, cx: &mut Context<Self>) {
+    fn replace_text_in_range(&mut self, _range: Option<std::ops::Range<usize>>, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.grid.borrow_mut().marked = None;
-        // The find bar being open contains every keystroke (see `key_down`);
-        // the input-method path must not be a way around that.
-        if !self.search_open {
+        // While the find field holds the keys, the input-method path must not
+        // be a way around that (see `key_down`); with the terminal focused,
+        // input methods type into the program as usual.
+        if !self.find_field_focused(window, cx) {
             self.send(text.as_bytes());
         }
         cx.notify();
@@ -1594,11 +1599,12 @@ impl EntityInputHandler for TerminalView {
         _range: Option<std::ops::Range<usize>>,
         text: &str,
         _selected: Option<std::ops::Range<usize>>,
-        _w: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
-        // Composition previews stay out of the terminal too while its find bar is open.
-        if self.search_open {
+        // Composition previews stay out of the terminal too while the find
+        // field holds the keys; with the terminal focused they show as usual.
+        if self.find_field_focused(window, cx) {
             return;
         }
         self.grid.borrow_mut().marked = (!text.is_empty()).then(|| text.to_owned());
@@ -1620,8 +1626,7 @@ impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::bench::count(&crate::bench::TERMINAL);
         let terminal_focused = self.focus.is_focused(window);
-        let search_focused = self.search_open
-            && self.search_input.as_ref().is_some_and(|input| input.read(cx).focus_handle(cx).is_focused(window));
+        let search_focused = self.find_field_focused(window, cx);
         // The find input is part of this terminal's interaction, not a loss of
         // attention to the terminal itself. Keep core focus/cursor state, while
         // only installing the terminal's IME handler when its own focus handle
@@ -1668,10 +1673,10 @@ impl Render for TerminalView {
             .relative()
             // Below 1, the layout's background shows through (cells a program colors stay solid).
             .bg(hsla(vt::theme().bg).opacity(crate::settings::get().terminal_opacity))
-            .on_action(cx.listener(|this, a: &gpui_shell::action::ShellAction, _, cx| {
+            .on_action(cx.listener(|this, a: &gpui_shell::action::ShellAction, window, cx| {
                 // `send:<text>` bindings from keys.json type into this terminal.
                 match a.id().strip_prefix("send:") {
-                    Some(_) if this.search_open => cx.stop_propagation(),
+                    Some(_) if this.find_field_focused(window, cx) => cx.stop_propagation(),
                     Some(text) => this.send(text.as_bytes()),
                     None => cx.propagate(),
                 }
@@ -2150,7 +2155,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn terminal_input_methods_are_contained_while_its_find_bar_is_open(cx: &mut gpui::TestAppContext) {
+    fn input_methods_follow_keyboard_focus_while_the_find_bar_is_open(cx: &mut gpui::TestAppContext) {
         use gpui::*;
 
         struct Root(Entity<super::TerminalView>);
@@ -2166,21 +2171,10 @@ mod tests {
         })));
         cx.run_until_parked();
 
-        // The bar is open and the terminal canvas was clicked, so the terminal
-        // root (not the find field) owns keyboard focus: text input methods
-        // must not become a way around the find bar's containment.
         cx.update(|window, app| {
             root.update(app, |root, app| {
                 root.0.update(app, |terminal, cx| {
                     terminal.open_search(window, cx);
-                    terminal.focus.focus(window, cx);
-                });
-            });
-        });
-        cx.run_until_parked();
-        cx.update(|window, app| {
-            root.update(app, |root, app| {
-                root.0.update(app, |terminal, cx| {
                     gpui::EntityInputHandler::replace_text_in_range(terminal, None, "leak", window, cx);
                     gpui::EntityInputHandler::replace_and_mark_text_in_range(terminal, None, "leak", None, window, cx);
                 });
@@ -2188,20 +2182,76 @@ mod tests {
         });
         root.read_with(cx, |root, cx| {
             let terminal = root.0.read(cx);
-            assert!(terminal.typed_at.get().is_none(), "text reached the program while the find bar was open");
-            assert!(terminal.grid.borrow().marked.is_none(), "composition previewed while the find bar was open");
+            assert!(terminal.typed_at.get().is_none(), "text reached the program while the find field held the keys");
+            assert!(terminal.grid.borrow().marked.is_none(), "composition previewed while the find field held the keys");
         });
 
-        // With the bar closed, the same text reaches the program again.
+        // The terminal canvas was clicked: the terminal root (not the find
+        // field) owns keyboard focus, so text input methods reach the program
+        // while the bar stays open.
         cx.update(|window, app| {
             root.update(app, |root, app| {
                 root.0.update(app, |terminal, cx| {
-                    terminal.close_search(window, cx);
+                    terminal.focus.focus(window, cx);
                     gpui::EntityInputHandler::replace_text_in_range(terminal, None, "typed", window, cx);
                 });
             });
         });
-        root.read_with(cx, |root, cx| assert!(root.0.read(cx).typed_at.get().is_some()));
+        root.read_with(cx, |root, cx| {
+            let terminal = root.0.read(cx);
+            assert!(terminal.search_open);
+            assert!(terminal.typed_at.get().is_some(), "text did not reach the program once the terminal held the keys");
+        });
+    }
+
+    #[gpui::test]
+    fn typing_reaches_the_program_while_the_find_bar_is_open(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        struct Root(Entity<super::TerminalView>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(self.0.clone())
+            }
+        }
+
+        cx.update(gpui_base::init);
+        let (root, cx) = cx.add_window_view(|_, cx| Root(cx.new(|cx| {
+            super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 6), cx)
+        })));
+        cx.run_until_parked();
+
+        cx.update(|window, app| {
+            root.update(app, |root, app| {
+                root.0.update(app, |terminal, cx| terminal.open_search(window, cx));
+            });
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("l s");
+        cx.run_until_parked();
+        root.read_with(cx, |root, cx| {
+            let terminal = root.0.read(cx);
+            assert_eq!(terminal.search_query, "ls");
+            assert!(terminal.typed_at.get().is_none(), "keystrokes reached the program while the find field held the keys");
+        });
+
+        cx.update(|window, app| {
+            root.update(app, |root, app| {
+                root.0.update(app, |terminal, cx| terminal.focus.focus(window, cx));
+            });
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("l s");
+        cx.run_until_parked();
+        root.read_with(cx, |root, cx| {
+            let terminal = root.0.read(cx);
+            assert!(terminal.search_open);
+            assert!(terminal.typed_at.get().is_some(), "keystrokes did not reach the program once the terminal held the keys");
+        });
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        root.read_with(cx, |root, cx| assert!(!root.0.read(cx).search_open));
     }
 
     #[cfg(target_os = "macos")]

@@ -497,8 +497,9 @@ the build doesn't do.
 - Terminal keys honor the program's negotiated Kitty mode, including on Windows.
 - Windows terminal Escape stays separate from the following key.
 - Search: `ctrl-shift-f` (Cmd-F on macOS) opens a find bar inside the focused terminal;
-  Enter/Shift-Enter moves through matches and Escape closes it. Each terminal keeps
-  its own query, and reopening selects it so typing replaces it. Search covers the screen and scrollback without replacing text selection.
+  Enter/Shift-Enter moves through matches and Escape closes it. Clicking the terminal
+  while the bar is open puts typing back in the program; the bar and its matches stay.
+  Each terminal keeps its own query, and reopening selects it so typing replaces it. Search covers the screen and scrollback without replacing text selection.
 
 ## Commands
 
