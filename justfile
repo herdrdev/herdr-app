@@ -43,7 +43,7 @@ build:
     cargo build --locked
 
 test:
-    bun test scripts/files.test.ts scripts/picker.test.ts scripts/palette.test.ts scripts/agents.test.ts scripts/spaces.test.ts
+    bun test scripts/files.test.ts scripts/picker.test.ts scripts/palette.test.ts scripts/agents.test.ts scripts/spaces.test.ts scripts/settings.test.ts
     cargo test --locked
 
 docs-generate: build
