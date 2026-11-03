@@ -820,11 +820,6 @@ pub fn run_here(command: &str, args: &[String]) -> Option<String> {
     run_blocking(command, args, None).ok().map(|(_, out, _)| out)
 }
 
-/// A program's output on another machine, if it ran.
-pub fn run_on(machine: &str, command: &str, args: &[String]) -> Option<String> {
-    run_remote(machine, command, args, None).ok().map(|(_, out, _)| String::from_utf8_lossy(&out).into_owned())
-}
-
 /// The agents a machine can start (`knownAgents()`), asked at most once a minute.
 fn known_agents(on: Option<String>, list: Vec<Value>) -> Value {
     type InstalledCache = std::collections::HashMap<Option<String>, (std::time::Instant, Vec<String>, Vec<String>)>;
