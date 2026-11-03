@@ -117,9 +117,7 @@ fn dirs_on(path: &std::ffi::OsStr) -> impl Iterator<Item = PathBuf> + '_ {
 /// (~/.local/bin), Homebrew, mise, Nix, cargo.
 fn usual_dirs(home: &Path) -> Vec<PathBuf> {
     if cfg!(windows) {
-        let local = std::env::var_os("LOCALAPPDATA")
-            .map(PathBuf::from)
-            .unwrap_or_else(|| home.join("AppData/Local"));
+        let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(|| home.join("AppData/Local"));
         return vec![local.join("Programs/herdr-core"), home.join(".cargo/bin")];
     }
     let mut dirs = vec![
@@ -211,57 +209,47 @@ pub fn update_to(at_least: Option<&str>) -> Result<String, String> {
     if let Some(v) = at_least {
         cmd.args(["--version", v]);
     }
-    let out = cmd
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("cannot run hc update: {e}"))?;
+    let out = cmd.stdin(Stdio::null()).output().map_err(|e| format!("cannot run hc update: {e}"))?;
     let reply: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
     if out.status.success() {
-        let now = reply
-            .get("now")
-            .and_then(|v| v.as_str())
-            .unwrap_or("the latest")
-            .to_owned();
+        let now = reply.get("now").and_then(|v| v.as_str()).unwrap_or("the latest").to_owned();
         #[cfg(target_os = "macos")]
         ensure_core_bundle(&now)?;
         return Ok(now);
     }
     let err: serde_json::Value = serde_json::from_slice(&out.stderr).unwrap_or_default();
-    let message = err
-        .pointer("/error/message")
-        .and_then(|v| v.as_str())
-        .map(str::to_owned);
-    let hint = err
-        .pointer("/error/hint")
-        .and_then(|v| v.as_str())
-        .map(|h| format!(" ({h})"))
-        .unwrap_or_default();
-    Err(message
-        .map(|m| m + &hint)
-        .unwrap_or_else(|| String::from_utf8_lossy(&out.stderr).trim().to_owned()))
+    let message = err.pointer("/error/message").and_then(|v| v.as_str()).map(str::to_owned);
+    let hint = err.pointer("/error/hint").and_then(|v| v.as_str()).map(|h| format!(" ({h})")).unwrap_or_default();
+    Err(message.map(|m| m + &hint).unwrap_or_else(|| String::from_utf8_lossy(&out.stderr).trim().to_owned()))
 }
+
+#[cfg(any(target_os = "macos", all(test, unix)))]
+const BUNDLE_INSTALL_SCRIPT: &str = "installer=$(curl -fsSL \"$1/core/install.sh\") && case \"$installer\" in *HC_BUNDLE_ONLY*) printf '%s\\n' \"$installer\" | sh ;; *) exit 0 ;; esac";
 
 /// Old core updaters copied only the bare executable. Finish that upgrade
 /// with the current installer, which retains the complete signed app bundle.
 #[cfg(target_os = "macos")]
 fn ensure_core_bundle(version: &str) -> Result<(), String> {
     let bin = path();
-    if bin
-        .canonicalize()
-        .ok()
-        .is_some_and(|p| p.ends_with("Contents/MacOS/herdr-core"))
-    {
+    if bin.canonicalize().ok().is_some_and(|p| p.ends_with("Contents/MacOS/herdr-core")) {
         return Ok(());
     }
-    let releases =
-        std::env::var("HERDR_RELEASES_URL").unwrap_or_else(|_| "https://releases.herdr.dev".into());
+    // Never replace a contributor's build, package-manager core, or a host app.
+    let official = crate::spawn::command("/usr/bin/codesign")
+        .args(["--verify", "--strict", "-R", "=identifier \"dev.herdr.core\" and anchor apple generic and certificate leaf[subject.OU] = \"2W9652Q7QR\""])
+        .arg(&bin).output().is_ok_and(|out| out.status.success());
+    if !official {
+        return Ok(());
+    }
+    let releases = std::env::var("HERDR_RELEASES_URL").unwrap_or_else(|_| "https://releases.herdr.dev".into());
     let mut cmd = crate::spawn::command("sh");
     cmd.args([
         "-c",
-        "installer=$(curl -fsSL \"$1/core/install.sh\") && printf '%s\\n' \"$installer\" | sh",
+        BUNDLE_INSTALL_SCRIPT,
         "sh",
         &releases,
     ]);
+    cmd.env("HC_BUNDLE_ONLY", "1");
     if let Some(v) = version.strip_prefix("hc ") {
         cmd.env("HC_VERSION", v);
     }
@@ -303,6 +291,19 @@ mod tests {
         assert_eq!(std::env::split_paths(&merged).collect::<Vec<_>>(), ["/custom/bin", "/opt/homebrew/bin", "/usr/bin", "/home/test/.local/bin", "/bin"].map(PathBuf::from));
         let fallback = merged_path(None, &usual, &current).unwrap();
         assert_eq!(std::env::split_paths(&fallback).collect::<Vec<_>>(), ["/home/test/.local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin"].map(PathBuf::from));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn bundle_completion_does_not_run_a_legacy_installer() {
+        for (installer, expected) in [("echo restarted", ""), ("# HC_BUNDLE_ONLY\necho bundled", "bundled\n")] {
+            let out = Command::new("sh")
+                .args(["-c", &format!("curl() {{ printf '%s\\n' \"$INSTALLER\"; }}; {BUNDLE_INSTALL_SCRIPT}")])
+                .env("INSTALLER", installer)
+                .output().unwrap();
+            assert!(out.status.success());
+            assert_eq!(String::from_utf8(out.stdout).unwrap(), expected);
+        }
     }
 
     // Fakes the binary with a shell script.
