@@ -716,6 +716,10 @@ What's about the user, never a look:
   pane's right edge (default `true`). It shows only when the pane has
   scrollback — never on the alternate screen (editors, pagers) — and
   drags to move through it.
+- `done_until_input`: `true` keeps a finished agent "done" until you send its
+  terminal input (type, paste, drop a file, or click in it), instead of until
+  it is on screen. Watching it finish no longer counts as seeing it either
+  (it still doesn't ring). Default `false`.
 - `telemetry`: `false` stops anonymous usage data and deletes what wasn't
   sent (on when absent; Settings → Privacy shows each report word for
   word, and `telemetry()` in mods). Once a day the app sends counts:

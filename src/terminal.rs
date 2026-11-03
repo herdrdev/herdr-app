@@ -47,6 +47,8 @@ pub enum TerminalEvent {
     Ended,
     /// Right-click where the program doesn't take the mouse: the pane menu.
     ContextMenu(Point<Pixels>),
+    /// The person sent the program input: typed, pasted, dropped or clicked.
+    Input,
 }
 
 /// What the canvas closures need, shared outside the entity so prepaint can resize.
@@ -524,7 +526,7 @@ impl TerminalView {
         self.shown_in.get() == FRAME.load(Ordering::Relaxed)
     }
 
-    fn send(&self, bytes: &[u8]) {
+    fn send(&self, bytes: &[u8], cx: &mut Context<Self>) {
         self.typed_at.set(Some(Instant::now()));
         let mut g = self.grid.borrow_mut();
         if let Some(ch) = g.channel
@@ -532,6 +534,7 @@ impl TerminalView {
         {
             g.vt.scroll_to_bottom();
             g.core.input(ch, bytes);
+            cx.emit(TerminalEvent::Input);
         }
     }
 
@@ -542,7 +545,7 @@ impl TerminalView {
         if !self.address.contains('/') {
             let text = quote_paths(paths.iter().map(|p| p.to_string_lossy().into_owned()));
             let bytes = self.grid.borrow().vt.paste_bytes(&text);
-            return self.send(&bytes);
+            return self.send(&bytes, cx);
         }
         self.put_there(paths, false, cx);
     }
@@ -570,9 +573,9 @@ impl TerminalView {
                 })
                 .await;
             if !there.is_empty() {
-                let _ = this.update(cx, |this, _| {
+                let _ = this.update(cx, |this, cx| {
                     let bytes = this.grid.borrow().vt.paste_bytes(&quote_paths(there));
-                    this.send(&bytes);
+                    this.send(&bytes, cx);
                 });
             }
         })
@@ -587,7 +590,7 @@ impl TerminalView {
             self.dropped(paths, cx);
         } else if let Some(text) = item.text() {
             let bytes = self.grid.borrow().vt.paste_bytes(&text);
-            self.send(&bytes);
+            self.send(&bytes, cx);
         } else if item.entries().iter().any(|e| matches!(e, ClipboardEntry::Image(_))) {
             self.paste_image(cx);
         }
@@ -601,7 +604,7 @@ impl TerminalView {
         let text = if cfg!(windows) { cx.read_from_clipboard().and_then(|c| c.text()) } else { None };
         let bytes = paste_image_fallback(&mut self.grid.borrow_mut().vt, text.as_deref());
         if let Some(bytes) = bytes {
-            self.send(&bytes);
+            self.send(&bytes, cx);
         }
     }
 
@@ -760,7 +763,7 @@ impl TerminalView {
         }
         let bytes = key_bytes(&mut self.grid.borrow_mut().vt, ev);
         if let Some(bytes) = bytes {
-            self.send(&bytes);
+            self.send(&bytes, cx);
             cx.stop_propagation();
         }
     }
@@ -1782,7 +1785,7 @@ impl EntityInputHandler for TerminalView {
         // be a way around that (see `key_down`); with the terminal focused,
         // input methods type into the program as usual.
         if !self.find_field_focused(window, cx) {
-            self.send(text.as_bytes());
+            self.send(text.as_bytes(), cx);
         }
         cx.notify();
     }
@@ -1873,7 +1876,7 @@ impl Render for TerminalView {
                 // `send:<text>` bindings from keys.json type into this terminal.
                 match a.id().strip_prefix("send:") {
                     Some(_) if this.find_field_focused(window, cx) => cx.stop_propagation(),
-                    Some(text) => this.send(text.as_bytes()),
+                    Some(text) => this.send(text.as_bytes(), cx),
                     None => cx.propagate(),
                 }
             }))
@@ -1920,6 +1923,9 @@ impl Render for TerminalView {
                 drop(g);
                 if !this.mouse(GHOSTTY_MOUSE_ACTION_PRESS, Some(ev.button), ev.position, ev.modifiers) {
                     this.start_selection(ev.position, cx);
+                } else {
+                    // A click the program takes (a choice in an agent's menu) answers it.
+                    cx.emit(TerminalEvent::Input);
                 }
             }))
             // Right-click is Herdr's menu, even when the program tracks the mouse

@@ -402,6 +402,8 @@ pub struct AppWindow {
     written_seen: HashMap<String, u64>,
     /// Agents the person is looking at, and the turn they were shared as seen at.
     looked: HashMap<String, u64>,
+    /// When the person last sent each terminal input, ms (`done_until_input`).
+    answered: HashMap<String, u64>,
     watched: Watched,
     /// Core's terminal records by address.
     live: HashMap<String, Value>,
@@ -496,6 +498,7 @@ impl AppWindow {
             written_where: HashMap::new(),
             written_seen: HashMap::new(),
             looked: HashMap::new(),
+            answered: HashMap::new(),
             watched: Watched::default(),
             live: HashMap::new(),
             listed_once: false,
@@ -1405,6 +1408,7 @@ impl AppWindow {
                 TerminalEvent::Peek(address) => this.peek_terminal(address, window, cx),
                 TerminalEvent::TitleChanged => this.publish(cx),
                 TerminalEvent::Ended => this.terminal_ended(&block, window, cx),
+                TerminalEvent::Input => this.answered(&addr, cx),
                 TerminalEvent::ContextMenu(at) => {
                     this.open_menu("pane", json!({ "pane": block.trim_end_matches(SWAP), "terminal": addr }), Some(*at), window, cx)
                 }
@@ -1485,14 +1489,43 @@ impl AppWindow {
                 focused.and_then(|p| self.pane_focus(&p, cx)).unwrap_or_else(|| self.focus.clone()).focus(window, cx);
             }
         }
-        if self.window_active {
-            let visible = self.visible_addresses();
-            self.model.mark_seen(&visible);
-        }
+        let seeing = self.seeing();
+        self.model.mark_seen(&seeing);
         self.share_seen(cx);
         self.publish(cx);
         self.save();
         cx.notify();
+    }
+
+    /// The agents that count as seen now: on screen in the active window and,
+    /// with `done_until_input`, sent input since they last changed state.
+    fn seeing(&self) -> Vec<String> {
+        if !self.window_active {
+            return Vec::new();
+        }
+        let mut out = self.visible_addresses();
+        if settings::get().done_until_input {
+            out.retain(|a| {
+                let since = self.model.agents.get(a).map_or(0, |ag| ag.since);
+                self.answered.get(a).is_some_and(|t| *t >= since)
+            });
+        }
+        out
+    }
+
+    /// The person sent a terminal input: with `done_until_input`, that is what
+    /// makes a finished agent seen.
+    fn answered(&mut self, addr: &str, cx: &mut Context<Self>) {
+        self.answered.insert(addr.to_owned(), model::now_ms());
+        if self.model.status(addr) != Some("done") {
+            return;
+        }
+        let seeing = self.seeing();
+        let changed = self.model.mark_seen(&seeing) | self.share_seen(cx);
+        if changed {
+            self.publish(cx);
+            cx.notify();
+        }
     }
 
     /// Shares what the person looks at as `herdr.seen` (docs/labels.md): an
@@ -1500,7 +1533,7 @@ impl AppWindow {
     /// there, so a phone marking it unread isn't undone by a screen nobody
     /// watches. Only ever raises it. True when a status changed.
     fn share_seen(&mut self, cx: &mut Context<Self>) -> bool {
-        let looking: HashSet<String> = if self.window_active { self.visible_addresses().into_iter().collect() } else { HashSet::new() };
+        let looking: HashSet<String> = self.seeing().into_iter().collect();
         self.looked.retain(|a, _| looking.contains(a));
         let mut changed = false;
         for addr in looking {
@@ -2018,12 +2051,14 @@ impl AppWindow {
             if let Some(alert) = self.model.alert_for(addr, child, prev.as_deref(), word.as_deref(), looking) {
                 alerts.push((addr.clone(), alert, looking));
             }
-            changed |= self.model.set_word(addr, word, app, looking);
+            // With `done_until_input`, watching it finish isn't answering it.
+            changed |= self.model.set_word(addr, word, app, looking && !settings::get().done_until_input);
             let turn = rec.get("turn").and_then(Value::as_u64).unwrap_or(0);
             let label = rec.pointer("/labels/herdr.seen").and_then(Value::as_str).and_then(|s| s.parse::<u64>().ok());
             changed |= self.model.set_turn(addr, turn, label.max(self.written_seen.get(addr).copied()));
         }
         self.written_seen.retain(|a, _| self.live.contains_key(a));
+        self.answered.retain(|a, _| self.live.contains_key(a));
         changed |= self.share_seen(cx);
         // Changes already made before Herdr started aren't news.
         if self.listed_once {
