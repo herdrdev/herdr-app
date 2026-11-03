@@ -1245,6 +1245,22 @@ impl Vt {
         unsafe { ghostty_terminal_scroll_viewport(self.term, s) };
     }
 
+    /// Scrolls so `row` (from the scrollback's top) is the first visible row.
+    pub fn scroll_to_row(&mut self, row: usize) {
+        self.placements_cache.get_mut().take();
+        let mut s = GhosttyTerminalScrollViewport { tag: GHOSTTY_SCROLL_VIEWPORT_ROW, ..Default::default() };
+        s.value.row = row;
+        unsafe { ghostty_terminal_scroll_viewport(self.term, s) };
+    }
+
+    /// What a scrollbar needs: the scrollable area's total rows, the viewport's
+    /// offset into it, and the viewport's length.
+    pub fn scrollbar(&self) -> GhosttyTerminalScrollbar {
+        let mut sb = GhosttyTerminalScrollbar::default();
+        unsafe { ghostty_terminal_get(self.term, GHOSTTY_TERMINAL_DATA_SCROLLBAR, &mut sb as *mut _ as *mut c_void) };
+        sb
+    }
+
     pub fn scroll_to_bottom(&mut self) {
         self.placements_cache.get_mut().take();
         let s = GhosttyTerminalScrollViewport { tag: GHOSTTY_SCROLL_VIEWPORT_BOTTOM, ..Default::default() };
