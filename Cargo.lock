@@ -3727,6 +3727,7 @@ dependencies = [
  "tracing-subscriber",
  "ttf-parser",
  "uds_windows",
+ "unicode-properties",
  "windows-sys 0.61.2",
  "winresource",
 ]
