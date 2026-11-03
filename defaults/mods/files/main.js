@@ -215,6 +215,11 @@ export default class Files extends View {
     choices.push({ name: "Other…", app: null, other: true });
     this.at = Math.min(this.at, choices.length - 1);
     const choose = (choice, cx) => this.openInApplication(choice.app, cx, true, choice.other);
+    const row = (choice, i) => h_flex().id(`files-application-${i}`).h(30).flex_none().px(8).gap(8).items_center().rounded(5)
+      .bg(i === this.at ? t.hover : t.popover).cursor_pointer().hover(s => s.bg(t.hover)).opacity(this.opening ? 0.5 : 1)
+      .on_click((_e, cx) => choose(choice, cx))
+      .child(div().w(14).flex_none().child(!choice.other && (choice.app ? selected?.id === choice.app.id : !selected) ? "✓" : ""))
+      .child(div().flex_1().min_w(0).truncate().child(choice.name));
     return v_flex().id("files-open-with").w_full().h(350).p(6).gap(4).bg(t.popover).text_color(t.foreground).text_size(13)
       .track_focus(this.handle).on_key_down((e, cx) => {
         if (e.key === "escape") closeOverlay(p.overlay);
@@ -227,11 +232,8 @@ export default class Files extends View {
       .child(div().px(8).py(4).font_semibold().child("Open with"))
       .child(v_flex().id("files-applications").flex_1().min_h(0).overflow_y_scrollbar()
         .when(this.appsLoading || Boolean(this.appsError), el => el.child(div().p(8).text_size(11).text_color(t.dim).child(this.appsError || "Finding applications…")))
-        .children(choices.map((choice, i) => h_flex().id(`files-application-${i}`).h(30).flex_none().px(8).gap(8).items_center().rounded(5)
-          .bg(i === this.at ? t.hover : t.popover).cursor_pointer().hover(s => s.bg(t.hover)).opacity(this.opening ? 0.5 : 1)
-          .on_click((_e, cx) => choose(choice, cx))
-          .child(div().w(14).flex_none().child(!choice.other && (choice.app ? selected?.id === choice.app.id : !selected) ? "✓" : ""))
-          .child(div().flex_1().min_w(0).truncate().child(choice.name)))))
+        .children(choices.slice(0, -1).map(row)))
+      .child(row(choices[choices.length - 1], choices.length - 1))
       .child(div().px(8).py(4).text_size(11).text_color(t.dim).child(`Remembers your choice for ${fileType(p.file) || "extensionless"} files in Herdr.`));
   }
 
