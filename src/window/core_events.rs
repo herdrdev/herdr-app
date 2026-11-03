@@ -1,18 +1,24 @@
 //! Wake for core events; keep idle maintenance and machine checks on their own clocks.
 
 use crate::hc::{EventLines, Pushed, Stream};
-use gpui::{BackgroundExecutor, FutureExt};
+use gpui::{BackgroundExecutor, Task};
+use std::future::{Future, poll_fn};
+use std::pin::{Pin, pin};
+use std::task::Poll;
 use std::time::{Duration, Instant};
 
 pub const IDLE_TICK: Duration = Duration::from_millis(500);
 const MACHINES_EVERY: Duration = Duration::from_millis(2500);
 
-async fn next(events: &async_channel::Receiver<Stream>, executor: &BackgroundExecutor, timeout: Duration) -> Option<Stream> {
-    match events.recv().with_timeout(timeout, executor).await {
-        Ok(Ok(event)) => Some(event),
-        Ok(Err(_)) => Some(Stream::Lost),
-        Err(_) => None,
-    }
+async fn next(events: &async_channel::Receiver<Stream>, timeout: &mut Task<()>) -> Option<Stream> {
+    let mut receive = pin!(events.recv());
+    poll_fn(|cx| {
+        // Give queued data priority when the event and the deadline are both ready.
+        if let Poll::Ready(event) = receive.as_mut().poll(cx) {
+            return Poll::Ready(Some(event.unwrap_or(Stream::Lost)));
+        }
+        if Pin::new(&mut *timeout).poll(cx).is_ready() { Poll::Ready(None) } else { Poll::Pending }
+    }).await
 }
 
 /// State/attention and layout changes wake the UI immediately. Titles and progress
@@ -22,6 +28,7 @@ pub async fn batch(
     force: bool, mut credit: impl FnMut(usize),
 ) -> (Pushed, bool) {
     let deadline = executor.now() + IDLE_TICK;
+    let mut timeout = None;
     let mut first = None;
     let (mut pushed, mut closed) = (Pushed::default(), false);
     loop {
@@ -39,7 +46,10 @@ pub async fn batch(
             }
         }
         if force || closed || pushed.docs || pushed.urgent || executor.now() >= deadline { return (pushed, closed); }
-        first = next(events, executor, deadline.saturating_duration_since(executor.now())).await;
+        // One timer for the batch, not a new task for every cosmetic event.
+        let timeout = timeout.get_or_insert_with(|| executor.timer(deadline.saturating_duration_since(executor.now())));
+        first = next(events, timeout).await;
+        if first.is_none() { return (pushed, closed); }
     }
 }
 
@@ -82,13 +92,14 @@ mod tests {
         let executor = cx.executor();
         let (tx, events) = async_channel::unbounded();
         let before = executor.now();
-        assert!(next(&events, &executor, IDLE_TICK).await.is_none());
+        let mut timeout = executor.timer(IDLE_TICK);
+        assert!(next(&events, &mut timeout).await.is_none());
         assert_eq!(executor.now() - before, IDLE_TICK);
         tx.try_send(Stream::Data(vec![1])).unwrap();
         let before = executor.now();
-        assert!(matches!(next(&events, &executor, IDLE_TICK).await, Some(Stream::Data(bytes)) if bytes == [1]));
+        assert!(matches!(next(&events, &mut timeout).await, Some(Stream::Data(bytes)) if bytes == [1]));
         drop(tx);
-        assert!(matches!(next(&events, &executor, IDLE_TICK).await, Some(Stream::Lost)));
+        assert!(matches!(next(&events, &mut timeout).await, Some(Stream::Lost)));
         assert_eq!(executor.now(), before, "queued data and a closed stream wake immediately");
     }
 
@@ -118,6 +129,27 @@ mod tests {
         assert!(pushed.terminals && !pushed.urgent && !closed);
         assert_eq!(lines.live()["terminals"][0]["status"]["title"], "4");
         assert_eq!(credited, task.await);
+    }
+
+    #[gpui::test]
+    async fn a_state_change_interrupts_a_shared_cosmetic_deadline(cx: &mut gpui::TestAppContext) {
+        let executor = cx.executor();
+        let sender = executor.clone();
+        let (tx, events) = async_channel::unbounded();
+        let task = executor.spawn(async move {
+            for (seq, state) in [(1, "working"), (2, "working"), (3, "blocked")] {
+                sender.timer(Duration::from_millis(50)).await;
+                let event = json!({"method": "event", "params": {"seq": seq, "type": "status", "terminal": "t1", "data": {"status": {"state": state, "title": seq.to_string()}}}});
+                tx.send(Stream::Data(format!("{event}\n").into_bytes())).await.unwrap();
+            }
+        });
+        let mut lines = EventLines::new(&json!({"seq": 0, "terminals": [{"address": "t1", "state": "live", "status": {"state": "working"}}]}));
+        let before = executor.now();
+        let (pushed, closed) = batch(&events, &mut lines, &executor, false, |_| {}).await;
+        assert_eq!(executor.now() - before, Duration::from_millis(150));
+        assert!(pushed.urgent && !closed);
+        assert_eq!(lines.live()["terminals"][0]["status"]["state"], "blocked");
+        task.await;
     }
 
     #[test]
