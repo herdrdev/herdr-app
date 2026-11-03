@@ -93,9 +93,9 @@ test("Files follows directory links one level at a time", async () => {
 });
 
 const editorSource = (await readFile(new URL("../defaults/mods/files/editor.js", import.meta.url), "utf8"))
-  .replace(/^import .*;\n/gm, "").replace(/^export /gm, "");
+  .replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, "");
 const linuxSource = (await readFile(new URL("../defaults/mods/files/open-with-linux.js", import.meta.url), "utf8"))
-  .replace(/^import .*;\n/gm, "").replace(/^export /gm, "");
+  .replace(/^import .*;\r?\n/gm, "").replace(/^export /gm, "");
 function launcher(platform: string, exec: (...args: any[]) => any, home = tmpdir()) {
   const linux = new Function("exec", "readTextFile", `${linuxSource}; return { applications, picker };`)(exec,
     async (path: string) => { try { return await readFile(path, "utf8"); } catch (e: any) { if (e.code === "ENOENT") return null; throw e; } });
@@ -186,7 +186,7 @@ function filesHarness() {
     props: () => state.props, shared: (k: string) => data.get(k), setShared: (k: string, v: any) => data.set(k, v),
     openOverlay: (p: any) => overlays.push(p), closeOverlay: (id: string) => closed.push(id), notify: (p: any) => notices.push(p),
   };
-  const Files = new Function(...Object.keys(values), source.replace(/^import .*;\n/gm, "").replace("export default class Files", "return class Files"))(...Object.values(values));
+  const Files = new Function(...Object.keys(values), source.replace(/^import .*;\r?\n/gm, "").replace("export default class Files", "return class Files"))(...Object.values(values));
   const cx = { notify() {}, stop_propagation() {}, focus_handle: () => ({ focus() {} }), timer: { every() {} }, spawn(f: any) { jobs.push(f(cx)); } };
   const view = new Files(); view.init({}, cx);
   const drain = async () => { while (jobs.length) await Promise.all(jobs.splice(0)); };
