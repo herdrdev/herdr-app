@@ -959,6 +959,17 @@ All of it is in `herdr.d.ts`. In short:
   Files also refreshes on its 10-second timer:
   `cx.spawn(async (cx) => { for (;;) { await watchFolder(dir); this.reload(); cx.notify(); } })`.
 - `notify({ ..., action: { name, args } })`: the toast runs the command when clicked.
+- Settings → Alerts has separate sound and notification controls. Notification
+  preferences live in `shared("notifications")`, persisted in `shared.json`:
+  `{ enabled, blocked, done, errors, other }`, all on unless explicitly `false`.
+  `enabled: false` suppresses every corner notification, including operational
+  errors, notices from mods and update notices. Individual choices are retained.
+  Agent-focus notifications (`action.name: "agent.focus"`) use `blocked` for
+  `level: "error"`, otherwise `done`; other `error` and `warning` notifications
+  use `errors`, and everything else uses `other`. These controls also apply to
+  replacement toast mods. Sounds and agent ordering are independent; updates
+  and their errors remain available in Settings → Updates.
+  Example: `setShared("notifications", { ...(shared("notifications") ?? {}), enabled: false })`.
 - This copy: `props()`, `shared(key)` / `setShared(key, value)` (every mod
   sees it; setting re-renders all), `nextCommand()` (key commands for this
   mod: `cx.spawn(async (cx) => { for (;;) { const c = await nextCommand(); …; cx.notify(); } })`).
