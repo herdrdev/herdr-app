@@ -22,6 +22,20 @@ pub type PathVertex_ScaledPixels = PathVertex<ScaledPixels>;
 #[expect(missing_docs)]
 pub type DrawOrder = u32;
 
+/// HERDR: where something drawn outside GPUI (a native layer over the window)
+/// sits in the scene. It is a paint operation, so a cached view replays it
+/// like its primitives, and the frame can tell whether GPUI painted anything
+/// over it afterwards.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub struct NativeAnchor {
+    /// The caller's name for what is drawn there.
+    pub key: u64,
+    /// Where it is drawn, already clipped to its content mask.
+    pub bounds: Bounds<ScaledPixels>,
+    /// Its place among the scene's paint operations.
+    index: usize,
+}
+
 /// A boolean stored as a `u32` so that GPU-facing structs contain no
 /// compiler-inserted padding bytes, which would be undefined behavior to
 /// reinterpret as `&[u8]` when writing instance buffers. Guaranteed to be
@@ -138,9 +152,57 @@ impl Scene {
             .push(PaintOperation::Primitive(primitive));
     }
 
+    /// HERDR: records a `NativeAnchor`.
+    pub fn insert_anchor(&mut self, key: u64, bounds: Bounds<ScaledPixels>) {
+        if bounds.is_empty() {
+            return;
+        }
+        let index = self.paint_operations.len();
+        self.paint_operations
+            .push(PaintOperation::Anchor(NativeAnchor { key, bounds, index }));
+    }
+
+    /// HERDR: the native anchors painted so far, in paint order.
+    pub fn anchors(&self) -> impl Iterator<Item = &NativeAnchor> {
+        self.paint_operations.iter().filter_map(|operation| match operation {
+            PaintOperation::Anchor(anchor) => Some(anchor),
+            _ => None,
+        })
+    }
+
+    /// HERDR: whether anything visible was painted over `anchor` after it.
+    /// Paint order is draw order, so that's what covers it. The test stays a
+    /// device pixel inside its edges: neighbours snapped to the same pixel
+    /// don't cover it.
+    pub fn anchor_covered(&self, anchor: &NativeAnchor) -> bool {
+        let inset = ScaledPixels(1.0);
+        let query = Bounds {
+            origin: point(anchor.bounds.origin.x + inset, anchor.bounds.origin.y + inset),
+            size: Size {
+                width: anchor.bounds.size.width - inset * 2.0,
+                height: anchor.bounds.size.height - inset * 2.0,
+            },
+        };
+        self.paint_operations[anchor.index + 1..]
+            .iter()
+            .any(|operation| match operation {
+                // A box's border is painted after what's inside it, over the
+                // whole box; only its strips hide anything.
+                PaintOperation::Primitive(Primitive::Quad(q)) if q.background.is_transparent() => {
+                    border_covers(q, &query)
+                }
+                PaintOperation::Primitive(p) => {
+                    p.visible() && p.bounds().intersect(&p.content_mask().bounds).intersects(&query)
+                }
+                PaintOperation::Anchor(a) => a.bounds.intersects(&query),
+                PaintOperation::StartLayer(_) | PaintOperation::EndLayer => false,
+            })
+    }
+
     pub fn replay(&mut self, range: Range<usize>, prev_scene: &Scene) {
         for operation in &prev_scene.paint_operations[range] {
             match operation {
+                PaintOperation::Anchor(anchor) => self.insert_anchor(anchor.key, anchor.bounds),
                 PaintOperation::Primitive(primitive) => self.insert_primitive(primitive.clone()),
                 PaintOperation::StartLayer(bounds) => self.push_layer(*bounds),
                 PaintOperation::EndLayer => self.pop_layer(),
@@ -213,6 +275,8 @@ pub(crate) enum PrimitiveKind {
 
 pub(crate) enum PaintOperation {
     Primitive(Primitive),
+    // HERDR: see `NativeAnchor`.
+    Anchor(NativeAnchor),
     StartLayer(Bounds<ScaledPixels>),
     EndLayer,
 }
@@ -230,8 +294,41 @@ pub enum Primitive {
     Surface(PaintSurface),
 }
 
+/// HERDR: whether `quad`'s border (its background is transparent) reaches
+/// into `query`: `query` overlaps the box but isn't wholly inside the border.
+fn border_covers(quad: &Quad, query: &Bounds<ScaledPixels>) -> bool {
+    let w = &quad.border_widths;
+    if quad.border_color.is_transparent()
+        || (w.top.0 <= 0.0 && w.right.0 <= 0.0 && w.bottom.0 <= 0.0 && w.left.0 <= 0.0)
+        || !quad.bounds.intersect(&quad.content_mask.bounds).intersects(query)
+    {
+        return false;
+    }
+    let b = &quad.bounds;
+    let inside = query.left() >= b.left() + w.left
+        && query.top() >= b.top() + w.top
+        && query.right() <= b.right() - w.right
+        && query.bottom() <= b.bottom() - w.bottom;
+    !inside
+}
+
 #[expect(missing_docs)]
 impl Primitive {
+    /// HERDR: whether it shows anything: a primitive faded to nothing still
+    /// takes part in the scene but hides nothing under it.
+    pub(crate) fn visible(&self) -> bool {
+        match self {
+            Primitive::Quad(q) => !q.background.is_transparent(),
+            Primitive::Shadow(p) => !p.color.is_transparent(),
+            Primitive::Underline(p) => !p.color.is_transparent(),
+            Primitive::MonochromeSprite(p) => !p.color.is_transparent(),
+            Primitive::SubpixelSprite(p) => !p.color.is_transparent(),
+            Primitive::PolychromeSprite(p) => p.opacity > 0.0,
+            Primitive::Path(p) => !p.color.is_transparent(),
+            Primitive::Surface(_) => true,
+        }
+    }
+
     pub fn bounds(&self) -> &Bounds<ScaledPixels> {
         match self {
             Primitive::Shadow(shadow) => &shadow.bounds,

@@ -865,7 +865,9 @@ Rules:
   spinner costs real battery. Use `.frames(["⠋", "⠙", …], 90)` (shows
   each string in turn as the element's text), `svg(arc).spin(900)` (turns
   an icon once every 900 ms: a ring spinner, e.g.
-  `mods/workspace-chrome/spinner.svg`), or `.loop("opacity", { from:
+  `mods/workspace-chrome/spinner.svg`; on macOS the system turns it every
+  display frame and the window doesn't redraw at all, so prefer it for a
+  busy indicator), or `.loop("opacity", { from:
   0.4, to: 1, period: 1200 })` (also width, height, left, top), and
   `.transition(...)` for changes: they run without your script and stop
   when not shown. Timers are for data (a clock, a fetch), and only as often

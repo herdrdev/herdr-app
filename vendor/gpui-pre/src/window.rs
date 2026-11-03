@@ -1205,6 +1205,8 @@ pub struct Window {
     pub(crate) next_tooltip_id: TooltipId,
     pub(crate) tooltip_bounds: Option<TooltipBounds>,
     pub(crate) next_frame_callbacks: Rc<RefCell<Vec<FrameCallback>>>,
+    // HERDR: see `Window::on_frame_painted`.
+    frame_painted: Vec<Box<dyn FnMut(&mut Window, &mut App)>>,
     pub(crate) dirty_views: FxHashSet<EntityId>,
     focus_listeners: SubscriberSet<(), AnyWindowFocusListener>,
     pub(crate) focus_lost_listeners: SubscriberSet<(), AnyObserver>,
@@ -2095,6 +2097,7 @@ impl Window {
             rendered_frame_size: None,
             next_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             next_frame_callbacks,
+            frame_painted: Vec::new(),
             next_hitbox_id: HitboxId(0),
             next_tooltip_id: TooltipId::default(),
             tooltip_bounds: None,
@@ -2649,6 +2652,43 @@ impl Window {
     /// await points in async code.
     pub fn to_async(&self, cx: &App) -> AsyncWindowContext {
         AsyncWindowContext::new_context(cx.to_async(), self.handle)
+    }
+
+    /// HERDR: marks where something drawn outside GPUI (a native layer over
+    /// the window) sits in this frame, under `key`. Call while painting, at
+    /// the point it would be painted; it is clipped to the content mask and
+    /// replayed with cached views. [`Self::native_anchors`] reports it.
+    pub fn paint_native_anchor(&mut self, key: u64, bounds: Bounds<Pixels>) {
+        self.invalidator.debug_assert_paint();
+        let bounds = self
+            .cover_bounds(bounds)
+            .intersect(&self.snapped_content_mask().bounds);
+        self.next_frame.scene.insert_anchor(key, bounds);
+    }
+
+    /// HERDR: the native anchors painted this frame, in logical pixels, each
+    /// with whether GPUI painted anything over it afterwards. Meaningful in an
+    /// [`Self::on_frame_painted`] hook.
+    pub fn native_anchors(&self) -> Vec<(u64, Bounds<Pixels>, bool)> {
+        let scale = self.scale_factor();
+        let scene = &self.next_frame.scene;
+        scene
+            .anchors()
+            .map(|anchor| {
+                let b = anchor.bounds;
+                let bounds = Bounds {
+                    origin: point(px(b.origin.x.0 / scale), px(b.origin.y.0 / scale)),
+                    size: size(px(b.size.width.0 / scale), px(b.size.height.0 / scale)),
+                };
+                (anchor.key, bounds, scene.anchor_covered(anchor))
+            })
+            .collect()
+    }
+
+    /// HERDR: runs `hook` after every frame this window paints, before it's
+    /// presented, for as long as the window lives.
+    pub fn on_frame_painted(&mut self, hook: impl FnMut(&mut Window, &mut App) + 'static) {
+        self.frame_painted.push(Box::new(hook));
     }
 
     /// Schedule the given closure to be run directly after the current frame is rendered.
@@ -3354,6 +3394,15 @@ impl Window {
         }
         if !cx.mode.skip_drawing() {
             self.draw_roots(cx);
+            // HERDR: native layers follow the frame GPUI just painted.
+            if !self.frame_painted.is_empty() {
+                let mut hooks = std::mem::take(&mut self.frame_painted);
+                for hook in &mut hooks {
+                    hook(self, cx);
+                }
+                hooks.append(&mut self.frame_painted);
+                self.frame_painted = hooks;
+            }
             #[cfg(feature = "profiler")]
             {
                 let viewport_size = self.viewport_size;
@@ -4200,8 +4249,9 @@ impl Window {
 
     /// Obtain the current element opacity. This method should only be called during the
     /// prepaint phase of element drawing.
+    // HERDR: public, for what's drawn outside GPUI at a native anchor.
     #[inline]
-    pub(crate) fn element_opacity(&self) -> f32 {
+    pub fn element_opacity(&self) -> f32 {
         self.invalidator.debug_assert_paint_or_prepaint();
         self.element_opacity
     }

@@ -85,6 +85,16 @@ gpui-fast = { workspace = true, features = ["test-support"] }
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
+# Spinners drawn as Core Animation layers over the window; see `native_spin`.
+[target.'cfg(target_os = "macos")'.dependencies]
+raw-window-handle.workspace = true
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3", features = ["NSColorSpace", "NSResponder", "NSView", "NSWindow", "objc2-quartz-core", "objc2-core-graphics"] }
+objc2-core-foundation = { version = "0.3", features = ["CFBase", "CFCGTypes", "CFData"] }
+objc2-core-graphics = { version = "0.3", features = ["CGColorSpace", "CGDataProvider", "CGImage"] }
+objc2-foundation = { version = "0.3", features = ["NSString", "NSValue"] }
+objc2-quartz-core = { version = "0.3", features = ["CAAnimation", "CABase", "CALayer", "CAMediaTiming", "CATransaction", "objc2-core-foundation", "objc2-core-graphics"] }
+
 [target.'cfg(target_os = "windows")'.dependencies]
 windows = { workspace = true, features = [
     "Win32_Foundation",
