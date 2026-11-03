@@ -16,7 +16,7 @@ use crate::model::{self, Tab, Model};
 use crate::mods::{self, Found, Instance, Request};
 use crate::settings;
 use crate::layout_sync;
-use crate::terminal::{TerminalEvent, TerminalView};
+use crate::terminal::{TerminalEvent, TerminalView, scroll_target};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_shell::action::ShellAction;
@@ -1581,6 +1581,32 @@ impl AppWindow {
             .or_else(|| self.model.focused_pane().and_then(|p| self.pane_term(&p)))
     }
 
+    fn shown_terminal_view(&self, address: &str, window: &Window, cx: &App) -> Result<Entity<TerminalView>, String> {
+        if !self.live.contains_key(address) {
+            return Err(format!("no running terminal {address:?}"));
+        }
+
+        let own_pane = self.model.pane_of(address);
+        // The view the person sees wins over a hidden one, such as a peek over its own tab's pane.
+        let best = self.terms.iter().filter(|(_, t)| t.address == address).max_by_key(|(pane, t)| {
+            let view = t.view.read(cx);
+            (view.owns_keyboard_focus(window, cx), view.on_screen_this_frame(), own_pane.as_deref() == Some(pane.as_str()))
+        });
+        best.map(|(_, t)| t.view.clone()).ok_or_else(|| format!("terminal {address:?} is running but not shown in this window, so it has no view to scroll"))
+    }
+
+    fn scroll_terminal(&self, args: &Value, window: &Window, cx: &mut Context<Self>) -> Result<(), String> {
+        let target = scroll_target(args)?;
+
+        let view = match Self::owned(args, "terminal") {
+            Some(address) => self.shown_terminal_view(&address, window, cx)?,
+            None => self.focused_terminal(window, cx).map(|t| t.view.clone()).ok_or("no focused terminal to scroll")?,
+        };
+
+        view.update(cx, |view, cx| view.scroll_history(target, cx));
+        Ok(())
+    }
+
     fn pane_focus(&self, pane: &str, cx: &App) -> Option<FocusHandle> {
         self.pane_term(pane).map(|t| t.view.read(cx).focus_target(cx))
     }
@@ -3068,6 +3094,11 @@ impl AppWindow {
                     });
                 }
                 return;
+            }
+            "terminal.scroll" => {
+                if let Err(error) = self.scroll_terminal(a, window, cx) {
+                    self.fail(error);
+                }
             }
             // ---- agents
             "agent.focus" => {

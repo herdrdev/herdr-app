@@ -1458,6 +1458,12 @@ impl Vt {
         self.search_spans = spans;
     }
 
+    pub fn scroll_to_top(&mut self) {
+        self.placements_cache.get_mut().take();
+        let s = GhosttyTerminalScrollViewport { tag: GHOSTTY_SCROLL_VIEWPORT_TOP, ..Default::default() };
+        unsafe { ghostty_terminal_scroll_viewport(self.term, s) };
+    }
+
     /// Wraps pasted text the way the program asked (bracketed paste or not).
     pub fn paste_bytes(&self, text: &str) -> Vec<u8> {
         if self.mode(BRACKETED_PASTE) {
@@ -2460,5 +2466,22 @@ mod tests {
         vt.write(b"\x1b]2;hello\x07");
         assert_eq!(vt.take_title().as_deref(), Some("hello"));
         assert_eq!(vt.take_title(), None);
+    }
+
+    #[test]
+    fn scroll_to_top_reaches_the_oldest_line_and_bottom_returns() {
+        let mut vt = Vt::new(20, 5);
+        for line in 1..=50 {
+            vt.write(format!("{line:04}\r\n").as_bytes());
+        }
+        let visible = |vt: &mut Vt| -> Vec<String> {
+            vt.frame().rows.iter().map(|row| row.iter().map(|c| c.text.as_str()).collect::<String>()).collect()
+        };
+        vt.scroll_to_top();
+        let top = visible(&mut vt);
+        assert!(top[0].starts_with("0001"), "{top:?}");
+        vt.scroll_to_bottom();
+        let bottom = visible(&mut vt);
+        assert!(bottom.iter().any(|row| row.starts_with("0050")), "{bottom:?}");
     }
 }
