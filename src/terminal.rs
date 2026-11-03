@@ -1918,7 +1918,10 @@ impl Render for TerminalView {
                     return;
                 }
                 drop(g);
-                if !this.mouse(GHOSTTY_MOUSE_ACTION_PRESS, Some(ev.button), ev.position, ev.modifiers) {
+                if this.mouse(GHOSTTY_MOUSE_ACTION_PRESS, Some(ev.button), ev.position, ev.modifiers) {
+                    // The program took the click: a later copy must not bring back Herdr's old selection.
+                    this.clear_selection(cx);
+                } else {
                     this.start_selection(ev.position, cx);
                 }
             }))
@@ -2166,6 +2169,41 @@ mod tests {
             cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
             assert!(!root.read_with(cx, |root, cx| root.text.read(cx).selected_text()).is_empty());
         }
+    }
+
+    #[gpui::test]
+    fn a_click_the_program_takes_clears_the_selection(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        struct Root(Entity<super::TerminalView>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(self.0.clone())
+            }
+        }
+
+        cx.update(gpui_base::init);
+        let (root, cx) = cx.add_window_view(|_, cx| Root(cx.new(|cx| {
+            let terminal = super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 6), cx);
+            // The program tracks the mouse.
+            terminal.grid.borrow_mut().vt.write(b"first line\r\nsecond line\r\nthird line\x1b[?1000h");
+            terminal
+        })));
+        cx.run_until_parked();
+        let selection = |cx: &mut VisualTestContext| root.read_with(cx, |root, cx| root.0.read(cx).grid.borrow().vt.selection_text());
+
+        // Shift keeps the mouse Herdr's: the drag selects.
+        let shift = Modifiers { shift: true, ..Default::default() };
+        let (start, end) = (point(px(1.), px(1.)), point(px(200.), px(40.)));
+        cx.simulate_mouse_down(start, MouseButton::Left, shift);
+        cx.simulate_mouse_move(end, Some(MouseButton::Left), shift);
+        cx.simulate_mouse_up(end, MouseButton::Left, shift);
+        assert!(selection(cx).is_some());
+
+        let click = point(px(50.), px(30.));
+        cx.simulate_mouse_down(click, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(click, MouseButton::Left, Modifiers::default());
+        assert_eq!(selection(cx), None, "a copy now would bring back the old selection");
     }
 
     #[gpui::test]
