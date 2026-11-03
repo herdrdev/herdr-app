@@ -328,6 +328,10 @@ layout's look and a block can differ:
   folder (or the home's `fonts/`) load at start and on the next look change,
   so a layout and its mod folder travel together (Herdr 98's do: its pixel
   fonts are in `mods/win98/fonts/`).
+- `pane_scrollbars` in settings.json (default `true`): show terminal scrollback
+  with a slim thumb and track. Drag the thumb or click the track to jump there.
+  With little or no terminal padding, the hit lane overlays the last 8px;
+  terminal columns do not change. Hidden in alternate-screen programs.
 - `terminal_opacity` (0..1): below 1, the background behind a terminal
   (a pane frame's, the layout's gradient) shows through its text.
 - Switching layouts switches the look. The theme menu changes the shown
@@ -482,6 +486,14 @@ the build doesn't do.
   command's first argument), `send:<text>` (types into the terminal),
   `<mod>.<command>` (delivered to that mod's `nextCommand()`), or `terminal`
   (the program gets the key).
+- Named, typed command arguments use an object instead of a string:
+  `"ctrl-shift-r": {"command": "layout.resize", "args": {"id": "sidebar", "px": 240}}`.
+  `command` names an app command; `args` is an object (optional, defaults to `{}`).
+  It can pass several arguments, numbers, booleans, arrays or nested objects.
+  String actions keep their literal first-argument shorthand, including numeric
+  indexes: `space.new:{work}` names a space `{work}`, and `space.new:{}` names it `{}`.
+  Invalid binding objects or rejected arguments show an error toast when pressed;
+  the key does not go to the terminal program.
 - Plain ctrl+letters go to the program unless bound. Programs rely on
   ctrl+c, ctrl+d, ctrl+l, ctrl+r, ctrl+w, ctrl+a, ctrl+e, ctrl+u, ctrl+k,
   ctrl+z and ctrl+[ (Escape); ctrl+alt is AltGr on Windows; option+digits
@@ -696,6 +708,10 @@ What's about the user, never a look:
   `p` writes Linux primary selection. `s` is ignored; cut buffers `0`–`7`
   are treated as the system clipboard.
   Clipboard reads (`?`) are never allowed.
+- `pane_scrollbars`: `false` hides the scroll position thumb at a terminal
+  pane's right edge (default `true`). It shows only when the pane has
+  scrollback — never on the alternate screen (editors, pagers) — and
+  drags to move through it.
 - `telemetry`: `false` stops anonymous usage data and deletes what wasn't
   sent (on when absent; Settings → Privacy shows each report word for
   word, and `telemetry()` in mods). Once a day the app sends counts:
