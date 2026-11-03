@@ -34,7 +34,9 @@ fn main() {
     let zig = std::env::var("ZIG").unwrap_or_else(|_| "zig".into());
     let status = Command::new(&zig)
         .current_dir(&src)
-        .args(["build", "-Demit-lib-vt", "-Doptimize=ReleaseFast"])
+        // With full Xcode installed, Ghostty otherwise also builds a universal
+        // XCFramework (including iOS). Cargo only needs this target's library.
+        .args(["build", "-Demit-lib-vt", "-Demit-xcframework=false", "-Doptimize=ReleaseFast"])
         .arg(format!("-Dtarget={}", zig_target(&std::env::var("TARGET").unwrap())))
         .arg("--prefix")
         .arg(out.join("zig-out"))
