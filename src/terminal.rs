@@ -35,12 +35,13 @@ pub fn hsla(c: Rgb) -> Hsla {
 
 #[derive(Clone, Debug, PartialEq)]
 enum LinkTarget {
-    External(links::Target),
+    External(String, links::Target),
     Terminal(String),
 }
 
 pub enum TerminalEvent {
     Peek(String),
+    Link { raw: String, target: links::Target, at: Point<Pixels> },
     TitleChanged,
     /// The program ended.
     Ended,
@@ -649,7 +650,7 @@ impl TerminalView {
                 && let Some(link) = links::resolve(&text[range.clone()], self.cwd.as_deref())
                 && (!joined || matches!(link, links::Target::File(_)))
             {
-                target = Some(LinkTarget::External(link));
+                target = Some(LinkTarget::External(text[range.clone()].to_owned(), link));
                 return Some(range);
             }
             if joined {
@@ -661,7 +662,8 @@ impl TerminalView {
             Some(range)
         })?;
         // OSC 8 links bypass text detection.
-        let target = target.or_else(|| links::resolve(&hit.target, self.cwd.as_deref()).map(LinkTarget::External))?;
+        let raw = hit.target;
+        let target = target.or_else(|| links::resolve(&raw, self.cwd.as_deref()).map(|l| LinkTarget::External(raw, l)))?;
         Some((target, hit.spans))
     }
 
@@ -1494,7 +1496,7 @@ impl Render for TerminalView {
                     && let Some((target, _)) = this.link_at(ev.position)
                 {
                     match target {
-                        LinkTarget::External(target) => links::open(&target),
+                        LinkTarget::External(raw, target) => cx.emit(TerminalEvent::Link { raw, target, at: ev.position }),
                         LinkTarget::Terminal(address) => cx.emit(TerminalEvent::Peek(address)),
                     }
                     return;
