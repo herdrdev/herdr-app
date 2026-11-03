@@ -2,21 +2,36 @@ use std::{
     fs::File,
     io::{ErrorKind, Write},
     os::fd::{AsRawFd, BorrowedFd, OwnedFd},
+    path::PathBuf,
 };
 
 use calloop::{LoopHandle, PostAction};
 use filedescriptor::Pipe;
+use http_client::Url;
+use smallvec::SmallVec;
 use strum::IntoEnumIterator;
 use wayland_client::{Connection, protocol::wl_data_offer::WlDataOffer};
 use wayland_protocols::wp::primary_selection::zv1::client::zwp_primary_selection_offer_v1::ZwpPrimarySelectionOfferV1;
 
 use crate::linux::platform::{PIPE_READ_TIMEOUT, read_fd_with_timeout};
-use gpui::{ClipboardEntry, ClipboardItem, Image, ImageFormat, hash};
+use gpui::{ClipboardEntry, ClipboardItem, ExternalPaths, Image, ImageFormat, hash};
 
 /// Text mime types that we'll offer to other programs.
 pub(crate) const TEXT_MIME_TYPES: [&str; 3] =
     ["text/plain;charset=utf-8", "UTF8_STRING", "text/plain"];
 pub(crate) const FILE_LIST_MIME_TYPE: &str = "text/uri-list";
+
+/// Parses a `text/uri-list` body (RFC 2483) into local paths. Skips comments,
+/// blank lines and URIs that are not `file://` paths.
+pub(crate) fn parse_file_uri_list(list: &str) -> SmallVec<[PathBuf; 2]> {
+    list.lines()
+        .filter(|line| !line.is_empty() && !line.starts_with('#'))
+        .filter_map(|line| Url::parse(line).ok())
+        // `to_file_path` ignores the scheme, so `trash:/a` would become `/a`.
+        .filter(|url| url.scheme() == "file")
+        .filter_map(|url| url.to_file_path().ok())
+        .collect()
+}
 
 /// Text mime types that we'll accept from other programs.
 pub(crate) const ALLOWED_TEXT_MIME_TYPES: [&str; 2] = ["text/plain;charset=utf-8", "UTF8_STRING"];
@@ -117,6 +132,41 @@ impl<T: ReceiveData> DataOffer<T> {
         Some(ClipboardItem::new_string(result))
     }
 
+    /// Copied files come first, so a paste can take them as files; the text or
+    /// image stays for readers that want it, as on macOS.
+    fn read_item(&self, connection: &Connection) -> Option<ClipboardItem> {
+        let files = self.read_files(connection);
+        let contents = self
+            .read_text(connection)
+            .or_else(|| self.read_image(connection));
+
+        let mut entries: Vec<ClipboardEntry> = files
+            .map(ClipboardEntry::ExternalPaths)
+            .into_iter()
+            .collect();
+        entries.extend(contents.into_iter().flat_map(|item| item.entries));
+        if entries.is_empty() {
+            return None;
+        }
+
+        Some(ClipboardItem { entries })
+    }
+
+    fn read_files(&self, connection: &Connection) -> Option<ExternalPaths> {
+        if !self.has_mime_type(FILE_LIST_MIME_TYPE) {
+            return None;
+        }
+
+        let bytes = self.read_bytes(connection, FILE_LIST_MIME_TYPE)?;
+        let list = String::from_utf8(bytes).ok()?;
+        let paths = parse_file_uri_list(&list);
+        if paths.is_empty() {
+            return None;
+        }
+
+        Some(ExternalPaths(paths))
+    }
+
     fn read_image(&self, connection: &Connection) -> Option<ClipboardItem> {
         for format in ImageFormat::iter() {
             let mime_type = format.mime_type();
@@ -200,9 +250,7 @@ impl Clipboard {
             return self.contents.clone();
         }
 
-        let item = offer
-            .read_text(&self.connection)
-            .or_else(|| offer.read_image(&self.connection))?;
+        let item = offer.read_item(&self.connection)?;
 
         self.cached_read = Some(item.clone());
         Some(item)
@@ -253,5 +301,252 @@ impl Clipboard {
                 },
             )
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::{cell::RefCell, collections::HashMap, os::unix::net::UnixStream};
+
+    use gpui::ClipboardString;
+    use smallvec::smallvec;
+
+    use super::*;
+
+    #[test]
+    fn parses_percent_encoded_spaces_in_file_names() {
+        let paths = parse_file_uri_list("file:///home/me/My%20Docs/a%20b.txt\r\n");
+
+        assert_eq!(
+            paths.into_vec(),
+            vec![PathBuf::from("/home/me/My Docs/a b.txt")]
+        );
+    }
+
+    #[test]
+    fn parses_unicode_file_names_encoded_and_raw() {
+        let paths = parse_file_uri_list(
+            "file:///tmp/caf%C3%A9%20%E6%97%A5.txt\r\nfile:///tmp/naïve.txt\r\n",
+        );
+
+        assert_eq!(
+            paths.into_vec(),
+            vec![
+                PathBuf::from("/tmp/café 日.txt"),
+                PathBuf::from("/tmp/naïve.txt"),
+            ]
+        );
+    }
+
+    #[test]
+    fn parses_several_files() {
+        let paths = parse_file_uri_list("file:///tmp/a\r\nfile:///tmp/b\r\nfile:///tmp/c\r\n");
+
+        assert_eq!(
+            paths.into_vec(),
+            vec![
+                PathBuf::from("/tmp/a"),
+                PathBuf::from("/tmp/b"),
+                PathBuf::from("/tmp/c"),
+            ]
+        );
+    }
+
+    #[test]
+    fn skips_comment_lines() {
+        let paths = parse_file_uri_list("# copied from Dolphin\r\nfile:///tmp/a\r\n");
+
+        assert_eq!(paths.into_vec(), vec![PathBuf::from("/tmp/a")]);
+    }
+
+    #[test]
+    fn skips_blank_lines() {
+        let paths = parse_file_uri_list("\r\nfile:///tmp/a\r\n\r\nfile:///tmp/b\r\n\r\n");
+
+        assert_eq!(
+            paths.into_vec(),
+            vec![PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b")]
+        );
+    }
+
+    #[test]
+    fn accepts_lf_only_line_ends() {
+        let paths = parse_file_uri_list("file:///tmp/a\nfile:///tmp/b");
+
+        assert_eq!(
+            paths.into_vec(),
+            vec![PathBuf::from("/tmp/a"), PathBuf::from("/tmp/b")]
+        );
+    }
+
+    #[test]
+    fn skips_non_file_uris() {
+        let paths = parse_file_uri_list("https://example.com/a.txt\r\nfile:///tmp/a\r\n");
+
+        assert_eq!(paths.into_vec(), vec![PathBuf::from("/tmp/a")]);
+    }
+
+    #[test]
+    fn skips_uris_of_other_schemes_that_have_a_path() {
+        let paths = parse_file_uri_list("trash:/0-a.txt\r\nfile:///tmp/a\r\n");
+
+        assert_eq!(paths.into_vec(), vec![PathBuf::from("/tmp/a")]);
+    }
+
+    #[test]
+    fn keeps_trailing_unicode_whitespace_in_file_names() {
+        let paths = parse_file_uri_list("file:///tmp/a\u{a0}\r\n");
+
+        assert_eq!(paths.into_vec(), vec![PathBuf::from("/tmp/a\u{a0}")]);
+    }
+
+    #[test]
+    fn returns_no_paths_when_no_uri_is_a_file() {
+        let paths = parse_file_uri_list("https://example.com/a.txt\r\nmailto:me@example.com\r\n");
+
+        assert!(paths.is_empty());
+    }
+
+    #[derive(Default)]
+    struct FakeOfferSource {
+        contents: HashMap<String, Vec<u8>>,
+        requested: RefCell<Vec<String>>,
+    }
+
+    impl ReceiveData for FakeOfferSource {
+        fn receive_data(&self, mime_type: String, fd: BorrowedFd<'_>) {
+            self.requested.borrow_mut().push(mime_type.clone());
+            let bytes = self.contents.get(&mime_type).cloned().unwrap_or_default();
+            let mut file = File::from(fd.try_clone_to_owned().unwrap());
+            file.write_all(&bytes).unwrap();
+        }
+    }
+
+    fn fake_offer(entries: &[(&str, &str)]) -> DataOffer<FakeOfferSource> {
+        let byte_entries: Vec<(&str, &[u8])> = entries
+            .iter()
+            .map(|(mime_type, content)| (*mime_type, content.as_bytes()))
+            .collect();
+        fake_offer_bytes(&byte_entries)
+    }
+
+    fn fake_offer_bytes(entries: &[(&str, &[u8])]) -> DataOffer<FakeOfferSource> {
+        let mut offer = DataOffer::new(FakeOfferSource::default());
+        for (mime_type, content) in entries {
+            offer.add_mime_type(mime_type.to_string());
+            offer
+                .inner
+                .contents
+                .insert(mime_type.to_string(), content.to_vec());
+        }
+        offer
+    }
+
+    fn test_connection() -> (Connection, UnixStream) {
+        let (client, server) = UnixStream::pair().unwrap();
+        (Connection::from_socket(client).unwrap(), server)
+    }
+
+    #[test]
+    fn reads_text_when_offer_has_no_file_list() {
+        let (connection, _server) = test_connection();
+        let offer = fake_offer(&[("text/plain;charset=utf-8", "hello")]);
+
+        assert_eq!(
+            offer.read_item(&connection),
+            Some(ClipboardItem::new_string("hello".to_string()))
+        );
+    }
+
+    #[test]
+    fn requests_no_file_list_the_offer_does_not_have() {
+        let (connection, _server) = test_connection();
+        let offer = fake_offer(&[("text/plain;charset=utf-8", "hello")]);
+
+        offer.read_item(&connection);
+
+        assert_eq!(
+            *offer.inner.requested.borrow(),
+            vec!["text/plain;charset=utf-8".to_string()]
+        );
+    }
+
+    #[test]
+    fn reads_text_when_file_list_has_no_file_uris() {
+        let (connection, _server) = test_connection();
+        let offer = fake_offer(&[
+            (FILE_LIST_MIME_TYPE, "https://example.com/a.txt\r\n"),
+            ("text/plain;charset=utf-8", "hello"),
+        ]);
+
+        assert_eq!(
+            offer.read_item(&connection),
+            Some(ClipboardItem::new_string("hello".to_string()))
+        );
+    }
+
+    #[test]
+    fn reads_text_when_file_list_is_not_utf8() {
+        let (connection, _server) = test_connection();
+        let offer = fake_offer_bytes(&[
+            (FILE_LIST_MIME_TYPE, b"file:///tmp/bad\xff.txt\r\n"),
+            ("text/plain;charset=utf-8", b"hello"),
+        ]);
+
+        assert_eq!(
+            offer.read_item(&connection),
+            Some(ClipboardItem::new_string("hello".to_string()))
+        );
+    }
+
+    #[test]
+    fn reads_file_list_as_paths_before_text() {
+        let (connection, _server) = test_connection();
+        let offer = fake_offer(&[
+            (
+                FILE_LIST_MIME_TYPE,
+                "file:///tmp/My%20Docs/caf%C3%A9.txt\r\n",
+            ),
+            ("text/plain;charset=utf-8", "/tmp/My Docs/café.txt"),
+        ]);
+
+        assert_eq!(
+            offer.read_item(&connection),
+            Some(ClipboardItem {
+                entries: vec![
+                    ClipboardEntry::ExternalPaths(ExternalPaths(smallvec![PathBuf::from(
+                        "/tmp/My Docs/café.txt"
+                    )])),
+                    ClipboardEntry::String(ClipboardString::new(
+                        "/tmp/My Docs/café.txt".to_string()
+                    )),
+                ],
+            })
+        );
+    }
+
+    #[test]
+    fn reads_file_list_as_paths_before_image() {
+        let (connection, _server) = test_connection();
+        let offer = fake_offer(&[
+            (FILE_LIST_MIME_TYPE, "file:///tmp/shot.png\r\n"),
+            ("image/png", "png bytes"),
+        ]);
+
+        assert_eq!(
+            offer.read_item(&connection),
+            Some(ClipboardItem {
+                entries: vec![
+                    ClipboardEntry::ExternalPaths(ExternalPaths(smallvec![PathBuf::from(
+                        "/tmp/shot.png"
+                    )])),
+                    ClipboardEntry::Image(Image {
+                        format: ImageFormat::Png,
+                        bytes: b"png bytes".to_vec(),
+                        id: hash(&b"png bytes".to_vec()),
+                    }),
+                ],
+            })
+        );
     }
 }
