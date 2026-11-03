@@ -117,10 +117,12 @@ fn dirs_on(path: &std::ffi::OsStr) -> impl Iterator<Item = PathBuf> + '_ {
 /// (~/.local/bin), Homebrew, mise, Nix, cargo.
 fn usual_dirs(home: &Path) -> Vec<PathBuf> {
     if cfg!(windows) {
-        let local = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).unwrap_or_else(|| home.join("AppData/Local"));
+        let local = std::env::var_os("LOCALAPPDATA")
+            .map(PathBuf::from)
+            .unwrap_or_else(|| home.join("AppData/Local"));
         return vec![local.join("Programs/herdr-core"), home.join(".cargo/bin")];
     }
-    vec![
+    let mut dirs = vec![
         home.join(".local/bin"),
         PathBuf::from("/opt/homebrew/bin"),
         PathBuf::from("/usr/local/bin"),
@@ -128,7 +130,11 @@ fn usual_dirs(home: &Path) -> Vec<PathBuf> {
         home.join(".nix-profile/bin"),
         PathBuf::from("/run/current-system/sw/bin"),
         home.join(".cargo/bin"),
-    ]
+    ];
+    if cfg!(target_os = "macos") {
+        dirs.push(home.join(".local/share/herdr-core/Herdr Core.app/Contents/MacOS"));
+    }
+    dirs
 }
 
 /// The PATH the person's login shell sets up, or None if it doesn't answer quickly.
@@ -205,20 +211,88 @@ pub fn update_to(at_least: Option<&str>) -> Result<String, String> {
     if let Some(v) = at_least {
         cmd.args(["--version", v]);
     }
-    let out = cmd.stdin(Stdio::null()).output().map_err(|e| format!("cannot run hc update: {e}"))?;
+    let out = cmd
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("cannot run hc update: {e}"))?;
     let reply: serde_json::Value = serde_json::from_slice(&out.stdout).unwrap_or_default();
     if out.status.success() {
-        return Ok(reply.get("now").and_then(|v| v.as_str()).unwrap_or("the latest").to_owned());
+        let now = reply
+            .get("now")
+            .and_then(|v| v.as_str())
+            .unwrap_or("the latest")
+            .to_owned();
+        #[cfg(target_os = "macos")]
+        ensure_core_bundle(&now)?;
+        return Ok(now);
     }
     let err: serde_json::Value = serde_json::from_slice(&out.stderr).unwrap_or_default();
-    let message = err.pointer("/error/message").and_then(|v| v.as_str()).map(str::to_owned);
-    let hint = err.pointer("/error/hint").and_then(|v| v.as_str()).map(|h| format!(" ({h})")).unwrap_or_default();
-    Err(message.map(|m| m + &hint).unwrap_or_else(|| String::from_utf8_lossy(&out.stderr).trim().to_owned()))
+    let message = err
+        .pointer("/error/message")
+        .and_then(|v| v.as_str())
+        .map(str::to_owned);
+    let hint = err
+        .pointer("/error/hint")
+        .and_then(|v| v.as_str())
+        .map(|h| format!(" ({h})"))
+        .unwrap_or_default();
+    Err(message
+        .map(|m| m + &hint)
+        .unwrap_or_else(|| String::from_utf8_lossy(&out.stderr).trim().to_owned()))
+}
+
+/// Old core updaters copied only the bare executable. Finish that upgrade
+/// with the current installer, which retains the complete signed app bundle.
+#[cfg(target_os = "macos")]
+fn ensure_core_bundle(version: &str) -> Result<(), String> {
+    let bin = path();
+    if bin
+        .canonicalize()
+        .ok()
+        .is_some_and(|p| p.ends_with("Contents/MacOS/herdr-core"))
+    {
+        return Ok(());
+    }
+    let releases =
+        std::env::var("HERDR_RELEASES_URL").unwrap_or_else(|_| "https://releases.herdr.dev".into());
+    let mut cmd = crate::spawn::command("sh");
+    cmd.args([
+        "-c",
+        "installer=$(curl -fsSL \"$1/core/install.sh\") && printf '%s\\n' \"$installer\" | sh",
+        "sh",
+        &releases,
+    ]);
+    if let Some(v) = version.strip_prefix("hc ") {
+        cmd.env("HC_VERSION", v);
+    }
+    if bin.is_absolute()
+        && let Some(dir) = bin.parent()
+    {
+        cmd.env("HC_INSTALL_DIR", dir);
+    }
+    let out = cmd
+        .stdin(Stdio::null())
+        .output()
+        .map_err(|e| format!("cannot finish core bundle installation: {e}"))?;
+    if out.status.success() {
+        Ok(())
+    } else {
+        Err(String::from_utf8_lossy(&out.stderr).trim().to_owned())
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    fn the_independent_core_bundle_is_a_discovery_fallback() {
+        let home = Path::new("/Users/test");
+        let dir = home.join(".local/share/herdr-core/Herdr Core.app/Contents/MacOS");
+        assert_eq!(usual_dirs(home).last(), Some(&dir));
+        assert_eq!(names(&dir)[0], dir.join("herdr-core"));
+    }
 
     #[test]
     fn startup_path_keeps_shell_order_and_falls_back_to_usual_dirs() {
