@@ -111,29 +111,63 @@ pub fn resolve(link: &str, cwd: Option<&Path>) -> Option<Target> {
     Path::new(bare).exists().then(|| Target::File(PathBuf::from(bare)))
 }
 
-/// Hands the target to the system (xdg-open, open on macOS, explorer on Windows).
+/// Hands the target to the system: URLs to the browser, files to their app.
 pub fn open(target: &Target) {
     let arg = match target {
-        Target::Url(u) => std::ffi::OsStr::new(u),
-        Target::File(p) => p.as_os_str(),
+        Target::Url(u) => std::ffi::OsString::from(u),
+        Target::File(p) => p.clone().into_os_string(),
     };
-    let opener = if cfg!(target_os = "macos") {
-        "open"
-    } else if cfg!(windows) {
-        "explorer.exe"
-    } else {
-        "xdg-open"
-    };
-    let spawned = std::process::Command::new(opener)
+    // Off the UI thread: starting the app can take a moment.
+    drop(std::thread::spawn(move || {
+        if let Err(e) = launch(&arg) {
+            tracing::warn!("cannot open {}: {e}", arg.display());
+        }
+    }));
+}
+
+#[cfg(not(windows))]
+fn launch(arg: &std::ffi::OsStr) -> Result<(), String> {
+    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
+    let mut child = std::process::Command::new(opener)
         .arg(arg)
         .stdin(std::process::Stdio::null())
         .stdout(std::process::Stdio::null())
         .stderr(std::process::Stdio::null())
-        .spawn();
-    match spawned {
-        // Reaped off the UI thread so it never lingers as a zombie.
-        Ok(mut child) => drop(std::thread::spawn(move || child.wait())),
-        Err(e) => tracing::warn!("cannot run {opener}: {e}"),
+        .spawn()
+        .map_err(|e| format!("cannot run {opener}: {e}"))?;
+    // Waited for so it never lingers as a zombie.
+    let _ = child.wait();
+    Ok(())
+}
+
+/// The shell's own "open", as a double-click does. Explorer would read the
+/// target as a folder and open Documents for a URL it cannot parse.
+#[cfg(windows)]
+fn launch(arg: &std::ffi::OsStr) -> Result<(), String> {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::System::Com::{COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize};
+    use windows_sys::Win32::UI::Shell::{SEE_MASK_FLAG_NO_UI, SEE_MASK_NOASYNC, SHELLEXECUTEINFOW, ShellExecuteExW};
+    use windows_sys::Win32::UI::WindowsAndMessaging::SW_SHOWNORMAL;
+    let file: Vec<u16> = arg.encode_wide().chain([0]).collect();
+    let verb: Vec<u16> = "open\0".encode_utf16().collect();
+    // SAFETY: an all-zero SHELLEXECUTEINFOW is valid (null pointers and handles).
+    let mut info: SHELLEXECUTEINFOW = unsafe { std::mem::zeroed() };
+    info.cbSize = size_of::<SHELLEXECUTEINFOW>() as u32;
+    // No error dialogs: a failure is logged like on the other systems.
+    info.fMask = SEE_MASK_NOASYNC | SEE_MASK_FLAG_NO_UI;
+    info.lpVerb = verb.as_ptr();
+    info.lpFile = file.as_ptr();
+    info.nShow = SW_SHOWNORMAL;
+    // SAFETY: the strings outlive the call; COM, which shell handlers may use,
+    // is set up for this thread alone and undone only if it was set up here.
+    unsafe {
+        let com = CoInitializeEx(std::ptr::null(), (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) as u32) >= 0;
+        let opened = ShellExecuteExW(&mut info) != 0;
+        let error = std::io::Error::last_os_error();
+        if com {
+            CoUninitialize();
+        }
+        if opened { Ok(()) } else { Err(error.to_string()) }
     }
 }
 
@@ -329,5 +363,14 @@ mod tests {
             assert_eq!(resolve("src/main.rs.", Some(&dir)), Some(Target::File(dotted)));
         }
         std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    /// Explorer opens a folder for anything it cannot read as one, and says
+    /// nothing; the shell opens the target itself or reports why not.
+    #[cfg(windows)]
+    #[test]
+    fn windows_reports_a_target_it_cannot_open() {
+        let gone = std::env::temp_dir().join(format!("herdr-links-gone-{}.txt", std::process::id()));
+        assert!(launch(gone.as_os_str()).is_err());
     }
 }
