@@ -531,6 +531,9 @@ The main ones:
   skip settled tabs).
 - Panes: `pane.split {direction: "right" | "down", pane?, argv? | mod?, props?}` (a new
   terminal, or a mod pane), `pane.close {pane?}`,
+  `pane.move {pane?, tab}` or `{pane?, target, edge?}` (into a tab — after its
+  focused pane — or beside a pane in any tab at edge `"left" | "right" | "up" |
+  "down"`, default right; a pane stays on its own machine, its terminal running),
   `pane.zoom {pane?}`, `pane.focus {pane | terminal}`, `pane.go {direction}`, `pane.swap {direction}`.
   `pane.go` prefers the most recently focused pane along the nearest edge in that
   direction; unvisited panes fall back to overlap, then top/left layout order.

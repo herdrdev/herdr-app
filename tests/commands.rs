@@ -16,7 +16,9 @@ fn commands_need_no_window_or_app_home() {
     let commands: serde_json::Value = serde_json::from_slice(&output.stdout).unwrap();
     let commands = commands.as_array().unwrap();
     assert!(!commands.is_empty());
-    assert!(commands.iter().any(|c| c["name"] == "pane.split"));
+    for name in ["pane.split", "pane.move"] {
+        assert!(commands.iter().any(|c| c["name"] == name), "{name}");
+    }
     for command in commands {
         assert!(command["name"].is_string());
         assert!(command["about"].is_string());

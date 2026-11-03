@@ -41,6 +41,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("tab.move", &[req("id"), req("index")], "Move a tab to a position in its space (1 = first)."),
     cmd("pane.split", &[req("direction"), opt("pane"), opt("argv"), opt("mod"), opt("props")], "Split a pane (default: the focused one) \"right\" or \"down\" with a new terminal, or with a mod (`mod`, its `props`) beside it."),
     cmd("pane.close", &[opt("pane")], "Close a pane and end its terminal."),
+    cmd("pane.move", &[opt("pane"), opt("tab"), opt("target"), opt("edge")], "Move a pane (default: the focused one) into another tab, keeping its terminal: `tab` appends after that tab's focused pane, `target` puts it beside a pane in any tab at `edge` (\"left\", \"right\", \"up\", \"down\"; default right). One of `tab` or `target`."),
     cmd("terminal.open", &[opt("argv"), opt("folder"), opt("place"), opt("name")], "Start a terminal: as a new tab (place \"tab\", default), or \"right\"/\"down\" of the focused pane."),
     cmd("terminal.keep", &[req("terminal"), opt("place")], "Give a running terminal without a pane (a sub-agent) a pane: a new tab, or \"right\"/\"down\"."),
     cmd("terminal.park", &[req("terminal")], "Take a terminal's pane away and disable core keep; it keeps running (a sub-agent shows under its parent again)."),
