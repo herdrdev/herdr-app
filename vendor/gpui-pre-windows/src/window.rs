@@ -21,7 +21,12 @@ use windows::{
         Graphics::Dwm::*,
         Graphics::Gdi::*,
         System::{
-            Com::*, Diagnostics::Debug::MessageBeep, LibraryLoader::*, Ole::*, SystemServices::*,
+            Com::*,
+            Diagnostics::Debug::MessageBeep,
+            LibraryLoader::*,
+            Memory::{GlobalLock, GlobalSize, GlobalUnlock},
+            Ole::*,
+            SystemServices::*,
         },
         UI::{Controls::*, HiDpi::*, Input::KeyboardAndMouse::*, Shell::*, WindowsAndMessaging::*},
     },
@@ -1197,6 +1202,22 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
                     paths: ExternalPaths(paths),
                 });
                 self.handle_drag_drop(input);
+            } else if let Some(text) = dragged_text(idata_obj) {
+                *pdweffect = DROPEFFECT_COPY;
+                let mut cursor_position = cursor_position;
+                ScreenToClient(self.0.hwnd, &mut cursor_position)
+                    .ok()
+                    .log_err();
+                let scale_factor = self.0.state.scale_factor.get();
+                let input = PlatformInput::FileDrop(FileDropEvent::TextEntered {
+                    position: logical_point(
+                        cursor_position.x as f32,
+                        cursor_position.y as f32,
+                        scale_factor,
+                    ),
+                    text: ExternalText(text),
+                });
+                self.handle_drag_drop(input);
             } else {
                 *pdweffect = DROPEFFECT_NONE;
             }
@@ -1278,6 +1299,38 @@ impl IDropTarget_Impl for WindowsDragDropHandler_Impl {
         self.handle_drag_drop(input);
 
         Ok(())
+    }
+}
+
+unsafe fn dragged_text(data: &IDataObject) -> Option<String> {
+    let format = FORMATETC {
+        cfFormat: CF_UNICODETEXT.0,
+        ptd: std::ptr::null_mut() as _,
+        dwAspect: DVASPECT_CONTENT.0,
+        lindex: -1,
+        tymed: TYMED_HGLOBAL.0 as _,
+    };
+    unsafe {
+        if data.QueryGetData(&format) != S_OK {
+            return None;
+        }
+        let mut medium = data.GetData(&format).log_err()?;
+        let text = (!medium.u.hGlobal.is_invalid())
+            .then(|| {
+                let ptr = GlobalLock(medium.u.hGlobal) as *const u16;
+                if ptr.is_null() {
+                    return None;
+                }
+                let words = GlobalSize(medium.u.hGlobal) / std::mem::size_of::<u16>();
+                let wide = std::slice::from_raw_parts(ptr, words);
+                let len = wide.iter().position(|&c| c == 0).unwrap_or(words);
+                let text = String::from_utf16_lossy(&wide[..len]);
+                let _ = GlobalUnlock(medium.u.hGlobal);
+                Some(text)
+            })
+            .flatten();
+        ReleaseStgMedium(&mut medium);
+        text.filter(|t| !t.is_empty())
     }
 }
 

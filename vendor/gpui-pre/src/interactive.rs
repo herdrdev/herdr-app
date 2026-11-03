@@ -700,6 +700,23 @@ impl ExternalPaths {
     }
 }
 
+/// Text dragged in from another application, such as a link from a browser.
+#[derive(Debug, Clone, Default, Eq, PartialEq)]
+pub struct ExternalText(pub String);
+
+impl ExternalText {
+    /// The dragged text.
+    pub fn text(&self) -> &str {
+        &self.0
+    }
+}
+
+impl Render for ExternalText {
+    fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+        Empty
+    }
+}
+
 /// Data offered to the platform when an internal drag leaves the window and is
 /// promoted to a native drag session.
 #[derive(Debug, Clone, Eq, PartialEq)]
@@ -741,6 +758,13 @@ pub enum FileDropEvent {
         position: Point<Pixels>,
         /// The paths of the files that are being dragged.
         paths: ExternalPaths,
+    },
+    /// Text from another application has entered the window.
+    TextEntered {
+        /// The position of the mouse relative to the window.
+        position: Point<Pixels>,
+        /// The text that is being dragged.
+        text: ExternalText,
     },
     /// The files are being dragged over the window
     Pending {
