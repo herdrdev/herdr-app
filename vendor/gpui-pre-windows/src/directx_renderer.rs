@@ -86,6 +86,9 @@ struct DirectXResources {
 struct DirectXRenderPipelines {
     shadow_pipeline: PipelineState<Shadow>,
     quad_pipeline: PipelineState<Quad>,
+    // HERDR: shaders for plain quads; they read `quad_pipeline`'s buffer.
+    plain_quad_vertex: ID3D11VertexShader,
+    plain_quad_fragment: ID3D11PixelShader,
     path_rasterization_pipeline: PipelineState<PathRasterizationSprite>,
     path_sprite_pipeline: PipelineState<PathSprite>,
     underline_pipeline: PipelineState<Underline>,
@@ -368,7 +371,7 @@ impl DirectXRenderer {
                 .map(|annotation| Annotation::new(annotation, HSTRING::from(batch.label())));
             match batch {
                 PrimitiveBatch::Shadows(range) => self.draw_shadows(range.start, range.len()),
-                PrimitiveBatch::Quads(range) => self.draw_quads(range.start, range.len()),
+                PrimitiveBatch::Quads(range) => self.draw_quads(&scene.quads[range.clone()], range.start),
                 PrimitiveBatch::Paths(range) => {
                     let paths = &scene.paths[range];
                     self.draw_paths_to_intermediate(paths)?;
@@ -596,20 +599,44 @@ impl DirectXRenderer {
         )
     }
 
-    fn draw_quads(&mut self, start: usize, len: usize) -> Result<()> {
-        if len == 0 {
-            return Ok(());
-        }
+    fn draw_quads(&mut self, quads: &[Quad], start: usize) -> Result<()> {
         let devices = self.devices.as_ref().context("devices missing")?;
-        self.pipelines.quad_pipeline.draw_range(
-            &devices.device_context,
-            self.globals
-                .batch_params_buffer
-                .as_ref()
-                .context("batch params buffer missing")?,
-            start as u32,
-            len as u32,
-        )
+        let batch_params = self
+            .globals
+            .batch_params_buffer
+            .as_ref()
+            .context("batch params buffer missing")?;
+        let pipelines = &self.pipelines;
+        // HERDR: draw runs of plain quads with the plain shaders. Runs keep
+        // the batch's order, so overlapping quads still blend the same way.
+        let mut run_start = 0;
+        while run_start < quads.len() {
+            let plain = is_plain_quad(&quads[run_start]);
+            let run_len = quads[run_start..]
+                .iter()
+                .take_while(|quad| is_plain_quad(quad) == plain)
+                .count();
+            let first = (start + run_start) as u32;
+            if plain {
+                pipelines.quad_pipeline.draw_range_with_shaders(
+                    &devices.device_context,
+                    batch_params,
+                    first,
+                    run_len as u32,
+                    &pipelines.plain_quad_vertex,
+                    &pipelines.plain_quad_fragment,
+                )?;
+            } else {
+                pipelines.quad_pipeline.draw_range(
+                    &devices.device_context,
+                    batch_params,
+                    first,
+                    run_len as u32,
+                )?;
+            }
+            run_start += run_len;
+        }
+        Ok(())
     }
 
     fn draw_paths_to_intermediate(&mut self, paths: &[Path<ScaledPixels>]) -> Result<()> {
@@ -955,6 +982,14 @@ impl DirectXRenderPipelines {
             64,
             create_blend_state(device)?,
         )?;
+        let plain_quad_vertex = {
+            let raw_shader = RawShaderBytes::new(ShaderModule::PlainQuad, ShaderTarget::Vertex)?;
+            create_vertex_shader(device, raw_shader.as_bytes())?
+        };
+        let plain_quad_fragment = {
+            let raw_shader = RawShaderBytes::new(ShaderModule::PlainQuad, ShaderTarget::Fragment)?;
+            create_fragment_shader(device, raw_shader.as_bytes())?
+        };
         let path_rasterization_pipeline = PipelineState::new(
             device,
             "path_rasterization_pipeline",
@@ -1001,6 +1036,8 @@ impl DirectXRenderPipelines {
         Ok(Self {
             shadow_pipeline,
             quad_pipeline,
+            plain_quad_vertex,
+            plain_quad_fragment,
             path_rasterization_pipeline,
             path_sprite_pipeline,
             underline_pipeline,
@@ -1213,6 +1250,25 @@ impl<T> PipelineState<T> {
         first_instance: u32,
         instance_count: u32,
     ) -> Result<()> {
+        self.draw_range_with_shaders(
+            device_context,
+            batch_params_buffer,
+            first_instance,
+            instance_count,
+            &self.vertex,
+            &self.fragment,
+        )
+    }
+
+    fn draw_range_with_shaders(
+        &self,
+        device_context: &ID3D11DeviceContext,
+        batch_params_buffer: &ID3D11Buffer,
+        first_instance: u32,
+        instance_count: u32,
+        vertex: &ID3D11VertexShader,
+        fragment: &ID3D11PixelShader,
+    ) -> Result<()> {
         anyhow::ensure!(
             first_instance as usize + instance_count as usize <= self.buffer_size,
             "DirectX instance range exceeds the {} buffer",
@@ -1223,8 +1279,8 @@ impl<T> PipelineState<T> {
             device_context,
             slice::from_ref(&self.view),
             D3D_PRIMITIVE_TOPOLOGY_TRIANGLESTRIP,
-            &self.vertex,
-            &self.fragment,
+            vertex,
+            fragment,
             &self.blend_state,
         );
         unsafe {
@@ -1649,6 +1705,17 @@ fn update_buffer<T>(
 }
 
 #[inline]
+// HERDR: a solid background with no border and no rounded corner, which
+// `quad_fragment` would fill with exactly its solid color.
+fn is_plain_quad(quad: &Quad) -> bool {
+    let zero = ScaledPixels(0.0);
+    let r = &quad.corner_radii;
+    let b = &quad.border_widths;
+    quad.background.as_solid().is_some()
+        && [r.top_left, r.top_right, r.bottom_right, r.bottom_left] == [zero; 4]
+        && [b.top, b.right, b.bottom, b.left] == [zero; 4]
+}
+
 fn update_batch_start(
     device_context: &ID3D11DeviceContext,
     buffer: &ID3D11Buffer,
@@ -1709,6 +1776,7 @@ pub(crate) mod shader_resources {
     #[derive(Copy, Clone, Debug, Eq, PartialEq)]
     pub(crate) enum ShaderModule {
         Quad,
+        PlainQuad,
         Shadow,
         Underline,
         PathRasterization,
@@ -1761,6 +1829,10 @@ pub(crate) mod shader_resources {
                 ShaderModule::Quad => match target {
                     ShaderTarget::Vertex => QUAD_VERTEX_BYTES,
                     ShaderTarget::Fragment => QUAD_FRAGMENT_BYTES,
+                },
+                ShaderModule::PlainQuad => match target {
+                    ShaderTarget::Vertex => PLAIN_QUAD_VERTEX_BYTES,
+                    ShaderTarget::Fragment => PLAIN_QUAD_FRAGMENT_BYTES,
                 },
                 ShaderModule::Shadow => match target {
                     ShaderTarget::Vertex => SHADOW_VERTEX_BYTES,
@@ -1873,6 +1945,7 @@ pub(crate) mod shader_resources {
         pub fn as_str(self) -> &'static str {
             match self {
                 ShaderModule::Quad => "quad",
+                ShaderModule::PlainQuad => "plain_quad",
                 ShaderModule::Shadow => "shadow",
                 ShaderModule::Underline => "underline",
                 ShaderModule::PathRasterization => "path_rasterization",
