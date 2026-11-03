@@ -537,6 +537,14 @@ The main ones:
   `pane.go` also reaches visible mods whose `mod.json` says `"focusable": true`, and
   starts from that mod while it holds the keyboard.
   `pane.swap` uses geometry only. Focus history lasts until the window closes.
+  `pane.navigate {direction, terminal?}` forwards Ctrl+H/J/K/L to a focused
+  terminal identified as Neovim; otherwise it uses `pane.go` navigation.
+  Bind it in the terminal key context, for example `"ctrl-h": "pane.navigate:left"`.
+  Neovim must map those keys to move editor windows first. At an editor edge,
+  call `herdr-app do pane.navigate --direction left --terminal "$HC_TERMINAL_ID"`
+  with the corresponding direction. Passing `terminal` bypasses forwarding;
+  the handoff is ignored if that terminal no longer has keyboard focus.
+  This command works independently of loaded mods and does not change default keys.
   `pane.focus {terminal}` prefers the first visible layout terminal block showing that
   address, then its model pane. Clicking a terminal block focuses it too.
   While a layout terminal block is focused, implicit split/close/zoom/go/swap and

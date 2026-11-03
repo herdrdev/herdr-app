@@ -37,6 +37,12 @@ herdr-app do pane.split --direction right --pane p12
 herdr-app do agent.focus --terminal t7
 ```
 
+`pane.navigate --direction left|right|up|down` forwards the corresponding
+Ctrl+H/L/K/J key to a focused Neovim terminal, or navigates adjacent panes.
+It requires matching Neovim mappings for editor-first movement. At an editor
+edge, pass `--terminal "$HC_TERMINAL_ID"` to hand off to the App. The App
+ignores the handoff if that terminal no longer has keyboard focus.
+
 For a remote space:
 
 ```sh

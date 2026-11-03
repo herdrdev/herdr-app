@@ -255,6 +255,15 @@ Focus the pane or focusable mod to the "left", "right", "up" or "down".
 |---|---|
 | `direction` | yes |
 
+## `pane.navigate`
+
+Navigate Neovim windows or adjacent panes; terminal identifies an editor's edge handoff.
+
+| Argument | Required |
+|---|---|
+| `direction` | yes |
+| `terminal` | no |
+
 ## `pane.swap`
 
 Swap the focused pane with its neighbor in a direction.
