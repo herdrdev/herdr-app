@@ -607,7 +607,7 @@ impl TerminalView {
 
         self.search_open = true;
         self.search_query = input.read(cx).value().to_string();
-        self.grid.borrow_mut().vt.start_search(&self.search_query.clone());
+        self.grid.borrow_mut().vt.start_search(&self.search_query);
         self.focus_search_input(window, cx);
         if reopening && !self.search_query.is_empty() {
             if let Some(input) = &self.search_input {
@@ -1818,24 +1818,8 @@ impl Render for TerminalView {
                         .child(div().w(px(58.0)).text_xs().text_color(crate::settings::color("muted")).child(search_label))
                         .child(
                             div()
-                                .id(SharedString::from(format!("find-prev-{address}")))
-                                .w(px(26.0))
-                                .h(px(26.0))
-                                .flex()
-                                .items_center()
-                                .justify_center()
-                                .rounded_sm()
-                                .hover(|d| d.bg(crate::settings::color("hover")))
-                                .cursor_pointer()
-                                .on_click(cx.listener(|this, _, window, cx| {
-                                    this.queue_search_navigation(true, cx);
-                                    this.focus_search_input(window, cx);
-                                }))
-                                .child("↑"),
-                        )
-                        .child(
-                            div()
                                 .id(SharedString::from(format!("find-next-{address}")))
+                                .debug_selector(|| "find-up".to_owned())
                                 .w(px(26.0))
                                 .h(px(26.0))
                                 .flex()
@@ -1846,6 +1830,24 @@ impl Render for TerminalView {
                                 .cursor_pointer()
                                 .on_click(cx.listener(|this, _, window, cx| {
                                     this.queue_search_navigation(false, cx);
+                                    this.focus_search_input(window, cx);
+                                }))
+                                .child("↑"),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("find-prev-{address}")))
+                                .debug_selector(|| "find-down".to_owned())
+                                .w(px(26.0))
+                                .h(px(26.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_sm()
+                                .hover(|d| d.bg(crate::settings::color("hover")))
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.queue_search_navigation(true, cx);
                                     this.focus_search_input(window, cx);
                                 }))
                                 .child("↓"),
@@ -2092,6 +2094,59 @@ mod tests {
         cx.simulate_keystrokes("x y z");
         cx.run_until_parked();
         root.read_with(cx, |root, cx| assert_eq!(root.0.read(cx).search_query, "xyz"));
+    }
+
+    #[gpui::test]
+    fn find_bar_chevrons_step_older_up_and_newer_down(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        struct Root(Entity<super::TerminalView>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(self.0.clone())
+            }
+        }
+
+        cx.update(gpui_base::init);
+        let (root, cx) = cx.add_window_view(|_, cx| Root(cx.new(|cx| {
+            let terminal = super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 5), cx);
+            terminal.grid.borrow_mut().vt.write(b"old alpha\r\nbetween\r\nnew alpha");
+            terminal
+        })));
+        cx.run_until_parked();
+
+        cx.update(|window, app| {
+            root.update(app, |root, app| {
+                root.0.update(app, |terminal, cx| terminal.open_search(window, cx));
+            });
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("a l p h a");
+        cx.run_until_parked();
+
+        let click = |cx: &mut gpui::VisualTestContext, selector: &'static str| {
+            let at = cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is laid out")).center();
+            cx.simulate_mouse_move(at, None, Modifiers::default());
+            cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::default());
+            cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::default());
+            cx.run_until_parked();
+        };
+        let selected_row = |cx: &mut gpui::VisualTestContext| {
+            root.read_with(cx, |root, cx| {
+                root.0.read(cx).grid.borrow_mut().vt.frame()
+                    .search_spans.iter()
+                    .filter(|span| span.selected)
+                    .map(|span| span.row)
+                    .collect::<Vec<_>>()
+            })
+        };
+
+        click(cx, "find-up");
+        assert_eq!(selected_row(cx), vec![2], "the newest match, at the bottom, is selected first");
+        click(cx, "find-up");
+        assert_eq!(selected_row(cx), vec![0], "the second press up is the older match");
+        click(cx, "find-down");
+        assert_eq!(selected_row(cx), vec![2]);
     }
 
     #[gpui::test]
