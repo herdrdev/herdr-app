@@ -59,6 +59,7 @@
     "ctrl-9": "space.select:9"
   },
   "terminal": {
+    "cmd-f": "terminal.search",
     "cmd-c": "terminal.copy",
     "cmd-v": "terminal.paste",
     "ctrl-v": "terminal.paste_image",
