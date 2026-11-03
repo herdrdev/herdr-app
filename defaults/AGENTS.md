@@ -496,6 +496,8 @@ the build doesn't do.
   Existing `keys.json` files don't need to change.
 - Terminal keys honor the program's negotiated Kitty mode, including on Windows.
 - Windows terminal Escape stays separate from the following key.
+- In Windows terminals requesting Win32 input without Kitty, Ctrl+J keeps its
+  own key identity for programs that use it to insert a newline.
 
 ## Commands
 

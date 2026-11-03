@@ -1,7 +1,7 @@
 //! Windows' ConPTY asks its viewer for win32-input-mode (`CSI ?9001h`): key
 //! events with their modifiers, which it otherwise loses (Shift+Enter as
 //! Ghostty sends it never reaches the program). herdr-core replays the request
-//! to every new viewer. Used for Escape and modified Enter without Kitty;
+//! to every new viewer. Used for Escape, Ctrl+J and modified Enter without Kitty;
 //! negotiated Kitty input stays with Ghostty's encoder.
 
 const ON: &[u8] = b"\x1b[?9001h";
@@ -48,6 +48,12 @@ pub fn enter(shift: bool, ctrl: bool, alt: bool) -> Vec<u8> {
 
 pub fn escape(shift: bool, ctrl: bool, alt: bool) -> Vec<u8> {
     key(27, 1, 27, shift, ctrl, alt)
+}
+
+/// Keep Ctrl+J's key identity instead of asking ConPTY to infer it from LF.
+pub fn ctrl_j() -> Vec<u8> {
+    // VK_J, J's scan code, LF, left Ctrl held.
+    key(74, 36, 10, false, true, false)
 }
 
 fn key(vk: u32, scan: u32, typed: u32, shift: bool, ctrl: bool, alt: bool) -> Vec<u8> {
