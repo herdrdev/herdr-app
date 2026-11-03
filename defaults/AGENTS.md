@@ -498,7 +498,7 @@ the build doesn't do.
 - Windows terminal Escape stays separate from the following key.
 - Search: `ctrl-shift-f` (Cmd-F on macOS) opens a find bar inside the focused terminal;
   Enter/Shift-Enter moves through matches and Escape closes it. Each terminal keeps
-  its own query. Search covers the screen and scrollback without replacing text selection.
+  its own query, and reopening selects it so typing replaces it. Search covers the screen and scrollback without replacing text selection.
 
 ## Commands
 

@@ -581,6 +581,7 @@ impl TerminalView {
     /// Opens the find bar inside this terminal view. Keeping the input entity
     /// here means its query and selection survive tab switches independently.
     pub fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let reopening = !self.search_open;
         let input = if let Some(input) = self.search_input.clone() {
             input
         } else {
@@ -608,6 +609,11 @@ impl TerminalView {
         self.search_query = input.read(cx).value().to_string();
         self.grid.borrow_mut().vt.start_search(&self.search_query.clone());
         self.focus_search_input(window, cx);
+        if reopening && !self.search_query.is_empty() {
+            if let Some(input) = &self.search_input {
+                input.update(cx, |state, cx| state.select_all(window, cx));
+            }
+        }
         self.ensure_search_task(cx);
         cx.notify();
     }
@@ -2033,6 +2039,59 @@ mod tests {
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
         root.read_with(cx, |root, cx| assert!(!root.0.read(cx).search_open));
+    }
+
+    #[gpui::test]
+    fn reopening_the_find_bar_selects_the_kept_query(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        struct Root(Entity<super::TerminalView>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(self.0.clone())
+            }
+        }
+
+        cx.update(gpui_base::init);
+        let (root, cx) = cx.add_window_view(|_, cx| Root(cx.new(|cx| {
+            let terminal = super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 6), cx);
+            terminal.grid.borrow_mut().vt.write(b"needle appears here");
+            terminal
+        })));
+        cx.run_until_parked();
+
+        cx.update(|window, app| {
+            root.update(app, |root, app| {
+                root.0.update(app, |terminal, cx| terminal.open_search(window, cx));
+            });
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("n e e d l e");
+        cx.run_until_parked();
+        root.read_with(cx, |root, cx| assert_eq!(root.0.read(cx).search_query, "needle"));
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        root.read_with(cx, |root, cx| assert!(!root.0.read(cx).search_open));
+
+        // The kept query comes back selected, so typing replaces it instead
+        // of appending to the stale needle.
+        cx.update(|window, app| {
+            root.update(app, |root, app| {
+                root.0.update(app, |terminal, cx| terminal.open_search(window, cx));
+            });
+        });
+        cx.run_until_parked();
+        root.read_with(cx, |root, cx| {
+            let terminal = root.0.read(cx);
+            assert!(terminal.search_open);
+            assert_eq!(terminal.search_query, "needle");
+            let input = terminal.search_input.as_ref().unwrap().read(cx);
+            assert_eq!(input.selected_range(), 0.."needle".len());
+        });
+        cx.simulate_keystrokes("x y z");
+        cx.run_until_parked();
+        root.read_with(cx, |root, cx| assert_eq!(root.0.read(cx).search_query, "xyz"));
     }
 
     #[gpui::test]
