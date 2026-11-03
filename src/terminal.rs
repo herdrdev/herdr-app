@@ -76,6 +76,10 @@ struct Grid {
     /// The cursor's cell in window coordinates, from the last paint: where the
     /// input method puts its candidate window.
     cursor_at: Option<Bounds<Pixels>>,
+    /// The scroll thumb's grabbable lane from the last paint, in window
+    /// coordinates (wider than the few px drawn).
+    thumb: Option<Bounds<Pixels>>,
+    track: Option<Bounds<Pixels>>,
     /// Each row's drawing by position, kept while the row is the same (`Rc`).
     painted: Vec<(Rc<Vec<vt::Cell>>, Vec<RowOp>, Option<usize>)>,
     /// Font size, cell size, font, loaded fonts and ligature setting used to draw.
@@ -90,6 +94,8 @@ pub struct TerminalView {
     pub lost: bool,
     /// A left-button selection drag is in progress.
     selecting: bool,
+    /// A scroll thumb drag is: the px into the thumb it was grabbed at.
+    scrollbar_grab: Option<f32>,
     selection_pointer: Point<Pixels>,
     selection_scroll: Option<Task<()>>,
     /// The terminal's folder, for links to relative paths.
@@ -207,6 +213,7 @@ impl TerminalView {
             ended: None,
             lost: false,
             selecting: false,
+            scrollbar_grab: None,
             selection_pointer: Point::default(),
             selection_scroll: None,
             cwd: None,
@@ -227,6 +234,8 @@ impl TerminalView {
                 link_spans: Vec::new(),
                 marked: None,
                 cursor_at: None,
+                thumb: None,
+                track: None,
                 painted: Vec::new(),
                 painted_with: (0, Size::default(), String::new(), 0, false),
             })),
@@ -752,6 +761,43 @@ fn selection_scroll_lines(y: f32, cell_height: f32, rows: u16) -> isize {
     let height = cell_height * rows as f32;
     let outside = if y < 0.0 { y } else if y >= height { y - height + 1.0 } else { return 0 };
     (outside / cell_height).abs().ceil().clamp(1.0, 5.0) as isize * if outside < 0.0 { -1 } else { 1 }
+}
+
+/// A scroll thumb's top and length in px inside a `track` px lane: the
+/// scrollable area is `total` rows, the `len`-row viewport sits `offset` rows
+/// from its top. None when nothing scrolls; `min` keeps a huge scrollback
+/// grabbable. The proportions are Herdr's scrollbar's.
+fn scrollbar_thumb(total: u64, offset: u64, len: u64, track: f32, min: f32) -> Option<(f32, f32)> {
+    if total <= len || len == 0 || track <= 0.0 {
+        return None;
+    }
+    let thumb = (track * len as f32 / total as f32).clamp(min.min(track), track);
+    let travel = track - thumb;
+    let top = if travel <= 0.0 { 0.0 } else { offset.min(total - len) as f32 / (total - len) as f32 * travel };
+    Some((top, thumb))
+}
+
+// Use existing padding when possible, otherwise overlay the last few pixels.
+// Scrollback appearing must not resize the terminal or reflow its output.
+fn scrollbar_lane(bounds: Bounds<Pixels>, origin: Point<Pixels>, text_width: Pixels, height: Pixels) -> Bounds<Pixels> {
+    let edge = bounds.origin.x + bounds.size.width;
+    let left = (origin.x + text_width).min(edge - px(8.0)).max(bounds.origin.x);
+    Bounds::new(point(left, origin.y), size(edge - left, height))
+}
+
+fn scrollbar_grab_at(top: f32, len: f32, y: f32) -> f32 {
+    if y >= top && y < top + len { y - top } else { len / 2.0 }
+}
+
+/// The scroll position a thumb dragged to `top` px lands on, as a row offset
+/// from the scrollback's top (`Vt::scroll_to_row`'s).
+fn scrollbar_row_at(total: u64, len: u64, track: f32, min: f32, top: f32) -> usize {
+    let Some((_, thumb)) = scrollbar_thumb(total, 0, len, track, min) else { return 0 };
+    let travel = track - thumb;
+    if travel <= 0.0 {
+        return 0;
+    }
+    (top.clamp(0.0, travel) / travel * (total - len) as f32).round() as usize
 }
 
 /// A title as it's shown: an agent's spinner in front of it (`\u{2733} Fix the
@@ -1405,7 +1451,31 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
         window.paint_quad(fill(snap_box(Bounds::new(p, size(line.width, cell.height))), hsla(frame.bg)));
         let _ = line.paint(p, cell.height, TextAlign::Left, None, window, cx);
     }
-    grid.borrow_mut().cursor_at = frame.cursor_cell.map(|(x, y)| Bounds::new(at(x as usize, y as usize), cell));
+    {
+        let mut g = grid.borrow_mut();
+        g.cursor_at = frame.cursor_cell.map(|(x, y)| Bounds::new(at(x as usize, y as usize), cell));
+        // As in Herdr, hide on the alternate screen and below five columns.
+        g.thumb = None;
+        g.track = None;
+        let sb = g.vt.scrollbar();
+        let track = f32::from(cell.height) * f32::from(g.vt.rows);
+        if crate::settings::get().pane_scrollbars
+            && !g.vt.alt_screen()
+            && g.vt.cols > 4
+            && let Some((top, len)) = scrollbar_thumb(sb.total, sb.offset, sb.len, track, f32::from(cell.height))
+        {
+            let lane = scrollbar_lane(bounds, origin, cell.width * f32::from(g.vt.cols), px(track));
+            let w = px(4.0);
+            let x = lane.origin.x + lane.size.width - w - px(2.0);
+            let color = crate::settings::color("muted");
+            let rail = Bounds::new(point(x + w / 2.0 - px(0.5), origin.y), size(px(1.0), px(track)));
+            window.paint_quad(fill(snap_box(rail), color.opacity(0.35)));
+            let thumb = Bounds::new(point(x, origin.y + px(top)), size(w, px(len)));
+            window.paint_quad(fill(snap_box(thumb), color).corner_radii(w / 2.0));
+            g.thumb = Some(Bounds::new(point(lane.origin.x, thumb.origin.y), size(lane.size.width, thumb.size.height)));
+            g.track = Some(lane);
+        }
+    }
 }
 
 /// OS text input (AltGr, Pinyin, Japanese, Korean, dead keys) types here.
@@ -1524,6 +1594,24 @@ impl Render for TerminalView {
                     }
                     return;
                 }
+                let mut g = this.grid.borrow_mut();
+                if let (Some(track), Some(thumb)) = (g.track, g.thumb)
+                    && track.contains(&ev.position)
+                {
+                    let grab = scrollbar_grab_at(f32::from(thumb.origin.y), f32::from(thumb.size.height), f32::from(ev.position.y));
+                    this.scrollbar_grab = Some(grab);
+                    if !thumb.contains(&ev.position) {
+                        let sb = g.vt.scrollbar();
+                        let top = f32::from(ev.position.y - track.origin.y) - grab;
+                        let min = f32::from(g.cell.height);
+                        g.vt.scroll_to_row(scrollbar_row_at(sb.total, sb.len, f32::from(track.size.height), min, top));
+                    }
+                    drop(g);
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                }
+                drop(g);
                 if !this.mouse(GHOSTTY_MOUSE_ACTION_PRESS, Some(ev.button), ev.position, ev.modifiers) {
                     this.start_selection(ev.position, cx);
                 }
@@ -1565,6 +1653,20 @@ impl Render for TerminalView {
                         window.on_mouse_event(move |ev: &MouseMoveEvent, phase, _, cx| {
                             if phase == DispatchPhase::Capture {
                                 let _ = view.update(cx, |this, cx| {
+                                    if this.scrollbar_grab.is_some() {
+                                        if ev.pressed_button != Some(MouseButton::Left) {
+                                            this.scrollbar_grab = None;
+                                            return;
+                                        }
+                                        let mut g = this.grid.borrow_mut();
+                                        let sb = g.vt.scrollbar();
+                                        let (track, min) = (f32::from(g.cell.height) * f32::from(g.vt.rows), f32::from(g.cell.height));
+                                        let top = f32::from(ev.position.y - g.origin.y) - this.scrollbar_grab.unwrap_or(0.0);
+                                        g.vt.scroll_to_row(scrollbar_row_at(sb.total, sb.len, track, min, top));
+                                        drop(g);
+                                        cx.notify();
+                                        return;
+                                    }
                                     if !this.selecting && ev.pressed_button.is_some() && !this.grid.borrow().buttons_down.is_empty() {
                                         this.mouse(GHOSTTY_MOUSE_ACTION_MOTION, ev.pressed_button, ev.position, ev.modifiers);
                                     }
@@ -1583,6 +1685,13 @@ impl Render for TerminalView {
                         window.on_mouse_event(move |ev: &MouseUpEvent, phase, _, cx| {
                             if phase == DispatchPhase::Capture {
                                 let _ = selection_view.update(cx, |this, cx| {
+                                    if this.scrollbar_grab.is_some() {
+                                        if ev.button == MouseButton::Left {
+                                            this.scrollbar_grab = None;
+                                            cx.stop_propagation();
+                                        }
+                                        return;
+                                    }
                                     if (!this.selecting || ev.button != MouseButton::Left) && this.grid.borrow().buttons_down.contains(&ev.button) {
                                         this.mouse(GHOSTTY_MOUSE_ACTION_RELEASE, Some(ev.button), ev.position, ev.modifiers);
                                     }
@@ -2034,6 +2143,60 @@ mod tests {
         assert_eq!(steps(-0.1), -3);
         assert_eq!(steps(1.5), 4, "a fast spin's tick, its half line dropped");
         assert_eq!(steps(0.0), 0);
+    }
+
+    #[test]
+    fn the_scroll_thumb_maps_the_viewport_into_its_track() {
+        use super::scrollbar_thumb as thumb;
+        // No scrollback: no thumb.
+        assert_eq!(thumb(40, 0, 40, 100.0, 4.0), None);
+        // Half the scrollable area visible: a half-height thumb at the top.
+        assert_eq!(thumb(80, 0, 40, 100.0, 4.0), Some((0.0, 50.0)));
+        // At the bottom it reaches the track's end.
+        assert_eq!(thumb(80, 40, 40, 100.0, 4.0), Some((50.0, 50.0)));
+        // A huge scrollback still leaves a grabbable thumb.
+        assert_eq!(thumb(10_000, 0, 40, 100.0, 4.0), Some((0.0, 4.0)));
+    }
+
+    #[test]
+    fn scrollbar_lane_survives_zero_and_small_padding_without_resizing() {
+        use gpui::{point, px, size, Bounds};
+        let bounds = Bounds::new(point(px(20.0), px(30.0)), size(px(400.0), px(200.0)));
+        for padding in [0.0, 1.0, 2.0, 14.0] {
+            for remainder in [0.0, 0.5, 7.0] {
+                let origin = bounds.origin + point(px(padding), px(padding));
+                let width = px(400.0 - padding * 2.0 - remainder);
+                let lane = super::scrollbar_lane(bounds, origin, width, px(160.0));
+                assert!(lane.size.width >= px(8.0));
+                assert_eq!(lane.origin.x + lane.size.width, px(420.0));
+                assert_eq!(lane.origin.y, origin.y);
+                assert_eq!(lane.size.height, px(160.0));
+            }
+        }
+    }
+
+    #[test]
+    fn track_click_centers_the_thumb_and_preserves_a_thumb_grab() {
+        use super::{scrollbar_grab_at as grab, scrollbar_row_at as row_at, scrollbar_thumb as thumb};
+        let (top, len) = thumb(1000, 800, 40, 100.0, 4.0).unwrap();
+        assert_eq!(grab(top, len, top + 1.0), 1.0);
+        let offset = grab(top, len, 50.0);
+        assert_eq!(offset, len / 2.0);
+        assert_eq!(row_at(1000, 40, 100.0, 4.0, 50.0 - offset), 480);
+        assert_eq!(row_at(1000, 40, 100.0, 4.0, -offset), 0);
+        assert_eq!(row_at(1000, 40, 100.0, 4.0, 100.0 - offset), 960);
+    }
+
+    #[test]
+    fn a_scroll_thumb_drag_round_trips_to_a_row() {
+        use super::{scrollbar_row_at as row_at, scrollbar_thumb as thumb};
+        let (track, min) = (100.0, 4.0);
+        // The track's ends are the scrollback's ends.
+        assert_eq!(row_at(80, 40, track, min, 0.0), 0);
+        assert_eq!(row_at(80, 40, track, min, track), 40);
+        // A thumb's painted top reads back as its own offset.
+        let (top, _) = thumb(80, 25, 40, track, min).unwrap();
+        assert_eq!(row_at(80, 40, track, min, top), 25);
     }
 
     #[test]

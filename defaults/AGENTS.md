@@ -328,6 +328,10 @@ layout's look and a block can differ:
   folder (or the home's `fonts/`) load at start and on the next look change,
   so a layout and its mod folder travel together (Herdr 98's do: its pixel
   fonts are in `mods/win98/fonts/`).
+- `pane_scrollbars` in settings.json (default `true`): show terminal scrollback
+  with a slim thumb and track. Drag the thumb or click the track to jump there.
+  With little or no terminal padding, the hit lane overlays the last 8px;
+  terminal columns do not change. Hidden in alternate-screen programs.
 - `terminal_opacity` (0..1): below 1, the background behind a terminal
   (a pane frame's, the layout's gradient) shows through its text.
 - Switching layouts switches the look. The theme menu changes the shown
@@ -691,6 +695,10 @@ What's about the user, never a look:
   `p` writes Linux primary selection. `s` is ignored; cut buffers `0`–`7`
   are treated as the system clipboard.
   Clipboard reads (`?`) are never allowed.
+- `pane_scrollbars`: `false` hides the scroll position thumb at a terminal
+  pane's right edge (default `true`). It shows only when the pane has
+  scrollback — never on the alternate screen (editors, pagers) — and
+  drags to move through it.
 - `telemetry`: `false` stops anonymous usage data and deletes what wasn't
   sent (on when absent; Settings → Privacy shows each report word for
   word, and `telemetry()` in mods). Once a day the app sends counts:
