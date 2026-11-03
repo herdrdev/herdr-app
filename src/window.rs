@@ -432,6 +432,8 @@ pub struct AppWindow {
     /// The mod block holding the keyboard for directional navigation.
     focused_block: Option<String>,
     synced_model_pane: Option<String>,
+    /// Whether the last sync showed the tab, to hand it the keyboard back when a stack shows it again.
+    tab_shown: bool,
     pane_history: Vec<String>,
     window_active: bool,
     /// The system's appearance; a layout with a light and a dark theme follows it.
@@ -521,6 +523,7 @@ impl AppWindow {
             focused_pane: None,
             focused_block: None,
             synced_model_pane: None,
+            tab_shown: true,
             pane_history: Vec::new(),
             window_active: true,
             system_dark: is_dark(window.appearance()),
@@ -1464,6 +1467,11 @@ impl AppWindow {
         self.synced_model_pane = model_pane;
         self.focused_pane = focused.clone();
         let no_dialog = !self.overlays.iter().any(|o| o.kind.modal_keys());
+        // The tab shown again (`layout.select` back from another stack child): its
+        // focused pane gets the keyboard, which went to the window while it was hidden.
+        let tab_shown = self.shows_tab();
+        let revealed = tab_shown && !self.tab_shown;
+        self.tab_shown = tab_shown;
         if terminal_block(&self.chrome, focused.as_deref()).is_some() {
             if pane_changed && no_dialog && let Some(f) = focused.as_deref().and_then(|p| self.pane_focus(p, cx)) {
                 f.focus(window, cx);
@@ -1484,6 +1492,8 @@ impl AppWindow {
             if no_dialog {
                 focused.and_then(|p| self.pane_focus(&p, cx)).unwrap_or_else(|| self.focus.clone()).focus(window, cx);
             }
+        } else if revealed {
+            self.refocus_pane(window, cx);
         }
         if self.window_active {
             let visible = self.visible_addresses();
@@ -1605,6 +1615,19 @@ impl AppWindow {
 
         view.update(cx, |view, cx| view.scroll_history(target, cx));
         Ok(())
+    }
+
+    /// Gives the focused pane the keyboard, unless something other than the
+    /// window holds it: a dialog, a mod block, an input.
+    fn refocus_pane(&self, window: &mut Window, cx: &mut App) {
+        let dialog = self.overlays.iter().any(|o| o.kind.modal_keys());
+        let window_holds_keys = window.focused(cx).is_none() || self.focus.is_focused(window);
+        if dialog || self.focused_block.is_some() || !window_holds_keys {
+            return;
+        }
+        if let Some(f) = self.focused_pane.as_ref().and_then(|p| self.pane_focus(p, cx)) {
+            f.focus(window, cx);
+        }
     }
 
     fn pane_focus(&self, pane: &str, cx: &App) -> Option<FocusHandle> {
@@ -4084,17 +4107,7 @@ impl AppWindow {
                 // or other focusable control owns the keyboard once it takes focus.
                 .when(!in_overlay && !in_pane, |d| {
                     d.capture_any_mouse_down(cx.listener(|_, _, window, cx| {
-                        cx.defer_in(window, |this, window, cx| {
-                            let dialog = this.overlays.iter().any(|o| o.kind.modal_keys());
-                            if !dialog
-                                && this.focused_block.is_none()
-                                && (window.focused(cx).is_none() || this.focus.is_focused(window))
-                                && let Some(f) = this.focused_pane.as_ref().and_then(|p| this.pane_focus(p, cx))
-                                && !f.is_focused(window)
-                            {
-                                f.focus(window, cx);
-                            }
-                        });
+                        cx.defer_in(window, |this, window, cx| this.refocus_pane(window, cx));
                     }))
                 })
                 // Popups size to their content, up to the window: a column, so a mod
@@ -5215,6 +5228,41 @@ mod tests {
         let (view, cx) = cx.add_window_view(|window, cx| super::AppWindow::new(crate::hc::offline(), requests, window, cx));
         assert_eq!(view.update(cx, |this, _| this.layout_name.clone()), "test");
         (view, cx)
+    }
+
+    #[test]
+    fn showing_the_tab_again_gives_its_pane_the_keyboard() {
+        in_own_process("tab_shown_again");
+    }
+
+    /// A home page in a stack beside the tab: a space made while it shows
+    /// gets the keyboard once `layout.select` shows the tab again.
+    #[gpui::test]
+    fn tab_shown_again(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("tab_shown_again") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "home", "", json!({
+            "id": "center", "type": "stack", "active": "main", "children": [
+                { "id": "main", "type": "block", "content": { "tab": "active" } },
+                { "id": "home", "type": "block", "content": { "mod": "home" } }
+            ]
+        }));
+        let select = |child: &str, cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| view.update(cx, |this, cx| this.run("layout.select", json!({ "stack": "center", "child": child }), window, cx)));
+            cx.run_until_parked();
+        };
+        select("home", cx);
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.model.add_space("sp1", "", "/tmp", crate::model::Tab::new("tb1", "", "p1", "t1"));
+            this.sync(window, cx);
+        }));
+        cx.run_until_parked();
+        let pane_focused = |cx: &mut gpui::VisualTestContext| cx.update(|window, cx| view.read(cx).pane_focus("p1", cx).unwrap().is_focused(window));
+        assert!(!pane_focused(cx), "hidden, the pane can't hold the keyboard");
+        select("main", cx);
+        assert!(pane_focused(cx));
     }
 
     #[test]
