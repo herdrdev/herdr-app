@@ -534,6 +534,8 @@ The main ones:
   `pane.zoom {pane?}`, `pane.focus {pane | terminal}`, `pane.go {direction}`, `pane.swap {direction}`.
   `pane.go` prefers the most recently focused pane along the nearest edge in that
   direction; unvisited panes fall back to overlap, then top/left layout order.
+  While zoomed, it moves focus and zoom together to the neighboring pane in
+  the underlying grid, without moving panes or showing the grid in between.
   `pane.go` also reaches visible mods whose `mod.json` says `"focusable": true`, and
   starts from that mod while it holds the keyboard.
   `pane.swap` uses geometry only. Focus history lasts until the window closes.
