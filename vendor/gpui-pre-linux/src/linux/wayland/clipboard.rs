@@ -21,13 +21,10 @@ pub(crate) const TEXT_MIME_TYPES: [&str; 3] =
     ["text/plain;charset=utf-8", "UTF8_STRING", "text/plain"];
 pub(crate) const FILE_LIST_MIME_TYPE: &str = "text/uri-list";
 
-/// Parses a `text/uri-list` body (RFC 2483) into local paths. Skips comments,
-/// blank lines and URIs that are not `file://` paths.
 pub(crate) fn parse_file_uri_list(list: &str) -> SmallVec<[PathBuf; 2]> {
     list.lines()
         .filter(|line| !line.is_empty() && !line.starts_with('#'))
         .filter_map(|line| Url::parse(line).ok())
-        // `to_file_path` ignores the scheme, so `trash:/a` would become `/a`.
         .filter(|url| url.scheme() == "file")
         .filter_map(|url| url.to_file_path().ok())
         .collect()
@@ -132,8 +129,6 @@ impl<T: ReceiveData> DataOffer<T> {
         Some(ClipboardItem::new_string(result))
     }
 
-    /// Copied files come first, so a paste can take them as files; the text or
-    /// image stays for readers that want it, as on macOS.
     fn read_item(&self, connection: &Connection) -> Option<ClipboardItem> {
         let files = self.read_files(connection);
         let contents = self
