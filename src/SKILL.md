@@ -117,6 +117,7 @@ restoration combines the last fetched authoritative hidden content with pending
 local edits and does not force a remote read. Reconnect, attention, index and
 next/previous selection never restore it automatically. Downgrading to an
 older app may lose these private exclusions.
+If a pending Keep succeeds after its destination is closed only on this screen, it remains kept remotely; restoring that view here permits it to be shown.
 If a competing write removes an unacknowledged view from the authoritative
 layout, its terminal keeps running and the private exclusion prevents silent
 re-adoption. Saved-ID selection cannot recreate a view absent from that layout;

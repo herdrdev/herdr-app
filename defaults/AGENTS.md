@@ -604,6 +604,7 @@ The main ones:
   Ordinary close ends visible work and preserves already dismissed work; restore
   that work first to end it here. Index/next, reconnects and agent attention
   do not restore it. Older app versions do not retain this private exclusion.
+  If a pending Keep succeeds after its destination is closed only on this screen, it remains kept remotely; restoring that view here permits it to be shown.
   If a competing write removes an unacknowledged view from the authoritative
   layout, its terminal keeps running and the local exclusion prevents silent
   re-adoption. Saved-ID selection cannot recreate an absent view; the
