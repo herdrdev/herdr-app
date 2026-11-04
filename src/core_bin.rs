@@ -130,6 +130,8 @@ fn usual_dirs(home: &Path) -> Vec<PathBuf> {
         home.join(".cargo/bin"),
     ];
     if cfg!(target_os = "macos") {
+        dirs.push(home.join(".local/share/herdr-core/current/Contents/MacOS"));
+        // Older installers placed the bundle directly in herdr-core.
         dirs.push(home.join(".local/share/herdr-core/Herdr Core.app/Contents/MacOS"));
     }
     dirs
@@ -293,8 +295,10 @@ mod tests {
     #[test]
     fn the_independent_core_bundle_is_a_discovery_fallback() {
         let home = Path::new("/Users/test");
-        let dir = home.join(".local/share/herdr-core/Herdr Core.app/Contents/MacOS");
-        assert_eq!(usual_dirs(home).last(), Some(&dir));
+        let dir = home.join(".local/share/herdr-core/current/Contents/MacOS");
+        let legacy = home.join(".local/share/herdr-core/Herdr Core.app/Contents/MacOS");
+        let dirs = usual_dirs(home);
+        assert_eq!(&dirs[dirs.len() - 2..], &[dir.clone(), legacy]);
         assert_eq!(names(&dir)[0], dir.join("herdr-core"));
     }
 
