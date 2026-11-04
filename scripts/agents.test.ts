@@ -76,11 +76,12 @@ test("tab labels prefer the first agent, then focused terminal, then first termi
 // Lightweight element descriptions: execute conditional builders and retain text,
 // without running input callbacks or pretending to exercise native GPUI layout.
 function element() {
-  const node = { id: "", children: [] as any[] };
+  const node = { id: "", tooltip: undefined as string | undefined, children: [] as any[] };
   const el: any = new Proxy(node, { get: (_, method) => {
     if (method === "node") return node;
     return (...args: any[]) => {
       if (method === "id") node.id = args[0];
+      if (method === "tooltip") node.tooltip = args[0];
       if (method === "child") node.children.push(args[0]?.node ?? args[0]);
       if (method === "children") node.children.push(...args[0].map((child: any) => child?.node ?? child));
       if (method === "when" && args[0]) args[1](el);
@@ -119,4 +120,36 @@ for (const sort of ["priority", "grouped"]) test(`${sort} render reads panes onc
   expect(second).toContain("Updated task");
   expect(second).not.toContain("Task 63");
   expect(orders[1]).toEqual(orders[0]);
+});
+
+function tooltips(node: any): Record<string, string> {
+  if (typeof node !== "object" || !node) return {};
+  const own = node.tooltip === undefined ? {} : { [node.id]: node.tooltip };
+  return Object.assign(own, ...node.children.map(tooltips));
+}
+
+function longNameTooltips(sort: string) {
+  const space_name = "a-very-long-project-directory-name";
+  const a = { address: "thor/t1", pane: "p1", tab: "tab1", space: "s1", space_name, program: { name: "Claude", key: "claude", agent: true }, title: "Issue 272", status: "working", seq: 1 };
+  const { agents } = harness([], {
+    agents: () => [a], terminals: () => [{ ...a, state: "live" }],
+    panes: () => [{ tab: a.tab, terminal: a.address, program: a.program, title: a.title }], focused: () => null,
+    spaces: () => [{ tabs: [{ id: a.tab, name: "Claude", named: true }] }],
+    layout: () => ({ id: "sidebar", size: { px: 268 } }), shared: () => sort,
+    theme: () => ({}), setAgentOrder: () => {},
+    div: element, v_flex: element, h_flex: element, svg: element, image: element,
+  });
+  return tooltips(agents.render({}).node);
+}
+
+test("by priority, hovering a row's title shows its whole space name and detail; section names need none", () => {
+  const shown = longNameTooltips("priority");
+  expect(shown["ag-title-thor/t1"]).toBe("a-very-long-project-directory-name · Issue 272");
+  expect(Object.keys(shown).filter(id => id.endsWith("-label"))).toEqual([]);
+});
+
+test("grouped, hovering a space header shows its whole name", () => {
+  const shown = longNameTooltips("grouped");
+  expect(shown["sp-s1-label"]).toBe("a-very-long-project-directory-name");
+  expect(shown["ag-title-thor/t1"]).toBe("Issue 272");
 });
