@@ -144,6 +144,9 @@ struct Shared {
     state: GhosttyRenderState,
     size: GhosttySizeReportSize,
     held_since: Option<Instant>,
+    /// When the hold timed out: a big image can still be arriving, so the images
+    /// on screen stay until there's something else to show, or for `MAX_IMAGE_WAIT`.
+    hold_timed_out: std::cell::Cell<Option<Instant>>,
     title_changed: bool,
     /// Replies the terminal writes back to the program (e.g. kitty graphics acks).
     replies: Vec<u8>,
@@ -507,6 +510,9 @@ pub struct Vt {
     /// The width and colors they were read with: a change reads every row.
     seen_with: (u16, u64),
     placements_cache: RefCell<Option<Vec<Placement>>>,
+    /// The images last drawn (their textures are the view's): what a
+    /// synchronized update keeps on screen until it ends.
+    placements_shown: RefCell<Vec<Placement>>,
     /// Whether the program wants win32 key events (Ghostty doesn't track it).
     pub win32: crate::win32_keys::Win32Input,
 }
@@ -611,6 +617,7 @@ unsafe extern "C" fn on_render_hold(_t: GhosttyTerminal, userdata: *mut c_void, 
     if held {
         // Capture the finished frame the program wants on screen before it redraws.
         unsafe { ghostty_render_state_update(shared.state, _t) };
+        shared.hold_timed_out.set(None);
         shared.held_since = Some(Instant::now());
     } else {
         shared.held_since = None;
@@ -636,6 +643,7 @@ const SYNC_OUTPUT: GhosttyMode = 2026;
 const GRAPHEME_CLUSTER: GhosttyMode = 2027;
 const BRACKETED_PASTE: GhosttyMode = 2004;
 const MAX_HOLD: Duration = Duration::from_millis(1000);
+const MAX_IMAGE_WAIT: Duration = Duration::from_secs(5);
 const SCROLLBACK_MAX_LINES: usize = 10_000;
 // Bound memory per terminal; wide or heavily styled rows may hit this first.
 const SCROLLBACK_MAX_BYTES: usize = 10_000_000;
@@ -665,7 +673,7 @@ impl Vt {
             ok(ghostty_mouse_event_new(std::ptr::null(), &mut mouse_event), "mouse_event_new");
 
             install_png_decoder();
-            let mut shared = Box::new(Shared { state, size: GhosttySizeReportSize { rows: rows.max(1), columns: cols.max(1), cell_width: 0, cell_height: 0 }, held_since: None, title_changed: false, replies: Vec::new(), clipboard_write: true, clipboard: [None, None] });
+            let mut shared = Box::new(Shared { state, size: GhosttySizeReportSize { rows: rows.max(1), columns: cols.max(1), cell_width: 0, cell_height: 0 }, held_since: None, hold_timed_out: std::cell::Cell::new(None), title_changed: false, replies: Vec::new(), clipboard_write: true, clipboard: [None, None] });
             let ud = &mut *shared as *mut Shared as *const c_void;
             ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_USERDATA, ud);
             let hold: GhosttyTerminalRenderHoldFn = Some(on_render_hold);
@@ -729,6 +737,7 @@ impl Vt {
                 seen: HashMap::new(),
                 seen_with: (0, 0),
                 placements_cache: RefCell::new(None),
+                placements_shown: RefCell::new(Vec::new()),
                 win32: Default::default(),
             };
             vt.apply_theme();
@@ -770,6 +779,12 @@ impl Vt {
 
     /// Visible kitty graphics placements, bottom layer first.
     pub fn placements(&self) -> Vec<Placement> {
+        // Like the text: a program can delete its image first and send the new
+        // one later in the update (libghostty drops the old pixels at the new
+        // one's first chunk), and nothing of that shows until it ends.
+        if self.shared.held_since.is_some() {
+            return self.placements_shown.borrow().clone();
+        }
         if let Some(placements) = self.placements_cache.borrow().as_ref() {
             return placements.clone();
         }
@@ -826,7 +841,12 @@ impl Vt {
             out.extend(self.kitty_virtual_image_placements(g, &specs));
         }
         out.sort_by_key(|p| p.z);
+        if out.is_empty() && self.shared.hold_timed_out.get().is_some_and(|at| at.elapsed() < MAX_IMAGE_WAIT) {
+            return self.placements_shown.borrow().clone();
+        }
+        self.shared.hold_timed_out.set(None);
         *self.placements_cache.borrow_mut() = Some(out.clone());
+        *self.placements_shown.borrow_mut() = out.clone();
         out
     }
 
@@ -1524,6 +1544,7 @@ impl Vt {
                 let cfg = GhosttyTerminalModeConfig { mode: SYNC_OUTPUT, value: false };
                 ghostty_terminal_set(self.term, GHOSTTY_TERMINAL_OPT_MODE, &cfg as *const _ as *const c_void);
                 self.shared.held_since = None;
+                self.shared.hold_timed_out.set(Some(Instant::now()));
             }
             let state = self.shared.state;
             if self.shared.held_since.is_none() {
@@ -2125,6 +2146,58 @@ mod tests {
         assert_eq!(&bgra[..], &[0, 0, 255, 255]);
         let reply = String::from_utf8(vt.take_replies()).unwrap();
         assert!(reply.contains("i=7") && reply.contains("OK"), "{reply:?}");
+    }
+
+    #[test]
+    fn images_stay_on_screen_during_a_synchronized_update() {
+        let mut vt = Vt::new(20, 5);
+        vt.resize(20, 5, 8, 16);
+        vt.write(b"\x1b_Ga=T,f=32,s=1,v=1,i=7,p=1,C=1,q=2;/wAA/w==\x1b\\");
+        let red = vt.placements();
+        assert_eq!(red.len(), 1, "{red:?}");
+        // How terminal-browser replaces a frame: drop the old one, then send the new one.
+        vt.write(b"\x1b[?2026h\x1b_Ga=d,d=i,i=7,p=1,q=2\x1b\\\x1b[H\x1b_Ga=T,f=32,s=1,v=1,i=7,p=1,C=1,q=2,m=1;AP8A\x1b\\");
+        assert_eq!(vt.placements(), red);
+        vt.write(b"\x1b_Gm=0;/w==\x1b\\");
+        assert_eq!(vt.placements(), red);
+        // The next frame follows at once: no draw sees the screen between the
+        // updates, so the last one drawn stays up rather than none.
+        vt.write(b"\x1b[?2026l\x1b[?2026h\x1b_Ga=d,d=i,i=7,p=1,q=2\x1b\\\x1b[H\x1b_Ga=T,f=32,s=1,v=1,i=7,p=1,C=1,q=2;AAD//w==\x1b\\");
+        assert_eq!(vt.placements(), red);
+        vt.write(b"\x1b[?2026l");
+        let blue = vt.placements();
+        assert_ne!(blue[0].generation, red[0].generation);
+        assert_eq!(&vt.image_bgra(7, blue[0].source).unwrap().2[..], &[255, 0, 0, 255]);
+    }
+
+    #[test]
+    fn an_image_too_big_for_the_hold_stays_until_the_next_one_arrives() {
+        let mut vt = Vt::new(20, 5);
+        vt.resize(20, 5, 8, 16);
+        vt.write(b"\x1b_Ga=T,f=32,s=1,v=1,i=7,p=1,C=1,q=2;/wAA/w==\x1b\\");
+        let red = vt.placements();
+        vt.write(b"\x1b[?2026h\x1b_Ga=d,d=i,i=7,p=1,q=2\x1b\\\x1b[H\x1b_Ga=T,f=32,s=1,v=1,i=7,p=1,C=1,q=2,m=1;AP8A\x1b\\");
+        vt.shared.held_since = Some(Instant::now() - MAX_HOLD * 2);
+        vt.frame();
+        assert!(vt.shared.held_since.is_none());
+        assert_eq!(vt.placements(), red);
+        vt.write(b"\x1b_Gm=0;/w==\x1b\\\x1b[?2026l");
+        let green = vt.placements();
+        assert_ne!(green[0].generation, red[0].generation);
+        // A program that then removes its image for good isn't overruled.
+        vt.write(b"\x1b_Ga=d,d=I,i=7,q=2\x1b\\");
+        assert!(vt.placements().is_empty());
+
+        // Nor is one that stopped mid-update and left the screen to the shell: not for long.
+        vt.write(b"\x1b_Ga=T,f=32,s=1,v=1,i=7,p=1,C=1,q=2;/wAA/w==\x1b\\");
+        assert_eq!(vt.placements().len(), 1);
+        vt.write(b"\x1b[?2026h\x1b_Ga=d,d=I,i=7,q=2\x1b\\");
+        vt.shared.held_since = Some(Instant::now() - MAX_HOLD * 2);
+        vt.frame();
+        vt.write(b"\x1b[2J");
+        assert_eq!(vt.placements().len(), 1);
+        vt.shared.hold_timed_out.set(Some(Instant::now() - MAX_IMAGE_WAIT));
+        assert!(vt.placements().is_empty());
     }
 
     fn virtual_image(vt: &mut Vt, id: u32, placement: u32) {
