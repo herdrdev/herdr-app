@@ -955,6 +955,7 @@ All of it is in `herdr.d.ts`. In short:
   `panes()` still lists only model panes; none is focused while a terminal block is.
   For composition navigation: `run("pane.focus", {terminal: nextAddress})`.
   Terminal copy/paste and implicit right-click routing follow the focused block.
+  `panes()`, `agents()`, `terminals()` and the other lists return a fresh copy of the whole list on each call: read one once per render into a variable, not once per row.
 - Floating: `placement()` (null unless this copy floats).
 - Act: `run(command, args)`.
 - Overlays: `openOverlay({ mod, props, kind: "dialog" | "popup" | "window", width, height, at, frame })`

@@ -124,6 +124,11 @@ pub enum HostValue {
     /// Insertion-ordered, because an object is frequently a record the script
     /// renders in order, and a map would decide that order for it.
     Object(Vec<(String, HostValue)>),
+    /// A JSON value the host keeps and shares, for the host-to-script
+    /// direction: the engine builds the script's copy straight from it, so a
+    /// host that serves one record to many reads neither converts nor copies
+    /// it per call. Scripts never produce it.
+    Json(std::sync::Arc<serde_json::Value>),
 }
 
 impl HostValue {
@@ -183,6 +188,7 @@ impl HostValue {
             HostValue::Str(_) => "a string",
             HostValue::Array(_) => "an array",
             HostValue::Object(_) => "an object",
+            HostValue::Json(_) => "a JSON value",
         }
     }
 }

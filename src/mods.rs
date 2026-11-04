@@ -552,6 +552,10 @@ thread_local! {
     static SHOWN_COPIES: RefCell<std::collections::HashSet<u64>> = RefCell::new(std::collections::HashSet::new());
     static LIVE_READS: RefCell<HashMap<u64, Weak<RefCell<LiveReads>>>> = RefCell::new(HashMap::new());
     static REVISIONS: RefCell<HashMap<&'static str, u64>> = RefCell::new(HashMap::new());
+    /// `keys()` as last served, with when its files had changed (`keys_part`).
+    static KEYS_PART: RefCell<Option<(FileStamp, std::sync::Arc<Value>)>> = const { RefCell::new(None) };
+    /// Snapshot parts by key, with the revision they were copied at (`shared_part`).
+    static SHARED_PARTS: RefCell<HashMap<&'static str, (u64, std::sync::Arc<Value>)>> = RefCell::new(HashMap::new());
     static COPY_SEQ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static OVERLAY_SEQ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
@@ -652,7 +656,54 @@ fn read(reads: &RefCell<LiveReads>, key: &'static str, f: impl FnOnce(&Snapshot)
 }
 
 fn reader(reads: Rc<RefCell<LiveReads>>, key: &'static str, f: fn(&Snapshot) -> &Value) -> impl Fn(&gpui_shell::HostArguments) -> gpui_shell::HostResult {
-    move |_| Ok(read(&reads, key, f))
+    move |_| {
+        REVISIONS.with_borrow(|r| reads.borrow_mut().record(key, r));
+        Ok(HostValue::Json(shared_part(key, f)))
+    }
+}
+
+/// `keys()`, listed again only once keys.json or the mods folder changed: a
+/// status bar mod reads it every render, and reading the file and looking
+/// for every mod a binding names cost more than the rest of its render.
+fn keys_part() -> std::sync::Arc<Value> {
+    let modified = |p: &std::path::Path| std::fs::metadata(p).and_then(|m| m.modified()).ok();
+    let stamp = (modified(&crate::keys::path()), modified(&mods_dir()));
+    KEYS_PART.with_borrow_mut(|part| {
+        cached_part(part, stamp, || {
+            let list: Vec<Value> = crate::keys::listing().into_iter().map(|(s, k, a)| json!({ "section": s, "keys": k, "action": a })).collect();
+            Value::Array(list)
+        })
+    })
+}
+
+type FileStamp = (Option<std::time::SystemTime>, Option<std::time::SystemTime>);
+
+fn cached_part(part: &mut Option<(FileStamp, std::sync::Arc<Value>)>, stamp: FileStamp, make: impl FnOnce() -> Value) -> std::sync::Arc<Value> {
+    match part {
+        Some((seen, value)) if *seen == stamp => value.clone(),
+        _ => {
+            let value = std::sync::Arc::new(make());
+            *part = Some((stamp, value.clone()));
+            value
+        }
+    }
+}
+
+/// One snapshot part, copied once per revision and shared by every read of
+/// it: the script's copy is built straight from it rather than from a
+/// converted copy per call.
+fn shared_part(key: &'static str, f: fn(&Snapshot) -> &Value) -> std::sync::Arc<Value> {
+    let revision = REVISIONS.with_borrow(|r| r.get(key).copied().unwrap_or(0));
+    SHARED_PARTS.with_borrow_mut(|parts| {
+        if let Some((seen, part)) = parts.get(key)
+            && *seen == revision
+        {
+            return part.clone();
+        }
+        let part = std::sync::Arc::new(SNAPSHOT.with(|s| f(&s.borrow()).clone()));
+        parts.insert(key, (revision, part.clone()));
+        part
+    })
 }
 
 /// Reads in callbacks and child views count too: keep their dependencies until the copy unloads.
@@ -738,6 +789,7 @@ pub fn from_host(v: &HostValue) -> Value {
         HostValue::Str(s) => Value::String(s.clone()),
         HostValue::Array(a) => Value::Array(a.iter().map(from_host).collect()),
         HostValue::Object(o) => Value::Object(o.iter().map(|(k, v)| (k.clone(), from_host(v))).collect()),
+        HostValue::Json(v) => (**v).clone(),
     }
 }
 
@@ -1048,10 +1100,7 @@ fn module(inst: Instance, copy: u64) -> HostModule {
         .function("window", reader(reads.clone(), "window", |s| &s.window))
         .function("theme", |_| Ok(to_host(&serde_json::to_value(&*crate::settings::theme()).unwrap_or(Value::Null))))
         .function("settings", |_| Ok(to_host(&serde_json::to_value(&*crate::settings::get()).unwrap_or(Value::Null))))
-        .function("keys", |_| {
-            let list: Vec<Value> = crate::keys::listing().into_iter().map(|(s, k, a)| json!({ "section": s, "keys": k, "action": a })).collect();
-            Ok(to_host(&Value::Array(list)))
-        })
+        .function("keys", |_| Ok(HostValue::Json(keys_part())))
         .function("openOverlay", |a| {
             let mut spec = from_host(a.value(0)?);
             if spec.get("mod").is_none()
@@ -1257,6 +1306,29 @@ mod tests {
             assert!(!snapshot_changed(1));
             drop(reads);
             assert!(!snapshot_changed(1));
+        }).join().unwrap();
+    }
+
+    #[test]
+    fn keys_are_listed_again_only_when_their_files_change() {
+        let at = |s| (Some(std::time::UNIX_EPOCH + std::time::Duration::from_secs(s)), None);
+        let mut part = None;
+        assert_eq!(*cached_part(&mut part, at(1), || json!("one")), json!("one"));
+        assert_eq!(*cached_part(&mut part, at(1), || json!("two")), json!("one"));
+        assert_eq!(*cached_part(&mut part, at(2), || json!("two")), json!("two"));
+    }
+
+    #[test]
+    fn reads_share_one_copy_of_a_snapshot_part_until_it_changes() {
+        std::thread::spawn(|| {
+            let panes: fn(&Snapshot) -> &Value = |s| &s.panes;
+            publish_panes(json!([{"pane":"p1","status":"idle"}]));
+            let first = shared_part("panes", panes);
+            assert!(std::sync::Arc::ptr_eq(&first, &shared_part("panes", panes)));
+            assert!(!publish_panes(json!([{"pane":"p1","status":"idle"}])));
+            assert!(std::sync::Arc::ptr_eq(&first, &shared_part("panes", panes)), "the same value is no change");
+            publish_panes(json!([{"pane":"p1","status":"working"}]));
+            assert_eq!(*shared_part("panes", panes), json!([{"pane":"p1","status":"working"}]));
         }).join().unwrap();
     }
 
