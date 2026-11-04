@@ -3897,7 +3897,7 @@ impl AppWindow {
 
     // ---- rendering ---------------------------------------------------------
 
-    fn focused_path(&self, window: &Window) -> HashSet<String> {
+    fn focused_path(&self, window: &Window, cx: &App) -> HashSet<String> {
         let mut out = HashSet::new();
         // A mod block in the layout holding the keyboard: its `focus` looks, not the pane's.
         if let Some(path) = self.focused_block.as_ref().and_then(|b| self.chrome.path_to(b)) {
@@ -3906,7 +3906,7 @@ impl AppWindow {
         }
         if let Some(p) = &self.focused_pane {
             // Pane selection survives an input, float or dialog taking the keyboard.
-            if self.pane_term(p).is_some_and(|t| !t.focus.is_focused(window)) {
+            if self.pane_term(p).is_some_and(|t| !t.view.read(cx).owns_keyboard_focus(window, cx)) {
                 return out;
             }
             if let Some(c) = self.model.active_tab()
@@ -4773,7 +4773,7 @@ impl Render for AppWindow {
         if mods::publish_window(self.window_json(window)) {
             self.refresh_snapshot_mods(cx);
         }
-        let focused = self.focused_path(window);
+        let focused = self.focused_path(window, cx);
         let tree = self.render_node(&self.chrome, &focused, None, cx);
         let tree = self.window_frame(tree, window, cx);
         let overlays = self.render_overlays(window.viewport_size(), cx);
@@ -5282,17 +5282,17 @@ mod tests {
             this.focused_pane = Some("pane".into());
             let pane = this.pane_focus("pane", cx).unwrap();
             pane.focus(window, cx);
-            assert!(this.focused_path(window).contains("pane"));
+            assert!(this.focused_path(window, cx).contains("pane"));
             let input = cx.focus_handle();
             input.focus(window, cx);
-            assert!(this.focused_path(window).is_empty());
+            assert!(this.focused_path(window, cx).is_empty());
             assert_eq!(this.focused_pane.as_deref(), Some("pane"));
             pane.focus(window, cx);
-            assert!(this.focused_path(window).contains("pane"));
+            assert!(this.focused_path(window, cx).contains("pane"));
         }));
         cx.deactivate_window();
-        cx.update(|window, cx| view.update(cx, |this, _| {
-            assert!(this.focused_path(window).contains("pane"));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            assert!(this.focused_path(window, cx).contains("pane"));
         }));
     }
 
@@ -5336,6 +5336,7 @@ mod tests {
                     let term = this.pane_term("pa").unwrap();
                     assert!(!term.focus.is_focused(window), "returning must not send a find query to the program");
                     assert!(this.pane_focus("pa", cx).unwrap().is_focused(window));
+                    assert!(this.focused_path(window, cx).contains("pa"), "Find focus must keep the pane ring");
                 }));
                 cx.simulate_keystrokes("x");
             }
