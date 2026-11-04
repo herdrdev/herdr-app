@@ -645,7 +645,7 @@ impl TerminalView {
         let input = if let Some(input) = self.search_input.clone() {
             input
         } else {
-            let input = cx.new(|cx| InputState::new(window, cx).placeholder("Find in terminal"));
+            let input = cx.new(|cx| InputState::new(window, cx).placeholder(gpui_shell::translate_text("Find in terminal")));
             cx.subscribe(&input, |this, input, event: &InputEvent, cx| match event {
                 InputEvent::Change => {
                     this.search_query = input.read(cx).value().to_string();
@@ -1854,13 +1854,13 @@ impl Render for TerminalView {
         let search_label = if self.search_query.is_empty() {
             String::new()
         } else if !search_progress.complete {
-            if search_progress.total == 0 { "Searching…".to_owned() } else { format!("{}+", search_progress.total) }
+            if search_progress.total == 0 { gpui_shell::translate_text("Searching…") } else { format!("{}+", search_progress.total) }
         } else if search_progress.total == 0 {
-            "No matches".to_owned()
+            gpui_shell::translate_text("No matches")
         } else if let Some(selected) = search_progress.selected {
             format!("{} / {}", selected + 1, search_progress.total)
         } else {
-            format!("{} matches", search_progress.total)
+            gpui_shell::translate_text(&format!("{} matches", search_progress.total))
         };
         let address = self.address.clone();
 

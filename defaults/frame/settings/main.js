@@ -15,6 +15,12 @@ const SECTIONS = [
   { id: "privacy", title: "Privacy", icon: "shield" },
 ];
 
+// Interface languages: the code settings.json keeps, and its name in its own language.
+const LANGUAGES = [
+  ["en", "English"],
+  ["zh-CN", "简体中文"],
+];
+
 const LOOKS = { main: "Herdr", terminals: "Terminals", win98: "Herdr 98" };
 const APPEARANCES = [
   [null, "System"],
@@ -297,6 +303,37 @@ export default class Settings extends View {
       );
   }
 
+  languagePicker(t, cx) {
+    const now = this.person.language ?? "en";
+    return h_flex()
+      .p(2)
+      .gap(2)
+      .rounded(8)
+      .border_1()
+      .border_color(t.border)
+      .bg(t.background)
+      .children(
+        LANGUAGES.map(([value, label]) =>
+          div()
+            .id(`st-lang-${value}`)
+            .px(12)
+            .py(4)
+            .rounded(6)
+            .text_size(13)
+            .cursor_pointer()
+            .when(now === value, (el) => el.bg(t.raised).text_color(t.foreground).border_1().border_color(t.border))
+            .when(now !== value, (el) => el.text_color(t.muted).hover((s) => s.text_color(t.foreground)))
+            .on_click((_e, cx) =>
+              this.change((p) => {
+                if (value === "en") delete p.language;
+                else p.language = value;
+              }, cx),
+            )
+            .child(label),
+        ),
+      );
+  }
+
   appearancePicker(t, cx) {
     const now = this.person.appearance ?? null;
     return h_flex()
@@ -483,6 +520,9 @@ export default class Settings extends View {
         .when(this.picking === which, (el) => el.child(this.fontList(t, which, def)));
     return v_flex()
       .w_full()
+      .child(this.heading(t, "Language"))
+      .child(this.row(t, "Interface language", "The language of menus, panels and messages.", this.languagePicker(t, cx)))
+      .child(div().h(18))
       .child(this.heading(t, "Layout"))
       .child(this.layoutPicker(t, cx))
       .child(div().h(18))

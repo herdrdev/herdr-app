@@ -102,6 +102,21 @@ pub(crate) mod watch;
 
 pub use anyhow;
 pub use value::set_pixel_scale;
+
+/// Herdr localization hook: maps a text run a mod drew to what the screen
+/// shows (`None` leaves it as written). Set once by the app at startup.
+pub type TextTranslator = fn(&str) -> Option<String>;
+
+static TEXT_TRANSLATOR: std::sync::OnceLock<TextTranslator> = std::sync::OnceLock::new();
+
+pub fn set_text_translator(translator: TextTranslator) {
+    let _ = TEXT_TRANSLATOR.set(translator);
+}
+
+/// What to draw for `text`: the translator's answer, else `text` itself.
+pub fn translate_text(text: &str) -> String {
+    TEXT_TRANSLATOR.get().and_then(|t| t(text)).unwrap_or_else(|| text.to_owned())
+}
 pub use assets::AppAssets;
 pub use capability::{Capabilities, ExecuteGrant, HttpRequestGrant, NetworkGrant};
 pub use component::ComponentArgs;

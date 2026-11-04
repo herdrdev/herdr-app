@@ -7,6 +7,7 @@ mod control;
 mod core_bin;
 mod files;
 mod hc;
+mod i18n;
 mod keys;
 mod layout;
 mod layout_sync;
@@ -76,6 +77,7 @@ fn attach_console() {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    i18n::install();
     #[cfg(windows)]
     if args.len() > 1 {
         attach_console();

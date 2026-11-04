@@ -120,7 +120,7 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
                     store
                         .entities()
                         .create_input(
-                            placeholder,
+                            placeholder.map(|p| crate::translate_text(&p)),
                             value,
                             scope::current_application_generation(),
                             window,
