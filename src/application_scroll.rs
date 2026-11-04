@@ -51,7 +51,10 @@ fn detect<R: PartialEq>(
     if count < 3 { return None; }
     let mut best: Option<(usize, ScrollRegion)> = None;
     let mut ambiguous = false;
-    for distance in 1..=(end - start) / 2 {
+    // A delayed/coalesced redraw can move more than half a viewport. Three
+    // distinct equal text anchors still establish the displacement; requiring
+    // half the old screen made otherwise coherent fast scrolling snap.
+    for distance in 1..=(end - start).saturating_sub(3) {
         // Even a perfect remaining run cannot beat this match. This bounds
         // full-screen, small wheel steps by their distance instead of height².
         // Keep equal scores in play so ambiguity still falls back immediately.
@@ -197,8 +200,21 @@ impl<R: Clone + PartialEq> ApplicationScroll<R> {
             .filter(|(_, deadline)| now <= *deadline)
             .and_then(|(direction, _)| detect(&self.previous, rows, direction, anchor));
         let observed = detected.clone();
-        if let Some(scroll) = detected {
-            let prior = self.motion.take().filter(|m| m.layer.region == scroll.rows);
+        if let Some(mut scroll) = detected {
+            let prior = self.motion.take().filter(|m| {
+                let old = &m.layer.region;
+                // A fixed overlay or changing blank edges can split a transcript.
+                // Keep the already moving part instead of restarting its curve
+                // at a whole-row position. Newly included rows stay immediate
+                // until this motion settles; they have no previous offset.
+                let shared = old.start.max(scroll.rows.start)..old.end.min(scroll.rows.end);
+                if !shared.is_empty() {
+                    scroll.rows = shared;
+                    true
+                } else {
+                    false
+                }
+            });
             let (first, old, offset, velocity) = match prior {
                 Some(m) => (m.layer.first_row, m.layer.rows, m.layer.offset_rows, m.animation.sample(now).1),
                 None => (
@@ -423,6 +439,111 @@ mod tests {
         // Removing the overlay reveals the retained underlying text.
         s.update_with_overlays(&frame(97), ms(30), key, |_, _| false);
         assert!(s.layer(ms(30)).is_some());
+    }
+
+    fn row_position(layer: &Layer<String>, row: &str) -> f64 {
+        layer.first_row as f64
+            + layer.rows.iter().position(|r| r == row).unwrap() as f64
+            + layer.offset_rows
+    }
+
+    #[test]
+    fn a_fixed_overlay_does_not_reset_the_next_wheel_animation() {
+        let mut s = started();
+        s.wheel(3, ms(1));
+        s.update(&frame(97), ms(2), key);
+        let mut overlay = frame(97);
+        overlay[11] = "jump-to-bottom overlay".into();
+        s.update_with_overlays(&overlay, ms(20), key, |_, row| row.ends_with("overlay"));
+        let before = s.layer(ms(32)).unwrap();
+        let velocity = s.motion.as_ref().unwrap().animation.sample(ms(32)).1;
+
+        s.wheel(3, ms(32));
+        let mut next = frame(94);
+        next[11] = "jump-to-bottom overlay".into();
+        s.update_with_overlays(&next, ms(32), key, |_, row| row.ends_with("overlay"));
+        let after = s.layer(ms(32)).unwrap();
+        assert_eq!(after.region, 1..11);
+        assert!((row_position(&before, "chat row 100") - row_position(&after, "chat row 100")).abs() < 1e-9);
+        assert!((s.motion.as_ref().unwrap().animation.sample(ms(32)).1 - velocity).abs() < 1e-9);
+        assert!(!after.rows.iter().any(|r| r.ends_with("overlay")));
+
+        // When the overlay disappears, newly matched edge rows must not
+        // inherit an offset they never had. The already moving text keeps it.
+        let before = s.layer(ms(62)).unwrap();
+        s.wheel(3, ms(62));
+        s.update(&frame(91), ms(62), key);
+        let after = s.layer(ms(62)).unwrap();
+        assert_eq!(after.region, 1..11);
+        assert!((row_position(&before, "chat row 97") - row_position(&after, "chat row 97")).abs() < 1e-9);
+        assert!(s.layer(ms(222)).is_none());
+    }
+
+    #[test]
+    fn coalesced_redraws_can_move_more_than_half_the_viewport() {
+        for (first, direction) in [(91, 3), (109, -3)] {
+            let mut s = started();
+            s.wheel(direction, ms(1));
+            let found = s.update(&frame(first), ms(2), key).unwrap();
+            assert_eq!(found.rows, 1..13);
+            assert_eq!(found.delta, first as isize - 100);
+            let layer = s.layer(ms(2)).unwrap();
+            assert!((row_position(&layer, "chat row 100") - 1.0).abs() < 1e-9);
+            assert!(s.layer(ms(82)).unwrap().offset_rows.abs() < 9.0);
+            assert!(s.layer(ms(162)).is_none());
+        }
+        // With fewer than three remaining anchors, there is no reliable
+        // correspondence. Keep the existing immediate fallback.
+        let mut s = started();
+        s.wheel(3, ms(1));
+        assert!(s.update(&frame(89), ms(2), key).is_none());
+        assert!(s.layer(ms(2)).is_none());
+    }
+
+    #[test]
+    fn a_different_scroll_region_does_not_inherit_previous_motion() {
+        let panels = |top, bottom| {
+            let mut rows = frame(top);
+            rows.extend((bottom..bottom + 12).map(|n| format!("other panel {n}")));
+            rows.push("fixed footer".into());
+            rows
+        };
+        let mut s = ApplicationScroll::default();
+        s.update(&panels(100, 200), ms(0), key);
+        s.wheel(3, ms(1));
+        s.update(&panels(97, 200), ms(2), key);
+        assert_eq!(s.layer(ms(32)).unwrap().region, 1..13);
+        s.wheel(3, ms(32));
+        s.update(&panels(97, 197), ms(32), key);
+        let layer = s.layer(ms(32)).unwrap();
+        assert_eq!(layer.region, 16..28);
+        assert_eq!(layer.offset_rows, -3.0);
+    }
+
+    #[test]
+    fn partial_blank_edge_redraws_keep_the_overlapping_text_in_place() {
+        let paragraphs = |first| {
+            let mut rows = vec!["header".to_owned()];
+            rows.extend((first..first + 18).map(|n| {
+                if n % 3 == 0 { String::new() } else { format!("paragraph {n}") }
+            }));
+            rows.extend(["composer".into(), "status".into()]);
+            rows
+        };
+        let mut s = ApplicationScroll::default();
+        s.update(&paragraphs(102), ms(0), key);
+        s.wheel(3, ms(1));
+        s.update(&paragraphs(99), ms(2), key);
+        assert_eq!(s.layer(ms(2)).unwrap().region, 2..19);
+        // Agent TUIs can split the next wheel batch into unequal row shifts.
+        s.wheel(2, ms(32));
+        s.update(&paragraphs(97), ms(32), key);
+        let before = s.layer(ms(62)).unwrap();
+        s.wheel(3, ms(62));
+        assert_eq!(s.update(&paragraphs(94), ms(62), key).unwrap().rows, 1..18);
+        let after = s.layer(ms(62)).unwrap();
+        assert_eq!(after.region, 2..18);
+        assert!((row_position(&before, "paragraph 103") - row_position(&after, "paragraph 103")).abs() < 1e-9);
     }
 
     #[test]

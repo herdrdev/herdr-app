@@ -797,7 +797,10 @@ impl TerminalView {
         }
         if self.grid.borrow().vt.search_progress().complete {
             self.pending_search_nav = None;
-            if self.grid.borrow_mut().vt.search_navigate(previous) {
+            let mut grid = self.grid.borrow_mut();
+            grid.cancel_smooth_scroll();
+            grid.application_scroll.finish();
+            if grid.vt.search_navigate(previous) {
                 cx.notify();
             }
         } else {
@@ -827,6 +830,8 @@ impl TerminalView {
                 if grid.vt.search_progress().complete
                     && let Some(previous) = this.pending_search_nav.take()
                 {
+                    grid.cancel_smooth_scroll();
+                    grid.application_scroll.finish();
                     changed |= grid.vt.search_navigate(previous);
                 }
                 let busy = !grid.vt.search_progress().complete || this.pending_search_nav.is_some();
@@ -926,6 +931,8 @@ impl TerminalView {
 
     pub fn scroll_history(&mut self, target: ScrollTarget, cx: &mut Context<Self>) {
         let mut g = self.grid.borrow_mut();
+        g.cancel_smooth_scroll();
+        g.application_scroll.finish();
         let rows = g.vt.rows;
 
         match target {
@@ -1123,12 +1130,16 @@ fn selection_scroll_lines(y: f32, cell_height: f32, rows: u16) -> isize {
 /// from its top. None when nothing scrolls; `min` keeps a huge scrollback
 /// grabbable. The proportions are Herdr's scrollbar's.
 fn scrollbar_thumb(total: u64, offset: u64, len: u64, track: f32, min: f32) -> Option<(f32, f32)> {
+    scrollbar_thumb_at(total, offset as f64, len, track, min)
+}
+
+fn scrollbar_thumb_at(total: u64, offset: f64, len: u64, track: f32, min: f32) -> Option<(f32, f32)> {
     if total <= len || len == 0 || track <= 0.0 {
         return None;
     }
     let thumb = (track * len as f32 / total as f32).clamp(min.min(track), track);
     let travel = track - thumb;
-    let top = if travel <= 0.0 { 0.0 } else { offset.min(total - len) as f32 / (total - len) as f32 * travel };
+    let top = if travel <= 0.0 { 0.0 } else { (offset.clamp(0.0, (total - len) as f64) / (total - len) as f64) as f32 * travel };
     Some((top, thumb))
 }
 
@@ -2001,7 +2012,9 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
         if crate::settings::get().pane_scrollbars
             && !g.vt.alt_screen()
             && g.vt.cols > 4
-            && let Some((top, len)) = scrollbar_thumb(sb.total, sb.offset, sb.len, track, f32::from(cell.height))
+            && let Some((top, len)) = scrollbar_thumb_at(sb.total,
+                sb.offset as f64 - g.scroll_offset as f64 / f32::from(cell.height) as f64,
+                sb.len, track, f32::from(cell.height))
         {
             let lane = scrollbar_lane(bounds, base_origin, cell.width * f32::from(g.vt.cols), px(track));
             let w = px(4.0);
@@ -2184,6 +2197,7 @@ impl Render for TerminalView {
                 if let (Some(track), Some(thumb)) = (g.track, g.thumb)
                     && track.contains(&ev.position)
                 {
+                    g.cancel_smooth_scroll();
                     let grab = scrollbar_grab_at(f32::from(thumb.origin.y), f32::from(thumb.size.height), f32::from(ev.position.y));
                     this.scrollbar_grab = Some(grab);
                     if !thumb.contains(&ev.position) {
@@ -2487,6 +2501,12 @@ mod tests {
             let g = terminal.grid.borrow();
             assert_eq!(g.vt.scroll_metrics().1, 1);
             assert!((g.scroll_offset + height * 0.75).abs() < 0.001);
+            let (track, thumb) = (g.track.unwrap(), g.thumb.unwrap());
+            assert!((f32::from(track.origin.y + px(g.scroll_offset) - g.origin.y)).abs() < 0.001);
+            let sb = g.vt.scrollbar();
+            let travel = f32::from(track.size.height - thumb.size.height);
+            let expected = ((sb.total - sb.len) as f64 - 0.25) / (sb.total - sb.len) as f64 * travel as f64;
+            assert!((f32::from(thumb.origin.y - track.origin.y) as f64 - expected).abs() < 0.001);
         });
         if !cfg!(target_os = "macos") {
             cx.simulate_event(ScrollWheelEvent { position, delta: ScrollDelta::Lines(point(0.0, 0.25)), modifiers: Modifiers::default(), touch_phase: TouchPhase::Moved });
@@ -2509,6 +2529,56 @@ mod tests {
             let g = terminal.grid.borrow();
             assert!(g.history_scroll.is_none());
             assert_eq!(g.scroll_offset, 0.0);
+        });
+        crate::settings::set((*original).clone());
+    }
+
+    #[gpui::test]
+    fn direct_history_actions_and_thumb_drag_cancel_smooth_motion(cx: &mut gpui::TestAppContext) {
+        use super::*;
+        let original = crate::settings::get();
+        let mut settings = (*original).clone();
+        settings.smooth_scrolling = true;
+        settings.pane_scrollbars = true;
+        crate::settings::set(settings);
+        cx.update(gpui_base::init);
+        let (terminal, cx) = cx.add_window_view(|_, cx| TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 5), cx));
+        terminal.update(cx, |terminal, cx| {
+            for n in 0..1000 { terminal.grid.borrow_mut().vt.write(format!("row {n}\r\n").as_bytes()); }
+            cx.notify();
+        });
+        cx.run_until_parked();
+        let (position, height) = terminal.read_with(cx, |terminal, _| {
+            let g = terminal.grid.borrow();
+            (g.origin + point(px(10.), px(10.)), g.cell.height)
+        });
+        let fractional = ScrollWheelEvent { position, delta: ScrollDelta::Pixels(point(px(0.), height / 4.0)), modifiers: Modifiers::default(), touch_phase: TouchPhase::Moved };
+        cx.simulate_event(fractional.clone());
+        cx.run_until_parked();
+        terminal.update(cx, |terminal, cx| terminal.scroll_history(ScrollTarget::Bottom, cx));
+        cx.run_until_parked();
+        terminal.read_with(cx, |terminal, _| {
+            let g = terminal.grid.borrow();
+            assert_eq!(g.vt.scroll_metrics().1, 0);
+            assert_eq!(g.scroll_offset, 0.0);
+        });
+
+        cx.simulate_event(fractional);
+        cx.run_until_parked();
+        let (thumb, track) = terminal.read_with(cx, |terminal, _| {
+            let g = terminal.grid.borrow();
+            (g.thumb.unwrap().center(), g.track.unwrap())
+        });
+        cx.simulate_mouse_down(thumb, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(point(thumb.x, track.top()), Some(MouseButton::Left), Modifiers::default());
+        cx.simulate_mouse_up(point(thumb.x, track.top()), MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        terminal.read_with(cx, |terminal, _| {
+            let g = terminal.grid.borrow();
+            let (maximum, position) = g.vt.scroll_metrics();
+            assert_eq!(position, maximum);
+            assert_eq!(g.scroll_offset, 0.0);
+            assert!(terminal.scrollbar_grab.is_none());
         });
         crate::settings::set((*original).clone());
     }

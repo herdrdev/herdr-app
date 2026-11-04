@@ -708,9 +708,12 @@ What's about the user, never a look:
   and bounded wheel animation (off by default). Pixel history events follow
   directly; line events, including fractional X11 input, ease over 160 ms,
   preserving speed across repeated wheel events and stopping without overshoot.
+  The terminal scrollbar follows the fractional position. Dragging it, search
+  navigation and explicit history-scroll commands move directly to their targets.
   For mouse-reporting or alternate-screen programs, recognizable text-region
   scroll redraws after wheel input are animated; fixed headers/composers stay
-  put, and wheel events keep their existing routing. Typing, pointer interaction
+  put, and fixed overlays do not restart already moving text. Wheel events keep
+  their existing routing. Typing, pointer interaction
   and selection finish that animation. Unrecognized redraws/page jumps remain
   immediate; terminals containing Kitty image placements keep existing scrolling.
   Reduced motion disables animation.
