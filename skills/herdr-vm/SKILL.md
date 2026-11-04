@@ -63,9 +63,12 @@ The guest's `localhost` is also separate from the host's.
 
 ## See and interact
 
-Prefer a connected guest MCP server when available. Its stdio command is
-the absolute project path to `scripts/vm/guest` with argument `mcp`.
-Otherwise use the tested CLI transport:
+Use the connected guest MCP server for inline images. Its stdio command is
+the absolute project path to `scripts/vm/guest` with argument `mcp` and the
+selected `HERDR_VM_HOME`. If it is missing, follow **Connect the agent to guest
+MCP** in [setup.md](references/setup.md): register it in the intended client,
+verify connectivity, and reload that client's tools as needed. The skill alone
+does not connect a server. For diagnosis or a temporary fallback, use the CLI:
 
 ```sh
 scripts/vm/guest tools

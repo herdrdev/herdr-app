@@ -137,10 +137,46 @@ and execute `/Volumes/My Shared Files/artifacts/guest-keyboard` inside the guest
 It uses supported input-source APIs. Host synthetic Command shortcuts remain
 unverified; test physical keyboard input separately from guest-driver input.
 
-The CLI `guest tool` transport needs no agent-global MCP changes. If MCP is
-wanted, register the absolute `scripts/vm/guest` command with argument `mcp`
-and an explicit `HERDR_VM_HOME` environment value. Keep the driver in the guest;
-a direct host cua-driver registration would control the wrong desktop.
+## Connect the agent to guest MCP
+
+For computer-use setup, register and verify the guest MCP server in the actual
+agent client running on this Mac. Installing this skill does not register MCP.
+Identify the client and its configuration scope; preserve unrelated servers.
+Use a distinct name such as `herdr-vm`, the absolute checkout helper path, and
+an explicit `HERDR_VM_HOME` matching the app. Inspect an existing registration
+before adding one; reuse it if correct and repair only this server if stale.
+
+Read the installed client's `mcp add --help` to confirm syntax. Examples from
+the checkout root, with `HERDR_VM_HOME` already set to the selected guest:
+
+```sh
+# Claude Code: user scope makes the guest available across local projects.
+claude mcp add --scope user --transport stdio --env "HERDR_VM_HOME=$HERDR_VM_HOME" -- herdr-vm "$PWD/scripts/vm/guest" mcp
+claude mcp get herdr-vm
+
+# Codex: register the same SSH-backed stdio transport.
+codex mcp add herdr-vm --env "HERDR_VM_HOME=$HERDR_VM_HOME" -- "$PWD/scripts/vm/guest" mcp
+codex mcp get herdr-vm
+```
+
+Run only the command for the intended client, or both when requested. These
+local paths work for agents on this Mac; remote agents need a separately
+configured transport. Keep Cua Driver inside the guest: registering a direct
+host cua-driver command would control the wrong desktop.
+
+Verify a real MCP handshake/tool discovery, not just that config was written.
+A client `get` command may only report configuration; inspect its actual status.
+The active conversation must also expose the guest tools. If it cached its
+server list, use the client's supported reconnect/reload or ask the person to
+start a new agent session. Configuration cannot inject tools into a session
+that does not support refreshing them. Report this precise remaining step.
+
+With the connected guest tools, discover a window and request `get_window_state`
+without `screenshot_out_file`. Verify the response contains an image content
+block that the agent can inspect, alongside accessibility data. Raw base64 in
+terminal text is not an inline image. If registration is unavailable or the
+user declines it, explicitly report that limitation and use SKILL.md's bounded
+temporary-file CLI fallback; do not call inline computer use ready.
 
 ## Verify and hand over
 
@@ -149,6 +185,7 @@ Verify each requested capability with fresh evidence:
 - Boot reaches a usable desktop; SSH authenticates with the key.
 - Guest reads `artifacts` and writes a unique test result into `results` that
   appears on the host. Only these dedicated directories are shared.
+- The intended agent session has guest MCP tools and inspects an inline image.
 - Driver discovers guest windows, returns an inspected inline screenshot, types text
   and clicks a control with an observed result. Repeat with the Herdr tab hidden
   when computer use is requested; end the test driver session afterward. Follow
