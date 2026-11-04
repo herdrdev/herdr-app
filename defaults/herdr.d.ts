@@ -232,7 +232,7 @@ export function focused(): { space: string; tab: string; pane: string | null; te
  *  Opens a pointer popup with mod.json overlay width/height (default 220×260). */
 export function layout(): unknown;
 
-/** The names of every layout in layouts/ (main first). */
+/** The names of every layout in layouts/ (main first), except settings.json's `hidden_layouts`. */
 export function layouts(): string[];
 
 /** Every command the app runs: its name, arguments and what it does (as `herdr-app commands`).

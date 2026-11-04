@@ -166,8 +166,10 @@ the highlighted line shows where it will land.
 
 Each file is one whole window. `layout.switch` (`ctrl-shift-l`) cycles
 through them, `layout.switch {name}` picks one; `shared("layout")` is the
-shown one's name. Herdr ships `main` ("Herdr": spaces by machine and the
-agents list on the left, `workspace-chrome`; tabs as pills with a + menu
+shown one's name. settings.json's `hidden_layouts` leaves layouts out of
+the cycle and the lists without deleting them. Herdr ships `main`
+("Herdr": spaces by machine and the agents list on the left,
+`workspace-chrome`; tabs as pills with a + menu
 that starts a terminal or any installed agent, `new-menu`; panes as cards
 with a header; Files and Changes panels on the right, `files` and
 `changes`, opened from the tab bar and remembered per space (which ones:
@@ -662,6 +664,10 @@ What's about the user, never a look:
   precedence as fonts.
 - `appearance`: `"light"` or `"dark"` always; absent, the system's. A layout
   with a light and a dark theme shows the matching one.
+- `hidden_layouts`: layout names (`["win98", "terminals"]`) that
+  `layout.switch` skips and that Settings, the palette and `layouts()`
+  leave out. The files stay, shipped ones are still updated, and
+  `layout.switch {name}` still shows them. Hiding every layout hides none.
 - Updates: an installed app downloads them by itself and offers Restart and
   What changed. If the app crashes or is killed with a verified newer update
   waiting, the next launch installs it before opening a window. The first

@@ -338,7 +338,7 @@ export default class Settings extends View {
       .children(
         // A theme named like a layout (themes/win98.json) is that layout's own.
         themes()
-          .filter((x) => Boolean(x.light) === light && (x.name === shared("layout") || !layouts().includes(x.name)))
+          .filter((x) => Boolean(x.light) === light && (x.name === shared("layout") || !(layouts().includes(x.name) || s.hidden_layouts?.includes(x.name))))
           .map(({ name, colors: c }) => {
           const on = name === current;
           const dot = (color) => div().w(8).h(8).rounded(4).bg(color);
