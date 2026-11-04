@@ -122,7 +122,8 @@ herdr-app shot /tmp/mod.png   # then look at the picture
 ```
 
 `check` loads the mod and renders it once. It exits nonzero with the exact
-error. Never call a mod done without a passing check. Then confirm it is
+error. Its shared state starts empty and stays in memory; it leaves shared.json
+untouched. Never call a mod done without a passing check. Then confirm it is
 shown correctly in the running window with `shot`; don't claim a visual
 check you haven't made.
 

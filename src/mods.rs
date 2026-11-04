@@ -1127,7 +1127,13 @@ fn capabilities() -> Capabilities {
         .clipboard_write(true)
 }
 
-/// What mods may touch, and the `herdr` module they import. Also used by `herdr-app check`.
+/// Checks exercise shared state in memory, without reading or writing the person's file.
+pub fn install_check_policy() {
+    SHARED.with_borrow_mut(|slot| *slot = Some(SharedStore { values: Default::default(), path: app_dir().join("shared.json"), writable: false, writer: None }));
+    install_policy();
+}
+
+/// What mods may touch, and the `herdr` module they import.
 pub fn install_policy() -> async_channel::Receiver<Request> {
     gpui_shell::policy::update_default(|p| {
         p.with_capabilities(capabilities())
