@@ -1,4 +1,4 @@
-//! Startup geometry for panes that do not have a terminal view yet.
+//! Geometry for panes that aren't drawn: programs starting, and tabs that are hidden.
 //! Layout metrics are shared with the renderer; normal resize still handles pixel rounding.
 
 use super::*;
@@ -115,21 +115,79 @@ fn pane_size(n: &Node, size: Size<Pixels>, target: &str, frame: Option<&PaneFram
     }
 }
 
+/// The tab area and the cell size.
+type Geometry = (Size<Pixels>, Size<Pixels>);
+
+/// Whether hidden tabs fit the window: the geometry seen at the last tick, and
+/// whether they were sized for it.
+#[derive(Default)]
+pub(super) enum HiddenFit {
+    #[default]
+    Unknown,
+    Seen(Geometry),
+    Done(Geometry),
+}
+
 impl AppWindow {
     pub(super) fn initial_size(&self, root: &Node, pane: &str, window: &Window) -> Option<(u16, u16)> {
-        let context = self.chrome.visible_blocks().into_iter().find(|n| matches!(n.content(), Some(Content::Context { .. })))?;
-        let bounds = *self.bounds.borrow().get(&context.id)?;
-        if bounds.size.width <= px(0.0) || bounds.size.height <= px(0.0) { return None; }
+        let focused = root.path_to(pane)?.into_iter().collect();
+        self.displayed_size(root, root.panes().len(), pane, &focused, window)
+    }
+
+    /// The grid `pane` gets when `tab` is the one shown.
+    pub(super) fn shown_size(&self, tab: &Tab, pane: &str, window: &Window) -> Option<(u16, u16)> {
+        let focused = tab.focused_pane().and_then(|f| tab.root.path_to(&f)).unwrap_or_default().into_iter().collect();
+        self.displayed_size(tab.shown(), tab.root.panes().len(), pane, &focused, window)
+    }
+
+    /// `shown`: the tree on screen; `panes`: how many the tab has (its frame needs more than one, or `lone`).
+    fn displayed_size(&self, shown: &Node, panes: usize, pane: &str, focused: &HashSet<String>, window: &Window) -> Option<(u16, u16)> {
+        let (context, area) = self.context_area()?;
         let frame = match context.content() {
-            Some(Content::Context { pane: Some(frame), .. }) if frame.lone || root.panes().len() > 1 => Some(frame),
+            Some(Content::Context { pane: Some(frame), .. }) if frame.lone || panes > 1 => Some(frame),
             _ => None,
         };
         let zoom = settings::zoom();
-        let focused = root.path_to(pane)?.into_iter().collect();
         // The absolute bounds canvas already excludes the context border (padding box).
         let (y, x) = padding(context);
-        let size = inset(bounds.size, 2.0 * x * zoom, 2.0 * y * zoom);
-        let size = pane_size(root, size, pane, frame, &focused, zoom)?;
+        let size = inset(area, 2.0 * x * zoom, 2.0 * y * zoom);
+        let size = pane_size(shown, size, pane, frame, focused, zoom)?;
         Some(crate::terminal::grid_size(size, crate::terminal::cell_size(window)))
+    }
+
+    /// The block tabs show in, and the area it was last drawn with.
+    fn context_area(&self) -> Option<(&Node, Size<Pixels>)> {
+        let context = self.chrome.visible_blocks().into_iter().find(|n| matches!(n.content(), Some(Content::Context { .. })))?;
+        let size = self.bounds.borrow().get(&context.id)?.size;
+        (size.width > px(0.0) && size.height > px(0.0)).then_some((context, size))
+    }
+
+    /// Terminals in hidden tabs keep the size they last had on screen, so a tab shown
+    /// after the window changed size draws its old screens, then jumps once the programs
+    /// redraw. Once the window settles (the same at two ticks), they are sized as their
+    /// panes would be, so the programs redraw out of sight.
+    pub(super) fn fit_hidden_tabs(&mut self, window: &Window, cx: &App) {
+        let Some((_, area)) = self.context_area() else { return };
+        let cell = crate::terminal::cell_size(window);
+        let now = (area, cell);
+        match self.hidden_fit {
+            HiddenFit::Done(g) if g == now => return,
+            HiddenFit::Seen(g) if g == now => self.hidden_fit = HiddenFit::Done(now),
+            _ => {
+                self.hidden_fit = HiddenFit::Seen(now);
+                return;
+            }
+        }
+        let scale = window.scale_factor();
+        let active = self.model.active_tab().map(|t| t.id.clone());
+        for tab in self.model.tabs().filter(|t| Some(&t.id) != active.as_ref()) {
+            for pane in tab.shown().panes() {
+                if let Some(t) = self.terms.get(&pane.id)
+                    && let Some((cols, rows)) = self.shown_size(tab, &pane.id, window)
+                {
+                    t.view.read(cx).fit(cols, rows, cell, scale);
+                }
+            }
+        }
     }
 }
