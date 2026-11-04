@@ -2363,7 +2363,7 @@ impl AppWindow {
         let argv = argv.unwrap_or_default();
         self.require_document(on)?;
         let labels = json!({ "herdr.space": crate::mirror::local(space, on), "herdr.tab": crate::mirror::local(ctx, on), "herdr.seen": "0" });
-        let (addr, cwd) = run_following_folder(cwd, follow, |cwd| match self.core.run(argv.clone(), cwd.clone(), labels.clone(), on, size, crate::terminal::initial_display(window)) {
+        let (addr, cwd) = run_following_folder(cwd, follow, on, |cwd| match self.core.run(argv.clone(), cwd.clone(), labels.clone(), on, size, crate::terminal::initial_display(window)) {
             // An agent on a machine without `sh` (Windows): in its PowerShell instead.
             Err(e) if on.is_some() && argv.first().map(String::as_str) == Some("sh") && format!("{e:#}").contains("not found") => {
                 self.core.run(Self::powershell_argv(&argv), cwd, labels.clone(), on, size, crate::terminal::initial_display(window))
@@ -4569,14 +4569,14 @@ fn needs_model_pane(name: &str, args: &Value) -> bool {
 }
 
 /// A failed implicit folder gets one retry in the machine's home, without local probes.
-fn run_following_folder(mut folder: String, follow: bool, mut run: impl FnMut(Option<String>) -> anyhow::Result<String>) -> anyhow::Result<(String, String)> {
+fn run_following_folder(mut folder: String, follow: bool, on: Option<&str>, mut run: impl FnMut(Option<String>) -> anyhow::Result<String>) -> anyhow::Result<(String, String)> {
     let result = run(Some(folder.clone()).filter(|f| !f.is_empty()));
     let address = match result {
         // A missing folder and a missing program both report spawn_failed. The holder's
         // timeout may still create a terminal, so never retry that ambiguous outcome.
         Err(e) if follow && !folder.is_empty() && crate::hc::error_kind(&e) == Some("spawn_failed") && !format!("{e:#}").contains("the holder did not answer") => {
-            folder.clear();
-            run(None)?
+            folder = if on.is_some() { String::new() } else { home() };
+            run(Some(folder.clone()).filter(|f| !f.is_empty()))?
         }
         result => result?,
     };
@@ -4964,26 +4964,30 @@ mod tests {
     fn terminal_folders_retry_only_definite_spawn_failures_in_home() {
         let failed = |message| anyhow::Error::new(crate::hc::RpcError(serde_json::json!({"message": message, "data": {"kind": "spawn_failed"}})));
         let mut folders = Vec::new();
-        let result = super::run_following_folder("deleted".into(), true, |folder| {
+        let result = super::run_following_folder("deleted".into(), true, None, |folder| {
             folders.push(folder.clone());
-            if folder.is_some() { Err(failed("invalid directory")) } else { Ok("t2".into()) }
+            if folder.as_deref() == Some("deleted") { Err(failed("invalid directory")) } else { Ok("t2".into()) }
         }).unwrap();
-        assert_eq!(folders, vec![Some("deleted".into()), None]);
-        assert_eq!(result, ("t2".into(), String::new()));
+        assert_eq!(folders, vec![Some("deleted".into()), Some(super::home())]);
+        assert_eq!(result, ("t2".into(), super::home()));
+        let result = super::run_following_folder("/remote/deleted".into(), true, Some("remote"), |folder| {
+            if folder.is_some() { Err(failed("invalid directory")) } else { Ok("remote/t2".into()) }
+        }).unwrap();
+        assert_eq!(result, ("remote/t2".into(), String::new()));
         for (follow, folder, message) in [(false, "explicit", "invalid directory"), (true, "", "invalid directory"), (true, "inherited", "the holder did not answer")] {
             let mut calls = 0;
-            assert!(super::run_following_folder(folder.into(), follow, |_| { calls += 1; Err(failed(message)) }).is_err());
+            assert!(super::run_following_folder(folder.into(), follow, None, |_| { calls += 1; Err(failed(message)) }).is_err());
             assert_eq!(calls, 1);
         }
         let mut calls = 0;
-        assert!(super::run_following_folder("inherited".into(), true, |_| { calls += 1; Err(anyhow::anyhow!("lost the core")) }).is_err());
+        assert!(super::run_following_folder("inherited".into(), true, None, |_| { calls += 1; Err(anyhow::anyhow!("lost the core")) }).is_err());
         assert_eq!(calls, 1);
         let mut calls = 0;
-        let result = super::run_following_folder("existing".into(), true, |_| { calls += 1; Ok("t1".into()) }).unwrap();
+        let result = super::run_following_folder("existing".into(), true, None, |_| { calls += 1; Ok("t1".into()) }).unwrap();
         assert_eq!(calls, 1);
         assert_eq!(result, ("t1".into(), "existing".into()));
         let mut calls = 0;
-        let error = super::run_following_folder("deleted".into(), true, |_| { calls += 1; Err(failed(if calls == 1 { "first" } else { "second" })) }).unwrap_err();
+        let error = super::run_following_folder("deleted".into(), true, None, |_| { calls += 1; Err(failed(if calls == 1 { "first" } else { "second" })) }).unwrap_err();
         assert_eq!(calls, 2);
         assert!(error.to_string().contains("second"));
     }
