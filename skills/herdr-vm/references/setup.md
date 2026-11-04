@@ -1,100 +1,179 @@
-# Local setup and recovery
+# Set up or resume a local Herdr VM
 
-Run project commands from the repository containing this skill, or the configured
-`HERDR_VM_PROJECT`. The existing guest's identity, disk, credentials and SSH key
-live in `.local/vm`. Preserve that directory when updating the app.
+Use the existing helpers for Apple installation and SSH transport; adapt guest
+setup to the detected macOS and driver versions. This workflow manages one VM
+per Herdr process. A new tab does not create another machine.
 
-## Start the existing VM
+## Establish the target and resume point
 
-`scripts/vm/run` launches `.local/Herdr VM.app` using a separate app home and
-`HC_SESSION=vmproto`. Select its macOS VM tab if the VM has not started yet.
-It can remain hidden after boot. This is distinct from the installed Herdr.
+Resolve the checkout as described in SKILL.md. Inspect `uname -m`, `sw_vers`,
+`xcodebuild -version`, `xcrun swift --version`, free disk space, and available
+Rust/Zig/Python/hc tools. Read the checkout's `docs/local-vm.md` for build
+requirements. Apple Silicon is required. Automatic account provisioning is
+compiled with Swift 6.4+ and used on macOS 27+; older supported hosts require
+manual guest Setup Assistant. Do not promise unattended setup on those hosts.
 
-The default guest account is `agent`; the authoritative password is in
-`.local/vm/config.json`. Read it only when authentication is needed and avoid
-printing it into routine diagnostics. After changing it, the guest may
-require an explicit login rather than logging in automatically.
+Inspect the intended app bundle's `Info.plist` / `LSEnvironment` and its launch
+method. `HERDR_VM_HOME` selects the private VM directory; `HERDR_APP_HOME`
+selects the GUI configuration; `HC_SESSION` selects the core. Export the same
+absolute VM path for all helpers. Shell environment changes do not reconfigure
+an already running app or necessarily override a Finder-launched bundle.
 
-`scripts/vm/guest connect` installs the private SSH public key using the saved
-guest credentials. It discovers the NAT lease by the VM's MAC address. If SSH
-is not ready, inspect boot status and retry after the guest has booted. A stale
-or unavailable lease is not permission to connect to an unrelated machine.
+- `scripts/vm/build` and `scripts/vm/run` are the isolated lab route, with
+  `.local/Herdr VM.app`, a separate app home and `HC_SESSION=vmproto`.
+- An installed VM-enabled app can use the person's normal workspace. Use its
+  configured VM path; do not launch the lab as a substitute for that app.
+- Select an existing configured guest when present. Choosing another directory
+  requires a coordinated app restart; simultaneous multi-VM tabs are unsupported.
 
-## Build or provision
+Inspect only non-secret config fields (installed, CPU, RAM, disk, username,
+MAC address), file presence, and status. Read passwords only for authentication
+or when the person asks for them. Status includes a timestamp and PID: confirm
+process identity and fresh SSH state instead of trusting an old `running` file.
 
-`scripts/vm/build` compiles the feature-gated native app and signs the local
-bundle with the virtualization entitlement. Stop the guest and quit only this
-experimental app before replacing its executable or native library.
+| Observed state | Next action |
+| --- | --- |
+| No configuration or disk | Provision a new private directory. |
+| Partial restore download | Resume `prepare`; it resumes the partial download. |
+| Valid config with `installed:false` | Inspect installer output and disk ownership, then resume `prepare` on that directory. |
+| Installed guest | Skip installation; boot or connect. |
+| Disk/identity files but missing or invalid config | Preserve them; diagnose or choose a separate new directory. Never recreate over those files. |
+| Another process owns the VM | Identify it and use that session; do not remove the lock or compete for its disk. |
 
-`scripts/vm/prepare` downloads Apple's supported restore image and installs a
-fresh VM when none exists; it does not reset an installed guest. It needs
-substantial disk space and download time. The prepared local configuration is
-8 CPUs, 16 GiB RAM, and a 128 GiB sparse disk on Apple Silicon. Automated
-account/SSH provisioning uses macOS 27 APIs. Put Rust and Zig on PATH (or set ZIG).
+Record completed stages and remaining blockers in a private `setup-notes.md`
+inside the VM directory, without credentials. Recheck outcomes on resumption;
+the notes are not proof the guest is still reachable.
 
-The repository's `AGENTS.md` requires a maintainer discussion before upstream
-core/API growth. Local prototype work is not an approved upstream extension API.
+## Prepare and boot
 
-## Cua permissions and connection
+Reuse the person's stated preferences. For a fresh setup, clarify only relevant
+unknowns: intended app/VM location, resource needs, automatic login, and whether
+to install computer-use tooling. State the selected defaults before the large
+download. The helper currently creates 8 CPUs, 16 GiB RAM, and a 128 GiB sparse
+disk (or Apple's higher minimum CPU/RAM). CPU/RAM may be adjusted in config
+while the app has released the guest. Disk resizing and custom pre-install
+account options are not helper interfaces; do not claim they are supported.
 
-The guest installation is `/Applications/CuaDriver.app`, invoked through
-`~/.local/bin/cua-driver`. Use the signed app's own daemon so macOS attributes
-permissions to CuaDriver. Check with `guest exec`:
-
-```sh
-scripts/vm/guest exec '~/.local/bin/cua-driver doctor'
-scripts/vm/guest exec '~/.local/bin/cua-driver permissions status --json'
-scripts/vm/guest exec '~/.local/bin/cua-driver permissions grant'
-```
-
-The grant command opens the guest's system prompts. Complete Device Control /
-Accessibility, Screen Recording, and the explicit direct-capture consent. The
-last one may still be needed after both basic status booleans are true. Respect
-the active computer-use tool's confirmation rules when changing these settings.
-Use the guest UI or hand that step to the person; permission databases and
-disabled permission gates are not substitutes for a grant.
-
-When a prompt requires host interaction, the host Computer Use skill controls
-the experimental app. Click inside the VM before typing. Host automation must send physical key
-events (`press_key`); generic Unicode/AX `type_text` does not pass through
-`VZVirtualMachineView`. Use guest-driver `type_text` for ordinary text entry. Ordinary operation
-then returns to the guest driver, including when the host tab is hidden.
-
-For Codex or Claude, register a stdio MCP server whose command is the absolute
-project path to `scripts/vm/guest`, with `args = ["mcp"]`. The CLI `guest tool`
-transport works immediately without changing the agent's global MCP settings.
-The driver version used for the local proof was 0.38.0; use its `describe`
-output rather than copying schemas from a different release.
-
-## Keyboard and shutdown
-
-The development guest was tested with U.S. input only. To configure a new guest via
-the supported macOS input-source APIs:
+Run from the checkout with the selected `HERDR_VM_HOME`:
 
 ```sh
-xcrun swiftc -framework AppKit -framework Carbon native/vm/GuestKeyboard.swift -o .local/vm/artifacts/guest-keyboard
-codesign --force --sign - .local/vm/artifacts/guest-keyboard
-scripts/vm/guest exec '"/Volumes/My Shared Files/artifacts/guest-keyboard"'
+scripts/vm/prepare
 ```
 
-Native typing requires the VM view to retain first responder across Herdr
-redraws. System-wide shortcuts remain with macOS. Click host chrome to return
-focus to Herdr. Host synthetic Command shortcuts through the native view are
-not verified; send agent shortcuts through the guest driver. The native host defers hiding until it knows the pane is absent; hiding
-and showing the native view every frame breaks that focus. Test both native
-typing and direct guest-driver typing when changing the view integration.
+Finish when installation succeeds and config says `installed:true`. Reusing an
+installed directory is a no-op. The helper generates a random account password
+and preserves machine identity. Keep config private (0600) and the directory
+private (0700). Reserve sufficient real disk space for the restore image and
+guest data, even though the disk image is sparse.
 
-For a clean shutdown, run `scripts/vm/guest shutdown` and wait for
-`.local/vm/status.json` to report `stopped` before quitting Herdr. The toolbar's
-ACPI shutdown request may require confirmation inside macOS. Quitting Herdr requests guest shutdown; if it has not completed after 30 seconds,
-quitting is cancelled. Guest shutdown prompts may still need attention. Forced
-process termination or a host crash cannot be intercepted.
+Build only if a suitable native-vm app is missing or outdated. Stop the guest
+cleanly and quit that app before replacing its executable/library; preserve
+its launch settings and unrelated Herdr/core processes. For the lab, use
+`scripts/vm/build` then `scripts/vm/run`. For an existing installed app, open
+**+ → macOS VM** in a local workspace. The first display attempts boot;
+a stopped session has a Start button. An unprepared pane offers setup guidance
+and Retry without owning the disk, allowing `prepare` to run separately.
 
-## Reproduce the deployment test
+On supported hosts the first boot requests an `agent` account, automatic login,
+and Remote Login. Otherwise complete Setup Assistant in the guest and enable
+Remote Login there; align the private config's username/password with the
+actual guest account. Editing config alone does not change a guest password.
 
-`scripts/vm/build-smoke-app` builds a small test app. Deploy
-`.local/vm/artifacts/Herdr VM Test.app`. It reports the Metal device and a
-completed Metal command in `results/deployment.json`; typing writes
-`results/typing-result.txt`, and its button writes `results/click-result.txt`.
-Verify those outcomes alongside screenshots, including with another Herdr tab
-selected. These files provide independent evidence of actual guest input.
+## Unattended access and login
+
+Treat the three forms of “passwordless” separately:
+
+1. **SSH:** run `scripts/vm/guest connect` to install a per-VM public key using
+   the saved guest credentials. Then `guest exec 'id; sw_vers'` must succeed
+   without prompting. The helper discovers the NAT lease by MAC address and
+   keeps host keys under the VM directory. Verify identity before resolving a
+   host-key mismatch; a stale lease is not permission to use another machine.
+2. **Desktop:** configure automatic login through the guest's supported System
+   Settings or the detected version's documented account-management tool. Keep
+   a real account password for administrator prompts. Read the guest tool's
+   help rather than assuming host flags. Provisioning requests automatic login,
+   but that is not proof it works, especially after changing the password.
+3. **Administrator commands:** keep password-authenticated sudo by default;
+   the shutdown helper supplies the saved password privately. If the user
+   specifically requests passwordless sudo, configure a guest-only sudoers
+   drop-in, validate it with `visudo`, and test the requested command with
+   `sudo -n`. This does not enable desktop automatic login or grant UI permissions.
+
+When changing a guest password, use its supported account tools and update the
+private config only after success. Avoid passwords in shell history, process
+arguments, or diagnostic output. A simple requested development password is a
+user choice, not the skill's default for every guest.
+
+To claim unattended desktop access, perform a coordinated clean shutdown and
+boot, then verify the guest reached the desktop without entering credentials.
+SSH success alone is insufficient. If macOS rejects automatic-login setup,
+report that specific blocker and the remaining manual-login step; do not edit
+credential databases or fabricate success.
+
+## Guest computer use
+
+Install Cua Driver **inside the guest**, following its current official
+[quickstart](https://cua.ai/docs/cua-driver/quickstart). Inspect the installer
+before executing it in the guest. Preserve an existing working installation;
+use its CLI help to resolve version/path differences. The tested installation
+uses `/Applications/CuaDriver.app` and `~/.local/bin/cua-driver`.
+
+Through `scripts/vm/guest exec`, run the installed CLI's `doctor`,
+`permissions status --json`, and, when needed, `permissions grant`. The signed
+app's daemon must own the grants. Complete guest Accessibility, Screen Recording,
+and any direct-capture consent, accepting a driver restart when requested.
+Use the guest UI or hand the specific step to the person; follow the active
+computer-use tool's permission rules. A missing grant remains a setup blocker.
+
+Before guest control is available, the person can interact with the native
+pane. If an available host Computer Use tool is used for setup, follow its
+skill. Native input requires physical key events; generic Unicode/AX text
+injection does not pass through VZVirtualMachineView. Once ready, return to
+SSH plus the guest driver for ordinary work, including hidden-tab operation.
+
+For U.S.-only input when requested, compile `native/vm/GuestKeyboard.swift`
+with AppKit/Carbon, sign it ad hoc, place it in the selected VM's `artifacts`,
+and execute `/Volumes/My Shared Files/artifacts/guest-keyboard` inside the guest.
+It uses supported input-source APIs. Host synthetic Command shortcuts remain
+unverified; test physical keyboard input separately from guest-driver input.
+
+The CLI `guest tool` transport needs no agent-global MCP changes. If MCP is
+wanted, register the absolute `scripts/vm/guest` command with argument `mcp`
+and an explicit `HERDR_VM_HOME` environment value. Keep the driver in the guest;
+a direct host cua-driver registration would control the wrong desktop.
+
+## Verify and hand over
+
+Verify each requested capability with fresh evidence:
+
+- Boot reaches a usable desktop; SSH authenticates with the key.
+- Guest reads `artifacts` and writes a unique test result into `results` that
+  appears on the host. Only these dedicated directories are shared.
+- Driver discovers guest windows, captures an inspected screenshot, types text
+  and clicks a control with an observed result. Repeat with the Herdr tab hidden
+  when computer use is requested; end the test driver session afterward.
+- For app testing, run `scripts/vm/build-smoke-app`, deploy the produced
+  `.local/vm/artifacts/Herdr VM Test.app` using `guest deploy`, and inspect fresh
+  `deployment.json`, `typing-result.txt`, and `click-result.txt` under the
+  selected VM's results directory. Distinguish new outputs from stale ones.
+- For unattended login, verify the clean reboot described above. Leave the VM
+  running unless the person asked for shutdown.
+
+Report the app and VM paths, verified capabilities, and precise remaining
+manual steps. Persist those results in the private setup notes. Installed or
+booted is not equivalent to ready for computer use.
+
+## Lifecycle and recovery
+
+Hidden/closed tabs leave the guest running. All VM tabs target the same guest;
+reuse its existing tab. Herdr owns the VM process lifetime, independently of
+herdr-core's terminal sessions. Quitting requests shutdown and cancels after
+30 seconds if the guest has not stopped. No saved-state suspend exists.
+
+`scripts/vm/guest shutdown` requests authenticated normal OS shutdown. Wait
+for a fresh `stopped` status before replacing the app, changing VM files, or
+switching configurations. The pane's shutdown request can leave a guest prompt
+pending. Even a stopped VM may remain owned by the app until it quits; closing
+its tab does not release the disk lock. Forced termination can interrupt guest
+writes. Preserve disks and identity on recovery; deletion/recreation is a
+separate destructive action, not an automatic repair step.

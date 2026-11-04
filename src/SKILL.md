@@ -153,6 +153,8 @@ host tab is hidden. Closing a pane leaves the VM running. Quitting requests
 normal guest shutdown and is cancelled if shutdown does not finish in 30 s.
 Use `guest shutdown` for authenticated shutdown over SSH.
 
-For setup and limitations, see `docs/local-vm.md`. For agent operation, read
-`skills/herdr-vm/SKILL.md`. VM credentials, disks and SSH keys remain under the
+For provisioning, recovery, and guest operation, read `skills/herdr-vm/SKILL.md`
+and its setup reference. Unprepared panes show skill-based setup guidance and
+Retry; they do not create a VM. For manual helpers, skill installation, and
+limitations, see `docs/local-vm.md`. VM credentials, disks and SSH keys remain under the
 ignored private VM directory. The pane uses Apple's native display, not VNC.

@@ -59,7 +59,37 @@ struct LifecycleTests {
                 _ = try VMCore(directory: directory)
                 try FileManager.default.removeItem(at: directory)
             } catch { fatalError("Lock test: \(error)") }
-            print("Native lifecycle tests passed: redraw focus, hide/reattach, resize, disk ownership")
+            // Empty/incomplete/malformed setups neither boot nor lock the disk.
+            let setupDirectory = FileManager.default.temporaryDirectory.appendingPathComponent(UUID().uuidString)
+            unsetenv("HERDR_VM_HOME")
+            let panel = VMPanel()
+            panel.start()
+            precondition(!panel.setup.isHidden && panel.core == nil && panel.power.isEnabled)
+            setenv("HERDR_VM_HOME", setupDirectory.path, 1)
+            panel.togglePower()
+            precondition(!panel.setup.isHidden && panel.core == nil)
+            precondition(!FileManager.default.fileExists(atPath: setupDirectory.path), "Empty pane created VM files")
+            panel.show(host: host, rect: NSRect(x: 0, y: 0, width: 600, height: 400))
+            // Offscreen AppKit rendering: no host window is shown or captured.
+            if let bitmap = panel.container.bitmapImageRepForCachingDisplay(in: panel.container.bounds) {
+                panel.container.cacheDisplay(in: panel.container.bounds, to: bitmap)
+                try! bitmap.representation(using: .png, properties: [:])!.write(
+                    to: URL(fileURLWithPath: ".local/vm-setup-test.png"))
+            }
+            do {
+                let installer = try VMCore(directory: setupDirectory)
+                installer.settings = VMSettings(macAddress: "02:00:00:00:00:01", password: "test-only")
+                try installer.saveSettings()
+                panel.togglePower()
+                precondition(panel.core == nil && !panel.setup.isHidden, "Incomplete VM acquired a session")
+                try Data("invalid".utf8).write(to: installer.path("config.json"))
+                panel.togglePower()
+                precondition(panel.core == nil && panel.power.title == "Retry", "Malformed config must be recoverable")
+                try FileManager.default.removeItem(at: setupDirectory)
+            } catch { fatalError("Setup test: \(error)") }
+            panel.timer?.invalidate()
+            unsetenv("HERDR_VM_HOME")
+            print("Native lifecycle tests passed: setup/retry without disk ownership, redraw focus, hide/reattach, resize, disk ownership")
             exit(0)
         }
         app.run()

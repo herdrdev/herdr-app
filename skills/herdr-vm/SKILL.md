@@ -1,6 +1,6 @@
 ---
 name: herdr-vm
-description: "Deploy and test macOS apps or browse with computer use inside the local Herdr VM, including while its tab is hidden. Use for guest screenshots, input, shared files, or VM setup; this targets the experimental native VM build."
+description: "Set up, recover, and operate a local macOS VM in Herdr. Use for VM provisioning, unattended login and SSH, guest computer use, or app deployment and testing, including with the VM tab hidden."
 ---
 
 # Herdr VM
@@ -10,21 +10,32 @@ Operate the guest through its Cua Driver over SSH. Herdr's tab is a native
 need to select, capture, or click that host tab. The VM and its desktop remain
 available when the tab is hidden. Quitting Herdr requests guest shutdown; a timeout cancels quitting. Keep guest work separate from the person's host desktop.
 
+## Set up or recover
+
+For a new VM, missing configuration, interrupted installation, login/SSH problems,
+or guest permissions, read [setup.md](references/setup.md). Complete the relevant
+stages and verify their outcomes; preserve existing guests. Use that workflow
+when asked to make the VM passwordless: SSH keys, automatic desktop login, and
+administrator authentication are separate settings.
+
 ## Locate and check
 
 Resolve this skill through any installation symlink. Its project root is two
 directories above the skill folder (`skills/herdr-vm`), or `HERDR_VM_PROJECT`
-when explicitly configured. Run commands from that project root:
+when explicitly configured. Select the VM directory from the app's launch
+configuration (`HERDR_VM_HOME`); `.local/vm` is only the lab default. Export the
+same absolute `HERDR_VM_HOME` for all helpers. If the app and helper targets are
+unclear, resolve them using the setup reference before connecting. Run commands
+from the project root:
 
 ```sh
-cat .local/vm/status.json
+cat "$HERDR_VM_HOME/status.json"
 scripts/vm/guest exec 'id; sw_vers'
 scripts/vm/guest exec '~/.local/bin/cua-driver permissions status --json'
 ```
 
 Proceed when the VM is running, SSH works, and the guest is logged in with the
-driver's capture/control permissions enabled. For installation, boot/login,
-permissions, keyboard layout, or SSH problems, read [setup.md](references/setup.md).
+driver's capture/control permissions enabled.
 An unavailable guest is not a reason to substitute host computer use.
 
 ## Deploy an app
@@ -40,7 +51,7 @@ to the guest's `~/Applications`, and launches it there. Quit the previous guest
 instance before replacing a running build. Verify the new instance through
 guest window discovery and its visible state or test output.
 
-| Host path under `.local/vm` | Guest path | Guest access |
+| Host path under `HERDR_VM_HOME` | Guest path | Guest access |
 | --- | --- | --- |
 | `artifacts/` | `/Volumes/My Shared Files/artifacts/` | Read-only |
 | `results/` | `/Volumes/My Shared Files/results/` | Read/write |
@@ -68,7 +79,7 @@ tool schema with `describe` before using unfamiliar arguments.
 For a discovered window, request `get_window_state` with its `pid`, `window_id`,
 and `session`. Set `screenshot_out_file` to a unique guest path such as
 `/Volumes/My Shared Files/results/my-task-before.png`. Inspect the returned
-accessibility tree and the corresponding host file `.local/vm/results/my-task-before.png`.
+accessibility tree and the corresponding host file `$HERDR_VM_HOME/results/my-task-before.png`.
 Capture errors are failures to see the window, not evidence that it is blank.
 
 Use current `element_token` values for accessible controls. For canvas or other

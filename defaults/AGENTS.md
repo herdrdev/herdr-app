@@ -1031,7 +1031,10 @@ see `herdr.d.ts` for their contract. `HERDR_VM_HOME` selects the prepared VM.
 A hidden or closed pane does not stop the session. Quit requests normal guest
 shutdown; a timeout cancels quitting instead of forcing the VM off.
 
-Setup: `docs/local-vm.md` in the source tree. Agent deployment and computer use:
-`skills/herdr-vm/SKILL.md`. Guest screenshots/input use the guest driver and
-work independently of host tab visibility. This feature is opt-in and its
+For new setup, interrupted provisioning, login/permission recovery, or guest
+operation, read `skills/herdr-vm/SKILL.md` in the source checkout. The setup
+workflow lives in `skills/herdr-vm/references/setup.md`; helpers and skill
+installation are documented in `docs/local-vm.md`. Unprepared panes show setup
+guidance and Retry without locking the disk. Guest screenshots/input use the
+guest driver and work independently of host tab visibility. This feature is opt-in and its
 proposed API is subject to upstream discussion.

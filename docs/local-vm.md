@@ -5,7 +5,29 @@ Virtualization framework. It is a proposal for review, not an upstream release.
 The first version intentionally manages one local VM. There is no VNC server,
 network video stream, or change to herdr-core.
 
-## Try it
+## Set up with an agent
+
+The `herdr-vm` skill handles new setup and recovery: it inspects the host and
+selected VM, resumes provisioning, configures guest access and optional computer
+use, and verifies the requested capabilities. Start with:
+
+> Use the herdr-vm skill to set up my local macOS VM in Herdr.
+
+Install the skill by linking `skills/herdr-vm` from this checkout into your
+agent's skills directory (`~/.codex/skills/herdr-vm` for Codex, or
+`~/.claude/skills/herdr-vm` for Claude Code). Resolve the checkout to an absolute
+path; preserve any existing unrelated skill at that destination. Start a new
+agent session if it has already cached its skill list. Alternatively, ask the
+agent to read the checkout's `skills/herdr-vm/SKILL.md` directly. The app does not
+silently install skills or register host computer-use tools.
+
+An unprepared VM pane shows this setup instruction and a Retry button. It does
+not download macOS, create a guest, or hold the installer's disk lock. The skill
+uses the helpers below and reports any guest permission or login step still
+requiring interaction. SSH keys, automatic desktop login, and passwordless sudo
+are separate choices; automatic login must be verified after a clean reboot.
+
+## Manual setup helpers
 
 Use Apple Silicon, Xcode with the macOS SDK, Rust and Zig as described in the
 root README, Python 3, and herdr-core (`hc` on PATH). Full automatic guest
@@ -39,7 +61,7 @@ app home at build/run time. Rebuild after changing the bundled launch defaults.
 Normal builds do not link Virtualization or require its entitlement.
 
 In a VM-enabled build, click **+ → macOS VM** to open the native pane,
-then use **Start** to boot the prepared guest. This entry is only visible in local workspaces on VM-enabled builds.
+which attempts to boot the prepared guest. Use **Start** after shutdown. This entry is only visible in local workspaces on VM-enabled builds.
 The underlying native capability always targets the desktop client’s Mac.
 
 ## Native capability and mod API
