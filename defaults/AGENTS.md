@@ -972,9 +972,10 @@ All of it is in `herdr.d.ts`. In short:
   A window can hold a layout, terminals too: a terminal keeps its presses
   (selecting text), so give it a mod block to drag by, a title bar:
   `openOverlay({ kind: "window", key: "t7", width: 600, height: 400, layout: { type: "column", children: [{ type: "block", size: { px: 28 }, content: { mod: "my-titlebar" } }, { type: "block", content: { terminal: "t7" } }] } })`.
-- Machine: `exec(cmd, args, { cwd, on })` (the user's real environment; use this,
+- Machine: `exec(cmd, args, { cwd, on, timeout })` (the user's real environment; use this,
   not `process.run`; `on: space.machine` runs there, omitted means local).
-  It rejects if the program cannot start or the machine cannot be reached.
+  `timeout` is milliseconds, defaults to 30,000 and is capped at 600,000 (10 minutes),
+  locally and remotely. It rejects on timeout, if the program cannot start or the machine cannot be reached.
   `hc(args)` (`hc read <t>` gives a terminal's text),
   `home()`, `appHome()`, `playSound("done" | "blocked" | file)`.
   `knownAgents({ on })`: the agents people can start (programs.json's
