@@ -1276,6 +1276,9 @@ mod tests {
                 while reading.load(std::sync::atomic::Ordering::Relaxed) {
                     match std::fs::read(&path) {
                         Ok(bytes) => { serde_json::from_slice::<Value>(&bytes).unwrap(); }
+                        // Windows refuses to open a file while a rename replaces it. The reader
+                        // got no bytes, so that is not a torn snapshot.
+                        Err(e) if cfg!(windows) && e.kind() == std::io::ErrorKind::PermissionDenied => {}
                         Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::NotFound),
                     }
                     std::thread::yield_now();
