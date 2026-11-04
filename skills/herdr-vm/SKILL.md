@@ -61,6 +61,24 @@ computer-use screenshots are transient, not saved artifacts. Host paths and gues
 paths are different: commands after `guest exec` run inside macOS in the VM.
 The guest's `localhost` is also separate from the host's.
 
+## Communication and call efficiency
+
+Keep routine computer use quiet. Perform clicks, double-clicks, typing,
+screenshots, and straightforward recovery without narrating each action or
+explaining tool names, coordinates, or transport mechanics. Follow the client's
+required progress-update cadence with brief outcome-focused updates. Report
+completed results, meaningful blockers, consequential mistakes, and decisions
+that need the user. Explain interaction details when the user asks for debugging
+or a walkthrough; otherwise omit the step-by-step play-by-play.
+
+Reuse known tool schemas and valid app/window IDs within the task. Discover
+again when the target changes, disappears, or an error invalidates that state.
+Use the connected guest MCP tools directly; do not duplicate their calls through
+the CLI. Request observations that inform the next action or verify an outcome,
+using accessibility-only diffs when sufficient. Keep required visual checks
+and authorization steps. The client controls tool-call visibility; this skill
+cannot hide its tool UI.
+
 ## See and interact
 
 Use the connected guest MCP server for inline images. Its stdio command is
@@ -111,8 +129,12 @@ only when the user requests screenshots, a recording, or other visual evidence;
 ordinary verification does not imply permission to retain a screenshot archive.
 
 Use current `element_token` values for accessible controls. For canvas or other
-surfaces absent from the tree, use screenshot coordinates and the returned
-capture ID. Read state again after acting, using `since:"latest"`; the returned
+surfaces absent from the tree, ground coordinates in the current inspected
+screenshot and its capture metadata, using the coordinate space required by the
+action tool. Pair coordinates with that capture's ID. When image dimensions,
+window size, or layout change, obtain a fresh reference; never reuse a scale
+factor from an earlier image or guess at a conversion. Resolve any ambiguity
+from the tool schema and capture metadata before clicking. Read state again after acting, using `since:"latest"`; the returned
 snapshot ID supersedes older element tokens. Confirm text, navigation, and
 click effects from the new state or application outputs. A tool reporting
 `effect:"unverifiable"` requires inspection before retrying.
