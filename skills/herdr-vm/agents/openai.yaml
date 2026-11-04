@@ -1,0 +1,4 @@
+interface:
+  display_name: "Herdr VM"
+  short_description: "Test apps inside a local macOS VM in Herdr"
+  default_prompt: "Use $herdr-vm to deploy and test this app inside the local Herdr VM without interrupting my desktop."

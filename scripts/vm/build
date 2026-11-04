@@ -1,0 +1,36 @@
+#!/bin/bash
+set -euo pipefail
+cd "$(dirname "$0")/../.."
+[[ "$(uname -s)" == Darwin && "$(uname -m)" == arm64 ]] || { echo 'The native VM build requires Apple Silicon macOS.' >&2; exit 1; }
+export PATH="$HOME/.cargo/bin:$HOME/.local/bin:$PATH"
+command -v cargo >/dev/null || { echo 'Install Rust and put cargo on PATH.' >&2; exit 1; }
+mkdir -p .local
+app="$PWD/.local/Herdr VM.app"
+python3 - "$app" <<'PY'
+import subprocess, sys
+binary=sys.argv[1]+'/Contents/MacOS/HerdrVM'
+if any(line.strip().startswith(binary) for line in subprocess.check_output(['ps','-ax','-o','command='],text=True).splitlines()):
+    raise SystemExit('Quit Herdr VM before replacing its application bundle. Other Herdr installations can stay open.')
+PY
+cargo build --locked --features native-vm --message-format=json-render-diagnostics > .local/vm-build.jsonl
+mkdir -p "$app/Contents/MacOS" "$app/Contents/Frameworks" "$app/Contents/Resources"
+python3 - "$app" <<'PY'
+import json, os, pathlib, plistlib, shutil, sys
+app=pathlib.Path(sys.argv[1]); root=pathlib.Path.cwd()
+records=[json.loads(line) for line in (root/'.local/vm-build.jsonl').read_text().splitlines() if line.startswith('{')]
+binary=next(r['executable'] for r in records if r.get('reason')=='compiler-artifact' and r.get('target',{}).get('name')=='herdr-app' and r.get('executable'))
+out=next(pathlib.Path(r['out_dir']) for r in records if r.get('reason')=='build-script-executed' and (pathlib.Path(r['out_dir'])/'libHerdrVM.dylib').exists())
+shutil.copy2(binary,app/'Contents/MacOS/HerdrVM')
+shutil.copy2(out/'libHerdrVM.dylib',app/'Contents/Frameworks/libHerdrVM.dylib')
+shutil.copy2('assets/icons/Herdr.icns',app/'Contents/Resources/Herdr.icns')
+info=dict(CFBundleExecutable='HerdrVM',CFBundleIdentifier='dev.herdr.vm-lab',
+    CFBundleName='Herdr VM',CFBundleDisplayName='Herdr VM',CFBundlePackageType='APPL',
+    CFBundleIconFile='Herdr',CFBundleVersion='1',CFBundleShortVersionString='0.1',
+    NSHighResolutionCapable=True,NSPrincipalClass='NSApplication',
+    LSEnvironment=dict(HERDR_APP_HOME=os.environ.get('HERDR_VM_APP_HOME',str(root/'.local/app-home')),
+        HERDR_VM_HOME=os.environ.get('HERDR_VM_HOME',str(root/'.local/vm')),HC_SESSION='vmproto',PATH=os.environ['PATH']))
+with (app/'Contents/Info.plist').open('wb') as f: plistlib.dump(info,f)
+PY
+codesign --force --sign - "$app/Contents/Frameworks/libHerdrVM.dylib"
+codesign --force --sign - --entitlements native/vm/entitlements.plist "$app"
+echo "Built $app"

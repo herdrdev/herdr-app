@@ -1,0 +1,9 @@
+#!/bin/bash
+set -euo pipefail
+cd "$(dirname "$0")/../.."
+[[ "$(uname -s)" == Darwin && "$(uname -m)" == arm64 ]] || { echo 'VM preparation requires Apple Silicon macOS.' >&2; exit 1; }
+mkdir -p .local/bin
+xcrun swiftc -swift-version 5 -O -framework AppKit -framework Virtualization \
+    native/vm/VMCore.swift native/vm/Prepare.swift -o .local/bin/vm-prepare
+codesign --force --sign - --entitlements native/vm/entitlements.plist .local/bin/vm-prepare
+exec .local/bin/vm-prepare "${HERDR_VM_HOME:-$PWD/.local/vm}"

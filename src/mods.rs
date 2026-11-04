@@ -343,6 +343,9 @@ pub struct Hint {
     /// `pane.go` can give it the keyboard.
     #[serde(default)]
     pub focusable: bool,
+    /// Opt-in built-in native pane; unknown values keep the JavaScript fallback.
+    #[serde(default)]
+    pub native: Option<String>,
 }
 
 #[derive(Clone)]
@@ -888,6 +891,9 @@ fn module(inst: Instance, copy: u64) -> HostModule {
     COMMANDS.with(|c| c.borrow_mut().push((copy, inst.name.clone(), cmd_tx)));
     HostModule::new("herdr")
         .declarations(DECLARATIONS)
+        .function("vmStatus", |_| Ok(to_host(&crate::native_vm::status())))
+        .function("vmStart", |_| crate::native_vm::command(1).map(|_| HostValue::Null).map_err(HostError::new))
+        .function("vmShutdown", |_| crate::native_vm::command(2).map(|_| HostValue::Null).map_err(HostError::new))
         .async_function("exec", |a| {
             let command = a.string(0)?.to_owned();
             Ok(exec_future(command, strings(a.get(1)), opt_str(a.get(2), "cwd"), opt_str(a.get(2), "on")))

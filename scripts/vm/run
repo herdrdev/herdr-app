@@ -1,0 +1,23 @@
+#!/bin/bash
+set -euo pipefail
+cd "$(dirname "$0")/../.."
+export HERDR_APP_HOME="${HERDR_VM_APP_HOME:-$PWD/.local/app-home}"
+export HERDR_VM_HOME="${HERDR_VM_HOME:-$PWD/.local/vm}"
+export HC_SESSION=vmproto
+export PATH="$HOME/.local/bin:$PATH"
+# Separate home, bundle id and core session: the installed Herdr is untouched.
+open -g "$PWD/.local/Herdr VM.app"
+bin="$PWD/.local/Herdr VM.app/Contents/MacOS/HerdrVM"
+for attempt in $(seq 1 60); do
+    if "$bin" status >/dev/null 2>&1; then
+        if [[ ! -f "$HERDR_APP_HOME/vm-tab-created" ]]; then
+            "$bin" do space.new '{"name":"Local VM Lab"}'
+            "$bin" do tab.new '{"name":"macOS VM","mod":"virtual-machine"}'
+            touch "$HERDR_APP_HOME/vm-tab-created"
+        fi
+        exit 0
+    fi
+    sleep 1
+done
+echo 'Experimental Herdr did not become ready' >&2
+exit 1

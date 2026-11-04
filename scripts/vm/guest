@@ -1,0 +1,96 @@
+#!/usr/bin/env python3
+"""Private SSH transport and app deployment for the experimental guest."""
+import json
+import os
+from pathlib import Path
+import re
+import shlex
+import subprocess
+import sys
+
+ROOT = Path(__file__).resolve().parents[2]
+VM = Path(os.environ.get('HERDR_VM_HOME', ROOT / '.local/vm'))
+
+def config():
+    return json.loads((VM / 'config.json').read_text())
+
+def address():
+    wanted = ':'.join(f'{int(x,16):02x}' for x in config()['macAddress'].split(':'))
+    leases = Path('/var/db/dhcpd_leases')
+    if leases.exists():
+        for block in re.findall(r'\{([^}]+)\}', leases.read_text()):
+            values = dict(re.findall(r'^\s*(\w+)=(.*)$', block, re.M))
+            mac = values.get('hw_address', '').split(',')[-1]
+            try: mac = ':'.join(f'{int(x,16):02x}' for x in mac.split(':'))
+            except ValueError: continue
+            if mac == wanted and 'ip_address' in values:
+                return values['ip_address']
+    raise SystemExit('Guest IP not found yet. Wait for macOS to boot and configure its network.')
+
+def ssh_args(password=False):
+    return ['/usr/bin/ssh', '-o', 'ConnectTimeout=10', '-o', 'StrictHostKeyChecking=accept-new',
+        '-o', f'UserKnownHostsFile={VM / "known_hosts"}', '-o', 'IdentitiesOnly=yes',
+        '-o', f'BatchMode={"no" if password else "yes"}', '-i', str(VM / 'ssh-key'),
+        f'{config()["username"]}@{address()}']
+
+def remote(command):
+    return subprocess.run(ssh_args() + [command]).returncode
+
+def main():
+    if os.environ.get('HERDR_VM_ASKPASS') == '1':
+        # Only ssh consumes this output, via a private askpass process.
+        print(config()['password'])
+        return 0
+    if len(sys.argv) < 2:
+        raise SystemExit('usage: guest ip | connect | exec <command> | mcp | tools | describe <tool> | tool <name> <json> | deploy <App.app> | shutdown')
+    action = sys.argv[1]
+    if action == 'ip': print(address()); return 0
+    if action == 'connect':
+        key = VM / 'ssh-key'
+        if not key.exists():
+            subprocess.run(['/usr/bin/ssh-keygen', '-q', '-t', 'ed25519', '-N', '', '-f', str(key)], check=True)
+        public = key.with_suffix('.pub').read_text().strip()
+        command = 'umask 077; mkdir -p ~/.ssh; touch ~/.ssh/authorized_keys; ' + \
+            'grep -qxF ' + shlex.quote(public) + ' ~/.ssh/authorized_keys || printf "%s\\n" ' + \
+            shlex.quote(public) + ' >> ~/.ssh/authorized_keys'
+        env = dict(os.environ, SSH_ASKPASS=str(Path(__file__).resolve()), SSH_ASKPASS_REQUIRE='force',
+                   DISPLAY='herdr-vm', HERDR_VM_ASKPASS='1')
+        subprocess.run(ssh_args(password=True) + [command], env=env, stdin=subprocess.DEVNULL, check=True)
+        return remote('id; sw_vers; ls -la "/Volumes/My Shared Files"')
+    if action == 'exec': return remote(' '.join(sys.argv[2:]))
+    if action == 'mcp':
+        args = ssh_args() + ['~/.local/bin/cua-driver mcp']
+        os.execv(args[0], args)
+    if action == 'tools': return remote('~/.local/bin/cua-driver list-tools')
+    if action == 'describe':
+        return remote('~/.local/bin/cua-driver describe ' + shlex.quote(sys.argv[2]))
+    if action == 'tool':
+        arguments = json.loads(sys.argv[3] if len(sys.argv) > 3 else '{}')
+        if not isinstance(arguments, dict): raise SystemExit('Tool arguments must be a JSON object')
+        return remote('~/.local/bin/cua-driver call ' + shlex.quote(sys.argv[2]) + ' ' +
+                      shlex.quote(json.dumps(arguments)))
+    if action == 'deploy':
+        source = Path(sys.argv[2]).resolve()
+        if not source.is_dir() or source.suffix != '.app': raise SystemExit('Expected an existing .app bundle')
+        target = VM / 'artifacts' / source.name
+        if source != target:
+            subprocess.run(['/usr/bin/ditto', str(source), str(target)], check=True)
+        shared = '/Volumes/My Shared Files/artifacts/' + source.name
+        # Preserve bundle metadata on the guest filesystem before launching.
+        return remote('mkdir -p "$HOME/Applications"; /usr/bin/ditto ' + shlex.quote(shared) +
+            ' "$HOME/Applications/"' + shlex.quote(source.name) +
+            ' && /usr/bin/open "$HOME/Applications/"' + shlex.quote(source.name))
+    if action == 'shutdown':
+        # ACPI's requestStop may leave a macOS confirmation dialog pending.
+        # The private guest admin account can request a normal OS shutdown over SSH.
+        process = subprocess.run(ssh_args() + ['sudo -S -p "" /sbin/shutdown -h now'],
+            input=config()['password'] + '\n', text=True, capture_output=True)
+        if 'Shutdown NOW!' in process.stdout or process.returncode == 0:
+            print('Guest shutdown requested; wait for status.json to report stopped.')
+            return 0
+        print(process.stderr, file=sys.stderr)
+        return process.returncode
+    raise SystemExit(f'Unknown action: {action}')
+
+if __name__ == '__main__':
+    sys.exit(main())
