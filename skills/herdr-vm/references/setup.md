@@ -149,9 +149,10 @@ Verify each requested capability with fresh evidence:
 - Boot reaches a usable desktop; SSH authenticates with the key.
 - Guest reads `artifacts` and writes a unique test result into `results` that
   appears on the host. Only these dedicated directories are shared.
-- Driver discovers guest windows, captures an inspected screenshot, types text
+- Driver discovers guest windows, returns an inspected inline screenshot, types text
   and clicks a control with an observed result. Repeat with the Herdr tab hidden
-  when computer use is requested; end the test driver session afterward.
+  when computer use is requested; end the test driver session afterward. Follow
+  SKILL.md’s transient-image policy; clean up any CLI fallback capture file.
 - For app testing, run `scripts/vm/build-smoke-app`, deploy the produced
   `.local/vm/artifacts/Herdr VM Test.app` using `guest deploy`, and inspect fresh
   `deployment.json`, `typing-result.txt`, and `click-result.txt` under the

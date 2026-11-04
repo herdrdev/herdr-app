@@ -56,7 +56,8 @@ guest window discovery and its visible state or test output.
 | `artifacts/` | `/Volumes/My Shared Files/artifacts/` | Read-only |
 | `results/` | `/Volumes/My Shared Files/results/` | Read/write |
 
-Use `results/` for screenshots, logs, and test reports. Host paths and guest
+Use `results/` for requested deliverables, logs, and test reports; routine
+computer-use screenshots are transient, not saved artifacts. Host paths and guest
 paths are different: commands after `guest exec` run inside macOS in the VM.
 The guest's `localhost` is also separate from the host's.
 
@@ -77,10 +78,24 @@ Choose a task-specific session label and reuse it on calls that accept
 tool schema with `describe` before using unfamiliar arguments.
 
 For a discovered window, request `get_window_state` with its `pid`, `window_id`,
-and `session`. Set `screenshot_out_file` to a unique guest path such as
-`/Volumes/My Shared Files/results/my-task-before.png`. Inspect the returned
-accessibility tree and the corresponding host file `$HERDR_VM_HOME/results/my-task-before.png`.
-Capture errors are failures to see the window, not evidence that it is blank.
+and `session`. **Omit `screenshot_out_file` by default.** Inspect the inline image
+and accessibility tree returned through guest MCP. If using a tool bridge,
+forward image content to the model's image renderer; printing base64 to a
+terminal does not let the model see it.
+
+Use `include_screenshot:false` for follow-up checks answerable from the
+accessibility tree, with `since:"latest"` for changes. Request an inline image
+when visual verification or coordinate targeting is needed. Capture errors
+are failures to see the window, not evidence that it is blank.
+
+If only the CLI is available and the harness cannot render its inline image,
+use one task-owned temporary capture path in the shared `results/` directory.
+Reuse/overwrite that path for sequential captures, inspect each image through
+the harness's image viewer, and delete the temporary file after inspection
+(including cleanup on failure). Concurrent tasks must have separate paths.
+Do not create numbered or timestamped screenshot collections. Persist images
+only when the user requests screenshots, a recording, or other visual evidence;
+ordinary verification does not imply permission to retain a screenshot archive.
 
 Use current `element_token` values for accessible controls. For canvas or other
 surfaces absent from the tree, use screenshot coordinates and the returned
