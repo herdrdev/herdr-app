@@ -1463,6 +1463,7 @@ impl AppWindow {
             let sub = cx.subscribe_in(&view, window, move |this, _, ev: &TerminalEvent, window, cx| match ev {
                 TerminalEvent::Peek(address) => this.peek_terminal(address, window, cx),
                 TerminalEvent::TitleChanged => this.publish(cx),
+                TerminalEvent::MachineDialed => this.relist_machines = true,
                 TerminalEvent::Ended => this.terminal_ended(&block, window, cx),
                 TerminalEvent::ContextMenu(at) => {
                     this.open_menu("pane", json!({ "pane": block.trim_end_matches(SWAP), "terminal": addr }), Some(*at), window, cx)
@@ -2474,7 +2475,9 @@ impl AppWindow {
         let start = TerminalStart::new(argv, cwd, follow, space, ctx, on, size, window);
         let reply = self.control_reply.take();
         let core = self.core.clone();
-        let generation = self.core_generation;
+        // Where the person was when they asked: a start that lands later
+        // doesn't pull them back from wherever they went meanwhile.
+        let asked_in = self.model.active.clone();
         // A start that answers quickly shows nothing extra; a slow one says it's waiting.
         let notice: Rc<RefCell<Option<String>>> = Rc::default();
         let done = Rc::new(Cell::new(false));
@@ -2499,18 +2502,27 @@ impl AppWindow {
             done.set(true);
             let _ = this.update_in(cx, |this, window, cx| {
                 if let Some(id) = notice.borrow_mut().take() { this.close_overlay(&id, window, cx); }
+                // Addresses outlive a core restart (its programs survive), so a
+                // start that lands after one is placed all the same.
                 let result = match started {
-                    Ok((addr, folder)) if generation == this.core_generation => {
+                    Ok((addr, _)) if this.draining => {
+                        this.kill(std::slice::from_ref(&addr), cx);
+                        Err(format!("cannot start a terminal on {machine}: Herdr is quitting"))
+                    }
+                    Ok((addr, folder)) => {
                         this.born.borrow_mut().insert(addr.clone(), Instant::now());
                         if !folder.is_empty() {
                             this.cwds.insert(addr.clone(), folder.clone());
                         }
+                        let now_in = this.model.active.clone();
                         let placed = place(this, &addr, &folder);
+                        if placed.is_ok() && now_in != asked_in {
+                            this.model.active = now_in;
+                        }
                         // Its space or pane went while it started: it has nowhere to be.
                         if placed.is_err() { this.kill(std::slice::from_ref(&addr), cx); }
                         placed
                     }
-                    Ok(_) => Err(format!("cannot start a terminal on {machine}: the core restarted meanwhile; try again")),
                     Err(e) => Err(e),
                 };
                 match (&result, reply) {
@@ -2540,9 +2552,12 @@ impl AppWindow {
         let name = machine.clone();
         cx.spawn_in(window, async move |this, cx| {
             let result = cx.background_executor()
-                .spawn(async move { core.call_timeout("machine.connect", json!({ "machine": name }), Duration::from_secs(30)) })
+                // Inside `herdr-app do`'s 30 s, so a long dial still answers with its state.
+                .spawn(async move { core.call_timeout("machine.connect", json!({ "machine": name }), Duration::from_secs(25)) })
                 .await;
             let _ = this.update_in(cx, |this, window, cx| {
+                // Its state shows at once, not at the next listing.
+                this.relist_machines = true;
                 let answer = result.unwrap_or_else(|e| json!({ "error": format!("{e:#}") }));
                 if let Some(reply) = reply {
                     let _ = reply.send(answer);
@@ -2558,8 +2573,6 @@ impl AppWindow {
                     let spec = json!({"kind":"toast", "notification":{"title":format!("Still can't reach {machine}"),"body":why,"level":"warning"}});
                     this.open_overlay(mods::new_overlay_id(), spec, window, cx);
                 }
-                // Its state shows at once, not at the next listing.
-                this.relist_machines = true;
             });
         })
         .detach();

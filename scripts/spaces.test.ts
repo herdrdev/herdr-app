@@ -310,10 +310,21 @@ test("Retry asks the app to dial once, ignoring repeat clicks until it settles",
   view.retry("box", cx);
   view.retry("box", cx);
   expect(runs).toEqual([{ name: "machine.reconnect", args: { machine: "box" } }]);
-  expect(view.retrying.box).toBeNumber();
+  expect(view.retrying.box.at).toBeNumber();
   sleeps.forEach(wake => wake());
   await Promise.all(tasks);
   expect(view.retrying.box).toBeUndefined();
+  view.retry("box", cx);
+  expect(runs.length).toBe(2);
+});
+
+test("an earlier Retry's timer leaves a later click's busy state alone", async () => {
+  const { view, cx, runs, sleeps, tasks } = harness();
+  view.retry("box", cx);
+  delete view.retrying.box; // it connected, then dropped again
+  view.retry("box", cx);
+  sleeps[0]();
+  await tasks[0];
   view.retry("box", cx);
   expect(runs.length).toBe(2);
 });

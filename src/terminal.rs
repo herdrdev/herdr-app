@@ -47,6 +47,8 @@ pub enum TerminalEvent {
     Ended,
     /// Right-click where the program doesn't take the mouse: the pane menu.
     ContextMenu(Point<Pixels>),
+    /// The pane's reconnect button dialed its machine: its state is news.
+    MachineDialed,
 }
 
 /// What the canvas closures need, shared outside the entity so prepaint can resize.
@@ -660,6 +662,7 @@ impl TerminalView {
                 .spawn(async move { core.call_timeout("machine.connect", serde_json::json!({ "machine": machine }), Duration::from_secs(60)) })
                 .await;
             let _ = this.update(cx, |this, cx| {
+                cx.emit(TerminalEvent::MachineDialed);
                 this.reconnect = match result {
                     Ok(v) if v["state"] == "connected" => Reconnect::Idle,
                     Ok(v) => Reconnect::Failed(v["why"].as_str().map(str::to_owned).unwrap_or_else(|| format!("still {}", v["state"].as_str().unwrap_or("away").replace('_', " ")))),

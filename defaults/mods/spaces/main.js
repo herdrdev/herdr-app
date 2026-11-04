@@ -81,7 +81,7 @@ export default class Spaces extends View {
     this.pressed = null;
     this.over = null;
     this.machines = [];
-    this.retrying = {}; // machine -> when Retry was clicked
+    this.retrying = {}; // machine -> { at }: when Retry was clicked
     this.reconnecting = JSON.parse(localStorage.getItem("machines.reconnecting") ?? "{}");
     for (const state of Object.values(this.reconnecting)) state.busy = false;
     this.folded = new Set(JSON.parse(localStorage.getItem("machines.folded") ?? "[]"));
@@ -158,13 +158,14 @@ export default class Spaces extends View {
   // Asks the core to dial now (machine.reconnect); the header says so until
   // the state moves or the dial is long over.
   retry(m, cx) {
-    if (this.retrying[m] && Date.now() - this.retrying[m] < 35000) return;
-    this.retrying[m] = Date.now();
+    if (this.retrying[m] && Date.now() - this.retrying[m].at < 35000) return;
+    const click = this.retrying[m] = { at: Date.now() };
     run("machine.reconnect", { machine: m });
     cx.notify();
     cx.spawn(async cx => {
       await cx.sleep(35000);
-      delete this.retrying[m];
+      // A later click owns the entry now.
+      if (this.retrying[m] === click) delete this.retrying[m];
       cx.notify();
     });
   }
@@ -318,7 +319,8 @@ export default class Spaces extends View {
     // write can lose a sync conflict: allow the echo to settle before retrying.
     const order = sp.map(w => w.id);
     const target = out.map(r => r.w.id);
-    const key = JSON.stringify([order, target, machines()]);
+    // Machines by readiness only: their line state moving isn't a reason to resend.
+    const key = JSON.stringify([order, target, machines().map(m => [m.name, m.layout])]);
     if (order.every((id, i) => id === target[i])) {
       this.ordering = null;
     } else if (this.ordering?.key !== key || this.orderingDue(Date.now())) {
