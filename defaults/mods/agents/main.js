@@ -28,9 +28,15 @@ function toggleSidebar() {
 
 const clean = (s) => (s ?? "").replace(/^[^\p{L}\p{N}]+/u, "").trim();
 
-function lead(tab, all = panes()) {
-  const mine = all.filter(p => p.tab === tab.id && p.terminal);
-  return mine.find(p => p.program?.agent) ?? mine.find(p => p.focused) ?? mine[0];
+function leadPanes(all) {
+  const leads = new Map();
+  for (const p of all) {
+    if (!p.terminal) continue;
+    const current = leads.get(p.tab);
+    // First agent, else first focused terminal, else first terminal in the tab.
+    if (!current || (!current.program?.agent && (p.program?.agent || (!current.focused && p.focused)))) leads.set(p.tab, p);
+  }
+  return leads;
 }
 
 function title(tab, l) {
@@ -272,15 +278,18 @@ export default class Agents extends View {
     // A row reads "space \u00b7 detail": the agent's pane name, else a named tab
     // or its own title. Only missing panes fall back to the tab's lead.
     // Automatic tab numbers stay hidden unless two rows would read the same.
-    const tabs = spaces().flatMap(s => s.tabs);
-    const allPanes = panes();
-    const paneOf = (a) => allPanes.find(p => p.pane === a.pane);
-    const label = (a) => {
-      const tab = tabs.find(tab => tab.id === a.tab);
-      const pane = paneOf(a);
-      return pane?.name || (tab ? title(tab, pane ?? lead(tab, allPanes)) : a.title || a.program?.name || "");
-    };
-    const detail = new Map(list.map(a => [a.address, paneOf(a)?.name || (/^\d+$/.test(label(a)) ? null : label(a))]));
+    // Read the pane snapshot once: every host read copies the whole list into JS.
+    const paneList = panes();
+    const leads = leadPanes(paneList);
+    const paneById = new Map(paneList.map(p => [p.pane, p]));
+    const tabs = new Map(spaces().flatMap(s => s.tabs).map(tab => [tab.id, tab]));
+    const labels = new Map(list.map(a => {
+      const pane = paneById.get(a.pane);
+      const tab = tabs.get(a.tab);
+      return [a.address, pane?.name || (tab ? title(tab, pane ?? leads.get(tab.id)) : a.title || a.program?.name || "")];
+    }));
+    const label = (a) => labels.get(a.address);
+    const detail = new Map(list.map(a => [a.address, paneById.get(a.pane)?.name || (/^\d+$/.test(label(a)) ? null : label(a))]));
     const seen = {};
     for (const a of list) { const k = `${a.space_name}\u0000${detail.get(a.address) ?? ""}`; seen[k] = (seen[k] ?? 0) + 1; }
     for (const a of list) {
