@@ -13,7 +13,8 @@ available when the tab is hidden. Quitting Herdr requests guest shutdown; a time
 ## Set up or recover
 
 For a new VM, missing configuration, interrupted installation, login/SSH problems,
-or guest permissions, read [setup.md](references/setup.md). Complete the relevant
+guest permissions, a dark/idle display, or driver startup, read
+[setup.md](references/setup.md). Complete the relevant
 stages and verify their outcomes; preserve existing guests. Use that workflow
 when asked to make the VM passwordless: SSH keys, automatic desktop login, and
 administrator authentication are separate settings.
@@ -144,7 +145,8 @@ does not require bringing Herdr or its VM tab to the front. Browser work uses
 the guest's browser; discover its window and use the driver's supported tools.
 This skill does not itself authorize external submissions or account changes.
 
-For long tests, keep the guest logged in and awake for that task. Coordinate
+For long tests, verify the guest stays logged in and awake using the setup
+reference’s idle settings or a task-scoped sleep assertion. Coordinate
 concurrent agents sharing this one guest desktop; a different session label
 does not create a separate desktop. End your driver session when finished
 using `end_session` according to its schema. Leave the VM running for the

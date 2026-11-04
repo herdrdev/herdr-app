@@ -110,6 +110,42 @@ SSH success alone is insufficient. If macOS rejects automatic-login setup,
 report that specific blocker and the remaining manual-login step; do not edit
 credential databases or fabricate success.
 
+## Keep a dedicated agent guest available
+
+For an unattended development guest, include idle behavior in setup. Apply
+these changes inside the selected guest only; preserve the host's sleep/lock
+settings. Reuse the person's preferences. Offer the always-available profile
+when unattended use is requested; use temporary `caffeinate` for a one-off task
+when persistent idle changes are not wanted.
+
+Inspect `pmset -g custom`, the guest's Lock Screen settings, screen saver,
+automatic logout, and `sysadminctl -screenLock status`. For the always-available
+profile, disable system/display/disk idle sleep, screen saver, automatic locking,
+and automatic logout. On the tested guest:
+
+```sh
+# Run in the guest, authenticating sudo privately when needed.
+sudo pmset -a displaysleep 0 sleep 0 disksleep 0
+defaults -currentHost write com.apple.screensaver idleTime -int 0
+defaults write com.apple.screensaver idleTime -int 0
+sudo defaults write /Library/Preferences/.GlobalPreferences com.apple.autologout.AutoLogOutDelay -int 0
+sysadminctl -screenLock status
+```
+
+If screen locking is enabled, use guest Lock Screen settings or the installed
+`sysadminctl -screenLock off` interface after reading its authentication help.
+Use prompted/private credential input; do not place passwords in command-line
+arguments. Verify the effective settings afterward; defaults keys can vary by
+macOS release, so use the guest settings UI when readback or observed behavior
+does not match. `caffeinate -u -t 2` can wake an idle guest display; it is not the
+persistent fix. Explicit locking, logout, host sleep, and shutdown still affect
+availability.
+
+Record before/after values in private setup notes. After an idle interval past
+the previous timeout, verify desktop availability and a fresh inline capture.
+Active work can reset idle timers; mark the idle check pending if another agent
+is using the guest. A settings readback alone does not prove unattended behavior.
+
 ## Guest computer use
 
 Install Cua Driver **inside the guest**, following its current official
@@ -136,6 +172,34 @@ with AppKit/Carbon, sign it ad hoc, place it in the selected VM's `artifacts`,
 and execute `/Volumes/My Shared Files/artifacts/guest-keyboard` inside the guest.
 It uses supported input-source APIs. Host synthetic Command shortcuts remain
 unverified; test physical keyboard input separately from guest-driver input.
+
+## Driver startup and access policy
+
+Check the installed driver's help and `status`. Configure startup in the guest's
+logged-in desktop session, preserving the signed app's permission identity.
+In the tested 0.38 release, `autostart` is Windows-only. On macOS, use a guest
+Login Item or a user LaunchAgent whose ProgramArguments are `/usr/bin/open`,
+`-g`, and the installed signed CuaDriver.app path, with `RunAtLoad:true` and
+`LimitLoadToSessionType:Aqua`. Use a dedicated label such as
+`dev.herdr.vm.cua-driver`, validate the plist, and bootstrap it into `gui/<uid>`.
+Reuse an existing equivalent startup entry rather than duplicating it. The
+launcher exits successfully after opening the app; verify the driver's own
+status separately. Do not add KeepAlive to this one-shot launcher or restart a
+working daemon solely to configure next-login startup.
+
+Inspect the effective permission mode, user/managed policy, and capability
+manifest. Start with standard mode and the guest's granted Accessibility,
+Screen Recording, and direct-capture consent. Test the intended apps and actions;
+a request for full interaction does not itself require unrestricted mode,
+Full Disk Access, browser-profile attachment, or disabled macOS permission gates.
+If a specific action is denied, identify the driver policy or OS permission and
+configure the needed access within the user's requested scope. Managed policy
+and genuine approval requirements remain in force. Do not silently switch to
+`--dangerously-bypass-approvals` as a setup shortcut.
+
+After a coordinated guest reboot, verify automatic desktop login, driver
+startup, permissions, and MCP inline capture again. When reboot would interrupt
+ongoing work, record it as pending instead of reporting persistence as tested.
 
 ## Connect the agent to guest MCP
 
@@ -195,7 +259,8 @@ Verify each requested capability with fresh evidence:
   `.local/vm/artifacts/Herdr VM Test.app` using `guest deploy`, and inspect fresh
   `deployment.json`, `typing-result.txt`, and `click-result.txt` under the
   selected VM's results directory. Distinguish new outputs from stale ones.
-- For unattended login, verify the clean reboot described above. Leave the VM
+- For unattended use, verify idle behavior and the clean reboot/login/driver
+  startup checks described above. Leave the VM
   running unless the person asked for shutdown.
 
 Report the app and VM paths, verified capabilities, and precise remaining
