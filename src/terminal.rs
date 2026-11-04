@@ -746,7 +746,7 @@ impl TerminalView {
     }
 
     fn key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if self.search_open && ev.keystroke.key == "escape" {
+        if self.find_field_focused(window, cx) && ev.keystroke.key == "escape" {
             self.close_search(window, cx);
             cx.stop_propagation();
             return;
@@ -2571,9 +2571,16 @@ mod tests {
             assert!(terminal.typed_at.get().is_some(), "keystrokes did not reach the program once the terminal held the keys");
         });
 
+        cx.update(|_, app| root.update(app, |root, app| {
+            root.0.update(app, |terminal, _| terminal.typed_at.set(None));
+        }));
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
-        root.read_with(cx, |root, cx| assert!(!root.0.read(cx).search_open));
+        root.read_with(cx, |root, cx| {
+            let terminal = root.0.read(cx);
+            assert!(terminal.search_open, "terminal Escape must not close Find");
+            assert!(terminal.typed_at.get().is_some(), "Escape must reach the program");
+        });
     }
 
     #[gpui::test]
