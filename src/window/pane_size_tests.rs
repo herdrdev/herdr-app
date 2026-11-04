@@ -79,3 +79,48 @@ fn initial_pane_size(cx: &mut gpui::TestAppContext) {
         assert_eq!(predicted, actual, "{label}: initial size must match the rendered grid exactly");
     }
 }
+
+#[test]
+fn hidden_tabs_follow_the_window() {
+    in_own_process("hidden_tabs_follow");
+}
+
+#[gpui::test]
+fn hidden_tabs_follow(cx: &mut gpui::TestAppContext) {
+    use gpui::{px, size};
+    if !running_alone("hidden_tabs_follow") { return; }
+    let main: serde_json::Value = serde_json::from_str(include_str!("../../defaults/layouts/main.json")).unwrap();
+    let (view, cx) = open_window(cx, "size-probe", "export default () => null;", main);
+    // Tab "a" has two panes side by side; tab "b" is the one shown.
+    let mut root = crate::model::pane("a", "probe-a");
+    root.split("a", super::Axis::Row, crate::model::pane("a2", "probe-a2"), "s".into());
+    view.update_in(cx, |this, window, cx| {
+        this.folders.retain(|id, _| id == "size-probe");
+        this.model = crate::model::Model::default();
+        let mut tab = super::Tab::new("ta", "", "a", "probe-a");
+        tab.root = root;
+        tab.focus("a2");
+        this.model.add_space("space", "test", "/", tab);
+        this.model.add_tab("space", super::Tab::new("tb", "", "b", "probe-b"));
+        this.sync(window, cx);
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let dims = |cx: &mut gpui::VisualTestContext| view.update(cx, |this, cx| ["a", "a2"].map(|p| this.terms[p].view.read(cx).dimensions()));
+    let before = dims(cx);
+    cx.simulate_resize(size(px(1400.0), px(900.0)));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    // The first tick after a change waits for the window to settle; the second sizes them.
+    view.update_in(cx, |this, window, cx| this.fit_hidden_tabs(window, cx));
+    assert_eq!(dims(cx), before, "a tick right after a change must leave hidden tabs alone");
+    view.update_in(cx, |this, window, cx| this.fit_hidden_tabs(window, cx));
+    let fitted = dims(cx);
+    eprintln!("hidden tab: {before:?} before the window grew, {fitted:?} once it settled");
+    assert_ne!(fitted, before, "a settled window must size the hidden tab's terminals");
+    // Shown, the panes draw with the size they were given: nothing changes.
+    view.update_in(cx, |this, window, cx| {
+        this.model.select_tab("ta");
+        this.sync(window, cx);
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert_eq!(dims(cx), fitted, "hidden tabs must have been sized as their panes draw them");
+}

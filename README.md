@@ -79,7 +79,7 @@ Duplicate a shipped layout or mod before changing its structure or code. Your co
 Save a personal layout, mod or key file and the window reloads it.
 A broken edit keeps the last good version and reports the error.
 
-Ctrl+Shift+P shows every command and its key (Cmd+Shift+P on macOS). Change any key in `keys.json`; see [the keys section](defaults/AGENTS.md#keys-keysjson) of the mod guide for the format.
+Ctrl+Shift+P shows every command and its key (Cmd+Shift+P on macOS). Change any key in `keys.json`; see [the keys section](defaults/AGENTS.md#keys-keysjson) of the mod guide for the format, including JSON objects for named, typed command arguments.
 
 [Layouts and mods](docs/mods.md) · [Commands](docs/commands.md)
 

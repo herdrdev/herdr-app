@@ -6,7 +6,8 @@ use crate::vt::{self, CursorShape, Rgb, Select, Vt};
 use ghostty_sys::*;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use serde_json::json;
+use gpui_base::input::{Input, InputEditorStyle, InputEvent, InputState};
+use serde_json::{Value, json};
 use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -76,6 +77,10 @@ struct Grid {
     /// The cursor's cell in window coordinates, from the last paint: where the
     /// input method puts its candidate window.
     cursor_at: Option<Bounds<Pixels>>,
+    /// The scroll thumb's grabbable lane from the last paint, in window
+    /// coordinates (wider than the few px drawn).
+    thumb: Option<Bounds<Pixels>>,
+    track: Option<Bounds<Pixels>>,
     /// Each row's drawing by position, kept while the row is the same (`Rc`).
     painted: Vec<(Rc<Vec<vt::Cell>>, Vec<RowOp>, Option<usize>)>,
     /// Font size, cell size, cell font, loaded fonts and ligature setting used to draw.
@@ -90,6 +95,8 @@ pub struct TerminalView {
     pub lost: bool,
     /// A left-button selection drag is in progress.
     selecting: bool,
+    /// A scroll thumb drag is: the px into the thumb it was grabbed at.
+    scrollbar_grab: Option<f32>,
     selection_pointer: Point<Pixels>,
     selection_scroll: Option<Task<()>>,
     /// The terminal's folder, for links to relative paths.
@@ -107,6 +114,15 @@ pub struct TerminalView {
     typed_at: Cell<Option<Instant>>,
     /// Scrolled this gesture, in lines, toward the next whole one.
     scrolled: Point<f32>,
+    /// Search UI and query belong to this terminal view, not the window. Each
+    /// terminal in a tab therefore keeps its own query and match position.
+    search_open: bool,
+    /// Restore the last keyboard target when returning to this pane.
+    search_keys: bool,
+    search_query: String,
+    search_input: Option<Entity<InputState>>,
+    pending_search_nav: Option<bool>,
+    search_task: Option<Task<()>>,
     _reader: Option<Task<()>>,
 }
 
@@ -144,6 +160,10 @@ fn display_update(told: &mut Option<DisplayFacts>, theme: &vt::Theme, cell: (u32
     Some(json!({"fg": hex(facts.fg), "bg": hex(facts.bg), "cursor": hex(facts.cursor), "cell": [cell.0, cell.1]}))
 }
 
+pub fn initial_display(window: &Window) -> serde_json::Value {
+    display_update(&mut None, &vt::theme(), device_cell(cell_size(window), window.scale_factor())).unwrap()
+}
+
 impl Grid {
     fn refresh_theme(&mut self, theme: &vt::Theme, cell: (u32, u32)) {
         self.vt.set_theme(theme.clone());
@@ -151,6 +171,26 @@ impl Grid {
             && let Some(facts) = display_update(&mut self.told_display, theme, cell)
         {
             self.core.facts(chan, &facts);
+        }
+    }
+
+    /// Sizes the screen to `cols` x `rows` of `cell` at `scale`; the program hears of a change.
+    fn fit(&mut self, cols: u16, rows: u16, cell: Size<Pixels>, scale: f32) {
+        self.cell = cell;
+        self.scale = scale;
+        let dev = device_cell(cell, scale);
+        // Before the size, so a program woken by it asks for the new cell.
+        self.refresh_theme(&vt::theme(), dev);
+        if (cols, rows) == (self.vt.cols, self.vt.rows) && dev == self.vt_cell {
+            return;
+        }
+        self.vt.resize(cols, rows, dev.0, dev.1);
+        self.vt_cell = dev;
+        if let Some(chan) = self.channel {
+            self.core.resize(chan, cols, rows);
+            // Mode 2048 programs wait for this report, not SIGWINCH.
+            let replies = self.vt.take_replies();
+            self.core.automatic_input(chan, &replies);
         }
     }
 }
@@ -187,6 +227,7 @@ impl TerminalView {
             ended: None,
             lost: false,
             selecting: false,
+            scrollbar_grab: None,
             selection_pointer: Point::default(),
             selection_scroll: None,
             cwd: None,
@@ -207,6 +248,8 @@ impl TerminalView {
                 link_spans: Vec::new(),
                 marked: None,
                 cursor_at: None,
+                thumb: None,
+                track: None,
                 painted: Vec::new(),
                 painted_with: (0, Size::default(), font(""), 0, false),
             })),
@@ -215,6 +258,12 @@ impl TerminalView {
             shown_in: Cell::new(0),
             typed_at: Cell::new(None),
             scrolled: point(0.0, 0.0),
+            search_open: false,
+            search_keys: false,
+            search_query: String::new(),
+            search_input: None,
+            pending_search_nav: None,
+            search_task: None,
             _reader: None,
         };
         view.connect(core, false, cx);
@@ -248,6 +297,9 @@ impl TerminalView {
             let cell = device_cell(g.cell, g.scale);
             g.vt = Vt::new(cols, rows);
             g.vt.resize(cols, rows, cell.0, cell.1);
+            if self.search_open {
+                g.vt.start_search(&self.search_query);
+            }
             g.vt_cell = cell;
             g.told_display = None;
             let facts = display_update(&mut g.told_display, &vt::theme(), cell).unwrap();
@@ -350,6 +402,26 @@ impl TerminalView {
         &self.focus
     }
 
+    /// The focused terminal remains the action target while its local find
+    /// input owns keyboard focus (notably for search, copy and paste commands).
+    pub fn owns_keyboard_focus(&self, window: &Window, cx: &App) -> bool {
+        self.focus.is_focused(window) || self.find_field_focused(window, cx)
+    }
+
+    pub fn focus_target(&self, cx: &App) -> FocusHandle {
+        if self.search_open && self.search_keys
+            && let Some(input) = &self.search_input
+        {
+            return input.read(cx).focus_handle(cx);
+        }
+        self.focus.clone()
+    }
+
+    fn find_field_focused(&self, window: &Window, cx: &App) -> bool {
+        self.search_open
+            && self.search_input.as_ref().is_some_and(|input| input.read(cx).focus_handle(cx).is_focused(window))
+    }
+
     pub fn detach(&self) {
         let g = self.grid.borrow();
         if let Some(ch) = g.channel {
@@ -444,6 +516,15 @@ impl TerminalView {
     /// The window puts this terminal on screen in the frame it's building.
     pub fn mark_shown(&self) {
         self.shown_in.set(FRAME.load(Ordering::Relaxed));
+    }
+
+    /// Sizes a terminal that isn't on screen as its pane would be (`AppWindow::fit_hidden_tabs`).
+    pub fn fit(&self, cols: u16, rows: u16, cell: Size<Pixels>, scale: f32) {
+        self.grid.borrow_mut().fit(cols, rows, cell, scale);
+    }
+
+    pub fn on_screen_this_frame(&self) -> bool {
+        self.shown_in.get() == FRAME.load(Ordering::Relaxed)
     }
 
     fn send(&self, bytes: &[u8]) {
@@ -557,7 +638,124 @@ impl TerminalView {
         cx.notify();
     }
 
-    fn key_down(&mut self, ev: &KeyDownEvent, _w: &mut Window, cx: &mut Context<Self>) {
+    /// Opens the find bar inside this terminal view. Keeping the input entity
+    /// here means its query and selection survive tab switches independently.
+    pub fn open_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let reopening = !self.search_open;
+        let input = if let Some(input) = self.search_input.clone() {
+            input
+        } else {
+            let input = cx.new(|cx| InputState::new(window, cx).placeholder("Find in terminal"));
+            cx.subscribe(&input, |this, input, event: &InputEvent, cx| match event {
+                InputEvent::Change => {
+                    this.search_query = input.read(cx).value().to_string();
+                    this.pending_search_nav = None;
+                    this.grid.borrow_mut().vt.set_search_needle(&this.search_query);
+                    this.ensure_search_task(cx);
+                    cx.notify();
+                }
+                InputEvent::PressEnter { shift, .. } => this.queue_search_navigation(*shift, cx),
+                InputEvent::Focus => this.search_keys = true,
+                _ => {}
+            })
+            .detach();
+            self.search_input = Some(input.clone());
+            input
+        };
+        // Re-applied on every open, so a theme change while the bar was closed
+        // doesn't leave the field with the old colors.
+        input.update(cx, |state, _| state.set_editor_style(find_input_style()));
+
+        self.search_open = true;
+        self.search_keys = true;
+        self.search_query = input.read(cx).value().to_string();
+        self.grid.borrow_mut().vt.start_search(&self.search_query);
+        self.focus_search_input(window, cx);
+        if reopening && !self.search_query.is_empty() {
+            if let Some(input) = &self.search_input {
+                input.update(cx, |state, cx| state.select_all(window, cx));
+            }
+        }
+        self.ensure_search_task(cx);
+        cx.notify();
+    }
+
+    fn focus_search_input(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(input) = &self.search_input {
+            input.update(cx, |state, cx| state.focus(window, cx));
+        }
+    }
+
+    fn close_search(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.search_open = false;
+        self.pending_search_nav = None;
+        self.search_task.take();
+        self.grid.borrow_mut().vt.clear_search();
+        self.focus.focus(window, cx);
+        cx.notify();
+    }
+
+    fn queue_search_navigation(&mut self, previous: bool, cx: &mut Context<Self>) {
+        if !self.search_open || self.search_query.is_empty() {
+            return;
+        }
+        if self.grid.borrow().vt.search_progress().complete {
+            self.pending_search_nav = None;
+            if self.grid.borrow_mut().vt.search_navigate(previous) {
+                cx.notify();
+            }
+        } else {
+            self.pending_search_nav = Some(previous);
+            self.ensure_search_task(cx);
+        }
+    }
+
+    fn ensure_search_task(&mut self, cx: &mut Context<Self>) {
+        if !self.search_open || self.search_query.is_empty() || self.search_task.is_some() {
+            return;
+        }
+        self.search_task = Some(cx.spawn(async move |this, cx| loop {
+            let delay = this.update(cx, |this, cx| {
+                if !this.search_open {
+                    return None;
+                }
+                if this.shown_in.get() != FRAME.load(Ordering::Relaxed) {
+                    return Some(Duration::from_millis(250));
+                }
+                if this.search_query.is_empty() {
+                    return Some(Duration::from_millis(200));
+                }
+
+                let mut grid = this.grid.borrow_mut();
+                let mut changed = grid.vt.progress_search();
+                if grid.vt.search_progress().complete
+                    && let Some(previous) = this.pending_search_nav.take()
+                {
+                    changed |= grid.vt.search_navigate(previous);
+                }
+                let busy = !grid.vt.search_progress().complete || this.pending_search_nav.is_some();
+                drop(grid);
+                if changed {
+                    cx.notify();
+                }
+                Some(if busy { Duration::from_millis(33) } else { Duration::from_millis(200) })
+            }).unwrap_or(None);
+            let Some(delay) = delay else { break };
+            cx.background_executor().timer(delay).await;
+        }));
+    }
+
+    fn key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
+        if self.find_field_focused(window, cx) && ev.keystroke.key == "escape" {
+            self.close_search(window, cx);
+            cx.stop_propagation();
+            return;
+        }
+        if self.find_field_focused(window, cx) {
+            // The input entity owns text editing and Enter navigation; never
+            // leak its keystrokes into the shell running in this terminal.
+            return;
+        }
         let k = &ev.keystroke;
         // Typing clears a selection, as in Herdr.
         if !k.key.starts_with("shift") && !k.key.starts_with("control") && !k.key.starts_with("alt") {
@@ -598,6 +796,19 @@ impl TerminalView {
             }
         } else {
             g.vt.scroll_viewport(if up { -(n as isize) } else { n as isize });
+        }
+        cx.notify();
+    }
+
+    pub fn scroll_history(&mut self, target: ScrollTarget, cx: &mut Context<Self>) {
+        let mut g = self.grid.borrow_mut();
+        let rows = g.vt.rows;
+
+        match target {
+            ScrollTarget::Lines(lines) => g.vt.scroll_viewport(lines),
+            ScrollTarget::Pages(pages) => g.vt.scroll_viewport(pages_to_lines(pages, rows)),
+            ScrollTarget::Top => g.vt.scroll_to_top(),
+            ScrollTarget::Bottom => g.vt.scroll_to_bottom(),
         }
         cx.notify();
     }
@@ -723,10 +934,93 @@ impl TerminalView {
     }
 }
 
+#[derive(Debug, PartialEq)]
+pub enum ScrollTarget {
+    Lines(isize),
+    Pages(f64),
+    Top,
+    Bottom,
+}
+
+pub fn scroll_target(args: &Value) -> Result<ScrollTarget, String> {
+    let given: Vec<&str> = ["lines", "pages", "to"].into_iter().filter(|key| is_given(args, key)).collect();
+    match given.as_slice() {
+        [] => Err("terminal.scroll needs one of lines, pages, to".into()),
+        ["lines"] => whole_lines_arg(args).map(ScrollTarget::Lines),
+        ["pages"] => pages_arg(args).map(ScrollTarget::Pages),
+        ["to"] => edge_arg(args),
+        _ => Err(format!("terminal.scroll takes one of lines, pages, to, not {}", given.join(" and "))),
+    }
+}
+
+fn is_given(args: &Value, key: &str) -> bool {
+    args.get(key).is_some_and(|value| !value.is_null())
+}
+
+fn whole_lines_arg(args: &Value) -> Result<isize, String> {
+    let value = &args["lines"];
+    value.as_i64().and_then(|lines| isize::try_from(lines).ok()).ok_or_else(|| format!("terminal.scroll lines is not a whole number: {value}"))
+}
+
+fn pages_arg(args: &Value) -> Result<f64, String> {
+    let value = &args["pages"];
+    value.as_f64().filter(|pages| pages.is_finite()).ok_or_else(|| format!("terminal.scroll pages is not a finite number: {value}"))
+}
+
+fn edge_arg(args: &Value) -> Result<ScrollTarget, String> {
+    let value = &args["to"];
+    match value.as_str() {
+        Some("top") => Ok(ScrollTarget::Top),
+        Some("bottom") => Ok(ScrollTarget::Bottom),
+        _ => Err(format!("terminal.scroll to is \"top\" or \"bottom\", not {value}")),
+    }
+}
+
+fn pages_to_lines(pages: f64, rows: u16) -> isize {
+    (pages * f64::from(rows)).round() as isize
+}
+
 fn selection_scroll_lines(y: f32, cell_height: f32, rows: u16) -> isize {
     let height = cell_height * rows as f32;
     let outside = if y < 0.0 { y } else if y >= height { y - height + 1.0 } else { return 0 };
     (outside / cell_height).abs().ceil().clamp(1.0, 5.0) as isize * if outside < 0.0 { -1 } else { 1 }
+}
+
+/// A scroll thumb's top and length in px inside a `track` px lane: the
+/// scrollable area is `total` rows, the `len`-row viewport sits `offset` rows
+/// from its top. None when nothing scrolls; `min` keeps a huge scrollback
+/// grabbable. The proportions are Herdr's scrollbar's.
+fn scrollbar_thumb(total: u64, offset: u64, len: u64, track: f32, min: f32) -> Option<(f32, f32)> {
+    if total <= len || len == 0 || track <= 0.0 {
+        return None;
+    }
+    let thumb = (track * len as f32 / total as f32).clamp(min.min(track), track);
+    let travel = track - thumb;
+    let top = if travel <= 0.0 { 0.0 } else { offset.min(total - len) as f32 / (total - len) as f32 * travel };
+    Some((top, thumb))
+}
+
+// Use existing padding when possible, otherwise overlay the last few pixels.
+// Scrollback appearing must not resize the terminal or reflow its output.
+fn scrollbar_lane(bounds: Bounds<Pixels>, origin: Point<Pixels>, text_width: Pixels, height: Pixels) -> Bounds<Pixels> {
+    let edge = bounds.origin.x + bounds.size.width;
+    let left = (origin.x + text_width).min(edge - px(8.0)).max(bounds.origin.x);
+    Bounds::new(point(left, origin.y), size(edge - left, height))
+}
+
+fn scrollbar_grab_at(top: f32, len: f32, y: f32) -> f32 {
+    if y >= top && y < top + len { y - top } else { len / 2.0 }
+}
+
+/// The scroll position a thumb dragged to `top` px lands on, as a row offset
+/// from the scrollback's top (`Vt::scroll_to_row`'s).
+fn scrollbar_row_at(total: u64, len: u64, track: f32, min: f32, top: f32) -> usize {
+    let Some((_, thumb)) = scrollbar_thumb(total, 0, len, track, min) else { return 0 };
+    let travel = track - thumb;
+    if travel <= 0.0 {
+        return 0;
+    }
+    (top.clamp(0.0, travel) / travel * (total - len) as f32).round() as usize
 }
 
 /// A title as it's shown: an agent's spinner in front of it (`\u{2733} Fix the
@@ -1106,6 +1400,22 @@ pub fn cell_size(window: &Window) -> Size<Pixels> {
     size(w, px((f32::from(h) * 1.15 * scale).ceil() / scale))
 }
 
+// Force-width shaping moves glyph origins, but does not resize fallback glyphs.
+fn fallback_size(c: &vt::Cell, font: &Font, width: Pixels, ts: &gpui::WindowTextSystem) -> Option<Pixels> {
+    if c.wide || c.text.is_ascii() {
+        return None;
+    }
+    let first = c.text.chars().next()?;
+    let size = px(crate::settings::font_size());
+    let primary = ts.resolve_font(font);
+    if ts.advance(primary, size, first).is_ok() {
+        return None;
+    }
+    let run = TextRun { len: c.text.len(), font: font.clone(), ..Default::default() };
+    let line = ts.shape_line(c.text.clone().into(), size, &[run], None);
+    (line.width() > width).then(|| size * f32::from(width) / f32::from(line.width()))
+}
+
 /// One piece of a row's drawing, in cells from the row's start.
 enum RowOp {
     Bg { from: usize, to: usize, color: Hsla },
@@ -1170,9 +1480,10 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
             ops.push(RowOp::Icon { x: start, offset: point(px(left), px(baseline)), font, glyph: GlyphId(icon.id), size, color });
             continue;
         }
+        let fitted_size = fallback_size(c, &text_font, cell.width, window.text_system());
         let mut text = if c.text.is_empty() { " ".to_owned() } else { c.text.clone() };
         // Shape the cursor cell separately, so its plain glyph doesn't cover a ligature.
-        if !c.wide && cursor != Some(start) {
+        if !c.wide && fitted_size.is_none() && cursor != Some(start) {
             while x < row.len() {
                 let d = &row[x];
                 let same = !d.wide
@@ -1184,7 +1495,7 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
                     && d.underline == c.underline
                     && d.strike == c.strike;
                 // Bundled fallback icons are fitted separately from the text run.
-                if !same || cursor == Some(x) || (d.text.is_empty() && !d.underline && !d.strike) || crate::sprites::is_sprite(&d.text) || fallback_icon(&d.text, &text_font, window.text_system()).is_some() {
+                if !same || cursor == Some(x) || (d.text.is_empty() && !d.underline && !d.strike) || crate::sprites::is_sprite(&d.text) || fallback_icon(&d.text, &text_font, window.text_system()).is_some() || fallback_size(d, &text_font, cell.width, window.text_system()).is_some() {
                     break;
                 }
                 text.push_str(if d.text.is_empty() { " " } else { &d.text });
@@ -1206,10 +1517,23 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
             strikethrough: c.strike.then(|| StrikethroughStyle { thickness: px(1.0), color: Some(color) }),
         };
         let force = (!c.wide).then_some(cell.width);
-        let line = window.text_system().shape_line(text.into(), px(crate::settings::font_size()), &[run], force);
+        let line = window.text_system().shape_line(text.into(), fitted_size.unwrap_or_else(|| px(crate::settings::font_size())), &[run], force);
         ops.push(RowOp::Text { x: start, line });
     }
     ops
+}
+
+/// The find field's editor colors, following the theme at open time.
+fn find_input_style() -> InputEditorStyle {
+    InputEditorStyle {
+        foreground: crate::settings::color("foreground"),
+        muted_foreground: crate::settings::color("muted"),
+        background: crate::settings::color("input"),
+        border: crate::settings::color("border"),
+        selection: crate::settings::color("selection"),
+        caret: crate::settings::color("foreground"),
+        ..InputEditorStyle::default()
+    }
 }
 
 fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, window: &mut Window, cx: &mut App) {
@@ -1288,27 +1612,49 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     painted.truncate(frame.rows.len());
     for (y, row) in frame.rows.iter().enumerate() {
         let column = cursor.filter(|(_, cy)| *cy as usize == y).map(|(x, _)| x as usize);
-        let fresh;
-        let ops = if frame.all {
-            fresh = row_ops(row, cell, column, window);
-            &fresh
-        } else {
-            if painted.get(y).is_none_or(|(r, _, c)| !Rc::ptr_eq(r, row) || *c != column) {
-                let ops = row_ops(row, cell, column, window);
-                if y < painted.len() {
-                    painted[y] = (row.clone(), ops, column);
-                } else {
-                    painted.push((row.clone(), ops, column));
-                }
+        if frame.all || painted.get(y).is_none_or(|(r, _, c)| !Rc::ptr_eq(r, row) || *c != column) {
+            let ops = row_ops(row, cell, column, window);
+            if y < painted.len() {
+                painted[y] = (row.clone(), ops, column);
+            } else {
+                painted.push((row.clone(), ops, column));
             }
-            &painted[y].1
-        };
+        }
+    }
+
+    // Paint all program backgrounds first, then search overlays, then text.
+    // This lets a match highlight sit below glyphs without contaminating
+    // cached RowOps or the terminal's own selection/copy state.
+    for (y, (_, ops, _)) in painted.iter().enumerate() {
         for op in ops {
             match op {
                 RowOp::Bg { from, to, color } => {
                     let b = Bounds::new(at(*from, y), size(cell.width * (to - from) as f32, cell.height));
                     window.paint_quad(fill(snap_box(b), *color));
                 }
+                _ => {}
+            }
+        }
+    }
+    for selected in [false, true] {
+        for span in frame.search_spans.iter().filter(|span| span.selected == selected) {
+            let y = span.row as usize;
+            let Some(row) = frame.rows.get(y) else { continue };
+            let start = span.start as usize;
+            let end = (span.end as usize + 1).min(row.len());
+            if start >= end {
+                continue;
+            }
+            let opacity = if selected { 0.55 } else { 0.28 };
+            let highlight = crate::settings::color("accent").opacity(opacity);
+            let b = Bounds::new(at(start, y), size(cell.width * (end - start) as f32, cell.height));
+            window.paint_quad(fill(snap_box(b), highlight));
+        }
+    }
+    for (y, (_, ops, _)) in painted.iter().enumerate() {
+        for op in ops {
+            match op {
+                RowOp::Bg { .. } => {}
                 RowOp::Sprite { x, text, color } => crate::sprites::paint(text, Bounds::new(at(*x, y), cell), *color, window),
                 RowOp::Icon { x, offset, font, glyph, size, color } => {
                     let _ = window.paint_glyph(at(*x, y) + *offset, *font, *glyph, *size, *color);
@@ -1382,7 +1728,31 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
         window.paint_quad(fill(snap_box(Bounds::new(p, size(line.width, cell.height))), hsla(frame.bg)));
         let _ = line.paint(p, cell.height, TextAlign::Left, None, window, cx);
     }
-    grid.borrow_mut().cursor_at = frame.cursor_cell.map(|(x, y)| Bounds::new(at(x as usize, y as usize), cell));
+    {
+        let mut g = grid.borrow_mut();
+        g.cursor_at = frame.cursor_cell.map(|(x, y)| Bounds::new(at(x as usize, y as usize), cell));
+        // As in Herdr, hide on the alternate screen and below five columns.
+        g.thumb = None;
+        g.track = None;
+        let sb = g.vt.scrollbar();
+        let track = f32::from(cell.height) * f32::from(g.vt.rows);
+        if crate::settings::get().pane_scrollbars
+            && !g.vt.alt_screen()
+            && g.vt.cols > 4
+            && let Some((top, len)) = scrollbar_thumb(sb.total, sb.offset, sb.len, track, f32::from(cell.height))
+        {
+            let lane = scrollbar_lane(bounds, origin, cell.width * f32::from(g.vt.cols), px(track));
+            let w = px(4.0);
+            let x = lane.origin.x + lane.size.width - w - px(2.0);
+            let color = crate::settings::color("muted");
+            let rail = Bounds::new(point(x + w / 2.0 - px(0.5), origin.y), size(px(1.0), px(track)));
+            window.paint_quad(fill(snap_box(rail), color.opacity(0.35)));
+            let thumb = Bounds::new(point(x, origin.y + px(top)), size(w, px(len)));
+            window.paint_quad(fill(snap_box(thumb), color).corner_radii(w / 2.0));
+            g.thumb = Some(Bounds::new(point(lane.origin.x, thumb.origin.y), size(lane.size.width, thumb.size.height)));
+            g.track = Some(lane);
+        }
+    }
 }
 
 /// OS text input (AltGr, Pinyin, Japanese, Korean, dead keys) types here.
@@ -1411,9 +1781,14 @@ impl EntityInputHandler for TerminalView {
         cx.notify();
     }
 
-    fn replace_text_in_range(&mut self, _range: Option<std::ops::Range<usize>>, text: &str, _w: &mut Window, cx: &mut Context<Self>) {
+    fn replace_text_in_range(&mut self, _range: Option<std::ops::Range<usize>>, text: &str, window: &mut Window, cx: &mut Context<Self>) {
         self.grid.borrow_mut().marked = None;
-        self.send(text.as_bytes());
+        // While the find field holds the keys, the input-method path must not
+        // be a way around that (see `key_down`); with the terminal focused,
+        // input methods type into the program as usual.
+        if !self.find_field_focused(window, cx) {
+            self.send(text.as_bytes());
+        }
         cx.notify();
     }
 
@@ -1422,9 +1797,14 @@ impl EntityInputHandler for TerminalView {
         _range: Option<std::ops::Range<usize>>,
         text: &str,
         _selected: Option<std::ops::Range<usize>>,
-        _w: &mut Window,
+        window: &mut Window,
         cx: &mut Context<Self>,
     ) {
+        // Composition previews stay out of the terminal too while the find
+        // field holds the keys; with the terminal focused they show as usual.
+        if self.find_field_focused(window, cx) {
+            return;
+        }
         self.grid.borrow_mut().marked = (!text.is_empty()).then(|| text.to_owned());
         cx.notify();
     }
@@ -1443,7 +1823,16 @@ impl EntityInputHandler for TerminalView {
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::bench::count(&crate::bench::TERMINAL);
-        let focused = self.focus.is_focused(window);
+        let terminal_focused = self.focus.is_focused(window);
+        if terminal_focused {
+            self.search_keys = false;
+        }
+        let search_focused = self.find_field_focused(window, cx);
+        // The find input is part of this terminal's interaction, not a loss of
+        // attention to the terminal itself. Keep core focus/cursor state, while
+        // only installing the terminal's IME handler when its own focus handle
+        // owns keyboard input.
+        let focused = terminal_focused || search_focused;
         if focused != self.was_focused {
             self.was_focused = focused;
             let g = self.grid.borrow();
@@ -1462,6 +1851,20 @@ impl Render for TerminalView {
         let selection_view = cx.entity().downgrade();
         let (input_focus, input_view) = (self.focus.clone(), cx.entity());
         let ended = self.ended.clone().or_else(|| self.lost.then(|| "reconnecting to core…".to_owned()));
+        let search_input = self.search_open.then(|| self.search_input.clone()).flatten();
+        let search_progress = self.grid.borrow().vt.search_progress();
+        let search_label = if self.search_query.is_empty() {
+            String::new()
+        } else if !search_progress.complete {
+            if search_progress.total == 0 { "Searching…".to_owned() } else { format!("{}+", search_progress.total) }
+        } else if search_progress.total == 0 {
+            "No matches".to_owned()
+        } else if let Some(selected) = search_progress.selected {
+            format!("{} / {}", selected + 1, search_progress.total)
+        } else {
+            format!("{} matches", search_progress.total)
+        };
+        let address = self.address.clone();
 
         div()
             .id(SharedString::from(format!("term-{}", self.address)))
@@ -1471,9 +1874,22 @@ impl Render for TerminalView {
             .relative()
             // Below 1, the layout's background shows through (cells a program colors stay solid).
             .bg(hsla(vt::theme().bg).opacity(crate::settings::get().terminal_opacity))
-            .on_action(cx.listener(|this, a: &gpui_shell::action::ShellAction, _, cx| {
+            .on_action(cx.listener(|this, a: &gpui_shell::action::ShellAction, window, cx| {
+                if this.find_field_focused(window, cx) {
+                    let action: Option<Box<dyn gpui::Action>> = match a.id() {
+                        "terminal.copy" => Some(Box::new(gpui_base::input::Copy)),
+                        "terminal.paste" => Some(Box::new(gpui_base::input::Paste)),
+                        _ => None,
+                    };
+                    if let Some(action) = action {
+                        window.dispatch_action(action, cx);
+                        cx.stop_propagation();
+                        return;
+                    }
+                }
                 // `send:<text>` bindings from keys.json type into this terminal.
                 match a.id().strip_prefix("send:") {
+                    Some(_) if this.find_field_focused(window, cx) => cx.stop_propagation(),
                     Some(text) => this.send(text.as_bytes()),
                     None => cx.propagate(),
                 }
@@ -1501,6 +1917,24 @@ impl Render for TerminalView {
                     }
                     return;
                 }
+                let mut g = this.grid.borrow_mut();
+                if let (Some(track), Some(thumb)) = (g.track, g.thumb)
+                    && track.contains(&ev.position)
+                {
+                    let grab = scrollbar_grab_at(f32::from(thumb.origin.y), f32::from(thumb.size.height), f32::from(ev.position.y));
+                    this.scrollbar_grab = Some(grab);
+                    if !thumb.contains(&ev.position) {
+                        let sb = g.vt.scrollbar();
+                        let top = f32::from(ev.position.y - track.origin.y) - grab;
+                        let min = f32::from(g.cell.height);
+                        g.vt.scroll_to_row(scrollbar_row_at(sb.total, sb.len, f32::from(track.size.height), min, top));
+                    }
+                    drop(g);
+                    cx.notify();
+                    cx.stop_propagation();
+                    return;
+                }
+                drop(g);
                 if !this.mouse(GHOSTTY_MOUSE_ACTION_PRESS, Some(ev.button), ev.position, ev.modifiers) {
                     this.start_selection(ev.position, cx);
                 }
@@ -1533,23 +1967,8 @@ impl Render for TerminalView {
             .child(
                 canvas(
                     move |bounds, window, _cx| {
-                        let mut g = grid.borrow_mut();
-                        g.cell = cell;
-                        g.scale = window.scale_factor();
-                        let dev = device_cell(cell, g.scale);
-                        // Before the size, so a program woken by it asks for the new cell.
-                        g.refresh_theme(&vt::theme(), dev);
                         let (cols, rows) = grid_size(bounds.size, cell);
-                        if (cols, rows) != (g.vt.cols, g.vt.rows) || dev != g.vt_cell {
-                            g.vt.resize(cols, rows, dev.0, dev.1);
-                            g.vt_cell = dev;
-                            if let Some(chan) = g.channel {
-                                g.core.resize(chan, cols, rows);
-                                // Mode 2048 programs wait for this report, not SIGWINCH.
-                                let replies = g.vt.take_replies();
-                                g.core.automatic_input(chan, &replies);
-                            }
-                        }
+                        grid.borrow_mut().fit(cols, rows, cell, window.scale_factor());
                     },
                     move |bounds, _, window, cx| {
                         paint_grid(bounds, &grid_paint, focused, window, cx);
@@ -1557,6 +1976,20 @@ impl Render for TerminalView {
                         window.on_mouse_event(move |ev: &MouseMoveEvent, phase, _, cx| {
                             if phase == DispatchPhase::Capture {
                                 let _ = view.update(cx, |this, cx| {
+                                    if this.scrollbar_grab.is_some() {
+                                        if ev.pressed_button != Some(MouseButton::Left) {
+                                            this.scrollbar_grab = None;
+                                            return;
+                                        }
+                                        let mut g = this.grid.borrow_mut();
+                                        let sb = g.vt.scrollbar();
+                                        let (track, min) = (f32::from(g.cell.height) * f32::from(g.vt.rows), f32::from(g.cell.height));
+                                        let top = f32::from(ev.position.y - g.origin.y) - this.scrollbar_grab.unwrap_or(0.0);
+                                        g.vt.scroll_to_row(scrollbar_row_at(sb.total, sb.len, track, min, top));
+                                        drop(g);
+                                        cx.notify();
+                                        return;
+                                    }
                                     if !this.selecting && ev.pressed_button.is_some() && !this.grid.borrow().buttons_down.is_empty() {
                                         this.mouse(GHOSTTY_MOUSE_ACTION_MOTION, ev.pressed_button, ev.position, ev.modifiers);
                                     }
@@ -1575,6 +2008,13 @@ impl Render for TerminalView {
                         window.on_mouse_event(move |ev: &MouseUpEvent, phase, _, cx| {
                             if phase == DispatchPhase::Capture {
                                 let _ = selection_view.update(cx, |this, cx| {
+                                    if this.scrollbar_grab.is_some() {
+                                        if ev.button == MouseButton::Left {
+                                            this.scrollbar_grab = None;
+                                            cx.stop_propagation();
+                                        }
+                                        return;
+                                    }
                                     if (!this.selecting || ev.button != MouseButton::Left) && this.grid.borrow().buttons_down.contains(&ev.button) {
                                         this.mouse(GHOSTTY_MOUSE_ACTION_RELEASE, Some(ev.button), ev.position, ev.modifiers);
                                     }
@@ -1588,13 +2028,88 @@ impl Render for TerminalView {
                         });
                         // While focused, the OS input methods (Pinyin, Japanese,
                         // dead keys) type into this terminal.
-                        if focused {
+                        if terminal_focused {
                             window.handle_input(&input_focus, ElementInputHandler::new(bounds, input_view), cx);
                         }
                     },
                 )
                 .size_full(),
             )
+            .when_some(search_input, |d, input| {
+                d.child(
+                    div()
+                        .flex()
+                        .id(SharedString::from(format!("find-bar-{address}")))
+                        .debug_selector(|| "find-bar".to_owned())
+                        .absolute()
+                        .top_2()
+                        .right_2()
+                        .w_full()
+                        .max_w(px(460.0))
+                        .h(px(38.0))
+                        .gap_1()
+                        .items_center()
+                        .px_1()
+                        .rounded_md()
+                        .border_1()
+                        .border_color(crate::settings::color("border"))
+                        .bg(crate::settings::color("popover"))
+                        .shadow_md()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(div().flex_1().min_w(px(48.0)).h_full().child(Input::new(&input)))
+                        .child(div().w(px(58.0)).text_xs().text_color(crate::settings::color("muted")).child(search_label))
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("find-next-{address}")))
+                                .debug_selector(|| "find-up".to_owned())
+                                .w(px(26.0))
+                                .h(px(26.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_sm()
+                                .hover(|d| d.bg(crate::settings::color("hover")))
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.queue_search_navigation(false, cx);
+                                    this.focus_search_input(window, cx);
+                                }))
+                                .child("↑"),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("find-prev-{address}")))
+                                .debug_selector(|| "find-down".to_owned())
+                                .w(px(26.0))
+                                .h(px(26.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_sm()
+                                .hover(|d| d.bg(crate::settings::color("hover")))
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _, window, cx| {
+                                    this.queue_search_navigation(true, cx);
+                                    this.focus_search_input(window, cx);
+                                }))
+                                .child("↓"),
+                        )
+                        .child(
+                            div()
+                                .id(SharedString::from(format!("find-close-{address}")))
+                                .w(px(26.0))
+                                .h(px(26.0))
+                                .flex()
+                                .items_center()
+                                .justify_center()
+                                .rounded_sm()
+                                .hover(|d| d.bg(crate::settings::color("hover")))
+                                .cursor_pointer()
+                                .on_click(cx.listener(|this, _, window, cx| this.close_search(window, cx)))
+                                .child("×"),
+                        ),
+                )
+            })
             .when_some(ended, |d, why| {
                 d.child(
                     div()
@@ -1621,6 +2136,9 @@ impl Focusable for TerminalView {
 
 #[cfg(test)]
 mod tests {
+    use super::{ScrollTarget, pages_to_lines, scroll_target};
+    use serde_json::{Value, json};
+
     #[gpui::test]
     fn terminal_release_ends_window_text_selection(cx: &mut gpui::TestAppContext) {
         use gpui::*;
@@ -1665,6 +2183,453 @@ mod tests {
             cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
             assert!(!root.read_with(cx, |root, cx| root.text.read(cx).selected_text()).is_empty());
         }
+    }
+
+    #[gpui::test]
+    fn each_terminal_keeps_its_find_bar_inside_its_own_pane(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        struct Root {
+            first: Entity<super::TerminalView>,
+            second: Entity<super::TerminalView>,
+        }
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().flex().size_full()
+                    .child(div().w(px(320.0)).h(px(150.0)).child(self.first.clone()))
+                    .child(div().w(px(320.0)).h(px(150.0)).child(self.second.clone()))
+            }
+        }
+
+        cx.update(gpui_base::init);
+        let (root, cx) = cx.add_window_view(|_, cx| Root {
+            first: cx.new(|cx| {
+                let terminal = super::TerminalView::attach(crate::hc::offline(), "t1".into(), (32, 6), cx);
+                terminal.grid.borrow_mut().vt.write(b"alpha result");
+                terminal
+            }),
+            second: cx.new(|cx| {
+                let terminal = super::TerminalView::attach(crate::hc::offline(), "t2".into(), (32, 6), cx);
+                terminal.grid.borrow_mut().vt.write(b"beta result");
+                terminal
+            }),
+        });
+        cx.run_until_parked();
+
+        cx.update(|window, app| {
+            root.update(app, |root, app| {
+                root.first.update(app, |terminal, cx| terminal.open_search(window, cx));
+            });
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("a l p h a");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("find-bar").is_some());
+        root.read_with(cx, |root, cx| {
+            assert!(root.first.read(cx).search_open);
+            assert!(!root.second.read(cx).search_open);
+            assert_eq!(root.first.read(cx).search_query, "alpha");
+        });
+
+        cx.update(|window, app| {
+            root.update(app, |root, app| {
+                root.second.update(app, |terminal, cx| terminal.open_search(window, cx));
+            });
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("b e t a");
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("find-bar").is_some());
+        root.read_with(cx, |root, cx| {
+            assert!(root.first.read(cx).search_open);
+            assert!(root.second.read(cx).search_open);
+            assert_eq!(root.first.read(cx).search_query, "alpha");
+            assert_eq!(root.second.read(cx).search_query, "beta");
+        });
+    }
+
+    #[gpui::test]
+    fn find_input_does_not_type_into_terminal_and_escape_closes_it(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        struct Root(Entity<super::TerminalView>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(self.0.clone())
+            }
+        }
+
+        cx.update(gpui_base::init);
+        let (root, cx) = cx.add_window_view(|_, cx| Root(cx.new(|cx| {
+            let terminal = super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 6), cx);
+            terminal.grid.borrow_mut().vt.write(b"needle appears here");
+            terminal
+        })));
+        cx.run_until_parked();
+
+        cx.update(|window, app| {
+            root.update(app, |root, app| {
+                root.0.update(app, |terminal, cx| terminal.open_search(window, cx));
+            });
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("n e e d l e enter");
+        cx.run_until_parked();
+        root.read_with(cx, |root, cx| {
+            let terminal = root.0.read(cx);
+            assert_eq!(terminal.search_query, "needle");
+            let frame = terminal.grid.borrow_mut().vt.frame();
+            let text: String = frame.rows[0].iter().map(|cell| cell.text.as_str()).collect();
+            assert!(text.starts_with("needle appears here"), "search input leaked into the shell: {text:?}");
+        });
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        root.read_with(cx, |root, cx| assert!(!root.0.read(cx).search_open));
+    }
+
+    #[gpui::test]
+    fn reconnect_keeps_find_searching_the_new_terminal(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        cx.update(gpui_base::init);
+        let terminal = cx.new(|cx| super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 6), cx));
+        let (_, cx) = cx.add_window_view(|_, _| gpui::Empty);
+        cx.update(|window, app| terminal.update(app, |terminal, cx| {
+            terminal.open_search(window, cx);
+            terminal.search_query = "needle".into();
+            terminal.reattach(crate::hc::offline(), cx);
+            let mut grid = terminal.grid.borrow_mut();
+            grid.vt.write(b"replayed needle\r\n");
+            for _ in 0..1000 {
+                grid.vt.progress_search();
+                if grid.vt.search_progress().complete { break; }
+            }
+            assert!(grid.vt.search_progress().complete);
+            assert_eq!(grid.vt.search_progress().total, 1);
+            assert_eq!(grid.vt.frame().search_spans.len(), 1);
+            grid.vt.set_search_needle("replayed");
+            for _ in 0..1000 {
+                grid.vt.progress_search();
+                if grid.vt.search_progress().complete { break; }
+            }
+            assert_eq!(grid.vt.search_progress().total, 1, "query edits must keep working after reconnect");
+        }));
+    }
+
+    #[gpui::test]
+    fn shipped_clipboard_aliases_edit_find_without_terminal_input(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        struct Root(Entity<super::TerminalView>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                div().key_context("Herdr").size_full()
+                    .on_action(cx.listener(|this, action: &gpui_shell::action::ShellAction, _, cx| {
+                        match action.id() {
+                            "terminal.paste" => this.0.update(cx, |terminal, cx| terminal.paste(cx)),
+                            "terminal.copy" => { this.0.update(cx, |terminal, cx| terminal.copy(cx)); }
+                            _ => cx.propagate(),
+                        }
+                    }))
+                    .child(self.0.clone())
+            }
+        }
+
+        cx.update(gpui_base::init);
+        let bindings = crate::keys::parse(crate::keys::DEFAULTS).expect("shipped keys parse");
+        cx.update(|app| crate::keys::install(bindings, app));
+        let (root, cx) = cx.add_window_view(|_, cx| {
+            Root(cx.new(|cx| super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 6), cx)))
+        });
+        cx.run_until_parked();
+        let aliases: &[(&str, &str)] = if cfg!(target_os = "macos") {
+            &[("cmd-v", "cmd-c")]
+        } else {
+            &[("ctrl-shift-v", "ctrl-shift-c"), ("shift-insert", "ctrl-insert")]
+        };
+        for &(paste, copy) in aliases {
+            cx.update(|window, app| {
+                root.update(app, |root, app| {
+                    root.0.update(app, |terminal, cx| terminal.open_search(window, cx));
+                });
+                app.write_to_clipboard(ClipboardItem::new_string("needle".into()));
+            });
+            cx.run_until_parked();
+            cx.simulate_keystrokes(paste);
+            cx.run_until_parked();
+            root.read_with(cx, |root, cx| {
+                let terminal = root.0.read(cx);
+                assert_eq!(terminal.search_query, "needle", "{paste}");
+                assert!(terminal.typed_at.get().is_none(), "{paste} sent terminal input");
+            });
+            cx.simulate_keystrokes(if cfg!(target_os = "macos") { "cmd-a" } else { "ctrl-a" });
+            cx.update(|_, app| app.write_to_clipboard(ClipboardItem::new_string("unchanged".into())));
+            cx.simulate_keystrokes(copy);
+            cx.run_until_parked();
+            cx.update(|_, app| assert_eq!(app.read_from_clipboard().unwrap().text().as_deref(), Some("needle"), "{copy}"));
+            root.read_with(cx, |root, cx| assert!(root.0.read(cx).typed_at.get().is_none(), "{copy} sent terminal input"));
+        }
+    }
+
+    #[gpui::test]
+    fn reopening_the_find_bar_selects_the_kept_query(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        struct Root(Entity<super::TerminalView>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(self.0.clone())
+            }
+        }
+
+        cx.update(gpui_base::init);
+        let (root, cx) = cx.add_window_view(|_, cx| Root(cx.new(|cx| {
+            let terminal = super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 6), cx);
+            terminal.grid.borrow_mut().vt.write(b"needle appears here");
+            terminal
+        })));
+        cx.run_until_parked();
+
+        cx.update(|window, app| {
+            root.update(app, |root, app| {
+                root.0.update(app, |terminal, cx| terminal.open_search(window, cx));
+            });
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("n e e d l e");
+        cx.run_until_parked();
+        root.read_with(cx, |root, cx| assert_eq!(root.0.read(cx).search_query, "needle"));
+
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        root.read_with(cx, |root, cx| assert!(!root.0.read(cx).search_open));
+
+        // The kept query comes back selected, so typing replaces it instead
+        // of appending to the stale needle.
+        cx.update(|window, app| {
+            root.update(app, |root, app| {
+                root.0.update(app, |terminal, cx| terminal.open_search(window, cx));
+            });
+        });
+        cx.run_until_parked();
+        root.read_with(cx, |root, cx| {
+            let terminal = root.0.read(cx);
+            assert!(terminal.search_open);
+            assert_eq!(terminal.search_query, "needle");
+            let input = terminal.search_input.as_ref().unwrap().read(cx);
+            assert_eq!(input.selected_range(), 0.."needle".len());
+        });
+        cx.simulate_keystrokes("x y z");
+        cx.run_until_parked();
+        root.read_with(cx, |root, cx| assert_eq!(root.0.read(cx).search_query, "xyz"));
+    }
+
+    #[gpui::test]
+    fn find_bar_chevrons_step_older_up_and_newer_down(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        struct Root(Entity<super::TerminalView>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(self.0.clone())
+            }
+        }
+
+        cx.update(gpui_base::init);
+        let (root, cx) = cx.add_window_view(|_, cx| Root(cx.new(|cx| {
+            let terminal = super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 5), cx);
+            terminal.grid.borrow_mut().vt.write(b"old alpha\r\nbetween\r\nnew alpha");
+            terminal
+        })));
+        cx.run_until_parked();
+
+        cx.update(|window, app| {
+            root.update(app, |root, app| {
+                root.0.update(app, |terminal, cx| terminal.open_search(window, cx));
+            });
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("a l p h a");
+        cx.run_until_parked();
+
+        let click = |cx: &mut gpui::VisualTestContext, selector: &'static str| {
+            let at = cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is laid out")).center();
+            cx.simulate_mouse_move(at, None, Modifiers::default());
+            cx.simulate_mouse_down(at, MouseButton::Left, Modifiers::default());
+            cx.simulate_mouse_up(at, MouseButton::Left, Modifiers::default());
+            cx.run_until_parked();
+        };
+        let selected_row = |cx: &mut gpui::VisualTestContext| {
+            root.read_with(cx, |root, cx| {
+                root.0.read(cx).grid.borrow_mut().vt.frame()
+                    .search_spans.iter()
+                    .filter(|span| span.selected)
+                    .map(|span| span.row)
+                    .collect::<Vec<_>>()
+            })
+        };
+
+        click(cx, "find-up");
+        assert_eq!(selected_row(cx), vec![2], "the newest match, at the bottom, is selected first");
+        click(cx, "find-up");
+        assert_eq!(selected_row(cx), vec![0], "the second press up is the older match");
+        click(cx, "find-down");
+        assert_eq!(selected_row(cx), vec![2]);
+    }
+
+    #[gpui::test]
+    fn input_methods_follow_keyboard_focus_while_the_find_bar_is_open(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        struct Root(Entity<super::TerminalView>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(self.0.clone())
+            }
+        }
+
+        cx.update(gpui_base::init);
+        let (root, cx) = cx.add_window_view(|_, cx| Root(cx.new(|cx| {
+            super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 6), cx)
+        })));
+        cx.run_until_parked();
+
+        cx.update(|window, app| {
+            root.update(app, |root, app| {
+                root.0.update(app, |terminal, cx| {
+                    terminal.open_search(window, cx);
+                    gpui::EntityInputHandler::replace_text_in_range(terminal, None, "leak", window, cx);
+                    gpui::EntityInputHandler::replace_and_mark_text_in_range(terminal, None, "leak", None, window, cx);
+                });
+            });
+        });
+        root.read_with(cx, |root, cx| {
+            let terminal = root.0.read(cx);
+            assert!(terminal.typed_at.get().is_none(), "text reached the program while the find field held the keys");
+            assert!(terminal.grid.borrow().marked.is_none(), "composition previewed while the find field held the keys");
+        });
+
+        // The terminal canvas was clicked: the terminal root (not the find
+        // field) owns keyboard focus, so text input methods reach the program
+        // while the bar stays open.
+        cx.update(|window, app| {
+            root.update(app, |root, app| {
+                root.0.update(app, |terminal, cx| {
+                    terminal.focus.focus(window, cx);
+                    gpui::EntityInputHandler::replace_text_in_range(terminal, None, "typed", window, cx);
+                });
+            });
+        });
+        root.read_with(cx, |root, cx| {
+            let terminal = root.0.read(cx);
+            assert!(terminal.search_open);
+            assert!(terminal.typed_at.get().is_some(), "text did not reach the program once the terminal held the keys");
+        });
+    }
+
+    #[gpui::test]
+    fn typing_reaches_the_program_while_the_find_bar_is_open(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        struct Root(Entity<super::TerminalView>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(self.0.clone())
+            }
+        }
+
+        cx.update(gpui_base::init);
+        let (root, cx) = cx.add_window_view(|_, cx| Root(cx.new(|cx| {
+            super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 6), cx)
+        })));
+        cx.run_until_parked();
+
+        cx.update(|window, app| {
+            root.update(app, |root, app| {
+                root.0.update(app, |terminal, cx| terminal.open_search(window, cx));
+            });
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("l s");
+        cx.run_until_parked();
+        root.read_with(cx, |root, cx| {
+            let terminal = root.0.read(cx);
+            assert_eq!(terminal.search_query, "ls");
+            assert!(terminal.typed_at.get().is_none(), "keystrokes reached the program while the find field held the keys");
+        });
+
+        cx.update(|window, app| {
+            root.update(app, |root, app| {
+                root.0.update(app, |terminal, cx| terminal.focus.focus(window, cx));
+            });
+        });
+        cx.run_until_parked();
+        cx.simulate_keystrokes("l s");
+        cx.run_until_parked();
+        root.read_with(cx, |root, cx| {
+            let terminal = root.0.read(cx);
+            assert!(terminal.search_open);
+            assert!(terminal.typed_at.get().is_some(), "keystrokes did not reach the program once the terminal held the keys");
+        });
+
+        cx.update(|_, app| root.update(app, |root, app| {
+            root.0.update(app, |terminal, _| terminal.typed_at.set(None));
+        }));
+        cx.simulate_keystrokes("escape");
+        cx.run_until_parked();
+        root.read_with(cx, |root, cx| {
+            let terminal = root.0.read(cx);
+            assert!(terminal.search_open, "terminal Escape must not close Find");
+            assert!(terminal.typed_at.get().is_some(), "Escape must reach the program");
+        });
+    }
+
+    #[gpui::test]
+    fn shipped_find_binding_opens_search_but_ctrl_f_reaches_the_program(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        struct Root(Entity<super::TerminalView>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .key_context("Herdr")
+                    .size_full()
+                    .on_action(cx.listener(|this, action: &gpui_shell::action::ShellAction, window, cx| {
+                        if action.id() == "terminal.search" {
+                            this.0.update(cx, |terminal, cx| terminal.open_search(window, cx));
+                        } else {
+                            cx.propagate();
+                        }
+                    }))
+                    .child(self.0.clone())
+            }
+        }
+
+        cx.update(gpui_base::init);
+        let bindings = crate::keys::parse(crate::keys::DEFAULTS).expect("shipped keys parse");
+        cx.update(|app| crate::keys::install(bindings, app));
+        let (root, cx) = cx.add_window_view(|_, cx| {
+            Root(cx.new(|cx| super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 6), cx)))
+        });
+        cx.run_until_parked();
+        cx.update(|window, app| {
+            root.update(app, |root, app| {
+                root.0.update(app, |terminal, cx| terminal.focus.focus(window, cx));
+            });
+        });
+
+        cx.simulate_keystrokes("ctrl-f");
+        cx.run_until_parked();
+        root.read_with(cx, |root, cx| {
+            let terminal = root.0.read(cx);
+            assert!(!terminal.search_open);
+            assert!(terminal.typed_at.get().is_some(), "Ctrl+F must reach the program");
+        });
+        cx.simulate_keystrokes(if cfg!(target_os = "macos") { "cmd-f" } else { "ctrl-shift-f" });
+        cx.run_until_parked();
+        root.read_with(cx, |root, cx| assert!(root.0.read(cx).search_open));
+        assert!(cx.debug_bounds("find-bar").is_some());
     }
 
     #[test]
@@ -1741,6 +2706,90 @@ mod tests {
                 assert_ne!(variants[0], variants[1], "{text}: ligatures must change the glyphs");
             }
         }
+        crate::settings::set((*original).clone());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fallback_symbols_fit_their_terminal_cells_pixels() {
+        use super::*;
+        use std::borrow::Cow;
+
+        struct Symbols;
+        impl Render for Symbols {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().bg(rgb(0x000000)).child(canvas(
+                    |_, _, _| {},
+                    |_, _, window, cx| {
+                        let cell = cell_size(window);
+                        for (y, text) in ["🕹", "🖥", "🌡", "🕹\u{fe0f}", "🖥\u{fe0f}", "🌡\u{fe0f}", "M"].iter().enumerate() {
+                            let wide = text.contains('\u{fe0f}');
+                            let mut row = vec![vt::Cell { text: text.to_string(), wide, fg: vt::Rgb(255, 0, 0), ..Default::default() }];
+                            if wide { row.push(vt::Cell::default()); }
+                            row.push(vt::Cell { text: "a".into(), fg: vt::Rgb(255, 255, 255), ..Default::default() });
+                            for op in row_ops(&row, cell, None, window) {
+                                if let RowOp::Text { x, line } = op {
+                                    line.paint(point(px(4.) + cell.width * x as f32, cell.height * y as f32), cell.height, TextAlign::Left, None, window, cx).unwrap();
+                                }
+                            }
+                        }
+                    },
+                ).size_full())
+            }
+        }
+
+        let platform = Arc::new(gpui_wgpu::CosmicTextSystem::new_without_system_fonts(crate::settings::DEFAULT_FONT));
+        let system = TextSystem::new(platform.clone());
+        system.add_fonts(vec![
+            Cow::Borrowed(include_bytes!("../assets/fonts/JetBrainsMono-Variable.ttf")),
+            Cow::Borrowed(include_bytes!("../vendor/ghostty/src/font/res/NotoEmoji-Regular.ttf")),
+        ]).unwrap();
+        let mut cx = HeadlessAppContext::with_platform(platform, Arc::new(()), gpui_platform::current_headless_renderer);
+        let original = crate::settings::get();
+        let mut settings = (*original).clone();
+        settings.font_family = crate::settings::DEFAULT_FONT.into();
+        settings.font_size = 24.;
+        crate::settings::set(settings);
+        let window = cx.open_window(size(px(120.), px(280.)), |_, cx| cx.new(|_| Symbols)).unwrap();
+        cx.update_window(window.into(), |_, window, cx| {
+            let _ = window.draw(cx);
+            let image = window.render_to_image().unwrap();
+            let row: Vec<_> = ["a", "🕹", "a", "🖥", "a", "🌡", "a"].into_iter()
+                .map(|text| vt::Cell { text: text.into(), ..Default::default() }).collect();
+            let ops = row_ops(&row, cell_size(window), None, window);
+            let text: Vec<_> = ops.iter().filter_map(|op| match op {
+                RowOp::Text { x, line } => Some((*x, line.font_size)),
+                _ => None,
+            }).collect();
+            assert_eq!(text.len(), 7, "oversized fallback must break a same-style run");
+            for (x, size) in text {
+                if x % 2 == 0 { assert_eq!(size, px(24.)); }
+                else { assert!(size < px(24.)); }
+            }
+            for text in ["🕹\u{fe0f}", "🖥\u{fe0f}", "🌡\u{fe0f}"] {
+                let row = [vt::Cell { text: text.into(), wide: true, ..Default::default() }];
+                for op in row_ops(&row, cell_size(window), None, window) {
+                    if let RowOp::Text { line, .. } = op { assert_eq!(line.font_size, px(24.)); }
+                }
+            }
+            if let Ok(path) = std::env::var("HERDR_SYMBOL_PIXELS") { image.save(path).unwrap(); }
+            let scale = window.scale_factor();
+            let cell = cell_size(window);
+            for (y, slots) in [1, 1, 1, 2, 2, 2, 1].into_iter().enumerate() {
+                let mut inside = 0;
+                let mut outside = 0;
+                for (x, py, pixel) in image.enumerate_pixels() {
+                    let logical_y = py as f32 / scale;
+                    if logical_y < f32::from(cell.height) * y as f32 || logical_y >= f32::from(cell.height) * (y + 1) as f32 { continue; }
+                    if pixel[0] > 80 && pixel[1] < 20 && pixel[2] < 20 {
+                        if x as f32 / scale < 4. + f32::from(cell.width) * slots as f32 { inside += 1; } else { outside += 1; }
+                    }
+                }
+                println!("symbol row {y}: inside={inside}, overflow={outside}");
+                assert!(inside > 10, "fixture must draw row {y}");
+                assert_eq!(outside, 0, "row {y} glyph must fit its {slots} cell(s)");
+            }
+        }).unwrap();
         crate::settings::set((*original).clone());
     }
 
@@ -2026,6 +3075,60 @@ mod tests {
         assert_eq!(steps(-0.1), -3);
         assert_eq!(steps(1.5), 4, "a fast spin's tick, its half line dropped");
         assert_eq!(steps(0.0), 0);
+    }
+
+    #[test]
+    fn the_scroll_thumb_maps_the_viewport_into_its_track() {
+        use super::scrollbar_thumb as thumb;
+        // No scrollback: no thumb.
+        assert_eq!(thumb(40, 0, 40, 100.0, 4.0), None);
+        // Half the scrollable area visible: a half-height thumb at the top.
+        assert_eq!(thumb(80, 0, 40, 100.0, 4.0), Some((0.0, 50.0)));
+        // At the bottom it reaches the track's end.
+        assert_eq!(thumb(80, 40, 40, 100.0, 4.0), Some((50.0, 50.0)));
+        // A huge scrollback still leaves a grabbable thumb.
+        assert_eq!(thumb(10_000, 0, 40, 100.0, 4.0), Some((0.0, 4.0)));
+    }
+
+    #[test]
+    fn scrollbar_lane_survives_zero_and_small_padding_without_resizing() {
+        use gpui::{point, px, size, Bounds};
+        let bounds = Bounds::new(point(px(20.0), px(30.0)), size(px(400.0), px(200.0)));
+        for padding in [0.0, 1.0, 2.0, 14.0] {
+            for remainder in [0.0, 0.5, 7.0] {
+                let origin = bounds.origin + point(px(padding), px(padding));
+                let width = px(400.0 - padding * 2.0 - remainder);
+                let lane = super::scrollbar_lane(bounds, origin, width, px(160.0));
+                assert!(lane.size.width >= px(8.0));
+                assert_eq!(lane.origin.x + lane.size.width, px(420.0));
+                assert_eq!(lane.origin.y, origin.y);
+                assert_eq!(lane.size.height, px(160.0));
+            }
+        }
+    }
+
+    #[test]
+    fn track_click_centers_the_thumb_and_preserves_a_thumb_grab() {
+        use super::{scrollbar_grab_at as grab, scrollbar_row_at as row_at, scrollbar_thumb as thumb};
+        let (top, len) = thumb(1000, 800, 40, 100.0, 4.0).unwrap();
+        assert_eq!(grab(top, len, top + 1.0), 1.0);
+        let offset = grab(top, len, 50.0);
+        assert_eq!(offset, len / 2.0);
+        assert_eq!(row_at(1000, 40, 100.0, 4.0, 50.0 - offset), 480);
+        assert_eq!(row_at(1000, 40, 100.0, 4.0, -offset), 0);
+        assert_eq!(row_at(1000, 40, 100.0, 4.0, 100.0 - offset), 960);
+    }
+
+    #[test]
+    fn a_scroll_thumb_drag_round_trips_to_a_row() {
+        use super::{scrollbar_row_at as row_at, scrollbar_thumb as thumb};
+        let (track, min) = (100.0, 4.0);
+        // The track's ends are the scrollback's ends.
+        assert_eq!(row_at(80, 40, track, min, 0.0), 0);
+        assert_eq!(row_at(80, 40, track, min, track), 40);
+        // A thumb's painted top reads back as its own offset.
+        let (top, _) = thumb(80, 25, 40, track, min).unwrap();
+        assert_eq!(row_at(80, 40, track, min, top), 25);
     }
 
     #[test]
@@ -2414,5 +3517,42 @@ mod tests {
         assert_eq!(super::display_update(&mut told, &theme, (17, 43)).unwrap()["cell"], serde_json::json!([17, 43]));
         theme.selection_bg = Rgb(7, 8, 9);
         assert!(super::display_update(&mut told, &theme, (17, 43)).is_none(), "local selection colors are not core display facts");
+    }
+
+    #[test]
+    fn scroll_takes_exactly_one_of_lines_pages_or_to() {
+        assert_eq!(scroll_target(&json!({ "lines": -5 })), Ok(ScrollTarget::Lines(-5)));
+        assert_eq!(scroll_target(&json!({ "pages": -0.5 })), Ok(ScrollTarget::Pages(-0.5)));
+        assert_eq!(scroll_target(&json!({ "to": "top" })), Ok(ScrollTarget::Top));
+        assert_eq!(scroll_target(&json!({ "to": "bottom", "terminal": "t1" })), Ok(ScrollTarget::Bottom));
+        assert_eq!(scroll_target(&json!({ "lines": null, "to": "top" })), Ok(ScrollTarget::Top), "null is omitted");
+    }
+
+    #[test]
+    fn scroll_names_missing_and_repeated_targets() {
+        let needs_one = "terminal.scroll needs one of lines, pages, to";
+        assert_eq!(scroll_target(&json!({})), Err(needs_one.into()));
+        assert_eq!(scroll_target(&json!({ "terminal": "t1", "lines": null })), Err(needs_one.into()));
+        assert_eq!(scroll_target(&json!({ "lines": 1, "to": "top" })), Err("terminal.scroll takes one of lines, pages, to, not lines and to".into()));
+        assert_eq!(scroll_target(&json!({ "lines": 1, "pages": 1, "to": "top" })), Err("terminal.scroll takes one of lines, pages, to, not lines and pages and to".into()));
+    }
+
+    #[test]
+    fn scroll_rejects_values_the_target_does_not_take() {
+        let error = |args: Value| scroll_target(&args).unwrap_err();
+        assert_eq!(error(json!({ "lines": 1.5 })), "terminal.scroll lines is not a whole number: 1.5");
+        assert_eq!(error(json!({ "lines": "5" })), "terminal.scroll lines is not a whole number: \"5\"");
+        assert_eq!(error(json!({ "pages": "half" })), "terminal.scroll pages is not a finite number: \"half\"");
+        assert_eq!(error(json!({ "to": "middle" })), "terminal.scroll to is \"top\" or \"bottom\", not \"middle\"");
+        assert_eq!(error(json!({ "to": 5 })), "terminal.scroll to is \"top\" or \"bottom\", not 5");
+    }
+
+    #[test]
+    fn pages_become_whole_lines_of_the_terminals_rows() {
+        assert_eq!(pages_to_lines(1.0, 24), 24);
+        assert_eq!(pages_to_lines(-1.0, 24), -24);
+        assert_eq!(pages_to_lines(-0.5, 24), -12);
+        assert_eq!(pages_to_lines(-0.5, 25), -13, "half of an odd row count rounds away from zero");
+        assert_eq!(pages_to_lines(0.02, 24), 0);
     }
 }
