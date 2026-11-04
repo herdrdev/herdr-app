@@ -64,13 +64,20 @@ struct Folder {
     _watcher: std::sync::mpsc::Sender<()>,
     waiters: Vec<async_channel::Sender<Vec<String>>>,
     pending: HashSet<String>,
+    /// When a mod last asked for its changes or was handed them.
+    used: std::time::Instant,
 }
 
 static FOLDERS: OnceLock<std::sync::Mutex<std::collections::HashMap<PathBuf, Folder>>> = OnceLock::new();
 /// Changes are batched this long (an editor's save is several events).
 const BATCH: std::time::Duration = std::time::Duration::from_millis(150);
-/// At most this many folders watched for mods at once.
+/// A quiet folder's thread sleeps this long between checks that it's still watched.
+const IDLE: std::time::Duration = std::time::Duration::from_secs(30);
+/// At most this many folders watched for mods at once; a new one replaces the least wanted.
 const MAX_FOLDERS: usize = 64;
+/// A folder used this recently stays: its mod may be between batches, and more live
+/// watches than fit fail, as before, instead of taking turns replacing each other.
+const KEEP: std::time::Duration = std::time::Duration::from_secs(60);
 const MAX_PENDING: usize = 1024;
 #[cfg(target_os = "linux")]
 const MAX_DIRECTORIES: usize = 4096;
@@ -91,12 +98,21 @@ pub async fn next_change(path: String) -> Result<Vec<String>, String> {
     let rx = {
         let mut all = folders();
         if !all.contains_key(&root) {
-            if all.len() >= MAX_FOLDERS {
-                return Err(format!("already watching {MAX_FOLDERS} folders"));
+            let now = std::time::Instant::now();
+            let old = if all.len() < MAX_FOLDERS {
+                None
+            } else {
+                Some(least_wanted(&all, now).ok_or_else(|| format!("already watching {MAX_FOLDERS} folders"))?)
+            };
+            let watcher = start_folder(&root)?;
+            if let Some(old) = old {
+                // Its waits end with "stopped watching", and mods fall back to their timers.
+                all.remove(&old);
             }
-            all.insert(root.clone(), Folder { _watcher: start_folder(&root)?, waiters: Vec::new(), pending: HashSet::new() });
+            all.insert(root.clone(), Folder { _watcher: watcher, waiters: Vec::new(), pending: HashSet::new(), used: now });
         }
         let f = all.get_mut(&root).unwrap();
+        f.used = std::time::Instant::now();
         if !f.pending.is_empty() {
             return Ok(f.pending.drain().collect());
         }
@@ -106,6 +122,15 @@ pub async fn next_change(path: String) -> Result<Vec<String>, String> {
         rx
     };
     rx.recv().await.map_err(|_| "stopped watching".to_owned())
+}
+
+/// The folder to give up for a new one: unused for at least `KEEP`, preferring one
+/// nobody waits on, then the one used longest ago.
+fn least_wanted(all: &std::collections::HashMap<PathBuf, Folder>, now: std::time::Instant) -> Option<PathBuf> {
+    all.iter()
+        .filter(|(_, f)| now.duration_since(f.used) >= KEEP)
+        .min_by_key(|(_, f)| (f.waiters.iter().any(|w| !w.is_closed()), f.used))
+        .map(|(path, _)| path.clone())
 }
 
 #[cfg(target_os = "linux")]
@@ -246,22 +271,24 @@ fn start_folder(root: &Path) -> Result<std::sync::mpsc::Sender<()>, String> {
             if matches!(stopped.try_recv(), Err(std::sync::mpsc::TryRecvError::Disconnected)) {
                 break;
             }
-            let deadline = std::time::Instant::now() + BATCH;
+            // A quiet folder sleeps until its next event, which opens the batch.
+            let mut deadline: Option<std::time::Instant> = None;
             let mut pending = HashSet::new();
             let mut refresh = false;
             let mut removed = HashSet::new();
-            while let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) {
-                match events.recv_timeout(left) {
-                    Ok(Ok(event)) => {
+            while let Some(wait) = deadline.map_or(Some(IDLE), |at| at.checked_duration_since(std::time::Instant::now())) {
+                let Ok(event) = events.recv_timeout(wait) else { break };
+                deadline.get_or_insert_with(|| std::time::Instant::now() + BATCH);
+                match event {
+                    Ok(event) => {
                         refresh |= collect_event(event, &root, &directories, &mut pending, &mut removed);
                     }
-                    Ok(Err(_)) => {
+                    Err(_) => {
                         removed.extend(directories.iter().cloned());
                         refresh = true;
                         pending.clear();
                         pending.insert(root.to_string_lossy().into_owned());
                     }
-                    Err(_) => break,
                 }
             }
             if overflow.swap(false, std::sync::atomic::Ordering::Relaxed) {
@@ -324,6 +351,7 @@ fn deliver_pending(root: &Path, pending: HashSet<String>) -> bool {
         for w in f.waiters.drain(..) {
             let _ = w.try_send(batch.clone());
         }
+        f.used = std::time::Instant::now();
     }
     true
 }
@@ -375,6 +403,31 @@ mod tests {
         assert_eq!(pending.len(), 1);
         add_pending(&mut pending, root, (0..MAX_PENDING * 10).map(|i| root.join(i.to_string())));
         assert_eq!(pending, HashSet::from(["/project".to_owned()]));
+    }
+
+    #[test]
+    fn a_folder_past_the_cap_replaces_one_unused_for_a_while_preferring_one_nobody_waits_on() {
+        let now = std::time::Instant::now();
+        let (waiting, _receiver) = async_channel::bounded(1);
+        let abandoned = async_channel::bounded(1).0;
+        let folder = |secs, waiters: Vec<async_channel::Sender<Vec<String>>>| Folder {
+            _watcher: std::sync::mpsc::channel().0,
+            waiters,
+            pending: HashSet::new(),
+            used: now - std::time::Duration::from_secs(secs),
+        };
+        let mut all = std::collections::HashMap::from([
+            (PathBuf::from("/left-long-ago"), folder(600, vec![waiting.clone()])),
+            (PathBuf::from("/closed-mod"), folder(120, vec![abandoned])),
+            // Just handed a batch: its mod hasn't asked again yet.
+            (PathBuf::from("/between-batches"), folder(0, Vec::new())),
+            (PathBuf::from("/shown"), folder(1, vec![waiting])),
+        ]);
+        assert_eq!(least_wanted(&all, now), Some(PathBuf::from("/closed-mod")));
+        all.remove(Path::new("/closed-mod"));
+        assert_eq!(least_wanted(&all, now), Some(PathBuf::from("/left-long-ago")));
+        all.remove(Path::new("/left-long-ago"));
+        assert_eq!(least_wanted(&all, now), None, "folders used just now are in use");
     }
 
     fn test_repo(name: &str) -> PathBuf {
