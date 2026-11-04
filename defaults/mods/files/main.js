@@ -1,7 +1,7 @@
 // A lazy file browser for the focused pane's folder, with bounded read-only previews.
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState } from "gpui-base";
-import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings, window } from "herdr";
+import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings, window, openOverlay, closeOverlay, props, notify } from "herdr";
 
 function location() {
   const space = spaces().find(s => s.active), f = focused();
@@ -38,10 +38,57 @@ async function directory(path, on) {
   return out;
 }
 
+// The system file manager's name, for menu labels. On another machine it is
+// whoever answers there, so the generic name.
+function manager(on) {
+  const here = !on && window()?.platform;
+  return here === "macos" ? "Finder" : here === "windows" ? "File Explorer" : "File Manager";
+}
+
+// Opens `abs` in the system file manager: the folder itself when `dir`, else
+// the item selected in its folder. `on` opens it on that machine.
+async function showInManager(abs, dir, on) {
+  const here = !on && window()?.platform, win = abs.replace(/\//g, "\\");
+  const explorer = () => exec("explorer", dir ? [win] : [`/select,${win}`], { on }); // exits 1 even when it opened
+  let cmd = "explorer", r;
+  if (here === "macos") { cmd = "open"; r = await exec("open", dir ? [abs] : ["-R", abs], { on }); }
+  else if (here === "windows") r = await explorer();
+  else {
+    cmd = "xdg-open";
+    // The file manager service selects the item; without it, open its folder.
+    const script = dir ? 'xdg-open "$1"'
+      : 'dbus-send --print-reply --dest=org.freedesktop.FileManager1 /org/freedesktop/FileManager1 org.freedesktop.FileManager1.ShowItems array:string:"$2" "" >/dev/null 2>&1 || xdg-open "$(dirname -- "$1")"';
+    r = await exec("sh", ["-c", script, "files", abs, `file://${abs.split("/").map(encodeURIComponent).join("/")}`], { on }).catch(async e => {
+      if (!on || !String(e).includes("cannot start sh: program not found")) throw e;
+      cmd = "explorer";
+      return explorer();
+    });
+  }
+  if (cmd !== "explorer" && r.code !== 0) throw new Error(r.stderr?.trim() || "The file manager did not open");
+}
+
+// Copies text to this machine's clipboard (the panel may browse another machine's files).
+async function copyText(text) {
+  const here = window()?.platform;
+  if (here === "windows") {
+    // PowerShell reads curly single quotes as quotes too, so they're doubled like '.
+    const r = await exec("powershell", ["-NoProfile", "-Command", "Set-Clipboard -Value '" + text.replace(/['‘’‚‛]/g, "$&$&") + "'"]);
+    if (r.code !== 0) throw new Error(r.stderr?.trim() || "The clipboard is unavailable");
+    return;
+  }
+  // Wayland and X11 clipboards have different programs; try each in turn.
+  const script = here === "macos" ? 'printf %s "$1" | pbcopy'
+    : 'printf %s "$1" | wl-copy 2>/dev/null && exit\nprintf %s "$1" | xclip -selection clipboard -rmlastnl 2>/dev/null && exit\nprintf %s "$1" | xsel --clipboard --input 2>/dev/null';
+  const r = await exec("sh", ["-c", script, "copy", text]);
+  if (r.code !== 0) throw new Error("No clipboard program found; install wl-copy or xclip");
+}
+
 export default class Files extends View {
   init(_props, cx) {
     this.saved = new Map();
     this.entries = new Map(); this.folders = new Set(); this.pending = new Set(); this.marks = {};
+    // A copy opened as the context-menu popup draws only the menu.
+    if (props()?.menu) { this.menuAt = 0; this.handle = cx.focus_handle(); this.handle.focus(); return; }
     this.refresh(cx);
     cx.timer.every(10000, cx => this.refresh(cx));
   }
@@ -154,6 +201,7 @@ export default class Files extends View {
       const path = prefix ? `${prefix}/${entry.name}` : entry.name, open = this.folders.has(path), mark = this.marks[`${this.root}/${path}`];
       out.push(h_flex().id(`file-${path}`).h(28).flex_none().pl(8 + depth * 18).pr(8).gap(7).items_center().rounded(7).cursor_pointer().hover(s => s.bg(t.hover))
         .on_click((_e, cx) => entry.dir ? this.toggle(path, cx) : this.show(path, cx))
+        .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); openOverlay({ mod: "files", kind: "popup", width: 200, props: { menu: { dir: entry.dir, path, abs: `${this.root}/${path}`, on: this.on } } }); })
         .child(entry.dir ? svg(`mods/files/chevron-${open ? "down" : "right"}.svg`).size(12).flex_none().text_color(t.dim) : div().w(12).flex_none())
         .child(svg(`mods/files/${entry.dir ? "folder" : "file"}.svg`).size(14).flex_none().text_color(t.muted))
         .child(div().flex_1().min_w(0).truncate().child(entry.name))
@@ -163,7 +211,50 @@ export default class Files extends View {
     return out;
   }
 
+  // The context menu's items, in groups separated by a null: the system file
+  // manager first, then the clipboard. Acts run without a cx, so they keep
+  // going once the popup has closed.
+  menuItems(m) {
+    const items = [];
+    if (m.dir) items.push({ label: `Open in ${manager(m.on)}`, icon: "mods/files/folder.svg", act: () => showInManager(m.abs, true, m.on) });
+    items.push({ label: `Reveal in ${manager(m.on)}`, icon: "mods/workspace-chrome/search.svg", act: () => showInManager(m.abs, false, m.on) });
+    items.push(null);
+    items.push({ label: "Copy Path", icon: "mods/files/copy.svg", act: () => copyText(m.abs) });
+    items.push({ label: "Copy Relative Path", icon: "mods/files/copy.svg", act: () => copyText(m.path) });
+    return items;
+  }
+
+  choose(item) {
+    if (!item) return;
+    item.act().catch(e => notify({ title: "Files", body: String(e), level: "error" }));
+    closeOverlay(props().overlay);
+  }
+
+  menuRender(cx) {
+    const t = theme(), items = this.menuItems(props().menu), acts = items.filter(Boolean);
+    let next = 0;
+    const rows = items.map(it => (it ? Object.assign(it, { at: next++ }) : null));
+    return v_flex().id("files-menu").track_focus(this.handle).w_full().min_h(0).p(5).bg(t.popover).text_size(12.8)
+      .on_key_down((e, cx) => {
+        if (e.key === "down") this.menuAt = (this.menuAt + 1) % acts.length;
+        else if (e.key === "up") this.menuAt = (this.menuAt + acts.length - 1) % acts.length;
+        else if (e.key === "enter") this.choose(acts[this.menuAt]);
+        else if (e.key === "escape") closeOverlay(props().overlay);
+        else return;
+        cx.notify();
+      })
+      .children(rows.map(r => (r
+        ? h_flex().id(`fm-${r.at}`).h(31).px(8).gap(9).rounded(7).items_center().text_color(t.foreground)
+          .when(this.menuAt === r.at, el => el.bg(t.selected))
+          .hover(s => s.bg(t.hover))
+          .on_click(() => this.choose(r))
+          .child(svg(r.icon).size(14).flex_none().text_color(t.muted))
+          .child(div().flex_1().child(r.label))
+        : div().mx(7).my(4).h(1).bg(t.border))));
+  }
+
   render(cx) {
+    if (props()?.menu) return this.menuRender(cx);
     if (key() !== this.context?.key) this.refresh(cx);
     const t = theme();
     return v_flex().id("files").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
