@@ -277,6 +277,8 @@ struct Term {
 enum TerminalChange {
     Keep { space: String, tab: String, pane: String, name: String, target: Option<String>, axis: Axis },
     Park,
+    /// Reverse a rejected Keep remotely without editing the current layout.
+    UndoKeep,
 }
 
 struct PendingTerminalChange {
@@ -2736,7 +2738,7 @@ impl AppWindow {
             TerminalChange::Keep { space, tab, .. } => (true, json!({
                 "herdr.space":crate::mirror::local(space, machine), "herdr.tab":crate::mirror::local(tab, machine),
             })),
-            TerminalChange::Park => (false, json!({"herdr.space":"","herdr.tab":""})),
+            TerminalChange::Park | TerminalChange::UndoKeep => (false, json!({"herdr.space":"","herdr.tab":""})),
         };
         let (tx, rx) = std::sync::mpsc::channel();
         self.changing_terminals.insert(address.clone());
@@ -2773,13 +2775,13 @@ impl AppWindow {
         match change {
             TerminalChange::Keep { space, tab, pane, name, target, axis } => {
                 if !self.live.contains_key(&address) { return; }
-                if self.model.space(&space).is_none() {
-                    if let Err(error) = self.park_terminal(&address, window, cx) {
-                        tracing::error!("cannot undo pane placement into closed space: {error}");
-                    }
-                    return;
-                }
                 if self.model.pane_of(&address).is_none() {
+                    // A local close may have won the race with the successful Keep reply.
+                    if self.model.space(&space).is_none() || self.model.dismissed_target(&address, &space, Some(&tab)) {
+                        // Undo our remote change even when public Park would reject a dismissed view.
+                        self.start_terminal_change(address, TerminalChange::UndoKeep, window, cx);
+                        return;
+                    }
                     let destination = target.filter(|p| self.model.tab_of(p).is_some_and(|t| t.id == tab))
                         .or_else(|| self.model.tab(&tab).and_then(|t| t.root.panes().first().map(|p| p.id.clone())));
                     if let Some(target) = destination {
@@ -2790,6 +2792,9 @@ impl AppWindow {
                 }
                 if let Some(pane) = self.model.pane_of(&address) { self.model.focus_pane(&pane); }
             }
+            // A sync read may have placed this terminal elsewhere while cleanup ran.
+            // Only explicit Park may remove that placement or publish a layout edit.
+            TerminalChange::UndoKeep => return,
             TerminalChange::Park => {
                 if let Some(pane) = self.model.pane_of(&address) {
                     self.stage_removal(&pane);
@@ -5987,6 +5992,185 @@ mod tests {
                 assert_eq!(&this.chrome, expected);
                 assert_eq!(&saved(this), expected);
             }
+        }));
+    }
+
+    #[test]
+    fn pending_keep_respects_closed_tab() { in_own_process("pending_keep_tab"); }
+
+    #[test]
+    fn pending_keep_rolls_back_closed_space() { in_own_process("pending_keep_space"); }
+
+    #[test]
+    fn pending_keep_drain_preserves_hidden_layout() { in_own_process("pending_keep_drain"); }
+
+    #[test]
+    fn pending_keep_preserves_valid_destinations() { in_own_process("pending_keep_valid"); }
+
+    #[gpui::test]
+    fn pending_keep_tab(cx: &mut gpui::TestAppContext) {
+        if running_alone("pending_keep_tab") { pending_keep_case(cx, "tab"); }
+    }
+
+    #[gpui::test]
+    fn pending_keep_space(cx: &mut gpui::TestAppContext) {
+        if running_alone("pending_keep_space") { pending_keep_case(cx, "space"); }
+    }
+
+    #[gpui::test]
+    fn pending_keep_drain(cx: &mut gpui::TestAppContext) {
+        if running_alone("pending_keep_drain") { pending_keep_case(cx, "drain"); }
+    }
+
+    #[gpui::test]
+    fn pending_keep_valid(cx: &mut gpui::TestAppContext) {
+        if running_alone("pending_keep_valid") {
+            for case in ["restore", "fresh", "visible", "failed", "moved", "removed"] {
+                pending_keep_case(cx, case);
+            }
+        }
+    }
+
+    #[test]
+    fn pending_keep_preserves_adoption_during_rollback() { in_own_process("pending_keep_adopted"); }
+
+    #[gpui::test]
+    fn pending_keep_adopted(cx: &mut gpui::TestAppContext) {
+        if running_alone("pending_keep_adopted") {
+            for case in ["adopted", "adopted-failed", "adopted-drain"] {
+                pending_keep_case(cx, case);
+            }
+        }
+    }
+
+    /// Control the callback order without a remote host or executor timing.
+    fn pending_keep_case(cx: &mut gpui::TestAppContext, case: &str) {
+        use serde_json::json;
+        use crate::{mirror::Document, model::{Model, Tab}};
+        let (view, cx) = open_window(cx, "unused", "", json!({"id":"main","type":"block","content":{"tab":"active"}}));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            let mut source = Model::default();
+            source.add_space("s", "remote", "/tmp", Tab::new("t", "original", "p", "term"));
+            source.split("p", crate::layout::Axis::Row, "pa", "term-a");
+            source.space_mut("s").unwrap().tabs.push(Tab::new("t2", "sibling", "p2", "term2"));
+            let doc = Document::capture(&source, None);
+            this.model = Model::default();
+            doc.replace(&mut this.model, Some("remote"));
+            let slot = this.documents.entry("remote".into()).or_default();
+            slot.document = Some(doc.clone());
+            slot.available = true;
+            slot.connected = true;
+            // Keep document writes controlled too; callbacks below run synchronously.
+            let (document_tx, document_rx) = std::sync::mpsc::channel();
+            slot.pending = Some(document_rx);
+            this.live.insert("remote/new".into(), json!({"name":"newcomer"}));
+            this.model.focus_pane("remote/p");
+            let reply = this.keep_terminal("remote/new", if case == "fresh" { "tab" } else { "right" }, window, cx).unwrap();
+            assert_eq!(reply["pending"], true);
+            let mut pending = this.pending_terminals.remove("remote/new").unwrap();
+            let command = if case == "space" || case == "visible" { "space.close" } else { "tab.close" };
+            if case == "removed" {
+                this.model.remove_tab("remote/t");
+            } else if case == "moved" {
+                this.model.tab_mut("remote/t").unwrap().root.find_mut("remote/p").unwrap().id = "remote/moved".into();
+            } else {
+                assert_eq!(this.run_as(command, json!({"id":if command == "space.close" { "remote/s" } else { "remote/t" },"local":true}), false, window, cx), json!({"ok":true,"local":true}));
+            }
+            // A live snapshot may already contain labels from the successful RPC.
+            this.live.get_mut("remote/new").unwrap()["labels"] = json!({"herdr.space":"s","herdr.tab":reply["tab"].as_str().unwrap().strip_prefix("remote/").unwrap()});
+            if case == "restore" {
+                assert_eq!(this.run_as("tab.select", json!({"id":"remote/t"}), false, window, cx), json!({"ok":true}));
+            }
+            if case == "visible" {
+                // Another screen placed it elsewhere while our Keep was pending.
+                let mut elsewhere = Model::default();
+                elsewhere.add_space("elsewhere", "elsewhere", "/tmp", Tab::new("other", "", "other-pane", "new"));
+                let replacement = Document::capture(&elsewhere, None);
+                this.documents_updated(None, vec![("remote".into(), crate::mirror_sync::Outcome::Read(replacement, 1))], window, cx);
+                assert!(this.model.space("remote/s").is_none());
+            }
+            if case == "drain" {
+                // Feed the accepted Keep result through the real quit-time drain.
+                let (tx, rx) = std::sync::mpsc::channel();
+                tx.send(Ok(())).unwrap();
+                pending.reply = rx;
+                this.pending_terminals.insert("remote/new".into(), pending);
+                this.documents.get_mut("remote").unwrap().pending = None;
+                this.drain_documents(window, cx);
+                assert!(this.pending_terminals.is_empty());
+                assert!(!this.changing_terminals.contains("remote/new"));
+                assert!(this.model.tab("remote/t").is_none(), "drain must not resurrect the dismissed tab");
+                assert_eq!(this.documents["remote"].capture(&this.model, Some("remote")), doc);
+                return;
+            }
+            let result = if case == "failed" { Err("keep failed".into()) } else { Ok(()) };
+            this.apply_terminal_change("remote/new".into(), pending.change, result, window, cx);
+            match case {
+                "tab" | "space" | "adopted" | "adopted-failed" | "adopted-drain" => {
+                    assert!(this.model.tab("remote/t").is_none(), "late Keep must not resurrect the dismissed tab");
+                    assert_eq!(this.documents["remote"].capture(&this.model, Some("remote")), doc, "original split and metadata must remain canonical");
+                    let rollback = this.pending_terminals.remove("remote/new").expect("internal rollback bypasses dismissed-terminal guards");
+                    assert!(matches!(rollback.change, super::TerminalChange::UndoKeep));
+                    assert!(this.changing_terminals.contains("remote/new"));
+                    if case.starts_with("adopted") {
+                        // An authoritative read adopts the terminal while cleanup is pending.
+                        source.split("p2", crate::layout::Axis::Row, "pn", "new");
+                        let adopted = Document::capture(&source, None);
+                        this.documents_updated(None, vec![("remote".into(), crate::mirror_sync::Outcome::Read(adopted.clone(), 2))], window, cx);
+                        assert_eq!(this.model.pane_of("remote/new").as_deref(), Some("remote/pn"));
+                        assert_eq!(this.documents["remote"].capture(&this.model, Some("remote")), adopted);
+                        let result = if case == "adopted-failed" { Err("rollback failed".into()) } else { Ok(()) };
+                        if case == "adopted-drain" {
+                            let (tx, rx) = std::sync::mpsc::channel();
+                            tx.send(result).unwrap();
+                            this.pending_terminals.insert("remote/new".into(), super::PendingTerminalChange { change: rollback.change, reply: rx });
+                            this.documents.get_mut("remote").unwrap().pending = None;
+                            this.drain_documents(window, cx);
+                        } else {
+                            this.apply_terminal_change("remote/new".into(), rollback.change, result, window, cx);
+                        }
+                        assert_eq!(this.model.pane_of("remote/new").as_deref(), Some("remote/pn"), "rollback removed a pane adopted elsewhere");
+                        assert!(this.model.tab("remote/t").is_none(), "dismissed original must remain hidden");
+                        assert_eq!(this.documents["remote"].capture(&this.model, Some("remote")), adopted, "cleanup must preserve the adopted canonical document");
+                        assert!(this.pending_terminals.is_empty());
+                        assert!(!this.changing_terminals.contains("remote/new"));
+                        assert!(this.closing_terminals.is_empty());
+                        drop(document_tx);
+                        this.documents.get_mut("remote").unwrap().pending = None;
+                        return;
+                    }
+                    // Both successful and failed cleanup retain the hidden canonical layout.
+                    let result = if case == "tab" { Ok(()) } else { Err("rollback failed".into()) };
+                    this.apply_terminal_change("remote/new".into(), rollback.change, result, window, cx);
+                    assert!(this.model.tab("remote/t").is_none());
+                    assert_eq!(this.documents["remote"].capture(&this.model, Some("remote")), doc);
+                    assert!(!this.changing_terminals.contains("remote/new"));
+                    assert!(this.closing_terminals.is_empty());
+                    let dismissed = this.model.dismissed.clone();
+                    assert!(!dismissed.is_empty());
+                    this.documents_updated(None, vec![("remote".into(), crate::mirror_sync::Outcome::Written(doc.clone(), 1))], window, cx);
+                    assert_eq!(this.model.dismissed, dismissed, "an acknowledgement must retain the private dismissal");
+                    assert_eq!(this.documents["remote"].capture(&this.model, Some("remote")), doc);
+                }
+                "failed" => {
+                    assert!(this.model.tab("remote/t").is_none());
+                    assert!(this.pending_terminals.is_empty());
+                    assert_eq!(this.documents["remote"].capture(&this.model, Some("remote")), doc);
+                }
+                "visible" => {
+                    assert_eq!(this.model.pane_of("remote/new").as_deref(), Some("remote/other-pane"));
+                    assert!(this.pending_terminals.is_empty(), "old destination disappearance must not park an already-visible terminal");
+                }
+                _ => {
+                    let pane = this.model.pane_of("remote/new").expect("valid placement must complete");
+                    assert_eq!(this.model.tab_of(&pane).unwrap().id, reply["tab"].as_str().unwrap());
+                    assert!(this.pending_terminals.is_empty());
+                    if case == "restore" { assert!(this.model.pane_of("remote/term-a").is_some()); }
+                    if case == "fresh" { assert!(this.model.tab("remote/t").is_none()); }
+                }
+            }
+            drop(document_tx);
+            this.documents.get_mut("remote").unwrap().pending = None;
         }));
     }
 
