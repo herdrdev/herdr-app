@@ -736,7 +736,8 @@ What's about the user, never a look:
 ## Programs: `programs.json`
 
 Every pane, agent and terminal carries `program`: its name, icon and tile,
-from one table, so every mod shows the same. An agent's own report wins;
+from one table, so every mod shows the same, and the app's own toasts
+("Kiro finished") use the same names. An agent's own report wins;
 else the program the terminal runs (an interpreter shows what it runs:
 `node .../vite` is Vite, `npx vitest` is Vitest); shells are `shell`,
 anything unlisted is `program` with a color of its own. The built-in table

@@ -2090,7 +2090,7 @@ impl AppWindow {
         let app = self.model.agents.get(addr).and_then(|a| a.app.clone());
         let name = rec
             .and_then(|r| r.get("name").and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned))
-            .or_else(|| app.as_deref().map(agent_name))
+            .or_else(|| app.as_deref().map(crate::programs::name))
             .unwrap_or_else(|| "An agent".into());
         // A sub-agent lives where its top agent does.
         let home = self.root_agent(addr);
@@ -2550,7 +2550,7 @@ impl AppWindow {
             .unwrap_or_else(|| self.model.fresh_id_on("tb", machine.as_deref()));
         let pane = self.model.fresh_id_on("p", machine.as_deref());
         let name = self.live.get(addr).and_then(|r| r["name"].as_str()).filter(|s| !s.is_empty()).map(str::to_owned)
-            .or_else(|| self.model.agents.get(addr).and_then(|a| a.app.as_deref()).map(agent_name)).unwrap_or_else(|| addr.to_owned());
+            .or_else(|| self.model.agents.get(addr).and_then(|a| a.app.as_deref()).map(crate::programs::name)).unwrap_or_else(|| addr.to_owned());
         let (address, place) = (addr.to_owned(), place.to_owned());
         let reply = json!({"pending":true,"terminal":addr,"pane":pane,"tab":ctx});
         self.start_terminal_change(address, TerminalChange::Keep {
@@ -4429,22 +4429,6 @@ pub(crate) fn cached<V: Render>(view: &Entity<V>) -> AnyElement {
 pub(crate) fn shown_terminal(view: &Entity<TerminalView>, cx: &App) -> AnyElement {
     view.read(cx).mark_shown();
     cached(view)
-}
-
-/// How people call an agent, from its 7501 `app`.
-fn agent_name(app: &str) -> String {
-    match app {
-        "claude" | "claude-code" => "Claude Code".into(),
-        "codex" => "Codex".into(),
-        "pi" => "Pi".into(),
-        "pig" => "PiG".into(),
-        "opencode" => "OpenCode".into(),
-        "cursor" | "cursor-agent" => "Cursor".into(),
-        "amp" => "Amp".into(),
-        "grok" => "Grok".into(),
-        "dsh-tui" => "DeepSeek Harness".into(),
-        other => other.to_owned(),
-    }
 }
 
 fn remember_pane(history: &mut Vec<String>, id: &str) {
