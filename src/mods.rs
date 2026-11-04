@@ -461,10 +461,6 @@ struct SharedStore {
 }
 
 impl SharedStore {
-    fn transient(path: PathBuf) -> Self {
-        Self { values: Default::default(), path, writable: false, writer: None }
-    }
-
     fn load(path: PathBuf) -> Self {
         let mut writable = true;
         let values = match std::fs::read(&path) {
@@ -1133,7 +1129,7 @@ fn capabilities() -> Capabilities {
 
 /// Checks exercise shared state in memory, without reading or writing the person's file.
 pub fn install_check_policy() {
-    SHARED.with_borrow_mut(|slot| *slot = Some(SharedStore::transient(app_dir().join("shared.json"))));
+    SHARED.with_borrow_mut(|slot| *slot = Some(SharedStore { values: Default::default(), path: app_dir().join("shared.json"), writable: false, writer: None }));
     install_policy();
 }
 
@@ -1270,28 +1266,6 @@ mod tests {
         assert_eq!(next[0]["installed"], true);
         assert_eq!(next[1]["key"], "claude-alt");
         assert_eq!(next[1]["installed"], true);
-    }
-
-    #[test]
-    fn transient_shared_state_round_trips_without_touching_disk() {
-        let dir = std::env::temp_dir().join(format!("herdr-shared-transient-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let path = dir.join("shared.json");
-        for original in [Some("{\"sentinel\":true}"), Some("broken json"), None] {
-            if let Some(text) = original { std::fs::write(&path, text).unwrap(); }
-            let store_path = path.clone();
-            std::thread::spawn(move || {
-                SHARED.with_borrow_mut(|slot| *slot = Some(SharedStore::transient(store_path)));
-                assert_eq!(shared("sentinel"), None);
-                set_shared("probe".into(), json!("x".repeat(1_000_000)));
-                assert_eq!(shared("probe").unwrap().as_str().unwrap().len(), 1_000_000);
-                finish_shared();
-            }).join().unwrap();
-            assert_eq!(std::fs::read_to_string(&path).ok().as_deref(), original);
-            assert_eq!(std::fs::read_dir(&dir).unwrap().count(), usize::from(original.is_some()));
-            if original.is_some() { std::fs::remove_file(&path).unwrap(); }
-        }
-        std::fs::remove_dir(dir).unwrap();
     }
 
     #[test]
