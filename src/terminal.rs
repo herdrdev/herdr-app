@@ -593,7 +593,7 @@ impl TerminalView {
     /// Twice a second while input waits: probe the machine when due, and
     /// redraw the waiting time once it looks stalled. False when done.
     fn answering_tick(&mut self, episode: u64, cx: &mut Context<Self>) -> bool {
-        if !self.answering.waiting() || self.answering.episode() != episode {
+        if !self.answering.waiting() || self.answering.settled() || self.answering.episode() != episode {
             return false;
         }
         let now = Instant::now();

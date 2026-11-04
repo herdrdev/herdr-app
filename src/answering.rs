@@ -58,6 +58,11 @@ impl Answering {
     /// Input went out. True when this starts a new unanswered stretch (the
     /// caller then watches it).
     pub fn input(&mut self, now: Instant) -> bool {
+        // The machine answered a probe for the earlier input: this one is
+        // measured on its own (the line may have stalled since).
+        if self.probe == Probe::Answered {
+            self.unanswered = None;
+        }
         match &mut self.unanswered {
             Some((_, sent)) => {
                 *sent += 1;
@@ -91,6 +96,11 @@ impl Answering {
 
     pub fn waiting(&self) -> bool {
         self.unanswered.is_some()
+    }
+
+    /// The machine answered: only the program is quiet, nothing to watch until more input.
+    pub fn settled(&self) -> bool {
+        self.probe == Probe::Answered
     }
 
     /// Whether a scroll may go out now (it is then counted as input).
@@ -240,6 +250,21 @@ mod tests {
         a.probed(ep, true, at(t0, 1050));
         assert!(a.may_scroll(at(t0, 1100)));
         assert!(a.may_scroll(at(t0, 1150)));
+    }
+
+    #[test]
+    fn input_after_a_quiet_answer_is_watched_afresh() {
+        let t0 = Instant::now();
+        let mut a = Answering::default();
+        a.input(t0);
+        let ep = a.probe_due(at(t0, 1000)).unwrap();
+        a.probed(ep, true, at(t0, 1050));
+        assert!(a.settled());
+        assert!(a.input(at(t0, 5000)), "a new stretch, with its own probe");
+        assert!(!a.settled());
+        assert_eq!(a.probe_due(at(t0, 5500)), None);
+        a.probe_due(at(t0, 6000)).unwrap();
+        assert_eq!(a.stall(at(t0, 7000)), Some(Stall { waited: Duration::from_secs(2), sent: 1 }), "timed from the new input, not the old");
     }
 
     #[test]
