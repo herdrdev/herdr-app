@@ -861,7 +861,6 @@ export default class Settings extends View {
       .h(620)
       .min_h(0)
       .items_start()
-      .bg(t.popover)
       .on_key_down((e, cx) => {
         const k = e.key;
         if (this.machineEdit) {
