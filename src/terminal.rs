@@ -87,6 +87,23 @@ struct Grid {
     painted_with: (u32, Size<Pixels>, String, u64, bool),
 }
 
+/// A machine that isn't connected, as `machine.list` says (offline UX).
+#[derive(Clone, Debug, PartialEq)]
+pub struct MachineDown {
+    /// `connecting`, `unreachable`, `needs_login`, `needs_update`.
+    pub state: String,
+    pub why: Option<String>,
+    /// When it went down (ms since the epoch), when the core knows.
+    pub since_ms: Option<u64>,
+}
+
+#[derive(Clone, Debug, PartialEq)]
+enum Reconnect {
+    Idle,
+    Busy,
+    Failed(String),
+}
+
 pub struct TerminalView {
     pub address: String,
     pub title: String,
@@ -123,6 +140,13 @@ pub struct TerminalView {
     search_input: Option<Entity<InputState>>,
     pending_search_nav: Option<bool>,
     search_task: Option<Task<()>>,
+    /// On another machine: whether it answers what is sent (`answering.rs`).
+    answering: crate::answering::Answering,
+    _answering: Option<Task<()>>,
+    machine_down: Option<MachineDown>,
+    /// When this pane first heard its machine was down.
+    down_seen: Option<Instant>,
+    reconnect: Reconnect,
     _reader: Option<Task<()>>,
 }
 
@@ -264,6 +288,11 @@ impl TerminalView {
             search_input: None,
             pending_search_nav: None,
             search_task: None,
+            answering: Default::default(),
+            _answering: None,
+            machine_down: None,
+            down_seen: None,
+            reconnect: Reconnect::Idle,
             _reader: None,
         };
         view.connect(core, false, cx);
@@ -307,6 +336,9 @@ impl TerminalView {
             g.channel = None;
             (cols, rows, facts)
         };
+        // Nothing sent on the old line waits on this one.
+        self.answering.reset();
+        self._answering = None;
         let address = self.address.clone();
         // Replacing the task drops an attach still in flight for an older connection.
         self._reader = Some(cx.spawn(async move |this, cx| {
@@ -437,6 +469,7 @@ impl TerminalView {
             for item in batch {
                 match item {
                     Stream::Data(bytes) => {
+                        self.answering.output();
                         g.vt.allow_clipboard_write(crate::settings::get().clipboard_write);
                         g.vt.write(&bytes);
                         let [clipboard, primary] = g.vt.take_clipboard();
@@ -527,7 +560,7 @@ impl TerminalView {
         self.shown_in.get() == FRAME.load(Ordering::Relaxed)
     }
 
-    fn send(&self, bytes: &[u8]) {
+    fn send(&mut self, bytes: &[u8], cx: &mut Context<Self>) {
         self.typed_at.set(Some(Instant::now()));
         let mut g = self.grid.borrow_mut();
         if let Some(ch) = g.channel
@@ -535,7 +568,107 @@ impl TerminalView {
         {
             g.vt.scroll_to_bottom();
             g.core.input(ch, bytes);
+            drop(g);
+            self.sent_input(cx);
         }
+    }
+
+    /// Input went to a terminal on another machine: watch that it answers.
+    fn sent_input(&mut self, cx: &mut Context<Self>) {
+        if self.machine().is_none() || !self.answering.input(Instant::now()) {
+            return;
+        }
+        let episode = self.answering.episode();
+        self._answering = Some(cx.spawn(async move |this, cx| {
+            loop {
+                cx.background_executor().timer(Duration::from_millis(500)).await;
+                match this.update(cx, |this, cx| this.answering_tick(episode, cx)) {
+                    Ok(true) => {}
+                    _ => break,
+                }
+            }
+        }));
+    }
+
+    /// Twice a second while input waits: probe the machine when due, and
+    /// redraw the waiting time once it looks stalled. False when done.
+    fn answering_tick(&mut self, episode: u64, cx: &mut Context<Self>) -> bool {
+        if !self.answering.waiting() || self.answering.episode() != episode {
+            return false;
+        }
+        let now = Instant::now();
+        if let Some(ep) = self.answering.probe_due(now) {
+            let (core, address) = (self.grid.borrow().core.clone(), self.address.clone());
+            cx.spawn(async move |this, cx| {
+                // One round trip over the same line the keys take; any reply but
+                // "not connected" means the line works.
+                let answered = cx
+                    .background_executor()
+                    .spawn(async move {
+                        match core.call_timeout("terminal.get", serde_json::json!({ "terminal": address }), Duration::from_secs(10)) {
+                            Ok(_) => true,
+                            Err(e) => crate::hc::error_kind(&e).is_some_and(|k| k != "unavailable"),
+                        }
+                    })
+                    .await;
+                let _ = this.update(cx, |this, cx| {
+                    this.answering.probed(ep, answered, Instant::now());
+                    cx.notify();
+                });
+            })
+            .detach();
+        }
+        if self.answering.stall(now).is_some() {
+            cx.notify();
+        }
+        true
+    }
+
+    /// The machine this terminal runs on, None for this one.
+    pub fn machine(&self) -> Option<&str> {
+        self.address.split_once('/').map(|(m, _)| m)
+    }
+
+    /// What the window last heard about this terminal's machine (None: connected or here).
+    pub fn set_machine_down(&mut self, down: Option<MachineDown>, cx: &mut Context<Self>) {
+        if down.is_none() && self.machine_down.is_some() {
+            self.reconnect = Reconnect::Idle;
+        }
+        if down.is_none() {
+            self.down_seen = None;
+        } else if self.down_seen.is_none() {
+            self.down_seen = Some(Instant::now());
+        }
+        if down != self.machine_down || down.is_some() {
+            self.machine_down = down;
+            cx.notify();
+        }
+    }
+
+    /// Asks the core to dial the machine now instead of at its next retry.
+    fn reconnect_machine(&mut self, cx: &mut Context<Self>) {
+        let Some(machine) = self.machine().map(str::to_owned) else { return };
+        if self.reconnect == Reconnect::Busy {
+            return;
+        }
+        self.reconnect = Reconnect::Busy;
+        cx.notify();
+        let core = self.grid.borrow().core.clone();
+        cx.spawn(async move |this, cx| {
+            let result = cx
+                .background_executor()
+                .spawn(async move { core.call_timeout("machine.connect", serde_json::json!({ "machine": machine }), Duration::from_secs(60)) })
+                .await;
+            let _ = this.update(cx, |this, cx| {
+                this.reconnect = match result {
+                    Ok(v) if v["state"] == "connected" => Reconnect::Idle,
+                    Ok(v) => Reconnect::Failed(v["why"].as_str().map(str::to_owned).unwrap_or_else(|| format!("still {}", v["state"].as_str().unwrap_or("away").replace('_', " ")))),
+                    Err(e) => Reconnect::Failed(format!("{e:#}")),
+                };
+                cx.notify();
+            });
+        })
+        .detach();
     }
 
     /// Files dropped on the terminal: their paths typed in, quoted, as a paste
@@ -545,7 +678,7 @@ impl TerminalView {
         if !self.address.contains('/') {
             let text = quote_paths(paths.iter().map(|p| p.to_string_lossy().into_owned()));
             let bytes = self.grid.borrow().vt.paste_bytes(&text);
-            return self.send(&bytes);
+            return self.send(&bytes, cx);
         }
         self.put_there(paths, false, cx);
     }
@@ -573,9 +706,9 @@ impl TerminalView {
                 })
                 .await;
             if !there.is_empty() {
-                let _ = this.update(cx, |this, _| {
+                let _ = this.update(cx, |this, cx| {
                     let bytes = this.grid.borrow().vt.paste_bytes(&quote_paths(there));
-                    this.send(&bytes);
+                    this.send(&bytes, cx);
                 });
             }
         })
@@ -590,7 +723,7 @@ impl TerminalView {
             self.dropped(paths, cx);
         } else if let Some(text) = item.text() {
             let bytes = self.grid.borrow().vt.paste_bytes(&text);
-            self.send(&bytes);
+            self.send(&bytes, cx);
         } else if item.entries().iter().any(|e| matches!(e, ClipboardEntry::Image(_))) {
             self.paste_image(cx);
         }
@@ -604,7 +737,7 @@ impl TerminalView {
         let text = if cfg!(windows) { cx.read_from_clipboard().and_then(|c| c.text()) } else { None };
         let bytes = paste_image_fallback(&mut self.grid.borrow_mut().vt, text.as_deref());
         if let Some(bytes) = bytes {
-            self.send(&bytes);
+            self.send(&bytes, cx);
         }
     }
 
@@ -763,7 +896,7 @@ impl TerminalView {
         }
         let bytes = key_bytes(&mut self.grid.borrow_mut().vt, ev);
         if let Some(bytes) = bytes {
-            self.send(&bytes);
+            self.send(&bytes, cx);
             cx.stop_propagation();
         }
     }
@@ -777,6 +910,12 @@ impl TerminalView {
             return;
         }
         let up = steps.y > 0;
+        // A full-screen program gets scrolls as input: one that isn't
+        // answering gets a few, not a backlog that replays when the line returns.
+        let to_program = g.vt.mouse_tracking() || g.vt.alt_screen();
+        if to_program && self.machine().is_some() && !self.answering.may_scroll(Instant::now()) {
+            return;
+        }
         if g.vt.mouse_tracking() {
             let ((x, y), size) = mouse_at(&g, ev.position);
             let out = scroll_mouse_bytes(&mut g.vt, steps, x, y, size);
@@ -796,6 +935,11 @@ impl TerminalView {
             }
         } else {
             g.vt.scroll_viewport(if up { -(n as isize) } else { n as isize });
+        }
+        let sent = to_program && g.channel.is_some();
+        drop(g);
+        if sent {
+            self.sent_input(cx);
         }
         cx.notify();
     }
@@ -1026,6 +1170,34 @@ fn scrollbar_row_at(total: u64, len: u64, track: f32, min: f32, top: f32) -> usi
 /// A title as it's shown: an agent's spinner in front of it (`\u{2733} Fix the
 /// tests`, braille dots) is no part of it. Herdr draws its own, and a title
 /// that spins would redraw every mod that shows titles, 10 times a second.
+/// The pane's stall notice: "box hasn't answered for 6s · 3 inputs waiting".
+fn stall_text(machine: &str, stall: &crate::answering::Stall) -> String {
+    let waiting = if stall.sent == 1 { "1 input waiting".to_owned() } else { format!("{} inputs waiting", stall.sent) };
+    format!("{machine} hasn't answered for {} · {waiting}", crate::answering::short_duration(stall.waited))
+}
+
+/// The machine-down banner: its title, and the reason when there is one.
+fn down_text(machine: &str, down: &MachineDown, seen: Duration, now_ms: u64) -> (String, String) {
+    let what = match down.state.as_str() {
+        "connecting" => "Connecting to",
+        "needs_login" => "Login needed for",
+        "needs_update" => "Core update needed on",
+        _ => "Can't reach",
+    };
+    let gone = down.since_ms.and_then(|ms| now_ms.checked_sub(ms)).map(Duration::from_millis).unwrap_or(seen);
+    let since = format!(" · {}", crate::answering::short_duration(gone));
+    let keeps = "Its programs keep running there; this pane catches up when it's back.";
+    let detail = match &down.why {
+        Some(why) => format!("{why}. {keeps}"),
+        None => keeps.to_owned(),
+    };
+    (format!("{what} {machine}{since}"), detail)
+}
+
+fn now_ms() -> u64 {
+    std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
+}
+
 pub(crate) fn shown_title(title: &str) -> &str {
     // Frames agents spin, not status icons (\u{2713} build stays): braille dots,
     // Claude Code's stars and its half circles.
@@ -1785,7 +1957,7 @@ impl EntityInputHandler for TerminalView {
         // be a way around that (see `key_down`); with the terminal focused,
         // input methods type into the program as usual.
         if !self.find_field_focused(window, cx) {
-            self.send(text.as_bytes());
+            self.send(text.as_bytes(), cx);
         }
         cx.notify();
     }
@@ -1863,6 +2035,14 @@ impl Render for TerminalView {
             format!("{} matches", search_progress.total)
         };
         let address = self.address.clone();
+        let machine = self.machine().unwrap_or_default().to_owned();
+        // Every redial passes through "connecting": only a long one is news.
+        let seen = self.down_seen.map(|at| at.elapsed()).unwrap_or_default();
+        let down = self.machine_down.clone().filter(|d| d.state != "connecting" || seen >= Duration::from_secs(5));
+        // A machine that's down says so itself; a stall is for one that seems up.
+        let stall = down.is_none().then(|| self.answering.stall(Instant::now())).flatten();
+        let reconnect = self.reconnect.clone();
+        let notice_low = self.search_open;
 
         div()
             .id(SharedString::from(format!("term-{}", self.address)))
@@ -1888,7 +2068,7 @@ impl Render for TerminalView {
                 // `send:<text>` bindings from keys.json type into this terminal.
                 match a.id().strip_prefix("send:") {
                     Some(_) if this.find_field_focused(window, cx) => cx.stop_propagation(),
-                    Some(text) => this.send(text.as_bytes()),
+                    Some(text) => this.send(text.as_bytes(), cx),
                     None => cx.propagate(),
                 }
             }))
@@ -2111,6 +2291,88 @@ impl Render for TerminalView {
                         ),
                 )
             })
+            .when_some(stall, |d, stall| {
+                d.child(
+                    div()
+                        .absolute()
+                        .when(notice_low, |d| d.top(px(48.0)))
+                        .when(!notice_low, |d| d.top_2())
+                        .right_3()
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .bg(crate::settings::color("raised"))
+                        .text_color(hsla(vt::theme().fg))
+                        .text_xs()
+                        .debug_selector(|| "stall-notice".to_owned())
+                        .child(div().size(px(6.0)).rounded_full().bg(crate::settings::color("working")))
+                        .child(stall_text(&machine, &stall)),
+                )
+            })
+            .when_some(down, |d, down| {
+                let (title, detail) = down_text(&machine, &down, seen, now_ms());
+                let can_retry = matches!(down.state.as_str(), "connecting" | "unreachable");
+                let busy = reconnect == Reconnect::Busy;
+                let failed = match &reconnect {
+                    Reconnect::Failed(e) => Some(format!("Couldn't reconnect: {e}")),
+                    _ => None,
+                };
+                d.child(
+                    div()
+                        .id(SharedString::from(format!("machine-down-{address}")))
+                        .debug_selector(|| "machine-down".to_owned())
+                        .absolute()
+                        .left_3()
+                        .right_3()
+                        .when(notice_low, |d| d.bottom_2())
+                        .when(!notice_low, |d| d.top_2())
+                        .flex()
+                        .items_center()
+                        .gap_2()
+                        .px_3()
+                        .py_2()
+                        .rounded_md()
+                        .bg(crate::settings::color("raised"))
+                        .text_color(hsla(vt::theme().fg))
+                        .text_xs()
+                        // The banner's clicks are its own, not the program's.
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_mouse_up(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .child(div().flex_none().size(px(6.0)).rounded_full().bg(crate::settings::color("blocked")))
+                        .child(
+                            div()
+                                .flex_1()
+                                .min_w_0()
+                                .flex()
+                                .flex_col()
+                                .child(title)
+                                .child(div().text_color(crate::settings::color("muted")).child(detail))
+                                .when_some(failed, |d, t| d.child(div().text_color(crate::settings::color("blocked")).child(t))),
+                        )
+                        .when(can_retry, |d| {
+                            d.child(
+                                div()
+                                    .id(SharedString::from(format!("machine-reconnect-{address}")))
+                                    .debug_selector(|| "machine-reconnect".to_owned())
+                                    .flex_none()
+                                    .px_2()
+                                    .py_1()
+                                    .rounded_sm()
+                                    .border_1()
+                                    .border_color(crate::settings::color("border"))
+                                    .when(!busy, |d| d.cursor_pointer().hover(|d| d.bg(crate::settings::color("hover"))))
+                                    .on_click(cx.listener(|this, _, _, cx| {
+                                        cx.stop_propagation();
+                                        this.reconnect_machine(cx);
+                                    }))
+                                    .child(if busy { "Reconnecting…" } else { "Reconnect now" }),
+                            )
+                        }),
+                )
+            })
             .when_some(ended, |d, why| {
                 d.child(
                     div()
@@ -2184,6 +2446,69 @@ mod tests {
             cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
             assert!(!root.read_with(cx, |root, cx| root.text.read(cx).selected_text()).is_empty());
         }
+    }
+
+    #[gpui::test]
+    fn a_pane_on_another_machine_says_when_it_is_down_or_not_answering(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+        use std::time::{Duration, Instant};
+
+        struct Root(Entity<super::TerminalView>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().w(px(480.0)).h(px(200.0)).child(self.0.clone())
+            }
+        }
+        cx.update(gpui_base::init);
+        let (root, cx) = cx.add_window_view(|_, cx| Root(cx.new(|cx| super::TerminalView::attach(crate::hc::offline(), "box/t1".into(), (40, 6), cx))));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("machine-down").is_none());
+        assert!(cx.debug_bounds("stall-notice").is_none());
+
+        let down = |state: &str| Some(super::MachineDown { state: state.into(), why: Some("ssh: connect timed out".into()), since_ms: None });
+        let set = |state: Option<super::MachineDown>, cx: &mut VisualTestContext| {
+            root.update(cx, |root, cx| root.0.update(cx, |t, cx| t.set_machine_down(state, cx)));
+            cx.run_until_parked();
+        };
+        set(down("connecting"), cx);
+        assert!(cx.debug_bounds("machine-down").is_none(), "a redial in progress is not news yet");
+        set(down("unreachable"), cx);
+        assert!(cx.debug_bounds("machine-down").is_some());
+        assert!(cx.debug_bounds("machine-reconnect").is_some());
+        set(down("needs_login"), cx);
+        assert!(cx.debug_bounds("machine-down").is_some());
+        assert!(cx.debug_bounds("machine-reconnect").is_none(), "a login needs a person at a terminal, not a redial");
+        set(None, cx);
+        assert!(cx.debug_bounds("machine-down").is_none());
+
+        // Keys out for 3 s, a probe out for 2 s: stalled.
+        root.update(cx, |root, cx| root.0.update(cx, |t, cx| {
+            let now = Instant::now();
+            t.answering.input(now - Duration::from_secs(3));
+            t.answering.probe_due(now - Duration::from_secs(2));
+            cx.notify();
+        }));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("stall-notice").is_some());
+        root.update(cx, |root, cx| root.0.update(cx, |t, cx| {
+            t.answering.output();
+            cx.notify();
+        }));
+        cx.run_until_parked();
+        assert!(cx.debug_bounds("stall-notice").is_none(), "output ends the stall");
+    }
+
+    #[test]
+    fn offline_notices_read_plainly() {
+        use std::time::Duration;
+        let stall = crate::answering::Stall { waited: Duration::from_secs(6), sent: 3 };
+        assert_eq!(super::stall_text("box", &stall), "box hasn't answered for 6s · 3 inputs waiting");
+        let down = super::MachineDown { state: "unreachable".into(), why: Some("ssh: connect timed out".into()), since_ms: Some(1_000) };
+        let (title, detail) = super::down_text("box", &down, Duration::ZERO, 66_000);
+        assert_eq!(title, "Can't reach box · 1m 05s");
+        assert!(detail.starts_with("ssh: connect timed out. Its programs keep running there"));
+        let connecting = super::MachineDown { state: "connecting".into(), why: None, since_ms: None };
+        assert_eq!(super::down_text("box", &connecting, Duration::from_secs(8), 0).0, "Connecting to box · 8s");
     }
 
     #[gpui::test]

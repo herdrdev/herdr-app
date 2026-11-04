@@ -2005,6 +2005,7 @@ impl AppWindow {
             // Temporary machines are agents' short-lived sandboxes: the app leaves them out.
             let kept = || machines["machines"].as_array().into_iter().flatten().filter(|m| m["temporary"] != true);
             let states = kept().filter_map(|m| Some((m["name"].as_str()?, m["state"].as_str()?))).collect::<HashMap<_, _>>();
+            let mut down = HashMap::new();
             for machine in kept() {
                 let Some(name) = machine["name"].as_str() else { continue };
                 let state = machine["state"].as_str().unwrap_or("unavailable");
@@ -2013,7 +2014,18 @@ impl AppWindow {
                     "needs_login" => format!("{name} needs login; run hc machine login {name}"),
                     _ => format!("{name} is {state}"),
                 }));
+                if state != "connected" {
+                    // "connecting" without a reason is the core's own wording: the banner says it better.
+                    let why = machine["why"].as_str().map(str::to_owned).or_else(|| reason.clone().filter(|_| state.starts_with("needs_")));
+                    down.insert(name.to_owned(), crate::terminal::MachineDown { state: state.to_owned(), why, since_ms: machine["since_ms"].as_u64() });
+                }
                 self.documents.entry(name.to_owned()).or_default().connection(state == "connected", machine["since_ms"].as_u64(), reason);
+            }
+            // Each pane on a machine shows whether it's there (offline UX).
+            for term in self.terms.values() {
+                let Some((m, _)) = term.address.split_once('/') else { continue };
+                let state = down.get(m).cloned();
+                term.view.update(cx, |v, cx| v.set_machine_down(state, cx));
             }
             if self.model.spaces.iter().any(|s| s.machine.as_deref().is_some_and(|m| !states.contains_key(m))) {
                 let mut view = crate::mirror::View::capture(&self.model);
