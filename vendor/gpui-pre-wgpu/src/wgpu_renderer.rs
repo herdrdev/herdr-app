@@ -1356,8 +1356,10 @@ impl WgpuRendererCore {
                 timeout: Some(std::time::Duration::from_secs(5)),
             })
             .map_err(|error| anyhow::anyhow!("Failed to wait for headless rendering: {error}"))?;
+        // Another renderer can poll the shared device and take this callback.
+        // Our submission finishing does not mean that thread has delivered it yet.
         receiver
-            .try_recv()
+            .recv_timeout(std::time::Duration::from_secs(5))
             .map_err(|error| anyhow::anyhow!("Failed to receive headless mapping result: {error}"))?
             .map_err(|error| anyhow::anyhow!("Failed to map headless readback buffer: {error}"))?;
 

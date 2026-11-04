@@ -132,11 +132,17 @@ impl LinuxCommon {
 
         let background_executor = BackgroundExecutor::new(dispatcher.clone());
 
+        // HERDR: do not paint the light fallback before the portal reports dark.
+        #[cfg(any(feature = "wayland", feature = "x11"))]
+        let appearance = crate::linux::xdg_desktop_portal::initial_appearance();
+        #[cfg(not(any(feature = "wayland", feature = "x11")))]
+        let appearance = WindowAppearance::Light;
+
         let common = LinuxCommon {
             background_executor,
             foreground_executor: ForegroundExecutor::new(dispatcher),
             text_system,
-            appearance: WindowAppearance::Light,
+            appearance,
             auto_hide_scrollbars: false,
             button_layout: WindowButtonLayout::linux_default(),
             callbacks,

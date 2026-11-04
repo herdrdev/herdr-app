@@ -65,6 +65,11 @@ Use `commands` to confirm the command's exact shape:
 herdr-app do pane.split '{"direction":"right","pane":"p12"}'
 ```
 
+`terminal.search` opens a find bar in the focused terminal. It searches that
+terminal's screen and scrollback; Enter and Shift-Enter move between matches,
+Escape closes the bar while its find field has focus, and each terminal keeps its own query (reopening selects it, so typing replaces it).
+Clicking the terminal while the bar is open puts typing, including Escape, back in the program; the bar and its matches stay.
+
 It prints the created IDs (for example `{ "pane": "...", "terminal": "..." }`)
 or `{ "error": "..." }` and exits 1. Read the result, then inspect `ls` or
 `status` to confirm. Commands invoked by an agent never open a missing-argument

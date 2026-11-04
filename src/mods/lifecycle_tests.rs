@@ -229,18 +229,11 @@ export default class extends View {
 }"#);
     let started = Rc::new(Cell::new(false));
     let call = started.clone();
-    let completed = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
-    let complete = completed.clone();
     gpui_shell::policy::set_default(Policy::new().with_host_module(
         HostModule::new("fixture").async_function("start", move |_| {
             call.set(true);
-            let complete = complete.clone();
-            let (tx, rx) = async_channel::bounded(1);
-            std::thread::spawn(move || {
-                complete.store(true, Ordering::SeqCst);
-                let _ = tx.send_blocking(());
-            });
-            Ok(async move { let _ = rx.recv().await; Ok(HostValue::Null) })
+            // Starting native work must not depend on its promise settling.
+            Ok(std::future::pending::<gpui_shell::HostResult>())
         })
     ).unwrap());
     let runtime = ShellRuntime::new_isolated().unwrap();
@@ -250,11 +243,6 @@ export default class extends View {
     drop(root);
     cx.run_until_parked();
     assert!(started.get());
-    for _ in 0..100 {
-        if completed.load(Ordering::SeqCst) { break; }
-        std::thread::sleep(Duration::from_millis(1));
-    }
-    assert!(completed.load(Ordering::SeqCst));
     window.update(cx, |_, window, _| window.remove_window()).unwrap();
 }
 

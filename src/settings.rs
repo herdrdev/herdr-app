@@ -378,6 +378,8 @@ pub struct Person {
     pub font: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font_size: Option<f32>,
+    /// Enable programming ligatures in terminal fonts.
+    pub font_ligatures: bool,
     /// The panels' font (their sizes follow zoom).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ui_font: Option<String>,
@@ -387,6 +389,9 @@ pub struct Person {
     /// Allow terminal programs (including remote ones) to copy text locally.
     #[serde(skip_serializing_if = "is_true")]
     pub clipboard_write: bool,
+    /// A draggable scroll position thumb at a terminal pane's right edge.
+    #[serde(skip_serializing_if = "is_true")]
+    pub pane_scrollbars: bool,
     /// Minimum terminal text contrast ratio; 1 leaves program colors unchanged.
     pub minimum_contrast: f32,
     /// Px (at zoom 1) added to (or, negative, taken from) the terminal cell width.
@@ -448,9 +453,11 @@ impl Default for Person {
             core: None,
             font: None,
             font_size: None,
+            font_ligatures: false,
             ui_font: None,
             telemetry: true,
             clipboard_write: true,
+            pane_scrollbars: true,
             minimum_contrast: 1.0,
             letter_spacing: None,
             option_as_alt: OptionAsAlt::Auto,
@@ -468,6 +475,7 @@ impl Default for Person {
 pub struct Settings {
     pub font_family: String,
     pub font_size: f32,
+    pub font_ligatures: bool,
     pub ui_font_family: String,
     pub ui_font_size: f32,
     /// How big the whole app is drawn (1 = as designed). The zoom keys change it.
@@ -481,6 +489,8 @@ pub struct Settings {
     pub dark: bool,
     /// Any theme color by name (see `theme()` in herdr.d.ts), `#rrggbb` or `#rrggbbaa`.
     pub colors: BTreeMap<String, String>,
+    /// A draggable scroll position thumb at a terminal pane's right edge.
+    pub pane_scrollbars: bool,
     /// Space between a terminal's edge and its text, in px: [x, y].
     pub terminal_padding: [f32; 2],
     /// 0..1: below 1, what's behind a terminal shows through.
@@ -516,6 +526,7 @@ impl Default for Settings {
         Settings {
             font_family: DEFAULT_FONT.into(),
             font_size: 14.0,
+            font_ligatures: false,
             ui_font_family: "Geist".into(),
             ui_font_size: 13.0,
             zoom: 1.0,
@@ -524,6 +535,7 @@ impl Default for Settings {
             theme_dark: DEFAULT_DARK.into(),
             dark: true,
             colors: BTreeMap::new(),
+            pane_scrollbars: true,
             terminal_padding: [10.0, 6.0],
             terminal_opacity: 1.0,
             clipboard_write: true,
@@ -553,6 +565,7 @@ impl Settings {
             // The layout's own, else the person's, else Herdr's.
             font_family: look.font.clone().or(person.font.clone()).unwrap_or(d.font_family),
             font_size: look.font_size.or(person.font_size).unwrap_or(d.font_size),
+            font_ligatures: person.font_ligatures,
             ui_font_family: look.ui_font.clone().or(person.ui_font.clone()).unwrap_or(d.ui_font_family),
             ui_font_size: d.ui_font_size,
             zoom: person.zoom,
@@ -561,6 +574,7 @@ impl Settings {
             theme_dark,
             dark,
             colors,
+            pane_scrollbars: person.pane_scrollbars,
             terminal_padding: look.terminal_padding.unwrap_or(d.terminal_padding),
             terminal_opacity: look.terminal_opacity.unwrap_or(1.0).clamp(0.0, 1.0),
             sounds: person.sounds.clone(),
@@ -838,6 +852,19 @@ pub const DEFAULT_FONT: &str = "JetBrains Mono";
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn terminal_ligatures_default_off_and_can_be_enabled() {
+        use super::*;
+        let person: Person = serde_json::from_str("{}").unwrap();
+        assert!(!Settings::compose(&person, &crate::layout::Look::default(), true).font_ligatures);
+        assert!(!Settings::default().font_ligatures);
+        let person: Person = serde_json::from_str(r#"{"font_ligatures":true}"#).unwrap();
+        let saved = serde_json::to_string(&person).unwrap();
+        let restored: Person = serde_json::from_str(&saved).unwrap();
+        assert!(Settings::compose(&restored, &crate::layout::Look::default(), true).font_ligatures);
+        assert!(serde_json::from_str::<Person>(r#"{"font_ligatures":"yes"}"#).is_err());
+    }
+
     use super::*;
 
     #[test]
