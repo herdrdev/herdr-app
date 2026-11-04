@@ -31,16 +31,16 @@ pub const COMMANDS: &[Command] = &[
     // What exists.
     cmd("space.new", &[opt("name"), opt("folder"), opt("tab"), opt("argv"), opt("task"), opt("machine"), opt("focus")],
         "Make a space: its name (default: none, so it's called after where its first terminal is), the folder its terminals start in (default: the focused terminal's), its first tab's name (default: none, so it's called by its number), optionally an agent (argv) and its first message (task), and the machine it lives on (`hc machine ls`; default the focused space's machine for keys and clicks, this computer for scripts; empty string: this computer; its terminals start in that machine's home unless folder). It is shown at once; focus false keeps the shown space and tab (with no space shown, the new space is shown)."),
-    cmd("space.close", &[opt("id"), opt("confirmed")], "Close a space and end its terminals (asks first unless confirmed)."),
+    cmd("space.close", &[opt("id"), opt("confirmed"), opt("local")], "Close a space and end its visible terminals (asks first unless confirmed; already dismissed work is preserved); local: true closes a remote view on this screen only."),
     cmd("space.rename", &[opt("id"), opt("name")], "Rename a space (asks the person when no name; an empty name: called after where its first terminal is again)."),
     cmd("space.move", &[req("id"), req("index")], "Move a space to a position (1 = first)."),
     cmd("tab.new", &[opt("name"), opt("space"), opt("folder"), opt("argv"), opt("task"), opt("mod"), opt("props"), opt("focus")],
         "Make a tab in a space (default: the selected one; name default: none, so it's called by its number) with a terminal in folder (default: the focused terminal's), optionally an agent (argv) and its first message (task); or with a mod as its only pane (`mod`, its `props`: a file, a board). It is shown at once; focus false adds it last in its space and keeps the shown space and the target space's selected tab. With no space open, a person's new tab starts a space (as space.new)."),
-    cmd("tab.close", &[opt("id"), opt("confirmed")], "Close a tab and end its terminals."),
+    cmd("tab.close", &[opt("id"), opt("confirmed"), opt("local")], "Close a tab and end its visible terminals; local: true closes a remote view on this screen only."),
     cmd("tab.rename", &[opt("id"), opt("name")], "Rename a tab (asks the person when no name; an empty name: called by its number again)."),
     cmd("tab.move", &[opt("id"), opt("index"), opt("by")], "Move a tab (the active one if no id) to a position in its space (1 = first), or `by` places left (-) or right (+), wrapping."),
     cmd("pane.split", &[req("direction"), opt("pane"), opt("argv"), opt("mod"), opt("props")], "Split a pane (default: the focused one) \"right\" or \"down\" with a new terminal, or with a mod (`mod`, its `props`) beside it."),
-    cmd("pane.close", &[opt("pane")], "Close a pane and end its terminal."),
+    cmd("pane.close", &[opt("pane"), opt("confirmed"), opt("local")], "Close a pane and end its terminal; local: true supports only the last pane of a remote tab."),
     cmd("terminal.open", &[opt("argv"), opt("folder"), opt("place"), opt("name")], "Start a terminal: as a new tab (place \"tab\", default), or \"right\"/\"down\" of the focused pane."),
     cmd("terminal.keep", &[req("terminal"), opt("place")], "Give a running terminal without a pane (a sub-agent) a pane: a new tab, or \"right\"/\"down\"."),
     cmd("terminal.park", &[req("terminal")], "Take a terminal's pane away and disable core keep; it keeps running (a sub-agent shows under its parent again)."),
@@ -48,10 +48,10 @@ pub const COMMANDS: &[Command] = &[
     cmd("terminal.pin", &[req("terminal"), req("pinned")], "Pin an agent to the top of the agent lists (pinned true) or unpin it (false). Pins are kept with the terminal, so every Herdr client shows them, and end with it."),
     cmd("terminal.kill", &[req("terminal")], "End a terminal and its sub-agents."),
     // What you see.
-    cmd("space.select", &[opt("index"), opt("id")], "Show a space (by position or id)."),
+    cmd("space.select", &[opt("index"), opt("id")], "Show a space (by position or id); an explicit saved remote id restores a view closed on this screen when its layout is available."),
     cmd("space.next", &[], "Show the next space."),
     cmd("space.prev", &[], "Show the previous space."),
-    cmd("tab.select", &[opt("index"), opt("id")], "Show a tab (by position in the space, or id)."),
+    cmd("tab.select", &[opt("index"), opt("id")], "Show a tab (by position in the space, or id); an explicit saved remote id restores a view closed on this screen when its layout is available."),
     cmd("tab.settle", &[opt("id")], "Put a tab away on this screen (default: the shown one): out of the lists, still running. It comes back when shown or when an agent in it needs you."),
     cmd("tab.unsettle", &[opt("id")], "Bring a settled tab back to the lists."),
     cmd("tab.next", &[], "Show the next tab."),
@@ -137,6 +137,9 @@ pub fn validate_args(c: &Command, args: &Value) -> Result<(), String> {
                 return Err(format!("{}: unknown argument(s): {}; valid arguments: {valid}", c.name, unknown.join(", ")));
             }
             for (key, value) in args {
+                if key == "local" && !value.is_boolean() {
+                    return Err(format!("{}: argument local must be a boolean", c.name));
+                }
                 if matches!(key.as_str(), "id" | "pane" | "space" | "terminal" | "target") && !value.is_string() && !value.is_null() {
                     return Err(format!("{}: argument {key} must be a string (or null to omit it)", c.name));
                 }
@@ -191,12 +194,12 @@ mod tests {
             assert!(validate_args(c, &Value::Null).is_ok());
             assert!(validate_args(c, &json!({})).is_ok());
             assert!(validate_args(c, &json!(["target"])).is_err());
-            let args: serde_json::Map<String, Value> = c.args.iter().map(|a| (a.name.into(), json!("target"))).collect();
+            let args: serde_json::Map<String, Value> = c.args.iter().map(|a| (a.name.into(), if a.name == "local" { json!(false) } else { json!("target") })).collect();
             assert!(validate_args(c, &Value::Object(args)).is_ok());
         }
         let close = find("space.close").unwrap();
         assert_eq!(validate_args(close, &json!({"space": "X", "confirmed": true})),
-            Err("space.close: unknown argument(s): space; valid arguments: id, confirmed".into()));
+            Err("space.close: unknown argument(s): space; valid arguments: id, confirmed, local".into()));
         assert!(validate_args(close, &json!({"id": "X", "confirmed": true})).is_ok());
     }
 

@@ -47,21 +47,27 @@ export function playSound(sound: string): null;
 
 /**
  * Runs a command, the same ones keys.json binds (`herdr-app commands` lists them all with their
- * arguments). Structural commands fail while their machine's layout is unavailable.
+ * arguments). Structural commands require an available machine layout, except explicit
+ * remote tab/space close with local: true: it closes this screen's view without ending
+ * terminals or changing other screens. Keep its qualified ID; explicit tab.select or
+ * space.select restores it when the layout is available, combining last fetched hidden
+ * data and pending local edits without forcing a read. Ordinary close preserves already
+ * dismissed work; restore it first to end it here. Last-pane close can cascade
+ * locally; closing only one of several panes cannot.
  * Mod props are stored as given, never machine-qualified. Most commands apply right after
  * the call returns; terminal.keep/park finish in the background and toast on failure.
  * A rename without a name is asked for;
  * "" gives the space or tab Herdr's automatic name again. The main ones:
- * Spaces: space.new {name?, folder?, tab?, argv?, task?, machine?, focus?}, space.close {id?}, space.rename {id?, name},
+ * Spaces: space.new {name?, folder?, tab?, argv?, task?, machine?, focus?}, space.close {id?, confirmed?, local?}, space.rename {id?, name},
  *   space.move {id, index}, space.select {index | id}, space.next, space.prev.
  * Tabs: tab.new {name?, space?, folder?, argv?, task?, focus?} (argv: an agent, task: its first message)
  *   or {name?, space?, mod, props?, focus?} (a tab whose only pane is a mod),
- *   tab.close {id?}, tab.rename {id?, name}, tab.move {id?, index | by} (by: -1 left, 1 right, wrapping), tab.select {index | id},
+ *   tab.close {id?, confirmed?, local?}, tab.rename {id?, name}, tab.move {id?, index | by} (by: -1 left, 1 right, wrapping), tab.select {index | id},
  *   tab.next, tab.prev.
  * New spaces and tabs take focus by default. Boolean focus: false keeps the shown
  * space, selected tab and keyboard focus; background tabs are appended in creation order.
  * With no space shown, a new space is shown even with focus: false.
- * Panes: pane.split {direction: "right" | "down", pane?}, pane.close {pane?}, pane.zoom {pane?},
+ * Panes: pane.split {direction: "right" | "down", pane?}, pane.close {pane?, confirmed?, local?}, pane.zoom {pane?},
  *   pane.focus {pane | terminal}, pane.go {direction}, pane.swap {pane?, direction | target}.
  *   Pane menus get target { pane, terminal }.
  * Terminals: terminal.open {argv?, folder?, place?: "tab" | "right" | "down"}, terminal.kill {terminal},
