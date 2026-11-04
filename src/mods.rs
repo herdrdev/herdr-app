@@ -1279,9 +1279,9 @@ mod tests {
         let path = dir.join("shared.json");
         for original in [Some("{\"sentinel\":true}"), Some("broken json"), None] {
             if let Some(text) = original { std::fs::write(&path, text).unwrap(); }
-            let path = path.clone();
+            let store_path = path.clone();
             std::thread::spawn(move || {
-                SHARED.with_borrow_mut(|slot| *slot = Some(SharedStore::transient(path)));
+                SHARED.with_borrow_mut(|slot| *slot = Some(SharedStore::transient(store_path)));
                 assert_eq!(shared("sentinel"), None);
                 set_shared("probe".into(), json!("x".repeat(1_000_000)));
                 assert_eq!(shared("probe").unwrap().as_str().unwrap().len(), 1_000_000);
