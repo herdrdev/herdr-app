@@ -286,6 +286,17 @@ Copy the focused terminal's selection. With nothing selected, that key goes to t
 
 No arguments.
 
+## `terminal.scroll`
+
+Scroll a terminal's view of its history (default: the focused one). Give exactly one of: lines (a whole number; negative goes up, toward history), pages (a number, fractions allowed; one page is the terminal's rows), to: "top" (oldest history) or "bottom" (the live screen). This scrolls Herdr's view, not the program.
+
+| Argument | Required |
+|---|---|
+| `lines` | no |
+| `pages` | no |
+| `to` | no |
+| `terminal` | no |
+
 ## `terminal.paste`
 
 Paste into the focused terminal (copied files as if dropped; an image alone as terminal.paste_image pastes it).
@@ -295,6 +306,12 @@ No arguments.
 ## `terminal.paste_image`
 
 Ctrl+V: the clipboard's image as a file on the focused terminal's machine, when that's another one; on Windows, paste clipboard text; otherwise Ctrl+V goes to the terminal.
+
+No arguments.
+
+## `terminal.search`
+
+Search the focused terminal's screen and scrollback; the find bar and query stay with that terminal.
 
 No arguments.
 

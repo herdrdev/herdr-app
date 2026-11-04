@@ -389,6 +389,9 @@ pub struct Person {
     /// Allow terminal programs (including remote ones) to copy text locally.
     #[serde(skip_serializing_if = "is_true")]
     pub clipboard_write: bool,
+    /// A draggable scroll position thumb at a terminal pane's right edge.
+    #[serde(skip_serializing_if = "is_true")]
+    pub pane_scrollbars: bool,
     /// Minimum terminal text contrast ratio; 1 leaves program colors unchanged.
     pub minimum_contrast: f32,
     /// macOS Option sends Alt shortcuts, or follows the keyboard layout.
@@ -451,6 +454,7 @@ impl Default for Person {
             ui_font: None,
             telemetry: true,
             clipboard_write: true,
+            pane_scrollbars: true,
             minimum_contrast: 1.0,
             option_as_alt: OptionAsAlt::Auto,
             appearance: Appearance::System,
@@ -481,6 +485,8 @@ pub struct Settings {
     pub dark: bool,
     /// Any theme color by name (see `theme()` in herdr.d.ts), `#rrggbb` or `#rrggbbaa`.
     pub colors: BTreeMap<String, String>,
+    /// A draggable scroll position thumb at a terminal pane's right edge.
+    pub pane_scrollbars: bool,
     /// Space between a terminal's edge and its text, in px: [x, y].
     pub terminal_padding: [f32; 2],
     /// 0..1: below 1, what's behind a terminal shows through.
@@ -524,6 +530,7 @@ impl Default for Settings {
             theme_dark: DEFAULT_DARK.into(),
             dark: true,
             colors: BTreeMap::new(),
+            pane_scrollbars: true,
             terminal_padding: [10.0, 6.0],
             terminal_opacity: 1.0,
             clipboard_write: true,
@@ -561,6 +568,7 @@ impl Settings {
             theme_dark,
             dark,
             colors,
+            pane_scrollbars: person.pane_scrollbars,
             terminal_padding: look.terminal_padding.unwrap_or(d.terminal_padding),
             terminal_opacity: look.terminal_opacity.unwrap_or(1.0).clamp(0.0, 1.0),
             sounds: person.sounds.clone(),

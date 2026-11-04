@@ -111,19 +111,48 @@ pub fn resolve(link: &str, cwd: Option<&Path>) -> Option<Target> {
     Path::new(bare).exists().then(|| Target::File(PathBuf::from(bare)))
 }
 
-/// Hands the target to the system (xdg-open, open on macOS, explorer on Windows).
+/// Hands the target to the system's default handler.
 pub fn open(target: &Target) {
     let arg = match target {
         Target::Url(u) => std::ffi::OsStr::new(u),
         Target::File(p) => p.as_os_str(),
     };
-    let opener = if cfg!(target_os = "macos") {
-        "open"
-    } else if cfg!(windows) {
-        "explorer.exe"
-    } else {
-        "xdg-open"
+    open_system(arg);
+}
+
+#[cfg(windows)]
+fn open_system(arg: &std::ffi::OsStr) {
+    use std::os::windows::ffi::OsStrExt;
+    use windows_sys::Win32::{
+        System::Com::{COINIT_APARTMENTTHREADED, COINIT_DISABLE_OLE1DDE, CoInitializeEx, CoUninitialize},
+        UI::{Shell::ShellExecuteW, WindowsAndMessaging::SW_SHOWNORMAL},
     };
+
+    let mut wide: Vec<u16> = arg.encode_wide().collect();
+    if wide.contains(&0) {
+        tracing::warn!("cannot open a link containing a NUL");
+        return;
+    }
+    wide.push(0);
+    // ShellExecuteW can pump messages; never reenter GPUI while it handles a click.
+    std::thread::spawn(move || {
+        let initialized = unsafe { CoInitializeEx(std::ptr::null(), (COINIT_APARTMENTTHREADED | COINIT_DISABLE_OLE1DDE) as u32) };
+        // Explorer interprets '=' as its own arguments; the handler gets a literal target.
+        let result = unsafe {
+            ShellExecuteW(std::ptr::null_mut(), std::ptr::null(), wide.as_ptr(), std::ptr::null(), std::ptr::null(), SW_SHOWNORMAL)
+        } as isize;
+        if result <= 32 {
+            tracing::warn!("cannot open link: ShellExecuteW returned {result}");
+        }
+        if initialized >= 0 {
+            unsafe { CoUninitialize() };
+        }
+    });
+}
+
+#[cfg(not(windows))]
+fn open_system(arg: &std::ffi::OsStr) {
+    let opener = if cfg!(target_os = "macos") { "open" } else { "xdg-open" };
     let spawned = std::process::Command::new(opener)
         .arg(arg)
         .stdin(std::process::Stdio::null())
@@ -241,6 +270,16 @@ mod tests {
         }
         for input in ["input/output", "foo/bar", "$10/bar", "$10/$20", "$10/bar.txt", "foo/bar,baz.txt", "foo$BAR/baz.txt", "foo~/bar.txt", "// foo bar", "//foo"] {
             assert_eq!(first(input), None, "{input:?}");
+        }
+    }
+
+    #[test]
+    fn query_links_keep_their_full_target() {
+        for url in ["https://example.com/?a=1&b=2", "https://localhost:17480/login?t=abc%3D%3D", "file:///C:/Windows/System32/winver.exe"] {
+            let text = format!("Dashboard: {url}");
+            let range = find(&text, text.find(url).unwrap()).unwrap();
+            assert_eq!(&text[range.clone()], url);
+            assert_eq!(resolve(&text[range], None), Some(Target::Url(url.into())));
         }
     }
 
