@@ -131,8 +131,16 @@ export interface SpaceInfo {
 }
 
 /** Machines' layout documents on this connection. Null names this computer.
- * Loading ends after the first read, including failures; unavailable includes offline cores. */
-export function machines(): { name: string | null; layout: "loading" | "ready" | "unavailable" }[];
+ * Loading ends after the first read, including failures; unavailable includes offline cores.
+ * `state` is the core's line to it (this computer: always connected); `why` and `since_ms`
+ * (when it went down, ms since the epoch) come with a line that's down, when the core knows. */
+export function machines(): {
+  name: string | null;
+  layout: "loading" | "ready" | "unavailable";
+  state: "connected" | "connecting" | "unreachable" | "needs_login" | "needs_update";
+  why: string | null;
+  since_ms: number | null;
+}[];
 
 /** Spaces in order. Mods re-render when they change. */
 export function spaces(): SpaceInfo[];

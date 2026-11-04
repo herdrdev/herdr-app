@@ -37,9 +37,10 @@ pub fn listen(tx: async_channel::Sender<Request>) {
 }
 
 /// How long a request may take to answer. A terminal starting on another
-/// machine answers when that machine does (up to two 10 s core calls).
+/// machine answers when that machine does (up to two 10 s core calls), and
+/// a reconnect when the dial ends.
 fn reply_timeout(cmd: &Value) -> Duration {
-    let starts_terminal = matches!(cmd.get("do").and_then(Value::as_str), Some("space.new" | "tab.new" | "pane.split" | "terminal.open"));
+    let starts_terminal = matches!(cmd.get("do").and_then(Value::as_str), Some("space.new" | "tab.new" | "pane.split" | "terminal.open" | "machine.reconnect"));
     Duration::from_secs(if cmd.get("shot").is_some() || starts_terminal { 30 } else { 5 })
 }
 
@@ -192,6 +193,7 @@ mod tests {
     fn terminal_starts_wait_for_a_slow_machine_and_other_requests_do_not() {
         assert_eq!(reply_timeout(&json!({"do": "pane.split", "args": {}})), Duration::from_secs(30));
         assert_eq!(reply_timeout(&json!({"do": "space.new"})), Duration::from_secs(30));
+        assert_eq!(reply_timeout(&json!({"do": "machine.reconnect"})), Duration::from_secs(30));
         assert_eq!(reply_timeout(&json!({"do": "pane.close"})), Duration::from_secs(5));
         assert_eq!(reply_timeout(&json!({"commands": true})), Duration::from_secs(5));
     }

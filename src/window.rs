@@ -441,6 +441,10 @@ pub struct AppWindow {
     /// The `herdr-app do` waiting on the command running now: a command that
     /// finishes later (a terminal starting on another machine) takes it.
     control_reply: Option<std::sync::mpsc::Sender<Value>>,
+    /// Each machine's line as `machine.list` last said: state, why, since_ms (for `machines()`).
+    machine_states: HashMap<String, Value>,
+    /// Ask the core for the machines at the next tick, not the fifth.
+    relist_machines: bool,
     /// The `where` label last written per terminal address.
     written_where: HashMap<String, String>,
     /// `herdr.seen` turns written but not yet back from the core.
@@ -544,6 +548,8 @@ impl AppWindow {
             person: settings::Person::default(),
             reply: None,
             control_reply: None,
+            machine_states: HashMap::new(),
+            relist_machines: false,
             written_where: HashMap::new(),
             written_seen: HashMap::new(),
             looked: HashMap::new(),
@@ -664,8 +670,8 @@ impl AppWindow {
             let mut event_lines = crate::hc::EventLines::default();
             let (mut tick, mut relist) = (0u64, false);
             loop {
-                let Ok((core, generation)) = this.update(cx, |this, _| {
-                    (this.core.clone(), this.core_generation)
+                let Ok((core, generation, relist_machines)) = this.update(cx, |this, _| {
+                    (this.core.clone(), this.core_generation, std::mem::take(&mut this.relist_machines))
                 }) else { break };
                 if generation != subscribed_generation {
                     drop(subscription.take());
@@ -691,7 +697,7 @@ impl AppWindow {
                         this.sync(window, cx);
                     }).is_err() { break; }
                 }
-                let ask_machines = tick.is_multiple_of(5);
+                let ask_machines = tick.is_multiple_of(5) || relist_machines;
                 tick += 1;
                 let relisting = std::mem::take(&mut relist);
                 let (sub, machines, refresh, listed, lines) = cx.background_executor().spawn(async move {
@@ -1798,9 +1804,13 @@ impl AppWindow {
             Some(json!({ "space": p.id, "tab": ctx.id, "terminal": m.address_of(&pane), "shown": self.swapped.get(&pane),
                 "pane": pane, "agent": self.shown_agent(), "cwd": cwd }))
         });
-        let machines = self.documents.iter().map(|(name, slot)| json!({
-            "name": (!name.is_empty()).then_some(name), "layout": slot.layout(),
-        })).collect();
+        let machines = self.documents.iter().map(|(name, slot)| {
+            let line = if name.is_empty() { json!({ "state": "connected" }) } else { self.machine_states.get(name).cloned().unwrap_or_else(|| json!({ "state": "connecting" })) };
+            json!({
+                "name": (!name.is_empty()).then_some(name), "layout": slot.layout(),
+                "state": line["state"], "why": line.get("why").cloned().unwrap_or(Value::Null), "since_ms": line.get("since_ms").cloned().unwrap_or(Value::Null),
+            })
+        }).collect();
         let mut changed = mods::publish_machines(Value::Array(machines));
         changed |= mods::publish_spaces(Value::Array(spaces));
         changed |= mods::publish_agents(Value::Array(agents));
@@ -1953,7 +1963,7 @@ impl AppWindow {
         let shown = |d: &std::collections::BTreeMap<String, crate::mirror_sync::Slot>| {
             d.iter().map(|(m, s)| (m.clone(), s.connected, s.available, s.blocked, s.error.clone(), s.layout())).collect::<Vec<_>>()
         };
-        let (listing, was) = (results.is_empty(), shown(&self.documents));
+        let (listing, was, lines_were) = (results.is_empty(), shown(&self.documents), self.machine_states.clone());
         for (machine, result) in results {
             let Some(slot) = self.documents.get_mut(&machine) else { continue };
             let first = slot.document.is_none();
@@ -2006,9 +2016,11 @@ impl AppWindow {
             let kept = || machines["machines"].as_array().into_iter().flatten().filter(|m| m["temporary"] != true);
             let states = kept().filter_map(|m| Some((m["name"].as_str()?, m["state"].as_str()?))).collect::<HashMap<_, _>>();
             let mut down = HashMap::new();
+            self.machine_states.clear();
             for machine in kept() {
                 let Some(name) = machine["name"].as_str() else { continue };
                 let state = machine["state"].as_str().unwrap_or("unavailable");
+                self.machine_states.insert(name.to_owned(), json!({ "state": state, "why": machine["why"], "since_ms": machine["since_ms"] }));
                 let reason = (state != "connected").then(|| machine["why"].as_str().map(str::to_owned).unwrap_or_else(|| match state {
                     "needs_update" => format!("{name} needs a core update; run hc machine update {name}"),
                     "needs_login" => format!("{name} needs login; run hc machine login {name}"),
@@ -2039,7 +2051,7 @@ impl AppWindow {
             self.model.spaces.retain(|s| s.machine.as_deref().is_none_or(|m| states.contains_key(m)));
             changed |= before != self.model.spaces.len();
         }
-        if !listing || changed || shown(&self.documents) != was {
+        if !listing || changed || shown(&self.documents) != was || self.machine_states != lines_were {
             self.publish(cx);
             cx.notify();
         }
@@ -2517,6 +2529,40 @@ impl AppWindow {
         })
         .detach();
         Ok(answer)
+    }
+
+    /// `machine.reconnect`: the core dials now, off the UI thread (a dial
+    /// waits up to the machine timeout). A waiting `herdr-app do` hears the
+    /// machine's state; a person hears only when it still can't connect.
+    fn reconnect_machine(&mut self, machine: String, window: &mut Window, cx: &mut Context<Self>) {
+        let reply = self.control_reply.take();
+        let core = self.core.clone();
+        let name = machine.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx.background_executor()
+                .spawn(async move { core.call_timeout("machine.connect", json!({ "machine": name }), Duration::from_secs(30)) })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                let answer = result.unwrap_or_else(|e| json!({ "error": format!("{e:#}") }));
+                if let Some(reply) = reply {
+                    let _ = reply.send(answer);
+                    return;
+                }
+                let why = match (answer["error"].as_str(), answer["state"].as_str()) {
+                    (Some(error), _) => Some(error.to_owned()),
+                    (None, Some("connected")) => None,
+                    (None, state) => Some(answer["why"].as_str().map(str::to_owned)
+                        .unwrap_or_else(|| format!("It is {}.", state.unwrap_or("away").replace('_', " ")))),
+                };
+                if let Some(why) = why {
+                    let spec = json!({"kind":"toast", "notification":{"title":format!("Still can't reach {machine}"),"body":why,"level":"warning"}});
+                    this.open_overlay(mods::new_overlay_id(), spec, window, cx);
+                }
+                // Its state shows at once, not at the next listing.
+                this.relist_machines = true;
+            });
+        })
+        .detach();
     }
 
     /// The PowerShell form of a remote agent start (`agent_argv`): the program,
@@ -3239,6 +3285,13 @@ impl AppWindow {
                     return self.fail(format!("no running terminal {t:?}"));
                 }
                 self.kill(&[t.to_owned()], cx);
+            }
+            "machine.reconnect" => {
+                let Some(machine) = Self::owned(a, "machine").filter(|m| !m.is_empty()) else { return self.fail("machine.reconnect needs machine (a name from hc machine ls)") };
+                if !self.machine_states.contains_key(&machine) {
+                    return self.fail(format!("Herdr has no machine called {machine}. See hc machine ls; machines added with --temp stay out of Herdr."));
+                }
+                self.reconnect_machine(machine, window, cx);
             }
             "terminal.peek" => {
                 let t = Self::arg(a, "terminal").unwrap_or_default();

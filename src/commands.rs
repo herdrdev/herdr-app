@@ -47,6 +47,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("terminal.right_click", &[req("to"), opt("terminal")], "Where right-clicks in a terminal (default: the focused one) go when its program takes the mouse: \"program\" or \"menu\" (Herdr's, the default). Shift+right-click is always the menu."),
     cmd("terminal.pin", &[req("terminal"), req("pinned")], "Pin an agent to the top of the agent lists (pinned true) or unpin it (false). Pins are kept with the terminal, so every Herdr client shows them, and end with it."),
     cmd("terminal.kill", &[req("terminal")], "End a terminal and its sub-agents."),
+    cmd("machine.reconnect", &[req("machine")], "Dial a machine (`hc machine ls`) now instead of at the core's next retry; answers with its state once the dial ends. A person sees a note when it still can't connect."),
     // What you see.
     cmd("space.select", &[opt("index"), opt("id")], "Show a space (by position or id)."),
     cmd("space.next", &[], "Show the next space."),
