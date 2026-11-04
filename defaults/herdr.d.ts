@@ -41,6 +41,11 @@ export function pickFolder(options?: { prompt?: string }): Promise<string | null
  *  file (absolute, or relative to ~/.config/herdr-app). */
 export function playSound(sound: string): null;
 
+/** Shows `label` on the app's dock icon (macOS; elsewhere nothing yet) until the app quits or
+ *  the next call: a string as given, a number as written. 0, "" or null clears it. One badge for
+ *  the whole app: the last call from any mod copy wins. */
+export function setBadge(label: string | number | null): null;
+
 /**
  * Runs a command, the same ones keys.json binds (`herdr-app commands` lists them all with their
  * arguments). Structural commands fail while their machine's layout is unavailable.
