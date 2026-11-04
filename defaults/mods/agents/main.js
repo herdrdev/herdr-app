@@ -269,15 +269,18 @@ export default class Agents extends View {
         .when(!open, (el) => el.child(String(subs.length)));
     };
 
-    // A row reads "space \u00b7 detail": the detail is a tab someone named or the
-    // agent's own title, never an automatic tab number unless two rows would
-    // otherwise read the same.
+    // A row reads "space \u00b7 detail": the agent's pane name, else a named tab
+    // or its own title. Only missing panes fall back to the tab's lead.
+    // Automatic tab numbers stay hidden unless two rows would read the same.
     const tabs = spaces().flatMap(s => s.tabs);
+    const allPanes = panes();
+    const paneOf = (a) => allPanes.find(p => p.pane === a.pane);
     const label = (a) => {
       const tab = tabs.find(tab => tab.id === a.tab);
-      return tab ? title(tab, lead(tab)) : a.title || a.program?.name || "";
+      const pane = paneOf(a);
+      return pane?.name || (tab ? title(tab, pane ?? lead(tab, allPanes)) : a.title || a.program?.name || "");
     };
-    const detail = new Map(list.map(a => [a.address, /^\d+$/.test(label(a)) ? null : label(a)]));
+    const detail = new Map(list.map(a => [a.address, paneOf(a)?.name || (/^\d+$/.test(label(a)) ? null : label(a))]));
     const seen = {};
     for (const a of list) { const k = `${a.space_name}\u0000${detail.get(a.address) ?? ""}`; seen[k] = (seen[k] ?? 0) + 1; }
     for (const a of list) {
