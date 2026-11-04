@@ -1023,6 +1023,8 @@ including a small herdr-core skill you can install with the user's permission.
 A tab mod can declare `"native":"macos-vm"` in `mod.json` to request the built-in
 native VM pane on an Apple Silicon `native-vm` build. The shipped
 `virtual-machine` mod demonstrates this and provides a JavaScript fallback.
+On supported builds, the tab bar’s **+ → macOS VM** opens this pane in local
+workspaces. The menu entry is hidden in remote workspaces.
 This is a local capability even in a space connected to a remote core.
 `vmStatus()`, `vmStart()` and `vmShutdown()` are the narrow `herdr` module API;
 see `herdr.d.ts` for their contract. `HERDR_VM_HOME` selects the prepared VM.

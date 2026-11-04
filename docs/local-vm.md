@@ -38,6 +38,10 @@ It does not replace an installed Herdr. `HERDR_VM_APP_HOME` overrides the lab
 app home at build/run time. Rebuild after changing the bundled launch defaults.
 Normal builds do not link Virtualization or require its entitlement.
 
+In a VM-enabled build, click **+ → macOS VM** to open the native pane,
+then use **Start** to boot the prepared guest. This entry is only visible in local workspaces on VM-enabled builds.
+The underlying native capability always targets the desktop client’s Mac.
+
 ## Native capability and mod API
 
 The shipped `virtual-machine` mod declares:
