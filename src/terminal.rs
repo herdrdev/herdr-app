@@ -1396,7 +1396,14 @@ pub fn cell_size(window: &Window) -> Size<Pixels> {
     // grid once it drifts over 1px, so a rounded width made text wobble.
     // Boxes snap their edges instead (`snap_box`).
     let scale = window.scale_factor();
-    size(w, px((f32::from(h) * 1.15 * scale).ceil() / scale))
+    size(w, px(cell_height(f32::from(h), f32::from(ts.line_gap(id, fs)), scale)))
+}
+
+fn cell_height(font_height: f32, line_gap: f32, scale: f32) -> f32 {
+    // Keep the existing spacing unless the font needs more leading (iA Writer
+    // Mono, for example). Leading is extra space, not another scale factor.
+    let height = (font_height * 1.15).max(font_height + line_gap);
+    (height * scale).ceil() / scale
 }
 
 // Force-width shaping moves glyph origins, but does not resize fallback glyphs.
@@ -2136,6 +2143,33 @@ impl Focusable for TerminalView {
 mod tests {
     use super::{ScrollTarget, pages_to_lines, scroll_target};
     use serde_json::{Value, json};
+
+    #[test]
+    fn cell_height_preserves_existing_spacing_for_fonts_with_little_leading() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            for leading in [-1.0, 0.0, 1.0] {
+                assert_eq!(super::cell_height(13.0, leading, scale), (13.0_f32 * 1.15 * scale).ceil() / scale);
+            }
+        }
+    }
+
+    #[test]
+    fn cell_height_respects_font_leading_without_scaling_it_again() {
+        // iA Writer Mono's CoreText metrics at 13px: 13px ascent + descent,
+        // 3.9px leading. Previously rounded to 15px on a Retina display.
+        assert_eq!(super::cell_height(13.0, 3.9, 2.0), 17.0);
+        assert_eq!(super::cell_height(13.0, 3.9, 1.0), 17.0);
+    }
+
+    #[test]
+    fn cell_height_rounds_up_to_a_device_pixel() {
+        for scale in [1.0, 1.25, 1.5, 2.0] {
+            let height = super::cell_height(13.0, 3.9, scale);
+            assert!(height >= 16.9);
+            assert!(height < 16.9 + 1.0 / scale);
+            assert!((height * scale - (height * scale).round()).abs() < 0.0001);
+        }
+    }
 
     #[gpui::test]
     fn terminal_release_ends_window_text_selection(cx: &mut gpui::TestAppContext) {
