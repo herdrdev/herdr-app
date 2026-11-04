@@ -470,6 +470,10 @@ the build doesn't do.
 
 ## Keys: `keys.json`
 
+On upgrade, an untouched keys file from an earlier release gets the current
+shortcuts. Any edit, even whitespace, keeps the entire file as yours; new default
+shortcuts must then be added by hand.
+
 ```json
 {
   "global":   { "ctrl-shift-t": "tab.new", "ctrl-shift-o": "pane.split:right", "alt-1": "space.select:1" },
