@@ -32,6 +32,20 @@ pub const DEFAULTS: &str = include_str!("../defaults/keys.json");
 #[cfg(target_os = "macos")]
 pub const DEFAULTS: &str = include_str!("../defaults/keys.macos.json");
 
+// Exact originals from release tags, deduplicated across v0.1.4–v0.1.12.
+// Keep these when defaults change: only untouched shipped files may migrate.
+#[cfg(any(not(target_os = "macos"), test))]
+const SHIPPED_KEYS: &[&str] = &[
+    include_str!("keys/shipped/v0.1.4-keys.json"),
+    include_str!("keys/shipped/v0.1.5-keys.json"),
+    include_str!("keys/shipped/v0.1.12-keys.json"),
+];
+#[cfg(any(target_os = "macos", test))]
+const SHIPPED_MACOS_KEYS: &[&str] = &[
+    include_str!("keys/shipped/v0.1.4-keys.macos.json"),
+    include_str!("keys/shipped/v0.1.5-keys.macos.json"),
+];
+
 #[derive(serde::Deserialize)]
 #[serde(untagged)]
 enum Binding {
@@ -148,14 +162,29 @@ fn valid_action(action: &str) -> bool {
         || name.split_once('.').is_some_and(|(m, c)| !m.is_empty() && !c.is_empty())
 }
 
-/// Reads keys.json (writing the defaults if it's missing) into bindings, or says what's wrong.
+/// Reads keys.json, installing or updating untouched defaults, or says what's wrong.
 pub fn load() -> Result<Vec<KeyBinding>, String> {
-    let p = path();
-    if !p.exists() {
-        let _ = std::fs::write(&p, DEFAULTS);
+    #[cfg(not(target_os = "macos"))]
+    let originals = SHIPPED_KEYS;
+    #[cfg(target_os = "macos")]
+    let originals = SHIPPED_MACOS_KEYS;
+    parse(&load_text(&path(), DEFAULTS, originals)?)
+}
+
+fn load_text(path: &std::path::Path, defaults: &str, originals: &[&str]) -> Result<String, String> {
+    let text = match std::fs::read_to_string(path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => {
+            std::fs::write(path, defaults).map_err(|e| e.to_string())?;
+            return Ok(defaults.to_owned());
+        }
+        Err(e) => return Err(e.to_string()),
+    };
+    if text != defaults && originals.contains(&text.as_str()) {
+        std::fs::write(path, defaults).map_err(|e| e.to_string())?;
+        return Ok(defaults.to_owned());
     }
-    let text = std::fs::read_to_string(&p).map_err(|e| e.to_string())?;
-    parse(&text)
+    Ok(text)
 }
 
 pub fn parse(text: &str) -> Result<Vec<KeyBinding>, String> {
@@ -244,6 +273,36 @@ pub fn install(bindings: Vec<KeyBinding>, cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn only_byte_identical_shipped_keys_are_upgraded() {
+        let dir = std::env::temp_dir().join(format!("herdr-keys-migration-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("keys.json");
+        for (defaults, originals) in [
+            (include_str!("../defaults/keys.json"), super::SHIPPED_KEYS),
+            (include_str!("../defaults/keys.macos.json"), super::SHIPPED_MACOS_KEYS),
+        ] {
+            for original in originals {
+                std::fs::write(&path, original).unwrap();
+                assert_eq!(super::load_text(&path, defaults, originals).unwrap(), defaults);
+                assert_eq!(std::fs::read_to_string(&path).unwrap(), defaults);
+
+                // Even a whitespace-only edit is personal, not an untouched original.
+                for edited in [format!("{original}\n"), original.replace("tab.new", "pane.zoom")] {
+                    std::fs::write(&path, &edited).unwrap();
+                    assert_eq!(super::load_text(&path, defaults, originals).unwrap(), edited);
+                    assert_eq!(std::fs::read_to_string(&path).unwrap(), edited);
+                }
+            }
+            std::fs::write(&path, defaults).unwrap();
+            assert_eq!(super::load_text(&path, defaults, originals).unwrap(), defaults);
+            std::fs::remove_file(&path).unwrap();
+            assert_eq!(super::load_text(&path, defaults, originals).unwrap(), defaults);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), defaults);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
     #[test]
     fn keys_from_0_1_0_mean_the_same_now() {
         assert_eq!(super::current("project.select:2"), "space.select:2");

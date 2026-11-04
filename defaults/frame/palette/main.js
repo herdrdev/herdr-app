@@ -309,7 +309,8 @@ export default class Palette extends View {
                 // The event bridge converts both wheel and touchpad deltas to pixels.
                 this.scroll = Math.max(0, Math.min(this.scroll - e.delta.y, this.maxScroll));
                 // The selection stays on screen, so the next frame doesn't scroll back to it.
-                while (this.at < rows.length - 1 && tops[this.at].row < this.scroll) this.at++;
+                // A row that opens a group is shown with its title, so the title counts.
+                while (this.at < rows.length - 1 && (tops[this.at].head ? tops[this.at].title : tops[this.at].row) < this.scroll) this.at++;
                 while (this.at > 0 && tops[this.at].row + ROW_H > this.scroll + LIST_H) this.at--;
                 cx.notify();
               })

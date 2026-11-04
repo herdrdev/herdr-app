@@ -1127,7 +1127,13 @@ fn capabilities() -> Capabilities {
         .clipboard_write(true)
 }
 
-/// What mods may touch, and the `herdr` module they import. Also used by `herdr-app check`.
+/// Checks exercise shared state in memory, without reading or writing the person's file.
+pub fn install_check_policy() {
+    SHARED.with_borrow_mut(|slot| *slot = Some(SharedStore { values: Default::default(), path: app_dir().join("shared.json"), writable: false, writer: None }));
+    install_policy();
+}
+
+/// What mods may touch, and the `herdr` module they import.
 pub fn install_policy() -> async_channel::Receiver<Request> {
     gpui_shell::policy::update_default(|p| {
         p.with_capabilities(capabilities())
@@ -1276,6 +1282,9 @@ mod tests {
                 while reading.load(std::sync::atomic::Ordering::Relaxed) {
                     match std::fs::read(&path) {
                         Ok(bytes) => { serde_json::from_slice::<Value>(&bytes).unwrap(); }
+                        // Windows refuses to open a file while a rename replaces it. The reader
+                        // got no bytes, so that is not a torn snapshot.
+                        Err(e) if cfg!(windows) && e.kind() == std::io::ErrorKind::PermissionDenied => {}
                         Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::NotFound),
                     }
                     std::thread::yield_now();
