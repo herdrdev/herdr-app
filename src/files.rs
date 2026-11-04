@@ -407,7 +407,8 @@ mod tests {
 
     #[test]
     fn a_folder_past_the_cap_replaces_one_unused_for_a_while_preferring_one_nobody_waits_on() {
-        let now = std::time::Instant::now();
+        // Look back from the future: an Instant can't predate boot, and a fresh CI runner has been up < 600 s.
+        let now = std::time::Instant::now() + std::time::Duration::from_secs(600);
         let (waiting, _receiver) = async_channel::bounded(1);
         let abandoned = async_channel::bounded(1).0;
         let folder = |secs, waiters: Vec<async_channel::Sender<Vec<String>>>| Folder {
