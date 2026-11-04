@@ -271,8 +271,8 @@ fn ensure_core_bundle(version: &str) -> Result<(), String> {
     if let Some(v) = version.strip_prefix("hc ") {
         cmd.env("HC_VERSION", v);
     }
-    if bin.is_absolute()
-        && let Some(dir) = bin.parent()
+    if resolved.is_absolute()
+        && let Some(dir) = resolved.parent()
     {
         cmd.env("HC_INSTALL_DIR", dir);
     }
