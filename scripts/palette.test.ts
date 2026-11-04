@@ -20,7 +20,9 @@ class Element {
 }
 const source = await readFile(new URL("../defaults/frame/palette/main.js", import.meta.url), "utf8");
 const element = () => new Element();
-const values = { View: class {}, div: element, svg: element, v_flex: element, h_flex: element, Input: { new: element }, theme: () => ({}), keys: () => [] };
+let platform = "linux";
+const icons: string[] = [];
+const values = { View: class {}, div: element, svg: (path: string) => { icons.push(path); return element(); }, v_flex: element, h_flex: element, Input: { new: element }, theme: () => ({}), keys: () => [], win: () => ({ platform }) };
 const Palette = new Function(...Object.keys(values), source.replace(/^import .*;\n/gm, "").replace("export default class Palette", "return class Palette"))(...Object.values(values));
 function find(root: Element, id: string): Element | undefined {
   if (root?.calls?.id?.[0] === id) return root;
@@ -39,6 +41,17 @@ test("palette follows small pixel movements and converted wheel deltas", () => {
     expect(list).toBeDefined();
     list!.calls.on_scroll_wheel[0]({ delta: { y: delta } }, { notify() {} });
     expect(view.scroll).toBe(-delta);
+  }
+});
+
+test("palette input shows the command key only on macos", () => {
+  for (const [os, icon] of [["macos", "frame/palette/command.svg"], ["windows", "mods/workspace-chrome/search.svg"], ["linux", "mods/workspace-chrome/search.svg"]]) {
+    platform = os; icons.length = 0;
+    const view = new Palette();
+    view.query = ""; view.at = 0; view.scroll = 0; view.input = {}; view.handle = {};
+    view.rows = () => [];
+    view.render();
+    expect(icons).toEqual([icon]);
   }
 });
 
