@@ -2266,6 +2266,13 @@ impl Render for TerminalView {
                                 }
                                 cx.notify();
                             }))
+                            // It can lie over the next pane: moves on it are its own, not that pane's or its
+                            // program's. A drag (a button held) still goes on under it.
+                            .on_mouse_move(|ev: &MouseMoveEvent, _, cx| {
+                                if ev.pressed_button.is_none() {
+                                    cx.stop_propagation();
+                                }
+                            })
                             .on_mouse_down(MouseButton::Left, cx.listener(|this, _: &MouseDownEvent, _, cx| {
                                 cx.stop_propagation();
                                 if let Some(p) = &mut this.preview {
@@ -2338,6 +2345,72 @@ mod tests {
             cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
             assert!(!root.read_with(cx, |root, cx| root.text.read(cx).selected_text()).is_empty());
         }
+    }
+
+    #[gpui::test]
+    fn a_link_preview_over_the_next_pane_hides_that_panes_links(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        struct Root {
+            first: Entity<super::TerminalView>,
+            second: Entity<super::TerminalView>,
+            drags: usize,
+        }
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                // Like the window's own drags (a divider, the window itself).
+                div().flex().size_full()
+                    .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, _| this.drags += ev.pressed_button.is_some() as usize))
+                    .child(div().w(px(320.0)).h(px(150.0)).child(self.first.clone()))
+                    .child(div().w(px(320.0)).h(px(150.0)).child(self.second.clone()))
+            }
+        }
+
+        cx.update(gpui_base::init);
+        let target = format!("https://example.com/{}", "a".repeat(80));
+        let (root, cx) = cx.add_window_view(|_, cx| Root {
+            first: cx.new(|cx| {
+                let terminal = super::TerminalView::attach(crate::hc::offline(), "t1".into(), (32, 6), cx);
+                terminal.grid.borrow_mut().vt.write(format!("\x1b]8;;{target}\x1b\\here\x1b]8;;\x1b\\").as_bytes());
+                terminal
+            }),
+            second: cx.new(|cx| {
+                let terminal = super::TerminalView::attach(crate::hc::offline(), "t2".into(), (32, 6), cx);
+                terminal.grid.borrow_mut().vt.write("https://beta.example/x\r\n".repeat(5).as_bytes());
+                terminal
+            }),
+            drags: 0,
+        });
+        cx.run_until_parked();
+        let key = if cfg!(target_os = "macos") { Modifiers::command() } else { Modifiers::control() };
+        let cell = |t: &Entity<super::TerminalView>, cx: &mut VisualTestContext, col: f32, row: f32| {
+            t.read_with(cx, |t, _| {
+                let g = t.grid.borrow();
+                g.origin + point(g.cell.width * col, g.cell.height * row)
+            })
+        };
+
+        let on_link = cell(&root.read_with(cx, |r, _| r.first.clone()), cx, 1.5, 0.5);
+        cx.simulate_mouse_move(on_link, None, key);
+        cx.run_until_parked();
+        let at = root.read_with(cx, |r, cx| r.first.read(cx).preview.as_ref().map(|p| (p.target.clone(), p.at)));
+        let (shown, at) = at.expect("the first pane previews its link");
+        assert_eq!(shown, target);
+
+        // Onto the preview where it lies over the second pane's links.
+        let second_x = cell(&root.read_with(cx, |r, _| r.second.clone()), cx, 2.5, 0.0).x;
+        let over = point(second_x, at.y + px(6.0));
+        assert!(root.read_with(cx, |r, cx| r.second.read(cx).link_at(over).is_some()), "a link of the second pane is under the preview");
+        cx.simulate_mouse_move(over, None, key);
+        cx.run_until_parked();
+        root.read_with(cx, |r, cx| {
+            assert!(r.first.read(cx).preview.as_ref().is_some_and(|p| p.hovered));
+            assert!(r.second.read(cx).preview.is_none(), "the second pane shows no preview of its own");
+        });
+
+        // A drag passing over the preview still moves.
+        cx.simulate_mouse_move(over + point(px(4.0), px(0.0)), Some(MouseButton::Left), key);
+        assert_eq!(root.read_with(cx, |r, _| r.drags), 1);
     }
 
     #[gpui::test]
