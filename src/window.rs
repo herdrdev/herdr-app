@@ -5385,6 +5385,90 @@ mod tests {
         }));
     }
 
+    #[test]
+    fn a_hidden_terminal_frees_its_drawing_and_draws_the_same_when_shown() {
+        in_own_process("hidden_caches");
+    }
+
+    /// A terminal with colors, a selection and scrolled back, then its tab
+    /// hidden: a quick flip back keeps its drawing caches; hidden a few
+    /// seconds, it frees them; shown again, it draws exactly what it drew.
+    #[gpui::test]
+    fn hidden_caches(cx: &mut gpui::TestAppContext) {
+        use crate::layout::{Axis, Node};
+        use crate::model::{Tab, pane};
+        use gpui::{Modifiers, MouseButton, point, px};
+        use serde_json::json;
+        use std::time::Duration;
+        if !running_alone("hidden_caches") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "unused", "", json!({ "id": "main", "type": "block", "content": { "tab": "active" } }));
+        view.update_in(cx, |this, window, cx| {
+            for id in this.overlays.iter().map(|o| o.id.clone()).collect::<Vec<_>>() {
+                this.close_overlay(&id, window, cx);
+            }
+            let mut tab = Tab::new("t", "", "a", "ta");
+            tab.root = Node::container("t", Axis::Row, vec![pane("a", "ta")]);
+            this.model.add_space("s", "", "/tmp", tab);
+            this.model.add_tab("s", Tab::new("u", "", "d", "td"));
+            this.model.select_tab("t");
+            this.run_as("pane.focus", json!({ "pane": "a" }), false, window, cx);
+        });
+        cx.run_until_parked();
+        let wait = |cx: &mut gpui::VisualTestContext, ms: u64| {
+            cx.executor().advance_clock(Duration::from_millis(ms));
+            cx.run_until_parked();
+        };
+        let keys = |cx: &mut gpui::VisualTestContext, command: &str| {
+            view.update_in(cx, |this, window, cx| this.run_as(command, json!({}), false, window, cx));
+            cx.run_until_parked();
+        };
+        let term = view.update(cx, |this, _| this.terms["a"].view.clone());
+        let mut out = String::new();
+        for i in 0..80 {
+            out.push_str(&format!("\x1b[3{}mline {i} \x1b[1;4mbold\x1b[0m \x1b[44m blue \x1b[0m ─┼─ fi=>\r\n", i % 8));
+        }
+        out.push_str("\x1b[7mprompt\x1b[0m $ ");
+        term.update(cx, |t, cx| t.ingest(vec![crate::hc::Stream::Data(out.into_bytes())], cx));
+        wait(cx, 100);
+        let origin = view.update(cx, |this, _| this.bounds.borrow()["a"].origin);
+        let none = Modifiers::default();
+        let (from, to) = (point(origin.x + px(12.), origin.y + px(30.)), point(origin.x + px(90.), origin.y + px(50.)));
+        cx.simulate_mouse_down(from, MouseButton::Left, none);
+        cx.simulate_mouse_move(to, Some(MouseButton::Left), none);
+        cx.simulate_mouse_up(to, MouseButton::Left, none);
+        cx.simulate_event(gpui::ScrollWheelEvent { position: to, delta: gpui::ScrollDelta::Lines(point(0., 3.)), ..Default::default() });
+        wait(cx, 100);
+        let drawing = |cx: &mut gpui::VisualTestContext| term.update(cx, |t, _| t.drawing());
+        let (shown, released) = drawing(cx);
+        assert!(!released && shown.contains("line ") && !shown.contains("selection None") && !shown.contains("prompt"), "not drawn colored, selected and scrolled back: {shown}");
+
+        keys(cx, "tab.next");
+        wait(cx, 1000);
+        keys(cx, "tab.prev");
+        wait(cx, 100);
+        assert_eq!(drawing(cx), (shown.clone(), false), "a quick flip changed or released the drawing");
+
+        keys(cx, "tab.next");
+        wait(cx, 1000);
+        assert!(!drawing(cx).1, "released within a second of hiding");
+        wait(cx, 4000);
+        assert!(drawing(cx).1, "hidden 5 s, the drawing caches are still held");
+
+        keys(cx, "tab.prev");
+        wait(cx, 100);
+        assert_eq!(drawing(cx), (shown.clone(), false), "drawn again differently after the release");
+
+        // Shown again, it watches again: hidden once more, it frees them once more.
+        keys(cx, "tab.next");
+        wait(cx, 5000);
+        assert!(drawing(cx).1, "a second hiding kept the drawing caches");
+        keys(cx, "tab.prev");
+        wait(cx, 100);
+        assert_eq!(drawing(cx), (shown, false));
+    }
+
     /// Mods see window().active follow the focus, losing it too: a probe mod
     /// notes every value it renders with while the window is focused and
     /// blurred, and the poll that checks the focus runs in between.

@@ -144,6 +144,8 @@ struct Shared {
     state: GhosttyRenderState,
     size: GhosttySizeReportSize,
     held_since: Option<Instant>,
+    /// `state` is new (`Vt::release_frame_caches`) and holds no frame yet.
+    released: bool,
     title_changed: bool,
     /// Replies the terminal writes back to the program (e.g. kitty graphics acks).
     replies: Vec<u8>,
@@ -608,7 +610,10 @@ fn ok(r: GhosttyResult, what: &str) {
 
 unsafe extern "C" fn on_render_hold(_t: GhosttyTerminal, userdata: *mut c_void, held: bool) {
     let shared = unsafe { &mut *(userdata as *mut Shared) };
-    if held {
+    if held && shared.released {
+        // Nothing of this terminal is on screen to keep: capturing would only
+        // fill the released state again while nobody sees it.
+    } else if held {
         // Capture the finished frame the program wants on screen before it redraws.
         unsafe { ghostty_render_state_update(shared.state, _t) };
         shared.held_since = Some(Instant::now());
@@ -665,7 +670,7 @@ impl Vt {
             ok(ghostty_mouse_event_new(std::ptr::null(), &mut mouse_event), "mouse_event_new");
 
             install_png_decoder();
-            let mut shared = Box::new(Shared { state, size: GhosttySizeReportSize { rows: rows.max(1), columns: cols.max(1), cell_width: 0, cell_height: 0 }, held_since: None, title_changed: false, replies: Vec::new(), clipboard_write: true, clipboard: [None, None] });
+            let mut shared = Box::new(Shared { state, size: GhosttySizeReportSize { rows: rows.max(1), columns: cols.max(1), cell_width: 0, cell_height: 0 }, held_since: None, released: false, title_changed: false, replies: Vec::new(), clipboard_write: true, clipboard: [None, None] });
             let ud = &mut *shared as *mut Shared as *const c_void;
             ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_USERDATA, ud);
             let hold: GhosttyTerminalRenderHoldFn = Some(on_render_hold);
@@ -732,6 +737,9 @@ impl Vt {
                 win32: Default::default(),
             };
             vt.apply_theme();
+            // The update above only read the default colors: a terminal
+            // attached in a hidden tab holds no screen copy until drawn.
+            vt.release_frame_caches();
             vt
         }
     }
@@ -1529,6 +1537,7 @@ impl Vt {
             if self.shared.held_since.is_none() {
                 ghostty_render_state_update(state, self.term);
             }
+            self.shared.released = false;
 
             let mut colors = GhosttyRenderStateColors { size: std::mem::size_of::<GhosttyRenderStateColors>(), ..Default::default() };
             ghostty_render_state_get(state, GHOSTTY_RENDER_STATE_DATA_COLORS, &mut colors as *mut _ as *mut c_void);
@@ -1597,6 +1606,34 @@ impl Vt {
             let cursor_cell = cur.viewport_has_value.then_some((cur.viewport_x, cur.viewport_y));
             Frame { rows, all, cursor, cursor_cell, bg: bg_default, search_spans: self.search_spans.clone() }
         }
+    }
+
+    /// Frees what drawing keeps from frame to frame: libghostty's copy of the
+    /// screen (its render state) and the rows read from it, a few MB for a full
+    /// screen. The screen itself, scrollback, selection and images stay; the
+    /// next `frame` reads everything again. Not while the program holds a
+    /// synchronized update: the held frame is what gets shown next.
+    pub fn release_frame_caches(&mut self) -> bool {
+        if self.shared.held_since.is_some() {
+            return false;
+        }
+        if !self.shared.released {
+            unsafe {
+                let mut state = std::ptr::null_mut();
+                ok(ghostty_render_state_new(std::ptr::null(), &mut state), "render_state_new");
+                ghostty_render_state_free(self.shared.state);
+                self.shared.state = state;
+            }
+            self.shared.released = true;
+            self.seen = HashMap::new();
+            self.seen_with = (0, 0);
+        }
+        true
+    }
+
+    #[cfg(test)]
+    pub fn frame_caches_released(&self) -> bool {
+        self.shared.released && self.seen.is_empty()
     }
 
     unsafe fn read_cell(&mut self, fg_default: Rgb, selected: bool) -> Cell {
@@ -1791,6 +1828,31 @@ impl Drop for Vt {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn released_frame_caches_read_the_same_frame_again() {
+        let cells = |f: &Frame| f.rows.iter().map(|r| (**r).clone()).collect::<Vec<_>>();
+        let mut vt = Vt::new(20, 4);
+        vt.write(b"\x1b[31mred\x1b[0m \x1b[1;44mbold\x1b[0m\r\nplain\r\n$ ");
+        let shown = vt.frame();
+        assert!(vt.release_frame_caches());
+        assert!(vt.frame_caches_released());
+        let again = vt.frame();
+        assert!(!vt.frame_caches_released());
+        assert!(cells(&shown) == cells(&again) && shown.cursor_cell == again.cursor_cell && shown.bg == again.bg, "a released terminal read a different frame");
+
+        // Held mid synchronized update: the held frame is what shows next.
+        vt.write(b"\x1b[?2026hhalf");
+        assert!(!vt.release_frame_caches(), "released the frame a synchronized update holds");
+        vt.write(b" done\x1b[?2026l");
+        assert!(vt.release_frame_caches());
+        // Released, a synchronized update doesn't fill the render state again.
+        vt.write(b"\x1b[?2026hnext");
+        assert!(vt.frame_caches_released());
+        vt.write(b"\x1b[?2026l");
+        let text: String = vt.frame().rows[2].iter().map(|c| c.text.as_str()).collect();
+        assert!(text.starts_with("$ half donenext"), "{text:?}");
+    }
 
     fn finish_search(vt: &mut Vt) {
         for _ in 0..100_000 {
