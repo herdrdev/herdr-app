@@ -2055,6 +2055,7 @@ mod tests {
                 is_emoji: true,
                 subpixel_rendering: false,
                 dilation: 0,
+                thicken: None,
                 foreground: [0, 0, 0, 255],
             };
             let raster_bounds = text_system.glyph_raster_bounds(&params)?;

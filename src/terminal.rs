@@ -84,7 +84,7 @@ struct Grid {
     /// Each row's drawing by position, kept while the row is the same (`Rc`).
     painted: Vec<(Rc<Vec<vt::Cell>>, Vec<RowOp>, Option<usize>)>,
     /// Font size, cell size, font, loaded fonts and ligature setting used to draw.
-    painted_with: (u32, Size<Pixels>, String, u64, bool),
+    painted_with: (u32, Size<Pixels>, String, u64, bool, Option<u8>),
 }
 
 pub struct TerminalView {
@@ -251,7 +251,7 @@ impl TerminalView {
                 thumb: None,
                 track: None,
                 painted: Vec::new(),
-                painted_with: (0, Size::default(), String::new(), 0, false),
+                painted_with: (0, Size::default(), String::new(), 0, false, None),
             })),
             focus: cx.focus_handle(),
             was_focused: false,
@@ -1535,6 +1535,14 @@ fn find_input_style() -> InputEditorStyle {
     }
 }
 
+/// font_thicken's strength, when on: the terminal's glyphs thicken alike
+/// whatever their color, as Ghostty's do, where macOS otherwise thickens
+/// light text on dark more than dark text on light.
+fn glyph_thicken() -> Option<u8> {
+    let s = crate::settings::get();
+    s.font_thicken.then(|| s.font_thicken_strength.min(255) as u8)
+}
+
 fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, window: &mut Window, cx: &mut App) {
     crate::bench::count(&crate::bench::GRID);
     let mut g = grid.borrow_mut();
@@ -1600,7 +1608,7 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     // line rebuilds one row, not the whole screen.
     let ligatures = crate::settings::get().font_ligatures;
     let cursor = frame.cursor_cell.filter(|_| ligatures);
-    let with = (crate::settings::font_size().to_bits(), cell, crate::settings::terminal_font(), crate::settings::fonts_added(), ligatures);
+    let with = (crate::settings::font_size().to_bits(), cell, crate::settings::terminal_font(), crate::settings::fonts_added(), ligatures, glyph_thicken());
     // When every row changed (output scrolling), nothing is kept: the next
     // frame would find none of them the same.
     let mut painted = std::mem::take(&mut grid.borrow_mut().painted);
@@ -1972,7 +1980,7 @@ impl Render for TerminalView {
                         grid.borrow_mut().fit(cols, rows, cell, window.scale_factor());
                     },
                     move |bounds, _, window, cx| {
-                        paint_grid(bounds, &grid_paint, focused, window, cx);
+                        window.with_glyph_thicken(glyph_thicken(), |window| paint_grid(bounds, &grid_paint, focused, window, cx));
                         let view = selection_view.clone();
                         window.on_mouse_event(move |ev: &MouseMoveEvent, phase, _, cx| {
                             if phase == DispatchPhase::Capture {

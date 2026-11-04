@@ -659,6 +659,15 @@ What's about the user, never a look:
 - `font_ligatures`: programming ligatures are off by default; set `true` to
   enable them in terminal fonts such as JetBrains Mono and Fira Code. The cursor
   and background changes (including selections) break ligatures so individual cells stay clear.
+- `font_thicken`: `true` thickens terminal text the same for every text color,
+  as Ghostty's `font-thicken` does (macOS). Without it, macOS font smoothing
+  thickens light text on a dark background more than dark text on a light one.
+  Panels keep the system's smoothing. Off by default.
+- `font_thicken_strength` (0..255): how much `font_thicken` thickens, Ghostty's
+  `font-thicken-strength`. Default 255. macOS applies it in a few steps: 0 to
+  about 100 all draw as its lightest smoothing, the one dark text gets without
+  `font_thicken`; 255 draws as white text does. Changes apply immediately,
+  including text already on screen.
 - `theme`: a theme name or `{light, dark}`; used where the layout sets none.
   The theme picker overrides any layout and stays on that layout.
 - `colors`: theme color overrides (`{"accent":"#ff8800"}`), with the same

@@ -1278,6 +1278,9 @@ pub struct RenderGlyphParams {
     pub is_emoji: bool,
     pub subpixel_rendering: bool,
     pub dilation: u8,
+    /// HERDR: Ghostty-style thickening at this strength (0 to 255),
+    /// independent of the color; overrides `dilation` where supported.
+    pub thicken: Option<u8>,
     pub foreground: [u8; 4],
 }
 
@@ -1293,6 +1296,7 @@ impl Hash for RenderGlyphParams {
         self.is_emoji.hash(state);
         self.subpixel_rendering.hash(state);
         self.dilation.hash(state);
+        self.thicken.hash(state);
         self.foreground.hash(state);
     }
 }
