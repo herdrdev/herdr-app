@@ -102,6 +102,26 @@ endpoints from `focused().selection` or `terminals()`; null means none (or no
 attached view). Use `selection.end` as a copy-mode cursor. Selection facts update
 when the selection changes, without refreshing readers on ordinary terminal output.
 
+For an unavailable remote tab or space, use `tab.close {id, local: true}` or
+`space.close {id, local: true}` to close it only on this screen. This never
+kills terminals or edits the remote layout, even if the machine reconnects
+before the command runs. It returns `{ "ok": true, "local": true }` and stays
+closed across reconnects and restarts. `local` must be a boolean and requires
+a remote target. Ordinary connected close ends the remaining visible terminals;
+already dismissed work stays running. Restore that work first to end it here.
+`pane.close {pane, local: true}` supports only the last pane, cascading to
+its tab/space; for other panes close the tab explicitly.
+Keep the qualified tab/space ID from `ls` before closing. To restore it, run
+`tab.select {id}` or `space.select {id}` after its remote layout is available;
+restoration combines the last fetched authoritative hidden content with pending
+local edits and does not force a remote read. Reconnect, attention, index and
+next/previous selection never restore it automatically. Downgrading to an
+older app may lose these private exclusions.
+If a competing write removes an unacknowledged view from the authoritative
+layout, its terminal keeps running and the private exclusion prevents silent
+re-adoption. Saved-ID selection cannot recreate a view absent from that layout;
+it can restore the view only once the authoritative layout contains it again.
+
 `terminal.search` opens a find bar in the focused terminal. It searches that
 terminal's screen and scrollback; Enter and Shift-Enter move between matches,
 Escape closes the bar while its find field has focus, and each terminal keeps its own query (reopening selects it, so typing replaces it).

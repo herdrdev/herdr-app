@@ -562,7 +562,7 @@ The main ones:
   The space lives there, its
   terminals start in that machine's home unless folder, and its tabs and
   splits stay there; `spaces()` gives each space's `machine`, null here),
-  `space.close {id?, confirmed?}`, `space.rename {id?, name}` ("": Herdr's name again),
+  `space.close {id?, confirmed?, local?}`, `space.rename {id?, name}` ("": Herdr's name again),
   `space.move {id, index}`, `space.select {index | id}`, `space.next`, `space.prev`.
   With no `argv`, the target core chooses that machine's default shell (PowerShell 7 when available on Windows).
 - Tabs: `tab.new {name?, space?, folder?, argv?, task?, focus?}` (argv: an
@@ -571,7 +571,7 @@ The main ones:
   that exits with a nonzero code within two seconds of launch shows an error
   toast with its exit code and last output lines. Or `tab.new {name?, space?, mod,
   props?, focus?}` for a tab whose only pane is a mod (a file, a board; split a shell
-  in beside it like any tab), `tab.close {id?, confirmed?}` (closing the last tab
+  in beside it like any tab), `tab.close {id?, confirmed?, local?}` (closing the last tab
   closes its space and asks first unless confirmed),
   `tab.rename {id?, name}` ("": its number again), `tab.move {id, index}`,
   `tab.select {index | id}`, `tab.next`, `tab.prev`,
@@ -581,8 +581,25 @@ The main ones:
   `tab.new` keeps the shown space and the target space's selected tab (with no
   space shown, the new space is shown), for work the person looks at later;
   such tabs go last in their space, in the order made. `focus` is a boolean.
+- Remote `space.close` / `tab.close` with `local: true` closes the view on this
+  screen only, persists across restarts and reconnects, and returns `local: true`.
+  Terminals keep running and other screens' documents are unchanged. Unavailable
+  remote close asks people for this choice; scripts must pass `local: true`
+  explicitly. Local-machine targets reject it. Keep the qualified ID before
+  closing: explicit `space.select {id}` / `tab.select {id}` restores that view
+  when the remote layout is available. Restoration combines the last fetched
+  authoritative hidden content and pending local edits; it does not force a read.
+  Ordinary close ends visible work and preserves already dismissed work; restore
+  that work first to end it here. Index/next, reconnects and agent attention
+  do not restore it. Older app versions do not retain this private exclusion.
+  If a competing write removes an unacknowledged view from the authoritative
+  layout, its terminal keeps running and the local exclusion prevents silent
+  re-adoption. Saved-ID selection cannot recreate an absent view; the
+  authoritative layout must contain it again before it can be restored.
 - Panes: `pane.split {direction: "right" | "down", pane?, argv? | mod?, props?}` (a new
-  terminal, or a mod pane), `pane.close {pane?}`,
+  terminal, or a mod pane), `pane.close {pane?, confirmed?, local?}`,
+  `local: true` on `pane.close` works only for the last pane of a remote tab;
+  otherwise close its tab instead.
   `pane.zoom {pane?}`, `pane.focus {pane | terminal}`, `pane.go {direction}`,
   `pane.swap {pane?, direction | target}`.
   `pane.go` prefers the most recently focused pane along the nearest edge in that
