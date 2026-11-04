@@ -136,6 +136,7 @@ fn headless() {
         std::sync::Arc::new(()),
         gpui_platform::current_headless_renderer,
     );
+    markdown_selection_pixels(&mut cx);
     // TestPlatform uses 2x HiDPI; these physical widths force row padding.
     for width in [129., 131.] {
         let window = cx
@@ -144,6 +145,62 @@ fn headless() {
         cx.update_window(window.into(), |_, window, cx| check(window, cx))
             .unwrap();
     }
+}
+
+#[cfg(not(windows))]
+fn markdown_selection_pixels(cx: &mut HeadlessAppContext) {
+    use gpui_base::{TextSelectionLayer, TextView, TextViewState, TextViewStyle};
+
+    struct MarkdownScene {
+        text: Entity<TextViewState>,
+    }
+    impl Render for MarkdownScene {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .bg(rgb(0x000000))
+                .text_size(px(24.))
+                .child(TextSelectionLayer)
+                .child(
+                    TextView::new(&self.text)
+                        .scrollable(false)
+                        .selectable(true)
+                        .style(
+                            TextViewStyle::default()
+                                .with_foreground(rgb(0xffffff).into())
+                                .with_selection(rgb(0xff0000).into()),
+                        ),
+                )
+        }
+    }
+
+    let window = cx
+        .open_window(size(px(320.), px(100.)), |_, cx| {
+            gpui_base::init(cx);
+            let text = cx.new(|cx| TextViewState::markdown("Selected glyphs stay visible", cx));
+            cx.new(|_| MarkdownScene { text })
+        })
+        .unwrap();
+    cx.update_window(window.into(), |root, window, cx| {
+        let _ = window.draw(cx);
+        let before = window.render_to_image().unwrap();
+        root.downcast::<MarkdownScene>().unwrap().update(cx, |root, cx| {
+            root.text.update(cx, |text, cx| text.select_all(cx));
+        });
+        let _ = window.draw(cx);
+        let after = window.render_to_image().unwrap();
+        let white = |image: &image::RgbaImage| {
+            image.pixels().filter(|p| p[0] > 240 && p[1] > 240 && p[2] > 240).count()
+        };
+        let unselected_glyphs = white(&before);
+        let selected_glyphs = white(&after);
+        println!("markdown white glyph pixels: unselected={unselected_glyphs}, selected={selected_glyphs}");
+        assert!(unselected_glyphs > 100, "fixture must render visible glyphs");
+        assert!(after.pixels().any(|p| p[0] == 255 && p[1] == 0 && p[2] == 0),
+            "fixture must paint a selection");
+        assert!(selected_glyphs >= unselected_glyphs * 9 / 10,
+            "selection must be behind glyphs");
+    }).unwrap();
 }
 
 fn native() {

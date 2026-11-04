@@ -328,6 +328,10 @@ layout's look and a block can differ:
   folder (or the home's `fonts/`) load at start and on the next look change,
   so a layout and its mod folder travel together (Herdr 98's do: its pixel
   fonts are in `mods/win98/fonts/`).
+- `pane_scrollbars` in settings.json (default `true`): show terminal scrollback
+  with a slim thumb and track. Drag the thumb or click the track to jump there.
+  With little or no terminal padding, the hit lane overlays the last 8px;
+  terminal columns do not change. Hidden in alternate-screen programs.
 - `terminal_opacity` (0..1): below 1, the background behind a terminal
   (a pane frame's, the layout's gradient) shows through its text.
 - Switching layouts switches the look. The theme menu changes the shown
@@ -466,6 +470,10 @@ the build doesn't do.
 
 ## Keys: `keys.json`
 
+On upgrade, an untouched keys file from an earlier release gets the current
+shortcuts. Any edit, even whitespace, keeps the entire file as yours; new default
+shortcuts must then be added by hand.
+
 ```json
 {
   "global":   { "ctrl-shift-t": "tab.new", "ctrl-shift-o": "pane.split:right", "alt-1": "space.select:1" },
@@ -482,6 +490,14 @@ the build doesn't do.
   command's first argument), `send:<text>` (types into the terminal),
   `<mod>.<command>` (delivered to that mod's `nextCommand()`), or `terminal`
   (the program gets the key).
+- Named, typed command arguments use an object instead of a string:
+  `"ctrl-shift-r": {"command": "layout.resize", "args": {"id": "sidebar", "px": 240}}`.
+  `command` names an app command; `args` is an object (optional, defaults to `{}`).
+  It can pass several arguments, numbers, booleans, arrays or nested objects.
+  String actions keep their literal first-argument shorthand, including numeric
+  indexes: `space.new:{work}` names a space `{work}`, and `space.new:{}` names it `{}`.
+  Invalid binding objects or rejected arguments show an error toast when pressed;
+  the key does not go to the terminal program.
 - Plain ctrl+letters go to the program unless bound. Programs rely on
   ctrl+c, ctrl+d, ctrl+l, ctrl+r, ctrl+w, ctrl+a, ctrl+e, ctrl+u, ctrl+k,
   ctrl+z and ctrl+[ (Escape); ctrl+alt is AltGr on Windows; option+digits
@@ -496,6 +512,11 @@ the build doesn't do.
   Existing `keys.json` files don't need to change.
 - Terminal keys honor the program's negotiated Kitty mode, including on Windows.
 - Windows terminal Escape stays separate from the following key.
+- Search: `ctrl-shift-f` (Cmd-F on macOS) opens a find bar inside the focused terminal;
+  Enter/Shift-Enter moves through matches and Escape closes it while the find field
+  has focus. Clicking the terminal puts typing, including Escape, back in the program;
+  the bar and its matches stay.
+  Each terminal keeps its own query, and reopening selects it so typing replaces it. Search covers the screen and scrollback without replacing text selection.
 
 ## Commands
 
@@ -547,7 +568,8 @@ The main ones:
   starting directory for tabs and right/down splits, with or without `argv`), `terminal.kill {terminal}`,
   `terminal.keep {terminal, place?}`, `terminal.park {terminal}`,
   `terminal.peek {terminal}` (peek over the tab, with keep-as-tab and close),
-  `terminal.show {terminal?, pane?}`, `terminal.copy`, `terminal.paste` (copied
+  `terminal.show {terminal?, pane?}`, `terminal.search` (screen and scrollback;
+  find bar state stays with that terminal), `terminal.copy`, `terminal.paste` (copied
   files, such as Finder's or a clipboard manager's image, as if dropped; an image
   alone as `terminal.paste_image` pastes it), `terminal.paste_image` (Ctrl+V: an
   image, into a terminal on another machine: copied there, its path pasted; on
@@ -557,6 +579,10 @@ The main ones:
   `terminal.right_click {to: "program" | "menu", terminal?}` (where right-clicks go
   when the program takes the mouse; kept as its label `herdr.right-click=program`;
   Shift+right-click is always Herdr's menu),
+  `terminal.scroll {lines | pages | to: "top" | "bottom", terminal?}` (moves Herdr's view of the
+  history, not the program: negative lines or pages go up, toward history; pages may be
+  fractional, one page is the terminal's rows; on the alternate screen, such as vim or less,
+  there is no history, so nothing moves),
   `terminal.pin {terminal, pinned}` (pins an agent to the top of the agent lists;
   kept on the terminal as `herdr.pinned`, so every Herdr client shows it, and
   gone when the terminal ends; read it as `agents()` `pinned`). Copy, paste, paste-image and implicit
@@ -703,6 +729,10 @@ What's about the user, never a look:
   `p` writes Linux primary selection. `s` is ignored; cut buffers `0`–`7`
   are treated as the system clipboard.
   Clipboard reads (`?`) are never allowed.
+- `pane_scrollbars`: `false` hides the scroll position thumb at a terminal
+  pane's right edge (default `true`). It shows only when the pane has
+  scrollback — never on the alternate screen (editors, pagers) — and
+  drags to move through it.
 - `telemetry`: `false` stops anonymous usage data and deletes what wasn't
   sent (on when absent; Settings → Privacy shows each report word for
   word, and `telemetry()` in mods). Once a day the app sends counts:
