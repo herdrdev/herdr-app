@@ -183,6 +183,12 @@ pub fn of(app: Option<&str>, argv: &[String]) -> Value {
     TABLE.with(|t| resolve(&t.borrow(), app, argv))
 }
 
+/// How the app calls an agent ("Kiro finished"), from its 7501 `app`: the
+/// name `of` shows for it (the person's `programs.json` included), else the `app`.
+pub fn name(app: &str) -> String {
+    TABLE.with(|t| find(&t.borrow(), app).map(|(key, e)| e.name.clone().unwrap_or_else(|| key.to_owned()))).unwrap_or_else(|| app.to_owned())
+}
+
 /// An agent's 7501 `app` as a name Herdr ships (`claude` for `claude-code`),
 /// else `other` (`unknown` when it gave none): never the person's own words.
 pub fn agent_name(app: Option<&str>) -> String {
