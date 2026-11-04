@@ -268,7 +268,7 @@ struct Term {
 enum TerminalChange {
     Keep { space: String, tab: String, pane: String, name: String, target: Option<String>, axis: Axis },
     Park,
-    /// Reverse a rejected Keep remotely without editing the current layout.
+    /// Reverse a Keep into a removed shared space without editing the current layout.
     UndoKeep,
 }
 
@@ -2698,9 +2698,11 @@ impl AppWindow {
             TerminalChange::Keep { space, tab, pane, name, target, axis } => {
                 if !self.live.contains_key(&address) { return; }
                 if self.model.pane_of(&address).is_none() {
-                    // A local close may have won the race with the successful Keep reply.
-                    if self.model.space(&space).is_none() || self.model.dismissed_target(&address, &space, Some(&tab)) {
-                        // Undo our remote change even when public Park would reject a dismissed view.
+                    // Closing on this screen keeps the remote placement and keep protection.
+                    // Check first: dismissing a whole space also removes it from this model.
+                    if self.model.dismissed_target(&address, &space, Some(&tab)) { return; }
+                    if self.model.space(&space).is_none() {
+                        // A genuinely removed shared space retains the existing cleanup policy.
                         self.start_terminal_change(address, TerminalChange::UndoKeep, window, cx);
                         return;
                     }
@@ -5518,7 +5520,7 @@ mod tests {
     fn pending_keep_respects_closed_tab() { in_own_process("pending_keep_tab"); }
 
     #[test]
-    fn pending_keep_rolls_back_closed_space() { in_own_process("pending_keep_space"); }
+    fn pending_keep_preserves_remote_keep_for_closed_space() { in_own_process("pending_keep_space"); }
 
     #[test]
     fn pending_keep_drain_preserves_hidden_layout() { in_own_process("pending_keep_drain"); }
@@ -5538,25 +5540,27 @@ mod tests {
 
     #[gpui::test]
     fn pending_keep_drain(cx: &mut gpui::TestAppContext) {
-        if running_alone("pending_keep_drain") { pending_keep_case(cx, "drain"); }
+        if running_alone("pending_keep_drain") {
+            for case in ["draining", "drain"] { pending_keep_case(cx, case); }
+        }
     }
 
     #[gpui::test]
     fn pending_keep_valid(cx: &mut gpui::TestAppContext) {
         if running_alone("pending_keep_valid") {
-            for case in ["restore", "fresh", "visible", "failed", "moved", "removed"] {
+            for case in ["restore", "fresh", "visible", "failed", "moved", "removed", "closed-shared"] {
                 pending_keep_case(cx, case);
             }
         }
     }
 
     #[test]
-    fn pending_keep_preserves_adoption_during_rollback() { in_own_process("pending_keep_adopted"); }
+    fn pending_keep_preserves_adoption_before_and_after_reply() { in_own_process("pending_keep_adopted"); }
 
     #[gpui::test]
     fn pending_keep_adopted(cx: &mut gpui::TestAppContext) {
         if running_alone("pending_keep_adopted") {
-            for case in ["adopted", "adopted-failed", "adopted-drain"] {
+            for case in ["adopted-before", "adopted-after"] {
                 pending_keep_case(cx, case);
             }
         }
@@ -5582,13 +5586,19 @@ mod tests {
             // Keep document writes controlled too; callbacks below run synchronously.
             let (document_tx, document_rx) = std::sync::mpsc::channel();
             slot.pending = Some(document_rx);
-            this.live.insert("remote/new".into(), json!({"name":"newcomer"}));
+            this.live.insert("remote/parent".into(), json!({}));
+            this.live.insert("remote/new".into(), json!({"name":"newcomer", "parent":"remote/parent", "keep":true}));
             this.model.focus_pane("remote/p");
             let reply = this.keep_terminal("remote/new", if case == "fresh" { "tab" } else { "right" }, window, cx).unwrap();
             assert_eq!(reply["pending"], true);
             let mut pending = this.pending_terminals.remove("remote/new").unwrap();
             let command = if case == "space" || case == "visible" { "space.close" } else { "tab.close" };
-            if case == "removed" {
+            if case == "closed-shared" {
+                let empty = Document::capture(&Model::default(), None);
+                this.documents_updated(None, vec![("remote".into(), crate::mirror_sync::Outcome::Read(empty, 1))], window, cx);
+                assert!(this.model.dismissed.is_empty());
+                assert!(this.model.space("remote/s").is_none());
+            } else if case == "removed" {
                 this.model.remove_tab("remote/t");
             } else if case == "moved" {
                 this.model.tab_mut("remote/t").unwrap().root.find_mut("remote/p").unwrap().id = "remote/moved".into();
@@ -5608,6 +5618,14 @@ mod tests {
                 this.documents_updated(None, vec![("remote".into(), crate::mirror_sync::Outcome::Read(replacement, 1))], window, cx);
                 assert!(this.model.space("remote/s").is_none());
             }
+            let adopted = if case.starts_with("adopted-") {
+                source.split("p2", crate::layout::Axis::Row, "pn", "new");
+                Some(Document::capture(&source, None))
+            } else { None };
+            if case == "adopted-before" {
+                this.documents_updated(None, vec![("remote".into(), crate::mirror_sync::Outcome::Read(adopted.clone().unwrap(), 2))], window, cx);
+                assert_eq!(this.model.pane_of("remote/new").as_deref(), Some("remote/pn"));
+            }
             if case == "drain" {
                 // Feed the accepted Keep result through the real quit-time drain.
                 let (tx, rx) = std::sync::mpsc::channel();
@@ -5618,58 +5636,77 @@ mod tests {
                 this.drain_documents(window, cx);
                 assert!(this.pending_terminals.is_empty());
                 assert!(!this.changing_terminals.contains("remote/new"));
+                assert_eq!(this.live["remote/new"]["labels"]["herdr.space"], "s");
+                assert_eq!(this.live["remote/new"]["keep"], true);
+                assert!(!this.model.dismissed.is_empty());
                 assert!(this.model.tab("remote/t").is_none(), "drain must not resurrect the dismissed tab");
                 assert_eq!(this.documents["remote"].capture(&this.model, Some("remote")), doc);
                 return;
             }
+            if case == "draining" { this.draining = true; }
             let result = if case == "failed" { Err("keep failed".into()) } else { Ok(()) };
             this.apply_terminal_change("remote/new".into(), pending.change, result, window, cx);
             match case {
-                "tab" | "space" | "adopted" | "adopted-failed" | "adopted-drain" => {
-                    assert!(this.model.tab("remote/t").is_none(), "late Keep must not resurrect the dismissed tab");
-                    assert_eq!(this.documents["remote"].capture(&this.model, Some("remote")), doc, "original split and metadata must remain canonical");
-                    let rollback = this.pending_terminals.remove("remote/new").expect("internal rollback bypasses dismissed-terminal guards");
-                    assert!(matches!(rollback.change, super::TerminalChange::UndoKeep));
-                    assert!(this.changing_terminals.contains("remote/new"));
-                    if case.starts_with("adopted") {
-                        // An authoritative read adopts the terminal while cleanup is pending.
-                        source.split("p2", crate::layout::Axis::Row, "pn", "new");
-                        let adopted = Document::capture(&source, None);
-                        this.documents_updated(None, vec![("remote".into(), crate::mirror_sync::Outcome::Read(adopted.clone(), 2))], window, cx);
-                        assert_eq!(this.model.pane_of("remote/new").as_deref(), Some("remote/pn"));
-                        assert_eq!(this.documents["remote"].capture(&this.model, Some("remote")), adopted);
-                        let result = if case == "adopted-failed" { Err("rollback failed".into()) } else { Ok(()) };
-                        if case == "adopted-drain" {
-                            let (tx, rx) = std::sync::mpsc::channel();
-                            tx.send(result).unwrap();
-                            this.pending_terminals.insert("remote/new".into(), super::PendingTerminalChange { change: rollback.change, reply: rx });
-                            this.documents.get_mut("remote").unwrap().pending = None;
-                            this.drain_documents(window, cx);
-                        } else {
-                            this.apply_terminal_change("remote/new".into(), rollback.change, result, window, cx);
-                        }
-                        assert_eq!(this.model.pane_of("remote/new").as_deref(), Some("remote/pn"), "rollback removed a pane adopted elsewhere");
-                        assert!(this.model.tab("remote/t").is_none(), "dismissed original must remain hidden");
-                        assert_eq!(this.documents["remote"].capture(&this.model, Some("remote")), adopted, "cleanup must preserve the adopted canonical document");
-                        assert!(this.pending_terminals.is_empty());
-                        assert!(!this.changing_terminals.contains("remote/new"));
-                        assert!(this.closing_terminals.is_empty());
-                        drop(document_tx);
-                        this.documents.get_mut("remote").unwrap().pending = None;
-                        return;
-                    }
-                    // Both successful and failed cleanup retain the hidden canonical layout.
-                    let result = if case == "tab" { Ok(()) } else { Err("rollback failed".into()) };
-                    this.apply_terminal_change("remote/new".into(), rollback.change, result, window, cx);
-                    assert!(this.model.tab("remote/t").is_none());
-                    assert_eq!(this.documents["remote"].capture(&this.model, Some("remote")), doc);
+                "draining" => {
+                    // Observe the drain-mode completion before a drain loop could
+                    // consume a newly scheduled cleanup and hide that regression.
+                    assert!(this.pending_terminals.is_empty(), "drain-mode Keep must not schedule cleanup");
                     assert!(!this.changing_terminals.contains("remote/new"));
-                    assert!(this.closing_terminals.is_empty());
+                    assert!(this.model.tab("remote/t").is_none());
+                    assert!(!this.model.dismissed.is_empty());
+                    assert_eq!(this.documents["remote"].capture(&this.model, Some("remote")), doc);
+                    assert_eq!(this.live["remote/new"]["labels"]["herdr.space"], "s");
+                    assert_eq!(this.live["remote/new"]["keep"], true);
+                }
+                "tab" | "space" | "adopted-before" | "adopted-after" => {
+                    // Scheduling cleanup is itself destructive: start_terminal_change is
+                    // the only remote-call entry from this completion, and queues it first.
+                    assert!(this.pending_terminals.is_empty(), "private dismissal must not schedule remote label/keep cleanup");
+                    assert!(!this.changing_terminals.contains("remote/new"));
+                    assert!(this.model.tab("remote/t").is_none(), "late Keep must not resurrect the dismissed tab");
+                    if case == "adopted-after" {
+                        this.documents_updated(None, vec![("remote".into(), crate::mirror_sync::Outcome::Read(adopted.clone().unwrap(), 2))], window, cx);
+                    }
+                    let canonical = adopted.as_ref().unwrap_or(&doc);
+                    assert_eq!(this.documents["remote"].capture(&this.model, Some("remote")), *canonical, "original split and metadata must remain canonical");
+                    if adopted.is_some() {
+                        assert_eq!(this.model.pane_of("remote/new").as_deref(), Some("remote/pn"));
+                    }
+                    assert!(this.documents["remote"].pending.is_some(), "completion must not replace the controlled document write");
+                    assert_eq!(this.live["remote/new"]["labels"]["herdr.space"], "s");
+                    assert_eq!(this.live["remote/new"]["labels"]["herdr.tab"], "t");
+                    assert_eq!(this.live["remote/new"]["keep"], true);
+                    // This snapshot alone is not a remote RPC proof; pair it with
+                    // the no-cleanup scheduling assertion above.
+                    this.kill(&["remote/parent".into()], cx);
+                    assert!(this.closing_terminals.contains_key("remote/parent"));
+                    assert!(!this.closing_terminals.contains_key("remote/new"), "kept child must survive parent close");
+                    this.closing_terminals.clear();
                     let dismissed = this.model.dismissed.clone();
                     assert!(!dismissed.is_empty());
-                    this.documents_updated(None, vec![("remote".into(), crate::mirror_sync::Outcome::Written(doc.clone(), 1))], window, cx);
+                    this.documents_updated(None, vec![("remote".into(), crate::mirror_sync::Outcome::Written(canonical.clone(), 3))], window, cx);
                     assert_eq!(this.model.dismissed, dismissed, "an acknowledgement must retain the private dismissal");
-                    assert_eq!(this.documents["remote"].capture(&this.model, Some("remote")), doc);
+                    assert_eq!(this.documents["remote"].capture(&this.model, Some("remote")), *canonical);
+                    this.reconcile(window, cx);
+                    assert!(!this.changing_terminals.contains("remote/new"), "same-screen reconciliation must not re-adopt hidden work");
+                    if adopted.is_none() {
+                        let command = if case == "space" { "space.select" } else { "tab.select" };
+                        let id = if case == "space" { "remote/s" } else { "remote/t" };
+                        assert_eq!(this.run_as(command, json!({"id":id}), false, window, cx), json!({"ok":true}));
+                        assert!(this.model.pane_of("remote/term-a").is_some(), "restore must preserve the original split");
+                        this.reconcile(window, cx);
+                        assert!(this.changing_terminals.contains("remote/new"), "explicit restore permits adoption from preserved labels");
+                        this.finish_adoption("remote/new", "remote/s", Some("remote/t"), window, cx);
+                        assert!(this.model.pane_of("remote/new").is_some());
+                    }
+                }
+                "closed-shared" => {
+                    let cleanup = this.pending_terminals.remove("remote/new").expect("genuinely removed shared space retains cleanup policy");
+                    assert!(matches!(cleanup.change, super::TerminalChange::UndoKeep));
+                    assert!(this.changing_terminals.contains("remote/new"));
+                    this.apply_terminal_change("remote/new".into(), cleanup.change, Ok(()), window, cx);
+                    assert!(this.model.space("remote/s").is_none());
+                    assert!(this.pending_terminals.is_empty());
                 }
                 "failed" => {
                     assert!(this.model.tab("remote/t").is_none());
