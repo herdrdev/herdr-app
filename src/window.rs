@@ -2359,21 +2359,20 @@ impl AppWindow {
     /// Starts a terminal for `space`, on `on` (another machine) or here. An
     /// empty `cwd`: the machine's home. With no argv, that machine's core
     /// picks its own shell.
-    fn spawn(&self, argv: Option<Vec<String>>, cwd: String, space: &str, ctx: &str, on: Option<&str>, size: Option<(u16, u16)>, window: &Window) -> Result<String, String> {
+    fn spawn(&self, argv: Option<Vec<String>>, cwd: String, follow: bool, space: &str, ctx: &str, on: Option<&str>, size: Option<(u16, u16)>, window: &Window) -> Result<(String, String), String> {
         let argv = argv.unwrap_or_default();
-        let cwd = Some(cwd).filter(|c| !c.is_empty());
         self.require_document(on)?;
         let labels = json!({ "herdr.space": crate::mirror::local(space, on), "herdr.tab": crate::mirror::local(ctx, on), "herdr.seen": "0" });
-        let addr = match self.core.run(argv.clone(), cwd.clone(), labels.clone(), on, size, crate::terminal::initial_display(window)) {
+        let (addr, cwd) = run_following_folder(cwd, follow, on, |cwd| match self.core.run(argv.clone(), cwd.clone(), labels.clone(), on, size, crate::terminal::initial_display(window)) {
             // An agent on a machine without `sh` (Windows): in its PowerShell instead.
             Err(e) if on.is_some() && argv.first().map(String::as_str) == Some("sh") && format!("{e:#}").contains("not found") => {
-                self.core.run(Self::powershell_argv(&argv), cwd, labels, on, size, crate::terminal::initial_display(window))
+                self.core.run(Self::powershell_argv(&argv), cwd, labels.clone(), on, size, crate::terminal::initial_display(window))
             }
             r => r,
-        }
+        })
         .map_err(|e| format!("cannot start a terminal: {e:#}"))?;
         self.born.borrow_mut().insert(addr.clone(), Instant::now());
-        Ok(addr)
+        Ok((addr, cwd))
     }
 
     /// The PowerShell form of a remote agent start (`agent_argv`): the program,
@@ -2405,6 +2404,7 @@ impl AppWindow {
     /// A space with its first tab and terminal, shown at once.
     /// `machine`: another machine (`hc machine ls`); its space starts in that machine's home.
     fn new_space(&mut self, name: &str, folder: Option<String>, ctx_name: Option<&str>, argv: Option<Vec<String>>, task: Option<&str>, machine: Option<String>, window: &Window) -> Result<Value, String> {
+        let follow = folder.is_none();
         let on = machine.as_deref();
         // The focused pane's folder only means something on its own machine.
         let here = || self.model.focused_pane().and_then(|p| self.model.address_of(&p))
@@ -2413,7 +2413,7 @@ impl AppWindow {
         let folder = folder.or_else(here).unwrap_or_else(|| if on.is_some() { String::new() } else { home() });
         let (space, ctx, pane) = (self.model.fresh_id_on("sp", on), self.model.fresh_id_on("tb", on), self.model.fresh_id_on("p", on));
         let size = self.initial_size(&Tab::new(&ctx, "", &pane, "").root, &pane, window);
-        let addr = self.spawn(Self::agent_argv(argv.clone(), task, on).or(argv), folder.clone(), &space, &ctx, on, size, window)?;
+        let (addr, folder) = self.spawn(Self::agent_argv(argv.clone(), task, on).or(argv), folder, follow, &space, &ctx, on, size, window)?;
         let ctx_name = ctx_name.map(str::trim).unwrap_or_default();
         self.model.add_space(&space, name.trim(), &folder, Tab::new(&ctx, ctx_name, &pane, &addr));
         if let Some(p) = self.model.space_mut(&space) {
@@ -2428,11 +2428,12 @@ impl AppWindow {
         if self.model.space(&space).is_none() {
             return Err(format!("no space {space:?}"));
         }
+        let follow = folder.is_none();
         let folder = folder.unwrap_or_else(|| self.folder_for(&space));
         let on = self.machine_of(&space);
         let (ctx, pane) = (self.model.fresh_id_on("tb", on.as_deref()), self.model.fresh_id_on("p", on.as_deref()));
         let size = self.initial_size(&Tab::new(&ctx, "", &pane, "").root, &pane, window);
-        let addr = self.spawn(Self::agent_argv(argv.clone(), task, on.as_deref()).or(argv), folder, &space, &ctx, on.as_deref(), size, window)?;
+        let (addr, _) = self.spawn(Self::agent_argv(argv.clone(), task, on.as_deref()).or(argv), folder, follow, &space, &ctx, on.as_deref(), size, window)?;
         self.model.add_tab(&space, Tab::new(&ctx, name.trim(), &pane, &addr));
         self.model.active = Some(space.clone());
         Ok(json!({ "space": space, "tab": ctx, "terminal": addr }))
@@ -2460,6 +2461,7 @@ impl AppWindow {
         let (Some(p), Some(c)) = (self.model.space_of(&target), self.model.tab_of(&target)) else { return Err(format!("no pane {target:?}")) };
         let (space, ctx, fallback) = (p.id.clone(), c.id.clone(), p.folder.clone());
         let target_addr = self.model.address_of(&target);
+        let follow = folder.is_none();
         let cwd = folder.unwrap_or_else(|| target_addr.as_ref().and_then(|a| self.cwds.get(a).cloned()).unwrap_or(fallback));
         // A split stays on the machine of the pane it splits (else its space's).
         let on = target_addr.and_then(|a| a.split_once('/').map(|(m, _)| m.to_owned())).or_else(|| self.machine_of(&space));
@@ -2468,7 +2470,7 @@ impl AppWindow {
         root.split(&target, axis, Node::block(new.clone(), Content::Terminal { terminal: String::new() }), "initial-size".into());
         let size = self.model.active_tab().filter(|tab| tab.id == ctx)
             .and_then(|_| self.initial_size(&root, &new, window));
-        let addr = self.spawn(argv, cwd, &space, &ctx, on.as_deref(), size, window)?;
+        let (addr, _) = self.spawn(argv, cwd, follow, &space, &ctx, on.as_deref(), size, window)?;
         self.model.split(&target, axis, &new, &addr);
         Ok(json!({ "pane": new, "terminal": addr }))
     }
@@ -4566,6 +4568,21 @@ fn needs_model_pane(name: &str, args: &Value) -> bool {
     }
 }
 
+/// A failed implicit folder gets one retry in the machine's home, without local probes.
+fn run_following_folder(mut folder: String, follow: bool, on: Option<&str>, mut run: impl FnMut(Option<String>) -> anyhow::Result<String>) -> anyhow::Result<(String, String)> {
+    let result = run(Some(folder.clone()).filter(|f| !f.is_empty()));
+    let address = match result {
+        // A missing folder and a missing program both report spawn_failed. The holder's
+        // timeout may still create a terminal, so never retry that ambiguous outcome.
+        Err(e) if follow && !folder.is_empty() && crate::hc::error_kind(&e) == Some("spawn_failed") && !format!("{e:#}").contains("the holder did not answer") => {
+            folder = if on.is_some() { String::new() } else { home() };
+            run(Some(folder.clone()).filter(|f| !f.is_empty()))?
+        }
+        result => result?,
+    };
+    Ok((address, folder))
+}
+
 fn new_space_machine(args: &Value, person: bool, model: &Model) -> Option<String> {
     args.get("machine").and_then(Value::as_str)
         .or_else(|| if person { model.active_space().and_then(|s| s.machine.as_deref()) } else { None })
@@ -4941,6 +4958,38 @@ mod tests {
             // Recency cannot select a pane outside the requested direction.
             assert_eq!(super::nearest(other, out, split(), &history), None);
         }
+    }
+
+    #[test]
+    fn terminal_folders_retry_only_definite_spawn_failures_in_home() {
+        let failed = |message| anyhow::Error::new(crate::hc::RpcError(serde_json::json!({"message": message, "data": {"kind": "spawn_failed"}})));
+        let mut folders = Vec::new();
+        let result = super::run_following_folder("deleted".into(), true, None, |folder| {
+            folders.push(folder.clone());
+            if folder.as_deref() == Some("deleted") { Err(failed("invalid directory")) } else { Ok("t2".into()) }
+        }).unwrap();
+        assert_eq!(folders, vec![Some("deleted".into()), Some(super::home())]);
+        assert_eq!(result, ("t2".into(), super::home()));
+        let result = super::run_following_folder("/remote/deleted".into(), true, Some("remote"), |folder| {
+            if folder.is_some() { Err(failed("invalid directory")) } else { Ok("remote/t2".into()) }
+        }).unwrap();
+        assert_eq!(result, ("remote/t2".into(), String::new()));
+        for (follow, folder, message) in [(false, "explicit", "invalid directory"), (true, "", "invalid directory"), (true, "inherited", "the holder did not answer")] {
+            let mut calls = 0;
+            assert!(super::run_following_folder(folder.into(), follow, None, |_| { calls += 1; Err(failed(message)) }).is_err());
+            assert_eq!(calls, 1);
+        }
+        let mut calls = 0;
+        assert!(super::run_following_folder("inherited".into(), true, None, |_| { calls += 1; Err(anyhow::anyhow!("lost the core")) }).is_err());
+        assert_eq!(calls, 1);
+        let mut calls = 0;
+        let result = super::run_following_folder("existing".into(), true, None, |_| { calls += 1; Ok("t1".into()) }).unwrap();
+        assert_eq!(calls, 1);
+        assert_eq!(result, ("t1".into(), "existing".into()));
+        let mut calls = 0;
+        let error = super::run_following_folder("deleted".into(), true, None, |_| { calls += 1; Err(failed(if calls == 1 { "first" } else { "second" })) }).unwrap_err();
+        assert_eq!(calls, 2);
+        assert!(error.to_string().contains("second"));
     }
 
     #[test]
