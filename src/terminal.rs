@@ -297,6 +297,9 @@ impl TerminalView {
             let cell = device_cell(g.cell, g.scale);
             g.vt = Vt::new(cols, rows);
             g.vt.resize(cols, rows, cell.0, cell.1);
+            if self.search_open {
+                g.vt.start_search(&self.search_query);
+            }
             g.vt_cell = cell;
             g.told_display = None;
             let facts = display_update(&mut g.told_display, &vt::theme(), cell).unwrap();
@@ -2281,6 +2284,35 @@ mod tests {
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
         root.read_with(cx, |root, cx| assert!(!root.0.read(cx).search_open));
+    }
+
+    #[gpui::test]
+    fn reconnect_keeps_find_searching_the_new_terminal(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        cx.update(gpui_base::init);
+        let terminal = cx.new(|cx| super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 6), cx));
+        let (_, cx) = cx.add_window_view(|_, _| gpui::Empty);
+        cx.update(|window, app| terminal.update(app, |terminal, cx| {
+            terminal.open_search(window, cx);
+            terminal.search_query = "needle".into();
+            terminal.reattach(crate::hc::offline(), cx);
+            let mut grid = terminal.grid.borrow_mut();
+            grid.vt.write(b"replayed needle\r\n");
+            for _ in 0..1000 {
+                grid.vt.progress_search();
+                if grid.vt.search_progress().complete { break; }
+            }
+            assert!(grid.vt.search_progress().complete);
+            assert_eq!(grid.vt.search_progress().total, 1);
+            assert_eq!(grid.vt.frame().search_spans.len(), 1);
+            grid.vt.set_search_needle("replayed");
+            for _ in 0..1000 {
+                grid.vt.progress_search();
+                if grid.vt.search_progress().complete { break; }
+            }
+            assert_eq!(grid.vt.search_progress().total, 1, "query edits must keep working after reconnect");
+        }));
     }
 
     #[gpui::test]
