@@ -76,12 +76,22 @@ scripts/vm/guest describe get_window_state
 scripts/vm/guest tool get_accessibility_tree '{"session":"my-task"}'
 ```
 
-Choose a task-specific session label and reuse it on calls that accept
-`session`. Discover guest PIDs/window IDs from the response. Read the relevant
-tool schema with `describe` before using unfamiliar arguments.
+For connected MCP tools, **omit `session` by default**: the authenticated
+connection owns an implicit lifecycle session. Omit it on `end_session` too.
+Named sessions are transport-owned, not global labels that can be carried
+between CLI calls and MCP connections. If a named MCP session is needed, use a
+fresh label and keep its lifecycle on that same connection. On “session is not
+available to this transport”, return to the implicit session; do not try to
+revive or end a label owned by another connection. Take fresh snapshots after
+switching sessions rather than reusing old element tokens or capture IDs.
 
-For a discovered window, request `get_window_state` with its `pid`, `window_id`,
-and `session`. **Omit `screenshot_out_file` by default.** Inspect the inline image
+For the CLI fallback, choose a task-specific label and reuse it on calls that
+accept `session`, including cleanup. Discover guest PIDs/window IDs from the
+response. Read the relevant tool schema with `describe` before using unfamiliar
+arguments.
+
+For a discovered window, request `get_window_state` with its `pid` and
+`window_id`, following the transport-specific session rules above. **Omit `screenshot_out_file` by default.** Inspect the inline image
 and accessibility tree returned through guest MCP. If using a tool bridge,
 forward image content to the model's image renderer; printing base64 to a
 terminal does not let the model see it.

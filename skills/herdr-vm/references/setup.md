@@ -172,7 +172,8 @@ start a new agent session. Configuration cannot inject tools into a session
 that does not support refreshing them. Report this precise remaining step.
 
 With the connected guest tools, discover a window and request `get_window_state`
-without `screenshot_out_file`. Verify the response contains an image content
+without `session` or `screenshot_out_file` (use the MCP connection’s implicit
+session, not a label from CLI setup). Verify the response contains an image content
 block that the agent can inspect, alongside accessibility data. Raw base64 in
 terminal text is not an inline image. If registration is unavailable or the
 user declines it, explicitly report that limitation and use SKILL.md's bounded
