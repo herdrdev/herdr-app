@@ -41,3 +41,19 @@ test("palette follows small pixel movements and converted wheel deltas", () => {
     expect(view.scroll).toBe(-delta);
   }
 });
+
+test("palette scrolls past group titles with small movements", () => {
+  for (const delta of [-3, -16, -25]) {
+    const view = new Palette();
+    view.query = ""; view.at = 0; view.scroll = 0; view.input = {}; view.handle = {};
+    view.rows = () => Array.from({ length: 30 }, (_, i) => ({ head: `Group ${Math.floor(i / 6)}`, e: { name: "test", title: `Command ${i}`, args: {} } }));
+    for (let step = 0; step < 400 && (step === 0 || view.scroll < view.maxScroll); step++) {
+      const list = find(view.render(), "palette-rows");
+      const before = view.scroll;
+      list!.calls.on_scroll_wheel[0]({ delta: { y: delta } }, { notify() {} });
+      view.render();
+      expect(view.scroll).toBe(Math.min(before - delta, view.maxScroll));
+    }
+    expect(view.scroll).toBe(view.maxScroll);
+  }
+});
