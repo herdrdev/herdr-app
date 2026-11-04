@@ -113,6 +113,8 @@ the highlighted line shows where it will land.
   live folders (`panes()[i].cwd`), not the folder it was made in: new
   tabs start where its focused pane is, and the default mods take a
   space's repo from its first terminal.
+  Missing inherited local folders fall back to the space folder or home; explicit
+  invalid folders still fail.
 - A **tab** is a piece of work in a space: its terminals and how they're
   split right and down. One nobody named is called by its place (1, 2,
   ...), as in Herdr; `tab.rename` names it ("fix login"). A space

@@ -2337,7 +2337,7 @@ impl AppWindow {
     fn folder_for(&self, space: &str) -> String {
         let p = self.model.space(space);
         let here = p.and_then(|p| p.active_tab()).and_then(|c| c.focused_pane()).and_then(|f| self.model.address_of(&f)).and_then(|a| self.cwds.get(&a).cloned());
-        here.or_else(|| p.map(|p| p.folder.clone())).unwrap_or_else(home)
+        terminal_folder(None, here, p.map(|p| p.folder.clone()), p.and_then(|p| p.machine.as_deref()))
     }
 
     /// The machine a space's terminals run on, None for this one.
@@ -2410,7 +2410,7 @@ impl AppWindow {
         let here = || self.model.focused_pane().and_then(|p| self.model.address_of(&p))
             .filter(|a| a.split_once('/').map(|(m, _)| m) == on)
             .and_then(|a| self.cwds.get(&a).cloned());
-        let folder = folder.or_else(here).unwrap_or_else(|| if on.is_some() { String::new() } else { home() });
+        let folder = terminal_folder(folder, here(), None, on);
         let (space, ctx, pane) = (self.model.fresh_id_on("sp", on), self.model.fresh_id_on("tb", on), self.model.fresh_id_on("p", on));
         let size = self.initial_size(&Tab::new(&ctx, "", &pane, "").root, &pane, window);
         let addr = self.spawn(Self::agent_argv(argv.clone(), task, on).or(argv), folder.clone(), &space, &ctx, on, size, window)?;
@@ -2460,9 +2460,10 @@ impl AppWindow {
         let (Some(p), Some(c)) = (self.model.space_of(&target), self.model.tab_of(&target)) else { return Err(format!("no pane {target:?}")) };
         let (space, ctx, fallback) = (p.id.clone(), c.id.clone(), p.folder.clone());
         let target_addr = self.model.address_of(&target);
-        let cwd = folder.unwrap_or_else(|| target_addr.as_ref().and_then(|a| self.cwds.get(a).cloned()).unwrap_or(fallback));
         // A split stays on the machine of the pane it splits (else its space's).
+        let here = target_addr.as_ref().and_then(|a| self.cwds.get(a).cloned());
         let on = target_addr.and_then(|a| a.split_once('/').map(|(m, _)| m.to_owned())).or_else(|| self.machine_of(&space));
+        let cwd = terminal_folder(folder, here, Some(fallback), on.as_deref());
         let new = self.model.fresh_id_on("p", on.as_deref());
         let mut root = self.model.tab(&ctx).expect("target tab").root.clone();
         root.split(&target, axis, Node::block(new.clone(), Content::Terminal { terminal: String::new() }), "initial-size".into());
@@ -4566,6 +4567,15 @@ fn needs_model_pane(name: &str, args: &Value) -> bool {
     }
 }
 
+/// Explicit folders belong to the caller; implicit local folders may have been deleted.
+fn terminal_folder(explicit: Option<String>, here: Option<String>, fallback: Option<String>, on: Option<&str>) -> String {
+    explicit.unwrap_or_else(|| {
+        here.into_iter().chain(fallback)
+            .find(|folder| on.is_some() || std::path::Path::new(folder).is_dir())
+            .unwrap_or_else(|| if on.is_some() { String::new() } else { home() })
+    })
+}
+
 fn new_space_machine(args: &Value, person: bool, model: &Model) -> Option<String> {
     args.get("machine").and_then(Value::as_str)
         .or_else(|| if person { model.active_space().and_then(|s| s.machine.as_deref()) } else { None })
@@ -4941,6 +4951,30 @@ mod tests {
             // Recency cannot select a pane outside the requested direction.
             assert_eq!(super::nearest(other, out, split(), &history), None);
         }
+    }
+
+    #[test]
+    fn terminal_folders_skip_missing_local_defaults_but_preserve_explicit_and_remote_paths() {
+        let root = std::env::temp_dir().join(format!("herdr-terminal-folder-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let deleted = root.join("deleted");
+        std::fs::create_dir(&deleted).unwrap();
+        let existing = root.to_string_lossy().into_owned();
+        let missing = deleted.to_string_lossy().into_owned();
+        use super::terminal_folder as choose;
+        assert_eq!(choose(None, Some(missing.clone()), None, None), missing);
+        std::fs::remove_dir(&deleted).unwrap();
+        assert_eq!(choose(None, Some(missing.clone()), None, None), super::home());
+        assert_eq!(choose(None, Some(missing.clone()), Some(existing.clone()), None), existing);
+        assert_eq!(choose(None, Some(missing.clone()), Some(missing.clone()), None), super::home());
+        assert_eq!(choose(Some(missing.clone()), Some(existing.clone()), None, None), missing);
+        assert_eq!(choose(None, Some(missing.clone()), Some(existing.clone()), Some("remote")), missing);
+        assert_eq!(choose(None, None, Some(missing.clone()), Some("remote")), missing);
+        assert_eq!(choose(None, None, None, Some("remote")), "");
+        let file = root.join("file");
+        std::fs::write(&file, "").unwrap();
+        assert_eq!(choose(None, Some(file.to_string_lossy().into_owned()), None, None), super::home());
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
