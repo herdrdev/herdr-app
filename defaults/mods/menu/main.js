@@ -67,6 +67,11 @@ function items(p, git) {
         ...(git === "linked" ? [["Remove worktree", "worktree", { space: tg.id, action: "remove" }]] : []),
         ["Close", "space.close", { id: tg.id }],
       ];
+    case "files":
+      return [
+        ["Copy path", "clipboard.copy", { text: `${tg.root}/${tg.path}` }],
+        ["Copy relative path", "clipboard.copy", { text: tg.path }],
+      ];
     default:
       return [
         ["New space", "space.new", {}],
@@ -113,6 +118,7 @@ export default class Menu extends View {
     if (!it) return;
     closeOverlay(props()?.overlay);
     if (it[1] === "worktree") openOverlay({ mod: "worktree", kind: "dialog", ...(it[2].action === "open" ? { width: 560, height: 480 } : { width: 440, height: 260 }), props: it[2] });
+    else if (it[1] === "clipboard.copy") cx.write_to_clipboard(it[2].text);
     else run(it[1], it[2]);
   }
 

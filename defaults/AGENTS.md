@@ -181,7 +181,9 @@ the title bar, panes as cards, a space picker) and `win98`
 writing a new file. The Files panel supports Windows folder paths with spaces,
 parentheses and apostrophes, and preserves Unicode file and folder names
 (including Chinese). Directory links expand as folders; their contents load
-only when expanded.
+only when expanded. Right-click a file or folder in the Files panel to copy its
+full path, or its path relative to the folder the panel shows, for mentioning it
+in a session.
 
 **Herdr's own layouts and mods are read-only.** They are replaced whole
 on every start. Use settings.json for look (fonts, sizes, theme, colors,
