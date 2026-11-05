@@ -1223,6 +1223,15 @@ fn module(inst: Instance, copy: u64) -> HostModule {
                 Ok(path.map(|p| HostValue::Str(p.to_string_lossy().into_owned())).unwrap_or(HostValue::Null))
             })
         })
+        .async_function("pickFiles", |a| {
+            let options = a.get(0).map(from_host).unwrap_or(Value::Null);
+            let prompt = options.get("prompt").and_then(Value::as_str).map(str::to_owned).unwrap_or_else(|| "Open".into());
+            let multiple = options.get("multiple").and_then(Value::as_bool).unwrap_or(false);
+            let picked = gpui_shell::with_current_app(|cx| cx.prompt_for_paths(gpui::PathPromptOptions {
+                files: true, directories: false, multiple, prompt: Some(prompt.into()),
+            })).ok_or_else(|| HostError::new("no window to pick from"))?;
+            Ok(async move { Ok(picked_files(picked.await.ok().and_then(Result::ok).flatten())) })
+        })
         .function("feedbackClearImages", move |_| {
             if feedback_frame { crate::feedback::clear_shots(); }
             Ok(HostValue::Null)
@@ -1490,6 +1499,14 @@ pub fn check_link_mod(dir: &Path) -> anyhow::Result<bool> {
     Ok(handles_links)
 }
 
+/// The paths a file picker returned, in its order; a cancel (or no file) is null, never [].
+fn picked_files(paths: Option<Vec<std::path::PathBuf>>) -> HostValue {
+    match paths {
+        Some(paths) if !paths.is_empty() => HostValue::Array(paths.into_iter().map(|p| HostValue::Str(p.to_string_lossy().into_owned())).collect()),
+        _ => HostValue::Null,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -1683,6 +1700,14 @@ mod tests {
         for path in [r"C:\pipe\file", r"\\server\share\folder\..\pipe\file", r"\\?\C:\pipe\file", r"\\?\UNC\server\share\file"] {
             assert!(windows_preview_path_allowed(path), "{path}");
         }
+    }
+
+    #[test]
+    fn picked_files_keep_the_pickers_order_and_cancel_is_null() {
+        let picked = picked_files(Some(vec!["/b/2.txt".into(), "/a/1.txt".into()]));
+        assert_eq!(from_host(&picked), json!(["/b/2.txt", "/a/1.txt"]));
+        assert!(matches!(picked_files(None), HostValue::Null));
+        assert!(matches!(picked_files(Some(vec![])), HostValue::Null));
     }
 
     #[test]
