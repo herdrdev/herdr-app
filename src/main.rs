@@ -180,6 +180,7 @@ fn main() {
             .detach();
             #[cfg(target_os = "macos")]
             macos::init(cx);
+            window::follow_notification_clicks(cx);
             if fresh {
                 let width = cx.primary_display().map(|d| f32::from(d.bounds().size.width));
                 let zoom = settings::first_zoom(width);

@@ -679,6 +679,7 @@ export default class Settings extends View {
   // Alerts ---------------------------------------------------------------
 
   alerts(t) {
+    const macos = window()?.platform === "macos";
     const sounds = this.person.sounds ?? {};
     const on = sounds.enabled !== false;
     const file = (f) => (f ? f.split(/[\\/]/).pop() : "Herdr's sound");
@@ -708,13 +709,25 @@ export default class Settings extends View {
       .child(
         this.row(
           t,
-          "Bounce the Dock icon",
-          "When an agent needs you while Herdr is in the background.",
-          this.toggle(t, "st-dock_bounce", this.person.dock_bounce === true, (_e, cx) =>
-            this.change((p) => {
-              if (p.dock_bounce) delete p.dock_bounce;
-              else p.dock_bounce = true;
-            }, cx),
+          "Send a test notification",
+          macos
+            ? "The first time, macOS asks whether Herdr may send notifications. Answer here, so no agent's alert is lost to the question."
+            : "See how an alert shows outside Herdr.",
+          this.button(t, "st-test-notification", "Send", () => run("app.test_notification")),
+        ),
+      )
+      .when(macos, (el) =>
+        el.child(
+          this.row(
+            t,
+            "Bounce the Dock icon",
+            "When an agent needs you while Herdr is in the background.",
+            this.toggle(t, "st-dock_bounce", this.person.dock_bounce === true, (_e, cx) =>
+              this.change((p) => {
+                if (p.dock_bounce) delete p.dock_bounce;
+                else p.dock_bounce = true;
+              }, cx),
+            ),
           ),
         ),
       );

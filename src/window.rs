@@ -344,6 +344,30 @@ struct Watched {
     programs: Option<SystemTime>,
 }
 
+/// A notification clicked before the window opened (it can start Herdr).
+struct PendingFocus(String);
+
+impl Global for PendingFocus {}
+
+/// Clicking a system notification goes to its agent, as clicking the toast
+/// does. Set up before any window opens, so a click that started Herdr isn't
+/// lost on the way to the window.
+pub fn follow_notification_clicks(cx: &mut App) {
+    cx.on_system_notification_response(|response, cx| {
+        let Some(addr) = crate::alert::address_of(&response.tag).map(str::to_owned) else { return };
+        cx.activate(true);
+        match cx.windows().into_iter().find_map(|w| w.downcast::<AppWindow>()) {
+            Some(main) => {
+                let _ = main.update(cx, |this, window, cx| {
+                    window.activate_window();
+                    this.notification_clicked(addr, window, cx);
+                });
+            }
+            None => cx.set_global(PendingFocus(addr)),
+        }
+    });
+}
+
 pub struct AppWindow {
     core: Arc<Core>,
     runtime: Option<Rc<ShellRuntime>>,
@@ -441,6 +465,11 @@ pub struct AppWindow {
     window_active: bool,
     /// Agents with a system notification up (alert.rs), taken down once seen.
     notified: HashSet<String>,
+    /// Whether notifications left from an earlier run were looked at (the first listing).
+    notifications_swept: bool,
+    /// An agent whose notification was clicked before the core listed it: shown
+    /// at the next listing, if it is still there.
+    pending_focus: Option<String>,
     /// The system's appearance; a layout with a light and a dark theme follows it.
     system_dark: bool,
     /// The OS tells us when files change (`files.rs`); else the disk is polled.
@@ -533,6 +562,8 @@ impl AppWindow {
             pane_history: Vec::new(),
             window_active: true,
             notified: HashSet::new(),
+            notifications_swept: false,
+            pending_focus: cx.has_global::<PendingFocus>().then(|| cx.remove_global::<PendingFocus>().0),
             system_dark: is_dark(window.appearance()),
             file_events: crate::files::watch(&mods::app_dir()),
             polls: 0,
@@ -583,19 +614,6 @@ impl AppWindow {
             w.open_overlay(mods::new_overlay_id(), json!({ "kind": "toast", "notification": note }), window, cx);
         }
 
-        // Clicking a system notification goes there, as clicking the toast does.
-        let (handle, this) = (window.window_handle(), cx.entity().downgrade());
-        cx.on_system_notification_response(move |response, cx| {
-            let Some(addr) = crate::alert::address_of(&response.tag).map(str::to_owned) else { return };
-            cx.activate(true);
-            let _ = handle.update(cx, |_, window, cx| {
-                window.activate_window();
-                let _ = this.update(cx, |this, cx| {
-                    this.notified.remove(&addr);
-                    this.run("agent.focus", json!({ "terminal": addr }), window, cx);
-                });
-            });
-        });
         w._tasks.push(cx.spawn_in(window, async move |this, cx| {
             loop {
                 if this.update_in(cx, |this, window, cx| this.poll(window, cx)).is_err() {
@@ -1375,6 +1393,18 @@ impl AppWindow {
     }
 
     /// Makes `addr` the shown agent; a pane showing it also becomes the focused pane.
+    /// Shows the agent a system notification is about; one the core hasn't
+    /// listed yet (a click from an earlier run, as Herdr starts) waits for the
+    /// next listing.
+    fn notification_clicked(&mut self, addr: String, window: &mut Window, cx: &mut Context<Self>) {
+        self.notified.remove(&addr);
+        if self.live.contains_key(&addr) {
+            self.run("agent.focus", json!({ "terminal": addr }), window, cx);
+        } else {
+            self.pending_focus = Some(addr);
+        }
+    }
+
     fn focus_agent(&mut self, addr: &str) {
         if let Some(p) = self.model.pane_of(addr) {
             self.model.focus_pane(&p);
@@ -2054,6 +2084,21 @@ impl AppWindow {
         let mut changed = self.reconcile(window, cx);
         let visible: HashSet<String> = self.visible_addresses().into_iter().collect();
         let mut alerts = Vec::new();
+        // An empty listing (the core not reached yet, or nothing running) can't
+        // tell an agent that's gone from one not listed yet.
+        let agents_listed = listed && !self.live.is_empty();
+        // The first listing: notifications left from an earlier run are old
+        // news, except for an agent still waiting on the person.
+        if agents_listed && !self.notifications_swept {
+            self.notifications_swept = true;
+            for (addr, rec) in &self.live {
+                if matches!(rec.get("status").and_then(Value::as_str), Some("blocked" | "error")) {
+                    self.notified.insert(addr.clone());
+                } else {
+                    cx.dismiss_system_notification(&crate::alert::tag(addr));
+                }
+            }
+        }
         for (addr, rec) in &self.live {
             let word = rec.get("status").and_then(Value::as_str).map(str::to_owned);
             let app = rec.get("report").and_then(|r| r.get("app")).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned);
@@ -2075,6 +2120,10 @@ impl AppWindow {
         self.written_seen.retain(|a, _| self.live.contains_key(a));
         for gone in self.notified.extract_if(|a| !self.live.contains_key(a)) {
             cx.dismiss_system_notification(&crate::alert::tag(&gone));
+        }
+        if agents_listed && let Some(addr) = self.pending_focus.take() && self.live.contains_key(&addr) {
+            self.focus_agent(&addr);
+            changed = true;
         }
         changed |= self.share_seen(cx);
         // Changes already made before Herdr started aren't news.
@@ -2131,11 +2180,12 @@ impl AppWindow {
         });
         let message = crate::alert::message_of(rec.and_then(|r| r.get("report")));
         let note = crate::alert::Note { address: addr.to_owned(), alert, name, place, message };
-        if crate::alert::should_notify(settings.system_notifications, self.window_active, looking) {
+        let active = window.is_window_active();
+        if crate::alert::should_notify(settings.system_notifications, active) {
             cx.show_system_notification(crate::alert::system_notification(&note));
             self.notified.insert(addr.to_owned());
         }
-        if alert.needs_you() && settings.dock_bounce && !self.window_active {
+        if alert.needs_you() && settings.dock_bounce && !active {
             window.request_attention();
         }
         let level = if alert.needs_you() { "error" } else { "info" };
@@ -3361,6 +3411,7 @@ impl AppWindow {
                 return;
             }
             "app.check_updates" => crate::update::check_now(),
+            "app.test_notification" => cx.show_system_notification(crate::alert::test_notification()),
             "app.update_core" => {
                 if crate::update::core().ready.is_none() && crate::update::core().error.is_none() {
                     return self.fail("herdr-core is up to date");
@@ -5330,24 +5381,41 @@ mod tests {
     /// agent, with the agent's own `msg` over "space / tab" and `error` told
     /// apart from `blocked`, as `system_notifications` says and never for the
     /// agent on screen; it is taken down when the agent works again or goes
-    /// away, and clicking one goes to that agent.
+    /// away, and clicking one goes to that agent, also when the click came
+    /// before the window or the first listing. The first listing takes down
+    /// what an earlier run left, but not for an agent still waiting.
     #[gpui::test]
     fn system_notifications(cx: &mut gpui::TestAppContext) {
         use crate::settings::SystemNotifications::{self, *};
+        use gpui::SystemNotificationResponse;
         use serde_json::json;
         if !running_alone("system_notifications") {
             return;
         }
-        cx.update(|cx| cx.set_app_identity("dev.herdr.test", "Herdr"));
+        let click = |addr: &str| SystemNotificationResponse { tag: crate::alert::tag(addr).into(), action_id: None };
+        cx.update(|cx| {
+            cx.set_app_identity("dev.herdr.test", "Herdr");
+            super::follow_notification_clicks(cx);
+        });
+        // Clicked in Notification Center while Herdr wasn't running.
+        cx.simulate_system_notification_response(click("t2"));
         let (view, cx) = open_window(cx, "unused", "", json!({ "id": "pane", "type": "block", "content": { "terminal": "t1" } }));
         view.update(cx, |this, _| {
+            assert_eq!(this.pending_focus.as_deref(), Some("t2"), "the click waits for the window");
             this.model.add_space("p1", "api", "/src/api", crate::model::Tab::new("c1", "fix login", "x1", "t1"));
             this.model.add_space("p2", "web", "/src/web", crate::model::Tab::new("c2", "tests", "x2", "t2"));
+            this.model.add_space("p3", "docs", "/src/docs", crate::model::Tab::new("c3", "guide", "x3", "t3"));
         });
-        // t1 is on screen; t2 is in another space.
+        // t1 is on screen; t2 and t3 are in other spaces.
         let list = |mode: SystemNotifications, active: bool, t1: &str, t2: Option<serde_json::Value>, cx: &mut gpui::VisualTestContext| {
             let mut terminals = vec![json!({ "address": "t1", "name": "Claude", "status": { "state": t1, "app": "claude-code" } })];
             terminals.extend(t2.map(|status| json!({ "address": "t2", "name": "Codex", "status": status })));
+            cx.deactivate_window();
+            if active {
+                cx.update(|window, _| window.activate_window());
+                cx.run_until_parked();
+            }
+            assert_eq!(cx.update(|window, _| window.is_window_active()), active);
             cx.update(|window, cx| view.update(cx, |this, cx| {
                 this.person.sounds.enabled = false;
                 this.person.system_notifications = mode;
@@ -5359,6 +5427,24 @@ mod tests {
         let working = || Some(json!({ "state": "working", "app": "codex" }));
         let blocked = || Some(json!({ "state": "blocked", "kind": "permission", "app": "codex", "msg": "approve Bash: make" }));
         let error = || Some(json!({ "state": "error", "app": "codex" }));
+
+        // The first listing: t2 is shown at last; what an earlier run left for
+        // t1 and t2 goes, t3's stays while it still waits.
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            // As at a start where the core answered at once: the offline core's
+            // empty listing came first here.
+            this.listed_once = false;
+            this.terminals_listed(json!({ "terminals": [
+                { "address": "t1", "name": "Claude", "status": { "state": "idle" } },
+                { "address": "t2", "name": "Codex", "status": { "state": "working" } },
+                { "address": "t3", "name": "Gemini", "status": { "state": "blocked" } },
+            ] }), window, cx);
+            assert_eq!((this.pending_focus.as_deref(), this.shown_agent().as_deref()), (None, Some("t2")));
+            assert_eq!(this.notified.iter().collect::<Vec<_>>(), ["t3"]);
+        }));
+        let mut dismissed: Vec<String> = cx.dismissed_system_notifications().iter().map(|t| t.to_string()).collect();
+        dismissed.sort();
+        assert_eq!(dismissed, ["herdr-agent:t1", "herdr-agent:t2"]);
 
         list(Background, true, "working", working(), cx);
         list(Background, true, "working", blocked(), cx);
@@ -5388,12 +5474,22 @@ mod tests {
         list(Always, false, "working", Some(json!({ "state": "idle", "app": "codex" })), cx);
         let delivered = cx.delivered_system_notifications();
         assert_eq!(delivered.iter().map(|n| n.title.to_string()).collect::<Vec<_>>(), ["Codex finished"], "one per agent: the newer replaces the older");
-        cx.simulate_system_notification_response(gpui::SystemNotificationResponse { tag: "herdr-agent:t2".into(), action_id: None });
+        view.update(cx, |this, _| this.focus_agent("t1"));
+        cx.simulate_system_notification_response(click("t2"));
         cx.run_until_parked();
         view.update(cx, |this, _| {
-            assert!(this.notified.is_empty(), "the click reached the window");
+            assert!(!this.notified.contains("t2"), "the click reached the window");
             assert_eq!(this.shown_agent().as_deref(), Some("t2"));
         });
+        // A click on an agent that's gone by the next listing does nothing.
+        cx.simulate_system_notification_response(click("t9"));
+        list(Always, false, "working", working(), cx);
+        view.update(cx, |this, _| assert_eq!((this.pending_focus.as_deref(), this.shown_agent().as_deref()), (None, Some("t2"))));
+
+        // Settings' test button: whatever system_notifications says, with its own tag.
+        list(Off, true, "working", working(), cx);
+        cx.update(|window, cx| view.update(cx, |this, cx| this.run("app.test_notification", serde_json::Value::Null, window, cx)));
+        assert_eq!(cx.shown_system_notifications().last().map(|n| n.tag.to_string()), Some("herdr-test".into()));
     }
 
     #[test]

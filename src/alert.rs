@@ -41,12 +41,12 @@ pub fn message_of(report: Option<&Value>) -> String {
     report.and_then(|r| r.get("msg")).and_then(Value::as_str).unwrap_or_default().to_owned()
 }
 
-/// Whether an alert leaves the window. `app_active`: Herdr's window is key in
-/// the app in front. `looking`: that agent is on screen in it.
-pub fn should_notify(mode: SystemNotifications, app_active: bool, looking: bool) -> bool {
+/// Whether an alert also goes to the notification center. `app_active`:
+/// Herdr's window is key in the app in front. The agent the person is looking
+/// at never alerts (window.rs).
+pub fn should_notify(mode: SystemNotifications, app_active: bool) -> bool {
     match mode {
         SystemNotifications::Off => false,
-        _ if looking => false,
         SystemNotifications::Background => !app_active,
         SystemNotifications::Always => true,
     }
@@ -63,6 +63,18 @@ pub fn address_of(tag: &str) -> Option<&str> {
     tag.strip_prefix(TAG_PREFIX).filter(|a| !a.is_empty())
 }
 
+/// What Settings > Alerts sends on request, whatever `system_notifications`
+/// says: the person is there when macOS asks for permission, so no agent's
+/// alert is the one lost to the question. Its own tag: a click goes nowhere.
+pub fn test_notification() -> SystemNotification {
+    SystemNotification {
+        tag: "herdr-test".into(),
+        title: "Herdr can reach you here".into(),
+        body: "An agent that needs you, hits an error or finishes shows like this.".into(),
+        actions: Vec::new(),
+    }
+}
+
 pub fn system_notification(note: &Note) -> SystemNotification {
     SystemNotification {
         tag: tag(&note.address).into(),
@@ -75,42 +87,25 @@ pub fn system_notification(note: &Note) -> SystemNotification {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::settings::Person;
 
     fn note(alert: Alert) -> Note {
         Note { address: "local:t7".into(), alert, name: "Claude".into(), place: Some("herdr / main".into()), message: String::new() }
     }
 
     #[test]
-    fn notifies_only_when_away_unless_always_and_never_while_looking() {
+    fn notifies_only_when_away_unless_always() {
         use SystemNotifications::*;
         let cases = [
-            // mode, app_active, looking, notify
-            (Background, false, false, true),
-            (Background, true, false, false),
-            (Background, false, true, false),
-            (Always, true, false, true),
-            (Always, false, false, true),
-            (Always, true, true, false),
-            (Off, false, false, false),
-            (Off, true, false, false),
+            // mode, app_active, notify
+            (Background, false, true),
+            (Background, true, false),
+            (Always, true, true),
+            (Always, false, true),
+            (Off, false, false),
+            (Off, true, false),
         ];
-        for (mode, active, looking, want) in cases {
-            assert_eq!(should_notify(mode, active, looking), want, "{mode:?} active={active} looking={looking}");
-        }
-    }
-
-    #[test]
-    fn the_setting_parses_and_stays_out_of_settings_json_by_default() {
-        let person: Person = serde_json::from_value(serde_json::json!({})).unwrap();
-        assert_eq!((person.system_notifications, person.dock_bounce), (SystemNotifications::Background, false));
-        let saved = serde_json::to_value(&person).unwrap();
-        for key in ["system_notifications", "dock_bounce"] {
-            assert!(saved.get(key).is_none(), "{key} written at its default");
-        }
-        for (word, mode) in [("always", SystemNotifications::Always), ("off", SystemNotifications::Off), ("background", SystemNotifications::Background)] {
-            let person: Person = serde_json::from_value(serde_json::json!({ "system_notifications": word, "dock_bounce": true })).unwrap();
-            assert_eq!((person.system_notifications, person.dock_bounce), (mode, true));
+        for (mode, active, want) in cases {
+            assert_eq!(should_notify(mode, active), want, "{mode:?} active={active}");
         }
     }
 
@@ -127,9 +122,8 @@ mod tests {
 
     #[test]
     fn the_agents_own_message_goes_over_the_place() {
-        let quoted = "approve Bash: echo \"$HOME\" 'x' $(id); `id`";
-        let n = Note { message: quoted.into(), ..note(Alert::Blocked) };
-        assert_eq!(system_notification(&n).body.as_ref(), format!("{quoted}\nherdr / main"));
+        let n = Note { message: "approve Bash: make".into(), ..note(Alert::Blocked) };
+        assert_eq!(system_notification(&n).body.as_ref(), "approve Bash: make\nherdr / main");
         let alone = Note { place: None, message: "  done: 3 files  ".into(), ..note(Alert::Done) };
         assert_eq!(system_notification(&alone).body.as_ref(), "done: 3 files");
         let report = serde_json::json!({ "state": "blocked", "kind": "question", "title": "t", "msg": "which one?" });

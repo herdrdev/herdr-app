@@ -968,6 +968,20 @@ mod tests {
         assert_eq!(Settings::compose(&person, &win98.look, true).theme, "ink");
     }
 
+    #[test]
+    fn system_notifications_parse_and_stay_out_of_settings_json_by_default() {
+        let person: Person = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!((person.system_notifications, person.dock_bounce), (SystemNotifications::Background, false));
+        let saved = serde_json::to_value(&person).unwrap();
+        for key in ["system_notifications", "dock_bounce"] {
+            assert!(saved.get(key).is_none(), "{key} written at its default");
+        }
+        for (word, mode) in [("always", SystemNotifications::Always), ("off", SystemNotifications::Off), ("background", SystemNotifications::Background)] {
+            let person: Person = serde_json::from_value(serde_json::json!({ "system_notifications": word, "dock_bounce": true })).unwrap();
+            assert_eq!((person.system_notifications, person.dock_bounce), (mode, true));
+        }
+    }
+
     /// The guide agents read (written to the home folder) explains every
     /// settings.json key.
     #[test]
