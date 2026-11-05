@@ -989,6 +989,8 @@ All of it is in `herdr.d.ts`. In short:
   start one with `argv: agent.run`.
   `pickFolder({ prompt })`: the system's folder picker (here only),
   resolves with the folder or null.
+  `pickFiles({ prompt, multiple })`: the system's file picker (here only),
+  resolves with the files' paths or null.
 - Files: `readTextFile(path, { on })` (here, or on that machine),
   `writeTextFile(path, text, expected)` (here only), and
   `watchFolder(dir)` (here only; poll a remote space's folder): resolves with the changed paths the next time anything

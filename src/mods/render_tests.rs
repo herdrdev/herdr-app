@@ -151,6 +151,7 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
     module = module.async_function("feedbackPickImages", |_| Ok(async { Ok(HostValue::Array(vec![])) }));
     module = module.async_function("knownAgents", |_| Ok(async { Ok(HostValue::Array(vec![])) }));
     module = module.async_function("pickFolder", |_| Ok(async { Ok(HostValue::Null) }));
+    module = module.async_function("pickFiles", |_| Ok(async { Ok(HostValue::Null) }));
     for name in ["nextCommand", "watchFolder"] {
         module = module.async_function(name, |_| Ok(std::future::pending::<gpui_shell::HostResult>()));
     }
