@@ -1901,7 +1901,10 @@ impl AppWindow {
         let mut live = HashMap::new();
         for t in list.as_array_mut().into_iter().flatten() {
             let Some(obj) = t.as_object_mut() else { continue };
-            let report = obj.remove("status").unwrap_or(Value::Null);
+            let mut report = obj.remove("status").unwrap_or(Value::Null);
+            if foreground_is_shell(obj) {
+                report = Value::Null;
+            }
             let word = report.get("state").cloned().unwrap_or_else(|| if report.is_string() { report.clone() } else { Value::Null });
             obj.insert("status".into(), word);
             obj.insert("program".into(), program_of(&report, running_argv(obj)));
@@ -4461,6 +4464,13 @@ fn sized(slot: Div, n: &Node, axis: Axis, total_weight: f32) -> Div {
         slot = if row { slot.max_w(settings::z(max)) } else { slot.max_h(settings::z(max)) };
     }
     slot
+}
+
+/// The agent that reported has exited: core keeps its last report, but a shell
+/// is back in front, so the terminal is no longer an agent.
+fn foreground_is_shell(rec: &serde_json::Map<String, Value>) -> bool {
+    let Some(argv) = rec.get("foreground").and_then(|f| f.get("argv")).filter(|a| a.as_array().is_some_and(|a| !a.is_empty())) else { return false };
+    program_of(&Value::Null, Some(argv))["shell"].as_bool().unwrap_or(false)
 }
 
 /// What a terminal runs now (core's `foreground`), else what it started with.
