@@ -7,10 +7,11 @@ export interface ExecResult {
   stderr: string;
 }
 
-/** Runs a program with the user's real environment (HOME, PATH, auth). 30 s limit, 8 MiB output.
+/** Runs a program with the user's real environment (HOME, PATH, auth). 8 MiB output.
+ *  `timeout`: milliseconds, defaults to 30,000, capped at 600,000 (10 minutes).
  *  `on`: on that machine (a space's `machine`) through herdr-core, its home by default.
  *  Rejects when it can't start (not installed, no such folder, the machine is unreachable). */
-export function exec(command: string, args?: string[], options?: { cwd?: string; on?: string | null }): Promise<ExecResult>;
+export function exec(command: string, args?: string[], options?: { cwd?: string; on?: string | null; timeout?: number }): Promise<ExecResult>;
 
 /** Runs `hc` (herdr-core) with the given arguments. Add "--json" for machine output. */
 export function hc(args: string[]): Promise<ExecResult>;
