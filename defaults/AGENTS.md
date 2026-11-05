@@ -954,7 +954,9 @@ All of it is in `herdr.d.ts`. In short:
   `focused().agent` is the agent an agent block shows.
   `focused().space`/`tab` describe the current window context. With a layout terminal
   block focused, `pane` and `shown` are null; `terminal` and `cwd` describe that block,
-  not its source pane. Check `focused()?.pane` before offering pane controls.
+  not its source pane. A terminal in a window (`openOverlay` with a `layout`) that has
+  the keyboard is reported the same way; pane commands without a `pane` still act on
+  the focused pane under the window. Check `focused()?.pane` before offering pane controls.
   `panes()` still lists only model panes; none is focused while a terminal block is.
   For composition navigation: `run("pane.focus", {terminal: nextAddress})`.
   Terminal copy/paste and implicit right-click routing follow the focused block.

@@ -432,6 +432,9 @@ pub struct AppWindow {
     /// The mod block holding the keyboard for directional navigation.
     focused_block: Option<String>,
     synced_model_pane: Option<String>,
+    /// A terminal block in a window (an overlay's layout) holding the keyboard.
+    /// `focused()` reports it like a layout terminal block; the focused pane stays.
+    window_terminal: Option<String>,
     /// Whether the last sync showed the tab, to hand it the keyboard back when a stack shows it again.
     tab_shown: bool,
     pane_history: Vec<String>,
@@ -523,6 +526,7 @@ impl AppWindow {
             focused_pane: None,
             focused_block: None,
             synced_model_pane: None,
+            window_terminal: None,
             tab_shown: true,
             pane_history: Vec::new(),
             window_active: true,
@@ -1697,7 +1701,9 @@ impl AppWindow {
                 model::space_json(m, p, i, branch.as_deref(), &home)
             })
             .collect();
-        let block = terminal_block(&self.chrome, self.focused_pane.as_deref());
+        // A window's terminal with the keyboard first, then a layout terminal block.
+        let block = overlay_terminal_block(&self.overlays, self.window_terminal.as_deref())
+            .or_else(|| terminal_block(&self.chrome, self.focused_pane.as_deref()));
         let focused_pane = if block.is_some() { None } else { m.focused_pane() };
         let mut agents = Vec::new();
         let mut panes = Vec::new();
@@ -4552,6 +4558,12 @@ fn terminal_block<'a>(chrome: &'a Node, focused: Option<&str>) -> Option<&'a Nod
     chrome.visible_blocks().into_iter().find(|n| n.id == id && n.terminal().is_some())
 }
 
+/// The terminal block `id` in a window's layout (an overlay with blocks).
+fn overlay_terminal_block<'a>(overlays: &'a [Overlay], id: Option<&str>) -> Option<&'a Node> {
+    let id = id?;
+    overlays.iter().filter_map(|o| o.layout.as_ref()).find_map(|l| l.visible_blocks().into_iter().find(|n| n.id == id && n.terminal().is_some()))
+}
+
 fn needs_model_pane(name: &str, args: &Value) -> bool {
     match name {
         "pane.split" | "pane.close" | "pane.zoom" | "terminal.show" => AppWindow::arg(args, "pane").is_none(),
@@ -4767,6 +4779,12 @@ impl Render for AppWindow {
             .find(|(_, t)| t.focus.is_focused(window))
             .map(|(id, _)| id.clone());
         if clicked.is_some() && self.focused_block.take().is_some() {
+            self.publish(cx);
+        }
+        // A window's terminal with the keyboard is what focused() reports; the pane under it stays.
+        let in_window = overlay_terminal_block(&self.overlays, clicked.as_deref()).map(|n| n.id.clone());
+        if in_window != self.window_terminal {
+            self.window_terminal = in_window;
             self.publish(cx);
         }
         if let Some(id) = clicked
