@@ -789,6 +789,9 @@ impl AppWindow {
     }
 
     fn open_welcome(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.native_overlay_open(OverlayKind::Window, "frame-welcome", None) {
+            return;
+        }
         // A window over the live app (nothing dims), centered and movable:
         // each step changes what's behind it, and a click beside it doesn't end it.
         let spec = json!({ "mod": "frame-welcome", "kind": "window", "width": 660, "height": 600 });
@@ -3529,7 +3532,23 @@ impl AppWindow {
 
     // ---- overlays ----------------------------------------------------------
 
+    /// Reuse a native interaction without reusing a retired instance id.
+    /// The command and target keep independent confirmations separate.
+    fn native_overlay_open(&self, kind: OverlayKind, mod_name: &str, command: Option<(&str, Option<&str>)>) -> bool {
+        self.overlays.iter().any(|overlay| {
+            overlay.kind == kind && overlay.layout.is_none() && self.copies.get(&overlay.slot).is_some_and(|copy| {
+                copy.inst.name == mod_name && command.is_none_or(|(name, id)| {
+                    copy.inst.props.pointer("/command/name").and_then(Value::as_str) == Some(name)
+                        && copy.inst.props.pointer("/command/args/id").and_then(Value::as_str) == id
+                })
+            })
+        })
+    }
+
     fn confirm(&mut self, title: &str, detail: &str, command: &str, args: Value, window: &mut Window, cx: &mut Context<Self>) {
+        if self.native_overlay_open(OverlayKind::Dialog, "confirm", Some((command, Self::arg(&args, "id")))) {
+            return;
+        }
         let spec = json!({ "mod": "confirm", "kind": "dialog", "width": 380,
             "props": { "title": title, "detail": detail, "command": { "name": command, "args": args } } });
         self.open_overlay(mods::new_overlay_id(), spec, window, cx);
@@ -5612,6 +5631,142 @@ mod tests {
         let (view, cx) = cx.add_window_view(|window, cx| super::AppWindow::new(crate::hc::offline(), requests, window, cx));
         assert_eq!(view.update(cx, |this, _| this.layout_name.clone()), "test");
         (view, cx)
+    }
+
+    fn native_overlay_window<'a>(cx: &'a mut gpui::TestAppContext) -> (gpui::Entity<super::AppWindow>, &'a mut gpui::VisualTestContext) {
+        let main = "import { View, div } from 'gpui-kit'; import { props, setShared } from 'herdr'; export default class Fixture extends View { init() { setShared('native-overlay-handle', props().overlay); } render() { return div(); } }";
+        let (view, cx) = open_window(cx, "confirm", main, serde_json::json!({
+            "id": "root", "type": "block", "content": { "tab": "active" }
+        }));
+        // Substitute only the UI shell; commands and the status interface are real.
+        let folder = crate::mods::app_dir().join("frame/welcome");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("mod.json"), r#"{ "place": "none" }"#).unwrap();
+        std::fs::write(folder.join("main.js"), main).unwrap();
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.folders = crate::mods::scan().into_iter().map(|f| (f.id.clone(), f)).collect();
+            this.model.add_space("sp1", "First", "/tmp", crate::model::Tab::new("tb1", "First", "p1", "t1"));
+            this.sync(window, cx);
+            let document = crate::mirror::Document::capture(&this.model, None);
+            let slot = this.documents.entry(String::new()).or_default();
+            slot.available = true;
+            slot.document = Some(document);
+            this.documents_watching = false;
+            let startup: Vec<_> = this.overlays.iter().map(|o| o.id.clone()).collect();
+            for id in startup {
+                this.close_overlay(&id, window, cx);
+            }
+        }));
+        (view, cx)
+    }
+
+    #[test]
+    fn repeated_close_actions_keep_one_confirmation() {
+        in_own_process("close_dialog_reuse");
+    }
+
+    #[gpui::test]
+    fn close_dialog_reuse(cx: &mut gpui::TestAppContext) {
+        if !running_alone("close_dialog_reuse") {
+            return;
+        }
+        let (view, cx) = native_overlay_window(cx);
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            for (command, args) in [
+                ("pane.close", serde_json::json!({ "pane": "p1" })),
+                ("tab.close", serde_json::json!({ "id": "tb1" })),
+                ("space.close", serde_json::json!({ "id": "sp1" })),
+            ] {
+                for _ in 0..3 {
+                    this.run(command, args.clone(), window, cx);
+                    assert_eq!(this.control(serde_json::json!({ "status": true }), window, cx)["overlays"], serde_json::json!(["confirm"]), "{command}");
+                }
+                this.run("overlay.close", serde_json::json!({}), window, cx);
+                assert_eq!(this.control(serde_json::json!({ "status": true }), window, cx)["overlays"], serde_json::json!([]), "one cancel must dismiss the interaction");
+            }
+        }));
+    }
+
+    #[test]
+    fn repeated_welcome_keeps_its_current_window() {
+        in_own_process("welcome_window_reuse");
+    }
+
+    #[gpui::test]
+    fn welcome_window_reuse(cx: &mut gpui::TestAppContext) {
+        if !running_alone("welcome_window_reuse") {
+            return;
+        }
+        let (view, cx) = native_overlay_window(cx);
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.run("app.welcome", serde_json::json!({}), window, cx);
+            let first = crate::mods::shared("native-overlay-handle").unwrap();
+            for _ in 0..2 {
+                this.run("app.welcome", serde_json::json!({}), window, cx);
+                assert_eq!(this.control(serde_json::json!({ "status": true }), window, cx)["overlays"], serde_json::json!(["frame-welcome"]));
+            }
+            this.control(serde_json::json!({ "do": "overlay.close", "args": { "id": first } }), window, cx);
+            assert_eq!(this.control(serde_json::json!({ "status": true }), window, cx)["overlays"], serde_json::json!([]), "the original handle must still close the reused window");
+            this.run("app.welcome", serde_json::json!({}), window, cx);
+            this.control(serde_json::json!({ "do": "overlay.close", "args": { "id": first } }), window, cx);
+            assert_eq!(this.control(serde_json::json!({ "status": true }), window, cx)["overlays"], serde_json::json!(["frame-welcome"]), "a retired handle must not close a new window");
+        }));
+    }
+
+    #[test]
+    fn close_confirmations_keep_distinct_targets() {
+        in_own_process("close_dialog_targets");
+    }
+
+    #[gpui::test]
+    fn close_dialog_targets(cx: &mut gpui::TestAppContext) {
+        if !running_alone("close_dialog_targets") {
+            return;
+        }
+        let (view, cx) = native_overlay_window(cx);
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.model.add_space("sp2", "Second", "/tmp", crate::model::Tab::new("tb2", "Second", "p2", "t2"));
+            this.sync(window, cx);
+            this.run("space.close", serde_json::json!({ "id": "sp1" }), window, cx);
+            let first = crate::mods::shared("native-overlay-handle").unwrap();
+            this.run("space.close", serde_json::json!({ "id": "sp2" }), window, cx);
+            this.run("space.close", serde_json::json!({ "id": "sp1" }), window, cx);
+            assert_eq!(this.control(serde_json::json!({ "status": true }), window, cx)["overlays"], serde_json::json!(["confirm", "confirm"]));
+            this.control(serde_json::json!({ "do": "overlay.close", "args": { "id": first } }), window, cx);
+            assert_eq!(this.control(serde_json::json!({ "status": true }), window, cx)["overlays"], serde_json::json!(["confirm"]));
+            this.run("overlay.close", serde_json::json!({}), window, cx);
+            assert_eq!(this.control(serde_json::json!({ "status": true }), window, cx)["overlays"], serde_json::json!([]));
+        }));
+    }
+
+    #[test]
+    fn sdk_overlays_keep_nesting_and_window_replacement() {
+        in_own_process("sdk_overlay_compatibility");
+    }
+
+    #[gpui::test]
+    fn sdk_overlay_compatibility(cx: &mut gpui::TestAppContext) {
+        if !running_alone("sdk_overlay_compatibility") {
+            return;
+        }
+        let (view, cx) = native_overlay_window(cx);
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            for id in ["sdk-parent", "sdk-child"] {
+                this.handle(crate::mods::Request::OpenOverlay { id: id.into(), spec: serde_json::json!({ "mod": "confirm", "kind": "dialog" }) }, window, cx);
+            }
+            assert_eq!(this.control(serde_json::json!({ "status": true }), window, cx)["overlays"], serde_json::json!(["confirm", "confirm"]));
+            this.run("overlay.close", serde_json::json!({}), window, cx);
+            assert_eq!(this.control(serde_json::json!({ "status": true }), window, cx)["overlays"], serde_json::json!(["confirm"]));
+            this.control(serde_json::json!({ "do": "overlay.close", "args": { "id": "sdk-parent" } }), window, cx);
+            for n in 0..3 {
+                this.handle(crate::mods::Request::OpenOverlay { id: format!("sdk-window-{n}"), spec: serde_json::json!({ "mod": "confirm", "kind": "window", "key": "same-window" }) }, window, cx);
+                assert_eq!(this.control(serde_json::json!({ "status": true }), window, cx)["overlays"], serde_json::json!(["confirm"]));
+            }
+            this.control(serde_json::json!({ "do": "overlay.close", "args": { "id": "sdk-window-0" } }), window, cx);
+            assert_eq!(this.control(serde_json::json!({ "status": true }), window, cx)["overlays"], serde_json::json!(["confirm"]));
+            this.run("space.close", serde_json::json!({ "id": "sp1" }), window, cx);
+            assert_eq!(this.control(serde_json::json!({ "status": true }), window, cx)["overlays"], serde_json::json!(["confirm", "confirm"]), "a window using the confirm mod must not hide the native dialog");
+        }));
     }
 
     #[test]
