@@ -2909,6 +2909,17 @@ impl AppWindow {
                     args["confirmed"] = a.get("confirmed").cloned().unwrap_or(Value::Null);
                     return self.dispatch("space.close", &args, person, window, cx);
                 }
+                // A tab asks before ending a running program or a live agent
+                // session, including one between turns. An idle shell is safe.
+                if a.get("confirmed").and_then(Value::as_bool) != Some(true)
+                    && let Some(detail) = self.stopped_by_tab(&id)
+                {
+                    if !person {
+                        return self.fail("tab.close ends a running program or agent session: pass confirmed: true");
+                    }
+                    self.confirm("Close tab?", &detail, "tab.close", json!({ "id": id, "confirmed": true }), window, cx);
+                    return;
+                }
                 let (addrs, _) = self.model.remove_tab(&id);
                 self.kill(&addrs, cx);
             }
@@ -2975,8 +2986,24 @@ impl AppWindow {
                     return;
                 }
                 if c.root.panes().len() == 1 {
-                    let id = c.id.clone();
-                    return self.dispatch("tab.close", &json!({ "id": id }), person, window, cx);
+                    // Closing the last pane closes the tab: let it ask (or a
+                    // confirmed close carry through), like closing the tab does.
+                    let mut args = json!({ "id": c.id.clone() });
+                    args["confirmed"] = a.get("confirmed").cloned().unwrap_or(Value::Null);
+                    return self.dispatch("tab.close", &args, person, window, cx);
+                }
+                // Mod and empty panes have no terminal; an idle shell is safe,
+                // but an agent between turns still has a session to lose.
+                if a.get("confirmed").and_then(Value::as_bool) != Some(true)
+                    && let Some(addr) = self.model.address_of(&pane).filter(|addr| needs_close_confirmation(&self.live, addr))
+                {
+                    if !person {
+                        return self.fail("pane.close ends a running program or agent session: pass confirmed: true");
+                    }
+                    let title = self.live.get(&addr).and_then(|r| r.get("title")).and_then(Value::as_str).map(str::to_owned)
+                        .unwrap_or_else(|| "its terminal".to_owned());
+                    self.confirm("Close pane?", &format!("{title} \u{2014} still running"), "pane.close", json!({ "pane": pane, "confirmed": true }), window, cx);
+                    return;
                 }
                 let addr = self.model.address_of(&pane);
                 self.model.remove_pane(&pane);
@@ -3469,6 +3496,18 @@ impl AppWindow {
     }
 
     // ---- overlays ----------------------------------------------------------
+
+    /// What closing a tab would stop, or None when it has no running program
+    /// or live agent session. Mods, blank panes and idle shells are safe.
+    fn stopped_by_tab(&self, id: &str) -> Option<String> {
+        let p = self.model.space_of(id)?;
+        let c = self.model.tab(id)?;
+        let running = model::addresses(&c.root).iter().filter(|a| needs_close_confirmation(&self.live, a)).count();
+        if running == 0 {
+            return None;
+        }
+        Some(format!("{} \u{2014} {} running terminal{}", Model::tab_name(p, c), running, if running == 1 { "" } else { "s" }))
+    }
 
     fn confirm(&mut self, title: &str, detail: &str, command: &str, args: Value, window: &mut Window, cx: &mut Context<Self>) {
         let spec = json!({ "mod": "confirm", "kind": "dialog", "width": 380,
@@ -4702,6 +4741,26 @@ fn running_argv(rec: &serde_json::Map<String, Value>) -> Option<&Value> {
     rec.get("foreground").and_then(|f| f.get("argv")).filter(|a| a.as_array().is_some_and(|a| !a.is_empty())).or_else(|| rec.get("argv"))
 }
 
+/// Closing an idle agent still ends its interactive session (and its context).
+/// `busy` is for checking whether a command or agent *turn* just finished;
+/// it deliberately ignores agents between turns, so it cannot decide whether
+/// a close needs confirmation. Use the actual foreground process without the
+/// agent report (which otherwise masks an agent that already exited back to a
+/// shell). A working/blocked/error report protects an in-flight turn even if
+/// the foreground process snapshot lags behind. If it is unavailable, prefer
+/// preserving a reported agent over silently ending its session.
+fn needs_close_confirmation(live: &HashMap<String, Value>, address: &str) -> bool {
+    live.get(address).is_some_and(|record| {
+        if record["state"] != "live" { return false; }
+        if matches!(record["status"].as_str(), Some("working" | "blocked" | "error")) { return true; }
+        let foreground = record.get("foreground").and_then(|f| f.get("argv"))
+            .filter(|a| a.as_array().is_some_and(|a| !a.is_empty()));
+        if foreground.is_none() && record["status"].as_str().is_some() { return true; }
+        let Some(argv) = foreground.or_else(|| record.get("argv")) else { return true; };
+        program_of(&Value::Null, Some(argv))["shell"] != true
+    })
+}
+
 /// Whether the core's record still puts a terminal in this space and tab and
 /// it still runs. A listing taken just before it ended still shows it running,
 /// and labels outlive the program: putting it back would show a dead pane.
@@ -5022,6 +5081,178 @@ mod tests {
         assert_eq!(super::new_space_machine(&json!({}), true, &model), None);
         model.active = Some("remote".into());
         assert_eq!(super::new_space_machine(&json!({}), true, &model).as_deref(), Some("second"));
+    }
+
+    #[test]
+    fn close_confirmation_preserves_live_agents_and_running_programs() {
+        use std::collections::HashMap;
+        use serde_json::json;
+        let mut live = HashMap::new();
+        let shell = json!(["/bin/zsh", "-l"]);
+        live.insert("idle-shell".to_owned(), json!({
+            "state": "live", "argv": shell,
+            "program": { "shell": true, "agent": false },
+            "foreground": { "name": "zsh", "argv": ["/bin/zsh", "-l"] },
+        }));
+        live.insert("running-command".to_owned(), json!({
+            "state": "live", "argv": shell,
+            "program": { "shell": false, "agent": false },
+            "foreground": { "name": "cargo", "argv": ["cargo", "test"] },
+        }));
+        live.insert("working-agent".to_owned(), json!({
+            "state": "live", "status": "working", "argv": shell,
+            "program": { "shell": false, "agent": true },
+            "foreground": { "name": "opencode", "argv": ["opencode"] },
+        }));
+        live.insert("blocked-agent".to_owned(), json!({
+            "state": "live", "status": "blocked", "argv": shell,
+            "program": { "shell": false, "agent": true },
+            "foreground": { "name": "claude", "argv": ["claude"] },
+        }));
+        live.insert("finished-agent".to_owned(), json!({
+            "state": "live", "status": "done", "argv": shell,
+            "program": { "shell": false, "agent": true },
+            "foreground": { "name": "opencode", "argv": ["opencode"] },
+        }));
+        live.insert("idle-agent".to_owned(), json!({
+            "state": "live", "status": "idle", "argv": shell,
+            "program": { "shell": false, "agent": true },
+            "foreground": { "name": "opencode", "argv": ["opencode"] },
+        }));
+        live.insert("exited-agent-in-shell".to_owned(), json!({
+            "state": "live", "status": "done", "argv": shell,
+            "program": { "shell": false, "agent": true },
+            "foreground": { "name": "zsh", "argv": ["/bin/zsh", "-l"] },
+        }));
+        live.insert("finished-terminal".to_owned(), json!({
+            "state": "finished", "argv": ["cargo", "test"],
+            "foreground": { "name": "cargo", "argv": ["cargo", "test"] },
+        }));
+        live.insert("direct-program".to_owned(), json!({
+            "state": "live", "argv": ["vim"],
+        }));
+        live.insert("unknown-process".to_owned(), json!({ "state": "live" }));
+        live.insert("agent-without-foreground".to_owned(), json!({
+            "state": "live", "status": "idle", "argv": shell,
+        }));
+        for (address, ask) in [
+            ("idle-shell", false), ("running-command", true),
+            ("working-agent", true), ("blocked-agent", true),
+            ("finished-agent", true), ("idle-agent", true),
+            ("exited-agent-in-shell", false),
+            ("finished-terminal", false), ("direct-program", true),
+            ("unknown-process", true), ("agent-without-foreground", true),
+            ("empty-pane", false),
+        ] {
+            assert_eq!(super::needs_close_confirmation(&live, address), ask, "{address}");
+        }
+    }
+
+    #[test]
+    fn close_buttons_protect_an_agent_between_turns() {
+        in_own_process("close_buttons_protect_an_agent_between_turns_window");
+    }
+
+    /// Real core record shape, passed through the same listing and mod-command
+    /// paths as the tab bar's x and a pane header's x. An agent's visible status
+    /// is idle while the OpenCode process and its session are still alive, and
+    /// the last tab closes its space, which asks first even when idle.
+    #[gpui::test]
+    fn close_buttons_protect_an_agent_between_turns_window(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("close_buttons_protect_an_agent_between_turns_window") { return; }
+        let (view, cx) = open_window(cx, "unused", "", json!({
+            "id": "root", "type": "block", "content": { "tab": "active" }
+        }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.model.add_space("sp1", "", "/src", crate::model::Tab::new("tb1", "Agent", "p1", "t1"));
+            assert!(this.model.split("p1", super::Axis::Row, "p2", "t2"));
+            assert!(this.model.add_tab("sp1", crate::model::Tab::new("tb2", "Shell", "p3", "t3")));
+            let shell = json!(["/bin/zsh", "-l"]);
+            this.terminals_listed(json!({ "terminals": [
+                { "address": "t1", "state": "live", "argv": shell,
+                  "foreground": { "argv": ["opencode"], "name": "opencode" },
+                  "status": { "state": "idle", "app": "opencode" } },
+                { "address": "t2", "state": "live", "argv": shell,
+                  "foreground": { "argv": shell, "name": "zsh" }, "status": null },
+                { "address": "t3", "state": "live", "argv": shell,
+                  "foreground": { "argv": shell, "name": "zsh" }, "status": null },
+            ] }), window, cx);
+            // The fake core is offline; only bypass the layout-availability
+            // gate so the command can exercise the close decision itself.
+            this.documents.get_mut("").unwrap().available = true;
+            assert_eq!(this.model.status("t1"), Some("idle"));
+            assert_eq!(this.live["t1"]["status"], "idle", "core status was normalized");
+
+            for id in this.overlays.iter().map(|o| o.id.clone()).collect::<Vec<_>>() {
+                this.close_overlay(&id, window, cx);
+            }
+
+            let script = this.run_as("pane.close", json!({ "pane": "p1" }), false, window, cx);
+            assert_eq!(script["error"], "pane.close ends a running program or agent session: pass confirmed: true");
+            this.handle(crate::mods::Request::Run { name: "pane.close".into(), args: json!({ "pane": "p1" }) }, window, cx);
+            assert!(this.model.address_of("p1").is_some(), "a pending confirmation cannot close the pane");
+            assert_eq!(this.overlays.len(), 1, "the pane's x opens a dialog");
+            let id = this.overlays[0].id.clone();
+            assert_eq!(this.copies[&this.overlays[0].slot].inst.props["command"]["name"], "pane.close");
+            assert_eq!(this.copies[&this.overlays[0].slot].inst.props["title"], "Close pane?");
+            assert!(this.copies[&this.overlays[0].slot].inst.props["detail"].as_str().is_some_and(|s| !s.is_empty()));
+            this.close_overlay(&id, window, cx);
+
+            let script = this.run_as("tab.close", json!({ "id": "tb1" }), false, window, cx);
+            assert_eq!(script["error"], "tab.close ends a running program or agent session: pass confirmed: true");
+            this.handle(crate::mods::Request::Run { name: "tab.close".into(), args: json!({ "id": "tb1" }) }, window, cx);
+            assert!(this.model.tab("tb1").is_some(), "a pending confirmation cannot close the tab");
+            assert_eq!(this.overlays.len(), 1, "the tab's x opens a dialog");
+            let id = this.overlays[0].id.clone();
+            assert_eq!(this.copies[&this.overlays[0].slot].inst.props["command"]["name"], "tab.close");
+            assert_eq!(this.copies[&this.overlays[0].slot].inst.props["title"], "Close tab?");
+            assert_eq!(this.copies[&this.overlays[0].slot].inst.props["detail"], "Agent — 1 running terminal");
+            this.close_overlay(&id, window, cx);
+
+            this.handle(crate::mods::Request::Run { name: "tab.close".into(), args: json!({ "id": "tb2" }) }, window, cx);
+            assert!(this.model.tab("tb2").is_none(), "an idle shell closes without a prompt");
+            assert!(this.overlays.is_empty());
+            // The last tab closes its space: that gate asks first, whatever runs.
+            let script = this.run_as("tab.close", json!({ "id": "tb1" }), false, window, cx);
+            assert_eq!(script["error"], "space.close ends its terminals: pass confirmed: true");
+            this.handle(crate::mods::Request::Run { name: "tab.close".into(), args: json!({ "id": "tb1" }) }, window, cx);
+            assert!(this.model.space("sp1").is_some(), "the last tab still protects the agent");
+            assert_eq!(this.overlays.len(), 1);
+            assert_eq!(this.copies[&this.overlays[0].slot].inst.props["command"]["name"], "space.close");
+            assert_eq!(this.copies[&this.overlays[0].slot].inst.props["title"], "Close space?");
+            assert_eq!(this.copies[&this.overlays[0].slot].inst.props["detail"], "src — 1 tabs, 2 terminals");
+            let id = this.overlays[0].id.clone();
+            this.close_overlay(&id, window, cx);
+
+            this.handle(crate::mods::Request::Run { name: "pane.close".into(), args: json!({ "pane": "p2" }) }, window, cx);
+            assert!(this.model.address_of("p2").is_none(), "an idle shell pane closes without a prompt");
+            assert!(this.overlays.is_empty());
+            this.handle(crate::mods::Request::Run { name: "pane.close".into(), args: json!({ "pane": "p1" }) }, window, cx);
+            assert!(this.model.space("sp1").is_some(), "closing the last pane protects its live agent");
+            assert_eq!(this.overlays.len(), 1);
+            assert_eq!(this.copies[&this.overlays[0].slot].inst.props["command"]["name"], "space.close");
+            let id = this.overlays[0].id.clone();
+            this.close_overlay(&id, window, cx);
+
+            // An idle last tab still takes its space with it: ask like closing
+            // the space, the behavior before tabs had their own close check.
+            this.model.add_space("sp2", "opencode", "/src", crate::model::Tab::new("tb3", "Only", "p4", "t4"));
+            this.terminals_listed(json!({ "terminals": [
+                { "address": "t1", "state": "live", "argv": shell,
+                  "foreground": { "argv": ["opencode"], "name": "opencode" },
+                  "status": { "state": "idle", "app": "opencode" } },
+                { "address": "t4", "state": "live", "argv": shell,
+                  "foreground": { "argv": shell, "name": "zsh" }, "status": null },
+            ] }), window, cx);
+            let script = this.run_as("tab.close", json!({ "id": "tb3" }), false, window, cx);
+            assert_eq!(script["error"], "space.close ends its terminals: pass confirmed: true");
+            this.handle(crate::mods::Request::Run { name: "tab.close".into(), args: json!({ "id": "tb3" }) }, window, cx);
+            assert!(this.model.space("sp2").is_some(), "the last tab asks before closing its space");
+            assert_eq!(this.overlays.len(), 1);
+            assert_eq!(this.copies[&this.overlays[0].slot].inst.props["command"]["name"], "space.close");
+            assert_eq!(this.copies[&this.overlays[0].slot].inst.props["detail"], "opencode — 1 tabs, 1 terminals");
+        }));
     }
 
     #[gpui::test]
