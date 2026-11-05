@@ -118,8 +118,12 @@ impl Tab {
         }
     }
 
-    /// Focuses a pane and remembers the one it leaves.
+    /// Focuses a pane and remembers the one it leaves. A zoomed tab shows the
+    /// pane it focuses, never a hidden one.
     pub fn focus(&mut self, pane: &str) {
+        if self.zoomed.is_some() {
+            self.zoomed = Some(pane.to_owned());
+        }
         if let Some(old) = self.focused.take().filter(|o| o != pane) {
             self.before.retain(|p| *p != old && p != pane);
             self.before.push(old);
@@ -857,6 +861,19 @@ mod tests {
         m.set_word("t1", Some("idle".into()), None, false);
         m.set_turn("t1", 5, None);
         assert_eq!(m.status("t1"), Some("done"));
+    }
+
+    #[test]
+    fn focusing_another_pane_in_a_zoomed_tab_moves_the_zoom() {
+        let mut m = model_with_one();
+        assert!(m.split("x1", Axis::Row, "x2", "t2"));
+        m.tab_mut("c1").unwrap().zoomed = Some("x2".into());
+        assert!(m.focus_pane("x1"));
+        assert_eq!(m.tab("c1").unwrap().zoomed.as_deref(), Some("x1"));
+        // A tab nobody zoomed stays unzoomed when focus moves.
+        m.tab_mut("c1").unwrap().zoomed = None;
+        assert!(m.focus_pane("x2"));
+        assert_eq!(m.tab("c1").unwrap().zoomed, None);
     }
 
     #[test]

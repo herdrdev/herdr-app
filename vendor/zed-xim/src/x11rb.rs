@@ -584,13 +584,32 @@ impl<C: HasConnection> X11rbClient<C> {
     ) -> Result<(), ClientError> {
         if msg.format == 32 {
             let [length, atom, ..] = msg.data.as_data32();
+            // HERDR: read only this message; `length` is in bytes, and fcitx4 appends the next
+            // message to a property we haven't read yet.
             let reply = self
                 .conn()
-                .get_property(true, msg.window, atom, AtomEnum::ANY, 0, length)?
+                .get_property(true, msg.window, atom, AtomEnum::ANY, 0, length.div_ceil(4))?
                 .reply()?;
-            // handle fcitx4 occasionally sending empty reply
-            if reply.value_len == 0 {
-                return Err(ClientError::InvalidReply);
+            if reply.bytes_after > 0 {
+                // X deleted nothing: take it all and put back what follows, as Xlib does.
+                let whole = reply.value.len() as u32 + reply.bytes_after;
+                let all = self
+                    .conn()
+                    .get_property(true, msg.window, atom, AtomEnum::ANY, 0, whole.div_ceil(4))?
+                    .reply()?;
+                if let Some(rest) = all
+                    .value
+                    .get(length as usize..)
+                    .filter(|rest| !rest.is_empty())
+                {
+                    self.conn().change_property8(
+                        PropMode::PREPEND,
+                        msg.window,
+                        atom,
+                        all.type_,
+                        rest,
+                    )?;
+                }
             }
             let data = reply.value;
             let req = xim_parser::read(&data)?;

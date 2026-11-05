@@ -362,6 +362,43 @@ fn font_pickers_contain_scroll_on_the_wrapper(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn long_theme_names_stay_inside_their_card(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let long = "catppuccin-macchiato";
+    let mut p = props();
+    p["section"] = json!("look");
+    let mut values = fixture(true, p, updates("current", "current"));
+    let theme = values["theme"].clone();
+    values.insert("themes".into(), json!([{ "name": long, "light": false, "colors": theme }]));
+    let mut settings = values["settings"].clone();
+    settings["theme_dark"] = json!(long);
+    values.insert("settings".into(), settings);
+    let tree = describe_with_values(cx, &staged, "frame/settings", values, None).unwrap();
+    let lines: Vec<&str> = tree.lines().collect();
+    let card = lines.iter().position(|l| l.contains(&format!("st-t-{long}"))).unwrap();
+    let row = lines[card..].iter().find(|l| l.trim_start().starts_with("h_flex") && l.contains("min_w")).unwrap();
+    assert!(row.contains(".w_full"), "the name row must fill the card: {row}");
+    assert!(row.contains(".min_w[Number(0.0)]"), "the name row must be allowed to shrink: {row}");
+    let name = lines[card..].iter().find(|l| l.contains("truncate")).unwrap();
+    assert!(name.contains(":tooltip[Str(\"catppuccin macchiato\")]"), "a cut name needs its full text on hover: {name}");
+    let check = lines[card..].iter().find(|l| l.contains("check.svg")).unwrap();
+    assert!(check.contains(".flex_none"), "the selected check must not shrink: {check}");
+}
+
+#[gpui::test]
+fn confirm_dialog_background_follows_the_frame_corners(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut p = props();
+    p["title"] = json!("Close space?");
+    p["command"] = json!({"name": "space.close", "args": {"id": "s1"}});
+    let tree = describe(cx, &staged, "mods/confirm", true, p, updates("current", "current"), None).unwrap();
+    let root = tree.lines().find(|l| l.contains(":id[Str(\"confirm\")]")).unwrap();
+    assert!(root.contains(".rounded[Number(8.0)]"), "the dialog background must follow the frame's corners: {root}");
+}
+
+#[gpui::test]
 fn check_materializes_retained_elements_in_a_rendered_view(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
