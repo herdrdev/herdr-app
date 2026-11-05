@@ -118,6 +118,17 @@ Close a pane and end its terminal.
 |---|---|
 | `pane` | no |
 
+## `pane.move`
+
+Move a pane (default: the focused one) into another tab, keeping its terminal: `tab` appends after that tab's focused pane, `target` puts it beside a pane in any tab at `edge` ("left", "right", "up", "down"; default right). One of `tab` or `target`.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+| `tab` | no |
+| `target` | no |
+| `edge` | no |
+
 ## `terminal.open`
 
 Start a terminal: as a new tab (place "tab", default), or "right"/"down" of the focused pane.
