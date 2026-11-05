@@ -550,13 +550,17 @@ The main ones:
   that exits with a nonzero code within two seconds of launch shows an error
   toast with its exit code and last output lines. Or `tab.new {name?, space?, mod,
   props?}` for a tab whose only pane is a mod (a file, a board; split a shell
-  in beside it like any tab), `tab.close {id?, confirmed?}` (asks first for running programs and live agents, even between turns; idle shells close instantly; closing the last tab closes its space),
+  in beside it like any tab), `tab.close {id?, confirmed?}` (closing the last
+  tab closes its space and asks first unless confirmed; otherwise asks first for
+  running programs and live agents, even between turns — idle shells close instantly),
   `tab.rename {id?, name}` ("": its number again), `tab.move {id, index}`,
   `tab.select {index | id}`, `tab.next`, `tab.prev`,
   `tab.settle {id?}`, `tab.unsettle {id?}` (index, next and prev
   skip settled tabs).
 - Panes: `pane.split {direction: "right" | "down", pane?, argv? | mod?, props?}` (a new
-  terminal, or a mod pane), `pane.close {pane?, confirmed?}` (asks first for running programs and live agents, even between turns; idle shells close instantly),
+  terminal, or a mod pane), `pane.close {pane?, confirmed?}` (closing the last
+  pane closes its tab as `tab.close` does; otherwise asks first for running
+  programs and live agents, even between turns — idle shells close instantly),
   `pane.zoom {pane?}`, `pane.focus {pane | terminal}`, `pane.go {direction}`, `pane.swap {direction}`.
   `pane.go` prefers the most recently focused pane along the nearest edge in that
   direction; unvisited panes fall back to overlap, then top/left layout order.

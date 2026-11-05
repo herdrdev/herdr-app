@@ -73,7 +73,7 @@ Make a tab in a space (default: the selected one; name default: none, so it's ca
 
 ## `tab.close`
 
-Close a tab and end its terminals.
+Close a tab and end its terminals (the last tab closes its space and asks first unless confirmed; otherwise asks first for running programs or live agent sessions, even between turns).
 
 | Argument | Required |
 |---|---|
@@ -112,11 +112,12 @@ Split a pane (default: the focused one) "right" or "down" with a new terminal, o
 
 ## `pane.close`
 
-Close a pane and end its terminal.
+Close a pane and end its terminal (the last pane closes its tab as tab.close does; otherwise asks first for a running program or live agent session, even between turns).
 
 | Argument | Required |
 |---|---|
 | `pane` | no |
+| `confirmed` | no |
 
 ## `terminal.open`
 

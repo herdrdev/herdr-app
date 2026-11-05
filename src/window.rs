@@ -2903,6 +2903,12 @@ impl AppWindow {
             "tab.close" => {
                 let Some(id) = Self::owned(a, "id").or(active_ctx) else { return self.fail("no tab to close") };
                 let Some(p) = self.model.space_of(&id) else { return self.fail(format!("no tab {id:?}")) };
+                // The last tab takes its space with it: ask like closing the space.
+                if p.tabs.len() == 1 {
+                    let mut args = json!({ "id": p.id });
+                    args["confirmed"] = a.get("confirmed").cloned().unwrap_or(Value::Null);
+                    return self.dispatch("space.close", &args, person, window, cx);
+                }
                 // A tab asks before ending a running program or a live agent
                 // session, including one between turns. An idle shell is safe.
                 if a.get("confirmed").and_then(Value::as_bool) != Some(true)
@@ -2911,20 +2917,8 @@ impl AppWindow {
                     if !person {
                         return self.fail("tab.close ends a running program or agent session: pass confirmed: true");
                     }
-                    if p.tabs.len() == 1 {
-                        self.confirm("Close space?", &detail, "space.close", json!({ "id": p.id, "confirmed": true }), window, cx);
-                    } else {
-                        self.confirm("Close tab?", &detail, "tab.close", json!({ "id": id, "confirmed": true }), window, cx);
-                    }
+                    self.confirm("Close tab?", &detail, "tab.close", json!({ "id": id, "confirmed": true }), window, cx);
                     return;
-                }
-                // The last tab takes its space with it. We already applied the
-                // tab's close-safety check, so carry confirmation through rather
-                // than asking space.close a second time for an idle shell.
-                if p.tabs.len() == 1 {
-                    let mut args = json!({ "id": p.id });
-                    args["confirmed"] = Value::Bool(true);
-                    return self.dispatch("space.close", &args, person, window, cx);
                 }
                 let (addrs, _) = self.model.remove_tab(&id);
                 self.kill(&addrs, cx);
@@ -5161,7 +5155,8 @@ mod tests {
 
     /// Real core record shape, passed through the same listing and mod-command
     /// paths as the tab bar's x and a pane header's x. An agent's visible status
-    /// is idle while the OpenCode process and its session are still alive.
+    /// is idle while the OpenCode process and its session are still alive, and
+    /// the last tab closes its space, which asks first even when idle.
     #[gpui::test]
     fn close_buttons_protect_an_agent_between_turns_window(cx: &mut gpui::TestAppContext) {
         use serde_json::json;
@@ -5200,6 +5195,8 @@ mod tests {
             assert_eq!(this.overlays.len(), 1, "the pane's x opens a dialog");
             let id = this.overlays[0].id.clone();
             assert_eq!(this.copies[&this.overlays[0].slot].inst.props["command"]["name"], "pane.close");
+            assert_eq!(this.copies[&this.overlays[0].slot].inst.props["title"], "Close pane?");
+            assert!(this.copies[&this.overlays[0].slot].inst.props["detail"].as_str().is_some_and(|s| !s.is_empty()));
             this.close_overlay(&id, window, cx);
 
             let script = this.run_as("tab.close", json!({ "id": "tb1" }), false, window, cx);
@@ -5209,15 +5206,22 @@ mod tests {
             assert_eq!(this.overlays.len(), 1, "the tab's x opens a dialog");
             let id = this.overlays[0].id.clone();
             assert_eq!(this.copies[&this.overlays[0].slot].inst.props["command"]["name"], "tab.close");
+            assert_eq!(this.copies[&this.overlays[0].slot].inst.props["title"], "Close tab?");
+            assert_eq!(this.copies[&this.overlays[0].slot].inst.props["detail"], "Agent — 1 running terminal");
             this.close_overlay(&id, window, cx);
 
             this.handle(crate::mods::Request::Run { name: "tab.close".into(), args: json!({ "id": "tb2" }) }, window, cx);
             assert!(this.model.tab("tb2").is_none(), "an idle shell closes without a prompt");
             assert!(this.overlays.is_empty());
+            // The last tab closes its space: that gate asks first, whatever runs.
+            let script = this.run_as("tab.close", json!({ "id": "tb1" }), false, window, cx);
+            assert_eq!(script["error"], "space.close ends its terminals: pass confirmed: true");
             this.handle(crate::mods::Request::Run { name: "tab.close".into(), args: json!({ "id": "tb1" }) }, window, cx);
             assert!(this.model.space("sp1").is_some(), "the last tab still protects the agent");
             assert_eq!(this.overlays.len(), 1);
             assert_eq!(this.copies[&this.overlays[0].slot].inst.props["command"]["name"], "space.close");
+            assert_eq!(this.copies[&this.overlays[0].slot].inst.props["title"], "Close space?");
+            assert_eq!(this.copies[&this.overlays[0].slot].inst.props["detail"], "src — 1 tabs, 2 terminals");
             let id = this.overlays[0].id.clone();
             this.close_overlay(&id, window, cx);
 
@@ -5228,6 +5232,26 @@ mod tests {
             assert!(this.model.space("sp1").is_some(), "closing the last pane protects its live agent");
             assert_eq!(this.overlays.len(), 1);
             assert_eq!(this.copies[&this.overlays[0].slot].inst.props["command"]["name"], "space.close");
+            let id = this.overlays[0].id.clone();
+            this.close_overlay(&id, window, cx);
+
+            // An idle last tab still takes its space with it: ask like closing
+            // the space, the behavior before tabs had their own close check.
+            this.model.add_space("sp2", "opencode", "/src", crate::model::Tab::new("tb3", "Only", "p4", "t4"));
+            this.terminals_listed(json!({ "terminals": [
+                { "address": "t1", "state": "live", "argv": shell,
+                  "foreground": { "argv": ["opencode"], "name": "opencode" },
+                  "status": { "state": "idle", "app": "opencode" } },
+                { "address": "t4", "state": "live", "argv": shell,
+                  "foreground": { "argv": shell, "name": "zsh" }, "status": null },
+            ] }), window, cx);
+            let script = this.run_as("tab.close", json!({ "id": "tb3" }), false, window, cx);
+            assert_eq!(script["error"], "space.close ends its terminals: pass confirmed: true");
+            this.handle(crate::mods::Request::Run { name: "tab.close".into(), args: json!({ "id": "tb3" }) }, window, cx);
+            assert!(this.model.space("sp2").is_some(), "the last tab asks before closing its space");
+            assert_eq!(this.overlays.len(), 1);
+            assert_eq!(this.copies[&this.overlays[0].slot].inst.props["command"]["name"], "space.close");
+            assert_eq!(this.copies[&this.overlays[0].slot].inst.props["detail"], "opencode — 1 tabs, 1 terminals");
         }));
     }
 
