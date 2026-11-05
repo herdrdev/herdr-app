@@ -14,7 +14,7 @@ use crate::{
     Keystroke, KeystrokeEvent, LayoutId, LineLayoutIndex, Modifiers, ModifiersChangedEvent,
     MonochromeSprite, MouseButton, MouseEvent, MouseMoveEvent, MouseUpEvent, Path, Pixels,
     PlatformAtlas, PlatformDisplay, PlatformInput, PlatformInputHandler, PlatformWindow, Point,
-    PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams,
+    GlyphThicken, PolychromeSprite, Priority, PromptButton, PromptLevel, Quad, Render, RenderGlyphParams,
     RenderImage, RenderImageParams, RenderSvgParams, Replay, ResizeEdge, SMOOTH_SVG_SCALE_FACTOR,
     SUBPIXEL_VARIANTS_X, SUBPIXEL_VARIANTS_Y, ScaledPixels, Scene, Shadow, SharedString, Size,
     StrikethroughStyle, Style, SubpixelSprite, SubscriberSet, Subscription, SystemWindowTab,
@@ -1200,8 +1200,8 @@ pub struct Window {
     pub(crate) rendered_frame: Frame,
     // HERDR: distinguish an empty scene from a window that has not drawn yet.
     rendered_frame_size: Option<(Size<Pixels>, f32)>,
-    // HERDR: the thickening strength `paint_glyph` uses (`with_glyph_thicken`).
-    glyph_thicken: Option<u8>,
+    // HERDR: the thickening `paint_glyph` uses (`with_glyph_thicken`).
+    glyph_thicken: GlyphThicken,
     pub(crate) next_frame: Frame,
     next_hitbox_id: HitboxId,
     pub(crate) next_tooltip_id: TooltipId,
@@ -2095,7 +2095,7 @@ impl Window {
             focused_text_input_active: false,
             rendered_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             rendered_frame_size: None,
-            glyph_thicken: None,
+            glyph_thicken: GlyphThicken::Auto,
             next_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             next_frame_callbacks,
             next_hitbox_id: HitboxId(0),
@@ -4057,11 +4057,12 @@ impl Window {
         id
     }
 
-    /// HERDR: paints the monochrome glyphs in `f` thickened at `strength`
+    /// HERDR: paints the monochrome glyphs in `f` thickened at a strength
     /// (0 to 255) whatever their color, as Ghostty's `font-thicken` does,
-    /// or, with None, at the platform's color-dependent dilation.
-    pub fn with_glyph_thicken<R>(&mut self, strength: Option<u8>, f: impl FnOnce(&mut Self) -> R) -> R {
-        let outer = std::mem::replace(&mut self.glyph_thicken, strength);
+    /// with no font smoothing (`Off`), or, with `Auto`, at the platform's
+    /// color-dependent dilation.
+    pub fn with_glyph_thicken<R>(&mut self, thicken: GlyphThicken, f: impl FnOnce(&mut Self) -> R) -> R {
+        let outer = std::mem::replace(&mut self.glyph_thicken, thicken);
         let result = f(self);
         self.glyph_thicken = outer;
         result
@@ -4758,8 +4759,8 @@ impl Window {
         let subpixel_rendering = self.should_use_subpixel_rendering(font_id, font_size);
         let thicken = self.glyph_thicken;
         let dilation = match thicken {
-            Some(_) => 0,
-            None => self.text_system().glyph_dilation_for_color(color),
+            GlyphThicken::Auto => self.text_system().glyph_dilation_for_color(color),
+            GlyphThicken::Strength(_) | GlyphThicken::Off => 0,
         };
         let params = RenderGlyphParams {
             font_id,
@@ -4874,7 +4875,7 @@ impl Window {
             is_emoji: true,
             subpixel_rendering: false,
             dilation: 0,
-            thicken: None,
+            thicken: GlyphThicken::Auto,
             foreground: u32::from(color.to_rgb()).to_be_bytes(),
         };
         let uses_foreground = self.text_system().glyph_uses_foreground(&params);

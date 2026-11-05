@@ -84,7 +84,7 @@ struct Grid {
     /// Each row's drawing by position, kept while the row is the same (`Rc`).
     painted: Vec<(Rc<Vec<vt::Cell>>, Vec<RowOp>, Option<usize>)>,
     /// Font size, cell size, font, loaded fonts and ligature setting used to draw.
-    painted_with: (u32, Size<Pixels>, String, u64, bool, Option<u8>),
+    painted_with: (u32, Size<Pixels>, String, u64, bool, gpui::GlyphThicken),
 }
 
 pub struct TerminalView {
@@ -251,7 +251,7 @@ impl TerminalView {
                 thumb: None,
                 track: None,
                 painted: Vec::new(),
-                painted_with: (0, Size::default(), String::new(), 0, false, None),
+                painted_with: (0, Size::default(), String::new(), 0, false, gpui::GlyphThicken::Auto),
             })),
             focus: cx.focus_handle(),
             was_focused: false,
@@ -1535,12 +1535,12 @@ fn find_input_style() -> InputEditorStyle {
     }
 }
 
-/// font_thicken's strength, when on: the terminal's glyphs thicken alike
-/// whatever their color, as Ghostty's do, where macOS otherwise thickens
-/// light text on dark more than dark text on light.
-fn glyph_thicken() -> Option<u8> {
+/// font_thicken: on, the terminal's glyphs thicken alike whatever their
+/// color, as Ghostty's do, and off they aren't smoothed at all, where macOS
+/// otherwise thickens light text on dark more than dark text on light.
+fn glyph_thicken() -> gpui::GlyphThicken {
     let s = crate::settings::get();
-    s.font_thicken.then(|| s.font_thicken_strength.min(255) as u8)
+    s.font_thicken.glyph(s.font_thicken_strength)
 }
 
 fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, window: &mut Window, cx: &mut App) {

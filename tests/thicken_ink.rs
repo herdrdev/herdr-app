@@ -1,7 +1,8 @@
 #![cfg_attr(not(target_os = "macos"), allow(dead_code, unused_imports))]
 //! Real CoreText rasterising and GPU readback: font_thicken's strength
 //! thickens dark text on light as much as light text on dark (Ghostty's
-//! `font-thicken`), where macOS's own smoothing thickens by text color.
+//! `font-thicken`), and smoothing off inks both alike too, where macOS's own
+//! smoothing thickens by text color.
 //! Prints each case's ink: the mean of (pixel - background) / (text -
 //! background) over the text's box, so both polarities compare directly.
 use gpui::{prelude::*, *};
@@ -11,13 +12,15 @@ const DARK: u32 = 0x1b1b1e;
 const LIGHT: u32 = 0xe4e4e8;
 // Rows: (font weight, thicken, text, background). Ghostty on the LG display
 // draws Regular (400) with font-thicken-strength 30.
-const CASES: [(f32, Option<u8>, u32, u32); 6] = [
-    (400., None, LIGHT, DARK),
-    (400., None, DARK, LIGHT),
-    (400., Some(30), LIGHT, DARK),
-    (400., Some(30), DARK, LIGHT),
-    (400., Some(255), LIGHT, DARK),
-    (400., Some(255), DARK, LIGHT),
+const CASES: [(f32, GlyphThicken, u32, u32); 8] = [
+    (400., GlyphThicken::Auto, LIGHT, DARK),
+    (400., GlyphThicken::Auto, DARK, LIGHT),
+    (400., GlyphThicken::Strength(30), LIGHT, DARK),
+    (400., GlyphThicken::Strength(30), DARK, LIGHT),
+    (400., GlyphThicken::Strength(255), LIGHT, DARK),
+    (400., GlyphThicken::Strength(255), DARK, LIGHT),
+    (400., GlyphThicken::Off, LIGHT, DARK),
+    (400., GlyphThicken::Off, DARK, LIGHT),
 ];
 const ROW: f32 = 18.;
 const WIDTH: f32 = 220.;
@@ -73,13 +76,14 @@ fn check(window: &mut Window, cx: &mut App) {
         let polarity = if *fg == DARK { "dark on light" } else { "light on dark" };
         println!("scale {scale} weight {weight} thicken {thicken:?} {polarity}: ink {ink:.4}");
     }
-    let [off_light, off_dark, t30_light, t30_dark, t255_light, t255_dark] = inks[..] else { unreachable!() };
-    assert!(off_light > off_dark * 1.05, "macOS smoothing thickens light text more ({off_light} vs {off_dark})");
-    // One mask, tinted: thickened polarities differ only by rounding.
-    for (light, dark) in [(t30_light, t30_dark), (t255_light, t255_dark)] {
-        assert!((light - dark).abs() < light * 0.01, "thickened polarities match: {light} vs {dark}");
+    let [auto_light, auto_dark, t30_light, t30_dark, t255_light, t255_dark, off_light, off_dark] = inks[..] else { unreachable!() };
+    assert!(auto_light > auto_dark * 1.05, "macOS smoothing thickens light text more ({auto_light} vs {auto_dark})");
+    // One mask, tinted: thickened or unsmoothed polarities differ only by rounding.
+    for (light, dark) in [(t30_light, t30_dark), (t255_light, t255_dark), (off_light, off_dark)] {
+        assert!((light - dark).abs() < light * 0.01, "polarities match: {light} vs {dark}");
     }
     assert!(t255_dark > t30_dark * 1.05, "strength thickens: {t30_dark} to {t255_dark}");
+    assert!(off_dark < auto_dark, "smoothing off draws lighter than the lightest smoothing: {off_dark} vs {auto_dark}");
 }
 
 fn add_font(cx: &mut App) {

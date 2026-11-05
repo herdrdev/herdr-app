@@ -1278,10 +1278,34 @@ pub struct RenderGlyphParams {
     pub is_emoji: bool,
     pub subpixel_rendering: bool,
     pub dilation: u8,
-    /// HERDR: Ghostty-style thickening at this strength (0 to 255),
-    /// independent of the color; overrides `dilation` where supported.
-    pub thicken: Option<u8>,
+    /// HERDR: how font smoothing thickens the glyph; anything but `Auto`
+    /// is independent of the color and overrides `dilation` where supported.
+    pub thicken: GlyphThicken,
     pub foreground: [u8; 4],
+}
+
+/// HERDR: how macOS font smoothing thickens monochrome glyphs.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Hash)]
+pub enum GlyphThicken {
+    /// The platform's dilation for the text's color.
+    #[default]
+    Auto,
+    /// Thicken at this strength (0 to 255) whatever the color, as Ghostty's
+    /// `font-thicken` does.
+    Strength(u8),
+    /// No font smoothing: antialiased coverage, the same for every color, as
+    /// Ghostty's `font-thicken = false`.
+    Off,
+}
+
+impl GlyphThicken {
+    /// The fixed strength, when thickening.
+    pub fn strength(self) -> Option<u8> {
+        match self {
+            GlyphThicken::Strength(strength) => Some(strength),
+            _ => None,
+        }
+    }
 }
 
 impl Eq for RenderGlyphParams {}
