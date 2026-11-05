@@ -4612,33 +4612,73 @@ impl Window {
             return;
         }
 
+        // A strip keeps only its outer border edges: the edges that face the
+        // hole must not be stroked, or they draw a line across the hole and a
+        // stub past each rounded corner. Corner radii stay on every strip,
+        // because one arc can be split across two of them.
+        let zero = ScaledPixels(0.);
+        let widths = quad.border_widths.clone();
         let strips = [
             // Top
-            Bounds::from_corners(
-                outer_bounds.origin,
-                point(outer_bounds.right(), inner_bounds.top()),
+            (
+                Bounds::from_corners(
+                    outer_bounds.origin,
+                    point(outer_bounds.right(), inner_bounds.top()),
+                ),
+                Edges {
+                    top: widths.top,
+                    right: widths.right,
+                    bottom: zero,
+                    left: widths.left,
+                },
             ),
             // Bottom
-            Bounds::from_corners(
-                point(outer_bounds.left(), inner_bounds.bottom()),
-                outer_bounds.bottom_right(),
+            (
+                Bounds::from_corners(
+                    point(outer_bounds.left(), inner_bounds.bottom()),
+                    outer_bounds.bottom_right(),
+                ),
+                Edges {
+                    top: zero,
+                    right: widths.right,
+                    bottom: widths.bottom,
+                    left: widths.left,
+                },
             ),
             // Left
-            Bounds::from_corners(
-                point(outer_bounds.left(), inner_bounds.top()),
-                inner_bounds.bottom_left(),
+            (
+                Bounds::from_corners(
+                    point(outer_bounds.left(), inner_bounds.top()),
+                    inner_bounds.bottom_left(),
+                ),
+                Edges {
+                    top: zero,
+                    right: zero,
+                    bottom: zero,
+                    left: widths.left,
+                },
             ),
             // Right
-            Bounds::from_corners(
-                inner_bounds.top_right(),
-                point(outer_bounds.right(), inner_bounds.bottom()),
+            (
+                Bounds::from_corners(
+                    inner_bounds.top_right(),
+                    point(outer_bounds.right(), inner_bounds.bottom()),
+                ),
+                Edges {
+                    top: zero,
+                    right: widths.right,
+                    bottom: zero,
+                    left: zero,
+                },
             ),
         ];
 
-        for strip in strips {
+        for (strip, border_widths) in strips {
             let content_mask_bounds = quad.content_mask.bounds.intersect(&strip);
             if !content_mask_bounds.is_empty() {
                 self.next_frame.scene.insert_primitive(Quad {
+                    bounds: strip,
+                    border_widths,
                     content_mask: ContentMask {
                         bounds: content_mask_bounds,
                     },
