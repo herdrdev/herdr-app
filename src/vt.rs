@@ -595,6 +595,16 @@ fn hyperlink_uri(r: &GhosttyGridRef) -> Option<String> {
     (res == GHOSTTY_SUCCESS && len > 0).then(|| String::from_utf8_lossy(&buf[..len]).into_owned())
 }
 
+fn is_wide(r: &GhosttyGridRef) -> bool {
+    let mut cell: GhosttyCell = Default::default();
+    let mut wide: GhosttyCellWide = GHOSTTY_CELL_WIDE_NARROW;
+    let read = unsafe {
+        ghostty_grid_ref_cell(r, &mut cell) == GHOSTTY_SUCCESS
+            && ghostty_cell_get(cell, GHOSTTY_CELL_DATA_WIDE, &mut wide as *mut _ as *mut c_void) == GHOSTTY_SUCCESS
+    };
+    read && wide == GHOSTTY_CELL_WIDE_WIDE
+}
+
 #[derive(Clone, Copy)]
 pub enum Select {
     Press,
@@ -1441,8 +1451,13 @@ impl Vt {
             if start_ok != GHOSTTY_SUCCESS || end_ok != GHOSTTY_SUCCESS {
                 continue;
             }
-            if (start.y, start.x) > (end.y, end.x) {
+            let swapped = (start.y, start.x) > (end.y, end.x);
+            if swapped {
                 std::mem::swap(&mut start, &mut end);
+            }
+            // A match ends on a wide character's first cell; cover its second too.
+            if is_wide(if swapped { &matched.start } else { &matched.end }) {
+                end.x += 1;
             }
             let last_row = end.y.min(self.rows.saturating_sub(1) as u32);
             if start.y >= self.rows as u32 || start.y > last_row {
@@ -1858,6 +1873,23 @@ mod tests {
         assert!(!first.search_spans.is_empty(), "selecting a history result scrolls it into view");
         assert!(first.search_spans.iter().all(|span| span.selected));
         assert_eq!(second.search_spans, second_spans, "searching one terminal doesn't draw in another");
+    }
+
+    #[test]
+    fn terminal_search_highlights_both_cells_of_a_wide_character() {
+        let spans = |cols: u16, text: &str, query: &str| {
+            let mut vt = Vt::new(cols, 3);
+            vt.write(text.as_bytes());
+            vt.start_search(query);
+            finish_search(&mut vt);
+            vt.search_spans.iter().map(|span| (span.row, span.start, span.end)).collect::<Vec<_>>()
+        };
+        assert_eq!(spans(20, "日本語 ab", "本"), vec![(0, 2, 3)]);
+        assert_eq!(spans(20, "日本語 ab", "日本"), vec![(0, 0, 3)]);
+        assert_eq!(spans(20, "x😀y", "😀"), vec![(0, 1, 2)]);
+        assert_eq!(spans(6, "abcd日", "日"), vec![(0, 4, 5)], "in the last two columns");
+        assert_eq!(spans(5, "abcd日", "d日"), vec![(0, 3, 4), (1, 0, 1)], "wrapped to the next row");
+        assert_eq!(spans(20, "日本語 ab", "語 a"), vec![(0, 4, 7)], "a narrow end keeps its own cell");
     }
 
     #[test]
