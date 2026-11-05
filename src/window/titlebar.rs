@@ -89,6 +89,10 @@ impl AppWindow {
 
     /// Makes a node move the window when dragged and maximize it on a double-click.
     pub(super) fn window_drag(&self, el: Div, cx: &mut Context<Self>) -> Div {
+        // The quick terminal stays where it dropped down.
+        if crate::quick::on() {
+            return el;
+        }
         el.on_mouse_down(MouseButton::Left, cx.listener(|this, ev: &MouseDownEvent, window, _| {
             if ev.click_count == 2 {
                 this.drag_from = None;
@@ -131,7 +135,8 @@ impl AppWindow {
         #[cfg(target_os = "macos")]
         {
             let _ = window;
-            if self.titlebar() == Titlebar::System {
+            // The quick terminal has no window buttons to leave room for.
+            if self.titlebar() == Titlebar::System && !crate::quick::on() {
                 let strip = self.window_drag(div().flex_none().h(px(MAC_STRIP)).w_full(), cx);
                 return div().size_full().flex().flex_col().child(strip).child(div().flex_1().min_h_0().flex().child(tree)).into_any_element();
             }
@@ -197,6 +202,15 @@ impl AppWindow {
 
     pub(super) fn window_command(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
         match name {
+            "window.close" if crate::quick::on() => crate::quick::hide(cx),
+            // The quick terminal: the whole screen, or back to its height.
+            "window.maximize" if crate::quick::on() => {
+                self.write_person(|p| {
+                    let q = p.quick_terminal.get_or_insert_with(Default::default);
+                    q.fullscreen = !q.fullscreen;
+                }, window, cx);
+                crate::quick::show(cx);
+            }
             "window.close" => {
                 self.drain_documents(window, cx);
                 self.close_mods_now(std::time::Instant::now() + Duration::from_millis(250), window, cx);
