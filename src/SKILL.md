@@ -37,6 +37,10 @@ herdr-app do pane.split --direction right --pane p12
 herdr-app do agent.focus --terminal t7
 ```
 
+While a pane is zoomed, `herdr-app do pane.go --direction right` moves the
+zoom and keyboard focus to its grid neighbor in one step. `pane.zoom`
+returns to the same grid with the destination focused.
+
 For a remote space:
 
 ```sh

@@ -3413,8 +3413,18 @@ impl AppWindow {
 
     /// `pane.go`: the nearest pane or focusable mod.
     fn go(&mut self, dir: &str, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(from) = self.focused_block.clone().or_else(|| self.model.focused_pane()) else { return };
-        let Some(to) = self.neighbor(&from, dir, true) else { return };
+        let tab = self.model.active_tab();
+        let Some(from) = self.focused_block.clone().or_else(|| tab?.zoomed.clone()).or_else(|| self.model.focused_pane()) else { return };
+        let step = tab.filter(|t| t.zoomed.as_ref() == Some(&from))
+            .and_then(|t| Some((t.id.clone(), self.zoomed_neighbor(t, &from, dir)?)));
+        let to = if let Some((id, to)) = step {
+            // Change the view and keyboard target in one sync; never show the grid in between.
+            self.model.tab_mut(&id).unwrap().zoomed = Some(to.clone());
+            to
+        } else if let Some(to) = self.neighbor(&from, dir, true) {
+            // At a grid edge a visible focusable mod can still take the keyboard.
+            to
+        } else { return };
         if self.focusable(&to) {
             return self.focus_block(&to, window, cx);
         }
@@ -3452,9 +3462,15 @@ impl AppWindow {
                 || self.model.active_tab().is_some_and(|t| t.shown().visible_blocks().iter().any(|n| n.id == id)))
     }
 
-    /// Its mod.json says `"focusable": true` (`go` asks only of visible blocks).
+    /// A destination mod pane may not have a running copy until zoom moves to it.
     fn focusable(&self, id: &str) -> bool {
-        self.copies.get(id).and_then(|c| self.folders.get(&c.inst.name)).is_some_and(|f| f.hint.focusable)
+        let name = self.copies.get(id).map(|c| &c.inst.name).or_else(|| {
+            match self.model.active_tab()?.root.find(id)?.content()? {
+                Content::Mod { name, .. } => Some(name),
+                _ => None,
+            }
+        });
+        name.and_then(|n| self.folders.get(n)).is_some_and(|f| f.hint.focusable)
     }
 
     /// Swaps the focused pane with its neighbor in a direction.
@@ -5482,6 +5498,51 @@ export default class Probe extends View {
     }
 
     include!("window/pane_size_tests.rs");
+
+    #[test]
+    fn zoomed_pane_shortcuts_follow_the_underlying_grid() {
+        in_own_process("zoomed_pane_keys");
+    }
+
+    #[gpui::test]
+    fn zoomed_pane_keys(cx: &mut gpui::TestAppContext) {
+        use crate::model::pane;
+        use super::Axis::{Column, Row};
+        if !running_alone("zoomed_pane_keys") { return; }
+        let layout = serde_json::json!({"id":"context", "type":"block", "content":{"tab":"active"}});
+        let (view, cx) = open_window(cx, "unused", "", layout);
+        let mut tab = super::Tab::new("tab", "", "a", "term-a");
+        tab.root.split("a", Row, pane("b", "term-b"), "row".into());
+        tab.root.split("b", Column, pane("c", "term-c"), "column".into());
+        let grid = tab.root.clone();
+        // Restore already zoomed: there are no previously drawn split bounds to rely on.
+        tab.zoomed = Some("a".into());
+        view.update_in(cx, |this, window, cx| {
+            this.model.add_space("space", "test", "/", tab);
+            this.sync(window, cx);
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let key = |action: &str| crate::keys::listing().into_iter().find(|(_, _, a)| a == action).unwrap().1;
+        for (dir, target) in [("right", "b"), ("down", "c"), ("right", "c"), ("left", "a"), ("right", "c"), ("up", "b")] {
+            cx.simulate_keystrokes(&key(&format!("pane.go:{dir}")));
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            view.update_in(cx, |this, window, _| {
+                let tab = this.model.active_tab().unwrap();
+                assert_eq!(tab.zoomed.as_deref(), Some(target), "{dir}");
+                assert_eq!(tab.shown().id, target);
+                assert!(this.terms[target].focus.is_focused(window));
+                let bounds = this.bounds.borrow();
+                assert_eq!(bounds[target], bounds["context"]);
+            });
+        }
+        cx.simulate_keystrokes(&key("pane.zoom"));
+        view.update(cx, |this, _| {
+            let tab = this.model.active_tab().unwrap();
+            assert_eq!(tab.zoomed, None);
+            assert_eq!(tab.shown(), &grid);
+            assert_eq!(tab.focused.as_deref(), Some("b"));
+        });
+    }
 
     #[test]
     fn terminal_menu_preserves_clicked_target_and_uses_mod_dimensions() {
