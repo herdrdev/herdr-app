@@ -38,7 +38,7 @@ export default class TerminalsPane extends View {
     const g = p.program;
     const where = folder(p.cwd);
     // Shells often put the folder in their title already.
-    const title = p.title || "shell";
+    const title = p.name || p.title || "shell";
     const dir = where && !title.includes(where) && !/^[~/]/.test(title) ? where : "";
     return h_flex()
       .id(`tm-head-${pane}`)

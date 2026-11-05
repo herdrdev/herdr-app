@@ -237,6 +237,19 @@ impl Model {
         self.spaces.iter_mut().flat_map(|p| p.tabs.iter_mut()).find(|c| c.root.find(node).is_some())
     }
 
+    /// The name someone gave a pane (kept as its block's title); None: its program's.
+    pub fn pane_name(&self, pane: &str) -> Option<&str> {
+        self.tab_of(pane).and_then(|c| c.root.find(pane)).filter(|n| n.is_pane()).and_then(|n| n.title.as_deref())
+    }
+
+    /// Names a pane; an empty name goes back to its program's. False: no such pane.
+    pub fn rename_pane(&mut self, pane: &str, name: &str) -> bool {
+        let Some(n) = self.tab_of_mut(pane).and_then(|c| c.root.find_mut(pane)).filter(|n| n.is_pane()) else { return false };
+        let name = name.trim();
+        n.title = (!name.is_empty()).then(|| name.to_owned());
+        true
+    }
+
     /// Adds a space at the end and selects it.
     /// What a space is called: its name, else its first terminal's checkout
     /// (a worktree's own folder; outside git its folder), as Herdr names workspaces.
@@ -646,6 +659,21 @@ mod tests {
         assert_eq!(names.iter().map(String::as_str).collect::<Vec<_>>(), ["1", "review", "3"]);
         m.space_mut("p1").unwrap().name = "api".into();
         assert_eq!(m.space_name(m.space("p1").unwrap(), "/home/me"), "api");
+    }
+
+    #[test]
+    fn panes_are_named_and_an_empty_name_is_their_programs_again() {
+        let mut m = Model::default();
+        m.add_space("p1", "", "/home/me", Tab::new("c1", "", "x1", "t1"));
+        assert_eq!(m.pane_name("x1"), None);
+        assert!(m.rename_pane("x1", "  build "));
+        assert_eq!(m.pane_name("x1"), Some("build"));
+        assert!(m.rename_pane("x1", " "));
+        assert_eq!(m.pane_name("x1"), None);
+        // Only panes: not tabs, containers or unknown ids.
+        assert!(!m.rename_pane("c1", "x"));
+        assert!(!m.rename_pane("nope", "x"));
+        assert_eq!(m.tab("c1").unwrap().root.title, None);
     }
 
     #[test]

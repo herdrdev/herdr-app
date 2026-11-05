@@ -118,6 +118,15 @@ Close a pane and end its terminal.
 |---|---|
 | `pane` | no |
 
+## `pane.rename`
+
+Name a pane (default: the focused one; asks the person when no name; an empty name: its program's again).
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+| `name` | no |
+
 ## `terminal.open`
 
 Start a terminal: as a new tab (place "tab", default), or "right"/"down" of the focused pane.
