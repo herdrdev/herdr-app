@@ -59,6 +59,11 @@ const kidStatus = (k, listed) => {
   const s = k.status;
   return s === "error" ? "blocked" : s === "done" ? "idle" : s;
 };
+// Work an agent reports beside its own status, as OSC 7501 records (Claude
+// Code's background sub-agents, which have no terminal). Only a record that
+// works or waits counts. Agents keep ended runs as records (pi-subagents keeps
+// a failed one as error), so done, error and any other state read as idle.
+const recordStatus = (k) => Object.values(k?.records ?? {}).map(({ state: s } = {}) => (s === "working" || s === "blocked" ? s : "idle"));
 const SORTS = [
   { id: "priority", label: "Priority", icon: "clock" },
   { id: "grouped", label: "Grouped by space", icon: "layers" },
@@ -240,7 +245,12 @@ export default class Agents extends View {
     const byPriority = sort.id === "priority";
     // A helper's done is its own row's news: it doesn't pull a working parent out of Working.
     const kidRank = (k) => { const s = kidStatus(k, this.listed); return RANK[s === "done" ? "idle" : s] ?? 0; };
-    const urgency = new Map(list.map((a) => [a.address, Math.max(this.rank(a), ...this.tree(all, a.address).map((s) => kidRank(s.t)))]));
+    const byAddress = new Map(all.map((k) => [k.address, k]));
+    // The most urgent of an agent's own records, or null.
+    const recordTop = new Map(list.map((a) => [a.address, recordStatus(byAddress.get(a.address)).reduce((m, s) => ((RANK[s] ?? 0) > (RANK[m] ?? 0) ? s : m), null)]));
+    const urgency = new Map(list.map((a) => [a.address, Math.max(this.rank(a), RANK[recordTop.get(a.address)] ?? 0, ...this.tree(all, a.address).flatMap((s) => [kidRank(s.t), ...recordStatus(s.t).map((r) => RANK[r] ?? 0)]))]));
+    // An idle agent whose records work shows their status, not its own idle ring.
+    const shownStatus = (a) => (a.status === "idle" && (RANK[recordTop.get(a.address)] ?? 0) > RANK.idle ? { ...a, status: recordTop.get(a.address) } : a);
     const rankOf = (a) => urgency.get(a.address);
     if (byPriority) list = [...list].sort((x, y) => rankOf(y) - rankOf(x) || this.since(y) - this.since(x) || y.seq - x.seq);
     const pinned = list.filter((a) => a.pinned);
@@ -319,10 +329,10 @@ export default class Agents extends View {
           .hover((s) => s.bg(t.hover))
           .on_click(() => run("pane.focus", { pane: a.pane }))
           .child(div().flex_1().min_w(0).whitespace_nowrap().text_right().text_color(a.focused ? t.foreground : t.muted).child(String(i + 1)))
-          .child(h_flex().w(14).flex_none().items_center().justify_center().child(this.status(t, a, true)));
+          .child(h_flex().w(14).flex_none().items_center().justify_center().child(this.status(t, shownStatus(a), true)));
       }
       const when = this.since(a);
-      const idle = a.status === "idle" && !a.focused;
+      const idle = shownStatus(a).status === "idle" && !a.focused;
       const isPinned = a.pinned;
       const pin = div()
         .id(`pin-${a.address}`)
@@ -375,7 +385,7 @@ export default class Agents extends View {
         .when(subs.length > 0, el => el.child(fold(a, subs)))
         .when(this.hovered === a.address, el => el.child(pin))
         .when(this.hovered !== a.address && Boolean(when), el => el.child(div().flex_none().text_size(11).text_color(t.dim).child(duration(now - when))))
-        .child(this.status(t, a, byPriority && !isPinned));
+        .child(this.status(t, shownStatus(a), byPriority && !isPinned));
     };
 
     // Groups in list order: spaces (grouped) or priority sections. Agents of a
