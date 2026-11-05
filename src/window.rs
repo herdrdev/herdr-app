@@ -5064,8 +5064,7 @@ mod tests {
 
     #[test]
     fn directory_changes_include_nested_assets() {
-        let temp = if cfg!(target_os = "linux") { std::path::PathBuf::from("/var/tmp") } else { std::env::temp_dir() };
-        let home = temp.join(format!("herdr-image-directory-test-{}", std::process::id()));
+        let home = asset_sandbox("image-directory-test");
         std::fs::create_dir_all(home.join("mods/probe/nested")).unwrap();
         std::fs::write(home.join("mods/probe/nested/icon.svg"), "svg").unwrap();
         for ignored in ["node_modules/pkg", ".git"] {
@@ -5082,6 +5081,62 @@ mod tests {
         assert_eq!(paths.iter().filter(|p| p.ends_with("icon.svg")).count(), 1);
         std::fs::remove_dir_all(&home).unwrap();
         assert_eq!(super::changed_asset_paths(&home, &changed), changed);
+    }
+
+    fn write_asset(home: &std::path::Path, path: &str, bytes: &str, modified_secs: u64) {
+        let file = home.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, bytes).unwrap();
+        let modified = std::time::UNIX_EPOCH + std::time::Duration::from_secs(modified_secs);
+        std::fs::File::options().write(true).open(&file).unwrap().set_modified(modified).unwrap();
+    }
+
+    fn asset_sandbox(name: &str) -> std::path::PathBuf {
+        let temp = if cfg!(target_os = "linux") { std::path::PathBuf::from("/var/tmp") } else { std::env::temp_dir() };
+        let home = temp.join(format!("herdr-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        home
+    }
+
+    #[test]
+    fn loaded_assets_are_not_evicted_for_their_own_write_event() {
+        use gpui::AssetSource as _;
+        let home = asset_sandbox("loaded-asset-event-test");
+        let (icon, logo) = (std::path::PathBuf::from("mods/probe/icon.svg"), std::path::PathBuf::from("mods/probe/logo.svg"));
+        write_asset(&home, "mods/probe/icon.svg", "<svg/>", 1000);
+        write_asset(&home, "mods/probe/logo.svg", "<svg/>", 1000);
+        gpui_shell::AppAssets::new(home.clone()).load("mods/probe/icon.svg").unwrap();
+        let events = [icon.clone(), logo.clone(), "mods/probe".into()];
+
+        let paths = super::changed_asset_paths(&home, &events);
+        assert!(!paths.contains(&icon), "the loaded, unchanged icon was evicted: {paths:?}");
+        assert!(paths.contains(&logo));
+
+        write_asset(&home, "mods/probe/icon.svg", "<svg><g/></svg>", 2000);
+        assert!(super::changed_asset_paths(&home, &events).contains(&icon));
+
+        std::fs::remove_file(home.join(&icon)).unwrap();
+        assert!(super::changed_asset_paths(&home, &events).contains(&icon));
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn a_save_still_evicts_after_a_later_load_or_a_missing_first_load() {
+        use gpui::AssetSource as _;
+        let home = asset_sandbox("later-load-event-test");
+        let assets = gpui_shell::AppAssets::new(home.clone());
+        let icon = std::path::PathBuf::from("mods/probe/icon.svg");
+        write_asset(&home, "mods/probe/icon.svg", "<svg/>", 1000);
+        assets.load("mods/probe/icon.svg").unwrap();
+        write_asset(&home, "mods/probe/icon.svg", "<svg><g/></svg>", 2000);
+        assets.load("mods/probe/icon.svg").unwrap();
+        assert!(super::changed_asset_paths(&home, &[icon.clone()]).contains(&icon));
+
+        let later = std::path::PathBuf::from("mods/probe/later.svg");
+        assert!(assets.load("mods/probe/later.svg").unwrap().is_none());
+        write_asset(&home, "mods/probe/later.svg", "<svg/>", 1000);
+        assert!(super::changed_asset_paths(&home, &[later.clone()]).contains(&later));
+        std::fs::remove_dir_all(&home).unwrap();
     }
 
     #[test]
