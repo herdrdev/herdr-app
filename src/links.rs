@@ -120,7 +120,8 @@ fn file_url_path(link: &str) -> Option<PathBuf> {
         && drive.as_bytes().get(1) == Some(&b':')
         && drive.as_bytes()[0].is_ascii_alphabetic()
     {
-        return Some(PathBuf::from(drive));
+        // file:///C:/x is C:\x; Explorer and some handlers don't take forward slashes.
+        return Some(PathBuf::from(drive.replace('/', "\\")));
     }
     Some(PathBuf::from(decoded))
 }
