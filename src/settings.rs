@@ -660,6 +660,12 @@ impl Settings {
         }
         out
     }
+
+    /// What the window applies once `problems` are reported: an opacity out of range at its nearest end.
+    pub fn in_range(mut self) -> Self {
+        self.window_opacity = self.window_opacity.clamp(0.0, 1.0);
+        self
+    }
 }
 
 pub fn path() -> std::path::PathBuf {
@@ -991,6 +997,15 @@ mod tests {
         let clicks = crate::layout_sync::State { theme: Some(ThemeChoice::One("ink".into())), ..Default::default() };
         clicks.apply(&mut win98);
         assert_eq!(Settings::compose(&person, &win98.look, true).theme, "ink");
+    }
+
+    #[test]
+    fn a_window_opacity_out_of_range_is_reported_then_applied_at_its_nearest_end() {
+        for (asked, applied) in [(-0.5, 0.0), (1.5, 1.0), (0.4, 0.4)] {
+            let s = Settings::compose(&Person { window_opacity: asked, ..Person::default() }, &crate::layout::Look::default(), true);
+            assert_eq!(s.problems().iter().any(|p| p.starts_with("window_opacity")), asked != applied, "{asked}");
+            assert_eq!(s.in_range().window_opacity, applied);
+        }
     }
 
     #[test]

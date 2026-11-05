@@ -850,6 +850,7 @@ impl AppWindow {
         if !problems.is_empty() {
             self.report_layout(&problems.join("; "));
         }
+        let s = s.in_range();
         let background = match (s.window_opacity < 1.0, s.window_blur) {
             (false, _) => WindowBackgroundAppearance::Opaque,
             (true, false) => WindowBackgroundAppearance::Transparent,
