@@ -263,6 +263,8 @@ struct Term {
     address: String,
     focus: FocusHandle,
     _sub: Subscription,
+    _focus_in: Subscription,
+    _focus_out: Subscription,
 }
 
 enum TerminalChange {
@@ -1342,7 +1344,7 @@ impl AppWindow {
         self.model.pane_of(addr).and_then(|p| self.terms.get(&p)).or_else(|| self.terms.get(block).filter(|t| t.address == addr))
     }
 
-    /// What's on screen now, for done-vs-seen.
+    /// What's on screen now, for alerts.
     fn visible_addresses(&self) -> Vec<String> {
         let (terms, _) = self.visible();
         // A swapped-in terminal is drawn instead of its pane's own.
@@ -1352,6 +1354,20 @@ impl AppWindow {
             out.extend(self.shown_agent());
         }
         out
+    }
+
+    /// The drawn terminal holding the keyboard, including its own Find field.
+    fn seen_address(&self, window: &Window, cx: &App) -> Option<String> {
+        if !window.is_window_active() {
+            return None;
+        }
+        let (terms, _) = self.visible();
+        let covered: HashSet<&str> = terms.iter().filter_map(|(slot, _)| slot.strip_suffix(SWAP)).collect();
+        let drawn = terms.iter().filter(|(slot, _)| !covered.contains(slot.as_str())).filter_map(|(slot, address)| {
+            self.terms.get(slot).filter(|t| &t.address == address)
+        });
+        let agent = self.agent_block().and_then(|block| self.shown_agent().and_then(|addr| self.agent_view(&block, &addr)));
+        drawn.chain(agent).find(|t| t.view.read(cx).owns_keyboard_focus(window, cx)).map(|t| t.address.clone())
     }
 
     /// Makes `addr` the shown agent; a pane showing it also becomes the focused pane.
@@ -1413,7 +1429,9 @@ impl AppWindow {
                 }
             });
             let focus = view.read(cx).focus_handle().clone();
-            self.terms.insert(id, Term { view, address, focus, _sub: sub });
+            let focus_in = cx.on_focus_in(&focus, window, |this, window, cx| this.focus_seen_changed(window, cx));
+            let focus_out = cx.on_focus_out(&focus, window, |this, _, window, cx| this.focus_seen_changed(window, cx));
+            self.terms.insert(id, Term { view, address, focus, _sub: sub, _focus_in: focus_in, _focus_out: focus_out });
         }
         let gone: Vec<String> = self.terms.keys().filter(|id| !want_terms.contains(*id)).cloned().collect();
         for id in gone {
@@ -1495,52 +1513,52 @@ impl AppWindow {
         } else if revealed {
             self.refocus_pane(window, cx);
         }
-        if self.window_active {
-            let visible = self.visible_addresses();
-            self.model.mark_seen(&visible);
-        }
-        self.share_seen(cx);
+        self.share_seen(window, cx);
         self.publish(cx);
         self.save();
         cx.notify();
     }
 
-    /// Shares what the person looks at as `herdr.seen` (docs/labels.md): an
-    /// agent on screen in the active window, once per turn while it stays
-    /// there, so a phone marking it unread isn't undone by a screen nobody
-    /// watches. Only ever raises it. True when a status changed.
-    fn share_seen(&mut self, cx: &mut Context<Self>) -> bool {
-        let looking: HashSet<String> = if self.window_active { self.visible_addresses().into_iter().collect() } else { HashSet::new() };
-        self.looked.retain(|a, _| looking.contains(a));
-        let mut changed = false;
-        for addr in looking {
-            let Some(a) = self.model.agents.get(&addr) else { continue };
-            let turn = a.turn;
-            if a.word.is_none() || !self.live.contains_key(&addr) || self.looked.get(&addr) == Some(&turn) {
-                continue;
-            }
-            self.looked.insert(addr.clone(), turn);
-            if a.seen_turn.is_some_and(|s| s >= turn) {
-                continue;
-            }
-            // Shown as seen now, not after the core's round trip.
-            changed |= self.model.set_turn(&addr, turn, Some(turn));
-            self.written_seen.insert(addr.clone(), turn);
-            let core = self.core.clone();
-            cx.spawn(async move |this, cx| {
-                let params = json!({ "terminal": addr, "labels": { "herdr.seen": turn.to_string() } });
-                let Err(e) = cx.background_executor().spawn(async move { core.call("terminal.label", params) }).await else { return };
-                tracing::warn!("seen label for {addr}: {e:#}");
-                let _ = this.update(cx, |this, _| {
-                    if this.written_seen.get(&addr) == Some(&turn) {
-                        this.written_seen.remove(&addr);
-                        this.looked.remove(&addr);
-                    }
-                });
-            })
-            .detach();
+    /// Shares the focused terminal as seen, once per turn until focus leaves it.
+    fn share_seen(&mut self, window: &Window, cx: &mut Context<Self>) -> bool {
+        let looking = self.seen_address(window, cx);
+        self.looked.retain(|a, _| Some(a.as_str()) == looking.as_deref());
+        let Some(addr) = looking else { return false };
+        let mut changed = self.model.mark_seen(std::slice::from_ref(&addr));
+        let Some(a) = self.model.agents.get(&addr) else { return changed };
+        let turn = a.turn;
+        if a.word.is_none() || !self.live.contains_key(&addr) || self.looked.get(&addr) == Some(&turn) {
+            return changed;
         }
+        self.looked.insert(addr.clone(), turn);
+        if a.seen_turn.is_some_and(|s| s >= turn) {
+            return changed;
+        }
+        // Shown as seen now, not after the core's round trip.
+        changed |= self.model.set_turn(&addr, turn, Some(turn));
+        self.written_seen.insert(addr.clone(), turn);
+        let core = self.core.clone();
+        cx.spawn(async move |this, cx| {
+            let params = json!({ "terminal": addr, "labels": { "herdr.seen": turn.to_string() } });
+            let Err(e) = cx.background_executor().spawn(async move { core.call("terminal.label", params) }).await else { return };
+            tracing::warn!("seen label for {addr}: {e:#}");
+            let _ = this.update(cx, |this, _| {
+                if this.written_seen.get(&addr) == Some(&turn) {
+                    this.written_seen.remove(&addr);
+                    this.looked.remove(&addr);
+                }
+            });
+        })
+        .detach();
         changed
+    }
+
+    /// Pointer and keyboard focus can move without changing the layout.
+    fn focus_seen_changed(&mut self, window: &Window, cx: &mut Context<Self>) {
+        if self.share_seen(window, cx) {
+            self.publish(cx);
+            cx.notify();
+        }
     }
 
     /// The keyboard never ends up nowhere. When what had it leaves the screen (a
@@ -2031,6 +2049,7 @@ impl AppWindow {
         // listing is ours, and must ring.
         let mut changed = self.reconcile(window, cx);
         let visible: HashSet<String> = self.visible_addresses().into_iter().collect();
+        let focused = self.seen_address(window, cx);
         let mut alerts = Vec::new();
         for (addr, rec) in &self.live {
             let word = rec.get("status").and_then(Value::as_str).map(str::to_owned);
@@ -2041,13 +2060,13 @@ impl AppWindow {
             if let Some(alert) = self.model.alert_for(addr, child, prev.as_deref(), word.as_deref(), looking) {
                 alerts.push((addr.clone(), alert, looking));
             }
-            changed |= self.model.set_word(addr, word, app, looking);
+            changed |= self.model.set_word(addr, word, app, focused.as_deref() == Some(addr.as_str()));
             let turn = rec.get("turn").and_then(Value::as_u64).unwrap_or(0);
             let label = rec.pointer("/labels/herdr.seen").and_then(Value::as_str).and_then(|s| s.parse::<u64>().ok());
             changed |= self.model.set_turn(addr, turn, label.max(self.written_seen.get(addr).copied()));
         }
         self.written_seen.retain(|a, _| self.live.contains_key(a));
-        changed |= self.share_seen(cx);
+        changed |= self.share_seen(window, cx);
         // Changes already made before Herdr started aren't news.
         if self.listed_once {
             for (addr, alert, looking) in alerts {
@@ -5330,6 +5349,289 @@ mod tests {
         cx.deactivate_window();
         cx.update(|window, cx| view.update(cx, |this, cx| {
             assert!(this.focused_path(window, cx).contains("pane"));
+        }));
+    }
+
+    #[test]
+    fn focusing_one_agent_keeps_its_visible_sibling_unread() {
+        in_own_process("focused_agent_seen");
+    }
+
+    #[gpui::test]
+    fn focused_agent_seen(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("focused_agent_seen") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "unused", "", json!({
+            "id": "main", "type": "block", "content": { "tab": "active" }
+        }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            window.activate_window();
+            this.model.add_space("s1", "", "", crate::model::Tab::new("tab", "", "p1", "t1"));
+            this.model.split("p1", super::Axis::Row, "p2", "t2");
+            this.model.focus_pane("p1");
+            this.sync(window, cx);
+        }));
+        cx.run_until_parked();
+        cx.executor().advance_clock(std::time::Duration::from_millis(500));
+        cx.run_until_parked();
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            assert!(window.is_window_active(), "the test window must be active");
+            assert!(this.window_active, "the app must have observed window activation");
+            assert_eq!(this.model.focused_pane().as_deref(), Some("p1"));
+            assert!(this.visible_addresses().contains(&"t1".to_owned()));
+            assert!(this.visible_addresses().contains(&"t2".to_owned()));
+            for addr in ["t1", "t2"] {
+                this.model.agents.insert(addr.into(), crate::model::Agent {
+                    word: Some("idle".into()), seen: false, turn: 1, seen_turn: Some(0), ..Default::default()
+                });
+                this.live.insert(addr.into(), json!({"status": "idle", "turn": 1, "labels": {"herdr.seen": "0"}}));
+            }
+            this.dispatch("agent.focus", &json!({"terminal": "t1"}), true, window, cx);
+            assert_eq!(this.model.status("t1"), Some("idle"));
+            assert_eq!(this.model.status("t2"), Some("done"), "a visible sibling was not focused");
+            let first = this.model.agents.get_mut("t1").unwrap();
+            first.turn = 2;
+            first.seen_turn = Some(1);
+            first.seen = false;
+        }));
+        // A pointer click changes keyboard focus without going through sync().
+        let at = view.read_with(cx, |this, _| this.bounds.borrow().get("p2").unwrap().center());
+        cx.simulate_mouse_down(at, gpui::MouseButton::Left, gpui::Modifiers::default());
+        cx.simulate_mouse_up(at, gpui::MouseButton::Left, gpui::Modifiers::default());
+        cx.run_until_parked();
+        view.read_with(cx, |this, _| {
+            assert_eq!(this.model.status("t1"), Some("done"));
+            assert_eq!(this.model.status("t2"), Some("idle"), "clicking a terminal marks it seen");
+        });
+        // A remote mark-unread survives while focus stays put, but returning
+        // after another control held the keyboard is a fresh look.
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.model.agents.get_mut("t2").unwrap().seen_turn = Some(0);
+            this.looked.insert("t2".into(), 1);
+            this.sync(window, cx);
+            assert_eq!(this.model.status("t2"), Some("done"));
+            this.focus.focus(window, cx);
+        }));
+        cx.run_until_parked();
+        cx.update(|window, cx| view.update(cx, |this, cx| this.terms["p2"].focus.focus(window, cx)));
+        cx.run_until_parked();
+        view.read_with(cx, |this, _| assert_eq!(this.model.status("t2"), Some("idle"), "returning is a fresh look"));
+        // With no shared label, the local fallback must obey the same rule.
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            for addr in ["t1", "t2"] {
+                let agent = this.model.agents.get_mut(addr).unwrap();
+                agent.seen = false;
+                agent.seen_turn = None;
+            }
+            this.sync(window, cx);
+            assert!(!this.model.agents["t1"].seen);
+            assert!(this.model.agents["t2"].seen);
+        }));
+    }
+
+    #[test]
+    fn an_unfocused_visible_agent_can_finish_unread() {
+        in_own_process("unfocused_agent_finishes");
+    }
+
+    #[gpui::test]
+    fn unfocused_agent_finishes(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("unfocused_agent_finishes") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "unused", "", json!({
+            "id": "main", "type": "block", "content": { "tab": "active" }
+        }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            window.activate_window();
+            this.model.add_space("s1", "", "", crate::model::Tab::new("tab", "", "p1", "t1"));
+            this.model.split("p1", super::Axis::Row, "p2", "t2");
+            this.model.focus_pane("p1");
+            this.sync(window, cx);
+        }));
+        cx.run_until_parked();
+        cx.executor().advance_clock(std::time::Duration::from_millis(500));
+        cx.run_until_parked();
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.model.agents.insert("t1".into(), crate::model::Agent { word: Some("idle".into()), seen: true, ..Default::default() });
+            this.model.agents.insert("t2".into(), crate::model::Agent { word: Some("working".into()), seen: true, ..Default::default() });
+            this.live.insert("t1".into(), json!({"status": "idle", "turn": 0, "labels": {}}));
+            this.live.insert("t2".into(), json!({"status": "idle", "turn": 1, "labels": {}}));
+            this.tend_terminals(false, window, cx);
+            assert_eq!(this.model.status("t2"), Some("done"), "the fallback without a shared label stays unread");
+            assert!(!this.model.agents["t2"].seen);
+
+            // Core sends the final status before advancing the shared turn.
+            let agent = this.model.agents.get_mut("t2").unwrap();
+            agent.word = Some("working".into());
+            agent.turn = 1;
+            agent.seen_turn = Some(1);
+            this.live.insert("t2".into(), json!({"status": "idle", "turn": 1, "labels": {"herdr.seen": "1"}}));
+            this.tend_terminals(false, window, cx);
+            this.live.insert("t2".into(), json!({"status": "idle", "turn": 2, "labels": {"herdr.seen": "1"}}));
+            this.tend_terminals(false, window, cx);
+            assert_eq!(this.model.status("t2"), Some("done"), "an unfocused new shared turn stays unread");
+            assert_eq!(this.model.agents["t2"].seen_turn, Some(1));
+        }));
+    }
+
+    #[test]
+    fn focused_peeks_and_swaps_mark_their_own_terminal_seen() {
+        in_own_process("seen_peek_and_swap");
+    }
+
+    #[gpui::test]
+    fn seen_peek_and_swap(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("seen_peek_and_swap") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "unused", "", json!({
+            "id": "main", "type": "block", "content": { "tab": "active" }
+        }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            window.activate_window();
+            this.model.add_space("s1", "", "", crate::model::Tab::new("tab", "", "p1", "t1"));
+            this.model.split("p1", super::Axis::Row, "p2", "t2");
+            this.model.focus_pane("p1");
+            this.sync(window, cx);
+        }));
+        cx.run_until_parked();
+        cx.executor().advance_clock(std::time::Duration::from_millis(500));
+        cx.run_until_parked();
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.focus.focus(window, cx);
+            for addr in ["t1", "t2", "t3"] {
+                this.model.agents.insert(addr.into(), crate::model::Agent {
+                    word: Some("idle".into()), seen: false, turn: 1, seen_turn: Some(0), ..Default::default()
+                });
+                this.live.insert(addr.into(), json!({"status": "idle", "turn": 1, "labels": {"herdr.seen": "0"}}));
+            }
+            this.peek_terminal("t2", window, cx);
+        }));
+        cx.run_until_parked();
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            assert_eq!(this.model.status("t1"), Some("done"));
+            assert_eq!(this.model.status("t2"), Some("idle"), "the peek holds focus");
+            this.close_overlay("terminal-peek", window, cx);
+            this.model.agents.get_mut("t2").unwrap().seen_turn = Some(0);
+            this.dispatch("terminal.show", &json!({"pane": "p1", "terminal": "t3"}), true, window, cx);
+            assert_eq!(this.model.status("t1"), Some("done"), "the pane's own terminal is covered");
+            assert_eq!(this.model.status("t2"), Some("done"));
+            assert_eq!(this.model.status("t3"), Some("idle"), "the swapped-in view holds focus");
+        }));
+    }
+
+    #[test]
+    fn an_agent_block_marks_its_focused_terminal_seen() {
+        in_own_process("seen_agent_block");
+    }
+
+    #[gpui::test]
+    fn seen_agent_block(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("seen_agent_block") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "unused", "", json!({
+            "id": "agent", "type": "block", "content": { "agent": "focused" }
+        }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            window.activate_window();
+            this.model.add_space("s1", "", "", crate::model::Tab::new("tab", "", "p1", "t1"));
+            this.model.split("p1", super::Axis::Row, "p2", "t2");
+            this.sync(window, cx);
+        }));
+        cx.run_until_parked();
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            for addr in ["t1", "t2"] {
+                this.model.agents.insert(addr.into(), crate::model::Agent {
+                    word: Some("idle".into()), seen: false, turn: 1, seen_turn: Some(0), ..Default::default()
+                });
+                this.live.insert(addr.into(), json!({"status": "idle", "turn": 1, "labels": {"herdr.seen": "0"}}));
+            }
+            this.dispatch("agent.focus", &json!({"terminal": "t2"}), true, window, cx);
+            assert_eq!(this.model.status("t1"), Some("done"));
+            assert_eq!(this.model.status("t2"), Some("idle"), "the agent block draws the pane's terminal view");
+        }));
+    }
+
+    #[test]
+    fn seen_requires_foreground_visible_terminal_focus() {
+        in_own_process("seen_focus_boundaries");
+    }
+
+    #[gpui::test]
+    fn seen_focus_boundaries(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("seen_focus_boundaries") {
+            return;
+        }
+        cx.update(gpui_base::init);
+        let (view, cx) = open_window(cx, "unused", "", json!({
+            "id": "main", "type": "block", "content": { "tab": "active" }
+        }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            window.activate_window();
+            this.model.add_space("s1", "", "", crate::model::Tab::new("tab", "", "p1", "t1"));
+            this.model.split("p1", super::Axis::Row, "p2", "t2");
+            this.model.focus_pane("p1");
+            this.sync(window, cx);
+        }));
+        cx.run_until_parked();
+        cx.executor().advance_clock(std::time::Duration::from_millis(500));
+        cx.run_until_parked();
+        cx.deactivate_window();
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            for addr in ["t1", "t2"] {
+                this.model.agents.insert(addr.into(), crate::model::Agent {
+                    word: Some("idle".into()), seen: false, turn: 1, seen_turn: Some(0), ..Default::default()
+                });
+                this.live.insert(addr.into(), json!({"status": "idle", "turn": 1, "labels": {"herdr.seen": "0"}}));
+            }
+            this.sync(window, cx);
+            assert_eq!(this.model.status("t1"), Some("done"), "a background window cannot acknowledge");
+        }));
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        view.read_with(cx, |this, _| assert_eq!(this.model.status("t1"), Some("idle"), "returning to the window acknowledges its focused terminal"));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.open_overlay("test-dialog".into(), json!({"kind": "dialog", "mod": "unused"}), window, cx);
+            for addr in ["t1", "t2"] {
+                let agent = this.model.agents.get_mut(addr).unwrap();
+                agent.seen = false;
+                agent.seen_turn = Some(0);
+            }
+            this.sync(window, cx);
+            assert_eq!(this.model.status("t1"), Some("done"), "the dialog holds focus");
+            assert_eq!(this.model.status("t2"), Some("done"));
+            this.close_overlay("test-dialog", window, cx);
+        }));
+        cx.run_until_parked();
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            // Even a retained keyboard handle cannot make a zoom-hidden pane seen.
+            this.model.tab_mut("tab").unwrap().zoomed = Some("p1".into());
+            this.terms["p2"].focus.focus(window, cx);
+            this.model.agents.get_mut("t2").unwrap().seen_turn = Some(0);
+            this.sync(window, cx);
+            assert_eq!(this.model.status("t2"), Some("done"), "the focused handle belongs to a hidden pane");
+            this.model.tab_mut("tab").unwrap().zoomed = None;
+            this.terms["p1"].focus.focus(window, cx);
+            this.dispatch("terminal.search", &json!({}), true, window, cx);
+        }));
+        cx.run_until_parked();
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            let term = this.pane_term("p1").unwrap();
+            assert!(!term.focus.is_focused(window));
+            assert!(term.view.read(cx).owns_keyboard_focus(window, cx), "Find is part of the terminal");
+            this.looked.remove("t1");
+            this.model.agents.get_mut("t1").unwrap().seen_turn = Some(0);
+            this.sync(window, cx);
+            assert_eq!(this.model.status("t1"), Some("idle"));
+            assert_eq!(this.model.status("t2"), Some("done"));
         }));
     }
 

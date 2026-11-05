@@ -20,6 +20,11 @@ prints the built-in command list even without an open window. Do not launch bare
 signal or restart the person's app or core. A window closing does not kill
 its terminals.
 
+In the active window, focusing a visible agent terminal marks its finished
+turn as seen; its Find field counts too, and no typing is required. Other
+panes stay unread even when visible in the same tab. A dialog or mod holding
+the keyboard does not acknowledge the selected terminal.
+
 `app.check_updates` checks for newer releases. Settings reports "Up to date"
 only after a successful check; on failure, check the connection and retry.
 

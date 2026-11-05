@@ -34,11 +34,18 @@ Writing it:
   elsewhere join).
 - "Looking" means really in front of someone: the window or app in the
   foreground and that agent drawn on screen (a peek or a floating view
-  counts; a pane covered by another terminal doesn't). A screen left on in an empty room
-  shouldn't clear everyone's "done".
+  counts; a pane covered by another terminal doesn't). A client may require
+  focus as well. The desktop app acknowledges only the visible terminal that
+  owns keyboard focus, including its Find field. Focusing a pane, from the
+  sidebar, navigation or a click, is enough; no terminal input is required.
+  Other panes in the same tab stay unread even when visible. A dialog or mod
+  holding the keyboard does not acknowledge the selected terminal.
+  Completion alerts still use visibility, so an unfocused but visible pane
+  finishing does not produce a new alert just because it remains unread.
 - Write once per turn while it stays on screen, not on every update: then
   a "mark unread" from another client isn't overruled by a screen nobody
-  watches. Looking again later raises it again.
+  watches. Looking again later raises it again. In the desktop app, moving
+  focus away and back starts a new look.
 - A turn ends with a `status` event first, then a `turn` event. Decide on
   the `turn` event.
 - Mark unread is the one lower write: `herdr.seen=<turn - 1>`. At turn 0
