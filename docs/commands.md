@@ -297,6 +297,38 @@ Scroll a terminal's view of its history (default: the focused one). Give exactly
 | `to` | no |
 | `terminal` | no |
 
+## `terminal.page_up`
+
+Scroll one terminal view up by one page (default: the focused terminal).
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
+## `terminal.page_down`
+
+Scroll one terminal view down by one page (default: the focused terminal).
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
+## `terminal.scroll_top`
+
+Scroll one terminal view to the top of its scrollback (default: the focused terminal).
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
+## `terminal.scroll_bottom`
+
+Scroll one terminal view to the active screen at the bottom (default: the focused terminal).
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+
 ## `terminal.paste`
 
 Paste into the focused terminal (copied files as if dropped; an image alone as terminal.paste_image pastes it).

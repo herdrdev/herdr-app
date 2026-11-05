@@ -16,7 +16,7 @@ use crate::model::{self, Tab, Model};
 use crate::mods::{self, Found, Instance, Request};
 use crate::settings;
 use crate::layout_sync;
-use crate::terminal::{TerminalEvent, TerminalView, scroll_target};
+use crate::terminal::{ScrollTarget, TerminalEvent, TerminalView, scroll_target};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_shell::action::ShellAction;
@@ -3129,6 +3129,26 @@ impl AppWindow {
                     self.fail(error);
                 }
             }
+            "terminal.page_up" | "terminal.page_down" | "terminal.scroll_top" | "terminal.scroll_bottom" => {
+                let view = match Self::arg(a, "pane") {
+                    Some(pane) => self.pane_term(pane).map(|t| t.view.clone()),
+                    None => self.focused_terminal(window, cx).map(|t| t.view.clone()),
+                };
+                let Some(view) = view else {
+                    return self.fail(match Self::arg(a, "pane") {
+                        Some(pane) => format!("pane {pane:?} does not show a terminal"),
+                        None => "no focused terminal".into(),
+                    });
+                };
+                let target = match name {
+                    "terminal.page_up" => ScrollTarget::Pages(-1.0),
+                    "terminal.page_down" => ScrollTarget::Pages(1.0),
+                    "terminal.scroll_top" => ScrollTarget::Top,
+                    _ => ScrollTarget::Bottom,
+                };
+                view.update(cx, |v, cx| v.scroll_history(target, cx));
+                return;
+            }
             // ---- agents
             "agent.focus" => {
                 let t = Self::arg(a, "terminal").unwrap_or_default().to_owned();
@@ -5485,7 +5505,10 @@ export default class Probe extends View {
             assert!(!super::needs_model_pane(name, &json!({})), "{name}");
             assert!(!super::needs_model_pane(name, &json!({"place": "tab"})), "{name}");
         }
-        for name in ["pane.focus", "terminal.copy", "terminal.paste", "terminal.paste_image", "terminal.right_click"] {
+        for name in [
+            "pane.focus", "terminal.copy", "terminal.paste", "terminal.paste_image", "terminal.page_up", "terminal.page_down",
+            "terminal.scroll_top", "terminal.scroll_bottom", "terminal.right_click",
+        ] {
             assert!(!super::needs_model_pane(name, &json!({})), "{name}");
         }
     }

@@ -61,6 +61,10 @@
     "shift-f2": "space.rename"
   },
   "terminal": {
+    "shift-home": "terminal.scroll_top",
+    "shift-end": "terminal.scroll_bottom",
+    "shift-pageup": "terminal.page_up",
+    "shift-pagedown": "terminal.page_down",
     "ctrl-backspace": "send:\u0017",
     "ctrl-left": "send:\u001bb",
     "ctrl-right": "send:\u001bf",
