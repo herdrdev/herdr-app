@@ -65,19 +65,24 @@ while True:
 
 # Agents that only report: idle, or working without a word of output (the
 # spinners are all that moves), or working with a title that animates
-# (in front, or after a prefix).
+# (in front, or after a prefix), or one that counts time.
 REPORTS = r"""
 import sys, time, itertools
 state = sys.argv[1]
 sys.stdout.write(f"\033]7501;state={'idle' if state == 'idle' else 'working'}:app=pi\033\\")
 sys.stdout.flush()
 spin = itertools.cycle("\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f")
+n = 0
 while True:
+    n += 1
     if state == "title":
         sys.stdout.write(f"\033]2;{next(spin)} working\007")
         sys.stdout.flush()
     if state == "prefixed":  # omp's: the spinner after a prefix
         sys.stdout.write(f"\033]2;\u03c0 {next(spin)} task\007")
+        sys.stdout.flush()
+    if state == "timer":  # no spinner to ignore: every tick is a new title
+        sys.stdout.write(f"\033]2;task {n / 10:.1f}s\007")
         sys.stdout.flush()
     time.sleep(0.1)
 """
@@ -325,9 +330,10 @@ def main():
     ap.add_argument("--seconds", type=int, default=20)
     ap.add_argument("--sample", action="store_true")
     ap.add_argument("--zoom", type=float, default=1.0)
-    ap.add_argument("--set", choices=["all", "spinners", "titles"], default="all",
+    ap.add_argument("--set", choices=["all", "spinners", "titles", "timers"], default="all",
                     help="spinners: many spaces of idle agents, one agent working on screen; "
-                    "titles: eight agents whose titles spin after a prefix")
+                    "titles: eight agents whose titles spin after a prefix; "
+                    "timers: eight agents whose titles count time")
     ap.add_argument("--only", help="measure only this scenario, e.g. spinners+stream")
     a = ap.parse_args()
     if a.seconds <= 0:
@@ -398,6 +404,12 @@ def main():
             for i in range(7):
                 do(bin, "tab.new", {"name": f"title{i}", "argv": reports("prefixed")})
             rows.append(measure("eight-prefixed-titles", app.pid, a.seconds, a.sample))
+            return
+        if a.set == "timers":
+            do(bin, "space.new", {"name": "bench", "folder": ROOT, "argv": reports("timer")})
+            for i in range(7):
+                do(bin, "tab.new", {"name": f"timer{i}", "argv": reports("timer")})
+            rows.append(measure("eight-timer-titles", app.pid, a.seconds, a.sample))
             return
         do(bin, "space.new", {"name": "bench", "folder": ROOT})
         rows.append(measure("idle-shell", app.pid, a.seconds, a.sample))
