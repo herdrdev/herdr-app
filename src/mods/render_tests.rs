@@ -180,6 +180,7 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
                     if first == "git"
                         && [
                             json!(["rev-parse", "--show-toplevel"]),
+                            json!(["--no-pager", "--literal-pathspecs", "-c", "core.quotepath=false", "--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false", "rev-parse", "--show-toplevel"]),
                             json!(["rev-parse", "--path-format=absolute", "--git-common-dir"]),
                             json!(["status", "--porcelain=v2", "--branch"]),
                             json!(["--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain=v2", "--branch"]),

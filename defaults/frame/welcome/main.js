@@ -18,6 +18,7 @@ const APPEARANCES = [
 const PANELS = [
   { id: "files", icon: "files", title: "Files", about: "The folder you're in as a tree. Open a file to read it, highlighted." },
   { id: "changes", icon: "git-compare", title: "Changes", about: "What your agents changed: every file with its diff, and a commit box." },
+  { id: "source-control", icon: "git-compare", title: "Source Control", about: "Stage changes, commit and push, resolve conflicts, and browse the Git graph." },
 ];
 
 // The key bound to a command, as people press it: "Ctrl+Shift+P".
@@ -391,11 +392,11 @@ export default class Welcome extends View {
 
   pageThree(t) {
     // The first look at this page asks: nothing is picked yet (skipping the
-    // welcome leaves both on).
+    // welcome leaves all panels on).
     if (shared("workspace.panels") === undefined || shared("workspace.panels") === null) setShared("workspace.panels", []);
     return v_flex()
       .gap(14)
-      .child(this.title(t, "Choose your panels", "Herdr comes with a couple of panels. Turn one on and it appears beside your terminals. Drag this window aside to see it. Later, the buttons in the tab bar open and close them."))
+      .child(this.title(t, "Choose your panels", "Turn a panel on and it appears beside your terminals. Drag this window aside to see it. Later, the buttons in the tab bar open and close them."))
       .children(PANELS.map((p) => this.panelCard(t, p)))
       .child(
         h_flex()

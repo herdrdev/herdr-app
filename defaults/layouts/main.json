@@ -160,6 +160,13 @@
                       "content": {
                         "mod": "changes"
                       }
+                    },
+                    {
+                      "id": "source-control",
+                      "type": "block",
+                      "content": {
+                        "mod": "source-control"
+                      }
                     }
                   ]
                 }
