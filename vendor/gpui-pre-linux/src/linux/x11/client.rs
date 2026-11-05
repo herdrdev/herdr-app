@@ -214,6 +214,9 @@ pub struct X11ClientState {
     keyboard_layout: LinuxKeyboardLayout,
     pub(crate) ximc: Option<X11rbClient<Rc<XCBConnection>>>,
     pub(crate) xim_handler: Option<XimHandler>,
+    /// HERDR: the spot last sent to the XIM server, to avoid a `set_ic_values`
+    /// round trip on every painted frame while a text input stays focused.
+    pub(crate) last_ime_spot: Option<(i16, i16)>,
     pub modifiers: Modifiers,
     pub capslock: Capslock,
     // TODO: Can the other updates to `modifiers` be removed so that this is unnecessary?
@@ -279,7 +282,21 @@ impl X11ClientStatePtr {
             return;
         };
         let mut state = client.0.borrow_mut();
-        if state.composing || state.ximc.is_none() {
+        if state.composing
+            || state.ximc.is_none()
+            || !state.xim_handler.as_ref().is_some_and(|h| h.connected)
+        {
+            return;
+        }
+
+        let scaled_bounds = bounds.scale(state.scale_factor);
+        // The spot is the insertion point's lower left corner: the candidate
+        // window hugs the preedit text from below.
+        let spot = (
+            u32::from(scaled_bounds.origin.x) as i16,
+            u32::from(scaled_bounds.origin.y + scaled_bounds.size.height) as i16,
+        );
+        if state.last_ime_spot == Some(spot) {
             return;
         }
 
@@ -292,28 +309,25 @@ impl X11ClientStatePtr {
             state.ximc = Some(ximc);
             return;
         };
-        let scaled_bounds = bounds.scale(state.scale_factor);
+        // Only SpotLocation may change after the context exists; the style
+        // and window attributes are create-time only.
         let ic_attributes = ximc
             .build_ic_attributes()
-            .push(
-                xim::AttributeName::InputStyle,
-                xim::InputStyle::PREEDIT_CALLBACKS,
-            )
-            .push(xim::AttributeName::ClientWindow, xim_handler.window)
-            .push(xim::AttributeName::FocusWindow, xim_handler.window)
             .nested_list(xim::AttributeName::PreeditAttributes, |b| {
                 b.push(
                     xim::AttributeName::SpotLocation,
                     xim::Point {
-                        x: u32::from(scaled_bounds.origin.x + scaled_bounds.size.width) as i16,
-                        y: u32::from(scaled_bounds.origin.y + scaled_bounds.size.height) as i16,
+                        x: spot.0,
+                        y: spot.1,
                     },
                 );
             })
             .build();
-        let _ = ximc
-            .set_ic_values(xim_handler.im_id, xim_handler.ic_id, ic_attributes)
-            .log_err();
+        let result = ximc.set_ic_values(xim_handler.im_id, xim_handler.ic_id, ic_attributes);
+        // A dead context will not come back, so a failed send still counts
+        // as sent: it must not retry (and log) on every frame.
+        state.last_ime_spot = Some(spot);
+        let _ = result.log_err();
         state.ximc = Some(ximc);
         state.xim_handler = Some(xim_handler);
     }
@@ -535,6 +549,7 @@ impl X11Connection {
                 keyboard_layout,
                 ximc,
                 xim_handler,
+                last_ime_spot: None,
 
                 compose_state,
                 pre_edit_text: None,
@@ -823,6 +838,13 @@ impl X11Client {
         let Some((mut ximc, xim_handler)) = state.take_xim() else {
             return;
         };
+        if xim_handler.im_id == 0 {
+            // HERDR: before open assigns the IM id a create_ic with id 0
+            // makes the IM server reply with an error packet; the
+            // handshake creates the context itself moments later.
+            state.restore_xim(ximc, xim_handler);
+            return;
+        }
         let mut ic_attributes = ximc
             .build_ic_attributes()
             .push(AttributeName::InputStyle, InputStyle::PREEDIT_CALLBACKS)
@@ -831,6 +853,7 @@ impl X11Client {
 
         let window_id = state.keyboard_focused_window;
         drop(state);
+        let mut spot = None;
         if let Some(window_id) = window_id {
             let Some(window) = self.get_window(window_id) else {
                 log::error!("Failed to get window for IME positioning");
@@ -840,21 +863,29 @@ impl X11Client {
                 return;
             };
             if let Some(scaled_area) = window.get_ime_area() {
+                let point = xim::Point {
+                    x: u32::from(scaled_area.origin.x) as i16,
+                    y: u32::from(scaled_area.origin.y + scaled_area.size.height) as i16,
+                };
+                spot = Some((point.x, point.y));
                 ic_attributes =
                     ic_attributes.nested_list(xim::AttributeName::PreeditAttributes, |b| {
-                        b.push(
-                            xim::AttributeName::SpotLocation,
-                            xim::Point {
-                                x: u32::from(scaled_area.origin.x + scaled_area.size.width) as i16,
-                                y: u32::from(scaled_area.origin.y + scaled_area.size.height) as i16,
-                            },
-                        );
+                        b.push(xim::AttributeName::SpotLocation, point);
                     });
             }
         }
-        ximc.create_ic(xim_handler.im_id, ic_attributes.build())
-            .ok();
+        if ximc
+            .create_ic(xim_handler.im_id, ic_attributes.build())
+            .log_err()
+            .is_none()
+        {
+            spot = None;
+        }
         let mut state = self.0.borrow_mut();
+        // HERDR: the new context starts without the spot that was deduplicated
+        // away; the next frame pushes it again unless create_ic already
+        // carried it.
+        state.last_ime_spot = spot;
         state.restore_xim(ximc, xim_handler);
     }
 
@@ -863,7 +894,11 @@ impl X11Client {
         state.composing = false;
         if let Some(mut ximc) = state.ximc.take() {
             if let Some(xim_handler) = state.xim_handler.as_ref() {
-                ximc.reset_ic(xim_handler.im_id, xim_handler.ic_id).ok();
+                // HERDR: no context exists yet before the first create_ic
+                // reply; resetting id 0 makes the IM server error out.
+                if xim_handler.ic_id != 0 {
+                    ximc.reset_ic(xim_handler.im_id, xim_handler.ic_id).ok();
+                }
             } else {
                 log::error!("bug: xim handler not set in reset_ime");
             }
@@ -1603,7 +1638,7 @@ impl X11Client {
                     b.push(
                         xim::AttributeName::SpotLocation,
                         xim::Point {
-                            x: u32::from(scaled_area.origin.x + scaled_area.size.width) as i16,
+                            x: u32::from(scaled_area.origin.x) as i16,
                             y: u32::from(scaled_area.origin.y + scaled_area.size.height) as i16,
                         },
                     );

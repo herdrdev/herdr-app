@@ -593,12 +593,19 @@ impl<C: HasConnection> X11rbClient<C> {
                 return Err(ClientError::InvalidReply);
             }
             let data = reply.value;
-            let req = xim_parser::read(&data)?;
-            client_handle_request(self, handler, req)?;
+            match xim_parser::read(&data) {
+                Ok(req) => client_handle_request(self, handler, req)?,
+                // Servers may emit packets this parser cannot read (e.g.
+                // imdkit's header-only XIM_ERROR); dropping the connection
+                // over one malformed packet kills input for good.
+                Err(err) => log::error!("Can't parse xim message: {}", err),
+            }
         } else if msg.format == 8 {
             let data = msg.data.as_data8();
-            let req: xim_parser::Request = xim_parser::read(&data)?;
-            client_handle_request(self, handler, req)?;
+            match xim_parser::read(&data) {
+                Ok(req) => client_handle_request(self, handler, req)?,
+                Err(err) => log::error!("Can't parse xim message: {}", err),
+            }
         }
 
         Ok(())
