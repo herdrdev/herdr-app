@@ -88,6 +88,7 @@ first frame or during GPU recovery it reports an error instead of a PNG.
 Shared state is saved atomically in the background, with the latest change winning.
 If `shared.json` is invalid, Herdr logs a warning and keeps it as
 `shared.json.corrupt-<time>` before starting empty.
+`herdr-app check` uses empty shared state in memory and leaves this file untouched.
 
 ## The model: spaces, tabs, terminals
 
@@ -113,6 +114,8 @@ the highlighted line shows where it will land.
   live folders (`panes()[i].cwd`), not the folder it was made in: new
   tabs start where its focused pane is, and the default mods take a
   space's repo from its first terminal.
+  If starting in an inherited folder fails, new spaces, tabs and splits retry in
+  that machine's home. Explicit invalid folders still fail.
 - A **tab** is a piece of work in a space: its terminals and how they're
   split right and down. One nobody named is called by its place (1, 2,
   ...), as in Herdr; `tab.rename` names it ("fix login"). A space
@@ -272,7 +275,10 @@ Create `mods/my-menu/main.js` and `mod.json` (e.g.
 its `mod.json` overlay width/height override those defaults. It gets
 `props()` = `{tab: "pane", target: {pane, terminal}, overlay}`. Always use
 `target.terminal` or `target.pane` in actions, not the focused terminal:
-right-clicking a different terminal must act on the one clicked. For example:
+right-clicking a different terminal must act on the one clicked. A terminal
+shown outside a tab (a layout terminal block, a window) has no pane:
+`target.pane` is its block's id, not in `panes()`, so leave out pane items
+there, as the shipped menu does. For example:
 
 ```js
 import { View, div } from "gpui-kit";
@@ -470,6 +476,10 @@ the build doesn't do.
 
 ## Keys: `keys.json`
 
+On upgrade, an untouched keys file from an earlier release gets the current
+shortcuts. Any edit, even whitespace, keeps the entire file as yours; new default
+shortcuts must then be added by hand.
+
 ```json
 {
   "global":   { "ctrl-shift-t": "tab.new", "ctrl-shift-o": "pane.split:right", "alt-1": "space.select:1" },
@@ -509,8 +519,9 @@ the build doesn't do.
 - Terminal keys honor the program's negotiated Kitty mode, including on Windows.
 - Windows terminal Escape stays separate from the following key.
 - Search: `ctrl-shift-f` (Cmd-F on macOS) opens a find bar inside the focused terminal;
-  Enter/Shift-Enter moves through matches and Escape closes it. Clicking the terminal
-  while the bar is open puts typing back in the program; the bar and its matches stay.
+  Enter/Shift-Enter moves through matches and Escape closes it while the find field
+  has focus. Clicking the terminal puts typing, including Escape, back in the program;
+  the bar and its matches stay.
   Each terminal keeps its own query, and reopening selects it so typing replaces it. Search covers the screen and scrollback without replacing text selection.
 
 ## Commands
@@ -740,7 +751,8 @@ What's about the user, never a look:
 ## Programs: `programs.json`
 
 Every pane, agent and terminal carries `program`: its name, icon and tile,
-from one table, so every mod shows the same. An agent's own report wins;
+from one table, so every mod shows the same, and the app's own toasts
+("Kiro finished") use the same names. An agent's own report wins;
 else the program the terminal runs (an interpreter shows what it runs:
 `node .../vite` is Vite, `npx vitest` is Vitest); shells are `shell`,
 anything unlisted is `program` with a color of its own. The built-in table
@@ -954,7 +966,9 @@ All of it is in `herdr.d.ts`. In short:
   `focused().agent` is the agent an agent block shows.
   `focused().space`/`tab` describe the current window context. With a layout terminal
   block focused, `pane` and `shown` are null; `terminal` and `cwd` describe that block,
-  not its source pane. Check `focused()?.pane` before offering pane controls.
+  not its source pane. A terminal in a window (`openOverlay` with a `layout`) that has
+  the keyboard is reported the same way; pane commands without a `pane` still act on
+  the focused pane under the window. Check `focused()?.pane` before offering pane controls.
   `panes()` still lists only model panes; none is focused while a terminal block is.
   For composition navigation: `run("pane.focus", {terminal: nextAddress})`.
   Terminal copy/paste and implicit right-click routing follow the focused block.
@@ -975,9 +989,10 @@ All of it is in `herdr.d.ts`. In short:
   A window can hold a layout, terminals too: a terminal keeps its presses
   (selecting text), so give it a mod block to drag by, a title bar:
   `openOverlay({ kind: "window", key: "t7", width: 600, height: 400, layout: { type: "column", children: [{ type: "block", size: { px: 28 }, content: { mod: "my-titlebar" } }, { type: "block", content: { terminal: "t7" } }] } })`.
-- Machine: `exec(cmd, args, { cwd, on })` (the user's real environment; use this,
+- Machine: `exec(cmd, args, { cwd, on, timeout })` (the user's real environment; use this,
   not `process.run`; `on: space.machine` runs there, omitted means local).
-  It rejects if the program cannot start or the machine cannot be reached.
+  `timeout` is milliseconds, defaults to 30,000 and is capped at 600,000 (10 minutes),
+  locally and remotely. It rejects on timeout, if the program cannot start or the machine cannot be reached.
   `hc(args)` (`hc read <t>` gives a terminal's text),
   `home()`, `appHome()`, `playSound("done" | "blocked" | file)`.
   `knownAgents({ on })`: the agents people can start (programs.json's

@@ -51,7 +51,9 @@ login/interactive shell (sh, bash, zsh, dash, ksh or fish), including its
 configured PATH. Other shells keep the sh launcher.
 `terminal.open --folder /path --place down` starts the split in that folder,
 including when `--argv` supplies a program. Without `--folder`, it follows the
-focused terminal's folder.
+focused terminal's folder. If an inherited local folder was deleted, new spaces,
+tabs and splits retry in that machine's home. An explicit invalid folder
+still fails.
 `hc machine ls` lists machines. Use `hc run --on vps ...`, `hc exec --on vps ...`
 and `hc file ... --on vps ...` for remote work, not your local file tools.
 
@@ -67,8 +69,8 @@ herdr-app do pane.split '{"direction":"right","pane":"p12"}'
 
 `terminal.search` opens a find bar in the focused terminal. It searches that
 terminal's screen and scrollback; Enter and Shift-Enter move between matches,
-Escape closes the bar, and each terminal keeps its own query (reopening selects it, so typing replaces it).
-Clicking the terminal while the bar is open puts typing back in the program; the bar and its matches stay.
+Escape closes the bar while its find field has focus, and each terminal keeps its own query (reopening selects it, so typing replaces it).
+Clicking the terminal while the bar is open puts typing, including Escape, back in the program; the bar and its matches stay.
 
 It prints the created IDs (for example `{ "pane": "...", "terminal": "..." }`)
 or `{ "error": "..." }` and exits 1. Read the result, then inspect `ls` or
@@ -120,7 +122,8 @@ herdr-app shot /tmp/mod.png   # then look at the picture
 ```
 
 `check` loads the mod and renders it once. It exits nonzero with the exact
-error. Never call a mod done without a passing check. Then confirm it is
+error. Its shared state starts empty and stays in memory; it leaves shared.json
+untouched. Never call a mod done without a passing check. Then confirm it is
 shown correctly in the running window with `shot`; don't claim a visual
 check you haven't made.
 

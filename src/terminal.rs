@@ -351,6 +351,9 @@ impl TerminalView {
             let cell = device_cell(g.cell, g.scale);
             g.vt = Vt::new(cols, rows);
             g.vt.resize(cols, rows, cell.0, cell.1);
+            if self.search_open {
+                g.vt.start_search(&self.search_query);
+            }
             g.vt_cell = cell;
             g.told_display = None;
             let facts = display_update(&mut g.told_display, &vt::theme(), cell).unwrap();
@@ -803,7 +806,7 @@ impl TerminalView {
     }
 
     fn key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if self.search_open && ev.keystroke.key == "escape" {
+        if self.find_field_focused(window, cx) && ev.keystroke.key == "escape" {
             self.close_search(window, cx);
             cx.stop_propagation();
             return;
@@ -1932,6 +1935,18 @@ impl Render for TerminalView {
             // Below 1, the layout's background shows through (cells a program colors stay solid).
             .bg(hsla(vt::theme().bg).opacity(crate::settings::get().terminal_opacity))
             .on_action(cx.listener(|this, a: &gpui_shell::action::ShellAction, window, cx| {
+                if this.find_field_focused(window, cx) {
+                    let action: Option<Box<dyn gpui::Action>> = match a.id() {
+                        "terminal.copy" => Some(Box::new(gpui_base::input::Copy)),
+                        "terminal.paste" => Some(Box::new(gpui_base::input::Paste)),
+                        _ => None,
+                    };
+                    if let Some(action) = action {
+                        window.dispatch_action(action, cx);
+                        cx.stop_propagation();
+                        return;
+                    }
+                }
                 // `send:<text>` bindings from keys.json type into this terminal.
                 match a.id().strip_prefix("send:") {
                     Some(_) if this.find_field_focused(window, cx) => cx.stop_propagation(),
@@ -1980,7 +1995,10 @@ impl Render for TerminalView {
                     return;
                 }
                 drop(g);
-                if !this.mouse(GHOSTTY_MOUSE_ACTION_PRESS, Some(ev.button), ev.position, ev.modifiers) {
+                if this.mouse(GHOSTTY_MOUSE_ACTION_PRESS, Some(ev.button), ev.position, ev.modifiers) {
+                    // The program took the click: Herdr's old selection ends, so a copy can't repeat it.
+                    this.clear_selection(cx);
+                } else {
                     this.start_selection(ev.position, cx);
                 }
             }))
@@ -2337,6 +2355,90 @@ mod tests {
     }
 
     #[gpui::test]
+    fn reconnect_keeps_find_searching_the_new_terminal(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        cx.update(gpui_base::init);
+        let terminal = cx.new(|cx| super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 6), cx));
+        let (_, cx) = cx.add_window_view(|_, _| gpui::Empty);
+        cx.update(|window, app| terminal.update(app, |terminal, cx| {
+            terminal.open_search(window, cx);
+            terminal.search_query = "needle".into();
+            terminal.reattach(crate::hc::offline(), cx);
+            let mut grid = terminal.grid.borrow_mut();
+            grid.vt.write(b"replayed needle\r\n");
+            for _ in 0..1000 {
+                grid.vt.progress_search();
+                if grid.vt.search_progress().complete { break; }
+            }
+            assert!(grid.vt.search_progress().complete);
+            assert_eq!(grid.vt.search_progress().total, 1);
+            assert_eq!(grid.vt.frame().search_spans.len(), 1);
+            grid.vt.set_search_needle("replayed");
+            for _ in 0..1000 {
+                grid.vt.progress_search();
+                if grid.vt.search_progress().complete { break; }
+            }
+            assert_eq!(grid.vt.search_progress().total, 1, "query edits must keep working after reconnect");
+        }));
+    }
+
+    #[gpui::test]
+    fn shipped_clipboard_aliases_edit_find_without_terminal_input(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        struct Root(Entity<super::TerminalView>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                div().key_context("Herdr").size_full()
+                    .on_action(cx.listener(|this, action: &gpui_shell::action::ShellAction, _, cx| {
+                        match action.id() {
+                            "terminal.paste" => this.0.update(cx, |terminal, cx| terminal.paste(cx)),
+                            "terminal.copy" => { this.0.update(cx, |terminal, cx| terminal.copy(cx)); }
+                            _ => cx.propagate(),
+                        }
+                    }))
+                    .child(self.0.clone())
+            }
+        }
+
+        cx.update(gpui_base::init);
+        let bindings = crate::keys::parse(crate::keys::DEFAULTS).expect("shipped keys parse");
+        cx.update(|app| crate::keys::install(bindings, app));
+        let (root, cx) = cx.add_window_view(|_, cx| {
+            Root(cx.new(|cx| super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 6), cx)))
+        });
+        cx.run_until_parked();
+        let aliases: &[(&str, &str)] = if cfg!(target_os = "macos") {
+            &[("cmd-v", "cmd-c")]
+        } else {
+            &[("ctrl-shift-v", "ctrl-shift-c"), ("shift-insert", "ctrl-insert")]
+        };
+        for &(paste, copy) in aliases {
+            cx.update(|window, app| {
+                root.update(app, |root, app| {
+                    root.0.update(app, |terminal, cx| terminal.open_search(window, cx));
+                });
+                app.write_to_clipboard(ClipboardItem::new_string("needle".into()));
+            });
+            cx.run_until_parked();
+            cx.simulate_keystrokes(paste);
+            cx.run_until_parked();
+            root.read_with(cx, |root, cx| {
+                let terminal = root.0.read(cx);
+                assert_eq!(terminal.search_query, "needle", "{paste}");
+                assert!(terminal.typed_at.get().is_none(), "{paste} sent terminal input");
+            });
+            cx.simulate_keystrokes(if cfg!(target_os = "macos") { "cmd-a" } else { "ctrl-a" });
+            cx.update(|_, app| app.write_to_clipboard(ClipboardItem::new_string("unchanged".into())));
+            cx.simulate_keystrokes(copy);
+            cx.run_until_parked();
+            cx.update(|_, app| assert_eq!(app.read_from_clipboard().unwrap().text().as_deref(), Some("needle"), "{copy}"));
+            root.read_with(cx, |root, cx| assert!(root.0.read(cx).typed_at.get().is_none(), "{copy} sent terminal input"));
+        }
+    }
+
+    #[gpui::test]
     fn reopening_the_find_bar_selects_the_kept_query(cx: &mut gpui::TestAppContext) {
         use gpui::*;
 
@@ -2537,9 +2639,16 @@ mod tests {
             assert!(terminal.typed_at.get().is_some(), "keystrokes did not reach the program once the terminal held the keys");
         });
 
+        cx.update(|_, app| root.update(app, |root, app| {
+            root.0.update(app, |terminal, _| terminal.typed_at.set(None));
+        }));
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
-        root.read_with(cx, |root, cx| assert!(!root.0.read(cx).search_open));
+        root.read_with(cx, |root, cx| {
+            let terminal = root.0.read(cx);
+            assert!(terminal.search_open, "terminal Escape must not close Find");
+            assert!(terminal.typed_at.get().is_some(), "Escape must reach the program");
+        });
     }
 
     #[gpui::test]
@@ -2850,6 +2959,37 @@ mod tests {
             }
         }).unwrap();
         crate::settings::set((*original).clone());
+    }
+
+    #[gpui::test]
+    fn a_click_the_program_takes_ends_the_selection(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        struct Root(Entity<super::TerminalView>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().w(px(400.)).h(px(100.)).child(self.0.clone())
+            }
+        }
+        cx.update(gpui_base::init);
+        let (root, cx) = cx.add_window_view(|_, cx| {
+            Root(cx.new(|cx| super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 5), cx)))
+        });
+        cx.run_until_parked();
+        let terminal = root.read_with(cx, |root, _| root.0.clone());
+        terminal.update(cx, |t, _| {
+            let mut g = t.grid.borrow_mut();
+            // The program tracks the mouse, and a Shift+drag selected some text.
+            g.vt.write(b"\x1b[?1000hold text");
+            g.vt.select(super::Select::Press, 0, 0, 0., 5., 10., 60.);
+            g.vt.select(super::Select::Drag, 2, 0, 25., 5., 10., 60.);
+            g.vt.select(super::Select::Release, 2, 0, 25., 5., 10., 60.);
+            assert!(g.vt.mouse_tracking());
+            assert!(g.vt.selection_text().is_some());
+        });
+        cx.simulate_mouse_down(point(px(50.), px(50.)), MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(point(px(50.), px(50.)), MouseButton::Left, Modifiers::default());
+        assert_eq!(terminal.read_with(cx, |t, _| t.grid.borrow().vt.selection_text()), None);
     }
 
     #[gpui::test]
