@@ -85,6 +85,107 @@ test("commit then push stops if the active branch changes after committing", asy
   expect(panel.message).toBe(""); expect(inputValue).toBe("");
 });
 
+function renderedPanel(savedHeight: unknown, platform = "windows", zoom = 1) {
+  const values = new Map<string, unknown>([["source-control.upper-height", savedHeight]]), writes: unknown[][] = [];
+  let notifications = 0;
+  const element = (kind: string, id?: string): any => {
+    const node = { kind, attrs: { id: [id] } as Record<string, any[]>, items: [] as any[] };
+    const builder: any = new Proxy(node, { get(target: any, name: string) {
+      if (name in target) return target[name];
+      return (...args: any[]) => {
+        if (name === "child") node.items.push(args[0]);
+        else if (name === "children") node.items.push(...args[0]);
+        else if (name === "when") { if (args[0]) return args[1](builder); }
+        else node.attrs[name] = args;
+        return builder;
+      };
+    } });
+    return builder;
+  };
+  const globals = { View: class {}, div: () => element("div"), h_flex: () => element("row"), v_flex: () => element("column"),
+    v_resizable: (id: string) => element("vertical-split", id), resizable_panel: () => element("panel"),
+    Textarea: { new: () => element("textarea") }, theme: () => ({}), spaces: () => [{ id: "fixture", active: true }],
+    window: () => ({ platform }), settings: () => ({ zoom }), shared: (key: string) => values.get(key),
+    setShared: (key: string, value: unknown) => { values.set(key, value); writes.push([key, value]); },
+    renderGraph: () => element("graph"),
+  };
+  const Panel = new Function(...Object.keys(globals), `${panelSource}; return SourceControl;`)(...Object.values(globals));
+  const panel = Object.assign(new Panel(), controller(), { collapsed: {}, history: [], limit: 200, input: {} });
+  const cx = { notify() { notifications++; } };
+  const nodes = (node: any): any[] => typeof node === "object" && node ? [node, ...node.items.flatMap(nodes)] : [];
+  const render = () => nodes(panel.render(cx));
+  const measure = (height = 700) => {
+    render()[0].attrs.on_size_change[0]({ width: 368, height }, cx);
+    return render();
+  };
+  return { panel, cx, values, writes, render, measure, notifications: () => notifications };
+}
+
+test("Source Control split restores safe heights through native panels on both platforms", () => {
+  for (const platform of ["windows", "macos"]) {
+    for (const [saved, expected] of [[undefined, 207], [null, 207], ["360", 207], [NaN, 207], [Infinity, 207], [80, 160], [360.5, 360.5]]) {
+      const view = renderedPanel(saved, platform), nodes = view.measure();
+      const splits = nodes.filter(node => node.kind === "vertical-split");
+      expect(splits).toHaveLength(1);
+      expect(splits[0].items.map((node: any) => node.kind)).toEqual(["panel", "panel"]);
+      expect(splits[0].items[0].attrs.size).toEqual([expected]);
+      expect(splits[0].items[0].attrs.size_range).toEqual([160, 582]);
+      expect(splits[0].items[1].attrs.size_range).toEqual([80]);
+      expect(nodes.some(node => node.kind === "graph")).toBe(true);
+      expect(view.writes).toEqual([]);
+    }
+  }
+});
+
+test("Source Control split stores unzoomed heights and restores them at a different zoom", () => {
+  const view = renderedPanel(undefined, "windows", 1.2), split = view.measure().find(node => node.kind === "vertical-split");
+  expect(split.items[0].attrs.size[0]).toBeCloseTo(248.4);
+  expect(split.items[0].attrs.size_range[0]).toBeCloseTo(192);
+  expect(split.items[0].attrs.size_range[1]).toBeCloseTo(558.4);
+  expect(split.items[1].attrs.size_range[0]).toBeCloseTo(96);
+  const notified = view.notifications();
+  split.attrs.on_resize[0]([377.4, 277], view.cx);
+  expect(view.writes).toEqual([["source-control.upper-height", 314.5]]);
+  expect(view.notifications()).toBe(notified + 1);
+  const reopened = renderedPanel(view.values.get("source-control.upper-height"), "macos", 1.5);
+  const restored = reopened.measure().find(node => node.kind === "vertical-split");
+  expect(restored.items[0].attrs.size[0]).toBeCloseTo(471.75);
+  expect(reopened.writes).toEqual([]);
+});
+
+test("Source Control split measures a smaller window before mounting a saved height", () => {
+  const view = renderedPanel(582);
+  expect(view.render().some(node => node.kind === "vertical-split")).toBe(false);
+  expect(view.writes).toEqual([]);
+  const split = view.measure(400).find(node => node.kind === "vertical-split");
+  expect(split.items[0].attrs.size).toEqual([282]);
+  expect(split.items[0].attrs.size_range).toEqual([160, 282]);
+  expect(split.items[1].attrs.size_range).toEqual([80]);
+  expect(view.values.get("source-control.upper-height")).toBe(582);
+  expect(view.writes).toEqual([]);
+  split.attrs.on_resize[0]([200, 162], view.cx);
+  expect(view.writes).toEqual([["source-control.upper-height", 200]]);
+});
+
+test("Source Control split preserves its size and identity while Graph is collapsed", () => {
+  const view = renderedPanel(320), initial = view.measure();
+  const split = initial.find(node => node.kind === "vertical-split");
+  const toggle = (nodes: any[]) => nodes.find(node => node.attrs.id[0] === "graph-heading").attrs.on_click[0]({}, view.cx);
+  toggle(initial);
+  const collapsed = view.render(), hiddenSplit = collapsed.find(node => node.kind === "vertical-split");
+  expect(collapsed.some(node => node.kind === "graph")).toBe(false);
+  expect(hiddenSplit.attrs.id).toEqual(split.attrs.id);
+  expect(hiddenSplit.items).toHaveLength(2);
+  expect(hiddenSplit.items[0].attrs.size).toEqual([320]);
+  toggle(collapsed);
+  const expanded = view.render(), restored = expanded.find(node => node.kind === "vertical-split");
+  expect(expanded.some(node => node.kind === "graph")).toBe(true);
+  expect(restored.attrs.id).toEqual(split.attrs.id);
+  expect(restored.items[0].attrs.size).toEqual([320]);
+  expect(view.values.get("source-control.upper-height")).toBe(320);
+  expect(view.writes).toEqual([]);
+});
+
 async function fixture(body: (f: any) => Promise<void>) {
   const sandbox = await mkdtemp(join(tmpdir(), "herdr-source-control-")), root = join(sandbox, "work");
   const calls: string[][] = [];

@@ -1,6 +1,6 @@
 import { View, div } from "gpui-kit";
-import { h_flex, v_flex, InputState, Input, TextareaState, Textarea } from "gpui-base";
-import { spaces, panes, focused, theme, props, openOverlay, pickFolder, shared } from "herdr";
+import { h_flex, v_flex, v_resizable, resizable_panel, InputState, Input, TextareaState, Textarea } from "gpui-base";
+import { spaces, panes, focused, theme, settings, props, openOverlay, pickFolder, shared, setShared } from "herdr";
 import { createGit } from "./git.js";
 import { parseGraph, renderGraph } from "./graph.js";
 import { DiffPanel } from "./diff-ui.js";
@@ -410,13 +410,7 @@ export default class SourceControl extends View {
       if (!count && name !== "changes") return height;
       return height + 26 + (this.collapsed[name] ? 0 : count ? count * 26 : 38);
     }, 8);
-    return v_flex().id("source-control").size_full().min_h(0).relative().rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(12).track_focus(this.handle)
-      .on_key_down((e, cx) => {
-        if (e.key === "escape") { this.dialog = null; cx.notify(); }
-      })
-      .child(h_flex().h(36).flex_none().px(12).gap(5).items_center().child(div().font_semibold().child("Source Control")).child(div().flex_1())
-        .child(this.button("refresh", "↻", "Refresh", cx => this.refresh(cx), !this.busy && !this.loading))
-        .child(this.button("more", "…", "More Actions", cx => this.moreMenu(cx), !this.busy)))
+    const upper = v_flex().id("source-control-upper").size_full().min_h(0).overflow_y_scrollbar()
       .child(h_flex().h(26).flex_none().px(10).gap(6).items_center()
         .child(div().id("repository-picker").flex_1().min_w(0).truncate().text_color(t.muted).cursor_pointer().tooltip(data?.root || this.location().cwd || "").on_click((_e, cx) => this.repositoryMenu(cx)).child(`▾ ${repoName}`))
         .child(div().id("branch-picker").max_w(170).truncate().text_color(t.ansi4).cursor_pointer().tooltip(branch?.upstream || "Select branch").on_click((_e, cx) => { if (this.ready()) this.branchMenu(cx); }).child(branch ? `⑂ ${branch.name}${branch.behind ? ` ↓${branch.behind}` : ""}${branch.ahead ? ` ↑${branch.ahead}` : ""}` : data?.head ? `Detached ${data.head.slice(0, 7)}` : "")))
@@ -428,9 +422,10 @@ export default class SourceControl extends View {
           .when(primary.enabled, e => e.cursor_pointer()).on_click((_e, cx) => this.primaryClick(cx)).child(this.busy || primary.label))
           .child(div().id("commit-options").w(27).flex_none().flex().items_center().justify_center().bg(t.raised).rounded(3).cursor_pointer().on_click((_e, cx) => this.commitMenu(cx)).child("⌄"))))
       .when(Boolean(data?.operation), e => e.child(h_flex().px(12).gap(6).items_center().child(div().flex_1().text_color(t.ansi3).child(`${data.operation} in progress`)).child(this.button("abort", "Abort", "Abort operation", cx => this.confirm("Abort", data.operation, (_v, cx) => this.perform("Abort", "abort", { operation: data.operation }, cx), cx), this.ready()))))
-      .child(v_flex().id("file-groups").h(Math.min(285, groupsHeight)).flex_none().overflow_y_scrollbar().pb(8)
+      .child(v_flex().id("file-groups").flex_1().min_h(64).overflow_y_scrollbar().pb(8)
         .child(this.group("conflicts", "Merge Changes", cx)).child(this.group("staged", "Staged Changes", cx)).child(this.group("changes", "Changes", cx)))
-      .when(Boolean(this.note), e => e.child(h_flex().px(10).py(4).gap(4).flex_none().items_start().child(div().id("operation-output").flex_1().min_w(0).max_h(100).overflow_y_scrollbar().text_size(11).text_color(t.muted).child(this.note)).child(this.button("dismiss-note", "×", "Dismiss", cx => { this.note = null; cx.notify(); }))))
+      .when(Boolean(this.note), e => e.child(h_flex().px(10).py(4).gap(4).flex_none().items_start().child(div().id("operation-output").flex_1().min_w(0).max_h(100).overflow_y_scrollbar().text_size(11).text_color(t.muted).child(this.note)).child(this.button("dismiss-note", "×", "Dismiss", cx => { this.note = null; cx.notify(); }))));
+    const graph = v_flex().size_full().min_h(0)
       .child(h_flex().h(30).flex_none().px(10).gap(6).items_center().border_t(1).border_color(t.border)
         .child(div().id("graph-heading").flex_1().min_w(0).cursor_pointer().on_click((_e, cx) => { this.collapsed.graph = !this.collapsed.graph; cx.notify(); }).child(`${this.collapsed.graph ? "›" : "⌄"} Graph`))
         .child(div().text_size(10).text_color(t.dim).child(String(this.history.filter(r => r.hash).length)))
@@ -439,7 +434,25 @@ export default class SourceControl extends View {
         .child(this.button("graph-refresh", "↻", "Refresh Graph", cx => this.refresh(cx), !this.busy && !this.loading)))
       .when(!this.collapsed.graph, e => e.child(renderGraph(this.history, t, { selected: this.selected, onSelect: (row, cx) => this.showCommit(row, cx), onContext: (row, cx) => this.graphMenu(row, cx) }))
         .when(!this.history.length, e => e.child(div().px(12).py(8).text_color(t.dim).child(this.loading ? "Loading graph…" : "No commits")))
-        .when(this.history.filter(r => r.hash).length >= this.limit, e => e.child(this.button("graph-more", "Load more…", "Load older commits", cx => { this.limit += 200; this.refresh(cx); }, !this.busy && !this.loading))))
+        .when(this.history.filter(r => r.hash).length >= this.limit, e => e.child(this.button("graph-more", "Load more…", "Load older commits", cx => { this.limit += 200; this.refresh(cx); }, !this.busy && !this.loading))));
+    const savedHeight = shared("source-control.upper-height"), zoom = settings().zoom;
+    // Native panel sizes are window pixels; ordinary element styles apply zoom themselves.
+    // Reserve the 36px title, two borders, and at least 80px of Graph.
+    const maxUpper = Math.max(160 * zoom, (this.panelHeight || 0) - 118 * zoom);
+    const upperHeight = Math.min(maxUpper, (Number.isFinite(savedHeight) ? Math.max(160, savedHeight) : 135 + Math.min(285, groupsHeight)) * zoom);
+    return v_flex().id("source-control").size_full().min_h(0).relative().rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(12).track_focus(this.handle)
+      .on_size_change(({ height }, cx) => { this.panelHeight = height; cx.notify(); })
+      .on_key_down((e, cx) => {
+        if (e.key === "escape") { this.dialog = null; cx.notify(); }
+      })
+      .child(h_flex().h(36).flex_none().px(12).gap(5).items_center().child(div().font_semibold().child("Source Control")).child(div().flex_1())
+        .child(this.button("refresh", "↻", "Refresh", cx => this.refresh(cx), !this.busy && !this.loading))
+        .child(this.button("more", "…", "More Actions", cx => this.moreMenu(cx), !this.busy)))
+      // Measure before creating native state so a saved height fits even in a smaller window.
+      .when(this.panelHeight > 0, e => e.child(v_resizable("source-control-split").w_full().flex_1().min_h(0)
+        .on_resize(([height], cx) => { setShared("source-control.upper-height", height / zoom); cx.notify(); })
+        .child(resizable_panel().size(upperHeight).size_range(160 * zoom, maxUpper).flex_none().child(upper))
+        .child(resizable_panel().size_range(80 * zoom).child(graph))))
       .when(Boolean(this.dialog), e => e.child(this.renderDialog()));
   }
 }

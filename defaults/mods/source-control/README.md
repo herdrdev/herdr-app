@@ -5,6 +5,13 @@ Open **Source Control** from the tab bar. It follows the focused terminal's
 folder by default; the repository menu can select another local folder,
 worktree, or connected machine.
 
+Drag the divider immediately above **Graph** up or down to resize the changes
+and history areas. Both areas scroll independently. The upper area's height
+is saved when you release the divider and restored after restarting Herdr.
+The native divider supports the same mouse and trackpad drag on Windows and
+macOS, including display scaling. Restoring into a smaller window limits the
+upper height so Graph and its divider remain reachable.
+
 ## Changes and commits
 
 - **Changes**, **Staged Changes**, and **Merge Changes** show working tree,

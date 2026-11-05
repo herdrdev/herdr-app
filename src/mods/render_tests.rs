@@ -814,3 +814,108 @@ fn status_bar_shows_the_real_palette_key(cx: &mut TestAppContext) {
     assert!(tree.contains("commands"), "unbound hint still offers commands: {tree}");
     assert!(!tree.contains("Shift P"), "unbound hint must not invent a key: {tree}");
 }
+
+#[gpui::test]
+fn source_control_split_drags_clamps_and_restores(cx: &mut TestAppContext) {
+    use gpui::{IntoElement, Modifiers, MouseButton, ParentElement, Styled, VisualTestContext, point, px};
+    use gpui_shell::{ShellRoot, ScriptView};
+    use std::ops::Deref;
+
+    struct Mounted(gpui::Entity<ShellRoot>, f32);
+    impl gpui::Render for Mounted {
+        fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+            // Fix the content size before its first layout, so resizing a test
+            // window cannot proportionally adjust the initial panel sizes.
+            gpui::div().w(px(368.)).h(px(self.1)).child(self.0.clone())
+        }
+    }
+    fn draw(cx: &mut VisualTestContext) {
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.run_until_parked();
+    }
+    fn drag(cx: &mut VisualTestContext, from: f32, to: f32) {
+        // The panel border and 36px title precede the resizable group.
+        let at = |upper| point(px(184.), px(37. + upper));
+        cx.simulate_mouse_down(at(from - 2.), MouseButton::Left, Modifiers::default());
+        draw(cx);
+        cx.simulate_mouse_move(at(from + (to - from).signum() * 20.), Some(MouseButton::Left), Modifiers::default());
+        draw(cx);
+        cx.simulate_mouse_move(at(to), Some(MouseButton::Left), Modifiers::default());
+        draw(cx);
+        cx.simulate_mouse_up(at(to), MouseButton::Left, Modifiers::default());
+        draw(cx);
+    }
+
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    std::fs::write(staged.0.join("main.js"), r#"
+import Real from './mods/source-control/main.js';
+export default class Scenario extends Real {
+  refresh() {}
+  init(props, cx) {
+    super.init(props, cx);
+    this.data = { root: '/fixture/project', head: 'abc', branch: { name: 'main', upstream: 'origin/main', ahead: 0, behind: 0 },
+      groups: { staged: [], changes: [], conflicts: [] }, remotes: ['origin'] };
+    this.context = this.key();
+  }
+}
+"#).unwrap();
+    for platform in ["windows", "macos"] {
+        let calls = Rc::new(RefCell::new(Calls::default()));
+        let saved = || calls.borrow().shared.get("source-control.upper-height").and_then(Value::as_f64);
+        for (scenario, height) in [(0, 700.), (1, 700.), (2, 400.), (3, 700.)] {
+            let mut values = fixture(true, props(), updates("current", "current"));
+            values.insert("window".into(), json!({"platform":platform}));
+            gpui_shell::policy::set_default(Policy::new()
+                .with_capabilities(Capabilities::new().read_roots([staged.0.clone()]))
+                .with_host_module(module(values, calls.clone())).unwrap());
+            let runtime = ShellRuntime::new_isolated().unwrap();
+            let window = cx.add_window(|window, cx| Mounted(runtime.try_load(&staged.0, window, cx).unwrap(), height));
+            let mut visual = VisualTestContext::from_window(*window.deref(), cx);
+            draw(&mut visual); draw(&mut visual);
+            let view = window.update(&mut visual, |root, _, cx| {
+                root.0.read(cx).content().clone().downcast::<ScriptView>().unwrap()
+            }).unwrap();
+            let tree = visual.update(|_, cx| view.read(cx).snapshot().unwrap().debug_tree());
+            assert!(tree.contains("v_resizable \"source-control-split\""), "{platform}: {tree}");
+            let initial = match scenario { 0 => 207., 1 => 300., _ => 200. };
+            if height == 400. {
+                assert_eq!(saved(), Some(582.), "mounting a smaller window must retain the preferred height");
+                assert!(tree.contains(":panel_size[Number(282.0)]"), "the restored size must fit the smaller window: {tree}");
+                // The saved 582px must fit the 362px group while leaving Graph
+                // 80px visible; its handle must be reachable at 282px.
+                drag(&mut visual, 282., 200.);
+                assert_eq!(saved(), Some(200.), "{platform}: an oversized saved height must keep Graph and its divider reachable");
+            } else if scenario == 3 {
+                drag(&mut visual, initial, 582.);
+                assert_eq!(saved(), Some(582.));
+                window.update(&mut visual, |root, _, cx| { root.1 = 400.; cx.notify(); }).unwrap();
+                draw(&mut visual); draw(&mut visual);
+                assert_eq!(saved(), Some(582.), "window resize must not overwrite the preferred height");
+                drag(&mut visual, 282., 200.);
+                assert_eq!(saved(), Some(200.), "{platform}: shrinking the same window must leave the divider reachable");
+            } else if scenario == 0 {
+                assert!(tree.contains(&format!(":panel_size[Number({initial:.1})]")), "{platform}/scenario={scenario}: {tree}");
+                assert_eq!(saved(), None, "initial layout must not save a user preference");
+                drag(&mut visual, initial, 300.);
+                assert_eq!(saved(), Some(300.), "{platform}: dragging must reach the persisted preference");
+                visual.simulate_mouse_move(point(px(184.), px(480.)), None, Modifiers::default());
+                draw(&mut visual);
+                visual.simulate_mouse_up(point(px(184.), px(480.)), MouseButton::Left, Modifiers::default());
+                draw(&mut visual);
+                assert_eq!(saved(), Some(300.), "moving after release must not keep resizing");
+            } else {
+                assert!(tree.contains(&format!(":panel_size[Number({initial:.1})]")), "{platform}/scenario={scenario}: {tree}");
+                // Starting at the saved boundary also proves the restored size reached native layout.
+                drag(&mut visual, initial, 260.);
+                assert_eq!(saved(), Some(260.), "{platform}: the new window must restore the divider");
+                drag(&mut visual, 260., 20.);
+                assert_eq!(saved(), Some(160.), "the commit area must retain its minimum height");
+                drag(&mut visual, 160., 650.);
+                assert_eq!(saved(), Some(582.), "the graph must retain 80px in the 662px group");
+            }
+            assert!(calls.borrow().unexpected.is_empty(), "{:?}", calls.borrow().unexpected);
+            window.update(&mut visual, |_, window, _| window.remove_window()).unwrap();
+        }
+    }
+}
