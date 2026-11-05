@@ -2077,7 +2077,7 @@ impl AppWindow {
 
     /// Tells the person an agent needs them or finished: Herdr's sounds, and a
     /// toast (drawn by the `toast` mod; click it to go there) unless they're
-    /// looking at that agent.
+    /// looking at that agent or turned these toasts off (`alert_toasts`).
     fn alert(&mut self, addr: &str, alert: model::Alert, looking: bool, window: &mut Window, cx: &mut Context<Self>) {
         if settings::get().sounds.enabled {
             crate::sound::play(if alert == model::Alert::Blocked { "blocked" } else { "done" });
@@ -2089,7 +2089,7 @@ impl AppWindow {
             self.save();
             self.publish(cx);
         }
-        if looking {
+        if looking || !settings::get().alert_toasts {
             return;
         }
         let rec = self.live.get(addr);

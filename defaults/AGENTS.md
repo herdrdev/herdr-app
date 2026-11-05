@@ -650,10 +650,14 @@ What's about the user, never a look:
   (0.5 to 3; the zoom keys change it). Write sizes as designed at zoom 1.
 - `sounds`: `{ "enabled": true, "done": "<file>", "blocked": "<file>" }`.
   When an agent needs the person, or finishes while they aren't looking at
-  it, Herdr plays a sound and (unless they're looking) posts a toast that
-  goes there when clicked. `done` / `blocked` replace the bundled MP3s
-  (path absolute or relative to `~/.config/herdr-app`). Changes apply live,
-  including the Play buttons in Settings > Alerts.
+  it, Herdr plays a sound and (unless they're looking, or `alert_toasts` is
+  `false`) posts a toast that goes there when clicked. `done` / `blocked`
+  replace the bundled MP3s (path absolute or relative to
+  `~/.config/herdr-app`). Changes apply live, including the Play buttons in
+  Settings > Alerts.
+- `alert_toasts`: `false` stops the toasts for agents that need the person
+  or finished (default `true`). Sounds still follow `sounds`, and other
+  toasts and `notify()` still show. Changes apply live.
 - `core`: the herdr-core binary to use, when it isn't where Herdr looks
   (PATH, the login shell's PATH, `~/.local/bin`, Homebrew, mise, Nix,
   cargo). Read at start.
