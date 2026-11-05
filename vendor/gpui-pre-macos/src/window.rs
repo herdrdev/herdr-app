@@ -3075,6 +3075,12 @@ extern "C" fn window_did_exit_fullscreen(this: &Object, _: Sel, _: id) {
     // Keep using the native windowed frames when restoring them on the next entry.
     lock.traffic_light_frames = lock.pre_fullscreen_traffic_light_frames.take();
     lock.move_traffic_light();
+    drop(lock);
+
+    // A full-screen transition need not resize the content view (for example,
+    // when leaving a tiled full-screen space). Notify GPUI's bounds observers
+    // so the app can persist the windowed state and redraw its title bar.
+    update_window_scale_factor(&window_state);
 }
 
 pub(crate) fn is_macos_version_at_least(version: NSOperatingSystemVersion) -> bool {
