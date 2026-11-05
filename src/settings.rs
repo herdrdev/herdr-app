@@ -950,7 +950,7 @@ mod tests {
     use super::*;
 
     #[test]
-    fn font_thicken_defaults_off_at_ghosttys_strength_and_validates_it() {
+    fn font_thicken_defaults_auto_at_ghosttys_strength_and_validates_it() {
         let default: Person = serde_json::from_str("{}").unwrap();
         assert_eq!(default.font_thicken, Thicken::Auto);
         assert_eq!(default.font_thicken_strength, 255);
