@@ -1392,7 +1392,6 @@ impl AppWindow {
         out
     }
 
-    /// Makes `addr` the shown agent; a pane showing it also becomes the focused pane.
     /// Shows the agent a system notification is about; one the core hasn't
     /// listed yet (a click from an earlier run, as Herdr starts) waits for the
     /// next listing.
@@ -1405,6 +1404,7 @@ impl AppWindow {
         }
     }
 
+    /// Makes `addr` the shown agent; a pane showing it also becomes the focused pane.
     fn focus_agent(&mut self, addr: &str) {
         if let Some(p) = self.model.pane_of(addr) {
             self.model.focus_pane(&p);
