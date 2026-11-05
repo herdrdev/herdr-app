@@ -2803,6 +2803,10 @@ impl AppWindow {
     /// Asks the person for a new name (space.rename, tab.rename), then runs it with it.
     /// The prompt starts with the name someone gave, empty for an automatic one.
     fn ask_name(&mut self, name: &str, mut args: Value, window: &mut Window, cx: &mut Context<Self>) {
+        let id = format!("ask-{name}");
+        if self.overlays.iter().any(|o| o.id == id) {
+            return;
+        }
         if !args.is_object() {
             args = json!({});
         }
@@ -2822,7 +2826,7 @@ impl AppWindow {
         };
         let spec = json!({ "mod": "prompt", "kind": "dialog", "width": 380,
             "props": { "title": title, "value": current.as_deref().unwrap_or(""), "hint": hint, "command": { "name": name, "args": args } } });
-        self.open_overlay(mods::new_overlay_id(), spec, window, cx);
+        self.open_overlay(id, spec, window, cx);
     }
 
     fn dispatch(&mut self, name: &str, a: &Value, person: bool, window: &mut Window, cx: &mut Context<Self>) {
