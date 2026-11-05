@@ -387,6 +387,18 @@ fn long_theme_names_stay_inside_their_card(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn confirm_dialog_background_follows_the_frame_corners(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut p = props();
+    p["title"] = json!("Close space?");
+    p["command"] = json!({"name": "space.close", "args": {"id": "s1"}});
+    let tree = describe(cx, &staged, "mods/confirm", true, p, updates("current", "current"), None).unwrap();
+    let root = tree.lines().find(|l| l.contains(":id[Str(\"confirm\")]")).unwrap();
+    assert!(root.contains(".rounded[Number(8.0)]"), "the dialog background must follow the frame's corners: {root}");
+}
+
+#[gpui::test]
 fn check_materializes_retained_elements_in_a_rendered_view(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
