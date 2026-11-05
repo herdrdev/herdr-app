@@ -439,6 +439,8 @@ pub struct AppWindow {
     tab_shown: bool,
     pane_history: Vec<String>,
     window_active: bool,
+    /// Agents with a system notification up (alert.rs), taken down once seen.
+    notified: HashSet<String>,
     /// The system's appearance; a layout with a light and a dark theme follows it.
     system_dark: bool,
     /// The OS tells us when files change (`files.rs`); else the disk is polled.
@@ -530,6 +532,7 @@ impl AppWindow {
             tab_shown: true,
             pane_history: Vec::new(),
             window_active: true,
+            notified: HashSet::new(),
             system_dark: is_dark(window.appearance()),
             file_events: crate::files::watch(&mods::app_dir()),
             polls: 0,
@@ -580,6 +583,19 @@ impl AppWindow {
             w.open_overlay(mods::new_overlay_id(), json!({ "kind": "toast", "notification": note }), window, cx);
         }
 
+        // Clicking a system notification goes there, as clicking the toast does.
+        let (handle, this) = (window.window_handle(), cx.entity().downgrade());
+        cx.on_system_notification_response(move |response, cx| {
+            let Some(addr) = crate::alert::address_of(&response.tag).map(str::to_owned) else { return };
+            cx.activate(true);
+            let _ = handle.update(cx, |_, window, cx| {
+                window.activate_window();
+                let _ = this.update(cx, |this, cx| {
+                    this.notified.remove(&addr);
+                    this.run("agent.focus", json!({ "terminal": addr }), window, cx);
+                });
+            });
+        });
         w._tasks.push(cx.spawn_in(window, async move |this, cx| {
             loop {
                 if this.update_in(cx, |this, window, cx| this.poll(window, cx)).is_err() {
@@ -2047,12 +2063,19 @@ impl AppWindow {
             if let Some(alert) = self.model.alert_for(addr, child, prev.as_deref(), word.as_deref(), looking) {
                 alerts.push((addr.clone(), alert, looking));
             }
+            // Seen, or back at work: its notification is old news.
+            if (looking || word.as_deref() == Some("working")) && self.notified.remove(addr) {
+                cx.dismiss_system_notification(&crate::alert::tag(addr));
+            }
             changed |= self.model.set_word(addr, word, app, looking);
             let turn = rec.get("turn").and_then(Value::as_u64).unwrap_or(0);
             let label = rec.pointer("/labels/herdr.seen").and_then(Value::as_str).and_then(|s| s.parse::<u64>().ok());
             changed |= self.model.set_turn(addr, turn, label.max(self.written_seen.get(addr).copied()));
         }
         self.written_seen.retain(|a, _| self.live.contains_key(a));
+        for gone in self.notified.extract_if(|a| !self.live.contains_key(a)) {
+            cx.dismiss_system_notification(&crate::alert::tag(&gone));
+        }
         changed |= self.share_seen(cx);
         // Changes already made before Herdr started aren't news.
         if self.listed_once {
@@ -2077,10 +2100,12 @@ impl AppWindow {
 
     /// Tells the person an agent needs them or finished: Herdr's sounds, and a
     /// toast (drawn by the `toast` mod; click it to go there) unless they're
-    /// looking at that agent.
+    /// looking at that agent. Outside the window too, as `system_notifications`
+    /// says.
     fn alert(&mut self, addr: &str, alert: model::Alert, looking: bool, window: &mut Window, cx: &mut Context<Self>) {
-        if settings::get().sounds.enabled {
-            crate::sound::play(if alert == model::Alert::Blocked { "blocked" } else { "done" });
+        let settings = settings::get();
+        if settings.sounds.enabled {
+            crate::sound::play(if alert.needs_you() { "blocked" } else { "done" });
         }
         // Needing the person brings a settled tab back.
         if let Some(ctx) = self.model.pane_of(&self.root_agent(addr)).and_then(|p| self.model.tab_of(&p)).map(|c| c.id.clone())
@@ -2104,12 +2129,18 @@ impl AppWindow {
             let (p, c) = (self.model.space_of(&pane)?, self.model.tab_of(&pane)?);
             Some(format!("{} / {}", self.model.space_name(p, &self::home()), Model::tab_name(p, c)))
         });
-        let (title, level) = match alert {
-            model::Alert::Blocked => (format!("{name} needs you"), "error"),
-            model::Alert::Done => (format!("{name} finished"), "info"),
-        };
+        let message = crate::alert::message_of(rec.and_then(|r| r.get("report")));
+        let note = crate::alert::Note { address: addr.to_owned(), alert, name, place, message };
+        if crate::alert::should_notify(settings.system_notifications, self.window_active, looking) {
+            cx.show_system_notification(crate::alert::system_notification(&note));
+            self.notified.insert(addr.to_owned());
+        }
+        if alert.needs_you() && settings.dock_bounce && !self.window_active {
+            window.request_attention();
+        }
+        let level = if alert.needs_you() { "error" } else { "info" };
         let notification = json!({
-            "title": title, "body": place, "level": level,
+            "title": note.title(), "body": note.place, "level": level,
             "action": { "name": "agent.focus", "args": { "terminal": addr } },
         });
         self.open_overlay(mods::new_overlay_id(), json!({ "kind": "toast", "notification": notification }), window, cx);
@@ -5288,6 +5319,81 @@ mod tests {
         let (view, cx) = cx.add_window_view(|window, cx| super::AppWindow::new(crate::hc::offline(), requests, window, cx));
         assert_eq!(view.update(cx, |this, _| this.layout_name.clone()), "test");
         (view, cx)
+    }
+
+    #[test]
+    fn agent_alerts_reach_the_notification_center() {
+        in_own_process("system_notifications");
+    }
+
+    /// A status change in the core's listing posts one system notification per
+    /// agent, with the agent's own `msg` over "space / tab" and `error` told
+    /// apart from `blocked`, as `system_notifications` says and never for the
+    /// agent on screen; it is taken down when the agent works again or goes
+    /// away, and clicking one goes to that agent.
+    #[gpui::test]
+    fn system_notifications(cx: &mut gpui::TestAppContext) {
+        use crate::settings::SystemNotifications::{self, *};
+        use serde_json::json;
+        if !running_alone("system_notifications") {
+            return;
+        }
+        cx.update(|cx| cx.set_app_identity("dev.herdr.test", "Herdr"));
+        let (view, cx) = open_window(cx, "unused", "", json!({ "id": "pane", "type": "block", "content": { "terminal": "t1" } }));
+        view.update(cx, |this, _| {
+            this.model.add_space("p1", "api", "/src/api", crate::model::Tab::new("c1", "fix login", "x1", "t1"));
+            this.model.add_space("p2", "web", "/src/web", crate::model::Tab::new("c2", "tests", "x2", "t2"));
+        });
+        // t1 is on screen; t2 is in another space.
+        let list = |mode: SystemNotifications, active: bool, t1: &str, t2: Option<serde_json::Value>, cx: &mut gpui::VisualTestContext| {
+            let mut terminals = vec![json!({ "address": "t1", "name": "Claude", "status": { "state": t1, "app": "claude-code" } })];
+            terminals.extend(t2.map(|status| json!({ "address": "t2", "name": "Codex", "status": status })));
+            cx.update(|window, cx| view.update(cx, |this, cx| {
+                this.person.sounds.enabled = false;
+                this.person.system_notifications = mode;
+                this.apply_look(window, cx);
+                this.window_active = active;
+                this.terminals_listed(json!({ "terminals": terminals }), window, cx);
+            }));
+        };
+        let working = || Some(json!({ "state": "working", "app": "codex" }));
+        let blocked = || Some(json!({ "state": "blocked", "kind": "permission", "app": "codex", "msg": "approve Bash: make" }));
+        let error = || Some(json!({ "state": "error", "app": "codex" }));
+
+        list(Background, true, "working", working(), cx);
+        list(Background, true, "working", blocked(), cx);
+        assert!(cx.shown_system_notifications().is_empty(), "not while Herdr is in front");
+        list(Off, false, "working", working(), cx);
+        list(Off, false, "working", blocked(), cx);
+        assert!(cx.shown_system_notifications().is_empty(), "never when off");
+        list(Always, true, "blocked", working(), cx);
+        assert!(cx.shown_system_notifications().is_empty(), "never for the agent on screen");
+
+        list(Background, false, "working", working(), cx);
+        list(Background, false, "working", blocked(), cx);
+        let shown = cx.shown_system_notifications();
+        assert_eq!(shown.len(), 1);
+        assert_eq!((shown[0].tag.as_ref(), shown[0].title.as_ref(), shown[0].body.as_ref()), ("herdr-agent:t2", "Codex needs you", "approve Bash: make\nweb / tests"));
+
+        list(Always, true, "working", working(), cx);
+        assert!(cx.delivered_system_notifications().is_empty(), "back at work takes it down");
+        list(Always, true, "working", error(), cx);
+        let delivered = cx.delivered_system_notifications();
+        assert_eq!(delivered.iter().map(|n| (n.title.to_string(), n.body.to_string())).collect::<Vec<_>>(), [("Codex hit an error".to_owned(), "web / tests".to_owned())], "an old message doesn't linger");
+        list(Always, true, "working", None, cx);
+        assert!(cx.delivered_system_notifications().is_empty(), "an agent gone takes it down");
+
+        list(Always, false, "working", working(), cx);
+        list(Always, false, "working", error(), cx);
+        list(Always, false, "working", Some(json!({ "state": "idle", "app": "codex" })), cx);
+        let delivered = cx.delivered_system_notifications();
+        assert_eq!(delivered.iter().map(|n| n.title.to_string()).collect::<Vec<_>>(), ["Codex finished"], "one per agent: the newer replaces the older");
+        cx.simulate_system_notification_response(gpui::SystemNotificationResponse { tag: "herdr-agent:t2".into(), action_id: None });
+        cx.run_until_parked();
+        view.update(cx, |this, _| {
+            assert!(this.notified.is_empty(), "the click reached the window");
+            assert_eq!(this.shown_agent().as_deref(), Some("t2"));
+        });
     }
 
     #[test]

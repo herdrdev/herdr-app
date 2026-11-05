@@ -1,6 +1,7 @@
 // Windows: a window app, no console of its own (see `attach_console`).
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
+mod alert;
 mod bench;
 mod commands;
 mod control;
