@@ -228,6 +228,15 @@ export default class Agents extends View {
     let list = agents();
     this.listed = new Map(list.map((a) => [a.address, a.status]));
     const all = terminals();
+    // A live sub-agent is already drawn under its parent by tree(); listing it here as well shows
+    // the same agent twice. `agents()` carries no parent, so pair it up from `terminals()`, and only
+    // drop the child when the parent is on the top level too.
+    const parentOf = new Map(all.filter((t) => t.parent && t.state === "live").map((t) => [t.address, t.parent]));
+    const onTop = new Set(list.map((a) => a.address));
+    list = list.filter((a) => {
+      const parent = parentOf.get(a.address);
+      return !(parent && onTop.has(parent));
+    });
     this.migratePins(all);
     const shown = focused()?.agent;
     const now = Date.now();

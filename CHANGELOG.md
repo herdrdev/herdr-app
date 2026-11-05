@@ -12,6 +12,7 @@
 - dsh-tui agents have their own icon and start from the new agent menu. (#335, thanks @tsonglew)
 
 ### Fixed
+- A sub-agent is listed once in the agents list: it stays nested under the agent that started it instead of also appearing as a row of its own.
 - Programs start at the size of their pane, so the first screen of an agent isn't drawn at the wrong width.
 - On Windows, Nerd Font icons show again.
 - On Windows, links with an = in them open in the browser.
