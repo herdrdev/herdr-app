@@ -40,10 +40,7 @@ impl AppWindow {
 
     /// Makes the window match the shown layout's title bar. Cheap; runs on every render.
     pub(super) fn apply_titlebar(&mut self, window: &mut Window) {
-        // AppKit may recreate the standard buttons while leaving full screen.
-        // Reapply their position even when the layout itself has not changed.
-        let full_screen = cfg!(target_os = "macos") && window.is_fullscreen();
-        let want = (self.titlebar(), self.chrome.traffic_lights, full_screen);
+        let want = (self.titlebar(), self.chrome.traffic_lights);
         if self.titlebar_applied == Some(want) {
             return;
         }
@@ -53,7 +50,7 @@ impl AppWindow {
         #[cfg(target_os = "macos")]
         {
             let [x, y] = match want {
-                (Titlebar::Layout, Some(at), _) => at,
+                (Titlebar::Layout, Some(at)) => at,
                 _ => MAC_LIGHTS,
             };
             window.set_traffic_light_position(point(px(x), px(y)));

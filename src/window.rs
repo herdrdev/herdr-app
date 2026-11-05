@@ -427,7 +427,7 @@ pub struct AppWindow {
     pointer: Point<Pixels>,
     /// Where a press on a `window_drag` node started, until it moves the window.
     drag_from: Option<Point<Pixels>>,
-    titlebar_applied: Option<(crate::layout::Titlebar, Option<[f32; 2]>, bool)>,
+    titlebar_applied: Option<(crate::layout::Titlebar, Option<[f32; 2]>)>,
     focused_pane: Option<String>,
     /// The mod block holding the keyboard for directional navigation.
     focused_block: Option<String>,
