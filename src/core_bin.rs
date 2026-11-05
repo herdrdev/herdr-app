@@ -137,14 +137,20 @@ fn usual_dirs(home: &Path) -> Vec<PathBuf> {
     dirs
 }
 
-/// The PATH the person's login shell sets up, or None if it doesn't answer quickly.
+/// The PATH the person's login and interactive shell set up, or None if it
+/// doesn't answer quickly. Interactive too: zsh keeps Homebrew's shellenv in
+/// `.zshrc` when there is no `.zprofile`.
 fn login_shell_path() -> Option<std::ffi::OsString> {
     if cfg!(windows) {
         return None;
     }
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
+    login_shell_path_of(&shell)
+}
+
+fn login_shell_path_of(shell: &str) -> Option<std::ffi::OsString> {
     let mut child = Command::new(shell)
-        .args(["-lc", "printf %s \"$PATH\""])
+        .args(["-lic", "printf %s \"$PATH\""])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -311,6 +317,19 @@ mod tests {
         assert_eq!(std::env::split_paths(&merged).collect::<Vec<_>>(), ["/custom/bin", "/opt/homebrew/bin", "/usr/bin", "/home/test/.local/bin", "/bin"].map(PathBuf::from));
         let fallback = merged_path(None, &usual, &current).unwrap();
         assert_eq!(std::env::split_paths(&fallback).collect::<Vec<_>>(), ["/home/test/.local/bin", "/opt/homebrew/bin", "/usr/bin", "/bin"].map(PathBuf::from));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_login_shell_loads_interactive_profiles() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("herdr-login-shell-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let shell = dir.join("shell");
+        std::fs::write(&shell, "#!/bin/sh\n[ \"$1\" = \"-lic\" ] || exit 2\nprintf '/from/rc'\n").unwrap();
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+        assert_eq!(login_shell_path_of(shell.to_str().unwrap()).as_deref().and_then(|s| s.to_str()), Some("/from/rc"));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[cfg(unix)]
