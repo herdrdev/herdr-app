@@ -17,8 +17,10 @@
 use std::{
     borrow::Cow,
     cell::RefCell,
-    collections::{HashSet, VecDeque},
-    path::PathBuf,
+    collections::{HashMap, HashSet, VecDeque},
+    path::{Path, PathBuf},
+    sync::{LazyLock, Mutex, PoisonError},
+    time::SystemTime,
 };
 
 use cap_std::{ambient_authority, fs::Dir};
@@ -28,6 +30,18 @@ const MAX_ASSET_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_ASSET_LIST_ENTRIES: usize = 10_000;
 const MAX_ASSET_LIST_NAME_BYTES: usize = 1024 * 1024;
 const MAX_REPORTED_MISSING_ASSETS: usize = 256;
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Stamp {
+    modified: SystemTime,
+    len: u64,
+}
+
+static LOADED: LazyLock<Mutex<HashMap<PathBuf, Stamp>>> = LazyLock::new(Default::default);
+
+fn loaded() -> std::sync::MutexGuard<'static, HashMap<PathBuf, Stamp>> {
+    LOADED.lock().unwrap_or_else(PoisonError::into_inner)
+}
 
 /// Serves files from one application directory.
 #[derive(Clone, Debug)]
@@ -65,6 +79,24 @@ impl AppAssets {
         (!resolved.as_os_str().is_empty()).then_some(resolved)
     }
 
+    /// Whether the file at `path` (relative to `root`) differs from what `load`
+    /// last read of it, so what is cached for it must be dropped. False only
+    /// when its modified time and length still match; a file never loaded,
+    /// missing now or written since is a change.
+    pub fn changed_since_load(root: &Path, path: &str) -> bool {
+        let Some(relative) = Self::relative_path(path) else { return true };
+        let key = root.join(relative);
+        let Some(recorded) = loaded().get(&key).copied() else { return true };
+        let current = std::fs::metadata(&key)
+            .ok()
+            .and_then(|meta| Some(Stamp { modified: meta.modified().ok()?, len: meta.len() }));
+        if current == Some(recorded) {
+            return false;
+        }
+        loaded().remove(&key);
+        true
+    }
+
     /// Opens the application directory and answers the path within it.
     ///
     /// The same shape the `fs` capability uses, and for the same reason: a
@@ -93,7 +125,8 @@ impl AssetSource for AppAssets {
             Ok(mut file) => {
                 use std::io::Read as _;
 
-                let size = file.metadata()?.len();
+                let before_read = file.metadata()?;
+                let size = before_read.len();
                 if size > MAX_ASSET_BYTES {
                     anyhow::bail!(
                         "asset `{path}` is {size} bytes, over the {MAX_ASSET_BYTES}-byte limit"
@@ -105,6 +138,10 @@ impl AssetSource for AppAssets {
                     .read_to_end(&mut bytes)?;
                 if bytes.len() as u64 > MAX_ASSET_BYTES {
                     anyhow::bail!("asset `{path}` grew over the {MAX_ASSET_BYTES}-byte limit");
+                }
+                if let Ok(modified) = before_read.modified() {
+                    let stamp = Stamp { modified: modified.into_std(), len: size };
+                    loaded().entry(self.root.join(&resolved)).or_insert(stamp);
                 }
                 Ok(Some(Cow::Owned(bytes)))
             }

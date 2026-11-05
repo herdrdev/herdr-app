@@ -4902,14 +4902,15 @@ fn invalidate_image(resource: &gpui::Resource, window: &mut Window, cx: &mut gpu
 }
 
 /// The changed paths, plus the files inside changed mod folders (a folder
-/// renamed into place arrives as one event). Runs on the UI thread: skips what
-/// the watcher ignores (hidden, `node_modules`) and stops at a mod-sized limit.
+/// renamed into place arrives as one event), minus files unchanged since the
+/// asset loader read them. Runs on the UI thread: skips what the watcher
+/// ignores (hidden, `node_modules`) and stops at a mod-sized limit.
 fn changed_asset_paths(home: &std::path::Path, changed: &[std::path::PathBuf]) -> Vec<std::path::PathBuf> {
     const MAX_FILES: usize = 2000;
     let mut paths: std::collections::BTreeSet<_> = changed.iter().cloned().collect();
     let mut seen = std::collections::HashSet::new();
     let mut pending: Vec<_> = changed.iter().filter(|p| p.starts_with("mods")).cloned().collect();
-    while let Some(path) = pending.pop() {
+    'walk: while let Some(path) = pending.pop() {
         // Do not follow symlinks out of the mod folder (or into a cycle).
         if !seen.insert(path.clone()) || !home.join(&path).symlink_metadata().is_ok_and(|m| m.is_dir()) { continue; }
         let Ok(entries) = std::fs::read_dir(home.join(&path)) else { continue };
@@ -4924,11 +4925,14 @@ fn changed_asset_paths(home: &std::path::Path, changed: &[std::path::PathBuf]) -
             } else if paths.len() < MAX_FILES {
                 paths.insert(child);
             } else {
-                return paths.into_iter().collect();
+                break 'walk;
             }
         }
     }
-    paths.into_iter().collect()
+    paths
+        .into_iter()
+        .filter(|path| gpui_shell::AppAssets::changed_since_load(home, &path.to_string_lossy()))
+        .collect()
 }
 
 #[cfg(test)]
