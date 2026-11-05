@@ -222,6 +222,9 @@ export function terminals(): any[];
  *  `terminal` and `cwd` describe it; `pane` and `shown` are null, not its source pane.
  *  Implicit pane split/close/zoom/go/swap and terminal.show fail in that case, as do
  *  terminal.open/keep with place right/down. An explicit pane id targets a model pane.
+ *  A terminal in a window (openOverlay with a layout) that has the keyboard is reported
+ *  the same way (`pane` and `shown` null); implicit pane commands still act on the
+ *  focused pane under the window.
  *  pane.focus {terminal} prefers the first visible layout terminal block, then a model pane.
  *  `shown`: terminal.show replacement, if any. `agent`: the agent an agent block shows.
  *  `terminal` is null for mod panes. Live. */
