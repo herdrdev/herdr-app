@@ -272,6 +272,23 @@ impl Model {
         true
     }
 
+    /// Adds a space without showing it; with no space shown yet, it is shown.
+    pub fn add_space_unshown(&mut self, id: &str, name: &str, folder: &str, ctx: Tab) {
+        let shown = self.active.clone();
+        self.add_space(id, name, folder, ctx);
+        self.active = shown.or(Some(id.to_owned()));
+    }
+
+    /// Adds a tab after the space's selected one, which stays selected.
+    pub fn add_tab_unselected(&mut self, space: &str, ctx: Tab) -> bool {
+        let keep = self.space(space).and_then(|p| p.active.clone());
+        let added = self.add_tab(space, ctx);
+        if let Some(p) = self.space_mut(space) {
+            p.active = keep;
+        }
+        added
+    }
+
     /// Splits `target` (a pane) with a new terminal pane and focuses it.
     pub fn split(&mut self, target: &str, axis: Axis, new_pane: &str, address: &str) -> bool {
         self.split_with(target, axis, pane(new_pane, address))
@@ -672,6 +689,23 @@ mod tests {
         let mut m = Model::default();
         m.add_space("p1", "api", "/src/api", Tab::new("c1", "fix login", "x1", "t1"));
         m
+    }
+
+    #[test]
+    fn unshown_spaces_and_unselected_tabs_keep_what_is_shown() {
+        let mut m = Model::default();
+        m.add_space_unshown("p1", "", "/a", Tab::new("c1", "", "x1", "t1"));
+        assert_eq!(m.active.as_deref(), Some("p1"), "with nothing shown, the new space is");
+        m.add_space_unshown("p2", "", "/b", Tab::new("c2", "", "x2", "t2"));
+        assert_eq!(m.active.as_deref(), Some("p1"));
+        assert_eq!(m.space("p2").unwrap().active.as_deref(), Some("c2"), "shown later, it opens on its tab");
+        assert!(m.add_tab_unselected("p1", Tab::new("c3", "", "x3", "t3")));
+        assert!(m.add_tab_unselected("p2", Tab::new("c4", "", "x4", "t4")));
+        assert_eq!(m.active_tab().map(|c| c.id.as_str()), Some("c1"));
+        assert_eq!(m.space("p2").unwrap().active.as_deref(), Some("c2"));
+        let order: Vec<&str> = m.space("p1").unwrap().tabs.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(order, ["c1", "c3"], "placed after the selected tab, as add_tab does");
+        assert!(!m.add_tab_unselected("nope", Tab::new("c5", "", "x5", "t5")));
     }
 
     #[test]

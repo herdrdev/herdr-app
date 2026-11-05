@@ -26,6 +26,13 @@ only after a successful check; on failure, check the connection and retry.
 ## Show something when asked
 
 New spaces and tabs are shown immediately: only create them when asked.
+To start one the person will look at later without moving them there, pass
+`--focus false`:
+
+```sh
+herdr-app do space.new --folder ~/code/app/eng-123 --argv '["claude"]' --task "Implement ENG-123" --focus false
+```
+
 Pick an explicit, useful name for every new space and tab; don't rely on
 default names. Use IDs from `ls` rather than guessing or acting on the wrong
 focused pane.
