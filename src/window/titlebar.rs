@@ -42,7 +42,8 @@ impl AppWindow {
     pub(super) fn apply_titlebar(&mut self, window: &mut Window) {
         // AppKit may recreate the standard buttons while leaving full screen.
         // Reapply their position even when the layout itself has not changed.
-        let want = (self.titlebar(), self.chrome.traffic_lights, window.is_fullscreen());
+        let full_screen = cfg!(target_os = "macos") && window.is_fullscreen();
+        let want = (self.titlebar(), self.chrome.traffic_lights, full_screen);
         if self.titlebar_applied == Some(want) {
             return;
         }
