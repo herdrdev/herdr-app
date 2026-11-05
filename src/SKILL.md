@@ -104,6 +104,8 @@ those files or the generated guide. The app rewrites them on start.
   Discover required arguments with `herdr-app commands`.
 - Save to reload. A broken save keeps the old version running and reports
   an error in `status`; a still-working screen is not proof the edit worked.
+  Many reloads fill the mod runtime's heap (`status` shows `mods.heap_bytes`);
+  Herdr then starts a fresh runtime and mounts every copy again on its own.
 - Make only the requested change. Don't touch unrelated mods or settings.
 - Use theme colors. Do not retain a mod's `cx` across callbacks; each
   callback receives its own. Native animations, not redraw timers, keep

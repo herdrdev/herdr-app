@@ -795,7 +795,11 @@ has 120 programs (agents, editors, runtimes, tools, databases, infra);
   `node_modules`). The old build's tasks and timers stop: a loop ends at its
   next `cx` use. A broken save keeps the old version running and shows in
   `herdr-app status`; its top-level code has already run, so keep side effects
-  on `globalThis` out of the module's top level.
+  on `globalThis` out of the module's top level. Each reload leaves the
+  replaced build in the mod runtime's heap (a module cannot be unloaded):
+  when reloads have filled most of it, Herdr starts a fresh runtime and
+  mounts every copy again, so in-memory state is gone but the window stays.
+  `status` shows `mods.heap_bytes` and `mods.restarts`.
 - A copy starts the first time it shows, then stays alive while its block is in
   the layout, shown or not (a hidden column, the other child of a stack, a pane
   in another tab or behind a zoom): switching back finds it as it was. Its

@@ -10,6 +10,7 @@ Start with Settings for fonts, colors and sounds.
 For deeper changes, duplicate a shipped layout or mod from the command palette, then edit the copy.
 Shipped files update on start; personal copies do not.
 Save to reload. Check for errors, even when the old screen still looks fine.
+Every reload keeps the replaced build in the mod runtime's memory; after many, Herdr starts a fresh runtime and mounts the mods again by itself (`status` shows `mods.heap_bytes` and `mods.restarts`).
 
 ```sh
 herdr-app check ~/.config/herdr-app/mods/my-panel

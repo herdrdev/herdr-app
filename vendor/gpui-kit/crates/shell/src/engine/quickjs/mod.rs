@@ -2075,6 +2075,23 @@ impl ShellRuntime {
         self.metrics.read()
     }
 
+    /// HERDR: what the JavaScript heap holds now, in bytes.
+    ///
+    /// An ES module cannot be unloaded, so every hot reload leaves the
+    /// previous build's modules in QuickJS's cache (see [`AppModules`]) and
+    /// the heap only climbs across reloads. A host that reloads for a living
+    /// reads this to replace the runtime before the ceiling shows up as "out
+    /// of memory" on some unrelated allocation. Walks the heap: not for every
+    /// frame.
+    pub fn heap_used(&self) -> usize {
+        usize::try_from(self.js_runtime.memory_usage().malloc_size).unwrap_or(0)
+    }
+
+    /// HERDR: the heap ceiling [`heap_used`](Self::heap_used) is measured against.
+    pub fn heap_limit(&self) -> usize {
+        sandbox::memory_limit_bytes()
+    }
+
     /// This runtime's retained state.
     ///
     /// Scoped to the runtime rather than shared, so one runtime cannot resolve

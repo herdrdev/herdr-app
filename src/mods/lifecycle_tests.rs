@@ -321,3 +321,44 @@ export default class extends View {
     cx.run_until_parked();
     window.update(cx, |_, window, _| window.remove_window()).unwrap();
 }
+
+/// `recycle_mods`: the window's runtime can be replaced once its copies have
+/// closed and nothing holds it, and the heap reading the decision rests on
+/// climbs with each load (an ES module cannot be unloaded).
+#[gpui::test]
+fn a_closed_runtime_can_be_replaced_and_reloads_grow_the_heap(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let fixture = Fixture::new(r#"
+import { View, div } from "gpui-kit";
+export default class extends View {
+  render() { return div(); }
+}"#);
+    gpui_shell::policy::set_default(Policy::new());
+    let runtime = cx.update(ShellRuntime::new).unwrap();
+    assert!(runtime.heap_limit() > 0);
+    let window = cx.add_window(|_, _| Empty);
+    let root = window.update(cx, |_, window, cx| runtime.try_load(&fixture.0, window, cx).unwrap()).unwrap();
+    let loaded = runtime.heap_used();
+    assert!(loaded > 0);
+    for _ in 0..5 {
+        window.update(cx, |_, window, cx| runtime.reload_now(&root, window, cx).unwrap()).unwrap();
+    }
+    let grown = runtime.heap_used();
+    assert!(grown > loaded, "five reloads left nothing in the heap: {loaded} bytes before and after");
+    // Another default runtime is refused while this one is the window's.
+    assert!(cx.update(ShellRuntime::new).is_err());
+    window.update(cx, |_, window, cx| {
+        runtime.close_now(&root, Instant::now() + Duration::from_millis(100), window, cx);
+        window.remove_window();
+    }).unwrap();
+    drop(root);
+    drop(runtime);
+    // GPUI releases a dropped entity when the next update ends, and the view
+    // holds the runtime: the window's poll after `recycle_mods` is that update.
+    cx.update(|_| ());
+    cx.run_until_parked();
+    let fresh = cx.update(ShellRuntime::new).expect("a closed runtime can be replaced");
+    // Compared with the grown heap, not the first load's: what an empty
+    // runtime holds (the built-in modules) differs by platform and allocator.
+    assert!(fresh.heap_used() < grown, "a fresh runtime ({}) holds as much as five reloads left ({grown})", fresh.heap_used());
+}
