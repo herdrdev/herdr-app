@@ -120,3 +120,32 @@ for (const sort of ["priority", "grouped"]) test(`${sort} render reads panes onc
   expect(second).not.toContain("Task 63");
   expect(orders[1]).toEqual(orders[0]);
 });
+
+function idsOf(node: any, ids: string[] = []): string[] {
+  if (node && typeof node === "object") {
+    if (node.id) ids.push(node.id);
+    for (const child of node.children ?? []) idsOf(child, ids);
+  }
+  return ids;
+}
+
+test("a sub-agent with a pane is listed once, not under its parent", () => {
+  const parent = { address: "lead", pane: "p1", tab: "tab1", space: "s1", space_name: "Project", program: { name: "Claude", key: "claude", agent: true }, title: "Lead", status: "idle", seq: 1 };
+  const child = { ...parent, address: "kid", pane: "p2", title: "Kid", status: "working", seq: 2, parent: "lead" };
+  const list = [parent, child];
+  const { agents } = harness([], {
+    agents: () => list,
+    terminals: () => list.map(a => ({ ...a, state: "live" })),
+    panes: () => [{ tab: "tab1", terminal: "lead" }, { tab: "tab1", terminal: "kid" }],
+    focused: () => null,
+    spaces: () => [{ id: "s1", tabs: [{ id: "tab1", name: "Claude", named: true }] }],
+    layout: () => ({ id: "sidebar", size: { px: 268 } }),
+    shared: () => "priority",
+    theme: () => ({}),
+    setAgentOrder: () => {},
+    div: element, v_flex: element, h_flex: element, svg: element, image: element,
+  });
+  const ids = idsOf(agents.render({}).node);
+  expect(ids.filter(id => id === "ag-kid")).toHaveLength(1);
+  expect(ids).not.toContain("sub-kid");
+});

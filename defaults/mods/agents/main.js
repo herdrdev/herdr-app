@@ -171,9 +171,10 @@ export default class Agents extends View {
     run("terminal.peek", { terminal: addr });
   }
 
-  // Live sub-agents of `addr`, depth first, each with the tree lines in front of it.
+  // Live sub-agents of `addr` without a pane, depth first, each with the tree
+  // lines in front of it. A kept one is listed on its own row instead.
   tree(all, addr, lead = []) {
-    const kids = all.filter((k) => k.parent === addr && k.state === "live");
+    const kids = all.filter((k) => k.parent === addr && k.state === "live" && !this.listed.has(k.address));
     return kids.flatMap((k, i) => {
       const last = i === kids.length - 1;
       return [
