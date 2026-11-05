@@ -275,7 +275,10 @@ Create `mods/my-menu/main.js` and `mod.json` (e.g.
 its `mod.json` overlay width/height override those defaults. It gets
 `props()` = `{tab: "pane", target: {pane, terminal}, overlay}`. Always use
 `target.terminal` or `target.pane` in actions, not the focused terminal:
-right-clicking a different terminal must act on the one clicked. For example:
+right-clicking a different terminal must act on the one clicked. A terminal
+shown outside a tab (a layout terminal block, a window) has no pane:
+`target.pane` is its block's id, not in `panes()`, so leave out pane items
+there, as the shipped menu does. For example:
 
 ```js
 import { View, div } from "gpui-kit";
