@@ -14,7 +14,7 @@ type Result = { code: number; stdout: string; stderr: string };
 test("plain Enter keeps a multiline message; only the commit shortcut submits", () => {
   const handlers = new Map<string, Function>();
   const input = { set_auto_grow() {}, on(name: string, handler: Function) { handlers.set(name, handler); } };
-  const Panel = new Function("View", "TextareaState", `${panelSource}; return SourceControl;`)(class {}, { new: () => input });
+  const Panel = new Function("View", "TextareaState", "VirtualListScrollHandle", "shared", `${panelSource}; return SourceControl;`)(class {}, { new: () => input }, { new: () => ({}) }, () => undefined);
   const panel = new Panel(); let commits = 0, confirmations = 0;
   panel.refresh = () => {}; panel.commit = () => { commits++; panel.dialog = {}; }; panel.submitDialog = () => { confirmations++; };
   const cx = { focus_handle() {}, timer: { every() {} } };
@@ -31,7 +31,7 @@ test("plain Enter keeps a multiline message; only the commit shortcut submits", 
 function controller() {
   const panel = new SourceControl();
   panel.chosen = { cwd: "/fixture", on: null }; panel.context = panel.key(); panel.message = "message";
-  panel.data = { head: "head", groups: { staged: [], changes: [], conflicts: [] }, remotes: ["origin"], operation: null,
+  panel.data = { root: "/fixture", head: "head", groups: { staged: [], changes: [], conflicts: [] }, remotes: ["origin"], operation: null,
     branch: { name: "main", upstream: "origin/main", remote: "origin", ahead: 0, behind: 0 } };
   return panel;
 }
@@ -102,23 +102,32 @@ function renderedPanel(savedHeight: unknown, platform = "windows", zoom = 1) {
     } });
     return builder;
   };
-  const globals = { View: class {}, div: () => element("div"), h_flex: () => element("row"), v_flex: () => element("column"),
+  const scrolls: any[] = [], jobs: Promise<unknown>[] = [], diffs: any[] = [];
+  let panel: any, repository: any;
+  const globals = { View: class {}, div: () => element("div"), svg: (path: string) => element("svg", path), h_flex: () => element("row"), v_flex: () => element("column"),
     v_resizable: (id: string) => element("vertical-split", id), resizable_panel: () => element("panel"),
     Textarea: { new: () => element("textarea") }, theme: () => ({}), spaces: () => [{ id: "fixture", active: true }],
     window: () => ({ platform }), settings: () => ({ zoom }), shared: (key: string) => values.get(key),
     setShared: (key: string, value: unknown) => { values.set(key, value); writes.push([key, value]); },
-    renderGraph: () => element("graph"),
+    renderGraph: (_rows: any, _theme: any, options: any) => element("graph").props(options),
+    graphIndex: (rows: any[], hash: string) => rows.findIndex(row => row.hash === hash),
+    parseGraph: (text: string) => JSON.parse(text),
+    openOverlay: (options: any) => diffs.push(options),
+    createGit: () => repository || panel.repo,
   };
   const Panel = new Function(...Object.keys(globals), `${panelSource}; return SourceControl;`)(...Object.values(globals));
-  const panel = Object.assign(new Panel(), controller(), { collapsed: {}, history: [], limit: 200, input: {} });
-  const cx = { notify() { notifications++; } };
+  panel = Object.assign(new Panel(), controller(), { collapsed: {}, history: [], limit: 200, input: { set_value() {} }, expanded: {}, directories: {}, fileView: "list",
+    graphFilter: { mode: "auto", refs: [] }, graphScroll: { scroll_to_item(...args: any[]) { scrolls.push(args); } }, handle: { focus() {} },
+  });
+  Object.assign(panel.data, { refs: [], graphRefs: [], graphIncludesHead: true });
+  const cx: any = { notify() { notifications++; }, stop_propagation() {}, spawn(fn: Function) { jobs.push(Promise.resolve().then(() => fn(cx))); } };
   const nodes = (node: any): any[] => typeof node === "object" && node ? [node, ...node.items.flatMap(nodes)] : [];
   const render = () => nodes(panel.render(cx));
   const measure = (height = 700) => {
     render()[0].attrs.on_size_change[0]({ width: 368, height }, cx);
     return render();
   };
-  return { panel, cx, values, writes, render, measure, notifications: () => notifications };
+  return { panel, cx, values, writes, render, measure, scrolls, diffs, setRepository: (value: any) => { repository = value; }, drain: async () => { while (jobs.length) await jobs.shift(); }, notifications: () => notifications };
 }
 
 test("Source Control split restores safe heights through native panels on both platforms", () => {
@@ -184,6 +193,95 @@ test("Source Control split preserves its size and identity while Graph is collap
   expect(restored.items[0].attrs.size).toEqual([320]);
   expect(view.values.get("source-control.upper-height")).toBe(320);
   expect(view.writes).toEqual([]);
+});
+
+test("Graph toolbar follows VS Code order and dispatches fetch-all, pull, push, and publish", () => {
+  const view = renderedPanel(undefined), calls: any[] = [];
+  view.panel.network = (...args: any[]) => calls.push([args[0], args[2]]);
+  const ids = ["graph-filter", "graph-current", "fetch", "graph-pull", "push", "graph-refresh", "graph-more-actions"];
+  const buttons = view.measure().filter(node => ids.includes(node.attrs.id[0]));
+  expect(buttons.map(node => node.attrs.id[0])).toEqual(ids);
+  const click = (id: string) => view.render().find(node => node.attrs.id[0] === id).attrs.on_click[0]({ stop_propagation() {} }, view.cx);
+  click("fetch"); click("graph-pull"); click("push");
+  expect(calls).toEqual([["fetch", { all: true }], ["pull", undefined], ["push", undefined]]);
+  view.panel.data.graphIncludesHead = false; click("graph-pull"); click("push");
+  expect(calls).toHaveLength(3);
+  view.panel.data.branch.upstream = ""; click("push");
+  expect(calls.at(-1)[0]).toBe("publish");
+  expect(view.render().find(node => node.attrs.id[0] === "push").attrs.tooltip).toEqual(["Publish Branch…"]);
+});
+
+test("Graph reference selection stays open for multiple refs and saves only on Apply", () => {
+  const view = renderedPanel(undefined), { panel, cx } = view;
+  panel.refresh = () => {};
+  panel.data.refs = [
+    { ref: "refs/heads/main", name: "main", hash: "head", type: "branch" },
+    { ref: "refs/remotes/origin/main", name: "origin/main", hash: "head", type: "remote" },
+    { ref: "refs/remotes/origin/HEAD", name: "origin/HEAD", hash: "head", type: "remote", symbolicTarget: "refs/remotes/origin/main" },
+  ];
+  panel.data.graphRefs = ["refs/heads/main"];
+  panel.graphFilterMenu(cx);
+  const dialog = panel.dialog;
+  expect(dialog.items.map((item: any) => item.label)).toEqual(["Auto", "All", "Apply Selected References", "main", "origin/main"]);
+  const remote = view.render().find(node => node.attrs.id[0] === "menu-4");
+  remote.attrs.on_click[0]({}, cx);
+  expect(panel.dialog).toBe(dialog); expect(dialog.items[4].checked).toBe(true);
+  expect(view.writes).toEqual([]);
+  view.render().find(node => node.attrs.id[0] === "menu-2").attrs.on_click[0]({}, cx);
+  expect(panel.dialog).toBeNull();
+  expect(panel.graphFilter).toEqual({ mode: "refs", refs: ["refs/heads/main", "refs/remotes/origin/main"] });
+  expect(view.values.get("source-control.graph-filters")[panel.key()]).toEqual(panel.graphFilter);
+  expect(view.scrolls).toEqual([[0]]);
+});
+
+test("Graph filters follow the repository root across terminal subdirectories and separate remote machines", async () => {
+  const view = renderedPanel(undefined), { panel, cx } = view, snapshot = { ...panel.data, graph: "[]" };
+  const repo = { read: async () => structuredClone(snapshot) };
+  view.setRepository(repo);
+  panel.chosen.cwd = "/fixture/src";
+  panel.repo = repo; panel.refresh(cx); await view.drain();
+  const filter = { mode: "refs", refs: ["refs/heads/topic"] };
+  panel.setGraphFilter(filter, cx); await view.drain();
+  expect(view.values.get("source-control.graph-filters")).toEqual({ [JSON.stringify({ cwd: "/fixture", on: null })]: filter });
+  panel.chosen.cwd = "/fixture/tests"; panel.repo = repo; panel.refresh(cx); await view.drain();
+  expect(panel.graphFilter).toEqual(filter);
+  panel.chosen.on = "other-machine"; panel.repo = repo; panel.refresh(cx); await view.drain();
+  expect(panel.graphFilter).toEqual({ mode: "auto", refs: [] });
+});
+
+test("Go to Current History Item loads beyond the first page and avoids stale repository results", async () => {
+  for (const stale of [false, true]) {
+    const view = renderedPanel(undefined), { panel, cx } = view, requests: number[] = [];
+    const snapshot = structuredClone(panel.data);
+    panel.history = Array.from({ length: 200 }, (_, index) => ({ hash: String(index) }));
+    panel.collapsed.graph = true;
+    panel.repo = { read: async (limit: number) => { requests.push(limit); if (stale) panel.chosen.cwd = "/other"; return { ...snapshot, graph: JSON.stringify([...panel.history, { hash: "head" }]) }; } };
+    panel.revealCurrent(cx); await view.drain();
+    expect(requests).toEqual([400]);
+    expect(view.scrolls).toEqual(stale ? [] : [[200, "center"]]);
+    if (!stale) { expect(panel.selected).toBe("head"); expect(panel.collapsed.graph).toBe(false); }
+    expect(panel.loading).toBe(false);
+  }
+});
+
+test("Graph commits expand inline, open historical diffs, and switch list/tree without Git mutations", async () => {
+  const view = renderedPanel(undefined), { panel, cx } = view;
+  const file = { path: "src/app.js", status: "M" };
+  let reads = 0;
+  panel.repo = { showCommit: async () => { reads++; return { files: [file] }; } };
+  panel.toggleCommit({ hash: "head" }, cx); await view.drain();
+  expect(panel.expanded.head.files).toEqual([file]); expect(panel.dialog).toBeUndefined();
+  const graph = view.measure().find(node => node.kind === "graph").attrs.props[0];
+  graph.onFile(file, "head", cx);
+  expect(view.diffs[0].props).toMatchObject({ file, group: "history", hash: "head" });
+  for (const path of ["src", "toString", "__proto__"]) {
+    graph.onToggleDirectory("head", path, cx); expect(panel.directories.head[path]).toBe(true);
+    graph.onToggleDirectory("head", path, cx); expect(panel.directories.head[path]).toBe(false);
+  }
+  panel.graphViewMenu(cx); panel.dialog.items[1].run(cx);
+  expect(panel.fileView).toBe("tree"); expect(view.values.get("source-control.graph-file-view")).toBe("tree");
+  expect(panel.expanded.head.files).toEqual([file]); expect(reads).toBe(1);
+  panel.toggleCommit({ hash: "head" }, cx); expect(panel.expanded.head).toBeUndefined();
 });
 
 async function fixture(body: (f: any) => Promise<void>) {

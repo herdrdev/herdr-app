@@ -859,6 +859,7 @@ export default class Scenario extends Real {
     this.context = this.key();
   }
 }
+
 "#).unwrap();
     for platform in ["windows", "macos"] {
         let calls = Rc::new(RefCell::new(Calls::default()));
@@ -917,5 +918,113 @@ export default class Scenario extends Real {
             assert!(calls.borrow().unexpected.is_empty(), "{:?}", calls.borrow().unexpected);
             window.update(&mut visual, |_, window, _| window.remove_window()).unwrap();
         }
+    }
+}
+
+#[gpui::test]
+fn source_control_graph_reveals_and_expands_history(cx: &mut TestAppContext) {
+    use gpui::{IntoElement, Modifiers, MouseButton, ParentElement, Styled, VisualTestContext, point, px};
+    use gpui_shell::{ScriptView, ShellRoot};
+    use std::ops::Deref;
+
+    struct Mounted(gpui::Entity<ShellRoot>);
+    impl gpui::Render for Mounted {
+        fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+            gpui::div().w(px(368.)).h(px(700.)).child(self.0.clone())
+        }
+    }
+    fn draw(cx: &mut VisualTestContext) {
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.run_until_parked();
+    }
+    fn click(cx: &mut VisualTestContext, x: f32, y: f32) {
+        cx.simulate_click(point(px(x), px(y)), Modifiers::default());
+        draw(cx); draw(cx);
+    }
+
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    std::fs::write(staged.0.join("main.js"), r#"
+import Real from './mods/source-control/main.js';
+import { setShared } from 'herdr';
+export default class Scenario extends Real {
+  refresh() {}
+  init(props, cx) {
+    super.init(props, cx);
+    this.history = Array.from({ length: 100 }, (_, index) => ({ graph: '* ', hash: index.toString(16).padStart(40, '0'),
+      refs: '', subject: `Commit ${index}`, author: 'Fixture', date: '2026-01-01', height: 22 }));
+    const head = this.history[50].hash;
+    this.data = { root: '/fixture/project', head, branch: { name: 'main', upstream: 'origin/main', upstreamRef: 'refs/remotes/origin/main', ahead: 0, behind: 0 },
+      groups: { staged: [], changes: [], conflicts: [] }, remotes: ['origin', 'backup'], graphIncludesHead: true,
+      graphRefs: ['refs/heads/main', 'refs/remotes/origin/main'], baseRef: null,
+      refs: [{ ref: 'refs/heads/main', name: 'main', type: 'branch', hash: head },
+        { ref: 'refs/remotes/origin/main', name: 'origin/main', type: 'remote', hash: head },
+        { ref: 'refs/remotes/backup/main', name: 'backup/main', type: 'remote', hash: head }] };
+    this.context = this.key();
+    this.repo = { showCommit: async hash => {
+      setShared('test.graph-request', hash);
+      return { files: [{ path: 'src/lib/foo.rs', status: 'M' }, { path: 'src/lib/bar.rs', status: 'A' }, { path: 'README.md', status: 'M' }] };
+    } };
+  }
+  openDiff(file, group, cx, hash) { setShared('test.graph-file', { file: file.path, group, hash }); }
+  render(cx) {
+    const result = super.render(cx);
+    setShared('test.graph-state', { selected: this.selected || null, expanded: Object.keys(this.expanded), directories: this.directories, fileView: this.fileView });
+    return result;
+  }
+}
+"#).unwrap();
+    let head = format!("{:040x}", 50);
+    for platform in ["windows", "macos"] {
+        let calls = Rc::new(RefCell::new(Calls::default()));
+        calls.borrow_mut().shared.insert("source-control.upper-height".into(), json!(200));
+        let shared = |key: &str| calls.borrow().shared.get(key).cloned().unwrap_or(Value::Null);
+        let mut values = fixture(true, props(), updates("current", "current"));
+        values.insert("window".into(), json!({"platform":platform}));
+        gpui_shell::policy::set_default(Policy::new()
+            .with_capabilities(Capabilities::new().read_roots([staged.0.clone()]))
+            .with_host_module(module(values, calls.clone())).unwrap());
+        let runtime = ShellRuntime::new_isolated().unwrap();
+        let window = cx.add_window(|window, cx| Mounted(runtime.try_load(&staged.0, window, cx).unwrap()));
+        let mut visual = VisualTestContext::from_window(*window.deref(), cx);
+        draw(&mut visual); draw(&mut visual);
+        let view = window.update(&mut visual, |root, _, cx| root.0.read(cx).content().clone().downcast::<ScriptView>().unwrap()).unwrap();
+        let tree = |visual: &mut VisualTestContext| visual.update(|_, cx| view.read(cx).snapshot().unwrap().debug_tree());
+        let initial = tree(&mut visual);
+        for id in ["graph-filter", "graph-current", "fetch", "graph-pull", "push", "graph-refresh", "graph-more-actions"] {
+            assert!(initial.contains(&format!("\"{id}\"")), "{platform}: missing {id}: {initial}");
+        }
+        assert_eq!(shared("test.graph-state")["selected"], Value::Null);
+
+        // The 36px title, 200px upper panel, and borders put the Graph toolbar
+        // at y=252. Its six 24px icon buttons have 1px gaps and an 8px inset.
+        click(&mut visual, 222., 252.);
+        assert_eq!(shared("test.graph-state")["selected"], json!(head), "{platform}: native target button must reveal HEAD");
+        // HEAD starts outside the viewport. Clicking its center after reveal
+        // proves the real virtual-list handle moved it, rather than only
+        // changing the selected hash. This row also paints main + cloud(2).
+        click(&mut visual, 100., 483.);
+        assert_eq!(shared("test.graph-request"), json!(head), "{platform}: HEAD must be centered and clickable");
+        assert_eq!(shared("test.graph-state")["expanded"], json!([head]));
+        click(&mut visual, 100., 505.);
+        assert_eq!(shared("test.graph-file"), json!({"file":"src/lib/foo.rs","group":"history","hash":head}), "{platform}: expanded file must retain its commit");
+
+        click(&mut visual, 347., 252.);
+        let menu = tree(&mut visual);
+        assert!(menu.contains("View as List") && menu.contains("View as Tree"), "{platform}: {menu}");
+        click(&mut visual, 100., 97.);
+        assert_eq!(shared("source-control.graph-file-view"), json!("tree"), "{platform}: native More menu must persist tree mode");
+        click(&mut visual, 222., 252.);
+        click(&mut visual, 100., 505.);
+        assert_eq!(shared("test.graph-state")["directories"][&head]["src"], json!(true), "{platform}: native folder row must collapse");
+        click(&mut visual, 100., 505.);
+        assert_eq!(shared("test.graph-state")["directories"][&head]["src"], json!(false), "{platform}: native folder row must reopen");
+        click(&mut visual, 100., 549.);
+        assert_eq!(shared("test.graph-file"), json!({"file":"src/lib/bar.rs","group":"history","hash":head}), "{platform}: tree file must open the same historical commit");
+        visual.simulate_mouse_down(point(px(100.), px(483.)), MouseButton::Right, Modifiers::default());
+        draw(&mut visual);
+        assert!(tree(&mut visual).contains("Show Commit Changes"), "{platform}: secondary click must retain the commit menu");
+        assert!(calls.borrow().unexpected.is_empty(), "{:?}", calls.borrow().unexpected);
+        window.update(&mut visual, |_, window, _| window.remove_window()).unwrap();
     }
 }

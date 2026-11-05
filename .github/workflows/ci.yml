@@ -135,7 +135,7 @@ jobs:
           ~/.bun/bin/bun scripts/docs.ts check
       - name: Check Source Control
         if: matrix.platform == 'linux-x86_64'
-        run: ~/.bun/bin/bun test scripts/source-control.test.ts
+        run: ~/.bun/bin/bun test scripts/source-control*.test.ts
 
   # Keep the required check name stable while requiring every platform.
   test:

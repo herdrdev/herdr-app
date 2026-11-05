@@ -194,6 +194,13 @@ local only. See `mods/source-control/README.md` for controls and limits.
 Drag the divider above Graph to resize the changes and history areas; the
 upper height is saved in shared `"source-control.upper-height"` and restored
 on restart. The native divider works on Windows and macOS.
+Graph has Auto/All/reference filters, current-commit navigation, Fetch All,
+Pull, Push/Publish, and refresh. Local target and remote cloud badges show
+their commit positions. Expand a commit to inspect its files; Graph's More
+Actions switches list/tree view. Filters are saved per repository in shared
+`"source-control.graph-filters"`; the file view is saved in
+`"source-control.graph-file-view"`. Graph refresh reads local refs; Fetch
+updates the known remote positions.
 Existing panel choices are preserved; enable Source Control from `app.welcome`.
 
 **Herdr's own layouts and mods are read-only.** They are replaced whole

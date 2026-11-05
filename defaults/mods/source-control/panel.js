@@ -1,8 +1,8 @@
-import { View, div } from "gpui-kit";
-import { h_flex, v_flex, v_resizable, resizable_panel, InputState, Input, TextareaState, Textarea } from "gpui-base";
+import { View, div, svg } from "gpui-kit";
+import { h_flex, v_flex, v_resizable, resizable_panel, VirtualListScrollHandle, InputState, Input, TextareaState, Textarea } from "gpui-base";
 import { spaces, panes, focused, theme, settings, props, openOverlay, pickFolder, shared, setShared } from "herdr";
 import { createGit } from "./git.js";
-import { parseGraph, renderGraph } from "./graph.js";
+import { parseGraph, renderGraph, graphIndex } from "./graph.js";
 import { DiffPanel } from "./diff-ui.js";
 import { MergePanel } from "./merge-ui.js";
 
@@ -18,6 +18,9 @@ export default class SourceControl extends View {
     if (p.mode === "diff") { this.diffPanel = new DiffPanel(p, cx); return; }
     if (p.mode === "merge") { this.mergePanel = new MergePanel(p, cx); return; }
     this.limit = 200; this.history = []; this.collapsed = {}; this.message = "";
+    this.expanded = {}; this.directories = {};
+    this.fileView = shared("source-control.graph-file-view") === "tree" ? "tree" : "list";
+    this.graphScroll = VirtualListScrollHandle.new();
     this.input = TextareaState.new({ placeholder: "Message (Ctrl+Enter to commit)", rows: 2 });
     this.input.set_auto_grow(2, 4);
     this.input.on("change", (_e, cx) => { this.message = this.input.value(); cx.notify(); });
@@ -30,7 +33,7 @@ export default class SourceControl extends View {
   }
 
   location() { return this.chosen || activeLocation(); }
-  async close(cx) { if (this.diffPanel?.close) await this.diffPanel.close(cx); if (this.mergePanel?.close) await this.mergePanel.close(cx); }
+  async close(cx) { if (this.diffPanel?.close) await this.diffPanel.close(cx); if (this.mergePanel?.close) await this.mergePanel.close(cx); this.graphScroll?.release(); }
   key() { return JSON.stringify(this.location()); }
   stamp() { return JSON.stringify({ head: this.data?.head, branch: this.data?.branch, operation: this.data?.operation }); }
   dialogCurrent(dialog) { return dialog.context === this.key() && dialog.stamp === this.stamp(); }
@@ -42,6 +45,8 @@ export default class SourceControl extends View {
     if (context !== this.context) {
       this.context = context; this.data = null; this.repo = null; this.history = []; this.dialog = null;
       this.note = null; this.error = null; this.limit = 200; this.selected = null;
+      this.expanded = {}; this.directories = {};
+      this.graphFilter = { mode: "auto", refs: [] }; this.filterStorageKey = null;
       this.message = ""; this.input.set_value("");
     }
     if (!cwd) return;
@@ -49,8 +54,16 @@ export default class SourceControl extends View {
     const repo = createGit(cwd, on);
     cx.spawn(async cx => {
       try {
-        const data = await repo.read(this.limit);
+        let data = await repo.read(this.limit, this.graphFilter);
         if (context !== this.key()) return;
+        const storageKey = JSON.stringify({ cwd: data.root, on });
+        if (storageKey !== this.filterStorageKey) {
+          const filters = shared("source-control.graph-filters"), stored = filters?.[storageKey] || filters?.[context];
+          this.filterStorageKey = storageKey;
+          this.graphFilter = stored && ["auto", "all", "refs"].includes(stored.mode) && Array.isArray(stored.refs) ? stored : { mode: "auto", refs: [] };
+          if (this.graphFilter.mode !== "auto") data = await repo.read(this.limit, this.graphFilter);
+          if (context !== this.key()) return;
+        }
         this.data = data; this.repo = repo; this.history = parseGraph(data.graph); this.error = null;
       } catch (error) { if (context === this.key()) this.error = String(error); }
       finally { this.loading = false; cx.notify(); }
@@ -148,6 +161,7 @@ export default class SourceControl extends View {
     if (!this.ready()) return;
     if (action === "publish") {
       if (!this.data.branch) return;
+      if (!this.data.remotes.length) { this.note = "Add a remote before publishing this branch."; cx.notify(); return; }
       const branch = { ...this.data.branch };
       const publish = (remote, cx) => this.perform("Publish Branch", "publish", { remote, branch }, cx);
       if (this.data.remotes.length === 1) publish(this.data.remotes[0], cx);
@@ -211,6 +225,79 @@ export default class SourceControl extends View {
       { label: "Delete Branch…", run: cx => this.confirm("Delete Branch", `${ref.name}\nUnmerged branches will not be deleted.`, (_v, cx) => this.perform("Delete Branch", "branchDelete", { name: ref.name }, cx), cx) },
     );
     this.choose(ref.name, items, cx);
+  }
+
+  setGraphFilter(filter, cx) {
+    this.graphFilter = filter; this.limit = 200; this.expanded = {}; this.directories = {};
+    const storageKey = JSON.stringify({ cwd: this.data.root, on: this.location().on });
+    setShared("source-control.graph-filters", { ...(shared("source-control.graph-filters") || {}), [storageKey]: filter });
+    this.graphScroll.scroll_to_item(0); this.refresh(cx); cx.notify();
+  }
+
+  graphFilterMenu(cx) {
+    if (!this.ready()) return;
+    const selected = new Set((this.graphFilter?.mode === "refs" ? this.graphFilter.refs : this.data.graphRefs || []).filter(ref => this.data.refs.some(item => item.ref === ref)));
+    const items = [
+      { label: "Auto", hint: "Current / remote / base", run: cx => this.setGraphFilter({ mode: "auto", refs: [] }, cx) },
+      { label: "All", hint: "All branches and tags", run: cx => this.setGraphFilter({ mode: "all", refs: [] }, cx) },
+      { label: "Apply Selected References", run: cx => this.setGraphFilter({ mode: "refs", refs: [...selected] }, cx) },
+      ...(this.data.refs || []).filter(ref => ref.hash && !ref.symbolicTarget).map(ref => {
+        const item = { label: ref.name, hint: ref.type, checked: selected.has(ref.ref), keepOpen: true,
+          run: cx => { item.checked = !item.checked; if (item.checked) selected.add(ref.ref); else selected.delete(ref.ref); cx.notify(); } };
+        return item;
+      }),
+    ];
+    this.choose("Graph References", items, cx);
+  }
+
+  graphViewMenu(cx) {
+    this.choose("Graph", ["list", "tree"].map(mode => ({
+      label: mode === "list" ? "View as List" : "View as Tree", checked: this.fileView === mode,
+      run: cx => { this.fileView = mode; setShared("source-control.graph-file-view", mode); cx.notify(); },
+    })), cx);
+  }
+
+  revealCurrent(cx) {
+    if (!this.ready() || !this.data.head || !this.data.graphIncludesHead) return;
+    const context = this.context, head = this.data.head, repo = this.repo;
+    const reveal = cx => {
+      const index = graphIndex(this.history, head, { expanded: this.expanded, fileView: this.fileView, directories: this.directories });
+      if (index < 0) return false;
+      this.collapsed.graph = false; this.selected = head;
+      this.graphScroll.scroll_to_item(index, "center"); this.handle.focus(); cx.notify(); return true;
+    };
+    if (reveal(cx)) return;
+    this.loading = true;
+    cx.spawn(async cx => {
+      try {
+        while (context === this.key()) {
+          this.limit += 200;
+          const data = await repo.read(this.limit, this.graphFilter);
+          if (context !== this.key()) return;
+          if (data.head !== head) { this.note = "The current commit changed. Refresh and try again."; return; }
+          this.data = data; this.history = parseGraph(data.graph);
+          if (reveal(cx) || this.history.filter(row => row.hash).length < this.limit) return;
+        }
+      } catch (error) { if (context === this.key()) this.note = String(error); }
+      finally { this.loading = false; cx.notify(); }
+    });
+    cx.notify();
+  }
+
+  toggleCommit(row, cx) {
+    if (!this.ready()) return;
+    this.selected = row.hash;
+    if (this.expanded[row.hash]) { delete this.expanded[row.hash]; cx.notify(); return; }
+    const context = this.context, repo = this.repo, entry = { loading: true, files: [] };
+    this.expanded[row.hash] = entry;
+    cx.spawn(async cx => {
+      try {
+        const detail = await repo.showCommit(row.hash);
+        if (context === this.key() && this.expanded[row.hash] === entry) entry.files = detail.files;
+      } catch (error) { if (context === this.key() && this.expanded[row.hash] === entry) entry.error = String(error); }
+      finally { entry.loading = false; cx.notify(); }
+    });
+    cx.notify();
   }
 
   graphMenu(row, cx) {
@@ -385,8 +472,9 @@ export default class SourceControl extends View {
       .when(Boolean(d.description), e => e.child(div().id("dialog-description").max_h(150).flex_none().overflow_y_scrollbar().text_size(11).text_color(t.muted).child(d.description)))
       .when(Boolean(d.items), e => e.child(v_flex().id("source-menu").flex_1().min_h(0).overflow_y_scrollbar().gap(2).children(d.items.map((item, index) =>
         h_flex().id(`menu-${index}`).min_h(32).flex_none().px(8).py(5).gap(8).items_center().rounded(4).cursor_pointer().hover(s => s.bg(t.hover))
-          .on_click((_e, cx) => { if (this.busy || this.loading) return; if (!this.dialogCurrent(d)) { this.dialog = null; this.note = "The repository state changed. Select the action again."; cx.notify(); return; } this.dialog = null; item.run(cx); cx.notify(); })
-          .child(div().flex_1().min_w(0).child(item.label)).when(!!item.hint, e => e.child(div().max_w(75).truncate().text_size(10).text_color(t.dim).child(item.hint)))))))
+          .on_click((_e, cx) => { if (this.busy || this.loading) return; if (!this.dialogCurrent(d)) { this.dialog = null; this.note = "The repository state changed. Select the action again."; cx.notify(); return; } if (!item.keepOpen) this.dialog = null; item.run(cx); cx.notify(); })
+          .when(item.checked !== undefined, e => e.child(div().w(14).text_color(t.ansi4).child(item.checked ? "✓" : "")))
+          .child(div().flex_1().min_w(0).child(item.label)).when(!!item.hint, e => e.child(div().max_w(130).truncate().text_size(10).text_color(t.dim).child(item.hint)))))))
       .when(Boolean(d.fields), e => e.children(d.fields.map((field, index) => v_flex().gap(4).flex_none()
         .child(div().text_size(11).text_color(t.muted).child(field.label))
         .child(div().id(`form-${index}`).h(32).px(8).rounded(4).border_1().border_color(t.input).bg(t.surface).child(Input.new(field.input).h_full())))))
@@ -425,14 +513,26 @@ export default class SourceControl extends View {
       .child(v_flex().id("file-groups").flex_1().min_h(64).overflow_y_scrollbar().pb(8)
         .child(this.group("conflicts", "Merge Changes", cx)).child(this.group("staged", "Staged Changes", cx)).child(this.group("changes", "Changes", cx)))
       .when(Boolean(this.note), e => e.child(h_flex().px(10).py(4).gap(4).flex_none().items_start().child(div().id("operation-output").flex_1().min_w(0).max_h(100).overflow_y_scrollbar().text_size(11).text_color(t.muted).child(this.note)).child(this.button("dismiss-note", "×", "Dismiss", cx => { this.note = null; cx.notify(); }))));
+    const filter = this.graphFilter || { mode: "auto", refs: [] }, graphRefs = data?.graphRefs || [];
+    const filterLabel = filter.mode === "auto" ? "Auto" : filter.mode === "all" ? "All" : graphRefs.length === 1 ? data?.refs.find(ref => ref.ref === graphRefs[0])?.name || "1 ref" : `${graphRefs.length} refs`;
+    const graphCurrent = this.ready() && Boolean(data?.graphIncludesHead), upstream = Boolean(branch?.upstream && !branch.gone);
+    const icon = name => svg(`mods/source-control/icons/${name}.svg`).size(16);
     const graph = v_flex().size_full().min_h(0)
-      .child(h_flex().h(30).flex_none().px(10).gap(6).items_center().border_t(1).border_color(t.border)
+      .child(h_flex().h(30).flex_none().px(8).gap(1).items_center().border_t(1).border_color(t.border)
         .child(div().id("graph-heading").flex_1().min_w(0).cursor_pointer().on_click((_e, cx) => { this.collapsed.graph = !this.collapsed.graph; cx.notify(); }).child(`${this.collapsed.graph ? "›" : "⌄"} Graph`))
-        .child(div().text_size(10).text_color(t.dim).child(String(this.history.filter(r => r.hash).length)))
-        .child(this.button("fetch", "↓", "Fetch", cx => this.network("fetch", cx), this.ready() && !!data?.remotes.length))
-        .child(this.button("push", "↑", "Push", cx => this.network("push", cx), this.ready() && !!branch?.upstream && !data?.operation))
-        .child(this.button("graph-refresh", "↻", "Refresh Graph", cx => this.refresh(cx), !this.busy && !this.loading)))
-      .when(!this.collapsed.graph, e => e.child(renderGraph(this.history, t, { selected: this.selected, onSelect: (row, cx) => this.showCommit(row, cx), onContext: (row, cx) => this.graphMenu(row, cx) }))
+        .child(this.button("graph-filter", h_flex().max_w(90).gap(3).items_center().child(icon("branch")).child(div().min_w(0).truncate().text_size(11).child(filterLabel)), filter.mode === "all" ? "All Branches and Tags" : graphRefs.join("\n") || "Select Graph References", cx => this.graphFilterMenu(cx), this.ready()))
+        .child(this.button("graph-current", icon("target"), "Go to Current History Item", cx => this.revealCurrent(cx), graphCurrent && !!data?.head))
+        .child(this.button("fetch", icon("fetch"), "Fetch From All Remotes", cx => this.network("fetch", cx, { all: true }), this.ready()))
+        .child(this.button("graph-pull", icon("pull"), "Pull", cx => this.network("pull", cx), graphCurrent && upstream && !data?.operation))
+        .child(this.button("push", icon(upstream ? "push" : "publish"), upstream ? "Push" : "Publish Branch…", cx => this.network(upstream ? "push" : "publish", cx), this.ready() && !!branch && !!data?.head && (!upstream || graphCurrent) && !data?.operation))
+        .child(this.button("graph-refresh", icon("refresh"), "Refresh", cx => { this.graphScroll.scroll_to_item(0); this.refresh(cx); }, !this.busy && !this.loading))
+        .child(this.button("graph-more-actions", icon("more"), "More Actions…", cx => this.graphViewMenu(cx), !this.busy && !this.loading)))
+      .when(!this.collapsed.graph, e => e.child(renderGraph(this.history, t, {
+        data, scroll: this.graphScroll, selected: this.selected, expanded: this.expanded, fileView: this.fileView, directories: this.directories,
+        onSelect: (row, cx) => this.toggleCommit(row, cx), onContext: (row, cx) => this.graphMenu(row, cx),
+        onFile: (file, hash, cx) => this.openDiff(file, "history", cx, hash),
+        onToggleDirectory: (hash, path, cx) => { const dirs = this.directories[hash] ||= Object.create(null); dirs[path] = dirs[path] !== true; cx.notify(); },
+      }))
         .when(!this.history.length, e => e.child(div().px(12).py(8).text_color(t.dim).child(this.loading ? "Loading graph…" : "No commits")))
         .when(this.history.filter(r => r.hash).length >= this.limit, e => e.child(this.button("graph-more", "Load more…", "Load older commits", cx => { this.limit += 200; this.refresh(cx); }, !this.busy && !this.loading))));
     const savedHeight = shared("source-control.upper-height"), zoom = settings().zoom;

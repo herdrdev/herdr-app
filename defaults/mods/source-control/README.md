@@ -30,9 +30,27 @@ upper height so Graph and its divider remain reachable.
 
 ## History and repository tools
 
-The graph shows up to 200 commits initially; **Load more** extends it. Click a
-commit to inspect its metadata and changed files. Its context menu offers
-branch and tag creation, detached checkout, cherry-pick, revert, and reset.
+The Graph toolbar follows VS Code's order: reference filter, **Go to Current
+History Item**, **Fetch From All Remotes**, **Pull**, **Push** (or **Publish
+Branch**), **Refresh**, and **More Actions**.
+
+- **Auto** shows the current branch, its upstream, and its base branch when
+  known. Choose **All**, or select several branches/tags and apply the selection.
+  The filter is remembered per repository. Filtering never checks out a branch.
+- The target badge marks the current local branch; the cloud badge marks remote
+  branch tips. Both appear when they point to the same commit and separate when
+  local and remote history diverge. Hover a badge to see every reference it
+  represents. Remote positions reflect the last fetched/pushed tracking refs;
+  **Refresh** alone does not contact a server.
+- Click a commit to expand its changed files, then a file to open its historical
+  diff. **More Actions → View as List / View as Tree** changes how those files
+  are shown; folders can be collapsed in tree view. The view choice is saved.
+- The graph loads 200 commits initially; **Load more** extends it. **Go to
+  Current History Item** centers and selects the current commit, loading more
+  history if needed. It is disabled when the current reference is filtered out.
+
+A commit's context menu provides metadata and changed files, branch and tag
+creation, detached checkout, cherry-pick, revert, and reset.
 
 The branch picker and **More Actions** menu provide fetch, pull, push, sync,
 branch management, merge, rebase, stash, tags, worktrees, repository selection,
@@ -78,3 +96,5 @@ at revision `e934a7a384ac95319b46ceb4d9fa78b191625d9d`:
 - [Git commands](https://github.com/microsoft/vscode/blob/e934a7a384ac95319b46ceb4d9fa78b191625d9d/extensions/git/src/git.ts)
 - [Repository operations](https://github.com/microsoft/vscode/blob/e934a7a384ac95319b46ceb4d9fa78b191625d9d/extensions/git/src/repository.ts)
 - [Line staging behavior](https://github.com/microsoft/vscode/blob/e934a7a384ac95319b46ceb4d9fa78b191625d9d/extensions/git/src/staging.ts)
+- [Graph toolbar, reference filters, and badges](https://github.com/microsoft/vscode/blob/e934a7a384ac95319b46ceb4d9fa78b191625d9d/src/vs/workbench/contrib/scm/browser/scmHistoryViewPane.ts)
+- [Graph Git actions](https://github.com/microsoft/vscode/blob/e934a7a384ac95319b46ceb4d9fa78b191625d9d/extensions/git/package.json)

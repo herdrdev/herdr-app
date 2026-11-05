@@ -82,32 +82,65 @@ export function createGit(cwd, on = null, runner = exec, reader = readTextFile) 
     return states.find(Boolean) || null;
   }
 
-  async function read(limit = 200) {
+  async function read(limit = 200, graphOptions = {}) {
     root = (await output(["rev-parse", "--show-toplevel"])).trim();
     const [status, headResult, nameResult, refText, remoteText, stashText, worktreeText, currentOperation] = await Promise.all([
       output(["status", "--porcelain=v1", "-z", "--untracked-files=all"]),
       command(["rev-parse", "--verify", "--quiet", "HEAD"], false, [0, 1]),
       command(["symbolic-ref", "--quiet", "HEAD"], false, [0, 1]),
-      output(["for-each-ref", "--format=%(refname)%00%(upstream:remotename)%00%(upstream:remoteref)%00%(upstream:track)%00%(objectname)%00%(upstream)", "refs/heads", "refs/remotes", "refs/tags"]),
+      output(["for-each-ref", "--format=%(refname)%00%(upstream:remotename)%00%(upstream:remoteref)%00%(upstream:track)%00%(objectname)%00%(upstream)%00%(objecttype)%00%(*objectname)%00%(*objecttype)%00%(symref)", "refs/heads", "refs/remotes", "refs/tags"]),
       output(["remote"]), output(["stash", "list", "--encoding=UTF-8", "--format=%gd%x00%H%x00%gs"]),
       output(["worktree", "list", "--porcelain", "-z"]), operation(),
     ]);
     const head = headResult.code === 0 ? headResult.stdout.trim() : null;
     const name = nameResult.code === 0 ? nameResult.stdout.trim().replace(/^refs\/heads\//, "") : null;
     let branch = name ? { name, upstream: "", remote: "", target: "", ahead: 0, behind: 0, gone: false } : null;
-    const refs = refText.split(/\r?\n/).filter(Boolean).map(line => {
-      const [ref, remote, target, track, hash, upstreamRef] = line.split("\0");
+    const refs = await Promise.all(refText.split(/\r?\n/).filter(Boolean).map(async line => {
+      const [ref, remote, target, track, objectHash, upstreamRef, objectType, peeledHash, peeledType, symbolicTarget] = line.split("\0");
       if (branch && ref === `refs/heads/${name}`) branch = { name, upstream: upstreamRef.replace(/^refs\/(?:heads|remotes)\//, ""), upstreamRef, remote, target, ahead: Number(/ahead (\d+)/.exec(track)?.[1] || 0), behind: Number(/behind (\d+)/.exec(track)?.[1] || 0), gone: track.includes("gone") };
-      return { ref, name: ref.replace(/^refs\/(?:heads|remotes|tags)\//, ""), hash, type: ref.startsWith("refs/heads/") ? "branch" : ref.startsWith("refs/remotes/") ? "remote" : "tag" };
-    });
+      let hash = objectType === "commit" ? objectHash : peeledType === "commit" ? peeledHash : null;
+      // A tag can itself name another annotated tag. Resolve that uncommon case to a commit.
+      if (objectType === "tag" && peeledType === "tag") {
+        const peeled = await command(["rev-parse", "--verify", "--quiet", "--end-of-options", `${ref}^{commit}`], false, [0, 1]);
+        hash = peeled.code === 0 ? peeled.stdout.trim() : null;
+      }
+      return { ref, name: ref.replace(/^refs\/(?:heads|remotes|tags)\//, ""), hash, objectHash, type: ref.startsWith("refs/heads/") ? "branch" : ref.startsWith("refs/remotes/") ? "remote" : "tag", ...(symbolicTarget ? { symbolicTarget } : {}) };
+    }));
     if (branch) branch.remoteHead = refs.find(ref => ref.ref === branch.upstreamRef)?.hash || null;
+    const remotes = remoteText.split(/\r?\n/).filter(Boolean), byRef = new Map(refs.map(ref => [ref.ref, ref]));
+    const canonical = value => {
+      const seen = new Set();
+      let ref = byRef.get(value);
+      while (ref?.symbolicTarget && !seen.has(ref.ref)) { seen.add(ref.ref); ref = byRef.get(ref.symbolicTarget); }
+      return ref?.hash && !ref.symbolicTarget ? ref : null;
+    };
+    let baseRef = null;
+    if (branch) {
+      // Read VS Code's branch-base preference without writing config or contacting a remote.
+      const configured = (await command(["config", "--get", `branch.${branch.name}.vscode-merge-base`], false, [0, 1])).stdout.trim();
+      const candidates = configured.startsWith("refs/") ? [configured] : [`refs/remotes/${configured}`, `refs/heads/${configured}`];
+      const remoteOrder = [...new Set([branch.remote, "origin", ...remotes].filter(remote => remotes.includes(remote)))];
+      candidates.push(...remoteOrder.map(remote => `refs/remotes/${remote}/HEAD`));
+      candidates.push(...remoteOrder.flatMap(remote => ["main", "master"].map(name => `refs/remotes/${remote}/${name}`)), "refs/heads/main", "refs/heads/master");
+      baseRef = candidates.map(canonical).find(ref => ref && ref.type !== "tag")?.ref || null;
+    }
     const worktrees = []; let worktree;
     for (const entry of worktreeText.split("\0")) {
       if (entry.startsWith("worktree ")) { worktree = { path: entry.slice(9), branch: "" }; worktrees.push(worktree); }
       else if (entry.startsWith("branch ") && worktree) worktree.branch = entry.slice(7).replace(/^refs\/heads\//, "");
     }
-    const graph = head || refs.length ? await output(["log", "--all", "--graph", "--topo-order", "--no-color", "--no-show-signature", "--encoding=UTF-8", "--decorate=short", "--date=short", `-n${Math.max(1, Math.floor(limit))}`, "--format=%x1f%H%x1f%D%x1f%s%x1f%an%x1f%ad"]) : "";
-    snapshot = { root, head, branch, groups: parseStatus(status), refs, remotes: remoteText.split(/\r?\n/).filter(Boolean), stashes: stashText.split(/\r?\n/).filter(Boolean).map(line => { const [ref, hash, subject] = line.split("\0"); return { ref, hash, subject }; }), worktrees, operation: currentOperation, graph };
+    const mode = graphOptions?.mode || "auto", graphRefs = [];
+    const include = value => { const ref = canonical(value); if (ref && !graphRefs.includes(ref.ref)) graphRefs.push(ref.ref); };
+    if (mode === "all") refs.forEach(ref => include(ref.ref));
+    else if (mode === "refs") { for (const ref of Array.isArray(graphOptions.refs) ? graphOptions.refs : []) include(ref); }
+    else if (mode === "auto") { if (branch) include(`refs/heads/${branch.name}`); include(branch?.upstreamRef); include(baseRef); }
+    else throw new Error("Unknown history filter.");
+    const graphIncludesHead = Boolean(head && (mode !== "refs" || graphOptions.includeHead || (branch && graphRefs.includes(`refs/heads/${branch.name}`))));
+    if (graphIncludesHead && branch) include(`refs/heads/${branch.name}`);
+    // Use the captured commit OIDs so a deleted/moved selection cannot become an option or broaden the query.
+    const revisions = [...new Set([...graphRefs.map(ref => byRef.get(ref).hash), ...(graphIncludesHead ? [head] : [])])];
+    const graph = revisions.length || mode === "all" ? await output(["log", ...(mode === "all" ? ["--all"] : []), "--graph", "--topo-order", "--no-color", "--no-show-signature", "--encoding=UTF-8", "--decorate=short", "--date=short", `-n${Math.max(1, Math.floor(limit))}`, "--format=%x1f%H%x1f%D%x1f%s%x1f%an%x1f%ad", ...revisions, "--"]) : "";
+    snapshot = { root, head, branch, groups: parseStatus(status), refs, remotes, stashes: stashText.split(/\r?\n/).filter(Boolean).map(line => { const [ref, hash, subject] = line.split("\0"); return { ref, hash, subject }; }), worktrees, operation: currentOperation, graph, graphRefs, graphIncludesHead, baseRef };
     return snapshot;
   }
 
