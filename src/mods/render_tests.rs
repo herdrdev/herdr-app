@@ -387,6 +387,22 @@ fn long_theme_names_stay_inside_their_card(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn tabs_keep_a_readable_minimum_width_with_the_plus_beside_them(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let tree = describe(cx, &staged, "mods/tabs", true, props(), updates("current", "current"), None).unwrap();
+    let lines: Vec<&str> = tree.lines().collect();
+    let indent = |line: &str| line.len() - line.trim_start().len();
+    let scroll = lines.iter().find(|l| l.contains(":id[Str(\"tab-scroll\")]")).unwrap();
+    let plus = lines.iter().find(|l| l.contains(":id[Str(\"tab-new\")]")).unwrap();
+    let files = lines.iter().find(|l| l.contains(":id[Str(\"panel-files\")]")).unwrap();
+    assert_eq!(indent(scroll), indent(plus), "the + stays beside the tabs: {tree}");
+    assert!(indent(plus) > indent(files), "the + is in the tabs' growing group, not the right edge: {tree}");
+    let tab = lines.iter().find(|l| l.contains(":id[Str(\"tab-tab1\")]")).unwrap();
+    assert!(tab.contains(".min_w[Number(64.0)]"), "a one-character tab keeps a readable width: {tab}");
+}
+
+#[gpui::test]
 fn check_materializes_retained_elements_in_a_rendered_view(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
