@@ -256,37 +256,44 @@ impl Model {
     }
 
     pub fn add_space(&mut self, id: &str, name: &str, folder: &str, ctx: Tab) {
-        let active = Some(ctx.id.clone());
-        self.spaces.push(Space { id: id.to_owned(), name: name.to_owned(), folder: folder.to_owned(), machine: None, tabs: vec![ctx], active });
-        self.recent.retain(|r| r.name != name);
-        self.active = Some(id.to_owned());
-    }
-
-    /// Adds a tab after the space's selected one and selects it (not the space).
-    pub fn add_tab(&mut self, space: &str, ctx: Tab) -> bool {
-        let Some(p) = self.space_mut(space) else { return false };
-        let at = p.active.as_deref().and_then(|a| p.tabs.iter().position(|c| c.id == a)).map_or(p.tabs.len(), |i| i + 1);
-        let id = ctx.id.clone();
-        p.tabs.insert(at, ctx);
-        p.active = Some(id);
-        true
+        self.insert_space(id, name, folder, ctx, true);
     }
 
     /// Adds a space without showing it; with no space shown yet, it is shown.
     pub fn add_space_unshown(&mut self, id: &str, name: &str, folder: &str, ctx: Tab) {
-        let shown = self.active.clone();
-        self.add_space(id, name, folder, ctx);
-        self.active = shown.or(Some(id.to_owned()));
+        self.insert_space(id, name, folder, ctx, false);
     }
 
-    /// Adds a tab after the space's selected one, which stays selected.
-    pub fn add_tab_unselected(&mut self, space: &str, ctx: Tab) -> bool {
-        let keep = self.space(space).and_then(|p| p.active.clone());
-        let added = self.add_tab(space, ctx);
-        if let Some(p) = self.space_mut(space) {
-            p.active = keep;
+    fn insert_space(&mut self, id: &str, name: &str, folder: &str, ctx: Tab, show: bool) {
+        let show = show || self.active_index().is_none();
+        let active = Some(ctx.id.clone());
+        self.spaces.push(Space { id: id.to_owned(), name: name.to_owned(), folder: folder.to_owned(), machine: None, tabs: vec![ctx], active });
+        self.recent.retain(|r| r.name != name);
+        if show {
+            self.active = Some(id.to_owned());
         }
-        added
+    }
+
+    /// Adds a tab after the space's selected one and selects it (not the space).
+    pub fn add_tab(&mut self, space: &str, ctx: Tab) -> bool {
+        self.insert_tab(space, ctx, true)
+    }
+
+    /// Adds a tab at the end of the space, so several keep their order; its selected tab stays.
+    pub fn add_tab_unselected(&mut self, space: &str, ctx: Tab) -> bool {
+        self.insert_tab(space, ctx, false)
+    }
+
+    fn insert_tab(&mut self, space: &str, ctx: Tab, select: bool) -> bool {
+        let Some(p) = self.space_mut(space) else { return false };
+        if !select {
+            p.tabs.push(ctx);
+            return true;
+        }
+        let at = p.active.as_deref().and_then(|a| p.tabs.iter().position(|c| c.id == a)).map_or(p.tabs.len(), |i| i + 1);
+        p.active = Some(ctx.id.clone());
+        p.tabs.insert(at, ctx);
+        true
     }
 
     /// Splits `target` (a pane) with a new terminal pane and focuses it.
@@ -703,9 +710,14 @@ mod tests {
         assert!(m.add_tab_unselected("p2", Tab::new("c4", "", "x4", "t4")));
         assert_eq!(m.active_tab().map(|c| c.id.as_str()), Some("c1"));
         assert_eq!(m.space("p2").unwrap().active.as_deref(), Some("c2"));
+        assert!(m.add_tab_unselected("p1", Tab::new("c5", "", "x5", "t5")));
         let order: Vec<&str> = m.space("p1").unwrap().tabs.iter().map(|c| c.id.as_str()).collect();
-        assert_eq!(order, ["c1", "c3"], "placed after the selected tab, as add_tab does");
-        assert!(!m.add_tab_unselected("nope", Tab::new("c5", "", "x5", "t5")));
+        assert_eq!(order, ["c1", "c3", "c5"], "at the end, in the order they came");
+        assert_eq!(m.active_tab().map(|c| c.id.as_str()), Some("c1"));
+
+        let mut stale = Model { active: Some("gone".into()), ..Model::default() };
+        stale.add_space_unshown("p9", "", "/c", Tab::new("c9", "", "x9", "t9"));
+        assert_eq!(stale.active.as_deref(), Some("p9"), "a stale id shows nothing, so the new space is shown");
     }
 
     #[test]

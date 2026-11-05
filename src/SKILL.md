@@ -30,7 +30,7 @@ To start one the person will look at later without moving them there, pass
 `--focus false`:
 
 ```sh
-herdr-app do space.new --folder ~/code/app/eng-123 --argv '["claude"]' --task "Implement ENG-123" --focus false
+herdr-app do space.new --name eng-123 --folder ~/code/app/eng-123 --argv '["claude"]' --task "Implement ENG-123" --focus false
 ```
 
 Pick an explicit, useful name for every new space and tab; don't rely on

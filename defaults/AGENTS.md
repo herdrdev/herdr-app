@@ -553,9 +553,10 @@ The main ones:
   `tab.select {index | id}`, `tab.next`, `tab.prev`,
   `tab.settle {id?}`, `tab.unsettle {id?}` (index, next and prev
   skip settled tabs).
-  A new space or tab is shown at once; `focus: false` keeps the shown space and
-  the target space's selected tab (with no space shown, the new one is), for an
-  agent that starts work the person looks at later.
+- New spaces and tabs are shown at once. `focus: false` on `space.new` or
+  `tab.new` keeps the shown space and the target space's selected tab (with no
+  space shown, the new space is shown), for work the person looks at later;
+  such tabs go last in their space, in the order made. `focus` is a boolean.
 - Panes: `pane.split {direction: "right" | "down", pane?, argv? | mod?, props?}` (a new
   terminal, or a mod pane), `pane.close {pane?}`,
   `pane.zoom {pane?}`, `pane.focus {pane | terminal}`, `pane.go {direction}`, `pane.swap {direction}`.

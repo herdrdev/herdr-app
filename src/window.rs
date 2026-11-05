@@ -2399,7 +2399,7 @@ impl AppWindow {
         })
     }
 
-    /// A space with its first tab and terminal, shown at once.
+    /// A space with its first tab and terminal, shown at once unless focus is false.
     /// `machine`: another machine (`hc machine ls`); its space starts in that machine's home.
     fn new_space(&mut self, name: &str, folder: Option<String>, ctx_name: Option<&str>, argv: Option<Vec<String>>, task: Option<&str>, machine: Option<String>, focus: bool, window: &Window) -> Result<Value, String> {
         let follow = folder.is_none();
@@ -2421,7 +2421,7 @@ impl AppWindow {
         Ok(json!({ "space": space, "tab": ctx, "terminal": addr }))
     }
 
-    /// A tab in a space (default: the shown one), shown at once unless not focus.
+    /// A tab in a space (default: the shown one), shown at once unless focus is false.
     fn new_tab(&mut self, space: Option<String>, name: &str, folder: Option<String>, argv: Option<Vec<String>>, task: Option<&str>, focus: bool, window: &Window) -> Result<Value, String> {
         let space = space.or_else(|| self.model.active_space().map(|p| p.id.clone())).ok_or("no space yet: make one first (space.new)")?;
         if self.model.space(&space).is_none() {
@@ -2433,12 +2433,12 @@ impl AppWindow {
         let (ctx, pane) = (self.model.fresh_id_on("tb", on.as_deref()), self.model.fresh_id_on("p", on.as_deref()));
         let size = self.initial_size(&Tab::new(&ctx, "", &pane, "").root, &pane, window);
         let (addr, _) = self.spawn(Self::agent_argv(argv.clone(), task, on.as_deref()).or(argv), folder, follow, &space, &ctx, on.as_deref(), size, window)?;
-        self.show_new_tab(&space, Tab::new(&ctx, name.trim(), &pane, &addr), focus);
+        self.add_new_tab(&space, Tab::new(&ctx, name.trim(), &pane, &addr), focus);
         Ok(json!({ "space": space, "tab": ctx, "terminal": addr }))
     }
 
-    /// Adds a new tab to its space, then shows it, or (not focus) leaves what is shown as it is.
-    fn show_new_tab(&mut self, space: &str, tab: Tab, focus: bool) {
+    /// Adds a new tab to its space and shows it, or (focus false) leaves what is shown as it is.
+    fn add_new_tab(&mut self, space: &str, tab: Tab, focus: bool) {
         if focus {
             self.model.add_tab(space, tab);
             self.model.active = Some(space.to_owned());
@@ -2447,7 +2447,7 @@ impl AppWindow {
         }
     }
 
-    /// A tab whose only pane is a mod (a file, a board), shown at once unless not focus.
+    /// A tab whose only pane is a mod (a file, a board), shown at once unless focus is false.
     fn new_mod_tab(&mut self, space: Option<String>, name: &str, m: String, props: Value, focus: bool) -> Result<Value, String> {
         let space = space.or_else(|| self.model.active_space().map(|p| p.id.clone())).ok_or("no space yet: make one first (space.new)")?;
         if self.model.space(&space).is_none() {
@@ -2459,7 +2459,7 @@ impl AppWindow {
         let machine = self.machine_of(&space);
         self.require_document(machine.as_deref())?;
         let (ctx, pane) = (self.model.fresh_id_on("tb", machine.as_deref()), self.model.fresh_id_on("p", machine.as_deref()));
-        self.show_new_tab(&space, Tab::with_pane(&ctx, name.trim(), Node::block(pane.clone(), Content::Mod { name: m, props })), focus);
+        self.add_new_tab(&space, Tab::with_pane(&ctx, name.trim(), Node::block(pane.clone(), Content::Mod { name: m, props })), focus);
         Ok(json!({ "space": space, "tab": ctx, "pane": pane }))
     }
 
@@ -2702,9 +2702,12 @@ impl AppWindow {
         Self::arg(args, k).map(str::to_owned)
     }
 
-    /// Whether a new space or tab is shown: unless `focus: false`.
-    fn focus(args: &Value) -> bool {
-        args.get("focus").and_then(Value::as_bool) != Some(false)
+    /// Whether a new space or tab is shown: `focus`, true when omitted; None when it isn't a boolean.
+    fn focus(args: &Value) -> Option<bool> {
+        match args.get("focus") {
+            None | Some(Value::Null) => Some(true),
+            Some(v) => v.as_bool(),
+        }
     }
 
     fn answer(&mut self, r: Result<Value, String>) {
@@ -2838,8 +2841,9 @@ impl AppWindow {
         match name {
             // ---- spaces
             "space.new" => {
+                let Some(focus) = Self::focus(a) else { return self.fail("space.new focus is true or false") };
                 let name = Self::arg(a, "name").unwrap_or_default();
-                let r = self.new_space(name, Self::owned(a, "folder"), Self::arg(a, "tab"), Self::argv(a), Self::arg(a, "task"), Self::owned(a, "machine").filter(|m| !m.is_empty()), Self::focus(a), window);
+                let r = self.new_space(name, Self::owned(a, "folder"), Self::arg(a, "tab"), Self::argv(a), Self::arg(a, "task"), Self::owned(a, "machine").filter(|m| !m.is_empty()), focus, window);
                 self.answer(r);
             }
             "space.close" => {
@@ -2886,8 +2890,8 @@ impl AppWindow {
             }
             // ---- tabs
             "tab.new" => {
+                let Some(focus) = Self::focus(a) else { return self.fail("tab.new focus is true or false") };
                 let name = Self::arg(a, "name").unwrap_or_default();
-                let focus = Self::focus(a);
                 let r = match Self::owned(a, "mod") {
                     Some(m) => self.new_mod_tab(Self::owned(a, "space"), name, m, a.get("props").cloned().unwrap_or(Value::Null), focus),
                     // A person's new tab with no space open starts one, as space.new does.
@@ -5347,8 +5351,9 @@ mod tests {
         in_own_process("tab_new_without_focus");
     }
 
-    /// `tab.new {focus: false}` adds the tab behind the shown one, in the shown
-    /// space or another; without it the new tab is shown, as before.
+    /// `tab.new {mod, focus: false}` adds the tab after its space's selected one,
+    /// in the shown space or another, and keeps what is shown; without focus the
+    /// new tab is shown.
     #[gpui::test]
     fn tab_new_without_focus(cx: &mut gpui::TestAppContext) {
         use serde_json::json;
@@ -5377,13 +5382,15 @@ mod tests {
         let here = new_tab(json!({ "space": "s1", "mod": "board", "focus": false }), cx);
         assert_eq!(here["space"], "s1", "{here}");
         assert_eq!(shown(cx), ("s1".into(), "a".into()));
+        let s1_tabs = cx.update(|_, cx| view.read_with(cx, |this, _| this.model.space("s1").unwrap().tabs.len()));
+        assert_eq!(s1_tabs, 2);
+        let refused = new_tab(json!({ "space": "s1", "mod": "board", "focus": "false" }), cx);
+        assert!(refused["error"].as_str().is_some_and(|e| e.contains("true or false")), "{refused}");
         let there = new_tab(json!({ "space": "s2", "mod": "board", "focus": false }), cx);
         assert_eq!(there["space"], "s2", "{there}");
         assert_eq!(shown(cx), ("s1".into(), "a".into()));
-        cx.update(|_, cx| view.read_with(cx, |this, _| {
-            assert_eq!(this.model.space("s1").unwrap().tabs.len(), 2);
-            assert_eq!(this.model.space("s2").unwrap().active.as_deref(), Some("b"), "s2 opens where it was");
-        }));
+        let s2_selected = cx.update(|_, cx| view.read_with(cx, |this, _| this.model.space("s2").unwrap().active.clone()));
+        assert_eq!(s2_selected.as_deref(), Some("b"), "s2 still opens on its own tab");
 
         let shown_now = new_tab(json!({ "space": "s2", "mod": "board" }), cx);
         let tab = shown_now["tab"].as_str().unwrap().to_owned();
