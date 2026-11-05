@@ -67,6 +67,10 @@ Use `commands` to confirm the command's exact shape:
 herdr-app do pane.split '{"direction":"right","pane":"p12"}'
 ```
 
+`tab.close` and `pane.close` ask a person before ending a running program or live agent session (including an agent between turns); 
+an idle shell closes without a prompt. Agent-issued closes require `--confirmed true` in those cases. `space.close` still requires 
+confirmation regardless of activity.
+
 `terminal.search` opens a find bar in the focused terminal. It searches that
 terminal's screen and scrollback; Enter and Shift-Enter move between matches,
 Escape closes the bar while its find field has focus, and each terminal keeps its own query (reopening selects it, so typing replaces it).
