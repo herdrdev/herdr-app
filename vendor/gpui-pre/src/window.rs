@@ -4617,7 +4617,7 @@ impl Window {
         // stub past each rounded corner. Corner radii stay on every strip,
         // because one arc can be split across two of them.
         let zero = ScaledPixels(0.);
-        let widths = quad.border_widths.clone();
+        let widths = quad.border_widths;
         let strips = [
             // Top
             (
