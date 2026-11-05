@@ -380,6 +380,9 @@ pub struct Person {
     pub font_size: Option<f32>,
     /// Enable programming ligatures in terminal fonts.
     pub font_ligatures: bool,
+    /// OpenType features for terminal fonts: `ss03`, `-calt`, `cv02=2`.
+    #[serde(skip_serializing_if = "Vec::is_empty", deserialize_with = "font_features_checked")]
+    pub font_features: Vec<String>,
     /// The panels' font (their sizes follow zoom).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ui_font: Option<String>,
@@ -451,6 +454,7 @@ impl Default for Person {
             font: None,
             font_size: None,
             font_ligatures: false,
+            font_features: Vec::new(),
             ui_font: None,
             telemetry: true,
             clipboard_write: true,
@@ -472,6 +476,7 @@ pub struct Settings {
     pub font_family: String,
     pub font_size: f32,
     pub font_ligatures: bool,
+    pub font_features: Vec<String>,
     pub ui_font_family: String,
     pub ui_font_size: f32,
     /// How big the whole app is drawn (1 = as designed). The zoom keys change it.
@@ -522,6 +527,7 @@ impl Default for Settings {
             font_family: DEFAULT_FONT.into(),
             font_size: 14.0,
             font_ligatures: false,
+            font_features: Vec::new(),
             ui_font_family: "Geist".into(),
             ui_font_size: 13.0,
             zoom: 1.0,
@@ -560,6 +566,7 @@ impl Settings {
             font_family: look.font.clone().or(person.font.clone()).unwrap_or(d.font_family),
             font_size: look.font_size.or(person.font_size).unwrap_or(d.font_size),
             font_ligatures: person.font_ligatures,
+            font_features: person.font_features.clone(),
             ui_font_family: look.ui_font.clone().or(person.ui_font.clone()).unwrap_or(d.ui_font_family),
             ui_font_size: d.ui_font_size,
             zoom: person.zoom,
@@ -605,6 +612,13 @@ pub fn rgb(s: &str) -> Rgb {
 }
 
 impl Settings {
+    /// Whether terminal text may shape ligatures: `font_ligatures`, or a
+    /// `font_features` entry that turns a ligature feature on.
+    pub fn terminal_ligatures(&self) -> bool {
+        self.font_ligatures
+            || self.font_features.iter().filter_map(|f| parse_font_feature(f).ok()).any(|(tag, value)| value != 0 && LIGATURE_TAGS.contains(&tag.as_str()))
+    }
+
     /// Problems an agent should hear about before the file is applied.
     pub fn problems(&self) -> Vec<String> {
         let mut out = Vec::new();
@@ -840,6 +854,34 @@ pub const SYMBOLS_FONT: &str = "Symbols Nerd Font";
 /// Terminals' font unless a layout or settings.json picks another.
 pub const DEFAULT_FONT: &str = "JetBrains Mono";
 
+/// The OpenType features that join letters or punctuation into ligatures.
+pub const LIGATURE_TAGS: [&str; 3] = ["calt", "liga", "dlig"];
+
+/// One `font_features` entry: `ss03`, `+ss03` (on), `-calt` (off), `cv02=2`.
+pub fn parse_font_feature(text: &str) -> Result<(String, u32), String> {
+    let bad = || format!("font_features: {text:?} is not a feature like \"ss03\", \"-calt\" or \"cv02=2\"");
+    let (sign, rest) = match text.as_bytes().first() {
+        Some(b'+') => (Some(1), &text[1..]),
+        Some(b'-') => (Some(0), &text[1..]),
+        _ => (None, text),
+    };
+    let (tag, value) = match rest.split_once('=') {
+        Some((tag, value)) if sign.is_none() => (tag, Some(value.parse::<u32>().map_err(|_| bad())?)),
+        Some(_) => return Err(bad()),
+        None => (rest, None),
+    };
+    if tag.len() != 4 || !tag.bytes().all(|b| b.is_ascii_alphanumeric()) {
+        return Err(bad());
+    }
+    Ok((tag.to_owned(), value.or(sign).unwrap_or(1)))
+}
+
+fn font_features_checked<'de, D: serde::Deserializer<'de>>(d: D) -> Result<Vec<String>, D::Error> {
+    let features = Vec::<String>::deserialize(d)?;
+    features.iter().try_for_each(|f| parse_font_feature(f).map(drop)).map_err(serde::de::Error::custom)?;
+    Ok(features)
+}
+
 #[cfg(test)]
 mod tests {
     #[test]
@@ -853,6 +895,48 @@ mod tests {
         let restored: Person = serde_json::from_str(&saved).unwrap();
         assert!(Settings::compose(&restored, &crate::layout::Look::default(), true).font_ligatures);
         assert!(serde_json::from_str::<Person>(r#"{"font_ligatures":"yes"}"#).is_err());
+    }
+
+    #[test]
+    fn font_features_parse_like_ghostty() {
+        use super::*;
+        let ok = |t: &str| parse_font_feature(t).unwrap();
+        assert_eq!(ok("ss03"), ("ss03".into(), 1));
+        assert_eq!(ok("+ss03"), ("ss03".into(), 1));
+        assert_eq!(ok("-calt"), ("calt".into(), 0));
+        assert_eq!(ok("cv02=2"), ("cv02".into(), 2));
+        assert_eq!(ok("ss03=0"), ("ss03".into(), 0));
+        for bad in ["", "-", "cv0", "cv002", "-ss01=2", "+ss01=2", "ss01=x", "ss01=", "ss 01", "ss0é"] {
+            assert!(parse_font_feature(bad).is_err(), "{bad:?}");
+        }
+    }
+
+    #[test]
+    fn font_features_load_keep_their_text_and_reject_bad_entries() {
+        use super::*;
+        let person: Person = serde_json::from_str("{}").unwrap();
+        assert!(person.font_features.is_empty());
+        assert!(!serde_json::to_string(&person).unwrap().contains("font_features"));
+        let person: Person = serde_json::from_str(r#"{"font_features":["+ss01","-calt","cv02=2"]}"#).unwrap();
+        let restored: Person = serde_json::from_str(&serde_json::to_string(&person).unwrap()).unwrap();
+        assert_eq!(restored.font_features, ["+ss01", "-calt", "cv02=2"]);
+        let settings = Settings::compose(&restored, &crate::layout::Look::default(), true);
+        assert_eq!(settings.font_features, ["+ss01", "-calt", "cv02=2"]);
+        for bad in [r#"{"font_features":["cv0"]}"#, r#"{"font_features":["-ss01=2"]}"#, r#"{"font_features":"ss01"}"#, r#"{"font_features":[1]}"#] {
+            assert!(serde_json::from_str::<Person>(bad).is_err(), "{bad}");
+        }
+    }
+
+    #[test]
+    fn only_ligature_features_turned_on_count_as_ligatures() {
+        use super::*;
+        let with = |ligatures: bool, features: &[&str]| Settings { font_ligatures: ligatures, font_features: features.iter().map(|f| f.to_string()).collect(), ..Settings::default() };
+        assert!(!with(false, &[]).terminal_ligatures());
+        assert!(!with(false, &["ss03", "cv02=2", "-calt", "liga=0"]).terminal_ligatures());
+        assert!(with(false, &["calt"]).terminal_ligatures());
+        assert!(with(false, &["+liga"]).terminal_ligatures());
+        assert!(with(false, &["dlig=1"]).terminal_ligatures());
+        assert!(with(true, &["-calt"]).terminal_ligatures());
     }
 
     use super::*;
@@ -941,7 +1025,7 @@ mod tests {
     /// settings.json key.
     #[test]
     fn the_guide_explains_every_setting() {
-        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), ui_font: Some(String::new()), telemetry: false, clipboard_write: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), ..Person::default() };
+        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), font_features: vec!["ss01".into()], ui_font: Some(String::new()), telemetry: false, clipboard_write: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), ..Person::default() };
         let keys: Vec<String> = serde_json::to_value(&all).unwrap().as_object().unwrap().keys().cloned().collect();
         let guide = include_str!("../defaults/AGENTS.md");
         let section = guide.split("## The person").nth(1).and_then(|s| s.split("\n## ").next()).unwrap_or_default();
