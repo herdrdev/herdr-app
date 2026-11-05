@@ -1288,6 +1288,7 @@ impl Vt {
         let mut s = GhosttyTerminalScrollViewport { tag: GHOSTTY_SCROLL_VIEWPORT_ROW, ..Default::default() };
         s.value.row = row;
         unsafe { ghostty_terminal_scroll_viewport(self.term, s) };
+        self.feed_search();
     }
 
     /// What a scrollbar needs: the scrollable area's total rows, the viewport's
@@ -1456,6 +1457,13 @@ impl Vt {
             }
         }
         self.search_spans = spans;
+    }
+
+    pub fn scroll_to_top(&mut self) {
+        self.placements_cache.get_mut().take();
+        let s = GhosttyTerminalScrollViewport { tag: GHOSTTY_SCROLL_VIEWPORT_TOP, ..Default::default() };
+        unsafe { ghostty_terminal_scroll_viewport(self.term, s) };
+        self.feed_search();
     }
 
     /// Wraps pasted text the way the program asked (bracketed paste or not).
@@ -2460,5 +2468,46 @@ mod tests {
         vt.write(b"\x1b]2;hello\x07");
         assert_eq!(vt.take_title().as_deref(), Some("hello"));
         assert_eq!(vt.take_title(), None);
+    }
+
+    #[test]
+    fn absolute_scroll_refreshes_search_highlights_across_pages() {
+        let mut vt = Vt::new(80, 24);
+        vt.write(b"ONLY TOP NEEDLE\r\n");
+        for line in 1..=2000 {
+            vt.write(format!("nonmatching line {line}\r\n").as_bytes());
+        }
+        vt.start_search("NEEDLE");
+        finish_search(&mut vt);
+        assert_eq!(vt.search_progress().total, 1);
+        assert!(vt.search_spans.is_empty());
+
+        vt.scroll_to_row(0);
+        assert_eq!(vt.search_spans.len(), 1);
+        assert_eq!(vt.search_spans[0].row, 0);
+        for row in [500, 1000, 1500] {
+            vt.scroll_to_row(row);
+            assert!(vt.search_spans.is_empty(), "stale highlights at row {row}");
+            vt.scroll_to_top();
+            assert_eq!(vt.search_spans.len(), 1, "missing top highlight after row {row}");
+            assert_eq!(vt.search_spans[0].row, 0);
+        }
+    }
+
+    #[test]
+    fn scroll_to_top_reaches_the_oldest_line_and_bottom_returns() {
+        let mut vt = Vt::new(20, 5);
+        for line in 1..=50 {
+            vt.write(format!("{line:04}\r\n").as_bytes());
+        }
+        let visible = |vt: &mut Vt| -> Vec<String> {
+            vt.frame().rows.iter().map(|row| row.iter().map(|c| c.text.as_str()).collect::<String>()).collect()
+        };
+        vt.scroll_to_top();
+        let top = visible(&mut vt);
+        assert!(top[0].starts_with("0001"), "{top:?}");
+        vt.scroll_to_bottom();
+        let bottom = visible(&mut vt);
+        assert!(bottom.iter().any(|row| row.starts_with("0050")), "{bottom:?}");
     }
 }

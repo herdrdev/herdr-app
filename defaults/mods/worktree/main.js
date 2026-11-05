@@ -6,10 +6,10 @@ import { v_flex, h_flex, InputState, Input, Scrollbar } from "gpui-base";
 import { run, props, closeOverlay, theme, spaces, panes, exec, home } from "herdr";
 
 // Where a space is now: its first terminal's live folder, else where it was made.
-function place(s) {
+function place(s, all = panes()) {
   if (!s) return null;
   const tabs = new Set((s.tabs ?? []).map((c) => c.id));
-  return panes().find((p) => tabs.has(p.tab) && p.cwd)?.cwd || s.folder || null;
+  return all.find((p) => tabs.has(p.tab) && p.cwd)?.cwd || s.folder || null;
 }
 
 // Checkouts go to <ROOT>/<repo>/<branch, slashes as dashes>.
@@ -44,17 +44,17 @@ async function checkouts(repo, on) {
 }
 
 // The space showing a checkout: its first terminal is in it (the deepest checkout wins).
-function spaceOf(path, all, on) {
+function spaceOf(path, all, on, spaceList, paneList) {
   const inside = (p, dir) => p === dir || p.startsWith(dir + "/");
-  return spaces().find((s) => (s.machine ?? null) === (on ?? null) && (() => {
-    const at = place(s)?.replace(/\\/g, "/");
+  return spaceList.find((s) => (s.machine ?? null) === (on ?? null) && (() => {
+    const at = place(s, paneList)?.replace(/\\/g, "/");
     if (!at || !inside(at, path)) return false;
     return !all.some((c) => c.path !== path && c.path.length > path.length && inside(at, c.path));
   })());
 }
 
-async function git(cwd, args, on) {
-  const r = await exec("git", args, { cwd, on });
+async function git(cwd, args, on, timeout) {
+  const r = await exec("git", args, { cwd, on, ...(timeout === undefined ? {} : { timeout }) });
   return { ok: r.code === 0, out: (r.stdout ?? "").trim(), err: (r.stderr ?? r.stdout ?? "").trim() };
 }
 
@@ -185,7 +185,7 @@ export default class Worktree extends View {
     const path = `${ROOT(this.userHome)}/${this.repo.name}/${slug(branch)}`;
     const exists = (await git(this.repo.main, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], this.on)).ok;
     const add = exists ? ["worktree", "add", path, branch] : ["worktree", "add", "-b", branch, path, "HEAD"];
-    const r = await git(this.repo.top, add, this.on);
+    const r = await git(this.repo.top, add, this.on, 600_000);
     if (!r.ok) return r.err || "git worktree add failed.";
     const p = props();
     // Leave spaces unnamed so they follow the checkout folder and nest under the repo.
@@ -201,7 +201,7 @@ export default class Worktree extends View {
   open(c) {
     if (!c) return;
     this.close();
-    const s = spaceOf(c.path, this.list, this.on);
+    const s = spaceOf(c.path, this.list, this.on, spaces(), panes());
     if (s) run("space.select", { id: s.id });
     else run("space.new", { folder: c.path, machine: this.on });
   }
@@ -221,7 +221,7 @@ export default class Worktree extends View {
     // Terminals first: a shell sitting in the folder keeps it busy on Windows.
     run("space.close", { id: s.id, confirmed: true });
     const force = this.dirty || mods.length > 0;
-    const r = await git(this.repo.main, ["worktree", "remove", ...(force ? ["--force"] : []), this.repo.top], this.on);
+    const r = await git(this.repo.main, ["worktree", "remove", ...(force ? ["--force"] : []), this.repo.top], this.on, 600_000);
     return r.ok ? "" : r.err || "git worktree remove failed.";
   }
 
@@ -242,9 +242,11 @@ export default class Worktree extends View {
     const r = this.repo;
     const rows = this.shown();
     const all = this.list ?? [];
+    const spaceList = spaces();
+    const paneList = panes();
     const row = (c, i) => {
       const on = i === this.at;
-      const there = spaceOf(c.path, all, this.on);
+      const there = spaceOf(c.path, all, this.on, spaceList, paneList);
       return v_flex()
         .id(`wt-${i}`)
         .flex_none()
@@ -353,6 +355,8 @@ export default class Worktree extends View {
           .justify_end()
           .text_size(11)
           .text_color(t.dim)
+          .gap(6)
+          .when(this.busy, (el) => el.child(div().frames(["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"], 90)))
           .child(this.busy ? "working…" : blocked ? "esc close" : remove ? "↵ remove · esc cancel" : "↵ create · esc cancel"),
       );
   }

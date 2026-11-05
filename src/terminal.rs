@@ -7,7 +7,7 @@ use ghostty_sys::*;
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_base::input::{Input, InputEditorStyle, InputEvent, InputState};
-use serde_json::json;
+use serde_json::{Value, json};
 use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
@@ -297,6 +297,9 @@ impl TerminalView {
             let cell = device_cell(g.cell, g.scale);
             g.vt = Vt::new(cols, rows);
             g.vt.resize(cols, rows, cell.0, cell.1);
+            if self.search_open {
+                g.vt.start_search(&self.search_query);
+            }
             g.vt_cell = cell;
             g.told_display = None;
             let facts = display_update(&mut g.told_display, &vt::theme(), cell).unwrap();
@@ -520,6 +523,10 @@ impl TerminalView {
         self.grid.borrow_mut().fit(cols, rows, cell, scale);
     }
 
+    pub fn on_screen_this_frame(&self) -> bool {
+        self.shown_in.get() == FRAME.load(Ordering::Relaxed)
+    }
+
     fn send(&self, bytes: &[u8]) {
         self.typed_at.set(Some(Instant::now()));
         let mut g = self.grid.borrow_mut();
@@ -739,7 +746,7 @@ impl TerminalView {
     }
 
     fn key_down(&mut self, ev: &KeyDownEvent, window: &mut Window, cx: &mut Context<Self>) {
-        if self.search_open && ev.keystroke.key == "escape" {
+        if self.find_field_focused(window, cx) && ev.keystroke.key == "escape" {
             self.close_search(window, cx);
             cx.stop_propagation();
             return;
@@ -789,6 +796,19 @@ impl TerminalView {
             }
         } else {
             g.vt.scroll_viewport(if up { -(n as isize) } else { n as isize });
+        }
+        cx.notify();
+    }
+
+    pub fn scroll_history(&mut self, target: ScrollTarget, cx: &mut Context<Self>) {
+        let mut g = self.grid.borrow_mut();
+        let rows = g.vt.rows;
+
+        match target {
+            ScrollTarget::Lines(lines) => g.vt.scroll_viewport(lines),
+            ScrollTarget::Pages(pages) => g.vt.scroll_viewport(pages_to_lines(pages, rows)),
+            ScrollTarget::Top => g.vt.scroll_to_top(),
+            ScrollTarget::Bottom => g.vt.scroll_to_bottom(),
         }
         cx.notify();
     }
@@ -912,6 +932,52 @@ impl TerminalView {
         }
         cx.notify();
     }
+}
+
+#[derive(Debug, PartialEq)]
+pub enum ScrollTarget {
+    Lines(isize),
+    Pages(f64),
+    Top,
+    Bottom,
+}
+
+pub fn scroll_target(args: &Value) -> Result<ScrollTarget, String> {
+    let given: Vec<&str> = ["lines", "pages", "to"].into_iter().filter(|key| is_given(args, key)).collect();
+    match given.as_slice() {
+        [] => Err("terminal.scroll needs one of lines, pages, to".into()),
+        ["lines"] => whole_lines_arg(args).map(ScrollTarget::Lines),
+        ["pages"] => pages_arg(args).map(ScrollTarget::Pages),
+        ["to"] => edge_arg(args),
+        _ => Err(format!("terminal.scroll takes one of lines, pages, to, not {}", given.join(" and "))),
+    }
+}
+
+fn is_given(args: &Value, key: &str) -> bool {
+    args.get(key).is_some_and(|value| !value.is_null())
+}
+
+fn whole_lines_arg(args: &Value) -> Result<isize, String> {
+    let value = &args["lines"];
+    value.as_i64().and_then(|lines| isize::try_from(lines).ok()).ok_or_else(|| format!("terminal.scroll lines is not a whole number: {value}"))
+}
+
+fn pages_arg(args: &Value) -> Result<f64, String> {
+    let value = &args["pages"];
+    value.as_f64().filter(|pages| pages.is_finite()).ok_or_else(|| format!("terminal.scroll pages is not a finite number: {value}"))
+}
+
+fn edge_arg(args: &Value) -> Result<ScrollTarget, String> {
+    let value = &args["to"];
+    match value.as_str() {
+        Some("top") => Ok(ScrollTarget::Top),
+        Some("bottom") => Ok(ScrollTarget::Bottom),
+        _ => Err(format!("terminal.scroll to is \"top\" or \"bottom\", not {value}")),
+    }
+}
+
+fn pages_to_lines(pages: f64, rows: u16) -> isize {
+    (pages * f64::from(rows)).round() as isize
 }
 
 fn selection_scroll_lines(y: f32, cell_height: f32, rows: u16) -> isize {
@@ -1340,6 +1406,22 @@ pub fn cell_size(window: &Window) -> Size<Pixels> {
     size(w, px((f32::from(h) * 1.15 * scale).ceil() / scale))
 }
 
+// Force-width shaping moves glyph origins, but does not resize fallback glyphs.
+fn fallback_size(c: &vt::Cell, font: &Font, width: Pixels, ts: &gpui::WindowTextSystem) -> Option<Pixels> {
+    if c.wide || c.text.is_ascii() {
+        return None;
+    }
+    let first = c.text.chars().next()?;
+    let size = px(crate::settings::font_size());
+    let primary = ts.resolve_font(font);
+    if ts.advance(primary, size, first).is_ok() {
+        return None;
+    }
+    let run = TextRun { len: c.text.len(), font: font.clone(), ..Default::default() };
+    let line = ts.shape_line(c.text.clone().into(), size, &[run], None);
+    (line.width() > width).then(|| size * f32::from(width) / f32::from(line.width()))
+}
+
 /// One piece of a row's drawing, in cells from the row's start.
 enum RowOp {
     Bg { from: usize, to: usize, color: Hsla },
@@ -1404,10 +1486,11 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
             ops.push(RowOp::Icon { x: start, offset: point(px(left), px(baseline)), font, glyph: GlyphId(icon.id), size, color });
             continue;
         }
+        let fitted_size = fallback_size(c, &text_font, cell.width, window.text_system());
         let mut text = if c.text.is_empty() { " ".to_owned() } else { c.text.clone() };
         let emoji = one_cell_emoji(c);
         // Shape the cursor cell separately, so its plain glyph doesn't cover a ligature.
-        if !c.wide && !emoji && cursor != Some(start) {
+        if !c.wide && !emoji && fitted_size.is_none() && cursor != Some(start) {
             while x < row.len() {
                 let d = &row[x];
                 let same = !d.wide
@@ -1419,7 +1502,7 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
                     && d.underline == c.underline
                     && d.strike == c.strike;
                 // Bundled fallback icons and one-cell emoji are fitted separately from the text run.
-                if !same || cursor == Some(x) || (d.text.is_empty() && !d.underline && !d.strike) || crate::sprites::is_sprite(&d.text) || fallback_icon(&d.text, &text_font, window.text_system()).is_some() || one_cell_emoji(d) {
+                if !same || cursor == Some(x) || (d.text.is_empty() && !d.underline && !d.strike) || crate::sprites::is_sprite(&d.text) || fallback_icon(&d.text, &text_font, window.text_system()).is_some() || one_cell_emoji(d) || fallback_size(d, &text_font, cell.width, window.text_system()).is_some() {
                     break;
                 }
                 text.push_str(if d.text.is_empty() { " " } else { &d.text });
@@ -1451,7 +1534,7 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
             }
         }
         let force = (!c.wide).then_some(cell.width);
-        let line = window.text_system().shape_line(text.into(), font_size, &[run], force);
+        let line = window.text_system().shape_line(text.into(), fitted_size.unwrap_or(font_size), &[run], force);
         ops.push(RowOp::Text { x: start, line });
     }
     ops
@@ -1808,6 +1891,18 @@ impl Render for TerminalView {
             // Below 1, the layout's background shows through (cells a program colors stay solid).
             .bg(hsla(vt::theme().bg).opacity(crate::settings::get().terminal_opacity))
             .on_action(cx.listener(|this, a: &gpui_shell::action::ShellAction, window, cx| {
+                if this.find_field_focused(window, cx) {
+                    let action: Option<Box<dyn gpui::Action>> = match a.id() {
+                        "terminal.copy" => Some(Box::new(gpui_base::input::Copy)),
+                        "terminal.paste" => Some(Box::new(gpui_base::input::Paste)),
+                        _ => None,
+                    };
+                    if let Some(action) = action {
+                        window.dispatch_action(action, cx);
+                        cx.stop_propagation();
+                        return;
+                    }
+                }
                 // `send:<text>` bindings from keys.json type into this terminal.
                 match a.id().strip_prefix("send:") {
                     Some(_) if this.find_field_focused(window, cx) => cx.stop_propagation(),
@@ -1856,7 +1951,10 @@ impl Render for TerminalView {
                     return;
                 }
                 drop(g);
-                if !this.mouse(GHOSTTY_MOUSE_ACTION_PRESS, Some(ev.button), ev.position, ev.modifiers) {
+                if this.mouse(GHOSTTY_MOUSE_ACTION_PRESS, Some(ev.button), ev.position, ev.modifiers) {
+                    // The program took the click: Herdr's old selection ends, so a copy can't repeat it.
+                    this.clear_selection(cx);
+                } else {
                     this.start_selection(ev.position, cx);
                 }
             }))
@@ -2057,6 +2155,9 @@ impl Focusable for TerminalView {
 
 #[cfg(test)]
 mod tests {
+    use super::{ScrollTarget, pages_to_lines, scroll_target};
+    use serde_json::{Value, json};
+
     #[gpui::test]
     fn terminal_release_ends_window_text_selection(cx: &mut gpui::TestAppContext) {
         use gpui::*;
@@ -2204,6 +2305,90 @@ mod tests {
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
         root.read_with(cx, |root, cx| assert!(!root.0.read(cx).search_open));
+    }
+
+    #[gpui::test]
+    fn reconnect_keeps_find_searching_the_new_terminal(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        cx.update(gpui_base::init);
+        let terminal = cx.new(|cx| super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 6), cx));
+        let (_, cx) = cx.add_window_view(|_, _| gpui::Empty);
+        cx.update(|window, app| terminal.update(app, |terminal, cx| {
+            terminal.open_search(window, cx);
+            terminal.search_query = "needle".into();
+            terminal.reattach(crate::hc::offline(), cx);
+            let mut grid = terminal.grid.borrow_mut();
+            grid.vt.write(b"replayed needle\r\n");
+            for _ in 0..1000 {
+                grid.vt.progress_search();
+                if grid.vt.search_progress().complete { break; }
+            }
+            assert!(grid.vt.search_progress().complete);
+            assert_eq!(grid.vt.search_progress().total, 1);
+            assert_eq!(grid.vt.frame().search_spans.len(), 1);
+            grid.vt.set_search_needle("replayed");
+            for _ in 0..1000 {
+                grid.vt.progress_search();
+                if grid.vt.search_progress().complete { break; }
+            }
+            assert_eq!(grid.vt.search_progress().total, 1, "query edits must keep working after reconnect");
+        }));
+    }
+
+    #[gpui::test]
+    fn shipped_clipboard_aliases_edit_find_without_terminal_input(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        struct Root(Entity<super::TerminalView>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                div().key_context("Herdr").size_full()
+                    .on_action(cx.listener(|this, action: &gpui_shell::action::ShellAction, _, cx| {
+                        match action.id() {
+                            "terminal.paste" => this.0.update(cx, |terminal, cx| terminal.paste(cx)),
+                            "terminal.copy" => { this.0.update(cx, |terminal, cx| terminal.copy(cx)); }
+                            _ => cx.propagate(),
+                        }
+                    }))
+                    .child(self.0.clone())
+            }
+        }
+
+        cx.update(gpui_base::init);
+        let bindings = crate::keys::parse(crate::keys::DEFAULTS).expect("shipped keys parse");
+        cx.update(|app| crate::keys::install(bindings, app));
+        let (root, cx) = cx.add_window_view(|_, cx| {
+            Root(cx.new(|cx| super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 6), cx)))
+        });
+        cx.run_until_parked();
+        let aliases: &[(&str, &str)] = if cfg!(target_os = "macos") {
+            &[("cmd-v", "cmd-c")]
+        } else {
+            &[("ctrl-shift-v", "ctrl-shift-c"), ("shift-insert", "ctrl-insert")]
+        };
+        for &(paste, copy) in aliases {
+            cx.update(|window, app| {
+                root.update(app, |root, app| {
+                    root.0.update(app, |terminal, cx| terminal.open_search(window, cx));
+                });
+                app.write_to_clipboard(ClipboardItem::new_string("needle".into()));
+            });
+            cx.run_until_parked();
+            cx.simulate_keystrokes(paste);
+            cx.run_until_parked();
+            root.read_with(cx, |root, cx| {
+                let terminal = root.0.read(cx);
+                assert_eq!(terminal.search_query, "needle", "{paste}");
+                assert!(terminal.typed_at.get().is_none(), "{paste} sent terminal input");
+            });
+            cx.simulate_keystrokes(if cfg!(target_os = "macos") { "cmd-a" } else { "ctrl-a" });
+            cx.update(|_, app| app.write_to_clipboard(ClipboardItem::new_string("unchanged".into())));
+            cx.simulate_keystrokes(copy);
+            cx.run_until_parked();
+            cx.update(|_, app| assert_eq!(app.read_from_clipboard().unwrap().text().as_deref(), Some("needle"), "{copy}"));
+            root.read_with(cx, |root, cx| assert!(root.0.read(cx).typed_at.get().is_none(), "{copy} sent terminal input"));
+        }
     }
 
     #[gpui::test]
@@ -2407,9 +2592,16 @@ mod tests {
             assert!(terminal.typed_at.get().is_some(), "keystrokes did not reach the program once the terminal held the keys");
         });
 
+        cx.update(|_, app| root.update(app, |root, app| {
+            root.0.update(app, |terminal, _| terminal.typed_at.set(None));
+        }));
         cx.simulate_keystrokes("escape");
         cx.run_until_parked();
-        root.read_with(cx, |root, cx| assert!(!root.0.read(cx).search_open));
+        root.read_with(cx, |root, cx| {
+            let terminal = root.0.read(cx);
+            assert!(terminal.search_open, "terminal Escape must not close Find");
+            assert!(terminal.typed_at.get().is_some(), "Escape must reach the program");
+        });
     }
 
     #[gpui::test]
@@ -2536,6 +2728,90 @@ mod tests {
         crate::settings::set((*original).clone());
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn fallback_symbols_fit_their_terminal_cells_pixels() {
+        use super::*;
+        use std::borrow::Cow;
+
+        struct Symbols;
+        impl Render for Symbols {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().bg(rgb(0x000000)).child(canvas(
+                    |_, _, _| {},
+                    |_, _, window, cx| {
+                        let cell = cell_size(window);
+                        for (y, text) in ["🕹", "🖥", "🌡", "🕹\u{fe0f}", "🖥\u{fe0f}", "🌡\u{fe0f}", "M"].iter().enumerate() {
+                            let wide = text.contains('\u{fe0f}');
+                            let mut row = vec![vt::Cell { text: text.to_string(), wide, fg: vt::Rgb(255, 0, 0), ..Default::default() }];
+                            if wide { row.push(vt::Cell::default()); }
+                            row.push(vt::Cell { text: "a".into(), fg: vt::Rgb(255, 255, 255), ..Default::default() });
+                            for op in row_ops(&row, cell, None, window) {
+                                if let RowOp::Text { x, line } = op {
+                                    line.paint(point(px(4.) + cell.width * x as f32, cell.height * y as f32), cell.height, TextAlign::Left, None, window, cx).unwrap();
+                                }
+                            }
+                        }
+                    },
+                ).size_full())
+            }
+        }
+
+        let platform = Arc::new(gpui_wgpu::CosmicTextSystem::new_without_system_fonts(crate::settings::DEFAULT_FONT));
+        let system = TextSystem::new(platform.clone());
+        system.add_fonts(vec![
+            Cow::Borrowed(include_bytes!("../assets/fonts/JetBrainsMono-Variable.ttf")),
+            Cow::Borrowed(include_bytes!("../vendor/ghostty/src/font/res/NotoEmoji-Regular.ttf")),
+        ]).unwrap();
+        let mut cx = HeadlessAppContext::with_platform(platform, Arc::new(()), gpui_platform::current_headless_renderer);
+        let original = crate::settings::get();
+        let mut settings = (*original).clone();
+        settings.font_family = crate::settings::DEFAULT_FONT.into();
+        settings.font_size = 24.;
+        crate::settings::set(settings);
+        let window = cx.open_window(size(px(120.), px(280.)), |_, cx| cx.new(|_| Symbols)).unwrap();
+        cx.update_window(window.into(), |_, window, cx| {
+            let _ = window.draw(cx);
+            let image = window.render_to_image().unwrap();
+            let row: Vec<_> = ["a", "🕹", "a", "🖥", "a", "🌡", "a"].into_iter()
+                .map(|text| vt::Cell { text: text.into(), ..Default::default() }).collect();
+            let ops = row_ops(&row, cell_size(window), None, window);
+            let text: Vec<_> = ops.iter().filter_map(|op| match op {
+                RowOp::Text { x, line } => Some((*x, line.font_size)),
+                _ => None,
+            }).collect();
+            assert_eq!(text.len(), 7, "oversized fallback must break a same-style run");
+            for (x, size) in text {
+                if x % 2 == 0 { assert_eq!(size, px(24.)); }
+                else { assert!(size < px(24.)); }
+            }
+            for text in ["🕹\u{fe0f}", "🖥\u{fe0f}", "🌡\u{fe0f}"] {
+                let row = [vt::Cell { text: text.into(), wide: true, ..Default::default() }];
+                for op in row_ops(&row, cell_size(window), None, window) {
+                    if let RowOp::Text { line, .. } = op { assert_eq!(line.font_size, px(24.)); }
+                }
+            }
+            if let Ok(path) = std::env::var("HERDR_SYMBOL_PIXELS") { image.save(path).unwrap(); }
+            let scale = window.scale_factor();
+            let cell = cell_size(window);
+            for (y, slots) in [1, 1, 1, 2, 2, 2, 1].into_iter().enumerate() {
+                let mut inside = 0;
+                let mut outside = 0;
+                for (x, py, pixel) in image.enumerate_pixels() {
+                    let logical_y = py as f32 / scale;
+                    if logical_y < f32::from(cell.height) * y as f32 || logical_y >= f32::from(cell.height) * (y + 1) as f32 { continue; }
+                    if pixel[0] > 80 && pixel[1] < 20 && pixel[2] < 20 {
+                        if x as f32 / scale < 4. + f32::from(cell.width) * slots as f32 { inside += 1; } else { outside += 1; }
+                    }
+                }
+                println!("symbol row {y}: inside={inside}, overflow={outside}");
+                assert!(inside > 10, "fixture must draw row {y}");
+                assert_eq!(outside, 0, "row {y} glyph must fit its {slots} cell(s)");
+            }
+        }).unwrap();
+        crate::settings::set((*original).clone());
+    }
+
     #[test]
     fn ordinary_output_does_not_enable_ligature_shaping() {
         use super::*;
@@ -2594,6 +2870,37 @@ mod tests {
             }
         }).unwrap();
         crate::settings::set((*original).clone());
+    }
+
+    #[gpui::test]
+    fn a_click_the_program_takes_ends_the_selection(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        struct Root(Entity<super::TerminalView>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().w(px(400.)).h(px(100.)).child(self.0.clone())
+            }
+        }
+        cx.update(gpui_base::init);
+        let (root, cx) = cx.add_window_view(|_, cx| {
+            Root(cx.new(|cx| super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 5), cx)))
+        });
+        cx.run_until_parked();
+        let terminal = root.read_with(cx, |root, _| root.0.clone());
+        terminal.update(cx, |t, _| {
+            let mut g = t.grid.borrow_mut();
+            // The program tracks the mouse, and a Shift+drag selected some text.
+            g.vt.write(b"\x1b[?1000hold text");
+            g.vt.select(super::Select::Press, 0, 0, 0., 5., 10., 60.);
+            g.vt.select(super::Select::Drag, 2, 0, 25., 5., 10., 60.);
+            g.vt.select(super::Select::Release, 2, 0, 25., 5., 10., 60.);
+            assert!(g.vt.mouse_tracking());
+            assert!(g.vt.selection_text().is_some());
+        });
+        cx.simulate_mouse_down(point(px(50.), px(50.)), MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(point(px(50.), px(50.)), MouseButton::Left, Modifiers::default());
+        assert_eq!(terminal.read_with(cx, |t, _| t.grid.borrow().vt.selection_text()), None);
     }
 
     #[gpui::test]
@@ -3279,5 +3586,42 @@ mod tests {
         assert_eq!(super::display_update(&mut told, &theme, (17, 43)).unwrap()["cell"], serde_json::json!([17, 43]));
         theme.selection_bg = Rgb(7, 8, 9);
         assert!(super::display_update(&mut told, &theme, (17, 43)).is_none(), "local selection colors are not core display facts");
+    }
+
+    #[test]
+    fn scroll_takes_exactly_one_of_lines_pages_or_to() {
+        assert_eq!(scroll_target(&json!({ "lines": -5 })), Ok(ScrollTarget::Lines(-5)));
+        assert_eq!(scroll_target(&json!({ "pages": -0.5 })), Ok(ScrollTarget::Pages(-0.5)));
+        assert_eq!(scroll_target(&json!({ "to": "top" })), Ok(ScrollTarget::Top));
+        assert_eq!(scroll_target(&json!({ "to": "bottom", "terminal": "t1" })), Ok(ScrollTarget::Bottom));
+        assert_eq!(scroll_target(&json!({ "lines": null, "to": "top" })), Ok(ScrollTarget::Top), "null is omitted");
+    }
+
+    #[test]
+    fn scroll_names_missing_and_repeated_targets() {
+        let needs_one = "terminal.scroll needs one of lines, pages, to";
+        assert_eq!(scroll_target(&json!({})), Err(needs_one.into()));
+        assert_eq!(scroll_target(&json!({ "terminal": "t1", "lines": null })), Err(needs_one.into()));
+        assert_eq!(scroll_target(&json!({ "lines": 1, "to": "top" })), Err("terminal.scroll takes one of lines, pages, to, not lines and to".into()));
+        assert_eq!(scroll_target(&json!({ "lines": 1, "pages": 1, "to": "top" })), Err("terminal.scroll takes one of lines, pages, to, not lines and pages and to".into()));
+    }
+
+    #[test]
+    fn scroll_rejects_values_the_target_does_not_take() {
+        let error = |args: Value| scroll_target(&args).unwrap_err();
+        assert_eq!(error(json!({ "lines": 1.5 })), "terminal.scroll lines is not a whole number: 1.5");
+        assert_eq!(error(json!({ "lines": "5" })), "terminal.scroll lines is not a whole number: \"5\"");
+        assert_eq!(error(json!({ "pages": "half" })), "terminal.scroll pages is not a finite number: \"half\"");
+        assert_eq!(error(json!({ "to": "middle" })), "terminal.scroll to is \"top\" or \"bottom\", not \"middle\"");
+        assert_eq!(error(json!({ "to": 5 })), "terminal.scroll to is \"top\" or \"bottom\", not 5");
+    }
+
+    #[test]
+    fn pages_become_whole_lines_of_the_terminals_rows() {
+        assert_eq!(pages_to_lines(1.0, 24), 24);
+        assert_eq!(pages_to_lines(-1.0, 24), -24);
+        assert_eq!(pages_to_lines(-0.5, 24), -12);
+        assert_eq!(pages_to_lines(-0.5, 25), -13, "half of an odd row count rounds away from zero");
+        assert_eq!(pages_to_lines(0.02, 24), 0);
     }
 }
