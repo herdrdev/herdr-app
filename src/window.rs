@@ -2820,9 +2820,14 @@ impl AppWindow {
                 ("rename tab", "empty: its number", current)
             }
         };
+        // Once: a second rename press closes the open prompt instead of stacking another.
+        if self.overlays.iter().any(|o| o.id == "rename") {
+            self.close_overlay("rename", window, cx);
+            return;
+        }
         let spec = json!({ "mod": "prompt", "kind": "dialog", "width": 380,
             "props": { "title": title, "value": current.as_deref().unwrap_or(""), "hint": hint, "command": { "name": name, "args": args } } });
-        self.open_overlay(mods::new_overlay_id(), spec, window, cx);
+        self.open_overlay("rename".into(), spec, window, cx);
     }
 
     fn dispatch(&mut self, name: &str, a: &Value, person: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -5300,6 +5305,33 @@ mod tests {
         assert!(!pane_focused(cx), "hidden, the pane can't hold the keyboard");
         select("main", cx);
         assert!(pane_focused(cx));
+    }
+
+    #[test]
+    fn a_second_rename_press_closes_the_prompt() {
+        in_own_process("rename_prompt_opens_once");
+    }
+
+    #[gpui::test]
+    fn rename_prompt_opens_once(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("rename_prompt_opens_once") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "unused", "", json!({
+            "id": "root", "type": "block", "content": { "tab": "active" }
+        }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.model.add_space("sp1", "", "/tmp", crate::model::Tab::new("tb1", "", "p1", "t1"));
+            this.sync(window, cx);
+            let prompts = |this: &super::AppWindow| this.overlays.iter().filter(|o| o.id == "rename").count();
+            this.run("tab.rename", json!({}), window, cx);
+            assert_eq!(prompts(this), 1);
+            this.run("tab.rename", json!({}), window, cx);
+            assert_eq!(prompts(this), 0, "a second press closes the prompt");
+            this.run("tab.rename", json!({}), window, cx);
+            assert_eq!(prompts(this), 1, "and a third opens it again");
+        }));
     }
 
     #[test]
