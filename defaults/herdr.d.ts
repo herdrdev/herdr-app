@@ -256,6 +256,11 @@ export function window(): {
   active: boolean;
 };
 
+/** Sets the OS window's title, which window switchers, taskbars and time trackers read. The last
+ *  call wins, whichever mod made it; null restores "Herdr". It doesn't outlive the app, so set it
+ *  again when your mod starts. Call it when the title changes, not on every render. */
+export function setWindowTitle(title: string | null): null;
+
 /** For a floating mod: where it sits now. `vertical` on the left/right edges, horizontal on
  *  top/bottom; while dragged, where it would land. `hovered` is true while the pointer is on it
  *  (or it's dragged); a `peek` drawer is open then. Null for mods that don't float. */
