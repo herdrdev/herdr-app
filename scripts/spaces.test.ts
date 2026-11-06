@@ -200,6 +200,23 @@ test("dragging a main checkout moves the right id and its children follow", () =
   expect(h.moves).toEqual([]);
 });
 
+test("hovering a space's name shows it whole", () => {
+  const seen: Record<string, string> = {};
+  let id = "";
+  const element: any = new Proxy({}, { get: (_, method) => (...args: any[]) => {
+    if (method === "id") id = args[0];
+    if (method === "tooltip") seen[id] = args[0];
+    if (method === "when" && args[0]) args[1](element);
+    return element;
+  } });
+  const Spaces = new Function("View", "localStorage", "spaces", "v_flex", "h_flex", "div", "svg", "shared", `${source}; return Spaces;`)(
+    class {}, { getItem: () => null, setItem() {} }, () => [], ...Array(4).fill(() => element), () => null,
+  );
+  const name = "a-very-long-project-directory-name";
+  new Spaces().row({ w: { id: "s1", name, active: false }, i: 0 }, {});
+  expect(seen["space-name-s1"]).toBe(name);
+});
+
 test("a machine becoming ready retries a previously rejected batch", () => {
   const h = orderedHarness(["topic", "main"]);
   h.git("main", "repo", false);
