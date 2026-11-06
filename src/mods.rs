@@ -876,13 +876,19 @@ fn read_remote(machine: &str, path: &str) -> Result<Option<String>, String> {
 
 fn exec_future(command: String, args: Vec<String>, cwd: Option<String>, on: Option<String>, limit: Duration) -> impl std::future::Future<Output = Result<HostValue, HostError>> + Send {
     let (tx, rx) = async_channel::bounded(1);
-    std::thread::spawn(move || {
+    let run = move || {
         let r = match on {
             Some(m) => run_remote_with_limit(&m, &command, &args, cwd, limit).map(|(c, o, e)| (c, String::from_utf8_lossy(&o).into_owned(), String::from_utf8_lossy(&e).into_owned())),
             None => run_blocking(&command, &args, cwd, limit),
         };
         let _ = tx.send_blocking(r);
-    });
+    };
+    #[cfg(not(test))]
+    std::thread::spawn(run);
+    // GPUI tests cannot be woken from a foreign thread. Queue the real result
+    // before polling the receiver, without changing production dispatch.
+    #[cfg(test)]
+    run();
     async move {
         let (code, stdout, stderr) = rx.recv().await.map_err(|_| HostError::new("the command was lost"))?.map_err(HostError::new)?;
         Ok(HostObject::new().field("code", code as f64).field("stdout", stdout).field("stderr", stderr).into())
@@ -1215,6 +1221,18 @@ mod tests {
         assert!(error.contains("0.03 s"), "{error}");
         let (code, stdout, _) = run_blocking("sh", &args, None, Duration::from_secs(2)).unwrap();
         assert_eq!((code, stdout.as_str()), (0, "done"));
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn exec_returns_real_output_and_errors_under_the_test_scheduler(_cx: &mut gpui::TestAppContext) {
+        let result = exec_future("sh".into(), vec!["-c".into(), "printf out; printf err >&2; exit 7".into()], None, None, EXEC_LIMIT).await.unwrap();
+        assert!(matches!(result.get("code"), Some(HostValue::Number(7.0))));
+        assert!(matches!(result.get("stdout"), Some(HostValue::Str(s)) if s == "out"));
+        assert!(matches!(result.get("stderr"), Some(HostValue::Str(s)) if s == "err"));
+        assert!(exec_future("herdr_test_missing_command_638".into(), vec![], None, None, EXEC_LIMIT).await.is_err());
+        let error = exec_future("sh".into(), vec!["-c".into(), "sleep 0.15; printf late".into()], None, None, Duration::from_millis(30)).await.unwrap_err();
+        assert!(error.to_string().contains("0.03 s"), "{error}");
     }
 
     #[test]
