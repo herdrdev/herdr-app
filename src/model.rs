@@ -328,7 +328,6 @@ impl Model {
         true
     }
 
-    /// Trades two panes' places in their tab; focus stays with the same pane ids.
     pub fn swap_panes(&mut self, pane: &str, target: &str) -> Result<(), String> {
         let is_pane = |m: &Model, id: &str| m.tab_of(id).and_then(|c| c.root.find(id)).is_some_and(Node::is_pane);
         if !is_pane(self, pane) {
@@ -829,7 +828,6 @@ mod tests {
         assert_eq!(pane_order(&m, "c1"), ["x3", "x2", "x1"]);
         assert_eq!(m.focused_pane().as_deref(), Some("x1"));
         assert_eq!(m.address_of("x1").as_deref(), Some("t1"));
-        // A pane other than the focused one: focus stays where it was.
         assert_eq!(m.swap_panes("x2", "x3"), Ok(()));
         assert_eq!(pane_order(&m, "c1"), ["x2", "x3", "x1"]);
         assert_eq!(m.focused_pane().as_deref(), Some("x1"));

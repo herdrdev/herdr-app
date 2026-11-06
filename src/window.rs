@@ -3471,7 +3471,6 @@ impl AppWindow {
         self.copies.get(id).and_then(|c| self.folders.get(&c.inst.name)).is_some_and(|f| f.hint.focusable)
     }
 
-    /// Swaps a pane with its neighbor in a direction; no neighbor, no swap.
     fn swap_pane(&mut self, from: &str, explicit: bool, dir: &str) -> Result<(), String> {
         let neighbor = self.neighbor(from, dir, false);
         swap_with_neighbor(&mut self.model, from, explicit, neighbor)
@@ -4579,7 +4578,6 @@ enum SwapBy<'a> {
     Target(&'a str),
 }
 
-/// Neighbors come from the shown tab's geometry, so an explicit pane must be shown there.
 fn swap_with_neighbor(model: &mut Model, from: &str, explicit: bool, neighbor: Option<String>) -> Result<(), String> {
     if explicit && model.tab_of(from).and_then(|c| c.root.find(from)).is_none_or(|n| !n.is_pane()) {
         return Err(format!("no pane {from:?}"));
@@ -4597,9 +4595,7 @@ fn swap_with_neighbor(model: &mut Model, from: &str, explicit: bool, neighbor: O
     Ok(())
 }
 
-/// `pane.swap` takes exactly one of `direction` or `target`.
 fn swap_by(args: &Value) -> Result<SwapBy<'_>, String> {
-    // `arg` reads only strings: a non-string direction would otherwise count as absent.
     if args.get("direction").is_some_and(|d| !d.is_string() && !d.is_null()) {
         return Err("pane.swap direction must be a string (or null to omit it)".into());
     }
@@ -5629,7 +5625,6 @@ export default class Probe extends View {
         let mut m = swap_model();
         assert_eq!(super::swap_with_neighbor(&mut m, "x2", true, Some("x1".into())), Ok(()));
         assert_eq!(swap_state(&m), (vec!["x2".into(), "x1".into()], vec!["x3".into()], Some("x1".into())));
-        // No neighbor in that direction: nothing to do, not an error.
         assert_eq!(super::swap_with_neighbor(&mut m, "x2", true, None), Ok(()));
         assert_eq!(swap_state(&m).0, ["x2", "x1"]);
     }
