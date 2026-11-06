@@ -237,7 +237,7 @@ export default class MachineAdd extends View {
       .text_size(12.5)
       .text_color(t.muted)
       .child(svg(I("server")).size(14))
-      .child(div().flex_1().child(`Adding ${props().target}: answer it here`))
+      .child(div().flex_1().child(props().action === "login" ? `Logging in to ${props().target}: answer it here` : `Adding ${props().target}: answer it here`))
       .child(
         div()
           .id("ma-bar-close")
