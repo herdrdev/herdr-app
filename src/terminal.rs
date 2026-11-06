@@ -12,6 +12,8 @@ use std::cell::{Cell, RefCell};
 use std::sync::atomic::{AtomicU64, Ordering};
 use std::time::{Duration, Instant};
 use std::collections::HashMap;
+use std::future::Future;
+use std::task::Poll;
 use crate::links;
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -54,6 +56,8 @@ struct Grid {
     vt: Vt,
     core: Arc<Core>,
     channel: Option<u32>,
+    attach_ready: bool,
+    fit_ready: Option<async_channel::Sender<()>>,
     cell: Size<Pixels>,
     /// The window's scale factor, from the last prepaint. Programs see cells,
     /// images and pixel mouse reports in device pixels, as in Ghostty.
@@ -123,6 +127,7 @@ pub struct TerminalView {
     search_input: Option<Entity<InputState>>,
     pending_search_nav: Option<bool>,
     search_task: Option<Task<()>>,
+    attach_deadline: Instant,
     _reader: Option<Task<()>>,
 }
 
@@ -165,6 +170,13 @@ pub fn initial_display(window: &Window) -> serde_json::Value {
 }
 
 impl Grid {
+    fn ready_to_attach(&mut self) {
+        self.attach_ready = true;
+        if let Some(ready) = self.fit_ready.take() {
+            let _ = ready.try_send(());
+        }
+    }
+
     fn refresh_theme(&mut self, theme: &vt::Theme, cell: (u32, u32)) {
         self.vt.set_theme(theme.clone());
         if let Some(chan) = self.channel
@@ -181,6 +193,7 @@ impl Grid {
         let dev = device_cell(cell, scale);
         // Before the size, so a program woken by it asks for the new cell.
         self.refresh_theme(&vt::theme(), dev);
+        self.ready_to_attach();
         if (cols, rows) == (self.vt.cols, self.vt.rows) && dev == self.vt_cell {
             return;
         }
@@ -218,9 +231,9 @@ fn track_mouse_button(buttons: &mut Vec<MouseButton>, action: GhosttyMouseAction
 }
 
 impl TerminalView {
-    /// Attaches at `size` (cols, rows): the terminal's current size, so attaching
-    /// a hidden terminal doesn't resize its program.
+    /// Waits for pane layout before replay, bounded so an unpainted view still attaches.
     pub fn attach(core: Arc<Core>, address: String, size_hint: (u16, u16), cx: &mut Context<Self>) -> Self {
+        let attach_deadline = cx.background_executor().now() + Duration::from_millis(100);
         let mut view = TerminalView {
             address: address.clone(),
             title: address.clone(),
@@ -237,6 +250,8 @@ impl TerminalView {
                 vt: Vt::new(size_hint.0.max(2), size_hint.1.max(1)),
                 core: core.clone(),
                 channel: None,
+                attach_ready: false,
+                fit_ready: None,
                 cell: size(px(9.0), px(18.0)),
                 scale: 1.0,
                 vt_cell: (9, 18),
@@ -264,6 +279,7 @@ impl TerminalView {
             search_input: None,
             pending_search_nav: None,
             search_task: None,
+            attach_deadline,
             _reader: None,
         };
         view.connect(core, cx);
@@ -289,7 +305,7 @@ impl TerminalView {
     /// Attaches off the UI thread: a terminal on a machine still dialing can
     /// take seconds, and the window must keep drawing meanwhile.
     fn connect(&mut self, core: Arc<Core>, cx: &mut Context<Self>) {
-        let (cols, rows, facts) = {
+        let fit_ready = {
             let mut g = self.grid.borrow_mut();
             let (cols, rows) = (g.vt.cols, g.vt.rows);
             // The core repaints the whole screen (and history) on attach.
@@ -301,14 +317,38 @@ impl TerminalView {
             }
             g.vt_cell = cell;
             g.told_display = None;
-            let facts = display_update(&mut g.told_display, &vt::theme(), cell).unwrap();
             g.core = core.clone();
             g.channel = None;
-            (cols, rows, facts)
+            if g.attach_ready {
+                None
+            } else {
+                let (ready, wait) = async_channel::bounded(1);
+                g.fit_ready = Some(ready);
+                Some(wait)
+            }
         };
         let address = self.address.clone();
+        let deadline = cx.background_executor().timer(self.attach_deadline.saturating_duration_since(cx.background_executor().now()));
         // Replacing the task drops an attach still in flight for an older connection.
         self._reader = Some(cx.spawn(async move |this, cx| {
+            if let Some(ready) = fit_ready {
+                let mut ready = std::pin::pin!(ready.recv());
+                let mut deadline = std::pin::pin!(deadline);
+                std::future::poll_fn(|cx| {
+                    if ready.as_mut().poll(cx).is_ready() || deadline.as_mut().poll(cx).is_ready() {
+                        Poll::Ready(())
+                    } else {
+                        Poll::Pending
+                    }
+                }).await;
+            }
+            let Ok((cols, rows, facts)) = this.update(cx, |this, _| {
+                let mut g = this.grid.borrow_mut();
+                g.ready_to_attach();
+                let cell = device_cell(g.cell, g.scale);
+                let facts = display_update(&mut g.told_display, &vt::theme(), cell).unwrap();
+                (g.vt.cols, g.vt.rows, facts)
+            }) else { return };
             let attached = cx.background_executor().spawn(async move { core.attach(&address, cols, rows, facts) }).await;
             let Ok(Some(rx)) = this.update(cx, |this, cx| this.attached(attached, (cols, rows), cx)) else {
                 return;
@@ -337,15 +377,18 @@ impl TerminalView {
             Ok(attached) => {
                 self.lost = false;
                 let mut g = self.grid.borrow_mut();
+                // Replay uses the size requested by attach, not a newer pane layout.
+                if (g.vt.cols, g.vt.rows) != attached_size {
+                    g.core.detach(attached.channel);
+                    let core = g.core.clone();
+                    drop(g);
+                    self.connect(core, cx);
+                    return None;
+                }
                 g.channel = Some(attached.channel);
                 // The theme or cell may have changed while the attach was in flight.
                 let cell = device_cell(g.cell, g.scale);
                 g.refresh_theme(&vt::theme(), cell);
-                // The pane may have been laid out while the attach was in flight.
-                let now = (g.vt.cols, g.vt.rows);
-                if now != attached_size {
-                    g.core.resize(attached.channel, now.0, now.1);
-                }
                 drop(g);
                 if let Some(t) = attached.terminal.get("title").and_then(|t| t.as_str()).filter(|t| !t.is_empty()) {
                     self.set_title(t, cx);
@@ -2163,6 +2206,54 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(ends.read_with(cx, |count, _| *count), 1);
+    }
+
+    #[gpui::test]
+    fn terminal_attaches_only_after_its_first_fit(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        let terminal = cx.new(|cx| super::TerminalView::attach(crate::hc::offline(), "t1".into(), (120, 40), cx));
+        cx.run_until_parked();
+        terminal.read_with(cx, |terminal, _| assert!(!terminal.lost, "must not contact the core before layout"));
+        terminal.update(cx, |terminal, _| terminal.fit(114, 30, size(px(8.), px(18.)), 1.));
+        cx.run_until_parked();
+        terminal.read_with(cx, |terminal, _| {
+            assert!(terminal.lost, "the fitted pane must attempt to attach");
+            assert_eq!(terminal.dimensions(), (114, 30));
+        });
+    }
+
+    #[gpui::test]
+    fn an_unpainted_terminal_attaches_at_its_creation_deadline(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        let terminal = cx.new(|cx| super::TerminalView::attach(crate::hc::offline(), "t1".into(), (120, 40), cx));
+        cx.run_until_parked();
+        cx.executor().advance_clock(std::time::Duration::from_millis(99));
+        cx.run_until_parked();
+        terminal.read_with(cx, |terminal, _| assert!(!terminal.lost));
+        cx.executor().advance_clock(std::time::Duration::from_millis(1));
+        cx.run_until_parked();
+        terminal.read_with(cx, |terminal, _| {
+            assert!(terminal.lost, "an unpainted view must not wait forever");
+            assert_eq!(terminal.dimensions(), (120, 40));
+        });
+    }
+
+    #[gpui::test]
+    fn terminal_discards_replay_for_an_outdated_pane_size(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        let terminal = cx.new(|cx| super::TerminalView::attach(crate::hc::offline(), "t1".into(), (120, 40), cx));
+        let (tx, rx) = async_channel::unbounded();
+        terminal.update(cx, |terminal, cx| {
+            terminal.fit(114, 30, size(px(8.), px(18.)), 1.);
+            let attached = crate::hc::Attached { channel: 7, stream: rx, terminal: json!({"title": "outdated replay"}) };
+            assert!(terminal.attached(Ok(attached), (120, 40), cx).is_none());
+            assert!(terminal.grid.borrow().channel.is_none());
+            assert_ne!(terminal.title, "outdated replay");
+            assert!(tx.is_closed(), "the wrong-sized replay must not be consumed");
+        });
     }
 
     #[gpui::test]
