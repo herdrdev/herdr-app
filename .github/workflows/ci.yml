@@ -125,7 +125,7 @@ jobs:
         run: cargo test --locked --config 'profile.dev.package."*".opt-level=0' --test shot_pixels
       - name: Check release packaging
         if: matrix.platform == 'linux-x86_64' || runner.os == 'macOS'
-        run: python3 -m unittest discover -s scripts -p test_distribution.py
+        run: python3 -m unittest discover -s scripts -p 'test_*distribution.py'
       - name: Install Bun
         if: matrix.platform == 'linux-x86_64'
         run: curl -fsSL https://bun.sh/install | bash -s "bun-v1.4.4"

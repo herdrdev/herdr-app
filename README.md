@@ -15,13 +15,15 @@ Linux needs a desktop session and a working Vulkan driver. macOS builds require 
 The installer adds Herdr to your apps and puts the command in `~/.local/bin`.
 Add that folder to your PATH if the installer asks.
 On macOS the app lives in `~/Applications/Herdr.app`.
-For drag-and-drop installation on Apple Silicon, download [Herdr.dmg](https://releases.herdr.dev/app/Herdr.dmg) and drag Herdr to Applications. On Intel Macs, use the shell installer above.
+For drag-and-drop installation, download the [Apple Silicon DMG](https://releases.herdr.dev/app/Herdr.dmg) or [Intel DMG](https://releases.herdr.dev/app/Herdr-macos-x86_64.dmg) and drag Herdr to Applications.
 
 On macOS (Apple Silicon), you can also install with [Homebrew](https://brew.sh/):
 
 ```sh
 brew install --cask herdr-app
 ```
+
+The [Homebrew cask](https://github.com/Homebrew/homebrew-cask/blob/master/Casks/h/herdr-app.rb) is maintained separately and currently admits Apple Silicon only. [Intel cask release coordination](distribution/macos/homebrew.md) follows the availability of both official DMGs.
 
 ### Windows
 
