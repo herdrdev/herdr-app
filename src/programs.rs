@@ -419,6 +419,11 @@ mod tests {
     }
 
     #[test]
+    fn codex_starts_without_a_shared_daemon() {
+        assert_eq!(t().programs["codex"].run, vec!["codex", "--no-daemon"]);
+    }
+
+    #[test]
     fn every_entry_has_its_icon() {
         for (k, e) in t().programs {
             let icon = e.icon.unwrap_or_else(|| panic!("{k} has no icon"));
