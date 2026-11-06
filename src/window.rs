@@ -3060,11 +3060,10 @@ impl AppWindow {
                 }
             }
             "pane.equalize" => {
-                let id = match a.get("tab") {
-                    None | Some(Value::Null) => self.model.active_tab().map(|c| c.id.clone()).unwrap_or_default(),
-                    Some(Value::String(id)) => id.clone(),
-                    Some(_) => return self.fail("pane.equalize tab must be a tab id (or null for the focused tab)"),
-                };
+                if a.get("tab").is_some_and(|t| !t.is_null() && !t.is_string()) {
+                    return self.fail("pane.equalize tab must be a tab id (or null for the focused tab)");
+                }
+                let Some(id) = Self::owned(a, "tab").or(active_ctx) else { return self.fail("no tab to equalize") };
                 let Some(c) = self.model.tab_mut(&id) else { return self.fail(format!("no tab {id:?}")) };
                 c.root.equalize();
             }
