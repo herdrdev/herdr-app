@@ -26,6 +26,8 @@ mod remote_shell;
 mod settings;
 mod setup;
 mod sound;
+mod smooth_scroll;
+mod application_scroll;
 mod spawn;
 mod sprites;
 mod telemetry;

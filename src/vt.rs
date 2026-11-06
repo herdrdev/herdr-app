@@ -507,6 +507,8 @@ pub struct Vt {
     /// The width and colors they were read with: a change reads every row.
     seen_with: (u16, u64),
     placements_cache: RefCell<Option<Vec<Placement>>>,
+    overscan: bool,
+    captured_guard_row: bool,
     /// Whether the program wants win32 key events (Ghostty doesn't track it).
     pub win32: crate::win32_keys::Win32Input,
 }
@@ -739,6 +741,8 @@ impl Vt {
                 seen: HashMap::new(),
                 seen_with: (0, 0),
                 placements_cache: RefCell::new(None),
+                overscan: false,
+                captured_guard_row: false,
                 win32: Default::default(),
             };
             vt.apply_theme();
@@ -961,7 +965,19 @@ impl Vt {
         unsafe {
             let mut r = GhosttyGridRef { size: std::mem::size_of::<GhosttyGridRef>(), ..Default::default() };
             let mut p = GhosttyPoint { tag: GHOSTTY_POINT_TAG_VIEWPORT, ..Default::default() };
-            p.value.coordinate = GhosttyPointCoordinate { x: col.min(self.cols.saturating_sub(1)), y: row.min(self.rows.saturating_sub(1)) as u32 };
+            let last = self.rows.saturating_sub(1) + u16::from(self.captured_guard_row);
+            let selected_row = row.min(last);
+            let mut screen_y = u32::from(selected_row);
+            if selected_row == self.rows {
+                let first = self.grid_ref(GHOSTTY_POINT_TAG_VIEWPORT, 0, 0);
+                let mut top = GhosttyPointCoordinate::default();
+                let Some(first) = first else { return; };
+                if ghostty_terminal_point_from_grid_ref(self.term, &first, GHOSTTY_POINT_TAG_SCREEN, &mut top) != GHOSTTY_SUCCESS { return; }
+                let Some(at) = top.y.checked_add(screen_y) else { return; };
+                screen_y = at;
+                p.tag = GHOSTTY_POINT_TAG_SCREEN;
+            }
+            p.value.coordinate = GhosttyPointCoordinate { x: col.min(self.cols.saturating_sub(1)), y: screen_y };
             if ghostty_terminal_grid_ref(self.term, p, &mut r) != GHOSTTY_SUCCESS {
                 return;
             }
@@ -1049,7 +1065,7 @@ impl Vt {
     /// new lines themselves. `find` is told when its text holds lines joined; a
     /// link found there wins when it's longer.
     pub fn link_at(&self, col: u16, row: u16, mut find: impl FnMut(&str, usize, bool) -> Option<std::ops::Range<usize>>) -> Option<LinkHit> {
-        if col >= self.cols || row >= self.rows {
+        if col >= self.cols || row as u32 >= self.rows as u32 + u32::from(self.captured_guard_row) {
             return None;
         }
         // Screen rows count from the top of the scrollback; the viewport starts at `top`.
@@ -1202,7 +1218,7 @@ impl Vt {
         };
         let mut spans = Spans::new();
         for s in chosen {
-            let Some(vy) = s.y.checked_sub(top).filter(|vy| *vy < self.rows as u32) else { continue };
+            let Some(vy) = s.y.checked_sub(top).filter(|vy| *vy < self.rows as u32 + u32::from(self.captured_guard_row)) else { continue };
             let end = s.x + s.width - 1;
             match spans.last_mut() {
                 Some(last) if last.0 == vy as u16 => last.2 = end,
@@ -1282,6 +1298,37 @@ impl Vt {
         let mut screen: GhosttyTerminalScreen = GHOSTTY_TERMINAL_SCREEN_PRIMARY;
         unsafe { ghostty_terminal_get(self.term, GHOSTTY_TERMINAL_DATA_ACTIVE_SCREEN, &mut screen as *mut _ as *mut c_void) };
         screen == GHOSTTY_TERMINAL_SCREEN_ALTERNATE
+    }
+
+    /// Rows available above the live bottom, and the current distance from it.
+    pub fn scroll_metrics(&self) -> (u32, u32) {
+        let mut bar = GhosttyTerminalScrollbar::default();
+        unsafe { ghostty_terminal_get(self.term, GHOSTTY_TERMINAL_DATA_SCROLLBAR, &mut bar as *mut _ as *mut c_void); }
+        let maximum = bar.total.saturating_sub(bar.len).min(u32::MAX as u64) as u32;
+        (maximum, (maximum as u64).saturating_sub(bar.offset).min(maximum as u64) as u32)
+    }
+
+    pub fn scroll_to_position(&mut self, above_bottom: u32) {
+        let (maximum, current) = self.scroll_metrics();
+        let wanted = above_bottom.min(maximum);
+        if wanted != current { self.scroll_viewport(current as isize - wanted as isize); }
+    }
+
+    pub fn render_held(&self) -> bool { self.shared.held_since.is_some() }
+
+    /// Image placement geometry is viewport-clipped by Ghostty. Keep its
+    /// existing whole-row path until guard-row image geometry is available.
+    pub fn has_image_placements(&self) -> bool {
+        unsafe {
+            let mut graphics: GhosttyKittyGraphics = std::ptr::null_mut();
+            if ghostty_terminal_get(self.term, GHOSTTY_TERMINAL_DATA_KITTY_GRAPHICS, &mut graphics as *mut _ as *mut c_void) != GHOSTTY_SUCCESS || graphics.is_null() { return false; }
+            let mut it: GhosttyKittyGraphicsPlacementIterator = std::ptr::null_mut();
+            if ghostty_kitty_graphics_placement_iterator_new(std::ptr::null(), &mut it) != GHOSTTY_SUCCESS { return true; }
+            let result = ghostty_kitty_graphics_get(graphics, GHOSTTY_KITTY_GRAPHICS_DATA_PLACEMENT_ITERATOR, &mut it as *mut _ as *mut c_void);
+            let found = result != GHOSTTY_SUCCESS || ghostty_kitty_graphics_placement_next(it);
+            ghostty_kitty_graphics_placement_iterator_free(it);
+            found
+        }
     }
 
     pub fn scroll_viewport(&mut self, delta: isize) {
@@ -1531,8 +1578,16 @@ impl Vt {
     }
 
     /// Updates the render state (respecting synchronized output) and reads one frame.
-    pub fn frame(&mut self) -> Frame {
+    pub fn frame(&mut self) -> Frame { self.frame_with_overscan(false) }
+
+    /// Capture one neighboring row without resizing or moving the viewport.
+    pub fn frame_with_overscan(&mut self, enabled: bool) -> Frame {
         unsafe {
+            if self.overscan != enabled {
+                let request = GhosttyRenderStateOverscan { above: 0, below: u16::from(enabled) };
+                ghostty_render_state_set(self.shared.state, GHOSTTY_RENDER_STATE_OPTION_OVERSCAN, &request as *const _ as *const c_void);
+                self.overscan = enabled;
+            }
             if let Some(since) = self.shared.held_since
                 && since.elapsed() > MAX_HOLD
             {
@@ -1547,6 +1602,9 @@ impl Vt {
 
             let mut colors = GhosttyRenderStateColors { size: std::mem::size_of::<GhosttyRenderStateColors>(), ..Default::default() };
             ghostty_render_state_get(state, GHOSTTY_RENDER_STATE_DATA_COLORS, &mut colors as *mut _ as *mut c_void);
+            let mut captured = GhosttyRenderStateOverscan::default();
+            ghostty_render_state_get(state, GHOSTTY_RENDER_STATE_DATA_OVERSCAN, &mut captured as *mut _ as *mut c_void);
+            self.captured_guard_row = enabled && captured.below > 0;
             let fg_default = Rgb::from(colors.foreground);
             let bg_default = Rgb::from(colors.background);
 
@@ -1591,6 +1649,7 @@ impl Vt {
                 }
                 rows.push(row);
             }
+            if !enabled { rows.truncate(self.rows as usize); }
             (self.seen, self.seen_with) = (seen, with);
 
             let mut cur = GhosttyRenderStateCursor { size: std::mem::size_of::<GhosttyRenderStateCursor>(), ..Default::default() };
@@ -1746,6 +1805,14 @@ impl Vt {
         let (x, y) = (x / cw.max(1.0) * cwi, y / ch.max(1.0) * chi);
         unsafe {
             ghostty_mouse_encoder_setopt_from_terminal(self.mouse, self.term);
+            // Core snapshots can restore both extended formats in numeric
+            // order, losing which one the program selected last. Prefer the
+            // advertised SGR format over urxvt in that mixed state; direct
+            // attach clients parse SGR, and urxvt-only/pixel modes stay intact.
+            if self.mode(1006) && self.mode(1015) && !self.mode(1016) {
+                let format: GhosttyMouseFormat = GHOSTTY_MOUSE_FORMAT_SGR;
+                ghostty_mouse_encoder_setopt(self.mouse, GHOSTTY_MOUSE_ENCODER_OPT_FORMAT, &format as *const _ as *const c_void);
+            }
             let s = GhosttyMouseEncoderSize {
                 size: std::mem::size_of::<GhosttyMouseEncoderSize>(),
                 screen_width: cols * cwi as u32,
@@ -2107,6 +2174,25 @@ mod tests {
     }
 
     #[test]
+    fn restored_mixed_mouse_formats_prefer_advertised_sgr() {
+        for setup in [b"\x1b[?1000h\x1b[?1006h\x1b[?1015h".as_slice(), b"\x1b[?1000h\x1b[?1015h\x1b[?1006h"] {
+            let mut vt = Vt::new(80, 24);
+            vt.write(setup);
+            assert_eq!(vt.encode_mouse(GHOSTTY_MOUSE_ACTION_PRESS, Some(GHOSTTY_MOUSE_BUTTON_FOUR), 0, 15.0, 25.0, (80, 24, 10.0, 20.0), false), b"\x1b[<64;2;2M");
+            assert_eq!(vt.encode_mouse(GHOSTTY_MOUSE_ACTION_RELEASE, Some(GHOSTTY_MOUSE_BUTTON_LEFT), 0, 15.0, 25.0, (80, 24, 10.0, 20.0), false), b"\x1b[<0;2;2m");
+        }
+    }
+
+    #[test]
+    fn mixed_format_compatibility_preserves_urxvt_only_and_pixel_modes() {
+        let mut vt = Vt::new(80, 24);
+        vt.write(b"\x1b[?1000h\x1b[?1015h");
+        assert_eq!(vt.encode_mouse(GHOSTTY_MOUSE_ACTION_PRESS, Some(GHOSTTY_MOUSE_BUTTON_FOUR), 0, 15.0, 25.0, (80, 24, 10.0, 20.0), false), b"\x1b[96;2;2M");
+        vt.write(b"\x1b[?1006h\x1b[?1016h");
+        assert_eq!(vt.encode_mouse(GHOSTTY_MOUSE_ACTION_PRESS, Some(GHOSTTY_MOUSE_BUTTON_FOUR), 0, 15.0, 25.0, (80, 24, 10.0, 20.0), false), b"\x1b[<64;15;25M");
+    }
+
+    #[test]
     fn mouse_hover_tracks_only_changed_cells_and_respects_button_mode() {
         let mut vt = Vt::new(80, 2);
         let size = (80, 2, 10.0, 20.0);
@@ -2146,8 +2232,10 @@ mod tests {
     fn kitty_images_are_stored_placed_and_acknowledged() {
         let mut vt = Vt::new(20, 5);
         vt.resize(20, 5, 8, 16);
+        assert!(!vt.has_image_placements());
         // A 1x1 red PNG, transmitted and displayed, asking for a reply.
         vt.write(b"\x1b_Ga=T,f=100,i=7,q=0;iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==\x1b\\");
+        assert!(vt.has_image_placements());
         let p = vt.placements();
         assert_eq!(p.len(), 1, "{p:?}");
         assert_eq!((p[0].image, p[0].col, p[0].row), (7, 0, 0));
@@ -2175,6 +2263,7 @@ mod tests {
         let mut vt = Vt::new(20, 6);
         vt.resize(20, 6, 8, 8);
         virtual_image(&mut vt, 7, 0);
+        assert!(vt.has_image_placements());
         vt.write(b"\x1b[38;5;7m");
         for row in 0..4 {
             for col in 0..8 {
@@ -2541,5 +2630,66 @@ mod tests {
         vt.scroll_to_bottom();
         let bottom = visible(&mut vt);
         assert!(bottom.iter().any(|row| row.starts_with("0050")), "{bottom:?}");
+    }
+}
+
+#[cfg(test)]
+mod smooth_scroll_tests {
+    use super::*;
+
+    fn history() -> Vt {
+        let mut vt = Vt::new(20, 3);
+        vt.resize(20, 3, 10, 20);
+        vt.write(b"first\r\nsecond\r\nthird\r\nfourth\r\nfifth");
+        vt.scroll_to_position(1);
+        vt
+    }
+
+    #[test]
+    fn overscan_reads_one_guard_row_without_moving_or_resizing_the_terminal() {
+        let mut vt = history();
+        let before = vt.scroll_metrics();
+        let normal = vt.frame();
+        let extended = vt.frame_with_overscan(true);
+        assert_eq!(normal.rows.len(), 3);
+        assert_eq!(extended.rows.len(), 4);
+        assert_eq!(vt.rows, 3);
+        assert_eq!(vt.scroll_metrics(), before);
+        assert!(extended.rows[3].iter().map(|c| c.text.as_str()).collect::<String>().starts_with("fifth"));
+        assert_eq!(vt.frame().rows.len(), 3);
+        assert_eq!(vt.scroll_metrics(), before);
+    }
+
+    #[test]
+    fn a_selection_can_copy_the_partially_visible_guard_row() {
+        let mut vt = history();
+        vt.frame_with_overscan(true);
+        vt.select(Select::Press, 0, 3, 1.0, 61.0, 10.0, 80.0);
+        vt.select(Select::Drag, 5, 3, 51.0, 61.0, 10.0, 80.0);
+        vt.select(Select::Release, 5, 3, 51.0, 61.0, 10.0, 80.0);
+        assert_eq!(vt.selection_text().unwrap().trim(), "fifth");
+        let frame = vt.frame_with_overscan(true);
+        assert!(frame.rows[3].iter().take(5).all(|c| c.bg == Some(vt.theme.selection_bg)));
+    }
+
+    #[test]
+    fn links_in_the_guard_row_keep_their_real_target_and_span() {
+        let mut vt = Vt::new(30, 3);
+        vt.write(b"first\r\nsecond\r\nthird\r\nfourth\r\n\x1b]8;;https://example.org/guard\x1b\\label\x1b]8;;\x1b\\");
+        vt.scroll_to_position(1);
+        vt.frame_with_overscan(true);
+        let hit = vt.link_at(1, 3, |_, _, _| None).unwrap();
+        assert_eq!(hit.target, "https://example.org/guard");
+        assert!(hit.spans.iter().any(|span| span.0 == 3));
+        vt.frame();
+        assert!(vt.link_at(1, 3, |_, _, _| None).is_none());
+    }
+
+    #[test]
+    fn no_guard_is_reported_past_the_live_bottom() {
+        let mut vt = history();
+        vt.scroll_to_bottom();
+        assert_eq!(vt.frame_with_overscan(true).rows.len(), 3);
+        assert!(!vt.captured_guard_row);
     }
 }
