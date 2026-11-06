@@ -39,6 +39,7 @@ jobs:
           # Match release's glibc floor and native platform runners.
           - { platform: linux-x86_64, runner: ubuntu-22.04 }
           - { platform: macos-aarch64, runner: macos-15 }
+          - { platform: macos-x86_64, runner: macos-15-intel }
           - { platform: windows-x86_64, runner: windows-2022 }
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
@@ -68,7 +69,7 @@ jobs:
             ~/.cargo/registry/cache
             ~/.cargo/git/db
             target
-          key: ci-v2-${{ matrix.platform }}-${{ env.RUST_TOOLCHAIN }}-zig${{ env.ZIG_VERSION }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'vendor/**', 'crates/**', '.github/workflows/ci.yml') }}
+          key: ci-v2-${{ matrix.platform }}-${{ env.RUST_TOOLCHAIN }}-zig${{ env.ZIG_VERSION }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', '.cargo/config.toml', 'vendor/**', 'crates/**', '.github/workflows/ci.yml') }}
           restore-keys: ci-v2-${{ matrix.platform }}-${{ env.RUST_TOOLCHAIN }}-zig${{ env.ZIG_VERSION }}-
       - name: Linux build dependencies
         if: runner.os == 'Linux'
@@ -123,7 +124,7 @@ jobs:
           HERDR_SHOT_NATIVE_TEST: "1"
         run: cargo test --locked --config 'profile.dev.package."*".opt-level=0' --test shot_pixels
       - name: Check release packaging
-        if: matrix.platform == 'linux-x86_64'
+        if: matrix.platform == 'linux-x86_64' || runner.os == 'macOS'
         run: python3 -m unittest discover -s scripts -p test_distribution.py
       - name: Install Bun
         if: matrix.platform == 'linux-x86_64'

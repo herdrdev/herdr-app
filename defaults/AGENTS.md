@@ -695,7 +695,9 @@ What's about the user, never a look:
   media uses the normal HTTPS cache.
   Mods use `updates().notes` and `presentUpdateNotes([version])` only
   for spotlight entries actually shown expanded, not collapsed headlines.
-  macOS releases require Apple Silicon; Intel Macs must build from source.
+  macOS releases require macOS 13.0 or newer and a compatible Metal GPU, on
+  Apple Silicon and Intel. Intel Macs use the shell
+  installer; the DMG and Homebrew cask are Apple-Silicon-only.
   Keep signed macOS bundles unchanged: don't edit their Info.plist or
   re-sign them. On launch, an installed macOS bundle creates or repairs its
   own `~/.local/bin/herdr-app` symlink, leaving personal files and other

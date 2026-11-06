@@ -26,6 +26,8 @@ on:
     paths:
       - Cargo.lock
       - Cargo.toml
+      - build.rs
+      - .cargo/config.toml
       - vendor/**
       - crates/**
       - scripts/package
@@ -69,6 +71,7 @@ jobs:
           - { target: linux-x86_64, runner: ubuntu-22.04 }
           - { target: linux-aarch64, runner: ubuntu-22.04-arm }
           - { target: macos-aarch64, runner: macos-15 }
+          - { target: macos-x86_64, runner: macos-15-intel }
           - { target: windows-x86_64, runner: windows-2022 }
     runs-on: ${{ matrix.runner }}
     # Only tags can access the release environment's Apple certificate.
