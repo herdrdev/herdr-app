@@ -2837,6 +2837,9 @@ impl AppWindow {
     }
 
     fn dispatch(&mut self, name: &str, a: &Value, person: bool, window: &mut Window, cx: &mut Context<Self>) {
+        // Creation is one UI update: background items keep the existing selection.
+        let selection = (matches!(name, "space.new" | "tab.new") && a.get("focus").and_then(Value::as_bool) == Some(false))
+            .then(|| (self.model.active.clone(), self.model.spaces.iter().map(|p| (p.id.clone(), p.active.clone())).collect::<Vec<_>>()));
         let active_ctx = self.model.active_tab().map(|c| c.id.clone());
         match name {
             // ---- spaces
@@ -3385,6 +3388,13 @@ impl AppWindow {
             other => {
                 tracing::warn!("command {other:?} is listed but not handled");
                 return;
+            }
+        }
+        if let Some((active, tabs)) = selection {
+            // With no prior selection, show the first item instead of a blank view.
+            if active.is_some() { self.model.active = active; }
+            for (space, tab) in tabs {
+                if tab.is_some() && let Some(space) = self.model.space_mut(&space) { space.active = tab; }
             }
         }
         self.sync(window, cx);

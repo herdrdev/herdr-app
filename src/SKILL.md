@@ -25,7 +25,9 @@ only after a successful check; on failure, check the connection and retry.
 
 ## Show something when asked
 
-New spaces and tabs are shown immediately: only create them when asked.
+New spaces and tabs are shown immediately by default: only create them when asked.
+Pass `focus: false` to `space.new` or `tab.new` to leave the selected space and
+tab unchanged. When nothing is selected yet, the first new item is shown.
 Pick an explicit, useful name for every new space and tab; don't rely on
 default names. Use IDs from `ls` rather than guessing or acting on the wrong
 focused pane.
