@@ -674,6 +674,15 @@ What's about the user, never a look:
 - `core`: the herdr-core binary to use, when it isn't where Herdr looks
   (PATH, the login shell's PATH, `~/.local/bin`, Homebrew, mise, Nix,
   cargo). Read at start.
+- `wsl`: Windows only, the WSL distribution name (such as `"Ubuntu"`) that
+  runs "This computer": its herdr-core (`hc`), local spaces, terminals,
+  agents, shell and local mod commands (`home()`, `exec`, `files`). Absent
+  uses Windows itself. Available in Settings → Machines on the This computer
+  row; herdr-core must already be installed there. Choose Restart to apply a
+  selection; until then the current environment stays active. The app and its
+  configuration (`appHome()`) stay on Windows. Startup discovery and the Settings
+  check share the bundled `frame/settings/find-core.sh`; like the rest of `frame/`,
+  it is rewritten on start, so don't edit it.
 - `font`, `font_size`, `ui_font`: used where the layout doesn't set its
   own. Herdr (main) leaves these unset. Bigger panels: `zoom`.
 - `font_ligatures`: programming ligatures are off by default; set `true` to
@@ -1020,7 +1029,14 @@ All of it is in `herdr.d.ts`. In short:
 - Files: `readTextFile(path, { on })` (here, or on that machine),
   `writeTextFile(path, text, expected)` (here only), and
   `watchFolder(dir)` (here only; poll a remote space's folder): resolves with the changed paths the next time anything
-  under `dir` changes. On Linux, Git-ignored directories and Git objects are skipped,
+  under `dir` changes. With WSL active, local guest paths stay Linux paths for reads,
+  writes, the folder picker and watch results; `appHome()` paths remain on Windows.
+  Host paths use the selected distro's actual mount configuration, not a guessed `/mnt/c`.
+  Guest paths containing a literal backslash, `..`, or a name ending in a space or period
+  cannot be written or watched through the Windows file API; use `exec` in the guest instead.
+  Reads use a bounded guest command for those paths so Windows cannot redirect them to a different file;
+  invalid UTF-8 and read errors are reported rather than treated as missing files.
+  On Linux, Git-ignored directories and Git objects are skipped,
   and trees above 4096 non-ignored directories reject the watch; use a timer fallback.
   macOS and Windows watch recursively, including ignored directories.
   A returned root path means refresh everything (the pending paths are bounded).

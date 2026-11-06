@@ -102,7 +102,7 @@ pub fn installed(commands: &[String], on: Option<&str>) -> Vec<String> {
             };
             result.map(|(_, out, _)| String::from_utf8_lossy(&out).into_owned()).unwrap_or_default()
         }
-        None if cfg!(windows) => {
+        None if cfg!(windows) && crate::wsl::active().is_none() => {
             // The core refreshes user/system PATH; the app may have inherited only the system PATH.
             let mut args = vec!["exec".into(), "--".into(), crate::window::shell()];
             args.extend(installed_powershell(commands));
@@ -111,7 +111,8 @@ pub fn installed(commands: &[String], on: Option<&str>) -> Vec<String> {
         None => {
             let shell = crate::window::shell();
             let line = installed_line(commands, base(&shell) == "fish");
-            crate::mods::run_here(&shell, &["-ic".into(), line]).unwrap_or_default()
+            let flag = if crate::wsl::active().is_some() { "-lic" } else { "-ic" };
+            crate::mods::run_here(&shell, &[flag.into(), line]).unwrap_or_default()
         }
     };
     let found: std::collections::HashSet<&str> = out.split("herdr-has:").skip(1).filter_map(|s| s.split_whitespace().next()).collect();

@@ -516,14 +516,21 @@ fn swap(root: &Path) -> bool {
 }
 
 /// Opens the app again once this process has exited (after `apply`).
-pub fn relaunch() {
-    relaunch_expected(None);
+pub fn relaunch() -> bool {
+    relaunch_expected(None)
 }
 
 #[cfg(windows)]
 fn relaunch_expected(expected: Option<&str>) -> bool {
-    let Some(root) = root() else { return false };
-    let exe = exe_in(&root).to_string_lossy().replace('\'', "''");
+    let exe = match (root(), expected) {
+        (Some(root), _) => exe_in(&root),
+        (None, None) => match std::env::current_exe() {
+            Ok(exe) => exe,
+            Err(_) => return false,
+        },
+        (None, Some(_)) => return false,
+    };
+    let exe = exe.to_string_lossy().replace('\'', "''");
     let script = format!("Wait-Process -Id {} -ErrorAction SilentlyContinue; Start-Process '{exe}'", std::process::id());
     let mut command = crate::spawn::command("powershell");
     if let Some(expected) = expected {

@@ -2,7 +2,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input, Popup } from "gpui-base";
-import { hc, run, theme, themes, fonts, updates, telemetry, settings, layouts, shared, appHome, readTextFile, writeTextFile, playSound, props, closeOverlay, window } from "herdr";
+import { hc, exec, run, theme, themes, fonts, updates, telemetry, settings, layouts, shared, appHome, readTextFile, writeTextFile, playSound, props, closeOverlay, window } from "herdr";
 
 const I = (name) => `frame/settings/${name}.svg`;
 
@@ -30,7 +30,7 @@ export default class Settings extends View {
   init(_props, cx) {
     const asked = props()?.section;
     this.section = SECTIONS.some((s) => s.id === asked) ? asked : "look";
-    this.picking = null; // "font" | "ui_font" while its list is open
+    this.picking = null; // "font" | "ui_font" | "wsl" while its list is open
     this.filter = "";
     this.fontInput = InputState.new({ placeholder: "Type to search fonts" });
     this.fontInput.on("change", (_e, cx) => { this.filter = this.fontInput.value(); cx.notify(); });
@@ -44,6 +44,7 @@ export default class Settings extends View {
     });
     this.person = {};
     this.raw = null;
+    this.saveError = null;
     this.previews = {}; // layout name -> its "preview" picture
     this.previewsOf = "";
     this.showData = false;
@@ -54,10 +55,13 @@ export default class Settings extends View {
     this.machineResults = {};
     this.machineEdit = null;
     this.machineNotice = null;
+    this.wslDistros = [];
+    this.wslChecking = null;
+    this.wslError = null;
     this.handle = cx.focus_handle();
     this.handle.focus();
     cx.spawn(async (cx) => {
-      await this.load();
+      try { await this.load(); } catch (e) { this.saveError = String(e); }
       if (this.section === "machines") await this.loadMachines();
       cx.notify();
     });
@@ -100,26 +104,26 @@ export default class Settings extends View {
 
   async load() {
     this.raw = await readTextFile(this.file());
-    try {
-      this.person = this.raw ? JSON.parse(this.raw) : {};
-    } catch {
-      this.person = {};
-    }
+    // Do not replace a broken settings file with defaults when changing WSL.
+    const person = this.raw ? JSON.parse(this.raw) : {};
+    if (!person || typeof person !== "object" || Array.isArray(person)) throw new Error("settings.json must contain an object.");
+    this.person = person;
   }
 
-  // Changes settings.json the way an agent would: read, change, write back
-  // only if nobody changed it meanwhile (else read again and redo).
+  // Read, change, write only if nobody changed the snapshot in the meantime.
   change(edit, cx) {
     cx.spawn(async (cx) => {
+      this.saveError = null;
       for (let attempt = 0; attempt < 3; attempt++) {
-        await this.load();
-        const next = JSON.parse(JSON.stringify(this.person));
-        edit(next);
         try {
+          await this.load();
+          const next = JSON.parse(JSON.stringify(this.person));
+          edit(next);
           await writeTextFile(this.file(), JSON.stringify(next, null, 2) + "\n", this.raw);
           this.person = next;
+          this.saveError = null;
           break;
-        } catch {}
+        } catch (e) { this.saveError = `Couldn't save settings: ${e}`; }
       }
       cx.notify();
     });
@@ -552,6 +556,17 @@ export default class Settings extends View {
   async loadMachines() {
     if (this.machineLoading) return;
     this.machineLoading = true;
+    if (window()?.platform === "windows") {
+      try {
+        const w = await exec("wsl.exe", ["--list", "--quiet"]);
+        if (w.code === 0) {
+          this.wslDistros = w.stdout
+            .split(/\r?\n/)
+            .map((s) => s.replace(/\0/g, "").trim())
+            .filter((s, i, all) => s && !["docker-desktop", "docker-desktop-data"].includes(s.toLowerCase()) && all.findIndex((d) => d.toLowerCase() === s.toLowerCase()) === i);
+        }
+      } catch {}
+    }
     try {
       const r = await hc(["machine", "ls", "--json"]);
       if (r.code !== 0) throw new Error(r.stderr || r.stdout || "Couldn't read machines.");
@@ -673,12 +688,148 @@ export default class Settings extends View {
     return row;
   }
 
+  selectWsl(value, cx) {
+    const now = this.person.wsl ?? null;
+    this.picking = null;
+    this.wslError = null;
+    this.handle.focus();
+    if (this.wslChecking || now === value) {
+      cx.notify();
+      return;
+    }
+    if (value === null) {
+      this.change((p) => {
+        delete p.wsl;
+      }, cx);
+      return;
+    }
+    this.wslChecking = value;
+    cx.notify();
+    cx.spawn(async (cx) => {
+      try {
+        const probe = await readTextFile(`${appHome()}/frame/settings/find-core.sh`);
+        if (!probe?.trim()) throw new Error("Couldn't read the WSL core probe. Restart Herdr and try again.");
+        const r = await exec("wsl.exe", ["-d", value, "--cd", "~", "-e", "sh", "-c", probe, "sh", this.person.core ?? ""]);
+        if (r.code !== 0) {
+          const detail = r.stderr?.trim();
+          this.wslError = `Couldn't verify herdr-core in ${value}. ${detail || "Check that WSL starts and herdr-core (hc) is installed in this distribution."}`;
+          return;
+        }
+        this.change((p) => {
+          p.wsl = value;
+        }, cx);
+      } catch (e) {
+        this.wslError = String(e);
+      } finally {
+        this.wslChecking = null;
+        cx.notify();
+      }
+    });
+  }
+
+  wslButton(t) {
+    const checking = Boolean(this.wslChecking);
+    const open = !checking && this.picking === "wsl";
+    const label = this.person.wsl ? `${this.person.wsl} (WSL)` : "Windows";
+    const trigger = h_flex()
+      .id("st-wsl-button")
+      .min_w(140)
+      .px(12)
+      .py(5)
+      .gap(8)
+      .items_center()
+      .justify_between()
+      .rounded(7)
+      .border_1()
+      .border_color(open ? t.accent : t.border)
+      .bg(t.raised)
+      .when(!checking, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)))
+      .child(div().text_size(13).text_color(t.foreground).child(label))
+      .child(checking
+        ? svg("mods/workspace-chrome/spinner.svg").size(12).text_color(t.working).spin(900)
+        : svg("mods/workspace-chrome/chevron-down.svg").size(12).text_color(t.muted));
+    // Keep the selector's label and dimensions while validation runs; it is inert.
+    if (checking) return trigger;
+    trigger.on_click((_e, cx) => {
+      this.picking = open ? null : "wsl";
+      this.wslError = null;
+      if (open) this.handle.focus();
+      cx.notify();
+    });
+    return Popup.new("st-wsl-popover", trigger)
+      .when(open, (el) => el.content(this.wslList(t)));
+  }
+
+  wslList(t) {
+    const now = this.person.wsl ?? null;
+    const distros = [...this.wslDistros];
+    if (now && !distros.includes(now)) distros.unshift(now);
+    const choices = [[null, "Windows"], ...distros.map((d) => [d, `${d} (WSL)`])];
+    return v_flex()
+      .id("st-wsl-list")
+      .min_w(140)
+      .mt(4)
+      .p(4)
+      .rounded(8)
+      .border_1()
+      .border_color(t.border)
+      .bg(t.popover)
+      .shadow_md()
+      .children(
+        choices.map(([value, label]) => {
+          const on = now === value;
+          return h_flex()
+            .id(`st-wsl-${value ?? "windows"}`)
+            .px(10)
+            .py(6)
+            .gap(12)
+            .items_center()
+            .justify_between()
+            .rounded(6)
+            .cursor_pointer()
+            .hover((s) => s.bg(t.hover))
+            .on_click((_e, cx) => this.selectWsl(value, cx))
+            .child(div().text_size(13).text_color(on ? t.foreground : t.muted).child(label))
+            .when(on, (el) => el.child(svg(I("check")).size(12).text_color(t.accent)));
+        }),
+      );
+  }
+
   machines(t) {
     const version = updates().core.version;
+    const activeWsl = settings()?.wsl ?? null;
+    const selectedWsl = this.person.wsl ?? null;
+    const hasWsl = window()?.platform === "windows" && (this.wslDistros.length > 0 || Boolean(selectedWsl) || Boolean(activeWsl));
+    const connected = Boolean(version);
+    const pendingRestart = hasWsl && selectedWsl !== activeWsl;
+    const localAbout = `${activeWsl ? `WSL (${activeWsl}) · ` : ""}${connected || !hasWsl ? "Connected · " : ""}${version ? `hc ${version}` : "hc version unknown"}${pendingRestart ? ` · Restart to switch to ${selectedWsl ?? "Windows"}` : ""}${this.wslChecking ? ` · Checking ${this.wslChecking}…` : ""}`;
+    const restartBtn = div()
+      .id("st-wsl-restart")
+      .px(12)
+      .py(5)
+      .rounded(7)
+      .cursor_pointer()
+      .bg(t.accent)
+      .text_color(t.accent_foreground)
+      .text_size(13)
+      .font_semibold()
+      .hover((s) => s.opacity(0.9))
+      .on_click(() => run("app.update"))
+      .child("Restart");
+    const statusDot = div().w(7).h(7).rounded(4).bg(t.ansi2);
+    const localControl = hasWsl
+      ? h_flex()
+          .gap(8)
+          .items_center()
+          .child(this.wslButton(t))
+          .when(pendingRestart, (el) => el.child(restartBtn))
+          .when(connected, (el) => el.child(statusDot))
+      : statusDot;
     return v_flex().w_full()
       .child(this.heading(t, "Machines"))
       .child(div().pb(8).text_size(12.5).line_height("18px").text_color(t.dim).child("Your computers, reached over ssh. Their terminals keep running when you disconnect."))
-      .child(this.row(t, "This computer", `Connected · ${version ? `hc ${version}` : "hc version unknown"}`, div().w(7).h(7).rounded(4).bg(t.ansi2)))
+      .child(this.row(t, "This computer", localAbout, localControl).id("st-local-machine"))
+      .when(Boolean(this.wslError), (el) => el.child(div().pt(8).pb(4).text_size(12.5).text_color(t.blocked).child(this.wslError)))
       .children((this.machineList ?? []).map((m) => this.machineRow(t, m, version)))
       .when(this.machineList === null && !this.machineError, (el) => el.child(h_flex().py(14).gap(8).items_center().child(svg("mods/workspace-chrome/spinner.svg").size(12).text_color(t.working).spin(900)).child(div().text_size(12.5).text_color(t.dim).child("Reading machines…"))))
       .when(this.machineList?.length === 0, (el) => el.child(div().py(14).text_size(12.5).text_color(t.dim).child("No other machines yet.")))
@@ -924,6 +1075,7 @@ export default class Settings extends View {
                 div()
                   .px(28)
                   .py(22)
+                  .when(Boolean(this.saveError), (el) => el.child(div().id("st-save-error").pb(12).text_size(12.5).text_color(t.blocked).child(this.saveError)))
                   .child(
                     this.section === "look"
                       ? this.look(t, cx)

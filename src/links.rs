@@ -85,9 +85,10 @@ pub fn resolve(link: &str, cwd: Option<&Path>) -> Option<Target> {
         }
         return Some(Target::Url(link.to_owned()));
     }
-    let home = std::env::home_dir();
+    let guest = crate::wsl::active().is_some();
+    let home = crate::wsl::home().or_else(std::env::home_dir);
     let expanded = if let Some(rest) = link.strip_prefix("~/") {
-        home?.join(rest)
+        join_file_path(&home?, rest, guest)
     } else if let Some(var) = link.strip_prefix('$') {
         let (name, rest) = var.split_once('/').unwrap_or((var, ""));
         let base = match name {
@@ -95,16 +96,24 @@ pub fn resolve(link: &str, cwd: Option<&Path>) -> Option<Target> {
             "HOME" => home?,
             _ => PathBuf::from(std::env::var_os(name)?),
         };
-        base.join(rest)
+        join_file_path(&base, rest, guest)
     } else {
         PathBuf::from(link)
     };
-    let full = if expanded.is_absolute() { expanded } else { cwd?.join(expanded) };
+    let abs = expanded.is_absolute() || (guest && expanded.to_string_lossy().starts_with('/'));
+    let full = if abs { expanded } else { join_file_path(cwd?, expanded.to_str()?, guest) };
+    let host = crate::wsl::host_path_if_active(&full);
     // Windows ignores a trailing period when checking whether a path exists.
-    if !(cfg!(windows) && full.extension().is_some_and(|ext| ext.is_empty())) && full.exists() {
-        return Some(Target::File(full));
+    if let Ok(host) = &host
+        && !(cfg!(windows) && host.extension().is_some_and(|ext| ext.is_empty())) && host.exists()
+    {
+        return Some(Target::File(host.clone()));
     }
-    // The period ending a sentence, or `:42` / `:42:7` naming a place in the file.
+    // An actual guest `note.` must never open the separate host-visible `note`.
+    if host.is_err() && full.to_string_lossy().ends_with('.')
+        && crate::wsl::command("test", None).args(["-e", full.to_str()?]).status().ok()?.success()
+    { return None; }
+    // Strip punctuation in the original namespace, before converting to Windows.
     let mut bare = full.to_str()?.strip_suffix('.').unwrap_or(full.to_str()?);
     for _ in 0..2 {
         match bare.rsplit_once(':') {
@@ -112,7 +121,17 @@ pub fn resolve(link: &str, cwd: Option<&Path>) -> Option<Target> {
             _ => break,
         }
     }
-    Path::new(bare).exists().then(|| Target::File(PathBuf::from(bare)))
+    if bare == full.to_str()? { return None; }
+    let bare = crate::wsl::host_path_if_active(Path::new(bare)).ok()?;
+    bare.exists().then(|| Target::File(bare))
+}
+
+fn join_file_path(base: &Path, rest: &str, guest: bool) -> PathBuf {
+    if guest && base.to_string_lossy().starts_with('/') {
+        PathBuf::from(format!("{}/{}", base.to_string_lossy().trim_end_matches('/'), rest))
+    } else {
+        base.join(rest)
+    }
 }
 
 /// The path a `file:` URL names on this computer, percent-decoded.
@@ -201,6 +220,14 @@ fn open_system(arg: &std::ffi::OsStr) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guest_file_joins_keep_posix_separators_on_every_host() {
+        assert_eq!(join_file_path(Path::new("/home/alice"), "src/main.rs", true), PathBuf::from("/home/alice/src/main.rs"));
+        assert_eq!(join_file_path(Path::new("/"), "src/main.rs", true), PathBuf::from("/src/main.rs"));
+        assert_eq!(join_file_path(Path::new(r"C:\Users\alice"), "src/main.rs", true), Path::new(r"C:\Users\alice").join("src/main.rs"));
+        assert_eq!(join_file_path(Path::new("/home/alice"), "src/main.rs", false), Path::new("/home/alice").join("src/main.rs"));
+    }
 
     fn first(text: &str) -> Option<&str> {
         PATTERN.find(text).unwrap().map(|m| m.as_str())

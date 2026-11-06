@@ -24,7 +24,7 @@ async function directory(path, on) {
     const result = JSON.parse(r.stdout || "[]");
     return Array.isArray(result) ? result : [result];
   };
-  if (!on && window()?.platform === "windows") return windowsDirectory();
+  if (!on && window()?.platform === "windows" && !settings()?.wsl) return windowsDirectory();
   const script = 'n=0; for p in "$1"/* "$1"/.[!.]* "$1"/..?*; do [ -e "$p" ] || [ -L "$p" ] || continue; name=${p##*/}; [ "$name" = .git ] && continue; if [ -d "$p" ]; then kind=d; else kind=f; fi; printf "%s\\0%s\\0" "$kind" "$name"; n=$((n+1)); [ "$n" -gt 500 ] && break; done; test -d "$1"';
   let r;
   try { r = await exec("sh", ["-c", script, "files", path], { on }); }

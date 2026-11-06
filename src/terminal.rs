@@ -65,6 +65,61 @@ enum LinkTarget {
     Terminal(String),
 }
 
+#[derive(Clone, Debug, PartialEq)]
+struct LinkQuery {
+    cwd: Option<PathBuf>,
+    paths: Vec<String>,
+}
+
+impl LinkQuery {
+    fn resolve(&self) -> HashMap<String, Option<links::Target>> {
+        self.paths.iter().map(|path| (path.clone(), links::resolve(path, self.cwd.as_deref()))).collect()
+    }
+}
+
+#[derive(Default)]
+struct LinkClick {
+    generation: u64,
+    query: Option<LinkQuery>,
+    target: Option<LinkTarget>,
+}
+
+impl LinkClick {
+    fn start(&mut self, query: LinkQuery, target: Option<LinkTarget>) -> u64 {
+        self.generation = self.generation.wrapping_add(1);
+        self.query = Some(query);
+        self.target = target;
+        self.generation
+    }
+
+    fn complete(&mut self, ticket: u64, query: &LinkQuery, current: &LinkQuery, target: Option<&LinkTarget>) -> bool {
+        if self.generation != ticket { return false; }
+        // A redraw can change the terminal fallback without changing the file candidates.
+        self.query.take().as_ref() == Some(query) && query == current && self.target.as_ref() == target
+    }
+}
+
+#[derive(Default)]
+struct LinkCache {
+    query: Option<LinkQuery>,
+    resolved: Option<HashMap<String, Option<links::Target>>>,
+}
+
+impl LinkCache {
+    fn request(&mut self, query: Option<LinkQuery>) -> bool {
+        if self.query == query { return false; }
+        self.query = query;
+        self.resolved = None;
+        true
+    }
+
+    fn complete(&mut self, query: &LinkQuery, resolved: HashMap<String, Option<links::Target>>) -> bool {
+        if self.query.as_ref() != Some(query) { return false; }
+        self.resolved = Some(resolved);
+        true
+    }
+}
+
 pub enum TerminalEvent {
     Peek(String),
     TitleChanged,
@@ -130,6 +185,11 @@ pub struct TerminalView {
     pub cwd: Option<PathBuf>,
     /// The link under the pointer while the link modifier is held.
     link: Option<LinkTarget>,
+    link_cache: LinkCache,
+    link_generation: Arc<AtomicU64>,
+    link_resolver: Option<Task<()>>,
+    link_click: LinkClick,
+    link_click_resolver: Option<Task<()>>,
     /// Right-clicks go to the program when it takes the mouse (Shift: the menu).
     pub right_click_to_program: bool,
     grid: Rc<RefCell<Grid>>,
@@ -269,6 +329,11 @@ impl TerminalView {
             selection_scroll: None,
             cwd: None,
             link: None,
+            link_cache: LinkCache::default(),
+            link_generation: Arc::new(AtomicU64::new(0)),
+            link_resolver: None,
+            link_click: LinkClick::default(),
+            link_click_resolver: None,
             right_click_to_program: false,
             grid: Rc::new(RefCell::new(Grid {
                 vt: Vt::new(size_hint.0.max(2), size_hint.1.max(1)),
@@ -644,9 +709,16 @@ impl TerminalView {
     fn dropped(&mut self, paths: Vec<std::path::PathBuf>, cx: &mut Context<Self>) {
         if !self.address.contains('/') {
             let paths = stage_temporary_screenshot(&paths).unwrap_or(paths);
-            let text = quote_paths(paths.iter().map(|p| p.to_string_lossy().into_owned()));
-            let bytes = self.grid.borrow().vt.paste_bytes(&text);
-            return self.send(&bytes);
+            cx.spawn(async move |this, cx| {
+                let text = cx.background_executor().spawn(async move {
+                    paths.iter().map(|p| crate::wsl::linux_path_if_active(p)).collect::<Result<Vec<_>, _>>().map(quote_paths)
+                }).await;
+                let _ = this.update(cx, |this, _| match text {
+                    Ok(text) => { let bytes = this.grid.borrow().vt.paste_bytes(&text); this.send(&bytes); }
+                    Err(e) => tracing::warn!("cannot paste dropped paths: {e}"),
+                });
+            }).detach();
+            return;
         }
         self.put_there(paths, false, cx);
     }
@@ -662,7 +734,8 @@ impl TerminalView {
                     paths
                         .iter()
                         .filter_map(|p| {
-                            let out = crate::spawn::command(crate::core_bin::path()).args(["put", "--json", &addr]).arg(p).output();
+                            let path = crate::wsl::linux_path_if_active(p).map_err(|e| tracing::warn!("cannot send dropped path: {e}")).ok()?;
+                            let out = crate::core_bin::command().args(["put", "--json", &addr]).arg(path).output();
                             if copies {
                                 let _ = std::fs::remove_file(p);
                             }
@@ -949,8 +1022,106 @@ impl TerminalView {
         self.grid.borrow().hover.is_some()
     }
 
-    /// The link at a window position, and where it shows.
-    fn link_at(&self, pos: Point<Pixels>) -> Option<(LinkTarget, vt::Spans)> {
+    fn link_query(&self, pos: Point<Pixels>) -> (Option<(LinkTarget, vt::Spans)>, LinkQuery) {
+        let mut paths = Vec::new();
+        let terminal = self.link_at_with(pos, |path| {
+            if !paths.iter().any(|p| p == path) { paths.push(path.to_owned()); }
+            None
+        });
+        (terminal, LinkQuery { cwd: self.cwd.clone(), paths })
+    }
+
+    /// WSL filesystem checks spawn processes; render only collects candidates and
+    /// reads a view-local result. One hover resolver runs at a time; clicks have
+    /// their own fresh resolution and never consume this display-only cache.
+    fn link_at(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) -> Option<(LinkTarget, vt::Spans)> {
+        if crate::wsl::active().is_none() {
+            return self.link_at_with(pos, |path| links::resolve(path, self.cwd.as_deref()));
+        }
+        let (terminal, query) = self.link_query(pos);
+        if query.paths.is_empty() { self.clear_link_query(); return terminal; }
+        if self.link_cache.request(Some(query.clone())) {
+            self.link_generation.fetch_add(1, Ordering::Relaxed);
+        }
+        if let Some(resolved) = &self.link_cache.resolved {
+            return self.link_at_with(pos, |path| resolved.get(path).cloned().flatten());
+        }
+        if self.link_resolver.is_none() {
+            let generation = self.link_generation.clone();
+            let ticket = generation.load(Ordering::Relaxed);
+            let requested = query.clone();
+            self.link_resolver = Some(cx.spawn(async move |this, cx| {
+                let completed = requested.clone();
+                let resolved = cx.background_executor().spawn(async move {
+                    let mut resolved = HashMap::new();
+                    for path in &requested.paths {
+                        if generation.load(Ordering::Relaxed) != ticket { break; }
+                        resolved.insert(path.clone(), links::resolve(path, requested.cwd.as_deref()));
+                    }
+                    resolved
+                }).await;
+                let _ = this.update(cx, |this, cx| {
+                    this.link_resolver = None;
+                    if this.link_generation.load(Ordering::Relaxed) == ticket && this.cwd == completed.cwd {
+                        this.link_cache.complete(&completed, resolved);
+                    }
+                    cx.notify();
+                });
+            }));
+        }
+        None
+    }
+
+    fn clear_link_query(&mut self) {
+        if self.link_cache.request(None) { self.link_generation.fetch_add(1, Ordering::Relaxed); }
+    }
+
+    fn click_link(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) -> bool {
+        if crate::wsl::active().is_none() {
+            if let Some((target, _)) = self.link_at_with(pos, |path| links::resolve(path, self.cwd.as_deref())) {
+                Self::open_link(target, cx);
+                return true;
+            }
+            return false;
+        }
+        let (terminal, query) = self.link_query(pos);
+        let ticket = self.link_click.start(query.clone(), terminal.as_ref().map(|(target, _)| target.clone()));
+        self.link_click_resolver = None;
+        if query.paths.is_empty() {
+            self.link_click.complete(ticket, &query, &query, terminal.as_ref().map(|(target, _)| target));
+            if let Some((target, _)) = terminal {
+                Self::open_link(target, cx);
+                return true;
+            }
+            return false;
+        }
+        // A click is an action, not a hover lookup: even an in-flight hover may
+        // have checked the filesystem before the click. Resolve again off-thread.
+        self.link_click_resolver = Some(cx.spawn(async move |this, cx| {
+            let requested = query.clone();
+            let resolved = cx.background_executor().spawn(async move { requested.resolve() }).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.link_click.generation != ticket { return; }
+                this.link_click_resolver = None;
+                let (terminal, current) = this.link_query(pos);
+                if this.link_click.complete(ticket, &query, &current, terminal.as_ref().map(|(target, _)| target))
+                    && let Some((target, _)) = this.link_at_with(pos, |path| resolved.get(path).cloned().flatten())
+                { Self::open_link(target, cx); }
+            });
+        }));
+        true
+    }
+
+    fn open_link(target: LinkTarget, cx: &mut Context<Self>) {
+        match target {
+            LinkTarget::External(target) => links::open(&target),
+            LinkTarget::Terminal(address) => cx.emit(TerminalEvent::Peek(address)),
+        }
+    }
+
+    /// The link at a window position, and where it shows. `resolve` is either
+    /// immediate native resolution or a lookup in the completed WSL batch.
+    fn link_at_with(&self, pos: Point<Pixels>, mut resolve: impl FnMut(&str) -> Option<links::Target>) -> Option<(LinkTarget, vt::Spans)> {
         let g = self.grid.borrow();
         let (x, y) = local(&g, pos);
         let (col, row) = (x / f32::from(g.cell.width), y / f32::from(g.cell.height));
@@ -958,7 +1129,7 @@ impl TerminalView {
         let hit = g.vt.link_at(col as u16, row as u16, |text, at, joined| {
             // In lines joined back together only a file that exists proves the join right.
             if let Some(range) = links::find(text, at)
-                && let Some(link) = links::resolve(&text[range.clone()], self.cwd.as_deref())
+                && let Some(link) = resolve(&text[range.clone()])
                 && (!joined || matches!(link, links::Target::File(_)))
             {
                 target = Some(LinkTarget::External(link));
@@ -973,7 +1144,7 @@ impl TerminalView {
             Some(range)
         })?;
         // OSC 8 links bypass text detection.
-        let target = target.or_else(|| links::resolve(&hit.target, self.cwd.as_deref()).map(LinkTarget::External))?;
+        let target = target.or_else(|| resolve(&hit.target).map(LinkTarget::External))?;
         Some((target, hit.spans))
     }
 
@@ -1160,7 +1331,7 @@ fn quote_paths(paths: impl IntoIterator<Item = String>) -> String {
         if !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+=,:@%~".contains(c)) {
             return p;
         }
-        if cfg!(windows) { format!("'{}'", p.replace('\'', "''")) } else { format!("'{}'", p.replace('\'', "'\\''")) }
+        if cfg!(windows) && crate::wsl::active().is_none() { format!("'{}'", p.replace('\'', "''")) } else { format!("'{}'", p.replace('\'', "'\\''")) }
     };
     let mut out: String = paths.into_iter().map(quote).collect::<Vec<_>>().join(" ");
     out.push(' ');
@@ -2113,7 +2284,10 @@ impl Render for TerminalView {
         }
         let cell = cell_size(window);
         let hover = self.grid.borrow().hover;
-        let found = hover.filter(|_| link_mods(&window.modifiers())).and_then(|pos| self.link_at(pos));
+        let found = match hover.filter(|_| link_mods(&window.modifiers())) {
+            Some(pos) => self.link_at(pos, cx),
+            None => { self.clear_link_query(); None }
+        };
         let (link, spans) = found.unzip();
         self.link = link;
         self.grid.borrow_mut().link_spans = spans.unwrap_or_default();
@@ -2172,6 +2346,7 @@ impl Render for TerminalView {
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                 if !hovered {
                     this.grid.borrow_mut().hover = None;
+                    this.clear_link_query();
                     if this.link.is_some() {
                         cx.notify();
                     }
@@ -2184,15 +2359,7 @@ impl Render for TerminalView {
                     g.core.resize(ch, g.vt.cols, g.vt.rows);
                 }
                 drop(g);
-                if link_mods(&ev.modifiers)
-                    && let Some((target, _)) = this.link_at(ev.position)
-                {
-                    match target {
-                        LinkTarget::External(target) => links::open(&target),
-                        LinkTarget::Terminal(address) => cx.emit(TerminalEvent::Peek(address)),
-                    }
-                    return;
-                }
+                if link_mods(&ev.modifiers) && this.click_link(ev.position, cx) { return; }
                 let mut g = this.grid.borrow_mut();
                 if let (Some(track), Some(thumb)) = (g.track, g.thumb)
                     && track.contains(&ev.position)
@@ -3024,6 +3191,116 @@ mod tests {
         cx.run_until_parked();
         root.read_with(cx, |root, cx| assert!(root.0.read(cx).search_open));
         assert!(cx.debug_bounds("find-bar").is_some());
+    }
+
+    #[test]
+    fn link_click_rejects_older_clicks_and_changed_content_or_folder() {
+        use super::*;
+        let first = LinkQuery { cwd: Some("/first".into()), paths: vec!["src/main.rs".into()] };
+        let second = LinkQuery { cwd: Some("/second".into()), paths: first.paths.clone() };
+        let changed = LinkQuery { paths: vec!["other.rs".into()], ..first.clone() };
+        let mut click = LinkClick::default();
+        let old = click.start(first.clone(), None);
+        let new = click.start(second.clone(), None);
+        assert!(!click.complete(old, &first, &first, None), "an older click cannot consume a newer request");
+        assert!(click.complete(new, &second, &second, None));
+        assert!(!click.complete(new, &second, &second, None), "a completed click cannot open twice");
+        let ticket = click.start(first.clone(), None);
+        assert!(!click.complete(ticket, &first, &changed, None), "terminal output changed under the clicked cell");
+        let ticket = click.start(first.clone(), None);
+        assert!(!click.complete(ticket, &first, &second, None), "the terminal changed folders");
+    }
+
+    #[test]
+    fn link_click_rejects_changed_terminal_with_identical_file_candidates() {
+        use super::*;
+        let identity = |text: &str| {
+            let path = &text[links::find(text, 10).unwrap()];
+            let word = &text[links::word(text, 10).unwrap()];
+            let address = links::terminal_address(word, "source", ["t1", "t2"]).unwrap();
+            (LinkQuery { cwd: Some("/same".into()), paths: vec![path.into()] }, Some(LinkTarget::Terminal(address)))
+        };
+        let (before, first) = identity("   /tmp/x t1 t2");
+        let (after, second) = identity("/tmp/x t1 t2");
+        assert_eq!(before, after, "the space-containing file candidate did not change");
+        assert_eq!(first, Some(LinkTarget::Terminal("t1".into())));
+        assert_eq!(second, Some(LinkTarget::Terminal("t2".into())));
+        let mut click = LinkClick::default();
+        let ticket = click.start(before.clone(), first.clone());
+        assert!(!click.complete(ticket, &before, &after, second.as_ref()), "the clicked terminal changed at the same cell");
+        let ticket = click.start(before.clone(), first.clone());
+        assert!(click.complete(ticket, &before, &before, first.as_ref()));
+        let old = click.start(before.clone(), first.clone());
+        let new = click.start(after.clone(), second.clone());
+        assert!(!click.complete(old, &before, &before, first.as_ref()), "an old identity cannot consume a newer click");
+        assert!(click.complete(new, &after, &after, second.as_ref()));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn link_click_resolves_files_again_after_hover_cache_or_inflight_hover() {
+        use super::*;
+        let root = std::env::temp_dir().join(format!("herdr-click-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir(&root).unwrap();
+        struct Cleanup(PathBuf);
+        impl Drop for Cleanup { fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); } }
+        let _cleanup = Cleanup(root.clone());
+        let plain = root.join("note");
+        let dotted = root.join("note.");
+        let created = root.join("created.rs");
+        std::fs::write(&plain, "plain").unwrap();
+        let query = LinkQuery { cwd: Some(root), paths: vec![dotted.to_str().unwrap().into(), created.to_str().unwrap().into()] };
+        let mut hover = LinkCache::default();
+        hover.request(Some(query.clone()));
+        let old = query.resolve();
+        assert_eq!(old[&query.paths[0]], Some(links::Target::File(plain.clone())));
+        assert_eq!(old[&query.paths[1]], None);
+        hover.complete(&query, old.clone());
+
+        // An earlier hover can still complete after the click without being its result.
+        let (ready_tx, ready_rx) = std::sync::mpsc::channel();
+        let (release_tx, release_rx) = std::sync::mpsc::channel();
+        let previous = query.clone();
+        let inflight = std::thread::spawn(move || {
+            let resolved = previous.resolve();
+            ready_tx.send(()).unwrap();
+            release_rx.recv().unwrap();
+            resolved
+        });
+        ready_rx.recv().unwrap();
+        let mut click = LinkClick::default();
+        let ticket = click.start(query.clone(), None);
+        std::fs::write(&dotted, "exact name").unwrap();
+        std::fs::write(&created, "created after hover").unwrap();
+        let fresh = query.resolve();
+        release_tx.send(()).unwrap();
+        hover.complete(&query, inflight.join().unwrap());
+        assert_eq!(hover.resolved.as_ref().unwrap(), &old);
+        assert!(click.complete(ticket, &query, &query, None));
+        assert_eq!(fresh[&query.paths[0]], Some(links::Target::File(dotted.clone())));
+        assert_eq!(fresh[&query.paths[1]], Some(links::Target::File(created.clone())));
+
+        let ticket = click.start(query.clone(), None);
+        for path in [&plain, &dotted, &created] { std::fs::remove_file(path).unwrap(); }
+        assert!(query.resolve().values().all(Option::is_none), "deleted files must not open from hover cache");
+        assert!(click.complete(ticket, &query, &query, None));
+    }
+
+    #[test]
+    fn link_cache_never_applies_another_hover_or_folder_result() {
+        use super::*;
+        let first = LinkQuery { cwd: Some("/first".into()), paths: vec!["src/main.rs".into()] };
+        let second = LinkQuery { cwd: Some("/second".into()), paths: first.paths.clone() };
+        let mut cache = LinkCache::default();
+        assert!(cache.request(Some(first.clone())));
+        assert!(cache.resolved.is_none());
+        assert!(cache.request(Some(second.clone())));
+        assert!(!cache.complete(&first, HashMap::new()));
+        assert!(cache.resolved.is_none());
+        assert!(cache.complete(&second, HashMap::new()));
+        assert!(!cache.request(Some(second)));
+        assert!(cache.request(None));
+        assert!(cache.resolved.is_none());
     }
 
     #[test]

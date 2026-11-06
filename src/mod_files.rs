@@ -1,7 +1,7 @@
 //! Asynchronous text files for mods. Writes reject a stale editor snapshot.
 use gpui_shell::{HostError, HostValue};
 use std::io::{Read, Write};
-use std::path::Path;
+use std::path::{Path, PathBuf};
 use std::sync::Mutex;
 
 pub const LIMIT: u64 = 1024 * 1024;
@@ -93,6 +93,11 @@ pub fn read_with(
     }
 }
 
+fn write_path(path: &Path, distro: Option<&str>) -> Result<PathBuf, String> {
+    let Some(distro) = distro else { return Ok(path.to_path_buf()) };
+    crate::wsl::host_path(path, distro)
+}
+
 pub fn write_text(
     path: String,
     text: String,
@@ -100,13 +105,16 @@ pub fn write_text(
 ) -> impl std::future::Future<Output = Result<HostValue, HostError>> + Send {
     let (tx, rx) = async_channel::bounded(1);
     std::thread::spawn(move || {
-        let _ = tx.send_blocking(write(Path::new(&path), &text, expected.as_deref()));
+        // WSL path conversion starts a process, so keep it off the UI thread too.
+        let path = write_path(Path::new(&path), crate::wsl::active());
+        let _ = tx.send_blocking(path.and_then(|path| write(&path, &text, expected.as_deref())));
     });
     async move {
         rx.recv()
             .await
             .map_err(|e| HostError::new(e.to_string()))?
             .map_err(HostError::new)?;
+        crate::mods::request(crate::mods::Request::Refresh);
         Ok(HostValue::Null)
     }
 }
@@ -114,6 +122,18 @@ pub fn write_text(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn guest_write_paths_preserve_host_files_and_reject_literal_backslashes() {
+        let host = Path::new(r"C:\Herdr\settings.json");
+        let literal = Path::new(r"/home/alice/back\slash.txt");
+        assert_eq!(write_path(host, Some("Ubuntu")).unwrap(), host);
+        assert!(write_path(literal, Some("Ubuntu")).unwrap_err().contains("literal backslash"));
+        assert!(write_path(Path::new("/mnt/c/../c/note.txt"), Some("Ubuntu")).is_err());
+        assert!(write_path(Path::new("/home/alice/note "), Some("Ubuntu")).is_err());
+        assert!(write_path(Path::new("/home/alice/dir./note"), Some("Ubuntu")).is_err());
+        assert_eq!(write_path(literal, None).unwrap(), literal);
+    }
+
     #[test]
     fn creates_updates_and_rejects_stale_text() {
         let root = std::path::PathBuf::from("/var/tmp").join(format!(

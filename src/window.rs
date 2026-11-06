@@ -100,6 +100,9 @@ fn mtime(p: &std::path::Path) -> Option<SystemTime> {
 }
 
 pub fn shell() -> String {
+    if let Some(sh) = crate::wsl::shell() {
+        return sh;
+    }
     if cfg!(windows) {
         let path = std::env::var_os("PATH").unwrap_or_default();
         let pwsh = std::env::split_paths(&path).any(|d| d.join("pwsh.exe").is_file());
@@ -869,8 +872,9 @@ impl AppWindow {
     }
 
     fn reload_config(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let first_load = self.watched.settings.is_none();
         let s_time = mtime(&settings::path());
-        if s_time.is_none() || s_time != self.watched.settings {
+        if first_load || s_time.is_none() || s_time != self.watched.settings {
             let loaded = settings::load_person();
             crate::telemetry::set_setting(settings::telemetry_setting(&loaded));
             match loaded {
@@ -2255,8 +2259,8 @@ impl AppWindow {
                 .and_then(|f| f.get("cwd"))
                 .and_then(Value::as_str)
                 .map(str::to_owned)
-                // (a pid on another machine means nothing here)
-                .or_else(|| rec.get("pid").and_then(Value::as_u64).filter(|_| !addr.contains('/')).and_then(crate::process_cwd::read).map(|p| p.to_string_lossy().into_owned()))
+                // (a pid on another machine or inside WSL means nothing here)
+                .or_else(|| rec.get("pid").and_then(Value::as_u64).filter(|_| !addr.contains('/') && crate::wsl::active().is_none()).and_then(crate::process_cwd::read).map(|p| p.to_string_lossy().into_owned()))
                 .or_else(|| rec.get("cwd").and_then(Value::as_str).map(str::to_owned));
             let Some(cwd) = cwd else { continue };
             let busy = busy(rec);
@@ -2424,12 +2428,12 @@ impl AppWindow {
                 return crate::remote_shell::launch(cmd);
             }
             let sh = shell();
-            if cfg!(windows) {
+            if cfg!(windows) && crate::wsl::active().is_none() {
                 // PowerShell has no `-ic`: run it, then stay. `&` finds npm's `.cmd` shims too.
                 return vec![sh, "-NoExit".into(), "-Command".into(), crate::programs::powershell_line(&cmd)];
             }
-            // macOS terminal sessions load login profiles (including Homebrew's PATH).
-            unix_agent_argv(sh, cmd, cfg!(target_os = "macos"))
+            // macOS and WSL terminal sessions load login profiles (including Homebrew's/user's PATH).
+            unix_agent_argv(sh, cmd, cfg!(target_os = "macos") || crate::wsl::active().is_some())
         })
     }
 
@@ -3437,11 +3441,14 @@ impl AppWindow {
             }
             "app.quit" => cx.quit(),
             "app.update" => {
-                if !crate::update::apply() {
+                let wsl_restart = cfg!(windows) && self.person.wsl.as_deref() != crate::wsl::active();
+                if !crate::update::apply() && !wsl_restart {
                     return self.fail("no update is ready yet");
                 }
                 self.drain_documents(window, cx);
-                crate::update::relaunch();
+                if !crate::update::relaunch() {
+                    return self.fail("cannot restart Herdr; close and reopen it to switch");
+                }
                 cx.quit();
             }
             "window.close" | "window.minimize" | "window.maximize" => return self.window_command(name, window, cx),
@@ -3755,7 +3762,10 @@ impl AppWindow {
             Request::Run { name, args } => self.run(&name, args, window, cx),
             Request::OpenOverlay { id, spec } => self.open_overlay(id, spec, window, cx),
             Request::CloseOverlay { id } => self.close_overlay(&id, window, cx),
-            Request::Refresh => self.refresh_mods(cx),
+            Request::Refresh => {
+                self.reload_config(window, cx);
+                self.refresh_mods(cx);
+            }
             Request::Control { cmd, reply } => {
                 let _ = reply.send(self.control(cmd, window, cx));
             }
@@ -4612,6 +4622,7 @@ fn folder_info(cwd: &str, home: &str, on: Option<&str>) -> (model::FolderInfo, b
     let args = ["-C", cwd, "rev-parse", "--show-toplevel", "--abbrev-ref", "HEAD"].map(str::to_owned);
     let ran = match on {
         Some(m) => mods::run_remote(m, "git", &args, None).ok().map(|(code, out, err)| (code == 0, out, err)),
+        None if crate::wsl::active().is_some() => crate::wsl::command("git", None).args(&args).output().ok().map(|o| (o.status.success(), o.stdout, o.stderr)),
         None => crate::spawn::command("git").args(&args).output().ok().map(|o| (o.status.success(), o.stdout, o.stderr)),
     };
     let Some((true, out, _)) = ran else {

@@ -164,7 +164,13 @@ fn folders() -> std::sync::MutexGuard<'static, std::collections::HashMap<PathBuf
 /// The next changes under `path` (recursive), as absolute paths: at once if
 /// some came since the last call, else when the next batch lands.
 pub async fn next_change(path: String) -> Result<Vec<String>, String> {
-    let root = Path::new(&path).canonicalize().map_err(|e| format!("{path}: {e}"))?;
+    let host = crate::wsl::host_path_if_active(Path::new(&path))?;
+    let root = host.canonicalize().map_err(|e| format!("{path}: {e}"))?;
+    let guest = crate::wsl::active().filter(|_| path.starts_with('/'));
+    let paths_for_caller = |paths: Vec<String>| match guest {
+        Some(distro) => paths.into_iter().map(|p| crate::wsl::linux_path(Path::new(&p), distro)).collect(),
+        None => Ok(paths),
+    };
     let rx = {
         let mut all = folders();
         if !all.contains_key(&root) {
@@ -175,14 +181,14 @@ pub async fn next_change(path: String) -> Result<Vec<String>, String> {
         }
         let f = all.get_mut(&root).unwrap();
         if !f.pending.is_empty() {
-            return Ok(f.pending.drain().collect());
+            return paths_for_caller(f.pending.drain().collect());
         }
         f.waiters.retain(|w| !w.is_closed());
         let (tx, rx) = async_channel::bounded(1);
         f.waiters.push(tx);
         rx
     };
-    rx.recv().await.map_err(|_| "stopped watching".to_owned())
+    paths_for_caller(rx.recv().await.map_err(|_| "stopped watching".to_owned())?)
 }
 
 #[cfg(target_os = "linux")]
