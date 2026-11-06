@@ -37,6 +37,10 @@ herdr-app do pane.split --direction right --pane p12
 herdr-app do agent.focus --terminal t7
 ```
 
+`pane.equalize` gives every split in the focused tab equal shares again,
+nested splits included. Pass `--tab <id>` (from `ls`) for another tab; an
+unknown ID fails and changes nothing.
+
 For a remote space:
 
 ```sh
