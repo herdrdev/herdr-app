@@ -3,7 +3,7 @@
 
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar } from "gpui-base";
-import { run, props, closeOverlay, theme, spaces, panes, exec, home } from "herdr";
+import { run, props, closeOverlay, theme, spaces, panes, exec, home, notify } from "herdr";
 
 // Where a space is now: its first terminal's live folder, else where it was made.
 function place(s, all = panes()) {
@@ -172,7 +172,20 @@ export default class Worktree extends View {
     this.busy = true;
     this.error = "";
     cx.notify();
-    try { this.error = props().action === "remove" ? await this.remove() : await this.create(); }
+    if (props().action === "remove") {
+      let job;
+      try {
+        ({ error: this.error, job } = await this.prepareRemove());
+      } catch (error) { this.error = String(error); }
+      this.busy = false;
+      if (this.error) return cx.notify();
+      // The checkout can take a while to delete: hand it to a task that
+      // outlives this dialog, then close the dialog.
+      cx.spawn(async () => { await job(); }, { owner: null });
+      this.close();
+      return;
+    }
+    try { this.error = await this.create(); }
     catch (error) { this.error = String(error); }
     this.busy = false;
     if (!this.error) this.close();
@@ -206,10 +219,11 @@ export default class Worktree extends View {
     else run("space.new", { folder: c.path, machine: this.on });
   }
 
-  async remove() {
+  // The dialog's checks; the removal itself runs after the dialog closes.
+  async prepareRemove() {
     const s = this.space();
     const status = await git(this.repo.top, ["--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain"], this.on);
-    if (!status.ok) return status.err || "git status failed.";
+    if (!status.ok) return { error: status.err || "git status failed." };
     // git refuses a worktree with submodules unless forced, because their
     // history goes with it. The popup already showed what's at risk; only
     // risk that appeared since it opened gets one more warning.
@@ -217,12 +231,19 @@ export default class Worktree extends View {
     const changed = (status.out && !this.dirty) || unpushed.some((name) => !this.unpushed.includes(name));
     this.dirty ||= status.out !== "";
     this.unpushed = [...new Set([...this.unpushed, ...unpushed])];
-    if (changed) return "It changed since this opened. Enter again removes it anyway.";
-    // Terminals first: a shell sitting in the folder keeps it busy on Windows.
-    run("space.close", { id: s.id, confirmed: true });
+    if (changed) return { error: "It changed since this opened. Enter again removes it anyway." };
+    const repo = this.repo;
+    const on = this.on;
     const force = this.dirty || mods.length > 0;
-    const r = await git(this.repo.main, ["worktree", "remove", ...(force ? ["--force"] : []), this.repo.top], this.on, 600_000);
-    return r.ok ? "" : r.err || "git worktree remove failed.";
+    return {
+      error: "",
+      job: async () => {
+        // Terminals first: a shell sitting in the folder keeps it busy on Windows.
+        run("space.close", { id: s.id, confirmed: true });
+        const r = await git(repo.main, ["worktree", "remove", ...(force ? ["--force"] : []), repo.top], on, 600_000);
+        if (!r.ok) notify({ title: "Remove worktree failed", body: r.err || "git worktree remove failed.", level: "error" });
+      },
+    };
   }
 
   key(e, cx) {
