@@ -248,6 +248,9 @@ fn describe_with_values(
         Ok(second)
     })?;
     window.update(cx, |_, window, _| window.remove_window())?;
+    // localStorage writes land on the executor: let them finish while the
+    // staged folder is still there, or they recreate it after its drop.
+    cx.run_until_parked();
     assert!(calls.borrow().unexpected.is_empty(), "{entry}: {:?}", calls.borrow().unexpected);
     result
 }
@@ -275,6 +278,19 @@ fn shipped_initial_descriptions(cx: &mut TestAppContext) {
         entries.len(),
         start.elapsed()
     );
+}
+
+/// A mod's localStorage write lands on the executor; one that lands after the
+/// staged folder's drop recreates it, and the folder outlives the test.
+#[gpui::test]
+fn a_described_mod_leaves_no_folder_behind(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let path = staged.0.clone();
+    describe(cx, &staged, "mods/agents", true, props(), updates("current", "current"), None).unwrap();
+    drop(staged);
+    cx.run_until_parked();
+    assert!(!path.exists(), "left behind: {:?}", std::fs::read_dir(&path).map(|d| d.flatten().map(|e| e.file_name()).collect::<Vec<_>>()));
 }
 
 #[gpui::test]
@@ -396,6 +412,24 @@ fn confirm_dialog_background_follows_the_frame_corners(cx: &mut TestAppContext) 
     let tree = describe(cx, &staged, "mods/confirm", true, p, updates("current", "current"), None).unwrap();
     let root = tree.lines().find(|l| l.contains(":id[Str(\"confirm\")]")).unwrap();
     assert!(root.contains(".rounded[Number(8.0)]"), "the dialog background must follow the frame's corners: {root}");
+}
+
+#[gpui::test]
+fn layout_previews_stay_inside_their_cards(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut p = props();
+    p["section"] = json!("look");
+    let mut values = fixture(true, p, updates("current", "current"));
+    values.insert("layouts".into(), json!(["main"]));
+    let tree = describe_with_values(
+        cx, &staged, "frame/settings", values,
+        Some("this.previews = { main: 'layouts/portrait.png' }; this.previewsOf = 'main';"),
+    ).unwrap();
+    let lines: Vec<&str> = tree.lines().collect();
+    let image = lines.iter().position(|l| l.contains("layouts/portrait.png")).unwrap();
+    assert!(lines[image].contains(".h[Number(62.0)]"), "a preview keeps the card's height: {}", lines[image]);
+    assert!(lines[image - 1].contains(".overflow_hidden"), "a preview cannot spill out of its card: {}", lines[image - 1]);
 }
 
 #[gpui::test]

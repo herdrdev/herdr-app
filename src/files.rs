@@ -12,9 +12,11 @@ pub type Changed = Vec<PathBuf>;
 
 /// Starts watching `home`; None if the OS watcher can't start (the app then
 /// polls as before).
-pub fn watch(home: &Path) -> Option<async_channel::Receiver<Changed>> {
+pub fn watch(home: &Path, #[cfg(test)] executor: gpui::BackgroundExecutor) -> Option<async_channel::Receiver<Changed>> {
     static WATCHER: OnceLock<std::sync::Mutex<notify::RecommendedWatcher>> = OnceLock::new();
     let (tx, rx) = async_channel::unbounded();
+    #[cfg(test)]
+    let tx = test_notifications(tx, executor);
     let root = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
     let base = root.clone();
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
@@ -24,7 +26,10 @@ pub fn watch(home: &Path) -> Option<async_channel::Receiver<Changed>> {
         }
         let changed: Changed = event.paths.iter().filter_map(|p| p.strip_prefix(&base).ok()).filter(|p| watched(p)).map(Path::to_path_buf).collect();
         if !changed.is_empty() {
+            #[cfg(not(test))]
             let _ = tx.send_blocking(changed);
+            #[cfg(test)]
+            let _ = tx.send(changed);
         }
     })
     .map_err(|e| tracing::warn!("file watching unavailable ({e}); polling instead"))
@@ -32,6 +37,22 @@ pub fn watch(home: &Path) -> Option<async_channel::Receiver<Changed>> {
     watcher.watch(&root, RecursiveMode::Recursive).map_err(|e| tracing::warn!("cannot watch {} ({e}); polling instead", root.display())).ok()?;
     WATCHER.set(std::sync::Mutex::new(watcher)).ok()?;
     Some(rx)
+}
+
+// Native callbacks cannot wake GPUI's deterministic test scheduler directly.
+#[cfg(test)]
+fn test_notifications(tx: async_channel::Sender<Changed>, executor: gpui::BackgroundExecutor) -> std::sync::mpsc::Sender<Changed> {
+    let (pending, events) = std::sync::mpsc::channel();
+    let clock = executor.clone();
+    executor.spawn(async move {
+        while !tx.is_closed() {
+            clock.timer(std::time::Duration::from_millis(10)).await;
+            while let Ok(changed) = events.try_recv() {
+                if tx.try_send(changed).is_err() { return; }
+            }
+        }
+    }).detach();
+    pending
 }
 
 /// The files that change what the app shows. The app's own state files
@@ -338,6 +359,24 @@ pub fn mod_of(rel: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn native_notifications_reach_a_waiting_test_receiver(cx: &mut gpui::TestAppContext) {
+        let (tx, rx) = async_channel::unbounded();
+        let pending = test_notifications(tx, cx.background_executor.clone());
+        let result = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let received = result.clone();
+        cx.background_executor.spawn(async move {
+            *received.lock().unwrap() = rx.recv().await.ok();
+        }).detach();
+        cx.run_until_parked();
+        let paths = vec![PathBuf::from("settings.json")];
+        let sent = paths.clone();
+        std::thread::spawn(move || pending.send(sent).unwrap()).join().unwrap();
+        cx.executor().advance_clock(std::time::Duration::from_millis(10));
+        cx.run_until_parked();
+        assert_eq!(*result.lock().unwrap(), Some(paths));
+    }
 
     #[test]
     fn only_what_people_edit_counts() {
