@@ -131,7 +131,7 @@ function tooltips(node: any): Record<string, string> {
 
 function longNameTooltips(sort: string) {
   const space_name = "a-very-long-project-directory-name";
-  const a = { address: "thor/t1", pane: "p1", tab: "tab1", space: "s1", space_name, program: { name: "Claude", key: "claude", agent: true }, title: "Issue 272", status: "working", seq: 1 };
+  const a = { address: "host/t1", pane: "p1", tab: "tab1", space: "s1", space_name, program: { name: "Claude", key: "claude", agent: true }, title: "Issue 272", status: "working", seq: 1 };
   const { agents } = harness([], {
     agents: () => [a], terminals: () => [{ ...a, state: "live" }],
     panes: () => [{ tab: a.tab, terminal: a.address, program: a.program, title: a.title }], focused: () => null,
@@ -145,14 +145,14 @@ function longNameTooltips(sort: string) {
 
 test("by priority, hovering a row's title shows its whole space name and detail; section names need none", () => {
   const shown = longNameTooltips("priority");
-  expect(shown["ag-title-thor/t1"]).toBe("a-very-long-project-directory-name · Issue 272");
+  expect(shown["ag-title-host/t1"]).toBe("a-very-long-project-directory-name · Issue 272");
   expect(Object.keys(shown).filter(id => id.endsWith("-label"))).toEqual([]);
 });
 
 test("grouped, hovering a space header shows its whole name", () => {
   const shown = longNameTooltips("grouped");
   expect(shown["sp-s1-label"]).toBe("a-very-long-project-directory-name");
-  expect(shown["ag-title-thor/t1"]).toBe("Issue 272");
+  expect(shown["ag-title-host/t1"]).toBe("Issue 272");
 });
 
 // A kept sub-agent: started by t1 (`hc run`), then given a pane (`terminal.keep`).
