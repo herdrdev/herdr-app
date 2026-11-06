@@ -658,7 +658,6 @@ impl Node {
         true
     }
 
-    /// Turns the row or column that directly holds `pane` one place. Sizes stay with the places.
     pub fn rotate(&mut self, pane: &str, rotation: Rotation) -> Result<(), RotateError> {
         let split = self.parent_of_mut(pane).filter(|p| p.axis().is_some());
         let Some(children) = split.and_then(Node::children_mut) else {
@@ -683,20 +682,15 @@ impl Node {
     }
 }
 
-/// Which way `Node::rotate` turns a split, like Vim's `<C-w>r` and `<C-w>R`.
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Rotation {
-    /// Each child one place on, the last to the front.
     Next,
-    /// Each child one place back, the first to the end.
     Prev,
 }
 
 #[derive(Debug, PartialEq)]
 pub enum RotateError {
-    /// The pane is alone, not beside others in a row or column.
     NotInSplit,
-    /// A child of the split is itself a split.
     NestedSplit,
 }
 
