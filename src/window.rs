@@ -5372,6 +5372,62 @@ mod tests {
     }
 
     #[test]
+    fn pane_rotate_turns_the_split_and_refusals_change_nothing() {
+        in_own_process("pane_rotate_command");
+    }
+
+    #[gpui::test]
+    fn pane_rotate_command(cx: &mut gpui::TestAppContext) {
+        use crate::layout::Axis;
+        use serde_json::json;
+        if !running_alone("pane_rotate_command") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "unused", "", json!({
+            "id": "root", "type": "block", "content": { "tab": "active" }
+        }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            // tb1: p1 beside a column of p2 p3 p4, focus on p4. tb2: q1 beside q2.
+            this.model.add_space("sp1", "", "/tmp", crate::model::Tab::new("tb2", "", "q1", "u1"));
+            this.model.split("q1", Axis::Row, "q2", "u2");
+            this.model.add_tab("sp1", crate::model::Tab::new("tb1", "", "p1", "t1"));
+            this.model.split("p1", Axis::Row, "p2", "t2");
+            this.model.split("p2", Axis::Column, "p3", "t3");
+            this.model.split("p3", Axis::Column, "p4", "t4");
+            this.documents.get_mut("").unwrap().available = true;
+            let order = |this: &super::AppWindow, pane: &str| -> Vec<String> {
+                let root = &this.model.tab_of(pane).unwrap().root;
+                root.parent_of(pane).unwrap().children().iter().map(|n| n.id.clone()).collect()
+            };
+
+            assert_eq!(this.run_as("pane.rotate", json!({"direction": "next"}), false, window, cx), json!({"ok": true}));
+            assert_eq!(order(this, "p2"), ["p4", "p2", "p3"]);
+            assert_eq!(this.model.focused_pane().as_deref(), Some("p4"));
+            assert_eq!(this.run_as("pane.rotate", json!({"direction": "prev", "pane": "q1"}), false, window, cx), json!({"ok": true}));
+            assert_eq!(order(this, "q1"), ["q2", "q1"]);
+            assert_eq!(order(this, "p2"), ["p4", "p2", "p3"]);
+
+            let trees = |this: &super::AppWindow| ["tb1", "tb2"].map(|id| this.model.tab(id).unwrap().root.clone());
+            let before = trees(this);
+            let error = |reply: serde_json::Value| reply["error"].as_str().unwrap_or_default().to_owned();
+            for (args, expected) in [
+                (json!({"direction": "left"}), "pane.rotate direction is \"next\" or \"prev\", not \"left\""),
+                (json!({}), "pane.rotate needs direction"),
+                (json!({"direction": "next", "pane": "nope"}), "no pane \"nope\""),
+                (json!({"direction": "next", "pane": "p1"}), "cannot rotate a split that holds another split"),
+            ] {
+                assert_eq!(error(this.run_as("pane.rotate", args.clone(), false, window, cx)), expected, "{args}");
+                assert_eq!(trees(this), before, "{args}");
+            }
+            let local = this.documents.get_mut("").unwrap();
+            (local.available, local.error) = (false, None);
+            let reply = this.run_as("pane.rotate", json!({"direction": "next"}), false, window, cx);
+            assert_eq!(error(reply), "This machine's layout is unavailable. Try again when it reconnects.");
+            assert_eq!(trees(this), before);
+        }));
+    }
+
+    #[test]
     fn pane_ring_follows_keyboard_focus() {
         in_own_process("pane_ring_focus");
     }
