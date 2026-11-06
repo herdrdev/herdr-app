@@ -1,6 +1,8 @@
 //! Box drawing, block and braille characters drawn as shapes that fit their cell
 //! exactly, as Ghostty does. Font glyphs for these rarely span the whole
-//! cell, so tables get gaps between rows and block art gets seams.
+//! cell, so tables get gaps between rows and block art gets seams. The
+//! octants, sextants and eighth blocks of Symbols for Legacy Computing are
+//! drawn too: few fonts have them, so they would show as missing glyphs.
 
 use gpui::{Bounds, Hsla, PathBuilder, Pixels, Window, fill, point, px, size};
 
@@ -103,8 +105,79 @@ fn blocks(c: char) -> Option<(Vec<[f32; 4]>, f32)> {
         '▝' => (quads(false, true, false, false), 1.0),
         '▞' => (quads(false, true, true, false), 1.0),
         '▟' => (quads(false, true, true, true), 1.0),
+        '\u{1CD00}'..='\u{1CDE5}' => {
+            let word = OCTANTS.split_whitespace().nth((c as u32 - 0x1CD00) as usize)?;
+            (cells(word.bytes().map(|b| (b - b'1') as u32), 2, 4), 1.0)
+        }
+        // Sextants skip blank, full, ▌ and ▐, which are block elements already.
+        '\u{1FB00}'..='\u{1FB3B}' => {
+            let i = c as u32 - 0x1FB00;
+            let bits = i + i / 20 + 1;
+            (cells((0..6).filter(|k| bits & (1 << k) != 0), 2, 3), 1.0)
+        }
+        '\u{1CE90}'..='\u{1CE9F}' => (cells([c as u32 - 0x1CE90], 4, 4), 1.0),
+        '\u{1CEA0}'..='\u{1CEAF}' => {
+            // x0 y0 x1 y1 in quarters, in code point order.
+            const QUARTERS: &str = "2344 1344 0334 0324 0214 0114 0013 0012 0021 0031 1041 2041 3042 3043 3144 3244";
+            let word = QUARTERS.split_whitespace().nth((c as u32 - 0x1CEA0) as usize)?;
+            let q: Vec<f32> = word.bytes().map(|b| (b - b'0') as f32 / 4.0).collect();
+            (vec![r(q[0], q[1], q[2], q[3])], 1.0)
+        }
+        '\u{1FB70}'..='\u{1FB75}' => {
+            let n = (c as u32 - 0x1FB70 + 1) as f32;
+            (vec![r(n * e, 0.0, (n + 1.0) * e, 1.0)], 1.0)
+        }
+        '\u{1FB76}'..='\u{1FB7B}' => {
+            let n = (c as u32 - 0x1FB76 + 1) as f32;
+            (vec![r(0.0, n * e, 1.0, (n + 1.0) * e)], 1.0)
+        }
+        '\u{1FB7C}'..='\u{1FB80}' => {
+            let (left, right, upper, lower) = (r(0.0, 0.0, e, 1.0), r(1.0 - e, 0.0, 1.0, 1.0), r(0.0, 0.0, 1.0, e), r(0.0, 1.0 - e, 1.0, 1.0));
+            (match c {
+                '\u{1FB7C}' => vec![left, lower],
+                '\u{1FB7D}' => vec![left, upper],
+                '\u{1FB7E}' => vec![right, upper],
+                '\u{1FB7F}' => vec![right, lower],
+                _ => vec![upper, lower],
+            }, 1.0)
+        }
+        '\u{1FB81}' => ([0.0, 2.0, 4.0, 7.0].map(|n| r(0.0, n * e, 1.0, (n + 1.0) * e)).to_vec(), 1.0),
+        '\u{1FB82}'..='\u{1FB8B}' => {
+            let i = c as u32 - 0x1FB82;
+            let n = [2.0, 3.0, 5.0, 6.0, 7.0][(i % 5) as usize] * e;
+            (vec![if i < 5 { r(0.0, 0.0, 1.0, n) } else { r(1.0 - n, 0.0, 1.0, 1.0) }], 1.0)
+        }
         _ => return None,
     })
+}
+
+/// Octants (U+1CD00..1CDE5) by the cells their names fill, numbered 1 2 / 3 4
+/// / 5 6 / 7 8. Unicode leaves out patterns encoded elsewhere, so the names
+/// are the only reliable order.
+const OCTANTS: &str = "\
+    3 23 123 4 14 124 34 134 234 5 15 25 125 135 235 1235 \
+    45 145 245 1245 345 1345 2345 12345 6 16 26 126 36 136 236 1236 \
+    146 246 1246 346 1346 2346 12346 56 156 256 1256 356 1356 2356 12356 456 \
+    1456 2456 12456 3456 13456 23456 17 27 127 37 137 237 1237 47 147 247 \
+    1247 347 1347 2347 12347 157 257 1257 357 2357 12357 457 1457 12457 3457 13457 \
+    23457 67 167 267 1267 367 1367 2367 12367 467 1467 2467 12467 3467 13467 23467 \
+    123467 567 1567 2567 12567 3567 13567 23567 123567 4567 14567 24567 124567 34567 134567 234567 \
+    1234567 18 28 128 38 138 238 1238 48 148 248 1248 348 1348 2348 12348 \
+    58 158 258 1258 358 1358 2358 12358 458 1458 2458 12458 3458 13458 23458 123458 \
+    168 268 1268 368 2368 12368 468 1468 12468 3468 13468 23468 568 1568 2568 12568 \
+    3568 13568 23568 123568 4568 14568 24568 124568 34568 134568 234568 1234568 178 278 1278 378 \
+    1378 2378 12378 478 1478 2478 12478 3478 13478 23478 123478 578 1578 2578 12578 3578 \
+    13578 23578 123578 4578 14578 24578 124578 34578 134578 234578 1234578 678 1678 2678 12678 3678 \
+    13678 23678 123678 4678 14678 24678 124678 34678 134678 234678 1234678 15678 25678 125678 35678 235678 \
+    1235678 45678 145678 1245678 1345678 2345678";
+
+/// Rectangles for the given cells (from 0, row by row) of a `cols` x `rows` grid.
+fn cells(filled: impl IntoIterator<Item = u32>, cols: u32, rows: u32) -> Vec<[f32; 4]> {
+    let (w, h) = (cols as f32, rows as f32);
+    filled.into_iter().map(|i| {
+        let (x, y) = ((i % cols) as f32, (i / cols) as f32);
+        [x / w, y / h, (x + 1.0) / w, (y + 1.0) / h]
+    }).collect()
 }
 
 /// Ghostty's dot sizing, with vertical spacing even across adjacent cells.
@@ -436,6 +509,52 @@ mod tests {
         for c in '\u{2580}'..='\u{259F}' {
             assert!(blocks(c).is_some(), "{c} has no entry");
         }
+        let legacy = ('\u{1CD00}'..='\u{1CDE5}').chain('\u{1CE90}'..='\u{1CEAF}')
+            .chain('\u{1FB00}'..='\u{1FB3B}').chain('\u{1FB70}'..='\u{1FB8B}');
+        for c in legacy {
+            let (rects, alpha) = blocks(c).unwrap_or_else(|| panic!("U+{:X} has no entry", c as u32));
+            assert!(is_sprite(&c.to_string()) && alpha == 1.0 && !rects.is_empty());
+            for [x0, y0, x1, y1] in rects {
+                assert!(0.0 <= x0 && x0 < x1 && x1 <= 1.0 && 0.0 <= y0 && y0 < y1 && y1 <= 1.0, "U+{:X}", c as u32);
+            }
+        }
+        for c in ['\u{1CDE6}', '\u{1CE8F}', '\u{1CEB0}', '\u{1FB3C}', '\u{1FB6F}', '\u{1FB8C}'] {
+            assert_eq!(blocks(c), None, "U+{:X}", c as u32);
+        }
+    }
+
+    #[test]
+    fn legacy_computing_blocks_fill_the_cells_their_names_say() {
+        let rects = |c: char| blocks(c).unwrap().0;
+        let (q, t) = (0.25, 1.0 / 3.0);
+        // Claude Code's mascot.
+        assert_eq!(rects('\u{1CD0C}'), [[0.0, 0.0, 0.5, q], [0.5, 0.0, 1.0, q], [0.0, 2.0 * q, 0.5, 3.0 * q]]); // OCTANT-125
+        assert_eq!(rects('\u{1CD1A}'), [[0.5, 0.0, 1.0, q], [0.5, 2.0 * q, 1.0, 3.0 * q]]); // OCTANT-26
+        assert_eq!(rects('\u{1CD27}'), [[0.0, 2.0 * q, 0.5, 3.0 * q], [0.5, 2.0 * q, 1.0, 3.0 * q]]); // OCTANT-56
+        assert_eq!(rects('\u{1CDE1}'), [[0.5, q, 1.0, 2.0 * q], [0.0, 2.0 * q, 0.5, 3.0 * q], [0.5, 2.0 * q, 1.0, 3.0 * q], [0.0, 3.0 * q, 0.5, 1.0], [0.5, 3.0 * q, 1.0, 1.0]]); // OCTANT-45678
+        assert_eq!(rects('\u{1CD17}').len(), 5); // OCTANT-12345
+        assert_eq!(rects('\u{1CDDD}').len(), 6); // OCTANT-125678
+        assert_eq!(rects('\u{1CDE4}').len(), 7); // OCTANT-1345678
+        assert_eq!(rects('\u{1CEAB}'), [[0.5, 0.0, 1.0, q]]); // RIGHT HALF UPPER ONE QUARTER
+        assert_eq!(rects('\u{1FB85}'), [[0.0, 0.0, 1.0, 3.0 * q]]); // UPPER THREE QUARTERS
+        // Octants and sextants at both ends of their ranges.
+        assert_eq!(rects('\u{1CD00}'), [[0.0, q, 0.5, 2.0 * q]]); // OCTANT-3
+        assert_eq!(rects('\u{1CDE5}').len(), 7); // OCTANT-2345678
+        assert_eq!(rects('\u{1FB00}'), [[0.0, 0.0, 0.5, t]]); // SEXTANT-1
+        // On either side of the skipped ▌ (135) and ▐ (246).
+        assert_eq!(rects('\u{1FB13}'), [[0.0, t, 0.5, 2.0 * t], [0.0, 2.0 * t, 0.5, 1.0]]); // SEXTANT-35
+        assert_eq!(rects('\u{1FB14}'), [[0.5, 0.0, 1.0, t], [0.0, t, 0.5, 2.0 * t], [0.0, 2.0 * t, 0.5, 1.0]]); // SEXTANT-235
+        assert_eq!(rects('\u{1FB27}'), [[0.0, 0.0, 0.5, t], [0.5, t, 1.0, 2.0 * t], [0.5, 2.0 * t, 1.0, 1.0]]); // SEXTANT-146
+        assert_eq!(rects('\u{1FB28}').len(), 4); // SEXTANT-1246
+        assert_eq!(rects('\u{1FB3B}').len(), 5); // SEXTANT-23456
+        // Sixteenths, quarters and eighths.
+        assert_eq!(rects('\u{1CE9F}'), [[3.0 * q, 3.0 * q, 1.0, 1.0]]); // LOWER RIGHT ONE SIXTEENTH
+        assert_eq!(rects('\u{1CEA5}'), [[0.0, q, q, 1.0]]); // LOWER THREE QUARTERS LEFT ONE QUARTER
+        assert_eq!(rects('\u{1FB70}'), [[0.125, 0.0, 0.25, 1.0]]); // VERTICAL ONE EIGHTH-2
+        assert_eq!(rects('\u{1FB7B}'), [[0.0, 0.75, 1.0, 0.875]]); // HORIZONTAL ONE EIGHTH-7
+        assert_eq!(rects('\u{1FB7E}'), [[0.875, 0.0, 1.0, 1.0], [0.0, 0.0, 1.0, 0.125]]); // RIGHT AND UPPER ONE EIGHTH
+        assert_eq!(rects('\u{1FB81}'), [[0.0, 0.0, 1.0, 0.125], [0.0, 0.25, 1.0, 0.375], [0.0, 0.5, 1.0, 0.625], [0.0, 0.875, 1.0, 1.0]]); // -1358
+        assert_eq!(rects('\u{1FB8B}'), [[0.125, 0.0, 1.0, 1.0]]); // RIGHT SEVEN EIGHTHS
     }
 
     #[cfg(target_os = "linux")]
