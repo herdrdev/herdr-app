@@ -2,13 +2,14 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input } from "gpui-base";
-import { hc, run, theme, themes, fonts, updates, telemetry, settings, layouts, shared, appHome, readTextFile, writeTextFile, playSound, props, closeOverlay, window } from "herdr";
+import { hc, run, theme, themes, fonts, updates, telemetry, settings, layouts, layout, shared, setShared, appHome, readTextFile, writeTextFile, playSound, props, closeOverlay, window } from "herdr";
 
 const I = (name) => `frame/settings/${name}.svg`;
 
 const SECTIONS = [
   { id: "look", title: "Look", icon: "palette" },
   ...(window()?.platform === "macos" ? [{ id: "keyboard", title: "Keyboard", icon: "keyboard" }] : []),
+  { id: "panels", title: "Panels", icon: "panels" },
   { id: "machines", title: "Machines", icon: "server" },
   { id: "alerts", title: "Alerts", icon: "bell" },
   { id: "updates", title: "Updates", icon: "refresh" },
@@ -21,6 +22,34 @@ const APPEARANCES = [
   ["light", "Light"],
   ["dark", "Dark"],
 ];
+
+// The panels the layout offers (its "panel-body" stack), as the tab bar's buttons.
+const PANELS = [
+  { id: "files", title: "Files", about: "The folder you're in as a tree. Open a file to read it, highlighted." },
+  { id: "changes", title: "Changes", about: "What your agents changed: every file with its diff, and a commit box." },
+];
+
+function find(node, id) {
+  if (!node) return null;
+  if (node.id === id) return node;
+  for (const c of node.children ?? []) {
+    const found = find(c, id);
+    if (found) return found;
+  }
+  return null;
+}
+
+// The panels that are on: the shared choice, or all of them when nothing is
+// chosen yet (the tab bar's own default).
+function panelsOn() {
+  return shared("workspace.panels") ?? PANELS.map((p) => p.id);
+}
+
+// Turning one on or off: the list the tab bar reads.
+function panelsAfter(current, id, wasOn) {
+  const rest = current.filter((x) => x !== id);
+  return wasOn ? rest : [...rest, id];
+}
 
 // What the app uses when settings.json names no font (settings.rs).
 const DEFAULT_FONT = "JetBrains Mono";
@@ -213,6 +242,45 @@ export default class Settings extends View {
       .when(on, (el) => el.justify_end())
       .on_click(onClick)
       .child(div().w(16).h(16).rounded(8).bg(on ? t.accent_foreground : t.muted));
+  }
+
+  // Panels ---------------------------------------------------------------
+
+  // Turning a panel on shows it; turning the open one off (or the last one)
+  // hides the panel, like the welcome does.
+  togglePanel(id, cx) {
+    const wasOn = panelsOn().includes(id);
+    const next = panelsAfter(panelsOn(), id, wasOn);
+    setShared("workspace.panels", next);
+    const L = layout();
+    if (find(L, "panel")) {
+      if (wasOn) {
+        if (find(L, "panel-body")?.active === id || next.length === 0) run("layout.hide", { id: "panel" });
+      } else {
+        run("layout.select", { stack: "panel-body", child: id });
+        run("layout.show", { id: "panel" });
+      }
+    }
+    cx.notify();
+  }
+
+  panels(t, cx) {
+    const on = panelsOn();
+    return v_flex()
+      .gap(2)
+      .child(this.heading(t, "Side panels"))
+      .children(
+        PANELS.map((p) =>
+          this.row(t, p.title, p.about, this.toggle(t, `st-panel-${p.id}`, on.includes(p.id), (_e, cx) => this.togglePanel(p.id, cx))),
+        ),
+      )
+      .child(
+        div()
+          .text_size(12.5)
+          .line_height("18px")
+          .text_color(t.dim)
+          .child("The tab bar shows a button for every panel you turn on. Herdr remembers which panel is open, per space."),
+      );
   }
 
   // Look -----------------------------------------------------------------
@@ -904,6 +972,8 @@ export default class Settings extends View {
                       ? this.look(t, cx)
                       : this.section === "keyboard"
                         ? this.keyboard(t)
+                      : this.section === "panels"
+                        ? this.panels(t, cx)
                       : this.section === "machines"
                         ? this.machines(t)
                       : this.section === "alerts"
