@@ -13,7 +13,7 @@
     "grok": {"name":"Grok","icon":"icons/grok.svg","run":["grok"],"match":["grok-build"],"tint":true,"tile":"#1c1d21","color":"#ffffff"},
     "dsh-tui": {"name":"DeepSeek Harness","icon":"icons/dsh-tui.svg","run":["dsh-tui"],"tint":true,"tile":"#1c1d21","color":"#ffffff"},
     "antigravity": {"name":"Antigravity","icon":"icons/antigravity.svg","run":["agy"],"match":["agy"],"tint":false,"tile":"#1c1d21","color":"#ffffff"},
-    "kimi": {"name":"Kimi","icon":"icons/kimi.svg","run":["kimi"],"tint":false,"tile":"#1c1d21","color":"#ffffff"},
+    "kimi": {"name":"Kimi","icon":"icons/kimi.svg","run":["kimi"],"match":["kimi-code","kimicodecli"],"tint":false,"tile":"#1c1d21","color":"#ffffff"},
     "kiro": {"name":"Kiro","icon":"icons/kiro.svg","run":["kiro-cli"],"match":["kiro-cli"],"tint":false,"tile":"#1c1d21","color":"#ffffff"},
     "hermes": {"name":"Hermes","icon":"icons/hermes.svg","run":["hermes"],"tint":true,"tile":"#1c1d21","color":"#ffffff"},
     "mastracode": {"name":"Mastra Code","icon":"icons/mastracode.svg","tint":true,"tile":"#1c1d21","color":"#ffffff"},
