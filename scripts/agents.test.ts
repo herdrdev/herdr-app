@@ -81,6 +81,7 @@ function element() {
     if (method === "node") return node;
     return (...args: any[]) => {
       if (method === "id") node.id = args[0];
+      if (method === "on_click") (node as any).click = args[0];
       if (method === "child") node.children.push(args[0]?.node ?? args[0]);
       if (method === "children") node.children.push(...args[0].map((child: any) => child?.node ?? child));
       if (method === "when" && args[0]) args[1](el);
@@ -119,4 +120,53 @@ for (const sort of ["priority", "grouped"]) test(`${sort} render reads panes onc
   expect(second).toContain("Updated task");
   expect(second).not.toContain("Task 63");
   expect(orders[1]).toEqual(orders[0]);
+});
+
+// A kept sub-agent: started by t1 (`hc run`), then given a pane (`terminal.keep`).
+function keptRender(sort: string, { width = 268, kept = [{ address: "t3", parent: "t1" }], paneless = [] as { address: string; parent: string }[], pinned = [] as string[] } = {}) {
+  const program = { name: "Claude", key: "claude", agent: true };
+  const row = (address: string, seq: number) => ({ address, pane: `p-${address}`, tab: "tab1", space: "s1", space_name: "Project", program, title: address, status: "working", seq, pinned: pinned.includes(address) });
+  const list = [row("t1", 1), ...kept.map((k, i) => row(k.address, i + 2))];
+  const live = (address: string, parent: string | null) => ({ address, parent, state: "live", status: "working", program, labels: {} });
+  const orders: string[][] = [];
+  const { agents, writes } = harness([], {
+    agents: () => list,
+    terminals: () => [live("t1", null), ...paneless.map(k => live(k.address, k.parent)), ...kept.map(k => live(k.address, k.parent))],
+    panes: () => list.map(a => ({ tab: a.tab, terminal: a.address, program, title: a.title })), focused: () => null,
+    spaces: () => [{ tabs: [{ id: "tab1", name: "Project", named: true }] }],
+    layout: () => ({ id: "sidebar", size: { px: width } }), shared: () => sort,
+    theme: () => ({}), setAgentOrder: (order: string[]) => orders.push(order),
+    div: element, v_flex: element, h_flex: element, svg: element, image: element,
+  });
+  const ids: string[] = [];
+  const clicks = new Map<string, () => void>();
+  const walk = (node: any) => {
+    if (node?.id) { ids.push(node.id); if (node.click) clicks.set(node.id, node.click); }
+    (node?.children ?? []).forEach(walk);
+  };
+  walk(agents.render({}).node);
+  return { ids, clicks, writes, order: orders[orders.length - 1] };
+}
+
+for (const sort of ["priority", "grouped"]) test(`${sort}: a kept sub-agent shows once, under its parent, and its row focuses its pane`, () => {
+  const { ids, clicks, writes, order } = keptRender(sort);
+  expect(ids).toContain("ag-t1");
+  expect(ids).toContain("sub-t3");
+  expect(ids).not.toContain("ag-t3");
+  expect(order).toEqual(["t1"]);
+  clicks.get("sub-t3")!();
+  expect(writes).toContainEqual(["pane.focus", { terminal: "t3" }]);
+});
+
+for (const sort of ["priority", "grouped"]) test(`${sort}: a kept sub-agent under a pane-less one shows once in the tree`, () => {
+  const { ids } = keptRender(sort, { paneless: [{ address: "t3", parent: "t1" }], kept: [{ address: "t4", parent: "t3" }] });
+  expect(ids).toContain("sub-t3");
+  expect(ids).toContain("sub-t4");
+  expect(ids).not.toContain("ag-t4");
+});
+
+for (const sort of ["priority", "grouped"]) test(`${sort}: a kept sub-agent keeps its own row where no tree shows it`, () => {
+  expect(keptRender(sort, { width: 44 }).ids).toContain("ag-t3"); // the rail draws no trees
+  expect(keptRender(sort, { pinned: ["t3"] }).ids).toContain("ag-t3");
+  expect(keptRender(sort, { kept: [{ address: "t3", parent: "t9" }] }).ids).toContain("ag-t3"); // its parent ended
 });
