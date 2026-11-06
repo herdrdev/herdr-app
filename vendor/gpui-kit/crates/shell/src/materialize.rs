@@ -1151,7 +1151,7 @@ fn materialize_component(
             // holding it.
             warn_unhonoured_a11y(&behavior, "text", &[]);
             warn_without_surface("text", &refinement, &states, &children);
-            SharedString::from(value).into_any_element()
+            SharedString::from(crate::translate_text(&value)).into_any_element()
         }
         Component::Button(id) => {
             warn_ignored_key(&behavior, "Button");
@@ -3593,7 +3593,7 @@ fn apply_behavior(behavior: &mut Behavior, name: &str, args: &[Bridged]) {
             behavior.tooltip = args
                 .first()
                 .and_then(|value| value.as_str().ok())
-                .map(SharedString::from);
+                .map(|s| SharedString::from(crate::translate_text(s)));
         }
         "open_delay" => behavior.open_delay = milliseconds(args),
         "close_delay" => behavior.close_delay = milliseconds(args),

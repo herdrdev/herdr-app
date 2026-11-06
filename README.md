@@ -1,5 +1,7 @@
 # Herdr
 
+English · [简体中文](README.zh-CN.md)
+
 Herdr is a desktop app for terminals and coding agents. Keep work in spaces, see which agents need you, and leave terminals running when you close the window.
 
 ## Install
