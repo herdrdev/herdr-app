@@ -115,6 +115,7 @@ fn worker(dir: &Path, target: &str) -> io::Result<()> {
     if start != [1] {
         return Err(io::Error::other("invalid checker handshake"));
     }
+    ready.set_read_timeout(None)?;
     let child = Command::new(std::env::current_exe()?)
         .args(invocation.args)
         .env_clear()
@@ -131,8 +132,20 @@ fn worker(dir: &Path, target: &str) -> io::Result<()> {
     let code = status.code().unwrap_or_else(|| 128 + status.signal().unwrap_or(1));
     ready.write_all(&code.to_be_bytes())?;
     // Keep the output files until the caller has relayed them or gone away.
-    let _ = ready.read(&mut [0]);
-    Ok(())
+    wait_for_ack(&mut ready)
+}
+
+fn wait_for_ack(ready: &mut UnixStream) -> io::Result<()> {
+    let mut ack = [0];
+    loop {
+        match ready.read(&mut ack) {
+            Ok(0) => return Ok(()),
+            Ok(1) if ack == [1] => return Ok(()),
+            Ok(_) => return Err(io::Error::other("invalid checker acknowledgement")),
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => continue,
+            Err(error) => return Err(error),
+        }
+    }
 }
 
 fn wait_for_checker(mut child: Child, ready: &UnixStream) -> io::Result<Option<ExitStatus>> {
@@ -177,7 +190,7 @@ impl Drop for Job {
 
 /// Errors before submission permit fallback; after submission never run a check twice.
 fn submit(args: &[String]) -> io::Result<i32> {
-    let _interrupts = Interrupts::install()?;
+    let mut interrupts = Some(Interrupts::install()?);
     let stamp = SystemTime::now().duration_since(UNIX_EPOCH).map_err(io::Error::other)?.as_nanos();
     let label = format!("dev.herdr.check.{}.{stamp}", std::process::id());
     let domain = format!("gui/{}", unsafe { libc::getuid() });
@@ -218,7 +231,6 @@ fn submit(args: &[String]) -> io::Result<i32> {
             return Err(io::Error::other("checker job did not connect within 10 seconds"));
         }
         let (mut ready, _) = listener.accept()?;
-        job.handed_off = true;
         ready.write_all(&[1])?;
         ready.set_read_timeout(Some(Duration::from_millis(100)))?;
         let mut code = [0; 4];
@@ -234,9 +246,20 @@ fn submit(args: &[String]) -> io::Result<i32> {
                 Err(error) => return Err(error),
             }
         }
+        drop(interrupts.take());
+        // During blocking output, termination closes the socket so the worker cleans up.
+        unsafe {
+            libc::signal(libc::SIGINT, libc::SIG_DFL);
+            libc::signal(libc::SIGTERM, libc::SIG_DFL);
+        }
+        if INTERRUPTED.load(Ordering::Relaxed) != 0 {
+            return Err(io::ErrorKind::Interrupted.into());
+        }
         relay(&job.dir, "stdout", &mut io::stdout().lock())?;
         relay(&job.dir, "stderr", &mut io::stderr().lock())?;
         ready.write_all(&[1])?;
+        // Only successful delivery leaves cleanup exclusively to the worker.
+        job.handed_off = true;
         Ok(i32::from_be_bytes(code))
     })();
     let signal = INTERRUPTED.load(Ordering::Relaxed);
@@ -283,6 +306,21 @@ mod tests {
         assert!(wait_for_checker(child, &worker).unwrap().is_none());
         assert_eq!(unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) }, -1);
         assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ECHILD));
+    }
+
+    #[test]
+    fn worker_waits_for_ack_or_disconnection() {
+        for acknowledge in [true, false] {
+            let (mut worker, mut caller) = UnixStream::pair().unwrap();
+            std::thread::scope(|scope| {
+                let task = scope.spawn(|| wait_for_ack(&mut worker).unwrap());
+                std::thread::sleep(Duration::from_millis(150));
+                assert!(!task.is_finished());
+                if acknowledge { caller.write_all(&[1]).unwrap(); }
+                drop(caller);
+                task.join().unwrap();
+            });
+        }
     }
 
     #[test]
