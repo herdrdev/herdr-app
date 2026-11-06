@@ -536,6 +536,13 @@ impl Node {
         (p.len() >= 2).then(|| self.find(&p[p.len() - 2])).flatten()
     }
 
+    pub fn parent_of_mut(&mut self, id: &str) -> Option<&mut Node> {
+        if self.children().iter().any(|c| c.id == id) {
+            return Some(self);
+        }
+        self.children_mut()?.iter_mut().find_map(|c| c.parent_of_mut(id))
+    }
+
     /// Terminal blocks in tree order.
     pub fn terminals(&self) -> Vec<&Node> {
         self.walk().into_iter().filter(|n| n.terminal().is_some()).collect()
@@ -572,8 +579,7 @@ impl Node {
     /// Puts `new` beside `target` along `axis` (after it). Reuses the parent
     /// if it already runs along that axis, else wraps the target.
     pub fn split(&mut self, target: &str, axis: Axis, new: Node, container_id: String) -> bool {
-        if let Some(parent) = self.parent_of(target).map(|p| p.id.clone())
-            && let Some(p) = self.find_mut(&parent)
+        if let Some(p) = self.parent_of_mut(target)
             && p.axis() == Some(axis)
         {
             let c = p.children_mut().unwrap();
@@ -642,11 +648,10 @@ impl Node {
         true
     }
 
-    /// Turns the row or column that directly holds `pane` one place: `forward`
-    /// moves each child one on and the last to the front. Sizes stay with the places.
-    pub fn rotate(&mut self, pane: &str, forward: bool) -> Result<(), RotateError> {
-        let split = self.parent_of(pane).filter(|p| p.axis().is_some()).map(|p| p.id.clone());
-        let Some(children) = split.and_then(|id| self.find_mut(&id)).and_then(Node::children_mut) else {
+    /// Turns the row or column that directly holds `pane` one place. Sizes stay with the places.
+    pub fn rotate(&mut self, pane: &str, rotation: Rotation) -> Result<(), RotateError> {
+        let split = self.parent_of_mut(pane).filter(|p| p.axis().is_some());
+        let Some(children) = split.and_then(Node::children_mut) else {
             return Err(RotateError::NotInSplit);
         };
         if children.len() < 2 {
@@ -657,16 +662,24 @@ impl Node {
         }
 
         let sizes: Vec<_> = children.iter().map(|c| c.size).collect();
-        if forward {
-            children.rotate_right(1);
-        } else {
-            children.rotate_left(1);
+        match rotation {
+            Rotation::Next => children.rotate_right(1),
+            Rotation::Prev => children.rotate_left(1),
         }
         for (child, size) in children.iter_mut().zip(sizes) {
             child.size = size;
         }
         Ok(())
     }
+}
+
+/// Which way `Node::rotate` turns a split, like Vim's `<C-w>r` and `<C-w>R`.
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Rotation {
+    /// Each child one place on, the last to the front.
+    Next,
+    /// Each child one place back, the first to the end.
+    Prev,
 }
 
 #[derive(Debug, PartialEq)]
@@ -914,19 +927,19 @@ mod tests {
     #[test]
     fn rotating_moves_panes_and_keeps_sizes_with_places() {
         let weights = [Size::Weight { weight: 1.0 }, Size::Weight { weight: 2.0 }, Size::Px { px: 300.0 }];
-        for (forward, expected) in [(true, ["c", "a", "b"]), (false, ["b", "c", "a"])] {
+        for (rotation, expected) in [(Rotation::Next, ["c", "a", "b"]), (Rotation::Prev, ["b", "c", "a"])] {
             let mut n = Node::container("r", Axis::Row, vec![term("a"), term("b"), term("c")]);
             for (child, size) in n.children_mut().unwrap().iter_mut().zip(weights) {
                 child.size = Some(size);
             }
-            assert_eq!(n.rotate("b", forward), Ok(()));
+            assert_eq!(n.rotate("b", rotation), Ok(()));
             assert_eq!(order(&n), expected);
             let sizes: Vec<_> = n.children().iter().map(|c| c.size.unwrap()).collect();
             assert_eq!(sizes, weights);
         }
-        for forward in [true, false] {
+        for rotation in [Rotation::Next, Rotation::Prev] {
             let mut n = Node::container("r", Axis::Column, vec![term("a"), term("b")]);
-            assert_eq!(n.rotate("a", forward), Ok(()));
+            assert_eq!(n.rotate("a", rotation), Ok(()));
             assert_eq!(order(&n), ["b", "a"]);
         }
     }
@@ -935,7 +948,7 @@ mod tests {
     fn rotating_turns_only_the_split_that_holds_the_pane() {
         let inner = Node::container("col", Axis::Column, vec![term("b"), term("c"), term("d")]);
         let mut n = Node::container("r", Axis::Row, vec![term("a"), inner]);
-        assert_eq!(n.rotate("c", true), Ok(()));
+        assert_eq!(n.rotate("c", Rotation::Next), Ok(()));
         assert_eq!(order(&n), ["a", "col"]);
         assert_eq!(order(n.find("col").unwrap()), ["d", "b", "c"]);
     }
@@ -945,7 +958,7 @@ mod tests {
         let inner = Node::container("col", Axis::Column, vec![term("b"), term("c")]);
         let mut n = Node::container("r", Axis::Row, vec![term("a"), inner]);
         let before = n.clone();
-        assert_eq!(n.rotate("a", true), Err(RotateError::NestedSplit));
+        assert_eq!(n.rotate("a", Rotation::Next), Err(RotateError::NestedSplit));
         assert_eq!(n, before);
     }
 
@@ -953,8 +966,8 @@ mod tests {
     fn rotating_refuses_a_pane_alone_in_its_tab() {
         let mut n = Node::container("tab", Axis::Row, vec![term("a")]);
         let before = n.clone();
-        assert_eq!(n.rotate("a", true), Err(RotateError::NotInSplit));
-        assert_eq!(n.rotate("missing", true), Err(RotateError::NotInSplit));
+        assert_eq!(n.rotate("a", Rotation::Next), Err(RotateError::NotInSplit));
+        assert_eq!(n.rotate("missing", Rotation::Next), Err(RotateError::NotInSplit));
         assert_eq!(n, before);
     }
 }
