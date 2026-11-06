@@ -79,6 +79,7 @@ pub mod host;
 pub mod host_modules;
 pub(crate) mod materialize;
 pub mod metrics;
+pub(crate) mod native_spin;
 pub(crate) mod path;
 pub mod plugin;
 pub mod policy;

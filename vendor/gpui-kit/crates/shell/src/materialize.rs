@@ -1439,7 +1439,21 @@ fn materialize_component(
             // still wins and an icon in a dark button comes out light.
             warn_unhonoured_a11y(&behavior, "svg", &[]);
             let path = crate::AppAssets::cache_key(&path);
-            // HERDR: `spin`.
+            // HERDR: `spin`. Where the compositor can turn it, that's cheapest
+            // of all (see `native_spin`).
+            if let Some(ms) = behavior.spin
+                && !checking()
+                && crate::native_spin::enabled(window, cx)
+            {
+                // A canvas paints without its own opacity or visibility, so
+                // they go into the color.
+                let own = match refinement.visibility {
+                    Some(gpui::Visibility::Hidden) => 0.0,
+                    _ => refinement.opacity.unwrap_or(1.0),
+                };
+                let color = inherited.opacity(own);
+                return native_spin_slot(window.current_view(), path, color, ms, &refinement);
+            }
             if let Some(ms) = behavior.spin
                 && HOSTED.with(|h| h.get())
                 && !checking()
@@ -2762,7 +2776,7 @@ struct Loop {
 }
 
 /// One clock for every view, so spinners in different mods turn together.
-fn loop_clock_ms() -> f64 {
+pub(crate) fn loop_clock_ms() -> f64 {
     static EPOCH: std::sync::OnceLock<std::time::Instant> = std::sync::OnceLock::new();
     EPOCH.get_or_init(std::time::Instant::now).elapsed().as_secs_f64() * 1000.0
 }
@@ -2802,6 +2816,10 @@ thread_local! {
     static INLINE: RefCell<std::collections::HashSet<gpui::EntityId>> =
         RefCell::new(std::collections::HashSet::new());
     static HOSTED: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
+    /// How many native spinners each view's build has made, so each keeps its
+    /// name from one build to the next.
+    static NATIVE_SLOTS: RefCell<std::collections::HashMap<gpui::EntityId, usize>> =
+        RefCell::new(std::collections::HashMap::new());
     static KEEP_INLINE: std::cell::Cell<bool> = const { std::cell::Cell::new(false) };
     /// The opacity the node being built is painted with (its ancestors' and its own).
     static FADE: std::cell::Cell<f32> = const { std::cell::Cell::new(1.0) };
@@ -2812,8 +2830,16 @@ pub(crate) fn show_spins_of(view: gpui::EntityId) {
     SHOWN.with(|s| s.borrow_mut().insert(view));
 }
 
+/// Native spinners are numbered per frame: a view built outside `build_view`
+/// (a dock's tab bar, a list row) starts again at 0 each frame too.
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
+pub(crate) fn reset_native_slots() {
+    NATIVE_SLOTS.with(|s| s.borrow_mut().clear());
+}
+
 pub(crate) fn forget_spins(view: gpui::EntityId) {
     SPINS.with(|s| s.borrow_mut().remove(&view));
+    NATIVE_SLOTS.with(|s| s.borrow_mut().remove(&view));
     SHOWN.with(|s| s.borrow_mut().remove(&view));
     INLINE.with(|s| s.borrow_mut().remove(&view));
 }
@@ -2826,6 +2852,7 @@ pub(crate) fn build_view<T>(view: gpui::EntityId, may_host: bool, build: impl Fn
         && SHOWN.with(|s| s.borrow().contains(&view))
         && !INLINE.with(|s| s.borrow().contains(&view));
     SPINS.with(|s| s.borrow_mut().remove(&view));
+    NATIVE_SLOTS.with(|s| s.borrow_mut().remove(&view));
     HOSTED.with(|h| h.set(hosted));
     KEEP_INLINE.with(|o| o.set(false));
     let built = build();
@@ -2878,6 +2905,46 @@ fn spin_slot(
     );
     slot.style().refine(refinement);
     slot.into_any_element()
+}
+
+/// A spinner the compositor turns (see `native_spin`). GPUI only marks where it
+/// is, and draws it itself, at ~10 fps, while something is painted over it.
+fn native_spin_slot(
+    view: gpui::EntityId,
+    path: SharedString,
+    color: gpui::Hsla,
+    ms: f64,
+    refinement: &StyleRefinement,
+) -> AnyElement {
+    let slot = NATIVE_SLOTS.with(|s| {
+        let mut slots = s.borrow_mut();
+        let next = slots.entry(view).or_insert(0);
+        *next += 1;
+        *next - 1
+    });
+    let key = crate::native_spin::key(view, slot);
+    let mut canvas = gpui::canvas(
+        |_, _, _| {},
+        move |bounds, _, window, cx| {
+            let covered = crate::native_spin::covered(key);
+            if covered {
+                let scale = window.scale_factor();
+                let turn = (loop_clock_ms() % ms) / ms;
+                let center = bounds.center();
+                let matrix = gpui::TransformationMatrix::unit()
+                    .translate(center.scale(scale))
+                    .rotate(gpui::radians((turn * std::f64::consts::TAU) as f32))
+                    .translate(center.scale(-scale));
+                let _ = window.paint_svg(bounds, path.clone(), None, matrix, color, cx);
+                wake_view_after(Duration::from_millis(100), window, cx);
+            }
+            let color = color.opacity(window.element_opacity());
+            let spinner = crate::native_spin::Spinner { bounds, path, color, ms };
+            crate::native_spin::place(key, window.current_view(), spinner, window);
+        },
+    );
+    canvas.style().refine(refinement);
+    canvas.into_any_element()
 }
 
 /// `view`'s spinners, turned to now; while there are any, the view this is

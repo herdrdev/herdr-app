@@ -228,7 +228,9 @@ impl SvgRenderer {
         self.render_parsed(&svg, scale_factor)
     }
 
-    pub(crate) fn render_alpha_mask(
+    /// Renders `params.path` (or `bytes`) to one alpha byte per pixel.
+    // HERDR: public, so a native layer can draw the same mask GPUI would.
+    pub fn render_alpha_mask(
         &self,
         params: &RenderSvgParams,
         bytes: Option<&[u8]>,
