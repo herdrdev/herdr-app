@@ -2297,7 +2297,7 @@ impl AppWindow {
             return self.close_overlay(&id, window, cx);
         }
         if self.chrome.find(block).is_some_and(|n| n.terminal().is_some()) {
-            self.chrome.remove(block);
+            self.chrome.remove_slot(block);
             self.sync(window, cx);
         }
         // How its stream ended, for `reconcile` (`hc run --rm` leaves no record).
