@@ -1,5 +1,5 @@
-// Windows: a window app, no console of its own (see `attach_console`).
-#![cfg_attr(windows, windows_subsystem = "windows")]
+// Windows: a window app, but tests inherit Cargo's console for their child processes.
+#![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 
 mod bench;
 mod commands;
