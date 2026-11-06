@@ -265,6 +265,14 @@ Swap a pane (default: the focused one) with its neighbor in a direction, or with
 | `pane` | no |
 | `target` | no |
 
+## `pane.equalize`
+
+Give every split in a tab (default: the focused one) equal shares, nested ones too.
+
+| Argument | Required |
+|---|---|
+| `tab` | no |
+
 ## `terminal.peek`
 
 Peek at a running terminal over the tab, with keep-as-tab and close controls.

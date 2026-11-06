@@ -2807,8 +2807,8 @@ impl AppWindow {
             if !args.is_object() { args = json!({}); }
             args["machine"] = json!(machine);
         }
-        if matches!(name, "space.new" | "space.close" | "space.rename" | "space.move" | "tab.new" | "tab.close" | "tab.rename" | "tab.move" | "pane.split" | "pane.close" | "pane.swap" | "terminal.keep" | "terminal.park") {
-            let node = ["id", "space", "pane"].into_iter().find_map(|k| Self::arg(&args, k));
+        if matches!(name, "space.new" | "space.close" | "space.rename" | "space.move" | "tab.new" | "tab.close" | "tab.rename" | "tab.move" | "pane.split" | "pane.close" | "pane.swap" | "pane.equalize" | "terminal.keep" | "terminal.park") {
+            let node = ["id", "space", "pane", "tab"].into_iter().find_map(|k| Self::arg(&args, k));
             let target = node.and_then(|id| self.model.space(id).or_else(|| self.model.space_of(id))).or_else(|| self.model.active_space());
             let machine = if name == "space.new" { Self::arg(&args, "machine") }
                 else if name == "terminal.park" { Self::arg(&args, "terminal").and_then(|a| a.split_once('/').map(|(m, _)| m)) }
@@ -3058,6 +3058,15 @@ impl AppWindow {
                 if let Err(e) = r {
                     return self.fail(e);
                 }
+            }
+            "pane.equalize" => {
+                let id = match a.get("tab") {
+                    None | Some(Value::Null) => self.model.active_tab().map(|c| c.id.clone()).unwrap_or_default(),
+                    Some(Value::String(id)) => id.clone(),
+                    Some(_) => return self.fail("pane.equalize tab must be a tab id (or null for the focused tab)"),
+                };
+                let Some(c) = self.model.tab_mut(&id) else { return self.fail(format!("no tab {id:?}")) };
+                c.root.equalize();
             }
             // ---- terminals
             "terminal.open" => {
@@ -5470,6 +5479,62 @@ mod tests {
             assert_eq!(prompts(this), 0, "a second press closes the prompt");
             this.run("tab.rename", json!({}), window, cx);
             assert_eq!(prompts(this), 1, "and a third opens it again");
+        }));
+    }
+
+    #[test]
+    fn equalizing_panes_resets_one_tabs_splits() {
+        in_own_process("equalize_panes");
+    }
+
+    #[gpui::test]
+    fn equalize_panes(cx: &mut gpui::TestAppContext) {
+        use super::{Axis, Node, Span};
+        use serde_json::json;
+        if !running_alone("equalize_panes") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "unused", "", json!({
+            "id": "root", "type": "block", "content": { "tab": "active" }
+        }));
+        // A row of `a` and a column of `b` over `c`, dragged uneven, `b` focused.
+        let uneven = |tab: &str| {
+            let sized = |mut n: Node, size: Span| { n.size = Some(size); n };
+            let pane = |name: &str| crate::model::pane(&format!("{tab}-{name}"), &format!("t-{tab}-{name}"));
+            let column = Node::container(format!("{tab}-col"), Axis::Column, vec![sized(pane("b"), Span::Px { px: 50.0 }), pane("c")]);
+            let mut t = crate::model::Tab::new(tab, "", &format!("{tab}-a"), &format!("t-{tab}-a"));
+            t.root = Node::container(tab, Axis::Row, vec![sized(pane("a"), Span::Weight { weight: 3.0 }), sized(column, Span::Px { px: 200.0 })]);
+            t.focus(&format!("{tab}-b"));
+            t
+        };
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.documents.get_mut("").unwrap().available = true;
+            this.model.add_space("sp1", "", "/tmp", uneven("tb1"));
+            this.model.add_tab("sp1", uneven("tb2"));
+            this.model.select_tab("tb1");
+            this.sync(window, cx);
+            let tab = |this: &super::AppWindow, id: &str| this.model.tab(id).unwrap().clone();
+            let even = |this: &super::AppWindow, id: &str| tab(this, id).root.walk().iter().skip(1).all(|n| n.size.is_none());
+            let (before1, before2) = (tab(this, "tb1"), tab(this, "tb2"));
+
+            let reply = this.run_as("pane.equalize", json!({ "tab": "nope" }), false, window, cx);
+            assert_eq!(reply, json!({ "error": "no tab \"nope\"" }));
+            let reply = this.run_as("pane.equalize", json!({ "tab": 2 }), false, window, cx);
+            assert!(reply["error"].as_str().is_some_and(|e| e.contains("tab")), "{reply}");
+            assert_eq!((tab(this, "tb1").root, tab(this, "tb2").root), (before1.root.clone(), before2.root.clone()), "a refused tab changes nothing");
+
+            assert_eq!(this.run_as("pane.equalize", json!({}), false, window, cx), json!({ "ok": true }));
+            assert!(even(this, "tb1"), "the focused tab: {:?}", tab(this, "tb1").root);
+            assert_eq!(tab(this, "tb2").root, before2.root, "other tabs stay");
+            let ids = |n: &Node| n.walk().iter().map(|n| n.id.clone()).collect::<Vec<_>>();
+            assert_eq!(ids(&tab(this, "tb1").root), ids(&before1.root), "pane order stays");
+            assert_eq!(tab(this, "tb1").focused.as_deref(), Some("tb1-b"));
+            assert_eq!(this.model.active_tab().map(|t| t.id.clone()).as_deref(), Some("tb1"));
+
+            assert_eq!(this.run_as("pane.equalize", json!({ "tab": "tb2" }), false, window, cx), json!({ "ok": true }));
+            assert!(even(this, "tb2"), "a tab that isn't shown");
+            assert_eq!(tab(this, "tb2").focused.as_deref(), Some("tb2-b"));
+            assert_eq!(this.model.active_tab().map(|t| t.id.clone()).as_deref(), Some("tb1"), "focus stays on the shown tab");
         }));
     }
 

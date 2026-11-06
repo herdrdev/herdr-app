@@ -650,6 +650,18 @@ impl Node {
         }
         true
     }
+
+    /// Gives every child of every row and column below this node the same
+    /// share, fixed-size ones included. This node's own size is left alone.
+    pub fn equalize(&mut self) {
+        let split = matches!(self.kind, Kind::Row { .. } | Kind::Column { .. });
+        for child in self.children_mut().into_iter().flatten() {
+            if split {
+                child.size = None;
+            }
+            child.equalize();
+        }
+    }
 }
 
 fn active_child<'a>(children: &'a [Node], active: Option<&str>) -> Option<&'a Node> {
@@ -892,5 +904,22 @@ mod tests {
         let ids: Vec<_> = n.children().iter().map(|c| c.id.clone()).collect();
         assert_eq!(ids, ["c", "b", "a"]);
         assert_eq!(n.children()[0].size, Some(Size::Px { px: 100.0 }));
+    }
+
+    #[test]
+    fn equalizing_gives_every_split_child_the_same_share_at_each_level() {
+        let mut inner = Node::container("inner", Axis::Column, vec![term("b"), term("c"), term("d")]);
+        inner.size = Some(Size::Px { px: 300.0 });
+        let mut n = Node::container("r", Axis::Row, vec![term("a"), inner]);
+        n.size = Some(Size::Weight { weight: 2.0 });
+        n.find_mut("a").unwrap().size = Some(Size::Weight { weight: 0.2 });
+        n.find_mut("b").unwrap().size = Some(Size::Px { px: 40.0 });
+        n.find_mut("c").unwrap().size = Some(Size::Weight { weight: 3.0 });
+        n.equalize();
+        let sizes: Vec<_> = ["a", "inner", "b", "c", "d"].iter().map(|id| n.find(id).unwrap().size).collect();
+        assert_eq!(sizes, [None; 5]);
+        assert_eq!(n.size, Some(Size::Weight { weight: 2.0 }), "the root's own slot is its parent's business");
+        let ids: Vec<_> = n.walk().iter().map(|c| c.id.clone()).collect();
+        assert_eq!(ids, ["r", "a", "inner", "b", "c", "d"]);
     }
 }
