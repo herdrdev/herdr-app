@@ -531,6 +531,7 @@ impl Node {
         })
     }
 
+    #[cfg(test)]
     pub fn parent_of(&self, id: &str) -> Option<&Node> {
         let p = self.path_to(id)?;
         (p.len() >= 2).then(|| self.find(&p[p.len() - 2])).flatten()
