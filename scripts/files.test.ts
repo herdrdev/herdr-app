@@ -16,6 +16,12 @@ const directory = loadDirectory(
   process.platform === "win32" ? "windows" : process.platform,
 );
 
+test("Files keeps the preview text size usable whatever shared.json holds", () => {
+  const previewSize = new Function(`${source.match(/^const previewSize = .*$/m)![0]}; return previewSize;`)();
+  expect([undefined, null, "big", "14", NaN, Infinity].map(previewSize)).toEqual([12, 12, 12, 12, 12, 12]);
+  expect([-3, 7, 8, 14.5, 32, 33].map(previewSize)).toEqual([8, 8, 8, 14.5, 32, 32]);
+});
+
 test("Files retries a remote Windows directory with PowerShell on that machine", async () => {
   const calls: { command: string; args: string[]; on: string }[] = [];
   const list = loadDirectory(async (command: string, args: string[], options: { on: string }) => {
