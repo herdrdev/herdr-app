@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { readFile, writeFile, mkdtemp, mkdir, rm } from "node:fs/promises";
+import { readFile, writeFile, mkdtemp, mkdir, rm, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
@@ -8,7 +8,7 @@ const source = (await readFile(new URL("../defaults/mods/source-control/git.js",
 const hashes = (state: any): string[] => state.graph.split("\n").map((line: string) => line.split("\x1f")[1]).filter(Boolean);
 
 async function fixture(body: (f: any) => Promise<void>) {
-  const sandbox = await mkdtemp(join(tmpdir(), "herdr-history-")), root = join(sandbox, "work");
+  const temporary = await realpath(tmpdir()), sandbox = await mkdtemp(join(temporary, "herdr-history-")), root = join(sandbox, "work");
   const env = Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_")));
   Object.assign(env, { GIT_CONFIG_NOSYSTEM: "1", GIT_CONFIG_GLOBAL: join(sandbox, "gitconfig"), GIT_TERMINAL_PROMPT: "0", GIT_ALLOW_PROTOCOL: "file",
     GIT_AUTHOR_NAME: "Fixture", GIT_AUTHOR_EMAIL: "fixture@example.invalid", GIT_COMMITTER_NAME: "Fixture", GIT_COMMITTER_EMAIL: "fixture@example.invalid" });
@@ -44,7 +44,7 @@ async function fixture(body: (f: any) => Promise<void>) {
       commit: (subject: string, ...parents: string[]) => git(["commit-tree", tree, ...parents.flatMap(parent => ["-p", parent]), "-m", subject]),
     });
   } finally {
-    expect(dirname(resolve(sandbox))).toBe(resolve(tmpdir()));
+    expect(dirname(resolve(sandbox))).toBe(temporary);
     await rm(sandbox, { recursive: true, force: true });
   }
 }

@@ -60,6 +60,8 @@ The window arranges terminals. The core runs them.
 Closing the window leaves them running; closing a pane or tab ends its terminals.
 After a reboot or core crash, kept panes get fresh shells in their last folders, not their old programs.
 
+Open **Source Control** from the tab bar to inspect Git changes and commit history. Click a changed text file to view its diff, then select individual changed lines or whole hunks to stage or unstage. Refreshing the diff clears its selection. See the [Source Control guide](defaults/mods/source-control/README.md) for repository actions and limits.
+
 ## Work on another machine
 
 Add an SSH machine from Settings → Machines or the sidebar's Add machine action.
@@ -131,6 +133,8 @@ On Linux it links to this checkout, so keep the checkout in place.
 Quit and reopen Herdr to use the new build.
 
 Documentation checks also need [Bun](https://bun.sh): `just docs-check` checks generated pages and CLI examples; `just docs-generate` refreshes the reference pages.
+
+The Source Control suites also run on macOS in CI. Run them locally with `bun test scripts/source-control*.test.ts`; their temporary repositories use canonical paths so macOS's `/var` and `/private/var` aliases refer to the same sandbox.
 
 To compare drawing changes on Windows, Linux or macOS, run the same fixed workloads against each build:
 

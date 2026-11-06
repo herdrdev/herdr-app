@@ -104,13 +104,13 @@ export class DiffPanel {
     const mutable = !this.busy && !this.error && !this.restriction();
     if (row.kind === "header") return div().h(22).flex_none().px(12).text_color(t.dim).whitespace_nowrap().child(row.text);
     if (row.kind === "hunk") return h_flex().id(`diff-hunk-${index}`).h(22).flex_none().px(12).gap(12).items_center().bg(t.raised).text_color(t.accent)
-      .when(mutable, e => e.cursor_pointer().tooltip("Select or clear all changed lines in this hunk").on_click((_event, cx) => this.toggleHunk(row.hunk, cx)))
+      .when(mutable, e => e.cursor_pointer().tooltip("Select or clear all changed lines in this hunk"))
       .child(div().flex_1().whitespace_nowrap().child(row.text))
       .when(mutable, e => e.child(div().text_size(10).child("Select hunk")));
     const changed = row.kind === "+" || row.kind === "-", selected = this.selected.has(row.index);
     return h_flex().id(`diff-line-${index}`).h(22).flex_none().items_center().gap(8).px(8)
       .bg(selected ? t.selected : row.kind === "+" ? t.ansi2 + "18" : row.kind === "-" ? t.ansi1 + "18" : t.background)
-      .when(changed && mutable, e => e.cursor_pointer().hover(s => s.bg(t.hover)).tooltip("Select or clear this line").on_click((_event, cx) => this.toggle(row.index, cx)))
+      .when(changed && mutable, e => e.cursor_pointer().hover(s => s.bg(t.hover)).tooltip("Select or clear this line"))
       .child(div().w(12).flex_none().text_color(t.accent).child(selected ? "✓" : ""))
       .child(div().w(38).flex_none().text_right().text_color(t.dim).child(row.oldLine == null ? "" : String(row.oldLine)))
       .child(div().w(38).flex_none().text_right().text_color(t.dim).child(row.newLine == null ? "" : String(row.newLine)))
@@ -119,6 +119,7 @@ export class DiffPanel {
   }
 
   render() {
+    const rows = this.rows;
     const t = theme(), restriction = this.restriction(), enabled = !this.busy && !this.error && !restriction && this.selected.size > 0;
     const group = this.props.hash ? `Commit ${this.props.hash.slice(0, 8)}` : this.props.group === "staged" ? "Staged Changes" : this.props.group === "conflicts" ? "Merge Changes" : "Changes";
     return v_flex().size_full().min_h(0).min_w(0).bg(t.background).text_color(t.foreground).text_size(12)
@@ -141,8 +142,14 @@ export class DiffPanel {
       .when(Boolean(this.error || this.note), e => e.child(div().px(14).py(7).text_color(this.error ? t.ansi1 : t.muted).child(this.error || this.note)))
       .child(div().flex_1().min_h(0).relative().font_family("JetBrains Mono").text_size(12)
         .child(div().id("source-diff-x").size_full().overflow_x_scrollbar()
-          .child(div().min_w(this.width).w_full().h_full().child(v_virtual_list("source-diff-lines", this.rows.length, 22, index => String(index),
-            range => this.rows.slice(range.start, range.end).map((row, offset) => this.renderRow(row, range.start + offset, t))).size_full())))
+          .child(div().min_w(this.width).w_full().h_full().child(v_virtual_list("source-diff-lines", rows.length, 22, index => String(index),
+            range => rows.slice(range.start, range.end).map((row, offset) => this.renderRow(row, range.start + offset, t))).size_full()
+            .on_item_click((key, cx) => {
+              if (rows !== this.rows) return;
+              const row = rows[Number(key)];
+              if (row?.kind === "hunk") this.toggleHunk(row.hunk, cx);
+              else if (row?.kind === "+" || row?.kind === "-") this.toggle(row.index, cx);
+            }))))
         .child(Scrollbar.vertical("source-diff-lines").viewport_from_layout().absolute().inset_0())
         .when(!this.rows.length, e => e.child(div().absolute().top(12).px(14).text_color(t.dim).child(this.busy ? "Loading diff…" : "No changes to display."))));
   }

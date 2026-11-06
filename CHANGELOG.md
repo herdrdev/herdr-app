@@ -1,5 +1,10 @@
 # Herdr changelog
 
+## [Unreleased]
+
+### Fixed
+- Source Control's changed-file diffs render on macOS and allow line and hunk selection; clicks from an older diff are ignored after refresh. (#563, thanks @photojupi)
+
 ## [0.1.13] - 2026-11-04
 <!-- spotlight macos -->
 

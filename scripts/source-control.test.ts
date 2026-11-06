@@ -1,5 +1,5 @@
 import { test, expect } from "bun:test";
-import { readFile, writeFile, mkdtemp, mkdir, rm, rename } from "node:fs/promises";
+import { readFile, writeFile, mkdtemp, mkdir, rm, rename, realpath } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { dirname, isAbsolute, join, relative, resolve } from "node:path";
 
@@ -285,7 +285,7 @@ test("Graph commits expand inline, open historical diffs, and switch list/tree w
 });
 
 async function fixture(body: (f: any) => Promise<void>) {
-  const sandbox = await mkdtemp(join(tmpdir(), "herdr-source-control-")), root = join(sandbox, "work");
+  const temporary = await realpath(tmpdir()), sandbox = await mkdtemp(join(temporary, "herdr-source-control-")), root = join(sandbox, "work");
   const calls: string[][] = [];
   const env = Object.fromEntries(Object.entries(process.env).filter(([name]) => !name.startsWith("GIT_")));
   Object.assign(env, {
@@ -324,7 +324,7 @@ async function fixture(body: (f: any) => Promise<void>) {
     });
   } finally {
     // Only remove the directory this fixture created, never a repository supplied by a caller.
-    expect(dirname(resolve(sandbox))).toBe(resolve(tmpdir()));
+    expect(dirname(resolve(sandbox))).toBe(temporary);
     await rm(sandbox, { recursive: true, force: true });
   }
 }

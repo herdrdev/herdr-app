@@ -1040,3 +1040,81 @@ export default class Scenario extends Real {
         window.update(&mut visual, |_, window, _| window.remove_window()).unwrap();
     }
 }
+
+#[gpui::test]
+fn source_control_diff_rows_render_and_select(cx: &mut TestAppContext) {
+    use gpui::{IntoElement, Modifiers, ParentElement, Styled, VisualTestContext, point, px};
+    use gpui_shell::ShellRoot;
+    use std::ops::Deref;
+
+    struct Mounted(gpui::Entity<ShellRoot>);
+    impl gpui::Render for Mounted {
+        fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+            gpui::div().w(px(600.)).h(px(400.)).child(self.0.clone())
+        }
+    }
+    fn draw(cx: &mut VisualTestContext) {
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.run_until_parked();
+    }
+    fn click(cx: &mut VisualTestContext, y: f32) {
+        cx.simulate_click(point(px(100.), px(y)), Modifiers::default());
+        draw(cx); draw(cx);
+    }
+
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    std::fs::write(staged.0.join("main.js"), r#"
+import { View } from 'gpui-kit';
+import { setShared } from 'herdr';
+import { DiffPanel } from './mods/source-control/diff-ui.js';
+class FixtureDiff extends DiffPanel {
+  load() {
+    this.setPatch('diff --git a/example.txt b/example.txt\nindex 1234567..abcdef0 100644\n--- a/example.txt\n+++ b/example.txt\n@@ -1,2 +1,2 @@\n first\n-old\n+new\n');
+  }
+}
+export default class Scenario extends View {
+  init(props, cx) {
+    this.panel = new FixtureDiff({ root: '/fixture/project', file: { path: 'example.txt' }, group: 'changes' }, cx);
+  }
+  render() {
+    const result = this.panel.render();
+    setShared('test.diff-selection', [...this.panel.selected].sort());
+    return result;
+  }
+}
+"#).unwrap();
+    for platform in ["windows", "macos"] {
+        let calls = Rc::new(RefCell::new(Calls::default()));
+        let selected = || calls.borrow().shared.get("test.diff-selection").cloned().unwrap_or(Value::Null);
+        let mut values = fixture(true, props(), updates("current", "current"));
+        values.insert("window".into(), json!({"platform":platform}));
+        gpui_shell::policy::set_default(Policy::new()
+            .with_capabilities(Capabilities::new().read_roots([staged.0.clone()]))
+            .with_host_module(module(values, calls.clone())).unwrap());
+        let runtime = ShellRuntime::new_isolated().unwrap();
+        let window = cx.add_window(|window, cx| Mounted(runtime.try_load(&staged.0, window, cx).unwrap()));
+        let mut visual = VisualTestContext::from_window(*window.deref(), cx);
+        draw(&mut visual); draw(&mut visual);
+        assert_eq!(selected(), json!([]));
+
+        // The 44px title and 42px controls precede eight 22px virtual rows.
+        // Clicking a painted row catches deferred-render errors that check
+        // and the initial description cannot see.
+        click(&mut visual, 97.);
+        click(&mut visual, 207.);
+        assert_eq!(selected(), json!([]), "{platform}: headers and context must not be selectable");
+        click(&mut visual, 251.);
+        assert_eq!(selected(), json!([2]), "{platform}: the added line must render and select");
+        click(&mut visual, 251.);
+        assert_eq!(selected(), json!([]), "{platform}: clicking a selected line must clear it");
+        click(&mut visual, 229.);
+        assert_eq!(selected(), json!([1]), "{platform}: the removed line must select");
+        click(&mut visual, 185.);
+        assert_eq!(selected(), json!([1, 2]), "{platform}: a hunk must select all changed lines");
+        click(&mut visual, 185.);
+        assert_eq!(selected(), json!([]), "{platform}: clicking a selected hunk must clear it");
+        assert!(calls.borrow().unexpected.is_empty(), "{:?}", calls.borrow().unexpected);
+        window.update(&mut visual, |_, window, _| window.remove_window()).unwrap();
+    }
+}
