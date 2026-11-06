@@ -265,6 +265,15 @@ Swap a pane (default: the focused one) with its neighbor in a direction, or with
 | `pane` | no |
 | `target` | no |
 
+## `pane.rotate`
+
+Rotate the panes of the split that holds a pane (default: the focused one): "next" moves each one place on and the last to the front, "prev" the other way.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+| `direction` | yes |
+
 ## `terminal.peek`
 
 Peek at a running terminal over the tab, with keep-as-tab and close controls.
