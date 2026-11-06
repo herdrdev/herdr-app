@@ -3590,6 +3590,7 @@ mod tests {
 
     #[cfg(target_os = "macos")]
     #[test]
+    #[ignore = "creates the native text system off the main thread; run with --ignored"]
     fn italic_gets_a_synthetic_face_when_the_family_has_none() {
         use gpui::{Font, FontStyle, PlatformTextSystem, font, px};
         use std::borrow::Cow;
