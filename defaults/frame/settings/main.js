@@ -2,7 +2,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input } from "gpui-base";
-import { hc, run, theme, themes, fonts, updates, telemetry, settings, layouts, shared, appHome, readTextFile, writeTextFile, playSound, props, closeOverlay, window } from "herdr";
+import { hc, run, theme, themes, fonts, updates, telemetry, settings, layouts, shared, appHome, readTextFile, writeTextFile, playSound, props, closeOverlay, notify, window } from "herdr";
 
 const I = (name) => `frame/settings/${name}.svg`;
 
@@ -98,31 +98,53 @@ export default class Settings extends View {
     });
   }
 
+  // `broken`: settings.json doesn't parse (mid-edit), or isn't an object, so
+  // nothing may be written over it.
   async load() {
     this.raw = await readTextFile(this.file());
     try {
-      this.person = this.raw ? JSON.parse(this.raw) : {};
+      const person = this.raw ? JSON.parse(this.raw) : {};
+      this.broken = !person || typeof person !== "object" || Array.isArray(person);
+      this.person = this.broken ? {} : person;
     } catch {
       this.person = {};
+      this.broken = true;
     }
   }
 
   // Changes settings.json the way an agent would: read, change, write back
-  // only if nobody changed it meanwhile (else read again and redo).
+  // only if nobody changed it meanwhile (else read again and redo). Says so
+  // when it couldn't.
   change(edit, cx) {
     cx.spawn(async (cx) => {
-      for (let attempt = 0; attempt < 3; attempt++) {
-        await this.load();
-        const next = JSON.parse(JSON.stringify(this.person));
-        edit(next);
-        try {
-          await writeTextFile(this.file(), JSON.stringify(next, null, 2) + "\n", this.raw);
-          this.person = next;
-          break;
-        } catch {}
-      }
+      const failed = await this.save(edit);
+      if (failed) notify({ ...failed, level: "error" });
       cx.notify();
     });
+  }
+
+  // The toast saying why `edit` wasn't written, or null once it is.
+  async save(edit) {
+    let error;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      let next;
+      try {
+        await this.load();
+        if (this.broken) return { title: "settings.json has errors: fix it first" };
+        next = JSON.parse(JSON.stringify(this.person));
+        edit(next);
+      } catch (e) {
+        return { title: "Cannot read settings.json", body: String(e?.message ?? e) };
+      }
+      try {
+        await writeTextFile(this.file(), JSON.stringify(next, null, 2) + "\n", this.raw);
+        this.person = next;
+        return null;
+      } catch (e) {
+        error = e;
+      }
+    }
+    return { title: "Not saved to settings.json", body: String(error?.message ?? error) };
   }
 
   close() {
