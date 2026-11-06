@@ -158,6 +158,9 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
         let calls = calls.clone();
         module = module.async_function(name, move |a| {
             let first = a.get(0).map(from_host).unwrap_or(Value::Null);
+            if name == "hc" {
+                calls.borrow_mut().effects.push((name.into(), vec![first.clone()]));
+            }
             let reply = match name {
                 "readTextFile" if first == "/fixture/app/settings.json" || first == "/fixture/.ssh/config" => Some(Value::Null),
                 "readTextFile" => first
@@ -457,6 +460,54 @@ fn rebuilt_machine_offers_connect_only_for_identity_mismatch(cx: &mut TestAppCon
         assert_eq!(tree.contains("This machine was rebuilt or replaced. Click to connect to the new one."), offered, "{tree}");
         assert!(!tree.contains("machine-reconnect-"), "reconnect belongs in the machine row: {tree}");
     }
+}
+
+#[gpui::test]
+fn machine_login_is_offered_only_when_authentication_is_needed(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for state in ["needs_login", "connected", "unreachable", "needs_update"] {
+        let setup = format!("this.machineList = [{{name:'office server', target:'host', state:{state:?}}}];");
+        let tree = describe(cx, &staged, "frame/settings", false, json!({"section":"machines"}), updates("current", "current"), Some(&setup)).unwrap();
+        assert_eq!(tree.contains("st-m-login-office server"), state == "needs_login", "{tree}");
+        assert_eq!(tree.contains("SSH needs authentication."), state == "needs_login", "{tree}");
+    }
+}
+
+#[gpui::test]
+fn machine_login_opens_a_terminal_without_replacing_the_machine(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let calls = Rc::new(RefCell::new(Calls::default()));
+    let policy = Policy::new().with_host_module(module(fixture(false, props(), updates("current", "current")), calls.clone())).unwrap();
+    let root = staged.wrapper("frame/settings", "this.machineLogin('office server', cx);");
+    let window = cx.add_window(|_, _| Empty);
+    let mut session = window.update(cx, |_, window, cx| {
+        DescriptionSession::load(ShellRuntime::new_isolated().unwrap(), root, policy, window, cx).unwrap()
+    }).unwrap();
+    cx.run_until_parked();
+    window.update(cx, |_, window, cx| {
+        session.describe(window, cx).unwrap();
+        window.remove_window();
+    }).unwrap();
+    let calls = calls.borrow();
+    assert!(calls.unexpected.is_empty(), "{:?}", calls.unexpected);
+    let commands: Vec<_> = calls.effects.iter().filter(|(name, _)| name == "hc").map(|(_, args)| &args[0]).collect();
+    assert_eq!(commands, vec![&json!(["run", "--bg", "--json", "--no-parent", "--name", "machine-login", "--", "hc", "machine", "login", "office server"])]);
+    let spec = &calls.effects.iter().find(|(name, _)| name == "openOverlay").unwrap().1[0];
+    assert_eq!(spec["layout"]["children"][1]["content"]["terminal"], "t-setup");
+    assert_eq!(spec["layout"]["children"][0]["content"]["props"]["action"], "login");
+}
+
+#[gpui::test]
+fn machine_login_terminal_has_a_login_title(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let tree = describe(cx, &staged, "mods/machine-add", false,
+        json!({"part":"bar", "target":"office server", "action":"login"}),
+        updates("current", "current"), None).unwrap();
+    assert!(tree.contains("Logging in to office server: answer it here"), "{tree}");
+    assert!(!tree.contains("Adding office server"), "{tree}");
 }
 
 #[gpui::test]
