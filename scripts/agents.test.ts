@@ -73,14 +73,15 @@ test("tab labels prefer the first agent, then focused terminal, then first termi
   ]);
 });
 
-// Lightweight element descriptions: execute conditional builders and retain text,
+// Lightweight element descriptions: retain text, SVG source and animation calls,
 // without running input callbacks or pretending to exercise native GPUI layout.
-function element() {
-  const node = { id: "", children: [] as any[] };
+function element(src?: string) {
+  const node = { id: "", src, spin: undefined as number | undefined, children: [] as any[] };
   const el: any = new Proxy(node, { get: (_, method) => {
     if (method === "node") return node;
     return (...args: any[]) => {
       if (method === "id") node.id = args[0];
+      if (method === "spin") node.spin = args[0];
       if (method === "on_click") (node as any).click = args[0];
       if (method === "child") node.children.push(args[0]?.node ?? args[0]);
       if (method === "children") node.children.push(...args[0].map((child: any) => child?.node ?? child));
@@ -169,4 +170,164 @@ for (const sort of ["priority", "grouped"]) test(`${sort}: a kept sub-agent keep
   expect(keptRender(sort, { width: 44 }).ids).toContain("ag-t3"); // the rail draws no trees
   expect(keptRender(sort, { pinned: ["t3"] }).ids).toContain("ag-t3");
   expect(keptRender(sort, { kept: [{ address: "t3", parent: "t9" }] }).ids).toContain("ag-t3"); // its parent ended
+});
+
+const summaryAgent = (address = "t1", status = "idle") => ({
+  address, status, pane: `p-${address}`, tab: "tab1", space: "s1", space_name: "Project",
+  program: { name: "Generic worker", key: "generic-worker", agent: true },
+  seq: 1, focused: false, pinned: false,
+});
+const summaryTerminal = (address = "t1", records?: Record<string, unknown>) => ({
+  address, records, state: "live", status: "idle", report: { state: "idle" }, parent: null as string | null,
+});
+const workingRecords = () => ({ task: { state: "working", app: "generic-worker" } });
+
+function summaryRender(list = [summaryAgent()], all = [summaryTerminal("t1", workingRecords())], { sort = "priority", width = 268 } = {}) {
+  const orders: string[][] = [];
+  const { agents, writes } = harness([], {
+    agents: () => list, terminals: () => all, panes: () => [], focused: () => null,
+    spaces: () => [{ tabs: [{ id: "tab1", name: "Task", named: true }] }],
+    layout: () => ({ id: "sidebar", size: { px: width } }), shared: () => sort,
+    theme: () => ({}), setAgentOrder: (order: string[]) => orders.push(order),
+    div: element, v_flex: element, h_flex: element, svg: element, image: element,
+  });
+  return { view: agents, writes, orders, render: () => agents.render({}).node };
+}
+function nodes(node: any): any[] {
+  return [node, ...(node?.children ?? []).flatMap(nodes)];
+}
+const byId = (tree: any, id: string) => nodes(tree).find(node => node?.id === id);
+const spinners = (tree: any) => nodes(tree).filter(node => node?.src === "mods/workspace-chrome/spinner.svg" && node.spin === 900);
+
+for (const sort of ["priority", "grouped"]) test(`${sort}: settled roots with working records show a spinning row in Working or their space`, () => {
+  const list = [summaryAgent("t1", "idle"), summaryAgent("t2", "done")];
+  const all = [summaryTerminal("t1", workingRecords()), summaryTerminal("t2", {
+    ...workingRecords(), second: { state: "working" }, waiting: { state: "blocked" }, failed: { state: "error" },
+  })];
+  const { render, view, writes } = summaryRender(list, all, { sort });
+  const tree = render();
+  for (const a of list) {
+    expect(spinners(byId(tree, `ag-${a.address}`))).toHaveLength(1);
+    expect(view.listed.get(a.address)).toBe("working");
+  }
+  const header = byId(tree, sort === "priority" ? "sec-2" : "sp-s1");
+  expect(textOf(header)).toContain(sort === "priority" ? "Working" : "Project");
+  expect(byId(tree, "sec-3")).toBeUndefined();
+  expect(byId(tree, "sec-1")).toBeUndefined();
+  expect(nodes(tree).filter(node => node?.id?.startsWith("sub-"))).toHaveLength(0);
+  expect(writes).toEqual([]);
+});
+
+test("working and blocked roots keep precedence, including a raw root error", () => {
+  for (const raw of ["working", "blocked", "error"]) {
+    const status = raw === "error" ? "blocked" : raw;
+    const terminal = { ...summaryTerminal("t1", workingRecords()), status: raw, report: { state: raw } };
+    const { render, view } = summaryRender([summaryAgent("t1", status)], [terminal]);
+    const tree = render();
+    expect(view.listed.get("t1")).toBe(status);
+    expect(textOf(byId(tree, raw === "working" ? "sec-2" : "sec-4"))).toContain(raw === "working" ? "Working" : "Needs you");
+    expect(spinners(byId(tree, "ag-t1"))).toHaveLength(raw === "working" ? 1 : 0);
+  }
+});
+
+for (const status of ["idle", "done"]) test(`${status}: only a nonempty record ID with direct working state promotes`, () => {
+  const ignored = [undefined, {}, { "": { state: "working" } }, { task: { status: { state: "working" } } },
+    ...["idle", "done", "blocked", "error"].map(state => ({ task: { state } }))];
+  for (const records of ignored) {
+    const { render, view } = summaryRender([summaryAgent("t1", status)], [summaryTerminal("t1", records)]);
+    const tree = render();
+    expect(view.listed.get("t1")).toBe(status);
+    expect(byId(tree, status === "done" ? "sec-3" : "sec-1")).toBeDefined();
+    expect(spinners(tree)).toHaveLength(0);
+  }
+});
+
+for (const status of ["idle", "done"]) test(`${status}: clearing or settling the last working record restores the root on the same view`, () => {
+  const terminal = summaryTerminal("t1", workingRecords());
+  const { render, view } = summaryRender([summaryAgent("t1", status)], [terminal]);
+  const settled = [undefined, {}, ...["done", "idle", "error", "blocked"].map(state => ({ task: { state } }))];
+  for (const records of settled) {
+    terminal.records = workingRecords();
+    expect(spinners(byId(render(), "ag-t1"))).toHaveLength(1);
+    expect(view.changed.t1.s).toBe("working");
+    terminal.records = records;
+    const tree = render();
+    expect(spinners(tree)).toHaveLength(0);
+    expect(byId(tree, status === "done" ? "sec-3" : "sec-1")).toBeDefined();
+    expect(view.listed.get("t1")).toBe(status);
+    expect(view.changed.t1.s).toBe("idle");
+  }
+});
+
+test("focused Done hold yields to working records and resumes normal Done/Idle handling after clear", () => {
+  const agent = { ...summaryAgent("t1", "done"), focused: true };
+  const terminal = summaryTerminal();
+  const { render } = summaryRender([agent], [terminal]);
+  expect(byId(render(), "sec-3")).toBeDefined();
+  agent.status = "idle";
+  expect(byId(render(), "sec-3")).toBeDefined(); // Seen Done stays until left.
+  terminal.records = workingRecords();
+  expect(byId(render(), "sec-2")).toBeDefined();
+  terminal.records = {};
+  expect(byId(render(), "sec-1")).toBeDefined(); // Not a stale Done hold or spinner.
+  agent.status = "done";
+  expect(byId(render(), "sec-3")).toBeDefined();
+  agent.status = "idle";
+  expect(byId(render(), "sec-3")).toBeDefined();
+  agent.focused = false;
+  expect(byId(render(), "sec-1")).toBeDefined();
+});
+
+test("records join by exact local/remote address without mutating snapshots or issuing commands", () => {
+  const list = ["t1", "host-a/t1", "host-b/t1", "host-c/t1"].map(address => summaryAgent(address));
+  const all = [summaryTerminal("t1"), summaryTerminal("host-a/t1"), summaryTerminal("host-b/t1")];
+  const { render, view, writes } = summaryRender(list, all);
+  for (const owner of all) {
+    for (const terminal of all) terminal.records = terminal === owner ? workingRecords() : {};
+    const before = structuredClone({ list, all });
+    const tree = render();
+    for (const agent of list) {
+      expect(view.listed.get(agent.address)).toBe(agent.address === owner.address ? "working" : "idle");
+      expect(spinners(byId(tree, `ag-${agent.address}`))).toHaveLength(agent.address === owner.address ? 1 : 0);
+    }
+    expect({ list, all }).toEqual(before);
+    expect(writes).toEqual([]);
+  }
+});
+
+for (const sort of ["priority", "grouped"]) test(`${sort}: narrow rail and pinned rows keep the summary and navigation order`, () => {
+  const list = [summaryAgent("idle"), summaryAgent("worker", "done"), summaryAgent("done", "done"),
+    summaryAgent("blocked", "blocked"), { ...summaryAgent("pinned"), pinned: true }];
+  const all = list.map(a => summaryTerminal(a.address, ["worker", "pinned"].includes(a.address) ? workingRecords() : {}));
+  for (const width of [268, 44]) {
+    const { render, orders } = summaryRender(list, all, { sort, width });
+    const tree = render();
+    expect(orders.at(-1)).toEqual(sort === "priority"
+      ? ["pinned", "blocked", "done", "worker", "idle"] : ["pinned", "idle", "worker", "done", "blocked"]);
+    expect(spinners(byId(tree, "ag-worker"))).toHaveLength(1);
+    expect(spinners(byId(tree, "ag-pinned"))).toHaveLength(1);
+    expect(Boolean(byId(tree, "pinned"))).toBe(width === 268);
+  }
+});
+
+test("folded space header reflects working records and restores idle after clear", () => {
+  const terminal = summaryTerminal("t1", workingRecords());
+  const { render, view } = summaryRender([summaryAgent()], [terminal], { sort: "grouped" });
+  view.folded.add("sp-s1");
+  const tree = render();
+  expect(byId(tree, "ag-t1")).toBeUndefined();
+  expect(textOf(byId(tree, "sp-s1"))).toContain("Project 1");
+  expect(spinners(byId(tree, "sp-s1"))).toHaveLength(1);
+  terminal.records = {};
+  expect(spinners(byId(render(), "sp-s1"))).toHaveLength(0);
+});
+
+test("separate blocked child terminals still put a record-working parent in Needs you", () => {
+  const all = [summaryTerminal("t1", workingRecords()), { ...summaryTerminal("child"), parent: "t1", status: "blocked" }];
+  const { render, orders } = summaryRender([summaryAgent("t1", "done")], all);
+  const tree = render();
+  expect(textOf(byId(tree, "sec-4"))).toContain("Needs you");
+  expect(spinners(byId(tree, "ag-t1"))).toHaveLength(1);
+  expect(textOf(byId(tree, "sub-child"))).toContain("!");
+  expect(orders.at(-1)).toEqual(["t1"]);
 });

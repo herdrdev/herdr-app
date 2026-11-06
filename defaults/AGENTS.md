@@ -154,6 +154,13 @@ the highlighted line shows where it will land.
   `working`, `blocked`, `idle`, or `done` = finished while the user wasn't
   looking (it becomes `idle` once they look). A space's and a tab's
   status is the most urgent of its agents: blocked > done > working > idle.
+  In the Agents sidebar only, an idle/done root also shows Working while its
+  terminal has an in-process OSC 7501 child record with a nonempty ID and
+  `state: "working"`, regardless of program or ID prefix. Root Needs you
+  takes precedence; other child states alone don't change the summary.
+  When the last working record settles or clears, the normal Done/Idle display
+  returns. This doesn't change root/turn status, alerts, or tab/space status;
+  these records aren't separate child terminals or peekable rows.
 - **Sub-agents** are terminals an agent started with `hc run`: the core
   records the starter as `parent` (see `terminals()`). They belong to their
   parent's tab without a pane; the `agents` mod shows them,

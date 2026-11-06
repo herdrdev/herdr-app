@@ -45,6 +45,14 @@ function title(tab, l) {
   const telling = live && live !== prog && !/^[~/]|^[A-Za-z]:\\/.test(live) && !live.includes("@") && live.toLowerCase() !== l?.program?.key;
   return (tab.name === prog || !tab.named) && telling ? live : tab.name;
 }
+// In-process workers affect only the sidebar, not the root's status or turn.
+function sidebarSummary(list, all) {
+  const records = new Map(all.map(t => [t.address, t.records]));
+  return list.map(a => (a.status === "idle" || a.status === "done") &&
+    Object.entries(records.get(a.address) ?? {}).some(([id, record]) => id !== "" && record?.state === "working")
+    ? { ...a, status: "working" } : a);
+}
+
 const RANK = { blocked: 4, done: 3, working: 2, idle: 1 };
 // A sub-agent without a pane isn't in agents(): its raw word, error counting as
 // blocked. It's never done: it reports to its parent, and the parent's done is the news.
@@ -225,9 +233,9 @@ export default class Agents extends View {
     if (props()?.sortMenu) return this.sortMenu(t);
     const collapsed = narrow();
     const sort = sortOf();
-    let list = agents();
-    this.listed = new Map(list.map((a) => [a.address, a.status]));
     const all = terminals();
+    let list = sidebarSummary(agents(), all);
+    this.listed = new Map(list.map((a) => [a.address, a.status]));
     this.migratePins(all);
     const shown = focused()?.agent;
     const now = Date.now();
