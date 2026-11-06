@@ -651,8 +651,6 @@ impl Node {
         true
     }
 
-    /// Gives every child of every row and column below this node the same
-    /// share, fixed-size ones included. This node's own size is left alone.
     pub fn equalize(&mut self) {
         let split = matches!(self.kind, Kind::Row { .. } | Kind::Column { .. });
         for child in self.children_mut().into_iter().flatten() {
