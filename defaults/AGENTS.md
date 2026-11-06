@@ -295,7 +295,10 @@ Create `mods/my-menu/main.js` and `mod.json` (e.g.
 its `mod.json` overlay width/height override those defaults. It gets
 `props()` = `{tab: "pane", target: {pane, terminal}, overlay}`. Always use
 `target.terminal` or `target.pane` in actions, not the focused terminal:
-right-clicking a different terminal must act on the one clicked. For example:
+right-clicking a different terminal must act on the one clicked. A terminal
+shown outside a tab (a layout terminal block, a window) has no pane:
+`target.pane` is its block's id, not in `panes()`, so leave out pane items
+there, as the shipped menu does. For example:
 
 ```js
 import { View, div } from "gpui-kit";
@@ -971,7 +974,9 @@ All of it is in `herdr.d.ts`. In short:
   `focused().agent` is the agent an agent block shows.
   `focused().space`/`tab` describe the current window context. With a layout terminal
   block focused, `pane` and `shown` are null; `terminal` and `cwd` describe that block,
-  not its source pane. Check `focused()?.pane` before offering pane controls.
+  not its source pane. A terminal in a window (`openOverlay` with a `layout`) that has
+  the keyboard is reported the same way; pane commands without a `pane` still act on
+  the focused pane under the window. Check `focused()?.pane` before offering pane controls.
   `panes()` still lists only model panes; none is focused while a terminal block is.
   For composition navigation: `run("pane.focus", {terminal: nextAddress})`.
   Terminal copy/paste and implicit right-click routing follow the focused block.

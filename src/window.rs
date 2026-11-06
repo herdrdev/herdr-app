@@ -432,6 +432,9 @@ pub struct AppWindow {
     /// The mod block holding the keyboard for directional navigation.
     focused_block: Option<String>,
     synced_model_pane: Option<String>,
+    /// A terminal block in a window (an overlay's layout) holding the keyboard.
+    /// `focused()` reports it like a layout terminal block; the focused pane stays.
+    window_terminal: Option<String>,
     /// Whether the last sync showed the tab, to hand it the keyboard back when a stack shows it again.
     tab_shown: bool,
     pane_history: Vec<String>,
@@ -523,6 +526,7 @@ impl AppWindow {
             focused_pane: None,
             focused_block: None,
             synced_model_pane: None,
+            window_terminal: None,
             tab_shown: true,
             pane_history: Vec::new(),
             window_active: true,
@@ -1697,7 +1701,9 @@ impl AppWindow {
                 model::space_json(m, p, i, branch.as_deref(), &home)
             })
             .collect();
-        let block = terminal_block(&self.chrome, self.focused_pane.as_deref());
+        // A window's terminal with the keyboard first, then a layout terminal block.
+        let block = overlay_terminal_block(&self.overlays, self.window_terminal.as_deref())
+            .or_else(|| terminal_block(&self.chrome, self.focused_pane.as_deref()));
         let focused_pane = if block.is_some() { None } else { m.focused_pane() };
         let mut agents = Vec::new();
         let mut panes = Vec::new();
@@ -2820,9 +2826,14 @@ impl AppWindow {
                 ("rename tab", "empty: its number", current)
             }
         };
+        // Once: a second rename press closes the open prompt instead of stacking another.
+        if self.overlays.iter().any(|o| o.id == "rename") {
+            self.close_overlay("rename", window, cx);
+            return;
+        }
         let spec = json!({ "mod": "prompt", "kind": "dialog", "width": 380,
             "props": { "title": title, "value": current.as_deref().unwrap_or(""), "hint": hint, "command": { "name": name, "args": args } } });
-        self.open_overlay(mods::new_overlay_id(), spec, window, cx);
+        self.open_overlay("rename".into(), spec, window, cx);
     }
 
     fn dispatch(&mut self, name: &str, a: &Value, person: bool, window: &mut Window, cx: &mut Context<Self>) {
@@ -3460,7 +3471,7 @@ impl AppWindow {
     // ---- overlays ----------------------------------------------------------
 
     fn confirm(&mut self, title: &str, detail: &str, command: &str, args: Value, window: &mut Window, cx: &mut Context<Self>) {
-        let spec = json!({ "mod": "confirm", "kind": "dialog", "width": 380, "height": 150,
+        let spec = json!({ "mod": "confirm", "kind": "dialog", "width": 380,
             "props": { "title": title, "detail": detail, "command": { "name": command, "args": args } } });
         self.open_overlay(mods::new_overlay_id(), spec, window, cx);
     }
@@ -4547,6 +4558,12 @@ fn terminal_block<'a>(chrome: &'a Node, focused: Option<&str>) -> Option<&'a Nod
     chrome.visible_blocks().into_iter().find(|n| n.id == id && n.terminal().is_some())
 }
 
+/// The terminal block `id` in a window's layout (an overlay with blocks).
+fn overlay_terminal_block<'a>(overlays: &'a [Overlay], id: Option<&str>) -> Option<&'a Node> {
+    let id = id?;
+    overlays.iter().filter_map(|o| o.layout.as_ref()).find_map(|l| l.visible_blocks().into_iter().find(|n| n.id == id && n.terminal().is_some()))
+}
+
 fn needs_model_pane(name: &str, args: &Value) -> bool {
     match name {
         "pane.split" | "pane.close" | "pane.zoom" | "terminal.show" => AppWindow::arg(args, "pane").is_none(),
@@ -4762,6 +4779,12 @@ impl Render for AppWindow {
             .find(|(_, t)| t.focus.is_focused(window))
             .map(|(id, _)| id.clone());
         if clicked.is_some() && self.focused_block.take().is_some() {
+            self.publish(cx);
+        }
+        // A window's terminal with the keyboard is what focused() reports; the pane under it stays.
+        let in_window = overlay_terminal_block(&self.overlays, clicked.as_deref()).map(|n| n.id.clone());
+        if in_window != self.window_terminal {
+            self.window_terminal = in_window;
             self.publish(cx);
         }
         if let Some(id) = clicked
@@ -5303,6 +5326,33 @@ mod tests {
     }
 
     #[test]
+    fn a_second_rename_press_closes_the_prompt() {
+        in_own_process("rename_prompt_opens_once");
+    }
+
+    #[gpui::test]
+    fn rename_prompt_opens_once(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("rename_prompt_opens_once") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "unused", "", json!({
+            "id": "root", "type": "block", "content": { "tab": "active" }
+        }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.model.add_space("sp1", "", "/tmp", crate::model::Tab::new("tb1", "", "p1", "t1"));
+            this.sync(window, cx);
+            let prompts = |this: &super::AppWindow| this.overlays.iter().filter(|o| o.id == "rename").count();
+            this.run("tab.rename", json!({}), window, cx);
+            assert_eq!(prompts(this), 1);
+            this.run("tab.rename", json!({}), window, cx);
+            assert_eq!(prompts(this), 0, "a second press closes the prompt");
+            this.run("tab.rename", json!({}), window, cx);
+            assert_eq!(prompts(this), 1, "and a third opens it again");
+        }));
+    }
+
+    #[test]
     fn pane_ring_follows_keyboard_focus() {
         in_own_process("pane_ring_focus");
     }
@@ -5383,6 +5433,37 @@ mod tests {
         cx.update(|window, cx| view.update(cx, |this, _| {
             assert!(this.pane_term("pa").unwrap().focus.is_focused(window));
         }));
+    }
+
+    #[test]
+    fn the_toast_clock_runs_only_while_a_toast_is_up() {
+        in_own_process("toast_clock");
+    }
+
+    /// No mod root wakes for toasts it doesn't have: the clock starts with a
+    /// toast and stops once the last one has left.
+    #[gpui::test]
+    fn toast_clock(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("toast_clock") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "probe", "import { View, div } from \"gpui-kit\";\nexport default class P extends View { render() { return div(); } }", json!({ "id": "probe", "type": "block", "content": { "mod": "probe" } }));
+        cx.run_until_parked();
+        let roots: Vec<_> = view.update(cx, |this, _| this.copies.values().filter_map(|c| c.root.clone()).collect());
+        assert!(!roots.is_empty(), "no mod loaded");
+        let running = |cx: &mut gpui::VisualTestContext| roots.iter().filter(|r| r.read_with(cx, |r, _| r.toast_clock_running())).count();
+        assert_eq!(running(cx), 0, "no toasts, no clock");
+        let root = roots[0].clone();
+        cx.update(|window, cx| root.update(cx, |r, cx| r.push_toast(gpui_shell::ToastRequest::new("Saved"), window, cx)));
+        assert_eq!(running(cx), 1, "a toast starts its root's clock, and only its");
+        cx.executor().advance_clock(gpui_shell::ToastRequest::DEFAULT_TIMEOUT / 2);
+        cx.run_until_parked();
+        assert_eq!((running(cx), root.read_with(cx, |r, _| r.toast_count())), (1, 1), "still up, still ticking");
+        cx.executor().advance_clock(gpui_shell::ToastRequest::DEFAULT_TIMEOUT * 2);
+        cx.run_until_parked();
+        assert_eq!(root.read_with(cx, |r, _| r.toast_count()), 0, "the toast timed out and left");
+        assert_eq!(running(cx), 0, "and the clock stopped with it");
     }
 
     /// Mods see window().active follow the focus, losing it too: a probe mod
