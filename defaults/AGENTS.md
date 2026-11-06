@@ -32,9 +32,28 @@ and terminals, open dialogs, popups and floating blocks, show a live
 terminal inside a block, run any app command, run programs (`exec`) and
 fetch URLs, keep state per mod or shared between mods, animate natively.
 
-You can't: use HTML, CSS, a web view, Node APIs or `setTimeout`; draw
-outside your block except through overlays; change how a terminal itself
+You can't: use HTML or CSS for the mod itself, Node APIs or `setTimeout`;
+draw outside your block except through overlays; change how a terminal itself
 draws text; read or change other mods' code at run time.
+
+This fork also provides `BrowserState(url)` and `Browser(state)` from
+`herdr-browser`. Retain the state in `init`, render the element in a sized
+container, and use `state.navigate(url)`, `reload()`, `back()`, `url()` or
+`error()`. Pages accept HTTP(S) URLs without embedded credentials and have no
+Herdr IPC. Popups and downloads are blocked. The native page hides while any
+Herdr overlay is open or its container is partly clipped; an inactive tab keeps
+its page hidden. Linux requires X11/XWayland and WebKitGTK 4.1. Windows requires
+WebView2. Keep an external-browser fallback in mods that open pages.
+
+The shipped `plannotator-browser` mod takes `{ url, origin? }` props and opens a
+review with Back, Reload and Open externally controls. `herdr-app --browser-api`
+prints the machine-readable browser API version without opening a window.
+The Pi integration in `integrations/plannotator` uses the core terminal's space
+label to split beside its originating pane. An unknown or ambiguous origin
+opens the system browser instead of using the currently focused agent.
+Review cleanup is scoped to Plannotator's review ID and Pi session, including
+reviews that reuse a listening port. Unmatched browser requests, such as the
+Plannotator archive, keep their system-browser fallback.
 
 ## What mods are written in
 

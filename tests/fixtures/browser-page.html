@@ -1,0 +1,8 @@
+<!doctype html>
+<html lang="en"><meta charset="utf-8"><title>Native browser check</title>
+<style>body{font:18px system-ui;background:#1e2026;color:#eef0f6;margin:32px}textarea{display:block;width:90%;height:150px;margin:24px 0;padding:12px;font:20px system-ui}button{padding:10px 20px}output{display:block;margin:20px 0;color:#b7e096}</style>
+<h1>Native browser check</h1><p>This page checks typing, focus and retained page state.</p>
+<textarea aria-label="Question" placeholder="Type a question here"></textarea>
+<button id="send">Send question</button><output id="result">No question sent</output>
+<script>document.querySelector('#send').onclick=()=>document.querySelector('#result').textContent=document.querySelector('textarea').value;</script>
+</html>

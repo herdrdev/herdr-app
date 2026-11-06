@@ -2,3 +2,4 @@
 /dist
 /.brain
 /AGENTS.local.md
+/scripts/__pycache__/

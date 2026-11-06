@@ -70,7 +70,7 @@ pub fn write_workspace() -> std::io::Result<()> {
         let _ = std::fs::remove_file(dir.join("CLAUDE.md"));
     }
     write_if_changed(&dir.join("herdr.d.ts"), DECLARATIONS)?;
-    let types = gpui_shell::type_declarations(&gpui_shell::FrozenComponentRegistry::default());
+    let types = gpui_shell::type_declarations(&crate::browser::components());
     write_if_changed(&dir.join("gpui-kit.d.ts"), &types)?;
     let _ = std::fs::remove_dir_all(frame_dir());
     for (path, bytes) in FRAME_MODS {

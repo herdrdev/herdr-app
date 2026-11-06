@@ -2,6 +2,7 @@
 #![cfg_attr(windows, windows_subsystem = "windows")]
 
 mod bench;
+mod browser;
 mod commands;
 mod control;
 mod core_bin;
@@ -52,6 +53,7 @@ Usage:
   herdr-app shot [file.png]        save the last window frame (default: herdr-shot.png)
   herdr-app check <mod folder>     load a mod once and report what's wrong
   herdr-app --skill                Agent Skill: driving the window, and where hc fits
+  herdr-app --browser-api          print this fork's native browser API version
   herdr-app --version
 
 The terminals run in herdr-core (`hc`), which keeps them alive when the
@@ -75,6 +77,12 @@ fn attach_console() {
 }
 
 fn main() {
+    // WebView2's native child must compose over the GPUI swapchain. Set this
+    // before starting threads; the setting is only needed by the Windows host.
+    #[cfg(windows)]
+    if std::env::var_os("GPUI_DISABLE_DIRECT_COMPOSITION").is_none() {
+        unsafe { std::env::set_var("GPUI_DISABLE_DIRECT_COMPOSITION", "true") };
+    }
     let args: Vec<String> = std::env::args().collect();
     #[cfg(windows)]
     if args.len() > 1 {
@@ -83,7 +91,7 @@ fn main() {
     // `herdr-app check <mod>` / `herdr-app types <mod>`: gpui-shell's own checker, with Herdr's module installed.
     if matches!(args.get(1).map(String::as_str), Some("check" | "types")) {
         mods::install_check_policy();
-        gpui_shell::host::main_with_components(gpui_shell::FrozenComponentRegistry::default());
+        gpui_shell::host::main_with_components(browser::components());
         return;
     }
     if matches!(args.get(1).map(String::as_str), Some("do" | "status" | "ls" | "commands" | "feedback" | "shot")) {
@@ -96,6 +104,7 @@ fn main() {
         None => {}
         Some("-h" | "--help" | "help") => return print!("{HELP}"),
         Some("--skill") => return print!("{}", include_str!("SKILL.md")),
+        Some("--browser-api") => return println!("{}", serde_json::json!({"version": 1, "module": "herdr-browser"})),
         Some("-V" | "--version" | "version") => return println!("herdr-app {}", env!("CARGO_PKG_VERSION")),
         Some(other) => {
             eprint!("herdr-app: unknown argument {other:?}\n\n{HELP}");

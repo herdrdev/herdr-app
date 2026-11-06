@@ -9,6 +9,12 @@ on:
     branches: [master]
   # No paths-ignore here: CI is required to merge, so every PR needs it.
   pull_request:
+  workflow_call:
+    inputs:
+      ref:
+        type: string
+        required: false
+        default: ''
 
 permissions:
   contents: read
@@ -48,6 +54,7 @@ jobs:
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
+          ref: ${{ inputs.ref }}
           submodules: true
           persist-credentials: false
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
@@ -80,7 +87,7 @@ jobs:
           sudo apt-get $apt install -y --no-install-recommends \
             pkg-config clang libclang-dev \
             libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
-            libvulkan-dev mesa-vulkan-drivers libfontconfig-dev libfreetype-dev
+            libvulkan-dev mesa-vulkan-drivers libfontconfig-dev libfreetype-dev libwebkit2gtk-4.1-dev
       - name: Windows build dependencies
         if: runner.os == 'Windows'
         run: echo "LIBCLANG_PATH=C:\\Program Files\\LLVM\\bin" >> "$GITHUB_ENV"
@@ -90,6 +97,22 @@ jobs:
       # Disable optimized dev dependencies in CI to reduce test compile time.
       - name: Build tests
         run: cargo test --locked --config 'profile.dev.package."*".opt-level=0' --no-run
+      # Debug GPUI builds load shaders from the compiler's absolute source path.
+      # The executable used outside the runner must embed its release shaders.
+      - name: Build portable Windows browser executable
+        if: runner.os == 'Windows'
+        run: |
+          cargo build --release --locked
+          mkdir -p target/browser-proof
+          cp target/release/herdr-app.exe LICENSE THIRD-PARTY-NOTICES target/browser-proof/
+      - name: Retain Windows browser test build
+        if: runner.os == 'Windows'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: herdr-browser-windows
+          path: target/browser-proof/
+          if-no-files-found: error
+          retention-days: 7
       - name: Note the sources the cache was built from
         if: env.SAVE_CACHES == 'true' && steps.cache.outputs.cache-hit != 'true'
         run: scripts/ci-sources record
@@ -128,6 +151,20 @@ jobs:
       - name: Install Bun
         if: matrix.platform == 'linux-x86_64'
         run: curl -fsSL https://bun.sh/install | bash -s "bun-v1.4.4"
+      - name: Install Node for Pi integration checks
+        if: matrix.platform == 'linux-x86_64'
+        uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24.22.2'
+      - name: Check Pi browser integration
+        if: matrix.platform == 'linux-x86_64'
+        run: |
+          npm ci --prefix integrations/plannotator
+          npm run --prefix integrations/plannotator check
+          npm test --prefix integrations/plannotator
+      - name: Check fork synchronization
+        if: matrix.platform == 'linux-x86_64'
+        run: python3 -m unittest discover -s scripts -p test_fork_sync.py
       - name: Check documentation
         if: matrix.platform == 'linux-x86_64'
         run: |

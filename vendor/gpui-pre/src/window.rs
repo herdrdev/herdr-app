@@ -5235,6 +5235,13 @@ impl Window {
         hitbox
     }
 
+    /// Returns geometry present in this frame, including reused cached subtrees.
+    /// Native child surfaces can use this during paint to follow tab visibility.
+    pub fn prepainted_hitbox(&self, id: HitboxId) -> Option<&Hitbox> {
+        self.invalidator.debug_assert_paint();
+        self.next_frame.hitboxes.iter().find(|hitbox| hitbox.id == id)
+    }
+
     /// Set a hitbox which will act as a control area of the platform window.
     ///
     /// This method should only be called as part of the paint phase of element drawing.

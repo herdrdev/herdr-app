@@ -35,6 +35,9 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 fancy-regex = "0.19"
 notify = "7"
 sha2 = "0.10"
+url = "2"
+wry = { version = "=0.53.5", default-features = false, features = ["os-webview", "x11"] }
+raw-window-handle = "0.6"
 
 [[test]]
 name = "shot_pixels"
@@ -53,6 +56,7 @@ swash = "=0.2.10"
 tiny-skia = { version = "=0.11.4", default-features = false, features = ["std", "simd"] }
 
 [target.'cfg(target_os = "linux")'.dependencies]
+gtk = "0.18"
 gpui_linux = { package = "gpui-pre-linux", version = "=0.3.8", features = ["render-to-image"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]

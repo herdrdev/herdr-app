@@ -1,0 +1,15 @@
+{
+  "name": "herdr-plannotator",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "pi": { "extensions": ["./index.ts"] },
+  "bin": { "herdr-plannotator-open": "./open.mjs" },
+  "scripts": { "test": "node --test test/*.test.mjs", "check": "tsc" },
+  "devDependencies": {
+    "@earendil-works/pi-coding-agent": "1.5.0",
+    "@types/node": "^24.0.0",
+    "pi-coding-agent-test": "0.1.4",
+    "typescript": "^6.0.0"
+  }
+}
