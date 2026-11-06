@@ -616,9 +616,10 @@ The main ones:
   never one a package manager owns), `app.welcome`, `app.whats_new`, `app.feedback {message?, from?}` (from `"person"` or `"agent"`; opens a review window, where the person can paste up to 3 screenshots; never sends until the person clicks Send), `app.reset`,
   `app.theme {name}`, `app.zoom_in`, `app.zoom_out`, `app.zoom_reset`,
   `app.update` (restart into a downloaded update).
-  Add machine lists all named ssh-config hosts in a scrollable list. Setup
-  prompts open above the picker; close the setup terminal to return to the
-  updated list and any machine-specific guidance. If a remote machine was rebuilt
+  Add machine lists all named ssh-config hosts in a scrollable list. Machines
+  that need a password, a new host key or herdr-core installed show what to run
+  in your own terminal; the picker updates once it is added. Other machines are
+  added quietly. If a remote machine was rebuilt
   or replaced and a different core answers there, its sidebar offers Connect:
   explicitly forget the old identity and pair again with the same name and target.
   Other unreachable machines don't offer this.
