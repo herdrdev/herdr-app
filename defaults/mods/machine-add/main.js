@@ -24,7 +24,12 @@ async function includeFiles(value) {
       files.push(p);
       continue;
     }
-    const r = await exec("sh", ["-c", 'for f in $1; do [ -f "$f" ] && printf "%s\\n" "$f"; done', "sh", p]).catch(() => null);
+    // From a Windows program, Git's sh gets the pattern already expanded, one
+    // argument per file, unless a space made it quoted: then sh expands it, and
+    // takes a backslash as an escape. So read every argument, never split one
+    // at its spaces, and give sh slashes.
+    const glob = /^[a-z]:/i.test(p) ? p.replace(/\\/g, "/") : p;
+    const r = await exec("sh", ["-c", 'IFS=; for p in "$@"; do for f in $p; do [ -f "$f" ] && printf "%s\\n" "$f"; done; done', "sh", glob]).catch(() => null);
     files.push(...(r?.stdout ?? "").split("\n").filter(Boolean));
   }
   return files;
