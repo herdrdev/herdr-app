@@ -78,8 +78,7 @@ impl Browser {
     fn show(&mut self, window: &Window, overlay: bool) {
         let hitbox = self.hitbox.and_then(|id| window.prepainted_hitbox(id));
         let unclipped = hitbox.is_some_and(|hitbox| {
-            hitbox.bounds.intersect(&hitbox.content_mask.bounds) == hitbox.bounds
-                && hitbox.bounds.size.width > gpui::px(0.) && hitbox.bounds.size.height > gpui::px(0.)
+            policy::is_unclipped(&hitbox.bounds, &hitbox.content_mask.bounds)
         });
         let show = policy::should_show(hitbox.is_some(), unclipped, overlay) && self.error.is_none();
         if show == self.visible { return; }
@@ -123,7 +122,7 @@ impl ComponentMaterializer for BrowserElement {
             if let Err(error) = browser.create(window, cx) { browser.error = Some(error.to_string()); }
             Ok(())
         })?;
-        let message = state.borrow().error.clone().unwrap_or_else(|| "Browser hidden while a Herdr overlay is open.".into());
+        let message = state.borrow().error.clone().unwrap_or_else(|| "Browser hidden while its surface is clipped or covered.".into());
         let element = div().relative().size_full()
             .child(div().absolute().size_full().p(gpui::px(16.)).child(message))
             .child(canvas(move |bounds, window, _| state.borrow_mut().layout(bounds, window), |_, _, _, _| {}).size_full());
