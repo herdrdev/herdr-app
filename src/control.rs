@@ -36,6 +36,14 @@ pub fn listen(tx: async_channel::Sender<Request>) {
     });
 }
 
+/// How long a request may take to answer. A terminal starting on another
+/// machine answers when that machine does (up to two 10 s core calls), and
+/// a reconnect when the dial ends.
+fn reply_timeout(cmd: &Value) -> Duration {
+    let starts_terminal = matches!(cmd.get("do").and_then(Value::as_str), Some("space.new" | "tab.new" | "pane.split" | "terminal.open" | "machine.reconnect"));
+    Duration::from_secs(if cmd.get("shot").is_some() || starts_terminal { 30 } else { 5 })
+}
+
 fn serve(stream: UnixStream, tx: async_channel::Sender<Request>) {
     let mut line = String::new();
     if BufReader::new(&stream).read_line(&mut line).is_err() {
@@ -43,7 +51,7 @@ fn serve(stream: UnixStream, tx: async_channel::Sender<Request>) {
     }
     let reply = match serde_json::from_str::<Value>(&line) {
         Ok(cmd) => {
-            let timeout = Duration::from_secs(if cmd.get("shot").is_some() { 30 } else { 5 });
+            let timeout = reply_timeout(&cmd);
             let (reply_tx, reply_rx) = std::sync::mpsc::channel();
             let _ = tx.send_blocking(Request::Control { cmd, reply: reply_tx });
             reply_rx.recv_timeout(timeout).unwrap_or_else(|_| json!({ "error": "the window did not answer" }))
@@ -180,6 +188,15 @@ fn fail(message: &str) -> i32 {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn terminal_starts_wait_for_a_slow_machine_and_other_requests_do_not() {
+        assert_eq!(reply_timeout(&json!({"do": "pane.split", "args": {}})), Duration::from_secs(30));
+        assert_eq!(reply_timeout(&json!({"do": "space.new"})), Duration::from_secs(30));
+        assert_eq!(reply_timeout(&json!({"do": "machine.reconnect"})), Duration::from_secs(30));
+        assert_eq!(reply_timeout(&json!({"do": "pane.close"})), Duration::from_secs(5));
+        assert_eq!(reply_timeout(&json!({"commands": true})), Duration::from_secs(5));
+    }
 
     #[test]
     fn a_second_launch_raises_the_running_window() {

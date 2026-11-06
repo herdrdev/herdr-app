@@ -30,6 +30,7 @@ mod spawn;
 mod sprites;
 mod telemetry;
 mod feedback;
+mod answering;
 mod terminal;
 mod update;
 mod update_notes;

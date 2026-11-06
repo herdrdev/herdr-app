@@ -47,6 +47,23 @@ export function tone(t, status) {
   return t[status] ?? t.unknown;
 }
 
+// A machine's line for its header: "unreachable · 3m", and what to tell
+// the person on hover. Minutes only: the header redraws now and then, not each second.
+export function lineLabel(name, line, now) {
+  const state = (line?.state ?? "asleep").replace(/_/g, " ");
+  const gone = line?.since_ms ? Math.floor((now - line.since_ms) / 60000) : 0;
+  const since = gone >= 60 ? ` · ${Math.floor(gone / 60)}h` : gone >= 1 ? ` · ${gone}m` : "";
+  const hint = line?.state === "needs_login" ? `Run hc machine login ${name} in a terminal.`
+    : line?.state === "needs_update" ? `Run hc machine update ${name}.`
+    : "Click Retry to dial it now. Its programs keep running there.";
+  return { text: state + since, tooltip: [line?.why, hint].filter(Boolean).join("\n") };
+}
+
+// Retry dials again; a login or update needs a person or a command.
+export function canRetry(line) {
+  return line?.state === "unreachable" || line?.state === "connecting";
+}
+
 export default class Spaces extends View {
   init(_props, cx) {
     this.git = {}; // where() -> { name, branch, ahead, behind, repo, linked }, null: not a repo
@@ -64,6 +81,7 @@ export default class Spaces extends View {
     this.pressed = null;
     this.over = null;
     this.machines = [];
+    this.retrying = {}; // machine -> { at }: when Retry was clicked
     this.reconnecting = JSON.parse(localStorage.getItem("machines.reconnecting") ?? "{}");
     for (const state of Object.values(this.reconnecting)) state.busy = false;
     this.folded = new Set(JSON.parse(localStorage.getItem("machines.folded") ?? "[]"));
@@ -126,6 +144,28 @@ export default class Spaces extends View {
   refreshMachines(cx) {
     cx.spawn(async cx => {
       try { const r = await hc(["machine", "ls", "--json"]); if (r.code === 0) this.machines = (JSON.parse(r.stdout).machines ?? []).filter((m) => !m.temporary); } catch {}
+      cx.notify();
+    });
+  }
+
+  // A machine's line: the window's (fresh), else the last `hc machine ls`.
+  lineOf(m) {
+    const live = machines().find(k => k.name === m);
+    if (live?.state) return live;
+    return this.machines.find(k => k.name === m);
+  }
+
+  // Asks the core to dial now (machine.reconnect); the header says so until
+  // the state moves or the dial is long over.
+  retry(m, cx) {
+    if (this.retrying[m] && Date.now() - this.retrying[m].at < 35000) return;
+    const click = this.retrying[m] = { at: Date.now() };
+    run("machine.reconnect", { machine: m });
+    cx.notify();
+    cx.spawn(async cx => {
+      await cx.sleep(35000);
+      // A later click owns the entry now.
+      if (this.retrying[m] === click) delete this.retrying[m];
       cx.notify();
     });
   }
@@ -279,7 +319,8 @@ export default class Spaces extends View {
     // write can lose a sync conflict: allow the echo to settle before retrying.
     const order = sp.map(w => w.id);
     const target = out.map(r => r.w.id);
-    const key = JSON.stringify([order, target, machines()]);
+    // Machines by readiness only: their line state moving isn't a reason to resend.
+    const key = JSON.stringify([order, target, machines().map(m => [m.name, m.layout])]);
     if (order.every((id, i) => id === target[i])) {
       this.ordering = null;
     } else if (this.ordering?.key !== key || this.orderingDue(Date.now())) {
@@ -314,7 +355,10 @@ export default class Spaces extends View {
       const mine = rows.filter((r) => (r.w.machine ?? null) === m);
       const repair = this.reconnecting[m];
       const machine = this.machines.find(k => k.name === m) ?? repair?.machine;
-      const connected = !m || machine?.state === "connected";
+      const line = m ? this.lineOf(m) ?? machine : null;
+      const connected = !m || line?.state === "connected";
+      if (connected && m) delete this.retrying[m];
+      const label = lineLabel(m, line, Date.now());
       const rebuilt = this.rebuilt(machine) || !!repair;
       const folded = this.folded.has(m);
       const icon = svg(`mods/workspace-chrome/${m ? "server" : "monitor"}.svg`).size(13).flex_none();
@@ -330,7 +374,13 @@ export default class Spaces extends View {
         .when(!collapsed, el => el.child(icon))
         .when(collapsed, el => el.child(div().relative().flex_none().child(icon).when(Boolean(m), el => el.child(badge))))
         .when(!collapsed, el => el.child(div().flex_1().truncate().child(m ?? "This computer"))
-          .when(!connected && !rebuilt, el => el.child(div().flex_none().child((machine?.state ?? "asleep").replace(/_/g, " "))))
+          .when(!connected && !rebuilt, el => el.child(div().id(`machine-state-${m}`).flex_none().text_color(line?.state === "connecting" ? t.dim : t.blocked)
+              .tooltip(label.tooltip).child(label.text))
+            .when(canRetry(line), el => el.child(div().id(`machine-retry-${m}`).flex_none().text_color(t.muted)
+              .hover(s => s.text_color(t.foreground))
+              .tooltip("Dial it now instead of waiting for the next retry.")
+              .on_click((_e, cx) => { cx.stop_propagation(); this.retry(m, cx); })
+              .child(this.retrying[m] ? "Retrying…" : "Retry"))))
           .when(rebuilt, el => el.child(h_flex().flex_none().gap(3).items_center()
             .child(div().max_w(140).truncate().child(repair?.error || "rebuilt ·"))
             .child(div().id(`machine-connect-${m}`).text_color(repair?.error ? t.blocked : t.muted)

@@ -172,6 +172,14 @@ End a terminal and its sub-agents.
 |---|---|
 | `terminal` | yes |
 
+## `machine.reconnect`
+
+Dial a machine (`hc machine ls`) now instead of at the core's next retry; answers with its state once the dial ends. A person sees a note when it still can't connect.
+
+| Argument | Required |
+|---|---|
+| `machine` | yes |
+
 ## `space.select`
 
 Show a space (by position or id).

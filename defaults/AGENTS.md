@@ -604,6 +604,15 @@ The main ones:
   started, including its release outside the pane; other panes don't receive it.
   Terminals display Kitty graphics, including Unicode placeholder images used by
   programs such as yazi; partial images and scrolling follow the placeholder cells.
+- Machines: `machine.reconnect {machine}` dials a machine now instead of at the
+  core's next retry (it waits up to the machine timeout, then answers with the
+  machine's state; a person sees a note when it still can't connect). A pane on a
+  machine that's down says so, with a reconnect button; one whose machine hasn't
+  answered for a while (keys sent, nothing back, and a round trip there doesn't
+  return either) shows how long and how many inputs wait. Scrolls into a
+  full-screen program that isn't answering go out once a second instead of piling up.
+  Starting a terminal there doesn't hold the window: the pane appears when the
+  machine answers.
 - Agents: `agent.next`, `agent.prev`, `agent.focus {terminal}`.
 - Layout: `layout.switch {name?}`, `layout.toggle {id}`, `layout.show {id}`, `layout.hide {id}`,
   `layout.resize {id, px | weight}`, `layout.select {stack, child}`, `layout.set {layout}`
@@ -943,7 +952,9 @@ All of it is in `herdr.d.ts`. In short:
 - Live data: `spaces()` (each with its tabs, status, name, named, folder,
   machine, branch), `machines()` (name, null for this computer; layout:
   `loading`, `ready`, or `unavailable` on this connection; loading ends on
-  the first read even if it fails, and offline machines are unavailable),
+  the first read even if it fails, and offline machines are unavailable;
+  state: the line's `connected`, `connecting`, `unreachable`, `needs_login` or
+  `needs_update`, with `why` and `since_ms` when the core says),
   `agents()` (status, app, space, tab, pinned, focused; "done" turns "idle"
   once someone looks at it on any Herdr client), `terminals()`
   (every core terminal), `focused()`, `layout()`, `theme()` (every color by

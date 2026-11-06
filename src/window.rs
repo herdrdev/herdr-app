@@ -22,7 +22,7 @@ use gpui::*;
 use gpui_shell::action::ShellAction;
 use gpui_shell::{ShellRoot, ShellRuntime, Watcher};
 use serde_json::{Value, json};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
@@ -270,6 +270,48 @@ enum TerminalChange {
     Park,
 }
 
+/// What `terminal.run` needs to start one of the app's terminals, taken on
+/// the UI thread so the call itself can run off it.
+struct TerminalStart {
+    argv: Vec<String>,
+    cwd: String,
+    labels: Value,
+    on: Option<String>,
+    size: Option<(u16, u16)>,
+    display: Value,
+    /// A missing folder falls back to home (see `run_following_folder`).
+    follow: bool,
+}
+
+impl TerminalStart {
+    #[allow(clippy::too_many_arguments)]
+    fn new(argv: Option<Vec<String>>, cwd: String, follow: bool, space: &str, ctx: &str, on: Option<&str>, size: Option<(u16, u16)>, window: &Window) -> Self {
+        let labels = json!({ "herdr.space": crate::mirror::local(space, on), "herdr.tab": crate::mirror::local(ctx, on), "herdr.seen": "0" });
+        TerminalStart {
+            argv: argv.unwrap_or_default(),
+            cwd,
+            labels,
+            on: on.map(str::to_owned),
+            size,
+            display: crate::terminal::initial_display(window),
+            follow,
+        }
+    }
+}
+
+/// Starts the terminal (any thread): its address and the folder it started in.
+fn run_terminal(core: &Core, s: TerminalStart) -> Result<(String, String), String> {
+    let on = s.on.as_deref();
+    run_following_folder(s.cwd, s.follow, on, |cwd| match core.run(s.argv.clone(), cwd.clone(), s.labels.clone(), on, s.size, s.display.clone()) {
+        // An agent on a machine without `sh` (Windows): in its PowerShell instead.
+        Err(e) if on.is_some() && s.argv.first().map(String::as_str) == Some("sh") && format!("{e:#}").contains("not found") => {
+            core.run(AppWindow::powershell_argv(&s.argv), cwd, s.labels.clone(), on, s.size, s.display.clone())
+        }
+        r => r,
+    })
+    .map_err(|e| format!("cannot start a terminal: {e:#}"))
+}
+
 struct PendingTerminalChange {
     change: TerminalChange,
     reply: std::sync::mpsc::Receiver<Result<(), String>>,
@@ -396,6 +438,13 @@ pub struct AppWindow {
     person: settings::Person,
     /// What the last command made or why it didn't (for callers that wait for it).
     reply: Option<Value>,
+    /// The `herdr-app do` waiting on the command running now: a command that
+    /// finishes later (a terminal starting on another machine) takes it.
+    control_reply: Option<std::sync::mpsc::Sender<Value>>,
+    /// Each machine's line as `machine.list` last said: state, why, since_ms (for `machines()`).
+    machine_states: HashMap<String, Value>,
+    /// Ask the core for the machines at the next tick, not the fifth.
+    relist_machines: bool,
     /// The `where` label last written per terminal address.
     written_where: HashMap<String, String>,
     /// `herdr.seen` turns written but not yet back from the core.
@@ -498,6 +547,9 @@ impl AppWindow {
             written_view: String::new(),
             person: settings::Person::default(),
             reply: None,
+            control_reply: None,
+            machine_states: HashMap::new(),
+            relist_machines: false,
             written_where: HashMap::new(),
             written_seen: HashMap::new(),
             looked: HashMap::new(),
@@ -618,8 +670,8 @@ impl AppWindow {
             let mut event_lines = crate::hc::EventLines::default();
             let (mut tick, mut relist) = (0u64, false);
             loop {
-                let Ok((core, generation)) = this.update(cx, |this, _| {
-                    (this.core.clone(), this.core_generation)
+                let Ok((core, generation, relist_machines)) = this.update(cx, |this, _| {
+                    (this.core.clone(), this.core_generation, std::mem::take(&mut this.relist_machines))
                 }) else { break };
                 if generation != subscribed_generation {
                     drop(subscription.take());
@@ -645,7 +697,7 @@ impl AppWindow {
                         this.sync(window, cx);
                     }).is_err() { break; }
                 }
-                let ask_machines = tick.is_multiple_of(5);
+                let ask_machines = tick.is_multiple_of(5) || relist_machines;
                 tick += 1;
                 let relisting = std::mem::take(&mut relist);
                 let (sub, machines, refresh, listed, lines) = cx.background_executor().spawn(async move {
@@ -1411,6 +1463,7 @@ impl AppWindow {
             let sub = cx.subscribe_in(&view, window, move |this, _, ev: &TerminalEvent, window, cx| match ev {
                 TerminalEvent::Peek(address) => this.peek_terminal(address, window, cx),
                 TerminalEvent::TitleChanged => this.publish(cx),
+                TerminalEvent::MachineDialed => this.relist_machines = true,
                 TerminalEvent::Ended => this.terminal_ended(&block, window, cx),
                 TerminalEvent::ContextMenu(at) => {
                     this.open_menu("pane", json!({ "pane": block.trim_end_matches(SWAP), "terminal": addr }), Some(*at), window, cx)
@@ -1752,9 +1805,13 @@ impl AppWindow {
             Some(json!({ "space": p.id, "tab": ctx.id, "terminal": m.address_of(&pane), "shown": self.swapped.get(&pane),
                 "pane": pane, "agent": self.shown_agent(), "cwd": cwd }))
         });
-        let machines = self.documents.iter().map(|(name, slot)| json!({
-            "name": (!name.is_empty()).then_some(name), "layout": slot.layout(),
-        })).collect();
+        let machines = self.documents.iter().map(|(name, slot)| {
+            let line = if name.is_empty() { json!({ "state": "connected" }) } else { self.machine_states.get(name).cloned().unwrap_or_else(|| json!({ "state": "connecting" })) };
+            json!({
+                "name": (!name.is_empty()).then_some(name), "layout": slot.layout(),
+                "state": line["state"], "why": line.get("why").cloned().unwrap_or(Value::Null), "since_ms": line.get("since_ms").cloned().unwrap_or(Value::Null),
+            })
+        }).collect();
         let mut changed = mods::publish_machines(Value::Array(machines));
         changed |= mods::publish_spaces(Value::Array(spaces));
         changed |= mods::publish_agents(Value::Array(agents));
@@ -1907,7 +1964,7 @@ impl AppWindow {
         let shown = |d: &std::collections::BTreeMap<String, crate::mirror_sync::Slot>| {
             d.iter().map(|(m, s)| (m.clone(), s.connected, s.available, s.blocked, s.error.clone(), s.layout())).collect::<Vec<_>>()
         };
-        let (listing, was) = (results.is_empty(), shown(&self.documents));
+        let (listing, was, lines_were) = (results.is_empty(), shown(&self.documents), self.machine_states.clone());
         for (machine, result) in results {
             let Some(slot) = self.documents.get_mut(&machine) else { continue };
             let first = slot.document.is_none();
@@ -1959,15 +2016,29 @@ impl AppWindow {
             // Temporary machines are agents' short-lived sandboxes: the app leaves them out.
             let kept = || machines["machines"].as_array().into_iter().flatten().filter(|m| m["temporary"] != true);
             let states = kept().filter_map(|m| Some((m["name"].as_str()?, m["state"].as_str()?))).collect::<HashMap<_, _>>();
+            let mut down = HashMap::new();
+            self.machine_states.clear();
             for machine in kept() {
                 let Some(name) = machine["name"].as_str() else { continue };
                 let state = machine["state"].as_str().unwrap_or("unavailable");
+                self.machine_states.insert(name.to_owned(), json!({ "state": state, "why": machine["why"], "since_ms": machine["since_ms"] }));
                 let reason = (state != "connected").then(|| machine["why"].as_str().map(str::to_owned).unwrap_or_else(|| match state {
                     "needs_update" => format!("{name} needs a core update; run hc machine update {name}"),
                     "needs_login" => format!("{name} needs login; run hc machine login {name}"),
                     _ => format!("{name} is {state}"),
                 }));
+                if state != "connected" {
+                    // "connecting" without a reason is the core's own wording: the banner says it better.
+                    let why = machine["why"].as_str().map(str::to_owned).or_else(|| reason.clone().filter(|_| state.starts_with("needs_")));
+                    down.insert(name.to_owned(), crate::terminal::MachineDown { state: state.to_owned(), why, since_ms: machine["since_ms"].as_u64() });
+                }
                 self.documents.entry(name.to_owned()).or_default().connection(state == "connected", machine["since_ms"].as_u64(), reason);
+            }
+            // Each pane on a machine shows whether it's there (offline UX).
+            for term in self.terms.values() {
+                let Some((m, _)) = term.address.split_once('/') else { continue };
+                let state = down.get(m).cloned();
+                term.view.update(cx, |v, cx| v.set_machine_down(state, cx));
             }
             if self.model.spaces.iter().any(|s| s.machine.as_deref().is_some_and(|m| !states.contains_key(m))) {
                 let mut view = crate::mirror::View::capture(&self.model);
@@ -1981,7 +2052,7 @@ impl AppWindow {
             self.model.spaces.retain(|s| s.machine.as_deref().is_none_or(|m| states.contains_key(m)));
             changed |= before != self.model.spaces.len();
         }
-        if !listing || changed || shown(&self.documents) != was {
+        if !listing || changed || shown(&self.documents) != was || self.machine_states != lines_were {
             self.publish(cx);
             cx.notify();
         }
@@ -2365,24 +2436,146 @@ impl AppWindow {
     /// Starts a terminal for `space`, on `on` (another machine) or here. An
     /// empty `cwd`: the machine's home. With no argv, that machine's core
     /// picks its own shell.
+    #[allow(clippy::too_many_arguments)]
     fn spawn(&mut self, argv: Option<Vec<String>>, cwd: String, follow: bool, space: &str, ctx: &str, on: Option<&str>, size: Option<(u16, u16)>, window: &Window) -> Result<(String, String), String> {
-        let argv = argv.unwrap_or_default();
         self.require_document(on)?;
-        let labels = json!({ "herdr.space": crate::mirror::local(space, on), "herdr.tab": crate::mirror::local(ctx, on), "herdr.seen": "0" });
-        let (addr, cwd) = run_following_folder(cwd, follow, on, |cwd| match self.core.run(argv.clone(), cwd.clone(), labels.clone(), on, size, crate::terminal::initial_display(window)) {
-            // An agent on a machine without `sh` (Windows): in its PowerShell instead.
-            Err(e) if on.is_some() && argv.first().map(String::as_str) == Some("sh") && format!("{e:#}").contains("not found") => {
-                self.core.run(Self::powershell_argv(&argv), cwd, labels.clone(), on, size, crate::terminal::initial_display(window))
-            }
-            r => r,
-        })
-        .map_err(|e| format!("cannot start a terminal: {e:#}"))?;
+        let (addr, cwd) = run_terminal(&self.core, TerminalStart::new(argv, cwd, follow, space, ctx, on, size, window))?;
         self.born.borrow_mut().insert(addr.clone(), Instant::now());
         // Follow the launch folder until the first live folder report arrives.
         if !cwd.is_empty() {
             self.cwds.insert(addr.clone(), cwd.clone());
         }
         Ok((addr, cwd))
+    }
+
+    /// Starts a terminal for `space` and `place`s it in the model. Here: at
+    /// once. On another machine the start goes off the UI thread: a slow or
+    /// stalled line takes seconds to answer, and the window keeps drawing and
+    /// taking keys meanwhile. The pane appears when the machine answers, and
+    /// a `herdr-app do` waiting for the reply hears then.
+    #[allow(clippy::too_many_arguments)]
+    fn start_terminal(
+        &mut self,
+        argv: Option<Vec<String>>,
+        cwd: String,
+        follow: bool,
+        space: &str,
+        ctx: &str,
+        on: Option<&str>,
+        size: Option<(u16, u16)>,
+        window: &mut Window,
+        cx: &mut Context<Self>,
+        place: impl FnOnce(&mut Self, &str, &str) -> Result<Value, String> + 'static,
+    ) -> Result<Value, String> {
+        let Some(machine) = on.map(str::to_owned) else {
+            let (addr, folder) = self.spawn(argv, cwd, follow, space, ctx, None, size, window)?;
+            return place(self, &addr, &folder);
+        };
+        self.require_document(on)?;
+        let start = TerminalStart::new(argv, cwd, follow, space, ctx, on, size, window);
+        let reply = self.control_reply.take();
+        let core = self.core.clone();
+        // Where the person was when they asked: a start that lands later
+        // doesn't pull them back from wherever they went meanwhile.
+        let asked_in = self.model.active.clone();
+        // A start that answers quickly shows nothing extra; a slow one says it's waiting.
+        let notice: Rc<RefCell<Option<String>>> = Rc::default();
+        let done = Rc::new(Cell::new(false));
+        {
+            let (notice, done, machine) = (notice.clone(), done.clone(), machine.clone());
+            cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor().timer(Duration::from_millis(700)).await;
+                if done.get() { return; }
+                let _ = this.update_in(cx, |this, window, cx| {
+                    let id = mods::new_overlay_id();
+                    let spec = json!({"kind":"toast", "notification":{"title":format!("Starting a terminal on {machine}…"),
+                        "body":"Waiting for the machine to answer. Herdr keeps working meanwhile.","level":"info","timeout":120000}});
+                    this.open_overlay(id.clone(), spec, window, cx);
+                    *notice.borrow_mut() = Some(id);
+                });
+            })
+            .detach();
+        }
+        let answer = json!({ "starting": machine });
+        cx.spawn_in(window, async move |this, cx| {
+            let started = cx.background_executor().spawn(async move { run_terminal(&core, start) }).await;
+            done.set(true);
+            let _ = this.update_in(cx, |this, window, cx| {
+                if let Some(id) = notice.borrow_mut().take() { this.close_overlay(&id, window, cx); }
+                // Addresses outlive a core restart (its programs survive), so a
+                // start that lands after one is placed all the same.
+                let result = match started {
+                    Ok((addr, _)) if this.draining => {
+                        this.kill(std::slice::from_ref(&addr), cx);
+                        Err(format!("cannot start a terminal on {machine}: Herdr is quitting"))
+                    }
+                    Ok((addr, folder)) => {
+                        this.born.borrow_mut().insert(addr.clone(), Instant::now());
+                        if !folder.is_empty() {
+                            this.cwds.insert(addr.clone(), folder.clone());
+                        }
+                        let now_in = this.model.active.clone();
+                        let placed = place(this, &addr, &folder);
+                        if placed.is_ok() && now_in != asked_in {
+                            this.model.active = now_in;
+                        }
+                        // Its space or pane went while it started: it has nowhere to be.
+                        if placed.is_err() { this.kill(std::slice::from_ref(&addr), cx); }
+                        placed
+                    }
+                    Err(e) => Err(e),
+                };
+                match (&result, reply) {
+                    (_, Some(reply)) => { let _ = reply.send(result.clone().unwrap_or_else(|e| json!({ "error": e }))); }
+                    (Err(e), None) => {
+                        tracing::warn!("{e}");
+                        let spec = json!({"kind":"toast", "notification":{"title":format!("Couldn't start a terminal on {machine}"),"body":e,"level":"error"}});
+                        this.open_overlay(mods::new_overlay_id(), spec, window, cx);
+                    }
+                    (Ok(_), None) => {}
+                }
+                this.sync(window, cx);
+                this.flush_documents(false, window, cx);
+                cx.notify();
+            });
+        })
+        .detach();
+        Ok(answer)
+    }
+
+    /// `machine.reconnect`: the core dials now, off the UI thread (a dial
+    /// waits up to the machine timeout). A waiting `herdr-app do` hears the
+    /// machine's state; a person hears only when it still can't connect.
+    fn reconnect_machine(&mut self, machine: String, window: &mut Window, cx: &mut Context<Self>) {
+        let reply = self.control_reply.take();
+        let core = self.core.clone();
+        let name = machine.clone();
+        cx.spawn_in(window, async move |this, cx| {
+            let result = cx.background_executor()
+                // Inside `herdr-app do`'s 30 s, so a long dial still answers with its state.
+                .spawn(async move { core.call_timeout("machine.connect", json!({ "machine": name }), Duration::from_secs(25)) })
+                .await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                // Its state shows at once, not at the next listing.
+                this.relist_machines = true;
+                let answer = result.unwrap_or_else(|e| json!({ "error": format!("{e:#}") }));
+                if let Some(reply) = reply {
+                    let _ = reply.send(answer);
+                    return;
+                }
+                let why = match (answer["error"].as_str(), answer["state"].as_str()) {
+                    (Some(error), _) => Some(error.to_owned()),
+                    (None, Some("connected")) => None,
+                    (None, state) => Some(answer["why"].as_str().map(str::to_owned)
+                        .unwrap_or_else(|| format!("It is {}.", state.unwrap_or("away").replace('_', " ")))),
+                };
+                if let Some(why) = why {
+                    let spec = json!({"kind":"toast", "notification":{"title":format!("Still can't reach {machine}"),"body":why,"level":"warning"}});
+                    this.open_overlay(mods::new_overlay_id(), spec, window, cx);
+                }
+            });
+        })
+        .detach();
     }
 
     /// The PowerShell form of a remote agent start (`agent_argv`): the program,
@@ -2413,9 +2606,11 @@ impl AppWindow {
 
     /// A space with its first tab and terminal, shown at once.
     /// `machine`: another machine (`hc machine ls`); its space starts in that machine's home.
-    fn new_space(&mut self, name: &str, folder: Option<String>, ctx_name: Option<&str>, argv: Option<Vec<String>>, task: Option<&str>, machine: Option<String>, window: &Window) -> Result<Value, String> {
+    #[allow(clippy::too_many_arguments)]
+    fn new_space(&mut self, name: &str, folder: Option<String>, ctx_name: Option<&str>, argv: Option<Vec<String>>, task: Option<&str>, machine: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Result<Value, String> {
         let follow = folder.is_none();
-        let on = machine.as_deref();
+        let on_machine = machine.clone();
+        let on = on_machine.as_deref();
         // The focused pane's folder only means something on its own machine.
         let here = || self.model.focused_pane().and_then(|p| self.model.address_of(&p))
             .filter(|a| a.split_once('/').map(|(m, _)| m) == on)
@@ -2423,17 +2618,21 @@ impl AppWindow {
         let folder = folder.or_else(here).unwrap_or_else(|| if on.is_some() { String::new() } else { home() });
         let (space, ctx, pane) = (self.model.fresh_id_on("sp", on), self.model.fresh_id_on("tb", on), self.model.fresh_id_on("p", on));
         let size = self.initial_size(&Tab::new(&ctx, "", &pane, "").root, &pane, window);
-        let (addr, folder) = self.spawn(Self::agent_argv(argv.clone(), task, on).or(argv), folder, follow, &space, &ctx, on, size, window)?;
-        let ctx_name = ctx_name.map(str::trim).unwrap_or_default();
-        self.model.add_space(&space, name.trim(), &folder, Tab::new(&ctx, ctx_name, &pane, &addr));
-        if let Some(p) = self.model.space_mut(&space) {
-            p.machine = machine;
-        }
-        Ok(json!({ "space": space, "tab": ctx, "terminal": addr }))
+        let argv = Self::agent_argv(argv.clone(), task, on).or(argv);
+        let (name, ctx_name) = (name.trim().to_owned(), ctx_name.map(str::trim).unwrap_or_default().to_owned());
+        let (sp, tb) = (space.clone(), ctx.clone());
+        self.start_terminal(argv, folder, follow, &sp, &tb, on, size, window, cx, move |this, addr, folder| {
+            this.model.add_space(&space, &name, folder, Tab::new(&ctx, &ctx_name, &pane, addr));
+            if let Some(p) = this.model.space_mut(&space) {
+                p.machine = machine;
+            }
+            Ok(json!({ "space": space, "tab": ctx, "terminal": addr }))
+        })
     }
 
     /// A tab in a space (default: the shown one), shown at once.
-    fn new_tab(&mut self, space: Option<String>, name: &str, folder: Option<String>, argv: Option<Vec<String>>, task: Option<&str>, window: &Window) -> Result<Value, String> {
+    #[allow(clippy::too_many_arguments)]
+    fn new_tab(&mut self, space: Option<String>, name: &str, folder: Option<String>, argv: Option<Vec<String>>, task: Option<&str>, window: &mut Window, cx: &mut Context<Self>) -> Result<Value, String> {
         let space = space.or_else(|| self.model.active_space().map(|p| p.id.clone())).ok_or("no space yet: make one first (space.new)")?;
         if self.model.space(&space).is_none() {
             return Err(format!("no space {space:?}"));
@@ -2443,10 +2642,16 @@ impl AppWindow {
         let on = self.machine_of(&space);
         let (ctx, pane) = (self.model.fresh_id_on("tb", on.as_deref()), self.model.fresh_id_on("p", on.as_deref()));
         let size = self.initial_size(&Tab::new(&ctx, "", &pane, "").root, &pane, window);
-        let (addr, _) = self.spawn(Self::agent_argv(argv.clone(), task, on.as_deref()).or(argv), folder, follow, &space, &ctx, on.as_deref(), size, window)?;
-        self.model.add_tab(&space, Tab::new(&ctx, name.trim(), &pane, &addr));
-        self.model.active = Some(space.clone());
-        Ok(json!({ "space": space, "tab": ctx, "terminal": addr }))
+        let argv = Self::agent_argv(argv.clone(), task, on.as_deref()).or(argv);
+        let name = name.trim().to_owned();
+        let (sp, tb) = (space.clone(), ctx.clone());
+        self.start_terminal(argv, folder, follow, &sp, &tb, on.as_deref(), size, window, cx, move |this, addr, _| {
+            if !this.model.add_tab(&space, Tab::new(&ctx, &name, &pane, addr)) {
+                return Err(format!("space {space:?} closed while its terminal started"));
+            }
+            this.model.active = Some(space.clone());
+            Ok(json!({ "space": space, "tab": ctx, "terminal": addr }))
+        })
     }
 
     /// A tab whose only pane is a mod (a file, a board), shown at once.
@@ -2466,7 +2671,7 @@ impl AppWindow {
         Ok(json!({ "space": space, "tab": ctx, "pane": pane }))
     }
 
-    fn split(&mut self, pane: Option<String>, axis: Axis, argv: Option<Vec<String>>, folder: Option<String>, window: &Window) -> Result<Value, String> {
+    fn split(&mut self, pane: Option<String>, axis: Axis, argv: Option<Vec<String>>, folder: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Result<Value, String> {
         let target = pane.or_else(|| self.model.focused_pane()).ok_or("no pane to split")?;
         let (Some(p), Some(c)) = (self.model.space_of(&target), self.model.tab_of(&target)) else { return Err(format!("no pane {target:?}")) };
         let (space, ctx, fallback) = (p.id.clone(), c.id.clone(), p.folder.clone());
@@ -2480,9 +2685,12 @@ impl AppWindow {
         root.split(&target, axis, Node::block(new.clone(), Content::Terminal { terminal: String::new() }), "initial-size".into());
         let size = self.model.active_tab().filter(|tab| tab.id == ctx)
             .and_then(|_| self.initial_size(&root, &new, window));
-        let (addr, _) = self.spawn(argv, cwd, follow, &space, &ctx, on.as_deref(), size, window)?;
-        self.model.split(&target, axis, &new, &addr);
-        Ok(json!({ "pane": new, "terminal": addr }))
+        self.start_terminal(argv, cwd, follow, &space, &ctx, on.as_deref(), size, window, cx, move |this, addr, _| {
+            if !this.model.split(&target, axis, &new, addr) {
+                return Err(format!("pane {target:?} closed while its terminal started"));
+            }
+            Ok(json!({ "pane": new, "terminal": addr }))
+        })
     }
 
     /// A mod as a pane beside the target (a viewer next to the shell).
@@ -2842,7 +3050,7 @@ impl AppWindow {
             // ---- spaces
             "space.new" => {
                 let name = Self::arg(a, "name").unwrap_or_default();
-                let r = self.new_space(name, Self::owned(a, "folder"), Self::arg(a, "tab"), Self::argv(a), Self::arg(a, "task"), Self::owned(a, "machine").filter(|m| !m.is_empty()), window);
+                let r = self.new_space(name, Self::owned(a, "folder"), Self::arg(a, "tab"), Self::argv(a), Self::arg(a, "task"), Self::owned(a, "machine").filter(|m| !m.is_empty()), window, cx);
                 self.answer(r);
             }
             "space.close" => {
@@ -2894,9 +3102,9 @@ impl AppWindow {
                     Some(m) => self.new_mod_tab(Self::owned(a, "space"), name, m, a.get("props").cloned().unwrap_or(Value::Null)),
                     // A person's new tab with no space open starts one, as space.new does.
                     None if person && a.get("space").is_none() && self.model.active_space().is_none() => {
-                        self.new_space("", Self::owned(a, "folder"), Some(name), Self::argv(a), Self::arg(a, "task"), None, window)
+                        self.new_space("", Self::owned(a, "folder"), Some(name), Self::argv(a), Self::arg(a, "task"), None, window, cx)
                     }
-                    None => self.new_tab(Self::owned(a, "space"), name, Self::owned(a, "folder"), Self::argv(a), Self::arg(a, "task"), window),
+                    None => self.new_tab(Self::owned(a, "space"), name, Self::owned(a, "folder"), Self::argv(a), Self::arg(a, "task"), window, cx),
                 };
                 self.answer(r);
             }
@@ -2964,7 +3172,7 @@ impl AppWindow {
                 };
                 let r = match Self::owned(a, "mod") {
                     Some(name) => self.split_mod(Self::owned(a, "pane"), axis, name, a.get("props").cloned().unwrap_or(Value::Null)),
-                    None => self.split(Self::owned(a, "pane"), axis, Self::argv(a), None, window),
+                    None => self.split(Self::owned(a, "pane"), axis, Self::argv(a), None, window, cx),
                 };
                 self.answer(r);
             }
@@ -3044,13 +3252,13 @@ impl AppWindow {
             "terminal.open" => {
                 let argv = Self::argv(a);
                 let r = match Self::arg(a, "place").unwrap_or("tab") {
-                    "right" => self.split(None, Axis::Row, argv, Self::owned(a, "folder"), window),
-                    "down" => self.split(None, Axis::Column, argv, Self::owned(a, "folder"), window),
+                    "right" => self.split(None, Axis::Row, argv, Self::owned(a, "folder"), window, cx),
+                    "down" => self.split(None, Axis::Column, argv, Self::owned(a, "folder"), window, cx),
                     _ => {
                         let name = Self::owned(a, "name")
                             .or_else(|| argv.as_ref().and_then(|v| v.first()).map(|p| p.rsplit('/').next().unwrap_or(p).to_owned()))
                             .unwrap_or_else(|| "shell".into());
-                        self.new_tab(None, &name, Self::owned(a, "folder"), argv, None, window)
+                        self.new_tab(None, &name, Self::owned(a, "folder"), argv, None, window, cx)
                     }
                 };
                 self.answer(r);
@@ -3104,6 +3312,13 @@ impl AppWindow {
                     return self.fail(format!("no running terminal {t:?}"));
                 }
                 self.kill(&[t.to_owned()], cx);
+            }
+            "machine.reconnect" => {
+                let Some(machine) = Self::owned(a, "machine").filter(|m| !m.is_empty()) else { return self.fail("machine.reconnect needs machine (a name from hc machine ls)") };
+                if !self.machine_states.contains_key(&machine) {
+                    return self.fail(format!("Herdr has no machine called {machine}. See hc machine ls; machines added with --temp stay out of Herdr."));
+                }
+                self.reconnect_machine(machine, window, cx);
             }
             "terminal.peek" => {
                 let t = Self::arg(a, "terminal").unwrap_or_default();
@@ -3695,7 +3910,11 @@ impl AppWindow {
             Request::CloseOverlay { id } => self.close_overlay(&id, window, cx),
             Request::Refresh => self.refresh_mods(cx),
             Request::Control { cmd, reply } => {
-                let _ = reply.send(self.control(cmd, window, cx));
+                self.control_reply = Some(reply);
+                let answer = self.control(cmd, window, cx);
+                if let Some(reply) = self.control_reply.take() {
+                    let _ = reply.send(answer);
+                }
             }
         }
     }
@@ -5332,6 +5551,32 @@ mod tests {
         let (view, cx) = cx.add_window_view(|window, cx| super::AppWindow::new(crate::hc::offline(), requests, window, cx));
         assert_eq!(view.update(cx, |this, _| this.layout_name.clone()), "test");
         (view, cx)
+    }
+
+    #[test]
+    fn a_terminal_on_another_machine_starts_off_the_ui_thread() {
+        in_own_process("remote_start_async");
+    }
+
+    /// A machine that answers late (here: never, the core is offline) must
+    /// not hold the window: the command answers at once, and the failure
+    /// arrives later as a toast, with nothing added to the model.
+    #[gpui::test]
+    fn remote_start_async(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("remote_start_async") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "unused", "", json!({ "id": "main", "type": "block", "content": { "tab": "active" } }));
+        let answer = cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.documents.entry("box".into()).or_default().available = true;
+            this.run_as("space.new", json!({ "machine": "box" }), false, window, cx)
+        }));
+        assert_eq!(answer, json!({ "starting": "box" }));
+        let toasts = |cx: &mut gpui::VisualTestContext| cx.update(|_, cx| view.read(cx).overlays.iter().filter(|o| o.kind == super::OverlayKind::Toast).count());
+        cx.run_until_parked();
+        assert_eq!(toasts(cx), 1, "the failed start is reported");
+        assert!(cx.update(|_, cx| view.read(cx).model.spaces.is_empty()), "a failed start adds no space");
     }
 
     #[test]

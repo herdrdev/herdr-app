@@ -10,12 +10,13 @@ function harness(replies: unknown[] = [], storage = new Map<string, string>(), s
   const tasks: Promise<unknown>[] = [];
   const availability = [{ name: null as string | null, layout: "ready" }];
   const moves: { id: string; index: number }[] = [];
+  const runs: { name: string; args: unknown }[] = [];
   const handlers: Record<string, (...args: any[]) => void> = {};
   const element: any = new Proxy({}, { get: (_, method) => (...args: any[]) => {
     if (String(method).startsWith("on_")) handlers[String(method)] = args.at(-1);
     return element;
   } });
-  const Spaces = new Function("View", "hc", "localStorage", "spaces", "panes", "run", "v_flex", "h_flex", "div", "svg", "shared", "machines", `${source}; return Spaces;`)(
+  const Spaces = new Function("View", "hc", "localStorage", "spaces", "panes", "run", "v_flex", "h_flex", "div", "svg", "shared", "machines", `${source}; Object.assign(Spaces, { lineLabel, canRetry }); return Spaces;`)(
     class {},
     async (args: string[]) => {
       calls.push(args);
@@ -25,18 +26,20 @@ function harness(replies: unknown[] = [], storage = new Map<string, string>(), s
     },
     { setItem(key: string, value: string) { storage.set(key, value); }, getItem(key: string) { return storage.get(key) ?? null; } },
     () => snapshot, () => [],
-    (name: string, args: { id: string; index: number }) => {
-      expect(name).toBe("space.move");
+    (name: string, args: any) => {
+      if (name !== "space.move") return runs.push({ name, args });
       moves.push(args);
     },
     ...Array(4).fill(() => element), () => null, () => availability,
   );
   const view = new Spaces();
   view.reconnecting = {};
+  view.retrying = {};
   view.folded = new Set(["cloud"]);
   view.refreshMachines = () => {};
-  const cx = { timer: { every() {} }, notify() {}, spawn(fn: (cx: unknown) => Promise<unknown>) { tasks.push(fn(cx)); } };
-  return { view, calls, tasks, cx, storage, moves, handlers, snapshot, availability };
+  const sleeps: (() => void)[] = [];
+  const cx: any = { timer: { every() {} }, notify() {}, sleep: () => new Promise<void>(r => sleeps.push(r)), spawn(fn: (cx: unknown) => Promise<unknown>) { tasks.push(fn(cx)); } };
+  return { view, calls, tasks, cx, storage, moves, runs, sleeps, handlers, snapshot, availability };
 }
 
 const machine = { name: "cloud", id: "old", target: "user@host", session: null, via: false };
@@ -279,4 +282,49 @@ test("no reconciliation without a rendered sidebar", () => {
   h.rows();
   h.flush();
   expect(h.order()).toEqual(["main", "topic"]);
+});
+
+test("a machine's header says how long it has been down and why, and only offers Retry when a dial can help", () => {
+  const { lineLabel, canRetry } = harness().view.constructor;
+  const now = 10 * 60_000;
+  const down = { state: "unreachable", why: "ssh: connect to host box port 22: Operation timed out", since_ms: now - 3 * 60_000 };
+  expect(lineLabel("box", down, now)).toEqual({ text: "unreachable · 3m", tooltip: `${down.why}\nClick Retry to dial it now. Its programs keep running there.` });
+  expect(lineLabel("box", { state: "unreachable", since_ms: now - 20_000 }, now).text).toBe("unreachable");
+  expect(lineLabel("box", { state: "needs_login" }, now).tooltip).toBe("Run hc machine login box in a terminal.");
+  expect(canRetry(down)).toBe(true);
+  expect(canRetry({ state: "connecting" })).toBe(true);
+  expect(canRetry({ state: "needs_login" })).toBe(false);
+  expect(canRetry({ state: "needs_update" })).toBe(false);
+});
+
+test("the window's fresh line state wins over the last machine listing", () => {
+  const { view, availability } = harness();
+  view.machines = [{ name: "box", state: "connected" }];
+  availability.push({ name: "box", layout: "unavailable", state: "unreachable", why: "gone", since_ms: 1 } as any);
+  expect(view.lineOf("box").state).toBe("unreachable");
+  expect(view.lineOf("other")).toBeUndefined();
+});
+
+test("Retry asks the app to dial once, ignoring repeat clicks until it settles", async () => {
+  const { view, cx, runs, sleeps, tasks } = harness();
+  view.retry("box", cx);
+  view.retry("box", cx);
+  expect(runs).toEqual([{ name: "machine.reconnect", args: { machine: "box" } }]);
+  expect(view.retrying.box.at).toBeNumber();
+  sleeps.forEach(wake => wake());
+  await Promise.all(tasks);
+  expect(view.retrying.box).toBeUndefined();
+  view.retry("box", cx);
+  expect(runs.length).toBe(2);
+});
+
+test("an earlier Retry's timer leaves a later click's busy state alone", async () => {
+  const { view, cx, runs, sleeps, tasks } = harness();
+  view.retry("box", cx);
+  delete view.retrying.box; // it connected, then dropped again
+  view.retry("box", cx);
+  sleeps[0]();
+  await tasks[0];
+  view.retry("box", cx);
+  expect(runs.length).toBe(2);
 });
