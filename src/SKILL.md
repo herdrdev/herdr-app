@@ -67,6 +67,11 @@ Use `commands` to confirm the command's exact shape:
 herdr-app do pane.split '{"direction":"right","pane":"p12"}'
 ```
 
+`pane.rotate --direction next` (or `prev`) turns the panes of the row or
+column that holds the focused pane, or `--pane`, like Vim's `<C-w>r`. Sizes
+stay in place and focus stays on the pane. It fails when that row or column
+holds another split.
+
 `terminal.search` opens a find bar in the focused terminal. It searches that
 terminal's screen and scrollback; Enter and Shift-Enter move between matches,
 Escape closes the bar while its find field has focus, and each terminal keeps its own query (reopening selects it, so typing replaces it).

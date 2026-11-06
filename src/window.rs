@@ -2788,7 +2788,7 @@ impl AppWindow {
             if !args.is_object() { args = json!({}); }
             args["machine"] = json!(machine);
         }
-        if matches!(name, "space.new" | "space.close" | "space.rename" | "space.move" | "tab.new" | "tab.close" | "tab.rename" | "tab.move" | "pane.split" | "pane.close" | "pane.swap" | "terminal.keep" | "terminal.park") {
+        if matches!(name, "space.new" | "space.close" | "space.rename" | "space.move" | "tab.new" | "tab.close" | "tab.rename" | "tab.move" | "pane.split" | "pane.close" | "pane.swap" | "pane.rotate" | "terminal.keep" | "terminal.park") {
             let node = ["id", "space", "pane"].into_iter().find_map(|k| Self::arg(&args, k));
             let target = node.and_then(|id| self.model.space(id).or_else(|| self.model.space_of(id))).or_else(|| self.model.active_space());
             let machine = if name == "space.new" { Self::arg(&args, "machine") }
@@ -3025,6 +3025,16 @@ impl AppWindow {
                     return self.go(dir, window, cx);
                 }
                 self.swap_pane(dir);
+            }
+            "pane.rotate" => {
+                let forward = match rotation_direction(Self::arg(a, "direction").unwrap_or_default()) {
+                    Ok(forward) => forward,
+                    Err(error) => return self.fail(error),
+                };
+                let Some(pane) = Self::owned(a, "pane").or_else(|| self.model.focused_pane()) else { return self.fail("no pane to rotate") };
+                if let Err(error) = self.model.rotate_pane(&pane, forward) {
+                    return self.fail(error);
+                }
             }
             // ---- terminals
             "terminal.open" => {
@@ -4564,9 +4574,18 @@ fn overlay_terminal_block<'a>(overlays: &'a [Overlay], id: Option<&str>) -> Opti
     overlays.iter().filter_map(|o| o.layout.as_ref()).find_map(|l| l.visible_blocks().into_iter().find(|n| n.id == id && n.terminal().is_some()))
 }
 
+/// `pane.rotate`'s direction: "next" turns forward.
+fn rotation_direction(direction: &str) -> Result<bool, String> {
+    match direction {
+        "next" => Ok(true),
+        "prev" => Ok(false),
+        other => Err(format!("pane.rotate direction is \"next\" or \"prev\", not {other:?}")),
+    }
+}
+
 fn needs_model_pane(name: &str, args: &Value) -> bool {
     match name {
-        "pane.split" | "pane.close" | "pane.zoom" | "terminal.show" => AppWindow::arg(args, "pane").is_none(),
+        "pane.split" | "pane.close" | "pane.zoom" | "pane.rotate" | "terminal.show" => AppWindow::arg(args, "pane").is_none(),
         "pane.go" | "pane.swap" => true,
         "terminal.open" | "terminal.keep" => matches!(AppWindow::arg(args, "place"), Some("right" | "down")),
         _ => false,
@@ -5550,13 +5569,21 @@ export default class Probe extends View {
     }
 
     #[test]
+    fn rotation_direction_is_next_or_prev() {
+        assert_eq!(super::rotation_direction("next"), Ok(true));
+        assert_eq!(super::rotation_direction("prev"), Ok(false));
+        assert_eq!(super::rotation_direction("left"), Err("pane.rotate direction is \"next\" or \"prev\", not \"left\"".to_owned()));
+        assert_eq!(super::rotation_direction(""), Err("pane.rotate direction is \"next\" or \"prev\", not \"\"".to_owned()));
+    }
+
+    #[test]
     fn composition_commands_never_default_to_a_source_pane() {
         use serde_json::json;
-        for name in ["pane.split", "pane.close", "pane.zoom", "pane.go", "pane.swap", "terminal.show"] {
+        for name in ["pane.split", "pane.close", "pane.zoom", "pane.go", "pane.swap", "pane.rotate", "terminal.show"] {
             assert!(super::needs_model_pane(name, &json!({})), "{name}");
             assert!(super::needs_model_pane(name, &json!({"pane": null})), "{name}");
         }
-        for name in ["pane.split", "pane.close", "pane.zoom", "terminal.show"] {
+        for name in ["pane.split", "pane.close", "pane.zoom", "pane.rotate", "terminal.show"] {
             assert!(!super::needs_model_pane(name, &json!({"pane": "explicit-pane"})), "{name}");
         }
         for name in ["terminal.open", "terminal.keep"] {
