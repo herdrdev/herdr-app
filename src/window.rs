@@ -5375,7 +5375,6 @@ mod tests {
         let (view, cx) = open_window(cx, "unused", "", json!({
             "id": "root", "type": "block", "content": { "tab": "active" }
         }));
-        // A row of `a` and a column of `b` over `c`, dragged uneven, `b` focused.
         let uneven = |tab: &str| {
             let sized = |mut n: Node, size: Span| { n.size = Some(size); n };
             let pane = |name: &str| crate::model::pane(&format!("{tab}-{name}"), &format!("t-{tab}-{name}"));
@@ -5423,8 +5422,6 @@ mod tests {
         in_own_process("equalize_needs_document");
     }
 
-    /// The target tab's machine decides, not the focused one's: here only the
-    /// focused space's layout document is available.
     #[gpui::test]
     fn equalize_needs_document(cx: &mut gpui::TestAppContext) {
         use super::{Axis, Node, Span};
