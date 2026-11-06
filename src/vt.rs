@@ -1011,6 +1011,13 @@ impl Vt {
         }
     }
 
+    /// Whether the next drags select a block (the same columns on every row).
+    pub fn set_rectangle_selection(&mut self, on: bool) {
+        unsafe {
+            ghostty_selection_gesture_event_set(self.drag, GHOSTTY_SELECTION_GESTURE_EVENT_OPT_RECTANGLE, &on as *const bool as *const c_void);
+        }
+    }
+
     /// The selected text, if anything is selected.
     pub fn selection_text(&self) -> Option<String> {
         unsafe {
@@ -2201,6 +2208,22 @@ mod tests {
         assert_eq!(vt.selection_text().as_deref(), Some("hello"));
         vt.clear_selection();
         assert_eq!(vt.selection_text(), None);
+    }
+
+    #[test]
+    fn a_rectangle_drag_selects_the_same_columns_on_every_row() {
+        // A fresh terminal each time: a second press there would be a double click.
+        let drag = |rectangle| {
+            let mut vt = Vt::new(20, 3);
+            vt.write(b"abcdef\r\nghijkl\r\nmnopqr");
+            vt.set_rectangle_selection(rectangle);
+            vt.select(Select::Press, 1, 0, 12.0, 5.0, 10.0, 60.0);
+            vt.select(Select::Drag, 3, 2, 36.0, 45.0, 10.0, 60.0);
+            vt.select(Select::Release, 3, 2, 36.0, 45.0, 10.0, 60.0);
+            vt.selection_text()
+        };
+        assert_eq!(drag(true).as_deref(), Some("bcd\nhij\nnop"));
+        assert_eq!(drag(false).as_deref(), Some("bcdef\nghijkl\nmnop"));
     }
 
     #[test]

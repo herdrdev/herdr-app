@@ -610,8 +610,10 @@ The main ones:
   with no terminal holding keyboard focus, they use the focused pane or block.
   Dragging a text selection past the terminal's top or bottom scrolls while held;
   releasing stops it. Programs that track the mouse still get their mouse events
-  (hold Shift to select text instead). A drag stays with the terminal where it
-  started, including its release outside the pane; other panes don't receive it.
+  (hold Shift to select text instead). Ctrl+Alt+drag (Option+drag on macOS)
+  selects a block, the same columns on every row; add Shift when the program
+  takes the mouse. A drag stays with the terminal where it started, including
+  its release outside the pane; other panes don't receive it.
   Terminals display Kitty graphics, including Unicode placeholder images used by
   programs such as yazi; partial images and scrolling follow the placeholder cells.
 - Agents: `agent.next`, `agent.prev`, `agent.focus {terminal}`.
