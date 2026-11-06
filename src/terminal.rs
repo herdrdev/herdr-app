@@ -221,6 +221,13 @@ impl TerminalView {
     /// Attaches at `size` (cols, rows): the terminal's current size, so attaching
     /// a hidden terminal doesn't resize its program.
     pub fn attach(core: Arc<Core>, address: String, size_hint: (u16, u16), cx: &mut Context<Self>) -> Self {
+        Self::attach_with(core, address, size_hint, false, cx)
+    }
+
+    /// `announce_end`: emit Ended when the terminal turns out to be gone. A
+    /// pop-out window is its view's only supervision; there is no listing to
+    /// clean it up.
+    pub fn attach_with(core: Arc<Core>, address: String, size_hint: (u16, u16), announce_end: bool, cx: &mut Context<Self>) -> Self {
         let mut view = TerminalView {
             address: address.clone(),
             title: address.clone(),
@@ -266,7 +273,7 @@ impl TerminalView {
             search_task: None,
             _reader: None,
         };
-        view.connect(core, false, cx);
+        view.connect(core, announce_end, cx);
         view
     }
 

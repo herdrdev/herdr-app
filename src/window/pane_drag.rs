@@ -37,7 +37,9 @@ fn inherited_movable(root: &Node, id: &str) -> Option<bool> {
 impl AppWindow {
     pub(super) fn pane_movable(&self, pane: &str) -> bool {
         let Some(tab) = self.model.active_tab() else { return false };
-        if tab.zoomed.is_some() || tab.root.panes().len() < 2 || !tab.root.find(pane).is_some_and(Node::is_pane) {
+        // A lone pane can only be dragged out of the window, but that is the
+        // point of grabbing it.
+        if tab.zoomed.is_some() || !tab.root.find(pane).is_some_and(Node::is_pane) {
             return false;
         }
         let owner = self.chrome.visible_blocks().into_iter().find(|n| matches!(n.content(), Some(Content::Context { .. })));
@@ -133,7 +135,21 @@ impl AppWindow {
             cx.notify();
             return true;
         }
-        if self.pane_movable(&d.pane)
+        // Dropped outside every pane, outside the window: the pane's terminal
+        // detaches into its own OS window. `bounds()` is desktop-space; the
+        // event position is window-space.
+        let inside = Bounds::new(Point::default(), window.viewport_size()).contains(&at);
+        if target.is_none() && !inside {
+            let address = self
+                .model
+                .tabs()
+                .find(|t| t.id == d.tab)
+                .and_then(|t| t.root.find(&d.pane))
+                .and_then(|n| n.terminal().map(str::to_owned));
+            if let Some(address) = address.filter(|a| self.live.contains_key(a)) {
+                let _ = self.popout_terminal(&address, window, cx);
+            }
+        } else if self.pane_movable(&d.pane)
             && let Some((target, edge)) = target
             && self.model.move_pane(&d.pane, &target, edge)
         {
