@@ -3,7 +3,7 @@
 //! how they're split. Plus which pane has focus and agent attention (done vs
 //! seen) with Herdr's rollup. Pure data; the window drives it.
 
-use crate::layout::{Axis, Content, Node, RotateError};
+use crate::layout::{Axis, Content, Node, RotateError, Rotation};
 use serde::{Deserialize, Serialize};
 use serde_json::{Value, json};
 use std::collections::{BTreeMap, HashMap};
@@ -295,11 +295,10 @@ impl Model {
         true
     }
 
-    /// Rotates the panes of the split that holds `pane` (Vim's `<C-w>r`, or `<C-w>R`
-    /// when not `forward`). Focus stays on the same pane.
-    pub fn rotate_pane(&mut self, pane: &str, forward: bool) -> Result<(), String> {
+    /// Rotates the panes of the split that holds `pane`. Focus stays on the same pane.
+    pub fn rotate_pane(&mut self, pane: &str, rotation: Rotation) -> Result<(), String> {
         let Some(tab) = self.tab_of_mut(pane) else { return Err(format!("no pane {pane:?}")) };
-        tab.root.rotate(pane, forward).map_err(|error| match error {
+        tab.root.rotate(pane, rotation).map_err(|error| match error {
             RotateError::NotInSplit => format!("pane {pane:?} is not in a split"),
             RotateError::NestedSplit => "cannot rotate a split that holds another split".to_owned(),
         })
@@ -760,7 +759,7 @@ mod tests {
         m.split("x1", Axis::Row, "x2", "t2");
         m.split("x2", Axis::Row, "x3", "t3");
         m.focus_pane("x2");
-        assert_eq!(m.rotate_pane("x2", true), Ok(()));
+        assert_eq!(m.rotate_pane("x2", Rotation::Next), Ok(()));
         let ids: Vec<_> = m.tab("c1").unwrap().root.children().iter().map(|n| n.id.clone()).collect();
         assert_eq!(ids, ["x3", "x1", "x2"]);
         assert_eq!(m.focused_pane().as_deref(), Some("x2"));
@@ -770,13 +769,13 @@ mod tests {
     fn rotating_refusals_each_say_why_and_change_nothing() {
         let mut m = model_with_one();
         let alone = m.tab("c1").unwrap().root.clone();
-        assert_eq!(m.rotate_pane("x1", true), Err("pane \"x1\" is not in a split".to_owned()));
-        assert_eq!(m.rotate_pane("nope", true), Err("no pane \"nope\"".to_owned()));
+        assert_eq!(m.rotate_pane("x1", Rotation::Next), Err("pane \"x1\" is not in a split".to_owned()));
+        assert_eq!(m.rotate_pane("nope", Rotation::Next), Err("no pane \"nope\"".to_owned()));
         assert_eq!(m.tab("c1").unwrap().root, alone);
         m.split("x1", Axis::Row, "x2", "t2");
         m.split("x2", Axis::Column, "x3", "t3");
         let nested = m.tab("c1").unwrap().root.clone();
-        assert_eq!(m.rotate_pane("x1", false), Err("cannot rotate a split that holds another split".to_owned()));
+        assert_eq!(m.rotate_pane("x1", Rotation::Prev), Err("cannot rotate a split that holds another split".to_owned()));
         assert_eq!(m.tab("c1").unwrap().root, nested);
         assert_eq!(m.focused_pane().as_deref(), Some("x3"));
     }
