@@ -45,6 +45,43 @@ fn fractional_native_surfaces_show_when_the_mask_contains_them() {
 }
 
 #[test]
+fn fractional_scale_uses_the_rendered_mask_not_its_unsnapped_edges() {
+    use gpui::{point, px, size, Bounds};
+    // Captured from the native Windows pane at 150% display scaling.
+    let bounds = Bounds::new(
+        point(px(277.33334), px(118.666664)),
+        size(px(994.), px(664.6667)),
+    );
+    let mask = Bounds::new(point(px(277.66666), px(51.)), size(px(993.3334), px(732.)));
+    assert!(policy::is_unclipped_at_scale(&bounds, &mask, 1.5));
+    for edge in 0..4 {
+        let mut clipped = mask;
+        match edge {
+            0 => clipped.origin.x += px(2.),
+            1 => clipped.origin.y = bounds.top() + px(2.),
+            2 => clipped.size.width -= px(2.),
+            _ => clipped.size.height = bounds.bottom() - mask.top() - px(2.),
+        }
+        assert!(
+            !policy::is_unclipped_at_scale(&bounds, &clipped, 1.5),
+            "edge {edge}"
+        );
+    }
+}
+
+#[test]
+fn native_origin_and_size_round_independently_before_checking_the_mask() {
+    use gpui::{point, px, size, Bounds};
+    let bounds = Bounds::new(point(px(0.5), px(0.5)), size(px(10.5), px(10.5)));
+    let mask = Bounds::new(point(px(0.), px(0.)), size(px(11.), px(11.)));
+    // The native child is at (1, 1), sized (11, 11): its far edge is 12,
+    // even though the unrounded logical far edge is only 11.
+    assert!(!policy::is_unclipped_at_scale(&bounds, &mask, 1.));
+    let mask = Bounds::new(mask.origin, size(px(12.), px(12.)));
+    assert!(policy::is_unclipped_at_scale(&bounds, &mask, 1.));
+}
+
+#[test]
 fn native_surfaces_hide_for_clipping_at_every_edge_or_empty_size() {
     use gpui::{point, px, size, Bounds};
     let bounds = Bounds::new(
