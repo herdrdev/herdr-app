@@ -295,7 +295,6 @@ impl Model {
         true
     }
 
-    /// Rotates the panes of the split that holds `pane`. Focus stays on the same pane.
     pub fn rotate_pane(&mut self, pane: &str, rotation: Rotation) -> Result<(), String> {
         let Some(tab) = self.tab_of_mut(pane) else { return Err(format!("no pane {pane:?}")) };
         tab.root.rotate(pane, rotation).map_err(|error| match error {

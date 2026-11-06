@@ -5386,7 +5386,6 @@ mod tests {
             "id": "root", "type": "block", "content": { "tab": "active" }
         }));
         cx.update(|window, cx| view.update(cx, |this, cx| {
-            // tb1: p1 beside a column of p2 p3 p4, focus on p4. tb2: q1 beside q2.
             this.model.add_space("sp1", "", "/tmp", crate::model::Tab::new("tb2", "", "q1", "u1"));
             this.model.split("q1", Axis::Row, "q2", "u2");
             this.model.add_tab("sp1", crate::model::Tab::new("tb1", "", "p1", "t1"));
