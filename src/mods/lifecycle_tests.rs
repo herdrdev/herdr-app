@@ -94,6 +94,12 @@ export default class extends View {
     visual.run_until_parked();
     visual.update(|window, cx| {
         let position = gpui::point(gpui::px(20.), gpui::px(20.));
+        // Typed last, as before dragging a screenshot in: no mouse move reaches the window.
+        window.dispatch_event(gpui::KeyDownEvent {
+            keystroke: gpui::Keystroke::parse("a").unwrap(),
+            is_held: false,
+            prefer_character_input: false,
+        }.to_platform_input(), cx);
         window.dispatch_event(FileDropEvent::Entered {
             position,
             paths: ExternalPaths([PathBuf::from("/var/tmp/screenshot.png"), PathBuf::from("/var/tmp/a file.jpg")].into_iter().collect()),
