@@ -531,9 +531,17 @@ impl Node {
         })
     }
 
+    #[cfg(test)]
     pub fn parent_of(&self, id: &str) -> Option<&Node> {
         let p = self.path_to(id)?;
         (p.len() >= 2).then(|| self.find(&p[p.len() - 2])).flatten()
+    }
+
+    pub fn parent_of_mut(&mut self, id: &str) -> Option<&mut Node> {
+        if self.children().iter().any(|c| c.id == id) {
+            return Some(self);
+        }
+        self.children_mut()?.iter_mut().find_map(|c| c.parent_of_mut(id))
     }
 
     /// Terminal blocks in tree order.
@@ -572,8 +580,7 @@ impl Node {
     /// Puts `new` beside `target` along `axis` (after it). Reuses the parent
     /// if it already runs along that axis, else wraps the target.
     pub fn split(&mut self, target: &str, axis: Axis, new: Node, container_id: String) -> bool {
-        if let Some(parent) = self.parent_of(target).map(|p| p.id.clone())
-            && let Some(p) = self.find_mut(&parent)
+        if let Some(p) = self.parent_of_mut(target)
             && p.axis() == Some(axis)
         {
             let c = p.children_mut().unwrap();
@@ -641,6 +648,41 @@ impl Node {
         }
         true
     }
+
+    pub fn rotate(&mut self, pane: &str, rotation: Rotation) -> Result<(), RotateError> {
+        let split = self.parent_of_mut(pane).filter(|p| p.axis().is_some());
+        let Some(children) = split.and_then(Node::children_mut) else {
+            return Err(RotateError::NotInSplit);
+        };
+        if children.len() < 2 {
+            return Err(RotateError::NotInSplit);
+        }
+        if children.iter().any(|c| !matches!(c.kind, Kind::Block { .. })) {
+            return Err(RotateError::NestedSplit);
+        }
+
+        let sizes: Vec<_> = children.iter().map(|c| c.size).collect();
+        match rotation {
+            Rotation::Next => children.rotate_right(1),
+            Rotation::Prev => children.rotate_left(1),
+        }
+        for (child, size) in children.iter_mut().zip(sizes) {
+            child.size = size;
+        }
+        Ok(())
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq)]
+pub enum Rotation {
+    Next,
+    Prev,
+}
+
+#[derive(Debug, PartialEq)]
+pub enum RotateError {
+    NotInSplit,
+    NestedSplit,
 }
 
 fn active_child<'a>(children: &'a [Node], active: Option<&str>) -> Option<&'a Node> {
@@ -871,5 +913,56 @@ mod tests {
         let ids: Vec<_> = n.children().iter().map(|c| c.id.clone()).collect();
         assert_eq!(ids, ["c", "b", "a"]);
         assert_eq!(n.children()[0].size, Some(Size::Px { px: 100.0 }));
+    }
+
+    fn order(n: &Node) -> Vec<&str> {
+        n.children().iter().map(|c| c.id.as_str()).collect()
+    }
+
+    #[test]
+    fn rotating_moves_panes_and_keeps_sizes_with_places() {
+        let weights = [Size::Weight { weight: 1.0 }, Size::Weight { weight: 2.0 }, Size::Px { px: 300.0 }];
+        for (rotation, expected) in [(Rotation::Next, ["c", "a", "b"]), (Rotation::Prev, ["b", "c", "a"])] {
+            let mut n = Node::container("r", Axis::Row, vec![term("a"), term("b"), term("c")]);
+            for (child, size) in n.children_mut().unwrap().iter_mut().zip(weights) {
+                child.size = Some(size);
+            }
+            assert_eq!(n.rotate("b", rotation), Ok(()));
+            assert_eq!(order(&n), expected);
+            let sizes: Vec<_> = n.children().iter().map(|c| c.size.unwrap()).collect();
+            assert_eq!(sizes, weights);
+        }
+        for rotation in [Rotation::Next, Rotation::Prev] {
+            let mut n = Node::container("r", Axis::Column, vec![term("a"), term("b")]);
+            assert_eq!(n.rotate("a", rotation), Ok(()));
+            assert_eq!(order(&n), ["b", "a"]);
+        }
+    }
+
+    #[test]
+    fn rotating_turns_only_the_split_that_holds_the_pane() {
+        let inner = Node::container("col", Axis::Column, vec![term("b"), term("c"), term("d")]);
+        let mut n = Node::container("r", Axis::Row, vec![term("a"), inner]);
+        assert_eq!(n.rotate("c", Rotation::Next), Ok(()));
+        assert_eq!(order(&n), ["a", "col"]);
+        assert_eq!(order(n.find("col").unwrap()), ["d", "b", "c"]);
+    }
+
+    #[test]
+    fn rotating_refuses_a_split_that_holds_another_split() {
+        let inner = Node::container("col", Axis::Column, vec![term("b"), term("c")]);
+        let mut n = Node::container("r", Axis::Row, vec![term("a"), inner]);
+        let before = n.clone();
+        assert_eq!(n.rotate("a", Rotation::Next), Err(RotateError::NestedSplit));
+        assert_eq!(n, before);
+    }
+
+    #[test]
+    fn rotating_refuses_a_pane_alone_in_its_tab() {
+        let mut n = Node::container("tab", Axis::Row, vec![term("a")]);
+        let before = n.clone();
+        assert_eq!(n.rotate("a", Rotation::Next), Err(RotateError::NotInSplit));
+        assert_eq!(n.rotate("missing", Rotation::Next), Err(RotateError::NotInSplit));
+        assert_eq!(n, before);
     }
 }

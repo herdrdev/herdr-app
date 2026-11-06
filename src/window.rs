@@ -11,7 +11,7 @@ mod pane_drag;
 mod pane_size;
 mod titlebar;
 
-use crate::layout::{Axis, Background as Paint, Content, Fit, HeaderContent, Kind, Line, Node, PaneFrame, Size as Span};
+use crate::layout::{Axis, Background as Paint, Content, Fit, HeaderContent, Kind, Line, Node, PaneFrame, Rotation, Size as Span};
 use crate::model::{self, Tab, Model};
 use crate::mods::{self, Found, Instance, Request};
 use crate::settings;
@@ -2788,7 +2788,7 @@ impl AppWindow {
             if !args.is_object() { args = json!({}); }
             args["machine"] = json!(machine);
         }
-        if matches!(name, "space.new" | "space.close" | "space.rename" | "space.move" | "tab.new" | "tab.close" | "tab.rename" | "tab.move" | "pane.split" | "pane.close" | "pane.swap" | "terminal.keep" | "terminal.park") {
+        if matches!(name, "space.new" | "space.close" | "space.rename" | "space.move" | "tab.new" | "tab.close" | "tab.rename" | "tab.move" | "pane.split" | "pane.close" | "pane.swap" | "pane.rotate" | "terminal.keep" | "terminal.park") {
             let node = ["id", "space", "pane"].into_iter().find_map(|k| Self::arg(&args, k));
             let target = node.and_then(|id| self.model.space(id).or_else(|| self.model.space_of(id))).or_else(|| self.model.active_space());
             let machine = if name == "space.new" { Self::arg(&args, "machine") }
@@ -3025,6 +3025,16 @@ impl AppWindow {
                     return self.go(dir, window, cx);
                 }
                 self.swap_pane(dir);
+            }
+            "pane.rotate" => {
+                let rotation = match rotation_direction(Self::arg(a, "direction").unwrap_or_default()) {
+                    Ok(rotation) => rotation,
+                    Err(error) => return self.fail(error),
+                };
+                let Some(pane) = Self::owned(a, "pane").or_else(|| self.model.focused_pane()) else { return self.fail("no pane to rotate") };
+                if let Err(error) = self.model.rotate_pane(&pane, rotation) {
+                    return self.fail(error);
+                }
             }
             // ---- terminals
             "terminal.open" => {
@@ -4564,9 +4574,17 @@ fn overlay_terminal_block<'a>(overlays: &'a [Overlay], id: Option<&str>) -> Opti
     overlays.iter().filter_map(|o| o.layout.as_ref()).find_map(|l| l.visible_blocks().into_iter().find(|n| n.id == id && n.terminal().is_some()))
 }
 
+fn rotation_direction(direction: &str) -> Result<Rotation, String> {
+    match direction {
+        "next" => Ok(Rotation::Next),
+        "prev" => Ok(Rotation::Prev),
+        other => Err(format!("pane.rotate direction is \"next\" or \"prev\", not {other:?}")),
+    }
+}
+
 fn needs_model_pane(name: &str, args: &Value) -> bool {
     match name {
-        "pane.split" | "pane.close" | "pane.zoom" | "terminal.show" => AppWindow::arg(args, "pane").is_none(),
+        "pane.split" | "pane.close" | "pane.zoom" | "pane.rotate" | "terminal.show" => AppWindow::arg(args, "pane").is_none(),
         "pane.go" | "pane.swap" => true,
         "terminal.open" | "terminal.keep" => matches!(AppWindow::arg(args, "place"), Some("right" | "down")),
         _ => false,
@@ -5353,6 +5371,61 @@ mod tests {
     }
 
     #[test]
+    fn pane_rotate_turns_the_split_and_refusals_change_nothing() {
+        in_own_process("pane_rotate_command");
+    }
+
+    #[gpui::test]
+    fn pane_rotate_command(cx: &mut gpui::TestAppContext) {
+        use crate::layout::Axis;
+        use serde_json::json;
+        if !running_alone("pane_rotate_command") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "unused", "", json!({
+            "id": "root", "type": "block", "content": { "tab": "active" }
+        }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.model.add_space("sp1", "", "/tmp", crate::model::Tab::new("tb2", "", "q1", "u1"));
+            this.model.split("q1", Axis::Row, "q2", "u2");
+            this.model.add_tab("sp1", crate::model::Tab::new("tb1", "", "p1", "t1"));
+            this.model.split("p1", Axis::Row, "p2", "t2");
+            this.model.split("p2", Axis::Column, "p3", "t3");
+            this.model.split("p3", Axis::Column, "p4", "t4");
+            this.documents.get_mut("").unwrap().available = true;
+            let order = |this: &super::AppWindow, pane: &str| -> Vec<String> {
+                let root = &this.model.tab_of(pane).unwrap().root;
+                root.parent_of(pane).unwrap().children().iter().map(|n| n.id.clone()).collect()
+            };
+
+            assert_eq!(this.run_as("pane.rotate", json!({"direction": "next"}), false, window, cx), json!({"ok": true}));
+            assert_eq!(order(this, "p2"), ["p4", "p2", "p3"]);
+            assert_eq!(this.model.focused_pane().as_deref(), Some("p4"));
+            assert_eq!(this.run_as("pane.rotate", json!({"direction": "prev", "pane": "q1"}), false, window, cx), json!({"ok": true}));
+            assert_eq!(order(this, "q1"), ["q2", "q1"]);
+            assert_eq!(order(this, "p2"), ["p4", "p2", "p3"]);
+
+            let trees = |this: &super::AppWindow| ["tb1", "tb2"].map(|id| this.model.tab(id).unwrap().root.clone());
+            let before = trees(this);
+            let error = |reply: serde_json::Value| reply["error"].as_str().unwrap_or_default().to_owned();
+            for (args, expected) in [
+                (json!({"direction": "left"}), "pane.rotate direction is \"next\" or \"prev\", not \"left\""),
+                (json!({}), "pane.rotate needs direction"),
+                (json!({"direction": "next", "pane": "nope"}), "no pane \"nope\""),
+                (json!({"direction": "next", "pane": "p1"}), "cannot rotate a split that holds another split"),
+            ] {
+                assert_eq!(error(this.run_as("pane.rotate", args.clone(), false, window, cx)), expected, "{args}");
+                assert_eq!(trees(this), before, "{args}");
+            }
+            let local = this.documents.get_mut("").unwrap();
+            (local.available, local.error) = (false, None);
+            let reply = this.run_as("pane.rotate", json!({"direction": "next"}), false, window, cx);
+            assert_eq!(error(reply), "This machine's layout is unavailable. Try again when it reconnects.");
+            assert_eq!(trees(this), before);
+        }));
+    }
+
+    #[test]
     fn pane_ring_follows_keyboard_focus() {
         in_own_process("pane_ring_focus");
     }
@@ -5550,13 +5623,21 @@ export default class Probe extends View {
     }
 
     #[test]
+    fn rotation_direction_is_next_or_prev() {
+        assert_eq!(super::rotation_direction("next"), Ok(super::Rotation::Next));
+        assert_eq!(super::rotation_direction("prev"), Ok(super::Rotation::Prev));
+        assert_eq!(super::rotation_direction("left"), Err("pane.rotate direction is \"next\" or \"prev\", not \"left\"".to_owned()));
+        assert_eq!(super::rotation_direction(""), Err("pane.rotate direction is \"next\" or \"prev\", not \"\"".to_owned()));
+    }
+
+    #[test]
     fn composition_commands_never_default_to_a_source_pane() {
         use serde_json::json;
-        for name in ["pane.split", "pane.close", "pane.zoom", "pane.go", "pane.swap", "terminal.show"] {
+        for name in ["pane.split", "pane.close", "pane.zoom", "pane.go", "pane.swap", "pane.rotate", "terminal.show"] {
             assert!(super::needs_model_pane(name, &json!({})), "{name}");
             assert!(super::needs_model_pane(name, &json!({"pane": null})), "{name}");
         }
-        for name in ["pane.split", "pane.close", "pane.zoom", "terminal.show"] {
+        for name in ["pane.split", "pane.close", "pane.zoom", "pane.rotate", "terminal.show"] {
             assert!(!super::needs_model_pane(name, &json!({"pane": "explicit-pane"})), "{name}");
         }
         for name in ["terminal.open", "terminal.keep"] {
