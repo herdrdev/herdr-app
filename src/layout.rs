@@ -901,4 +901,16 @@ mod tests {
         let ids: Vec<_> = n.walk().iter().map(|c| c.id.clone()).collect();
         assert_eq!(ids, ["r", "a", "inner", "b", "c", "d"]);
     }
+
+    #[test]
+    fn equalizing_keeps_stack_children_sizes_and_reaches_splits_inside_them() {
+        let mut split = Node::container("split", Axis::Row, vec![term("a"), term("b")]);
+        split.size = Some(Size::Px { px: 200.0 });
+        let mut n = Node::new("s", Kind::Stack { children: vec![split, term("c")], active: None, header: None });
+        n.find_mut("a").unwrap().size = Some(Size::Weight { weight: 3.0 });
+        n.find_mut("b").unwrap().size = Some(Size::Px { px: 40.0 });
+        n.equalize();
+        assert_eq!(n.find("split").unwrap().size, Some(Size::Px { px: 200.0 }), "a stack child is not a split share");
+        assert_eq!((n.find("a").unwrap().size, n.find("b").unwrap().size), (None, None));
+    }
 }
