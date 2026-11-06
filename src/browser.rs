@@ -2,6 +2,10 @@
 mod policy;
 #[cfg(target_os = "linux")]
 mod linux;
+#[cfg(windows)]
+mod windows;
+#[cfg(windows)]
+use windows::create;
 
 use gpui::{HitboxId, HitboxBehavior, AnyElement, App, Bounds, IntoElement, ParentElement, Pixels, Styled, Window, WindowId, canvas, div};
 use gpui_shell::{ArgumentDescriptor, ArgumentSchema, ComponentArgument, ComponentDataValue, ComponentDescriptor, ComponentMaterializer, ComponentPayload, ComponentRegistry, ConstructorDescriptor, FrozenComponentRegistry, MaterializeRequest, StateDescriptor, StateMethodDescriptor, COMPONENT_REGISTRY_API_VERSION};
@@ -18,7 +22,10 @@ struct Browser {
     native: Option<wry::WebView>,
     error: Option<String>,
     hitbox: Option<HitboxId>,
+    bounds: Option<wry::Rect>,
     visible: bool,
+    #[cfg(windows)]
+    creating: bool,
 }
 
 impl Drop for Browser {
@@ -29,16 +36,27 @@ impl Drop for Browser {
     }
 }
 
+#[cfg(not(windows))]
+fn create(state: &State, window: &mut Window, cx: &mut App) {
+    let mut browser = state.borrow_mut();
+    if let Err(error) = browser.create(window, cx) { browser.error = Some(error.to_string()); }
+}
+
 impl Browser {
-    fn create(&mut self, window: &mut Window, cx: &mut App) -> anyhow::Result<()> {
-        if self.native.is_some() || self.error.is_some() { return Ok(()); }
-        let builder = wry::WebViewBuilder::new()
-            .with_url(&self.url)
+    fn builder(url: &str) -> wry::WebViewBuilder<'static> {
+        wry::WebViewBuilder::new()
+            .with_url(url)
             .with_visible(false)
             .with_navigation_handler(|url| policy::allows_navigation(&url))
             // No popups, downloads, custom protocols, initialization scripts or native IPC.
             .with_new_window_req_handler(|_, _| wry::NewWindowResponse::Deny)
-            .with_download_started_handler(|_, _| false);
+            .with_download_started_handler(|_, _| false)
+    }
+
+    #[cfg(not(windows))]
+    fn create(&mut self, window: &mut Window, cx: &mut App) -> anyhow::Result<()> {
+        if self.native.is_some() || self.error.is_some() { return Ok(()); }
+        let builder = Self::builder(&self.url);
         #[cfg(target_os = "linux")]
         let view = linux::build(builder, window, cx)?;
         #[cfg(not(target_os = "linux"))]
@@ -52,7 +70,6 @@ impl Browser {
 
     fn layout(&mut self, bounds: Bounds<Pixels>, window: &mut Window) {
         self.hitbox = Some(window.insert_hitbox(bounds, HitboxBehavior::Normal).id);
-        let Some(view) = &self.native else { return };
         // GTK expects physical pixels. WebView2 and WKWebView use logical coordinates.
         let x = f64::from(f32::from(bounds.origin.x));
         let y = f64::from(f32::from(bounds.origin.y));
@@ -70,6 +87,10 @@ impl Browser {
                 size: wry::dpi::LogicalSize::new(width, height).into(),
             }
         };
+        // Creation may still be pending on Windows. Keep the latest requested
+        // rectangle even when this canvas is cached before the native view arrives.
+        self.bounds = Some(rect);
+        let Some(view) = &self.native else { return };
         if let Err(error) = view.set_bounds(rect) {
             self.error = Some(error.to_string());
         }
@@ -78,9 +99,16 @@ impl Browser {
     fn show(&mut self, window: &Window, overlay: bool) {
         let hitbox = self.hitbox.and_then(|id| window.prepainted_hitbox(id));
         let unclipped = hitbox.is_some_and(|hitbox| {
-            policy::is_unclipped(&hitbox.bounds, &hitbox.content_mask.bounds)
+            // WKWebView keeps a floating-point logical frame. Windows/GTK
+            // children use integer device pixels, like GPUI's rendered mask.
+            if cfg!(target_os = "macos") {
+                policy::is_unclipped(&hitbox.bounds, &hitbox.content_mask.bounds)
+            } else {
+                policy::is_unclipped_at_scale(&hitbox.bounds, &hitbox.content_mask.bounds, window.scale_factor())
+            }
         });
         let show = policy::should_show(hitbox.is_some(), unclipped, overlay) && self.error.is_none();
+        tracing::trace!(geometry = ?hitbox.map(|hitbox| (hitbox.bounds, hitbox.content_mask.bounds)), overlay, unclipped, show, visible = self.visible, "native browser visibility");
         if show == self.visible { return; }
         if let Some(view) = &self.native {
             if !show {
@@ -118,8 +146,7 @@ impl ComponentMaterializer for BrowserElement {
         let argument = request.payload().downcast_ref::<ComponentArgument>().unwrap().clone();
         let state = request.with_state::<State, _>(&argument, Clone::clone)?;
         request.with_window_app(|window, cx| {
-            let mut browser = state.borrow_mut();
-            if let Err(error) = browser.create(window, cx) { browser.error = Some(error.to_string()); }
+            create(&state, window, cx);
             Ok(())
         })?;
         let message = state.borrow().error.clone().unwrap_or_else(|| "Browser hidden while its surface is clipped or covered.".into());
@@ -137,7 +164,8 @@ pub fn components() -> FrozenComponentRegistry {
         |args, window, _| {
             let ComponentArgument::String(url) = &args[0] else { unreachable!() };
             if !policy::allows_navigation(url) { return Err("Expected an HTTP(S) URL without credentials".into()); }
-            let state = Rc::new(RefCell::new(Browser { window: window.window_handle().window_id(), url: url.clone(), native: None, error: None, hitbox: None, visible: false }));
+            let state = Rc::new(RefCell::new(Browser { window: window.window_handle().window_id(), url: url.clone(), native: None, error: None, hitbox: None, bounds: None, visible: false,
+                #[cfg(windows)] creating: false }));
             VIEWS.with_borrow_mut(|views| views.push(Rc::downgrade(&state)));
             Ok(Box::new(state))
         },
