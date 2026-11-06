@@ -18,8 +18,6 @@ mod place;
 mod persist;
 #[cfg(target_os = "macos")]
 mod macos;
-#[cfg(target_os = "macos")]
-mod macos_check;
 mod mods;
 mod mod_files;
 mod process_cwd;
@@ -78,8 +76,6 @@ fn attach_console() {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
-    #[cfg(target_os = "macos")]
-    macos_check::startup(&args);
     #[cfg(windows)]
     if args.len() > 1 {
         attach_console();
