@@ -531,7 +531,7 @@ impl AppWindow {
             pane_history: Vec::new(),
             window_active: true,
             system_dark: is_dark(window.appearance()),
-            file_events: crate::files::watch(&mods::app_dir()),
+            file_events: crate::files::watch(&mods::app_dir(), #[cfg(test)] cx.background_executor().clone()),
             polls: 0,
             update_ready: None,
             update_dismissed: None,
