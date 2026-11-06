@@ -5539,6 +5539,50 @@ mod tests {
     }
 
     #[test]
+    fn equalizing_panes_needs_the_target_tabs_machine() {
+        in_own_process("equalize_needs_document");
+    }
+
+    /// The target tab's machine decides, not the focused one's: here only the
+    /// focused space's layout document is available.
+    #[gpui::test]
+    fn equalize_needs_document(cx: &mut gpui::TestAppContext) {
+        use super::{Axis, Node, Span};
+        use serde_json::json;
+        if !running_alone("equalize_needs_document") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "unused", "", json!({
+            "id": "root", "type": "block", "content": { "tab": "active" }
+        }));
+        let uneven = |tab: &str| {
+            let mut t = crate::model::Tab::new(tab, "", &format!("{tab}-a"), &format!("t-{tab}-a"));
+            let mut b = crate::model::pane(&format!("{tab}-b"), &format!("t-{tab}-b"));
+            b.size = Some(Span::Px { px: 50.0 });
+            t.root = Node::container(tab, Axis::Row, vec![crate::model::pane(&format!("{tab}-a"), &format!("t-{tab}-a")), b]);
+            t
+        };
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.documents.get_mut("").unwrap().available = true;
+            this.documents.insert("vps".into(), Default::default());
+            this.model.add_space("remote", "", "/srv", uneven("far"));
+            this.model.space_mut("remote").unwrap().machine = Some("vps".into());
+            this.model.add_space("local", "", "/tmp", uneven("near"));
+            this.model.select_tab("near");
+            this.sync(window, cx);
+            let before = this.model.tab("far").unwrap().root.clone();
+
+            let reply = this.run_as("pane.equalize", json!({ "tab": "far" }), false, window, cx);
+            assert_eq!(reply, json!({ "error": "This machine's layout is unavailable. Try again when it reconnects." }));
+            assert_eq!(this.model.tab("far").unwrap().root, before, "a refused tab changes nothing");
+
+            this.model.select_tab("far");
+            assert_eq!(this.run_as("pane.equalize", json!({ "tab": "near" }), false, window, cx), json!({ "ok": true }));
+            assert!(this.model.tab("near").unwrap().root.walk().iter().skip(1).all(|n| n.size.is_none()));
+        }));
+    }
+
+    #[test]
     fn pane_ring_follows_keyboard_focus() {
         in_own_process("pane_ring_focus");
     }
