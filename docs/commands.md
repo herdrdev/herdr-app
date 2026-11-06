@@ -271,8 +271,8 @@ Rotate the panes of the split that holds a pane (default: the focused one): "nex
 
 | Argument | Required |
 |---|---|
-| `pane` | no |
 | `direction` | yes |
+| `pane` | no |
 
 ## `terminal.peek`
 
