@@ -10,7 +10,7 @@ Herdr is a desktop app for terminals and coding agents. Keep work in spaces, see
 curl -fsSL https://releases.herdr.dev/app/install.sh | sh
 ```
 
-Linux needs a desktop session and a working Vulkan driver. macOS builds are available for Apple Silicon; Intel Mac users can [build from source](#build-from-source). Linux builds are x86-64 and ARM64.
+Linux needs a desktop session, a working Vulkan driver and WebKitGTK 4.1 (`libwebkit2gtk-4.1-0` on Debian/Ubuntu). macOS builds are available for Apple Silicon; Intel Mac users can [build from source](#build-from-source). Linux builds are x86-64 and ARM64.
 
 The installer adds Herdr to your apps and puts the command in `~/.local/bin`.
 Add that folder to your PATH if the installer asks.

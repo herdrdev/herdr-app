@@ -7,9 +7,10 @@ protocols are unchanged.
 
 ## Build and install
 
-Use the upstream [build requirements](../README.md#build-from-source), plus
-WebKitGTK 4.1 and GTK 3 development packages on Linux. Windows needs the WebView2
-runtime. The browser uses the system webview; it does not bundle Chromium.
+Use the [build requirements](../README.md#build-from-source) and install the
+[Linux runtime dependencies](../README.md#linux-and-macos) when running a Linux
+binary. Windows needs the WebView2 runtime. The browser uses the system webview;
+it does not bundle Chromium.
 
 Build and install with `just install`. Quit and reopen the app yourself to use the
 new binary. Installing a build must not stop the core or other people's agents.
