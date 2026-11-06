@@ -330,6 +330,7 @@ layout's look and a block can differ:
   brings its own fonts.
   JetBrains Mono, Geist Mono and Geist ship with Herdr; any installed font
   works (a terminal font the machine lacks falls back to JetBrains Mono).
+  A family without an italic face is slanted synthetically, as Ghostty does.
   A layout brings its own fonts: `.ttf`/`.otf` files in a mod's `fonts/`
   folder (or the home's `fonts/`) load at start and on the next look change,
   so a layout and its mod folder travel together (Herdr 98's do: its pixel
