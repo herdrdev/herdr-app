@@ -5387,6 +5387,8 @@ mod tests {
         };
         cx.update(|window, cx| view.update(cx, |this, cx| {
             this.documents.get_mut("").unwrap().available = true;
+            assert_eq!(this.run_as("pane.equalize", json!({}), false, window, cx), json!({ "error": "no tab to equalize" }));
+
             this.model.add_space("sp1", "", "/tmp", uneven("tb1"));
             this.model.add_tab("sp1", uneven("tb2"));
             this.model.select_tab("tb1");
