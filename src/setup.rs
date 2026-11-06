@@ -29,6 +29,7 @@ const CORE_PLACE: &str = if cfg!(windows) { r"%LOCALAPPDATA%\Programs\herdr-core
 /// What's missing before the main window can open.
 pub enum Need {
     Install,
+    Connect(String),
     Fix(Mismatch),
 }
 
@@ -75,7 +76,10 @@ impl Setup {
                     self.state = State::Ready;
                 }
             },
-            Err(e) => self.state = State::Failed(format!("herdr-core is there but didn't start: {e:#}")),
+            Err(e) => {
+                self.need = Need::Connect(format!("{e:#}"));
+                self.state = State::Ready;
+            }
         }
         cx.notify();
     }
@@ -140,6 +144,11 @@ impl Setup {
                 "herdr-core runs your terminals and agents, and keeps them alive when this window closes. Herdr couldn't find it on this computer.".into(),
                 format!("Install it for me puts it in {CORE_PLACE} (with hc), like its own installer: {CORE_INSTALL}"),
             ),
+            Need::Connect(error) => (
+                "Herdr can't connect to herdr-core".into(),
+                error.clone(),
+                "Once you've resolved this, try again.".into(),
+            ),
             Need::Fix(Mismatch::TooOld { have, need }) => (
                 "Herdr needs a newer herdr-core".into(),
                 format!("Yours is {have}; this Herdr needs {need} or newer. Updating keeps your terminals running."),
@@ -185,6 +194,7 @@ impl Render for Setup {
                 .gap(px(10.0))
                 .child(button("install", "Install it for me", true).when(!busy, |d| d.on_click(cx.listener(|this, _, w, cx| this.install(w, cx)))))
                 .child(button("choose", "I have it somewhere…", false).when(!busy, |d| d.on_click(cx.listener(|this, _, w, cx| this.choose(w, cx))))),
+            Need::Connect(_) => div().child(button("retry", "Retry", true).on_click(cx.listener(|this, _, w, cx| this.start(w, cx)))),
             Need::Fix(Mismatch::Newer { .. }) => div()
                 .flex()
                 .gap(px(10.0))
