@@ -9,6 +9,7 @@ mod floats;
 mod movable;
 mod pane_drag;
 mod pane_size;
+mod popout;
 mod titlebar;
 
 use crate::layout::{Axis, Background as Paint, Content, Fit, HeaderContent, Kind, Line, Node, PaneFrame, Size as Span};
@@ -814,6 +815,13 @@ impl AppWindow {
         self.publish(cx);
         for t in self.terms.values() {
             t.view.update(cx, |v, cx| v.reattach(core.clone(), cx));
+        }
+        let popouts = cx
+            .try_global::<popout::Popouts>()
+            .map(|p| p.0.values().cloned().collect::<Vec<_>>())
+            .unwrap_or_default();
+        for h in popouts {
+            let _ = h.update(cx, |this, _, cx| this.reattach(&core, cx));
         }
         cx.notify();
     }
@@ -2545,13 +2553,21 @@ impl AppWindow {
         }
         if !self.live.contains_key(addr) { return Err(format!("no running terminal {addr:?}")); }
         if self.changing_terminals.contains(addr) { return Err("This terminal already has a pane change in progress.".into()); }
-        let space = self.model.active_space().map(|p| p.id.clone()).ok_or("no space to keep it in")?;
-        let machine = self.machine_of(&space);
-        if addr.split_once('/').map(|(m, _)| m) != machine.as_deref() {
-            return Err("A terminal's pane must stay on its own machine.".into());
-        }
-        self.require_document(machine.as_deref())?;
-        let target = matches!(place, "right" | "down").then(|| self.model.focused_pane()).flatten();
+        let machine = addr.split_once('/').map(|(m, _)| m);
+        // The active space keeps it when it's on the terminal's machine; with
+        // none of its own open (a pop-out's Return can be all that's left
+        // after its park closed the last one), keep makes a space for it.
+        let space = match self.model.active_space() {
+            Some(p) if self.machine_of(&p.id).as_deref() == machine => p.id.clone(),
+            _ => self.model.fresh_id_on("sp", machine),
+        };
+        self.require_document(machine)?;
+        let target = matches!(place, "right" | "down")
+            .then(|| self.model.focused_pane())
+            .flatten()
+            .filter(|p| {
+                self.model.space(&space).is_some_and(|s| s.tabs.iter().any(|t| t.root.find(p).is_some()))
+            });
         let ctx = target.as_deref().and_then(|p| self.model.tab_of(p)).map(|t| t.id.clone())
             .unwrap_or_else(|| self.model.fresh_id_on("tb", machine.as_deref()));
         let pane = self.model.fresh_id_on("p", machine.as_deref());
@@ -2616,22 +2632,43 @@ impl AppWindow {
         match change {
             TerminalChange::Keep { space, tab, pane, name, target, axis } => {
                 if !self.live.contains_key(&address) { return; }
-                if self.model.space(&space).is_none() {
-                    if let Err(error) = self.park_terminal(&address, window, cx) {
-                        tracing::error!("cannot undo pane placement into closed space: {error}");
-                    }
-                    return;
-                }
                 if self.model.pane_of(&address).is_none() {
-                    let destination = target.filter(|p| self.model.tab_of(p).is_some_and(|t| t.id == tab))
-                        .or_else(|| self.model.tab(&tab).and_then(|t| t.root.panes().first().map(|p| p.id.clone())));
-                    if let Some(target) = destination {
-                        self.model.split(&target, axis, &pane, &address);
+                    if self.model.space(&space).is_none() {
+                        // The space closed while the change was out, or keep
+                        // made a fresh id: it comes back around this terminal,
+                        // with the ids and name the reply promised.
+                        let folder = self
+                            .cwds
+                            .get(&address)
+                            .cloned()
+                            .or_else(|| {
+                                self.live
+                                    .get(&address)
+                                    .and_then(|r| {
+                                        r.get("foreground").and_then(|f| f.get("cwd")).or_else(|| r.get("cwd"))
+                                    })
+                                    .and_then(Value::as_str)
+                                    .map(str::to_owned)
+                            })
+                            .unwrap_or_else(|| mods::home().to_string_lossy().into_owned());
+                        self.model.add_space(&space, "", &folder, Tab::new(&tab, &name, &pane, &address));
+                        if let Some(s) = self.model.space_mut(&space) {
+                            s.machine = address.split_once('/').map(|(m, _)| m.to_owned());
+                        }
                     } else {
-                        self.model.add_tab(&space, Tab::new(&tab, &name, &pane, &address));
+                        let destination = target.filter(|p| self.model.tab_of(p).is_some_and(|t| t.id == tab))
+                            .or_else(|| self.model.tab(&tab).and_then(|t| t.root.panes().first().map(|p| p.id.clone())));
+                        if let Some(target) = destination {
+                            self.model.split(&target, axis, &pane, &address);
+                        } else {
+                            self.model.add_tab(&space, Tab::new(&tab, &name, &pane, &address));
+                        }
                     }
                 }
                 if let Some(pane) = self.model.pane_of(&address) { self.model.focus_pane(&pane); }
+                // A pane again: its pop-out, if any, is a second view that
+                // would fight this one over the terminal's size.
+                popout::close(&address, cx);
             }
             TerminalChange::Park => {
                 if let Some(pane) = self.model.pane_of(&address) { self.model.remove_pane(&pane); }
@@ -3111,6 +3148,11 @@ impl AppWindow {
                     return self.fail(format!("no running terminal {t:?}"));
                 }
                 self.peek_terminal(t, window, cx);
+            }
+            "terminal.popout" => {
+                let t = Self::arg(a, "terminal").unwrap_or_default();
+                let r = self.popout_terminal(t, window, cx);
+                self.answer(r);
             }
             "terminal.show" => {
                 let pane = Self::owned(a, "pane").or_else(|| self.model.focused_pane());
@@ -3607,6 +3649,34 @@ impl AppWindow {
             self.publish_shown_copies();
         }
         cx.notify();
+    }
+
+    /// Opens `address` in its own OS window, detached from its pane: the pane
+    /// is parked (removed, labels and keep cleared; the terminal keeps
+    /// running), and the pop-out window is its only view.
+    fn popout_terminal(&mut self, address: &str, window: &mut Window, cx: &mut Context<Self>) -> Result<Value, String> {
+        let Some(rec) = self.live.get(address) else {
+            return Err(format!("no running terminal {address:?}"));
+        };
+        let title = rec.get("title").and_then(Value::as_str).unwrap_or_default().to_owned();
+        let Some(tx) = mods::request_sender() else {
+            return Err("the window is not taking requests".into());
+        };
+        // One without a pane (a sub-agent, an already-detached terminal) has
+        // nothing to park.
+        let had_pane = self.model.pane_of(address).is_some();
+        if had_pane {
+            self.park_terminal(address, window, cx)?;
+        }
+        if let Err(e) = popout::open(&self.core, address, &title, tx, cx) {
+            // No window: give the pane back rather than detach the terminal
+            // with nothing showing it.
+            if had_pane {
+                let _ = self.keep_terminal(address, "tab", window, cx);
+            }
+            return Err(e);
+        }
+        Ok(json!({ "ok": true }))
     }
 
     fn peek_terminal(&mut self, address: &str, window: &mut Window, cx: &mut Context<Self>) {

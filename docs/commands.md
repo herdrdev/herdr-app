@@ -273,6 +273,14 @@ Peek at a running terminal over the tab, with keep-as-tab and close controls.
 |---|---|
 | `terminal` | yes |
 
+## `terminal.popout`
+
+Show a running terminal in its own OS window, detached: the pane is removed and the terminal keeps running. The window's Return button (or terminal.keep) gives it a pane back; closing the window leaves it detached.
+
+| Argument | Required |
+|---|---|
+| `terminal` | yes |
+
 ## `terminal.show`
 
 Show a terminal in a pane for now, in place of its own (no terminal: back).

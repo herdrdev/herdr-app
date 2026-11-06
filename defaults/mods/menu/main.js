@@ -48,6 +48,7 @@ function items(p, git) {
               toProgram
                 ? ["Use Herdr right-click menu", "terminal.right_click", { terminal: term.address, to: "menu" }]
                 : ["Send right-clicks to pane", "terminal.right_click", { terminal: term.address, to: "program" }],
+              ["Pop out window", "terminal.popout", { terminal: term.address }],
             ]
           : []),
         ...(parent ? [[`Send back to ${parent.name || parent.address}`, "terminal.park", { terminal: term.address }]] : []),

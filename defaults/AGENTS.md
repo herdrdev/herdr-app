@@ -243,8 +243,10 @@ Properties any node can have:
   Unlike `resizable`, it inherits: the nearest explicit ancestor wins, through the
   tab tree and then the layout's tab block and its ancestors. Root `"movable": false`
   opts the layout out. Composition terminal blocks aren't tab panes and never drag.
-  Center drop swaps panes; an edge drop places beside it. Escape or dropping outside
-  another pane cancels. Zoomed tabs and one-pane tabs don't drag. The grip appears
+  Center drop swaps panes; an edge drop places beside it. Escape,
+  or a drop inside the window but outside another pane, cancels; a drop outside the
+  window detaches the pane's terminal into its own OS window (`terminal.popout`).
+  A lone pane drags too — out of the window is its only drop. Zoomed tabs don't drag. The grip appears
   on top-edge hover, regardless of the header's position or presence. Only the grip
   starts dragging; header mods don't need drag handlers. `panes()` exposes `movable`.
 - `floating`: blocks over this node (below).
@@ -578,6 +580,7 @@ The main ones:
   starting directory for tabs and right/down splits, with or without `argv`), `terminal.kill {terminal}`,
   `terminal.keep {terminal, place?}`, `terminal.park {terminal}`,
   `terminal.peek {terminal}` (peek over the tab, with keep-as-tab and close),
+  `terminal.popout {terminal}` (its own OS window, detached: the pane is removed and the terminal keeps running; its Return button, or `terminal.keep`, puts it back as a tab),
   `terminal.show {terminal?, pane?}`, `terminal.search` (screen and scrollback;
   find bar state stays with that terminal), `terminal.copy`, `terminal.paste` (copied
   files, such as Finder's or a clipboard manager's image, as if dropped; an image
