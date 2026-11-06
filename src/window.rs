@@ -3016,15 +3016,29 @@ impl AppWindow {
                 self.agent = self.model.address_of(&p);
                 self.swapped.remove(&p);
             }
-            "pane.go" | "pane.swap" => {
+            "pane.go" => {
                 let dir = Self::arg(a, "direction").unwrap_or_default();
                 if !matches!(dir, "left" | "right" | "up" | "down") {
                     return self.fail(format!("{name} direction is left, right, up or down, not {dir:?}"));
                 }
-                if name == "pane.go" {
-                    return self.go(dir, window, cx);
+                return self.go(dir, window, cx);
+            }
+            "pane.swap" => {
+                let by = match swap_by(a) {
+                    Ok(by) => by,
+                    Err(e) => return self.fail(e),
+                };
+                let explicit = Self::arg(a, "pane").is_some();
+                let pane = Self::owned(a, "pane").or_else(|| self.model.focused_pane());
+                let r = match (by, pane) {
+                    (SwapBy::Direction(dir), Some(pane)) => self.swap_pane(&pane, explicit, dir),
+                    (SwapBy::Direction(_), None) => Ok(()),
+                    (SwapBy::Target(target), Some(pane)) => self.model.swap_panes(&pane, target),
+                    (SwapBy::Target(_), None) => Err("no pane to swap".into()),
+                };
+                if let Err(e) = r {
+                    return self.fail(e);
                 }
-                self.swap_pane(dir);
             }
             // ---- terminals
             "terminal.open" => {
@@ -3457,15 +3471,9 @@ impl AppWindow {
         self.copies.get(id).and_then(|c| self.folders.get(&c.inst.name)).is_some_and(|f| f.hint.focusable)
     }
 
-    /// Swaps the focused pane with its neighbor in a direction.
-    fn swap_pane(&mut self, dir: &str) {
-        if let Some(from) = self.model.focused_pane()
-            && let Some(to) = self.neighbor(&from, dir, false)
-            && let Some(ctx) = self.model.tab_of(&from).map(|c| c.id.clone())
-            && let Some(c) = self.model.tab_mut(&ctx)
-        {
-            c.root.swap(&from, &to);
-        }
+    fn swap_pane(&mut self, from: &str, explicit: bool, dir: &str) -> Result<(), String> {
+        let neighbor = self.neighbor(from, dir, false);
+        swap_with_neighbor(&mut self.model, from, explicit, neighbor)
     }
 
     // ---- overlays ----------------------------------------------------------
@@ -4564,10 +4572,46 @@ fn overlay_terminal_block<'a>(overlays: &'a [Overlay], id: Option<&str>) -> Opti
     overlays.iter().filter_map(|o| o.layout.as_ref()).find_map(|l| l.visible_blocks().into_iter().find(|n| n.id == id && n.terminal().is_some()))
 }
 
+#[derive(Debug, PartialEq)]
+enum SwapBy<'a> {
+    Direction(&'a str),
+    Target(&'a str),
+}
+
+fn swap_with_neighbor(model: &mut Model, from: &str, explicit: bool, neighbor: Option<String>) -> Result<(), String> {
+    if explicit && model.tab_of(from).and_then(|c| c.root.find(from)).is_none_or(|n| !n.is_pane()) {
+        return Err(format!("no pane {from:?}"));
+    }
+    let shown = model.active_tab().is_some_and(|c| c.shown().visible_blocks().iter().any(|n| n.id == from));
+    if explicit && !shown {
+        return Err(format!("pane.swap direction needs a pane in the shown tab, not {from:?}"));
+    }
+    if let Some(to) = neighbor
+        && let Some(ctx) = model.tab_of(from).map(|c| c.id.clone())
+        && let Some(c) = model.tab_mut(&ctx)
+    {
+        c.root.swap(from, &to);
+    }
+    Ok(())
+}
+
+fn swap_by(args: &Value) -> Result<SwapBy<'_>, String> {
+    if args.get("direction").is_some_and(|d| !d.is_string() && !d.is_null()) {
+        return Err("pane.swap direction must be a string (or null to omit it)".into());
+    }
+    match (AppWindow::arg(args, "direction"), AppWindow::arg(args, "target")) {
+        (Some(_), Some(_)) => Err("pane.swap takes direction or target, not both".into()),
+        (None, None) => Err("pane.swap needs direction or target".into()),
+        (None, Some(target)) => Ok(SwapBy::Target(target)),
+        (Some(dir @ ("left" | "right" | "up" | "down")), None) => Ok(SwapBy::Direction(dir)),
+        (Some(dir), None) => Err(format!("pane.swap direction is left, right, up or down, not {dir:?}")),
+    }
+}
+
 fn needs_model_pane(name: &str, args: &Value) -> bool {
     match name {
-        "pane.split" | "pane.close" | "pane.zoom" | "terminal.show" => AppWindow::arg(args, "pane").is_none(),
-        "pane.go" | "pane.swap" => true,
+        "pane.split" | "pane.close" | "pane.zoom" | "pane.swap" | "terminal.show" => AppWindow::arg(args, "pane").is_none(),
+        "pane.go" => true,
         "terminal.open" | "terminal.keep" => matches!(AppWindow::arg(args, "place"), Some("right" | "down")),
         _ => false,
     }
@@ -5550,15 +5594,83 @@ export default class Probe extends View {
     }
 
     #[test]
+    fn pane_swap_refuses_a_direction_that_is_not_a_string() {
+        use serde_json::json;
+        for direction in [json!(false), json!(1), json!(["left"]), json!({"to": "left"})] {
+            for args in [json!({"direction": direction}), json!({"direction": direction, "target": "p2"})] {
+                assert_eq!(super::swap_by(&args), Err("pane.swap direction must be a string (or null to omit it)".into()), "{args}");
+            }
+        }
+        assert_eq!(super::swap_by(&json!({"direction": null, "target": "p2"})), Ok(super::SwapBy::Target("p2")));
+    }
+
+    fn swap_model() -> super::Model {
+        use crate::layout::Axis;
+        let mut m = super::Model::default();
+        m.add_space("s1", "api", "/src", super::Tab::new("c1", "", "x1", "t1"));
+        m.split("x1", Axis::Row, "x2", "t2");
+        m.add_tab("s1", super::Tab::new("c2", "", "x3", "t3"));
+        m.select_tab("c1");
+        m.focus_pane("x1");
+        m
+    }
+
+    fn swap_state(m: &super::Model) -> (Vec<String>, Vec<String>, Option<String>) {
+        let order = |tab: &str| m.tab(tab).unwrap().root.panes().iter().map(|n| n.id.clone()).collect();
+        (order("c1"), order("c2"), m.focused_pane())
+    }
+
+    #[test]
+    fn an_explicit_pane_swaps_with_its_neighbor_in_the_shown_tab() {
+        let mut m = swap_model();
+        assert_eq!(super::swap_with_neighbor(&mut m, "x2", true, Some("x1".into())), Ok(()));
+        assert_eq!(swap_state(&m), (vec!["x2".into(), "x1".into()], vec!["x3".into()], Some("x1".into())));
+        assert_eq!(super::swap_with_neighbor(&mut m, "x2", true, None), Ok(()));
+        assert_eq!(swap_state(&m).0, ["x2", "x1"]);
+    }
+
+    #[test]
+    fn an_explicit_pane_swap_by_direction_refuses_panes_it_cannot_place() {
+        let mut m = swap_model();
+        let container = m.tab("c1").unwrap().root.id.clone();
+        let before = swap_state(&m);
+        let cases = [
+            ("nope".to_owned(), "no pane \"nope\"".to_owned()),
+            (container.clone(), format!("no pane {container:?}")),
+            ("x3".to_owned(), "pane.swap direction needs a pane in the shown tab, not \"x3\"".to_owned()),
+        ];
+        for (pane, error) in cases {
+            assert_eq!(super::swap_with_neighbor(&mut m, &pane, true, Some("x1".into())), Err(error), "{pane}");
+            assert_eq!(swap_state(&m), before, "{pane}");
+        }
+    }
+
+    #[test]
+    fn pane_swap_takes_exactly_one_of_direction_or_target() {
+        use super::SwapBy;
+        use serde_json::json;
+        for dir in ["left", "right", "up", "down"] {
+            assert_eq!(super::swap_by(&json!({"direction": dir})), Ok(SwapBy::Direction(dir)));
+        }
+        assert_eq!(super::swap_by(&json!({"target": "p2", "pane": "p1"})), Ok(SwapBy::Target("p2")));
+        assert_eq!(super::swap_by(&json!({"direction": "left", "target": "p2"})), Err("pane.swap takes direction or target, not both".into()));
+        for neither in [json!({}), json!(null), json!({"pane": "p1"}), json!({"direction": null, "target": null})] {
+            assert_eq!(super::swap_by(&neither), Err("pane.swap needs direction or target".into()), "{neither}");
+        }
+        assert_eq!(super::swap_by(&json!({"direction": "sideways"})), Err("pane.swap direction is left, right, up or down, not \"sideways\"".into()));
+    }
+
+    #[test]
     fn composition_commands_never_default_to_a_source_pane() {
         use serde_json::json;
         for name in ["pane.split", "pane.close", "pane.zoom", "pane.go", "pane.swap", "terminal.show"] {
             assert!(super::needs_model_pane(name, &json!({})), "{name}");
             assert!(super::needs_model_pane(name, &json!({"pane": null})), "{name}");
         }
-        for name in ["pane.split", "pane.close", "pane.zoom", "terminal.show"] {
+        for name in ["pane.split", "pane.close", "pane.zoom", "pane.swap", "terminal.show"] {
             assert!(!super::needs_model_pane(name, &json!({"pane": "explicit-pane"})), "{name}");
         }
+        assert!(super::needs_model_pane("pane.go", &json!({"pane": "explicit-pane"})));
         for name in ["terminal.open", "terminal.keep"] {
             for place in ["right", "down"] {
                 assert!(super::needs_model_pane(name, &json!({"place": place})), "{name} {place}");
