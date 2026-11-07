@@ -212,3 +212,11 @@ for (const sort of ["priority", "grouped"]) test(`${sort}: a kept sub-agent keep
   expect(pinned.texts.get("ag-t3")).toContain("t3");
   expect(keptRender(sort, { kept: [{ address: "t3", parent: "t9" }] }).ids).toContain("ag-t3"); // its parent ended
 });
+
+test("records read like sub-agents without a pane", () => {
+  const recordStatus = new Function("View", "localStorage", "props", "run", `${source}; return recordStatus;`)(class {}, {}, () => ({}), () => {});
+  expect(recordStatus({ records: { a: { state: "working" }, b: { state: "error" }, c: { state: "done" }, d: { state: "blocked" } } })).toEqual(["working", "blocked", "idle", "blocked"]);
+  expect(recordStatus({ records: {} })).toEqual([]);
+  expect(recordStatus({})).toEqual([]);
+  expect(recordStatus(undefined)).toEqual([]);
+});

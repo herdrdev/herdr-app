@@ -998,3 +998,19 @@ fn status_bar_shows_the_real_palette_key(cx: &mut TestAppContext) {
     assert!(tree.contains("commands"), "unbound hint still offers commands: {tree}");
     assert!(!tree.contains("Shift P"), "unbound hint must not invent a key: {tree}");
 }
+
+#[gpui::test]
+fn agents_count_records_as_work(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    // t2 ended its turn (idle) and reports a background sub-agent as an OSC 7501 record.
+    for (record, section, spinners) in [("working", "sec-2", 2), ("done", "sec-1", 1)] {
+        let mut values = fixture(true, props(), updates("current", "current"));
+        values.get_mut("agents").unwrap()[1]["status"] = json!("idle");
+        values.get_mut("terminals").unwrap()[1]["status"] = json!("idle");
+        values.get_mut("terminals").unwrap()[1]["records"] = json!({"a1": {"app": "pi", "state": record, "title": "Sub-agent"}});
+        let tree = describe_with_values(cx, &staged, "mods/agents", values, None).unwrap();
+        assert!(tree.contains(section), "{record}: t2 belongs in {section}: {tree}");
+        assert_eq!(tree.matches("spinner.svg").count(), spinners, "{record}: {tree}");
+    }
+}
