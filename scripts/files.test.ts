@@ -6,6 +6,8 @@ import { join } from "node:path";
 const source = await readFile(new URL("../defaults/mods/files/main.js", import.meta.url), "utf8");
 const directorySource = source.slice(source.indexOf("async function directory("), source.indexOf("\nexport default class"));
 const loadDirectory = (exec: Function, platform: string) => new Function("exec", "window", `${directorySource}; return directory;`)(exec, () => ({ platform }));
+// The mod's other helpers live in the same slice; load one by name.
+const loadFn = (name: string, exec: Function, platform: string) => new Function("exec", "window", `${directorySource}; return ${name};`)(exec, () => ({ platform }));
 const directory = loadDirectory(
   async (command: string, args: string[]) => {
     // Hidden like the app's spawns: a visible console would give PowerShell UTF-8 and hide code page bugs.
@@ -86,6 +88,92 @@ test("Files preserves Unicode names when listing and expanding folders", async (
   } finally {
     await rm(root, { recursive: true, force: true });
   }
+});
+
+test("Files names the file manager per platform", () => {
+  const ok = async () => ({ code: 0, stdout: "", stderr: "" });
+  expect(loadFn("manager", ok, "macos")(null)).toBe("Finder");
+  expect(loadFn("manager", ok, "windows")(null)).toBe("File Explorer");
+  expect(loadFn("manager", ok, "linux")(null)).toBe("File Manager");
+  expect(loadFn("manager", ok, "macos")("vps")).toBe("File Manager");
+});
+
+test("Files opens and reveals in the platform file manager", async () => {
+  const calls: { command: string; args: string[]; on?: string }[] = [];
+  const recording = (platform: string) => loadFn("showInManager", async (command: string, args: string[], options?: { on: string }) => {
+    calls.push({ command, args, on: options?.on });
+    return { code: 0, stdout: "", stderr: "" };
+  }, platform);
+  await recording("macos")("/tmp/report v2.pdf", false, null);
+  await recording("macos")("/tmp/项目", true, null);
+  expect(calls).toEqual([
+    { command: "open", args: ["-R", "/tmp/report v2.pdf"], on: null },
+    { command: "open", args: ["/tmp/项目"], on: null },
+  ]);
+  calls.length = 0;
+  await recording("windows")("C:/Users/me/报告/final.txt", false, null);
+  await recording("windows")("C:/Users/me/报告", true, null);
+  expect(calls).toEqual([
+    { command: "explorer", args: ["/select,C:\\Users\\me\\报告\\final.txt"], on: null },
+    { command: "explorer", args: ["C:\\Users\\me\\报告"], on: null },
+  ]);
+  calls.length = 0;
+  await recording("linux")("/home/me/a b/c.txt", false, null);
+  await recording("linux")("/home/me/a b", true, null);
+  expect(calls).toEqual([
+    { command: "sh", args: [
+      "-c",
+      'dbus-send --print-reply --dest=org.freedesktop.FileManager1 /org/freedesktop/FileManager1 org.freedesktop.FileManager1.ShowItems array:string:"$2" "" >/dev/null 2>&1 || xdg-open "$(dirname -- "$1")"',
+      "files", "/home/me/a b/c.txt", "file:///home/me/a%20b/c.txt",
+    ], on: null },
+    { command: "sh", args: ["-c", 'xdg-open "$1"', "files", "/home/me/a b", "file:///home/me/a%20b"], on: null },
+  ]);
+});
+
+test("Files reveals on a remote Windows machine with explorer", async () => {
+  const calls: { command: string; args: string[]; on?: string }[] = [];
+  const reveal = loadFn("showInManager", async (command: string, args: string[], options?: { on: string }) => {
+    calls.push({ command, args, on: options?.on });
+    if (command === "sh") throw new Error("herdr.exec: cannot start sh: program not found");
+    return { code: 1, stdout: "", stderr: "" }; // explorer exits 1 even when it opened
+  }, "linux");
+  await reveal("C:/repos/x", true, "winvm");
+  await reveal("C:/repos/x/README.md", false, "winvm");
+  expect(calls).toEqual([
+    { command: "sh", args: expect.any(Array), on: "winvm" },
+    { command: "explorer", args: ["C:\\repos\\x"], on: "winvm" },
+    { command: "sh", args: expect.any(Array), on: "winvm" },
+    { command: "explorer", args: ["/select,C:\\repos\\x\\README.md"], on: "winvm" },
+  ]);
+});
+
+test("Files surfaces file manager and clipboard failures", async () => {
+  const lost = loadFn("showInManager", async () => { throw new Error("connection lost"); }, "linux");
+  await expect(lost("/x", true, "vps")).rejects.toThrow("connection lost");
+  const refused = loadFn("showInManager", async () => ({ code: 1, stdout: "", stderr: "open: no such file" }), "macos");
+  await expect(refused("/gone", false, null)).rejects.toThrow("open: no such file");
+  const noClipboard = loadFn("copyText", async () => ({ code: 127, stdout: "", stderr: "xclip: not found" }), "linux");
+  await expect(noClipboard("/x.txt")).rejects.toThrow("No clipboard program found");
+});
+
+test("Files copies paths to the local clipboard per platform", async () => {
+  const calls: { command: string; args: string[]; platform: string }[] = [];
+  const copy = (platform: string) => loadFn("copyText", async (command: string, args: string[]) => {
+    calls.push({ command, args, platform });
+    return { code: 0, stdout: "", stderr: "" };
+  }, platform);
+  await copy("macos")("/tmp/a b/rollers.txt");
+  await copy("windows")("C:/Users/O’Brien ‘x’/f.txt");
+  await copy("linux")("/tmp/x.txt");
+  expect(calls).toEqual([
+    { command: "sh", args: ["-c", 'printf %s "$1" | pbcopy', "copy", "/tmp/a b/rollers.txt"], platform: "macos" },
+    { command: "powershell", args: ["-NoProfile", "-Command", "Set-Clipboard -Value 'C:/Users/O’’Brien ‘‘x’’/f.txt'"], platform: "windows" },
+    { command: "sh", args: [
+      "-c",
+      'printf %s "$1" | wl-copy 2>/dev/null && exit\nprintf %s "$1" | xclip -selection clipboard -rmlastnl 2>/dev/null && exit\nprintf %s "$1" | xsel --clipboard --input 2>/dev/null',
+      "copy", "/tmp/x.txt",
+    ], platform: "linux" },
+  ]);
 });
 
 test("Files follows directory links one level at a time", async () => {
