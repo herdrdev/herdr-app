@@ -154,6 +154,11 @@ the highlighted line shows where it will land.
   `working`, `blocked`, `idle`, or `done` = finished while the user wasn't
   looking (it becomes `idle` once they look). A space's and a tab's
   status is the most urgent of its agents: blocked > done > working > idle.
+  Terminals started by the app export `HERDR_ENV=1`, locally and remotely.
+  OpenCode uses this to disable its internal shared tabs in `auto` mode,
+  so each terminal reports its selected session instead of other tabs' work.
+  An explicit OpenCode `tabs.mode: "on"` overrides that default. Existing
+  terminals keep their launch environment until reopened.
 - **Sub-agents** are terminals an agent started with `hc run`: the core
   records the starter as `parent` (see `terminals()`). They belong to their
   parent's tab without a pane; the `agents` mod shows them,
