@@ -151,6 +151,9 @@ jobs:
       - name: Install Bun
         if: matrix.platform == 'linux-x86_64'
         run: curl -fsSL https://bun.sh/install | bash -s "bun-v1.4.4"
+      - name: Check browser targets
+        if: matrix.platform == 'linux-x86_64'
+        run: ~/.bun/bin/bun test tests/linear_target.test.mjs tests/github_target.test.mjs
       - name: Install Node for Pi integration checks
         if: matrix.platform == 'linux-x86_64'
         uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
