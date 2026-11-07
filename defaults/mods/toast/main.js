@@ -16,6 +16,7 @@ export default class Toast extends View {
       .id("toast")
       .size_full()
       .px(18)
+      .py(12)
       .gap(12)
       .items_center()
       .bg(t.popover)
@@ -30,8 +31,8 @@ export default class Toast extends View {
         v_flex()
           .flex_1()
           .overflow_hidden()
-          .child(div().truncate().font_semibold().text_size(13).text_color(t.foreground).child(p.title ?? ""))
-          .when(Boolean(p.body), (el) => el.child(div().truncate().text_size(12).text_color(t.muted).child(p.body ?? ""))),
+          .child(div().font_semibold().text_size(13).text_color(t.foreground).child(p.title ?? ""))
+          .when(Boolean(p.body), (el) => el.child(div().text_size(12).text_color(t.muted).child(p.body ?? ""))),
       );
   }
 }

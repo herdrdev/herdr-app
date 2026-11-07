@@ -3565,7 +3565,7 @@ impl AppWindow {
         props["overlay"] = json!(id);
         let num = |k: &str, d: f32| spec.get(k).and_then(Value::as_f64).map_or(d, |v| v as f32);
         let size = match kind {
-            OverlayKind::Toast => size(340.0, num("height", 72.0)),
+            OverlayKind::Toast => size(340.0, num("height", toast_height(&props))),
             // No size: as big as its content (0 = unset).
             OverlayKind::Window => size(num("width", 0.0), num("height", 0.0)),
             // No height: as tall as the content, up to most of the window.
@@ -4672,6 +4672,24 @@ fn home() -> String {
     mods::home().to_string_lossy().into_owned()
 }
 
+/// How tall a toast is: the `toast` mod wraps its title and body, and toasts
+/// stack by this height, so it is counted from the text (characters per line
+/// at the mod's font sizes in its 340 px box, each `\n` a new line), never
+/// below the one-line toast. Lines are gpui's default height for 13 and 12 px
+/// text (1.618 times the size, rounded), plus the mod's padding and the frame's border.
+fn toast_height(notification: &Value) -> f32 {
+    let lines = |key: &str, per_line: usize| {
+        let text = notification.get(key).and_then(Value::as_str).unwrap_or_default();
+        if text.is_empty() {
+            return 0.0;
+        }
+
+        text.split('\n').map(|line| line.chars().count().div_ceil(per_line).max(1)).sum::<usize>() as f32
+    };
+
+    (24.0 + 2.0 + lines("title", 34) * 21.0 + lines("body", 40) * 19.0).max(72.0)
+}
+
 fn mod_overlay(dir: &std::path::Path) -> Value {
     let meta: Value = std::fs::read_to_string(dir.join("mod.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
     meta.get("overlay").cloned().filter(Value::is_object).unwrap_or_else(|| json!({}))
@@ -5749,6 +5767,21 @@ export default class SystemToast extends View {
         root.toast = Some("system-toast".into());
         let restored: super::Node = serde_json::from_value(serde_json::to_value(&root).unwrap()).unwrap();
         assert_eq!(restored.toast.as_deref(), Some("system-toast"));
+    }
+
+    #[test]
+    fn toast_grows_with_its_text() {
+        assert_eq!(super::toast_height(&serde_json::json!({"title": "Saved"})), 72.0);
+
+        let error = "cannot start a terminal: terminal.run: cannot start \"/bin/bash\": No such file or directory (os error 2) (check the program name and cwd)";
+        assert_eq!(super::toast_height(&serde_json::json!({"title": "tab.new failed", "body": error})), 26.0 + 21.0 + 4.0 * 19.0);
+
+        let failure = "Exit code 3\nfirst line\nsecond line";
+        assert_eq!(super::toast_height(&serde_json::json!({"title": "Terminal failed to start", "body": failure})), 26.0 + 21.0 + 3.0 * 19.0);
+
+        let title = "x".repeat(80);
+        assert_eq!(super::toast_height(&serde_json::json!({"title": title})), 26.0 + 3.0 * 21.0);
+        assert_eq!(super::toast_height(&serde_json::json!({"title": "x", "body": "a\n\nb"})), 26.0 + 21.0 + 3.0 * 19.0);
     }
 
     #[test]
