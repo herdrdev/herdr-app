@@ -2,7 +2,8 @@ import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-a
 import { release } from "node:os";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
-import { closeReview, openReview, resolveApp, runJson } from "./open.mjs";
+import { randomUUID } from "node:crypto";
+import { importFresh } from "./fresh-import.mjs";
 import { createReviewRouter } from "./router.mjs";
 import { startBrowserIpc } from "./ipc.mjs";
 
@@ -20,7 +21,13 @@ export default function herdrPlannotator(pi: ExtensionAPI): void {
   };
 
   pi.on("session_start", async (_event, ctx) => {
-    if (process.env.HERDR_PLANNOTATOR_MODE === "disabled" || prior.get("PLANNOTATOR_BROWSER") !== undefined) return;
+    const browser = prior.get("PLANNOTATOR_BROWSER");
+    const ownHook = browser === helper && prior.get("HERDR_PLANNOTATOR_SOCKET") !== undefined;
+    if (process.env.HERDR_PLANNOTATOR_MODE === "disabled" || (browser !== undefined && !ownHook)) return;
+    // Node retains native ESM imports across Pi reloads; load the current browser hook.
+    const module = new URL("./open.mjs", import.meta.url);
+    module.searchParams.set("load", randomUUID());
+    const { closeReview, openReview, resolveApp, runJson } = await importFresh(module.href) as typeof import("./open.mjs");
     context = ctx;
     const session = ctx.sessionManager.getSessionId();
     router = createReviewRouter(session, { open: openReview, close: closeReview });
