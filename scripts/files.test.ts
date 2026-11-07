@@ -16,6 +16,15 @@ const directory = loadDirectory(
   process.platform === "win32" ? "windows" : process.platform,
 );
 
+test("Files and Changes keep the text size usable whatever shared.json holds", async () => {
+  const changes = await readFile(new URL("../defaults/mods/changes/main.js", import.meta.url), "utf8");
+  for (const [text, name] of [[source, "previewSize"], [changes, "diffSize"]]) {
+    const size = new Function(`${text.match(new RegExp(`^const ${name} = .*$`, "m"))![0]}; return ${name};`)();
+    expect([undefined, null, "big", "14", NaN, Infinity].map(size)).toEqual([12, 12, 12, 12, 12, 12]);
+    expect([-3, 7, 8, 14.5, 32, 33].map(size)).toEqual([8, 8, 8, 14.5, 32, 32]);
+  }
+});
+
 test("Files retries a remote Windows directory with PowerShell on that machine", async () => {
   const calls: { command: string; args: string[]; on: string }[] = [];
   const list = loadDirectory(async (command: string, args: string[], options: { on: string }) => {
