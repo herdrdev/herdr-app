@@ -49,6 +49,8 @@ pub enum TerminalEvent {
     Ended,
     /// Right-click where the program doesn't take the mouse: the pane menu.
     ContextMenu(Point<Pixels>),
+    /// Copy on select put text on the clipboard.
+    Copied,
 }
 
 /// What the canvas closures need, shared outside the entity so prepaint can resize.
@@ -967,7 +969,9 @@ impl TerminalView {
         drop(g);
         if matches!(step, Select::Release) {
             // Copy on select, as in Herdr.
-            self.copy(cx);
+            if self.copy(cx) {
+                cx.emit(TerminalEvent::Copied);
+            }
         }
         cx.notify();
     }
