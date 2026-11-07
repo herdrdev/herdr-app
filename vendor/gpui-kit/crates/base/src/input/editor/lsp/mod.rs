@@ -102,6 +102,14 @@ impl Lsp {
         self.update_semantic_tokens(text, window, cx);
     }
 
+    /// Replace the cached semantic tokens, for a host that pushes them rather
+    /// than installing a provider.
+    pub fn set_semantic_tokens(&mut self, mut tokens: Vec<(lsp_types::Range, SharedString)>) {
+        // HERDR: painting binary-searches this list by start position.
+        tokens.sort_by_key(|(range, _)| range.start);
+        self.semantic_tokens = tokens;
+    }
+
     /// Reset all LSP states.
     pub(crate) fn reset(&mut self) {
         self.document_colors.clear();
@@ -114,19 +122,49 @@ impl Lsp {
 }
 
 impl InputBaseState<EditorMode> {
-    /// Apply a list of [`lsp_types::TextEdit`] to mutate the text.
+    /// Apply [`lsp_types::TextEdit`]s as one undo step.
+    ///
+    /// Every range is read against the document before any of the edits, as
+    /// LSP defines them, and the caret stays on the text it was on. Returns
+    /// false and changes nothing if the ranges overlap, which LSP forbids.
     pub fn apply_lsp_edits(
         &mut self,
-        text_edits: &Vec<lsp_types::TextEdit>,
+        text_edits: &[lsp_types::TextEdit],
         window: &mut Window,
         cx: &mut Context<Self>,
-    ) {
-        for edit in text_edits {
-            let start = self.text.position_to_offset(&edit.range.start);
-            let end = self.text.position_to_offset(&edit.range.end);
-
-            let range_utf16 = self.range_to_utf16(&(start..end));
-            self.replace_text_in_range_silent(Some(range_utf16), &edit.new_text, window, cx);
+    ) -> bool {
+        if text_edits.is_empty() || !self.is_editable() {
+            return true;
         }
+        // HERDR: reversed because the batch puts each later edit at an equal
+        // start in front of the earlier one, and LSP wants array order.
+        let edits: Vec<(std::ops::Range<usize>, String)> = text_edits
+            .iter()
+            .rev()
+            .map(|edit| {
+                let start = self.text.position_to_offset(&edit.range.start);
+                let end = self.text.position_to_offset(&edit.range.end);
+                (start.min(end)..start.max(end), edit.new_text.clone())
+            })
+            .collect();
+        let mut ranges: Vec<_> = edits.iter().map(|(range, _)| range.clone()).collect();
+        ranges.sort_by_key(|range| range.start);
+        if ranges.windows(2).any(|pair| pair[0].end > pair[1].start) {
+            return false;
+        }
+
+        let cursor = self.cursor();
+        let caret = edits.iter().fold(cursor as isize, |caret, (range, text)| {
+            if range.end <= cursor {
+                caret + text.len() as isize - range.len() as isize
+            } else if range.start < cursor {
+                caret + (range.start + text.len()) as isize - cursor as isize
+            } else {
+                caret
+            }
+        }) as usize;
+        self.replace_text_in_ranges(&edits, window, cx);
+        self.set_selected_range(caret..caret, cx);
+        true
     }
 }

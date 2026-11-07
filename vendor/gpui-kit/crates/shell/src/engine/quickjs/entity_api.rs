@@ -10,7 +10,7 @@
 //! `Object<'js>` cannot unify the two elided lifetimes, so the handle object
 //! itself is assembled in the JS prelude, exactly as element objects are.
 
-use std::rc::Weak;
+use std::rc::{Rc, Weak};
 
 use gpui::ScrollStrategy;
 use gpui_base::NumberStep;
@@ -22,6 +22,7 @@ use rquickjs::{
 };
 
 use crate::{
+    editor_language::{LanguageHandlers, ScriptHandler},
     entities::{EntityHandle, InputEventName, OtpEventName, SliderEventName},
     scope::{self, ScopePhase},
     spec::{Component, SpecId},
@@ -38,6 +39,71 @@ use super::{InputCallbackOwner, ShellRuntime};
 /// inside `FromJs`, where both are still the same lifetime. The same reason the
 /// engine's `Arguments` type exists.
 pub(super) struct Handler(pub(super) Persistent<Function<'static>>);
+
+// HERDR: the handlers a code editor's `lsp` option names, saved while there is a
+// context to save them with.
+struct ScriptLanguage {
+    functions: Vec<(&'static str, Persistent<Function<'static>>)>,
+    completion_triggers: Vec<String>,
+    owner: Rc<InputCallbackOwner>,
+}
+
+impl<'js> FromJs<'js> for ScriptLanguage {
+    fn from_js(ctx: &Ctx<'js>, value: Value<'js>) -> JsResult<Self> {
+        let object = Object::from_js(ctx, value)?;
+        let mut functions = Vec::new();
+        for name in [
+            "hover",
+            "completion",
+            "completion_accepted",
+            "definition",
+            "code_actions",
+            "perform_code_action",
+            "show_document",
+        ] {
+            if let Some(function) = object.get::<_, Option<Function<'js>>>(name)? {
+                functions.push((name, Persistent::save(ctx, function)));
+            }
+        }
+        Ok(Self {
+            functions,
+            completion_triggers: object.get("completion_triggers")?,
+            owner: Rc::new(InputCallbackOwner {
+                policy: scope::policy(),
+                application: scope::current_application_generation(),
+                view: scope::current_view().map(|view| view.downgrade()),
+            }),
+        })
+    }
+}
+
+impl ScriptLanguage {
+    fn into_handlers(self, runtime: &Weak<ShellRuntime>) -> LanguageHandlers {
+        let mut handlers = LanguageHandlers {
+            completion_triggers: self.completion_triggers,
+            ..Default::default()
+        };
+        for (name, function) in self.functions {
+            let runtime = runtime.clone();
+            let owner = self.owner.clone();
+            let handler = ScriptHandler::new(name, move |json, reply, window, cx| {
+                if let Some(runtime) = runtime.upgrade() {
+                    runtime.dispatch_editor_call(&function, &owner, json, Some(reply), window, cx);
+                }
+            });
+            *match name {
+                "hover" => &mut handlers.hover,
+                "completion" => &mut handlers.completion,
+                "completion_accepted" => &mut handlers.completion_accepted,
+                "definition" => &mut handlers.definition,
+                "code_actions" => &mut handlers.code_actions,
+                "perform_code_action" => &mut handlers.perform_code_action,
+                _ => &mut handlers.show_document,
+            } = Some(handler);
+        }
+        handlers
+    }
+}
 
 impl<'js> FromJs<'js> for Handler {
     fn from_js(ctx: &Ctx<'js>, value: Value<'js>) -> JsResult<Self> {
@@ -455,8 +521,21 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
                         .map_err(|error| Exception::throw_type(&ctx, &error.to_string()))?;
                     colors.insert(name.clone(), color);
                 }
+                let diagnostic = |severity: &str| {
+                    colors
+                        .get(&format!("diagnostic.{severity}"))
+                        .copied()
+                        .unwrap_or_default()
+                };
+                let diagnostics = gpui_base::input::DiagnosticColors {
+                    error: diagnostic("error"),
+                    warning: diagnostic("warning"),
+                    info: diagnostic("info"),
+                    hint: diagnostic("hint"),
+                };
                 let style = gpui_base::input::InputEditorStyle {
                     highlight_styles: std::sync::Arc::new(crate::syntax::SyntaxStyles(colors)),
+                    diagnostics,
                     ..Default::default()
                 };
                 let store = alive(&ctx, &create_editor)?;
@@ -493,6 +572,95 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
         Func::from(
             move |ctx: Ctx<'_>, handle: EntityHandle, value: String| -> JsResult<()> {
                 write_value(&ctx, &live_editor(&ctx, &write_editor, handle)?, value)
+            },
+        ),
+    )?;
+
+    let read_language = runtime.clone();
+    globals.set(
+        "__editor_read",
+        Func::from(
+            move |ctx: Ctx<'_>, handle: EntityHandle, what: String| -> JsResult<String> {
+                let state = live_editor(&ctx, &read_language, handle)?;
+                scope::with_current_app(|cx| {
+                    let state = state.read(cx);
+                    match what.as_str() {
+                        "selection" => crate::editor_language::selection_json(state),
+                        _ => crate::editor_language::cursor_json(state),
+                    }
+                })
+                .ok_or_else(|| needs_call(&ctx, "cursor()"))
+            },
+        ),
+    )?;
+
+    let write_language = runtime.clone();
+    globals.set(
+        "__editor_write",
+        Func::from(
+            move |ctx: Ctx<'_>, handle: EntityHandle, what: String, json: String| -> JsResult<()> {
+                let state = live_editor(&ctx, &write_language, handle)?;
+                editor_write(&ctx, &state, &what, &json)
+            },
+        ),
+    )?;
+
+    let language_runtime = runtime.clone();
+    globals.set(
+        "__editor_set_language",
+        Func::from(
+            move |ctx: Ctx<'_>, handle: EntityHandle, language: ScriptLanguage| -> JsResult<()> {
+                let store = alive(&ctx, &language_runtime)?;
+                let language = language.into_handlers(&language_runtime);
+                scope::with_current_app(|cx| {
+                    store.entities().set_editor_language(handle, language, cx)
+                })
+                .ok_or_else(|| needs_call(&ctx, "EditorState.new(...)"))?
+                .then_some(())
+                .ok_or_else(|| Exception::throw_type(&ctx, "this editor state has been released"))
+            },
+        ),
+    )?;
+
+    let subscribe_cursor = runtime.clone();
+    globals.set(
+        "__editor_on_cursor",
+        Func::from(
+            move |ctx: Ctx<'_>, handle: EntityHandle, handler: Handler| -> JsResult<bool> {
+                let saved = handler.0;
+                let dispatch = subscribe_cursor.clone();
+                let store = alive(&ctx, &subscribe_cursor)?;
+                let owner = InputCallbackOwner {
+                    policy: scope::policy(),
+                    application: scope::current_application_generation(),
+                    view: scope::current_view().map(|view| view.downgrade()),
+                };
+                let subscribed = scope::with_current(|window, cx| {
+                    store.entities().subscribe_editor_cursor(
+                        handle,
+                        window,
+                        cx,
+                        move |json, window, cx| {
+                            let Some(runtime) = dispatch.upgrade() else {
+                                return;
+                            };
+                            runtime.dispatch_editor_call(&saved, &owner, json, None, window, cx);
+                        },
+                    )
+                })
+                .ok_or_else(|| {
+                    Exception::throw_type(
+                        &ctx,
+                        "on(...) needs a live host call; subscribe from init() or an event handler",
+                    )
+                })?;
+                if !subscribed {
+                    return Err(Exception::throw_type(
+                        &ctx,
+                        "this editor state has been released",
+                    ));
+                }
+                Ok(true)
             },
         ),
     )?;
@@ -1282,6 +1450,76 @@ fn live_editor(
         .entities()
         .editor(handle)
         .ok_or_else(|| Exception::throw_type(ctx, "this editor state has been released"))
+}
+
+// HERDR: the writes all take LSP's JSON and have nothing to return.
+fn editor_write(
+    ctx: &Ctx<'_>,
+    state: &gpui::Entity<gpui_base::input::EditorState>,
+    what: &str,
+    json: &str,
+) -> JsResult<()> {
+    fn parse<'a, T: serde::Deserialize<'a>>(
+        ctx: &Ctx<'_>,
+        what: &str,
+        json: &'a str,
+    ) -> JsResult<T> {
+        serde_json::from_str(json)
+            .map_err(|error| Exception::throw_type(ctx, &format!("{what}: {error}")))
+    }
+    use crate::editor_language::{select_range, set_diagnostics, set_semantic_tokens};
+    let mut overlapping = false;
+    let done = match what {
+        "set_selection" => {
+            let range = parse(ctx, what, json)?;
+            scope::with_current_app(|cx| {
+                state.update(cx, |state, cx| select_range(state, range, cx));
+            })
+        }
+        "set_diagnostics" => {
+            let list = parse(ctx, what, json)?;
+            scope::with_current_app(|cx| {
+                state.update(cx, |state, cx| {
+                    set_diagnostics(state, list);
+                    cx.notify();
+                });
+            })
+        }
+        "set_semantic_tokens" => {
+            let list = parse(ctx, what, json)?;
+            scope::with_current_app(|cx| {
+                state.update(cx, |state, cx| {
+                    set_semantic_tokens(state, list);
+                    cx.notify();
+                });
+            })
+        }
+        "apply_edits" => {
+            let edits: Vec<gpui_base::input::lsp_types::TextEdit> = parse(ctx, what, json)?;
+            scope::with_current(|window, cx| {
+                state.update(cx, |state, cx| {
+                    overlapping = !state.apply_lsp_edits(&edits, window, cx);
+                });
+            })
+        }
+        "show_completions" => scope::with_current(|window, cx| {
+            state.update(cx, |state, cx| state.show_completions(window, cx));
+        }),
+        "show_code_actions" => scope::with_current(|window, cx| {
+            state.update(cx, |state, cx| state.handle_code_action_trigger(window, cx));
+        }),
+        "go_to_definition" => scope::with_current(|window, cx| {
+            state.update(cx, |state, cx| state.go_to_definition_at_cursor(window, cx));
+        }),
+        "focus" => scope::with_current(|window, cx| {
+            state.update(cx, |state, cx| state.focus(window, cx));
+        }),
+        _ => None,
+    };
+    if overlapping {
+        return Err(Exception::throw_type(ctx, "apply_edits: the edits overlap"));
+    }
+    done.ok_or_else(|| needs_call(ctx, what))
 }
 
 fn live_textarea(

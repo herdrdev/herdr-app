@@ -940,6 +940,20 @@ language, value, readonly, font_family: settings().font_family, syntax: {
 keyword: theme().ansi5, ... } })` + `Editor.new(state)` is a code view (readonly)
 or editor with syntax highlighting, line numbers and folding. A viewer opens
 beside the shell as a pane: `pane.split {direction, mod, props: { file }}`.
+A code editor's language features are the mod's to answer, in LSP's own JSON, so
+a language server's responses pass through unchanged:
+`EditorState.new({ lsp: { hover, completion, completion_triggers,
+completion_accepted, definition, code_actions, perform_code_action, show_document } })`.
+Each handler is `(params, cx)` and returns the answer or a promise of it; `params`
+are the request's without `textDocument`. The editor draws the hover and the menus
+(up, down, enter, tab; ctrl+. or cmd+. for code actions) and follows definitions
+(ctrl- or cmd-click). The state also has `set_diagnostics(list)`,
+`set_semantic_tokens([{ range, type }])`, `apply_edits(edits)`, `cursor()`,
+`selection()`, `set_cursor(position)`, `set_selection(range)`,
+`on("cursor", ({ position, selection }, cx) => …)`, `focus()`, and for your own keys
+`show_completions()`, `show_code_actions()`, `go_to_definition()`. Positions count
+code points, LSP's `utf-32`: ask the server for it in `general.positionEncodings`.
+Don't advertise `snippetSupport`: the editor inserts text as it comes.
 The full surface is in `gpui-kit.d.ts` next to this file.
 
 ### The `herdr` module

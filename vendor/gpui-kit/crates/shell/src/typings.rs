@@ -3141,10 +3141,55 @@ const BASE: &str = r#"  /** A row. */
   export const Textarea: { new: (state: TextareaState) => NativeElement };
 
   // HERDR: built-in source editing and read-only code viewing.
+  /**
+   * A place in the text, with LSP's field names. `character` counts Unicode
+   * code points (LSP's `utf-32` position encoding): ask for it in your server's
+   * `general.positionEncodings`, or lines with emoji will be off under `utf-16`.
+   */
+  export interface EditorPosition { line: number; character: number }
+  export interface EditorRange { start: EditorPosition; end: EditorPosition }
+  /** Answers a code editor's requests with LSP's own JSON, so a server's response passes through unchanged. */
+  export interface EditorLsp {
+    /** `textDocument/hover`, without `textDocument`. The editor draws the hover. */
+    hover?(params: { position: EditorPosition }, cx: Context): Promise<unknown> | unknown;
+    /** `textDocument/completion`, without `textDocument`: items or a list. The editor draws the menu. */
+    completion?(params: { position: EditorPosition; context: unknown }, cx: Context): Promise<unknown> | unknown;
+    /** Besides word characters, what typing opens the menu: a server's `triggerCharacters`. */
+    completion_triggers?: string[];
+    /** After the editor has inserted an item and its `additionalTextEdits`: resolve it or run its `command`. */
+    completion_accepted?(item: unknown, cx: Context): Promise<unknown> | unknown;
+    /** `textDocument/definition`, without `textDocument`. Ctrl/Cmd-click and `go_to_definition()` follow it. */
+    definition?(params: { position: EditorPosition }, cx: Context): Promise<unknown> | unknown;
+    /** `textDocument/codeAction`, without `textDocument`; `context.diagnostics` is filled in. */
+    code_actions?(params: { range: EditorRange; context: { diagnostics: unknown[] } }, cx: Context): Promise<unknown> | unknown;
+    /** Runs what the person picked from `code_actions`, which needs this: apply its `edit` with `apply_edits`, run its `command`. */
+    perform_code_action?(action: unknown, cx: Context): Promise<unknown> | unknown;
+    /** Answers `window/showDocument` for a followed definition. True when the mod showed it itself; otherwise the editor jumps within this document. */
+    show_document?(params: { uri: string; external?: boolean; takeFocus?: boolean; selection?: EditorRange }, cx: Context): Promise<boolean> | boolean;
+  }
   export interface EditorState {
     value(): string;
     /** Programmatic replacement works even in readonly mode. */
     set_value(value: string): void;
+    cursor(): EditorPosition;
+    /** Null when nothing is selected. */
+    selection(): EditorRange | null;
+    /** Moves the caret and scrolls it into view, without taking the keyboard. */
+    set_cursor(position: EditorPosition): void;
+    set_selection(range: EditorRange): void;
+    /** LSP `Diagnostic`s, drawn as underlines with a card on hover. An edit clears them until the next call. Colors: `diagnostic.error` (and `warning`, `info`, `hint`) in `syntax`. */
+    set_diagnostics(list: unknown[]): void;
+    /** Decoded tokens; `type` is looked up in the `syntax` colors. */
+    set_semantic_tokens(list: { range: EditorRange; type: string }[]): void;
+    /** LSP `TextEdit`s, all against the current text, as one undo step. Throws if they overlap. */
+    apply_edits(edits: { range: EditorRange; newText: string }[]): void;
+    show_completions(): void;
+    show_code_actions(): void;
+    go_to_definition(): void;
+    /** Moves the keyboard onto the editor. */
+    focus(): void;
+    /** `cursor` fires when the caret or the selection moves. */
+    on(event: "cursor", handler: (event: { position: EditorPosition; selection: EditorRange | null }, cx: Context) => void): boolean;
     on(event: "change" | "submit" | "focus" | "blur" | "paste_other", handler: (event: InputEvent, cx: Context) => void): boolean;
     release(): boolean;
   }
@@ -3156,6 +3201,7 @@ const BASE: &str = r#"  /** A row. */
       font_family?: string;
       /** Font size in pixels; defaults to the theme's mono_md size. */
       font_size?: number;
+      lsp?: EditorLsp;
       /** Defaults to true. */
       line_numbers?: boolean;
       /** Defaults to true; brace-based fold candidates. */

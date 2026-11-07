@@ -173,6 +173,9 @@ impl InputBaseState<EditorMode> {
         if new_offset < start_offset {
             return;
         }
+        let completion = &mut self.extras.context_menu_content.completion;
+        completion.open = latched.is_some() && completion.was_open;
+        completion.was_open = false;
 
         let query = self
             .text_for_range(
@@ -315,7 +318,9 @@ impl InputBaseState<EditorMode> {
     }
 
     pub(crate) fn hide_context_menu(&mut self, cx: &mut Context<Self>) {
-        self.extras.context_menu_content.completion.open = false;
+        let completion = &mut self.extras.context_menu_content.completion;
+        completion.was_open |= completion.open;
+        completion.open = false;
         self.extras.context_menu_content.code_action.open = false;
         self.extras.context_menu_task = Task::ready(Ok(()));
         cx.notify();
