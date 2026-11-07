@@ -108,7 +108,7 @@ pub fn shell() -> String {
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
 }
 
-fn unix_agent_argv(sh: String, cmd: Vec<String>, login: bool) -> Vec<String> {
+pub(crate) fn unix_agent_argv(sh: String, cmd: Vec<String>, login: bool) -> Vec<String> {
     let fish = std::path::Path::new(&sh).file_name().and_then(|s| s.to_str()) == Some("fish");
     let script = match (fish, login) {
         (true, true) => "command $argv[2..]; exec $argv[1] -li",
@@ -116,7 +116,9 @@ fn unix_agent_argv(sh: String, cmd: Vec<String>, login: bool) -> Vec<String> {
         (false, true) => "\"$@\"; exec \"$0\" -li",
         (false, false) => "\"$@\"; exec \"$0\" -i",
     };
-    let mut run = vec![sh.clone(), if login { "-lic" } else { "-ic" }.into(), script.into(), sh];
+    // The folder's environment (direnv's `.envrc`) loads at a prompt; there is none before the agent.
+    let script = format!("{}{script}", crate::remote_shell::prompt_hooks(&sh));
+    let mut run = vec![sh.clone(), if login { "-lic" } else { "-ic" }.into(), script, sh];
     run.extend(cmd);
     run
 }
@@ -5195,7 +5197,7 @@ mod tests {
                     (false, true) => "\"$@\"; exec \"$0\" -li",
                     (false, false) => "\"$@\"; exec \"$0\" -i",
                 };
-                assert_eq!(run[2], expected);
+                assert_eq!(run[2], format!("{}{expected}", crate::remote_shell::prompt_hooks(sh)));
             }
         }
     }

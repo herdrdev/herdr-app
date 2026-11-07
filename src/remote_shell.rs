@@ -2,28 +2,46 @@
 
 pub fn check(commands: &[String]) -> Vec<String> {
     let posix = "for c; do unalias -- \"$c\" 2>/dev/null; command -v \"$c\" >/dev/null 2>&1 && printf 'herdr-has:%s\\n' \"$c\"; done";
-    in_shell(posix, "for c in $argv[2..]; command -v $c >/dev/null 2>&1; and printf 'herdr-has:%s\\n' $c; end", posix, commands.to_vec())
+    in_shell(posix, "for c in $argv[2..]; command -v $c >/dev/null 2>&1; and printf 'herdr-has:%s\\n' $c; end", posix, false, commands.to_vec())
 }
 
 pub fn launch(command: Vec<String>) -> Vec<String> {
-    in_shell("\"$@\"; exec \"$0\" -li", "command $argv[2..]; exec $argv[1] -li", "\"$@\"; exec \"${SHELL:-sh}\" -i", command)
+    in_shell("\"$@\"; exec \"$0\" -li", "command $argv[2..]; exec $argv[1] -li", "\"$@\"; exec \"${SHELL:-sh}\" -i", true, command)
+}
+
+/// Runs what `shell` runs before each prompt, where direnv, mise and the like
+/// load a folder's environment (`.envrc`). A `-c` shell shows no prompt before
+/// the agent starts, so without this the agent misses that environment.
+pub fn prompt_hooks(shell: &str) -> &'static str {
+    match std::path::Path::new(shell).file_name().and_then(|s| s.to_str()) {
+        Some("zsh") => "for f in $precmd_functions; do \"$f\"; done; ",
+        // A string before bash 5.1, maybe an array after: both expand this way.
+        Some("bash") => "for c in \"${PROMPT_COMMAND[@]}\"; do eval \"$c\"; done; ",
+        Some("fish") => "emit fish_prompt; ",
+        _ => "",
+    }
 }
 
 /// Select the shell there, not the viewer's shell. The core may have started
 /// with only the SSH session's minimal PATH; load login and interactive profiles
 /// before checking or launching. Only our fixed scripts become shell source.
-fn in_shell(posix: &str, fish: &str, fallback: &str, args: Vec<String>) -> Vec<String> {
-    let quote = |s: &str| s.replace('\'', "'\\''");
+/// `hooks`: run its prompt hooks first (`prompt_hooks`).
+fn in_shell(posix: &str, fish: &str, fallback: &str, hooks: bool, args: Vec<String>) -> Vec<String> {
+    let quote = |shell: &str, s: &str| format!("{}{s}", if hooks { prompt_hooks(shell) } else { "" }).replace('\'', "'\\''");
     let script = format!(
         r#"shell=${{SHELL:-/bin/sh}}
 case "${{shell##*/}}" in
   fish) exec "$shell" -lic '{}' "$shell" "$@" ;;
-  sh|bash|zsh|dash|ksh) exec "$shell" -lic '{}' "$shell" "$@" ;;
+  zsh) exec "$shell" -lic '{}' "$shell" "$@" ;;
+  bash) exec "$shell" -lic '{}' "$shell" "$@" ;;
+  sh|dash|ksh) exec "$shell" -lic '{}' "$shell" "$@" ;;
   *) exec sh -c '{}' sh "$@" ;;
 esac"#,
-        quote(fish),
-        quote(posix),
-        quote(fallback),
+        quote("fish", fish),
+        quote("zsh", posix),
+        quote("bash", posix),
+        quote("sh", posix),
+        quote("sh", fallback),
     );
     // Keep the command at argv[4..]: the Windows fallback reads it there when
     // sh is unavailable. Passing it separately also preserves literal arguments.
@@ -51,14 +69,15 @@ mod tests {
             let interactive = "export PATH=\"$HERDR_TEST_BIN:$PATH\"\nprintf 'rc greeting without newline'\nsleep 0.1\nfixture_function() { :; }\nalias missing_agent='printf alias'\n";
             for (file, text) in [
                 (".zprofile", login.to_owned()),
-                (".zshrc", interactive.to_owned()),
+                // Prompt hooks, as direnv installs them.
+                (".zshrc", format!("{interactive}fixture_hook() {{ export HERDR_TEST_HOOK=hooked; }}\nprecmd_functions+=(fixture_hook)\n")),
                 (".bash_profile", format!("{login}. \"$HOME/.bashrc\"\n")),
-                (".bashrc", format!("case $- in *i*) ;; *) return;; esac\n{interactive}")),
+                (".bashrc", format!("case $- in *i*) ;; *) return;; esac\n{interactive}PROMPT_COMMAND='export HERDR_TEST_HOOK=hooked'\n")),
             ] {
                 std::fs::write(dir.join(file), text).unwrap();
             }
             let agent = dir.join("agent bin/fixture_agent");
-            std::fs::write(&agent, "#!/bin/sh\nprintf '<%s>\\n' \"$HERDR_TEST_LOGIN\" \"$@\"\n").unwrap();
+            std::fs::write(&agent, "#!/bin/sh\nprintf '<%s>\\n' \"$HERDR_TEST_LOGIN\" \"$HERDR_TEST_HOOK\" \"$@\"\n").unwrap();
             std::fs::set_permissions(agent, std::fs::Permissions::from_mode(0o755)).unwrap();
             Self(dir)
         }
@@ -113,7 +132,11 @@ mod tests {
         let cmd = ["fixture_agent", "a 'quoted' task; $(not-a-command)\nnext line", ""].map(String::from).to_vec();
         let out = home.run(launch(cmd), Some(shell));
         let stdout = String::from_utf8(out.stdout).unwrap();
-        assert!(stdout.contains("<loaded>\n<a 'quoted' task; $(not-a-command)\nnext line>\n<>\n"), "{stdout:?}: {}", String::from_utf8_lossy(&out.stderr));
+        assert!(stdout.contains("<loaded>\n<hooked>\n<a 'quoted' task; $(not-a-command)\nnext line>\n<>\n"), "{stdout:?}: {}", String::from_utf8_lossy(&out.stderr));
+        // The same shell started on this machine (window::agent_argv).
+        let out = home.run(crate::window::unix_agent_argv(shell.into(), vec!["fixture_agent".into(), "local".into()], true), Some(shell));
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        assert!(stdout.contains("<loaded>\n<hooked>\n<local>\n"), "{stdout:?}: {}", String::from_utf8_lossy(&out.stderr));
     }
 
     #[test]
@@ -175,7 +198,7 @@ mod tests {
         let home = Home::new();
         let agent = home.0.join("agent bin/fixture_agent").to_string_lossy().into_owned();
         let out = home.run(launch(vec![agent, "$(not-a-command); 'literal'".into()]), Some("/bin/bash"));
-        assert!(String::from_utf8(out.stdout).unwrap().contains("<loaded>\n<$(not-a-command); 'literal'>\n"));
+        assert!(String::from_utf8(out.stdout).unwrap().contains("<loaded>\n<hooked>\n<$(not-a-command); 'literal'>\n"));
     }
 
     #[test]
@@ -188,7 +211,7 @@ mod tests {
         let out = home.run(check(&["fixture_agent".into()]), Some(shell));
         assert!(String::from_utf8(out.stdout).unwrap().contains("herdr-has:fixture_agent\n"));
         let out = home.run(launch(vec!["fixture_agent".into(), "literal".into()]), Some(shell));
-        assert!(String::from_utf8(out.stdout).unwrap().contains("<loaded>\n<literal>\n"));
+        assert!(String::from_utf8(out.stdout).unwrap().contains("<loaded>\n<hooked>\n<literal>\n"));
     }
 
     #[cfg(target_os = "macos")]

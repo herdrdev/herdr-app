@@ -48,7 +48,9 @@ New-space keys and clicks follow the focused space's machine. Script commands
 without `--machine` still use this computer; `--machine ''` explicitly chooses it.
 The agent menu checks and starts agents in the remote Unix user's
 login/interactive shell (sh, bash, zsh, dash, ksh or fish), including its
-configured PATH. Other shells keep the sh launcher.
+configured PATH. In bash, zsh and fish, the shell's prompt hooks run before the
+agent (direnv or mise load the folder's environment there). Other shells keep
+the sh launcher.
 `terminal.open --folder /path --place down` starts the split in that folder,
 including when `--argv` supplies a program. Without `--folder`, it follows the
 focused terminal's folder. If an inherited local folder was deleted, new spaces,
