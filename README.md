@@ -81,6 +81,8 @@ A broken edit keeps the last good version and reports the error.
 
 Ctrl+Shift+P shows every command and its key (Cmd+Shift+P on macOS). Change any key in `keys.json`; see [the keys section](defaults/AGENTS.md#keys-keysjson) of the mod guide for the format, including JSON objects for named, typed command arguments.
 
+To show or hide Herdr from any app with one key, add `"hotkey": true` to `settings.json`: Cmd+` on macOS, Ctrl+` on Windows, or name your own key (`"hotkey": "ctrl-alt-space"`). On Linux, bind `herdr-app do app.toggle` in your desktop's keyboard settings.
+
 [Layouts and mods](docs/mods.md) · [Commands](docs/commands.md)
 
 ## Updates and privacy

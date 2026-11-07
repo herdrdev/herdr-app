@@ -873,6 +873,15 @@ impl AppWindow {
                 Ok(p) => {
                     self.person = p;
                     let _ = std::fs::remove_file(file("settings.error"));
+                    match crate::hotkey::set(self.person.hotkey.key()) {
+                        Ok(()) => {
+                            let _ = std::fs::remove_file(file("hotkey.error"));
+                        }
+                        Err(e) => {
+                            tracing::warn!("settings.json hotkey not applied: {e}");
+                            let _ = std::fs::write(file("hotkey.error"), format!("settings.json hotkey was not applied: {e}\n"));
+                        }
+                    }
                 }
                 Err(e) => self.report("settings", &e),
             }
@@ -3413,6 +3422,21 @@ impl AppWindow {
                 cx.quit();
             }
             "window.close" | "window.minimize" | "window.maximize" => return self.window_command(name, window, cx),
+            "app.toggle" => {
+                if window.is_window_active() {
+                    // macOS hides the app (Cmd+H), elsewhere the window
+                    // minimizes; either way the app before has the keys again.
+                    if cfg!(target_os = "macos") {
+                        cx.hide();
+                    } else {
+                        window.minimize_window();
+                    }
+                } else {
+                    cx.activate(true);
+                    window.activate_window();
+                }
+                return;
+            }
             // Hiding apps is macOS's (bound natively there).
             "app.hide" | "app.hide_others" | "app.show_all" => return,
             other => {
@@ -3744,7 +3768,7 @@ impl AppWindow {
         }
         if cmd.get("status").is_some() {
             let round = |v: f32| (v as f64 * 100.0).round() / 100.0;
-            let errors: Vec<String> = ["settings", "keys", "layout", "programs"]
+            let errors: Vec<String> = ["settings", "hotkey", "keys", "layout", "programs"]
                 .iter()
                 .filter_map(|w| std::fs::read_to_string(file(&format!("{w}.error"))).ok())
                 .chain(self.copies.values().filter_map(|c| Some(format!("mod {}: {}", c.inst.name, c.error.as_ref()?))))

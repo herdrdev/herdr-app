@@ -623,7 +623,10 @@ The main ones:
   or replaced and a different core answers there, its sidebar offers Connect:
   explicitly forget the old identity and pair again with the same name and target.
   Other unreachable machines don't offer this.
-- Window: `window.minimize`, `window.maximize` (or back), `window.close`.
+- Window: `window.minimize`, `window.maximize` (or back), `window.close`,
+  `app.toggle` (hide Herdr when it's in front, else bring it there; the
+  `hotkey` setting runs it from any app; another tool's key can run
+  `herdr-app do app.toggle`).
 - macOS: `app.quit`, `app.hide`, `app.hide_others`, `app.show_all`.
 
 When the user runs a command without a required name (a key, a click), Herdr
@@ -715,6 +718,20 @@ What's about the user, never a look:
   Option input on every layout. `"left"` / `"right"` makes only that Option
   key act as Alt; the other types characters. Changes apply immediately, including layout
   switches. Linux and Windows are unchanged.
+- `hotkey`: a system-wide key that shows or hides Herdr from any app
+  (`app.toggle`): `true` uses Cmd+` on macOS and Ctrl+` on Windows, or name
+  a key in keys.json's form, `"ctrl-alt-space"`. Off when absent or `false`.
+  It needs ctrl, alt or cmd (an F key may go alone). On macOS hiding is like
+  Cmd+H, on Windows the window minimizes; either way the app you were in has
+  the keys again. The key is Herdr's in every app while it runs, its own
+  terminals included: Cmd+` is also macOS's key for the next window of an app,
+  Ctrl+` VS Code's terminal; pick another key to keep those. macOS reads keys
+  by their place on a US keyboard. A key that doesn't parse, or one the system
+  refuses (another app holds it), shows in `herdr-app status`; Herdr tries
+  again when settings.json changes. Changes apply live.
+  macOS and Windows only: on Linux, bind `herdr-app do app.toggle` to a key in
+  the desktop's keyboard settings (on Wayland the desktop may only flag the
+  window instead of bringing it to the front).
 - `minimum_contrast`: terminal text contrast ratio, `1` (default) leaves
   program colors unchanged. Set it to `1.6` to enable the previous readability
   adjustment, or another number from `1` to `21`. Text below that ratio is
