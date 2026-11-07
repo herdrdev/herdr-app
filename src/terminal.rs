@@ -1136,6 +1136,16 @@ fn link_mods(m: &Modifiers) -> bool {
     key && !m.alt && !m.shift
 }
 
+/// Dragging with these selects a block, as in Ghostty: Option on macOS,
+/// Ctrl+Alt elsewhere. Shift may be held too, to select over a program that
+/// takes the mouse. libghostty-vt leaves the keys to the app; this is
+/// Ghostty's own rule, `isRectangleSelectState` (its `ctrlOrSuper` is Ctrl
+/// off macOS):
+/// https://github.com/ghostty-org/ghostty/blob/291fd050b9e9c293c8adb6a140742649b7e42d3a/src/surface_mouse.zig#L96-L103
+fn rectangle_mods(m: &Modifiers) -> bool {
+    if cfg!(target_os = "macos") { m.alt } else { m.control && m.alt }
+}
+
 fn local(g: &Grid, p: Point<Pixels>) -> (f32, f32) {
     (f32::from(p.x - g.origin.x).max(0.0), f32::from(p.y - g.origin.y).max(0.0))
 }
@@ -1976,6 +1986,8 @@ impl Render for TerminalView {
                     // The program took the click: Herdr's old selection ends, so a copy can't repeat it.
                     this.clear_selection(cx);
                 } else {
+                    // Set before any drag, autoscroll included, so none uses the last gesture's.
+                    this.grid.borrow_mut().vt.set_rectangle_selection(rectangle_mods(&ev.modifiers));
                     this.start_selection(ev.position, cx);
                 }
             }))
@@ -2035,6 +2047,7 @@ impl Render for TerminalView {
                                     }
                                     if this.selecting {
                                         this.selection_pointer = ev.position;
+                                        this.grid.borrow_mut().vt.set_rectangle_selection(rectangle_mods(&ev.modifiers));
                                         if ev.pressed_button == Some(MouseButton::Left) {
                                             this.select(Select::Drag, ev.position, cx);
                                         } else {
@@ -2784,6 +2797,54 @@ mod tests {
         assert_eq!(lines(841.0, 20.0, 40), 3);
         assert_eq!(lines(-10_000.0, 20.0, 40), -5);
         assert_eq!(lines(10_000.0, 20.0, 40), 5);
+    }
+
+    #[test]
+    fn block_selection_takes_ghostty_s_modifiers_with_or_without_shift() {
+        use gpui::Modifiers;
+        let m = |control, alt, shift, platform| Modifiers { control, alt, shift, platform, function: false };
+        let block = if cfg!(target_os = "macos") { m(false, true, false, false) } else { m(true, true, false, false) };
+        assert!(super::rectangle_mods(&block));
+        assert!(super::rectangle_mods(&Modifiers { shift: true, ..block }), "Shift selects over a program that takes the mouse");
+        assert!(!super::link_mods(&block), "a block drag is no link click");
+        assert!(!super::rectangle_mods(&m(false, false, false, false)));
+        assert!(!super::rectangle_mods(&m(false, false, true, false)));
+        assert_eq!(super::rectangle_mods(&m(false, true, false, true)), cfg!(target_os = "macos"), "Super+Alt is no block off macOS");
+    }
+
+    /// Through the view, as the mouse does it: a block drag, then a plain one.
+    #[gpui::test]
+    fn ctrl_alt_drag_selects_a_block_and_a_plain_drag_lines(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+        struct Root {
+            terminal: Entity<super::TerminalView>,
+        }
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().w(px(400.)).h(px(200.)).child(self.terminal.clone())
+            }
+        }
+        let (root, cx) = cx.add_window_view(|_, cx| Root {
+            terminal: cx.new(|cx| super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 5), cx)),
+        });
+        cx.run_until_parked();
+        let terminal = root.read_with(cx, |root, _| root.terminal.clone());
+        let (origin, cell) = terminal.read_with(cx, |t, _| {
+            let mut g = t.grid.borrow_mut();
+            g.vt.write(b"abcdef\r\nghijkl\r\nmnopqr");
+            (g.origin, g.cell)
+        });
+        let at = |col: f32, row: f32| point(origin.x + cell.width * col, origin.y + cell.height * row);
+        // Starts a cell apart: the same spot twice would be a double click.
+        let drag = |start: f32, mods: Modifiers, cx: &mut VisualTestContext| {
+            cx.simulate_mouse_down(at(start, 0.5), MouseButton::Left, mods);
+            cx.simulate_mouse_move(at(3.8, 2.5), Some(MouseButton::Left), mods);
+            cx.simulate_mouse_up(at(3.8, 2.5), MouseButton::Left, mods);
+            terminal.read_with(cx, |t, _| t.grid.borrow().vt.selection_text())
+        };
+        let block = Modifiers { control: !cfg!(target_os = "macos"), alt: true, ..Modifiers::default() };
+        assert_eq!(drag(1.2, block, cx).as_deref(), Some("bcd\nhij\nnop"));
+        assert_eq!(drag(2.2, Modifiers::default(), cx).as_deref(), Some("cdef\nghijkl\nmnop"));
     }
 
     // The native macOS text system is private to GPUI; creating MacPlatform here
