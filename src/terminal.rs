@@ -3703,4 +3703,24 @@ mod tests {
         assert_eq!(pages_to_lines(-0.5, 25), -13, "half of an odd row count rounds away from zero");
         assert_eq!(pages_to_lines(0.02, 24), 0);
     }
+
+    #[cfg(target_os = "macos")]
+    #[test]
+    #[ignore = "creates the native text system off the main thread; run with --ignored"]
+    fn italic_gets_a_synthetic_face_when_the_family_has_none() {
+        use gpui::{Font, FontStyle, PlatformTextSystem, font, px};
+        use std::borrow::Cow;
+
+        let system = gpui_macos::MacTextSystem::new();
+        system.add_fonts(vec![Cow::Borrowed(include_bytes!("../assets/fonts/Geist.ttf"))]).unwrap();
+        let normal = font("Geist");
+        let italic = Font { style: FontStyle::Italic, ..normal.clone() };
+        let normal_id = system.font_id(&normal).unwrap();
+        let italic_id = system.font_id(&italic).unwrap();
+        assert_ne!(normal_id, italic_id);
+        for (font_id, want) in [(normal_id, normal_id), (italic_id, italic_id)] {
+            let layout = system.layout_line("italic", px(14.), &[gpui::FontRun { font_id, len: 6 }]);
+            assert_eq!(layout.runs[0].font_id, want);
+        }
+    }
 }
