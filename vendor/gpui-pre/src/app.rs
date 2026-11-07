@@ -240,6 +240,13 @@ impl Application {
         self
     }
 
+    /// Sets the activation policy before the native application starts.
+    /// Has no effect outside macOS.
+    pub fn with_activation_policy(self, policy: ActivationPolicy) -> Self {
+        self.0.borrow().platform.set_activation_policy(policy);
+        self
+    }
+
     /// Start the application. The provided callback will be called once the
     /// app is fully launched.
     ///

@@ -59,12 +59,20 @@ and `hc file ... --on vps ...` for remote work, not your local file tools.
 
 `do` accepts `--key value` arguments (JSON for arrays/objects) or one JSON
 object. Unknown argument names fail and list valid names. Target IDs (`id`,
-`pane`, `space`, `terminal`) must be strings; other non-null types fail before
+`pane`, `space`, `target`, `terminal`) must be strings; other non-null types fail before
 the current-target default can apply. Null keeps its omitted-argument meaning.
 Use `commands` to confirm the command's exact shape:
 
 ```sh
 herdr-app do pane.split '{"direction":"right","pane":"p12"}'
+```
+
+`pane.swap {pane?, direction | target}` trades the places of `pane` (default:
+the focused one) and its neighbor in a direction, or `target`, another pane of
+the same tab. Give `direction` or `target`, not both. Focus stays with the same pane:
+
+```sh
+herdr-app do pane.swap '{"pane":"p12","target":"p14"}'
 ```
 
 `terminal.search` opens a find bar in the focused terminal. It searches that
