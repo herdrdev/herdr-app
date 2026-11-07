@@ -1006,6 +1006,7 @@ All of it is in `herdr.d.ts`. In short:
   and trees above 4096 non-ignored directories reject the watch; use a timer fallback.
   macOS and Windows watch recursively, including ignored directories.
   A returned root path means refresh everything (the pending paths are bounded).
+  At most 64 folders are watched: a new one replaces one unused for a minute, whose waits reject.
   Files also refreshes on its 10-second timer:
   `cx.spawn(async (cx) => { for (;;) { await watchFolder(dir); this.reload(); cx.notify(); } })`.
 - `notify({ ..., action: { name, args } })`: the toast runs the command when clicked.

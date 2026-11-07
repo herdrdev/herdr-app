@@ -53,7 +53,7 @@ export default class Changes extends View {
           await watchFolder(root);
           if (this.watched === root) this.refresh(cx);
         }
-      } catch { this.watched = null; }
+      } catch { if (this.watched === root) this.watched = null; }
     });
   }
 

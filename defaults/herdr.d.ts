@@ -412,6 +412,8 @@ export function nextCommand(): Promise<string>;
  * above 4096 non-ignored directories reject the watch, so use a timer fallback.
  * macOS and Windows watch recursively, including ignored directories.
  * Pending paths are bounded: a batch containing the root means refresh everything.
+ * At most 64 folders are watched. A new one replaces one no mod asked for or got
+ * changes from in a minute, whose waits reject; while all are in use, it rejects.
  * Shared by every mod. Files also refreshes on its 10-second timer.
  *   cx.spawn(async (cx) => { for (;;) { await watchFolder(dir); this.reload(); cx.notify(); } });
  * Watch what you show, not a whole home folder (node_modules is a lot of events).
