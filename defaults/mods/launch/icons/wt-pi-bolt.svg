@@ -1,0 +1,7 @@
+<svg xmlns="http://www.w3.org/2000/svg" viewBox="80 80 640 640">
+  <title>Pi-Bolt</title>
+  <polygon fill="#F7C04A" points="540,100 220,460 390,460"/>
+  <polygon fill="#E9A42C" points="540,100 390,460 430,320"/>
+  <polygon fill="#4C96EA" points="430,320 390,460 300,700"/>
+  <polygon fill="#2A78D6" points="430,320 300,700 600,320"/>
+</svg>
