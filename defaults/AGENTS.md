@@ -323,6 +323,10 @@ layout's look and a block can differ:
   are upgraded to readable terminal colors; edited theme files are kept.
   A theme named like a layout (`themes/win98.json`) is
   that layout's own: Settings offers it only there.
+  Bold text keeps its color unless `terminal_bold` is set (in any `colors`),
+  which works like Ghostty's `bold-color`: bold text in the default foreground
+  takes it, and bold text in palette colors 0–7 takes its bright counterpart
+  (8–15).
 - `font` / `font_size`: the terminals' (px at zoom 1); `ui_font`: the mods'
   (their text sizes are their own, in px, and follow zoom). Optional: without
   them a layout uses settings.json's, else Herdr's (JetBrains Mono 14, Geist).
