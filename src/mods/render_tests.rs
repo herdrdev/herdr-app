@@ -159,7 +159,7 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
         module = module.async_function(name, move |a| {
             let first = a.get(0).map(from_host).unwrap_or(Value::Null);
             let reply = match name {
-                "readTextFile" if first == "/fixture/app/settings.json" || first == "/fixture/.ssh/config" => Some(Value::Null),
+                "readTextFile" if first == "/fixture/app/settings.json" || first == "/fixture/.ssh/config" || first == "/fixture/project/.linear-project" => Some(Value::Null),
                 "readTextFile" => first
                     .as_str()
                     .and_then(|p| p.strip_prefix("/fixture/app/layouts/"))
