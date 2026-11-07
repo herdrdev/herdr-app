@@ -764,7 +764,7 @@ fn exec_limit(options: Option<&HostValue>) -> Result<Duration, HostError> {
     }
 }
 
-fn run_blocking(command: &str, args: &[String], cwd: Option<String>, limit: Duration) -> Result<(i32, String, String), String> {
+pub(crate) fn run_blocking(command: &str, args: &[String], cwd: Option<String>, limit: Duration) -> Result<(i32, String, String), String> {
     use std::io::Read;
     let mut child = crate::spawn::command(command)
         .args(args)

@@ -248,6 +248,7 @@ printf 'dev PATH added' >> "$3"''')
             ("Linux", "x86_64", "linux-x86_64", "herdr-app"),
             ("Darwin", "arm64", "macos-aarch64", "Herdr.app/Contents/Resources"),
             ("MINGW64_NT", "x86_64", "windows-x86_64", "herdr-app"),
+            ("MINGW64_NT", "aarch64", "windows-aarch64", "herdr-app"),
         ):
             with self.subTest(target=target):
                 result = self.run_script(checkout / "scripts/package", os_name, arch)

@@ -70,6 +70,8 @@ jobs:
           - { target: linux-aarch64, runner: ubuntu-22.04-arm }
           - { target: macos-aarch64, runner: macos-15 }
           - { target: windows-x86_64, runner: windows-2022 }
+          # The triple is explicit: Git Bash's `uname -m` may not say aarch64.
+          - { target: windows-aarch64, runner: windows-11-arm, triple: aarch64-pc-windows-msvc }
     runs-on: ${{ matrix.runner }}
     # Only tags can access the release environment's Apple certificate.
     environment: ${{ github.ref_type == 'tag' && 'release' || 'build' }}
@@ -88,6 +90,22 @@ jobs:
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: ${{ env.ZIG_VERSION }}
+      # Zig 0.16.0's own Arm64 Windows build crashes (0xc0000005) building
+      # libghostty-vt; its x64 build, emulated, makes the same native Arm64
+      # library, with its own cache. Only Zig runs emulated: the app is Arm64.
+      - name: x64 Zig on Arm Windows
+        if: runner.os == 'Windows' && runner.arch == 'ARM64'
+        shell: pwsh
+        run: |
+          $name = "zig-x86_64-windows-0.16.0"
+          Invoke-WebRequest -UseBasicParsing "https://ziglang.org/download/0.16.0/$name.zip" -OutFile "$env:RUNNER_TEMP\zig.zip"
+          $sha = (Get-FileHash "$env:RUNNER_TEMP\zig.zip" -Algorithm SHA256).Hash
+          if ($sha -ne "68659EB5F1E4EB1437A722F1DD889C5A322C9954607F5EDCF337BC3684A75A7E") { throw "zig download: sha256 $sha" }
+          Expand-Archive "$env:RUNNER_TEMP\zig.zip" $env:RUNNER_TEMP
+          & "$env:RUNNER_TEMP\$name\zig.exe" version
+          if ($LASTEXITCODE) { throw "x64 zig does not run" }
+          "ZIG=$env:RUNNER_TEMP\$name\zig.exe" >> $env:GITHUB_ENV
+          "ZIG_GLOBAL_CACHE_DIR=$env:RUNNER_TEMP\zig-x64-cache" >> $env:GITHUB_ENV
       - name: Restore build cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
@@ -127,7 +145,7 @@ jobs:
           RELEASES_URL: ${{ vars.RELEASES_URL }}
           APPLE_CERTIFICATE_P12: ${{ runner.os == 'macOS' && github.ref_type == 'tag' && secrets.APPLE_CERTIFICATE_P12 || '' }}
           APPLE_CERTIFICATE_PASSWORD: ${{ runner.os == 'macOS' && github.ref_type == 'tag' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
-        run: scripts/package
+        run: scripts/package ${{ matrix.triple }}
       - name: Verify release notices
         run: |
           archive="dist/herdr-app-${{ matrix.target }}.tar.gz"
@@ -187,6 +205,10 @@ jobs:
   # while it's unset this is skipped and releases go out unsigned.
   sign-windows:
     needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [windows-x86_64, windows-aarch64]
     if: >-
       github.triggering_actor == 'ogulcancelik' && vars.AZURE_SIGNING_PROFILE != ''
       && ((github.event_name == 'push' && github.ref_type == 'tag') || github.event_name == 'workflow_dispatch')
@@ -202,9 +224,9 @@ jobs:
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: herdr-app-windows-x86_64
+          name: herdr-app-${{ matrix.target }}
           path: dist
-      - run: tar -xzf dist/herdr-app-windows-x86_64.tar.gz -C dist
+      - run: tar -xzf dist/herdr-app-${{ matrix.target }}.tar.gz -C dist
       - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
@@ -224,11 +246,11 @@ jobs:
           $sig = Get-AuthenticodeSignature dist\herdr-app\herdr-app.exe
           $sig | Format-List Status, StatusMessage, SignerCertificate
           if ($sig.Status -ne 'Valid') { exit 1 }
-      - run: tar -czf dist/herdr-app-windows-x86_64.tar.gz -C dist herdr-app
+      - run: tar -czf dist/herdr-app-${{ matrix.target }}.tar.gz -C dist herdr-app
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: herdr-app-windows-x86_64
-          path: dist/herdr-app-windows-x86_64.tar.gz
+          name: herdr-app-${{ matrix.target }}
+          path: dist/herdr-app-${{ matrix.target }}.tar.gz
           if-no-files-found: error
           overwrite: true
           retention-days: 7
