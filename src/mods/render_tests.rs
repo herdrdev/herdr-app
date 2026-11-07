@@ -433,15 +433,23 @@ fn a_described_mod_leaves_no_folder_behind(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn brand_leaves_room_for_macos_traffic_lights_only_outside_full_screen(cx: &mut TestAppContext) {
+fn brand_leaves_room_for_macos_traffic_lights(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
-    for (fullscreen, inset) in [(false, true), (true, false)] {
+    for (fullscreen, titlebar, zoom, lights, expected) in [
+        (false, "none", 1.0, [12, 16], 76.0),
+        (true, "none", 1.0, [12, 16], 76.0),
+        (false, "none", 0.5, [12, 16], 152.0),
+        (false, "none", 1.0, [20, 16], 84.0),
+        (false, "system", 1.0, [12, 16], 14.0),
+    ] {
         let mut values = fixture(true, props(), updates("current", "current"));
-        values.insert("window".into(), json!({"platform":"macos","titlebar":"none","fullscreen":fullscreen,"buttons":false}));
+        values.insert("window".into(), json!({"platform":"macos","titlebar":titlebar,"fullscreen":fullscreen,"buttons":false}));
+        values.get_mut("settings").unwrap()["zoom"] = json!(zoom);
+        values.get_mut("layout").unwrap()["traffic_lights"] = json!(lights);
         let tree = describe_with_values(cx, &staged, "mods/workspace-chrome", values, None).unwrap();
         let root = tree.lines().next().unwrap();
-        assert_eq!(root.contains(".pl[Number(76.0)]"), inset, "fullscreen={fullscreen}: {tree}");
+        assert!(root.contains(&format!(".pl[Number({expected}.0)]")), "fullscreen={fullscreen} titlebar={titlebar} zoom={zoom} lights={lights:?}: {tree}");
     }
 }
 
@@ -456,7 +464,7 @@ fn tabs_leave_room_for_macos_traffic_lights(cx: &mut TestAppContext) {
         ("macos", "none", false, 60, true, 1.0, 16),
         ("macos", "none", false, 76, true, 1.0, 10),
         ("macos", "none", false, 268, true, 1.0, 10),
-        ("macos", "none", true, 44, true, 1.0, 10),
+        ("macos", "none", true, 44, true, 1.0, 32),
         ("macos", "system", false, 44, true, 1.0, 10),
         ("macos", "none", false, 44, false, 1.0, 10),
         ("linux", "none", false, 44, true, 1.0, 10),
