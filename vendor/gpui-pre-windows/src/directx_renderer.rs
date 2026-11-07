@@ -86,9 +86,11 @@ struct DirectXResources {
 struct DirectXRenderPipelines {
     shadow_pipeline: PipelineState<Shadow>,
     quad_pipeline: PipelineState<Quad>,
-    // HERDR: shaders for plain quads; they read `quad_pipeline`'s buffer.
+    // HERDR: shaders for plain and rounded quads; they read `quad_pipeline`'s buffer.
     plain_quad_vertex: ID3D11VertexShader,
     plain_quad_fragment: ID3D11PixelShader,
+    rounded_quad_vertex: ID3D11VertexShader,
+    rounded_quad_fragment: ID3D11PixelShader,
     path_rasterization_pipeline: PipelineState<PathRasterizationSprite>,
     path_sprite_pipeline: PipelineState<PathSprite>,
     underline_pipeline: PipelineState<Underline>,
@@ -966,6 +968,15 @@ impl DirectXRenderPipelines {
             let raw_shader = RawShaderBytes::new(ShaderModule::PlainQuad, ShaderTarget::Fragment)?;
             create_fragment_shader(device, raw_shader.as_bytes())?
         };
+        let rounded_quad_vertex = {
+            let raw_shader = RawShaderBytes::new(ShaderModule::RoundedQuad, ShaderTarget::Vertex)?;
+            create_vertex_shader(device, raw_shader.as_bytes())?
+        };
+        let rounded_quad_fragment = {
+            let raw_shader =
+                RawShaderBytes::new(ShaderModule::RoundedQuad, ShaderTarget::Fragment)?;
+            create_fragment_shader(device, raw_shader.as_bytes())?
+        };
         let path_rasterization_pipeline = PipelineState::new(
             device,
             "path_rasterization_pipeline",
@@ -1014,6 +1025,8 @@ impl DirectXRenderPipelines {
             quad_pipeline,
             plain_quad_vertex,
             plain_quad_fragment,
+            rounded_quad_vertex,
+            rounded_quad_fragment,
             path_rasterization_pipeline,
             path_sprite_pipeline,
             underline_pipeline,
@@ -1680,15 +1693,26 @@ fn update_buffer<T>(
     Ok(())
 }
 
-#[inline]
-// HERDR: a solid background with no border and no rounded corner, which
-// `quad_fragment` would fill with exactly its solid color.
-fn is_plain_quad(quad: &Quad) -> bool {
+// HERDR: which shaders draw a quad. `Plain` and `Rounded` give exactly the
+// pixels of the full `quad_fragment` for the quads they take, with a small
+// fraction of its instructions: WARP (software D3D) runs every instruction
+// of a pixel shader for every pixel.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum QuadShader {
+    /// A solid background, no border and no rounding: one solid color.
+    Plain,
+    /// A solid background and rounded corners, no border, solid style.
+    Rounded,
+    /// Everything else: gradients, patterns, borders, dashes.
+    Full,
+}
+
+fn quad_shader(quad: &Quad) -> QuadShader {
     // Every field by name: a new `Quad` field fails to build here, so whoever
-    // adds it decides whether the plain shaders must handle it.
+    // adds it decides whether the plain and rounded shaders must handle it.
     let Quad {
         order: _,
-        border_style: _,
+        border_style,
         bounds: _,
         content_mask: _,
         background,
@@ -1699,14 +1723,20 @@ fn is_plain_quad(quad: &Quad) -> bool {
     let zero = ScaledPixels(0.0);
     let r = corner_radii;
     let b = border_widths;
-    background.as_solid().is_some()
-        && [r.top_left, r.top_right, r.bottom_right, r.bottom_left] == [zero; 4]
-        && [b.top, b.right, b.bottom, b.left] == [zero; 4]
+    if background.as_solid().is_none() || [b.top, b.right, b.bottom, b.left] != [zero; 4] {
+        QuadShader::Full
+    } else if [r.top_left, r.top_right, r.bottom_right, r.bottom_left] == [zero; 4] {
+        QuadShader::Plain
+    } else if *border_style == BorderStyle::Solid {
+        QuadShader::Rounded
+    } else {
+        QuadShader::Full
+    }
 }
 
-// HERDR: draw a quad batch as runs of plain quads (plain shaders) and other
-// quads (full shaders). Runs keep the batch's order, so overlapping quads
-// still blend the same way. `start` is the batch's offset in the quad buffer.
+// HERDR: draw a quad batch as runs of quads that use the same shaders. Runs
+// keep the batch's order, so overlapping quads still blend the same way.
+// `start` is the batch's offset in the quad buffer.
 fn draw_quad_runs(
     pipelines: &DirectXRenderPipelines,
     device_context: &ID3D11DeviceContext,
@@ -1716,34 +1746,40 @@ fn draw_quad_runs(
 ) -> Result<()> {
     let mut run_start = 0;
     while run_start < quads.len() {
-        let plain = is_plain_quad(&quads[run_start]);
+        let shader = quad_shader(&quads[run_start]);
         let run_len = quads[run_start..]
             .iter()
-            .take_while(|quad| is_plain_quad(quad) == plain)
+            .take_while(|quad| quad_shader(quad) == shader)
             .count();
         let first = (start + run_start) as u32;
-        if plain {
-            pipelines.quad_pipeline.draw_range_with_shaders(
+        let quad_pipeline = &pipelines.quad_pipeline;
+        match shader {
+            QuadShader::Plain => quad_pipeline.draw_range_with_shaders(
                 device_context,
                 batch_params,
                 first,
                 run_len as u32,
                 &pipelines.plain_quad_vertex,
                 &pipelines.plain_quad_fragment,
-            )?;
-        } else {
-            pipelines.quad_pipeline.draw_range(
+            )?,
+            QuadShader::Rounded => quad_pipeline.draw_range_with_shaders(
                 device_context,
                 batch_params,
                 first,
                 run_len as u32,
-            )?;
+                &pipelines.rounded_quad_vertex,
+                &pipelines.rounded_quad_fragment,
+            )?,
+            QuadShader::Full => {
+                quad_pipeline.draw_range(device_context, batch_params, first, run_len as u32)?
+            }
         }
         run_start += run_len;
     }
     Ok(())
 }
 
+#[inline]
 fn update_batch_start(
     device_context: &ID3D11DeviceContext,
     buffer: &ID3D11Buffer,
@@ -1805,6 +1841,7 @@ pub(crate) mod shader_resources {
     pub(crate) enum ShaderModule {
         Quad,
         PlainQuad,
+        RoundedQuad,
         Shadow,
         Underline,
         PathRasterization,
@@ -1861,6 +1898,10 @@ pub(crate) mod shader_resources {
                 ShaderModule::PlainQuad => match target {
                     ShaderTarget::Vertex => PLAIN_QUAD_VERTEX_BYTES,
                     ShaderTarget::Fragment => PLAIN_QUAD_FRAGMENT_BYTES,
+                },
+                ShaderModule::RoundedQuad => match target {
+                    ShaderTarget::Vertex => ROUNDED_QUAD_VERTEX_BYTES,
+                    ShaderTarget::Fragment => ROUNDED_QUAD_FRAGMENT_BYTES,
                 },
                 ShaderModule::Shadow => match target {
                     ShaderTarget::Vertex => SHADOW_VERTEX_BYTES,
@@ -1974,6 +2015,7 @@ pub(crate) mod shader_resources {
             match self {
                 ShaderModule::Quad => "quad",
                 ShaderModule::PlainQuad => "plain_quad",
+                ShaderModule::RoundedQuad => "rounded_quad",
                 ShaderModule::Shadow => "shadow",
                 ShaderModule::Underline => "underline",
                 ShaderModule::PathRasterization => "path_rasterization",
@@ -2170,8 +2212,9 @@ mod dxgi {
     }
 }
 
-// HERDR: plain quads must look exactly like `quad_fragment` draws them, and
-// the plain pixel shader must stay tiny: WARP (no GPU) runs it on the CPU.
+// HERDR: plain and rounded quads must look exactly like `quad_fragment` draws
+// them, and their pixel shaders must stay small: WARP (no GPU) runs them on
+// the CPU.
 #[cfg(test)]
 mod plain_quad_tests {
     use super::*;
@@ -2202,7 +2245,9 @@ mod plain_quad_tests {
         }
     }
 
-    /// Plain and other quads, overlapping, so the runs must keep their order.
+    /// Plain, rounded and other quads, overlapping, so the runs must keep
+    /// their order. The rounded ones cover the corners that
+    /// `rounded_quad_fragment` must match.
     fn scene() -> Vec<Quad> {
         let rounded = Quad {
             corner_radii: Corners::all(ScaledPixels(8.)),
@@ -2230,6 +2275,48 @@ mod plain_quad_tests {
             },
             ..quad(50., 25., 40., 35., hsla(0.8, 0.6, 0.5, 1.).into())
         };
+        // A different radius on each corner, one of them 0, half
+        // transparent, at fractional bounds, over other quads.
+        let mixed_corners = Quad {
+            corner_radii: Corners {
+                top_left: ScaledPixels(0.),
+                top_right: ScaledPixels(12.),
+                bottom_right: ScaledPixels(3.5),
+                bottom_left: ScaledPixels(6.),
+            },
+            ..quad(30.4, 20.7, 36.3, 26.6, hsla(0.45, 0.7, 0.5, 0.6).into())
+        };
+        // A 0-width border whose color still tints the antialiased edge.
+        let tinted_edge = Quad {
+            corner_radii: Corners::all(ScaledPixels(7.)),
+            border_color: hsla(0., 1., 0.5, 0.8),
+            ..quad(70., 34., 22., 26., hsla(0.15, 0.6, 0.6, 1.).into())
+        };
+        // A pill: the radius is half the height.
+        let pill = Quad {
+            corner_radii: Corners::all(ScaledPixels(6.)),
+            ..quad(4., 50., 40., 12., hsla(0.7, 0.5, 0.4, 0.9).into())
+        };
+        let rounded_clipped = Quad {
+            corner_radii: Corners::all(ScaledPixels(10.)),
+            content_mask: ContentMask {
+                bounds: scaled_bounds(0., 0., 60., 40.),
+            },
+            ..quad(44., 28., 30., 30., hsla(0.95, 0.6, 0.5, 1.).into())
+        };
+        // Dashed with 0-width borders: left to the full shader.
+        let dashed = Quad {
+            border_style: BorderStyle::Dashed,
+            corner_radii: Corners::all(ScaledPixels(5.)),
+            ..quad(82., 4., 12., 20., hsla(0.55, 0.6, 0.5, 1.).into())
+        };
+        // Rounded with a border: left to the full shader.
+        let rounded_bordered = Quad {
+            corner_radii: Corners::all(ScaledPixels(6.)),
+            border_widths: Edges::all(ScaledPixels(1.5)),
+            border_color: hsla(0.6, 0.8, 0.3, 1.),
+            ..quad(46., 44., 20., 16., hsla(0.3, 0.5, 0.7, 1.).into())
+        };
         vec![
             quad(
                 0.,
@@ -2245,6 +2332,12 @@ mod plain_quad_tests {
             quad(2., 40., 20., 20., hsla(0.5, 0.6, 0.4, 1.).into()),
             gradient,
             clipped,
+            mixed_corners,
+            tinted_edge,
+            pill,
+            rounded_clipped,
+            dashed,
+            rounded_bordered,
         ]
     }
 
@@ -2363,13 +2456,20 @@ mod plain_quad_tests {
     }
 
     #[::core::prelude::v1::test]
-    fn plain_quads_are_solid_unrounded_and_borderless() {
-        let plain: Vec<bool> = scene().iter().map(is_plain_quad).collect();
-        assert_eq!(plain, [true, false, true, false, true, false, true]);
+    fn quads_pick_the_smallest_exact_shader() {
+        use QuadShader::*;
+        let shaders: Vec<QuadShader> = scene().iter().map(quad_shader).collect();
+        assert_eq!(
+            shaders,
+            [
+                Plain, Rounded, Plain, Full, Plain, Full, Plain, Rounded, Rounded, Rounded,
+                Rounded, Full, Full
+            ]
+        );
     }
 
     #[::core::prelude::v1::test]
-    fn plain_quad_runs_draw_the_same_pixels_as_the_quad_shader() {
+    fn quad_runs_draw_the_same_pixels_as_the_quad_shader() {
         let quads = scene();
         let with_runs = render(&quads, true);
         let full = render(&quads, false);
@@ -2382,9 +2482,8 @@ mod plain_quad_tests {
         assert_eq!(differing, 0, "{differing} pixels differ");
     }
 
-    #[::core::prelude::v1::test]
-    fn plain_quad_fragment_stays_small() {
-        let raw = RawShaderBytes::new(ShaderModule::PlainQuad, ShaderTarget::Fragment).unwrap();
+    fn fragment_instructions(module: ShaderModule) -> u32 {
+        let raw = RawShaderBytes::new(module, ShaderTarget::Fragment).unwrap();
         let bytes = raw.as_bytes();
         let reflection: ID3D11ShaderReflection = unsafe {
             let mut out = std::ptr::null_mut();
@@ -2399,10 +2498,26 @@ mod plain_quad_tests {
         };
         let mut desc = D3D11_SHADER_DESC::default();
         unsafe { reflection.GetDesc(&mut desc) }.unwrap();
+        desc.InstructionCount
+    }
+
+    #[::core::prelude::v1::test]
+    fn plain_quad_fragment_stays_small() {
+        let count = fragment_instructions(ShaderModule::PlainQuad);
         assert!(
-            desc.InstructionCount <= 4,
-            "plain_quad_fragment has {} instructions; WARP runs each of them for every pixel",
-            desc.InstructionCount
+            count <= 4,
+            "plain_quad_fragment has {count} instructions; WARP runs each of them for every pixel"
+        );
+    }
+
+    #[::core::prelude::v1::test]
+    fn rounded_quad_fragment_stays_a_fraction_of_quad_fragment() {
+        // Relative, because debug builds compile the shaders unoptimized.
+        let rounded = fragment_instructions(ShaderModule::RoundedQuad);
+        let full = fragment_instructions(ShaderModule::Quad);
+        assert!(
+            rounded * 4 <= full,
+            "rounded_quad_fragment has {rounded} instructions, quad_fragment {full}; WARP runs each of them for every pixel"
         );
     }
 }
