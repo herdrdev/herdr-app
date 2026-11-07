@@ -337,6 +337,9 @@ impl TerminalView {
             // The core repaints the whole screen (and history) on attach.
             let cell = device_cell(g.cell, g.scale);
             g.vt = Vt::new(cols, rows);
+            if !self.address.contains('/') {
+                g.vt.allow_shared_memory_images();
+            }
             g.vt.resize(cols, rows, cell.0, cell.1);
             if self.search_open {
                 g.vt.start_search(&self.search_query);
@@ -1894,10 +1897,16 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
             images.push((below, Bounds::new(pos, size(px(width), px(height))), img.clone()));
         }
     }
-    g.images.retain(|k, _| keep.contains(k));
+    // An image no placement shows any more leaves the window's sprite atlas
+    // too: the atlas keeps every upload until told, and video replaces the
+    // image many times a second.
+    let gone: Vec<Arc<RenderImage>> = g.images.extract_if(|k, _| !keep.contains(k)).map(|(_, img)| img).collect();
     let link_spans = g.link_spans.clone();
     let marked = g.marked.clone();
     drop(g);
+    for img in gone {
+        let _ = window.drop_image(img);
+    }
 
     window.paint_quad(fill(bounds, hsla(frame.bg).opacity(crate::settings::get().terminal_opacity)));
     let at = |x: usize, y: usize| origin + point(cell.width * x as f32, cell.height * y as f32);
