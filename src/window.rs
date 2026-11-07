@@ -3986,7 +3986,11 @@ impl AppWindow {
             el = el.border(settings::z(l.width)).border_color(c(&l.color));
         }
         el = shadow(el, f.shadow.as_deref());
-        let body = div().flex_1().min_h_0().flex().child(inner);
+        let mut body = div().flex_1().min_h_0().flex().relative().child(inner);
+        // No listeners, so no hitbox: clicks still reach the terminal below.
+        if let Some(v) = f.veil.as_ref().filter(|_| !on) {
+            body = body.child(div().absolute().inset_0().bg(c(v)));
+        }
         let Some(h) = &f.header else { return el.child(body).into_any_element() };
         let head = div().flex_none().h(settings::z(pane_size::header_height(h))).w_full().flex()
             .child(self.render_slot(&format!("{}#frame", n.id), cx));
