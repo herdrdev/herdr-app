@@ -20,6 +20,8 @@ struct Browser {
     window: WindowId,
     url: String,
     native: Option<wry::WebView>,
+    #[cfg(not(target_os = "linux"))]
+    context: Option<wry::WebContext>,
     error: Option<String>,
     hitbox: Option<HitboxId>,
     bounds: Option<wry::Rect>,
@@ -43,8 +45,8 @@ fn create(state: &State, window: &mut Window, cx: &mut App) {
 }
 
 impl Browser {
-    fn builder(url: &str) -> wry::WebViewBuilder<'static> {
-        wry::WebViewBuilder::new()
+    fn builder<'a>(url: &str, context: &'a mut wry::WebContext) -> wry::WebViewBuilder<'a> {
+        wry::WebViewBuilder::new_with_web_context(context)
             .with_url(url)
             .with_visible(false)
             .with_navigation_handler(|url| policy::allows_navigation(&url))
@@ -56,11 +58,15 @@ impl Browser {
     #[cfg(not(windows))]
     fn create(&mut self, window: &mut Window, cx: &mut App) -> anyhow::Result<()> {
         if self.native.is_some() || self.error.is_some() { return Ok(()); }
-        let builder = Self::builder(&self.url);
         #[cfg(target_os = "linux")]
-        let view = linux::build(builder, window, cx)?;
+        let view = linux::build(&self.url, window, cx)?;
         #[cfg(not(target_os = "linux"))]
-        let view = builder.build_as_child(window)?;
+        let view = {
+            let mut context = wry::WebContext::new(Some(crate::mods::app_dir().join("browser")));
+            let view = Self::builder(&self.url, &mut context).build_as_child(window)?;
+            self.context = Some(context);
+            view
+        };
         // Wry's X11 host is installed after its initial visibility is applied.
         // Hide once more after construction so its child window is hidden too.
         view.set_visible(false)?;
@@ -173,7 +179,7 @@ pub fn components() -> FrozenComponentRegistry {
         |args, window, _| {
             let ComponentArgument::String(url) = &args[0] else { unreachable!() };
             if !policy::allows_navigation(url) { return Err("Expected an HTTP(S) URL without credentials".into()); }
-            let state = Rc::new(RefCell::new(Browser { window: window.window_handle().window_id(), url: url.clone(), native: None, error: None, hitbox: None, bounds: None, visible: false,
+            let state = Rc::new(RefCell::new(Browser { window: window.window_handle().window_id(), url: url.clone(), native: None, #[cfg(not(target_os = "linux"))] context: None, error: None, hitbox: None, bounds: None, visible: false,
                 #[cfg(windows)] creating: false }));
             VIEWS.with_borrow_mut(|views| views.push(Rc::downgrade(&state)));
             Ok(Box::new(state))

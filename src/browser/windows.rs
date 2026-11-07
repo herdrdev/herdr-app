@@ -24,8 +24,9 @@ pub(super) fn create(state: &State, window: &Window, cx: &App) {
             return;
         };
         let Some(url) = weak.upgrade().map(|state| state.borrow().url.clone()) else { return; };
+        let mut context = wry::WebContext::new(Some(crate::mods::app_dir().join("browser")));
         let built = parent.and_then(|parent| {
-            Browser::builder(&url).build_as_child(&parent).map_err(Into::into)
+            Browser::builder(&url, &mut context).build_as_child(&parent).map_err(Into::into)
         });
         // The pane may have gone away or navigated while the build pumped
         // messages. Never keep its state borrowed across native calls either.
@@ -44,7 +45,7 @@ pub(super) fn create(state: &State, window: &Window, cx: &App) {
                 let mut browser = state.borrow_mut();
                 debug_assert!(browser.native.is_none());
                 match built.take().unwrap() {
-                    Ok(view) => browser.native = Some(view),
+                    Ok(view) => { browser.context = Some(context); browser.native = Some(view); },
                     Err(error) => browser.error = Some(error.to_string()),
                 }
                 window.refresh();

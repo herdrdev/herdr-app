@@ -6,7 +6,7 @@ use std::time::Duration;
 struct GtkLoop;
 impl Global for GtkLoop {}
 
-pub fn build(builder: wry::WebViewBuilder<'_>, window: &Window, cx: &mut App) -> anyhow::Result<wry::WebView> {
+pub fn build(url: &str, window: &Window, cx: &mut App) -> anyhow::Result<wry::WebView> {
     let raw = match HasWindowHandle::window_handle(window)?.as_raw() {
         RawWindowHandle::Xcb(handle) => {
             let mut parent = XlibWindowHandle::new(handle.window.get().into());
@@ -38,5 +38,11 @@ pub fn build(builder: wry::WebViewBuilder<'_>, window: &Window, cx: &mut App) ->
             Ok(unsafe { WindowHandle::borrow_raw(RawWindowHandle::Xlib(self.0)) })
         }
     }
-    Ok(builder.build_as_child(&Parent(raw))?)
+    thread_local! {
+        static CONTEXT: std::cell::RefCell<Option<wry::WebContext>> = const { std::cell::RefCell::new(None) };
+    }
+    CONTEXT.with_borrow_mut(|context| {
+        let context = context.get_or_insert_with(|| wry::WebContext::new(Some(crate::mods::app_dir().join("browser"))));
+        Ok(super::Browser::builder(url, context).build_as_child(&Parent(raw))?)
+    })
 }
