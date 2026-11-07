@@ -1,5 +1,10 @@
 # Herdr changelog
 
+## Unreleased
+
+### Fixed
+- On macOS, dragging a live screenshot thumbnail into a local terminal now attaches the image instead of pasting a temporary path that the pane cannot read. The thumbnail is copied while the app still has access to it, and the pane receives the staged path. (herdrdev/herdr#2091)
+
 ## [0.1.13] - 2026-11-04
 <!-- spotlight macos -->
 
