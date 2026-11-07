@@ -8,7 +8,7 @@ export interface ExecResult {
 }
 
 /** Runs a program with the user's real environment (HOME, PATH, auth). 8 MiB output.
- *  `timeout`: milliseconds, defaults to 30,000, capped at 600,000 (10 minutes).
+ *  `timeout`: milliseconds including output collection, defaults to 30,000, capped at 600,000 (10 minutes).
  *  `on`: on that machine (a space's `machine`) through herdr-core, its home by default.
  *  Rejects when it can't start (not installed, no such folder, the machine is unreachable). */
 export function exec(command: string, args?: string[], options?: { cwd?: string; on?: string | null; timeout?: number }): Promise<ExecResult>;
