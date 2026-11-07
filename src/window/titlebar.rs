@@ -62,6 +62,16 @@ impl AppWindow {
         });
     }
 
+    /// The root's `window_blur`: frosted glass behind the window, else opaque.
+    pub(super) fn apply_blur(&mut self, window: &mut Window) {
+        let want = self.chrome.window_blur;
+        if self.blur_applied == Some(want) {
+            return;
+        }
+        self.blur_applied = Some(want);
+        window.set_background_appearance(if want { gpui::WindowBackgroundAppearance::Blurred } else { gpui::WindowBackgroundAppearance::Opaque });
+    }
+
     /// What mods know about the window: `window()`.
     pub(super) fn window_json(&self, window: &Window) -> Value {
         let platform = if cfg!(target_os = "macos") {
