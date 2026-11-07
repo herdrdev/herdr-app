@@ -3544,7 +3544,14 @@ impl AppWindow {
             }
         });
         let (name, mut props) = if kind == OverlayKind::Toast {
-            ("toast".to_owned(), spec.get("notification").cloned().unwrap_or(Value::Null))
+            let requested = self.chrome.toast.as_deref().unwrap_or("toast");
+            let name = if self.folders.contains_key(requested) {
+                requested
+            } else {
+                tracing::warn!(mod_name = requested, "toast mod not found; using toast");
+                "toast"
+            };
+            (name.to_owned(), spec.get("notification").cloned().unwrap_or(Value::Null))
         } else {
             (spec.get("mod").and_then(Value::as_str).unwrap_or_default().to_owned(), spec.get("props").cloned().unwrap_or(json!({})))
         };
@@ -5305,6 +5312,59 @@ mod tests {
         root.terminal_menu = Some("personal-menu".into());
         let restored: super::Node = serde_json::from_value(serde_json::to_value(&root).unwrap()).unwrap();
         assert_eq!(restored.terminal_menu.as_deref(), Some("personal-menu"));
+    }
+
+    #[test]
+    fn toast_is_a_root_layout_choice_that_roundtrips() {
+        let mut root = super::default_layout("main");
+        assert_eq!(root.toast, None);
+        assert!(serde_json::to_value(&root).unwrap().get("toast").is_none());
+        root.toast = Some("personal-toast".into());
+        let restored: super::Node = serde_json::from_value(serde_json::to_value(&root).unwrap()).unwrap();
+        assert_eq!(restored.toast.as_deref(), Some("personal-toast"));
+    }
+
+    #[test]
+    fn notifications_use_the_layout_toast_mod_and_fall_back_when_missing() {
+        in_own_process("layout_toast_mod");
+    }
+
+    #[gpui::test]
+    fn layout_toast_mod(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("layout_toast_mod") {
+            return;
+        }
+        let probe = r#"import { View, div } from "gpui-kit";
+import { props, setShared } from "herdr";
+export default class Probe extends View {
+  render() {
+    setShared("probe.notification", props());
+    return div().child(props().title);
+  }
+}"#;
+        let (view, cx) = open_window(cx, "personal-toast", probe, json!({
+            "id": "root", "type": "row", "children": [], "toast": "personal-toast"
+        }));
+        let notification = json!({ "title": "Attention", "body": "Ready", "level": "info" });
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.open_overlay("custom-toast".into(), json!({ "kind": "toast", "notification": notification }), window, cx);
+        }));
+        cx.run_until_parked();
+        assert_eq!(crate::mods::shared("probe.notification"), Some(json!({
+            "title": "Attention", "body": "Ready", "level": "info", "overlay": "custom-toast"
+        })));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.chrome.toast = Some("missing-toast".into());
+            this.open_overlay("fallback-toast".into(), json!({
+                "kind": "toast", "notification": { "title": "Error", "level": "error" }
+            }), window, cx);
+            let copy = &this.copies["overlay:fallback-toast"];
+            assert_eq!(copy.inst.name, "toast");
+            assert!(copy.root.is_some(), "the shipped fallback must load");
+            assert_eq!(copy.inst.props["title"], "Error");
+            assert_eq!(copy.inst.props["overlay"], "fallback-toast");
+        }));
     }
 
     /// Runs `window::tests::<name>` alone in a test process of its own, on a
