@@ -26,6 +26,25 @@ case "$(uname -s)" in
   MINGW* | MSYS* | CYGWIN*) fail "this installer is for Linux and macOS; on Windows, run this in PowerShell: irm $releases/app/install.ps1 | iex" ;;
   *) fail "no build for $(uname -s)" ;;
 esac
+if [ "$os" = macos ]; then
+  # This installer is published alone: keep in sync with .cargo/config.toml.
+  min_macos=13.0
+  macos_version=$(SYSTEM_VERSION_COMPAT=0 sw_vers -productVersion) || fail "cannot determine macOS version"
+  case $macos_version in
+    '' | *[!0-9.]*) fail "cannot determine macOS version: $macos_version" ;;
+  esac
+  if ! awk -v have="$macos_version" -v need="$min_macos" 'BEGIN {
+    if (have !~ /^[0-9]+\.[0-9]+(\.[0-9]+)?$/) exit 1
+    split(have, h, "."); split(need, n, ".")
+    for (i = 1; i <= 3; i++) {
+      if (h[i] + 0 > n[i] + 0) exit 0
+      if (h[i] + 0 < n[i] + 0) exit 1
+    }
+    exit 0
+  }'; then
+    fail "requires macOS $min_macos or newer (found $macos_version)"
+  fi
+fi
 case "$(uname -m)" in
   x86_64 | amd64) arch=x86_64 ;;
   arm64 | aarch64) arch=aarch64 ;;
@@ -36,8 +55,6 @@ if [ "$os" = macos ] && [ "$arch" = x86_64 ]; then
   if [ "$(sysctl -n hw.optional.arm64 2>/dev/null || true)" = 1 ] ||
      [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || true)" = 1 ]; then
     arch=aarch64
-  else
-    fail "Intel Macs aren't supported; build from source: https://github.com/herdrdev/herdr-app#build-from-source"
   fi
 fi
 target="$os-$arch"
