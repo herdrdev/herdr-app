@@ -487,6 +487,8 @@ fn prepaint_view(
                     && element_state.cache_key.text_style == text_style
                     && !window.dirty_views.contains(&entity_id)
                     && !window.refreshing
+                    // HERDR: its accessibility nodes must exist in the last frame.
+                    && window.a11y.can_reuse_cached()
                 {
                     let prepaint_start = window.prepaint_index();
                     window.reuse_prepaint(element_state.prepaint_range.clone());

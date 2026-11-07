@@ -1017,6 +1017,8 @@ pub(crate) struct PrepaintStateIndex {
     dispatch_tree_index: usize,
     accessed_element_states_index: usize,
     line_layout_index: LineLayoutIndex,
+    /// HERDR: where the view's accessibility nodes start in the frame's list.
+    a11y_nodes_index: usize,
 }
 
 #[derive(Clone, Default)]
@@ -3693,6 +3695,9 @@ impl Window {
                 );
                 self.platform_window.a11y_tree_update(tree_update);
             }
+        } else {
+            // HERDR: nothing for a cached view to reuse in the next frame.
+            self.a11y.forget_rendered();
         }
     }
 
@@ -3889,6 +3894,7 @@ impl Window {
             dispatch_tree_index: self.next_frame.dispatch_tree.len(),
             accessed_element_states_index: self.next_frame.accessed_element_states.len(),
             line_layout_index: self.text_system.layout_index(),
+            a11y_nodes_index: self.a11y.nodes_index(),
         }
     }
 
@@ -3922,6 +3928,12 @@ impl Window {
         if reused_subtree.contains_focus() {
             self.next_frame.focus = self.focus;
         }
+
+        // HERDR: and its accessibility nodes, or it leaves the tree.
+        self.a11y.reuse_nodes(
+            range.start.a11y_nodes_index..range.end.a11y_nodes_index,
+            self.focus,
+        );
 
         self.next_frame.deferred_draws.extend(
             self.rendered_frame.deferred_draws

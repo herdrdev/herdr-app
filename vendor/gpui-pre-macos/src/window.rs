@@ -1385,11 +1385,10 @@ impl MacWindow {
 impl Drop for MacWindow {
     fn drop(&mut self) {
         let mut this = self.0.lock();
-        // `accesskit_macos::SubclassingAdapter::for_window` strong-retains the
-        // window's content view, and that content view keeps the `GPUIView` it
-        // hosts alive. Together with the `Arc<Mutex<MacWindowState>>` parked in
-        // both views' `windowState` ivar, that forms
-        // `MacWindowState -> adapter -> content view -> GPUIView -> MacWindowState`,
+        // `accesskit_macos::SubclassingAdapter` strong-retains the view it
+        // subclasses (HERDR: the `GPUIView` itself). Together with the
+        // `Arc<Mutex<MacWindowState>>` parked in the view's `windowState` ivar,
+        // that forms `MacWindowState -> adapter -> GPUIView -> MacWindowState`,
         // a cycle the delegate/`frame_source` teardown below cannot break. Drop
         // the adapter here so the native view, its `CAMetalLayer` and the
         // renderer's command queue are actually released with the window.
@@ -2385,15 +2384,29 @@ impl PlatformWindow for MacWindow {
         };
         let action_handler = A11yActionHandler(callbacks.action);
 
-        let adapter = unsafe {
-            accesskit_macos::SubclassingAdapter::for_window(
-                lock.native_window as *mut c_void,
+        // HERDR: the GPUI view, not the window's content view (`for_window`).
+        // AppKit finds the focused element from the first responder, which is
+        // this view inside the content view, so with the content view
+        // subclassed, "what is focused?" (dictation apps asking where to type)
+        // never reached the tree and answered with the bare window.
+        let mut adapter = unsafe {
+            accesskit_macos::SubclassingAdapter::new(
+                lock.native_view.as_ptr() as *mut c_void,
                 activation_handler,
                 action_handler,
             )
         };
+        // HERDR: the adapter starts as unfocused and hears of key changes
+        // after this; a window already key would report no focus until the
+        // person left it and came back.
+        let is_key: BOOL = unsafe { msg_send![lock.native_window, isKeyWindow] };
+        let events = adapter.update_view_focus_state(is_key == YES);
 
         lock.accesskit_adapter = Some(adapter);
+        drop(lock);
+        if let Some(events) = events {
+            events.raise();
+        }
     }
 
     fn a11y_tree_update(&self, tree_update: accesskit::TreeUpdate) {

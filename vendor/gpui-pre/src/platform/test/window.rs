@@ -1,5 +1,5 @@
 use crate::{
-    AnyWindowHandle, Bounds, DevicePixels, DispatchEventResult, GpuSpecs, HeadlessAtlas, Pixels,
+    A11yCallbacks, AnyWindowHandle, Bounds, DevicePixels, DispatchEventResult, GpuSpecs, HeadlessAtlas, Pixels,
     PlatformAtlas, PlatformDisplay, PlatformHeadlessRenderer, PlatformInput, PlatformInputHandler,
     PlatformWindow, Point, PromptButton, RequestFrameOptions, Scene, Size, TestPlatform,
     TextInputConfiguration, TextInputStateChange, WindowAppearance, WindowBackgroundAppearance,
@@ -56,6 +56,10 @@ pub(crate) struct TestWindowState {
     appearance: WindowAppearance,
     external_drag_files: Vec<(PathBuf, bool)>,
     start_external_drag_result: bool,
+    // HERDR: the accessibility adapter, so tests can see what assistive
+    // technology would.
+    a11y_callbacks: Option<Arc<A11yCallbacks>>,
+    a11y_tree: Option<accesskit::TreeUpdate>,
 }
 
 #[derive(Clone)]
@@ -130,7 +134,31 @@ impl TestWindow {
             appearance: WindowAppearance::Light,
             external_drag_files: Vec::new(),
             start_external_drag_result: false,
+            a11y_callbacks: None,
+            a11y_tree: None,
         })))
+    }
+
+    /// HERDR: assistive technology connects to the window, as a screen reader
+    /// or a dictation app querying the focused element does.
+    pub fn simulate_a11y_activation(&self) {
+        let callbacks = self.0.lock().a11y_callbacks.clone();
+        if let Some(callbacks) = callbacks {
+            (callbacks.activation)();
+        }
+    }
+
+    /// HERDR: assistive technology asks for an action on a node.
+    pub fn simulate_a11y_action(&self, request: accesskit::ActionRequest) {
+        let callbacks = self.0.lock().a11y_callbacks.clone();
+        if let Some(callbacks) = callbacks {
+            (callbacks.action)(request);
+        }
+    }
+
+    /// HERDR: the last accessibility tree sent to the platform.
+    pub fn a11y_tree(&self) -> Option<accesskit::TreeUpdate> {
+        self.0.lock().a11y_tree.clone()
     }
     pub fn simulate_scheduled_frame(&self) -> bool {
         let callback = {
@@ -554,6 +582,14 @@ impl PlatformWindow for TestWindow {
 
     fn as_test(&mut self) -> Option<&mut TestWindow> {
         Some(self)
+    }
+
+    fn a11y_init(&self, callbacks: A11yCallbacks) {
+        self.0.lock().a11y_callbacks = Some(Arc::new(callbacks));
+    }
+
+    fn a11y_tree_update(&self, tree_update: accesskit::TreeUpdate) {
+        self.0.lock().a11y_tree = Some(tree_update);
     }
 
     #[cfg(target_os = "windows")]

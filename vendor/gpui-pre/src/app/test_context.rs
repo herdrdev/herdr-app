@@ -482,6 +482,21 @@ impl TestAppContext {
             .simulate_visual_viewport_change(bounds);
     }
 
+    /// HERDR: assistive technology connects to the window.
+    pub fn simulate_a11y_activation(&self, window_handle: AnyWindowHandle) {
+        self.test_window(window_handle).simulate_a11y_activation();
+    }
+
+    /// HERDR: assistive technology asks for an action on a node.
+    pub fn simulate_a11y_action(&self, window_handle: AnyWindowHandle, request: accesskit::ActionRequest) {
+        self.test_window(window_handle).simulate_a11y_action(request);
+    }
+
+    /// HERDR: the last accessibility tree the window sent to the platform.
+    pub fn a11y_tree(&self, window_handle: AnyWindowHandle) -> Option<accesskit::TreeUpdate> {
+        self.test_window(window_handle).a11y_tree()
+    }
+
     /// Simulates the window moving to a display with a different scale factor.
     pub fn simulate_window_scale_factor_change(
         &self,
