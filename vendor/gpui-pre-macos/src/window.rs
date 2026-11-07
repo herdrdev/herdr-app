@@ -232,6 +232,25 @@ unsafe fn build_classes() {
                 display_layer as extern "C" fn(&Object, Sel, id),
             );
 
+            // Expose the view to Accessibility as an editable text area so
+            // dictation/paste tools can detect a text target (NSAccessibility).
+            decl.add_method(
+                sel!(isAccessibilityElement),
+                ax_is_element as extern "C" fn(&Object, Sel) -> BOOL,
+            );
+            decl.add_method(
+                sel!(accessibilityRole),
+                ax_role as extern "C" fn(&Object, Sel) -> id,
+            );
+            decl.add_method(
+                sel!(accessibilityValue),
+                ax_value as extern "C" fn(&Object, Sel) -> id,
+            );
+            decl.add_method(
+                sel!(accessibilitySelectedTextRange),
+                ax_selected_text_range as extern "C" fn(&Object, Sel) -> NSRange,
+            );
+
             decl.add_protocol(Protocol::get("NSTextInputClient").unwrap());
             decl.add_method(
                 sel!(validAttributesForMarkedText),
@@ -3381,6 +3400,22 @@ extern "C" fn wake_frames(view: *mut c_void) {
 
 extern "C" fn valid_attributes_for_marked_text(_: &Object, _: Sel) -> id {
     unsafe { msg_send![class!(NSArray), array] }
+}
+
+extern "C" fn ax_is_element(_: &Object, _: Sel) -> BOOL {
+    YES
+}
+
+extern "C" fn ax_role(_: &Object, _: Sel) -> id {
+    unsafe { ns_string("AXTextArea") }
+}
+
+extern "C" fn ax_value(_: &Object, _: Sel) -> id {
+    unsafe { ns_string("") }
+}
+
+extern "C" fn ax_selected_text_range(_: &Object, _: Sel) -> NSRange {
+    NSRange { location: 0, length: 0 }
 }
 
 extern "C" fn has_marked_text(this: &Object, _: Sel) -> BOOL {
