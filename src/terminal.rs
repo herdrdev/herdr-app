@@ -1235,6 +1235,13 @@ fn is_icon(text: &str) -> bool {
     matches!((chars.next(), chars.next()), (Some(c), None) if matches!(c as u32, 0xE000..=0xF8FF | 0xF0000..=0x10FFFD))
 }
 
+/// An emoji that takes one cell: text-default emoji such as 🕹 without U+FE0F.
+/// Fonts draw many of them two cells wide.
+fn one_cell_emoji(c: &vt::Cell) -> bool {
+    use unicode_properties::UnicodeEmoji as _;
+    !c.wide && c.text.chars().next().is_some_and(|ch| !ch.is_ascii() && ch.is_emoji_char())
+}
+
 /// Keep the configured font’s icon proportions; only fit bundled fallback glyphs.
 fn fallback_icon(text: &str, font: &Font, ts: &gpui::TextSystem) -> Option<IconGlyph> {
     let c = text.chars().next().filter(|_| is_icon(text))?;
@@ -1520,8 +1527,9 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
         }
         let fitted_size = fallback_size(c, &text_font, cell.width, window.text_system());
         let mut text = if c.text.is_empty() { " ".to_owned() } else { c.text.clone() };
+        let emoji = one_cell_emoji(c);
         // Shape the cursor cell separately, so its plain glyph doesn't cover a ligature.
-        if !c.wide && fitted_size.is_none() && cursor != Some(start) {
+        if !c.wide && !emoji && fitted_size.is_none() && cursor != Some(start) {
             while x < row.len() {
                 let d = &row[x];
                 let same = !d.wide
@@ -1532,8 +1540,8 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
                     && d.faint == c.faint
                     && d.underline == c.underline
                     && d.strike == c.strike;
-                // Bundled fallback icons are fitted separately from the text run.
-                if !same || cursor == Some(x) || (d.text.is_empty() && !d.underline && !d.strike) || crate::sprites::is_sprite(&d.text) || fallback_icon(&d.text, &text_font, window.text_system()).is_some() || fallback_size(d, &text_font, cell.width, window.text_system()).is_some() {
+                // Bundled fallback icons and one-cell emoji are fitted separately from the text run.
+                if !same || cursor == Some(x) || (d.text.is_empty() && !d.underline && !d.strike) || crate::sprites::is_sprite(&d.text) || fallback_icon(&d.text, &text_font, window.text_system()).is_some() || one_cell_emoji(d) || fallback_size(d, &text_font, cell.width, window.text_system()).is_some() {
                     break;
                 }
                 text.push_str(if d.text.is_empty() { " " } else { &d.text });
@@ -1554,8 +1562,18 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
             underline: c.underline.then(|| UnderlineStyle { thickness: px(1.0), color: Some(color), wavy: false }),
             strikethrough: c.strike.then(|| StrikethroughStyle { thickness: px(1.0), color: Some(color) }),
         };
+        let font_size = px(crate::settings::font_size());
+        if emoji {
+            let line = window.text_system().shape_line(text.clone().into(), font_size, &[run.clone()], None);
+            if line.width > cell.width {
+                // Scaled to its cell, as Ghostty does, so it doesn't cover the next one.
+                let line = window.text_system().shape_line(text.into(), font_size * (cell.width / line.width), &[run], None);
+                ops.push(RowOp::Text { x: start, line });
+                continue;
+            }
+        }
         let force = (!c.wide).then_some(cell.width);
-        let line = window.text_system().shape_line(text.into(), fitted_size.unwrap_or_else(|| px(crate::settings::font_size())), &[run], force);
+        let line = window.text_system().shape_line(text.into(), fitted_size.unwrap_or(font_size), &[run], force);
         ops.push(RowOp::Text { x: start, line });
     }
     ops
@@ -3050,6 +3068,25 @@ mod tests {
             }
         }).unwrap();
         crate::settings::set((*original).clone());
+    }
+
+    #[gpui::test]
+    fn one_cell_emoji_fit_their_cell(cx: &mut gpui::TestAppContext) {
+        use super::*;
+        let row: Vec<_> = "🕹a".chars().map(|ch| vt::Cell { text: ch.to_string(), ..Default::default() }).collect();
+        let window = cx.add_window(|_, _| Empty);
+        window.update(cx, |_, window, _| {
+            let cell = size(px(8.), px(16.));
+            let ops = row_ops(&row, cell, None, window);
+            let runs: Vec<_> = ops.iter().filter_map(|op| match op {
+                RowOp::Text { x, line } => Some((*x, line.text.as_ref())),
+                _ => None,
+            }).collect();
+            assert_eq!(runs, vec![(0, "🕹"), (1, "a")]);
+            let RowOp::Text { line, .. } = &ops[0] else { panic!("the emoji has no text op") };
+            // Two cells wide unfitted; float rounding may leave a hair over one.
+            assert!(line.width <= cell.width * 1.001, "{:?} wider than its cell", line.width);
+        }).unwrap();
     }
 
     struct Empty;
