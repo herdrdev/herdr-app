@@ -60,6 +60,16 @@ The window arranges terminals. The core runs them.
 Closing the window leaves them running; closing a pane or tab ends its terminals.
 After a reboot or core crash, kept panes get fresh shells in their last folders, not their old programs.
 
+## Open Linear
+
+Choose **Linear** from the **+** menu to open it in a tab. Herdr looks for `.linear-project` in the focused terminal's folder, then at the Git root if the file is absent. For a remote space, it reads the file on that machine. The file contains the Linear workspace slug and project UUID:
+
+```json
+{"workspace":"my-workspace","project":"00000000-0000-0000-0000-000000000000"}
+```
+
+If the file is missing or invalid, the tab opens Linear without a project. Sign in with email and enter the code from Linear's email in the tab. Browser data is shared by Herdr's browser tabs and kept when the app restarts.
+
 ## Work on another machine
 
 Add an SSH machine from Settings → Machines or the sidebar's Add machine action.
