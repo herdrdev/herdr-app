@@ -370,6 +370,12 @@ pub struct Person {
     /// How big the whole app is drawn (1 = as designed). The zoom keys change it.
     pub zoom: f32,
     pub sounds: Sounds,
+    /// When an alert also goes to the system's notification center (alert.rs).
+    #[serde(skip_serializing_if = "SystemNotifications::is_background")]
+    pub system_notifications: SystemNotifications,
+    /// Bounce the Dock icon when an agent needs you while Herdr is in the background.
+    #[serde(skip_serializing_if = "std::ops::Not::not")]
+    pub dock_bounce: bool,
     /// The herdr-core to use, when it isn't where Herdr looks (core_bin.rs).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub core: Option<String>,
@@ -404,6 +410,23 @@ pub struct Person {
     pub theme: Option<crate::layout::ThemeChoice>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub colors: BTreeMap<String, String>,
+}
+
+/// `background`: only while Herdr isn't the app in front. `always`: also while
+/// it is, unless the person is looking at that agent.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum SystemNotifications {
+    #[default]
+    Background,
+    Always,
+    Off,
+}
+
+impl SystemNotifications {
+    fn is_background(&self) -> bool {
+        *self == SystemNotifications::Background
+    }
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -447,6 +470,8 @@ impl Default for Person {
         Person {
             zoom: 1.0,
             sounds: Sounds::default(),
+            system_notifications: SystemNotifications::Background,
+            dock_bounce: false,
             core: None,
             font: None,
             font_size: None,
@@ -495,6 +520,8 @@ pub struct Settings {
     pub minimum_contrast: f32,
     pub option_as_alt: OptionAsAlt,
     pub sounds: Sounds,
+    pub system_notifications: SystemNotifications,
+    pub dock_bounce: bool,
 }
 
 /// Attention sounds: when an agent needs you, and when one finished while you
@@ -537,6 +564,8 @@ impl Default for Settings {
             minimum_contrast: 1.0,
             option_as_alt: OptionAsAlt::Auto,
             sounds: Sounds::default(),
+            system_notifications: SystemNotifications::Background,
+            dock_bounce: false,
         }
     }
 }
@@ -572,6 +601,8 @@ impl Settings {
             terminal_padding: look.terminal_padding.unwrap_or(d.terminal_padding),
             terminal_opacity: look.terminal_opacity.unwrap_or(1.0).clamp(0.0, 1.0),
             sounds: person.sounds.clone(),
+            system_notifications: person.system_notifications,
+            dock_bounce: person.dock_bounce,
             clipboard_write: person.clipboard_write,
             minimum_contrast: person.minimum_contrast,
             option_as_alt: person.option_as_alt,
@@ -937,11 +968,25 @@ mod tests {
         assert_eq!(Settings::compose(&person, &win98.look, true).theme, "ink");
     }
 
+    #[test]
+    fn system_notifications_parse_and_stay_out_of_settings_json_by_default() {
+        let person: Person = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert_eq!((person.system_notifications, person.dock_bounce), (SystemNotifications::Background, false));
+        let saved = serde_json::to_value(&person).unwrap();
+        for key in ["system_notifications", "dock_bounce"] {
+            assert!(saved.get(key).is_none(), "{key} written at its default");
+        }
+        for (word, mode) in [("always", SystemNotifications::Always), ("off", SystemNotifications::Off), ("background", SystemNotifications::Background)] {
+            let person: Person = serde_json::from_value(serde_json::json!({ "system_notifications": word, "dock_bounce": true })).unwrap();
+            assert_eq!((person.system_notifications, person.dock_bounce), (mode, true));
+        }
+    }
+
     /// The guide agents read (written to the home folder) explains every
     /// settings.json key.
     #[test]
     fn the_guide_explains_every_setting() {
-        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), ui_font: Some(String::new()), telemetry: false, clipboard_write: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), ..Person::default() };
+        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), ui_font: Some(String::new()), telemetry: false, clipboard_write: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), system_notifications: SystemNotifications::Off, dock_bounce: true, ..Person::default() };
         let keys: Vec<String> = serde_json::to_value(&all).unwrap().as_object().unwrap().keys().cloned().collect();
         let guide = include_str!("../defaults/AGENTS.md");
         let section = guide.split("## The person").nth(1).and_then(|s| s.split("\n## ").next()).unwrap_or_default();

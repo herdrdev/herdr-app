@@ -485,6 +485,12 @@ Look for a newer Herdr and herdr-core now.
 
 No arguments.
 
+## `app.test_notification`
+
+Send a system notification now, whatever system_notifications says (macOS asks for permission the first time).
+
+No arguments.
+
 ## `app.update_core`
 
 Update herdr-core to its latest release of this generation; terminals keep running.

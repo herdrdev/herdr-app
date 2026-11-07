@@ -659,6 +659,24 @@ What's about the user, never a look:
   goes there when clicked. `done` / `blocked` replace the bundled MP3s
   (path absolute or relative to `~/.config/herdr-app`). Changes apply live,
   including the Play buttons in Settings > Alerts.
+- `system_notifications`: `"background"` (default), `"always"` or `"off"`.
+  The same alerts also go to the system's notification center, titled as
+  the toast ("<name> needs you", "<name> hit an error", "<name> finished"),
+  with the agent's own message from its status report (e.g. "approve Bash:
+  make"), when it gave one, above "space / tab" as the body. One per agent:
+  a newer alert replaces the older one. `background` sends them only while
+  Herdr isn't the app in front; `always` also while it is. Never for the
+  agent the person is looking at. Clicking one brings Herdr forward on that
+  agent; it goes away once the person looks at the agent, it starts working
+  again or it ends while Herdr runs. When Herdr starts, what an earlier run
+  left goes away too, except for an agent still waiting on the person. The
+  toast shows either way. macOS asks permission the first time one is sent,
+  and that first alert may not show; Send a test notification in Settings >
+  Alerts (`app.test_notification`) asks while the person is there. A build
+  not run from an app bundle sends none.
+- `dock_bounce`: `true` bounces the Dock icon (macOS) when an agent needs
+  the person (blocked or stopped on an error) while Herdr is in the
+  background. Off by default.
 - `core`: the herdr-core binary to use, when it isn't where Herdr looks
   (PATH, the login shell's PATH, `~/.local/bin`, Homebrew, mise, Nix,
   cargo). Read at start.
