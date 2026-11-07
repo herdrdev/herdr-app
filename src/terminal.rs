@@ -1429,13 +1429,21 @@ pub fn cell_size(window: &Window) -> Size<Pixels> {
     let f = cell_font(false, false);
     let id = ts.resolve_font(&f);
     let fs = px(crate::settings::font_size());
-    let w = ts.advance(id, fs, 'M').map(|s| s.width).unwrap_or(fs * 0.6);
+    let advance = ts.advance(id, fs, 'M').map(|s| s.width).unwrap_or(fs * 0.6);
+    let w = spaced_width(advance, crate::settings::z(crate::settings::get().letter_spacing));
     let h = ts.ascent(id, fs) + ts.descent(id, fs).abs();
-    // The width stays the font's own advance: GPUI only moves a glyph onto the
-    // grid once it drifts over 1px, so a rounded width made text wobble.
-    // Boxes snap their edges instead (`snap_box`).
+    // The width is not rounded: glyphs sit exactly on their cells (gpui-pre
+    // `apply_force_width_to_layout`), and boxes snap their edges (`snap_box`).
     let scale = window.scale_factor();
     size(w, px((f32::from(h) * 1.15 * scale).ceil() / scale))
+}
+
+/// The font's advance plus letter_spacing, kept within half to one and a half
+/// advances. gpui-pre's force-width pass takes a glyph less than half a cell
+/// past the previous letter for a combining mark, so cells twice the advance
+/// would draw every other letter off the grid.
+fn spaced_width(advance: Pixels, spacing: Pixels) -> Pixels {
+    (advance + spacing).max(advance * 0.5).min(advance * 1.5)
 }
 
 // Force-width shaping moves glyph origins, but does not resize fallback glyphs.
@@ -2747,6 +2755,17 @@ mod tests {
         cx.run_until_parked();
         root.read_with(cx, |root, cx| assert!(root.0.read(cx).search_open));
         assert!(cx.debug_bounds("find-bar").is_some());
+    }
+
+    #[test]
+    fn letter_spacing_keeps_cells_within_half_to_one_and_a_half_advances() {
+        use gpui::px;
+        let advance = px(8.);
+        assert_eq!(super::spaced_width(advance, px(0.)), advance);
+        assert_eq!(super::spaced_width(advance, px(-0.25)), px(7.75));
+        assert_eq!(super::spaced_width(advance, px(2.)), px(10.));
+        assert_eq!(super::spaced_width(advance, px(10.)), px(12.));
+        assert_eq!(super::spaced_width(advance, px(-10.)), px(4.));
     }
 
     #[test]
