@@ -380,6 +380,9 @@ pub struct Person {
     pub font_size: Option<f32>,
     /// Enable programming ligatures in terminal fonts.
     pub font_ligatures: bool,
+    /// The terminals' row height, as a multiple of the font's height.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub line_height: Option<f32>,
     /// The panels' font (their sizes follow zoom).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ui_font: Option<String>,
@@ -451,6 +454,7 @@ impl Default for Person {
             font: None,
             font_size: None,
             font_ligatures: false,
+            line_height: None,
             ui_font: None,
             telemetry: true,
             clipboard_write: true,
@@ -472,6 +476,8 @@ pub struct Settings {
     pub font_family: String,
     pub font_size: f32,
     pub font_ligatures: bool,
+    /// The terminals' row height, as a multiple of the font's height.
+    pub line_height: f32,
     pub ui_font_family: String,
     pub ui_font_size: f32,
     /// How big the whole app is drawn (1 = as designed). The zoom keys change it.
@@ -522,6 +528,7 @@ impl Default for Settings {
             font_family: DEFAULT_FONT.into(),
             font_size: 14.0,
             font_ligatures: false,
+            line_height: 1.15,
             ui_font_family: "Geist".into(),
             ui_font_size: 13.0,
             zoom: 1.0,
@@ -560,6 +567,7 @@ impl Settings {
             font_family: look.font.clone().or(person.font.clone()).unwrap_or(d.font_family),
             font_size: look.font_size.or(person.font_size).unwrap_or(d.font_size),
             font_ligatures: person.font_ligatures,
+            line_height: look.line_height.or(person.line_height).unwrap_or(d.line_height),
             ui_font_family: look.ui_font.clone().or(person.ui_font.clone()).unwrap_or(d.ui_font_family),
             ui_font_size: d.ui_font_size,
             zoom: person.zoom,
@@ -624,6 +632,9 @@ impl Settings {
         }
         if !(6.0..=72.0).contains(&self.font_size) {
             out.push(format!("font_size {} is outside 6..72", self.font_size));
+        }
+        if !(0.8..=2.0).contains(&self.line_height) {
+            out.push(format!("line_height {} is outside 0.8..2", self.line_height));
         }
         out
     }
@@ -860,13 +871,13 @@ mod tests {
     #[test]
     fn layout_look_wins_and_settings_fill_what_it_leaves_unset() {
         let person = Person {
-            font: Some("person".into()), font_size: Some(19.0), ui_font: Some("person-ui".into()),
+            font: Some("person".into()), font_size: Some(19.0), line_height: Some(1.0), ui_font: Some("person-ui".into()),
             theme: Some(crate::layout::ThemeChoice::One("paper".into())),
             colors: [("accent".into(), "#123456".into())].into(),
             ..Person::default()
         };
         let look = crate::layout::Look {
-            font: Some("layout".into()), font_size: Some(14.0), ui_font: Some("layout-ui".into()),
+            font: Some("layout".into()), font_size: Some(14.0), line_height: Some(1.3), ui_font: Some("layout-ui".into()),
             theme: Some(crate::layout::ThemeChoice::One("ink".into())),
             colors: Some([("accent".into(), "#abcdef".into()), ("text".into(), "#ffffff".into())].into()),
             ..Default::default()
@@ -874,8 +885,10 @@ mod tests {
         let inherited = Settings::compose(&person, &crate::layout::Look::default(), true);
         assert_eq!((inherited.font_family.as_str(), inherited.font_size, inherited.ui_font_family.as_str(), inherited.theme.as_str()), ("person", 19.0, "person-ui", "paper"));
         assert_eq!(inherited.colors["accent"], "#123456");
+        assert_eq!(inherited.line_height, 1.0);
         let own = Settings::compose(&person, &look, true);
         assert_eq!((own.font_family.as_str(), own.font_size, own.ui_font_family.as_str(), own.theme.as_str()), ("layout", 14.0, "layout-ui", "ink"));
+        assert_eq!(own.line_height, 1.3);
         assert_eq!(own.colors["accent"], "#abcdef");
         assert_eq!(own.colors["text"], "#ffffff");
     }
@@ -907,6 +920,15 @@ mod tests {
         }
     }
 
+    #[test]
+    fn terminal_line_height_keeps_its_default_and_rejects_extremes() {
+        let default = Settings::compose(&Person::default(), &crate::layout::Look::default(), true);
+        assert_eq!(default.line_height, 1.15);
+        assert!(default.problems().is_empty());
+        let tight = Person { line_height: Some(0.5), ..Person::default() };
+        let problems = Settings::compose(&tight, &crate::layout::Look::default(), true).problems();
+        assert!(problems.iter().any(|p| p.contains("line_height")), "{problems:?}");
+    }
     #[test]
     fn program_clipboard_writes_default_on_and_can_be_disabled() {
         let default: Person = serde_json::from_str("{}").unwrap();
@@ -941,7 +963,7 @@ mod tests {
     /// settings.json key.
     #[test]
     fn the_guide_explains_every_setting() {
-        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), ui_font: Some(String::new()), telemetry: false, clipboard_write: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), ..Person::default() };
+        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), line_height: Some(1.0), ui_font: Some(String::new()), telemetry: false, clipboard_write: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), ..Person::default() };
         let keys: Vec<String> = serde_json::to_value(&all).unwrap().as_object().unwrap().keys().cloned().collect();
         let guide = include_str!("../defaults/AGENTS.md");
         let section = guide.split("## The person").nth(1).and_then(|s| s.split("\n## ").next()).unwrap_or_default();
