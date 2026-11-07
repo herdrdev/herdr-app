@@ -19,8 +19,11 @@ function Fail($why) { throw "herdr: $why" }
 $releases = if ($env:HERDR_RELEASES_URL) { $env:HERDR_RELEASES_URL.TrimEnd("/") } else { "https://releases.herdr.dev" }
 $dir = Join-Path $env:LOCALAPPDATA "Programs\herdr-app"
 $arch = if ($env:PROCESSOR_ARCHITEW6432) { $env:PROCESSOR_ARCHITEW6432 } else { $env:PROCESSOR_ARCHITECTURE }
-if ($arch -ne "AMD64") { Fail "no build for $arch Windows yet (x64 only)" }
-$target = "windows-x86_64"
+$target = switch ($arch) {
+    "AMD64" { "windows-x86_64" }
+    "ARM64" { "windows-aarch64" }
+    default { Fail "no build for $arch Windows yet (x64 and ARM64 only)" }
+}
 # Windows' own tar: Git Bash's, often first on PATH, takes C:\ for a remote host.
 $tar = Join-Path $env:SystemRoot "System32\tar.exe"
 if (-not (Get-Command curl.exe -ErrorAction SilentlyContinue) -or -not (Test-Path $tar)) {

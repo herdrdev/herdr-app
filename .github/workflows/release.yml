@@ -70,6 +70,8 @@ jobs:
           - { target: linux-aarch64, runner: ubuntu-22.04-arm }
           - { target: macos-aarch64, runner: macos-15 }
           - { target: windows-x86_64, runner: windows-2022 }
+          # The triple is explicit: Git Bash's `uname -m` may not say aarch64.
+          - { target: windows-aarch64, runner: windows-11-arm, triple: aarch64-pc-windows-msvc }
     runs-on: ${{ matrix.runner }}
     # Only tags can access the release environment's Apple certificate.
     environment: ${{ github.ref_type == 'tag' && 'release' || 'build' }}
@@ -127,7 +129,7 @@ jobs:
           RELEASES_URL: ${{ vars.RELEASES_URL }}
           APPLE_CERTIFICATE_P12: ${{ runner.os == 'macOS' && github.ref_type == 'tag' && secrets.APPLE_CERTIFICATE_P12 || '' }}
           APPLE_CERTIFICATE_PASSWORD: ${{ runner.os == 'macOS' && github.ref_type == 'tag' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
-        run: scripts/package
+        run: scripts/package ${{ matrix.triple }}
       - name: Verify release notices
         run: |
           archive="dist/herdr-app-${{ matrix.target }}.tar.gz"
@@ -187,6 +189,10 @@ jobs:
   # while it's unset this is skipped and releases go out unsigned.
   sign-windows:
     needs: build
+    strategy:
+      fail-fast: false
+      matrix:
+        target: [windows-x86_64, windows-aarch64]
     if: >-
       github.triggering_actor == 'ogulcancelik' && vars.AZURE_SIGNING_PROFILE != ''
       && ((github.event_name == 'push' && github.ref_type == 'tag') || github.event_name == 'workflow_dispatch')
@@ -202,9 +208,9 @@ jobs:
     steps:
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: herdr-app-windows-x86_64
+          name: herdr-app-${{ matrix.target }}
           path: dist
-      - run: tar -xzf dist/herdr-app-windows-x86_64.tar.gz -C dist
+      - run: tar -xzf dist/herdr-app-${{ matrix.target }}.tar.gz -C dist
       - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
         with:
           client-id: ${{ vars.AZURE_CLIENT_ID }}
@@ -224,11 +230,11 @@ jobs:
           $sig = Get-AuthenticodeSignature dist\herdr-app\herdr-app.exe
           $sig | Format-List Status, StatusMessage, SignerCertificate
           if ($sig.Status -ne 'Valid') { exit 1 }
-      - run: tar -czf dist/herdr-app-windows-x86_64.tar.gz -C dist herdr-app
+      - run: tar -czf dist/herdr-app-${{ matrix.target }}.tar.gz -C dist herdr-app
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: herdr-app-windows-x86_64
-          path: dist/herdr-app-windows-x86_64.tar.gz
+          name: herdr-app-${{ matrix.target }}
+          path: dist/herdr-app-${{ matrix.target }}.tar.gz
           if-no-files-found: error
           overwrite: true
           retention-days: 7
