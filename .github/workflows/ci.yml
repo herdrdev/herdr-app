@@ -84,6 +84,13 @@ jobs:
       - name: Windows build dependencies
         if: runner.os == 'Windows'
         run: echo "LIBCLANG_PATH=C:\\Program Files\\LLVM\\bin" >> "$GITHUB_ENV"
+      - name: Windows Explorer extension and installer tests
+        if: runner.os == 'Windows'
+        shell: powershell
+        run: |
+          ./scripts/build-windows-shell.ps1
+          ./scripts/test-windows-explorer.ps1
+          ./scripts/test-install-windows.ps1
       - name: Keep unchanged sources fresh
         run: scripts/ci-sources restore
       # Compile the screenshot harness everywhere, even without a desktop.

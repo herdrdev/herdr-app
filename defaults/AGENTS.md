@@ -24,6 +24,19 @@ from the same parts you have.
 
 `herdr-app` controls this app; `hc` controls herdr-core.
 
+`herdr-app open "/path/to/project"` starts or raises the window and opens a
+visible new space on this computer, regardless of the selected space's machine.
+Use it only when asked to open a folder. It uses herdr-core's shell configuration
+in `config.toml` (Git Bash included), with no new app setting or program override.
+An uncertain reply does not mean nothing happened: inspect before retrying.
+
+Windows 11 signed releases optionally add **Open in Herdr** to Explorer's main
+folder and folder-background menus. Installation or the first launch of a new
+release offers it; a refusal is remembered. The installed
+`%LOCALAPPDATA%\Programs\herdr-app\windows-explorer.ps1` helper accepts
+`-Action Enable`, `-Action Disable` or `-Action Repair`. These change Explorer
+integration, not the app's settings or the core's shell configuration.
+
 ## What you can and can't do
 
 You can: rearrange and restyle the whole window (layouts), rebind any key,
@@ -543,7 +556,7 @@ The main ones:
   splits stay there; `spaces()` gives each space's `machine`, null here),
   `space.close {id?, confirmed?}`, `space.rename {id?, name}` ("": Herdr's name again),
   `space.move {id, index}`, `space.select {index | id}`, `space.next`, `space.prev`.
-  With no `argv`, the target core chooses that machine's default shell (PowerShell 7 when available on Windows).
+  With no `argv`, the target core chooses the shell configured in its `config.toml`, or its platform default (PowerShell 7 when available on Windows).
 - Tabs: `tab.new {name?, space?, folder?, argv?, task?}` (argv: an
   agent to run, task: its first message). Agents run in your interactive
   shell (including fish), which stays open after the agent exits. A terminal
@@ -675,7 +688,9 @@ What's about the user, never a look:
   with a light and a dark theme shows the matching one.
 - Updates: an installed app downloads them by itself and offers Restart and
   What changed. If the app crashes or is killed with a verified newer update
-  waiting, the next launch installs it before opening a window. The first
+  waiting, the next ordinary launch installs it before opening a window.
+  A folder launch opens its folder first and leaves the update for later.
+  The first
   start after an app update also updates herdr-core
   to the latest release of the same generation, keeping terminals running.
   Settings → Updates keeps app and core actions together;

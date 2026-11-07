@@ -96,6 +96,10 @@ try {
         }
     }
 
+    $explorer = Join-Path $dir 'windows-explorer.ps1'
+    if (Test-Path -LiteralPath $explorer) {
+        & powershell.exe -NoLogo -NoProfile -NonInteractive -WindowStyle Hidden -ExecutionPolicy Bypass -File $explorer -Action Offer -InstallRoot $dir
+    }
     Write-Host "Herdr is installed. Open it from the Start menu, or run: herdr-app"
 } finally {
     Remove-Item -Recurse -Force $tmp -ErrorAction SilentlyContinue

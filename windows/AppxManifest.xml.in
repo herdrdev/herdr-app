@@ -1,0 +1,39 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Package xmlns="http://schemas.microsoft.com/appx/manifest/foundation/windows10"
+  xmlns:uap="http://schemas.microsoft.com/appx/manifest/uap/windows10"
+  xmlns:uap10="http://schemas.microsoft.com/appx/manifest/uap/windows10/10"
+  xmlns:desktop4="http://schemas.microsoft.com/appx/manifest/desktop/windows10/4"
+  xmlns:desktop5="http://schemas.microsoft.com/appx/manifest/desktop/windows10/5"
+  xmlns:com="http://schemas.microsoft.com/appx/manifest/com/windows10"
+  xmlns:rescap="http://schemas.microsoft.com/appx/manifest/foundation/windows10/restrictedcapabilities"
+  IgnorableNamespaces="uap uap10 desktop4 desktop5 com rescap">
+  <Identity Name="Herdr.Explorer" Publisher="@PUBLISHER@" Version="@VERSION@" ProcessorArchitecture="x64" />
+  <Properties>
+    <DisplayName>Herdr</DisplayName>
+    <PublisherDisplayName>Herdr</PublisherDisplayName>
+    <Logo>herdr-app-shell\@VERSION@\logo.png</Logo>
+    <uap10:AllowExternalContent>true</uap10:AllowExternalContent>
+  </Properties>
+  <Resources><Resource Language="en-us" /><Resource Language="ru-ru" /></Resources>
+  <Dependencies><TargetDeviceFamily Name="Windows.Desktop" MinVersion="10.0.22000.0" MaxVersionTested="10.0.26100.0" /></Dependencies>
+  <Applications>
+    <Application Id="Herdr" Executable="herdr-app\herdr-app.exe" uap10:TrustLevel="mediumIL" uap10:RuntimeBehavior="win32App">
+      <uap:VisualElements AppListEntry="none" DisplayName="Herdr" Description="Open folders in Herdr" BackgroundColor="transparent"
+        Square150x150Logo="herdr-app-shell\@VERSION@\logo.png" Square44x44Logo="herdr-app-shell\@VERSION@\logo.png" />
+      <Extensions>
+        <com:Extension Category="windows.comServer">
+          <com:ComServer><com:SurrogateServer DisplayName="Herdr shell command">
+            <com:Class Id="2976D73E-BC10-4BAE-A68B-041048F25498" Path="herdr-app-shell\@VERSION@\herdr-explorer.dll" ThreadingModel="STA" />
+          </com:SurrogateServer></com:ComServer>
+        </com:Extension>
+        <desktop4:Extension Category="windows.fileExplorerContextMenus">
+          <desktop4:FileExplorerContextMenus>
+            <desktop5:ItemType Type="Directory"><desktop5:Verb Id="OpenInHerdr" Clsid="2976D73E-BC10-4BAE-A68B-041048F25498" /></desktop5:ItemType>
+            <desktop5:ItemType Type="Directory\Background"><desktop5:Verb Id="OpenInHerdr" Clsid="2976D73E-BC10-4BAE-A68B-041048F25498" /></desktop5:ItemType>
+          </desktop4:FileExplorerContextMenus>
+        </desktop4:Extension>
+      </Extensions>
+    </Application>
+  </Applications>
+  <Capabilities><rescap:Capability Name="runFullTrust" /><rescap:Capability Name="unvirtualizedResources" /></Capabilities>
+</Package>

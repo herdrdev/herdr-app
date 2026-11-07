@@ -1,0 +1,4 @@
+LIBRARY herdr-explorer
+EXPORTS
+    DllGetClassObject PRIVATE
+    DllCanUnloadNow PRIVATE

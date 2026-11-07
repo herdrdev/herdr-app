@@ -26,6 +26,14 @@ only after a successful check; on failure, check the connection and retry.
 ## Show something when asked
 
 New spaces and tabs are shown immediately: only create them when asked.
+`herdr-app open "/path/to/project"` intentionally opens a visible new local
+space, starting the window if necessary. It always targets this computer,
+even when a remote space is selected. The core chooses its configured shell
+from `config.toml`; the app passes no program or shell override. Use this only
+when the person asks to open a folder, never for inspection or background work.
+Opening waits up to 30 seconds for the local layout; an error or an uncertain
+reply is not a reason to retry blindly, since a terminal may already exist.
+
 Pick an explicit, useful name for every new space and tab; don't rely on
 default names. Use IDs from `ls` rather than guessing or acting on the wrong
 focused pane.
