@@ -271,6 +271,10 @@ pub struct PaneFrame {
     /// The border while the pane has focus.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub focus: Option<Line>,
+    /// How much a pane fades while another pane of its tab is selected, 0 to
+    /// 1: the terminal's background colour painted over it at that opacity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub veil: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub radius: Option<f32>,
     /// Space between panes.
@@ -801,12 +805,13 @@ mod tests {
     fn tab_blocks_say_how_their_panes_are_framed() {
         let json = r#"{ "id": "main", "type": "block", "content": { "tab": "active",
           "pane": { "header": { "content": { "mod": "pane" }, "height": 28, "reveal": "hover", "position": "bottom" },
-                    "radius": 10, "gap": 8, "lone": true, "border": { "width": 1, "color": "border" } } } }"#;
+                    "radius": 10, "gap": 8, "lone": true, "border": { "width": 1, "color": "border" }, "veil": 0.4 } } }"#;
         let n: Node = serde_json::from_str(json).unwrap();
         let Some(Content::Context { pane: Some(f), .. }) = n.content() else { panic!("no frame") };
         let h = f.header.as_ref().unwrap();
         assert!(h.hover() && h.bottom() && f.lone);
         assert_eq!((f.radius, f.gap, h.height), (Some(10.0), Some(8.0), Some(28.0)));
+        assert_eq!(f.veil, Some(0.4));
         let back: Node = serde_json::from_str(&serde_json::to_string(&n).unwrap()).unwrap();
         assert_eq!(back, n);
     }

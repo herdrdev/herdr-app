@@ -382,6 +382,13 @@ The tab block says how each pane of the shown tab is wrapped:
 
 - The look applies to every pane; `focus` replaces the border while the
   pane has the keyboard; `gap` is the space between panes.
+- `veil`: 0 to 1 (`"veil": 0.4`). Panes other than the tab's selected one
+  fade by that much: the terminal's background colour (the theme's
+  `background`, ignoring its alpha) is drawn over them at that opacity, so
+  their text fades and the look follows the theme. With `terminal_opacity`
+  below 1 it also covers what shows through the terminal. A dialog or input
+  taking the keyboard doesn't veil the selected pane, and a zoomed tab isn't
+  veiled. Clicks go through it.
 - `header`: a mod drawn on each pane, one copy per pane, with
   `props().pane` and `props().terminal`. It reads its live facts from
   `panes()` (title, folder, branch, agent status, focused, zoomed, scroll)
