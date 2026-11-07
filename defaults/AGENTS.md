@@ -24,6 +24,10 @@ from the same parts you have.
 
 `herdr-app` controls this app; `hc` controls herdr-core.
 
+With Nix flakes, `nix run github:herdrdev/herdr-app -- <arguments>` runs the
+window or its CLI without a profile install. The Nix package needs a separately
+installed herdr-core (`hc`); update the app through Nix, not the in-app updater.
+
 ## What you can and can't do
 
 You can: rearrange and restyle the whole window (layouts), rebind any key,
