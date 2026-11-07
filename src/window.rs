@@ -3712,6 +3712,7 @@ impl AppWindow {
             Request::Run { name, args } => self.run(&name, args, window, cx),
             Request::OpenOverlay { id, spec } => self.open_overlay(id, spec, window, cx),
             Request::CloseOverlay { id } => self.close_overlay(&id, window, cx),
+            Request::SetWindowTitle(title) => window.set_window_title(title.as_deref().unwrap_or("Herdr")),
             Request::Refresh => self.refresh_mods(cx),
             Request::Control { cmd, reply } => {
                 let _ = reply.send(self.control(cmd, window, cx));
@@ -5616,6 +5617,41 @@ export default class Probe extends View {
             cx.deactivate_window();
             assert_eq!(seen(cx), Some(json!(false)), "blurred: {:?}", crate::mods::shared("probe.seen"));
         }
+    }
+
+    #[test]
+    fn mods_set_the_window_title() {
+        in_own_process("window_title");
+    }
+
+    #[gpui::test]
+    fn window_title(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("window_title") {
+            return;
+        }
+        let probe = r#"import { View, div } from "gpui-kit";
+import { setWindowTitle, shared } from "herdr";
+
+export default class Probe extends View {
+  render() {
+    const title = shared("probe.title");
+    if (title !== undefined) setWindowTitle(title);
+    return div();
+  }
+}
+"#;
+        let layout = json!({ "id": "root", "type": "row", "children": [
+            { "id": "probe", "type": "block", "content": { "mod": "title-probe" } }
+        ] });
+        let (_view, cx) = open_window(cx, "title-probe", probe, layout);
+        let title = |value, cx: &mut gpui::VisualTestContext| {
+            crate::mods::set_shared("probe.title".into(), value);
+            cx.run_until_parked();
+            cx.window_title()
+        };
+        assert_eq!(title(json!("acorn"), cx).as_deref(), Some("acorn"));
+        assert_eq!(title(json!(null), cx).as_deref(), Some("Herdr"));
     }
 
     include!("window/pane_size_tests.rs");
