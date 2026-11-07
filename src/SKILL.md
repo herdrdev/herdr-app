@@ -100,10 +100,10 @@ the screen.
 ## Native browser panes (personal fork)
 
 Mods can import `BrowserState` and `Browser` from `herdr-browser` to show an
-HTTP(S) page. Split a mod beside an explicit originating pane with
-`pane.split {direction: "right", pane, mod, props}`; do not infer the origin
-from whichever agent is focused later. Read the installed mod guide for the
-browser API and platform requirements. Pages receive no native command bridge.
+HTTP(S) page. Open a full-size mod tab in an explicit originating space with
+`tab.new {space, mod, props}`; do not infer the origin from whichever agent is
+focused later. Read the installed mod guide for the browser API and platform
+requirements. Pages receive no native command bridge.
 
 ## Customize layouts, keys, or mods
 

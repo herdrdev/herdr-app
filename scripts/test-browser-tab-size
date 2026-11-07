@@ -1,0 +1,40 @@
+#!/usr/bin/env bash
+# Linux UI regression: a native browser retains its size after its tab is hidden.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+export HERDR_APP_SANDBOX="bt-$$"
+root="/var/tmp/herdr-app-$HERDR_APP_SANDBOX"
+sandbox() { scripts/sandbox "$@"; }
+trap 'sandbox down' EXIT
+sandbox up
+export DISPLAY=$(<"$root/display")
+first=$(sandbox do space.new '{"name":"browser-size-test"}' | jq -r .tab)
+browser=$(sandbox do tab.new '{"name":"browser-test","mod":"plannotator-browser","props":{"url":"http://127.0.0.1:9/"}}' | jq -r .tab)
+# Dismiss the first-run welcome overlay, which intentionally hides native browsers.
+sandbox click 945 137
+sleep 2
+check_size() {
+  xwininfo -root -tree | python3 -c '
+import re, sys
+lines = sys.stdin.read().splitlines()
+parent = next(i for i, line in enumerate(lines) if "\"Herdr\"" in line)
+children = [line for line in lines[parent + 1:] if re.match(r"\s+0x[0-9a-f]+", line)][:2]
+assert len(children) == 2, "native browser windows are missing"
+for child in children:
+    match = re.search(r"\s(\d+)x(\d+)\+", child)
+    assert match, child
+    width, height = map(int, match.groups())
+    assert width >= 600 and height >= 400, f"native browser is too small: {width}x{height}"
+'
+}
+check_size
+# Opening the new-tab menu hides the browser beneath the overlay.
+sandbox click 1105 20
+sandbox click 1088 41
+sleep 1
+sandbox do tab.select "{\"id\":\"$first\"}" >/dev/null
+sleep 1
+sandbox do tab.select "{\"id\":\"$browser\"}" >/dev/null
+sleep 2
+check_size
+echo 'native browser size survives switching tabs'

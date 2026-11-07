@@ -49,8 +49,9 @@ The shipped `plannotator-browser` mod takes `{ url, origin? }` props and opens a
 review with Back, Reload and Open externally controls. `herdr-app --browser-api`
 prints the machine-readable browser API version without opening a window.
 The Pi integration in `integrations/plannotator` uses the core terminal's space
-label to split beside its originating pane. An unknown or ambiguous origin
-opens the system browser instead of using the currently focused agent.
+label to open a review in its own tab in the originating agent's space. An
+unknown or ambiguous origin opens the system browser instead of using the
+currently focused agent.
 Review cleanup is scoped to Plannotator's review ID and Pi session, including
 reviews that reuse a listening port. Unmatched browser requests, such as the
 Plannotator archive, keep their system-browser fallback.

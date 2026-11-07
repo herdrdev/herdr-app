@@ -19,7 +19,12 @@ test('a real Pi binds browser launches and cleanup to its own session', { timeou
       transport: 'rpc',
       extensions: [path.resolve(here, '../index.ts'), path.join(here, 'fixtures/probe.ts')],
       tools: ['browser_route_probe'],
-      environment: { HC_TERMINAL_ID: '', HC_TERMINAL_SOCKET: '' },
+      environment: {
+        HC_TERMINAL_ID: '', HC_TERMINAL_SOCKET: '',
+        PLANNOTATOR_BROWSER: undefined, PLANNOTATOR_REMOTE: undefined,
+        HERDR_PLANNOTATOR_SESSION_ID: undefined, HERDR_PLANNOTATOR_NODE: undefined,
+        HERDR_PLANNOTATOR_SOCKET: undefined, HERDR_PLANNOTATOR_TOKEN: undefined,
+      },
       conversation: [assistantMessage([toolCall({ id: 'probe', name: 'browser_route_probe', arguments: {} })], { stopReason: 'toolUse' }), assistantMessage([text('Probe complete')])],
     }).run('Run the browser routing probe');
     assert.equal(getToolExecution(run, 'probe').isError, false);

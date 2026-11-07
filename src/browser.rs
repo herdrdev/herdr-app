@@ -117,7 +117,16 @@ impl Browser {
                 }
             }
             match view.set_visible(show) {
-                Ok(()) => self.visible = show,
+                Ok(()) => {
+                    self.visible = show;
+                    // GTK can restore its default size when a hidden child is shown.
+                    #[cfg(target_os = "linux")]
+                    if show {
+                        if let Some(bounds) = self.bounds {
+                            if let Err(error) = view.set_bounds(bounds) { self.error = Some(error.to_string()); }
+                        }
+                    }
+                },
                 Err(error) => self.error = Some(error.to_string()),
             }
         }

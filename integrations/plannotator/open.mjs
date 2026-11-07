@@ -11,7 +11,7 @@ const execute = promisify(execFile);
 const wsl = process.platform === 'linux' && /microsoft/i.test(release());
 const exists = async file => access(file).then(() => true, () => false);
 
-export function findOriginPane(snapshot, terminal) {
+export function findOriginSpace(snapshot, terminal) {
     const spaceId = terminal.labels?.['herdr.space'];
     if (!spaceId || !terminal.address) return undefined;
     const matches = [];
@@ -19,7 +19,7 @@ export function findOriginPane(snapshot, terminal) {
         if (space.id !== spaceId && !space.id.endsWith(`/${spaceId}`)) continue;
         for (const tab of space.tabs ?? []) {
             for (const item of tab.terminals ?? []) {
-                if ((item.terminal === terminal.address || item.terminal?.endsWith(`/${terminal.address}`)) && typeof item.pane === 'string') matches.push(item.pane);
+                if ((item.terminal === terminal.address || item.terminal?.endsWith(`/${terminal.address}`)) && typeof item.pane === 'string') matches.push(space.id);
             }
         }
     }
@@ -81,10 +81,10 @@ export async function openReview({ url, id }, isClosed = () => false) {
             runJson(process.env.HC_BIN || 'hc', ['get', terminalId, '--json']),
             runJson(app, ['ls']),
         ]);
-        const origin = findOriginPane(snapshot, terminal);
+        const origin = findOriginSpace(snapshot, terminal);
         if (!origin) throw new Error('The requesting terminal has no unambiguous pane in this Herdr App');
         if (isClosed()) return { kind: 'closed' };
-        const result = await runJson(app, ['do', 'pane.split', JSON.stringify({ direction: 'right', pane: origin, mod: 'plannotator-browser', props: { url, session, origin: terminalId, review: id } })]);
+        const result = await runJson(app, ['do', 'tab.new', JSON.stringify({ space: origin, name: 'Plannotator', mod: 'plannotator-browser', props: { url, session, origin: terminalId, review: id } })]);
         if (typeof result.pane !== 'string') throw new Error('Herdr did not return the new browser pane');
         return { kind: 'embedded', app, pane: result.pane };
     } catch (error) {

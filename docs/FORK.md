@@ -1,7 +1,7 @@
 # Personal browser fork
 
 This fork follows `herdrdev/herdr-app` and adds a native HTTP(S) browser component
-for mods. Plannotator reviews can open beside the Pi terminal that requested them.
+for mods. Plannotator reviews open in their own tab in the requesting Pi terminal's space.
 Pages have no Herdr command bridge. Existing layouts, terminal storage and core
 protocols are unchanged.
 
@@ -38,11 +38,12 @@ its existing behavior. Otherwise the integration supplies a browser helper that
 finds the native app and its requesting terminal. It uses the terminal's
 `herdr.space` label, not the currently selected agent. An unavailable app, an
 older app without the browser API, or an ambiguous origin opens the system
-browser instead. Closing the review closes only the browser pane it created.
-Each Pi runtime owns a private local socket (a named pipe on Windows). The
-browser hook pairs with Plannotator's review ID over that socket; a reused URL
-or port does not reuse a closed review's lifetime. Cancelling a review while its
-pane is opening also closes that eventual pane. Archive and other unmatched
+browser instead. Closing the review closes only the browser it created. If the
+user has split the review tab, other panes are left alone. Each Pi runtime owns
+a private local socket (a named pipe on Windows). The browser hook pairs with
+Plannotator's review ID over that socket; a reused URL or port does not reuse a
+closed review's lifetime. Cancelling a review while its tab is opening also
+closes the browser once it appears. Archive and other unmatched
 browser requests still open in the system browser.
 
 The Windows app can show a review served by Pi in local WSL through localhost.
