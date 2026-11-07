@@ -61,7 +61,7 @@ Input-SHA256: 0035e237c09464dce9426e0be2b66b1d69052a33c572c9114c31fb95c429b336 v
 Input-SHA256: 752daf2fb234ca4a1fa372c073fe127f44b7b90fd2529ae44273a64f9d53da7a vendor/gpui-pre-linux/LICENSE-APACHE
 Input-SHA256: 79043cc6fc3d6533e0264b468916537eb8db3e2d9961dce745517335a6d3f3fd vendor/gpui-pre-macos/Cargo.toml
 Input-SHA256: 752daf2fb234ca4a1fa372c073fe127f44b7b90fd2529ae44273a64f9d53da7a vendor/gpui-pre-macos/LICENSE-APACHE
-Input-SHA256: 4a374d428ae871cf9651c79098a9a7a69eee5858a0916e3915130d8f77469816 vendor/gpui-pre-wgpu/Cargo.toml
+Input-SHA256: 4e8807ec04775770963f932a8bbaed9a9056fc16b84cf3d732c28e49126dbd7e vendor/gpui-pre-wgpu/Cargo.toml
 Input-SHA256: 752daf2fb234ca4a1fa372c073fe127f44b7b90fd2529ae44273a64f9d53da7a vendor/gpui-pre-wgpu/LICENSE-APACHE
 Input-SHA256: 729c498e73ac5cfdd158f04d1781dda3dbc6acf85f72910be64c12639a19a4b4 vendor/gpui-pre-windows/Cargo.toml
 Input-SHA256: 752daf2fb234ca4a1fa372c073fe127f44b7b90fd2529ae44273a64f9d53da7a vendor/gpui-pre-windows/LICENSE-APACHE

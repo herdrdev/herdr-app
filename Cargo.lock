@@ -3453,6 +3453,7 @@ dependencies = [
  "tiny-skia",
  "ttf-parser",
  "unicode-bidi",
+ "unicode-properties",
  "unicode-segmentation",
  "web-sys",
  "wgpu",

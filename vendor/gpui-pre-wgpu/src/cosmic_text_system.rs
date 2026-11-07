@@ -19,6 +19,7 @@ use swash::{
     scale::{Render, ScaleContext, Source, StrikeWith},
     zeno::{Format, Vector},
 };
+use unicode_properties::{EmojiStatus, UnicodeEmoji};
 use unicode_segmentation::UnicodeSegmentation;
 
 pub struct CosmicTextSystem(RwLock<CosmicTextSystemState>);
@@ -54,6 +55,8 @@ struct CosmicTextSystemState {
     font_system: FontSystem,
     scratch: ShapeBuffer,
     color_fallbacks: HashMap<(FontId, u32, String), Option<ColorFallback>>,
+    /// The color emoji face drawing each character, `None` when no color face has it.
+    color_emoji_faces: HashMap<char, Option<cosmic_text::fontdb::ID>>,
     swash_scale_context: ScaleContext,
     pending_glyph_image: Option<(RenderGlyphParams, swash::scale::image::Image)>,
     #[cfg(feature = "test-support")]
@@ -150,6 +153,7 @@ impl CosmicTextSystem {
             font_system,
             scratch: ShapeBuffer::default(),
             color_fallbacks: HashMap::default(),
+            color_emoji_faces: HashMap::default(),
             swash_scale_context: ScaleContext::new(),
             pending_glyph_image: None,
             #[cfg(feature = "test-support")]
@@ -172,6 +176,7 @@ impl CosmicTextSystem {
             font_system,
             scratch: ShapeBuffer::default(),
             color_fallbacks: HashMap::default(),
+            color_emoji_faces: HashMap::default(),
             swash_scale_context: ScaleContext::new(),
             pending_glyph_image: None,
             #[cfg(feature = "test-support")]
@@ -391,6 +396,7 @@ impl CosmicTextSystemState {
     fn add_fonts(&mut self, fonts: Vec<Cow<'static, [u8]>>) -> Result<()> {
         self.font_ids_by_family_cache.clear();
         self.color_fallbacks.clear();
+        self.color_emoji_faces.clear();
         let db = self.font_system.db_mut();
         for bytes in fonts {
             db.load_font_source(cosmic_text::fontdb::Source::Binary(Arc::new(bytes)));
@@ -1026,12 +1032,36 @@ impl CosmicTextSystemState {
                 )
             };
 
+            let emoji_spans = self.color_emoji_spans(text, offs..run_end, &spans);
             for span in spans {
                 let attrs = match span.slot {
                     None => &primary_attrs,
                     Some(ix) => &fallback_attrs[ix],
                 };
                 attrs_list.add_span(span.start..span.end, attrs);
+            }
+            for (range, id) in emoji_spans {
+                // An alias family keeps the validated face, not a duplicate
+                // with the same family and style.
+                let Some(alias) = self.color_fallback_alias(id) else {
+                    continue;
+                };
+                let Some(face) = self.font_system.db().face(self.loaded_fonts[alias.0].font.id())
+                else {
+                    continue;
+                };
+                let Some((family, _)) = face.families.first() else {
+                    continue;
+                };
+                // The emoji face's own weight and style: cosmic-text skips a
+                // named family whose static faces don't match the request.
+                let attrs = Attrs::new()
+                    .metadata(run.font_id.0)
+                    .family(Family::Name(family))
+                    .stretch(face.stretch)
+                    .style(face.style)
+                    .weight(face.weight);
+                attrs_list.add_span(range, &attrs);
             }
             offs = run_end;
         }
@@ -1307,6 +1337,67 @@ impl CosmicTextSystemState {
             FallbackFontClass::Proportional
         }
     }
+
+    /// Graphemes in `range` that need a color emoji font, with the face to
+    /// draw each one. `spans` are the requested faces for that range.
+    fn color_emoji_spans(
+        &mut self,
+        text: &str,
+        range: Range<usize>,
+        spans: &[RunSpan],
+    ) -> SmallVec<[(Range<usize>, cosmic_text::fontdb::ID); 2]> {
+        let mut emoji_spans = SmallVec::new();
+        if text[range.clone()].is_ascii() {
+            return emoji_spans;
+        }
+        for (ix, grapheme) in text[range.clone()].grapheme_indices(true) {
+            let start = range.start + ix;
+            let ch = grapheme.chars().next().unwrap_or('\0');
+            let requested = spans
+                .iter()
+                .find(|span| span.start <= start && start < span.end)
+                .map(|span| span.font_id);
+            let loaded_fonts = &self.loaded_fonts;
+            let requested_covers =
+                || requested.is_some_and(|id| charmap_covers(loaded_fonts, id, ch));
+            if !needs_color_emoji(grapheme, requested_covers) {
+                continue;
+            }
+            if let Some(id) = self.color_emoji_face(ch) {
+                emoji_spans.push((start..start + grapheme.len(), id));
+            }
+        }
+        emoji_spans
+    }
+
+    /// The first installed emoji face that draws `ch` in color.
+    fn color_emoji_face(&mut self, ch: char) -> Option<cosmic_text::fontdb::ID> {
+        if let Some(id) = self.color_emoji_faces.get(&ch) {
+            return *id;
+        }
+        let db = self.font_system.db();
+        let id = db
+            .faces()
+            // The same name test as cosmic-text's own emoji detection.
+            .filter(|face| face.post_script_name.contains("Emoji"))
+            .find(|face| {
+                db.with_face_data(face.id, |data, index| {
+                    let Some(glyph) = ttf_parser::Face::parse(data, index)
+                        .ok()
+                        .and_then(|font| font.glyph_index(ch))
+                    else {
+                        return false;
+                    };
+                    // Only faces that layout marks `is_emoji`, the ones rendered in color.
+                    check_is_known_emoji_font(&face.post_script_name)
+                        || crate::colr::has_glyph(data, index, u32::from(glyph.0))
+                })
+                .unwrap_or(false)
+            })
+            .map(|face| face.id);
+        self.color_emoji_faces.insert(ch, id);
+        id
+    }
 }
 
 fn alpha_bitmap<'a>(
@@ -1540,6 +1631,29 @@ fn charmap_covers(loaded_fonts: &[LoadedFont], id: FontId, ch: char) -> bool {
     loaded_fonts
         .get(id.0)
         .is_some_and(|loaded| loaded.font.as_swash().charmap().map(ch) != 0)
+}
+
+/// Whether a grapheme is drawn from a color emoji font. U+FE0F asks for one
+/// and U+FE0E for text. Otherwise an `Emoji_Presentation` character uses one
+/// unless the requested font has it, so a configured font may draw either,
+/// as in Ghostty. Text-default emoji such as ☀ keep the normal fallback.
+fn needs_color_emoji(grapheme: &str, requested_covers: impl FnOnce() -> bool) -> bool {
+    if grapheme.contains('\u{fe0e}') {
+        return false;
+    }
+    if grapheme.contains('\u{fe0f}') {
+        return true;
+    }
+    let presentation = grapheme.chars().next().is_some_and(|ch| {
+        matches!(
+            ch.emoji_status(),
+            EmojiStatus::EmojiPresentation
+                | EmojiStatus::EmojiPresentationAndModifierBase
+                | EmojiStatus::EmojiPresentationAndEmojiComponent
+                | EmojiStatus::EmojiPresentationAndModifierAndEmojiComponent
+        )
+    });
+    presentation && !requested_covers()
 }
 
 fn cosmic_font_features(features: &FontFeatures) -> Result<CosmicFontFeatures> {
