@@ -25,11 +25,10 @@ struct Revisions {
 }
 
 impl Revisions {
-    fn changed(&mut self, changed: &mut Changed, rescan: bool) {
+    fn changed(&mut self, changed: &Changed, rescan: bool) {
         if rescan {
             self.next += 1;
             self.all = self.next;
-            changed.extend(self.roots.keys().cloned());
         }
         for root in changed.iter().filter_map(|path| mod_of(path).map(|name| PathBuf::from("mods").join(name))).collect::<HashSet<_>>() {
             self.next += 1;
@@ -80,8 +79,8 @@ pub fn watch(home: &Path, #[cfg(test)] executor: gpui::BackgroundExecutor) -> Op
     let event_revisions = revisions.clone();
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
         let mut revisions = event_revisions.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (mut changed, rescan) = changes(&base, event);
-        revisions.changed(&mut changed, rescan);
+        let (changed, rescan) = changes(&base, event);
+        revisions.changed(&changed, rescan);
         drop(revisions);
         if !changed.is_empty() {
             #[cfg(not(test))]
@@ -430,22 +429,22 @@ mod tests {
         let other = Path::new("/home/probe/mods/other");
         assert_eq!(revision(first), Some(0));
         assert_eq!(revision(other), Some(0));
-        events.revisions.lock().unwrap().changed(&mut vec!["mods/one/main.js".into()], false);
+        events.revisions.lock().unwrap().changed(&vec!["mods/one/main.js".into()], false);
         assert_eq!(revision(first), Some(1));
         assert_eq!(revision(other), Some(0));
         // No copy registration is needed for a root edited while closed.
-        events.revisions.lock().unwrap().changed(&mut vec!["mods/closed/main.js".into()], false);
+        events.revisions.lock().unwrap().changed(&vec!["mods/closed/main.js".into()], false);
         assert_eq!(revision(Path::new("/home/probe/mods/closed")), Some(2));
-        let mut changed = Vec::new();
-        events.revisions.lock().unwrap().changed(&mut changed, true);
+        let changed = Vec::new();
+        events.revisions.lock().unwrap().changed(&changed, true);
         assert!(revision(first).unwrap() > 2);
         assert!(revision(other).unwrap() > 2);
-        assert!(changed.contains(&PathBuf::from("mods/one")));
+        assert!(changed.is_empty(), "a rescan must not request mod hot reloads");
         assert_eq!(revision(Path::new("/outside")), None);
     }
 
     #[test]
-    fn unattributed_events_invalidate_all_mod_roots() {
+    fn unattributed_events_revalidate_code_without_reloading_mods() {
         let base = Path::new("/home/probe");
         let mut paths = vec![base.to_path_buf(), base.join("mods"), base.parent().unwrap().to_path_buf()];
         #[cfg(unix)]
@@ -453,17 +452,37 @@ mod tests {
             use std::os::unix::ffi::OsStringExt;
             paths.push(base.join("mods").join(std::ffi::OsString::from_vec(vec![0xff])));
         }
-        for path in paths {
+        let mut events: Vec<notify::Result<notify::Event>> = paths.into_iter()
+            .map(|path| Ok(notify::Event::new(notify::EventKind::Any).add_path(path))).collect();
+        events.push(Err(notify::Error::generic("missed events")));
+        events.push(Ok(notify::Event::new(notify::EventKind::Any).set_flag(notify::event::Flag::Rescan)));
+        for event in events {
             let mut revisions = Revisions::default();
             revisions.roots.insert("mods/one".into(), 0);
             revisions.roots.insert("mods/two".into(), 0);
-            let event = notify::Event::new(notify::EventKind::Any).add_path(path);
-            let (mut changed, rescan) = changes(base, Ok(event));
-            revisions.changed(&mut changed, rescan);
+            let (changed, rescan) = changes(base, event);
+            revisions.changed(&changed, rescan);
             assert!(revisions.all > 0);
-            assert!(changed.contains(&PathBuf::from("mods/one")));
-            assert!(changed.contains(&PathBuf::from("mods/two")));
+            assert!(!changed.contains(&PathBuf::from("mods/one")));
+            assert!(!changed.contains(&PathBuf::from("mods/two")));
         }
+    }
+
+    #[test]
+    fn rescan_keeps_real_edits_without_reloading_other_mods() {
+        let base = Path::new("/home/probe");
+        let mut revisions = Revisions::default();
+        revisions.roots.insert("mods/one".into(), 0);
+        revisions.roots.insert("mods/two".into(), 0);
+        let event = notify::Event::new(notify::EventKind::Any)
+            .set_flag(notify::event::Flag::Rescan)
+            .add_path(base.join("mods/one/main.js"));
+        let (changed, rescan) = changes(base, Ok(event));
+        revisions.changed(&changed, rescan);
+        assert_eq!(changed, vec![PathBuf::from("mods/one/main.js")]);
+        assert!(revisions.all > 0);
+        assert!(revisions.roots[Path::new("mods/one")] > revisions.all);
+        assert_eq!(revisions.roots[Path::new("mods/two")], 0);
     }
 
     #[test]
