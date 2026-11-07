@@ -116,6 +116,7 @@ fn main() {
         )
         .init();
 
+    update::leave_install_folder();
     if update::apply_on_startup() {
         return;
     }
