@@ -1016,6 +1016,11 @@ fn module(inst: Instance, copy: u64) -> HostModule {
             crate::sound::play(a.string(0)?);
             Ok(HostValue::Null)
         })
+        .function("setBadge", |a| {
+            let label = crate::badge::label(a.get(0)).map_err(HostError::new)?;
+            crate::badge::set(&label).map_err(HostError::new)?;
+            Ok(HostValue::Null)
+        })
         .function("run", |a| {
             let name = a.string(0)?.to_owned();
             let args = a.get(1).map(from_host).unwrap_or(Value::Null);
