@@ -1199,9 +1199,60 @@ pub fn prepare_load(inst: &Instance) -> u64 {
     copy
 }
 
+/// The share of the mod runtime's heap ceiling at which reloads replace it.
+///
+/// Generous: a window's mods take a few MB; what fills the heap is the builds
+/// reloads leave behind, and past this point the next reload gets a fresh
+/// runtime while every mod still loads.
+pub const RECYCLE_AT: f64 = 0.75;
+
+/// How many copy reloads one mod runtime serves before it is replaced anyway.
+///
+/// What a replaced build keeps is not all on the heap the limit measures (the
+/// JIT's feedback and compiled code grow with it too, herdrdev/herdr-app#88),
+/// so a count backs the measurement. A delivery that reloads four copies
+/// counts four; at a save a minute this is an hour and a half of editing.
+pub const RECYCLE_RELOADS: u32 = 64;
+
+/// Why the mod runtime should be replaced now, if it should.
+///
+/// QuickJS cannot unload a module, so every build a reload ever evaluated
+/// stays in the heap, and a window that reloads for a day meets the ceiling as
+/// "out of memory" on whatever allocation comes next; from then on no mod
+/// loads until the runtime goes. "Out of memory" in any copy's error means it
+/// already went past; `used` against `limit`, or `reloads`, says it is on
+/// its way.
+pub fn recycle_reason<'a>(errors: impl IntoIterator<Item = &'a str>, used: usize, limit: usize, reloads: u32) -> Option<String> {
+    if let Some(e) = errors.into_iter().find(|e| e.to_ascii_lowercase().contains("out of memory")) {
+        return Some(format!("a mod ran out of memory ({})", e.trim()));
+    }
+    if limit > 0 && used as f64 >= limit as f64 * RECYCLE_AT {
+        return Some(format!("{reloads} reloads left {} MB of {} MB in the mod runtime", used >> 20, limit >> 20));
+    }
+    if reloads >= RECYCLE_RELOADS {
+        return Some(format!("{reloads} reloads since the mod runtime started"));
+    }
+    None
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn mod_runtime_is_replaced_past_the_heap_share_or_on_out_of_memory() {
+        let mib = 1024 * 1024;
+        assert_eq!(recycle_reason([], 10 * mib, 256 * mib, 3), None);
+        assert_eq!(recycle_reason(["mod a: no such file"], 191 * mib, 256 * mib, RECYCLE_RELOADS - 1), None);
+        let near = recycle_reason([], 192 * mib, 256 * mib, 40).unwrap();
+        assert!(near.contains("192 MB of 256 MB"), "{near}");
+        let many = recycle_reason([], 20 * mib, 256 * mib, RECYCLE_RELOADS).unwrap();
+        assert!(many.contains("64 reloads"), "{many}");
+        let oom = recycle_reason(["mod kanso-strip: reloading ~/mods/kanso-strip: out of memory"], 0, 256 * mib, 0).unwrap();
+        assert!(oom.contains("out of memory") && oom.contains("kanso-strip"), "{oom}");
+        // No limit known (nothing measured): only an error or the count can ask for it.
+        assert_eq!(recycle_reason([], usize::MAX, 0, 0), None);
+    }
 
     #[test]
     fn exec_timeout_defaults_caps_and_rejects_invalid_values() {

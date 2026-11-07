@@ -444,6 +444,11 @@ pub struct AppWindow {
     /// The OS tells us when files change (`files.rs`); else the disk is polled.
     file_events: Option<crate::files::FileEvents>,
     polls: u64,
+    /// The mod runtime is being replaced (`recycle_mods`): since when, and why.
+    mods_restart: Option<(Instant, String)>,
+    /// How many times it was, for `status`, and the copy reloads this one served.
+    mods_restarts: u32,
+    mods_reloads: u32,
     /// The downloaded update the frame's pill offers, and the one closed for now.
     /// What's waiting, in words (`update_label`).
     update_ready: Option<String>,
@@ -537,6 +542,9 @@ impl AppWindow {
             system_dark: is_dark(window.appearance()),
             file_events,
             polls: 0,
+            mods_restart: None,
+            mods_restarts: 0,
+            mods_reloads: 0,
             update_ready: None,
             update_dismissed: None,
             update_success: false,
@@ -1314,6 +1322,80 @@ impl AppWindow {
                 runtime.close_now(root, deadline, window, cx);
             }
         });
+    }
+
+    /// Replaces the mod runtime in place: every copy gets its final call now,
+    /// the runtime goes, and the next poll starts a fresh one and mounts the
+    /// copies again from the layout.
+    ///
+    /// QuickJS cannot unload a module, so each hot reload leaves the previous
+    /// build in the runtime's heap (gpui-shell tags every load `?v=N` for
+    /// that). A window that reloads for a day meets the heap ceiling as "out
+    /// of memory" on a later save, and from then on no mod loads until the
+    /// window restarts. Terminals and agents live in herdr-core and the layout
+    /// is the window's, so a new runtime costs the mods' in-memory state only.
+    fn recycle_mods(&mut self, why: &str, window: &mut Window, cx: &mut Context<Self>) {
+        if self.mods_restart.is_some() {
+            return;
+        }
+        tracing::warn!("replacing the mod runtime: {why}");
+        // Overlays are copies too (a dialog, a toast): they go with the runtime.
+        for id in self.overlays.iter().map(|o| o.id.clone()).collect::<Vec<_>>() {
+            self.remove_overlay(&id, window, cx);
+        }
+        if let Some(runtime) = &self.runtime {
+            let deadline = Instant::now() + Duration::from_millis(100);
+            for root in self.copies.values().filter_map(|copy| copy.root.as_ref()) {
+                runtime.close_now(root, deadline, window, cx);
+            }
+        }
+        self.copies.clear();
+        self.runtime = None;
+        self.mods_restart = Some((Instant::now(), why.to_owned()));
+        self.publish_shown_copies();
+        cx.notify();
+    }
+
+    /// The second half of `recycle_mods`, from `poll`: the old runtime is gone
+    /// once nothing holds it (a copy's final call may run until its deadline),
+    /// so this tries until a new one can be the window's.
+    fn restart_mods(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let Some((since, why)) = self.mods_restart.clone() else { return };
+        match ShellRuntime::new(cx) {
+            Ok(runtime) => {
+                self.runtime = Some(runtime);
+                self.mods_restart = None;
+                self.mods_restarts += 1;
+                self.mods_reloads = 0;
+                tracing::info!("mod runtime replaced ({why}); mounting the copies again");
+                self.sync(window, cx);
+                self.publish(cx);
+                if why.contains("out of memory") {
+                    let note = json!({
+                        "title": "Mods restarted",
+                        "body": format!("{why}. Your terminals and agents were not touched."),
+                        "level": "info", "timeout": 10000,
+                    });
+                    self.open_overlay(mods::new_overlay_id(), json!({ "kind": "toast", "notification": note }), window, cx);
+                }
+            }
+            Err(e) if since.elapsed() > Duration::from_secs(5) => {
+                tracing::error!("the mod runtime could not be replaced, mods are off: {e:#}");
+                self.mods_restart = None;
+            }
+            Err(_) => {}
+        }
+    }
+
+    /// After reloads: a runtime that reloads filled, or one a mod already ran
+    /// out of, is replaced (`recycle_reason` says which).
+    fn check_mod_heap(&mut self, measure: bool, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(runtime) = &self.runtime else { return };
+        let (used, limit) = if measure { (runtime.heap_used(), runtime.heap_limit()) } else { (0, 0) };
+        let errors = self.copies.values().filter_map(|c| c.error.as_deref());
+        if let Some(why) = mods::recycle_reason(errors, used, limit, self.mods_reloads) {
+            self.recycle_mods(&why, window, cx);
+        }
     }
 
     fn shows_tab(&self) -> bool {
@@ -3764,6 +3846,13 @@ impl AppWindow {
                     Some(_) => Some("layout".to_owned()),
                     None => self.copies.get(&o.slot).map(|c| c.inst.name.clone()),
                 }).collect::<Vec<_>>(),
+                // The mod runtime's heap: reloads fill it (see `recycle_mods`).
+                "mods": {
+                    "heap_bytes": self.runtime.as_ref().map(|r| r.heap_used()),
+                    "heap_limit_bytes": self.runtime.as_ref().map(|r| r.heap_limit()),
+                    "reloads": self.mods_reloads,
+                    "restarts": self.mods_restarts,
+                },
                 "errors": errors,
             });
         }
@@ -3815,6 +3904,10 @@ impl AppWindow {
     // ---- mods on disk ----------------------------------------------------
 
     fn poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.restart_mods(window, cx);
+        // A copy that found the heap full while loading (an overlay opening,
+        // a layout switch) asks for the same; the heap itself is read on reloads.
+        self.check_mod_heap(false, window, cx);
         self.flush_documents(false, window, cx);
         let ready = Self::update_label();
         if ready != self.update_ready {
@@ -3893,6 +3986,7 @@ impl AppWindow {
         let loaded: BTreeSet<u64> = self.copies.values().filter(|c| c.root.is_some()).map(|c| c.id).collect();
         self.sync_folders(window, cx);
         let Some(runtime) = self.runtime.clone() else { return };
+        let mut reloads = 0u32;
         for copy in self.copies.values_mut().filter(|c| edited.contains(&c.inst.name) && loaded.contains(&c.id)) {
             let Some(root) = &copy.root else { continue };
             let error = runtime.reload_now(root, window, cx).err().map(|e| format!("{e:#}"));
@@ -3900,7 +3994,13 @@ impl AppWindow {
                 tracing::warn!("mod reload failed: {e}");
             }
             copy.error = error;
+            reloads += 1;
         }
+        // Each reload leaves the replaced build in the heap: past a share of
+        // the ceiling, or enough reloads, the runtime is replaced while every
+        // mod still loads.
+        self.mods_reloads = self.mods_reloads.saturating_add(reloads);
+        self.check_mod_heap(true, window, cx);
     }
 
     fn sync_folders(&mut self, window: &mut Window, cx: &mut Context<Self>) {
