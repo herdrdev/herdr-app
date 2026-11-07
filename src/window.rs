@@ -3995,7 +3995,12 @@ impl AppWindow {
         let head = div().flex_none().h(settings::z(pane_size::header_height(h))).w_full().flex()
             .child(self.render_slot(&format!("{}#frame", n.id), cx));
         if h.hover() {
-            let head = head.absolute().left_0().right_0().opacity(0.).group_hover(group, |s| s.opacity(1.));
+            let mut head = head.absolute().left_0().right_0().opacity(0.).group_hover(group, |s| s.opacity(1.));
+            // It floats over the terminal, so it needs the frame's background, rounded like the frame.
+            if let Some(bg) = &f.background {
+                let r = settings::z(pane_size::inner_corners(f, on).top_left);
+                head = if h.bottom() { paint(head, bg).rounded_b(r) } else { paint(head, bg).rounded_t(r) };
+            }
             let head = if h.bottom() { head.bottom_0() } else { head.top_0() };
             return el.child(body).child(head).into_any_element();
         }
@@ -4014,7 +4019,10 @@ impl AppWindow {
         }
         let el = match &n.kind {
             Kind::Block { content } => {
-                let inner = self.render_block(n, content, focused, cx);
+                let corners = frame
+                    .filter(|_| n.is_pane())
+                    .map_or_else(Corners::default, |f| pane_size::inner_corners(f, focused.contains(&n.id)).map(|r| settings::z(*r)));
+                let inner = self.render_block(n, content, focused, corners, cx);
                 match frame.filter(|_| n.is_pane()) {
                     Some(f) => el.child(self.frame_pane(n, f, focused.contains(&n.id), inner, cx)),
                     None => el.child(inner),
@@ -4068,10 +4076,12 @@ impl AppWindow {
         el.children(self.render_floats(n, cx)).children(self.pane_grip(&n.id, row, cx)).into_any_element()
     }
 
-    fn render_block(&self, n: &Node, content: &Content, focused: &HashSet<String>, cx: &mut Context<Self>) -> AnyElement {
+    /// `corners`: the pane frame's inner rounding, for a terminal's background.
+    fn render_block(&self, n: &Node, content: &Content, focused: &HashSet<String>, corners: Corners<Pixels>, cx: &mut Context<Self>) -> AnyElement {
         match content {
             Content::Terminal { .. } => match self.pane_term(&n.id) {
                 Some(t) => {
+                    round_terminal(&t.view, corners, cx);
                     let id = n.id.clone();
                     div()
                         .size_full()
@@ -4096,6 +4106,7 @@ impl AppWindow {
             Content::Mod { .. } => self.render_slot(&n.id, cx),
             Content::Agent { .. } => match self.shown_agent() {
                 Some(addr) => match self.agent_view(&n.id, &addr) {
+                    // An agent block can show a tab pane's own terminal: leave its corners to that pane.
                     Some(t) => div().size_full().child(shown_terminal(&t.view, cx)).into_any_element(),
                     None => div().into_any_element(),
                 },
@@ -4462,6 +4473,13 @@ impl AppWindow {
 /// redraws that terminal, not every mod and pane in the window.
 pub(crate) fn cached<V: Render>(view: &Entity<V>) -> AnyElement {
     view.clone().cached(StyleRefinement::default().size_full()).into_any_element()
+}
+
+/// Keeps a terminal's background inside its pane frame's rounded corners.
+fn round_terminal(view: &Entity<TerminalView>, corners: Corners<Pixels>, cx: &mut App) {
+    if view.read(cx).set_corners(corners) {
+        view.update(cx, |_, cx| cx.notify());
+    }
 }
 
 pub(crate) fn shown_terminal(view: &Entity<TerminalView>, cx: &App) -> AnyElement {

@@ -89,6 +89,9 @@ struct Grid {
     painted: Vec<(Rc<Vec<vt::Cell>>, Vec<RowOp>, Option<usize>)>,
     /// Font size, cell size, font, loaded fonts and ligature setting used to draw.
     painted_with: (u32, Size<Pixels>, String, u64, bool),
+    /// The rounding of the pane frame around this terminal, so its background
+    /// stays inside the frame's corners (GPUI clips to rectangles only).
+    corners: Corners<Pixels>,
 }
 
 pub struct TerminalView {
@@ -257,6 +260,7 @@ impl TerminalView {
                 vt_cell: (9, 18),
                 told_display: None,
                 origin: Point::default(),
+                corners: Corners::default(),
                 buttons_down: Vec::new(),
                 images: HashMap::new(),
                 hover: None,
@@ -550,6 +554,14 @@ impl TerminalView {
             })
             .detach();
         }
+    }
+
+    /// Rounds the terminal's background to its pane frame; true when it changed.
+    pub fn set_corners(&self, corners: Corners<Pixels>) -> bool {
+        let mut g = self.grid.borrow_mut();
+        let changed = g.corners != corners;
+        g.corners = corners;
+        changed
     }
 
     /// The window puts this terminal on screen in the frame it's building.
@@ -1615,9 +1627,11 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     g.images.retain(|k, _| keep.contains(k));
     let link_spans = g.link_spans.clone();
     let marked = g.marked.clone();
+    let corners = g.corners;
     drop(g);
 
-    window.paint_quad(fill(bounds, hsla(frame.bg).opacity(crate::settings::get().terminal_opacity)));
+    // Below 1, the layout's background shows through (cells a program colors stay solid).
+    window.paint_quad(fill(bounds, hsla(frame.bg).opacity(crate::settings::get().terminal_opacity)).corner_radii(corners));
     let at = |x: usize, y: usize| origin + point(cell.width * x as f32, cell.height * y as f32);
     // Edges round to device pixels, so cells side by side meet without seams.
     let snap_box = |b: Bounds<Pixels>| {
@@ -1909,8 +1923,6 @@ impl Render for TerminalView {
             .key_context("Terminal")
             .size_full()
             .relative()
-            // Below 1, the layout's background shows through (cells a program colors stay solid).
-            .bg(hsla(vt::theme().bg).opacity(crate::settings::get().terminal_opacity))
             .on_action(cx.listener(|this, a: &gpui_shell::action::ShellAction, window, cx| {
                 if this.find_field_focused(window, cx) {
                     let action: Option<Box<dyn gpui::Action>> = match a.id() {

@@ -206,3 +206,18 @@ fn hidden_tabs_follow(cx: &mut gpui::TestAppContext) {
     cx.update(|window, cx| window.draw(cx).clear(cx));
     assert_eq!(dims(cx), fitted, "hidden tabs must have been sized as their panes draw them");
 }
+
+#[test]
+fn terminal_background_rounds_only_the_corners_the_frame_leaves_open() {
+    let frame = |header: &str| -> crate::layout::PaneFrame {
+        serde_json::from_str(&format!(r#"{{"radius":10,"border":{{"width":1}},"focus":{{"width":2}}{header}}}"#)).unwrap()
+    };
+    let c = |f: &crate::layout::PaneFrame, on| { let c = super::pane_size::inner_corners(f, on); [c.top_left, c.top_right, c.bottom_left, c.bottom_right] };
+    assert_eq!(c(&frame(r#","header":{"content":{"mod":"pane"}}"#), false), [0.0, 0.0, 9.0, 9.0]);
+    assert_eq!(c(&frame(r#","header":{"content":{"mod":"pane"}}"#), true), [0.0, 0.0, 8.0, 8.0]);
+    assert_eq!(c(&frame(r#","header":{"content":{"mod":"pane"},"position":"bottom"}"#), false), [9.0, 9.0, 0.0, 0.0]);
+    assert_eq!(c(&frame(r#","header":{"content":{"mod":"pane"},"reveal":"hover"}"#), false), [9.0; 4]);
+    assert_eq!(c(&frame(""), false), [9.0; 4]);
+    let thick: crate::layout::PaneFrame = serde_json::from_str(r#"{"radius":2,"border":{"width":4}}"#).unwrap();
+    assert_eq!(c(&thick, false), [0.0; 4]);
+}
