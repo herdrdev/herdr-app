@@ -5,7 +5,7 @@
 
 Runs the app on its own temporary home and core session, so nothing of yours
 is touched; prints the artifact folder and keeps it after cleanup. Requires hc
-on PATH and the Python running this script. Both scenario sets use only Python
+on PATH and the Python running this script. Every scenario set uses only Python
 fixture programs. The window must stay
 visible while it runs (hidden windows aren't drawn, which flatters the
 numbers). Per scenario: CPU % of the app, the core and its holder
@@ -64,16 +64,22 @@ while True:
 """
 
 # Agents that only report: idle, or working without a word of output (the
-# spinners are all that moves), or working with a title that animates.
+# spinners are all that moves), or working with a title that animates,
+# or one that counts time.
 REPORTS = r"""
 import sys, time, itertools
 state = sys.argv[1]
 sys.stdout.write(f"\033]7501;state={'idle' if state == 'idle' else 'working'}:app=pi\033\\")
 sys.stdout.flush()
 spin = itertools.cycle("\u280b\u2819\u2839\u2838\u283c\u2834\u2826\u2827\u2807\u280f")
+n = 0
 while True:
+    n += 1
     if state == "title":
         sys.stdout.write(f"\033]2;{next(spin)} working\007")
+        sys.stdout.flush()
+    if state == "timer":  # no spinner to ignore: every tick is a new title
+        sys.stdout.write(f"\033]2;task {n / 10:.1f}s\007")
         sys.stdout.flush()
     time.sleep(0.1)
 """
@@ -321,8 +327,9 @@ def main():
     ap.add_argument("--seconds", type=int, default=20)
     ap.add_argument("--sample", action="store_true")
     ap.add_argument("--zoom", type=float, default=1.0)
-    ap.add_argument("--set", choices=["all", "spinners"], default="all",
-                    help="spinners: many spaces of idle agents, one agent working on screen")
+    ap.add_argument("--set", choices=["all", "spinners", "timers"], default="all",
+                    help="spinners: many spaces of idle agents, one agent working on screen; "
+                    "timers: eight agents whose titles count time")
     ap.add_argument("--only", help="measure only this scenario, e.g. spinners+stream")
     a = ap.parse_args()
     if a.seconds <= 0:
@@ -387,6 +394,12 @@ def main():
             rows.append(measure("spinners+stream", app.pid, a.seconds, a.sample))
             do(bin, "tab.new", {"name": "title", "argv": reports("title")})
             rows.append(measure("spinners+title", app.pid, a.seconds, a.sample))
+            return
+        if a.set == "timers":
+            do(bin, "space.new", {"name": "bench", "folder": ROOT, "argv": reports("timer")})
+            for i in range(7):
+                do(bin, "tab.new", {"name": f"timer{i}", "argv": reports("timer")})
+            rows.append(measure("eight-timer-titles", app.pid, a.seconds, a.sample))
             return
         do(bin, "space.new", {"name": "bench", "folder": ROOT})
         rows.append(measure("idle-shell", app.pid, a.seconds, a.sample))
