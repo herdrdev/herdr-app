@@ -662,6 +662,41 @@ pub fn space_json(m: &Model, p: &Space, index: usize, branch: Option<&str>, home
 mod tests {
     use super::*;
 
+    fn review_tab(tab: &str, origin: &str, review: &str) -> Tab {
+        Tab::with_pane(tab, "", Node::block(tab, Content::Mod {
+            name: "plannotator-browser".into(),
+            props: json!({ "origin": origin, "review": review }),
+        }))
+    }
+
+    #[test]
+    fn review_follows_each_origin_until_its_last_tab_closes() {
+        let mut m = Model::default();
+        m.add_space("s1", "", "", Tab::new("agent-a", "", "a", "t1"));
+        m.add_tab("s1", Tab::new("agent-b", "", "b", "t2"));
+        m.add_tab("s1", review_tab("review-a1", "t1", "r1"));
+        m.add_tab("s1", review_tab("review-a2", "t1", "r2"));
+        m.add_tab("s1", review_tab("review-b", "t2", "r3"));
+        m.add_space("remote/s2", "", "", Tab::new("remote/agent", "", "remote/p", "remote/t1"));
+        m.space_mut("remote/s2").unwrap().machine = Some("remote".into());
+        m.add_tab("remote/s2", review_tab("remote/review", "t1", "r4"));
+        m.add_tab("remote/s2", review_tab("remote/invalid", "other/t1", "r5"));
+        m.add_tab("s1", review_tab("incomplete", "t3", ""));
+
+        let expected = [("s1", "t1"), ("s1", "t2"), ("remote/s2", "remote/t1")];
+        let origins = m.review_origins();
+        assert_eq!(origins.len(), expected.len());
+        for (space, address) in expected { assert!(origins.contains(&(space.into(), address.into()))); }
+
+        m.space_mut("s1").unwrap().tabs.retain(|tab| tab.id != "review-a1");
+        assert!(m.review_origins().contains(&("s1".into(), "t1".into())));
+        m.space_mut("s1").unwrap().tabs.retain(|tab| tab.id != "review-a2");
+        let origins = m.review_origins();
+        assert!(!origins.contains(&("s1".into(), "t1".into())));
+        assert!(origins.contains(&("s1".into(), "t2".into())));
+        assert!(origins.contains(&("remote/s2".into(), "remote/t1".into())));
+    }
+
     #[test]
     fn folders_name_as_in_herdr_on_every_system() {
         assert_eq!(folder_name("/home/can", "/home/can"), "~");
