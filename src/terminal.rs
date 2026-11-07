@@ -582,8 +582,7 @@ impl TerminalView {
     /// gets each file copied there first (`hc put`), and its path there.
     fn dropped(&mut self, paths: Vec<std::path::PathBuf>, cx: &mut Context<Self>) {
         if !self.address.contains('/') {
-            let text = quote_paths(paths.iter().map(|p| p.to_string_lossy().into_owned()));
-            let bytes = self.grid.borrow().vt.paste_bytes(&text);
+            let bytes = self.grid.borrow().vt.paste_bytes(&local_paste(paths));
             return self.send(&bytes);
         }
         self.put_there(paths, false, cx);
@@ -1074,6 +1073,12 @@ pub(crate) fn shown_title(title: &str) -> &str {
     let rest = title.trim_start_matches(|c: char| spinner(c) || c.is_whitespace());
     let led = title.len() - rest.len();
     if rest.is_empty() || !title[..led].chars().any(spinner) || !title[..led].ends_with(char::is_whitespace) { title } else { rest }
+}
+
+/// What dropping `paths` on a local terminal types: each path as the shell
+/// reads it, after `drops::stage` swaps in copies the terminal's program can read.
+fn local_paste(paths: Vec<PathBuf>) -> String {
+    quote_paths(crate::drops::stage(paths).iter().map(|p| p.to_string_lossy().into_owned()))
 }
 
 /// Paths as a shell reads them, space-separated with a trailing space: bare
@@ -3286,6 +3291,24 @@ mod tests {
         assert_eq!(q(&["/tmp/shot.png"]), "/tmp/shot.png ");
         assert_eq!(q(&["/tmp/my shot.png", "/a/b"]), "'/tmp/my shot.png' /a/b ");
         assert_eq!(q(&["/tmp/it's.png"]), "'/tmp/it'\\''s.png' ");
+    }
+
+    #[gpui::test]
+    fn a_file_dropped_on_a_local_terminal_is_typed_as_a_paste(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+        let (core, frames) = crate::hc::offline_recording();
+        let view = cx.new(|cx| super::TerminalView::attach(core, "t1".into(), (40, 5), cx));
+        let pasted = view.update(cx, |view, cx| {
+            view.grid.borrow_mut().channel = Some(7);
+            view.dropped(vec!["/tmp/my shot.png".into()], cx);
+            view.grid.borrow().vt.paste_bytes("'/tmp/my shot.png' ")
+        });
+        assert!(frames.try_iter().any(|f| f.ends_with(&pasted)), "the quoted path reached the terminal");
+    }
+
+    #[test]
+    fn local_drops_type_ordinary_paths_unchanged() {
+        assert_eq!(super::local_paste(vec!["/tmp/my shot.png".into(), "/a/b".into()]), "'/tmp/my shot.png' /a/b ");
     }
 
     #[test]
