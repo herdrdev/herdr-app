@@ -15,7 +15,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::task::Poll;
 use crate::links;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -582,6 +582,7 @@ impl TerminalView {
     /// gets each file copied there first (`hc put`), and its path there.
     fn dropped(&mut self, paths: Vec<std::path::PathBuf>, cx: &mut Context<Self>) {
         if !self.address.contains('/') {
+            let paths = stage_temporary_screenshot(&paths).unwrap_or(paths);
             let text = quote_paths(paths.iter().map(|p| p.to_string_lossy().into_owned()));
             let bytes = self.grid.borrow().vt.paste_bytes(&text);
             return self.send(&bytes);
@@ -1088,6 +1089,60 @@ fn quote_paths(paths: impl IntoIterator<Item = String>) -> String {
     let mut out: String = paths.into_iter().map(quote).collect::<Vec<_>>().join(" ");
     out.push(' ');
     out
+}
+
+/// A live macOS screenshot thumbnail, dropped before it saved.
+///
+/// macOS writes such an image into a private `NSIRD_*` directory under
+/// `TemporaryItems` and grants read access to it only to the app that received
+/// the drop, and only until the thumbnail saves.
+fn is_temporary_screenshot(path: &Path) -> bool {
+    if !path.is_absolute() {
+        return false;
+    }
+    path.ancestors().skip(1).any(|directory| {
+        directory
+            .file_name()
+            .and_then(|name| name.to_str())
+            .is_some_and(|name| name.starts_with("NSIRD_"))
+            && directory
+                .parent()
+                .and_then(Path::file_name)
+                .is_some_and(|name| name == "TemporaryItems")
+    })
+}
+
+/// Whether these bytes are an image the pane can open.
+fn is_image_bytes(bytes: &[u8]) -> bool {
+    bytes.starts_with(b"\x89PNG\r\n\x1a\n") || bytes.starts_with(&[0xff, 0xd8, 0xff])
+}
+
+/// Copies a live screenshot thumbnail somewhere a pane can read, and pastes
+/// that path instead.
+///
+/// macOS gives read access to the thumbnail's temporary file only to the app
+/// that received the drop; a pane's processes are children of the Herdr
+/// daemon, not of this app, so they cannot open it, and the file is gone
+/// within seconds. This app can read it now, so it copies the bytes into the
+/// temp directory and the pane gets a path that stays readable.
+fn stage_temporary_screenshot(paths: &[PathBuf]) -> Option<Vec<PathBuf>> {
+    let [path] = paths else {
+        return None;
+    };
+    if !is_temporary_screenshot(path) {
+        return None;
+    }
+    let bytes = std::fs::read(path).ok()?;
+    if !is_image_bytes(&bytes) {
+        return None;
+    }
+    let directory = std::env::temp_dir().join("herdr-drops");
+    std::fs::create_dir_all(&directory).ok()?;
+    let stamp = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).ok()?.as_millis();
+    let name = path.file_name()?.to_str()?;
+    let staged = directory.join(format!("{stamp}-{name}"));
+    std::fs::write(&staged, &bytes).ok()?;
+    Some(vec![staged])
 }
 
 /// Files on the clipboard: their text is only the bare path, which an agent
@@ -3286,6 +3341,45 @@ mod tests {
         assert_eq!(q(&["/tmp/shot.png"]), "/tmp/shot.png ");
         assert_eq!(q(&["/tmp/my shot.png", "/a/b"]), "'/tmp/my shot.png' /a/b ");
         assert_eq!(q(&["/tmp/it's.png"]), "'/tmp/it'\\''s.png' ");
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn a_screenshot_thumbnail_is_staged_where_a_pane_can_read_it() {
+        use super::{is_temporary_screenshot, stage_temporary_screenshot};
+        let root = std::env::temp_dir().join(format!("herdr-drop-test-{}", std::process::id()));
+        let thumbnail = root.join("T/TemporaryItems/NSIRD_screencaptureui_vKTdfp/Screenshot 2026-10-16 at 2.09.54 PM.png");
+        std::fs::create_dir_all(thumbnail.parent().unwrap()).unwrap();
+        std::fs::write(&thumbnail, b"\x89PNG\r\n\x1a\nrest").unwrap();
+        assert!(is_temporary_screenshot(&thumbnail));
+        let staged = stage_temporary_screenshot(std::slice::from_ref(&thumbnail)).expect("staged");
+        assert_eq!(staged.len(), 1);
+        assert!(staged[0].starts_with(std::env::temp_dir().join("herdr-drops")));
+        assert_ne!(staged[0], thumbnail);
+        assert_eq!(std::fs::read(&staged[0]).unwrap(), b"\x89PNG\r\n\x1a\nrest");
+        std::fs::remove_dir_all(&root).ok();
+        std::fs::remove_file(&staged[0]).ok();
+    }
+
+    #[test]
+    #[cfg(not(windows))]
+    fn other_drops_are_left_alone() {
+        use super::{is_temporary_screenshot, stage_temporary_screenshot};
+        // A saved screenshot is readable by the pane's processes.
+        assert!(!is_temporary_screenshot(&std::path::PathBuf::from("/Users/me/Desktop/Screenshot.png")));
+        // A look-alike directory, the wrong parent, and a relative path.
+        assert!(!is_temporary_screenshot(&std::path::PathBuf::from("/T/TemporaryItems/NSIRDx/a.png")));
+        assert!(!is_temporary_screenshot(&std::path::PathBuf::from("/T/Items/NSIRD_screencaptureui_x/a.png")));
+        assert!(!is_temporary_screenshot(&std::path::PathBuf::from("TemporaryItems/NSIRD_x/a.png")));
+        // One file at a time: a multi-file drop keeps its paths.
+        let many = vec![std::path::PathBuf::from("/a.png"), std::path::PathBuf::from("/b.png")];
+        assert!(stage_temporary_screenshot(&many).is_none());
+        // A file that is not an image is not staged either.
+        let notes = std::env::temp_dir().join("T/TemporaryItems/NSIRD_x/notes.txt");
+        std::fs::create_dir_all(notes.parent().unwrap()).unwrap();
+        std::fs::write(&notes, b"hello").unwrap();
+        assert!(stage_temporary_screenshot(std::slice::from_ref(&notes)).is_none());
+        std::fs::remove_dir_all(notes.parent().unwrap().parent().unwrap()).ok();
     }
 
     #[test]
