@@ -674,15 +674,24 @@ export default class Settings extends View {
   alerts(t) {
     const sounds = this.person.sounds ?? {};
     const on = sounds.enabled !== false;
+    const toasts = this.person.alert_toasts !== false;
     const file = (f) => (f ? f.split(/[\\/]/).pop() : "Herdr's sound");
     return v_flex()
       .w_full()
-      .child(this.heading(t, "Sounds"))
+      .child(this.heading(t, "Alerts"))
+      .child(
+        this.row(
+          t,
+          "Show notes",
+          "A note in the corner when an agent needs you, and when one finishes while you're not looking. Click it to go there.",
+          this.toggle(t, "st-alert-toasts", toasts, (_e, cx) => this.change((p) => (p.alert_toasts = !toasts), cx)),
+        ),
+      )
       .child(
         this.row(
           t,
           "Play sounds",
-          "When an agent needs you, and when one finishes while you're not looking. A note shows in the corner either way.",
+          "When an agent needs you, and when one finishes while you're not looking.",
           this.toggle(t, "st-sounds", on, (_e, cx) => this.change((p) => (p.sounds = { ...(p.sounds ?? {}), enabled: !on }), cx)),
         ),
       )
