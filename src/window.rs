@@ -2449,7 +2449,7 @@ impl AppWindow {
         let size = self.initial_size(&Tab::new(&ctx, "", &pane, "").root, &pane, window);
         let (addr, _) = self.spawn(Self::agent_argv(argv.clone(), task, on.as_deref()).or(argv), folder, follow, &space, &ctx, on.as_deref(), size, window)?;
         self.model.add_tab(&space, Tab::new(&ctx, name.trim(), &pane, &addr));
-        self.model.active = Some(space.clone());
+        self.model.activate(&space);
         Ok(json!({ "space": space, "tab": ctx, "terminal": addr }))
     }
 
@@ -2466,7 +2466,7 @@ impl AppWindow {
         self.require_document(machine.as_deref())?;
         let (ctx, pane) = (self.model.fresh_id_on("tb", machine.as_deref()), self.model.fresh_id_on("p", machine.as_deref()));
         self.model.add_tab(&space, Tab::with_pane(&ctx, name.trim(), Node::block(pane.clone(), Content::Mod { name: m, props })));
-        self.model.active = Some(space.clone());
+        self.model.activate(&space);
         Ok(json!({ "space": space, "tab": ctx, "pane": pane }))
     }
 
@@ -2895,7 +2895,7 @@ impl AppWindow {
                     self.model.spaces.get(i.checked_sub(1)?).map(|p| p.id.clone())
                 });
                 match id.filter(|id| self.model.space(id).is_some()) {
-                    Some(id) => self.model.active = Some(id),
+                    Some(id) => self.model.activate(&id),
                     None => return self.fail("no such space"),
                 }
             }
@@ -2903,7 +2903,7 @@ impl AppWindow {
                 let n = self.model.spaces.len();
                 if let Some(i) = self.model.active_index().filter(|_| n > 0) {
                     let j = if name == "space.next" { (i + 1) % n } else { (i + n - 1) % n };
-                    self.model.active = Some(self.model.spaces[j].id.clone());
+                    self.model.activate(&self.model.spaces[j].id.clone());
                 }
             }
             // ---- tabs

@@ -79,6 +79,8 @@ pub struct Model {
     pub spaces: Vec<Space>,
     /// The selected space.
     pub active: Option<String>,
+    /// The space shown before `active`: where `remove_space` goes back to.
+    pub previous: Option<String>,
     pub recent: Vec<Recent>,
     /// Each pane's live folder, for its display name.
     pub pane_folders: BTreeMap<String, String>,
@@ -263,7 +265,14 @@ impl Model {
         let active = Some(ctx.id.clone());
         self.spaces.push(Space { id: id.to_owned(), name: name.to_owned(), folder: folder.to_owned(), machine: None, tabs: vec![ctx], active });
         self.recent.retain(|r| r.name != name);
-        self.active = Some(id.to_owned());
+        self.activate(id);
+    }
+
+    /// Selects a space, remembering the one it leaves for close fallback.
+    pub fn activate(&mut self, id: &str) {
+        if self.active.as_deref() != Some(id) {
+            self.previous = self.active.replace(id.to_owned());
+        }
     }
 
     /// Adds a tab after the space's selected one and selects it (not the space).
@@ -396,7 +405,14 @@ impl Model {
         self.recent.insert(0, Recent { name: p.name.clone(), folder: p.folder.clone() });
         self.recent.truncate(20);
         if was_active {
-            self.active = self.spaces.get(pi).or(self.spaces.last()).map(|p| p.id.clone());
+            // Back to the space shown before this one (on its machine or not),
+            // else the one sliding into its slot, else the last.
+            self.active = self
+                .previous
+                .take()
+                .filter(|id| id != &p.id && self.spaces.iter().any(|s| &s.id == id))
+                .or_else(|| self.spaces.get(pi).map(|s| s.id.clone()))
+                .or_else(|| self.spaces.last().map(|s| s.id.clone()));
         }
         p.tabs.iter().flat_map(|c| addresses(&c.root)).collect()
     }
@@ -410,7 +426,8 @@ impl Model {
     pub fn select_tab(&mut self, ctx: &str) -> bool {
         let Some(p) = self.spaces.iter_mut().find(|p| p.tab(ctx).is_some()) else { return false };
         p.select(ctx);
-        self.active = Some(p.id.clone());
+        let id = p.id.clone();
+        self.activate(&id);
         self.unsettle(ctx);
         true
     }
@@ -727,6 +744,30 @@ mod tests {
         // Opening it again takes it off the recent list.
         m.add_space("p4", "web", "/src/web", Tab::new("c4", "x", "x4", "t4"));
         assert!(m.recent.is_empty());
+    }
+
+    #[test]
+    fn closing_the_active_space_goes_back_to_the_previous_one() {
+        // Local block first, then a machine's block: p1, p2, s1, s2.
+        let mut m = model_with_one();
+        m.add_space("p2", "web", "/src/web", Tab::new("c2", "x", "x2", "t2"));
+        m.add_space("s1", "api", "/srv/api", Tab::new("c3", "x", "x3", "t3"));
+        m.add_space("s2", "db", "/srv/db", Tab::new("c4", "x", "x4", "t4"));
+        m.space_mut("s1").unwrap().machine = Some("server".into());
+        m.space_mut("s2").unwrap().machine = Some("server".into());
+        m.activate("p1");
+        m.activate("p2");
+        // p2's slot slides to s1 on another machine; it goes back to p1 instead.
+        m.remove_space("p2");
+        assert_eq!(m.active.as_deref(), Some("p1"));
+        // With the previous one used up, it takes the space sliding into the slot.
+        m.remove_space("p1");
+        assert_eq!(m.active.as_deref(), Some("s1"));
+        // A stale previous id is skipped; with no spaces left there is none.
+        m.activate("s2");
+        m.remove_space("s1");
+        m.remove_space("s2");
+        assert_eq!(m.active, None);
     }
 
     #[test]
