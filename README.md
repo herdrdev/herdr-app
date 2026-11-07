@@ -60,7 +60,11 @@ The window arranges terminals. The core runs them.
 Closing the window leaves them running; closing a pane or tab ends its terminals.
 After a reboot or core crash, kept panes get fresh shells in their last folders, not their old programs.
 
-## Open Linear
+## Open websites
+
+Choose **GitHub**, **Notion** or **Website…** from the **+** menu to open a site in a tab. GitHub opens the repository from the focused terminal's Git `origin`, or the space folder if no terminal is focused. If the remote is not a GitHub repository or cannot be read, it opens the GitHub home page. Notion opens the app directly. For another site, enter an HTTP or HTTPS URL.
+
+Browser tabs share data that persists when Herdr restarts. Some sign-in providers, including Google, block sign-in in embedded browsers; use a supported alternative such as email or password when available. **Open externally** opens the current page in the system browser, which has its own sign-in state.
 
 Choose **Linear** from the **+** menu to open it in a tab. Herdr looks for `.linear-project` in the focused terminal's folder, then at the Git root if the file is absent. For a remote space, it reads the file on that machine. The file contains the Linear workspace slug and project UUID:
 
@@ -68,7 +72,7 @@ Choose **Linear** from the **+** menu to open it in a tab. Herdr looks for `.lin
 {"workspace":"my-workspace","project":"00000000-0000-0000-0000-000000000000"}
 ```
 
-If the file is missing or invalid, the tab opens Linear without a project. Sign in with email and enter the code from Linear's email in the tab. Browser data is shared by Herdr's browser tabs and kept when the app restarts.
+If the file is missing or invalid, the tab opens Linear without a project. Sign in with email and enter the code from Linear's email in the tab.
 
 ## Work on another machine
 
