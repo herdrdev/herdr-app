@@ -5,4 +5,4 @@ description: Use when working on Herdr App.
 
 # Herdr App
 
-After working on Herdr App, install the verified new build on the user's machine before a demo or reporting the work complete. Confirm that the running app and any integration used by the demo have loaded the new version; installing files alone does not update running processes. Preserve the user's terminals and data. If activation could interrupt the agent's connection, follow the autonomous-agent skill and report any remaining restart or verification step.
+After working on Herdr App, install the verified new build on the user's machine before a demo or reporting the work complete. Confirm that the running app and any integration used by the demo have loaded the new version; installing files alone does not update running processes. Herdr App can be restarted during development: herdr-core runs separately and keeps terminals and agents alive when the window closes. Preserve the user's terminals and data; do not stop herdr-core. If activation could interrupt the agent's connection, follow the autonomous-agent skill and report any remaining restart or verification step.

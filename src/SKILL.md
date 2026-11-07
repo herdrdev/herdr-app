@@ -16,9 +16,9 @@ herdr-app commands    # available commands, arguments and descriptions
 
 `ls` and `status` talk to the running window, not a new app. `commands`
 prints the built-in command list even without an open window. Do not launch bare
-`herdr-app` to inspect it: that opens or raises the window. Do not stop,
-signal or restart the person's app or core. A window closing does not kill
-its terminals.
+`herdr-app` to inspect it: that opens or raises the window. You may restart
+the app when needed; herdr-core keeps its terminals and agents running. Do not
+stop or restart the person's core.
 
 `app.check_updates` checks for newer releases. Settings reports "Up to date"
 only after a successful check; on failure, check the connection and retry.
