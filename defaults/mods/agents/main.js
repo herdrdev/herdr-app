@@ -206,7 +206,12 @@ export default class Agents extends View {
         .when(l === "└" || l === "├", el => el.border_b(1.5).rounded_bl(6))))
       .when(Boolean(pic), el => el.child(div().mr(8).child(pic)))
       .child(div().flex_1().truncate().text_color(on ? t.foreground : t.muted).child(k.name || k.template || k.program?.name || k.address))
+      .when(this.reviewing.has(k.address), el => el.child(div().mr(6).child(this.reviewBadge(t))))
       .child(this.status(t, { status: st }, compact));
+  }
+
+  reviewBadge(t) {
+    return div().flex_none().px(6).h(18).rounded(5).bg(t.accent + "26").text_size(10.5).font_semibold().text_color(t.accent).flex().items_center().child("Review");
   }
 
   // compact: a ! for blocked where a header already says "Needs you".
@@ -227,6 +232,7 @@ export default class Agents extends View {
     const sort = sortOf();
     let list = agents();
     this.listed = new Map(list.map((a) => [a.address, a.status]));
+    this.reviewing = new Set(list.filter((a) => a.review).map((a) => a.address));
     const all = terminals();
     this.migratePins(all);
     const shown = focused()?.agent;
@@ -316,7 +322,10 @@ export default class Agents extends View {
           .hover((s) => s.bg(t.hover))
           .on_click(() => run("pane.focus", { pane: a.pane }))
           .child(div().flex_1().min_w(0).whitespace_nowrap().text_right().text_color(t.muted).child(String(i + 1)))
-          .child(h_flex().w(14).flex_none().items_center().justify_center().child(this.status(t, a, true)));
+          .child(h_flex().relative().w(14).flex_none().items_center().justify_center()
+            .when(a.review, el => el.tooltip("Review"))
+            .child(this.status(t, a, true))
+            .when(a.review, el => el.child(div().absolute().right(-3).top(-2).size(6).rounded(3).border_1().border_color(t.chrome).bg(t.accent))));
       }
       const when = this.since(a);
       const idle = a.status === "idle" && !a.focused;
@@ -371,7 +380,8 @@ export default class Agents extends View {
         .when(Boolean(machine), el => el.child(div().text_size(10).text_color(t.dim).child(machine)))
         .when(subs.length > 0, el => el.child(fold(a, subs)))
         .when(this.hovered === a.address, el => el.child(pin))
-        .when(this.hovered !== a.address && Boolean(when), el => el.child(div().flex_none().text_size(11).text_color(t.dim).child(duration(now - when))))
+        .when(this.hovered !== a.address && Boolean(when) && !a.review, el => el.child(div().flex_none().text_size(11).text_color(t.dim).child(duration(now - when))))
+        .when(a.review, el => el.child(this.reviewBadge(t)))
         .child(this.status(t, a, byPriority && !isPinned));
     };
 

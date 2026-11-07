@@ -99,6 +99,31 @@ pub fn priority(status: Option<&str>) -> u8 {
     }
 }
 
+impl Model {
+    /// Open review panes, keyed by their space and their originating terminal.
+    pub fn review_origins(&self) -> std::collections::HashSet<(String, String)> {
+        let mut origins = std::collections::HashSet::new();
+        for space in &self.spaces {
+            for tab in &space.tabs {
+                for pane in tab.root.panes() {
+                    let Some(Content::Mod { name, props }) = pane.content() else { continue };
+                    if name != "plannotator-browser" || !props.get("review").and_then(Value::as_str).is_some_and(|s| !s.is_empty()) {
+                        continue;
+                    }
+                    let Some(origin) = props.get("origin").and_then(Value::as_str).filter(|s| !s.is_empty()) else { continue };
+                    let address = match space.machine.as_deref() {
+                        Some(machine) if !origin.contains('/') => crate::mirror::qualify(origin, Some(machine)),
+                        Some(machine) if origin.strip_prefix(machine).is_some_and(|rest| rest.starts_with('/')) => origin.to_owned(),
+                        None if !origin.contains('/') => origin.to_owned(),
+                        _ => continue,
+                    };
+                    origins.insert((space.id.clone(), address));
+                }
+            }
+        }
+        origins
+    }
+}
 impl Tab {
     /// A tab with one terminal pane.
     pub fn new(id: &str, name: &str, pane_id: &str, address: &str) -> Tab {

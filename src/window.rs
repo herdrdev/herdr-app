@@ -1707,6 +1707,7 @@ impl AppWindow {
         let focused_pane = if block.is_some() { None } else { m.focused_pane() };
         let mut agents = Vec::new();
         let mut panes = Vec::new();
+        let review_origins = m.review_origins();
         for pr in &m.spaces {
             for (ci, ctx) in pr.tabs.iter().enumerate() {
                 for p in ctx.root.panes() {
@@ -1732,7 +1733,8 @@ impl AppWindow {
                     agents.push(json!({
                         "address": addr, "pane": p.id, "space": pr.id, "space_name": m.space_name(pr, &home),
                         "tab": ctx.id, "tab_index": ci + 1, "tab_name": Model::tab_name(pr, ctx),
-                        "status": status, "app": a.and_then(|a| a.app.clone()), "program": self.program(addr), "title": title.unwrap_or_default(),
+                        "status": status, "review": review_origins.contains(&(pr.id.clone(), addr.to_owned())),
+                        "app": a.and_then(|a| a.app.clone()), "program": self.program(addr), "title": title.unwrap_or_default(),
                         "seq": a.map(|a| a.seq).unwrap_or(0),
                         "pinned": self.live.get(addr).and_then(|r| r.pointer("/labels/herdr.pinned")).and_then(Value::as_str).is_some_and(|v| !v.is_empty()),
                         "focused": m.active.as_deref() == Some(pr.id.as_str()) && focused_pane.as_deref() == Some(p.id.as_str()),

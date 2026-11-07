@@ -157,6 +157,8 @@ export interface Program {
 }
 
 export interface AgentInfo {
+  /** An open Plannotator review in this agent's space belongs to this terminal. */
+  review: boolean;
   address: string;
   pane: string;
   space: string;
