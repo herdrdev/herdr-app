@@ -933,6 +933,13 @@ in init, `.track_focus(this.h).on_key_down((e, cx) => …)`, `this.h.focus()`.
 the same limits, previews and removal as picked images.
 `.on_hover((hovered, cx) => …)` reports pointer entry and exit on buttons
 and other interactive controls too.
+`.on_mouse_move` and `.on_mouse_up` fire only over the element. For a drag that
+should keep following the pointer once it leaves (dragging a tab off the bar),
+use `.on_window_mouse_move((e, cx) => …)` and `.on_window_mouse_up("left", (e, cx) => …)`
+on a plain layout element: they hear every move and release in the window,
+including over terminals, with positions against the element's box. A move's
+`pressed_button` is missing once the button is up, so a drag released outside
+the window can cancel.
 `.when(cond, (el) => …)`, `.children([...])`. Controls from `gpui-base`
 (`Button`, `Checkbox`, `Switch`, `InputState` + `Input`) are unstyled: style
 them. Text: `TextView.markdown(id, text)` renders markdown; `EditorState.new({

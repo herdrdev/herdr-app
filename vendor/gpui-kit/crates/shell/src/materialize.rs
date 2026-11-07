@@ -346,6 +346,10 @@ struct Behavior {
     on_token_click: Option<CallbackId>,
     on_token_hover: Option<CallbackId>,
     on_mouse_move: Option<CallbackId>,
+    /// Every pointer move in the window, wherever the pointer is, during the
+    /// capture phase: what a drag follows once the pointer leaves the element
+    /// it started on.
+    on_window_mouse_move: Option<CallbackId>,
     on_hover: Option<CallbackId>,
     /// Reports a key press that reached this element.
     ///
@@ -368,6 +372,9 @@ struct Behavior {
     on_mouse_down: SmallVec<[(MouseButton, CallbackId); 1]>,
     /// Releases on this element, listed the same way.
     on_mouse_up: SmallVec<[(MouseButton, CallbackId); 1]>,
+    /// Releases anywhere in the window, during the capture phase: where a drag
+    /// that left its element is let go.
+    on_window_mouse_up: SmallVec<[(MouseButton, CallbackId); 1]>,
     /// A press anywhere outside this element, delivered during the capture
     /// phase.
     ///
@@ -595,6 +602,8 @@ impl Behavior {
             || self.aria_selected.is_some()
             || self.aria_active_descendant
             || self.on_mouse_move.is_some()
+            || self.on_window_mouse_move.is_some()
+            || !self.on_window_mouse_up.is_empty()
             || self.on_hover.is_some()
             || self.on_key_down.is_some()
             || self.on_drop.is_some()
@@ -1939,6 +1948,72 @@ where
     element
 }
 
+/// Listens to the whole window for `on_window_mouse_move` and
+/// `on_window_mouse_up`. GPUI only hands an element the moves and releases
+/// over it, so this registers window listeners from an invisible child, the
+/// way `on_prepaint` measures, and reports positions against the element's box.
+fn with_window_mouse<E: ParentElement>(
+    element: E,
+    behavior: &Behavior,
+    runtime: &Rc<ShellRuntime>,
+) -> E {
+    let bounds = Rc::new(Cell::new(None::<Bounds<Pixels>>));
+    let writer = Rc::clone(&bounds);
+    let runtime = Rc::downgrade(runtime);
+    let moves = behavior.on_window_mouse_move;
+    let ups = behavior.on_window_mouse_up.clone();
+    element.child(
+        gpui::canvas(
+            move |value, _, _| writer.set(Some(value)),
+            move |_, _, window, _| {
+                if let Some(callback) = moves {
+                    let runtime = runtime.clone();
+                    let bounds = Rc::clone(&bounds);
+                    window.on_mouse_event(
+                        move |event: &gpui::MouseMoveEvent, phase, window, cx| {
+                            if phase != gpui::DispatchPhase::Capture {
+                                return;
+                            }
+                            let (Some(bounds), Some(runtime)) = (bounds.get(), runtime.upgrade())
+                            else {
+                                return;
+                            };
+                            runtime.dispatch_mouse_move(
+                                callback,
+                                event,
+                                event.position - bounds.origin,
+                                bounds,
+                                window,
+                                cx,
+                            );
+                        },
+                    );
+                }
+                for (button, callback) in ups {
+                    let runtime = runtime.clone();
+                    let bounds = Rc::clone(&bounds);
+                    window.on_mouse_event(move |event: &gpui::MouseUpEvent, phase, window, cx| {
+                        if phase == gpui::DispatchPhase::Capture && event.button == button {
+                            dispatch_mouse_button(
+                                &runtime,
+                                callback,
+                                event,
+                                bounds.get(),
+                                window,
+                                cx,
+                            );
+                        }
+                    });
+                }
+            },
+        )
+        .absolute()
+        .top_0()
+        .left_0()
+        .size_full(),
+    )
+}
+
 /// One dispatch for the three press-and-release builders.
 ///
 /// `MouseDownEvent` and `MouseUpEvent` are different types carrying the same
@@ -2145,6 +2220,8 @@ fn flex_element(
         && !behavior.needs_identity()
         && behavior.on_click.is_none()
         && behavior.on_mouse_move.is_none()
+        && behavior.on_window_mouse_move.is_none()
+        && behavior.on_window_mouse_up.is_empty()
         && behavior.on_size_change.is_none()
         && behavior.on_hover.is_none()
         && behavior.on_key_down.is_none()
@@ -2196,6 +2273,9 @@ fn flex_element(
                 runtime.dispatch_mouse_move(callback, event, local, bounds, window, cx);
             }
         });
+    }
+    if behavior.on_window_mouse_move.is_some() || !behavior.on_window_mouse_up.is_empty() {
+        stateful = with_window_mouse(stateful, &behavior, runtime);
     }
     let stateful = components::tooltip::with_tooltip(stateful, &behavior, window);
     if behavior.scrollbar {
@@ -2697,6 +2777,16 @@ pub(in crate::materialize) fn resolve_ops(
                 "on_click" => behavior.on_click = Some(*id),
                 "on_link_click" => behavior.on_link_click = Some(*id),
                 "on_mouse_move" => behavior.on_mouse_move = Some(*id),
+                "on_window_mouse_move" => behavior.on_window_mouse_move = Some(*id),
+                "on_window_mouse_up_left" => {
+                    behavior.on_window_mouse_up.push((MouseButton::Left, *id))
+                }
+                "on_window_mouse_up_right" => {
+                    behavior.on_window_mouse_up.push((MouseButton::Right, *id))
+                }
+                "on_window_mouse_up_middle" => {
+                    behavior.on_window_mouse_up.push((MouseButton::Middle, *id))
+                }
                 "on_hover" => behavior.on_hover = Some(*id),
                 "on_key_down" => behavior.on_key_down = Some(*id),
                 "on_key_up" => behavior.on_key_up = Some(*id),
