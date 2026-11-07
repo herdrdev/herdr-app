@@ -60,6 +60,10 @@
   },
   "terminal": {
     "cmd-f": "terminal.search",
+    "shift-home": "terminal.scroll_top",
+    "shift-end": "terminal.scroll_bottom",
+    "shift-pageup": "terminal.page_up",
+    "shift-pagedown": "terminal.page_down",
     "cmd-c": "terminal.copy",
     "cmd-v": "terminal.paste",
     "ctrl-v": "terminal.paste_image",

@@ -593,6 +593,12 @@ The main ones:
   history, not the program: negative lines or pages go up, toward history; pages may be
   fractional, one page is the terminal's rows; on the alternate screen, such as vim or less,
   there is no history, so nothing moves),
+  `terminal.page_up {pane?}`, `terminal.page_down {pane?}` (move one terminal's
+  local scrollback by a page; default: the focused terminal; Shift+PageUp/Down
+  by default, while plain PageUp/Down still go to the program),
+  `terminal.scroll_top {pane?}`, `terminal.scroll_bottom {pane?}` (the ends of
+  that local scrollback; Shift+Home/End by default, while plain Home/End still
+  go to the program),
   `terminal.pin {terminal, pinned}` (pins an agent to the top of the agent lists;
   kept on the terminal as `herdr.pinned`, so every Herdr client shows it, and
   gone when the terminal ends; read it as `agents()` `pinned`). Copy, paste, paste-image and implicit
