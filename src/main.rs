@@ -135,7 +135,7 @@ fn main() {
                 Ok(core) => hc::check(&core.hello).map(|()| core).map_err(setup::Need::Fix),
                 Err(e) => {
                     eprintln!("herdr-app: {e:#}");
-                    Err(setup::Need::Connect(format!("{e:#}")))
+                    Err(setup::Need::connection(e))
                 }
             }
         }
