@@ -34,6 +34,28 @@ fn embed(base: &Path, folder: &str, name: &str, file: &str) {
 }
 
 fn main() {
+    if std::env::var_os("CARGO_FEATURE_NATIVE_VM").is_some()
+        && std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos")
+        && std::env::var("CARGO_CFG_TARGET_ARCH").as_deref() == Ok("aarch64")
+    {
+        let out = std::path::PathBuf::from(std::env::var("OUT_DIR").unwrap());
+        for file in ["native/NativePaneHost.swift", "native/vm/VMCore.swift", "native/vm/VMView.swift", "native/vm/Bridge.swift"] {
+            println!("cargo:rerun-if-changed={file}");
+        }
+        let result = std::process::Command::new("xcrun")
+            .args(["swiftc", "-swift-version", "5", "-O", "-emit-library", "-module-name", "HerdrVM",
+                "-framework", "AppKit", "-framework", "Virtualization",
+                "native/NativePaneHost.swift", "native/vm/VMCore.swift", "native/vm/VMView.swift", "native/vm/Bridge.swift", "-o"])
+            .arg(out.join("libHerdrVM.dylib"))
+            .args(["-Xlinker", "-install_name", "-Xlinker", "@rpath/libHerdrVM.dylib"])
+            .status().expect("compile native VM bridge");
+        assert!(result.success(), "Swift VM bridge failed to compile");
+        println!("cargo:rustc-link-search=native={}", out.display());
+        println!("cargo:rustc-link-lib=dylib=HerdrVM");
+        println!("cargo:rustc-link-arg=-Wl,-rpath,@executable_path/../Frameworks");
+        // Also permit the experimental command-line binary to find its library.
+        println!("cargo:rustc-link-arg=-Wl,-rpath,{}", out.display());
+    }
     let base = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     embed(&base, "defaults/mods", "DEFAULT_MODS", "default_mods.rs");
     embed(&base, "defaults/icons", "DEFAULT_ICONS", "default_icons.rs");

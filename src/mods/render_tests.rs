@@ -126,7 +126,8 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
         shared.borrow_mut().shared.insert(a.string(0)?.into(), from_host(a.value(1)?));
         Ok(HostValue::Null)
     });
-    for name in ["run", "playSound", "setAgentOrder", "openOverlay", "closeOverlay", "notify", "presentUpdateNotes"] {
+    module = module.function("vmStatus", |_| Ok(to_host(&json!({"supported": false, "configured": false, "session": null}))));
+    for name in ["run", "playSound", "setAgentOrder", "openOverlay", "closeOverlay", "notify", "presentUpdateNotes", "vmStart", "vmShutdown"] {
         let calls = calls.clone();
         module = module.function(name, move |a| {
             if name == "run" {

@@ -38,6 +38,7 @@ mod update_notes;
 mod vt;
 mod win32_keys;
 mod window;
+mod native_vm;
 
 use gpui::*;
 
@@ -162,6 +163,7 @@ fn main() {
             settings::note_fonts(cx.text_system().all_font_names());
             settings::load_home_fonts(cx);
             mods::init(cx);
+            native_vm::install_lifecycle();
             // Not restarted for it: the update goes in when the app quits.
             cx.on_app_quit(|cx| {
                 let deadline = std::time::Instant::now() + std::time::Duration::from_millis(250);

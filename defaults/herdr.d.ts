@@ -21,6 +21,15 @@ export function home(): string;
 /** The app's folder (`~/.config/herdr-app`, or `$HERDR_APP_HOME`): settings.json, keys.json, layouts/. */
 export function appHome(): string;
 
+/** Opt-in local macOS VM capability. Session metadata never contains credentials.
+ * `supported` describes this build, `configured` whether HERDR_VM_HOME is set.
+ * Session state is the last persisted report; use its pid/updated fields to assess freshness. */
+export function vmStatus(): { supported: boolean; configured: boolean; session: null | { state: string; message: string; pid: number; updated: number } };
+/** Start the configured local VM; idempotent while starting or running. Throws if unavailable. */
+export function vmStart(): null;
+/** Request normal guest shutdown. Guest confirmation may be necessary; never forces power off. */
+export function vmShutdown(): null;
+
 /** Reads UTF-8 text (up to 1 MiB), or null if absent. Runs off the UI thread.
  *  `on`: from that machine (a space's `machine`). */
 export function readTextFile(path: string, options?: { on?: string | null }): Promise<string | null>;

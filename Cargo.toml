@@ -15,6 +15,9 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+native-vm = []
+
 [dependencies]
 ghostty-sys = { path = "crates/ghostty-sys" }
 gpui = { package = "gpui-pre", version = "=0.3.8", features = ["render-to-image"] }
@@ -56,6 +59,7 @@ tiny-skia = { version = "=0.11.4", default-features = false, features = ["std", 
 gpui_linux = { package = "gpui-pre-linux", version = "=0.3.8", features = ["render-to-image"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
+raw-window-handle = "0.6"
 gpui_macos = { package = "gpui-pre-macos", version = "=0.3.8", features = ["render-to-image"] }
 libc = "0.2"
 

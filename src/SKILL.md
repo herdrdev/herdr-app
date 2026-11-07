@@ -151,3 +151,21 @@ Never experiment with pointer/key automation on the person's real display.
 When developing the app on Linux, its `scripts/sandbox` provides an isolated
 home, core and display: `up`, `do`, `status`, `shot`, then `down` when done.
 Never stop a server or session you didn't start.
+
+# Local macOS VM (opt-in build)
+
+The `native-vm` build supports a local macOS guest on Apple Silicon. A tab mod
+with `"native":"macos-vm"` in its `mod.json` requests the built-in native pane;
+`virtual-machine` ships as an example. `HERDR_VM_HOME` selects the prepared VM.
+`scripts/vm/prepare`, `build`, and `run` install and launch an isolated test app.
+`scripts/vm/guest deploy /path/App.app` deploys through VirtioFS; `guest mcp`
+exposes the guest's installed Cua Driver. Screenshots and input work while the
+host tab is hidden. Closing a pane leaves the VM running. Quitting requests
+normal guest shutdown and is cancelled if shutdown does not finish in 30 s.
+Use `guest shutdown` for authenticated shutdown over SSH.
+
+For provisioning, recovery, and guest operation, read `skills/herdr-vm/SKILL.md`
+and its setup reference. Unprepared panes show skill-based setup guidance and
+Retry; they do not create a VM. For manual helpers, skill installation, and
+limitations, see `docs/local-vm.md`. VM credentials, disks and SSH keys remain under the
+ignored private VM directory. The pane uses Apple's native display, not VNC.

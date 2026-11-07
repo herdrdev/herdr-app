@@ -1,0 +1,15 @@
+#!/bin/bash
+set -euo pipefail
+cd "$(dirname "$0")/../.."
+app="$PWD/.local/vm/artifacts/Herdr VM Test.app"
+mkdir -p "$app/Contents/MacOS"
+xcrun swiftc -O -framework AppKit -framework Metal native/vm/SmokeApp.swift -o "$app/Contents/MacOS/Smoke"
+python3 - "$app" <<'PY'
+import pathlib, plistlib, sys
+with (pathlib.Path(sys.argv[1])/'Contents/Info.plist').open('wb') as f:
+    plistlib.dump(dict(CFBundleExecutable='Smoke', CFBundleIdentifier='local.herdr.vm-smoke',
+        CFBundleName='Herdr VM Test', CFBundlePackageType='APPL', CFBundleVersion='1',
+        NSHighResolutionCapable=True, NSPrincipalClass='NSApplication'), f)
+PY
+codesign --force --sign - "$app"
+echo "$app"

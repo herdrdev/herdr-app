@@ -4127,6 +4127,19 @@ impl AppWindow {
     }
 
     fn render_slot(&self, slot: &str, cx: &mut Context<Self>) -> AnyElement {
+        #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "native-vm"))]
+        if std::env::var_os("HERDR_VM_HOME").is_some()
+            && self.model.tab_of(slot).is_some()
+            && let Some(copy) = self.copies.get(slot)
+            && let Some(folder) = self.folders.get(&copy.inst.name)
+            && folder.hint.native.as_deref() == Some("macos-vm")
+        {
+            return if self.overlays.is_empty() && self.pane_drag.is_none() {
+                crate::native_vm::pane(slot)
+            } else {
+                div().size_full().into_any_element()
+            };
+        }
         let in_overlay = slot.starts_with("overlay:") || self.overlays.iter().any(|o| o.layout.as_ref().is_some_and(|l| l.find(slot).is_some()));
         // A mod that is a pane in a tab: a click makes it the focused pane, and the
         // keyboard is its own (an editor, a board), like a terminal's.
@@ -4830,6 +4843,8 @@ fn shadow(el: Div, s: Option<&str>) -> Div {
 
 impl Render for AppWindow {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        #[cfg(all(target_os = "macos", target_arch = "aarch64", feature = "native-vm"))]
+        crate::native_vm::begin_frame();
         crate::bench::count(&crate::bench::WINDOW);
         let _timed = crate::bench::timed(&crate::bench::WINDOW_US);
         crate::bench::frame_start();

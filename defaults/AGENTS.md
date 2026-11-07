@@ -1037,3 +1037,24 @@ including a small herdr-core skill you can install with the user's permission.
 - One mod per idea. Don't edit `AGENTS.md` or the `.d.ts` files (the app
   rewrites them). Don't touch other mods unless the request
   needs it.
+
+# Local macOS VM (opt-in)
+
+A tab mod can declare `"native":"macos-vm"` in `mod.json` to request the built-in
+native VM pane on an Apple Silicon `native-vm` build. The shipped
+`virtual-machine` mod demonstrates this and provides a JavaScript fallback.
+On supported builds, the tab bar’s **+ → macOS VM** opens this pane in local
+workspaces. The menu entry is hidden in remote workspaces.
+This is a local capability even in a space connected to a remote core.
+`vmStatus()`, `vmStart()` and `vmShutdown()` are the narrow `herdr` module API;
+see `herdr.d.ts` for their contract. `HERDR_VM_HOME` selects the prepared VM.
+A hidden or closed pane does not stop the session. Quit requests normal guest
+shutdown; a timeout cancels quitting instead of forcing the VM off.
+
+For new setup, interrupted provisioning, login/permission recovery, or guest
+operation, read `skills/herdr-vm/SKILL.md` in the source checkout. The setup
+workflow lives in `skills/herdr-vm/references/setup.md`; helpers and skill
+installation are documented in `docs/local-vm.md`. Unprepared panes show setup
+guidance and Retry without locking the disk. Guest screenshots/input use the
+guest driver and work independently of host tab visibility. This feature is opt-in and its
+proposed API is subject to upstream discussion.

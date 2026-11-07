@@ -2,6 +2,31 @@
 
 Herdr is a desktop app for terminals and coding agents. Keep work in spaces, see which agents need you, and leave terminals running when you close the window.
 
+## Native macOS VM — discussion fork
+
+Run a local Mac inside a Herdr tab. Agents can inspect, type and click inside
+the guest while you work in another tab, without opening windows on your desktop.
+The display uses Apple's native Virtualization framework; guest automation runs
+over SSH/MCP. No VNC is involved.
+
+[![Watch the native VM demo](docs/media/local-vm-preview.gif)](https://raw.githubusercontent.com/DAmesberger/herdr-app/experiment/native-vm/docs/media/local-vm-demo.mp4)
+
+[Watch/download the demo (MP4)](https://raw.githubusercontent.com/DAmesberger/herdr-app/experiment/native-vm/docs/media/local-vm-demo.mp4)
+· [Setup and design](docs/local-vm.md)
+· [Agent skill](skills/herdr-vm/SKILL.md)
+
+This branch proposes an **opt-in, built-in native capability**, with AppKit pane
+placement separated from VM ownership and a small JavaScript mod API. It does
+not change herdr-core or introduce arbitrary native extensions. Normal builds
+keep the JavaScript fallback. The installers below install upstream Herdr,
+**not this experimental feature**; follow the setup guide to build the isolated lab app.
+
+Verified locally: native display, Apple paravirtual Metal execution, shared-folder
+app deployment, and guest screenshots/input with the VM tab hidden. The initial
+scope is one local VM on Apple Silicon; remote VM streaming, snapshots and saved-state
+suspend/resume are not included. This is ready for design discussion, not an
+upstream-approved release.
+
 ## Install
 
 ### Linux and macOS

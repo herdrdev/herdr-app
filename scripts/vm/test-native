@@ -1,0 +1,8 @@
+#!/bin/bash
+set -euo pipefail
+cd "$(dirname "$0")/../.."
+mkdir -p .local/bin
+xcrun swiftc -swift-version 5 -framework AppKit -framework Virtualization \
+    native/NativePaneHost.swift native/vm/VMCore.swift native/vm/VMView.swift native/tests/LifecycleTests.swift \
+    -o .local/bin/vm-lifecycle-tests
+.local/bin/vm-lifecycle-tests
