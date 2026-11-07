@@ -965,7 +965,7 @@ impl TerminalView {
         let height = ch * g.vt.rows as f32;
         g.vt.select(step, col, row, x, y, cw, height);
         drop(g);
-        if matches!(step, Select::Release) {
+        if matches!(step, Select::Release) && crate::settings::get().copy_on_select {
             // Copy on select, as in Herdr.
             self.copy(cx);
         }
@@ -2967,6 +2967,55 @@ mod tests {
                 assert_eq!(runs, expected, "cursor: {cursor:?}");
             }
         }).unwrap();
+        crate::settings::set((*original).clone());
+    }
+
+    #[gpui::test]
+    fn copy_on_select_can_be_turned_off(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        struct Root(Entity<super::TerminalView>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().w(px(400.)).h(px(100.)).child(self.0.clone())
+            }
+        }
+        cx.update(gpui_base::init);
+        let original = crate::settings::get();
+        let (root, cx) = cx.add_window_view(|_, cx| {
+            Root(cx.new(|cx| super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 5), cx)))
+        });
+        cx.run_until_parked();
+
+        let drag = |root: &Entity<Root>, cx: &mut VisualTestContext| {
+            root.update(cx, |root, cx| {
+                root.0.update(cx, |terminal, cx| {
+                    terminal.select(super::Select::Press, point(px(1.), px(1.)), cx);
+                    terminal.select(super::Select::Drag, point(px(16.), px(1.)), cx);
+                    terminal.select(super::Select::Release, point(px(31.), px(1.)), cx);
+                });
+            });
+            cx.run_until_parked();
+        };
+        root.update(cx, |root, cx| {
+            root.0.update(cx, |terminal, _| terminal.grid.borrow_mut().vt.write(b"hello"));
+        });
+
+        let mut settings = (*original).clone();
+        settings.copy_on_select = false;
+        crate::settings::set(settings);
+        cx.update(|_, app| app.write_to_clipboard(ClipboardItem::new_string("unchanged".into())));
+        drag(&root, cx);
+        cx.update(|_, app| assert_eq!(app.read_from_clipboard().unwrap().text().as_deref(), Some("unchanged")));
+
+        let mut settings = (*original).clone();
+        settings.copy_on_select = true;
+        crate::settings::set(settings);
+        drag(&root, cx);
+        cx.update(|_, app| {
+            let copied = app.read_from_clipboard().and_then(|item| item.text()).unwrap_or_default();
+            assert!(copied.starts_with("hel"), "copied {copied:?}");
+        });
         crate::settings::set((*original).clone());
     }
 
