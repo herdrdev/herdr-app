@@ -86,6 +86,7 @@ pub(super) struct Discovery {
     /// Swapped out rather than recorded around, so a template's ids are dense
     /// and start at zero — which is what makes grafting one addition per id.
     saved: SpecArena,
+    owner: Option<std::rc::Rc<ApplicationGeneration>>,
 }
 
 impl ShellRuntime {
@@ -96,7 +97,15 @@ impl ShellRuntime {
     /// inner template's slots, and there is no evidence yet that anyone wants
     /// to: refusing it now costs a message, and allowing it later costs
     /// nothing that has been promised.
-    pub(super) fn begin_template(&self, ctx: &Ctx<'_>, arity: usize) -> JsResult<()> {
+    pub(super) fn begin_template(
+        &self,
+        ctx: &Ctx<'_>,
+        arity: usize,
+        owner: Option<std::rc::Rc<ApplicationGeneration>>,
+    ) -> JsResult<()> {
+        if owner.as_ref().is_some_and(|owner| !owner.is_active()) {
+            return Err(Exception::throw_type(ctx, "this template belongs to an application that has been unloaded"));
+        }
         if self.discovery.borrow().is_some() {
             return Err(Exception::throw_type(
                 ctx,
@@ -111,6 +120,7 @@ impl ShellRuntime {
             arity,
             slots: Vec::new(),
             saved,
+            owner,
         });
         Ok(())
     }
@@ -178,7 +188,7 @@ impl ShellRuntime {
             root,
             discovery.slots,
             discovery.arity,
-            scope::current_application_generation(),
+            discovery.owner,
         ))));
         Ok((templates.len() - 1) as u32)
     }
@@ -502,11 +512,8 @@ mod tests {
 
     use crate::{ShellRuntime, runtime::ApplicationGeneration};
 
-    /// A template is defined once and used for the life of the module, so
-    /// nothing in a render would ever free one. What frees them is the release
-    /// that already retires an application's callbacks and tasks — and it has
-    /// to, because a hot reload re-evaluates the module and defines every
-    /// template in it again.
+    /// Releasing a template's defining generation frees its recorded body,
+    /// even when the first render discovered that body later.
     #[gpui::test]
     fn releasing_an_application_drops_the_templates_it_defined(cx: &mut TestAppContext) {
         struct Host;
@@ -535,11 +542,17 @@ export default class Board extends View {
         cx.update(|cx| runtime.set_global(cx));
 
         let application = ApplicationGeneration::new(41);
-        let mut view_type = runtime.load_source("templates.js", SOURCE).expect("load");
-        view_type.application = Some(Rc::clone(&application));
-
         let window = cx.add_window(|_, _| Host);
         let mut context = VisualTestContext::from_window(*window.deref(), cx);
+        let view_type = context.update(|window, cx| {
+            let (_owner, _) = crate::scope::enter_with_application(
+                &runtime, window, cx, crate::scope::ScopePhase::Event,
+                None, crate::policy::default(), Some(application.clone()),
+            );
+            let mut view_type = runtime.load_source("templates.js", SOURCE).expect("load");
+            view_type.application = Some(Rc::clone(&application));
+            view_type
+        });
         let object = context.update(|window, cx| {
             runtime
                 .instantiate(&view_type, window, cx)

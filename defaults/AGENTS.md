@@ -883,6 +883,9 @@ Rules:
   once; `render(cx)` describes the UI and runs again after `cx.notify()` and
   whenever Herdr's live data changes (spaces, agents, terminals, focus,
   theme, shared state). Don't poll those.
+- Module code runs once per source version and is shared by copies, even after all
+  copies close. Keep instance state and host calls in constructor/init, not module
+  scope. Each copy still gets its own instance, tasks and localStorage.
 - **Never keep a `cx` and use it later.** Every callback gets its own:
   `on_click((event, cx) => …)`, `cx.spawn(async (cx) => …)`,
   `cx.timer.every(ms, (cx) => …)`.
