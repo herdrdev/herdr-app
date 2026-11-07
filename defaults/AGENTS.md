@@ -667,6 +667,11 @@ What's about the user, never a look:
 - `font_ligatures`: programming ligatures are off by default; set `true` to
   enable them in terminal fonts such as JetBrains Mono and Fira Code. The cursor
   and background changes (including selections) break ligatures so individual cells stay clear.
+- `font_features`: OpenType features for terminal fonts, applied over
+  `font_ligatures` (the entry wins): `["cv02", "ss03", "-calt"]`. `ss03` or `+ss03`
+  turns a feature on, `-calt` off, `cv02=2` picks a variant. A bad entry makes
+  settings.json fail to load. Turning on `calt`, `liga` or `dlig` here breaks
+  ligatures at the cursor and background changes like `font_ligatures` does.
 - `theme`: a theme name or `{light, dark}`; used where the layout sets none.
   The theme picker overrides any layout and stays on that layout.
 - `colors`: theme color overrides (`{"accent":"#ff8800"}`), with the same

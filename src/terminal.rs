@@ -87,8 +87,8 @@ struct Grid {
     track: Option<Bounds<Pixels>>,
     /// Each row's drawing by position, kept while the row is the same (`Rc`).
     painted: Vec<(Rc<Vec<vt::Cell>>, Vec<RowOp>, Option<usize>)>,
-    /// Font size, cell size, font, loaded fonts and ligature setting used to draw.
-    painted_with: (u32, Size<Pixels>, String, u64, bool),
+    /// Font size, cell size, font, loaded fonts and ligature and feature settings used to draw.
+    painted_with: (u32, Size<Pixels>, String, u64, (bool, Vec<String>)),
 }
 
 pub struct TerminalView {
@@ -266,7 +266,7 @@ impl TerminalView {
                 thumb: None,
                 track: None,
                 painted: Vec::new(),
-                painted_with: (0, Size::default(), String::new(), 0, false),
+                painted_with: (0, Size::default(), String::new(), 0, (false, Vec::new())),
             })),
             focus: cx.focus_handle(),
             was_focused: false,
@@ -1401,11 +1401,16 @@ fn map_key(key: &str) -> Option<(GhosttyKey, bool, Option<char>)> {
     Some((code, shifted, Some(base)))
 }
 
+/// The ligature features (on or off), then the person's `font_features` over them.
 fn ligature_features(enabled: bool) -> FontFeatures {
-    static FEATURES: std::sync::LazyLock<[FontFeatures; 2]> = std::sync::LazyLock::new(|| {
-        [0, 1].map(|value| FontFeatures(Arc::new(vec![("calt".into(), value), ("liga".into(), value), ("dlig".into(), 0)])))
-    });
-    FEATURES[usize::from(enabled)].clone()
+    let mut features: Vec<(String, u32)> = crate::settings::LIGATURE_TAGS.map(|tag| (tag.to_owned(), u32::from(enabled && tag != "dlig"))).into();
+    for (tag, value) in crate::settings::get().font_features.iter().filter_map(|f| crate::settings::parse_font_feature(f).ok()) {
+        match features.iter_mut().find(|(t, _)| *t == tag) {
+            Some(have) => have.1 = value,
+            None => features.push((tag, value)),
+        }
+    }
+    FontFeatures(Arc::new(features))
 }
 
 fn cell_font(bold: bool, italic: bool) -> Font {
@@ -1466,7 +1471,10 @@ enum RowOp {
 /// text in runs of one style (wide characters, sprites and icons on their own).
 fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: &mut Window) -> Vec<RowOp> {
     crate::bench::count(&crate::bench::ROWS);
-    let ligatures = crate::settings::get().font_ligatures;
+    let settings = crate::settings::get();
+    // `split` keeps cells apart at the cursor and background changes;
+    // `upgrade` swaps in the ligatures-on font where the text can join.
+    let (split, upgrade) = (settings.terminal_ligatures(), settings.font_ligatures);
     let mut ops = Vec::new();
     let mut x = 0;
     while x < row.len() {
@@ -1525,7 +1533,7 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
             while x < row.len() {
                 let d = &row[x];
                 let same = !d.wide
-                    && (!ligatures || d.bg == c.bg)
+                    && (!split || d.bg == c.bg)
                     && d.fg == c.fg
                     && d.bold == c.bold
                     && d.italic == c.italic
@@ -1543,7 +1551,7 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
         if text.trim().is_empty() && !c.underline && !c.strike {
             continue;
         }
-        if ligatures && needs_ligatures(&text, &text_font) {
+        if upgrade && needs_ligatures(&text, &text_font) {
             text_font.features = ligature_features(true);
         }
         let run = TextRun {
@@ -1637,9 +1645,9 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     // Each row's drawing is built once and painted again while the row is the
     // same (`Vt::frame` keeps a row libghostty didn't change): an agent's spinner
     // line rebuilds one row, not the whole screen.
-    let ligatures = crate::settings::get().font_ligatures;
-    let cursor = frame.cursor_cell.filter(|_| ligatures);
-    let with = (crate::settings::font_size().to_bits(), cell, crate::settings::terminal_font(), crate::settings::fonts_added(), ligatures);
+    let settings = crate::settings::get();
+    let cursor = frame.cursor_cell.filter(|_| settings.terminal_ligatures());
+    let with = (crate::settings::font_size().to_bits(), cell, crate::settings::terminal_font(), crate::settings::fonts_added(), (settings.font_ligatures, settings.font_features.clone()));
     // When every row changed (output scrolling), nothing is kept: the next
     // frame would find none of them the same.
     let mut painted = std::mem::take(&mut grid.borrow_mut().painted);
@@ -3050,6 +3058,113 @@ mod tests {
             }
         }).unwrap();
         crate::settings::set((*original).clone());
+    }
+
+    fn with_font_settings(ligatures: bool, features: &[&str], f: impl FnOnce()) {
+        let original = crate::settings::get();
+        let mut settings = (*original).clone();
+        settings.font_ligatures = ligatures;
+        settings.font_features = features.iter().map(|f| f.to_string()).collect();
+        crate::settings::set(settings);
+        f();
+        crate::settings::set((*original).clone());
+    }
+
+    fn feature_list(features: &gpui::FontFeatures) -> Vec<(&str, u32)> {
+        features.tag_value_list().iter().map(|(tag, value)| (tag.as_str(), *value)).collect()
+    }
+
+    #[test]
+    fn font_features_go_over_the_ligature_features_and_reach_every_cell_font() {
+        use super::*;
+        with_font_settings(false, &[], || {
+            assert_eq!(feature_list(&ligature_features(false)), [("calt", 0), ("liga", 0), ("dlig", 0)]);
+            assert_eq!(feature_list(&ligature_features(true)), [("calt", 1), ("liga", 1), ("dlig", 0)]);
+        });
+        with_font_settings(true, &["-calt", "ss03", "cv02=2"], || {
+            let on = [("calt", 0), ("liga", 1), ("dlig", 0), ("ss03", 1), ("cv02", 2)];
+            assert_eq!(feature_list(&ligature_features(true)), on);
+            let off = [("calt", 0), ("liga", 0), ("dlig", 0), ("ss03", 1), ("cv02", 2)];
+            assert_eq!(feature_list(&ligature_features(false)), off);
+            // Plain output (the ligatures-off font) and the cursor cell get them too.
+            assert_eq!(feature_list(&cell_font(false, false).features), off);
+        });
+        with_font_settings(false, &["cv02=2", "cv02=3", "bad"], || {
+            let features = ligature_features(false);
+            let list = feature_list(&features);
+            assert_eq!(list.iter().filter(|(tag, _)| *tag == "cv02").collect::<Vec<_>>(), [&("cv02", 3)]);
+            assert_eq!(list.len(), 4);
+        });
+    }
+
+    #[gpui::test]
+    fn ligature_features_in_font_features_break_runs_at_the_cursor_without_enabling_liga(cx: &mut gpui::TestAppContext) {
+        use super::*;
+        let row: Vec<_> = "a=>b".chars().map(|ch| vt::Cell { text: ch.to_string(), ..Default::default() }).collect();
+        let window = cx.add_window(|_, _| Empty);
+        for (ligatures, features) in [(false, &["calt"][..]), (true, &["-calt"][..])] {
+            with_font_settings(ligatures, features, || {
+                if !ligatures {
+                    assert_eq!(feature_list(&ligature_features(false)), [("calt", 1), ("liga", 0), ("dlig", 0)]);
+                }
+                window.update(cx, |_, window, _| {
+                    let ops = row_ops(&row, size(px(8.), px(16.)), Some(1), window);
+                    let runs: Vec<_> = ops.iter().filter_map(|op| match op {
+                        RowOp::Text { x, line } => Some((*x, line.text.as_ref())),
+                        _ => None,
+                    }).collect();
+                    assert_eq!(runs, vec![(0, "a"), (1, "="), (2, ">b")], "ligatures {ligatures}, features {features:?}");
+                }).unwrap();
+            });
+        }
+    }
+
+    #[gpui::test]
+    fn other_font_features_do_not_split_runs(cx: &mut gpui::TestAppContext) {
+        use super::*;
+        let mut row: Vec<_> = "a=>b 42".chars().map(|ch| vt::Cell { text: ch.to_string(), ..Default::default() }).collect();
+        row[2].bg = Some(vt::Rgb(10, 20, 30));
+        let window = cx.add_window(|_, _| Empty);
+        with_font_settings(false, &["ss03", "-calt", "cv02=2"], || {
+            window.update(cx, |_, window, _| {
+                let ops = row_ops(&row, size(px(8.), px(16.)), None, window);
+                let runs: Vec<_> = ops.iter().filter_map(|op| match op {
+                    RowOp::Text { x, line } => Some((*x, line.text.as_ref())),
+                    _ => None,
+                }).collect();
+                assert_eq!(runs, vec![(0, "a=>b 42")]);
+            }).unwrap();
+        });
+    }
+
+    // `zero` swaps JetBrains Mono's zero for a dotted or slashed one.
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn font_features_change_glyphs_without_moving_terminal_cells() {
+        use super::*;
+        use std::borrow::Cow;
+
+        let system = Arc::new(TextSystem::new(Arc::new(gpui_wgpu::CosmicTextSystem::new_without_system_fonts(crate::settings::DEFAULT_FONT))));
+        system.add_fonts(vec![Cow::Borrowed(include_bytes!("../assets/fonts/JetBrainsMono-Variable.ttf"))]).unwrap();
+        let text_system = WindowTextSystem::new(system);
+        let text = "a0b";
+        let mut variants = Vec::new();
+        for features in [&[][..], &["zero"][..]] {
+            with_font_settings(false, features, || {
+                let font = cell_font(false, false);
+                let font_id = text_system.resolve_font(&font);
+                let size = px(14.0);
+                let width = text_system.advance(font_id, size, 'M').unwrap().width;
+                let run = TextRun { len: text.len(), font, ..Default::default() };
+                let line = text_system.shape_line(text.into(), size, &[run], Some(width));
+                let glyphs: Vec<_> = line.runs.iter().flat_map(|run| &run.glyphs).collect();
+                for glyph in &glyphs {
+                    assert!(f32::from(glyph.position.x - width * glyph.index as f32).abs() < 0.1, "glyph drift");
+                }
+                variants.push(glyphs.iter().map(|glyph| glyph.id).collect::<Vec<_>>());
+            });
+        }
+        assert_ne!(variants[0], variants[1], "zero must change the glyphs");
     }
 
     struct Empty;
