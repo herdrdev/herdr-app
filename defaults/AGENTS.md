@@ -161,6 +161,8 @@ the highlighted line shows where it will land.
   Ctrl-click (Cmd-click on macOS) a live terminal address in terminal text to
   peek at it. Bare addresses refer to the machine of the terminal showing them;
   use `machine/address` for another machine. Names and non-live addresses aren't links.
+  Held over any other link, the same key shows where the link goes under it
+  (an OSC 8 link's text can differ); clicking that copies it.
 - **Agent navigation order** belongs to the mods. A mod displaying agents calls
   `setAgentOrder(list.map(a => a.address))` on render so `agent.next` /
   `agent.prev` follow its list.
