@@ -126,13 +126,16 @@ jobs:
         if: matrix.platform == 'linux-x86_64'
         run: python3 -m unittest discover -s scripts -p test_distribution.py
       - name: Install Bun
-        if: matrix.platform == 'linux-x86_64'
+        if: runner.os != 'Windows'
         run: curl -fsSL https://bun.sh/install | bash -s "bun-v1.4.4"
       - name: Check documentation
         if: matrix.platform == 'linux-x86_64'
         run: |
           ~/.bun/bin/bun test scripts/docs.test.ts
           ~/.bun/bin/bun scripts/docs.ts check
+      - name: Check Source Control
+        if: runner.os != 'Windows'
+        run: ~/.bun/bin/bun test scripts/source-control*.test.ts
 
   # Keep the required check name stable while requiring every platform.
   test:

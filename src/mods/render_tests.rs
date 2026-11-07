@@ -180,6 +180,7 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
                     if first == "git"
                         && [
                             json!(["rev-parse", "--show-toplevel"]),
+                            json!(["--no-pager", "--literal-pathspecs", "-c", "core.quotepath=false", "--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false", "rev-parse", "--show-toplevel"]),
                             json!(["rev-parse", "--path-format=absolute", "--git-common-dir"]),
                             json!(["status", "--porcelain=v2", "--branch"]),
                             json!(["--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain=v2", "--branch"]),
@@ -858,4 +859,296 @@ fn status_bar_shows_the_real_palette_key(cx: &mut TestAppContext) {
     let tree = describe_with_values(cx, &staged, "mods/workspace-status", unbound, None).unwrap();
     assert!(tree.contains("commands"), "unbound hint still offers commands: {tree}");
     assert!(!tree.contains("Shift P"), "unbound hint must not invent a key: {tree}");
+}
+
+#[gpui::test]
+fn source_control_split_drags_clamps_and_restores(cx: &mut TestAppContext) {
+    use gpui::{IntoElement, Modifiers, MouseButton, ParentElement, Styled, VisualTestContext, point, px};
+    use gpui_shell::{ShellRoot, ScriptView};
+    use std::ops::Deref;
+
+    struct Mounted(gpui::Entity<ShellRoot>, f32);
+    impl gpui::Render for Mounted {
+        fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+            // Fix the content size before its first layout, so resizing a test
+            // window cannot proportionally adjust the initial panel sizes.
+            gpui::div().w(px(368.)).h(px(self.1)).child(self.0.clone())
+        }
+    }
+    fn draw(cx: &mut VisualTestContext) {
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.run_until_parked();
+    }
+    fn drag(cx: &mut VisualTestContext, from: f32, to: f32) {
+        // The panel border and 36px title precede the resizable group.
+        let at = |upper| point(px(184.), px(37. + upper));
+        cx.simulate_mouse_down(at(from - 2.), MouseButton::Left, Modifiers::default());
+        draw(cx);
+        cx.simulate_mouse_move(at(from + (to - from).signum() * 20.), Some(MouseButton::Left), Modifiers::default());
+        draw(cx);
+        cx.simulate_mouse_move(at(to), Some(MouseButton::Left), Modifiers::default());
+        draw(cx);
+        cx.simulate_mouse_up(at(to), MouseButton::Left, Modifiers::default());
+        draw(cx);
+    }
+
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    std::fs::write(staged.0.join("main.js"), r#"
+import Real from './mods/source-control/main.js';
+export default class Scenario extends Real {
+  refresh() {}
+  init(props, cx) {
+    super.init(props, cx);
+    this.data = { root: '/fixture/project', head: 'abc', branch: { name: 'main', upstream: 'origin/main', ahead: 0, behind: 0 },
+      groups: { staged: [], changes: [], conflicts: [] }, remotes: ['origin'] };
+    this.context = this.key();
+  }
+}
+
+"#).unwrap();
+    for platform in ["windows", "macos"] {
+        let calls = Rc::new(RefCell::new(Calls::default()));
+        let saved = || calls.borrow().shared.get("source-control.upper-height").and_then(Value::as_f64);
+        for (scenario, height) in [(0, 700.), (1, 700.), (2, 400.), (3, 700.)] {
+            let mut values = fixture(true, props(), updates("current", "current"));
+            values.insert("window".into(), json!({"platform":platform}));
+            gpui_shell::policy::set_default(Policy::new()
+                .with_capabilities(Capabilities::new().read_roots([staged.0.clone()]))
+                .with_host_module(module(values, calls.clone())).unwrap());
+            let runtime = ShellRuntime::new_isolated().unwrap();
+            let window = cx.add_window(|window, cx| Mounted(runtime.try_load(&staged.0, window, cx).unwrap(), height));
+            let mut visual = VisualTestContext::from_window(*window.deref(), cx);
+            draw(&mut visual); draw(&mut visual);
+            let view = window.update(&mut visual, |root, _, cx| {
+                root.0.read(cx).content().clone().downcast::<ScriptView>().unwrap()
+            }).unwrap();
+            let tree = visual.update(|_, cx| view.read(cx).snapshot().unwrap().debug_tree());
+            assert!(tree.contains("v_resizable \"source-control-split\""), "{platform}: {tree}");
+            let initial = match scenario { 0 => 207., 1 => 300., _ => 200. };
+            if height == 400. {
+                assert_eq!(saved(), Some(582.), "mounting a smaller window must retain the preferred height");
+                assert!(tree.contains(":panel_size[Number(282.0)]"), "the restored size must fit the smaller window: {tree}");
+                // The saved 582px must fit the 362px group while leaving Graph
+                // 80px visible; its handle must be reachable at 282px.
+                drag(&mut visual, 282., 200.);
+                assert_eq!(saved(), Some(200.), "{platform}: an oversized saved height must keep Graph and its divider reachable");
+            } else if scenario == 3 {
+                drag(&mut visual, initial, 582.);
+                assert_eq!(saved(), Some(582.));
+                window.update(&mut visual, |root, _, cx| { root.1 = 400.; cx.notify(); }).unwrap();
+                draw(&mut visual); draw(&mut visual);
+                assert_eq!(saved(), Some(582.), "window resize must not overwrite the preferred height");
+                drag(&mut visual, 282., 200.);
+                assert_eq!(saved(), Some(200.), "{platform}: shrinking the same window must leave the divider reachable");
+            } else if scenario == 0 {
+                assert!(tree.contains(&format!(":panel_size[Number({initial:.1})]")), "{platform}/scenario={scenario}: {tree}");
+                assert_eq!(saved(), None, "initial layout must not save a user preference");
+                drag(&mut visual, initial, 300.);
+                assert_eq!(saved(), Some(300.), "{platform}: dragging must reach the persisted preference");
+                visual.simulate_mouse_move(point(px(184.), px(480.)), None, Modifiers::default());
+                draw(&mut visual);
+                visual.simulate_mouse_up(point(px(184.), px(480.)), MouseButton::Left, Modifiers::default());
+                draw(&mut visual);
+                assert_eq!(saved(), Some(300.), "moving after release must not keep resizing");
+            } else {
+                assert!(tree.contains(&format!(":panel_size[Number({initial:.1})]")), "{platform}/scenario={scenario}: {tree}");
+                // Starting at the saved boundary also proves the restored size reached native layout.
+                drag(&mut visual, initial, 260.);
+                assert_eq!(saved(), Some(260.), "{platform}: the new window must restore the divider");
+                drag(&mut visual, 260., 20.);
+                assert_eq!(saved(), Some(160.), "the commit area must retain its minimum height");
+                drag(&mut visual, 160., 650.);
+                assert_eq!(saved(), Some(582.), "the graph must retain 80px in the 662px group");
+            }
+            assert!(calls.borrow().unexpected.is_empty(), "{:?}", calls.borrow().unexpected);
+            window.update(&mut visual, |_, window, _| window.remove_window()).unwrap();
+        }
+    }
+}
+
+#[gpui::test]
+fn source_control_graph_reveals_and_expands_history(cx: &mut TestAppContext) {
+    use gpui::{IntoElement, Modifiers, MouseButton, ParentElement, Styled, VisualTestContext, point, px};
+    use gpui_shell::{ScriptView, ShellRoot};
+    use std::ops::Deref;
+
+    struct Mounted(gpui::Entity<ShellRoot>);
+    impl gpui::Render for Mounted {
+        fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+            gpui::div().w(px(368.)).h(px(700.)).child(self.0.clone())
+        }
+    }
+    fn draw(cx: &mut VisualTestContext) {
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.run_until_parked();
+    }
+    fn click(cx: &mut VisualTestContext, x: f32, y: f32) {
+        cx.simulate_click(point(px(x), px(y)), Modifiers::default());
+        draw(cx); draw(cx);
+    }
+
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    std::fs::write(staged.0.join("main.js"), r#"
+import Real from './mods/source-control/main.js';
+import { setShared } from 'herdr';
+export default class Scenario extends Real {
+  refresh() {}
+  init(props, cx) {
+    super.init(props, cx);
+    this.history = Array.from({ length: 100 }, (_, index) => ({ graph: '* ', hash: index.toString(16).padStart(40, '0'),
+      refs: '', subject: `Commit ${index}`, author: 'Fixture', date: '2026-01-01', height: 22 }));
+    const head = this.history[50].hash;
+    this.data = { root: '/fixture/project', head, branch: { name: 'main', upstream: 'origin/main', upstreamRef: 'refs/remotes/origin/main', ahead: 0, behind: 0 },
+      groups: { staged: [], changes: [], conflicts: [] }, remotes: ['origin', 'backup'], graphIncludesHead: true,
+      graphRefs: ['refs/heads/main', 'refs/remotes/origin/main'], baseRef: null,
+      refs: [{ ref: 'refs/heads/main', name: 'main', type: 'branch', hash: head },
+        { ref: 'refs/remotes/origin/main', name: 'origin/main', type: 'remote', hash: head },
+        { ref: 'refs/remotes/backup/main', name: 'backup/main', type: 'remote', hash: head }] };
+    this.context = this.key();
+    this.repo = { showCommit: async hash => {
+      setShared('test.graph-request', hash);
+      return { files: [{ path: 'src/lib/foo.rs', status: 'M' }, { path: 'src/lib/bar.rs', status: 'A' }, { path: 'README.md', status: 'M' }] };
+    } };
+  }
+  openDiff(file, group, cx, hash) { setShared('test.graph-file', { file: file.path, group, hash }); }
+  render(cx) {
+    const result = super.render(cx);
+    setShared('test.graph-state', { selected: this.selected || null, expanded: Object.keys(this.expanded), directories: this.directories, fileView: this.fileView });
+    return result;
+  }
+}
+"#).unwrap();
+    let head = format!("{:040x}", 50);
+    for platform in ["windows", "macos"] {
+        let calls = Rc::new(RefCell::new(Calls::default()));
+        calls.borrow_mut().shared.insert("source-control.upper-height".into(), json!(200));
+        let shared = |key: &str| calls.borrow().shared.get(key).cloned().unwrap_or(Value::Null);
+        let mut values = fixture(true, props(), updates("current", "current"));
+        values.insert("window".into(), json!({"platform":platform}));
+        gpui_shell::policy::set_default(Policy::new()
+            .with_capabilities(Capabilities::new().read_roots([staged.0.clone()]))
+            .with_host_module(module(values, calls.clone())).unwrap());
+        let runtime = ShellRuntime::new_isolated().unwrap();
+        let window = cx.add_window(|window, cx| Mounted(runtime.try_load(&staged.0, window, cx).unwrap()));
+        let mut visual = VisualTestContext::from_window(*window.deref(), cx);
+        draw(&mut visual); draw(&mut visual);
+        let view = window.update(&mut visual, |root, _, cx| root.0.read(cx).content().clone().downcast::<ScriptView>().unwrap()).unwrap();
+        let tree = |visual: &mut VisualTestContext| visual.update(|_, cx| view.read(cx).snapshot().unwrap().debug_tree());
+        let initial = tree(&mut visual);
+        for id in ["graph-filter", "graph-current", "fetch", "graph-pull", "push", "graph-refresh", "graph-more-actions"] {
+            assert!(initial.contains(&format!("\"{id}\"")), "{platform}: missing {id}: {initial}");
+        }
+        assert_eq!(shared("test.graph-state")["selected"], Value::Null);
+
+        // The 36px title, 200px upper panel, and borders put the Graph toolbar
+        // at y=252. Its six 24px icon buttons have 1px gaps and an 8px inset.
+        click(&mut visual, 222., 252.);
+        assert_eq!(shared("test.graph-state")["selected"], json!(head), "{platform}: native target button must reveal HEAD");
+        // HEAD starts outside the viewport. Clicking its center after reveal
+        // proves the real virtual-list handle moved it, rather than only
+        // changing the selected hash. This row also paints main + cloud(2).
+        click(&mut visual, 100., 483.);
+        assert_eq!(shared("test.graph-request"), json!(head), "{platform}: HEAD must be centered and clickable");
+        assert_eq!(shared("test.graph-state")["expanded"], json!([head]));
+        click(&mut visual, 100., 505.);
+        assert_eq!(shared("test.graph-file"), json!({"file":"src/lib/foo.rs","group":"history","hash":head}), "{platform}: expanded file must retain its commit");
+
+        click(&mut visual, 347., 252.);
+        let menu = tree(&mut visual);
+        assert!(menu.contains("View as List") && menu.contains("View as Tree"), "{platform}: {menu}");
+        click(&mut visual, 100., 97.);
+        assert_eq!(shared("source-control.graph-file-view"), json!("tree"), "{platform}: native More menu must persist tree mode");
+        click(&mut visual, 222., 252.);
+        click(&mut visual, 100., 505.);
+        assert_eq!(shared("test.graph-state")["directories"][&head]["src"], json!(true), "{platform}: native folder row must collapse");
+        click(&mut visual, 100., 505.);
+        assert_eq!(shared("test.graph-state")["directories"][&head]["src"], json!(false), "{platform}: native folder row must reopen");
+        click(&mut visual, 100., 549.);
+        assert_eq!(shared("test.graph-file"), json!({"file":"src/lib/bar.rs","group":"history","hash":head}), "{platform}: tree file must open the same historical commit");
+        visual.simulate_mouse_down(point(px(100.), px(483.)), MouseButton::Right, Modifiers::default());
+        draw(&mut visual);
+        assert!(tree(&mut visual).contains("Show Commit Changes"), "{platform}: secondary click must retain the commit menu");
+        assert!(calls.borrow().unexpected.is_empty(), "{:?}", calls.borrow().unexpected);
+        window.update(&mut visual, |_, window, _| window.remove_window()).unwrap();
+    }
+}
+
+#[gpui::test]
+fn source_control_diff_rows_render_and_select(cx: &mut TestAppContext) {
+    use gpui::{IntoElement, Modifiers, ParentElement, Styled, VisualTestContext, point, px};
+    use gpui_shell::ShellRoot;
+    use std::ops::Deref;
+
+    struct Mounted(gpui::Entity<ShellRoot>);
+    impl gpui::Render for Mounted {
+        fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+            gpui::div().w(px(600.)).h(px(400.)).child(self.0.clone())
+        }
+    }
+    fn draw(cx: &mut VisualTestContext) {
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.run_until_parked();
+    }
+    fn click(cx: &mut VisualTestContext, y: f32) {
+        cx.simulate_click(point(px(100.), px(y)), Modifiers::default());
+        draw(cx); draw(cx);
+    }
+
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    std::fs::write(staged.0.join("main.js"), r#"
+import { View } from 'gpui-kit';
+import { setShared } from 'herdr';
+import { DiffPanel } from './mods/source-control/diff-ui.js';
+class FixtureDiff extends DiffPanel {
+  load() {
+    this.setPatch('diff --git a/example.txt b/example.txt\nindex 1234567..abcdef0 100644\n--- a/example.txt\n+++ b/example.txt\n@@ -1,2 +1,2 @@\n first\n-old\n+new\n');
+  }
+}
+export default class Scenario extends View {
+  init(props, cx) {
+    this.panel = new FixtureDiff({ root: '/fixture/project', file: { path: 'example.txt' }, group: 'changes' }, cx);
+  }
+  render() {
+    const result = this.panel.render();
+    setShared('test.diff-selection', [...this.panel.selected].sort());
+    return result;
+  }
+}
+"#).unwrap();
+    for platform in ["windows", "macos"] {
+        let calls = Rc::new(RefCell::new(Calls::default()));
+        let selected = || calls.borrow().shared.get("test.diff-selection").cloned().unwrap_or(Value::Null);
+        let mut values = fixture(true, props(), updates("current", "current"));
+        values.insert("window".into(), json!({"platform":platform}));
+        gpui_shell::policy::set_default(Policy::new()
+            .with_capabilities(Capabilities::new().read_roots([staged.0.clone()]))
+            .with_host_module(module(values, calls.clone())).unwrap());
+        let runtime = ShellRuntime::new_isolated().unwrap();
+        let window = cx.add_window(|window, cx| Mounted(runtime.try_load(&staged.0, window, cx).unwrap()));
+        let mut visual = VisualTestContext::from_window(*window.deref(), cx);
+        draw(&mut visual); draw(&mut visual);
+        assert_eq!(selected(), json!([]));
+
+        // The 44px title and 42px controls precede eight 22px virtual rows.
+        // Clicking a painted row catches deferred-render errors that check
+        // and the initial description cannot see.
+        click(&mut visual, 97.);
+        click(&mut visual, 207.);
+        assert_eq!(selected(), json!([]), "{platform}: headers and context must not be selectable");
+        click(&mut visual, 251.);
+        assert_eq!(selected(), json!([2]), "{platform}: the added line must render and select");
+        click(&mut visual, 251.);
+        assert_eq!(selected(), json!([]), "{platform}: clicking a selected line must clear it");
+        click(&mut visual, 229.);
+        assert_eq!(selected(), json!([1]), "{platform}: the removed line must select");
+        click(&mut visual, 185.);
+        assert_eq!(selected(), json!([1, 2]), "{platform}: a hunk must select all changed lines");
+        click(&mut visual, 185.);
+        assert_eq!(selected(), json!([]), "{platform}: clicking a selected hunk must clear it");
+        assert!(calls.borrow().unexpected.is_empty(), "{:?}", calls.borrow().unexpected);
+        window.update(&mut visual, |_, window, _| window.remove_window()).unwrap();
+    }
 }

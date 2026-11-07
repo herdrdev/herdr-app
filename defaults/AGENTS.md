@@ -172,8 +172,8 @@ through them, `layout.switch {name}` picks one; `shared("layout")` is the
 shown one's name. Herdr ships `main` ("Herdr": spaces by machine and the
 agents list on the left, `workspace-chrome`; tabs as pills with a + menu
 that starts a terminal or any installed agent, `new-menu`; panes as cards
-with a header; Files and Changes panels on the right, `files` and
-`changes`, opened from the tab bar and remembered per space (which ones:
+with a header; Files, Changes and Source Control panels on the right, `files`,
+`changes` and `source-control`, opened from the tab bar and remembered per space (which ones:
 shared `"workspace.panels"`, set by the welcome); a status bar,
 `workspace-status`), and as examples `terminals` ("Terminals": tabs in
 the title bar, panes as cards, a space picker) and `win98`
@@ -182,6 +182,26 @@ writing a new file. The Files panel supports Windows folder paths with spaces,
 parentheses and apostrophes, and preserves Unicode file and folder names
 (including Chinese). Directory links expand as folders; their contents load
 only when expanded.
+
+Source Control is a separate Git panel; Changes keeps its existing behavior.
+It follows the focused terminal's repository and offers staged/unstaged files,
+commit variants, publish/push/sync, branches, stashes, tags, worktrees and a
+commit graph. Its main button becomes Push when the branch is only ahead of
+its upstream and has no uncommitted changes. Text diffs support selected lines
+and hunks; local text conflicts open a merge editor. Whole-file Git actions
+also work on remote machines; partial patches and saving merge results are
+local only. See `mods/source-control/README.md` for controls and limits.
+Drag the divider above Graph to resize the changes and history areas; the
+upper height is saved in shared `"source-control.upper-height"` and restored
+on restart. The native divider works on Windows and macOS.
+Graph has Auto/All/reference filters, current-commit navigation, Fetch All,
+Pull, Push/Publish, and refresh. Local target and remote cloud badges show
+their commit positions. Expand a commit to inspect its files; Graph's More
+Actions switches list/tree view. Filters are saved per repository in shared
+`"source-control.graph-filters"`; the file view is saved in
+`"source-control.graph-file-view"`. Graph refresh reads local refs; Fetch
+updates the known remote positions.
+Existing panel choices are preserved; enable Source Control from `app.welcome`.
 
 **Herdr's own layouts and mods are read-only.** They are replaced whole
 on every start. Use settings.json for look (fonts, sizes, theme, colors,
