@@ -153,7 +153,8 @@ fn main() {
     }
 
     gpui_platform::application()
-        .with_assets(gpui_shell::AppAssets::new(mods::app_dir()))
+        // Mods run programs already; the user's own links (dotfiles, Nix) may point out.
+        .with_assets(gpui_shell::AppAssets::new(mods::app_dir()).following_links())
         .run(move |cx| {
             let fonts = settings::BUNDLED_FONTS.iter().map(|f| std::borrow::Cow::Borrowed(*f)).collect();
             if let Err(e) = cx.text_system().add_fonts(fonts) {
