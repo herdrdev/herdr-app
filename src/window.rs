@@ -456,6 +456,7 @@ pub struct AppWindow {
     _focus_lost: Option<Subscription>,
     /// Remembers where the window is (`place.rs`); the write waiting to settle.
     _place: Option<Subscription>,
+    _activation: Option<Subscription>,
     place_write: Option<Task<()>>,
 }
 
@@ -545,9 +546,15 @@ impl AppWindow {
             _tasks: Vec::new(),
             _focus_lost: None,
             _place: None,
+            _activation: None,
             place_write: None,
         };
         w._focus_lost = Some(cx.on_focus_lost(window, |this, window, cx| this.restore_focus(window, cx)));
+        // The poll would notice within 400 ms; the focus look and mods' window() shouldn't wait.
+        w._activation = Some(cx.observe_window_activation(window, |this, window, cx| {
+            this.sync_window_active(window, cx);
+            cx.notify();
+        }));
         w._place = Some(cx.observe_window_bounds(window, |this, window, cx| {
             if let Some(t) = crate::place::changed(window, cx) {
                 this.place_write = Some(t);
@@ -3814,6 +3821,27 @@ impl AppWindow {
 
     // ---- mods on disk ----------------------------------------------------
 
+    /// Catches up with the window gaining or losing activation (the observer
+    /// calls it at once; the poll is the fallback).
+    fn sync_window_active(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let active = window.is_window_active();
+        if active == self.window_active {
+            return;
+        }
+        self.window_active = active;
+        if active {
+            self.sync(window, cx);
+        } else {
+            self.looked.clear();
+        }
+        // Tell mods now: render publishes window() too, but a mod it refreshes
+        // waits for another frame, which an idle window that just lost focus
+        // may not draw for a long time.
+        if mods::publish_window(self.window_json(window)) {
+            self.refresh_snapshot_mods(cx);
+        }
+    }
+
     fn poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         self.flush_documents(false, window, cx);
         let ready = Self::update_label();
@@ -3846,21 +3874,7 @@ impl AppWindow {
         for id in expired {
             self.close_overlay(&id, window, cx);
         }
-        let active = window.is_window_active();
-        if active != self.window_active {
-            self.window_active = active;
-            if active {
-                self.sync(window, cx);
-            } else {
-                self.looked.clear();
-            }
-            // Tell mods now: render publishes window() too, but a mod it refreshes
-            // waits for another frame, which an idle window that just lost focus
-            // may not draw for a long time.
-            if mods::publish_window(self.window_json(window)) {
-                self.refresh_snapshot_mods(cx);
-            }
-        }
+        self.sync_window_active(window, cx);
         let dark = is_dark(window.appearance());
         if dark != self.system_dark {
             self.system_dark = dark;
@@ -3987,7 +4001,10 @@ impl AppWindow {
             el = paint(el, bg);
         }
         if let Some(l) = line {
-            el = el.border(settings::z(l.width)).border_color(c(&l.color));
+            // The focused pane's border dims with the window, so a glance tells
+            // which pane has the keyboard and whether Herdr does.
+            let color = f.focus_inactive.as_deref().filter(|_| on && f.focus.is_some() && !self.window_active).unwrap_or(&l.color);
+            el = el.border(settings::z(l.width)).border_color(c(color));
         }
         el = shadow(el, f.shadow.as_deref());
         let body = div().flex_1().min_h_0().flex().child(inner);
