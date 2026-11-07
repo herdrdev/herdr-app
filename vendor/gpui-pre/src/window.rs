@@ -5528,6 +5528,8 @@ impl Window {
         self.last_input_modality = match &event {
             PlatformInput::KeyDown(_) => InputModality::Keyboard,
             PlatformInput::MouseMove(_) | PlatformInput::MouseDown(_) => InputModality::Mouse,
+            // A drag from another app moves the pointer without sending mouse moves.
+            PlatformInput::FileDrop(_) => InputModality::Mouse,
             PlatformInput::Touch(_) => InputModality::Touch,
             _ => self.last_input_modality,
         };
