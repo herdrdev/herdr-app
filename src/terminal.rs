@@ -426,7 +426,7 @@ impl TerminalView {
     fn set_title(&mut self, title: &str, cx: &mut Context<Self>) {
         let shown = shown_title(title);
         if shown != self.title {
-            self.title = shown.to_owned();
+            self.title = shown.into_owned();
             cx.emit(TerminalEvent::TitleChanged);
         }
     }
@@ -1063,9 +1063,11 @@ fn scrollbar_row_at(total: u64, len: u64, track: f32, min: f32, top: f32) -> usi
 }
 
 /// A title as it's shown: an agent's spinner in front of it (`\u{2733} Fix the
-/// tests`, braille dots) is no part of it. Herdr draws its own, and a title
-/// that spins would redraw every mod that shows titles, 10 times a second.
-pub(crate) fn shown_title(title: &str) -> &str {
+/// tests`, braille dots) is no part of it, nor braille dots after a short
+/// prefix (`\u{03c0} \u{2839} task`). Herdr draws its own, and a title that
+/// spins would redraw every mod that shows titles, 10 times a second.
+pub(crate) fn shown_title(title: &str) -> std::borrow::Cow<'_, str> {
+    use std::borrow::Cow;
     // Frames agents spin, not status icons (\u{2713} build stays): braille dots,
     // Claude Code's stars and its half circles.
     let spinner = |c: char| {
@@ -1073,7 +1075,20 @@ pub(crate) fn shown_title(title: &str) -> &str {
     };
     let rest = title.trim_start_matches(|c: char| spinner(c) || c.is_whitespace());
     let led = title.len() - rest.len();
-    if rest.is_empty() || !title[..led].chars().any(spinner) || !title[..led].ends_with(char::is_whitespace) { title } else { rest }
+    if !rest.is_empty() && title[..led].chars().any(spinner) && title[..led].ends_with(char::is_whitespace) {
+        return Cow::Borrowed(rest);
+    }
+    let braille = |w: &str| !w.is_empty() && w.chars().all(|c| matches!(c, '\u{2800}'..='\u{28ff}'));
+    let mut words = title.splitn(3, ' ');
+    match (words.next(), words.next()) {
+        (Some(prefix), Some(frame)) if !prefix.is_empty() && prefix.chars().count() <= 3 && !braille(prefix) && braille(frame) => {
+            match words.next().map(str::trim_start).filter(|r| !r.is_empty()) {
+                Some(rest) => Cow::Owned(format!("{prefix} {rest}")),
+                None => Cow::Borrowed(prefix),
+            }
+        }
+        _ => Cow::Borrowed(title),
+    }
 }
 
 /// Paths as a shell reads them, space-separated with a trailing space: bare
@@ -3161,6 +3176,21 @@ mod tests {
         assert_eq!(shown_title("\u{2733}"), "\u{2733}", "nothing after it: kept");
         assert_eq!(shown_title("\u{2713} build"), "\u{2713} build", "a status icon stays");
         assert_eq!(shown_title("\u{2717} build"), "\u{2717} build");
+    }
+
+    #[test]
+    fn a_spinner_after_a_short_prefix_is_not_part_of_it() {
+        use super::shown_title;
+        assert_eq!(shown_title("\u{03c0} \u{2839} fix the tests"), "\u{03c0} fix the tests", "omp's");
+        assert_eq!(shown_title("\u{03c0} \u{2827} fix the tests"), "\u{03c0} fix the tests", "every frame alike");
+        assert_eq!(shown_title("\u{03c0} \u{2839}"), "\u{03c0}", "nothing after it");
+        assert_eq!(shown_title("\u{2839} fix the tests"), "fix the tests", "codex's, in front");
+        assert_eq!(shown_title("\u{2733} Fix the tests"), "Fix the tests", "Claude Code's");
+        assert_eq!(shown_title("repo \u{00b7} branch"), "repo \u{00b7} branch", "a middle dot between words stays");
+        assert_eq!(shown_title("\u{03c0} \u{00b7} task"), "\u{03c0} \u{00b7} task", "only braille after a prefix");
+        assert_eq!(shown_title("herdr \u{2839} task"), "herdr \u{2839} task", "a word is no prefix");
+        assert_eq!(shown_title("\u{2839}"), "\u{2839}", "only a spinner: kept");
+        assert_eq!(shown_title("\u{2839} \u{2838}"), "\u{2839} \u{2838}");
     }
 
     use super::key_bytes;
