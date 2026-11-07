@@ -1,6 +1,7 @@
 # HERDR: quickjs-jit's `jit` crate at our pinned rev 96593cd with
-# longbridge/quickjs-jit#38 applied (src/lib.rs, marked HERDR:). Only the
-# library: tests, benches and binaries stay upstream. Drop once merged.
+# longbridge/quickjs-jit#38 applied (src/lib.rs), plus sharing frozen feedback
+# between candidate scans (src/runtime/feedback.rs). Only the library: the
+# upstream test harness, benches and binaries stay upstream. See HERDR: notes.
 [package]
 name = "quickjs-jit-runtime"
 version = "0.12.11"

@@ -1,5 +1,7 @@
 use std::collections::{btree_map::Entry as MapEntry, BTreeMap};
 
+use std::sync::{Arc, OnceLock};
+
 use super::FunctionKey;
 
 #[derive(Clone, Copy, Debug, Eq, Hash, Ord, PartialEq, PartialOrd)]
@@ -254,13 +256,18 @@ impl FeedbackSnapshotEntry {
 #[derive(Clone, Debug, Eq, PartialEq)]
 pub struct FeedbackSnapshot {
     epoch: u64,
+    global: Arc<GlobalFeedback>,
+    properties: Box<[(u32, super::ShapeFeedbackSite)]>,
+}
+
+#[derive(Debug, Default, Eq, PartialEq)]
+struct GlobalFeedback {
     entries: Box<[FeedbackSnapshotEntry]>,
     calls: Box<[CallFeedbackSnapshot]>,
     binaries: Box<[BinaryFeedbackSnapshot]>,
     conversions: Box<[ConversionFeedbackSnapshot]>,
     branches: Box<[BranchFeedbackSnapshot]>,
     call_signatures: Box<[CallSignatureFeedbackSnapshot]>,
-    properties: Box<[(u32, super::ShapeFeedbackSite)]>,
     arrays: Box<[super::ArrayFeedbackSnapshot]>,
 }
 
@@ -393,23 +400,18 @@ impl BinaryFeedbackSnapshot {
 
 impl FeedbackSnapshot {
     pub fn empty(epoch: u64) -> Self {
+        static EMPTY: OnceLock<Arc<GlobalFeedback>> = OnceLock::new();
         Self {
             epoch,
-            entries: Box::new([]),
-            calls: Box::new([]),
-            binaries: Box::new([]),
-            conversions: Box::new([]),
-            branches: Box::new([]),
-            call_signatures: Box::new([]),
+            global: EMPTY.get_or_init(Arc::default).clone(),
             properties: Box::new([]),
-            arrays: Box::new([]),
         }
     }
     pub const fn epoch(&self) -> u64 {
         self.epoch
     }
     pub fn entries(&self) -> &[FeedbackSnapshotEntry] {
-        &self.entries
+        &self.global.entries
     }
     pub fn with_properties(mut self, properties: Vec<(u32, super::ShapeFeedbackSite)>) -> Self {
         self.properties = properties.into_boxed_slice();
@@ -422,7 +424,7 @@ impl FeedbackSnapshot {
     }
 
     pub fn arrays(&self) -> &[super::ArrayFeedbackSnapshot] {
-        &self.arrays
+        &self.global.arrays
     }
 
     pub fn array_at(
@@ -430,41 +432,70 @@ impl FeedbackSnapshot {
         function: FunctionKey,
         pc: u32,
     ) -> Option<&super::ArrayFeedbackSnapshot> {
-        self.arrays
+        self.global
+            .arrays
             .iter()
             .find(|site| site.function() == function && site.pc() == pc)
     }
 
     /// Additional retained snapshot storage for bounded array profiles.
     pub fn array_feedback_bytes(&self) -> usize {
-        core::mem::size_of_val(self.arrays.as_ref())
+        core::mem::size_of_val(self.global.arrays.as_ref())
     }
 
     pub fn function(&self) -> Option<FunctionKey> {
         let function = self
+            .global
             .entries
             .first()
             .map(|entry| entry.function)
-            .or_else(|| self.calls.first().map(|entry| entry.function))
-            .or_else(|| self.binaries.first().map(|entry| entry.function))
-            .or_else(|| self.conversions.first().map(|entry| entry.function))
-            .or_else(|| self.branches.first().map(|entry| entry.function))
-            .or_else(|| self.call_signatures.first().map(|entry| entry.caller))
-            .or_else(|| self.arrays.first().map(|entry| entry.function()))?;
-        let same = self.entries.iter().all(|entry| entry.function == function)
-            && self.calls.iter().all(|entry| entry.function == function)
-            && self.binaries.iter().all(|entry| entry.function == function)
+            .or_else(|| self.global.calls.first().map(|entry| entry.function))
+            .or_else(|| self.global.binaries.first().map(|entry| entry.function))
+            .or_else(|| self.global.conversions.first().map(|entry| entry.function))
+            .or_else(|| self.global.branches.first().map(|entry| entry.function))
+            .or_else(|| {
+                self.global
+                    .call_signatures
+                    .first()
+                    .map(|entry| entry.caller)
+            })
+            .or_else(|| self.global.arrays.first().map(|entry| entry.function()))?;
+        let same = self
+            .global
+            .entries
+            .iter()
+            .all(|entry| entry.function == function)
             && self
+                .global
+                .calls
+                .iter()
+                .all(|entry| entry.function == function)
+            && self
+                .global
+                .binaries
+                .iter()
+                .all(|entry| entry.function == function)
+            && self
+                .global
                 .conversions
                 .iter()
                 .all(|entry| entry.function == function)
-            && self.branches.iter().all(|entry| entry.function == function);
+            && self
+                .global
+                .branches
+                .iter()
+                .all(|entry| entry.function == function);
         let same = same
             && self
+                .global
                 .call_signatures
                 .iter()
                 .all(|entry| entry.caller == function)
-            && self.arrays.iter().all(|entry| entry.function() == function);
+            && self
+                .global
+                .arrays
+                .iter()
+                .all(|entry| entry.function() == function);
         same.then_some(function)
     }
 
@@ -473,11 +504,14 @@ impl FeedbackSnapshot {
     }
 
     pub fn call_at(&self, function: FunctionKey) -> Option<&CallFeedbackSnapshot> {
-        self.calls.iter().find(|entry| entry.function == function)
+        self.global
+            .calls
+            .iter()
+            .find(|entry| entry.function == function)
     }
 
     pub fn stable_return_at(&self, function: FunctionKey, pc: u32) -> Option<ObservedType> {
-        self.entries.iter().find_map(|entry| {
+        self.global.entries.iter().find_map(|entry| {
             (entry.function == function
                 && entry.pc == pc
                 && entry.kind == FeedbackKind::Exit
@@ -488,7 +522,8 @@ impl FeedbackSnapshot {
     }
 
     pub fn binary_at(&self, function: FunctionKey, pc: u32) -> Option<&BinaryFeedbackSnapshot> {
-        self.binaries
+        self.global
+            .binaries
             .iter()
             .find(|entry| entry.function == function && entry.pc == pc)
     }
@@ -498,13 +533,15 @@ impl FeedbackSnapshot {
         function: FunctionKey,
         pc: u32,
     ) -> Option<&ConversionFeedbackSnapshot> {
-        self.conversions
+        self.global
+            .conversions
             .iter()
             .find(|entry| entry.function == function && entry.pc == pc)
     }
 
     pub fn branch_at(&self, function: FunctionKey, pc: u32) -> Option<&BranchFeedbackSnapshot> {
-        self.branches
+        self.global
+            .branches
             .iter()
             .find(|entry| entry.function == function && entry.pc == pc)
     }
@@ -514,7 +551,8 @@ impl FeedbackSnapshot {
         caller: FunctionKey,
         pc: u32,
     ) -> Option<&CallSignatureFeedbackSnapshot> {
-        self.call_signatures
+        self.global
+            .call_signatures
             .iter()
             .find(|entry| entry.caller == caller && entry.pc == pc)
     }
@@ -590,7 +628,8 @@ impl FeedbackSnapshot {
         &self,
         caller: FunctionKey,
     ) -> impl Iterator<Item = CallSpecializationKey> + '_ {
-        self.call_signatures
+        self.global
+            .call_signatures
             .iter()
             .filter(move |entry| entry.caller == caller)
             .filter_map(move |entry| self.call_specialization_at(caller, entry.pc))
@@ -600,7 +639,7 @@ impl FeedbackSnapshot {
     /// generation and frozen at a nonzero runtime epoch.
     pub fn has_stable_value_for(&self, function: FunctionKey) -> bool {
         self.epoch != 0
-            && self.entries.iter().any(|entry| {
+            && self.global.entries.iter().any(|entry| {
                 entry.function == function
                     && entry.kind == FeedbackKind::Value
                     && entry.state == FeedbackState::Monomorphic
@@ -614,7 +653,7 @@ impl FeedbackSnapshot {
         pc: u32,
         observation: ObservedType,
     ) -> bool {
-        self.entries.iter().any(|entry| {
+        self.global.entries.iter().any(|entry| {
             entry.function == function
                 && entry.pc == pc
                 && entry.kind == FeedbackKind::Exit
@@ -624,7 +663,7 @@ impl FeedbackSnapshot {
     }
 
     pub fn stable_observation_at(&self, function: FunctionKey, pc: u32) -> Option<ObservedType> {
-        self.entries.iter().find_map(|entry| {
+        self.global.entries.iter().find_map(|entry| {
             (entry.function == function
                 && entry.pc == pc
                 && entry.kind == FeedbackKind::Value
@@ -656,6 +695,7 @@ impl FeedbackSnapshot {
         }
 
         let returns = self
+            .global
             .entries
             .iter()
             .filter(|entry| entry.function == function && entry.kind == FeedbackKind::Exit);
@@ -686,6 +726,7 @@ impl FeedbackSnapshot {
             .collect::<Option<Vec<_>>>()?;
 
         let binaries = self
+            .global
             .binaries
             .iter()
             .filter(|entry| entry.function == function);
@@ -750,6 +791,9 @@ const fn observed_scalar_representation(observed: ObservedType) -> Option<Feedba
 
 #[derive(Debug)]
 pub struct FeedbackTable {
+    // Frozen observations are immutable. Epoch and per-candidate shapes belong to the
+    // snapshot wrapper, not to this shared allocation. Invalidate on change or retirement.
+    frozen: OnceLock<Arc<GlobalFeedback>>,
     capacity: usize,
     diversity_limit: usize,
     dropped: u64,
@@ -895,6 +939,7 @@ fn empty_entry(capacity: usize) -> Entry {
 impl FeedbackTable {
     pub fn new(capacity: usize, diversity_limit: usize) -> Self {
         Self {
+            frozen: OnceLock::new(),
             capacity,
             diversity_limit: diversity_limit.max(1),
             dropped: 0,
@@ -927,6 +972,7 @@ impl FeedbackTable {
         // The version is left unchanged: a freed generation can never be
         // compiled again, so no live lattice entry changes and artifacts in
         // flight for other functions keep their feedback epoch.
+        self.frozen.take();
         self.entries.retain(|key, _| key.function != function);
         self.calls.remove(&function);
         self.binaries.retain(|(key, _), _| *key != function);
@@ -952,6 +998,7 @@ impl FeedbackTable {
         let version = self.arrays.version();
         let state = self.arrays.observe(function, pc, access, mode, hazards);
         if self.arrays.version() != version {
+            self.frozen.take();
             self.version = self.version.saturating_add(1);
         }
         state
@@ -967,6 +1014,7 @@ impl FeedbackTable {
         let version = self.arrays.version();
         let state = self.arrays.observe_raw(function, pc, mode, flags)?;
         if self.arrays.version() != version {
+            self.frozen.take();
             self.version = self.version.saturating_add(1);
         }
         Some(state)
@@ -1010,6 +1058,7 @@ impl FeedbackTable {
             slots_shape(&call.slots),
         );
         if is_new || before != after {
+            self.frozen.take();
             self.version = self.version.wrapping_add(1);
         }
         self.last_call = Some(function);
@@ -1058,6 +1107,7 @@ impl FeedbackTable {
             entry.flags,
         );
         if before != after {
+            self.frozen.take();
             self.version = self.version.wrapping_add(1);
         }
         if states.contains(&FeedbackState::Megamorphic) {
@@ -1087,6 +1137,7 @@ impl FeedbackTable {
         entry.operand.observe(operand, self.diversity_limit);
         entry.result.observe(result, self.diversity_limit);
         if before != (entry_shape(&entry.operand), entry_shape(&entry.result)) {
+            self.frozen.take();
             self.version = self.version.wrapping_add(1);
         }
         combined_state(&[&entry.operand, &entry.result], false)
@@ -1112,6 +1163,7 @@ impl FeedbackTable {
             .observe(condition_type, self.diversity_limit);
         entry.outcomes |= if taken { 1 } else { 2 };
         if before != (entry_shape(&entry.condition_types), entry.outcomes) {
+            self.frozen.take();
             self.version = self.version.wrapping_add(1);
         }
         combined_state(&[&entry.condition_types], entry.outcomes == 3)
@@ -1203,6 +1255,7 @@ impl FeedbackTable {
             entry.callee_bytecode_identity,
         );
         if before != after {
+            self.frozen.take();
             self.version = self.version.wrapping_add(1);
         }
         call_signature_state(entry)
@@ -1244,6 +1297,7 @@ impl FeedbackTable {
         };
         let state = entry.observe(observation, self.diversity_limit);
         if before != Some(entry_shape(entry)) {
+            self.frozen.take();
             self.version = self.version.wrapping_add(1);
         }
         // Capacity-rejected observations return above and are never cached:
@@ -1265,6 +1319,14 @@ impl FeedbackTable {
     }
 
     pub fn snapshot(&self, epoch: u64) -> FeedbackSnapshot {
+        FeedbackSnapshot {
+            epoch,
+            global: self.frozen.get_or_init(|| Arc::new(self.freeze())).clone(),
+            properties: Box::new([]),
+        }
+    }
+
+    fn freeze(&self) -> GlobalFeedback {
         let entries = self
             .entries
             .iter()
@@ -1390,15 +1452,13 @@ impl FeedbackTable {
             })
             .collect::<Vec<_>>()
             .into_boxed_slice();
-        FeedbackSnapshot {
-            epoch,
+        GlobalFeedback {
             entries,
             calls,
             binaries,
             conversions,
             branches,
             call_signatures,
-            properties: Box::new([]),
             arrays: self.arrays.snapshot(),
         }
     }
@@ -1416,6 +1476,27 @@ mod call_link_tests {
         table.observe_call_signature_with_identity(
             CALLER, PC, CALLEE, 0x1000, 0x2000, arguments, result,
         );
+    }
+
+    #[test]
+    fn snapshots_share_only_unchanged_observations_and_keep_the_requested_epoch() {
+        let mut table = FeedbackTable::new(16, 2);
+        table.observe_return(CALLER, PC, ObservedType::Int32);
+        let first = table.snapshot(1);
+        table.observe_return(CALLER, PC, ObservedType::Int32);
+        let next = table.snapshot(2);
+        assert_eq!(next.epoch(), 2);
+        assert!(Arc::ptr_eq(&first.global, &next.global));
+        table.observe_return(CALLER, PC, ObservedType::Bool);
+        let wide = table.snapshot(2);
+        assert!(!Arc::ptr_eq(&first.global, &wide.global));
+        assert_eq!(first.entries()[0].state(), FeedbackState::Monomorphic);
+        assert_eq!(wide.entries()[0].state(), FeedbackState::Polymorphic);
+        let version = table.version();
+        table.forget_function(CALLER);
+        assert_eq!(version, table.version()); // retirement doesn't advance the lattice
+        assert!(table.snapshot(2).entries().is_empty());
+        assert_eq!(wide.entries().len(), 1); // a worker can keep its old snapshot
     }
 
     #[test]
