@@ -392,6 +392,9 @@ pub struct Person {
     /// A draggable scroll position thumb at a terminal pane's right edge.
     #[serde(skip_serializing_if = "is_true")]
     pub pane_scrollbars: bool,
+    /// A finished agent stays "done" until you send it input, not just until you look at it.
+    #[serde(skip_serializing_if = "is_false")]
+    pub done_until_input: bool,
     /// Minimum terminal text contrast ratio; 1 leaves program colors unchanged.
     pub minimum_contrast: f32,
     /// macOS Option sends Alt shortcuts, or follows the keyboard layout.
@@ -442,6 +445,10 @@ fn is_true(b: &bool) -> bool {
     *b
 }
 
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 impl Default for Person {
     fn default() -> Self {
         Person {
@@ -455,6 +462,7 @@ impl Default for Person {
             telemetry: true,
             clipboard_write: true,
             pane_scrollbars: true,
+            done_until_input: false,
             minimum_contrast: 1.0,
             option_as_alt: OptionAsAlt::Auto,
             appearance: Appearance::System,
@@ -495,6 +503,7 @@ pub struct Settings {
     pub minimum_contrast: f32,
     pub option_as_alt: OptionAsAlt,
     pub sounds: Sounds,
+    pub done_until_input: bool,
 }
 
 /// Attention sounds: when an agent needs you, and when one finished while you
@@ -537,6 +546,7 @@ impl Default for Settings {
             minimum_contrast: 1.0,
             option_as_alt: OptionAsAlt::Auto,
             sounds: Sounds::default(),
+            done_until_input: false,
         }
     }
 }
@@ -573,6 +583,7 @@ impl Settings {
             terminal_opacity: look.terminal_opacity.unwrap_or(1.0).clamp(0.0, 1.0),
             sounds: person.sounds.clone(),
             clipboard_write: person.clipboard_write,
+            done_until_input: person.done_until_input,
             minimum_contrast: person.minimum_contrast,
             option_as_alt: person.option_as_alt,
         }
