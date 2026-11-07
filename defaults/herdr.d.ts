@@ -234,6 +234,8 @@ export function focused(): { space: string; tab: string; pane: string | null; te
 /** The shown layout (layouts/<name>.json). Its name is shared("layout").
  *  Root `terminal_menu?: string` chooses a terminal right-click menu mod (default: "menu").
  *  Unknown names warn and fall back to "menu". This replaces the menu, not its items.
+ *  Root `terminal_links?: string` chooses a mod for Cmd+clicked (Ctrl+clicked on Linux/Windows)
+ *  terminal links; when omitted or unknown, the system opens them.
  *  Opens a pointer popup with mod.json overlay width/height (default 220×260). */
 export function layout(): unknown;
 
@@ -385,6 +387,7 @@ export function notify(n: {
 
 /** The props this copy of the mod was given in the layout (or overlay).
  *  A layout's terminal_menu mod gets {tab: "pane", target: {pane: string, terminal: string}, overlay: string}.
+ *  A layout's terminal_links mod gets {link: {kind: "file", path: string, raw: string} | {kind: "url", url: string, raw: string}, target: {pane: string, terminal: string}, overlay: string}.
  *  Target names the clicked pane/terminal, not necessarily the focused one; pass it to actions.
  *  Close the popup with closeOverlay(props().overlay). */
 /** Size is not a prop: root div/h_flex/v_flex.on_size_change reports logical px.
