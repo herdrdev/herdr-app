@@ -843,6 +843,7 @@ impl CosmicTextSystemState {
             is_emoji: true,
             subpixel_rendering: false,
             dilation: 0,
+            thicken: gpui::GlyphThicken::Auto,
             foreground: [255; 4],
         };
         let index = self

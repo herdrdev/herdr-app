@@ -10,7 +10,7 @@ use core_foundation::{
 };
 use core_graphics::{
     base::{CGGlyph, kCGImageAlphaPremultipliedLast},
-    color_space::CGColorSpace,
+    color_space::{CGColorSpace, kCGColorSpaceLinearGray},
     context::{CGContext, CGTextDrawingMode},
     display::CGPoint,
 };
@@ -35,7 +35,7 @@ use font_kit::{
 };
 use gpui::{
     Bounds, DevicePixels, Font, FontFallbacks, FontFeatures, FontId, FontMetrics, FontRun,
-    FontStyle, FontWeight, GlyphId, Hsla, LineLayout, Pixels, PlatformTextSystem,
+    FontStyle, FontWeight, GlyphId, GlyphThicken, Hsla, LineLayout, Pixels, PlatformTextSystem,
     RenderGlyphParams, Result, Rgba, SUBPIXEL_VARIANTS_X, ShapedGlyph, ShapedRun, SharedString,
     Size, TextRenderingMode, point, px, size, swap_rgba_pa_to_bgra,
 };
@@ -429,8 +429,10 @@ impl MacTextSystemState {
             font_kit::canvas::RasterizationOptions::GrayscaleAa,
         )?);
 
-        // Expand the bounds by 1 pixel on each side to give CG room for anti-aliasing.
-        Ok(bounds.dilate(DevicePixels(1)))
+        // Expand the bounds by 1 pixel on each side to give CG room for anti-aliasing,
+        // HERDR: and 1 more for thickening, which Ghostty takes to add at most 1 pixel to an edge.
+        let room = if params.thicken.strength().is_some() && !params.is_emoji { 2 } else { 1 };
+        Ok(bounds.dilate(DevicePixels(room)))
     }
 
     fn rasterize_glyph(
@@ -466,13 +468,20 @@ impl MacTextSystemState {
                 );
             } else {
                 bytes = vec![0; bitmap_size.width.0 as usize * bitmap_size.height.0 as usize];
+                // HERDR: thickened glyphs in Ghostty's linear gray, which sets
+                // how its strength maps to CoreGraphics' smoothing.
+                let space = match params.thicken {
+                    GlyphThicken::Strength(_) => unsafe { CGColorSpace::create_with_name(kCGColorSpaceLinearGray) }
+                        .unwrap_or_else(CGColorSpace::create_device_gray),
+                    GlyphThicken::Auto | GlyphThicken::Off => CGColorSpace::create_device_gray(),
+                };
                 cx = CGContext::create_bitmap_context(
                     Some(bytes.as_mut_ptr() as *mut _),
                     bitmap_size.width.0 as usize,
                     bitmap_size.height.0 as usize,
                     8,
                     bitmap_size.width.0 as usize,
-                    &CGColorSpace::create_device_gray(),
+                    &space,
                     kCGImageAlphaOnly,
                 );
             }
@@ -499,7 +508,18 @@ impl MacTextSystemState {
             cx.set_allows_font_subpixel_quantization(false);
             cx.set_should_subpixel_quantize_fonts(false);
 
-            if params.dilation > 0 {
+            if let Some(strength) = params.thicken.strength().filter(|_| !params.is_emoji) {
+                // HERDR: Ghostty's font-thicken (font/face/coretext.zig): smoothing
+                // on, at a gray set by the strength rather than the text color.
+                cx.set_allows_font_smoothing(true);
+                cx.set_should_smooth_fonts(true);
+                cx.set_gray_fill_color(strength as CGFloat / 255.0, 1.0);
+            } else if params.thicken == GlyphThicken::Off && !params.is_emoji {
+                // HERDR: Ghostty's font-thicken = false: no smoothing, so no
+                // dilation, the same coverage for every text color.
+                cx.set_should_smooth_fonts(false);
+                cx.set_gray_fill_color(0.0, 1.0);
+            } else if params.dilation > 0 {
                 let luminance = params.dilation as f64 * 0.25;
                 cx.set_should_smooth_fonts(true);
                 cx.set_gray_fill_color(luminance, 1.0);
