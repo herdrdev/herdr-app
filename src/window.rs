@@ -5808,19 +5808,19 @@ export default class Probe extends View {
         }
         let main_js = r#"import { View, div } from "gpui-kit";
 import { InputState, Input } from "gpui-base";
-import { nextCommand } from "herdr";
+import { nextCommand, setShared } from "herdr";
 export default class Picker extends View {
   init(_props, cx) {
     this.commands = 0;
+    setShared("picker.commands", 0);
     this.input = InputState.new({});
     this.input.focus();
     cx.spawn(async (cx) => {
-      for (;;) { if (await nextCommand() === "next") this.commands += 1; cx.notify(); }
+      for (;;) { if (await nextCommand() === "next") setShared("picker.commands", ++this.commands); cx.notify(); }
     });
   }
   render() {
-    return div().w_full().h(200).child(Input.new(this.input).w(100).h(20))
-      .child(div().id("commands").w(10 + 10 * this.commands).h(10).flex_none());
+    return div().w_full().h(200).child(Input.new(this.input).w(100).h(20));
   }
 }"#;
         std::fs::create_dir_all(crate::mods::app_dir()).unwrap();
@@ -5833,7 +5833,7 @@ export default class Picker extends View {
             this.dispatch("mod.open", &json!({ "name": "picker" }), true, window, cx);
         }));
         cx.run_until_parked();
-        let commands = |cx: &mut gpui::VisualTestContext| cx.debug_bounds("commands").map(|b| (f32::from(b.size.width) as usize - 10) / 10);
+        let commands = |_: &mut gpui::VisualTestContext| crate::mods::shared("picker.commands").and_then(|v| v.as_u64());
         let in_input = |cx: &mut gpui::VisualTestContext| cx.update(|window, _| window.context_stack().last().is_some_and(|c| c.contains("Input")));
         assert!(in_input(cx), "the field has the keyboard");
         assert_eq!(commands(cx), Some(0));
