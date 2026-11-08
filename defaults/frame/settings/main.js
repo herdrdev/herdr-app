@@ -347,6 +347,15 @@ export default class Settings extends View {
     );
   }
 
+  interfaceTextPicker(t, s) {
+    const choices = [[true, "Default"], [false, "Lighter"]].map(([value, label]) => ({
+      id: `st-ui-text-${label.toLowerCase()}`, value, label,
+    }));
+    return this.choicePicker(t, s.ui_font_thicken ?? true, choices, (value, cx) =>
+      this.change((p) => { p.ui_font_thicken = value; }, cx),
+    );
+  }
+
   themePicker(t, light) {
     const s = settings();
     const current = light ? s.theme_light : s.theme_dark;
@@ -505,6 +514,7 @@ export default class Settings extends View {
       .child(this.heading(t, "Layout"))
       .child(this.layoutPicker(t, cx))
       .child(this.row(t, "Terminal renderer", s.ghostty_renderer_available ? "Applies immediately. Ghostty is experimental." : "Ghostty is unavailable in this build.", this.rendererPicker(t, s)))
+      .when(window()?.platform === "macos", (el) => el.child(this.row(t, "Interface text", "Lighter strokes in panels, menus and mods. Applies immediately.", this.interfaceTextPicker(t, s))))
       .child(div().h(18))
       .child(this.heading(t, "Theme"))
       .child(this.row(t, "Appearance", "Light or dark, or as your system is now.", this.appearancePicker(t)))

@@ -724,6 +724,13 @@ What's about the user, never a look:
   metrics and draws the terminal through Metal; Herdr still handles input,
   selection, clipboard, search, and scrollback.
   Renderer initialization/drawing failures fall back to GPUI and are logged.
+- `ui_font_thicken`: macOS only, `true` (default) preserves GPUI's stroke
+  thickening and respects the system's font-smoothing preference. Set `false`
+  for lighter strokes, closer to Ghostty's `font-thicken=false`. Select
+  **Default** or **Lighter** in Settings → Look → Interface text. Applies
+  immediately to panels, menus, mod text (including Markdown), and terminals
+  using the Default renderer. Antialiasing, font sizes, weights and layout stay
+  intact. Ghostty terminal rendering and other platforms are unchanged.
 - `minimum_contrast`: terminal text contrast ratio, `1` (default) leaves
   program colors unchanged. Set it to `1.6` to enable the previous readability
   adjustment, or another number from `1` to `21`. Text below that ratio is

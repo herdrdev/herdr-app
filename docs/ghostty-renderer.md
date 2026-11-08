@@ -41,6 +41,20 @@ initialization. Configuration diagnostics and native failure details reach Herdr
 log. A compositor texture-allocation failure logs and skips the affected surface
 instead of terminating the app.
 
+## Interface text
+
+On macOS, **Settings → Look → Interface text → Lighter** sets
+`ui_font_thicken: false`. This disables CoreGraphics' extra stroke thickening
+throughout GPUI, including shipped and personal mods, Markdown, menus and the
+Default terminal renderer. It matches the Ghostty bridge's `font-thicken=false`
+policy while retaining antialiasing, authored font weights, sizes and spacing.
+Ghostty terminal pixels are unaffected. The change is live and reversible;
+**Default** preserves the existing behavior and macOS font-smoothing preference.
+
+UI text still uses GPUI's shaping, positioning and compositor, so identical fonts
+need not be pixel-identical to Ghostty. This option is also available in macOS
+builds without the Ghostty feature. Other platforms are unchanged.
+
 ## Integration
 
 Herdr still owns the core connection, terminal byte stream, libghostty-vt state,

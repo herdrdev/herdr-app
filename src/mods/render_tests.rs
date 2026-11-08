@@ -517,6 +517,29 @@ fn font_pickers_contain_scroll_on_the_wrapper(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn interface_text_picker_is_macos_only_and_shows_current_choice(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for platform in ["macos", "linux", "windows"] {
+        for thicken in [true, false] {
+            let mut p = props();
+            p["section"] = json!("look");
+            let mut values = fixture(true, p, updates("current", "current"));
+            values.insert("window".into(), json!({"platform":platform}));
+            values.get_mut("settings").unwrap()["ui_font_thicken"] = json!(thicken);
+            let tree = describe_with_values(cx, &staged, "frame/settings", values, None).unwrap();
+            for (choice, selected) in [("default", thicken), ("lighter", !thicken)] {
+                let row = tree.lines().find(|line| line.contains(&format!("st-ui-text-{choice}")));
+                assert_eq!(row.is_some(), platform == "macos", "{platform}: {tree}");
+                if let Some(row) = row {
+                    assert_eq!(row.contains(".border_1"), selected, "{row}");
+                }
+            }
+        }
+    }
+}
+
+#[gpui::test]
 fn long_theme_names_stay_inside_their_card(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
