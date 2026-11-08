@@ -7,7 +7,7 @@
     "pi": {"name":"Pi","icon":"icons/pi.svg","run":["pi"],"tint":true,"tile":"#1c1d21","color":"#ffffff"},
     "pig": {"name":"PiG","icon":"icons/pig.svg","run":["pig"],"tint":false,"tile":"#1c1d21","color":"#ffffff"},
     "opencode": {"name":"OpenCode","icon":"icons/opencode.svg","run":["opencode"],"tint":true,"tile":"#1c1d21","color":"#ffffff"},
-    "cursor": {"name":"Cursor","icon":"icons/cursor.svg","run":["cursor-agent"],"match":["cursor-agent"],"tint":true,"tile":"#1c1d21","color":"#ffffff"},
+    "cursor": {"name":"Cursor","icon":"icons/cursor.svg","run":["agent"],"match":["agent","cursor-agent"],"tint":true,"tile":"#1c1d21","color":"#ffffff"},
     "copilot": {"name":"Copilot","icon":"icons/copilot.svg","run":["copilot"],"match":["github-copilot"],"tint":true,"tile":"#1c1d21","color":"#ffffff"},
     "amp": {"name":"Amp","icon":"icons/amp.svg","run":["amp"],"tint":false,"tile":"#1c1d21","color":"#ffffff"},
     "grok": {"name":"Grok","icon":"icons/grok.svg","run":["grok"],"match":["grok-build"],"tint":true,"tile":"#1c1d21","color":"#ffffff"},

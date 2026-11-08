@@ -209,11 +209,14 @@ pub fn agent_name(app: Option<&str>) -> String {
     let names = NAMES.get_or_init(|| {
         let table: Table = serde_json::from_str(BUILT_IN).expect("defaults/programs.json");
         let mut names = BTreeMap::new();
-        for (key, e) in table.programs {
+        for (key, _) in &table.programs {
+            names.insert(key.to_lowercase(), key.clone());
+        }
+        // Same rule as `find`: `match` wins over another entry's key.
+        for (key, e) in &table.programs {
             for alias in &e.also {
                 names.insert(alias.to_lowercase(), key.clone());
             }
-            names.insert(key.to_lowercase(), key);
         }
         names
     });
@@ -281,10 +284,12 @@ fn powershell_words(line: &str) -> Option<Vec<String>> {
 
 fn find<'a>(t: &'a Table, name: &str) -> Option<(&'a str, &'a Entry)> {
     let lower = name.to_lowercase();
+    // `match` wins over a key: Cursor's CLI is `agent`, which must not resolve
+    // to the generic `agent` fallback entry.
     t.programs
         .iter()
-        .find(|(k, _)| k.as_str() == name || k.to_lowercase() == lower)
-        .or_else(|| t.programs.iter().find(|(_, e)| e.also.iter().any(|a| a == name || a.to_lowercase() == lower)))
+        .find(|(_, e)| e.also.iter().any(|a| a == name || a.to_lowercase() == lower))
+        .or_else(|| t.programs.iter().find(|(k, _)| k.as_str() == name || k.to_lowercase() == lower))
         .map(|(k, e)| (k.as_str(), e))
 }
 
@@ -404,7 +409,11 @@ mod tests {
         assert_eq!(key(None, &["dsh-tui"]), "dsh-tui");
         assert_eq!(key(Some("goose"), &["/bin/zsh"]), "goose");
         assert_eq!(key(None, &["goose"]), "goose");
+        assert_eq!(key(None, &["agent"]), "cursor");
+        assert_eq!(key(Some("agent"), &[]), "cursor");
+        assert_eq!(key(Some("cursor-agent"), &[]), "cursor");
         assert_eq!(key(Some("newagent"), &[]), "agent");
+        assert!(startable().iter().any(|a| a["key"] == "cursor" && a["run"] == json!(["agent"])));
         assert_eq!(key(None, &["/bin/zsh"]), "shell");
         assert_eq!(key(None, &["-zsh"]), "shell");
         assert_eq!(key(None, &["nvim", "x.rs"]), "nvim");
