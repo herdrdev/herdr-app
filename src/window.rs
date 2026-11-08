@@ -1414,6 +1414,9 @@ impl AppWindow {
             let (block, addr) = (id.clone(), address.clone());
             let sub = cx.subscribe_in(&view, window, move |this, _, ev: &TerminalEvent, window, cx| match ev {
                 TerminalEvent::Peek(address) => this.peek_terminal(address, window, cx),
+                TerminalEvent::Link { raw, target, at } => {
+                    this.open_link(raw, target, json!({ "pane": block.trim_end_matches(SWAP), "terminal": addr }), *at, window, cx)
+                }
                 TerminalEvent::TitleChanged => this.publish(cx),
                 TerminalEvent::Ended => this.terminal_ended(&block, window, cx),
                 TerminalEvent::ContextMenu(at) => {
@@ -3520,6 +3523,23 @@ impl AppWindow {
         self.open_overlay(mods::new_overlay_id(), spec, window, cx);
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn open_link(&mut self, raw: &str, link: &crate::links::Target, target: Value, at: Point<Pixels>, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(requested) = self.chrome.terminal_links.as_deref() else {
+            crate::links::open(link);
+            return;
+        };
+        let Some(folder) = self.folders.get(requested) else {
+            tracing::warn!(mod_name = requested, "terminal links mod not found; opening with system");
+            crate::links::open(link);
+            return;
+        };
+        self.pointer = at;
+        let defaults = mod_overlay(&folder.dir);
+        let spec = terminal_link_spec(requested, &defaults, raw, link, target);
+        self.open_overlay(mods::new_overlay_id(), spec, window, cx);
+    }
+
     fn open_overlay(&mut self, id: String, spec: Value, window: &mut Window, cx: &mut Context<Self>) {
         let kind = match spec.get("kind").and_then(Value::as_str) {
             Some("popup") => OverlayKind::Popup,
@@ -4673,6 +4693,17 @@ fn terminal_menu_spec(name: &str, defaults: &Value, tab: &str, target: Value) ->
         "props": { "tab": tab, "target": target } })
 }
 
+fn terminal_link_spec(name: &str, defaults: &Value, raw: &str, link: &crate::links::Target, target: Value) -> Value {
+    let resolved = match link {
+        crate::links::Target::File(p) => json!({ "kind": "file", "path": p.to_string_lossy(), "raw": raw }),
+        crate::links::Target::Url(u) => json!({ "kind": "url", "url": u, "raw": raw }),
+    };
+    json!({ "mod": name, "kind": "popup",
+        "width": defaults.get("width").and_then(Value::as_f64).unwrap_or(220.0),
+        "height": defaults.get("height").and_then(Value::as_f64).unwrap_or(260.0),
+        "props": { "link": resolved, "target": target } })
+}
+
 fn num_in(v: &Value, k: &str) -> f32 {
     v.get(k).and_then(Value::as_f64).unwrap_or(0.0) as f32
 }
@@ -5307,6 +5338,16 @@ mod tests {
         assert_eq!(restored.terminal_menu.as_deref(), Some("personal-menu"));
     }
 
+    #[test]
+    fn terminal_links_is_a_root_layout_choice_that_roundtrips() {
+        let mut root = super::default_layout("main");
+        assert_eq!(root.terminal_links, None);
+        assert!(serde_json::to_value(&root).unwrap().get("terminal_links").is_none());
+        root.terminal_links = Some("personal-links".into());
+        let restored: super::Node = serde_json::from_value(serde_json::to_value(&root).unwrap()).unwrap();
+        assert_eq!(restored.terminal_links.as_deref(), Some("personal-links"));
+    }
+
     /// Runs `window::tests::<name>` alone in a test process of its own, on a
     /// fresh app home: a window takes process-wide things (the app home, the
     /// mods' request channel) that tests beside it would otherwise share.
@@ -5636,6 +5677,43 @@ export default class Probe extends View {
         let partial = super::terminal_menu_spec("personal-menu", &json!({"width": 0.4}), "pane", json!({}));
         assert_eq!(partial["width"], 0.4);
         assert_eq!(partial["height"], 260.0);
+    }
+
+    #[test]
+    fn terminal_links_preserves_clicked_target_and_uses_mod_dimensions() {
+        use serde_json::json;
+        let target = json!({ "pane": "p2", "terminal": "t8" });
+        let file = crate::links::Target::File(std::path::PathBuf::from("/tmp/src/main.rs"));
+        let stock = super::terminal_link_spec("link-opener", &json!({}), "src/main.rs:42", &file, target.clone());
+        assert_eq!(stock["mod"], "link-opener");
+        assert_eq!(stock["kind"], "popup");
+        assert_eq!(stock["width"], 220.0);
+        assert_eq!(stock["height"], 260.0);
+        assert_eq!(
+            stock["props"],
+            json!({
+                "link": { "kind": "file", "path": "/tmp/src/main.rs", "raw": "src/main.rs:42" },
+                "target": target,
+            })
+        );
+        let url = crate::links::Target::Url("https://herdr.dev".into());
+        let custom = super::terminal_link_spec(
+            "link-opener",
+            &json!({"kind": "dialog", "width": 320, "height": 140}),
+            "https://herdr.dev",
+            &url,
+            target.clone(),
+        );
+        assert_eq!(custom["kind"], "popup");
+        assert_eq!(custom["width"], 320.0);
+        assert_eq!(custom["height"], 140.0);
+        assert_eq!(
+            custom["props"],
+            json!({
+                "link": { "kind": "url", "url": "https://herdr.dev", "raw": "https://herdr.dev" },
+                "target": target,
+            })
+        );
     }
 
     #[test]

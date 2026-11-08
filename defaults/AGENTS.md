@@ -266,6 +266,13 @@ Properties any node can have:
   right-clicks (including Shift+right-click). Omit it for the shipped `menu`;
   an unknown mod logs a warning and falls back to `menu`. Clone a shipped
   layout before changing this field. Other menus are unchanged.
+- Root only: `"terminal_links": "my-links"` chooses the mod for Cmd+clicked
+  (Ctrl+clicked on Linux/Windows) terminal URL and file links. Omit it to open
+  links with the system; an unknown mod logs a warning and falls back to the
+  system opener. It opens as a pointer popup (default 220×260 px, overridden by
+  `mod.json` overlay width/height) with `props()` =
+  `{link: {kind: "file", path, raw} | {kind: "url", url, raw}, target: {pane, terminal}, overlay}`.
+  Terminal address peeks are unchanged.
 - Colors are theme names (`border`, `accent`, `surface`, ...) or `#rrggbb[aa]`.
 
 A personal terminal menu replaces the whole menu; it doesn't merge items.
