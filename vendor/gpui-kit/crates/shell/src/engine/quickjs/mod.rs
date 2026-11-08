@@ -1071,6 +1071,7 @@ mod dock_api;
 mod entity_api;
 pub(crate) mod host;
 mod host_modules;
+mod code_cache;
 mod overlay;
 pub(crate) mod sandbox;
 mod scheduler;
@@ -1440,9 +1441,11 @@ pub struct ShellRuntime {
     /// that frame returns, so nothing can read it after the borrow it names has
     /// ended.
     active_context: Cell<Option<std::ptr::NonNull<rquickjs::qjs::JSContext>>>,
+    // Cached exports must drop before the context, without retaining a copy's policy.
+    code_cache: RefCell<BTreeMap<[u8; 32], Vec<Rc<code_cache::CachedCode>>>>,
+    source_revision: RefCell<Option<Box<dyn Fn(&Path) -> Option<u64>>>>,
     context: JsContext,
-    /// Incremented per `load_app`, so a reload re-reads every module rather
-    /// than serving the first version from QuickJS's module cache.
+    /// Resolver leases for evaluated code versions, shared across copies.
     app_modules: AppModules,
     dependency_store: GitDependencyStore,
     next_application_generation: Cell<u64>,
@@ -1524,11 +1527,18 @@ impl ShellRuntime {
         result
     }
 
+    /// Supplies host watcher revisions for application roots. Return None for
+    /// roots the watcher does not cover; those use a bounded filesystem scan.
+    /// Loaded source files are always re-stated, even if watcher events are lost.
+    pub fn set_source_revision_provider(&self, provider: impl Fn(&Path) -> Option<u64> + 'static) {
+        *self.source_revision.borrow_mut() = Some(Box::new(provider));
+    }
+
     /// Loads an application's JavaScript entry without exposing engine values.
     ///
-    /// Resolution, declaration refresh, module generations, capabilities and
-    /// watcher-compatible module leases are identical to the shell's own app
-    /// loading path.
+    /// Reuses evaluated code for an unchanged revision, but returns a fresh
+    /// copy lifetime. Constructor/init run when mounted. Module-scope state is
+    /// shared by copies and remains alive after the last copy closes.
     pub fn load_application(
         self: &Rc<Self>,
         directory: &Path,
@@ -1738,6 +1748,8 @@ impl ShellRuntime {
             next_nested_view_token: Cell::new(0),
             panel_scripts: RefCell::new(HashMap::new()),
             active_context: Cell::new(None),
+            code_cache: RefCell::new(BTreeMap::new()),
+            source_revision: RefCell::new(None),
             terminal_job_error: RefCell::new(None),
             metrics: Metrics::default(),
             #[cfg(test)]
@@ -2179,64 +2191,80 @@ impl ShellRuntime {
     /// the first half of the sandbox's module policy (design doc §19.1).
     pub(crate) fn load_app(self: &Rc<Self>, dir: &Path, entry: &str) -> Result<ViewType> {
         let root = crate::runtime::resolve_app_root(dir, entry)?;
-        if let Err(error) = self.write_type_declarations(&root) {
-            tracing::debug!(
-                "could not update declarations in {}: {error}",
-                root.display()
-            );
-        }
-
         let dependencies = if root.join(crate::plugin::MANIFEST_FILE).is_file() {
             let manifest = crate::plugin::PluginManifest::read(&root)?;
             let dependencies = self.dependency_store.materialize_all(&manifest)?;
-            // Beside the declarations, and for the same reason: the process
-            // that will resolve these imports is the one that tells an editor
-            // where they are, so a package cannot be typed against a checkout
-            // this load is not going to use. Best-effort, like the
-            // declarations — a read-only directory is not a reason to refuse to
-            // run.
-            if let Err(error) = self.dependency_store.link_for_editor(&root, &dependencies) {
-                tracing::debug!(
-                    "could not link dependencies for an editor in {}: {error:#}",
-                    root.display()
-                );
-            }
             dependencies
         } else {
             BTreeMap::new()
         };
 
-        // Every load is a new generation, which is what makes a reload pick up
-        // a change in an imported module rather than only in the entry point.
-        let module_lease = self
-            .app_modules
-            .register_with_dependencies(root.clone(), dependencies);
-        let generation = module_lease.generation();
-        let application = ApplicationGeneration::new(self.next_application_generation.get());
-        self.next_application_generation.set(
-            self.next_application_generation
-                .get()
-                .checked_add(1)
-                .expect("a shell runtime exhausted its application generations"),
-        );
+        let revision = self.source_revision.borrow().as_ref().and_then(|provider| provider(&root));
+        let fingerprint = code_cache::fingerprint(&root, entry, &dependencies, revision);
+        let cached = self.code_cache.borrow().get(&fingerprint)
+            .and_then(|versions| versions.last())
+            .filter(|code| code.sources.current()).cloned();
+        let application = self.new_application_generation();
 
-        let entry = root.join(entry);
-        let source = read_module_source(&entry)?;
-
-        // The entry carries the generation too: it is a cached module like any
-        // other, and a reload that re-read every import but served a stale
-        // `main.js` would be the same bug one level up.
-        let _application_scope = scope::enter_application(application.clone());
-        let loaded = self.load_source_with_lease(
-            &format!("{}?v={}", entry.to_string_lossy(), generation),
-            &source,
-            Some(module_lease),
-            Some(application.clone()),
-        );
-        if loaded.is_err() {
-            self.release_application_generation_without_context(&application);
+        let code = match cached {
+            Some(code) => code,
+            None => {
+                // Declaration generation also walks source directories. Refresh
+                // once per revision, not once for every copy of that revision.
+                if let Err(error) = self.write_type_declarations(&root) {
+                    tracing::debug!("could not update declarations in {}: {error}", root.display());
+                }
+                if let Err(error) = self.dependency_store.link_for_editor(&root, &dependencies) {
+                    tracing::debug!("could not link editor dependencies in {}: {error:#}", root.display());
+                }
+                let lease = self.app_modules.register_with_dependencies(root.clone(), dependencies);
+                let sources = lease.0.sources.clone();
+                let entry = root.join(entry);
+                sources.record(&entry);
+                // Module-scope resources belong to code, not whichever copy
+                // happened to load it first. Copies still have separate owners.
+                let code_application = self.new_application_generation();
+                let _application_scope = scope::enter_application(code_application.clone());
+                let result = read_module_source(&entry).and_then(|source| {
+                    self.load_source_with_lease(
+                        &format!("{}?v={}", entry.to_string_lossy(), lease.generation()),
+                        &source, Some(lease.clone()), Some(code_application.clone()),
+                    ).map(|view_type| code_cache::EvaluatedCode {
+                        class: view_type.value, lease, _application: code_application.clone(),
+                    })
+                });
+                let cacheable = !sources.transient_failure.get() && result.as_ref().err()
+                    .is_none_or(|error| error.downcast_ref::<CodeError>().is_some_and(|error| error.cacheable));
+                if result.is_err() {
+                    self.release_application_generation_without_context(&code_application);
+                }
+                let code = Rc::new(code_cache::CachedCode {
+                    result: result.map_err(|error| format!("{error:#}")), sources,
+                });
+                if cacheable {
+                    self.code_cache.borrow_mut().entry(fingerprint).or_default().push(code.clone());
+                }
+                code
+            }
+        };
+        match &code.result {
+            Ok(code) => Ok(ViewType {
+                value: code.class.clone(),
+                module_lease: Some(code.lease.clone()),
+                application: Some(application),
+            }),
+            Err(message) => {
+                self.release_application_generation_without_context(&application);
+                Err(anyhow!(message.clone()))
+            }
         }
-        loaded
+    }
+
+    fn new_application_generation(&self) -> Rc<ApplicationGeneration> {
+        let generation = self.next_application_generation.get();
+        self.next_application_generation.set(generation.checked_add(1)
+            .expect("a shell runtime exhausted its application generations"));
+        ApplicationGeneration::new(generation)
     }
 
     /// Evaluates a module and returns its default export, which must be a view
@@ -5087,7 +5115,7 @@ impl ShellRuntime {
             let outer = self.active_context.replace(Some(ctx.as_raw()));
             let produced = match body(&ctx) {
                 Ok(value) => Ok(value),
-                Err(error) => Err(anyhow!("{}", describe(&ctx, error))),
+                Err(error) => Err(CodeError::capture(&ctx, error).into()),
             };
             self.active_context.set(outer);
             produced
@@ -5290,16 +5318,9 @@ impl Loader for RegisteredComponentModule {
 #[derive(Clone, Default)]
 struct AppModules {
     applications: Rc<RefCell<Vec<ApplicationModules>>>,
-    /// Bumped on every load so a reload re-reads every file.
-    ///
-    /// QuickJS caches an evaluated module by name, and an ES module cannot be
-    /// unloaded — so re-evaluating `main.js` alone left every module it imports
-    /// at the version that was on disk the first time. A hot reload that
-    /// silently ignores every file except the entry point is worse than no hot
-    /// reload, because it looks like it worked. Tagging the resolved name with
-    /// a generation makes each reload a different module as far as the cache is
-    /// concerned. The previous generation stays in the cache until the runtime
-    /// shuts down; that is the cost, and it is a development-only one.
+    /// A new name for each code revision, including its imports. QuickJS keeps
+    /// older evaluated modules until runtime shutdown; opening another copy of
+    /// unchanged code must not allocate another revision.
     next_generation: Rc<Cell<u32>>,
 }
 
@@ -5308,6 +5329,7 @@ struct ApplicationModules {
     root: std::path::PathBuf,
     generation: u32,
     dependencies: BTreeMap<String, MaterializedDependency>,
+    sources: Rc<code_cache::SourceFiles>,
 }
 
 #[derive(Clone)]
@@ -5317,6 +5339,7 @@ struct ApplicationModuleRegistration {
     applications: Rc<RefCell<Vec<ApplicationModules>>>,
     root: std::path::PathBuf,
     generation: u32,
+    sources: Rc<code_cache::SourceFiles>,
 }
 
 impl ApplicationModuleLease {
@@ -5346,15 +5369,18 @@ impl AppModules {
     ) -> ApplicationModuleLease {
         let generation = self.next_generation.get().wrapping_add(1);
         self.next_generation.set(generation);
+        let sources = Rc::new(code_cache::SourceFiles::default());
         self.applications.borrow_mut().push(ApplicationModules {
             root: root.clone(),
             generation,
             dependencies,
+            sources: sources.clone(),
         });
         ApplicationModuleLease(Rc::new(ApplicationModuleRegistration {
             applications: self.applications.clone(),
             root,
             generation,
+            sources,
         }))
     }
 
@@ -5429,6 +5455,11 @@ impl AppModules {
         };
 
         for candidate in [joined.clone(), joined.with_extension("js")] {
+            application.sources.record(&candidate);
+            if let Err(error) = candidate.metadata()
+                && transient_source_io(&error) {
+                application.sources.transient_failure.set(true);
+            }
             if candidate.is_file() {
                 return candidate.canonicalize().ok().map(|path| (path, boundary));
             }
@@ -5501,36 +5532,66 @@ impl Loader for AppModules {
         _attributes: Option<ImportAttributes<'js>>,
     ) -> JsResult<Module<'js, Declared>> {
         let path = Self::untag(name);
-        let source = read_module_source(Path::new(path))
-            .map_err(|error| Exception::throw_message(ctx, &error.to_string()))?;
+        let application = self.application_for_base(name);
+        if let Some(application) = &application {
+            application.sources.record(Path::new(path));
+        }
+        let source = read_module_source(Path::new(path)).map_err(|error| {
+            if let Some(application) = &application
+                && error.downcast_ref::<CodeError>().is_none_or(|error| !error.cacheable) {
+                application.sources.transient_failure.set(true);
+            }
+            Exception::throw_message(ctx, &error.to_string())
+        })?;
         Module::declare(ctx.clone(), name, source)
     }
+}
+
+fn transient_source_io(error: &std::io::Error) -> bool {
+    use std::io::ErrorKind;
+    // Windows sharing/lock violations can appear as PermissionDenied mid-save.
+    (cfg!(windows) && matches!(error.raw_os_error(), Some(32 | 33)))
+        || !matches!(error.kind(), ErrorKind::InvalidData | ErrorKind::PermissionDenied | ErrorKind::NotFound)
+}
+
+#[cfg(test)]
+thread_local! {
+    static SOURCE_READ_FAILURE: RefCell<Option<(std::path::PathBuf, std::io::Error)>> = const { RefCell::new(None) };
 }
 
 fn read_module_source(path: &Path) -> Result<String> {
     use std::io::Read as _;
 
-    let mut file =
-        std::fs::File::open(path).with_context(|| format!("reading module {}", path.display()))?;
-    let size = file.metadata()?.len();
-    if size > MAX_MODULE_BYTES {
-        anyhow::bail!(
-            "module `{}` is {size} bytes, over the {MAX_MODULE_BYTES}-byte limit",
-            path.display()
-        );
-    }
-    let mut source = String::with_capacity(size as usize);
-    file.by_ref()
-        .take(MAX_MODULE_BYTES + 1)
-        .read_to_string(&mut source)
-        .with_context(|| format!("reading module {}", path.display()))?;
-    if source.len() as u64 > MAX_MODULE_BYTES {
-        anyhow::bail!(
-            "module `{}` grew over the {MAX_MODULE_BYTES}-byte limit",
-            path.display()
-        );
-    }
-    Ok(source)
+    let read = || -> Result<String> {
+        #[cfg(test)]
+        if let Some(error) = SOURCE_READ_FAILURE.with(|failure| {
+            let mut failure = failure.borrow_mut();
+            if failure.as_ref().is_some_and(|(target, _)| target == path) {
+                failure.take().map(|(_, error)| error)
+            } else {
+                None
+            }
+        }) {
+            return Err(error.into());
+        }
+        let mut file = std::fs::File::open(path)
+            .with_context(|| format!("reading module {}", path.display()))?;
+        let size = file.metadata()?.len();
+        if size > MAX_MODULE_BYTES {
+            anyhow::bail!("module `{}` is {size} bytes, over the {MAX_MODULE_BYTES}-byte limit", path.display());
+        }
+        let mut source = String::with_capacity(size as usize);
+        file.by_ref().take(MAX_MODULE_BYTES + 1).read_to_string(&mut source)
+            .with_context(|| format!("reading module {}", path.display()))?;
+        if source.len() as u64 > MAX_MODULE_BYTES {
+            anyhow::bail!("module `{}` grew over the {MAX_MODULE_BYTES}-byte limit", path.display());
+        }
+        Ok(source)
+    };
+    read().map_err(|error| CodeError {
+        cacheable: !error.downcast_ref::<std::io::Error>().is_some_and(transient_source_io),
+        message: format!("{error:#}"),
+    }.into())
 }
 
 /// Installed once per context. It builds the element prototype from the style
@@ -6828,12 +6889,13 @@ globalThis.__gpui = (() => {
     if (typeof build !== "function") {
       throw new TypeError("template(build) expects a function that builds one element");
     }
+    const begin = __template_owner();
     let id = -1;
     return (...args) => {
       if (id < 0) {
         const slots = [];
         for (let i = 0; i < build.length; i += 1) slots.push(templateSlot(i));
-        __template_begin(build.length);
+        begin(build.length);
         let root;
         try {
           root = build(...slots);
@@ -7725,12 +7787,9 @@ impl ShellRuntime {
             // out, and `abort` puts the interrupted one back when the body
             // threw. Three calls rather than one because the body runs in
             // JavaScript between them.
-            let begin_runtime = runtime.clone();
             globals.set(
-                "__template_begin",
-                Func::from(move |ctx: Ctx<'_>, arity: usize| {
-                    upgrade(&begin_runtime, &ctx)?.begin_template(&ctx, arity)
-                }),
+                "__template_owner",
+                Func::from(template_owner_binding(runtime.clone())),
             )?;
             let end_runtime = runtime.clone();
             globals.set(
@@ -10134,6 +10193,18 @@ fn collect_component_elements(argument: &ComponentArgument, elements: &mut Vec<S
     }
 }
 
+fn template_owner_binding(
+    runtime: Weak<ShellRuntime>,
+) -> impl for<'js> Fn(Ctx<'js>) -> JsResult<Function<'js>> {
+    move |ctx| {
+        let owner = scope::current_application_generation();
+        let runtime = runtime.clone();
+        Function::new(ctx, move |ctx: Ctx<'_>, arity: usize| {
+            upgrade(&runtime, &ctx)?.begin_template(&ctx, arity, owner.clone())
+        })
+    }
+}
+
 /// Binds `__template_instantiate`, which is the one global taking live script
 /// values alongside its `Ctx`.
 ///
@@ -10301,11 +10372,49 @@ fn upgrade(runtime: &Weak<ShellRuntime>, ctx: &Ctx<'_>) -> JsResult<Rc<ShellRunt
 
 /// Turns a QuickJS error into a message that includes the script's own stack,
 /// which is the part an author actually needs.
+#[derive(Debug)]
+struct CodeError {
+    message: String,
+    cacheable: bool,
+}
+
+impl std::fmt::Display for CodeError {
+    fn fmt(&self, formatter: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        formatter.write_str(&self.message)
+    }
+}
+
+impl std::error::Error for CodeError {}
+
+impl CodeError {
+    fn capture(ctx: &Ctx<'_>, error: JsError) -> Self {
+        if !matches!(error, JsError::Exception) {
+            return Self {
+                cacheable: matches!(error, JsError::Resolving { .. } | JsError::DuplicateExports | JsError::InvalidExport),
+                message: error.to_string(),
+            };
+        }
+        let value = ctx.catch();
+        // The engine marks interrupts uncatchable. Its OOM exception has no
+        // distinct class; inspect that native InternalError before formatting.
+        let interrupted = unsafe { rquickjs::qjs::JS_IsUncatchableError(value.as_raw()) };
+        let out_of_memory = value.as_exception().is_some_and(|error| {
+            error.message().as_deref() == Some("out of memory")
+                && error.as_object().get::<_, String>("name").is_ok_and(|name| name == "InternalError")
+        });
+        let cacheable = !value.is_null() && !interrupted && !out_of_memory;
+        Self { message: describe_exception(&value), cacheable }
+    }
+}
+
 fn describe(ctx: &Ctx<'_>, error: JsError) -> String {
     if !matches!(error, JsError::Exception) {
         return error.to_string();
     }
-    let value = ctx.catch();
+    describe_exception(&ctx.catch())
+}
+
+fn describe_exception(value: &Value<'_>) -> String {
     match value.as_exception() {
         Some(exception) => match exception.stack() {
             Some(stack) => format!(
@@ -10480,9 +10589,9 @@ export default class Panel extends View { render() { return div(); } }
         assert_eq!(label(&second), "second");
 
         drop(first);
-        assert_eq!(runtime.app_modules.registration_count(), 1);
         drop(second);
-        assert_eq!(runtime.app_modules.registration_count(), 0);
+        assert_eq!(runtime.app_modules.registration_count(), 2,
+            "evaluated versions stay registered for reopened copies and dynamic imports");
         let _ = std::fs::remove_dir_all(root);
     }
 
@@ -11422,7 +11531,8 @@ export default class Child extends View {
         drop(child_application);
         drop(application);
         context.update(|_, _| {});
-        assert_eq!(runtime.app_modules.registration_count(), 0);
+        assert_eq!(runtime.app_modules.registration_count(), 1,
+            "the code cache retains the resolver, not the retired incarnation");
         let _ = std::fs::remove_dir_all(root);
     }
 

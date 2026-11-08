@@ -272,6 +272,26 @@ fn read_frame(r: &mut impl Read) -> Option<(u32, u8, Vec<u8>)> {
     Some((channel, h[4], payload))
 }
 
+#[derive(Debug)]
+pub struct ConnectError(pub String);
+
+impl std::fmt::Display for ConnectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for ConnectError {}
+
+fn connect_error(stderr: &str) -> Option<ConnectError> {
+    let reply: Value = serde_json::from_str(stderr.trim()).ok()?;
+    let error = reply.get("error")?;
+    let message = error.get("message")?.as_str()?;
+    Some(ConnectError(match error.get("hint").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+        Some(hint) => format!("{message}\n\n{hint}"),
+        None => message.to_owned(),
+    }))
+}
+
 impl Core {
     /// Connects to the user's core (starting it if needed) and switches to framed mode.
     pub fn connect() -> Result<Arc<Core>> {
@@ -279,15 +299,38 @@ impl Core {
             .arg("connect")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())
-            .stderr(Stdio::inherit())
+            .stderr(Stdio::piped())
             .spawn()
             .context("cannot run `hc connect`: is herdr-core installed?")?;
+        let mut stderr = child.stderr.take().unwrap();
+        let (error_tx, errors) = mpsc::channel();
+        std::thread::Builder::new().name("hc-stderr".into()).spawn(move || {
+            let mut captured = Vec::new();
+            let mut buffer = [0u8; 4096];
+            while let Ok(n) = stderr.read(&mut buffer) {
+                if n == 0 { break; }
+                let _ = std::io::stderr().write_all(&buffer[..n]);
+                captured.extend_from_slice(&buffer[..n.min(65536 - captured.len())]);
+            }
+            let _ = error_tx.send(String::from_utf8_lossy(&captured).into_owned());
+        })?;
         let mut stdin = child.stdin.take().unwrap();
         let mut reader = BufReader::new(child.stdout.take().unwrap());
-        stdin.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"hello\",\"params\":{\"framed\":true}}\n")?;
-        let mut line = String::new();
-        reader.read_line(&mut line)?;
-        let hello: Value = serde_json::from_str(&line).context("bad hello reply from core")?;
+        let hello = (|| -> Result<Value> {
+            stdin.write_all(b"{\"jsonrpc\":\"2.0\",\"id\":0,\"method\":\"hello\",\"params\":{\"framed\":true}}\n")?;
+            let mut line = String::new();
+            reader.read_line(&mut line)?;
+            serde_json::from_str(&line).context("bad hello reply from core")
+        })();
+        let hello = match hello {
+            Ok(hello) => hello,
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                if let Some(error) = connect_error(&errors.recv_timeout(Duration::from_secs(1)).unwrap_or_default()) { return Err(error.into()); }
+                return Err(error);
+            }
+        };
         if let Some(err) = hello.get("error") {
             bail!("core refused hello: {err}");
         }
@@ -512,6 +555,16 @@ pub fn offline() -> Arc<Core> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_errors_keep_the_cores_message_and_recovery_hint() {
+        let stderr = json!({"error": {
+            "kind": "unavailable", "message": "the core pipe cannot be accessed",
+            "hint": "stop it with hc server stop in an elevated terminal"
+        }}).to_string();
+        assert_eq!(connect_error(&stderr).unwrap().to_string(), "the core pipe cannot be accessed\n\nstop it with hc server stop in an elevated terminal");
+        assert!(connect_error("not JSON").is_none());
+    }
 
     #[test]
     fn the_event_stream_keeps_the_terminals_as_the_core_has_them() {

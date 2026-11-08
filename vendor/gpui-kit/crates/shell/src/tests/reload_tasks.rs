@@ -6,7 +6,7 @@
 
 use crate::{HostModule, HostValue, ScriptView, ShellRuntime};
 use gpui::{Entity, IntoElement as _, TestAppContext, VisualTestContext};
-use std::{ops::Deref as _, path::PathBuf, rc::Rc, time::Duration};
+use std::{cell::Cell, ops::Deref as _, path::PathBuf, rc::Rc, time::Duration};
 
 struct Empty;
 
@@ -20,12 +20,16 @@ struct App {
     runtime: Rc<ShellRuntime>,
     context: VisualTestContext,
     directory: PathBuf,
+    revision: Rc<Cell<u64>>,
 }
 
 impl App {
     fn new(cx: &mut TestAppContext, name: &str, source: &str) -> Self {
         cx.update(crate::init);
         let runtime = ShellRuntime::new_isolated().expect("runtime");
+        let revision = Rc::new(Cell::new(0));
+        let provider = revision.clone();
+        runtime.set_source_revision_provider(move |_| Some(provider.get()));
         cx.update(|cx| runtime.set_global(cx));
         let directory = std::env::temp_dir().join(format!("gpui-shell-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&directory);
@@ -33,22 +37,25 @@ impl App {
         std::fs::write(directory.join("main.js"), source).expect("source");
         let window = cx.add_window(|_, _| Empty);
         let context = VisualTestContext::from_window(*window.deref(), cx);
-        Self { runtime, context, directory }
+        Self { runtime, context, directory, revision }
     }
 
     /// Copies of one loaded application, like one mod shown in several blocks.
     fn copies(&mut self, count: usize) -> Vec<Entity<ScriptView>> {
         let (runtime, directory) = (self.runtime.clone(), self.directory.clone());
         self.context.update(|window, cx| {
-            let view_type = runtime.load_app(&directory, "main.js").expect("load");
             (0..count)
-                .map(|_| runtime.instantiate_view(&view_type, window, cx).expect("instantiate"))
+                .map(|_| {
+                    let view_type = runtime.load_app(&directory, "main.js").expect("load");
+                    runtime.instantiate_view(&view_type, window, cx).expect("instantiate")
+                })
                 .collect()
         })
     }
 
     fn save(&mut self, view: &Entity<ScriptView>, source: &str) -> anyhow::Result<()> {
         std::fs::write(self.directory.join("main.js"), source).expect("source");
+        self.revision.set(self.revision.get() + 1);
         let (runtime, directory) = (self.runtime.clone(), self.directory.clone());
         self.context
             .update(|window, cx| crate::watch::reload(&runtime, view, &directory, "main.js", window, cx))
