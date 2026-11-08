@@ -3,10 +3,14 @@
 // fold into "earlier". Type to filter, ↑/↓ and Enter to go, ctrl+d to close
 // a tab, Esc to leave. Last rows: new work (a tab here, a space on this
 // computer or on each connected machine).
+// The filter matches space, tab, program and terminal names fuzzily (as the
+// palette does), and terminal addresses ("t7", "vps/t7") exactly or by prefix.
+// A tab found by one of its terminals names it; Enter focuses that pane, or
+// peeks at a sub-agent (a terminal without a pane, in its parent's tab).
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { agents, spaces, terminals, run, hc, theme, settings, props, closeOverlay, openOverlay, shared, setShared } from "herdr";
+import { agents, spaces, terminals, panes, run, hc, theme, settings, props, closeOverlay, openOverlay, shared, setShared } from "herdr";
 
 const MARK = { ansi6: "#22a99a", ansi3: "#e3814f", ansi4: "#5b8def", ansi5: "#8b7cf6", ansi2: "#3fae6a", ansi1: "#d9649a" };
 
@@ -34,12 +38,43 @@ function spaceColor(t, p) {
   return c.startsWith("#") ? c : (MARK[c] ?? t[c]);
 }
 
+// Fuzzy score of `q` in `text`, as the palette ranks: your letters in order,
+// word starts and runs rank higher; null: no match. A copy of the palette's.
+function fuzzy(q, text) {
+  const t = text.toLowerCase();
+  let score = 0;
+  let at = 0;
+  let run = 0;
+  let hits = 0;
+  for (const ch of q) {
+    const i = t.indexOf(ch, at);
+    if (i < 0) return null;
+    const start = i === 0 || /[\s:.\-_/]/.test(t[i - 1]);
+    run = i === at && hits ? run + 1 : 0;
+    score += 1 + (start ? 6 : 0) + run * 3 - Math.min(i - at, 6) * 0.3;
+    hits++;
+    at = i + 1;
+  }
+  return score - text.length * 0.02;
+}
+
+// A terminal address typed in full, or its start (so "t1" isn't every t?1?).
+// Another machine's terminals answer to "vps/t7" and to the bare "t7" their
+// own output uses.
+function addressScore(q, address) {
+  const a = address.toLowerCase();
+  const own = a.slice(a.indexOf("/") + 1);
+  if (a === q || own === q) return 100;
+  return a.startsWith(q) || own.startsWith(q) ? 50 : null;
+}
+
 export default class Picker extends View {
   init(_props, cx) {
     this.filter = "";
     this.input = InputState.new({ placeholder: "Go to a tab, space or agent…" });
-    this.input.on("change", (_e, cx) => { this.filter = this.input.value(); this.at = 0; cx.notify(); });
-    this.input.on("submit", () => this.go(this.rows().filter(r => r.kind === "ctx" || r.kind === "new" || r.kind === "space")[this.at]));
+    // While filtering, the best match is picked (it may sit in a later group).
+    this.input.on("change", (_e, cx) => { this.filter = this.input.value(); this.at = this.filter.trim() ? null : 0; cx.notify(); });
+    this.input.on("submit", () => this.go(this.selected(this.rows())));
     this.input.focus();
     cx.timer.after(600, () => this.input.focus());
     this.at = null;
@@ -61,7 +96,8 @@ export default class Picker extends View {
   }
 
   rows() {
-    const f = this.filter.toLowerCase();
+    const q = this.filter.trim().toLowerCase();
+    const fq = q.replace(/\s+/g, "");
     const all = agents();
     const live = terminals().filter((x) => x.state === "live");
     const teamOf = (addrs) => {
@@ -70,18 +106,42 @@ export default class Picker extends View {
       addrs.forEach(walk);
       return n;
     };
+    // Each live terminal's tab: its own pane's, else (a sub-agent) its nearest parent's with one.
+    const paneOf = new Map(panes().filter((p) => p.terminal).map((p) => [p.terminal, p]));
+    const byAddress = new Map(live.map((x) => [x.address, x]));
+    const held = live.map((x) => {
+      let up = x;
+      while (up && !paneOf.has(up.address)) up = byAddress.get(up.parent);
+      const pane = up && paneOf.get(up.address);
+      return pane && { x, tab: pane.tab, pane: up === x ? pane.pane : null };
+    }).filter(Boolean);
+    const best = (scores) => scores.reduce((m, s) => (s !== null && (m === null || s > m) ? s : m), null);
     const groups = spaces().map((w) => {
       const ctxs = w.tabs
         .map((ctx) => {
           const mine = all.filter((a) => a.tab === ctx.id);
-          return { w, ctx, mine, team: teamOf(mine.map((a) => a.address)) };
+          const c = { w, ctx, mine, team: teamOf(mine.map((a) => a.address)) };
+          if (!q) return c;
+          // Each name alone, or (like the palette's keywords) all of them in a row: "herdr editor".
+          const names = [w.name, ctx.name, ...mine.map((a) => a.program?.name ?? "")];
+          const joined = fuzzy(fq, names.join(" "));
+          const named = best([...names.map((n) => fuzzy(fq, n)), joined === null ? null : joined - 4]);
+          let term = null;
+          for (const h of held.filter((h) => h.tab === ctx.id)) {
+            const s = best([addressScore(q, h.x.address), h.x.name ? fuzzy(fq, h.x.name) : null]);
+            if (s !== null && (!term || s > term.score)) term = { ...h, score: s };
+          }
+          const score = best([named, term?.score ?? null]);
+          return score === null ? null : { ...c, score, term: term && term.score >= (named ?? -Infinity) ? term : null };
         })
-        .filter((c) => !f || [w.name, c.ctx.name, ...c.mine.map((a) => a.program?.name ?? "")].join(" ").toLowerCase().includes(f));
-      return { w, ctxs };
+        .filter(Boolean);
+      if (q) ctxs.sort((a, b) => b.score - a.score);
+      return { w, ctxs, score: best(ctxs.map((c) => c.score ?? null)) };
     });
     const busy = groups.filter((p) => p.w.status && p.ctxs.length);
     const quiet = groups.filter((p) => !p.w.status && p.ctxs.length);
-    busy.sort((a, b) => (b.w.status === "blocked") - (a.w.status === "blocked"));
+    busy.sort((a, b) => (q ? b.score - a.score : 0) || (b.w.status === "blocked") - (a.w.status === "blocked"));
+    if (q) quiet.sort((a, b) => b.score - a.score);
     const out = [];
     const add = (p) => {
       out.push({ kind: "head", w: p.w });
@@ -90,7 +150,7 @@ export default class Picker extends View {
     busy.forEach(add);
     if (quiet.length) {
       out.push({ kind: "earlier", count: quiet.length });
-      if (this.showEarlier || f) quiet.forEach(add);
+      if (this.showEarlier || q) quiet.forEach(add);
     }
     out.push({ kind: "new" });
     out.push({ kind: "space", machine: null });
@@ -98,10 +158,26 @@ export default class Picker extends View {
     return out;
   }
 
+  // The row Enter takes: where you are on open, the best match while filtering.
+  selected(rows) {
+    const pickable = rows.filter((r) => r.kind === "ctx" || r.kind === "new" || r.kind === "space");
+    if (this.at === null && this.filter.trim()) {
+      const top = pickable.reduce((m, r, i) => (r.kind === "ctx" && (m < 0 || r.score > pickable[m].score) ? i : m), -1);
+      this.at = Math.max(0, top);
+    }
+    if (this.at === null) this.at = Math.max(0, pickable.findIndex((r) => r.kind === "ctx" && r.w.active && r.ctx.active));
+    this.at = Math.min(this.at, pickable.length - 1);
+    return pickable[this.at];
+  }
+
   go(r) {
     if (!r) return;
     this.close();
-    if (r.kind === "ctx") run("tab.select", { id: r.ctx.id });
+    if (r.kind === "ctx") {
+      run("tab.select", { id: r.ctx.id });
+      if (r.term?.pane) run("pane.focus", { pane: r.term.pane });
+      else if (r.term) run("terminal.peek", { terminal: r.term.x.address });
+    }
     else if (r.kind === "new") run("tab.new");
     else if (r.kind === "space") run("space.new", { machine: r.machine ?? "" });
   }
@@ -115,10 +191,7 @@ export default class Picker extends View {
     const t = theme();
     const rows = this.rows();
     const pickable = rows.filter((r) => r.kind === "ctx" || r.kind === "new" || r.kind === "space");
-    // Opens on where you are.
-    if (this.at === null) this.at = Math.max(0, pickable.findIndex((r) => r.kind === "ctx" && r.w.active && r.ctx.active));
-    this.at = Math.min(this.at, pickable.length - 1);
-    const sel = pickable[this.at];
+    const sel = this.selected(rows);
     // One continuous strip: each row (and the group title before it) at a fixed
     // y. Scrolling moves the strip only as far as it takes to keep the selected
     // row in view, so the arrows can't run the selection off the list.
@@ -212,6 +285,7 @@ export default class Picker extends View {
         .child(div().flex_1().truncate().text_color(t.foreground).when(here, (d) => d.font_semibold()).child(r.ctx.name))
         .when(r.ctx.status === "blocked", (el) => el.child(div().text_size(11).text_color(t.blocked).child("needs you")))
         .when(r.ctx.status === "done", (el) => el.child(div().text_size(11).text_color(t.done).child("finished")))
+        .when(!!r.term, (el) => el.child(div().flex_none().text_size(11).text_color(t.muted).child([r.term.x.address, r.term.x.name].filter(Boolean).join(" "))))
         .child(div().text_size(11).text_color(t.dim).child(who + (r.team ? `  +${r.team}` : "")));
     };
 
