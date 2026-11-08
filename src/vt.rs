@@ -103,10 +103,9 @@ pub struct Cursor {
 }
 
 pub struct Frame {
-    /// A row that didn't change since the last frame is the same `Rc`.
+    /// A row that didn't change since the last frame is the same `Rc`, even
+    /// when it moved (output scrolled).
     pub rows: Vec<Rc<Vec<Cell>>>,
-    /// Every row changed (output scrolled, a resize, new colors): none is kept.
-    pub all: bool,
     pub cursor: Option<Cursor>,
     /// The cursor's cell even when the program hides it (agents draw their
     /// own): where input methods put their candidate window.
@@ -1567,15 +1566,15 @@ impl Vt {
                 let selection = selected.then_some((sel.start_x, sel.end_x));
                 let mut id = GhosttyRenderStateRowId::default();
                 let known = ghostty_render_state_row_get(self.rows_it, GHOSTTY_RENDER_STATE_ROW_DATA_ID, &mut id as *mut _ as *mut c_void) == GHOSTTY_SUCCESS;
-                // Everything changed: no row is kept (but each is remembered).
+                // Everything changed: every row is read again.
                 let mut row_dirty = true;
                 if !all {
                     ghostty_render_state_row_get(self.rows_it, GHOSTTY_RENDER_STATE_ROW_DATA_DIRTY, &mut row_dirty as *mut _ as *mut c_void);
                 }
-                let same = (known && !row_dirty).then(|| self.seen.get(&id.bits)).flatten().filter(|(_, s)| *s == selection);
-                let row = match same {
-                    Some((row, _)) => row.clone(),
-                    None => {
+                let last = known.then(|| self.seen.get(&id.bits).cloned()).flatten();
+                let row = match last {
+                    Some((row, s)) if !row_dirty && s == selection => row,
+                    _ => {
                         ghostty_render_state_row_get(self.rows_it, GHOSTTY_RENDER_STATE_ROW_DATA_CELLS, &mut self.cells as *mut _ as *mut c_void);
                         let mut row = Vec::with_capacity(self.cols as usize);
                         let mut x: u16 = 0;
@@ -1583,7 +1582,12 @@ impl Vt {
                             row.push(self.read_cell(fg_default, selected && x >= sel.start_x && x <= sel.end_x));
                             x += 1;
                         }
-                        Rc::new(row)
+                        // libghostty marks every row dirty when the screen
+                        // scrolls: a row that only moved stays the same `Rc`.
+                        match last {
+                            Some((last, _)) if *last == row => last,
+                            _ => Rc::new(row),
+                        }
                     }
                 };
                 if known {
@@ -1610,7 +1614,7 @@ impl Vt {
             self.drawn = self.drawable();
             ghostty_render_state_clean(state);
             let cursor_cell = cur.viewport_has_value.then_some((cur.viewport_x, cur.viewport_y));
-            Frame { rows, all, cursor, cursor_cell, bg: bg_default, search_spans: self.search_spans.clone() }
+            Frame { rows, cursor, cursor_cell, bg: bg_default, search_spans: self.search_spans.clone() }
         }
     }
 
@@ -1893,6 +1897,39 @@ mod tests {
     }
 
     #[test]
+    fn a_row_stays_the_same_rc_only_while_it_reads_the_same() {
+        let text = |f: &Frame| f.rows.iter().map(|r| r.iter().map(|c| c.text.as_str()).collect::<String>()).collect::<Vec<_>>();
+        let mut vt = Vt::new(10, 4);
+        vt.write(b"a\r\nb\r\nc\r\nd");
+        let first = vt.frame();
+        vt.write(b"\r\ne");
+        let scrolled = vt.frame();
+        assert_eq!(text(&scrolled), ["b", "c", "d", "e"]);
+        for y in 0..3 {
+            assert!(Rc::ptr_eq(&scrolled.rows[y], &first.rows[y + 1]), "row {y} only moved up");
+        }
+
+        vt.write(b"\x1b[1;1HB\x1b[4;2H");
+        let edited = vt.frame();
+        assert!(!Rc::ptr_eq(&edited.rows[0], &scrolled.rows[0]), "a row written over");
+        assert!((1..4).all(|y| Rc::ptr_eq(&edited.rows[y], &scrolled.rows[y])));
+
+        vt.select(Select::Press, 0, 1, 1.0, 25.0, 10.0, 20.0);
+        vt.select(Select::Drag, 2, 1, 25.0, 25.0, 10.0, 20.0);
+        let selected = vt.frame();
+        assert!(!Rc::ptr_eq(&selected.rows[1], &edited.rows[1]), "a row selected");
+        assert!(Rc::ptr_eq(&selected.rows[2], &edited.rows[2]));
+
+        vt.set_theme(Theme { fg: Rgb(1, 2, 3), ..theme() });
+        let recolored = vt.frame();
+        assert!(!Rc::ptr_eq(&recolored.rows[2], &selected.rows[2]), "new colors");
+
+        vt.resize(12, 4, 9, 18);
+        let resized = vt.frame();
+        assert!(resized.rows.iter().zip(&recolored.rows).all(|(a, b)| !Rc::ptr_eq(a, b)), "a new width");
+    }
+
+    #[test]
     fn scrollback_retains_five_thousand_styled_lines() {
         for cols in [80, 200] {
             let mut vt = Vt::new(cols, 25);
@@ -1943,7 +1980,7 @@ mod tests {
     fn a_frame_reads_again_only_the_rows_that_changed() {
         let mut vt = Vt::new(20, 4);
         // The cursor ends on the last row: the row it leaves counts as changed.
-        vt.write(b"one\r\ntwo\r\nthree\r\n");
+        vt.write(b"one\r\ntwo\r\n\x1b[31mthree\x1b[0m\r\n");
         let before = vt.frame();
         vt.write(b"\x1b[2;1Hchanged");
         let after = vt.frame();
@@ -1951,9 +1988,13 @@ mod tests {
         assert!(same(0) && same(2), "untouched rows aren't read again");
         assert!(!same(1));
         assert!(after.rows[1].iter().map(|c| c.text.as_str()).collect::<String>().starts_with("changed"));
+        // A palette change marks no row dirty: every row is read again, and
+        // the one drawn in that color changes.
         vt.write(b"\x1b]4;1;rgb:12/34/56\x1b\\");
         let recolored = vt.frame();
-        assert!(!Rc::ptr_eq(&after.rows[0], &recolored.rows[0]), "a palette change reads every row");
+        assert_eq!(recolored.rows[2][0].fg, Rgb(0x12, 0x34, 0x56), "a palette change reads every row");
+        assert!(!Rc::ptr_eq(&after.rows[2], &recolored.rows[2]));
+        assert!(Rc::ptr_eq(&after.rows[0], &recolored.rows[0]), "a row that reads the same is kept");
     }
 
     #[test]
