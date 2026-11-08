@@ -280,9 +280,10 @@ export default class Settings extends View {
               div()
                 .h(62)
                 .w_full()
+                .overflow_hidden()
                 .child(
                   this.previews[name]
-                    ? image(this.previews[name]).size_full().rounded(6).border_1().border_color(t.border)
+                    ? image(this.previews[name]).w_full().h(62).rounded(6).border_1().border_color(t.border)
                     : this.preview(t, name),
                 ),
             )
@@ -341,6 +342,7 @@ export default class Settings extends View {
           .filter((x) => Boolean(x.light) === light && (x.name === shared("layout") || !layouts().includes(x.name)))
           .map(({ name, colors: c }) => {
           const on = name === current;
+          const label = name.replace(/-/g, " ");
           const dot = (color) => div().w(8).h(8).rounded(4).bg(color);
           return v_flex()
             .id(`st-t-${name}`)
@@ -371,10 +373,12 @@ export default class Settings extends View {
             )
             .child(
               h_flex()
+                .w_full()
+                .min_w(0)
                 .gap(5)
                 .items_center()
-                .child(div().text_size(12.5).text_color(on ? t.foreground : t.muted).child(name.replace(/-/g, " ")))
-                .when(on, (el) => el.child(svg(I("check")).size(12).text_color(t.accent))),
+                .child(div().min_w(0).truncate().tooltip(label).text_size(12.5).text_color(on ? t.foreground : t.muted).child(label))
+                .when(on, (el) => el.child(svg(I("check")).size(12).flex_none().text_color(t.accent))),
             );
         }),
       );
@@ -858,7 +862,6 @@ export default class Settings extends View {
       .h(620)
       .min_h(0)
       .items_start()
-      .bg(t.popover)
       .on_key_down((e, cx) => {
         const k = e.key;
         if (this.machineEdit) {

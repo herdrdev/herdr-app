@@ -18,6 +18,8 @@ mod place;
 mod persist;
 #[cfg(target_os = "macos")]
 mod macos;
+#[cfg(target_os = "macos")]
+mod macos_check;
 mod mods;
 mod mod_files;
 mod process_cwd;
@@ -76,13 +78,15 @@ fn attach_console() {
 
 fn main() {
     let args: Vec<String> = std::env::args().collect();
+    #[cfg(target_os = "macos")]
+    macos_check::startup(&args);
     #[cfg(windows)]
     if args.len() > 1 {
         attach_console();
     }
     // `herdr-app check <mod>` / `herdr-app types <mod>`: gpui-shell's own checker, with Herdr's module installed.
     if matches!(args.get(1).map(String::as_str), Some("check" | "types")) {
-        mods::install_policy();
+        mods::install_check_policy();
         gpui_shell::host::main_with_components(gpui_shell::FrozenComponentRegistry::default());
         return;
     }
@@ -131,7 +135,7 @@ fn main() {
                 Ok(core) => hc::check(&core.hello).map(|()| core).map_err(setup::Need::Fix),
                 Err(e) => {
                     eprintln!("herdr-app: {e:#}");
-                    Err(setup::Need::Install)
+                    Err(setup::Need::connection(e))
                 }
             }
         }
@@ -212,6 +216,10 @@ pub fn open_main(core: std::sync::Arc<hc::Core>, requests: async_channel::Receiv
                     traffic_light_position: cfg!(target_os = "macos").then(|| point(px(12.0), px(7.0))),
                 }),
                 app_owns_titlebar_drag: cfg!(target_os = "macos"),
+                // Linux: open with the title bar the shipped layouts draw. Turning the
+                // system's off on the first render, while KWin maps the window, shrinks
+                // it to 20x20; turning it on later (a "system" layout) is fine.
+                window_decorations: Some(WindowDecorations::Client),
                 // Herdr Dev and other side-by-side builds get their own dock icon.
                 app_id: Some(std::env::var("HERDR_APP_ID").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "herdr-app".into())),
                 ..Default::default()

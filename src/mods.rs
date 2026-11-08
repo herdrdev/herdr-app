@@ -752,9 +752,19 @@ fn opt_str(v: Option<&HostValue>, key: &str) -> Option<String> {
 }
 
 const EXEC_LIMIT: Duration = Duration::from_secs(30);
+const EXEC_MAX: Duration = Duration::from_secs(600);
 const EXEC_OUTPUT: u64 = 8 << 20;
 
-fn run_blocking(command: &str, args: &[String], cwd: Option<String>) -> Result<(i32, String, String), String> {
+fn exec_limit(options: Option<&HostValue>) -> Result<Duration, HostError> {
+    match options.and_then(|o| o.get("timeout")) {
+        // `timeout: undefined` reaches here as Null: both mean the default, as omitting it does.
+        None | Some(HostValue::Null) => Ok(EXEC_LIMIT),
+        Some(HostValue::Number(ms)) if ms.is_finite() && *ms > 0.0 => Ok(Duration::from_secs_f64(ms.min(EXEC_MAX.as_millis() as f64) / 1000.0)),
+        _ => Err(HostError::new("timeout must be a positive number of milliseconds")),
+    }
+}
+
+fn run_blocking(command: &str, args: &[String], cwd: Option<String>, limit: Duration) -> Result<(i32, String, String), String> {
     use std::io::Read;
     let mut child = crate::spawn::command(command)
         .args(args)
@@ -780,10 +790,10 @@ fn run_blocking(command: &str, args: &[String], cwd: Option<String>) -> Result<(
     let status = loop {
         match child.try_wait() {
             Ok(Some(s)) => break s,
-            Ok(None) if start.elapsed() > EXEC_LIMIT => {
+            Ok(None) if start.elapsed() > limit => {
                 let _ = child.kill();
                 let _ = child.wait();
-                return Err(format!("{command} took longer than 30 s and was stopped"));
+                return Err(format!("{command} took longer than {} s and was stopped", limit.as_secs_f64()));
             }
             Ok(None) => std::thread::sleep(Duration::from_millis(10)),
             Err(e) => return Err(e.to_string()),
@@ -794,21 +804,26 @@ fn run_blocking(command: &str, args: &[String], cwd: Option<String>) -> Result<(
 
 /// Runs a program on another machine through the core's exec: its exact output.
 pub fn run_remote(machine: &str, command: &str, args: &[String], cwd: Option<String>) -> Result<(i32, Vec<u8>, Vec<u8>), String> {
+    run_remote_with_limit(machine, command, args, cwd, EXEC_LIMIT)
+}
+
+fn run_remote_with_limit(machine: &str, command: &str, args: &[String], cwd: Option<String>, limit: Duration) -> Result<(i32, Vec<u8>, Vec<u8>), String> {
     use base64::Engine;
-    let mut hc_args: Vec<String> = vec!["exec".into(), "--json".into(), "--on".into(), machine.into(), "--timeout".into(), EXEC_LIMIT.as_secs().to_string()];
+    let mut hc_args: Vec<String> = vec!["exec".into(), "--json".into(), "--on".into(), machine.into(), "--timeout".into(), limit.as_secs_f64().to_string()];
     if let Some(c) = cwd {
         hc_args.extend(["--cwd".into(), c]);
     }
     hc_args.push("--".into());
     hc_args.push(command.into());
     hc_args.extend(args.iter().cloned());
-    let (_, out, err) = run_blocking("hc", &hc_args, None)?;
+    // Let the remote timeout end the program and deliver its result before the wrapper expires.
+    let (_, out, err) = run_blocking("hc", &hc_args, None, limit + Duration::from_secs(5))?;
     let v: Value = serde_json::from_str(out.trim()).or_else(|_| serde_json::from_str(err.trim())).map_err(|_| format!("hc exec: {}", err.trim()))?;
     if let Some(e) = v.get("error") {
         return Err(e.get("message").and_then(Value::as_str).unwrap_or("hc exec failed").to_owned());
     }
     if v.get("timed_out").and_then(Value::as_bool) == Some(true) {
-        return Err(format!("{command} took longer than {} s on {machine} and was stopped", EXEC_LIMIT.as_secs()));
+        return Err(format!("{command} took longer than {} s on {machine} and was stopped", limit.as_secs_f64()));
     }
     let bytes = |k: &str| base64::engine::general_purpose::STANDARD.decode(v.get(k).and_then(Value::as_str).unwrap_or_default()).map_err(|e| e.to_string());
     let code = v.get("code").and_then(Value::as_i64).map_or(-1, |c| c as i32);
@@ -817,7 +832,7 @@ pub fn run_remote(machine: &str, command: &str, args: &[String], cwd: Option<Str
 
 /// A program's output here, if it ran (for the app's own checks).
 pub fn run_here(command: &str, args: &[String]) -> Option<String> {
-    run_blocking(command, args, None).ok().map(|(_, out, _)| out)
+    run_blocking(command, args, None, EXEC_LIMIT).ok().map(|(_, out, _)| out)
 }
 
 /// The agents a machine can start (`knownAgents()`), asked at most once a minute.
@@ -859,15 +874,21 @@ fn read_remote(machine: &str, path: &str) -> Result<Option<String>, String> {
     Ok(Some(String::from_utf8_lossy(&out).into_owned()))
 }
 
-fn exec_future(command: String, args: Vec<String>, cwd: Option<String>, on: Option<String>) -> impl std::future::Future<Output = Result<HostValue, HostError>> + Send {
+fn exec_future(command: String, args: Vec<String>, cwd: Option<String>, on: Option<String>, limit: Duration) -> impl std::future::Future<Output = Result<HostValue, HostError>> + Send {
     let (tx, rx) = async_channel::bounded(1);
-    std::thread::spawn(move || {
+    let run = move || {
         let r = match on {
-            Some(m) => run_remote(&m, &command, &args, cwd).map(|(c, o, e)| (c, String::from_utf8_lossy(&o).into_owned(), String::from_utf8_lossy(&e).into_owned())),
-            None => run_blocking(&command, &args, cwd),
+            Some(m) => run_remote_with_limit(&m, &command, &args, cwd, limit).map(|(c, o, e)| (c, String::from_utf8_lossy(&o).into_owned(), String::from_utf8_lossy(&e).into_owned())),
+            None => run_blocking(&command, &args, cwd, limit),
         };
         let _ = tx.send_blocking(r);
-    });
+    };
+    #[cfg(not(test))]
+    std::thread::spawn(run);
+    // GPUI tests cannot be woken from a foreign thread. Queue the real result
+    // before polling the receiver, without changing production dispatch.
+    #[cfg(test)]
+    run();
     async move {
         let (code, stdout, stderr) = rx.recv().await.map_err(|_| HostError::new("the command was lost"))?.map_err(HostError::new)?;
         Ok(HostObject::new().field("code", code as f64).field("stdout", stdout).field("stderr", stderr).into())
@@ -885,12 +906,15 @@ fn module(inst: Instance, copy: u64) -> HostModule {
     let feedback_from = inst.props.get("from").and_then(Value::as_str).unwrap_or("person").to_owned();
     let feedback_layout = inst.props.get("layout").and_then(Value::as_str).unwrap_or("other").to_owned();
     let (cmd_tx, commands) = async_channel::unbounded::<String>();
-    COMMANDS.with(|c| c.borrow_mut().push((copy, inst.name.clone(), cmd_tx)));
+    COMMANDS.with_borrow_mut(|commands| {
+        commands.retain(|(_, _, tx)| !tx.is_closed());
+        commands.push((copy, inst.name.clone(), cmd_tx));
+    });
     HostModule::new("herdr")
         .declarations(DECLARATIONS)
         .async_function("exec", |a| {
             let command = a.string(0)?.to_owned();
-            Ok(exec_future(command, strings(a.get(1)), opt_str(a.get(2), "cwd"), opt_str(a.get(2), "on")))
+            Ok(exec_future(command, strings(a.get(1)), opt_str(a.get(2), "cwd"), opt_str(a.get(2), "on"), exec_limit(a.get(2))?))
         })
         .async_function("readTextFile", |a| {
             let path = a.string(0)?.to_owned();
@@ -904,7 +928,7 @@ fn module(inst: Instance, copy: u64) -> HostModule {
             let expected = a.get(2).and_then(|v| match v { HostValue::Str(s) => Some(s.clone()), _ => None });
             Ok(crate::mod_files::write_text(a.string(0)?.to_owned(), a.string(1)?.to_owned(), expected))
         })
-        .async_function("hc", |a| Ok(exec_future("hc".into(), strings(a.get(0)), None, None)))
+        .async_function("hc", |a| Ok(exec_future("hc".into(), strings(a.get(0)), None, None, EXEC_LIMIT)))
         .function("home", |_| Ok(home().to_string_lossy().into_owned().into()))
         .function("appHome", |_| Ok(app_dir().to_string_lossy().into_owned().into()))
         .function("fonts", |_| Ok(to_host(&json!(*FONTS.lock().unwrap()))))
@@ -1127,7 +1151,13 @@ fn capabilities() -> Capabilities {
         .clipboard_write(true)
 }
 
-/// What mods may touch, and the `herdr` module they import. Also used by `herdr-app check`.
+/// Checks exercise shared state in memory, without reading or writing the person's file.
+pub fn install_check_policy() {
+    SHARED.with_borrow_mut(|slot| *slot = Some(SharedStore { values: Default::default(), path: app_dir().join("shared.json"), writable: false, writer: None }));
+    install_policy();
+}
+
+/// What mods may touch, and the `herdr` module they import.
 pub fn install_policy() -> async_channel::Receiver<Request> {
     gpui_shell::policy::update_default(|p| {
         p.with_capabilities(capabilities())
@@ -1174,6 +1204,41 @@ mod tests {
     use super::*;
 
     #[test]
+    fn exec_timeout_defaults_caps_and_rejects_invalid_values() {
+        assert_eq!(exec_limit(None).unwrap(), EXEC_LIMIT);
+        assert_eq!(exec_limit(Some(&HostObject::new().field("timeout", HostValue::Null).into())).unwrap(), EXEC_LIMIT);
+        let options = |ms| HostObject::new().field("timeout", ms).into();
+        assert_eq!(exec_limit(Some(&options(1250.0))).unwrap(), Duration::from_millis(1250));
+        assert_eq!(exec_limit(Some(&options(900_000.0))).unwrap(), EXEC_MAX);
+        for ms in [0.0, -1.0, f64::NAN, f64::INFINITY] {
+            assert!(exec_limit(Some(&options(ms))).is_err());
+        }
+        assert!(exec_limit(Some(&HostObject::new().field("timeout", "30").into())).is_err());
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn exec_uses_the_requested_deadline_and_reports_it() {
+        let args = ["-c".into(), "sleep 0.15; printf done".into()];
+        let error = run_blocking("sh", &args, None, Duration::from_millis(30)).unwrap_err();
+        assert!(error.contains("0.03 s"), "{error}");
+        let (code, stdout, _) = run_blocking("sh", &args, None, Duration::from_secs(2)).unwrap();
+        assert_eq!((code, stdout.as_str()), (0, "done"));
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    async fn exec_returns_real_output_and_errors_under_the_test_scheduler(_cx: &mut gpui::TestAppContext) {
+        let result = exec_future("sh".into(), vec!["-c".into(), "printf out; printf err >&2; exit 7".into()], None, None, EXEC_LIMIT).await.unwrap();
+        assert!(matches!(result.get("code"), Some(HostValue::Number(7.0))));
+        assert!(matches!(result.get("stdout"), Some(HostValue::Str(s)) if s == "out"));
+        assert!(matches!(result.get("stderr"), Some(HostValue::Str(s)) if s == "err"));
+        assert!(exec_future("herdr_test_missing_command_638".into(), vec![], None, None, EXEC_LIMIT).await.is_err());
+        let error = exec_future("sh".into(), vec!["-c".into(), "sleep 0.15; printf late".into()], None, None, Duration::from_millis(30)).await.unwrap_err();
+        assert!(error.to_string().contains("0.03 s"), "{error}");
+    }
+
+    #[test]
     fn live_reads_ignore_unread_inputs_and_keep_pending_changes() {
         let mut revisions = HashMap::new();
         let mut list = LiveReads::default();
@@ -1213,6 +1278,22 @@ mod tests {
             assert!(!snapshot_changed(1));
             drop(reads);
             assert!(!snapshot_changed(1));
+        }).join().unwrap();
+    }
+
+    #[test]
+    fn loading_copies_reclaims_closed_command_channels_without_dispatch() {
+        std::thread::spawn(|| {
+            let inst = Instance { name: "test".into(), props: Value::Null };
+            let live = module(inst.clone(), 1);
+            for copy in 2..102 {
+                drop(module(inst.clone(), copy));
+                COMMANDS.with_borrow(|commands| assert!(commands.len() <= 2));
+            }
+            drop(live);
+            let last = module(inst, 102);
+            COMMANDS.with_borrow(|commands| assert_eq!(commands.len(), 1));
+            drop(last);
         }).join().unwrap();
     }
 
@@ -1276,6 +1357,9 @@ mod tests {
                 while reading.load(std::sync::atomic::Ordering::Relaxed) {
                     match std::fs::read(&path) {
                         Ok(bytes) => { serde_json::from_slice::<Value>(&bytes).unwrap(); }
+                        // Windows refuses to open a file while a rename replaces it. The reader
+                        // got no bytes, so that is not a torn snapshot.
+                        Err(e) if cfg!(windows) && e.kind() == std::io::ErrorKind::PermissionDenied => {}
                         Err(e) => assert_eq!(e.kind(), std::io::ErrorKind::NotFound),
                     }
                     std::thread::yield_now();

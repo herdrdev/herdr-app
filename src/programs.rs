@@ -103,7 +103,10 @@ pub fn installed(commands: &[String], on: Option<&str>) -> Vec<String> {
             result.map(|(_, out, _)| String::from_utf8_lossy(&out).into_owned()).unwrap_or_default()
         }
         None if cfg!(windows) => {
-            crate::mods::run_here(&crate::window::shell(), &installed_powershell(commands)).unwrap_or_default()
+            // The core refreshes user/system PATH; the app may have inherited only the system PATH.
+            let mut args = vec!["exec".into(), "--".into(), crate::window::shell()];
+            args.extend(installed_powershell(commands));
+            crate::mods::run_here(&crate::core_bin::path().to_string_lossy(), &args).unwrap_or_default()
         }
         None => {
             let shell = crate::window::shell();
@@ -181,6 +184,12 @@ pub fn load() -> Result<(), String> {
 /// program it runs (`argv`). `{ key, name, icon, tint, tile, color, shell, agent }`.
 pub fn of(app: Option<&str>, argv: &[String]) -> Value {
     TABLE.with(|t| resolve(&t.borrow(), app, argv))
+}
+
+/// How the app calls an agent ("Kiro finished"), from its 7501 `app`: the
+/// name `of` shows for it (the person's `programs.json` included), else the `app`.
+pub fn name(app: &str) -> String {
+    TABLE.with(|t| find(&t.borrow(), app).map(|(key, e)| e.name.clone().unwrap_or_else(|| key.to_owned()))).unwrap_or_else(|| app.to_owned())
 }
 
 /// An agent's 7501 `app` as a name Herdr ships (`claude` for `claude-code`),
