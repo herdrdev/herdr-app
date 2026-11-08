@@ -17,6 +17,26 @@ export default class Tabs extends View {
     this.panels = JSON.parse(localStorage.getItem("panels") ?? "{}");
   }
 
+  // A mouse wheel notch switches one tab. A trackpad sends a stream of small
+  // moves, then momentum after the fingers lift: those add up to one switch per
+  // gesture, and a sideways swipe is left to the tab strip. A device that never
+  // reports a gesture start switches once per stretch of the same distance.
+  wheel(e) {
+    if (e.touch_phase === "started") { this.phased = true; this.swipe = { x: 0, y: 0 }; return; }
+    if (e.touch_phase !== "moved") { this.swipe = null; return; }
+    if (e.delta_lines) {
+      const { x, y } = e.delta_lines;
+      if (y !== 0 && Math.abs(y) >= Math.abs(x)) run(y > 0 ? "tab.prev" : "tab.next");
+      return;
+    }
+    if (!this.swipe) { if (this.phased) return; this.swipe = { x: 0, y: 0 }; }
+    this.swipe.x += e.delta.x; this.swipe.y += e.delta.y;
+    const { x, y } = this.swipe;
+    if (Math.abs(y) < 24 || Math.abs(y) < Math.abs(x)) return;
+    run(y > 0 ? "tab.prev" : "tab.next");
+    this.swipe = null;
+  }
+
   // The side panel is remembered per space: switching shows that space's choice
   // (closed if it never had one), and opening or closing it records it.
   syncPanel(space, panel, body, enabled) {
@@ -91,7 +111,7 @@ export default class Tabs extends View {
     };
     return h_flex().size_full().min_w(0).px(10).pl(lightsPadding).gap(3).items_center().bg(t.chrome).border_b(1).border_color(t.border)
       .on_mouse_up("left", () => { this.pressed = null; })
-      .on_scroll_wheel(e => { if (Math.abs(e.delta.y) >= 1) run(e.delta.y > 0 ? "tab.prev" : "tab.next"); })
+      .on_scroll_wheel(e => this.wheel(e))
       .child(h_flex().id("tab-scroll").flex_1().min_w(0).h_full().items_center().gap(3).overflow_x_scrollbar().children(shown.map(item)))
       .child(button("tab-new", "+", () => openOverlay({ mod: "new-menu", kind: "popup", width: 250, height: 512 })))
       .when(enabled.includes("files"), el => el.child(panelButton("files", "Files", "mods/files/file.svg")))
