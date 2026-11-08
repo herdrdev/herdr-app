@@ -715,6 +715,13 @@ What's about the user, never a look:
   Option input on every layout. `"left"` / `"right"` makes only that Option
   key act as Alt; the other types characters. Changes apply immediately, including layout
   switches. Linux and Windows are unchanged.
+- `terminal_renderer`: `"gpui"` (default) or `"ghostty"`. Ghostty is an
+  experimental macOS option in builds made with `--features ghostty-renderer`.
+  Other builds use GPUI. Changes apply immediately; existing terminal sessions
+  stay connected. Ghostty supplies font
+  metrics and draws the terminal through Metal; Herdr still handles input,
+  selection, clipboard, search, and scrollback.
+  Renderer initialization/drawing failures fall back to GPUI and are logged.
 - `minimum_contrast`: terminal text contrast ratio, `1` (default) leaves
   program colors unchanged. Set it to `1.6` to enable the previous readability
   adjustment, or another number from `1` to `21`. Text below that ratio is

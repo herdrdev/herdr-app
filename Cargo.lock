@@ -2774,6 +2774,7 @@ name = "ghostty-sys"
 version = "0.0.0"
 dependencies = [
  "bindgen",
+ "cc",
 ]
 
 [[package]]
@@ -3701,6 +3702,8 @@ dependencies = [
  "anyhow",
  "async-channel",
  "base64",
+ "core-foundation 0.10.1",
+ "core-video",
  "fancy-regex 0.19.2",
  "ghostty-sys",
  "gpui-base",

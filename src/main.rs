@@ -33,6 +33,7 @@ mod sprites;
 mod telemetry;
 mod feedback;
 mod terminal;
+mod terminal_renderer;
 mod update;
 mod update_notes;
 mod vt;
@@ -155,7 +156,8 @@ fn main() {
     gpui_platform::application()
         .with_assets(gpui_shell::AppAssets::new(mods::app_dir()))
         .run(move |cx| {
-            let fonts = settings::BUNDLED_FONTS.iter().map(|f| std::borrow::Cow::Borrowed(*f)).collect();
+            let fonts: Vec<_> = settings::BUNDLED_FONTS.iter().map(|f| std::borrow::Cow::Borrowed(*f)).collect();
+            terminal_renderer::register_fonts(&fonts);
             if let Err(e) = cx.text_system().add_fonts(fonts) {
                 tracing::warn!("bundled fonts not loaded: {e:#}");
             }

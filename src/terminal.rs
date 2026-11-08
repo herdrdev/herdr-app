@@ -54,6 +54,7 @@ pub enum TerminalEvent {
 /// What the canvas closures need, shared outside the entity so prepaint can resize.
 struct Grid {
     vt: Vt,
+    renderer: crate::terminal_renderer::Renderer,
     core: Arc<Core>,
     channel: Option<u32>,
     attach_ready: bool,
@@ -166,7 +167,7 @@ fn display_update(told: &mut Option<DisplayFacts>, theme: &vt::Theme, cell: (u32
 }
 
 pub fn initial_display(window: &Window) -> serde_json::Value {
-    display_update(&mut None, &vt::theme(), device_cell(cell_size(window), window.scale_factor())).unwrap()
+    display_update(&mut None, &vt::theme(), device_cell(crate::terminal_renderer::initial_cell_size(window).unwrap_or_else(|| cell_size(window)), window.scale_factor())).unwrap()
 }
 
 impl Grid {
@@ -248,6 +249,7 @@ impl TerminalView {
             right_click_to_program: false,
             grid: Rc::new(RefCell::new(Grid {
                 vt: Vt::new(size_hint.0.max(2), size_hint.1.max(1)),
+                renderer: Default::default(),
                 core: core.clone(),
                 channel: None,
                 attach_ready: false,
@@ -1586,8 +1588,18 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     let origin = bounds.origin + point(px(pad_x), px(pad_y + (spare / 2.0).floor()));
     let origin = point(snap(origin.x), snap(origin.y));
     g.origin = origin;
-    let frame = g.vt.frame();
-    let placements = g.vt.placements();
+    let was_native = g.renderer.active();
+    let mut native = false;
+    let Grid { vt, renderer, .. } = &mut *g;
+    let frame = vt.frame_with(|terminal, snapshot, full, changed| {
+        native = renderer.draw(terminal, snapshot, focused, full, changed);
+    });
+    if was_native && !native {
+        // The next render recomputes GPUI metrics and resizes, even if the
+        // terminal is idle and there is no subsequent output or input.
+        window.request_animation_frame();
+    }
+    let placements = if native { Vec::new() } else { g.vt.placements() };
     let mut images: Vec<(bool, Bounds<Pixels>, Arc<RenderImage>)> = Vec::new();
     let mut keep = std::collections::HashSet::new();
     for p in &placements {
@@ -1617,7 +1629,23 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     let marked = g.marked.clone();
     drop(g);
 
-    window.paint_quad(fill(bounds, hsla(frame.bg).opacity(crate::settings::get().terminal_opacity)));
+    let background = hsla(frame.bg).opacity(crate::settings::get().terminal_opacity);
+    if native {
+        // Ghostty paints the grid background, including its opacity. Only fill
+        // the surrounding padding here so transparent terminals do not darken.
+        let right = origin.x + cell.width * grid.borrow().vt.cols as f32;
+        let bottom = origin.y + cell.height * grid.borrow().vt.rows as f32;
+        for gap in [
+            Bounds::new(bounds.origin, size(bounds.size.width, origin.y - bounds.origin.y)),
+            Bounds::new(point(bounds.origin.x, bottom), size(bounds.size.width, bounds.bottom() - bottom)),
+            Bounds::new(point(bounds.origin.x, origin.y), size(origin.x - bounds.origin.x, bottom - origin.y)),
+            Bounds::new(point(right, origin.y), size(bounds.right() - right, bottom - origin.y)),
+        ] {
+            if gap.size.width > px(0.) && gap.size.height > px(0.) { window.paint_quad(fill(gap, background)); }
+        }
+    } else {
+        window.paint_quad(fill(bounds, background));
+    }
     let at = |x: usize, y: usize| origin + point(cell.width * x as f32, cell.height * y as f32);
     // Edges round to device pixels, so cells side by side meet without seams.
     let snap_box = |b: Bounds<Pixels>| {
@@ -1632,80 +1660,92 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
             }
         }
     };
+    if native {
+        let g = grid.borrow();
+        g.renderer.paint(Bounds::new(origin, size(cell.width * g.vt.cols as f32, cell.height * g.vt.rows as f32)), window);
+    }
     paint_images(true, window);
 
-    // Each row's drawing is built once and painted again while the row is the
-    // same (`Vt::frame` keeps a row libghostty didn't change): an agent's spinner
-    // line rebuilds one row, not the whole screen.
-    let ligatures = crate::settings::get().font_ligatures;
-    let cursor = frame.cursor_cell.filter(|_| ligatures);
-    let with = (crate::settings::font_size().to_bits(), cell, crate::settings::terminal_font(), crate::settings::fonts_added(), ligatures);
-    // When every row changed (output scrolling), nothing is kept: the next
-    // frame would find none of them the same.
-    let mut painted = std::mem::take(&mut grid.borrow_mut().painted);
-    if grid.borrow().painted_with != with || frame.all {
-        painted.clear();
-    }
-    painted.truncate(frame.rows.len());
-    for (y, row) in frame.rows.iter().enumerate() {
-        let column = cursor.filter(|(_, cy)| *cy as usize == y).map(|(x, _)| x as usize);
-        if frame.all || painted.get(y).is_none_or(|(r, _, c)| !Rc::ptr_eq(r, row) || *c != column) {
-            let ops = row_ops(row, cell, column, window);
-            if y < painted.len() {
-                painted[y] = (row.clone(), ops, column);
-            } else {
-                painted.push((row.clone(), ops, column));
+    let paint_matches = |window: &mut Window| {
+        for selected in [false, true] {
+            for span in frame.search_spans.iter().filter(|span| span.selected == selected) {
+                let y = span.row as usize;
+                let Some(row) = frame.rows.get(y) else { continue };
+                let start = span.start as usize;
+                let end = (span.end as usize + 1).min(row.len());
+                if start >= end {
+                    continue;
+                }
+                let opacity = if selected { 0.55 } else { 0.28 };
+                let highlight = crate::settings::color("accent").opacity(opacity);
+                let b = Bounds::new(at(start, y), size(cell.width * (end - start) as f32, cell.height));
+                window.paint_quad(fill(snap_box(b), highlight));
             }
+        }
+    };
+
+    if !native {
+        // Each row's drawing is built once and painted again while the row is the
+        // same (`Vt::frame` keeps a row libghostty didn't change): an agent's spinner
+        // line rebuilds one row, not the whole screen.
+        let ligatures = crate::settings::get().font_ligatures;
+        let cursor = frame.cursor_cell.filter(|_| ligatures);
+        let with = (crate::settings::font_size().to_bits(), cell, crate::settings::terminal_font(), crate::settings::fonts_added(), ligatures);
+        // When every row changed (output scrolling), nothing is kept: the next
+        // frame would find none of them the same.
+        let mut painted = std::mem::take(&mut grid.borrow_mut().painted);
+        if grid.borrow().painted_with != with || frame.all {
+            painted.clear();
+        }
+        painted.truncate(frame.rows.len());
+        for (y, row) in frame.rows.iter().enumerate() {
+            let column = cursor.filter(|(_, cy)| *cy as usize == y).map(|(x, _)| x as usize);
+            if frame.all || painted.get(y).is_none_or(|(r, _, c)| !Rc::ptr_eq(r, row) || *c != column) {
+                let ops = row_ops(row, cell, column, window);
+                if y < painted.len() {
+                    painted[y] = (row.clone(), ops, column);
+                } else {
+                    painted.push((row.clone(), ops, column));
+                }
+            }
+        }
+
+        // Paint all program backgrounds first, then search overlays, then text.
+        // This lets a match highlight sit below glyphs without contaminating
+        // cached RowOps or the terminal's own selection/copy state.
+        for (y, (_, ops, _)) in painted.iter().enumerate() {
+            for op in ops {
+                match op {
+                    RowOp::Bg { from, to, color } => {
+                        let b = Bounds::new(at(*from, y), size(cell.width * (to - from) as f32, cell.height));
+                        window.paint_quad(fill(snap_box(b), *color));
+                    }
+                    _ => {}
+                }
+            }
+        }
+        paint_matches(window);
+        for (y, (_, ops, _)) in painted.iter().enumerate() {
+            for op in ops {
+                match op {
+                    RowOp::Bg { .. } => {}
+                    RowOp::Sprite { x, text, color } => crate::sprites::paint(text, Bounds::new(at(*x, y), cell), *color, window),
+                    RowOp::Icon { x, offset, font, glyph, size, color } => {
+                        let _ = window.paint_glyph(at(*x, y) + *offset, *font, *glyph, *size, *color);
+                    }
+                    RowOp::Text { x, line } => {
+                        let _ = line.paint(at(*x, y), cell.height, TextAlign::Left, None, window, cx);
+                    }
+                }
+            }
+        }
+        {
+            let mut g = grid.borrow_mut();
+            (g.painted, g.painted_with) = (painted, with);
         }
     }
 
-    // Paint all program backgrounds first, then search overlays, then text.
-    // This lets a match highlight sit below glyphs without contaminating
-    // cached RowOps or the terminal's own selection/copy state.
-    for (y, (_, ops, _)) in painted.iter().enumerate() {
-        for op in ops {
-            match op {
-                RowOp::Bg { from, to, color } => {
-                    let b = Bounds::new(at(*from, y), size(cell.width * (to - from) as f32, cell.height));
-                    window.paint_quad(fill(snap_box(b), *color));
-                }
-                _ => {}
-            }
-        }
-    }
-    for selected in [false, true] {
-        for span in frame.search_spans.iter().filter(|span| span.selected == selected) {
-            let y = span.row as usize;
-            let Some(row) = frame.rows.get(y) else { continue };
-            let start = span.start as usize;
-            let end = (span.end as usize + 1).min(row.len());
-            if start >= end {
-                continue;
-            }
-            let opacity = if selected { 0.55 } else { 0.28 };
-            let highlight = crate::settings::color("accent").opacity(opacity);
-            let b = Bounds::new(at(start, y), size(cell.width * (end - start) as f32, cell.height));
-            window.paint_quad(fill(snap_box(b), highlight));
-        }
-    }
-    for (y, (_, ops, _)) in painted.iter().enumerate() {
-        for op in ops {
-            match op {
-                RowOp::Bg { .. } => {}
-                RowOp::Sprite { x, text, color } => crate::sprites::paint(text, Bounds::new(at(*x, y), cell), *color, window),
-                RowOp::Icon { x, offset, font, glyph, size, color } => {
-                    let _ = window.paint_glyph(at(*x, y) + *offset, *font, *glyph, *size, *color);
-                }
-                RowOp::Text { x, line } => {
-                    let _ = line.paint(at(*x, y), cell.height, TextAlign::Left, None, window, cx);
-                }
-            }
-        }
-    }
-    {
-        let mut g = grid.borrow_mut();
-        (g.painted, g.painted_with) = (painted, with);
-    }
+    if native { paint_matches(window); }
 
     for &(y, x0, x1) in &link_spans {
         let Some(row) = frame.rows.get(y as usize) else { continue };
@@ -1717,7 +1757,7 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
 
     paint_images(false, window);
 
-    if let Some(cur) = frame.cursor {
+    if let Some(cur) = frame.cursor.filter(|_| !native) {
         let (x, y) = (cur.x as usize, cur.y as usize);
         let wide = frame.rows.get(y).and_then(|r| r.get(x)).is_some_and(|c| c.wide);
         let w = cell.width * if wide { 2.0 } else { 1.0 };
@@ -1877,7 +1917,7 @@ impl Render for TerminalView {
                 g.core.focus(ch, focused);
             }
         }
-        let cell = cell_size(window);
+        let cell = self.grid.borrow_mut().renderer.prepare(window).unwrap_or_else(|| cell_size(window));
         let hover = self.grid.borrow().hover;
         let found = hover.filter(|_| link_mods(&window.modifiers())).and_then(|pos| self.link_at(pos));
         let (link, spans) = found.unzip();

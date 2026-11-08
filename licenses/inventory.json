@@ -41,11 +41,22 @@
     "vendor/ghostty/pkg/wuffs/build.zig.zon",
     "vendor/ghostty/pkg/wuffs/build.zig",
     "vendor/ghostty/pkg/simdutf/vendor/simdutf.h",
-    "vendor/ghostty/pkg/simdutf/vendor/simdutf.cpp"
+    "vendor/ghostty/pkg/simdutf/vendor/simdutf.cpp",
+    "vendor/ghostty/pkg/libpng/build.zig.zon",
+    "vendor/ghostty/pkg/spirv-cross/build.zig.zon",
+    "vendor/ghostty/pkg/freetype/build.zig.zon",
+    "vendor/ghostty/pkg/zlib/build.zig.zon",
+    "vendor/ghostty/pkg/glslang/build.zig.zon",
+    "vendor/ghostty/pkg/dcimgui/build.zig.zon",
+    "vendor/ghostty/pkg/oniguruma/build.zig.zon",
+    "crates/ghostty-sys/renderer/ghostty.patch",
+    "crates/ghostty-sys/renderer_build.rs",
+    "vendor/ghostty/src/stb/stb_image.h",
+    "vendor/ghostty/src/stb/stb_image_resize.h"
   ],
   "components": [
     {
-      "name": "Ghostty (libghostty-vt)",
+      "name": "Ghostty (libghostty-vt and optional Metal renderer)",
       "source": "https://github.com/ghostty-org/ghostty/tree/291fd050b9e9c293c8adb6a140742649b7e42d3a",
       "files": [
         "vendor/ghostty/LICENSE"
@@ -190,6 +201,142 @@
       "source": "Ram path adapted from https://github.com/herdrdev/herdr/blob/HEAD/assets/logo.svg (Apache-2.0). Herdr 98 artwork is drawn by defaults/mods/win98/art/generate.ts, under the app's Apache-2.0 license.",
       "files": [
         "LICENSE"
+      ]
+    },
+    {
+      "name": "libxev (optional Ghostty renderer)",
+      "source": "https://deps.files.ghostty.org/libxev-9ce8e8e6ff89e583258a7f8e7adeeeaeae8611bf.tar.gz",
+      "files": [
+        "licenses/ghostty-renderer/libxev-LICENSE"
+      ]
+    },
+    {
+      "name": "vaxis (optional Ghostty renderer)",
+      "source": "https://deps.files.ghostty.org/vaxis-1dbbe575dff4586fe51e3217aa5c3fecdcbb6089.tar.gz",
+      "files": [
+        "licenses/ghostty-renderer/vaxis-LICENSE"
+      ]
+    },
+    {
+      "name": "zig_objc (optional Ghostty renderer)",
+      "source": "https://deps.files.ghostty.org/zig_objc-c8de82ff80281215ad92900866dab7103a8efa8b.tar.gz",
+      "files": [
+        "licenses/ghostty-renderer/zig_objc-LICENSE"
+      ]
+    },
+    {
+      "name": "zf (optional Ghostty renderer)",
+      "source": "https://deps.files.ghostty.org/zf-c35c421f84895193246db06c40683c1a30e616ef.tar.gz",
+      "files": [
+        "licenses/ghostty-renderer/zf-LICENSE"
+      ]
+    },
+    {
+      "name": "JetBrainsMono (optional Ghostty renderer)",
+      "source": "https://deps.files.ghostty.org/JetBrainsMono-2.304.tar.gz",
+      "files": [
+        "licenses/ghostty-renderer/JetBrainsMono-OFL.txt"
+      ]
+    },
+    {
+      "name": "NerdFontsSymbolsOnly (optional Ghostty renderer)",
+      "source": "https://deps.files.ghostty.org/NerdFontsSymbolsOnly-3.4.0.tar.gz",
+      "files": [
+        "licenses/ghostty-renderer/NerdFontsSymbolsOnly-LICENSE"
+      ]
+    },
+    {
+      "name": "libpng (optional Ghostty renderer)",
+      "source": "https://deps.files.ghostty.org/libpng-1220aa013f0c83da3fb64ea6d327f9173fa008d10e28bc9349eac3463457723b1c66.tar.gz",
+      "files": [
+        "licenses/ghostty-renderer/libpng-LICENSE"
+      ]
+    },
+    {
+      "name": "spirv_cross (optional Ghostty renderer)",
+      "source": "https://deps.files.ghostty.org/spirv_cross-1220fb3b5586e8be67bc3feb34cbe749cf42a60d628d2953632c2f8141302748c8da.tar.gz",
+      "files": [
+        "licenses/ghostty-renderer/spirv_cross-LICENSE"
+      ]
+    },
+    {
+      "name": "freetype (optional Ghostty renderer)",
+      "source": "https://deps.files.ghostty.org/freetype-1220b81f6ecfb3fd222f76cf9106fecfa6554ab07ec7fdc4124b9bb063ae2adf969d.tar.gz",
+      "files": [
+        "licenses/ghostty-renderer/freetype-LICENSE.TXT",
+        "licenses/ghostty-renderer/freetype-FTL.TXT",
+        "licenses/ghostty-renderer/freetype-GPLv2.TXT"
+      ]
+    },
+    {
+      "name": "zlib (optional Ghostty renderer)",
+      "source": "https://deps.files.ghostty.org/zlib-1220fed0c74e1019b3ee29edae2051788b080cd96e90d56836eea857b0b966742efb.tar.gz",
+      "files": [
+        "licenses/ghostty-renderer/zlib-LICENSE"
+      ]
+    },
+    {
+      "name": "glslang (optional Ghostty renderer)",
+      "source": "https://deps.files.ghostty.org/glslang-12201278a1a05c0ce0b6eb6026c65cd3e9247aa041b1c260324bf29cee559dd23ba1.tar.gz",
+      "files": [
+        "licenses/ghostty-renderer/glslang-LICENSE.txt"
+      ]
+    },
+    {
+      "name": "DearImGui (optional Ghostty renderer)",
+      "source": "https://deps.files.ghostty.org/N-V-__8AAEbOfQBnvcFcCX2W5z7tDaN8vaNZGamEQtNOe0UI.tar.gz",
+      "files": [
+        "licenses/ghostty-renderer/DearImGui-LICENSE.txt"
+      ]
+    },
+    {
+      "name": "oniguruma (optional Ghostty renderer)",
+      "source": "https://deps.files.ghostty.org/oniguruma-1220c15e72eadd0d9085a8af134904d9a0f5dfcbed5f606ad60edc60ebeccd9706bb.tar.gz",
+      "files": [
+        "licenses/ghostty-renderer/oniguruma-COPYING"
+      ]
+    },
+    {
+      "name": "z2d (optional Ghostty renderer)",
+      "source": "https://github.com/vancluever/z2d/tree/7dbae85c81784dba9988320bf9543ed9a81350c8",
+      "files": [
+        "licenses/ghostty-renderer/z2d-LICENSE",
+        "licenses/ghostty-renderer/z2d-COPYING"
+      ]
+    },
+    {
+      "name": "Dear Bindings (optional Ghostty renderer)",
+      "source": "https://github.com/dearimgui/dear_bindings/tree/v0.17",
+      "files": [
+        "licenses/ghostty-renderer/DearBindings-LICENSE.txt"
+      ]
+    },
+    {
+      "name": "Noto Emoji fonts (optional Ghostty renderer)",
+      "source": "Copyright 2013 Google LLC; vendor/ghostty/src/font/res/README.md, pinned with Ghostty",
+      "files": [
+        "licenses/ghostty-renderer/NotoEmoji-OFL.txt"
+      ]
+    },
+    {
+      "name": "stb_image.h (optional Ghostty renderer)",
+      "source": "https://github.com/ghostty-org/ghostty/tree/291fd050b9e9c293c8adb6a140742649b7e42d3a/src/stb",
+      "files": [
+        "licenses/ghostty-renderer/stb_image.h-LICENSE.txt"
+      ]
+    },
+    {
+      "name": "stb_image_resize.h (optional Ghostty renderer)",
+      "source": "https://github.com/ghostty-org/ghostty/tree/291fd050b9e9c293c8adb6a140742649b7e42d3a/src/stb",
+      "files": [
+        "licenses/ghostty-renderer/stb_image_resize.h-LICENSE.txt"
+      ]
+    },
+    {
+      "name": "zigimg (optional Ghostty renderer dependency)",
+      "source": "https://github.com/zigimg/zigimg/tree/d695acd97c02e57bb151e8f659d1280f5cd6ca70",
+      "files": [
+        "licenses/ghostty-renderer/zigimg-LICENSE"
       ]
     }
   ]

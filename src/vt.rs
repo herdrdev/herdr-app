@@ -1531,7 +1531,14 @@ impl Vt {
     }
 
     /// Updates the render state (respecting synchronized output) and reads one frame.
+    #[cfg(test)]
     pub fn frame(&mut self) -> Frame {
+        self.frame_with(|_, _, _, _| {})
+    }
+
+    /// Borrow the prepared snapshot before cleaning its dirty flags. A native
+    /// renderer must not update a competing snapshot or retain either handle.
+    pub fn frame_with(&mut self, paint: impl FnOnce(GhosttyTerminal, GhosttyRenderState, bool, bool)) -> Frame {
         unsafe {
             if let Some(since) = self.shared.held_since
                 && since.elapsed() > MAX_HOLD
@@ -1607,7 +1614,10 @@ impl Vt {
                 color: if colors.cursor_has_value { colors.cursor.into() } else { fg_default },
             });
 
-            self.drawn = self.drawable();
+            let drawable = self.drawable();
+            let changed = all || dirty != GHOSTTY_RENDER_STATE_DIRTY_FALSE || drawable != self.drawn;
+            self.drawn = drawable;
+            paint(self.term, state, all, changed);
             ghostty_render_state_clean(state);
             let cursor_cell = cur.viewport_has_value.then_some((cur.viewport_x, cur.viewport_y));
             Frame { rows, all, cursor, cursor_cell, bg: bg_default, search_spans: self.search_spans.clone() }
@@ -1815,6 +1825,42 @@ mod tests {
             vt.progress_search();
         }
         panic!("terminal search did not finish incrementally");
+    }
+
+    #[test]
+    fn native_snapshot_tracks_changes_without_redrawing_idle_frames() {
+        let mut vt = Vt::new(20, 4);
+        let mut changes = Vec::new();
+        vt.frame_with(|_, _, full, changed| changes.push((full, changed)));
+        vt.frame_with(|_, _, full, changed| changes.push((full, changed)));
+        assert!(changes[0].0 && changes[0].1);
+        assert_eq!(changes[1], (false, false));
+        vt.write(b"hello");
+        let frame = vt.frame_with(|_, _, _, changed| assert!(changed));
+        assert_eq!(frame.rows[0][0].text, "h");
+        vt.frame_with(|_, _, _, changed| assert!(!changed));
+        vt.write(b"\x1b[10G");
+        vt.frame_with(|_, _, _, changed| {
+            assert!(changed, "cursor-only changes need a native frame")
+        });
+        vt.frame_with(|_, _, _, changed| assert!(!changed));
+        vt.write(b"\x1b[?25l");
+        vt.frame_with(|_, _, _, changed| {
+            assert!(changed, "cursor visibility needs a native frame")
+        });
+        vt.select(Select::Press, 0, 0, 1.0, 5.0, 10.0, 40.0);
+        vt.select(Select::Drag, 4, 0, 46.0, 5.0, 10.0, 40.0);
+        vt.frame_with(|_, _, _, changed| assert!(changed, "selection needs a native frame"));
+        vt.frame_with(|_, _, _, changed| assert!(!changed));
+        vt.clear_selection();
+        vt.frame_with(|_, _, _, changed| {
+            assert!(changed, "clearing selection needs a native frame")
+        });
+        vt.write(b"\r\none\r\ntwo\r\nthree\r\nfour\r\nfive");
+        vt.frame();
+        vt.scroll_to_top();
+        vt.frame_with(|_, _, _, changed| assert!(changed, "scrollback needs a native frame"));
+        vt.frame_with(|_, _, _, changed| assert!(!changed));
     }
 
     #[test]

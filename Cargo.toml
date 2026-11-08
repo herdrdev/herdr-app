@@ -15,6 +15,9 @@ edition.workspace = true
 license.workspace = true
 publish.workspace = true
 
+[features]
+ghostty-renderer = ["ghostty-sys/renderer"]
+
 [dependencies]
 ghostty-sys = { path = "crates/ghostty-sys" }
 gpui = { package = "gpui-pre", version = "=0.3.8", features = ["render-to-image"] }
@@ -35,6 +38,12 @@ tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 fancy-regex = "0.19"
 notify = "7"
 sha2 = "0.10"
+
+[[test]]
+name = "ghostty_renderer"
+path = "tests/ghostty_renderer.rs"
+harness = false
+required-features = ["ghostty-renderer"]
 
 [[test]]
 name = "shot_pixels"
@@ -58,6 +67,8 @@ gpui_linux = { package = "gpui-pre-linux", version = "=0.3.8", features = ["rend
 [target.'cfg(target_os = "macos")'.dependencies]
 gpui_macos = { package = "gpui-pre-macos", version = "=0.3.8", features = ["render-to-image"] }
 libc = "0.2"
+core-video = { version = "0.5.2", features = ["metal"] }
+core-foundation = "0.10"
 
 [target.'cfg(windows)'.dependencies]
 gpui_windows = { package = "gpui-pre-windows", version = "=0.3.8", features = ["render-to-image"] }

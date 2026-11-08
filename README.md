@@ -125,6 +125,17 @@ just test
 just install
 ```
 
+### Experimental Ghostty renderer on macOS
+
+Build with `cargo build --locked --features ghostty-renderer` (Xcode Command Line Tools
+and Zig 0.16.0 are required), then set `"terminal_renderer": "ghostty"` in
+`settings.json`. The default remains `"gpui"`; unsupported builds fall back to
+GPUI. Font, font size, theme, zoom and renderer changes apply live.
+
+Use a scratch `HERDR_APP_HOME` and an isolated core when evaluating this build.
+See [the renderer integration](docs/ghostty-renderer.md) for setup, architecture,
+validation and current limitations.
+
 Install [just](https://github.com/casey/just) to use these recipes.
 The platform installer builds a release and adds the app to your desktop.
 On Linux it links to this checkout, so keep the checkout in place.

@@ -1,0 +1,287 @@
+--- a/src/build/GhosttyLib.zig
++++ b/src/build/GhosttyLib.zig
+@@ -25,7 +25,7 @@
+     const lib = b.addLibrary(.{
+         .name = "ghostty",
+         .root_module = b.createModule(.{
+-            .root_source_file = b.path("src/main_c.zig"),
++            .root_source_file = b.path("src/herdr_renderer.zig"),
+             .target = deps.config.target,
+             .optimize = deps.config.optimize,
+             .strip = deps.config.strip,
+--- a/build.zig
++++ b/build.zig
+@@ -225,6 +225,7 @@
+         // the full Ghostty GUI core.
+         const lib_shared = try buildpkg.GhosttyLib.initShared(b, &deps);
+         const lib_static = try buildpkg.GhosttyLib.initStatic(b, &deps);
++        if (config.target.result.os.tag.isDarwin()) lib_static.install("libherdr-ghostty.a");
+ 
+         // We shouldn't have this guard but we don't currently
+         // build on macOS this way ironically so we need to fix that.
+--- a/src/build/SharedDeps.zig
++++ b/src/build/SharedDeps.zig
+@@ -186,7 +186,10 @@
+     step.root_module.addOptions("build_options", self.options);
+ 
+     // Every exe needs the terminal options
+-    self.config.terminalOptions(.ghostty, optimize).add(b, step.root_module);
++    var terminal_options = self.config.terminalOptions(.ghostty, optimize);
++    terminal_options.c_abi = true;
++    terminal_options.oniguruma = true;
++    terminal_options.add(b, step.root_module);
+ 
+     // Every exe needs the uucode module
+     step.root_module.addImport("uucode", self.uucode_mod);
+@@ -500,10 +503,10 @@
+     if (step.rootModuleTarget().os.tag.isDarwin()) {
+         try @import("apple_sdk").addPaths(b, step);
+ 
+-        const metallib = self.metallib.?;
+-        metallib.output.addStepDependencies(&step.step);
++        // HERDR: compile Metal source at runtime, like GPUI. This avoids
++        // requiring Apple's separately downloaded Metal command-line tools.
+         step.root_module.addAnonymousImport("ghostty_metallib", .{
+-            .root_source_file = metallib.output,
++            .root_source_file = b.path("src/renderer/shaders/shaders.metal"),
+         });
+     }
+ 
+@@ -583,10 +586,10 @@
+         // This is LGPL but since our source code is open source we are
+         // in compliance with the LGPL since end users can modify this
+         // build script to replace the bundled libintl with their own.
+-        if (b.lazyDependency("libintl", .{
+-            .target = target,
+-            .optimize = optimize,
+-        })) |libintl_dep| {
++        if (if (self.config.i18n) b.lazyDependency("libintl", .{
++            .target = target,
++            .optimize = optimize,
++        }) else null) |libintl_dep| {
+             step.root_module.linkLibrary(libintl_dep.artifact("intl"));
+             try static_libs.append(
+                 b.allocator,
+--- a/src/lib_vt.zig
++++ b/src/lib_vt.zig
+@@ -173,7 +173,7 @@
+ comptime {
+     // If we're building the C library (vs. the Zig module) then
+     // we want to reference the C API so that it gets exported.
+-    if (@import("root") == lib) {
++    if (@import("root") == lib or @hasDecl(@import("root"), "herdr_renderer")) {
+         // MSVC requires this marker whenever floating-point code is present.
+         // Zig's compiler_rt only provides it when libc is not linked.
+         if (builtin.os.tag == .windows and
+--- a/src/renderer/Options.zig
++++ b/src/renderer/Options.zig
+@@ -19,10 +19,13 @@
+ 
+ /// The mailbox for sending the surface messages. This is only valid
+ /// once the thread has started and should not be used outside of the thread.
+-surface_mailbox: apprt.surface.Mailbox,
++surface_mailbox: ?apprt.surface.Mailbox = null,
+ 
+ /// The apprt surface.
+-rt_surface: *apprt.Surface,
++rt_surface: ?*apprt.Surface = null,
++
++/// Herdr supplies a detached view; no terminal surface or process is created.
++native_view: ?struct { view: *anyopaque, scale: f64 } = null,
+ 
+ /// The renderer thread.
+-thread: *renderer.Thread,
++thread: ?*renderer.Thread = null,
+--- a/src/renderer/Metal.zig
++++ b/src/renderer/Metal.zig
+@@ -76,10 +76,12 @@
+     };
+ 
+     // Get the metadata about our underlying view that we'll be rendering to.
+-    const info: ViewInfo = switch (apprt.runtime) {
++    const info: ViewInfo = if (opts.native_view) |v| .{
++        .view = objc.Object.fromId(v.view), .scaleFactor = v.scale,
++    } else switch (apprt.runtime) {
+         apprt.embedded => .{
+-            .scaleFactor = @floatCast(opts.rt_surface.content_scale.x),
+-            .view = switch (opts.rt_surface.platform) {
++            .scaleFactor = @floatCast(opts.rt_surface.?.content_scale.x),
++            .view = switch (opts.rt_surface.?.platform) {
+                 .macos => |v| v.nsview,
+                 .ios => |v| v.uiview,
+             },
+--- a/src/renderer/generic.zig
++++ b/src/renderer/generic.zig
+@@ -119,7 +119,10 @@
+         config: DerivedConfig,
+ 
+         /// The mailbox for communicating with the window.
+-        surface_mailbox: apprt.surface.Mailbox,
++        surface_mailbox: ?apprt.surface.Mailbox,
++
++        /// Herdr already updated this snapshot through libghostty-vt.
++        external_render_state: bool = false,
+ 
+         /// The latest exported frame ready to be consumed by an apprt
+         /// who needs to manually composite the frame with UI elements.
+@@ -1376,12 +1379,12 @@
+             //
+             // Frame count is ~12 minutes at 120Hz.
+             const max_terminal_state_frame_count = 100_000;
+-            if (self.terminal_state_frame_count >= max_terminal_state_frame_count) {
++            if (!self.external_render_state and self.terminal_state_frame_count >= max_terminal_state_frame_count) {
+                 self.terminal_state.deinit(self.alloc);
+                 self.terminal_state = .empty;
+                 self.terminal_state_frame_count = 0;
+             }
+-            self.terminal_state_frame_count += 1;
++            if (!self.external_render_state) self.terminal_state_frame_count += 1;
+ 
+             // Create an arena for all our temporary allocations while rebuilding
+             var arena = ArenaAllocator.init(self.alloc);
+@@ -1413,7 +1416,7 @@
+                 defer state.unlockDemand(global.io());
+ 
+                 // If we're in a synchronized output state, we pause all rendering.
+-                if (state.terminal.modes.get(.synchronized_output)) {
++                if (!self.external_render_state and state.terminal.modes.get(.synchronized_output)) {
+                     log.debug("synchronized output started, skipping render", .{});
+                     return;
+                 }
+@@ -1423,7 +1426,7 @@
+                 // y offset changed, new content was added to the screen.
+                 // Update this BEFORE we update our render state so we can
+                 // draw the new scrolled data immediately.
+-                if (self.config.scroll_to_bottom_on_output) scroll: {
++                if (!self.external_render_state and self.config.scroll_to_bottom_on_output) scroll: {
+                     const br = state.terminal.screens.active.pages.getBottomRight(.screen) orelse break :scroll;
+ 
+                     // If the pin hasn't changed, then don't scroll.
+@@ -1443,14 +1446,14 @@
+                 // denormalization) is deferred to the endUpdate call
+                 // outside of this critical section, keeping our lock
+                 // hold time as short as possible.
+-                try self.terminal_state.beginUpdate(
++                if (!self.external_render_state) try self.terminal_state.beginUpdate(
+                     self.alloc,
+                     state.terminal,
+                 );
+ 
+                 // If our terminal state is dirty at all we need to redo
+                 // the viewport search.
+-                if (self.terminal_state.dirty != .false) {
++                if (!self.external_render_state and self.terminal_state.dirty != .false) {
+                     state.terminal.flags.search_viewport_dirty = true;
+                 }
+ 
+@@ -1735,11 +1738,13 @@
+             // After the graphics API is complete (so we defer) we want to
+             // update our scrollbar state.
+             defer if (self.scrollbar_dirty) {
++                if (self.surface_mailbox) |mailbox| {
+                 // Fail instantly if the surface mailbox if full, we'll just
+                 // get it on the next frame.
+-                if (self.surface_mailbox.push(.{
++                if (mailbox.push(.{
+                     .scrollbar = self.scrollbar,
+                 }, .instant) > 0) self.scrollbar_dirty = false;
++                }
+             };
+ 
+             // Let our graphics API do any bookkeeping, etc.
+@@ -2043,9 +2048,9 @@
+ 
+                 // Our health value changed, so we notify the surface so that it
+                 // can do something about it.
+-                _ = self.surface_mailbox.push(.{
++                if (self.surface_mailbox) |mailbox| { _ = mailbox.push(.{
+                     .renderer_health = health,
+-                }, .{ .forever = {} });
++                }, .{ .forever = {} }); }
+             }
+ 
+             // Always release our semaphore. The swap chain is
+--- a/src/renderer/metal/shaders.zig
++++ b/src/renderer/metal/shaders.zig
+@@ -333,26 +333,14 @@
+ };
+ 
+ /// Initialize the MTLLibrary. A MTLLibrary is a collection of shaders.
++// Herdr's bridge runs on the UI thread. The native cache retains one library
++// per Metal device for the process lifetime; callers receive their own retain.
++extern fn herdr_metal_library(device: *anyopaque, source: [*]const u8, length: usize) ?*anyopaque;
+ fn initLibrary(device: objc.Object) !objc.Object {
+     const start: std.Io.Timestamp = .now(global.io(), .awake);
+ 
+-    const data = try macos.dispatch.Data.create(
+-        @embedFile("ghostty_metallib"),
+-        macos.dispatch.queue.getMain(),
+-        macos.dispatch.Data.DESTRUCTOR_DEFAULT,
+-    );
+-    defer data.release();
+-
+-    var err: ?*anyopaque = null;
+-    const library = device.msgSend(
+-        objc.Object,
+-        objc.sel("newLibraryWithData:error:"),
+-        .{
+-            data,
+-            &err,
+-        },
+-    );
+-    try checkError(err);
++    const source = @embedFile("ghostty_metallib");
++    const library = objc.Object.fromId(herdr_metal_library(device.value, source.ptr, source.len) orelse return error.ShaderCompileFailed);
+ 
+     log.debug("shader library loaded time={}us", .{start.untilNow(global.io(), .awake).toMicroseconds()});
+ 
+--- a/src/global.zig
++++ b/src/global.zig
+@@ -45,6 +45,8 @@
+     tool: std.process.Init.Minimal,
+ 
+     c: struct {
++        /// Herdr only needs rendering services; leave host process policy alone.
++        renderer_only: bool = false,
+         argc: usize,
+         argv: [*][*:0]u8,
+         environ: std.process.Environ,
+@@ -123,6 +125,13 @@
+     // Discover and save the temporary directory path
+     self.tmp_dir_path = try allocTmpDir(self.alloc, self.environ);
+ 
++    if (opts == .c and opts.c.renderer_only) {
++        try glslang.init();
++        try oni.init(&.{oni.Encoding.utf8});
++        return;
++    }
++
++
+     // We first try to parse any action that we may be executing.
+     // Tool binaries (ghostty-bench, ghostty-gen) have their own action
+     // namespace and detect their own actions, so we skip detection here.
+--- a/src/renderer/Thread.zig
++++ b/src/renderer/Thread.zig
+@@ -210,7 +210,7 @@
+     // Setup our crash metadata
+     crash.sentry.thread_state = .{
+         .type = .renderer,
+-        .surface = self.renderer.surface_mailbox.surface,
++        .surface = self.renderer.surface_mailbox.?.surface,
+     };
+     defer crash.sentry.thread_state = null;
+ 
+--- a/src/renderer/metal/Device.zig
++++ b/src/renderer/metal/Device.zig
+@@ -103,7 +103,11 @@
+     }
+ }
+ 
++extern fn herdr_metal_device() ?*anyopaque;
+ fn chooseDevice() error{NoMetalDevice}!objc.Object {
++    if (@hasDecl(@import("root"), "herdr_renderer")) {
++        return objc.Object.fromId(herdr_metal_device() orelse return error.NoMetalDevice);
++    }
+     var chosen_device: ?objc.Object = null;
+ 
+     switch (comptime builtin.os.tag) {

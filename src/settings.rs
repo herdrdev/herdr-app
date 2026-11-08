@@ -380,6 +380,8 @@ pub struct Person {
     pub font_size: Option<f32>,
     /// Enable programming ligatures in terminal fonts.
     pub font_ligatures: bool,
+    /// Terminal drawing backend; Ghostty requires the optional macOS build.
+    pub terminal_renderer: TerminalRenderer,
     /// The panels' font (their sizes follow zoom).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ui_font: Option<String>,
@@ -404,6 +406,14 @@ pub struct Person {
     pub theme: Option<crate::layout::ThemeChoice>,
     #[serde(skip_serializing_if = "BTreeMap::is_empty")]
     pub colors: BTreeMap<String, String>,
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum TerminalRenderer {
+    #[default]
+    Gpui,
+    Ghostty,
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -451,6 +461,7 @@ impl Default for Person {
             font: None,
             font_size: None,
             font_ligatures: false,
+            terminal_renderer: TerminalRenderer::Gpui,
             ui_font: None,
             telemetry: true,
             clipboard_write: true,
@@ -472,6 +483,8 @@ pub struct Settings {
     pub font_family: String,
     pub font_size: f32,
     pub font_ligatures: bool,
+    /// Terminal drawing backend; Ghostty requires the optional macOS build.
+    pub terminal_renderer: TerminalRenderer,
     pub ui_font_family: String,
     pub ui_font_size: f32,
     /// How big the whole app is drawn (1 = as designed). The zoom keys change it.
@@ -522,6 +535,7 @@ impl Default for Settings {
             font_family: DEFAULT_FONT.into(),
             font_size: 14.0,
             font_ligatures: false,
+            terminal_renderer: TerminalRenderer::Gpui,
             ui_font_family: "Geist".into(),
             ui_font_size: 13.0,
             zoom: 1.0,
@@ -560,6 +574,7 @@ impl Settings {
             font_family: look.font.clone().or(person.font.clone()).unwrap_or(d.font_family),
             font_size: look.font_size.or(person.font_size).unwrap_or(d.font_size),
             font_ligatures: person.font_ligatures,
+            terminal_renderer: person.terminal_renderer,
             ui_font_family: look.ui_font.clone().or(person.ui_font.clone()).unwrap_or(d.ui_font_family),
             ui_font_size: d.ui_font_size,
             zoom: person.zoom,
@@ -795,6 +810,7 @@ pub fn load_home_fonts(cx: &mut gpui::App) -> bool {
     if new.is_empty() {
         return false;
     }
+    crate::terminal_renderer::register_fonts(&new);
     if let Err(e) = cx.text_system().add_fonts(new) {
         tracing::warn!("fonts in {} not loaded: {e:#}", home.display());
     }

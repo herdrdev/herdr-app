@@ -2,6 +2,7 @@
 
 use std::path::PathBuf;
 use std::process::Command;
+mod renderer_build;
 
 // Zig builds for the machine it runs on unless told otherwise: its CPU's
 // newest instructions, which crash older CPUs, and never another target's.
@@ -31,12 +32,26 @@ fn main() {
     }
     println!("cargo:rerun-if-env-changed=ZIG");
 
+    let renderer = std::env::var_os("CARGO_FEATURE_RENDERER").is_some()
+        && std::env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("macos");
+    println!("cargo:rerun-if-changed=renderer");
+    println!("cargo:rerun-if-changed=renderer_build.rs");
+    let build_src = if renderer { renderer_build::prepare(&src, &out, &manifest) } else { src.clone() };
+    if renderer {
+        cc::Build::new().file(manifest.join("renderer/metal.m"))
+            .flag("-fno-objc-arc").compile("herdr-metal");
+        for framework in ["AppKit", "Metal", "QuartzCore", "CoreVideo", "IOSurface", "CoreText", "CoreGraphics", "Foundation", "Carbon"] {
+            println!("cargo:rustc-link-lib=framework={framework}");
+        }
+        println!("cargo:rustc-link-lib=c++");
+    }
     let zig = std::env::var("ZIG").unwrap_or_else(|_| "zig".into());
     let status = Command::new(&zig)
-        .current_dir(&src)
+        .current_dir(&build_src)
         // Only the static library is linked. Ghostty builds the xcframework whenever it finds
         // xcodebuild, and with only the Command Line Tools /usr/bin/xcodebuild exists but fails.
-        .args(["build", "-Demit-lib-vt", "-Demit-xcframework=false", "-Doptimize=ReleaseFast"])
+        .args(["build", "-Demit-xcframework=false", "-Demit-macos-app=false", "-Doptimize=ReleaseFast"])
+        .args(if renderer { vec!["-Dapp-runtime=none", "-Dsentry=false", "-Demit-docs=false", "-Di18n=false"] } else { vec!["-Demit-lib-vt"] })
         .arg(format!("-Dtarget={}", zig_target(&std::env::var("TARGET").unwrap())))
         .arg("--prefix")
         .arg(out.join("zig-out"))
@@ -52,7 +67,7 @@ fn main() {
     if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
         std::fs::copy(out.join("zig-out/lib/ghostty-vt-static.lib"), lib.join("ghostty-vt.lib")).unwrap();
     } else {
-        std::fs::copy(out.join("zig-out/lib/libghostty-vt.a"), lib.join("libghostty-vt.a")).unwrap();
+        std::fs::copy(out.join(if renderer { "zig-out/lib/libherdr-ghostty.a" } else { "zig-out/lib/libghostty-vt.a" }), lib.join("libghostty-vt.a")).unwrap();
     }
     println!("cargo:rustc-link-search=native={}", lib.display());
     println!("cargo:rustc-link-lib=static=ghostty-vt");
@@ -81,6 +96,10 @@ fn main() {
         // which match its libclang; Zig's newer ones break older ones (Ubuntu
         // 22.04's clang 14 can't parse them).
         builder = builder.clang_arg(format!("-isystem{zig_lib}/include"));
+    }
+    if renderer {
+        builder = builder.header(manifest.join("renderer/herdr_renderer.h").to_string_lossy())
+            .allowlist_function("herdr_.*").allowlist_type("Herdr.*");
     }
     builder
         .allowlist_function("ghostty_.*")
