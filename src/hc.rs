@@ -537,19 +537,26 @@ impl Drop for Core {
 /// fails at once, and it never reports the loss (so nothing reconnects).
 #[cfg(test)]
 pub fn offline() -> Arc<Core> {
-    let (writer, frames) = mpsc::channel();
+    let (core, frames) = recording();
     std::mem::forget(frames);
+    core
+}
+
+/// An offline core whose outgoing viewer frames can be checked by UI tests.
+#[cfg(test)]
+pub fn recording() -> (Arc<Core>, mpsc::Receiver<Vec<u8>>) {
+    let (writer, frames) = mpsc::channel();
     let (lost_tx, lost) = async_channel::bounded(1);
     std::mem::forget(lost_tx);
     let child = std::process::Command::new(std::env::current_exe().unwrap()).arg("--help").stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
-    Arc::new(Core {
+    (Arc::new(Core {
         hello: Value::Null,
         writer,
         routes: Arc::new(Mutex::new(Routes { closed: true, ..Default::default() })),
         next_id: AtomicU64::new(1),
         child: Mutex::new(child),
         lost,
-    })
+    }), frames)
 }
 
 #[cfg(test)]

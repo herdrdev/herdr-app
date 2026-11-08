@@ -112,6 +112,7 @@ pub struct TerminalView {
     grid: Rc<RefCell<Grid>>,
     focus: FocusHandle,
     was_focused: bool,
+    focus_out: Option<Subscription>,
     /// The window frame this terminal was last put on screen in (`FRAME`).
     shown_in: Cell<u64>,
     /// When the person last typed here: output right after is shown at once.
@@ -270,6 +271,7 @@ impl TerminalView {
             })),
             focus: cx.focus_handle(),
             was_focused: false,
+            focus_out: None,
             shown_in: Cell::new(0),
             typed_at: Cell::new(None),
             scrolled: point(0.0, 0.0),
@@ -439,6 +441,16 @@ impl TerminalView {
 
     pub fn focus_handle(&self) -> &FocusHandle {
         &self.focus
+    }
+
+    fn sync_core_focus(&mut self, focused: bool) {
+        if focused != self.was_focused {
+            self.was_focused = focused;
+            let g = self.grid.borrow();
+            if let Some(ch) = g.channel {
+                g.core.focus(ch, focused);
+            }
+        }
     }
 
     /// The focused terminal remains the action target while its local find
@@ -1860,6 +1872,16 @@ impl EntityInputHandler for TerminalView {
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::bench::count(&crate::bench::TERMINAL);
+        if self.focus_out.is_none() {
+            // Hidden tabs aren't rendered, so they cannot notice blur in render.
+            // Forgetting it there prevents FOCUS on return and leaves another
+            // viewer's rows/columns in charge of the program until the next key.
+            self.focus_out = Some(cx.on_focus_out(&self.focus, window, |this, _, window, cx| {
+                if !this.owns_keyboard_focus(window, cx) {
+                    this.sync_core_focus(false);
+                }
+            }));
+        }
         let terminal_focused = self.focus.is_focused(window);
         if terminal_focused {
             self.search_keys = false;
@@ -1870,13 +1892,7 @@ impl Render for TerminalView {
         // only installing the terminal's IME handler when its own focus handle
         // owns keyboard input.
         let focused = terminal_focused || search_focused;
-        if focused != self.was_focused {
-            self.was_focused = focused;
-            let g = self.grid.borrow();
-            if let Some(ch) = g.channel {
-                g.core.focus(ch, focused);
-            }
-        }
+        self.sync_core_focus(focused);
         let cell = cell_size(window);
         let hover = self.grid.borrow().hover;
         let found = hover.filter(|_| link_mods(&window.modifiers())).and_then(|pos| self.link_at(pos));
@@ -2299,6 +2315,68 @@ mod tests {
             cx.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::default());
             cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
             assert!(!root.read_with(cx, |root, cx| root.text.read(cx).selected_text()).is_empty());
+        }
+    }
+
+    #[gpui::test]
+    fn terminal_focus_is_reclaimed_after_a_hidden_tab(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        struct Tabs {
+            panes: [Entity<super::TerminalView>; 2],
+            active: usize,
+        }
+        impl Render for Tabs {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(self.panes[self.active].clone())
+            }
+        }
+
+        let (core, frames) = crate::hc::recording();
+        cx.update(gpui_base::init);
+        let (tabs, cx) = cx.add_window_view(|window, cx| {
+            let panes = [1, 2].map(|channel| cx.new(|cx| {
+                let mut pane = super::TerminalView::attach(core.clone(), format!("t{channel}"), (135, 39), cx);
+                // Keep the real renderer and focus protocol; no core or user's terminal.
+                pane._reader = None;
+                pane.grid.borrow_mut().channel = Some(channel);
+                pane
+            }));
+            panes[0].read(cx).focus.clone().focus(window, cx);
+            Tabs { panes, active: 0 }
+        });
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        frames.try_iter().for_each(drop);
+
+        // Another viewer can take size ownership while a tab is hidden. The app
+        // must reclaim it on return, even though the cached local grid is unchanged.
+        for search in [false, true] {
+            if search {
+                cx.update(|window, cx| tabs.update(cx, |tabs, cx| {
+                    tabs.panes[0].update(cx, |pane, cx| pane.open_search(window, cx));
+                }));
+                cx.run_until_parked();
+                cx.update(|window, cx| window.draw(cx).clear(cx));
+                assert!(!frames.try_iter().any(|frame| frame[4] == crate::hc::FOCUS),
+                    "the local find input must not give up terminal focus or size ownership");
+            }
+            for active in [1, 0, 1, 0] {
+                cx.update(|window, cx| tabs.update(cx, |tabs, cx| {
+                    tabs.active = active;
+                    tabs.panes[active].read(cx).focus_target(cx).focus(window, cx);
+                    cx.notify();
+                }));
+                cx.run_until_parked();
+                cx.update(|window, cx| window.draw(cx).clear(cx));
+                let focused: Vec<_> = frames.try_iter()
+                    .filter(|frame| frame[4] == crate::hc::FOCUS && frame.last() == Some(&1))
+                    .map(|frame| u32::from_le_bytes(frame[..4].try_into().unwrap()))
+                    .collect();
+                assert!(focused.contains(&(active as u32 + 1)),
+                    "returning to tab {active} (find={search}) must restore its pane size through core FOCUS; got {focused:?}");
+            }
         }
     }
 
