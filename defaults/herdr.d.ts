@@ -328,7 +328,8 @@ export function feedbackClearImages(): null;
 export function sendFeedback(body: import("gpui-kit").HostValue, images?: string[]): Promise<string | null>;
 
 /** What the app runs with: the shown layout's look (theme name, fonts, sizes, terminal
- *  padding and opacity) with the person's zoom and sounds. */
+ *  padding and opacity) with the person's zoom and sounds. Includes the read-only
+ *  ghostty_renderer_available build capability. */
 export function settings(): Record<string, unknown>;
 
 /** Every key binding: { section, keys, action }. */

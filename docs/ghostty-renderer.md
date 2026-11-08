@@ -14,7 +14,11 @@ the separate Apple Metal compiler download is not required.
 cargo build --locked --features ghostty-renderer
 ```
 
-In an isolated app home's `settings.json`, select:
+In **Settings → Look → Terminal renderer**, choose **Ghostty** or **Default**
+(GPUI). The change applies immediately to open terminals and is saved in
+`settings.json`. Builds without Ghostty support show its choice as unavailable.
+
+For an isolated preview, you can also set the app home's `settings.json`:
 
 ```json
 {

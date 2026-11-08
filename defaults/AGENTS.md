@@ -717,8 +717,10 @@ What's about the user, never a look:
   switches. Linux and Windows are unchanged.
 - `terminal_renderer`: `"gpui"` (default) or `"ghostty"`. Ghostty is an
   experimental macOS option in builds made with `--features ghostty-renderer`.
-  Other builds use GPUI. Changes apply immediately; existing terminal sessions
-  stay connected. Ghostty supplies font
+  Select **Default** (GPUI) or **Ghostty** in Settings → Look → Terminal renderer.
+  Other builds use GPUI and disable the Ghostty choice. `settings()` exposes the
+  read-only `ghostty_renderer_available` build capability. Changes apply
+  immediately; existing terminal sessions stay connected. Ghostty supplies font
   metrics and draws the terminal through Metal; Herdr still handles input,
   selection, clipboard, search, and scrollback.
   Renderer initialization/drawing failures fall back to GPUI and are logged.
