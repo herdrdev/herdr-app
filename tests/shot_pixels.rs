@@ -137,6 +137,8 @@ fn headless() {
         gpui_platform::current_headless_renderer,
     );
     markdown_selection_pixels(&mut cx);
+    #[cfg(target_os = "macos")]
+    text_thickening_pixels(&mut cx);
     // TestPlatform uses 2x HiDPI; these physical widths force row padding.
     for width in [129., 131.] {
         let window = cx
@@ -145,6 +147,50 @@ fn headless() {
         cx.update_window(window.into(), |_, window, cx| check(window, cx))
             .unwrap();
     }
+}
+
+#[cfg(target_os = "macos")]
+fn text_thickening_pixels(cx: &mut HeadlessAppContext) {
+    struct TextScene;
+    impl Render for TextScene {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .bg(rgb(0))
+                .font_family("Monaco")
+                .text_size(px(15.))
+                .text_color(rgb(0xbbbbbb))
+                .child(div().child("Panels and mods: Monaco 15 Il1| O0"))
+                .child(div().font_weight(FontWeight::BOLD).child("Bold stays bold 0123456789"))
+                .child(div().text_size(px(13.)).child("Smaller UI text and emoji 🚀"))
+        }
+    }
+
+    let window = cx.open_window(size(px(400.), px(100.)), |_, cx| cx.new(|_| TextScene)).unwrap();
+    gpui_macos::set_font_thickening(true);
+    let system_allows = gpui_platform::current_platform(true)
+        .text_system().glyph_dilation_for_color(rgb(0xbbbbbb).into()) > 0;
+    let mut capture = |thicken| {
+        gpui_macos::set_font_thickening(thicken);
+        cx.update_window(window.into(), |_, window, cx| {
+            window.refresh();
+            let _ = window.draw(cx);
+            window.render_to_image().unwrap()
+        }).unwrap()
+    };
+    let default = capture(true);
+    let lighter = capture(false);
+    let restored = capture(true);
+    assert_eq!(default, restored, "live toggles must restore cached glyphs exactly");
+    let coverage = |image: &image::RgbaImage| image.pixels().map(|p| u64::from(p[0])).sum::<u64>();
+    let (before, after) = (coverage(&default), coverage(&lighter));
+    assert!(after > 100_000, "lighter glyphs must remain visible");
+    if system_allows {
+        assert!(after < before, "lighter strokes must reduce coverage: {before} -> {after}");
+    } else {
+        assert_eq!(default, lighter, "honor the user's existing smoothing opt-out");
+    }
+    println!("text thickening pixel coverage: default={before}, lighter={after}");
 }
 
 #[cfg(not(windows))]

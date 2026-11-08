@@ -47,11 +47,21 @@ use pathfinder_geometry::{
 };
 use smallvec::SmallVec;
 use std::{borrow::Cow, char, convert::TryFrom, sync::Arc, sync::OnceLock};
+use std::sync::atomic::{AtomicBool, Ordering};
 
 use crate::open_type::apply_features_and_fallbacks;
 
 #[allow(non_upper_case_globals)]
 const kCGImageAlphaOnly: u32 = 7;
+
+static FONT_THICKENING: AtomicBool = AtomicBool::new(true);
+
+/// Allow CoreGraphics stroke thickening, subject to the user's AppleFontSmoothing
+/// preference. Disabling it keeps antialiasing and font weights intact. Callers
+/// must refresh their windows; dilation is already part of the glyph atlas key.
+pub fn set_font_thickening(enabled: bool) {
+    FONT_THICKENING.store(enabled, Ordering::Relaxed);
+}
 
 /// macOS text system using CoreText for font shaping.
 pub struct MacTextSystem(RwLock<MacTextSystemState>);
@@ -219,7 +229,7 @@ impl PlatformTextSystem for MacTextSystem {
         // When font smoothing is enabled, CoreGraphics thickens glyph strokes by an amount that
         // depends on the foreground color's luminance. We replicate the logic used by CoreGraphics
         // to select between the different levels of dilation.
-        if !font_smoothing_allowed_by_user() {
+        if !FONT_THICKENING.load(Ordering::Relaxed) || !font_smoothing_allowed_by_user() {
             return 0;
         }
         let rgba: Rgba = color.into();
@@ -499,9 +509,12 @@ impl MacTextSystemState {
             cx.set_allows_font_subpixel_quantization(false);
             cx.set_should_subpixel_quantize_fonts(false);
 
+            // Explicitly disable smoothing for undilated glyphs, as Ghostty does
+            // with font-thicken=false. Antialiasing remains enabled above.
+            cx.set_allows_font_smoothing(true);
+            cx.set_should_smooth_fonts(params.dilation > 0);
             if params.dilation > 0 {
                 let luminance = params.dilation as f64 * 0.25;
-                cx.set_should_smooth_fonts(true);
                 cx.set_gray_fill_color(luminance, 1.0);
             } else {
                 cx.set_gray_fill_color(0.0, 1.0);

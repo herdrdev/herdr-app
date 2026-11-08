@@ -58,6 +58,7 @@ pub(crate) use text_system::*;
 
 pub use platform::MacPlatform;
 pub use events::{OptionAsAlt, option_as_alt, set_option_as_alt};
+pub use text_system::set_font_thickening;
 
 trait BoolExt {
     fn to_objc(self) -> BOOL;
