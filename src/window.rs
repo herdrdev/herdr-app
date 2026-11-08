@@ -4250,14 +4250,15 @@ impl AppWindow {
         let Some(d) = &self.drag else { return };
         let (container, index, axis) = (d.container.clone(), d.index, d.axis);
         let Some(node) = self.find_node_mut(&container).map(|n| n.clone()) else { return };
+        if !node.resizable() { return; }
         let shown: Vec<&Node> = node.children().iter().filter(|c| !c.hidden).collect();
         let (Some(a), Some(b)) = (shown.get(index), shown.get(index + 1)) else { return };
         let bounds = self.bounds.borrow();
         let (Some(ba), Some(bb)) = (bounds.get(&a.id).copied(), bounds.get(&b.id).copied()) else { return };
         drop(bounds);
-        let (start, end, p) = match axis {
-            Axis::Row => (f32::from(ba.left()), f32::from(bb.right()), f32::from(pos.x)),
-            Axis::Column => (f32::from(ba.top()), f32::from(bb.bottom()), f32::from(pos.y)),
+        let (start, p) = match axis {
+            Axis::Row => (f32::from(ba.left()), f32::from(pos.x)),
+            Axis::Column => (f32::from(ba.top()), f32::from(pos.y)),
         };
         let (la, lb) = match axis {
             Axis::Row => (f32::from(ba.size.width), f32::from(bb.size.width)),
@@ -4265,9 +4266,11 @@ impl AppWindow {
         };
         // Measured on screen; sizes are stored as designed (unzoomed).
         let zoom = settings::zoom();
-        let (la, lb, start, end, p) = (la / zoom, lb / zoom, start / zoom, end / zoom, p / zoom);
+        let (la, lb, start, p) = (la / zoom, lb / zoom, start / zoom, p / zoom);
         let total = la + lb;
-        let mut new_a = (p - start).clamp(24.0, (end - start) - 24.0);
+        // Squeezed and zero-size siblings cannot both keep the drag minimum.
+        if total <= 48.0 { return; }
+        let mut new_a = (p - start).clamp(24.0, total - 24.0);
         if let Some(min) = a.min {
             new_a = new_a.max(min);
         }
@@ -5634,6 +5637,7 @@ export default class Probe extends View {
     }
 
     include!("window/pane_size_tests.rs");
+    include!("window/drag_tests.rs");
 
     /// The whole path, in a real window: a layout names the toast mod, a
     /// notification opens it with its props, and it can close itself (as one
