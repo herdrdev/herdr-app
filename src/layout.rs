@@ -569,6 +569,11 @@ impl Node {
         Some(removed)
     }
 
+    /// Removes a composition slot without simplifying the authored layout.
+    pub fn remove_slot(&mut self, id: &str) -> Option<Node> {
+        remove_inner(self, id)
+    }
+
     /// Puts `new` beside `target` along `axis` (after it). Reuses the parent
     /// if it already runs along that axis, else wraps the target.
     pub fn split(&mut self, target: &str, axis: Axis, new: Node, container_id: String) -> bool {
@@ -852,6 +857,18 @@ mod tests {
         let mut root = Node::container("ctx", Axis::Row, vec![term("x"), term("y")]);
         root.remove("y");
         assert_eq!((root.id.as_str(), root.children().len()), ("ctx", 1));
+    }
+
+    #[test]
+    fn removing_a_composition_slot_keeps_authored_containers() {
+        let mut panel = Node::container("panel", Axis::Column, vec![term("panel-body")]);
+        panel.hidden = true;
+        panel.size = Some(Size::Px { px: 368.0 });
+        let mut root = Node::container("work-body", Axis::Row, vec![term("coordinator"), term("main"), panel.clone()]);
+        assert!(root.remove_slot("coordinator").is_some());
+        assert!(root.find("coordinator").is_none());
+        assert_eq!(root.find("panel"), Some(&panel));
+        assert!(root.remove_slot("missing").is_none());
     }
 
     #[test]

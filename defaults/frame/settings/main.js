@@ -280,9 +280,10 @@ export default class Settings extends View {
               div()
                 .h(62)
                 .w_full()
+                .overflow_hidden()
                 .child(
                   this.previews[name]
-                    ? image(this.previews[name]).size_full().rounded(6).border_1().border_color(t.border)
+                    ? image(this.previews[name]).w_full().h(62).rounded(6).border_1().border_color(t.border)
                     : this.preview(t, name),
                 ),
             )
