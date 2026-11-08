@@ -103,7 +103,10 @@ pub fn installed(commands: &[String], on: Option<&str>) -> Vec<String> {
             result.map(|(_, out, _)| String::from_utf8_lossy(&out).into_owned()).unwrap_or_default()
         }
         None if cfg!(windows) => {
-            crate::mods::run_here(&crate::window::shell(), &installed_powershell(commands)).unwrap_or_default()
+            // The core refreshes user/system PATH; the app may have inherited only the system PATH.
+            let mut args = vec!["exec".into(), "--".into(), crate::window::shell()];
+            args.extend(installed_powershell(commands));
+            crate::mods::run_here(&crate::core_bin::path().to_string_lossy(), &args).unwrap_or_default()
         }
         None => {
             let shell = crate::window::shell();
