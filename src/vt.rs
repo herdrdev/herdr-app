@@ -1530,6 +1530,10 @@ impl Vt {
         }
     }
 
+    pub fn render_hold_deadline(&self) -> Option<Instant> {
+        self.shared.held_since.map(|since| since + MAX_HOLD)
+    }
+
     /// Updates the render state (respecting synchronized output) and reads one frame.
     pub fn frame(&mut self) -> Frame {
         unsafe {
@@ -1919,6 +1923,20 @@ mod tests {
         assert!(f.rows[0][0].wide, "also after a reset");
         assert_eq!(f.rows[0][0].text, "\u{270d}\u{fe0f}");
         assert_eq!(f.rows[0][2].text, "!");
+    }
+
+    #[test]
+    fn synchronized_output_releases_at_its_deadline() {
+        let mut vt = Vt::new(20, 3);
+        vt.write(b"before");
+        vt.write(b"\x1b[?2026h\r\x1b[Kafter");
+        let text = |frame: Frame| frame.rows[0].iter().map(|c| c.text.as_str()).collect::<String>();
+        assert!(text(vt.frame()).starts_with("before"));
+        let since = Instant::now() - MAX_HOLD - Duration::from_millis(1);
+        vt.shared.held_since = Some(since);
+        assert_eq!(vt.render_hold_deadline(), Some(since + MAX_HOLD));
+        assert!(text(vt.frame()).starts_with("after"));
+        assert_eq!(vt.render_hold_deadline(), None);
     }
 
     #[test]

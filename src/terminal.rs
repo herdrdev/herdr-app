@@ -19,6 +19,29 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
+const OUTPUT_TIME_PER_TURN: Duration = Duration::from_millis(6);
+
+fn output_turn(
+    first: Stream,
+    rx: &async_channel::Receiver<Stream>,
+    budget: Duration,
+) -> impl Iterator<Item = Stream> + '_ {
+    let deadline = Instant::now() + budget;
+    let mut first = Some(first);
+    let mut ended = false;
+    std::iter::from_fn(move || {
+        let item = if let Some(first) = first.take() {
+            first
+        } else {
+            // Released cores send frames of at most 16 KiB; a turn can overshoot by one frame.
+            if ended || Instant::now() >= deadline { return None; }
+            rx.try_recv().ok()?
+        };
+        ended = !matches!(item, Stream::Data(_));
+        Some(item)
+    })
+}
+
 fn pad() -> (f32, f32) {
     let p = crate::settings::get().terminal_padding;
     let zoom = crate::settings::zoom();
@@ -128,6 +151,7 @@ pub struct TerminalView {
     pending_search_nav: Option<bool>,
     search_task: Option<Task<()>>,
     attach_deadline: Instant,
+    _render_hold: Option<(Instant, Task<()>)>,
     _reader: Option<Task<()>>,
 }
 
@@ -280,6 +304,7 @@ impl TerminalView {
             pending_search_nav: None,
             search_task: None,
             attach_deadline,
+            _render_hold: None,
             _reader: None,
         };
         view.connect(core, cx);
@@ -305,6 +330,7 @@ impl TerminalView {
     /// Attaches off the UI thread: a terminal on a machine still dialing can
     /// take seconds, and the window must keep drawing meanwhile.
     fn connect(&mut self, core: Arc<Core>, cx: &mut Context<Self>) {
+        self._render_hold = None;
         let fit_ready = {
             let mut g = self.grid.borrow_mut();
             let (cols, rows) = (g.vt.cols, g.vt.rows);
@@ -353,14 +379,25 @@ impl TerminalView {
             let Ok(Some(rx)) = this.update(cx, |this, cx| this.attached(attached, (cols, rows), cx)) else {
                 return;
             };
+            // Keep the first history paint together; live output gets the shorter budget.
+            let mut budget = Duration::from_millis(250);
             while let Ok(first) = rx.recv().await {
-                let mut batch = vec![first];
-                while let Ok(more) = rx.try_recv() {
-                    batch.push(more);
-                }
-                let alive = this.update(cx, |this, cx| this.ingest(batch, cx));
+                let alive = this.update(cx, |this, cx| this.ingest(output_turn(first, &rx, budget), cx));
+                budget = OUTPUT_TIME_PER_TURN;
                 if !matches!(alive, Ok(true)) {
                     break;
+                }
+                if !rx.is_empty() {
+                    // A ready receiver does not yield to input and painting.
+                    let mut yielded = false;
+                    std::future::poll_fn(|cx| {
+                        if std::mem::replace(&mut yielded, true) {
+                            Poll::Ready(())
+                        } else {
+                            cx.waker().wake_by_ref();
+                            Poll::Pending
+                        }
+                    }).await;
                 }
             }
         }));
@@ -469,7 +506,7 @@ impl TerminalView {
     }
 
     /// Feeds relayed bytes in; returns false once the stream is over.
-    fn ingest(&mut self, batch: Vec<Stream>, cx: &mut Context<Self>) -> bool {
+    fn ingest(&mut self, batch: impl IntoIterator<Item = Stream>, cx: &mut Context<Self>) -> bool {
         let mut open = true;
         let title = {
             let mut g = self.grid.borrow_mut();
@@ -516,6 +553,19 @@ impl TerminalView {
         }
         if !open {
             cx.emit(TerminalEvent::Ended);
+        }
+        // GPUI can retain this pane's drawing while other panes paint.
+        // Wake it at the sync deadline even if the program sends no more bytes.
+        let deadline = self.grid.borrow().vt.render_hold_deadline();
+        if self._render_hold.as_ref().map(|(deadline, _)| *deadline) != deadline {
+            self._render_hold = deadline.map(|deadline| (deadline, cx.spawn(async move |this, cx| {
+                cx.background_executor().timer(deadline.saturating_duration_since(Instant::now())).await;
+                let _ = this.update(cx, |this, cx| {
+                    if this.shown_in.get() == FRAME.load(Ordering::Relaxed) {
+                        cx.notify();
+                    }
+                });
+            })));
         }
         // Output in a terminal nobody sees doesn't redraw the window; it's
         // drawn fresh when shown again. Nor does output that changed nothing
@@ -2248,6 +2298,44 @@ impl Focusable for TerminalView {
 mod tests {
     use super::{ScrollTarget, pages_to_lines, scroll_target};
     use serde_json::{Value, json};
+
+    #[test]
+    fn output_turns_preserve_bytes_budget_and_close_order() {
+        use crate::hc::Stream;
+        use std::time::Duration;
+
+        let (tx, rx) = async_channel::unbounded();
+        let payload: Vec<u8> = (0..50_000).map(|n| n as u8).collect();
+        for chunk in payload.chunks(997) {
+            tx.try_send(Stream::Data(chunk.to_vec())).unwrap();
+        }
+        tx.try_send(Stream::Closed(json!({"reason": "exited"}))).unwrap();
+        drop(tx);
+        let first = rx.try_recv().unwrap();
+        let mut turn = super::output_turn(first, &rx, Duration::ZERO);
+        let Some(Stream::Data(first)) = turn.next() else { panic!("missing first frame") };
+        assert!(turn.next().is_none(), "an expired turn must leave queued data for later");
+        let mut received = first;
+        let mut ended = false;
+        while let Ok(first) = rx.try_recv() {
+            for item in super::output_turn(first, &rx, Duration::from_secs(1)) {
+                match item {
+                    Stream::Data(bytes) => {
+                        assert!(!ended, "data overtook the close event");
+                        received.extend_from_slice(&bytes);
+                    }
+                    Stream::Closed(why) => {
+                        assert_eq!(why["reason"], "exited");
+                        assert_eq!(received, payload);
+                        ended = true;
+                    }
+                    Stream::Lost => panic!("unexpected lost connection"),
+                }
+            }
+        }
+        assert!(ended);
+        assert!(rx.is_closed() && rx.is_empty());
+    }
 
     #[gpui::test]
     fn attach_errors_do_not_announce_a_terminal_exit(cx: &mut gpui::TestAppContext) {
