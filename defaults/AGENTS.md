@@ -126,7 +126,9 @@ the highlighted line shows where it will land.
   tab); a mod that does can hide or fold settled tabs. Showing one, or an
   agent in it needing the user, brings it back.
 - A **pane** is a terminal on screen, or a **mod** beside them (a markdown
-  viewer, a board, a git panel): `pane.split {direction, mod, props}`. A
+  viewer, a board, a git panel): `pane.split {direction, mod, props}`. Herdr
+  ships the markdown viewer: `mod: "markdown"`, `props: {file}` (an absolute
+  path on this computer); it shows the file rendered and follows its changes. A
   mod pane splits, zooms, closes and gets a header like any pane, keeps
   the keyboard when clicked, and is saved with its tab; its `props` tell
   it what to show (a file, a folder). Closing a terminal pane ends its
@@ -183,7 +185,7 @@ the title bar, panes as cards, a space picker) and `win98`
 writing a new file. The Files panel supports Windows folder paths with spaces,
 parentheses and apostrophes, and preserves Unicode file and folder names
 (including Chinese). Directory links expand as folders; their contents load
-only when expanded.
+only when expanded. The Files panel shows `.md` files rendered.
 
 **Herdr's own layouts and mods are read-only.** They are replaced whole
 on every start. Use settings.json for look (fonts, sizes, theme, colors,
@@ -830,7 +832,8 @@ has 120 programs (agents, editors, runtimes, tools, databases, infra);
   mod showing it, including images that were missing or invalid on first load.
 - The defaults are mods too, read them as examples: `spaces`, `agents`,
   `tabs` (the tab bar), `menu`, `prompt`, `confirm`, `help`, `toast`,
-  Terminals' `picker`, `peek`, and `pane` (an
+  Terminals' `picker`, `peek`, `markdown` (a live, rendered markdown file
+  beside the terminals, props `{file}`), and `pane` (an
   example pane header, not used by the default layouts), and `worktree`
   (git worktrees as spaces: the space menu's and the + menu's New worktree,
   Open worktree (the repo's checkouts, filtered; one already shown is gone
@@ -956,7 +959,8 @@ them. Text: `TextView.markdown(id, text)` renders markdown; `EditorState.new({
 language, value, readonly, font_family: settings().font_family, syntax: {
 keyword: theme().ansi5, ... } })` + `Editor.new(state)` is a code view (readonly)
 or editor with syntax highlighting, line numbers and folding. A viewer opens
-beside the shell as a pane: `pane.split {direction, mod, props: { file }}`.
+beside the shell as a pane: `pane.split {direction, mod, props: { file }}`,
+as the shipped `markdown` mod does.
 The full surface is in `gpui-kit.d.ts` next to this file.
 
 ### The `herdr` module

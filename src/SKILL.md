@@ -37,6 +37,49 @@ herdr-app do pane.split --direction right --pane p12
 herdr-app do agent.focus --terminal t7
 ```
 
+To show a markdown file (a plan, notes) rendered beside your terminal, split
+your own pane with the `markdown` mod. It follows the file's changes, so open
+it once. The new pane takes the focus; give it back to your pane:
+
+```sh
+pane=$(herdr-app ls | jq -r --arg t "$HC_TERMINAL_ID" 'first(.. | objects | select(.terminal? == $t) | .pane)')
+herdr-app do pane.split --direction right --pane "$pane" --mod markdown --props '{"file":"/abs/path/plan.md"}'
+herdr-app do pane.focus --pane "$pane"
+```
+
+When the person asks to see Claude Code's plans this way every time, install
+this hook (it needs jq) as `~/.claude/hooks/herdr-show-plan.sh`, executable:
+
+```sh
+#!/bin/sh
+# Shows Claude's plan beside its terminal in Herdr, once per plan file. Needs jq.
+[ -n "$HC_TERMINAL_ID" ] || exit 0
+input=$(cat)
+[ "$(printf '%s' "$input" | jq -r '.permission_mode // empty')" = plan ] || exit 0
+file=$(printf '%s' "$input" | jq -r '.tool_input.file_path // empty')
+case "$file" in *.md) ;; *) exit 0 ;; esac
+pane=$(herdr-app ls 2>/dev/null | jq -r --arg t "$HC_TERMINAL_ID" 'first(.. | objects | select(.terminal? == $t) | .pane) // empty')
+[ -n "$pane" ] || exit 0
+# One viewer per plan file until the marker goes (per boot where
+# XDG_RUNTIME_DIR exists); a closed viewer stays closed.
+marker="${XDG_RUNTIME_DIR:-${TMPDIR:-/tmp}}/herdr-plan-$(basename "$file" .md)"
+mkdir "$marker" 2>/dev/null || exit 0
+before=$(herdr-app status 2>/dev/null | jq -r '.focused_pane // empty')
+herdr-app do pane.split "$(jq -nc --arg p "$pane" --arg f "$file" \
+  '{direction:"right",pane:$p,mod:"markdown",props:{file:$f}}')" >/dev/null 2>&1 \
+  || { rmdir "$marker"; exit 0; }
+# The new pane takes the focus: give the keyboard back to where it was.
+[ -z "$before" ] || herdr-app do pane.focus --pane "$before" >/dev/null 2>&1
+exit 0
+```
+
+Then add it to `~/.claude/settings.json`, keeping the hooks already there:
+
+```json
+{ "hooks": { "PostToolUse": [{ "matcher": "Write|Edit",
+  "hooks": [{ "type": "command", "command": "~/.claude/hooks/herdr-show-plan.sh" }] }] } }
+```
+
 For a remote space:
 
 ```sh
