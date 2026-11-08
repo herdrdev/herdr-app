@@ -5088,10 +5088,13 @@ impl Window {
 
         self.invalidator.debug_assert_paint();
 
+        let opacity = self.element_opacity();
+        if opacity <= 0.0 { return; }
         let bounds = self.snap_bounds(bounds);
         let content_mask = self.snapped_content_mask();
         self.next_frame.scene.insert_primitive(PaintSurface {
             order: 0,
+            opacity,
             bounds,
             content_mask,
             image_buffer,

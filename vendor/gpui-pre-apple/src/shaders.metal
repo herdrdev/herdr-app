@@ -849,12 +849,14 @@ fragment float4 path_sprite_fragment(
 
 struct SurfaceVertexOutput {
   float4 position [[position]];
+  float opacity [[flat]];
   float2 texture_position;
   float clip_distance [[clip_distance]][4];
 };
 
 struct SurfaceFragmentInput {
   float4 position [[position]];
+  float opacity [[flat]];
   float2 texture_position;
 };
 
@@ -877,6 +879,7 @@ vertex SurfaceVertexOutput surface_vertex(
   float2 texture_position = unit_vertex;
   return SurfaceVertexOutput{
       device_position,
+      surface.opacity,
       texture_position,
       {clip_distance.x, clip_distance.y, clip_distance.z, clip_distance.w}};
 }
@@ -896,7 +899,9 @@ fragment float4 surface_fragment(SurfaceFragmentInput input [[stage_in]],
       y_texture.sample(texture_sampler, input.texture_position).r,
       cb_cr_texture.sample(texture_sampler, input.texture_position).rg, 1.0);
 
-  return ycbcrToRGBTransform * ycbcr;
+  float4 color = ycbcrToRGBTransform * ycbcr;
+  color.a *= input.opacity;
+  return color;
 }
 
 float4 hsla_to_rgba(Hsla hsla) {
@@ -1276,4 +1281,12 @@ float4 fill_color(Background background,
   }
 
   return color;
+}
+
+// HERDR: Ghostty already blends and gamma-encodes the terminal into BGRA.
+// Sample these encoded pixels directly, preserving its text edge coverage.
+fragment float4 bgra_surface_fragment(SurfaceFragmentInput input [[stage_in]],
+    texture2d<float> texture [[texture(SurfaceInputIndex_YTexture)]]) {
+  constexpr sampler texture_sampler(mag_filter::nearest, min_filter::nearest);
+  return texture.sample(texture_sampler, input.texture_position) * input.opacity;
 }

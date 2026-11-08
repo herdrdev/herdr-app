@@ -12,8 +12,8 @@ use objc2::runtime::AnyObject;
 
 use core_foundation::base::TCFType;
 use core_video::{
-    metal_texture::CVMetalTextureGetTexture, metal_texture_cache::CVMetalTextureCache,
-    pixel_buffer::kCVPixelFormatType_420YpCbCr8BiPlanarFullRange,
+    metal_texture::{CVMetalTexture, CVMetalTextureGetTexture}, metal_texture_cache::CVMetalTextureCache,
+    pixel_buffer::{kCVPixelFormatType_420YpCbCr8BiPlanarFullRange, kCVPixelFormatType_32BGRA},
 };
 use foreign_types::{ForeignType, ForeignTypeRef};
 use metal::{
@@ -123,6 +123,7 @@ pub struct MetalRenderer {
     monochrome_sprites_pipeline_state: metal::RenderPipelineState,
     polychrome_sprites_pipeline_state: metal::RenderPipelineState,
     surfaces_pipeline_state: metal::RenderPipelineState,
+    bgra_surfaces_pipeline_state: metal::RenderPipelineState,
     unit_vertices: metal::Buffer,
     #[allow(clippy::arc_with_non_send_sync)]
     instance_buffer_pool: Arc<Mutex<InstanceBufferPool>>,
@@ -317,6 +318,7 @@ impl MetalRenderer {
             "shadow_vertex",
             "shadow_fragment",
             MTLPixelFormat::BGRA8Unorm,
+            false,
         );
         let quads_pipeline_state = build_pipeline_state(
             &device,
@@ -325,6 +327,7 @@ impl MetalRenderer {
             "quad_vertex",
             "quad_fragment",
             MTLPixelFormat::BGRA8Unorm,
+            false,
         );
         let underlines_pipeline_state = build_pipeline_state(
             &device,
@@ -333,6 +336,7 @@ impl MetalRenderer {
             "underline_vertex",
             "underline_fragment",
             MTLPixelFormat::BGRA8Unorm,
+            false,
         );
         let monochrome_sprites_pipeline_state = build_pipeline_state(
             &device,
@@ -341,6 +345,7 @@ impl MetalRenderer {
             "monochrome_sprite_vertex",
             "monochrome_sprite_fragment",
             MTLPixelFormat::BGRA8Unorm,
+            false,
         );
         let polychrome_sprites_pipeline_state = build_pipeline_state(
             &device,
@@ -349,6 +354,7 @@ impl MetalRenderer {
             "polychrome_sprite_vertex",
             "polychrome_sprite_fragment",
             MTLPixelFormat::BGRA8Unorm,
+            false,
         );
         let surfaces_pipeline_state = build_pipeline_state(
             &device,
@@ -357,8 +363,15 @@ impl MetalRenderer {
             "surface_vertex",
             "surface_fragment",
             MTLPixelFormat::BGRA8Unorm,
+            false,
         );
 
+        // HERDR: composite native Ghostty frames without a CPU readback.
+        let bgra_surfaces_pipeline_state = build_pipeline_state(
+            &device, &library, "bgra_surfaces", "surface_vertex", "bgra_surface_fragment",
+            MTLPixelFormat::BGRA8Unorm,
+            true,
+        );
         let command_queue = device.new_command_queue();
         let supports_shared_storage = cfg!(target_os = "ios") || is_apple_gpu;
         let sprite_atlas = Arc::new(MetalAtlas::new(device.clone(), supports_shared_storage));
@@ -381,6 +394,7 @@ impl MetalRenderer {
             monochrome_sprites_pipeline_state,
             polychrome_sprites_pipeline_state,
             surfaces_pipeline_state,
+            bgra_surfaces_pipeline_state,
             unit_vertices,
             instance_buffer_pool,
             sprite_atlas,
@@ -695,6 +709,7 @@ impl MetalRenderer {
         let command_queue = self.command_queue.clone();
         let command_buffer = command_queue.new_command_buffer();
         let alpha = if self.opaque { 1. } else { 0. };
+        let mut surface_textures = Vec::new();
 
         let mut command_encoder = new_command_encoder_for_texture(
             command_buffer,
@@ -766,6 +781,7 @@ impl MetalRenderer {
                     instance_bindings,
                     viewport_size,
                     command_encoder,
+                    &mut surface_textures,
                 ),
                 PrimitiveBatch::SubpixelSprites { .. } => unreachable!(),
             }
@@ -773,6 +789,13 @@ impl MetalRenderer {
 
         command_encoder.end_encoding();
 
+        if !surface_textures.is_empty() {
+            // Keep the CoreVideo wrappers (and their IOSurfaces) alive until this
+            // frame's GPU work finishes, including asynchronously presented frames.
+            let textures = Cell::new(Some(surface_textures));
+            let block = RcBlock::new(move |_: ptr::NonNull<AnyObject>| { drop(textures.take()); });
+            unsafe { command_buffer.add_completed_handler(&*RcBlock::as_ptr(&block).cast()); }
+        }
         Ok(command_buffer.to_owned())
     }
 
@@ -1162,12 +1185,12 @@ impl MetalRenderer {
         instance_bindings: &InstanceBindings,
         viewport_size: Size<DevicePixels>,
         command_encoder: &metal::RenderCommandEncoderRef,
+        surface_textures: &mut Vec<CVMetalTexture>,
     ) {
         if surfaces.is_empty() {
             return;
         }
 
-        command_encoder.set_render_pipeline_state(&self.surfaces_pipeline_state);
         command_encoder.set_vertex_buffer(
             SurfaceInputIndex::Vertices as u64,
             Some(&self.unit_vertices),
@@ -1190,48 +1213,72 @@ impl MetalRenderer {
                 DevicePixels::from(surface.image_buffer.get_height() as i32),
             );
 
-            assert_eq!(
-                surface.image_buffer.get_pixel_format(),
-                kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
-            );
-
-            let y_texture = self
-                .core_video_texture_cache
-                .create_texture_from_image(
-                    surface.image_buffer.as_concrete_TypeRef(),
-                    None,
-                    MTLPixelFormat::R8Unorm,
-                    surface.image_buffer.get_width_of_plane(0),
-                    surface.image_buffer.get_height_of_plane(0),
-                    0,
-                )
-                .unwrap();
-            let cb_cr_texture = self
-                .core_video_texture_cache
-                .create_texture_from_image(
-                    surface.image_buffer.as_concrete_TypeRef(),
-                    None,
-                    MTLPixelFormat::RG8Unorm,
-                    surface.image_buffer.get_width_of_plane(1),
-                    surface.image_buffer.get_height_of_plane(1),
-                    1,
-                )
-                .unwrap();
-
             command_encoder.set_vertex_bytes(
                 SurfaceInputIndex::TextureSize as u64,
                 mem::size_of_val(&texture_size) as u64,
                 &texture_size as *const Size<DevicePixels> as *const _,
             );
-            // let y_texture = y_texture.get_texture().unwrap().
-            command_encoder.set_fragment_texture(SurfaceInputIndex::YTexture as u64, unsafe {
-                let texture = CVMetalTextureGetTexture(y_texture.as_concrete_TypeRef());
-                Some(metal::TextureRef::from_ptr(texture as *mut _))
-            });
-            command_encoder.set_fragment_texture(SurfaceInputIndex::CbCrTexture as u64, unsafe {
-                let texture = CVMetalTextureGetTexture(cb_cr_texture.as_concrete_TypeRef());
-                Some(metal::TextureRef::from_ptr(texture as *mut _))
-            });
+            if surface.image_buffer.get_pixel_format() == kCVPixelFormatType_32BGRA {
+                command_encoder.set_render_pipeline_state(&self.bgra_surfaces_pipeline_state);
+                let texture = match self.core_video_texture_cache.create_texture_from_image(
+                    surface.image_buffer.as_concrete_TypeRef(), None, MTLPixelFormat::BGRA8Unorm,
+                    surface.image_buffer.get_width(), surface.image_buffer.get_height(), 0,
+                ) {
+                    Ok(texture) => texture,
+                    Err(error) => {
+                        log::error!("BGRA IOSurface texture unavailable: {error}");
+                        continue;
+                    }
+                };
+                let native_texture = unsafe { CVMetalTextureGetTexture(texture.as_concrete_TypeRef()) };
+                if native_texture.is_null() {
+                    log::error!("BGRA IOSurface has no Metal texture");
+                    continue;
+                }
+                command_encoder.set_fragment_texture(SurfaceInputIndex::YTexture as u64, unsafe {
+                    Some(metal::TextureRef::from_ptr(native_texture as *mut _))
+                });
+                surface_textures.push(texture);
+            } else {
+                command_encoder.set_render_pipeline_state(&self.surfaces_pipeline_state);
+                assert_eq!(
+                    surface.image_buffer.get_pixel_format(),
+                    kCVPixelFormatType_420YpCbCr8BiPlanarFullRange
+                );
+
+                let y_texture = self
+                    .core_video_texture_cache
+                    .create_texture_from_image(
+                        surface.image_buffer.as_concrete_TypeRef(),
+                        None,
+                        MTLPixelFormat::R8Unorm,
+                        surface.image_buffer.get_width_of_plane(0),
+                        surface.image_buffer.get_height_of_plane(0),
+                        0,
+                    )
+                    .unwrap();
+                let cb_cr_texture = self
+                    .core_video_texture_cache
+                    .create_texture_from_image(
+                        surface.image_buffer.as_concrete_TypeRef(),
+                        None,
+                        MTLPixelFormat::RG8Unorm,
+                        surface.image_buffer.get_width_of_plane(1),
+                        surface.image_buffer.get_height_of_plane(1),
+                        1,
+                    )
+                    .unwrap();
+
+                command_encoder.set_fragment_texture(SurfaceInputIndex::YTexture as u64, unsafe {
+                    let texture = CVMetalTextureGetTexture(y_texture.as_concrete_TypeRef());
+                    Some(metal::TextureRef::from_ptr(texture as *mut _))
+                });
+                command_encoder.set_fragment_texture(SurfaceInputIndex::CbCrTexture as u64, unsafe {
+                    let texture = CVMetalTextureGetTexture(cb_cr_texture.as_concrete_TypeRef());
+                    Some(metal::TextureRef::from_ptr(texture as *mut _))
+                });
+                surface_textures.extend([y_texture, cb_cr_texture]);
+            }
 
             command_encoder.draw_primitives_instanced_base_instance(
                 metal::MTLPrimitiveType::Triangle,
@@ -1313,6 +1360,7 @@ fn build_pipeline_state(
     vertex_fn_name: &str,
     fragment_fn_name: &str,
     pixel_format: metal::MTLPixelFormat,
+    premultiplied: bool,
 ) -> metal::RenderPipelineState {
     let vertex_fn = library
         .get_function(vertex_fn_name, None)
@@ -1330,10 +1378,10 @@ fn build_pipeline_state(
     color_attachment.set_blending_enabled(true);
     color_attachment.set_rgb_blend_operation(metal::MTLBlendOperation::Add);
     color_attachment.set_alpha_blend_operation(metal::MTLBlendOperation::Add);
-    color_attachment.set_source_rgb_blend_factor(metal::MTLBlendFactor::SourceAlpha);
+    color_attachment.set_source_rgb_blend_factor(if premultiplied { metal::MTLBlendFactor::One } else { metal::MTLBlendFactor::SourceAlpha });
     color_attachment.set_source_alpha_blend_factor(metal::MTLBlendFactor::One);
     color_attachment.set_destination_rgb_blend_factor(metal::MTLBlendFactor::OneMinusSourceAlpha);
-    color_attachment.set_destination_alpha_blend_factor(metal::MTLBlendFactor::One);
+    color_attachment.set_destination_alpha_blend_factor(if premultiplied { metal::MTLBlendFactor::OneMinusSourceAlpha } else { metal::MTLBlendFactor::One });
 
     device
         .new_render_pipeline_state(&descriptor)
@@ -1438,6 +1486,7 @@ fn write_instances(scene: &Scene, writer: &mut InstanceBufferWriter) -> Result<I
         surfaces: writer.write_iter(scene.surfaces.iter().map(|surface| SurfaceBounds {
             bounds: surface.bounds,
             content_mask: surface.content_mask,
+            opacity: surface.opacity,
         }))?,
     })
 }
@@ -1625,9 +1674,10 @@ pub struct PathSprite {
     pub bounds: Bounds<ScaledPixels>,
 }
 
-#[derive(Clone, Debug, Eq, PartialEq)]
+#[derive(Clone, Debug, PartialEq)]
 #[repr(C)]
 pub struct SurfaceBounds {
+    pub opacity: f32,
     pub bounds: Bounds<ScaledPixels>,
     pub content_mask: ContentMask<ScaledPixels>,
 }
