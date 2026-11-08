@@ -17,8 +17,10 @@
 use std::{
     borrow::Cow,
     cell::RefCell,
-    collections::{HashSet, VecDeque},
-    path::PathBuf,
+    collections::{HashMap, HashSet, VecDeque},
+    path::{Path, PathBuf},
+    sync::{LazyLock, Mutex, PoisonError},
+    time::SystemTime,
 };
 
 use cap_std::{ambient_authority, fs::Dir};
@@ -28,6 +30,51 @@ const MAX_ASSET_BYTES: u64 = 16 * 1024 * 1024;
 const MAX_ASSET_LIST_ENTRIES: usize = 10_000;
 const MAX_ASSET_LIST_NAME_BYTES: usize = 1024 * 1024;
 const MAX_REPORTED_MISSING_ASSETS: usize = 256;
+const MAX_LOADED_FILES: usize = 4096;
+
+// HERDR: what `load` first read of each file since it was last evicted, so a
+// file event for a file that is still the same does not drop what was decoded
+// from it (#521). `None` is a file that was missing then: always a change.
+static LOADED: LazyLock<Mutex<HashMap<PathBuf, Option<Stamp>>>> = LazyLock::new(Default::default);
+
+#[derive(Clone, Copy, PartialEq, Eq)]
+struct Stamp {
+    modified: SystemTime,
+    len: u64,
+    /// Unix also gives the inode and the change time, which a copy or an
+    /// extraction that sets the modified time back still moves. Windows has
+    /// no stable equivalent in std.
+    #[cfg(unix)]
+    changed: (u64, i64, i64),
+}
+
+impl Stamp {
+    fn of(meta: &std::fs::Metadata) -> Option<Self> {
+        #[cfg(unix)]
+        use std::os::unix::fs::MetadataExt as _;
+        Some(Self {
+            modified: meta.modified().ok()?,
+            len: meta.len(),
+            #[cfg(unix)]
+            changed: (meta.ino(), meta.ctime(), meta.ctime_nsec()),
+        })
+    }
+}
+
+fn loaded() -> std::sync::MutexGuard<'static, HashMap<PathBuf, Option<Stamp>>> {
+    LOADED.lock().unwrap_or_else(PoisonError::into_inner)
+}
+
+/// Keeps the first record since the last eviction: a later load (at another
+/// size, or by another view) must not vouch for bytes an earlier one cached.
+/// A full table is forgotten, which only costs evictions.
+fn record_load(path: PathBuf, stamp: Option<Stamp>) {
+    let mut loaded = loaded();
+    if loaded.len() >= MAX_LOADED_FILES && !loaded.contains_key(&path) {
+        loaded.clear();
+    }
+    loaded.entry(path).or_insert(stamp);
+}
 
 /// Serves files from one application directory.
 #[derive(Clone, Debug)]
@@ -65,6 +112,23 @@ impl AppAssets {
         (!resolved.as_os_str().is_empty()).then_some(resolved)
     }
 
+    /// Whether the file at `path` (relative to `root`) differs from what `load`
+    /// first read of it, so what is cached for it must be dropped. False only
+    /// while it keeps the length and times (on Unix also the inode) that load
+    /// saw. Anything else is a change, including a file never loaded or missing
+    /// then or now, and a change forgets the record so the next load starts a
+    /// new one.
+    pub fn changed_since_load(root: &Path, path: &str) -> bool {
+        let Some(relative) = Self::relative_path(path) else { return true };
+        let key = root.join(relative);
+        let recorded = loaded().get(&key).copied().flatten();
+        if recorded.is_some() && std::fs::metadata(&key).ok().and_then(|meta| Stamp::of(&meta)) == recorded {
+            return false;
+        }
+        loaded().remove(&key);
+        true
+    }
+
     /// Opens the application directory and answers the path within it.
     ///
     /// The same shape the `fs` capability uses, and for the same reason: a
@@ -90,10 +154,14 @@ impl AssetSource for AppAssets {
         };
 
         match dir.open(&resolved) {
-            Ok(mut file) => {
+            Ok(file) => {
                 use std::io::Read as _;
 
-                let size = file.metadata()?.len();
+                let mut file = file.into_std();
+                // Taken before the bytes, so a write during the read leaves
+                // the file looking changed to its event.
+                let before_read = file.metadata()?;
+                let size = before_read.len();
                 if size > MAX_ASSET_BYTES {
                     anyhow::bail!(
                         "asset `{path}` is {size} bytes, over the {MAX_ASSET_BYTES}-byte limit"
@@ -106,6 +174,7 @@ impl AssetSource for AppAssets {
                 if bytes.len() as u64 > MAX_ASSET_BYTES {
                     anyhow::bail!("asset `{path}` grew over the {MAX_ASSET_BYTES}-byte limit");
                 }
+                record_load(self.root.join(&resolved), Stamp::of(&before_read));
                 Ok(Some(Cow::Owned(bytes)))
             }
             // A missing asset cannot be an error: GPUI asks for assets it may
@@ -114,7 +183,9 @@ impl AssetSource for AppAssets {
             // find, so it is reported — once per path, because this runs on
             // every paint.
             Err(error) if error.kind() == std::io::ErrorKind::NotFound => {
-                report_missing(path, &self.root.join(&resolved));
+                let full = self.root.join(&resolved);
+                report_missing(path, &full);
+                record_load(full, None);
                 Ok(None)
             }
             Err(error) => Err(error.into()),

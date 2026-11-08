@@ -4965,21 +4965,28 @@ fn invalidate_image(resource: &gpui::Resource, window: &mut Window, cx: &mut gpu
 }
 
 /// The changed paths, plus the files inside changed mod folders (a folder
-/// renamed into place arrives as one event). Runs on the UI thread: skips what
-/// the watcher ignores (hidden, `node_modules`) and stops at a mod-sized limit.
+/// renamed into place arrives as one event), minus files unchanged since the
+/// asset loader read them. Runs on the UI thread: skips what the watcher
+/// ignores (hidden, `node_modules`) and stops at a mod-sized limit.
 fn changed_asset_paths(home: &std::path::Path, changed: &[std::path::PathBuf]) -> Vec<std::path::PathBuf> {
     const MAX_FILES: usize = 2000;
     let mut paths: std::collections::BTreeSet<_> = changed.iter().cloned().collect();
     let mut seen = std::collections::HashSet::new();
+    let mut listed = std::collections::HashSet::new();
+    let mut skipped = false;
     let mut pending: Vec<_> = changed.iter().filter(|p| p.starts_with("mods")).cloned().collect();
-    while let Some(path) = pending.pop() {
+    'walk: while let Some(path) = pending.pop() {
         // Do not follow symlinks out of the mod folder (or into a cycle).
         if !seen.insert(path.clone()) || !home.join(&path).symlink_metadata().is_ok_and(|m| m.is_dir()) { continue; }
         let Ok(entries) = std::fs::read_dir(home.join(&path)) else { continue };
+        listed.insert(path.clone());
         for entry in entries.flatten() {
             let name = entry.file_name();
             let name = name.to_string_lossy();
-            if name.starts_with('.') || name == "node_modules" { continue; }
+            if name.starts_with('.') || name == "node_modules" {
+                skipped = true;
+                continue;
+            }
             let child = path.join(&*name);
             let Ok(kind) = entry.file_type() else { continue };
             if kind.is_dir() {
@@ -4987,11 +4994,19 @@ fn changed_asset_paths(home: &std::path::Path, changed: &[std::path::PathBuf]) -
             } else if paths.len() < MAX_FILES {
                 paths.insert(child);
             } else {
-                return paths.into_iter().collect();
+                skipped = true;
+                break 'walk;
             }
         }
     }
-    paths.into_iter().collect()
+    paths
+        .into_iter()
+        // Evicting a folder drops every svg under it by prefix, unchanged ones
+        // too, so a folder whose files were all listed is left out. One that is
+        // gone, or holds files the walk skipped, keeps that eviction.
+        .filter(|path| skipped || !listed.contains(path))
+        .filter(|path| gpui_shell::AppAssets::changed_since_load(home, &path.to_string_lossy()))
+        .collect()
 }
 
 #[cfg(test)]
@@ -5127,8 +5142,7 @@ mod tests {
 
     #[test]
     fn directory_changes_include_nested_assets() {
-        let temp = if cfg!(target_os = "linux") { std::path::PathBuf::from("/var/tmp") } else { std::env::temp_dir() };
-        let home = temp.join(format!("herdr-image-directory-test-{}", std::process::id()));
+        let home = asset_sandbox("image-directory-test");
         std::fs::create_dir_all(home.join("mods/probe/nested")).unwrap();
         std::fs::write(home.join("mods/probe/nested/icon.svg"), "svg").unwrap();
         for ignored in ["node_modules/pkg", ".git"] {
@@ -5145,6 +5159,84 @@ mod tests {
         assert_eq!(paths.iter().filter(|p| p.ends_with("icon.svg")).count(), 1);
         std::fs::remove_dir_all(&home).unwrap();
         assert_eq!(super::changed_asset_paths(&home, &changed), changed);
+    }
+
+    fn write_asset(home: &std::path::Path, path: &std::path::Path, bytes: &str, modified_secs: u64) {
+        let file = home.join(path);
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, bytes).unwrap();
+        let modified = std::time::UNIX_EPOCH + std::time::Duration::from_secs(modified_secs);
+        std::fs::File::options().write(true).open(&file).unwrap().set_modified(modified).unwrap();
+    }
+
+    fn asset_sandbox(name: &str) -> std::path::PathBuf {
+        let temp = if cfg!(target_os = "linux") { std::path::PathBuf::from("/var/tmp") } else { std::env::temp_dir() };
+        let home = temp.join(format!("herdr-{name}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&home);
+        home
+    }
+
+    #[test]
+    fn loaded_assets_are_not_evicted_for_their_own_write_event() {
+        use gpui::AssetSource as _;
+        let home = asset_sandbox("loaded-asset-event-test");
+        let assets = gpui_shell::AppAssets::new(home.clone());
+        let load = |path: &std::path::Path| assets.load(&path.to_string_lossy()).unwrap();
+        let folder = std::path::PathBuf::from("mods/probe");
+        let (icon, logo) = (folder.join("icon.svg"), folder.join("logo.svg"));
+        write_asset(&home, &icon, "<svg/>", 1000);
+        write_asset(&home, &logo, "<svg/>", 1000);
+        load(&icon);
+        let events = [icon.clone(), logo.clone(), folder.clone()];
+
+        let paths = super::changed_asset_paths(&home, &events);
+        assert_eq!(paths, [logo.clone()], "the loaded, unchanged icon was evicted, or the folder holding it");
+
+        write_asset(&home, &icon, "<SVG/>", 2000);
+        assert!(super::changed_asset_paths(&home, &events).contains(&icon), "a save of the same length was missed");
+
+        load(&icon);
+        std::fs::remove_file(home.join(&icon)).unwrap();
+        assert!(super::changed_asset_paths(&home, &[icon.clone()]).contains(&icon), "a deleted file kept its image");
+
+        std::fs::remove_dir_all(home.join(&folder)).unwrap();
+        assert!(super::changed_asset_paths(&home, &[folder.clone()]).contains(&folder), "a deleted folder kept its images");
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    /// Unix only: the inode and change time are in the stamp there.
+    #[cfg(unix)]
+    #[test]
+    fn an_asset_replaced_with_its_old_time_and_length_is_evicted() {
+        use gpui::AssetSource as _;
+        let home = asset_sandbox("replaced-asset-event-test");
+        let (icon, unpacked) = (std::path::PathBuf::from("mods/probe/icon.svg"), std::path::PathBuf::from("mods/probe/unpacked.svg"));
+        write_asset(&home, &icon, "<svg/>", 1000);
+        gpui_shell::AppAssets::new(home.clone()).load(&icon.to_string_lossy()).unwrap();
+        write_asset(&home, &unpacked, "<SVG/>", 1000);
+        std::fs::rename(home.join(&unpacked), home.join(&icon)).unwrap();
+        assert!(super::changed_asset_paths(&home, &[icon.clone()]).contains(&icon), "a file unpacked with the old time and length kept the old image");
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
+    #[test]
+    fn a_save_still_evicts_after_a_later_load_or_a_missing_first_load() {
+        use gpui::AssetSource as _;
+        let home = asset_sandbox("later-load-event-test");
+        let assets = gpui_shell::AppAssets::new(home.clone());
+        let load = |path: &std::path::Path| assets.load(&path.to_string_lossy()).unwrap();
+        let (icon, later) = (std::path::PathBuf::from("mods/probe/icon.svg"), std::path::PathBuf::from("mods/probe/later.svg"));
+        write_asset(&home, &icon, "<svg/>", 1000);
+        load(&icon);
+        write_asset(&home, &icon, "<svg><g/></svg>", 2000);
+        load(&icon);
+        assert!(super::changed_asset_paths(&home, &[icon.clone()]).contains(&icon), "a save before a later load was missed");
+
+        assert!(load(&later).is_none());
+        write_asset(&home, &later, "<svg/>", 1000);
+        load(&later);
+        assert!(super::changed_asset_paths(&home, &[later.clone()]).contains(&later), "a file missing at its first load stayed missing");
+        std::fs::remove_dir_all(&home).unwrap();
     }
 
     #[test]
