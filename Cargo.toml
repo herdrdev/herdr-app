@@ -51,7 +51,6 @@ gpui_wgpu = { package = "gpui-pre-wgpu", path = "vendor/gpui-pre-wgpu", features
 skrifa = "=0.44.0"
 swash = "=0.2.10"
 tiny-skia = { version = "=0.11.4", default-features = false, features = ["std", "simd"] }
-libc = "0.2"
 
 [target.'cfg(target_os = "linux")'.dependencies]
 gpui_linux = { package = "gpui-pre-linux", version = "=0.3.8", features = ["render-to-image"] }

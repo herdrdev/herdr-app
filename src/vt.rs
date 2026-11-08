@@ -2348,15 +2348,30 @@ mod tests {
         assert_ne!(held[0].generation, p[0].generation);
     }
 
-    #[cfg(unix)]
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
     #[test]
     fn kitty_images_come_in_shared_memory_once_allowed() {
         use base64::Engine;
+        // On Linux a shared memory object is a file in /dev/shm.
+        #[cfg(target_os = "linux")]
         fn shared(name: &str, pixel: [u8; 4]) {
+            std::fs::write(format!("/dev/shm{name}"), pixel).unwrap();
+        }
+        #[cfg(target_os = "linux")]
+        fn unshare(name: &str) {
+            let _ = std::fs::remove_file(format!("/dev/shm{name}"));
+        }
+        #[cfg(target_os = "macos")]
+        fn unshare(name: &str) {
+            let c = std::ffi::CString::new(name).unwrap();
+            unsafe { libc::shm_unlink(c.as_ptr()) };
+        }
+        #[cfg(target_os = "macos")]
+        fn shared(name: &str, pixel: [u8; 4]) {
+            // macOS sizes a shared memory object only once.
+            unshare(name);
             let c = std::ffi::CString::new(name).unwrap();
             unsafe {
-                // macOS sizes a shared memory object only once.
-                libc::shm_unlink(c.as_ptr());
                 let fd = libc::shm_open(c.as_ptr(), libc::O_CREAT | libc::O_RDWR, 0o600 as libc::c_uint);
                 assert!(fd >= 0);
                 assert_eq!(libc::ftruncate(fd, 4), 0);
@@ -2374,7 +2389,6 @@ mod tests {
             vt.placements().len()
         };
         let name = format!("/herdr-vt-test-{}", std::process::id());
-        let c = std::ffi::CString::new(name.clone()).unwrap();
 
         shared(&name, [0, 0, 255, 255]);
         let mut vt = Vt::new(20, 5);
@@ -2385,7 +2399,7 @@ mod tests {
         vt.allow_shared_memory_images();
         assert_eq!(show(&mut vt, &name), 1);
         assert_eq!(vt.image_bgra(1, vt.placements()[0].source).unwrap().2, [255, 0, 0, 255]);
-        unsafe { libc::shm_unlink(c.as_ptr()) };
+        unshare(&name);
     }
 
     fn virtual_image(vt: &mut Vt, id: u32, placement: u32) {
