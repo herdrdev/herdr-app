@@ -149,7 +149,7 @@ test("Chinese and duplicate pane names preserve terminal aliases, navigation ord
   }
 });
 
-test("renaming and clearing a pane updates its row and restores the named tab fallback", () => {
+test("renaming and clearing a pane updates its row and restores the shared tab's agent title", () => {
   const h = sidebar();
   h.tab.name = "fix login";
   h.tab.named = true;
@@ -162,7 +162,7 @@ test("renaming and clearing a pane updates its row and restores the named tab fa
   for (const cleared of [null, ""]) {
     h.snapshot[0].name = cleared;
     const tree = h.render();
-    expect(text(h.row(tree, "t1"))).toEqual(["repo", "· fix login", "<1m"]);
+    expect(text(h.row(tree, "t1"))).toEqual(["repo", "· Task 1", "<1m"]);
     expect(text(h.row(tree, "t2"))).toEqual(["repo", "· 前端", "<1m"]);
   }
 });
@@ -171,8 +171,8 @@ test("unnamed panes read their own live titles without stealing the first or foc
   const h = sidebar();
   for (const tab of [{ name: "1", named: false }, { name: "Claude Code", named: true }]) {
     Object.assign(h.tab, tab);
-    h.snapshot[0].title = "✳ Fix login";
-    h.snapshot[1].title = "✳ Write tests";
+    h.snapshot[0].title = h.list[0].title = "✳ Fix login";
+    h.snapshot[1].title = h.list[1].title = "✳ Write tests";
     for (const focused of [0, 1]) {
       h.snapshot.forEach((p, i) => { p.focused = i === focused; });
       const tree = h.render();
@@ -180,7 +180,7 @@ test("unnamed panes read their own live titles without stealing the first or foc
       expect(text(h.row(tree, "t2"))).toEqual(["repo", "· Write tests", "<1m"]);
     }
   }
-  h.snapshot[1].title = "✳ Tests passed";
+  h.snapshot[1].title = h.list[1].title = "✳ Tests passed";
   expect(text(h.row(h.render(), "t2"))).toContain("· Tests passed");
 });
 
@@ -188,6 +188,7 @@ test("program, Windows path and shell titles keep the existing automatic tab-num
   const h = sidebar();
   for (const title of ["Claude Code", "claude", "C:\\work\\repo", "user@host:repo"]) {
     h.snapshot.forEach(p => { p.title = title; });
+    h.list.forEach(a => { a.title = title; });
     const tree = h.render();
     // With two otherwise identical rows the automatic tab number stays visible.
     for (const a of h.list) expect(text(h.row(tree, a.address))).toEqual(["repo", "· 1", "<1m"]);
@@ -196,10 +197,10 @@ test("program, Windows path and shell titles keep the existing automatic tab-num
   expect(text(h.row(h.render(), "t1"))).toEqual(["repo", "<1m"]);
 });
 
-test("missing pane entries retain the legacy lead fallback and missing tabs retain agent titles", () => {
+test("missing pane entries and missing tabs read the agent's own title", () => {
   const h = sidebar();
   h.snapshot.splice(1);
-  expect(text(h.row(h.render(), "t2"))).toContain("· Task 1");
+  expect(text(h.row(h.render(), "t2"))).toContain("· Task 2");
   h.tabs.splice(0);
   h.snapshot[0].name = "命名仍有效";
   let tree = h.render();

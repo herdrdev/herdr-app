@@ -282,8 +282,7 @@ export default class Agents extends View {
     };
 
     // A row reads "space \u00b7 detail": the agent's pane name, else a named tab
-    // (unless several agents share it) or its own title. Only missing panes
-    // fall back to the tab's lead.
+    // (unless several agents share it) or its own title.
     // Automatic tab numbers stay hidden unless two rows would read the same.
     // Read the pane snapshot once: every host read copies the whole list into JS.
     const paneList = panes();
@@ -294,7 +293,7 @@ export default class Agents extends View {
       const pane = paneById.get(a.pane);
       const tab = tabs.get(a.tab);
       const many = tabCounts.get(a.tab) > 1;
-      return [a.address, pane?.name || (tab ? title(many ? { ...tab, named: false } : tab, many ? a : pane ?? leads.get(a.tab)) : (a.title || a.program?.name || ""))];
+      return [a.address, pane?.name || (tab ? title(many ? { ...tab, named: false } : tab, many ? a : leads.get(a.tab)) : (a.title || a.program?.name || ""))];
     }));
     const label = (a) => labels.get(a.address);
     const detail = new Map(list.map(a => [a.address, paneById.get(a.pane)?.name || (/^\d+$/.test(label(a)) ? null : label(a))]));
