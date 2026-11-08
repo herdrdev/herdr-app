@@ -6,7 +6,7 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { agents, spaces, terminals, run, hc, theme, settings, props, closeOverlay, openOverlay, shared, setShared } from "herdr";
+import { agents, spaces, terminals, machines, run, theme, settings, props, closeOverlay, openOverlay, shared, setShared } from "herdr";
 
 const MARK = { ansi6: "#22a99a", ansi3: "#e3814f", ansi4: "#5b8def", ansi5: "#8b7cf6", ansi2: "#3fae6a", ansi1: "#d9649a" };
 
@@ -38,22 +38,14 @@ export default class Picker extends View {
   init(_props, cx) {
     this.filter = "";
     this.input = InputState.new({ placeholder: "Go to a tab, space or agent…" });
-    this.input.on("change", (_e, cx) => { this.filter = this.input.value(); this.at = 0; cx.notify(); });
-    this.input.on("submit", () => this.go(this.rows().filter(r => r.kind === "ctx" || r.kind === "new" || r.kind === "space")[this.at]));
+    this.input.on("change", (_e, cx) => { this.filter = this.input.value(); this.at = 0; this.pickable = null; cx.notify(); });
+    this.input.on("submit", () => this.go(this.choices(this.rows())[this.at]));
     this.input.focus();
     cx.timer.after(600, () => this.input.focus());
     this.at = null;
     this.scroll = 0;
     this.showEarlier = false;
-    this.machines = [];
     this.handle = cx.focus_handle();
-    cx.spawn(async (cx) => {
-      try {
-        const r = await hc(["machine", "ls", "--json"]);
-        if (r.code === 0) this.machines = (JSON.parse(r.stdout).machines ?? []).filter((m) => m.state === "connected" && !m.temporary).map((m) => m.name);
-      } catch {}
-      cx.notify();
-    });
   }
 
   close() {
@@ -94,8 +86,22 @@ export default class Picker extends View {
     }
     out.push({ kind: "new" });
     out.push({ kind: "space", machine: null });
-    for (const m of this.machines) out.push({ kind: "space", machine: m });
+    for (const m of machines()) if (m.name !== null && m.layout === "ready") out.push({ kind: "space", machine: m.name });
     return out;
+  }
+
+  choices(rows) {
+    const pickable = rows.filter(r => r.kind === "ctx" || r.kind === "new" || r.kind === "space");
+    const selected = this.pickable?.[this.at];
+    if (this.at === null) this.at = Math.max(0, pickable.findIndex(r => r.kind === "ctx" && r.w.active && r.ctx.active));
+    else if (selected) {
+      // Live updates can move a row without changing what the user selected.
+      const at = pickable.findIndex(r => r.kind === selected.kind && r.ctx?.id === selected.ctx?.id && r.machine === selected.machine);
+      if (at >= 0) this.at = at;
+    }
+    this.at = Math.min(this.at, pickable.length - 1);
+    this.pickable = pickable;
+    return pickable;
   }
 
   go(r) {
@@ -114,10 +120,7 @@ export default class Picker extends View {
   render() {
     const t = theme();
     const rows = this.rows();
-    const pickable = rows.filter((r) => r.kind === "ctx" || r.kind === "new" || r.kind === "space");
-    // Opens on where you are.
-    if (this.at === null) this.at = Math.max(0, pickable.findIndex((r) => r.kind === "ctx" && r.w.active && r.ctx.active));
-    this.at = Math.min(this.at, pickable.length - 1);
+    const pickable = this.choices(rows);
     const sel = pickable[this.at];
     // One continuous strip: each row (and the group title before it) at a fixed
     // y. Scrolling moves the strip only as far as it takes to keep the selected
@@ -127,7 +130,10 @@ export default class Picker extends View {
     let y = 0;
     rows.forEach((r) => { tops.push(y); y += H[r.kind] ?? 32; });
     const total = y;
-    const height = Math.min(320, this.listHeight ?? 320);
+    const requestedHeight = Math.min(320, total);
+    // A full-size old list can grow; allow one pixel of layout rounding at zoom.
+    const constrained = this.listRequestedHeight - this.listHeight > 1 / settings().zoom;
+    const height = Math.min(requestedHeight, constrained ? this.listHeight : 320);
     const fixed = total > height;
     const maxScroll = Math.max(0, total - height);
     this.scroll = Math.max(0, Math.min(this.scroll, maxScroll));
@@ -249,9 +255,10 @@ export default class Picker extends View {
           .id("pk-list")
           .on_size_change((size, cx) => {
             this.listHeight = size.height / settings().zoom;
+            this.listRequestedHeight = requestedHeight;
             cx.notify();
           })
-          .h(Math.min(320, total))
+          .h(requestedHeight)
           .min_h(0)
           .mb(6)
           .when(fixed, (el) =>
