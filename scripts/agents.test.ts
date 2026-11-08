@@ -58,6 +58,16 @@ test("an unnamed tab's row reads its terminal's title, not the tab number", () =
   expect(title({ name: "3", named: false }, { ...claude, title: "claude" })).toBe("3");
 });
 
+test("a title that is a folder never replaces the tab's name", () => {
+  const title = new Function("View", "localStorage", "props", "run", `${source}; return title;`)(class {}, {}, () => ({}), () => {});
+  const claude = { program: { name: "claude", key: "claude" }, title: "Herdr session names" };
+  expect(title({ name: "3", named: false }, { ...claude, title: "~/src/api" })).toBe("3");
+  expect(title({ name: "3", named: false }, { ...claude, title: "/tmp" })).toBe("3");
+  expect(title({ name: "3", named: false }, { ...claude, title: "\u2733 ~/src/api" })).toBe("3");
+  expect(title({ name: "3", named: false }, { ...claude, title: "C:\\src\\api" })).toBe("3");
+  expect(title({ name: "3", named: false }, { ...claude, title: "\u2733 Herdr session names" })).toBe("Herdr session names");
+});
+
 test("tab labels prefer the first agent, then focused terminal, then first terminal", () => {
   const leadPanes = new Function("View", `${source}; return leadPanes;`)(class {});
   const pane = (tab: string, terminal: string, agent = false, focused = false) => ({ tab, terminal, program: { agent }, focused });
