@@ -266,6 +266,13 @@ Properties any node can have:
   right-clicks (including Shift+right-click). Omit it for the shipped `menu`;
   an unknown mod logs a warning and falls back to `menu`. Clone a shipped
   layout before changing this field. Other menus are unchanged.
+- Root only: `"toast": "my-toast"` chooses the mod that shows notifications
+  (Herdr's own and every `notify()`), in place of the shipped `toast`; an
+  unknown mod logs a warning and falls back to `toast`. It gets the same
+  `props()`: `{title, body, level, icon, action, timeout, overlay}` (`timeout`
+  is optional). A mod that hands them to the system instead
+  (`exec("notify-send", ...)`) closes itself at once
+  with `closeOverlay(props().overlay)`.
 - Colors are theme names (`border`, `accent`, `surface`, ...) or `#rrggbb[aa]`.
 
 A personal terminal menu replaces the whole menu; it doesn't merge items.
@@ -976,7 +983,8 @@ All of it is in `herdr.d.ts`. In short:
   returns an id; the mod gets `props().overlay` and closes itself with
   `closeOverlay(id)`; Esc closes the top dialog or popup. `frame: "none"`
   drops Herdr's border, corners and shadow so the mod draws its own.
-  `notify({ title, body, level, icon, timeout })` posts a notification, drawn by the `toast` mod.
+  `notify({ title, body, level, icon, timeout })` posts a notification, drawn
+  by the layout-chosen mod (default: `toast`).
 - Windows (`kind: "window"`): stay open until closed, over the layout and
   under dialogs; a press the mod doesn't stop drags it (stop it on your
   controls, like a title bar's buttons), it stays where dropped, and the one
