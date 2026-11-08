@@ -346,6 +346,7 @@ struct Watched {
 
 pub struct AppWindow {
     core: Arc<Core>,
+    opening: Vec<crate::open::Pending>,
     runtime: Option<Rc<ShellRuntime>>,
     chrome: Node,
     /// Which layout `chrome` is (`layouts/<name>.json`).
@@ -470,6 +471,7 @@ impl AppWindow {
         let seen = std::fs::read_to_string(file("seen.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
         let mut w = AppWindow {
             core,
+            opening: Vec::new(),
             runtime,
             chrome: default_layout("main"),
             layout_name: "main".into(),
@@ -3714,6 +3716,19 @@ impl AppWindow {
             Request::CloseOverlay { id } => self.close_overlay(&id, window, cx),
             Request::Refresh => self.refresh_mods(cx),
             Request::Control { cmd, reply } => {
+                if let Some(folder) = cmd.get("open") {
+                    let folder = folder.as_str().ok_or_else(|| "open needs a folder path".to_owned()).and_then(crate::open::folder);
+                    match folder {
+                        Ok(folder) => {
+                            cx.activate(true);
+                            window.activate_window();
+                            self.opening.push(crate::open::Pending { folder, deadline: crate::open::deadline(&cmd), reply });
+                            self.open_folders(window, cx);
+                        }
+                        Err(error) => { let _ = reply.send(json!({ "error": error })); }
+                    }
+                    return;
+                }
                 let _ = reply.send(self.control(cmd, window, cx));
             }
         }
@@ -3814,7 +3829,21 @@ impl AppWindow {
 
     // ---- mods on disk ----------------------------------------------------
 
+    fn open_folders(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        for pending in std::mem::take(&mut self.opening) {
+            let slot = self.documents.get("");
+            let state = crate::open::ready(slot.is_some_and(|s| s.available), slot.and_then(|s| s.error.as_deref()), pending.deadline);
+            let reply = match state {
+                Ok(false) => { self.opening.push(pending); continue; }
+                Ok(true) => self.run_as("space.new", json!({ "folder": pending.folder, "machine": "" }), false, window, cx),
+                Err(error) => json!({ "error": error }),
+            };
+            let _ = pending.reply.send(reply);
+        }
+    }
+
     fn poll(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.open_folders(window, cx);
         self.flush_documents(false, window, cx);
         let ready = Self::update_label();
         if ready != self.update_ready {

@@ -17,23 +17,20 @@ fn socket() -> PathBuf {
 }
 
 /// Serves the socket for this window. A live socket means another window owns this home.
-pub fn listen(tx: async_channel::Sender<Request>) {
+pub fn listen(tx: async_channel::Sender<Request>) -> Result<(), String> {
     let path = socket();
     if UnixStream::connect(&path).is_ok() {
-        tracing::warn!("another Herdr is serving {}; `herdr-app do` goes there", path.display());
-        return;
+        return Err(format!("another Herdr window is already serving {}", path.display()));
     }
     let _ = std::fs::remove_file(&path);
-    let listener = match UnixListener::bind(&path) {
-        Ok(l) => l,
-        Err(e) => return tracing::warn!("cannot serve {}: {e}", path.display()),
-    };
-    let _ = std::thread::Builder::new().name("herdr-app-control".into()).spawn(move || {
+    let listener = UnixListener::bind(&path).map_err(|e| format!("cannot serve {}: {e}", path.display()))?;
+    std::thread::Builder::new().name("herdr-app-control".into()).spawn(move || {
         for stream in listener.incoming().flatten() {
             let tx = tx.clone();
             std::thread::spawn(move || serve(stream, tx));
         }
-    });
+    }).map_err(|e| format!("cannot start Herdr control listener: {e}"))?;
+    Ok(())
 }
 
 fn serve(stream: UnixStream, tx: async_channel::Sender<Request>) {
@@ -43,7 +40,8 @@ fn serve(stream: UnixStream, tx: async_channel::Sender<Request>) {
     }
     let reply = match serde_json::from_str::<Value>(&line) {
         Ok(cmd) => {
-            let timeout = Duration::from_secs(if cmd.get("shot").is_some() { 30 } else { 5 });
+            let timeout = if cmd.get("open").is_some() { crate::open::WAIT + Duration::from_secs(5) }
+                else { Duration::from_secs(if cmd.get("shot").is_some() { 30 } else { 5 }) };
             let (reply_tx, reply_rx) = std::sync::mpsc::channel();
             let _ = tx.send_blocking(Request::Control { cmd, reply: reply_tx });
             reply_rx.recv_timeout(timeout).unwrap_or_else(|_| json!({ "error": "the window did not answer" }))
@@ -58,6 +56,27 @@ fn serve(stream: UnixStream, tx: async_channel::Sender<Request>) {
 /// a second window would ring every alert twice).
 pub fn raise_running() -> bool {
     raise_running_at(&socket())
+}
+
+/// None means no listener. Once connected, an uncertain reply must never start another window.
+pub fn open_running(folder: &str) -> Result<Option<Value>, String> {
+    open_running_at(&socket(), folder)
+}
+
+fn open_running_at(path: &std::path::Path, folder: &str) -> Result<Option<Value>, String> {
+    let mut stream = match UnixStream::connect(path) {
+        Ok(stream) => stream,
+        Err(e) if matches!(e.kind(), std::io::ErrorKind::NotFound | std::io::ErrorKind::ConnectionRefused) => return Ok(None),
+        Err(e) => return Err(format!("cannot contact Herdr: {e}")),
+    };
+    stream.set_read_timeout(Some(crate::open::WAIT + Duration::from_secs(10))).map_err(|e| e.to_string())?;
+    stream.set_write_timeout(Some(Duration::from_secs(5))).map_err(|e| e.to_string())?;
+    stream.write_all(format!("{}\n", crate::open::request(folder)).as_bytes()).map_err(|e| format!("cannot send folder to Herdr: {e}"))?;
+    let mut line = String::new();
+    BufReader::new(stream).read_line(&mut line).map_err(|e| format!("Herdr did not confirm opening the folder: {e}"))?;
+    let reply: Value = serde_json::from_str(&line).map_err(|e| format!("invalid reply from Herdr: {e}"))?;
+    if reply.get("space").is_none() && reply.get("error").is_none() { return Err("Herdr did not confirm opening the folder".into()); }
+    Ok(Some(reply))
 }
 
 fn raise_running_at(path: &std::path::Path) -> bool {
@@ -177,9 +196,51 @@ fn fail(message: &str) -> i32 {
     2
 }
 
-#[cfg(all(test, unix))]
+#[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn opening_passes_the_literal_folder_and_does_not_retry_a_broken_reply() {
+        let dir = std::env::temp_dir().join(format!("herdr-open-ipc-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("app.sock");
+        assert_eq!(open_running_at(&path, ".").unwrap(), None);
+        let listener = UnixListener::bind(&path).unwrap();
+        let asked = std::thread::spawn(move || {
+            let (mut stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(&stream).read_line(&mut line).unwrap();
+            stream.write_all(b"broken reply\n").unwrap();
+            serde_json::from_str::<Value>(&line).unwrap()
+        });
+        let folder = "D:\\project & 'quoted'\\тест\\";
+        assert!(open_running_at(&path, folder).is_err());
+        let request = asked.join().unwrap();
+        assert_eq!(request["open"], folder);
+        assert!(request["open_until"].as_u64().is_some());
+        let _ = std::fs::remove_dir_all(dir);
+    }
+
+    #[test]
+    fn opening_preserves_success_and_errors_and_rejects_empty_confirmations() {
+        let dir = std::env::temp_dir().join(format!("herdr-open-replies-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("app.sock");
+        let listener = UnixListener::bind(&path).unwrap();
+        let server = std::thread::spawn(move || {
+            for reply in ["{\"space\":\"sp1\"}\n", "{\"error\":\"bad cwd\"}\n", "null\n"] {
+                let (mut stream, _) = listener.accept().unwrap();
+                BufReader::new(&stream).read_line(&mut String::new()).unwrap();
+                stream.write_all(reply.as_bytes()).unwrap();
+            }
+        });
+        assert_eq!(open_running_at(&path, ".").unwrap(), Some(json!({ "space": "sp1" })));
+        assert_eq!(open_running_at(&path, ".").unwrap(), Some(json!({ "error": "bad cwd" })));
+        assert!(open_running_at(&path, ".").is_err());
+        server.join().unwrap();
+        let _ = std::fs::remove_dir_all(dir);
+    }
 
     #[test]
     fn a_second_launch_raises_the_running_window() {

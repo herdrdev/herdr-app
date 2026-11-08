@@ -2,7 +2,7 @@ import { describe, expect, test } from "bun:test";
 import { checkExample, checkMarkdown, commandPage, type Reference } from "./docs";
 
 const ref: Reference = {
-  help: "Usage:\n  herdr-app status\n  herdr-app ls\n  herdr-app do <command> [args]\n  herdr-app commands\n  herdr-app --skill\n  herdr-app --version\n",
+  help: "Usage:\n  herdr-app status\n  herdr-app ls\n  herdr-app open <folder>\n  herdr-app do <command> [args]\n  herdr-app commands\n  herdr-app --skill\n  herdr-app --version\n",
   commands: [{ name: "pane.split", about: "Split a pane.", args: [{ name: "direction", required: true }] }],
 };
 
@@ -30,6 +30,12 @@ describe("CLI examples", () => {
     expect(checkExample("curl --not-our-flag https://example.org", ref)).toEqual([]);
     expect(checkExample("herdr-app ls | other --not-our-flag", ref)).toEqual([]);
     expect(checkExample("herdr-app do pane.split --direction herdr-app", ref)).toEqual([]);
+  });
+
+  test("checks folder-opening examples using the CLI help", () => {
+    expect(checkExample('herdr-app open "D:\\Project\\my app"', ref)).toEqual([]);
+    expect(checkExample('herdr-app open "/path/to/project"', ref)).toEqual([]);
+    expect(checkExample('herdr-app open --shell bash', ref)).toEqual(["unknown flag for open: --shell"]);
   });
 
   test("reports inline and fenced examples with file and line", () => {

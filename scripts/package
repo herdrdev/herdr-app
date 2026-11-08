@@ -64,7 +64,15 @@ out="dist/herdr-app-$target.tar.gz"
 if [[ $os == linux || $os == windows ]]; then
   dir="$work/herdr-app"
   mkdir -p "$dir"
-  if [[ $os == windows ]]; then cp "$bin/herdr-app.exe" "$dir/"; else cp "$bin/herdr-app" "$dir/"; fi
+  if [[ $os == windows ]]; then
+    cp "$bin/herdr-app.exe" "$dir/"
+    powershell.exe -NoProfile -ExecutionPolicy Bypass -File scripts/build-windows-shell.ps1
+    mkdir -p "$dir/shell"
+    cp target/windows-shell/{herdr-explorer.dll,Herdr.Explorer.msix,logo.png,version.txt} "$dir/shell/"
+    cp scripts/windows-explorer.ps1 "$dir/"
+  else
+    cp "$bin/herdr-app" "$dir/"
+  fi
   cp assets/icons/herdr-ui-icon-clean.svg "$dir/herdr-app.svg"
   cp LICENSE THIRD-PARTY-NOTICES "$dir/"
   notices_path=herdr-app/THIRD-PARTY-NOTICES
