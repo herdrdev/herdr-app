@@ -120,7 +120,10 @@ fn tab(section: &str) -> Result<String, String> {
         "global" => Ok("Herdr".into()),
         "terminal" => Ok("Terminal".into()),
         s => match (s.strip_prefix("mod:"), s.strip_prefix("layout:")) {
-            (Some(p), _) if !p.is_empty() => Ok(format!("mod == {p}")),
+            // At the mod's ShellRoot, not its outer block: the kit binds tab and shift-tab
+            // (focus traversal) on ShellRoot, a deeper context that would outrank `mod == p`.
+            // At the same depth the section wins, bound after the kit's keys.
+            (Some(p), _) if !p.is_empty() => Ok(format!("mod == {p} > ShellRoot")),
             // While layouts/<name>.json is shown (the window's tab says which).
             (_, Some(l)) if !l.is_empty() => Ok(format!("layout == {l}")),
             _ => Err(format!("unknown section {s:?}: use \"global\", \"terminal\", \"layout:<name>\" or \"mod:<name>\"")),

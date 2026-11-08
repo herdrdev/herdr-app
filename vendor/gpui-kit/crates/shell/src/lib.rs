@@ -281,6 +281,7 @@ pub fn set_development_mode(enabled: bool) {
 pub fn init(cx: &mut App) {
     gpui_base::init(cx);
     style::init();
+    root::install_key_bindings(cx);
 }
 
 /// Initializes the runtime and the catalog it will render.
