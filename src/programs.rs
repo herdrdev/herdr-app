@@ -209,13 +209,16 @@ pub fn agent_name(app: Option<&str>) -> String {
     let names = NAMES.get_or_init(|| {
         let table: Table = serde_json::from_str(BUILT_IN).expect("defaults/programs.json");
         let mut names = BTreeMap::new();
-        for (key, _) in &table.programs {
-            names.insert(key.to_lowercase(), key.clone());
-        }
-        // Same rule as `find`: `match` wins over another entry's key.
         for (key, e) in &table.programs {
             for alias in &e.also {
                 names.insert(alias.to_lowercase(), key.clone());
+            }
+            names.insert(key.to_lowercase(), key.clone());
+        }
+        // Cursor's CLI is `agent`; keep that alias over the generic `agent` key.
+        if let Some(cursor) = table.programs.get("cursor") {
+            for alias in &cursor.also {
+                names.insert(alias.to_lowercase(), "cursor".into());
             }
         }
         names
@@ -284,13 +287,17 @@ fn powershell_words(line: &str) -> Option<Vec<String>> {
 
 fn find<'a>(t: &'a Table, name: &str) -> Option<(&'a str, &'a Entry)> {
     let lower = name.to_lowercase();
-    // `match` wins over a key: Cursor's CLI is `agent`, which must not resolve
-    // to the generic `agent` fallback entry.
-    t.programs
-        .iter()
-        .find(|(_, e)| e.also.iter().any(|a| a == name || a.to_lowercase() == lower))
-        .or_else(|| t.programs.iter().find(|(k, _)| k.as_str() == name || k.to_lowercase() == lower))
-        .map(|(k, e)| (k.as_str(), e))
+    let by_key = t.programs.iter().find(|(k, _)| k.as_str() == name || k.to_lowercase() == lower);
+    let by_match = t.programs.iter().find(|(_, e)| e.also.iter().any(|a| a == name || a.to_lowercase() == lower));
+    // An explicit key wins — including a person's own `programs.json` entry —
+    // except the generic `agent` fallback, which yields to a `match` (Cursor's
+    // CLI process is named `agent`).
+    match (by_key, by_match) {
+        (Some((k, _)), Some((mk, me))) if k.as_str() == "agent" => Some((mk.as_str(), me)),
+        (Some((k, e)), _) => Some((k.as_str(), e)),
+        (None, Some((k, e))) => Some((k.as_str(), e)),
+        (None, None) => None,
+    }
 }
 
 fn resolve(t: &Table, app: Option<&str>, argv: &[String]) -> Value {
@@ -414,6 +421,14 @@ mod tests {
         assert_eq!(key(Some("cursor-agent"), &[]), "cursor");
         assert_eq!(key(Some("newagent"), &[]), "agent");
         assert!(startable().iter().any(|a| a["key"] == "cursor" && a["run"] == json!(["agent"])));
+        // A person's own key still beats a built-in `match` (python matches python3).
+        let mut personal = t();
+        personal.programs.insert(
+            "python3".into(),
+            Entry { name: Some("Project Python".into()), ..Entry::default() },
+        );
+        assert_eq!(resolve(&personal, None, &["python3".into()])["key"], "python3");
+        assert_eq!(resolve(&personal, None, &["python3".into()])["name"], "Project Python");
         assert_eq!(key(None, &["/bin/zsh"]), "shell");
         assert_eq!(key(None, &["-zsh"]), "shell");
         assert_eq!(key(None, &["nvim", "x.rs"]), "nvim");
