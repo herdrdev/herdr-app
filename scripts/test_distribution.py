@@ -211,6 +211,51 @@ printf 'dev PATH added' >> "$3"''')
         self.assertEqual(len(calls), 2)
         self.assertTrue(calls[1].startswith("--verify --deep --strict "))
 
+    def linux_install(self, dbus_exit=0):
+        """Runs the Linux branch of install.sh against a fake release."""
+        home = self.bin / "home"
+        (home / ".local/bin").mkdir(parents=True, exist_ok=True)
+        (home / ".local/bin/herdr-core").touch()
+        source = self.bin / "source/herdr-app"
+        source.mkdir(parents=True, exist_ok=True)
+        (source / "herdr-app").write_bytes(b"test binary")
+        (source / "herdr-app.svg").write_text("<svg/>")
+        archive = self.bin / "release.tar.gz"
+        with tarfile.open(archive, "w:gz") as tar:
+            tar.add(source, arcname="herdr-app")
+        sha = hashlib.sha256(archive.read_bytes()).hexdigest()
+        manifest = self.bin / "manifest.json"
+        manifest.write_text('{"version":"1.0.0","targets":{"linux-x86_64":{"url":"release","sha256":"%s"}}}' % sha)
+        self.stub("curl", f'''url=; out=; prev=
+for a; do
+  if [ "$prev" = -o ]; then out=$a; else case $a in -*) ;; *) url=$a ;; esac; fi
+  prev=$a
+done
+case $url in */latest.json) cp "{manifest}" "$out" ;; release) cp "{archive}" "$out" ;; *) exit 97 ;; esac''')
+        log = self.bin / "dbus.log"
+        log.unlink(missing_ok=True)
+        self.stub("dbus-send", f'echo "$*" >> "{log}"; exit {dbus_exit}')
+        env = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}", TEST_OS="Linux", TEST_ARCH="x86_64",
+                   HOME=str(home), XDG_DATA_HOME=str(home / ".local/share"))
+        result = subprocess.run([str(ROOT / "distribution/install.sh")], cwd=ROOT, env=env,
+                                capture_output=True, text=True, check=False)
+        return result, home, log
+
+    def test_linux_installer_tells_kiconloader_the_theme_changed(self):
+        result, home, log = self.linux_install()
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue((home / ".local/share/icons/hicolor/scalable/apps/herdr-app.svg").is_file())
+        self.assertTrue((home / ".local/share/applications/herdr-app.desktop").is_file())
+        self.assertEqual(
+            log.read_text().splitlines(),
+            ["--session --type=signal /KIconLoader org.kde.KIconLoader.iconChanged int32:0"],
+        )
+
+    def test_linux_installer_survives_a_missing_session_bus(self):
+        result, _, log = self.linux_install(dbus_exit=1)
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        self.assertTrue(log.exists())
+
     def test_intel_mac_package_stops_before_build(self):
         for args in ((), ("x86_64-apple-darwin",)):
             with self.subTest(args=args):

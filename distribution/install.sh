@@ -102,6 +102,12 @@ StartupWMClass=herdr-app
 EOF
   command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$data/applications" 2>/dev/null || true
   [ -f "$data/icons/hicolor/icon-theme.cache" ] && gtk-update-icon-cache -f -t "$data/icons/hicolor" >/dev/null 2>&1 || true
+  # Plasma caches a missing icon for the life of the session: KIconLoader does
+  # not watch the icon directories for new names. Tell every running instance
+  # the theme changed, so a fresh install shows its icon without a restart.
+  if command -v dbus-send >/dev/null 2>&1; then
+    dbus-send --session --type=signal /KIconLoader org.kde.KIconLoader.iconChanged int32:0 2>/dev/null || true
+  fi
 else
   apps="$HOME/Applications"
   app="$apps/Herdr.app"
