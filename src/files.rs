@@ -418,7 +418,6 @@ fn deliver_pending(root: &Path, pending: HashSet<String>) -> bool {
     true
 }
 
-/// The mod a changed path belongs to (`mods/<name>/...`).
 /// The folder whose code a file belongs to: `mods/<name>`, or `frame/<name>`
 /// for the app's own mods.
 fn code_root(rel: &Path) -> Option<PathBuf> {
@@ -428,6 +427,7 @@ fn code_root(rel: &Path) -> Option<PathBuf> {
     Some(Path::new(top).join(parts.next()?.as_os_str().to_str()?))
 }
 
+/// The mod a changed path belongs to (`mods/<name>/...`).
 pub fn mod_of(rel: &Path) -> Option<String> {
     let mut parts = rel.components();
     (parts.next()?.as_os_str() == "mods").then_some(())?;
