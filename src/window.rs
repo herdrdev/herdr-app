@@ -361,6 +361,7 @@ pub struct AppWindow {
     float_drag: Option<floats::FloatDrag>,
     pane_drag: Option<pane_drag::PaneDrag>,
     pane_shown: Option<pane_drag::PaneShown>,
+    pane_layout: pane_drag::PaneLayout,
     pane_grip_hover: Option<String>,
     /// Each pane's top row the grip sits centered in: its top header, else a strip.
     pane_grip_rows: RefCell<HashMap<String, f32>>,
@@ -480,6 +481,7 @@ impl AppWindow {
             float_drag: None,
             pane_drag: None,
             pane_shown: None,
+            pane_layout: Default::default(),
             pane_grip_hover: None,
             pane_grip_rows: RefCell::default(),
             win_drag: None,
@@ -4135,10 +4137,13 @@ impl AppWindow {
                     .into_any_element(),
             },
             Content::Context { .. } => match self.model.active_tab() {
-                Some(c) => match self.pane_preview(c) {
-                    Some(preview) => self.render_node(&preview, focused, self.pane_frame(), cx),
-                    None => self.render_node(c.shown(), focused, self.pane_frame(), cx),
-                },
+                Some(c) => {
+                    let tree = match self.pane_preview(c) {
+                        Some(preview) => self.render_node(&preview, focused, self.pane_frame(), cx),
+                        None => self.render_node(c.shown(), focused, self.pane_frame(), cx),
+                    };
+                    div().size_full().relative().children(self.pane_ghosts()).child(tree).into_any_element()
+                }
                 None if self.documents.get("").is_some_and(|s| s.layout() == "loading") => div().size_full().into_any_element(),
                 None => {
                     let key = crate::keys::listing().into_iter().find(|(_, _, a)| a == "space.new").map(|(_, k, _)| format!(" ({k})"));
@@ -6062,6 +6067,93 @@ export default class SystemToast extends View {
             let ids: Vec<&str> = this.model.tab("tb1").unwrap().root.panes().iter().map(|n| n.id.as_str()).collect();
             assert_eq!(ids, ["p1", "p2"]);
         });
+    }
+
+
+    #[test]
+    fn a_new_pane_fades_in_once_the_others_made_room() {
+        in_own_process("pane_added");
+    }
+
+    #[gpui::test]
+    fn pane_added(cx: &mut gpui::TestAppContext) {
+        if !running_alone("pane_added") {
+            return;
+        }
+        let (view, cx) = two_panes(cx);
+        cx.update(|_, cx| assert!(view.read(cx).pane_shown.is_none(), "the first panes just appear"));
+        let o2 = slot(&view, cx, "p2");
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            assert!(this.model.split("p2", crate::layout::Axis::Column, "p3", "t3"));
+            this.sync(window, cx);
+        }));
+        // `sync` drew the first frame of the new layout.
+        cx.run_until_parked();
+        let shown = |cx: &mut gpui::VisualTestContext, id: &str| cx.update(|_, cx| view.read(cx).pane_shown.as_ref().map(|s| s.opacity(id)));
+        assert_eq!(drawn(cx, "pane-p2"), o2, "p2 starts from where it was");
+        assert_eq!(shown(cx, "p3"), Some(0.), "p3 waits for room");
+        frames(cx, 4);
+        let sliding = drawn(cx, "pane-p2");
+        assert!(between(o2, sliding, slot(&view, cx, "p2")) || sliding.size.height < o2.size.height && sliding.size.height > slot(&view, cx, "p2").size.height, "p2 makes room gradually: {sliding:?}");
+        assert!(shown(cx, "p3").unwrap() < 1.);
+        frames(cx, 60);
+        assert_eq!(drawn(cx, "pane-p2"), slot(&view, cx, "p2"));
+        cx.update(|_, cx| assert!(view.read(cx).pane_shown.is_none(), "settled, the panes sit in their slots"));
+    }
+
+    #[test]
+    fn a_closed_pane_fades_out_where_it_was() {
+        in_own_process("pane_closed");
+    }
+
+    #[gpui::test]
+    fn pane_closed(cx: &mut gpui::TestAppContext) {
+        if !running_alone("pane_closed") {
+            return;
+        }
+        let (view, cx) = two_panes(cx);
+        let (o1, o2) = (slot(&view, cx, "p1"), slot(&view, cx, "p2"));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.model.remove_pane("p2");
+            this.sync(window, cx);
+        }));
+        // `sync` drew the first frame of the new layout.
+        cx.run_until_parked();
+        let ghost = |cx: &mut gpui::VisualTestContext| cx.update(|_, cx| view.read(cx).pane_shown.as_ref().and_then(|s| s.ghost("p2")));
+        assert_eq!(drawn(cx, "pane-p1"), o1, "p1 starts from where it was");
+        assert_eq!(ghost(cx).map(|g| g.0), Some(o2), "p2 fades where it was");
+        frames(cx, 3);
+        let sliding = drawn(cx, "pane-p1");
+        let full = slot(&view, cx, "p1");
+        assert!(sliding.size.width > o1.size.width && sliding.size.width < full.size.width, "p1 fills the room gradually: {sliding:?}");
+        assert!(ghost(cx).is_some_and(|g| g.1 < 1.));
+        frames(cx, 60);
+        assert_eq!(drawn(cx, "pane-p1"), full);
+        cx.update(|_, cx| assert!(view.read(cx).pane_shown.is_none()));
+    }
+
+    #[test]
+    fn resizing_panes_moves_them_at_once() {
+        in_own_process("pane_resized");
+    }
+
+    #[gpui::test]
+    fn pane_resized(cx: &mut gpui::TestAppContext) {
+        if !running_alone("pane_resized") {
+            return;
+        }
+        let (view, cx) = two_panes(cx);
+        let o1 = slot(&view, cx, "p1");
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            let root = &mut this.model.tab_mut("tb1").unwrap().root;
+            root.find_mut("p1").unwrap().size = Some(crate::layout::Size::Weight { weight: 3. });
+            this.sync(window, cx);
+        }));
+        frames(cx, 1);
+        let s1 = slot(&view, cx, "p1");
+        assert!(s1.size.width > o1.size.width);
+        assert_eq!(drawn(cx, "pane-p1"), s1, "the finger leads: no easing");
+        cx.update(|_, cx| assert!(view.read(cx).pane_shown.is_none()));
     }
 
 
