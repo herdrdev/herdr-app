@@ -111,7 +111,7 @@ those files or the generated guide. The app rewrites them on start.
   Shipped layouts likewise use `layout.clone` for a personal copy.
   Discover required arguments with `herdr-app commands`.
 - Layout terminal blocks keep their slots through stream loss and reattach when available.
-  They are removed when the program ends or core confirms the terminal is gone.
+  Slots inside layout containers are removed when the program ends or core confirms it is gone.
 - Save to reload. A broken save keeps the old version running and reports
   an error in `status`; a still-working screen is not proof the edit worked.
 - Make only the requested change. Don't touch unrelated mods or settings.

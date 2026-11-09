@@ -2313,8 +2313,10 @@ impl AppWindow {
             return;
         }
         if self.chrome.find(block).is_some_and(|n| n.terminal().is_some()) {
-            self.chrome.remove_slot(block);
-            return self.sync(window, cx);
+            if self.chrome.remove_slot(block).is_some() {
+                self.sync(window, cx);
+            }
+            return;
         }
         if let Some(t) = self.terms.get(block)
             && self.model.address_of(block).as_deref() == Some(t.address.as_str())
@@ -2533,8 +2535,7 @@ impl AppWindow {
                         this.model.remove_pane(&block);
                         changed = true;
                     } else if this.chrome.find(&block).and_then(|n| n.terminal()) == Some(addr.as_str()) {
-                        this.chrome.remove_slot(&block);
-                        changed = true;
+                        changed |= this.chrome.remove_slot(&block).is_some();
                     }
                 }
                 if changed { this.sync(window, cx); }
@@ -5525,6 +5526,29 @@ mod tests {
         assert!(cx.update(|_, cx| view.read(cx).chrome.find("slot").is_some()));
         assert!(cx.update(|_, cx| view.read(cx).chrome.find("slot-header").is_some()));
         assert!(cx.update(|_, cx| view.read(cx).chrome.find("main").is_some()));
+
+        // A root block has no parent slot to remove. Keep the authored root
+        // policy, but do not publish/save a structural change that never happened.
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.chrome = this.chrome.find("slot-terminal").unwrap().clone();
+            this.sync(window, cx);
+        }));
+        cx.run_until_parked();
+        let notifications = std::rc::Rc::new(std::cell::Cell::new(0));
+        let observed = notifications.clone();
+        let _subscription = cx.update(|_, cx| cx.observe(&view, move |_, _| observed.set(observed.get() + 1)));
+        for reason in ["holder_lost", "exited"] {
+            cx.update(|window, cx| view.update(cx, |this, cx| {
+                this.terms["slot-terminal"].view.update(cx, |v, _| v.ended = Some(reason.into()));
+                this.terminal_ended("slot-terminal", window, cx);
+            }));
+            cx.run_until_parked();
+            assert!(shown(cx), "an unremovable root keeps its authored structure");
+            assert_eq!(notifications.get(), 0, "no change to publish after {reason}");
+        }
+        check(Err(json!({"data": {"kind": "not_found"}, "message": "terminal removed"})), "", cx);
+        assert!(shown(cx));
+        assert_eq!(notifications.get(), 0, "closure confirmation must not publish a failed root removal");
     }
 
     #[test]
