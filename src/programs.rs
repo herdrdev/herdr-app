@@ -285,12 +285,13 @@ fn resolve(t: &Table, app: Option<&str>, argv: &[String]) -> Value {
             None => shown("agent", t.programs.get("agent").unwrap_or(&Entry::default()), Some(app), false, true),
         };
     }
-    // The app starts commands in the person's shell: `zsh -ic '"$@"; exec "$0" -i' zsh <cmd>...`.
+    // The app starts commands in the person's shell: `zsh -ic '"$@"; exec "$0" -i' zsh <cmd>...`,
+    // or fish's `command $argv[2..]; exec $argv[1] -i`; on macOS both as login shells (`-lic`, `-li`).
     if argv.len() > 4
         && t.shells.iter().any(|s| s == base(&argv[0]))
         && argv[1].starts_with('-')
         && argv[1].ends_with('c')
-        && (argv[2].contains("\"$@\"") || argv[2] == "command $argv[2..]; exec $argv[1] -i")
+        && (argv[2].contains("\"$@\"") || matches!(argv[2].as_str(), "command $argv[2..]; exec $argv[1] -i" | "command $argv[2..]; exec $argv[1] -li"))
     {
         return resolve(t, None, &argv[4..]);
     }
@@ -404,6 +405,9 @@ mod tests {
         assert_eq!(key(None, &["mytool"]), "program");
         assert_eq!(key(None, &["/bin/zsh", "-ic", "\"$@\"; exec \"$0\" -i", "/bin/zsh", "vi", "x"]), "vim");
         assert_eq!(key(None, &["/usr/bin/fish", "-ic", "command $argv[2..]; exec $argv[1] -i", "/usr/bin/fish", "vi", "x"]), "vim");
+        // macOS starts agents from a login shell (`-lic`, then `exec fish -li`).
+        assert_eq!(key(None, &["/bin/zsh", "-lic", "\"$@\"; exec \"$0\" -li", "/bin/zsh", "cursor-agent"]), "cursor");
+        assert_eq!(key(None, &["/opt/homebrew/bin/fish", "-lic", "command $argv[2..]; exec $argv[1] -li", "/opt/homebrew/bin/fish", "cursor-agent"]), "cursor");
         let line = powershell_line(&["codex".into(), "fix it".into()]);
         assert_eq!(key(None, &["pwsh.exe", "-NoExit", "-Command", &line]), "codex");
         assert_eq!(key(None, &[r"C:\Windows\powershell.exe"]), "shell");
