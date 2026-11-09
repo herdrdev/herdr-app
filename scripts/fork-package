@@ -1,0 +1,28 @@
+#!/bin/bash
+# Fork build for Windows: dist/herdr-app-windows-x86_64.tar.gz and its .sha256.
+#
+# Unlike scripts/package this does not set HERDR_APP_RELEASE: such a build
+# would check releases.herdr.dev and replace itself with the upstream app. The
+# fork is updated by running its installer again (distribution/fork-install.ps1).
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+target=windows-x86_64
+archive="dist/herdr-app-$target.tar.gz"
+for notice in LICENSE THIRD-PARTY-NOTICES; do
+  [[ -s $notice ]] || { echo "fork-package: $notice is missing or empty" >&2; exit 1; }
+done
+
+cargo build --release --locked
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+mkdir -p "$work/herdr-app" dist
+cp target/release/herdr-app.exe "$work/herdr-app/"
+cp assets/icons/herdr-ui-icon-clean.svg "$work/herdr-app/herdr-app.svg"
+cp LICENSE THIRD-PARTY-NOTICES "$work/herdr-app/"
+tar -czf "$archive" -C "$work" herdr-app
+tar -xOf "$archive" herdr-app/THIRD-PARTY-NOTICES | cmp - THIRD-PARTY-NOTICES
+tar -xOf "$archive" herdr-app/LICENSE | cmp - LICENSE
+(cd dist && sha256sum "herdr-app-$target.tar.gz" > "herdr-app-$target.tar.gz.sha256")
+echo "fork-package: $archive ($(cut -d' ' -f1 "$archive.sha256"))"

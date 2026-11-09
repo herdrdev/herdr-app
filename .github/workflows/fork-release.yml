@@ -1,0 +1,139 @@
+# The fork's own release: a Windows build published as a GitHub Release, for
+# `distribution/fork-install.ps1` to install without building locally.
+#
+# Upstream's release.yml publishes only for its maintainer, to his bucket, so it
+# never releases here; it is disabled in this fork. This workflow builds the
+# Windows app on every master push that changes the build, and sync-upstream
+# starts it after landing an upstream merge (a push made with GITHUB_TOKEN does
+# not trigger workflows). Nothing is signed.
+name: fork release
+run-name: fork release ${{ github.sha }}
+
+on:
+  push:
+    branches: [master]
+    paths:
+      - Cargo.lock
+      - Cargo.toml
+      - build.rs
+      - src/**
+      - crates/**
+      - vendor/**
+      - defaults/**
+      - assets/**
+      - LICENSE
+      - THIRD-PARTY-NOTICES
+      - scripts/fork-package
+      - scripts/ci-sources
+      - distribution/fork-install.ps1
+      - .github/workflows/fork-release.yml
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+# Never cancel: a cancelled master build saves no cache and releases nothing.
+concurrency:
+  group: fork-release
+  cancel-in-progress: false
+
+env:
+  RUST_TOOLCHAIN: 1.95.0
+  # In the cache key: ghostty-sys can't tell when Zig changes.
+  ZIG_VERSION: 0.16.0
+
+jobs:
+  build:
+    if: github.repository == 'alexshpunt/herdr-app'
+    runs-on: windows-2022
+    timeout-minutes: 60
+    defaults:
+      run:
+        shell: bash
+    outputs:
+      version: ${{ steps.version.outputs.version }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          submodules: true
+          persist-credentials: false
+      - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
+        with:
+          toolchain: ${{ env.RUST_TOOLCHAIN }}
+      - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
+        with:
+          version: ${{ env.ZIG_VERSION }}
+      - name: Restore build cache
+        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: &cache-paths |
+            ~/.cargo/registry/index
+            ~/.cargo/registry/cache
+            ~/.cargo/git/db
+            target
+          key: fork-v1-windows-x86_64-${{ env.RUST_TOOLCHAIN }}-zig${{ env.ZIG_VERSION }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          # The last two reuse the caches upstream's release.yml saved before it was disabled.
+          restore-keys: |
+            fork-v1-windows-x86_64-${{ env.RUST_TOOLCHAIN }}-zig${{ env.ZIG_VERSION }}-${{ hashFiles('Cargo.lock') }}-
+            fork-v1-windows-x86_64-${{ env.RUST_TOOLCHAIN }}-zig${{ env.ZIG_VERSION }}-
+            release-v2-windows-x86_64-${{ env.RUST_TOOLCHAIN }}-zig${{ env.ZIG_VERSION }}-${{ hashFiles('Cargo.lock') }}-
+            release-v2-windows-x86_64-${{ env.RUST_TOOLCHAIN }}-zig${{ env.ZIG_VERSION }}-
+      # bindgen's libclang: the runner image's LLVM.
+      - name: Windows build dependencies
+        run: echo "LIBCLANG_PATH=C:\\Program Files\\LLVM\\bin" >> "$GITHUB_ENV"
+      - name: Keep unchanged sources fresh
+        run: scripts/ci-sources restore
+      - name: Build and pack
+        run: scripts/fork-package
+      - name: Note the sources the cache was built from
+        run: scripts/ci-sources record
+      - name: Save build cache
+        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: *cache-paths
+          key: fork-v1-windows-x86_64-${{ env.RUST_TOOLCHAIN }}-zig${{ env.ZIG_VERSION }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+      - id: version
+        run: echo "version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)" >> "$GITHUB_OUTPUT"
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: herdr-app-windows-x86_64
+          path: |
+            dist/herdr-app-windows-x86_64.tar.gz
+            dist/herdr-app-windows-x86_64.tar.gz.sha256
+          if-no-files-found: error
+          retention-days: 7
+
+  publish:
+    needs: build
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    permissions:
+      contents: write
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          name: herdr-app-windows-x86_64
+          path: dist
+      - name: Publish the release
+        env:
+          GH_TOKEN: ${{ github.token }}
+          VERSION: ${{ needs.build.outputs.version }}
+        run: |
+          tag="fork-${VERSION}-${GITHUB_RUN_NUMBER}"
+          cp distribution/fork-install.ps1 dist/install.ps1
+          cat > notes.md <<NOTES
+          Windows x64 build of the fork at ${GITHUB_SHA::7} (herdr-app ${VERSION}). Not signed; it does not update itself.
+
+          Install or update:
+
+          \`\`\`
+          powershell -c "irm https://github.com/${GITHUB_REPOSITORY}/releases/latest/download/install.ps1 | iex"
+          \`\`\`
+          NOTES
+          gh release create "$tag" \
+            dist/herdr-app-windows-x86_64.tar.gz dist/herdr-app-windows-x86_64.tar.gz.sha256 dist/install.ps1 \
+            --target "$GITHUB_SHA" --title "Herdr App ${VERSION} fork build ${GITHUB_RUN_NUMBER}" \
+            --notes-file notes.md --generate-notes --latest
