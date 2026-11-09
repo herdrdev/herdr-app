@@ -24,6 +24,33 @@ herdr-app --browser-api
 # {"module":"herdr-browser","version":1}
 ```
 
+## Install a release
+
+Every master push that changes the app builds a Windows x64 release on GitHub
+(`.github/workflows/fork-release.yml`); nothing is signed. Install or update
+from PowerShell, without building:
+
+```powershell
+powershell -c "irm https://github.com/alexshpunt/herdr-app/releases/latest/download/install.ps1 | iex"
+```
+
+The installer verifies the build's SHA-256, replaces `%LOCALAPPDATA%\Programs\herdr-app`
+(a running app keeps running until it quits) and installs herdr-core only if
+there is none. These builds do not update themselves, because a release build
+of upstream's updater would replace the fork with the upstream app; run the
+installer again for a newer build.
+
+Upstream's `release.yml` publishes only for its maintainer and is disabled in
+this fork (`gh workflow disable release.yml`). Do not re-enable it.
+
+## Follow upstream
+
+`sync-upstream.yml` merges `herdrdev/herdr-app` into master every day, runs CI
+on the merge, fast-forwards master and starts the fork release. When the merge
+conflicts or CI fails it opens an issue "Upstream sync is failing". Resolve it
+by merging `upstream/master` into a branch by hand and landing it through a PR
+(merge commit, not squash).
+
 ## Connect Pi and Plannotator
 
 Install Plannotator and this checkout's integration into each Pi environment:

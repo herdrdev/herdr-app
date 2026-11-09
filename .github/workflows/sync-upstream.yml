@@ -7,6 +7,8 @@ on:
 
 permissions:
   contents: write
+  actions: write
+  issues: write
 
 concurrency:
   group: fork-upstream-sync
@@ -63,3 +65,27 @@ jobs:
         run: |
           gh auth setup-git
           python3 scripts/fork-sync.py land --branch "$CANDIDATE_BRANCH" --sha "$CANDIDATE_SHA"
+      # A push made with GITHUB_TOKEN triggers no workflows, so start the release by hand.
+      - name: Build and publish the fork release
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: gh workflow run fork-release.yml --ref master
+  # A conflict or a failed check stops the sync silently; open an issue so it is seen.
+  notify:
+    needs: [prepare, verify, land]
+    if: failure()
+    runs-on: ubuntu-latest
+    permissions:
+      issues: write
+    steps:
+      - name: Open an issue unless one is already open
+        env:
+          GH_TOKEN: ${{ github.token }}
+          RUN_URL: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+        run: |
+          title="Upstream sync is failing"
+          open=$(gh issue list -R "$GITHUB_REPOSITORY" --state open --search "\"$title\" in:title" --json number --jq length)
+          if [ "$open" = 0 ]; then
+            gh issue create -R "$GITHUB_REPOSITORY" --title "$title" \
+              --body "The scheduled merge of upstream failed, most likely on a conflict. Run: $RUN_URL"
+          fi
