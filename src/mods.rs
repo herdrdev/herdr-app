@@ -1204,6 +1204,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_input_selection_uses_the_theme_selection_colour() {
+        let mut tokens = gpui_base::SemanticThemeTokens::default();
+        tokens.colors.accent = gpui::hsla(0.1, 0.5, 0.5, 1.0);
+        tokens.colors.selection = gpui::hsla(0.6, 0.5, 0.5, 0.3);
+
+        let style = gpui_base::input::InputEditorStyle::default().resolved(&tokens);
+
+        assert_eq!(style.selection, tokens.colors.selection);
+    }
+
+    #[test]
     fn exec_timeout_defaults_caps_and_rejects_invalid_values() {
         assert_eq!(exec_limit(None).unwrap(), EXEC_LIMIT);
         assert_eq!(exec_limit(Some(&HostObject::new().field("timeout", HostValue::Null).into())).unwrap(), EXEC_LIMIT);
