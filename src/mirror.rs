@@ -19,6 +19,9 @@ pub struct SharedSpace {
     name: String,
     folder: String,
     tabs: Vec<SharedTab>,
+    /// Fields this build doesn't read, kept so a newer build's survive this one's write.
+    #[serde(flatten)]
+    rest: serde_json::Map<String, serde_json::Value>,
 }
 
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
@@ -29,6 +32,9 @@ struct SharedTab {
     name: String,
     #[serde(default = "empty_root")]
     root: Node,
+    /// Fields this build doesn't read, kept so a newer build's survive this one's write.
+    #[serde(flatten)]
+    rest: serde_json::Map<String, serde_json::Value>,
 }
 
 fn empty_root() -> Node {
@@ -104,9 +110,10 @@ impl Document {
                         .map(|t| {
                             let mut root = t.root.clone();
                             map_node(&mut root, &map);
-                            SharedTab { id: map(&t.id), name: t.name.clone(), root }
+                            SharedTab { id: map(&t.id), name: t.name.clone(), root, rest: t.rest.clone() }
                         })
                         .collect(),
+                    rest: s.rest.clone(),
                 })
                 .collect(),
         }
@@ -129,9 +136,10 @@ impl Document {
                 .map(|t| {
                     let mut root = t.root.clone();
                     map_node(&mut root, &map);
-                    Tab { id: map(&t.id), name: t.name.clone(), root, focused: None, before: vec![], zoomed: None, settled: None }
+                    Tab { id: map(&t.id), name: t.name.clone(), root, focused: None, before: vec![], zoomed: None, settled: None, rest: t.rest.clone() }
                 })
                 .collect(),
+            rest: s.rest.clone(),
         });
         model.spaces.splice(at..at, spaces);
         model.order_spaces();
@@ -294,6 +302,30 @@ mod tests {
         saved.apply_machine(&mut m, None);
         assert!(m.agents["t1"].seen);
     }
+    /// A newer build may add fields to a space or tab (#718's `floating`): this
+    /// build writes them back as they were, so a mixed-version machine keeps them.
+    #[test]
+    fn unknown_space_and_tab_fields_survive_a_read_and_write() {
+        let text = serde_json::json!({"spaces":[{"id":"s","name":"work","folder":"/w","color":"teal","tabs":[{"id":"t","name":"","root":
+            {"id":"t","type":"row","children":[{"id":"p","type":"block","content":{"terminal":"t1"}}]},
+            "floating":[{"pane":{"id":"q","type":"block","content":{"terminal":"t2"}},"rect":[0.2,0.2,0.6,0.6]}]}]}]});
+        let read: Document = serde_json::from_value(text.clone()).unwrap();
+        for machine in [None, Some("mac")] {
+            let mut m = Model::default();
+            read.replace(&mut m, machine);
+            let id = |s: &str| qualify(s, machine);
+            m.split(&id("p"), Axis::Row, &id("p2"), &id("t3"));
+            let written = serde_json::to_value(Document::capture(&m, machine)).unwrap();
+            assert_eq!(written["spaces"][0]["color"], "teal", "{machine:?}");
+            assert_eq!(written["spaces"][0]["tabs"][0]["floating"], text["spaces"][0]["tabs"][0]["floating"], "{machine:?}");
+        }
+        // Read and written alone: the same document.
+        let mut m = Model::default();
+        read.replace(&mut m, None);
+        assert_eq!(serde_json::to_value(Document::capture(&m, None)).unwrap(), text);
+        assert!(!serde_json::to_string(&Document::capture(&model(), None)).unwrap().contains("rest"), "nothing extra: no field");
+    }
+
     #[test]
     fn shared_fields_can_be_omitted() {
         let doc: Document = serde_json::from_value(serde_json::json!({"spaces":[{"id":"s","tabs":[{"id":"t"}]}]})).unwrap();
