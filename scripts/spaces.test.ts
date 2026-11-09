@@ -15,7 +15,8 @@ function harness(replies: unknown[] = [], storage = new Map<string, string>(), s
     if (String(method).startsWith("on_")) handlers[String(method)] = args.at(-1);
     return element;
   } });
-  const Spaces = new Function("View", "hc", "localStorage", "spaces", "panes", "run", "v_flex", "h_flex", "div", "svg", "shared", "machines", `${source}; return Spaces;`)(
+  const scroll = () => ({ offset: () => ({ x: 0, y: 0 }), max_offset: () => ({ x: 0, y: 0 }), set_offset() {} });
+  const Spaces = new Function("View", "hc", "localStorage", "spaces", "panes", "run", "v_flex", "h_flex", "div", "svg", "shared", "machines", "ScrollHandle", "focused", `${source}; return Spaces;`)(
     class {},
     async (args: string[]) => {
       calls.push(args);
@@ -30,12 +31,17 @@ function harness(replies: unknown[] = [], storage = new Map<string, string>(), s
       moves.push(args);
     },
     ...Array(4).fill(() => element), () => null, () => availability,
+    { new: scroll }, () => null,
   );
   const view = new Spaces();
   view.reconnecting = {};
   view.folded = new Set(["cloud"]);
   view.refreshMachines = () => {};
-  const cx = { timer: { every() {} }, notify() {}, spawn(fn: (cx: unknown) => Promise<unknown>) { tasks.push(fn(cx)); } };
+  const task = { cancel() {} };
+  const cx = {
+    timer: { every: () => task, after: () => task }, notify() {}, focus_handle: () => ({ focus() {} }),
+    spawn(fn: (cx: unknown) => Promise<unknown>) { tasks.push(fn(cx)); },
+  };
   return { view, calls, tasks, cx, storage, moves, handlers, snapshot, availability };
 }
 
@@ -121,7 +127,10 @@ function orderedHarness(ids: string[]) {
   h.view.shown = new Set(ids);
   h.view.born = {};
   h.view.pressed = null;
-  h.view.over = null;
+  h.view.drag = null;
+  h.view.handle = { focus() {} };
+  h.view.scroll = { offset: () => ({ x: 0, y: 0 }), set_offset() {} };
+  h.view.view = 1000;
   const git = (id: string, repo: string, linked: boolean) => {
     const s = h.snapshot.find(s => s.id === id)!;
     h.view.git[JSON.stringify([s.machine ?? null, s.folder])] = { repo, linked };
@@ -185,12 +194,14 @@ test("dragging a main checkout moves the right id and its children follow", () =
   h.git("topic", "repo", true);
   const first = h.rows();
   h.flush();
-  // The row was built before reconciliation: neither its old index nor the
-  // dragged row's old index may be used to resolve the drop.
-  h.view.pressed = "main";
-  h.view.over = "last";
-  h.view.row(first.find((r: any) => r.w.id === "last"), {});
-  h.handlers.on_mouse_up({}, h.cx);
+  expect(first.map((r: any) => r.w.id)).toEqual(["other", "main", "topic", "last"]);
+  // Pressed on main's row (30 px down), lifted, and held 70 px lower: main and
+  // topic (58 px) go past the middle of last. The drop is resolved from the
+  // model as it is then, not from rows built before reconciliation.
+  h.view.pressed = { id: "main", at: 30, row: 30, tree: false };
+  h.view.follow(40, h.cx);
+  h.view.follow(100, h.cx);
+  h.view.settle(true, h.cx);
   expect(h.moves).toEqual([{ id: "main", index: 4 }]);
   h.flush();
   h.rows();
