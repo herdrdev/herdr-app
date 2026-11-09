@@ -53,7 +53,7 @@ Input-SHA256: d1b0449e5478c574ba4f686c2656df7fe77d66821a61f8b6ed3378a58ed9a811 v
 Input-SHA256: f2eefb822738db27e4ce4b28601c4491f258c51ae52e57d11c98ae03a6100081 vendor/gpui-kit/crates/base/examples/native/Cargo.toml
 Input-SHA256: 81001a9f6c3d868140e0c7c66abcbff8deb4dc00e0fbb68d4a2506d2e2385ea8 vendor/gpui-kit/crates/base/examples/wasm/Cargo.toml
 Input-SHA256: 2ca4d3969f5a62ea841f25868efe6a4c38866f244caffc0affa4af1b25400dad vendor/gpui-kit/crates/fps/Cargo.toml
-Input-SHA256: 3a6d0f6eb8adde4f5126933a5edd1ce72a1c84b994de27d6da12d918cc1b14ae vendor/gpui-kit/crates/shell/Cargo.toml
+Input-SHA256: 643a0dbfd9207840764607afbd0cf163b07a16ae4a48266f5cb31efe64b1b2ac vendor/gpui-kit/crates/shell/Cargo.toml
 Input-SHA256: cd6a0e1b53913eb4f2559b79aae3b7877b41e9c559c56a0231501cbd0fe2ad3a vendor/gpui-kit/crates/shell/rquickjs-compat/Cargo.toml
 Input-SHA256: f00df50e0e437e56cd8475bc78289f57ef00e5d0af0a1a056bf215438bfe5529 vendor/gpui-pre-apple/Cargo.toml
 Input-SHA256: 752daf2fb234ca4a1fa372c073fe127f44b7b90fd2529ae44273a64f9d53da7a vendor/gpui-pre-apple/LICENSE-APACHE

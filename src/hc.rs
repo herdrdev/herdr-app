@@ -272,14 +272,24 @@ fn read_frame(r: &mut impl Read) -> Option<(u32, u8, Vec<u8>)> {
     Some((channel, h[4], payload))
 }
 
-fn connect_error(stderr: &str) -> Option<String> {
+#[derive(Debug)]
+pub struct ConnectError(pub String);
+
+impl std::fmt::Display for ConnectError {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.write_str(&self.0)
+    }
+}
+impl std::error::Error for ConnectError {}
+
+fn connect_error(stderr: &str) -> Option<ConnectError> {
     let reply: Value = serde_json::from_str(stderr.trim()).ok()?;
     let error = reply.get("error")?;
     let message = error.get("message")?.as_str()?;
-    Some(match error.get("hint").and_then(Value::as_str).filter(|s| !s.is_empty()) {
+    Some(ConnectError(match error.get("hint").and_then(Value::as_str).filter(|s| !s.is_empty()) {
         Some(hint) => format!("{message}\n\n{hint}"),
         None => message.to_owned(),
-    })
+    }))
 }
 
 impl Core {
@@ -317,7 +327,7 @@ impl Core {
             Err(error) => {
                 let _ = child.kill();
                 let _ = child.wait();
-                if let Some(message) = connect_error(&errors.recv_timeout(Duration::from_secs(1)).unwrap_or_default()) { bail!("{message}"); }
+                if let Some(error) = connect_error(&errors.recv_timeout(Duration::from_secs(1)).unwrap_or_default()) { return Err(error.into()); }
                 return Err(error);
             }
         };
@@ -552,8 +562,8 @@ mod tests {
             "kind": "unavailable", "message": "the core pipe cannot be accessed",
             "hint": "stop it with hc server stop in an elevated terminal"
         }}).to_string();
-        assert_eq!(connect_error(&stderr).as_deref(), Some("the core pipe cannot be accessed\n\nstop it with hc server stop in an elevated terminal"));
-        assert_eq!(connect_error("not JSON"), None);
+        assert_eq!(connect_error(&stderr).unwrap().to_string(), "the core pipe cannot be accessed\n\nstop it with hc server stop in an elevated terminal");
+        assert!(connect_error("not JSON").is_none());
     }
 
     #[test]

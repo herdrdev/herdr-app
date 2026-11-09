@@ -442,7 +442,7 @@ pub struct AppWindow {
     /// The system's appearance; a layout with a light and a dark theme follows it.
     system_dark: bool,
     /// The OS tells us when files change (`files.rs`); else the disk is polled.
-    file_events: Option<async_channel::Receiver<crate::files::Changed>>,
+    file_events: Option<crate::files::FileEvents>,
     polls: u64,
     /// The downloaded update the frame's pill offers, and the one closed for now.
     /// What's waiting, in words (`update_label`).
@@ -462,6 +462,10 @@ pub struct AppWindow {
 impl AppWindow {
     pub fn new(core: Arc<Core>, requests: async_channel::Receiver<Request>, window: &mut Window, cx: &mut Context<Self>) -> Self {
         let runtime = ShellRuntime::new_with_components(cx, crate::browser::components()).map_err(|e| tracing::error!("script runtime failed, mods are off: {e:#}")).ok();
+        let file_events = crate::files::watch(&mods::app_dir(), #[cfg(test)] cx.background_executor().clone());
+        if let (Some(runtime), Some(events)) = (&runtime, &file_events) {
+            runtime.set_source_revision_provider(events.revision_provider());
+        }
         mods::note_fonts(cx);
         let seen = std::fs::read_to_string(file("seen.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
         let mut w = AppWindow {
@@ -531,7 +535,7 @@ impl AppWindow {
             pane_history: Vec::new(),
             window_active: true,
             system_dark: is_dark(window.appearance()),
-            file_events: crate::files::watch(&mods::app_dir(), #[cfg(test)] cx.background_executor().clone()),
+            file_events,
             polls: 0,
             update_ready: None,
             update_dismissed: None,
@@ -590,10 +594,10 @@ impl AppWindow {
         }));
         if let Some(events) = w.file_events.clone() {
             w._tasks.push(cx.spawn_in(window, async move |this, cx| {
-                while let Ok(mut changed) = events.recv().await {
+                while let Ok(mut changed) = events.changes.recv().await {
                     // An editor's save is several events: take them together.
                     cx.background_executor().timer(Duration::from_millis(80)).await;
-                    while let Ok(more) = events.try_recv() {
+                    while let Ok(more) = events.changes.try_recv() {
                         changed.extend(more);
                     }
                     if this.update_in(cx, |this, window, cx| this.files_changed(changed, window, cx)).is_err() {
@@ -3528,6 +3532,17 @@ impl AppWindow {
         self.open_overlay(mods::new_overlay_id(), spec, window, cx);
     }
 
+    /// The layout's notification mod (`"toast"` on the root), else the shipped `toast`.
+    fn toast_mod(&self) -> &str {
+        let requested = self.chrome.toast.as_deref().unwrap_or("toast");
+        if self.folders.contains_key(requested) {
+            requested
+        } else {
+            tracing::warn!(mod_name = requested, "toast mod not found; using toast");
+            "toast"
+        }
+    }
+
     fn open_overlay(&mut self, id: String, spec: Value, window: &mut Window, cx: &mut Context<Self>) {
         let kind = match spec.get("kind").and_then(Value::as_str) {
             Some("popup") => OverlayKind::Popup,
@@ -3552,7 +3567,7 @@ impl AppWindow {
             }
         });
         let (name, mut props) = if kind == OverlayKind::Toast {
-            ("toast".to_owned(), spec.get("notification").cloned().unwrap_or(Value::Null))
+            (self.toast_mod().to_owned(), spec.get("notification").cloned().unwrap_or(Value::Null))
         } else {
             (spec.get("mod").and_then(Value::as_str).unwrap_or_default().to_owned(), spec.get("props").cloned().unwrap_or(json!({})))
         };
@@ -4735,9 +4750,13 @@ fn dock(root: &mut Node, block: Node, place: &str, wrapper_id: String) {
         if first { c.insert(0, block) } else { c.push(block) }
         return;
     }
-    let old = std::mem::replace(root, Node::new("", Kind::Row { children: vec![] }));
+    let mut old = std::mem::replace(root, Node::new("", Kind::Row { children: vec![] }));
+    let toast = old.toast.take();
+    let terminal_menu = old.terminal_menu.take();
     let children = if first { vec![block, old] } else { vec![old, block] };
     let mut wrapper = Node::container(wrapper_id, axis, children);
+    wrapper.toast = toast;
+    wrapper.terminal_menu = terminal_menu;
     wrapper.divider = Some(Line { width: 1.0, color: "border".into() });
     *root = wrapper;
 }
@@ -5628,6 +5647,122 @@ export default class Probe extends View {
     }
 
     include!("window/pane_size_tests.rs");
+
+    /// The whole path, in a real window: a layout names the toast mod, a
+    /// notification opens it with its props, and it can close itself (as one
+    /// that hands notifications to the system does). Unknown: the shipped toast.
+    #[test]
+    fn a_layout_s_toast_mod_gets_every_notification() {
+        in_own_process("toast_window");
+    }
+
+    #[gpui::test]
+    fn toast_window(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("toast_window") {
+            return;
+        }
+        let forward = r#"import { View, div } from "gpui-kit";
+import { props, closeOverlay, shared, setShared } from "herdr";
+
+export default class SystemToast extends View {
+  render() {
+    const p = props();
+    // A real one would exec("notify-send", [p.title, p.body]) here.
+    setShared("toast-test.seen", [...(shared("toast-test.seen") ?? []), `${p.title}: ${p.body}`]);
+    closeOverlay(p.overlay);
+    return div();
+  }
+}
+"#;
+        let layout = json!({ "id": "root", "type": "row", "toast": "system-toast", "children": [] });
+        let (view, cx) = open_window(cx, "system-toast", forward, layout);
+        let notify = |cx: &mut gpui::VisualTestContext| {
+            view.update_in(cx, |this, window, cx| {
+                this.sync_folders(window, cx);
+                let note = json!({ "kind": "toast", "notification": { "title": "Build finished", "body": "All green", "level": "success" } });
+                let id = crate::mods::new_overlay_id();
+                this.open_overlay(id.clone(), note, window, cx);
+                (id.clone(), this.copies[&format!("overlay:{id}")].inst.name.clone())
+            })
+        };
+        // Herdr's own notes ("Your edits are in …") may show up too.
+        let shown = |id: &str, cx: &mut gpui::VisualTestContext| {
+            cx.run_until_parked();
+            view.update(cx, |this, _| this.overlays.iter().any(|o| o.id == id))
+        };
+
+        let (id, name) = notify(cx);
+        assert_eq!(name, "system-toast");
+        assert!(!shown(&id, cx), "the layout's mod closed the notification");
+        let seen = crate::mods::shared("toast-test.seen").unwrap_or_default();
+        assert!(seen.as_array().unwrap().contains(&json!("Build finished: All green")), "the mod got the notification's props: {seen}");
+
+        view.update(cx, |this, _| this.chrome.toast = Some("no-such-mod".into()));
+        let (id, name) = notify(cx);
+        assert_eq!(name, "toast");
+        assert!(shown(&id, cx), "an unknown mod falls back to the shipped toast, which stays");
+    }
+
+    #[test]
+    fn docking_keeps_the_layouts_notification_and_menu_mods() {
+        in_own_process("dock_root_choices");
+    }
+
+    #[gpui::test]
+    fn dock_root_choices(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("dock_root_choices") {
+            return;
+        }
+        let layout = json!({
+            "id": "root", "type": "row", "toast": "chosen", "terminal_menu": "chosen", "children": []
+        });
+        let (view, cx) = open_window(cx, "chosen", "", layout);
+        let check_handlers = |cx: &mut gpui::VisualTestContext| {
+            view.update_in(cx, |this, window, cx| {
+                let id = crate::mods::new_overlay_id();
+                this.open_overlay(id.clone(), json!({
+                    "kind": "toast", "notification": { "title": "After docking", "body": "Still chosen" }
+                }), window, cx);
+                assert_eq!(this.copies[&format!("overlay:{id}")].inst.name, "chosen");
+                this.close_overlay(&id, window, cx);
+                this.open_menu("tab", json!({}), None, window, cx);
+                let id = this.overlays.last().unwrap().id.clone();
+                assert_eq!(this.copies[&format!("overlay:{id}")].inst.name, "chosen");
+                this.close_overlay(&id, window, cx);
+            });
+        };
+        check_handlers(cx);
+        let folder = crate::mods::app_dir().join("mods/new-top");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("mod.json"), r#"{"place":"top"}"#).unwrap();
+        std::fs::write(folder.join("main.js"), "").unwrap();
+        view.update_in(cx, |this, window, cx| {
+            this.sync_folders(window, cx);
+            assert_eq!(this.chrome.axis(), Some(crate::layout::Axis::Column));
+            assert!(this.chrome.walk().iter().any(|n| matches!(
+                n.content(), Some(crate::layout::Content::Mod { name, .. }) if name == "new-top"
+            )));
+            this.save();
+        });
+        check_handlers(cx);
+        view.update_in(cx, |this, window, cx| {
+            this.load_layout("test");
+            this.sync(window, cx);
+        });
+        check_handlers(cx);
+    }
+
+    #[test]
+    fn toast_is_a_root_layout_choice_that_roundtrips() {
+        let mut root = super::default_layout("main");
+        assert_eq!(root.toast, None);
+        assert!(serde_json::to_value(&root).unwrap().get("toast").is_none());
+        root.toast = Some("system-toast".into());
+        let restored: super::Node = serde_json::from_value(serde_json::to_value(&root).unwrap()).unwrap();
+        assert_eq!(restored.toast.as_deref(), Some("system-toast"));
+    }
 
     #[test]
     fn terminal_menu_preserves_clicked_target_and_uses_mod_dimensions() {
