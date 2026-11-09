@@ -224,8 +224,10 @@ impl SvgRenderer {
         bytes: &[u8],
         scale_factor: f32,
     ) -> Result<Arc<RenderImage>, usvg::Error> {
-        let svg = self.parse_svg(bytes)?;
-        self.render_parsed(&svg, scale_factor)
+        let svg = Arc::new(self.parse_svg(bytes)?);
+        let mut image = self.render_parsed(&svg, scale_factor)?;
+        Arc::get_mut(&mut image).unwrap().svg = Some((svg, std::sync::Mutex::new(Vec::new())));
+        Ok(image)
     }
 
     pub(crate) fn render_alpha_mask(

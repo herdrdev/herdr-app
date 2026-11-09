@@ -1,9 +1,9 @@
 use crate::{
-    AnyElement, AnyImageCache, App, Asset, AssetLogger, Bounds, DefiniteLength, Element, ElementId,
-    Entity, GlobalElementId, Hitbox, Image, ImageCache, InspectorElementId, InteractiveElement,
-    Interactivity, IntoElement, LayoutId, Length, ObjectFit, Pixels, RenderImage, Resource,
-    SharedString, SharedUri, StyleRefinement, Styled, Task, Window, decode_static_image,
-    decode_static_image_from_decoder, px,
+    AnyElement, AnyImageCache, App, Asset, AssetLogger, Bounds, DefiniteLength, DevicePixels,
+    Element, ElementId, Entity, GlobalElementId, Hitbox, Image, ImageCache, InspectorElementId,
+    InteractiveElement, Interactivity, IntoElement, LayoutId, Length, ObjectFit, Pixels,
+    RenderImage, Resource, SharedString, SharedUri, StyleRefinement, Styled, SvgSize, Task, Window,
+    decode_static_image, decode_static_image_from_decoder, px,
 };
 use anyhow::Result;
 
@@ -491,6 +491,32 @@ impl Element for Img {
                         .style
                         .object_fit
                         .get_bounds(bounds, data.size(layout_state.frame_index));
+
+                    let data = if let Some((svg, cache)) = &data.svg {
+                        let size = new_bounds.size.map(|length| {
+                            DevicePixels(
+                                (length.0 * window.scale_factor()).ceil().clamp(1.0, 8192.0) as i32,
+                            )
+                        });
+
+                        let mut cache = cache.lock().unwrap();
+                        if let Some((_, image)) =
+                            cache.iter().find(|(cached_size, _)| *cached_size == size)
+                        {
+                            image.clone()
+                        } else if let Ok(image) = cx
+                            .svg_renderer()
+                            .render_parsed(svg, SvgSize::ExactSize(size))
+                        {
+                            cache.push((size, image.clone()));
+                            image
+                        } else {
+                            data.clone()
+                        }
+                    } else {
+                        data
+                    };
+
                     let corner_radii = style.corner_radii.to_pixels(window.rem_size());
                     window
                         .paint_image(
@@ -625,8 +651,6 @@ impl Asset for ImageAssetLoader {
         cx: &mut App,
     ) -> impl Future<Output = Self::Output> + Send + 'static {
         let client = cx.http_client();
-        // TODO: Can we make SVGs always rescale?
-        // let scale_factor = cx.scale_factor();
         let svg_renderer = cx.svg_renderer();
         let asset_source = cx.asset_source().clone();
         async move {
@@ -833,6 +857,47 @@ mod tests {
                 });
             },
         )
+    }
+
+    #[gpui::test]
+    fn svg_image_raster_follows_zoom_and_display_scale(cx: &mut TestAppContext) {
+        let renderer = cx.update(|cx| cx.svg_renderer());
+        let image = renderer.render_single_frame(br##"<svg xmlns="http://www.w3.org/2000/svg" width="16" height="16"><rect width="16" height="16" fill="#ff0000"/></svg>"##, 1.0).unwrap();
+        let window = cx.add_empty_window();
+        for (logical_size, scale, pixels) in [
+            (16., 1., 16),
+            (17.6, 1., 18),
+            (16., 2., 32),
+            (17.6, 2., 35),
+            (16., 1., 16),
+        ] {
+            window.update(|window, _| window.set_scale_factor(scale));
+            window.draw(
+                point(px(0.), px(0.)),
+                size(px(logical_size), px(logical_size)),
+                |_, _| {
+                    img(ImageSource::Render(image.clone()))
+                        .size_full()
+                        .into_any_element()
+                },
+            );
+            window.update(|window, _| {
+                let tile = window
+                    .rendered_frame
+                    .scene
+                    .polychrome_sprites
+                    .last()
+                    .unwrap()
+                    .tile;
+                assert_eq!(
+                    tile.bounds.size,
+                    size(DevicePixels(pixels), DevicePixels(pixels))
+                );
+            });
+        }
+        let cache = image.svg.as_ref().unwrap().1.lock().unwrap();
+        assert_eq!(cache.len(), 4);
+        assert_eq!(&cache[0].1.as_bytes(0).unwrap()[..4], &[0, 0, 255, 255]);
     }
 
     #[gpui::test]

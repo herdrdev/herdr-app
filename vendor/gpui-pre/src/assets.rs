@@ -6,7 +6,10 @@ use std::{
     borrow::Cow,
     fmt,
     hash::Hash,
-    sync::atomic::{AtomicUsize, Ordering::SeqCst},
+    sync::{
+        Arc, Mutex,
+        atomic::{AtomicUsize, Ordering::SeqCst},
+    },
 };
 
 /// A source of assets for this app to use.
@@ -46,6 +49,10 @@ pub struct RenderImage {
     /// The scale factor of this image on render.
     pub(crate) scale_factor: f32,
     data: SmallVec<[Frame; 1]>,
+    pub(crate) svg: Option<(
+        Arc<crate::ParsedSvg>,
+        Mutex<Vec<(Size<DevicePixels>, Arc<RenderImage>)>>,
+    )>,
 }
 
 impl PartialEq for RenderImage {
@@ -65,6 +72,7 @@ impl RenderImage {
             id: ImageId(NEXT_ID.fetch_add(1, SeqCst)),
             scale_factor: 1.0,
             data: data.into(),
+            svg: None,
         }
     }
 
