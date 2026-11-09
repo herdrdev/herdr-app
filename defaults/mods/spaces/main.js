@@ -355,17 +355,18 @@ export default class Spaces extends View {
     });
   }
 
-  // Only what's unusual, after the name: "herdr \u00b7 spike \u21912 \u21931". The repo or
-  // branch goes when the name already says it (a worktree is named after its branch),
-  // and master/main go: nearly every space is on one.
+  // Only what's unusual, after the name: "herdr \u00b7 spike \u21912 \u21931".
+  // Nested worktrees have just their space name and counters; their parent names
+  // the repo. Elsewhere, omit a branch the name already says, and master/main.
   gitTail(g, tree, name, t) {
     const raw = g.branch ?? "detached";
     const same = (a) => a.toLowerCase() === name.toLowerCase();
-    const branch = same(raw) || raw === "master" || raw === "main" ? "" : raw;
+    const branch = tree || same(raw) || raw === "master" || raw === "main" ? "" : raw;
     const repo = tree || same(g.name) ? "" : g.name;
     const where = [repo, branch].filter(Boolean).join(" \u00b7 ");
     return h_flex()
-      .flex_1()
+      .when(Boolean(tree), el => el.flex_none())
+      .when(!tree, el => el.flex_1())
       .min_w(0)
       .gap(5)
       .justify_end()
@@ -378,6 +379,13 @@ export default class Spaces extends View {
   }
 
   row({ w, i, g, tree }, t) {
+    let name = w.name;
+    if (tree) {
+      // `repos` names spaces <repo>@<worktree>; the parent already says the repo.
+      const prefix = `${g.name}@`;
+      if (name.startsWith(prefix)) name = name.slice(prefix.length);
+      else if (!w.named && g.branch && g.branch !== "(detached)") name = g.branch;
+    }
     const on = w.active;
     const fromIndex = this.pressed === null ? -1 : spaces().findIndex(s => s.id === this.pressed);
     const colors = shared("space.colors") ?? {};
@@ -429,8 +437,11 @@ export default class Spaces extends View {
           .items_center()
           .when(Boolean(tree), el => el.pl(22).child(svg("mods/workspace-chrome/branch.svg").size(13).text_color(t.dim)))
           .when(!tree, el => el.child(h_flex().size(18).flex_none().rounded(5).bg(fill).items_center().justify_center().text_size(10.5).font_bold().text_color("#ffffff").child([...w.name][0]?.toUpperCase() ?? "?")))
-          .child(div().flex_shrink(0).max_w(150).truncate().text_color(t.foreground).child(w.name))
-          .child(g ? this.gitTail(g, tree, w.name, t) : div().flex_1()),
+          .child(div()
+            .when(Boolean(tree), el => el.flex_1().min_w(0))
+            .when(!tree, el => el.flex_shrink(0).max_w(150))
+            .truncate().text_color(t.foreground).child(name))
+          .child(g ? this.gitTail(g, tree, name, t) : div().flex_1()),
       );
   }
 

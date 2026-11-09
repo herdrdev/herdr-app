@@ -11,10 +11,23 @@ function harness(replies: unknown[] = [], storage = new Map<string, string>(), s
   const availability = [{ name: null as string | null, layout: "ready" }];
   const moves: { id: string; index: number }[] = [];
   const handlers: Record<string, (...args: any[]) => void> = {};
-  const element: any = new Proxy({}, { get: (_, method) => (...args: any[]) => {
-    if (String(method).startsWith("on_")) handlers[String(method)] = args.at(-1);
-    return element;
-  } });
+  const texts: string[] = [];
+  const elements: { text?: string; styles: Record<string, any[]> }[] = [];
+  const element = () => {
+    const node = { text: undefined as string | undefined, styles: {} as Record<string, any[]> };
+    elements.push(node);
+    const el: any = new Proxy({}, { get: (_, method) => (...args: any[]) => {
+      if (String(method).startsWith("on_")) handlers[String(method)] = args.at(-1);
+      if (method === "when" && args[0]) return args[1](el);
+      if (method === "child" && typeof args[0] === "string") {
+        texts.push(args[0]);
+        node.text = args[0];
+      }
+      node.styles[String(method)] = args;
+      return el;
+    } });
+    return el;
+  };
   const Spaces = new Function("View", "hc", "localStorage", "spaces", "panes", "run", "v_flex", "h_flex", "div", "svg", "shared", "machines", `${source}; return Spaces;`)(
     class {},
     async (args: string[]) => {
@@ -29,14 +42,14 @@ function harness(replies: unknown[] = [], storage = new Map<string, string>(), s
       expect(name).toBe("space.move");
       moves.push(args);
     },
-    ...Array(4).fill(() => element), () => null, () => availability,
+    ...Array(4).fill(element), () => null, () => availability,
   );
   const view = new Spaces();
   view.reconnecting = {};
   view.folded = new Set(["cloud"]);
   view.refreshMachines = () => {};
   const cx = { timer: { every() {} }, notify() {}, spawn(fn: (cx: unknown) => Promise<unknown>) { tasks.push(fn(cx)); } };
-  return { view, calls, tasks, cx, storage, moves, handlers, snapshot, availability };
+  return { view, calls, tasks, cx, storage, moves, handlers, snapshot, availability, texts, elements };
 }
 
 const machine = { name: "cloud", id: "old", target: "user@host", session: null, via: false };
@@ -116,7 +129,7 @@ test("unexpected transport failures clear the busy state", async () => {
 });
 
 function orderedHarness(ids: string[]) {
-  const h = harness([], new Map(), ids.map(id => ({ id, folder: "/" + id })));
+  const h = harness([], new Map(), ids.map(id => ({ id, name: id, folder: "/" + id })));
   h.view.git = {};
   h.view.shown = new Set(ids);
   h.view.born = {};
@@ -269,6 +282,56 @@ test("settled retries wait for the affected machine to be ready", () => {
   } finally {
     now.mockRestore();
   }
+});
+
+function worktreeRow(name: string, named = true, tree: string | null = "└─", branch = "devbox-workmac-ssh-port", ahead = 0, behind = 0) {
+  const h = harness();
+  h.view.pressed = null;
+  h.view.row({
+    w: { id: "topic", name, named, folder: "/code/proxmox-config-devbox-workmac-ssh-port" },
+    i: 1, tree,
+    g: { name: "proxmox-config", branch, linked: true, ahead, behind },
+  }, {});
+  return h;
+}
+
+test("a nested repos worktree shows its name once, without the repo prefix", () => {
+  const h = worktreeRow("proxmox-config@devbox-workmac-ssh-port");
+  expect(h.texts).toEqual(["devbox-workmac-ssh-port"]);
+  const label = h.elements.find(el => el.text === "devbox-workmac-ssh-port")!;
+  expect(label.styles.flex_1).toBeDefined();
+  expect(label.styles.min_w).toEqual([0]);
+  expect(label.styles.max_w).toBeUndefined();
+});
+
+test("automatic nested names use the branch rather than a repo-prefixed folder", () => {
+  expect(worktreeRow("proxmox-config-devbox-workmac-ssh-port", false).texts).toEqual(["devbox-workmac-ssh-port"]);
+});
+
+test("renamed nested spaces keep their name without a branch suffix", () => {
+  expect(worktreeRow("My networking fix").texts).toEqual(["My networking fix"]);
+});
+
+test("repos worktree names keep their spelling when the branch contains slashes", () => {
+  expect(worktreeRow("proxmox-config@fix-network", true, "└─", "fix/network").texts).toEqual(["fix-network"]);
+});
+
+test("repos worktree names stay unprefixed after a branch switch", () => {
+  expect(worktreeRow("proxmox-config@devbox-workmac-ssh-port", true, "└─", "other-branch").texts).toEqual(["devbox-workmac-ssh-port"]);
+});
+
+test("detached worktrees retain a useful space name", () => {
+  expect(worktreeRow("detached-checkout", false, "└─", "(detached)").texts).toEqual(["detached-checkout"]);
+});
+
+test("nested worktrees keep ahead and behind counters", () => {
+  expect(worktreeRow("My networking fix", true, "└─", "devbox-workmac-ssh-port", 2, 1).texts).toEqual(["My networking fix", "↑2", "↓1"]);
+});
+
+test("standalone worktree spaces keep their full name and git context", () => {
+  const h = worktreeRow("My networking fix", true, null);
+  expect(h.texts).toContain("My networking fix");
+  expect(h.texts).toContain("proxmox-config · devbox-workmac-ssh-port");
 });
 
 test("no reconciliation without a rendered sidebar", () => {
