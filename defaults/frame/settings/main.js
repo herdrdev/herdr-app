@@ -645,6 +645,18 @@ export default class Settings extends View {
           .child(div().text_size(14).text_color(t.foreground).child(m.name))
           .child(div().text_size(12.5).text_color(t.dim).child(`${m.target ?? ""} · ${state} · ${m.version ? `hc ${m.version}` : "hc version unknown"}`)))
         .child(controls.flex_none()));
+    if (m.state === "needs_login") {
+      const command = `hc machine login ${m.name}`;
+      row.child(v_flex().gap(5)
+        .child(div().text_size(12.5).text_color(t.blocked).child("needs a login: run"))
+        .child(h_flex().gap(8).items_center()
+          .child(div().flex_1().min_w(0).text_size(12.5).text_color(t.foreground).child(command))
+          .child(this.button(t, `st-m-login-copy-${m.name}`, this.copiedLogin === command ? "Copied" : "Copy", (_e, cx) => {
+            cx.write_to_clipboard(command);
+            this.copiedLogin = command;
+            cx.notify();
+          }))));
+    }
     if (busy === "update") row.child(div().text_size(12.5).text_color(t.dim).child("Copying this computer's herdr-core. Its terminals keep running."));
     if (edit && !busy) {
       const cancel = this.button(t, `st-m-cancel-${m.name}`, "Cancel", (_e, cx) => { this.machineEdit = null; this.handle.focus(); cx.notify(); });
