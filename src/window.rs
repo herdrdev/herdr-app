@@ -360,6 +360,7 @@ pub struct AppWindow {
     swapped: HashMap<String, String>,
     float_drag: Option<floats::FloatDrag>,
     pane_drag: Option<pane_drag::PaneDrag>,
+    pane_shown: Option<pane_drag::PaneShown>,
     pane_grip_hover: Option<String>,
     /// Each pane's top row the grip sits centered in: its top header, else a strip.
     pane_grip_rows: RefCell<HashMap<String, f32>>,
@@ -478,6 +479,7 @@ impl AppWindow {
             swapped: HashMap::new(),
             float_drag: None,
             pane_drag: None,
+            pane_shown: None,
             pane_grip_hover: None,
             pane_grip_rows: RefCell::default(),
             win_drag: None,
@@ -4015,11 +4017,24 @@ impl AppWindow {
 
     /// `frame`: how panes are wrapped here (inside a framed tab), else None.
     fn render_node(&self, n: &Node, focused: &HashSet<String>, frame: Option<&PaneFrame>, cx: &mut Context<Self>) -> AnyElement {
-        let mut el = div().relative().overflow_hidden().size_full().flex();
         let bounds_map = self.bounds.clone();
         let id = n.id.clone();
-        el = el.child(canvas(move |b, _, _| { bounds_map.borrow_mut().insert(id, b); }, |_, _, _, _| {}).absolute().size_full());
+        let record = canvas(move |b, _, _| { bounds_map.borrow_mut().insert(id, b); }, |_, _, _, _| {}).absolute().size_full();
+        let el = match self.pane_in_motion(n, |cx| self.node_body(n, focused, frame, cx).size_full().into_any_element(), frame, cx) {
+            Some(slot) => slot,
+            None => self.node_body(n, focused, frame, cx).size_full(),
+        };
+        el.child(record).into_any_element()
+    }
+
+    /// A node without its place: drawn in its slot, or where a drag has it.
+    fn node_body(&self, n: &Node, focused: &HashSet<String>, frame: Option<&PaneFrame>, cx: &mut Context<Self>) -> Div {
+        let mut el = div().relative().overflow_hidden().flex();
         el = apply_look(el, n, focused.contains(&n.id));
+        if n.is_pane() {
+            let id = n.id.clone();
+            el = el.debug_selector(move || format!("pane-{id}"));
+        }
         if n.window_drag {
             el = self.window_drag(el, cx);
         }
@@ -4076,7 +4091,7 @@ impl AppWindow {
             }
         };
         let row = frame.and_then(|f| f.header.as_ref()).filter(|h| !h.bottom() && !h.hover()).map(pane_size::header_height);
-        el.children(self.render_floats(n, cx)).children(self.pane_grip(&n.id, row, cx)).into_any_element()
+        el.children(self.render_floats(n, cx)).children(self.pane_grip(&n.id, row, cx))
     }
 
     fn render_block(&self, n: &Node, content: &Content, focused: &HashSet<String>, cx: &mut Context<Self>) -> AnyElement {
@@ -4120,7 +4135,10 @@ impl AppWindow {
                     .into_any_element(),
             },
             Content::Context { .. } => match self.model.active_tab() {
-                Some(c) => self.render_node(c.shown(), focused, self.pane_frame(), cx),
+                Some(c) => match self.pane_preview(c) {
+                    Some(preview) => self.render_node(&preview, focused, self.pane_frame(), cx),
+                    None => self.render_node(c.shown(), focused, self.pane_frame(), cx),
+                },
                 None if self.documents.get("").is_some_and(|s| s.layout() == "loading") => div().size_full().into_any_element(),
                 None => {
                     let key = crate::keys::listing().into_iter().find(|(_, _, a)| a == "space.new").map(|(_, k, _)| format!(" ({k})"));
@@ -4879,13 +4897,14 @@ impl Render for AppWindow {
         if mods::publish_window(self.window_json(window)) {
             self.refresh_snapshot_mods(cx);
         }
+        self.pane_motion(window, cx);
         let focused = self.focused_path(window, cx);
         let tree = self.render_node(&self.chrome, &focused, None, cx);
         let tree = self.window_frame(tree, window, cx);
         let overlays = self.render_overlays(window.viewport_size(), cx);
         let tracker = self.float_tracker(cx);
         let win_tracker = self.window_tracker(cx);
-        let pane_drag = self.pane_drag_layer(cx);
+        let pane_drag = self.pane_drag_layer(&focused, cx);
         div()
             .id("herdr")
             .track_focus(&self.focus)
@@ -4928,7 +4947,7 @@ impl Render for AppWindow {
                 }
             }))
             .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
-                if ev.keystroke.key == "escape" && this.pane_drag.is_some() {
+                if ev.keystroke.key == "escape" && this.pane_held() {
                     this.cancel_pane_drag(cx);
                     cx.stop_propagation();
                 }
@@ -5921,5 +5940,129 @@ export default class SystemToast extends View {
         assert!(!super::adoptable(&record("live"), "sp2", Some("tb1"), None));
         assert!(!super::adoptable(&record("live"), "sp1", Some("tb2"), None));
     }
+
+    /// Two panes side by side, p1 then p2, in a tab that fills the window.
+    fn two_panes(cx: &mut gpui::TestAppContext) -> (gpui::Entity<super::AppWindow>, &mut gpui::VisualTestContext) {
+        let (view, cx) = open_window(cx, "unused", "", serde_json::json!({ "id": "root", "type": "block", "content": { "tab": "active" } }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.model.add_space("sp1", "", "/tmp", crate::model::Tab::new("tb1", "", "p1", "t1"));
+            assert!(this.model.split("p1", crate::layout::Axis::Row, "p2", "t2"));
+            this.sync(window, cx);
+        }));
+        frames(cx, 1);
+        (view, cx)
+    }
+
+    /// Draws `n` frames 16 ms apart.
+    fn frames(cx: &mut gpui::VisualTestContext, n: usize) {
+        for _ in 0..n {
+            cx.executor().advance_clock(std::time::Duration::from_millis(16));
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+        }
+    }
+
+    fn slot(view: &gpui::Entity<super::AppWindow>, cx: &mut gpui::VisualTestContext, id: &str) -> gpui::Bounds<gpui::Pixels> {
+        cx.update(|_, cx| view.read(cx).bounds.borrow()[id])
+    }
+
+    fn drawn(cx: &mut gpui::VisualTestContext, selector: &'static str) -> gpui::Bounds<gpui::Pixels> {
+        cx.debug_bounds(selector).unwrap_or_else(|| panic!("{selector} is drawn"))
+    }
+
+    /// Presses p1's grip and carries it to `to`.
+    fn carry(cx: &mut gpui::VisualTestContext, o1: gpui::Bounds<gpui::Pixels>, to: gpui::Point<gpui::Pixels>) -> gpui::Point<gpui::Pixels> {
+        use gpui::{Modifiers, MouseButton, point, px};
+        let grip = point(o1.center().x, o1.top() + px(9.));
+        cx.simulate_mouse_move(grip, None, Modifiers::none());
+        cx.simulate_mouse_down(grip, MouseButton::Left, Modifiers::none());
+        cx.simulate_mouse_move(to, MouseButton::Left, Modifiers::none());
+        grip
+    }
+
+    fn between(a: gpui::Bounds<gpui::Pixels>, x: gpui::Bounds<gpui::Pixels>, b: gpui::Bounds<gpui::Pixels>) -> bool {
+        let inside = |a: f32, x: f32, b: f32| a.min(b) < x && x < a.max(b);
+        inside(a.top().into(), x.top().into(), b.top().into()) || inside(a.left().into(), x.left().into(), b.left().into())
+    }
+
+    #[test]
+    fn a_carried_pane_follows_the_pointer_and_the_tab_shows_where_it_lands() {
+        in_own_process("pane_carried");
+    }
+
+    #[gpui::test]
+    fn pane_carried(cx: &mut gpui::TestAppContext) {
+        use gpui::{Bounds, Modifiers, MouseButton, point, px};
+        if !running_alone("pane_carried") {
+            return;
+        }
+        let (view, cx) = two_panes(cx);
+        let (o1, o2) = (slot(&view, cx, "p1"), slot(&view, cx, "p2"));
+        let near = o1.center() + point(px(40.), px(30.));
+        let grip = carry(cx, o1, near);
+        let carried = |at: gpui::Point<gpui::Pixels>| Bounds::new(o1.origin + (at - grip), o1.size);
+        assert_eq!(drawn(cx, "pane-p1"), carried(near), "it moves with the pointer, at its own size");
+        frames(cx, 30);
+        assert_eq!((slot(&view, cx, "p1"), drawn(cx, "pane-p2")), (o1, o2), "over its own place nothing moves");
+        // Over p2's bottom quarter, the tab shows p1 below p2.
+        let over = point(o2.center().x, o2.bottom() - px(10.));
+        cx.simulate_mouse_move(over, MouseButton::Left, Modifiers::none());
+        assert_eq!(drawn(cx, "pane-p2"), o2, "p2 starts from where it was");
+        frames(cx, 3);
+        let sliding = drawn(cx, "pane-p2");
+        assert!(sliding != o2 && sliding.size != o2.size, "p2 makes room gradually: {sliding:?}");
+        frames(cx, 60);
+        let (s1, s2) = (slot(&view, cx, "p1"), slot(&view, cx, "p2"));
+        assert!(s2.bottom() <= s1.top() && s1.left() == o1.left() && s1.right() == o2.right(), "p1 below p2: {s1:?} {s2:?}");
+        assert_eq!(drawn(cx, "pane-p2"), s2);
+        assert_eq!(drawn(cx, "pane-p1"), carried(over), "still under the pointer");
+        cx.update(|_, cx| assert!(view.read(cx).model.tab("tb1").unwrap().root.find("p1").is_some()));
+        // Let go: the tab takes that layout and p1 glides into its place.
+        cx.simulate_mouse_up(over, MouseButton::Left, Modifiers::none());
+        cx.update(|_, cx| {
+            let root = &view.read(cx).model.tab("tb1").unwrap().root;
+            let ids: Vec<&str> = root.panes().iter().map(|n| n.id.as_str()).collect();
+            assert_eq!(ids, ["p2", "p1"]);
+        });
+        frames(cx, 5);
+        let gliding = drawn(cx, "pane-p1");
+        assert!(between(carried(over), gliding, s1), "glides: {gliding:?}");
+        frames(cx, 60);
+        assert_eq!((drawn(cx, "pane-p1"), drawn(cx, "pane-p2")), (s1, s2));
+        cx.update(|_, cx| assert!(view.read(cx).pane_drag.is_none()));
+    }
+
+    #[test]
+    fn escape_sends_a_carried_pane_back() {
+        in_own_process("pane_sent_back");
+    }
+
+    #[gpui::test]
+    fn pane_sent_back(cx: &mut gpui::TestAppContext) {
+        use gpui::{Bounds, point, px};
+        if !running_alone("pane_sent_back") {
+            return;
+        }
+        let (view, cx) = two_panes(cx);
+        let (o1, o2) = (slot(&view, cx, "p1"), slot(&view, cx, "p2"));
+        let over = point(o2.center().x, o2.bottom() - px(10.));
+        let grip = carry(cx, o1, over);
+        frames(cx, 60);
+        let moved = drawn(cx, "pane-p2");
+        assert!(moved != o2);
+        cx.simulate_keystrokes("escape");
+        frames(cx, 5);
+        assert!(between(moved, drawn(cx, "pane-p2"), o2), "p2 slides back");
+        assert!(between(Bounds::new(o1.origin + (over - grip), o1.size), drawn(cx, "pane-p1"), o1), "p1 glides back");
+        frames(cx, 60);
+        assert_eq!((drawn(cx, "pane-p1"), drawn(cx, "pane-p2")), (o1, o2));
+        cx.update(|_, cx| {
+            let this = view.read(cx);
+            assert!(this.pane_drag.is_none());
+            let ids: Vec<&str> = this.model.tab("tb1").unwrap().root.panes().iter().map(|n| n.id.as_str()).collect();
+            assert_eq!(ids, ["p1", "p2"]);
+        });
+    }
+
 
 }

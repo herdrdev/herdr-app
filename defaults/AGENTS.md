@@ -243,8 +243,9 @@ Properties any node can have:
   Unlike `resizable`, it inherits: the nearest explicit ancestor wins, through the
   tab tree and then the layout's tab block and its ancestors. Root `"movable": false`
   opts the layout out. Composition terminal blocks aren't tab panes and never drag.
-  Center drop swaps panes; an edge drop places beside it. Escape or dropping outside
-  another pane cancels. Zoomed tabs and one-pane tabs don't drag. The grip appears
+  Center drop swaps panes; an edge drop places beside it. The dragged pane follows
+  the pointer while the tab shows where it lands; Escape or dropping outside
+  another pane sends it back. Zoomed tabs and one-pane tabs don't drag. The grip appears
   on top-edge hover, regardless of the header's position or presence. Only the grip
   starts dragging; header mods don't need drag handlers. `panes()` exposes `movable`.
 - `floating`: blocks over this node (below).
