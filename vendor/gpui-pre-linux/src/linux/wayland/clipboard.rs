@@ -19,7 +19,8 @@ pub(crate) const TEXT_MIME_TYPES: [&str; 3] =
 pub(crate) const FILE_LIST_MIME_TYPE: &str = "text/uri-list";
 
 /// Text mime types that we'll accept from other programs.
-pub(crate) const ALLOWED_TEXT_MIME_TYPES: [&str; 2] = ["text/plain;charset=utf-8", "UTF8_STRING"];
+// HERDR: accept plain text too; a source need not offer a charset-qualified alias.
+pub(crate) const ALLOWED_TEXT_MIME_TYPES: [&str; 3] = TEXT_MIME_TYPES;
 
 pub(crate) struct Clipboard {
     connection: Connection,
@@ -253,5 +254,68 @@ impl Clipboard {
                 },
             )
             .unwrap();
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use std::{cell::RefCell, io::Write, os::unix::net::UnixStream};
+
+    struct TextSource {
+        bytes: Vec<u8>,
+        requested: RefCell<Vec<String>>,
+    }
+
+    impl ReceiveData for TextSource {
+        fn receive_data(&self, mime_type: String, fd: BorrowedFd<'_>) {
+            self.requested.borrow_mut().push(mime_type);
+            File::from(fd.try_clone_to_owned().unwrap())
+                .write_all(&self.bytes)
+                .unwrap();
+        }
+    }
+
+    #[test]
+    fn plain_text_without_an_alias_is_read_as_utf8() {
+        // No compositor is needed: the source writes into the real receive pipe.
+        let (socket, _server) = UnixStream::pair().unwrap();
+        let connection = Connection::from_socket(socket).unwrap();
+        for mime in TEXT_MIME_TYPES {
+            let mut offer = DataOffer::new(TextSource {
+                bytes: "pasted text\r\nRīga 🦒".as_bytes().to_vec(),
+                requested: RefCell::new(Vec::new()),
+            });
+            offer.add_mime_type(mime.into());
+            let item = offer.read_text(&connection).expect(mime);
+            assert_eq!(item.text().as_deref(), Some("pasted text\nRīga 🦒"));
+            assert_eq!(*offer.inner.requested.borrow(), [mime]);
+        }
+    }
+
+    #[test]
+    fn non_text_offers_are_not_requested_as_text() {
+        let (socket, _server) = UnixStream::pair().unwrap();
+        let connection = Connection::from_socket(socket).unwrap();
+        let mut offer = DataOffer::new(TextSource {
+            bytes: b"not text".to_vec(),
+            requested: RefCell::new(Vec::new()),
+        });
+        offer.add_mime_type("image/png".into());
+        assert!(offer.read_text(&connection).is_none());
+        assert!(offer.inner.requested.borrow().is_empty());
+    }
+
+    #[test]
+    fn invalid_utf8_is_not_pasted_as_text() {
+        let (socket, _server) = UnixStream::pair().unwrap();
+        let connection = Connection::from_socket(socket).unwrap();
+        let mut offer = DataOffer::new(TextSource {
+            bytes: vec![0xff],
+            requested: RefCell::new(Vec::new()),
+        });
+        offer.add_mime_type("text/plain".into());
+        assert!(offer.read_text(&connection).is_none());
+        assert_eq!(*offer.inner.requested.borrow(), ["text/plain"]);
     }
 }
