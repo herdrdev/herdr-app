@@ -906,7 +906,10 @@ fn module(inst: Instance, copy: u64) -> HostModule {
     let feedback_from = inst.props.get("from").and_then(Value::as_str).unwrap_or("person").to_owned();
     let feedback_layout = inst.props.get("layout").and_then(Value::as_str).unwrap_or("other").to_owned();
     let (cmd_tx, commands) = async_channel::unbounded::<String>();
-    COMMANDS.with(|c| c.borrow_mut().push((copy, inst.name.clone(), cmd_tx)));
+    COMMANDS.with_borrow_mut(|commands| {
+        commands.retain(|(_, _, tx)| !tx.is_closed());
+        commands.push((copy, inst.name.clone(), cmd_tx));
+    });
     HostModule::new("herdr")
         .declarations(DECLARATIONS)
         .async_function("exec", |a| {
@@ -1275,6 +1278,22 @@ mod tests {
             assert!(!snapshot_changed(1));
             drop(reads);
             assert!(!snapshot_changed(1));
+        }).join().unwrap();
+    }
+
+    #[test]
+    fn loading_copies_reclaims_closed_command_channels_without_dispatch() {
+        std::thread::spawn(|| {
+            let inst = Instance { name: "test".into(), props: Value::Null };
+            let live = module(inst.clone(), 1);
+            for copy in 2..102 {
+                drop(module(inst.clone(), copy));
+                COMMANDS.with_borrow(|commands| assert!(commands.len() <= 2));
+            }
+            drop(live);
+            let last = module(inst, 102);
+            COMMANDS.with_borrow(|commands| assert_eq!(commands.len(), 1));
+            drop(last);
         }).join().unwrap();
     }
 

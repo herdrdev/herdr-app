@@ -33,6 +33,33 @@ pub enum Need {
     Fix(Mismatch),
 }
 
+impl Need {
+    pub fn connection(error: anyhow::Error) -> Self {
+        match error.downcast_ref::<crate::hc::ConnectError>() {
+            Some(error) => Self::Connect(error.to_string()),
+            None => Self::Install,
+        }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::Need;
+
+    #[test]
+    fn unreadable_core_connections_offer_installation_instead_of_retry() {
+        let error = anyhow::anyhow!("bad hello reply from core: EOF");
+        assert!(matches!(Need::connection(error), Need::Install));
+    }
+
+    #[test]
+    fn structured_core_errors_keep_the_recovery_hint_and_retry() {
+        let message = "the core pipe cannot be accessed\n\ntry again without elevation";
+        let error = anyhow::Error::new(crate::hc::ConnectError(message.into())).context("connecting");
+        assert!(matches!(Need::connection(error), Need::Connect(text) if text == message));
+    }
+}
+
 enum State {
     Ready,
     Busy(&'static str),
@@ -77,7 +104,7 @@ impl Setup {
                 }
             },
             Err(e) => {
-                self.need = Need::Connect(format!("{e:#}"));
+                self.need = Need::connection(e);
                 self.state = State::Ready;
             }
         }
