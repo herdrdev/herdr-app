@@ -869,7 +869,7 @@ impl TerminalView {
         let up = steps.y > 0;
         if g.vt.mouse_tracking() {
             let ((x, y), size) = mouse_at(&g, ev.position);
-            let out = scroll_mouse_bytes(&mut g.vt, steps, x, y, size);
+            let out = scroll_mouse_bytes(&mut g.vt, steps, ev.modifiers, x, y, size);
             if let Some(ch) = g.channel {
                 g.core.input(ch, &out);
             }
@@ -926,7 +926,7 @@ impl TerminalView {
         });
         let ((x, y), size) = mouse_at(&g, pos);
         let any = !g.buttons_down.is_empty();
-        let bytes = g.vt.encode_mouse(action, b, 0, x, y, size, any);
+        let bytes = g.vt.encode_mouse(action, b, mouse_mods(mods), x, y, size, any);
         if let Some(ch) = g.channel {
             g.core.input(ch, &bytes);
         }
@@ -1251,6 +1251,20 @@ fn paste_image_bytes(format: ImageFormat, bytes: &[u8]) -> Option<(ImageFormat, 
     Some((ImageFormat::Png, std::borrow::Cow::Owned(png.into_inner())))
 }
 
+fn mouse_mods(m: Modifiers) -> GhosttyMods {
+    let mut mods = 0;
+    if m.shift {
+        mods |= GHOSTTY_MODS_SHIFT as GhosttyMods;
+    }
+    if m.alt {
+        mods |= GHOSTTY_MODS_ALT as GhosttyMods;
+    }
+    if m.control {
+        mods |= GHOSTTY_MODS_CTRL as GhosttyMods;
+    }
+    mods
+}
+
 fn link_mods(m: &Modifiers) -> bool {
     let key = if cfg!(target_os = "macos") { m.platform && !m.control } else { m.control && !m.platform };
     key && !m.alt && !m.shift
@@ -1270,7 +1284,7 @@ fn scroll_delta_steps(scrolled: &mut Point<f32>, delta: ScrollDelta, phase: Touc
     point(scroll_steps(&mut scrolled.x, phase, lines.x, cols as f32), scroll_steps(&mut scrolled.y, phase, lines.y, rows as f32))
 }
 
-fn scroll_mouse_bytes(vt: &mut Vt, steps: Point<i32>, x: f32, y: f32, size: (u32, u32, f32, f32)) -> Vec<u8> {
+fn scroll_mouse_bytes(vt: &mut Vt, steps: Point<i32>, mods: Modifiers, x: f32, y: f32, size: (u32, u32, f32, f32)) -> Vec<u8> {
     let mut out = Vec::new();
     for (steps, positive, negative) in [
         (steps.y, GHOSTTY_MOUSE_BUTTON_FOUR, GHOSTTY_MOUSE_BUTTON_FIVE),
@@ -1278,7 +1292,7 @@ fn scroll_mouse_bytes(vt: &mut Vt, steps: Point<i32>, x: f32, y: f32, size: (u32
     ] {
         let button = if steps > 0 { positive } else { negative };
         for _ in 0..steps.unsigned_abs() {
-            out.extend(vt.encode_mouse(GHOSTTY_MOUSE_ACTION_PRESS, Some(button), 0, x, y, size, false));
+            out.extend(vt.encode_mouse(GHOSTTY_MOUSE_ACTION_PRESS, Some(button), mouse_mods(mods), x, y, size, false));
         }
     }
     out
@@ -3365,6 +3379,46 @@ mod tests {
     use gpui::{KeyDownEvent, Keystroke, Modifiers};
 
     #[test]
+    fn mouse_modifiers_reach_clicks_drags_and_wheels_in_each_encoding() {
+        use ghostty_sys::*;
+        let size = (80, 24, 10.0, 20.0);
+        for mode in [0, 1005, 1006, 1015, 1016] {
+            for (mods, bits) in [
+                (Modifiers::default(), 0),
+                (Modifiers { shift: true, ..Modifiers::default() }, 4),
+                (Modifiers { alt: true, ..Modifiers::default() }, 8),
+                (Modifiers { control: true, ..Modifiers::default() }, 16),
+                (Modifiers { shift: true, alt: true, control: true, ..Modifiers::default() }, 28),
+            ] {
+                let mut vt = Vt::new(80, 24);
+                vt.write(b"\x1b[?1002h");
+                if mode != 0 {
+                    vt.write(format!("\x1b[?{mode}h").as_bytes());
+                }
+                let expected = |button: u8, release, x: u8| match mode {
+                    1006 => format!("\x1b[<{};{};2{}", button + bits, x / 10 + 1, if release { 'm' } else { 'M' }).into_bytes(),
+                    1016 => format!("\x1b[<{};{x};25{}", button + bits, if release { 'm' } else { 'M' }).into_bytes(),
+                    1015 => format!("\x1b[{};{};2M", if release { 3 } else { button } + bits + 32, x / 10 + 1).into_bytes(),
+                    _ => vec![0x1b, b'[', b'M', if release { 3 } else { button } + bits + 32, x / 10 + 33, 34],
+                };
+                for (action, button, release, x) in [
+                    (GHOSTTY_MOUSE_ACTION_PRESS, 0, false, 15),
+                    (GHOSTTY_MOUSE_ACTION_MOTION, 32, false, 25),
+                    (GHOSTTY_MOUSE_ACTION_RELEASE, 0, true, 25),
+                ] {
+                    assert_eq!(
+                        vt.encode_mouse(action, Some(GHOSTTY_MOUSE_BUTTON_LEFT), super::mouse_mods(mods), x as f32, 25.0, size, true),
+                        expected(button, release, x),
+                        "mode {mode}, modifiers {bits}, action {action}",
+                    );
+                }
+                let wheels = super::scroll_mouse_bytes(&mut vt, gpui::point(1, 1), mods, 15.0, 25.0, size);
+                assert_eq!(wheels, [expected(64, false, 15), expected(66, false, 15)].concat(), "mode {mode}, modifiers {bits}");
+            }
+        }
+    }
+
+    #[test]
     fn touchpad_moves_add_up_to_whole_lines() {
         use gpui::TouchPhase::*;
         let mut s = 0.0;
@@ -3391,12 +3445,12 @@ mod tests {
             (point(-10.0, 20.0), b"\x1b[<64;2;2M\x1b[<67;2;2M".as_slice()),
         ] {
             let steps = super::scroll_delta_steps(&mut scrolled, ScrollDelta::Pixels(point(px(delta.x), px(delta.y))), TouchPhase::Moved, cell, 80, 24);
-            assert_eq!(super::scroll_mouse_bytes(&mut vt, steps, 15.0, 25.0, (80, 24, 10.0, 20.0)), expected);
+            assert_eq!(super::scroll_mouse_bytes(&mut vt, steps, Modifiers::default(), 15.0, 25.0, (80, 24, 10.0, 20.0)), expected);
         }
         let steps = super::scroll_delta_steps(&mut scrolled, ScrollDelta::Lines(point(1.0, -1.0)), TouchPhase::Moved, cell, 80, 24);
         let count = if cfg!(target_os = "macos") { 3 } else { 1 };
         assert_eq!(steps, point(1, -count));
-        assert_eq!(super::scroll_mouse_bytes(&mut vt, steps, 15.0, 25.0, (80, 24, 10.0, 20.0)), [b"\x1b[<65;2;2M".repeat(count as usize), b"\x1b[<66;2;2M".to_vec()].concat());
+        assert_eq!(super::scroll_mouse_bytes(&mut vt, steps, Modifiers::default(), 15.0, 25.0, (80, 24, 10.0, 20.0)), [b"\x1b[<65;2;2M".repeat(count as usize), b"\x1b[<66;2;2M".to_vec()].concat());
     }
 
     #[test]
