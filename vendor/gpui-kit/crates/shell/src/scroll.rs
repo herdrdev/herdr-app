@@ -26,6 +26,8 @@ pub(crate) struct Scrollable<E: InteractiveElement + Styled + ParentElement + El
     axis: ScrollbarAxis,
     // HERDR: `mode(...)` on an `overflow_*_scrollbar` element.
     mode: Option<gpui_base::ScrollbarMode>,
+    // HERDR: a script's `ScrollHandle`, in place of the keyed one.
+    handle: Option<ScrollHandle>,
 }
 
 impl<E> Scrollable<E>
@@ -39,7 +41,13 @@ where
             element,
             axis: axis.into(),
             mode: None,
+            handle: None,
         }
+    }
+
+    pub(crate) fn handle(mut self, handle: Option<ScrollHandle>) -> Self {
+        self.handle = handle;
+        self
     }
 
     pub(crate) fn mode(mut self, mode: Option<gpui_base::ScrollbarMode>) -> Self {
@@ -89,7 +97,10 @@ where
     E: InteractiveElement + Styled + ParentElement + Element + 'static,
 {
     fn render(mut self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let scroll_handle = scroll_handle_for(&self.id, window, cx);
+        let scroll_handle = match self.handle.take() {
+            Some(handle) => handle,
+            None => scroll_handle_for(&self.id, window, cx),
+        };
 
         // Preserve the caller-requested size on the wrapper, while keeping the
         // caller's element as the actual scroll-tracked layout container.

@@ -2254,20 +2254,25 @@ fn flex_element(
         });
     }
     let stateful = components::tooltip::with_tooltip(stateful, &behavior, window);
+    // HERDR: a script's `ScrollHandle` holds this area's position.
+    let scroll_handle = behavior.virtual_scroll.and_then(|handle| runtime.entities().scroll(handle));
     if behavior.scrollbar {
         let mut stateful = stateful;
         stateful.style().refine(&refinement);
         stateful.extend(children);
         let element = match (scroll_x, scroll_y) {
             (true, true) => Scrollable::new(stateful, ScrollbarAxis::Both)
+                .handle(scroll_handle.clone())
                 .id(identity.clone())
                 .mode(behavior.scrollbar_mode)
                 .into_any_element(),
             (true, false) => Scrollable::new(stateful, ScrollbarAxis::Horizontal)
+                .handle(scroll_handle.clone())
                 .id(identity.clone())
                 .mode(behavior.scrollbar_mode)
                 .into_any_element(),
             (false, true) => Scrollable::new(stateful, ScrollbarAxis::Vertical)
+                .handle(scroll_handle.clone())
                 .id(identity.clone())
                 .mode(behavior.scrollbar_mode)
                 .into_any_element(),
@@ -2281,6 +2286,15 @@ fn flex_element(
     // `overflow_*_scrollbar` path above is deliberately left out of this: its
     // `Scrollable` owns a position of its own, on the inner area it builds.
     let stateful = match (scroll_x, scroll_y) {
+        _ if let Some(handle) = &scroll_handle => {
+            let stateful = stateful.track_scroll(handle);
+            match (scroll_x, scroll_y) {
+                (true, true) => stateful.overflow_scroll(),
+                (true, false) => stateful.overflow_x_scroll(),
+                (false, true) => stateful.overflow_y_scroll(),
+                (false, false) => stateful,
+            }
+        }
         (true, true) => {
             components::scrollbar::track_scroll_position(stateful, &identity, window, cx)
                 .overflow_scroll()

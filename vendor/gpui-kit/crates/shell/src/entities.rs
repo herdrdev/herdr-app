@@ -169,6 +169,11 @@ enum Record {
         handle: VirtualListScrollHandle,
         application: Option<Rc<ApplicationGeneration>>,
     },
+    // HERDR: a plain scroll area's position, so a script can read and move it.
+    Scroll {
+        handle: gpui::ScrollHandle,
+        application: Option<Rc<ApplicationGeneration>>,
+    },
 }
 
 // HERDR: script editor construction options, decoded before retaining any state.
@@ -309,6 +314,7 @@ impl EntityStore {
             Record::Focus { .. } => Some("FocusHandle"),
             Record::Dock { .. } => Some("DockArea"),
             Record::VirtualScroll { .. } => Some("VirtualListScrollHandle"),
+            Record::Scroll { .. } => Some("ScrollHandle"),
         }
     }
 
@@ -786,6 +792,21 @@ impl EntityStore {
         })
     }
 
+    // HERDR: a plain scroll area's position.
+    pub fn create_scroll(
+        &mut self,
+        application: Option<Rc<ApplicationGeneration>>,
+    ) -> Result<EntityHandle, EntityLimitError> {
+        self.push(Record::Scroll { handle: gpui::ScrollHandle::new(), application })
+    }
+
+    pub fn scroll(&self, handle: EntityHandle) -> Option<gpui::ScrollHandle> {
+        match self.record(handle) {
+            Some(Record::Scroll { handle, .. }) => Some(handle.clone()),
+            _ => None,
+        }
+    }
+
     /// The scroll position behind a handle, if it is still live and belongs
     /// here.
     pub fn virtual_scroll(&self, handle: EntityHandle) -> Option<VirtualListScrollHandle> {
@@ -1025,6 +1046,9 @@ impl EntityStore {
                     application: owner, ..
                 }
                 | Record::VirtualScroll {
+                    application: owner, ..
+                }
+                | Record::Scroll {
                     application: owner, ..
                 }
                 | Record::Dock {

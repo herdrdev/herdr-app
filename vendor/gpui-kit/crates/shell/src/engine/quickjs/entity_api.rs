@@ -1205,6 +1205,54 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
         }),
     )?;
 
+    // HERDR: a plain scroll area's position. Offsets cross as distances
+    // scrolled (0 at the start, growing), not GPUI's negative content offset.
+    let create_scroll = runtime.clone();
+    globals.set(
+        "__scroll_new",
+        Func::from(move |ctx: Ctx<'_>| -> JsResult<EntityHandle> {
+            refuse_creation_in_render(&ctx, "ScrollHandle.new()")?;
+            alive(&ctx, &create_scroll)?
+                .entities()
+                .create_scroll(scope::current_application_generation())
+                .map_err(|_| entity_limit_reached(&ctx))
+        }),
+    )?;
+    let scroll_offset = runtime.clone();
+    globals.set(
+        "__scroll_offset",
+        Func::from(move |ctx: Ctx<'_>, handle: EntityHandle| -> JsResult<Vec<f64>> {
+            let o = live_scroll(&ctx, &scroll_offset, handle)?.offset();
+            Ok(vec![-f64::from(f32::from(o.x)), -f64::from(f32::from(o.y))])
+        }),
+    )?;
+    let scroll_max = runtime.clone();
+    globals.set(
+        "__scroll_max_offset",
+        Func::from(move |ctx: Ctx<'_>, handle: EntityHandle| -> JsResult<Vec<f64>> {
+            let m = live_scroll(&ctx, &scroll_max, handle)?.max_offset();
+            Ok(vec![f64::from(f32::from(m.x)), f64::from(f32::from(m.y))])
+        }),
+    )?;
+    let scroll_set = runtime.clone();
+    globals.set(
+        "__scroll_set_offset",
+        Func::from(move |ctx: Ctx<'_>, handle: EntityHandle, x: f64, y: f64| -> JsResult<()> {
+            let scroll = live_scroll(&ctx, &scroll_set, handle)?;
+            let max = scroll.max_offset();
+            let clamp = |v: f64, max: gpui::Pixels| gpui::px(-(v as f32).clamp(0., f32::from(max).max(0.)));
+            scroll.set_offset(gpui::point(clamp(x, max.x), clamp(y, max.y)));
+            Ok(())
+        }),
+    )?;
+    let discard_scroll = runtime.clone();
+    globals.set(
+        "__scroll_release",
+        Func::from(move |handle: EntityHandle| {
+            discard_scroll.upgrade().is_some_and(|runtime| runtime.entities().release(handle))
+        }),
+    )?;
+
     let discard_virtual_scroll = runtime.clone();
     globals.set(
         "__virtual_scroll_release",
@@ -1647,6 +1695,17 @@ fn live_virtual_scroll(
     alive(ctx, runtime)?
         .entities()
         .virtual_scroll(handle)
+        .ok_or_else(|| Exception::throw_type(ctx, "this scroll handle has been released"))
+}
+
+fn live_scroll(
+    ctx: &Ctx<'_>,
+    runtime: &Weak<ShellRuntime>,
+    handle: EntityHandle,
+) -> JsResult<gpui::ScrollHandle> {
+    alive(ctx, runtime)?
+        .entities()
+        .scroll(handle)
         .ok_or_else(|| Exception::throw_type(ctx, "this scroll handle has been released"))
 }
 

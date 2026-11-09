@@ -5679,6 +5679,42 @@ export default class Probe extends View {
         assert_eq!(crate::mods::shared("probe.log"), Some(json!(["move 200", "move 300", "up", "up"])));
     }
 
+    #[test]
+    fn a_scroll_handle_reads_and_moves_a_plain_scroll_area() {
+        in_own_process("scroll_handle");
+    }
+
+    #[gpui::test]
+    fn scroll_handle(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("scroll_handle") {
+            return;
+        }
+        let probe = r#"import { View, div } from "gpui-kit";
+import { ScrollHandle } from "gpui-base";
+import { shared, setShared } from "herdr";
+export default class Probe extends View {
+  init() { this.s = ScrollHandle.new(); }
+  render() {
+    if (shared("probe.go") && !this.done) {
+      this.done = true;
+      const seen = [this.s.max_offset().x];
+      for (const x of [50, 1e6, -5]) { this.s.set_offset({ x }); seen.push(this.s.offset().x); }
+      setShared("probe.seen", seen);
+    }
+    return div().id("row").w(200).h(20).flex().overflow_x_scroll().track_scroll(this.s)
+      .child(div().w(500).h(20).flex_none());
+  }
+}
+"#;
+        let layout = json!({ "id": "root", "type": "block", "content": { "mod": "scroll-probe" } });
+        let (_view, cx) = open_window(cx, "scroll-probe", probe, layout);
+        cx.run_until_parked();
+        crate::mods::set_shared("probe.go".into(), json!(true));
+        cx.run_until_parked();
+        assert_eq!(crate::mods::shared("probe.seen"), Some(json!([300, 50, 300, 0])));
+    }
+
     include!("window/pane_size_tests.rs");
 
     /// The whole path, in a real window: a layout names the toast mod, a

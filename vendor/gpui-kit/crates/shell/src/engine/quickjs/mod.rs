@@ -1182,6 +1182,7 @@ pub(crate) mod exports {
         "v_virtual_list",
         "h_virtual_list",
         "VirtualListScrollHandle",
+        "ScrollHandle",
         // Text editing.
         "Input",
         "InputState",
@@ -5750,7 +5751,7 @@ globalThis.__gpui = (() => {
   methods.track_scroll = function (handle) {
     if (typeof handle?.__handle !== "number") {
       throw new TypeError(
-        "track_scroll(handle) expects a VirtualListScrollHandle from VirtualListScrollHandle.new()",
+        "track_scroll(handle) expects a VirtualListScrollHandle or ScrollHandle from its new()",
       );
     }
     __apply(this.__id, "track_scroll", [handle.__handle]);
@@ -6583,6 +6584,15 @@ globalThis.__gpui = (() => {
     release: () => __virtual_scroll_release(handle),
   });
 
+  // HERDR: a plain scroll area's position, in distances scrolled.
+  const scrollHandle = (handle) => ({
+    __handle: handle,
+    offset: () => { const [x, y] = __scroll_offset(handle); return { x, y }; },
+    max_offset: () => { const [x, y] = __scroll_max_offset(handle); return { x, y }; },
+    set_offset: ({ x = 0, y = 0 } = {}) => __scroll_set_offset(handle, Number(x), Number(y)),
+    release: () => __scroll_release(handle),
+  });
+
   let deferInit = false;
   globalThis.__construct = (Class) => {
     deferInit = true;
@@ -7071,6 +7081,7 @@ globalThis.__gpui = (() => {
     list: lazyList(__list, "list", true),
     uniform_list: lazyList(__uniform_list, "uniform_list", false),
     VirtualListScrollHandle: { new: () => virtualScrollHandle(__virtual_scroll_new()) },
+    ScrollHandle: { new: () => scrollHandle(__scroll_new()) },
     Scrollbar: {
       new: (id) => element(__scrollbar(String(id))),
       // `horizontal` and `vertical` are `new` plus the orientation the group

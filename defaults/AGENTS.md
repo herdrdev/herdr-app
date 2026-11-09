@@ -943,6 +943,10 @@ and other interactive controls too.
 `.capture_pointer()` on a `div`, `h_flex` or `v_flex` makes a drag: after a
 left press on it, its `on_mouse_move` and left `on_mouse_up` keep firing
 wherever the pointer goes in the window, until that release.
+`ScrollHandle.new()` (from `gpui-base`, in `init`) and `.track_scroll(handle)`
+on an `overflow_*_scroll` or `overflow_*_scrollbar` element let the script read
+and move it: `offset()`, `max_offset()`, `set_offset({ x, y })`, in distances
+scrolled from the start; a set shows on the next frame.
 `.when(cond, (el) => …)`, `.children([...])`. Controls from `gpui-base`
 (`Button`, `Checkbox`, `Switch`, `InputState` + `Input`) are unstyled: style
 them. Text: `TextView.markdown(id, text)` renders markdown; `EditorState.new({
