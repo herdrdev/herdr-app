@@ -2,6 +2,8 @@ import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
 import { spaces, panes, run, openOverlay, theme, window, shared, layout, settings } from "herdr";
 
+const TAB_GAP = 3;
+
 function find(node, id) {
   if (node?.id === id) return node;
   for (const child of node?.children ?? []) {
@@ -15,6 +17,41 @@ export default class Tabs extends View {
   init() {
     this.pressed = null;
     this.panels = JSON.parse(localStorage.getItem("panels") ?? "{}");
+    // The tab strip scrolls by sliding its row left: offset is how far, in px.
+    this.offset = 0; this.widths = {}; this.viewW = 0; this.contentW = 0;
+    this.seen = null; this.reveal = false; this.quick = false;
+  }
+
+  maxOffset() { return Math.max(0, this.contentW - this.viewW); }
+
+  scrollTo(x, quick = false) {
+    this.quick = quick;
+    this.offset = Math.max(0, Math.min(x, this.maxOffset()));
+  }
+
+  measure(id, width, cx) {
+    if (this.widths[id] === width) return;
+    this.widths[id] = width; this.reveal = true; cx.notify();
+  }
+
+  // When the shown tab, the tab count or the space changes, slide just enough to show the active tab
+  // (a new tab opens at the end, so the strip follows it right). Manual scrolling stays put otherwise.
+  follow(space, shown) {
+    const active = shown.findIndex(c => c.active);
+    const key = `${space?.id}|${shown.map(c => c.id).join(",")}|${shown[active]?.id}`;
+    if (key !== this.seen) {
+      if (this.seen?.split("|")[0] !== String(space?.id)) this.offset = 0;
+      this.seen = key; this.reveal = true;
+    }
+    const widths = shown.map(c => this.widths[c.id]);
+    if (widths.some(w => w === undefined)) return;
+    this.contentW = widths.reduce((sum, w) => sum + w, 0) + TAB_GAP * Math.max(0, shown.length - 1);
+    this.offset = Math.min(this.offset, this.maxOffset());
+    if (!this.reveal || !this.viewW || active < 0) return;
+    this.reveal = false;
+    const start = widths.slice(0, active).reduce((sum, w) => sum + w + TAB_GAP, 0), end = start + widths[active];
+    if (start < this.offset) this.scrollTo(start);
+    else if (end > this.offset + this.viewW) this.scrollTo(end - this.viewW);
   }
 
   // The side panel is remembered per space: switching shows that space's choice
@@ -56,6 +93,7 @@ export default class Tabs extends View {
       const program = panes().find(p => p.tab === c.id && p.program?.agent)?.program ?? panes().find(p => p.tab === c.id)?.program;
       const name = /^tb\d+$/.test(c.name) ? program?.name ?? "Terminal" : c.name;
       return h_flex().id(`tab-${c.id}`).h(29).px(10).gap(7).rounded(7).items_center().flex_none().text_size(12.8)
+        .on_size_change((s, cx) => this.measure(c.id, s.width, cx))
         .border(1).border_color(c.active ? t.border : t.chrome).bg(c.active ? t.raised : t.chrome).text_color(c.active ? t.foreground : t.muted)
         .hover(s => s.bg(t.hover))
         .on_mouse_down("left", (e, cx) => { cx.stop_propagation(); this.pressed = i; if (e.click_count === 2) run("tab.rename", { id: c.id }); })
@@ -71,6 +109,19 @@ export default class Tabs extends View {
         .when(c.status === "blocked" || c.status === "done", el => el.child(div().size(6).rounded(3).bg(t[c.status])))
         .when(c.active, el => el.child(div().id(`close-${c.id}`).text_color(t.dim).on_mouse_down("left", stop).on_click((_e, cx) => { cx.stop_propagation(); run("tab.close", { id: c.id }); }).child(svg("mods/pane/close.svg").size(12))));
     };
+    this.follow(space, shown);
+    const max = this.maxOffset();
+    const strip = h_flex().id("tab-viewport").flex_1().min_w(0).h_full().items_center().overflow_hidden()
+      .on_size_change((s, cx) => { if (Math.abs(s.width - this.viewW) >= 0.5) { this.viewW = s.width; this.reveal = true; cx.notify(); } })
+      // Sideways swipes and shift+wheel scroll the strip; a plain wheel still switches tabs.
+      .on_scroll_wheel((e, cx) => {
+        const dx = Math.abs(e.delta.x) > Math.abs(e.delta.y) ? e.delta.x : e.modifiers.shift ? e.delta.y : 0;
+        if (!dx || max <= 0) return;
+        cx.stop_propagation(); this.scrollTo(this.offset - dx, true); cx.notify();
+      })
+      .child(h_flex().id("tab-row").relative().flex_none().h_full().items_center().gap(TAB_GAP)
+        .left(-this.offset).transition("left", { duration: this.quick ? 120 : 200, easing: "ease-out" })
+        .children(shown.map(item)));
     const root = layout(), sidebar = find(root, "sidebar"), w = window();
     // Old saved rails and a dragged-narrow sidebar can be smaller than the window buttons.
     const lightsPadding = w?.platform === "macos" && w.titlebar === "none" && !w.fullscreen && root?.traffic_lights
@@ -92,7 +143,7 @@ export default class Tabs extends View {
     return h_flex().size_full().min_w(0).px(10).pl(lightsPadding).gap(3).items_center().bg(t.chrome).border_b(1).border_color(t.border)
       .on_mouse_up("left", () => { this.pressed = null; })
       .on_scroll_wheel(e => { if (Math.abs(e.delta.y) >= 1) run(e.delta.y > 0 ? "tab.prev" : "tab.next"); })
-      .child(h_flex().id("tab-scroll").flex_1().min_w(0).h_full().items_center().gap(3).overflow_x_scrollbar().children(shown.map(item)))
+      .child(strip)
       .child(button("tab-new", "+", () => openOverlay({ mod: "new-menu", kind: "popup", width: 250, height: 512 })))
       .when(enabled.includes("files"), el => el.child(panelButton("files", "Files", "mods/files/file.svg")))
       .when(enabled.includes("changes"), el => el.child(panelButton("changes", "Changes", "mods/changes/changes.svg")))
