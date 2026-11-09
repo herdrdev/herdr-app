@@ -445,6 +445,22 @@ fn startup_target<'a>(running: &str, staged: Option<&'a str>, relaunched: Option
 
 /// Recover a staged hotfix even when the previous window never quit cleanly.
 /// The inherited expected version allows only one automatic relaunch.
+/// Windows can't rename a folder that is a process's working directory, and a
+/// launcher or shortcut may start the app in its own folder. Leave it before
+/// the core and terminals inherit it, or no update could ever be put in place.
+pub fn leave_install_folder() {
+    if !cfg!(windows) {
+        return;
+    }
+    let (Some(root), Ok(cwd)) = (root(), std::env::current_dir()) else { return };
+    if cwd.canonicalize().is_ok_and(|cwd| cwd.starts_with(&root))
+        && let Some(home) = std::env::home_dir()
+        && let Err(e) = std::env::set_current_dir(&home)
+    {
+        tracing::warn!("update: cannot leave the install folder for {}: {e}", home.display());
+    }
+}
+
 pub fn apply_on_startup() -> bool {
     let expected = std::env::var("HERDR_APP_UPDATE_EXPECTED").ok();
     if let Some(expected) = &expected {
