@@ -6057,8 +6057,14 @@ export default class SystemToast extends View {
         assert!(moved != o2);
         cx.simulate_keystrokes("escape");
         frames(cx, 5);
-        assert!(between(moved, drawn(cx, "pane-p2"), o2), "p2 slides back");
-        assert!(between(Bounds::new(o1.origin + (over - grip), o1.size), drawn(cx, "pane-p1"), o1), "p1 glides back");
+        let (p1, p2) = (drawn(cx, "pane-p1"), drawn(cx, "pane-p2"));
+        let carried = Bounds::new(o1.origin + (over - grip), o1.size);
+        assert!(between(moved, p2, o2), "p2 slides back");
+        assert!(between(carried, p1, o1), "p1 glides back");
+        // Both start from rest at the same moment on the same spring, so both are as far along.
+        let done = |from: f32, now: f32, to: f32| (from - now) / (from - to);
+        let (a, b) = (done(carried.top().into(), p1.top().into(), o1.top().into()), done(moved.size.height.into(), p2.size.height.into(), o2.size.height.into()));
+        assert!((a - b).abs() < 0.02, "p1 lands on the spring p2 slides on: {a} vs {b}");
         frames(cx, 60);
         assert_eq!((drawn(cx, "pane-p1"), drawn(cx, "pane-p2")), (o1, o2));
         cx.update(|_, cx| {
