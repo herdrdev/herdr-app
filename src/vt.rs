@@ -903,8 +903,22 @@ impl Vt {
                 ghostty_kitty_graphics_image_get(image, GHOSTTY_KITTY_IMAGE_DATA_HEIGHT, &mut image_height as *mut _ as *mut c_void);
                 ghostty_kitty_graphics_image_get(image, GHOSTTY_KITTY_IMAGE_DATA_GENERATION, &mut generation as *mut _ as *mut c_void);
             }
-            if let Some(placement) = kitty_virtual_placement_geometry(run, *spec, image_width, image_height, cell_width, cell_height, generation) {
-                placements.push(placement);
+            let Some(placement) = kitty_virtual_placement_geometry(run, *spec, image_width, image_height, cell_width, cell_height, generation) else { continue };
+
+            // Extend the slice ending right above with the same source columns: one
+            // sprite per image, as sprites meeting at a row edge show seams.
+            let bottom = |p: &Placement| i64::from(p.row) * i64::from(cell_height) + i64::from(p.offset[1]) + i64::from(p.height);
+            let top = i64::from(placement.row) * i64::from(cell_height) + i64::from(placement.offset[1]);
+            let above = placements.iter_mut().find(|p: &&mut Placement| (p.image, p.generation, p.col, p.width, p.offset[0], p.cell_pixels)
+                    == (placement.image, placement.generation, placement.col, placement.width, placement.offset[0], placement.cell_pixels)
+                && (p.source[0], p.source[2], p.source[1] + p.source[3]) == (placement.source[0], placement.source[2], placement.source[1])
+                && bottom(p) == top);
+            match above {
+                Some(p) => {
+                    p.height += placement.height;
+                    p.source[3] += placement.source[3];
+                }
+                None => placements.push(placement),
             }
         }
         placements
@@ -2245,19 +2259,17 @@ mod tests {
         }
         let frame = vt.frame();
         assert!(frame.rows.iter().flat_map(|r| r.iter()).all(|c| c.text.is_empty()));
+        // The row slices join into one sprite, so no seams show between rows.
         let p = vt.placements();
-        assert_eq!(p.len(), 4, "{p:?}");
-        for (row, p) in p.iter().enumerate() {
-            assert_eq!((p.image, p.col, p.row, p.width, p.height), (7, 0, row as i32, 64, 8));
-            assert_eq!(p.source, [0, row as u32, 8, 1]);
-            assert_eq!(p.pixel_geometry(9.75, 20.5), [0.0, row as f32 * 20.5, 78.0, 20.5]);
-        }
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert_eq!((p[0].image, p[0].col, p[0].row, p[0].width, p[0].height), (7, 0, 0, 64, 32));
+        assert_eq!(p[0].source, [0, 0, 8, 4]);
+        assert_eq!(p[0].pixel_geometry(9.75, 20.5), [0.0, 0.0, 78.0, 82.0]);
         vt.write(b"\x1b[6;1H\n\n");
         vt.frame();
         let p = vt.placements();
-        assert_eq!(p.len(), 2, "{p:?}");
-        assert_eq!((p[0].row, p[0].source), (0, [0, 2, 8, 1]));
-        assert_eq!((p[1].row, p[1].source), (1, [0, 3, 8, 1]));
+        assert_eq!(p.len(), 1, "{p:?}");
+        assert_eq!((p[0].row, p[0].height, p[0].source), (0, 16, [0, 2, 8, 2]));
     }
 
     #[test]
