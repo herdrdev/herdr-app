@@ -940,6 +940,9 @@ in init, `.track_focus(this.h).on_key_down((e, cx) => …)`, `this.h.focus()`.
 the same limits, previews and removal as picked images.
 `.on_hover((hovered, cx) => …)` reports pointer entry and exit on buttons
 and other interactive controls too.
+`.capture_pointer()` on a `div`, `h_flex` or `v_flex` makes a drag: after a
+left press on it, its `on_mouse_move` and left `on_mouse_up` keep firing
+wherever the pointer goes in the window, until that release.
 `.when(cond, (el) => …)`, `.children([...])`. Controls from `gpui-base`
 (`Button`, `Checkbox`, `Switch`, `InputState` + `Input`) are unstyled: style
 them. Text: `TextView.markdown(id, text)` renders markdown; `EditorState.new({

@@ -390,6 +390,12 @@ struct Behavior {
     aria_level: Option<usize>,
     /// Whether a shut `AccordionPanel` stays in the tree.
     keep_mounted: bool,
+    // HERDR: a left press on this element keeps reaching its `on_mouse_move`
+    // and left `on_mouse_up` wherever the pointer goes, until it is released.
+    capture_pointer: bool,
+    /// Whether that press is held, and whether its release was already
+    /// reported. Window state: the press and its moves may span renders.
+    capture: Option<Rc<(Cell<bool>, Cell<bool>)>>,
     /// The key-binding context this element and its subtree sit in.
     ///
     /// What a keymap's `context` predicate is matched against, so a chord can
@@ -578,6 +584,7 @@ impl Behavior {
             || self.on_mouse_down_out.is_some()
             || self.on_scroll_wheel.is_some()
             || self.on_hover.is_some()
+            || self.capture_pointer
     }
 
     /// Whether focus or accessibility gave this element a reason to be
@@ -1848,10 +1855,55 @@ where
                 dispatch_mouse_button(&runtime, callback, event, bounds.get(), window, cx);
             });
         }
+        // HERDR: pointer capture. While held, moves outside the element and
+        // the left release anywhere are dispatched from window listeners; a
+        // release they already reported is not reported again by the element.
+        let capture = behavior.capture.clone().unwrap_or_default();
+        if behavior.capture.is_some() {
+            let press = Rc::clone(&capture);
+            element = element.capture_any_mouse_down(move |event, _, _| {
+                if event.button == MouseButton::Left {
+                    press.0.set(true);
+                    press.1.set(false);
+                }
+            });
+            let moved = behavior.on_mouse_move;
+            let ups: SmallVec<[CallbackId; 1]> = behavior.on_mouse_up.iter()
+                .filter(|(button, _)| *button == MouseButton::Left).map(|(_, callback)| *callback).collect();
+            let (runtime, bounds, capture) = (Rc::downgrade(runtime), Rc::clone(&bounds), Rc::clone(&capture));
+            // Registered on every paint, held or not: a cached view replays
+            // the listeners of the paint it reuses, which may predate the press.
+            element = element.child(gpui::canvas(|_, _, _| {}, move |_, _, window, _| {
+                let (move_runtime, move_bounds, move_capture) = (runtime.clone(), Rc::clone(&bounds), Rc::clone(&capture));
+                window.on_mouse_event(move |event: &gpui::MouseMoveEvent, phase, window, cx| {
+                    let (Some(callback), Some(bounds)) = (moved, move_bounds.get()) else { return };
+                    // Inside, the element's own hover-gated listener reports it.
+                    if phase != gpui::DispatchPhase::Capture || !move_capture.0.get() || bounds.contains(&event.position) {
+                        return;
+                    }
+                    if let Some(runtime) = move_runtime.upgrade() {
+                        runtime.dispatch_mouse_move(callback, event, event.position - bounds.origin, bounds, window, cx);
+                    }
+                });
+                window.on_mouse_event(move |event: &gpui::MouseUpEvent, phase, window, cx| {
+                    if phase != gpui::DispatchPhase::Capture || event.button != MouseButton::Left || !capture.0.replace(false) {
+                        return;
+                    }
+                    capture.1.set(true);
+                    for callback in ups.iter().copied() {
+                        dispatch_mouse_button(&runtime, callback, event, bounds.get(), window, cx);
+                    }
+                });
+            }).absolute().size_0());
+        }
         for (button, callback) in behavior.on_mouse_up.iter().copied() {
             let runtime = Rc::downgrade(runtime);
             let bounds = Rc::clone(&bounds);
+            let capture = Rc::clone(&capture);
             element = element.on_mouse_up(button, move |event, window, cx| {
+                if button == MouseButton::Left && capture.1.replace(false) {
+                    return;
+                }
                 dispatch_mouse_button(&runtime, callback, event, bounds.get(), window, cx);
             });
         }
@@ -2170,6 +2222,10 @@ fn flex_element(
     // toolbar, a composite whose keyboard focus stays on its container.
     let focus = tracked_focus(runtime, &behavior, "div");
     let identity = element_id(id, behavior.key.clone());
+    let mut behavior = behavior;
+    if behavior.capture_pointer {
+        behavior.capture = Some(window.use_keyed_state((identity.clone(), "pointer-capture"), cx, |_, _| Rc::<(Cell<bool>, Cell<bool>)>::default()).read(cx).clone());
+    }
     let stateful = element.id(identity.clone());
     let stateful = with_gpui_focus(stateful, &behavior, focus.as_ref());
     let stateful = with_input_handlers(stateful, &behavior, runtime);
@@ -3399,6 +3455,7 @@ fn apply_behavior(behavior: &mut Behavior, name: &str, args: &[Bridged]) {
                 .map(|level| level.max(1.0) as usize);
         }
         "keep_mounted" => behavior.keep_mounted = flag.unwrap_or(true),
+        "capture_pointer" => behavior.capture_pointer = flag.unwrap_or(true),
         "key_context" => {
             behavior.key_context = args
                 .first()

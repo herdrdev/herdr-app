@@ -1394,6 +1394,9 @@ const ELEMENT_METHODS: &str = r#"    /**
     on_click<Self extends Element>(this: Self, handler: (event: ClickEvent, cx: Context) => void): Self;
     /** GPUI `InteractiveElement::on_mouse_move`, delivered while this element is hovered. */
     on_mouse_move<Self extends Element>(this: Self, handler: (event: MouseMoveEvent, cx: Context) => void): Self;
+    /** After a left press on this element, its `on_mouse_move` and left `on_mouse_up` keep
+     *  firing wherever the pointer goes in the window, until that release: a drag. */
+    capture_pointer<Self extends Element>(this: Self): Self;
     /** div/h_flex/v_flex: initial size and changed layout size, in logical pixels.
      * Runs after layout, even without pointer movement. Use a stable id. */
     on_size_change<Self extends Element>(this: Self, handler: (size: { width: number; height: number }, cx: Context) => void): Self;
@@ -3994,6 +3997,7 @@ mod tests {
         "panel",
         "aria_level",
         "keep_mounted",
+        "capture_pointer",
         "on_item_click",
         "on_item_secondary_click",
         "on_change",
