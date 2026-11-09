@@ -1394,6 +1394,9 @@ const ELEMENT_METHODS: &str = r#"    /**
     on_click<Self extends Element>(this: Self, handler: (event: ClickEvent, cx: Context) => void): Self;
     /** GPUI `InteractiveElement::on_mouse_move`, delivered while this element is hovered. */
     on_mouse_move<Self extends Element>(this: Self, handler: (event: MouseMoveEvent, cx: Context) => void): Self;
+    /** After a left press on this element, its `on_mouse_move` and left `on_mouse_up` keep
+     *  firing wherever the pointer goes in the window, until that release: a drag. */
+    capture_pointer<Self extends Element>(this: Self): Self;
     /** div/h_flex/v_flex: initial size and changed layout size, in logical pixels.
      * Runs after layout, even without pointer movement. Use a stable id. */
     on_size_change<Self extends Element>(this: Self, handler: (size: { width: number; height: number }, cx: Context) => void): Self;
@@ -1706,7 +1709,7 @@ const ELEMENT_METHODS: &str = r#"    /**
      * the id it was built with — which is the same place a `Scrollbar` named
      * after that id looks, so the bar works either way.
      */
-    track_scroll<Self extends Element>(this: Self, handle: import("gpui-base").VirtualListScrollHandle): Self;
+    track_scroll<Self extends Element>(this: Self, handle: import("gpui-base").VirtualListScrollHandle | import("gpui-base").ScrollHandle): Self;
     /**
      * Which item a virtual list measures to infer its size across the axis it
      * scrolls: a vertical list takes its width from this item, a horizontal
@@ -3026,6 +3029,26 @@ const BASE: &str = r#"  /** A row. */
     new: () => VirtualListScrollHandle;
   };
 
+  /**
+   * A plain scroll area's position (`overflow_*_scroll` or `overflow_*_scrollbar`
+   * on a div), kept across frames so the script can read and move it. Create it
+   * in `init()` and hand it to the area with `track_scroll`. Offsets are the
+   * distance scrolled: 0 at the start, up to `max_offset()`.
+   */
+  export interface ScrollHandle {
+    offset(): { x: number; y: number };
+    /** How far it can scroll, from the last layout. */
+    max_offset(): { x: number; y: number };
+    /** Clamped to `0..max_offset()`; shows on the next frame (`cx.notify()`). */
+    set_offset(offset: { x?: number; y?: number }): void;
+    /** Releases the handle. Using it afterwards throws. */
+    release(): boolean;
+  }
+
+  export const ScrollHandle: {
+    new: () => ScrollHandle;
+  };
+
   /** Payload emitted by retained text state. Submit events carry key modifiers. */
   export interface InputEvent {
     readonly secondary?: boolean;
@@ -3994,6 +4017,7 @@ mod tests {
         "panel",
         "aria_level",
         "keep_mounted",
+        "capture_pointer",
         "on_item_click",
         "on_item_secondary_click",
         "on_change",

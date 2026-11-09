@@ -5633,6 +5633,88 @@ export default class Probe extends View {
         }
     }
 
+    #[test]
+    fn a_captured_press_follows_the_pointer_out_of_the_element() {
+        in_own_process("capture_pointer");
+    }
+
+    #[gpui::test]
+    fn capture_pointer(cx: &mut gpui::TestAppContext) {
+        use gpui::{Modifiers, MouseButton, point, px};
+        use serde_json::json;
+        if !running_alone("capture_pointer") {
+            return;
+        }
+        let probe = r#"import { View, div } from "gpui-kit";
+import { shared, setShared } from "herdr";
+const log = (e) => setShared("probe.log", [...(shared("probe.log") ?? []), e]);
+export default class Probe extends View {
+  render() {
+    return div().id("probe").size_full().capture_pointer()
+      .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .on_mouse_move(e => log(`move ${Math.round(e.position.y)}`))
+      .on_mouse_up("left", () => log("up"));
+  }
+}
+"#;
+        let layout = json!({ "id": "root", "type": "column", "children": [
+            { "id": "bar", "type": "block", "size": { "px": 160 }, "content": { "mod": "capture-probe" } },
+            { "id": "rest", "type": "block", "content": { "tab": "active" } }
+        ] });
+        let (_view, cx) = open_window(cx, "capture-probe", probe, layout);
+        cx.run_until_parked();
+        let none = Modifiers::default();
+        let step = |cx: &mut gpui::VisualTestContext| cx.run_until_parked();
+        // Outside without a press: not this element's.
+        cx.simulate_mouse_move(point(px(50.), px(200.)), None, none); step(cx);
+        cx.simulate_mouse_down(point(px(50.), px(100.)), MouseButton::Left, none); step(cx);
+        cx.simulate_mouse_move(point(px(50.), px(200.)), MouseButton::Left, none); step(cx);
+        cx.simulate_mouse_move(point(px(60.), px(300.)), MouseButton::Left, none); step(cx);
+        cx.simulate_mouse_up(point(px(60.), px(300.)), MouseButton::Left, none); step(cx);
+        // Released: outside is no longer this element's.
+        cx.simulate_mouse_move(point(px(70.), px(310.)), None, none); step(cx);
+        // A release inside is reported once.
+        cx.simulate_mouse_down(point(px(50.), px(100.)), MouseButton::Left, none); step(cx);
+        cx.simulate_mouse_up(point(px(50.), px(100.)), MouseButton::Left, none); step(cx);
+        assert_eq!(crate::mods::shared("probe.log"), Some(json!(["move 200", "move 300", "up", "up"])));
+    }
+
+    #[test]
+    fn a_scroll_handle_reads_and_moves_a_plain_scroll_area() {
+        in_own_process("scroll_handle");
+    }
+
+    #[gpui::test]
+    fn scroll_handle(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("scroll_handle") {
+            return;
+        }
+        let probe = r#"import { View, div } from "gpui-kit";
+import { ScrollHandle } from "gpui-base";
+import { shared, setShared } from "herdr";
+export default class Probe extends View {
+  init() { this.s = ScrollHandle.new(); }
+  render() {
+    if (shared("probe.go") && !this.done) {
+      this.done = true;
+      const seen = [this.s.max_offset().x];
+      for (const x of [50, 1e6, -5]) { this.s.set_offset({ x }); seen.push(this.s.offset().x); }
+      setShared("probe.seen", seen);
+    }
+    return div().id("row").w(200).h(20).flex().overflow_x_scroll().track_scroll(this.s)
+      .child(div().w(500).h(20).flex_none());
+  }
+}
+"#;
+        let layout = json!({ "id": "root", "type": "block", "content": { "mod": "scroll-probe" } });
+        let (_view, cx) = open_window(cx, "scroll-probe", probe, layout);
+        cx.run_until_parked();
+        crate::mods::set_shared("probe.go".into(), json!(true));
+        cx.run_until_parked();
+        assert_eq!(crate::mods::shared("probe.seen"), Some(json!([300, 50, 300, 0])));
+    }
+
     include!("window/pane_size_tests.rs");
 
     /// The whole path, in a real window: a layout names the toast mod, a

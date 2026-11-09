@@ -100,8 +100,10 @@ is no `spaces.json`. On simultaneous edits the newest accepted document wins
 (no merging); structural commands fail while that machine's layout is unavailable.
 Mod pane props are stored as given, never machine-qualified. Space order is local
 machine first, then machines by name; `space.move` stays inside its machine's block.
-In the expanded Spaces sidebar, drag a space to reorder it within its machine;
-the highlighted line shows where it will land.
+Drag a space in the expanded Spaces sidebar to reorder it within its machine
+(a checkout takes its worktrees along), or a tab in the tab bar. The dragged
+one follows the pointer and the others make room; the list scrolls at its
+ends, and Escape sends it back.
 
 - A **space** is a place to work, on one machine: this one, or another
   from `hc machine ls` (`spaces()[i].machine`). Herdr leaves out machines
@@ -940,6 +942,13 @@ in init, `.track_focus(this.h).on_key_down((e, cx) => …)`, `this.h.focus()`.
 the same limits, previews and removal as picked images.
 `.on_hover((hovered, cx) => …)` reports pointer entry and exit on buttons
 and other interactive controls too.
+`.capture_pointer()` on a `div`, `h_flex` or `v_flex` makes a drag: after a
+left press on it, its `on_mouse_move` and left `on_mouse_up` keep firing
+wherever the pointer goes in the window, until that release.
+`ScrollHandle.new()` (from `gpui-base`, in `init`) and `.track_scroll(handle)`
+on an `overflow_*_scroll` or `overflow_*_scrollbar` element let the script read
+and move it: `offset()`, `max_offset()`, `set_offset({ x, y })`, in distances
+scrolled from the start; a set shows on the next frame.
 `.when(cond, (el) => …)`, `.children([...])`. Controls from `gpui-base`
 (`Button`, `Checkbox`, `Switch`, `InputState` + `Input`) are unstyled: style
 them. Text: `TextView.markdown(id, text)` renders markdown; `EditorState.new({

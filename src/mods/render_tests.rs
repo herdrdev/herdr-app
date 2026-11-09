@@ -998,3 +998,179 @@ fn status_bar_shows_the_real_palette_key(cx: &mut TestAppContext) {
     assert!(tree.contains("commands"), "unbound hint still offers commands: {tree}");
     assert!(!tree.contains("Shift P"), "unbound hint must not invent a key: {tree}");
 }
+
+/// The tab bar over three tabs, 100, 60 and 80 px wide (3 px apart); `setup`
+/// puts it in the state under test.
+fn tabs_tree(cx: &mut TestAppContext, setup: &str) -> String {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut values = fixture(true, props(), updates("current", "current"));
+    values.get_mut("spaces").unwrap()[0]["tabs"] = json!(["a", "b", "c"].map(|id| json!({"id":id,"index":1,"name":id.to_uppercase(),"active":id == "a","status":"idle","panes":1,"zoomed":false,"settled":false,"settled_at":null,"changed_at":null,"working_since":null})));
+    describe_with_values(cx, &staged, "mods/tabs", values, Some(&format!("this.widths = {{ a: 100, b: 60, c: 80 }}; {setup}"))).unwrap()
+}
+
+fn line_with_id<'a>(tree: &'a str, id: &str) -> &'a str {
+    tree.lines().find(|l| l.contains(&format!(":id[Str(\"{id}\")]"))).unwrap_or_else(|| panic!("no {id}: {tree}"))
+}
+
+#[gpui::test]
+fn tabs_sit_by_their_widths_and_the_first_ones_just_appear(cx: &mut TestAppContext) {
+    let tree = tabs_tree(cx, "");
+    for (id, left) in [("cell-a", 0), ("cell-b", 103), ("cell-c", 166)] {
+        let cell = line_with_id(&tree, id);
+        assert!(cell.contains(&format!(".left[Number({left}.0)]")), "{cell}");
+        assert!(cell.contains(".opacity[Number(1.0)] :transition(opacity, 0ms"), "on start a tab is there, not fading in: {cell}");
+    }
+    assert!(line_with_id(&tree, "tab-row").contains(".w[Number(246.0)]"), "{tree}");
+}
+
+#[gpui::test]
+fn a_new_tab_fades_in_once_its_neighbours_made_room(cx: &mut TestAppContext) {
+    let shown = r#"this.rowSpace = "s1"; this.first = new Set(["a", "b"]);"#;
+    let tree = tabs_tree(cx, &format!("{shown} delete this.widths.c;"));
+    assert!(line_with_id(&tree, "cell-c").contains(".opacity[Number(0.0)]"), "hidden until it has a width: {tree}");
+    let tree = tabs_tree(cx, shown);
+    let cell = line_with_id(&tree, "cell-c");
+    assert!(cell.contains(".opacity[Number(1.0)] :transition(opacity, 200ms, 100ms"), "fades in once the slide is mostly done: {cell}");
+}
+
+#[gpui::test]
+fn a_closed_tab_fades_out_where_it_was(cx: &mut TestAppContext) {
+    let tree = tabs_tree(cx, r#"this.rowSpace = "s1"; this.first = new Set(["a", "b", "c"]);
+      this.last = { gone: { c: { id: "gone", name: "Gone", active: false }, x: 103 } };"#);
+    let ghost = line_with_id(&tree, "cell-gone");
+    assert!(ghost.contains(".left[Number(103.0)]") && ghost.contains(".opacity[Number(0.0)] :transition(opacity, 120ms"), "{ghost}");
+    assert!(line_with_id(&tree, "cell-b").contains(".left[Number(103.0)]"), "the others take its place: {tree}");
+}
+
+#[gpui::test]
+fn a_held_tab_follows_the_pointer_and_its_neighbours_make_room(cx: &mut TestAppContext) {
+    let held = r#"this.gesture = { kind: "drag", id: "a", order: ["a", "b", "c"], from: 0, down: 0, pointer: 90, scroll: 0, left: 0, dx: 90 };"#;
+    let tree = tabs_tree(cx, held);
+    // A's right edge (190) is past B's middle (133), not C's (206): A lands second.
+    // A spring, not a transition: a landing that changes mid-slide keeps its speed. No overshoot.
+    assert!(line_with_id(&tree, "cell-b").contains(".left[Number(0.0)] :spring(left, 200ms, 1,"), "{tree}");
+    assert!(line_with_id(&tree, "slot-a").contains(".left[Number(63.0)]"), "the dashed box is where it lands: {tree}");
+    assert!(line_with_id(&tree, "cell-c").contains(".left[Number(166.0)]"), "{tree}");
+    let lifted = line_with_id(&tree, "cell-a");
+    assert!(lifted.contains(".left[Number(90.0)] :spring(left, 0ms, 1,"), "under the pointer, no lag: {lifted}");
+    let cells: Vec<_> = tree.lines().filter(|l| l.contains(":id[Str(\"cell-")).collect();
+    assert_eq!(cells.last(), Some(&lifted), "drawn last, over the others: {tree}");
+
+    let tree = tabs_tree(cx, &held.replace(r#"kind: "drag""#, r#"kind: "drop", to: 1"#));
+    assert!(line_with_id(&tree, "cell-a").contains(".left[Number(63.0)] :spring(left, 200ms, 1,"), "let go, the same spring slides it into the box: {tree}");
+    let tree = tabs_tree(cx, &held.replace(r#"kind: "drag""#, r#"kind: "back", to: 0"#));
+    assert!(line_with_id(&tree, "cell-a").contains(".left[Number(0.0)] :spring(left, 200ms, 1,"), "cancelled, it flies back: {tree}");
+    assert!(line_with_id(&tree, "cell-b").contains(".left[Number(103.0)]"), "and B goes back: {tree}");
+}
+
+/// The space list over three spaces on this computer, each row 30 px tall;
+/// `setup` puts it in the state under test.
+fn spaces_tree(cx: &mut TestAppContext, setup: &str) -> String {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut values = fixture(true, props(), updates("current", "current"));
+    let tab = json!({"id":"t","index":1,"name":"1","active":true,"status":"idle","panes":1,"zoomed":false,"settled":false,"settled_at":null,"changed_at":null,"working_since":null});
+    values.insert("spaces".into(), json!(["a", "b", "c"].map(|id| json!({"id":id,"index":1,"name":id.to_uppercase(),"folder":"/fixture","machine":null,"branch":null,"active":id == "a","status":"idle","tabs":[tab.clone()]}))));
+    describe_with_values(cx, &staged, "mods/spaces", values, Some(setup)).unwrap()
+}
+
+#[gpui::test]
+fn spaces_sit_by_their_rows_and_the_first_ones_just_appear(cx: &mut TestAppContext) {
+    let tree = spaces_tree(cx, "");
+    for (id, top) in [("cell-a", 0), ("cell-b", 30), ("cell-c", 60)] {
+        let cell = line_with_id(&tree, id);
+        assert!(cell.contains(&format!(".top[Number({top}.0)] :spring(top, 200ms, 1,")), "{cell}");
+        assert!(cell.contains(":transition(opacity, 0ms"), "on start a space is there, not fading in: {cell}");
+    }
+    assert!(line_with_id(&tree, "group-local").contains(".h[Number(90.0)] :spring(height, 200ms"), "{tree}");
+}
+
+#[gpui::test]
+fn a_new_space_fades_in_and_a_closed_one_fades_out_where_it_was(cx: &mut TestAppContext) {
+    let tree = spaces_tree(cx, r#"this.first = new Set(["a", "b"]);
+      this.last = { gone: { r: { w: { id: "gone", name: "Gone", active: false, status: "idle" }, i: 3, g: null, tree: null }, y: 30, m: null } };"#);
+    assert!(line_with_id(&tree, "cell-c").contains(".opacity[Number(1.0)] :transition(opacity, 200ms, 100ms"), "fades in once the others made room: {tree}");
+    let ghost = line_with_id(&tree, "cell-gone");
+    assert!(ghost.contains(".top[Number(30.0)]") && ghost.contains(".opacity[Number(0.0)] :transition(opacity, 120ms"), "{ghost}");
+}
+
+#[gpui::test]
+fn a_held_space_follows_the_pointer_and_the_others_make_room(cx: &mut TestAppContext) {
+    let held = r#"const row = id => ({ w: { id, name: id.toUpperCase(), active: id === "a", status: "idle" }, i: 0, g: null, tree: null });
+      this.gesture = { kind: "drag", id: "a", machine: null, order: ["a", "b", "c"], byId: Object.fromEntries(["a", "b", "c"].map(id => [id, { id, rows: [row(id)], h: 30 }])),
+        from: 0, top: 0, down: 0, pointer: 40, dy: 40 };"#;
+    let tree = spaces_tree(cx, held);
+    // A's bottom (70) is past B's middle (45), not C's (75): A lands second.
+    assert!(line_with_id(&tree, "cell-b").contains(".top[Number(0.0)] :spring(top, 200ms, 1,"), "{tree}");
+    assert!(line_with_id(&tree, "slot-a").contains(".top[Number(30.0)]"), "the dashed box is where it lands: {tree}");
+    assert!(line_with_id(&tree, "cell-c").contains(".top[Number(60.0)]"), "{tree}");
+    let lifted = line_with_id(&tree, "lift-a");
+    assert!(lifted.contains(".top[Number(40.0)] :spring(top, 0ms, 1,"), "under the pointer, no lag: {lifted}");
+    let last = tree.lines().filter(|l| l.contains(":id[Str(\"cell-") || l.contains(":id[Str(\"lift-")).last();
+    assert_eq!(last, Some(lifted), "drawn last, over the others: {tree}");
+    let tree = spaces_tree(cx, &held.replace(r#"kind: "drag""#, r#"kind: "back", to: 0"#));
+    assert!(line_with_id(&tree, "lift-a").contains(".top[Number(0.0)] :spring(top, 200ms, 1,"), "cancelled, it flies back: {tree}");
+}
+
+/// A drag feels the same in every list: the tab bar and the space list use the
+/// same thresholds and motion.
+#[test]
+fn lists_drag_with_the_same_motion() {
+    fn value<'a>(src: &'a str, name: &str) -> &'a str {
+        let at = src.find(&format!("{name} = ")).unwrap_or_else(|| panic!("no {name}")) + name.len() + 3;
+        let rest = &src[at..];
+        let end = if rest.starts_with('{') { rest.find('}').unwrap() + 1 } else { rest.find(|c: char| !c.is_ascii_digit()).unwrap() };
+        &rest[..end]
+    }
+    let tabs = include_str!("../../defaults/mods/tabs/main.js");
+    let spaces = include_str!("../../defaults/mods/spaces/main.js");
+    for name in ["SLIDE", "HELD", "LANDED", "GLIDE", "ENTER", "EXIT", "RAISE", "LIFT", "EDGE", "STEP"] {
+        assert_eq!(value(tabs, name), value(spaces, name), "{name}");
+    }
+}
+
+/// The held look, the same for a tab and a space: nothing in the list follows
+/// the pointer's hover while one is held or landing (a neighbour sliding under
+/// a still pointer flickered); the held one shows its hover look and a shadow
+/// on an opaque base, the shadow fading in as it lifts, both fading out as it
+/// lands, so it ends exactly as it rests; and after landing nothing hovers
+/// until the pointer moves.
+#[gpui::test]
+fn a_held_tab_keeps_its_hover_look_and_nothing_else_hovers(cx: &mut TestAppContext) {
+    let held = r#"this.gesture = { kind: "drag", id: "a", order: ["a", "b", "c"], from: 0, down: 0, pointer: 90, scroll: 0, left: 0, dx: 90, raised: true };"#;
+    let tree = tabs_tree(cx, held);
+    for id in ["tab-a", "tab-b", "tab-c"] {
+        assert!(!line_with_id(&tree, id).contains(":hover("), "no hover while one is held: {tree}");
+    }
+    assert!(line_with_id(&tree, "backing-a").contains(".opacity[Number(1.0)] :transition(opacity, 120ms"), "the shadow fades in: {tree}");
+    assert!(line_with_id(&tree, "hovered-a").contains(".opacity[Number(1.0)] :transition(opacity, 0ms"), "the hover look stays as it was: {tree}");
+    let tree = tabs_tree(cx, &held.replace(r#"kind: "drag""#, r#"kind: "drop", to: 1"#));
+    for id in ["backing-a", "hovered-a"] {
+        assert!(line_with_id(&tree, id).contains(".opacity[Number(0.0)] :transition(opacity, 200ms"), "{id} fades as it lands: {tree}");
+    }
+    assert!(!line_with_id(&tree, "tab-b").contains(":hover("), "{tree}");
+    let tree = tabs_tree(cx, "this.quiet = true;");
+    assert!(!line_with_id(&tree, "tab-b").contains(":hover("), "landed, nothing hovers before the pointer moves: {tree}");
+    assert!(line_with_id(&tabs_tree(cx, ""), "tab-b").contains(":hover("), "at rest a tab hovers: {tree}");
+}
+
+#[gpui::test]
+fn a_held_space_keeps_its_hover_look_and_nothing_else_hovers(cx: &mut TestAppContext) {
+    let held = r#"const row = id => ({ w: { id, name: id.toUpperCase(), active: id === "a", status: "idle" }, i: 0, g: null, tree: null });
+      this.gesture = { kind: "drag", id: "b", machine: null, order: ["a", "b", "c"], byId: Object.fromEntries(["a", "b", "c"].map(id => [id, { id, rows: [row(id)], h: 30 }])),
+        from: 1, top: 0, down: 0, pointer: 10, dy: 10, raised: true };"#;
+    let tree = spaces_tree(cx, held);
+    for id in ["space-a", "space-b", "space-c"] {
+        assert!(!line_with_id(&tree, id).contains(":hover("), "no hover while one is held: {tree}");
+    }
+    assert!(line_with_id(&tree, "backing-b").contains(".opacity[Number(1.0)] :transition(opacity, 120ms"), "{tree}");
+    assert!(line_with_id(&tree, "hovered-b").contains(".opacity[Number(1.0)] :transition(opacity, 0ms"), "{tree}");
+    let tree = spaces_tree(cx, &held.replace(r#"kind: "drag""#, r#"kind: "back", to: 1"#));
+    for id in ["backing-b", "hovered-b"] {
+        assert!(line_with_id(&tree, id).contains(".opacity[Number(0.0)] :transition(opacity, 200ms"), "{id} fades as it lands: {tree}");
+    }
+    let tree = spaces_tree(cx, "this.quiet = true;");
+    assert!(!line_with_id(&tree, "space-b").contains(":hover("), "{tree}");
+    assert!(line_with_id(&spaces_tree(cx, ""), "space-b").contains(":hover("), "at rest a space hovers");
+}
