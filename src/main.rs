@@ -123,23 +123,8 @@ fn main() {
     telemetry::clock();
     // A first start sizes the app to the screen and the system's text size.
     let fresh = !settings::path().exists();
-    // The core people installed; without one, the setup screen installs it.
     let person = settings::load_person();
-    let configured = person.as_ref().ok().and_then(|p| p.core.clone());
-    let core: Result<std::sync::Arc<hc::Core>, setup::Need> = match core_bin::find(configured.as_deref()) {
-        None => Err(setup::Need::Install),
-        Some(bin) => {
-            core_bin::use_core(bin);
-            match hc::Core::connect() {
-                // One that can't serve this app gets the screen that fixes it.
-                Ok(core) => hc::check(&core.hello).map(|()| core).map_err(setup::Need::Fix),
-                Err(e) => {
-                    eprintln!("herdr-app: {e:#}");
-                    Err(setup::Need::connection(e))
-                }
-            }
-        }
-    };
+    let core = connect(&person);
     #[cfg(target_os = "macos")]
     core_bin::install_cli_link();
     if core.is_ok() {
@@ -152,8 +137,9 @@ fn main() {
         eprintln!("herdr-app: cannot write {}: {e}", mods::app_dir().display());
     }
 
-    gpui_platform::application()
-        .with_assets(gpui_shell::AppAssets::new(mods::app_dir()))
+    let app = gpui_platform::application().with_assets(gpui_shell::AppAssets::new(mods::app_dir()));
+    app.on_reopen(reopen);
+    app
         .run(move |cx| {
             let fonts = settings::BUNDLED_FONTS.iter().map(|f| std::borrow::Cow::Borrowed(*f)).collect();
             if let Err(e) = cx.text_system().add_fonts(fonts) {
@@ -194,11 +180,51 @@ fn main() {
             if let Some(tx) = mods::request_sender() {
                 control::listen(tx);
             }
+            cx.set_global(Requests(requests.clone()));
             match core {
                 Ok(core) => open_main(core, requests, cx),
                 Err(need) => setup::open(need, requests, cx),
             }
         });
+}
+
+/// The core people installed; without one, the setup screen installs it.
+fn connect(person: &Result<settings::Person, String>) -> Result<std::sync::Arc<hc::Core>, setup::Need> {
+    let configured = person.as_ref().ok().and_then(|p| p.core.clone());
+    match core_bin::find(configured.as_deref()) {
+        None => Err(setup::Need::Install),
+        Some(bin) => {
+            core_bin::use_core(bin);
+            match hc::Core::connect() {
+                // One that can't serve this app gets the screen that fixes it.
+                Ok(core) => hc::check(&core.hello).map(|()| core).map_err(setup::Need::Fix),
+                Err(e) => {
+                    eprintln!("herdr-app: {e:#}");
+                    Err(setup::Need::connection(e))
+                }
+            }
+        }
+    }
+}
+
+/// The requests mods and `herdr-app do` send the window, kept for a window
+/// opened again.
+struct Requests(async_channel::Receiver<mods::Request>);
+impl Global for Requests {}
+
+/// macOS: the Dock icon was clicked or Herdr was opened again while it ran
+/// without a window (`window.close` keeps it running): open the window again.
+fn reopen(cx: &mut App) {
+    if !cx.windows().is_empty() {
+        return;
+    }
+    let Some(requests) = cx.try_global::<Requests>().map(|r| r.0.clone()) else { return };
+    // Nobody answered what came while no window was open: don't run it late.
+    while requests.try_recv().is_ok() {}
+    match connect(&settings::load_person()) {
+        Ok(core) => open_main(core, requests, cx),
+        Err(need) => setup::open(need, requests, cx),
+    }
 }
 
 /// The main window, on a connected core.

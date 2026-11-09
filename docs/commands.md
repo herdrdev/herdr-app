@@ -555,7 +555,7 @@ No arguments.
 
 ## `window.close`
 
-Close the window (on Linux, quits).
+Close the window (on Linux, quits; on macOS, the Dock icon opens it again).
 
 No arguments.
 
