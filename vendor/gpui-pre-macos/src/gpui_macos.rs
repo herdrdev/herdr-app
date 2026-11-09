@@ -6,6 +6,8 @@
 //! macOS screens have a y axis that goes up from the bottom of the screen and
 //! an origin at the bottom left of the main display.
 
+// HERDR: a per-run Dock icon (src/macos.rs `HERDR_APP_ICON`).
+mod app_icon;
 mod display;
 mod display_link;
 mod events;
@@ -58,6 +60,7 @@ pub(crate) use text_system::*;
 
 pub use platform::MacPlatform;
 pub use events::{OptionAsAlt, option_as_alt, set_option_as_alt};
+pub use app_icon::set_app_icon;
 
 trait BoolExt {
     fn to_objc(self) -> BOOL;
