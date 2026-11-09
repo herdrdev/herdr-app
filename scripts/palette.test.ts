@@ -22,7 +22,7 @@ const source = await readFile(new URL("../defaults/frame/palette/main.js", impor
 const element = () => new Element();
 let platform = "linux";
 const icons: string[] = [];
-const values = { View: class {}, div: element, svg: (path: string) => { icons.push(path); return element(); }, v_flex: element, h_flex: element, Input: { new: element }, theme: () => ({}), keys: () => [], win: () => ({ platform }) };
+const values = { View: class {}, div: element, svg: (path: string) => { icons.push(path); return element(); }, v_flex: element, h_flex: element, Input: { new: element }, theme: () => ({}), keys: () => [], win: () => ({ platform }), commands: () => [{ name: "mod.open", args: [{ name: "name", required: true }], about: "" }], layouts: () => [] };
 const Palette = new Function(...Object.keys(values), source.replace(/^import .*;\n/gm, "").replace("export default class Palette", "return class Palette"))(...Object.values(values));
 function find(root: Element, id: string): Element | undefined {
   if (root?.calls?.id?.[0] === id) return root;
@@ -69,4 +69,18 @@ test("palette scrolls past group titles with small movements", () => {
     }
     expect(view.scroll).toBe(view.maxScroll);
   }
+});
+
+test("palette lists titled overlay mods once, after the app's own names", () => {
+  const view = new Palette();
+  view.query = ""; view.recent = [];
+  view.mods = [{ name: "jump", title: "Jump" }, { name: "picker", title: "Picker" }, { name: "themes", title: "Themes" }];
+  const mods = view.rows().filter((r) => r.e.name === "mod.open");
+  expect(mods.map((r) => [r.head, r.e.title, r.e.args.name])).toEqual([
+    ["Tab", "Go to space or tab…", "picker"],
+    ["Mod", "Open Jump", "jump"],
+    ["Mod", "Open Themes", "themes"],
+  ]);
+  view.query = "themes";
+  expect(view.rows()[0].e).toMatchObject({ name: "mod.open", args: { name: "themes" } });
 });
