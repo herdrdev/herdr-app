@@ -126,8 +126,8 @@ function orderedHarness(ids: string[]) {
   h.view.git = {};
   h.view.shown = new Set(ids);
   h.view.born = {};
-  h.view.pressed = null;
-  h.view.drag = null;
+  h.view.gesture = null;
+  h.view.quiet = false;
   h.view.handle = { focus() {} };
   h.view.scroll = { offset: () => ({ x: 0, y: 0 }), set_offset() {} };
   h.view.view = 1000;
@@ -198,7 +198,7 @@ test("dragging a main checkout moves the right id and its children follow", () =
   // Pressed on main's row (30 px down), lifted, and held 70 px lower: main and
   // topic (58 px) go past the middle of last. The drop is resolved from the
   // model as it is then, not from rows built before reconciliation.
-  h.view.pressed = { id: "main", at: 30, row: 30, tree: false };
+  h.view.gesture = { kind: "pressed", id: "main", at: 30, row: 30, tree: false };
   h.view.follow(40, h.cx);
   h.view.follow(100, h.cx);
   h.view.settle(true, h.cx);

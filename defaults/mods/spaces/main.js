@@ -42,6 +42,12 @@ const FALLBACK = 60000;
 const SLIDE = { response: 200, damping: 1 }, GLIDE = { duration: 200, easing: "ease-out" };
 const ENTER = { duration: 200, delay: 200, easing: "ease-out" }, EXIT = { duration: 120, easing: "ease-out" };
 const LIFT = 4;
+// The held look, the same in every dragged list: nothing follows the pointer's
+// hover while one is held or landing (a neighbour sliding under a still pointer
+// flickered), nor after it lands until the pointer moves. The held one shows
+// its hover look and a shadow over its own opaque look: the shadow fades in as
+// it lifts, both fade out as it lands, so it ends exactly as it rests.
+const RAISE = { duration: 120, easing: "ease-out" };
 // Held within EDGE px of the list's ends, the list scrolls, up to STEP px a frame.
 const EDGE = 40, STEP = 14;
 
@@ -72,8 +78,10 @@ export default class Spaces extends View {
     // worktree appears under its repo instead of jumping there.
     this.shown = new Set(spaces().map((s) => s.id));
     this.born = {};
-    this.pressed = null;
-    this.drag = null;
+    // null, or the one pointer gesture going on: "pressed" (not moved yet),
+    // "drag" (held), "drop" or "back" (landing).
+    this.gesture = null;
+    this.quiet = false;
     this.handle = cx.focus_handle();
     this.scroll = ScrollHandle.new();
     this.view = 0;
@@ -397,7 +405,7 @@ export default class Spaces extends View {
       .when(g.behind > 0, (el) => el.child(div().flex_none().text_color(t.ansi1).child(`\u2193${g.behind}`)));
   }
 
-  row({ w, i, g, tree }, t) {
+  row({ w, i, g, tree }, t, lifted) {
     const on = w.active;
     const colors = shared("space.colors") ?? {};
     const color = colors[w.id] ?? "ansi6";
@@ -411,9 +419,9 @@ export default class Spaces extends View {
       .justify_center()
       .rounded(8)
       .when(on, (el) => el.bg(t.selected))
-      .when(!on, (el) => el.hover((s) => s.bg(t.hover)))
+      .when(!on && !lifted && !this.quiet && !this.held(), (el) => el.hover((s) => s.bg(t.hover)))
       // A worktree goes with its checkout, so only a checkout's row drags.
-      .on_mouse_down("left", (e) => { this.pressed = { id: w.id, y: e.position.y, row: e.bounds?.y, tree: Boolean(tree) }; })
+      .on_mouse_down("left", (e) => { if (!this.held()) this.gesture = { kind: "pressed", id: w.id, y: e.position.y, row: e.bounds?.y, tree: Boolean(tree) }; })
       .on_mouse_down("right", () => this.menu(w))
       .child(
         h_flex()
@@ -460,25 +468,32 @@ export default class Spaces extends View {
     return { y, end: at };
   }
 
+  held() {
+    const g = this.gesture;
+    return g && g.kind !== "pressed" ? g : null;
+  }
+
   follow(pointer, cx) {
-    const p = this.pressed, d = this.drag;
-    if (d?.phase === "drag") {
-      d.pointer = pointer;
-      this.place(d);
-      this.edge(d, cx);
+    if (this.quiet) { this.quiet = false; cx.notify(); }
+    const p = this.gesture;
+    if (p?.kind === "drag") {
+      p.pointer = pointer;
+      this.place(p);
+      this.edge(p, cx);
       cx.notify();
-    } else if (p && !d && !p.tree && p.at !== undefined && Math.abs(pointer - p.at) >= LIFT) {
+    } else if (p?.kind === "pressed" && !p.tree && p.at !== undefined && Math.abs(pointer - p.at) >= LIFT) {
       const space = spaces().find(s => s.id === p.id), machine = space?.machine ?? null;
       const blocks = this.blocks(this.ordered().filter(r => (r.w.machine ?? null) === machine));
       const byId = Object.fromEntries(blocks.map(b => [b.id, b])), order = blocks.map(b => b.id);
       if (!byId[p.id] || order.length < 2) return;
-      this.pressed = null;
       const from = order.indexOf(p.id);
       // The group's top in the list, from where the pressed row was.
       const top = p.row - this.geometry(order, byId).y[p.id];
-      this.drag = { id: p.id, machine, order, byId, from, top, down: p.at, pointer, dy: 0, phase: "drag", pane: focused()?.pane };
-      this.place(this.drag);
+      const d = this.gesture = { kind: "drag", id: p.id, machine, order, byId, from, top, down: p.at, pointer, dy: 0, pane: focused()?.pane };
+      this.place(d);
       this.handle.focus();
+      // A transition starts from what was drawn: the shadow is drawn clear once, then raised.
+      cx.timer.after(0, cx => { d.raised = true; cx.notify(); });
       cx.notify();
     }
   }
@@ -501,10 +516,10 @@ export default class Spaces extends View {
   // A held pointer at an end keeps scrolling without moving, so this one ticks,
   // only while held there.
   edge(d, cx) {
-    if (d.phase !== "drag" || this.speed(d) === 0) { d.tick?.cancel(); d.tick = null; return; }
+    if (this.speed(d) === 0) { d.tick?.cancel(); d.tick = null; return; }
     d.tick ??= cx.timer.every(16, cx => {
-      const v = this.drag === d ? this.speed(d) : 0;
-      if (v === 0 || d.phase !== "drag") { d.tick?.cancel(); d.tick = null; return; }
+      const v = this.gesture === d ? this.speed(d) : 0;
+      if (v === 0) { d.tick?.cancel(); d.tick = null; return; }
       const at = this.scroll.offset().y;
       this.scroll.set_offset({ y: at + v });
       const moved = this.scroll.offset().y - at;
@@ -517,7 +532,7 @@ export default class Spaces extends View {
 
   // Which place letting go lands in: past half of a neighbour, it makes room.
   landing() {
-    const d = this.drag, { y } = this.geometry(d.order, d.byId), h = d.byId[d.id].h;
+    const d = this.gesture, { y } = this.geometry(d.order, d.byId), h = d.byId[d.id].h;
     const top = y[d.id] + d.dy, bottom = top + h;
     let to = d.from;
     d.order.forEach((id, j) => {
@@ -529,20 +544,20 @@ export default class Spaces extends View {
   }
 
   settle(drop, cx) {
-    const d = this.drag, to = this.landing();
-    d.tick?.cancel(); d.tick = null;
-    d.phase = drop && to !== d.from ? "drop" : "back";
-    d.to = d.phase === "drop" ? to : d.from;
-    if (d.phase === "drop") {
+    const d = this.gesture, to = this.landing();
+    d.tick?.cancel();
+    const kind = drop && to !== d.from ? "drop" : "back";
+    const g = this.gesture = { ...d, kind, to: kind === "drop" ? to : d.from, tick: null };
+    if (kind === "drop") {
       // Before the next block's checkout, else after the last row of the one before.
-      const order = d.order.filter(id => id !== d.id); order.splice(d.to, 0, d.id);
+      const order = d.order.filter(id => id !== d.id); order.splice(g.to, 0, d.id);
       const rest = spaces().map(s => s.id).filter(id => id !== d.id);
-      const next = order[d.to + 1], prev = order[d.to - 1];
+      const next = order[g.to + 1], prev = order[g.to - 1];
       const at = next ? rest.indexOf(next) : rest.indexOf(d.byId[prev].rows.at(-1).w.id) + 1;
       run("space.move", { id: d.id, index: at + 1 });
     }
     if (d.pane) run("pane.focus", { pane: d.pane });
-    cx.timer.after(GLIDE.duration, cx => { if (this.drag === d) { this.drag = null; cx.notify(); } });
+    cx.timer.after(GLIDE.duration, cx => { if (this.gesture === g) { this.gesture = null; this.quiet = true; cx.notify(); } });
     cx.notify();
   }
 
@@ -567,19 +582,22 @@ export default class Spaces extends View {
   // where letting go lands.
   group(m, mine, t) {
     const blocks = this.blocks(mine), byId = Object.fromEntries(blocks.map(b => [b.id, b]));
-    let d = this.drag?.machine === m ? this.drag : null;
-    if (d && (blocks.length !== d.order.length || blocks.some(b => !d.byId[b.id] || d.byId[b.id].rows.length !== b.rows.length))) d = this.drag = null;
+    let d = this.held()?.machine === m ? this.held() : null;
+    if (d && (blocks.length !== d.order.length || blocks.some(b => !d.byId[b.id] || d.byId[b.id].rows.length !== b.rows.length))) d = this.gesture = null;
     let order = blocks.map(b => b.id);
     if (d) {
       order = d.order.filter(id => id !== d.id);
-      order.splice(d.phase === "drag" ? this.landing() : d.to, 0, d.id);
+      order.splice(d.kind === "drag" ? this.landing() : d.to, 0, d.id);
     }
     const { y, end } = this.geometry(order, byId);
     const cell = (r, top, motion, opacity, fade) => div().id(`cell-${r.w.id}`).absolute().left(0).right(0).top(top)
       .map(el => motion === SLIDE ? el.spring("top", SLIDE) : el.transition("top", motion))
       .opacity(opacity).transition("opacity", fade).child(this.row(r, t));
     const cells = [];
+    // The dashed box comes and goes with the backing (it shows round the held block's edge).
+    const up = d?.kind === "drag" && d.raised;
     if (d) cells.push(div().id(`slot-${d.id}`).absolute().left(0).right(0).top(y[d.id]).spring("top", SLIDE)
+      .opacity(up ? 1 : 0).transition("opacity", up ? RAISE : GLIDE)
       .h(byId[d.id].h).rounded(8).border(1).border_dashed().border_color(t.dim));
     for (const g of Object.values(this.ghosts)) if (g.m === m) cells.push(cell(g.r, g.y, SLIDE, 0, EXIT));
     for (const id of order) {
@@ -591,10 +609,17 @@ export default class Spaces extends View {
       }
     }
     if (d) {
-      const lifted = d.phase === "drag" ? this.geometry(d.order, d.byId).y[d.id] + d.dy : y[d.id];
-      cells.push(div().id(`lift-${d.id}`).absolute().left(0).right(0).top(lifted).transition("top", d.phase === "drag" ? 0 : GLIDE)
-        .flex().flex_col().rounded(8).bg(t.raised).border(1).border_color(t.border).shadow_md()
-        .children(byId[d.id].rows.map(r => this.row(r, t))));
+      const dragging = d.kind === "drag", rows = byId[d.id].rows, main = rows[0];
+      const lifted = dragging ? this.geometry(d.order, d.byId).y[d.id] + d.dy : y[d.id];
+      const layer = (name) => div().id(`${name}-${d.id}`).absolute().left(0).right(0).top(0).rounded(8);
+      cells.push(div().id(`lift-${d.id}`).absolute().left(0).right(0).top(lifted).transition("top", dragging ? 0 : GLIDE)
+        .flex().flex_col()
+        .child(layer("backing").bottom(0).bg(t.chrome).shadow_md().opacity(up ? 1 : 0).transition("opacity", up ? RAISE : GLIDE))
+        .child(layer("rest").bottom(0).bg(t.chrome))
+        // Only the pressed row was hovered, and the shown space's row never is.
+        .when(!main.w.active, el => el.child(layer("hovered").h(rowHeight(main)).bg(t.hover)
+          .opacity(dragging ? 1 : 0).transition("opacity", dragging ? 0 : GLIDE)))
+        .children(rows.map(r => this.row(r, t, true))));
     }
     return div().id(`group-${m ?? "local"}`).relative().flex_none().h(end).spring("height", SLIDE).children(cells);
   }
@@ -623,14 +648,14 @@ export default class Spaces extends View {
       .child(v_flex().id("space-list").flex_1().min_h(0).px(collapsed ? 0 : 8).pb(14).overflow_y_scrollbar().mode("always")
         .track_scroll(this.scroll).on_size_change(size => { this.view = size.height; })
         .track_focus(this.handle).capture_pointer()
-        .on_key_down((e, cx) => { if (e.key === "escape" && this.drag?.phase === "drag") { cx.stop_propagation(); this.settle(false, cx); } })
+        .on_key_down((e, cx) => { if (e.key === "escape" && this.gesture?.kind === "drag") { cx.stop_propagation(); this.settle(false, cx); } })
         // The list's own coordinates: what it scrolled counts.
-        .on_mouse_down("left", (e) => { if (this.pressed) { this.pressed.at = e.position.y - e.bounds.y; this.pressed.row -= e.bounds.y; } })
+        .on_mouse_down("left", (e) => { const p = this.gesture; if (p?.kind === "pressed") { p.at = e.position.y - e.bounds.y; p.row -= e.bounds.y; } })
         .on_mouse_move((e, cx) => this.follow(e.position.y - e.bounds.y, cx))
         .on_mouse_up("left", (_e, cx) => {
-          const pressed = this.pressed; this.pressed = null;
-          if (this.drag?.phase === "drag") this.settle(true, cx);
-          else if (pressed && !this.drag) run("space.select", { id: pressed.id });
+          const g = this.gesture;
+          if (g?.kind === "drag") this.settle(true, cx);
+          else if (g?.kind === "pressed") { this.gesture = null; run("space.select", { id: g.id }); }
         })
         .children(this.grouped(t, collapsed)));
   }
