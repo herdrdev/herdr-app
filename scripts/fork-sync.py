@@ -3,6 +3,7 @@
 import argparse
 import json
 import re
+import shlex
 import subprocess
 import sys
 
@@ -26,13 +27,31 @@ def clean():
         raise RuntimeError("Use a clean disposable checkout for fork synchronization")
 
 
+def resolve_conflicts(command):
+    """Let a command resolve the merge in progress; accept it only if nothing is left unresolved."""
+    unmerged = git("diff", "--name-only", "--diff-filter=U").stdout.split()
+    print("Merge conflicts in: " + ", ".join(unmerged), file=sys.stderr)
+    if subprocess.run(shlex.split(command)).returncode:
+        raise RuntimeError("The conflict resolver failed")
+    git("add", "--", *unmerged)
+    left = git("diff", "--name-only", "--diff-filter=U").stdout.split()
+    markers = git("grep", "-n", "--cached", "-E", "^(<<<<<<<|>>>>>>>) ", "--", *unmerged, check=False).stdout.strip()
+    if left or markers:
+        raise RuntimeError("The conflict resolver left conflicts unresolved:\n" + (markers or "\n".join(left)))
+    git("commit", "--no-edit")
+
+
 def prepare(args):
     git("fetch", "--no-tags", args.upstream, args.base)
     upstream = git("rev-parse", "FETCH_HEAD").stdout.strip()
     if ancestor(upstream, "HEAD"):
         return {"changed": False}
     git("switch", "-c", args.branch)
-    git("merge", "--no-edit", upstream)
+    merged = git("merge", "--no-edit", upstream, check=False)
+    if merged.returncode:
+        if not args.resolver:
+            raise RuntimeError(merged.stderr.strip() or merged.stdout.strip())
+        resolve_conflicts(args.resolver)
     sha = git("rev-parse", "HEAD").stdout.strip()
     git("push", "--set-upstream", "origin", args.branch)
     return {"changed": True, "branch": args.branch, "sha": sha}
@@ -66,6 +85,7 @@ def main():
     parser.add_argument("--base", default="master")
     parser.add_argument("--branch", required=True)
     parser.add_argument("--sha")
+    parser.add_argument("--resolver", help="command that resolves merge conflicts in the working tree; its result is checked and committed")
     args = parser.parse_args()
     if not args.branch.startswith("automation/upstream-"):
         parser.error("Candidate branches must start with automation/upstream-")

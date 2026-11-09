@@ -1,0 +1,35 @@
+#!/bin/bash
+# Resolves the merge conflicts of an upstream sync with a cheap coding model.
+# Called by fork-sync.py prepare --resolver in the middle of the merge; it only
+# edits files. fork-sync.py then rejects leftover markers, and CI verifies the
+# result before master moves, so a wrong resolution cannot land.
+#
+# Needs pi (npm i -g @earendil-works/pi-coding-agent) and OPENCODE_API_KEY.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+
+files=$(git diff --name-only --diff-filter=U)
+[[ -n $files ]] || { echo "fork-resolve-conflicts: no conflicts" >&2; exit 1; }
+
+# The model gets no GitHub token: upstream text it reads must not be able to push.
+env -u GH_TOKEN -u GITHUB_TOKEN pi --provider opencode-go --model "${FORK_RESOLVER_MODEL:-deepseek-v4.1-flash}" --thinking medium \
+  --no-session --no-extensions --no-skills --no-prompt-templates --no-context-files \
+  --tools read,edit,write,bash -p "$(cat <<PROMPT
+This repository is a fork of herdrdev/herdr-app, in the middle of 'git merge upstream/master'.
+These files have merge conflicts:
+
+$files
+
+Resolve every conflict by editing the files so no <<<<<<<, ======= or >>>>>>> line is left.
+- Keep what upstream changed and what the fork added; combine both when they touch the same lines.
+- The fork's additions are described in docs/FORK.md (a native browser component for mods and a Plannotator integration). If upstream renamed or reshaped something the fork's code calls, update the fork's code to the new shape.
+- To understand a hunk, use git log, git show and git diff (for example: git diff MERGE_HEAD...HEAD -- FILE).
+- Do not run cargo or a build, do not commit, do not touch files without conflicts.
+- When done, reply with one line per file saying what you kept.
+PROMPT
+)"
+
+if git grep -n -E '^(<<<<<<<|>>>>>>>) ' -- $files; then
+  echo "fork-resolve-conflicts: markers remain" >&2
+  exit 1
+fi

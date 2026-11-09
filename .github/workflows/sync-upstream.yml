@@ -28,15 +28,23 @@ jobs:
           ref: master
           fetch-depth: 0
           persist-credentials: false
+      # Only for conflicts: a model resolves them (scripts/fork-resolve-conflicts); verify still
+      # has to pass before master moves. Needs the OPENCODE_API_KEY repository secret.
+      - uses: actions/setup-node@249970729cb0ef3589644e2896645e5dc5ba9c38 # v6
+        with:
+          node-version: '24.22.2'
+      - name: Install the conflict resolver
+        run: npm install -g @earendil-works/pi-coding-agent@1.5.0
       - name: Prepare a candidate without changing master
         id: candidate
         env:
           GH_TOKEN: ${{ github.token }}
+          OPENCODE_API_KEY: ${{ secrets.OPENCODE_API_KEY }}
         run: |
           gh auth setup-git
           git config user.name 'github-actions[bot]'
           git config user.email '41898282+github-actions[bot]@users.noreply.github.com'
-          result=$(python3 scripts/fork-sync.py prepare --branch "automation/upstream-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}")
+          result=$(python3 scripts/fork-sync.py prepare --resolver scripts/fork-resolve-conflicts --branch "automation/upstream-${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}")
           printf '%s\n' "$result"
           printf '%s\n' "$result" | jq -r 'to_entries[] | "\(.key)=\(.value)"' >> "$GITHUB_OUTPUT"
   verify:
