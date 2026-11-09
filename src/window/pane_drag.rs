@@ -40,12 +40,16 @@ impl PaneDrag {
     }
 }
 
-/// Where a drag draws the tab's panes this frame (it eases them toward where
-/// the layout puts them).
+/// Where the shown tab's panes are drawn this frame while they ease toward
+/// where the layout puts them (a drag, or panes added, closed or moved).
 pub(super) struct PaneShown {
     rects: HashMap<String, Bounds<Pixels>>,
+    /// Panes fading in (absent: shown).
+    opacity: HashMap<String, f32>,
+    /// Closed panes fading out where they were.
+    ghosts: Vec<(String, Bounds<Pixels>, f32)>,
     /// The dashed box where the carried pane lands.
-    slot: Bounds<Pixels>,
+    slot: Option<Bounds<Pixels>>,
     /// How lifted the carried pane is: its shadow and dashed box.
     lift: f32,
     /// Its grip, which fades as it lands.
@@ -54,22 +58,56 @@ pub(super) struct PaneShown {
     target: Option<(String, Option<Edge>)>,
 }
 
-/// The drag motion of the shipped tabs and spaces mods (their `SLIDE`,
-/// `GLIDE` and `RAISE`): the others slide, the carried one glides into
-/// place, its shadow rises.
+impl PaneShown {
+    pub(super) fn opacity(&self, pane: &str) -> f32 {
+        self.opacity.get(pane).copied().unwrap_or(1.)
+    }
+
+    #[cfg(test)]
+    pub(super) fn ghost(&self, pane: &str) -> Option<(Bounds<Pixels>, f32)> {
+        self.ghosts.iter().find(|g| g.0 == pane).map(|g| (g.1, g.2))
+    }
+}
+
+/// The shown tab's layout last frame: a change in its shape (not its sizes,
+/// which the pointer leads) eases the panes into the new one.
+#[derive(Default)]
+pub(super) struct PaneLayout {
+    /// Tab and zoomed pane: another one shows at once.
+    shown: Option<(String, Option<String>)>,
+    shape: String,
+    panes: Vec<String>,
+    easing: bool,
+    /// Closed panes and their last place; true until first drawn.
+    ghosts: Vec<(String, Bounds<Pixels>, bool)>,
+}
+
+fn shape(root: &Node) -> String {
+    root.walk().iter().map(|n| format!("{}:{:?}:{};", n.id, n.axis(), n.children().len())).collect()
+}
+
+/// The motion of the shipped tabs and spaces mods (their `SLIDE`, `GLIDE`,
+/// `RAISE`, `ENTER` and `EXIT`): the others slide, the carried one glides
+/// into place, its shadow rises; a new one fades in once there's room, a
+/// closed one fades out where it was.
 const SLIDE: Spring = Spring::new(Duration::from_millis(200)).with_damping(1.0);
 const GLIDE: Duration = Duration::from_millis(200);
 const RAISE: Duration = Duration::from_millis(120);
+const EXIT: Duration = Duration::from_millis(120);
 /// How far the pointer moves before a press carries the pane.
 const DRAG_START: f32 = 4.;
+
+fn enter() -> Transition {
+    ease(Duration::from_millis(200)).delay(Duration::from_millis(200))
+}
 
 fn ease(duration: Duration) -> Transition {
     Transition::new(duration).ease(ease_out_cubic)
 }
 
-fn spring_bounds(key: &str, b: Bounds<Pixels>, window: &mut Window, cx: &mut App) -> Bounds<Pixels> {
+fn spring_bounds(key: &str, b: Bounds<Pixels>, policy: Spring, window: &mut Window, cx: &mut App) -> Bounds<Pixels> {
     let id = SharedString::from(key.to_owned());
-    let mut at = |channel: &'static str, v: Pixels| spring((id.clone(), channel), v, SLIDE, window, cx);
+    let mut at = |channel: &'static str, v: Pixels| spring((id.clone(), channel), v, policy, window, cx);
     let origin = point(at("x", b.origin.x), at("y", b.origin.y));
     Bounds::new(origin, size(at("w", b.size.width), at("h", b.size.height)))
 }
@@ -250,93 +288,154 @@ impl AppWindow {
         }
     }
 
-    /// Eases each pane of a dragged tab toward its place in the layout drawn
-    /// last frame; ends a landing once everything is there.
+    /// Eases each pane of the shown tab toward its place in the layout drawn
+    /// last frame, while a drag or a change of its shape lasts; ends a
+    /// landing once everything is there.
     pub(super) fn pane_motion(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let Some(d) = &self.pane_drag else {
-            self.pane_shown = None;
-            return;
-        };
-        let Some(tab) = self.model.active_tab().filter(|t| t.id == d.tab() && t.zoomed.is_none()) else {
-            // Its tab went away or isn't shown: nothing left to draw it in.
+        let Some(tab) = self.model.active_tab() else {
             self.pane_drag = None;
             self.pane_shown = None;
+            self.pane_layout = PaneLayout::default();
             return;
         };
-        if matches!(d, PaneDrag::Pressed { .. }) {
-            self.pane_shown = None;
-            return;
+        if self.pane_drag.as_ref().is_some_and(|d| d.tab() != tab.id || tab.zoomed.is_some()) {
+            // Its tab went away or isn't shown: nothing left to draw it in.
+            self.pane_drag = None;
         }
-        // The first frame draws it flat, so the lift has a start to rise from.
-        let up = matches!(d, PaneDrag::Carried { .. }) && self.pane_shown.is_some();
-        let target = match d {
-            PaneDrag::Carried { target, .. } => target.clone(),
-            _ => None,
-        };
+        let bounds = self.bounds.borrow().clone();
+        let shown = Some((tab.id.clone(), tab.zoomed.clone()));
+        let (shape, panes) = (shape(&tab.root), tab.root.panes().iter().map(|n| n.id.clone()).collect::<Vec<_>>());
+        let l = &mut self.pane_layout;
+        if l.shown != shown {
+            l.easing = false;
+            l.ghosts.clear();
+        } else if l.shape != shape {
+            l.easing = true;
+            for id in l.panes.iter().filter(|id| !panes.contains(id)) {
+                if let Some(b) = bounds.get(id) {
+                    l.ghosts.push((id.clone(), *b, true));
+                }
+            }
+        }
+        (l.shown, l.shape, l.panes) = (shown, shape, panes);
+        let easing = l.easing;
+        let d = self.pane_drag.as_ref();
+        let moving = matches!(d, Some(PaneDrag::Carried { .. } | PaneDrag::Landing { .. }));
+        let carried = d.filter(|_| moving).map(PaneDrag::pane);
+        let policy = if easing || moving { SLIDE } else { SLIDE.with_travel(false) };
         let mut rects = HashMap::new();
+        let mut opacity = HashMap::new();
         let mut slot = None;
         let mut settled = true;
-        let bounds = self.bounds.borrow().clone();
         for n in tab.root.panes() {
-            let Some(place) = bounds.get(&n.id).copied() else { continue };
-            let rect = if n.id == d.pane() {
-                slot = Some(spring_bounds(&format!("pane-slot:{}", n.id), place, window, cx));
+            let place = bounds.get(&n.id).copied();
+            // Laid out for the first time: hidden until the frame that knows its place.
+            let o = transition(SharedString::from(format!("pane-enter:{}", n.id)), if place.is_some() { 1. } else { 0. },
+                if easing { enter() } else { ease(Duration::ZERO) }, window, cx);
+            if o < 1. {
+                opacity.insert(n.id.clone(), o);
+                settled = false;
+            }
+            let Some(place) = place else { continue };
+            let rect = if carried == Some(n.id.as_str()) {
+                slot = Some(spring_bounds(&format!("pane-slot:{}", n.id), place, SLIDE, window, cx));
                 let id = SharedString::from(format!("pane-carry:{}", n.id));
                 match d {
-                    PaneDrag::Carried { from, down, pointer, .. } => {
+                    Some(PaneDrag::Carried { from, down, pointer, .. }) => {
                         transition(id, Bounds::new(from.origin + (*pointer - *down), from.size), ease(Duration::ZERO), window, cx)
                     }
                     _ => transition(id, place, ease(GLIDE), window, cx),
                 }
             } else {
-                spring_bounds(&format!("pane-at:{}", n.id), place, window, cx)
+                spring_bounds(&format!("pane-at:{}", n.id), place, policy, window, cx)
             };
             settled &= rect == place;
             rects.insert(n.id.clone(), rect);
         }
-        let fade = if up { ease(RAISE) } else { ease(GLIDE) };
-        let lift = transition("pane-lift", if up { 1. } else { 0. }, fade, window, cx);
-        let grip = transition("pane-grip", if up || self.pane_shown.is_none() { 1. } else { 0. }, ease(GLIDE), window, cx);
-        let Some(slot) = slot else {
-            self.pane_drag = None;
-            self.pane_shown = None;
-            return;
+        let mut ghosts = Vec::new();
+        self.pane_layout.ghosts.retain_mut(|(id, b, fresh)| {
+            let o = transition(SharedString::from(format!("pane-ghost:{id}")), if *fresh { 1. } else { 0. }, ease(EXIT), window, cx);
+            *fresh = false;
+            ghosts.push((id.clone(), *b, o));
+            o > 0.
+        });
+        let up = matches!(d, Some(PaneDrag::Carried { .. }));
+        let lift = transition("pane-lift", if up { 1. } else { 0. }, if up { ease(RAISE) } else { ease(GLIDE) }, window, cx);
+        let landing = matches!(d, Some(PaneDrag::Landing { .. }));
+        let grip = transition("pane-grip", if landing { 0. } else { 1. }, if landing { ease(GLIDE) } else { ease(Duration::ZERO) }, window, cx);
+        if settled && self.pane_layout.ghosts.is_empty() {
+            self.pane_layout.easing = false;
+            if landing && lift == 0. && grip == 0. {
+                self.pane_drag = None;
+            }
+        }
+        let target = match &self.pane_drag {
+            Some(PaneDrag::Carried { target, .. }) => target.clone(),
+            _ => None,
         };
-        if matches!(d, PaneDrag::Landing { .. }) && settled && lift == 0. && grip == 0. {
-            self.pane_drag = None;
+        let moving = matches!(self.pane_drag, Some(PaneDrag::Carried { .. } | PaneDrag::Landing { .. }));
+        if tab.zoomed.is_some() || !(moving || self.pane_layout.easing || !ghosts.is_empty()) {
             self.pane_shown = None;
             return;
         }
-        // A new preview is laid out this frame; the next one moves toward it.
+        // A new layout is drawn this frame; the next one moves toward it.
         if self.pane_shown.as_ref().is_none_or(|s| s.target != target) {
             window.request_animation_frame();
         }
-        self.pane_shown = Some(PaneShown { rects, slot, lift, grip, target });
+        self.pane_shown = Some(PaneShown { rects, opacity, ghosts, slot, lift, grip, target });
     }
 
-    /// A pane of a dragged tab: its slot records where the layout puts it,
-    /// and the pane is drawn where its motion has it (the carried one by
-    /// `pane_drag_layer`, a dashed box in its slot).
+    /// A pane of the shown tab while its panes ease: its slot records where
+    /// the layout puts it, and the pane is drawn where its motion has it
+    /// (the carried one by `pane_drag_layer`, a dashed box in its slot).
     pub(super) fn pane_in_motion(&self, n: &Node, body: impl FnOnce(&mut Context<Self>) -> AnyElement, frame: Option<&PaneFrame>, cx: &mut Context<Self>) -> Option<Div> {
-        let s = self.pane_shown.as_ref().filter(|_| n.is_pane())?;
-        let rect = *s.rects.get(&n.id)?;
-        let d = self.pane_drag.as_ref()?;
+        let s = self.pane_shown.as_ref().filter(|_| n.is_pane() && self.model.active_tab().is_some_and(|t| t.root.find(&n.id).is_some()))?;
         let at = |b: Bounds<Pixels>, child: AnyElement| anchored().position(b.origin).child(div().w(b.size.width).h(b.size.height).child(child));
-        let inner = if n.id == d.pane() {
-            let mut boxed = div().size_full().border_1().border_dashed().border_color(c("dim")).opacity(s.lift);
-            if let Some(r) = frame.and_then(|f| f.radius) {
-                boxed = boxed.rounded(settings::z(r));
+        let carried = self.pane_drag.as_ref().is_some_and(|d| d.pane() == n.id && !matches!(d, PaneDrag::Pressed { .. }));
+        let inner = match (s.rects.get(&n.id), s.slot) {
+            (_, Some(slot)) if carried => {
+                let mut boxed = div().size_full().border_1().border_dashed().border_color(c("dim")).opacity(s.lift);
+                if let Some(r) = frame.and_then(|f| f.radius) {
+                    boxed = boxed.rounded(settings::z(r));
+                }
+                at(slot, boxed.into_any_element()).into_any_element()
             }
-            at(s.slot, boxed.into_any_element())
-        } else {
-            at(rect, body(cx))
+            (Some(rect), _) => at(*rect, div().size_full().opacity(s.opacity(&n.id)).child(body(cx)).into_any_element()).into_any_element(),
+            // Not laid out yet: it shows once it has a place.
+            (None, _) => div().size_full().opacity(0.).child(body(cx)).into_any_element(),
         };
         Some(div().relative().size_full().child(inner))
     }
 
+    /// Closed panes fading out where they were, under the others.
+    pub(super) fn pane_ghosts(&self) -> Vec<AnyElement> {
+        let Some(s) = &self.pane_shown else { return vec![] };
+        let frame = self.pane_frame();
+        s.ghosts.iter().map(|(_, b, o)| {
+            let mut el = div().w(b.size.width).h(b.size.height).opacity(*o);
+            match frame {
+                Some(f) => {
+                    if let Some(r) = f.radius {
+                        el = el.rounded(settings::z(r));
+                    }
+                    el = match &f.background {
+                        Some(bg) => paint(el, bg),
+                        None => el.bg(c("background")),
+                    };
+                    if let Some(l) = pane_size::frame_border(f, false) {
+                        el = el.border(settings::z(l.width)).border_color(c(&l.color));
+                    }
+                }
+                None => el = el.bg(c("background")),
+            }
+            anchored().position(b.origin).child(el).into_any_element()
+        }).collect()
+    }
+
     pub(super) fn pane_drag_layer(&self, focused: &HashSet<String>, cx: &mut Context<Self>) -> AnyElement {
         // The carried pane, over everything, with a shadow as it lifts.
-        let carried = self.pane_shown.as_ref().zip(self.pane_drag.as_ref()).and_then(|(s, d)| {
+        let moving = self.pane_drag.as_ref().filter(|d| !matches!(d, PaneDrag::Pressed { .. }));
+        let carried = self.pane_shown.as_ref().zip(moving).and_then(|(s, d)| {
             let tab = self.model.tab(d.tab())?;
             let n = tab.root.find(d.pane())?;
             let rect = *s.rects.get(&n.id)?;
@@ -344,7 +443,7 @@ impl AppWindow {
             let radius = frame.and_then(|f| f.radius).map_or(px(0.), settings::z);
             let body = self.node_body(n, focused, frame, cx).size_full();
             Some(div().absolute().left(rect.origin.x).top(rect.origin.y).w(rect.size.width).h(rect.size.height)
-                .child(div().absolute().inset_0().rounded(radius).bg(c("background")).shadow_lg().opacity(s.lift))
+                .child(div().absolute().inset_0().rounded(radius).bg(c("background")).shadow_md().opacity(s.lift))
                 .child(body))
         });
         let this = cx.entity().downgrade();
