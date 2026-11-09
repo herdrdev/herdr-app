@@ -1091,6 +1091,9 @@ drop; local folders and remote paths dropped onto another machine are refused.
 Paths containing control characters are rejected, including clipboard files.
 `.on_hover((hovered, cx) => …)` reports pointer entry and exit on buttons
 and other interactive controls too.
+`.capture_pointer()` on a `div`, `h_flex` or `v_flex` makes a drag: after a
+left press on it, its `on_mouse_move` and left `on_mouse_up` keep firing
+wherever the pointer goes in the window, until that release.
 `.when(cond, (el) => …)`, `.children([...])`. Controls from `gpui-base`
 (`Button`, `Checkbox`, `Switch`, `InputState` + `Input`) are unstyled: style
 them. Text: `TextView.markdown(id, text)` renders markdown; `EditorState.new({
