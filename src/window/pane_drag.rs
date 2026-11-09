@@ -98,7 +98,7 @@ const EXIT: Duration = Duration::from_millis(120);
 const DRAG_START: f32 = 4.;
 
 fn enter() -> Transition {
-    ease(Duration::from_millis(200)).delay(Duration::from_millis(200))
+    ease(Duration::from_millis(200)).delay(Duration::from_millis(100))
 }
 
 fn ease(duration: Duration) -> Transition {
