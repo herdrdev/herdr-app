@@ -74,6 +74,32 @@ class ForkSync(unittest.TestCase):
         self.prepare(ok=False)
         self.assertEqual(git(self.fork, "rev-parse", "master"), before)
 
+    def conflict(self):
+        self.commit(self.work, "base.txt", "fork version")
+        git(self.work, "push", "origin", "master")
+        self.commit(self.upstream, "base.txt", "upstream version")
+
+    def resolver(self, body):
+        script = self.root / "resolver.py"
+        script.write_text("from pathlib import Path\n" + body)
+        return "python3 " + str(script)
+
+    def test_a_resolved_conflict_becomes_a_candidate(self):
+        self.conflict()
+        resolver = self.resolver("Path('base.txt').write_text('both versions')\n")
+        candidate = self.sync("prepare", "--upstream", str(self.upstream), "--branch", "automation/upstream-test", "--resolver", resolver)
+        self.assertTrue(candidate["changed"])
+        self.assertEqual(git(self.work, "show", candidate["sha"] + ":base.txt"), "both versions")
+        self.assertEqual(git(self.work, "rev-list", "--parents", "-n1", candidate["sha"]).count(" "), 2)
+
+    def test_a_resolver_that_leaves_markers_is_rejected(self):
+        self.conflict()
+        before = git(self.fork, "rev-parse", "master")
+        resolver = self.resolver("pass\n")
+        self.sync("prepare", "--upstream", str(self.upstream), "--branch", "automation/upstream-test", "--resolver", resolver, ok=False)
+        self.assertEqual(git(self.fork, "rev-parse", "master"), before)
+        self.assertEqual(git(self.fork, "for-each-ref", "--format=%(refname)", "refs/heads/automation/"), "")
+
     def test_a_concurrent_master_change_is_not_overwritten(self):
         self.commit(self.upstream, "upstream.txt", "new upstream")
         candidate = self.prepare()

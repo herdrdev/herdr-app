@@ -46,10 +46,16 @@ this fork (`gh workflow disable release.yml`). Do not re-enable it.
 ## Follow upstream
 
 `sync-upstream.yml` merges `herdrdev/herdr-app` into master every day, runs CI
-on the merge, fast-forwards master and starts the fork release. When the merge
-conflicts or CI fails it opens an issue "Upstream sync is failing". Resolve it
-by merging `upstream/master` into a branch by hand and landing it through a PR
-(merge commit, not squash).
+on the merge, fast-forwards master and starts the fork release.
+
+When the merge conflicts, `scripts/fork-resolve-conflicts` has a cheap model
+(`opencode-go/deepseek-v4.1-flash` through pi, the `OPENCODE_API_KEY` repository
+secret) edit the conflicted files. `scripts/fork-sync.py` rejects the result if
+any conflict marker is left, and the candidate still has to pass the whole CI
+before master moves, so a wrong resolution fails instead of landing. When the
+resolver or CI fails, the workflow opens an issue "Upstream sync is failing";
+resolve it by merging `upstream/master` into a branch by hand and landing it
+through a PR (merge commit, not squash).
 
 ## Connect Pi and Plannotator
 
