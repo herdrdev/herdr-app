@@ -1,11 +1,13 @@
 import { test, expect, spyOn } from "bun:test";
 import { readFile } from "node:fs/promises";
-
+import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 const source = (await readFile(new URL("../defaults/mods/spaces/main.js", import.meta.url), "utf8"))
   .replace(/^import .*;\n/gm, "").replace("export default class Spaces", "class Spaces").replace(/^export /gm, "");
 
 type Space = { id: string; folder: string; machine?: string | null };
-function harness(replies: unknown[] = [], storage = new Map<string, string>(), snapshot: Space[] = []) {
+function harness(replies: unknown[] = [], storage = new Map<string, string>(), snapshot: Space[] = [], execGit?: (...args: any[]) => Promise<unknown>) {
   const calls: string[][] = [];
   const tasks: Promise<unknown>[] = [];
   const availability = [{ name: null as string | null, layout: "ready" }];
@@ -15,7 +17,7 @@ function harness(replies: unknown[] = [], storage = new Map<string, string>(), s
     if (String(method).startsWith("on_")) handlers[String(method)] = args.at(-1);
     return element;
   } });
-  const Spaces = new Function("View", "hc", "localStorage", "spaces", "panes", "run", "v_flex", "h_flex", "div", "svg", "shared", "machines", `${source}; return Spaces;`)(
+  const Spaces = new Function("View", "hc", "localStorage", "spaces", "panes", "run", "v_flex", "h_flex", "div", "svg", "shared", "machines", "exec", `${source}; return Spaces;`)(
     class {},
     async (args: string[]) => {
       calls.push(args);
@@ -29,7 +31,7 @@ function harness(replies: unknown[] = [], storage = new Map<string, string>(), s
       expect(name).toBe("space.move");
       moves.push(args);
     },
-    ...Array(4).fill(() => element), () => null, () => availability,
+    ...Array(4).fill(() => element), () => null, () => availability, execGit,
   );
   const view = new Spaces();
   view.reconnecting = {};
@@ -38,6 +40,56 @@ function harness(replies: unknown[] = [], storage = new Map<string, string>(), s
   const cx = { timer: { every() {} }, notify() {}, spawn(fn: (cx: unknown) => Promise<unknown>) { tasks.push(fn(cx)); } };
   return { view, calls, tasks, cx, storage, moves, handlers, snapshot, availability };
 }
+
+test("git grouping reads refs for normal, detached, unborn and bare worktrees", async () => {
+  const root = mkdtempSync(join(tmpdir(), "herdr-spaces-"));
+  const git = (cwd: string, ...args: string[]) => {
+    const result = Bun.spawnSync(["git", ...args], { cwd, env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_AUTHOR_NAME: "Test", GIT_AUTHOR_EMAIL: "test@example.com", GIT_COMMITTER_NAME: "Test", GIT_COMMITTER_EMAIL: "test@example.com" } });
+    if (result.exitCode) throw new Error(result.stderr.toString());
+    return result.stdout.toString().trim();
+  };
+  const execGit = async (_command: string, args: string[], { cwd }: { cwd: string }) => {
+    const result = Bun.spawnSync(["git", ...args], { cwd });
+    return { code: result.exitCode, stdout: result.stdout.toString(), stderr: result.stderr.toString() };
+  };
+  const h = harness([], new Map(), [], execGit);
+  Object.assign(h.view, { git: {}, checked: {}, unsure: new Set() });
+  h.view.watch = () => {};
+  const check = async (folder: string) => {
+    const key = JSON.stringify([null, folder]);
+    await h.view.check(key, h.cx);
+    return h.view.git[key];
+  };
+  try {
+    const repo = join(root, "repo");
+    mkdirSync(repo);
+    git(repo, "init", "-b", "main");
+    expect(await check(repo)).toMatchObject({ branch: "main", ahead: 0, behind: 0, linked: false });
+    git(repo, "commit", "--allow-empty", "-m", "base");
+    git(repo, "branch", "upstream");
+    git(repo, "branch", "--set-upstream-to=upstream");
+    git(repo, "commit", "--allow-empty", "-m", "ahead");
+    git(repo, "checkout", "upstream");
+    git(repo, "commit", "--allow-empty", "-m", "behind");
+    git(repo, "checkout", "main");
+    git(repo, "tag", "main");
+    expect(await check(repo)).toMatchObject({ name: "repo", branch: "main", ahead: 1, behind: 1, linked: false });
+    const tree = join(root, "tree");
+    git(repo, "worktree", "add", "-b", "topic", tree);
+    expect(await check(tree)).toMatchObject({ branch: "topic", ahead: 0, behind: 0, linked: true, repo: JSON.stringify([null, join(repo, ".git")]) });
+    git(tree, "checkout", "--detach");
+    expect(await check(tree)).toMatchObject({ branch: "(detached)", ahead: 0, behind: 0 });
+    expect(await check(root)).toBeNull();
+    expect(h.view.unsure.has(JSON.stringify([null, root]))).toBe(false);
+    const bare = join(root, "bare.git"), bareTree = join(root, "bare-tree");
+    git(root, "clone", "--bare", repo, bare);
+    expect(await check(bare)).toBeNull();
+    git(bare, "worktree", "add", "-b", "bare-topic", bareTree);
+    expect(await check(bareTree)).toMatchObject({ name: "bare", branch: "bare-topic", linked: true, repo: JSON.stringify([null, bare]) });
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
 
 const machine = { name: "cloud", id: "old", target: "user@host", session: null, via: false };
 
