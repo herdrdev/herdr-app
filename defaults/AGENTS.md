@@ -1071,7 +1071,10 @@ in init, `.track_focus(this.h).on_key_down((e, cx) => …)`, `this.h.focus()`.
 `overflow_*_scrollbar()` area from code. Create `this.scroll = ScrollHandle.new()`
 in `init`, attach `.track_scroll(this.scroll)`, then call
 `this.scroll.scroll_to_item(index)` to reveal a zero-based direct child with
-only the movement needed. Requests run once after layout; visible children stay put.
+only the movement needed (requests run once after layout; visible children stay
+put), or read and move it directly with `offset()`, `max_offset()`, and
+`set_offset({ x, y })` in distances scrolled from the start (a set shows on the
+next frame).
 Lazy lists: `list` and `uniform_list` come from `gpui-kit`, where `div` is;
 `v_virtual_list` and `h_virtual_list` come from `gpui-base`. They need a
 definite height from their container: a `flex_1()` chain with no explicit

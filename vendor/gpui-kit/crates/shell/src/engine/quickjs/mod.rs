@@ -6772,6 +6772,10 @@ globalThis.__gpui = (() => {
       }
       __scroll_to_item(handle, index);
     },
+    // HERDR: distances scrolled from the start, not GPUI's negative content offset.
+    offset: () => { const [x, y] = __scroll_offset(handle); return { x, y }; },
+    max_offset: () => { const [x, y] = __scroll_max_offset(handle); return { x, y }; },
+    set_offset: ({ x = 0, y = 0 } = {}) => __scroll_set_offset(handle, Number(x), Number(y)),
     release: () => __scroll_release(handle),
   });
 

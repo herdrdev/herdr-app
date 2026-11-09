@@ -3051,6 +3051,12 @@ const BASE: &str = r#"  /** A row. */
      * Requests are consumed once, after layout; already visible children stay put.
      */
     scroll_to_item(index: number): void;
+    /** Distance scrolled from the start (0..max_offset()). */
+    offset(): { x: number; y: number };
+    /** How far it can scroll, from the last layout. */
+    max_offset(): { x: number; y: number };
+    /** Clamped to `0..max_offset()`; shows on the next frame (`cx.notify()`). */
+    set_offset(offset: { x?: number; y?: number }): void;
     /** Releases the handle. Using it afterwards throws. */
     release(): boolean;
   }
