@@ -15,7 +15,18 @@ function harness(replies: unknown[] = [], storage = new Map<string, string>(), s
   const handlers: Record<string, (...args: any[]) => void> = {};
   const env = { layout: null as unknown };
   // The list's scroll position: the requests the view makes are what the sidebar would scroll by.
-  const ScrollHandle = { new: () => ({ calls: [] as number[], scroll_to_item(index: number) { this.calls.push(index); } }) };
+  const makeScroll = () => {
+    const state = { x: 0, y: 0 };
+    return {
+      calls: [] as number[],
+      offsets: [] as number[],
+      scroll_to_item(index: number) { this.calls.push(index); },
+      offset() { return { ...state }; },
+      max_offset() { return { x: 0, y: 1000 }; },
+      set_offset({ x = state.x, y = state.y }: { x?: number; y?: number } = {}) { state.x = x; state.y = y; this.offsets.push(y); },
+    };
+  };
+  const ScrollHandle = { new: makeScroll };
   const theme = () => new Proxy({}, { get: () => "#000000" });
   const tracked: unknown[] = [];
   const element: any = new Proxy({}, { get: (_, method) => (...args: any[]) => {
@@ -23,7 +34,7 @@ function harness(replies: unknown[] = [], storage = new Map<string, string>(), s
     if (method === "track_scroll") tracked.push(args[0]);
     return element;
   } });
-  const Spaces = new Function("View", "hc", "localStorage", "spaces", "panes", "run", "v_flex", "h_flex", "div", "svg", "shared", "machines", "exec", "window", "watchFolder", "ScrollHandle", "theme", "layout", "setShared", `${source}; return Spaces;`)(
+  const Spaces = new Function("View", "hc", "localStorage", "spaces", "panes", "run", "v_flex", "h_flex", "div", "svg", "shared", "machines", "exec", "window", "watchFolder", "ScrollHandle", "theme", "layout", "setShared", "focused", `${source}; return Spaces;`)(
     class {},
     async (args: string[]) => {
       calls.push(args);
@@ -38,13 +49,17 @@ function harness(replies: unknown[] = [], storage = new Map<string, string>(), s
       moves.push(args);
     },
     ...Array(4).fill(() => element), () => null, () => availability, execGit, () => ({ active: true }), watch,
-    ScrollHandle, theme, () => env.layout, () => {},
+    ScrollHandle, theme, () => env.layout, () => {}, () => null,
   );
   const view = new Spaces();
   view.reconnecting = {};
   view.folded = new Set(["cloud"]);
   view.refreshMachines = () => {};
-  const cx = { timer: { every() {} }, notify() {}, spawn(fn: (cx: unknown) => Promise<unknown>) { tasks.push(fn(cx)); } };
+  const task = { cancel() {} };
+  const cx = {
+    timer: { every: () => task, after: () => task }, notify() {}, focus_handle: () => ({ focus() {} }),
+    spawn(fn: (cx: unknown) => Promise<unknown>) { tasks.push(fn(cx)); },
+  };
   return { view, calls, tasks, cx, storage, moves, handlers, snapshot, availability, env, tracked };
 }
 
@@ -290,7 +305,10 @@ function orderedHarness(ids: string[]) {
   h.view.shown = new Set(ids);
   h.view.born = {};
   h.view.pressed = null;
-  h.view.over = null;
+  h.view.drag = null;
+  h.view.handle = { focus() {} };
+  h.view.scroll = { offset: () => ({ x: 0, y: 0 }), set_offset() {} };
+  h.view.view = 1000;
   const git = (id: string, repo: string, linked: boolean) => {
     const s = h.snapshot.find(s => s.id === id)!;
     h.view.git[JSON.stringify([s.machine ?? null, s.folder])] = { repo, linked };
@@ -354,12 +372,14 @@ test("dragging a main checkout moves the right id and its children follow", () =
   h.git("topic", "repo", true);
   const first = h.rows();
   h.flush();
-  // The row was built before reconciliation: neither its old index nor the
-  // dragged row's old index may be used to resolve the drop.
-  h.view.pressed = "main";
-  h.view.over = "last";
-  h.view.row(first.find((r: any) => r.w.id === "last"), {});
-  h.handlers.on_mouse_up({}, h.cx);
+  expect(first.map((r: any) => r.w.id)).toEqual(["other", "main", "topic", "last"]);
+  // Pressed on main's row (30 px down), lifted, and held 70 px lower: main and
+  // topic (58 px) go past the middle of last. The drop is resolved from the
+  // model as it is then, not from rows built before reconciliation.
+  h.view.pressed = { id: "main", at: 30, row: 30, tree: false };
+  h.view.follow(40, h.cx);
+  h.view.follow(100, h.cx);
+  h.view.settle(true, h.cx);
   expect(h.moves).toEqual([{ id: "main", index: 4 }]);
   h.flush();
   h.rows();
@@ -469,44 +489,61 @@ test("git checks run a few spaces at a time, not every space at once", async () 
   expect(most).toBeLessThanOrEqual(12);
 });
 
-// The list scrolls by its direct children, so the active space's place counts machine headers too.
-function scrollHarness(spaces: Space[]) {
+// The list scrolls by its direct children in the narrow rail, and by pixel band in the wide sidebar
+// (where each machine's rows sit inside an animated group).
+function scrollHarness(spaces: Space[], viewHeight = 60) {
   const h = harness([], new Map(), spaces);
-  Object.assign(h.view, { git: {}, checked: {}, unsure: new Set(), pending: new Set(), watching: new Map(), folded: new Set(), machines: [] });
+  Object.assign(h.view, {
+    git: {}, checked: {}, unsure: new Set(), pending: new Set(), watching: new Map(),
+    folded: new Set(), machines: [], last: {}, ghosts: {}, first: new Set(), view: viewHeight,
+  });
   h.view.shown = new Set(spaces.map(s => s.id));
   h.view.born = {};
   return h;
 }
-const withHandle = (h: ReturnType<typeof harness>) => { h.view.scroll = { calls: [] as number[], scroll_to_item(i: number) { this.calls.push(i); } }; return h; };
+const withHandle = (h: ReturnType<typeof harness>) => {
+  const state = { x: 0, y: 0 };
+  h.view.scroll = {
+    calls: [] as number[],
+    offsets: [] as number[],
+    scroll_to_item(i: number) { this.calls.push(i); },
+    offset() { return { ...state }; },
+    max_offset() { return { x: 0, y: 1000 }; },
+    set_offset({ x = state.x, y = state.y }: { x?: number; y?: number } = {}) { state.x = x; state.y = y; this.offsets.push(y); },
+  };
+  return h;
+};
 const spaceList = (ids: string[], active: string, remote: string[] = []): Space[] =>
   ids.map(id => ({ id, folder: "/" + id, active: id === active, ...(remote.includes(id) ? { machine: "cloud" } : {}) }));
 
 test("the active space is brought into view once, and left alone while it stays put", () => {
   const h = withHandle(scrollHarness(spaceList(["a", "b", "c", "d"], "c")));
   h.view.render();
-  expect(h.view.scroll.calls).toEqual([2]);
+  // c sits at 60..90; with a 60 px viewport starting at 0, scroll to 30 so c fits at the bottom.
+  expect(h.view.scroll.offsets).toEqual([30]);
   expect(h.tracked).toEqual([h.view.scroll]); // the list is the area that handle scrolls
   h.view.render();
   h.view.render();
-  expect(h.view.scroll.calls).toEqual([2]);
+  expect(h.view.scroll.offsets).toEqual([30]);
   h.snapshot.forEach(s => { s.active = s.id === "a"; });
   h.view.render();
-  expect(h.view.scroll.calls).toEqual([2, 0]);
+  // a sits at 0..30, above the current offset 30, so scroll back to 0.
+  expect(h.view.scroll.offsets).toEqual([30, 0]);
 });
 
 test("the active space's place counts a remote machine's header and rows", () => {
   const ids = ["a", "b", "r1", "r2"];
   const h = withHandle(scrollHarness(spaceList(ids, "r2", ["r1", "r2"])));
   h.view.render();
-  // children: this computer's header, a, b, cloud's header, r1, r2
-  expect(h.view.scroll.calls).toEqual([5]);
+  // this computer header (26) + a, b (60) + cloud header (26) + r1 (30) + r2 (30) = 172; bottom 172 - view 60 = 112.
+  expect(h.view.scroll.offsets).toEqual([112]);
 });
 
 test("a folded machine's active space has no row to reveal", () => {
   const h = withHandle(scrollHarness(spaceList(["a", "r1"], "r1", ["r1"])));
   h.view.folded = new Set(["cloud"]);
   h.view.render();
-  expect(h.view.scroll.calls).toEqual([]);
+  expect(h.view.scroll.offsets).toEqual([]);
 });
 
 test("the narrow rail reveals the same child", () => {
@@ -517,16 +554,18 @@ test("the narrow rail reveals the same child", () => {
 });
 
 test("the list reveals the active space again when its own size changes, and only then", () => {
-  const h = withHandle(scrollHarness(spaceList(["a", "b", "c", "d"], "d")));
+  const h = withHandle(scrollHarness(spaceList(["a", "b", "c", "d"], "d"), 120));
   let notified = 0;
   h.cx.notify = () => { notified++; };
   h.view.render();
-  expect(h.view.scroll.calls).toEqual([3]);
+  // All 4 rows (120 px) fit in the 120 px viewport: no scroll yet.
+  expect(h.view.scroll.offsets).toEqual([]);
+  // Viewport shrinks to 60 px: d (90..120) is pushed out, so scroll to 60.
   h.handlers.on_size_change({ width: 200, height: 60 }, h.cx);
-  expect(h.view.scroll.calls).toEqual([3, 3]);
+  expect(h.view.scroll.offsets).toEqual([60]);
   expect(notified).toBe(1);
   h.view.render();
-  expect(h.view.scroll.calls).toEqual([3, 3]);
+  expect(h.view.scroll.offsets).toEqual([60]);
 });
 
 test("a size change with no active row drawn asks for nothing", () => {
@@ -534,19 +573,19 @@ test("a size change with no active row drawn asks for nothing", () => {
   h.view.folded = new Set(["cloud"]);
   h.view.render();
   h.handlers.on_size_change({ width: 200, height: 60 }, h.cx);
-  expect(h.view.scroll.calls).toEqual([]);
+  expect(h.view.scroll.offsets).toEqual([]);
 });
 
 test("the list reveals the active space again when a machine header shifts its place", () => {
-  const h = withHandle(scrollHarness(spaceList(["a", "b", "c", "d"], "b")));
+  const h = withHandle(scrollHarness(spaceList(["a", "b", "c", "d"], "b"), 60));
   h.view.render();
-  expect(h.view.scroll.calls).toEqual([1]);
-  // A machine joins: its header and rows come after this computer's, and now this computer gets a header too,
-  // so the same active space sits one child further down.
+  // b sits at 30..60, already in view in 0..60.
+  expect(h.view.scroll.offsets).toEqual([]);
+  // A machine joins: this computer now gets a 26 px header, shifting b to 56..86 (past 60).
   h.snapshot.push({ id: "r1", folder: "/r1", machine: "cloud", active: false });
   h.view.shown.add("r1");
   h.view.render();
-  expect(h.view.scroll.calls).toEqual([1, 2]);
+  expect(h.view.scroll.offsets).toEqual([26]);
   h.view.render();
-  expect(h.view.scroll.calls).toEqual([1, 2]);
+  expect(h.view.scroll.offsets).toEqual([26]);
 });

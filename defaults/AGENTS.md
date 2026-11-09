@@ -100,10 +100,10 @@ is no `spaces.json`. On simultaneous edits the newest accepted document wins
 (no merging); structural commands fail while that machine's layout is unavailable.
 Mod pane props are stored as given, never machine-qualified. Space order is local
 machine first, then machines by name; `space.move` stays inside its machine's block.
-In the expanded Spaces sidebar, drag a space to reorder it within its machine;
-the highlighted line shows where it will land. In the tab bar, a dragged tab
-follows the pointer and its neighbours make room; the bar scrolls at its ends,
-and Escape sends the tab back.
+Drag a space in the expanded Spaces sidebar to reorder it within its machine
+(a checkout takes its worktrees along), or a tab in the tab bar. The dragged
+one follows the pointer and the others make room; the list scrolls at its
+ends, and Escape sends it back.
 
 - A **space** is a place to work, on one machine: this one, or another
   from `hc machine ls` (`spaces()[i].machine`). Herdr leaves out machines

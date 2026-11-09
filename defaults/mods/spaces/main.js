@@ -5,7 +5,7 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, ScrollHandle } from "gpui-base";
-import { spaces, machines, panes, run, openOverlay, exec, hc, theme, shared, setShared, watchFolder, window, layout } from "herdr";
+import { spaces, machines, panes, focused, run, openOverlay, exec, hc, theme, shared, setShared, watchFolder, window, layout } from "herdr";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -56,6 +56,17 @@ async function both(a, b) {
   return done.map((d) => d.value);
 }
 
+// The tab bar's drag and motion, the same here (see the tabs mod).
+// Slide: a space moving to its new place, on a spring so a landing that changes
+// mid-slide keeps its speed; damping 1, no overshoot. Glide: the dragged space
+// landing or flying back. Enter: a new space fades in once the others have made
+// room. Exit: a closed one fades out where it was, shorter.
+const SLIDE = { response: 200, damping: 1 }, GLIDE = { duration: 200, easing: "ease-out" };
+const ENTER = { duration: 200, delay: 200, easing: "ease-out" }, EXIT = { duration: 120, easing: "ease-out" };
+const LIFT = 4;
+// Held within EDGE px of the list's ends, the list scrolls, up to STEP px a frame.
+const EDGE = 40, STEP = 14;
+
 // What a stored color name looks like on an avatar (the same in every mod
 // that draws space avatars): one strong color per hue, light and dark alike.
 const MARK = { ansi6: "#22a99a", ansi3: "#e3814f", ansi4: "#5b8def", ansi5: "#8b7cf6", ansi2: "#3fae6a", ansi1: "#d9649a" };
@@ -84,9 +95,16 @@ export default class Spaces extends View {
     this.shown = new Set(spaces().map((s) => s.id));
     this.born = {};
     this.pressed = null;
-    this.over = null;
+    this.drag = null;
+    this.handle = cx.focus_handle();
     this.scroll = ScrollHandle.new(); // the list's position: the active space is brought into view through it
-    this.activeAt = -1; // the active space's place among the list's children (headers and rows), -1 when not drawn
+    this.view = 0;
+    this.activeAt = -1; // the active space's place among direct children in the narrow rail, -1 when not drawn
+    this.activeBand = null; // the active space's vertical band in the wide list, null when not drawn
+    // What the list showed last, so a space that goes fades where it was.
+    this.last = {};
+    this.ghosts = {};
+    this.first = new Set();
     this.machines = [];
     try {
       this.reconnecting = JSON.parse(localStorage.getItem("machines.reconnecting") ?? "{}");
@@ -346,10 +364,11 @@ export default class Spaces extends View {
   grouped(t, collapsed) {
     const rows = this.ordered();
     const draw = (r) => (collapsed ? this.compact(r, t) : this.row(r, t));
-    // Where the active space's row lands among the children this returns: the list scrolls by its direct
-    // children, and machine headers, login notes and loading rows count too.
+    // Where the active space's row lands: direct child index in the narrow rail,
+    // or vertical pixel band in the wide list (where each machine's rows sit inside a group).
     this.activeAt = -1;
-    let before = 0;
+    this.activeBand = null;
+    let before = 0, y = 0;
     const remote = [...new Set([...rows.map(r => r.w.machine).filter(Boolean), ...this.machines.map(m => m.name), ...Object.keys(this.reconnecting)])].sort();
     const loading = m => {
       const layout = machines().find(k => k.name === m)?.layout;
@@ -357,10 +376,12 @@ export default class Spaces extends View {
         || spaces().some(s => (s.machine ?? null) === m && !this.shown.has(s.id));
     };
     const loadingRow = m => h_flex().id(`machine-loading-${m ?? "local"}`).h(28).flex_none().px(collapsed ? 0 : 8).items_center().when(collapsed, el => el.justify_center()).text_size(12).text_color(t.dim).child(collapsed ? "…" : "Loading…");
+    if (!collapsed) this.forget(rows);
+    const list = (m, mine, yOffset) => collapsed ? mine.map(draw) : [this.group(m, mine, t, yOffset)];
     if (!remote.length) {
       if (loading(null) && !rows.length) return [loadingRow(null)];
-      this.activeAt = rows.findIndex(r => r.w.active);
-      return rows.map(draw);
+      if (collapsed) this.activeAt = rows.findIndex(r => r.w.active);
+      return list(null, rows, 0);
     }
     const machineNames = [null, ...remote];
     return machineNames.flatMap((m) => {
@@ -407,7 +428,7 @@ export default class Spaces extends View {
           .child(h_flex().size(18).rounded(5).border_1().border_color(t.dim).items_center().justify_center()
             .child(svg("mods/workspace-chrome/plus.svg").size(10))))
         .when(!collapsed, el => el.child(svg("mods/workspace-chrome/plus.svg").size(12)).child("New space there"));
-      if (!collapsed && rebuilt) { before += 1; return [head]; }
+      if (!collapsed && rebuilt) { before += 1; y += 26; return [head]; }
       const cell = collapsed ? railCell : (el) => el;
       const guidance = !collapsed && login ? [v_flex().px(8).pb(6).gap(3).flex_none()
         .child(div().text_size(11).text_color(t.blocked).child("needs a login: run"))
@@ -417,9 +438,15 @@ export default class Spaces extends View {
             .text_size(11).text_color(t.foreground).bg(t.raised).cursor_pointer().hover(s => s.bg(t.hover))
             .on_click((_e, cx) => { cx.stop_propagation(); cx.write_to_clipboard(login); this.copiedLogin = login; cx.notify(); })
             .child(this.copiedLogin === login ? "Copied" : "Copy")))] : [];
-      const items = [cell(head), ...guidance, ...(folded ? [] : mine.length ? mine.map(draw) : [loading(m) ? loadingRow(m) : cell(empty)])];
-      const first = folded ? -1 : mine.findIndex(r => r.w.active);
-      if (first >= 0) this.activeAt = before + 1 + guidance.length + first;
+      y += 26 + (guidance.length ? 40 : 0);
+      const body = folded ? [] : mine.length ? list(m, mine, y) : [loading(m) ? loadingRow(m) : cell(empty)];
+      const items = [cell(head), ...guidance, ...body];
+      if (collapsed) {
+        const first = folded ? -1 : mine.findIndex(r => r.w.active);
+        if (first >= 0) this.activeAt = before + 1 + guidance.length + first;
+      } else if (!folded) {
+        y += mine.length ? this.lastGroupEnd : 28;
+      }
       before += items.length;
       return items;
     });
@@ -450,7 +477,6 @@ export default class Spaces extends View {
 
   row({ w, i, g, tree }, t) {
     const on = w.active;
-    const fromIndex = this.pressed === null ? -1 : spaces().findIndex(s => s.id === this.pressed);
     const colors = shared("space.colors") ?? {};
     const color = colors[w.id] ?? "ansi6";
     const fill = color.startsWith("#") ? color : (MARK[color] ?? t[color]);
@@ -464,35 +490,8 @@ export default class Spaces extends View {
       .rounded(8)
       .when(on, (el) => el.bg(t.selected))
       .when(!on, (el) => el.hover((s) => s.bg(t.hover)))
-      .when(this.pressed === w.id && this.over !== w.id, (el) => el.opacity(0.5))
-      .when(this.pressed !== null && this.over === w.id && this.pressed !== w.id, (el) => el.child(
-        div().absolute().left(0).right(0).h(2).bg(t.accent)
-          .when(fromIndex < i, line => line.bottom(0))
-          .when(fromIndex > i, line => line.top(0)),
-      ))
-      .on_mouse_down("left", () => {
-        this.pressed = w.id;
-        this.over = w.id;
-      })
-      .on_mouse_move((_e, cx) => {
-        const source = spaces().find(s => s.id === this.pressed);
-        const over = source && (source.machine ?? null) === (w.machine ?? null) ? w.id : null;
-        if (this.pressed !== null && this.over !== over) {
-          this.over = over;
-          cx.notify();
-        }
-      })
-      .on_mouse_up("left", (_e, cx) => {
-        const from = this.pressed;
-        const over = this.over;
-        this.pressed = null;
-        this.over = null;
-        if (from !== null && over === w.id && from !== w.id) {
-          const index = spaces().findIndex(s => s.id === w.id);
-          if (index !== -1) run("space.move", { id: from, index: index + 1 });
-        } else if (from === w.id) run("space.select", { id: w.id });
-        cx.notify();
-      })
+      // A worktree goes with its checkout, so only a checkout's row drags.
+      .on_mouse_down("left", (e) => { this.pressed = { id: w.id, y: e.position.y, row: e.bounds?.y, tree: Boolean(tree) }; })
       .on_mouse_down("right", () => this.menu(w))
       .child(
         h_flex()
@@ -521,6 +520,181 @@ export default class Spaces extends View {
       .child(div().absolute().right(5).text_color(tone(t, w.status)).child(glyph(w.status))));
   }
 
+  // A checkout and the worktrees listed under it move as one block.
+  blocks(mine) {
+    const out = [];
+    for (const r of mine) {
+      if (r.tree && out.length) out[out.length - 1].rows.push(r);
+      else out.push({ id: r.w.id, rows: [r] });
+    }
+    for (const b of out) b.h = b.rows.reduce((h, r) => h + rowHeight(r), 0);
+    return out;
+  }
+
+  // Where each block sits in its machine's group.
+  geometry(ids, byId) {
+    const y = {}; let at = 0;
+    for (const id of ids) { y[id] = at; at += byId[id].h; }
+    return { y, end: at };
+  }
+
+  follow(pointer, cx) {
+    const p = this.pressed, d = this.drag;
+    if (d?.phase === "drag") {
+      d.pointer = pointer;
+      this.place(d);
+      this.edge(d, cx);
+      cx.notify();
+    } else if (p && !d && !p.tree && p.at !== undefined && Math.abs(pointer - p.at) >= LIFT) {
+      const space = spaces().find(s => s.id === p.id), machine = space?.machine ?? null;
+      const blocks = this.blocks(this.ordered().filter(r => (r.w.machine ?? null) === machine));
+      const byId = Object.fromEntries(blocks.map(b => [b.id, b])), order = blocks.map(b => b.id);
+      if (!byId[p.id] || order.length < 2) return;
+      this.pressed = null;
+      const from = order.indexOf(p.id);
+      // The group's top in the list, from where the pressed row was.
+      const top = p.row - this.geometry(order, byId).y[p.id];
+      this.drag = { id: p.id, machine, order, byId, from, top, down: p.at, pointer, dy: 0, phase: "drag", pane: focused()?.pane };
+      this.place(this.drag);
+      this.handle.focus();
+      cx.notify();
+    }
+  }
+
+  // Under the pointer, kept inside its group and the list's visible part.
+  place(d) {
+    const { y, end } = this.geometry(d.order, d.byId), h = d.byId[d.id].h, at = this.scroll.offset().y;
+    const top = y[d.id] + d.pointer - d.down;
+    d.dy = Math.min(Math.max(top, 0, at - d.top), end - h, at + this.view - d.top - h) - y[d.id];
+  }
+
+  // How fast the list scrolls with the pointer here: faster nearer an end.
+  speed(d) {
+    const seen = d.pointer - this.scroll.offset().y, into = Math.min(seen, this.view - seen);
+    if (into >= EDGE) return 0;
+    const v = STEP * Math.min(1, (EDGE - into) / EDGE);
+    return seen < this.view / 2 ? -v : v;
+  }
+
+  // A held pointer at an end keeps scrolling without moving, so this one ticks,
+  // only while held there.
+  edge(d, cx) {
+    if (d.phase !== "drag" || this.speed(d) === 0) { d.tick?.cancel(); d.tick = null; return; }
+    d.tick ??= cx.timer.every(16, cx => {
+      const v = this.drag === d ? this.speed(d) : 0;
+      if (v === 0 || d.phase !== "drag") { d.tick?.cancel(); d.tick = null; return; }
+      const at = this.scroll.offset().y;
+      this.scroll.set_offset({ y: at + v });
+      const moved = this.scroll.offset().y - at;
+      if (!moved) { d.tick?.cancel(); d.tick = null; return; }
+      d.pointer += moved;
+      this.place(d);
+      cx.notify();
+    });
+  }
+
+  // Which place letting go lands in: past half of a neighbour, it makes room.
+  landing() {
+    const d = this.drag, { y } = this.geometry(d.order, d.byId), h = d.byId[d.id].h;
+    const top = y[d.id] + d.dy, bottom = top + h;
+    let to = d.from;
+    d.order.forEach((id, j) => {
+      const mid = y[id] + d.byId[id].h / 2;
+      if (j > d.from && bottom > mid) to++;
+      if (j < d.from && top < mid) to--;
+    });
+    return to;
+  }
+
+  settle(drop, cx) {
+    const d = this.drag, to = this.landing();
+    d.tick?.cancel(); d.tick = null;
+    d.phase = drop && to !== d.from ? "drop" : "back";
+    d.to = d.phase === "drop" ? to : d.from;
+    if (d.phase === "drop") {
+      // Before the next block's checkout, else after the last row of the one before.
+      const order = d.order.filter(id => id !== d.id); order.splice(d.to, 0, d.id);
+      const rest = spaces().map(s => s.id).filter(id => id !== d.id);
+      const next = order[d.to + 1], prev = order[d.to - 1];
+      const at = next ? rest.indexOf(next) : rest.indexOf(d.byId[prev].rows.at(-1).w.id) + 1;
+      run("space.move", { id: d.id, index: at + 1 });
+    }
+    if (d.pane) run("pane.focus", { pane: d.pane });
+    cx.timer.after(GLIDE.duration, cx => { if (this.drag === d) { this.drag = null; cx.notify(); } });
+    cx.notify();
+  }
+
+  // A space that is gone (not one folded away or not yet shown) fades where it was.
+  forget(rows) {
+    if (!this.first.size) rows.forEach(r => this.first.add(r.w.id));
+    const ids = new Set(spaces().map(s => s.id));
+    for (const [id, g] of Object.entries(this.last)) {
+      if (ids.has(id) || this.ghosts[id]) continue;
+      this.ghosts[id] = g;
+      delete this.last[id];
+      g.until = Date.now() + EXIT.duration;
+    }
+    for (const [id, g] of Object.entries(this.ghosts)) if (ids.has(id) || Date.now() > g.until + 50) delete this.ghosts[id];
+  }
+
+  // A machine's spaces: every row sits at a place worked out from the row
+  // heights and slides when it changes, whatever changed it (a drag, another
+  // window, a space opening or closing). A new space fades in; a closed one
+  // fades out where it was; the first ones shown just appear. While a block is
+  // held it is drawn last, raised, at the pointer; a dashed box of its size is
+  // where letting go lands.
+  group(m, mine, t, yOffset = 0) {
+    const blocks = this.blocks(mine), byId = Object.fromEntries(blocks.map(b => [b.id, b]));
+    let d = this.drag?.machine === m ? this.drag : null;
+    if (d && (blocks.length !== d.order.length || blocks.some(b => !d.byId[b.id] || d.byId[b.id].rows.length !== b.rows.length))) d = this.drag = null;
+    let order = blocks.map(b => b.id);
+    if (d) {
+      order = d.order.filter(id => id !== d.id);
+      order.splice(d.phase === "drag" ? this.landing() : d.to, 0, d.id);
+    }
+    const { y, end } = this.geometry(order, byId);
+    this.lastGroupEnd = end;
+    const cell = (r, top, motion, opacity, fade) => div().id(`cell-${r.w.id}`).absolute().left(0).right(0).top(top)
+      .map(el => motion === SLIDE ? el.spring("top", SLIDE) : el.transition("top", motion))
+      .opacity(opacity).transition("opacity", fade).child(this.row(r, t));
+    const cells = [];
+    if (d) cells.push(div().id(`slot-${d.id}`).absolute().left(0).right(0).top(y[d.id]).spring("top", SLIDE)
+      .h(byId[d.id].h).rounded(8).border(1).border_dashed().border_color(t.dim));
+    for (const g of Object.values(this.ghosts)) if (g.m === m) cells.push(cell(g.r, g.y, SLIDE, 0, EXIT));
+    for (const id of order) {
+      let at = y[id];
+      for (const r of byId[id].rows) {
+        const h = rowHeight(r);
+        if (r.w.active) this.activeBand = { top: yOffset + at, bottom: yOffset + at + h };
+        this.last[r.w.id] = { r, y: at, m };
+        if (!(d && id === d.id)) cells.push(cell(r, at, SLIDE, 1, this.first.has(r.w.id) ? 0 : ENTER));
+        at += h;
+      }
+    }
+    if (d) {
+      const lifted = d.phase === "drag" ? this.geometry(d.order, d.byId).y[d.id] + d.dy : y[d.id];
+      cells.push(div().id(`lift-${d.id}`).absolute().left(0).right(0).top(lifted).transition("top", d.phase === "drag" ? 0 : GLIDE)
+        .flex().flex_col().rounded(8).bg(t.raised).border(1).border_color(t.border).shadow_md()
+        .children(byId[d.id].rows.map(r => this.row(r, t))));
+    }
+    return div().id(`group-${m ?? "local"}`).relative().flex_none().h(end).spring("height", SLIDE).children(cells);
+  }
+
+  // Bring the active space into view; a row already in view stays put.
+  revealActive(collapsed) {
+    if (this.drag) return false;
+    if (collapsed) {
+      if (this.activeAt < 0) return false;
+      this.scroll.scroll_to_item(this.activeAt);
+      return true;
+    }
+    if (!this.activeBand || this.view <= 0) return false;
+    const { top, bottom } = this.activeBand, at = this.scroll.offset().y;
+    if (top < at) this.scroll.set_offset({ y: top });
+    else if (bottom > at + this.view) this.scroll.set_offset({ y: bottom - this.view });
+    return true;
+  }
+
   render() {
     const t = theme();
     const collapsed = narrow();
@@ -539,10 +713,11 @@ export default class Spaces extends View {
     const list = this.grouped(t, collapsed);
     // Bring the active space into view when it, or its place in the list, changes; a row already in view stays put.
     const active = sp.find(p => p.active)?.id;
-    if (active !== this.revealed || this.activeAt !== this.revealedAt) {
+    const place = collapsed ? this.activeAt : this.activeBand ? `${this.activeBand.top}:${this.activeBand.bottom}` : null;
+    if (active !== this.revealed || place !== this.revealedAt) {
       this.revealed = active;
-      this.revealedAt = this.activeAt;
-      if (this.activeAt >= 0) this.scroll.scroll_to_item(this.activeAt);
+      this.revealedAt = place;
+      this.revealActive(collapsed);
     }
     return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13)
       .child(h_flex().h(31).pl(16).pr(10).items_center().justify_between().text_size(11.5).text_color(t.dim)
@@ -550,10 +725,23 @@ export default class Spaces extends View {
         .when(!collapsed, el => el.child("Spaces"))
         .child(div().id("space-new").size(26).flex_none().flex().items_center().justify_center().rounded(6).hover(s => s.bg(t.hover).text_color(t.foreground))
           .on_click(() => run("space.new")).child(svg("mods/workspace-chrome/plus.svg").size(14))))
-      .child(v_flex().flex_1().min_h(0).px(collapsed ? 0 : 8).pb(14).overflow_y_scrollbar().mode("always").track_scroll(this.scroll)
+      .child(v_flex().id("space-list").flex_1().min_h(0).px(collapsed ? 0 : 8).pb(14).overflow_y_scrollbar().mode("always")
+        .track_scroll(this.scroll)
         // A block above (another mod's) growing, or the window resizing, shrinks this list and can push the active space out.
-        .on_size_change((_size, cx) => { if (this.activeAt >= 0) { this.scroll.scroll_to_item(this.activeAt); cx.notify(); } })
-        .on_mouse_up("left", (_e, cx) => { this.pressed = null; cx.notify(); })
+        .on_size_change((size, cx) => {
+          this.view = size.height;
+          if (this.revealActive(collapsed)) cx.notify();
+        })
+        .track_focus(this.handle).capture_pointer()
+        .on_key_down((e, cx) => { if (e.key === "escape" && this.drag?.phase === "drag") { cx.stop_propagation(); this.settle(false, cx); } })
+        // The list's own coordinates: what it scrolled counts.
+        .on_mouse_down("left", (e) => { if (this.pressed) { this.pressed.at = e.position.y - e.bounds.y; this.pressed.row -= e.bounds.y; } })
+        .on_mouse_move((e, cx) => this.follow(e.position.y - e.bounds.y, cx))
+        .on_mouse_up("left", (_e, cx) => {
+          const pressed = this.pressed; this.pressed = null;
+          if (this.drag?.phase === "drag") this.settle(true, cx);
+          else if (pressed && !this.drag) run("space.select", { id: pressed.id });
+        })
         .children(list));
   }
 }
