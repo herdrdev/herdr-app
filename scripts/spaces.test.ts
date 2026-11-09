@@ -6,6 +6,7 @@ const source = (await readFile(new URL("../defaults/mods/spaces/main.js", import
 
 type Space = { id: string; folder: string; machine?: string | null };
 function harness(replies: unknown[] = [], storage = new Map<string, string>(), snapshot: Space[] = []) {
+  const paneSnapshot: any[] = [];
   const calls: string[][] = [];
   const tasks: Promise<unknown>[] = [];
   const availability = [{ name: null as string | null, layout: "ready" }];
@@ -15,7 +16,7 @@ function harness(replies: unknown[] = [], storage = new Map<string, string>(), s
     if (String(method).startsWith("on_")) handlers[String(method)] = args.at(-1);
     return element;
   } });
-  const Spaces = new Function("View", "hc", "localStorage", "spaces", "panes", "run", "v_flex", "h_flex", "div", "svg", "shared", "machines", `${source}; return Spaces;`)(
+  const Spaces = new Function("View", "hc", "localStorage", "spaces", "panes", "run", "v_flex", "h_flex", "div", "svg", "shared", "machines", "window", `${source}; return Spaces;`)(
     class {},
     async (args: string[]) => {
       calls.push(args);
@@ -24,19 +25,19 @@ function harness(replies: unknown[] = [], storage = new Map<string, string>(), s
       return reply ?? { code: 0, stdout: "{}", stderr: "" };
     },
     { setItem(key: string, value: string) { storage.set(key, value); }, getItem(key: string) { return storage.get(key) ?? null; } },
-    () => snapshot, () => [],
+    () => snapshot, () => paneSnapshot,
     (name: string, args: { id: string; index: number }) => {
       expect(name).toBe("space.move");
       moves.push(args);
     },
-    ...Array(4).fill(() => element), () => null, () => availability,
+    ...Array(4).fill(() => element), () => null, () => availability, () => ({ active: false }),
   );
   const view = new Spaces();
   view.reconnecting = {};
   view.folded = new Set(["cloud"]);
   view.refreshMachines = () => {};
   const cx = { timer: { every() {} }, notify() {}, spawn(fn: (cx: unknown) => Promise<unknown>) { tasks.push(fn(cx)); } };
-  return { view, calls, tasks, cx, storage, moves, handlers, snapshot, availability };
+  return { view, calls, tasks, cx, storage, moves, handlers, snapshot, paneSnapshot, availability };
 }
 
 const machine = { name: "cloud", id: "old", target: "user@host", session: null, via: false };
@@ -136,6 +137,38 @@ function orderedHarness(ids: string[]) {
   const order = () => h.snapshot.map(s => s.id);
   return { ...h, git, flush, rows, order };
 }
+
+test("worktrees stay under their original checkout when a terminal changes folder", () => {
+  const h = orderedHarness(["main", "topic"]);
+  (h.snapshot[0] as any).tabs = [{ id: "tab" }];
+  h.paneSnapshot.push({ tab: "tab", cwd: "/elsewhere" });
+  h.git("main", "repo", false);
+  h.git("topic", "repo", true);
+  h.view.git[JSON.stringify([null, "/elsewhere"])] = null;
+  expect(h.rows().find((r: any) => r.w.id === "topic").tree).toBe("└─");
+});
+
+test("grouping follows a terminal that enters another repository", () => {
+  const h = orderedHarness(["main", "topic"]);
+  (h.snapshot[0] as any).tabs = [{ id: "tab" }];
+  h.paneSnapshot.push({ tab: "tab", cwd: "/other-repo" });
+  h.git("main", "original", false);
+  h.git("topic", "original", true);
+  h.view.git[JSON.stringify([null, "/other-repo"])] = { repo: "other", linked: false };
+  expect(h.rows().find((r: any) => r.w.id === "topic").tree).toBeNull();
+});
+
+test("checks both the space folder and its terminal folder", () => {
+  const h = orderedHarness(["main"]);
+  (h.snapshot[0] as any).tabs = [{ id: "tab" }];
+  h.paneSnapshot.push({ tab: "tab", cwd: "/elsewhere" });
+  h.view.at = {};
+  h.view.busy = {};
+  h.view.ready = {};
+  expect(h.view.due(Date.now(), h.snapshot, h.paneSnapshot)).toEqual(new Set([
+    JSON.stringify([null, "/main"]), JSON.stringify([null, "/elsewhere"]),
+  ]));
+});
 
 test("the sidebar reconciles a full batch once, then the core echo is a no-op", () => {
   const h = orderedHarness(["other", "a", "main", "tail", "b"]);
