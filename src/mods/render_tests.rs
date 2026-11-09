@@ -1053,14 +1053,14 @@ fn a_held_tab_follows_the_pointer_and_its_neighbours_make_room(cx: &mut TestAppC
     assert!(line_with_id(&tree, "slot-a").contains(".left[Number(63.0)]"), "the dashed box is where it lands: {tree}");
     assert!(line_with_id(&tree, "cell-c").contains(".left[Number(166.0)]"), "{tree}");
     let lifted = line_with_id(&tree, "cell-a");
-    assert!(lifted.contains(".left[Number(90.0)] :transition(left, 0ms"), "under the pointer, no lag: {lifted}");
+    assert!(lifted.contains(".left[Number(90.0)] :spring(left, 0ms, 1,"), "under the pointer, no lag: {lifted}");
     let cells: Vec<_> = tree.lines().filter(|l| l.contains(":id[Str(\"cell-")).collect();
     assert_eq!(cells.last(), Some(&lifted), "drawn last, over the others: {tree}");
 
     let tree = tabs_tree(cx, &held.replace(r#"kind: "drag""#, r#"kind: "drop", to: 1"#));
-    assert!(line_with_id(&tree, "cell-a").contains(".left[Number(63.0)] :transition(left, 200ms"), "let go, it glides into the box: {tree}");
+    assert!(line_with_id(&tree, "cell-a").contains(".left[Number(63.0)] :spring(left, 200ms, 1,"), "let go, the same spring slides it into the box: {tree}");
     let tree = tabs_tree(cx, &held.replace(r#"kind: "drag""#, r#"kind: "back", to: 0"#));
-    assert!(line_with_id(&tree, "cell-a").contains(".left[Number(0.0)] :transition(left, 200ms"), "cancelled, it flies back: {tree}");
+    assert!(line_with_id(&tree, "cell-a").contains(".left[Number(0.0)] :spring(left, 200ms, 1,"), "cancelled, it flies back: {tree}");
     assert!(line_with_id(&tree, "cell-b").contains(".left[Number(103.0)]"), "and B goes back: {tree}");
 }
 
@@ -1106,11 +1106,11 @@ fn a_held_space_follows_the_pointer_and_the_others_make_room(cx: &mut TestAppCon
     assert!(line_with_id(&tree, "slot-a").contains(".top[Number(30.0)]"), "the dashed box is where it lands: {tree}");
     assert!(line_with_id(&tree, "cell-c").contains(".top[Number(60.0)]"), "{tree}");
     let lifted = line_with_id(&tree, "lift-a");
-    assert!(lifted.contains(".top[Number(40.0)] :transition(top, 0ms"), "under the pointer, no lag: {lifted}");
+    assert!(lifted.contains(".top[Number(40.0)] :spring(top, 0ms, 1,"), "under the pointer, no lag: {lifted}");
     let last = tree.lines().filter(|l| l.contains(":id[Str(\"cell-") || l.contains(":id[Str(\"lift-")).last();
     assert_eq!(last, Some(lifted), "drawn last, over the others: {tree}");
     let tree = spaces_tree(cx, &held.replace(r#"kind: "drag""#, r#"kind: "back", to: 0"#));
-    assert!(line_with_id(&tree, "lift-a").contains(".top[Number(0.0)] :transition(top, 200ms"), "cancelled, it flies back: {tree}");
+    assert!(line_with_id(&tree, "lift-a").contains(".top[Number(0.0)] :spring(top, 200ms, 1,"), "cancelled, it flies back: {tree}");
 }
 
 /// A drag feels the same in every list: the tab bar and the space list use the
@@ -1125,7 +1125,7 @@ fn lists_drag_with_the_same_motion() {
     }
     let tabs = include_str!("../../defaults/mods/tabs/main.js");
     let spaces = include_str!("../../defaults/mods/spaces/main.js");
-    for name in ["SLIDE", "GLIDE", "ENTER", "EXIT", "RAISE", "LIFT", "EDGE", "STEP"] {
+    for name in ["SLIDE", "HELD", "LANDED", "GLIDE", "ENTER", "EXIT", "RAISE", "LIFT", "EDGE", "STEP"] {
         assert_eq!(value(tabs, name), value(spaces, name), "{name}");
     }
 }

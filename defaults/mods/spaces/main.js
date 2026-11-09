@@ -35,11 +35,15 @@ const base = (path) => path.replace(/\/+$/, "").split("/").pop();
 const FALLBACK = 60000;
 
 // The tab bar's drag and motion, the same here (see the tabs mod).
-// Slide: a space moving to its new place, on a spring so a landing that changes
-// mid-slide keeps its speed; damping 1, no overshoot. Glide: the dragged space
-// landing or flying back. Enter: a new space fades in once the others have
-// mostly made room. Exit: a closed one fades out where it was, shorter.
-const SLIDE = { response: 200, damping: 1 }, GLIDE = { duration: 200, easing: "ease-out" };
+// Slide: a space moving to its new place, the dragged one landing or flying
+// back included, on a spring so a landing that changes mid-slide keeps its
+// speed; damping 1, no overshoot; within half a pixel of its place after
+// LANDED ms. Held: the same spring while the pointer holds it, at once. Glide:
+// the held look fading as it lands. Enter: a new space fades in once the
+// others have mostly made room. Exit: a closed one fades out where it was,
+// shorter.
+const SLIDE = { response: 200, damping: 1 }, HELD = { response: 0, damping: 1 }, LANDED = 300;
+const GLIDE = { duration: 200, easing: "ease-out" };
 const ENTER = { duration: 200, delay: 100, easing: "ease-out" }, EXIT = { duration: 120, easing: "ease-out" };
 const LIFT = 4;
 // The held look, the same in every dragged list: nothing follows the pointer's
@@ -557,7 +561,7 @@ export default class Spaces extends View {
       run("space.move", { id: d.id, index: at + 1 });
     }
     if (d.pane) run("pane.focus", { pane: d.pane });
-    cx.timer.after(GLIDE.duration, cx => { if (this.gesture === g) { this.gesture = null; this.quiet = true; cx.notify(); } });
+    cx.timer.after(LANDED, cx => { if (this.gesture === g) { this.gesture = null; this.quiet = true; cx.notify(); } });
     cx.notify();
   }
 
@@ -612,7 +616,7 @@ export default class Spaces extends View {
       const dragging = d.kind === "drag", rows = byId[d.id].rows, main = rows[0];
       const lifted = dragging ? this.geometry(d.order, d.byId).y[d.id] + d.dy : y[d.id];
       const layer = (name) => div().id(`${name}-${d.id}`).absolute().left(0).right(0).top(0).rounded(8);
-      cells.push(div().id(`lift-${d.id}`).absolute().left(0).right(0).top(lifted).transition("top", dragging ? 0 : GLIDE)
+      cells.push(div().id(`lift-${d.id}`).absolute().left(0).right(0).top(lifted).spring("top", dragging ? HELD : SLIDE)
         .flex().flex_col()
         .child(layer("backing").bottom(0).bg(t.chrome).shadow_md().opacity(up ? 1 : 0).transition("opacity", up ? RAISE : GLIDE))
         .child(layer("rest").bottom(0).bg(t.chrome))

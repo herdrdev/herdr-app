@@ -11,13 +11,17 @@ function find(node, id) {
   return null;
 }
 
-// Slide: a tab moving to its new place. Glide: the dragged tab landing or flying
-// back. Enter: a new tab fades in once its neighbours have mostly made room
-// (fading in as they start to slide, they covered it). Exit: a closed tab fades out, shorter, and
-// hides the neighbours sliding over its place.
+// Slide: a tab moving to its new place, the dragged one landing or flying back
+// included. Held: the same spring while the pointer holds it, at once. Glide:
+// the held look fading as it lands. Enter: a new tab fades in once its
+// neighbours have mostly made room (fading in as they start to slide, they
+// covered it). Exit: a closed tab fades out, shorter, and hides the neighbours
+// sliding over its place.
 // Slide is a spring: when the landing changes mid-slide it keeps its speed
 // (a transition restarts from rest, a visible stutter); damping 1, no overshoot.
-const SLIDE = { response: 200, damping: 1 }, GLIDE = { duration: 200, easing: "ease-out" };
+// It is within half a pixel of its place after LANDED ms.
+const SLIDE = { response: 200, damping: 1 }, HELD = { response: 0, damping: 1 }, LANDED = 300;
+const GLIDE = { duration: 200, easing: "ease-out" };
 const ENTER = { duration: 200, delay: 100, easing: "ease-out" }, EXIT = { duration: 120, easing: "ease-out" };
 const GAP = 3, LIFT = 4;
 // The held look, the same in every dragged list: nothing follows the pointer's
@@ -161,7 +165,7 @@ export default class Tabs extends View {
     const g = this.gesture = { ...d, kind, to: kind === "drop" ? to : d.from, tick: null };
     if (kind === "drop") run("tab.move", { id: d.id, index: g.to + 1 });
     if (d.pane) run("pane.focus", { pane: d.pane });
-    cx.timer.after(GLIDE.duration, cx => { if (this.gesture === g) { this.gesture = null; this.quiet = true; cx.notify(); } });
+    cx.timer.after(LANDED, cx => { if (this.gesture === g) { this.gesture = null; this.quiet = true; cx.notify(); } });
     cx.notify();
   }
 
@@ -195,7 +199,7 @@ export default class Tabs extends View {
     const byId = Object.fromEntries(shown.map(c => [c.id, c]));
     this.last = {};
     const cell = (c, left, motion, opacity, fade) => div().id(`cell-${c.id}`).absolute().top(0).bottom(0).flex().items_center()
-      .left(left).map(el => motion === SLIDE ? el.spring("left", SLIDE) : el.transition("left", motion))
+      .left(left).map(el => motion.response === undefined ? el.transition("left", motion) : el.spring("left", motion))
       .opacity(opacity).transition("opacity", fade);
     const placed = this.placed; this.placed = new Set();
     const cells = [];
@@ -217,7 +221,7 @@ export default class Tabs extends View {
       const c = byId[d.id], dragging = d.kind === "drag";
       const lifted = dragging ? this.geometry(d.order).x[d.from] + d.dx : at[d.id];
       const layer = (name, bg) => div().id(`${name}-${d.id}`).absolute().inset(0).rounded(7).bg(bg);
-      cells.push(cell(c, lifted, dragging ? 0 : GLIDE, 1, 0).child(div().relative()
+      cells.push(cell(c, lifted, dragging ? HELD : SLIDE, 1, 0).child(div().relative()
         .child(layer("backing", t.chrome).shadow_md().opacity(up ? 1 : 0).transition("opacity", up ? RAISE : GLIDE))
         .child(layer("rest", c.active ? t.raised : t.chrome))
         // A tab's hover replaces its fill: the hover look is its own opaque layer.
