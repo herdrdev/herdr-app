@@ -87,9 +87,9 @@ fn shape(root: &Node) -> String {
 }
 
 /// The motion of the shipped tabs and spaces mods (their `SLIDE`, `GLIDE`,
-/// `RAISE`, `ENTER` and `EXIT`): the others slide, the carried one glides
-/// into place, its shadow rises; a new one fades in once there's room, a
-/// closed one fades out where it was.
+/// `RAISE`, `ENTER` and `EXIT`): panes move on one spring, the carried one
+/// landing too; its shadow rises as it lifts and fades as it lands; a new one
+/// fades in once there's room, a closed one fades out where it was.
 const SLIDE: Spring = Spring::new(Duration::from_millis(200)).with_damping(1.0);
 const GLIDE: Duration = Duration::from_millis(200);
 const RAISE: Duration = Duration::from_millis(120);
@@ -323,6 +323,13 @@ impl AppWindow {
         let moving = matches!(d, Some(PaneDrag::Carried { .. } | PaneDrag::Landing { .. }));
         let carried = d.filter(|_| moving).map(PaneDrag::pane);
         let policy = if easing || moving { SLIDE } else { SLIDE.with_travel(false) };
+        let target = match d {
+            Some(PaneDrag::Carried { target, .. }) => target.clone(),
+            _ => None,
+        };
+        // Laid out anew this frame, the places known are last frame's: the
+        // carried pane holds still until the next one knows where it goes.
+        let held = self.pane_shown.as_ref().filter(|s| s.target != target).and_then(|s| carried.and_then(|p| s.rects.get(p)).copied());
         let mut rects = HashMap::new();
         let mut opacity = HashMap::new();
         let mut slot = None;
@@ -339,12 +346,16 @@ impl AppWindow {
             let Some(place) = place else { continue };
             let rect = if carried == Some(n.id.as_str()) {
                 slot = Some(spring_bounds(&format!("pane-slot:{}", n.id), place, SLIDE, window, cx));
-                let id = SharedString::from(format!("pane-carry:{}", n.id));
+                // Held, the spring follows the pointer at once; let go, the same spring lands it.
+                let key = format!("pane-carry:{}", n.id);
                 match d {
                     Some(PaneDrag::Carried { from, down, pointer, .. }) => {
-                        transition(id, Bounds::new(from.origin + (*pointer - *down), from.size), ease(Duration::ZERO), window, cx)
+                        spring_bounds(&key, Bounds::new(from.origin + (*pointer - *down), from.size), SLIDE.with_travel(false), window, cx)
                     }
-                    _ => transition(id, place, ease(GLIDE), window, cx),
+                    _ => match held {
+                        Some(at) => spring_bounds(&key, at, SLIDE.with_travel(false), window, cx),
+                        None => spring_bounds(&key, place, SLIDE, window, cx),
+                    },
                 }
             } else {
                 spring_bounds(&format!("pane-at:{}", n.id), place, policy, window, cx)
