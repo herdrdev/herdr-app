@@ -1660,7 +1660,7 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
                 x += 1;
             }
         }
-        if text.trim().is_empty() && !c.underline && !c.strike {
+        if text.trim_matches(' ').is_empty() && !c.underline && !c.strike {
             continue;
         }
         if ligatures && needs_ligatures(&text, &text_font) {
@@ -3078,6 +3078,30 @@ mod tests {
         assert!(needs_ligatures("界=>", &font));
         assert!(needs_ligatures("fi ->", &gpui::font("Fira Code")));
         assert!(needs_ligatures("fi", &gpui::font("Fira Code")));
+    }
+
+    #[gpui::test]
+    fn unicode_spaces_are_shaped_but_blank_cells_are_skipped(cx: &mut gpui::TestAppContext) {
+        use super::*;
+        let window = cx.add_window(|_, _| Empty);
+        window.update(cx, |_, window, _| {
+            for (text, wide) in [("\u{3000}", true), ("\u{a0}", false), ("\u{2003}", false)] {
+                let row = [vt::Cell { text: text.into(), wide, ..Default::default() }, vt::Cell::default()];
+                let ops = row_ops(&row, size(px(8.), px(16.)), None, window);
+                let runs: Vec<_> = ops.iter().filter_map(|op| match op {
+                    RowOp::Text { x, line } => Some((*x, line.text.as_ref())),
+                    _ => None,
+                }).collect();
+                assert_eq!(runs, vec![(0, text)]);
+            }
+            for text in ["", " ", "   "] {
+                for (underline, strike) in [(false, false), (true, false), (false, true)] {
+                    let row = [vt::Cell { text: text.into(), underline, strike, ..Default::default() }];
+                    let ops = row_ops(&row, size(px(8.), px(16.)), None, window);
+                    assert_eq!(ops.iter().filter(|op| matches!(op, RowOp::Text { .. })).count(), usize::from(underline || strike));
+                }
+            }
+        }).unwrap();
     }
 
     #[gpui::test]
