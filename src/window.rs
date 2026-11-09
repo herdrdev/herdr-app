@@ -4057,8 +4057,9 @@ impl AppWindow {
     }
 
     /// The window's mods on a new VM, as when the window opens: every copy
-    /// closes on the old one and the shown ones load again. Terminals, the
-    /// core and the layout stay.
+    /// closes on the old one and the shown ones load again, open popups,
+    /// dialogs and windows too (toasts close). Hidden copies start fresh when
+    /// shown. Terminals, the core and the layout stay.
     fn restart_mods(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let fresh = match ShellRuntime::replace_default(cx) {
             Ok(fresh) => fresh,
@@ -4071,11 +4072,37 @@ impl AppWindow {
         if let Some(events) = &self.file_events {
             fresh.set_source_revision_provider(events.revision_provider());
         }
+        // A toast would show (or send) its notification again: it closes.
+        let toasts: Vec<String> = self.overlays.iter().filter(|o| o.kind == OverlayKind::Toast).map(|o| o.id.clone()).collect();
+        for id in toasts {
+            self.remove_overlay(&id, window, cx);
+        }
+        // An overlay's own mod loads when it opens, not in `sync`: it loads
+        // again here, in its frame.
+        let reopen: Vec<(String, Instance, bool)> = self
+            .overlays
+            .iter()
+            .filter(|o| o.layout.is_none())
+            .filter_map(|o| self.copies.get(&o.slot).map(|c| (o.slot.clone(), c.inst.clone(), o.fit)))
+            .collect();
         let slots: Vec<String> = self.copies.keys().cloned().collect();
         for slot in slots {
             self.remove_copy(&slot, window, cx);
         }
         self.runtime = Some(fresh);
+        // The frame takes the keyboard first, as when it opened.
+        if let Some(focus) = self.overlays.iter().rev().find(|o| o.kind.modal_keys()).map(|o| o.focus.clone()) {
+            focus.focus(window, cx);
+        }
+        for (slot, inst, fit) in reopen {
+            let copy = self.load(inst, window, cx);
+            if fit
+                && let Some(root) = &copy.root
+            {
+                root.update(cx, |r, cx| r.set_fit_content(true, cx));
+            }
+            self.copies.insert(slot, copy);
+        }
         self.sync(window, cx);
     }
 
@@ -5945,6 +5972,43 @@ mod tests {
                 assert_eq!(&saved(this), expected);
             }
         }));
+    }
+
+    #[test]
+    fn a_new_vm_loads_the_open_popup_again() {
+        in_own_process("new_vm_keeps_popup");
+    }
+
+    /// A popup's copy loads when it opens, not with the layout's. When the
+    /// window moves its mods to a new VM, the open popup loads there too
+    /// instead of staying an empty frame that holds the keyboard.
+    #[gpui::test]
+    fn new_vm_keeps_popup(cx: &mut gpui::TestAppContext) {
+        if !running_alone("new_vm_keeps_popup") {
+            return;
+        }
+        let (view, cx) = open_heavy(cx, 1);
+        cx.update(|window, cx| view.update(cx, |this, cx| this.open_overlay("menu".into(), serde_json::json!({ "kind": "popup", "mod": "heavy" }), window, cx)));
+        cx.run_until_parked();
+        let popup = |view: &gpui::Entity<super::AppWindow>, cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                let this = view.read(cx);
+                let o = this.overlays.iter().find(|o| o.id == "menu").expect("the popup stays open");
+                let copy = this.copies.get(&o.slot);
+                (copy.is_some_and(|c| c.root.is_some() && c.error.is_none()), o.focus.contains_focused(window, cx))
+            })
+        };
+        assert_eq!(popup(&view, cx), (true, true), "the popup shows its mod and holds the keyboard");
+        let note = serde_json::json!({ "kind": "toast", "notification": { "title": "Saved", "body": "", "level": "info" } });
+        cx.update(|window, cx| view.update(cx, |this, cx| this.open_overlay("note".into(), note, window, cx)));
+        let first = view.update(cx, |this, _| std::rc::Rc::downgrade(this.runtime.as_ref().unwrap()));
+        cx.update(|window, cx| view.update(cx, |this, cx| this.restart_mods(window, cx)));
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(first.upgrade().is_none(), "the old VM is freed");
+        assert_eq!(popup(&view, cx), (true, true), "on the new VM the popup shows its mod again");
+        assert!(view.update(cx, |this, _| !this.overlays.iter().any(|o| o.id == "note")), "a toast is not shown twice");
+        assert_eq!(view.update(cx, |this, _| this.copies.values().filter(|c| c.root.is_some()).count()), 2, "the block and the popup");
     }
 
     #[test]
