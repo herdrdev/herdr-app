@@ -630,7 +630,8 @@ The main ones:
   or replaced and a different core answers there, its sidebar offers Connect:
   explicitly forget the old identity and pair again with the same name and target.
   Other unreachable machines don't offer this.
-- Window: `window.minimize`, `window.maximize` (or back), `window.close`.
+- Window: `window.minimize`, `window.maximize` (or back), `window.close`
+  (on macOS Herdr keeps running; the Dock icon opens the window again).
 - macOS: `app.quit`, `app.hide`, `app.hide_others`, `app.show_all`.
 
 When the user runs a command without a required name (a key, a click), Herdr
