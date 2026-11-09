@@ -554,6 +554,16 @@ fn confirm_dialog_background_follows_the_frame_corners(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
+fn pane_header_leaves_the_background_to_the_rounded_frame(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let tree = describe(cx, &staged, "mods/pane", true, props(), updates("current", "current"), None).unwrap();
+    let head = tree.lines().find(|l| l.contains("pane-head-")).unwrap_or_else(|| panic!("no pane header: {tree}"));
+    // The frame clips to a rectangle, so a header background would square off its rounded corners.
+    assert!(!head.contains(".bg["), "the pane header must not paint over the frame's corners: {head}");
+}
+
+#[gpui::test]
 fn layout_previews_stay_inside_their_cards(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();

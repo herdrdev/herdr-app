@@ -16,6 +16,18 @@ pub(super) fn frame_border(frame: &PaneFrame, focused: bool) -> Option<&Line> {
     if focused { frame.focus.as_ref().or(frame.border.as_ref()) } else { frame.border.as_ref() }
 }
 
+/// The radius left inside a pane frame's border, on the corners its body meets:
+/// a header above or below covers those corners itself (it has no background of its own).
+pub(super) fn inner_corners(frame: &PaneFrame, focused: bool) -> Corners<f32> {
+    let width = frame_border(frame, focused).map_or(0.0, |l| l.width);
+    let r = (frame.radius.unwrap_or(0.0) - width).max(0.0);
+    match &frame.header {
+        Some(h) if !h.hover() && h.bottom() => Corners { top_left: r, top_right: r, bottom_left: 0.0, bottom_right: 0.0 },
+        Some(h) if !h.hover() => Corners { top_left: 0.0, top_right: 0.0, bottom_left: r, bottom_right: r },
+        _ => Corners::all(r),
+    }
+}
+
 pub(super) fn header_height(header: &Header) -> f32 {
     header.height.unwrap_or(HEADER_HEIGHT)
 }
