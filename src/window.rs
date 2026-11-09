@@ -5141,7 +5141,7 @@ mod tests {
         let old = cx.update(|cx| cx.cached_asset::<ImgResourceLoader>(&resource)).unwrap().unwrap();
         let context = cx.add_empty_window();
         let displayed = old.clone();
-        assert_eq!(old.frame_count(), 2);
+        assert_eq!(old.frame_count(), 1);
         context.draw(point(px(0.0), px(0.0)), size(px(20.0), px(20.0)), move |_, _| {
             gpui::canvas(|_, _, _| (), move |bounds, _, window, _| {
                 for frame in 0..displayed.frame_count() {
@@ -5158,6 +5158,217 @@ mod tests {
             super::invalidate_image(&missing, window, cx);
             assert!(!cx.has_asset::<ImgResourceLoader>(&missing));
         });
+        std::fs::remove_dir_all(home).unwrap();
+    }
+
+    #[gpui::test]
+    fn still_image_cache_is_bounded_and_avoids_repeat_downloads(cx: &mut TestAppContext) {
+        use gpui::{ImgResourceLoader, Resource, http_client::{AsyncBody, FakeHttpClient, Response}};
+        use std::sync::{Arc, atomic::{AtomicUsize, Ordering}};
+        let mut bytes = std::io::Cursor::new(Vec::new());
+        image::RgbaImage::from_pixel(1, 1, image::Rgba([255, 0, 0, 255]))
+            .write_to(&mut bytes, image::ImageFormat::Png).unwrap();
+        let bytes = bytes.into_inner();
+        let requests = Arc::new(AtomicUsize::new(0));
+        let count = requests.clone();
+        cx.update(|cx| cx.set_http_client(FakeHttpClient::create(move |_| {
+            count.fetch_add(1, Ordering::SeqCst);
+            let bytes = bytes.clone();
+            async move { Ok(Response::builder().status(200).body(AsyncBody::from(bytes)).unwrap()) }
+        })));
+        let context = cx.add_empty_window();
+        context.deactivate_window();
+        let sources: Vec<_> = (0..130).map(|id| Resource::Uri(format!("http://images.test/{id}.png").into())).collect();
+        for source in &sources {
+            context.update(|_, cx| { cx.fetch_asset::<ImgResourceLoader>(source); });
+            context.run_until_parked();
+        }
+        context.update(|window, cx| { window.draw(cx).clear(cx); });
+        assert_eq!(context.update(|_, cx| sources.iter().filter(|source| cx.has_asset::<ImgResourceLoader>(source)).count()), 128);
+        let retained = sources.last().unwrap();
+        assert!(context.update(|_, cx| cx.fetch_asset::<ImgResourceLoader>(retained)).unwrap().is_ok());
+        assert_eq!(requests.load(Ordering::SeqCst), 130);
+        assert!(!context.update(|_, cx| cx.has_asset::<ImgResourceLoader>(&sources[0])));
+        context.update(|window, cx| {
+            cx.set_quit_mode(gpui::QuitMode::Explicit);
+            window.remove_window();
+        });
+    }
+
+    #[gpui::test]
+    fn closing_last_window_releases_many_animation_sources_in_one_call(cx: &mut TestAppContext) {
+        use gpui::{ImgResourceLoader, Resource, img};
+        use std::sync::Arc;
+        struct Images(Vec<Resource>);
+        impl Render for Images {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().children(self.0.iter().enumerate().map(|(id, source)| {
+                    img(gpui::ImageSource::Resource(source.clone())).id(id).size_4()
+                }))
+            }
+        }
+        let mut gif = Vec::new();
+        {
+            let mut encoder = image::codecs::gif::GifEncoder::new(&mut gif);
+            for color in [[255, 0, 0, 255], [0, 255, 0, 255]] {
+                encoder.encode_frame(image::Frame::new(image::RgbaImage::from_pixel(2, 2, image::Rgba(color)))).unwrap();
+            }
+        }
+        let temp = if cfg!(target_os = "linux") { std::path::PathBuf::from("/var/tmp") } else { std::env::temp_dir() };
+        let dir = temp.join(format!("herdr-many-images-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let sources: Vec<_> = (0..24).map(|id| {
+            let path = dir.join(format!("{id}.gif"));
+            std::fs::write(&path, &gif).unwrap();
+            Resource::Path(path.into())
+        }).collect();
+        let (_, context) = cx.add_window_view(|_, _| Images(sources.clone()));
+        context.deactivate_window();
+        context.run_until_parked();
+        let mut images = context.update(|window, _| window.displayed_images());
+        assert_eq!(images.iter().filter(|image| image.frame_count() == 2).count(), 24);
+        images.extend(context.update(|_, cx| sources.iter().map(|source| cx.cached_asset::<ImgResourceLoader>(source).unwrap().unwrap()).collect::<Vec<_>>()));
+        let weak: Vec<_> = images.iter().map(Arc::downgrade).collect();
+        drop(images);
+        context.update(|window, cx| {
+            cx.set_quit_mode(gpui::QuitMode::Explicit);
+            window.remove_window();
+        });
+        assert!(weak.iter().all(|image| image.upgrade().is_none()), "one close must release every animation and its source regardless of hash order");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[gpui::test]
+    fn image_tiles_wait_for_both_scenes_before_retiring(cx: &mut TestAppContext) {
+        use std::sync::Arc;
+        let context = cx.add_empty_window();
+        let image = Arc::new(gpui::RenderImage::new((0..3).map(|red| {
+            image::Frame::new(image::RgbaImage::from_pixel(2, 2, image::Rgba([red, 0, 0, 255])))
+        }).collect::<smallvec::SmallVec<[_; 1]>>()));
+        for frame in 0..3 {
+            let painted = image.clone();
+            context.draw(point(px(0.), px(0.)), size(px(20.), px(20.)), move |_, _| {
+                gpui::canvas(|_, _, _| (), move |bounds, _, window, _| {
+                    window.paint_image(bounds, bounds, gpui::Corners::default(), painted.clone(), frame, false).unwrap();
+                }).size_full()
+            });
+            for previous in 0..=frame {
+                assert_eq!(context.update(|window, _| window.has_image_frame_atlas_entry(&image, previous)), previous + 1 >= frame);
+            }
+        }
+    }
+
+    #[gpui::test]
+    fn clipped_images_do_not_upload(cx: &mut TestAppContext) {
+        use std::sync::Arc;
+        let context = cx.add_empty_window();
+        let image = Arc::new(gpui::RenderImage::new(smallvec::smallvec![
+            image::Frame::new(image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 0, 0, 255])))
+        ]));
+        for mask in [
+            gpui::Bounds::new(point(px(50.), px(50.)), size(px(10.), px(10.))),
+            gpui::Bounds::new(point(px(0.), px(0.)), size(px(0.), px(0.))),
+        ] {
+            for _ in 0..2 {
+                let painted = image.clone();
+                context.draw(point(px(0.), px(0.)), size(px(20.), px(20.)), move |_, _| {
+                    gpui::canvas(|_, _, _| (), move |bounds, _, window, _| {
+                        window.with_content_mask(Some(gpui::ContentMask { bounds: mask }), |window| {
+                            window.paint_image(bounds, bounds, gpui::Corners::default(), painted.clone(), 0, false).unwrap();
+                        });
+                    }).size_full()
+                });
+                assert!(!context.update(|window, _| window.has_image_frame_atlas_entry(&image, 0)));
+            }
+        }
+        let painted = image.clone();
+        context.draw(point(px(0.), px(0.)), size(px(20.), px(20.)), move |_, _| {
+            gpui::canvas(|_, _, _| (), move |bounds, _, window, _| {
+                window.paint_image(bounds, bounds, gpui::Corners::default(), painted.clone(), 0, false).unwrap();
+            }).size_full()
+        });
+        assert!(context.update(|window, _| window.has_image_frame_atlas_entry(&image, 0)));
+    }
+
+    #[gpui::test]
+    fn background_images_stay_warm_and_release_animations(cx: &mut TestAppContext) {
+        use gpui::{AssetSource as _, ImgResourceLoader, Resource, img};
+        use std::sync::Arc;
+        struct ImageProbe { source: Option<Resource>, animate: bool }
+        impl Render for ImageProbe {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let mut element = div().size_full();
+                if let Some(source) = &self.source {
+                    element = element.child(img(gpui::ImageSource::Resource(source.clone())).size_4());
+                    if self.animate {
+                        element = element.child(img(gpui::ImageSource::Resource(source.clone())).id("animated").size_4());
+                    }
+                }
+                element
+            }
+        }
+        let temp = if cfg!(target_os = "linux") { std::path::PathBuf::from("/var/tmp") } else { std::env::temp_dir() };
+        let home = temp.join(format!("herdr-image-release-test-{}", std::process::id()));
+        std::fs::create_dir_all(&home).unwrap();
+        let gif = home.join("animated.gif");
+        let png = home.join("still.png");
+        let mut encoder = image::codecs::gif::GifEncoder::new(std::fs::File::create(&gif).unwrap());
+        for color in [[255, 0, 0, 255], [0, 255, 0, 255]] {
+            encoder.encode_frame(image::Frame::new(image::RgbaImage::from_pixel(2, 2, image::Rgba(color)))).unwrap();
+        }
+        drop(encoder);
+        image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 0, 0, 255])).save(&png).unwrap();
+        let assets = gpui_shell::AppAssets::new(home.clone());
+        assert_eq!(
+            assets.image_resource(&Resource::Path(gif.clone().into())),
+            Resource::Path(gif.clone().into())
+        );
+        let (view, cx) = cx.add_window_view(|_, _| ImageProbe { source: None, animate: false });
+        cx.deactivate_window();
+        for file in [&gif, &png, &gif] {
+            let resource = Resource::Path(file.clone().into());
+            view.update(cx, |view, cx| { view.source = Some(resource.clone()); cx.notify(); });
+            cx.run_until_parked();
+            let image = cx.update(|_, cx| cx.cached_asset::<ImgResourceLoader>(&resource)).unwrap().unwrap();
+            assert_eq!(image.frame_count(), 1);
+            assert_eq!(&image.as_bytes(0).unwrap()[..4], &[0, 0, 255, 255]);
+            assert!(cx.update(|window, _| window.has_image_frame_atlas_entry(&image, 0)));
+            if file == &gif {
+                view.update(cx, |view, cx| { view.animate = true; cx.notify(); });
+                cx.run_until_parked();
+                let animation = cx.update(|window, _| window.displayed_images().into_iter().find(|image| image.frame_count() == 2)).unwrap();
+                assert_eq!(animation.as_bytes(0).unwrap().as_ptr(), image.as_bytes(0).unwrap().as_ptr());
+                let weak_animation = Arc::downgrade(&animation);
+                drop(animation);
+                view.update(cx, |view, cx| { view.animate = false; cx.notify(); });
+                cx.run_until_parked();
+                assert!(weak_animation.upgrade().is_none(), "a still background must not keep animation pixels");
+                assert!(cx.update(|window, _| window.has_image_frame_atlas_entry(&image, 0)));
+            }
+            let weak = Arc::downgrade(&image);
+            drop(image);
+            view.update(cx, |view, cx| { view.source = None; cx.notify(); });
+            cx.run_until_parked();
+            assert!(weak.upgrade().is_some(), "still pixels stay warm for layout switches");
+            view.update(cx, |view, cx| { view.source = Some(resource.clone()); cx.notify(); });
+            cx.update(|window, cx| { window.draw(cx).clear(cx); });
+            let warm = cx.update(|_, cx| cx.cached_asset::<ImgResourceLoader>(&resource)).unwrap().unwrap();
+            assert!(Arc::ptr_eq(&warm, &weak.upgrade().unwrap()));
+            assert!(cx.update(|window, _| window.has_image_frame_atlas_entry(&warm, 0)));
+            drop(warm);
+        }
+        // Leave both the source and animation unowned in the same close operation.
+        view.update(cx, |view, cx| { view.animate = true; cx.notify(); });
+        cx.run_until_parked();
+        let images = cx.update(|window, _| window.displayed_images());
+        let weak: Vec<_> = images.iter().map(Arc::downgrade).collect();
+        assert!(images.iter().any(|image| image.frame_count() == 2));
+        drop(images);
+        cx.update(|window, cx| {
+            cx.set_quit_mode(gpui::QuitMode::Explicit);
+            window.remove_window();
+        });
+        assert!(weak.iter().all(|image| image.upgrade().is_none()), "closing the last window must prune in dependency order without another draw");
         std::fs::remove_dir_all(home).unwrap();
     }
 

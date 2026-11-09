@@ -102,6 +102,14 @@ impl AppAssets {
 }
 
 impl AssetSource for AppAssets {
+    fn image_resource(&self, resource: &gpui::Resource) -> gpui::Resource {
+        match resource {
+            // Path reads have no size limit; embedded reads enforce the mod limit.
+            gpui::Resource::Embedded(path) => gpui::Resource::Embedded(Self::cache_key(path)),
+            _ => resource.clone(),
+        }
+    }
+
     fn load(&self, path: &str) -> anyhow::Result<Option<Cow<'static, [u8]>>> {
         let Some((dir, resolved)) = self.resolve(path) else {
             anyhow::bail!("`{path}` is outside the application directory");
