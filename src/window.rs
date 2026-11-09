@@ -589,6 +589,8 @@ impl AppWindow {
         // theirs) starts on Herdr's instead of a wall of "did not load".
         let gone = name.as_deref().map(missing_mods).unwrap_or_default();
         w.load_layout(if gone.is_empty() { name.as_deref().unwrap_or("main") } else { "main" });
+        #[cfg(target_os = "macos")]
+        crate::macos::refresh_menus(cx);
         w.apply_look(window, cx);
         w.show_layout_notes(window, cx);
         if let (Some(n), false) = (&name, gone.is_empty()) {
@@ -1009,6 +1011,8 @@ impl AppWindow {
             self.drop_layout_copies(window, cx);
         }
         self.load_layout(&next);
+        #[cfg(target_os = "macos")]
+        crate::macos::refresh_menus(cx);
         self.apply_look(window, cx);
         // Whatever the new layout shows takes the keyboard.
         self.focused_pane = None;
@@ -3955,6 +3959,11 @@ impl AppWindow {
         }
         if changed.iter().any(|p| top(p) == "layouts") {
             self.check_layout_file(window, cx);
+        }
+        // The View menu lists the layouts (not their saved clicks in layouts/.state).
+        #[cfg(target_os = "macos")]
+        if changed.iter().any(|p| p.parent() == Some(std::path::Path::new("layouts"))) {
+            crate::macos::refresh_menus(cx);
         }
         let edited: BTreeSet<String> = changed.iter().filter_map(|p| crate::files::mod_of(p)).collect();
         if edited.is_empty() {

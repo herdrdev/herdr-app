@@ -535,6 +535,8 @@ shortcuts must then be added by hand.
 - On macOS, shifted punctuation shortcuts accept both spellings from the
   current layout: `cmd-shift-]` and `cmd-}` match the same US-layout keypress.
   Existing `keys.json` files don't need to change.
+- The macOS menu bar runs the same commands and shows the key that keys.json
+  binds to each (string actions only). Rebinding updates the menus live.
 - Terminal keys honor the program's negotiated Kitty mode, including on Windows.
 - Windows terminal Escape stays separate from the following key.
 - Search: `ctrl-shift-f` (Cmd-F on macOS) opens a find bar inside the focused terminal;
