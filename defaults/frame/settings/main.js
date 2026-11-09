@@ -2,7 +2,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input } from "gpui-base";
-import { hc, run, theme, themes, fonts, updates, telemetry, settings, layouts, shared, appHome, readTextFile, writeTextFile, playSound, props, closeOverlay, window } from "herdr";
+import { hc, run, theme, themes, fonts, updates, telemetry, settings, layouts, shared, setShared, appHome, readTextFile, writeTextFile, playSound, props, closeOverlay, window } from "herdr";
 
 const I = (name) => `frame/settings/${name}.svg`;
 
@@ -674,6 +674,12 @@ export default class Settings extends View {
   alerts(t) {
     const sounds = this.person.sounds ?? {};
     const on = sounds.enabled !== false;
+    const notifications = shared("notifications") ?? {};
+    const notification = (key, title, about) => this.row(t, title, about,
+      this.toggle(t, `st-notifications-${key}`, notifications[key] !== false, () => {
+        const current = shared("notifications") ?? {};
+        setShared("notifications", { ...current, [key]: current[key] === false });
+      }));
     const file = (f) => (f ? f.split(/[\\/]/).pop() : "Herdr's sound");
     return v_flex()
       .w_full()
@@ -682,13 +688,19 @@ export default class Settings extends View {
         this.row(
           t,
           "Play sounds",
-          "When an agent needs you, and when one finishes while you're not looking. A note shows in the corner either way.",
+          "When an agent needs you, and when one finishes while you're not looking. Notification popups are controlled separately below.",
           this.toggle(t, "st-sounds", on, (_e, cx) => this.change((p) => (p.sounds = { ...(p.sounds ?? {}), enabled: !on }), cx)),
         ),
       )
       .child(this.row(t, "An agent needs you", file(sounds.blocked), this.button(t, "st-play-blocked", "Play", () => playSound("blocked"))))
       .child(this.row(t, "An agent finished", file(sounds.done), this.button(t, "st-play-done", "Play", () => playSound("done"))))
-      .child(div().pt(12).text_size(12.5).line_height("18px").text_color(t.dim).child("Want your own sounds? Ask your agent to set sounds.done and sounds.blocked in settings.json to an MP3."));
+      .child(div().pt(12).text_size(12.5).line_height("18px").text_color(t.dim).child("Want your own sounds? Ask your agent to set sounds.done and sounds.blocked in settings.json to an MP3."))
+      .child(div().pt(24).child(this.heading(t, "Notifications")))
+      .child(notification("enabled", "Show notifications", "Show corner popups. Turning this off hides all notifications, including errors. Sounds are controlled separately."))
+      .child(notification("blocked", "An agent needs you", "An agent is waiting for your input."))
+      .child(notification("done", "An agent finished", "An agent finished while you were looking elsewhere."))
+      .child(notification("errors", "Operational errors", "Errors and warnings from terminals, commands, updates and mods."))
+      .child(notification("other", "Other notifications", "Informational notices, update availability and other notifications from mods."));
   }
 
   // Updates --------------------------------------------------------------

@@ -3550,6 +3550,11 @@ impl AppWindow {
     }
 
     fn open_overlay(&mut self, id: String, spec: Value, window: &mut Window, cx: &mut Context<Self>) {
+        if spec.get("kind").and_then(Value::as_str) == Some("toast")
+            && !notification_enabled(&mods::shared("notifications").unwrap_or(Value::Null), notification_category(&spec["notification"]))
+        {
+            return;
+        }
         let kind = match spec.get("kind").and_then(Value::as_str) {
             Some("popup") => OverlayKind::Popup,
             Some("toast") => OverlayKind::Toast,
@@ -3741,7 +3746,15 @@ impl AppWindow {
             Request::Run { name, args } => self.run(&name, args, window, cx),
             Request::OpenOverlay { id, spec } => self.open_overlay(id, spec, window, cx),
             Request::CloseOverlay { id } => self.close_overlay(&id, window, cx),
-            Request::Refresh => self.refresh_mods(cx),
+            Request::Refresh => {
+                let preferences = mods::shared("notifications").unwrap_or(Value::Null);
+                let hidden: Vec<_> = self.overlays.iter().filter(|o| o.kind == OverlayKind::Toast)
+                    .filter(|o| self.copies.get(&o.slot).is_some_and(|c| !notification_enabled(&preferences, notification_category(&c.inst.props))))
+                    .map(|o| o.id.clone()).collect();
+                for id in hidden { self.remove_overlay(&id, window, cx); }
+                self.refresh_mods(cx);
+                cx.notify();
+            }
             Request::Control { cmd, reply } => {
                 let _ = reply.send(self.control(cmd, window, cx));
             }
@@ -4393,7 +4406,9 @@ impl AppWindow {
                 }
             }
         }
-        if let Some(error) = crate::update::core().error {
+        if let Some(error) = crate::update::core().error
+            && notification_enabled(&mods::shared("notifications").unwrap_or(Value::Null), "errors")
+        {
             out.push(div().absolute().right(settings::z(16.0)).bottom(settings::z(toast_y))
                 .max_w(settings::z(540.0)).p(settings::z(12.0)).rounded_lg().bg(c("popover"))
                 .border_1().border_color(c("border")).text_size(settings::z(13.0)).text_color(c("foreground"))
@@ -4408,8 +4423,23 @@ impl AppWindow {
 
 const UPDATE_PILL_HEIGHT: f32 = 34.0;
 
+fn notification_category(note: &Value) -> &'static str {
+    if note["action"]["name"].as_str() == Some("agent.focus") {
+        if note["level"].as_str() == Some("error") { "blocked" } else { "done" }
+    } else if matches!(note["level"].as_str(), Some("error" | "warning")) {
+        "errors"
+    } else {
+        "other"
+    }
+}
+
+fn notification_enabled(preferences: &Value, category: &str) -> bool {
+    preferences.get("enabled").and_then(Value::as_bool) != Some(false)
+        && preferences.get(category).and_then(Value::as_bool) != Some(false)
+}
+
 impl AppWindow {
-    /// "Herdr 0.2.0 is ready · Restart": the frame's, so no layout or mod can hide it.
+    /// "Herdr 0.2.0 is ready · Restart": the frame's, subject to notification preferences.
     /// What's waiting, in words: the pill shows it until clicked or dismissed.
     fn update_label() -> Option<String> {
         let core = crate::update::core();
@@ -4423,6 +4453,7 @@ impl AppWindow {
     }
 
     fn render_update_pill(&self, cx: &mut Context<Self>) -> Option<AnyElement> {
+        if !notification_enabled(&mods::shared("notifications").unwrap_or(Value::Null), "other") { return None; }
         let app_version = crate::update::ready();
         let app_ready = app_version.is_some();
         let success = self.update_ready.is_none() && self.update_success;
@@ -5036,6 +5067,30 @@ mod tests {
     use gpui::prelude::*;
 
     #[test]
+    fn notification_preferences_cover_all_categories_and_default_on() {
+        use serde_json::{json, Value};
+        let notes = [
+            (json!({"level":"error", "action":{"name":"agent.focus"}}), "blocked"),
+            (json!({"level":"info", "action":{"name":"agent.focus"}}), "done"),
+            (json!({"level":"error"}), "errors"),
+            (json!({"level":"warning"}), "errors"),
+            (json!({"level":"info"}), "other"),
+            (json!({"level":"success"}), "other"),
+            (Value::Null, "other"),
+        ];
+        for (note, expected) in notes {
+            let category = super::notification_category(&note);
+            assert_eq!(category, expected);
+            assert!(super::notification_enabled(&Value::Null, category));
+            assert!(!super::notification_enabled(&json!({"enabled":false}), category));
+            let preferences = json!({expected: false});
+            for other in ["blocked", "done", "errors", "other"] {
+                assert_eq!(super::notification_enabled(&preferences, other), other != expected);
+            }
+        }
+    }
+
+    #[test]
     fn going_back_into_a_split_column_takes_its_top_pane_whatever_the_fractions() {
         let r = |x: f32, y: f32, w: f32, h: f32| gpui::Bounds::new(point(px(x), px(y)), size(px(w), px(h)));
         // An odd height splits into halves a fraction apart, the bottom one larger.
@@ -5363,6 +5418,51 @@ mod tests {
     /// In the process `in_own_process` started for `name`: whether to go on.
     fn running_alone(name: &str) -> bool {
         std::env::var("HERDR_TEST_WINDOW").as_deref() == Ok(name)
+    }
+
+    #[test]
+    fn notifications_follow_preferences_without_hiding_dialogs() {
+        in_own_process("notification_window");
+    }
+
+    #[gpui::test]
+    fn notification_window(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("notification_window") { return; }
+        let (view, cx) = open_window(cx, "probe",
+            "import { View, div } from 'gpui-kit'; export default class Probe extends View { render() { return div(); } }",
+            json!({"id":"root", "type":"block", "content":{"mod":"probe"}}));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            let error = json!({"kind":"toast", "notification":{"title":"Failed", "level":"error"}});
+            let other = json!({"kind":"toast", "notification":{"title":"Notice"}});
+            this.open_overlay("error".into(), error.clone(), window, cx);
+            this.open_overlay("other".into(), other.clone(), window, cx);
+            this.open_overlay("dialog".into(), json!({"mod":"probe", "kind":"dialog"}), window, cx);
+            this.update_ready = Some("An update is ready".into());
+            assert!(this.render_update_pill(cx).is_some());
+
+            crate::mods::set_shared("notifications".into(), json!({"errors":false}));
+            this.handle(crate::mods::Request::Refresh, window, cx);
+            assert!(!this.overlays.iter().any(|o| o.id == "error"));
+            assert!(this.overlays.iter().any(|o| o.id == "other"));
+            this.open_overlay("suppressed".into(), error, window, cx);
+            assert!(!this.overlays.iter().any(|o| o.id == "suppressed"));
+
+            crate::mods::set_shared("notifications".into(), json!({"enabled":false}));
+            this.handle(crate::mods::Request::Refresh, window, cx);
+            assert!(this.overlays.iter().all(|o| o.kind != super::OverlayKind::Toast));
+            assert!(this.overlays.iter().any(|o| o.id == "dialog"));
+            assert!(this.render_update_pill(cx).is_none());
+            this.open_overlay("suppressed".into(), other.clone(), window, cx);
+            assert!(!this.overlays.iter().any(|o| o.id == "suppressed"));
+
+            crate::mods::set_shared("notifications".into(), json!({"other":false}));
+            assert!(this.render_update_pill(cx).is_none());
+            crate::mods::set_shared("notifications".into(), json!({}));
+            this.open_overlay("restored".into(), other, window, cx);
+            assert!(this.overlays.iter().any(|o| o.id == "restored"));
+            assert!(this.render_update_pill(cx).is_some());
+        }));
     }
 
     /// The window on a core that's never there (`hc::offline`), showing
