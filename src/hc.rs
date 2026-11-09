@@ -552,6 +552,29 @@ pub fn offline() -> Arc<Core> {
     })
 }
 
+/// A framed RPC peer for window tests that need specific core replies.
+#[cfg(test)]
+pub fn responding(reply: impl Fn(Value) -> Result<Value, Value> + Send + 'static) -> Arc<Core> {
+    let mut core = offline();
+    let (writer, frames) = mpsc::channel::<Vec<u8>>();
+    let inner = Arc::get_mut(&mut core).unwrap();
+    inner.writer = writer;
+    inner.routes.lock().unwrap().closed = false;
+    let routes = inner.routes.clone();
+    std::thread::spawn(move || {
+        for frame in frames {
+            if frame[4] != DATA || frame[..4] != [0; 4] { continue; }
+            let request: Value = serde_json::from_slice(&frame[HEADER..]).unwrap();
+            let id = request["id"].as_u64().unwrap();
+            let result = reply(request);
+            if let Some(tx) = routes.lock().unwrap().replies.remove(&id) {
+                let _ = tx.send(result);
+            }
+        }
+    });
+    core
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

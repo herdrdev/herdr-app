@@ -2128,7 +2128,10 @@ impl AppWindow {
         if QUITTING.load(std::sync::atomic::Ordering::SeqCst) {
             return false;
         }
+        // Layout terminal blocks too: one whose program ended while its stream was
+        // down goes as a pane does.
         let missing = self.model.tabs().flat_map(|c| c.root.terminals())
+            .chain(self.chrome.terminals())
             .filter_map(|n| n.terminal().filter(|a| !self.live.contains_key(*a) && !self.just_born(a)).map(|a| (n.id.clone(), a.to_owned())))
             .collect::<Vec<_>>();
         if !missing.is_empty() && !self.checking_closed {
@@ -2300,21 +2303,24 @@ impl AppWindow {
             let id = o.id.clone();
             return self.close_overlay(&id, window, cx);
         }
+        // How its stream ended (`hc run --rm` leaves no record). The program ended on
+        // its own (or was killed): its pane or layout block goes now. A stream that
+        // just broke (the core restarted, a machine's link dropped) says neither, and
+        // its view attaches again when the connection is back.
+        let closed = self.terms.get(block).and_then(|t| t.view.read(cx).ended.clone())
+            .is_some_and(|why| matches!(why.as_str(), "exited" | "killed" | "finished"));
+        if !closed {
+            return;
+        }
         if self.chrome.find(block).is_some_and(|n| n.terminal().is_some()) {
             self.chrome.remove_slot(block);
-            self.sync(window, cx);
+            return self.sync(window, cx);
         }
-        // How its stream ended, for `reconcile` (`hc run --rm` leaves no record).
         if let Some(t) = self.terms.get(block)
-            && let Some(why) = t.view.read(cx).ended.clone()
+            && self.model.address_of(block).as_deref() == Some(t.address.as_str())
         {
-            // The program ended on its own (or was killed): its pane goes now. A
-            // stream that just broke (the core died) says neither.
-            let closed = matches!(why.as_str(), "exited" | "killed" | "finished");
-            if closed && self.model.address_of(block).as_deref() == Some(t.address.as_str()) {
-                self.model.remove_pane(block);
-                return self.sync(window, cx);
-            }
+            self.model.remove_pane(block);
+            return self.sync(window, cx);
         }
         // Otherwise the next listing checks closure; core owns lost terminals.
     }
@@ -2521,10 +2527,13 @@ impl AppWindow {
                 this.checking_closed = false;
                 if generation != this.core_generation { return; }
                 let mut changed = false;
-                for (pane, addr) in closed {
-                    if this.model.address_of(&pane).as_deref() == Some(&addr) {
+                for (block, addr) in closed {
+                    if this.model.address_of(&block).as_deref() == Some(&addr) {
                         this.notify_launch_failure(&addr, window, cx);
-                        this.model.remove_pane(&pane);
+                        this.model.remove_pane(&block);
+                        changed = true;
+                    } else if this.chrome.find(&block).and_then(|n| n.terminal()) == Some(addr.as_str()) {
+                        this.chrome.remove_slot(&block);
                         changed = true;
                     }
                 }
@@ -5401,6 +5410,121 @@ mod tests {
         assert!(!pane_focused(cx), "hidden, the pane can't hold the keyboard");
         select("main", cx);
         assert!(pane_focused(cx));
+    }
+
+    #[test]
+    fn layout_terminal_blocks_stay_until_their_program_ends() {
+        in_own_process("layout_terminal_block_ends");
+    }
+
+    /// A terminal block in the layout (a composition) keeps its place when its
+    /// stream breaks (a core restart, a dropped machine link), and goes only once
+    /// the program itself has ended, as a pane does.
+    #[gpui::test]
+    fn layout_terminal_block_ends(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("layout_terminal_block_ends") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "header", "", json!({
+            "id": "root", "type": "row", "children": [
+                { "id": "main", "type": "block", "content": { "tab": "active" } },
+                { "id": "slot", "type": "column", "children": [
+                    { "id": "slot-header", "type": "block", "content": { "mod": "header" } },
+                    { "id": "slot-terminal", "type": "block", "content": { "terminal": "t1" } }
+                ] }
+            ]
+        }));
+        cx.run_until_parked();
+        let end = |why: &str, cx: &mut gpui::VisualTestContext| cx.update(|window, cx| view.update(cx, |this, cx| {
+            let block = this.terms.get("slot-terminal").expect("the block's terminal view").view.clone();
+            block.update(cx, |v, _| v.ended = Some(why.into()));
+            this.terminal_ended("slot-terminal", window, cx);
+        }));
+        let shown = |cx: &mut gpui::VisualTestContext| cx.update(|_, cx| view.read(cx).chrome.find("slot-terminal").is_some());
+        let chrome = cx.update(|_, cx| view.read(cx).chrome.clone());
+        for why in ["", "unknown", "ended", "holder_lost", "server_stop", "stopped_by_restart"] {
+            end(why, cx);
+            assert!(shown(cx), "a stream that ended with {why:?} keeps its block");
+        }
+        for why in ["exited", "killed", "finished"] {
+            end(why, cx);
+            assert!(!shown(cx), "a program that {why} loses its block");
+            cx.update(|window, cx| view.update(cx, |this, cx| {
+                this.chrome = chrome.clone();
+                this.sync(window, cx);
+            }));
+        }
+        assert!(cx.update(|_, cx| view.read(cx).chrome.find("slot-header").is_some()), "its neighbors stay");
+    }
+
+    #[test]
+    fn missing_layout_terminals_need_confirmed_closure() {
+        in_own_process("layout_terminal_reconciliation");
+    }
+
+    #[gpui::test]
+    fn layout_terminal_reconciliation(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("layout_terminal_reconciliation") { return; }
+        let (view, cx) = open_window(cx, "header", "", json!({
+            "id": "root", "type": "row", "children": [
+                { "id": "main", "type": "block", "content": { "tab": "active" } },
+                { "id": "slot", "type": "column", "children": [
+                    { "id": "slot-header", "type": "block", "content": { "mod": "header" } },
+                    { "id": "slot-terminal", "type": "block", "content": { "terminal": "t1" } }
+                ] }
+            ]
+        }));
+        cx.run_until_parked();
+        let check = |reply: Result<serde_json::Value, serde_json::Value>, change: &str, cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| view.update(cx, |this, cx| {
+                this.core = crate::hc::responding(move |request| {
+                    assert_eq!(request["method"], "terminal.get");
+                    reply.clone()
+                });
+                this.reconcile(window, cx);
+                assert!(this.checking_closed, "missing layout blocks are checked");
+                match change {
+                    "generation" => this.core_generation += 1,
+                    "replacement" => this.chrome.find_mut("slot-terminal").unwrap().kind = crate::layout::Kind::Block { content: crate::layout::Content::Terminal { terminal: "t2".into() } },
+                    _ => {}
+                }
+                // Background window ticks must keep using the offline connection.
+                this.core = crate::hc::offline();
+            }));
+            cx.run_until_parked();
+            assert!(!cx.update(|_, cx| view.read(cx).checking_closed));
+        };
+        let shown = |cx: &mut gpui::VisualTestContext| cx.update(|_, cx| view.read(cx).chrome.find("slot-terminal").is_some());
+        for reply in [
+            Ok(json!({"pid": 123})),
+            Ok(json!({"reason": "holder_lost"})),
+            Err(json!({"data": {"kind": "unavailable"}, "message": "machine disconnected"})),
+        ] {
+            check(reply, "", cx);
+            assert!(shown(cx), "an absent listing alone does not prove closure");
+        }
+        check(Ok(json!({"reason": "exited"})), "generation", cx);
+        assert!(shown(cx), "a reply from the old core cannot remove a block");
+        check(Ok(json!({"reason": "killed"})), "replacement", cx);
+        assert!(shown(cx), "a reply for the old terminal cannot remove its replacement");
+        let chrome = cx.update(|_, cx| view.read(cx).chrome.clone());
+        for reply in [
+            Ok(json!({"reason": "exited"})),
+            Ok(json!({"reason": "killed"})),
+            Err(json!({"data": {"kind": "not_found"}, "message": "terminal removed"})),
+        ] {
+            check(reply, "", cx);
+            assert!(!shown(cx), "confirmed closure while disconnected removes the block");
+            cx.update(|window, cx| view.update(cx, |this, cx| {
+                this.chrome = chrome.clone();
+                this.sync(window, cx);
+            }));
+        }
+        assert!(cx.update(|_, cx| view.read(cx).chrome.find("slot").is_some()));
+        assert!(cx.update(|_, cx| view.read(cx).chrome.find("slot-header").is_some()));
+        assert!(cx.update(|_, cx| view.read(cx).chrome.find("main").is_some()));
     }
 
     #[test]
