@@ -190,6 +190,16 @@ impl Model {
         true
     }
 
+    /// Moves a tab within its space (1 = first). Only a tab id: not `space_of`, which also
+    /// finds the space of a pane or container, and those have no place in `tabs`.
+    pub fn move_tab(&mut self, id: &str, index: usize) -> bool {
+        let Some((p, from)) = self.spaces.iter_mut().find_map(|p| p.tabs.iter().position(|c| c.id == id).map(|from| (p, from))) else { return false };
+        let tab = p.tabs.remove(from);
+        let to = index.saturating_sub(1).min(p.tabs.len());
+        p.tabs.insert(to, tab);
+        true
+    }
+
     pub fn active_index(&self) -> Option<usize> {
         let id = self.active.as_deref()?;
         self.spaces.iter().position(|p| p.id == id).or((!self.spaces.is_empty()).then_some(0))
@@ -689,6 +699,27 @@ mod tests {
         assert_eq!(m.alert_for("t9", false, Some("working"), Some("blocked"), false), None);
         // A sub-agent reports to its parent, not to the person.
         assert_eq!(m.alert_for("t1", true, Some("working"), Some("blocked"), false), None);
+    }
+
+    #[test]
+    fn tab_move_refuses_panes_and_containers_and_leaves_the_tabs_alone() {
+        let mut m = Model::default();
+        m.add_space("s1", "api", "/src", Tab::new("c1", "", "x1", "t1"));
+        m.split("x1", crate::layout::Axis::Column, "x2", "t2");
+        m.add_tab("s1", Tab::new("c2", "", "x3", "t3"));
+        // The column split wraps x1 and x2 in a container of their own, inside the tab's root.
+        let inner = &m.tab("c1").unwrap().root.children()[0];
+        assert!(!inner.is_pane() && inner.id != "c1");
+        let container = inner.id.clone();
+        let tabs = |m: &Model| m.space("s1").unwrap().tabs.iter().map(|c| c.id.clone()).collect::<Vec<_>>();
+        for id in ["x1", "x3", container.as_str(), "s1", "nope"] {
+            assert!(!m.move_tab(id, 2), "{id}");
+            assert_eq!(tabs(&m), ["c1", "c2"], "{id}");
+        }
+        assert!(m.move_tab("c2", 1));
+        assert_eq!(tabs(&m), ["c2", "c1"]);
+        assert!(m.move_tab("c2", 9));
+        assert_eq!(tabs(&m), ["c1", "c2"]);
     }
 
     fn model_with_one() -> Model {
