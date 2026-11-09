@@ -215,7 +215,9 @@ export function setAgentOrder(addresses: string[]): null;
 
 /** Every core terminal as `hc ls --json` describes it (address, argv, name, template, parent,
  *  labels, state, ...), with `status` as a plain word, the agent's report in `report`, and
- *  `program` (see Program). Live. */
+ *  `program` (see Program). Parent addresses use the same machine names as `address`;
+ *  parents on this computer use bare terminal IDs. Parents that cannot be mapped
+ *  stay as the core reported them. Live. */
 export function terminals(): any[];
 
 /** Actual terminal/pane focus. `space` and `tab` are the current window context.

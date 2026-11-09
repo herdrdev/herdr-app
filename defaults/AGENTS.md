@@ -155,7 +155,9 @@ the highlighted line shows where it will land.
   looking (it becomes `idle` once they look). A space's and a tab's
   status is the most urgent of its agents: blocked > done > working > idle.
 - **Sub-agents** are terminals an agent started with `hc run`: the core
-  records the starter as `parent` (see `terminals()`). They belong to their
+  records the starter as `parent` (see `terminals()`). Parent addresses use
+  the app's machine names, or a bare ID for this computer, when they can be
+  mapped; otherwise they stay as the core reported them. They belong to their
   parent's tab without a pane; the `agents` mod shows them,
   `terminal.peek` opens one, `terminal.keep` gives one a pane.
   Ctrl-click (Cmd-click on macOS) a live terminal address in terminal text to
@@ -266,6 +268,13 @@ Properties any node can have:
   right-clicks (including Shift+right-click). Omit it for the shipped `menu`;
   an unknown mod logs a warning and falls back to `menu`. Clone a shipped
   layout before changing this field. Other menus are unchanged.
+- Root only: `"toast": "my-toast"` chooses the mod that shows notifications
+  (Herdr's own and every `notify()`), in place of the shipped `toast`; an
+  unknown mod logs a warning and falls back to `toast`. It gets the same
+  `props()`: `{title, body, level, icon, action, timeout, overlay}` (`timeout`
+  is optional). A mod that hands them to the system instead
+  (`exec("notify-send", ...)`) closes itself at once
+  with `closeOverlay(props().overlay)`.
 - Colors are theme names (`border`, `accent`, `surface`, ...) or `#rrggbb[aa]`.
 
 A personal terminal menu replaces the whole menu; it doesn't merge items.
@@ -364,7 +373,8 @@ The tab block says how each pane of the shown tab is wrapped:
   buttons run pane commands with that pane (`pane.split`, `pane.zoom`,
   `pane.close`). `position`: `top` or `bottom`; `reveal: "hover"` shows it
   only while the pointer is on the pane, drawn over the terminal so the
-  terminal never resizes. The shipped `pane` mod is an example header.
+  terminal never resizes. The shipped `pane` mod keeps its divider on the
+  terminal-facing edge and reads the frame position from `layout()`.
 - `lone: true` frames a tab's only pane too (default: only when split).
 - Each layout has its own, so one can stay bare while another makes
   every pane a card.
@@ -979,7 +989,8 @@ All of it is in `herdr.d.ts`. In short:
   returns an id; the mod gets `props().overlay` and closes itself with
   `closeOverlay(id)`; Esc closes the top dialog or popup. `frame: "none"`
   drops Herdr's border, corners and shadow so the mod draws its own.
-  `notify({ title, body, level, icon, timeout })` posts a notification, drawn by the `toast` mod.
+  `notify({ title, body, level, icon, timeout })` posts a notification, drawn
+  by the layout-chosen mod (default: `toast`).
 - Windows (`kind: "window"`): stay open until closed, over the layout and
   under dialogs; a press the mod doesn't stop drags it (stop it on your
   controls, like a title bar's buttons), it stays where dropped, and the one

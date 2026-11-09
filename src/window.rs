@@ -620,6 +620,7 @@ impl AppWindow {
             let mut subscription = None;
             let mut subscribed_generation = u64::MAX;
             let mut event_lines = crate::hc::EventLines::default();
+            let mut known_machines = Value::Null;
             let (mut tick, mut relist) = (0u64, false);
             loop {
                 let Ok((core, generation)) = this.update(cx, |this, _| {
@@ -652,7 +653,7 @@ impl AppWindow {
                 let ask_machines = tick.is_multiple_of(5);
                 tick += 1;
                 let relisting = std::mem::take(&mut relist);
-                let (sub, machines, refresh, listed, lines) = cx.background_executor().spawn(async move {
+                let (sub, machines, refresh, listed, lines, machine_names) = cx.background_executor().spawn(async move {
                     // The local stream forwards remote doc events too.
                     let mut sub = subscription;
                     let (mut refresh, mut terminals) = (false, relisting);
@@ -675,12 +676,15 @@ impl AppWindow {
                     // A stream that ended is subscribed to again, with a fresh snapshot.
                     if closed { sub = None; }
                     let machines = if ask_machines || terminals { core.call("machine.list", json!({})).ok() } else { None };
-                    let listed = terminals.then(|| event_lines.live());
-                    (sub, machines, refresh, listed, event_lines)
+                    let machines_changed = machines.as_ref().is_some_and(|m| m != &known_machines);
+                    if let Some(m) = &machines { known_machines = m.clone(); }
+                    let listed = (terminals || machines_changed).then(|| event_lines.live_for(&core.hello, &known_machines));
+                    (sub, machines, refresh, listed, event_lines, known_machines)
                 }).await;
                 let watching = sub.is_some();
                 subscription = sub;
                 event_lines = lines;
+                known_machines = machine_names;
                 let (seen, resynced) = event_lines.take_seen();
                 if this.update_in(cx, |this, window, cx| {
                     if generation != this.core_generation { return; }
@@ -2015,7 +2019,7 @@ impl AppWindow {
             obj.insert("program".into(), program_of(&report, running_argv(obj)));
             obj.insert("report".into(), report);
             // As the panes show it: a spinning title would change every listing.
-            if let Some(title) = obj.get("title").and_then(Value::as_str).map(|t| crate::terminal::shown_title(t).to_owned()) {
+            if let Some(title) = obj.get("title").and_then(Value::as_str).map(|t| crate::terminal::shown_title(t).into_owned()) {
                 obj.insert("title".into(), title.into());
             }
             if let Some(a) = obj.get("address").and_then(Value::as_str) {
@@ -2128,7 +2132,7 @@ impl AppWindow {
         if QUITTING.load(std::sync::atomic::Ordering::SeqCst) {
             return false;
         }
-        let missing = self.model.tabs().flat_map(|c| c.root.terminals())
+        let missing = self.model.tabs().flat_map(|c| c.root.terminals()).chain(self.chrome.terminals())
             .filter_map(|n| n.terminal().filter(|a| !self.live.contains_key(*a) && !self.just_born(a)).map(|a| (n.id.clone(), a.to_owned())))
             .collect::<Vec<_>>();
         if !missing.is_empty() && !self.checking_closed {
@@ -2300,10 +2304,6 @@ impl AppWindow {
             let id = o.id.clone();
             return self.close_overlay(&id, window, cx);
         }
-        if self.chrome.find(block).is_some_and(|n| n.terminal().is_some()) {
-            self.chrome.remove_slot(block);
-            self.sync(window, cx);
-        }
         // How its stream ended, for `reconcile` (`hc run --rm` leaves no record).
         if let Some(t) = self.terms.get(block)
             && let Some(why) = t.view.read(cx).ended.clone()
@@ -2311,6 +2311,10 @@ impl AppWindow {
             // The program ended on its own (or was killed): its pane goes now. A
             // stream that just broke (the core died) says neither.
             let closed = matches!(why.as_str(), "exited" | "killed" | "finished");
+            if closed && self.chrome.find(block).and_then(Node::terminal) == Some(t.address.as_str()) {
+                self.chrome.remove_slot(block);
+                return self.sync(window, cx);
+            }
             if closed && self.model.address_of(block).as_deref() == Some(t.address.as_str()) {
                 self.model.remove_pane(block);
                 return self.sync(window, cx);
@@ -2511,26 +2515,40 @@ impl AppWindow {
         let core = self.core.clone();
         let generation = self.core_generation;
         cx.spawn_in(window, async move |this, cx| {
-            let closed = cx.background_executor().spawn(async move {
-                missing.into_iter().filter(|(_, addr)| match core.call("terminal.get", json!({"terminal":addr})) {
-                    Ok(v) => matches!(v["reason"].as_str(), Some("exited" | "killed")),
-                    Err(e) => crate::hc::error_kind(&e) == Some("not_found"),
+            let checked = cx.background_executor().spawn(async move {
+                missing.into_iter().map(|(pane, addr)| {
+                    let result = core.call("terminal.get", json!({"terminal":addr}));
+                    (pane, addr, result)
                 }).collect::<Vec<_>>()
             }).await;
-            let _ = this.update_in(cx, |this, window, cx| {
-                this.checking_closed = false;
-                if generation != this.core_generation { return; }
-                let mut changed = false;
-                for (pane, addr) in closed {
-                    if this.model.address_of(&pane).as_deref() == Some(&addr) {
-                        this.notify_launch_failure(&addr, window, cx);
-                        this.model.remove_pane(&pane);
-                        changed = true;
-                    }
-                }
-                if changed { this.sync(window, cx); }
-            });
+            let _ = this.update_in(cx, |this, window, cx| this.checked_closed(generation, checked, window, cx));
         }).detach();
+    }
+
+    fn checked_closed(&mut self, generation: u64, checked: Vec<(String, String, anyhow::Result<Value>)>, window: &mut Window, cx: &mut Context<Self>) {
+        self.checking_closed = false;
+        if generation != self.core_generation { return; }
+        let mut changed = false;
+        for (pane, addr, result) in checked {
+            if self.chrome.find(&pane).and_then(Node::terminal) == Some(addr.as_str()) {
+                // A failed lookup is not evidence the program exited.
+                if result.as_ref().is_ok_and(|v| v["state"] == "finished") {
+                    self.chrome.remove_slot(&pane);
+                    changed = true;
+                }
+            } else if self.model.address_of(&pane).as_deref() == Some(&addr) {
+                let closed = match result {
+                    Ok(v) => matches!(v["reason"].as_str(), Some("exited" | "killed")),
+                    Err(e) => crate::hc::error_kind(&e) == Some("not_found"),
+                };
+                if closed {
+                    self.notify_launch_failure(&addr, window, cx);
+                    self.model.remove_pane(&pane);
+                    changed = true;
+                }
+            }
+        }
+        if changed { self.sync(window, cx); }
     }
 
     fn just_born(&self, addr: &str) -> bool {
@@ -3520,6 +3538,17 @@ impl AppWindow {
         self.open_overlay(mods::new_overlay_id(), spec, window, cx);
     }
 
+    /// The layout's notification mod (`"toast"` on the root), else the shipped `toast`.
+    fn toast_mod(&self) -> &str {
+        let requested = self.chrome.toast.as_deref().unwrap_or("toast");
+        if self.folders.contains_key(requested) {
+            requested
+        } else {
+            tracing::warn!(mod_name = requested, "toast mod not found; using toast");
+            "toast"
+        }
+    }
+
     fn open_overlay(&mut self, id: String, spec: Value, window: &mut Window, cx: &mut Context<Self>) {
         let kind = match spec.get("kind").and_then(Value::as_str) {
             Some("popup") => OverlayKind::Popup,
@@ -3544,7 +3573,7 @@ impl AppWindow {
             }
         });
         let (name, mut props) = if kind == OverlayKind::Toast {
-            ("toast".to_owned(), spec.get("notification").cloned().unwrap_or(Value::Null))
+            (self.toast_mod().to_owned(), spec.get("notification").cloned().unwrap_or(Value::Null))
         } else {
             (spec.get("mod").and_then(Value::as_str).unwrap_or_default().to_owned(), spec.get("props").cloned().unwrap_or(json!({})))
         };
@@ -4239,14 +4268,15 @@ impl AppWindow {
         let Some(d) = &self.drag else { return };
         let (container, index, axis) = (d.container.clone(), d.index, d.axis);
         let Some(node) = self.find_node_mut(&container).map(|n| n.clone()) else { return };
+        if !node.resizable() { return; }
         let shown: Vec<&Node> = node.children().iter().filter(|c| !c.hidden).collect();
         let (Some(a), Some(b)) = (shown.get(index), shown.get(index + 1)) else { return };
         let bounds = self.bounds.borrow();
         let (Some(ba), Some(bb)) = (bounds.get(&a.id).copied(), bounds.get(&b.id).copied()) else { return };
         drop(bounds);
-        let (start, end, p) = match axis {
-            Axis::Row => (f32::from(ba.left()), f32::from(bb.right()), f32::from(pos.x)),
-            Axis::Column => (f32::from(ba.top()), f32::from(bb.bottom()), f32::from(pos.y)),
+        let (start, p) = match axis {
+            Axis::Row => (f32::from(ba.left()), f32::from(pos.x)),
+            Axis::Column => (f32::from(ba.top()), f32::from(pos.y)),
         };
         let (la, lb) = match axis {
             Axis::Row => (f32::from(ba.size.width), f32::from(bb.size.width)),
@@ -4254,9 +4284,11 @@ impl AppWindow {
         };
         // Measured on screen; sizes are stored as designed (unzoomed).
         let zoom = settings::zoom();
-        let (la, lb, start, end, p) = (la / zoom, lb / zoom, start / zoom, end / zoom, p / zoom);
+        let (la, lb, start, p) = (la / zoom, lb / zoom, start / zoom, p / zoom);
         let total = la + lb;
-        let mut new_a = (p - start).clamp(24.0, (end - start) - 24.0);
+        // Squeezed and zero-size siblings cannot both keep the drag minimum.
+        if total <= 48.0 { return; }
+        let mut new_a = (p - start).clamp(24.0, total - 24.0);
         if let Some(min) = a.min {
             new_a = new_a.max(min);
         }
@@ -4727,9 +4759,13 @@ fn dock(root: &mut Node, block: Node, place: &str, wrapper_id: String) {
         if first { c.insert(0, block) } else { c.push(block) }
         return;
     }
-    let old = std::mem::replace(root, Node::new("", Kind::Row { children: vec![] }));
+    let mut old = std::mem::replace(root, Node::new("", Kind::Row { children: vec![] }));
+    let toast = old.toast.take();
+    let terminal_menu = old.terminal_menu.take();
     let children = if first { vec![block, old] } else { vec![old, block] };
     let mut wrapper = Node::container(wrapper_id, axis, children);
+    wrapper.toast = toast;
+    wrapper.terminal_menu = terminal_menu;
     wrapper.divider = Some(Line { width: 1.0, color: "border".into() });
     *root = wrapper;
 }
@@ -5354,6 +5390,70 @@ mod tests {
     }
 
     #[test]
+    fn layout_terminals_survive_stream_loss_until_confirmed_closed() {
+        in_own_process("layout_terminal_stream_loss");
+    }
+
+    #[gpui::test]
+    fn layout_terminal_stream_loss(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("layout_terminal_stream_loss") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "neighbor", "", json!({
+            "id": "root", "type": "row", "children": [
+                { "id": "left", "type": "column", "children": [
+                    { "id": "terminal", "type": "block", "content": { "terminal": "t1" } }
+                ] },
+                { "id": "right", "type": "column", "children": [
+                    { "id": "neighbor", "type": "block", "content": { "mod": "neighbor" } }
+                ] }
+            ]
+        }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            let saved = |this: &mut super::AppWindow| -> crate::layout::Node {
+                this.save();
+                serde_json::from_str(&std::fs::read_to_string(super::layout_path("test")).unwrap()).unwrap()
+            };
+            let original = this.chrome.clone();
+            this.terms["terminal"].view.update(cx, |v, _| v.ended = Some("holder_lost".into()));
+            this.terminal_ended("terminal", window, cx);
+            assert_eq!(this.chrome, original);
+            assert_eq!(saved(this), original, "saving while disconnected must retain the slot");
+            this.live.insert("t1".into(), json!({"pid": 1, "state": "live"}));
+            this.tend_terminals(false, window, cx);
+            assert!(this.terms["terminal"].view.read(cx).ended.is_none(), "recovered terminal reattaches");
+
+            let mut closed = original.clone();
+            closed.remove_slot("terminal");
+            this.terms["terminal"].view.update(cx, |v, _| v.ended = Some("exited".into()));
+            this.terminal_ended("terminal", window, cx);
+            assert_eq!(this.chrome, closed, "exit removes only the slot");
+            assert_eq!(saved(this), closed);
+
+            let error = |kind| Err(crate::hc::RpcError(json!({"data": {"kind": kind}})).into());
+            for (result, stale, removed) in [
+                (Ok(json!({"state": "finished", "reason": "holder_lost"})), false, true),
+                (error("not_found"), false, false),
+                (error("unavailable"), false, false),
+                (Ok(json!({"state": "finished", "reason": "holder_lost"})), true, false),
+                (Ok(json!({"state": "live", "reason": "holder_lost"})), false, false),
+            ] {
+                this.chrome = original.clone();
+                this.sync(window, cx);
+                let generation = this.core_generation;
+                if stale { this.core_generation += 1; }
+                this.checking_closed = true;
+                this.checked_closed(generation, vec![("terminal".into(), "t1".into(), result)], window, cx);
+                assert!(!this.checking_closed);
+                let expected = if removed { &closed } else { &original };
+                assert_eq!(&this.chrome, expected);
+                assert_eq!(&saved(this), expected);
+            }
+        }));
+    }
+
+    #[test]
     fn showing_the_tab_again_gives_its_pane_the_keyboard() {
         in_own_process("tab_shown_again");
     }
@@ -5619,6 +5719,123 @@ export default class Probe extends View {
     }
 
     include!("window/pane_size_tests.rs");
+    include!("window/drag_tests.rs");
+
+    /// The whole path, in a real window: a layout names the toast mod, a
+    /// notification opens it with its props, and it can close itself (as one
+    /// that hands notifications to the system does). Unknown: the shipped toast.
+    #[test]
+    fn a_layout_s_toast_mod_gets_every_notification() {
+        in_own_process("toast_window");
+    }
+
+    #[gpui::test]
+    fn toast_window(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("toast_window") {
+            return;
+        }
+        let forward = r#"import { View, div } from "gpui-kit";
+import { props, closeOverlay, shared, setShared } from "herdr";
+
+export default class SystemToast extends View {
+  render() {
+    const p = props();
+    // A real one would exec("notify-send", [p.title, p.body]) here.
+    setShared("toast-test.seen", [...(shared("toast-test.seen") ?? []), `${p.title}: ${p.body}`]);
+    closeOverlay(p.overlay);
+    return div();
+  }
+}
+"#;
+        let layout = json!({ "id": "root", "type": "row", "toast": "system-toast", "children": [] });
+        let (view, cx) = open_window(cx, "system-toast", forward, layout);
+        let notify = |cx: &mut gpui::VisualTestContext| {
+            view.update_in(cx, |this, window, cx| {
+                this.sync_folders(window, cx);
+                let note = json!({ "kind": "toast", "notification": { "title": "Build finished", "body": "All green", "level": "success" } });
+                let id = crate::mods::new_overlay_id();
+                this.open_overlay(id.clone(), note, window, cx);
+                (id.clone(), this.copies[&format!("overlay:{id}")].inst.name.clone())
+            })
+        };
+        // Herdr's own notes ("Your edits are in …") may show up too.
+        let shown = |id: &str, cx: &mut gpui::VisualTestContext| {
+            cx.run_until_parked();
+            view.update(cx, |this, _| this.overlays.iter().any(|o| o.id == id))
+        };
+
+        let (id, name) = notify(cx);
+        assert_eq!(name, "system-toast");
+        assert!(!shown(&id, cx), "the layout's mod closed the notification");
+        let seen = crate::mods::shared("toast-test.seen").unwrap_or_default();
+        assert!(seen.as_array().unwrap().contains(&json!("Build finished: All green")), "the mod got the notification's props: {seen}");
+
+        view.update(cx, |this, _| this.chrome.toast = Some("no-such-mod".into()));
+        let (id, name) = notify(cx);
+        assert_eq!(name, "toast");
+        assert!(shown(&id, cx), "an unknown mod falls back to the shipped toast, which stays");
+    }
+
+    #[test]
+    fn docking_keeps_the_layouts_notification_and_menu_mods() {
+        in_own_process("dock_root_choices");
+    }
+
+    #[gpui::test]
+    fn dock_root_choices(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("dock_root_choices") {
+            return;
+        }
+        let layout = json!({
+            "id": "root", "type": "row", "toast": "chosen", "terminal_menu": "chosen", "children": []
+        });
+        let (view, cx) = open_window(cx, "chosen", "", layout);
+        let check_handlers = |cx: &mut gpui::VisualTestContext| {
+            view.update_in(cx, |this, window, cx| {
+                let id = crate::mods::new_overlay_id();
+                this.open_overlay(id.clone(), json!({
+                    "kind": "toast", "notification": { "title": "After docking", "body": "Still chosen" }
+                }), window, cx);
+                assert_eq!(this.copies[&format!("overlay:{id}")].inst.name, "chosen");
+                this.close_overlay(&id, window, cx);
+                this.open_menu("tab", json!({}), None, window, cx);
+                let id = this.overlays.last().unwrap().id.clone();
+                assert_eq!(this.copies[&format!("overlay:{id}")].inst.name, "chosen");
+                this.close_overlay(&id, window, cx);
+            });
+        };
+        check_handlers(cx);
+        let folder = crate::mods::app_dir().join("mods/new-top");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("mod.json"), r#"{"place":"top"}"#).unwrap();
+        std::fs::write(folder.join("main.js"), "").unwrap();
+        view.update_in(cx, |this, window, cx| {
+            this.sync_folders(window, cx);
+            assert_eq!(this.chrome.axis(), Some(crate::layout::Axis::Column));
+            assert!(this.chrome.walk().iter().any(|n| matches!(
+                n.content(), Some(crate::layout::Content::Mod { name, .. }) if name == "new-top"
+            )));
+            this.save();
+        });
+        check_handlers(cx);
+        view.update_in(cx, |this, window, cx| {
+            this.load_layout("test");
+            this.sync(window, cx);
+        });
+        check_handlers(cx);
+    }
+
+    #[test]
+    fn toast_is_a_root_layout_choice_that_roundtrips() {
+        let mut root = super::default_layout("main");
+        assert_eq!(root.toast, None);
+        assert!(serde_json::to_value(&root).unwrap().get("toast").is_none());
+        root.toast = Some("system-toast".into());
+        let restored: super::Node = serde_json::from_value(serde_json::to_value(&root).unwrap()).unwrap();
+        assert_eq!(restored.toast.as_deref(), Some("system-toast"));
+    }
 
     #[test]
     fn terminal_menu_preserves_clicked_target_and_uses_mod_dimensions() {

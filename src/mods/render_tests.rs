@@ -554,6 +554,35 @@ fn confirm_dialog_background_follows_the_frame_corners(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
+fn pane_header_divider_faces_the_terminal(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for (position, reveal) in [("bottom", "always"), ("top", "always"), ("", "always"), ("bottom", "hover"), ("top", "hover")] {
+        let mut values = fixture(true, props(), updates("current", "current"));
+        values.insert("layout".into(), json!({
+            "id": "root", "type": "column", "children": [
+                {"id": "hidden", "type": "block", "hidden": true,
+                 "content": {"tab": "active", "pane": {"header": {"position": "bottom"}}}},
+                {"id": "stack", "type": "stack", "active": "shown", "children": [
+                    {"id": "inactive", "type": "block",
+                     "content": {"tab": "active", "pane": {"header": {"position": "bottom"}}}},
+                    {"id": "shown", "type": "block",
+                     "content": {"tab": "active", "pane": {"header": {"position": position, "reveal": reveal}}}}
+                ]}
+            ]
+        }));
+        if position.is_empty() {
+            values.get_mut("layout").unwrap()["children"][1]["children"][1]["content"]["pane"]["header"].as_object_mut().unwrap().remove("position");
+        }
+        let tree = describe_with_values(cx, &staged, "mods/pane", values, None).unwrap();
+        let head = tree.lines().find(|l| l.contains("pane-head-")).unwrap();
+        let (edge, outside) = if position == "bottom" { ("t", "b") } else { ("b", "t") };
+        assert!(head.contains(&format!(".border_{edge}[Number(1.0)]")), "{position}: {head}");
+        assert!(!head.contains(&format!(".border_{outside}[")), "{position}: {head}");
+    }
+}
+
+#[gpui::test]
 fn layout_previews_stay_inside_their_cards(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
