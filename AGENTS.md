@@ -46,8 +46,10 @@ the full API.
 `defaults/` is built into the app: mods, `layouts/*.json`, `keys.json`
 (Linux, Windows) and `keys.macos.json` (Mac). Shipped layouts and mods are
 replaced on start; edited versions are moved to personal copies. Layout
-clicks are kept separately. `keys.json` is installed only when missing, so a
-changed default key never reaches existing users by itself.
+clicks are kept separately. `keys.json` is installed when missing; files matching
+an earlier shipped original byte-for-byte are upgraded to the current defaults.
+Edited keys files are never replaced. Keep release originals in
+`src/keys/shipped/` when changing defaults.
 
 ## Platform differences
 
@@ -91,6 +93,15 @@ last tag; Herdr shows it as the update notes. One line per change, in user
 words (what a person notices, not code), with the issue or PR number and
 `thanks @name` for contributors. Leave out internal changes and fixes for bugs
 that never shipped.
+
+Add `<!-- spotlight -->` below a version heading to open What's New once
+when users update to it (including skipped versions). Use `<!-- spotlight macos -->`
+or a space-separated list such as `<!-- spotlight macos linux -->` to open it
+only on those platforms: `macos`, `linux`, `windows`. Other platforms keep the
+normal corner update note and can still read the full notes manually. Without
+platforms, a spotlight applies everywhere. Keep the marker in CHANGELOG.md:
+the release uploads the file unchanged to `releases.herdr.dev/app/<v>/changelog.md`,
+and `scripts/notes-media.ts check <v>` checks images without rewriting notes.
 
 Never stop, signal, or restart someone else's app or core. Use an isolated
 app home and core session for testing.

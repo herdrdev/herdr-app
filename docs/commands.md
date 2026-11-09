@@ -19,7 +19,7 @@ Mods can add their own actions, which are not listed here.
 
 ## `space.new`
 
-Make a space: its name (default: none, so it's called after where its first terminal is), the folder its terminals start in (default: the focused terminal's), its first tab's name (default: none, so it's called by its number), optionally an agent (argv) and its first message (task), and the machine it lives on (`hc machine ls`; default this one; its terminals start in that machine's home unless folder).
+Make a space: its name (default: none, so it's called after where its first terminal is), the folder its terminals start in (default: the focused terminal's), its first tab's name (default: none, so it's called by its number), optionally an agent (argv) and its first message (task), and the machine it lives on (`hc machine ls`; default the focused space's machine for keys and clicks, this computer for scripts; empty string: this computer; its terminals start in that machine's home unless folder).
 
 | Argument | Required |
 |---|---|
@@ -59,7 +59,7 @@ Move a space to a position (1 = first).
 
 ## `tab.new`
 
-Make a tab in a space (default: the selected one; name default: none, so it's called by its number) with a terminal in folder (default: the focused terminal's), optionally an agent (argv) and its first message (task); or with a mod as its only pane (`mod`, its `props`: a file, a board).
+Make a tab in a space (default: the selected one; name default: none, so it's called by its number) with a terminal in folder (default: the focused terminal's), optionally an agent (argv) and its first message (task); or with a mod as its only pane (`mod`, its `props`: a file, a board). With no space open, a person's new tab starts a space (as space.new).
 
 | Argument | Required |
 |---|---|
@@ -249,7 +249,7 @@ Focus a pane (or the pane showing a terminal).
 
 ## `pane.go`
 
-Focus the pane to the "left", "right", "up" or "down".
+Focus the pane or focusable mod to the "left", "right", "up" or "down".
 
 | Argument | Required |
 |---|---|
@@ -257,11 +257,13 @@ Focus the pane to the "left", "right", "up" or "down".
 
 ## `pane.swap`
 
-Swap the focused pane with its neighbor in a direction.
+Swap a pane (default: the focused one) with its neighbor in a direction, or with another pane of its tab (target). Give exactly one of direction or target.
 
 | Argument | Required |
 |---|---|
-| `direction` | yes |
+| `direction` | no |
+| `pane` | no |
+| `target` | no |
 
 ## `terminal.peek`
 
@@ -282,9 +284,20 @@ Show a terminal in a pane for now, in place of its own (no terminal: back).
 
 ## `terminal.copy`
 
-Copy the focused terminal's selection.
+Copy the focused terminal's selection. With nothing selected, that key goes to the program.
 
 No arguments.
+
+## `terminal.scroll`
+
+Scroll a terminal's view of its history (default: the focused one). Give exactly one of: lines (a whole number; negative goes up, toward history), pages (a number, fractions allowed; one page is the terminal's rows), to: "top" (oldest history) or "bottom" (the live screen). This scrolls Herdr's view, not the program.
+
+| Argument | Required |
+|---|---|
+| `lines` | no |
+| `pages` | no |
+| `to` | no |
+| `terminal` | no |
 
 ## `terminal.paste`
 
@@ -295,6 +308,12 @@ No arguments.
 ## `terminal.paste_image`
 
 Ctrl+V: the clipboard's image as a file on the focused terminal's machine, when that's another one; on Windows, paste clipboard text; otherwise Ctrl+V goes to the terminal.
+
+No arguments.
+
+## `terminal.search`
+
+Search the focused terminal's screen and scrollback; the find bar and query stay with that terminal.
 
 No arguments.
 
@@ -421,7 +440,7 @@ Close an overlay (default: the top dialog or popup).
 
 ## `app.help`
 
-Show the keys.
+Toggle the keys dialog.
 
 No arguments.
 

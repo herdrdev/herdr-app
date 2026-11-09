@@ -560,6 +560,10 @@ impl TextSystem {
 
     /// Get the rasterized size and location of a specific, rendered glyph.
     pub(crate) fn raster_bounds(&self, params: &RenderGlyphParams) -> Result<Bounds<DevicePixels>> {
+        // Foreground variants live in the window's scene, not this persistent cache.
+        if self.glyph_uses_foreground(params) {
+            return self.platform_text_system.glyph_raster_bounds(params);
+        }
         let raster_bounds = self.raster_bounds.upgradable_read();
         if let Some(bounds) = raster_bounds.get(params) {
             Ok(*bounds)
@@ -574,10 +578,14 @@ impl TextSystem {
     pub(crate) fn rasterize_glyph(
         &self,
         params: &RenderGlyphParams,
+        raster_bounds: Bounds<DevicePixels>,
     ) -> Result<(Size<DevicePixels>, Vec<u8>)> {
-        let raster_bounds = self.raster_bounds(params)?;
         self.platform_text_system
             .rasterize_glyph(params, raster_bounds)
+    }
+
+    pub(crate) fn glyph_uses_foreground(&self, params: &RenderGlyphParams) -> bool {
+        self.platform_text_system.glyph_uses_foreground(params)
     }
 
     /// Returns the dilation level to use for a glyph painted in the given color.
@@ -1270,6 +1278,7 @@ pub struct RenderGlyphParams {
     pub is_emoji: bool,
     pub subpixel_rendering: bool,
     pub dilation: u8,
+    pub foreground: [u8; 4],
 }
 
 impl Eq for RenderGlyphParams {}
@@ -1284,6 +1293,7 @@ impl Hash for RenderGlyphParams {
         self.is_emoji.hash(state);
         self.subpixel_rendering.hash(state);
         self.dilation.hash(state);
+        self.foreground.hash(state);
     }
 }
 

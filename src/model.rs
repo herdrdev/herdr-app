@@ -118,8 +118,12 @@ impl Tab {
         }
     }
 
-    /// Focuses a pane and remembers the one it leaves.
+    /// Focuses a pane and remembers the one it leaves. A zoomed tab shows the
+    /// pane it focuses, never a hidden one.
     pub fn focus(&mut self, pane: &str) {
+        if self.zoomed.is_some() {
+            self.zoomed = Some(pane.to_owned());
+        }
         if let Some(old) = self.focused.take().filter(|o| o != pane) {
             self.before.retain(|p| *p != old && p != pane);
             self.before.push(old);
@@ -322,6 +326,25 @@ impl Model {
         tab.root = root;
         tab.focus(source);
         true
+    }
+
+    pub fn swap_panes(&mut self, pane: &str, target: &str) -> Result<(), String> {
+        let is_pane = |m: &Model, id: &str| m.tab_of(id).and_then(|c| c.root.find(id)).is_some_and(Node::is_pane);
+        if !is_pane(self, pane) {
+            return Err(format!("no pane {pane:?}"));
+        }
+        if !is_pane(self, target) {
+            return Err(format!("no target pane {target:?}"));
+        }
+        if pane == target {
+            return Err("pane.swap target is the pane itself".into());
+        }
+        let Some(c) = self.tab_of_mut(pane) else { return Err(format!("no pane {pane:?}")) };
+        if c.root.find(target).is_none() {
+            return Err(format!("pane.swap target {target:?} is in another tab"));
+        }
+        c.root.swap(pane, target);
+        Ok(())
     }
 
     /// Removes a pane. Returns what else closed: the tab, and the space if it was its last.
@@ -784,6 +807,58 @@ mod tests {
         assert_eq!(m.active_tab().map(|c| c.id.as_str()), Some("c3"));
     }
 
+    fn three_panes_and_another_tab() -> Model {
+        let mut m = model_with_one();
+        m.split("x1", Axis::Row, "x2", "t2");
+        m.split("x2", Axis::Row, "x3", "t3");
+        m.add_tab("p1", Tab::new("c2", "docs", "x4", "t4"));
+        m.select_tab("c1");
+        m.focus_pane("x1");
+        m
+    }
+
+    fn pane_order(m: &Model, tab: &str) -> Vec<String> {
+        m.tab(tab).unwrap().root.panes().iter().map(|n| n.id.clone()).collect()
+    }
+
+    #[test]
+    fn swapping_panes_by_id_trades_places_and_keeps_focus_on_the_same_id() {
+        let mut m = three_panes_and_another_tab();
+        assert_eq!(m.swap_panes("x1", "x3"), Ok(()));
+        assert_eq!(pane_order(&m, "c1"), ["x3", "x2", "x1"]);
+        assert_eq!(m.focused_pane().as_deref(), Some("x1"));
+        assert_eq!(m.address_of("x1").as_deref(), Some("t1"));
+        assert_eq!(m.swap_panes("x2", "x3"), Ok(()));
+        assert_eq!(pane_order(&m, "c1"), ["x2", "x3", "x1"]);
+        assert_eq!(m.focused_pane().as_deref(), Some("x1"));
+    }
+
+    #[test]
+    fn swapping_panes_by_id_refuses_each_bad_pair_without_changes() {
+        let mut m = three_panes_and_another_tab();
+        let cases = [
+            ("nope", "x2", "no pane \"nope\""),
+            ("x1", "nope", "no target pane \"nope\""),
+            ("x1", "x1", "pane.swap target is the pane itself"),
+            ("x1", "x4", "pane.swap target \"x4\" is in another tab"),
+        ];
+        for (pane, target, error) in cases {
+            assert_eq!(m.swap_panes(pane, target), Err(error.to_owned()), "{pane} {target}");
+            assert_eq!(pane_order(&m, "c1"), ["x1", "x2", "x3"], "{pane} {target}");
+            assert_eq!(pane_order(&m, "c2"), ["x4"], "{pane} {target}");
+            assert_eq!(m.focused_pane().as_deref(), Some("x1"), "{pane} {target}");
+        }
+    }
+
+    #[test]
+    fn swapping_refuses_a_container_as_pane_or_target() {
+        let mut m = three_panes_and_another_tab();
+        let container = m.tab("c1").unwrap().root.id.clone();
+        assert_eq!(m.swap_panes(&container, "x1"), Err(format!("no pane {container:?}")));
+        assert_eq!(m.swap_panes("x1", &container), Err(format!("no target pane {container:?}")));
+        assert_eq!(pane_order(&m, "c1"), ["x1", "x2", "x3"]);
+    }
+
     #[test]
     fn splits_focus_the_new_pane_and_closing_it_moves_focus() {
         let mut m = model_with_one();
@@ -857,6 +932,19 @@ mod tests {
         m.set_word("t1", Some("idle".into()), None, false);
         m.set_turn("t1", 5, None);
         assert_eq!(m.status("t1"), Some("done"));
+    }
+
+    #[test]
+    fn focusing_another_pane_in_a_zoomed_tab_moves_the_zoom() {
+        let mut m = model_with_one();
+        assert!(m.split("x1", Axis::Row, "x2", "t2"));
+        m.tab_mut("c1").unwrap().zoomed = Some("x2".into());
+        assert!(m.focus_pane("x1"));
+        assert_eq!(m.tab("c1").unwrap().zoomed.as_deref(), Some("x1"));
+        // A tab nobody zoomed stays unzoomed when focus moves.
+        m.tab_mut("c1").unwrap().zoomed = None;
+        assert!(m.focus_pane("x2"));
+        assert_eq!(m.tab("c1").unwrap().zoomed, None);
     }
 
     #[test]

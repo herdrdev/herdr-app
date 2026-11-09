@@ -1,7 +1,9 @@
 //! Cumulative release notes and this launch's update range. Reading notes never
 //! changes the last successful version; only expanded spotlights are recorded.
 use serde::{Deserialize, Serialize};
-use std::sync::Mutex;
+use std::collections::HashMap;
+use std::path::{Path, PathBuf};
+use std::sync::{LazyLock, Mutex};
 
 #[derive(Clone, Debug, Default, Deserialize, Serialize)]
 pub struct Note {
@@ -27,6 +29,10 @@ pub struct Media {
 }
 
 pub fn parse(text: &str) -> Vec<Note> {
+    parse_for_os(text, std::env::consts::OS)
+}
+
+fn parse_for_os(text: &str, os: &str) -> Vec<Note> {
     let mut notes: Vec<Note> = Vec::new();
     let mut fixed = false;
     for line in text.lines().map(str::trim) {
@@ -36,8 +42,8 @@ pub fn parse(text: &str) -> Vec<Note> {
                 fixed = false;
             }
         } else if let Some(note) = notes.last_mut() {
-            if line == "<!-- spotlight -->" {
-                note.spotlight = true;
+            if let Some(platforms) = line.strip_prefix("<!-- spotlight ").and_then(|s| s.strip_suffix("-->")) {
+                note.spotlight |= platforms.trim().is_empty() || platforms.split_whitespace().any(|platform| platform == os);
             } else if line.starts_with("### ") {
                 fixed = line == "### Fixed";
             } else if let Some(url) = line.strip_prefix("![").and_then(|s| s.split_once("](")).and_then(|(_, s)| s.strip_suffix(')')) {
@@ -92,6 +98,7 @@ impl Launch {
 
 static LAUNCH: Mutex<Option<Launch>> = Mutex::new(None);
 static FETCHED: Mutex<Option<Vec<Note>>> = Mutex::new(None);
+static MEDIA: LazyLock<Mutex<MediaCache>> = LazyLock::new(|| Mutex::new(MediaCache::default()));
 
 fn path(name: &str) -> std::path::PathBuf {
     crate::mods::app_dir().join(name)
@@ -135,9 +142,9 @@ pub fn has(version: &str) -> bool {
 
 fn all() -> Vec<Note> {
     let mut notes = parse(include_str!("../CHANGELOG.md"));
-    let fetched = FETCHED.lock().unwrap().clone().unwrap_or_else(|| {
+    let fetched = FETCHED.lock().unwrap().get_or_insert_with(|| {
         std::fs::read_to_string(path("update-notes-cache.md")).map(|s| parse(&s)).unwrap_or_default()
-    });
+    }).clone();
     // The running binary's curated notes win over cached copies of its releases.
     for note in fetched {
         if !notes.iter().any(|n| n.version == note.version) { notes.push(note); }
@@ -188,8 +195,10 @@ fn fetch_media(notes: &[Note]) {
         let result = crate::spawn::command(crate::update::system("curl"))
             .args(["-fsSL", "--max-time", "30", "--max-filesize", "16777216", "-o"])
             .arg(&temp).arg(url).stdin(std::process::Stdio::null()).output();
-        if result.is_ok_and(|out| out.status.success()) {
-            let _ = std::fs::rename(&temp, &file);
+        if result.is_ok_and(|out| out.status.success())
+            && std::fs::rename(&temp, &file).is_ok()
+        {
+            MEDIA.lock().unwrap().0.remove(&file);
         }
         let _ = std::fs::remove_file(temp);
     }
@@ -201,13 +210,28 @@ fn cached_media(file: &std::path::Path, root: &std::path::Path) -> Option<Media>
     Some(Media { path: file.strip_prefix(root).ok()?.to_string_lossy().into_owned(), width, height })
 }
 
+#[derive(Default)]
+struct MediaCache(HashMap<PathBuf, Option<Media>>);
+
+impl MediaCache {
+    fn get(&mut self, file: &Path, root: &Path) -> Option<Media> {
+        self.0.entry(file.to_owned()).or_insert_with(|| cached_media(file, root)).clone()
+    }
+}
+
 pub fn notes(target: Option<&str>) -> Vec<Note> {
     let mut notes = all();
     for note in &mut notes {
         for item in &mut note.items {
             item.media = item.media.iter().filter_map(|media| {
-                preview_media(&media.path);
-                cached_media(&media_path(&media.path), &crate::mods::app_dir())
+                let preview = preview_media(&media.path);
+                let file = media_path(&media.path);
+                let root = crate::mods::app_dir();
+                if preview {
+                    cached_media(&file, &root)
+                } else {
+                    MEDIA.lock().unwrap().get(&file, &root)
+                }
             }).collect();
         }
     }
@@ -247,8 +271,38 @@ mod tests {
         Launch::new(Record { last_run: version.map(str::to_owned), ..Record::default() }, running, fresh)
     }
     #[test]
-    fn cached_notes_are_version_specific() {
-        let previous = FETCHED.lock().unwrap().replace(Vec::new());
+    fn platform_spotlight_is_recognized() {
+        let text = format!("## [1.8.0] - 2026-10-23\n<!-- spotlight {} -->\n- New thing\n", std::env::consts::OS);
+        assert!(parse(&text)[0].spotlight);
+    }
+    #[test]
+    fn spotlight_platform_filter_keeps_normal_notes() {
+        for platforms in ["", "macos", "linux", "windows", "macos linux", "macos linux windows", "plan9"] {
+            let text = format!("## [1.8.0] - 2026-10-23\n<!-- spotlight {platforms} -->\n### New\n- **New thing.** Still visible.\n## [1.7.0] - 2026-10-22\n- Older thing.\n");
+            for os in ["macos", "linux", "windows"] {
+                let notes = parse_for_os(&text, os);
+                assert_eq!(notes[0].spotlight, platforms.is_empty() || platforms.split_whitespace().any(|p| p == os), "{platforms:?} on {os}");
+                assert_eq!(notes[0].items[0].headline, "New thing.");
+                assert_eq!(notes[0].items[0].detail, "Still visible.");
+                assert!(!notes[1].spotlight);
+                let launch = from(Some("1.7.0"), "1.8.0", false);
+                assert_eq!(launch.range(&notes, None).len(), 1);
+            }
+        }
+    }
+    #[test]
+    fn spotlight_requires_its_own_comment() {
+        for marker in ["<!-- spotlightmacos -->", "<!-- spotlighted -->", "<!-- spotlight macos", "- <!-- spotlight macos -->"] {
+            let text = format!("## [1.8.0] - 2026-10-23\n{marker}\n");
+            assert!(!parse_for_os(&text, "macos")[0].spotlight);
+        }
+    }
+    #[test]
+    fn cached_notes_are_read_once_and_version_specific() {
+        let previous = FETCHED.lock().unwrap().take();
+        all();
+        assert!(FETCHED.lock().unwrap().is_some());
+        *FETCHED.lock().unwrap() = Some(Vec::new());
         assert!(!has("99.0.0"));
         *FETCHED.lock().unwrap() = Some(parse("## [99.0.0] - 2026-10-30\n- Test release\n"));
         assert!(has("99.0.0"));
@@ -314,6 +368,24 @@ mod tests {
         assert!(cached_media(&file, &root).is_none());
         std::fs::remove_dir_all(root).unwrap();
     }
+    #[test]
+    fn media_cache_reads_once_and_retries_after_download() {
+        let root = std::path::PathBuf::from(format!("/var/tmp/herdr-media-cache-test-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("hashed-image");
+        let mut cache = MediaCache::default();
+        assert!(cache.get(&file, &root).is_none());
+        image::RgbaImage::new(12, 7).save_with_format(&file, image::ImageFormat::Png).unwrap();
+        assert!(cache.get(&file, &root).is_none());
+        cache.0.remove(&file);
+        let media = cache.get(&file, &root).unwrap();
+        assert_eq!((media.width, media.height), (12, 7));
+        std::fs::remove_file(&file).unwrap();
+        let cached = cache.get(&file, &root).unwrap();
+        assert_eq!((cached.width, cached.height), (12, 7));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
     #[test]
     fn sections_and_item_media() {
         let notes = parse("## [1.8.0] - 2026-10-23\n### New\n- **A headline.** Its detail.\n![demo](https://example.com/demo.png)\n- **Another headline.** More detail.\n![bad](http://example.com/no.png)\n### Fixed\n- A short fix.\n## [1.7.0] - 2026-10-22\n- Plain item.\n");

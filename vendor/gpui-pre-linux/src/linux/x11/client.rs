@@ -816,7 +816,9 @@ impl X11Client {
 
     pub fn enable_ime(&self) {
         let mut state = self.0.borrow_mut();
-        if !state.has_xim() {
+        if !state.has_xim()
+            || !state.xim_handler.as_ref().is_some_and(|handler| handler.connected)
+        {
             return;
         }
 
@@ -852,8 +854,9 @@ impl X11Client {
                     });
             }
         }
-        ximc.create_ic(xim_handler.im_id, ic_attributes.build())
-            .ok();
+        ximc.set_ic_values(xim_handler.im_id, xim_handler.ic_id, ic_attributes.build())
+            .log_err();
+        ximc.set_focus(xim_handler.im_id, xim_handler.ic_id).log_err();
         let mut state = self.0.borrow_mut();
         state.restore_xim(ximc, xim_handler);
     }
@@ -1064,6 +1067,7 @@ impl X11Client {
                 state.keyboard_focused_window = Some(event.event);
                 if let Some(handler) = state.xim_handler.as_mut() {
                     handler.window = event.event;
+                    handler.focused = true;
                 }
                 drop(state);
                 self.enable_ime();
@@ -1075,6 +1079,15 @@ impl X11Client {
                 // Set last scroll values to `None` so that a large delta isn't created if scrolling is done outside the window (the valuator is global)
                 reset_all_pointer_device_scroll_positions(&mut state.pointer_device_states);
                 state.keyboard_focused_window = None;
+                if state.has_xim()
+                    && let Some((mut ximc, mut handler)) = state.take_xim()
+                {
+                    handler.focused = false;
+                    if handler.connected {
+                        ximc.unset_focus(handler.im_id, handler.ic_id).log_err();
+                    }
+                    state.restore_xim(ximc, handler);
+                }
                 if let Some(compose_state) = state.compose_state.as_mut() {
                     compose_state.reset();
                 }

@@ -55,16 +55,17 @@ export default class WorkspaceChrome extends View {
     const t = theme();
     const collapsed = narrow();
     if (props()?.footer) {
-      const row = (id, icon, label, dim, action, dot) => h_flex().id(id).h(28).px(collapsed ? 0 : 8).gap(9).items_center().rounded(8)
-        .when(collapsed, el => el.justify_center().tooltip(label))
+      const row = (id, icon, label, dim, action) => h_flex().id(id).h(28).px(8).gap(9).items_center().rounded(8)
+        .when(collapsed, el => el.relative().w(32).px(0).justify_center().tooltip(label))
         .text_color(dim ? t.dim : t.muted).hover(s => s.bg(t.hover).text_color(t.foreground)).cursor_pointer()
-        .on_click(action)
-        .child(div().relative().flex_none().child(svg(`mods/workspace-chrome/${icon}.svg`).size(14))
-          .when(dot && collapsed, el => el.child(div().absolute().top(-2).right(-3).size(6).rounded_full().bg(t.accent))))
-        .when(!collapsed, el => el.child(label).when(dot, el => el.child(div().size(6).rounded_full().bg(t.accent))));
-      return v_flex().size_full().bg(t.chrome).border_t(1).border_color(t.border).px(collapsed ? 4 : 8).pt(4).pb(8).text_size(13)
-        .child(row("settings", "settings", "Settings", false, () => run("app.settings"), Boolean(updates().app.ready)))
-        .child(row("machine", "plus", "Add machine", true, () => run("mod.open", { name: "machine-add" }), false));
+        .on_click(action).child(svg(`mods/workspace-chrome/${icon}.svg`).size(14))
+        .when(!collapsed, el => el.child(label));
+      const ready = div().size(6).rounded_full().bg(t.accent);
+      return v_flex().size_full().bg(t.chrome).border_t(1).border_color(t.border).px(8).pt(4).pb(8).text_size(13)
+        .when(collapsed, el => el.px(0).items_center())
+        .child(row("settings", "settings", "Settings", false, () => run("app.settings"))
+          .when(Boolean(updates().app.ready), el => el.child(collapsed ? ready.absolute().top(5).right(6) : ready)))
+        .child(row("machine", "plus", "Add machine", true, () => run("mod.open", { name: "machine-add" })));
     }
     this.snap();
     const toggle = this.button("sidebar-toggle", svg("mods/workspace-chrome/sidebar.svg").size(15), collapsed ? "Expand sidebar" : "Collapse sidebar", toggleSidebar);

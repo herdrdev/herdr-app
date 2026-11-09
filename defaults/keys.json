@@ -42,6 +42,7 @@
     "ctrl-shift-pageup": "space.prev",
     "alt-down": "agent.next",
     "alt-up": "agent.prev",
+    "ctrl-?": "app.help",
     "ctrl-shift-/": "app.help",
     "ctrl-shift-?": "app.help",
     "ctrl-shift-b": "layout.toggle:sidebar",
@@ -65,6 +66,7 @@
     "ctrl-right": "send:\u001bf",
     "ctrl-shift-c": "terminal.copy",
     "ctrl-shift-v": "terminal.paste",
+    "ctrl-shift-f": "terminal.search",
     "ctrl-v": "terminal.paste_image",
     "ctrl-insert": "terminal.copy",
     "shift-insert": "terminal.paste"

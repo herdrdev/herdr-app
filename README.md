@@ -17,6 +17,12 @@ Add that folder to your PATH if the installer asks.
 On macOS the app lives in `~/Applications/Herdr.app`.
 For drag-and-drop installation on Apple Silicon, download [Herdr.dmg](https://releases.herdr.dev/app/Herdr.dmg) and drag Herdr to Applications.
 
+On macOS (Apple Silicon), you can also install with [Homebrew](https://brew.sh/):
+
+```sh
+brew install --cask herdr-app
+```
+
 ### Windows
 
 Run in PowerShell on x64 Windows with curl and tar installed (Windows 10 1803 or newer):
@@ -27,7 +33,7 @@ irm https://releases.herdr.dev/app/install.ps1 | iex
 
 Herdr appears in the Start menu. The installer adds `%LOCALAPPDATA%\Programs\herdr-app` to your user PATH. Open a new terminal to pick it up.
 
-Both installers download and run code. Read the [shell installer](distribution/install.sh) or [PowerShell installer](distribution/install.ps1) first if you prefer.
+The shell and PowerShell installers download and run code. Read the [shell installer](distribution/install.sh) or [PowerShell installer](distribution/install.ps1) first if you prefer.
 They also install [herdr-core](https://github.com/herdrdev/herdr-core) if it is missing.
 The app can help install or update a core it cannot use.
 
@@ -73,7 +79,7 @@ Duplicate a shipped layout or mod before changing its structure or code. Your co
 Save a personal layout, mod or key file and the window reloads it.
 A broken edit keeps the last good version and reports the error.
 
-Ctrl+Shift+P shows every command and its key (Cmd+Shift+P on macOS). Change any key in `keys.json`; see [the keys section](defaults/AGENTS.md#keys-keysjson) of the mod guide for the format.
+Ctrl+Shift+P shows every command and its key (Cmd+Shift+P on macOS). Change any key in `keys.json`; see [the keys section](defaults/AGENTS.md#keys-keysjson) of the mod guide for the format, including JSON objects for named, typed command arguments.
 
 [Layouts and mods](docs/mods.md) · [Commands](docs/commands.md)
 
