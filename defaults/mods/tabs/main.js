@@ -12,13 +12,13 @@ function find(node, id) {
 }
 
 // Slide: a tab moving to its new place. Glide: the dragged tab landing or flying
-// back. Enter: a new tab fades in once its neighbours have made room (fading in
-// while they slide, they covered it). Exit: a closed tab fades out, shorter, and
+// back. Enter: a new tab fades in once its neighbours have mostly made room
+// (fading in as they start to slide, they covered it). Exit: a closed tab fades out, shorter, and
 // hides the neighbours sliding over its place.
 // Slide is a spring: when the landing changes mid-slide it keeps its speed
 // (a transition restarts from rest, a visible stutter); damping 1, no overshoot.
 const SLIDE = { response: 200, damping: 1 }, GLIDE = { duration: 200, easing: "ease-out" };
-const ENTER = { duration: 200, delay: 200, easing: "ease-out" }, EXIT = { duration: 120, easing: "ease-out" };
+const ENTER = { duration: 200, delay: 100, easing: "ease-out" }, EXIT = { duration: 120, easing: "ease-out" };
 const GAP = 3, LIFT = 4;
 // The held look, the same in every dragged list: nothing follows the pointer's
 // hover while one is held or landing (a neighbour sliding under a still pointer

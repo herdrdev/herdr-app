@@ -37,10 +37,10 @@ const FALLBACK = 60000;
 // The tab bar's drag and motion, the same here (see the tabs mod).
 // Slide: a space moving to its new place, on a spring so a landing that changes
 // mid-slide keeps its speed; damping 1, no overshoot. Glide: the dragged space
-// landing or flying back. Enter: a new space fades in once the others have made
-// room. Exit: a closed one fades out where it was, shorter.
+// landing or flying back. Enter: a new space fades in once the others have
+// mostly made room. Exit: a closed one fades out where it was, shorter.
 const SLIDE = { response: 200, damping: 1 }, GLIDE = { duration: 200, easing: "ease-out" };
-const ENTER = { duration: 200, delay: 200, easing: "ease-out" }, EXIT = { duration: 120, easing: "ease-out" };
+const ENTER = { duration: 200, delay: 100, easing: "ease-out" }, EXIT = { duration: 120, easing: "ease-out" };
 const LIFT = 4;
 // The held look, the same in every dragged list: nothing follows the pointer's
 // hover while one is held or landing (a neighbour sliding under a still pointer

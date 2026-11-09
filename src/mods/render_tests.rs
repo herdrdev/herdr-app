@@ -1031,7 +1031,7 @@ fn a_new_tab_fades_in_once_its_neighbours_made_room(cx: &mut TestAppContext) {
     assert!(line_with_id(&tree, "cell-c").contains(".opacity[Number(0.0)]"), "hidden until it has a width: {tree}");
     let tree = tabs_tree(cx, shown);
     let cell = line_with_id(&tree, "cell-c");
-    assert!(cell.contains(".opacity[Number(1.0)] :transition(opacity, 200ms, 200ms"), "fades in once the 200 ms slide is done: {cell}");
+    assert!(cell.contains(".opacity[Number(1.0)] :transition(opacity, 200ms, 100ms"), "fades in once the slide is mostly done: {cell}");
 }
 
 #[gpui::test]
@@ -1090,7 +1090,7 @@ fn spaces_sit_by_their_rows_and_the_first_ones_just_appear(cx: &mut TestAppConte
 fn a_new_space_fades_in_and_a_closed_one_fades_out_where_it_was(cx: &mut TestAppContext) {
     let tree = spaces_tree(cx, r#"this.first = new Set(["a", "b"]);
       this.last = { gone: { r: { w: { id: "gone", name: "Gone", active: false, status: "idle" }, i: 3, g: null, tree: null }, y: 30, m: null } };"#);
-    assert!(line_with_id(&tree, "cell-c").contains(".opacity[Number(1.0)] :transition(opacity, 200ms, 200ms"), "fades in once the others made room: {tree}");
+    assert!(line_with_id(&tree, "cell-c").contains(".opacity[Number(1.0)] :transition(opacity, 200ms, 100ms"), "fades in once the others made room: {tree}");
     let ghost = line_with_id(&tree, "cell-gone");
     assert!(ghost.contains(".top[Number(30.0)]") && ghost.contains(".opacity[Number(0.0)] :transition(opacity, 120ms"), "{ghost}");
 }
