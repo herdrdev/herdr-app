@@ -11,9 +11,14 @@ function find(node, id) {
   return null;
 }
 
+const CHIP = 34;
+
 export default class Tabs extends View {
   init() {
     this.pressed = null;
+    // Only the tabs that fit are drawn, and the active one is always among them.
+    // Widths are measured as tabs are drawn; `first` is remembered per space.
+    this.widths = {}; this.first = {}; this.stripW = 0; this.scale = 1;
     this.panels = JSON.parse(localStorage.getItem("panels") ?? "{}");
   }
 
@@ -45,6 +50,31 @@ export default class Tabs extends View {
     localStorage.setItem("panels", JSON.stringify(this.panels));
   }
 
+  // Which tabs to draw: [first, end). Keeps the previous start while the active
+  // tab is still in view, so the strip only moves when focus leaves it.
+  visibleRange(space, shown) {
+    const n = shown.length, W = this.stripW;
+    if (!W || n === 0) return [0, n];
+    const gap = 3 * this.scale, chip = CHIP * this.scale + gap;
+    const width = c => (this.widths[c.id] ?? 140 * this.scale) + gap;
+    if (shown.reduce((a, c) => a + width(c), 0) - gap <= W) return [0, n];
+    const end = first => {
+      const room = right => W - (first > 0 ? chip : 0) - (right ? chip : 0) + gap;
+      let used = 0, i = first;
+      while (i < n && used + width(shown[i]) <= room(true)) used += width(shown[i++]);
+      // Everything after `first` fits without the right chip: take it.
+      if (shown.slice(first).reduce((a, c) => a + width(c), 0) <= room(false)) return n;
+      return Math.max(i, first + 1);
+    };
+    const active = Math.max(0, shown.findIndex(c => c.active));
+    let first = Math.min(this.first[space.id] ?? 0, active, n - 1);
+    while (first < active && end(first) <= active) first++;
+    // Room left at the end (a tab closed, the window grew): pull earlier tabs back in.
+    while (first > 0 && end(first - 1) === n) first--;
+    this.first[space.id] = first;
+    return [first, end(first)];
+  }
+
   render() {
     const t = theme();
     const space = spaces().find(p => p.active);
@@ -56,6 +86,12 @@ export default class Tabs extends View {
       const program = panes().find(p => p.tab === c.id && p.program?.agent)?.program ?? panes().find(p => p.tab === c.id)?.program;
       const name = /^tb\d+$/.test(c.name) ? program?.name ?? "Terminal" : c.name;
       return h_flex().id(`tab-${c.id}`).h(29).px(10).gap(7).rounded(7).items_center().flex_none().text_size(12.8)
+        // Measured in logical px; the height against its 29 gives the zoom for the gaps.
+        .on_size_change((size, cx) => {
+          const scale = size.height / 29;
+          if (this.widths[c.id] === size.width && Math.abs(this.scale - scale) < 0.01) return;
+          this.widths[c.id] = size.width; if (scale > 0) this.scale = scale; cx.notify();
+        })
         .border(1).border_color(c.active ? t.border : t.chrome).bg(c.active ? t.raised : t.chrome).text_color(c.active ? t.foreground : t.muted)
         .hover(s => s.bg(t.hover))
         .on_mouse_down("left", (e, cx) => { cx.stop_propagation(); this.pressed = i; if (e.click_count === 2) run("tab.rename", { id: c.id }); })
@@ -71,6 +107,11 @@ export default class Tabs extends View {
         .when(c.status === "blocked" || c.status === "done", el => el.child(div().size(6).rounded(3).bg(t[c.status])))
         .when(c.active, el => el.child(div().id(`close-${c.id}`).text_color(t.dim).on_mouse_down("left", stop).on_click((_e, cx) => { cx.stop_propagation(); run("tab.close", { id: c.id }); }).child(svg("mods/pane/close.svg").size(12))));
     };
+    // Hidden tabs on that side: click shows the nearest one.
+    const more = (id, label, target) => div().id(id).w(CHIP).h(26).flex_none().flex().items_center().justify_center().rounded(6)
+      .text_size(12).text_color(t.muted).hover(s => s.bg(t.hover).text_color(t.foreground))
+      .on_mouse_down("left", stop).on_click(() => run("tab.select", { id: target.id })).child(label);
+    const [first, last] = this.visibleRange(space ?? { id: "" }, shown);
     const root = layout(), sidebar = find(root, "sidebar"), w = window();
     // Old saved rails and a dragged-narrow sidebar can be smaller than the window buttons.
     const lightsPadding = w?.platform === "macos" && w.titlebar === "none" && !w.fullscreen && root?.traffic_lights
@@ -92,7 +133,11 @@ export default class Tabs extends View {
     return h_flex().size_full().min_w(0).px(10).pl(lightsPadding).gap(3).items_center().bg(t.chrome).border_b(1).border_color(t.border)
       .on_mouse_up("left", () => { this.pressed = null; })
       .on_scroll_wheel(e => { if (Math.abs(e.delta.y) >= 1) run(e.delta.y > 0 ? "tab.prev" : "tab.next"); })
-      .child(h_flex().id("tab-scroll").flex_1().min_w(0).h_full().items_center().gap(3).overflow_x_scrollbar().children(shown.map(item)))
+      .child(h_flex().id("tab-scroll").flex_1().min_w(0).h_full().items_center().gap(3).overflow_hidden()
+        .on_size_change((size, cx) => { if (size.width !== this.stripW) { this.stripW = size.width; cx.notify(); } })
+        .when(first > 0, el => el.child(more("tab-more-left", `‹ ${first}`, shown[first - 1])))
+        .children(shown.slice(first, last).map((c, k) => item(c, first + k)))
+        .when(last < shown.length, el => el.child(more("tab-more-right", `${shown.length - last} ›`, shown[last]))))
       .child(button("tab-new", "+", () => openOverlay({ mod: "new-menu", kind: "popup", width: 250, height: 512 })))
       .when(enabled.includes("files"), el => el.child(panelButton("files", "Files", "mods/files/file.svg")))
       .when(enabled.includes("changes"), el => el.child(panelButton("changes", "Changes", "mods/changes/changes.svg")))
