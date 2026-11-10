@@ -59,6 +59,52 @@ pub fn hsla(c: Rgb) -> Hsla {
     Rgba { r: c.0 as f32 / 255.0, g: c.1 as f32 / 255.0, b: c.2 as f32 / 255.0, a: 1.0 }.into()
 }
 
+/// `rect` without `hole`, as up to four rectangles.
+fn without(rect: Bounds<Pixels>, hole: Bounds<Pixels>) -> Vec<Bounds<Pixels>> {
+    let h = rect.intersect(&hole);
+    if h.is_empty() {
+        return vec![rect];
+    }
+    let (left, top) = (rect.origin.x, rect.origin.y);
+    let (right, bottom) = (left + rect.size.width, top + rect.size.height);
+    let (h_right, h_bottom) = (h.origin.x + h.size.width, h.origin.y + h.size.height);
+    let at = |x0: Pixels, y0: Pixels, x1: Pixels, y1: Pixels| Bounds::new(point(x0, y0), size(x1 - x0, y1 - y0));
+    [at(left, top, right, h.origin.y), at(left, h_bottom, right, bottom), at(left, h.origin.y, h.origin.x, h_bottom), at(h_right, h.origin.y, right, h_bottom)]
+        .into_iter()
+        .filter(|r| !r.is_empty())
+        .collect()
+}
+
+/// The window minus the terminals that paint their own background.
+fn background_rects(window: Bounds<Pixels>, holes: Vec<Bounds<Pixels>>) -> Vec<Bounds<Pixels>> {
+    holes.into_iter().fold(vec![window], |rects, hole| rects.into_iter().flat_map(|r| without(r, hole)).collect())
+}
+
+/// How solid a terminal paints its default background. A see-through window
+/// painted the theme's at its root, and left a hole for one a program set
+/// (OSC 11), so that one goes here at the window's opacity, not stacked on it.
+/// Painting it here, not at the root, keeps it above a layout's solid surfaces.
+fn default_bg_opacity(own: bool, terminal_opacity: f32, window_opacity: f32) -> f32 {
+    if own { window_opacity } else { terminal_opacity }
+}
+
+/// A see-through window's background, as the root's first child: it paints after
+/// every terminal's prepaint, so it knows where they all are this frame.
+pub fn window_background(views: Vec<Entity<TerminalView>>) -> impl IntoElement {
+    canvas(
+        |_, _, _| {},
+        move |bounds, _, window, cx| {
+            let color = hsla(vt::theme().bg).opacity(crate::settings::get().window_opacity);
+            let holes = views.iter().filter_map(|v| v.read(cx).background_hole()).collect();
+            for rect in background_rects(bounds, holes) {
+                window.paint_quad(fill(rect, color));
+            }
+        },
+    )
+    .absolute()
+    .size_full()
+}
+
 #[derive(Clone, Debug, PartialEq)]
 enum LinkTarget {
     External(links::Target),
@@ -89,6 +135,12 @@ struct Grid {
     vt_cell: (u32, u32),
     /// The colors and device-pixel cell size the core was last told.
     told_display: Option<DisplayFacts>,
+    /// Where it's drawn, clipped. A cached terminal keeps this, and its bounds
+    /// changing redraws it.
+    drawn_at: Option<Bounds<Pixels>>,
+    /// In a see-through window, it paints a background a program set. Read when
+    /// it's drawn, so the window's hole and this paint can't disagree.
+    own_background: bool,
     /// Top-left of the cell grid in window coordinates, from the last paint.
     origin: Point<Pixels>,
     buttons_down: Vec<MouseButton>,
@@ -280,6 +332,8 @@ impl TerminalView {
                 scale: 1.0,
                 vt_cell: (9, 18),
                 told_display: None,
+                drawn_at: None,
+                own_background: false,
                 origin: Point::default(),
                 buttons_down: Vec::new(),
                 images: HashMap::new(),
@@ -605,6 +659,12 @@ impl TerminalView {
     /// The window puts this terminal on screen in the frame it's building.
     pub fn mark_shown(&self) {
         self.shown_in.set(FRAME.load(Ordering::Relaxed));
+    }
+
+    /// Where the window's background must leave room for this terminal's own.
+    fn background_hole(&self) -> Option<Bounds<Pixels>> {
+        let g = self.grid.borrow();
+        g.drawn_at.filter(|_| g.own_background && self.on_screen_this_frame())
     }
 
     /// A hidden pane cannot render its focus loss.
@@ -1841,7 +1901,9 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     let marked = g.marked.clone();
     drop(g);
 
-    window.paint_quad(fill(bounds, hsla(frame.bg).opacity(crate::settings::get().terminal_opacity)));
+    let s = crate::settings::get();
+    let opacity = default_bg_opacity(grid.borrow().own_background, s.terminal_opacity, s.window_opacity);
+    window.paint_quad(fill(bounds, hsla(frame.bg).opacity(opacity)));
     let at = |x: usize, y: usize| origin + point(cell.width * x as f32, cell.height * y as f32);
     // Edges round to device pixels, so cells side by side meet without seams.
     let snap_box = |b: Bounds<Pixels>| {
@@ -2247,7 +2309,10 @@ impl Render for TerminalView {
                 canvas(
                     move |bounds, window, _cx| {
                         let (cols, rows) = grid_size(bounds.size, cell);
-                        grid.borrow_mut().fit(cols, rows, cell, window.scale_factor());
+                        let mut g = grid.borrow_mut();
+                        g.fit(cols, rows, cell, window.scale_factor());
+                        g.drawn_at = Some(bounds.intersect(&window.content_mask().bounds));
+                        g.own_background = crate::settings::get().window_opacity < 1.0 && g.vt.background() != vt::theme().bg;
                     },
                     move |bounds, _, window, cx| {
                         paint_grid(bounds, &grid_paint, focused, window, cx);
@@ -3024,6 +3089,48 @@ mod tests {
         cx.run_until_parked();
         root.read_with(cx, |root, cx| assert!(root.0.read(cx).search_open));
         assert!(cx.debug_bounds("find-bar").is_some());
+    }
+
+    #[test]
+    fn background_is_the_one_a_program_set_until_it_resets_it() {
+        use super::*;
+        let mut vt = Vt::new(10, 2);
+        let theme_bg = vt.background();
+        vt.write(b"\x1b]11;#24283b\x1b\\");
+        assert_eq!(vt.background(), Rgb(0x24, 0x28, 0x3b));
+        vt.write(b"\x1b]111\x1b\\");
+        assert_eq!(vt.background(), theme_bg);
+    }
+
+    #[test]
+    fn a_see_through_background_leaves_a_hole_for_each_own_background() {
+        use super::*;
+        let rect = |x: f32, y: f32, w: f32, h: f32| Bounds::new(point(px(x), px(y)), size(px(w), px(h)));
+        let window = rect(0.0, 0.0, 100.0, 80.0);
+        let inside = |r: Bounds<Pixels>, x: f32, y: f32| r.contains(&point(px(x), px(y)));
+        // Each sampled point is painted once, or not at all inside a hole.
+        let check = |holes: Vec<Bounds<Pixels>>| {
+            let rects = background_rects(window, holes.clone());
+            for x in (0..100).step_by(5).map(|x| x as f32 + 0.5) {
+                for y in (0..80).step_by(5).map(|y| y as f32 + 0.5) {
+                    let painted = rects.iter().filter(|r| inside(**r, x, y)).count();
+                    assert_eq!(painted, usize::from(!holes.iter().any(|h| inside(*h, x, y))), "at {x},{y}");
+                }
+            }
+        };
+        assert_eq!(background_rects(window, Vec::new()), [window]);
+        check(vec![rect(0.0, 0.0, 40.0, 80.0), rect(40.0, 20.0, 30.0, 30.0)]); // touching, and on an edge
+        check(vec![rect(10.0, 10.0, 60.0, 60.0), rect(50.0, 30.0, 40.0, 20.0)]); // overlapping
+        check(vec![rect(90.0, 70.0, 50.0, 50.0)]); // hanging off the window
+        assert_eq!(background_rects(window, vec![rect(200.0, 0.0, 10.0, 10.0)]), [window]);
+    }
+
+    #[test]
+    fn a_background_a_program_set_paints_at_the_windows_opacity() {
+        use super::*;
+        assert_eq!(default_bg_opacity(true, 0.0, 0.9), 0.9);
+        assert_eq!(default_bg_opacity(false, 0.0, 0.9), 0.0, "the window already painted the theme's");
+        assert_eq!(default_bg_opacity(false, 0.85, 1.0), 0.85, "an opaque window keeps the layout's terminal_opacity");
     }
 
     #[test]
