@@ -72,6 +72,8 @@ pub enum TerminalEvent {
     Ended,
     /// Right-click where the program doesn't take the mouse: the pane menu.
     ContextMenu(Point<Pixels>),
+    /// Something the person asked for failed: an error toast.
+    Notice { title: String, body: String },
 }
 
 /// What the canvas closures need, shared outside the entity so prepaint can resize.
@@ -656,29 +658,35 @@ impl TerminalView {
     fn put_there(&self, paths: Vec<std::path::PathBuf>, copies: bool, cx: &mut Context<Self>) {
         let addr = self.address.clone();
         cx.spawn(async move |this, cx| {
-            let there = cx
+            let (there, refused) = cx
                 .background_executor()
                 .spawn(async move {
-                    paths
-                        .iter()
-                        .filter_map(|p| {
-                            let out = crate::spawn::command(crate::core_bin::path()).args(["put", "--json", &addr]).arg(p).output();
-                            if copies {
-                                let _ = std::fs::remove_file(p);
+                    let (mut there, mut refused) = (Vec::new(), Vec::new());
+                    for p in &paths {
+                        let out = crate::spawn::command(crate::core_bin::path()).args(["put", "--json", &addr]).arg(p).output();
+                        if copies {
+                            let _ = std::fs::remove_file(p);
+                        }
+                        match out.map_err(|e| e.to_string()).and_then(|o| put_answer(&o.stdout, &o.stderr)) {
+                            Ok(path) => there.push(path),
+                            Err(why) => {
+                                let name = if copies { "the pasted image".to_owned() } else { p.file_name().unwrap_or(p.as_os_str()).to_string_lossy().into_owned() };
+                                refused.push((name, why));
                             }
-                            let out = out.ok()?;
-                            let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
-                            v.get("path").and_then(|p| p.as_str()).map(str::to_owned)
-                        })
-                        .collect::<Vec<_>>()
+                        }
+                    }
+                    (there, refused)
                 })
                 .await;
-            if !there.is_empty() {
-                let _ = this.update(cx, |this, _| {
+            let _ = this.update(cx, |this, cx| {
+                if !there.is_empty() {
                     let bytes = this.grid.borrow().vt.paste_bytes(&quote_paths(there));
                     this.send(&bytes);
-                });
-            }
+                }
+                if let Some((title, body)) = refusal_notice(&refused) {
+                    cx.emit(TerminalEvent::Notice { title, body });
+                }
+            });
         })
         .detach();
     }
@@ -1231,6 +1239,31 @@ fn copied_files(item: &ClipboardItem) -> Option<Vec<std::path::PathBuf>> {
 }
 
 /// The clipboard's image saved to a file of its own, for its path to be pasted.
+/// `hc put --json`'s answer: the path there, or why it refused (on stderr).
+fn put_answer(stdout: &[u8], stderr: &[u8]) -> Result<String, String> {
+    let json = |b: &[u8]| serde_json::from_slice::<serde_json::Value>(b).unwrap_or_default();
+    if let Some(path) = json(stdout)["path"].as_str() {
+        return Ok(path.to_owned());
+    }
+    if let Some(why) = json(stderr)["error"]["message"].as_str() {
+        return Err(why.to_owned());
+    }
+    let text = String::from_utf8_lossy(stderr).trim().to_owned();
+    Err(if text.is_empty() { "hc put gave no path".to_owned() } else { text })
+}
+
+fn refusal_notice(refused: &[(String, String)]) -> Option<(String, String)> {
+    match refused {
+        [] => None,
+        [(name, why)] => Some((format!("Couldn't send {name}"), why.clone())),
+        many => {
+            let mut why: Vec<&str> = many.iter().map(|(_, w)| w.as_str()).collect();
+            why.dedup();
+            Some((format!("Couldn't send {} files", many.len()), why.join("; ")))
+        }
+    }
+}
+
 fn image_file(item: &ClipboardItem) -> Option<std::path::PathBuf> {
     let image = item.entries().iter().find_map(|e| match e {
         ClipboardEntry::Image(i) => Some(i),
@@ -3691,6 +3724,21 @@ mod tests {
         assert_eq!(q(&["/tmp/shot.png"]), "/tmp/shot.png ");
         assert_eq!(q(&["/tmp/my shot.png", "/a/b"]), "'/tmp/my shot.png' /a/b ");
         assert_eq!(q(&["/tmp/it's.png"]), "'/tmp/it'\\''s.png' ");
+    }
+
+    #[test]
+    fn a_file_the_core_refuses_is_named_with_its_reason() {
+        use super::{put_answer, refusal_notice};
+        assert_eq!(put_answer(br#"{"path":"/tmp/a b.png"}"#, b""), Ok("/tmp/a b.png".to_owned()));
+        let big = br#"{"error":{"hint":"see `hc schema`","kind":"invalid_params","message":"too big to send to studio (16 MB at most)"}}"#;
+        let why = put_answer(b"", big).unwrap_err();
+        assert_eq!(why, "too big to send to studio (16 MB at most)");
+        assert_eq!(put_answer(b"", b"no such machine\n"), Err("no such machine".to_owned()));
+        assert_eq!(refusal_notice(&[]), None);
+        assert_eq!(refusal_notice(&[("clip.mp4".into(), why.clone())]), Some(("Couldn't send clip.mp4".into(), why.clone())));
+        let two = refusal_notice(&[("a.mp4".into(), why.clone()), ("b.mov".into(), why.clone())]).unwrap();
+        assert_eq!(two.0, "Couldn't send 2 files");
+        assert_eq!(two.1, why);
     }
 
     #[test]
