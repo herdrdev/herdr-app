@@ -290,6 +290,20 @@ test("new source explains a branch from here", () => {
   expect(text).not.toContain("origin/");
 });
 
+test("menus and the guide expose one worktree dialog", async () => {
+  const menu = await readFile(new URL("../defaults/mods/menu/main.js", import.meta.url), "utf8");
+  const plus = await readFile(new URL("../defaults/mods/new-menu/main.js", import.meta.url), "utf8");
+  const guide = await readFile(new URL("../defaults/AGENTS.md", import.meta.url), "utf8");
+  expect(menu.match(/New worktree/g)).toHaveLength(1);
+  expect(menu).not.toContain("Open worktree");
+  expect(menu).toContain('action: "remote"');
+  expect(plus).not.toContain("worktree-open");
+  expect(plus).toContain('action: "remote"');
+  expect(plus).toContain("width: 560, height: 480");
+  expect(guide).toContain('action: "new" | "local" | "remote" | "open" | "remove"');
+  expect(guide).not.toContain("Open worktree");
+});
+
 test("loadLists drops origin/HEAD and keeps nested remote names", async () => {
   const { worktree } = harness(null, async (_c, args) => {
     const ref = args.at(-1);
