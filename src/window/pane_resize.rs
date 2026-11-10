@@ -12,11 +12,11 @@ impl super::AppWindow {
             Some("down") => (Axis::Column, 1.0),
             _ => return Err("pane.resize direction is left, right, up or down".into()),
         };
-        let amount = match args.get("amount") {
+        let px = match args.get("px") {
             None => 10.0,
-            Some(v) => v.as_f64().ok_or("pane.resize amount must be a finite positive number")? as f32,
+            Some(v) => v.as_f64().ok_or("pane.resize px must be a finite positive number")? as f32,
         };
-        if !amount.is_finite() || amount <= 0.0 { return Err("pane.resize amount must be a finite positive number".into()); }
+        if !px.is_finite() || px <= 0.0 { return Err("pane.resize px must be a finite positive number".into()); }
         let pane = match args.get("pane") {
             None | Some(Value::Null) => self.model.focused_pane().ok_or("no pane to resize")?,
             Some(Value::String(pane)) => pane.clone(),
@@ -28,7 +28,7 @@ impl super::AppWindow {
         let Some((parent, a, _)) = pair(&tab.root, &pane, axis) else { return Ok(json!({"ok": true})); };
         let index = parent.children().iter().filter(|n| !n.hidden).position(|n| n.id == a.id).unwrap();
         let available = self.split_available(tab, parent).ok_or("pane.resize geometry is unavailable")?;
-        let Some(updates) = sizes(parent, index, available, sign * amount) else { return Ok(json!({"ok": true})); };
+        let Some(updates) = sizes(parent, index, available, sign * px) else { return Ok(json!({"ok": true})); };
         let (tab_id, parent_id) = (tab.id.clone(), parent.id.clone());
         let tab = self.model.tab_mut(&tab_id).unwrap();
         let children = tab.root.find_mut(&parent_id).unwrap().children_mut().unwrap();

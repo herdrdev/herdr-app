@@ -585,7 +585,7 @@ The main ones:
   terminal, or a mod pane), `pane.close {pane?}`,
   `pane.zoom {pane?}`, `pane.focus {pane | terminal}`, `pane.go {direction}`,
   `pane.swap {pane?, direction | target}`.
-  `pane.resize {direction: "left" | "right" | "up" | "down", amount?, pane?}`
+  `pane.resize {direction: "left" | "right" | "up" | "down", px?, pane?}`
   moves the nearest divider (default: 10 logical pixels). macOS: Cmd+Ctrl+arrows.
   `pane.go` prefers the most recently focused pane along the nearest edge in that
   direction; unvisited panes fall back to overlap, then top/left layout order.

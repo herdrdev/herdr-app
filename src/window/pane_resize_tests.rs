@@ -21,9 +21,10 @@ fn pane_resize_dispatch(cx: &mut gpui::TestAppContext) {
         let before = this.model.active_tab().unwrap().root.clone();
         for args in [
             json!({}), json!({"direction":"diagonal"}),
-            json!({"direction":"right", "amount":0}), json!({"direction":"right", "amount":-1}),
-            json!({"direction":"right", "amount":"10"}), json!({"direction":"right", "amount":null}),
-            json!({"direction":"right", "amount":1e100}),
+            json!({"direction":"right", "amount":10}),
+            json!({"direction":"right", "px":0}), json!({"direction":"right", "px":-1}),
+            json!({"direction":"right", "px":"10"}), json!({"direction":"right", "px":null}),
+            json!({"direction":"right", "px":1e100}),
             json!({"direction":"right", "pane":123}), json!({"direction":"right", "pane":"unknown"}),
         ] {
             let reply = this.run_as("pane.resize", args.clone(), false, window, cx);
@@ -38,15 +39,15 @@ fn pane_resize_dispatch(cx: &mut gpui::TestAppContext) {
         this.bounds.borrow_mut().insert("context".into(), gpui::Bounds::new(gpui::point(gpui::px(0.0), gpui::px(0.0)), gpui::size(gpui::px(800.0), gpui::px(600.0))));
         let focused = this.model.focused_pane();
         let addresses: Vec<_> = this.model.active_tab().unwrap().root.terminals().iter().map(|n| n.terminal().unwrap().to_owned()).collect();
-        for _ in 0..2 {
-            assert_eq!(this.run_as("pane.resize:right", json!({}), false, window, cx), json!({"ok":true}));
+        for args in [json!({}), json!({"px":15})] {
+            assert_eq!(this.run_as("pane.resize:right", args, false, window, cx), json!({"ok":true}));
         }
         let tab = this.model.active_tab().unwrap();
         let parent = tab.root.parent_of("a").unwrap();
         let available = this.split_available(tab, parent).unwrap();
         let children: Vec<_> = parent.children().iter().collect();
         let measured = super::pane_size::shares(&children, available, 1.0);
-        assert!((measured[0] - available / 2.0 - 20.0).abs() < 0.01, "{measured:?}");
+        assert!((measured[0] - available / 2.0 - 25.0).abs() < 0.01, "{measured:?}");
         assert_eq!(tab.zoomed, None);
         assert_eq!(this.model.focused_pane(), focused);
         assert_eq!(tab.root.terminals().iter().map(|n| n.terminal().unwrap().to_owned()).collect::<Vec<_>>(), addresses);

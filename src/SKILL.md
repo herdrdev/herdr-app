@@ -85,7 +85,7 @@ the same tab. Give `direction` or `target`, not both. Focus stays with the same 
 herdr-app do pane.swap '{"pane":"p12","target":"p14"}'
 ```
 
-`pane.resize {direction, amount?, pane?}` moves the nearest divider left/right/up/down
+`pane.resize {direction, px?, pane?}` moves the nearest divider left/right/up/down
 by positive finite logical pixels (default 10). On macOS, use Cmd+Ctrl+arrows.
 On Linux and Windows, bind the command in your personal keys.json.
 Direction describes divider movement from either focused side. In a multi-child
@@ -95,7 +95,7 @@ Focus stays put, and a successful resize clears pane zoom. Missing splits,
 limits and moves not representable without changing other siblings are no-ops.
 
 ```sh
-herdr-app do pane.resize '{"direction":"right","amount":25}'
+herdr-app do pane.resize '{"direction":"right","px":25}'
 ```
 
 `terminal.select_all {terminal?}` selects a terminal's whole screen and scrollback,

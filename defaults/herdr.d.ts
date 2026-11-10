@@ -60,7 +60,7 @@ export function playSound(sound: string): null;
  * With no space shown, a new space is shown even with focus: false.
  * Panes: pane.split {direction: "right" | "down", pane?}, pane.close {pane?}, pane.zoom {pane?},
  *   pane.focus {pane | terminal}, pane.go {direction}, pane.swap {pane?, direction | target}.
- *   pane.resize {direction: "left" | "right" | "up" | "down", amount?, pane?} moves
+ *   pane.resize {direction: "left" | "right" | "up" | "down", px?, pane?} moves
  *   the nearest divider by positive logical pixels (default 10), within the shown tab.
  *   Preserves focus, clears zoom on success; limits or unrepresentable moves are no-ops.
  *   Pane menus get target { pane, terminal }.

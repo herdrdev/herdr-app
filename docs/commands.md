@@ -114,12 +114,12 @@ Split a pane (default: the focused one) "right" or "down" with a new terminal, o
 
 ## `pane.resize`
 
-Move the nearest split divider left, right, up or down (default: 10 logical pixels; amount must be finite and positive). Targets the focused pane or an explicit pane in the shown tab. Resizes the target branch and its next visible sibling, or previous sibling when last. Preserves focus; a successful resize clears pane zoom. Missing splits, limits and unrepresentable constrained moves are no-ops.
+Move the nearest split divider left, right, up or down (default: 10 logical pixels; px must be finite and positive). Targets the focused pane or an explicit pane in the shown tab. Resizes the target branch and its next visible sibling, or previous sibling when last. Preserves focus; a successful resize clears pane zoom. Missing splits, limits and unrepresentable constrained moves are no-ops.
 
 | Argument | Required |
 |---|---|
 | `direction` | yes |
-| `amount` | no |
+| `px` | no |
 | `pane` | no |
 
 ## `pane.close`
