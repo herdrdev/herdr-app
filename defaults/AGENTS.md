@@ -40,10 +40,19 @@ This fork also provides `BrowserState(url)` and `Browser(state)` from
 `herdr-browser`. Retain the state in `init`, render the element in a sized
 container, and use `state.navigate(url)`, `reload()`, `back()`, `url()` or
 `error()`. Pages accept HTTP(S) URLs without embedded credentials and have no
-Herdr IPC. Popups and downloads are blocked. The native page hides while any
-Herdr overlay is open or its container is partly clipped; an inactive tab keeps
-its page hidden. Linux requires X11/XWayland and WebKitGTK 4.1. Windows requires
-WebView2. Keep an external-browser fallback in mods that open pages.
+Herdr IPC. Popups and downloads are blocked. On Windows, toasts, popups and
+dialogs are cut out of the native page, which stays visible around them;
+elsewhere it hides while an overlay covers it. It also hides while its
+container is partly clipped; an inactive tab keeps its page hidden. Linux
+requires X11/XWayland and WebKitGTK 4.1. Windows requires WebView2. Keep an
+external-browser fallback in mods that open pages.
+
+On Windows, `NativeAppState("vscode", target)` and `NativeApp(state)` show the
+person's own VS Code window on `target` (a folder URI such as
+`vscode-remote://wsl+Ubuntu/root/app`, or a local folder) inside the element.
+Herdr asks VS Code for a window, adopts it and crops its title bar; closing the
+pane closes that window. `status()`, `error()`, `shown()`, `reopen()` and
+`focus()` follow and control it. The bundled `vscode` mod is one VS Code tab.
 
 The shipped `plannotator-browser` mod takes `{ url, origin? }` props and opens a
 review with Back, Reload and Open externally controls. `herdr-app --browser-api`
@@ -830,6 +839,8 @@ has 120 programs (agents, editors, runtimes, tools, databases, infra);
   (`this.handle.focus()`) and handle keys with `on_key_down`. The copy gets `"focus"`
   again after a popup over it closes. Leave with `run("pane.go", {direction})`.
   Without this opt-in, navigation and clicks stay unchanged.
+- `"frameless": true` in `mod.json` drops the layout's pane header over the
+  mod's panes, so the mod fills them (the `vscode` mod's editor).
 
 - The first time Herdr sees a folder, it docks one copy per `mod.json` into
   the shown layout (`"none"`: only where a layout or another mod puts it).
