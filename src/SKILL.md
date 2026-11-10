@@ -21,7 +21,8 @@ signal or restart the person's app or core. A window closing does not kill
 its terminals.
 
 `app.check_updates` checks for newer releases. Settings reports "Up to date"
-only after a successful check; on failure, check the connection and retry.
+only after a successful check; on failure it shows the error, which may be the
+connection, a proxy or a certificate check.
 
 ## Show something when asked
 
