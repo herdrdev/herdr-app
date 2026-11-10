@@ -1,15 +1,19 @@
 import { View, div } from "gpui-kit";
 import { v_flex } from "gpui-base";
 import { NativeAppState, NativeApp } from "herdr-browser";
-import { props, theme, focused, nextCommand } from "herdr";
+import { props, theme, focused, nextCommand, shared, setShared } from "herdr";
 
 // The person's own VS Code in this tab, on props.uri (a folder URI such as
 // vscode-remote://wsl+Ubuntu/root/app) or props.folder (a local path).
-// Closing the tab closes that VS Code window.
+// Closing the tab closes that VS Code window. shared("vscode.tabs") maps each
+// open project URI to its tab, so "Open in VS Code" can select it again.
 export default class VsCode extends View {
   init(_props, cx) {
     this.target = props()?.uri || props()?.folder || focused()?.cwd || "";
     this.app = NativeAppState("vscode", this.target);
+    // A tab starts its mod when it is first shown, so the focused tab is this one.
+    const tab = focused()?.tab;
+    if (tab && this.target) setShared("vscode.tabs", { ...(shared("vscode.tabs") || {}), [this.target]: tab });
     cx.spawn(async (cx) => {
       for (;;) {
         const command = await nextCommand();

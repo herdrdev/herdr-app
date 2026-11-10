@@ -49,6 +49,9 @@ pub(super) struct NativeApp {
     generation: u64,
     /// The window was closed; only reopen asks for a new one.
     closed: bool,
+    /// Keyboard focus was asked for while the pane was hidden: give it when
+    /// the pane shows up soon after (a tab selected just before).
+    focus_until: Option<std::time::Instant>,
     #[cfg(windows)]
     embedded: Option<win::Embedded>,
     #[cfg(windows)]
@@ -182,7 +185,7 @@ pub(super) fn register(registry: &mut ComponentRegistry) {
             let state = Rc::new(RefCell::new(NativeApp {
                 window: window.window_handle().window_id(), app: app.clone(), target: target.clone(),
                 status: "Opening…".into(), error: None, hitbox: None, rect: None, visible: false, holes: Vec::new(),
-                apply_pending: false, generation: 0, closed: false,
+                apply_pending: false, generation: 0, closed: false, focus_until: None,
                 #[cfg(windows)] embedded: None,
                 #[cfg(windows)] opening: false,
             }));
@@ -214,10 +217,15 @@ pub(super) fn register(registry: &mut ComponentRegistry) {
             Ok(ComponentDataValue::Null)
         }),
         StateMethodDescriptor::new::<State>("focus", "(): void", |state, _, _, _| {
+            // Every copy of a mod gets its commands: only a shown pane, or one
+            // shown within a second, takes the keyboard.
+            let mut app = state.borrow_mut();
+            app.focus_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(1));
             #[cfg(windows)]
-            if let Some(child) = state.borrow().embedded.as_ref().map(|e| e.child) { win::focus(child); }
-            #[cfg(not(windows))]
-            let _ = state;
+            if app.visible && let Some(child) = app.embedded.as_ref().map(|e| e.child) {
+                app.focus_until = None;
+                win::focus(child);
+            }
             Ok(ComponentDataValue::Null)
         }),
     ])).unwrap();
@@ -540,6 +548,9 @@ mod win {
         let [x, y, w, h] = child_rect(width, height, embedded.crop);
         unsafe { SetWindowPos(child, std::ptr::null_mut(), x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE) };
         embedded.applied = Some((rect, visible, holes));
+        if visible && app.focus_until.take().is_some_and(|until| std::time::Instant::now() <= until) {
+            focus::give(child);
+        }
         app.status = if visible { "Shown.".into() } else { "Hidden while its pane is covered.".into() };
     }
 
