@@ -52,12 +52,13 @@ function harness(focusedMachine: string | null = null, execImpl?: (command: stri
   };
   const Worktree = new Function(...Object.keys(globals), `${source}; return Worktree;`)(...Object.values(globals));
   const worktree = new Worktree();
-  Object.assign(worktree, { opening: true, text: "", at: 0, repo: { name: "repo" }, userHome: "/home/user" });
+  Object.assign(worktree, { source: "remote", opening: false, text: "", at: 0, repo: { name: "repo" }, userHome: "/home/user", query: { new: "", local: "", remote: "", open: "" } });
   return { worktree, reads, writes, destinations, executions, snapshot: (spaces: any[], panes: any[]) => { spaceList = spaces; paneList = panes; } };
 }
 
 test("open render reads spaces and panes once and refreshes both on the next render", () => {
   const { worktree, reads, snapshot } = harness();
+  worktree.source = "open";
   worktree.list = Array.from({ length: 80 }, (_, i) => ({ path: `/repo/wt-${i}`, branch: `branch-${i}`, at: 0 }));
   const spaces = worktree.list.map((c: any, i: number) => ({ id: `s${i}`, tabs: [{ id: `tab${i}` }] }));
   const panes = worktree.list.map((c: any, i: number) => ({ tab: `tab${i}`, cwd: `${c.path}/src` }));
@@ -79,6 +80,7 @@ test("open render reads spaces and panes once and refreshes both on the next ren
 
 test("open clicks read fresh snapshots once and select an existing space or create one", () => {
   const { worktree, reads, writes, snapshot } = harness();
+  worktree.source = "open";
   const checkout = { path: "/repo/worktree", branch: "branch", at: 0 };
   worktree.list = [checkout];
   snapshot([], []);
@@ -216,6 +218,76 @@ test("resolveBranch tracks the only remote and opens an existing checkout", asyn
   opened.snapshot([{ id: "s", tabs: [{ id: "t" }] }], [{ tab: "t", cwd: "/repo/wt" }]);
   expect(await opened.worktree.resolveBranch("feature")).toBe("");
   expect(opened.writes).toEqual([["space.select", { id: "s" }]]);
+});
+
+test("remote is the default source and shows full ref names", () => {
+  const { worktree } = harness();
+  Object.assign(worktree, {
+    source: "remote", repo: { name: "repo" }, userHome: "/home/user",
+    remotes: [{ remote: "origin", name: "feature/foo", at: 1 }],
+    list: [], query: { new: "", local: "", remote: "", open: "" }, at: 0,
+  });
+  const text = textOf(worktree.render({}).node);
+  expect(text).toContain("New worktree of repo");
+  expect(text).toContain("origin/feature/foo");
+  expect(text).toContain("A branch already checked out opens that space.");
+  expect(text).toContain("↵ checkout");
+});
+
+test("remote filter is case-insensitive and reports no matches", () => {
+  const { worktree } = harness();
+  Object.assign(worktree, {
+    source: "remote", repo: { name: "repo" }, userHome: "/home/user",
+    remotes: [{ remote: "origin", name: "feature/foo", at: 1 }],
+    list: [], query: { new: "", local: "", remote: "FOO", open: "" }, at: 0,
+  });
+  expect(textOf(worktree.render({}).node)).toContain("origin/feature/foo");
+  worktree.query.remote = "zzz";
+  const missed = textOf(worktree.render({}).node);
+  expect(missed).not.toContain("origin/feature/foo");
+  expect(missed).toContain("No matching branches.");
+});
+
+test("an empty remote list says there are no remote branches", () => {
+  const { worktree } = harness();
+  Object.assign(worktree, {
+    source: "remote", repo: { name: "repo" }, userHome: "/home/user",
+    remotes: [], list: [], query: { new: "", local: "", remote: "", open: "" }, at: 0,
+  });
+  const text = textOf(worktree.render({}).node);
+  expect(text).toContain("No remote branches.");
+  expect(text).toContain("esc cancel");
+  expect(text).not.toContain("↵ checkout");
+});
+
+test("open badge appears only when a space shows that checkout", () => {
+  const { worktree, snapshot } = harness();
+  const checkout = { path: "/repo/wt", branch: "feature", at: 1 };
+  Object.assign(worktree, {
+    source: "local", repo: { name: "repo" }, userHome: "/home/user", on: null,
+    branches: [{ name: "feature", at: 1 }, { name: "other", at: 0 }],
+    list: [checkout, { path: "/repo/bare", branch: "other", at: 0 }],
+    query: { new: "", local: "", remote: "", open: "" }, at: 0,
+  });
+  snapshot([{ id: "s", tabs: [{ id: "t" }] }], [{ tab: "t", cwd: "/repo/wt" }]);
+  const text = textOf(worktree.render({}).node);
+  expect(text).toContain("feature");
+  expect(text).toContain("open");
+  const other = rowsOf(worktree.render({}).node).find((row) => textOf(row).includes("other"));
+  expect(textOf(other)).not.toContain("open");
+  expect(text).toContain("↵ open");
+});
+
+test("new source explains a branch from here", () => {
+  const { worktree } = harness();
+  Object.assign(worktree, {
+    source: "new", repo: { name: "repo" }, userHome: "/home/user",
+    query: { new: "", local: "", remote: "", open: "" },
+  });
+  const text = textOf(worktree.render({}).node);
+  expect(text).toContain("A new branch starting from here, checked out in ~/.herdr/worktrees/repo/.");
+  expect(text).toContain("↵ create · esc cancel");
+  expect(text).not.toContain("origin/");
 });
 
 test("loadLists drops origin/HEAD and keeps nested remote names", async () => {

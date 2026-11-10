@@ -1,5 +1,6 @@
-// Worktree dialog: { space, action: "new" | "open" | "remove" } or
-// { folder, machine } for a repo without a space; optional { branch, tab, argv }.
+// Worktree dialog: { space, action: "new" | "local" | "remote" | "open" | "remove" }
+// or { folder, machine } for a repo without a space. Absent action opens Remote.
+// { branch, tab?, argv? } places that branch at once.
 
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar } from "gpui-base";
@@ -108,12 +109,23 @@ export default class Worktree extends View {
   init(_props, cx) {
     this.on = this.space()?.machine;
     this.userHome = this.on ? null : home();
-    this.opening = props()?.action === "open";
+    const action = props()?.action;
+    this.source = action === "new" || action === "local" || action === "open" || action === "remove" ? action : "remote";
+    this.query = { new: "", local: "", remote: "", open: "" };
     this.text = props()?.branch ?? "";
-    this.list = undefined; // open: the checkouts, once read
+    if (this.source !== "remove") this.query[this.source] = this.text;
+    this.list = undefined; // checkouts, once read
+    this.branches = undefined;
+    this.remotes = undefined;
     this.at = 0;
-    this.input = InputState.new({ value: this.text, placeholder: this.opening ? "filter worktrees" : "branch name" });
-    this.input.on("change", (_e, cx) => { this.text = this.input.value(); this.error = ""; this.at = 0; cx.notify(); });
+    this.input = InputState.new({ value: this.query[this.source] ?? "", placeholder: this.placeholder() });
+    this.input.on("change", (_e, cx) => {
+      if (this.source !== "remove") this.query[this.source] = this.input.value();
+      this.text = this.input.value();
+      this.error = "";
+      this.at = 0;
+      cx.notify();
+    });
     this.input.on("submit", (_e, cx) => this.go(cx));
     this.inputFocused = true;
     this.input.on("focus", (_e, cx) => { this.inputFocused = true; cx.notify(); });
@@ -261,23 +273,54 @@ export default class Worktree extends View {
     return this.place("new", branch);
   }
 
+  placeholder() {
+    if (this.source === "open") return "filter worktrees";
+    if (this.source === "local" || this.source === "remote") return "filter branches";
+    return "branch name";
+  }
+
+  // Enter follows the source. New never checks out an existing name.
   async create() {
-    const branch = this.text.trim();
-    if (!branch) return "Type a branch name.";
-    const path = `${ROOT(this.userHome)}/${this.repo.name}/${slug(branch)}`;
-    const exists = (await git(this.repo.main, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], this.on)).ok;
-    const add = exists ? ["worktree", "add", path, branch] : ["worktree", "add", "-b", branch, path, "HEAD"];
-    const r = await git(this.repo.top, add, this.on, 600_000);
-    if (!r.ok) return r.err || "git worktree add failed.";
-    const p = props();
-    // Leave spaces unnamed so they follow the checkout folder and nest under the repo.
-    run("space.new", { folder: path, machine: this.on ?? "", tab: p.tab, argv: p.argv });
-    return "";
+    if (this.source === "open") {
+      this.open(this.shown()[this.at]);
+      return "";
+    }
+    if (this.source === "remote") {
+      const row = this.shownRemotes()[this.at];
+      if (!row) return "Pick a branch.";
+      return this.place("remote", row.name, `${row.remote}/${row.name}`);
+    }
+    if (this.source === "local") {
+      const row = this.shownBranches()[this.at];
+      if (!row) return "Pick a branch.";
+      return this.place("local", row.name);
+    }
+    return this.place("new", (this.query?.new ?? this.text ?? "").trim());
+  }
+
+  shownBranches() {
+    const f = (this.query?.local ?? "").trim().toLowerCase();
+    return (this.branches ?? []).filter((b) => !f || b.name.toLowerCase().includes(f));
+  }
+
+  shownRemotes() {
+    const f = (this.query?.remote ?? "").trim().toLowerCase();
+    return (this.remotes ?? []).filter((r) => !f || `${r.remote}/${r.name}`.toLowerCase().includes(f));
   }
 
   shown() {
-    const f = this.text.trim().toLowerCase();
+    const f = (this.query?.open ?? "").trim().toLowerCase();
     return (this.list ?? []).filter((c) => !f || `${c.branch ?? ""} ${c.path}`.toLowerCase().includes(f));
+  }
+
+  selectSource(source) {
+    this.source = source;
+    this.at = 0;
+    this.error = "";
+    const value = this.query[source] ?? "";
+    this.text = value;
+    if (typeof this.input?.set_value === "function") this.input.set_value(value);
+    if (typeof this.input?.set_placeholder === "function") this.input.set_placeholder(this.placeholder());
   }
 
   open(c) {
@@ -309,101 +352,104 @@ export default class Worktree extends View {
 
   key(e, cx) {
     if (e.key === "escape") return this.close();
-    if (this.opening) {
-      const n = this.shown().length;
-      if (e.key === "enter") this.open(this.shown()[this.at]);
-      else if ((e.key === "down" || e.key === "up") && n) this.at = (this.at + (e.key === "down" ? 1 : n - 1)) % n;
+    if (this.source === "remove") {
+      if (e.key === "enter") return this.go(cx);
+      return;
+    }
+    if (this.source === "local" || this.source === "remote" || this.source === "open") {
+      const rows = this.source === "open" ? this.shown() : this.source === "local" ? this.shownBranches() : this.shownRemotes();
+      const n = rows.length;
+      if (e.key === "enter") {
+        if (this.source === "open") this.open(rows[this.at]);
+        else this.go(cx);
+      } else if ((e.key === "down" || e.key === "up") && n) this.at = (this.at + (e.key === "down" ? 1 : n - 1)) % n;
       else return;
       cx.stop_propagation();
       return cx.notify();
     }
-    if (e.key === "enter" && props()?.action === "remove") return this.go(cx);
+    if (e.key === "enter") return this.go(cx);
   }
 
-  renderOpen(t) {
-    const r = this.repo;
-    const rows = this.shown();
+  // A checkout already on screen. One spaces()/panes() pair per render.
+  shownSpace(name, all, spaceList, paneList) {
+    const checkout = (this.list ?? []).find((c) => c.branch === name);
+    return checkout ? spaceOf(checkout.path, all, this.on, spaceList, paneList) : null;
+  }
+
+  placeRows(t, spaceList, paneList) {
+    const open = this.source === "open";
+    const rows = open ? this.shown() : this.source === "local" ? this.shownBranches() : this.shownRemotes();
     const all = this.list ?? [];
-    const spaceList = spaces();
-    const paneList = panes();
-    const row = (c, i) => {
+    const row = (item, i) => {
+      const name = open ? item.branch : item.name;
+      const label = open ? (item.branch ?? "detached") : this.source === "remote" ? `${item.remote}/${item.name}` : item.name;
+      const there = open ? spaceOf(item.path, all, this.on, spaceList, paneList) : this.shownSpace(name, all, spaceList, paneList);
       const on = i === this.at;
-      const there = spaceOf(c.path, all, this.on, spaceList, paneList);
       return v_flex()
         .id(`wt-${i}`)
         .flex_none()
-        .h(44)
+        .h(open ? 44 : 32)
         .px(10)
         .justify_center()
         .rounded(7)
         .cursor_pointer()
         .when(on, (el) => el.bg(t.selected))
         .when(!on, (el) => el.hover((s) => s.bg(t.hover)))
-        .on_click(() => this.open(c))
+        .on_click((_e, cx) => {
+          this.at = i;
+          if (open) this.open(item);
+          else this.go(cx);
+        })
         .child(
           h_flex()
             .gap(8)
             .items_center()
-            .child(div().flex_1().min_w(0).truncate().text_color(t.foreground).child(c.branch ?? "detached"))
-            .when(c.main, (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child("main checkout")))
+            .child(div().flex_1().min_w(0).truncate().text_color(t.foreground).child(label))
+            .when(open && item.main, (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child("main checkout")))
             .when(Boolean(there), (el) => el.child(div().flex_none().text_size(11).text_color(t.accent).child("open")))
-            .when(!there && c.at > 0, (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child(ago(c.at)))),
+            .when(open && !there && item.at > 0, (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child(ago(item.at)))),
         )
-        .child(div().truncate().text_size(11.5).text_color(t.dim).child(tilde(c.path, this.userHome ?? "")));
+        .when(open, (el) => el.child(div().truncate().text_size(11.5).text_color(t.dim).child(tilde(item.path, this.userHome ?? ""))));
     };
-    const count = rows.length === all.length ? `${all.length} checkouts` : `${rows.length}/${all.length} checkouts`;
-    return v_flex()
-      .id("worktree")
-      .track_focus(this.handle)
-      .on_key_down((e, cx) => this.key(e, cx))
-      .size_full()
-      .p(16)
-      .gap(10)
-      .bg(t.popover)
-      .text_size(13)
-      .child(h_flex().child(div().flex_1().font_semibold().text_color(t.foreground).child(`Open worktree${r ? ` of ${r.name}` : ""}`)).child(div().text_size(11).text_color(t.dim).child(r ? count : "")))
-      .when(r === undefined || (r && this.list === undefined), (el) => el.child(div().text_color(t.muted).child("\u2026")))
-      .when(r === null, (el) => el.child(div().text_color(t.muted).child(`${this.folder ? tilde(this.folder, this.userHome ?? "") : "This folder"} is not in a git repository.`)))
-      .when(Boolean(r && this.list), (el) =>
-        el
-          .child(Input.new(this.input).h(32).px(10).items_center().rounded(6).border(1).border_color(this.inputFocused ? t.accent : t.input).bg(t.background).text_color(t.foreground))
-          .child(
-            div()
-              .relative()
-              .flex_1()
-              .min_h(0)
-              .child(
-                v_flex()
-                  .id("wt-list")
-                  .size_full()
-                  .overflow_y_scroll()
-                  .children(rows.map(row))
-                  .when(rows.length === 0, (el) => el.child(div().p(10).text_color(t.dim).child("No matching worktrees."))),
-              )
-              .child(Scrollbar.vertical("wt-list").absolute().inset_0()),
-          ),
-      )
-      .child(h_flex().justify_end().text_size(11).text_color(t.dim).child("\u2191\u2193 choose \u00b7 \u21b5 open \u00b7 esc close"));
+    const allRows = open ? all : this.source === "local" ? (this.branches ?? []) : (this.remotes ?? []);
+    const query = (this.query?.[this.source] ?? "").trim();
+    const empty = open
+      ? "No matching worktrees."
+      : allRows.length === 0 && !query
+        ? this.source === "remote" ? "No remote branches." : "No local branches."
+        : "No matching branches.";
+    return { rows, row, empty };
+  }
+
+  // The selected row opens a checkout, or adds one.
+  placeHint() {
+    const rows = this.source === "open" ? this.shown() : this.source === "local" ? this.shownBranches() : this.shownRemotes();
+    if (rows.length === 0) return "esc cancel";
+    const item = rows[Math.min(this.at, rows.length - 1)];
+    const name = this.source === "open" ? item.branch : item.name;
+    const checked = this.source === "open" || (this.list ?? []).some((c) => c.branch === name);
+    return checked ? "\u2191\u2193 choose \u00b7 \u21b5 open \u00b7 esc cancel" : "\u2191\u2193 choose \u00b7 \u21b5 checkout \u00b7 esc cancel";
   }
 
   render(cx) {
     const t = theme();
-    if (this.opening) return this.renderOpen(t);
-    const remove = props()?.action === "remove";
-    const s = this.space();
+    if (this.source === "remove") return this.renderRemove(t);
     const r = this.repo;
-    const title = remove ? `Remove worktree ${s?.name ?? ""}?` : `New worktree${r ? ` of ${r.name}` : ""}`;
-    const detail =
-      r === undefined
-        ? "…"
-        : r === null
-          ? `${this.folder ? tilde(this.folder, this.userHome) : "This folder"} is not in a git repository.`
-          : remove
-            ? !r.linked
-              ? "This is the repository's main checkout, not a worktree."
-              : `Closes the space and deletes ${tilde(r.top, this.userHome)}. The branch stays.`
-            : `A new space on a checkout in ${tilde(ROOT(this.userHome), this.userHome)}/${r.name}/. A branch that exists is checked out; a new one starts from here.`;
-    const blocked = !r || (remove && !r.linked);
+    const home = r ? `${tilde(ROOT(this.userHome), this.userHome)}/${r.name}/` : "";
+    const detail = r === undefined
+      ? "\u2026"
+      : r === null
+        ? `${this.folder ? tilde(this.folder, this.userHome ?? "") : "This folder"} is not in a git repository.`
+        : this.source === "new"
+          ? `A new branch starting from here, checked out in ${home}.`
+          : this.source === "open"
+            ? `${(this.list ?? []).length} checkouts`
+            : `A branch already checked out opens that space. Otherwise it is checked out in ${home}.`;
+    const ready = Boolean(r);
+    const spaceList = ready && this.source !== "new" ? spaces() : [];
+    const paneList = ready && this.source !== "new" ? panes() : [];
+    const listed = ready && this.source !== "new" ? this.placeRows(t, spaceList, paneList) : null;
+    const hint = !ready ? "esc close" : this.source === "new" ? "\u21b5 create \u00b7 esc cancel" : this.placeHint();
     return v_flex()
       .id("worktree")
       .track_focus(this.handle)
@@ -413,33 +459,59 @@ export default class Worktree extends View {
       .gap(10)
       .bg(t.popover)
       .text_size(13)
-      .child(div().font_semibold().text_color(t.foreground).child(title))
+      .child(div().font_semibold().text_color(t.foreground).child(`New worktree${r ? ` of ${r.name}` : ""}`))
+      .child(h_flex().gap(4).children(["new", "local", "remote", "open"].map((source) =>
+        div()
+          .px(8)
+          .py(3)
+          .rounded(6)
+          .cursor_pointer()
+          .text_size(11)
+          .text_color(this.source === source ? t.foreground : t.dim)
+          .when(this.source === source, (el) => el.bg(t.selected))
+          .on_click((_e, cx) => { this.selectSource(source); cx.notify(); })
+          .child(source === "new" ? "New" : source === "local" ? "Local" : source === "remote" ? "Remote" : "Open"),
+      )))
       .child(div().text_color(t.muted).child(detail))
-      .when(remove && this.dirty, (el) => el.child(div().text_color(t.blocked).child("It has uncommitted changes: they will be lost.")))
-      .when(remove && this.unpushed.length > 0, (el) => el.child(div().text_color(t.blocked).child(`Submodule ${this.unpushed.join(", ")} has commits that aren't pushed anywhere: they will be lost.`)))
-      .when(!remove && !blocked, (el) =>
-        el.child(
-          Input.new(this.input)
-            .h(32)
-            .px(10)
-            .items_center()
-            .rounded(6)
-            .border(1)
-            .border_color(this.inputFocused ? t.accent : t.input)
-            .bg(t.background)
-            .text_color(t.foreground),
-        ),
-      )
+      .when(ready, (el) => el.child(
+        Input.new(this.input).h(32).px(10).items_center().rounded(6).border(1).border_color(this.inputFocused ? t.accent : t.input).bg(t.background).text_color(t.foreground),
+      ))
+      .when(Boolean(listed), (el) => el.child(
+        div().relative().flex_1().min_h(0)
+          .child(v_flex().id("wt-list").size_full().overflow_y_scroll().children(listed.rows.map(listed.row)).when(listed.rows.length === 0, (box) => box.child(div().p(10).text_color(t.dim).child(listed.empty))))
+          .child(Scrollbar.vertical("wt-list").absolute().inset_0()),
+      ))
+      .when(Boolean(this.error), (el) => el.child(div().text_color(t.blocked).child(this.error)))
+      .when(this.source === "new", (el) => el.child(div().flex_1()))
+      .child(h_flex().justify_end().text_size(11).text_color(t.dim).gap(6).when(this.busy, (el) => el.child(div().frames(["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"], 90))).child(this.busy ? "working\u2026" : hint));
+  }
+
+  renderRemove(t) {
+    const s = this.space();
+    const r = this.repo;
+    const detail = r === undefined
+      ? "\u2026"
+      : r === null
+        ? `${this.folder ? tilde(this.folder, this.userHome) : "This folder"} is not in a git repository.`
+        : !r.linked
+          ? "This is the repository's main checkout, not a worktree."
+          : `Closes the space and deletes ${tilde(r.top, this.userHome)}. The branch stays.`;
+    const blocked = !r || !r.linked;
+    return v_flex()
+      .id("worktree")
+      .track_focus(this.handle)
+      .on_key_down((e, cx) => this.key(e, cx))
+      .size_full()
+      .p(16)
+      .gap(10)
+      .bg(t.popover)
+      .text_size(13)
+      .child(div().font_semibold().text_color(t.foreground).child(`Remove worktree ${s?.name ?? ""}?`))
+      .child(div().text_color(t.muted).child(detail))
+      .when(this.dirty, (el) => el.child(div().text_color(t.blocked).child("It has uncommitted changes: they will be lost.")))
+      .when(this.unpushed.length > 0, (el) => el.child(div().text_color(t.blocked).child(`Submodule ${this.unpushed.join(", ")} has commits that aren't pushed anywhere: they will be lost.`)))
       .when(Boolean(this.error), (el) => el.child(div().text_color(t.blocked).child(this.error)))
       .child(div().flex_1())
-      .child(
-        h_flex()
-          .justify_end()
-          .text_size(11)
-          .text_color(t.dim)
-          .gap(6)
-          .when(this.busy, (el) => el.child(div().frames(["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"], 90)))
-          .child(this.busy ? "working…" : blocked ? "esc close" : remove ? "↵ remove · esc cancel" : "↵ create · esc cancel"),
-      );
+      .child(h_flex().justify_end().text_size(11).text_color(t.dim).gap(6).when(this.busy, (el) => el.child(div().frames(["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"], 90))).child(this.busy ? "working\u2026" : blocked ? "esc close" : "\u21b5 remove \u00b7 esc cancel"));
   }
 }
