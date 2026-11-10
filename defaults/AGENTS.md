@@ -499,11 +499,6 @@ On upgrade, an untouched keys file from an earlier release gets the current
 shortcuts. Any edit, even whitespace, keeps the entire file as yours; new default
 shortcuts must then be added by hand.
 
-On macOS, Cmd+Ctrl+arrows move pane dividers by 10 logical pixels (the
-Ghostty resize shortcuts). Linux and Windows use personal bindings.
-For a custom step, add a global object binding:
-`"cmd-ctrl-right": {"command":"pane.resize","args":{"direction":"right","amount":25}}`.
-
 ```json
 {
   "global":   { "ctrl-shift-t": "tab.new", "ctrl-shift-o": "pane.split:right", "alt-1": "space.select:1" },
@@ -591,12 +586,7 @@ The main ones:
   `pane.zoom {pane?}`, `pane.focus {pane | terminal}`, `pane.go {direction}`,
   `pane.swap {pane?, direction | target}`.
   `pane.resize {direction: "left" | "right" | "up" | "down", amount?, pane?}`
-  moves the nearest divider on that axis, from either focused side. Amount is
-  positive finite logical pixels (default 10). An explicit pane must belong to
-  the shown tab. The target branch and next visible sibling resize, or the
-  previous sibling when last; disabled splits are boundaries. Focus stays put,
-  and successful resizing clears pane zoom. Missing splits, limits and moves
-  that cannot preserve other siblings under flex constraints are no-ops.
+  moves the nearest divider (default: 10 logical pixels). macOS: Cmd+Ctrl+arrows.
   `pane.go` prefers the most recently focused pane along the nearest edge in that
   direction; unvisited panes fall back to overlap, then top/left layout order.
   `pane.go` also reaches visible mods whose `mod.json` says `"focusable": true`, and
