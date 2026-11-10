@@ -342,7 +342,8 @@ mod win {
         let before = program_windows(&launch);
         let foreground = unsafe { GetForegroundWindow() };
         let mut command = std::process::Command::new(&launch.program);
-        command.args(&launch.args);
+        command.args(&launch.args)
+            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
         // Herdr may run inside VS Code or another Electron app: never pass
         // their IPC variables on, or Code.exe acts as a CLI or Node instead.
         for (key, _) in std::env::vars_os() {
@@ -402,6 +403,7 @@ mod win {
                     let crop = cx.background_executor().spawn(async move { measure(child as HWND) }).await;
                     let mut app = state.borrow_mut();
                     if let Some(e) = app.embedded.as_mut().filter(|e| e.crop != crop) {
+                        tracing::debug!(?crop, "native app crop changed");
                         e.crop = crop;
                         e.applied = None;
                     }
@@ -599,7 +601,6 @@ mod win {
             crop.right += edge(origin.x + width - 1, -1, &[HTRIGHT]);
             let center = origin.x + width / 2;
             crop.bottom += (0..24).take_while(|i| matches!(hit(center, origin.y + client.bottom - 1 - i), HTBOTTOM | HTBOTTOMLEFT | HTBOTTOMRIGHT)).count() as i32;
-            tracing::debug!(?crop, title, "native app crop");
             crop
         }
     }
