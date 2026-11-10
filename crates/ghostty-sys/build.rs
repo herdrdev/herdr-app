@@ -51,6 +51,19 @@ fn main() {
     std::fs::create_dir_all(&lib).unwrap();
     if std::env::var("CARGO_CFG_TARGET_ENV").as_deref() == Ok("msvc") {
         std::fs::copy(out.join("zig-out/lib/ghostty-vt-static.lib"), lib.join("ghostty-vt.lib")).unwrap();
+        // Arm64 MSVC: Zig's bundled compiler runtime and Rust's compiler_builtins
+        // both define helpers like __udivti3 as weak externals with different
+        // defaults, which link.exe refuses (LNK1227). Rust's provide the same
+        // routines, so Zig's copy leaves the archive.
+        if std::env::var("TARGET").as_deref() == Ok("aarch64-pc-windows-msvc") {
+            let status = Command::new(&zig)
+                .args(["ar", "d"])
+                .arg(lib.join("ghostty-vt.lib"))
+                .arg("compiler_rt.obj")
+                .status()
+                .unwrap_or_else(|e| panic!("cannot run {zig:?} ar: {e}"));
+            assert!(status.success(), "removing compiler_rt.obj from ghostty-vt.lib failed: {status}");
+        }
     } else {
         std::fs::copy(out.join("zig-out/lib/libghostty-vt.a"), lib.join("libghostty-vt.a")).unwrap();
     }

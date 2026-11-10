@@ -380,7 +380,12 @@ mod tests {
     #[cfg(windows)]
     #[test]
     fn powershell_finds_installed_commands() {
-        let out = crate::mods::run_here("powershell.exe", &installed_powershell(&["cmd.exe".into(), "herdr_missing_agent_440".into()])).unwrap();
+        // GitHub's Arm64 runner takes 20-30 s to start Windows PowerShell; ci.yml
+        // sets HERDR_TEST_SLOW_POWERSHELL there.
+        let slow = std::env::var_os("HERDR_TEST_SLOW_POWERSHELL").is_some_and(|v| !v.is_empty());
+        let limit = std::time::Duration::from_secs(if slow { 120 } else { 30 });
+        let args = installed_powershell(&["cmd.exe".into(), "herdr_missing_agent_440".into()]);
+        let (_, out, _) = crate::mods::run_blocking("powershell.exe", &args, None, limit).unwrap();
         assert!(out.contains("herdr-has:cmd.exe"));
         assert!(!out.contains("herdr-has:herdr_missing_agent_440"));
     }

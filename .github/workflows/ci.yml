@@ -40,6 +40,8 @@ jobs:
           - { platform: linux-x86_64, runner: ubuntu-22.04 }
           - { platform: macos-aarch64, runner: macos-15 }
           - { platform: windows-x86_64, runner: windows-2022 }
+          # Windows PowerShell starts slowly on this runner; the tests that run it allow for that.
+          - { platform: windows-aarch64, runner: windows-11-arm, slow_powershell: '1' }
     runs-on: ${{ matrix.runner }}
     timeout-minutes: 45
     defaults:
@@ -56,6 +58,22 @@ jobs:
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: ${{ env.ZIG_VERSION }}
+      # Zig 0.16.0's own Arm64 Windows build crashes (0xc0000005) building
+      # libghostty-vt; its x64 build, emulated, makes the same native Arm64
+      # library, with its own cache. Only Zig runs emulated: the app is Arm64.
+      - name: x64 Zig on Arm Windows
+        if: runner.os == 'Windows' && runner.arch == 'ARM64'
+        shell: pwsh
+        run: |
+          $name = "zig-x86_64-windows-0.16.0"
+          Invoke-WebRequest -UseBasicParsing "https://ziglang.org/download/0.16.0/$name.zip" -OutFile "$env:RUNNER_TEMP\zig.zip"
+          $sha = (Get-FileHash "$env:RUNNER_TEMP\zig.zip" -Algorithm SHA256).Hash
+          if ($sha -ne "68659EB5F1E4EB1437A722F1DD889C5A322C9954607F5EDCF337BC3684A75A7E") { throw "zig download: sha256 $sha" }
+          Expand-Archive "$env:RUNNER_TEMP\zig.zip" $env:RUNNER_TEMP
+          & "$env:RUNNER_TEMP\$name\zig.exe" version
+          if ($LASTEXITCODE) { throw "x64 zig does not run" }
+          "ZIG=$env:RUNNER_TEMP\$name\zig.exe" >> $env:GITHUB_ENV
+          "ZIG_GLOBAL_CACHE_DIR=$env:RUNNER_TEMP\zig-x64-cache" >> $env:GITHUB_ENV
       # The whole target/, like release.yml: rust-cache drops the vendored crates.
       # Keyed by what the dependencies build from, so a source-only push
       # restores an exact hit and saves nothing (no cache per commit).
@@ -90,6 +108,17 @@ jobs:
       # Disable optimized dev dependencies in CI to reduce test compile time.
       - name: Build tests
         run: cargo test --locked --config 'profile.dev.package."*".opt-level=0' --no-run
+      # Built for the runner's own CPU, so the Arm leg tests Arm, not emulation.
+      - name: The build is native
+        if: runner.os == 'Windows'
+        shell: pwsh
+        run: |
+          $native = [Environment]::GetEnvironmentVariable("PROCESSOR_ARCHITECTURE", "Machine")
+          $b = [IO.File]::ReadAllBytes("target/debug/herdr-app.exe")
+          $machine = [BitConverter]::ToUInt16($b, [BitConverter]::ToInt32($b, 0x3c) + 4)
+          "Windows on $native; herdr-app.exe for machine 0x{0:X4}" -f $machine
+          $want = @{ AMD64 = 0x8664; ARM64 = 0xAA64 }[$native]
+          if ($machine -ne $want) { throw "herdr-app.exe isn't built for this machine's own CPU" }
       - name: Note the sources the cache was built from
         if: env.SAVE_CACHES == 'true' && steps.cache.outputs.cache-hit != 'true'
         run: scripts/ci-sources record
@@ -100,6 +129,8 @@ jobs:
           path: *cache-paths
           key: ${{ steps.cache.outputs.cache-primary-key }}
       - name: Tests
+        env:
+          HERDR_TEST_SLOW_POWERSHELL: ${{ matrix.slow_powershell }}
         run: |
           only=()
           if [ "$RUNNER_OS" != Linux ]; then
