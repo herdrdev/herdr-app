@@ -829,7 +829,9 @@ has 120 programs (agents, editors, runtimes, tools, databases, infra);
   (tinted with the text color). Saving an asset under `mods/` updates every
   mod showing it, including images that were missing or invalid on first load.
 - The defaults are mods too, read them as examples: `spaces`, `agents`,
-  `tabs` (the tab bar), `menu`, `prompt`, `confirm`, `help`, `toast`,
+  `tabs` (the tab bar), `menu` (the right-click menus of panes, tabs, spaces
+  and agents-list rows; props `{tab: "pane" | "tab" | "space" | "agent", target}`,
+  an agent's target `{terminal}`), `prompt`, `confirm`, `help`, `toast`,
   Terminals' `picker`, `peek`, and `pane` (an
   example pane header, not used by the default layouts), and `worktree`
   (git worktrees as spaces: the space menu's and the + menu's New worktree,

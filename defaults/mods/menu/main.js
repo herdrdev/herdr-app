@@ -1,11 +1,11 @@
 // Context menus (Herdr's items). Opened as a popup with
-// props { tab: "pane" | "tab" | "space" | "global", target }.
+// props { tab: "pane" | "tab" | "space" | "agent" | "global", target }.
 // ↑/↓ move, Enter runs, Esc closes. An item is [label, command, args];
 // a command "worktree" opens the worktree dialog instead.
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { run, props, closeOverlay, openOverlay, theme, keys, terminals, spaces, panes, exec } from "herdr";
+import { run, props, closeOverlay, openOverlay, theme, keys, agents, terminals, spaces, panes, exec } from "herdr";
 
 // Where a space is now: its first terminal's live folder, else where it was made.
 function place(s) {
@@ -54,6 +54,23 @@ function items(p, git) {
         ...(inTab ? [["Close pane", "pane.close", { pane: tg.pane }]] : []),
       ];
     }
+    case "agent": {
+      // A row of the agents list, or a sub-agent under one; target { terminal }.
+      // Read live: a pin or a park may have changed since the menu was asked for.
+      const all = terminals();
+      const term = all.find((t) => t.address === tg.terminal);
+      if (!term) return [];
+      const agent = agents().find((a) => a.address === term.address);
+      const parent = term.parent && all.find((t) => t.address === term.parent);
+      return [
+        ["Focus", "pane.focus", { terminal: term.address }],
+        ["Peek", "terminal.peek", { terminal: term.address }],
+        // Only agents with a pane are in agents(), the list pins sort.
+        ...(agent ? [[agent.pinned ? "Unpin" : "Pin to the top", "terminal.pin", { terminal: term.address, pinned: !agent.pinned }]] : []),
+        ...(agent && parent ? [[`Send back to ${parent.name || parent.address}`, "terminal.park", { terminal: term.address }]] : []),
+        ...(agent?.pane ? [["Close pane", "pane.close", { pane: agent.pane }]] : []),
+      ];
+    }
     case "tab":
       return [
         ["Rename", "tab.rename", { id: tg.id }],
@@ -79,8 +96,8 @@ function items(p, git) {
   }
 }
 
-function menuIcon(command) {
-  const name = command.endsWith(".close") ? "x" : command.endsWith(".rename") ? "square-pen" : command.endsWith(".new") ? "plus" : command === "worktree" ? "git-branch" : command === "app.help" ? "terminal" : command === "app.theme" ? "settings" : command === "pane.split" ? "panel-right" : command === "pane.zoom" ? "square" : "terminal";
+function menuIcon(command, args) {
+  const name = command === "terminal.pin" ? (args?.pinned ? "pin" : "pin-off") : command === "terminal.peek" ? "search" : command === "terminal.park" ? "chevron-left" : command.endsWith(".close") ? "x" : command.endsWith(".rename") ? "square-pen" : command.endsWith(".new") ? "plus" : command === "worktree" ? "git-branch" : command === "app.help" ? "terminal" : command === "app.theme" ? "settings" : command === "pane.split" ? "panel-right" : command === "pane.zoom" ? "square" : "terminal";
   return `mods/workspace-chrome/${name}.svg`;
 }
 
@@ -151,7 +168,7 @@ export default class Menu extends View {
             .when(i === this.at, (el) => el.bg(t.selected))
             .hover((s) => s.bg(t.hover))
             .on_click((_e, cx) => this.choose(i, cx))
-            .child(svg(menuIcon(it[1])).size(14).flex_none().text_color(t.muted))
+            .child(svg(menuIcon(it[1], it[2])).size(14).flex_none().text_color(t.muted))
             .child(div().flex_1().child(it[0]))
             .child(div().text_size(11).text_color(t.dim).child(shortcut(it[1], it[2])))),
         ),
