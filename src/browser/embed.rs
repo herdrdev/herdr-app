@@ -37,6 +37,8 @@ struct Launch {
 /// A rectangle in device pixels, relative to the host window's client area.
 type Rect = [i32; 4];
 
+// Program, target and launch details are used by the Windows backend only.
+#[cfg_attr(not(windows), allow(dead_code))]
 pub(super) struct NativeApp {
     window: WindowId,
     app: String,
@@ -61,6 +63,7 @@ pub(super) struct NativeApp {
     opening: bool,
 }
 
+#[cfg_attr(not(windows), allow(dead_code))]
 fn launch(app: &str, target: &str) -> anyhow::Result<Launch> {
     match app {
         "vscode" => vscode(target),
@@ -71,6 +74,7 @@ fn launch(app: &str, target: &str) -> anyhow::Result<Launch> {
 /// The person's own VS Code: default profile and user data, so a running VS
 /// Code opens the window itself. `target` is a folder URI (`file://`,
 /// `vscode-remote://wsl+…`) or a local folder path.
+#[cfg_attr(not(windows), allow(dead_code))]
 fn vscode(target: &str) -> anyhow::Result<Launch> {
     let env = |key: &str| std::env::var_os(key).filter(|v| !v.is_empty()).map(PathBuf::from);
     let candidates = [

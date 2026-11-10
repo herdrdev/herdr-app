@@ -65,7 +65,7 @@ mod tests {
     fn a_toast_in_the_corner_cuts_only_its_own_area() {
         let view = rect(100., 50., 800., 600.);
         let toast = rect(700., 550., 300., 80.);
-        assert_eq!(holes(&view, &[toast], 1.5), vec![[900, 750, 300, 150]]);
+        assert_eq!(holes(&view, &[toast], 1.5), vec![[900, 750, 300, 120]]);
         assert!(!fully_covered(&view, &[toast]));
     }
 
