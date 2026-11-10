@@ -1398,29 +1398,40 @@ impl AppWindow {
         self.agent = Some(addr.to_owned());
     }
 
+    /// Whether `addr` or any agent above it was closed locally on a remote machine and isn't shown.
     fn dismissed_agent(&self, addr: &str) -> bool {
         if self.model.pane_of(addr).is_some() { return false; }
-        let root = self.root_agent(addr);
-        if self.model.dismissed_terminal(&root) { return true; }
-        let machine = root.split_once('/').map(|(m, _)| m);
-        let labels = self.live.get(&root).and_then(|r| r.get("labels"));
+        self.agent_chain(addr).iter().any(|a| self.dismissed_here(a))
+    }
+
+    /// Whether `addr` itself was dismissed: by terminal, or through its own space or tab.
+    fn dismissed_here(&self, addr: &str) -> bool {
+        if self.model.dismissed_terminal(addr) { return true; }
+        let machine = addr.split_once('/').map(|(m, _)| m);
+        let labels = self.live.get(addr).and_then(|r| r.get("labels"));
         let Some(space) = labels.and_then(|l| l.get("herdr.space")).and_then(Value::as_str) else { return false };
         let space = crate::mirror::qualify(space, machine);
         let tab = labels.and_then(|l| l.get("herdr.tab")).and_then(Value::as_str).map(|t| crate::mirror::qualify(t, machine));
-        self.model.dismissed_target(&root, &space, tab.as_deref())
+        self.model.dismissed_target(addr, &space, tab.as_deref())
+    }
+
+    /// `addr` and its parents up to the top, `addr` first.
+    fn agent_chain(&self, addr: &str) -> Vec<String> {
+        let mut chain = vec![addr.to_owned()];
+        for _ in 0..32 {
+            let cur = chain.last().unwrap();
+            let parent = self.live.get(cur).and_then(|r| r.get("parent")).and_then(Value::as_str);
+            match parent {
+                Some(p) if self.live.contains_key(p) => chain.push(p.to_owned()),
+                _ => break,
+            }
+        }
+        chain
     }
 
     /// The parent chain's top: the agent a sub-agent belongs to in the agent order.
     fn root_agent(&self, addr: &str) -> String {
-        let mut cur = addr.to_owned();
-        for _ in 0..32 {
-            let parent = self.live.get(&cur).and_then(|r| r.get("parent")).and_then(Value::as_str);
-            match parent {
-                Some(p) if self.live.contains_key(p) => cur = p.to_owned(),
-                _ => break,
-            }
-        }
-        cur
+        self.agent_chain(addr).pop().unwrap()
     }
 
     /// Creates what's visible, drops what isn't, publishes state, saves, focuses.
@@ -6443,6 +6454,52 @@ mod tests {
                 assert!(slot.source().unwrap().restore(&mut this.model, "remote", "remote/t", true));
                 assert_eq!(this.model.tab("remote/t").unwrap().name, "first");
             }
+        }));
+    }
+
+    #[test]
+    fn a_kept_sub_agent_in_a_locally_closed_tab_is_dismissed() {
+        in_own_process("dismissed_sub_agent");
+    }
+
+    #[gpui::test]
+    fn dismissed_sub_agent(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        use crate::{mirror::Document, model::{Model, Tab}};
+        if !running_alone("dismissed_sub_agent") { return; }
+        let (view, cx) = open_window(cx, "unused", "", json!({"id":"main","type":"block","content":{"tab":"active"}}));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            let mut source = Model::default();
+            source.add_space("s", "remote", "/tmp", Tab::new("t", "first", "p", "term"));
+            source.space_mut("s").unwrap().tabs.push(Tab::new("t2", "second", "p2", "child"));
+            let doc = Document::capture(&source, None);
+            doc.replace(&mut this.model, Some("remote"));
+            let slot = this.documents.entry("remote".into()).or_default();
+            slot.document = Some(doc.clone());
+            slot.available = true;
+            this.live.insert("remote/term".into(), json!({"labels":{"herdr.space":"s","herdr.tab":"t"}}));
+            this.live.insert("remote/child".into(), json!({"parent":"remote/term","keep":true,"labels":{"herdr.space":"s","herdr.tab":"t2"}}));
+            assert!(!this.dismissed_agent("remote/child"), "a sub-agent with a pane is shown");
+            assert_eq!(this.run_as("tab.close", json!({"id":"remote/t2","local":true,"confirmed":true}), true, window, cx), json!({"ok":true,"local":true}));
+            assert!(this.model.tab("remote/t2").is_none());
+            assert!(this.model.tab("remote/t").is_some(), "the parent's tab stays open");
+            let overlays = this.overlays.len();
+            assert!(this.run_as("agent.focus", json!({"terminal":"remote/child"}), false, window, cx).get("error").is_some());
+            this.alert("remote/child", crate::model::Alert::Done, false, window, cx);
+            assert_eq!(this.overlays.len(), overlays, "a dismissed sub-agent must not alert");
+            let layout_before = Document::capture_with_base(&this.model, Some("remote"), Some(&doc));
+            let labels_before = this.live["remote/child"].clone();
+            for command in ["terminal.keep", "terminal.park"] {
+                let reply = this.run_as(command, json!({"terminal":"remote/child"}), false, window, cx);
+                assert!(reply["error"].as_str().is_some_and(|s| s.contains("restore")), "{command}: {reply}");
+                assert_eq!(Document::capture_with_base(&this.model, Some("remote"), Some(&doc)), layout_before);
+                assert_eq!(this.live["remote/child"], labels_before);
+                assert!(this.pending_terminals.is_empty());
+                assert!(this.changing_terminals.is_empty());
+                assert!(this.closing_terminals.is_empty());
+            }
+            assert!(!this.dismissed_agent("remote/term"), "the parent stays visible");
+            assert!(this.run_as("agent.focus", json!({"terminal":"remote/term"}), false, window, cx).get("error").is_none());
         }));
     }
 
