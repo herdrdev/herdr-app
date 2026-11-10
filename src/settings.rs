@@ -828,6 +828,12 @@ pub const BUNDLED_FONTS: &[&[u8]] = &[
     include_bytes!("../assets/fonts/Geist.ttf"),
     include_bytes!("../assets/fonts/JetBrainsMono-Variable.ttf"),
     include_bytes!("../assets/fonts/JetBrainsMono-Italic-Variable.ttf"),
+    // CoreText loads a variable font as its default instance only, so bold
+    // cells would draw at regular weight. Other platforms use the wght axis.
+    #[cfg(target_os = "macos")]
+    include_bytes!("../assets/fonts/JetBrainsMono-Bold.ttf"),
+    #[cfg(target_os = "macos")]
+    include_bytes!("../assets/fonts/JetBrainsMono-BoldItalic.ttf"),
     SYMBOLS_FONT_FILE,
 ];
 
