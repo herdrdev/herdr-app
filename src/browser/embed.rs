@@ -335,6 +335,24 @@ mod win {
             Ok(RawWindowHandle::Win32(handle)) => handle.hwnd.get() as HWND,
             _ => { fail(state, "No Win32 host window".into()); return; }
         };
+        // A pane whose mod restarted (a mod reload, a layout change) gets the
+        // window its earlier copy still holds for the same target: VS Code
+        // would only bring that window forward instead of opening another.
+        if let Some(embedded) = take_over(state, &app, &target, host) {
+            let weak = Rc::downgrade(state);
+            let child = embedded.child as usize;
+            {
+                let mut app = state.borrow_mut();
+                app.opening = false;
+                app.embedded = Some(embedded);
+                app.status = "Hidden while its pane is covered.".into();
+            }
+            window.spawn(cx, async move |cx| {
+                let _ = cx.update(|window, _| window.refresh());
+                watch_loop(weak, generation, child, cx).await;
+            }).detach();
+            return;
+        }
         let launch = match super::launch(&app, &target) {
             Ok(launch) => launch,
             Err(error) => { fail(state, format!("{error:#}")); return; }
@@ -370,7 +388,7 @@ mod win {
                 let front = unsafe { GetForegroundWindow() };
                 if opened.elapsed() > Duration::from_secs(2) && front != foreground && now.contains(&front) { break front; }
                 let failed = matches!(child.try_wait(), Ok(Some(status)) if !status.success());
-                if failed || opened.elapsed() > Duration::from_secs(60) {
+                if failed || opened.elapsed() > Duration::from_secs(20) {
                     let mut app = state.borrow_mut();
                     app.opening = false;
                     app.error = Some(format!("{} did not open a window", launch.program.file_name().unwrap_or_default().to_string_lossy()));
@@ -392,27 +410,7 @@ mod win {
             let _ = cx.update(|window, _| window.refresh());
             apply(&state);
             focus::give(found);
-            // Watch the window: closed by its own button, moved by its title
-            // bar, or a title bar that changed height.
-            for tick in 1u64.. {
-                cx.background_executor().timer(Duration::from_millis(250)).await;
-                let Some(state) = weak.upgrade() else { return };
-                if state.borrow().generation != generation { return; }
-                // Zoom or the command center can change the title bar's height.
-                if tick % 8 == 0 {
-                    let crop = cx.background_executor().spawn(async move { measure(child as HWND) }).await;
-                    let mut app = state.borrow_mut();
-                    if let Some(e) = app.embedded.as_mut().filter(|e| e.crop != crop) {
-                        tracing::debug!(?crop, "native app crop changed");
-                        e.crop = crop;
-                        e.applied = None;
-                    }
-                }
-                if watch(&state) {
-                    let _ = cx.update(|window, _| window.refresh());
-                }
-                if state.borrow().embedded.is_none() { return; }
-            }
+            watch_loop(weak, generation, child, cx).await;
         }).detach();
     }
 
@@ -420,6 +418,54 @@ mod win {
         let mut app = state.borrow_mut();
         app.opening = false;
         app.error = Some(error);
+    }
+
+    /// The window another, unshown state of the same program and target
+    /// holds, moved into this host. That state ends as closed.
+    fn take_over(state: &State, app: &str, target: &str, host: HWND) -> Option<Embedded> {
+        let other = super::APPS.with_borrow(|apps| {
+            apps.iter().filter_map(std::rc::Weak::upgrade).find(|other| {
+                if Rc::ptr_eq(other, state) { return false; }
+                let o = other.borrow();
+                // One pane per project: the newest one shows its window.
+                o.app == app && o.target == target && o.embedded.is_some()
+            })
+        })?;
+        let mut o = other.borrow_mut();
+        let mut embedded = o.embedded.take()?;
+        o.generation += 1;
+        o.closed = true;
+        o.status = "Moved to another pane.".into();
+        drop(o);
+        embedded.applied = None;
+        unsafe {
+            if GetParent(embedded.container) != host { SetParent(embedded.container, host); }
+        }
+        Some(embedded)
+    }
+
+    /// Watch an adopted window: closed by its own button, moved by its title
+    /// bar, or a title bar that changed height.
+    async fn watch_loop(weak: std::rc::Weak<std::cell::RefCell<super::NativeApp>>, generation: u64, child: usize, cx: &mut gpui::AsyncWindowContext) {
+        for tick in 1u64.. {
+            cx.background_executor().timer(Duration::from_millis(250)).await;
+            let Some(state) = weak.upgrade() else { return };
+            if state.borrow().generation != generation { return; }
+            // Zoom or the command center can change the title bar's height.
+            if tick % 8 == 0 {
+                let crop = cx.background_executor().spawn(async move { measure(child as HWND) }).await;
+                let mut app = state.borrow_mut();
+                if let Some(e) = app.embedded.as_mut().filter(|e| e.crop != crop) {
+                    tracing::debug!(?crop, "native app crop changed");
+                    e.crop = crop;
+                    e.applied = None;
+                }
+            }
+            if watch(&state) {
+                let _ = cx.update(|window, _| window.refresh());
+            }
+            if state.borrow().embedded.is_none() { return; }
+        }
     }
 
     /// One watcher step. Returns whether to redraw.
