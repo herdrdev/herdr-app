@@ -17,6 +17,30 @@ export default class Tabs extends View {
     this.scroll = ScrollHandle.new();
     try { this.panels = JSON.parse(localStorage.getItem("panels") ?? "{}"); } catch { this.panels = {}; }
     if (!this.panels || typeof this.panels !== "object" || Array.isArray(this.panels)) this.panels = {};
+    this.swipe = { acc: 0, steps: 0, at: 0, last: 0 };
+  }
+
+  // One tab per wheel notch. A touchpad or smooth-scrolling mouse sends many
+  // small events per gesture: a short swipe or one smoothed notch (about
+  // 25 px) switches one tab, a longer swipe keeps going a tab per 60 px, at
+  // most one every 100 ms so each shows.
+  wheel(e) {
+    if (e.delta_lines) {
+      if (e.delta_lines.y) run(e.delta_lines.y > 0 ? "tab.prev" : "tab.next");
+      return;
+    }
+    const s = this.swipe, now = Date.now();
+    // Phases often arrive only as moves (a macOS touchpad included): a pause
+    // or a turn starts a new gesture.
+    if (e.touch_phase === "started" || now - s.at > 250 || e.delta.y * s.acc < 0) Object.assign(s, { acc: 0, steps: 0 });
+    s.at = now;
+    s.acc += e.delta.y;
+    const need = s.steps ? 60 : 20;
+    if (Math.abs(s.acc) < need || now - s.last < 100) return;
+    s.acc -= Math.sign(s.acc) * need;
+    s.steps++;
+    s.last = now;
+    run(e.delta.y > 0 ? "tab.prev" : "tab.next");
   }
 
   // The side panel is remembered per space: switching shows that space's choice
@@ -102,7 +126,7 @@ export default class Tabs extends View {
     };
     return h_flex().size_full().min_w(0).px(10).pl(lightsPadding).gap(3).items_center().bg(t.chrome).border_b(1).border_color(t.border)
       .on_mouse_up("left", () => { this.pressed = null; })
-      .on_scroll_wheel(e => { if (Math.abs(e.delta.y) >= 1) run(e.delta.y > 0 ? "tab.prev" : "tab.next"); })
+      .on_scroll_wheel(e => this.wheel(e))
       .child(h_flex().id("tab-scroll").flex_1().min_w(0).h_full().items_center().gap(3).overflow_x_scrollbar().track_scroll(this.scroll)
         .on_size_change((_size, cx) => { if (active >= 0) { this.scroll.scroll_to_item(active); cx.notify(); } })
         .children(shown.map(item)))
