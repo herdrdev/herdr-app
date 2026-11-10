@@ -3,10 +3,10 @@ use std::{cell::Cell, rc::Rc};
 use gpui::{
     Anchor, AnyElement, App, Bounds, Div, ElementId, InteractiveElement, Interactivity,
     IntoElement, ParentElement, Pixels, Point, RenderOnce, StatefulInteractiveElement,
-    StyleRefinement, Styled, Window, canvas, deferred, div, point, px,
+    StyleRefinement, Styled, Window, canvas, deferred, div, px,
 };
 
-use crate::{Positioner, ResolvedPosition, StyledExt as _};
+use crate::{Align, Placement, Positioner, ResolvedPosition, StyledExt as _};
 
 /// Distance kept between a popup and the window edge.
 const WINDOW_MARGIN: Pixels = px(8.);
@@ -99,17 +99,20 @@ impl Popup {
     }
 }
 
-/// Match the popup's anchor to the opposite edge of the measured trigger.
-fn anchor_position(anchor: Anchor, trigger: Bounds<Pixels>, offset: Pixels) -> Point<Pixels> {
+/// The side of the trigger an anchor puts the popup on, and how it lines up
+/// along that side: the popup's top-left corner on the trigger's bottom-left
+/// is "below, start-aligned". Placing by side rather than by corner is what
+/// lets the popup flip to the other side when it would not fit.
+fn anchor_side(anchor: Anchor) -> (Placement, Align) {
     match anchor {
-        Anchor::TopLeft => trigger.bottom_left() + point(px(0.), offset),
-        Anchor::TopCenter => trigger.bottom_center() + point(px(0.), offset),
-        Anchor::TopRight => trigger.bottom_right() + point(px(0.), offset),
-        Anchor::BottomLeft => trigger.origin - point(px(0.), offset),
-        Anchor::BottomCenter => trigger.top_center() - point(px(0.), offset),
-        Anchor::BottomRight => trigger.top_right() - point(px(0.), offset),
-        Anchor::LeftCenter => trigger.right_center() + point(offset, px(0.)),
-        Anchor::RightCenter => trigger.left_center() - point(offset, px(0.)),
+        Anchor::TopLeft => (Placement::Bottom, Align::Start),
+        Anchor::TopCenter => (Placement::Bottom, Align::Center),
+        Anchor::TopRight => (Placement::Bottom, Align::End),
+        Anchor::BottomLeft => (Placement::Top, Align::Start),
+        Anchor::BottomCenter => (Placement::Top, Align::Center),
+        Anchor::BottomRight => (Placement::Top, Align::End),
+        Anchor::LeftCenter => (Placement::Right, Align::Center),
+        Anchor::RightCenter => (Placement::Left, Align::Center),
     }
 }
 
@@ -131,14 +134,8 @@ impl RenderOnce for Popup {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let state =
             window.use_keyed_state((self.id, "anchor"), cx, |_, _| PopupAnchorState::default());
-        let anchor = self.anchor;
         let trigger_bounds = Rc::new(Cell::new(state.read(cx).bounds));
-        let offset = self.offset;
-        let position = Rc::new(Cell::new(anchor_position(
-            anchor,
-            state.read(cx).bounds,
-            offset,
-        )));
+        let anchor_visible = Rc::new(Cell::new(true));
 
         let root = self
             .base
@@ -147,11 +144,13 @@ impl RenderOnce for Popup {
                 canvas(
                     {
                         let state = state.clone();
-                        let position = position.clone();
                         let trigger_bounds = trigger_bounds.clone();
+                        let anchor_visible = anchor_visible.clone();
                         move |bounds, window, cx| {
                             trigger_bounds.set(bounds);
-                            position.set(anchor_position(anchor, bounds, offset));
+                            // A trigger scrolled out of its clipping parent
+                            // takes the popup with it.
+                            anchor_visible.set(window.content_mask().bounds.intersects(&bounds));
                             let first = state.update(cx, |state, _| {
                                 let first = !state.captured;
                                 state.bounds = bounds;
@@ -179,8 +178,13 @@ impl RenderOnce for Popup {
             return root;
         }
 
-        let positioner =
-            Positioner::corner(anchor, position.get()).tracked_corner_position(position);
+        let (placement, align) = anchor_side(self.anchor);
+        let positioner = Positioner::side(trigger_bounds.get())
+            .placement(placement)
+            .align(align)
+            .offset(self.offset)
+            .tracked_trigger_bounds(trigger_bounds.clone())
+            .tracked_anchor_visible(anchor_visible);
         let positioner = if let Some(callback) = self.on_position {
             positioner.on_position(move |position| callback(position, trigger_bounds.get()))
         } else {
@@ -321,5 +325,77 @@ mod tests {
             window.debug_bounds("popup-content").unwrap().size,
             gpui::Size::new(px(20.), px(20.))
         );
+    }
+
+    /// A trigger at `top` inside a `clip`-tall clipping parent, with a popup
+    /// asked to open below it.
+    struct PlacedHarness {
+        top: Pixels,
+        clip: Pixels,
+    }
+
+    impl Render for PlacedHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().size_full().child(
+                div().h(self.clip).overflow_hidden().child(
+                    div().absolute().top(self.top).left(px(10.)).child(
+                        Popup::new(
+                            "popup",
+                            div()
+                                .debug_selector(|| "popup-trigger".into())
+                                .w(px(100.))
+                                .h(px(20.)),
+                        )
+                        .content(
+                            div()
+                                .debug_selector(|| "popup-content".into())
+                                .w(px(100.))
+                                .h(px(60.)),
+                        ),
+                    ),
+                ),
+            )
+        }
+    }
+
+    fn placed(
+        cx: &mut gpui::TestAppContext,
+        top: impl Fn(Pixels) -> Pixels,
+        clip: impl Fn(Pixels) -> Pixels,
+    ) -> (Option<Bounds<Pixels>>, Option<Bounds<Pixels>>) {
+        let (view, window) = cx.add_window_view(|_, _| PlacedHarness { top: px(0.), clip: px(0.) });
+        let height = window.update(|window, _| window.viewport_size().height);
+        view.update(window, |view, _| {
+            view.top = top(height);
+            view.clip = clip(height);
+        });
+        window.update(|window, cx| window.draw(cx).clear(cx));
+        window.update(|window, cx| window.draw(cx).clear(cx));
+        (window.debug_bounds("popup-trigger"), window.debug_bounds("popup-content"))
+    }
+
+    #[gpui::test]
+    fn a_popup_without_room_below_opens_above_its_trigger(cx: &mut gpui::TestAppContext) {
+        let (trigger, content) = placed(cx, |height| height - px(40.), |height| height);
+        let (trigger, content) = (trigger.unwrap(), content.unwrap());
+        // Clamped below, it would cover the trigger it belongs to.
+        assert_eq!(content.bottom(), trigger.top());
+        assert_eq!(content.left(), trigger.left());
+    }
+
+    #[gpui::test]
+    fn a_popup_with_room_below_stays_below_its_trigger(cx: &mut gpui::TestAppContext) {
+        let (trigger, content) = placed(cx, |_| px(40.), |height| height);
+        assert_eq!(content.unwrap().top(), trigger.unwrap().bottom());
+    }
+
+    #[gpui::test]
+    fn a_popup_leaves_with_its_trigger_when_it_is_scrolled_out_of_sight(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // The trigger sits past the bottom of its clipping parent, the way a
+        // row of a scrolled page does; the popup must not stay pinned on.
+        let (_, content) = placed(cx, |_| px(200.), |_| px(100.));
+        assert_eq!(content, None);
     }
 }
