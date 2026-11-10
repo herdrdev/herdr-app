@@ -624,6 +624,37 @@ fn check_materializes_retained_elements_in_a_rendered_view(cx: &mut TestAppConte
 }
 
 #[gpui::test]
+fn long_space_names_use_the_sidebar_width(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let name = "quarterly infrastructure cost review";
+    let mut values = fixture(true, props(), updates("current", "current"));
+    let spaces = values.get_mut("spaces").unwrap().as_array_mut().unwrap();
+    spaces[0]["name"] = json!(name);
+    // A worktree of the first space's repo, drawn nested under it.
+    spaces.insert(1, json!({"id":"s3","index":2,"name":"portal rewrite","folder":"/fixture/portal","machine":null,"branch":null,"active":false,"status":"idle","tabs":[]}));
+    // The remote space is on main in a repo named after it: its tail has nothing to show.
+    let git = "this.git[JSON.stringify([null, '/fixture/project'])] = { name: 'herdr', branch: 'feature/rate-limiting', ahead: 0, behind: 0, repo: JSON.stringify([null, '/fixture/project/.git']), linked: false };
+        this.git[JSON.stringify([null, '/fixture/portal'])] = { name: 'herdr', branch: 'portal-rewrite', ahead: 0, behind: 0, repo: JSON.stringify([null, '/fixture/project/.git']), linked: true };
+        this.git[JSON.stringify(['remote', '/remote/project'])] = { name: 'remote', branch: 'main', ahead: 0, behind: 0, repo: JSON.stringify(['remote', '/remote/project/.git']), linked: false };";
+    let tree = describe_with_values(cx, &staged, "mods/spaces", values, Some(git)).unwrap();
+    let lines: Vec<&str> = tree.lines().collect();
+    let text = lines.iter().position(|l| l.contains(&format!("text {name:?}"))).unwrap();
+    let label = lines[text - 1];
+    assert!(!label.contains(".max_w"), "a wider sidebar must show more of the name: {label}");
+    assert!(!label.contains(".flex_shrink[Number(0.0)]"), "the name must give way when the row is full: {label}");
+    assert!(label.contains(".min_w[Number(48.0)]"), "the name shrinks, but a short one stays readable: {label}");
+    let tail = lines[text + 1..].iter().find(|l| l.contains(".justify_end")).unwrap();
+    assert!(tail.contains(".flex_auto") && !tail.contains(".flex_1"), "the git tail must start from its text's width, so both sides give way in proportion: {tail}");
+    assert!(tail.contains(".min_w[Number(48.0)]"), "the git tail shrinks, but a short one stays readable: {tail}");
+    let remote = lines.iter().position(|l| l.contains("text \"Remote\"")).unwrap();
+    let empty = lines[remote + 1..].iter().find(|l| l.contains(".justify_end")).unwrap();
+    assert!(empty.contains(".min_w[Number(0.0)]"), "an empty git tail must not take room from the name: {empty}");
+    let icon = lines.iter().find(|l| l.contains("branch.svg")).expect("the worktree space is nested");
+    assert!(icon.contains(".flex_none"), "a worktree's icon keeps its size while the name gives way: {icon}");
+}
+
+#[gpui::test]
 fn rebuilt_machine_offers_connect_only_for_identity_mismatch(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
