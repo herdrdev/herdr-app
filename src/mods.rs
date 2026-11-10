@@ -764,7 +764,7 @@ fn exec_limit(options: Option<&HostValue>) -> Result<Duration, HostError> {
     }
 }
 
-fn run_blocking(command: &str, args: &[String], cwd: Option<String>, limit: Duration) -> Result<(i32, String, String), String> {
+pub(crate) fn run_blocking(command: &str, args: &[String], cwd: Option<String>, limit: Duration) -> Result<(i32, String, String), String> {
     use std::io::Read;
     let mut child = crate::spawn::command(command)
         .args(args)
@@ -830,25 +830,20 @@ fn run_remote_with_limit(machine: &str, command: &str, args: &[String], cwd: Opt
     Ok((code, bytes("stdout")?, bytes("stderr")?))
 }
 
-/// A program's output here, if it ran (for the app's own checks).
-pub fn run_here(command: &str, args: &[String]) -> Option<String> {
-    run_blocking(command, args, None, EXEC_LIMIT).ok().map(|(_, out, _)| out)
-}
-
 /// The agents a machine can start (`knownAgents()`), asked at most once a minute.
-fn known_agents(on: Option<String>, list: Vec<Value>) -> Value {
+fn known_agents(on: Option<String>, list: Vec<Value>) -> Result<Value, String> {
     type InstalledCache = std::collections::HashMap<Option<String>, (std::time::Instant, Vec<String>, Vec<String>)>;
     static SEEN: std::sync::Mutex<Option<InstalledCache>> = std::sync::Mutex::new(None);
     let commands: Vec<String> = list.iter().filter_map(|a| a["run"][0].as_str().map(str::to_owned)).collect();
     let cached = SEEN.lock().ok().and_then(|s| s.as_ref()?.get(&on).filter(|(at, checked, _)| at.elapsed().as_secs() < 60 && checked == &commands).map(|(_, _, v)| v.clone()));
-    let have = cached.unwrap_or_else(|| {
-        let found = crate::programs::installed(&commands, on.as_deref());
+    let have = if let Some(cached) = cached { cached } else {
+        let found = crate::programs::installed(&commands, on.as_deref())?;
         if let Ok(mut s) = SEEN.lock() {
             s.get_or_insert_with(std::collections::HashMap::new).insert(on.clone(), (std::time::Instant::now(), commands, found.clone()));
         }
         found
-    });
-    Value::Array(
+    };
+    Ok(Value::Array(
         list.into_iter()
             .map(|mut a| {
                 let run = a["run"][0].as_str().unwrap_or_default().to_owned();
@@ -856,7 +851,7 @@ fn known_agents(on: Option<String>, list: Vec<Value>) -> Value {
                 a
             })
             .collect(),
-    )
+    ))
 }
 
 /// A text file on another machine: `cat`, or `type` where there is none (Windows).
@@ -980,7 +975,10 @@ fn module(inst: Instance, copy: u64) -> HostModule {
             std::thread::spawn(move || {
                 let _ = tx.send_blocking(known_agents(on, list));
             });
-            Ok(async move { Ok(to_host(&rx.recv().await.unwrap_or(Value::Array(Vec::new())))) })
+            Ok(async move {
+                let agents = rx.recv().await.map_err(|_| HostError::new("the agent check was lost"))?.map_err(HostError::new)?;
+                Ok(to_host(&agents))
+            })
         })
         .async_function("pickFolder", |a| {
             let prompt = a.get(0).map(from_host).and_then(|v| v.get("prompt").and_then(Value::as_str).map(str::to_owned)).unwrap_or_else(|| "Open".into());
@@ -1332,11 +1330,11 @@ mod tests {
     #[test]
     fn known_agents_uses_snapshot_and_refreshes_changed_commands() {
         let snapshot = vec![json!({"key": "claude", "run": ["herdr_issue57_not_installed"]})];
-        let first = std::thread::spawn(move || known_agents(None, snapshot)).join().unwrap();
+        let first = std::thread::spawn(move || known_agents(None, snapshot)).join().unwrap().unwrap();
         assert_eq!(first[0]["run"], json!(["herdr_issue57_not_installed"]));
         assert_eq!(first[0]["installed"], false);
         let snapshot = vec![json!({"key": "claude", "run": ["printf"]}), json!({"key": "claude-alt", "run": ["printf"]})];
-        let next = std::thread::spawn(move || known_agents(None, snapshot)).join().unwrap();
+        let next = std::thread::spawn(move || known_agents(None, snapshot)).join().unwrap().unwrap();
         assert_eq!(next.as_array().unwrap().len(), 2);
         assert_eq!(next[0]["installed"], true);
         assert_eq!(next[1]["key"], "claude-alt");
