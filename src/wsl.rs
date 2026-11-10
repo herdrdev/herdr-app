@@ -6,14 +6,55 @@
 
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+use std::process::{Command, Output, Stdio};
 use std::sync::{Mutex, OnceLock};
-use std::time::Duration;
+use std::time::{Duration, Instant};
 
 static DISTRO: OnceLock<Option<String>> = OnceLock::new();
-static ENV: OnceLock<Option<Env>> = OnceLock::new();
+static ENV: Mutex<EnvState> = Mutex::new(EnvState {
+    value: None,
+    failure: None,
+});
+const WSL_TIMEOUT: Duration = Duration::from_secs(30);
+const ENV_BACKOFF: Duration = Duration::from_secs(5);
+const TIMEOUT_ERROR: &str = "WSL did not respond; is the distro starting? Try again or check that the selected distribution starts.";
+
+#[derive(Default)]
+struct EnvState {
+    value: Option<Env>,
+    failure: Option<(Instant, String)>,
+}
+
+impl EnvState {
+    fn get(
+        &mut self,
+        now: Instant,
+        probe: impl FnOnce() -> Result<Env, String>,
+    ) -> Result<Env, String> {
+        if let Some(value) = &self.value {
+            return Ok(value.clone());
+        }
+        if let Some((at, error)) = &self.failure
+            && now.saturating_duration_since(*at) < ENV_BACKOFF
+        {
+            return Err(error.clone());
+        }
+        match probe() {
+            Ok(value) => {
+                self.failure = None;
+                self.value = Some(value.clone());
+                Ok(value)
+            }
+            Err(error) => {
+                self.failure = Some((Instant::now(), error.clone()));
+                Err(error)
+            }
+        }
+    }
+}
 static EXTRA_PATH: Mutex<Option<String>> = Mutex::new(None);
 
+#[derive(Clone)]
 struct Env {
     home: PathBuf,
     shell: String,
@@ -49,22 +90,30 @@ pub fn prepend_path(dir: &Path) {
     }
 }
 
-fn env() -> Option<&'static Env> {
-    let distro = active()?;
-    ENV.get_or_init(|| query_env(distro)).as_ref()
+fn environment() -> Result<Env, String> {
+    let distro = active().ok_or("WSL is not active")?;
+    ENV.lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .get(Instant::now(), || query_env(distro))
 }
 
-fn query_env(distro: &str) -> Option<Env> {
+fn env() -> Option<Env> {
+    environment().ok()
+}
+
+fn query_env(distro: &str) -> Result<Env, String> {
     let script = r#"s=${SHELL:-/bin/sh}; printf '%s\n%s\n' "$HOME" "$s"; "$s" -lic 'printf "\nherdr-path:%s\n" "$PATH"' 2>/dev/null || "$s" -lc 'printf "\nherdr-path:%s\n" "$PATH"' 2>/dev/null || printf '\nherdr-path:%s\n' "$PATH""#;
     let mut command = host_command();
     command.args(["-d", distro, "--cd", "~", "-e", "sh", "-c", script]);
-    let bytes = environment_output(command, Duration::from_secs(10))?;
-    let text = decode_output(&bytes);
+    let out = run_wsl_timed(command, WSL_TIMEOUT)?;
+    require_success(&out, &format!("Cannot reach WSL ({distro})"))?;
+    let text = decode_output(&out.stdout);
     let mut lines = text.lines();
-    let home = lines.next()?;
-    if home.is_empty() {
-        return None;
-    }
+    let home = lines.next().filter(|s| s.starts_with('/')).ok_or_else(|| {
+        format!(
+            "Cannot read the environment in WSL ({distro}); check that the distribution starts."
+        )
+    })?;
     let shell = lines
         .next()
         .map(str::trim)
@@ -76,7 +125,7 @@ fn query_env(distro: &str) -> Option<Env> {
         .last()
         .unwrap_or("/usr/local/bin:/usr/bin:/bin");
     let path = merge_linux_path(home, login_path);
-    Some(Env {
+    Ok(Env {
         home: PathBuf::from(home),
         shell,
         path,
@@ -85,7 +134,7 @@ fn query_env(distro: &str) -> Option<Env> {
 
 // A regular file avoids filling a pipe before the shell exits, without leaving
 // a reader thread blocked when a shell descendant inherits stdout.
-fn environment_output(mut command: Command, timeout: Duration) -> Option<Vec<u8>> {
+pub fn run_wsl_timed(mut command: Command, timeout: Duration) -> Result<Output, String> {
     use std::io::{Read, Seek, SeekFrom};
     const LIMIT: u64 = 1024 * 1024;
     struct OutputFile {
@@ -98,63 +147,119 @@ fn environment_output(mut command: Command, timeout: Duration) -> Option<Vec<u8>
             let _ = std::fs::remove_file(&self.path);
         }
     }
-    let path = std::env::temp_dir().join(format!(
-        "herdr-wsl-env-{}-{}",
-        std::process::id(),
-        std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .ok()?
-            .as_nanos()
-    ));
-    let mut options = std::fs::OpenOptions::new();
-    options.read(true).write(true).create_new(true);
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::OpenOptionsExt;
-        options.mode(0o600);
-    }
-    #[cfg(windows)]
-    {
-        use std::os::windows::fs::OpenOptionsExt;
-        options.share_mode(7);
-    } // Allow cleanup even if a descendant inherits stdout.
-    let file = options.open(&path).ok()?;
-    let mut output = OutputFile {
-        file: Some(file),
-        path,
+    let io_error = |e: std::io::Error| format!("Cannot run WSL: {e}");
+    let capture = |stream| -> Result<OutputFile, String> {
+        let path = std::env::temp_dir().join(format!(
+            "herdr-wsl-env-{}-{}-{stream}",
+            std::process::id(),
+            std::time::SystemTime::now()
+                .duration_since(std::time::UNIX_EPOCH)
+                .map_err(|e| e.to_string())?
+                .as_nanos()
+        ));
+        let mut options = std::fs::OpenOptions::new();
+        options.read(true).write(true).create_new(true);
+        #[cfg(unix)]
+        {
+            use std::os::unix::fs::OpenOptionsExt;
+            options.mode(0o600);
+        }
+        #[cfg(windows)]
+        {
+            use std::os::windows::fs::OpenOptionsExt;
+            options.share_mode(7);
+        } // Allow cleanup even if a descendant inherits an output handle.
+        let file = options.open(&path).map_err(io_error)?;
+        Ok(OutputFile {
+            file: Some(file),
+            path,
+        })
     };
+    let mut stdout = capture("out")?;
+    let mut stderr = capture("err")?;
     command
         .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .stdout(output.file.as_ref()?.try_clone().ok()?);
-    let mut child = command.spawn().ok()?;
+        .stdout(
+            stdout
+                .file
+                .as_ref()
+                .unwrap()
+                .try_clone()
+                .map_err(io_error)?,
+        )
+        .stderr(
+            stderr
+                .file
+                .as_ref()
+                .unwrap()
+                .try_clone()
+                .map_err(io_error)?,
+        );
+    let mut child = command.spawn().map_err(io_error)?;
     drop(command);
-    let deadline = std::time::Instant::now() + timeout;
-    loop {
-        let size = output.file.as_ref()?.metadata().map(|m| m.len());
-        let status = child.try_wait();
-        if size.is_err()
-            || size.ok()? > LIMIT
-            || status.is_err()
-            || std::time::Instant::now() >= deadline
-        {
-            let _ = child.kill();
-            let _ = child.wait();
-            return None;
-        }
-        if let Some(status) = status.ok()? {
-            if !status.success() {
-                return None;
+    let deadline = Instant::now() + timeout;
+    let status = loop {
+        let mut check = || -> Result<Option<std::process::ExitStatus>, String> {
+            for output in [&stdout, &stderr] {
+                if output
+                    .file
+                    .as_ref()
+                    .unwrap()
+                    .metadata()
+                    .map_err(io_error)?
+                    .len()
+                    > LIMIT
+                {
+                    return Err("WSL output exceeds 1 MiB".into());
+                }
             }
-            break;
+            if Instant::now() >= deadline {
+                return Err(TIMEOUT_ERROR.into());
+            }
+            child.try_wait().map_err(io_error)
+        };
+        match check() {
+            Ok(Some(status)) => break status,
+            Ok(None) => std::thread::sleep(Duration::from_millis(20)),
+            Err(error) => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(error);
+            }
         }
-        std::thread::sleep(Duration::from_millis(20));
+    };
+    let read = |output: &mut OutputFile| -> Result<Vec<u8>, String> {
+        let file = output.file.as_mut().unwrap();
+        file.seek(SeekFrom::Start(0)).map_err(io_error)?;
+        let mut bytes = Vec::new();
+        file.take(LIMIT + 1)
+            .read_to_end(&mut bytes)
+            .map_err(io_error)?;
+        if bytes.len() as u64 > LIMIT {
+            return Err("WSL output exceeds 1 MiB".into());
+        }
+        Ok(bytes)
+    };
+    Ok(Output {
+        status,
+        stdout: read(&mut stdout)?,
+        stderr: read(&mut stderr)?,
+    })
+}
+
+fn require_success(out: &Output, context: &str) -> Result<(), String> {
+    if out.status.success() {
+        return Ok(());
     }
-    let file = output.file.as_mut()?;
-    file.seek(SeekFrom::Start(0)).ok()?;
-    let mut bytes = Vec::new();
-    file.take(LIMIT + 1).read_to_end(&mut bytes).ok()?;
-    (bytes.len() as u64 <= LIMIT).then_some(bytes)
+    let detail = decode_output(&out.stderr);
+    Err(format!(
+        "{context}: {}",
+        if detail.trim().is_empty() {
+            "WSL command failed"
+        } else {
+            detail.trim()
+        }
+    ))
 }
 
 fn merge_linux_path(home: &str, login_path: &str) -> String {
@@ -185,14 +290,12 @@ fn merge_linux_path(home: &str, login_path: &str) -> String {
 
 /// The person's `$HOME` inside the active WSL distribution.
 pub fn home() -> Option<PathBuf> {
-    active()?;
-    Some(env().map_or_else(|| PathBuf::from("/"), |e| e.home.clone()))
+    env().map(|e| e.home)
 }
 
 /// The person's login `$SHELL` inside the active WSL distribution.
 pub fn shell() -> Option<String> {
-    active()?;
-    Some(env().map_or_else(|| "/bin/sh".into(), |e| e.shell.clone()))
+    env().map(|e| e.shell)
 }
 
 /// A `wsl.exe` command on the Windows host with UTF-8 output enabled.
@@ -246,29 +349,56 @@ fn path_with_core_first(path: &str, dir: &str) -> String {
 const FIND_CORE_SCRIPT: &str = include_str!("../defaults/frame/settings/find-core.sh");
 
 /// Finds `herdr-core` (`hc`) inside the active WSL distribution.
-pub fn find_core(configured: Option<&str>) -> Option<PathBuf> {
-    let out = command("sh", None)
-        .args(["-c", FIND_CORE_SCRIPT, "sh", configured.unwrap_or("")])
-        .stdin(Stdio::null())
-        .stderr(Stdio::null())
-        .output()
-        .ok()?;
-    let found = decode_output(&out.stdout).lines().next()?.to_owned();
-    (out.status.success() && !found.is_empty()).then(|| PathBuf::from(found))
+pub fn find_core(configured: Option<&str>) -> Result<Option<PathBuf>, String> {
+    environment()?;
+    let mut cmd = command("sh", None);
+    cmd.args(["-c", FIND_CORE_SCRIPT, "sh", configured.unwrap_or("")]);
+    let out = run_wsl_timed(cmd, WSL_TIMEOUT)?;
+    core_probe_result(&out)
+}
+
+fn core_probe_result(out: &Output) -> Result<Option<PathBuf>, String> {
+    if out.status.code() == Some(3) {
+        return Ok(None);
+    }
+    require_success(out, "Cannot reach the selected WSL distribution")?;
+    let text = decode_output(&out.stdout);
+    let found = text
+        .lines()
+        .next()
+        .filter(|s| !s.is_empty())
+        .ok_or("WSL returned an empty herdr-core probe; check the selected distribution.")?;
+    Ok(Some(PathBuf::from(found)))
+}
+
+/// Checks a guest binary without allowing an unbounded WSL version probe.
+pub fn version(bin: &Path) -> Result<Option<String>, String> {
+    if bin
+        .extension()
+        .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
+    {
+        return Ok(None);
+    }
+    environment()?;
+    let mut cmd = command(bin.as_os_str(), None);
+    cmd.arg("--version");
+    let out = run_wsl_timed(cmd, WSL_TIMEOUT)?;
+    require_success(&out, "Cannot check herdr-core in WSL")?;
+    let text = decode_output(&out.stdout).trim().to_owned();
+    Ok(text.starts_with("hc ").then_some(text))
 }
 
 /// Installs the Linux `herdr-core` release inside the active WSL distribution.
 pub fn install_core(releases: &str) -> Result<PathBuf, String> {
-    let out = command("sh", None)
-        .args([
-            "-c",
-            "script=$(curl -fsSL -- \"$1/core/install.sh\") && printf '%s\\n' \"$script\" | sh",
-            "sh",
-            releases,
-        ])
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("cannot run the installer in WSL: {e}"))?;
+    environment()?;
+    let mut cmd = command("sh", None);
+    cmd.args([
+        "-c",
+        "script=$(curl -fsSL -- \"$1/core/install.sh\") && printf '%s\\n' \"$script\" | sh",
+        "sh",
+        releases,
+    ]);
+    let out = run_wsl_timed(cmd, WSL_TIMEOUT)?;
     if !out.status.success() {
         let err = decode_output(&out.stderr).trim().to_owned();
         return Err(if err.is_empty() {
@@ -277,7 +407,7 @@ pub fn install_core(releases: &str) -> Result<PathBuf, String> {
             err
         });
     }
-    find_core(None).ok_or_else(|| "installed in WSL, but herdr-core doesn't run".into())
+    find_core(None)?.ok_or_else(|| "installed in WSL, but herdr-core doesn't run".into())
 }
 
 /// Decodes output from `wsl.exe`, handling both UTF-8 and UTF-16LE.
@@ -370,11 +500,9 @@ pub fn linux_path(path: &Path, distro: &str) -> Result<String, String> {
 }
 
 fn convert_path(path: &str, distro: &str, direction: &str) -> Result<String, String> {
-    let out = host_command()
-        .args(["-d", distro, "-e", "wslpath", "-a", direction, path])
-        .stdin(Stdio::null())
-        .output()
-        .map_err(|e| format!("Cannot convert {path} for WSL: {e}"))?;
+    let mut cmd = host_command();
+    cmd.args(["-d", distro, "-e", "wslpath", "-a", direction, path]);
+    let out = run_wsl_timed(cmd, WSL_TIMEOUT)?;
     if !out.status.success() {
         return Err(format!(
             "Cannot convert {path} for WSL: {}",
@@ -431,6 +559,65 @@ pub fn linux_path_if_active(path: &Path) -> Result<String, String> {
 mod tests {
     use super::*;
 
+    #[test]
+    fn environment_retries_after_backoff_and_caches_only_success() {
+        let mut state = EnvState::default();
+        assert!(
+            state
+                .get(Instant::now(), || Err("cold boot".into()))
+                .is_err()
+        );
+        let at = state.failure.as_ref().unwrap().0;
+        assert!(
+            state
+                .get(at + ENV_BACKOFF / 2, || panic!(
+                    "backoff must suppress probes"
+                ))
+                .is_err()
+        );
+        assert!(state.value.is_none());
+        let value = state
+            .get(at + ENV_BACKOFF, || {
+                Ok(Env {
+                    home: "/home/test".into(),
+                    shell: "/bin/bash".into(),
+                    path: "/usr/bin".into(),
+                })
+            })
+            .unwrap();
+        assert_eq!(value.home, Path::new("/home/test"));
+        assert!(state.failure.is_none());
+        assert_eq!(
+            state
+                .get(at + ENV_BACKOFF, || panic!("success must stay cached"))
+                .unwrap()
+                .shell,
+            "/bin/bash"
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn core_probe_distinguishes_missing_from_unreachable() {
+        use std::os::unix::process::ExitStatusExt;
+        let output = |code, stdout: &[u8]| Output {
+            status: std::process::ExitStatus::from_raw(code << 8),
+            stdout: stdout.to_vec(),
+            stderr: b"distribution unavailable".to_vec(),
+        };
+        assert_eq!(core_probe_result(&output(3, b"")), Ok(None));
+        assert!(
+            core_probe_result(&output(1, b""))
+                .unwrap_err()
+                .contains("distribution unavailable")
+        );
+        assert_eq!(
+            core_probe_result(&output(0, b"/home/test/hc\n")),
+            Ok(Some("/home/test/hc".into()))
+        );
+        assert!(core_probe_result(&output(0, b"")).is_err());
+    }
+
     #[cfg(unix)]
     #[test]
     fn environment_capture_handles_chatty_shell_timeout_and_output_limit() {
@@ -446,16 +633,25 @@ mod tests {
             })
             .map(|e| e.path())
             .collect();
-        let bytes = environment_output(chatty, Duration::from_secs(2)).unwrap();
+        let bytes = run_wsl_timed(chatty, Duration::from_secs(2))
+            .unwrap()
+            .stdout;
         assert_eq!(bytes.len(), 262144 + 9);
         assert!(bytes.ends_with(b"guest-env"));
         let mut oversized = Command::new("sh");
         oversized.args(["-c", "head -c 2097152 /dev/zero"]);
-        assert!(environment_output(oversized, Duration::from_secs(2)).is_none());
+        assert!(
+            run_wsl_timed(oversized, Duration::from_secs(2))
+                .unwrap_err()
+                .contains("output exceeds")
+        );
         let mut slow = Command::new("sh");
         slow.args(["-c", "exec sleep 2"]);
         let start = std::time::Instant::now();
-        assert!(environment_output(slow, Duration::from_millis(50)).is_none());
+        assert_eq!(
+            run_wsl_timed(slow, Duration::from_millis(50)).unwrap_err(),
+            TIMEOUT_ERROR
+        );
         assert!(start.elapsed() < Duration::from_secs(1));
         let after: Vec<_> = std::fs::read_dir(std::env::temp_dir())
             .unwrap()
@@ -563,9 +759,11 @@ mod tests {
         let fake = root.join("not hc");
         std::fs::write(&fake, "#!/bin/sh\necho other\n").unwrap();
         std::fs::set_permissions(&fake, std::fs::Permissions::from_mode(0o755)).unwrap();
-        assert!(probe(fake.to_str().unwrap(), Path::new("/bin/false"))
-            .status
-            .success());
+        assert!(
+            probe(fake.to_str().unwrap(), Path::new("/bin/false"))
+                .status
+                .success()
+        );
         // A Windows core left in settings must be skipped, without even running it.
         let windows = root.join("hc.ExE");
         let marker = root.join("host-was-run");

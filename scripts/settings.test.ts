@@ -14,7 +14,7 @@ function harness(raw: string | null = null, writeError?: string, probeError = ""
     class {}, () => ({ platform: "windows" }), () => "C:/fixture/app",
     async (path: string) => path === "C:/fixture/app/frame/settings/find-core.sh" ? probe : raw,
     async (...args: unknown[]) => { if (writeError) throw new Error(writeError); writes.push(args); raw = args[1] as string; },
-    async (command: string, args: string[]) => { commands.push([command, args]); return { code: ["Missing", "Removed"].includes(args[1]) ? 1 : 0, stdout: "", stderr: probeError }; },
+    async (command: string, args: string[]) => { commands.push([command, args]); return { code: args[1] === "Missing" ? 3 : args[1] === "Removed" ? 1 : 0, stdout: "", stderr: probeError }; },
   );
   const view = new Settings();
   Object.assign(view, { person: {}, raw: null, handle: { focus() {} } });
@@ -53,8 +53,8 @@ test("Settings verifies hc before saving a distro and retains unrelated keys", a
   h.view.selectWsl("Missing", h.cx);
   await h.settle();
   expect(h.writes).toHaveLength(0);
-  expect(h.view.wslError).toContain("Couldn't verify herdr-core in Missing");
-  expect(h.view.wslError).toContain("Check that WSL starts");
+  expect(h.view.wslError).toContain("herdr-core (hc) is missing in Missing");
+  expect(h.view.wslError).toContain("Install it in this distribution");
   h.view.selectWsl("Ubuntu", h.cx);
   await h.settle();
   expect(h.view.person).toEqual({ font: "Geist", core: "/home/Name With Space/hc", wsl: "Ubuntu" });
@@ -82,6 +82,7 @@ test("Settings preserves WSL startup errors instead of claiming hc is missing", 
   h.view.selectWsl("Removed", h.cx);
   await h.settle();
   expect(h.writes).toHaveLength(0);
+  expect(h.view.wslError).toContain("Couldn't reach WSL (Removed)");
   expect(h.view.wslError).toContain("There is no distribution with the supplied name.");
   expect(h.view.wslError).not.toContain("Install herdr-core");
   expect(h.view.wslChecking).toBeNull();
@@ -117,5 +118,10 @@ test("Settings uses the shared WSL probe for literal configured and home paths",
       expect(await p.exited).toBe(0);
       expect((await new Response(p.stdout).text()).replace(/\n$/, "")).toBe(core);
     }
+    await rm(core);
+    const missing = Bun.spawn(["/bin/sh", "-c", probe, "sh", ""], {
+      env: { HOME: home, SHELL: "/bin/false", PATH: "/nonexistent" }, stdout: "pipe", stderr: "pipe",
+    });
+    expect(await missing.exited).toBe(3);
   } finally { await rm(root, { recursive: true, force: true }); }
 });

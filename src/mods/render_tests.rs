@@ -1126,7 +1126,7 @@ fn settings_machines_shows_wsl_distros_on_windows(cx: &mut TestAppContext) {
     assert!(calls.borrow().unexpected.is_empty(), "{:?}", calls.borrow().unexpected);
     assert!(tree.contains("st-wsl-button"), "WSL dropdown button must render on This computer: {tree}");
     assert!(
-        tree.contains("Couldn't verify herdr-core in Debian"),
+        tree.contains("Couldn't reach WSL (Debian)"),
         "selecting a distro without hc must report an error: {tree}"
     );
     assert!(

@@ -684,7 +684,12 @@ What's about the user, never a look:
   `app.restart`) to apply a selection; no downloaded update is needed. Until
   then the current environment stays active. The app and its
   configuration (`appHome()`) stay on Windows. Startup discovery and the Settings
-  check share the bundled `frame/settings/find-core.sh`; like the rest of `frame/`,
+  check distinguish an unreachable distribution (retry after it starts) from
+  missing hc (install it in that distribution). Environment probes retry after
+  a five-second failure backoff; WSL discovery, path conversion, installation
+  and version checks stop after 30 seconds instead of waiting indefinitely.
+  Startup discovery and the Settings check share the bundled
+  `frame/settings/find-core.sh`; like the rest of `frame/`,
   it is rewritten on start, so don't edit it.
 - `font`, `font_size`, `ui_font`: used where the layout doesn't set its
   own. Herdr (main) leaves these unset. Bigger panels: `zoom`.

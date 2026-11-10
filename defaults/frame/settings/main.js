@@ -712,7 +712,9 @@ export default class Settings extends View {
         const r = await exec("wsl.exe", ["-d", value, "--cd", "~", "-e", "sh", "-c", probe, "sh", this.person.core ?? ""]);
         if (r.code !== 0) {
           const detail = r.stderr?.trim();
-          this.wslError = `Couldn't verify herdr-core in ${value}. ${detail || "Check that WSL starts and herdr-core (hc) is installed in this distribution."}`;
+          this.wslError = r.code === 3
+            ? `herdr-core (hc) is missing in ${value}. Install it in this distribution and try again.`
+            : `Couldn't reach WSL (${value}). ${detail || "Check that the distribution starts, then try again."}`;
           return;
         }
         this.change((p) => {

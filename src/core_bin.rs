@@ -92,20 +92,23 @@ fn merged_path(login: Option<&std::ffi::OsStr>, usual: &[PathBuf], current: &std
 
 /// `hc X.Y.Z` if this binary is herdr-core and runs.
 pub fn version(bin: &Path) -> Option<String> {
-    // WSL can execute Windows binaries through interop, but needs a guest core.
-    if crate::wsl::active().is_some() && bin.extension().is_some_and(|ext| ext.eq_ignore_ascii_case("exe")) {
-        return None;
+    if crate::wsl::active().is_some() {
+        return crate::wsl::version(bin).ok().flatten();
     }
     let out = command_for(bin).arg("--version").stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
     let text = crate::wsl::decode_output(&out.stdout).trim().to_owned();
     (out.status.success() && text.starts_with("hc ")).then_some(text)
 }
 
-/// The first herdr-core found, or None.
-pub fn find(configured: Option<&str>) -> Option<PathBuf> {
+/// The first herdr-core found, or None; WSL reachability failures remain errors.
+pub fn find(configured: Option<&str>) -> Result<Option<PathBuf>, String> {
     if crate::wsl::active().is_some() {
         return crate::wsl::find_core(configured);
     }
+    Ok(find_host(configured))
+}
+
+fn find_host(configured: Option<&str>) -> Option<PathBuf> {
     let home = crate::mods::home();
     let pick = |candidates: Vec<PathBuf>| candidates.into_iter().filter(|c| c.is_file()).find(|c| version(c).is_some());
     if let Some(found) = pick(configured.map(|c| vec![expand(c, &home)]).unwrap_or_default()) {
@@ -347,7 +350,7 @@ mod tests {
         std::fs::write(&bad, "#!/bin/sh\nif [ \"$1\" = --version ]; then echo hc 0.1.18; exit; fi\nread hello\necho unusable >&2\nexit 1\n").unwrap();
         std::fs::set_permissions(&bad, std::fs::Permissions::from_mode(0o755)).unwrap();
         for replacement in ["chosen", "installed"] {
-            use_core(find(Some(bad.to_str().unwrap())).unwrap());
+            use_core(find(Some(bad.to_str().unwrap())).unwrap().unwrap());
             assert!(crate::hc::Core::connect().is_err());
             let good = root.join(replacement);
             let hello = serde_json::json!({"result": {"selected": replacement}});
@@ -421,6 +424,6 @@ mod tests {
         assert_eq!(version(&dir.join("hc")), None);
         let real = dir.join("herdr-core");
         assert_eq!(version(&real).as_deref(), Some("hc 0.1.1"));
-        assert_eq!(find(Some(real.to_str().unwrap())), Some(real));
+        assert_eq!(find(Some(real.to_str().unwrap())), Ok(Some(real)));
     }
 }

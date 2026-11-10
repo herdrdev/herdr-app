@@ -20,4 +20,5 @@ for f in $("$s" -lic 'command -v herdr-core; command -v hc' 2>/dev/null) $("$s" 
 for d in "$HOME/.local/bin" "$HOME/.cargo/bin" /usr/local/bin /usr/bin /home/linuxbrew/.linuxbrew/bin "$HOME/.nix-profile/bin" /run/current-system/sw/bin "$HOME/.local/share/mise/shims"; do check "$d/herdr-core" "$d/hc"; done
 IFS=:
 for d in $PATH; do [ -n "$d" ] && check "$d/herdr-core" "$d/hc"; done
-exit 1
+# Distinguish a completed search with no guest core from a failed WSL launch.
+exit 3

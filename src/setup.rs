@@ -91,6 +91,21 @@ impl Setup {
     /// Connects to the core; if it serves this app, closes this window and
     /// opens the main one, else says what's still needed.
     fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if crate::wsl::active().is_some() {
+            let configured = settings::load_person().ok().and_then(|p| p.core);
+            match crate::core_bin::find(configured.as_deref()) {
+                Ok(Some(bin)) => crate::core_bin::use_core(bin),
+                result => {
+                    self.need = match result {
+                        Err(error) => Need::Connect(error),
+                        _ => Need::Install,
+                    };
+                    self.state = State::Ready;
+                    cx.notify();
+                    return;
+                }
+            }
+        }
         match Core::connect() {
             Ok(core) => match crate::hc::check(&core.hello) {
                 Ok(()) => {
@@ -153,7 +168,17 @@ impl Setup {
                     Ok(bin) => bin,
                     Err(e) => { this.state = State::Failed(e); cx.notify(); return; }
                 };
-                if crate::core_bin::version(&bin).is_none() {
+                let version = if crate::wsl::active().is_some() {
+                    crate::wsl::version(&bin)
+                } else {
+                    Ok(crate::core_bin::version(&bin))
+                };
+                if let Err(error) = &version {
+                    this.state = State::Failed(error.clone());
+                    cx.notify();
+                    return;
+                }
+                if version.ok().flatten().is_none() {
                     this.state = State::Failed(format!("{} isn't herdr-core (it should answer `--version` with `hc …`)", bin.display()));
                     cx.notify();
                     return;
@@ -210,7 +235,7 @@ impl Setup {
                 format!("Install it for me puts it in {place} (with hc), like its own installer: {installer}"),
             ),
             Need::Connect(error) => (
-                "Herdr can't connect to herdr-core".into(),
+                wsl.map_or_else(|| "Herdr can't connect to herdr-core".into(), |d| format!("Herdr can't reach WSL ({d}) or its herdr-core")),
                 error.clone(),
                 "Once you've resolved this, try again.".into(),
             ),
