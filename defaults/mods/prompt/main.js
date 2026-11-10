@@ -1,7 +1,7 @@
 // A text prompt. Enter saves, Esc cancels.
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { run, props, closeOverlay, theme } from "herdr";
+import { run, props, closeOverlay, theme, writeTextFile, exec, window, notify } from "herdr";
 
 export default class Prompt extends View {
   init(_props, cx) {
@@ -21,7 +21,55 @@ export default class Prompt extends View {
   submit() {
     const p = props();
     closeOverlay(p.overlay);
-    run(p.command.name, { ...(p.command.args ?? {}), name: this.text });
+    if (!this.text) return;
+    if (p.action === "create_file") {
+      const full = p.target?.dir ? `${p.target.dir}/${this.text}` : this.text;
+      writeTextFile(full, "", null).then(() => {
+        notify({ title: "Created file", body: this.text, level: "success", timeout: 1500 });
+      }).catch(e => {
+        notify({ title: "Failed to create file", body: String(e), level: "error", timeout: 3000 });
+      });
+    } else if (p.action === "create_folder") {
+      const full = p.target?.dir ? `${p.target.dir}/${this.text}` : this.text;
+      if (!p.target?.on && window()?.platform === "windows") {
+        const winPath = full.replace(/\//g, "\\");
+        exec("powershell", ["-NoProfile", "-Command", `New-Item -ItemType Directory -LiteralPath '${winPath.replace(/'/g, "''")}' -Force`]).then(() => {
+          notify({ title: "Created folder", body: this.text, level: "success", timeout: 1500 });
+        }).catch(e => {
+          notify({ title: "Failed to create folder", body: String(e), level: "error", timeout: 3000 });
+        });
+      } else {
+        exec("mkdir", ["-p", full], { on: p.target?.on }).then(() => {
+          notify({ title: "Created folder", body: this.text, level: "success", timeout: 1500 });
+        }).catch(e => {
+          notify({ title: "Failed to create folder", body: String(e), level: "error", timeout: 3000 });
+        });
+      }
+    } else if (p.action === "rename") {
+      const newPath = p.target?.parent ? `${p.target.parent}/${this.text}` : this.text;
+      if (!p.target?.on && window()?.platform === "windows") {
+        const oldWin = p.target?.oldPath?.replace(/\//g, "\\") ?? "";
+        const newWin = newPath.replace(/\//g, "\\");
+        exec("powershell", ["-NoProfile", "-Command", `Move-Item -LiteralPath '${oldWin.replace(/'/g, "''")}' -Destination '${newWin.replace(/'/g, "''")}' -Force`]).then(() => {
+          notify({ title: "Renamed", body: `${p.value} → ${this.text}`, level: "success", timeout: 1500 });
+        }).catch(e => {
+          notify({ title: "Failed to rename", body: String(e), level: "error", timeout: 3000 });
+        });
+      } else {
+        exec("mv", [p.target?.oldPath, newPath], { on: p.target?.on }).then(() => {
+          notify({ title: "Renamed", body: `${p.value} → ${this.text}`, level: "success", timeout: 1500 });
+        }).catch(e => {
+          notify({ title: "Failed to rename", body: String(e), level: "error", timeout: 3000 });
+        });
+      }
+    } else if (p.action === "find_in_folder") {
+      const query = this.text;
+      const folder = p.target?.dir || "";
+      run("terminal.open", { folder });
+      notify({ title: "Opened terminal for search", body: query, level: "info", timeout: 1500 });
+    } else if (p.command?.name) {
+      run(p.command.name, { ...(p.command.args ?? {}), name: this.text });
+    }
   }
 
   key(e, cx) {
