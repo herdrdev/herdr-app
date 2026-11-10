@@ -1394,6 +1394,20 @@ impl AppWindow {
         let (model, live) = (&self.model, &self.live);
         self.swapped.retain(|p, a| model.address_of(p).is_some() && live.contains_key(a));
         let (mut terms, mods_visible) = self.visible();
+        let covered: HashSet<&str> = terms.iter().filter_map(|(slot, _)| slot.strip_suffix(SWAP)).collect();
+        let mut displayed: HashSet<String> = terms.iter().filter(|(slot, _)| !covered.contains(slot.as_str())).map(|(slot, _)| slot.clone()).collect();
+        // Agent blocks reuse their agent's pane view even when its tab isn't shown.
+        if self.shows_agent()
+            && let Some(addr) = self.shown_agent()
+            && let Some(pane) = self.model.pane_of(&addr)
+        {
+            displayed.insert(pane);
+        }
+        for (id, t) in &self.terms {
+            if !displayed.contains(id) {
+                t.view.update(cx, |v, _| v.blur());
+            }
+        }
         // Every tab's terminals stay attached (only visible ones are drawn): tab
         // switches are instant and kitty images survive, which a repaint can't bring back.
         for c in self.model.tabs() {

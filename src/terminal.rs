@@ -607,6 +607,17 @@ impl TerminalView {
         self.shown_in.set(FRAME.load(Ordering::Relaxed));
     }
 
+    /// A hidden pane cannot render its focus loss.
+    pub fn blur(&mut self) {
+        if self.was_focused {
+            self.was_focused = false;
+            let g = self.grid.borrow();
+            if let Some(ch) = g.channel {
+                g.core.focus(ch, false);
+            }
+        }
+    }
+
     /// Sizes a terminal that isn't on screen as its pane would be (`AppWindow::fit_hidden_tabs`).
     pub fn fit(&self, cols: u16, rows: u16, cell: Size<Pixels>, scale: f32) {
         self.grid.borrow_mut().fit(cols, rows, cell, scale);
@@ -2168,6 +2179,11 @@ impl Render for TerminalView {
             }))
             .on_mouse_down(MouseButton::Left, cx.listener(|this, ev: &MouseDownEvent, window, cx| {
                 this.focus.focus(window, cx);
+                let g = this.grid.borrow();
+                if let Some(ch) = g.channel {
+                    g.core.resize(ch, g.vt.cols, g.vt.rows);
+                }
+                drop(g);
                 if link_mods(&ev.modifiers)
                     && let Some((target, _)) = this.link_at(ev.position)
                 {
