@@ -688,6 +688,8 @@ What's about the user, never a look:
   missing hc (install it in that distribution). Environment probes retry after
   a five-second failure backoff; WSL discovery, path conversion, installation
   and version checks stop after 30 seconds instead of waiting indefinitely.
+  Successful path conversions are cached (up to 512 entries per process);
+  restarting clears the cache. Guest paths still use the direct fast path.
   Startup discovery and the Settings check share the bundled
   `frame/settings/find-core.sh`; like the rest of `frame/`,
   it is rewritten on start, so don't edit it.

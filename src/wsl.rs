@@ -4,6 +4,7 @@
 //! terminals, and local mod commands run inside that distribution via `wsl.exe`
 //! while `herdr-app` itself and `~/.config/herdr-app` stay on the Windows host.
 
+use std::collections::VecDeque;
 use std::ffi::OsStr;
 use std::path::{Path, PathBuf};
 use std::process::{Command, Output, Stdio};
@@ -53,6 +54,38 @@ impl EnvState {
     }
 }
 static EXTRA_PATH: Mutex<Option<String>> = Mutex::new(None);
+const PATH_CACHE_CAP: usize = 512;
+type PathKey = (String, String, String);
+type PathCache = Mutex<VecDeque<(PathKey, String)>>;
+static PATH_CACHE: PathCache = Mutex::new(VecDeque::new());
+
+fn cached_path(
+    cache: &PathCache,
+    distro: &str,
+    direction: &str,
+    path: &str,
+    convert: impl FnOnce() -> Result<String, String>,
+) -> Result<String, String> {
+    let key = (distro.to_owned(), direction.to_owned(), path.to_owned());
+    if let Some((_, value)) = cache
+        .lock()
+        .unwrap_or_else(|e| e.into_inner())
+        .iter()
+        .find(|(k, _)| *k == key)
+    {
+        return Ok(value.clone());
+    }
+    // Do not hold the lock while WSL starts; unrelated conversions can proceed.
+    let value = convert()?;
+    let mut cache = cache.lock().unwrap_or_else(|e| e.into_inner());
+    if !cache.iter().any(|(k, _)| *k == key) {
+        if cache.len() >= PATH_CACHE_CAP {
+            cache.pop_front();
+        }
+        cache.push_back((key, value.clone()));
+    }
+    Ok(value)
+}
 
 #[derive(Clone)]
 struct Env {
@@ -500,6 +533,12 @@ pub fn linux_path(path: &Path, distro: &str) -> Result<String, String> {
 }
 
 fn convert_path(path: &str, distro: &str, direction: &str) -> Result<String, String> {
+    cached_path(&PATH_CACHE, distro, direction, path, || {
+        convert_path_uncached(path, distro, direction)
+    })
+}
+
+fn convert_path_uncached(path: &str, distro: &str, direction: &str) -> Result<String, String> {
     let mut cmd = host_command();
     cmd.args(["-d", distro, "-e", "wslpath", "-a", direction, path]);
     let out = run_wsl_timed(cmd, WSL_TIMEOUT)?;
@@ -558,6 +597,64 @@ pub fn linux_path_if_active(path: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn path_cache_hits_are_scoped_to_distro_direction_and_literal_path() {
+        let cache = Mutex::new(VecDeque::new());
+        assert_eq!(
+            cached_path(&cache, "Ubuntu", "-w", "/home/a b", || Ok("UNC".into())).unwrap(),
+            "UNC"
+        );
+        assert_eq!(
+            cached_path(&cache, "Ubuntu", "-w", "/home/a b", || panic!(
+                "cache hit must not spawn"
+            ))
+            .unwrap(),
+            "UNC"
+        );
+        for (distro, direction, path) in [
+            ("Debian", "-w", "/home/a b"),
+            ("Ubuntu", "-u", "/home/a b"),
+            ("Ubuntu", "-w", "/home/A b"),
+        ] {
+            assert_eq!(
+                cached_path(&cache, distro, direction, path, || Ok("other".into())).unwrap(),
+                "other"
+            );
+        }
+        assert_eq!(cache.lock().unwrap().len(), 4);
+    }
+
+    #[test]
+    fn path_cache_evicts_oldest_and_retries_failed_conversions() {
+        let cache = Mutex::new(VecDeque::new());
+        assert!(cached_path(&cache, "Ubuntu", "-u", "bad", || Err("starting".into())).is_err());
+        assert!(cache.lock().unwrap().is_empty());
+        assert_eq!(
+            cached_path(&cache, "Ubuntu", "-u", "bad", || Ok("recovered".into())).unwrap(),
+            "recovered"
+        );
+        for n in 0..PATH_CACHE_CAP {
+            cached_path(&cache, "Ubuntu", "-u", &n.to_string(), || {
+                Ok(format!("/{n}"))
+            })
+            .unwrap();
+        }
+        assert_eq!(cache.lock().unwrap().len(), PATH_CACHE_CAP);
+        assert_eq!(
+            cached_path(&cache, "Ubuntu", "-u", "bad", || Ok("new probe".into())).unwrap(),
+            "new probe"
+        );
+        assert_eq!(cache.lock().unwrap().len(), PATH_CACHE_CAP);
+        let recent = (PATH_CACHE_CAP - 1).to_string();
+        assert_eq!(
+            cached_path(&cache, "Ubuntu", "-u", &recent, || panic!(
+                "recent entry must remain"
+            ))
+            .unwrap(),
+            format!("/{recent}")
+        );
+    }
 
     #[test]
     fn environment_retries_after_backoff_and_caches_only_success() {
