@@ -9,7 +9,7 @@
 //! They run in foreground tasks between App updates, never inside layout or
 //! paint, so a reentrant message cannot meet a borrowed GPUI window.
 use super::policy;
-use gpui::{AnyElement, App, Bounds, HitboxBehavior, HitboxId, IntoElement, ParentElement, Pixels, Styled, Window, WindowId, canvas, div};
+use gpui::{AnyElement, App, Bounds, HitboxBehavior, HitboxId, ParentElement, Pixels, Styled, Window, WindowId, canvas, div};
 use gpui_shell::{ArgumentDescriptor, ArgumentSchema, ComponentArgument, ComponentDataValue, ComponentDescriptor, ComponentMaterializer, ComponentPayload, ComponentRegistry, ConstructorDescriptor, MaterializeRequest, StateDescriptor, StateMethodDescriptor};
 use std::{cell::RefCell, path::PathBuf, rc::{Rc, Weak}, sync::Arc};
 
@@ -46,6 +46,10 @@ pub(super) struct NativeApp {
     apply_pending: bool,
     /// Bumped by restart, so an older watcher task ends.
     generation: u64,
+    /// The program exited by itself; only restart starts it again.
+    stopped: bool,
+    /// A redraw is scheduled to retry a start that had to wait.
+    retry_pending: bool,
     #[cfg(windows)]
     process: Option<win::Process>,
 }
@@ -193,7 +197,7 @@ pub(super) fn register(registry: &mut ComponentRegistry) {
             let state = Rc::new(RefCell::new(NativeApp {
                 window: window.window_handle().window_id(), app: app.clone(), folder: folder.clone(),
                 status: "Starting…".into(), error: None, hitbox: None, rect: None, visible: false,
-                applied: None, apply_pending: false, generation: 0,
+                applied: None, apply_pending: false, generation: 0, stopped: false, retry_pending: false,
                 #[cfg(windows)] process: None,
             }));
             APPS.with_borrow_mut(|apps| apps.push(Rc::downgrade(&state)));
@@ -210,6 +214,7 @@ pub(super) fn register(registry: &mut ComponentRegistry) {
         StateMethodDescriptor::new::<State>("restart", "(): void", |state, _, _, _| {
             let mut app = state.borrow_mut();
             app.generation += 1;
+            app.stopped = false;
             app.error = None;
             app.status = "Starting…".into();
             app.applied = None;
@@ -241,12 +246,17 @@ mod win {
         Foundation::{CloseHandle, HANDLE, HWND, LPARAM, RECT},
         Graphics::Gdi::MapWindowPoints,
         System::JobObjects::*,
-        UI::Input::KeyboardAndMouse::{GetFocus, SetFocus},
         UI::WindowsAndMessaging::*,
     };
 
+    /// Process trees still closing. VS Code is single-instance per user-data
+    /// folder: a new Code.exe started while the old one shuts down hands its
+    /// window request to the dying process and then waits forever.
+    static CLOSING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
+
     pub(super) struct Process {
-        child: std::process::Child,
+        /// Taken by Drop, which hands it to the closing thread.
+        child: Option<std::process::Child>,
         job: HANDLE,
         host: HWND,
         pub(super) hwnd: Option<HWND>,
@@ -254,12 +264,41 @@ mod win {
 
     impl Drop for Process {
         fn drop(&mut self) {
-            // The whole tree: VS Code's renderers, extension hosts, terminals.
-            unsafe {
-                TerminateJobObject(self.job, 1);
-                CloseHandle(self.job);
+            // Ask the program to close like its own close button would, so VS
+            // Code keeps unsaved editors (hot exit). Only posted messages here:
+            // this can run inside an App update. Hide it at once; the tab is gone.
+            if let Some(hwnd) = self.hwnd {
+                unsafe {
+                    ShowWindowAsync(hwnd, SW_HIDE);
+                    PostMessageW(hwnd, WM_CLOSE, 0, 0);
+                }
             }
-            let _ = self.child.wait();
+            let job = self.job as usize;
+            let graceful = self.hwnd.is_some();
+            let Some(mut child) = self.child.take() else {
+                unsafe { CloseHandle(self.job) };
+                return;
+            };
+            // Then the whole tree: VS Code's renderers, extension hosts,
+            // terminals. If Herdr quits first, closing the job's last handle
+            // ends the tree too (KILL_ON_JOB_CLOSE).
+            CLOSING.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
+            let closer = std::thread::Builder::new().name("native-app-close".into()).spawn(move || {
+                let deadline = std::time::Instant::now() + Duration::from_secs(if graceful { 5 } else { 0 });
+                while std::time::Instant::now() < deadline {
+                    if let Ok(Some(_)) = child.try_wait() { break; }
+                    std::thread::sleep(Duration::from_millis(100));
+                }
+                unsafe {
+                    TerminateJobObject(job as HANDLE, 1);
+                    CloseHandle(job as HANDLE);
+                }
+                let _ = child.wait();
+                // The job's last process may outlive the launcher briefly.
+                std::thread::sleep(Duration::from_millis(300));
+                CLOSING.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
+            });
+            if closer.is_err() { CLOSING.fetch_sub(1, std::sync::atomic::Ordering::SeqCst); }
         }
     }
 
@@ -279,23 +318,41 @@ mod win {
         // SAFETY: a plain C struct; all-zero means no limits.
         let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
         limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        let process = Process { child, job, host, hwnd: None };
+        let mut process = Process { child: None, job, host, hwnd: None };
         unsafe {
             if SetInformationJobObject(job, JobObjectExtendedLimitInformation, (&raw const limits).cast(), size_of_val(&limits) as u32) == 0
-                || AssignProcessToJobObject(job, process.child.as_raw_handle() as HANDLE) == 0
+                || AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE) == 0
             {
-                anyhow::bail!("cannot own the process tree: {}", std::io::Error::last_os_error());
+                let error = std::io::Error::last_os_error();
+                let mut child = child;
+                let _ = child.kill();
+                anyhow::bail!("cannot own the process tree: {error}");
             }
         }
+        process.child = Some(child);
         Ok(process)
     }
 
     pub(super) fn start(state: &State, window: &mut Window, cx: &mut App) {
         let (generation, app, folder) = {
             let app = state.borrow();
-            if app.process.is_some() || app.error.is_some() { return; }
+            if app.process.is_some() || app.error.is_some() || app.stopped { return; }
             (app.generation, app.app.clone(), app.folder.clone())
         };
+        if CLOSING.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+            let mut app = state.borrow_mut();
+            app.status = "Waiting for the previous window to close…".into();
+            if !app.retry_pending {
+                app.retry_pending = true;
+                let weak = Rc::downgrade(state);
+                window.spawn(cx, async move |cx| {
+                    cx.background_executor().timer(Duration::from_millis(200)).await;
+                    if let Some(state) = weak.upgrade() { state.borrow_mut().retry_pending = false; }
+                    let _ = cx.update(|window, _| window.refresh());
+                }).detach();
+            }
+            return;
+        }
         let host = match HasWindowHandle::window_handle(window).map(|h| h.as_raw()) {
             Ok(RawWindowHandle::Win32(handle)) => handle.hwnd.get() as HWND,
             _ => { state.borrow_mut().error = Some("No Win32 host window".into()); return; }
@@ -335,8 +392,9 @@ mod win {
         let (job, host, hwnd) = {
             let mut app = state.borrow_mut();
             let Some(process) = app.process.as_mut() else { return false };
-            if let Ok(Some(status)) = process.child.try_wait() {
+            if let Some(Ok(Some(status))) = process.child.as_mut().map(|child| child.try_wait()) {
                 app.process = None;
+                app.stopped = true;
                 app.status = format!("Exited ({status}). Restart to open it again.");
                 return true;
             }
@@ -422,9 +480,10 @@ mod win {
             let style = (style & !(WS_POPUP | WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU)) | WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
             SetWindowLongPtrW(hwnd, GWL_STYLE, style as isize);
             let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
-            let ex = (ex & !(WS_EX_APPWINDOW | WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE | WS_EX_DLGMODALFRAME)) | WS_EX_NOPARENTNOTIFY;
+            let ex = ex & !(WS_EX_APPWINDOW | WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE | WS_EX_DLGMODALFRAME | WS_EX_NOPARENTNOTIFY);
             SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex as isize);
             SetParent(hwnd, host);
+            focus::adopt(host, hwnd);
             SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED | SWP_NOACTIVATE);
         }
     }
@@ -441,8 +500,7 @@ mod win {
         unsafe {
             if !visible {
                 // Typing must not keep going to a window nobody sees.
-                let focus = GetFocus();
-                if focus == hwnd || IsChild(hwnd, focus) != 0 { SetFocus(host); }
+                focus::release(host, hwnd);
             }
             let show = if visible { SWP_SHOWWINDOW } else { SWP_HIDEWINDOW };
             SetWindowPos(hwnd, HWND_TOP, rect[0], rect[1], rect[2].max(1), rect[3].max(1), SWP_NOACTIVATE | show);
@@ -453,6 +511,93 @@ mod win {
     }
 
     pub(super) fn focus(hwnd: HWND) {
-        unsafe { SetFocus(hwnd); }
+        focus::give(hwnd);
+    }
+
+    /// Keyboard focus between Herdr and embedded windows.
+    ///
+    /// A Chromium window takes keyboard focus when its top-level window is
+    /// activated, which a child window never is. Herdr's window is subclassed
+    /// instead: a click on an embedded window (WM_PARENTNOTIFY) gives it focus,
+    /// a click on Herdr's own surface takes focus back, and activating Herdr
+    /// returns focus to the embedded window that had it. Reparenting attached
+    /// both processes' input queues, so SetFocus works across them.
+    mod focus {
+        use std::cell::{Cell, RefCell};
+        use windows_sys::Win32::{
+            Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM},
+            UI::Input::KeyboardAndMouse::{GetFocus, SetFocus},
+            UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
+            UI::WindowsAndMessaging::*,
+        };
+
+        const ID: usize = 0x4845_5244; // "HERD"
+
+        thread_local! {
+            /// Embedded windows, by host.
+            static EMBEDDED: RefCell<Vec<(HWND, HWND)>> = const { RefCell::new(Vec::new()) };
+            /// The embedded window that should have focus while Herdr is active.
+            static ACTIVE: Cell<HWND> = const { Cell::new(std::ptr::null_mut()) };
+        }
+
+        pub fn adopt(host: HWND, hwnd: HWND) {
+            let first = EMBEDDED.with_borrow_mut(|list| {
+                list.retain(|&(_, h)| unsafe { IsWindow(h) } != 0);
+                let first = !list.iter().any(|&(o, _)| o == host);
+                list.push((host, hwnd));
+                first
+            });
+            if first { unsafe { SetWindowSubclass(host, Some(proc), ID, 0) }; }
+        }
+
+        /// The window is hidden: its typing goes back to Herdr.
+        pub fn release(host: HWND, hwnd: HWND) {
+            if ACTIVE.get() == hwnd { ACTIVE.set(std::ptr::null_mut()); }
+            let focus = unsafe { GetFocus() };
+            if focus == hwnd || unsafe { IsChild(hwnd, focus) } != 0 { unsafe { SetFocus(host) }; }
+        }
+
+        pub fn give(hwnd: HWND) {
+            ACTIVE.set(hwnd);
+            unsafe { SetFocus(hwnd) };
+        }
+
+        fn embedded_at(host: HWND, point: POINT) -> Option<HWND> {
+            let child = unsafe { ChildWindowFromPointEx(host, point, CWP_SKIPINVISIBLE) };
+            EMBEDDED.with_borrow(|list| list.iter().find(|&&(o, h)| o == host && h == child).map(|&(_, h)| h))
+        }
+
+        unsafe extern "system" fn proc(host: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM, _: usize, _: usize) -> LRESULT {
+            match msg {
+                WM_PARENTNOTIFY => {
+                    let event = (wparam & 0xffff) as u32;
+                    if matches!(event, WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN | WM_POINTERDOWN) {
+                        let mut point = POINT { x: (lparam & 0xffff) as i16 as i32, y: ((lparam >> 16) & 0xffff) as i16 as i32 };
+                        // Pointer notifications carry screen coordinates; mouse ones the host's client coordinates.
+                        if event == WM_POINTERDOWN { unsafe { windows_sys::Win32::Graphics::Gdi::ScreenToClient(host, &mut point) }; }
+                        if let Some(hwnd) = embedded_at(host, point) { give(hwnd); }
+                    }
+                }
+                WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN | WM_NCLBUTTONDOWN => {
+                    // Herdr's own surface: its keys go to Herdr again.
+                    ACTIVE.set(std::ptr::null_mut());
+                    if unsafe { GetFocus() } != host { unsafe { SetFocus(host) }; }
+                }
+                WM_SETFOCUS => {
+                    let result = unsafe { DefSubclassProc(host, msg, wparam, lparam) };
+                    let active = ACTIVE.get();
+                    if !active.is_null() && unsafe { IsWindow(active) } != 0 && unsafe { IsWindowVisible(active) } != 0 {
+                        unsafe { SetFocus(active) };
+                    }
+                    return result;
+                }
+                WM_NCDESTROY => {
+                    EMBEDDED.with_borrow_mut(|list| list.retain(|&(o, _)| o != host));
+                    unsafe { RemoveWindowSubclass(host, Some(proc), ID) };
+                }
+                _ => {}
+            }
+            unsafe { DefSubclassProc(host, msg, wparam, lparam) }
+        }
     }
 }
