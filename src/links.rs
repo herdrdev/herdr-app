@@ -86,16 +86,12 @@ pub fn resolve(link: &str, cwd: Option<&Path>) -> Option<Target> {
         return Some(Target::Url(link.to_owned()));
     }
     let guest = crate::wsl::active().is_some();
-    let home = crate::wsl::home().or_else(std::env::home_dir);
+    let home = if guest { crate::wsl::home() } else { std::env::home_dir() };
     let expanded = if let Some(rest) = link.strip_prefix("~/") {
         join_file_path(&home?, rest, guest)
     } else if let Some(var) = link.strip_prefix('$') {
         let (name, rest) = var.split_once('/').unwrap_or((var, ""));
-        let base = match name {
-            "PWD" => cwd?.to_path_buf(),
-            "HOME" => home?,
-            _ => PathBuf::from(std::env::var_os(name)?),
-        };
+        let base = link_variable(name, cwd, home.as_deref(), guest)?;
         join_file_path(&base, rest, guest)
     } else {
         PathBuf::from(link)
@@ -124,6 +120,15 @@ pub fn resolve(link: &str, cwd: Option<&Path>) -> Option<Target> {
     if bare == full.to_str()? { return None; }
     let bare = crate::wsl::host_path_if_active(Path::new(bare)).ok()?;
     bare.exists().then(|| Target::File(bare))
+}
+
+fn link_variable(name: &str, cwd: Option<&Path>, home: Option<&Path>, guest: bool) -> Option<PathBuf> {
+    match name {
+        "PWD" => cwd.map(Path::to_path_buf),
+        "HOME" => home.map(Path::to_path_buf),
+        _ if guest => None,
+        _ => std::env::var_os(name).map(PathBuf::from),
+    }
 }
 
 fn join_file_path(base: &Path, rest: &str, guest: bool) -> PathBuf {
@@ -220,6 +225,17 @@ fn open_system(arg: &std::ffi::OsStr) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guest_link_variables_never_read_host_environment() {
+        let home = Path::new("/home/guest");
+        let cwd = Path::new("/work");
+        assert_eq!(link_variable("HOME", Some(cwd), Some(home), true), Some(home.to_path_buf()));
+        assert_eq!(link_variable("PWD", Some(cwd), Some(home), true), Some(cwd.to_path_buf()));
+        assert_eq!(link_variable("HOME", Some(cwd), None, true), None);
+        assert_eq!(link_variable("PATH", Some(cwd), Some(home), true), None);
+        assert_eq!(link_variable("PATH", None, None, false), std::env::var_os("PATH").map(PathBuf::from));
+    }
 
     #[test]
     fn guest_file_joins_keep_posix_separators_on_every_host() {

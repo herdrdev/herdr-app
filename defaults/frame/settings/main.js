@@ -56,6 +56,7 @@ export default class Settings extends View {
     this.machineEdit = null;
     this.machineNotice = null;
     this.wslDistros = [];
+    this.wslListError = null;
     this.wslChecking = null;
     this.wslError = null;
     this.handle = cx.focus_handle();
@@ -559,13 +560,13 @@ export default class Settings extends View {
     if (window()?.platform === "windows") {
       try {
         const w = await exec("wsl.exe", ["--list", "--quiet"]);
-        if (w.code === 0) {
-          this.wslDistros = w.stdout
-            .split(/\r?\n/)
-            .map((s) => s.replace(/\0/g, "").trim())
-            .filter((s, i, all) => s && !["docker-desktop", "docker-desktop-data"].includes(s.toLowerCase()) && all.findIndex((d) => d.toLowerCase() === s.toLowerCase()) === i);
-        }
-      } catch {}
+        if (w.code !== 0) throw new Error(w.stderr || w.stdout || `wsl.exe exited with ${w.code}`);
+        this.wslListError = null;
+        this.wslDistros = w.stdout
+          .split(/\r?\n/)
+          .map((s) => s.replace(/\0/g, "").trim())
+          .filter((s, i, all) => s && !["docker-desktop", "docker-desktop-data"].includes(s.toLowerCase()) && all.findIndex((d) => d.toLowerCase() === s.toLowerCase()) === i);
+      } catch (e) { this.wslListError = `Couldn't list WSL distros: ${String(e)}`; }
     }
     try {
       const r = await hc(["machine", "ls", "--json"]);
@@ -831,6 +832,7 @@ export default class Settings extends View {
       .child(this.heading(t, "Machines"))
       .child(div().pb(8).text_size(12.5).line_height("18px").text_color(t.dim).child("Your computers, reached over ssh. Their terminals keep running when you disconnect."))
       .child(this.row(t, "This computer", localAbout, localControl).id("st-local-machine"))
+      .when(Boolean(this.wslListError), (el) => el.child(div().pt(8).pb(4).text_size(12.5).text_color(t.dim).child(this.wslListError)))
       .when(Boolean(this.wslError), (el) => el.child(div().pt(8).pb(4).text_size(12.5).text_color(t.blocked).child(this.wslError)))
       .children((this.machineList ?? []).map((m) => this.machineRow(t, m, version)))
       .when(this.machineList === null && !this.machineError, (el) => el.child(h_flex().py(14).gap(8).items_center().child(svg("mods/workspace-chrome/spinner.svg").size(12).text_color(t.working).spin(900)).child(div().text_size(12.5).text_color(t.dim).child("Reading machines…"))))

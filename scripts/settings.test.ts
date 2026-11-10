@@ -22,6 +22,28 @@ function harness(raw: string | null = null, writeError?: string, probeError = ""
   return { view, cx, writes, commands, async settle() { for (let i = 0; i < pending.length; i++) await pending[i]; } };
 }
 
+test("Settings surfaces distro list failures and recovers without losing the selected distro", async () => {
+  let result: { code: number; stdout: string; stderr: string } | Error = new Error("wsl.exe unavailable");
+  const Settings = new Function("View", "window", "exec", "hc", `${source}; return Settings;`)(
+    class {}, () => ({ platform: "windows" }),
+    async () => { if (result instanceof Error) throw result; return result; },
+    async () => ({ code: 0, stdout: '{"machines":[]}', stderr: "" }),
+  );
+  const view = new Settings();
+  view.person = { wsl: "Ubuntu" };
+  view.wslDistros = [];
+  await view.loadMachines();
+  expect(view.wslListError).toContain("Couldn't list WSL distros: Error: wsl.exe unavailable");
+  expect(view.person.wsl).toBe("Ubuntu");
+  result = { code: 1, stdout: "", stderr: "WSL is starting" };
+  await view.loadMachines();
+  expect(view.wslListError).toContain("WSL is starting");
+  result = { code: 0, stdout: "Ubuntu\r\n日本語\r\nubuntu\r\ndocker-desktop\r\n", stderr: "" };
+  await view.loadMachines();
+  expect(view.wslListError).toBeNull();
+  expect(view.wslDistros).toEqual(["Ubuntu", "日本語"]);
+});
+
 test("Settings WSL Restart runs app.restart without requesting an update", () => {
   const button = source.slice(source.indexOf("const restartBtn ="), source.indexOf("const statusDot ="));
   const click = button.match(/\.on_click\((.*)\)\n/)?.[1];

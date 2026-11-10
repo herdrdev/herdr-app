@@ -548,7 +548,11 @@ fn convert_path_uncached(path: &str, distro: &str, direction: &str) -> Result<St
             decode_output(&out.stderr).trim()
         ));
     }
-    let text = String::from_utf8(out.stdout).map_err(|e| e.to_string())?;
+    converted_path(&out.stdout, path, direction)
+}
+
+fn converted_path(bytes: &[u8], path: &str, direction: &str) -> Result<String, String> {
+    let text = decode_output(bytes);
     let text = text.strip_suffix('\n').unwrap_or(&text);
     if text.is_empty() || (direction == "-u" && !text.starts_with('/')) {
         return Err(format!("WSL did not return an absolute path for {path}"));
@@ -597,6 +601,20 @@ pub fn linux_path_if_active(path: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn converted_paths_decode_utf16le_and_require_absolute_guest_paths() {
+        let bytes: Vec<u8> = "\u{feff}/home/日本語/file\r\n"
+            .encode_utf16()
+            .flat_map(u16::to_le_bytes)
+            .collect();
+        assert_eq!(
+            converted_path(&bytes, "fixture", "-u").unwrap(),
+            "/home/日本語/file"
+        );
+        assert!(converted_path(b"relative\n", "fixture", "-u").is_err());
+        assert!(converted_path(b"\n", "fixture", "-w").is_err());
+    }
 
     #[test]
     fn path_cache_hits_are_scoped_to_distro_direction_and_literal_path() {
