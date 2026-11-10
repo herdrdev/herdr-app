@@ -144,6 +144,9 @@ struct Shared {
     state: GhosttyRenderState,
     size: GhosttySizeReportSize,
     held_since: Option<Instant>,
+    /// The kitty placements on screen when a synchronized update began: the
+    /// live list can change while the held text cannot.
+    held_placements: Option<Vec<Placement>>,
     title_changed: bool,
     /// Replies the terminal writes back to the program (e.g. kitty graphics acks).
     replies: Vec<u8>,
@@ -622,8 +625,12 @@ unsafe extern "C" fn on_render_hold(_t: GhosttyTerminal, userdata: *mut c_void, 
         // Capture the finished frame the program wants on screen before it redraws.
         unsafe { ghostty_render_state_update(shared.state, _t) };
         shared.held_since = Some(Instant::now());
+        // Images are read live, so freeze them with the text. Drawing them
+        // from the redraw while the held text is older tears the frame.
+        shared.held_placements = Some(read_placements(_t, shared.size.columns, shared.size.rows));
     } else {
         shared.held_since = None;
+        shared.held_placements = None;
     }
 }
 
@@ -652,6 +659,141 @@ const SCROLLBACK_MAX_BYTES: usize = 10_000_000;
 /// Units per pixel for selection gestures (see `select`).
 const SUBPIXEL: f32 = 64.0;
 
+fn grid_ref(term: GhosttyTerminal, tag: GhosttyPointTag, x: u16, y: u32) -> Option<GhosttyGridRef> {
+    let mut r = GhosttyGridRef { size: std::mem::size_of::<GhosttyGridRef>(), ..Default::default() };
+    let mut p = GhosttyPoint { tag, ..Default::default() };
+    p.value.coordinate = GhosttyPointCoordinate { x, y };
+    (unsafe { ghostty_terminal_grid_ref(term, p, &mut r) } == GHOSTTY_SUCCESS).then_some(r)
+}
+
+/// Visible kitty graphics placements, bottom layer first.
+fn read_placements(term: GhosttyTerminal, cols: u16, rows: u16) -> Vec<Placement> {
+    let mut out = Vec::new();
+    unsafe {
+        let mut g: GhosttyKittyGraphics = std::ptr::null_mut();
+        if ghostty_terminal_get(term, GHOSTTY_TERMINAL_DATA_KITTY_GRAPHICS, &mut g as *mut _ as *mut c_void) != GHOSTTY_SUCCESS || g.is_null() {
+            return out;
+        }
+        let mut it: GhosttyKittyGraphicsPlacementIterator = std::ptr::null_mut();
+        if ghostty_kitty_graphics_placement_iterator_new(std::ptr::null(), &mut it) != GHOSTTY_SUCCESS {
+            return out;
+        }
+        let mut specs = Vec::new();
+        if ghostty_kitty_graphics_get(g, GHOSTTY_KITTY_GRAPHICS_DATA_PLACEMENT_ITERATOR, &mut it as *mut _ as *mut c_void) == GHOSTTY_SUCCESS {
+            while ghostty_kitty_graphics_placement_next(it) {
+                let (mut id, mut z, mut virt) = (0u32, 0i32, false);
+                ghostty_kitty_graphics_placement_get(it, GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_IMAGE_ID, &mut id as *mut _ as *mut c_void);
+                ghostty_kitty_graphics_placement_get(it, GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_Z, &mut z as *mut _ as *mut c_void);
+                ghostty_kitty_graphics_placement_get(it, GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_IS_VIRTUAL, &mut virt as *mut _ as *mut c_void);
+                let img = ghostty_kitty_graphics_image(g, id);
+                if virt {
+                    let (mut placement_id, mut columns, mut rows) = (0u32, 0u32, 0u32);
+                    ghostty_kitty_graphics_placement_get(it, GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_PLACEMENT_ID, &mut placement_id as *mut _ as *mut c_void);
+                    ghostty_kitty_graphics_placement_get(it, GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_COLUMNS, &mut columns as *mut _ as *mut c_void);
+                    ghostty_kitty_graphics_placement_get(it, GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_ROWS, &mut rows as *mut _ as *mut c_void);
+                    specs.push(KittyVirtualPlacementSpec { image_id: id, placement_id, columns, rows });
+                    continue;
+                }
+                if img.is_null() {
+                    continue;
+                }
+                let mut info = GhosttyKittyGraphicsPlacementRenderInfo { size: std::mem::size_of::<GhosttyKittyGraphicsPlacementRenderInfo>(), ..Default::default() };
+                if ghostty_kitty_graphics_placement_render_info(it, img, term, &mut info) != GHOSTTY_SUCCESS || !info.viewport_visible {
+                    continue;
+                }
+                let mut generation = 0u64;
+                ghostty_kitty_graphics_image_get(img, GHOSTTY_KITTY_IMAGE_DATA_GENERATION, &mut generation as *mut _ as *mut c_void);
+                out.push(Placement {
+                    image: id,
+                    generation,
+                    col: info.viewport_col,
+                    row: info.viewport_row,
+                    width: info.pixel_width,
+                    height: info.pixel_height,
+                    source: [info.source_x, info.source_y, info.source_width, info.source_height],
+                    offset: [0, 0],
+                    cell_pixels: None,
+                    z,
+                });
+            }
+        }
+        ghostty_kitty_graphics_placement_iterator_free(it);
+        out.extend(kitty_virtual_image_placements(term, cols, rows, g, &specs));
+    }
+    out.sort_by_key(|p| p.z);
+    out
+}
+
+fn kitty_virtual_image_placements(term: GhosttyTerminal, cols: u16, rows: u16, graphics: GhosttyKittyGraphics, specs: &[KittyVirtualPlacementSpec]) -> Vec<Placement> {
+    if specs.is_empty() {
+        return Vec::new();
+    }
+    let (mut width, mut height) = (0u32, 0u32);
+    unsafe {
+        ghostty_terminal_get(term, GHOSTTY_TERMINAL_DATA_WIDTH_PX, &mut width as *mut _ as *mut c_void);
+        ghostty_terminal_get(term, GHOSTTY_TERMINAL_DATA_HEIGHT_PX, &mut height as *mut _ as *mut c_void);
+    }
+    let cell_width = (width / u32::from(cols.max(1))).max(1);
+    let cell_height = (height / u32::from(rows.max(1))).max(1);
+    let mut runs = Vec::new();
+    for y in 0..rows {
+        let Some(first) = grid_ref(term, GHOSTTY_POINT_TAG_VIEWPORT, 0, u32::from(y)) else { continue };
+        let mut row = GhosttyRow::default();
+        let mut placeholders = false;
+        unsafe {
+            ghostty_grid_ref_row(&first, &mut row);
+            ghostty_row_get(row, GHOSTTY_ROW_DATA_KITTY_VIRTUAL_PLACEHOLDER, &mut placeholders as *mut _ as *mut c_void);
+        }
+        if !placeholders {
+            continue;
+        }
+        let mut current: Option<KittyVirtualRun> = None;
+        for x in 0..cols {
+            let cell = grid_ref(term, GHOSTTY_POINT_TAG_VIEWPORT, x, u32::from(y))
+                .and_then(|grid_ref| kitty_virtual_cell(x, y, &grid_ref));
+            match cell {
+                Some(cell) => {
+                    if let Some(run) = current.as_mut() {
+                        if run.append(cell) {
+                            continue;
+                        }
+                        runs.push(*run);
+                    }
+                    current = Some(KittyVirtualRun::from_cell(cell));
+                }
+                None => {
+                    if let Some(run) = current.take() {
+                        runs.push(run);
+                    }
+                }
+            }
+        }
+        if let Some(run) = current {
+            runs.push(run);
+        }
+    }
+    let mut placements = Vec::new();
+    for run in runs {
+        let id = run.image_id();
+        let Some(spec) = specs.iter().find(|spec| spec.image_id == id
+            && (run.placement_id == 0 || spec.placement_id == run.placement_id)) else { continue };
+        let image = unsafe { ghostty_kitty_graphics_image(graphics, id) };
+        if image.is_null() {
+            continue;
+        }
+        let (mut image_width, mut image_height, mut generation) = (0u32, 0u32, 0u64);
+        unsafe {
+            ghostty_kitty_graphics_image_get(image, GHOSTTY_KITTY_IMAGE_DATA_WIDTH, &mut image_width as *mut _ as *mut c_void);
+            ghostty_kitty_graphics_image_get(image, GHOSTTY_KITTY_IMAGE_DATA_HEIGHT, &mut image_height as *mut _ as *mut c_void);
+            ghostty_kitty_graphics_image_get(image, GHOSTTY_KITTY_IMAGE_DATA_GENERATION, &mut generation as *mut _ as *mut c_void);
+        }
+        if let Some(placement) = kitty_virtual_placement_geometry(run, *spec, image_width, image_height, cell_width, cell_height, generation) {
+            placements.push(placement);
+        }
+    }
+    placements
+}
+
 impl Vt {
     pub fn new(cols: u16, rows: u16) -> Vt {
         unsafe {
@@ -675,7 +817,7 @@ impl Vt {
             ok(ghostty_mouse_event_new(std::ptr::null(), &mut mouse_event), "mouse_event_new");
 
             install_png_decoder();
-            let mut shared = Box::new(Shared { state, size: GhosttySizeReportSize { rows: rows.max(1), columns: cols.max(1), cell_width: 0, cell_height: 0 }, held_since: None, title_changed: false, replies: Vec::new(), clipboard_write: true, clipboard: [None, None] });
+            let mut shared = Box::new(Shared { state, size: GhosttySizeReportSize { rows: rows.max(1), columns: cols.max(1), cell_width: 0, cell_height: 0 }, held_since: None, held_placements: None, title_changed: false, replies: Vec::new(), clipboard_write: true, clipboard: [None, None] });
             let ud = &mut *shared as *mut Shared as *const c_void;
             ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_USERDATA, ud);
             let hold: GhosttyTerminalRenderHoldFn = Some(on_render_hold);
@@ -780,134 +922,15 @@ impl Vt {
 
     /// Visible kitty graphics placements, bottom layer first.
     pub fn placements(&self) -> Vec<Placement> {
+        if let Some(placements) = &self.shared.held_placements {
+            return placements.clone();
+        }
         if let Some(placements) = self.placements_cache.borrow().as_ref() {
             return placements.clone();
         }
-        let mut out = Vec::new();
-        unsafe {
-            let mut g: GhosttyKittyGraphics = std::ptr::null_mut();
-            if ghostty_terminal_get(self.term, GHOSTTY_TERMINAL_DATA_KITTY_GRAPHICS, &mut g as *mut _ as *mut c_void) != GHOSTTY_SUCCESS || g.is_null() {
-                return out;
-            }
-            let mut it: GhosttyKittyGraphicsPlacementIterator = std::ptr::null_mut();
-            if ghostty_kitty_graphics_placement_iterator_new(std::ptr::null(), &mut it) != GHOSTTY_SUCCESS {
-                return out;
-            }
-            let mut specs = Vec::new();
-            if ghostty_kitty_graphics_get(g, GHOSTTY_KITTY_GRAPHICS_DATA_PLACEMENT_ITERATOR, &mut it as *mut _ as *mut c_void) == GHOSTTY_SUCCESS {
-                while ghostty_kitty_graphics_placement_next(it) {
-                    let (mut id, mut z, mut virt) = (0u32, 0i32, false);
-                    ghostty_kitty_graphics_placement_get(it, GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_IMAGE_ID, &mut id as *mut _ as *mut c_void);
-                    ghostty_kitty_graphics_placement_get(it, GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_Z, &mut z as *mut _ as *mut c_void);
-                    ghostty_kitty_graphics_placement_get(it, GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_IS_VIRTUAL, &mut virt as *mut _ as *mut c_void);
-                    let img = ghostty_kitty_graphics_image(g, id);
-                    if virt {
-                        let (mut placement_id, mut columns, mut rows) = (0u32, 0u32, 0u32);
-                        ghostty_kitty_graphics_placement_get(it, GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_PLACEMENT_ID, &mut placement_id as *mut _ as *mut c_void);
-                        ghostty_kitty_graphics_placement_get(it, GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_COLUMNS, &mut columns as *mut _ as *mut c_void);
-                        ghostty_kitty_graphics_placement_get(it, GHOSTTY_KITTY_GRAPHICS_PLACEMENT_DATA_ROWS, &mut rows as *mut _ as *mut c_void);
-                        specs.push(KittyVirtualPlacementSpec { image_id: id, placement_id, columns, rows });
-                        continue;
-                    }
-                    if img.is_null() {
-                        continue;
-                    }
-                    let mut info = GhosttyKittyGraphicsPlacementRenderInfo { size: std::mem::size_of::<GhosttyKittyGraphicsPlacementRenderInfo>(), ..Default::default() };
-                    if ghostty_kitty_graphics_placement_render_info(it, img, self.term, &mut info) != GHOSTTY_SUCCESS || !info.viewport_visible {
-                        continue;
-                    }
-                    let mut generation = 0u64;
-                    ghostty_kitty_graphics_image_get(img, GHOSTTY_KITTY_IMAGE_DATA_GENERATION, &mut generation as *mut _ as *mut c_void);
-                    out.push(Placement {
-                        image: id,
-                        generation,
-                        col: info.viewport_col,
-                        row: info.viewport_row,
-                        width: info.pixel_width,
-                        height: info.pixel_height,
-                        source: [info.source_x, info.source_y, info.source_width, info.source_height],
-                        offset: [0, 0],
-                        cell_pixels: None,
-                        z,
-                    });
-                }
-            }
-            ghostty_kitty_graphics_placement_iterator_free(it);
-            out.extend(self.kitty_virtual_image_placements(g, &specs));
-        }
-        out.sort_by_key(|p| p.z);
+        let out = read_placements(self.term, self.cols, self.rows);
         *self.placements_cache.borrow_mut() = Some(out.clone());
         out
-    }
-
-    fn kitty_virtual_image_placements(&self, graphics: GhosttyKittyGraphics, specs: &[KittyVirtualPlacementSpec]) -> Vec<Placement> {
-        if specs.is_empty() {
-            return Vec::new();
-        }
-        let (mut width, mut height) = (0u32, 0u32);
-        unsafe {
-            ghostty_terminal_get(self.term, GHOSTTY_TERMINAL_DATA_WIDTH_PX, &mut width as *mut _ as *mut c_void);
-            ghostty_terminal_get(self.term, GHOSTTY_TERMINAL_DATA_HEIGHT_PX, &mut height as *mut _ as *mut c_void);
-        }
-        let cell_width = (width / u32::from(self.cols.max(1))).max(1);
-        let cell_height = (height / u32::from(self.rows.max(1))).max(1);
-        let mut runs = Vec::new();
-        for y in 0..self.rows {
-            let Some(first) = self.grid_ref(GHOSTTY_POINT_TAG_VIEWPORT, 0, u32::from(y)) else { continue };
-            let mut row = GhosttyRow::default();
-            let mut placeholders = false;
-            unsafe {
-                ghostty_grid_ref_row(&first, &mut row);
-                ghostty_row_get(row, GHOSTTY_ROW_DATA_KITTY_VIRTUAL_PLACEHOLDER, &mut placeholders as *mut _ as *mut c_void);
-            }
-            if !placeholders {
-                continue;
-            }
-            let mut current: Option<KittyVirtualRun> = None;
-            for x in 0..self.cols {
-                let cell = self.grid_ref(GHOSTTY_POINT_TAG_VIEWPORT, x, u32::from(y))
-                    .and_then(|grid_ref| kitty_virtual_cell(x, y, &grid_ref));
-                match cell {
-                    Some(cell) => {
-                        if let Some(run) = current.as_mut() {
-                            if run.append(cell) {
-                                continue;
-                            }
-                            runs.push(*run);
-                        }
-                        current = Some(KittyVirtualRun::from_cell(cell));
-                    }
-                    None => {
-                        if let Some(run) = current.take() {
-                            runs.push(run);
-                        }
-                    }
-                }
-            }
-            if let Some(run) = current {
-                runs.push(run);
-            }
-        }
-        let mut placements = Vec::new();
-        for run in runs {
-            let id = run.image_id();
-            let Some(spec) = specs.iter().find(|spec| spec.image_id == id
-                && (run.placement_id == 0 || spec.placement_id == run.placement_id)) else { continue };
-            let image = unsafe { ghostty_kitty_graphics_image(graphics, id) };
-            if image.is_null() {
-                continue;
-            }
-            let (mut image_width, mut image_height, mut generation) = (0u32, 0u32, 0u64);
-            unsafe {
-                ghostty_kitty_graphics_image_get(image, GHOSTTY_KITTY_IMAGE_DATA_WIDTH, &mut image_width as *mut _ as *mut c_void);
-                ghostty_kitty_graphics_image_get(image, GHOSTTY_KITTY_IMAGE_DATA_HEIGHT, &mut image_height as *mut _ as *mut c_void);
-                ghostty_kitty_graphics_image_get(image, GHOSTTY_KITTY_IMAGE_DATA_GENERATION, &mut generation as *mut _ as *mut c_void);
-            }
-            if let Some(placement) = kitty_virtual_placement_geometry(run, *spec, image_width, image_height, cell_width, cell_height, generation) {
-                placements.push(placement);
-            }
-        }
-        placements
     }
 
     /// An image's pixels as BGRA (what GPUI uploads), cropped to `source`.
@@ -1036,10 +1059,7 @@ impl Vt {
     }
 
     fn grid_ref(&self, tag: GhosttyPointTag, x: u16, y: u32) -> Option<GhosttyGridRef> {
-        let mut r = GhosttyGridRef { size: std::mem::size_of::<GhosttyGridRef>(), ..Default::default() };
-        let mut p = GhosttyPoint { tag, ..Default::default() };
-        p.value.coordinate = GhosttyPointCoordinate { x, y };
-        (unsafe { ghostty_terminal_grid_ref(self.term, p, &mut r) } == GHOSTTY_SUCCESS).then_some(r)
+        grid_ref(self.term, tag, x, y)
     }
 
     /// The link at a viewport cell: a link the program marked (OSC 8), or a
@@ -1539,6 +1559,7 @@ impl Vt {
                 let cfg = GhosttyTerminalModeConfig { mode: SYNC_OUTPUT, value: false };
                 ghostty_terminal_set(self.term, GHOSTTY_TERMINAL_OPT_MODE, &cfg as *const _ as *const c_void);
                 self.shared.held_since = None;
+                self.shared.held_placements = None;
             }
             let state = self.shared.state;
             if self.shared.held_since.is_none() {
@@ -2266,6 +2287,44 @@ mod tests {
         assert_eq!(vt.placements().len(), 1);
         vt.write(b"\x1b_Ga=d,d=I,i=7,q=2\x1b\\");
         assert!(vt.placements().is_empty());
+    }
+
+    #[test]
+    fn a_synchronized_update_holds_the_images_of_its_frame() {
+        let mut vt = Vt::new(20, 6);
+        vt.resize(20, 6, 8, 8);
+        virtual_image(&mut vt, 7, 0);
+        vt.write(b"\x1b[38;5;7m");
+        vt.write(placeholder(0, 0, None).as_bytes());
+        vt.frame();
+        assert_eq!(vt.placements().len(), 1);
+
+        // A redraw starts, removes the image and puts it back. The screen must
+        // keep the held frame's image until the redraw ends.
+        vt.write(b"\x1b[?2026h");
+        vt.write(b"\x1b_Ga=d,d=I,i=7,q=2\x1b\\");
+        vt.frame();
+        assert_eq!(vt.placements().len(), 1, "the held frame's image stays");
+        vt.write(b"\x1b[?2026l");
+        vt.frame();
+        assert!(vt.placements().is_empty(), "the next frame drops it");
+    }
+
+    #[test]
+    fn a_synchronized_update_shows_a_new_image_only_on_the_next_frame() {
+        let mut vt = Vt::new(20, 6);
+        vt.resize(20, 6, 8, 8);
+        assert!(vt.placements().is_empty());
+
+        vt.write(b"\x1b[?2026h\x1b[38;5;7m");
+        virtual_image(&mut vt, 7, 0);
+        vt.write(placeholder(0, 0, None).as_bytes());
+        vt.frame();
+        assert!(vt.placements().is_empty(), "a new image waits for the hold");
+
+        vt.write(b"\x1b[?2026l");
+        vt.frame();
+        assert_eq!(vt.placements().len(), 1);
     }
 
     #[test]
