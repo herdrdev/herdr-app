@@ -217,15 +217,13 @@ pub(super) fn register(registry: &mut ComponentRegistry) {
             Ok(ComponentDataValue::Null)
         }),
         StateMethodDescriptor::new::<State>("focus", "(): void", |state, _, _, _| {
-            // Every copy of a mod gets its commands: only a shown pane, or one
-            // shown within a second, takes the keyboard.
+            // Every copy of a mod gets its commands: only a pane shown within a
+            // second takes the keyboard. The next frame gives it, outside this
+            // App update (SetFocus sends messages to Herdr's window at once).
             let mut app = state.borrow_mut();
             app.focus_until = Some(std::time::Instant::now() + std::time::Duration::from_secs(1));
             #[cfg(windows)]
-            if app.visible && let Some(child) = app.embedded.as_ref().map(|e| e.child) {
-                app.focus_until = None;
-                win::focus(child);
-            }
+            if let Some(embedded) = app.embedded.as_mut() { embedded.applied = None; }
             Ok(ComponentDataValue::Null)
         }),
     ])).unwrap();
@@ -319,13 +317,13 @@ mod win {
         };
         if !QUIT_HOOKED.get() {
             QUIT_HOOKED.set(true);
-            // Quitting Herdr gives every window back before the process ends.
+            // Quitting Herdr closes every adopted window as its own close
+            // button would. Only posted messages: this runs inside an App update.
             cx.on_app_quit(|_| {
                 super::APPS.with_borrow(|apps| {
                     for app in apps.iter().filter_map(std::rc::Weak::upgrade) {
                         if let Some(e) = app.borrow_mut().embedded.take() {
                             let e = std::mem::ManuallyDrop::new(e);
-                            release(e.child, e.style, e.ex_style, screen_rect(e.container));
                             unsafe { PostMessageW(e.child, WM_CLOSE, 0, 0) };
                         }
                     }
@@ -428,12 +426,12 @@ mod win {
         let Some(embedded) = app.embedded.as_mut() else { return false };
         if unsafe { IsWindow(embedded.child) } == 0 || unsafe { GetParent(embedded.child) } != embedded.container {
             // Closed by the program: nothing to give back.
-            let e = app.embedded.take().unwrap();
-            focus::forget(e.container);
-            unsafe { DestroyWindow(e.container) };
-            std::mem::forget(e);
+            let e = std::mem::ManuallyDrop::new(app.embedded.take().unwrap());
             app.closed = true;
             app.status = "Closed.".into();
+            drop(app);
+            focus::forget(e.container);
+            unsafe { DestroyWindow(e.container) };
             return true;
         }
         // The program may move or resize its own window: put it back.
@@ -482,14 +480,15 @@ mod win {
         struct Search<'a> { class: &'a str, program: String, found: Vec<HWND>, checked: Vec<(u32, bool)> }
         unsafe extern "system" fn visit(hwnd: HWND, data: LPARAM) -> windows_sys::core::BOOL {
             let search = unsafe { &mut *(data as *mut Search) };
-            if unsafe { IsWindowVisible(hwnd) } == 0 || !unsafe { GetWindow(hwnd, GW_OWNER) }.is_null() || unsafe { GetWindowTextLengthW(hwnd) } == 0 {
-                return 1;
-            }
+            if unsafe { IsWindowVisible(hwnd) } == 0 || !unsafe { GetWindow(hwnd, GW_OWNER) }.is_null() { return 1; }
+            // The class first: a title read can send a message to a window
+            // of this process, such as Herdr's own.
             let mut name = [0u16; 64];
             let len = unsafe { GetClassNameW(hwnd, name.as_mut_ptr(), name.len() as i32) };
             if String::from_utf16_lossy(&name[..len.max(0) as usize]) != search.class { return 1; }
             let mut pid = 0;
             unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+            if pid == std::process::id() || unsafe { GetWindowTextLengthW(hwnd) } == 0 { return 1; }
             let ours = match search.checked.iter().find(|(p, _)| *p == pid) {
                 Some(&(_, ours)) => ours,
                 None => {
@@ -530,13 +529,22 @@ mod win {
     }
 
     /// Give the container the pane's latest geometry, visibility and holes.
+    ///
+    /// Runs outside App updates, and makes its native calls without any
+    /// borrow: SetFocus and SetWindowPos deliver messages to Herdr's own
+    /// window at once, which can draw a frame that reads this state again.
     pub(super) fn apply(state: &State) {
-        let mut app = state.borrow_mut();
-        app.apply_pending = false;
-        if !app.needs_apply() { return; }
-        let (rect, visible, holes) = (app.rect.unwrap(), app.visible, app.holes.clone());
-        let embedded = app.embedded.as_mut().unwrap();
-        let (child, container) = (embedded.child, embedded.container);
+        let (child, container, crop, rect, visible, holes, give) = {
+            let mut app = state.borrow_mut();
+            app.apply_pending = false;
+            if !app.needs_apply() { return; }
+            let (rect, visible, holes) = (app.rect.unwrap(), app.visible, app.holes.clone());
+            let give = visible && app.focus_until.take().is_some_and(|until| std::time::Instant::now() <= until);
+            app.status = if visible { "Shown.".into() } else { "Hidden while its pane is covered.".into() };
+            let embedded = app.embedded.as_mut().unwrap();
+            embedded.applied = Some((rect, visible, holes.clone()));
+            (embedded.child, embedded.container, embedded.crop, rect, visible, holes, give)
+        };
         let width = rect[2].max(1);
         let height = rect[3].max(1);
         unsafe {
@@ -545,13 +553,9 @@ mod win {
             SetWindowPos(container, HWND_TOP, rect[0], rect[1], width, height, SWP_NOACTIVATE | show);
         }
         super::super::win32::set_holes(container, width, height, &holes);
-        let [x, y, w, h] = child_rect(width, height, embedded.crop);
+        let [x, y, w, h] = child_rect(width, height, crop);
         unsafe { SetWindowPos(child, std::ptr::null_mut(), x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE) };
-        embedded.applied = Some((rect, visible, holes));
-        if visible && app.focus_until.take().is_some_and(|until| std::time::Instant::now() <= until) {
-            focus::give(child);
-        }
-        app.status = if visible { "Shown.".into() } else { "Hidden while its pane is covered.".into() };
+        if give { focus::give(child); }
     }
 
     /// What of the window is frame or title bar, by asking the window itself:
@@ -598,10 +602,6 @@ mod win {
             tracing::debug!(?crop, title, "native app crop");
             crop
         }
-    }
-
-    pub(super) fn focus(hwnd: HWND) {
-        focus::give(hwnd);
     }
 
     /// Herdr's container windows for adopted windows.
