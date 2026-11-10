@@ -489,6 +489,12 @@ mod win {
             unsafe { DestroyWindow(e.container) };
             return true;
         }
+        // Its own minimize button: show it again in the pane (posted, so no
+        // message reaches this process while the state is borrowed).
+        if unsafe { IsIconic(embedded.child) } != 0 {
+            unsafe { ShowWindowAsync(embedded.child, SW_SHOWNOACTIVATE) };
+            embedded.applied = None;
+        }
         // The program may move or resize its own window: put it back.
         if let Some((rect, _, _)) = &embedded.applied {
             let expected = child_rect(rect[2], rect[3], embedded.crop);
@@ -625,9 +631,10 @@ mod win {
         if give { focus::give(child); }
     }
 
-    /// What of the window is frame or title bar, by asking the window itself:
-    /// its client area, and where its hit test reports caption parts. Runs off
-    /// the UI thread: it sends a few hundred messages to the other process.
+    /// What of the window is frame, by asking the window itself: its client
+    /// area, and where its hit test reports resize borders. The program's own
+    /// title bar (VS Code: menu, search, layout controls) stays. Runs off the
+    /// UI thread: it sends a few dozen messages to the other process.
     fn measure(hwnd: HWND) -> Crop {
         unsafe {
             let window = screen_rect(hwnd);
@@ -647,24 +654,14 @@ mod win {
                 SendMessageTimeoutW(hwnd, WM_NCHITTEST, 0, lparam, SMTO_ABORTIFHUNG, 50, &mut result);
                 result as u32
             };
-            let caption = |code: u32| matches!(code, HTCAPTION | HTSYSMENU | HTMINBUTTON | HTMAXBUTTON | HTCLOSE | HTHELP | HTTOP | HTTOPLEFT | HTTOPRIGHT);
-            // The custom title bar: the lowest row where any column is caption.
             let width = client.right;
-            let limit = (client.bottom / 3).min(160);
-            let mut title = 0;
-            for column in [0.35, 0.5, 0.65, 0.8, 0.95] {
-                let x = origin.x + (width as f32 * column) as i32;
-                for y in title..limit {
-                    if caption(hit(x, origin.y + y)) { title = y + 1; }
-                }
-            }
-            crop.top += title;
+            let center = origin.x + width / 2;
+            crop.top += (0..24).take_while(|i| matches!(hit(center, origin.y + i), HTTOP | HTTOPLEFT | HTTOPRIGHT)).count() as i32;
             // Resize borders left despite WS_MAXIMIZE: cut those too.
             let middle = origin.y + client.bottom / 2;
             let edge = |from: i32, step: i32, codes: &[u32]| (0..24).take_while(|i| codes.contains(&hit(from + step * i, middle))).count() as i32;
             crop.left += edge(origin.x, 1, &[HTLEFT]);
             crop.right += edge(origin.x + width - 1, -1, &[HTRIGHT]);
-            let center = origin.x + width / 2;
             crop.bottom += (0..24).take_while(|i| matches!(hit(center, origin.y + client.bottom - 1 - i), HTBOTTOM | HTBOTTOMLEFT | HTBOTTOMRIGHT)).count() as i32;
             crop
         }

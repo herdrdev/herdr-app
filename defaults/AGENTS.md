@@ -50,7 +50,7 @@ external-browser fallback in mods that open pages.
 On Windows, `NativeAppState("vscode", target)` and `NativeApp(state)` show the
 person's own VS Code window on `target` (a folder URI such as
 `vscode-remote://wsl+Ubuntu/root/app`, or a local folder) inside the element.
-Herdr asks VS Code for a window, adopts it and crops its title bar; closing the
+Herdr asks VS Code for a window, adopts it and crops its frame; closing the
 pane closes that window. `status()`, `error()`, `shown()`, `reopen()` and
 `focus()` follow and control it. The bundled `vscode` mod is one VS Code tab.
 
