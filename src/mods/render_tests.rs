@@ -1223,6 +1223,23 @@ fn settings_machines_shows_wsl_distros_on_windows(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
+fn settings_wsl_list_error_keeps_selected_or_active_picker(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for active in [false, true] {
+        let mut p = props();
+        p["section"] = json!("machines");
+        let mut values = fixture(true, p, updates("current", "current"));
+        values.get_mut("window").unwrap()["platform"] = json!("windows");
+        values.get_mut("settings").unwrap()["wsl"] = if active { json!("Ubuntu") } else { Value::Null };
+        let setup = format!("this.wslDistros = []; this.person.wsl = {}; this.wslListError = \"Couldn't list WSL distros: unavailable\";", if active { "null" } else { "'Ubuntu'" });
+        let tree = describe_with_values(cx, &staged, "frame/settings", values, Some(&setup)).unwrap();
+        assert!(tree.contains("Couldn't list WSL distros: unavailable"), "list failure must be visible: {tree}");
+        assert!(tree.contains("st-wsl-button"), "selected or active WSL must keep the picker: {tree}");
+    }
+}
+
+#[gpui::test]
 fn settings_wsl_distinguishes_active_pending_and_save_errors(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();

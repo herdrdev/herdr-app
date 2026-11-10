@@ -119,7 +119,7 @@ pub fn prepend_path(dir: &Path) {
     }
     let dir = dir.to_string_lossy().into_owned();
     if !dir.is_empty() {
-        *EXTRA_PATH.lock().unwrap() = Some(dir);
+        *EXTRA_PATH.lock().unwrap_or_else(|e| e.into_inner()) = Some(dir);
     }
 }
 
@@ -362,7 +362,11 @@ pub fn command(program: impl AsRef<OsStr>, cwd: Option<&str>) -> Command {
     }
     c.args(["--cd", &dir, "-e"]);
     if let Some(e) = env() {
-        let path = match EXTRA_PATH.lock().unwrap().as_deref() {
+        let path = match EXTRA_PATH
+            .lock()
+            .unwrap_or_else(|e| e.into_inner())
+            .as_deref()
+        {
             Some(extra) => path_with_core_first(&e.path, extra),
             None => e.path.clone(),
         };
@@ -464,6 +468,9 @@ pub fn decode_output(bytes: &[u8]) -> String {
 }
 
 /// Parses `wsl.exe --list --quiet` output into distribution names, excluding Docker's internal stores.
+/// Production listing lives in defaults/frame/settings/main.js (loadMachines).
+/// Keep trimming, case-insensitive deduplication and Docker filtering in sync;
+/// both suites include a Unicode distro fixture. No Rust production caller lists distros.
 #[cfg(test)]
 pub fn parse_distros(bytes: &[u8]) -> Vec<String> {
     let mut out = Vec::new();
@@ -783,14 +790,63 @@ mod tests {
 
     #[test]
     fn parses_utf8_and_utf16le_distro_lists_and_skips_docker() {
-        let utf8 = b"Ubuntu\r\ndocker-desktop\r\nDebian\r\ndocker-desktop-data\r\n\r\n";
-        assert_eq!(parse_distros(utf8), vec!["Ubuntu", "Debian"]);
+        let utf8 = "Ubuntu\r\ndocker-desktop\r\nDebian\r\n日本語\r\ndocker-desktop-data\r\n\r\n"
+            .as_bytes();
+        assert_eq!(parse_distros(utf8), vec!["Ubuntu", "Debian", "日本語"]);
 
         let mut utf16 = vec![0xFF, 0xFE];
-        for u in "Ubuntu-24.04\r\ndocker-desktop\r\nArch\r\n".encode_utf16() {
+        for u in "Ubuntu-24.04\r\ndocker-desktop\r\nArch\r\n日本語\r\n".encode_utf16() {
             utf16.extend_from_slice(&u.to_le_bytes());
         }
-        assert_eq!(parse_distros(&utf16), vec!["Ubuntu-24.04", "Arch"]);
+        assert_eq!(
+            parse_distros(&utf16),
+            vec!["Ubuntu-24.04", "Arch", "日本語"]
+        );
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires a Windows host with WSL installed"]
+    fn windows_wsl_list_decodes_real_distribution_names() {
+        let mut cmd = host_command();
+        cmd.args(["--list", "--quiet"]);
+        let Ok(out) = run_wsl_timed(cmd, WSL_TIMEOUT) else {
+            eprintln!("skipping: WSL is unavailable");
+            return;
+        };
+        if !out.status.success() {
+            eprintln!("skipping: WSL is unavailable");
+            return;
+        }
+        for name in parse_distros(&out.stdout) {
+            assert!(!name.trim().is_empty());
+            assert!(!name.contains('\0'));
+            assert!(!name.to_ascii_lowercase().starts_with("docker-desktop"));
+        }
+    }
+
+    #[cfg(windows)]
+    #[test]
+    #[ignore = "requires a Windows host with an installed WSL distribution"]
+    fn windows_wslpath_round_trip_uses_real_mounts() {
+        let mut cmd = host_command();
+        cmd.args(["--list", "--quiet"]);
+        let Ok(out) = run_wsl_timed(cmd, WSL_TIMEOUT) else {
+            eprintln!("skipping: WSL is unavailable");
+            return;
+        };
+        if !out.status.success() {
+            eprintln!("skipping: WSL is unavailable");
+            return;
+        }
+        let Some(distro) = parse_distros(&out.stdout).into_iter().next() else {
+            eprintln!("skipping: no WSL distribution installed");
+            return;
+        };
+        let host = std::env::temp_dir();
+        let guest = linux_path(&host, &distro).unwrap();
+        let back = host_path(Path::new(&guest), &distro).unwrap();
+        assert_eq!(host.canonicalize().unwrap(), back.canonicalize().unwrap());
     }
 
     #[test]

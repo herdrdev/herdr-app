@@ -562,6 +562,8 @@ export default class Settings extends View {
         const w = await exec("wsl.exe", ["--list", "--quiet"]);
         if (w.code !== 0) throw new Error(w.stderr || w.stdout || `wsl.exe exited with ${w.code}`);
         this.wslListError = null;
+        // Keep trimming, deduplication and Docker filtering in sync with
+        // src/wsl.rs::parse_distros; both test suites include Unicode names.
         this.wslDistros = w.stdout
           .split(/\r?\n/)
           .map((s) => s.replace(/\0/g, "").trim())
@@ -830,7 +832,7 @@ export default class Settings extends View {
       : statusDot;
     return v_flex().w_full()
       .child(this.heading(t, "Machines"))
-      .child(div().pb(8).text_size(12.5).line_height("18px").text_color(t.dim).child("Your computers, reached over ssh. Their terminals keep running when you disconnect."))
+      .child(div().pb(8).text_size(12.5).line_height("18px").text_color(t.dim).child("On Windows, This computer can use WSL. Other computers are reached over ssh. Their terminals keep running when you disconnect."))
       .child(this.row(t, "This computer", localAbout, localControl).id("st-local-machine"))
       .when(Boolean(this.wslListError), (el) => el.child(div().pt(8).pb(4).text_size(12.5).text_color(t.dim).child(this.wslListError)))
       .when(Boolean(this.wslError), (el) => el.child(div().pt(8).pb(4).text_size(12.5).text_color(t.blocked).child(this.wslError)))
