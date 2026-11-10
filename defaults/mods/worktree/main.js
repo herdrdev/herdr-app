@@ -142,7 +142,7 @@ export default class Worktree extends View {
           this.dirty = (await git(repo.top, ["--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain"], this.on)).out !== "";
           this.unpushed = (await submodules(repo.top, this.on)).unpushed;
         }
-        if (repo && this.opening) this.list = await checkouts(repo, this.on);
+        if (repo && props().action !== "remove") await this.loadLists(repo);
         this.repo = repo;
         cx.notify();
         // The list (and with it the filter input) only mounts once loading is
@@ -174,11 +174,91 @@ export default class Worktree extends View {
     this.busy = true;
     this.error = "";
     cx.notify();
-    try { this.error = props().action === "remove" ? await this.remove() : await this.create(); }
+    try { this.error = props().action === "remove" ? await this.remove() : props().branch ? await this.resolveBranch(this.text.trim()) : await this.create(); }
     catch (error) { this.error = String(error); }
     this.busy = false;
     if (!this.error) this.close();
     cx.notify();
+  }
+
+  // for-each-ref lines: "name\tunix", newest first.
+  branchesFrom(out) {
+    return out.split("\n").filter(Boolean).map((line) => {
+      const [name, at] = line.split("\t");
+      return { name, at: Number(at) || 0 };
+    }).sort((a, b) => b.at - a.at);
+  }
+
+  // "origin/feature/name" → { remote, name }. A remote's HEAD is not a branch.
+  remotesFrom(out) {
+    return this.branchesFrom(out).flatMap((row) => {
+      const slash = row.name.indexOf("/");
+      if (slash <= 0) return [];
+      const remote = row.name.slice(0, slash);
+      const name = row.name.slice(slash + 1);
+      if (name === "HEAD") return [];
+      return [{ remote, name, at: row.at }];
+    });
+  }
+
+  async loadLists(repo = this.repo) {
+    const format = ["for-each-ref", "--format=%(refname:short)%09%(committerdate:unix)"];
+    this.list = await checkouts(repo, this.on);
+    const heads = await git(repo.main, [...format, "refs/heads"], this.on);
+    const remotes = await git(repo.main, [...format, "refs/remotes"], this.on);
+    this.branches = this.branchesFrom(heads.ok ? heads.out : "");
+    this.remotes = this.remotesFrom(remotes.ok ? remotes.out : "");
+  }
+
+  async localExists(name) {
+    return (await git(this.repo.main, ["show-ref", "--verify", "--quiet", `refs/heads/${name}`], this.on)).ok;
+  }
+
+  treePath(branch) {
+    return `${ROOT(this.userHome)}/${this.repo.name}/${slug(branch)}`;
+  }
+
+  async added(path, args) {
+    const r = await git(this.repo.top, args, this.on, 600_000);
+    if (!r.ok) return r.err || "git worktree add failed.";
+    const p = props() ?? {};
+    const space = { folder: path, machine: this.on ?? "" };
+    if (p.tab !== undefined) space.tab = p.tab;
+    if (p.argv !== undefined) space.argv = p.argv;
+    run("space.new", space);
+    return "";
+  }
+
+  // "" or an error. A branch already in this.list opens that checkout.
+  async place(kind, branch, remote) {
+    const name = (branch ?? "").trim();
+    if (!name) return "Type a branch name.";
+    const checked = (this.list ?? []).find((c) => c.branch === name);
+    if (kind !== "new" && checked) {
+      this.open(checked);
+      return "";
+    }
+    if (kind === "new") {
+      if (await this.localExists(name)) return `Branch ${name} already exists.`;
+      const path = this.treePath(name);
+      return this.added(path, ["worktree", "add", "-b", name, path, "HEAD"]);
+    }
+    if (kind === "remote" && !(await this.localExists(name))) {
+      const path = this.treePath(name);
+      return this.added(path, ["worktree", "add", "--track", "-b", name, path, remote]);
+    }
+    const path = this.treePath(name);
+    return this.added(path, ["worktree", "add", path, name]);
+  }
+
+  // {branch}: local, else the one remote with that short name, else from HEAD.
+  async resolveBranch(name) {
+    const branch = (name ?? "").trim();
+    if (!branch) return "Type a branch name.";
+    if ((this.list ?? []).some((c) => c.branch === branch) || await this.localExists(branch)) return this.place("local", branch);
+    const hits = (this.remotes ?? []).filter((r) => r.name === branch);
+    if (hits.length === 1) return this.place("remote", branch, `${hits[0].remote}/${hits[0].name}`);
+    return this.place("new", branch);
   }
 
   async create() {
