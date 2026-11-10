@@ -625,7 +625,9 @@ The main ones:
   `app.check_updates` (only a successful check reports Up to date; a failed check clears the checked time and can be retried), `app.update_core` (a newer herdr-core of this generation, terminals kept;
   never one a package manager owns), `app.welcome`, `app.whats_new`, `app.feedback {message?, from?}` (from `"person"` or `"agent"`; opens a review window, where the person can paste up to 3 screenshots; never sends until the person clicks Send), `app.reset`,
   `app.theme {name}`, `app.zoom_in`, `app.zoom_out`, `app.zoom_reset`,
-  `app.update` (restart into a downloaded update).
+  `app.update` (restart into a downloaded update),
+  `app.restart` (save layout documents and restart without requiring an update;
+  terminals keep running).
   Add machine lists all named ssh-config hosts in a scrollable list. Machines
   that need a password, a new host key or herdr-core installed show what to run
   in your own terminal; the picker updates once it is added. Other machines are
@@ -678,8 +680,9 @@ What's about the user, never a look:
   runs "This computer": its herdr-core (`hc`), local spaces, terminals,
   agents, shell and local mod commands (`home()`, `exec`, `files`). Absent
   uses Windows itself. Available in Settings → Machines on the This computer
-  row; herdr-core must already be installed there. Choose Restart to apply a
-  selection; until then the current environment stays active. The app and its
+  row; herdr-core must already be installed there. Choose Restart (or run
+  `app.restart`) to apply a selection; no downloaded update is needed. Until
+  then the current environment stays active. The app and its
   configuration (`appHome()`) stay on Windows. Startup discovery and the Settings
   check share the bundled `frame/settings/find-core.sh`; like the rest of `frame/`,
   it is rewritten on start, so don't edit it.

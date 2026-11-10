@@ -814,7 +814,7 @@ export default class Settings extends View {
       .text_size(13)
       .font_semibold()
       .hover((s) => s.opacity(0.9))
-      .on_click(() => run("app.update"))
+      .on_click(() => run("app.restart"))
       .child("Restart");
     const statusDot = div().w(7).h(7).rounded(4).bg(t.ansi2);
     const localControl = hasWsl

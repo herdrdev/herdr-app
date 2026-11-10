@@ -22,6 +22,16 @@ function harness(raw: string | null = null, writeError?: string, probeError = ""
   return { view, cx, writes, commands, async settle() { for (let i = 0; i < pending.length; i++) await pending[i]; } };
 }
 
+test("Settings WSL Restart runs app.restart without requesting an update", () => {
+  const button = source.slice(source.indexOf("const restartBtn ="), source.indexOf("const statusDot ="));
+  const click = button.match(/\.on_click\((.*)\)\n/)?.[1];
+  expect(click).toBeDefined();
+  const commands: string[] = [];
+  const onClick = new Function("run", `return (${click});`)((name: string) => commands.push(name));
+  onClick();
+  expect(commands).toEqual(["app.restart"]);
+});
+
 test("Settings refuses to overwrite invalid JSON and reports write failures", async () => {
   for (const raw of ["{broken", "null", "[]", "42"]) {
     const h = harness(raw);

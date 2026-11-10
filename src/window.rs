@@ -3441,10 +3441,16 @@ impl AppWindow {
             }
             "app.quit" => cx.quit(),
             "app.update" => {
-                let wsl_restart = cfg!(windows) && self.person.wsl.as_deref() != crate::wsl::active();
-                if !crate::update::apply() && !wsl_restart {
+                if !crate::update::apply() {
                     return self.fail("no update is ready yet");
                 }
+                self.drain_documents(window, cx);
+                if !crate::update::relaunch() {
+                    return self.fail("cannot restart Herdr; close and reopen it to switch");
+                }
+                cx.quit();
+            }
+            "app.restart" => {
                 self.drain_documents(window, cx);
                 if !crate::update::relaunch() {
                     return self.fail("cannot restart Herdr; close and reopen it to switch");
