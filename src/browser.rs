@@ -1,5 +1,6 @@
 //! A native HTTP(S) view for trusted mods. Web pages get no Herdr IPC bridge.
 mod policy;
+mod embed;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(windows)]
@@ -143,7 +144,7 @@ impl Browser {
 /// a cached view can still be on screen without executing its canvas again.
 /// Hide children for overlays, clipping, or an absent (inactive-tab) hitbox.
 pub fn end_frame(overlay: bool) -> impl IntoElement {
-    canvas(|_, _, _| (), move |_, _, window, _| {
+    canvas(|_, _, _| (), move |_, _, window, cx| {
         VIEWS.with_borrow_mut(|views| {
             views.retain(|weak| {
                 let Some(view) = weak.upgrade() else { return false };
@@ -152,6 +153,7 @@ pub fn end_frame(overlay: bool) -> impl IntoElement {
                 true
             });
         });
+        embed::end_frame(overlay, window, cx);
     })
 }
 
@@ -218,5 +220,6 @@ pub fn components() -> FrozenComponentRegistry {
         .with_documentation("Native browser element. Retain BrowserState in init and render Browser(state).")
         .with_constructors(vec![ConstructorDescriptor::new("Browser", vec![ArgumentDescriptor::new("state", ArgumentSchema::Entity("HerdrBrowserState"))], |args| Ok(ComponentPayload::new(args[0].clone())))])
         .with_methods(vec![])).unwrap();
+    embed::register(&mut registry);
     registry.freeze().unwrap()
 }
