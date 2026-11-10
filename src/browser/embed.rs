@@ -29,6 +29,9 @@ struct Launch {
     args: Vec<String>,
     /// Win32 class of the program's top-level windows.
     class: &'static str,
+    /// What the title of a window already showing the target contains as a
+    /// " - "-separated part (VS Code: the folder's name, maybe with " [WSL: …]").
+    title: String,
 }
 
 /// A rectangle in device pixels, relative to the host window's client area.
@@ -85,7 +88,9 @@ fn vscode(target: &str) -> anyhow::Result<Launch> {
     } else {
         args.push(target.to_owned());
     }
-    Ok(Launch { program, args, class: "Chrome_WidgetWin_1" })
+    let name = target.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or_default();
+    let title = url::form_urlencoded::parse(format!("n={name}").as_bytes()).next().map(|(_, v)| v.into_owned()).unwrap_or_default();
+    Ok(Launch { program, args, class: "Chrome_WidgetWin_1", title })
 }
 
 impl NativeApp {
@@ -384,9 +389,11 @@ mod win {
                 let now = program_windows(&launch);
                 if let Some(&hwnd) = now.iter().find(|h| !before.contains(h)) { break hwnd; }
                 // A program that already shows this folder brings that window
-                // to the front instead of opening another.
+                // to the front instead of opening another. Windows may not let
+                // it come forward: then it is found by its title.
                 let front = unsafe { GetForegroundWindow() };
                 if opened.elapsed() > Duration::from_secs(2) && front != foreground && now.contains(&front) { break front; }
+                if opened.elapsed() > Duration::from_secs(3) && let Some(hwnd) = showing(&now, &launch.title) { break hwnd; }
                 let failed = matches!(child.try_wait(), Ok(Some(status)) if !status.success());
                 if failed || opened.elapsed() > Duration::from_secs(20) {
                     let mut app = state.borrow_mut();
@@ -521,6 +528,18 @@ mod win {
             CloseHandle(process);
             (ok != 0).then(|| String::from_utf16_lossy(&buffer[..len as usize]))
         }
+    }
+
+    /// The one window whose title has `part` as a " - "-separated part.
+    fn showing(windows: &[HWND], part: &str) -> Option<HWND> {
+        if part.is_empty() { return None; }
+        let matches: Vec<HWND> = windows.iter().copied().filter(|&hwnd| {
+            let mut text = [0u16; 512];
+            let len = unsafe { GetWindowTextW(hwnd, text.as_mut_ptr(), text.len() as i32) };
+            let title = String::from_utf16_lossy(&text[..len.max(0) as usize]);
+            title.split(" - ").any(|p| p == part || p.strip_prefix(part).is_some_and(|rest| rest.starts_with(" [")))
+        }).collect();
+        (matches.len() == 1).then(|| matches[0])
     }
 
     /// Visible, unowned top-level windows of the launch's program.
