@@ -1188,8 +1188,8 @@ fn settings_machines_shows_wsl_distros_on_windows(cx: &mut TestAppContext) {
         .unwrap();
     assert!(calls3.borrow().unexpected.is_empty(), "{:?}", calls3.borrow().unexpected);
     assert!(
-        tree3.contains("Popover \"st-wsl-popover\"") && tree3.contains("@trigger") && tree3.contains("@content"),
-        "dropdown must open in an anchored Popover attached to its trigger button: {tree3}"
+        tree3.contains("Popup \"st-wsl-popover\"") && tree3.contains("@trigger") && tree3.contains("@content"),
+        "dropdown must open in an anchored Popup attached to its trigger button: {tree3}"
     );
     assert!(tree3.contains("st-wsl-list"), "dropdown list must render when picking='wsl': {tree3}");
     let list_line = tree3.lines().find(|l| l.contains("st-wsl-list")).unwrap();
