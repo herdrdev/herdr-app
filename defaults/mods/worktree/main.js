@@ -191,7 +191,7 @@ export default class Worktree extends View {
     if (!r.ok) return r.err || "git worktree add failed.";
     const p = props();
     // Leave spaces unnamed so they follow the checkout folder and nest under the repo.
-    run("space.new", { folder: path, machine: this.on, tab: p.tab, argv: p.argv });
+    run("space.new", { folder: path, machine: this.on ?? "", tab: p.tab, argv: p.argv });
     return "";
   }
 
@@ -205,7 +205,7 @@ export default class Worktree extends View {
     this.close();
     const s = spaceOf(c.path, this.list, this.on, spaces(), panes());
     if (s) run("space.select", { id: s.id });
-    else run("space.new", { folder: c.path, machine: this.on });
+    else run("space.new", { folder: c.path, machine: this.on ?? "" });
   }
 
   async remove() {
