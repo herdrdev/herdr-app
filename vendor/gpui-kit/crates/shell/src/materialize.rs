@@ -470,7 +470,7 @@ struct Behavior {
     ///
     /// [`DockChromeSlots`]: crate::dock::DockChromeSlots
     dock_chrome: crate::dock::DockChromeHooks,
-    /// The retained scroll position a `VirtualList` was told to drive.
+    /// The retained scroll position a plain area or `VirtualList` was told to drive.
     virtual_scroll: Option<crate::entities::EntityHandle>,
     /// This item's one-based position in its collection, and the collection's
     /// size — "tab 2 of 5". Announced, never drawn.
@@ -2162,6 +2162,13 @@ fn flex_element(
         return finish(element, refinement, children);
     }
 
+    // Keep script child indices ahead of the invisible geometry observers
+    // installed by pointer handlers.
+    let (element, children) = if behavior.virtual_scroll.is_some() {
+        (element.children(children), Children::new())
+    } else {
+        (element, children)
+    };
     let scroll_x = behavior.scroll_x;
     let scroll_y = behavior.scroll_y;
     // A plain element has no focus or role of its own, so GPUI's builders are
@@ -2198,6 +2205,7 @@ fn flex_element(
         });
     }
     let stateful = components::tooltip::with_tooltip(stateful, &behavior, window);
+    let scroll_handle = behavior.virtual_scroll.and_then(|handle| runtime.entities().scroll(handle));
     if behavior.scrollbar {
         let mut stateful = stateful;
         stateful.style().refine(&refinement);
@@ -2206,14 +2214,17 @@ fn flex_element(
             (true, true) => Scrollable::new(stateful, ScrollbarAxis::Both)
                 .id(identity.clone())
                 .mode(behavior.scrollbar_mode)
+                .track_scroll(scroll_handle.clone())
                 .into_any_element(),
             (true, false) => Scrollable::new(stateful, ScrollbarAxis::Horizontal)
                 .id(identity.clone())
                 .mode(behavior.scrollbar_mode)
+                .track_scroll(scroll_handle.clone())
                 .into_any_element(),
             (false, true) => Scrollable::new(stateful, ScrollbarAxis::Vertical)
                 .id(identity.clone())
                 .mode(behavior.scrollbar_mode)
+                .track_scroll(scroll_handle.clone())
                 .into_any_element(),
             (false, false) => stateful.into_any_element(),
         };
@@ -2226,15 +2237,15 @@ fn flex_element(
     // `Scrollable` owns a position of its own, on the inner area it builds.
     let stateful = match (scroll_x, scroll_y) {
         (true, true) => {
-            components::scrollbar::track_scroll_position(stateful, &identity, window, cx)
+            components::scrollbar::track_scroll_position(stateful, &identity, scroll_handle.clone(), window, cx)
                 .overflow_scroll()
         }
         (true, false) => {
-            components::scrollbar::track_scroll_position(stateful, &identity, window, cx)
+            components::scrollbar::track_scroll_position(stateful, &identity, scroll_handle.clone(), window, cx)
                 .overflow_x_scroll()
         }
         (false, true) => {
-            components::scrollbar::track_scroll_position(stateful, &identity, window, cx)
+            components::scrollbar::track_scroll_position(stateful, &identity, scroll_handle.clone(), window, cx)
                 .overflow_y_scroll()
         }
         (false, false) => stateful,

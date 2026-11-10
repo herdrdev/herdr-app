@@ -157,6 +157,10 @@ enum Record {
         application: Option<Rc<ApplicationGeneration>>,
         subscriptions: Vec<Subscription>,
     },
+    Scroll {
+        handle: PlainScrollHandle,
+        application: Option<Rc<ApplicationGeneration>>,
+    },
     /// The scroll position of a virtualized list, and the item it has been
     /// asked to scroll to.
     ///
@@ -169,6 +173,13 @@ enum Record {
         handle: VirtualListScrollHandle,
         application: Option<Rc<ApplicationGeneration>>,
     },
+}
+
+/// A plain scroll area's position and a request consumed during its next layout.
+#[derive(Clone, Default)]
+pub(crate) struct PlainScrollHandle {
+    pub(crate) handle: gpui::ScrollHandle,
+    pub(crate) pending: Rc<Cell<Option<usize>>>,
 }
 
 // HERDR: script editor construction options, decoded before retaining any state.
@@ -308,6 +319,7 @@ impl EntityStore {
             Record::Otp { .. } => Some("OtpState"),
             Record::Focus { .. } => Some("FocusHandle"),
             Record::Dock { .. } => Some("DockArea"),
+            Record::Scroll { .. } => Some("ScrollHandle"),
             Record::VirtualScroll { .. } => Some("VirtualListScrollHandle"),
         }
     }
@@ -770,6 +782,20 @@ impl EntityStore {
         }
     }
 
+    pub(crate) fn create_scroll(
+        &mut self,
+        application: Option<Rc<ApplicationGeneration>>,
+    ) -> Result<EntityHandle, EntityLimitError> {
+        self.push(Record::Scroll { handle: PlainScrollHandle::default(), application })
+    }
+
+    pub(crate) fn scroll(&self, handle: EntityHandle) -> Option<PlainScrollHandle> {
+        match self.record(handle) {
+            Some(Record::Scroll { handle, .. }) => Some(handle.clone()),
+            _ => None,
+        }
+    }
+
     /// Creates a virtualized list's scroll position and returns its handle.
     ///
     /// Refused during render for the same reason the rest are: a handle created
@@ -1022,6 +1048,9 @@ impl EntityStore {
                     application: owner, ..
                 }
                 | Record::Focus {
+                    application: owner, ..
+                }
+                | Record::Scroll {
                     application: owner, ..
                 }
                 | Record::VirtualScroll {

@@ -1182,6 +1182,7 @@ pub(crate) mod exports {
         "v_virtual_list",
         "h_virtual_list",
         "VirtualListScrollHandle",
+        "ScrollHandle",
         // Text editing.
         "Input",
         "InputState",
@@ -5750,7 +5751,7 @@ globalThis.__gpui = (() => {
   methods.track_scroll = function (handle) {
     if (typeof handle?.__handle !== "number") {
       throw new TypeError(
-        "track_scroll(handle) expects a VirtualListScrollHandle from VirtualListScrollHandle.new()",
+        "track_scroll(handle) expects a ScrollHandle or VirtualListScrollHandle",
       );
     }
     __apply(this.__id, "track_scroll", [handle.__handle]);
@@ -6569,6 +6570,17 @@ globalThis.__gpui = (() => {
     release: () => __dock_release(handle),
   });
 
+  const scrollHandle = (handle) => ({
+    __handle: handle,
+    scroll_to_item: (index) => {
+      if (!Number.isSafeInteger(index) || index < 0) {
+        throw new TypeError("scroll_to_item(index) needs a whole, non-negative index");
+      }
+      __scroll_to_item(handle, index);
+    },
+    release: () => __scroll_release(handle),
+  });
+
   const virtualScrollHandle = (handle) => ({
     __handle: handle,
     // The strategy is base's own word for where the item lands. `top` puts it
@@ -7070,6 +7082,7 @@ globalThis.__gpui = (() => {
     h_virtual_list: virtualList(__h_virtual_list, "h_virtual_list"),
     list: lazyList(__list, "list", true),
     uniform_list: lazyList(__uniform_list, "uniform_list", false),
+    ScrollHandle: { new: () => scrollHandle(__scroll_new()) },
     VirtualListScrollHandle: { new: () => virtualScrollHandle(__virtual_scroll_new()) },
     Scrollbar: {
       new: (id) => element(__scrollbar(String(id))),
