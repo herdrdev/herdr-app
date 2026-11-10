@@ -47,7 +47,7 @@ fn content_size(n: &Node, size: Size<Pixels>, focused: bool, zoom: f32) -> Size<
 }
 
 /// Flex shares after fixed siblings, gaps and min/max constraints.
-fn shares(children: &[&Node], available: f32, zoom: f32) -> Vec<f32> {
+pub(super) fn shares(children: &[&Node], available: f32, zoom: f32) -> Vec<f32> {
     let mut sizes = vec![0.0; children.len()];
     let mut pending = Vec::new();
     let mut left = available;
@@ -95,6 +95,7 @@ fn block_bounds(n: &Node, bounds: Bounds<Pixels>, target: &str, frame: Option<&P
     let (y, x) = padding(n);
     origin += point(px(x * zoom), px(y * zoom));
     let size = content_size(n, bounds.size, focused.contains(&n.id), zoom);
+    if n.id == target && n.axis().is_some() { return Some(Bounds::new(origin, size)); }
     match &n.kind {
         Kind::Row { children } | Kind::Column { children } => {
             let row = n.axis() == Some(Axis::Row);
@@ -144,6 +145,24 @@ pub(super) enum HiddenFit {
 }
 
 impl AppWindow {
+    /// Full tab geometry, even while a single pane is zoomed. Read only the
+    /// context's viewport bounds; child sizes come from the current model.
+    pub(super) fn split_available(&self, tab: &Tab, split: &Node) -> Option<f32> {
+        let (context, area) = self.context_area()?;
+        let frame = match context.content() {
+            Some(Content::Context { pane: Some(frame), .. }) if frame.lone || tab.root.panes().len() > 1 => Some(frame),
+            _ => None,
+        };
+        let zoom = settings::zoom();
+        let (y, x) = padding(context);
+        let size = inset(area, 2.0 * x * zoom, 2.0 * y * zoom);
+        let focused = tab.focused_pane().and_then(|p| tab.root.path_to(&p)).unwrap_or_default().into_iter().collect();
+        let size = block_bounds(&tab.root, Bounds::new(Point::default(), size), &split.id, frame, &focused, zoom)?.size;
+        let extent = match split.axis()? { Axis::Row => size.width, Axis::Column => size.height };
+        let separators = split.children().iter().filter(|n| !n.hidden).count().saturating_sub(1);
+        Some(f32::from(extent) / zoom - separator_width(split, gap(split, frame)) * separators as f32)
+    }
+
     pub(super) fn initial_size(&self, root: &Node, pane: &str, window: &Window) -> Option<(u16, u16)> {
         let focused = root.path_to(pane)?.into_iter().collect();
         self.displayed_size(root, root.panes().len(), pane, &focused, window)
