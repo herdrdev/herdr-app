@@ -1,6 +1,8 @@
 //! A native HTTP(S) view for trusted mods. Web pages get no Herdr IPC bridge.
 mod policy;
 mod embed;
+#[cfg(windows)]
+mod win32;
 #[cfg(target_os = "linux")]
 mod linux;
 #[cfg(windows)]
@@ -15,6 +17,19 @@ use std::{cell::RefCell, rc::{Rc, Weak}, sync::Arc};
 type State = Rc<RefCell<Browser>>;
 thread_local! {
     static VIEWS: RefCell<Vec<Weak<RefCell<Browser>>>> = const { RefCell::new(Vec::new()) };
+    /// What overlays cover this frame, collected by `cover()` during prepaint.
+    static COVERS: RefCell<Vec<(WindowId, Bounds<Pixels>)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// Marks its parent's area as drawn over native views this frame: a toast,
+/// a menu, a dialog's backdrop. Native views leave that area to GPUI.
+pub fn cover() -> impl IntoElement {
+    canvas(
+        |bounds, window, _| COVERS.with_borrow_mut(|covers| covers.push((window.window_handle().window_id(), bounds))),
+        |_, _, _, _| {},
+    )
+    .absolute()
+    .size_full()
 }
 
 struct Browser {
@@ -29,6 +44,12 @@ struct Browser {
     visible: bool,
     #[cfg(windows)]
     creating: bool,
+    /// Wry's container window, which holds the WebView2 windows.
+    #[cfg(windows)]
+    hwnd: Option<isize>,
+    /// What overlays cut out of it now.
+    #[cfg(windows)]
+    holes: Vec<[i32; 4]>,
 }
 
 impl Drop for Browser {
@@ -103,8 +124,22 @@ impl Browser {
         }
     }
 
-    fn show(&mut self, window: &Window, overlay: bool) {
+    fn show(&mut self, window: &Window, dragging: bool, covers: &[Bounds<Pixels>]) {
         let hitbox = self.hitbox.and_then(|id| window.prepainted_hitbox(id));
+        // Windows cuts overlays out of the native view; elsewhere it hides.
+        let overlay = dragging || hitbox.is_some_and(|hitbox| {
+            policy::fully_covered(&hitbox.bounds, covers) || (!cfg!(windows) && !policy::holes(&hitbox.bounds, covers, 1.).is_empty())
+        });
+        #[cfg(windows)]
+        if let (Some(hwnd), Some(hitbox)) = (self.hwnd, hitbox.as_ref()) {
+            let scale = window.scale_factor();
+            let holes = policy::holes(&hitbox.bounds, covers, scale);
+            if holes != self.holes {
+                let size = |v: Pixels| (f32::from(v) * scale).round() as i32;
+                win32::set_holes(hwnd as _, size(hitbox.bounds.size.width), size(hitbox.bounds.size.height), &holes);
+                self.holes = holes;
+            }
+        }
         let unclipped = hitbox.is_some_and(|hitbox| {
             // WKWebView keeps a floating-point logical frame. Windows/GTK
             // children use integer device pixels, like GPUI's rendered mask.
@@ -143,17 +178,23 @@ impl Browser {
 /// Native children follow cache-aware frame geometry, not render callbacks:
 /// a cached view can still be on screen without executing its canvas again.
 /// Hide children for overlays, clipping, or an absent (inactive-tab) hitbox.
-pub fn end_frame(overlay: bool) -> impl IntoElement {
+pub fn end_frame(dragging: bool) -> impl IntoElement {
     canvas(|_, _, _| (), move |_, _, window, cx| {
+        let id = window.window_handle().window_id();
+        let covers: Vec<Bounds<Pixels>> = COVERS.with_borrow_mut(|covers| {
+            let mine = covers.iter().filter(|(w, _)| *w == id).map(|(_, b)| *b).collect();
+            covers.retain(|(w, _)| *w != id);
+            mine
+        });
         VIEWS.with_borrow_mut(|views| {
             views.retain(|weak| {
                 let Some(view) = weak.upgrade() else { return false };
                 let mut view = view.borrow_mut();
-                if view.window == window.window_handle().window_id() { view.show(window, overlay); }
+                if view.window == id { view.show(window, dragging, &covers); }
                 true
             });
         });
-        embed::end_frame(overlay, window, cx);
+        embed::end_frame(dragging, &covers, window, cx);
     })
 }
 
@@ -182,7 +223,7 @@ pub fn components() -> FrozenComponentRegistry {
             let ComponentArgument::String(url) = &args[0] else { unreachable!() };
             if !policy::allows_navigation(url) { return Err("Expected an HTTP(S) URL without credentials".into()); }
             let state = Rc::new(RefCell::new(Browser { window: window.window_handle().window_id(), url: url.clone(), native: None, #[cfg(not(target_os = "linux"))] context: None, error: None, hitbox: None, bounds: None, visible: false,
-                #[cfg(windows)] creating: false }));
+                #[cfg(windows)] creating: false, #[cfg(windows)] hwnd: None, #[cfg(windows)] holes: Vec::new() }));
             VIEWS.with_borrow_mut(|views| views.push(Rc::downgrade(&state)));
             Ok(Box::new(state))
         },

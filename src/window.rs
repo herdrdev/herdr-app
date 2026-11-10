@@ -3502,6 +3502,11 @@ impl AppWindow {
         self.copies.get(id).and_then(|c| self.folders.get(&c.inst.name)).is_some_and(|f| f.hint.focusable)
     }
 
+    /// Its mod.json says `"frameless": true`: no frame header over its pane.
+    fn frameless(&self, id: &str) -> bool {
+        self.copies.get(id).and_then(|c| self.folders.get(&c.inst.name)).is_some_and(|f| f.hint.frameless)
+    }
+
     fn swap_pane(&mut self, from: &str, explicit: bool, dir: &str) -> Result<(), String> {
         let neighbor = self.neighbor(from, dir, false);
         swap_with_neighbor(&mut self.model, from, explicit, neighbor)
@@ -4014,7 +4019,7 @@ impl AppWindow {
         }
         el = shadow(el, f.shadow.as_deref());
         let body = div().flex_1().min_h_0().flex().child(inner);
-        let Some(h) = &f.header else { return el.child(body).into_any_element() };
+        let Some(h) = f.header.as_ref().filter(|_| !self.frameless(&n.id)) else { return el.child(body).into_any_element() };
         let head = div().flex_none().h(settings::z(pane_size::header_height(h))).w_full().flex()
             .child(self.render_slot(&format!("{}#frame", n.id), cx));
         if h.hover() {
@@ -4087,7 +4092,7 @@ impl AppWindow {
                 }
             }
         };
-        let row = frame.and_then(|f| f.header.as_ref()).filter(|h| !h.bottom() && !h.hover()).map(pane_size::header_height);
+        let row = frame.and_then(|f| f.header.as_ref()).filter(|h| !h.bottom() && !h.hover() && !self.frameless(&n.id)).map(pane_size::header_height);
         el.children(self.render_floats(n, cx)).children(self.pane_grip(&n.id, row, cx)).into_any_element()
     }
 
@@ -4343,7 +4348,9 @@ impl AppWindow {
                 // Scroll, hover and cursor stop here, not on the pane behind.
                 .occlude()
                 .when(o.kind != OverlayKind::Window, |d| d.on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation()))
-                .child(content);
+                .child(content)
+                // Native browser and app views leave this area to the overlay.
+                .child(crate::browser::cover());
             match o.kind {
                 OverlayKind::Window => out.push(self.render_window(o, body, viewport, cx)),
                 OverlayKind::Dialog => out.push(
@@ -4356,6 +4363,8 @@ impl AppWindow {
                         .items_center()
                         .justify_center()
                         .when(!o.modal, |d| d.on_mouse_down(MouseButton::Left, cx.listener(move |this, _, w, cx| this.close_overlay(&id, w, cx))))
+                        // The dimmed backdrop covers native views too.
+                        .child(crate::browser::cover())
                         .child(body)
                         .into_any_element(),
                 ),
@@ -4390,7 +4399,7 @@ impl AppWindow {
                 .border_1().border_color(c("border")).text_size(settings::z(13.0)).text_color(c("foreground"))
                 .id("core-update-error").cursor_pointer()
                 .on_click(cx.listener(|this, _, w, cx| this.run("app.settings", json!({ "section": "updates" }), w, cx)))
-                .child(format!("herdr-core update failed: {error} · Open Updates")).into_any_element());
+                .child(format!("herdr-core update failed: {error} · Open Updates")).child(crate::browser::cover()).into_any_element());
         }
         out.extend(pill);
         out
@@ -4974,7 +4983,7 @@ impl Render for AppWindow {
             .children(tracker)
             .children(win_tracker)
             .child(pane_drag)
-            .child(crate::browser::end_frame(!self.overlays.is_empty() || self.pane_drag.is_some()))
+            .child(crate::browser::end_frame(self.pane_drag.is_some()))
             .child(crate::bench::frame_end())
     }
 }

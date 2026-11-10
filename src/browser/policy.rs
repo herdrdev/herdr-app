@@ -13,6 +13,75 @@ pub fn should_show(drawn: bool, unclipped: bool, overlay: bool) -> bool {
     drawn && unclipped && !overlay
 }
 
+/// Where overlays cross a native view: rectangles `[x, y, width, height]` in
+/// device pixels relative to the view's top left. A native child is drawn
+/// above everything GPUI paints, so these parts are cut out of it.
+pub fn holes(
+    view: &gpui::Bounds<gpui::Pixels>,
+    covers: &[gpui::Bounds<gpui::Pixels>],
+    scale: f32,
+) -> Vec<[i32; 4]> {
+    let px = |v: gpui::Pixels| f32::from(v) * scale;
+    let (left, top) = (px(view.left()).round(), px(view.top()).round());
+    covers
+        .iter()
+        .filter(|cover| cover.intersects(view))
+        .map(|cover| {
+            let cut = cover.intersect(view);
+            // Grow outward to whole pixels so no overlay pixel stays covered.
+            let x0 = (px(cut.left()).floor() - left) as i32;
+            let y0 = (px(cut.top()).floor() - top) as i32;
+            let x1 = (px(cut.right()).ceil() - left) as i32;
+            let y1 = (px(cut.bottom()).ceil() - top) as i32;
+            [x0, y0, x1 - x0, y1 - y0]
+        })
+        .filter(|[_, _, w, h]| *w > 0 && *h > 0)
+        .collect()
+}
+
+/// The overlays leave nothing of the view to show.
+pub fn fully_covered(
+    view: &gpui::Bounds<gpui::Pixels>,
+    covers: &[gpui::Bounds<gpui::Pixels>],
+) -> bool {
+    covers.iter().any(|cover| {
+        cover.left() <= view.left()
+            && cover.top() <= view.top()
+            && cover.right() >= view.right()
+            && cover.bottom() >= view.bottom()
+    })
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{fully_covered, holes};
+    use gpui::{point, px, size, Bounds};
+
+    fn rect(x: f32, y: f32, w: f32, h: f32) -> Bounds<gpui::Pixels> {
+        Bounds::new(point(px(x), px(y)), size(px(w), px(h)))
+    }
+
+    #[test]
+    fn a_toast_in_the_corner_cuts_only_its_own_area() {
+        let view = rect(100., 50., 800., 600.);
+        let toast = rect(700., 550., 300., 80.);
+        assert_eq!(holes(&view, &[toast], 1.5), vec![[900, 750, 300, 150]]);
+        assert!(!fully_covered(&view, &[toast]));
+    }
+
+    #[test]
+    fn overlays_elsewhere_leave_the_view_whole() {
+        let view = rect(100., 50., 800., 600.);
+        assert!(holes(&view, &[rect(0., 0., 90., 40.)], 1.).is_empty());
+    }
+
+    #[test]
+    fn a_dialog_backdrop_covers_everything() {
+        let view = rect(100., 50., 800., 600.);
+        assert!(fully_covered(&view, &[rect(0., 0., 1200., 900.)]));
+    }
+}
+
 /// Compare integer native-window pixels with GPUI's rendered clip mask.
 pub fn is_unclipped_at_scale(
     bounds: &gpui::Bounds<gpui::Pixels>,

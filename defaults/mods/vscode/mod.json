@@ -1,1 +1,1 @@
-{ "place": "none", "title": "VS Code", "focusable": true }
+{ "place": "none", "title": "VS Code", "focusable": true, "frameless": true }

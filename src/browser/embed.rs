@@ -1,13 +1,16 @@
-//! Proof of concept: a native program's own window shown inside a Herdr pane.
+//! A native program's own window shown inside a Herdr pane (Windows).
 //!
-//! On Windows the pane starts the program in a job object that it owns, finds
-//! the program's top-level window, and reparents it as a Win32 child of the
-//! Herdr window. Closing the pane (or quitting Herdr) ends the whole process
-//! tree. Other platforms report that embedding is unsupported.
+//! The pane asks the program for a new window (VS Code: `--new-window` on a
+//! folder) and adopts that top-level window from the program's process, which
+//! may already be running the person's other windows. The window moves into a
+//! container child window that Herdr owns: the container follows the pane,
+//! crops the program's own title bar and frame, and has overlays cut out of it.
+//! Closing the pane gives the window back to the desktop and closes it, as its
+//! own close button would; the program keeps running.
 //!
-//! Native calls on the embedded window send messages to another process.
-//! They run in foreground tasks between App updates, never inside layout or
-//! paint, so a reentrant message cannot meet a borrowed GPUI window.
+//! Native calls on another process's window send messages to it. They run in
+//! foreground tasks between App updates, never inside layout or paint, so a
+//! reentrant message cannot meet a borrowed GPUI window.
 use super::policy;
 use gpui::{AnyElement, App, Bounds, HitboxBehavior, HitboxId, ParentElement, Pixels, Styled, Window, WindowId, canvas, div};
 use gpui_shell::{ArgumentDescriptor, ArgumentSchema, ComponentArgument, ComponentDataValue, ComponentDescriptor, ComponentMaterializer, ComponentPayload, ComponentRegistry, ConstructorDescriptor, MaterializeRequest, StateDescriptor, StateMethodDescriptor};
@@ -18,53 +21,51 @@ thread_local! {
     static APPS: RefCell<Vec<Weak<RefCell<NativeApp>>>> = const { RefCell::new(Vec::new()) };
 }
 
-/// What to start and how to recognize its main window.
+/// What to start and how to recognize its windows.
 #[derive(Clone, Debug)]
+#[cfg_attr(not(windows), allow(dead_code))]
 struct Launch {
     program: PathBuf,
     args: Vec<String>,
-    cwd: Option<PathBuf>,
-    /// Win32 class of the main window, when the program has a known one.
-    #[cfg_attr(not(windows), allow(dead_code))]
-    class: Option<&'static str>,
+    /// Win32 class of the program's top-level windows.
+    class: &'static str,
 }
 
-/// A rectangle in physical pixels, relative to the host window's client area.
+/// A rectangle in device pixels, relative to the host window's client area.
 type Rect = [i32; 4];
 
 pub(super) struct NativeApp {
     window: WindowId,
     app: String,
-    folder: String,
+    target: String,
     status: String,
     error: Option<String>,
     hitbox: Option<HitboxId>,
     rect: Option<Rect>,
     visible: bool,
-    /// What the native window last received.
-    applied: Option<(Rect, bool)>,
+    holes: Vec<[i32; 4]>,
     apply_pending: bool,
-    /// Bumped by restart, so an older watcher task ends.
+    /// Bumped by reopen, so an older watcher task ends.
     generation: u64,
-    /// The program exited by itself; only restart starts it again.
-    stopped: bool,
-    /// A redraw is scheduled to retry a start that had to wait.
-    retry_pending: bool,
+    /// The window was closed; only reopen asks for a new one.
+    closed: bool,
     #[cfg(windows)]
-    process: Option<win::Process>,
+    embedded: Option<win::Embedded>,
+    #[cfg(windows)]
+    opening: bool,
 }
 
-fn launch(app: &str, folder: &str) -> anyhow::Result<Launch> {
+fn launch(app: &str, target: &str) -> anyhow::Result<Launch> {
     match app {
-        "vscode" => vscode(folder),
-        other => anyhow::bail!("Unknown native app {other:?}; this proof of concept knows \"vscode\""),
+        "vscode" => vscode(target),
+        other => anyhow::bail!("Unknown native app {other:?}; Herdr knows \"vscode\""),
     }
 }
 
-/// VS Code with its own user-data folder, so it runs as a separate main
-/// process that this pane owns instead of handing the request to an already
-/// running VS Code. Extensions stay in the shared `~/.vscode/extensions`.
-fn vscode(folder: &str) -> anyhow::Result<Launch> {
+/// The person's own VS Code: default profile and user data, so a running VS
+/// Code opens the window itself. `target` is a folder URI (`file://`,
+/// `vscode-remote://wsl+…`) or a local folder path.
+fn vscode(target: &str) -> anyhow::Result<Launch> {
     let env = |key: &str| std::env::var_os(key).filter(|v| !v.is_empty()).map(PathBuf::from);
     let candidates = [
         env("HERDR_VSCODE_EXE"),
@@ -73,27 +74,15 @@ fn vscode(folder: &str) -> anyhow::Result<Launch> {
     ];
     let program = candidates.into_iter().flatten().find(|p| p.is_file())
         .ok_or_else(|| anyhow::anyhow!("VS Code is not installed (set HERDR_VSCODE_EXE to Code.exe)"))?;
-    let data = crate::mods::app_dir().join("apps").join("vscode");
-    seed_vscode_settings(&data);
-    let mut args = vec!["--user-data-dir".to_owned(), data.to_string_lossy().into_owned(), "--new-window".to_owned()];
-    let folder = folder.trim();
-    let cwd = (!folder.is_empty() && std::path::Path::new(folder).is_dir()).then(|| PathBuf::from(folder));
-    if let Some(cwd) = &cwd { args.push(cwd.to_string_lossy().into_owned()); }
-    Ok(Launch { program, args, cwd, class: Some("Chrome_WidgetWin_1") })
-}
-
-/// The first start copies the person's VS Code settings and keybindings, so
-/// the embedded editor looks and behaves like theirs. Later edits stay apart.
-fn seed_vscode_settings(data: &std::path::Path) {
-    let Some(source) = std::env::var_os("APPDATA").map(|d| PathBuf::from(d).join("Code").join("User")) else { return };
-    let target = data.join("User");
-    if std::fs::create_dir_all(&target).is_err() { return; }
-    for file in ["settings.json", "keybindings.json"] {
-        let to = target.join(file);
-        if !to.exists() {
-            let _ = std::fs::copy(source.join(file), to);
-        }
+    let target = target.trim();
+    anyhow::ensure!(!target.is_empty(), "No folder to open");
+    let mut args = vec!["--new-window".to_owned()];
+    if target.contains("://") {
+        args.extend(["--folder-uri".to_owned(), target.to_owned()]);
+    } else {
+        args.push(target.to_owned());
     }
+    Ok(Launch { program, args, class: "Chrome_WidgetWin_1" })
 }
 
 impl NativeApp {
@@ -104,23 +93,25 @@ impl NativeApp {
         self.rect = Some([px(bounds.origin.x), px(bounds.origin.y), px(bounds.size.width), px(bounds.size.height)]);
     }
 
-    fn update_visibility(&mut self, window: &Window, overlay: bool) {
+    fn update_visibility(&mut self, window: &Window, dragging: bool, covers: &[Bounds<Pixels>]) {
         let hitbox = self.hitbox.and_then(|id| window.prepainted_hitbox(id));
         let unclipped = hitbox.is_some_and(|hitbox| policy::is_unclipped_at_scale(&hitbox.bounds, &hitbox.content_mask.bounds, window.scale_factor()));
-        self.visible = policy::should_show(hitbox.is_some(), unclipped, overlay);
+        let covered = dragging || hitbox.is_some_and(|hitbox| policy::fully_covered(&hitbox.bounds, covers));
+        self.visible = policy::should_show(hitbox.is_some(), unclipped, covered);
+        self.holes = hitbox.map(|hitbox| policy::holes(&hitbox.bounds, covers, window.scale_factor())).unwrap_or_default();
     }
 
     /// The native state differs from the latest layout.
     fn needs_apply(&self) -> bool {
         #[cfg(windows)]
-        if self.process.as_ref().is_some_and(|p| p.hwnd.is_some()) {
-            return match self.rect { Some(rect) => self.applied != Some((rect, self.visible)), None => false };
+        if let (Some(embedded), Some(rect)) = (&self.embedded, self.rect) {
+            return embedded.applied.as_ref() != Some(&(rect, self.visible, self.holes.clone()));
         }
         false
     }
 }
 
-/// Start the program on first use. Runs between App updates on Windows.
+/// Open the program's window on first use. Runs between App updates on Windows.
 fn start(state: &State, window: &mut Window, cx: &mut App) {
     #[cfg(windows)]
     win::start(state, window, cx);
@@ -129,7 +120,7 @@ fn start(state: &State, window: &mut Window, cx: &mut App) {
         let _ = (window, cx);
         let mut app = state.borrow_mut();
         if app.error.is_none() {
-            app.error = Some("Embedding native apps is only implemented on Windows in this proof of concept.".into());
+            app.error = Some("Embedding native apps is only available on Windows.".into());
         }
     }
 }
@@ -151,16 +142,16 @@ fn schedule_apply(state: &State, window: &mut Window, cx: &mut App) {
     let _ = (window, cx);
 }
 
-/// Called from the browser's end-of-frame canvas: show or hide each embedded
-/// window like a native browser, for overlays, clipping and inactive tabs.
-pub(super) fn end_frame(overlay: bool, window: &mut Window, cx: &mut App) {
+/// Called from the browser's end-of-frame canvas: show, hide or cut each
+/// embedded window for overlays, clipping and inactive tabs.
+pub(super) fn end_frame(dragging: bool, covers: &[Bounds<Pixels>], window: &mut Window, cx: &mut App) {
     let id = window.window_handle().window_id();
     let apps: Vec<State> = APPS.with_borrow_mut(|apps| {
         apps.retain(|weak| weak.strong_count() > 0);
         apps.iter().filter_map(Weak::upgrade).filter(|app| app.borrow().window == id).collect()
     });
     for app in apps {
-        app.borrow_mut().update_visibility(window, overlay);
+        app.borrow_mut().update_visibility(window, dragging, covers);
         schedule_apply(&app, window, cx);
     }
 }
@@ -174,16 +165,10 @@ impl ComponentMaterializer for NativeAppElement {
             start(&state, window, cx);
             Ok(())
         })?;
-        let message = {
-            let app = state.borrow();
-            app.error.clone().unwrap_or_else(|| app.status.clone())
-        };
-        let element = div().relative().size_full()
-            .child(div().absolute().size_full().p(gpui::px(16.)).child(message))
-            .child(canvas(move |bounds, window, cx| {
-                state.borrow_mut().layout(bounds, window);
-                schedule_apply(&state, window, cx);
-            }, |_, _, _, _| {}).size_full());
+        let element = div().size_full().child(canvas(move |bounds, window, cx| {
+            state.borrow_mut().layout(bounds, window);
+            schedule_apply(&state, window, cx);
+        }, |_, _, _, _| {}).size_full());
         request.finish(element)
     }
 }
@@ -191,19 +176,20 @@ impl ComponentMaterializer for NativeAppElement {
 pub(super) fn register(registry: &mut ComponentRegistry) {
     registry.register_state(StateDescriptor::new(
         "NativeAppState", "HerdrNativeAppState",
-        vec![ArgumentDescriptor::new("app", ArgumentSchema::String), ArgumentDescriptor::new("folder", ArgumentSchema::String)],
+        vec![ArgumentDescriptor::new("app", ArgumentSchema::String), ArgumentDescriptor::new("target", ArgumentSchema::String)],
         |args, window, _| {
-            let (ComponentArgument::String(app), ComponentArgument::String(folder)) = (&args[0], &args[1]) else { unreachable!() };
+            let (ComponentArgument::String(app), ComponentArgument::String(target)) = (&args[0], &args[1]) else { unreachable!() };
             let state = Rc::new(RefCell::new(NativeApp {
-                window: window.window_handle().window_id(), app: app.clone(), folder: folder.clone(),
-                status: "Starting…".into(), error: None, hitbox: None, rect: None, visible: false,
-                applied: None, apply_pending: false, generation: 0, stopped: false, retry_pending: false,
-                #[cfg(windows)] process: None,
+                window: window.window_handle().window_id(), app: app.clone(), target: target.clone(),
+                status: "Opening…".into(), error: None, hitbox: None, rect: None, visible: false, holes: Vec::new(),
+                apply_pending: false, generation: 0, closed: false,
+                #[cfg(windows)] embedded: None,
+                #[cfg(windows)] opening: false,
             }));
             APPS.with_borrow_mut(|apps| apps.push(Rc::downgrade(&state)));
             Ok(Box::new(state))
         },
-    ).with_documentation("Proof of concept: a native program (\"vscode\") started in folder and shown in this pane. Its process tree ends with the state.")
+    ).with_documentation("A program's own window (\"vscode\": the person's VS Code on a folder URI or path) shown in this pane. Closing the pane closes that window.")
     .with_methods(vec![
         StateMethodDescriptor::new::<State>("status", "(): string", |state, _, _, _| {
             Ok(ComponentDataValue::String(state.borrow().status.clone()))
@@ -211,321 +197,459 @@ pub(super) fn register(registry: &mut ComponentRegistry) {
         StateMethodDescriptor::new::<State>("error", "(): string | null", |state, _, _, _| {
             Ok(state.borrow().error.clone().map(ComponentDataValue::String).unwrap_or(ComponentDataValue::Null))
         }).with_readonly(true),
-        StateMethodDescriptor::new::<State>("restart", "(): void", |state, _, _, _| {
-            let mut app = state.borrow_mut();
-            app.generation += 1;
-            app.stopped = false;
-            app.error = None;
-            app.status = "Starting…".into();
-            app.applied = None;
+        StateMethodDescriptor::new::<State>("shown", "(): boolean", |state, _, _, _| {
             #[cfg(windows)]
-            { app.process = None; }
+            return Ok(ComponentDataValue::Boolean(state.borrow().embedded.is_some()));
+            #[cfg(not(windows))]
+            { let _ = state; Ok(ComponentDataValue::Boolean(false)) }
+        }).with_readonly(true),
+        StateMethodDescriptor::new::<State>("reopen", "(): void", |state, _, _, _| {
+            let mut app = state.borrow_mut();
+            if app.closed || app.error.is_some() {
+                app.generation += 1;
+                app.closed = false;
+                app.error = None;
+                app.status = "Opening…".into();
+            }
             Ok(ComponentDataValue::Null)
         }),
         StateMethodDescriptor::new::<State>("focus", "(): void", |state, _, _, _| {
             #[cfg(windows)]
-            if let Some(hwnd) = state.borrow().process.as_ref().and_then(|p| p.hwnd) { win::focus(hwnd); }
+            if let Some(child) = state.borrow().embedded.as_ref().map(|e| e.child) { win::focus(child); }
             #[cfg(not(windows))]
             let _ = state;
             Ok(ComponentDataValue::Null)
         }),
     ])).unwrap();
     registry.register(ComponentDescriptor::new("NativeApp", Arc::new(NativeAppElement))
-        .with_documentation("Proof of concept: the native window of a NativeAppState. Retain the state in init.")
+        .with_documentation("The window of a NativeAppState, filling this element. Retain the state in init.")
         .with_constructors(vec![ConstructorDescriptor::new("NativeApp", vec![ArgumentDescriptor::new("state", ArgumentSchema::Entity("HerdrNativeAppState"))], |args| Ok(ComponentPayload::new(args[0].clone())))])
         .with_methods(vec![])).unwrap();
 }
 
 #[cfg(windows)]
 mod win {
-    use super::{Launch, NativeApp, Rect, State};
+    use super::{Launch, Rect, State};
     use gpui::{App, Window};
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    use std::{os::windows::io::AsRawHandle, rc::Rc, time::Duration};
+    use std::{cell::Cell, rc::Rc, time::{Duration, Instant}};
     use windows_sys::Win32::{
-        Foundation::{CloseHandle, HANDLE, HWND, LPARAM, RECT},
-        Graphics::Gdi::MapWindowPoints,
-        System::JobObjects::*,
+        Foundation::{CloseHandle, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
+        Graphics::Gdi::ClientToScreen,
+        System::{LibraryLoader::GetModuleHandleW, Threading::{OpenProcess, PROCESS_QUERY_LIMITED_INFORMATION, QueryFullProcessImageNameW}},
+        UI::Input::KeyboardAndMouse::SetFocus,
         UI::WindowsAndMessaging::*,
     };
 
-    /// Process trees still closing. VS Code is single-instance per user-data
-    /// folder: a new Code.exe started while the old one shuts down hands its
-    /// window request to the dying process and then waits forever.
-    static CLOSING: std::sync::atomic::AtomicUsize = std::sync::atomic::AtomicUsize::new(0);
-
-    pub(super) struct Process {
-        /// Taken by Drop, which hands it to the closing thread.
-        child: Option<std::process::Child>,
-        job: HANDLE,
-        host: HWND,
-        pub(super) hwnd: Option<HWND>,
+    /// An adopted window in its container.
+    pub(super) struct Embedded {
+        pub(super) child: HWND,
+        container: HWND,
+        /// The window's own styles, restored when it goes back to the desktop.
+        style: isize,
+        ex_style: isize,
+        /// Device pixels of the window cut off at each side: its title bar and frame.
+        crop: Crop,
+        pub(super) applied: Option<(Rect, bool, Vec<[i32; 4]>)>,
     }
 
-    impl Drop for Process {
+    #[derive(Clone, Copy, Default, PartialEq, Debug)]
+    pub(super) struct Crop { left: i32, top: i32, right: i32, bottom: i32 }
+
+    impl Drop for Embedded {
         fn drop(&mut self) {
-            // Ask the program to close like its own close button would, so VS
-            // Code keeps unsaved editors (hot exit). Only posted messages here:
-            // this can run inside an App update. Hide it at once; the tab is gone.
-            if let Some(hwnd) = self.hwnd {
+            focus::forget(self.container);
+            // Another process's window: give it back to the desktop and close
+            // it from a helper thread, so its sent messages never reenter an
+            // App update. A clean window closes at once; one with unsaved
+            // changes shows its own save prompt on the desktop.
+            let (child, container, style, ex_style) = (self.child as usize, self.container as usize, self.style, self.ex_style);
+            let screen = screen_rect(self.container);
+            let _ = std::thread::Builder::new().name("native-app-release".into()).spawn(move || {
+                release(child as HWND, style, ex_style, screen);
                 unsafe {
-                    ShowWindowAsync(hwnd, SW_HIDE);
-                    PostMessageW(hwnd, WM_CLOSE, 0, 0);
+                    PostMessageW(child as HWND, WM_CLOSE, 0, 0);
+                    // DestroyWindow must run on the container's own thread.
+                    PostMessageW(container as HWND, WM_CLOSE, 0, 0);
                 }
-            }
-            let job = self.job as usize;
-            let graceful = self.hwnd.is_some();
-            let Some(mut child) = self.child.take() else {
-                unsafe { CloseHandle(self.job) };
-                return;
-            };
-            // Then the whole tree: VS Code's renderers, extension hosts,
-            // terminals. If Herdr quits first, closing the job's last handle
-            // ends the tree too (KILL_ON_JOB_CLOSE).
-            CLOSING.fetch_add(1, std::sync::atomic::Ordering::SeqCst);
-            let closer = std::thread::Builder::new().name("native-app-close".into()).spawn(move || {
-                let deadline = std::time::Instant::now() + Duration::from_secs(if graceful { 5 } else { 0 });
-                while std::time::Instant::now() < deadline {
-                    if let Ok(Some(_)) = child.try_wait() { break; }
-                    std::thread::sleep(Duration::from_millis(100));
-                }
-                unsafe {
-                    TerminateJobObject(job as HANDLE, 1);
-                    CloseHandle(job as HANDLE);
-                }
-                let _ = child.wait();
-                // The job's last process may outlive the launcher briefly.
-                std::thread::sleep(Duration::from_millis(300));
-                CLOSING.fetch_sub(1, std::sync::atomic::Ordering::SeqCst);
             });
-            if closer.is_err() { CLOSING.fetch_sub(1, std::sync::atomic::Ordering::SeqCst); }
         }
     }
 
-    fn spawn(launch: &Launch, host: HWND) -> anyhow::Result<Process> {
-        let mut command = std::process::Command::new(&launch.program);
-        command.args(&launch.args);
-        if let Some(cwd) = &launch.cwd { command.current_dir(cwd); }
-        // Herdr may itself run inside VS Code or Electron: never pass their
-        // IPC variables on, or Code.exe acts as a CLI or Node instead.
-        for (key, _) in std::env::vars_os() {
-            let key_str = key.to_string_lossy();
-            if key_str.starts_with("VSCODE_") || key_str.starts_with("ELECTRON_") { command.env_remove(&key); }
-        }
-        let child = command.spawn().map_err(|e| anyhow::anyhow!("cannot start {}: {e}", launch.program.display()))?;
-        let job = unsafe { CreateJobObjectW(std::ptr::null(), std::ptr::null()) };
-        anyhow::ensure!(!job.is_null(), "cannot create a job object: {}", std::io::Error::last_os_error());
-        // SAFETY: a plain C struct; all-zero means no limits.
-        let mut limits: JOBOBJECT_EXTENDED_LIMIT_INFORMATION = unsafe { std::mem::zeroed() };
-        limits.BasicLimitInformation.LimitFlags = JOB_OBJECT_LIMIT_KILL_ON_JOB_CLOSE;
-        let mut process = Process { child: None, job, host, hwnd: None };
+    fn screen_rect(hwnd: HWND) -> RECT {
+        let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+        unsafe { GetWindowRect(hwnd, &mut r) };
+        r
+    }
+
+    /// The window back on the desktop, where the pane showed it.
+    fn release(child: HWND, style: isize, ex_style: isize, at: RECT) {
         unsafe {
-            if SetInformationJobObject(job, JobObjectExtendedLimitInformation, (&raw const limits).cast(), size_of_val(&limits) as u32) == 0
-                || AssignProcessToJobObject(job, child.as_raw_handle() as HANDLE) == 0
-            {
-                let error = std::io::Error::last_os_error();
-                let mut child = child;
-                let _ = child.kill();
-                anyhow::bail!("cannot own the process tree: {error}");
+            if IsWindow(child) == 0 { return; }
+            SetWindowLongPtrW(child, GWL_STYLE, style & !(WS_VISIBLE as isize) & !(WS_MAXIMIZE as isize));
+            SetWindowLongPtrW(child, GWL_EXSTYLE, ex_style);
+            SetParent(child, std::ptr::null_mut());
+            let (w, h) = (at.right - at.left, at.bottom - at.top);
+            if w > 0 && h > 0 {
+                SetWindowPos(child, HWND_TOP, at.left, at.top, w, h, SWP_NOACTIVATE | SWP_FRAMECHANGED | SWP_SHOWWINDOW);
+            } else {
+                ShowWindow(child, SW_SHOWNOACTIVATE);
             }
         }
-        process.child = Some(child);
-        Ok(process)
+    }
+
+    thread_local! {
+        static QUIT_HOOKED: Cell<bool> = const { Cell::new(false) };
     }
 
     pub(super) fn start(state: &State, window: &mut Window, cx: &mut App) {
-        let (generation, app, folder) = {
-            let app = state.borrow();
-            if app.process.is_some() || app.error.is_some() || app.stopped { return; }
-            (app.generation, app.app.clone(), app.folder.clone())
-        };
-        if CLOSING.load(std::sync::atomic::Ordering::SeqCst) > 0 {
+        let (generation, app, target) = {
             let mut app = state.borrow_mut();
-            app.status = "Waiting for the previous window to close…".into();
-            if !app.retry_pending {
-                app.retry_pending = true;
-                let weak = Rc::downgrade(state);
-                window.spawn(cx, async move |cx| {
-                    cx.background_executor().timer(Duration::from_millis(200)).await;
-                    if let Some(state) = weak.upgrade() { state.borrow_mut().retry_pending = false; }
-                    let _ = cx.update(|window, _| window.refresh());
-                }).detach();
-            }
-            return;
+            if app.embedded.is_some() || app.opening || app.error.is_some() || app.closed { return; }
+            app.opening = true;
+            (app.generation, app.app.clone(), app.target.clone())
+        };
+        if !QUIT_HOOKED.get() {
+            QUIT_HOOKED.set(true);
+            // Quitting Herdr gives every window back before the process ends.
+            cx.on_app_quit(|_| {
+                super::APPS.with_borrow(|apps| {
+                    for app in apps.iter().filter_map(std::rc::Weak::upgrade) {
+                        if let Some(e) = app.borrow_mut().embedded.take() {
+                            let e = std::mem::ManuallyDrop::new(e);
+                            release(e.child, e.style, e.ex_style, screen_rect(e.container));
+                            unsafe { PostMessageW(e.child, WM_CLOSE, 0, 0) };
+                        }
+                    }
+                });
+                async {}
+            }).detach();
         }
         let host = match HasWindowHandle::window_handle(window).map(|h| h.as_raw()) {
             Ok(RawWindowHandle::Win32(handle)) => handle.hwnd.get() as HWND,
-            _ => { state.borrow_mut().error = Some("No Win32 host window".into()); return; }
+            _ => { fail(state, "No Win32 host window".into()); return; }
         };
-        let launched = super::launch(&app, &folder).and_then(|launch| spawn(&launch, host).map(|p| (p, launch.class)));
-        let class = match launched {
-            Ok((process, class)) => {
-                let mut app = state.borrow_mut();
-                app.status = "Waiting for its window…".into();
-                app.process = Some(process);
-                class
-            }
-            Err(error) => { state.borrow_mut().error = Some(format!("{error:#}")); return; }
+        let launch = match super::launch(&app, &target) {
+            Ok(launch) => launch,
+            Err(error) => { fail(state, format!("{error:#}")); return; }
         };
+        let before = program_windows(&launch);
+        let foreground = unsafe { GetForegroundWindow() };
+        let mut command = std::process::Command::new(&launch.program);
+        command.args(&launch.args);
+        // Herdr may run inside VS Code or another Electron app: never pass
+        // their IPC variables on, or Code.exe acts as a CLI or Node instead.
+        for (key, _) in std::env::vars_os() {
+            let name = key.to_string_lossy();
+            if name.starts_with("VSCODE_") || name.starts_with("ELECTRON_") { command.env_remove(&key); }
+        }
+        let mut child = match command.spawn() {
+            Ok(child) => child,
+            Err(error) => { fail(state, format!("Cannot start {}: {error}", launch.program.display())); return; }
+        };
+        state.borrow_mut().status = "Waiting for its window…".into();
         let weak = Rc::downgrade(state);
         window.spawn(cx, async move |cx| {
-            let mut found = false;
-            loop {
-                let delay = if found { 250 } else { 100 };
-                cx.background_executor().timer(Duration::from_millis(delay)).await;
+            let opened = Instant::now();
+            // Adopt the new window.
+            let found = loop {
+                cx.background_executor().timer(Duration::from_millis(100)).await;
+                let Some(state) = weak.upgrade() else { return };
+                if state.borrow().generation != generation { state.borrow_mut().opening = false; return; }
+                let now = program_windows(&launch);
+                if let Some(&hwnd) = now.iter().find(|h| !before.contains(h)) { break hwnd; }
+                // A program that already shows this folder brings that window
+                // to the front instead of opening another.
+                let front = unsafe { GetForegroundWindow() };
+                if opened.elapsed() > Duration::from_secs(2) && front != foreground && now.contains(&front) { break front; }
+                let failed = matches!(child.try_wait(), Ok(Some(status)) if !status.success());
+                if failed || opened.elapsed() > Duration::from_secs(60) {
+                    let mut app = state.borrow_mut();
+                    app.opening = false;
+                    app.error = Some(format!("{} did not open a window", launch.program.file_name().unwrap_or_default().to_string_lossy()));
+                    let _ = cx.update(|window, _| window.refresh());
+                    return;
+                }
+            };
+            let Some(state) = weak.upgrade() else { return };
+            let mut embedded = embed(found, host);
+            let child = found as usize;
+            // The container stays hidden until the crop is known.
+            embedded.crop = cx.background_executor().spawn(async move { measure(child as HWND) }).await;
+            {
+                let mut app = state.borrow_mut();
+                app.opening = false;
+                app.embedded = Some(embedded);
+                app.status = "Hidden while its pane is covered.".into();
+            }
+            let _ = cx.update(|window, _| window.refresh());
+            apply(&state);
+            focus::give(found);
+            // Watch the window: closed by its own button, moved by its title
+            // bar, or a title bar that changed height.
+            for tick in 1u64.. {
+                cx.background_executor().timer(Duration::from_millis(250)).await;
                 let Some(state) = weak.upgrade() else { return };
                 if state.borrow().generation != generation { return; }
-                let changed = watch(&state, class);
-                found = state.borrow().process.as_ref().is_some_and(|p| p.hwnd.is_some());
-                apply(&state);
-                if changed {
+                // Zoom or the command center can change the title bar's height.
+                if tick % 8 == 0 {
+                    let crop = cx.background_executor().spawn(async move { measure(child as HWND) }).await;
+                    let mut app = state.borrow_mut();
+                    if let Some(e) = app.embedded.as_mut().filter(|e| e.crop != crop) {
+                        e.crop = crop;
+                        e.applied = None;
+                    }
+                }
+                if watch(&state) {
                     let _ = cx.update(|window, _| window.refresh());
                 }
-                if state.borrow().process.is_none() { return; }
+                if state.borrow().embedded.is_none() { return; }
             }
         }).detach();
     }
 
-    /// One watcher step: notice an exit, find or lose the window, keep the
-    /// geometry the program may have changed itself. Returns whether to redraw.
-    fn watch(state: &State, class: Option<&'static str>) -> bool {
-        let (job, host, hwnd) = {
-            let mut app = state.borrow_mut();
-            let Some(process) = app.process.as_mut() else { return false };
-            if let Some(Ok(Some(status))) = process.child.as_mut().map(|child| child.try_wait()) {
-                app.process = None;
-                app.stopped = true;
-                app.status = format!("Exited ({status}). Restart to open it again.");
-                return true;
-            }
-            (process.job, process.host, process.hwnd)
-        };
-        match hwnd {
-            Some(hwnd) if unsafe { IsWindow(hwnd) } == 0 => {
-                let mut app = state.borrow_mut();
-                if let Some(p) = app.process.as_mut() { p.hwnd = None; }
-                app.applied = None;
-                app.status = "Waiting for its window…".into();
-                true
-            }
-            Some(hwnd) => {
-                // The program may move or resize its own window (restoring its
-                // saved bounds, a double-click on its title bar). Put it back.
-                let expected = state.borrow().applied.map(|(rect, _)| rect);
-                if let Some(expected) = expected {
-                    if current_rect(hwnd, host) != Some(expected) { state.borrow_mut().applied = None; }
-                }
-                false
-            }
-            None => {
-                let Some(found) = find_window(&job_pids(job), class) else { return false };
-                embed(found, host);
-                let mut app = state.borrow_mut();
-                if let Some(p) = app.process.as_mut() { p.hwnd = Some(found); }
-                app.applied = None;
-                app.status = "Hidden while its pane is covered.".into();
-                true
-            }
-        }
+    fn fail(state: &State, error: String) {
+        let mut app = state.borrow_mut();
+        app.opening = false;
+        app.error = Some(error);
     }
 
-    fn current_rect(hwnd: HWND, host: HWND) -> Option<Rect> {
-        let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+    /// One watcher step. Returns whether to redraw.
+    fn watch(state: &State) -> bool {
+        let mut app = state.borrow_mut();
+        let Some(embedded) = app.embedded.as_mut() else { return false };
+        if unsafe { IsWindow(embedded.child) } == 0 || unsafe { GetParent(embedded.child) } != embedded.container {
+            // Closed by the program: nothing to give back.
+            let e = app.embedded.take().unwrap();
+            focus::forget(e.container);
+            unsafe { DestroyWindow(e.container) };
+            std::mem::forget(e);
+            app.closed = true;
+            app.status = "Closed.".into();
+            return true;
+        }
+        // The program may move or resize its own window: put it back.
+        if let Some((rect, _, _)) = &embedded.applied {
+            let expected = child_rect(rect[2], rect[3], embedded.crop);
+            if current(embedded.child) != expected { embedded.applied = None; }
+        }
+        drop(app);
+        apply(state);
+        false
+    }
+
+    /// The child's place inside a container of `width` x `height`.
+    fn child_rect(width: i32, height: i32, crop: Crop) -> [i32; 4] {
+        [-crop.left, -crop.top, width + crop.left + crop.right, height + crop.top + crop.bottom]
+    }
+
+    /// The window's rectangle in its parent's client coordinates.
+    fn current(hwnd: HWND) -> [i32; 4] {
+        let r = screen_rect(hwnd);
+        let mut origin = POINT { x: r.left, y: r.top };
         unsafe {
-            if GetWindowRect(hwnd, &mut r) == 0 { return None; }
-            let mut points = [windows_sys::Win32::Foundation::POINT { x: r.left, y: r.top }, windows_sys::Win32::Foundation::POINT { x: r.right, y: r.bottom }];
-            MapWindowPoints(std::ptr::null_mut(), host, points.as_mut_ptr(), 2);
-            Some([points[0].x, points[0].y, points[1].x - points[0].x, points[1].y - points[0].y])
+            let parent = GetParent(hwnd);
+            let mut zero = POINT { x: 0, y: 0 };
+            ClientToScreen(parent, &mut zero);
+            origin.x -= zero.x;
+            origin.y -= zero.y;
+        }
+        [origin.x, origin.y, r.right - r.left, r.bottom - r.top]
+    }
+
+    fn image_path(pid: u32) -> Option<String> {
+        unsafe {
+            let process = OpenProcess(PROCESS_QUERY_LIMITED_INFORMATION, 0, pid);
+            if process.is_null() { return None; }
+            let mut buffer = [0u16; 1024];
+            let mut len = buffer.len() as u32;
+            let ok = QueryFullProcessImageNameW(process, 0, buffer.as_mut_ptr(), &mut len);
+            CloseHandle(process);
+            (ok != 0).then(|| String::from_utf16_lossy(&buffer[..len as usize]))
         }
     }
 
-    fn job_pids(job: HANDLE) -> Vec<u32> {
-        #[repr(C)]
-        struct List { assigned: u32, listed: u32, ids: [usize; 256] }
-        let mut list = List { assigned: 0, listed: 0, ids: [0; 256] };
-        let ok = unsafe { QueryInformationJobObject(job, JobObjectBasicProcessIdList, (&raw mut list).cast(), size_of::<List>() as u32, std::ptr::null_mut()) };
-        if ok == 0 { return Vec::new(); }
-        list.ids[..list.listed as usize].iter().map(|&id| id as u32).collect()
-    }
-
-    /// A visible, unowned top-level window of a process in the job.
-    fn find_window(pids: &[u32], class: Option<&str>) -> Option<HWND> {
-        struct Search<'a> { pids: &'a [u32], class: Option<&'a str>, found: Option<HWND> }
+    /// Visible, unowned top-level windows of the launch's program.
+    fn program_windows(launch: &Launch) -> Vec<HWND> {
+        struct Search<'a> { class: &'a str, program: String, found: Vec<HWND>, checked: Vec<(u32, bool)> }
         unsafe extern "system" fn visit(hwnd: HWND, data: LPARAM) -> windows_sys::core::BOOL {
             let search = unsafe { &mut *(data as *mut Search) };
+            if unsafe { IsWindowVisible(hwnd) } == 0 || !unsafe { GetWindow(hwnd, GW_OWNER) }.is_null() || unsafe { GetWindowTextLengthW(hwnd) } == 0 {
+                return 1;
+            }
+            let mut name = [0u16; 64];
+            let len = unsafe { GetClassNameW(hwnd, name.as_mut_ptr(), name.len() as i32) };
+            if String::from_utf16_lossy(&name[..len.max(0) as usize]) != search.class { return 1; }
             let mut pid = 0;
             unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
-            if !search.pids.contains(&pid) || unsafe { IsWindowVisible(hwnd) } == 0 { return 1; }
-            if !unsafe { GetWindow(hwnd, GW_OWNER) }.is_null() || unsafe { GetWindowTextLengthW(hwnd) } == 0 { return 1; }
-            if let Some(class) = search.class {
-                let mut name = [0u16; 64];
-                let len = unsafe { GetClassNameW(hwnd, name.as_mut_ptr(), name.len() as i32) };
-                if String::from_utf16_lossy(&name[..len.max(0) as usize]) != class { return 1; }
-            }
-            search.found = Some(hwnd);
-            0
+            let ours = match search.checked.iter().find(|(p, _)| *p == pid) {
+                Some(&(_, ours)) => ours,
+                None => {
+                    let ours = image_path(pid).is_some_and(|path| path.eq_ignore_ascii_case(&search.program));
+                    search.checked.push((pid, ours));
+                    ours
+                }
+            };
+            if ours { search.found.push(hwnd); }
+            1
         }
-        if pids.is_empty() { return None; }
-        let mut search = Search { pids, class, found: None };
+        let program = std::fs::canonicalize(&launch.program).map(|p| p.to_string_lossy().trim_start_matches(r"\\?\").to_owned())
+            .unwrap_or_else(|_| launch.program.to_string_lossy().into_owned());
+        let mut search = Search { class: launch.class, program, found: Vec::new(), checked: Vec::new() };
         unsafe { EnumWindows(Some(visit), (&raw mut search) as LPARAM) };
         search.found
     }
 
-    /// Turn the program's top-level window into a borderless child of `host`.
-    fn embed(hwnd: HWND, host: HWND) {
+    /// Move the program's top-level window into a new container in `host`.
+    fn embed(hwnd: HWND, host: HWND) -> Embedded {
         unsafe {
-            if IsZoomed(hwnd) != 0 || IsIconic(hwnd) != 0 { ShowWindow(hwnd, SW_RESTORE); }
-            ShowWindow(hwnd, SW_HIDE);
-            let style = GetWindowLongPtrW(hwnd, GWL_STYLE) as u32;
-            let style = (style & !(WS_POPUP | WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU)) | WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS;
-            SetWindowLongPtrW(hwnd, GWL_STYLE, style as isize);
-            let ex = GetWindowLongPtrW(hwnd, GWL_EXSTYLE) as u32;
-            let ex = ex & !(WS_EX_APPWINDOW | WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE | WS_EX_DLGMODALFRAME | WS_EX_NOPARENTNOTIFY);
-            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, ex as isize);
-            SetParent(hwnd, host);
-            focus::adopt(host, hwnd);
-            SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED | SWP_NOACTIVATE);
+            let container = container::create(host);
+            if IsIconic(hwnd) != 0 || IsZoomed(hwnd) != 0 { ShowWindow(hwnd, SW_RESTORE); }
+            let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
+            let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
+            // A borderless child. WS_MAXIMIZE makes Chromium treat its edges as
+            // a maximized window's: no resize borders to drag.
+            let child_style = (style as u32 & !(WS_POPUP | WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU))
+                | WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS | WS_MAXIMIZE;
+            SetWindowLongPtrW(hwnd, GWL_STYLE, child_style as isize);
+            let child_ex = ex_style as u32 & !(WS_EX_APPWINDOW | WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE | WS_EX_DLGMODALFRAME | WS_EX_NOPARENTNOTIFY | WS_EX_TOPMOST);
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, child_ex as isize);
+            SetParent(hwnd, container);
+            SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+            focus::adopt(host, container, hwnd);
+            Embedded { child: hwnd, container, style, ex_style, crop: Crop::default(), applied: None }
         }
     }
 
-    /// Give the embedded window the latest geometry and visibility.
+    /// Give the container the pane's latest geometry, visibility and holes.
     pub(super) fn apply(state: &State) {
-        let (hwnd, host, rect, visible) = {
-            let mut app = state.borrow_mut();
-            app.apply_pending = false;
-            if !app.needs_apply() { return; }
-            let NativeApp { process: Some(process), rect: Some(rect), visible, .. } = &*app else { return };
-            (process.hwnd.unwrap(), process.host, *rect, *visible)
-        };
-        unsafe {
-            if !visible {
-                // Typing must not keep going to a window nobody sees.
-                focus::release(host, hwnd);
-            }
-            let show = if visible { SWP_SHOWWINDOW } else { SWP_HIDEWINDOW };
-            SetWindowPos(hwnd, HWND_TOP, rect[0], rect[1], rect[2].max(1), rect[3].max(1), SWP_NOACTIVATE | show);
-        }
         let mut app = state.borrow_mut();
-        app.applied = Some((rect, visible));
-        if visible { app.status = "Running.".into(); } else if app.process.is_some() { app.status = "Hidden while its pane is covered.".into(); }
+        app.apply_pending = false;
+        if !app.needs_apply() { return; }
+        let (rect, visible, holes) = (app.rect.unwrap(), app.visible, app.holes.clone());
+        let embedded = app.embedded.as_mut().unwrap();
+        let (child, container) = (embedded.child, embedded.container);
+        let width = rect[2].max(1);
+        let height = rect[3].max(1);
+        unsafe {
+            if !visible { focus::release(container, child); }
+            let show = if visible { SWP_SHOWWINDOW } else { SWP_HIDEWINDOW };
+            SetWindowPos(container, HWND_TOP, rect[0], rect[1], width, height, SWP_NOACTIVATE | show);
+        }
+        super::super::win32::set_holes(container, width, height, &holes);
+        let [x, y, w, h] = child_rect(width, height, embedded.crop);
+        unsafe { SetWindowPos(child, std::ptr::null_mut(), x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE) };
+        embedded.applied = Some((rect, visible, holes));
+        app.status = if visible { "Shown.".into() } else { "Hidden while its pane is covered.".into() };
+    }
+
+    /// What of the window is frame or title bar, by asking the window itself:
+    /// its client area, and where its hit test reports caption parts. Runs off
+    /// the UI thread: it sends a few hundred messages to the other process.
+    fn measure(hwnd: HWND) -> Crop {
+        unsafe {
+            let window = screen_rect(hwnd);
+            let mut client = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+            GetClientRect(hwnd, &mut client);
+            let mut origin = POINT { x: 0, y: 0 };
+            ClientToScreen(hwnd, &mut origin);
+            let mut crop = Crop {
+                left: origin.x - window.left,
+                top: origin.y - window.top,
+                right: window.right - (origin.x + client.right),
+                bottom: window.bottom - (origin.y + client.bottom),
+            };
+            let hit = |x: i32, y: i32| -> u32 {
+                let lparam = ((y as u32 & 0xffff) << 16 | (x as u32 & 0xffff)) as LPARAM;
+                let mut result = 0usize;
+                SendMessageTimeoutW(hwnd, WM_NCHITTEST, 0, lparam, SMTO_ABORTIFHUNG, 50, &mut result);
+                result as u32
+            };
+            let caption = |code: u32| matches!(code, HTCAPTION | HTSYSMENU | HTMINBUTTON | HTMAXBUTTON | HTCLOSE | HTHELP | HTTOP | HTTOPLEFT | HTTOPRIGHT);
+            // The custom title bar: the lowest row where any column is caption.
+            let width = client.right;
+            let limit = (client.bottom / 3).min(160);
+            let mut title = 0;
+            for column in [0.35, 0.5, 0.65, 0.8, 0.95] {
+                let x = origin.x + (width as f32 * column) as i32;
+                for y in title..limit {
+                    if caption(hit(x, origin.y + y)) { title = y + 1; }
+                }
+            }
+            crop.top += title;
+            // Resize borders left despite WS_MAXIMIZE: cut those too.
+            let middle = origin.y + client.bottom / 2;
+            let edge = |from: i32, step: i32, codes: &[u32]| (0..24).take_while(|i| codes.contains(&hit(from + step * i, middle))).count() as i32;
+            crop.left += edge(origin.x, 1, &[HTLEFT]);
+            crop.right += edge(origin.x + width - 1, -1, &[HTRIGHT]);
+            let center = origin.x + width / 2;
+            crop.bottom += (0..24).take_while(|i| matches!(hit(center, origin.y + client.bottom - 1 - i), HTBOTTOM | HTBOTTOMLEFT | HTBOTTOMRIGHT)).count() as i32;
+            tracing::debug!(?crop, title, "native app crop");
+            crop
+        }
     }
 
     pub(super) fn focus(hwnd: HWND) {
         focus::give(hwnd);
     }
 
-    /// Keyboard focus between Herdr and embedded windows.
+    /// Herdr's container windows for adopted windows.
+    mod container {
+        use super::*;
+        use std::sync::Once;
+
+        const CLASS: &str = "HerdrNativeAppHost";
+
+        fn class_name() -> Vec<u16> { CLASS.encode_utf16().chain([0]).collect() }
+
+        pub fn create(host: HWND) -> HWND {
+            static REGISTER: Once = Once::new();
+            let name = class_name();
+            unsafe {
+                let instance = GetModuleHandleW(std::ptr::null());
+                REGISTER.call_once(|| {
+                    let class = WNDCLASSEXW {
+                        cbSize: size_of::<WNDCLASSEXW>() as u32,
+                        lpfnWndProc: Some(proc),
+                        hInstance: instance,
+                        lpszClassName: name.as_ptr(),
+                        ..std::mem::zeroed()
+                    };
+                    RegisterClassExW(&class);
+                });
+                CreateWindowExW(0, name.as_ptr(), std::ptr::null(), WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS,
+                    0, 0, 1, 1, host, std::ptr::null_mut(), instance, std::ptr::null())
+            }
+        }
+
+        unsafe extern "system" fn proc(hwnd: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+            match msg {
+                // Keyboard focus passes through to the adopted window.
+                WM_SETFOCUS => {
+                    let child = unsafe { GetWindow(hwnd, GW_CHILD) };
+                    if !child.is_null() { unsafe { SetFocus(child) }; }
+                    0
+                }
+                // The adopted window paints everything; no flash of a background.
+                WM_ERASEBKGND => 1,
+                _ => unsafe { DefWindowProcW(hwnd, msg, wparam, lparam) },
+            }
+        }
+    }
+
+    /// Keyboard focus between Herdr and adopted windows.
     ///
     /// A Chromium window takes keyboard focus when its top-level window is
     /// activated, which a child window never is. Herdr's window is subclassed
-    /// instead: a click on an embedded window (WM_PARENTNOTIFY) gives it focus,
+    /// instead: a click on an adopted window (WM_PARENTNOTIFY) gives it focus,
     /// a click on Herdr's own surface takes focus back, and activating Herdr
-    /// returns focus to the embedded window that had it. Reparenting attached
+    /// returns focus to the adopted window that had it. Reparenting attached
     /// both processes' input queues, so SetFocus works across them.
     mod focus {
         use std::cell::{Cell, RefCell};
         use windows_sys::Win32::{
             Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM},
+            Graphics::Gdi::ScreenToClient,
             UI::Input::KeyboardAndMouse::{GetFocus, SetFocus},
             UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
             UI::WindowsAndMessaging::*,
@@ -534,27 +658,37 @@ mod win {
         const ID: usize = 0x4845_5244; // "HERD"
 
         thread_local! {
-            /// Embedded windows, by host.
-            static EMBEDDED: RefCell<Vec<(HWND, HWND)>> = const { RefCell::new(Vec::new()) };
-            /// The embedded window that should have focus while Herdr is active.
+            /// (host, container, adopted window).
+            static EMBEDDED: RefCell<Vec<(HWND, HWND, HWND)>> = const { RefCell::new(Vec::new()) };
+            /// The adopted window that should have focus while Herdr is active.
             static ACTIVE: Cell<HWND> = const { Cell::new(std::ptr::null_mut()) };
         }
 
-        pub fn adopt(host: HWND, hwnd: HWND) {
+        pub fn adopt(host: HWND, container: HWND, hwnd: HWND) {
             let first = EMBEDDED.with_borrow_mut(|list| {
-                list.retain(|&(_, h)| unsafe { IsWindow(h) } != 0);
-                let first = !list.iter().any(|&(o, _)| o == host);
-                list.push((host, hwnd));
+                let first = !list.iter().any(|&(h, _, _)| h == host);
+                list.push((host, container, hwnd));
                 first
             });
             if first { unsafe { SetWindowSubclass(host, Some(proc), ID, 0) }; }
         }
 
+        pub fn forget(container: HWND) {
+            EMBEDDED.with_borrow_mut(|list| {
+                if let Some(&(_, _, hwnd)) = list.iter().find(|&&(_, c, _)| c == container) {
+                    if ACTIVE.get() == hwnd { ACTIVE.set(std::ptr::null_mut()); }
+                }
+                list.retain(|&(_, c, _)| c != container);
+            });
+        }
+
         /// The window is hidden: its typing goes back to Herdr.
-        pub fn release(host: HWND, hwnd: HWND) {
+        pub fn release(container: HWND, hwnd: HWND) {
             if ACTIVE.get() == hwnd { ACTIVE.set(std::ptr::null_mut()); }
             let focus = unsafe { GetFocus() };
-            if focus == hwnd || unsafe { IsChild(hwnd, focus) } != 0 { unsafe { SetFocus(host) }; }
+            if focus == container || focus == hwnd || unsafe { IsChild(container, focus) } != 0 {
+                unsafe { SetFocus(GetParent(container)) };
+            }
         }
 
         pub fn give(hwnd: HWND) {
@@ -562,9 +696,9 @@ mod win {
             unsafe { SetFocus(hwnd) };
         }
 
-        fn embedded_at(host: HWND, point: POINT) -> Option<HWND> {
+        fn adopted_at(host: HWND, point: POINT) -> Option<HWND> {
             let child = unsafe { ChildWindowFromPointEx(host, point, CWP_SKIPINVISIBLE) };
-            EMBEDDED.with_borrow(|list| list.iter().find(|&&(o, h)| o == host && h == child).map(|&(_, h)| h))
+            EMBEDDED.with_borrow(|list| list.iter().find(|&&(h, c, _)| h == host && c == child).map(|&(_, _, w)| w))
         }
 
         unsafe extern "system" fn proc(host: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM, _: usize, _: usize) -> LRESULT {
@@ -574,8 +708,8 @@ mod win {
                     if matches!(event, WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN | WM_POINTERDOWN) {
                         let mut point = POINT { x: (lparam & 0xffff) as i16 as i32, y: ((lparam >> 16) & 0xffff) as i16 as i32 };
                         // Pointer notifications carry screen coordinates; mouse ones the host's client coordinates.
-                        if event == WM_POINTERDOWN { unsafe { windows_sys::Win32::Graphics::Gdi::ScreenToClient(host, &mut point) }; }
-                        if let Some(hwnd) = embedded_at(host, point) { give(hwnd); }
+                        if event == WM_POINTERDOWN { unsafe { ScreenToClient(host, &mut point) }; }
+                        if let Some(hwnd) = adopted_at(host, point) { give(hwnd); }
                     }
                 }
                 WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN | WM_NCLBUTTONDOWN => {
@@ -592,7 +726,7 @@ mod win {
                     return result;
                 }
                 WM_NCDESTROY => {
-                    EMBEDDED.with_borrow_mut(|list| list.retain(|&(o, _)| o != host));
+                    EMBEDDED.with_borrow_mut(|list| list.retain(|&(h, _, _)| h != host));
                     unsafe { RemoveWindowSubclass(host, Some(proc), ID) };
                 }
                 _ => {}
