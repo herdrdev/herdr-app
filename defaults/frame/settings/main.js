@@ -329,7 +329,7 @@ export default class Settings extends View {
       );
   }
 
-  themePicker(t, light) {
+  themePicker(t, light, choices) {
     const s = settings();
     const current = light ? s.theme_light : s.theme_dark;
     return h_flex()
@@ -337,9 +337,8 @@ export default class Settings extends View {
       .flex_wrap()
       .gap(8)
       .children(
-        // A theme named like a layout (themes/win98.json) is that layout's own.
-        themes()
-          .filter((x) => Boolean(x.light) === light && (x.name === shared("layout") || !layouts().includes(x.name)))
+        choices
+          .filter((x) => Boolean(x.light) === light)
           .map(({ name, colors: c }) => {
           const on = name === current;
           const label = name.replace(/-/g, " ");
@@ -470,6 +469,10 @@ export default class Settings extends View {
   look(t, cx) {
     const s = settings();
     const p = this.person;
+    const layout = shared("layout");
+    const layoutNames = new Set(layouts());
+    // Read host lists once; a theme named like a layout belongs to that layout.
+    const choices = themes().filter((x) => x.name === layout || !layoutNames.has(x.name));
     const own = (key, composed, def) => (p[key] ?? def) !== composed;
     const size = (key, value, d, cx) => this.change((q) => (q[key] = Math.max(8, Math.min(32, (q[key] ?? value) + d))), cx);
     const fontRow = (which, sizeKey, title, family, def, sizeNow) =>
@@ -497,9 +500,9 @@ export default class Settings extends View {
       .child(this.row(t, "Appearance", "Light or dark, or as your system is now.", this.appearancePicker(t, cx)))
       .child(div().pt(12).pb(8).text_size(12.5).text_color(t.dim).child("For the layout you're in: each layout keeps its own light and dark theme."))
       .child(div().pb(6).text_size(12.5).font_medium().text_color(t.muted).child("Dark"))
-      .child(this.themePicker(t, false))
+      .child(this.themePicker(t, false, choices))
       .child(div().pt(10).pb(6).text_size(12.5).font_medium().text_color(t.muted).child("Light"))
-      .child(this.themePicker(t, true))
+      .child(this.themePicker(t, true, choices))
       .child(div().h(18))
       .child(this.heading(t, "Size and fonts"))
       .child(
