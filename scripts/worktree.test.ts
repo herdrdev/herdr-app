@@ -35,12 +35,15 @@ function harness(focusedMachine: string | null = null, execImpl?: (command: stri
   const writes: unknown[] = [];
   const destinations: (string | null)[] = [];
   const executions: any[] = [];
+  const propsValue: any = { overlay: "overlay" };
   const globals = {
     View: class {}, div: element, v_flex: element, h_flex: element,
-    Input: { new: element }, Scrollbar: { vertical: element }, theme: () => ({}),
+    Input: { new: element },
+    InputState: { new: (opts: any = {}) => ({ placeholder: opts.placeholder ?? "", _value: opts.value ?? "", value() { return this._value; }, set_value(v: string) { this._value = v; }, on() { return true; }, focus() {} }) },
+    Scrollbar: { vertical: element }, theme: () => ({}),
     spaces: () => { reads.spaces++; return structuredClone(spaceList); },
     panes: () => { reads.panes++; return structuredClone(paneList); },
-    props: () => ({ overlay: "overlay" }), closeOverlay: () => {},
+    props: () => propsValue, closeOverlay: () => {},
     run: (command: string, args: any) => {
       writes.push([command, args]);
       if (command === "space.new") destinations.push(args.machine === "" ? null : args.machine ?? focusedMachine);
@@ -53,7 +56,7 @@ function harness(focusedMachine: string | null = null, execImpl?: (command: stri
   const Worktree = new Function(...Object.keys(globals), `${source}; return Worktree;`)(...Object.values(globals));
   const worktree = new Worktree();
   Object.assign(worktree, { source: "remote", opening: false, text: "", at: 0, repo: { name: "repo" }, userHome: "/home/user", query: { new: "", local: "", remote: "", open: "" } });
-  return { worktree, reads, writes, destinations, executions, snapshot: (spaces: any[], panes: any[]) => { spaceList = spaces; paneList = panes; } };
+  return { worktree, reads, writes, destinations, executions, props: propsValue, snapshot: (spaces: any[], panes: any[]) => { spaceList = spaces; paneList = panes; } };
 }
 
 test("open render reads spaces and panes once and refreshes both on the next render", () => {
@@ -315,4 +318,67 @@ test("loadLists drops origin/HEAD and keeps nested remote names", async () => {
   await worktree.loadLists();
   expect(worktree.remotes).toEqual([{ remote: "origin", name: "feature/foo", at: 2 }]);
   expect(worktree.branches).toEqual([{ name: "feature/foo", at: 3 }]);
+});
+
+// Enter is delivered twice: the field submits, and the key bubbles to the dialog.
+const fieldCx = () => ({ notify() {}, stop_propagation() {}, spawn(body: any) { return body(fieldCx()); } });
+
+test("enter on an open row creates one space when the field also submits", async () => {
+  const { worktree, writes } = harness();
+  Object.assign(worktree, {
+    source: "open", repo: { name: "repo" }, busy: false, at: 0,
+    list: [{ path: "/repo", branch: "main", at: 0 }],
+  });
+  const cx = fieldCx();
+  worktree.key({ key: "enter" }, cx);
+  await worktree.go(cx);
+  expect(writes.filter((w) => w[0] === "space.new")).toEqual([["space.new", { folder: "/repo", machine: "" }]]);
+});
+
+test("switching source replaces the placeholder", () => {
+  const { worktree } = harness();
+  worktree.query = { new: "mine", local: "loc", remote: "", open: "op" };
+  worktree.selectSource("new");
+  expect(worktree.input.placeholder).toBe("branch name");
+  expect(worktree.input.value()).toBe("mine");
+  worktree.selectSource("open");
+  expect(worktree.input.placeholder).toBe("filter worktrees");
+  expect(worktree.input.value()).toBe("op");
+  worktree.selectSource("local");
+  expect(worktree.input.placeholder).toBe("filter branches");
+});
+
+test("a later enter follows the source after an immediate branch", async () => {
+  const { worktree, executions, props } = harness(null, absent);
+  props.branch = "feature";
+  Object.assign(worktree, {
+    source: "new", repo: { name: "repo", main: "/repo", top: "/repo" }, busy: false,
+    list: [], remotes: [{ remote: "origin", name: "feature", at: 1 }],
+    text: "feature", query: { new: "feature", local: "", remote: "", open: "" },
+  });
+  await worktree.work({ notify() {} });
+  expect(executions.at(-1).args).toEqual(["worktree", "add", "-b", "feature", "/home/user/.herdr/worktrees/repo/feature", "HEAD"]);
+});
+
+test("the opening branch still resolves before later enters follow the source", async () => {
+  const { worktree, executions, props } = harness(null, absent);
+  props.branch = "feature";
+  Object.assign(worktree, {
+    source: "new", repo: { name: "repo", main: "/repo", top: "/repo" }, busy: false,
+    list: [], remotes: [{ remote: "origin", name: "feature", at: 1 }], text: "feature",
+  });
+  await worktree.work({ notify() {} }, true);
+  expect(executions.at(-1).args).toEqual(["worktree", "add", "--track", "-b", "feature", "/home/user/.herdr/worktrees/repo/feature", "origin/feature"]);
+});
+
+test("a checkout with no space keeps the caller's tab and argv", () => {
+  const { worktree, writes, props, snapshot } = harness();
+  props.argv = ["claude"];
+  props.tab = { name: "agent" };
+  worktree.list = [{ path: "/repo", branch: "main" }];
+  worktree.open(worktree.list[0]);
+  expect(writes).toEqual([["space.new", { folder: "/repo", machine: "", tab: { name: "agent" }, argv: ["claude"] }]]);
+  snapshot([{ id: "existing", tabs: [{ id: "tab" }] }], [{ tab: "tab", cwd: "/repo" }]);
+  worktree.open(worktree.list[0]);
+  expect(writes[1]).toEqual(["space.select", { id: "existing" }]);
 });

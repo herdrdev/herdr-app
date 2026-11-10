@@ -54,6 +54,16 @@ function spaceOf(path, all, on, spaceList, paneList) {
   })());
 }
 
+// A new space carries tab and argv when the caller set them. That includes a
+// checkout that already exists and does not have a space yet.
+function spaceNew(folder, on) {
+  const p = props() ?? {};
+  const space = { folder, machine: on ?? "" };
+  if (p.tab !== undefined) space.tab = p.tab;
+  if (p.argv !== undefined) space.argv = p.argv;
+  run("space.new", space);
+}
+
 async function git(cwd, args, on, timeout) {
   const r = await exec("git", args, { cwd, on, ...(timeout === undefined ? {} : { timeout }) });
   return { ok: r.code === 0, out: (r.stdout ?? "").trim(), err: (r.stderr ?? r.stdout ?? "").trim() };
@@ -118,18 +128,8 @@ export default class Worktree extends View {
     this.branches = undefined;
     this.remotes = undefined;
     this.at = 0;
-    this.input = InputState.new({ value: this.query[this.source] ?? "", placeholder: this.placeholder() });
-    this.input.on("change", (_e, cx) => {
-      if (this.source !== "remove") this.query[this.source] = this.input.value();
-      this.text = this.input.value();
-      this.error = "";
-      this.at = 0;
-      cx.notify();
-    });
-    this.input.on("submit", (_e, cx) => this.go(cx));
     this.inputFocused = true;
-    this.input.on("focus", (_e, cx) => { this.inputFocused = true; cx.notify(); });
-    this.input.on("blur", (_e, cx) => { this.inputFocused = false; cx.notify(); });
+    this.mountInput(this.query[this.source] ?? "");
     this.handle = cx.focus_handle();
     this.handle.focus(); // the root is mounted from the first frame: keep the keyboard here while loading
     if (props()?.action !== "remove") this.input.focus();
@@ -162,7 +162,7 @@ export default class Worktree extends View {
         // loading lands on nothing and the dialog stays keyboard-dead.
         this.handle.focus();
         if (props().action !== "remove") cx.timer.after(100, () => this.input.focus());
-        if (props().branch) await this.work(cx);
+        if (props().branch) await this.work(cx, true);
       } catch (error) { this.repo = null; this.error = String(error); cx.notify(); }
     });
   }
@@ -181,16 +181,37 @@ export default class Worktree extends View {
     cx.spawn(async (cx) => this.work(cx));
   }
 
-  async work(cx) {
+  // immediate is only the opening {branch} resolution. A later Enter follows the source.
+  async work(cx, immediate = false) {
     if (this.busy || !this.repo) return;
     this.busy = true;
     this.error = "";
     cx.notify();
-    try { this.error = props().action === "remove" ? await this.remove() : props().branch ? await this.resolveBranch(this.text.trim()) : await this.create(); }
-    catch (error) { this.error = String(error); }
+    try {
+      this.error = props().action === "remove"
+        ? await this.remove()
+        : immediate
+          ? await this.resolveBranch((this.text ?? "").trim())
+          : await this.create();
+    } catch (error) { this.error = String(error); }
     this.busy = false;
     if (!this.error) this.close();
     cx.notify();
+  }
+
+  // JS InputState cannot change its placeholder, so each source gets a new one.
+  mountInput(value) {
+    this.input = InputState.new({ value: value ?? "", placeholder: this.placeholder() });
+    this.input.on("change", (_e, cx) => {
+      if (this.source !== "remove") this.query[this.source] = this.input.value();
+      this.text = this.input.value();
+      this.error = "";
+      this.at = 0;
+      cx.notify();
+    });
+    this.input.on("submit", (_e, cx) => this.go(cx));
+    this.input.on("focus", (_e, cx) => { this.inputFocused = true; cx.notify(); });
+    this.input.on("blur", (_e, cx) => { this.inputFocused = false; cx.notify(); });
   }
 
   // for-each-ref lines: "name\tunix", newest first.
@@ -233,11 +254,7 @@ export default class Worktree extends View {
   async added(path, args) {
     const r = await git(this.repo.top, args, this.on, 600_000);
     if (!r.ok) return r.err || "git worktree add failed.";
-    const p = props() ?? {};
-    const space = { folder: path, machine: this.on ?? "" };
-    if (p.tab !== undefined) space.tab = p.tab;
-    if (p.argv !== undefined) space.argv = p.argv;
-    run("space.new", space);
+    spaceNew(path, this.on);
     return "";
   }
 
@@ -313,14 +330,15 @@ export default class Worktree extends View {
     return (this.list ?? []).filter((c) => !f || `${c.branch ?? ""} ${c.path}`.toLowerCase().includes(f));
   }
 
-  selectSource(source) {
+  selectSource(source, cx) {
     this.source = source;
     this.at = 0;
     this.error = "";
     const value = this.query[source] ?? "";
     this.text = value;
-    if (typeof this.input?.set_value === "function") this.input.set_value(value);
-    if (typeof this.input?.set_placeholder === "function") this.input.set_placeholder(this.placeholder());
+    this.mountInput(value);
+    // The new field is not in the tree until the next frame.
+    if (cx) cx.timer.after(100, () => this.input.focus());
   }
 
   open(c) {
@@ -328,7 +346,7 @@ export default class Worktree extends View {
     this.close();
     const s = spaceOf(c.path, this.list, this.on, spaces(), panes());
     if (s) run("space.select", { id: s.id });
-    else run("space.new", { folder: c.path, machine: this.on ?? "" });
+    else spaceNew(c.path, this.on);
   }
 
   async remove() {
@@ -360,8 +378,9 @@ export default class Worktree extends View {
       const rows = this.source === "open" ? this.shown() : this.source === "local" ? this.shownBranches() : this.shownRemotes();
       const n = rows.length;
       if (e.key === "enter") {
-        if (this.source === "open") this.open(rows[this.at]);
-        else this.go(cx);
+        // The field's submit and this handler both see one Enter. go() marks
+        // busy before its first await, so the second arrival does not open again.
+        this.go(cx);
       } else if ((e.key === "down" || e.key === "up") && n) this.at = (this.at + (e.key === "down" ? 1 : n - 1)) % n;
       else return;
       cx.stop_propagation();
@@ -469,7 +488,7 @@ export default class Worktree extends View {
           .text_size(11)
           .text_color(this.source === source ? t.foreground : t.dim)
           .when(this.source === source, (el) => el.bg(t.selected))
-          .on_click((_e, cx) => { this.selectSource(source); cx.notify(); })
+          .on_click((_e, cx) => { this.selectSource(source, cx); cx.notify(); })
           .child(source === "new" ? "New" : source === "local" ? "Local" : source === "remote" ? "Remote" : "Open"),
       )))
       .child(div().text_color(t.muted).child(detail))
