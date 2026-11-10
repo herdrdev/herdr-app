@@ -1,6 +1,6 @@
 import { test, expect, spyOn } from "bun:test";
 import { readFile } from "node:fs/promises";
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 const source = (await readFile(new URL("../defaults/mods/spaces/main.js", import.meta.url), "utf8"))
@@ -76,7 +76,8 @@ test("git grouping reads refs for normal, detached, unborn and bare worktrees", 
     expect(await check(repo)).toMatchObject({ name: "repo", branch: "main", ahead: 1, behind: 1, linked: false });
     const tree = join(root, "tree");
     git(repo, "worktree", "add", "-b", "topic", tree);
-    expect(await check(tree)).toMatchObject({ branch: "topic", ahead: 0, behind: 0, linked: true, repo: JSON.stringify([null, join(repo, ".git")]) });
+    // Git resolves aliases such as macOS's /var -> /private/var in absolute paths.
+    expect(await check(tree)).toMatchObject({ branch: "topic", ahead: 0, behind: 0, linked: true, repo: JSON.stringify([null, realpathSync(join(repo, ".git"))]) });
     git(tree, "checkout", "--detach");
     expect(await check(tree)).toMatchObject({ branch: "(detached)", ahead: 0, behind: 0 });
     expect(await check(root)).toBeNull();
@@ -85,7 +86,7 @@ test("git grouping reads refs for normal, detached, unborn and bare worktrees", 
     git(root, "clone", "--bare", repo, bare);
     expect(await check(bare)).toBeNull();
     git(bare, "worktree", "add", "-b", "bare-topic", bareTree);
-    expect(await check(bareTree)).toMatchObject({ name: "bare", branch: "bare-topic", linked: true, repo: JSON.stringify([null, bare]) });
+    expect(await check(bareTree)).toMatchObject({ name: "bare", branch: "bare-topic", linked: true, repo: JSON.stringify([null, realpathSync(bare)]) });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
