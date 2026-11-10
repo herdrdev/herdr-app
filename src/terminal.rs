@@ -72,8 +72,8 @@ struct LinkQuery {
 }
 
 impl LinkQuery {
-    fn resolve(&self) -> HashMap<String, Option<links::Target>> {
-        self.paths.iter().map(|path| (path.clone(), links::resolve(path, self.cwd.as_deref()))).collect()
+    fn resolve(&self, current: impl Fn() -> bool) -> HashMap<String, Option<links::Target>> {
+        self.paths.iter().take_while(|_| current()).map(|path| (path.clone(), links::resolve(path, self.cwd.as_deref()))).collect()
     }
 }
 
@@ -1053,12 +1053,7 @@ impl TerminalView {
             self.link_resolver = Some(cx.spawn(async move |this, cx| {
                 let completed = requested.clone();
                 let resolved = cx.background_executor().spawn(async move {
-                    let mut resolved = HashMap::new();
-                    for path in &requested.paths {
-                        if generation.load(Ordering::Relaxed) != ticket { break; }
-                        resolved.insert(path.clone(), links::resolve(path, requested.cwd.as_deref()));
-                    }
-                    resolved
+                    requested.resolve(|| generation.load(Ordering::Relaxed) == ticket)
                 }).await;
                 let _ = this.update(cx, |this, cx| {
                     this.link_resolver = None;
@@ -1099,7 +1094,7 @@ impl TerminalView {
         // have checked the filesystem before the click. Resolve again off-thread.
         self.link_click_resolver = Some(cx.spawn(async move |this, cx| {
             let requested = query.clone();
-            let resolved = cx.background_executor().spawn(async move { requested.resolve() }).await;
+            let resolved = cx.background_executor().spawn(async move { requested.resolve(|| true) }).await;
             let _ = this.update(cx, |this, cx| {
                 if this.link_click.generation != ticket { return; }
                 this.link_click_resolver = None;
@@ -3252,7 +3247,7 @@ mod tests {
         let query = LinkQuery { cwd: Some(root), paths: vec![dotted.to_str().unwrap().into(), created.to_str().unwrap().into()] };
         let mut hover = LinkCache::default();
         hover.request(Some(query.clone()));
-        let old = query.resolve();
+        let old = query.resolve(|| true);
         assert_eq!(old[&query.paths[0]], Some(links::Target::File(plain.clone())));
         assert_eq!(old[&query.paths[1]], None);
         hover.complete(&query, old.clone());
@@ -3262,7 +3257,7 @@ mod tests {
         let (release_tx, release_rx) = std::sync::mpsc::channel();
         let previous = query.clone();
         let inflight = std::thread::spawn(move || {
-            let resolved = previous.resolve();
+            let resolved = previous.resolve(|| true);
             ready_tx.send(()).unwrap();
             release_rx.recv().unwrap();
             resolved
@@ -3272,7 +3267,7 @@ mod tests {
         let ticket = click.start(query.clone(), None);
         std::fs::write(&dotted, "exact name").unwrap();
         std::fs::write(&created, "created after hover").unwrap();
-        let fresh = query.resolve();
+        let fresh = query.resolve(|| true);
         release_tx.send(()).unwrap();
         hover.complete(&query, inflight.join().unwrap());
         assert_eq!(hover.resolved.as_ref().unwrap(), &old);
@@ -3282,7 +3277,7 @@ mod tests {
 
         let ticket = click.start(query.clone(), None);
         for path in [&plain, &dotted, &created] { std::fs::remove_file(path).unwrap(); }
-        assert!(query.resolve().values().all(Option::is_none), "deleted files must not open from hover cache");
+        assert!(query.resolve(|| true).values().all(Option::is_none), "deleted files must not open from hover cache");
         assert!(click.complete(ticket, &query, &query, None));
     }
 
@@ -3292,6 +3287,7 @@ mod tests {
         let first = LinkQuery { cwd: Some("/first".into()), paths: vec!["src/main.rs".into()] };
         let second = LinkQuery { cwd: Some("/second".into()), paths: first.paths.clone() };
         let mut cache = LinkCache::default();
+        assert!(first.resolve(|| false).is_empty(), "a stale hover must not start filesystem checks");
         assert!(cache.request(Some(first.clone())));
         assert!(cache.resolved.is_none());
         assert!(cache.request(Some(second.clone())));
