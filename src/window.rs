@@ -720,13 +720,27 @@ impl AppWindow {
                 core.closed().await;
                 tracing::warn!("lost the core; reconnecting");
                 crate::telemetry::count("core_lost");
+                let mut failures = 0u32;
+                let notice = crate::wsl::active().map(|_| mods::new_overlay_id());
                 let fresh = loop {
-                    cx.background_executor().timer(Duration::from_millis(1000)).await;
+                    let (delay, message) = reconnect_wait(crate::wsl::active(), failures);
+                    if failures == 3 && let (Some(message), Some(id)) = (message, notice.as_ref()) {
+                        if this.update_in(cx, |this, window, cx| {
+                            this.open_overlay(id.clone(), json!({"kind":"toast", "notification":{
+                                "title":message, "body":"Herdr will reconnect automatically. Your last layout is kept.", "level":"warning"
+                            }}), window, cx);
+                        }).is_err() { return; }
+                    }
+                    cx.background_executor().timer(delay).await;
                     if let Ok(core) = cx.background_executor().spawn(async { Core::connect() }).await {
                         break core;
                     }
+                    failures = failures.saturating_add(1);
                 };
-                if this.update(cx, |this, cx| this.reconnected(fresh, cx)).is_err() {
+                if this.update_in(cx, |this, window, cx| {
+                    if let Some(id) = &notice { this.close_overlay(id, window, cx); }
+                    this.reconnected(fresh, cx);
+                }).is_err() {
                     break;
                 }
             }
@@ -4699,6 +4713,16 @@ fn needs_model_pane(name: &str, args: &Value) -> bool {
     }
 }
 
+fn reconnect_wait(distro: Option<&str>, failures: u32) -> (Duration, Option<String>) {
+    match distro {
+        Some(distro) => (
+            Duration::from_secs(u64::from(failures.saturating_add(1).min(5))),
+            (failures >= 3).then(|| format!("Waiting for WSL ({distro})…")),
+        ),
+        None => (Duration::from_secs(1), None),
+    }
+}
+
 /// A failed implicit folder gets one retry in the machine's home, without local probes.
 fn run_following_folder(mut folder: String, follow: bool, on: Option<&str>, mut run: impl FnMut(Option<String>) -> anyhow::Result<String>) -> anyhow::Result<(String, String)> {
     let result = run(Some(folder.clone()).filter(|f| !f.is_empty()));
@@ -5063,6 +5087,16 @@ fn changed_asset_paths(home: &std::path::Path, changed: &[std::path::PathBuf]) -
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn wsl_reconnect_wait_shows_status_after_three_failures_and_caps_backoff() {
+        use std::time::Duration;
+        assert_eq!(super::reconnect_wait(Some("Ubuntu"), 0), (Duration::from_secs(1), None));
+        assert_eq!(super::reconnect_wait(Some("Ubuntu"), 2), (Duration::from_secs(3), None));
+        assert_eq!(super::reconnect_wait(Some("Ubuntu"), 3), (Duration::from_secs(4), Some("Waiting for WSL (Ubuntu)…".into())));
+        assert_eq!(super::reconnect_wait(Some("Ubuntu"), u32::MAX).0, Duration::from_secs(5));
+        assert_eq!(super::reconnect_wait(None, 100), (Duration::from_secs(1), None));
+    }
+
     use gpui::{div, point, px, size, Context, IntoElement, Render, TestAppContext, Window};
     use gpui::prelude::*;
 

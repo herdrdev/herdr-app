@@ -894,17 +894,22 @@ fn known_agents(on: Option<String>, list: Vec<Value>) -> Value {
 /// A text file on this machine (or inside the active WSL distribution).
 fn read_local(path: &str) -> Result<Option<String>, String> {
     if crate::wsl::active().is_some() && path.starts_with('/') {
-        // Unrepresentable paths (including symlink/.. semantics) must reach Linux unchanged.
-        if let Ok(host) = crate::wsl::host_path_if_active(Path::new(path)) {
-            match crate::mod_files::read(&host)? {
-                Some(text) => return Ok(Some(text)),
-                // The Windows share may not expose a guest mount or symlink.
-                None => {}
-            }
-        }
-        return read_guest_with(crate::wsl::command("env", None), path);
+        return read_wsl_with(path, crate::wsl::host_path_if_active(Path::new(path)), |path| {
+            read_guest_with(crate::wsl::command("env", None), path)
+        });
     }
     crate::mod_files::read(Path::new(path))
+}
+
+fn read_wsl_with(path: &str, host: Result<PathBuf, String>, guest: impl FnOnce(&str) -> Result<Option<String>, String>) -> Result<Option<String>, String> {
+    // A policy rejection must never try a Windows read: preserve Linux spelling
+    // (including symlink/.. semantics) and go straight to the guest.
+    if let Ok(host) = host
+        && let Some(text) = crate::mod_files::read(&host)?
+    {
+        return Ok(Some(text));
+    }
+    guest(path)
 }
 
 // Keep raw bytes until UTF-8 validation; head bounds output even for a huge file.
@@ -1270,6 +1275,17 @@ pub fn prepare_load(inst: &Instance) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejected_host_paths_go_directly_to_guest_read_unchanged() {
+        for path in ["/work/link/../file", "/work/literal\\name", "/work/note.", "/work/note "] {
+            let text = read_wsl_with(path, Err("Windows path policy".into()), |guest_path| {
+                assert_eq!(guest_path, path);
+                Ok(Some("guest text".into()))
+            }).unwrap();
+            assert_eq!(text.as_deref(), Some("guest text"));
+        }
+    }
 
     #[cfg(unix)]
     #[test]

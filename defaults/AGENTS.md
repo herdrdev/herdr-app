@@ -692,6 +692,8 @@ What's about the user, never a look:
   restarting clears the cache. Guest paths still use the direct fast path.
   WSL file links expand only `$HOME` and `$PWD`, never Windows environment
   variables. Settings reports distro-list failures without clearing your selection.
+  After three failed WSL reconnects, a Waiting for WSL notification appears;
+  retries back off from one to at most five seconds between attempts.
   Startup discovery and the Settings check share the bundled
   `frame/settings/find-core.sh`; like the rest of `frame/`,
   it is rewritten on start, so don't edit it.
