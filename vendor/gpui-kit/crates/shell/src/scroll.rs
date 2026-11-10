@@ -16,7 +16,7 @@ use gpui::{
     PointRefinement, RenderOnce, ScrollHandle, StatefulInteractiveElement, StyleRefinement, Styled,
     Window, div, prelude::FluentBuilder,
 };
-use gpui_base::{InteractiveElementExt as _, Scrollbar, ScrollbarAxis, StyledExt as _};
+use gpui_base::{ElementExt as _, InteractiveElementExt as _, Scrollbar, ScrollbarAxis, StyledExt as _};
 
 /// A scrollable element wrapper that renders the original element as the scroll area and overlays scrollbars.
 #[derive(IntoElement)]
@@ -26,6 +26,7 @@ pub(crate) struct Scrollable<E: InteractiveElement + Styled + ParentElement + El
     axis: ScrollbarAxis,
     // HERDR: `mode(...)` on an `overflow_*_scrollbar` element.
     mode: Option<gpui_base::ScrollbarMode>,
+    owned_scroll: Option<crate::entities::PlainScrollHandle>,
 }
 
 impl<E> Scrollable<E>
@@ -39,7 +40,13 @@ where
             element,
             axis: axis.into(),
             mode: None,
+            owned_scroll: None,
         }
+    }
+
+    pub(crate) fn track_scroll(mut self, handle: Option<crate::entities::PlainScrollHandle>) -> Self {
+        self.owned_scroll = handle;
+        self
     }
 
     pub(crate) fn mode(mut self, mode: Option<gpui_base::ScrollbarMode>) -> Self {
@@ -89,7 +96,9 @@ where
     E: InteractiveElement + Styled + ParentElement + Element + 'static,
 {
     fn render(mut self, window: &mut Window, cx: &mut App) -> impl IntoElement {
-        let scroll_handle = scroll_handle_for(&self.id, window, cx);
+        let scroll_handle = self.owned_scroll.as_ref().map(|owned| owned.handle.clone())
+            .unwrap_or_else(|| scroll_handle_for(&self.id, window, cx));
+        let requested = self.owned_scroll.as_ref().and_then(|owned| owned.pending.take());
 
         // Preserve the caller-requested size on the wrapper, while keeping the
         // caller's element as the actual scroll-tracked layout container.
@@ -109,6 +118,34 @@ where
                 ScrollbarAxis::Horizontal => this.w_auto().min_w_full(),
                 ScrollbarAxis::Both => this.size_auto().min_size_full(),
             });
+
+        // The wrapper's area has one content child, while script indices name
+        // the content's children. Measure those without changing their layout.
+        let content = if let Some(index) = requested {
+            let items = ScrollHandle::default();
+            let measured = items.clone();
+            let area = scroll_handle.clone();
+            let axis = self.axis;
+            content.track_scroll(&items).on_prepaint(move |_, window, _| {
+                let Some(child) = measured.bounds_for_item(index) else { return };
+                let viewport = area.bounds();
+                let mut offset = area.offset();
+                if axis.has_horizontal() {
+                    offset.x += reveal_delta(child.left(), child.right(), viewport.left(), viewport.right());
+                }
+                if axis.has_vertical() {
+                    offset.y += reveal_delta(child.top(), child.bottom(), viewport.top(), viewport.bottom());
+                }
+                if offset != area.offset() {
+                    window.on_next_frame(move |window, _| {
+                        area.set_offset(offset);
+                        window.refresh();
+                    });
+                }
+            })
+        } else {
+            content
+        };
 
         // Keep the scroll area in the normal flow: its content size must
         // propagate to auto-sized ancestors (e.g. a Dialog that grows with
@@ -143,6 +180,16 @@ where
                 window,
                 cx,
             ))
+    }
+}
+
+fn reveal_delta(start: gpui::Pixels, end: gpui::Pixels, near: gpui::Pixels, far: gpui::Pixels) -> gpui::Pixels {
+    if end - start > far - near || start < near {
+        near - start
+    } else if end > far {
+        far - end
+    } else {
+        gpui::px(0.)
     }
 }
 

@@ -36,6 +36,7 @@ pub const LOADING_DELAY: Duration = Duration::from_millis(200);
 /// Note: that this is only for Resources, like URLs or file paths.
 /// Custom loaders, or external images will not use this asset loader
 pub type ImgResourceLoader = AssetLogger<ImageAssetLoader>;
+pub(crate) type ImageLoad = crate::asset_cache::CachedLoad<Result<Arc<RenderImage>, ImageCacheError>>;
 
 /// A source of image content.
 #[derive(Clone)]
@@ -258,6 +259,7 @@ struct ImgState {
 
 /// The image layout state between frames
 pub struct ImgLayoutState {
+    data: Option<Arc<RenderImage>>,
     frame_index: usize,
     replacement: Option<AnyElement>,
 }
@@ -282,6 +284,7 @@ impl Element for Img {
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let mut layout_state = ImgLayoutState {
+            data: None,
             frame_index: 0,
             replacement: None,
         };
@@ -312,7 +315,13 @@ impl Element for Img {
                         window,
                         cx,
                     ) {
-                        Some(Ok(data)) => {
+                        Some(Ok(mut data)) => {
+                            if global_id.is_some() && data.has_animation() && !cx.reduce_motion()
+                                && let Some(Ok(animation)) = window.image_asset::<ImageAnimationLoader>(&AnimationSource(data.clone()), true, cx)
+                            {
+                                data = animation;
+                            }
+                            layout_state.data = Some(data.clone());
                             let frame_count = data.frame_count();
                             let max_frame_index = frame_count.saturating_sub(1);
 
@@ -468,7 +477,6 @@ impl Element for Img {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let source = self.source.clone();
         self.interactivity.paint(
             global_id,
             inspector_id,
@@ -477,13 +485,7 @@ impl Element for Img {
             window,
             cx,
             |style, window, cx| {
-                if let Some(Ok(data)) = source.use_data(
-                    self.image_cache
-                        .clone()
-                        .or_else(|| window.image_cache_stack.last().cloned()),
-                    window,
-                    cx,
-                ) {
+                if let Some(data) = layout_state.data.take() {
                     if data.frame_count() == 0 {
                         return;
                     }
@@ -544,7 +546,7 @@ impl ImageSource {
                 if let Some(cache) = cache {
                     cache.load(resource, window, cx)
                 } else {
-                    window.use_asset::<ImgResourceLoader>(resource, cx)
+                    window.image_asset::<ImgResourceLoader>(resource, true, cx)
                 }
             }
             ImageSource::Custom(loading_fn) => loading_fn(window, cx),
@@ -564,7 +566,7 @@ impl ImageSource {
                 if let Some(cache) = cache {
                     cache.load(resource, window, cx)
                 } else {
-                    window.get_asset::<ImgResourceLoader>(resource, cx)
+                    window.image_asset::<ImgResourceLoader>(resource, false, cx)
                 }
             }
             ImageSource::Custom(loading_fn) => loading_fn(window, cx),
@@ -597,6 +599,26 @@ impl ImageSource {
 }
 
 #[derive(Clone)]
+pub(crate) struct AnimationSource(pub(crate) Arc<RenderImage>);
+
+impl std::hash::Hash for AnimationSource {
+    fn hash<H: std::hash::Hasher>(&self, state: &mut H) {
+        self.0.id.hash(state);
+    }
+}
+
+pub(crate) enum ImageAnimationLoader {}
+
+impl Asset for ImageAnimationLoader {
+    type Source = AnimationSource;
+    type Output = Result<Arc<RenderImage>, ImageCacheError>;
+
+    fn load(source: Self::Source, _cx: &mut App) -> impl Future<Output = Self::Output> + Send + 'static {
+        async move { Ok(Arc::new(source.0.prepare_animation())) }
+    }
+}
+
+#[derive(Clone)]
 enum ImageDecoder {}
 
 impl Asset for ImageDecoder {
@@ -619,6 +641,10 @@ pub enum ImageAssetLoader {}
 impl Asset for ImageAssetLoader {
     type Source = Resource;
     type Output = Result<Arc<RenderImage>, ImageCacheError>;
+
+    fn cache_key(source: &Resource, cx: &App) -> u64 {
+        crate::hash(&cx.asset_source().image_resource(source))
+    }
 
     fn load(
         source: Self::Source,
@@ -667,6 +693,7 @@ impl Asset for ImageAssetLoader {
             };
 
             if let Ok(format) = image::guess_format(&bytes) {
+                let mut animated = format == ImageFormat::Gif;
                 let data = match format {
                     ImageFormat::Gif => {
                         let decoder = GifDecoder::new(Cursor::new(&bytes))?;
@@ -680,6 +707,7 @@ impl Asset for ImageAssetLoader {
                                         pixel.swap(0, 2);
                                     }
                                     frames.push(frame);
+                                    break;
                                 }
                                 Err(err) => {
                                     log::debug!(
@@ -700,7 +728,8 @@ impl Asset for ImageAssetLoader {
                     ImageFormat::WebP => {
                         let mut decoder = WebPDecoder::new(Cursor::new(&bytes))?;
 
-                        if decoder.has_animation() {
+                        animated = decoder.has_animation();
+                        if animated {
                             let _ = decoder.set_background_color(Rgba([0, 0, 0, 0]));
                             let mut frames = SmallVec::new();
 
@@ -712,6 +741,7 @@ impl Asset for ImageAssetLoader {
                                             pixel.swap(0, 2);
                                         }
                                         frames.push(frame);
+                                        break;
                                     }
                                     Err(err) => {
                                         log::debug!(
@@ -735,7 +765,11 @@ impl Asset for ImageAssetLoader {
                     _ => decode_static_image(&bytes, format)?,
                 };
 
-                Ok(Arc::new(RenderImage::new(data)))
+                let image = RenderImage::new(data);
+                let image = if animated {
+                    image.with_animation(bytes, format)
+                } else { image };
+                Ok(Arc::new(image))
             } else {
                 svg_renderer
                     .render_single_frame(&bytes, 1.0)

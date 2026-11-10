@@ -750,7 +750,7 @@ fn settings_sections_and_updates(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn animated_images_advance_with_explicit_and_implicit_ids(cx: &mut TestAppContext) {
-    use gpui::{IntoElement as _, http_client::{AsyncBody, FakeHttpClient, Response}};
+    use gpui::{Styled as _, http_client::{AsyncBody, FakeHttpClient, Response}};
     use image::{Delay, Frame, Rgba, RgbaImage, codecs::gif::GifEncoder};
     use std::{sync::Arc, time::Duration};
 
@@ -762,9 +762,14 @@ fn animated_images_advance_with_explicit_and_implicit_ids(cx: &mut TestAppContex
             encoder.encode_frame(Frame::from_parts(RgbaImage::from_pixel(2, 2, Rgba(color)), 0, 0, Delay::from_numer_denom_ms(20, 1))).unwrap();
         }
     }
+    let (ready, waiting) = async_channel::unbounded::<()>();
     let client = FakeHttpClient::create(move |_| {
         let bytes = bytes.clone();
-        async move { Ok(Response::builder().status(200).body(AsyncBody::from(bytes)).unwrap()) }
+        let waiting = waiting.clone();
+        async move {
+            waiting.recv().await.unwrap();
+            Ok(Response::builder().status(200).body(AsyncBody::from(bytes)).unwrap())
+        }
     });
     cx.update(|cx| cx.set_http_client(client));
     let staged = Staged::new();
@@ -775,26 +780,57 @@ fn animated_images_advance_with_explicit_and_implicit_ids(cx: &mut TestAppContex
         std::fs::write(staged.0.join("main.js"), source).unwrap();
         let context = cx.add_empty_window();
         let view = context.update(|window, cx| {
-            window.activate_window();
             let root = runtime.try_load(&staged.0, window, cx).unwrap();
             root.read(cx).content().clone()
         });
+        struct AnimationRoot(gpui::AnyView);
+        impl gpui::Render for AnimationRoot {
+            fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+                self.0.clone().cached(gpui::StyleRefinement::default().size_full())
+            }
+        }
+        // Load while inactive, then tick frames explicitly so the executor can park.
+        context.deactivate_window();
+        let root = context.update(|window, cx| window.replace_root(cx, |_, _| AnimationRoot(view.clone())));
+        context.run_until_parked();
+        // A cached subtree must keep its pending load across an unrelated parent draw.
+        context.update(|_, cx| root.update(cx, |_, cx| cx.notify()));
+        context.run_until_parked();
+        ready.try_send(()).unwrap();
+        context.run_until_parked();
+        let resource = gpui::Resource::Uri(url.into());
+        let still: Arc<gpui::RenderImage> = context.update(|_, cx| cx.fetch_asset::<gpui::ImgResourceLoader>(&resource).unwrap().unwrap());
+        assert_eq!(still.frame_count(), 1);
+        let data = context.update(|window, _| window.displayed_images().into_iter().find(|image| image.frame_count() == 2)).unwrap();
+        assert_eq!(data.as_bytes(0).unwrap().as_ptr(), still.as_bytes(0).unwrap().as_ptr());
+        context.update(|window, cx| {
+            window.replace_root(cx, |_, _| Empty);
+            window.activate_window();
+        });
+        context.run_until_parked();
+        context.update(|window, cx| { window.replace_root(cx, |_, _| AnimationRoot(view.clone())); });
         let draw = |context: &mut gpui::VisualTestContext| {
-            let view = view.clone();
-            context.draw(gpui::Point::default(), gpui::size(gpui::px(40.), gpui::px(40.)), move |_, _| view.into_any_element());
+            context.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                window.draw(cx).clear(cx);
+            });
         };
         draw(context);
-        context.run_until_parked();
-        draw(context);
         assert!(context.update(|window, _| window.is_window_active()));
-        let resource = gpui::Resource::Uri(url.into());
-        let data: Arc<gpui::RenderImage> = context.update(|_, cx| cx.fetch_asset::<gpui::ImgResourceLoader>(&resource).unwrap().unwrap());
         assert_eq!(data.frame_count(), 2);
-        assert!(!context.update(|window, _| window.has_image_atlas_entry(&data)));
+        assert!(context.update(|window, _| window.has_image_frame_atlas_entry(&data, 0)));
+        assert!(!context.update(|window, _| window.has_image_frame_atlas_entry(&data, 1)));
         // GPUI's image clock is wall time, not the test executor's clock.
         std::thread::sleep(Duration::from_millis(25));
         draw(context);
-        assert!(context.update(|window, _| window.has_image_atlas_entry(&data)), "both animation frames must have painted (explicit id: {explicit})");
+        assert!(context.update(|window, _| window.has_image_frame_atlas_entry(&data, 1)), "the next animation frame must paint (explicit id: {explicit})");
+        assert!(context.update(|window, _| window.has_image_frame_atlas_entry(&data, 0)));
+        std::thread::sleep(Duration::from_millis(25));
+        draw(context);
+        assert!(context.update(|window, _| window.has_image_frame_atlas_entry(&data, 0)));
+        assert!(context.update(|window, _| window.has_image_frame_atlas_entry(&data, 1)));
+        context.update(|window, cx| { window.replace_root(cx, |_, _| Empty); });
+        context.deactivate_window();
     }
 }
 

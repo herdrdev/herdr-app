@@ -607,6 +607,17 @@ impl TerminalView {
         self.shown_in.set(FRAME.load(Ordering::Relaxed));
     }
 
+    /// A hidden pane cannot render its focus loss.
+    pub fn blur(&mut self) {
+        if self.was_focused {
+            self.was_focused = false;
+            let g = self.grid.borrow();
+            if let Some(ch) = g.channel {
+                g.core.focus(ch, false);
+            }
+        }
+    }
+
     /// Sizes a terminal that isn't on screen as its pane would be (`AppWindow::fit_hidden_tabs`).
     pub fn fit(&self, cols: u16, rows: u16, cell: Size<Pixels>, scale: f32) {
         self.grid.borrow_mut().fit(cols, rows, cell, scale);
@@ -1558,18 +1569,89 @@ fn needs_ligatures(text: &str, font: &Font) -> bool {
         || text.as_bytes().windows(2).any(|pair| pair[0].is_ascii_punctuation() && pair[1].is_ascii_punctuation())
 }
 
-pub fn cell_size(window: &Window) -> Size<Pixels> {
+#[derive(Clone, Copy, Debug)]
+struct CellMetrics {
+    size: Size<Pixels>,
+    baseline: Pixels,
+    underline: Pixels,
+    underline_thickness: Pixels,
+    strike: Pixels,
+    strike_thickness: Pixels,
+}
+
+fn cell_metrics(window: &Window) -> CellMetrics {
     let ts = window.text_system();
-    let f = cell_font(false, false);
-    let id = ts.resolve_font(&f);
-    let fs = px(crate::settings::font_size());
-    let w = ts.advance(id, fs, 'M').map(|s| s.width).unwrap_or(fs * 0.6);
-    let h = ts.ascent(id, fs) + ts.descent(id, fs).abs();
-    // The width stays the font's own advance: GPUI only moves a glyph onto the
-    // grid once it drifts over 1px, so a rounded width made text wobble.
-    // Boxes snap their edges instead (`snap_box`).
-    let scale = window.scale_factor();
-    size(w, px((f32::from(h) * 1.15 * scale).ceil() / scale))
+    let id = ts.resolve_font(&cell_font(false, false));
+    font_cell_metrics(ts, id, crate::settings::font_size(), window.scale_factor())
+}
+
+fn font_cell_metrics(ts: &WindowTextSystem, id: FontId, fs: f32, scale: f32) -> CellMetrics {
+    // FreeType uses integer y_ppem for metrics; CoreText uses the requested size.
+    let em = if cfg!(target_os = "macos") { fs * scale } else { (fs * scale).round().max(1.0) };
+    let metrics = ts.font_metrics(id);
+    let unit = em / metrics.units_per_em.max(1) as f32;
+    let hhea_data = ts.font_table(id, *b"hhea");
+    let os2_data = ts.font_table(id, *b"OS/2");
+    let post_data = ts.font_table(id, *b"post");
+    let hhea = hhea_data.as_deref().and_then(ttf_parser::hhea::Table::parse);
+    let os2 = os2_data.as_deref().and_then(ttf_parser::os2::Table::parse);
+    let post = post_data.as_deref().and_then(ttf_parser::post::Table::parse);
+    // Match Ghostty's hhea / USE_TYPO_METRICS / typo / Windows fallback order.
+    let (ascent, descent, gap) = if let Some(hhea) = hhea {
+        if let Some(os2) = os2 {
+            if os2.use_typographic_metrics() {
+                (os2.typographic_ascender() as f32, os2.typographic_descender() as f32, os2.typographic_line_gap() as f32)
+            } else if hhea.ascender != 0 || hhea.descender != 0 {
+                (hhea.ascender as f32, hhea.descender as f32, hhea.line_gap as f32)
+            } else if os2.typographic_ascender() != 0 || os2.typographic_descender() != 0 {
+                (os2.typographic_ascender() as f32, os2.typographic_descender() as f32, os2.typographic_line_gap() as f32)
+            } else {
+                (os2.windows_ascender() as f32, -(os2.windows_descender() as f32), 0.0)
+            }
+        } else {
+            (hhea.ascender as f32, hhea.descender as f32, hhea.line_gap as f32)
+        }
+    } else {
+        (metrics.ascent, metrics.descent, metrics.line_gap)
+    };
+    let face_height = (ascent - descent + gap) * unit;
+    let height = face_height.round().max(1.0);
+    let baseline_bottom = (gap * unit / 2.0 - descent * unit - (height - face_height) / 2.0).round();
+    let baseline = height - baseline_bottom;
+    let measured_height = |ch| ts.typographic_bounds(id, px(metrics.units_per_em as f32), ch).ok()
+        .map(|b| f32::from(b.size.height)).filter(|h| *h > 0.0);
+    let ex = os2.and_then(|o| o.x_height()).filter(|h| *h > 0).map(|h| h as f32)
+        .or_else(|| measured_height('x')).unwrap_or_else(|| {
+            let cap = os2.and_then(|o| o.capital_height()).filter(|h| *h > 0).map(|h| h as f32)
+                .or_else(|| measured_height('H')).unwrap_or(ascent * 0.75);
+            cap * 0.75
+        });
+    let ul = post.map(|p| p.underline_metrics);
+    let st = os2.map(|o| o.strikeout_metrics());
+    let ul_thick = ul.filter(|m| m.thickness > 0).map_or(ex * unit * 0.15, |m| m.thickness as f32 * unit);
+    let st_thick = st.filter(|m| m.thickness > 0).map_or(ul_thick, |m| m.thickness as f32 * unit);
+    let ul_pos = ul.filter(|m| m.thickness != 0 || m.position != 0).map_or(-ul_thick, |m| m.position as f32 * unit);
+    let st_pos = st.filter(|m| m.thickness != 0 || m.position != 0).map_or((ex * unit + st_thick) * 0.5, |m| m.position as f32 * unit);
+    let width = (' '..='~').filter_map(|c| ts.advance(id, px(fs * scale), c).ok())
+        .map(|s| f32::from(s.width)).fold(0.0_f32, f32::max).round().max(1.0);
+    CellMetrics {
+        size: size(px(width / scale), px(height / scale)),
+        baseline: px(baseline / scale),
+        underline: px((baseline - ul_pos).round() / scale),
+        underline_thickness: px(ul_thick.ceil().max(1.0) / scale),
+        strike: px((baseline - st_pos).round() / scale),
+        strike_thickness: px(st_thick.ceil().max(1.0) / scale),
+    }
+}
+
+pub fn cell_size(window: &Window) -> Size<Pixels> {
+    cell_metrics(window).size
+}
+
+fn paint_cell_text(line: &ShapedLine, origin: Point<Pixels>, metrics: CellMetrics, window: &mut Window, cx: &mut App) {
+    let gpui_baseline = (metrics.size.height - line.ascent - line.descent) / 2.0 + line.ascent;
+    let origin = origin + point(px(0.0), metrics.baseline - gpui_baseline);
+    let _ = line.paint(origin, metrics.size.height, TextAlign::Left, None, window, cx);
 }
 
 // Force-width shaping moves glyph origins, but does not resize fallback glyphs.
@@ -1594,6 +1676,7 @@ enum RowOp {
     Sprite { x: usize, text: String, color: Hsla },
     Icon { x: usize, offset: Point<Pixels>, font: FontId, glyph: GlyphId, size: Pixels, color: Hsla },
     Text { x: usize, line: ShapedLine },
+    Decoration { from: usize, to: usize, underline: bool, strike: bool, color: Hsla },
 }
 
 /// A row's drawing: its backgrounds, merged into runs of one color, then its
@@ -1654,6 +1737,7 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
         }
         let fitted_size = fallback_size(c, &text_font, cell.width, window.text_system());
         let mut text = if c.text.is_empty() { " ".to_owned() } else { c.text.clone() };
+        let mut positions = vec![(0, px(0.0))];
         // Shape the cursor cell separately, so its plain glyph doesn't cover a ligature.
         if !c.wide && fitted_size.is_none() && cursor != Some(start) {
             while x < row.len() {
@@ -1670,6 +1754,7 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
                 if !same || cursor == Some(x) || (d.text.is_empty() && !d.underline && !d.strike) || crate::sprites::is_sprite(&d.text) || fallback_icon(&d.text, &text_font, window.text_system()).is_some() || fallback_size(d, &text_font, cell.width, window.text_system()).is_some() {
                     break;
                 }
+                positions.push((text.len(), cell.width * (x - start) as f32));
                 text.push_str(if d.text.is_empty() { " " } else { &d.text });
                 x += 1;
             }
@@ -1685,12 +1770,16 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
             font: text_font,
             color,
             background_color: None,
-            underline: c.underline.then(|| UnderlineStyle { thickness: px(1.0), color: Some(color), wavy: false }),
-            strikethrough: c.strike.then(|| StrikethroughStyle { thickness: px(1.0), color: Some(color) }),
+            underline: None,
+            strikethrough: None,
         };
-        let force = (!c.wide).then_some(cell.width);
-        let line = window.text_system().shape_line(text.into(), fitted_size.unwrap_or_else(|| px(crate::settings::font_size())), &[run], force);
+        let width = cell.width * if c.wide { 2.0 } else { (x - start) as f32 };
+        let line = window.text_system().shape_line(text.into(), fitted_size.unwrap_or_else(|| px(crate::settings::font_size())), &[run], None)
+            .with_cell_positions(&positions, width);
         ops.push(RowOp::Text { x: start, line });
+        if c.underline || c.strike {
+            ops.push(RowOp::Decoration { from: start, to: if c.wide { start + 2 } else { x }, underline: c.underline, strike: c.strike, color });
+        }
     }
     ops
 }
@@ -1712,6 +1801,7 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     crate::bench::count(&crate::bench::GRID);
     let mut g = grid.borrow_mut();
     let cell = g.cell;
+    let metrics = cell_metrics(window);
     let (pad_x, pad_y) = pad();
     // Rows rarely fill the height exactly: split what's left above and below.
     let spare = (f32::from(bounds.size.height) - 2.0 * pad_y - f32::from(cell.height) * g.vt.rows as f32).max(0.0);
@@ -1831,7 +1921,15 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
                     let _ = window.paint_glyph(at(*x, y) + *offset, *font, *glyph, *size, *color);
                 }
                 RowOp::Text { x, line } => {
-                    let _ = line.paint(at(*x, y), cell.height, TextAlign::Left, None, window, cx);
+                    paint_cell_text(line, at(*x, y), metrics, window, cx);
+                }
+                RowOp::Decoration { from, to, underline, strike, color } => {
+                    for (enabled, offset, thickness) in [(*underline, metrics.underline, metrics.underline_thickness), (*strike, metrics.strike, metrics.strike_thickness)] {
+                        if enabled {
+                            let b = Bounds::new(at(*from, y) + point(px(0.0), offset), size(cell.width * (to - from) as f32, thickness));
+                            window.paint_quad(fill(snap_box(b), *color));
+                        }
+                    }
                 }
             }
         }
@@ -1845,7 +1943,7 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
         let Some(row) = frame.rows.get(y as usize) else { continue };
         let color = row.get(x0 as usize).map_or(hsla(vt::theme().fg), |c| hsla(c.fg));
         let (x0, x1) = (x0 as usize, (x1 as usize + 1).min(row.len()));
-        let line = Bounds::new(at(x0, y as usize) + point(px(0.0), cell.height - px(2.0)), size(cell.width * (x1 - x0) as f32, px(1.0)));
+        let line = Bounds::new(at(x0, y as usize) + point(px(0.0), metrics.underline), size(cell.width * (x1 - x0) as f32, metrics.underline_thickness));
         window.paint_quad(fill(snap_box(line), color));
     }
 
@@ -1870,7 +1968,7 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
                         strikethrough: None,
                     };
                     let line = window.text_system().shape_line(c.text.clone().into(), px(crate::settings::font_size()), &[run], None);
-                    let _ = line.paint(p, cell.height, TextAlign::Left, None, window, cx);
+                    paint_cell_text(&line, p, metrics, window, cx);
                 }
             }
             (true, CursorShape::Bar) => window.paint_quad(fill(snap_box(Bounds::new(p, size(px(2.0), cell.height))), color)),
@@ -1892,12 +1990,14 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
             font: cell_font(false, false),
             color: fg,
             background_color: None,
-            underline: Some(UnderlineStyle { thickness: px(1.0), color: Some(fg), wavy: false }),
+            underline: None,
             strikethrough: None,
         };
         let line = window.text_system().shape_line(text.into(), px(crate::settings::font_size()), &[run], None);
         window.paint_quad(fill(snap_box(Bounds::new(p, size(line.width, cell.height))), hsla(frame.bg)));
-        let _ = line.paint(p, cell.height, TextAlign::Left, None, window, cx);
+        paint_cell_text(&line, p, metrics, window, cx);
+        let underline = Bounds::new(p + point(px(0.0), metrics.underline), size(line.width, metrics.underline_thickness));
+        window.paint_quad(fill(snap_box(underline), fg));
     }
     {
         let mut g = grid.borrow_mut();
@@ -2079,6 +2179,11 @@ impl Render for TerminalView {
             }))
             .on_mouse_down(MouseButton::Left, cx.listener(|this, ev: &MouseDownEvent, window, cx| {
                 this.focus.focus(window, cx);
+                let g = this.grid.borrow();
+                if let Some(ch) = g.channel {
+                    g.core.resize(ch, g.vt.cols, g.vt.rows);
+                }
+                drop(g);
                 if link_mods(&ev.modifiers)
                     && let Some((target, _)) = this.link_at(ev.position)
                 {
@@ -2983,7 +3088,7 @@ mod tests {
                     let font_id = text_system.resolve_font(&font);
                     let width = text_system.advance(font_id, font_size, 'M').unwrap().width;
                     let run = TextRun { len: text.len(), font, ..Default::default() };
-                    let line = text_system.shape_line(text.into(), font_size, &[run], Some(width));
+                    let line = text_system.shape_line(text.into(), font_size, std::slice::from_ref(&run), Some(width));
 
                     assert!(f32::from(line.width() - width * text.len() as f32).abs() < 0.1, "{text}: width drift");
                     let glyphs: Vec<_> = line.runs.iter().flat_map(|run| &run.glyphs).collect();
@@ -2991,11 +3096,60 @@ mod tests {
                         assert!(f32::from(glyph.position.x - width * glyph.index as f32).abs() < 0.1, "{text}: glyph drift");
                     }
                     variants.push(glyphs.iter().map(|glyph| glyph.id).collect::<Vec<_>>());
+                    let cell = px(f32::from(width).round());
+                    let positions: Vec<_> = (0..text.len()).map(|i| (i, cell * i as f32)).collect();
+                    let aligned = text_system.shape_line(text.into(), font_size, &[run], None).with_cell_positions(&positions, cell * text.len() as f32);
+                    for glyph in aligned.runs.iter().flat_map(|run| &run.glyphs) {
+                        assert!((f32::from(glyph.position.x - cell * glyph.index as f32)).abs() < 0.1, "{text}: rounded grid drift");
+                    }
                 }
                 assert_ne!(variants[0], variants[1], "{text}: ligatures must change the glyphs");
             }
         }
         crate::settings::set((*original).clone());
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn ghostty_cells_and_clusters_at_fractional_scales() {
+        use super::*;
+        use std::borrow::Cow;
+        let system = Arc::new(TextSystem::new(Arc::new(gpui_wgpu::CosmicTextSystem::new_without_system_fonts(crate::settings::DEFAULT_FONT))));
+        system.add_fonts(vec![Cow::Borrowed(include_bytes!("../assets/fonts/JetBrainsMono-Variable.ttf"))]).unwrap();
+        let ts = WindowTextSystem::new(system);
+        let font = font(crate::settings::DEFAULT_FONT);
+        let id = ts.resolve_font(&font);
+        // Ghostty's font tables at 14/16px; zoom and display scaling use physical cells.
+        for (fs, scale, width, height, baseline) in [
+            (14., 1., 8., 18., 14.), (16., 1., 10., 21., 16.),
+            (14., 1.25, 11., 24., 19.), (14., 1.5, 13., 28., 22.),
+            (14., 2., 17., 37., 29.),
+            (16., 0.9, 9., 18., 14.), (16., 1.1, 11., 24., 19.),
+            (13.5, 1., 8., 18., 14.),
+        ] {
+            let metrics = font_cell_metrics(&ts, id, fs, scale);
+            assert_eq!(metrics.size.map(|v| v * scale), size(px(width), px(height)));
+            assert_eq!(metrics.baseline * scale, px(baseline));
+            let text = "H".repeat(60);
+            let run = TextRun { len: text.len(), font: font.clone(), ..Default::default() };
+            let positions: Vec<_> = (0..60).map(|i| (i, metrics.size.width * i as f32)).collect();
+            let line = ts.shape_line(text.into(), px(fs), &[run], None).with_cell_positions(&positions, metrics.size.width * 60.);
+            for glyph in line.runs.iter().flat_map(|r| &r.glyphs) {
+                assert_eq!(glyph.position.x, metrics.size.width * glyph.index as f32);
+            }
+        }
+        // Two code points in one terminal cell retain their shaped relative offset.
+        let text = "x\u{301}b";
+        let run = TextRun { len: text.len(), font, ..Default::default() };
+        let line = ts.shape_line(text.into(), px(14.), &[run], None);
+        let original: Vec<_> = line.runs.iter().flat_map(|r| &r.glyphs).map(|g| (g.index, g.position.x)).collect();
+        assert!(original.iter().filter(|(index, _)| *index < 3).count() >= 2, "fixture must shape a separate combining mark");
+        let aligned = line.with_cell_positions(&[(0, px(0.)), (3, px(8.))], px(16.));
+        let glyphs: Vec<_> = aligned.runs.iter().flat_map(|r| &r.glyphs).collect();
+        for ((index, x), glyph) in original.iter().zip(&glyphs) {
+            if *index < 3 { assert_eq!(glyph.position.x - glyphs[0].position.x, *x - original[0].1); }
+            else { assert_eq!(glyph.position.x, px(8.)); }
+        }
     }
 
     #[cfg(target_os = "linux")]
@@ -3316,7 +3470,7 @@ mod tests {
                 for decorated in [false, true] {
                     let row = [crate::vt::Cell { text: text.clone(), underline: decorated, strike: decorated, ..Default::default() }];
                     let ops = super::row_ops(&row, gpui::size(gpui::px(8.0), gpui::px(16.0)), None, window);
-                    assert_eq!(ops.len(), 1, "U+{code:X}");
+                    assert_eq!(ops.iter().filter(|op| !matches!(op, super::RowOp::Decoration { .. })).count(), 1, "U+{code:X}");
                     match &ops[0] {
                         super::RowOp::Text { x, line } => { assert_eq!(*x, 0); assert_eq!(line.text.as_ref(), text); }
                         super::RowOp::Icon { x, .. } => assert_eq!(*x, 0),

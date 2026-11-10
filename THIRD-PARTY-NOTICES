@@ -57,7 +57,7 @@ Input-SHA256: 643a0dbfd9207840764607afbd0cf163b07a16ae4a48266f5cb31efe64b1b2ac v
 Input-SHA256: cd6a0e1b53913eb4f2559b79aae3b7877b41e9c559c56a0231501cbd0fe2ad3a vendor/gpui-kit/crates/shell/rquickjs-compat/Cargo.toml
 Input-SHA256: f00df50e0e437e56cd8475bc78289f57ef00e5d0af0a1a056bf215438bfe5529 vendor/gpui-pre-apple/Cargo.toml
 Input-SHA256: 752daf2fb234ca4a1fa372c073fe127f44b7b90fd2529ae44273a64f9d53da7a vendor/gpui-pre-apple/LICENSE-APACHE
-Input-SHA256: 0035e237c09464dce9426e0be2b66b1d69052a33c572c9114c31fb95c429b336 vendor/gpui-pre-linux/Cargo.toml
+Input-SHA256: 0d4ca250457a2343879236779f72d4a2dbc1dbdb5fc9fec23d59152cce63caf1 vendor/gpui-pre-linux/Cargo.toml
 Input-SHA256: 752daf2fb234ca4a1fa372c073fe127f44b7b90fd2529ae44273a64f9d53da7a vendor/gpui-pre-linux/LICENSE-APACHE
 Input-SHA256: 79043cc6fc3d6533e0264b468916537eb8db3e2d9961dce745517335a6d3f3fd vendor/gpui-pre-macos/Cargo.toml
 Input-SHA256: 752daf2fb234ca4a1fa372c073fe127f44b7b90fd2529ae44273a64f9d53da7a vendor/gpui-pre-macos/LICENSE-APACHE
@@ -2752,7 +2752,7 @@ Apache License 2.0 (Apache-2.0)
 
 ----------------------------------------------------------------------
 Apache License 2.0 (Apache-2.0)
-  herdr-app 0.1.13
+  herdr-app 0.1.14
 
                                  Apache License
                            Version 2.0, January 2004
@@ -2958,7 +2958,7 @@ Apache License 2.0 (Apache-2.0)
 
 ----------------------------------------------------------------------
 Apache License 2.0 (Apache-2.0)
-  herdr-app 0.1.13
+  herdr-app 0.1.14
   codespan-reporting 0.13.1 — https://github.com/brendanzab/codespan
   crypto-primes 0.7.2 — https://github.com/entropyxyz/crypto-primes
   self_cell 1.3.0 — https://github.com/Voultapher/self_cell
@@ -12014,12 +12014,12 @@ limitations under the License.
 
 ----------------------------------------------------------------------
 Apache License 2.0 (Apache-2.0)
-  herdr-app 0.1.13
-  herdr-app 0.1.13
-  herdr-app 0.1.13
-  herdr-app 0.1.13
-  herdr-app 0.1.13
-  herdr-app 0.1.13
+  herdr-app 0.1.14
+  herdr-app 0.1.14
+  herdr-app 0.1.14
+  herdr-app 0.1.14
+  herdr-app 0.1.14
+  herdr-app 0.1.14
   gpui-pre 0.3.8 — https://github.com/zed-industries/zed
   gpui-pre-apple 0.3.8 — https://github.com/zed-industries/zed
   gpui-pre-linux 0.3.8 — https://github.com/zed-industries/zed
@@ -12269,8 +12269,8 @@ Apache License
 
 ----------------------------------------------------------------------
 Apache License 2.0 (Apache-2.0)
-  herdr-app 0.1.13
-  herdr-app 0.1.13
+  herdr-app 0.1.14
+  herdr-app 0.1.14
   gpui-base 0.7.1 — https://github.com/longbridge/gpui-kit
 
 Copyright 2024 - 2026 Longbridge <https://longbridge.com>
