@@ -282,6 +282,14 @@ Show a terminal in a pane for now, in place of its own (no terminal: back).
 | `terminal` | no |
 | `pane` | no |
 
+## `terminal.select_all`
+
+Select a terminal's whole screen and scrollback (default: the focused one), ready to copy. On the alternate screen, select only that screen.
+
+| Argument | Required |
+|---|---|
+| `terminal` | no |
+
 ## `terminal.copy`
 
 Copy the focused terminal's selection. With nothing selected, that key goes to the program.

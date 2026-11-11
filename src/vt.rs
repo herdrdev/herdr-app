@@ -1011,6 +1011,18 @@ impl Vt {
         }
     }
 
+    /// Select the active screen and its history without formatting or copying text.
+    pub fn select_all(&mut self) {
+        let mut selection = GhosttySelection { size: std::mem::size_of::<GhosttySelection>(), ..Default::default() };
+        unsafe {
+            if ghostty_terminal_select_all(self.term, &mut selection) == GHOSTTY_SUCCESS {
+                ghostty_terminal_set(self.term, GHOSTTY_TERMINAL_OPT_SELECTION, &selection as *const _ as *const c_void);
+            } else {
+                self.clear_selection();
+            }
+        }
+    }
+
     /// The selected text, if anything is selected.
     pub fn selection_text(&self) -> Option<String> {
         unsafe {
@@ -2189,6 +2201,65 @@ mod tests {
         vt.write(b"\x1b[?1002h\x1b[?1006h");
         // Ghostty trusts the event's button even if this pane never saw a press.
         assert_eq!(vt.encode_mouse(GHOSTTY_MOUSE_ACTION_MOTION, Some(GHOSTTY_MOUSE_BUTTON_LEFT), 0, 35.0, 5.0, (80, 2, 10.0, 20.0), false), b"\x1b[<32;4;1M");
+    }
+
+    #[test]
+    fn select_all_covers_history_and_screen_from_any_viewport() {
+        let mut vt = Vt::new(12, 2);
+        vt.write("old 日本語\r\nwrapped abcdefghijklmnop\r\nlast".as_bytes());
+        for scroll in [0, -100, 1] {
+            vt.scroll_viewport(scroll);
+            vt.select_all();
+            assert_eq!(vt.selection_text().as_deref(), Some("old 日本語\nwrapped abcdefghijklmnop\nlast"));
+            vt.clear_selection();
+            assert_eq!(vt.selection_text(), None);
+        }
+    }
+
+    #[test]
+    fn select_all_uses_only_the_active_screen() {
+        let mut vt = Vt::new(20, 3);
+        vt.select_all();
+        assert_eq!(vt.selection_text(), None);
+        vt.write(b"primary history\r\nprimary screen\x1b[?1049h\x1b[Halt only");
+        vt.select_all();
+        assert_eq!(vt.selection_text().as_deref(), Some("alt only"));
+        vt.write(b"\x1b[?1049l");
+        vt.select_all();
+        assert_eq!(vt.selection_text().as_deref(), Some("primary history\nprimary screen"));
+        vt.select(Select::Press, 0, 0, 2.0, 5.0, 10.0, 60.0);
+        assert_eq!(vt.selection_text(), None, "a plain click clears select-all too");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "manual 64 MiB scrollback performance check"]
+    fn select_all_large_scrollback() {
+        let mut vt = Vt::new(80, 25);
+        let bytes = 64usize * 1024 * 1024;
+        let lines = usize::MAX;
+        unsafe {
+            ok(ghostty_terminal_set(vt.term, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES, &bytes as *const _ as *const c_void), "scrollback bytes");
+            ok(ghostty_terminal_set(vt.term, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES, &lines as *const _ as *const c_void), "scrollback lines");
+        }
+        let line = format!("{}\r\n", "x".repeat(79));
+        for _ in 0..200_000 {
+            vt.write(line.as_bytes());
+        }
+        let memory = || {
+            std::fs::read_to_string("/proc/self/status").unwrap().lines()
+                .find(|line| line.starts_with("VmRSS:")).unwrap().to_owned()
+        };
+        let before = memory();
+        let started = Instant::now();
+        for _ in 0..1000 {
+            vt.select_all();
+        }
+        eprintln!("64 MiB budget, {} rows; 1000 selections: {:?}; RSS before {before}, after {}", vt.scrollbar().total, started.elapsed(), memory());
+        let text = vt.selection_text().unwrap();
+        assert!(text.starts_with(&"x".repeat(79)));
+        assert!(text.trim_end().ends_with(&"x".repeat(79)));
+        eprintln!("copy on request: {} bytes", text.len());
     }
 
     #[test]

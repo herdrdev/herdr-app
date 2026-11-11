@@ -78,6 +78,11 @@ the same tab. Give `direction` or `target`, not both. Focus stays with the same 
 herdr-app do pane.swap '{"pane":"p12","target":"p14"}'
 ```
 
+`terminal.select_all {terminal?}` selects a terminal's whole screen and scrollback,
+ready for `terminal.copy`. Without a target it follows keyboard focus. In vim and
+other alternate-screen apps, it selects only that screen. Cmd+A runs it on macOS;
+Linux and Windows have no default, so Ctrl+A stays with the shell.
+
 `terminal.search` opens a find bar in the focused terminal. It searches that
 terminal's screen and scrollback; Enter and Shift-Enter move between matches,
 Escape closes the bar while its find field has focus, and each terminal keeps its own query (reopening selects it, so typing replaces it).

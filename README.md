@@ -81,6 +81,10 @@ A broken edit keeps the last good version and reports the error.
 
 Ctrl+Shift+P shows every command and its key (Cmd+Shift+P on macOS). Change any key in `keys.json`; see [the keys section](defaults/AGENTS.md#keys-keysjson) of the mod guide for the format, including JSON objects for named, typed command arguments.
 
+On macOS, Cmd+A selects the terminal's whole screen and scrollback, ready for Cmd+C.
+In vim and other alternate-screen apps, it selects only that screen.
+Linux and Windows keep Ctrl+A for the shell; bind `terminal.select_all` in `keys.json` if desired.
+
 [Layouts and mods](docs/mods.md) · [Commands](docs/commands.md)
 
 ## Updates and privacy

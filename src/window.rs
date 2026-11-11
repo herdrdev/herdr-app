@@ -1630,7 +1630,7 @@ impl AppWindow {
             let view = t.view.read(cx);
             (view.owns_keyboard_focus(window, cx), view.on_screen_this_frame(), own_pane.as_deref() == Some(pane.as_str()))
         });
-        best.map(|(_, t)| t.view.clone()).ok_or_else(|| format!("terminal {address:?} is running but not shown in this window, so it has no view to scroll"))
+        best.map(|(_, t)| t.view.clone()).ok_or_else(|| format!("terminal {address:?} is running but not shown in this window, so it has no view"))
     }
 
     fn scroll_terminal(&self, args: &Value, window: &Window, cx: &mut Context<Self>) -> Result<(), String> {
@@ -3199,6 +3199,17 @@ impl AppWindow {
                         // A command, not a key: copy and leave the selection.
                         _ => { let _ = v.copy(cx); }
                     });
+                }
+                return;
+            }
+            "terminal.select_all" => {
+                let view = match Self::owned(a, "terminal") {
+                    Some(address) => self.shown_terminal_view(&address, window, cx),
+                    None => self.focused_terminal(window, cx).map(|t| t.view.clone()).ok_or_else(|| "no focused terminal to select".into()),
+                };
+                match view {
+                    Ok(view) => view.update(cx, |view, cx| view.select_all(cx)),
+                    Err(error) => self.fail(error),
                 }
                 return;
             }

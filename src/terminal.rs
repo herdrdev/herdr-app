@@ -734,6 +734,11 @@ impl TerminalView {
         true
     }
 
+    pub fn select_all(&mut self, cx: &mut Context<Self>) {
+        self.grid.borrow_mut().vt.select_all();
+        cx.notify();
+    }
+
     pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
         self.grid.borrow_mut().vt.clear_selection();
         cx.notify();
@@ -2744,6 +2749,33 @@ mod tests {
             }
             assert_eq!(grid.vt.search_progress().total, 1, "query edits must keep working after reconnect");
         }));
+    }
+
+    #[gpui::test]
+    fn select_all_waits_for_copy_and_typing_clears_it(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        let terminal = cx.new(|cx| super::TerminalView::attach(crate::hc::offline(), "t1".into(), (20, 3), cx));
+        let (_, cx) = cx.add_window_view(|_, _| gpui::Empty);
+        cx.update(|window, app| {
+            app.write_to_clipboard(ClipboardItem::new_string("untouched".into()));
+            terminal.update(app, |terminal, cx| {
+                terminal.grid.borrow_mut().vt.write(b"history\r\nscreen");
+                terminal.select_all(cx);
+                assert_eq!(cx.read_from_clipboard().unwrap().text().as_deref(), Some("untouched"));
+                assert!(terminal.copy(cx));
+                assert_eq!(cx.read_from_clipboard().unwrap().text().as_deref(), Some("history\nscreen"));
+                terminal.clear_selection(cx);
+                assert!(!terminal.copy(cx));
+                terminal.select_all(cx);
+                terminal.key_down(&KeyDownEvent {
+                    keystroke: Keystroke::parse("x").unwrap(),
+                    is_held: false,
+                    prefer_character_input: false,
+                }, window, cx);
+                assert_eq!(terminal.grid.borrow().vt.selection_text(), None);
+            });
+        });
     }
 
     #[gpui::test]
