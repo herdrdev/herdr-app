@@ -46,6 +46,11 @@ herdr-app do space.new --name "remote api" --machine vps --folder /srv/api
 The folder is on that machine; tabs and splits in the space stay there.
 New-space keys and clicks follow the focused space's machine. Script commands
 without `--machine` still use this computer; `--machine ''` explicitly chooses it.
+Open repository… (the folder button in the spaces header, the + menu, the command
+palette, and the global menu) picks a local git repository. A directory inside one
+uses that repository. A local space already there is shown; otherwise one space is
+created on this computer, with its first tab. When the path is already known,
+pass `--folder` to `space.new`.
 The agent menu checks and starts agents in the remote Unix user's
 login/interactive shell (sh, bash, zsh, dash, ksh or fish), including its
 configured PATH. Other shells keep the sh launcher.

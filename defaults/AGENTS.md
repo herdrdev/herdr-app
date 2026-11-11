@@ -841,7 +841,12 @@ has 120 programs (agents, editors, runtimes, tools, databases, infra);
   `~/.herdr/worktrees/<repo>/<branch>` on the space's machine, a constant
   at its top; the
   `spaces` sidebar nests worktree spaces under their repo's and shows each
-  space's repo, branch, ahead/behind and uncommitted changes). Shipped mods
+  space's repo, branch, ahead/behind and uncommitted changes), and `space-new`
+  (Open repository…: the folder button in the spaces header, the + menu, the
+  command palette, and the global menu. Pick a local git repository; a directory
+  inside one uses that repository. A local space already there is shown, otherwise
+  one space is created on this computer with its first tab. New space stays
+  `space.new`). Shipped mods
   are Herdr's; duplicate with `mod.clone` before editing.
 
 ### Check before you finish
