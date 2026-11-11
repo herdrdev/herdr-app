@@ -7,7 +7,7 @@ const source = (await readFile(new URL("../defaults/mods/spaces/main.js", import
   .replace(/^import .*;\n/gm, "").replace("export default class Spaces", "class Spaces").replace(/^export /gm, "");
 
 type Space = { id: string; folder: string; machine?: string | null };
-function harness(replies: unknown[] = [], storage = new Map<string, string>(), snapshot: Space[] = [], execGit?: (...args: any[]) => Promise<unknown>) {
+function harness(replies: unknown[] = [], storage = new Map<string, string>(), snapshot: Space[] = [], execGit?: (...args: any[]) => Promise<unknown>, watch?: (repo: string) => Promise<string[]>) {
   const calls: string[][] = [];
   const tasks: Promise<unknown>[] = [];
   const availability = [{ name: null as string | null, layout: "ready" }];
@@ -17,7 +17,7 @@ function harness(replies: unknown[] = [], storage = new Map<string, string>(), s
     if (String(method).startsWith("on_")) handlers[String(method)] = args.at(-1);
     return element;
   } });
-  const Spaces = new Function("View", "hc", "localStorage", "spaces", "panes", "run", "v_flex", "h_flex", "div", "svg", "shared", "machines", "exec", `${source}; return Spaces;`)(
+  const Spaces = new Function("View", "hc", "localStorage", "spaces", "panes", "run", "v_flex", "h_flex", "div", "svg", "shared", "machines", "exec", "window", "watchFolder", `${source}; return Spaces;`)(
     class {},
     async (args: string[]) => {
       calls.push(args);
@@ -31,7 +31,7 @@ function harness(replies: unknown[] = [], storage = new Map<string, string>(), s
       expect(name).toBe("space.move");
       moves.push(args);
     },
-    ...Array(4).fill(() => element), () => null, () => availability, execGit,
+    ...Array(4).fill(() => element), () => null, () => availability, execGit, () => ({ active: true }), watch,
   );
   const view = new Spaces();
   view.reconnecting = {};
@@ -89,6 +89,56 @@ test("git grouping reads refs for normal, detached, unborn and bare worktrees", 
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("closing spaces forgets old git state but keeps a shown worktree", () => {
+  const h = harness();
+  Object.assign(h.view, { git: {}, checked: {}, unsure: new Set(), watching: new Set(), at: {}, busy: {}, ready: {} });
+  const key = (folder: string) => JSON.stringify([null, folder]);
+  for (let i = 0; i < 75; i++) {
+    const folder = "/repo-" + i, repo = folder + "/.git";
+    h.view.git[key(folder)] = { repo: key(repo) };
+    h.view.checked[key(folder)] = 1;
+    h.view.unsure.add(key(folder));
+    h.view.due(100, [{ id: "current", folder }], []);
+    expect(Object.keys(h.view.git)).toEqual([key(folder)]);
+    expect([...h.view.unsure]).toEqual([key(folder)]);
+    expect(Object.keys(h.view.checked)).toEqual([key(folder)]);
+  }
+  const repo = "/repo-74/.git";
+  h.view.git[key("/worktree")] = { repo: key(repo) };
+  h.view.due(100, [{ id: "tree", folder: "/worktree" }], []);
+  h.view.due(100, [], []);
+  expect(h.view.git).toEqual({});
+  expect(h.view.checked).toEqual({});
+  expect(h.view.unsure.size).toBe(0);
+  expect(h.view.watching.size).toBe(0);
+});
+
+test("reopening a repo reuses its pending watch and closing ends the loop on its next event", async () => {
+  const wakes: ((paths: string[]) => void)[] = [];
+  const h = harness([], new Map(), [], undefined, () => new Promise(resolve => wakes.push(resolve)));
+  const key = JSON.stringify([null, "/repo"]);
+  Object.assign(h.view, { git: { [key]: { repo: JSON.stringify([null, "/repo/.git"]) } }, watching: new Set(), checked: {}, unsure: new Set(), at: {}, busy: {}, ready: {} });
+  let refreshes = 0;
+  h.view.refreshGit = () => refreshes++;
+  h.view.watch("/repo/.git", h.cx);
+  for (let i = 0; i < 75; i++) {
+    h.view.due(100, [], []);
+    h.view.git[key] = { repo: JSON.stringify([null, "/repo/.git"]) };
+    h.view.watch("/repo/.git", h.cx);
+  }
+  expect(wakes).toHaveLength(1);
+  wakes.shift()!(["/repo/.git/HEAD"]);
+  await Promise.resolve();
+  expect(refreshes).toBe(1);
+  expect(wakes).toHaveLength(1);
+  h.view.due(100, [], []);
+  wakes.shift()!(["/repo/.git/HEAD"]);
+  await Promise.all(h.tasks);
+  expect(refreshes).toBe(1);
+  expect(wakes).toHaveLength(0);
+  expect(h.view.watching.size).toBe(0);
 });
 
 const machine = { name: "cloud", id: "old", target: "user@host", session: null, via: false };

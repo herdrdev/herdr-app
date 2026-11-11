@@ -102,6 +102,11 @@ export default class Spaces extends View {
     const at = {};
     for (const s of sp) at[s.id] = where(s, ps);
     const keys = new Set(Object.values(at).filter((k) => JSON.parse(k)[1]));
+    for (const k of Object.keys(this.git)) if (!keys.has(k)) {
+      delete this.git[k];
+      delete this.checked[k];
+      this.unsure.delete(k);
+    }
     const due = new Set([...keys].filter((k) => !(k in this.git)));
     for (const [id, k] of Object.entries(at)) if (this.at[id] && this.at[id] !== k && keys.has(k)) due.add(k);
     this.at = at;
@@ -202,8 +207,6 @@ export default class Spaces extends View {
           while (next < keys.length) await this.check(keys[next++], cx);
         }));
       }
-      const used = new Set(Object.values(this.git).filter(Boolean).map((g) => JSON.parse(g.repo)).filter(([on]) => !on).map(([, repo]) => repo));
-      for (const repo of this.watching) if (!used.has(repo)) this.watching.delete(repo);
       this.refreshing = false;
       cx.notify();
     });
@@ -250,12 +253,15 @@ export default class Spaces extends View {
     this.watching.add(repo);
     cx.spawn(async (cx) => {
       try {
-        while (this.watching.has(repo)) {
+        for (;;) {
           await watchFolder(repo);
           const mine = JSON.stringify([null, repo]);
-          if (this.watching.has(repo)) this.refreshGit(Object.keys(this.git).filter((k) => this.git[k]?.repo === mine), cx);
+          const keys = Object.keys(this.git).filter((k) => this.git[k]?.repo === mine);
+          if (!keys.length) break;
+          this.refreshGit(keys, cx);
         }
-      } catch { this.watching.delete(repo); }
+      } catch {}
+      this.watching.delete(repo);
     });
   }
 

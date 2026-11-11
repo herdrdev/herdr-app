@@ -139,6 +139,7 @@ fn mod_file_counts(rest: std::path::Components) -> bool {
 /// mod waiting on it. Bounded invalidations collect even while nobody waits.
 struct Folder {
     _watcher: std::sync::mpsc::Sender<()>,
+    generation: Arc<()>,
     waiters: Vec<async_channel::Sender<Vec<String>>>,
     pending: HashSet<String>,
 }
@@ -169,9 +170,13 @@ pub async fn next_change(path: String) -> Result<Vec<String>, String> {
         let mut all = folders();
         if !all.contains_key(&root) {
             if all.len() >= MAX_FOLDERS {
+                reclaim_idle(&mut all);
+            }
+            if all.len() >= MAX_FOLDERS {
                 return Err(format!("already watching {MAX_FOLDERS} folders"));
             }
-            all.insert(root.clone(), Folder { _watcher: start_folder(&root)?, waiters: Vec::new(), pending: HashSet::new() });
+            let generation = Arc::new(());
+            all.insert(root.clone(), Folder { _watcher: start_folder(&root, generation.clone())?, generation, waiters: Vec::new(), pending: HashSet::new() });
         }
         let f = all.get_mut(&root).unwrap();
         if !f.pending.is_empty() {
@@ -183,6 +188,13 @@ pub async fn next_change(path: String) -> Result<Vec<String>, String> {
         rx
     };
     rx.recv().await.map_err(|_| "stopped watching".to_owned())
+}
+
+fn reclaim_idle(all: &mut std::collections::HashMap<PathBuf, Folder>) {
+    all.retain(|_, folder| {
+        folder.waiters.retain(|waiter| !waiter.is_closed());
+        !folder.waiters.is_empty()
+    });
 }
 
 #[cfg(target_os = "linux")]
@@ -299,7 +311,7 @@ fn collect_event(event: notify::Event, root: &Path, directories: &HashSet<PathBu
     refresh
 }
 
-fn start_folder(root: &Path) -> Result<std::sync::mpsc::Sender<()>, String> {
+fn start_folder(root: &Path, generation: Arc<()>) -> Result<std::sync::mpsc::Sender<()>, String> {
     let mut directories = watch_directories(root).inspect_err(|e| tracing::warn!("{e}"))?;
     let (tx, events) = std::sync::mpsc::sync_channel(1024);
     let overflow = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -365,7 +377,7 @@ fn start_folder(root: &Path) -> Result<std::sync::mpsc::Sender<()>, String> {
                             }
                             if let Err(e) = watcher.watch(path, folder_watch_mode()) {
                                 tracing::warn!("cannot watch {}: {e}; live folder updates unavailable, use periodic refresh", path.display());
-                                folders().remove(&root);
+                                remove_folder(&root, &generation);
                                 break 'watching;
                             }
                         }
@@ -374,8 +386,7 @@ fn start_folder(root: &Path) -> Result<std::sync::mpsc::Sender<()>, String> {
                     Err(e) => {
                         tracing::warn!("{e}");
                         // Do not leave a partial recursive watch pretending to be live.
-                        let mut all = folders();
-                        all.remove(&root);
+                        remove_folder(&root, &generation);
                         break;
                     }
                 }
@@ -383,7 +394,7 @@ fn start_folder(root: &Path) -> Result<std::sync::mpsc::Sender<()>, String> {
             if pending.is_empty() {
                 continue;
             }
-            if !deliver_pending(&root, pending) {
+            if !deliver_pending(&root, &generation, pending) {
                 break;
             }
         }
@@ -391,9 +402,20 @@ fn start_folder(root: &Path) -> Result<std::sync::mpsc::Sender<()>, String> {
     Ok(stop)
 }
 
-fn deliver_pending(root: &Path, pending: HashSet<String>) -> bool {
+fn remove_folder(root: &Path, generation: &Arc<()>) {
+    let mut all = folders();
+    if all.get(root).is_some_and(|f| Arc::ptr_eq(&f.generation, generation)) {
+        all.remove(root);
+    }
+}
+
+fn deliver_pending(root: &Path, generation: &Arc<()>, pending: HashSet<String>) -> bool {
     let mut all = folders();
     let Some(f) = all.get_mut(root) else { return false };
+    // A reclaimed path can already have a new watcher while the old worker exits.
+    if !Arc::ptr_eq(&f.generation, generation) {
+        return false;
+    }
     add_pending(&mut f.pending, root, pending.into_iter().map(PathBuf::from));
     f.waiters.retain(|w| !w.is_closed());
     if !f.waiters.is_empty() {
@@ -652,13 +674,78 @@ mod tests {
     }
 
     #[test]
+    fn reclaiming_idle_folders_keeps_live_waiters_and_stops_idle_workers() {
+        let mut all = std::collections::HashMap::new();
+        let mut live = Vec::new();
+        let mut workers = Vec::new();
+        for i in 0..MAX_FOLDERS {
+            let (stop, stopped) = std::sync::mpsc::channel();
+            let (tx, rx) = async_channel::bounded(1);
+            if i % 3 == 0 {
+                drop(rx); // A mod copy closed or its host future was cancelled.
+            } else if i % 3 == 1 {
+                live.push(rx);
+            } else {
+                tx.try_send(vec!["changed".into()]).unwrap();
+                drop(tx); // The batch was delivered; nothing awaits more changes.
+                all.insert(PathBuf::from(i.to_string()), Folder {
+                    _watcher: stop, generation: Arc::new(()), waiters: Vec::new(),
+                    pending: HashSet::from(["another change".into()]),
+                });
+                workers.push(stopped);
+                continue;
+            }
+            all.insert(PathBuf::from(i.to_string()), Folder {
+                _watcher: stop, generation: Arc::new(()), waiters: vec![tx], pending: HashSet::new(),
+            });
+            workers.push(stopped);
+        }
+        reclaim_idle(&mut all);
+        assert_eq!(all.len(), live.len());
+        for (i, stopped) in workers.iter().enumerate() {
+            assert_eq!(stopped.try_recv().unwrap_err(), if i % 3 == 1 {
+                std::sync::mpsc::TryRecvError::Empty
+            } else {
+                std::sync::mpsc::TryRecvError::Disconnected
+            });
+        }
+        // Genuine demand remains bounded; reclamation must not interrupt it.
+        reclaim_idle(&mut all);
+        assert_eq!(all.len(), live.len());
+        drop(live);
+        reclaim_idle(&mut all);
+        assert!(all.is_empty());
+    }
+
+    #[test]
+    fn retired_folder_workers_cannot_touch_replacements() {
+        let root = test_repo("replacement");
+        let retired = Arc::new(());
+        let generation = Arc::new(());
+        let (stop, _stopped) = std::sync::mpsc::channel();
+        let (tx, rx) = async_channel::bounded(1);
+        folders().insert(root.clone(), Folder {
+            _watcher: stop, generation: generation.clone(), waiters: vec![tx], pending: HashSet::new(),
+        });
+        remove_folder(&root, &retired);
+        assert!(!deliver_pending(&root, &retired, HashSet::from(["stale".into()])));
+        assert!(rx.try_recv().is_err());
+        assert!(deliver_pending(&root, &generation, HashSet::from(["fresh".into()])));
+        assert_eq!(rx.try_recv().unwrap(), vec!["fresh".to_owned()]);
+        remove_folder(&root, &generation);
+        assert!(!folders().contains_key(&root));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn abandoned_waiters_do_not_leave_an_unbounded_queue() {
         let root = test_repo("overflow");
         install_watch(&root);
         // Inject worker batches: native backends may coalesce real writes, so a
         // filesystem flood cannot deterministically exercise queue overflow.
+        let generation = folders().get(&root).unwrap().generation.clone();
         for i in 0..6000 {
-            assert!(deliver_pending(&root, HashSet::from([root.join(format!("file-{i}")).to_string_lossy().into_owned()])));
+            assert!(deliver_pending(&root, &generation, HashSet::from([root.join(format!("file-{i}")).to_string_lossy().into_owned()])));
         }
         let (pending, waiters) = {
             let all = folders();
