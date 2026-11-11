@@ -4986,7 +4986,7 @@ impl Render for AppWindow {
             .child(crate::browser::end_frame(self.pane_drag.is_some(), self.pane_frame().map_or(0., |f| {
                 // Native views sit inside the frame's border: its inner curve.
                 let border = f.border.as_ref().map_or(0., |l| l.width);
-                f32::from(settings::z((f.radius.unwrap_or(0.) - border).max(0.)))
+                settings::z((f.radius.unwrap_or(0.) - border).max(0.))
             })))
             .child(crate::bench::frame_end())
     }
