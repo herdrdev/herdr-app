@@ -1,9 +1,9 @@
 //! Watching the home folder for the files people and agents edit (settings,
 //! keys, programs, themes, layouts, mods), so changes apply live without
-//! looking at the disk on a timer. One OS watcher (FSEvents, inotify) for all.
+//! looking at the disk on a timer. Native watchers also follow linked mod roots.
 
 use notify::{RecursiveMode, Watcher as _};
-use std::collections::HashSet;
+use std::collections::{BTreeMap, HashSet};
 use std::path::{Path, PathBuf};
 use std::sync::{Arc, Mutex, OnceLock};
 
@@ -69,17 +69,15 @@ fn changes(base: &Path, event: notify::Result<notify::Event>) -> (Changed, bool)
 /// Starts watching `home`; None if the OS watcher can't start (the app then
 /// polls as before).
 pub fn watch(home: &Path, #[cfg(test)] executor: gpui::BackgroundExecutor) -> Option<FileEvents> {
-    static WATCHER: OnceLock<std::sync::Mutex<notify::RecommendedWatcher>> = OnceLock::new();
+    static WATCHER: OnceLock<std::sync::mpsc::Sender<()>> = OnceLock::new();
     let (tx, rx) = async_channel::unbounded();
     #[cfg(test)]
     let tx = test_notifications(tx, executor);
     let root = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
-    let base = root.clone();
     let revisions = Arc::new(Mutex::new(Revisions::default()));
     let event_revisions = revisions.clone();
-    let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+    let watcher = watch_home(&root, move |changed, rescan| {
         let mut revisions = event_revisions.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
-        let (changed, rescan) = changes(&base, event);
         revisions.changed(&changed, rescan);
         drop(revisions);
         if !changed.is_empty() {
@@ -88,12 +86,152 @@ pub fn watch(home: &Path, #[cfg(test)] executor: gpui::BackgroundExecutor) -> Op
             #[cfg(test)]
             let _ = tx.send(changed);
         }
-    })
-    .map_err(|e| tracing::warn!("file watching unavailable ({e}); polling instead"))
-    .ok()?;
-    watcher.watch(&root, RecursiveMode::Recursive).map_err(|e| tracing::warn!("cannot watch {} ({e}); polling instead", root.display())).ok()?;
-    WATCHER.set(std::sync::Mutex::new(watcher)).ok()?;
+    }).map_err(|e| tracing::warn!("file watching unavailable ({e}); polling instead")).ok()?;
+    WATCHER.set(watcher).ok()?;
     Some(FileEvents { changes: rx, root, revisions })
+}
+
+// Linked roots need their own watcher: some backends follow links at startup,
+// but do not start following a link created later. Keep it separate so removing
+// a target watch cannot remove a home watch on the same inode.
+fn watch_home(root: &Path, publish: impl Fn(Changed, bool) + Send + 'static) -> notify::Result<std::sync::mpsc::Sender<()>> {
+    let (tx, events) = std::sync::mpsc::channel();
+    let callback = move |event: notify::Result<notify::Event>| {
+        if event.as_ref().is_ok_and(|e| !e.need_rescan() && matches!(e.kind, notify::EventKind::Access(_))) {
+            return;
+        }
+        let _ = tx.send(event);
+    };
+    let mut home = notify::recommended_watcher(callback.clone())?;
+    home.watch(root, RecursiveMode::Recursive)?;
+    let mut targets = notify::recommended_watcher(callback)?;
+    let mut links = linked_mods(root);
+    let mut watched_targets = BTreeMap::new();
+    sync_link_watches(&mut targets, &links, &mut watched_targets, &HashSet::new());
+    let root = root.to_path_buf();
+    let (stop, stopped) = std::sync::mpsc::channel::<()>();
+    std::thread::spawn(move || {
+        let _home = home;
+        while !matches!(stopped.try_recv(), Err(std::sync::mpsc::TryRecvError::Disconnected)) {
+            let event = match events.recv_timeout(BATCH) {
+                Ok(event) => event,
+                Err(std::sync::mpsc::RecvTimeoutError::Timeout) => continue,
+                Err(_) => break,
+            };
+            let refresh = event.as_ref().map_or(true, |e| e.need_rescan() || e.paths.iter().any(|path| {
+                path.parent() == Some(root.join("mods").as_path()) || links.iter().any(|link| path == &link.target || link.symlinks.contains(path))
+            }));
+            let rearm: HashSet<PathBuf> = links.iter().filter(|link| {
+                event.as_ref().map_or(true, |e| e.need_rescan() || e.paths.iter().any(|path| path == &link.target))
+            }).map(|link| link.target.clone()).collect();
+            let event = event.map(|mut event| {
+                let mut mapped = Vec::new();
+                for path in &event.paths {
+                    for link in &links {
+                        if let Ok(relative) = path.strip_prefix(&link.target) {
+                            mapped.push(link.alias.join(relative));
+                        } else if link.symlinks.contains(path) {
+                            mapped.push(link.alias.clone());
+                        }
+                    }
+                }
+                event.paths.extend(mapped);
+                event
+            });
+            if refresh {
+                links = linked_mods(&root);
+                sync_link_watches(&mut targets, &links, &mut watched_targets, &rearm);
+            }
+            let (changed, rescan) = changes(&root, event);
+            if rescan || !changed.is_empty() {
+                publish(changed, rescan);
+            }
+        }
+    });
+    Ok(stop)
+}
+
+struct LinkedMod {
+    target: PathBuf,
+    alias: PathBuf,
+    symlinks: HashSet<PathBuf>,
+}
+
+fn linked_mods(root: &Path) -> Vec<LinkedMod> {
+    std::fs::read_dir(root.join("mods")).into_iter().flatten().flatten().filter_map(|entry| {
+        let alias = entry.path();
+        let relative = alias.strip_prefix(root).ok()?;
+        if !watched(relative) || !entry.file_type().ok()?.is_symlink() {
+            return None;
+        }
+        let mut symlinks = HashSet::new();
+        let target = resolve_mod_link(&alias, &mut symlinks)?;
+        Some(LinkedMod { target, alias, symlinks })
+    }).collect()
+}
+
+fn resolve_mod_link(path: &Path, symlinks: &mut HashSet<PathBuf>) -> Option<PathBuf> {
+    use std::path::Component;
+    let mut pending: std::collections::VecDeque<_> = path.components().map(|part| part.as_os_str().to_os_string()).collect();
+    let mut resolved = PathBuf::new();
+    let mut followed = 0;
+    while let Some(part) = pending.pop_front() {
+        match Path::new(&part).components().next()? {
+            Component::CurDir => continue,
+            Component::ParentDir => { resolved.pop(); continue; }
+            _ => {}
+        }
+        let next = resolved.join(&part);
+        if let Ok(target) = std::fs::read_link(&next) {
+            followed += 1;
+            if followed > 40 { return None; }
+            symlinks.insert(next);
+            if target.is_absolute() { resolved.clear(); }
+            for component in target.components().rev() {
+                pending.push_front(component.as_os_str().to_os_string());
+            }
+        } else {
+            resolved = next;
+        }
+    }
+    Some(resolved)
+}
+
+fn sync_link_watches(watcher: &mut impl notify::Watcher, links: &[LinkedMod], watched: &mut BTreeMap<PathBuf, RecursiveMode>, rearm: &HashSet<PathBuf>) {
+    let mut paths = BTreeMap::new();
+    for link in links {
+        for path in link.symlinks.iter().chain(std::iter::once(&link.target)) {
+            if let Some(parent) = path.parent() {
+                paths.entry(parent.to_path_buf()).or_insert(RecursiveMode::NonRecursive);
+            }
+        }
+        if link.target.is_dir() {
+            paths.insert(link.target.clone(), RecursiveMode::Recursive);
+        }
+    }
+    // A recursive watch already owns its descendants. Registering them again
+    // can downgrade or remove that inherited coverage in native backends.
+    let recursive: HashSet<_> = paths.iter().filter(|(_, mode)| **mode == RecursiveMode::Recursive)
+        .map(|(path, _)| path.clone()).collect();
+    paths.retain(|path, _| !path.ancestors().skip(1).any(|parent| recursive.contains(parent)));
+    let removed: Vec<_> = watched.iter().filter(|(path, mode)| {
+        paths.get(*path) != Some(*mode) || rearm.iter().any(|root| path.starts_with(root))
+    }).map(|(path, _)| path.clone()).collect();
+    // Linux may have recursively registered descendants through an overlapping
+    // ancestor watch. Restore them whenever an ancestor is removed.
+    let mut removed: Vec<_> = watched.keys().filter(|path| removed.iter().any(|root| path.starts_with(root))).cloned().collect();
+    removed.sort_by_key(|path| std::cmp::Reverse(path.components().count()));
+    for path in removed {
+        let _ = watcher.unwatch(&path);
+        watched.remove(&path);
+    }
+    for (path, mode) in paths {
+        if watched.get(&path) == Some(&mode) { continue; }
+        match watcher.watch(&path, mode) {
+            Ok(()) => { watched.insert(path, mode); }
+            Err(e) => tracing::warn!("cannot watch linked mod target {} ({e})", path.display()),
+        }
+    }
 }
 
 // Native callbacks cannot wake GPUI's deterministic test scheduler directly.
@@ -437,6 +575,232 @@ pub fn mod_of(rel: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn linked_watch_refreshes_only_register_new_or_invalidated_paths() {
+        #[derive(Default)]
+        struct RecordingWatcher {
+            active: BTreeMap<PathBuf, RecursiveMode>,
+            registrations: usize,
+            removals: usize,
+        }
+        impl notify::Watcher for RecordingWatcher {
+            fn new<F: notify::EventHandler>(_: F, _: notify::Config) -> notify::Result<Self> { Ok(Self::default()) }
+            fn kind() -> notify::WatcherKind { notify::WatcherKind::PollWatcher }
+            fn watch(&mut self, path: &Path, mode: RecursiveMode) -> notify::Result<()> {
+                assert!(!self.active.contains_key(path), "duplicate registration: {path:?}");
+                self.registrations += 1;
+                self.active.insert(path.to_path_buf(), mode);
+                Ok(())
+            }
+            fn unwatch(&mut self, path: &Path) -> notify::Result<()> {
+                let recursive = self.active.remove(path) == Some(RecursiveMode::Recursive);
+                if recursive { self.active.retain(|child, _| !child.starts_with(path)); }
+                self.removals += 1;
+                Ok(())
+            }
+        }
+        let scratch = test_repo("linked-watch-registrations");
+        let source = scratch.join("source");
+        let child = source.join("child");
+        std::fs::create_dir_all(&child).unwrap();
+        let mut links = vec![
+            LinkedMod { target: source.clone(), alias: scratch.join("first"), symlinks: HashSet::new() },
+            LinkedMod { target: child.clone(), alias: scratch.join("second"), symlinks: HashSet::new() },
+        ];
+        let mut watcher = RecordingWatcher::default();
+        let mut watched = BTreeMap::new();
+        sync_link_watches(&mut watcher, &links, &mut watched, &HashSet::new());
+        assert_eq!(watcher.registrations, 2);
+        for _ in 0..20 {
+            sync_link_watches(&mut watcher, &links, &mut watched, &HashSet::new());
+        }
+        assert_eq!(watcher.registrations, 2);
+        assert_eq!(watcher.removals, 0);
+        // Removing the outer target replaces its recursive watch with a
+        // non-recursive parent watch and a recursive watch for the child.
+        links.remove(0);
+        sync_link_watches(&mut watcher, &links, &mut watched, &HashSet::new());
+        assert_eq!(watcher.registrations, 4);
+        assert_eq!(watcher.removals, 2);
+        assert_eq!(watcher.active, watched);
+        assert_eq!(watched.get(&source), Some(&RecursiveMode::NonRecursive));
+        assert_eq!(watched.get(&child), Some(&RecursiveMode::Recursive));
+        sync_link_watches(&mut watcher, &links, &mut watched, &HashSet::from([child.clone()]));
+        assert_eq!(watcher.registrations, 5);
+        assert_eq!(watcher.removals, 3);
+        assert_eq!(watcher.active, watched);
+        sync_link_watches(&mut watcher, &[], &mut watched, &HashSet::new());
+        assert!(watcher.active.is_empty());
+        assert!(watched.is_empty());
+        std::fs::remove_dir_all(scratch).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    fn nested_linked_mods_keep_recursive_coverage(remove_outer: bool) {
+        use std::os::unix::fs::symlink;
+        let scratch = test_repo(if remove_outer { "nested-remove-outer" } else { "nested-remove-inner" });
+        let root = scratch.join("home");
+        let source = scratch.join("source");
+        let child = source.join("lib/child");
+        std::fs::create_dir_all(root.join("mods")).unwrap();
+        std::fs::create_dir_all(&child).unwrap();
+        std::fs::write(child.join("main.js"), "before").unwrap();
+        let (tx, events) = std::sync::mpsc::channel();
+        let stop = watch_home(&root, move |changed, _| { let _ = tx.send(changed); }).unwrap();
+        let wait = |expected: &str| {
+            let expected = PathBuf::from(expected);
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                let changed = events.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                    .unwrap_or_else(|e| panic!("missing {expected:?}: {e}"));
+                if changed.contains(&expected) { break; }
+            }
+        };
+        symlink(&source, root.join("mods/outer")).unwrap();
+        wait("mods/outer");
+        symlink(&child, root.join("mods/inner")).unwrap();
+        wait("mods/inner");
+        // Adding the inner alias must not downgrade lib's inherited recursive watch.
+        std::fs::create_dir(source.join("lib/fresh")).unwrap();
+        wait("mods/outer/lib/fresh");
+        std::fs::write(source.join("lib/fresh/new.js"), "added").unwrap();
+        wait("mods/outer/lib/fresh/new.js");
+        let removed = if remove_outer { "outer" } else { "inner" };
+        std::fs::remove_file(root.join("mods").join(removed)).unwrap();
+        wait(&format!("mods/{removed}"));
+        std::fs::write(child.join("main.js"), "after").unwrap();
+        let remaining = if remove_outer { "mods/inner" } else { "mods/outer/lib/child" };
+        wait(&format!("{remaining}/main.js"));
+        std::fs::create_dir(child.join("nested")).unwrap();
+        wait(&format!("{remaining}/nested"));
+        std::fs::write(child.join("nested/new.js"), "nested").unwrap();
+        wait(&format!("{remaining}/nested/new.js"));
+        drop(stop);
+        std::fs::remove_dir_all(scratch).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn adding_and_removing_inner_link_preserves_outer_recursive_watch() {
+        nested_linked_mods_keep_recursive_coverage(false);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn removing_outer_link_restores_inner_recursive_watch() {
+        nested_linked_mods_keep_recursive_coverage(true);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn intermediate_mod_links_retarget_and_watch_the_new_source() {
+        use std::os::unix::fs::symlink;
+        let scratch = test_repo("intermediate-mod-links");
+        let root = scratch.join("home");
+        let pointers = scratch.join("pointers");
+        let first = scratch.join("first");
+        let second = scratch.join("second");
+        for path in [root.join("mods"), pointers.clone(), first.clone(), second.clone()] {
+            std::fs::create_dir_all(path).unwrap();
+        }
+        symlink("../first", pointers.join("current")).unwrap();
+        // Exercise a link in an intermediate path component, not just the final component.
+        symlink(&pointers, scratch.join("indirect")).unwrap();
+        symlink(scratch.join("indirect/current"), root.join("mods/chained")).unwrap();
+        let observed = second.join("main.js");
+        let (tx, events) = std::sync::mpsc::channel();
+        let stop = watch_home(&root, move |changed, _| {
+            let _ = tx.send((changed, std::fs::read_to_string(&observed).ok()));
+        }).unwrap();
+        let wait = |path: &str, content: Option<&str>| {
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            loop {
+                let (changed, actual) = events.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).unwrap();
+                if changed.contains(&PathBuf::from(path)) && actual.as_deref() == content { break; }
+            }
+        };
+        std::fs::write(first.join("main.js"), "first").unwrap();
+        wait("mods/chained/main.js", None);
+        symlink("../second", pointers.join(".next")).unwrap();
+        std::fs::rename(pointers.join(".next"), pointers.join("current")).unwrap();
+        wait("mods/chained", None);
+        std::fs::write(second.join("main.js"), "second").unwrap();
+        wait("mods/chained/main.js", Some("second"));
+        let links = linked_mods(&root);
+        assert_eq!(links[0].target, second);
+        // Cycles are bounded and cannot stall subsequent home events.
+        symlink("cycle", pointers.join("cycle")).unwrap();
+        symlink(pointers.join("cycle"), root.join("mods/cycle")).unwrap();
+        assert_eq!(linked_mods(&root).len(), 1);
+        drop(stop);
+        std::fs::remove_dir_all(scratch).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn linked_mods_added_while_watching_reload_all_aliases_and_survive_atomic_saves() {
+        use std::os::unix::fs::symlink;
+        let scratch = test_repo("linked-mods");
+        let root = scratch.join("home");
+        let source = scratch.join("source");
+        std::fs::create_dir_all(root.join("mods/ordinary")).unwrap();
+        std::fs::create_dir_all(source.join("lib")).unwrap();
+        std::fs::write(source.join("main.js"), "before").unwrap();
+        symlink(&source, root.join("mods/early")).unwrap();
+        let (tx, events) = std::sync::mpsc::channel();
+        let replacement_file = scratch.join("other/after.js");
+        let stop = watch_home(&root, move |changed, _| {
+            let content = std::fs::read_to_string(&replacement_file).ok();
+            let _ = tx.send((changed, content));
+        }).unwrap();
+        let wait = |expected: &[&str]| {
+            let mut missing: HashSet<PathBuf> = expected.iter().map(PathBuf::from).collect();
+            let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+            while !missing.is_empty() {
+                let (changed, _) = events.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now()))
+                    .unwrap_or_else(|e| panic!("missing {missing:?}: {e}"));
+                for path in changed { missing.remove(&path); }
+            }
+        };
+        std::fs::write(root.join("mods/ordinary/main.js"), "ordinary").unwrap();
+        wait(&["mods/ordinary/main.js"]);
+        std::fs::write(source.join("main.js"), "early").unwrap();
+        wait(&["mods/early/main.js"]);
+        symlink(&source, root.join("mods/late")).unwrap();
+        wait(&["mods/late"]);
+        std::fs::write(source.join("lib/message.js"), "dependency").unwrap();
+        wait(&["mods/early/lib/message.js", "mods/late/lib/message.js"]);
+        std::fs::write(source.join(".saved.js"), "new entry").unwrap();
+        std::fs::rename(source.join(".saved.js"), source.join("main.js")).unwrap();
+        wait(&["mods/early/main.js", "mods/late/main.js"]);
+        let other = scratch.join("other");
+        std::fs::create_dir(&other).unwrap();
+        symlink(&other, root.join("mods/.replacement")).unwrap();
+        std::fs::rename(root.join("mods/.replacement"), root.join("mods/late")).unwrap();
+        wait(&["mods/late"]);
+        std::fs::write(other.join("main.js"), "repointed").unwrap();
+        wait(&["mods/late/main.js"]);
+        // Replacing the target directory must re-arm watches on its new inode.
+        std::fs::rename(&other, scratch.join("old-other")).unwrap();
+        wait(&["mods/late"]);
+        std::fs::create_dir(&other).unwrap();
+        wait(&["mods/late"]);
+        std::fs::write(other.join("after.js"), "replacement").unwrap();
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(10);
+        loop {
+            let (changed, content) = events.recv_timeout(deadline.saturating_duration_since(std::time::Instant::now())).unwrap();
+            // A backend can invalidate the replaced root instead of its new child.
+            // Capture the content at delivery so an older queued event cannot pass.
+            if content.as_deref() == Some("replacement")
+                && changed.iter().any(|path| Path::new("mods/late/after.js").starts_with(path))
+            {
+                break;
+            }
+        }
+        drop(stop);
+        std::fs::remove_dir_all(scratch).unwrap();
+    }
 
     #[test]
     fn source_revisions_survive_closed_copies_and_rescan_invalidates_all() {
