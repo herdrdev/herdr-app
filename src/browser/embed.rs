@@ -695,6 +695,14 @@ mod win {
             SetWindowLongPtrW(hwnd, GWL_STYLE, child_style as isize);
             let child_ex = ex_style as u32 & !(WS_EX_APPWINDOW | WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE | WS_EX_DLGMODALFRAME | WS_EX_NOPARENTNOTIFY | WS_EX_TOPMOST);
             SetWindowLongPtrW(hwnd, GWL_EXSTYLE, child_ex as isize);
+            // Herdr's flip-model swap chain covers child windows that draw
+            // into a redirection surface (WPF, as in Fork). A layered
+            // container gets its own DWM surface above it. Programs with
+            // their own composition (Chromium) need none.
+            if ex_style as u32 & WS_EX_NOREDIRECTIONBITMAP == 0 {
+                SetWindowLongPtrW(container, GWL_EXSTYLE, GetWindowLongPtrW(container, GWL_EXSTYLE) | WS_EX_LAYERED as isize);
+                SetLayeredWindowAttributes(container, 0, 255, LWA_ALPHA);
+            }
             SetParent(hwnd, container);
             SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_SHOWWINDOW);
             focus::adopt(host, container, hwnd);
