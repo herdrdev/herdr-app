@@ -114,6 +114,9 @@ pub fn set_core(version: Option<String>, managed: Option<String>) {
     }
     c.version = version;
     c.managed = managed;
+    if c.managed.is_some() {
+        c.error = None;
+    }
 }
 
 fn checks_app() -> Option<PathBuf> {
@@ -201,14 +204,8 @@ fn checked_at(succeeded: bool, now: u64) -> Option<u64> {
 
 /// Looks for a newer core of this app's generation.
 fn check_core() -> Result<(), String> {
-    let (have, managed) = {
-        let c = CORE.lock().unwrap();
-        (c.version.clone(), c.managed.clone())
-    };
+    let have = CORE.lock().unwrap().version.clone();
     let Some(have) = have else { return Ok(()) };
-    if managed.is_some() {
-        return Ok(());
-    }
     let latest = latest_core()?;
     let same = latest.generation == Some(crate::hc::GENERATION);
     CORE.lock().unwrap().ready = (same && newer(&latest.version, &have)).then_some(latest.version);
@@ -240,7 +237,7 @@ fn after_update_target<'a>(have: &str, latest: Option<&'a CoreRelease>, generati
 pub fn update_core() {
     {
         let mut c = CORE.lock().unwrap();
-        if c.updating {
+        if c.updating || c.managed.is_some() {
             return;
         }
         c.updating = true;
@@ -590,12 +587,15 @@ fn marker() -> PathBuf {
 /// of this app's generation (`hc update --version`, terminals kept). If the
 /// release check fails or offers another generation, keep the minimum pin.
 /// Cores before 0.1.5 lack `--version`: they keep their same-generation update
-/// path. A core a package manager owns is left alone (hc says so).
-pub fn after_update() {
+/// path. A core a package manager owns is left alone.
+pub fn after_update(connected: std::sync::Arc<crate::hc::Core>) {
     if std::fs::remove_file(marker()).is_err() {
         return;
     }
-    std::thread::spawn(|| {
+    std::thread::spawn(move || {
+        if after_update_managed(connected.call("server.status", serde_json::json!({})).map_err(|e| e.to_string())) {
+            return;
+        }
         let have = crate::core_bin::version(&crate::core_bin::path()).unwrap_or_default();
         CORE.lock().unwrap().updating = true;
         let latest = latest_core().map_err(|e| tracing::warn!("core release check after app update: {e}")).ok();
@@ -620,9 +620,58 @@ pub fn after_update() {
     });
 }
 
+fn after_update_managed(status: Result<serde_json::Value, String>) -> bool {
+    match status {
+        Ok(status) => {
+            let text = |key: &str| status[key].as_str().map(str::to_owned);
+            set_core(text("version").map(|v| v.trim_start_matches("hc ").to_owned()), text("installed_by"));
+            core().managed.is_some()
+        }
+        Err(e) => {
+            tracing::warn!("cannot check core ownership after app update: {e}; attempting the core update");
+            false
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[cfg(unix)]
+    #[test]
+    fn managed_cores_report_new_releases_without_running_updates() {
+        const CHILD: &str = "HERDR_TEST_MANAGED_CORE_UPDATE";
+        if std::env::var_os(CHILD).is_none() {
+            let root = std::env::temp_dir().join(format!("herdr-managed-release-{}", std::process::id()));
+            std::fs::create_dir_all(root.join("core")).unwrap();
+            std::fs::write(root.join("core/latest.json"), r#"{"version":"0.1.20","generation":1}"#).unwrap();
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "update::tests::managed_cores_report_new_releases_without_running_updates", "--nocapture"])
+                .env(CHILD, "1")
+                .env("HERDR_RELEASES_URL", format!("file://{}", root.display()))
+                .output().unwrap();
+            std::fs::remove_dir_all(root).unwrap();
+            assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        crate::core_bin::use_core(PathBuf::from("/nonexistent/herdr-core"));
+        for manager in ["nix", "homebrew", "mise", "system package manager"] {
+            CORE.lock().unwrap().error = Some("an earlier update failed".into());
+            set_core(Some("0.1.18".into()), Some(manager.into()));
+            check_core().unwrap();
+            assert_eq!(core().ready.as_deref(), Some("0.1.20"));
+            update_core();
+            let state = core();
+            assert_eq!(state.managed.as_deref(), Some(manager));
+            assert!(!state.updating);
+            assert!(state.error.is_none());
+            assert_eq!(state.ready.as_deref(), Some("0.1.20"));
+            assert!(after_update_managed(Ok(serde_json::json!({"version":"0.1.18", "installed_by":manager}))));
+            assert!(!after_update_managed(Err("connection closed".into())), "a failed ownership lookup must still attempt the update");
+        }
+        assert!(!after_update_managed(Ok(serde_json::json!({"version":"0.1.18", "installed_by":null}))));
+    }
 
     #[test]
     fn failed_check_clears_success_and_recovery_records_a_new_time() {
