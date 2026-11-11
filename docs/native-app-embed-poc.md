@@ -39,6 +39,10 @@ as `\\wsl.localhost\<distro>\<path>`. Other remote folders are refused.
   a pane adopts only a window of the process it started. A Fork opened outside
   Herdr afterwards also starts in the "Herdr" workspace; its workspace menu
   switches back.
+- **Safe repositories.** Windows git treats every WSL repository as owned by
+  another user and refuses it. Before the start Herdr adds a UNC repository
+  (`\\wsl.localhost\...`) to the global `safe.directory` list with Fork's own
+  git, as Fork's "Mark repository as safe" does.
 - **Mod restarts.** A dropped pane state (a mod reload, a layout change) keeps
   its window hidden for two seconds. The new copy of the pane takes it over;
   otherwise it closes. A Fork still starting when its pane goes away leaves its
@@ -77,5 +81,3 @@ as `\\wsl.localhost\<distro>\<path>`. Other remote folders are refused.
 - Not yet handled: drag and drop between Herdr and VS Code, several Herdr
   windows, DPI changes while moving between monitors.
 - Linux and macOS report that embedding is unsupported.
-- Git in Fork reports "dubious ownership" for a WSL repository until it is
-  marked safe once (Fork offers "Mark repository as safe").
