@@ -165,7 +165,7 @@ export default class Worktree extends View {
   }
 
   go(cx) {
-    if (this.busy || !this.repo) return;
+    if (this.busy || !this.repo || (props()?.action === "remove" && !this.repo.linked)) return;
     cx.spawn(async (cx) => this.work(cx));
   }
 
@@ -228,7 +228,7 @@ export default class Worktree extends View {
   }
 
   key(e, cx) {
-    if (e.key === "escape") return this.close();
+    if (e.key === "escape") { cx.stop_propagation(); return this.close(); }
     if (this.opening) {
       const n = this.shown().length;
       if (e.key === "enter") this.open(this.shown()[this.at]);
@@ -237,7 +237,7 @@ export default class Worktree extends View {
       cx.stop_propagation();
       return cx.notify();
     }
-    if (e.key === "enter" && props()?.action === "remove") return this.go(cx);
+    if (e.key === "enter" && props()?.action === "remove") { cx.stop_propagation(); return this.go(cx); }
   }
 
   renderOpen(t) {
@@ -324,6 +324,14 @@ export default class Worktree extends View {
               : `Closes the space and deletes ${tilde(r.top, this.userHome)}. The branch stays.`
             : `A new space on a checkout in ${tilde(ROOT(this.userHome), this.userHome)}/${r.name}/. A branch that exists is checked out; a new one starts from here.`;
     const blocked = !r || (remove && !r.linked);
+    const button = (id, label, shortcut, primary, action, enabled = true) =>
+      h_flex().id(id).h(32).px(14).gap(8).items_center().rounded(8).border_1().text_size(12)
+        .border_color(primary ? t.solid : t.input).bg(primary ? t.solid : t.raised)
+        .text_color(primary ? t.solid_foreground : t.foreground)
+        .when(!enabled, (el) => el.opacity(0.5))
+        .when(enabled, (el) => el.cursor_pointer().hover((s) => s.opacity(0.88))
+          .on_click((_e, cx) => { cx.stop_propagation(); action(cx); }))
+        .child(label).child(div().text_size(11).opacity(0.7).child(shortcut));
     return v_flex()
       .id("worktree")
       .track_focus(this.handle)
@@ -359,7 +367,11 @@ export default class Worktree extends View {
           .text_color(t.dim)
           .gap(6)
           .when(this.busy, (el) => el.child(div().frames(["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"], 90)))
-          .child(this.busy ? "working…" : blocked ? "esc close" : remove ? "↵ remove · esc cancel" : "↵ create · esc cancel"),
+          .when(!remove, (el) => el.child(this.busy ? "working…" : blocked ? "esc close" : "↵ create · esc cancel"))
+          .when(remove, (el) => el
+            .when(this.busy, (el) => el.child("working…"))
+            .child(button("wt-cancel", "Cancel", "Esc", false, () => this.close()))
+            .child(button("wt-remove", "Remove", "↵", true, (cx) => this.go(cx), !blocked && !this.busy))),
       );
   }
 }

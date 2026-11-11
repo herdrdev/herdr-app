@@ -6,11 +6,12 @@ const source = (await readFile(new URL("../defaults/mods/worktree/main.js", impo
 
 // Execute conditional builders and retain text, without native GPUI layout.
 function element() {
-  const node = { id: "", children: [] as any[] };
+  const node = { id: "", children: [] as any[], handlers: {} as Record<string, (...args: any[]) => any> };
   const el: any = new Proxy(node, { get: (_, method) => {
     if (method === "node") return node;
     return (...args: any[]) => {
       if (method === "id") node.id = args[0];
+      if (method === "on_click" || method === "on_key_down") node.handlers[method] = args[0];
       if (method === "child") node.children.push(args[0]?.node ?? args[0]);
       if (method === "children") node.children.push(...args[0].map((child: any) => child?.node ?? child));
       if (method === "when" && args[0]) args[1](el);
@@ -33,12 +34,14 @@ function harness(focusedMachine: string | null = null) {
   const writes: unknown[] = [];
   const destinations: (string | null)[] = [];
   const executions: any[] = [];
+  const properties: any = { overlay: "overlay" };
+  const closed: string[] = [];
   const globals = {
     View: class {}, div: element, v_flex: element, h_flex: element,
     Input: { new: element }, Scrollbar: { vertical: element }, theme: () => ({}),
     spaces: () => { reads.spaces++; return structuredClone(spaceList); },
     panes: () => { reads.panes++; return structuredClone(paneList); },
-    props: () => ({ overlay: "overlay" }), closeOverlay: () => {},
+    props: () => properties, closeOverlay: (id: string) => { closed.push(id); },
     run: (command: string, args: any) => {
       writes.push([command, args]);
       if (command === "space.new") destinations.push(args.machine === "" ? null : args.machine ?? focusedMachine);
@@ -51,8 +54,85 @@ function harness(focusedMachine: string | null = null) {
   const Worktree = new Function(...Object.keys(globals), `${source}; return Worktree;`)(...Object.values(globals));
   const worktree = new Worktree();
   Object.assign(worktree, { opening: true, text: "", at: 0, repo: { name: "repo" }, userHome: "/home/user" });
-  return { worktree, reads, writes, destinations, executions, snapshot: (spaces: any[], panes: any[]) => { spaceList = spaces; paneList = panes; } };
+  return { worktree, reads, writes, destinations, executions, properties, closed, snapshot: (spaces: any[], panes: any[]) => { spaceList = spaces; paneList = panes; } };
 }
+
+function find(node: any, id: string): any {
+  return node?.id === id ? node : (node?.children ?? []).map((child: any) => find(child, id)).find(Boolean);
+}
+
+function removalHarness() {
+  const h = harness();
+  h.properties.action = "remove";
+  Object.assign(h.worktree, {
+    opening: false, repo: { top: "/repo/worktree", main: "/repo", linked: true },
+    dirty: false, unpushed: [], busy: false, error: "",
+  });
+  return h;
+}
+
+test("remove confirmation offers clickable actions with the existing keyboard shortcuts", () => {
+  const { worktree, closed } = removalHarness();
+  let started = 0, stopped = 0;
+  const cx = { spawn: () => { started++; }, stop_propagation: () => { stopped++; } };
+  const tree = worktree.render(cx).node;
+  const remove = find(tree, "wt-remove"), cancel = find(tree, "wt-cancel");
+  expect(textOf(remove)).toBe("Remove ↵");
+  expect(textOf(cancel)).toBe("Cancel Esc");
+  remove.handlers.on_click({}, cx);
+  expect(started).toBe(1);
+  tree.handlers.on_key_down({ key: "enter" }, cx);
+  expect(started).toBe(2);
+  cancel.handlers.on_click({}, cx);
+  tree.handlers.on_key_down({ key: "escape" }, cx);
+  expect(closed).toEqual(["overlay", "overlay"]);
+  expect(stopped).toBe(4);
+});
+
+for (const state of ["loading", "unavailable", "main checkout", "busy"]) {
+  test(`remove clicks and Enter cannot submit while ${state}`, () => {
+    const { worktree, closed } = removalHarness();
+    if (state === "loading") worktree.repo = undefined;
+    if (state === "unavailable") worktree.repo = null;
+    if (state === "main checkout") worktree.repo.linked = false;
+    if (state === "busy") worktree.busy = true;
+    let started = 0;
+    const cx = { spawn: () => { started++; }, stop_propagation() {} };
+    const tree = worktree.render(cx).node;
+    expect(find(tree, "wt-remove").handlers.on_click).toBeUndefined();
+    tree.handlers.on_key_down({ key: "enter" }, cx);
+    expect(started).toBe(0);
+    find(tree, "wt-cancel").handlers.on_click({}, cx);
+    expect(closed).toEqual(["overlay"]);
+  });
+}
+
+test("a stale Remove click rechecks the busy state and preserves removal warnings", () => {
+  const { worktree } = removalHarness();
+  worktree.dirty = true;
+  worktree.unpushed = ["submodule"];
+  let started = 0;
+  const cx = { spawn: () => { started++; }, stop_propagation() {} };
+  const tree = worktree.render(cx).node;
+  expect(textOf(tree)).toContain("It has uncommitted changes: they will be lost.");
+  expect(textOf(tree)).toContain("Submodule submodule has commits that aren't pushed anywhere: they will be lost.");
+  worktree.busy = true;
+  find(tree, "wt-remove").handlers.on_click({}, cx);
+  expect(started).toBe(0);
+});
+
+test("new and open worktree footers are unchanged", () => {
+  const { worktree, properties } = removalHarness();
+  properties.action = "new";
+  const tree = worktree.render({}).node;
+  expect(find(tree, "wt-remove")).toBeUndefined();
+  expect(find(tree, "wt-cancel")).toBeUndefined();
+  expect(textOf(tree)).toContain("↵ create · esc cancel");
+  properties.action = "open";
+  worktree.opening = true;
+  worktree.list = [];
+  expect(textOf(worktree.render({}).node)).toContain("↑↓ choose · ↵ open · esc close");
+});
 
 test("open render reads spaces and panes once and refreshes both on the next render", () => {
   const { worktree, reads, snapshot } = harness();
