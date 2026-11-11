@@ -25,8 +25,14 @@ pub(super) fn create(state: &State, window: &Window, cx: &App) {
         };
         let Some(url) = weak.upgrade().map(|state| state.borrow().url.clone()) else { return; };
         let mut context = wry::WebContext::new(Some(crate::mods::app_dir().join("browser")));
+        let mut container = None;
         let built = parent.and_then(|parent| {
-            Browser::builder(&url, &mut context).build_as_child(&parent).map_err(Into::into)
+            let host = parent.0.hwnd.get() as windows_sys::Win32::Foundation::HWND;
+            let before = super::win32::children_of_class(host, "WRY_WEBVIEW");
+            let view = Browser::builder(&url, &mut context).build_as_child(&parent)?;
+            // Wry's own container window: overlays are cut out of it.
+            container = super::win32::children_of_class(host, "WRY_WEBVIEW").into_iter().find(|h| !before.contains(h)).map(|h| h as isize);
+            Ok(view)
         });
         // The pane may have gone away or navigated while the build pumped
         // messages. Never keep its state borrowed across native calls either.
@@ -45,7 +51,7 @@ pub(super) fn create(state: &State, window: &Window, cx: &App) {
                 let mut browser = state.borrow_mut();
                 debug_assert!(browser.native.is_none());
                 match built.take().unwrap() {
-                    Ok(view) => { browser.context = Some(context); browser.native = Some(view); },
+                    Ok(view) => { browser.context = Some(context); browser.native = Some(view); browser.hwnd = container; },
                     Err(error) => browser.error = Some(error.to_string()),
                 }
                 window.refresh();

@@ -343,6 +343,9 @@ pub struct Hint {
     /// `pane.go` can give it the keyboard.
     #[serde(default)]
     pub focusable: bool,
+    /// Its pane has no frame header: the mod fills the whole pane.
+    #[serde(default)]
+    pub frameless: bool,
 }
 
 #[derive(Clone)]
