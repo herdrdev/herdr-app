@@ -1,7 +1,7 @@
 //! Asynchronous text files for mods. Writes reject a stale editor snapshot.
 use gpui_shell::{HostError, HostValue};
 use std::io::{Read, Write};
-use std::path::{Path, PathBuf};
+use std::path::Path;
 use std::sync::Mutex;
 
 pub const LIMIT: u64 = 1024 * 1024;
@@ -93,9 +93,16 @@ pub fn read_with(
     }
 }
 
-fn write_path(path: &Path, distro: Option<&str>) -> Result<PathBuf, String> {
-    let Some(distro) = distro else { return Ok(path.to_path_buf()) };
-    crate::wsl::host_path(path, distro)
+fn write_in_namespace(path: &Path, text: &str, expected: Option<&str>, distro: Option<&str>) -> Result<(), String> {
+    if let Some(guest) = distro.and_then(|d| crate::wsl::guest_path(path, d)) {
+        let _guard = WRITES.lock().map_err(|e| e.to_string())?;
+        if text.len() as u64 > LIMIT || expected.is_some_and(|s| s.len() as u64 > LIMIT) {
+            return Err("Text file exceeds 1 MiB".into());
+        }
+        crate::wsl::write_text(&guest, text, expected)
+    } else {
+        write(path, text, expected)
+    }
 }
 
 pub fn write_text(
@@ -105,9 +112,8 @@ pub fn write_text(
 ) -> impl std::future::Future<Output = Result<HostValue, HostError>> + Send {
     let (tx, rx) = async_channel::bounded(1);
     std::thread::spawn(move || {
-        // WSL path conversion starts a process, so keep it off the UI thread too.
-        let path = write_path(Path::new(&path), crate::wsl::active());
-        let _ = tx.send_blocking(path.and_then(|path| write(&path, &text, expected.as_deref())));
+        // Guest writes must retain POSIX permissions; do not save through UNC.
+        let _ = tx.send_blocking(write_in_namespace(Path::new(&path), &text, expected.as_deref(), crate::wsl::active()));
     });
     async move {
         rx.recv()
@@ -123,20 +129,16 @@ pub fn write_text(
 mod tests {
     use super::*;
     #[test]
-    fn guest_write_paths_preserve_host_files_and_reject_literal_backslashes() {
+    fn guest_write_paths_preserve_linux_names_and_leave_host_files_native() {
         let host = Path::new(r"C:\Herdr\settings.json");
         let literal = Path::new(r"/home/alice/back\slash.txt");
-        assert_eq!(write_path(host, Some("Ubuntu")).unwrap(), host);
-        assert!(write_path(literal, Some("Ubuntu")).unwrap_err().contains("literal backslash"));
-        assert!(write_path(Path::new("/mnt/c/../c/note.txt"), Some("Ubuntu")).is_err());
-        assert!(write_path(Path::new("/home/alice/note "), Some("Ubuntu")).is_err());
-        assert!(write_path(Path::new("/home/alice/dir./note"), Some("Ubuntu")).is_err());
-        assert_eq!(write_path(literal, None).unwrap(), literal);
+        assert_eq!(crate::wsl::guest_path(host, "Ubuntu"), None);
+        assert_eq!(crate::wsl::guest_path(literal, "Ubuntu").as_deref(), literal.to_str());
     }
 
     #[test]
     fn creates_updates_and_rejects_stale_text() {
-        let root = std::path::PathBuf::from("/var/tmp").join(format!(
+        let root = std::env::temp_dir().join(format!(
             "herdr-app-files-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

@@ -691,7 +691,9 @@ What's about the user, never a look:
   Successful path conversions are cached (up to 512 entries per process);
   restarting clears the cache. Guest paths still use the direct fast path.
   WSL file links expand only `$HOME` and `$PWD`, never Windows environment
-  variables. Settings reports distro-list failures without clearing your selection.
+  variables. Local `file://` links resolve in the selected distribution too.
+  `HC_SESSION` is passed explicitly to guest commands, preserving the selected core session.
+  Settings reports distro-list failures without clearing your selection.
   After three failed WSL reconnects, a Waiting for WSL notification appears;
   retries back off from one to at most five seconds between attempts.
   Startup discovery and the Settings check share the bundled
@@ -1046,8 +1048,10 @@ All of it is in `herdr.d.ts`. In short:
   under `dir` changes. With WSL active, local guest paths stay Linux paths for reads,
   writes, the folder picker and watch results; `appHome()` paths remain on Windows.
   Host paths use the selected distro's actual mount configuration, not a guessed `/mnt/c`.
-  Guest paths containing a literal backslash, `..`, or a name ending in a space or period
-  cannot be written or watched through the Windows file API; use `exec` in the guest instead.
+  Guest writes run inside the distribution, preserving POSIX permission bits and symlinks
+  and rejecting stale editor contents. Guest paths containing a literal backslash, `..`,
+  or a name ending in a space or period cannot be watched through the Windows file API;
+  use `exec` in the guest for those watches.
   Reads use a bounded guest command for those paths so Windows cannot redirect them to a different file;
   invalid UTF-8 and read errors are reported rather than treated as missing files.
   On Linux, Git-ignored directories and Git objects are skipped,

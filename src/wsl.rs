@@ -167,8 +167,12 @@ fn query_env(distro: &str) -> Result<Env, String> {
 
 // A regular file avoids filling a pipe before the shell exits, without leaving
 // a reader thread blocked when a shell descendant inherits stdout.
-pub fn run_wsl_timed(mut command: Command, timeout: Duration) -> Result<Output, String> {
-    use std::io::{Read, Seek, SeekFrom};
+pub fn run_wsl_timed(command: Command, timeout: Duration) -> Result<Output, String> {
+    run_wsl_input(command, timeout, None)
+}
+
+fn run_wsl_input(mut command: Command, timeout: Duration, input: Option<&[u8]>) -> Result<Output, String> {
+    use std::io::{Read, Seek, SeekFrom, Write};
     const LIMIT: u64 = 1024 * 1024;
     struct OutputFile {
         file: Option<std::fs::File>,
@@ -210,8 +214,16 @@ pub fn run_wsl_timed(mut command: Command, timeout: Duration) -> Result<Output, 
     };
     let mut stdout = capture("out")?;
     let mut stderr = capture("err")?;
+    // A file also bounds stdin: a stalled WSL launch cannot block a pipe writer.
+    let mut stdin = input.map(|_| capture("in")).transpose()?;
+    let input = if let (Some(bytes), Some(input)) = (input, stdin.as_mut()) {
+        let file = input.file.as_mut().unwrap();
+        file.write_all(bytes).map_err(io_error)?;
+        file.seek(SeekFrom::Start(0)).map_err(io_error)?;
+        Stdio::from(file.try_clone().map_err(io_error)?)
+    } else { Stdio::null() };
     command
-        .stdin(Stdio::null())
+        .stdin(input)
         .stdout(
             stdout
                 .file
@@ -360,7 +372,7 @@ pub fn command(program: impl AsRef<OsStr>, cwd: Option<&str>) -> Command {
     if !distro.is_empty() {
         c.args(["-d", distro]);
     }
-    c.args(["--cd", &dir, "-e"]);
+    c.args(["--cd", &dir, "-e", "env", "--"]);
     if let Some(e) = env() {
         let path = match EXTRA_PATH
             .lock()
@@ -370,10 +382,36 @@ pub fn command(program: impl AsRef<OsStr>, cwd: Option<&str>) -> Command {
             Some(extra) => path_with_core_first(&e.path, extra),
             None => e.path.clone(),
         };
-        c.args(["env", &format!("PATH={path}")]);
+        c.arg(format!("PATH={path}"));
     }
+    // WSL does not inherit arbitrary host variables. Preserve the core session
+    // explicitly, without replacing the guest's HOME or other Linux settings.
+    append_session(&mut c, std::env::var_os("HC_SESSION"));
     c.arg(program);
     c
+}
+
+fn append_session(command: &mut Command, session: Option<std::ffi::OsString>) {
+    if let Some(session) = session {
+        let mut assignment = std::ffi::OsString::from("HC_SESSION=");
+        assignment.push(session);
+        command.arg(assignment);
+    }
+}
+
+/// Save in the guest so Windows permissions cannot erase POSIX mode bits.
+pub fn write_text(path: &str, text: &str, expected: Option<&str>) -> Result<(), String> {
+    write_text_with(command("sh", None), path, text, expected)
+}
+
+fn write_text_with(mut cmd: Command, path: &str, text: &str, expected: Option<&str>) -> Result<(), String> {
+    let mut input = expected.unwrap_or_default().as_bytes().to_vec();
+    let expected_len = input.len();
+    input.extend_from_slice(text.as_bytes());
+    cmd.args(["-c", include_str!("wsl/write-text.sh"), "sh", path,
+        if expected.is_some() { "1" } else { "0" }, &expected_len.to_string(), &text.len().to_string()]);
+    let out = run_wsl_input(cmd, WSL_TIMEOUT, Some(&input))?;
+    require_success(&out, "Cannot save file in WSL")
 }
 
 fn path_with_core_first(path: &str, dir: &str) -> String {
@@ -488,7 +526,7 @@ pub fn parse_distros(bytes: &[u8]) -> Vec<String> {
 }
 
 /// A path already in this distro's namespace; no process or mount guesses needed.
-fn guest_path(path: &Path, distro: &str) -> Option<String> {
+pub(crate) fn guest_path(path: &Path, distro: &str) -> Option<String> {
     let s = path.to_string_lossy();
     if s.starts_with('/') && !s.starts_with("//") {
         return Some(s.into_owned());
@@ -608,6 +646,43 @@ pub fn linux_path_if_active(path: &Path) -> Result<String, String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    // The cleanup assertion inventories this process's capture files.
+    static CAPTURE_TESTS: Mutex<()> = Mutex::new(());
+
+    #[test]
+    fn session_is_a_literal_environment_assignment() {
+        let mut cmd = Command::new("env");
+        append_session(&mut cmd, None);
+        assert_eq!(cmd.get_args().count(), 0);
+        append_session(&mut cmd, Some("session 日本語 $HOME; x".into()));
+        assert_eq!(cmd.get_args().collect::<Vec<_>>(), ["HC_SESSION=session 日本語 $HOME; x"]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn guest_saves_preserve_modes_links_and_reject_stale_content() {
+        let _guard = CAPTURE_TESTS.lock().unwrap();
+        use std::os::unix::fs::{PermissionsExt, symlink};
+        let root = std::env::temp_dir().join(format!("herdr-guest-save-{}-{}", std::process::id(), std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()));
+        std::fs::create_dir_all(&root).unwrap();
+        let save = |path: &Path, text: &str, expected| write_text_with(Command::new("sh"), path.to_str().unwrap(), text, expected);
+        for mode in [0o600, 0o755] {
+            let path = root.join(format!("日本語 ' $x back\\slash {mode}. \n"));
+            save(&path, "original\n", None).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(mode)).unwrap();
+            let link = root.join(format!("link-{mode}"));
+            symlink(&path, &link).unwrap();
+            save(&link, "new\0日本語\n", Some("original\n")).unwrap();
+            assert!(std::fs::symlink_metadata(&link).unwrap().is_symlink());
+            assert_eq!(std::fs::metadata(&path).unwrap().permissions().mode() & 0o777, mode);
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "new\0日本語\n");
+            assert!(save(&path, "bad", Some("original\n")).is_err());
+            assert!(save(&path, "bad", None).is_err());
+            assert_eq!(std::fs::read_to_string(&path).unwrap(), "new\0日本語\n");
+        }
+        assert!(!std::fs::read_dir(&root).unwrap().any(|p| p.unwrap().file_name().to_string_lossy().starts_with(".herdr-app-write")));
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn converted_paths_decode_utf16le_and_require_absolute_guest_paths() {
@@ -743,6 +818,7 @@ mod tests {
     #[cfg(unix)]
     #[test]
     fn environment_capture_handles_chatty_shell_timeout_and_output_limit() {
+        let _guard = CAPTURE_TESTS.lock().unwrap();
         let mut chatty = Command::new("sh");
         chatty.args(["-c", "head -c 262144 /dev/zero; printf guest-env"]);
         let before: Vec<_> = std::fs::read_dir(std::env::temp_dir())

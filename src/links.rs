@@ -79,11 +79,7 @@ pub fn resolve(link: &str, cwd: Option<&Path>) -> Option<Target> {
         s.len() > 1 && s.starts_with(|c: char| c.is_ascii_alphabetic()) && s.chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
     });
     if scheme {
-        // Windows can't open a file URL whose path is percent-encoded, the way programs write them.
-        if let Some(path) = file_url_path(link).filter(|p| p.exists()) {
-            return Some(Target::File(path));
-        }
-        return Some(Target::Url(link.to_owned()));
+        return resolve_url(link, crate::wsl::active().is_some(), |path| crate::wsl::host_path_if_active(path));
     }
     let guest = crate::wsl::active().is_some();
     let home = if guest { crate::wsl::home() } else { std::env::home_dir() };
@@ -120,6 +116,35 @@ pub fn resolve(link: &str, cwd: Option<&Path>) -> Option<Target> {
     if bare == full.to_str()? { return None; }
     let bare = crate::wsl::host_path_if_active(Path::new(bare)).ok()?;
     bare.exists().then(|| Target::File(bare))
+}
+
+fn resolve_url(link: &str, guest: bool, host_path: impl FnOnce(&Path) -> Result<PathBuf, String>) -> Option<Target> {
+    // Decode before converting: file:///home/... belongs to the same namespace
+    // as a plain /home/... link, not the Windows drive hosting the app.
+    if let Some(path) = file_url_path(link) {
+        let host = host_path(&path).ok()?;
+        if host.exists() {
+            return Some(Target::File(host));
+        }
+        // Do not let the host handler reinterpret an absent guest file.
+        if guest { return None; }
+    }
+    Some(Target::Url(link.to_owned()))
+}
+
+#[cfg(test)]
+#[test]
+fn guest_file_urls_convert_decoded_paths_before_opening() {
+    let file = std::env::temp_dir().join(format!("herdr-guest-url-{}", std::process::id()));
+    std::fs::write(&file, "").unwrap();
+    assert_eq!(resolve_url("file:///home/test/a%20b%23.txt", true, |path| {
+        assert_eq!(path, Path::new("/home/test/a b#.txt"));
+        Ok(file.clone())
+    }), Some(Target::File(file.clone())));
+    std::fs::remove_file(&file).unwrap();
+    assert_eq!(resolve_url("file:///home/test/missing", true, |_| Ok(file)), None);
+    assert_eq!(resolve_url("file:///home/test/missing", true, |_| Err("unavailable".into())), None);
+    assert_eq!(resolve_url("https://example.com", true, |_| panic!("not a file")), Some(Target::Url("https://example.com".into())));
 }
 
 fn link_variable(name: &str, cwd: Option<&Path>, home: Option<&Path>, guest: bool) -> Option<PathBuf> {
