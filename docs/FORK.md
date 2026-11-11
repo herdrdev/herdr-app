@@ -84,6 +84,16 @@ The helper resolves Windows PowerShell by absolute path when it is absent from
 WSL's PATH. For arbitrary remote servers, configure an appropriate browser route
 and tunnel separately; this integration does not expose a remote port publicly.
 
+Herdr can also start a review in a Pi, as the person typing the command there
+would. In a herdr-core terminal the integration labels the terminal
+`herdr.plannotator` with its process ID, session, socket, token, Node binary
+and `request.mjs`. `node request.mjs <terminal> review|last`, run on that
+machine, reads the label with `hc get`, checks that its Pi is still the
+terminal's foreground process, and asks that Pi over its socket to run
+`/plannotator-review` or `/plannotator-last`. Pi runs the command at once, even
+while the agent works, and the submitted annotations reach that session as with
+the typed command. A Pi without Plannotator answers with an error instead.
+
 Environment overrides:
 
 - `HERDR_APP_BIN`: the app executable to control, including a WSL path to the

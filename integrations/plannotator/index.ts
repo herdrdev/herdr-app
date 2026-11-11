@@ -19,6 +19,32 @@ export default function herdrPlannotator(pi: ExtensionAPI): void {
     console.error(error);
     context?.ui.notify(`Plannotator browser: ${error instanceof Error ? error.message : String(error)}`, "warning");
   };
+  const requestScript = path.join(path.dirname(fileURLToPath(import.meta.url)), "request.mjs");
+
+  // Herdr's tab bar asks for these: as if the person typed the command here.
+  // Pi runs extension commands at once, even while the agent works.
+  const runCommand = async (command: string) => {
+    const name = command === "review" ? "plannotator-review" : "plannotator-last";
+    if (!pi.getCommands().some(entry => entry.name === name)) throw new Error("Plannotator is not loaded in this Pi");
+    void Promise.resolve(pi.sendUserMessage(`/${name}`, { expandPromptTemplates: true })).catch(report);
+  };
+
+  // The terminal label tells Herdr how to reach this Pi: request.mjs, run on
+  // this machine, reads it back and checks that this Pi still runs there.
+  const publish = async (session: string, server: { socket: string; token: string }) => {
+    const terminal = process.env.HC_TERMINAL_ID;
+    if (!terminal || !process.env.HC_TERMINAL_SOCKET) return;
+    try {
+      // Nested Pi processes inherit HC_*: only the terminal's own Pi publishes.
+      const owner = await pi.exec("hc", ["get", terminal, "--json"], { timeout: 3000 });
+      if (owner.code !== 0 || JSON.parse(owner.stdout).foreground?.pid !== process.pid) return;
+      const label = { pid: process.pid, session, socket: server.socket, token: server.token, node: process.execPath, request: requestScript };
+      const result = await pi.exec("hc", ["label", terminal, `herdr.plannotator=${JSON.stringify(label)}`], { timeout: 3000 });
+      if (result.code !== 0) throw new Error(result.stderr.trim() || "hc label failed");
+    } catch (error) {
+      report(new Error(`Herdr cannot reach this session for annotations: ${error instanceof Error ? error.message : String(error)}`));
+    }
+  };
 
   pi.on("session_start", async (_event, ctx) => {
     const browser = prior.get("PLANNOTATOR_BROWSER");
@@ -31,7 +57,8 @@ export default function herdrPlannotator(pi: ExtensionAPI): void {
     context = ctx;
     const session = ctx.sessionManager.getSessionId();
     router = createReviewRouter(session, { open: openReview, close: closeReview });
-    ipc = await startBrowserIpc(session, router, report);
+    ipc = await startBrowserIpc(session, router, report, runCommand);
+    void publish(session, ipc);
     process.env.HERDR_PLANNOTATOR_SESSION_ID = session;
     process.env.HERDR_PLANNOTATOR_NODE = process.execPath;
     process.env.HERDR_PLANNOTATOR_SOCKET = ipc.socket;
