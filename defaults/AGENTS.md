@@ -54,9 +54,8 @@ Herdr asks VS Code for a window, adopts it and crops its frame; closing the
 pane closes that window. `status()`, `error()`, `shown()`, `reopen()` and
 `focus()` follow and control it. The bundled `vscode` mod is one VS Code tab.
 `NativeAppState("fork", target)` shows Fork, the git client, on a local
-folder, `file://` URI or WSL folder URI. Fork has one window: it moves to the
-Fork pane that is shown and opens that pane's repository. The bundled `fork`
-mod is one Fork tab.
+folder, `file://` URI or WSL folder URI: a Fork process of the pane's own,
+with only that repository. The bundled `fork` mod is one Fork tab.
 
 The shipped `plannotator-browser` mod takes `{ url, origin? }` props and opens a
 review with Back, Reload and Open externally controls. `herdr-app --browser-api`

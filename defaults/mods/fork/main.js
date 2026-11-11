@@ -5,9 +5,8 @@ import { props, theme, focused, nextCommand, panes, shared, setShared } from "he
 
 // The person's Fork (git client) in this tab, on props.uri (a folder URI such
 // as vscode-remote://wsl+Ubuntu/root/app) or props.folder (a local path).
-// Fork has one window for all repositories: it follows the Fork tab that is
-// shown, and each tab opens its repository there. Closing the tab that shows
-// it closes Fork. shared("fork.tabs") maps each open project URI to its tab.
+// Each tab has a Fork process of its own with only this repository; closing
+// the tab closes it. shared("fork.tabs") maps each open project URI to its tab.
 export default class ForkApp extends View {
   init(_props, cx) {
     this.target = props()?.uri || props()?.folder || focused()?.cwd || "";

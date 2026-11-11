@@ -28,12 +28,21 @@ as `\\wsl.localhost\<distro>\<path>`. Other remote folders are refused.
 - **Window.** Herdr runs `Code.exe --new-window` on the target and adopts the
   new top-level window of VS Code's process. When VS Code already shows that
   folder, it is adopted instead, found as the foreground window or by its title.
-  A pane whose mod restarts takes the window over from its earlier copy.
-- **One window for all folders (Fork).** Fork keeps a single window and opens
-  each repository as a tab inside it. The newest Fork pane takes that window
-  and runs `Fork.exe <folder>` so Fork shows its repository. A pane that lost
-  the window takes it back when it is shown again and its holder is hidden. A
-  Fork already open on the desktop is adopted.
+  One pane shows a folder: a new pane on a folder that another pane shows
+  takes that window over.
+- **A Fork of each pane's own.** `Fork.exe <folder>` hands the folder to a
+  running Fork and exits, so each Fork pane starts `Fork.exe` without a folder:
+  a new process, which restores the tabs of Fork's active workspace. Before
+  the start, Herdr makes the "Herdr" workspace in
+  `%LOCALAPPDATA%\Fork\settings.json` hold only the pane's repository and makes
+  it active; other workspaces and settings stay. Fork starts one at a time, and
+  a pane adopts only a window of the process it started. A Fork opened outside
+  Herdr afterwards also starts in the "Herdr" workspace; its workspace menu
+  switches back.
+- **Mod restarts.** A dropped pane state (a mod reload, a layout change) keeps
+  its window hidden for two seconds. The new copy of the pane takes it over;
+  otherwise it closes. A Fork still starting when its pane goes away leaves its
+  window the same way.
 - **Container.** The window becomes a borderless child of a Herdr-owned container
   window. The container follows the pane and cuts away only the window frame
   outside its client area; everything VS Code draws stays. A move, resize or
@@ -53,9 +62,8 @@ as `\\wsl.localhost\<distro>\<path>`. Other remote folders are refused.
   `focus` mod command gives a shown VS Code tab the keyboard.
 - **Closing.** Closing the tab gives the window back to the desktop and closes it
   as its own close button would; unsaved changes prompt there. Quitting Herdr
-  closes adopted windows the same way. VS Code itself keeps running. Closing
-  the Fork pane that shows Fork closes Fork; another Fork pane starts it
-  again when shown.
+  closes adopted windows the same way. VS Code itself keeps running; the
+  pane's own Fork process exits with its window.
 - Native calls run outside App updates and without borrowed state: SetFocus and
   SetWindowPos deliver messages to Herdr's own window at once.
 
@@ -69,3 +77,5 @@ as `\\wsl.localhost\<distro>\<path>`. Other remote folders are refused.
 - Not yet handled: drag and drop between Herdr and VS Code, several Herdr
   windows, DPI changes while moving between monitors.
 - Linux and macOS report that embedding is unsupported.
+- Git in Fork reports "dubious ownership" for a WSL repository until it is
+  marked safe once (Fork offers "Mark repository as safe").
