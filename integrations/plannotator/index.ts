@@ -5,7 +5,7 @@ import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { importFresh } from "./fresh-import.mjs";
 import { createReviewRouter } from "./router.mjs";
-import { startBrowserIpc } from "./ipc.mjs";
+import type { startBrowserIpc } from "./ipc.mjs";
 
 /** Route Plannotator's supported browser hook without changing its Ask AI bridge. */
 export default function herdrPlannotator(pi: ExtensionAPI): void {
@@ -54,6 +54,9 @@ export default function herdrPlannotator(pi: ExtensionAPI): void {
     const module = new URL("./open.mjs", import.meta.url);
     module.searchParams.set("load", randomUUID());
     const { closeReview, openReview, resolveApp, runJson } = await importFresh(module.href) as typeof import("./open.mjs");
+    const ipcModule = new URL("./ipc.mjs", import.meta.url);
+    ipcModule.searchParams.set("load", randomUUID());
+    const { startBrowserIpc } = await importFresh(ipcModule.href) as typeof import("./ipc.mjs");
     context = ctx;
     const session = ctx.sessionManager.getSessionId();
     router = createReviewRouter(session, { open: openReview, close: closeReview });
