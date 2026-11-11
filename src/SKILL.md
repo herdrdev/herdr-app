@@ -110,6 +110,10 @@ set). It is the installed guide to settings, layouts, commands and mods.
 Read the generated `.d.ts` files beside it for full API details; do not edit
 those files or the generated guide. The app rewrites them on start.
 
+- `terminal_line_height` (default 1, 0.8..2) adjusts terminal rows;
+  `terminal_scroll_speed` (default 1, 0.1..5) adjusts wheel and trackpad
+  scrolling, including mouse reports. Set them in settings.json or the
+  layout's look; the layout wins.
 - Home defaults to `~/.config/herdr-app`; `HERDR_APP_HOME` selects another.
 - Mods live in `mods/<name>/` with `main.js` and optional `mod.json`.
   They are trusted JavaScript with command and network access.

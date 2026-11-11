@@ -470,7 +470,9 @@ export default class Settings extends View {
   look(t, cx) {
     const s = settings();
     const p = this.person;
-    const own = (key, composed, def) => (p[key] ?? def) !== composed;
+    // Numbers come back from the host as 32-bit floats: 1.1 reads as 1.100000023841858.
+    const same = (a, b) => (typeof a === "number" && typeof b === "number" ? Math.abs(a - b) < 1e-4 : a === b);
+    const own = (key, composed, def) => !same(p[key] ?? def, composed);
     const size = (key, value, d, cx) => this.change((q) => (q[key] = Math.max(8, Math.min(32, (q[key] ?? value) + d))), cx);
     const fontRow = (which, sizeKey, title, family, def, sizeNow) =>
       v_flex()
@@ -515,6 +517,16 @@ export default class Settings extends View {
         ),
       )
       .child(fontRow("font", "font_size", "Terminal font", s.font_family, DEFAULT_FONT, s.font_size))
+      .children([
+        ["terminal_line_height", "Terminal line height", 0.8, 2],
+        ["terminal_scroll_speed", "Terminal scroll speed", 0.1, 5],
+      ].map(([key, title, min, max]) => this.row(
+        t, title,
+        own(key, s[key], 1) ? "This layout sets its own; yours shows in the others." : null,
+        this.stepper(t, `st-${key}`, `${Math.round(s[key] * 100)}%`,
+          (_e, cx) => this.change((q) => (q[key] = Math.max(min, Math.min(max, Math.round(((q[key] ?? s[key]) - 0.1) * 10) / 10))), cx),
+          (_e, cx) => this.change((q) => (q[key] = Math.max(min, Math.min(max, Math.round(((q[key] ?? s[key]) + 0.1) * 10) / 10))), cx)),
+      )))
       .child(fontRow("ui_font", null, "Interface font", s.ui_font_family, DEFAULT_UI_FONT));
   }
 

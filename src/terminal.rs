@@ -877,7 +877,7 @@ impl TerminalView {
     fn scroll(&mut self, ev: &ScrollWheelEvent, _w: &mut Window, cx: &mut Context<Self>) {
         cx.stop_propagation();
         let mut g = self.grid.borrow_mut();
-        let steps = scroll_delta_steps(&mut self.scrolled, ev.delta, ev.touch_phase, g.cell, g.vt.cols, g.vt.rows);
+        let steps = scroll_delta_steps(&mut self.scrolled, ev.delta, ev.touch_phase, g.cell, g.vt.cols, g.vt.rows, crate::settings::get().terminal_scroll_speed);
         let n = steps.y.unsigned_abs() as usize;
         if steps.x == 0 && n == 0 {
             return;
@@ -1290,14 +1290,20 @@ fn local(g: &Grid, p: Point<Pixels>) -> (f32, f32) {
     (f32::from(p.x - g.origin.x).max(0.0), f32::from(p.y - g.origin.y).max(0.0))
 }
 
-fn scroll_delta_steps(scrolled: &mut Point<f32>, delta: ScrollDelta, phase: TouchPhase, cell: Size<Pixels>, cols: u16, rows: u16) -> Point<i32> {
+fn scroll_delta_steps(scrolled: &mut Point<f32>, delta: ScrollDelta, phase: TouchPhase, cell: Size<Pixels>, cols: u16, rows: u16, speed: f32) -> Point<i32> {
     let lines = match delta {
         // As in Ghostty, a sideways notch moves one column; a vertical one, three lines.
-        ScrollDelta::Lines(p) if cfg!(target_os = "macos") => return point(macos_wheel_steps(p.x) / 3, macos_wheel_steps(p.y)),
+        ScrollDelta::Lines(p) if cfg!(target_os = "macos") => {
+            if speed == 1.0 {
+                return point(macos_wheel_steps(p.x) / 3, macos_wheel_steps(p.y));
+            }
+            let y = if p.y == 0.0 { 0.0 } else { p.y.signum() * p.y.abs().max(1.0) * 3.0 * speed };
+            return point(macos_wheel_steps(p.x) / 3, scroll_steps(&mut scrolled.y, phase, y, rows as f32));
+        },
         ScrollDelta::Lines(p) => p,
         ScrollDelta::Pixels(p) => point(p.x / cell.width, p.y / cell.height),
     };
-    point(scroll_steps(&mut scrolled.x, phase, lines.x, cols as f32), scroll_steps(&mut scrolled.y, phase, lines.y, rows as f32))
+    point(scroll_steps(&mut scrolled.x, phase, lines.x, cols as f32), scroll_steps(&mut scrolled.y, phase, lines.y * speed, rows as f32))
 }
 
 fn scroll_mouse_bytes(vt: &mut Vt, steps: Point<i32>, mods: Modifiers, x: f32, y: f32, size: (u32, u32, f32, f32)) -> Vec<u8> {
@@ -1590,18 +1596,19 @@ fn cell_metrics(window: &Window) -> CellMetrics {
     let ts = window.text_system();
     let id = ts.resolve_font(&cell_font(false, false));
     let (fs, scale) = (crate::settings::font_size(), window.scale_factor());
-    // Asked for on every frame of every terminal; the answer only changes with the font, size or scale.
-    thread_local!(static LAST: Cell<Option<((FontId, u32, u32), CellMetrics)>> = const { Cell::new(None) });
-    let key = (id, fs.to_bits(), scale.to_bits());
+    // Asked for on every frame; changes with the font, size, scale or line height.
+    thread_local!(static LAST: Cell<Option<((FontId, u32, u32, u32), CellMetrics)>> = const { Cell::new(None) });
+    let line_height = crate::settings::get().terminal_line_height;
+    let key = (id, fs.to_bits(), scale.to_bits(), line_height.to_bits());
     if let Some((_, metrics)) = LAST.get().filter(|(last, _)| *last == key) {
         return metrics;
     }
-    let metrics = font_cell_metrics(ts, id, fs, scale);
+    let metrics = font_cell_metrics(ts, id, fs, scale, line_height);
     LAST.set(Some((key, metrics)));
     metrics
 }
 
-fn font_cell_metrics(ts: &WindowTextSystem, id: FontId, fs: f32, scale: f32) -> CellMetrics {
+fn font_cell_metrics(ts: &WindowTextSystem, id: FontId, fs: f32, scale: f32, line_height: f32) -> CellMetrics {
     // FreeType uses integer y_ppem for metrics; CoreText uses the requested size.
     let em = if cfg!(target_os = "macos") { fs * scale } else { (fs * scale).round().max(1.0) };
     let metrics = ts.font_metrics(id);
@@ -1634,6 +1641,9 @@ fn font_cell_metrics(ts: &WindowTextSystem, id: FontId, fs: f32, scale: f32) -> 
     let height = face_height.round().max(1.0);
     let baseline_bottom = (gap * unit / 2.0 - descent * unit - (height - face_height) / 2.0).round();
     let baseline = height - baseline_bottom;
+    let face_baseline = gap * unit / 2.0 - descent * unit;
+    let (height, top) = adjusted_cell_height(height, face_height, baseline_bottom - face_baseline, line_height);
+    let baseline = baseline + top;
     let measured_height = |ch| ts.typographic_bounds(id, px(metrics.units_per_em as f32), ch).ok()
         .map(|b| f32::from(b.size.height)).filter(|h| *h > 0.0);
     let ex = os2.and_then(|o| o.x_height()).filter(|h| *h > 0).map(|h| h as f32)
@@ -1660,6 +1670,14 @@ fn font_cell_metrics(ts: &WindowTextSystem, id: FontId, fs: f32, scale: f32) -> 
         strike: px((baseline - st_pos).round() / scale),
         strike_thickness: px(st_thick.ceil().max(1.0) / scale),
     }
+}
+
+// Ghostty puts an odd extra pixel on the edge that best centres the face.
+fn adjusted_cell_height(height: f32, face_height: f32, face_y: f32, multiplier: f32) -> (f32, f32) {
+    let adjusted = (height * multiplier).round().max(1.0);
+    let half = (adjusted - height) / 2.0;
+    let top = if face_y - (height - face_height) / 2.0 > 0.0 { half.ceil() } else { half.floor() };
+    (adjusted, top)
 }
 
 pub fn cell_size(window: &Window) -> Size<Pixels> {
@@ -3194,9 +3212,21 @@ mod tests {
             (16., 0.9, 9., 18., 14.), (16., 1.1, 11., 24., 19.),
             (13.5, 1., 8., 18., 14.),
         ] {
-            let metrics = font_cell_metrics(&ts, id, fs, scale);
+            let metrics = font_cell_metrics(&ts, id, fs, scale, 1.0);
             assert_eq!(metrics.size.map(|v| v * scale), size(px(width), px(height)));
             assert_eq!(metrics.baseline * scale, px(baseline));
+            for multiplier in [0.8, 1.3, 2.0] {
+                let adjusted = font_cell_metrics(&ts, id, fs, scale, multiplier);
+                assert_eq!(adjusted.size.width, metrics.size.width);
+                assert_eq!(adjusted.size.height * scale, px((height * multiplier).round()));
+                let shift = adjusted.baseline - metrics.baseline;
+                let half = (f32::from(adjusted.size.height - metrics.size.height) * scale) / 2.0;
+                let physical_shift = f32::from(shift) * scale;
+                assert!((physical_shift - half.floor()).abs() < 1e-4 || (physical_shift - half.ceil()).abs() < 1e-4);
+                assert!((f32::from(adjusted.underline - metrics.underline - shift)).abs() < 1e-4);
+                assert!((f32::from(adjusted.strike - metrics.strike - shift)).abs() < 1e-4);
+                assert_eq!(adjusted.underline_thickness, metrics.underline_thickness);
+            }
             let text = "H".repeat(60);
             let run = TextRun { len: text.len(), font: font.clone(), ..Default::default() };
             let positions: Vec<_> = (0..60).map(|i| (i, metrics.size.width * i as f32)).collect();
@@ -3694,6 +3724,38 @@ mod tests {
     }
 
     #[test]
+    fn scroll_speed_accumulates_wheel_and_trackpad_remainders_in_mouse_reports() {
+        use gpui::{point, px, size, ScrollDelta, TouchPhase};
+        let cell = size(px(10.0), px(20.0));
+        for (delta, expected) in [
+            (ScrollDelta::Lines(point(0.0, 1.0)), if cfg!(target_os = "macos") { vec![1, 2, 1, 2] } else { vec![0, 1, 0, 1] }),
+            (ScrollDelta::Pixels(point(px(0.0), px(10.0))), vec![0, 0, 0, 1]),
+        ] {
+            let mut scrolled = point(0.0, 0.0);
+            let mut vt = Vt::new(80, 24);
+            vt.write(b"\x1b[?1000h\x1b[?1006h");
+            for count in expected {
+                let steps = super::scroll_delta_steps(&mut scrolled, delta, TouchPhase::Moved, cell, 80, 24, 0.5);
+                assert_eq!(steps, point(0, count));
+                assert_eq!(super::scroll_mouse_bytes(&mut vt, steps, Modifiers::default(), 15.0, 25.0, (80, 24, 10.0, 20.0)),
+                    b"\x1b[<64;2;2M".repeat(count as usize));
+            }
+        }
+        // Ghostty's multiplier affects the vertical axis only.
+        let mut scrolled = point(0.0, 0.0);
+        assert_eq!(super::scroll_delta_steps(&mut scrolled, ScrollDelta::Lines(point(1.0, 0.0)), TouchPhase::Moved, cell, 80, 24, 0.5), point(1, 0));
+        assert_eq!(super::scroll_delta_steps(&mut scrolled, ScrollDelta::Pixels(point(px(10.0), px(-40.0))), TouchPhase::Moved, cell, 80, 24, 0.5), point(1, -1));
+    }
+
+    #[test]
+    fn adjusted_rows_split_odd_pixels_like_ghostty() {
+        assert_eq!(super::adjusted_cell_height(20.0, 20.0, 0.1, 1.3), (26.0, 3.0));
+        assert_eq!(super::adjusted_cell_height(21.0, 21.0, 0.1, 2.0), (42.0, 11.0));
+        assert_eq!(super::adjusted_cell_height(21.0, 21.0, -0.1, 2.0), (42.0, 10.0));
+        assert_eq!(super::adjusted_cell_height(21.0, 21.0, 0.1, 0.8), (17.0, -2.0));
+    }
+
+    #[test]
     fn touchpad_moves_add_up_to_whole_lines() {
         use gpui::TouchPhase::*;
         let mut s = 0.0;
@@ -3719,10 +3781,10 @@ mod tests {
             (point(0.0, -20.0), b"\x1b[<65;2;2M".as_slice()),
             (point(-10.0, 20.0), b"\x1b[<64;2;2M\x1b[<67;2;2M".as_slice()),
         ] {
-            let steps = super::scroll_delta_steps(&mut scrolled, ScrollDelta::Pixels(point(px(delta.x), px(delta.y))), TouchPhase::Moved, cell, 80, 24);
+            let steps = super::scroll_delta_steps(&mut scrolled, ScrollDelta::Pixels(point(px(delta.x), px(delta.y))), TouchPhase::Moved, cell, 80, 24, 1.0);
             assert_eq!(super::scroll_mouse_bytes(&mut vt, steps, Modifiers::default(), 15.0, 25.0, (80, 24, 10.0, 20.0)), expected);
         }
-        let steps = super::scroll_delta_steps(&mut scrolled, ScrollDelta::Lines(point(1.0, -1.0)), TouchPhase::Moved, cell, 80, 24);
+        let steps = super::scroll_delta_steps(&mut scrolled, ScrollDelta::Lines(point(1.0, -1.0)), TouchPhase::Moved, cell, 80, 24, 1.0);
         let count = if cfg!(target_os = "macos") { 3 } else { 1 };
         assert_eq!(steps, point(1, -count));
         assert_eq!(super::scroll_mouse_bytes(&mut vt, steps, Modifiers::default(), 15.0, 25.0, (80, 24, 10.0, 20.0)), [b"\x1b[<65;2;2M".repeat(count as usize), b"\x1b[<66;2;2M".to_vec()].concat());
@@ -3732,7 +3794,7 @@ mod tests {
     fn scroll_axes_accumulate_independently_and_reset_together() {
         use gpui::{point, px, size, ScrollDelta, TouchPhase::*};
         let mut scrolled = point(0.0, 0.0);
-        let mut steps = |phase, x, y| super::scroll_delta_steps(&mut scrolled, ScrollDelta::Pixels(point(px(x), px(y))), phase, size(px(10.0), px(20.0)), 80, 24);
+        let mut steps = |phase, x, y| super::scroll_delta_steps(&mut scrolled, ScrollDelta::Pixels(point(px(x), px(y))), phase, size(px(10.0), px(20.0)), 80, 24, 1.0);
         assert_eq!(steps(Moved, 6.0, 8.0), point(0, 0));
         assert_eq!(steps(Moved, 5.0, 8.0), point(1, 0));
         assert_eq!(steps(Moved, 0.0, 8.0), point(0, 1));

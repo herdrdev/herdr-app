@@ -331,7 +331,9 @@ export function feedbackClearImages(): null;
 export function sendFeedback(body: import("gpui-kit").HostValue, images?: string[]): Promise<string | null>;
 
 /** What the app runs with: the shown layout's look (theme name, fonts, sizes, terminal
- *  padding and opacity) with the person's zoom and sounds. */
+ *  padding and opacity, terminal_line_height and terminal_scroll_speed) with the person's zoom and sounds.
+ *  terminal_line_height: number, default 1, clamped to 0.8..2; terminal_scroll_speed:
+ *  number, default 1, clamped to 0.1..5. Layout values override settings.json. */
 export function settings(): Record<string, unknown>;
 
 /** Every key binding: { section, keys, action }. */
