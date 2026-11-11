@@ -80,6 +80,14 @@ pub struct Agent {
     pub since: u64,
 }
 
+/// What a `Model` shows and focuses (`Model::shown`, `Model::restore`).
+#[derive(Clone, Debug, Default, PartialEq)]
+pub struct Shown {
+    active: Option<String>,
+    spaces: HashMap<String, Option<String>>,
+    tabs: HashMap<String, (Option<String>, Vec<String>, Option<String>)>,
+}
+
 #[derive(Default)]
 pub struct Model {
     pub spaces: Vec<Space>,
@@ -448,6 +456,39 @@ impl Model {
         c.focus(pane_id);
         let ctx = c.id.clone();
         self.select_tab(&ctx)
+    }
+
+    /// What's shown and focused now: the shown space, each space's tab and
+    /// each tab's panes (focused, history, zoomed).
+    pub fn shown(&self) -> Shown {
+        Shown {
+            active: self.active.clone(),
+            spaces: self.spaces.iter().map(|p| (p.id.clone(), p.active.clone())).collect(),
+            tabs: self.tabs().map(|c| (c.id.clone(), (c.focused.clone(), c.before.clone(), c.zoomed.clone()))).collect(),
+        }
+    }
+
+    /// Puts back what `shown()` saw, for the spaces and tabs it knew; new
+    /// ones keep their own. A space or tab gone since is skipped.
+    pub fn restore(&mut self, shown: &Shown) {
+        if shown.active.as_ref().is_none_or(|a| self.space(a).is_some()) {
+            self.active = shown.active.clone();
+        }
+        for p in &mut self.spaces {
+            if let Some(active) = shown.spaces.get(&p.id).filter(|a| a.as_ref().is_none_or(|a| p.tab(a).is_some())) {
+                p.active = active.clone();
+            }
+            for c in &mut p.tabs {
+                if let Some((focused, before, zoomed)) = shown.tabs.get(&c.id) {
+                    let has = |id: &String| c.root.find(id).is_some();
+                    if focused.as_ref().is_none_or(has) {
+                        c.focused = focused.clone();
+                    }
+                    c.before = before.iter().filter(|id| has(id)).cloned().collect();
+                    c.zoomed = zoomed.clone().filter(has);
+                }
+            }
+        }
     }
 
     /// The address shown in a pane block.
@@ -875,6 +916,34 @@ mod tests {
         assert_eq!(m.focused_pane().as_deref(), Some("x1"));
         // The arrangement keeps the tab's id with one pane left.
         assert_eq!(m.active_tab().unwrap().root.id, "c1");
+    }
+
+    #[test]
+    fn restoring_what_was_shown_keeps_new_spaces_tabs_and_panes_behind() {
+        let mut m = model_with_one();
+        let shown = m.shown();
+        m.add_space("p2", "web", "/w", Tab::new("c2", "", "x2", "t2"));
+        m.add_tab("p1", Tab::new("c3", "", "x3", "t3"));
+        m.split("x1", Axis::Row, "x4", "t4");
+        m.restore(&shown);
+        assert_eq!(m.active.as_deref(), Some("p1"));
+        assert_eq!(m.active_tab().unwrap().id, "c1");
+        assert_eq!(m.focused_pane().as_deref(), Some("x1"));
+        // Each new one is there, and shows its own pane when picked.
+        assert!(m.focus_pane("x2"));
+        assert_eq!(m.active.as_deref(), Some("p2"));
+        assert!(m.focus_pane("x4"));
+        assert_eq!(m.active_tab().unwrap().id, "c1");
+    }
+
+    #[test]
+    fn restoring_skips_spaces_tabs_and_panes_gone_since() {
+        let mut m = model_with_one();
+        m.add_space("p2", "web", "/w", Tab::new("c2", "", "x2", "t2"));
+        let shown = m.shown();
+        m.remove_space("p2");
+        m.restore(&shown);
+        assert_eq!(m.active.as_deref(), Some("p1"));
     }
 
     #[test]

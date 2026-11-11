@@ -394,6 +394,9 @@ pub struct Person {
     pub pane_scrollbars: bool,
     /// Minimum terminal text contrast ratio; 1 leaves program colors unchanged.
     pub minimum_contrast: f32,
+    /// Whether spaces, tabs and panes that scripts and agents open take the keyboard.
+    #[serde(skip_serializing_if = "ScriptFocus::is_default")]
+    pub script_focus: ScriptFocus,
     /// macOS Option sends Alt shortcuts, or follows the keyboard layout.
     #[serde(skip_serializing_if = "OptionAsAlt::is_auto")]
     pub option_as_alt: OptionAsAlt,
@@ -438,6 +441,26 @@ impl OptionAsAlt {
     }
 }
 
+/// Whether what a script or agent opens (`herdr-app do space.new`, `tab.new`,
+/// `pane.split`, `terminal.open`) is shown and takes the keyboard.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum ScriptFocus {
+    /// Shown at once, unless the person typed in the window in the last few seconds.
+    #[default]
+    UnlessTyping,
+    /// Always shown at once.
+    Always,
+    /// Never: it opens behind what's shown, with a toast to go there.
+    Never,
+}
+
+impl ScriptFocus {
+    fn is_default(&self) -> bool {
+        *self == Self::default()
+    }
+}
+
 fn is_true(b: &bool) -> bool {
     *b
 }
@@ -456,6 +479,7 @@ impl Default for Person {
             clipboard_write: true,
             pane_scrollbars: true,
             minimum_contrast: 1.0,
+            script_focus: ScriptFocus::default(),
             option_as_alt: OptionAsAlt::Auto,
             appearance: Appearance::System,
             theme: None,
@@ -493,6 +517,7 @@ pub struct Settings {
     pub terminal_opacity: f32,
     pub clipboard_write: bool,
     pub minimum_contrast: f32,
+    pub script_focus: ScriptFocus,
     pub option_as_alt: OptionAsAlt,
     pub sounds: Sounds,
 }
@@ -535,6 +560,7 @@ impl Default for Settings {
             terminal_opacity: 1.0,
             clipboard_write: true,
             minimum_contrast: 1.0,
+            script_focus: ScriptFocus::default(),
             option_as_alt: OptionAsAlt::Auto,
             sounds: Sounds::default(),
         }
@@ -574,6 +600,7 @@ impl Settings {
             sounds: person.sounds.clone(),
             clipboard_write: person.clipboard_write,
             minimum_contrast: person.minimum_contrast,
+            script_focus: person.script_focus,
             option_as_alt: person.option_as_alt,
         }
     }

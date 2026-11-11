@@ -432,6 +432,8 @@ pub struct AppWindow {
     /// The mod block holding the keyboard for directional navigation.
     focused_block: Option<String>,
     synced_model_pane: Option<String>,
+    /// When the person last pressed a key in the window (`script_focus`).
+    typed_at: Option<Instant>,
     /// A terminal block in a window (an overlay's layout) holding the keyboard.
     /// `focused()` reports it like a layout terminal block; the focused pane stays.
     window_terminal: Option<String>,
@@ -530,6 +532,7 @@ impl AppWindow {
             focused_pane: None,
             focused_block: None,
             synced_model_pane: None,
+            typed_at: None,
             window_terminal: None,
             tab_shown: true,
             pane_history: Vec::new(),
@@ -2852,9 +2855,44 @@ impl AppWindow {
             && let Err(error) = self.require_document(space.machine.as_deref())
         { return json!({"error":error}); }
         self.reply = None;
+        // What a script opens stays behind what's shown while the person types.
+        let shown = (!person && opens(name) && self.model.active_space().is_some() && self.keeps_focus()).then(|| self.model.shown());
         self.dispatch(name, &args, person, window, cx);
+        if let Some(shown) = shown
+            && self.reply.as_ref().is_some_and(|r| r.get("error").is_none())
+        {
+            self.model.restore(&shown);
+            self.opened_behind(name, window, cx);
+        }
         self.flush_documents(false, window, cx);
         self.reply.take().unwrap_or_else(|| json!({ "ok": true }))
+    }
+
+    /// Whether what a script opens now stays behind what's shown (`script_focus`).
+    fn keeps_focus(&self) -> bool {
+        keeps_focus(settings::get().script_focus, self.typed_at.map(|t| t.elapsed()))
+    }
+
+    /// Says where a script opened something the person wasn't shown, with a way there.
+    fn opened_behind(&mut self, name: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(reply) = self.reply.clone() else { return };
+        let pane = reply.get("pane").and_then(Value::as_str).map(str::to_owned)
+            .or_else(|| reply.get("terminal").and_then(Value::as_str).and_then(|t| self.model.pane_of(t)));
+        let Some(pane) = pane else { return };
+        let (Some(space), Some(tab)) = (self.model.space_of(&pane), self.model.tab_of(&pane)) else { return };
+        // A split in the shown tab is in sight already.
+        if self.model.active_tab().is_some_and(|c| c.id == tab.id) { return; }
+        let place = format!("{} / {}", self.model.space_name(space, &self::home()), Model::tab_name(space, tab));
+        let what = match name {
+            "space.new" => "New space",
+            "pane.split" => "New pane",
+            _ => "New tab",
+        };
+        let notification = json!({
+            "title": format!("{what} opened behind"), "body": place, "level": "info",
+            "action": { "name": "pane.focus", "args": { "pane": pane } },
+        });
+        self.open_overlay(mods::new_overlay_id(), json!({ "kind": "toast", "notification": notification }), window, cx);
     }
 
     /// Asks the person for a new name (space.rename, tab.rename), then runs it with it.
@@ -4697,6 +4735,24 @@ fn run_following_folder(mut folder: String, follow: bool, on: Option<&str>, mut 
     Ok((address, folder))
 }
 
+/// How long after the person's last key a script's new space, tab or pane
+/// stays behind what's shown (`script_focus: "unless_typing"`).
+const TYPING: Duration = Duration::from_secs(3);
+
+/// The commands that open something and show it: a script's stay behind
+/// while the person types.
+fn opens(name: &str) -> bool {
+    matches!(name, "space.new" | "tab.new" | "pane.split" | "terminal.open")
+}
+
+fn keeps_focus(setting: settings::ScriptFocus, since_typed: Option<Duration>) -> bool {
+    match setting {
+        settings::ScriptFocus::Always => false,
+        settings::ScriptFocus::Never => true,
+        settings::ScriptFocus::UnlessTyping => since_typed.is_some_and(|d| d < TYPING),
+    }
+}
+
 fn new_space_machine(args: &Value, person: bool, model: &Model) -> Option<String> {
     args.get("machine").and_then(Value::as_str)
         .or_else(|| if person { model.active_space().and_then(|s| s.machine.as_deref()) } else { None })
@@ -4956,6 +5012,7 @@ impl Render for AppWindow {
             }))
             // Ctrl (Cmd) alone shows links in the pane under the pointer, focused or not.
             .on_modifiers_changed(cx.listener(|this, _: &ModifiersChangedEvent, _, cx| {
+                this.typed_at = Some(Instant::now());
                 for t in this.terms.values() {
                     if t.view.read(cx).hovered() {
                         t.view.update(cx, |_, cx| cx.notify());
@@ -4963,6 +5020,7 @@ impl Render for AppWindow {
                 }
             }))
             .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, _, cx| {
+                this.typed_at = Some(Instant::now());
                 if ev.keystroke.key == "escape" && this.pane_drag.is_some() {
                     this.cancel_pane_drag(cx);
                     cx.stop_propagation();
@@ -5048,6 +5106,22 @@ fn changed_asset_paths(home: &std::path::Path, changed: &[std::path::PathBuf]) -
 mod tests {
     use gpui::{div, point, px, size, Context, IntoElement, Render, TestAppContext, Window};
     use gpui::prelude::*;
+
+    #[test]
+    fn scripts_open_behind_what_is_shown_while_the_person_types() {
+        use crate::settings::ScriptFocus::*;
+        use std::time::Duration;
+        let (now, typing, paused) = (None, Some(Duration::from_millis(500)), Some(Duration::from_secs(10)));
+        assert!(super::keeps_focus(UnlessTyping, typing));
+        assert!(!super::keeps_focus(UnlessTyping, paused));
+        assert!(!super::keeps_focus(UnlessTyping, now));
+        assert!(super::keeps_focus(Never, paused));
+        assert!(!super::keeps_focus(Always, typing));
+        for name in ["space.new", "tab.new", "pane.split", "terminal.open"] {
+            assert!(super::opens(name), "{name}");
+        }
+        assert!(!super::opens("pane.focus"));
+    }
 
     #[test]
     fn going_back_into_a_split_column_takes_its_top_pane_whatever_the_fractions() {

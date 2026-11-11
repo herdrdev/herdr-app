@@ -744,6 +744,12 @@ What's about the user, never a look:
   pane's right edge (default `true`). It shows only when the pane has
   scrollback — never on the alternate screen (editors, pagers) — and
   drags to move through it.
+- `script_focus`: whether a space, tab or pane that a script or agent opens
+  (`herdr-app do space.new`, `tab.new`, `pane.split`, `terminal.open`) is
+  shown and takes the keyboard. `"unless_typing"` (default): shown, unless
+  the person pressed a key in the window in the last 3 seconds; `"always"`:
+  shown; `"never"`: never (for voice input, which pastes in one go). One not
+  shown opens behind what's shown, with a toast that goes there.
 - `telemetry`: `false` stops anonymous usage data and deletes what wasn't
   sent (on when absent; Settings → Privacy shows each report word for
   word, and `telemetry()` in mods). Once a day the app sends counts:

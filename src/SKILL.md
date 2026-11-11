@@ -26,6 +26,8 @@ only after a successful check; on failure, check the connection and retry.
 ## Show something when asked
 
 New spaces and tabs are shown immediately: only create them when asked.
+While the person types (or with `script_focus: "never"`), they open behind
+what's shown instead, with a toast; the reply is the same.
 Pick an explicit, useful name for every new space and tab; don't rely on
 default names. Use IDs from `ls` rather than guessing or acting on the wrong
 focused pane.
