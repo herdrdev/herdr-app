@@ -27,7 +27,8 @@ thread_local! {
 struct Launch {
     program: PathBuf,
     args: Vec<String>,
-    /// Win32 class of the program's top-level windows.
+    /// Win32 class of the program's top-level windows; a trailing `*` matches
+    /// any rest (WPF adds a GUID per run).
     class: &'static str,
     /// What the title of a window already showing the target contains as a
     /// " - "-separated part (VS Code: the folder's name, maybe with " [WSL: …]").
@@ -54,6 +55,9 @@ pub(super) struct NativeApp {
     generation: u64,
     /// The window was closed; only reopen asks for a new one.
     closed: bool,
+    /// A single-window program moved on to another pane; this one takes it
+    /// back when shown again.
+    moved: bool,
     /// Keyboard focus was asked for while the pane was hidden: give it when
     /// the pane shows up soon after (a tab selected just before).
     focus_until: Option<std::time::Instant>,
@@ -67,9 +71,15 @@ pub(super) struct NativeApp {
 fn launch(app: &str, target: &str) -> anyhow::Result<Launch> {
     match app {
         "vscode" => vscode(target),
-        other => anyhow::bail!("Unknown native app {other:?}; Herdr knows \"vscode\""),
+        "fork" => fork(target),
+        other => anyhow::bail!("Unknown native app {other:?}; Herdr knows \"vscode\" and \"fork\""),
     }
 }
+
+/// The program has one window for all its folders (Fork): the window follows
+/// the pane that shows it, and each pane opens its folder there.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn single(app: &str) -> bool { app == "fork" }
 
 /// The person's own VS Code: default profile and user data, so a running VS
 /// Code opens the window itself. `target` is a folder URI (`file://`,
@@ -95,6 +105,51 @@ fn vscode(target: &str) -> anyhow::Result<Launch> {
     let name = target.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or_default();
     let title = url::form_urlencoded::parse(format!("n={name}").as_bytes()).next().map(|(_, v)| v.into_owned()).unwrap_or_default();
     Ok(Launch { program, args, class: "Chrome_WidgetWin_1", title })
+}
+
+/// The person's Fork (git client) on a repository. `target` is a local
+/// folder, a `file://` URI or a VS Code WSL folder URI (`vscode-remote://wsl+…`).
+#[cfg_attr(not(windows), allow(dead_code))]
+fn fork(target: &str) -> anyhow::Result<Launch> {
+    let env = |key: &str| std::env::var_os(key).filter(|v| !v.is_empty()).map(PathBuf::from);
+    let candidates = [
+        env("HERDR_FORK_EXE"),
+        env("LOCALAPPDATA").map(|d| d.join("Fork/current/Fork.exe")),
+        env("LOCALAPPDATA").map(|d| d.join("Fork/Fork.exe")),
+    ];
+    let program = candidates.into_iter().flatten().find(|p| p.is_file())
+        .ok_or_else(|| anyhow::anyhow!("Fork is not installed (set HERDR_FORK_EXE to Fork.exe)"))?;
+    Ok(Launch { program, args: vec![windows_folder(target)?], class: "HwndWrapper[Fork.exe;*", title: String::new() })
+}
+
+/// A window class against a `Launch.class` pattern.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn class_matches(pattern: &str, class: &str) -> bool {
+    match pattern.strip_suffix('*') {
+        Some(prefix) => class.starts_with(prefix),
+        None => class == pattern,
+    }
+}
+
+/// A Windows path for a folder given as a path or a folder URI.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn windows_folder(target: &str) -> anyhow::Result<String> {
+    let target = target.trim();
+    anyhow::ensure!(!target.is_empty(), "No folder to open");
+    // %XX escapes only: '+' stays itself.
+    let decode = |s: &str| url::form_urlencoded::parse(format!("n={}", s.replace('+', "%2B")).as_bytes()).next().map(|(_, v)| v.into_owned()).unwrap_or_default();
+    let Some((scheme, rest)) = target.split_once("://") else { return Ok(target.to_owned()) };
+    let (authority, path) = rest.split_once('/').map_or((rest, ""), |(a, p)| (a, p));
+    let path = decode(path).replace('/', "\\");
+    match scheme {
+        "file" if authority.is_empty() => Ok(path),
+        "file" => Ok(format!(r"\\{authority}\{path}")),
+        "vscode-remote" => match decode(authority).strip_prefix("wsl+") {
+            Some(distro) if !distro.is_empty() => Ok(format!(r"\\wsl.localhost\{distro}\{path}")),
+            _ => anyhow::bail!("Only local and WSL folders open on Windows, not {target}"),
+        },
+        _ => anyhow::bail!("Only local and WSL folders open on Windows, not {target}"),
+    }
 }
 
 impl NativeApp {
@@ -162,9 +217,34 @@ pub(super) fn end_frame(dragging: bool, covers: &[Bounds<Pixels>], window: &mut 
         apps.retain(|weak| weak.strong_count() > 0);
         apps.iter().filter_map(Weak::upgrade).filter(|app| app.borrow().window == id).collect()
     });
-    for app in apps {
+    for app in &apps {
         app.borrow_mut().update_visibility(window, dragging, covers);
-        schedule_apply(&app, window, cx);
+    }
+    #[cfg(windows)]
+    for app in &apps {
+        // A shown pane that a single-window program moved away from takes it
+        // back from a hidden holder.
+        let reclaim = {
+            let a = app.borrow();
+            a.moved && a.visible && !apps.iter().any(|o| {
+                if Rc::ptr_eq(o, app) { return false; }
+                let o = o.borrow();
+                o.app == a.app && o.visible && o.embedded.is_some()
+            })
+        };
+        if reclaim {
+            {
+                let mut a = app.borrow_mut();
+                a.moved = false;
+                a.closed = false;
+                a.generation += 1;
+                a.status = "Opening…".into();
+            }
+            start(app, window, cx);
+        }
+    }
+    for app in &apps {
+        schedule_apply(app, window, cx);
     }
 }
 
@@ -194,14 +274,14 @@ pub(super) fn register(registry: &mut ComponentRegistry) {
             let state = Rc::new(RefCell::new(NativeApp {
                 window: window.window_handle().window_id(), app: app.clone(), target: target.clone(),
                 status: "Opening…".into(), error: None, hitbox: None, rect: None, visible: false, holes: Vec::new(),
-                apply_pending: false, generation: 0, closed: false, focus_until: None,
+                apply_pending: false, generation: 0, closed: false, moved: false, focus_until: None,
                 #[cfg(windows)] embedded: None,
                 #[cfg(windows)] opening: false,
             }));
             APPS.with_borrow_mut(|apps| apps.push(Rc::downgrade(&state)));
             Ok(Box::new(state))
         },
-    ).with_documentation("A program's own window (\"vscode\": the person's VS Code on a folder URI or path) shown in this pane. Closing the pane closes that window.")
+    ).with_documentation("A program's own window shown in this pane: \"vscode\" (the person's VS Code on a folder URI or path) or \"fork\" (Fork, one window for all repositories, on a local or WSL folder). Closing the pane closes that window.")
     .with_methods(vec![
         StateMethodDescriptor::new::<State>("status", "(): string", |state, _, _, _| {
             Ok(ComponentDataValue::String(state.borrow().status.clone()))
@@ -220,6 +300,7 @@ pub(super) fn register(registry: &mut ComponentRegistry) {
             if app.closed || app.error.is_some() {
                 app.generation += 1;
                 app.closed = false;
+                app.moved = false;
                 app.error = None;
                 app.status = "Opening…".into();
             }
@@ -344,10 +425,19 @@ mod win {
             Ok(RawWindowHandle::Win32(handle)) => handle.hwnd.get() as HWND,
             _ => { fail(state, "No Win32 host window".into()); return; }
         };
+        let launch = match super::launch(&app, &target) {
+            Ok(launch) => launch,
+            Err(error) => { fail(state, format!("{error:#}")); return; }
+        };
+        let single = super::single(&app);
         // A pane whose mod restarted (a mod reload, a layout change) gets the
         // window its earlier copy still holds for the same target: VS Code
         // would only bring that window forward instead of opening another.
-        if let Some(embedded) = take_over(state, &app, &target, host) {
+        // A single-window program comes from any pane, and opens this folder.
+        if let Some((embedded, from)) = take_over(state, &app, &target, host) {
+            if single && from != target && let Err(error) = run(&launch) {
+                tracing::warn!(%error, "cannot open the folder in the adopted window");
+            }
             let weak = Rc::downgrade(state);
             let child = embedded.child as usize;
             {
@@ -362,22 +452,9 @@ mod win {
             }).detach();
             return;
         }
-        let launch = match super::launch(&app, &target) {
-            Ok(launch) => launch,
-            Err(error) => { fail(state, format!("{error:#}")); return; }
-        };
         let before = program_windows(&launch);
         let foreground = unsafe { GetForegroundWindow() };
-        let mut command = std::process::Command::new(&launch.program);
-        command.args(&launch.args)
-            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
-        // Herdr may run inside VS Code or another Electron app: never pass
-        // their IPC variables on, or Code.exe acts as a CLI or Node instead.
-        for (key, _) in std::env::vars_os() {
-            let name = key.to_string_lossy();
-            if name.starts_with("VSCODE_") || name.starts_with("ELECTRON_") { command.env_remove(&key); }
-        }
-        let mut child = match command.spawn() {
+        let mut child = match run(&launch) {
             Ok(child) => child,
             Err(error) => { fail(state, format!("Cannot start {}: {error}", launch.program.display())); return; }
         };
@@ -392,6 +469,9 @@ mod win {
                 if state.borrow().generation != generation { state.borrow_mut().opening = false; return; }
                 let now = program_windows(&launch);
                 if let Some(&hwnd) = now.iter().find(|h| !before.contains(h)) { break hwnd; }
+                // A single-window program on the desktop opens the folder in
+                // its window: adopt that.
+                if single && opened.elapsed() > Duration::from_millis(1500) && let Some(&hwnd) = now.first() { break hwnd; }
                 // A program that already shows this folder brings that window
                 // to the front instead of opening another. Windows may not let
                 // it come forward: then it is found by its title.
@@ -425,34 +505,51 @@ mod win {
         }).detach();
     }
 
+    fn run(launch: &Launch) -> std::io::Result<std::process::Child> {
+        let mut command = std::process::Command::new(&launch.program);
+        command.args(&launch.args)
+            .stdin(std::process::Stdio::null()).stdout(std::process::Stdio::null()).stderr(std::process::Stdio::null());
+        // Herdr may run inside VS Code or another Electron app: never pass
+        // their IPC variables on, or Code.exe acts as a CLI or Node instead.
+        for (key, _) in std::env::vars_os() {
+            let name = key.to_string_lossy();
+            if name.starts_with("VSCODE_") || name.starts_with("ELECTRON_") { command.env_remove(&key); }
+        }
+        command.spawn()
+    }
+
     fn fail(state: &State, error: String) {
         let mut app = state.borrow_mut();
         app.opening = false;
         app.error = Some(error);
     }
 
-    /// The window another, unshown state of the same program and target
-    /// holds, moved into this host. That state ends as closed.
-    fn take_over(state: &State, app: &str, target: &str, host: HWND) -> Option<Embedded> {
+    /// The window another state of the same program and target (any target
+    /// for a single-window program) holds, moved into this host, with that
+    /// state's target. That state ends as closed.
+    fn take_over(state: &State, app: &str, target: &str, host: HWND) -> Option<(Embedded, String)> {
+        let single = super::single(app);
         let other = super::APPS.with_borrow(|apps| {
             apps.iter().filter_map(std::rc::Weak::upgrade).find(|other| {
                 if Rc::ptr_eq(other, state) { return false; }
                 let o = other.borrow();
                 // One pane per project: the newest one shows its window.
-                o.app == app && o.target == target && o.embedded.is_some()
+                o.app == app && (single || o.target == target) && o.embedded.is_some()
             })
         })?;
         let mut o = other.borrow_mut();
         let mut embedded = o.embedded.take()?;
         o.generation += 1;
         o.closed = true;
+        o.moved = single;
         o.status = "Moved to another pane.".into();
+        let from = o.target.clone();
         drop(o);
         embedded.applied = None;
         unsafe {
             if GetParent(embedded.container) != host { SetParent(embedded.container, host); }
         }
-        Some(embedded)
+        Some((embedded, from))
     }
 
     /// Watch an adopted window: closed by its own button, moved by its title
@@ -560,9 +657,9 @@ mod win {
             if unsafe { IsWindowVisible(hwnd) } == 0 || !unsafe { GetWindow(hwnd, GW_OWNER) }.is_null() { return 1; }
             // The class first: a title read can send a message to a window
             // of this process, such as Herdr's own.
-            let mut name = [0u16; 64];
+            let mut name = [0u16; 128];
             let len = unsafe { GetClassNameW(hwnd, name.as_mut_ptr(), name.len() as i32) };
-            if String::from_utf16_lossy(&name[..len.max(0) as usize]) != search.class { return 1; }
+            if !super::class_matches(search.class, &String::from_utf16_lossy(&name[..len.max(0) as usize])) { return 1; }
             let mut pid = 0;
             unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
             if pid == std::process::id() || unsafe { GetWindowTextLengthW(hwnd) } == 0 { return 1; }
@@ -795,5 +892,29 @@ mod win {
             }
             unsafe { DefSubclassProc(host, msg, wparam, lparam) }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::{class_matches, windows_folder};
+
+    #[test]
+    fn folders_become_windows_paths() {
+        assert_eq!(windows_folder(r"C:\dev\app").unwrap(), r"C:\dev\app");
+        assert_eq!(windows_folder("file:///C:/dev/my%20app").unwrap(), r"C:\dev\my app");
+        assert_eq!(windows_folder("file://server/share/app").unwrap(), r"\\server\share\app");
+        assert_eq!(windows_folder("vscode-remote://wsl+Ubuntu/root/dev/c++").unwrap(), r"\\wsl.localhost\Ubuntu\root\dev\c++");
+        assert_eq!(windows_folder("vscode-remote://wsl%2BUbuntu-24.04/root").unwrap(), r"\\wsl.localhost\Ubuntu-24.04\root");
+        assert!(windows_folder("vscode-remote://ssh-remote+vps/root/app").is_err());
+        assert!(windows_folder("  ").is_err());
+    }
+
+    #[test]
+    fn classes_match_exactly_or_by_prefix() {
+        assert!(class_matches("Chrome_WidgetWin_1", "Chrome_WidgetWin_1"));
+        assert!(!class_matches("Chrome_WidgetWin_1", "Chrome_WidgetWin_10"));
+        assert!(class_matches("HwndWrapper[Fork.exe;*", "HwndWrapper[Fork.exe;;f99ed41f-8634-42e2-ab0d-34b527cb1e44]"));
+        assert!(!class_matches("HwndWrapper[Fork.exe;*", "HwndWrapper[Other.exe;;f99ed41f]"));
     }
 }
