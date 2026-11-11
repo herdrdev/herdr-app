@@ -1,4 +1,4 @@
-# VS Code inside a Herdr tab (Windows)
+# VS Code and Fork inside a Herdr tab (Windows)
 
 The `vscode` mod shows the person's own VS Code window in a tab. Herdr asks
 VS Code for a new window on a folder and adopts it: the same profile, settings,
@@ -13,16 +13,50 @@ either, the tab opens the focused terminal's folder. The tab records itself in
 `shared("vscode.tabs")` by URI, so a launcher can select an open project's tab
 instead of opening another.
 
+The `fork` mod does the same with Fork, the git client, and records its tabs
+in `shared("fork.tabs")`:
+
+```sh
+herdr-app do tab.new '{"name":"Fork","mod":"fork","props":{"uri":"vscode-remote://wsl+Ubuntu/root/app"}}'
+```
+
+Fork takes a local folder, a `file://` URI or a WSL folder URI, which it opens
+as `\\wsl.localhost\<distro>\<path>`. Other remote folders are refused.
+
 ## How it works (`src/browser/embed.rs`)
 
 - **Window.** Herdr runs `Code.exe --new-window` on the target and adopts the
   new top-level window of VS Code's process. When VS Code already shows that
   folder, it is adopted instead, found as the foreground window or by its title.
-  A pane whose mod restarts takes the window over from its earlier copy.
+  One pane shows a folder: a new pane on a folder that another pane shows
+  takes that window over.
+- **A Fork of each pane's own.** `Fork.exe <folder>` hands the folder to a
+  running Fork and exits, so each Fork pane starts `Fork.exe` without a folder:
+  a new process, which restores the tabs of Fork's active workspace. Before
+  the start, Herdr makes the "Herdr" workspace in
+  `%LOCALAPPDATA%\Fork\settings.json` hold only the pane's repository and makes
+  it active; other workspaces and settings stay. Fork starts one at a time, and
+  a pane adopts only a window of the process it started. A Fork opened outside
+  Herdr afterwards also starts in the "Herdr" workspace; its workspace menu
+  switches back.
+- **Safe repositories.** Windows git treats every WSL repository as owned by
+  another user and refuses it. Before the start Herdr adds a UNC repository
+  (`\\wsl.localhost\...`) to the global `safe.directory` list with Fork's own
+  git, as Fork's "Mark repository as safe" does.
+- **Mod restarts.** A dropped pane state (a mod reload, a layout change) keeps
+  its window hidden for two seconds. The new copy of the pane takes it over;
+  otherwise it closes. A Fork still starting when its pane goes away leaves its
+  window the same way.
 - **Container.** The window becomes a borderless child of a Herdr-owned container
   window. The container follows the pane and cuts away only the window frame
   outside its client area; everything VS Code draws stays. A move, resize or
   minimize from inside is undone within a quarter second.
+- **Layered container.** Herdr draws through a flip-model swap chain, which
+  covers child windows that draw into a redirection surface, such as WPF
+  windows (Fork). For a window without `WS_EX_NOREDIRECTIONBITMAP` the
+  container becomes an opaque layered window, which DWM composes on its own
+  surface above the swap chain. Chromium windows compose themselves and keep a
+  plain container.
 - **Overlays.** Toasts, popups and dialogs mark their area with
   `browser::cover()`. Native views (VS Code and the browser) cut those areas
   out of themselves with a window region and stay visible around them.
@@ -32,7 +66,8 @@ instead of opening another.
   `focus` mod command gives a shown VS Code tab the keyboard.
 - **Closing.** Closing the tab gives the window back to the desktop and closes it
   as its own close button would; unsaved changes prompt there. Quitting Herdr
-  closes adopted windows the same way. VS Code itself keeps running.
+  closes adopted windows the same way. VS Code itself keeps running; the
+  pane's own Fork process exits with its window.
 - Native calls run outside App updates and without borrowed state: SetFocus and
   SetWindowPos deliver messages to Herdr's own window at once.
 
