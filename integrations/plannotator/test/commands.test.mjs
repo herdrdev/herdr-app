@@ -33,6 +33,7 @@ test('Herdr runs Plannotator commands in the Pi its terminal label names', { tim
     assert.equal(details.label.session, run.state.sessionId);
     assert.equal(details.label.token, 'string');
     assert.equal(details.label.request, path.resolve(here, '../request.mjs'));
+    assert.equal(details.label.hc, path.join(here, 'fixtures/hc'));
     assert.deepEqual(details.runs.map(r => [r.command, r.code]), [['review', 0], ['last', 0], ['other', 1]]);
     assert.match(details.runs[2].stderr, /Usage/);
     assert.deepEqual(details.ran, ['plannotator-review', 'plannotator-last']);

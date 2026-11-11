@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Starts a Plannotator command in the Pi of a herdr-core terminal on this
-// machine, for Herdr's tab bar: `request.mjs <terminal> <review|last>`.
+// machine, for Herdr's tab bar: `request.mjs <terminal> <review|last> [hc]`.
 // The terminal's `herdr.plannotator` label, which that Pi publishes, says
 // how to reach it; it counts only while that Pi is the terminal's foreground.
 import { execFileSync } from 'node:child_process';
@@ -13,9 +13,10 @@ export function reachable(terminal) {
     return label && label.pid === terminal.foreground?.pid ? label : null;
 }
 
-async function main([terminal, command]) {
-    if (!terminal || !COMMANDS.includes(command)) throw new Error(`Usage: request.mjs <terminal> <${COMMANDS.join('|')}>`);
-    const info = JSON.parse(execFileSync('hc', ['get', terminal, '--json'], { encoding: 'utf8', timeout: 5000 }));
+// `hc`: herdr-core's CLI, by path when the caller's PATH lacks it (the label's `hc`).
+async function main([terminal, command, hc = process.env.HC_BIN || 'hc']) {
+    if (!terminal || !COMMANDS.includes(command)) throw new Error(`Usage: request.mjs <terminal> <${COMMANDS.join('|')}> [hc]`);
+    const info = JSON.parse(execFileSync(hc, ['get', terminal, '--json'], { encoding: 'utf8', timeout: 5000 }));
     const label = reachable(info);
     if (!label) throw new Error('No Pi with the Herdr Plannotator integration runs in this terminal');
     const answer = await requestCommand(command, label);

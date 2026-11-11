@@ -86,8 +86,9 @@ and tunnel separately; this integration does not expose a remote port publicly.
 
 Herdr can also start a review in a Pi, as the person typing the command there
 would. In a herdr-core terminal the integration labels the terminal
-`herdr.plannotator` with its process ID, session, socket, token, Node binary
-and `request.mjs`. `node request.mjs <terminal> review|last`, run on that
+`herdr.plannotator` with its process ID, session, socket, token, Node binary,
+`request.mjs` and the path of `hc`. `node request.mjs <terminal> review|last
+[hc]`, run on that
 machine, reads the label with `hc get`, checks that its Pi is still the
 terminal's foreground process, and asks that Pi over its socket to run
 `/plannotator-review` or `/plannotator-last`. Pi runs the command at once, even

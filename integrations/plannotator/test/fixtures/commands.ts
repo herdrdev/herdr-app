@@ -25,8 +25,13 @@ export default function commands(pi: ExtensionAPI) {
       }
       const label = JSON.parse(labels()["herdr.plannotator"]);
       const runs = [];
+      // As Herdr runs it: a PATH without hc, and hc named by the label.
+      const bare = { ...process.env, PATH: "/usr/bin:/bin" };
+      const { execFile } = await import("node:child_process");
+      const run = (args: string[]) => new Promise<{ code: number; stderr: string }>(resolve =>
+        execFile(label.node, [request, ...args], { env: bare }, (error, _out, stderr) => resolve({ code: error ? (typeof error.code === "number" ? error.code : 1) : 0, stderr })));
       for (const command of ["review", "last", "other"]) {
-        const child = await pi.exec(process.execPath, [request, "t1", command]);
+        const child = await run(["t1", command, label.hc]);
         runs.push({ command, code: child.code, stderr: child.stderr.trim() });
       }
       for (let i = 0; i < 50 && ran.length < 2; i++) await new Promise(resolve => setTimeout(resolve, 100));
