@@ -738,11 +738,13 @@ export default class Settings extends View {
               });
     const primary = (id, label, f) =>
       div().id(id).px(12).py(5).rounded(7).cursor_pointer().bg(t.accent).text_color(t.accent_foreground).text_size(13).font_semibold().hover((s) => s.opacity(0.9)).on_click(f).child(label);
-    const app = !u.app.updates
-      ? ["A build from source: it updates with git, not here.", null]
-      : u.app.ready
-        ? [`${u.app.ready} is ready. Restart to switch now; it also switches when you quit.`, primary("st-app-update", "Restart to update", () => run("app.update"))]
-        : [result, check("st-check-app")];
+    const app = u.app.managed
+      ? [`Managed by ${u.app.managed}: update it there.`, null]
+      : !u.app.updates
+        ? ["A build from source: it updates with git, not here.", null]
+        : u.app.ready
+          ? [`${u.app.ready} is ready. Restart to switch now; it also switches when you quit.`, primary("st-app-update", "Restart to update", () => run("app.update"))]
+          : [result, check("st-check-app")];
     const c = u.core;
     const core = c.managed
       ? [`Managed by ${c.managed}: update it there.`, null]
