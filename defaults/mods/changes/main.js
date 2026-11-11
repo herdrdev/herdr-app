@@ -31,16 +31,27 @@ function diffRows(lines) {
   });
 }
 
+const repoCache = new Map();
+
 // Discovers git repositories: either the folder itself or nested repositories inside it.
 async function findGitRepos(root, on) {
   if (!root) return [];
+  const cacheKey = `${on || 'local'}:${root}`;
+  const hit = repoCache.get(cacheKey);
+  if (hit && (Date.now() - hit.time < 60000)) {
+    return hit.repos;
+  }
+
   // 1. Check if the root folder itself is a git repository or inside one
   const top = await exec("git", ["rev-parse", "--show-toplevel"], { cwd: root, on }).catch(() => null);
   if (top && top.code === 0 && top.stdout && top.stdout.trim()) {
-    return [top.stdout.trim().replace(/\\/g, "/")];
+    const repos = [top.stdout.trim().replace(/\\/g, "/")];
+    repoCache.set(cacheKey, { repos, time: Date.now() });
+    return repos;
   }
 
   // 2. Discover nested git repositories up to depth 2 or 3
+  let repos = [];
   if (!on && window()?.platform === "windows") {
     try {
       const script = "[Console]::OutputEncoding = [System.Text.UTF8Encoding]::new($false); & { param($p) @(Get-ChildItem -LiteralPath $p -Depth 2 -Directory -Hidden -Filter '.git' -ErrorAction SilentlyContinue | Where-Object { $_.FullName -notmatch '[\\\\/](\\.cache|node_modules|vendor)[\\\\/]' } | ForEach-Object { $_.Parent.FullName.Replace('\\', '/') }) | ConvertTo-Json -Compress } '" + root.replace(/['‘’‚‛]/g, "$&$&") + "'";
@@ -48,7 +59,7 @@ async function findGitRepos(root, on) {
       if (r && r.code === 0 && r.stdout && r.stdout.trim()) {
         const parsed = JSON.parse(r.stdout.trim());
         const list = Array.isArray(parsed) ? parsed : [parsed];
-        return [...new Set(list.filter(Boolean))];
+        repos = [...new Set(list.filter(Boolean))];
       }
     } catch (_) {}
   } else {
@@ -57,12 +68,13 @@ async function findGitRepos(root, on) {
       const r = await exec("sh", ["-c", script, "repos", root], { on }).catch(() => null);
       if (r && r.code === 0 && r.stdout && r.stdout.trim()) {
         const list = r.stdout.trim().split("\n").map(s => s.trim()).filter(Boolean);
-        return [...new Set(list)];
+        repos = [...new Set(list)];
       }
     } catch (_) {}
   }
 
-  return [];
+  repoCache.set(cacheKey, { repos, time: Date.now() });
+  return repos;
 }
 
 async function loadRepoChanges(repoRoot, on) {
@@ -70,10 +82,26 @@ async function loadRepoChanges(repoRoot, on) {
   const status = await git(["status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"]).catch(() => null);
   if (!status || status.code !== 0) return null;
 
+  const entries = status.stdout.split("\0").filter(Boolean);
+  const name = repoRoot.split("/").pop() || repoRoot;
+
+  // Fast path for clean repositories: skip diffs completely to save SSH/CPU cycles
+  if (entries.length === 0) {
+    return {
+      root: repoRoot,
+      name,
+      branch: "",
+      hasHead: true,
+      files: [],
+      limited: false,
+      add: 0,
+      del: 0,
+    };
+  }
+
   const head = await git(["rev-parse", "--verify", "HEAD"]).catch(() => null);
   const branchRes = await git(["rev-parse", "--abbrev-ref", "HEAD"]).catch(() => null);
   const branch = branchRes?.code === 0 ? branchRes.stdout.trim() : "";
-  const name = repoRoot.split("/").pop() || repoRoot;
 
   const stats = {};
   const results = (head && head.code === 0)
@@ -91,7 +119,6 @@ async function loadRepoChanges(repoRoot, on) {
   }
 
   const files = [];
-  const entries = status.stdout.split("\0").filter(Boolean);
   for (const entry of entries.slice(0, 1000)) {
     const xy = entry.slice(0, 2), path = entry.slice(3), fresh = xy === "??";
     const conflict = xy.includes("U") || xy === "AA" || xy === "DD";
@@ -133,7 +160,7 @@ export default class Changes extends View {
     this.input.on("focus", (_e, cx) => { this.typing = true; cx.notify(); });
     this.input.on("blur", (_e, cx) => { this.typing = false; cx.notify(); });
     this.refresh(cx);
-    cx.timer.every(10000, (cx) => this.refresh(cx));
+    cx.timer.every(25000, (cx) => this.refresh(cx));
   }
 
   watch(root, cx) {
@@ -182,7 +209,16 @@ export default class Changes extends View {
           return;
         }
 
-        const loaded = (await Promise.all(repoRoots.map(r => loadRepoChanges(r, on)))).filter(Boolean);
+        const loaded = [];
+        if (on) {
+          for (const r of repoRoots) {
+            const res = await loadRepoChanges(r, on);
+            if (res) loaded.push(res);
+          }
+        } else {
+          const results = await Promise.all(repoRoots.map(r => loadRepoChanges(r, on)));
+          loaded.push(...results.filter(Boolean));
+        }
         if (key() !== context) return;
 
         this.repos = loaded;
