@@ -7001,6 +7001,12 @@ impl Window {
         self.a11y.is_active()
     }
 
+    /// Activate accessibility in a synthetic test window without an OS client.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn activate_accessibility_for_test(&mut self) {
+        self.a11y = A11y::new(Arc::new(AtomicBool::new(true)), false, None);
+    }
+
     /// Debug representation of the last frame's accessibility information.
     pub fn debug_a11y_tree_json(&self) -> Option<String> {
         self.a11y.debug_tree_json()
