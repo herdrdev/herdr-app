@@ -1572,6 +1572,8 @@ fn needs_ligatures(text: &str, font: &Font) -> bool {
 #[derive(Clone, Copy, Debug)]
 struct CellMetrics {
     size: Size<Pixels>,
+    /// How far every glyph moves right in its cell, as Ghostty's `renderGlyph` (`glyph_x`).
+    glyph_x: Pixels,
     baseline: Pixels,
     underline: Pixels,
     underline_thickness: Pixels,
@@ -1641,10 +1643,12 @@ fn font_cell_metrics(ts: &WindowTextSystem, id: FontId, fs: f32, scale: f32) -> 
     let st_thick = st.filter(|m| m.thickness > 0).map_or(ul_thick, |m| m.thickness as f32 * unit);
     let ul_pos = ul.filter(|m| m.thickness != 0 || m.position != 0).map_or(-ul_thick, |m| m.position as f32 * unit);
     let st_pos = st.filter(|m| m.thickness != 0 || m.position != 0).map_or((ex * unit + st_thick) * 0.5, |m| m.position as f32 * unit);
-    let width = (' '..='~').filter_map(|c| ts.advance(id, px(fs * scale), c).ok())
-        .map(|s| f32::from(s.width)).reduce(f32::max).unwrap_or(fs * scale * 0.6).round().max(1.0);
+    let face_width = (' '..='~').filter_map(|c| ts.advance(id, px(fs * scale), c).ok())
+        .map(|s| f32::from(s.width)).reduce(f32::max).unwrap_or(fs * scale * 0.6);
+    let width = face_width.round().max(1.0);
     CellMetrics {
         size: size(px(width / scale), px(height / scale)),
+        glyph_x: px(glyph_x(width, face_width) / scale),
         baseline: px(baseline / scale),
         underline: px((baseline - ul_pos).round() / scale),
         underline_thickness: px(ul_thick.ceil().max(1.0) / scale),
@@ -1657,9 +1661,31 @@ pub fn cell_size(window: &Window) -> Size<Pixels> {
     cell_metrics(window).size
 }
 
-fn paint_cell_text(line: &ShapedLine, origin: Point<Pixels>, metrics: CellMetrics, window: &mut Window, cx: &mut App) {
+/// Ghostty's re-centring of glyphs in their cells (`renderGlyph`), in device
+/// pixels: half the cell's difference from the face's unrounded advance.
+/// CoreText (`font/face/coretext.zig`) keeps, when the cell is the narrower,
+/// only the part under a whole pixel, so glyphs keep their subpixel phase
+/// without sliding a pixel left; FreeType (`font/face/freetype.zig`) moves
+/// only into a wider cell, by whole pixels, to keep hinting.
+fn glyph_x(cell_width: f32, face_width: f32) -> f32 {
+    let dx = (cell_width - face_width) / 2.0;
+    if cfg!(target_os = "macos") {
+        if dx < 0.0 { dx - dx.trunc() } else { dx }
+    } else if dx > 0.0 {
+        dx.round()
+    } else {
+        0.0
+    }
+}
+
+/// Where a cell's shaped text paints from: its baseline on the cell's, moved across by `glyph_x`.
+fn text_origin(line: &ShapedLine, origin: Point<Pixels>, metrics: CellMetrics) -> Point<Pixels> {
     let gpui_baseline = (metrics.size.height - line.ascent - line.descent) / 2.0 + line.ascent;
-    let origin = origin + point(px(0.0), metrics.baseline - gpui_baseline);
+    origin + point(metrics.glyph_x, metrics.baseline - gpui_baseline)
+}
+
+fn paint_cell_text(line: &ShapedLine, origin: Point<Pixels>, metrics: CellMetrics, window: &mut Window, cx: &mut App) {
+    let origin = text_origin(line, origin, metrics);
     let _ = line.paint(origin, metrics.size.height, TextAlign::Left, None, window, cx);
 }
 
@@ -3158,6 +3184,60 @@ mod tests {
         for ((index, x), glyph) in original.iter().zip(&glyphs) {
             if *index < 3 { assert_eq!(glyph.position.x - glyphs[0].position.x, *x - original[0].1); }
             else { assert_eq!(glyph.position.x, px(8.)); }
+        }
+    }
+
+    /// Ghostty's `renderGlyph` move, in device pixels: half the cell's difference
+    /// from the face; CoreText keeps only the part under a whole pixel when the cell
+    /// is narrower, FreeType moves only into a wider cell, by whole pixels.
+    #[test]
+    fn glyph_x_recentres_glyphs_as_ghostty() {
+        // (cell, face, CoreText, FreeType), device px
+        for (cell, face, core_text, free_type) in [
+            (7.0, 7.2, -0.1, 0.0),   // JetBrains Mono 12 pt at 1x
+            (14.0, 14.4, -0.2, 0.0), // and at 2x
+            (8.0, 8.0, 0.0, 0.0),
+            (7.0, 9.6, -0.3, 0.0),   // -1.3: the whole pixel is dropped
+            (8.0, 7.6, 0.2, 0.0),    // a wider cell: all the way, or the nearest whole pixel
+            (9.0, 7.2, 0.9, 1.0),
+        ] {
+            let want = if cfg!(target_os = "macos") { core_text } else { free_type };
+            let got = super::glyph_x(cell, face);
+            assert!((got - want).abs() < 1e-5, "cell {cell}, face {face}: {got}, want {want}");
+        }
+    }
+
+    /// Text painted on a cell starts `glyph_x` across from it, every glyph of the line
+    /// with it (their cell positions come from `with_cell_positions`). gpui places a
+    /// glyph on the nearest quarter device pixel, ties toward zero (`Window::paint_glyph`),
+    /// so JetBrains Mono 12 pt's -0.1 px CoreText move disappears at 1x and is -0.25
+    /// device px at 2x, as in Ghostty.
+    #[test]
+    fn cell_text_paints_glyph_x_across_from_its_cell() {
+        use super::*;
+        let quarter = |v: f32| (v.abs() * 4.0 - 0.5).ceil().copysign(v) / 4.0;
+        let line = ShapedLine::default();
+        for (scale, device) in [(1.0, 0.0), (2.0, -0.25)] {
+            let metrics = CellMetrics {
+                size: size(px(7.0), px(17.0)),
+                glyph_x: px(glyph_x(7.0 * scale, 7.2 * scale) / scale),
+                baseline: px(13.0),
+                underline: px(15.0),
+                underline_thickness: px(1.0),
+                strike: px(9.0),
+                strike_thickness: px(1.0),
+            };
+            for column in [0.0, 1.0, 5.0] {
+                let cell = point(px(7.0 * column), px(34.0));
+                let at = text_origin(&line, cell, metrics);
+                assert!(f32::from(at.x - cell.x - metrics.glyph_x).abs() < 1e-4, "column {column} at {scale}x: {:?}", at.x);
+                if cfg!(target_os = "macos") {
+                    let placed = quarter(f32::from(at.x) * scale) - quarter(f32::from(cell.x) * scale);
+                    assert_eq!(placed, device, "column {column} at {scale}x");
+                } else {
+                    assert_eq!(at.x, cell.x, "FreeType keeps glyphs on a cell narrower than the face");
+                }
+            }
         }
     }
 
