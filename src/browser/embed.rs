@@ -478,8 +478,15 @@ mod win {
             // Zoom can change the frame; a theme change, the colors at its edges.
             if tick % 8 == 1 {
                 let (crop, edges) = cx.background_executor().spawn(async move {
-                    let crop = measure(child as HWND);
-                    (crop, edge_colors(child as HWND, crop))
+                    let mut crop = measure(child as HWND);
+                    let edges = edge_colors(child as HWND, crop).map(|(colors, border)| {
+                        crop.left += border;
+                        crop.top += border;
+                        crop.right += border;
+                        crop.bottom += border;
+                        colors
+                    });
+                    (crop, edges)
                 }).await;
                 let mut app = state.borrow_mut();
                 if edges.is_some() && app.edges != edges {
@@ -697,7 +704,8 @@ mod win {
     /// left and bottom left of what the pane shows (VS Code: title bar and
     /// status bar), as 0xRRGGBB. A window region has no antialiasing, so the
     /// pane paints these colors behind the window to blend its corners.
-    fn edge_colors(hwnd: HWND, crop: Crop) -> Option<[u32; 2]> {
+    /// Also the width of an accent border the window draws inside its frame.
+    fn edge_colors(hwnd: HWND, crop: Crop) -> Option<([u32; 2], i32)> {
         use windows_sys::Win32::Graphics::Gdi::*;
         unsafe {
             let r = screen_rect(hwnd);
@@ -708,12 +716,22 @@ mod win {
             let bitmap = CreateCompatibleBitmap(screen, w, h);
             let old = SelectObject(dc, bitmap);
             let ok = windows_sys::Win32::Storage::Xps::PrintWindow(hwnd, dc, PW_RENDERFULLCONTENT) != 0;
-            let x = crop.left + 3;
+            // Inside the window's own 1-2 px accent border, which VS Code
+            // draws around an unmaximized window.
+            let inset = 8;
+            let x = crop.left + inset;
             let pick = |y: i32| {
                 let c = GetPixel(dc, x, y);
                 (c & 0xff) << 16 | (c & 0xff00) | (c >> 16 & 0xff)
             };
-            let colors = ok.then(|| [pick(crop.top + 3), pick(h - crop.bottom - 4)]);
+            let colors = ok.then(|| {
+                // The accent border: leading pixels at mid-height that differ
+                // from the color just inside them.
+                let y = (crop.top + h - crop.bottom) / 2;
+                let inside = GetPixel(dc, crop.left + inset, y);
+                let border = (0..4).take_while(|i| GetPixel(dc, crop.left + i, y) != inside).count() as i32;
+                ([pick(crop.top + inset), pick(h - crop.bottom - 1 - inset)], border)
+            });
             SelectObject(dc, old);
             DeleteObject(bitmap);
             DeleteDC(dc);
