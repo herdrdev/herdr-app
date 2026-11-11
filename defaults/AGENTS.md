@@ -1060,8 +1060,11 @@ All of it is in `herdr.d.ts`. In short:
   `cx.spawn(async (cx) => { for (;;) { await watchFolder(dir); this.reload(); cx.notify(); } })`.
 - `notify({ ..., action: { name, args } })`: the toast runs the command when clicked.
 - This copy: `props()`, `shared(key)` / `setShared(key, value)` (every mod
-  sees it; setting re-renders all), `nextCommand()` (key commands for this
+  sees it; setting re-renders all; values survive a restart), `nextCommand()` (key commands for this
   mod: `cx.spawn(async (cx) => { for (;;) { const c = await nextCommand(); …; cx.notify(); } })`).
+- A pane's mod copy starts the first time its tab is shown, then lives while
+  the pane does. After a restart, what a copy records in `init` (such as its
+  `shared()` entry) appears only once its tab has been shown again.
 
 Mods are trusted code: commands and network access (including `fetch`) are unrestricted.
 Other built-ins: `localStorage` (per mod copy), `console.log`, `fetch`,
