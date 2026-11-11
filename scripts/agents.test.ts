@@ -104,6 +104,35 @@ function textOf(node: any): string {
   return typeof node === "string" ? node : (node?.children ?? []).map(textOf).join(" ");
 }
 
+test("a failed agent check keeps cached launchable agents and shows an error instead of missing agents", async () => {
+  const menuSource = (await readFile(new URL("../defaults/mods/new-menu/main.js", import.meta.url), "utf8"))
+    .replace(/^import .*;\n/gm, "").replace("export default class NewMenu", "class NewMenu");
+  const cached = [
+    { key: "claude", name: "Claude Code", run: ["claude"], installed: true },
+    { key: "codex", name: "Codex", run: ["codex"], installed: false },
+  ];
+  for (const agents of [[], cached]) {
+    const writes: unknown[] = [];
+    const globals = {
+      View: class {}, spaces: () => [], shared: () => ({ "": agents }), setShared: (...args: unknown[]) => writes.push(args),
+      knownAgents: async () => { throw Error("shell failed"); },
+      theme: () => ({}), props: () => ({}), keys: () => [], window: () => ({ platform: "macos" }), panes: () => [],
+      div: element, svg: element, image: element, h_flex: element, v_flex: element,
+    };
+    const NewMenu = new Function(...Object.keys(globals), `${menuSource}; return NewMenu;`)(...Object.values(globals));
+    const menu = new NewMenu();
+    let task: Promise<void>;
+    menu.init({}, { focus_handle: () => ({ focus() {} }), spawn: (run: (cx: unknown) => Promise<void>) => { task = run({ notify() {} }); } });
+    await task!;
+    const text = textOf(menu.render().node);
+    expect(text).toContain("Could not check installed agents");
+    expect(text).not.toContain("not installed");
+    expect(text).not.toContain("Codex");
+    if (agents.length) expect(text).toContain("Claude Code");
+    expect(writes).toEqual([]);
+  }
+});
+
 for (const sort of ["priority", "grouped"]) test(`${sort} render reads panes once and refreshes labels on the next render`, () => {
   const list = Array.from({ length: 64 }, (_, i) => ({
     address: `t${i}`, pane: `p${i}`, tab: `tab${i}`, space: "s1", space_name: "Project",

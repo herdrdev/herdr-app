@@ -1,5 +1,45 @@
 # Herdr changelog
 
+## [0.1.15] - 2026-11-10
+
+### New
+- **Terminal rows are as tall as in Ghostty.** Herdr used to add about 15% extra space to every line, so the same font looked looser than in other terminals. Rows are now sized from the font itself, at every zoom and font size, and more lines fit on screen. (#66)
+- **A layout can choose the mod that shows notifications:** `"toast": "<mod>"` in the layout. The shipped toast is unchanged. (#364, thanks @ngotchac)
+- Mods can scroll a normal scroll area to one of its children: `ScrollHandle.new()`, `.track_scroll(handle)` and `handle.scroll_to_item(index)`.
+- Mods: `knownAgents()` now rejects when the check itself fails, instead of reporting every agent as not installed.
+
+### Fixed
+- **On macOS, files and screenshots can be dragged into a terminal.** Dropping a file from Finder works right after typing, and the floating screenshot thumbnail (Cmd+Shift+4) attaches to Claude Code and other programs. (#654, #709, thanks @EliaTogni and @rqres)
+- **On macOS, the + menu no longer shows every agent as "not installed" right after login or a restart,** and `herdr-app check` works then too. When Herdr can't check, it says so instead of calling agents missing.
+- **On macOS, reopen older terminals once.** Terminals opened before herdr-core 0.1.20 can still end when Herdr quits, and this update quits Herdr once. Once herdr-core is 0.1.20 or newer (Settings > Updates shows it), close and reopen those terminals, or restart your Mac, and they are safe from then on.
+- **On Linux, Herdr opens on a fresh Ubuntu 26.04 or Fedora 45.** It no longer needs the X11 keyboard library on Wayland. (#839)
+- **A terminal printing a lot of output no longer freezes the whole window.** (#748)
+- **An agent you come back to leaves "done"** in the agents list.
+- With many tabs, the tab bar scrolls to the active tab. (#802)
+- Coming back to a terminal that another device (your phone) resized takes its size back when you click it or switch to its tab or space, not only when you type.
+- The Spaces sidebar groups worktrees right away in large repositories (seconds before).
+- The Open worktree dialog takes the keyboard after a slow first load. (#798, thanks @ilstar)
+- Creating a worktree on this machine while a terminal on another machine is focused no longer fails and leaves the space out of the sidebar.
+- Playing a GIF or other animated image in a terminal uses far less memory, and gives it back when the image leaves the screen. (#560)
+- Settings: the font list stays inside the window, and Add machine shows login instructions you can copy.
+- Layout terminal blocks stay in place when the connection to their terminal drops. (#761)
+- Dragging a block that is squeezed very small no longer crashes Herdr.
+- On Windows, clicking into an ssh or tmux terminal no longer sends a stray drag that changes its selection. (#759)
+- Ctrl and Alt held during a mouse click or scroll, and Shift during a scroll, reach programs that track the mouse. Shift+click still selects text.
+- The picker's earlier rows can be reached with the keyboard.
+- The wide CJK space (U+3000) is drawn when the font has a glyph for it. (#777)
+- A sub-agent on another machine shows under its parent in the agents list.
+- A bottom pane header draws its divider above the header. (#712, thanks @Zihao-Qi)
+- An agent's spinner after a title prefix no longer shows in its name. (#626, thanks @namastex888)
+- An agent title that is a folder no longer replaces the tab's name. (#740, thanks @chasereyn)
+- Clicking the "Esc" hint in a dialog closes it. (#690, thanks @VinhLe1410)
+- Mod icons load when the mod folder is a link. (#427, thanks @ngotchac)
+- The Changes diff keeps tab indentation. (#366, thanks @sundarshahi)
+- From this version on, Herdr keeps space and tab details that a newer Herdr saved on the same machine, and saved files keep their permissions. (#729, #722, thanks @abhijit-s)
+- On Windows, updates apply when Herdr was started from its install folder, file links with encoded characters open, and Add machine lists every host from a wildcard `Include`. (#673, #663, #672, thanks @sundarshahi)
+- On KDE Plasma, the Herdr icon shows right after install. (#703, thanks @okurmustafa)
+
+
 ## [0.1.14] - 2026-11-08
 
 ### New

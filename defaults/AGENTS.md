@@ -808,7 +808,7 @@ has 120 programs (agents, editors, runtimes, tools, databases, infra);
   `"claude": { "run": ["my-claude"] }` or add
   `"claude-alt": { "name": "Claude (alt)", "icon": "icons/claude.svg", "run": ["my-claude-alt"] }`
   inside `programs`. Use programs or shell functions, not aliases (the launcher
-  does not expand them). On macOS the menu launcher loads login profiles before
+  does not expand them). On macOS both checks and the menu launcher load login profiles before
   running the agent and leaves an interactive login shell when it ends.
   Codex starts as `codex --no-daemon`: a shared Codex daemon would make later
   sessions use the first terminal's identity and stop with it.
@@ -1041,7 +1041,7 @@ All of it is in `herdr.d.ts`. In short:
   `knownAgents({ on })`: the agents people can start (programs.json's
   `run`), most picked first, each `installed` or not there (asked of the
   shell agents start in; a remote Unix machine's login/interactive shell when supported);
-  start one with `argv: agent.run`.
+  rejects if the check fails (failed checks are not cached); start one with `argv: agent.run`.
   `pickFolder({ prompt })`: the system's folder picker (here only),
   resolves with the folder or null.
 - Files: `readTextFile(path, { on })` (here, or on that machine),

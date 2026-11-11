@@ -1748,7 +1748,16 @@ struct CellMetrics {
 fn cell_metrics(window: &Window) -> CellMetrics {
     let ts = window.text_system();
     let id = ts.resolve_font(&cell_font(false, false));
-    font_cell_metrics(ts, id, crate::settings::font_size(), window.scale_factor())
+    let (fs, scale) = (crate::settings::font_size(), window.scale_factor());
+    // Asked for on every frame of every terminal; the answer only changes with the font, size or scale.
+    thread_local!(static LAST: Cell<Option<((FontId, u32, u32), CellMetrics)>> = const { Cell::new(None) });
+    let key = (id, fs.to_bits(), scale.to_bits());
+    if let Some((_, metrics)) = LAST.get().filter(|(last, _)| *last == key) {
+        return metrics;
+    }
+    let metrics = font_cell_metrics(ts, id, fs, scale);
+    LAST.set(Some((key, metrics)));
+    metrics
 }
 
 fn font_cell_metrics(ts: &WindowTextSystem, id: FontId, fs: f32, scale: f32) -> CellMetrics {
@@ -1799,7 +1808,7 @@ fn font_cell_metrics(ts: &WindowTextSystem, id: FontId, fs: f32, scale: f32) -> 
     let ul_pos = ul.filter(|m| m.thickness != 0 || m.position != 0).map_or(-ul_thick, |m| m.position as f32 * unit);
     let st_pos = st.filter(|m| m.thickness != 0 || m.position != 0).map_or((ex * unit + st_thick) * 0.5, |m| m.position as f32 * unit);
     let width = (' '..='~').filter_map(|c| ts.advance(id, px(fs * scale), c).ok())
-        .map(|s| f32::from(s.width)).fold(0.0_f32, f32::max).round().max(1.0);
+        .map(|s| f32::from(s.width)).reduce(f32::max).unwrap_or(fs * scale * 0.6).round().max(1.0);
     CellMetrics {
         size: size(px(width / scale), px(height / scale)),
         baseline: px(baseline / scale),

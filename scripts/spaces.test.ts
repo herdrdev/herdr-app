@@ -332,3 +332,22 @@ test("no reconciliation without a rendered sidebar", () => {
   h.flush();
   expect(h.order()).toEqual(["main", "topic"]);
 });
+
+test("git checks run a few spaces at a time, not every space at once", async () => {
+  let running = 0, most = 0;
+  const execGit = async () => {
+    running++;
+    most = Math.max(most, running);
+    await new Promise((resolve) => setTimeout(resolve, 1));
+    running--;
+    return { code: 0, stdout: "/repo\n", stderr: "" };
+  };
+  const h = harness([], new Map(), [], execGit);
+  Object.assign(h.view, { git: {}, checked: {}, unsure: new Set(), pending: new Set(), watching: new Set() });
+  h.view.watch = () => {};
+  const keys = Array.from({ length: 40 }, (_, i) => JSON.stringify([null, `/repo/${i}`]));
+  h.view.refreshGit(keys, h.cx);
+  await Promise.all(h.tasks);
+  expect(Object.values(h.view.git).filter(Boolean)).toHaveLength(40);
+  expect(most).toBeLessThanOrEqual(12);
+});
