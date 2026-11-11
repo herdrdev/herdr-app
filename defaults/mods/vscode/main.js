@@ -26,7 +26,7 @@ export default class VsCode extends View {
       let last = "";
       for (;;) {
         await cx.sleep(500);
-        const now = `${this.app.status()}|${this.app.error()}`;
+        const now = `${this.app.status()}|${this.app.error()}|${this.app.edgeColors()}`;
         if (now !== last) { last = now; cx.notify(); }
       }
     });
@@ -55,7 +55,14 @@ export default class VsCode extends View {
         div().id("reopen").px(10).py(5).rounded(5).bg(t.hover).text_color(t.foreground).cursor_pointer()
           .on_click((_event, cx) => { this.app.reopen(); cx.notify(); })
           .child("Open again")));
+    // VS Code's own title and status bar colors behind its window, so the
+    // corners the pane's rounded frame cuts away blend into it.
+    const [top, bottom] = this.app.edgeColors() || [t.surface, t.surface];
+    const backdrop = v_flex().absolute().size_full()
+      .child(div().flex_1().bg(top))
+      .child(div().flex_1().bg(bottom));
     return div().relative().size_full().bg(t.surface)
+      .child(backdrop)
       .child(message)
       .child(NativeApp(this.app).size_full());
   }
