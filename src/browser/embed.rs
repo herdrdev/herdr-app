@@ -207,6 +207,15 @@ fn windows_folder(target: &str) -> anyhow::Result<String> {
     }
 }
 
+impl Drop for NativeApp {
+    fn drop(&mut self) {
+        // A mod that restarts (a reload) makes a new state at once: it takes
+        // the window back within a moment, or the window closes.
+        #[cfg(windows)]
+        if let Some(embedded) = self.embedded.take() { win::orphan(&self.app, &self.target, embedded); }
+    }
+}
+
 impl NativeApp {
     fn layout(&mut self, bounds: Bounds<Pixels>, window: &mut Window) {
         self.hitbox = Some(window.insert_hitbox(bounds, HitboxBehavior::Normal).id);
@@ -427,6 +436,19 @@ mod win {
 
     thread_local! {
         static QUIT_HOOKED: Cell<bool> = const { Cell::new(false) };
+        /// Windows of dropped states, by program and target, until a new
+        /// state takes them or their time is up.
+        static ORPHANS: std::cell::RefCell<Vec<(String, String, Embedded, Instant)>> = const { std::cell::RefCell::new(Vec::new()) };
+    }
+
+    /// How long a dropped state's window waits for a restarted mod.
+    const ORPHAN_GRACE: Duration = Duration::from_secs(2);
+
+    /// Keep a dropped state's window, hidden, for a state that takes it soon.
+    /// Runs inside App updates: posted calls only.
+    pub(super) fn orphan(app: &str, target: &str, embedded: Embedded) {
+        unsafe { ShowWindowAsync(embedded.container, SW_HIDE) };
+        ORPHANS.with_borrow_mut(|o| o.push((app.to_owned(), target.to_owned(), embedded, Instant::now() + ORPHAN_GRACE)));
     }
 
     pub(super) fn start(state: &State, window: &mut Window, cx: &mut App) {
@@ -441,15 +463,24 @@ mod win {
             // Quitting Herdr closes every adopted window as its own close
             // button would. Only posted messages: this runs inside an App update.
             cx.on_app_quit(|_| {
+                let close = |e: Embedded| {
+                    let e = std::mem::ManuallyDrop::new(e);
+                    unsafe { PostMessageW(e.child, WM_CLOSE, 0, 0) };
+                };
                 super::APPS.with_borrow(|apps| {
                     for app in apps.iter().filter_map(std::rc::Weak::upgrade) {
-                        if let Some(e) = app.borrow_mut().embedded.take() {
-                            let e = std::mem::ManuallyDrop::new(e);
-                            unsafe { PostMessageW(e.child, WM_CLOSE, 0, 0) };
-                        }
+                        if let Some(e) = app.borrow_mut().embedded.take() { close(e); }
                     }
                 });
+                for (_, _, e, _) in ORPHANS.take() { close(e); }
                 async {}
+            }).detach();
+            // Close the windows nobody took back.
+            cx.spawn(async |cx| loop {
+                cx.background_executor().timer(Duration::from_millis(500)).await;
+                let now = Instant::now();
+                let expired: Vec<_> = ORPHANS.with_borrow_mut(|o| o.extract_if(.., |(_, _, _, until)| *until <= now).collect());
+                drop(expired);
             }).detach();
         }
         let host = match HasWindowHandle::window_handle(window).map(|h| h.as_raw()) {
@@ -464,14 +495,9 @@ mod win {
         // window its earlier copy still holds for the same target: VS Code
         // would only bring that window forward instead of opening another.
         if let Some(embedded) = take_over(state, &app, &target, host) {
-            let weak = Rc::downgrade(state);
             let child = embedded.child as usize;
-            {
-                let mut app = state.borrow_mut();
-                app.opening = false;
-                app.embedded = Some(embedded);
-                app.status = "Hidden while its pane is covered.".into();
-            }
+            show(state, embedded);
+            let weak = Rc::downgrade(state);
             window.spawn(cx, async move |cx| {
                 let _ = cx.update(|window, _| window.refresh());
                 watch_loop(weak, generation, child, cx).await;
@@ -485,11 +511,20 @@ mod win {
             let starting = match &launch.fork_repo {
                 Some(folder) => {
                     while STARTING.get() {
-                        let Some(state) = weak.upgrade() else { return };
-                        if state.borrow().generation != generation { state.borrow_mut().opening = false; return; }
+                        let Some(state) = wanted(&weak, generation) else { return };
                         state.borrow_mut().status = "Waiting for another Fork to start…".into();
                         drop(state);
                         cx.background_executor().timer(Duration::from_millis(100)).await;
+                    }
+                    // A start whose pane went away meanwhile left its window.
+                    if let Some(embedded) = take_orphan(&app, &target) {
+                        let Some(state) = wanted(&weak, generation) else { orphan(&app, &target, embedded); return };
+                        let child = embedded.child as usize;
+                        show(&state, moved_to(embedded, host));
+                        drop(state);
+                        let _ = cx.update(|window, _| window.refresh());
+                        watch_loop(weak, generation, child, cx).await;
+                        return;
                     }
                     let starting = Starting::new();
                     let folder = folder.clone();
@@ -500,8 +535,7 @@ mod win {
                 }
                 None => None,
             };
-            let Some(state) = weak.upgrade() else { return };
-            if state.borrow().generation != generation { state.borrow_mut().opening = false; return; }
+            let Some(state) = wanted(&weak, generation) else { return };
             let before = program_windows(&launch);
             let foreground = unsafe { GetForegroundWindow() };
             let mut child = match run(&launch) {
@@ -516,11 +550,16 @@ mod win {
             state.borrow_mut().status = "Waiting for its window…".into();
             drop(state);
             let opened = Instant::now();
+            // A pane that goes away (a mod restarting) leaves a started
+            // process of its own: its window waits for the pane's next state.
+            let mut abandoned = false;
             // Adopt the new window.
             let found = loop {
                 cx.background_executor().timer(Duration::from_millis(100)).await;
-                let Some(state) = weak.upgrade() else { return };
-                if state.borrow().generation != generation { state.borrow_mut().opening = false; return; }
+                if !abandoned && wanted(&weak, generation).is_none() {
+                    if !launch.own_process { return; }
+                    abandoned = true;
+                }
                 let mut now = program_windows(&launch);
                 if launch.own_process { now.retain(|&hwnd| window_pid(hwnd) == pid); }
                 if let Some(&hwnd) = now.iter().find(|h| !before.contains(h)) { break hwnd; }
@@ -535,28 +574,29 @@ mod win {
                     _ => false,
                 };
                 if failed || opened.elapsed() > Duration::from_secs(20) {
-                    let mut app = state.borrow_mut();
-                    app.opening = false;
-                    app.error = Some(format!("{} did not open a window", launch.program.file_name().unwrap_or_default().to_string_lossy()));
-                    let _ = cx.update(|window, _| window.refresh());
+                    if !abandoned && let Some(state) = weak.upgrade() {
+                        let mut app = state.borrow_mut();
+                        app.opening = false;
+                        app.error = Some(format!("{} did not open a window", launch.program.file_name().unwrap_or_default().to_string_lossy()));
+                        let _ = cx.update(|window, _| window.refresh());
+                    }
                     return;
                 }
             };
-            drop(starting);
-            let Some(state) = weak.upgrade() else { return };
             let mut embedded = embed(found, host);
             let child = found as usize;
             // The container stays hidden until the crop is known.
             embedded.crop = cx.background_executor().spawn(async move { measure(child as HWND) }).await;
-            {
-                let mut app = state.borrow_mut();
-                app.opening = false;
-                app.embedded = Some(embedded);
-                app.status = "Hidden while its pane is covered.".into();
-            }
+            let state = if abandoned { None } else { wanted(&weak, generation) };
+            let Some(state) = state else { orphan(&app, &target, embedded); return };
+            drop(starting);
+            show(&state, embedded);
             let _ = cx.update(|window, _| window.refresh());
             apply(&state);
             focus::give(found);
+            // Only the pane holds its state: closing the pane drops it, and
+            // with it the window.
+            drop(state);
             watch_loop(weak, generation, child, cx).await;
         }).detach();
     }
@@ -600,27 +640,58 @@ mod win {
         app.error = Some(error);
     }
 
-    /// The window another state of the same program and target holds, moved
-    /// into this host. That state ends as closed.
+    /// The state, while it still wants this start's window. A state that
+    /// moved on stops opening.
+    fn wanted(weak: &std::rc::Weak<std::cell::RefCell<super::NativeApp>>, generation: u64) -> Option<State> {
+        let state = weak.upgrade()?;
+        if state.borrow().generation != generation {
+            state.borrow_mut().opening = false;
+            return None;
+        }
+        Some(state)
+    }
+
+    fn show(state: &State, embedded: Embedded) {
+        let mut app = state.borrow_mut();
+        app.opening = false;
+        app.embedded = Some(embedded);
+        app.status = "Hidden while its pane is covered.".into();
+    }
+
+    /// The window of the same program and target that a dropped state left or
+    /// another state holds, moved into this host. That state ends as closed.
     fn take_over(state: &State, app: &str, target: &str, host: HWND) -> Option<Embedded> {
-        let other = super::APPS.with_borrow(|apps| {
-            apps.iter().filter_map(std::rc::Weak::upgrade).find(|other| {
-                if Rc::ptr_eq(other, state) { return false; }
-                let o = other.borrow();
-                // One pane per project: the newest one shows its window.
-                o.app == app && o.target == target && o.embedded.is_some()
-            })
-        })?;
-        let mut o = other.borrow_mut();
-        let mut embedded = o.embedded.take()?;
-        o.generation += 1;
-        o.closed = true;
-        o.status = "Moved to another pane.".into();
-        drop(o);
+        let embedded = take_orphan(app, target).or_else(|| held(state, app, target))?;
+        Some(moved_to(embedded, host))
+    }
+
+    fn take_orphan(app: &str, target: &str) -> Option<Embedded> {
+        ORPHANS.with_borrow_mut(|o| o.iter().position(|(a, t, _, _)| a == app && t == target).map(|i| o.remove(i).2))
+    }
+
+    fn moved_to(mut embedded: Embedded, host: HWND) -> Embedded {
         embedded.applied = None;
         unsafe {
             if GetParent(embedded.container) != host { SetParent(embedded.container, host); }
         }
+        embedded
+    }
+
+    /// The window another live state of the same program and target holds,
+    /// taken from it. One pane per project: the newest one shows its window.
+    fn held(state: &State, app: &str, target: &str) -> Option<Embedded> {
+        let other = super::APPS.with_borrow(|apps| {
+            apps.iter().filter_map(std::rc::Weak::upgrade).find(|other| {
+                if Rc::ptr_eq(other, state) { return false; }
+                let o = other.borrow();
+                o.app == app && o.target == target && o.embedded.is_some()
+            })
+        })?;
+        let mut o = other.borrow_mut();
+        let embedded = o.embedded.take()?;
+        o.generation += 1;
+        o.closed = true;
+        o.status = "Moved to another pane.".into();
         Some(embedded)
     }
 
