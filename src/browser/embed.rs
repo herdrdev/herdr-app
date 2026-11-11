@@ -490,7 +490,6 @@ mod win {
                 }).await;
                 let mut app = state.borrow_mut();
                 if edges.is_some() && app.edges != edges {
-                    tracing::debug!(edges = ?edges.map(|e| e.map(|c| format!("#{c:06x}"))), ?crop, "native app edges");
                     app.edges = edges;
                     drop(app);
                     let _ = cx.update(|window, _| window.refresh());
