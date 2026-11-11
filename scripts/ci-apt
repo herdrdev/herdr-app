@@ -5,7 +5,7 @@
 # signature-checked whichever mirror serves them.
 set -euo pipefail
 
-apt=(-o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o APT::Update::Error-Mode=any)
+apt=(-o Acquire::ForceIPv4=true -o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o APT::Update::Error-Mode=any)
 
 install() {
   # timeout runs under sudo: sudo does not pass on a signal from its own caller.
