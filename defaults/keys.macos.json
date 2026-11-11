@@ -3,6 +3,7 @@
     "cmd-q": "app.quit",
     "cmd-h": "app.hide",
     "cmd-alt-h": "app.hide_others",
+    "cmd-m": "window.minimize",
     "cmd-t": "tab.new",
     "cmd-w": "tab.close",
     "ctrl-tab": "tab.next",
