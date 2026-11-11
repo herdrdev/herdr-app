@@ -3,7 +3,7 @@
 ## [Unreleased]
 
 ### Fixed
-- Source Control's changed-file diffs render on macOS and allow line and hunk selection; clicks from an older diff are ignored after refresh. (#563, thanks @photojupi)
+- Source Control's changed-file diffs render on macOS and Windows and allow line and hunk selection; clicks from an older diff are ignored after refresh. (#563, thanks @photojupi)
 
 ## [0.1.15] - 2026-11-10
 
