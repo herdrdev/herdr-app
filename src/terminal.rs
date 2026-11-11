@@ -89,6 +89,8 @@ struct Grid {
     vt_cell: (u32, u32),
     /// The colors and device-pixel cell size the core was last told.
     told_display: Option<DisplayFacts>,
+    /// Back on screen: another window may have sized it meanwhile, so the next fit tells the core.
+    shown_again: bool,
     /// Top-left of the cell grid in window coordinates, from the last paint.
     origin: Point<Pixels>,
     buttons_down: Vec<MouseButton>,
@@ -151,6 +153,8 @@ pub struct TerminalView {
     pending_search_nav: Option<bool>,
     search_task: Option<Task<()>>,
     attach_deadline: Instant,
+    /// Not in the window's space: attaches leave the size to the windows showing it.
+    pub resumed: bool,
     _render_hold: Option<(Instant, Task<()>)>,
     _reader: Option<Task<()>>,
 }
@@ -218,7 +222,12 @@ impl Grid {
         // Before the size, so a program woken by it asks for the new cell.
         self.refresh_theme(&vt::theme(), dev);
         self.ready_to_attach();
+        // Kept until attached: a resumed attach doesn't set the size.
+        let shown_again = self.channel.is_some() && std::mem::take(&mut self.shown_again);
         if (cols, rows) == (self.vt.cols, self.vt.rows) && dev == self.vt_cell {
+            if shown_again && let Some(chan) = self.channel {
+                self.core.resize(chan, cols, rows);
+            }
             return;
         }
         self.vt.resize(cols, rows, dev.0, dev.1);
@@ -280,6 +289,7 @@ impl TerminalView {
                 scale: 1.0,
                 vt_cell: (9, 18),
                 told_display: None,
+                shown_again: false,
                 origin: Point::default(),
                 buttons_down: Vec::new(),
                 images: HashMap::new(),
@@ -304,6 +314,7 @@ impl TerminalView {
             pending_search_nav: None,
             search_task: None,
             attach_deadline,
+            resumed: false,
             _render_hold: None,
             _reader: None,
         };
@@ -368,14 +379,14 @@ impl TerminalView {
                     }
                 }).await;
             }
-            let Ok((cols, rows, facts)) = this.update(cx, |this, _| {
+            let Ok((cols, rows, facts, resumed)) = this.update(cx, |this, _| {
                 let mut g = this.grid.borrow_mut();
                 g.ready_to_attach();
                 let cell = device_cell(g.cell, g.scale);
                 let facts = display_update(&mut g.told_display, &vt::theme(), cell).unwrap();
-                (g.vt.cols, g.vt.rows, facts)
+                (g.vt.cols, g.vt.rows, facts, this.resumed)
             }) else { return };
-            let attached = cx.background_executor().spawn(async move { core.attach(&address, cols, rows, facts) }).await;
+            let attached = cx.background_executor().spawn(async move { core.attach(&address, cols, rows, facts, resumed) }).await;
             let Ok(Some(rx)) = this.update(cx, |this, cx| this.attached(attached, (cols, rows), cx)) else {
                 return;
             };
@@ -604,7 +615,10 @@ impl TerminalView {
 
     /// The window puts this terminal on screen in the frame it's building.
     pub fn mark_shown(&self) {
-        self.shown_in.set(FRAME.load(Ordering::Relaxed));
+        let frame = FRAME.load(Ordering::Relaxed);
+        if self.shown_in.replace(frame) + 1 < frame {
+            self.grid.borrow_mut().shown_again = true;
+        }
     }
 
     /// A hidden pane cannot render its focus loss.

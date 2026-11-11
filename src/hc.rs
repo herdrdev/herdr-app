@@ -491,10 +491,10 @@ impl Core {
         Ok((channel, rx, result))
     }
 
-    pub fn attach(&self, terminal: &str, cols: u16, rows: u16, display: Value) -> Result<Attached> {
+    pub fn attach(&self, terminal: &str, cols: u16, rows: u16, display: Value, resumed: bool) -> Result<Attached> {
         let result = self.call(
             "terminal.attach",
-            json!({"terminal": terminal, "cols": cols, "rows": rows, "history": 2000, "display": display}),
+            json!({"terminal": terminal, "cols": cols, "rows": rows, "history": 2000, "display": display, "resumed": resumed}),
         )?;
         let channel = result["channel"].as_u64().ok_or_else(|| anyhow!("attach returned no channel"))? as u32;
         let (tx, rx) = async_channel::unbounded();
@@ -578,6 +578,49 @@ pub fn offline() -> Arc<Core> {
         child: Mutex::new(child),
         lost,
     })
+}
+
+#[cfg(test)]
+pub enum Sent {
+    Attach(Value),
+    Resize(u16, u16),
+}
+
+/// A core that gives every attach a channel and fails every other call,
+/// handing back the attaches and resizes the app sends.
+#[cfg(test)]
+pub fn recording() -> (Arc<Core>, mpsc::Receiver<Sent>) {
+    let (writer, frames) = mpsc::channel::<Vec<u8>>();
+    let (lost_tx, lost) = async_channel::bounded(1);
+    std::mem::forget(lost_tx);
+    let child = std::process::Command::new(std::env::current_exe().unwrap()).arg("--help").stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+    let routes = Arc::new(Mutex::new(Routes::default()));
+    let core = Arc::new(Core { hello: Value::Null, writer, routes: routes.clone(), next_id: AtomicU64::new(1), child: Mutex::new(child), lost });
+    let (sent, seen) = mpsc::channel();
+    std::thread::spawn(move || {
+        let mut channels = 100;
+        while let Ok(frame) = frames.recv() {
+            let Some((channel, kind, payload)) = read_frame(&mut frame.as_slice()) else { continue };
+            match (channel, kind) {
+                (0, DATA) => {
+                    let request: Value = serde_json::from_slice(&payload).unwrap();
+                    let Some(reply) = routes.lock().unwrap().replies.remove(&request["id"].as_u64().unwrap()) else { continue };
+                    if request["method"] == "terminal.attach" {
+                        channels += 1;
+                        let _ = sent.send(Sent::Attach(request["params"].clone()));
+                        let _ = reply.send(Ok(json!({"channel": channels, "terminal": {}})));
+                    } else {
+                        let _ = reply.send(Err(json!({"message": "offline"})));
+                    }
+                }
+                (_, RESIZE) => {
+                    let _ = sent.send(Sent::Resize(u16::from_le_bytes([payload[0], payload[1]]), u16::from_le_bytes([payload[2], payload[3]])));
+                }
+                _ => {}
+            }
+        }
+    });
+    (core, seen)
 }
 
 #[cfg(test)]
@@ -773,8 +816,8 @@ mod tests {
         );
         let result = core.call("terminal.run", json!({"argv": ["sh", "-c", program]})).unwrap();
         let t = result["address"].as_str().unwrap();
-        let idle = core.attach(t, 80, 24, json!({})).unwrap();
-        let leader = core.attach(t, 100, 30, json!({})).unwrap();
+        let idle = core.attach(t, 80, 24, json!({}), false).unwrap();
+        let leader = core.attach(t, 100, 30, json!({}), false).unwrap();
         let capable = core.routes.lock().unwrap().automatic_input.contains(&idle.channel);
         let mut idle_vt = crate::vt::Vt::new(80, 24);
         let mut leader_vt = crate::vt::Vt::new(100, 30);

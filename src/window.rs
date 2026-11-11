@@ -381,6 +381,8 @@ pub struct AppWindow {
     seen: BTreeSet<String>,
     bounds: Rc<RefCell<HashMap<String, Bounds<Pixels>>>>,
     hidden_fit: pane_size::HiddenFit,
+    /// A terminal in another space waits to attach until the core reports its size.
+    attach_waiting: bool,
     drag: Option<Drag>,
     written_layout: String,
     /// The shown layout as its file has it; `chrome` is this plus the clicks
@@ -494,6 +496,7 @@ impl AppWindow {
             seen,
             bounds: Default::default(),
             hidden_fit: Default::default(),
+            attach_waiting: false,
             drag: None,
             written_layout: String::new(),
             file_chrome: default_layout("main"),
@@ -1422,11 +1425,18 @@ impl AppWindow {
             }
         }
         let want_terms: HashSet<String> = terms.iter().map(|(id, _)| id.clone()).collect();
+        // Attaching sets the terminal's size; another window may be showing the other spaces.
+        let own: HashSet<String> = self.model.active_space().into_iter().flat_map(|s| &s.tabs).flat_map(|t| t.root.terminals()).map(|n| n.id.clone()).collect();
+        self.attach_waiting = false;
         for (id, address) in terms {
             if self.terms.get(&id).is_some_and(|t| t.address == address) {
                 continue;
             }
             let rec = self.live.get(&address);
+            if !displayed.contains(&id) && !own.contains(&id) && rec.and_then(|r| r.get("cols")).and_then(Value::as_u64).is_none() {
+                self.attach_waiting = true;
+                continue;
+            }
             let dim = |k: &str, d: u64| rec.and_then(|r| r.get(k)).and_then(Value::as_u64).unwrap_or(d) as u16;
             let size_hint = (dim("cols", 120), dim("rows", 40));
             let view = cx.new(|cx| TerminalView::attach(self.core.clone(), address.clone(), size_hint, cx));
@@ -1442,6 +1452,10 @@ impl AppWindow {
             });
             let focus = view.read(cx).focus_handle().clone();
             self.terms.insert(id, Term { view, address, focus, _sub: sub });
+        }
+        for (id, t) in &self.terms {
+            let resumed = !displayed.contains(id) && !own.contains(id);
+            t.view.update(cx, |v, _| v.resumed = resumed);
         }
         let gone: Vec<String> = self.terms.keys().filter(|id| !want_terms.contains(*id)).cloned().collect();
         for id in gone {
@@ -2043,6 +2057,9 @@ impl AppWindow {
             }
         }
         self.live = live;
+        if self.attach_waiting {
+            self.sync(window, cx);
+        }
         self.closing_terminals.retain(|addr, completed| !*completed || self.live.contains_key(addr));
         // A new sub-agent changes only this list; mods that show teams need to redraw.
         let terminals_changed = mods::publish_terminals(list);
