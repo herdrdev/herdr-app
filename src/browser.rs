@@ -126,7 +126,13 @@ impl Browser {
 
     fn show(&mut self, window: &Window, dragging: bool, covers: &[Bounds<Pixels>]) {
         let hitbox = self.hitbox.and_then(|id| window.prepainted_hitbox(id));
-        // Windows cuts overlays out of the native view; elsewhere it hides.
+        // Windows cuts overlays and the parts outside the pane's clip mask out
+        // of the native view; elsewhere either hides it.
+        let mut covers = covers.to_vec();
+        if cfg!(windows) && let Some(hitbox) = hitbox.as_ref() {
+            covers.extend(policy::outside_mask(&hitbox.bounds, &hitbox.content_mask.bounds, window.scale_factor()));
+        }
+        let covers = covers.as_slice();
         let overlay = dragging || hitbox.is_some_and(|hitbox| {
             policy::fully_covered(&hitbox.bounds, covers) || (!cfg!(windows) && !policy::holes(&hitbox.bounds, covers, 1.).is_empty())
         });
@@ -141,9 +147,12 @@ impl Browser {
             }
         }
         let unclipped = hitbox.is_some_and(|hitbox| {
-            // WKWebView keeps a floating-point logical frame. Windows/GTK
-            // children use integer device pixels, like GPUI's rendered mask.
-            if cfg!(target_os = "macos") {
+            // Windows cuts the clipped parts out (above). WKWebView keeps a
+            // floating-point logical frame; GTK children use integer device
+            // pixels, like GPUI's rendered mask.
+            if cfg!(windows) {
+                true
+            } else if cfg!(target_os = "macos") {
                 policy::is_unclipped(&hitbox.bounds, &hitbox.content_mask.bounds)
             } else {
                 policy::is_unclipped_at_scale(&hitbox.bounds, &hitbox.content_mask.bounds, window.scale_factor())

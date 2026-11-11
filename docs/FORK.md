@@ -112,9 +112,13 @@ current session in that case.
 
 ## Native view limits
 
-The page keeps its state when its tab is inactive. It hides while a Herdr overlay
-is open or its container is partly clipped, so native browser pixels cannot
-cover a menu or dialog. Back, Reload and Open externally stay in native chrome.
+The page keeps its state when its tab is inactive. Native pixels always draw
+above Herdr's own, so on Windows the areas of open overlays (toasts, menus,
+dialogs) and the parts outside the container's clip are cut out of the page,
+which stays visible around them; a dialog's dimmed backdrop does not dim it.
+Elsewhere the page hides while an overlay is open or its container is partly
+clipped. It hides while a pane is dragged. Back, Reload and Open externally
+stay in native chrome.
 Downloads and new-window requests are blocked. Initial URLs and subsequent
 navigation accept HTTP(S) without embedded credentials.
 
