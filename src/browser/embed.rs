@@ -477,16 +477,12 @@ mod win {
             if state.borrow().generation != generation { return; }
             // Zoom can change the frame; a theme change, the colors at its edges.
             if tick % 8 == 1 {
+                let (container, corner) = {
+                    let app = state.borrow();
+                    (app.embedded.as_ref().map_or(0, |e| e.container as usize), app.corner)
+                };
                 let (crop, edges) = cx.background_executor().spawn(async move {
-                    let mut crop = measure(child as HWND);
-                    let edges = edge_colors(child as HWND, crop).map(|(colors, border)| {
-                        crop.left += border;
-                        crop.top += border;
-                        crop.right += border;
-                        crop.bottom += border;
-                        colors
-                    });
-                    (crop, edges)
+                    (measure(child as HWND), edge_colors(container as HWND, corner))
                 }).await;
                 let mut app = state.borrow_mut();
                 if edges.is_some() && app.edges != edges {
@@ -705,39 +701,30 @@ mod win {
     /// left and bottom left of what the pane shows (VS Code: title bar and
     /// status bar), as 0xRRGGBB. A window region has no antialiasing, so the
     /// pane paints these colors behind the window to blend its corners.
-    /// Also the width of an accent border the window draws inside its frame.
-    fn edge_colors(hwnd: HWND, crop: Crop) -> Option<([u32; 2], i32)> {
+    ///
+    /// Read from the screen, where the window is composed: PrintWindow gets a
+    /// placeholder for another process's GPU-drawn child. Only while the
+    /// points show this window and nothing covers them.
+    fn edge_colors(container: HWND, corner: i32) -> Option<[u32; 2]> {
         use windows_sys::Win32::Graphics::Gdi::*;
         unsafe {
-            let r = screen_rect(hwnd);
-            let (w, h) = (r.right - r.left, r.bottom - r.top);
-            if w <= 0 || h <= 0 { return None; }
+            if IsWindowVisible(container) == 0 { return None; }
+            let r = screen_rect(container);
+            // Next to the left edge, just below and above the rounded corners.
+            let (x, dy) = (r.left + 4, corner + 2);
+            if r.bottom - r.top < dy * 4 { return None; }
+            let points = [POINT { x, y: r.top + dy }, POINT { x, y: r.bottom - 1 - dy }];
+            for &point in &points {
+                let hit = WindowFromPoint(point);
+                if hit != container && IsChild(container, hit) == 0 { return None; }
+            }
             let screen = GetDC(std::ptr::null_mut());
-            let dc = CreateCompatibleDC(screen);
-            let bitmap = CreateCompatibleBitmap(screen, w, h);
-            let old = SelectObject(dc, bitmap);
-            let ok = windows_sys::Win32::Storage::Xps::PrintWindow(hwnd, dc, PW_RENDERFULLCONTENT) != 0;
-            // Inside the window's own 1-2 px accent border, which VS Code
-            // draws around an unmaximized window.
-            let inset = 8;
-            let x = crop.left + inset;
-            let pick = |y: i32| {
-                let c = GetPixel(dc, x, y);
+            let colors = points.map(|p| {
+                let c = GetPixel(screen, p.x, p.y);
                 (c & 0xff) << 16 | (c & 0xff00) | (c >> 16 & 0xff)
-            };
-            let colors = ok.then(|| {
-                // The accent border: leading pixels at mid-height that differ
-                // from the color just inside them.
-                let y = (crop.top + h - crop.bottom) / 2;
-                let inside = GetPixel(dc, crop.left + inset, y);
-                let border = (0..4).take_while(|i| GetPixel(dc, crop.left + i, y) != inside).count() as i32;
-                ([pick(crop.top + inset), pick(h - crop.bottom - 1 - inset)], border)
             });
-            SelectObject(dc, old);
-            DeleteObject(bitmap);
-            DeleteDC(dc);
             ReleaseDC(std::ptr::null_mut(), screen);
-            colors
+            Some(colors)
         }
     }
 
