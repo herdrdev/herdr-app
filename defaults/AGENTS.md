@@ -70,7 +70,7 @@ Plannotator archive, keep their system-browser fallback.
 A mod can start a review of an agent's changes or its last reply in that
 agent's Pi: when the terminal's `herdr.plannotator` label is valid (its `pid`
 is the terminal's `foreground.pid`), run
-`exec(label.node, [label.request, <terminal id on that machine>, "review" | "last"], { on: machine })`.
+`exec(label.node, [label.request, <terminal id on that machine>, "review" | "last", label.hc], { on: machine })`.
 The annotations go back to that Pi session (`docs/FORK.md`).
 
 ## What mods are written in

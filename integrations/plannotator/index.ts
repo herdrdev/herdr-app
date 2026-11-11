@@ -1,5 +1,6 @@
 import type { ExtensionAPI, ExtensionContext } from "@earendil-works/pi-coding-agent";
 import { release } from "node:os";
+import { existsSync } from "node:fs";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
@@ -41,7 +42,10 @@ export default function herdrPlannotator(pi: ExtensionAPI): void {
       // Nested Pi processes inherit HC_*: only the terminal's own Pi publishes.
       const owner = await pi.exec("hc", ["get", terminal, "--json"], { timeout: 3000 });
       if (owner.code !== 0 || JSON.parse(owner.stdout).foreground?.pid !== process.pid) return;
-      const label = { pid: process.pid, session, socket: server.socket, token: server.token, node: process.execPath, request: requestScript };
+      // Herdr runs request.mjs without this shell's PATH: name hc by its path.
+      const hc = (process.env.PATH ?? "").split(path.delimiter).filter(Boolean)
+        .map(dir => path.join(dir, process.platform === "win32" ? "hc.exe" : "hc")).find(file => existsSync(file)) ?? "hc";
+      const label = { pid: process.pid, session, socket: server.socket, token: server.token, node: process.execPath, request: requestScript, hc };
       const result = await pi.exec("hc", ["label", terminal, `herdr.plannotator=${JSON.stringify(label)}`], { timeout: 3000 });
       if (result.code !== 0) throw new Error(result.stderr.trim() || "hc label failed");
     } catch (error) {
