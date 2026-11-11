@@ -63,7 +63,8 @@ export async function openExternal(url) {
     }
 }
 
-export async function openReview({ url, id }, isClosed = () => false) {
+// `tabName`: the tab bar button that asked for this review ("Annotate diff"), else "Plannotator".
+export async function openReview({ url, id, tabName }, isClosed = () => false) {
     if (isClosed()) return { kind: 'closed' };
     const parsed = new URL(url);
     if (!['http:', 'https:'].includes(parsed.protocol) || parsed.username || parsed.password) throw new Error('Expected an HTTP(S) URL without credentials');
@@ -84,7 +85,7 @@ export async function openReview({ url, id }, isClosed = () => false) {
         const origin = findOriginSpace(snapshot, terminal);
         if (!origin) throw new Error('The requesting terminal has no unambiguous pane in this Herdr App');
         if (isClosed()) return { kind: 'closed' };
-        const result = await runJson(app, ['do', 'tab.new', JSON.stringify({ space: origin, name: 'Plannotator', mod: 'plannotator-browser', props: { url, session, origin: terminalId, review: id } })]);
+        const result = await runJson(app, ['do', 'tab.new', JSON.stringify({ space: origin, name: tabName ?? 'Plannotator', mod: 'plannotator-browser', props: { url, session, origin: terminalId, review: id } })]);
         if (typeof result.pane !== 'string') throw new Error('Herdr did not return the new browser pane');
         return { kind: 'embedded', app, pane: result.pane };
     } catch (error) {

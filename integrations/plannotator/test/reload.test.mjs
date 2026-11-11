@@ -21,7 +21,7 @@ test('Pi reload uses the updated browser hook when its own hook was already conf
   const prior = new Map(keys.map(key => [key, process.env[key]]));
   let session;
   try {
-    for (const file of ['index.ts', 'router.mjs', 'ipc.mjs', 'fresh-import.mjs']) await copyFile(path.join(integration, file), path.join(root, file));
+    for (const file of ['index.ts', 'router.mjs', 'requested.mjs', 'ipc.mjs', 'fresh-import.mjs']) await copyFile(path.join(integration, file), path.join(root, file));
     const modulePath = path.join(root, 'open.mjs');
     await writeFile(modulePath, browserModule('first'));
     for (const key of keys) delete process.env[key];

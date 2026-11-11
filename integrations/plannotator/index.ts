@@ -5,6 +5,7 @@ import { fileURLToPath } from "node:url";
 import { randomUUID } from "node:crypto";
 import { importFresh } from "./fresh-import.mjs";
 import { createReviewRouter } from "./router.mjs";
+import { createRequestNamer } from "./requested.mjs";
 import type { startBrowserIpc } from "./ipc.mjs";
 
 /** Route Plannotator's supported browser hook without changing its Ask AI bridge. */
@@ -23,9 +24,11 @@ export default function herdrPlannotator(pi: ExtensionAPI): void {
 
   // Herdr's tab bar asks for these: as if the person typed the command here.
   // Pi runs extension commands at once, even while the agent works.
+  const requests = createRequestNamer();
   const runCommand = async (command: string) => {
     const name = command === "review" ? "plannotator-review" : "plannotator-last";
     if (!pi.getCommands().some(entry => entry.name === name)) throw new Error("Plannotator is not loaded in this Pi");
+    requests.expect(command);
     void Promise.resolve(pi.sendUserMessage(`/${name}`, { expandPromptTemplates: true })).catch(report);
   };
 
@@ -77,7 +80,7 @@ export default function herdrPlannotator(pi: ExtensionAPI): void {
     }
   });
 
-  pi.events.on("plannotator:session-opened", event => router?.opened(event));
+  pi.events.on("plannotator:session-opened", event => router?.opened(requests.name(event)));
   pi.events.on("plannotator:session-closed", event => { void router?.closed(event).catch(report); });
   pi.on("session_shutdown", async () => {
     if (!ipc) return;
