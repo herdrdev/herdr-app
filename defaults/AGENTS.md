@@ -679,6 +679,13 @@ What's about the user, never a look:
 - `font_ligatures`: programming ligatures are off by default; set `true` to
   enable them in terminal fonts such as JetBrains Mono and Fira Code. The cursor
   and background changes (including selections) break ligatures so individual cells stay clear.
+- `terminal_bidi`: `true` draws right-to-left text (Hebrew, Arabic) in
+  terminals in reading order (default `false`). Only the drawing changes:
+  each row that holds right-to-left characters is reordered with the Unicode
+  Bidirectional Algorithm as a left-to-right paragraph (the terminal-wg
+  "implicit" mode, as in iTerm2 and mlterm); the program, copy and
+  selection keep the row in logical order, and the cursor is drawn on its
+  cell's new place. Rows without right-to-left text are unchanged.
 - `theme`: a theme name or `{light, dark}`; used where the layout sets none.
   The theme picker overrides any layout and stays on that layout.
 - `colors`: theme color overrides (`{"accent":"#ff8800"}`), with the same

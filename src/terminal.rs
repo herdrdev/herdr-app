@@ -110,8 +110,8 @@ struct Grid {
     track: Option<Bounds<Pixels>>,
     /// Each row's drawing by position, kept while the row is the same (`Rc`).
     painted: Vec<(Rc<Vec<vt::Cell>>, Vec<RowOp>, Option<usize>)>,
-    /// Font size, cell size, font, loaded fonts and ligature setting used to draw.
-    painted_with: (u32, Size<Pixels>, String, u64, bool),
+    /// Font size, cell size, font, loaded fonts, ligature and bidi settings used to draw.
+    painted_with: (u32, Size<Pixels>, String, u64, bool, bool),
 }
 
 pub struct TerminalView {
@@ -290,7 +290,7 @@ impl TerminalView {
                 thumb: None,
                 track: None,
                 painted: Vec::new(),
-                painted_with: (0, Size::default(), String::new(), 0, false),
+                painted_with: (0, Size::default(), String::new(), 0, false, false),
             })),
             focus: cx.focus_handle(),
             was_focused: false,
@@ -954,8 +954,9 @@ impl TerminalView {
         let g = self.grid.borrow();
         let (x, y) = local(&g, pos);
         let (col, row) = (x / f32::from(g.cell.width), y / f32::from(g.cell.height));
+        let col = logical_cell(&g, col as usize, row as usize).map_or(col as u16, |(logical, _)| logical as u16);
         let mut target = None;
-        let hit = g.vt.link_at(col as u16, row as u16, |text, at, joined| {
+        let hit = g.vt.link_at(col, row as u16, |text, at, joined| {
             // In lines joined back together only a file that exists proves the join right.
             if let Some(range) = links::find(text, at)
                 && let Some(link) = links::resolve(&text[range.clone()], self.cwd.as_deref())
@@ -1021,9 +1022,17 @@ impl TerminalView {
     /// Selecting with the mouse (when the program doesn't take it).
     fn select(&mut self, step: Select, pos: Point<Pixels>, cx: &mut Context<Self>) {
         let mut g = self.grid.borrow_mut();
-        let (x, y) = local(&g, pos);
+        let (mut x, y) = local(&g, pos);
         let (cw, ch) = (f32::from(g.cell.width), f32::from(g.cell.height));
-        let (col, row) = ((x / cw) as u16, (y / ch) as u16);
+        let (mut col, row) = ((x / cw) as u16, (y / ch) as u16);
+        // In a reordered row the pointer is over a cell drawn elsewhere: the
+        // selection (logical, as the program wrote the row) starts or ends at
+        // that cell, and "past its middle" is mirrored in right-to-left text.
+        if let Some((logical, rtl)) = logical_cell(&g, col as usize, row as usize) {
+            let within = x - col as f32 * cw;
+            x = logical as f32 * cw + if rtl { cw - within } else { within };
+            col = logical as u16;
+        }
         let height = ch * g.vt.rows as f32;
         g.vt.select(step, col, row, x, y, cw, height);
         drop(g);
@@ -1283,6 +1292,19 @@ fn link_mods(m: &Modifiers) -> bool {
 
 fn local(g: &Grid, p: Point<Pixels>) -> (f32, f32) {
     (f32::from(p.x - g.origin.x).max(0.0), f32::from(p.y - g.origin.y).max(0.0))
+}
+
+/// With `terminal_bidi`, the logical cell drawn at a visual column of a row
+/// (as last painted) and whether it reads right to left; `None` when the row
+/// is drawn as it is.
+fn logical_cell(g: &Grid, col: usize, row: usize) -> Option<(usize, bool)> {
+    if !crate::settings::get().terminal_bidi {
+        return None;
+    }
+    let (cells, _, _) = g.painted.get(row)?;
+    let order = crate::bidi::order(cells)?;
+    let logical = *order.logical.get(col)?;
+    Some((logical, order.rtl[logical]))
 }
 
 fn scroll_delta_steps(scrolled: &mut Point<f32>, delta: ScrollDelta, phase: TouchPhase, cell: Size<Pixels>, cols: u16, rows: u16) -> Point<i32> {
@@ -1690,21 +1712,26 @@ enum RowOp {
 
 /// A row's drawing: its backgrounds, merged into runs of one color, then its
 /// text in runs of one style (wide characters, sprites and icons on their own).
-fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: &mut Window) -> Vec<RowOp> {
+/// Ops are placed in visual columns: the logical ones, unless `bidi` is on
+/// and the row holds right-to-left text (bidi.rs).
+fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, bidi: bool, window: &mut Window) -> Vec<RowOp> {
     crate::bench::count(&crate::bench::ROWS);
     let ligatures = crate::settings::get().font_ligatures;
+    let order = if bidi { crate::bidi::order(row) } else { None };
+    let vis = |x: usize| order.as_ref().map_or(x, |o| o.visual[x]);
+    let logical = |v: usize| order.as_ref().map_or(v, |o| o.logical[v]);
     let mut ops = Vec::new();
-    let mut x = 0;
-    while x < row.len() {
-        let Some(bg) = row[x].bg else {
-            x += 1;
+    let mut v = 0;
+    while v < row.len() {
+        let Some(bg) = row[logical(v)].bg else {
+            v += 1;
             continue;
         };
-        let start = x;
-        while x < row.len() && row[x].bg == Some(bg) {
-            x += 1;
+        let start = v;
+        while v < row.len() && row[logical(v)].bg == Some(bg) {
+            v += 1;
         }
-        ops.push(RowOp::Bg { from: start, to: x, color: hsla(bg) });
+        ops.push(RowOp::Bg { from: start, to: v, color: hsla(bg) });
     }
     let mut x = 0;
     while x < row.len() {
@@ -1721,7 +1748,7 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
             color.a = 0.6;
         }
         if crate::sprites::is_sprite(&c.text) {
-            ops.push(RowOp::Sprite { x: start, text: c.text.clone(), color });
+            ops.push(RowOp::Sprite { x: vis(start), text: c.text.clone(), color });
             continue;
         }
         let mut text_font = cell_font(c.bold, c.italic);
@@ -1729,7 +1756,8 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
             // Fit missing icons from the bundled font by their outlines:
             // centered, as tall as fits, two cells wide when a space
             // follows (prompts, statuslines, file trees).
-            let room = if row.get(x).is_none_or(|d| d.text.trim().is_empty()) { 2.0 } else { 1.0 };
+            let after = (vis(start) + 1 < row.len()).then(|| &row[logical(vis(start) + 1)]);
+            let room = if after.is_none_or(|d| d.text.trim().is_empty()) { 2.0 } else { 1.0 };
             let (w, h) = (f32::from(cell.width) * room, f32::from(cell.height));
             let (gw, gh) = ((icon.x1 - icon.x0).max(1.0), (icon.y1 - icon.y0).max(1.0));
             // Up to ~1.5 cells of two, so it doesn't touch the next word.
@@ -1741,14 +1769,20 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
             let baseline = (h - gh * scale) / 2.0 + icon.y1 * scale;
             let font = window.text_system().resolve_font(&font(crate::settings::SYMBOLS_FONT));
             let size = px(scale * icon.units_per_em);
-            ops.push(RowOp::Icon { x: start, offset: point(px(left), px(baseline)), font, glyph: GlyphId(icon.id), size, color });
+            ops.push(RowOp::Icon { x: vis(start), offset: point(px(left), px(baseline)), font, glyph: GlyphId(icon.id), size, color });
             continue;
         }
         let fitted_size = fallback_size(c, &text_font, cell.width, window.text_system());
         let mut text = if c.text.is_empty() { " ".to_owned() } else { c.text.clone() };
-        let mut positions = vec![(0, px(0.0))];
+        // Each cluster's cell, as a visual column; the run's pixel positions
+        // follow once its leftmost column is known. The text itself stays in
+        // logical order: right-to-left scripts shape as written (Arabic
+        // joins, the shaper mirrors brackets in a right-to-left run).
+        let mut columns = vec![(0, vis(start))];
         // Shape the cursor cell separately, so its plain glyph doesn't cover a ligature.
         if !c.wide && fitted_size.is_none() && cursor != Some(start) {
+            // A run is one direction of neighboring visual columns.
+            let mut step: Option<isize> = None;
             while x < row.len() {
                 let d = &row[x];
                 let same = !d.wide
@@ -1759,11 +1793,14 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
                     && d.faint == c.faint
                     && d.underline == c.underline
                     && d.strike == c.strike;
+                let next = vis(x) as isize - vis(x - 1) as isize;
+                let adjacent = next.abs() == 1 && step.is_none_or(|s| s == next);
                 // Bundled fallback icons are fitted separately from the text run.
-                if !same || cursor == Some(x) || (d.text.is_empty() && !d.underline && !d.strike) || crate::sprites::is_sprite(&d.text) || fallback_icon(&d.text, &text_font, window.text_system()).is_some() || fallback_size(d, &text_font, cell.width, window.text_system()).is_some() {
+                if !same || !adjacent || cursor == Some(x) || (d.text.is_empty() && !d.underline && !d.strike) || crate::sprites::is_sprite(&d.text) || fallback_icon(&d.text, &text_font, window.text_system()).is_some() || fallback_size(d, &text_font, cell.width, window.text_system()).is_some() {
                     break;
                 }
-                positions.push((text.len(), cell.width * (x - start) as f32));
+                step = Some(next);
+                columns.push((text.len(), vis(x)));
                 text.push_str(if d.text.is_empty() { " " } else { &d.text });
                 x += 1;
             }
@@ -1782,12 +1819,15 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
             underline: None,
             strikethrough: None,
         };
-        let width = cell.width * if c.wide { 2.0 } else { (x - start) as f32 };
+        let left = columns.iter().map(|&(_, v)| v).min().unwrap_or(0);
+        let positions: Vec<(usize, Pixels)> = columns.iter().map(|&(at, v)| (at, cell.width * (v - left) as f32)).collect();
+        let cells = if c.wide { 2 } else { x - start };
+        let width = cell.width * cells as f32;
         let line = window.text_system().shape_line(text.into(), fitted_size.unwrap_or_else(|| px(crate::settings::font_size())), &[run], None)
             .with_cell_positions(&positions, width);
-        ops.push(RowOp::Text { x: start, line });
+        ops.push(RowOp::Text { x: left, line });
         if c.underline || c.strike {
-            ops.push(RowOp::Decoration { from: start, to: if c.wide { start + 2 } else { x }, underline: c.underline, strike: c.strike, color });
+            ops.push(RowOp::Decoration { from: left, to: left + cells, underline: c.underline, strike: c.strike, color });
         }
     }
     ops
@@ -1871,8 +1911,13 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     // same (`Vt::frame` keeps a row libghostty didn't change): an agent's spinner
     // line rebuilds one row, not the whole screen.
     let ligatures = crate::settings::get().font_ligatures;
+    let bidi = crate::settings::get().terminal_bidi;
     let cursor = frame.cursor_cell.filter(|_| ligatures);
-    let with = (crate::settings::font_size().to_bits(), cell, crate::settings::terminal_font(), crate::settings::fonts_added(), ligatures);
+    let with = (crate::settings::font_size().to_bits(), cell, crate::settings::terminal_font(), crate::settings::fonts_added(), ligatures, bidi);
+    // Where a row's logical columns are drawn (bidi.rs), for what is painted
+    // over the cached row ops: the cursor, search and link highlights.
+    let order_of = |y: usize| if bidi { frame.rows.get(y).and_then(|row| crate::bidi::order(row)) } else { None };
+    let visual_col = |y: usize, x: usize| order_of(y).and_then(|o| o.visual.get(x).copied()).unwrap_or(x);
     // When every row changed (output scrolling), nothing is kept: the next
     // frame would find none of them the same.
     let mut painted = std::mem::take(&mut grid.borrow_mut().painted);
@@ -1883,7 +1928,7 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     for (y, row) in frame.rows.iter().enumerate() {
         let column = cursor.filter(|(_, cy)| *cy as usize == y).map(|(x, _)| x as usize);
         if frame.all || painted.get(y).is_none_or(|(r, _, c)| !Rc::ptr_eq(r, row) || *c != column) {
-            let ops = row_ops(row, cell, column, window);
+            let ops = row_ops(row, cell, column, bidi, window);
             if y < painted.len() {
                 painted[y] = (row.clone(), ops, column);
             } else {
@@ -1917,8 +1962,18 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
             }
             let opacity = if selected { 0.55 } else { 0.28 };
             let highlight = crate::settings::color("accent").opacity(opacity);
-            let b = Bounds::new(at(start, y), size(cell.width * (end - start) as f32, cell.height));
-            window.paint_quad(fill(snap_box(b), highlight));
+            match order_of(y) {
+                // Reordered rows: the match's cells, each where it is drawn.
+                Some(o) => {
+                    for x in start..end {
+                        window.paint_quad(fill(snap_box(Bounds::new(at(o.visual[x], y), cell)), highlight));
+                    }
+                }
+                None => {
+                    let b = Bounds::new(at(start, y), size(cell.width * (end - start) as f32, cell.height));
+                    window.paint_quad(fill(snap_box(b), highlight));
+                }
+            }
         }
     }
     for (y, (_, ops, _)) in painted.iter().enumerate() {
@@ -1952,8 +2007,14 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
         let Some(row) = frame.rows.get(y as usize) else { continue };
         let color = row.get(x0 as usize).map_or(hsla(vt::theme().fg), |c| hsla(c.fg));
         let (x0, x1) = (x0 as usize, (x1 as usize + 1).min(row.len()));
-        let line = Bounds::new(at(x0, y as usize) + point(px(0.0), metrics.underline), size(cell.width * (x1 - x0) as f32, metrics.underline_thickness));
-        window.paint_quad(fill(snap_box(line), color));
+        let underline = |from: usize, to: usize, window: &mut Window| {
+            let line = Bounds::new(at(from, y as usize) + point(px(0.0), metrics.underline), size(cell.width * (to - from) as f32, metrics.underline_thickness));
+            window.paint_quad(fill(snap_box(line), color));
+        };
+        match order_of(y as usize) {
+            Some(o) => (x0..x1).for_each(|x| underline(o.visual[x], o.visual[x] + 1, window)),
+            None => underline(x0, x1, window),
+        }
     }
 
     paint_images(false, window);
@@ -1963,7 +2024,9 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
         let wide = frame.rows.get(y).and_then(|r| r.get(x)).is_some_and(|c| c.wide);
         let w = cell.width * if wide { 2.0 } else { 1.0 };
         let color = hsla(cur.color);
-        let p = at(x, y);
+        // The cursor's cell is drawn where its row puts it (bidi.rs).
+        let order = order_of(y);
+        let p = at(order.as_ref().and_then(|o| o.visual.get(x).copied()).unwrap_or(x), y);
         match (focused, cur.shape) {
             (true, CursorShape::Block) => {
                 window.paint_quad(fill(snap_box(Bounds::new(p, size(w, cell.height))), color));
@@ -1992,7 +2055,7 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     // underlined, on the terminal's background so the cells under it don't
     // show through.
     if let (Some((cx_, cy_)), Some(text)) = (frame.cursor_cell, marked.filter(|t| !t.is_empty())) {
-        let p = at(cx_ as usize, cy_ as usize);
+        let p = at(visual_col(cy_ as usize, cx_ as usize), cy_ as usize);
         let fg = hsla(vt::theme().fg);
         let run = TextRun {
             len: text.len(),
@@ -2010,7 +2073,7 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     }
     {
         let mut g = grid.borrow_mut();
-        g.cursor_at = frame.cursor_cell.map(|(x, y)| Bounds::new(at(x as usize, y as usize), cell));
+        g.cursor_at = frame.cursor_cell.map(|(x, y)| Bounds::new(at(visual_col(y as usize, x as usize), y as usize), cell));
         // As in Herdr, hide on the alternate screen and below five columns.
         g.thumb = None;
         g.track = None;
@@ -3179,7 +3242,7 @@ mod tests {
                             let mut row = vec![vt::Cell { text: text.to_string(), wide, fg: vt::Rgb(255, 0, 0), ..Default::default() }];
                             if wide { row.push(vt::Cell::default()); }
                             row.push(vt::Cell { text: "a".into(), fg: vt::Rgb(255, 255, 255), ..Default::default() });
-                            for op in row_ops(&row, cell, None, window) {
+                            for op in row_ops(&row, cell, None, false, window) {
                                 if let RowOp::Text { x, line } = op {
                                     line.paint(point(px(4.) + cell.width * x as f32, cell.height * y as f32), cell.height, TextAlign::Left, None, window, cx).unwrap();
                                 }
@@ -3208,7 +3271,7 @@ mod tests {
             let image = window.render_to_image().unwrap();
             let row: Vec<_> = ["a", "🕹", "a", "🖥", "a", "🌡", "a"].into_iter()
                 .map(|text| vt::Cell { text: text.into(), ..Default::default() }).collect();
-            let ops = row_ops(&row, cell_size(window), None, window);
+            let ops = row_ops(&row, cell_size(window), None, false, window);
             let text: Vec<_> = ops.iter().filter_map(|op| match op {
                 RowOp::Text { x, line } => Some((*x, line.font_size)),
                 _ => None,
@@ -3220,7 +3283,7 @@ mod tests {
             }
             for text in ["🕹\u{fe0f}", "🖥\u{fe0f}", "🌡\u{fe0f}"] {
                 let row = [vt::Cell { text: text.into(), wide: true, ..Default::default() }];
-                for op in row_ops(&row, cell_size(window), None, window) {
+                for op in row_ops(&row, cell_size(window), None, false, window) {
                     if let RowOp::Text { line, .. } = op { assert_eq!(line.font_size, px(24.)); }
                 }
             }
@@ -3264,7 +3327,7 @@ mod tests {
         window.update(cx, |_, window, _| {
             for (text, wide) in [("\u{3000}", true), ("\u{a0}", false), ("\u{2003}", false)] {
                 let row = [vt::Cell { text: text.into(), wide, ..Default::default() }, vt::Cell::default()];
-                let ops = row_ops(&row, size(px(8.), px(16.)), None, window);
+                let ops = row_ops(&row, size(px(8.), px(16.)), None, false, window);
                 let runs: Vec<_> = ops.iter().filter_map(|op| match op {
                     RowOp::Text { x, line } => Some((*x, line.text.as_ref())),
                     _ => None,
@@ -3274,7 +3337,7 @@ mod tests {
             for text in ["", " ", "   "] {
                 for (underline, strike) in [(false, false), (true, false), (false, true)] {
                     let row = [vt::Cell { text: text.into(), underline, strike, ..Default::default() }];
-                    let ops = row_ops(&row, size(px(8.), px(16.)), None, window);
+                    let ops = row_ops(&row, size(px(8.), px(16.)), None, false, window);
                     assert_eq!(ops.iter().filter(|op| matches!(op, RowOp::Text { .. })).count(), usize::from(underline || strike));
                 }
             }
@@ -3292,7 +3355,7 @@ mod tests {
         row[2].bg = Some(vt::Rgb(10, 20, 30));
         let window = cx.add_window(|_, _| Empty);
         window.update(cx, |_, window, _| {
-            let ops = row_ops(&row, size(px(8.), px(16.)), None, window);
+            let ops = row_ops(&row, size(px(8.), px(16.)), None, false, window);
             let runs: Vec<_> = ops.iter().filter_map(|op| match op {
                 RowOp::Text { x, line } => Some((*x, line.text.as_ref())),
                 _ => None,
@@ -3300,6 +3363,64 @@ mod tests {
             assert_eq!(runs, vec![(0, "a=>b 42")]);
         }).unwrap();
         crate::settings::set((*original).clone());
+    }
+
+    /// With `terminal_bidi`, a row's right-to-left text is shaped as written
+    /// and each glyph lands on the visual column of its cell (bidi.rs); the
+    /// setting off, nothing moves.
+    #[gpui::test]
+    fn hebrew_glyphs_land_on_their_visual_columns(cx: &mut gpui::TestAppContext) {
+        use super::*;
+        let cell = size(px(8.), px(16.));
+        let row: Vec<_> = "ab שלום cd".chars().map(|ch| vt::Cell { text: ch.to_string(), ..Default::default() }).collect();
+        let window = cx.add_window(|_, _| Empty);
+        window.update(cx, |_, window, _| {
+            // Each cluster's column, in logical order: text runs come in
+            // logical order and a glyph's index is its byte in its run's text.
+            let glyph_cells = |ops: &[RowOp]| -> Vec<((usize, usize), i32)> {
+                let mut found: Vec<((usize, usize), i32)> = ops.iter().filter_map(|op| match op {
+                    RowOp::Text { x, line } => Some((x, line)),
+                    _ => None,
+                }).enumerate().flat_map(|(n, (x, line))| {
+                    let base = *x as f32 * f32::from(cell.width);
+                    line.runs.iter().flat_map(|run| run.glyphs.iter()).map(move |g| ((n, g.index), ((base + f32::from(g.position.x)) / f32::from(cell.width)).round() as i32)).collect::<Vec<_>>()
+                }).collect();
+                found.sort();
+                found.dedup_by_key(|f| f.0);
+                found
+            };
+            let plain = row_ops(&row, cell, None, false, window);
+            assert_eq!(glyph_cells(&plain).iter().map(|f| f.1).collect::<Vec<_>>(), (0..10).collect::<Vec<_>>());
+            let bidi = row_ops(&row, cell, None, true, window);
+            // Byte offsets: "ab " 0..3, Hebrew letters two bytes each from 3, " cd" from 11.
+            let columns: Vec<_> = glyph_cells(&bidi).into_iter().map(|f| f.1).collect();
+            assert_eq!(columns, vec![0, 1, 2, 6, 5, 4, 3, 7, 8, 9]);
+            // Runs break where visual neighbors stop being logical neighbors; each
+            // keeps its logical text, so Arabic would join as written.
+            let texts: Vec<_> = bidi.iter().filter_map(|op| match op { RowOp::Text { x, line } => Some((*x, line.text.to_string())), _ => None }).collect();
+            assert_eq!(texts, vec![(0, "ab ".to_owned()), (3, "שלום".to_owned()), (7, " cd".to_owned())]);
+        }).unwrap();
+    }
+
+    /// Background runs and the cursor follow the cells they belong to.
+    #[gpui::test]
+    fn backgrounds_follow_reordered_cells(cx: &mut gpui::TestAppContext) {
+        use super::*;
+        let mut row: Vec<_> = "שלום xy".chars().map(|ch| vt::Cell { text: ch.to_string(), ..Default::default() }).collect();
+        // The first two letters typed have a background (a selection or highlight).
+        row[0].bg = Some(vt::Rgb(1, 2, 3));
+        row[1].bg = Some(vt::Rgb(1, 2, 3));
+        let window = cx.add_window(|_, _| Empty);
+        window.update(cx, |_, window, _| {
+            let ops = row_ops(&row, size(px(8.), px(16.)), None, true, window);
+            let bgs: Vec<_> = ops.iter().filter_map(|op| match op { RowOp::Bg { from, to, .. } => Some((*from, *to)), _ => None }).collect();
+            // Drawn at the right end of the Hebrew word, where those letters are.
+            assert_eq!(bgs, vec![(2, 4)]);
+            // The cursor cell is shaped alone, even in reordered text.
+            let ops = row_ops(&row, size(px(8.), px(16.)), Some(1), true, window);
+            let texts: Vec<_> = ops.iter().filter_map(|op| match op { RowOp::Text { x, line } => Some((*x, line.text.to_string())), _ => None }).collect();
+            assert_eq!(texts, vec![(3, "ש".to_owned()), (2, "ל".to_owned()), (0, "ום".to_owned()), (4, " xy".to_owned())]);
+        }).unwrap();
     }
 
     #[gpui::test]
@@ -3318,7 +3439,7 @@ mod tests {
                 (Some(1), vec![(0, "a"), (1, "="), (2, ">b")]),
                 (Some(2), vec![(0, "a="), (2, ">"), (3, "b")]),
             ] {
-                let ops = row_ops(&row, size(px(8.), px(16.)), cursor, window);
+                let ops = row_ops(&row, size(px(8.), px(16.)), cursor, false, window);
                 let runs: Vec<_> = ops.iter().filter_map(|op| match op {
                     RowOp::Text { x, line } => Some((*x, line.text.as_ref())),
                     _ => None,
@@ -3376,7 +3497,7 @@ mod tests {
         let window = cx.add_window(|_, _| Empty);
 
         window.update(cx, |_, window, _| {
-            let ops = row_ops(&vt.frame().rows[0], size(px(8.), px(16.)), None, window);
+            let ops = row_ops(&vt.frame().rows[0], size(px(8.), px(16.)), None, false, window);
             let runs: Vec<_> = ops.iter().filter_map(|op| match op {
                 RowOp::Text { x, line } => Some((*x, line.text.as_ref())),
                 _ => None,
@@ -3400,7 +3521,7 @@ mod tests {
                 settings.font_size = font_size;
                 settings.zoom = zoom;
                 crate::settings::set(settings);
-                let ops = row_ops(&vt.frame().rows[0], size(px(8.), px(16.)), None, window);
+                let ops = row_ops(&vt.frame().rows[0], size(px(8.), px(16.)), None, false, window);
                 let runs: Vec<_> = ops.iter().filter_map(|op| match op {
                     RowOp::Text { x, line } => Some((*x, line.text.as_ref())),
                     _ => None,
@@ -3430,7 +3551,7 @@ mod tests {
                         let row: Vec<_> = text.chars().map(|c| crate::vt::Cell {
                             text: c.to_string(), underline, strike, ..Default::default()
                         }).collect();
-                        let ops = super::row_ops(&row, gpui::size(gpui::px(8.0), gpui::px(16.0)), None, window);
+                        let ops = super::row_ops(&row, gpui::size(gpui::px(8.0), gpui::px(16.0)), None, false, window);
                         let rendered: String = ops.iter().filter_map(|op| match op {
                             super::RowOp::Text { line, .. } => Some(line.text.as_ref()),
                             _ => None,
@@ -3460,7 +3581,7 @@ mod tests {
                     let row: Vec<_> = text.chars().map(|c| crate::vt::Cell {
                         text: c.to_string(), bold, italic, ..Default::default()
                     }).collect();
-                    let ops = super::row_ops(&row, gpui::size(gpui::px(8.0), gpui::px(16.0)), None, window);
+                    let ops = super::row_ops(&row, gpui::size(gpui::px(8.0), gpui::px(16.0)), None, false, window);
                     assert_eq!(ops.len(), 1, "{text:?}");
                     let super::RowOp::Text { x, line } = &ops[0] else { panic!("configured font was bypassed") };
                     assert_eq!(*x, 0);
@@ -3478,7 +3599,7 @@ mod tests {
                 let text = char::from_u32(code).unwrap().to_string();
                 for decorated in [false, true] {
                     let row = [crate::vt::Cell { text: text.clone(), underline: decorated, strike: decorated, ..Default::default() }];
-                    let ops = super::row_ops(&row, gpui::size(gpui::px(8.0), gpui::px(16.0)), None, window);
+                    let ops = super::row_ops(&row, gpui::size(gpui::px(8.0), gpui::px(16.0)), None, false, window);
                     assert_eq!(ops.iter().filter(|op| !matches!(op, super::RowOp::Decoration { .. })).count(), 1, "U+{code:X}");
                     match &ops[0] {
                         super::RowOp::Text { x, line } => { assert_eq!(*x, 0); assert_eq!(line.text.as_ref(), text); }
