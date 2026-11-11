@@ -95,6 +95,7 @@ else
     <key>NSHighResolutionCapable</key><true/>
     <key>LSEnvironment</key><dict/></dict></plist>
 PLIST
+  scripts/mac-icon "$app"
   scripts/mac-sign "$app"
   tar -czf "$out" -C "$work" Herdr.app
 fi

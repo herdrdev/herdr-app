@@ -33,6 +33,7 @@ cat > "$app/Contents/Info.plist" <<'PLIST'
     <key>LSEnvironment</key><dict/></dict></plist>
 PLIST
 # Finder does not inherit a login shell's PATH; hc must still be discoverable.
+scripts/mac-icon "$app"
 /usr/libexec/PlistBuddy -c "Add :LSEnvironment:PATH string $HOME/.local/bin:/opt/homebrew/bin:$PATH" "$app/Contents/Info.plist"
 codesign --force --sign - "$app"
 ln -sfn "$app/Contents/MacOS/Herdr" "$HOME/.local/bin/herdr-app"

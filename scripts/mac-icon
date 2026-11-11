@@ -1,0 +1,39 @@
+#!/bin/bash
+# Compile assets/icons/Herdr.icon (Icon Composer) into an app bundle so macOS 26+
+# can render Default, Dark, Clear and Tinted styles. Herdr.icns stays in the
+# bundle as the fallback for older macOS. Usage: scripts/mac-icon path/to/Herdr.app
+set -euo pipefail
+cd "$(dirname "$0")/.."
+app=${1:?usage: scripts/mac-icon Herdr.app}
+icon=$PWD/assets/icons/Herdr.icon
+
+# .icon needs the Xcode 26+ actool. GitHub's macos-15 image defaults to an older
+# Xcode but ships 26.x next to it.
+actool_major() { DEVELOPER_DIR=${1:-${DEVELOPER_DIR:-}} xcrun actool --version 2>/dev/null | sed -n 's/.*<string>\([0-9][0-9]*\)\..*/\1/p' | head -1; }
+dev=${DEVELOPER_DIR:-}
+if [[ $(actool_major "$dev") -lt 26 ]]; then
+  dev=
+  for x in $(ls -d /Applications/Xcode_2[6-9]*.app 2>/dev/null | sort -rV); do
+    if [[ $(actool_major "$x/Contents/Developer") -ge 26 ]]; then dev="$x/Contents/Developer"; break; fi
+  done
+fi
+if [[ -z $dev && $(actool_major "") -ge 26 ]]; then dev=$(xcode-select -p); fi
+if [[ -z $dev ]]; then
+  echo 'mac-icon: Xcode 26 or newer is required to compile Herdr.icon' >&2
+  # A release must not silently ship the flat icon; local installs may.
+  if [[ -n ${CI:-} ]]; then exit 1; fi
+  echo 'mac-icon: skipping, the app keeps the flat Herdr.icns' >&2
+  exit 0
+fi
+
+out=$(mktemp -d)
+trap 'rm -rf "$out"' EXIT
+DEVELOPER_DIR=$dev xcrun actool "$icon" --compile "$out" \
+  --output-format human-readable-text --notices --warnings --errors \
+  --output-partial-info-plist "$out/partial.plist" \
+  --app-icon Herdr --include-all-app-icons --development-region en \
+  --target-device mac --platform macosx --minimum-deployment-target 11.0 >/dev/null
+cp "$out/Assets.car" "$app/Contents/Resources/Assets.car"
+plist="$app/Contents/Info.plist"
+/usr/libexec/PlistBuddy -c "Delete :CFBundleIconName" "$plist" 2>/dev/null || true
+/usr/libexec/PlistBuddy -c "Add :CFBundleIconName string Herdr" "$plist"

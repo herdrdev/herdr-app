@@ -236,9 +236,10 @@ printf 'dev PATH added' >> "$3"''')
             destination = checkout / path
             destination.parent.mkdir(parents=True, exist_ok=True)
             shutil.copy2(ROOT / path, destination)
-        sign = checkout / "scripts/mac-sign"
-        sign.write_text("#!/bin/sh\nexit 0\n")
-        sign.chmod(0o755)
+        for name in ("mac-sign", "mac-icon"):
+            stub = checkout / "scripts" / name
+            stub.write_text("#!/bin/sh\nexit 0\n")
+            stub.chmod(0o755)
         release = checkout / "target/release"
         release.mkdir(parents=True)
         for name in ("herdr-app", "herdr-app.exe"):
