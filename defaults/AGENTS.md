@@ -578,8 +578,10 @@ The main ones:
   `pane.swap {target}` trades the places of `pane` (default: the focused one) and
   `target`, another pane of the same tab; give `direction` or `target`, not both.
   A swap moves panes, not focus: the focused pane stays focused in its new place.
-  `pane.focus {terminal}` prefers the first visible layout terminal block showing that
-  address, then its model pane. Clicking a terminal block focuses it too.
+  `pane.focus {terminal}` prefers a visible overlay terminal block (topmost first),
+  then the first visible layout terminal block showing that address, then its model
+  pane. An open dialog or popup limits overlay targeting to that overlay.
+  Clicking a terminal block focuses it too.
   While a layout terminal block is focused, implicit split/close/zoom/go/swap and
   `terminal.show` fail, as do `terminal.open`/`terminal.keep` with place right/down.
   They never act on the terminal's source pane. An explicit `pane` still targets that
@@ -991,7 +993,11 @@ All of it is in `herdr.d.ts`. In short:
 - Act: `run(command, args)`.
 - Overlays: `openOverlay({ mod, props, kind: "dialog" | "popup" | "window", width, height, at, frame })`
   returns an id; the mod gets `props().overlay` and closes itself with
-  `closeOverlay(id)`; Esc closes the top dialog or popup. `frame: "none"`
+  `closeOverlay(id)`; Esc closes the top dialog or popup. A dialog or popup with a
+  terminal layout focuses its first visible terminal when opened; Esc goes to the
+  program instead. Closing it restores the previous keyboard focus if still shown,
+  otherwise the current pane. Closing an overlay underneath it leaves its keyboard
+  focus alone. `frame: "none"`
   drops Herdr's border, corners and shadow so the mod draws its own.
   `notify({ title, body, level, icon, timeout })` posts a notification, drawn
   by the layout-chosen mod (default: `toast`).
