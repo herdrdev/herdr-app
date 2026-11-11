@@ -166,7 +166,7 @@ fn folders() -> std::sync::MutexGuard<'static, std::collections::HashMap<PathBuf
 /// some came since the last call, else when the next batch lands.
 pub async fn next_change(path: String) -> Result<Vec<String>, String> {
     let root = Path::new(&path).canonicalize().map_err(|e| format!("{path}: {e}"))?;
-    let rx = {
+    let (rx, sender) = {
         let mut all = folders();
         if !all.contains_key(&root) {
             if all.len() >= MAX_FOLDERS {
@@ -184,10 +184,33 @@ pub async fn next_change(path: String) -> Result<Vec<String>, String> {
         }
         f.waiters.retain(|w| !w.is_closed());
         let (tx, rx) = async_channel::bounded(1);
+        let weak = tx.downgrade();
         f.waiters.push(tx);
-        rx
+        (rx, weak)
     };
+    let _waiting = FolderWait { root, sender };
     rx.recv().await.map_err(|_| "stopped watching".to_owned())
+}
+
+/// Weak: when the folder's watcher fails and lets go of its waiters, this wait
+/// must end with an error, not hang on a sender it keeps alive itself.
+struct FolderWait {
+    root: PathBuf,
+    sender: async_channel::WeakSender<Vec<String>>,
+}
+
+impl Drop for FolderWait {
+    fn drop(&mut self) {
+        let Some(sender) = self.sender.upgrade() else { return };
+        let mut all = folders();
+        if let Some(folder) = all.get_mut(&self.root) {
+            let pending = folder.waiters.iter().any(|waiter| waiter.same_channel(&sender));
+            folder.waiters.retain(|waiter| !waiter.same_channel(&sender));
+            if pending && folder.waiters.is_empty() {
+                all.remove(&self.root);
+            }
+        }
+    }
 }
 
 fn reclaim_idle(all: &mut std::collections::HashMap<PathBuf, Folder>) {
@@ -527,6 +550,30 @@ mod tests {
     }
 
     #[gpui::test]
+    fn a_wait_ends_with_an_error_when_its_watcher_stops(cx: &mut gpui::TestAppContext) {
+        let dir = std::env::temp_dir().join(format!("herdr-watch-stop-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let result = std::sync::Arc::new(std::sync::Mutex::new(None));
+        let received = result.clone();
+        let path = dir.to_string_lossy().into_owned();
+        cx.background_executor.spawn(async move {
+            *received.lock().unwrap() = Some(next_change(path).await);
+        }).detach();
+        cx.run_until_parked();
+        let (root, generation) = {
+            let all = folders();
+            let (root, folder) = all.iter().find(|(root, _)| root.ends_with(dir.file_name().unwrap())).expect("the wait registered its folder");
+            (root.clone(), folder.generation.clone())
+        };
+        assert!(result.lock().unwrap().is_none(), "nothing changed yet");
+        // What a failed native watcher does.
+        remove_folder(&root, &generation);
+        cx.run_until_parked();
+        assert_eq!(*result.lock().unwrap(), Some(Err("stopped watching".to_owned())));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[gpui::test]
     fn native_notifications_reach_a_waiting_test_receiver(cx: &mut gpui::TestAppContext) {
         let (tx, rx) = async_channel::unbounded();
         let pending = test_notifications(tx, cx.background_executor.clone());
@@ -597,8 +644,12 @@ mod tests {
     }
 
     fn install_watch(root: &Path) {
-        let mut wait = Box::pin(next_change(root.to_string_lossy().into_owned()));
-        assert!(wait.as_mut().poll(&mut std::task::Context::from_waker(std::task::Waker::noop())).is_pending());
+        // These event tests need an idle watch that buffers between calls.
+        let generation = Arc::new(());
+        folders().insert(root.to_owned(), Folder {
+            _watcher: start_folder(root, generation.clone()).unwrap(),
+            generation, waiters: Vec::new(), pending: HashSet::new(),
+        });
     }
 
     fn wait_for_change(root: &Path, path: &Path) {
@@ -670,6 +721,33 @@ mod tests {
             std::thread::sleep(BATCH);
         }
         folders().remove(&root);
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn cancelled_waits_release_quiet_folders_without_stopping_other_callers() {
+        use std::task::{Context, Waker};
+        let root = test_repo("cancel");
+        let path = root.to_string_lossy().into_owned();
+        let mut first = Box::pin(next_change(path.clone()));
+        let mut second = Box::pin(next_change(path.clone()));
+        let mut context = Context::from_waker(Waker::noop());
+        assert!(first.as_mut().poll(&mut context).is_pending());
+        assert!(second.as_mut().poll(&mut context).is_pending());
+        drop(first);
+        assert_eq!(folders().get(&root).unwrap().waiters.len(), 1);
+        std::fs::write(root.join("changed"), "yes").unwrap();
+        assert!(invalidates(&block_on(second).unwrap(), &root.join("changed")));
+        folders().remove(&root);
+        std::fs::remove_dir_all(root).unwrap();
+        let root = test_repo("cancel-quiet");
+        let path = root.to_string_lossy().into_owned();
+        for _ in 0..75 {
+            let mut wait = Box::pin(next_change(path.clone()));
+            assert!(wait.as_mut().poll(&mut context).is_pending());
+            drop(wait);
+            assert!(!folders().contains_key(&root));
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 

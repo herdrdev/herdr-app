@@ -119,6 +119,8 @@ those files or the generated guide. The app rewrites them on start.
   They are trusted JavaScript with command and network access.
   `"focusable": true` in `mod.json` lets `pane.go` move onto a copy; it receives
   `"focus"` from `nextCommand()` and focuses its own keyboard handle.
+- A mod's `watchFolder(dir)` promise has `cancel()`; cancel it when the folder
+  is no longer shown. It resolves with `[]` and releases only that call.
 - Shipped mods belong to Herdr: duplicate with `mod.clone` before editing.
   Shipped layouts likewise use `layout.clone` for a personal copy.
   Discover required arguments with `herdr-app commands`.

@@ -1038,6 +1038,9 @@ All of it is in `herdr.d.ts`. In short:
   A returned root path means refresh everything (the pending paths are bounded).
   At most 64 folders can have pending watches at once; further folders reject.
   Idle watches can be reclaimed to make room, so reload when starting a watch.
+  The returned promise also has `cancel()`: keep it and cancel when you stop
+  showing the folder. Cancellation resolves with `[]` and releases this call
+  without stopping other callers: `const watch = watchFolder(dir); watch.cancel();`.
   Closing a mod copy cancels its pending calls.
   Files also refreshes on its 10-second timer:
   `cx.spawn(async (cx) => { for (;;) { await watchFolder(dir); this.reload(); cx.notify(); } })`.

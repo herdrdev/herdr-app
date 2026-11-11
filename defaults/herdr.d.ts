@@ -419,8 +419,16 @@ export function nextCommand(): Promise<string>;
  * Pending paths are bounded: a batch containing the root means refresh everything.
  * Shared by every mod, with at most 64 folders awaiting changes at once.
  * Idle watches may be reclaimed to make room; reload when starting a watch.
+ * Call cancel() on the returned promise when you stop showing the folder.
+ * It resolves with [] and releases this call; other callers keep watching.
  * Closing a mod copy cancels its pending calls. Files also refreshes on its 10-second timer.
  *   cx.spawn(async (cx) => { for (;;) { await watchFolder(dir); this.reload(); cx.notify(); } });
  * Watch what you show, not a whole home folder (node_modules is a lot of events).
  */
-export function watchFolder(path: string): Promise<string[]>;
+export function watchFolder(path: string): FolderWatch;
+
+/** One pending watch. Keep this handle while the folder is shown. */
+export interface FolderWatch extends Promise<string[]> {
+  /** Resolves with [] and releases this call's watch. Safe to call again or after settlement. */
+  cancel(): void;
+}
