@@ -635,10 +635,10 @@ mod win {
         if give { focus::give(child); }
     }
 
-    /// What of the window is frame, by asking the window itself: its client
-    /// area, and where its hit test reports resize borders. The program's own
-    /// title bar (VS Code: menu, search, layout controls) stays. Runs off the
-    /// UI thread: it sends a few dozen messages to the other process.
+    /// The window's frame: what lies outside its client area. Everything the
+    /// program draws stays, including VS Code's title bar and the few pixels
+    /// at its edges where it reports resize borders. A resize from there is
+    /// undone by the watcher. No messages are sent to the other process.
     fn measure(hwnd: HWND) -> Crop {
         unsafe {
             let window = screen_rect(hwnd);
@@ -646,28 +646,12 @@ mod win {
             GetClientRect(hwnd, &mut client);
             let mut origin = POINT { x: 0, y: 0 };
             ClientToScreen(hwnd, &mut origin);
-            let mut crop = Crop {
+            Crop {
                 left: origin.x - window.left,
                 top: origin.y - window.top,
                 right: window.right - (origin.x + client.right),
                 bottom: window.bottom - (origin.y + client.bottom),
-            };
-            let hit = |x: i32, y: i32| -> u32 {
-                let lparam = ((y as u32 & 0xffff) << 16 | (x as u32 & 0xffff)) as LPARAM;
-                let mut result = 0usize;
-                SendMessageTimeoutW(hwnd, WM_NCHITTEST, 0, lparam, SMTO_ABORTIFHUNG, 50, &mut result);
-                result as u32
-            };
-            let width = client.right;
-            let center = origin.x + width / 2;
-            crop.top += (0..24).take_while(|i| matches!(hit(center, origin.y + i), HTTOP | HTTOPLEFT | HTTOPRIGHT)).count() as i32;
-            // Resize borders left despite WS_MAXIMIZE: cut those too.
-            let middle = origin.y + client.bottom / 2;
-            let edge = |from: i32, step: i32, codes: &[u32]| (0..24).take_while(|i| codes.contains(&hit(from + step * i, middle))).count() as i32;
-            crop.left += edge(origin.x, 1, &[HTLEFT]);
-            crop.right += edge(origin.x + width - 1, -1, &[HTRIGHT]);
-            crop.bottom += (0..24).take_while(|i| matches!(hit(center, origin.y + client.bottom - 1 - i), HTBOTTOM | HTBOTTOMLEFT | HTBOTTOMRIGHT)).count() as i32;
-            crop
+            }
         }
     }
 

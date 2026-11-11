@@ -20,10 +20,9 @@ instead of opening another.
   folder, it is adopted instead, found as the foreground window or by its title.
   A pane whose mod restarts takes the window over from its earlier copy.
 - **Container.** The window becomes a borderless child of a Herdr-owned container
-  window. The container follows the pane and cuts the window frame and resize
-  edges away, measured from VS Code's own hit test. VS Code's title bar (menu,
-  search, layout controls) stays. A move, resize or minimize from inside is
-  undone within a quarter second.
+  window. The container follows the pane and cuts away only the window frame
+  outside its client area; everything VS Code draws stays. A move, resize or
+  minimize from inside is undone within a quarter second.
 - **Overlays.** Toasts, popups and dialogs mark their area with
   `browser::cover()`. Native views (VS Code and the browser) cut those areas
   out of themselves with a window region and stay visible around them.
