@@ -6,7 +6,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { panes, props, run, theme, home, exec, spaces, layout } from "herdr";
+import { panes, props, run, theme, home, layout, agents, terminals } from "herdr";
 
 // Match the first visible tab frame, including the active child of a stack.
 function paneFrame(node) {
@@ -49,121 +49,80 @@ function agentPrefix(progName, progKey) {
   return progName || "Agent";
 }
 
-function formatTitle(p, extraTitle) {
+function isGenericTitle(title, p) {
+  if (!title) return true;
+  const t = title.trim().toLowerCase();
+  const progName = (p?.program?.name || "").toLowerCase();
+  const progKey = (p?.program?.key || "").toLowerCase();
+  const defaults = [
+    "", "bash", "zsh", "sh", "fish", "powershell", "pwsh", "cmd", "shell",
+    "terminal", "program", progName, progKey
+  ];
+  return defaults.includes(t);
+}
+
+function getLiveTitle(p) {
+  if (!p) return "";
+  // 1. Check pane.title
+  if (p.title && p.title.trim()) {
+    const t = p.title.trim();
+    if (!isGenericTitle(t, p)) return t;
+  }
+  // 2. Check agents()
+  try {
+    const agList = typeof agents === "function" ? agents() : [];
+    const ag = agList.find(a => a.pane === p.pane || (p.terminal && a.address === p.terminal));
+    if (ag?.title && ag.title.trim()) {
+      const t = ag.title.trim();
+      if (!isGenericTitle(t, p)) return t;
+    }
+  } catch (_) {}
+  // 3. Check terminals()
+  try {
+    if (p.terminal && typeof terminals === "function") {
+      const termList = terminals();
+      const term = termList.find(t => t.address === p.terminal || t.address.endsWith("/" + p.terminal.split("/").pop()));
+      if (term?.title && term.title.trim()) {
+        const t = term.title.trim();
+        if (!isGenericTitle(t, p)) return t;
+      }
+    }
+  } catch (_) {}
+  return p.title || "";
+}
+
+function formatTitle(p) {
   const progName = p.program?.name || p.title || "shell";
   const progKey = p.program?.key || "";
-  const termTitle = (p.title || "").trim();
   const prefix = agentPrefix(progName, progKey);
 
-  // 1. If terminal title already has formatted session (e.g. "OC | ...", "OMP | ...")
-  if (termTitle.includes(" | ")) {
-    return termTitle;
+  const raw = getLiveTitle(p);
+  if (!raw || isGenericTitle(raw, p)) {
+    return progName;
   }
 
-  // 2. If we resolved a session title from agent history
-  if (extraTitle && extraTitle.trim()) {
-    const clean = extraTitle
-      .replace(/^[\s\S]*?(THREAD|SERVER):\s*/i, "")
-      .replace(/^[\p{Emoji}\uFE0F\s]+/u, "")
-      .trim();
-    if (clean) {
-      return `${prefix} | ${clean}`;
-    }
+  const trimmed = raw.trim();
+
+  // If already formatted like "PREFIX | Title" (e.g. "OC | ...", "OMP | ...")
+  if (trimmed.includes(" | ")) {
+    return trimmed;
   }
 
-  // 3. If terminal title is a meaningful custom title (not generic shell/program)
-  const isDefault = [
-    progName.toLowerCase(),
-    progKey.toLowerCase(),
-    "bash", "zsh", "sh", "fish", "powershell", "pwsh", "cmd", "shell"
-  ].includes(termTitle.toLowerCase());
+  // Clean OMP / CLI status spinners and prompt symbols:
+  // e.g. "π > 💻 OPEN: Chỉnh hình trekker và màu BHD" -> "OPEN: Chỉnh hình trekker và màu BHD"
+  // e.g. "π ⠧ 💻 OPEN: Tích hợp CMS vào menubar admin" -> "OPEN: Tích hợp CMS vào menubar admin"
+  // e.g. "π ⠇ 🖼️ PHOTO: Tái hiện Intro Grid Motion Transition" -> "PHOTO: Tái hiện Intro Grid Motion Transition"
+  // e.g. "π > 📋 ENUM: Deploy Enum dropdown fix" -> "ENUM: Deploy Enum dropdown fix"
+  let clean = trimmed
+    .replace(/^[π\s>⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏•·\u2800-\u28FF]+/u, "")
+    .replace(/^[\p{Emoji}\uFE0F\s]+/u, "")
+    .trim();
 
-  if (termTitle && !isDefault) {
-    return `${prefix} | ${termTitle}`;
+  if (!clean || isGenericTitle(clean, p)) {
+    return progName;
   }
 
-  return progName;
-}
-
-const sessionCache = new Map();
-const inFlight = new Set();
-
-function targetMachine(p) {
-  if (p?.terminal?.includes("/")) return p.terminal.split("/")[0];
-  const space = spaces().find(s => s.active);
-  return space?.machine ?? null;
-}
-
-function resolveSessionTitle(p, cx) {
-  if (!p || !p.pane || !p.cwd) return;
-  const prog = (p.program?.name || p.program?.key || p.title || "").toLowerCase();
-  const on = targetMachine(p);
-  const cacheKey = `${p.pane}:${on || 'local'}:${p.cwd}`;
-
-  const cached = sessionCache.get(cacheKey);
-  if (cached && (Date.now() - cached.time < 5000)) return;
-  if (inFlight.has(cacheKey)) return;
-
-  inFlight.add(cacheKey);
-
-  cx.spawn(async (cx) => {
-    try {
-      let title = null;
-      if (prog.includes("omp")) {
-        const py = `import sqlite3, os
-p = os.path.expanduser('~/.omp/agent/history.db')
-cwd = ${JSON.stringify(p.cwd)}
-if os.path.exists(p):
-    try:
-        con = sqlite3.connect(p)
-        r = con.execute("SELECT title FROM session_titles WHERE session_id IN (SELECT session_id FROM history WHERE cwd=? ORDER BY created_at DESC LIMIT 1)", [cwd]).fetchone()
-        if not r:
-            r = con.execute("SELECT title FROM session_titles ORDER BY rowid DESC LIMIT 1").fetchone()
-        if r and r[0]:
-            print(r[0])
-    except Exception:
-        pass
-`;
-        const res = await exec("python3", ["-c", py], { on }).catch(() => null);
-        if (res && res.code === 0 && res.stdout && res.stdout.trim()) {
-          title = res.stdout.trim().split("\n")[0];
-        }
-      } else if (prog.includes("claude")) {
-        const py = `import json, os
-p = os.path.expanduser('~/.claude/history.jsonl')
-cwd = ${JSON.stringify(p.cwd)}
-if os.path.exists(p):
-    try:
-        lines = open(p, 'r', encoding='utf-8', errors='ignore').readlines()
-        for line in reversed(lines):
-            try:
-                data = json.loads(line)
-                if data.get('project') == cwd and data.get('display'):
-                    d = data['display'].strip()
-                    if not d.startswith('/'):
-                        print(d)
-                        break
-            except Exception:
-                continue
-    except Exception:
-        pass
-`;
-        const res = await exec("python3", ["-c", py], { on }).catch(() => null);
-        if (res && res.code === 0 && res.stdout && res.stdout.trim()) {
-          title = res.stdout.trim().split("\n")[0];
-        }
-      }
-
-      if (title) {
-        sessionCache.set(cacheKey, { title, time: Date.now() });
-        cx.notify();
-      }
-    } catch (_) {
-      // Ignore background detection errors
-    } finally {
-      inFlight.delete(cacheKey);
-    }
-  });
+  return `${prefix} | ${clean}`;
 }
 
 export default class Pane extends View {
@@ -194,15 +153,7 @@ export default class Pane extends View {
     const p = this.me();
     if (!p) return div();
 
-    const on = targetMachine(p);
-    const cacheKey = `${p.pane}:${on || 'local'}:${p.cwd}`;
-    const cached = sessionCache.get(cacheKey);
-
-    if (!p.title || !p.title.includes(" | ")) {
-      resolveSessionTitle(p, cx);
-    }
-
-    const name = formatTitle(p, cached?.title);
+    const name = formatTitle(p);
     const pic = icon(p.program, 14, t.dim);
     const st = p.status;
     const pane = p.pane;
