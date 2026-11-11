@@ -78,6 +78,12 @@ the same tab. Give `direction` or `target`, not both. Focus stays with the same 
 herdr-app do pane.swap '{"pane":"p12","target":"p14"}'
 ```
 
+`pane.focus {terminal}` can focus a visible terminal in an overlay, even without a
+model pane. A dialog or popup with a terminal layout focuses its first visible
+terminal when opened; Escape goes to the program, not to closing the popup.
+Closing the popup restores the previous keyboard focus if still shown, otherwise
+the current pane.
+
 `terminal.search` opens a find bar in the focused terminal. It searches that
 terminal's screen and scrollback; Enter and Shift-Enter move between matches,
 Escape closes the bar while its find field has focus, and each terminal keeps its own query (reopening selects it, so typing replaces it).

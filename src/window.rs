@@ -313,6 +313,8 @@ struct Overlay {
     size: Size<f32>,
     expires: Option<Instant>,
     focus: FocusHandle,
+    initial_focus: Option<gpui::WeakFocusHandle>,
+    return_focus: Option<gpui::WeakFocusHandle>,
     /// Blocks instead of one mod (terminals too), ids prefixed with the overlay's.
     layout: Option<Node>,
     /// `at: "top"`: centered, this far below the window's top.
@@ -1576,7 +1578,10 @@ impl AppWindow {
     /// reload), it goes to the top dialog, else the shown agent or focused pane,
     /// else the window, where the app's keys work.
     fn restore_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        let dialog = self.overlays.iter().rev().find(|o| o.kind.modal_keys()).map(|o| o.focus.clone());
+        let dialog = self.overlays.iter().rev().find(|o| o.kind.modal_keys()).map(|o| {
+            o.layout.as_ref().and_then(|l| l.visible_blocks().into_iter().find_map(|n| self.pane_focus(&n.id, cx)))
+                .unwrap_or_else(|| o.focus.clone())
+        });
         // A mod block holding the keyboard gets it back (a popup over it closed).
         if dialog.is_none() && self.focused_block.as_ref().is_some_and(|b| self.mod_block_shown(b)) {
             self.focus.focus(window, cx);
@@ -3046,6 +3051,19 @@ impl AppWindow {
                 }
             }
             "pane.focus" => {
+                let modal = self.overlays.iter().rev().find(|o| o.kind.modal_keys());
+                if Self::arg(a, "pane").is_none()
+                    && let Some(terminal) = Self::arg(a, "terminal")
+                    && let Some(block) = self.overlays.iter().rev()
+                        .filter(|o| modal.is_none_or(|top| top.id == o.id))
+                        .filter_map(|o| o.layout.as_ref())
+                        .find_map(|l| l.visible_blocks().into_iter().find(|n| n.terminal() == Some(terminal)))
+                    && let Some(f) = self.pane_focus(&block.id, cx)
+                {
+                    f.focus(window, cx);
+                    cx.notify();
+                    return;
+                }
                 if Self::arg(a, "pane").is_none()
                     && let Some(terminal) = Self::arg(a, "terminal")
                     && let Some(block) = self.chrome.visible_blocks().into_iter().find(|n| n.terminal() == Some(terminal))
@@ -3620,6 +3638,8 @@ impl AppWindow {
         });
         let slot = format!("overlay:{id}");
         // The frame takes the keyboard first, so a mod that focuses itself while loading wins.
+        let previous_focus = window.focused(cx);
+        let return_focus = if kind.modal_keys() { previous_focus.as_ref().map(|f| f.downgrade()) } else { None };
         let focus = cx.focus_handle();
         if kind.modal_keys() {
             focus.focus(window, cx);
@@ -3637,13 +3657,15 @@ impl AppWindow {
         let first_term = layout.as_ref().and_then(|l| l.visible_blocks().into_iter().find(|n| matches!(n.content(), Some(Content::Terminal { .. }))).map(|n| n.id.clone()));
         let has_layout = layout.is_some();
         self.overlays.push(Overlay {
-            id,
+            id: id.clone(),
             kind,
             slot,
             at,
             size,
             expires: (kind == OverlayKind::Toast).then(|| Instant::now() + Duration::from_millis(timeout as u64)),
             focus,
+            initial_focus: None,
+            return_focus,
             layout,
             top,
             fit,
@@ -3665,10 +3687,13 @@ impl AppWindow {
             if kind.modal_keys()
                 && let Some(t) = first_term.and_then(|b| self.terms.get(&b))
             {
-                t.focus.focus(window, cx);
+                t.view.read(cx).focus_target(cx).focus(window, cx);
             }
         } else {
             self.publish_shown_copies();
+        }
+        if let Some(o) = self.overlays.iter_mut().find(|o| o.id == id) {
+            o.initial_focus = window.focused(cx).filter(|f| previous_focus.as_ref() != Some(f)).map(|f| f.downgrade());
         }
         cx.notify();
     }
@@ -3708,9 +3733,25 @@ impl AppWindow {
         self.remove_overlay(id, window, cx);
     }
 
+    fn overlay_contains_focus(&self, o: &Overlay, focus: &FocusHandle, window: &Window, cx: &App) -> bool {
+        o.focus == *focus || o.focus.contains(focus, window)
+            || o.initial_focus.as_ref().and_then(|f| f.upgrade()).is_some_and(|f| f == *focus)
+            || o.layout.as_ref().is_some_and(|l| l.visible_blocks().into_iter().any(|n| {
+                self.pane_focus(&n.id, cx).is_some_and(|f| f == *focus || f.contains(focus, window))
+            }))
+    }
+
     fn remove_overlay(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(i) = self.overlays.iter().position(|o| o.id == id) {
             let o = self.overlays.remove(i);
+            let had_focus = window.focused(cx).is_some_and(|f| self.overlay_contains_focus(&o, &f, window, cx));
+            let inherited: Vec<_> = self.overlays.iter().enumerate().filter_map(|(i, other)| {
+                other.return_focus.as_ref().and_then(|f| f.upgrade())
+                    .filter(|f| self.overlay_contains_focus(&o, f, window, cx)).map(|_| i)
+            }).collect();
+            for i in inherited {
+                self.overlays[i].return_focus = o.return_focus.clone();
+            }
             if self.win_drag.as_ref().is_some_and(|d| d.id == o.id) {
                 self.win_drag = None;
             }
@@ -3721,12 +3762,21 @@ impl AppWindow {
             } else {
                 self.publish_shown_copies();
             }
-            // The keyboard never ends up nowhere: back to a dialog still open,
-            // else the pane, else the window (where the app's keys work). A
-            // window in the background had none to give back (one that had it:
-            // `restore_focus` runs on its own when its focus goes).
-            if o.kind.modal_keys() {
-                self.restore_focus(window, cx);
+            if had_focus {
+                let (shown, _) = self.visible();
+                let previous = o.return_focus.as_ref().and_then(|f| f.upgrade()).filter(|f| {
+                    let hidden_terminal = self.terms.iter().any(|(slot, t)| {
+                        (t.focus == *f || t.view.read(cx).focus_target(cx) == *f || t.focus.contains(f, window))
+                            && !shown.iter().any(|(id, _)| id == slot)
+                    });
+                    !hidden_terminal && self.overlays.iter().rev().find(|o| o.kind.modal_keys())
+                        .is_none_or(|top| self.overlay_contains_focus(top, f, window, cx))
+                });
+                if let Some(focus) = previous {
+                    focus.focus(window, cx);
+                } else {
+                    self.restore_focus(window, cx);
+                }
             }
             cx.notify();
         }
@@ -5986,6 +6036,7 @@ export default class Probe extends View {
         }
     }
 
+    include!("window/overlay_focus_tests.rs");
     include!("window/pane_size_tests.rs");
     include!("window/drag_tests.rs");
 

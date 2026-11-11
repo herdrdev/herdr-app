@@ -228,7 +228,9 @@ export function terminals(): any[];
  *  A terminal in a window (openOverlay with a layout) that has the keyboard is reported
  *  the same way (`pane` and `shown` null); implicit pane commands still act on the
  *  focused pane under the window.
- *  pane.focus {terminal} prefers the first visible layout terminal block, then a model pane.
+ *  pane.focus {terminal} prefers visible overlay terminal blocks (topmost first), then the
+ *  first visible layout terminal block, then a model pane. While a dialog or popup is open,
+ *  only that top modal overlay's terminal blocks can receive overlay focus.
  *  `shown`: terminal.show replacement, if any. `agent`: the agent an agent block shows.
  *  `terminal` is null for mod panes. Live. */
 export function focused(): { space: string; tab: string; pane: string | null; terminal: string | null; shown: string | null; agent: string | null; cwd: string | null } | null;
@@ -341,8 +343,10 @@ export interface OverlaySpec {
   mod?: string;
   props?: Record<string, unknown>;
   /** Blocks as in layouts/*.json (`{ terminal: "t7" }` blocks too), instead of `mod`. Its mods get
-   *  `props().overlay`. Esc goes to its terminals (agents use it), so give it a way to close.
-   *  Closes itself when its terminal ends. */
+   *  `props().overlay`. Dialogs and popups focus their first visible terminal on opening.
+   *  Esc goes to its terminals (agents use it), so give it a way to close.
+   *  Closing a dialog or popup restores the previous keyboard focus if still shown,
+   *  otherwise the current pane. Closes itself when its terminal ends. */
   layout?: unknown;
   /** dialog: centered, dims the window. popup: at `at` (default: the pointer).
    *  window: stays open until closed (no dimming, a click beside it doesn't close it, Esc goes to
