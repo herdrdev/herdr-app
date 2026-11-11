@@ -1,12 +1,13 @@
 //! A native program's own window shown inside a Herdr pane (Windows).
 //!
-//! The pane asks the program for a new window (VS Code: `--new-window` on a
-//! folder) and adopts that top-level window from the program's process, which
-//! may already be running the person's other windows. The window moves into a
-//! container child window that Herdr owns: the container follows the pane,
+//! The pane asks the program for a new window and adopts that top-level
+//! window. VS Code opens it with `--new-window` on a folder, from a process
+//! that may already run the person's other windows. Fork gets a process of its
+//! own per pane, which opens only the pane's repository. The window moves into
+//! a container child window that Herdr owns: the container follows the pane,
 //! crops the program's own title bar and frame, and has overlays cut out of it.
 //! Closing the pane gives the window back to the desktop and closes it, as its
-//! own close button would; the program keeps running.
+//! own close button would.
 //!
 //! Native calls on another process's window send messages to it. They run in
 //! foreground tasks between App updates, never inside layout or paint, so a
@@ -33,6 +34,11 @@ struct Launch {
     /// What the title of a window already showing the target contains as a
     /// " - "-separated part (VS Code: the folder's name, maybe with " [WSL: …]").
     title: String,
+    /// Only a window of the started process is the pane's.
+    own_process: bool,
+    /// Fork: the repository that Fork's settings get as the only one of the
+    /// active workspace just before the start.
+    fork_repo: Option<String>,
 }
 
 /// A rectangle in device pixels, relative to the host window's client area.
@@ -55,9 +61,6 @@ pub(super) struct NativeApp {
     generation: u64,
     /// The window was closed; only reopen asks for a new one.
     closed: bool,
-    /// A single-window program moved on to another pane; this one takes it
-    /// back when shown again.
-    moved: bool,
     /// Keyboard focus was asked for while the pane was hidden: give it when
     /// the pane shows up soon after (a tab selected just before).
     focus_until: Option<std::time::Instant>,
@@ -75,11 +78,6 @@ fn launch(app: &str, target: &str) -> anyhow::Result<Launch> {
         other => anyhow::bail!("Unknown native app {other:?}; Herdr knows \"vscode\" and \"fork\""),
     }
 }
-
-/// The program has one window for all its folders (Fork): the window follows
-/// the pane that shows it, and each pane opens its folder there.
-#[cfg_attr(not(windows), allow(dead_code))]
-fn single(app: &str) -> bool { app == "fork" }
 
 /// The person's own VS Code: default profile and user data, so a running VS
 /// Code opens the window itself. `target` is a folder URI (`file://`,
@@ -104,11 +102,16 @@ fn vscode(target: &str) -> anyhow::Result<Launch> {
     }
     let name = target.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or_default();
     let title = url::form_urlencoded::parse(format!("n={name}").as_bytes()).next().map(|(_, v)| v.into_owned()).unwrap_or_default();
-    Ok(Launch { program, args, class: "Chrome_WidgetWin_1", title })
+    Ok(Launch { program, args, class: "Chrome_WidgetWin_1", title, own_process: false, fork_repo: None })
 }
 
-/// The person's Fork (git client) on a repository. `target` is a local
-/// folder, a `file://` URI or a VS Code WSL folder URI (`vscode-remote://wsl+…`).
+/// A Fork (git client) process of the pane's own on a repository. `target`
+/// is a local folder, a `file://` URI or a VS Code WSL folder URI
+/// (`vscode-remote://wsl+…`).
+///
+/// Fork started with a folder hands it to a running Fork and exits; started
+/// with none, it is a new process that restores the tabs of its active
+/// workspace. So the pane writes a workspace of only its repository first.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn fork(target: &str) -> anyhow::Result<Launch> {
     let env = |key: &str| std::env::var_os(key).filter(|v| !v.is_empty()).map(PathBuf::from);
@@ -119,7 +122,59 @@ fn fork(target: &str) -> anyhow::Result<Launch> {
     ];
     let program = candidates.into_iter().flatten().find(|p| p.is_file())
         .ok_or_else(|| anyhow::anyhow!("Fork is not installed (set HERDR_FORK_EXE to Fork.exe)"))?;
-    Ok(Launch { program, args: vec![windows_folder(target)?], class: "HwndWrapper[Fork.exe;*", title: String::new() })
+    let mut folder = windows_folder(target)?;
+    while folder.len() > 3 && folder.ends_with(['\\', '/']) { folder.pop(); }
+    Ok(Launch { program, args: Vec::new(), class: "HwndWrapper[Fork.exe;*", title: String::new(), own_process: true, fork_repo: Some(folder) })
+}
+
+/// The name of the Fork workspace that Herdr's panes start Fork in.
+const FORK_WORKSPACE: &str = "Herdr";
+
+/// Give the "Herdr" workspace of Fork's settings
+/// (`%LOCALAPPDATA%\Fork\settings.json`) only `folder` and make it active.
+/// Other workspaces and settings stay as they are. Without that file Fork has
+/// never run: then it starts empty.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn prepare_fork(folder: &str) -> anyhow::Result<()> {
+    use anyhow::Context;
+    let dir = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).context("LOCALAPPDATA is not set")?.join("Fork");
+    let path = dir.join("settings.json");
+    let text = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+        Err(error) => return Err(error).with_context(|| format!("Cannot read {}", path.display())),
+    };
+    let mut settings: serde_json::Value = serde_json::from_str(text.trim_start_matches('\u{feff}'))
+        .with_context(|| format!("Cannot parse {}", path.display()))?;
+    fork_workspace(&mut settings, folder)?;
+    // A running Fork may read the file at any time: replace it whole.
+    let temp = dir.join("settings.json.herdr");
+    std::fs::write(&temp, serde_json::to_vec_pretty(&settings)?).with_context(|| format!("Cannot write {}", temp.display()))?;
+    std::fs::rename(&temp, &path).with_context(|| format!("Cannot replace {}", path.display()))
+}
+
+/// Fork's settings JSON with the "Herdr" workspace holding only `folder`,
+/// made active.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn fork_workspace(settings: &mut serde_json::Value, folder: &str) -> anyhow::Result<()> {
+    use anyhow::Context;
+    use serde_json::{Value, json};
+    let root = settings.as_object_mut().context("Fork's settings are not a JSON object")?;
+    let workspaces = root.entry("Workspaces").or_insert_with(|| json!({}))
+        .as_object_mut().context("Fork's Workspaces setting is not an object")?;
+    {
+        let all = workspaces.entry("All").or_insert_with(|| json!([]))
+            .as_array_mut().context("Fork's workspace list is not an array")?;
+        let index = match all.iter().position(|w| w.get("Name").and_then(Value::as_str) == Some(FORK_WORKSPACE)) {
+            Some(index) => index,
+            None => { all.push(json!({ "Name": FORK_WORKSPACE })); all.len() - 1 }
+        };
+        let workspace = all[index].as_object_mut().context("A Fork workspace is not an object")?;
+        workspace.insert("Repositories".into(), json!([folder]));
+        workspace.insert("ActiveRepository".into(), json!(folder));
+    }
+    workspaces.insert("ActiveWorkspace".into(), json!(FORK_WORKSPACE));
+    Ok(())
 }
 
 /// A window class against a `Launch.class` pattern.
@@ -220,29 +275,6 @@ pub(super) fn end_frame(dragging: bool, covers: &[Bounds<Pixels>], window: &mut 
     for app in &apps {
         app.borrow_mut().update_visibility(window, dragging, covers);
     }
-    #[cfg(windows)]
-    for app in &apps {
-        // A shown pane that a single-window program moved away from takes it
-        // back from a hidden holder.
-        let reclaim = {
-            let a = app.borrow();
-            a.moved && a.visible && !apps.iter().any(|o| {
-                if Rc::ptr_eq(o, app) { return false; }
-                let o = o.borrow();
-                o.app == a.app && o.visible && o.embedded.is_some()
-            })
-        };
-        if reclaim {
-            {
-                let mut a = app.borrow_mut();
-                a.moved = false;
-                a.closed = false;
-                a.generation += 1;
-                a.status = "Opening…".into();
-            }
-            start(app, window, cx);
-        }
-    }
     for app in &apps {
         schedule_apply(app, window, cx);
     }
@@ -274,14 +306,14 @@ pub(super) fn register(registry: &mut ComponentRegistry) {
             let state = Rc::new(RefCell::new(NativeApp {
                 window: window.window_handle().window_id(), app: app.clone(), target: target.clone(),
                 status: "Opening…".into(), error: None, hitbox: None, rect: None, visible: false, holes: Vec::new(),
-                apply_pending: false, generation: 0, closed: false, moved: false, focus_until: None,
+                apply_pending: false, generation: 0, closed: false, focus_until: None,
                 #[cfg(windows)] embedded: None,
                 #[cfg(windows)] opening: false,
             }));
             APPS.with_borrow_mut(|apps| apps.push(Rc::downgrade(&state)));
             Ok(Box::new(state))
         },
-    ).with_documentation("A program's own window shown in this pane: \"vscode\" (the person's VS Code on a folder URI or path) or \"fork\" (Fork, one window for all repositories, on a local or WSL folder). Closing the pane closes that window.")
+    ).with_documentation("A program's own window shown in this pane: \"vscode\" (the person's VS Code on a folder URI or path) or \"fork\" (a Fork process of this pane's own, showing only one repository: a local or WSL folder). Closing the pane closes that window.")
     .with_methods(vec![
         StateMethodDescriptor::new::<State>("status", "(): string", |state, _, _, _| {
             Ok(ComponentDataValue::String(state.borrow().status.clone()))
@@ -300,7 +332,6 @@ pub(super) fn register(registry: &mut ComponentRegistry) {
             if app.closed || app.error.is_some() {
                 app.generation += 1;
                 app.closed = false;
-                app.moved = false;
                 app.error = None;
                 app.status = "Opening…".into();
             }
@@ -429,15 +460,10 @@ mod win {
             Ok(launch) => launch,
             Err(error) => { fail(state, format!("{error:#}")); return; }
         };
-        let single = super::single(&app);
         // A pane whose mod restarted (a mod reload, a layout change) gets the
         // window its earlier copy still holds for the same target: VS Code
         // would only bring that window forward instead of opening another.
-        // A single-window program comes from any pane, and opens this folder.
-        if let Some((embedded, from)) = take_over(state, &app, &target, host) {
-            if single && from != target && let Err(error) = run(&launch) {
-                tracing::warn!(%error, "cannot open the folder in the adopted window");
-            }
+        if let Some(embedded) = take_over(state, &app, &target, host) {
             let weak = Rc::downgrade(state);
             let child = embedded.child as usize;
             {
@@ -452,33 +478,62 @@ mod win {
             }).detach();
             return;
         }
-        let before = program_windows(&launch);
-        let foreground = unsafe { GetForegroundWindow() };
-        let mut child = match run(&launch) {
-            Ok(child) => child,
-            Err(error) => { fail(state, format!("Cannot start {}: {error}", launch.program.display())); return; }
-        };
-        state.borrow_mut().status = "Waiting for its window…".into();
         let weak = Rc::downgrade(state);
         window.spawn(cx, async move |cx| {
+            // Fork reads its settings when it starts: one start at a time,
+            // each with its own repository there.
+            let starting = match &launch.fork_repo {
+                Some(folder) => {
+                    while STARTING.get() {
+                        let Some(state) = weak.upgrade() else { return };
+                        if state.borrow().generation != generation { state.borrow_mut().opening = false; return; }
+                        state.borrow_mut().status = "Waiting for another Fork to start…".into();
+                        drop(state);
+                        cx.background_executor().timer(Duration::from_millis(100)).await;
+                    }
+                    let starting = Starting::new();
+                    let folder = folder.clone();
+                    if let Err(error) = cx.background_executor().spawn(async move { super::prepare_fork(&folder) }).await {
+                        tracing::warn!(error = format!("{error:#}"), "cannot give Fork the pane's repository");
+                    }
+                    Some(starting)
+                }
+                None => None,
+            };
+            let Some(state) = weak.upgrade() else { return };
+            if state.borrow().generation != generation { state.borrow_mut().opening = false; return; }
+            let before = program_windows(&launch);
+            let foreground = unsafe { GetForegroundWindow() };
+            let mut child = match run(&launch) {
+                Ok(child) => child,
+                Err(error) => {
+                    fail(&state, format!("Cannot start {}: {error}", launch.program.display()));
+                    let _ = cx.update(|window, _| window.refresh());
+                    return;
+                }
+            };
+            let pid = child.id();
+            state.borrow_mut().status = "Waiting for its window…".into();
+            drop(state);
             let opened = Instant::now();
             // Adopt the new window.
             let found = loop {
                 cx.background_executor().timer(Duration::from_millis(100)).await;
                 let Some(state) = weak.upgrade() else { return };
                 if state.borrow().generation != generation { state.borrow_mut().opening = false; return; }
-                let now = program_windows(&launch);
+                let mut now = program_windows(&launch);
+                if launch.own_process { now.retain(|&hwnd| window_pid(hwnd) == pid); }
                 if let Some(&hwnd) = now.iter().find(|h| !before.contains(h)) { break hwnd; }
-                // A single-window program on the desktop opens the folder in
-                // its window: adopt that.
-                if single && opened.elapsed() > Duration::from_millis(1500) && let Some(&hwnd) = now.first() { break hwnd; }
                 // A program that already shows this folder brings that window
                 // to the front instead of opening another. Windows may not let
                 // it come forward: then it is found by its title.
                 let front = unsafe { GetForegroundWindow() };
                 if opened.elapsed() > Duration::from_secs(2) && front != foreground && now.contains(&front) { break front; }
                 if opened.elapsed() > Duration::from_secs(3) && let Some(hwnd) = showing(&now, &launch.title) { break hwnd; }
-                let failed = matches!(child.try_wait(), Ok(Some(status)) if !status.success());
+                let failed = match child.try_wait() {
+                    Ok(Some(status)) => launch.own_process || !status.success(),
+                    _ => false,
+                };
                 if failed || opened.elapsed() > Duration::from_secs(20) {
                     let mut app = state.borrow_mut();
                     app.opening = false;
@@ -487,6 +542,7 @@ mod win {
                     return;
                 }
             };
+            drop(starting);
             let Some(state) = weak.upgrade() else { return };
             let mut embedded = embed(found, host);
             let child = found as usize;
@@ -503,6 +559,26 @@ mod win {
             focus::give(found);
             watch_loop(weak, generation, child, cx).await;
         }).detach();
+    }
+
+    thread_local! {
+        /// A program that reads its settings at start (Fork) is starting.
+        static STARTING: Cell<bool> = const { Cell::new(false) };
+    }
+
+    /// Holds `STARTING` until dropped.
+    struct Starting;
+    impl Starting {
+        fn new() -> Self { STARTING.set(true); Starting }
+    }
+    impl Drop for Starting {
+        fn drop(&mut self) { STARTING.set(false); }
+    }
+
+    fn window_pid(hwnd: HWND) -> u32 {
+        let mut pid = 0;
+        unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
+        pid
     }
 
     fn run(launch: &Launch) -> std::io::Result<std::process::Child> {
@@ -524,32 +600,28 @@ mod win {
         app.error = Some(error);
     }
 
-    /// The window another state of the same program and target (any target
-    /// for a single-window program) holds, moved into this host, with that
-    /// state's target. That state ends as closed.
-    fn take_over(state: &State, app: &str, target: &str, host: HWND) -> Option<(Embedded, String)> {
-        let single = super::single(app);
+    /// The window another state of the same program and target holds, moved
+    /// into this host. That state ends as closed.
+    fn take_over(state: &State, app: &str, target: &str, host: HWND) -> Option<Embedded> {
         let other = super::APPS.with_borrow(|apps| {
             apps.iter().filter_map(std::rc::Weak::upgrade).find(|other| {
                 if Rc::ptr_eq(other, state) { return false; }
                 let o = other.borrow();
                 // One pane per project: the newest one shows its window.
-                o.app == app && (single || o.target == target) && o.embedded.is_some()
+                o.app == app && o.target == target && o.embedded.is_some()
             })
         })?;
         let mut o = other.borrow_mut();
         let mut embedded = o.embedded.take()?;
         o.generation += 1;
         o.closed = true;
-        o.moved = single;
         o.status = "Moved to another pane.".into();
-        let from = o.target.clone();
         drop(o);
         embedded.applied = None;
         unsafe {
             if GetParent(embedded.container) != host { SetParent(embedded.container, host); }
         }
-        Some((embedded, from))
+        Some(embedded)
     }
 
     /// Watch an adopted window: closed by its own button, moved by its title
@@ -905,7 +977,43 @@ mod win {
 
 #[cfg(test)]
 mod tests {
-    use super::{class_matches, windows_folder};
+    use super::{class_matches, fork_workspace, windows_folder};
+    use serde_json::json;
+
+    #[test]
+    fn fork_starts_in_a_workspace_of_one_repository() {
+        let mut settings = json!({
+            "Theme": 1,
+            "Workspaces": {
+                "All": [
+                    { "Name": "Work", "Repositories": [r"C:\work"], "ActiveRepository": r"C:\work" },
+                    { "Name": "Herdr", "Repositories": [r"C:\old", r"C:\other"], "ActiveRepository": r"C:\old", "Color": 3 },
+                ],
+                "ActiveWorkspace": "Work",
+                "ShowInTitle": false,
+            },
+        });
+        fork_workspace(&mut settings, r"C:\new").unwrap();
+        assert_eq!(settings, json!({
+            "Theme": 1,
+            "Workspaces": {
+                "All": [
+                    { "Name": "Work", "Repositories": [r"C:\work"], "ActiveRepository": r"C:\work" },
+                    { "Name": "Herdr", "Repositories": [r"C:\new"], "ActiveRepository": r"C:\new", "Color": 3 },
+                ],
+                "ActiveWorkspace": "Herdr",
+                "ShowInTitle": false,
+            },
+        }));
+
+        let mut fresh = json!({ "Theme": 1 });
+        fork_workspace(&mut fresh, r"\\wsl.localhost\Ubuntu\root\app").unwrap();
+        assert_eq!(fresh["Workspaces"], json!({
+            "All": [{ "Name": "Herdr", "Repositories": [r"\\wsl.localhost\Ubuntu\root\app"], "ActiveRepository": r"\\wsl.localhost\Ubuntu\root\app" }],
+            "ActiveWorkspace": "Herdr",
+        }));
+        assert!(fork_workspace(&mut json!([]), r"C:\new").is_err());
+    }
 
     #[test]
     fn folders_become_windows_paths() {
