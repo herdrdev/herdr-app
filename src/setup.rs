@@ -211,7 +211,7 @@ impl Setup {
             return;
         }
         if !crate::update::relaunch() {
-            self.state = State::Failed("Cannot restart Herdr. Close and reopen it to use Windows.".into());
+            self.state = State::Failed("Cannot restart Herdr. Close and reopen it to continue without WSL.".into());
             cx.notify();
             return;
         }
@@ -285,22 +285,22 @@ impl Render for Setup {
                 .gap(px(10.0))
                 .child(button("install", "Install it for me", true).when(!busy, |d| d.on_click(cx.listener(|this, _, w, cx| this.install(w, cx)))))
                 .child(button("choose", "I have it somewhere…", false).when(!busy, |d| d.on_click(cx.listener(|this, _, w, cx| this.choose(w, cx)))))
-                .when(wsl, |d| d.child(button("use-windows", "Use Windows instead", false).when(!busy, |d| d.on_click(cx.listener(|this, _, _, cx| this.use_windows(cx)))))),
+                .when(wsl, |d| d.child(button("use-windows", "Continue without WSL", false).when(!busy, |d| d.on_click(cx.listener(|this, _, _, cx| this.use_windows(cx)))))),
             Need::Connect(_) => div()
                 .flex()
                 .gap(px(10.0))
                 .child(button("retry", "Retry", true).on_click(cx.listener(|this, _, w, cx| this.start(w, cx))))
-                .when(wsl, |d| d.child(button("use-windows", "Use Windows instead", false).when(!busy, |d| d.on_click(cx.listener(|this, _, _, cx| this.use_windows(cx)))))),
+                .when(wsl, |d| d.child(button("use-windows", "Continue without WSL", false).when(!busy, |d| d.on_click(cx.listener(|this, _, _, cx| this.use_windows(cx)))))),
             Need::Fix(Mismatch::Newer { .. }) => div()
                 .flex()
                 .gap(px(10.0))
                 .child(button("quit", "Quit", false).on_click(cx.listener(|_, _, _, cx| cx.quit())))
-                .when(wsl, |d| d.child(button("use-windows", "Use Windows instead", false).on_click(cx.listener(|this, _, _, cx| this.use_windows(cx))))),
+                .when(wsl, |d| d.child(button("use-windows", "Continue without WSL", false).on_click(cx.listener(|this, _, _, cx| this.use_windows(cx))))),
             Need::Fix(_) => div()
                 .flex()
                 .gap(px(10.0))
                 .child(button("update", "Update herdr-core", true).when(!busy, |d| d.on_click(cx.listener(|this, _, w, cx| this.update(w, cx)))))
-                .when(wsl, |d| d.child(button("use-windows", "Use Windows instead", false).when(!busy, |d| d.on_click(cx.listener(|this, _, _, cx| this.use_windows(cx)))))),
+                .when(wsl, |d| d.child(button("use-windows", "Continue without WSL", false).when(!busy, |d| d.on_click(cx.listener(|this, _, _, cx| this.use_windows(cx)))))),
         };
         div()
             .size_full()
@@ -321,8 +321,10 @@ impl Render for Setup {
                             .flex()
                             .items_center()
                             .gap(px(14.0))
-                            .child(img(self.icon.clone()).w(px(48.0)).h(px(48.0)))
-                            .child(div().text_size(px(22.0)).font_weight(FontWeight::SEMIBOLD).child(title)),
+                            .child(img(self.icon.clone()).w(px(48.0)).h(px(48.0)).flex_shrink_0())
+                            // Constrain the title to the space beside the icon so long
+                            // WSL distro names wrap instead of widening the whole row.
+                            .child(div().flex_1().min_w_0().text_size(px(22.0)).font_weight(FontWeight::SEMIBOLD).child(title)),
                     )
                     .child(div().text_size(px(14.0)).line_height(px(21.0)).text_color(c("muted")).child(body))
                     .child(actions)
