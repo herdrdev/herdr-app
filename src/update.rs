@@ -595,6 +595,10 @@ pub fn after_update() {
     if std::fs::remove_file(marker()).is_err() {
         return;
     }
+    let bin = crate::core_bin::path();
+    if crate::core_bin::package_managed(&bin.canonicalize().unwrap_or(bin)) {
+        return;
+    }
     std::thread::spawn(|| {
         let have = crate::core_bin::version(&crate::core_bin::path()).unwrap_or_default();
         CORE.lock().unwrap().updating = true;

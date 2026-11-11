@@ -232,8 +232,12 @@ const BUNDLE_INSTALL_SCRIPT: &str = "installer=$(curl -fsSL \"$1/core/install.sh
 fn bundle_completion_path(bin: &Path, home: &Path) -> bool {
     bin.starts_with(home)
         && !bin.ends_with("Contents/MacOS/herdr-core")
-        && !["/Cellar/", "/nix/store/", "/mise/installs/"]
-            .iter().any(|marker| bin.to_string_lossy().contains(marker))
+        && !package_managed(bin)
+}
+
+/// A core Homebrew, Nix or mise installed: only that package manager updates it.
+pub fn package_managed(bin: &Path) -> bool {
+    ["/Cellar/", "/nix/store/", "/mise/installs/"].iter().any(|marker| bin.to_string_lossy().contains(marker))
 }
 
 #[cfg(any(target_os = "macos", all(test, unix)))]
