@@ -955,6 +955,52 @@ impl Vt {
         }
     }
 
+    /// Exports the full-resolution kitty graphics image as PNG bytes.
+    pub fn image_full_png(&self, id: u32) -> Option<Vec<u8>> {
+        unsafe {
+            let mut g: GhosttyKittyGraphics = std::ptr::null_mut();
+            ghostty_terminal_get(self.term, GHOSTTY_TERMINAL_DATA_KITTY_GRAPHICS, &mut g as *mut _ as *mut c_void);
+            let img = (!g.is_null()).then(|| ghostty_kitty_graphics_image(g, id)).filter(|i| !i.is_null())?;
+            let (mut w, mut h, mut fmt) = (0u32, 0u32, GHOSTTY_KITTY_IMAGE_FORMAT_RGBA);
+            let (mut ptr, mut len): (*const u8, usize) = (std::ptr::null(), 0);
+            ghostty_kitty_graphics_image_get(img, GHOSTTY_KITTY_IMAGE_DATA_WIDTH, &mut w as *mut _ as *mut c_void);
+            ghostty_kitty_graphics_image_get(img, GHOSTTY_KITTY_IMAGE_DATA_HEIGHT, &mut h as *mut _ as *mut c_void);
+            ghostty_kitty_graphics_image_get(img, GHOSTTY_KITTY_IMAGE_DATA_FORMAT, &mut fmt as *mut _ as *mut c_void);
+            if ghostty_kitty_graphics_image_get(img, GHOSTTY_KITTY_IMAGE_DATA_DATA_PTR, &mut ptr as *mut _ as *mut c_void) != GHOSTTY_SUCCESS || ptr.is_null() {
+                return None;
+            }
+            ghostty_kitty_graphics_image_get(img, GHOSTTY_KITTY_IMAGE_DATA_DATA_LEN, &mut len as *mut _ as *mut c_void);
+            let px = std::slice::from_raw_parts(ptr, len);
+            let bpp = match fmt {
+                GHOSTTY_KITTY_IMAGE_FORMAT_RGB => 3,
+                GHOSTTY_KITTY_IMAGE_FORMAT_GRAY_ALPHA => 2,
+                GHOSTTY_KITTY_IMAGE_FORMAT_GRAY => 1,
+                _ => 4,
+            };
+            if w == 0 || h == 0 {
+                return None;
+            }
+            let mut rgba = Vec::with_capacity((w * h * 4) as usize);
+            for y in 0..h {
+                for x in 0..w {
+                    let i = ((y * w + x) as usize) * bpp;
+                    let p = px.get(i..i + bpp)?;
+                    let (r, g, b, a) = match bpp {
+                        4 => (p[0], p[1], p[2], p[3]),
+                        3 => (p[0], p[1], p[2], 255),
+                        2 => (p[0], p[0], p[0], p[1]),
+                        _ => (p[0], p[0], p[0], 255),
+                    };
+                    rgba.extend_from_slice(&[r, g, b, a]);
+                }
+            }
+            let img_buf = image::RgbaImage::from_raw(w, h, rgba)?;
+            let mut png_bytes = std::io::Cursor::new(Vec::new());
+            img_buf.write_to(&mut png_bytes, image::ImageFormat::Png).ok()?;
+            Some(png_bytes.into_inner())
+        }
+    }
+
     /// Feeds one mouse step of a selection gesture (cell + pixel position in the grid).
     /// Applies the resulting selection; a plain click clears it.
     pub fn select(&mut self, step: Select, col: u16, row: u16, x: f32, y: f32, cell_w: f32, height: f32) {

@@ -11,7 +11,7 @@ static PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     let schemes = r"https?://|mailto:|ftp://|file:|ssh:|git://|ssh://|tel:|magnet:|ipfs://|ipns://|gemini://|gopher://|news:";
     let ipv6 = r"(?:\[[:0-9a-fA-F]+(?:[:0-9a-fA-F]*)+\](?::[0-9]+)?)";
     let scheme_chars = r"[\w\-.~:/?#@!$&*+,;=%]";
-    let path_chars = r"[\w\-.~:\/?#@!$&*+;=%]";
+    let path_chars = r"[\w\-.~:\/?#@!$&*+;=%\\]";
     let bracketed = r"(?:[\(\[]\w*[\)\]])?";
     let no_trailing_punctuation = r"(?<![,.])";
     let no_trailing_colon = r"(?<!:)";
@@ -19,7 +19,7 @@ static PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     let undotted = r"(?![\w\-.~:\/?#@!$&*+;=%]*\.)";
     let dotted_spaces = r"(?:(?<!:) (?!\w+:\/\/)(?!\.{0,2}\/)(?!~\/)[\w\-.~:\/?#@!$&*+;=%]*[\/.])*";
     let any_spaces = r"(?:(?<!:) (?!\w+:\/\/)(?!\.{0,2}\/)(?!~\/)[\w\-.~:\/?#@!$&*+;=%]+)*";
-    let rooted = r"(?:\.\.\/|\.\/|(?<!\w)~\/|(?:[\w][\w\-.]*\/)*(?<!\w)\$[A-Za-z_]\w*\/|\.[\w][\w\-.]*\/|(?<![\w~\/])\/(?!\/))";
+    let rooted = r"(?:[A-Za-z]:[\\/]|\.\.\/|\.\/|(?<!\w)~\/|(?:[\w][\w\-.]*\/)*(?<!\w)\$[A-Za-z_]\w*\/|\.[\w][\w\-.]*\/|(?<![\w~\/])\/(?!\/))";
     let scheme_url = format!("(?:{schemes})(?:{ipv6}|{scheme_chars}+{bracketed})+{no_trailing_punctuation}");
     let rooted_path = format!(
         "{rooted}(?:{dotted}{path_chars}+{dotted_spaces}{no_trailing_colon}|{undotted}{path_chars}+{any_spaces}{no_trailing_colon})"

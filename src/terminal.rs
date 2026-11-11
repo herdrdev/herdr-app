@@ -94,6 +94,8 @@ struct Grid {
     buttons_down: Vec<MouseButton>,
     /// Kitty images uploaded for drawing, by (image, generation, source rect).
     images: HashMap<(u32, u64, [u32; 4]), Arc<RenderImage>>,
+    /// Placements of visible kitty images from the last paint: (bounds, image_id).
+    visible_images: Vec<(Bounds<Pixels>, u32)>,
     /// Where the pointer is over the pane.
     hover: Option<Point<Pixels>>,
     /// The link under the pointer to underline: (row, first column, last column).
@@ -130,6 +132,8 @@ pub struct TerminalView {
     pub cwd: Option<PathBuf>,
     /// The link under the pointer while the link modifier is held.
     link: Option<LinkTarget>,
+    /// Image under the pointer.
+    hover_image: Option<u32>,
     /// Right-clicks go to the program when it takes the mouse (Shift: the menu).
     pub right_click_to_program: bool,
     grid: Rc<RefCell<Grid>>,
@@ -269,6 +273,7 @@ impl TerminalView {
             selection_scroll: None,
             cwd: None,
             link: None,
+            hover_image: None,
             right_click_to_program: false,
             grid: Rc::new(RefCell::new(Grid {
                 vt: Vt::new(size_hint.0.max(2), size_hint.1.max(1)),
@@ -283,6 +288,7 @@ impl TerminalView {
                 origin: Point::default(),
                 buttons_down: Vec::new(),
                 images: HashMap::new(),
+                visible_images: Vec::new(),
                 hover: None,
                 link_spans: Vec::new(),
                 marked: None,
@@ -912,6 +918,27 @@ impl TerminalView {
             ScrollTarget::Bottom => g.vt.scroll_to_bottom(),
         }
         cx.notify();
+    }
+
+    fn image_at(&self, pos: Point<Pixels>) -> Option<u32> {
+        let g = self.grid.borrow();
+        for (b, id) in g.visible_images.iter().rev() {
+            if b.contains(&pos) {
+                return Some(*id);
+            }
+        }
+        None
+    }
+
+    fn open_image(&self, image_id: u32) {
+        let g = self.grid.borrow();
+        if let Some(png) = g.vt.image_full_png(image_id) {
+            drop(g);
+            let temp_path = std::env::temp_dir().join(format!("herdr-preview-{}-{}.png", image_id, std::process::id()));
+            if std::fs::write(&temp_path, png).is_ok() {
+                links::open(&links::Target::File(temp_path));
+            }
+        }
     }
 
     /// The program tracks the mouse and Shift isn't held (Shift keeps the mouse Herdr's).
@@ -1814,6 +1841,7 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     let placements = g.vt.placements();
     let mut images: Vec<(bool, Bounds<Pixels>, Arc<RenderImage>)> = Vec::new();
     let mut keep = std::collections::HashSet::new();
+    let mut visible_images = Vec::new();
     for p in &placements {
         let key = (p.image, p.generation, p.source);
         keep.insert(key);
@@ -1831,11 +1859,14 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
                 height /= scale;
             }
             let pos = origin + point(px(x), px(y));
+            let b = Bounds::new(pos, size(px(width), px(height)));
+            visible_images.push((b, p.image));
             // Placeholder runs contain no text and must cover explicit cell backgrounds.
             let below = p.z < 0 && p.cell_pixels.is_none();
-            images.push((below, Bounds::new(pos, size(px(width), px(height))), img.clone()));
+            images.push((below, b, img.clone()));
         }
     }
+    g.visible_images = visible_images;
     g.images.retain(|k, _| keep.contains(k));
     let link_spans = g.link_spans.clone();
     let marked = g.marked.clone();
@@ -2168,11 +2199,13 @@ impl Render for TerminalView {
             .on_key_down(cx.listener(Self::key_down))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| this.dropped(paths.paths().to_vec(), cx)))
             .on_scroll_wheel(cx.listener(Self::scroll))
-            .when(self.link.is_some(), |d| d.cursor_pointer())
+            .when(self.link.is_some() || self.hover_image.is_some(), |d| d.cursor_pointer())
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                 if !hovered {
                     this.grid.borrow_mut().hover = None;
-                    if this.link.is_some() {
+                    let had_img = this.hover_image.is_some();
+                    this.hover_image = None;
+                    if this.link.is_some() || had_img {
                         cx.notify();
                     }
                 }
@@ -2184,6 +2217,11 @@ impl Render for TerminalView {
                     g.core.resize(ch, g.vt.cols, g.vt.rows);
                 }
                 drop(g);
+                if let Some(img_id) = this.image_at(ev.position) {
+                    this.open_image(img_id);
+                    cx.stop_propagation();
+                    return;
+                }
                 if link_mods(&ev.modifiers)
                     && let Some((target, _)) = this.link_at(ev.position)
                 {
@@ -2236,7 +2274,9 @@ impl Render for TerminalView {
             }))
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
                 this.grid.borrow_mut().hover = Some(ev.position);
-                if link_mods(&ev.modifiers) || this.link.is_some() {
+                let was_img = this.hover_image;
+                this.hover_image = this.image_at(ev.position);
+                if link_mods(&ev.modifiers) || this.link.is_some() || was_img != this.hover_image {
                     cx.notify();
                 }
                 if !this.selecting && ev.pressed_button.is_none() {
