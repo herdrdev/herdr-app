@@ -49,8 +49,6 @@ pub(super) struct NativeApp {
     rect: Option<Rect>,
     visible: bool,
     holes: Vec<[i32; 4]>,
-    /// Corner radius in device pixels, matching the pane's frame.
-    corner: i32,
     apply_pending: bool,
     /// Bumped by reopen, so an older watcher task ends.
     generation: u64,
@@ -59,8 +57,6 @@ pub(super) struct NativeApp {
     /// Keyboard focus was asked for while the pane was hidden: give it when
     /// the pane shows up soon after (a tab selected just before).
     focus_until: Option<std::time::Instant>,
-    /// The window's colors at its top and bottom edges (0xRRGGBB), once known.
-    edges: Option<[u32; 2]>,
     #[cfg(windows)]
     embedded: Option<win::Embedded>,
     #[cfg(windows)]
@@ -115,14 +111,13 @@ impl NativeApp {
         let covered = dragging || hitbox.is_some_and(|hitbox| policy::fully_covered(&hitbox.bounds, covers));
         self.visible = policy::should_show(hitbox.is_some(), unclipped, covered);
         self.holes = hitbox.map(|hitbox| policy::holes(&hitbox.bounds, covers, window.scale_factor())).unwrap_or_default();
-        self.corner = (super::corner() * window.scale_factor()).round() as i32;
     }
 
     /// The native state differs from the latest layout.
     fn needs_apply(&self) -> bool {
         #[cfg(windows)]
         if let (Some(embedded), Some(rect)) = (&self.embedded, self.rect) {
-            return embedded.applied.as_ref() != Some(&(rect, self.visible, self.holes.clone(), self.corner));
+            return embedded.applied.as_ref() != Some(&(rect, self.visible, self.holes.clone()));
         }
         false
     }
@@ -198,8 +193,8 @@ pub(super) fn register(registry: &mut ComponentRegistry) {
             let (ComponentArgument::String(app), ComponentArgument::String(target)) = (&args[0], &args[1]) else { unreachable!() };
             let state = Rc::new(RefCell::new(NativeApp {
                 window: window.window_handle().window_id(), app: app.clone(), target: target.clone(),
-                status: "Opening…".into(), error: None, hitbox: None, rect: None, visible: false, holes: Vec::new(), corner: 0,
-                apply_pending: false, generation: 0, closed: false, focus_until: None, edges: None,
+                status: "Opening…".into(), error: None, hitbox: None, rect: None, visible: false, holes: Vec::new(),
+                apply_pending: false, generation: 0, closed: false, focus_until: None,
                 #[cfg(windows)] embedded: None,
                 #[cfg(windows)] opening: false,
             }));
@@ -213,14 +208,6 @@ pub(super) fn register(registry: &mut ComponentRegistry) {
         }).with_readonly(true),
         StateMethodDescriptor::new::<State>("error", "(): string | null", |state, _, _, _| {
             Ok(state.borrow().error.clone().map(ComponentDataValue::String).unwrap_or(ComponentDataValue::Null))
-        }).with_readonly(true),
-        StateMethodDescriptor::new::<State>("edgeColors", "(): string[] | null", |state, _, _, _| {
-            // Paint these behind the element, top and bottom halves, so the
-            // window's rounded corners blend into it.
-            Ok(match state.borrow().edges {
-                Some(colors) => ComponentDataValue::Array(colors.iter().map(|c| ComponentDataValue::String(format!("#{c:06x}"))).collect()),
-                None => ComponentDataValue::Null,
-            })
         }).with_readonly(true),
         StateMethodDescriptor::new::<State>("shown", "(): boolean", |state, _, _, _| {
             #[cfg(windows)]
@@ -278,7 +265,7 @@ mod win {
         ex_style: isize,
         /// Device pixels of the window cut off at each side: its title bar and frame.
         crop: Crop,
-        pub(super) applied: Option<(Rect, bool, Vec<[i32; 4]>, i32)>,
+        pub(super) applied: Option<(Rect, bool, Vec<[i32; 4]>)>,
     }
 
     #[derive(Clone, Copy, Default, PartialEq, Debug)]
@@ -475,23 +462,10 @@ mod win {
             cx.background_executor().timer(Duration::from_millis(250)).await;
             let Some(state) = weak.upgrade() else { return };
             if state.borrow().generation != generation { return; }
-            // Zoom can change the frame; a theme change, the colors at its edges.
-            if tick % 8 == 1 {
-                let (container, corner) = {
-                    let app = state.borrow();
-                    (app.embedded.as_ref().map_or(0, |e| e.container as usize), app.corner)
-                };
-                let (crop, edges) = cx.background_executor().spawn(async move {
-                    (measure(child as HWND), edge_colors(container as HWND, corner))
-                }).await;
+            // Zoom or the command center can change the title bar's height.
+            if tick % 8 == 0 {
+                let crop = cx.background_executor().spawn(async move { measure(child as HWND) }).await;
                 let mut app = state.borrow_mut();
-                if edges.is_some() && app.edges != edges {
-                    tracing::debug!(edges = ?edges.map(|e| e.map(|c| format!("#{c:06x}"))), ?crop, "native app edges");
-                    app.edges = edges;
-                    drop(app);
-                    let _ = cx.update(|window, _| window.refresh());
-                    app = state.borrow_mut();
-                }
                 if let Some(e) = app.embedded.as_mut().filter(|e| e.crop != crop) {
                     tracing::debug!(?crop, "native app crop changed");
                     e.crop = crop;
@@ -526,7 +500,7 @@ mod win {
             embedded.applied = None;
         }
         // The program may move or resize its own window: put it back.
-        if let Some((rect, _, _, _)) = &embedded.applied {
+        if let Some((rect, _, _)) = &embedded.applied {
             let expected = child_rect(rect[2], rect[3], embedded.crop);
             if current(embedded.child) != expected { embedded.applied = None; }
         }
@@ -641,12 +615,12 @@ mod win {
             let mut app = state.borrow_mut();
             app.apply_pending = false;
             if !app.needs_apply() { return; }
-            let (rect, visible, holes, corner) = (app.rect.unwrap(), app.visible, app.holes.clone(), app.corner);
+            let (rect, visible, holes) = (app.rect.unwrap(), app.visible, app.holes.clone());
             let give = visible && app.focus_until.take().is_some_and(|until| std::time::Instant::now() <= until);
             app.status = if visible { "Shown.".into() } else { "Hidden while its pane is covered.".into() };
             let embedded = app.embedded.as_mut().unwrap();
-            embedded.applied = Some((rect, visible, holes.clone(), corner));
-            (embedded.child, embedded.container, embedded.crop, rect, visible, (holes, corner), give)
+            embedded.applied = Some((rect, visible, holes.clone()));
+            (embedded.child, embedded.container, embedded.crop, rect, visible, holes, give)
         };
         let width = rect[2].max(1);
         let height = rect[3].max(1);
@@ -655,16 +629,16 @@ mod win {
             let show = if visible { SWP_SHOWWINDOW } else { SWP_HIDEWINDOW };
             SetWindowPos(container, HWND_TOP, rect[0], rect[1], width, height, SWP_NOACTIVATE | show);
         }
-        super::super::win32::set_holes(container, width, height, &holes.0, holes.1);
+        super::super::win32::set_holes(container, width, height, &holes);
         let [x, y, w, h] = child_rect(width, height, crop);
         unsafe { SetWindowPos(child, std::ptr::null_mut(), x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE) };
         if give { focus::give(child); }
     }
 
-    /// What of the window is frame, by asking the window itself: its client
-    /// area, and where its hit test reports resize borders. The program's own
-    /// title bar (VS Code: menu, search, layout controls) stays. Runs off the
-    /// UI thread: it sends a few dozen messages to the other process.
+    /// The window's frame: what lies outside its client area. Everything the
+    /// program draws stays, including VS Code's title bar and the few pixels
+    /// at its edges where it reports resize borders. A resize from there is
+    /// undone by the watcher. No messages are sent to the other process.
     fn measure(hwnd: HWND) -> Crop {
         unsafe {
             let window = screen_rect(hwnd);
@@ -672,59 +646,12 @@ mod win {
             GetClientRect(hwnd, &mut client);
             let mut origin = POINT { x: 0, y: 0 };
             ClientToScreen(hwnd, &mut origin);
-            let mut crop = Crop {
+            Crop {
                 left: origin.x - window.left,
                 top: origin.y - window.top,
                 right: window.right - (origin.x + client.right),
                 bottom: window.bottom - (origin.y + client.bottom),
-            };
-            let hit = |x: i32, y: i32| -> u32 {
-                let lparam = ((y as u32 & 0xffff) << 16 | (x as u32 & 0xffff)) as LPARAM;
-                let mut result = 0usize;
-                SendMessageTimeoutW(hwnd, WM_NCHITTEST, 0, lparam, SMTO_ABORTIFHUNG, 50, &mut result);
-                result as u32
-            };
-            let width = client.right;
-            let center = origin.x + width / 2;
-            crop.top += (0..24).take_while(|i| matches!(hit(center, origin.y + i), HTTOP | HTTOPLEFT | HTTOPRIGHT)).count() as i32;
-            // Resize borders left despite WS_MAXIMIZE: cut those too.
-            let middle = origin.y + client.bottom / 2;
-            let edge = |from: i32, step: i32, codes: &[u32]| (0..24).take_while(|i| codes.contains(&hit(from + step * i, middle))).count() as i32;
-            crop.left += edge(origin.x, 1, &[HTLEFT]);
-            crop.right += edge(origin.x + width - 1, -1, &[HTRIGHT]);
-            crop.bottom += (0..24).take_while(|i| matches!(hit(center, origin.y + client.bottom - 1 - i), HTBOTTOM | HTBOTTOMLEFT | HTBOTTOMRIGHT)).count() as i32;
-            crop
-        }
-    }
-
-    /// The window's colors where its rounded corners meet the pane: the top
-    /// left and bottom left of what the pane shows (VS Code: title bar and
-    /// status bar), as 0xRRGGBB. A window region has no antialiasing, so the
-    /// pane paints these colors behind the window to blend its corners.
-    ///
-    /// Read from the screen, where the window is composed: PrintWindow gets a
-    /// placeholder for another process's GPU-drawn child. Only while the
-    /// points show this window and nothing covers them.
-    fn edge_colors(container: HWND, corner: i32) -> Option<[u32; 2]> {
-        use windows_sys::Win32::Graphics::Gdi::*;
-        unsafe {
-            if IsWindowVisible(container) == 0 { return None; }
-            let r = screen_rect(container);
-            // Next to the left edge, just below and above the rounded corners.
-            let (x, dy) = (r.left + 4, corner + 2);
-            if r.bottom - r.top < dy * 4 { return None; }
-            let points = [POINT { x, y: r.top + dy }, POINT { x, y: r.bottom - 1 - dy }];
-            for &point in &points {
-                let hit = WindowFromPoint(point);
-                if hit != container && IsChild(container, hit) == 0 { return None; }
             }
-            let screen = GetDC(std::ptr::null_mut());
-            let colors = points.map(|p| {
-                let c = GetPixel(screen, p.x, p.y);
-                (c & 0xff) << 16 | (c & 0xff00) | (c >> 16 & 0xff)
-            });
-            ReleaseDC(std::ptr::null_mut(), screen);
-            Some(colors)
         }
     }
 

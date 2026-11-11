@@ -1,27 +1,20 @@
 //! Win32 helpers shared by native browser and app views.
 use windows_sys::Win32::{
     Foundation::{HWND, LPARAM},
-    Graphics::Gdi::{
-        CombineRgn, CreateRectRgn, CreateRoundRectRgn, DeleteObject, SetWindowRgn, RGN_DIFF,
-    },
+    Graphics::Gdi::{CombineRgn, CreateRectRgn, DeleteObject, SetWindowRgn, RGN_DIFF},
     UI::WindowsAndMessaging::{EnumChildWindows, GetClassNameW, GetParent},
 };
 
-/// Clip a child window of `width` x `height` device pixels to its pane:
-/// corners rounded by `corner` pixels like the pane's frame, and `holes`
-/// (`[x, y, width, height]`, relative to the window) cut out for overlays.
+/// Cut `holes` (`[x, y, width, height]`, relative to the window) out of a
+/// child window of `width` x `height` device pixels, or show all of it again.
 /// Children of the window are clipped by the same region.
-pub fn set_holes(hwnd: HWND, width: i32, height: i32, holes: &[[i32; 4]], corner: i32) {
+pub fn set_holes(hwnd: HWND, width: i32, height: i32, holes: &[[i32; 4]]) {
     unsafe {
-        if holes.is_empty() && corner <= 0 {
+        if holes.is_empty() {
             SetWindowRgn(hwnd, std::ptr::null_mut(), 1);
             return;
         }
-        let region = if corner > 0 {
-            CreateRoundRectRgn(0, 0, width + 1, height + 1, corner * 2, corner * 2)
-        } else {
-            CreateRectRgn(0, 0, width, height)
-        };
+        let region = CreateRectRgn(0, 0, width, height);
         for &[x, y, w, h] in holes {
             let hole = CreateRectRgn(x, y, x + w, y + h);
             CombineRgn(region, region, hole, RGN_DIFF);
