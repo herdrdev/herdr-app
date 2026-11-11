@@ -1,7 +1,7 @@
 use crate::{
     BoolExt, MacDisplay, NSRange, NSStringExt, TISCopyCurrentKeyboardInputSource,
     TISGetInputSourceProperty, WindowFrameSource, events::platform_input_from_native, main_queue_source,
-    kTISPropertyInputSourceType, kTISTypeKeyboardInputMode,
+    kTISPropertyInputSourceType, kTISTypeKeyboardInputMode, kTISTypeKeyboardLayout,
     kTISTypeKeyboardInputMethodWithoutModes, kTISTypeKeyboardInputMethodModeEnabled,
     ns_string, renderer,
 };
@@ -1385,11 +1385,10 @@ impl MacWindow {
 impl Drop for MacWindow {
     fn drop(&mut self) {
         let mut this = self.0.lock();
-        // `accesskit_macos::SubclassingAdapter::for_window` strong-retains the
-        // window's content view, and that content view keeps the `GPUIView` it
-        // hosts alive. Together with the `Arc<Mutex<MacWindowState>>` parked in
-        // both views' `windowState` ivar, that forms
-        // `MacWindowState -> adapter -> content view -> GPUIView -> MacWindowState`,
+        // `accesskit_macos::SubclassingAdapter` strong-retains the `GPUIView`.
+        // Together with the `Arc<Mutex<MacWindowState>>` parked in its
+        // `windowState` ivar, that forms
+        // `MacWindowState -> adapter -> GPUIView -> MacWindowState`,
         // a cycle the delegate/`frame_source` teardown below cannot break. Drop
         // the adapter here so the native view, its `CAMetalLayer` and the
         // renderer's command queue are actually released with the window.
@@ -2385,15 +2384,26 @@ impl PlatformWindow for MacWindow {
         };
         let action_handler = A11yActionHandler(callbacks.action);
 
-        let adapter = unsafe {
-            accesskit_macos::SubclassingAdapter::for_window(
-                lock.native_window as *mut c_void,
+        // HERDR: the GPUI view, not the window's content view, is the first
+        // responder macOS asks for the focused element; on the content view
+        // assistive apps only ever found the window.
+        let mut adapter = unsafe {
+            accesskit_macos::SubclassingAdapter::new(
+                lock.native_view.as_ptr() as *mut c_void,
                 activation_handler,
                 action_handler,
             )
         };
 
+        // HERDR: native window creation can focus the view before GPUI installs
+        // this adapter, so it cannot rely on receiving the initial key event.
+        let is_active = unsafe { lock.native_window.isKeyWindow() == YES };
+        let events = adapter.update_view_focus_state(is_active);
         lock.accesskit_adapter = Some(adapter);
+        drop(lock);
+        if let Some(events) = events {
+            events.raise();
+        }
     }
 
     fn a11y_tree_update(&self, tree_update: accesskit::TreeUpdate) {
@@ -2646,6 +2656,19 @@ unsafe fn is_ime_input_source_active() -> bool {
     }
 }
 
+/// Only a positively identified layout uses our dead-key cancellation path.
+/// Unknown sources retain AppKit's existing behavior, like full IMEs.
+unsafe fn is_keyboard_layout_source_active() -> bool {
+    unsafe {
+        let source = TISCopyCurrentKeyboardInputSource();
+        if source.is_null() { return false; }
+        let source_type = TISGetInputSourceProperty(source, kTISPropertyInputSourceType as *const c_void);
+        let is_layout = !source_type.is_null() && CFEqual(source_type as CFTypeRef, kTISTypeKeyboardLayout as CFTypeRef) != 0;
+        CFRelease(source as CFTypeRef);
+        is_layout
+    }
+}
+
 extern "C" fn handle_key_event(this: &Object, native_event: id, key_equivalent: bool) -> BOOL {
     let window_state = unsafe { get_window_state(this) };
     let mut lock = window_state.as_ref().lock();
@@ -2694,6 +2717,26 @@ extern "C" fn handle_key_event(this: &Object, native_event: id, key_equivalent: 
                 with_input_handler(this, |input_handler| input_handler.marked_text_range())
                     .flatten()
                     .is_some();
+
+            // HERDR: cancel a keyboard-layout dead key before AppKit commits
+            // its accent and forwards Escape to the terminal. Otherwise the
+            // following letter becomes an unintended Alt+letter sequence.
+            // Full IMEs retain their own candidate-menu Escape handling.
+            if is_composing
+                && key_down_event.keystroke.key == "escape"
+                && key_down_event.keystroke.modifiers == Modifiers::default()
+                && unsafe { is_keyboard_layout_source_active() }
+            {
+                with_input_handler(this, |input_handler| {
+                    input_handler.replace_and_mark_text_in_range(None, "", None);
+                    input_handler.unmark_text();
+                });
+                unsafe {
+                    let input_context: id = msg_send![this, inputContext];
+                    let _: () = msg_send![input_context, discardMarkedText];
+                }
+                return YES;
+            }
 
             // If we're composing, send the key to the input handler first;
             // otherwise we only send to the input handler if we don't have a matching binding.

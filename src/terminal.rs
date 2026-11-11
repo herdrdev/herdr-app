@@ -101,6 +101,11 @@ struct Grid {
     /// Text an input method is still composing ("nihao" before "\u{4f60}\u{597d}"),
     /// drawn at the cursor; the program sees only the finished text.
     marked: Option<String>,
+    /// Native input-method context from the displayed cursor row only.
+    input_line: Option<InputLine>,
+    input_before_send: Option<InputLine>,
+    input_waiting: bool,
+    input_output_received: bool,
     /// The cursor's cell in window coordinates, from the last paint: where the
     /// input method puts its candidate window.
     cursor_at: Option<Bounds<Pixels>>,
@@ -286,6 +291,10 @@ impl TerminalView {
                 hover: None,
                 link_spans: Vec::new(),
                 marked: None,
+                input_line: None,
+                input_before_send: None,
+                input_waiting: false,
+                input_output_received: false,
                 cursor_at: None,
                 thumb: None,
                 track: None,
@@ -337,6 +346,7 @@ impl TerminalView {
             // The core repaints the whole screen (and history) on attach.
             let cell = device_cell(g.cell, g.scale);
             g.vt = Vt::new(cols, rows);
+            g.reset_input_context();
             g.vt.resize(cols, rows, cell.0, cell.1);
             if self.search_open {
                 g.vt.start_search(&self.search_query);
@@ -514,6 +524,8 @@ impl TerminalView {
                 match item {
                     Stream::Data(bytes) => {
                         g.vt.allow_clipboard_write(crate::settings::get().clipboard_write);
+                        g.input_line = None;
+                        g.input_output_received = true;
                         g.vt.write(&bytes);
                         let [clipboard, primary] = g.vt.take_clipboard();
                         if let Some(text) = clipboard {
@@ -535,10 +547,12 @@ impl TerminalView {
                     Stream::Closed(why) => {
                         open = false;
                         g.channel = None;
+                        g.reset_input_context();
                         self.ended = Some(why.get("reason").and_then(|r| r.as_str()).unwrap_or("ended").to_owned());
                     }
                     Stream::Lost => {
                         g.channel = None;
+                        g.reset_input_context();
                         self.lost = true;
                         cx.notify();
                         return false;
@@ -630,6 +644,7 @@ impl TerminalView {
     fn send(&self, bytes: &[u8]) {
         self.typed_at.set(Some(Instant::now()));
         let mut g = self.grid.borrow_mut();
+        if !bytes.is_empty() { g.invalidate_input_context(); }
         if let Some(ch) = g.channel
             && !bytes.is_empty()
         {
@@ -887,6 +902,7 @@ impl TerminalView {
             let ((x, y), size) = mouse_at(&g, ev.position);
             let out = scroll_mouse_bytes(&mut g.vt, steps, ev.modifiers, x, y, size);
             if let Some(ch) = g.channel {
+                if !out.is_empty() { g.invalidate_input_context(); }
                 g.core.input(ch, &out);
             }
         } else if n == 0 {
@@ -898,6 +914,7 @@ impl TerminalView {
                 out.extend(g.vt.encode_key(key, 0, 0, None, None));
             }
             if let Some(ch) = g.channel {
+                if !out.is_empty() { g.invalidate_input_context(); }
                 g.core.input(ch, &out);
             }
         } else {
@@ -944,6 +961,7 @@ impl TerminalView {
         let any = !g.buttons_down.is_empty();
         let bytes = g.vt.encode_mouse(action, b, mouse_mods(mods), x, y, size, any);
         if let Some(ch) = g.channel {
+            if !bytes.is_empty() { g.invalidate_input_context(); }
             g.core.input(ch, &bytes);
         }
         true
@@ -1855,20 +1873,201 @@ fn find_input_style() -> InputEditorStyle {
     }
 }
 
-fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, window: &mut Window, cx: &mut App) {
+/// Read-only text context for assistive clients, derived from the displayed
+/// frame rather than intercepted keystrokes (which could contain passwords).
+#[derive(Default, Debug)]
+struct AccessibleScreen {
+    rows: Vec<AccessibleRow>,
+    caret: Option<(usize, usize)>,
+    bounds: Bounds<Pixels>,
+    cell: Size<Pixels>,
+}
+
+#[derive(Default, Debug)]
+struct AccessibleRow {
+    text: String,
+    character_lengths: Vec<u8>,
+    cells: Vec<(usize, usize)>,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+struct InputLine {
+    units: Vec<u16>,
+    caret: usize,
+    row: usize,
+    spans: Vec<(std::ops::Range<usize>, usize, usize)>,
+}
+
+impl InputLine {
+    fn from_frame(frame: &vt::Frame) -> Option<Self> {
+        let (cursor_x, cursor_y) = frame.cursor_cell?;
+        let row = frame.rows.get(cursor_y as usize)?;
+        let mut line = Self { units: Vec::new(), caret: 0, row: cursor_y as usize, spans: Vec::new() };
+        let mut wide_tail = false;
+        for (x, cell) in row.iter().enumerate() {
+            if wide_tail {
+                wide_tail = false;
+                if x == cursor_x as usize {
+                    line.caret = line.spans.last()?.0.start;
+                }
+                continue;
+            }
+            if x == cursor_x as usize {
+                line.caret = line.units.len();
+            }
+            let start = line.units.len();
+            line.units.extend(if cell.text.is_empty() { " " } else { &cell.text }.encode_utf16());
+            line.spans.push((start..line.units.len(), x, if cell.wide { 2 } else { 1 }));
+            wide_tail = cell.wide;
+        }
+        Some(line)
+    }
+
+    fn substring(&self, range: std::ops::Range<usize>) -> Option<(String, std::ops::Range<usize>)> {
+        if range.start > range.end { return None; }
+        let mut start = range.start.min(self.units.len());
+        let mut end = range.end.min(self.units.len());
+        // Cocoa may propose ranges inside a surrogate pair. Return the full
+        // character and report the actual UTF-16 range instead of corrupting it.
+        if start > 0 && start < self.units.len() && (0xdc00..=0xdfff).contains(&self.units[start]) { start -= 1; }
+        if end < self.units.len() && (0xdc00..=0xdfff).contains(&self.units[end]) { end += 1; }
+        Some((String::from_utf16(&self.units[start..end]).ok()?, start..end))
+    }
+
+    fn completion_suffix<'a>(&self, range: std::ops::Range<usize>, text: &'a str) -> Option<&'a str> {
+        // A terminal is not an editable document. Only append a completion
+        // that preserves the exact existing prefix ending at the live caret.
+        // Corrections requiring deletion or cursor movement remain unsupported.
+        if range.end != self.caret || range.start > range.end || text.chars().any(char::is_control) { return None; }
+        if self.units.get(self.caret).is_some_and(|next| *next != u16::from(b' ')) { return None; }
+        let prefix = String::from_utf16(self.units.get(range)?).ok()?;
+        text.strip_prefix(&prefix)
+    }
+
+    fn columns_for_range(&self, range: std::ops::Range<usize>) -> Option<(usize, usize)> {
+        if range.start > range.end || range.end > self.units.len() { return None; }
+        let column = |offset: usize, end: bool| {
+            self.spans.iter().find(|(r, _, _)| r.contains(&offset))
+                .map(|(r, x, width)| if end && offset > r.start { x + width } else { *x })
+                .or_else(|| self.spans.last().map(|(_, x, width)| x + width))
+        };
+        Some((column(range.start, false)?, column(range.end, !range.is_empty())?))
+    }
+}
+
+impl Grid {
+    fn reset_input_context(&mut self) {
+        self.input_line = None;
+        self.input_before_send = None;
+        self.input_waiting = true;
+        self.input_output_received = false;
+    }
+
+    fn invalidate_input_context(&mut self) {
+        if let Some(line) = self.input_line.take() { self.input_before_send = Some(line); }
+        self.input_waiting = true;
+        self.input_output_received = false;
+    }
+
+    fn update_input_context(&mut self, frame: &vt::Frame) {
+        let line = InputLine::from_frame(frame);
+        if self.input_waiting {
+            // A repaint alone is not terminal echo. Keep old completion ranges
+            // unavailable until output produces a different displayed context.
+            if !self.input_output_received || line.is_none() || line == self.input_before_send { return; }
+            self.input_waiting = false;
+            self.input_before_send = None;
+        }
+        self.input_line = line;
+    }
+}
+
+impl AccessibleRow {
+    fn push_cell(&mut self, text: &str) {
+        self.text.push_str(text);
+        if let Ok(length) = u8::try_from(text.len()) {
+            self.character_lengths.push(length);
+        } else {
+            // AccessKit cannot encode a single selectable unit over 255 bytes.
+            // Preserve all text and valid UTF-8 boundaries for pathological
+            // combining sequences, without truncation or integer overflow.
+            self.character_lengths.extend(text.chars().map(|c| c.len_utf8() as u8));
+        }
+    }
+}
+
+impl AccessibleScreen {
+    fn from_frame(frame: &vt::Frame) -> Self {
+        let mut result = Self::default();
+        for (y, row) in frame.rows.iter().enumerate() {
+            let mut line = AccessibleRow::default();
+            let mut wide_tail = false;
+            let mut glyph_start = 0;
+            for (x, cell) in row.iter().enumerate() {
+                if frame.cursor_cell == Some((x as u16, y as u16)) {
+                    result.caret = Some((y, if wide_tail { glyph_start } else { line.character_lengths.len() }));
+                }
+                if wide_tail {
+                    wide_tail = false;
+                    continue;
+                }
+                glyph_start = line.character_lengths.len();
+                line.push_cell(if cell.text.is_empty() { " " } else { &cell.text });
+                line.cells.resize(line.character_lengths.len(), (x, if cell.wide { 2 } else { 1 }));
+                wide_tail = cell.wide;
+            }
+            if y + 1 < frame.rows.len() {
+                line.push_cell("\n");
+                line.cells.push((row.len(), 0));
+            }
+            result.rows.push(line);
+        }
+        result
+    }
+
+    fn write_tree(&self, builder: &mut A11ySubtreeBuilder) {
+        for (y, row) in self.rows.iter().enumerate() {
+            let id = builder.synthetic_node_id(("visible-terminal-line", y));
+            let mut run = accesskit::Node::new(Role::TextRun);
+            run.set_value(row.text.clone());
+            run.set_character_lengths(row.character_lengths.clone());
+            let left = f64::from(self.bounds.origin.x);
+            let top = f64::from(self.bounds.origin.y) + y as f64 * f64::from(self.cell.height);
+            run.set_bounds(accesskit::Rect::new(left, top, left + f64::from(self.bounds.size.width), top + f64::from(self.cell.height)));
+            run.set_character_positions(row.cells.iter().map(|(x, _)| *x as f32 * f32::from(self.cell.width)).collect::<Vec<_>>());
+            run.set_character_widths(row.cells.iter().map(|(_, width)| *width as f32 * f32::from(self.cell.width)).collect::<Vec<_>>());
+            run.set_text_direction(accesskit::TextDirection::LeftToRight);
+            builder.push_child(id, run);
+            if let Some((caret_row, character_index)) = self.caret
+                && caret_row == y
+            {
+                let caret = accesskit::TextPosition { node: id, character_index };
+                builder.parent_node().set_text_selection(accesskit::TextSelection { anchor: caret, focus: caret });
+            }
+        }
+        // No SetValue handler: a terminal's visible buffer is not an editable
+        // document. In particular, never send its history back to the PTY.
+    }
+}
+
+fn grid_origin(bounds: Bounds<Pixels>, cell: Size<Pixels>, rows: usize, padding: (f32, f32), scale: f32) -> Point<Pixels> {
+    let (pad_x, pad_y) = padding;
+    // Rows rarely fill the height exactly: split what's left above and below.
+    let spare = (f32::from(bounds.size.height) - 2.0 * pad_y - f32::from(cell.height) * rows as f32).max(0.0);
+    let snap = |v: Pixels| px((f32::from(v) * scale).round() / scale);
+    let origin = bounds.origin + point(px(pad_x), px(pad_y + (spare / 2.0).floor()));
+    point(snap(origin.x), snap(origin.y))
+}
+
+fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, frame: vt::Frame, focused: bool, window: &mut Window, cx: &mut App) {
     crate::bench::count(&crate::bench::GRID);
     let mut g = grid.borrow_mut();
     let cell = g.cell;
     let metrics = cell_metrics(window);
-    let (pad_x, pad_y) = pad();
-    // Rows rarely fill the height exactly: split what's left above and below.
-    let spare = (f32::from(bounds.size.height) - 2.0 * pad_y - f32::from(cell.height) * g.vt.rows as f32).max(0.0);
     let scale = window.scale_factor();
+    let origin = grid_origin(bounds, cell, g.vt.rows as usize, pad(), scale);
     let snap = |v: Pixels| px((f32::from(v) * scale).round() / scale);
-    let origin = bounds.origin + point(px(pad_x), px(pad_y + (spare / 2.0).floor()));
-    let origin = point(snap(origin.x), snap(origin.y));
     g.origin = origin;
-    let frame = g.vt.frame();
     let placements = g.vt.placements();
     let mut images: Vec<(bool, Bounds<Pixels>, Arc<RenderImage>)> = Vec::new();
     let mut keep = std::collections::HashSet::new();
@@ -2089,7 +2288,13 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
 /// `key_bytes`. The program gets the finished text as it is.
 impl EntityInputHandler for TerminalView {
     fn text_for_range(&mut self, range: std::ops::Range<usize>, adjusted: &mut Option<std::ops::Range<usize>>, _w: &mut Window, _cx: &mut Context<Self>) -> Option<String> {
-        let marked = self.grid.borrow().marked.clone().unwrap_or_default();
+        let g = self.grid.borrow();
+        if g.marked.is_none() {
+            let (text, actual) = g.input_line.as_ref()?.substring(range)?;
+            *adjusted = Some(actual);
+            return Some(text);
+        }
+        let marked = g.marked.clone().unwrap_or_default();
         let units: Vec<u16> = marked.encode_utf16().collect();
         let range = range.start.min(units.len())..range.end.min(units.len());
         *adjusted = Some(range.clone());
@@ -2097,7 +2302,11 @@ impl EntityInputHandler for TerminalView {
     }
 
     fn selected_text_range(&mut self, _ignore_disabled: bool, _w: &mut Window, _cx: &mut Context<Self>) -> Option<UTF16Selection> {
-        let len = self.grid.borrow().marked.as_ref().map_or(0, |m| m.encode_utf16().count());
+        let g = self.grid.borrow();
+        let len = match &g.marked {
+            Some(marked) => marked.encode_utf16().count(),
+            None => g.input_line.as_ref()?.caret,
+        };
         Some(UTF16Selection { range: len..len, reversed: false })
     }
 
@@ -2110,13 +2319,24 @@ impl EntityInputHandler for TerminalView {
         cx.notify();
     }
 
-    fn replace_text_in_range(&mut self, _range: Option<std::ops::Range<usize>>, text: &str, window: &mut Window, cx: &mut Context<Self>) {
-        self.grid.borrow_mut().marked = None;
+    fn replace_text_in_range(&mut self, range: Option<std::ops::Range<usize>>, text: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let composing = self.grid.borrow_mut().marked.take().is_some();
         // While the find field holds the keys, the input-method path must not
         // be a way around that (see `key_down`); with the terminal focused,
         // input methods type into the program as usual.
         if !self.find_field_focused(window, cx) {
-            self.send(text.as_bytes());
+            // An empty range is ordinary insertion, including immediately
+            // after IME commit/cancellation while terminal echo is pending.
+            let input = if !composing && let Some(range) = range.filter(|range| range.start != range.end) {
+                let g = self.grid.borrow();
+                g.input_line.as_ref().and_then(|line| line.completion_suffix(range, text)).map(str::to_owned)
+            } else {
+                Some(text.to_owned())
+            };
+            if let Some(input) = input {
+                self.send(input.as_bytes());
+                self.grid.borrow_mut().input_line = None;
+            }
         }
         cx.notify();
     }
@@ -2140,6 +2360,10 @@ impl EntityInputHandler for TerminalView {
 
     fn bounds_for_range(&mut self, range: std::ops::Range<usize>, _element: Bounds<Pixels>, _w: &mut Window, _cx: &mut Context<Self>) -> Option<Bounds<Pixels>> {
         let g = self.grid.borrow();
+        if g.marked.is_none() && let Some(line) = &g.input_line {
+            let (start, end) = line.columns_for_range(range)?;
+            return Some(Bounds::new(g.origin + point(g.cell.width * start as f32, g.cell.height * line.row as f32), size(g.cell.width * (end - start) as f32, g.cell.height)));
+        }
         let at = g.cursor_at?;
         Some(Bounds::new(at.origin + point(g.cell.width * range.start as f32, px(0.0)), at.size))
     }
@@ -2177,6 +2401,8 @@ impl Render for TerminalView {
         self.grid.borrow_mut().link_spans = spans.unwrap_or_default();
         let grid = self.grid.clone();
         let grid_paint = self.grid.clone();
+        let accessible = Rc::new(RefCell::new(AccessibleScreen::default()));
+        let accessible_prepaint = accessible.clone();
         let selection_view = cx.entity().downgrade();
         let (input_focus, input_view) = (self.focus.clone(), cx.entity());
         let ended = self.ended.clone().or_else(|| self.lost.then(|| "reconnecting to core…".to_owned()));
@@ -2197,7 +2423,9 @@ impl Render for TerminalView {
 
         div()
             .id(SharedString::from(format!("term-{}", self.address)))
+            .role(Role::Terminal)
             .track_focus(&self.focus)
+            .a11y_synthetic_children(move |builder| accessible.borrow().write_tree(builder))
             .key_context("Terminal")
             .size_full()
             .relative()
@@ -2305,10 +2533,25 @@ impl Render for TerminalView {
                 canvas(
                     move |bounds, window, _cx| {
                         let (cols, rows) = grid_size(bounds.size, cell);
-                        grid.borrow_mut().fit(cols, rows, cell, window.scale_factor());
+                        let mut grid = grid.borrow_mut();
+                        grid.fit(cols, rows, cell, window.scale_factor());
+                        let frame = grid.vt.frame();
+                        grid.update_input_context(&frame);
+                        if window.is_a11y_active() {
+                            let mut screen = AccessibleScreen::from_frame(&frame);
+                            // GPUI accessibility coordinates are device pixels,
+                            // including synthetic descendants. Match painting's
+                            // padded, centered and snapped grid origin exactly.
+                            let scale = window.scale_factor();
+                            let origin = grid_origin(bounds, cell, frame.rows.len(), pad(), scale);
+                            screen.bounds = Bounds::new(origin * scale, size(cell.width * cols as f32 * scale, cell.height * rows as f32 * scale));
+                            screen.cell = size(cell.width * scale, cell.height * scale);
+                            *accessible_prepaint.borrow_mut() = screen;
+                        }
+                        frame
                     },
-                    move |bounds, _, window, cx| {
-                        paint_grid(bounds, &grid_paint, focused, window, cx);
+                    move |bounds, frame, window, cx| {
+                        paint_grid(bounds, &grid_paint, frame, focused, window, cx);
                         let view = selection_view.clone();
                         window.on_mouse_event(move |ev: &MouseMoveEvent, phase, _, cx| {
                             if phase == DispatchPhase::Capture {
@@ -2475,6 +2718,168 @@ impl Focusable for TerminalView {
 mod tests {
     use super::{ScrollTarget, pages_to_lines, scroll_target};
     use serde_json::{Value, json};
+
+    #[test]
+    fn native_input_context_exposes_displayed_line_and_utf16_caret() {
+        let mut vt = crate::vt::Vt::new(30, 3);
+        vt.write("old output\r\nTest: 中😀hel".as_bytes());
+        let line = super::InputLine::from_frame(&vt.frame()).unwrap();
+        assert_eq!(line.caret, 12);
+        let (text, actual) = line.substring(0..usize::MAX).unwrap();
+        assert!(text.starts_with("Test: 中😀hel"));
+        assert!(!text.contains("old output"));
+        assert_eq!(actual.end, text.encode_utf16().count());
+        let (text, actual) = line.substring(8..9).unwrap();
+        assert_eq!(text, "😀");
+        assert_eq!(actual, 7..9);
+        assert_eq!(line.columns_for_range(7..9), Some((8, 10)));
+        assert_eq!(line.columns_for_range(12..12), Some((13, 13)));
+    }
+
+    #[test]
+    fn native_completion_only_appends_matching_prefix_without_commands() {
+        let mut vt = crate::vt::Vt::new(30, 2);
+        vt.write(b"Test: hel");
+        let line = super::InputLine::from_frame(&vt.frame()).unwrap();
+        assert_eq!(line.completion_suffix(6..9, "hello"), Some("lo"));
+        assert_eq!(line.completion_suffix(6..9, "hello "), Some("lo "));
+        assert_eq!(line.completion_suffix(6..9, "help\n"), None);
+        assert_eq!(line.completion_suffix(6..9, "world"), None);
+        assert_eq!(line.completion_suffix(6..8, "hello"), None);
+        assert_eq!(line.completion_suffix(0..usize::MAX, "hello"), None);
+        vt.write(b"\x08 \x08");
+        let line = super::InputLine::from_frame(&vt.frame()).unwrap();
+        assert_eq!(line.completion_suffix(6..8, "hello"), Some("llo"));
+        vt.write(b"\x1b[7G");
+        let line = super::InputLine::from_frame(&vt.frame()).unwrap();
+        assert_eq!(line.caret, 6);
+        assert_eq!(line.completion_suffix(6..8, "hello"), None);
+        vt.write(b"\rhello\x1b[4G");
+        let line = super::InputLine::from_frame(&vt.frame()).unwrap();
+        assert_eq!(line.completion_suffix(0..3, "hello"), None);
+    }
+
+    #[test]
+    fn native_input_context_does_not_capture_concealed_or_unpainted_text() {
+        let mut vt = crate::vt::Vt::new(30, 2);
+        vt.write(b"\x1b[8msecret\x1b[0m");
+        let mut frame = vt.frame();
+        let line = super::InputLine::from_frame(&frame).unwrap();
+        assert!(!line.substring(0..30).unwrap().0.contains("secret"));
+        frame.cursor_cell = None;
+        assert!(super::InputLine::from_frame(&frame).is_none());
+    }
+
+    #[test]
+    fn accessible_screen_maps_wide_combining_and_non_bmp_text_to_caret() {
+        let mut vt = crate::vt::Vt::new(20, 2);
+        vt.write("A 中e\u{301}😀".as_bytes());
+        let screen = super::AccessibleScreen::from_frame(&vt.frame());
+        assert!(screen.rows[0].text.starts_with("A 中e\u{301}😀"));
+        assert_eq!(&screen.rows[0].character_lengths[..5], &[1, 1, 3, 3, 4]);
+        assert_eq!(screen.caret, Some((0, 5)));
+        assert_eq!(&screen.rows[0].cells[..5], &[(0, 1), (1, 1), (2, 2), (4, 1), (5, 2)]);
+        for row in &screen.rows {
+            assert_eq!(row.cells.len(), row.character_lengths.len());
+        }
+    }
+
+    #[test]
+    fn accessibility_grid_origin_matches_padding_centering_and_retina_snapping() {
+        use gpui::{Bounds, point, px, size};
+        let bounds = Bounds::new(point(px(10.2), px(20.2)), size(px(200.), px(105.)));
+        let cell = size(px(8.), px(20.));
+        let origin = super::grid_origin(bounds, cell, 4, (3., 4.), 2.);
+        assert_eq!(origin, point(px(13.), px(32.)));
+        assert_eq!(origin * 2., point(px(26.), px(64.)));
+        assert_eq!(size(cell.width * 2., cell.height * 2.), size(px(16.), px(40.)));
+    }
+
+    #[test]
+    fn accessible_screen_tracks_erasure_cursor_moves_and_blank_cells() {
+        let mut vt = crate::vt::Vt::new(8, 2);
+        vt.write(b"hello\x08 \x08");
+        let screen = super::AccessibleScreen::from_frame(&vt.frame());
+        assert_eq!(screen.rows.iter().map(|r| r.text.as_str()).collect::<String>(), "hell    \n        ");
+        assert_eq!(screen.caret, Some((0, 4)));
+        vt.write(b"\x1b[2;3H");
+        let screen = super::AccessibleScreen::from_frame(&vt.frame());
+        assert_eq!(screen.caret, Some((1, 2)));
+        let mut frame = vt.frame();
+        frame.cursor_cell = None;
+        assert_eq!(super::AccessibleScreen::from_frame(&frame).caret, None);
+    }
+
+    #[test]
+    fn accessible_screen_normalizes_wide_tail_and_omits_concealed_text() {
+        let mut vt = crate::vt::Vt::new(20, 2);
+        vt.write("中\x1b[1;2H".as_bytes());
+        assert_eq!(super::AccessibleScreen::from_frame(&vt.frame()).caret, Some((0, 0)));
+        vt.write(b"\r\n\x1b[8msecret\x1b[0m");
+        let screen = super::AccessibleScreen::from_frame(&vt.frame());
+        assert!(!screen.rows.iter().any(|row| row.text.contains("secret")));
+    }
+
+    #[test]
+    fn accessible_row_preserves_joined_emoji_and_oversized_combining_cells() {
+        let mut row = super::AccessibleRow::default();
+        row.push_cell("👩\u{200d}💻");
+        assert_eq!(row.character_lengths, vec![11]);
+        let long = format!("a{}", "\u{301}".repeat(200));
+        row.push_cell(&long);
+        assert_eq!(row.character_lengths.iter().map(|n| *n as usize).sum::<usize>(), row.text.len());
+        assert!(row.text.ends_with(&long));
+    }
+
+    #[gpui::test]
+    fn terminal_accessibility_uses_the_current_rendered_frame(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+        struct Root(Entity<super::TerminalView>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(self.0.clone())
+            }
+        }
+        cx.update(gpui_base::init);
+        let handle = cx.add_window(|window, cx| {
+            let terminal = cx.new(|cx| super::TerminalView::attach(
+                crate::hc::offline(), "t1".into(), (40, 6), cx,
+            ));
+            terminal.update(cx, |terminal, cx| {
+                terminal.ingest([crate::hc::Stream::Data(b"hello".to_vec())], cx);
+                terminal.focus.focus(window, cx);
+            });
+            Root(terminal)
+        });
+        let terminal = cx.update(|cx| handle.read(cx).unwrap().0.clone());
+        cx.update_window(handle.into(), |_, window, cx| {
+            window.activate_accessibility_for_test();
+            window.draw(cx).clear(cx);
+            let dump = window.debug_a11y_tree_json().unwrap();
+            assert!(dump.contains("hello"), "displayed text missing from accessibility: {dump}");
+            assert!(dump.contains("TextRun"), "terminal has no text range support: {dump}");
+            let tree: serde_json::Value = serde_json::from_str(&dump).unwrap();
+            let lines = tree["nodes"].as_object().unwrap().values()
+                .filter(|node| node["aria"]["role"] == "TextRun").count();
+            assert!(lines > 1, "each displayed row needs its own accessible line");
+            terminal.update(cx, |terminal, cx| {
+                assert_eq!(terminal.grid.borrow().input_line.as_ref().unwrap().caret, 5);
+                terminal.send(b"\x1b[D");
+                let mut grid = terminal.grid.borrow_mut();
+                assert!(grid.input_line.is_none());
+                let frame = grid.vt.frame();
+                grid.update_input_context(&frame);
+                assert!(grid.input_line.is_none(), "redraw before echo must not restore stale context");
+                drop(grid);
+                terminal.ingest([crate::hc::Stream::Data(b"\x1b[1D".to_vec())], cx);
+                let mut grid = terminal.grid.borrow_mut();
+                let frame = grid.vt.frame();
+                grid.update_input_context(&frame);
+                assert_eq!(grid.input_line.as_ref().unwrap().caret, 4);
+                assert!(grid.input_line.as_ref().unwrap().completion_suffix(0..5, "hello!").is_none());
+            });
+        }).unwrap();
+    }
 
     #[test]
     fn output_turns_preserve_bytes_budget_and_close_order() {
@@ -3004,6 +3409,21 @@ mod tests {
             let terminal = root.0.read(cx);
             assert!(terminal.search_open);
             assert!(terminal.typed_at.get().is_some(), "text did not reach the program once the terminal held the keys");
+        });
+        cx.update(|window, app| {
+            root.update(app, |root, app| {
+                root.0.update(app, |terminal, cx| {
+                    terminal.typed_at.set(None);
+                    terminal.grid.borrow_mut().reset_input_context();
+                    gpui::EntityInputHandler::replace_text_in_range(terminal, Some(0..0), "z", window, cx);
+                    assert!(terminal.typed_at.get().is_some(), "empty-range insertion was dropped while waiting for echo");
+                    terminal.typed_at.set(None);
+                    gpui::EntityInputHandler::replace_text_in_range(terminal, Some(0..3), "hello", window, cx);
+                    assert!(terminal.typed_at.get().is_none(), "replacement used unavailable context");
+                    gpui::EntityInputHandler::replace_text_in_range(terminal, Some(3..0), "bad", window, cx);
+                    assert!(terminal.typed_at.get().is_none(), "reversed range was treated as ordinary insertion");
+                });
+            });
         });
     }
 
