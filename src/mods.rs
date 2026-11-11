@@ -1343,7 +1343,7 @@ mod tests {
 
     #[test]
     fn shared_bursts_persist_only_complete_snapshots_and_finish_at_final_state() {
-        let root = if cfg!(target_os = "linux") { PathBuf::from("/var/tmp") } else { std::env::temp_dir() };
+        let root = if cfg!(target_os = "linux") { crate::test_tmp() } else { std::env::temp_dir() };
         let dir = root.join(format!("herdr-shared-stress-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("shared.json");
@@ -1384,7 +1384,7 @@ mod tests {
 
     #[test]
     fn corrupt_shared_file_is_kept_before_starting_empty() {
-        let root = if cfg!(target_os = "linux") { PathBuf::from("/var/tmp") } else { std::env::temp_dir() };
+        let root = if cfg!(target_os = "linux") { crate::test_tmp() } else { std::env::temp_dir() };
         let dir = root.join(format!("herdr-shared-corrupt-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("shared.json");

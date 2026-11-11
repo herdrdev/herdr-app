@@ -14,8 +14,8 @@ struct Staged(PathBuf);
 impl Staged {
     fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let path = PathBuf::from(format!(
-            "/var/tmp/herdr-render-{}-{}",
+        let path = crate::test_tmp().join(format!(
+            "herdr-render-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
