@@ -49,6 +49,8 @@ pub(super) struct NativeApp {
     rect: Option<Rect>,
     visible: bool,
     holes: Vec<[i32; 4]>,
+    /// Corner radius in device pixels, matching the pane's frame.
+    corner: i32,
     apply_pending: bool,
     /// Bumped by reopen, so an older watcher task ends.
     generation: u64,
@@ -111,13 +113,14 @@ impl NativeApp {
         let covered = dragging || hitbox.is_some_and(|hitbox| policy::fully_covered(&hitbox.bounds, covers));
         self.visible = policy::should_show(hitbox.is_some(), unclipped, covered);
         self.holes = hitbox.map(|hitbox| policy::holes(&hitbox.bounds, covers, window.scale_factor())).unwrap_or_default();
+        self.corner = (super::corner() * window.scale_factor()).round() as i32;
     }
 
     /// The native state differs from the latest layout.
     fn needs_apply(&self) -> bool {
         #[cfg(windows)]
         if let (Some(embedded), Some(rect)) = (&self.embedded, self.rect) {
-            return embedded.applied.as_ref() != Some(&(rect, self.visible, self.holes.clone()));
+            return embedded.applied.as_ref() != Some(&(rect, self.visible, self.holes.clone(), self.corner));
         }
         false
     }
@@ -193,7 +196,7 @@ pub(super) fn register(registry: &mut ComponentRegistry) {
             let (ComponentArgument::String(app), ComponentArgument::String(target)) = (&args[0], &args[1]) else { unreachable!() };
             let state = Rc::new(RefCell::new(NativeApp {
                 window: window.window_handle().window_id(), app: app.clone(), target: target.clone(),
-                status: "Opening…".into(), error: None, hitbox: None, rect: None, visible: false, holes: Vec::new(),
+                status: "Opening…".into(), error: None, hitbox: None, rect: None, visible: false, holes: Vec::new(), corner: 0,
                 apply_pending: false, generation: 0, closed: false, focus_until: None,
                 #[cfg(windows)] embedded: None,
                 #[cfg(windows)] opening: false,
@@ -265,7 +268,7 @@ mod win {
         ex_style: isize,
         /// Device pixels of the window cut off at each side: its title bar and frame.
         crop: Crop,
-        pub(super) applied: Option<(Rect, bool, Vec<[i32; 4]>)>,
+        pub(super) applied: Option<(Rect, bool, Vec<[i32; 4]>, i32)>,
     }
 
     #[derive(Clone, Copy, Default, PartialEq, Debug)]
@@ -500,7 +503,7 @@ mod win {
             embedded.applied = None;
         }
         // The program may move or resize its own window: put it back.
-        if let Some((rect, _, _)) = &embedded.applied {
+        if let Some((rect, _, _, _)) = &embedded.applied {
             let expected = child_rect(rect[2], rect[3], embedded.crop);
             if current(embedded.child) != expected { embedded.applied = None; }
         }
@@ -615,12 +618,12 @@ mod win {
             let mut app = state.borrow_mut();
             app.apply_pending = false;
             if !app.needs_apply() { return; }
-            let (rect, visible, holes) = (app.rect.unwrap(), app.visible, app.holes.clone());
+            let (rect, visible, holes, corner) = (app.rect.unwrap(), app.visible, app.holes.clone(), app.corner);
             let give = visible && app.focus_until.take().is_some_and(|until| std::time::Instant::now() <= until);
             app.status = if visible { "Shown.".into() } else { "Hidden while its pane is covered.".into() };
             let embedded = app.embedded.as_mut().unwrap();
-            embedded.applied = Some((rect, visible, holes.clone()));
-            (embedded.child, embedded.container, embedded.crop, rect, visible, holes, give)
+            embedded.applied = Some((rect, visible, holes.clone(), corner));
+            (embedded.child, embedded.container, embedded.crop, rect, visible, (holes, corner), give)
         };
         let width = rect[2].max(1);
         let height = rect[3].max(1);
@@ -629,7 +632,7 @@ mod win {
             let show = if visible { SWP_SHOWWINDOW } else { SWP_HIDEWINDOW };
             SetWindowPos(container, HWND_TOP, rect[0], rect[1], width, height, SWP_NOACTIVATE | show);
         }
-        super::super::win32::set_holes(container, width, height, &holes);
+        super::super::win32::set_holes(container, width, height, &holes.0, holes.1);
         let [x, y, w, h] = child_rect(width, height, crop);
         unsafe { SetWindowPos(child, std::ptr::null_mut(), x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE) };
         if give { focus::give(child); }

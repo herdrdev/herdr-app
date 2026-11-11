@@ -17,8 +17,15 @@ use std::{cell::RefCell, rc::{Rc, Weak}, sync::Arc};
 type State = Rc<RefCell<Browser>>;
 thread_local! {
     static VIEWS: RefCell<Vec<Weak<RefCell<Browser>>>> = const { RefCell::new(Vec::new()) };
+    /// The inner corner radius of the panes native views sit in, logical px.
+    static CORNER: std::cell::Cell<f32> = const { std::cell::Cell::new(0.) };
     /// What overlays cover this frame, collected by `cover()` during prepaint.
     static COVERS: RefCell<Vec<(WindowId, Bounds<Pixels>)>> = const { RefCell::new(Vec::new()) };
+}
+
+/// The inner corner radius of the panes native views sit in, logical px.
+pub(crate) fn corner() -> f32 {
+    CORNER.get()
 }
 
 /// Marks its parent's area as drawn over native views this frame: a toast,
@@ -47,9 +54,9 @@ struct Browser {
     /// Wry's container window, which holds the WebView2 windows.
     #[cfg(windows)]
     hwnd: Option<isize>,
-    /// What overlays cut out of it now.
+    /// What overlays cut out of it now, and its corner radius.
     #[cfg(windows)]
-    holes: Vec<[i32; 4]>,
+    holes: (Vec<[i32; 4]>, i32),
 }
 
 impl Drop for Browser {
@@ -133,10 +140,10 @@ impl Browser {
         #[cfg(windows)]
         if let (Some(hwnd), Some(hitbox)) = (self.hwnd, hitbox.as_ref()) {
             let scale = window.scale_factor();
-            let holes = policy::holes(&hitbox.bounds, covers, scale);
+            let holes = (policy::holes(&hitbox.bounds, covers, scale), (corner() * scale).round() as i32);
             if holes != self.holes {
                 let size = |v: Pixels| (f32::from(v) * scale).round() as i32;
-                win32::set_holes(hwnd as _, size(hitbox.bounds.size.width), size(hitbox.bounds.size.height), &holes);
+                win32::set_holes(hwnd as _, size(hitbox.bounds.size.width), size(hitbox.bounds.size.height), &holes.0, holes.1);
                 self.holes = holes;
             }
         }
@@ -178,8 +185,11 @@ impl Browser {
 /// Native children follow cache-aware frame geometry, not render callbacks:
 /// a cached view can still be on screen without executing its canvas again.
 /// Hide children for overlays, clipping, or an absent (inactive-tab) hitbox.
-pub fn end_frame(dragging: bool) -> impl IntoElement {
+/// `corner`: the inner corner radius of the shown panes (logical px), so a
+/// rectangular native view does not cover a rounded pane frame.
+pub fn end_frame(dragging: bool, corner: f32) -> impl IntoElement {
     canvas(|_, _, _| (), move |_, _, window, cx| {
+        CORNER.set(corner);
         let id = window.window_handle().window_id();
         let covers: Vec<Bounds<Pixels>> = COVERS.with_borrow_mut(|covers| {
             let mine = covers.iter().filter(|(w, _)| *w == id).map(|(_, b)| *b).collect();
@@ -223,7 +233,7 @@ pub fn components() -> FrozenComponentRegistry {
             let ComponentArgument::String(url) = &args[0] else { unreachable!() };
             if !policy::allows_navigation(url) { return Err("Expected an HTTP(S) URL without credentials".into()); }
             let state = Rc::new(RefCell::new(Browser { window: window.window_handle().window_id(), url: url.clone(), native: None, #[cfg(not(target_os = "linux"))] context: None, error: None, hitbox: None, bounds: None, visible: false,
-                #[cfg(windows)] creating: false, #[cfg(windows)] hwnd: None, #[cfg(windows)] holes: Vec::new() }));
+                #[cfg(windows)] creating: false, #[cfg(windows)] hwnd: None, #[cfg(windows)] holes: (Vec::new(), 0) }));
             VIEWS.with_borrow_mut(|views| views.push(Rc::downgrade(&state)));
             Ok(Box::new(state))
         },
