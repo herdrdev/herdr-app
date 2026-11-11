@@ -688,6 +688,8 @@ What's about the user, never a look:
   missing hc (install it in that distribution). Environment probes retry after
   a five-second failure backoff; WSL discovery, path conversion, installation
   and version checks stop after 30 seconds instead of waiting indefinitely.
+  Setup retries and executable checks run in the background; while one is pending,
+  Setup shows progress and prevents duplicate actions without blocking the window.
   Successful path conversions are cached (up to 512 entries per process);
   restarting clears the cache. Guest paths still use the direct fast path.
   WSL file links expand only `$HOME` and `$PWD`, never Windows environment

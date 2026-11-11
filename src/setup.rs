@@ -88,62 +88,38 @@ pub fn open(need: Need, requests: async_channel::Receiver<Request>, cx: &mut App
 }
 
 impl Setup {
-    /// Connects to the core; if it serves this app, closes this window and
-    /// opens the main one, else says what's still needed.
+    /// All discovery, version probes and connection handshakes run off the UI thread.
     fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        if crate::wsl::active().is_some() {
-            let configured = settings::load_person().ok().and_then(|p| p.core);
-            match crate::core_bin::find(configured.as_deref()) {
-                Ok(Some(bin)) => crate::core_bin::use_core(bin),
-                result => {
-                    self.need = match result {
-                        Err(error) => Need::Connect(error),
-                        _ => Need::Install,
-                    };
-                    self.state = State::Ready;
-                    cx.notify();
-                    return;
-                }
-            }
-        }
-        match Core::connect() {
-            Ok(core) => match crate::hc::check(&core.hello) {
-                Ok(()) => {
-                    let Some(requests) = self.requests.take() else { return };
-                    window.remove_window();
-                    crate::open_main(core, requests, cx);
-                    return;
-                }
-                Err(m) => {
-                    self.need = Need::Fix(m);
-                    self.state = State::Ready;
-                }
-            },
-            Err(e) => {
-                self.need = Need::connection(e);
-                self.state = State::Ready;
-            }
-        }
-        cx.notify();
+        self.run("Connecting to herdr-core…", || Ok(None), window, cx);
     }
 
-    /// Runs `work` off the UI thread, then `start` again (or shows the error).
-    fn run(&mut self, label: &'static str, work: fn() -> Result<Option<PathBuf>, String>, window: &mut Window, cx: &mut Context<Self>) {
+    /// Runs `work` and reconnects off the UI thread, then applies the result once.
+    fn run(&mut self, label: &'static str, work: impl FnOnce() -> Result<Option<PathBuf>, String> + Send + 'static, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.state, State::Busy(_)) { return; }
         self.state = State::Busy(label);
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
-            let result = cx.background_executor().spawn(async move { work() }).await;
-            let _ = this.update_in(cx, |this, window, cx| match result {
-                Ok(bin) => {
-                    if let Some(bin) = bin {
-                        crate::core_bin::use_core(bin);
+            let result = cx.background_executor().spawn(async move {
+                work().map(|bin| {
+                    if let Some(bin) = bin { crate::core_bin::use_core(bin); }
+                    connect()
+                })
+            }).await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(Ok(core)) => {
+                        let Some(requests) = this.requests.take() else { return; };
+                        window.remove_window();
+                        crate::open_main(core, requests, cx);
+                        return;
                     }
-                    this.start(window, cx);
+                    Ok(Err(need)) => {
+                        this.need = need;
+                        this.state = State::Ready;
+                    }
+                    Err(error) => this.state = State::Failed(error),
                 }
-                Err(e) => {
-                    this.state = State::Failed(e);
-                    cx.notify();
-                }
+                cx.notify();
             });
         })
         .detach();
@@ -158,43 +134,18 @@ impl Setup {
     }
 
     fn choose(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.state, State::Busy(_)) { return; }
+        self.state = State::Busy("Choosing herdr-core…");
+        cx.notify();
         let paths = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some("Use this herdr-core".into()) });
         cx.spawn_in(window, async move |this, cx| {
-            let Ok(Ok(Some(paths))) = paths.await else { return };
-            let Some(bin) = paths.into_iter().next() else { return };
-            let bin = cx.background_executor().spawn(async move { crate::wsl::linux_path_if_active(&bin).map(PathBuf::from) }).await;
+            let paths = paths.await;
             let _ = this.update_in(cx, |this, window, cx| {
-                let bin = match bin {
-                    Ok(bin) => bin,
-                    Err(e) => { this.state = State::Failed(e); cx.notify(); return; }
-                };
-                let version = if crate::wsl::active().is_some() {
-                    crate::wsl::version(&bin)
-                } else {
-                    Ok(crate::core_bin::version(&bin))
-                };
-                if let Err(error) = &version {
-                    this.state = State::Failed(error.clone());
-                    cx.notify();
-                    return;
-                }
-                if version.ok().flatten().is_none() {
-                    this.state = State::Failed(format!("{} isn't herdr-core (it should answer `--version` with `hc …`)", bin.display()));
-                    cx.notify();
-                    return;
-                }
-                // Remembered: next time Herdr looks there first.
-                let result = settings::load_person().and_then(|mut person| {
-                    person.core = Some(bin.to_string_lossy().into_owned());
-                    settings::write_person(&person).map_err(|e| e.to_string())
-                });
-                if let Err(e) = result {
-                    this.state = State::Failed(format!("Cannot save settings: {e}"));
-                    cx.notify();
-                    return;
-                }
-                crate::core_bin::use_core(bin);
-                this.start(window, cx);
+                this.state = State::Ready;
+                cx.notify();
+                let Ok(Ok(Some(paths))) = paths else { return; };
+                let Some(bin) = paths.into_iter().next() else { return; };
+                this.run("Checking herdr-core…", move || choose_core(bin).map(Some), window, cx);
             });
         })
         .detach();
@@ -258,6 +209,37 @@ impl Setup {
     }
 }
 
+/// Blocking setup work, shared by retry, install, update and file selection.
+fn connect() -> Result<Arc<Core>, Need> {
+    if crate::wsl::active().is_some() {
+        let configured = settings::load_person().ok().and_then(|p| p.core);
+        let bin = crate::core_bin::find(configured.as_deref())
+            .map_err(Need::Connect)?.ok_or(Need::Install)?;
+        crate::core_bin::use_core(bin);
+    }
+    let core = Core::connect().map_err(Need::connection)?;
+    crate::hc::check(&core.hello).map_err(Need::Fix)?;
+    Ok(core)
+}
+
+fn choose_core(bin: PathBuf) -> Result<PathBuf, String> {
+    let bin = PathBuf::from(crate::wsl::linux_path_if_active(&bin)?);
+    let version = if crate::wsl::active().is_some() {
+        crate::wsl::version(&bin)?
+    } else {
+        crate::core_bin::version(&bin)
+    };
+    if version.is_none() {
+        return Err(format!("{} isn't herdr-core (it should answer `--version` with `hc …`)", bin.display()));
+    }
+    // Remember only a validated executable, leaving the previous choice on failure.
+    settings::load_person().and_then(|mut person| {
+        person.core = Some(bin.to_string_lossy().into_owned());
+        settings::write_person(&person).map_err(|e| e.to_string())
+    }).map_err(|e| format!("Cannot save settings: {e}"))?;
+    Ok(bin)
+}
+
 fn button(id: &'static str, label: &'static str, primary: bool) -> Stateful<Div> {
     div()
         .id(id)
@@ -289,7 +271,7 @@ impl Render for Setup {
             Need::Connect(_) => div()
                 .flex()
                 .gap(px(10.0))
-                .child(button("retry", "Retry", true).on_click(cx.listener(|this, _, w, cx| this.start(w, cx))))
+                .child(button("retry", "Retry", true).when(!busy, |d| d.on_click(cx.listener(|this, _, w, cx| this.start(w, cx)))))
                 .when(wsl, |d| d.child(button("use-windows", "Continue without WSL", false).when(!busy, |d| d.on_click(cx.listener(|this, _, _, cx| this.use_windows(cx)))))),
             Need::Fix(Mismatch::Newer { .. }) => div()
                 .flex()
