@@ -162,6 +162,12 @@ pub struct Look {
     pub font: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub font_size: Option<f32>,
+    /// Cell height multiplier, 0.8..2 (1 keeps the font's natural rows).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_line_height: Option<f32>,
+    /// Wheel and trackpad scroll multiplier, 0.1..5.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_scroll_speed: Option<f32>,
     /// The mods' font.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui_font: Option<String>,
@@ -375,6 +381,9 @@ pub struct Node {
     /// Root only: the terminal right-click menu's mod (default: `menu`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_menu: Option<String>,
+    /// Root only: the mod that shows notifications (default: `toast`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toast: Option<String>,
     /// Dragging this node moves the window; a double-click maximizes it.
     #[serde(default, skip_serializing_if = "is_false")]
     pub window_drag: bool,
@@ -414,6 +423,7 @@ impl Node {
             traffic_lights: None,
             preview: None,
             terminal_menu: None,
+            toast: None,
             window_drag: false,
         }
     }
@@ -567,6 +577,11 @@ impl Node {
         let removed = remove_inner(self, id)?;
         collapse(self);
         Some(removed)
+    }
+
+    /// Removes a composition slot without simplifying the authored layout.
+    pub fn remove_slot(&mut self, id: &str) -> Option<Node> {
+        remove_inner(self, id)
     }
 
     /// Puts `new` beside `target` along `axis` (after it). Reuses the parent
@@ -852,6 +867,18 @@ mod tests {
         let mut root = Node::container("ctx", Axis::Row, vec![term("x"), term("y")]);
         root.remove("y");
         assert_eq!((root.id.as_str(), root.children().len()), ("ctx", 1));
+    }
+
+    #[test]
+    fn removing_a_composition_slot_keeps_authored_containers() {
+        let mut panel = Node::container("panel", Axis::Column, vec![term("panel-body")]);
+        panel.hidden = true;
+        panel.size = Some(Size::Px { px: 368.0 });
+        let mut root = Node::container("work-body", Axis::Row, vec![term("coordinator"), term("main"), panel.clone()]);
+        assert!(root.remove_slot("coordinator").is_some());
+        assert!(root.find("coordinator").is_none());
+        assert_eq!(root.find("panel"), Some(&panel));
+        assert!(root.remove_slot("missing").is_none());
     }
 
     #[test]

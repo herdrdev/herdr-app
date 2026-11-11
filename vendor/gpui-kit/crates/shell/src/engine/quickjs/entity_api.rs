@@ -1157,6 +1157,36 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
     // `scroll_to_item` records an index the list consumes during its next
     // prepaint, so a handle rebuilt each frame would drop every request made
     // between two frames — which is every request a script can make.
+    let create_scroll = runtime.clone();
+    globals.set(
+        "__scroll_new",
+        Func::from(move |ctx: Ctx<'_>| -> JsResult<EntityHandle> {
+            refuse_creation_in_render(&ctx, "ScrollHandle.new()")?;
+            alive(&ctx, &create_scroll)?
+                .entities()
+                .create_scroll(scope::current_application_generation())
+                .map_err(|_| entity_limit_reached(&ctx))
+        }),
+    )?;
+    let scroll_to_item = runtime.clone();
+    globals.set(
+        "__scroll_to_item",
+        Func::from(move |ctx: Ctx<'_>, handle: EntityHandle, index: usize| -> JsResult<()> {
+            let scroll = alive(&ctx, &scroll_to_item)?
+                .entities().scroll(handle)
+                .ok_or_else(|| Exception::throw_type(&ctx, "this scroll handle has been released"))?;
+            scroll.pending.set(Some(index));
+            Ok(())
+        }),
+    )?;
+    let discard_scroll = runtime.clone();
+    globals.set(
+        "__scroll_release",
+        Func::from(move |handle: EntityHandle| {
+            discard_scroll.upgrade().is_some_and(|runtime| runtime.entities().release(handle))
+        }),
+    )?;
+
     let create_virtual_scroll = runtime.clone();
     globals.set(
         "__virtual_scroll_new",

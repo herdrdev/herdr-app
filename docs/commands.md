@@ -257,11 +257,13 @@ Focus the pane or focusable mod to the "left", "right", "up" or "down".
 
 ## `pane.swap`
 
-Swap the focused pane with its neighbor in a direction.
+Swap a pane (default: the focused one) with its neighbor in a direction, or with another pane of its tab (target). Give exactly one of direction or target.
 
 | Argument | Required |
 |---|---|
-| `direction` | yes |
+| `direction` | no |
+| `pane` | no |
+| `target` | no |
 
 ## `terminal.peek`
 
@@ -279,6 +281,14 @@ Show a terminal in a pane for now, in place of its own (no terminal: back).
 |---|---|
 | `terminal` | no |
 | `pane` | no |
+
+## `terminal.select_all`
+
+Select a terminal's whole screen and scrollback (default: the focused one), ready to copy. On the alternate screen, select only that screen.
+
+| Argument | Required |
+|---|---|
+| `terminal` | no |
 
 ## `terminal.copy`
 
