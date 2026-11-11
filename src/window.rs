@@ -4363,8 +4363,8 @@ impl AppWindow {
                         .items_center()
                         .justify_center()
                         .when(!o.modal, |d| d.on_mouse_down(MouseButton::Left, cx.listener(move |this, _, w, cx| this.close_overlay(&id, w, cx))))
-                        // The dimmed backdrop covers native views too.
-                        .child(crate::browser::cover())
+                        // Only the dialog itself covers native views: they stay
+                        // shown around it, undimmed (GPUI cannot draw over them).
                         .child(body)
                         .into_any_element(),
                 ),

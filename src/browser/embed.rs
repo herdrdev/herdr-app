@@ -271,10 +271,15 @@ impl NativeApp {
 
     fn update_visibility(&mut self, window: &Window, dragging: bool, covers: &[Bounds<Pixels>]) {
         let hitbox = self.hitbox.and_then(|id| window.prepainted_hitbox(id));
-        let unclipped = hitbox.is_some_and(|hitbox| policy::is_unclipped_at_scale(&hitbox.bounds, &hitbox.content_mask.bounds, window.scale_factor()));
-        let covered = dragging || hitbox.is_some_and(|hitbox| policy::fully_covered(&hitbox.bounds, covers));
-        self.visible = policy::should_show(hitbox.is_some(), unclipped, covered);
-        self.holes = hitbox.map(|hitbox| policy::holes(&hitbox.bounds, covers, window.scale_factor())).unwrap_or_default();
+        let scale = window.scale_factor();
+        // The parts outside the pane's clip mask are cut out like overlays.
+        let mut covers = covers.to_vec();
+        if let Some(hitbox) = hitbox.as_ref() {
+            covers.extend(policy::outside_mask(&hitbox.bounds, &hitbox.content_mask.bounds, scale));
+        }
+        let covered = dragging || hitbox.is_some_and(|hitbox| policy::fully_covered(&hitbox.bounds, &covers));
+        self.visible = policy::should_show(hitbox.is_some(), true, covered);
+        self.holes = hitbox.map(|hitbox| policy::holes(&hitbox.bounds, &covers, scale)).unwrap_or_default();
     }
 
     /// The native state differs from the latest layout.

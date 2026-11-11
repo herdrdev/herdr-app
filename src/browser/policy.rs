@@ -39,6 +39,35 @@ pub fn holes(
         .collect()
 }
 
+/// The parts of the view outside its clip mask (a scrolled or partly hidden
+/// pane), as covers: a native child cannot be clipped by GPUI, so these parts
+/// are cut out of it like overlays. Slivers under half a device pixel, from
+/// rounding at a mask's edge, are not.
+pub fn outside_mask(
+    view: &gpui::Bounds<gpui::Pixels>,
+    mask: &gpui::Bounds<gpui::Pixels>,
+    scale: f32,
+) -> Vec<gpui::Bounds<gpui::Pixels>> {
+    use gpui::{point, Bounds};
+    let (l, t, r, b) = (view.left(), view.top(), view.right(), view.bottom());
+    let inner = view.intersect(mask);
+    if inner.size.width <= gpui::px(0.) || inner.size.height <= gpui::px(0.) {
+        return vec![*view];
+    }
+    let (il, it, ir, ib) = (inner.left(), inner.top(), inner.right(), inner.bottom());
+    [
+        Bounds::from_corners(point(l, t), point(r, it)),
+        Bounds::from_corners(point(l, ib), point(r, b)),
+        Bounds::from_corners(point(l, it), point(il, ib)),
+        Bounds::from_corners(point(ir, it), point(r, ib)),
+    ]
+    .into_iter()
+    .filter(|band| {
+        f32::from(band.size.width) * scale >= 0.5 && f32::from(band.size.height) * scale >= 0.5
+    })
+    .collect()
+}
+
 /// The overlays leave nothing of the view to show.
 pub fn fully_covered(
     view: &gpui::Bounds<gpui::Pixels>,
@@ -54,7 +83,7 @@ pub fn fully_covered(
 
 #[cfg(test)]
 mod tests {
-    use super::{fully_covered, holes};
+    use super::{fully_covered, holes, outside_mask};
     use gpui::{point, px, size, Bounds};
 
     fn rect(x: f32, y: f32, w: f32, h: f32) -> Bounds<gpui::Pixels> {
@@ -73,6 +102,26 @@ mod tests {
     fn overlays_elsewhere_leave_the_view_whole() {
         let view = rect(100., 50., 800., 600.);
         assert!(holes(&view, &[rect(0., 0., 90., 40.)], 1.).is_empty());
+    }
+
+    #[test]
+    fn a_clipped_view_cuts_only_what_its_mask_hides() {
+        let view = rect(100., 50., 800., 600.);
+        // Its right 200 px and bottom 100 px are outside the pane's mask.
+        let bands = outside_mask(&view, &rect(0., 0., 800., 550.), 1.);
+        assert_eq!(
+            holes(&view, &bands, 1.),
+            vec![[0, 500, 800, 100], [700, 0, 100, 500]]
+        );
+        assert!(!fully_covered(&view, &bands));
+        assert!(outside_mask(&view, &rect(0., 0., 2000., 2000.), 1.).is_empty());
+        // A rounding sliver at the mask's edge leaves the view whole.
+        assert!(outside_mask(&view, &rect(100.2, 50., 800., 600.), 1.5).is_empty());
+        // Nothing of it inside the mask: all of it goes.
+        assert!(fully_covered(
+            &view,
+            &outside_mask(&view, &rect(1000., 0., 100., 100.), 1.)
+        ));
     }
 
     #[test]

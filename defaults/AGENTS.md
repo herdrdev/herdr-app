@@ -40,10 +40,12 @@ This fork also provides `BrowserState(url)` and `Browser(state)` from
 `herdr-browser`. Retain the state in `init`, render the element in a sized
 container, and use `state.navigate(url)`, `reload()`, `back()`, `url()` or
 `error()`. Pages accept HTTP(S) URLs without embedded credentials and have no
-Herdr IPC. Popups and downloads are blocked. On Windows, toasts, popups and
-dialogs are cut out of the native page, which stays visible around them;
-elsewhere it hides while an overlay covers it. It also hides while its
-container is partly clipped; an inactive tab keeps its page hidden. Linux
+Herdr IPC. Popups and downloads are blocked. On Windows, toasts, popups,
+dialogs and the parts outside its container's clip are cut out of the native
+page, which stays visible around them; a dialog's dimmed backdrop does not dim
+it. Elsewhere it hides while an overlay covers it or its container is partly
+clipped. It hides while a pane is dragged; an inactive tab keeps its page
+hidden. Linux
 requires X11/XWayland and WebKitGTK 4.1. Windows requires WebView2. Keep an
 external-browser fallback in mods that open pages.
 
