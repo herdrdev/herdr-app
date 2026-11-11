@@ -1,0 +1,21 @@
+#!/usr/bin/env node
+// A herdr-core stand-in: `label` stores labels in $FAKE_HC_STATE, and `get`
+// reports them with the labelling Pi as the terminal's foreground process.
+import { existsSync, readFileSync, writeFileSync } from 'node:fs';
+
+const file = process.env.FAKE_HC_STATE;
+const state = existsSync(file) ? JSON.parse(readFileSync(file, 'utf8')) : { labels: {}, foreground: null };
+const [command, terminal, ...rest] = process.argv.slice(2);
+if (command === 'get') {
+    // The Pi asking about its own terminal is in front; later readers see that Pi.
+    const foreground = state.foreground ?? process.ppid;
+    console.log(JSON.stringify({ address: terminal, labels: state.labels, foreground: { pid: foreground } }));
+} else if (command === 'label') {
+    const [pair] = rest;
+    const at = pair.indexOf('=');
+    state.labels[pair.slice(0, at)] = pair.slice(at + 1);
+    state.foreground = JSON.parse(pair.slice(at + 1)).pid;
+    writeFileSync(file, JSON.stringify(state));
+} else {
+    process.exit(2);
+}
