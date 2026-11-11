@@ -2658,6 +2658,66 @@ unsafe fn is_ime_input_source_active() -> bool {
     }
 }
 
+#[link(name = "Carbon", kind = "framework")]
+unsafe extern "C" {
+    fn TSMGetActiveDocument() -> *mut c_void;
+}
+
+// HERDR: AppKit keeps the key window's text input context paired with the
+// process's active Text Services Manager document. The pairing sometimes
+// comes apart while the window stays key, seen when a plain keyboard layout
+// is selected as the window becomes key: keys still arrive and are still
+// handed to the context, but the input method's replies reach no document
+// and input source switches are missed, so nothing composes until the app
+// is deactivated and activated again. Deactivating and activating the
+// context is what AppKit does when the key window changes, and it pairs
+// them again. Call it without the window state lock: AppKit may call back
+// into the view.
+fn pair_input_context(native_view: id, reason: &str) {
+    unsafe {
+        let native_window: id = msg_send![native_view, window];
+        let input_context: id = msg_send![native_view, inputContext];
+        if native_window.is_null() || input_context.is_null() {
+            return;
+        }
+        let app: id = msg_send![class!(NSApplication), sharedApplication];
+        let app_active: BOOL = msg_send![app, isActive];
+        let window_key: BOOL = msg_send![native_window, isKeyWindow];
+        let first_responder: id = msg_send![native_window, firstResponder];
+        let current: id = msg_send![class!(NSTextInputContext), currentInputContext];
+        let context = crate::input_pairing::InputContext {
+            app_active: app_active == YES,
+            window_key: window_key == YES,
+            first_responder: first_responder == native_view,
+            current: current == input_context,
+            document: !TSMGetActiveDocument().is_null(),
+        };
+        if !crate::input_pairing::lost(context) {
+            return;
+        }
+        let _: () = msg_send![input_context, deactivate];
+        let _: () = msg_send![input_context, activate];
+        let paired = !TSMGetActiveDocument().is_null();
+        // Before the first key after an activation this is routine; while
+        // typing it is the fault itself.
+        if reason == "key" {
+            log::warn!(
+                "the key window's input context had lost the text input system \
+                 (current: {}, document: {}); paired again: {paired}",
+                context.current,
+                context.document
+            );
+        } else {
+            log::debug!(
+                "paired the key window's input context on {reason} \
+                 (current: {}, document: {}); paired: {paired}",
+                context.current,
+                context.document
+            );
+        }
+    }
+}
+
 extern "C" fn handle_key_event(this: &Object, native_event: id, key_equivalent: bool) -> BOOL {
     let window_state = unsafe { get_window_state(this) };
     let mut lock = window_state.as_ref().lock();
@@ -2693,6 +2753,9 @@ extern "C" fn handle_key_event(this: &Object, native_event: id, key_equivalent: 
             }
 
             drop(lock);
+
+            // HERDR: before any key can reach the input method.
+            pair_input_context(this as *const Object as id, "key");
 
             // Alt shortcuts must never enter AppKit's Option/dead-key composition.
             if key_down_event.keystroke.modifiers.alt
@@ -3223,6 +3286,12 @@ extern "C" fn window_did_change_key_status(this: &Object, selector: Sel, _: id) 
             let mut lock = window_state.as_ref().lock();
             if is_active {
                 lock.move_traffic_light();
+                // HERDR: so an input source switched before the first key
+                // also reaches the window (see `pair_input_context`).
+                let native_view = lock.native_view.as_ptr();
+                drop(lock);
+                pair_input_context(native_view, "activation");
+                lock = window_state.as_ref().lock();
             }
 
             if let Some(mut callback) = lock.activate_callback.take() {
