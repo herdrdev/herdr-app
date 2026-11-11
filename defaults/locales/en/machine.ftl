@@ -1,0 +1,21 @@
+# Explicit interface messages. Variables are user data; never translate their values.
+machine-add-it-didn-t-answer = it didn't answer
+machine-add-couldn-t-add-here-it-needs-you-to-answer-something-a-password-a-new-host-key-or-insta = Couldn't add { $target } here: it needs you to answer something (a password, a new host key, or installing herdr-core there). Run `hc machine add { $quoted }` in a terminal. `hc machine --help` shows the options.
+machine-add-it-didn-t-work = it didn't work
+machine-add-is-a-mac-allow-its-folders-once = { $name } is a Mac: allow its folders once
+machine-add-macos-asks-on-the-mac-s-own-screen-before-an-agent-reads-desktop-documents-or-downloa = macOS asks on the Mac's own screen before an agent reads Desktop, Documents or Downloads, and waits until someone answers. Give herdr-core Full Disk Access there and it never asks again: in the list, press + and pick this file:
+machine-add-open-the-setting-on = Open the setting on { $name }
+machine-add-it-s-open-on-the-mac-s-screen = It's open on the Mac's screen.
+machine-add-copied = Copied
+machine-add-copy = Copy
+machine-add-added = Added
+machine-add-connecting = Connecting
+machine-add-add = Add
+machine-add-add-a-machine = Add a machine
+machine-add-esc = Esc
+machine-add-a-vps-a-mac-mini-a-box-at-home-herdr-reaches-it-over-ssh-and-agents-there-keep-runnin = A VPS, a Mac mini, a box at home: Herdr reaches it over ssh, and agents there keep running while your laptop sleeps.
+machine-add-from-your-ssh-config = From your ssh config
+machine-add-your-ssh-config-lists-no-hosts = Your ssh config lists no hosts
+machine-add-reading-ssh-config = Reading ~/.ssh/config…
+machine-add-also = also { $value1 }
+machine-add-or-type-how-ssh-reaches-it = Or type how ssh reaches it

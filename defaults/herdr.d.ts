@@ -330,8 +330,16 @@ export function feedbackClearImages(): null;
 export function sendFeedback(body: import("gpui-kit").HostValue, images?: string[]): Promise<string | null>;
 
 /** What the app runs with: the shown layout's look (theme name, fonts, sizes, terminal
- *  padding and opacity) with the person's zoom and sounds. */
+ *  padding and opacity) with the person's zoom and sounds.
+ *  language_preference is the normalized preference at launch, not a pending edit. */
 export function settings(): Record<string, unknown>;
+
+/** Effective interface language, fixed until the app restarts. */
+export function locale(): string;
+/** Supported languages, in their native names. "system" is a preference, not a language. */
+export function languages(): { code: string; nativeName: string }[];
+/** Translate an interface message. Parameters are never recursively translated. */
+export function t(key: string, params?: Record<string, string | number>): string;
 
 /** Every key binding: { section, keys, action }. */
 export function keys(): { section: string; keys: string; action: string }[];

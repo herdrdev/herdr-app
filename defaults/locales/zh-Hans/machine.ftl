@@ -1,0 +1,21 @@
+# Explicit interface messages. Variables are user data; never translate their values.
+machine-add-it-didn-t-answer = 它没有响应
+machine-add-couldn-t-add-here-it-needs-you-to-answer-something-a-password-a-new-host-key-or-insta = 无法在此添加 { $target }：需要你确认密码、新的主机密钥或安装 herdr-core。请在终端运行 `hc machine add { $quoted }`，通过 `hc machine --help` 查看选项。
+machine-add-it-didn-t-work = 没有成功
+machine-add-is-a-mac-allow-its-folders-once = { $name } 是一台 Mac:请一次性允许访问它的文件夹
+machine-add-macos-asks-on-the-mac-s-own-screen-before-an-agent-reads-desktop-documents-or-downloa = Agent 读取桌面、文稿或下载文件夹之前,macOS 会在这台 Mac 自己的屏幕上询问,并一直等到有人回答。在那里给 herdr-core 授予“完全磁盘访问权限”,以后就不会再询问:在列表中点 +,然后选择这个文件:
+machine-add-open-the-setting-on = 在 { $name } 上打开该设置
+machine-add-it-s-open-on-the-mac-s-screen = 已在这台 Mac 的屏幕上打开。
+machine-add-copied = 已复制
+machine-add-copy = 复制
+machine-add-added = 已添加
+machine-add-connecting = 连接中
+machine-add-add = 添加
+machine-add-add-a-machine = 添加机器
+machine-add-esc = Esc
+machine-add-a-vps-a-mac-mini-a-box-at-home-herdr-reaches-it-over-ssh-and-agents-there-keep-runnin = VPS、Mac mini、家里的一台主机:Herdr 通过 ssh 连接它们,你的笔记本休眠时,那里的 Agent 也会继续运行。
+machine-add-from-your-ssh-config = 来自你的 ssh 配置
+machine-add-your-ssh-config-lists-no-hosts = 你的 ssh 配置里没有任何主机
+machine-add-reading-ssh-config = 正在读取 ~/.ssh/config…
+machine-add-also = 还有 { $value1 }
+machine-add-or-type-how-ssh-reaches-it = 或者输入 ssh 连接它的方式

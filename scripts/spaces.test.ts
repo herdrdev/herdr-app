@@ -1,3 +1,4 @@
+import "./i18n-fixture";
 import { test, expect, spyOn } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { mkdtempSync, mkdirSync, rmSync } from "node:fs";

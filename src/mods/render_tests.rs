@@ -107,11 +107,18 @@ fn fixture(populated: bool, props: Value, update: Value) -> BTreeMap<String, Val
     values
 }
 
-fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostModule {
+fn module(mut values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostModule {
+    let language = values.remove("_locale").and_then(|v| v.as_str().map(str::to_owned)).unwrap_or_else(|| "en".into());
+    let translation_language = language.clone();
     let mut module = HostModule::new("herdr");
     for (name, value) in values {
+        let mut value = value;
+        if name == "settings" { value["language_preference"] = json!("system"); }
         module = module.function(name, move |_| Ok(to_host(&value)));
     }
+    module = module.function("locale", move |_| Ok(language.clone().into()))
+        .function("languages", |_| Ok(to_host(&crate::i18n::languages())))
+        .function("t", move |a| Ok(crate::i18n::translate_in(&translation_language, a.string(0)?, &a.get(1).map(from_host).unwrap_or(Value::Null)).into()));
     module = module.function("feedbackPreview", |a| {
         Ok(to_host(
             &json!({"available":true,"body":{"message":a.string(0)?,"email":a.string(1)?}}),
@@ -417,6 +424,27 @@ fn shipped_initial_descriptions(cx: &mut TestAppContext) {
         entries.len(),
         start.elapsed()
     );
+}
+
+#[gpui::test]
+fn localized_mods_use_native_messages_and_keep_user_text(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for code in ["en", "zh-Hans", "zh-Hant"] {
+        let mut values = fixture(true, props(), updates("current", "current"));
+        values.insert("_locale".into(), json!(code));
+        let tree = describe_with_values(cx, &staged, "frame/settings", values, None).unwrap();
+        assert!(tree.contains(&crate::i18n::translate_in(code, "settings-language-label", &Value::Null)), "{code}: {tree}");
+        for entry in ["mods/agents", "mods/files", "mods/changes", "frame/palette", "frame/welcome"] {
+            let mut values = fixture(true, props(), updates("current", "current"));
+            values.insert("_locale".into(), json!(code));
+            describe_with_values(cx, &staged, entry, values, None).unwrap_or_else(|e| panic!("{code}/{entry}: {e:#}"));
+        }
+        let mut values = fixture(true, json!({"overlay":"test", "title":"Settings", "hint":"New tab", "value":"Settings { $name }", "command":{"name":"space.rename","args":{"id":"s1"}}}), updates("current", "current"));
+        values.insert("_locale".into(), json!(code));
+        let tree = describe_with_values(cx, &staged, "mods/prompt", values, None).unwrap();
+        assert!(tree.contains("Settings") && tree.contains("New tab"), "user text changed: {tree}");
+    }
 }
 
 /// A mod's localStorage write lands on the executor; one that lands after the

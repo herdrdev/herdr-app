@@ -746,7 +746,7 @@ impl TerminalView {
         let input = if let Some(input) = self.search_input.clone() {
             input
         } else {
-            let input = cx.new(|cx| InputState::new(window, cx).placeholder("Find in terminal"));
+            let input = cx.new(|cx| InputState::new(window, cx).placeholder(crate::i18n::text("terminal-find")));
             cx.subscribe(&input, |this, input, event: &InputEvent, cx| match event {
                 InputEvent::Change => {
                     this.search_query = input.read(cx).value().to_string();
@@ -2136,13 +2136,13 @@ impl Render for TerminalView {
         let search_label = if self.search_query.is_empty() {
             String::new()
         } else if !search_progress.complete {
-            if search_progress.total == 0 { "Searching…".to_owned() } else { format!("{}+", search_progress.total) }
+            if search_progress.total == 0 { crate::i18n::text("terminal-searching") } else { format!("{}+", search_progress.total) }
         } else if search_progress.total == 0 {
-            "No matches".to_owned()
+            crate::i18n::text("terminal-no-matches")
         } else if let Some(selected) = search_progress.selected {
             format!("{} / {}", selected + 1, search_progress.total)
         } else {
-            format!("{} matches", search_progress.total)
+            crate::i18n::translate("terminal-match-count", &serde_json::json!({"count": search_progress.total}))
         };
         let address = self.address.clone();
 

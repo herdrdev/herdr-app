@@ -1,3 +1,4 @@
+import { t as tr } from "herdr";
 // The bar on top of a peeked agent (an overlay the agents list opens for a
 // sub-agent, or a terminal address link): who it is and how it's doing, ↗ to
 // go to its pane (or, without one, keep it as a tab of the shown space), ✕ to
@@ -13,7 +14,7 @@ function icon(p, size, color) {
   if (!p?.icon) return null;
   return p.tint ? svg(p.icon).size(size).flex_none().text_color(color) : image(p.icon).w(size).h(size).flex_none();
 }
-const WORDS = { working: "working", blocked: "needs you", done: "finished", idle: "idle" };
+const WORDS = { working: "working", blocked: tr("peek-needs-you"), done: "finished", idle: "idle" };
 
 export default class Peek extends View {
   init(_props, cx) {
@@ -63,10 +64,10 @@ export default class Peek extends View {
       .when(Boolean(pic), (el) => el.child(pic))
       .child(div().truncate().font_semibold().text_color(t.foreground).child(k?.name || k?.template || k?.program?.name || terminal || ""))
       .when(Boolean(st), (el) => el.child(div().flex_none().text_color(t[st] ?? t.dim).child(WORDS[st] ?? st)))
-      .when(Boolean(parent), (el) => el.child(div().truncate().text_color(t.dim).child(`from ${parent.name || parent.address}`)))
+      .when(Boolean(parent), (el) => el.child(div().truncate().text_color(t.dim).child(tr("peek-from", { address: parent.name || parent.address }))))
       .child(div().flex_1())
       .child(
-        this.button(t, "keep", home ? "↗ go to" : "↗ keep", () => {
+        this.button(t, "keep", home ? tr("peek-go-to") : tr("peek-keep"), () => {
           run(home ? "pane.focus" : "terminal.keep", { terminal });
           closeOverlay(overlay);
         }),

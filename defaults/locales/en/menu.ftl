@@ -1,0 +1,20 @@
+# Explicit interface messages. Variables are user data; never translate their values.
+menu-split-right = Split right
+menu-split-down = Split down
+menu-zoom = Zoom
+menu-use-herdr-right-click-menu = Use Herdr right-click menu
+menu-send-right-clicks-to-pane = Send right-clicks to pane
+menu-send-back-to = Send back to { $address }
+menu-close-pane = Close pane
+menu-rename = Rename
+menu-new-tab = New tab
+menu-close = Close
+menu-new-worktree = New worktree
+menu-open-worktree = Open worktree
+menu-remove-worktree = Remove worktree
+menu-new-space = New space
+menu-keybinds = Keybinds
+menu-theme-graphite = Theme: graphite
+menu-theme-ink = Theme: ink
+menu-theme-moss = Theme: moss
+menu-theme-atom-one-dark = Theme: atom one dark

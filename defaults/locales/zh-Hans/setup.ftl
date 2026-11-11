@@ -1,0 +1,22 @@
+# Explicit interface messages. Variables are user data; never translate their values.
+setup-installing = 正在安装 herdr-core…
+setup-updating = 正在更新 herdr-core…你的终端会继续运行。
+setup-choose = 使用此 herdr-core
+setup-required = Herdr 需要 herdr-core
+setup-missing = herdr-core 运行你的终端和 Agent，并在此窗口关闭后保持运行。Herdr 未能在这台电脑上找到它。
+setup-connection = Herdr 无法连接到 herdr-core
+setup-retry-hint = 解决此问题后，请重试。
+setup-newer-required = Herdr 需要更新版本的 herdr-core
+setup-manual-update = 也可以手动更新：hc update
+setup-app-older = 此 Herdr 版本早于你的 herdr-core
+setup-install-button = 为我安装
+setup-choose-button = 选择已有安装…
+setup-retry = 重试
+setup-quit = 退出
+setup-update-button = 更新 herdr-core
+setup-invalid-binary = { $path } 不是 herdr-core（运行 `--version` 应返回 `hc …`）
+setup-install-location = “为我安装”会将它和 hc 安装到 { $path }，与官方安装程序相同：{ $command }
+setup-version = 当前版本为 { $have }；Herdr 需要 { $need } 或更高版本。更新期间终端会继续运行。
+setup-capabilities = 你的 herdr-core 缺少所需功能（{ $methods }）。更新期间终端会继续运行。
+setup-protocol = 你的 herdr-core 使用更新的协议（第 { $generation } 代）。请更新 Herdr，终端会继续运行。
+setup-update-command = 更新 Herdr：{ $command }

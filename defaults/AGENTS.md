@@ -657,6 +657,23 @@ herdr-app commands    # every command and its arguments
 
 ## The person: `settings.json`
 
+- `language`: `"system"` (default), `"en"`, `"zh-Hans"`, or `"zh-Hant"`.
+  The legacy `"zh-CN"` also selects Simplified Chinese. System language
+  preferences are checked at launch; unsupported languages fall back to English.
+  Changes apply after the person reopens Herdr. Do not restart their app yourself.
+  Other settings continue to update live.
+
+Mods import `locale()`, `languages()` and `t(key, params?)` from `herdr`.
+`locale()` is the effective language for this launch; `languages()` lists
+`{code, nativeName}` choices. `settings().language_preference` is the normalized
+preference at launch (`system` or a language code), for restart notices.
+Use `import { t as tr } from "herdr"` to avoid colliding with `theme()`'s usual
+`t` variable. For example, `tr("settings-current-language", {name: "English"})`
+formats a shipped message. Only translate interface text, never user names,
+paths, source code, terminal output, command IDs or their arguments. Personal
+mods may use `locale()` with their own dictionaries. Catalogs are embedded;
+there is no runtime language-pack installation API.
+
 What's about the user, never a look:
 
 ```json

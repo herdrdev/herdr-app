@@ -6,6 +6,7 @@
 // (scale 2 doubles every pixel, "Large Fonts").
 
 import { div, svg, image, PathBuilder, Background } from "gpui-kit";
+import { t as tr } from "herdr";
 import { h_flex, v_flex } from "gpui-base";
 import { settings, shared, setShared, playSound, run, layout, openOverlay, closeOverlay, exec, window as appWindow } from "herdr";
 
@@ -33,6 +34,7 @@ export const C = {
 
 export const FONT = "Pixelated MS Sans Serif";
 export const DOS = "PxPlus IBM VGA 8x16";
+export const statusLabel = (status) => ["idle", "working", "blocked", "done", "error"].includes(status) ? tr(`common-status-${status}`) : status;
 export const ASSETS = "mods/win98";
 
 // ---- pixels

@@ -1,3 +1,4 @@
+import { t as tr } from "herdr";
 import { View, div, image, svg } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
 import { theme, run, props, window, shared, setShared, updates, layout } from "herdr";
@@ -41,9 +42,9 @@ export default class WorkspaceChrome extends View {
       const ready = div().size(6).rounded_full().bg(t.accent);
       return v_flex().size_full().bg(t.chrome).border_t(1).border_color(t.border).px(8).pt(4).pb(8).text_size(13)
         .when(collapsed, el => el.px(0).items_center())
-        .child(row("settings", "settings", "Settings", false, () => run("app.settings"))
+        .child(row("settings", "settings", tr("workspace-chrome-settings"), false, () => run("app.settings"))
           .when(Boolean(updates().app.ready), el => el.child(collapsed ? ready.absolute().top(5).right(6) : ready)))
-        .child(row("machine", "plus", "Add machine", true, () => run("mod.open", { name: "machine-add" })));
+        .child(row("machine", "plus", tr("workspace-chrome-add-machine"), true, () => run("mod.open", { name: "machine-add" })));
     }
     return h_flex().size_full().bg(t.chrome).pl(collapsed ? 6 : 14).pr(10).gap(4).items_center().text_size(13.5)
       .when(window()?.platform === "macos" && !window()?.fullscreen && !collapsed, el => el.pl(76))

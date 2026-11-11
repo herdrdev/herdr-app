@@ -1,0 +1,22 @@
+# Explicit interface messages. Variables are user data; never translate their values.
+setup-installing = Installing herdr-core…
+setup-updating = Updating herdr-core… your terminals keep running.
+setup-choose = Use this herdr-core
+setup-required = Herdr needs herdr-core
+setup-missing = herdr-core runs your terminals and agents, and keeps them alive when this window closes. Herdr couldn't find it on this computer.
+setup-connection = Herdr can't connect to herdr-core
+setup-retry-hint = Once you've resolved this, try again.
+setup-newer-required = Herdr needs a newer herdr-core
+setup-manual-update = Or update it yourself: hc update
+setup-app-older = This Herdr is older than your herdr-core
+setup-install-button = Install it for me
+setup-choose-button = I have it somewhere…
+setup-retry = Retry
+setup-quit = Quit
+setup-update-button = Update herdr-core
+setup-invalid-binary = { $path } is not herdr-core (it should answer `--version` with `hc …`)
+setup-install-location = Install it for me puts it in { $path } (with hc), like its own installer: { $command }
+setup-version = Yours is { $have }; this Herdr needs { $need } or newer. Updating keeps your terminals running.
+setup-capabilities = Your herdr-core lacks required capabilities ({ $methods }). Updating keeps your terminals running.
+setup-protocol = Your herdr-core uses a newer protocol (generation { $generation }). Update Herdr; your terminals keep running.
+setup-update-command = Update Herdr: { $command }
