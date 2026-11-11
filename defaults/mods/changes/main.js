@@ -1,4 +1,4 @@
-import { View, div } from "gpui-kit";
+import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar, v_virtual_list } from "gpui-base";
 import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings, window } from "herdr";
 
@@ -14,6 +14,9 @@ const key = () => JSON.stringify(location());
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
 const countLines = (text) => text ? text.split("\n").length - Number(text.endsWith("\n")) : 0;
 
+// Text draws a tab as nothing: pad each to the next 4-column stop.
+const untab = (text) => text.replace(/[^\t]*\t/g, (s) => s.slice(0, -1).padEnd((s.length - 1) - (s.length - 1) % 4 + 4));
+
 // Numbers each diff line once, so a frame only draws the rows on screen.
 function diffRows(lines) {
   let old = 0, next = 0;
@@ -21,9 +24,9 @@ function diffRows(lines) {
     const match = /^@@ -(\d+)(?:,\d+)? \+(\d+)/.exec(line);
     if (match) { old = +match[1]; next = +match[2]; return { kind: "@", text: line }; }
     const kind = line[0];
-    if (kind === "-") return { kind, number: old++, text: line.slice(1) || " " };
-    if (kind === "+") return { kind, number: next++, text: line.slice(1) || " " };
-    if (kind === " ") { old++; return { kind, number: next++, text: line.slice(1) || " " }; }
+    if (kind === "-") return { kind, number: old++, text: untab(line.slice(1)) || " " };
+    if (kind === "+") return { kind, number: next++, text: untab(line.slice(1)) || " " };
+    if (kind === " ") { old++; return { kind, number: next++, text: untab(line.slice(1)) || " " }; }
     return { kind: "", text: line };
   });
 }
@@ -113,8 +116,9 @@ export default class Changes extends View {
   init(_props, cx) {
     this.repos = [];
     this.allFiles = [];
-    this.files = [];
-    this.activeRepo = null; // null = all repos
+    this.collapsedRepos = new Set();
+    this.userToggled = new Set();
+    this.selectedRepo = null;
     this.rows = [];
     this.diffWidth = 0;
     this.message = "";
@@ -146,8 +150,14 @@ export default class Changes extends View {
   }
 
   getTargetRepo() {
-    if (this.openFile?.repo) return this.repos.find(r => r.root === this.openFile.repo);
-    if (this.activeRepo) return this.repos.find(r => r.root === this.activeRepo);
+    if (this.selectedRepo) {
+      const found = this.repos.find(r => r.root === this.selectedRepo);
+      if (found) return found;
+    }
+    if (this.openFile?.repo) {
+      const found = this.repos.find(r => r.root === this.openFile.repo);
+      if (found) return found;
+    }
     return this.repos.find(r => r.files.length > 0) || this.repos[0] || null;
   }
 
@@ -155,8 +165,9 @@ export default class Changes extends View {
     if (this.loading || this.busy) return;
     const { cwd, on } = location(), context = key();
     if (context !== this.context) {
-      this.context = context; this.root = null; this.repos = []; this.allFiles = []; this.files = []; this.open = null; this.openFile = null;
-      this.activeRepo = null; this.setLines([]); this.message = ""; this.input.set_value(""); this.error = null; this.note = null; this.watched = null; this.closed = false; this.limited = false;
+      this.context = context; this.root = null; this.repos = []; this.allFiles = []; this.open = null; this.openFile = null;
+      this.selectedRepo = null; this.collapsedRepos = new Set(); this.userToggled = new Set();
+      this.setLines([]); this.message = ""; this.input.set_value(""); this.error = null; this.note = null; this.watched = null; this.closed = false; this.limited = false;
     }
     if (!cwd) return;
     this.loading = true;
@@ -166,7 +177,7 @@ export default class Changes extends View {
         if (key() !== context) return;
 
         if (!repoRoots.length) {
-          this.root = null; this.repos = []; this.allFiles = []; this.files = []; this.setLines([]); this.open = null; this.openFile = null;
+          this.root = null; this.repos = []; this.allFiles = []; this.setLines([]); this.open = null; this.openFile = null;
           this.error = "Not a git repository (no git projects found)";
           return;
         }
@@ -179,29 +190,24 @@ export default class Changes extends View {
         this.limited = loaded.some(r => r.limited);
         this.on = on;
         this.error = null;
+        this.root = loaded[0]?.root || cwd;
 
-        // Maintain or update active repo selection
-        if (loaded.length === 1) {
-          this.activeRepo = loaded[0].root;
-        } else if (this.activeRepo && !loaded.some(r => r.root === this.activeRepo)) {
-          this.activeRepo = null;
+        // Auto-expand repos with changes, collapse clean ones unless user toggled
+        for (const r of loaded) {
+          if (!this.userToggled.has(r.root)) {
+            if (r.files.length === 0) {
+              this.collapsedRepos.add(r.root);
+            } else {
+              this.collapsedRepos.delete(r.root);
+            }
+          }
         }
 
-        this.files = this.activeRepo
-          ? (loaded.find(r => r.root === this.activeRepo)?.files ?? [])
-          : this.allFiles;
-
-        this.root = this.activeRepo || loaded[0]?.root || cwd;
         this.watch(cwd, cx);
 
         // Keep current diff open if file still exists
-        if (this.open && !this.files.some(f => `${f.repo}/${f.path}` === this.open)) {
+        if (this.open && !this.allFiles.some(f => `${f.repo}/${f.path}` === this.open)) {
           this.open = null; this.openFile = null; this.setLines([]);
-        }
-        if (!this.open && !this.closed && this.files.length) {
-          const first = this.files[0];
-          this.open = `${first.repo}/${first.path}`;
-          this.openFile = first;
         }
         if (this.openFile) {
           try { await this.load(this.openFile, context); }
@@ -254,6 +260,7 @@ export default class Changes extends View {
     } else {
       this.open = fileKey;
       this.openFile = file;
+      this.selectedRepo = file.repo;
       this.closed = false;
       this.setLines([]);
       this.note = null;
@@ -299,10 +306,12 @@ export default class Changes extends View {
   render(cx) {
     if (key() !== this.context) this.refresh(cx);
     const t = theme();
-    const totalAdd = this.files.reduce((n, f) => n + f.add, 0);
-    const totalDel = this.files.reduce((n, f) => n + f.del, 0);
+    const totalFiles = this.allFiles.length;
+    const totalAdd = this.repos.reduce((n, r) => n + r.add, 0);
+    const totalDel = this.repos.reduce((n, r) => n + r.del, 0);
     const targetRepo = this.getTargetRepo();
     const enabled = Boolean(this.message.trim() && targetRepo && !this.busy && !this.loading);
+    const hasDiff = Boolean(this.open && this.rows.length);
 
     return v_flex().id("changes").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13).track_focus(this.handle)
       .on_key_down((e, cx) => {
@@ -311,72 +320,175 @@ export default class Changes extends View {
       // Header
       .child(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
         .child(div().font_semibold().child("Changes"))
-        .child(div().px(5).py(1).rounded(4).border_1().border_color(t.border).text_size(10).text_color(t.muted).child(`${this.files.length} files`))
+        .child(div().px(5).py(1).rounded(4).border_1().border_color(t.border).text_size(10).text_color(t.muted).child(`${totalFiles} files`))
         .when(this.repos.length > 1, el => el.child(div().px(5).py(1).rounded(4).bg(t.raised).text_size(10).text_color(t.dim).child(`${this.repos.length} repos`)))
         .child(div().flex_1())
+        .when(this.repos.length > 1, el => el.child(
+          div().id("toggle-all-repos").px(6).py(2).rounded(4).bg(t.raised).hover(h => h.bg(t.hover)).cursor_pointer().text_size(10).text_color(t.dim)
+            .on_click((_e, cx) => {
+              const allCollapsed = this.repos.every(r => this.collapsedRepos.has(r.root));
+              if (allCollapsed) {
+                this.collapsedRepos.clear();
+              } else {
+                this.repos.forEach(r => this.collapsedRepos.add(r.root));
+              }
+              this.repos.forEach(r => this.userToggled.add(r.root));
+              cx.notify();
+            })
+            .child(this.repos.every(r => this.collapsedRepos.has(r.root)) ? "Expand all" : "Collapse all")
+        ))
         .child(div().text_size(11).text_color(t.ansi2).child(`+${totalAdd}`))
         .child(div().text_size(11).text_color(t.ansi1).child(`−${totalDel}`)))
-      // Multi-repo tabs selector (shown when multiple repositories are detected in workspace)
-      .when(this.repos.length > 1, el => el.child(
-        h_flex().id("changes-repo-tabs").flex_none().px(8).py(6).gap(6).overflow_x_scrollbar().border_b(1).border_color(t.border)
-          .child(
-            div().id("repo-tab-all").px(8).py(3).rounded(5).text_size(11).cursor_pointer()
-              .when(this.activeRepo === null, s => s.bg(t.selected).text_color(t.foreground).font_semibold())
-              .when(this.activeRepo !== null, s => s.bg(t.raised).text_color(t.dim).hover(h => h.bg(t.hover).text_color(t.foreground)))
-              .on_click((_e, cx) => {
-                this.activeRepo = null;
-                this.files = this.allFiles;
-                cx.notify();
-              })
-              .child(`All (${this.allFiles.length})`)
-          )
-          .children(this.repos.map(r =>
-            div().id(`repo-tab-${r.name}`).px(8).py(3).rounded(5).text_size(11).cursor_pointer().flex_none()
-              .when(this.activeRepo === r.root, s => s.bg(t.selected).text_color(t.foreground).font_semibold())
-              .when(this.activeRepo !== r.root, s => s.bg(t.raised).text_color(t.dim).hover(h => h.bg(t.hover).text_color(t.foreground)))
-              .on_click((_e, cx) => {
-                this.activeRepo = r.root;
-                this.files = r.files;
-                cx.notify();
-              })
-              .child(`${r.name}${r.branch ? ` (${r.branch})` : ""}${r.files.length ? ` · ${r.files.length}` : ""}`)
-          ))
-      ))
-      // Changed files list
-      .child(v_flex().id("changes-list").flex_none().h(Math.min(220, Math.max(44, this.files.length * 28 + 12))).overflow_y_scrollbar().p(6).border_b(1).border_color(t.border).children(this.files.map((f) => {
-        const fileKey = `${f.repo}/${f.path}`;
-        const parts = f.path.split("/"), name = parts.pop();
-        const isSelected = this.open === fileKey;
-        const showRepoTag = this.repos.length > 1 && this.activeRepo === null;
 
-        return h_flex().id(`change-${fileKey}`).h(28).flex_none().px(8).gap(8).items_center().rounded(7).cursor_pointer()
-          .when(isSelected, (e) => e.bg(t.selected))
-          .hover((s) => s.bg(t.hover))
-          .on_click((_e, cx) => this.pick(f, cx))
-          .child(div().w(14).text_size(11).text_color(f.status === "A" ? t.ansi2 : f.status === "D" ? t.ansi1 : f.status === "U" ? t.ansi1 : t.blocked).child(f.status))
-          .when(showRepoTag, el => el.child(
-            div().px(5).py(1).rounded(3).bg(t.raised).text_size(10).font_medium().text_color(t.accent).child(f.repoName)
-          ))
-          .child(h_flex().flex_1().min_w(0).child(div().text_color(t.dim).truncate().child(parts.length ? parts.join("/") + "/" : "")).child(div().max_w(260).min_w(0).truncate().child(name)))
-          .when(f.add > 0, (e) => e.child(div().text_size(11).text_color(t.ansi2).child(`+${f.add}`)))
-          .when(f.del > 0, (e) => e.child(div().text_size(11).text_color(t.ansi1).child(`−${f.del}`)));
-      })).when(!this.files.length, (e) => e.child(
-        div().p(8).text_color(t.dim).child(
-          this.error || (this.loading ? "Loading changes…" : (this.repos.length > 0 ? `No uncommitted changes in ${this.activeRepo ? (targetRepo?.name || "selected repository") : `${this.repos.length} repositories`}` : "No folder"))
-        )
-      )))
-      .when(this.limited, el => el.child(div().px(12).py(4).text_size(11).text_color(t.dim).child("Showing the first 1,000 changed files")))
-      // Diff viewer
-      .child(div().flex_1().min_h(0).relative().font_family(settings().font_family ?? "JetBrains Mono").text_size(11)
-        .child(div().id("changes-diff-x").size_full().overflow_x_scrollbar()
-          .child(div().w_full().min_w(this.diffWidth).h_full().child(v_virtual_list("changes-diff", this.rows.length, 20, (i) => String(i),
-            (range) => this.rows.slice(range.start, range.end).map((row) => this.diffRow(row, t))).size_full())))
-        .child(Scrollbar.vertical("changes-diff").viewport_from_layout().absolute().inset_0())
-        .when(!this.open && this.files.length > 0, (e) => e.child(div().absolute().top(6).px(12).text_color(t.dim).child("Select a file to view its changes"))))
+      // Top-down Accordion Tree: Repositories and their changed files
+      .child(
+        div()
+          .when(!hasDiff, el => el.flex_1().min_h(0))
+          .when(hasDiff, el => el.flex_none().h(220).border_b(1).border_color(t.border))
+          .relative()
+          .child(
+            v_flex()
+              .id("changes-tree")
+              .size_full()
+              .overflow_y_scroll()
+              .p(6)
+              .gap(2)
+              .children(
+                this.repos.map((repo) => {
+                  const isCollapsed = this.collapsedRepos.has(repo.root);
+                  const isTarget = targetRepo?.root === repo.root;
+
+                  return v_flex().id(`repo-group-${repo.name}`).flex_none().child(
+                    // Repository Header Row
+                    h_flex()
+                      .id(`repo-header-${repo.name}`)
+                      .h(28)
+                      .flex_none()
+                      .px(6)
+                      .gap(6)
+                      .items_center()
+                      .rounded(6)
+                      .cursor_pointer()
+                      .bg(t.raised)
+                      .hover(s => s.bg(t.hover))
+                      .when(isTarget, s => s.border_1().border_color(t.accent))
+                      .on_click((_e, cx) => {
+                        this.selectedRepo = repo.root;
+                        if (this.collapsedRepos.has(repo.root)) {
+                          this.collapsedRepos.delete(repo.root);
+                        } else {
+                          this.collapsedRepos.add(repo.root);
+                        }
+                        this.userToggled.add(repo.root);
+                        cx.notify();
+                      })
+                      .child(
+                        svg(isCollapsed ? "mods/workspace-chrome/chevron-right.svg" : "mods/workspace-chrome/chevron-down.svg")
+                          .size(11)
+                          .flex_none()
+                          .text_color(t.dim)
+                      )
+                      .child(div().font_semibold().text_size(12).text_color(t.foreground).truncate().child(repo.name))
+                      .when(Boolean(repo.branch), el => el.child(
+                        div().px(5).py(1).rounded(3).bg(t.background).border_1().border_color(t.border).text_size(10).text_color(t.dim).truncate().child(repo.branch)
+                      ))
+                      .child(div().flex_1())
+                      .when(repo.add > 0, el => el.child(div().text_size(11).text_color(t.ansi2).child(`+${repo.add}`)))
+                      .when(repo.del > 0, el => el.child(div().text_size(11).text_color(t.ansi1).child(`−${repo.del}`)))
+                      .child(
+                        div().px(5).py(1).rounded(4).border_1().border_color(t.border).text_size(10)
+                          .text_color(repo.files.length ? t.foreground : t.muted)
+                          .child(`${repo.files.length}`)
+                      )
+                  )
+                  // Expanded files under this repository
+                  .when(!isCollapsed, el => el.child(
+                    v_flex().id(`repo-files-${repo.name}`).gap(1).pt(2).pb(4).children(
+                      repo.files.length === 0
+                        ? [div().pl(24).py(4).text_size(11).text_color(t.dim).child("No uncommitted changes")]
+                        : repo.files.map((f) => {
+                            const fileKey = `${f.repo}/${f.path}`;
+                            const parts = f.path.split("/"), name = parts.pop();
+                            const isSelected = this.open === fileKey;
+
+                            return h_flex()
+                              .id(`change-${fileKey}`)
+                              .h(26)
+                              .flex_none()
+                              .pl(20)
+                              .pr(6)
+                              .gap(6)
+                              .items_center()
+                              .rounded(5)
+                              .cursor_pointer()
+                              .when(isSelected, s => s.bg(t.selected))
+                              .hover(s => s.bg(t.hover))
+                              .on_click((_e, cx) => {
+                                this.selectedRepo = repo.root;
+                                this.pick(f, cx);
+                              })
+                              .child(
+                                div().w(14).text_size(11).font_medium()
+                                  .text_color(f.status === "A" ? t.ansi2 : f.status === "D" ? t.ansi1 : f.status === "U" ? t.ansi1 : t.blocked)
+                                  .child(f.status)
+                              )
+                              .child(
+                                h_flex().flex_1().min_w(0)
+                                  .child(div().text_color(t.dim).truncate().child(parts.length ? parts.join("/") + "/" : ""))
+                                  .child(div().max_w(260).min_w(0).truncate().child(name))
+                              )
+                              .when(f.add > 0, s => s.child(div().text_size(11).text_color(t.ansi2).child(`+${f.add}`)))
+                              .when(f.del > 0, s => s.child(div().text_size(11).text_color(t.ansi1).child(`−${f.del}`)));
+                          })
+                    )
+                  ));
+                })
+              )
+              .when(!this.repos.length, el => el.child(
+                div().p(12).text_color(t.dim).child(
+                  this.error || (this.loading ? "Loading changes…" : "No git repository found")
+                )
+              ))
+          )
+          .child(Scrollbar.vertical("changes-tree").absolute().inset_0())
+      )
+
+      .when(this.limited, el => el.child(div().px(12).py(4).text_size(11).text_color(t.dim).child("Showing the first 1,000 changed files per repo")))
+
+      // Diff viewer (shown when a file is selected)
+      .when(hasDiff, el => el.child(
+        div().flex_1().min_h(120).relative().font_family(settings().font_family ?? "JetBrains Mono").text_size(11)
+          .child(
+            div().id("changes-diff-x").size_full().overflow_x_scrollbar()
+              .child(
+                div().w_full().min_w(this.diffWidth).h_full()
+                  .child(v_virtual_list("changes-diff", this.rows.length, 20, (i) => String(i),
+                    (range) => this.rows.slice(range.start, range.end).map((row) => this.diffRow(row, t))).size_full())
+              )
+          )
+          .child(Scrollbar.vertical("changes-diff").viewport_from_layout().absolute().inset_0())
+      ))
+
       .when(Boolean(this.note), (e) => e.child(div().px(10).pb(8).text_size(11).text_color(t.ansi1).child(this.note)))
+
       // Bottom commit bar
-      .child(h_flex().flex_none().p(10).gap(8).border_t(1).border_color(t.border)
-        .child(div().id("commit-message").flex_1().min_w(0).h(32).px(10).flex().items_center().rounded(8).border_1().border_color(this.typing ? t.accent : t.border).cursor_text().on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(this.input).h_full().text_size(12).text_color(t.foreground)))
-        .child(div().id("commit").h(32).px(14).flex().items_center().rounded(8).bg(enabled ? t.solid : t.raised).text_color(enabled ? t.solid_foreground : t.dim).text_size(12).when(enabled, (e) => e.cursor_pointer()).on_click((_e, cx) => this.commit(cx)).child(this.busy ? "Committing…" : `Commit${targetRepo && this.repos.length > 1 ? ` (${targetRepo.name})` : ""}`)));
+      .child(
+        h_flex().flex_none().p(10).gap(8).border_t(1).border_color(t.border)
+          .child(
+            div().id("commit-message").flex_1().min_w(0).h(32).px(10).flex().items_center().rounded(8).border_1()
+              .border_color(this.typing ? t.accent : t.border).cursor_text()
+              .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+              .child(Input.new(this.input).h_full().text_size(12).text_color(t.foreground))
+          )
+          .child(
+            div().id("commit").h(32).px(14).flex().items_center().rounded(8)
+              .bg(enabled ? t.solid : t.raised)
+              .text_color(enabled ? t.solid_foreground : t.dim)
+              .text_size(12)
+              .when(enabled, (e) => e.cursor_pointer())
+              .on_click((_e, cx) => this.commit(cx))
+              .child(this.busy ? "Committing…" : `Commit${targetRepo ? ` (${targetRepo.name})` : ""}`)
+          )
+      );
   }
 }
