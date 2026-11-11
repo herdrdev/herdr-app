@@ -131,26 +131,71 @@ fn fork(target: &str) -> anyhow::Result<Launch> {
 const FORK_WORKSPACE: &str = "Herdr";
 
 /// Give the "Herdr" workspace of Fork's settings
-/// (`%LOCALAPPDATA%\Fork\settings.json`) only `folder` and make it active.
-/// Other workspaces and settings stay as they are. Without that file Fork has
-/// never run: then it starts empty.
+/// (`%LOCALAPPDATA%\Fork\settings.json`) only `folder` and make it active,
+/// and mark `folder` safe for Fork's git. Other workspaces and settings stay
+/// as they are. Without that file Fork has never run: then it starts empty.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn prepare_fork(folder: &str) -> anyhow::Result<()> {
     use anyhow::Context;
     let dir = std::env::var_os("LOCALAPPDATA").map(PathBuf::from).context("LOCALAPPDATA is not set")?.join("Fork");
     let path = dir.join("settings.json");
-    let text = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
-        Err(error) if error.kind() == std::io::ErrorKind::NotFound => return Ok(()),
+    let settings: Option<serde_json::Value> = match std::fs::read_to_string(&path) {
+        Ok(text) => Some(serde_json::from_str(text.trim_start_matches('\u{feff}')).with_context(|| format!("Cannot parse {}", path.display()))?),
+        Err(error) if error.kind() == std::io::ErrorKind::NotFound => None,
         Err(error) => return Err(error).with_context(|| format!("Cannot read {}", path.display())),
     };
-    let mut settings: serde_json::Value = serde_json::from_str(text.trim_start_matches('\u{feff}'))
-        .with_context(|| format!("Cannot parse {}", path.display()))?;
+    #[cfg(windows)]
+    let trusted = trust_repository(&dir, settings.as_ref(), folder);
+    #[cfg(not(windows))]
+    let trusted = anyhow::Ok(());
+    let Some(mut settings) = settings else { return trusted };
     fork_workspace(&mut settings, folder)?;
     // A running Fork may read the file at any time: replace it whole.
     let temp = dir.join("settings.json.herdr");
     std::fs::write(&temp, serde_json::to_vec_pretty(&settings)?).with_context(|| format!("Cannot write {}", temp.display()))?;
-    std::fs::rename(&temp, &path).with_context(|| format!("Cannot replace {}", path.display()))
+    std::fs::rename(&temp, &path).with_context(|| format!("Cannot replace {}", path.display()))?;
+    trusted
+}
+
+/// Git refuses a repository that another user owns, as every WSL one is
+/// (`\\wsl.localhost\...`), until it is a `safe.directory`. Herdr opens the
+/// person's own repositories: add it to the global git config with Fork's
+/// git, as Fork's "Mark repository as safe" does.
+#[cfg(windows)]
+fn trust_repository(fork_dir: &std::path::Path, settings: Option<&serde_json::Value>, folder: &str) -> anyhow::Result<()> {
+    use std::os::windows::process::CommandExt;
+    let Some(entry) = safe_directory(folder) else { return Ok(()) };
+    let git = fork_git(fork_dir, settings);
+    let config = |args: &[&str]| {
+        const CREATE_NO_WINDOW: u32 = 0x0800_0000;
+        std::process::Command::new(&git).arg("config").arg("--global").args(args)
+            .stdin(std::process::Stdio::null()).creation_flags(CREATE_NO_WINDOW).output()
+    };
+    let listed = config(&["--get-all", "safe.directory"])?;
+    if String::from_utf8_lossy(&listed.stdout).lines().any(|line| line.trim() == entry || line.trim() == "*") { return Ok(()); }
+    let added = config(&["--add", "safe.directory", &entry])?;
+    anyhow::ensure!(added.status.success(), "{} cannot mark {folder} safe: {}", git.display(), String::from_utf8_lossy(&added.stderr).trim());
+    Ok(())
+}
+
+/// The git Fork runs: its `GitInstancePath` setting, else its newest bundled
+/// git, else the one on PATH.
+#[cfg(windows)]
+fn fork_git(fork_dir: &std::path::Path, settings: Option<&serde_json::Value>) -> PathBuf {
+    let chosen = settings.and_then(|s| s.get("GitInstancePath")).and_then(serde_json::Value::as_str).filter(|p| !p.is_empty()).map(PathBuf::from);
+    if let Some(path) = chosen.into_iter().flat_map(|p| [p.join("bin/git.exe"), p]).find(|p| p.is_file()) { return path; }
+    std::fs::read_dir(fork_dir.join("gitInstance")).into_iter().flatten().flatten()
+        .map(|entry| entry.path().join("bin/git.exe")).filter(|p| p.is_file())
+        .max_by_key(|p| p.metadata().and_then(|m| m.modified()).ok())
+        .unwrap_or_else(|| PathBuf::from("git"))
+}
+
+/// The `safe.directory` entry git asks for a UNC folder (WSL folders are
+/// `\\wsl.localhost\...`); none for a local drive, which the person owns.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn safe_directory(folder: &str) -> Option<String> {
+    let rest = folder.strip_prefix(r"\\")?;
+    Some(format!("%(prefix)///{}", rest.replace('\\', "/")))
 }
 
 /// Fork's settings JSON with the "Herdr" workspace holding only `folder`,
@@ -1048,7 +1093,7 @@ mod win {
 
 #[cfg(test)]
 mod tests {
-    use super::{class_matches, fork_workspace, windows_folder};
+    use super::{class_matches, fork_workspace, safe_directory, windows_folder};
     use serde_json::json;
 
     #[test]
@@ -1084,6 +1129,13 @@ mod tests {
             "ActiveWorkspace": "Herdr",
         }));
         assert!(fork_workspace(&mut json!([]), r"C:\new").is_err());
+    }
+
+    #[test]
+    fn wsl_repositories_become_safe_directories() {
+        assert_eq!(safe_directory(r"\\wsl.localhost\Ubuntu\root\dev\herdr-app").as_deref(), Some("%(prefix)///wsl.localhost/Ubuntu/root/dev/herdr-app"));
+        assert_eq!(safe_directory(r"\\server\share\app").as_deref(), Some("%(prefix)///server/share/app"));
+        assert_eq!(safe_directory(r"C:\dev\app"), None);
     }
 
     #[test]
