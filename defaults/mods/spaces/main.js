@@ -33,6 +33,18 @@ const base = (path) => path.replace(/\/+$/, "").split("/").pop();
 // Changes made outside Herdr (an editor's save, a commit in another app): looked
 // for this often, in repos the list shows, while the window is in front.
 const FALLBACK = 60000;
+// Places looked at together (two git runs each). All at once, a few hundred spaces
+// run out of the app's open files (256 when started from the Dock on macOS) or
+// past a machine core's 16 running execs, and those spaces wait for FALLBACK.
+const AT_ONCE = 6;
+
+// Both runs, finished: a place isn't done while one of its runs still holds a slot.
+async function both(a, b) {
+  const done = await Promise.allSettled([a, b]);
+  const failed = done.find((d) => d.status === "rejected");
+  if (failed) throw failed.reason;
+  return done.map((d) => d.value);
+}
 
 // What a stored color name looks like on an avatar (the same in every mod
 // that draws space avatars): one strong color per hue, light and dark alike.
@@ -185,7 +197,10 @@ export default class Spaces extends View {
       while (this.pending.size) {
         const keys = [...this.pending];
         this.pending.clear();
-        await Promise.all(keys.map((key) => this.check(key, cx)));
+        let next = 0;
+        await Promise.all(Array.from({ length: Math.min(AT_ONCE, keys.length) }, async () => {
+          while (next < keys.length) await this.check(keys[next++], cx);
+        }));
       }
       const used = new Set(Object.values(this.git).filter(Boolean).map((g) => JSON.parse(g.repo)).filter(([on]) => !on).map(([, repo]) => repo));
       for (const repo of this.watching) if (!used.has(repo)) this.watching.delete(repo);
@@ -202,10 +217,10 @@ export default class Spaces extends View {
     try {
       // Ref-only reads avoid scanning the worktree or waking its index watch.
       // Two reads: a folder name may itself contain a newline.
-      const [r, common] = await Promise.all([
+      const [r, common] = await both(
         exec("git", ["rev-parse", "--path-format=absolute", "--show-toplevel"], { cwd, on }),
         exec("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd, on }),
-      ]);
+      );
       if (r.code !== 0 || common.code !== 0) {
         // Only git's own "no" is remembered as no repo; anything else is asked again.
         if (!/not a git repository/i.test(r.code !== 0 ? r.stderr : common.stderr)) this.unsure.add(key);
@@ -214,10 +229,10 @@ export default class Spaces extends View {
       }
       // The repo's own .git folder names it; a worktree's top differs from it.
       const top = r.stdout.replace(/\n$/, ""), repo = common.stdout.replace(/\n$/, "");
-      const [branch, counts] = await Promise.all([
+      const [branch, counts] = await both(
         exec("git", ["symbolic-ref", "-q", "HEAD"], { cwd, on }),
         exec("git", ["rev-list", "--left-right", "--count", "HEAD...@{upstream}"], { cwd, on }),
-      ]);
+      );
       const name = repo.endsWith("/.git") ? base(repo.slice(0, -5)) : base(repo).replace(/\.git$/, "");
       const [ahead, behind] = counts.code === 0 ? counts.stdout.trim().split(/\s+/).map(Number) : [0, 0];
       const info = { name, branch: branch.code === 0 ? branch.stdout.trim().replace(/^refs\/heads\//, "") : "(detached)", ahead, behind, repo: JSON.stringify([on, repo]), linked: repo !== `${top}/.git` };
