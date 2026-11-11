@@ -59,8 +59,6 @@ pub(super) struct NativeApp {
     /// Keyboard focus was asked for while the pane was hidden: give it when
     /// the pane shows up soon after (a tab selected just before).
     focus_until: Option<std::time::Instant>,
-    /// The window's colors at its top and bottom edges (0xRRGGBB), once known.
-    edges: Option<[u32; 2]>,
     #[cfg(windows)]
     embedded: Option<win::Embedded>,
     #[cfg(windows)]
@@ -199,7 +197,7 @@ pub(super) fn register(registry: &mut ComponentRegistry) {
             let state = Rc::new(RefCell::new(NativeApp {
                 window: window.window_handle().window_id(), app: app.clone(), target: target.clone(),
                 status: "Opening…".into(), error: None, hitbox: None, rect: None, visible: false, holes: Vec::new(), corner: 0,
-                apply_pending: false, generation: 0, closed: false, focus_until: None, edges: None,
+                apply_pending: false, generation: 0, closed: false, focus_until: None,
                 #[cfg(windows)] embedded: None,
                 #[cfg(windows)] opening: false,
             }));
@@ -213,14 +211,6 @@ pub(super) fn register(registry: &mut ComponentRegistry) {
         }).with_readonly(true),
         StateMethodDescriptor::new::<State>("error", "(): string | null", |state, _, _, _| {
             Ok(state.borrow().error.clone().map(ComponentDataValue::String).unwrap_or(ComponentDataValue::Null))
-        }).with_readonly(true),
-        StateMethodDescriptor::new::<State>("edgeColors", "(): string[] | null", |state, _, _, _| {
-            // Paint these behind the element, top and bottom halves, so the
-            // window's rounded corners blend into it.
-            Ok(match state.borrow().edges {
-                Some(colors) => ComponentDataValue::Array(colors.iter().map(|c| ComponentDataValue::String(format!("#{c:06x}"))).collect()),
-                None => ComponentDataValue::Null,
-            })
         }).with_readonly(true),
         StateMethodDescriptor::new::<State>("shown", "(): boolean", |state, _, _, _| {
             #[cfg(windows)]
@@ -475,19 +465,10 @@ mod win {
             cx.background_executor().timer(Duration::from_millis(250)).await;
             let Some(state) = weak.upgrade() else { return };
             if state.borrow().generation != generation { return; }
-            // Zoom can change the frame; a theme change, the colors at its edges.
-            if tick % 8 == 1 {
-                let (crop, edges) = cx.background_executor().spawn(async move {
-                    let crop = measure(child as HWND);
-                    (crop, edge_colors(child as HWND, crop))
-                }).await;
+            // Zoom or the command center can change the title bar's height.
+            if tick % 8 == 0 {
+                let crop = cx.background_executor().spawn(async move { measure(child as HWND) }).await;
                 let mut app = state.borrow_mut();
-                if edges.is_some() && app.edges != edges {
-                    app.edges = edges;
-                    drop(app);
-                    let _ = cx.update(|window, _| window.refresh());
-                    app = state.borrow_mut();
-                }
                 if let Some(e) = app.embedded.as_mut().filter(|e| e.crop != crop) {
                     tracing::debug!(?crop, "native app crop changed");
                     e.crop = crop;
@@ -690,35 +671,6 @@ mod win {
             crop.right += edge(origin.x + width - 1, -1, &[HTRIGHT]);
             crop.bottom += (0..24).take_while(|i| matches!(hit(center, origin.y + client.bottom - 1 - i), HTBOTTOM | HTBOTTOMLEFT | HTBOTTOMRIGHT)).count() as i32;
             crop
-        }
-    }
-
-    /// The window's colors where its rounded corners meet the pane: the top
-    /// left and bottom left of what the pane shows (VS Code: title bar and
-    /// status bar), as 0xRRGGBB. A window region has no antialiasing, so the
-    /// pane paints these colors behind the window to blend its corners.
-    fn edge_colors(hwnd: HWND, crop: Crop) -> Option<[u32; 2]> {
-        use windows_sys::Win32::Graphics::Gdi::*;
-        unsafe {
-            let r = screen_rect(hwnd);
-            let (w, h) = (r.right - r.left, r.bottom - r.top);
-            if w <= 0 || h <= 0 { return None; }
-            let screen = GetDC(std::ptr::null_mut());
-            let dc = CreateCompatibleDC(screen);
-            let bitmap = CreateCompatibleBitmap(screen, w, h);
-            let old = SelectObject(dc, bitmap);
-            let ok = windows_sys::Win32::Storage::Xps::PrintWindow(hwnd, dc, PW_RENDERFULLCONTENT) != 0;
-            let x = crop.left + 3;
-            let pick = |y: i32| {
-                let c = GetPixel(dc, x, y);
-                (c & 0xff) << 16 | (c & 0xff00) | (c >> 16 & 0xff)
-            };
-            let colors = ok.then(|| [pick(crop.top + 3), pick(h - crop.bottom - 4)]);
-            SelectObject(dc, old);
-            DeleteObject(bitmap);
-            DeleteDC(dc);
-            ReleaseDC(std::ptr::null_mut(), screen);
-            colors
         }
     }
 
