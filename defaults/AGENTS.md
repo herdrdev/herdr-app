@@ -173,7 +173,8 @@ Each file is one whole window. `layout.switch` (`ctrl-shift-l`) cycles
 through them, `layout.switch {name}` picks one; `shared("layout")` is the
 shown one's name. Herdr ships `main` ("Herdr": spaces by machine and the
 agents list on the left, `workspace-chrome`; tabs as pills with a + menu
-that starts a terminal or any installed agent, `new-menu`; panes as cards
+that starts a terminal or any installed agent, or opens a Files tab in the
+selected space, `new-menu`; panes as cards
 with a header; Files and Changes panels on the right, `files` and
 `changes`, opened from the tab bar and remembered per space (which ones:
 shared `"workspace.panels"`, set by the welcome); a status bar,
@@ -184,6 +185,9 @@ writing a new file. The Files panel supports Windows folder paths with spaces,
 parentheses and apostrophes, and preserves Unicode file and folder names
 (including Chinese). Directory links expand as folders; their contents load
 only when expanded.
+The + menu's Files item opens the same browser as a tab with read-only file
+previews (`tab.new {name: "Files", mod: "files"}`). It is disabled when no
+space is selected; a Files-only tab browses that space's starting folder.
 
 **Herdr's own layouts and mods are read-only.** They are replaced whole
 on every start. Use settings.json for look (fonts, sizes, theme, colors,

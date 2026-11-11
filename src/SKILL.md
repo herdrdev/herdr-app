@@ -32,6 +32,8 @@ New spaces and tabs are shown immediately: only create them when asked.
 Pick an explicit, useful name for every new space and tab; don't rely on
 default names. Use IDs from `ls` rather than guessing or acting on the wrong
 focused pane.
+The tab bar's + menu also opens a Files tab in the selected space, equivalent
+to `tab.new {name: "Files", mod: "files"}`.
 
 ```sh
 herdr-app do space.new --name api --folder /path/to/api
