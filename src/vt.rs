@@ -1917,7 +1917,7 @@ mod tests {
             for line in 1..=5000 {
                 vt.write(format!("\x1b[1;31m{line:04}\x1b[0m {}\r\n", "x".repeat(cols as usize - 6)).as_bytes());
             }
-            vt.scroll_viewport(-10_000);
+            vt.scroll_to_top();
             for first in (1..=5000).step_by(25) {
                 let frame = vt.frame();
                 for (offset, row) in frame.rows.iter().enumerate() {
