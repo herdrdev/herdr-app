@@ -3444,7 +3444,7 @@ impl AppWindow {
                 crate::update::relaunch();
                 cx.quit();
             }
-            "window.close" | "window.minimize" | "window.maximize" => return self.window_command(name, window, cx),
+            "window.close" | "window.minimize" | "window.maximize" | "window.fill" => return self.window_command(name, window, cx),
             // Hiding apps is macOS's (bound natively there).
             "app.hide" | "app.hide_others" | "app.show_all" => return,
             other => {

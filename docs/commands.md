@@ -571,4 +571,10 @@ Maximize the window, or back.
 
 No arguments.
 
+## `window.fill`
+
+Fill the whole screen, the notch row included, with the menu bar and Dock hidden; or back (macOS).
+
+No arguments.
+
 [Back to Herdr](../README.md)

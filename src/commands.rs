@@ -104,6 +104,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("window.close", &[], "Close the window (on Linux, quits)."),
     cmd("window.minimize", &[], "Minimize the window."),
     cmd("window.maximize", &[], "Maximize the window, or back."),
+    cmd("window.fill", &[], "Fill the whole screen, the notch row included, with the menu bar and Dock hidden; or back (macOS)."),
 ];
 
 pub fn find(name: &str) -> Option<&'static Command> {
