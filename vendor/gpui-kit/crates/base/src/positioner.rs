@@ -62,7 +62,8 @@ pub struct ResolvedPosition {
 /// children.
 pub struct Positioner {
     strategy: Strategy,
-    corner_position: Option<Rc<Cell<Point<Pixels>>>>,
+    trigger_bounds: Option<Rc<Cell<Bounds<Pixels>>>>,
+    anchor_visible: Option<Rc<Cell<bool>>>,
     on_position: Option<Box<dyn Fn(ResolvedPosition)>>,
     margin: Pixels,
     occlude: bool,
@@ -84,7 +85,8 @@ impl Positioner {
                 align: Align::Center,
                 offset: px(0.),
             },
-            corner_position: None,
+            trigger_bounds: None,
+            anchor_visible: None,
             on_position: None,
             margin: px(4.),
             occlude: false,
@@ -100,7 +102,8 @@ impl Positioner {
     pub fn corner(anchor: Anchor, position: Point<Pixels>) -> Self {
         Self {
             strategy: Strategy::Corner { anchor, position },
-            corner_position: None,
+            trigger_bounds: None,
+            anchor_visible: None,
             on_position: None,
             margin: px(4.),
             occlude: false,
@@ -151,9 +154,17 @@ impl Positioner {
         self
     }
 
-    // Read after trigger prepaint so an open popup follows a moving trigger.
-    pub(crate) fn tracked_corner_position(mut self, position: Rc<Cell<Point<Pixels>>>) -> Self {
-        self.corner_position = Some(position);
+    // Read after trigger prepaint so an open side popup follows a moving
+    // trigger, flipping as it nears a window edge.
+    pub(crate) fn tracked_trigger_bounds(mut self, bounds: Rc<Cell<Bounds<Pixels>>>) -> Self {
+        self.trigger_bounds = Some(bounds);
+        self
+    }
+
+    // Read after trigger prepaint: a trigger scrolled out of sight takes its
+    // popup with it instead of leaving it pinned to the window edge.
+    pub(crate) fn tracked_anchor_visible(mut self, visible: Rc<Cell<bool>>) -> Self {
+        self.anchor_visible = Some(visible);
         self
     }
 
@@ -332,7 +343,8 @@ impl ParentElement for Positioner {
 
 impl Element for Positioner {
     type RequestLayoutState = PositionerState;
-    type PrepaintState = ();
+    /// Whether the children were prepainted, and so are to be painted.
+    type PrepaintState = bool;
 
     fn id(&self) -> Option<gpui::ElementId> {
         None
@@ -375,9 +387,12 @@ impl Element for Positioner {
         request_layout: &mut Self::RequestLayoutState,
         window: &mut Window,
         cx: &mut App,
-    ) {
+    ) -> bool {
         if request_layout.child_layout_ids.is_empty() {
-            return;
+            return false;
+        }
+        if self.anchor_visible.as_ref().is_some_and(|visible| !visible.get()) {
+            return false;
         }
 
         let mut child_min = point(Pixels::MAX, Pixels::MAX);
@@ -394,10 +409,10 @@ impl Element for Positioner {
             window.client_inset().unwrap_or(px(0.)),
         );
         let mut strategy = self.strategy;
-        if let (Strategy::Corner { position, .. }, Some(tracked)) =
-            (&mut strategy, &self.corner_position)
+        if let (Strategy::Side { trigger_bounds, .. }, Some(tracked)) =
+            (&mut strategy, &self.trigger_bounds)
         {
-            *position = tracked.get();
+            *trigger_bounds = tracked.get();
         }
         let position = resolve(
             strategy,
@@ -422,6 +437,7 @@ impl Element for Positioner {
                 child.prepaint(window, cx);
             }
         });
+        true
     }
 
     fn paint(
@@ -430,10 +446,13 @@ impl Element for Positioner {
         _: Option<&InspectorElementId>,
         _: Bounds<Pixels>,
         _: &mut Self::RequestLayoutState,
-        _: &mut Self::PrepaintState,
+        prepainted: &mut Self::PrepaintState,
         window: &mut Window,
         cx: &mut App,
     ) {
+        if !*prepainted {
+            return;
+        }
         for child in &mut self.children {
             child.paint(window, cx);
         }

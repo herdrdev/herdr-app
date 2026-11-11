@@ -1,7 +1,7 @@
 // App-owned settings mod. Writes changes immediately; no Save step.
 
 import { View, div, svg, image } from "gpui-kit";
-import { v_flex, h_flex, Scrollbar, InputState, Input, Popup } from "gpui-base";
+import { v_flex, h_flex, Scrollbar, ScrollHandle, InputState, Input, Popup } from "gpui-base";
 import { hc, run, theme, themes, fonts, updates, telemetry, settings, layouts, shared, appHome, readTextFile, writeTextFile, playSound, props, closeOverlay, window } from "herdr";
 
 const I = (name) => `frame/settings/${name}.svg`;
@@ -32,8 +32,24 @@ export default class Settings extends View {
     this.section = SECTIONS.some((s) => s.id === asked) ? asked : "look";
     this.picking = null; // "font" | "ui_font" while its list is open
     this.filter = "";
-    this.fontInput = InputState.new({ placeholder: "Type to search fonts" });
-    this.fontInput.on("change", (_e, cx) => { this.filter = this.fontInput.value(); cx.notify(); });
+    this.fontAt = 0; // the highlighted row in the open font list
+    this.fontTyped = false; // the field still shows the font in use, not a search
+    this.fontOut = null; // the last press outside the field or the list (see closeFontOutside)
+    this.fontScroll = ScrollHandle.new();
+    this.fontInput = InputState.new({ placeholder: "Search fonts" });
+    this.fontInput.on("change", (_e, cx) => {
+      // Filling the field with the font in use on open is not a search.
+      if (!this.fontTyped && this.fontInput.value() === this.fontShown) return;
+      this.fontTyped = true;
+      this.filter = this.fontInput.value();
+      this.fontAt = 0;
+      this.fontScroll.scroll_to_item(0);
+      cx.notify();
+    });
+    this.fontInput.on("submit", (_e, cx) => {
+      const row = this.fontOptions()[this.fontAt];
+      if (row) this.chooseFont(row.name, cx);
+    });
     this.renameInput = InputState.new();
     this.renameInput.on("focus", (_e, cx) => { this.renameFocused = true; cx.notify(); });
     this.renameInput.on("blur", (_e, cx) => { this.renameFocused = false; cx.notify(); });
@@ -43,6 +59,7 @@ export default class Settings extends View {
       if (edit?.action === "rename") this.machineAction(edit.machine, "rename", cx, edit.name);
     });
     this.person = {};
+    this.was = {}; // setting -> its value before a change the app hasn't read yet
     this.raw = null;
     this.previews = {}; // layout name -> its "preview" picture
     this.previewsOf = "";
@@ -111,16 +128,32 @@ export default class Settings extends View {
   // only if nobody changed it meanwhile (else read again and redo).
   change(edit, cx) {
     cx.spawn(async (cx) => {
+      const lagging = [];
       for (let attempt = 0; attempt < 3; attempt++) {
         await this.load();
         const next = JSON.parse(JSON.stringify(this.person));
         edit(next);
         try {
           await writeTextFile(this.file(), JSON.stringify(next, null, 2) + "\n", this.raw);
-          this.person = next;
-          break;
-        } catch {}
+        } catch {
+          continue;
+        }
+        // The app reads the file a moment later; until then it still shows
+        // what was there before (see own() in look).
+        for (const key of new Set([...Object.keys(this.person), ...Object.keys(next)])) {
+          if (JSON.stringify(this.person[key]) !== JSON.stringify(next[key]) && !(key in this.was)) {
+            this.was[key] = this.person[key];
+            lagging.push(key);
+          }
+        }
+        this.person = next;
+        break;
       }
+      cx.notify();
+      if (!lagging.length) return;
+      // A layout that sets the old value keeps showing it: the grace ends.
+      await cx.sleep(1500);
+      for (const key of lagging) delete this.was[key];
       cx.notify();
     });
   }
@@ -384,63 +417,147 @@ export default class Settings extends View {
       );
   }
 
-  // The font in use, written in itself; a click opens the list.
-  fontButton(t, which, family, def) {
+  // The font in use, written in itself. A click turns it into a search field
+  // with the list under it; typing filters the list.
+  fontButton(t, which, family) {
     const open = this.picking === which;
-    const trigger = div()
+    const set = this.person[which] !== undefined;
+    const icon = (id, name, onClick) =>
+      div()
+        .id(id)
+        .flex_none()
+        .p(2)
+        .rounded(4)
+        .cursor_pointer()
+        .text_color(t.dim)
+        .hover((s) => s.text_color(t.foreground))
+        .on_click((e, cx) => {
+          cx.stop_propagation();
+          onClick(e, cx);
+        })
+        .child(svg(I(name)).size(14));
+    const trigger = h_flex()
       .id(`st-f-${which}`)
-      .w(220)
-      .px(12)
-      .py(6)
+      .w(240)
+      .h(32)
+      .pl(12)
+      .pr(8)
+      .gap(4)
+      .items_center()
       .rounded(7)
       .border_1()
       .border_color(open ? t.accent : t.border)
       .bg(t.raised)
       .cursor_pointer()
-      .hover((s) => s.bg(t.hover))
+      .when(!open, (el) => el.hover((s) => s.bg(t.hover)))
+      .when(open, (el) => el.on_mouse_down_out((e, cx) => this.closeFontOutside("field", e, cx)))
       .on_click((_e, cx) => {
-        this.picking = open ? null : which;
-        this.filter = "";
-        this.fontInput.set_value("");
-        if (this.picking) this.fontInput.focus();
-        else this.handle.focus();
+        if (!open) this.openFont(which, family, cx);
+      })
+      .on_key_down((e, cx) => {
+        if (!open) return;
+        const n = this.fontOptions().length;
+        if (e.key === "down" && n) this.fontAt = Math.min(n - 1, this.fontAt + 1);
+        else if (e.key === "up" && n) this.fontAt = Math.max(0, this.fontAt - 1);
+        else return;
+        this.fontScroll.scroll_to_item(this.fontAt);
+        cx.stop_propagation();
         cx.notify();
       })
-      .child(div().font_family(family).text_size(13.5).text_color(t.foreground).child(family));
+      .child(
+        open
+          ? div().flex_1().min_w(0).text_size(13.5).child(Input.new(this.fontInput).h(24).font_family(family).text_color(t.foreground))
+          : div().flex_1().min_w(0).truncate().font_family(family).text_size(13.5).text_color(t.foreground).child(family),
+      )
+      .when(set, (el) => el.child(icon(`st-fx-${which}`, "circle-x", (_e, cx) => {
+        this.picking = which;
+        this.chooseFont(null, cx);
+      })))
+      .child(icon(`st-fc-${which}`, "chevrons-up-down", (_e, cx) => {
+        if (open) this.closeFont(cx);
+        else this.openFont(which, family, cx);
+      }));
     return Popup.new(`st-fp-${which}`, trigger)
-      .when(open, (el) => el.content(this.fontList(t, which, def)));
+      .when(open, (el) => el.content(this.fontList(t, which)));
   }
 
-  fontList(t, which, def) {
+  openFont(which, family, cx) {
+    this.picking = which;
+    this.filter = "";
+    this.fontTyped = false;
+    this.fontOut = null;
+    this.fontShown = family;
+    this.fontInput.set_value(family);
+    // Selected, so the first key typed replaces it with a search.
+    this.fontInput.set_selected_range({ start: 0, end: family.length });
+    this.fontInput.focus();
+    // Start on the font in use, like a select.
+    this.fontAt = Math.max(0, this.fontOptions().findIndex((o) => o.name === (this.person[which] ?? null)));
+    this.fontScroll.scroll_to_item(this.fontAt);
+    cx.notify();
+  }
+
+  closeFont(cx) {
+    this.picking = null;
+    this.handle.focus();
+    cx.notify();
+  }
+
+  // The field and the list each hear presses outside themselves; one press
+  // heard by both landed outside the two, and closes the list.
+  closeFontOutside(part, e, cx) {
+    const key = `${e.position.x},${e.position.y},${e.click_count}`;
+    if (this.fontOut?.key === key && this.fontOut.part !== part) this.closeFont(cx);
+    else this.fontOut = { key, part };
+  }
+
+  // The rows of the open font list: the default first when not searching.
+  fontOptions() {
+    const which = this.picking;
+    if (!which) return [];
+    const def = which === "ui_font" ? DEFAULT_UI_FONT : DEFAULT_FONT;
     const q = this.filter.toLowerCase();
     const matches = fonts().filter((f) => f.toLowerCase().includes(q)).slice(0, 200);
-    const choose = (name, cx) => {
-      this.change((p) => {
-        if (name === null) delete p[which];
-        else p[which] = name;
-      }, cx);
-      this.picking = null;
-      this.handle.focus();
-      cx.notify();
-    };
-    const item = (id, label, family, onClick) =>
-      div()
-        .id(id)
+    return [...(q ? [] : [{ name: null, label: `Default (${def})`, family: def }]), ...matches.map((f) => ({ name: f, label: f, family: f }))];
+  }
+
+  chooseFont(name, cx) {
+    const which = this.picking;
+    this.change((p) => {
+      if (name === null) delete p[which];
+      else p[which] = name;
+    }, cx);
+    this.picking = null;
+    this.handle.focus();
+    cx.notify();
+  }
+
+  fontList(t, which) {
+    const options = this.fontOptions();
+    const current = this.person[which] ?? null;
+    const item = (o, i) =>
+      h_flex()
+        .id(o.name === null ? `st-fd-${which}` : `st-fi-${which}-${i}`)
         .px(10)
         .py(5)
+        .gap(8)
+        .items_center()
         .rounded(6)
         .cursor_pointer()
-        .hover((s) => s.bg(t.hover))
-        .on_click(onClick)
-        .child(div().font_family(family).text_size(13.5).text_color(t.foreground).child(label));
+        .when(i === this.fontAt, (el) => el.bg(t.hover))
+        // The mouse moves the same highlight the arrow keys do, so only one row lights up.
+        .on_mouse_move((_e, cx) => {
+          if (this.fontAt === i) return;
+          this.fontAt = i;
+          cx.notify();
+        })
+        .on_click((_e, cx) => this.chooseFont(o.name, cx))
+        .child(div().flex_1().min_w(0).truncate().font_family(o.family).text_size(13.5).text_color(t.foreground).child(o.label))
+        .when(o.name === current, (el) => el.child(svg(I("check")).size(12).flex_none().text_color(t.accent)));
     return v_flex()
       .id(`st-font-list-${which}`)
-      .w(360)
-      .on_mouse_down_out((_e, cx) => {
-        this.picking = null;
-        this.handle.focus();
-        cx.notify();
-      })
+      .w(240)
+      .on_mouse_down_out((e, cx) => this.closeFontOutside("list", e, cx))
       .rounded(8)
       .border_1()
       .border_color(t.border)
@@ -449,28 +566,29 @@ export default class Settings extends View {
       .on_scroll_wheel((_e, cx) => cx.stop_propagation())
       .child(
         div()
-          .px(12)
-          .py(8)
-          .border_b(1)
-          .border_color(t.border)
-          .text_size(13)
-          .child(Input.new(this.fontInput).h(28).text_color(t.foreground)),
-      )
-      .child(
-        div()
           .id(`st-fl-${which}`)
-          .h(200)
+          .max_h(260)
           .p(4)
           .overflow_y_scrollbar()
-          .when(!q, (el) => el.child(item(`st-fd-${which}`, `Default (${def})`, def, (_e, cx) => choose(null, cx))))
-          .children(matches.map((f, i) => item(`st-fi-${which}-${i}`, f, f, (_e, cx) => choose(f, cx)))),
+          .track_scroll(this.fontScroll)
+          .when(!options.length, (el) => el.child(div().px(10).py(5).text_size(13).text_color(t.dim).child("No fonts found.")))
+          .children(options.map(item)),
       );
   }
 
   look(t, cx) {
     const s = settings();
     const p = this.person;
-    const own = (key, composed, def) => (p[key] ?? def) !== composed;
+    // A layout sets its own when the app shows something other than yours,
+    // except while the app still shows your previous value: it hasn't read
+    // the change yet.
+    const own = (key, composed, def) => {
+      if ((p[key] ?? def) === composed) {
+        delete this.was[key];
+        return false;
+      }
+      return !(key in this.was && (this.was[key] ?? def) === composed);
+    };
     const size = (key, value, d, cx) => this.change((q) => (q[key] = Math.max(8, Math.min(32, (q[key] ?? value) + d))), cx);
     const fontRow = (which, sizeKey, title, family, def, sizeNow) =>
       v_flex()
@@ -483,7 +601,7 @@ export default class Settings extends View {
             h_flex()
               .gap(8)
               .items_center()
-              .child(this.fontButton(t, which, family, def))
+              .child(this.fontButton(t, which, family))
               // The panels' text follows zoom: they size their rows to it.
               .when(Boolean(sizeKey), (el) => el.child(this.stepper(t, `st-${sizeKey}`, `${Math.round(sizeNow)}`, (_e, cx) => size(sizeKey, sizeNow, -1, cx), (_e, cx) => size(sizeKey, sizeNow, 1, cx)))),
           ),
