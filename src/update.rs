@@ -94,6 +94,9 @@ pub struct CoreInfo {
 static CORE: Mutex<CoreInfo> = Mutex::new(CoreInfo { version: None, managed: None, ready: None, updating: false, error: None });
 /// When the last check succeeded (unix seconds); a failed check clears it.
 static CHECKED: Mutex<Option<u64>> = Mutex::new(None);
+/// Why the last check failed, for Settings: a connection error alone reads
+/// like an offline machine, not a certificate or proxy refusing the request.
+static ERROR: Mutex<Option<String>> = Mutex::new(None);
 /// "Check now" wakes the checker early.
 static WAKE: (Mutex<bool>, Condvar) = (Mutex::new(false), Condvar::new());
 /// The checker runs (a release, or pointed at a test server), and is looking right now.
@@ -132,6 +135,7 @@ pub fn status() -> serde_json::Value {
         "notes": crate::update_notes::notes(ready().as_deref()),
         "core": core(),
         "checked": *CHECKED.lock().unwrap(),
+        "error": ERROR.lock().unwrap().clone(),
         "checks": RUNNING.load(Ordering::Relaxed),
         "checking": CHECKING.load(Ordering::Relaxed),
     })
@@ -166,7 +170,7 @@ pub fn start() {
         loop {
             CHECKING.store(true, Ordering::Relaxed);
             let mut wait = EVERY;
-            let mut succeeded = true;
+            let mut errors = Vec::new();
             if let Some(root) = &app {
                 match check(root) {
                     Ok(found) => {
@@ -178,17 +182,18 @@ pub fn start() {
                         tracing::warn!("update check: {e}");
                         crate::telemetry::count("app_update_failed");
                         wait = RETRY;
-                        succeeded = false;
+                        errors.push(format!("Herdr: {e}"));
                     }
                 }
             }
             if core && let Err(e) = check_core() {
                 tracing::warn!("core update check: {e}");
                 wait = RETRY;
-                succeeded = false;
+                errors.push(format!("herdr-core: {e}"));
             }
             let now = std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).map(|d| d.as_secs()).unwrap_or(0);
-            *CHECKED.lock().unwrap() = checked_at(succeeded, now);
+            *CHECKED.lock().unwrap() = checked_at(errors.is_empty(), now);
+            *ERROR.lock().unwrap() = (!errors.is_empty()).then(|| errors.join("; "));
             CHECKING.store(false, Ordering::Relaxed);
             sleep(wait);
         }
@@ -662,6 +667,14 @@ mod tests {
         checked = checked_at(recovered.is_ok(), 300);
         assert_eq!(checked, Some(300));
         server.join().unwrap();
+    }
+
+    #[test]
+    fn status_reports_why_the_last_check_failed() {
+        *ERROR.lock().unwrap() = Some("curl: (35) CRL unavailable".into());
+        assert_eq!(status()["error"].as_str(), Some("curl: (35) CRL unavailable"));
+        *ERROR.lock().unwrap() = None;
+        assert!(status()["error"].is_null());
     }
 
     #[test]

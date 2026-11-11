@@ -67,7 +67,7 @@ fn updates(app: &str, core: &str) -> Value {
     json!({
         "app": {"version":"0.1.0", "updates":app != "source", "ready": (app == "ready").then_some("0.1.1")},
         "core": {"version":"0.1.5", "ready":(core == "ready").then_some("0.1.6"), "managed":(core == "managed").then_some("homebrew"), "error":(core == "error").then_some("offline"), "updating":core == "updating"},
-        "checked":1700000000, "checks":app != "source", "checking":false
+        "checked":1700000000, "error":null, "checks":app != "source", "checking":false
     })
 }
 
@@ -746,6 +746,22 @@ fn settings_sections_and_updates(cx: &mut TestAppContext) {
         assert!(tree.contains(if checking { "Checking" } else if succeeded { "Up to date" } else { "Check your connection" }), "check status missing: {tree}");
     }
     eprintln!("27 settings cases, each twice: {:?}", start.elapsed());
+}
+
+#[gpui::test]
+fn a_failed_update_check_shows_its_reason(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut p = props();
+    p["section"] = json!("updates");
+    let mut u = updates("current", "current");
+    u["checked"] = Value::Null;
+    u["error"] = json!("Herdr: https://releases.herdr.dev/app/latest.json: curl: (35) schannel: CRL unavailable");
+    let tree = describe(cx, &staged, "frame/settings", true, p, u, None).unwrap();
+    assert!(
+        tree.contains("No successful check: Herdr: https://releases.herdr.dev/app/latest.json: curl: (35) schannel: CRL unavailable"),
+        "{tree}"
+    );
 }
 
 #[gpui::test]
