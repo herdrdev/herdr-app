@@ -1,5 +1,7 @@
 import { expect, test } from "bun:test";
-import { readFile } from "node:fs/promises";
+import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const source = await readFile(new URL("../defaults/mods/machine-add/main.js", import.meta.url), "utf8");
 
@@ -122,4 +124,40 @@ test("success refreshes the list and clears the typed target without opening any
   expect(s.probes).toEqual(["my-host"]);
   expect(s.calls.every((args) => args[0] === "machine")).toBe(true);
   expect(s.overlays).toEqual([]);
+});
+
+// The ssh config reading with real files and a real sh, started the way Herdr
+// starts programs, so a Windows home (C:\Users\...) behaves as it does there.
+async function hostsUnder(prefix: string) {
+  const home = await mkdtemp(join(tmpdir(), prefix));
+  try {
+    await mkdir(join(home, ".ssh", "config.d"), { recursive: true });
+    const config = "Include config.d/*\nHost direct\n";
+    await writeFile(join(home, ".ssh", "config"), config);
+    await writeFile(join(home, ".ssh", "config.d", "a-work"), "Host work\n  HostName 10.0.0.1\n");
+    await writeFile(join(home, ".ssh", "config.d", "b-lab"), "Host lab\n");
+    const values = {
+      View: class {}, div() {}, svg() {}, TextView: {}, v_flex() {}, h_flex() {}, InputState: {}, Input: {},
+      hc() {}, theme() {}, props: () => ({}), closeOverlay() {}, openOverlay() {},
+      home: () => home,
+      readTextFile: (file: string) => readFile(file, "utf8"),
+      exec: async (program: string, args: string[]) => {
+        const p = Bun.spawnSync([program, ...args]);
+        return { code: p.exitCode, stdout: p.stdout.toString(), stderr: p.stderr.toString() };
+      },
+    };
+    const body = source.replace(/^import .*;\r?\n/gm, "").replace("export default class MachineAdd", "class MachineAdd");
+    const parseConfig = new Function(...Object.keys(values), `${body}; return parseConfig;`)(...Object.values(values));
+    return (await parseConfig(config)).map((h: any) => [h.alias, h.hostname]);
+  } finally {
+    await rm(home, { recursive: true, force: true });
+  }
+}
+
+test("every file a wildcard Include matches is listed", async () => {
+  expect(await hostsUnder("herdr-ssh-")).toEqual([["work", "10.0.0.1"], ["lab", null], ["direct", null]]);
+});
+
+test("a wildcard Include is listed under a home with a space", async () => {
+  expect(await hostsUnder("herdr ssh ")).toEqual([["work", "10.0.0.1"], ["lab", null], ["direct", null]]);
 });

@@ -22,6 +22,9 @@ pub struct Tab {
     /// Put away (ms since the epoch): out of the lists, still running. Comes
     /// back when it's shown or one of its agents needs the person.
     pub settled: Option<u64>,
+    /// Fields of its document entry this build doesn't read (a newer build's),
+    /// written back as they were.
+    pub rest: serde_json::Map<String, serde_json::Value>,
 }
 
 /// A place to work, plus the folder its new terminals start in.
@@ -37,6 +40,9 @@ pub struct Space {
     pub tabs: Vec<Tab>,
     /// The selected tab.
     pub active: Option<String>,
+    /// Fields of its document entry this build doesn't read (a newer build's),
+    /// written back as they were.
+    pub rest: serde_json::Map<String, serde_json::Value>,
 }
 
 /// A closed space, so opening it again doesn't ask for its name.
@@ -115,6 +121,7 @@ impl Tab {
             root: Node::container(id, Axis::Row, vec![pane]),
             zoomed: None,
             settled: None,
+            rest: Default::default(),
         }
     }
 
@@ -261,7 +268,7 @@ impl Model {
 
     pub fn add_space(&mut self, id: &str, name: &str, folder: &str, ctx: Tab) {
         let active = Some(ctx.id.clone());
-        self.spaces.push(Space { id: id.to_owned(), name: name.to_owned(), folder: folder.to_owned(), machine: None, tabs: vec![ctx], active });
+        self.spaces.push(Space { id: id.to_owned(), name: name.to_owned(), folder: folder.to_owned(), machine: None, tabs: vec![ctx], active, rest: Default::default() });
         self.recent.retain(|r| r.name != name);
         self.active = Some(id.to_owned());
     }

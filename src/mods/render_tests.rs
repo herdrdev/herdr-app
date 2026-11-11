@@ -3,6 +3,7 @@ use super::*;
 use gpui::TestAppContext;
 use gpui_shell::{ShellRuntime, plugin::DescriptionSession, policy::Policy};
 use std::{
+    cell::Cell,
     collections::{BTreeMap, BTreeSet},
     rc::Rc,
     sync::atomic::{AtomicU64, Ordering},
@@ -204,6 +205,144 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
         });
     }
     module.declarations(DECLARATIONS)
+}
+
+#[gpui::test]
+fn mod_copies_share_code_without_sharing_props_state_or_lifetime(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let root = staged.0.join("cache");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("main.js"), r#"
+import { View, div } from 'gpui-kit';
+import { props, mark, next } from 'copy';
+const evaluation = mark();
+const row = globalThis.__template(value => div().child(value));
+export default class Panel extends View {
+  init(_, cx) {
+    if (props() === 'bad') throw Error('bad props');
+    this.count = 0;
+    this.count++;
+    this.async = 'waiting';
+    cx.spawn(async cx => { await next(); this.async = props(); cx.notify(); });
+  }
+  render() { return row(props() + ':' + this.count + ':' + evaluation + ':' + this.async); }
+}
+"#).unwrap();
+    let marks = Rc::new(Cell::new(0));
+    let policy = |name: &'static str| {
+        let marks = marks.clone();
+        Policy::new().with_host_module(HostModule::new("copy")
+            .function("props", move |_| Ok(name.into()))
+            .function("mark", move |_| { marks.set(marks.get() + 1); Ok((marks.get() as f64).into()) })
+            .async_function("next", |_| Ok(std::future::ready(Ok(HostValue::Null))))
+        ).unwrap()
+    };
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|_, _| Empty);
+    let (first, mut second) = window.update(cx, |_, window, cx| {
+        let mut first = DescriptionSession::load(runtime.clone(), &root, policy("A"), window, cx).unwrap();
+        let mut second = DescriptionSession::load(runtime.clone(), &root, policy("B"), window, cx).unwrap();
+        assert!(first.describe(window, cx).unwrap().contains("A:1:1"));
+        assert!(second.describe(window, cx).unwrap().contains("B:1:1"));
+        assert!(DescriptionSession::load(runtime.clone(), &root, policy("bad"), window, cx).is_err());
+        (first, second)
+    }).unwrap();
+    cx.run_until_parked();
+    drop(first);
+    cx.run_until_parked();
+    window.update(cx, |_, window, cx| {
+        let tree = second.describe(window, cx).unwrap();
+        assert!(tree.contains("B:1:1:B"), "{tree}");
+    }).unwrap();
+    drop(second);
+    cx.run_until_parked();
+    window.update(cx, |_, window, cx| {
+        let mut reopened = DescriptionSession::load(runtime.clone(), &root, policy("C"), window, cx).unwrap();
+        assert!(reopened.describe(window, cx).unwrap().contains("C:1:1"));
+    }).unwrap();
+    assert_eq!(marks.get(), 1, "reopening and failed init must reuse evaluated code");
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn mod_code_revisions_share_successes_and_failures_without_poisoning_old_copies(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let root = staged.0.join("cache");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("main.js"), r#"
+import { View, div } from 'gpui-kit';
+import { version } from './part.js';
+export default class Panel extends View { render() { return div().child('version:' + version); } }
+"#).unwrap();
+    std::fs::write(root.join("part.js"), "import { mark } from 'copy'; mark(); export const version = 1;").unwrap();
+    let marks = Rc::new(Cell::new(0));
+    let policy = || {
+        let marks = marks.clone();
+        Policy::new().with_host_module(HostModule::new("copy").function("mark", move |_| {
+            marks.set(marks.get() + 1); Ok(HostValue::Null)
+        })).unwrap()
+    };
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|_, _| Empty);
+    window.update(cx, |_, window, cx| {
+        let mut old = DescriptionSession::load(runtime.clone(), &root, policy(), window, cx).unwrap();
+        for version in [2, 3] {
+            std::fs::write(root.join("part.js"), format!("import {{ mark }} from 'copy'; mark(); export const version = {version};{}", " ".repeat(version))).unwrap();
+            for _ in 0..20 {
+                let mut new = DescriptionSession::load(runtime.clone(), &root, policy(), window, cx).unwrap();
+                assert!(new.describe(window, cx).unwrap().contains(&format!("version:{version}")));
+            }
+        }
+        assert_eq!(marks.get(), 3);
+        std::fs::write(root.join("part.js"), "import { mark } from 'copy'; mark(); throw Error('broken save'); export const version = 4;").unwrap();
+        for _ in 0..20 {
+            assert!(DescriptionSession::load(runtime.clone(), &root, policy(), window, cx).is_err());
+        }
+        assert_eq!(marks.get(), 4, "a failed revision evaluates once, not on every open");
+        assert!(old.describe(window, cx).unwrap().contains("version:1"));
+        std::fs::write(root.join("part.js"), "import { mark } from 'copy'; mark(); export const version = 5;").unwrap();
+        let mut fixed = DescriptionSession::load(runtime.clone(), &root, policy(), window, cx).unwrap();
+        assert!(fixed.describe(window, cx).unwrap().contains("version:5"));
+        assert_eq!(marks.get(), 5);
+        assert!(DescriptionSession::load(runtime.clone(), &root, Policy::new(), window, cx).is_err(),
+            "an ungranted host module must not reuse another policy's linked class");
+    }).unwrap();
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn mod_host_imports_keep_sync_async_and_missing_export_surfaces_distinct(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let root = staged.0.join("cache");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("main.js"), r#"
+import { View, div } from 'gpui-kit';
+import { value } from 'copy';
+export default class Panel extends View {
+  init() { this.kind = typeof value(); }
+  render() { return div().child('kind:' + this.kind); }
+}
+"#).unwrap();
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|_, _| Empty);
+    window.update(cx, |_, window, cx| {
+        let sync = HostModule::new("copy").function("value", |_| Ok(HostValue::Number(1.0)));
+        let mut a = DescriptionSession::load(runtime.clone(), &root, Policy::new().with_host_module(sync).unwrap(), window, cx).unwrap();
+        assert!(a.describe(window, cx).unwrap().contains("kind:number"));
+        let asynchronous = HostModule::new("copy").async_function("value", |_| Ok(std::future::ready(Ok(HostValue::Null))));
+        let mut b = DescriptionSession::load(runtime.clone(), &root, Policy::new().with_host_module(asynchronous).unwrap(), window, cx).unwrap();
+        assert!(b.describe(window, cx).unwrap().contains("kind:object"));
+        let missing = HostModule::new("copy").function("other", |_| Ok(HostValue::Null));
+        assert!(DescriptionSession::load(runtime.clone(), &root, Policy::new().with_host_module(missing).unwrap(), window, cx).is_err());
+        assert!(a.describe(window, cx).unwrap().contains("kind:number"));
+    }).unwrap();
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+    cx.run_until_parked();
 }
 
 struct Empty;
@@ -416,6 +555,35 @@ fn confirm_dialog_background_follows_the_frame_corners(cx: &mut TestAppContext) 
 }
 
 #[gpui::test]
+fn pane_header_divider_faces_the_terminal(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for (position, reveal) in [("bottom", "always"), ("top", "always"), ("", "always"), ("bottom", "hover"), ("top", "hover")] {
+        let mut values = fixture(true, props(), updates("current", "current"));
+        values.insert("layout".into(), json!({
+            "id": "root", "type": "column", "children": [
+                {"id": "hidden", "type": "block", "hidden": true,
+                 "content": {"tab": "active", "pane": {"header": {"position": "bottom"}}}},
+                {"id": "stack", "type": "stack", "active": "shown", "children": [
+                    {"id": "inactive", "type": "block",
+                     "content": {"tab": "active", "pane": {"header": {"position": "bottom"}}}},
+                    {"id": "shown", "type": "block",
+                     "content": {"tab": "active", "pane": {"header": {"position": position, "reveal": reveal}}}}
+                ]}
+            ]
+        }));
+        if position.is_empty() {
+            values.get_mut("layout").unwrap()["children"][1]["children"][1]["content"]["pane"]["header"].as_object_mut().unwrap().remove("position");
+        }
+        let tree = describe_with_values(cx, &staged, "mods/pane", values, None).unwrap();
+        let head = tree.lines().find(|l| l.contains("pane-head-")).unwrap();
+        let (edge, outside) = if position == "bottom" { ("t", "b") } else { ("b", "t") };
+        assert!(head.contains(&format!(".border_{edge}[Number(1.0)]")), "{position}: {head}");
+        assert!(!head.contains(&format!(".border_{outside}[")), "{position}: {head}");
+    }
+}
+
+#[gpui::test]
 fn layout_previews_stay_inside_their_cards(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
@@ -583,7 +751,7 @@ fn settings_sections_and_updates(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn animated_images_advance_with_explicit_and_implicit_ids(cx: &mut TestAppContext) {
-    use gpui::{IntoElement as _, http_client::{AsyncBody, FakeHttpClient, Response}};
+    use gpui::{Styled as _, http_client::{AsyncBody, FakeHttpClient, Response}};
     use image::{Delay, Frame, Rgba, RgbaImage, codecs::gif::GifEncoder};
     use std::{sync::Arc, time::Duration};
 
@@ -595,9 +763,14 @@ fn animated_images_advance_with_explicit_and_implicit_ids(cx: &mut TestAppContex
             encoder.encode_frame(Frame::from_parts(RgbaImage::from_pixel(2, 2, Rgba(color)), 0, 0, Delay::from_numer_denom_ms(20, 1))).unwrap();
         }
     }
+    let (ready, waiting) = async_channel::unbounded::<()>();
     let client = FakeHttpClient::create(move |_| {
         let bytes = bytes.clone();
-        async move { Ok(Response::builder().status(200).body(AsyncBody::from(bytes)).unwrap()) }
+        let waiting = waiting.clone();
+        async move {
+            waiting.recv().await.unwrap();
+            Ok(Response::builder().status(200).body(AsyncBody::from(bytes)).unwrap())
+        }
     });
     cx.update(|cx| cx.set_http_client(client));
     let staged = Staged::new();
@@ -608,26 +781,57 @@ fn animated_images_advance_with_explicit_and_implicit_ids(cx: &mut TestAppContex
         std::fs::write(staged.0.join("main.js"), source).unwrap();
         let context = cx.add_empty_window();
         let view = context.update(|window, cx| {
-            window.activate_window();
             let root = runtime.try_load(&staged.0, window, cx).unwrap();
             root.read(cx).content().clone()
         });
+        struct AnimationRoot(gpui::AnyView);
+        impl gpui::Render for AnimationRoot {
+            fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+                self.0.clone().cached(gpui::StyleRefinement::default().size_full())
+            }
+        }
+        // Load while inactive, then tick frames explicitly so the executor can park.
+        context.deactivate_window();
+        let root = context.update(|window, cx| window.replace_root(cx, |_, _| AnimationRoot(view.clone())));
+        context.run_until_parked();
+        // A cached subtree must keep its pending load across an unrelated parent draw.
+        context.update(|_, cx| root.update(cx, |_, cx| cx.notify()));
+        context.run_until_parked();
+        ready.try_send(()).unwrap();
+        context.run_until_parked();
+        let resource = gpui::Resource::Uri(url.into());
+        let still: Arc<gpui::RenderImage> = context.update(|_, cx| cx.fetch_asset::<gpui::ImgResourceLoader>(&resource).unwrap().unwrap());
+        assert_eq!(still.frame_count(), 1);
+        let data = context.update(|window, _| window.displayed_images().into_iter().find(|image| image.frame_count() == 2)).unwrap();
+        assert_eq!(data.as_bytes(0).unwrap().as_ptr(), still.as_bytes(0).unwrap().as_ptr());
+        context.update(|window, cx| {
+            window.replace_root(cx, |_, _| Empty);
+            window.activate_window();
+        });
+        context.run_until_parked();
+        context.update(|window, cx| { window.replace_root(cx, |_, _| AnimationRoot(view.clone())); });
         let draw = |context: &mut gpui::VisualTestContext| {
-            let view = view.clone();
-            context.draw(gpui::Point::default(), gpui::size(gpui::px(40.), gpui::px(40.)), move |_, _| view.into_any_element());
+            context.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                window.draw(cx).clear(cx);
+            });
         };
         draw(context);
-        context.run_until_parked();
-        draw(context);
         assert!(context.update(|window, _| window.is_window_active()));
-        let resource = gpui::Resource::Uri(url.into());
-        let data: Arc<gpui::RenderImage> = context.update(|_, cx| cx.fetch_asset::<gpui::ImgResourceLoader>(&resource).unwrap().unwrap());
         assert_eq!(data.frame_count(), 2);
-        assert!(!context.update(|window, _| window.has_image_atlas_entry(&data)));
+        assert!(context.update(|window, _| window.has_image_frame_atlas_entry(&data, 0)));
+        assert!(!context.update(|window, _| window.has_image_frame_atlas_entry(&data, 1)));
         // GPUI's image clock is wall time, not the test executor's clock.
         std::thread::sleep(Duration::from_millis(25));
         draw(context);
-        assert!(context.update(|window, _| window.has_image_atlas_entry(&data)), "both animation frames must have painted (explicit id: {explicit})");
+        assert!(context.update(|window, _| window.has_image_frame_atlas_entry(&data, 1)), "the next animation frame must paint (explicit id: {explicit})");
+        assert!(context.update(|window, _| window.has_image_frame_atlas_entry(&data, 0)));
+        std::thread::sleep(Duration::from_millis(25));
+        draw(context);
+        assert!(context.update(|window, _| window.has_image_frame_atlas_entry(&data, 0)));
+        assert!(context.update(|window, _| window.has_image_frame_atlas_entry(&data, 1)));
+        context.update(|window, cx| { window.replace_root(cx, |_, _| Empty); });
+        context.deactivate_window();
     }
 }
 

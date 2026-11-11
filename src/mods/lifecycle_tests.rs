@@ -67,6 +67,99 @@ export default class extends View {
     assert_eq!(sizes.borrow().len(), 2);
 }
 
+
+#[gpui::test]
+fn plain_mod_scroll_handles_reveal_children_once_without_moving_visible_items(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    for (overflow, horizontal) in [("overflow_x_scroll", true), ("overflow_x_scrollbar", true), ("overflow_y_scroll", false), ("overflow_y_scrollbar", false)] {
+        let source = r#"
+import { View, div } from "gpui-kit";
+import { ScrollHandle } from "gpui-base";
+import { note } from "fixture";
+export default class extends View {
+  init(_, cx) {
+    this.scroll = ScrollHandle.new();
+    this.scroll.scroll_to_item(4);
+    this.focus = cx.focus_handle();
+    this.focus.focus();
+  }
+  render() {
+    return div().size_full().track_focus(this.focus)
+      .on_key_down((e, cx) => {
+        this.scroll.scroll_to_item(Number(e.key));
+        cx.notify();
+      })
+      .child(div().id("area").flex().DIRECTION().w(WIDTH).h(HEIGHT).OVERFLOW().track_scroll(this.scroll).on_scroll_wheel(() => {})
+        .children([0, 1, 2, 3, 4].map(i => div().id("item-" + i).w(40).h(40).flex_none()
+          .on_click(() => note(i)).child(String(i)))));
+  }
+}"#.replace("OVERFLOW", overflow)
+            .replace("DIRECTION", if horizontal { "flex_row" } else { "flex_col" })
+            .replace("WIDTH", if horizontal { "120" } else { "40" })
+            .replace("HEIGHT", if horizontal { "40" } else { "120" });
+        let fixture = Fixture::new(&source);
+        let notes = Rc::new(RefCell::new(Vec::new()));
+        let calls = notes.clone();
+        gpui_shell::policy::set_default(Policy::new().with_host_module(
+            HostModule::new("fixture").function("note", move |a| {
+                calls.borrow_mut().push(a.number(0)? as usize);
+                Ok(HostValue::Null)
+            })
+        ).unwrap());
+        let runtime = ShellRuntime::new_isolated().unwrap();
+        let window = cx.add_window(|window, cx| Mounted(runtime.try_load(&fixture.0, window, cx).unwrap()));
+        let mut visual = VisualTestContext::from_window(*window.deref(), cx);
+        for _ in 0..3 {
+            visual.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                window.draw(cx).clear(cx);
+            });
+            visual.run_until_parked();
+        }
+        let position = |along| if horizontal { gpui::point(gpui::px(along), gpui::px(20.)) } else { gpui::point(gpui::px(20.), gpui::px(along)) };
+        visual.simulate_click(position(100.), Default::default());
+        assert_eq!(*notes.borrow(), vec![4], "{overflow}: the last child must be visible");
+        visual.simulate_keystrokes("3");
+        for _ in 0..3 {
+            visual.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                window.draw(cx).clear(cx);
+            });
+            visual.run_until_parked();
+        }
+        visual.simulate_click(position(10.), Default::default());
+        assert_eq!(*notes.borrow(), vec![4, 2], "{overflow}: revealing a visible child must keep the offset");
+        visual.simulate_keystrokes("0");
+        for _ in 0..3 {
+            visual.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                window.draw(cx).clear(cx);
+            });
+            visual.run_until_parked();
+        }
+        visual.simulate_click(position(10.), Default::default());
+        assert_eq!(*notes.borrow(), vec![4, 2, 0], "{overflow}: the first child must be visible again");
+        let delta = if horizontal { gpui::point(gpui::px(-80.), gpui::px(0.)) } else { gpui::point(gpui::px(0.), gpui::px(-80.)) };
+        visual.simulate_mouse_move(position(20.), None, Default::default());
+        visual.simulate_event(gpui::ScrollWheelEvent {
+            position: position(20.),
+            delta: gpui::ScrollDelta::Pixels(delta),
+            ..Default::default()
+        });
+        for _ in 0..3 {
+            visual.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                window.draw(cx).clear(cx);
+            });
+            visual.run_until_parked();
+        }
+        visual.simulate_click(position(100.), Default::default());
+        assert_eq!(*notes.borrow(), vec![4, 2, 0, 4], "{overflow}: manual scrolling must work after a consumed request");
+        visual.update(|window, _| window.remove_window());
+        visual.run_until_parked();
+    }
+}
+
 #[gpui::test]
 fn external_file_drops_reach_mod_elements(cx: &mut TestAppContext) {
     use gpui::{ExternalPaths, FileDropEvent, InputEvent};
@@ -94,6 +187,12 @@ export default class extends View {
     visual.run_until_parked();
     visual.update(|window, cx| {
         let position = gpui::point(gpui::px(20.), gpui::px(20.));
+        // Typed last, as before dragging a screenshot in: no mouse move reaches the window.
+        window.dispatch_event(gpui::KeyDownEvent {
+            keystroke: gpui::Keystroke::parse("a").unwrap(),
+            is_held: false,
+            prefer_character_input: false,
+        }.to_platform_input(), cx);
         window.dispatch_event(FileDropEvent::Entered {
             position,
             paths: ExternalPaths([PathBuf::from("/var/tmp/screenshot.png"), PathBuf::from("/var/tmp/a file.jpg")].into_iter().collect()),

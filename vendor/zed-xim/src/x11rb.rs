@@ -591,25 +591,7 @@ impl<C: HasConnection> X11rbClient<C> {
                 .get_property(true, msg.window, atom, AtomEnum::ANY, 0, length.div_ceil(4))?
                 .reply()?;
             if reply.bytes_after > 0 {
-                // X deleted nothing: take it all and put back what follows, as Xlib does.
-                let whole = reply.value.len() as u32 + reply.bytes_after;
-                let all = self
-                    .conn()
-                    .get_property(true, msg.window, atom, AtomEnum::ANY, 0, whole.div_ceil(4))?
-                    .reply()?;
-                if let Some(rest) = all
-                    .value
-                    .get(length as usize..)
-                    .filter(|rest| !rest.is_empty())
-                {
-                    self.conn().change_property8(
-                        PropMode::PREPEND,
-                        msg.window,
-                        atom,
-                        all.type_,
-                        rest,
-                    )?;
-                }
+                restore_property_tail(self.conn(), msg.window, atom, length)?;
             }
             let data = reply.value;
             let req = xim_parser::read(&data)?;
@@ -703,6 +685,34 @@ impl<C: HasConnection> ClientCore for X11rbClient<C> {
             &req,
         )
     }
+}
+
+#[cfg(all(test, feature = "x11rb-client"))]
+mod property_tests;
+
+#[cfg(feature = "x11rb-client")]
+fn restore_property_tail(
+    conn: &impl Connection,
+    window: Window,
+    atom: Atom,
+    length: u32,
+) -> Result<(), ClientError> {
+    // The server may append after the first read. Only a read through the current
+    // end deletes the property, so never bound this read by the earlier length.
+    let all = conn
+        .get_property(true, window, atom, AtomEnum::ANY, 0, u32::MAX)?
+        .reply()?;
+    if all.bytes_after != 0 {
+        return Err(ClientError::InvalidReply);
+    }
+    if let Some(rest) = all
+        .value
+        .get(length as usize..)
+        .filter(|rest| !rest.is_empty())
+    {
+        conn.change_property8(PropMode::PREPEND, window, atom, all.type_, rest)?;
+    }
+    Ok(())
 }
 
 fn send_req_impl<C: HasConnection, E: From<ConnectionError> + From<ReplyError>>(

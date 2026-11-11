@@ -10,7 +10,7 @@ use std::os::unix::process::{CommandExt, ExitStatusExt};
 use std::path::{Path, PathBuf};
 use std::process::{Child, Command, ExitStatus, Stdio};
 use std::sync::atomic::{AtomicI32, Ordering};
-use std::time::{Duration, SystemTime, UNIX_EPOCH};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const SENTINEL: &str = "--herdr-check-job";
 const DIRECT: &str = "HERDR_CHECK_DIRECT";
@@ -178,6 +178,97 @@ struct Job {
     handed_off: bool,
 }
 
+impl Job {
+    fn request(&self, action: &str, deadline: Instant) -> io::Result<String> {
+        let path = self.dir.join("launchctl.out");
+        let output = File::create(&path)?;
+        let mut child = Command::new("/bin/launchctl")
+            .args([action, &self.target])
+            .stdin(Stdio::null())
+            .stdout(output.try_clone()?)
+            .stderr(output)
+            .spawn()?;
+        let status = wait_startup_command(&mut child, deadline)?;
+        let mut output = String::new();
+        File::open(path)?.take(64 * 1024).read_to_string(&mut output)?;
+        if status.success() {
+            Ok(output)
+        } else {
+            Err(io::Error::other(format!("launchctl {action}: {} ({status})", output.trim())))
+        }
+    }
+
+    fn failure(&self, phase: &str, error: io::Error) -> io::Error {
+        self.failure_with_state(phase, error, &self.state())
+    }
+
+    fn state(&self) -> String {
+        match self.request("print", Instant::now() + Duration::from_secs(1)) {
+            Ok(output) => job_state(&output),
+            Err(error) => format!("job state unavailable: {error}"),
+        }
+    }
+
+    fn failure_with_state(&self, phase: &str, error: io::Error, state: &str) -> io::Error {
+        io::Error::new(error.kind(), format!("{}: {phase}: {error}; {state}", self.target))
+    }
+}
+
+fn wait_for_connection(listener: &UnixListener, deadline: Instant) -> io::Result<()> {
+    loop {
+        if INTERRUPTED.load(Ordering::Relaxed) != 0 {
+            return Err(io::ErrorKind::Interrupted.into());
+        }
+        let mut poll = libc::pollfd { fd: listener.as_raw_fd(), events: libc::POLLIN, revents: 0 };
+        let remaining = deadline.saturating_duration_since(Instant::now()).as_millis().min(i32::MAX as u128) as i32;
+        match unsafe { libc::poll(&mut poll, 1, remaining) } {
+            count if count > 0 => return Ok(()),
+            0 => return Err(io::Error::new(io::ErrorKind::TimedOut, "checker job did not connect before its deadline")),
+            _ => {
+                let error = io::Error::last_os_error();
+                if error.kind() != io::ErrorKind::Interrupted { return Err(error); }
+            }
+        }
+    }
+}
+
+fn job_started(state: &str) -> bool {
+    state.split("; ").any(|field| ["pid = ", "runs = "].iter()
+        .any(|key| field.strip_prefix(key).and_then(|value| value.parse::<u64>().ok()).is_some_and(|value| value > 0)))
+}
+
+fn wait_startup_command(child: &mut Child, deadline: Instant) -> io::Result<ExitStatus> {
+    loop {
+        match child.try_wait() {
+            Ok(Some(status)) => return Ok(status),
+            Ok(None) if Instant::now() < deadline && INTERRUPTED.load(Ordering::Relaxed) == 0 => {
+                std::thread::sleep(Duration::from_millis(10));
+            }
+            result => {
+                let _ = child.kill();
+                let _ = child.wait();
+                return Err(result.err().unwrap_or_else(|| {
+                    if INTERRUPTED.load(Ordering::Relaxed) != 0 {
+                        io::ErrorKind::Interrupted.into()
+                    } else {
+                        io::Error::new(io::ErrorKind::TimedOut, "launchctl startup command exceeded its deadline")
+                    }
+                }));
+            }
+        }
+    }
+}
+
+fn job_state(output: &str) -> String {
+    let fields: Vec<_> = output.lines()
+        .filter(|line| line.starts_with('\t') && !line.starts_with("\t\t"))
+        .map(str::trim)
+        .filter(|line| ["state =", "pid =", "runs =", "last exit code =", "last terminating signal =", "pended nondemand spawn ="]
+            .iter().any(|key| line.starts_with(key)))
+        .collect();
+    if fields.is_empty() { "no spawn state reported".into() } else { fields.join("; ") }
+}
+
 impl Drop for Job {
     fn drop(&mut self) {
         if self.handed_off { return; }
@@ -206,16 +297,8 @@ fn submit(args: &[String]) -> io::Result<i32> {
     let listener = UnixListener::bind(job.dir.join("ready"))?;
     let executable = std::env::current_exe()?;
     let executable = executable.to_str().ok_or_else(|| io::Error::other("non-UTF-8 executable path"))?;
-    let plist = format!(
-        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict>\
-         <key>Label</key><string>{label}</string>\
-         <key>ProgramArguments</key><array><string>{}</string><string>{SENTINEL}</string><string>{}</string><string>{}</string></array>\
-         <key>RunAtLoad</key><true/><key>ProcessType</key><string>Background</string>\
-         <key>StandardErrorPath</key><string>{}/worker-stderr</string></dict></plist>",
-        xml(executable), xml(job.dir.to_str().unwrap()), xml(&job.target), xml(job.dir.to_str().unwrap()),
-    );
     let path = job.dir.join("job.plist");
-    fs::write(&path, plist)?;
+    fs::write(&path, plist(executable, &label, &job.dir, &job.target))?;
     let output = Command::new("/bin/launchctl").args(["bootstrap", &domain]).arg(&path).output()?;
     if !output.status.success() {
         let _ = Command::new("/bin/launchctl").args(["bootout", &job.target]).output();
@@ -223,12 +306,18 @@ fn submit(args: &[String]) -> io::Result<i32> {
     }
     job.loaded = true;
     let result = (|| {
-        if INTERRUPTED.load(Ordering::Relaxed) != 0 {
-            return Err(io::ErrorKind::Interrupted.into());
-        }
-        let mut poll = libc::pollfd { fd: listener.as_raw_fd(), events: libc::POLLIN, revents: 0 };
-        if unsafe { libc::poll(&mut poll, 1, 10_000) } <= 0 {
-            return Err(io::Error::other("checker job did not connect within 10 seconds"));
+        // One demand request is the only trigger: RunAtLoad can be deferred at login.
+        let started = Instant::now();
+        let deadline = started + Duration::from_secs(10);
+        job.request("kickstart", deadline).map_err(|error| job.failure("kickstart", error))?;
+        if let Err(error) = wait_for_connection(&listener, deadline) {
+            let state = job.state();
+            if error.kind() != io::ErrorKind::TimedOut || !job_started(&state) {
+                return Err(job.failure_with_state("connect (10 seconds)", error, &state));
+            }
+            // Once spawned, a cold login can still delay the helper's first instructions.
+            wait_for_connection(&listener, started + Duration::from_secs(30))
+                .map_err(|error| job.failure("connect (30 seconds, job spawned)", error))?;
         }
         let (mut ready, _) = listener.accept()?;
         ready.write_all(&[1])?;
@@ -274,6 +363,17 @@ fn submit(args: &[String]) -> io::Result<i32> {
     }
 }
 
+fn plist(executable: &str, label: &str, dir: &Path, target: &str) -> String {
+    format!(
+        "<?xml version=\"1.0\" encoding=\"UTF-8\"?><plist version=\"1.0\"><dict>\
+         <key>Label</key><string>{label}</string>\
+         <key>ProgramArguments</key><array><string>{}</string><string>{SENTINEL}</string><string>{}</string><string>{}</string></array>\
+         <key>RunAtLoad</key><false/><key>ProcessType</key><string>Background</string>\
+         <key>StandardErrorPath</key><string>{}/worker-stderr</string></dict></plist>",
+        xml(executable), xml(dir.to_str().unwrap()), xml(target), xml(dir.to_str().unwrap()),
+    )
+}
+
 fn relay(dir: &Path, name: &str, out: &mut dyn Write) -> io::Result<()> {
     match File::open(dir.join(name)) {
         Ok(mut file) => { io::copy(&mut file, out)?; Ok(()) }
@@ -289,6 +389,74 @@ fn xml(value: &str) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn startup_command_timeout_reaps_its_child() {
+        let mut child = Command::new("/bin/sleep").arg("30").spawn().unwrap();
+        let pid = child.id() as libc::pid_t;
+        let start = Instant::now();
+        assert_eq!(wait_startup_command(&mut child, start + Duration::from_millis(50)).unwrap_err().kind(), io::ErrorKind::TimedOut);
+        assert!(start.elapsed() < Duration::from_secs(2));
+        assert_eq!(unsafe { libc::waitpid(pid, std::ptr::null_mut(), libc::WNOHANG) }, -1);
+        assert_eq!(io::Error::last_os_error().raw_os_error(), Some(libc::ECHILD));
+    }
+
+    #[test]
+    fn job_diagnostics_include_spawn_state_without_environment() {
+        let state = "job = {\n\tstate = spawn scheduled\n\truns = 0\n\tpended nondemand spawn = speculative\n\tenvironment = {\n\t\tSECRET = private\n\t}\n}";
+        assert_eq!(job_state(state), "state = spawn scheduled; runs = 0; pended nondemand spawn = speculative");
+        assert!(!job_started(&job_state(state)));
+        assert!(job_started("state = running; runs = 1; pid = 42"));
+        assert!(job_started("pid = 42"));
+        assert!(!job_started("job state unavailable: runs = 1"));
+    }
+
+    #[test]
+    fn connection_wait_observes_a_client_and_bounds_a_missing_client() {
+        let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let path = PathBuf::from(format!("/tmp/herdr-connect-{stamp}"));
+        let listener = UnixListener::bind(&path).unwrap();
+        let start = Instant::now();
+        let error = wait_for_connection(&listener, start + Duration::from_millis(30)).unwrap_err();
+        assert_eq!(error.kind(), io::ErrorKind::TimedOut);
+        assert!(start.elapsed() < Duration::from_secs(2));
+        let _client = UnixStream::connect(&path).unwrap();
+        wait_for_connection(&listener, Instant::now() + Duration::from_secs(1)).unwrap();
+        fs::remove_file(path).unwrap();
+    }
+
+    #[test]
+    fn checker_job_waits_for_demand_and_runs_once() {
+        let domain = format!("gui/{}", unsafe { libc::getuid() });
+        if !Command::new("/bin/launchctl").args(["print", &domain]).stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap().success() {
+            eprintln!("skipping: no GUI launchd domain");
+            return;
+        }
+        let stamp = SystemTime::now().duration_since(UNIX_EPOCH).unwrap().as_nanos();
+        let label = format!("dev.herdr.check.test.{}.{stamp}", std::process::id());
+        let dir = PathBuf::from(format!("/var/tmp/herdr-check-test-{stamp}"));
+        fs::DirBuilder::new().mode(0o700).create(&dir).unwrap();
+        let mut job = Job { dir, target: format!("{domain}/{label}"), loaded: false, handed_off: false };
+        let path = job.dir.join("job.plist");
+        fs::write(&path, plist("/usr/bin/true", &label, &job.dir, &job.target)).unwrap();
+        assert!(Command::new("/bin/launchctl").args(["bootstrap", &domain]).arg(path).status().unwrap().success());
+        job.loaded = true;
+        let deadline = Instant::now() + Duration::from_secs(10);
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(job_state(&job.request("print", deadline).unwrap()).contains("runs = 0"));
+        job.request("kickstart", deadline).unwrap();
+        loop {
+            let state = job_state(&job.request("print", deadline).unwrap());
+            if state.contains("runs = 1") && !state.contains("pid =") { break; }
+            assert!(Instant::now() < deadline, "{state}");
+            std::thread::sleep(Duration::from_millis(10));
+        }
+        std::thread::sleep(Duration::from_millis(100));
+        assert!(job_state(&job.request("print", deadline).unwrap()).contains("runs = 1"));
+        let target = job.target.clone();
+        drop(job);
+        assert!(!Command::new("/bin/launchctl").args(["print", &target]).stdout(Stdio::null()).stderr(Stdio::null()).status().unwrap().success());
+    }
 
     #[test]
     fn checker_exit_status_is_preserved() {

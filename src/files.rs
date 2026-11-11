@@ -5,26 +5,83 @@
 use notify::{RecursiveMode, Watcher as _};
 use std::collections::HashSet;
 use std::path::{Path, PathBuf};
-use std::sync::OnceLock;
+use std::sync::{Arc, Mutex, OnceLock};
 
 /// What changed, relative to the home folder.
 pub type Changed = Vec<PathBuf>;
 
+#[derive(Clone)]
+pub struct FileEvents {
+    pub changes: async_channel::Receiver<Changed>,
+    root: PathBuf,
+    revisions: Arc<Mutex<Revisions>>,
+}
+
+#[derive(Default)]
+struct Revisions {
+    next: u64,
+    all: u64,
+    roots: std::collections::BTreeMap<PathBuf, u64>,
+}
+
+impl Revisions {
+    fn changed(&mut self, changed: &Changed, rescan: bool) {
+        if rescan {
+            self.next += 1;
+            self.all = self.next;
+        }
+        for root in changed.iter().filter_map(|path| mod_of(path).map(|name| PathBuf::from("mods").join(name))).collect::<HashSet<_>>() {
+            self.next += 1;
+            self.roots.insert(root, self.next);
+        }
+    }
+}
+
+impl FileEvents {
+    pub fn revision_provider(&self) -> impl Fn(&Path) -> Option<u64> + 'static {
+        let base = self.root.clone();
+        let revisions = self.revisions.clone();
+        move |root| {
+            let relative = root.strip_prefix(&base).ok()?;
+            if relative.components().count() != 2 || !relative.starts_with("mods") {
+                return None;
+            }
+            let mut revisions = revisions.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            let all = revisions.all;
+            Some((*revisions.roots.entry(relative.to_path_buf()).or_insert(all)).max(all))
+        }
+    }
+}
+
+fn changes(base: &Path, event: notify::Result<notify::Event>) -> (Changed, bool) {
+    let Ok(event) = event else { return (Vec::new(), true) };
+    if !event.need_rescan() && matches!(event.kind, notify::EventKind::Access(_)) {
+        return (Vec::new(), false);
+    }
+    let rescan = event.need_rescan() || event.paths.iter().any(|path| {
+        base.starts_with(path) || path.strip_prefix(base).is_ok_and(|relative| relative.starts_with("mods") && mod_of(relative).is_none())
+    });
+    let changed = event.paths.iter().filter_map(|path| path.strip_prefix(base).ok())
+        .filter(|path| watched(path)).map(Path::to_path_buf).collect();
+    (changed, rescan)
+}
+
 /// Starts watching `home`; None if the OS watcher can't start (the app then
 /// polls as before).
-pub fn watch(home: &Path, #[cfg(test)] executor: gpui::BackgroundExecutor) -> Option<async_channel::Receiver<Changed>> {
+pub fn watch(home: &Path, #[cfg(test)] executor: gpui::BackgroundExecutor) -> Option<FileEvents> {
     static WATCHER: OnceLock<std::sync::Mutex<notify::RecommendedWatcher>> = OnceLock::new();
     let (tx, rx) = async_channel::unbounded();
     #[cfg(test)]
     let tx = test_notifications(tx, executor);
     let root = home.canonicalize().unwrap_or_else(|_| home.to_path_buf());
     let base = root.clone();
+    let revisions = Arc::new(Mutex::new(Revisions::default()));
+    let event_revisions = revisions.clone();
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
-        let Ok(event) = event else { return };
-        if matches!(event.kind, notify::EventKind::Access(_)) {
-            return;
-        }
-        let changed: Changed = event.paths.iter().filter_map(|p| p.strip_prefix(&base).ok()).filter(|p| watched(p)).map(Path::to_path_buf).collect();
+        let mut revisions = event_revisions.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+        let (changed, rescan) = changes(&base, event);
+        revisions.changed(&changed, rescan);
+        drop(revisions);
         if !changed.is_empty() {
             #[cfg(not(test))]
             let _ = tx.send_blocking(changed);
@@ -36,7 +93,7 @@ pub fn watch(home: &Path, #[cfg(test)] executor: gpui::BackgroundExecutor) -> Op
     .ok()?;
     watcher.watch(&root, RecursiveMode::Recursive).map_err(|e| tracing::warn!("cannot watch {} ({e}); polling instead", root.display())).ok()?;
     WATCHER.set(std::sync::Mutex::new(watcher)).ok()?;
-    Some(rx)
+    Some(FileEvents { changes: rx, root, revisions })
 }
 
 // Native callbacks cannot wake GPUI's deterministic test scheduler directly.
@@ -72,17 +129,17 @@ fn watched(rel: &Path) -> bool {
 /// typings and jsconfig into each mod on load, and editors drop hidden and
 /// backup files: none of those are the mod's code.
 fn mod_file_counts(rest: std::path::Components) -> bool {
-    let parts: Vec<&str> = rest.filter_map(|c| c.as_os_str().to_str()).collect();
-    if parts.iter().any(|p| p.starts_with('.') || p.ends_with('~') || *p == "node_modules") {
-        return false;
-    }
-    !matches!(parts.as_slice(), [_, "jsconfig.json"] | [_, .., "gpui-kit.d.ts"])
+    let mut rest = rest;
+    let Some(name) = rest.next() else { return true };
+    gpui_shell::application_file_counts(Path::new(name.as_os_str()))
+        && gpui_shell::application_file_counts(rest.as_path())
 }
 
 /// Folders mods watch (`watchFolder`): one OS watcher each, shared by every
 /// mod waiting on it. Bounded invalidations collect even while nobody waits.
 struct Folder {
     _watcher: std::sync::mpsc::Sender<()>,
+    generation: Arc<()>,
     waiters: Vec<async_channel::Sender<Vec<String>>>,
     pending: HashSet<String>,
 }
@@ -113,9 +170,13 @@ pub async fn next_change(path: String) -> Result<Vec<String>, String> {
         let mut all = folders();
         if !all.contains_key(&root) {
             if all.len() >= MAX_FOLDERS {
+                reclaim_idle(&mut all);
+            }
+            if all.len() >= MAX_FOLDERS {
                 return Err(format!("already watching {MAX_FOLDERS} folders"));
             }
-            all.insert(root.clone(), Folder { _watcher: start_folder(&root)?, waiters: Vec::new(), pending: HashSet::new() });
+            let generation = Arc::new(());
+            all.insert(root.clone(), Folder { _watcher: start_folder(&root, generation.clone())?, generation, waiters: Vec::new(), pending: HashSet::new() });
         }
         let f = all.get_mut(&root).unwrap();
         if !f.pending.is_empty() {
@@ -127,6 +188,13 @@ pub async fn next_change(path: String) -> Result<Vec<String>, String> {
         rx
     };
     rx.recv().await.map_err(|_| "stopped watching".to_owned())
+}
+
+fn reclaim_idle(all: &mut std::collections::HashMap<PathBuf, Folder>) {
+    all.retain(|_, folder| {
+        folder.waiters.retain(|waiter| !waiter.is_closed());
+        !folder.waiters.is_empty()
+    });
 }
 
 #[cfg(target_os = "linux")]
@@ -243,7 +311,7 @@ fn collect_event(event: notify::Event, root: &Path, directories: &HashSet<PathBu
     refresh
 }
 
-fn start_folder(root: &Path) -> Result<std::sync::mpsc::Sender<()>, String> {
+fn start_folder(root: &Path, generation: Arc<()>) -> Result<std::sync::mpsc::Sender<()>, String> {
     let mut directories = watch_directories(root).inspect_err(|e| tracing::warn!("{e}"))?;
     let (tx, events) = std::sync::mpsc::sync_channel(1024);
     let overflow = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
@@ -309,7 +377,7 @@ fn start_folder(root: &Path) -> Result<std::sync::mpsc::Sender<()>, String> {
                             }
                             if let Err(e) = watcher.watch(path, folder_watch_mode()) {
                                 tracing::warn!("cannot watch {}: {e}; live folder updates unavailable, use periodic refresh", path.display());
-                                folders().remove(&root);
+                                remove_folder(&root, &generation);
                                 break 'watching;
                             }
                         }
@@ -318,8 +386,7 @@ fn start_folder(root: &Path) -> Result<std::sync::mpsc::Sender<()>, String> {
                     Err(e) => {
                         tracing::warn!("{e}");
                         // Do not leave a partial recursive watch pretending to be live.
-                        let mut all = folders();
-                        all.remove(&root);
+                        remove_folder(&root, &generation);
                         break;
                     }
                 }
@@ -327,7 +394,7 @@ fn start_folder(root: &Path) -> Result<std::sync::mpsc::Sender<()>, String> {
             if pending.is_empty() {
                 continue;
             }
-            if !deliver_pending(&root, pending) {
+            if !deliver_pending(&root, &generation, pending) {
                 break;
             }
         }
@@ -335,9 +402,20 @@ fn start_folder(root: &Path) -> Result<std::sync::mpsc::Sender<()>, String> {
     Ok(stop)
 }
 
-fn deliver_pending(root: &Path, pending: HashSet<String>) -> bool {
+fn remove_folder(root: &Path, generation: &Arc<()>) {
+    let mut all = folders();
+    if all.get(root).is_some_and(|f| Arc::ptr_eq(&f.generation, generation)) {
+        all.remove(root);
+    }
+}
+
+fn deliver_pending(root: &Path, generation: &Arc<()>, pending: HashSet<String>) -> bool {
     let mut all = folders();
     let Some(f) = all.get_mut(root) else { return false };
+    // A reclaimed path can already have a new watcher while the old worker exits.
+    if !Arc::ptr_eq(&f.generation, generation) {
+        return false;
+    }
     add_pending(&mut f.pending, root, pending.into_iter().map(PathBuf::from));
     f.waiters.retain(|w| !w.is_closed());
     if !f.waiters.is_empty() {
@@ -359,6 +437,94 @@ pub fn mod_of(rel: &Path) -> Option<String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn source_revisions_survive_closed_copies_and_rescan_invalidates_all() {
+        let (_, changes) = async_channel::unbounded();
+        let events = FileEvents {
+            changes,
+            root: PathBuf::from("/home/probe"),
+            revisions: Default::default(),
+        };
+        let revision = events.revision_provider();
+        let first = Path::new("/home/probe/mods/one");
+        let other = Path::new("/home/probe/mods/other");
+        assert_eq!(revision(first), Some(0));
+        assert_eq!(revision(other), Some(0));
+        events.revisions.lock().unwrap().changed(&vec!["mods/one/main.js".into()], false);
+        assert_eq!(revision(first), Some(1));
+        assert_eq!(revision(other), Some(0));
+        // No copy registration is needed for a root edited while closed.
+        events.revisions.lock().unwrap().changed(&vec!["mods/closed/main.js".into()], false);
+        assert_eq!(revision(Path::new("/home/probe/mods/closed")), Some(2));
+        let changed = Vec::new();
+        events.revisions.lock().unwrap().changed(&changed, true);
+        assert!(revision(first).unwrap() > 2);
+        assert!(revision(other).unwrap() > 2);
+        assert!(changed.is_empty(), "a rescan must not request mod hot reloads");
+        assert_eq!(revision(Path::new("/outside")), None);
+    }
+
+    #[test]
+    fn unattributed_events_revalidate_code_without_reloading_mods() {
+        let base = Path::new("/home/probe");
+        let mut paths = vec![base.to_path_buf(), base.join("mods"), base.parent().unwrap().to_path_buf()];
+        #[cfg(unix)]
+        {
+            use std::os::unix::ffi::OsStringExt;
+            paths.push(base.join("mods").join(std::ffi::OsString::from_vec(vec![0xff])));
+        }
+        let mut events: Vec<notify::Result<notify::Event>> = paths.into_iter()
+            .map(|path| Ok(notify::Event::new(notify::EventKind::Any).add_path(path))).collect();
+        events.push(Err(notify::Error::generic("missed events")));
+        events.push(Ok(notify::Event::new(notify::EventKind::Any).set_flag(notify::event::Flag::Rescan)));
+        for event in events {
+            let mut revisions = Revisions::default();
+            revisions.roots.insert("mods/one".into(), 0);
+            revisions.roots.insert("mods/two".into(), 0);
+            let (changed, rescan) = changes(base, event);
+            revisions.changed(&changed, rescan);
+            assert!(revisions.all > 0);
+            assert!(!changed.contains(&PathBuf::from("mods/one")));
+            assert!(!changed.contains(&PathBuf::from("mods/two")));
+        }
+    }
+
+    #[test]
+    fn rescan_keeps_real_edits_without_reloading_other_mods() {
+        let base = Path::new("/home/probe");
+        let mut revisions = Revisions::default();
+        revisions.roots.insert("mods/one".into(), 0);
+        revisions.roots.insert("mods/two".into(), 0);
+        let event = notify::Event::new(notify::EventKind::Any)
+            .set_flag(notify::event::Flag::Rescan)
+            .add_path(base.join("mods/one/main.js"));
+        let (changed, rescan) = changes(base, Ok(event));
+        revisions.changed(&changed, rescan);
+        assert_eq!(changed, vec![PathBuf::from("mods/one/main.js")]);
+        assert!(revisions.all > 0);
+        assert!(revisions.roots[Path::new("mods/one")] > revisions.all);
+        assert_eq!(revisions.roots[Path::new("mods/two")], 0);
+    }
+
+    #[test]
+    fn revision_provider_does_not_keep_receiver_alive_and_recovers_poison() {
+        let (tx, changes) = async_channel::unbounded();
+        let events = FileEvents {
+            changes,
+            root: PathBuf::from("/home/probe"),
+            revisions: Default::default(),
+        };
+        let revision = events.revision_provider();
+        let state = events.revisions.clone();
+        drop(events);
+        assert!(tx.is_closed());
+        assert!(std::panic::catch_unwind(|| {
+            let _lock = state.lock().unwrap();
+            panic!("poison revision state");
+        }).is_err());
+        assert_eq!(revision(Path::new("/home/probe/mods/one")), Some(0));
+    }
 
     #[gpui::test]
     fn native_notifications_reach_a_waiting_test_receiver(cx: &mut gpui::TestAppContext) {
@@ -393,6 +559,7 @@ mod tests {
     fn files_the_runtime_or_an_editor_writes_into_a_mod_do_not_reload_it() {
         assert!(watched(Path::new("mods/probe")));
         assert!(watched(Path::new("mods/probe/ui.js")));
+        assert!(watched(Path::new("mods/probe/target/output.js")));
         assert!(watched(Path::new("mods/probe/lib/jsconfig.json")));
         assert!(!watched(Path::new("mods/probe/jsconfig.json")));
         assert!(!watched(Path::new("mods/probe/gpui-kit.d.ts")));
@@ -507,13 +674,78 @@ mod tests {
     }
 
     #[test]
+    fn reclaiming_idle_folders_keeps_live_waiters_and_stops_idle_workers() {
+        let mut all = std::collections::HashMap::new();
+        let mut live = Vec::new();
+        let mut workers = Vec::new();
+        for i in 0..MAX_FOLDERS {
+            let (stop, stopped) = std::sync::mpsc::channel();
+            let (tx, rx) = async_channel::bounded(1);
+            if i % 3 == 0 {
+                drop(rx); // A mod copy closed or its host future was cancelled.
+            } else if i % 3 == 1 {
+                live.push(rx);
+            } else {
+                tx.try_send(vec!["changed".into()]).unwrap();
+                drop(tx); // The batch was delivered; nothing awaits more changes.
+                all.insert(PathBuf::from(i.to_string()), Folder {
+                    _watcher: stop, generation: Arc::new(()), waiters: Vec::new(),
+                    pending: HashSet::from(["another change".into()]),
+                });
+                workers.push(stopped);
+                continue;
+            }
+            all.insert(PathBuf::from(i.to_string()), Folder {
+                _watcher: stop, generation: Arc::new(()), waiters: vec![tx], pending: HashSet::new(),
+            });
+            workers.push(stopped);
+        }
+        reclaim_idle(&mut all);
+        assert_eq!(all.len(), live.len());
+        for (i, stopped) in workers.iter().enumerate() {
+            assert_eq!(stopped.try_recv().unwrap_err(), if i % 3 == 1 {
+                std::sync::mpsc::TryRecvError::Empty
+            } else {
+                std::sync::mpsc::TryRecvError::Disconnected
+            });
+        }
+        // Genuine demand remains bounded; reclamation must not interrupt it.
+        reclaim_idle(&mut all);
+        assert_eq!(all.len(), live.len());
+        drop(live);
+        reclaim_idle(&mut all);
+        assert!(all.is_empty());
+    }
+
+    #[test]
+    fn retired_folder_workers_cannot_touch_replacements() {
+        let root = test_repo("replacement");
+        let retired = Arc::new(());
+        let generation = Arc::new(());
+        let (stop, _stopped) = std::sync::mpsc::channel();
+        let (tx, rx) = async_channel::bounded(1);
+        folders().insert(root.clone(), Folder {
+            _watcher: stop, generation: generation.clone(), waiters: vec![tx], pending: HashSet::new(),
+        });
+        remove_folder(&root, &retired);
+        assert!(!deliver_pending(&root, &retired, HashSet::from(["stale".into()])));
+        assert!(rx.try_recv().is_err());
+        assert!(deliver_pending(&root, &generation, HashSet::from(["fresh".into()])));
+        assert_eq!(rx.try_recv().unwrap(), vec!["fresh".to_owned()]);
+        remove_folder(&root, &generation);
+        assert!(!folders().contains_key(&root));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
     fn abandoned_waiters_do_not_leave_an_unbounded_queue() {
         let root = test_repo("overflow");
         install_watch(&root);
         // Inject worker batches: native backends may coalesce real writes, so a
         // filesystem flood cannot deterministically exercise queue overflow.
+        let generation = folders().get(&root).unwrap().generation.clone();
         for i in 0..6000 {
-            assert!(deliver_pending(&root, HashSet::from([root.join(format!("file-{i}")).to_string_lossy().into_owned()])));
+            assert!(deliver_pending(&root, &generation, HashSet::from([root.join(format!("file-{i}")).to_string_lossy().into_owned()])));
         }
         let (pending, waiters) = {
             let all = folders();

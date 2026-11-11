@@ -11,6 +11,7 @@ import { v_flex, h_flex, InputState, Input, TextView } from "gpui-base";
 import { hc, exec, home, readTextFile, theme, props, closeOverlay } from "herdr";
 
 const I = (name) => `mods/workspace-chrome/${name}.svg`;
+const shellArg = (target) => /^[a-z0-9_@%+=:,./-]+$/i.test(target) ? target : "'" + target.replace(/'/g, "'\\''") + "'";
 
 // An Include's files, as ssh finds them: ~ is home, a relative path is
 // under ~/.ssh, and a pattern matches files (through sh; none where there's no sh).
@@ -24,7 +25,12 @@ async function includeFiles(value) {
       files.push(p);
       continue;
     }
-    const r = await exec("sh", ["-c", 'for f in $1; do [ -f "$f" ] && printf "%s\\n" "$f"; done', "sh", p]).catch(() => null);
+    // From a Windows program, Git's sh gets the pattern already expanded, one
+    // argument per file, unless a space made it quoted: then sh expands it, and
+    // takes a backslash as an escape. So read every argument, never split one
+    // at its spaces, and give sh slashes.
+    const glob = /^[a-z]:/i.test(p) ? p.replace(/\\/g, "/") : p;
+    const r = await exec("sh", ["-c", 'IFS=; for p in "$@"; do for f in $p; do [ -f "$f" ] && printf "%s\\n" "$f"; done; done', "sh", glob]).catch(() => null);
     files.push(...(r?.stdout ?? "").split("\n").filter(Boolean));
   }
   return files;
@@ -132,7 +138,7 @@ export default class MachineAdd extends View {
         await this.refresh();
         await this.checkMac(target);
       } else if (["hc_missing", "incompatible", "login_needed", "auth_failed", "host_key"].includes(why.kind) || /password|passphrase|host key|permission denied|login/i.test(why.message ?? "")) {
-        const quoted = /^[a-z0-9_@%+=:,./-]+$/i.test(target) ? target : "'" + target.replace(/'/g, "'\\''") + "'";
+        const quoted = shellArg(target);
         this.pending.add(target);
         this.state[target] = `Couldn't add ${target} here: it needs you to answer something (a password, a new host key, or installing herdr-core there). Run \`hc machine add ${quoted}\` in a terminal. \`hc machine --help\` shows the options.`;
       } else this.state[target] = why.message || "it didn't work";
@@ -211,7 +217,14 @@ export default class MachineAdd extends View {
 
   message(t, target) {
     const text = String(this.state[target]).replace(/&/g, "&amp;").replace(/</g, "&lt;").replace(/>/g, "&gt;");
-    return div().text_size(12).text_color(t.blocked).child(TextView.html(`ma-message-${target}`, `<span>${text}</span>`).selectable(true));
+    const command = `hc machine add ${shellArg(target)}`;
+    return v_flex().gap(5)
+      .child(div().text_size(12).text_color(t.blocked).child(TextView.html(`ma-message-${target}`, `<span>${text}</span>`).selectable(true)))
+      .when(this.pending.has(target), (el) => el.child(h_flex().child(div()
+        .id(`ma-copy-${target}`).px(10).py(4).rounded(6).bg(t.raised).text_color(t.foreground)
+        .text_size(12).cursor_pointer().hover(s => s.bg(t.hover))
+        .on_click((_e, cx) => { cx.write_to_clipboard(command); this.copiedCommand = command; cx.notify(); })
+        .child(this.copiedCommand === command ? "Copied" : "Copy"))));
   }
 
   row(t, target, label, sub) {
@@ -271,7 +284,7 @@ export default class MachineAdd extends View {
       .p(18)
       .bg(t.popover)
       .text_color(t.foreground)
-      .child(h_flex().items_center().child(div().flex_1().text_size(15).font_semibold().child("Add a machine")).child(div().text_size(11).text_color(t.dim).child("Esc")))
+      .child(h_flex().items_center().child(div().flex_1().text_size(15).font_semibold().child("Add a machine")).child(div().id("ma-esc").px(6).py(2).rounded(5).text_size(11).text_color(t.dim).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground)).on_click(() => this.close()).child("Esc")))
       .child(
         div()
           .pt(6)

@@ -1,7 +1,7 @@
 // App-owned settings mod. Writes changes immediately; no Save step.
 
 import { View, div, svg, image } from "gpui-kit";
-import { v_flex, h_flex, Scrollbar, InputState, Input } from "gpui-base";
+import { v_flex, h_flex, Scrollbar, InputState, Input, Popup } from "gpui-base";
 import { hc, run, theme, themes, fonts, updates, telemetry, settings, layouts, shared, appHome, readTextFile, writeTextFile, playSound, props, closeOverlay, window } from "herdr";
 
 const I = (name) => `frame/settings/${name}.svg`;
@@ -385,9 +385,9 @@ export default class Settings extends View {
   }
 
   // The font in use, written in itself; a click opens the list.
-  fontButton(t, which, family) {
+  fontButton(t, which, family, def) {
     const open = this.picking === which;
-    return div()
+    const trigger = div()
       .id(`st-f-${which}`)
       .w(220)
       .px(12)
@@ -407,6 +407,8 @@ export default class Settings extends View {
         cx.notify();
       })
       .child(div().font_family(family).text_size(13.5).text_color(t.foreground).child(family));
+    return Popup.new(`st-fp-${which}`, trigger)
+      .when(open, (el) => el.content(this.fontList(t, which, def)));
   }
 
   fontList(t, which, def) {
@@ -432,8 +434,13 @@ export default class Settings extends View {
         .on_click(onClick)
         .child(div().font_family(family).text_size(13.5).text_color(t.foreground).child(label));
     return v_flex()
-      .w_full()
-      .mb(8)
+      .id(`st-font-list-${which}`)
+      .w(360)
+      .on_mouse_down_out((_e, cx) => {
+        this.picking = null;
+        this.handle.focus();
+        cx.notify();
+      })
       .rounded(8)
       .border_1()
       .border_color(t.border)
@@ -476,12 +483,11 @@ export default class Settings extends View {
             h_flex()
               .gap(8)
               .items_center()
-              .child(this.fontButton(t, which, family))
+              .child(this.fontButton(t, which, family, def))
               // The panels' text follows zoom: they size their rows to it.
               .when(Boolean(sizeKey), (el) => el.child(this.stepper(t, `st-${sizeKey}`, `${Math.round(sizeNow)}`, (_e, cx) => size(sizeKey, sizeNow, -1, cx), (_e, cx) => size(sizeKey, sizeNow, 1, cx)))),
           ),
-        )
-        .when(this.picking === which, (el) => el.child(this.fontList(t, which, def)));
+        );
     return v_flex()
       .w_full()
       .child(this.heading(t, "Layout"))
@@ -639,6 +645,18 @@ export default class Settings extends View {
           .child(div().text_size(14).text_color(t.foreground).child(m.name))
           .child(div().text_size(12.5).text_color(t.dim).child(`${m.target ?? ""} · ${state} · ${m.version ? `hc ${m.version}` : "hc version unknown"}`)))
         .child(controls.flex_none()));
+    if (m.state === "needs_login") {
+      const command = `hc machine login ${m.name}`;
+      row.child(v_flex().gap(5)
+        .child(div().text_size(12.5).text_color(t.blocked).child("needs a login: run"))
+        .child(h_flex().gap(8).items_center()
+          .child(div().flex_1().min_w(0).text_size(12.5).text_color(t.foreground).child(command))
+          .child(this.button(t, `st-m-login-copy-${m.name}`, this.copiedLogin === command ? "Copied" : "Copy", (_e, cx) => {
+            cx.write_to_clipboard(command);
+            this.copiedLogin = command;
+            cx.notify();
+          }))));
+    }
     if (busy === "update") row.child(div().text_size(12.5).text_color(t.dim).child("Copying this computer's herdr-core. Its terminals keep running."));
     if (edit && !busy) {
       const cancel = this.button(t, `st-m-cancel-${m.name}`, "Cancel", (_e, cx) => { this.machineEdit = null; this.handle.focus(); cx.notify(); });
@@ -858,6 +876,12 @@ export default class Settings extends View {
     return h_flex()
       .id("settings")
       .track_focus(this.handle)
+      .when(Boolean(this.picking), (el) => el.on_action("overlay.close", (_e, cx) => {
+        this.picking = null;
+        this.handle.focus();
+        cx.stop_propagation();
+        cx.notify();
+      }))
       .w_full()
       .h(620)
       .min_h(0)

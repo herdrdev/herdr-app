@@ -118,17 +118,14 @@ export default class Worktree extends View {
     this.inputFocused = true;
     this.input.on("focus", (_e, cx) => { this.inputFocused = true; cx.notify(); });
     this.input.on("blur", (_e, cx) => { this.inputFocused = false; cx.notify(); });
-    if (props()?.action !== "remove") {
-      this.input.focus();
-      cx.timer.after(600, () => this.input.focus());
-    }
+    this.handle = cx.focus_handle();
+    this.handle.focus(); // the root is mounted from the first frame: keep the keyboard here while loading
+    if (props()?.action !== "remove") this.input.focus();
     this.busy = false;
     this.error = "";
     this.repo = undefined; // undefined: looking, null: not in git
     this.dirty = false;
     this.unpushed = [];
-    this.handle = cx.focus_handle();
-    if (props()?.action === "remove") this.handle.focus();
     cx.spawn(async (cx) => {
       try {
         if (this.on) {
@@ -148,6 +145,11 @@ export default class Worktree extends View {
         if (repo && this.opening) this.list = await checkouts(repo, this.on);
         this.repo = repo;
         cx.notify();
+        // The list (and with it the filter input) only mounts once loading is
+        // done, so the keyboard must move there now — a focus call made while
+        // loading lands on nothing and the dialog stays keyboard-dead.
+        this.handle.focus();
+        if (props().action !== "remove") cx.timer.after(100, () => this.input.focus());
         if (props().branch) await this.work(cx);
       } catch (error) { this.repo = null; this.error = String(error); cx.notify(); }
     });
@@ -189,7 +191,7 @@ export default class Worktree extends View {
     if (!r.ok) return r.err || "git worktree add failed.";
     const p = props();
     // Leave spaces unnamed so they follow the checkout folder and nest under the repo.
-    run("space.new", { folder: path, machine: this.on, tab: p.tab, argv: p.argv });
+    run("space.new", { folder: path, machine: this.on ?? "", tab: p.tab, argv: p.argv });
     return "";
   }
 
@@ -203,7 +205,7 @@ export default class Worktree extends View {
     this.close();
     const s = spaceOf(c.path, this.list, this.on, spaces(), panes());
     if (s) run("space.select", { id: s.id });
-    else run("space.new", { folder: c.path, machine: this.on });
+    else run("space.new", { folder: c.path, machine: this.on ?? "" });
   }
 
   async remove() {

@@ -42,10 +42,9 @@
 //!   authority: revoking a module refuses the next call through an already
 //!   imported name, and a plugin's frame decides whose module answers.
 //!
-//! The resolved name carries the registry's generation, because QuickJS caches
-//! a linked module by name for the lifetime of the runtime. Without the tag,
-//! two plugins importing `workspace` would share whichever was linked first —
-//! one plugin's grant serving another's script.
+//! Resolved names identify the export surface, not the copy's registry. The
+//! forwarding stubs can be shared; authority and implementations are still
+//! looked up through the calling policy on every invocation.
 //!
 //! # Why conversion lives in `FromJs`/`IntoJs`
 //!
@@ -86,9 +85,8 @@ const MAX_DEPTH: usize = 16;
 /// JSON prevents either conversion path becoming an allocation bypass.
 pub(super) const MAX_BRIDGE_ARRAY_ITEMS: usize = 10_000;
 
-/// Separates a module name from the registry generation it was resolved
-/// against. Distinct from the `?v=` an application's own files carry, so the
-/// two loaders never answer for each other's names.
+/// Separates the module name from its export-surface fingerprint. Distinct
+/// from the `?v=` on application files so the loaders cannot answer for each other.
 const GENERATION_TAG: &str = "?m=";
 
 pub(super) fn bridge_array_len(ctx: &Ctx<'_>, array: &Array<'_>) -> JsResult<usize> {
@@ -178,11 +176,10 @@ const ASYNC_API: &str = "a HostModule's async function";
 pub(super) struct HostModuleLoader;
 
 impl HostModuleLoader {
-    /// Splits a resolved name back into the module and the generation it was
-    /// resolved against.
-    fn untag(name: &str) -> Option<(&str, u64)> {
-        let (module, generation) = name.rsplit_once(GENERATION_TAG)?;
-        Some((module, generation.parse().ok()?))
+    /// Splits a resolved name back into the module and its export surface.
+    fn untag(name: &str) -> Option<(&str, &str)> {
+        let (module, surface) = name.rsplit_once(GENERATION_TAG)?;
+        (!surface.is_empty()).then_some((module, surface))
     }
 }
 
@@ -202,11 +199,10 @@ impl Resolver for HostModuleLoader {
         }
 
         let registry = host_modules::modules();
-        if registry.get(name).is_err() {
-            return Err(JsError::new_resolving(base, name));
-        }
-
-        Ok(format!("{name}{GENERATION_TAG}{}", registry.generation()))
+        let found = registry
+            .get(name)
+            .map_err(|_| JsError::new_resolving(base, name))?;
+        Ok(format!("{name}{GENERATION_TAG}{}", surface_key(found)))
     }
 }
 
@@ -224,10 +220,10 @@ impl Loader for HostModuleLoader {
         };
 
         let registry = host_modules::modules();
-        // Resolve and load are one import apart, so a mismatch means the host
-        // swapped its registry in between. Saying so beats declaring a module
-        // whose exports describe a set that is already gone.
-        if registry.generation() != generation {
+        let found = registry
+            .get(module)
+            .map_err(|error| Exception::throw_message(ctx, error.message()))?;
+        if surface_key(found) != generation {
             return Err(Exception::throw_message(
                 ctx,
                 &format!(
@@ -236,10 +232,6 @@ impl Loader for HostModuleLoader {
                 ),
             ));
         }
-
-        let found = registry
-            .get(module)
-            .map_err(|error| Exception::throw_message(ctx, error.message()))?;
 
         let mut source = String::new();
         for function in found.function_names() {
@@ -286,6 +278,33 @@ impl Loader for HostModuleLoader {
 
         Module::declare(ctx.clone(), name, source)
     }
+}
+
+fn surface_key(module: &host_modules::HostModule) -> String {
+    use sha2::{Digest, Sha256};
+    let mut hash = Sha256::new();
+    for name in module.function_names() {
+        hash.update([u8::from(module.is_async(name))]);
+        hash.update(name.as_bytes());
+        hash.update([0]);
+    }
+    for name in module.component_names() {
+        hash.update([2]);
+        hash.update(name.as_bytes());
+        hash.update([0]);
+    }
+    format!("{:x}", hash.finalize())
+}
+
+pub(super) fn link_key() -> String {
+    let registry = host_modules::modules();
+    registry
+        .module_names()
+        .into_iter()
+        .map(|name| {
+            format!("{name}:{};", surface_key(registry.get(name).expect("registered module")))
+        })
+        .collect()
 }
 
 fn is_identifier(name: &str) -> bool {
@@ -510,7 +529,7 @@ mod tests {
     fn a_resolved_name_round_trips_through_its_generation_tag() {
         assert_eq!(
             HostModuleLoader::untag(&format!("market{GENERATION_TAG}7")),
-            Some(("market", 7))
+            Some(("market", "7"))
         );
         assert_eq!(HostModuleLoader::untag("market"), None);
     }

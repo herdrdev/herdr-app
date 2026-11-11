@@ -9,13 +9,13 @@
 
 use std::path::{Path, PathBuf};
 use std::process::{Command, Stdio};
-use std::sync::OnceLock;
+use std::sync::Mutex;
 use std::time::Duration;
 
 #[cfg(any(target_os = "macos", all(test, unix)))]
 mod cli_link;
 
-static BIN: OnceLock<PathBuf> = OnceLock::new();
+static BIN: Mutex<Option<PathBuf>> = Mutex::new(None);
 
 #[cfg(target_os = "macos")]
 pub fn install_cli_link() {
@@ -31,7 +31,7 @@ pub fn install_cli_link() {
 
 /// The core the app runs (`hc` until one is found).
 pub fn path() -> PathBuf {
-    BIN.get().cloned().unwrap_or_else(|| PathBuf::from("hc"))
+    BIN.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone().unwrap_or_else(|| PathBuf::from("hc"))
 }
 
 /// Uses this core from now on, and puts its folder first on PATH so mods'
@@ -46,7 +46,7 @@ pub fn use_core(bin: PathBuf) {
             unsafe { std::env::set_var("PATH", joined) };
         }
     }
-    let _ = BIN.set(bin);
+    *BIN.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(bin);
 }
 
 /// Finder and Dock launches don't inherit the person's shell PATH.
@@ -239,7 +239,7 @@ fn bundle_completion_path(bin: &Path, home: &Path) -> bool {
 #[cfg(any(target_os = "macos", all(test, unix)))]
 fn bundle_completion_writable(bin: &Path) -> bool {
     bin.parent().is_some_and(|dir| {
-        Command::new("/bin/test").arg("-w").arg(dir).status().is_ok_and(|status| status.success())
+        Command::new("/bin/sh").args(["-c", "test -w \"$1\"", "sh"]).arg(dir).status().is_ok_and(|status| status.success())
     })
 }
 
@@ -300,6 +300,38 @@ mod tests {
         let dirs = usual_dirs(home);
         assert_eq!(&dirs[dirs.len() - 2..], &[dir.clone(), legacy]);
         assert_eq!(names(&dir)[0], dir.join("herdr-core"));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn setup_can_replace_an_unusable_core_before_reconnecting() {
+        const CHILD: &str = "HERDR_TEST_RESELECT_CORE";
+        if std::env::var_os(CHILD).is_none() {
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "core_bin::tests::setup_can_replace_an_unusable_core_before_reconnecting", "--nocapture"])
+                .env(CHILD, "1").output().unwrap();
+            assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("herdr-core-reselect-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let bad = root.join("bad-hc");
+        std::fs::write(&bad, "#!/bin/sh\nif [ \"$1\" = --version ]; then echo hc 0.1.18; exit; fi\nread hello\necho unusable >&2\nexit 1\n").unwrap();
+        std::fs::set_permissions(&bad, std::fs::Permissions::from_mode(0o755)).unwrap();
+        for replacement in ["chosen", "installed"] {
+            use_core(find(Some(bad.to_str().unwrap())).unwrap());
+            assert!(crate::hc::Core::connect().is_err());
+            let good = root.join(replacement);
+            let hello = serde_json::json!({"result": {"selected": replacement}});
+            std::fs::write(&good, format!("#!/bin/sh\nread hello\necho '{hello}'\n")).unwrap();
+            std::fs::set_permissions(&good, std::fs::Permissions::from_mode(0o755)).unwrap();
+            use_core(good.clone());
+            let core = crate::hc::Core::connect().unwrap_or_else(|e| panic!("{replacement}: {e:#}"));
+            assert_eq!(path(), good);
+            assert_eq!(core.hello["selected"], replacement);
+        }
+        std::fs::remove_dir_all(root).unwrap();
     }
 
     #[test]
