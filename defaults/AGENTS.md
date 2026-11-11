@@ -833,7 +833,9 @@ has 120 programs (agents, editors, runtimes, tools, databases, infra);
   Terminals' `picker`, `peek`, and `pane` (an
   example pane header, not used by the default layouts), and `worktree`
   (git worktrees as spaces: the space menu and the + menu offer New worktree
-  (four sources: New, Local, Remote, Open; the menu opens Remote; a branch
+  (four sources: New, Local, Remote, Open; the menu opens Remote; Remote runs
+  `git fetch --all --prune` before listing remote-tracking branches and shows
+  the error if that fails; a branch
   already checked out opens its space) and Remove worktree. Props are
   `{space, folder?, action: "new" | "local" | "remote" | "open" | "remove"}`
   (the repo: folder, else where the space's first terminal is), or

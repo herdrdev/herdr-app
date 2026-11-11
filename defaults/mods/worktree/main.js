@@ -154,7 +154,7 @@ export default class Worktree extends View {
           this.dirty = (await git(repo.top, ["--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain"], this.on)).out !== "";
           this.unpushed = (await submodules(repo.top, this.on)).unpushed;
         }
-        if (repo && props().action !== "remove") await this.loadLists(repo);
+        if (repo && props().action !== "remove") await this.loadLists(repo, cx);
         this.repo = repo;
         cx.notify();
         // The list (and with it the filter input) only mounts once loading is
@@ -234,12 +234,30 @@ export default class Worktree extends View {
     });
   }
 
-  async loadLists(repo = this.repo) {
+  async loadLists(repo = this.repo, cx) {
     const format = ["for-each-ref", "--format=%(refname:short)%09%(committerdate:unix)"];
     this.list = await checkouts(repo, this.on);
     const heads = await git(repo.main, [...format, "refs/heads"], this.on);
-    const remotes = await git(repo.main, [...format, "refs/remotes"], this.on);
     this.branches = this.branchesFrom(heads.ok ? heads.out : "");
+    await this.refreshRemotes(repo, format, cx);
+  }
+
+  // refs/remotes is only the last fetch, so a branch created on the server
+  // since then is missing. Ask every remote first. A failed fetch stays on
+  // the Remote page; the list is whatever that fetch left behind.
+  async refreshRemotes(repo, format, cx) {
+    this.fetchError = "";
+    this.loading = "Fetching remote branches…";
+    cx?.notify();
+    let fetched;
+    try {
+      fetched = await git(repo.main, ["fetch", "--all", "--prune", "--no-tags", "--no-recurse-submodules"], this.on, 120_000);
+    } catch (error) {
+      this.fetchError = error?.message || String(error);
+    }
+    if (fetched && !fetched.ok) this.fetchError = fetched.err || "git fetch failed.";
+    this.loading = "";
+    const remotes = await git(repo.main, [...format, "refs/remotes"], this.on);
     this.remotes = this.remotesFrom(remotes.ok ? remotes.out : "");
   }
 
@@ -456,7 +474,7 @@ export default class Worktree extends View {
     const r = this.repo;
     const home = r ? `${tilde(ROOT(this.userHome), this.userHome)}/${r.name}/` : "";
     const detail = r === undefined
-      ? "\u2026"
+      ? (this.loading || "\u2026")
       : r === null
         ? `${this.folder ? tilde(this.folder, this.userHome ?? "") : "This folder"} is not in a git repository.`
         : this.source === "new"
@@ -501,6 +519,7 @@ export default class Worktree extends View {
           .child(Scrollbar.vertical("wt-list").absolute().inset_0()),
       ))
       .when(Boolean(this.error), (el) => el.child(div().text_color(t.blocked).child(this.error)))
+      .when(this.source === "remote" && Boolean(this.fetchError), (el) => el.child(div().text_color(t.blocked).child(this.fetchError)))
       .when(this.source === "new", (el) => el.child(div().flex_1()))
       .child(h_flex().justify_end().text_size(11).text_color(t.dim).gap(6).when(this.busy, (el) => el.child(div().frames(["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"], 90))).child(this.busy ? "working\u2026" : hint));
   }

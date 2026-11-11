@@ -308,16 +308,58 @@ test("menus and the guide expose one worktree dialog", async () => {
 });
 
 test("loadLists drops origin/HEAD and keeps nested remote names", async () => {
-  const { worktree } = harness(null, async (_c, args) => {
+  const { worktree, executions } = harness(null, async (_c, args) => {
     const ref = args.at(-1);
     if (ref === "refs/remotes") return { code: 0, stdout: "origin/HEAD\t1\norigin/feature/foo\t2\n", stderr: "" };
     if (ref === "refs/heads") return { code: 0, stdout: "feature/foo\t3\n", stderr: "" };
     return { code: 0, stdout: "", stderr: "" };
   });
-  Object.assign(worktree, { repo: { name: "repo", main: "/repo", top: "/repo" } });
-  await worktree.loadLists();
+  const notes: string[] = [];
+  Object.assign(worktree, { on: "server", repo: { name: "repo", main: "/repo", top: "/repo" } });
+  await worktree.loadLists(worktree.repo, { notify() { notes.push(worktree.loading); } });
+  const fetchAt = executions.findIndex((e) => e.args[0] === "fetch");
+  const remotesAt = executions.findIndex((e) => e.args.at(-1) === "refs/remotes");
+  expect(fetchAt).toBeGreaterThanOrEqual(0);
+  expect(fetchAt).toBeLessThan(remotesAt);
+  expect(executions[fetchAt]).toMatchObject({
+    command: "git",
+    args: ["fetch", "--all", "--prune", "--no-tags", "--no-recurse-submodules"],
+    cwd: "/repo",
+    on: "server",
+    timeout: 120000,
+  });
+  expect(notes).toContain("Fetching remote branches…");
+  expect(worktree.loading).toBe("");
+  expect(worktree.fetchError).toBe("");
   expect(worktree.remotes).toEqual([{ remote: "origin", name: "feature/foo", at: 2 }]);
   expect(worktree.branches).toEqual([{ name: "feature/foo", at: 3 }]);
+});
+
+test("a failed fetch stays visible and the remote-tracking refs are still listed", async () => {
+  const { worktree } = harness(null, async (_c, args) => {
+    if (args[0] === "fetch") return { code: 128, stdout: "", stderr: "could not resolve host" };
+    if (args.at(-1) === "refs/remotes") return { code: 0, stdout: "origin/old\t4\n", stderr: "" };
+    return { code: 0, stdout: "", stderr: "" };
+  });
+  Object.assign(worktree, { repo: { name: "repo", main: "/repo", top: "/repo" }, source: "remote", userHome: "/home/user" });
+  await worktree.loadLists();
+  expect(worktree.fetchError).toBe("could not resolve host");
+  expect(worktree.remotes).toEqual([{ remote: "origin", name: "old", at: 4 }]);
+  expect(textOf(worktree.render({}).node)).toContain("could not resolve host");
+  worktree.selectSource("local");
+  expect(textOf(worktree.render({}).node)).not.toContain("could not resolve host");
+});
+
+test("a fetch that cannot start does not discard the dialog's remote list", async () => {
+  const { worktree } = harness(null, async (_c, args) => {
+    if (args[0] === "fetch") throw new Error("timed out");
+    if (args.at(-1) === "refs/remotes") return { code: 0, stdout: "origin/old\t4\n", stderr: "" };
+    return { code: 0, stdout: "", stderr: "" };
+  });
+  Object.assign(worktree, { repo: { name: "repo", main: "/repo", top: "/repo" } });
+  await worktree.loadLists();
+  expect(worktree.fetchError).toBe("timed out");
+  expect(worktree.remotes).toEqual([{ remote: "origin", name: "old", at: 4 }]);
 });
 
 // Enter is delivered twice: the field submits, and the key bubbles to the dialog.

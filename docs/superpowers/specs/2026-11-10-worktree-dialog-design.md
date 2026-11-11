@@ -44,7 +44,7 @@
 
 **Local.** 列出 `refs/heads`. 该分支已经在某个 worktree 里 (含主 checkout): 打开那个 space, 没有 space 就在那个目录上新建. 否则 `git worktree add <path> <branch>`.
 
-**Remote.** 列出 `refs/remotes`, 不包含 `HEAD`. 行上写 `origin/feature/name` 这种全名. 本地分支名是远程名之后的部分 (`feature/name`). 同名本地分支已存在: 跟 Local 一样, 检出它或打开它的 space, 不改它指向哪一个远程. 同名本地分支不存在: `git worktree add --track -b <short> <path> <remote>/<short>`.
+**Remote.** 先在主 checkout 上执行 `git fetch --all --prune --no-tags --no-recurse-submodules` (最多两分钟), 再列出 `refs/remotes`, 不包含 `HEAD`. fetch 失败时错误留在 Remote 页, 列表是这次 fetch 留下的远程跟踪分支. 行上写 `origin/feature/name` 这种全名. 本地分支名是远程名之后的部分 (`feature/name`). 同名本地分支已存在: 跟 Local 一样, 检出它或打开它的 space, 不改它指向哪一个远程. 同名本地分支不存在: `git worktree add --track -b <short> <path> <remote>/<short>`.
 
 **Open.** 就是现在的 checkout 列表: 过滤, 已有 space 标 open, 回车或点击打开; 没有 space 则在该目录上新建.
 
