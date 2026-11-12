@@ -2225,6 +2225,10 @@ impl Render for TerminalView {
             }))
             .on_key_down(cx.listener(Self::key_down))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| this.dropped(paths.paths().to_vec(), cx)))
+            .on_drop(cx.listener(|this, text: &ExternalText, _, _| {
+                let bytes = this.grid.borrow().vt.paste_bytes(text.text());
+                this.send(&bytes);
+            }))
             .on_scroll_wheel(cx.listener(Self::scroll))
             .when(self.link.is_some(), |d| d.cursor_pointer())
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
@@ -2589,6 +2593,37 @@ mod tests {
             assert_ne!(terminal.title, "outdated replay");
             assert!(tx.is_closed(), "the wrong-sized replay must not be consumed");
         });
+    }
+
+    #[gpui::test]
+    fn dropped_text_reaches_text_drop_listeners(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+        use std::{cell::RefCell, rc::Rc};
+
+        struct Target(Rc<RefCell<Vec<String>>>);
+        impl Render for Target {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let dropped = self.0.clone();
+                div().size_full().on_drop(move |text: &ExternalText, _, _| dropped.borrow_mut().push(text.text().into()))
+            }
+        }
+        let dropped = Rc::new(RefCell::new(Vec::new()));
+        let window = cx.add_window({
+            let dropped = dropped.clone();
+            move |_, _| Target(dropped)
+        });
+        cx.update_window(window.into(), |_, window, cx| {
+                let position = point(px(20.), px(20.));
+                window.draw(cx).clear(cx);
+                window.dispatch_event(
+                    FileDropEvent::TextEntered { position, text: ExternalText("https://herdr.dev/".into()) }.to_platform_input(),
+                    cx,
+                );
+                window.draw(cx).clear(cx);
+                window.dispatch_event(FileDropEvent::Submit { position }.to_platform_input(), cx);
+            })
+            .unwrap();
+        assert_eq!(*dropped.borrow(), vec!["https://herdr.dev/".to_string()]);
     }
 
     #[gpui::test]
