@@ -3529,7 +3529,10 @@ impl AppWindow {
     /// `pane.go`: the nearest pane or focusable mod.
     fn go(&mut self, dir: &str, window: &mut Window, cx: &mut Context<Self>) {
         let Some(from) = self.focused_block.clone().or_else(|| self.model.focused_pane()) else { return };
-        let Some(to) = self.neighbor(&from, dir, true) else { return };
+        let to = self.model.active_tab().filter(|tab| tab.zoomed.as_deref() == Some(from.as_str()))
+            .and_then(|tab| self.unzoomed_neighbor(tab, &from, dir))
+            .or_else(|| self.neighbor(&from, dir, true));
+        let Some(to) = to else { return };
         if self.focusable(&to) {
             return self.focus_block(&to, window, cx);
         }
@@ -6156,6 +6159,63 @@ export default class Probe extends View {
     }
 
     include!("window/pane_size_tests.rs");
+
+    #[test]
+    fn directional_navigation_moves_zoom_and_keyboard_focus() {
+        in_own_process("zoomed_navigation");
+    }
+
+    #[gpui::test]
+    fn zoomed_navigation(cx: &mut gpui::TestAppContext) {
+        use crate::model::pane;
+        use serde_json::json;
+        if !running_alone("zoomed_navigation") { return; }
+        let (view, cx) = open_window(cx, "unused", "", json!({
+            "id": "context", "type": "block", "content": { "tab": "active" }
+        }));
+        let mut tab = super::Tab::new("tab", "", "a", "term-a");
+        tab.root.split("a", super::Axis::Row, pane("b", "term-b"), "row".into());
+        tab.root.split("b", super::Axis::Column, pane("c", "term-c"), "column".into());
+        tab.focus("c");
+        tab.zoomed = Some("c".into());
+        view.update_in(cx, |this, window, cx| {
+            this.model.add_space("space", "test", "/", tab);
+            this.sync(window, cx);
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        view.update(cx, |this, _| {
+            assert!(!this.bounds.borrow().contains_key("a"), "start without cached split bounds");
+            assert!(!this.bounds.borrow().contains_key("b"));
+        });
+        for (direction, expected) in [("up", "b"), ("down", "c"), ("left", "a"), ("right", "c"), ("right", "c")] {
+            view.update_in(cx, |this, window, cx| this.run("pane.go", json!({"direction": direction}), window, cx));
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            view.update_in(cx, |this, window, _| {
+                let tab = this.model.active_tab().unwrap();
+                assert_eq!(tab.zoomed.as_deref(), Some(expected), "{direction}");
+                assert_eq!(tab.focused.as_deref(), Some(expected));
+                assert_eq!(tab.shown().id, expected);
+                assert!(this.terms[expected].focus.is_focused(window));
+            });
+        }
+        cx.simulate_keystrokes("alt-h");
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        view.update_in(cx, |this, window, cx| {
+            assert_eq!(this.model.active_tab().unwrap().zoomed.as_deref(), Some("a"));
+            assert!(this.terms["a"].focus.is_focused(window));
+            this.run("pane.zoom", json!({}), window, cx);
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.simulate_keystrokes("alt-l");
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        view.update_in(cx, |this, window, _| {
+            let tab = this.model.active_tab().unwrap();
+            assert_eq!(tab.zoomed, None);
+            assert_eq!(tab.focused.as_deref(), Some("c"));
+            assert!(this.terms["c"].focus.is_focused(window));
+        });
+    }
+
     include!("window/drag_tests.rs");
 
     /// The whole path, in a real window: a layout names the toast mod, a
