@@ -185,7 +185,7 @@ fn main() {
                 }
                 mods::finish_shared();
                 telemetry::quit();
-                update::apply();
+                let _ = update::apply();
                 async {}
             })
             .detach();

@@ -3482,8 +3482,13 @@ impl AppWindow {
             }
             "app.quit" => cx.quit(),
             "app.update" => {
-                if !crate::update::apply() {
-                    return self.fail("no update is ready yet");
+                match crate::update::apply() {
+                    Ok(true) => {}
+                    Ok(false) => return self.fail("no update is ready yet"),
+                    Err(error) => {
+                        let reason = format!("Couldn't replace Herdr's files: {error}.");
+                        return self.fail(if cfg!(windows) { format!("Close Herdr's terminals (or restart Windows) and try again. {reason}") } else { reason });
+                    }
                 }
                 self.drain_documents(window, cx);
                 crate::update::relaunch();

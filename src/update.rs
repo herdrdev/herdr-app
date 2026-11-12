@@ -472,44 +472,44 @@ pub fn apply_on_startup() -> bool {
     let Some(root) = checks_app() else { return false };
     let staged = staged_version(&root);
     let Some(version) = startup_target(env!("CARGO_PKG_VERSION"), staged.as_deref(), expected.as_deref()) else { return false };
-    if !swap(&root) {
+    if swap(&root).is_err() {
         return false;
     }
     relaunch_expected(Some(version))
 }
 
 /// Puts the downloaded version in place of this one. The running app keeps
-/// its files open, so it can go on until it quits. True if it swapped.
+/// its files open, so it can go on until it quits. Ok(false) means nothing is ready.
 /// Windows lets a running program's folder be renamed, not deleted: the old
 /// one goes on the next start (`after_update`).
-pub fn apply() -> bool {
-    let Some(root) = root() else { return false };
+pub fn apply() -> std::io::Result<bool> {
+    let Some(root) = root() else { return Ok(false) };
     let staged = staged_version(&root);
     if ready().as_deref() != staged.as_deref() || !staged.as_deref().is_some_and(|version| newer(version, env!("CARGO_PKG_VERSION"))) {
-        return false;
+        return Ok(false);
     }
-    swap(&root)
+    swap(&root).map(|()| true)
 }
 
-fn swap(root: &Path) -> bool {
+fn swap(root: &Path) -> std::io::Result<()> {
     let staged = beside(root, ".new");
     let old = beside(root, ".old");
     let _ = std::fs::remove_dir_all(&old);
     if let Err(e) = std::fs::rename(root, &old) {
         tracing::warn!("update: cannot move {} aside: {e}", root.display());
-        return false;
+        return Err(e);
     }
     if let Err(e) = std::fs::rename(&staged, root) {
         tracing::warn!("update: cannot put the new version in place: {e}");
         if let Err(rollback) = std::fs::rename(&old, root) {
             tracing::error!("update: cannot restore the previous version: {rollback}");
         }
-        return false;
+        return Err(e);
     }
     let _ = std::fs::remove_file(beside(root, ".new.json"));
     *READY.lock().unwrap() = None;
     let _ = std::fs::write(marker(), "");
-    true
+    Ok(())
 }
 
 /// Opens the app again once this process has exited (after `apply`).
@@ -749,6 +749,41 @@ mod tests {
         std::fs::write(&receipt, r#"{"version":"0.1.8"}"#).unwrap();
         assert_eq!(staged_version(&root), None);
         assert!(!staged.exists());
+        std::fs::remove_dir_all(work).unwrap();
+    }
+
+    #[test]
+    fn failed_swap_keeps_the_download_and_reports_the_os_error() {
+        let work = std::env::temp_dir().join(format!("herdr-update-blocked-{}", std::process::id()));
+        let root = work.join(PACKED);
+        let staged = beside(&root, ".new");
+        let receipt = beside(&root, ".new.json");
+        let old = beside(&root, ".old");
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::create_dir_all(&staged).unwrap();
+        std::fs::write(&receipt, r#"{"version":"9.9.9"}"#).unwrap();
+        // A file at the backup path blocks renaming the installed folder.
+        std::fs::write(&old, "blocker").unwrap();
+        let error = swap(&root).unwrap_err();
+        assert!(error.raw_os_error().is_some(), "{error}");
+        assert!(root.is_dir());
+        assert!(staged.is_dir());
+        assert!(receipt.is_file());
+        assert_eq!(std::fs::read_to_string(&old).unwrap(), "blocker");
+        std::fs::remove_dir_all(work).unwrap();
+    }
+
+    #[test]
+    fn failed_install_restores_the_previous_version() {
+        let work = std::env::temp_dir().join(format!("herdr-update-rollback-{}", std::process::id()));
+        let root = work.join(PACKED);
+        std::fs::create_dir_all(&root).unwrap();
+        std::fs::write(root.join("previous"), "keep me").unwrap();
+        // The missing stage fails only after the installed folder was moved.
+        let error = swap(&root).unwrap_err();
+        assert_eq!(error.kind(), std::io::ErrorKind::NotFound);
+        assert_eq!(std::fs::read_to_string(root.join("previous")).unwrap(), "keep me");
+        assert!(!beside(&root, ".old").exists());
         std::fs::remove_dir_all(work).unwrap();
     }
 
