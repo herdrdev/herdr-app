@@ -248,6 +248,7 @@ mod native_views {
     /// How long the desktop may take to draw the picture.
     const CAPTURE_TIMEOUT: Duration = Duration::from_secs(5);
 
+    /// Herdr's top-level window handle, as a number the shot thread can take.
     pub fn host(window: &gpui::Window) -> Option<usize> {
         match HasWindowHandle::window_handle(window).ok()?.as_raw() {
             RawWindowHandle::Win32(handle) => Some(handle.hwnd.get() as usize),
