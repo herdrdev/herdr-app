@@ -1133,3 +1133,20 @@ fn status_bar_shows_the_real_palette_key(cx: &mut TestAppContext) {
     assert!(tree.contains("commands"), "unbound hint still offers commands: {tree}");
     assert!(!tree.contains("Shift P"), "unbound hint must not invent a key: {tree}");
 }
+
+/// Claude Code goes idle when its turn ends while its background agents keep
+/// working: they arrive as child 7501 records, and the row shows them.
+#[gpui::test]
+fn an_idle_agent_with_working_background_records_shows_working(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let spinners = |cx: &mut TestAppContext, records: Value| {
+        let mut values = fixture(true, props(), updates("current", "current"));
+        values.get_mut("agents").unwrap()[1]["status"] = json!("idle");
+        values.get_mut("terminals").unwrap()[1]["status"] = json!("idle");
+        values.get_mut("terminals").unwrap()[1]["records"] = records;
+        describe_with_values(cx, &staged, "mods/agents", values, None).unwrap().matches("spinner.svg").count()
+    };
+    assert_eq!(spinners(cx, json!({"a1": {"state": "done"}})), 1, "finished background work leaves it idle");
+    assert_eq!(spinners(cx, json!({"a1": {"state": "working", "title": "Build"}})), 2);
+}
