@@ -716,6 +716,22 @@ fn rebuilt_machine_offers_connect_only_for_identity_mismatch(cx: &mut TestAppCon
 }
 
 #[gpui::test]
+fn machine_logout_warning_tracks_current_remote_state(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for state in ["false", "true", "null", "undefined"] {
+        let setup = format!("this.hosts = []; this.added = [{{name:'cloud', target:'host', keeps_running_after_logout:{state}, logout_linger_user:'-alice'}}];");
+        let tree = describe(cx, &staged, "mods/machine-add", false, props(), updates("current", "current"), Some(&setup)).unwrap();
+        assert_eq!(tree.contains("Agents on cloud stop when you disconnect"), state == "false", "{tree}");
+        assert_eq!(tree.contains("ma-logout-copy-cloud"), state == "false", "{tree}");
+        if state == "false" { assert!(tree.contains("sudo loginctl enable-linger -- -alice"), "{tree}"); }
+        let setup = format!("this.machines = [{{name:'cloud', target:'host', state:'connected', keeps_running_after_logout:{state}}}];");
+        let tree = describe(cx, &staged, "mods/spaces", false, props(), updates("current", "current"), Some(&setup)).unwrap();
+        assert_eq!(tree.contains("machine-logout-cloud"), state == "false", "{tree}");
+    }
+}
+
+#[gpui::test]
 fn machine_picker_keeps_long_lists_scrollable(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();

@@ -656,6 +656,9 @@ export default class Settings extends View {
         .child(v_flex().flex_1().min_w(0).gap(3)
           .child(div().text_size(14).text_color(t.foreground).child(m.name))
           .child(div().text_size(12.5).text_color(t.dim).child(`${m.target ?? ""} · ${state} · ${m.version ? `hc ${m.version}` : "hc version unknown"}`)))
+        .when(m.keeps_running_after_logout === false, el => el.child(div().id(`st-m-logout-${m.name}`)
+          .text_color(t.blocked).cursor_pointer().tooltip("Agents stop when you disconnect. Click for the fix.")
+          .on_click(() => run("mod.open", { name: "machine-add" })).child("⚠")))
         .child(controls.flex_none()));
     if (m.state === "needs_login") {
       const command = `hc machine login ${m.name}`;

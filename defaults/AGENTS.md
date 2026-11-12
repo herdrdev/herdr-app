@@ -635,7 +635,12 @@ The main ones:
   Add machine lists all named ssh-config hosts in a scrollable list. Machines
   that need a password, a new host key or herdr-core installed show what to run
   in your own terminal; the picker updates once it is added. Other machines are
-  added quietly. Login guidance includes Copy. A machine that needs a login shows
+  added quietly. If a Linux server reports that programs stop at logout, its
+  added card warns that agents stop when you disconnect and offers the administrator's
+  `sudo loginctl enable-linger -- <user>` command with Copy. A warning mark in
+  Settings > Machines and the sidebar opens that card; it clears automatically
+  after the administrator enables lingering. Older cores show no warning.
+  Login guidance includes Copy. A machine that needs a login shows
   `hc machine login <name>` with Copy in Settings > Machines, its sidebar group,
   the welcome screen and the failed New space toast. If a remote machine was rebuilt
   or replaced and a different core answers there, its sidebar offers Connect:
