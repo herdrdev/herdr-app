@@ -1446,6 +1446,10 @@ impl AppWindow {
                 TerminalEvent::ContextMenu(at) => {
                     this.open_menu("pane", json!({ "pane": block.trim_end_matches(SWAP), "terminal": addr }), Some(*at), window, cx)
                 }
+                TerminalEvent::Notice { title, body } => {
+                    let spec = json!({"kind":"toast", "notification":{"title":title, "body":body, "level":"error"}});
+                    this.open_overlay(mods::new_overlay_id(), spec, window, cx)
+                }
             });
             let focus = view.read(cx).focus_handle().clone();
             self.terms.insert(id, Term { view, address, focus, _sub: sub });
