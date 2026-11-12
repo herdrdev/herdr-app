@@ -657,6 +657,13 @@ fn reader(reads: Rc<RefCell<LiveReads>>, key: &'static str, f: fn(&Snapshot) -> 
     move |_| Ok(read(&reads, key, f))
 }
 
+/// The published `panes` and how many times they changed.
+#[cfg(test)]
+pub fn published_panes() -> (u64, Value) {
+    let revision = REVISIONS.with_borrow(|r| r.get("panes").copied().unwrap_or(0));
+    (revision, SNAPSHOT.with(|s| s.borrow().panes.clone()))
+}
+
 /// Reads in callbacks and child views count too: keep their dependencies until the copy unloads.
 pub fn snapshot_changed(copy: u64) -> bool {
     LIVE_READS.with_borrow(|copies| {

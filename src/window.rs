@@ -428,6 +428,8 @@ pub struct AppWindow {
     /// Closed terminals stay excluded until kill completes and a listing drops them.
     closing_terminals: HashMap<String, bool>,
     pending_terminals: std::collections::BTreeMap<String, PendingTerminalChange>,
+    /// A title changed since the last publish (see `publish_soon`).
+    publish_due: bool,
     /// Each machine owns a document; the empty key is this core.
     documents: std::collections::BTreeMap<String, crate::mirror_sync::Slot>,
     initial_view: Option<crate::mirror::View>,
@@ -526,6 +528,7 @@ impl AppWindow {
             changing_terminals: HashSet::new(),
             closing_terminals: HashMap::new(),
             pending_terminals: Default::default(),
+            publish_due: false,
             documents: {
                 let mut local = crate::mirror_sync::Slot::default();
                 local.connection(true, None, None);
@@ -1441,7 +1444,7 @@ impl AppWindow {
             let (block, addr) = (id.clone(), address.clone());
             let sub = cx.subscribe_in(&view, window, move |this, _, ev: &TerminalEvent, window, cx| match ev {
                 TerminalEvent::Peek(address) => this.peek_terminal(address, window, cx),
-                TerminalEvent::TitleChanged => this.publish(cx),
+                TerminalEvent::TitleChanged => this.publish_soon(cx),
                 TerminalEvent::Ended => this.terminal_ended(&block, window, cx),
                 TerminalEvent::ContextMenu(at) => {
                     this.open_menu("pane", json!({ "pane": block.trim_end_matches(SWAP), "terminal": addr }), Some(*at), window, cx)
@@ -1721,8 +1724,26 @@ impl AppWindow {
         program_of(rec.and_then(|r| r.get("report")).unwrap_or(&Value::Null), rec.and_then(running_argv))
     }
 
+    /// Publishes within 100 ms, once for every call until then: an agent's
+    /// title can tick many times a second, and each publish re-renders mods.
+    fn publish_soon(&mut self, cx: &mut Context<Self>) {
+        if std::mem::replace(&mut self.publish_due, true) {
+            return;
+        }
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_millis(100)).await;
+            let _ = this.update(cx, |this, cx| {
+                if this.publish_due {
+                    this.publish(cx);
+                }
+            });
+        })
+        .detach();
+    }
+
     /// Tells mods what changed (they re-render only if something did).
     fn publish(&mut self, cx: &mut Context<Self>) {
+        self.publish_due = false;
         let m = &self.model;
         let home = home();
         let spaces: Vec<Value> = m
@@ -1754,20 +1775,21 @@ impl AppWindow {
                     }
                     let Some(addr) = p.terminal() else { continue };
                     let a = m.agents.get(addr);
+                    let program = self.program(addr);
                     let title = self.terms.get(&p.id).map(|t| t.view.read(cx).title.clone()).or_else(|| {
                         self.live.get(addr).and_then(|r| r.get("title")).and_then(Value::as_str).map(str::to_owned)
                     });
                     panes.push(json!({
                         "pane": p.id, "terminal": addr, "tab": ctx.id, "title": title.clone().unwrap_or_default(),
                         "cwd": self.cwds.get(addr), "branch": m.folder_info.get(addr).and_then(|f| f.branch.clone()),
-                        "status": m.status(addr), "app": a.and_then(|a| a.app.clone()), "program": self.program(addr),
+                        "status": m.status(addr), "app": a.and_then(|a| a.app.clone()), "program": program.clone(),
                         "focused": focused, "zoomed": zoomed, "movable": self.pane_movable(&p.id),
                     }));
                     let Some(status) = m.status(addr) else { continue };
                     agents.push(json!({
                         "address": addr, "pane": p.id, "space": pr.id, "space_name": m.space_name(pr, &home),
                         "tab": ctx.id, "tab_index": ci + 1, "tab_name": Model::tab_name(pr, ctx),
-                        "status": status, "app": a.and_then(|a| a.app.clone()), "program": self.program(addr), "title": title.unwrap_or_default(),
+                        "status": status, "app": a.and_then(|a| a.app.clone()), "program": program, "title": title.unwrap_or_default(),
                         "seq": a.map(|a| a.seq).unwrap_or(0),
                         "pinned": self.live.get(addr).and_then(|r| r.pointer("/labels/herdr.pinned")).and_then(Value::as_str).is_some_and(|v| !v.is_empty()),
                         "focused": m.active.as_deref() == Some(pr.id.as_str()) && focused_pane.as_deref() == Some(p.id.as_str()),
@@ -5866,6 +5888,42 @@ mod tests {
             this.run("tab.rename", json!({}), window, cx);
             assert_eq!(prompts(this), 1, "and a third opens it again");
         }));
+    }
+
+    #[test]
+    fn title_changes_publish_once() {
+        in_own_process("titles_publish_once");
+    }
+
+    /// Several title changes before the timer: one publish, with the last title.
+    #[gpui::test]
+    fn titles_publish_once(cx: &mut gpui::TestAppContext) {
+        if !running_alone("titles_publish_once") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "unused", "", serde_json::json!({
+            "id": "main", "type": "block", "content": { "tab": "active" }
+        }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.model.add_space("sp1", "", "/tmp", crate::model::Tab::new("tb1", "", "p1", "t1"));
+            this.sync(window, cx);
+        }));
+        cx.run_until_parked();
+        let (before, _) = crate::mods::published_panes();
+        let term = cx.update(|_, cx| view.read(cx).terms["p1"].view.clone());
+        for title in ["task 1.1s", "task 1.2s", "task 1.3s"] {
+            cx.update(|_, cx| term.update(cx, |t, cx| {
+                t.title = title.into();
+                cx.emit(super::TerminalEvent::TitleChanged);
+            }));
+        }
+        cx.run_until_parked();
+        assert_eq!(crate::mods::published_panes().0, before, "nothing before the timer");
+        cx.executor().advance_clock(std::time::Duration::from_millis(100));
+        cx.run_until_parked();
+        let (after, panes) = crate::mods::published_panes();
+        assert_eq!(after, before + 1, "one publish");
+        assert_eq!(panes[0]["title"], "task 1.3s");
     }
 
     #[test]
