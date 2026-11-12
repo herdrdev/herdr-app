@@ -45,6 +45,8 @@ enum LinkTarget {
 pub enum TerminalEvent {
     Peek(String),
     TitleChanged,
+    /// The program reported its folder (OSC 7 and its kin), or cleared it (None).
+    FolderReported(Option<crate::folder_report::Report>),
     /// The program ended.
     Ended,
     /// Right-click where the program doesn't take the mouse: the pane menu.
@@ -471,7 +473,7 @@ impl TerminalView {
     /// Feeds relayed bytes in; returns false once the stream is over.
     fn ingest(&mut self, batch: Vec<Stream>, cx: &mut Context<Self>) -> bool {
         let mut open = true;
-        let title = {
+        let (title, pwd) = {
             let mut g = self.grid.borrow_mut();
             for item in batch {
                 match item {
@@ -508,11 +510,14 @@ impl TerminalView {
                     }
                 }
             }
-            g.vt.take_title()
+            (g.vt.take_title(), g.vt.take_pwd())
         };
         if let Some(title) = title {
             let title = if title.is_empty() { self.address.clone() } else { title };
             self.set_title(&title, cx);
+        }
+        if let Some(raw) = pwd {
+            cx.emit(TerminalEvent::FolderReported(crate::folder_report::parse(&raw)));
         }
         if !open {
             cx.emit(TerminalEvent::Ended);

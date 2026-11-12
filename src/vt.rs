@@ -145,6 +145,8 @@ struct Shared {
     size: GhosttySizeReportSize,
     held_since: Option<Instant>,
     title_changed: bool,
+    /// A folder report (OSC 7 and its kin) arrived since the last `take_pwd`.
+    pwd_changed: bool,
     /// Replies the terminal writes back to the program (e.g. kitty graphics acks).
     replies: Vec<u8>,
     clipboard_write: bool,
@@ -641,6 +643,11 @@ unsafe extern "C" fn on_title(_t: GhosttyTerminal, userdata: *mut c_void) {
     shared.title_changed = true;
 }
 
+unsafe extern "C" fn on_pwd(_t: GhosttyTerminal, userdata: *mut c_void) {
+    let shared = unsafe { &mut *(userdata as *mut Shared) };
+    shared.pwd_changed = true;
+}
+
 const SYNC_OUTPUT: GhosttyMode = 2026;
 /// On from the start, as in Ghostty: VS16 makes ✍️ two cells wide and in color.
 const GRAPHEME_CLUSTER: GhosttyMode = 2027;
@@ -675,13 +682,15 @@ impl Vt {
             ok(ghostty_mouse_event_new(std::ptr::null(), &mut mouse_event), "mouse_event_new");
 
             install_png_decoder();
-            let mut shared = Box::new(Shared { state, size: GhosttySizeReportSize { rows: rows.max(1), columns: cols.max(1), cell_width: 0, cell_height: 0 }, held_since: None, title_changed: false, replies: Vec::new(), clipboard_write: true, clipboard: [None, None] });
+            let mut shared = Box::new(Shared { state, size: GhosttySizeReportSize { rows: rows.max(1), columns: cols.max(1), cell_width: 0, cell_height: 0 }, held_since: None, title_changed: false, pwd_changed: false, replies: Vec::new(), clipboard_write: true, clipboard: [None, None] });
             let ud = &mut *shared as *mut Shared as *const c_void;
             ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_USERDATA, ud);
             let hold: GhosttyTerminalRenderHoldFn = Some(on_render_hold);
             ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_RENDER_HOLD, std::mem::transmute(hold));
             let title: GhosttyTerminalTitleChangedFn = Some(on_title);
             ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_TITLE_CHANGED, std::mem::transmute(title));
+            let pwd: GhosttyTerminalPwdChangedFn = Some(on_pwd);
+            ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_PWD_CHANGED, std::mem::transmute(pwd));
             let size: GhosttyTerminalSizeFn = Some(on_size);
             ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_SIZE, std::mem::transmute(size));
             let write: GhosttyTerminalWritePtyFn = Some(on_write_pty);
@@ -1249,6 +1258,22 @@ impl Vt {
         }
         let mut s = GhosttyString::default();
         unsafe { ghostty_terminal_get(self.term, GHOSTTY_TERMINAL_DATA_TITLE, &mut s as *mut _ as *mut c_void) };
+        if s.ptr.is_null() {
+            return Some(String::new());
+        }
+        let bytes = unsafe { std::slice::from_raw_parts(s.ptr, s.len) };
+        Some(String::from_utf8_lossy(bytes).into_owned())
+    }
+
+    /// The folder the program last reported (OSC 7, OSC 9;9, OSC 1337
+    /// CurrentDir) as it sent it: for OSC 7 a `file://` URI; empty when it
+    /// cleared it. None: no report since the last call.
+    pub fn take_pwd(&mut self) -> Option<String> {
+        if !std::mem::take(&mut self.shared.pwd_changed) {
+            return None;
+        }
+        let mut s = GhosttyString::default();
+        unsafe { ghostty_terminal_get(self.term, GHOSTTY_TERMINAL_DATA_PWD, &mut s as *mut _ as *mut c_void) };
         if s.ptr.is_null() {
             return Some(String::new());
         }
@@ -2500,6 +2525,21 @@ mod tests {
         vt.write(b"\x1b]2;hello\x07");
         assert_eq!(vt.take_title().as_deref(), Some("hello"));
         assert_eq!(vt.take_title(), None);
+    }
+
+    #[test]
+    fn folder_report_is_taken_once_and_can_be_cleared() {
+        let mut vt = Vt::new(20, 3);
+        assert_eq!(vt.take_pwd(), None);
+        vt.write(b"\x1b]7;file://box/home/me/a%20b\x1b\\");
+        assert_eq!(vt.take_pwd().as_deref(), Some("file://box/home/me/a%20b"));
+        assert_eq!(vt.take_pwd(), None);
+        vt.write(b"\x1b]7;\x07");
+        assert_eq!(vt.take_pwd().as_deref(), Some(""));
+        // How herdr-core replays the last report to a viewer that attaches later.
+        vt.write(b"\x1b]7;file://box/root/dev\x00\x1b\\");
+        let replayed = vt.take_pwd().unwrap();
+        assert_eq!(crate::folder_report::parse(&replayed).map(|r| r.path).as_deref(), Some("/root/dev"), "{replayed:?}");
     }
 
     #[test]
