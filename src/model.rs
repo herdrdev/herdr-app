@@ -110,13 +110,7 @@ impl Model {
                     if name != "plannotator-browser" || !props.get("review").and_then(Value::as_str).is_some_and(|s| !s.is_empty()) {
                         continue;
                     }
-                    let Some(origin) = props.get("origin").and_then(Value::as_str).filter(|s| !s.is_empty()) else { continue };
-                    let address = match space.machine.as_deref() {
-                        Some(machine) if !origin.contains('/') => crate::mirror::qualify(origin, Some(machine)),
-                        Some(machine) if origin.strip_prefix(machine).is_some_and(|rest| rest.starts_with('/')) => origin.to_owned(),
-                        None if !origin.contains('/') => origin.to_owned(),
-                        _ => continue,
-                    };
+                    let Some(address) = origin_address(space, props) else { continue };
                     origins.insert((space.id.clone(), address));
                 }
             }
@@ -124,6 +118,29 @@ impl Model {
         origins
     }
 }
+
+/// The terminal a mod pane's `origin` prop names, as a full address. The prop
+/// is the terminal as on the space's machine, or its full address there; one
+/// naming another machine doesn't count.
+fn origin_address(space: &Space, props: &Value) -> Option<String> {
+    let origin = props.get("origin").and_then(Value::as_str).filter(|s| !s.is_empty())?;
+    match space.machine.as_deref() {
+        Some(machine) if !origin.contains('/') => Some(crate::mirror::qualify(origin, Some(machine))),
+        Some(machine) if origin.strip_prefix(machine).is_some_and(|rest| rest.starts_with('/')) => Some(origin.to_owned()),
+        None if !origin.contains('/') => Some(origin.to_owned()),
+        _ => None,
+    }
+}
+
+/// The agent a tab was opened for: the terminal its first mod pane with an
+/// `origin` prop names (`tab.new {mod, props: {origin}}`), as a full address.
+pub fn tab_origin(space: &Space, tab: &Tab) -> Option<String> {
+    tab.root.panes().into_iter().find_map(|pane| match pane.content() {
+        Some(Content::Mod { props, .. }) => origin_address(space, props),
+        _ => None,
+    })
+}
+
 impl Tab {
     /// A tab with one terminal pane.
     pub fn new(id: &str, name: &str, pane_id: &str, address: &str) -> Tab {
@@ -640,6 +657,7 @@ pub fn space_json(m: &Model, p: &Space, index: usize, branch: Option<&str>, home
                 "settled_at": c.settled,
                 "changed_at": m.changed_at(c),
                 "working_since": m.working_since(c),
+                "origin": tab_origin(p, c),
             })
         })
         .collect();
@@ -695,6 +713,35 @@ mod tests {
         assert!(!origins.contains(&("s1".into(), "t1".into())));
         assert!(origins.contains(&("s1".into(), "t2".into())));
         assert!(origins.contains(&("remote/s2".into(), "remote/t1".into())));
+    }
+
+    fn mod_pane(id: &str, name: &str, props: Value) -> Node {
+        Node::block(id, Content::Mod { name: name.into(), props })
+    }
+
+    #[test]
+    fn a_tab_records_the_agent_it_was_opened_for() {
+        let mut m = Model::default();
+        m.add_space("s1", "", "", Tab::new("agent", "", "a", "t1"));
+        m.add_tab("s1", Tab::with_pane("vscode", "VS Code", mod_pane("v", "vscode", json!({ "uri": "file:///r", "origin": "t1" }))));
+        m.add_tab("s1", Tab::with_pane("plain", "Notes", mod_pane("n", "markdown", json!({ "file": "/r/a.md" }))));
+        m.add_tab("s1", Tab::with_pane("foreign", "Linear", mod_pane("l", "linear-browser", json!({ "origin": "vps/t1" }))));
+        m.add_space("vps/s2", "", "", Tab::new("vps/agent", "", "vps/a", "vps/t1"));
+        m.space_mut("vps/s2").unwrap().machine = Some("vps".into());
+        m.add_tab("vps/s2", review_tab("vps/review", "t1", "r1"));
+        m.add_tab("vps/s2", Tab::with_pane("vps/full", "", mod_pane("vps/f", "fork", json!({ "origin": "vps/t1" }))));
+        m.add_tab("vps/s2", Tab::with_pane("vps/other", "", mod_pane("vps/o", "fork", json!({ "origin": "pc/t1" }))));
+
+        let origins = |space: &str| {
+            let space = m.space(space).unwrap();
+            space.tabs.iter().map(|tab| tab_origin(space, tab)).collect::<Vec<_>>()
+        };
+        let some = |s: &str| Some(s.to_owned());
+        assert_eq!(origins("s1"), [None, some("t1"), None, None]);
+        assert_eq!(origins("vps/s2"), [None, some("vps/t1"), some("vps/t1"), None]);
+        let json = space_json(&m, m.space("vps/s2").unwrap(), 1, None, "/home/can");
+        assert_eq!(json["tabs"][1]["origin"], "vps/t1");
+        assert_eq!(json["tabs"][0]["origin"], Value::Null);
     }
 
     #[test]

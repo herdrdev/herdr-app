@@ -80,6 +80,12 @@ is the terminal's `foreground.pid`), run
 `exec(label.node, [label.request, <terminal id on that machine>, "review" | "last", label.hc], { on: machine })`.
 The annotations go back to that Pi session (`docs/FORK.md`).
 
+A mod tab opened for an agent records it: give the tab's mod pane an `origin`
+prop with that agent's terminal as on the space's machine (`$HC_TERMINAL_ID`),
+as `tab.new {space, mod, props: {..., origin}}`. `TabInfo.origin` and the tab
+in `herdr-app ls` report it as a full address, as `AgentInfo.address`, also
+after that agent ends. Plannotator reviews record their agent this way.
+
 ## What mods are written in
 
 Mods use **gpui-kit** (its gpui-shell): JavaScript that describes **GPUI**
