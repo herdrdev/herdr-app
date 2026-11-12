@@ -112,7 +112,7 @@ export default class Menu extends View {
     const it = items(props(), this.git)[i];
     if (!it) return;
     closeOverlay(props()?.overlay);
-    if (it[1] === "worktree") openOverlay({ mod: "worktree", kind: "dialog", ...(it[2].action === "remove" ? { width: 440, height: 260 } : { width: 560, height: 480 }), props: it[2] });
+    if (it[1] === "worktree") openOverlay({ mod: "worktree", kind: "dialog", ...(it[2].action === "remove" ? { width: 440, height: 340 } : { width: 560, height: 480 }), props: it[2] });
     else run(it[1], it[2]);
   }
 

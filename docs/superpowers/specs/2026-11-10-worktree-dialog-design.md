@@ -19,7 +19,7 @@
 - 自定义 worktree 路径, 或在对话框里给 space 起名.
 - 远程分支检出时另起一个不同的本地分支名.
 - 用 `--force` 把已经检出的分支再检出一次.
-- 改 Remove 的流程.
+- 在 Close space 的确认里顺带删 worktree.
 
 ## 不做的事
 
@@ -50,7 +50,11 @@
 
 **立即创建 `{branch}`.** 先按 Local 的规则找这个本地分支. 本地没有时, 若恰好一个远程有这个短名, 按 Remote 的规则跟踪它. 否则按 New 的规则从 HEAD 创建. 已经检出时打开 space, 不再让 `git worktree add` 失败.
 
-四个来源 (除 Remove 外) 的对话框都是 560×480. Remove 维持现在的小尺寸. 本地分支、远程分支、worktree 列表在打开时一起读, 切换来源不再等待.
+四个来源 (除 Remove 外) 的对话框都是 560×480. Remove 是 440×340.
+
+**Remove.** 关掉 space 并 `git worktree remove`. 勾选框 Delete local branch 默认勾上, 确认后在主 checkout 上 `git branch -d <name>`. `-d` 拒绝时把 git 的报错留在弹窗上, 再问一次: 回车用 `git branch -D`, Esc 留下分支. 取消勾选则一开始就不删分支. detached HEAD 没有这个勾选. 不删远端分支.
+
+本地分支、远程分支、worktree 列表在打开时一起读, 切换来源不再等待.
 
 ## 我定的
 

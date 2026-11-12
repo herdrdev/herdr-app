@@ -836,7 +836,11 @@ has 120 programs (agents, editors, runtimes, tools, databases, infra);
   (four sources: New, Local, Remote, Open; the menu opens Remote; Remote runs
   `git fetch --all --prune` before listing remote-tracking branches and shows
   the error if that fails; a branch
-  already checked out opens its space) and Remove worktree. Props are
+  already checked out opens its space) and Remove worktree (closes the space
+  and deletes the checkout; the local branch is deleted with `git branch -d`
+  unless the box is unchecked, and a refusal stays on screen so Enter can
+  delete it with `-D` or Escape can keep it; a detached checkout has no branch
+  to delete). Props are
   `{space, folder?, action: "new" | "local" | "remote" | "open" | "remove"}`
   (the repo: folder, else where the space's first terminal is), or
   `{branch, tab?, argv?}` to place that branch at once. Checkouts go to

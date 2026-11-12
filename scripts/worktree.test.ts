@@ -6,7 +6,7 @@ const source = (await readFile(new URL("../defaults/mods/worktree/main.js", impo
 
 // Execute conditional builders and retain text, without native GPUI layout.
 function element() {
-  const node = { id: "", children: [] as any[] };
+  const node = { id: "", children: [] as any[], handlers: {} as Record<string, Function> };
   const el: any = new Proxy(node, { get: (_, method) => {
     if (method === "node") return node;
     return (...args: any[]) => {
@@ -14,6 +14,7 @@ function element() {
       if (method === "child") node.children.push(args[0]?.node ?? args[0]);
       if (method === "children") node.children.push(...args[0].map((child: any) => child?.node ?? child));
       if (method === "when" && args[0]) args[1](el);
+      if (method === "on_key_up" || method === "on_key_down" || method === "on_change") node.handlers[method] = args[0];
       return el;
     };
   } });
@@ -38,6 +39,7 @@ function harness(focusedMachine: string | null = null, execImpl?: (command: stri
   const propsValue: any = { overlay: "overlay" };
   const globals = {
     View: class {}, div: element, v_flex: element, h_flex: element,
+    Checkbox: { new: () => element() },
     Input: { new: element },
     InputState: { new: (opts: any = {}) => ({ placeholder: opts.placeholder ?? "", _value: opts.value ?? "", value() { return this._value; }, set_value(v: string) { this._value = v; }, on() { return true; }, focus() {} }) },
     Scrollbar: { vertical: element }, theme: () => ({}),
@@ -291,6 +293,146 @@ test("new source explains a branch from here", () => {
   expect(text).toContain("A new branch starting from here, checked out in ~/.herdr/worktrees/repo/.");
   expect(text).toContain("↵ create · esc cancel");
   expect(text).not.toContain("origin/");
+});
+
+function removal(execImpl: (command: string, args: string[]) => Promise<any>) {
+  const harnessed = harness(null, async (_c, args) => {
+    if (args.includes("status")) return { code: 0, stdout: "", stderr: "" };
+    if (args.includes("--absolute-git-dir")) return { code: 0, stdout: "/repo/.git", stderr: "" };
+    if (args.includes("config")) return { code: 1, stdout: "", stderr: "" };
+    return execImpl(args[0] === "git" ? args[0] : "git", args);
+  });
+  harnessed.props.space = "s1";
+  harnessed.props.action = "remove";
+  harnessed.snapshot([{ id: "s1", name: "Feature", tabs: [{ id: "t" }] }], []);
+  Object.assign(harnessed.worktree, {
+    on: "server", dirty: false, unpushed: [],
+    repo: { name: "repo", main: "/repo", top: "/wt", linked: true },
+    branch: "feature/foo", deleteBranch: true, userHome: "/home/user", source: "remove",
+  });
+  return harnessed;
+}
+
+test("remove deletes the local branch after the worktree when the box is checked", async () => {
+  const { worktree, writes, executions } = removal(async (_c, args) => {
+    if (args[0] === "worktree" || args[0] === "branch") return { code: 0, stdout: "", stderr: "" };
+    return { code: 0, stdout: "", stderr: "" };
+  });
+  const shown = textOf(worktree.render({}).node);
+  expect(shown).toContain("Delete local branch feature/foo");
+  expect(shown).toContain("\u2713");
+  expect(await worktree.remove()).toBe("");
+  expect(writes).toEqual([["space.close", { id: "s1", confirmed: true }]]);
+  const removed = executions.find((e) => e.args[0] === "worktree");
+  const deleted = executions.find((e) => e.args[0] === "branch");
+  expect(removed.args).toEqual(["worktree", "remove", "/wt"]);
+  expect(removed).toMatchObject({ cwd: "/repo", on: "server" });
+  expect(deleted.args).toEqual(["branch", "-d", "feature/foo"]);
+  expect(deleted.cwd).toBe("/repo");
+  expect(executions.indexOf(removed)).toBeLessThan(executions.indexOf(deleted));
+});
+
+test("enter keeps a checked box that the same key just toggled off", async () => {
+  const { worktree, executions } = removal(async () => ({ code: 0, stdout: "", stderr: "" }));
+  worktree.deleteBranch = false;
+  worktree.branchKeyFlip = true;
+  await worktree.key({ key: "enter" }, { spawn: (fn) => fn({ notify() {} }), notify() {}, stop_propagation() {} });
+  expect(worktree.deleteBranch).toBe(true);
+  expect(worktree.branchHeld).toBe(true);
+  expect(executions.find((e) => e.args[0] === "branch")?.args).toEqual(["branch", "-d", "feature/foo"]);
+});
+
+test("enter moves focus off the checkbox so keyup cannot uncheck it", async () => {
+  const { worktree, executions } = removal(async () => ({ code: 0, stdout: "", stderr: "" }));
+  let focused = 0;
+  worktree.handle = { focus() { focused += 1; } };
+  worktree.deleteBranch = true;
+  await worktree.key({ key: "enter" }, { spawn: (fn) => fn({ notify() {} }), notify() {}, stop_propagation() {} });
+  expect(focused).toBe(1);
+  expect(worktree.deleteBranch).toBe(true);
+  expect(worktree.branchHeld).toBe(true);
+  let painted = 0;
+  worktree.setBranchChecked(false, { notify() { painted += 1; }, timer: { after() {} } });
+  expect(worktree.deleteBranch).toBe(true);
+  expect(painted).toBe(0);
+  expect(executions.find((e) => e.args[0] === "branch")?.args).toEqual(["branch", "-d", "feature/foo"]);
+});
+
+test("keyup of the confirming enter lets the box be toggled again", () => {
+  const { worktree } = removal(async () => ({ code: 0, stdout: "", stderr: "" }));
+  worktree.branchHeld = true;
+  worktree.deleteBranch = true;
+  worktree.handle = { focus() {} };
+  const node = worktree.render({}).node;
+  node.handlers.on_key_up({ key: "enter" });
+  expect(worktree.branchHeld).toBe(false);
+  let painted = 0;
+  worktree.setBranchChecked(false, { notify() { painted += 1; }, timer: { after() {} } });
+  expect(worktree.deleteBranch).toBe(false);
+  expect(painted).toBe(1);
+});
+
+test("enter after the box has settled does not put the check back", async () => {
+  const { worktree, executions } = removal(async () => ({ code: 0, stdout: "", stderr: "" }));
+  worktree.deleteBranch = false;
+  worktree.branchKeyFlip = false;
+  await worktree.key({ key: "enter" }, { spawn: (fn) => fn({ notify() {} }), notify() {}, stop_propagation() {} });
+  expect(executions.some((e) => e.args[0] === "branch")).toBe(false);
+});
+
+test("remove keeps the local branch when the box is unchecked", async () => {
+  const { worktree, executions } = removal(async () => ({ code: 0, stdout: "", stderr: "" }));
+  worktree.deleteBranch = false;
+  expect(textOf(worktree.render({}).node)).not.toContain("\u2713");
+  expect(await worktree.remove()).toBe("");
+  expect(executions.some((e) => e.args[0] === "branch")).toBe(false);
+});
+
+test("a failed worktree remove does not delete the branch", async () => {
+  const { worktree, executions } = removal(async (_c, args) => (
+    args[0] === "worktree" ? { code: 128, stdout: "", stderr: "fatal: worktree locked" } : { code: 0, stdout: "", stderr: "" }
+  ));
+  expect(await worktree.remove()).toBe("fatal: worktree locked");
+  expect(executions.some((e) => e.args[0] === "branch")).toBe(false);
+});
+
+test("a refused branch -d stays on screen and the next enter uses -D", async () => {
+  const calls: string[][] = [];
+  const { worktree, writes, executions } = removal(async (_c, args) => {
+    if (args[0] === "branch") calls.push(args);
+    if (args[0] === "branch" && args[1] === "-d") return { code: 1, stdout: "", stderr: "error: not fully merged" };
+    return { code: 0, stdout: "", stderr: "" };
+  });
+  expect(await worktree.remove()).toBe("error: not fully merged");
+  expect(worktree.branchRefused).toBe("feature/foo");
+  worktree.error = "error: not fully merged";
+  const text = textOf(worktree.render({}).node);
+  expect(text).toContain("error: not fully merged");
+  expect(text).toContain("Delete local branch feature/foo anyway?");
+  expect(text).toContain("↵ delete anyway · esc keep the branch");
+  expect(await worktree.remove()).toBe("");
+  expect(calls).toEqual([["branch", "-d", "feature/foo"], ["branch", "-D", "feature/foo"]]);
+  expect(writes).toEqual([["space.close", { id: "s1", confirmed: true }]]);
+  expect(executions.filter((e) => e.args[0] === "worktree")).toHaveLength(1);
+});
+
+test("a refused -D stays on screen and does not remove the worktree again", async () => {
+  const { worktree, executions } = removal(async (_c, args) => (
+    args[0] === "branch" ? { code: 1, stdout: "", stderr: args[1] === "-d" ? "error: not fully merged" : "error: cannot force delete" } : { code: 0, stdout: "", stderr: "" }
+  ));
+  expect(await worktree.remove()).toBe("error: not fully merged");
+  expect(await worktree.remove()).toBe("error: cannot force delete");
+  expect(executions.filter((e) => e.args[0] === "worktree")).toHaveLength(1);
+  expect(executions.filter((e) => e.args[0] === "branch").map((e) => e.args[1])).toEqual(["-d", "-D"]);
+});
+
+test("a detached checkout has no delete-branch box", () => {
+  const { worktree } = harness();
+  Object.assign(worktree, {
+    source: "remove", userHome: "/home/user", branch: "", deleteBranch: false, dirty: false, unpushed: [],
+    repo: { name: "repo", main: "/repo", top: "/wt", linked: true },
+  });
+  expect(textOf(worktree.render({}).node)).not.toContain("Delete local branch");
 });
 
 test("menus and the guide expose one worktree dialog", async () => {

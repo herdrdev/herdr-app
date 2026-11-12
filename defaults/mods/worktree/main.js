@@ -3,7 +3,7 @@
 // { branch, tab?, argv? } places that branch at once.
 
 import { View, div } from "gpui-kit";
-import { v_flex, h_flex, InputState, Input, Scrollbar } from "gpui-base";
+import { v_flex, h_flex, InputState, Input, Scrollbar, Checkbox } from "gpui-base";
 import { run, props, closeOverlay, theme, spaces, panes, exec, home } from "herdr";
 
 // Where a space is now: its first terminal's live folder, else where it was made.
@@ -138,6 +138,14 @@ export default class Worktree extends View {
     this.repo = undefined; // undefined: looking, null: not in git
     this.dirty = false;
     this.unpushed = [];
+    this.branch = "";
+    this.deleteBranch = true;
+    this.branchRefused = "";
+    // null until Enter locks it. A focused checkbox toggles on that same Enter.
+    this.branchChoice = null;
+    this.branchKeyFlip = false;
+    // Set for the Enter that confirms, so the checkbox's keyup click cannot paint a different box.
+    this.branchHeld = false;
     cx.spawn(async (cx) => {
       try {
         if (this.on) {
@@ -153,6 +161,11 @@ export default class Worktree extends View {
         if (repo && props().action === "remove") {
           this.dirty = (await git(repo.top, ["--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain"], this.on)).out !== "";
           this.unpushed = (await submodules(repo.top, this.on)).unpushed;
+          const head = await git(repo.top, ["rev-parse", "--abbrev-ref", "HEAD"], this.on);
+          // Detached HEAD is "HEAD": there is no local branch to delete.
+          this.branch = head.ok && head.out && head.out !== "HEAD" ? head.out : "";
+          if (!head.ok) this.error = head.err || "git rev-parse failed.";
+          if (!this.branch) this.deleteBranch = false;
         }
         if (repo && props().action !== "remove") await this.loadLists(repo, cx);
         this.repo = repo;
@@ -178,7 +191,7 @@ export default class Worktree extends View {
 
   go(cx) {
     if (this.busy || !this.repo) return;
-    cx.spawn(async (cx) => this.work(cx));
+    return cx.spawn(async (cx) => this.work(cx));
   }
 
   // immediate is only the opening {branch} resolution. A later Enter follows the source.
@@ -368,6 +381,13 @@ export default class Worktree extends View {
   }
 
   async remove() {
+    // -d already refused. The checkout is gone; this enter is only the -D question.
+    if (this.branchRefused) {
+      const deleted = await git(this.repo.main, ["branch", "-D", this.branchRefused], this.on);
+      return deleted.ok ? "" : deleted.err || "git branch -D failed.";
+    }
+    // Locked by Enter before any await. A later click must not change which branch goes.
+    const branch = this.branchChoice != null ? this.branchChoice : (this.deleteBranch ? (this.branch || "") : "");
     const s = this.space();
     const status = await git(this.repo.top, ["--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain"], this.on);
     if (!status.ok) return status.err || "git status failed.";
@@ -383,13 +403,40 @@ export default class Worktree extends View {
     run("space.close", { id: s.id, confirmed: true });
     const force = this.dirty || mods.length > 0;
     const r = await git(this.repo.main, ["worktree", "remove", ...(force ? ["--force"] : []), this.repo.top], this.on, 600_000);
-    return r.ok ? "" : r.err || "git worktree remove failed.";
+    if (!r.ok) return r.err || "git worktree remove failed.";
+    if (!branch) return "";
+    const deleted = await git(this.repo.main, ["branch", "-d", branch], this.on);
+    if (deleted.ok) return "";
+    // The directory is already gone. Show git's refusal and wait: Enter uses -D, Escape keeps the branch.
+    this.branchRefused = branch;
+    return deleted.err || "git branch -d failed.";
+  }
+
+  // Click and Space change the box. Enter confirms, so a toggle that arrived
+  // with that Enter is ignored until the key comes back up.
+  setBranchChecked(checked, cx) {
+    if (this.branchHeld) return;
+    this.deleteBranch = checked;
+    this.branchKeyFlip = true;
+    cx.notify();
+    cx.timer.after(0, () => { this.branchKeyFlip = false; });
+    // A click focuses the box. The keyboard belongs to the dialog: Enter removes.
+    this.handle?.focus();
   }
 
   key(e, cx) {
     if (e.key === "escape") return this.close();
     if (this.source === "remove") {
-      if (e.key === "enter") return this.go(cx);
+      if (e.key === "enter") {
+        // The box records Enter on keydown and clicks itself on keyup. That click
+        // is dropped once focus has moved, because the generation no longer matches.
+        if (this.branchKeyFlip) this.deleteBranch = !this.deleteBranch;
+        this.branchKeyFlip = false;
+        this.branchChoice = this.deleteBranch ? (this.branch || "") : "";
+        this.branchHeld = true;
+        this.handle?.focus();
+        return this.go(cx);
+      }
       return;
     }
     if (this.source === "local" || this.source === "remote" || this.source === "open") {
@@ -533,12 +580,13 @@ export default class Worktree extends View {
         ? `${this.folder ? tilde(this.folder, this.userHome) : "This folder"} is not in a git repository.`
         : !r.linked
           ? "This is the repository's main checkout, not a worktree."
-          : `Closes the space and deletes ${tilde(r.top, this.userHome)}. The branch stays.`;
+          : `Closes the space and deletes ${tilde(r.top, this.userHome)}.`;
     const blocked = !r || !r.linked;
     return v_flex()
       .id("worktree")
       .track_focus(this.handle)
       .on_key_down((e, cx) => this.key(e, cx))
+      .on_key_up((e) => { if (e.key === "enter") this.branchHeld = false; })
       .size_full()
       .p(16)
       .gap(10)
@@ -546,10 +594,20 @@ export default class Worktree extends View {
       .text_size(13)
       .child(div().font_semibold().text_color(t.foreground).child(`Remove worktree ${s?.name ?? ""}?`))
       .child(div().text_color(t.muted).child(detail))
+      .when(Boolean(r?.linked && this.branch), (el) => el.child(
+        // Checkbox draws nothing of its own. The box is the first child; the label is the second, so one click covers both.
+        Checkbox.new("delete-branch").checked(Boolean(this.deleteBranch)).on_change((checked, cx) => {
+          this.setBranchChecked(checked, cx);
+        })
+          .flex().items_center().gap(8).cursor_pointer()
+          .child(div().size(14).flex_none().rounded(3).border(1).border_color(this.deleteBranch ? t.solid : t.input).bg(this.deleteBranch ? t.solid : t.background).flex().items_center().justify_center().text_size(10).font_semibold().text_color(t.solid_foreground).child(this.deleteBranch ? "\u2713" : ""))
+          .child(div().text_color(t.foreground).child(`Delete local branch ${this.branch}`)),
+      ))
       .when(this.dirty, (el) => el.child(div().text_color(t.blocked).child("It has uncommitted changes: they will be lost.")))
       .when(this.unpushed.length > 0, (el) => el.child(div().text_color(t.blocked).child(`Submodule ${this.unpushed.join(", ")} has commits that aren't pushed anywhere: they will be lost.`)))
       .when(Boolean(this.error), (el) => el.child(div().text_color(t.blocked).child(this.error)))
+      .when(Boolean(this.branchRefused), (el) => el.child(div().text_color(t.foreground).child(`Delete local branch ${this.branchRefused} anyway?`)))
       .child(div().flex_1())
-      .child(h_flex().justify_end().text_size(11).text_color(t.dim).gap(6).when(this.busy, (el) => el.child(div().frames(["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"], 90))).child(this.busy ? "working\u2026" : blocked ? "esc close" : "\u21b5 remove \u00b7 esc cancel"));
+      .child(h_flex().justify_end().text_size(11).text_color(t.dim).gap(6).when(this.busy, (el) => el.child(div().frames(["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"], 90))).child(this.busy ? "working\u2026" : blocked ? "esc close" : this.branchRefused ? "\u21b5 delete anyway \u00b7 esc keep the branch" : "\u21b5 remove \u00b7 esc cancel"));
   }
 }
