@@ -6,7 +6,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { panes, props, run, theme, home, layout, agents, terminals } from "herdr";
+import { panes, props, run, theme, home, layout, hc } from "herdr";
 
 // Match the first visible tab frame, including the active child of a stack.
 function paneFrame(node) {
@@ -35,6 +35,11 @@ function folder(cwd) {
   return cwd === h ? "~" : cwd.startsWith(h + "/") ? "~" + cwd.slice(h.length) : cwd;
 }
 
+function stripAnsi(str) {
+  if (!str) return "";
+  return str.replace(/\x1B(?:[@-Z\\-_]|\[[0-?]*[ -/]*[@-~])/g, "");
+}
+
 function agentPrefix(progName, progKey) {
   const k = (progKey || "").toLowerCase();
   const n = (progName || "").toLowerCase();
@@ -61,68 +66,143 @@ function isGenericTitle(title, p) {
   return defaults.includes(t);
 }
 
-function getLiveTitle(p) {
-  if (!p) return "";
-  // 1. Check pane.title
-  if (p.title && p.title.trim()) {
-    const t = p.title.trim();
-    if (!isGenericTitle(t, p)) return t;
-  }
-  // 2. Check agents()
-  try {
-    const agList = typeof agents === "function" ? agents() : [];
-    const ag = agList.find(a => a.pane === p.pane || (p.terminal && a.address === p.terminal));
-    if (ag?.title && ag.title.trim()) {
-      const t = ag.title.trim();
-      if (!isGenericTitle(t, p)) return t;
-    }
-  } catch (_) {}
-  // 3. Check terminals()
-  try {
-    if (p.terminal && typeof terminals === "function") {
-      const termList = terminals();
-      const term = termList.find(t => t.address === p.terminal || t.address.endsWith("/" + p.terminal.split("/").pop()));
-      if (term?.title && term.title.trim()) {
-        const t = term.title.trim();
-        if (!isGenericTitle(t, p)) return t;
+function extractAgentTitle(agentType, rawScreen) {
+  if (!rawScreen) return null;
+  const screen = stripAnsi(rawScreen);
+  const type = (agentType || "").toLowerCase();
+  const rawLines = screen.split("\n");
+
+  // 1. OMP
+  if (type.includes("omp")) {
+    for (let i = rawLines.length - 1; i >= 0; i--) {
+      const line = rawLines[i].trim();
+      const m = line.match(/(?:[\p{Emoji}\uFE0F\s]*)\s*([A-Z0-9_-]{2,20}:\s*[^|\n\r]{3,80})/u);
+      if (m && !line.includes("π >") && !line.startsWith("├") && !line.startsWith("│") && !line.startsWith("╰")) {
+        const label = m[1].split(":")[0].trim();
+        if (label.endsWith("_TOKEN") || label.endsWith("_KEY") || label.endsWith("_PATH") || label.endsWith("_URL")) continue;
+        return m[1].trim();
       }
     }
-  } catch (_) {}
-  return p.title || "";
+  }
+
+  // 2. OpenCode
+  if (type.includes("opencode")) {
+    for (let i = 0; i < Math.min(3, rawLines.length); i++) {
+      const line = rawLines[i].trim();
+      if (line.endsWith("+")) {
+        const tabs = line.split(/\s{2,}/).map(s => s.trim()).filter(s => s && s !== "+");
+        if (tabs.length > 0) {
+          return tabs[tabs.length - 1];
+        }
+      }
+    }
+  }
+
+  // 3. Claude Code
+  if (type.includes("claude")) {
+    for (let i = rawLines.length - 1; i >= 0; i--) {
+      const line = rawLines[i].trim();
+      const m = line.match(/(?:recap:\s*(?:\[PELICAN\]\s*)?|●\s*\[PELICAN\]\s*)([^\n\r]{5,80})/);
+      if (m) {
+        let t = m[1].replace(/^[A-Za-z0-9_-]+:\s*/, "").trim();
+        t = t.split(".")[0].trim();
+        if (t.length > 45) t = t.slice(0, 42) + "...";
+        return t;
+      }
+    }
+  }
+
+  // 4. Pi
+  if (type.includes("pi")) {
+    for (let i = rawLines.length - 1; i >= 0; i--) {
+      const line = rawLines[i].trim();
+      if (line.startsWith("π ") && line.includes(":")) {
+        const parts = line.split(":");
+        return parts.slice(1).join(":").trim();
+      }
+    }
+  }
+
+  // 5. Fallback for any agent status/task line
+  for (let i = rawLines.length - 1; i >= 0; i--) {
+    const line = rawLines[i].trim();
+    if (line.startsWith("⚠") || line.startsWith("!") || line.toLowerCase().includes("warning")) continue;
+    const m = line.match(/(?:[\p{Emoji}\uFE0F\s]*)\s*([A-Z0-9_-]{2,20}:\s*[^|\n\r]{3,80})/u);
+    if (m && !line.includes("π >") && !line.startsWith("├") && !line.startsWith("│") && !line.startsWith("╰")) {
+      const label = m[1].split(":")[0].trim();
+      if (label.endsWith("_TOKEN") || label.endsWith("_KEY") || label.endsWith("_PATH") || label.endsWith("_URL")) continue;
+      return m[1].trim();
+    }
+  }
+
+  return null;
 }
 
-function formatTitle(p) {
+const terminalTitleCache = new Map();
+const inFlightTerminals = new Set();
+
+function resolveTerminalTitle(p, cx) {
+  if (!p || !p.terminal) return;
+  const terminal = p.terminal;
+  const cached = terminalTitleCache.get(terminal);
+  const now = Date.now();
+  if (cached && (now - cached.time < 3500)) return;
+  if (inFlightTerminals.has(terminal)) return;
+
+  inFlightTerminals.add(terminal);
+
+  cx.spawn(async (cx) => {
+    try {
+      const res = await hc(["read", terminal]).catch(() => null);
+      if (res && res.code === 0 && res.stdout) {
+        const agentType = p.program?.key || p.program?.name || "";
+        const title = extractAgentTitle(agentType, res.stdout);
+        if (title) {
+          terminalTitleCache.set(terminal, { title, time: Date.now() });
+          cx.notify();
+        }
+      }
+    } catch (_) {
+      // background scan fail-safe
+    } finally {
+      inFlightTerminals.delete(terminal);
+    }
+  });
+}
+
+function formatTitle(p, extraTitle) {
   const progName = p.program?.name || p.title || "shell";
   const progKey = p.program?.key || "";
   const prefix = agentPrefix(progName, progKey);
 
-  const raw = getLiveTitle(p);
-  if (!raw || isGenericTitle(raw, p)) {
-    return progName;
+  // 1. If we have a resolved live session title from the terminal stream
+  if (extraTitle && extraTitle.trim()) {
+    let clean = extraTitle.trim();
+    if (clean.includes(" | ")) {
+      return clean;
+    }
+    // Remove leading spinners or emoji if prefix is already adding agent name
+    clean = clean
+      .replace(/^[π\s>⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏•·\u2800-\u28FF]+/u, "")
+      .replace(/^[\p{Emoji}\uFE0F\s]+/u, "")
+      .trim();
+    if (clean && !isGenericTitle(clean, p)) {
+      return `${prefix} | ${clean}`;
+    }
   }
 
-  const trimmed = raw.trim();
-
-  // If already formatted like "PREFIX | Title" (e.g. "OC | ...", "OMP | ...")
-  if (trimmed.includes(" | ")) {
-    return trimmed;
+  // 2. If terminal title is already explicitly formatted (e.g. "OC | ...", "OMP | ...")
+  const termTitle = (p.title || "").trim();
+  if (termTitle.includes(" | ")) {
+    return termTitle;
   }
 
-  // Clean OMP / CLI status spinners and prompt symbols:
-  // e.g. "π > 💻 OPEN: Chỉnh hình trekker và màu BHD" -> "OPEN: Chỉnh hình trekker và màu BHD"
-  // e.g. "π ⠧ 💻 OPEN: Tích hợp CMS vào menubar admin" -> "OPEN: Tích hợp CMS vào menubar admin"
-  // e.g. "π ⠇ 🖼️ PHOTO: Tái hiện Intro Grid Motion Transition" -> "PHOTO: Tái hiện Intro Grid Motion Transition"
-  // e.g. "π > 📋 ENUM: Deploy Enum dropdown fix" -> "ENUM: Deploy Enum dropdown fix"
-  let clean = trimmed
-    .replace(/^[π\s>⠋⠙⠹⠸⠼⠴⠦⠧⠇⠏•·\u2800-\u28FF]+/u, "")
-    .replace(/^[\p{Emoji}\uFE0F\s]+/u, "")
-    .trim();
-
-  if (!clean || isGenericTitle(clean, p)) {
-    return progName;
+  // 3. Fallback to meaningful p.title if not generic
+  if (termTitle && !isGenericTitle(termTitle, p)) {
+    return `${prefix} | ${termTitle}`;
   }
 
-  return `${prefix} | ${clean}`;
+  return progName;
 }
 
 export default class Pane extends View {
@@ -153,7 +233,10 @@ export default class Pane extends View {
     const p = this.me();
     if (!p) return div();
 
-    const name = formatTitle(p);
+    const cached = p.terminal ? terminalTitleCache.get(p.terminal) : null;
+    resolveTerminalTitle(p, cx);
+
+    const name = formatTitle(p, cached?.title);
     const pic = icon(p.program, 14, t.dim);
     const st = p.status;
     const pane = p.pane;
