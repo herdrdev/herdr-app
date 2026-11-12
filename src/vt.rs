@@ -2536,6 +2536,10 @@ mod tests {
         assert_eq!(vt.take_pwd(), None);
         vt.write(b"\x1b]7;\x07");
         assert_eq!(vt.take_pwd().as_deref(), Some(""));
+        // How herdr-core replays the last report to a viewer that attaches later.
+        vt.write(b"\x1b]7;file://box/root/dev\x00\x1b\\");
+        let replayed = vt.take_pwd().unwrap();
+        assert_eq!(crate::folder_report::parse(&replayed).map(|r| r.path).as_deref(), Some("/root/dev"), "{replayed:?}");
     }
 
     #[test]

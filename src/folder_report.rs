@@ -16,7 +16,8 @@ pub struct Report {
 /// None: cleared (an empty report) or nothing usable, such as a relative path,
 /// another URI scheme or broken escapes.
 pub fn parse(raw: &str) -> Option<Report> {
-    let raw = raw.trim();
+    // herdr-core replays a stored report with its C string's NUL.
+    let raw = raw.trim_end_matches('\0').trim();
     if raw.is_empty() {
         return None;
     }
@@ -162,6 +163,14 @@ mod tests {
         assert_eq!(
             parse(r"\\server\share\x"),
             report(None, r"\\server\share\x")
+        );
+    }
+
+    #[test]
+    fn reads_a_report_replayed_by_the_core() {
+        assert_eq!(
+            parse("file://box/root/dev\0"),
+            report(Some("box"), "/root/dev")
         );
     }
 
