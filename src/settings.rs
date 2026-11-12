@@ -974,7 +974,9 @@ mod tests {
         assert_eq!(Settings::compose(&Person::default(), &main.look, true).font_size, 14.0);
         assert_eq!(main.look.terminal_padding, Some([14.0, 12.0]));
         let terminals: Node = serde_json::from_str(include_str!("../defaults/layouts/terminals.json")).unwrap();
+        assert!(terminals.look.theme.is_none() && terminals.look.colors.is_none());
         assert_eq!(Settings::compose(&person, &terminals.look, true).font_size, 15.0);
+        assert_eq!(Settings::compose(&person, &terminals.look, true).theme.as_str(), "moss");
         let main_settings = Settings::compose(&person, &main.look, true);
         assert_eq!((main_settings.font_size, main_settings.theme.as_str()), (19.0, "moss"));
         let mut win98: Node = serde_json::from_str(include_str!("../defaults/layouts/win98.json")).unwrap();

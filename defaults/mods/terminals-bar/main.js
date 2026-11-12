@@ -4,17 +4,21 @@ import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
 import { spaces, panes, run, theme, home, openOverlay, window as win } from "herdr";
 
-const C = {
-  tray: "#1d1f22",
-  // The shown tab stands out; a hovered one only hints, so the two never look alike.
-  tab: "#34373c",
-  tabEdge: "#4a4d53",
-  hover: "#ffffff07",
-  edge: "#383b40",
-  chip: "#252628",
-  text: "#e8e9eb",
-  dim: "#8b8f95",
-};
+function C() {
+  const t = theme();
+  return {
+    tray: t.chrome,
+    // The shown tab stands out; a hovered one only hints, so the two never look alike.
+    tab: t.raised,
+    tabEdge: t.border,
+    hover: t.hover,
+    edge: t.hover,
+    chip: t.surface,
+    text: t.foreground,
+    dim: t.dim,
+    muted: t.muted,
+  };
+}
 
 function folder(cwd) {
   if (!cwd) return "";
@@ -40,15 +44,15 @@ function tile(t, p) {
     .rounded(7)
     .border_1()
     .border_color("#ffffff14")
-    .bg(g?.tile ?? C.chip)
+    .bg(g?.tile ?? C().chip)
     .flex()
     .items_center()
     .justify_center()
     .when(Boolean(g?.icon), (el) =>
-      el.child(g.tint ? svg(g.icon).size(15).text_color(g.color ?? C.text) : image(g.icon).w(15).h(15)),
+      el.child(g.tint ? svg(g.icon).size(15).text_color(g.color ?? C().text) : image(g.icon).w(15).h(15)),
     )
     .when(Boolean(dot), (el) =>
-      el.child(div().absolute().top(-4).right(-4).w(11).h(11).rounded_full().border_2().border_color(C.tray).bg(dot)),
+      el.child(div().absolute().top(-4).right(-4).w(11).h(11).rounded_full().border_2().border_color(C().tray).bg(dot)),
     );
 }
 
@@ -69,10 +73,10 @@ function windowButton(id, icon, command) {
       .flex()
       .items_center()
       .justify_center()
-      .bg(C.chip)
-      .text_color(C.dim)
+      .bg(C().chip)
+      .text_color(C().dim)
       .cursor_pointer()
-      .hover((s) => s.bg(C.edge).text_color(C.text))
+      .hover((s) => s.bg(C().edge).text_color(C().text))
       .on_click(() => run(command))
       .child(svg(`mods/terminals-bar/${icon}.svg`).size(14)),
   );
@@ -84,9 +88,9 @@ function iconButton(id, icon, onClick) {
     .flex_none()
     .p(7)
     .rounded(8)
-    .text_color(C.dim)
+    .text_color(C().dim)
     .cursor_pointer()
-    .hover((s) => s.bg(C.chip).text_color(C.text))
+    .hover((s) => s.bg(C().chip).text_color(C().text))
     .on_click(onClick)
     .child(svg(`mods/terminals-bar/${icon}.svg`).size(17));
 }
@@ -116,8 +120,8 @@ export default class TerminalsBar extends View {
         .border_1()
         .cursor_pointer()
         .text_size(13)
-        .when(c.active, (el) => el.bg(C.tab).border_color(C.tabEdge))
-        .when(!c.active, (el) => el.border_color("#00000000").hover((s) => s.bg(C.hover)))
+        .when(c.active, (el) => el.bg(C().tab).border_color(C().tabEdge))
+        .when(!c.active, (el) => el.border_color("#00000000").hover((s) => s.bg(C().hover)))
         .on_click(() => run("tab.select", { id: c.id }))
         .on_mouse_down("right", () =>
           openOverlay({ mod: "menu", kind: "popup", width: 200, props: { tab: "tab", target: { id: c.id, space: space.id } } }),
@@ -128,8 +132,8 @@ export default class TerminalsBar extends View {
             .min_w(0)
             .gap(6)
             .truncate()
-            .child(div().flex_none().text_color(c.active ? C.text : "#c4c6ca").child(c.name))
-            .when(Boolean(where), (el) => el.child(div().truncate().text_color(C.dim).child(where))),
+            .child(div().flex_none().text_color(c.active ? C().text : C().muted).child(c.name))
+            .when(Boolean(where), (el) => el.child(div().truncate().text_color(C().dim).child(where))),
         );
     };
 
@@ -149,14 +153,14 @@ export default class TerminalsBar extends View {
           .gap(8)
           .items_center()
           .rounded_full()
-          .bg(C.chip)
+          .bg(C().chip)
           .cursor_pointer()
           .text_size(13)
-          .text_color(C.dim)
-          .hover((s) => s.text_color(C.text))
+          .text_color(C().dim)
+          .hover((s) => s.text_color(C().text))
           .on_click(() => openOverlay({ mod: "picker", kind: "popup", at: "top", offset: 40, width: 640, height: 0.8 }))
           .child(svg("mods/terminals-bar/stack.svg").size(15))
-          .child(div().max_w(160).truncate().text_color(C.text).child(space.name)),
+          .child(div().max_w(160).truncate().text_color(C().text).child(space.name)),
       )
       .child(
         h_flex()
@@ -166,7 +170,7 @@ export default class TerminalsBar extends View {
           .p(3)
           .gap(3)
           .rounded(16)
-          .bg(C.tray)
+          .bg(C().tray)
           .children(space.tabs.map(tab)),
       )
       .child(div().flex_1())
