@@ -235,6 +235,54 @@ impl DisplayMap {
         self.rebuild_fold_projection();
     }
 
+    /// HERDR: install (or remove) the presenter that hides, replaces and scales text.
+    pub fn set_presenter(
+        &mut self,
+        presenter: Option<std::rc::Rc<std::cell::RefCell<dyn crate::input::LinePresenter>>>,
+        cx: &mut App,
+    ) {
+        self.wrap_map.set_presenter(presenter, cx);
+        self.rebuild_fold_projection();
+    }
+
+    /// HERDR: whether a presenter is installed.
+    pub fn has_presenter(&self) -> bool {
+        self.wrap_map.wrapper().presenter().is_some()
+    }
+
+    /// HERDR: the editor's row height, for presented pictures. Returns whether rows changed.
+    pub fn set_line_height(&mut self, line_height: Pixels, cx: &mut App) -> bool {
+        let changed = self.wrap_map.set_line_height(line_height, cx);
+        if changed {
+            self.rebuild_fold_projection();
+        }
+        changed
+    }
+
+    /// HERDR: wrap again after the presenter's output changed without an edit.
+    pub fn refresh_presentation(&mut self, cx: &mut App) {
+        self.wrap_map.refresh_presentation(cx);
+        self.rebuild_fold_projection();
+    }
+
+    /// HERDR: move the reveal to the caret's row. Returns whether rows wrapped again.
+    pub fn set_reveal(&mut self, reveal: Option<(usize, Range<usize>)>, cx: &mut App) -> bool {
+        let changed = self.wrap_map.set_reveal(reveal, cx);
+        if changed {
+            self.rebuild_fold_projection();
+        }
+        changed
+    }
+
+    /// HERDR: how buffer row `row` is presented right now.
+    pub(crate) fn presentation(
+        &self,
+        row: usize,
+        line: &str,
+    ) -> Option<crate::input::LinePresentation> {
+        self.wrap_map.wrapper().presentation(row, line)
+    }
+
     pub fn on_layout_changed(&mut self, wrap_width: Option<Pixels>, cx: &mut App) {
         self.wrap_map.on_layout_changed(wrap_width, cx);
         self.rebuild_fold_projection();

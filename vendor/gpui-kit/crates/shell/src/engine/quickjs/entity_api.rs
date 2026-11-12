@@ -456,7 +456,9 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
                     colors.insert(name.clone(), color);
                 }
                 let style = gpui_base::input::InputEditorStyle {
-                    highlight_styles: std::sync::Arc::new(crate::syntax::SyntaxStyles(colors)),
+                    highlight_styles: std::sync::Arc::new(crate::syntax::SyntaxStyles(
+                        colors.clone(),
+                    )),
                     ..Default::default()
                 };
                 let store = alive(&ctx, &create_editor)?;
@@ -466,6 +468,7 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
                         .create_editor(
                             options,
                             style,
+                            &colors,
                             scope::current_application_generation(),
                             window,
                             cx,

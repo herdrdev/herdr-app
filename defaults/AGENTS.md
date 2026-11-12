@@ -998,7 +998,23 @@ and other interactive controls too.
 them. Text: `TextView.markdown(id, text)` renders markdown; `EditorState.new({
 language, value, readonly, font_family: settings().font_family, syntax: {
 keyword: theme().ansi5, ... } })` + `Editor.new(state)` is a code view (readonly)
-or editor with syntax highlighting, line numbers and folding. A viewer opens
+or editor with syntax highlighting, line numbers and folding.
+`EditorState.new({ live_preview: true, ... })` goes further: one surface where Markdown
+is typed and drawn formatted in place, like Obsidian's live preview. Markers (`**`, `#`,
+link targets) hide until the caret touches their element, headings are larger, bullets
+and task checkboxes are glyphs (`symbol_font_family: "Symbols Nerd Font"`), tables line
+up in columns, code and quotes get their own look (`code_font_family`), and a line that
+is only `![[shot.png]]` or `![alt](shot.png)` draws the picture once the mod names its
+file with `state.set_images([{ target, path }])`. The text is never changed; `language`
+is ignored; colors come from `syntax` (heading, punctuation, link, code,
+code.background, quote, quote.bar, tag, tag.background, highlight, rule, muted,
+checkbox). Give the `Editor` `.line_height(1.75)` so headings fit their row.
+Editors also have `selected_range()`, `set_selected_range(range)`, `replace(text)`,
+`focus()` and `cursor_bounds()` (where the caret is, in window pixels and from the
+element's corner: anchor a completion list to it). To take a key the editor keeps
+(Enter, Tab, the arrows), bind it under your own context with the editor inside:
+`cx.bind_keys([{ keystroke: "enter", action: "my-enter", context: "MyNotes > Input" }])`,
+`.key_context("MyNotes")` on a wrapper and `.on_action("my-enter", ...)` above it. A viewer opens
 beside the shell as a pane: `pane.split {direction, mod, props: { file }}`.
 The full surface is in `gpui-kit.d.ts` next to this file.
 

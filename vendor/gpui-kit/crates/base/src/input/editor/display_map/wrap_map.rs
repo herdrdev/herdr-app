@@ -120,6 +120,31 @@ impl WrapMap {
         self.wrapper.set_inline_metrics(metrics, cx);
     }
 
+    // HERDR: line presentation passes through to the wrapper, which measures with it.
+    pub(super) fn set_presenter(
+        &mut self,
+        presenter: Option<std::rc::Rc<std::cell::RefCell<dyn crate::input::LinePresenter>>>,
+        cx: &mut App,
+    ) {
+        self.wrapper.set_presenter(presenter, cx);
+    }
+
+    pub(super) fn set_line_height(&mut self, line_height: Pixels, cx: &mut App) -> bool {
+        self.wrapper.set_line_height(line_height, cx)
+    }
+
+    pub(super) fn refresh_presentation(&mut self, cx: &mut App) {
+        self.wrapper.refresh_presentation(cx);
+    }
+
+    pub(super) fn set_reveal(
+        &mut self,
+        reveal: Option<(usize, Range<usize>)>,
+        cx: &mut App,
+    ) -> bool {
+        self.wrapper.set_reveal(reveal, cx)
+    }
+
     pub(super) fn on_layout_changed(&mut self, wrap_width: Option<Pixels>, cx: &mut App) {
         self.wrapper.set_wrap_width(wrap_width, cx);
     }

@@ -1864,6 +1864,7 @@ impl<M: InputModeKind> TextElement<M> {
                                 x,
                                 width,
                                 text: Some(shaped),
+                                glyph: None,
                             });
                             x += width;
                         }
@@ -1873,6 +1874,7 @@ impl<M: InputModeKind> TextElement<M> {
                             x,
                             width,
                             text: None,
+                            glyph: None,
                         });
                         x += width;
                         offset = local.end;
@@ -1891,6 +1893,7 @@ impl<M: InputModeKind> TextElement<M> {
                             x,
                             width,
                             text: Some(shaped),
+                            glyph: None,
                         });
                     }
                     lines.push(InputLine::inline(text[range].to_owned().into(), fragments));
@@ -1994,6 +1997,126 @@ impl<M: InputModeKind> TextElement<M> {
         out
     }
 
+    /// HERDR: shape one presented line: hidden spans take no room, replaced
+    /// spans draw their glyph, styled spans their font, all at the line's scale.
+    /// Fragment offsets stay in source bytes, so the caret and hit-testing agree.
+    #[allow(clippy::too_many_arguments)]
+    fn layout_presented_line(
+        presentation: &crate::input::LinePresentation,
+        line_text: &str,
+        wrapped: &[Range<usize>],
+        indent: u32,
+        runs: &[TextRun],
+        run_offset: usize,
+        bg_segments: &[(Range<usize>, Hsla)],
+        line_byte_offset: usize,
+        font_size: Pixels,
+        available: Pixels,
+        window: &mut Window,
+    ) -> LineLayout {
+        use crate::input::display_map::{InlineFragment, InputLine, LineDecor};
+        use crate::input::{SpanKind, presentation::apply_spans_to_runs};
+        let size = font_size * presentation.scale;
+        let mut lines: SmallVec<[InputLine; 1]> = SmallVec::new();
+        let mut line_has_background = false;
+        for range in wrapped {
+            let row_runs = runs_for_range(runs, run_offset, range);
+            let row_runs = if bg_segments.is_empty() {
+                row_runs
+            } else {
+                split_runs_by_bg_segments(line_byte_offset + range.start, &row_runs, bg_segments)
+            };
+            let mut fragments = Vec::new();
+            let mut x = px(0.);
+            for piece in presentation.pieces(range.clone()) {
+                let local = piece.range.start - range.start..piece.range.end - range.start;
+                let part_runs = runs_for_range(&row_runs, 0, &local);
+                match &piece.kind {
+                    SpanKind::Hidden => fragments.push(InlineFragment {
+                        range: local,
+                        x,
+                        width: px(0.),
+                        text: None,
+                        glyph: None,
+                    }),
+                    SpanKind::Replace(with) => {
+                        let Some(mut run) = part_runs.into_iter().next() else {
+                            continue;
+                        };
+                        run.len = with.len();
+                        piece.style.apply(&mut run);
+                        line_has_background |= run.background_color.is_some();
+                        let shaped =
+                            window
+                                .text_system()
+                                .shape_line(with.clone(), size, &[run], None);
+                        let width = shaped.width;
+                        fragments.push(InlineFragment {
+                            range: local,
+                            x,
+                            width,
+                            text: None,
+                            glyph: Some(shaped),
+                        });
+                        x += width;
+                    }
+                    SpanKind::Text => {
+                        let Some(part) = line_text.get(piece.range.clone()) else {
+                            continue;
+                        };
+                        let part_runs = apply_spans_to_runs(
+                            part_runs,
+                            &piece.range,
+                            std::slice::from_ref(&piece),
+                        );
+                        let part_runs = align_runs_to_char_boundaries(part, &part_runs)
+                            .unwrap_or(part_runs);
+                        line_has_background |= has_background(&part_runs);
+                        let shaped = window.text_system().shape_line(
+                            part.to_owned().into(),
+                            size,
+                            &part_runs,
+                            None,
+                        );
+                        let width = shaped.width;
+                        fragments.push(InlineFragment {
+                            range: local,
+                            x,
+                            width,
+                            text: Some(shaped),
+                            glyph: None,
+                        });
+                        x += width;
+                    }
+                }
+            }
+            let row_text = line_text.get(range.clone()).unwrap_or_default();
+            lines.push(InputLine::inline(row_text.to_owned().into(), fragments));
+        }
+        let wrap_indent = if indent > 0 && lines.len() > 1 {
+            let bytes = line_text
+                .char_indices()
+                .nth(indent as usize)
+                .map_or(line_text.len(), |(ix, _)| ix);
+            lines[0].x_for_index(bytes)
+        } else {
+            px(0.)
+        };
+        LineLayout::new()
+            .inline_lines(lines)
+            .wrap_indent(wrap_indent)
+            .with_background(line_has_background)
+            .with_decor(presentation.has_decor().then_some(LineDecor {
+                background: presentation.background,
+                left_bar: presentation.left_bar,
+                rule: presentation.rule,
+                image: presentation
+                    .image
+                    .as_ref()
+                    .map(|image| (image.image.clone(), image.fit(available))),
+            }))
+    }
+
     #[allow(clippy::too_many_arguments)]
     fn layout_lines(
         state: &InputBaseState<M>,
@@ -2064,6 +2187,27 @@ impl<M: InputModeKind> TextElement<M> {
                 .expect("line should exists in wrapper");
 
             debug_assert_eq!(line_item.len(), line_text.len());
+
+            // HERDR: a presented line shapes its visible pieces, not its bytes.
+            if !state.masked
+                && let Some(presentation) = state.display_map.presentation(buffer_line, &line_text)
+            {
+                lines.push(Self::layout_presented_line(
+                    &presentation,
+                    &line_text,
+                    &line_item.wrapped_lines,
+                    line_item.indent,
+                    runs,
+                    run_offset,
+                    bg_segments,
+                    last_layout.visible_line_byte_offsets[vi],
+                    font_size,
+                    last_layout.wrap_width.unwrap_or(px(720.)),
+                    window,
+                ));
+                run_offset += line_text.len() + 1;
+                continue;
+            }
 
             let mut wrapped_lines: SmallVec<[ShapedLine; 1]> = SmallVec::with_capacity(1);
             let mut line_has_background = false;
@@ -2585,6 +2729,16 @@ impl<M: InputModeKind> Element for TextElement<M> {
             });
         }
 
+        // HERDR: the caret's row shows its markers as source; move the reveal
+        // with it before rows are counted, since revealing changes wrapping.
+        if self.state.read(cx).display_map.has_presenter() {
+            self.state.update(cx, |state, cx| {
+                let reveal = state.presentation_reveal(window);
+                state.display_map.set_line_height(window.line_height(), cx);
+                state.display_map.set_reveal(reveal, cx);
+            });
+        }
+
         let line_height = window.line_height();
         let token_elements = self.measure_tokens(
             (bounds.size.width - line_number_width - RIGHT_MARGIN).max(px(1.)),
@@ -3097,6 +3251,18 @@ impl<M: InputModeKind> Element for TextElement<M> {
             let p = point(
                 origin.x + prepaint.last_layout.line_number_width + scroll_offset,
                 origin.y + offset_y,
+            );
+
+            // HERDR: presented lines paint their fills, bar and rule first.
+            line.paint_decor(
+                point(
+                    origin.x + prepaint.last_layout.line_number_width,
+                    origin.y + offset_y,
+                ),
+                line_height,
+                (prepaint.last_layout.content_width - prepaint.last_layout.line_number_width)
+                    .max(px(0.)),
+                window,
             );
 
             line.paint_background(
