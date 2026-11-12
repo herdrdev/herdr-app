@@ -75,6 +75,29 @@ function parseTerminalPorts(text) {
   return Array.from(ports);
 }
 
+async function findAvailableLocalPort(preferredPort, forwardedList) {
+  let port = parseInt(preferredPort, 10) || 3000;
+  const taken = new Set((forwardedList || []).map((f) => f.localPort));
+  while (taken.has(port)) {
+    port++;
+  }
+
+  const isWindows = window()?.platform === "windows";
+  if (isWindows) {
+    try {
+      const script = `$p = ${port}; while ($p -lt ${port + 100}) { if (-not (Get-NetTCPConnection -LocalPort $p -ErrorAction SilentlyContinue)) { try { $l = [System.Net.Sockets.TcpListener]::new([System.Net.IPAddress]::Loopback, $p); $l.Start(); $l.Stop(); Write-Output $p; break } catch { $p++ } } else { $p++ } }`;
+      const res = await exec("powershell", ["-NoProfile", "-Command", script]).catch(() => null);
+      if (res && res.stdout) {
+        const found = parseInt(res.stdout.trim(), 10);
+        if (found && !isNaN(found) && !taken.has(found)) {
+          return found;
+        }
+      }
+    } catch (_) {}
+  }
+  return port;
+}
+
 export default class Ports extends View {
   init(_props, cx) {
     this.machines = [];
@@ -86,16 +109,13 @@ export default class Ports extends View {
     this.autoNotified = new Set();
 
     this.remoteInput = InputState.new({ placeholder: "Remote port (e.g. 3000)" });
-    this.localInput = InputState.new({ placeholder: "Local port (default: same)" });
+    this.localInput = InputState.new({ placeholder: "Local port (auto-detects next free)" });
 
     this.remotePortVal = "";
     this.localPortVal = "";
 
     this.remoteInput.on("change", () => {
       this.remotePortVal = this.remoteInput.value().trim();
-      if (!this.localPortVal) {
-        this.localInput.set_value(this.remotePortVal);
-      }
       cx.notify();
     });
 
@@ -179,7 +199,7 @@ export default class Ports extends View {
             const isAlready = this.forwarded.some((f) => f.machine === this.selectedMachine && f.remotePort === d.port);
             if (isDev && !isAlready && !this.autoNotified.has(`${this.selectedMachine}:${d.port}`)) {
               this.autoNotified.add(`${this.selectedMachine}:${d.port}`);
-              await this.forwardPort(d.port, d.port, cx, true, d.process);
+              await this.forwardPort(d.port, null, cx, true, d.process);
             }
           }
         }
@@ -204,7 +224,7 @@ export default class Ports extends View {
           const isAlready = this.forwarded.some((f) => f.machine === machine && f.remotePort === port);
           if (!isAlready && !this.autoNotified.has(`${machine}:${port}`)) {
             this.autoNotified.add(`${machine}:${port}`);
-            await this.forwardPort(port, port, cx, true, t.agent || "terminal");
+            await this.forwardPort(port, null, cx, true, t.agent || "terminal");
           }
         }
       }
@@ -213,10 +233,9 @@ export default class Ports extends View {
 
   async forwardPort(remotePort, localPort, cx, isAuto = false, sourceDesc = "") {
     const rPort = parseInt(remotePort, 10);
-    const lPort = parseInt(localPort || remotePort, 10);
-    if (!rPort || isNaN(rPort) || !lPort || isNaN(lPort)) {
+    if (!rPort || isNaN(rPort)) {
       if (!isAuto) {
-        notify({ title: "Invalid Port", body: "Please enter a valid port number", level: "error" });
+        notify({ title: "Invalid Port", body: "Please enter a valid remote port number", level: "error" });
       }
       return;
     }
@@ -226,21 +245,17 @@ export default class Ports extends View {
     const mInfo = this.machines.find((m) => m.name === machineName);
     const target = mInfo?.target || machineName;
 
-    const existing = this.forwarded.find((f) => f.machine === machineName && f.remotePort === rPort);
-    if (existing) {
-      if (!isAuto) {
-        notify({ title: "Already Forwarded", body: `Port ${rPort} is already forwarded to localhost:${existing.localPort}`, level: "info" });
-      }
-      return;
-    }
+    // Allocate an available local port with collision resolution
+    const preferredLocal = parseInt(localPort, 10) || rPort;
+    const lPort = await findAvailableLocalPort(preferredLocal, this.forwarded);
 
     const isWindows = window()?.platform === "windows";
     try {
       if (isWindows) {
-        const cmd = `Start-Process -FilePath ssh -ArgumentList '-N', '-L', '${lPort}:127.0.0.1:${rPort}', '${target}' -WindowStyle Hidden`;
+        const cmd = `Start-Process -FilePath ssh -ArgumentList '-N', '-L', '127.0.0.1:${lPort}:127.0.0.1:${rPort}', '${target}' -WindowStyle Hidden`;
         await exec("powershell", ["-NoProfile", "-Command", cmd]);
       } else {
-        await exec("ssh", ["-f", "-N", "-L", `${lPort}:127.0.0.1:${rPort}`, target]);
+        await exec("ssh", ["-f", "-N", "-L", `127.0.0.1:${lPort}:127.0.0.1:${rPort}`, target]);
       }
 
       const item = {
@@ -256,9 +271,10 @@ export default class Ports extends View {
       this.forwarded.push(item);
       this.saveForwarded();
 
+      const portDiffMsg = lPort !== rPort ? ` (port ${rPort} was busy -> mapped to :${lPort})` : "";
       notify({
         title: isAuto ? "Auto-Forwarded Port" : "Port Forwarded",
-        body: `${machineName}:${rPort} (${sourceDesc || "service"}) -> http://localhost:${lPort}`,
+        body: `${machineName}:${rPort} (${sourceDesc || "service"}) -> http://localhost:${lPort}${portDiffMsg}`,
         level: "success",
       });
 
@@ -291,6 +307,7 @@ export default class Ports extends View {
 
     this.forwarded = this.forwarded.filter((f) => f.id !== item.id);
     this.saveForwarded();
+    this.autoNotified.delete(`${item.machine}:${item.remotePort}`);
     notify({
       title: "Tunnel Stopped",
       body: `Closed forwarding on localhost:${item.localPort}`,
@@ -299,17 +316,23 @@ export default class Ports extends View {
     cx.notify();
   }
 
-  async openBrowser(localPort) {
+  async stopAll(cx) {
+    for (const item of [...this.forwarded]) {
+      await this.stopForward(item, cx);
+    }
+  }
+
+  openBrowser(localPort) {
     const url = `http://localhost:${localPort}`;
     const isWindows = window()?.platform === "windows";
     const isMac = window()?.platform === "macos";
     try {
       if (isWindows) {
-        await exec("powershell", ["-NoProfile", "-Command", `Start-Process '${url}'`]);
+        exec("powershell", ["-NoProfile", "-Command", `Start-Process '${url}'`]).catch(() => {});
       } else if (isMac) {
-        await exec("open", [url]);
+        exec("open", [url]).catch(() => {});
       } else {
-        await exec("xdg-open", [url]);
+        exec("xdg-open", [url]).catch(() => {});
       }
     } catch (_) {}
   }
@@ -327,7 +350,7 @@ export default class Ports extends View {
 
   handleManualForward(cx) {
     const r = this.remotePortVal || this.remoteInput.value().trim();
-    const l = this.localPortVal || this.localInput.value().trim() || r;
+    const l = this.localPortVal || this.localInput.value().trim();
     this.forwardPort(r, l, cx);
   }
 
@@ -352,9 +375,12 @@ export default class Ports extends View {
             .border(1)
             .border_color(active ? t.accent : t.border)
             .hover((s) => s.bg(t.hover).text_color(t.foreground))
+            .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
             .on_click((_e, cx) => {
+              cx.stop_propagation();
               this.selectedMachine = m.name;
               this.detected = [];
+              cx.notify();
               cx.spawn(async (cx) => {
                 await this.scanDetected(cx);
               });
@@ -367,7 +393,7 @@ export default class Ports extends View {
       .filter((f) => !this.selectedMachine || f.machine === this.selectedMachine)
       .map((item) => {
         return h_flex()
-          .id(`fwd-${item.id}`)
+          .id(`fwd-row-${item.id}`)
           .h(38)
           .px(12)
           .gap(10)
@@ -378,13 +404,25 @@ export default class Ports extends View {
           .rounded(7)
           .hover((s) => s.bg(t.hover))
           .child(
-            div().size(8).rounded_full().bg("#22c55e").flex_none()
+            div().id(`dot-${item.id}`).size(8).rounded_full().bg("#22c55e").flex_none()
           )
           .child(
-            div().px(6).py(1).rounded(4).bg(t.chrome).border(1).border_color(t.border).text_size(10.5).font_medium().text_color(t.muted).child(item.machine)
+            div()
+              .id(`badge-${item.id}`)
+              .px(6)
+              .py(1)
+              .rounded(4)
+              .bg(t.chrome)
+              .border(1)
+              .border_color(t.border)
+              .text_size(10.5)
+              .font_medium()
+              .text_color(t.muted)
+              .child(item.machine)
           )
           .child(
             h_flex()
+              .id(`ports-label-${item.id}`)
               .gap(6)
               .items_center()
               .text_size(12.5)
@@ -396,12 +434,13 @@ export default class Ports extends View {
           )
           .when(Boolean(item.source), (el) =>
             el.child(
-              div().px(5).py(1).rounded(3).bg(t.chrome).text_size(10).text_color(t.dim).child(item.source)
+              div().id(`src-${item.id}`).px(5).py(1).rounded(3).bg(t.chrome).text_size(10).text_color(t.dim).child(item.source)
             )
           )
           .child(div().flex_1())
           .child(
             h_flex()
+              .id(`btn-open-browser-${item.id}`)
               .gap(4)
               .px(8)
               .py(3)
@@ -411,28 +450,44 @@ export default class Ports extends View {
               .border_color(t.border)
               .cursor_pointer()
               .hover((s) => s.bg(t.accent).text_color("#fff"))
-              .on_click(() => this.openBrowser(item.localPort))
+              .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+              .on_click((_e, cx) => {
+                cx.stop_propagation();
+                this.openBrowser(item.localPort);
+              })
               .child(svg(I("globe")).size(12).flex_none())
               .child(div().text_size(11.5).font_medium().child("Open Browser"))
           )
           .child(
             div()
-              .p(4)
+              .id(`btn-copy-${item.id}`)
+              .p(5)
               .rounded(5)
               .cursor_pointer()
               .text_color(t.dim)
               .hover((s) => s.bg(t.chrome).text_color(t.foreground))
-              .on_click((_e, cx) => this.copyUrl(item.localPort, cx))
+              .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+              .on_click((_e, cx) => {
+                cx.stop_propagation();
+                this.copyUrl(item.localPort, cx);
+              })
               .child(svg(I("link")).size(13))
           )
           .child(
             div()
-              .p(4)
+              .id(`btn-stop-${item.id}`)
+              .p(5)
               .rounded(5)
               .cursor_pointer()
               .text_color(t.dim)
               .hover((s) => s.bg("#ef444422").text_color("#ef4444"))
-              .on_click((_e, cx) => this.stopForward(item, cx))
+              .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+              .on_click((_e, cx) => {
+                cx.stop_propagation();
+                cx.spawn(async (cx) => {
+                  await this.stopForward(item, cx);
+                });
+              })
               .child(svg(I("trash")).size(13))
           );
       });
@@ -440,7 +495,7 @@ export default class Ports extends View {
     const detectedRows = this.detected.map((d) => {
       const isAlreadyForwarded = this.forwarded.some((f) => f.machine === this.selectedMachine && f.remotePort === d.port);
       return h_flex()
-        .id(`det-${d.port}`)
+        .id(`det-row-${d.port}`)
         .h(34)
         .px(12)
         .gap(10)
@@ -450,13 +505,14 @@ export default class Ports extends View {
         .border_color(t.border)
         .rounded(6)
         .child(
-          div().size(6).rounded_full().bg(isAlreadyForwarded ? "#22c55e" : t.dim).flex_none()
+          div().id(`det-dot-${d.port}`).size(6).rounded_full().bg(isAlreadyForwarded ? "#22c55e" : t.dim).flex_none()
         )
         .child(
-          div().font_bold().text_size(12).text_color(t.foreground).child(`Port ${d.port}`)
+          div().id(`det-title-${d.port}`).font_bold().text_size(12).text_color(t.foreground).child(`Port ${d.port}`)
         )
         .child(
           div()
+            .id(`det-proc-${d.port}`)
             .px(6)
             .py(1)
             .rounded(4)
@@ -468,8 +524,9 @@ export default class Ports extends View {
         .child(div().flex_1())
         .child(
           isAlreadyForwarded
-            ? div().text_size(11).font_medium().text_color("#22c55e").child("Forwarded")
+            ? div().id(`det-fwd-badge-${d.port}`).text_size(11).font_medium().text_color("#22c55e").child("Forwarded")
             : h_flex()
+                .id(`btn-forward-detected-${d.port}`)
                 .px(8)
                 .py(2)
                 .rounded(5)
@@ -477,7 +534,13 @@ export default class Ports extends View {
                 .text_color("#fff")
                 .cursor_pointer()
                 .hover((s) => s.opacity(0.85))
-                .on_click((_e, cx) => this.forwardPort(d.port, d.port, cx, false, d.process))
+                .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+                .on_click((_e, cx) => {
+                  cx.stop_propagation();
+                  cx.spawn(async (cx) => {
+                    await this.forwardPort(d.port, null, cx, false, d.process);
+                  });
+                })
                 .child(div().text_size(11).font_medium().child("+ Forward"))
         );
     });
@@ -493,6 +556,7 @@ export default class Ports extends View {
       .child(
         // Header
         h_flex()
+          .id("ports-header")
           .items_center()
           .gap(10)
           .child(svg(I("port")).size(18).text_color(t.accent).flex_none())
@@ -506,6 +570,7 @@ export default class Ports extends View {
           .child(
             // Auto Forward Toggle
             h_flex()
+              .id("toggle-autoforward-button")
               .gap(6)
               .items_center()
               .px(8)
@@ -515,7 +580,9 @@ export default class Ports extends View {
               .bg(this.autoForward ? t.selected : t.chrome)
               .border(1)
               .border_color(this.autoForward ? t.accent : t.border)
+              .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
               .on_click((_e, cx) => {
+                cx.stop_propagation();
                 this.autoForward = !this.autoForward;
                 cx.notify();
               })
@@ -525,6 +592,7 @@ export default class Ports extends View {
           .child(
             // Refresh button
             div()
+              .id("btn-refresh-ports-header")
               .px(8)
               .py(4)
               .rounded(6)
@@ -532,12 +600,19 @@ export default class Ports extends View {
               .bg(t.chrome)
               .text_color(t.muted)
               .hover((s) => s.text_color(t.foreground).bg(t.hover))
-              .on_click((_e, cx) => this.refresh(cx))
+              .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+              .on_click((_e, cx) => {
+                cx.stop_propagation();
+                cx.spawn(async (cx) => {
+                  await this.refresh(cx);
+                });
+              })
               .child(div().text_size(11.5).child(this.scanning ? "Scanning..." : "↻ Refresh"))
           )
           .child(
             // Close button
             div()
+              .id("btn-close-ports-overlay")
               .size(26)
               .rounded(6)
               .flex()
@@ -546,13 +621,18 @@ export default class Ports extends View {
               .cursor_pointer()
               .text_color(t.dim)
               .hover((s) => s.bg(t.hover).text_color(t.foreground))
-              .on_click(() => closeOverlay())
+              .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+              .on_click((_e, cx) => {
+                cx.stop_propagation();
+                closeOverlay();
+              })
               .child(svg("mods/pane/close.svg").size(14))
           )
       )
       .child(
         // Machine Switcher
         h_flex()
+          .id("machine-switcher-bar")
           .gap(8)
           .items_center()
           .child(div().text_size(11.5).font_medium().text_color(t.dim).child("Machine:"))
@@ -561,6 +641,7 @@ export default class Ports extends View {
       .child(
         // Forward Input Bar
         v_flex()
+          .id("forward-input-box")
           .p(10)
           .rounded(8)
           .bg(t.chrome)
@@ -595,6 +676,7 @@ export default class Ports extends View {
               )
               .child(
                 h_flex()
+                  .id("btn-manual-forward-submit")
                   .h(32)
                   .px(14)
                   .items_center()
@@ -604,7 +686,11 @@ export default class Ports extends View {
                   .text_color("#fff")
                   .cursor_pointer()
                   .hover((s) => s.opacity(0.85))
-                  .on_click((_e, cx) => this.handleManualForward(cx))
+                  .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+                  .on_click((_e, cx) => {
+                    cx.stop_propagation();
+                    this.handleManualForward(cx);
+                  })
                   .child(div().text_size(12).font_semibold().child("Forward"))
               )
           )
@@ -612,6 +698,7 @@ export default class Ports extends View {
       .child(
         // Active Forwarded List Section
         v_flex()
+          .id("active-forward-section")
           .gap(6)
           .child(
             h_flex()
@@ -629,6 +716,28 @@ export default class Ports extends View {
                   .text_color(t.accent)
                   .child(String(activeForwardRows.length))
               )
+              .child(div().flex_1())
+              .when(activeForwardRows.length > 0, (el) =>
+                el.child(
+                  div()
+                    .id("btn-clear-all-forwards")
+                    .px(6)
+                    .py(2)
+                    .rounded(4)
+                    .cursor_pointer()
+                    .text_size(10.5)
+                    .text_color(t.dim)
+                    .hover((s) => s.bg("#ef444422").text_color("#ef4444"))
+                    .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+                    .on_click((_e, cx) => {
+                      cx.stop_propagation();
+                      cx.spawn(async (cx) => {
+                        await this.stopAll(cx);
+                      });
+                    })
+                    .child("Clear All")
+                )
+              )
           )
           .when(activeForwardRows.length === 0, (el) =>
             el.child(
@@ -645,6 +754,7 @@ export default class Ports extends View {
       .child(
         // Detected Services Section
         v_flex()
+          .id("detected-services-section")
           .flex_1()
           .min_h(120)
           .gap(6)
