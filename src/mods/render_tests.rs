@@ -136,7 +136,7 @@ struct Calls {
 
 fn updates(app: &str, core: &str) -> Value {
     json!({
-        "app": {"version":"0.1.0", "updates":app != "source", "ready": (app == "ready").then_some("0.1.1")},
+        "app": {"version":"0.1.0", "updates":app != "source", "dev":app == "source", "ready": (app == "ready").then_some("0.1.1")},
         "core": {"version":"0.1.5", "ready":(core == "ready").then_some("0.1.6"), "managed":(core == "managed").then_some("homebrew"), "error":(core == "error").then_some("offline"), "updating":core == "updating"},
         "checked":1700000000, "checks":app != "source", "checking":false
     })
@@ -768,6 +768,18 @@ fn machine_add_needing_input_keeps_the_picker_and_shows_instructions(cx: &mut Te
     let calls = calls.borrow();
     assert!(calls.unexpected.is_empty(), "{:?}", calls.unexpected);
     assert!(!calls.effects.iter().any(|(name, _)| name == "openOverlay" || name == "closeOverlay"), "the picker stays open without a setup dialog");
+}
+
+#[gpui::test]
+fn dev_badge_marks_only_a_development_build(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    // A build from source is the dev one; an installed release is not.
+    for (app, badge) in [("source", true), ("current", false), ("ready", false)] {
+        let tree = describe(cx, &staged, "mods/workspace-chrome", true, props(), updates(app, "current"), None)
+            .unwrap_or_else(|e| panic!("workspace-chrome/{app}: {e:#}"));
+        assert_eq!(tree.contains("Dev"), badge, "app {app}: {tree}");
+    }
 }
 
 #[gpui::test]
