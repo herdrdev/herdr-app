@@ -446,6 +446,8 @@ mod tests {
         assert_eq!(key(None, &["/opt/homebrew/bin/fish", "-lic", "command $argv[2..]; exec $argv[1] -li", "/opt/homebrew/bin/fish", "cursor-agent"]), "cursor");
         let line = powershell_line(&["codex".into(), "fix it".into()]);
         assert_eq!(key(None, &["pwsh.exe", "-NoExit", "-Command", &line]), "codex");
+        assert_eq!(key(None, &[r"C:\Program Files\PowerShell\7\pwsh.exe", "-NoExit", "-Command", &line]), "codex");
+        assert_eq!(key(None, &[r"C:\Program Files\PowerShell\7\pwsh.exe"]), "shell");
         assert_eq!(key(None, &[r"C:\Windows\powershell.exe"]), "shell");
     }
 

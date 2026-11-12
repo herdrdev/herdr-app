@@ -102,8 +102,10 @@ fn mtime(p: &std::path::Path) -> Option<SystemTime> {
 pub fn shell() -> String {
     if cfg!(windows) {
         let path = std::env::var_os("PATH").unwrap_or_default();
-        let pwsh = std::env::split_paths(&path).any(|d| d.join("pwsh.exe").is_file());
-        return if pwsh { "pwsh.exe" } else { "powershell.exe" }.into();
+        return std::env::split_paths(&path)
+            .map(|dir| dir.join("pwsh.exe"))
+            .find(|exe| exe.is_file())
+            .map_or_else(|| "powershell.exe".into(), |exe| exe.to_string_lossy().into_owned());
     }
     std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into())
 }
