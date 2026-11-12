@@ -165,6 +165,9 @@ pub struct Look {
     /// Cell height multiplier, 0.8..2 (1 keeps the font's natural rows).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_line_height: Option<f32>,
+    /// Cell width multiplier, 0.8..2 (1 keeps the font's natural columns).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_cell_width: Option<f32>,
     /// Wheel and trackpad scroll multiplier, 0.1..5.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_scroll_speed: Option<f32>,

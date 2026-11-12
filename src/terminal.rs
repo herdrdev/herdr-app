@@ -1643,19 +1643,20 @@ fn cell_metrics(window: &Window) -> CellMetrics {
     let ts = window.text_system();
     let id = ts.resolve_font(&cell_font(false, false));
     let (fs, scale) = (crate::settings::font_size(), window.scale_factor());
-    // Asked for on every frame; changes with the font, size, scale or line height.
-    thread_local!(static LAST: Cell<Option<((FontId, u32, u32, u32), CellMetrics)>> = const { Cell::new(None) });
-    let line_height = crate::settings::get().terminal_line_height;
-    let key = (id, fs.to_bits(), scale.to_bits(), line_height.to_bits());
+    // Asked for on every frame; changes with the font, size, scale, line height or cell width.
+    thread_local!(static LAST: Cell<Option<((FontId, u32, u32, u32, u32), CellMetrics)>> = const { Cell::new(None) });
+    let s = crate::settings::get();
+    let (line_height, cell_width) = (s.terminal_line_height, s.terminal_cell_width);
+    let key = (id, fs.to_bits(), scale.to_bits(), line_height.to_bits(), cell_width.to_bits());
     if let Some((_, metrics)) = LAST.get().filter(|(last, _)| *last == key) {
         return metrics;
     }
-    let metrics = font_cell_metrics(ts, id, fs, scale, line_height);
+    let metrics = font_cell_metrics(ts, id, fs, scale, line_height, cell_width);
     LAST.set(Some((key, metrics)));
     metrics
 }
 
-fn font_cell_metrics(ts: &WindowTextSystem, id: FontId, fs: f32, scale: f32, line_height: f32) -> CellMetrics {
+fn font_cell_metrics(ts: &WindowTextSystem, id: FontId, fs: f32, scale: f32, line_height: f32, cell_width: f32) -> CellMetrics {
     // FreeType uses integer y_ppem for metrics; CoreText uses the requested size.
     let em = if cfg!(target_os = "macos") { fs * scale } else { (fs * scale).round().max(1.0) };
     let metrics = ts.font_metrics(id);
@@ -1707,7 +1708,8 @@ fn font_cell_metrics(ts: &WindowTextSystem, id: FontId, fs: f32, scale: f32, lin
     let st_pos = st.filter(|m| m.thickness != 0 || m.position != 0).map_or((ex * unit + st_thick) * 0.5, |m| m.position as f32 * unit);
     let face_width = (' '..='~').filter_map(|c| ts.advance(id, px(fs * scale), c).ok())
         .map(|s| f32::from(s.width)).reduce(f32::max).unwrap_or(fs * scale * 0.6);
-    let width = face_width.round().max(1.0);
+    // As Ghostty's adjust-cell-width: scale the rounded cell; glyph_x re-centres the face in it.
+    let width = (face_width.round().max(1.0) * cell_width).round().max(1.0);
     CellMetrics {
         size: size(px(width / scale), px(height / scale)),
         glyph_x: px(glyph_x(width, face_width) / scale),
@@ -3260,11 +3262,11 @@ mod tests {
             (16., 0.9, 9., 18., 14.), (16., 1.1, 11., 24., 19.),
             (13.5, 1., 8., 18., 14.),
         ] {
-            let metrics = font_cell_metrics(&ts, id, fs, scale, 1.0);
+            let metrics = font_cell_metrics(&ts, id, fs, scale, 1.0, 1.0);
             assert_eq!(metrics.size.map(|v| v * scale), size(px(width), px(height)));
             assert_eq!(metrics.baseline * scale, px(baseline));
             for multiplier in [0.8, 1.3, 2.0] {
-                let adjusted = font_cell_metrics(&ts, id, fs, scale, multiplier);
+                let adjusted = font_cell_metrics(&ts, id, fs, scale, multiplier, 1.0);
                 assert_eq!(adjusted.size.width, metrics.size.width);
                 assert_eq!(adjusted.size.height * scale, px((height * multiplier).round()));
                 let shift = adjusted.baseline - metrics.baseline;
@@ -3274,6 +3276,12 @@ mod tests {
                 assert!((f32::from(adjusted.underline - metrics.underline - shift)).abs() < 1e-4);
                 assert!((f32::from(adjusted.strike - metrics.strike - shift)).abs() < 1e-4);
                 assert_eq!(adjusted.underline_thickness, metrics.underline_thickness);
+            }
+            for multiplier in [0.8, 0.95, 1.3, 2.0] {
+                let adjusted = font_cell_metrics(&ts, id, fs, scale, 1.0, multiplier);
+                assert_eq!(adjusted.size.height, metrics.size.height);
+                assert_eq!(adjusted.size.width * scale, px((width * multiplier).round().max(1.0)));
+                assert_eq!((adjusted.baseline, adjusted.underline, adjusted.strike), (metrics.baseline, metrics.underline, metrics.strike));
             }
             let text = "H".repeat(60);
             let run = TextRun { len: text.len(), font: font.clone(), ..Default::default() };

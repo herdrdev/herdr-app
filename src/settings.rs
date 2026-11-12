@@ -382,6 +382,8 @@ pub struct Person {
     pub font_ligatures: bool,
     /// Cell height multiplier, 0.8..2.
     pub terminal_line_height: f32,
+    /// Cell width multiplier, 0.8..2.
+    pub terminal_cell_width: f32,
     /// Wheel and trackpad scroll multiplier, 0.1..5.
     pub terminal_scroll_speed: f32,
     /// The panels' font (their sizes follow zoom).
@@ -459,6 +461,7 @@ impl Default for Person {
             font_size: None,
             font_ligatures: false,
             terminal_line_height: 1.0,
+            terminal_cell_width: 1.0,
             terminal_scroll_speed: 1.0,
             ui_font: None,
             telemetry: true,
@@ -484,6 +487,8 @@ pub struct Settings {
     pub font_ligatures: bool,
     /// Cell height multiplier, 0.8..2.
     pub terminal_line_height: f32,
+    /// Cell width multiplier, 0.8..2.
+    pub terminal_cell_width: f32,
     /// Wheel and trackpad scroll multiplier, 0.1..5.
     pub terminal_scroll_speed: f32,
     pub ui_font_family: String,
@@ -538,6 +543,7 @@ impl Default for Settings {
             font_size: 14.0,
             font_ligatures: false,
             terminal_line_height: 1.0,
+            terminal_cell_width: 1.0,
             terminal_scroll_speed: 1.0,
             ui_font_family: "Geist".into(),
             ui_font_size: 13.0,
@@ -579,6 +585,7 @@ impl Settings {
             font_size: look.font_size.or(person.font_size).unwrap_or(d.font_size),
             font_ligatures: person.font_ligatures,
             terminal_line_height: look.terminal_line_height.unwrap_or(person.terminal_line_height).clamp(0.8, 2.0),
+            terminal_cell_width: look.terminal_cell_width.unwrap_or(person.terminal_cell_width).clamp(0.8, 2.0),
             terminal_scroll_speed: look.terminal_scroll_speed.unwrap_or(person.terminal_scroll_speed).clamp(0.1, 5.0),
             ui_font_family: look.ui_font.clone().or(person.ui_font.clone()).unwrap_or(d.ui_font_family),
             ui_font_size: d.ui_font_size,
@@ -894,6 +901,22 @@ mod tests {
         let person = Person { terminal_line_height: 5.0, terminal_scroll_speed: 0.0, ..default };
         let s = Settings::compose(&person, &crate::layout::Look::default(), true);
         assert_eq!((s.terminal_line_height, s.terminal_scroll_speed), (2.0, 0.1));
+    }
+
+    #[test]
+    fn terminal_cell_width_defaults_inherits_overrides_and_clamps() {
+        let default: Person = serde_json::from_str("{}").unwrap();
+        let none = crate::layout::Look::default();
+        assert_eq!(Settings::compose(&default, &none, true).terminal_cell_width, 1.0);
+        let person: Person = serde_json::from_str(r#"{"terminal_cell_width":0.95}"#).unwrap();
+        let roundtrip: Person = serde_json::from_value(serde_json::to_value(&person).unwrap()).unwrap();
+        assert_eq!(Settings::compose(&roundtrip, &none, true).terminal_cell_width, 0.95);
+        let look: crate::layout::Look = serde_json::from_str(r#"{"terminal_cell_width":1.1}"#).unwrap();
+        assert_eq!(Settings::compose(&person, &look, true).terminal_cell_width, 1.1);
+        let look: crate::layout::Look = serde_json::from_str(r#"{"terminal_cell_width":0.1}"#).unwrap();
+        assert_eq!(Settings::compose(&person, &look, true).terminal_cell_width, 0.8);
+        let person = Person { terminal_cell_width: 5.0, ..default };
+        assert_eq!(Settings::compose(&person, &none, true).terminal_cell_width, 2.0);
     }
 
     #[test]
