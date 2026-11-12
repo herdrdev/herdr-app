@@ -618,6 +618,7 @@ The main ones:
   releasing stops it. Programs that track the mouse still get their mouse events
   (hold Shift to select text instead). A drag stays with the terminal where it
   started, including its release outside the pane; other panes don't receive it.
+  Releasing it copies the text and shows a short "Copied to clipboard" toast.
   Terminals display Kitty graphics, including Unicode placeholder images used by
   programs such as yazi; partial images and scrolling follow the placeholder cells.
 - Agents: `agent.next`, `agent.prev`, `agent.focus {terminal}`.

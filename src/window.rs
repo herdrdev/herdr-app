@@ -451,6 +451,8 @@ pub struct AppWindow {
     core_update_error_dismissed: Option<String>,
     update_success: bool,
     update_status: String,
+    /// The "Copied to clipboard" toast on screen: the next copy replaces it.
+    copied_toast: Option<String>,
     focus: FocusHandle,
     _tasks: Vec<Task<()>>,
     /// Gives the keyboard back when what had it leaves the screen (`restore_focus`).
@@ -543,6 +545,7 @@ impl AppWindow {
             core_update_error_dismissed: None,
             update_success: false,
             update_status: String::new(),
+            copied_toast: None,
             focus: cx.focus_handle(),
             _tasks: Vec::new(),
             _focus_lost: None,
@@ -1439,6 +1442,7 @@ impl AppWindow {
                 TerminalEvent::ContextMenu(at) => {
                     this.open_menu("pane", json!({ "pane": block.trim_end_matches(SWAP), "terminal": addr }), Some(*at), window, cx)
                 }
+                TerminalEvent::Copied => this.show_copied(window, cx),
             });
             let focus = view.read(cx).focus_handle().clone();
             self.terms.insert(id, Term { view, address, focus, _sub: sub });
@@ -1876,6 +1880,16 @@ impl AppWindow {
                 });
             }).detach();
         }
+    }
+
+    /// Says a selection was copied, as Herdr did: one toast, replaced by the next copy.
+    fn show_copied(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if let Some(old) = self.copied_toast.take() {
+            self.remove_overlay(&old, window, cx);
+        }
+        let id = mods::new_overlay_id();
+        self.open_overlay(id.clone(), copied_toast_spec(), window, cx);
+        self.copied_toast = Some(id);
     }
 
     fn layout_notice(&mut self, title: &str, body: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -4738,6 +4752,11 @@ fn mod_overlay(dir: &std::path::Path) -> Value {
     meta.get("overlay").cloned().filter(Value::is_object).unwrap_or_else(|| json!({}))
 }
 
+/// A short, one-line toast: it goes after 2 s, like Herdr's.
+fn copied_toast_spec() -> Value {
+    json!({"kind": "toast", "height": 44, "notification": {"title": "Copied to clipboard", "level": "success", "timeout": 2000}})
+}
+
 fn terminal_menu_spec(name: &str, defaults: &Value, tab: &str, target: Value) -> Value {
     json!({ "mod": name, "kind": "popup",
         "width": defaults.get("width").and_then(Value::as_f64).unwrap_or(220.0),
@@ -6132,6 +6151,16 @@ export default class SystemToast extends View {
         let partial = super::terminal_menu_spec("personal-menu", &json!({"width": 0.4}), "pane", json!({}));
         assert_eq!(partial["width"], 0.4);
         assert_eq!(partial["height"], 260.0);
+    }
+
+    #[test]
+    fn copied_toast_is_a_short_success_toast() {
+        let spec = super::copied_toast_spec();
+        assert_eq!(spec["kind"], "toast");
+        assert_eq!(spec["height"], 44);
+        assert_eq!(spec["notification"]["title"], "Copied to clipboard");
+        assert_eq!(spec["notification"]["level"], "success");
+        assert_eq!(spec["notification"]["timeout"], 2000);
     }
 
     #[test]
