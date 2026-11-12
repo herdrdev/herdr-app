@@ -72,6 +72,8 @@ pub enum TerminalEvent {
     Ended,
     /// Right-click where the program doesn't take the mouse: the pane menu.
     ContextMenu(Point<Pixels>),
+    /// Terminal text reached the clipboard (a selection copy or an OSC 52 write).
+    Copied,
 }
 
 /// What the canvas closures need, shared outside the entity so prepaint can resize.
@@ -516,6 +518,7 @@ impl TerminalView {
                         g.vt.allow_clipboard_write(crate::settings::get().clipboard_write);
                         g.vt.write(&bytes);
                         let [clipboard, primary] = g.vt.take_clipboard();
+                        let copied = clipboard.is_some() || primary.is_some();
                         if let Some(text) = clipboard {
                             cx.write_to_clipboard(ClipboardItem::new_string(text));
                         }
@@ -525,6 +528,9 @@ impl TerminalView {
                         }
                         #[cfg(not(target_os = "linux"))]
                         let _ = primary;
+                        if copied {
+                            cx.emit(TerminalEvent::Copied);
+                        }
                         if let Some(ch) = g.channel {
                             g.core.credit(ch, bytes.len());
                             // What the core leaves to viewers (e.g. kitty graphics replies).
@@ -731,6 +737,7 @@ impl TerminalView {
         cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
         #[cfg(target_os = "linux")]
         cx.write_to_primary(ClipboardItem::new_string(text));
+        cx.emit(TerminalEvent::Copied);
         true
     }
 

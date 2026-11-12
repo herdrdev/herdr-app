@@ -396,6 +396,9 @@ pub struct Person {
     /// A draggable scroll position thumb at a terminal pane's right edge.
     #[serde(skip_serializing_if = "is_true")]
     pub pane_scrollbars: bool,
+    /// The "Copied to clipboard" toast when terminal text reaches the clipboard.
+    #[serde(skip_serializing_if = "is_true")]
+    pub clipboard_toast: bool,
     /// Minimum terminal text contrast ratio; 1 leaves program colors unchanged.
     pub minimum_contrast: f32,
     /// macOS Option sends Alt shortcuts, or follows the keyboard layout.
@@ -461,6 +464,7 @@ impl Default for Person {
             telemetry: true,
             clipboard_write: true,
             pane_scrollbars: true,
+            clipboard_toast: true,
             minimum_contrast: 1.0,
             option_as_alt: OptionAsAlt::Auto,
             appearance: Appearance::System,
@@ -502,6 +506,7 @@ pub struct Settings {
     /// 0..1: below 1, what's behind a terminal shows through.
     pub terminal_opacity: f32,
     pub clipboard_write: bool,
+    pub clipboard_toast: bool,
     pub minimum_contrast: f32,
     pub option_as_alt: OptionAsAlt,
     pub sounds: Sounds,
@@ -546,6 +551,7 @@ impl Default for Settings {
             terminal_padding: [10.0, 6.0],
             terminal_opacity: 1.0,
             clipboard_write: true,
+            clipboard_toast: true,
             minimum_contrast: 1.0,
             option_as_alt: OptionAsAlt::Auto,
             sounds: Sounds::default(),
@@ -587,6 +593,7 @@ impl Settings {
             terminal_opacity: look.terminal_opacity.unwrap_or(1.0).clamp(0.0, 1.0),
             sounds: person.sounds.clone(),
             clipboard_write: person.clipboard_write,
+            clipboard_toast: person.clipboard_toast,
             minimum_contrast: person.minimum_contrast,
             option_as_alt: person.option_as_alt,
         }
@@ -973,7 +980,7 @@ mod tests {
     /// settings.json key.
     #[test]
     fn the_guide_explains_every_setting() {
-        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), ui_font: Some(String::new()), telemetry: false, clipboard_write: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), ..Person::default() };
+        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), ui_font: Some(String::new()), telemetry: false, clipboard_write: false, clipboard_toast: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), ..Person::default() };
         let keys: Vec<String> = serde_json::to_value(&all).unwrap().as_object().unwrap().keys().cloned().collect();
         let guide = include_str!("../defaults/AGENTS.md");
         let section = guide.split("## The person").nth(1).and_then(|s| s.split("\n## ").next()).unwrap_or_default();
