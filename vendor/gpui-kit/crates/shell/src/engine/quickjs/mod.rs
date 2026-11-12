@@ -4185,6 +4185,17 @@ impl ShellRuntime {
             event_bounds.set("height", f32::from(bounds.size.height))?;
             payload.set("bounds", event_bounds)?;
             payload.set("modifiers", modifiers_object(&ctx, event.modifiers)?)?;
+            // Absent when no button is held, so a drag can tell it was
+            // released somewhere this element never heard about.
+            let pressed = match event.pressed_button {
+                Some(gpui::MouseButton::Left) => Some("left"),
+                Some(gpui::MouseButton::Right) => Some("right"),
+                Some(gpui::MouseButton::Middle) => Some("middle"),
+                _ => None,
+            };
+            if let Some(pressed) = pressed {
+                payload.set("pressed_button", pressed)?;
+            }
             handler.call::<_, ()>((
                 payload,
                 context_object(ctx, ContextBinding::Call(generation))?,
@@ -7273,12 +7284,14 @@ impl ShellRuntime {
                 "on_click",
                 "on_link_click",
                 "on_mouse_move",
+                "on_window_mouse_move",
                 "on_hover",
                 "on_key_down",
                 "on_key_up",
                 "on_modifiers_changed",
                 "on_mouse_down",
                 "on_mouse_up",
+                "on_window_mouse_up",
                 "on_mouse_down_out",
                 "on_drop",
                 "on_scroll_wheel",
@@ -8207,7 +8220,7 @@ impl ShellRuntime {
             // handler. The button is folded into the recorded op name — three
             // fixed names GPUI's own `MouseButton` maps onto — so the op stays
             // the `(&'static str, CallbackId)` pair every other callback uses.
-            "on_mouse_down" | "on_mouse_up" => {
+            "on_mouse_down" | "on_mouse_up" | "on_window_mouse_up" => {
                 if scope::current_phase() == Some(ScopePhase::Layout)
                     && !self.interactive_inline_layout.get()
                 {
@@ -8245,6 +8258,9 @@ impl ShellRuntime {
                     ("on_mouse_up", "left") => "on_mouse_up_left",
                     ("on_mouse_up", "right") => "on_mouse_up_right",
                     ("on_mouse_up", "middle") => "on_mouse_up_middle",
+                    ("on_window_mouse_up", "left") => "on_window_mouse_up_left",
+                    ("on_window_mouse_up", "right") => "on_window_mouse_up_right",
+                    ("on_window_mouse_up", "middle") => "on_window_mouse_up_middle",
                     (_, other) => {
                         return Err(Exception::throw_type(
                             ctx,
@@ -8278,6 +8294,7 @@ impl ShellRuntime {
             | "on_item_click"
             | "on_item_secondary_click"
             | "on_mouse_move"
+            | "on_window_mouse_move"
             | "on_hover"
             | "on_key_down"
             | "on_key_up"
@@ -10276,6 +10293,7 @@ fn callback_op_name(method: &str) -> Option<&'static str> {
         "on_click" => "on_click",
         "on_link_click" => "on_link_click",
         "on_mouse_move" => "on_mouse_move",
+        "on_window_mouse_move" => "on_window_mouse_move",
         "on_hover" => "on_hover",
         "on_key_down" => "on_key_down",
         "on_key_up" => "on_key_up",

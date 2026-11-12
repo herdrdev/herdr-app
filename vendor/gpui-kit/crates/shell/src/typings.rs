@@ -1153,6 +1153,8 @@ const CONTEXT_AND_VIEW: &str = r#"  /**
     local_position: Point;
     bounds: import("gpui-shell").ElementBounds;
     modifiers: Modifiers;
+    /** The button held during the move; absent when none is, so a drag that stops seeing it was released elsewhere. */
+    pressed_button?: MouseButton;
   }
 
   /**
@@ -1405,6 +1407,12 @@ const ELEMENT_METHODS: &str = r#"    /**
     on_click<Self extends Element>(this: Self, handler: (event: ClickEvent, cx: Context) => void): Self;
     /** GPUI `InteractiveElement::on_mouse_move`, delivered while this element is hovered. */
     on_mouse_move<Self extends Element>(this: Self, handler: (event: MouseMoveEvent, cx: Context) => void): Self;
+    /**
+     * Every pointer move in the window, wherever the pointer is, with positions
+     * against this element's box. For a drag that should keep following the
+     * pointer after it leaves the element it started on. Use on a plain layout element.
+     */
+    on_window_mouse_move<Self extends Element>(this: Self, handler: (event: MouseMoveEvent, cx: Context) => void): Self;
     /** div/h_flex/v_flex: initial size and changed layout size, in logical pixels.
      * Runs after layout, even without pointer movement. Use a stable id. */
     on_size_change<Self extends Element>(this: Self, handler: (size: { width: number; height: number }, cx: Context) => void): Self;
@@ -1452,6 +1460,14 @@ const ELEMENT_METHODS: &str = r#"    /**
     ): Self;
     /** GPUI `InteractiveElement::on_mouse_up`, for one button. */
     on_mouse_up<Self extends Element>(this: Self,
+      button: MouseButton,
+      handler: (event: MouseButtonEvent, cx: Context) => void,
+    ): Self;
+    /**
+     * A release of `button` anywhere in the window, delivered during the capture
+     * phase: where a drag that left this element is let go. Use on a plain layout element.
+     */
+    on_window_mouse_up<Self extends Element>(this: Self,
       button: MouseButton,
       handler: (event: MouseButtonEvent, cx: Context) => void,
     ): Self;
@@ -4018,12 +4034,14 @@ mod tests {
         "on_token_click",
         "on_token_hover",
         "on_mouse_move",
+        "on_window_mouse_move",
         "on_hover",
         "on_key_down",
         "on_key_up",
         "on_modifiers_changed",
         "on_mouse_down",
         "on_mouse_up",
+        "on_window_mouse_up",
         "on_mouse_down_out",
         "on_drop",
         "on_scroll_wheel",
