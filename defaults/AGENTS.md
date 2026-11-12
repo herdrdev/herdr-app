@@ -58,6 +58,11 @@ pane closes that window. `status()`, `error()`, `shown()`, `reopen()` and
 `NativeAppState("fork", target)` shows Fork, the git client, on a local
 folder, `file://` URI or WSL folder URI: a Fork process of the pane's own,
 with only that repository. The bundled `fork` mod is one Fork tab.
+`NativeAppState("unity", target)` shows the Unity Editor on the Unity project
+at `target` (a local folder or `file://` URI), in the version its
+`ProjectSettings/ProjectVersion.txt` names, from Unity Hub's editor folders.
+An editor that already has the project open is adopted; its menu bar stays.
+The bundled `unity` mod is one Unity tab.
 
 The shipped `plannotator-browser` mod takes `{ url, origin? }` props and opens a
 review with Back, Reload and Open externally controls. `herdr-app --browser-api`
