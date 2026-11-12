@@ -390,6 +390,8 @@ pub enum Request {
     Run { name: String, args: Value },
     OpenOverlay { id: String, spec: Value },
     CloseOverlay { id: String },
+    /// The OS window's title; `None` restores the default.
+    SetWindowTitle(Option<String>),
     Refresh,
     /// From `herdr-app do` / `herdr-app status` (control.rs); answer on `reply`.
     Control { cmd: Value, reply: std::sync::mpsc::Sender<Value> },
@@ -1038,6 +1040,14 @@ fn module(inst: Instance, copy: u64) -> HostModule {
         .function("panes", reader(reads.clone(), "panes", |s| &s.panes))
         .function("setAgentOrder", |a| {
             AGENT_ORDER.with(|s| *s.borrow_mut() = strings(a.get(0)));
+            Ok(HostValue::Null)
+        })
+        .function("setWindowTitle", |a| {
+            let title = match a.get(0) {
+                Some(v) if !v.is_null() => Some(a.string(0)?.to_owned()),
+                _ => None,
+            };
+            request(Request::SetWindowTitle(title));
             Ok(HostValue::Null)
         })
         .function("terminals", reader(reads.clone(), "terminals", |s| &s.terminals))

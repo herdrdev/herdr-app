@@ -1049,6 +1049,9 @@ All of it is in `herdr.d.ts`. In short:
   Closing a mod copy cancels its pending calls.
   Files also refreshes on its 10-second timer:
   `cx.spawn(async (cx) => { for (;;) { await watchFolder(dir); this.reload(); cx.notify(); } })`.
+- Window title: `setWindowTitle(title)` sets the OS window's title, which window switchers,
+  taskbars and time trackers read. The last call wins; `null` restores `Herdr`. Call it when the
+  title changes, not on every render.
 - `notify({ ..., action: { name, args } })`: the toast runs the command when clicked.
 - This copy: `props()`, `shared(key)` / `setShared(key, value)` (every mod
   sees it; setting re-renders all), `nextCommand()` (key commands for this
