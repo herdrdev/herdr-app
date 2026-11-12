@@ -6529,4 +6529,41 @@ export default class SystemToast extends View {
         assert!(!super::adoptable(&record("live"), "sp1", Some("tb2"), None));
     }
 
+
+
+    /// A popup opened near the right edge must snap back inside the window
+    /// with the 8 px margin: its body may not paint past the window border
+    /// (the reported right-edge menu clip).
+    #[gpui::test]
+    fn popup_at_right_edge_snaps_inside(cx: &mut TestAppContext) {
+        struct PopupView { at: gpui::Point<gpui::Pixels> }
+        impl Render for PopupView {
+            fn render(&mut self, _window: &mut Window, _cx: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(super::position_popup(
+                    self.at,
+                    div().id("popup-body").debug_selector(|| "POPUP".into()).w(px(220.)).h(px(140.)).bg(gpui::rgb(0x00ff00)),
+                ))
+            }
+        }
+        let window = cx.open_window(size(px(800.), px(600.)), |_, _| PopupView {
+            at: point(px(770.), px(100.)),   // 220 wide: 770 + 220 = 990, well past the 800 px edge
+        });
+        cx.run_until_parked();
+        let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+        let bounds = visual.debug_bounds("POPUP").expect("the popup body never laid out");
+        // The right edge sits exactly 8 px inside the window: SwitchAnchor alone
+        // would turn the anchor around and stop 220 px short (right at 770), so
+        // this range pins the margin, not just "somewhere inside". A pixel of
+        // rounding is allowed.
+        assert!(
+            bounds.right() >= gpui::px(780.) && bounds.right() <= gpui::px(793.),
+            "popup is not snapped to the right margin: right = {:?}",
+            bounds.right(),
+        );
+        assert!(
+            bounds.left() >= gpui::px(8.),
+            "popup lost its left margin: left = {:?}",
+            bounds.left(),
+        );
+    }
 }
