@@ -168,8 +168,8 @@ fn layout_path(name: &str) -> PathBuf {
 }
 
 /// Layout names on disk, in order: main first, then the rest alphabetically.
-/// A layout whose mods are gone (Zen after the update) isn't offered;
-/// `layout.switch {name}` still reaches it.
+/// A layout whose mods are gone (Zen after the update) isn't offered, nor is
+/// one in settings.json's `hidden_layouts`; `layout.switch {name}` still reaches both.
 pub(crate) fn layout_names() -> Vec<String> {
     let mut names: Vec<String> = std::fs::read_dir(file("layouts"))
         .into_iter()
@@ -179,7 +179,13 @@ pub(crate) fn layout_names() -> Vec<String> {
         .filter(|n| missing_mods(n).is_empty())
         .collect();
     names.sort_by_key(|n| (n != "main", n.clone()));
-    names
+    without_hidden(names, &settings::get().hidden_layouts)
+}
+
+/// Leaves out the hidden layouts, unless that leaves none: the cycle and the lists never go empty.
+fn without_hidden(names: Vec<String>, hidden: &[String]) -> Vec<String> {
+    let shown: Vec<String> = names.iter().filter(|n| !hidden.contains(n)).cloned().collect();
+    if shown.is_empty() { names } else { shown }
 }
 
 fn state_path(name: &str) -> PathBuf {
@@ -5087,6 +5093,15 @@ mod tests {
     use gpui::{div, point, px, size, Context, IntoElement, Render, TestAppContext, Window};
     use gpui::prelude::*;
 
+    #[test]
+    fn hidden_layouts_leave_the_cycle_unless_none_would_be_left() {
+        let names = || ["main", "terminals", "win98"].map(str::to_owned).to_vec();
+        let hide = |h: &[&str]| h.iter().map(|s| s.to_string()).collect::<Vec<_>>();
+        assert_eq!(super::without_hidden(names(), &hide(&["win98", "elsewhere"])), ["main", "terminals"]);
+        assert_eq!(super::without_hidden(names(), &[]), names());
+        assert_eq!(super::without_hidden(names(), &hide(&["main", "terminals", "win98"])), names());
+    }
+    
     #[test]
     fn core_error_dismissal_survives_failed_retries_but_resets_after_recovery() {
         let mut dismissed = Some("connection closed".to_owned());
