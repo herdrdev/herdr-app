@@ -65,10 +65,10 @@ impl AppWindow {
     /// The root's `window_blur`: frosted glass behind the window, else opaque.
     pub(super) fn apply_blur(&mut self, window: &mut Window) {
         let want = self.chrome.window_blur;
-        if self.blur_applied == Some(want) {
+        if self.blur_applied == want {
             return;
         }
-        self.blur_applied = Some(want);
+        self.blur_applied = want;
         window.set_background_appearance(if want { gpui::WindowBackgroundAppearance::Blurred } else { gpui::WindowBackgroundAppearance::Opaque });
     }
 

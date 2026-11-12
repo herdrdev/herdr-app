@@ -428,7 +428,7 @@ pub struct AppWindow {
     /// Where a press on a `window_drag` node started, until it moves the window.
     drag_from: Option<Point<Pixels>>,
     titlebar_applied: Option<(crate::layout::Titlebar, Option<[f32; 2]>)>,
-    blur_applied: Option<bool>,
+    blur_applied: bool,
     focused_pane: Option<String>,
     /// The mod block holding the keyboard for directional navigation.
     focused_block: Option<String>,
@@ -524,7 +524,8 @@ impl AppWindow {
             pointer: Point::default(),
             drag_from: None,
             titlebar_applied: None,
-            blur_applied: None,
+            // Windows open opaque: leave the platform alone until a layout asks for blur.
+            blur_applied: false,
             focused_pane: None,
             focused_block: None,
             synced_model_pane: None,
