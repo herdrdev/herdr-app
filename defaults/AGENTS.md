@@ -120,6 +120,10 @@ at the window’s physical pixel size, even when covered or minimized. No
 screen-recording permission is needed. Herdr must be running; before its
 first frame or during GPU recovery it reports an error instead of a PNG.
 `HERDR_APP_HOME` selects which running window to ask, as with `status`.
+On Windows the shot also includes the native windows shown in panes
+(VS Code, Fork, Unity, browser panes), as the desktop draws them. When it
+cannot, such as while Herdr is minimized, it saves Herdr's own frame with
+those panes empty and says on stderr that it left them out.
 
 ## The files
 

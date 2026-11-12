@@ -3742,6 +3742,11 @@ impl AppWindow {
             Request::CloseOverlay { id } => self.close_overlay(&id, window, cx),
             Request::Refresh => self.refresh_mods(cx),
             Request::Control { cmd, reply } => {
+                // A screenshot answers from its own thread once the file is written.
+                if let Some(path) = cmd.get("shot").and_then(Value::as_str) {
+                    crate::control::shot(window, path.into(), reply);
+                    return;
+                }
                 let _ = reply.send(self.control(cmd, window, cx));
             }
         }
@@ -3751,12 +3756,6 @@ impl AppWindow {
         if let Some(name) = cmd.get("do").and_then(Value::as_str) {
             let args = cmd.get("args").cloned().unwrap_or(Value::Null);
             return self.run_as(name, args, false, window, cx);
-        }
-        if let Some(path) = cmd.get("shot").and_then(Value::as_str) {
-            return match crate::control::save_shot(window, std::path::Path::new(path)) {
-                Ok(()) => json!({ "path": path }),
-                Err(error) => json!({ "error": format!("cannot save screenshot: {error:#}") }),
-            };
         }
         if cmd.get("commands").is_some() {
             return crate::commands::listing();

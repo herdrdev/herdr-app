@@ -105,6 +105,15 @@ assets: the pane waits for the window for up to 30 minutes.
   pane's own Fork process exits with its window, and so does Unity.
 - Native calls run outside App updates and without borrowed state: SetFocus and
   SetWindowPos deliver messages to Herdr's own window at once.
+- **Screenshots** (`src/control.rs`). Adopted windows draw themselves, so the
+  GPU frame of `herdr-app shot` has holes where they are. The shot fills them
+  from `PrintWindow(PW_CLIENTONLY | PW_RENDERFULLCONTENT)` of Herdr's window,
+  which the desktop composes even while other windows cover it: only the
+  visible parts of Herdr's shown child windows (their window regions, which
+  keep the holes cut for overlays) are taken from it. The capture runs off
+  the window thread with a 5 s limit. A minimized window, a frame of another
+  size or a failed capture leaves the native windows out; the reply names
+  why in `left_out`.
 
 ## Mod hints
 
