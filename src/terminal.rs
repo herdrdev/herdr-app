@@ -690,16 +690,18 @@ impl TerminalView {
                 .spawn(async move {
                     let (mut there, mut refused) = (Vec::new(), Vec::new());
                     for p in &paths {
+                        let name = || if copies { "the pasted image".to_owned() } else { p.file_name().unwrap_or(p.as_os_str()).to_string_lossy().into_owned() };
+                        if let Some(why) = drag_paths::upload_refusal(p) {
+                            refused.push((name(), why.to_owned()));
+                            continue;
+                        }
                         let out = crate::spawn::command(crate::core_bin::path()).args(["put", "--json", &addr]).arg(p).output();
                         if copies {
                             let _ = std::fs::remove_file(p);
                         }
                         match out.map_err(|e| e.to_string()).and_then(|o| put_answer(&o.stdout, &o.stderr)) {
                             Ok(path) => there.push(path),
-                            Err(why) => {
-                                let name = if copies { "the pasted image".to_owned() } else { p.file_name().unwrap_or(p.as_os_str()).to_string_lossy().into_owned() };
-                                refused.push((name, why));
-                            }
+                            Err(why) => refused.push((name(), why)),
                         }
                     }
                     (there, refused)

@@ -26,11 +26,12 @@ pub(super) fn same_machine(paths: &DraggedPaths, target: &str) -> Result<bool, &
 }
 
 pub(super) fn validate_upload(paths: &[PathBuf]) -> Result<(), &'static str> {
-    validate_paths(paths.iter().map(|p| p.to_string_lossy()))?;
-    if paths.iter().any(|p| p.is_dir()) {
-        return Err("Copying local folders to another machine is not supported yet. Drop the folder into a terminal on this computer instead.");
-    }
-    Ok(())
+    validate_paths(paths.iter().map(|p| p.to_string_lossy()))
+}
+
+/// Why this one item can't be copied to another machine; the rest of a drop still goes.
+pub(super) fn upload_refusal(path: &std::path::Path) -> Option<&'static str> {
+    path.is_dir().then_some("Copying local folders to another machine is not supported yet. Drop the folder into a terminal on this computer instead.")
 }
 
 /// Paths as the destination shell reads them, with a trailing space, never Enter.
@@ -146,7 +147,7 @@ mod tests {
     }
 
     #[test]
-    fn folder_uploads_are_rejected_before_any_transfer() {
+    fn folder_uploads_are_refused_one_by_one() {
         struct Scratch(PathBuf);
         impl Drop for Scratch {
             fn drop(&mut self) { let _ = std::fs::remove_dir_all(&self.0); }
@@ -156,10 +157,10 @@ mod tests {
         std::fs::create_dir(&root.0).unwrap();
         let file = root.0.join("O'Brien 中文.txt");
         std::fs::write(&file, "test").unwrap();
-        assert!(validate_upload(std::slice::from_ref(&file)).is_ok());
-        let error = validate_upload(std::slice::from_ref(&root.0)).unwrap_err();
+        assert!(validate_upload(&[file.clone(), root.0.clone()]).is_ok());
+        assert_eq!(upload_refusal(&file), None);
+        let error = upload_refusal(&root.0).unwrap();
         assert!(error.contains("Copying local folders"));
-        assert_eq!(validate_upload(&[file, root.0.clone()]), Err(error));
         // Reject only the transfer: local and same-machine remote folder paths still paste.
         assert!(quote_paths(vec![root.0.to_string_lossy().into_owned()], "t1", cfg!(windows)).is_ok());
         assert!(quote_paths(vec!["/remote/a folder".into()], "remote/t1", true).is_ok());
@@ -167,7 +168,7 @@ mod tests {
         {
             let link = root.0.join("folder-link");
             std::os::unix::fs::symlink(&root.0, &link).unwrap();
-            assert_eq!(validate_upload(&[link]), Err(error));
+            assert_eq!(upload_refusal(&link), Some(error));
         }
     }
 }
