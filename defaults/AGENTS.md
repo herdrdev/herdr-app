@@ -980,6 +980,10 @@ in init, `.track_focus(this.h).on_key_down((e, cx) => …)`, `this.h.focus()`.
 in `init`, attach `.track_scroll(this.scroll)`, then call
 `this.scroll.scroll_to_item(index)` to reveal a zero-based direct child with
 only the movement needed. Requests run once after layout; visible children stay put.
+It also says where the area is, as does a virtual list's `VirtualListScrollHandle`:
+`offset()` (`{x, y}`, counted up from 0 at the start), `content_size()` and
+`viewport_size()` (`{width, height}`), in the px you write, as of the last frame.
+At the end: `offset().y + viewport_size().height >= content_size().height - 1`.
 `.on_drop((event, cx) => …)` on a plain layout element receives external files as
 `event.paths` (absolute paths). The feedback form accepts dropped images with
 the same limits, previews and removal as picked images.
