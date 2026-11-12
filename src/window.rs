@@ -105,11 +105,18 @@ pub fn shell() -> String {
         let pwsh = std::env::split_paths(&path).any(|d| d.join("pwsh.exe").is_file());
         return if pwsh { "pwsh.exe" } else { "powershell.exe" }.into();
     }
-    std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
+    std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into())
 }
 
 fn unix_agent_argv(sh: String, cmd: Vec<String>, login: bool) -> Vec<String> {
-    let fish = std::path::Path::new(&sh).file_name().and_then(|s| s.to_str()) == Some("fish");
+    let name = std::path::Path::new(&sh).file_name().and_then(|s| s.to_str());
+    if !matches!(name, Some("sh" | "bash" | "zsh" | "dash" | "ksh" | "fish")) {
+        // Other shells cannot parse our wrapper; return to the person's shell after the command.
+        let mut run = vec!["/bin/sh".into(), "-c".into(), "\"$@\"; exec \"$0\" -i".into(), sh];
+        run.extend(cmd);
+        return run;
+    }
+    let fish = name == Some("fish");
     let script = match (fish, login) {
         (true, true) => "command $argv[2..]; exec $argv[1] -li",
         (true, false) => "command $argv[2..]; exec $argv[1] -i",
@@ -5513,6 +5520,27 @@ mod tests {
                 assert_eq!(run[2], expected);
             }
         }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn other_shells_run_the_command_then_return_to_the_shell() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = if cfg!(target_os = "linux") { std::path::PathBuf::from("/var/tmp") } else { std::env::temp_dir() };
+        let dir = temp.join(format!("herdr-other-shell-test-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // Stands in for nushell: it would fail on sh syntax, so it only records how it was started.
+        let nu = dir.join("nu");
+        std::fs::write(&nu, "#!/bin/sh\nprintf 'shell:%s\\n' \"$@\"\n").unwrap();
+        std::fs::set_permissions(&nu, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let task = "a 'quoted' task; $(not-a-command)\nnext line";
+        let cmd = vec!["printf".to_owned(), "[%s]\n".to_owned(), task.to_owned(), "".to_owned()];
+        for login in [false, true] {
+            let run = super::unix_agent_argv(nu.to_string_lossy().into(), cmd.clone(), login);
+            let out = std::process::Command::new(&run[0]).args(&run[1..]).output().unwrap();
+            assert_eq!(String::from_utf8(out.stdout).unwrap(), format!("[{task}]\n[]\nshell:-i\n"));
+        }
+        std::fs::remove_dir_all(&dir).unwrap();
     }
 
     #[test]
