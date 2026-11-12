@@ -586,6 +586,66 @@ fn font_pickers_contain_scroll_on_the_wrapper(cx: &mut TestAppContext) {
     }
 }
 
+struct RootedView(gpui::Entity<gpui_shell::ShellRoot>);
+impl gpui::Render for RootedView {
+    fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+        self.0.clone()
+    }
+}
+
+#[gpui::test]
+fn a_mod_hears_a_pinch_only_over_its_element(cx: &mut TestAppContext) {
+    use gpui::{AppContext as _, Modifiers, PinchEvent, TouchPhase, VisualTestContext, point, px};
+
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    std::fs::write(staged.0.join("main.js"), r#"
+import { View, div } from "gpui-kit";
+import { v_flex } from "gpui-base";
+export default class Demo extends View {
+  init() { this.log = []; }
+  render() {
+    return v_flex().w(300).h(200)
+      .child(div().w(100).h(50).on_pinch((event, cx) => {
+        this.log.push(`${event.delta}:${event.touch_phase}:${event.local_position.x}:${event.modifiers.platform}`);
+        cx.notify();
+      }))
+      .child(div().child(`log=${this.log.join(" ")}`));
+  }
+}
+"#).unwrap();
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|window, cx| {
+        RootedView(runtime.try_load(&staged.0, window, cx).unwrap())
+    });
+    let mut context = VisualTestContext::from_window(window.into(), cx);
+    context.update(|window, cx| window.draw(cx).clear(cx));
+    let view: gpui::Entity<gpui_shell::ScriptView> = window
+        .root(&mut context)
+        .unwrap()
+        .read_with(&context, |root, cx| root.0.read(cx).content().clone().downcast().unwrap());
+
+    let pinch = |x: f32, delta: f32, phase: TouchPhase, platform: bool| PinchEvent {
+        position: point(px(x), px(20.)),
+        delta,
+        modifiers: Modifiers { platform, ..Modifiers::default() },
+        phase,
+    };
+    // A hitbox counts as hovered only once the last input is the pointer.
+    context.simulate_mouse_move(point(px(20.), px(20.)), None, Modifiers::default());
+    context.simulate_event(pinch(20., 0.5, TouchPhase::Moved, true));
+    // Outside the element: GPUI only calls the listener on its hitbox.
+    context.simulate_event(pinch(250., 0.25, TouchPhase::Moved, false));
+    context.simulate_event(pinch(30., -0.25, TouchPhase::Ended, false));
+    context.run_until_parked();
+    context.update(|window, cx| window.draw(cx).clear(cx));
+
+    let tree = context.update(|_, cx| {
+        view.read(cx).snapshot().map(gpui_shell::RenderSnapshot::debug_tree).unwrap_or_default()
+    });
+    assert!(tree.contains("log=0.5:moved:20:true -0.25:ended:30:false"), "{tree}");
+}
+
 #[gpui::test]
 fn long_theme_names_stay_inside_their_card(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);

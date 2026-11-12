@@ -1194,6 +1194,17 @@ const CONTEXT_AND_VIEW: &str = r#"  /**
     context?: string;
   }
 
+  /** What an `on_pinch` handler receives. */
+  export interface PinchEvent {
+    /** The change in scale for this step: 0.1 is 10% larger, negative is smaller. */
+    delta: number;
+    touch_phase: "started" | "moved" | "ended" | "cancelled";
+    position: Point;
+    local_position?: Point;
+    bounds?: import("gpui-shell").ElementBounds;
+    modifiers: Modifiers;
+  }
+
   /** What an `on_scroll_wheel` handler receives. */
   export interface ScrollWheelEvent {
     /** The scroll distance in pixels, whichever unit the device reported. */
@@ -1464,6 +1475,11 @@ const ELEMENT_METHODS: &str = r#"    /**
      * the gesture drives something else — a zoom, a value, a custom viewport.
      */
     on_scroll_wheel<Self extends Element>(this: Self, handler: (event: ScrollWheelEvent, cx: Context) => void): Self;
+    /**
+     * GPUI `InteractiveElement::on_pinch`: a two-finger trackpad pinch over
+     * this element, on platforms that report one.
+     */
+    on_pinch<Self extends Element>(this: Self, handler: (event: PinchEvent, cx: Context) => void): Self;
     /**
      * `handler(event, cx)` when the named action is dispatched to this element
      * or to something inside it.
@@ -4000,6 +4016,7 @@ mod tests {
         "on_mouse_down_out",
         "on_drop",
         "on_scroll_wheel",
+        "on_pinch",
         "on_action",
         "key_context",
         "image",
