@@ -152,6 +152,12 @@ floats included, even when the window is covered or minimized. No screen
 capture or permissions. It needs a running window that has drawn a frame;
 `HERDR_APP_HOME` selects the window, as for `status`.
 
+On Windows the shot also shows the native windows in Herdr's panes (VS Code,
+Fork, Unity, browser panes) as the desktop draws them, also when another
+window covers Herdr. When it cannot, such as while Herdr is minimized, it
+still saves Herdr's own frame, with those panes empty, and says on stderr
+that it left them out.
+
 ## Problems and safety
 
 If Herdr misbehaves, `herdr-app feedback "<what happened>"` drafts a report.
