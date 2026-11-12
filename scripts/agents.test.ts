@@ -208,7 +208,7 @@ function keptRender(sort: string, { width = 268, kept = [{ address: "t3", parent
     panes: () => list.map(a => ({ tab: a.tab, terminal: a.address, program, title: a.title })), focused: () => null,
     spaces: () => [{ tabs: [{ id: "tab1", name: "Project", named: true }] }],
     layout: () => ({ id: "sidebar", size: { px: width } }), shared: () => sort,
-    theme: () => ({}), setAgentOrder: (order: string[]) => orders.push(order),
+    theme: () => ({}), window: () => ({ platform: "linux" }), setAgentOrder: (order: string[]) => orders.push(order),
     div: element, v_flex: element, h_flex: element, svg: element, image: element,
   });
   const ids: string[] = [];
