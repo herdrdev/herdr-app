@@ -302,13 +302,16 @@ export default class Agents extends View {
         return h_flex()
           .id(`ag-${a.address}`)
           .h(26)
-          .px(8)
+          .mx(6)
+          .px(2)
+          .rounded(6)
           .flex_none()
           .items_center()
           .gap(4)
+          .when(a.focused, (el) => el.bg(t.selected))
           .hover((s) => s.bg(t.hover))
           .on_click(() => run("pane.focus", { pane: a.pane }))
-          .child(div().flex_1().min_w(0).whitespace_nowrap().text_right().text_color(t.muted).child(String(i + 1)))
+          .child(div().flex_1().min_w(0).whitespace_nowrap().text_right().text_color(a.focused ? t.foreground : t.muted).child(String(i + 1)))
           .child(h_flex().w(14).flex_none().items_center().justify_center().child(this.status(t, a, true)));
       }
       const when = this.since(a);
