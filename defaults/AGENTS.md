@@ -117,10 +117,11 @@ the highlighted line shows where it will land.
   If starting in an inherited folder fails, new spaces, tabs and splits retry in
   that machine's home. Explicit invalid folders still fail.
 - A **tab** is a piece of work in a space: its terminals and how they're
-  split right and down. One nobody named is called by its place (1, 2,
-  ...), as in Herdr; `tab.rename` names it ("fix login"). A space
-  has one or more; closing the last one closes the space (it stays in
-  `recent`).
+  split right and down. One nobody named is called by the title its terminal
+  reports, which an agent session sets for itself (`pi -n testname`,
+  `/session-title`), else by its place (1, 2, ...); `tab.rename` names it
+  ("fix login"). A space has one or more; closing the last one closes the
+  space (it stays in `recent`).
 - A tab can be **settled** (`tab.settle`): put away on this screen, still running;
   `settled` on each tab. The shipped layouts don't use it (they list every
   tab); a mod that does can hide or fold settled tabs. Showing one, or an
