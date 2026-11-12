@@ -1833,11 +1833,13 @@ enum RowOp {
     Sprite { x: usize, text: String, color: Hsla },
     Icon { x: usize, offset: Point<Pixels>, font: FontId, glyph: GlyphId, size: Pixels, color: Hsla },
     Text { x: usize, line: ShapedLine },
-    Decoration { from: usize, to: usize, underline: bool, strike: bool, color: Hsla },
+    /// An underline in its style and color, a strikethrough in the text's color.
+    Decoration { from: usize, to: usize, underline: Option<(vt::Underline, Hsla)>, strike: Option<Hsla> },
 }
 
 /// A row's drawing: its backgrounds, merged into runs of one color, then its
-/// text in runs of one style (wide characters, sprites and icons on their own).
+/// text in runs of one style (wide characters, sprites and icons on their own),
+/// then its underlines and strikethroughs.
 fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: &mut Window) -> Vec<RowOp> {
     crate::bench::count(&crate::bench::ROWS);
     let ligatures = crate::settings::get().font_ligatures;
@@ -1861,13 +1863,10 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
         // Consume the first cell before dispatch: every path must make progress,
         // even when a private-use character has no bundled icon glyph.
         x += 1;
-        if c.text.is_empty() && !c.underline && !c.strike {
+        if c.text.is_empty() && c.underline.is_none() && !c.strike {
             continue;
         }
-        let mut color = hsla(c.fg);
-        if c.faint {
-            color.a = 0.6;
-        }
+        let color = cell_color(c);
         if crate::sprites::is_sprite(&c.text) {
             ops.push(RowOp::Sprite { x: start, text: c.text.clone(), color });
             continue;
@@ -1908,7 +1907,7 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
                     && d.underline == c.underline
                     && d.strike == c.strike;
                 // Bundled fallback icons are fitted separately from the text run.
-                if !same || cursor == Some(x) || (d.text.is_empty() && !d.underline && !d.strike) || crate::sprites::is_sprite(&d.text) || fallback_icon(&d.text, &text_font, window.text_system()).is_some() || fallback_size(d, &text_font, cell.width, window.text_system()).is_some() {
+                if !same || cursor == Some(x) || (d.text.is_empty() && d.underline.is_none() && !d.strike) || crate::sprites::is_sprite(&d.text) || fallback_icon(&d.text, &text_font, window.text_system()).is_some() || fallback_size(d, &text_font, cell.width, window.text_system()).is_some() {
                     break;
                 }
                 positions.push((text.len(), cell.width * (x - start) as f32));
@@ -1916,7 +1915,7 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
                 x += 1;
             }
         }
-        if text.trim_matches(' ').is_empty() && !c.underline && !c.strike {
+        if text.trim_matches(' ').is_empty() && c.underline.is_none() && !c.strike {
             continue;
         }
         if ligatures && needs_ligatures(&text, &text_font) {
@@ -1934,11 +1933,35 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
         let line = window.text_system().shape_line(text.into(), fitted_size.unwrap_or_else(|| px(crate::settings::font_size())), &[run], None)
             .with_cell_positions(&positions, width);
         ops.push(RowOp::Text { x: start, line });
-        if c.underline || c.strike {
-            ops.push(RowOp::Decoration { from: start, to: if c.wide { start + 2 } else { x }, underline: c.underline, strike: c.strike, color });
+    }
+    row_decorations(row, &mut ops);
+    ops
+}
+
+/// A cell's text color, dimmed when faint.
+fn cell_color(c: &vt::Cell) -> Hsla {
+    hsla(c.fg).opacity(if c.faint { 0.6 } else { 1.0 })
+}
+
+/// A row's underlines and strikethroughs, from its cells alone, so sprites,
+/// icons and blanks get them too. Neighbours that look the same share one.
+fn row_decorations(row: &[vt::Cell], ops: &mut Vec<RowOp>) {
+    let mut x = 0;
+    while x < row.len() {
+        let c = &row[x];
+        let start = x;
+        x += if c.wide { 2 } else { 1 };
+        if c.underline.is_none() && !c.strike {
+            continue;
+        }
+        let color = cell_color(c);
+        let underline = c.underline.map(|s| (s, c.underline_color.map_or(color, |u| hsla(u).opacity(color.a))));
+        let strike = c.strike.then_some(color);
+        match ops.last_mut() {
+            Some(RowOp::Decoration { to, underline: u, strike: s, .. }) if *to == start && *u == underline && *s == strike => *to = x,
+            _ => ops.push(RowOp::Decoration { from: start, to: x, underline, strike }),
         }
     }
-    ops
 }
 
 /// The find field's editor colors, following the theme at open time.
@@ -2080,12 +2103,50 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
                 RowOp::Text { x, line } => {
                     paint_cell_text(line, at(*x, y), metrics, window, cx);
                 }
-                RowOp::Decoration { from, to, underline, strike, color } => {
-                    for (enabled, offset, thickness) in [(*underline, metrics.underline, metrics.underline_thickness), (*strike, metrics.strike, metrics.strike_thickness)] {
-                        if enabled {
-                            let b = Bounds::new(at(*from, y) + point(px(0.0), offset), size(cell.width * (to - from) as f32, thickness));
-                            window.paint_quad(fill(snap_box(b), *color));
+                RowOp::Decoration { from, to, underline, strike } => {
+                    let width = cell.width * (to - from) as f32;
+                    let line = |offset: Pixels, thickness: Pixels| snap_box(Bounds::new(at(*from, y) + point(px(0.0), offset), size(width, thickness)));
+                    let (top, thick) = (metrics.underline, metrics.underline_thickness);
+                    match *underline {
+                        None => {}
+                        Some((vt::Underline::Single, color)) => window.paint_quad(fill(line(top, thick), color)),
+                        Some((vt::Underline::Double, color)) => {
+                            // A line above and a line below where the single one is, as Ghostty draws it.
+                            let top = top.min(cell.height - thick * 2.0);
+                            window.paint_quad(fill(line(top - thick, thick), color));
+                            window.paint_quad(fill(line(top + thick, thick), color));
                         }
+                        Some((vt::Underline::Curly, color)) => {
+                            // GPUI's wave is three thicknesses tall, around its middle.
+                            let offset = (top - thick).min(cell.height - thick * 3.0);
+                            let style = UnderlineStyle { thickness: thick, color: Some(color), wavy: true };
+                            window.paint_underline(at(*from, y) + point(px(0.0), offset), width, &style);
+                        }
+                        Some((vt::Underline::Dotted, color)) => {
+                            // Dots wider than the line and about a dot apart, at least one a cell, as Ghostty draws them.
+                            let (width, radius) = (f32::from(cell.width) * scale, std::f32::consts::FRAC_1_SQRT_2 * f32::from(thick) * scale);
+                            let count = (width / (4.0 * radius)).ceil().min((width / (3.0 * radius)).floor()).min((width / (2.0 * radius + 1.0)).floor()).max(1.0);
+                            let (step, dot) = (cell.width / count, px(2.0 * radius / scale));
+                            let offset = (top + (thick - dot) / 2.0).min(cell.height - dot);
+                            for i in 0..(to - from) * count as usize {
+                                let b = Bounds::new(at(*from, y) + point(step * (i as f32 + 0.5) - dot / 2.0, offset), size(dot, dot));
+                                window.paint_quad(fill(b, color).corner_radii(dot / 2.0));
+                            }
+                        }
+                        Some((vt::Underline::Dashed, color)) => {
+                            // In every cell a dash, a gap, and the start of the next dash, as Ghostty draws it.
+                            let width = f32::from(cell.width) * scale;
+                            let dash = (width / 3.0).floor() + 1.0;
+                            for x in *from..*to {
+                                for (start, len) in [(0.0, dash.min(width)), (2.0 * dash, (width - 2.0 * dash).max(0.0))] {
+                                    let b = Bounds::new(at(x, y) + point(px(start / scale), top), size(px(len / scale), thick));
+                                    window.paint_quad(fill(snap_box(b), color));
+                                }
+                            }
+                        }
+                    }
+                    if let Some(color) = *strike {
+                        window.paint_quad(fill(line(metrics.strike, metrics.strike_thickness), color));
                     }
                 }
             }
@@ -3537,11 +3598,48 @@ mod tests {
             }
             for text in ["", " ", "   "] {
                 for (underline, strike) in [(false, false), (true, false), (false, true)] {
-                    let row = [vt::Cell { text: text.into(), underline, strike, ..Default::default() }];
+                    let row = [vt::Cell { text: text.into(), underline: underline.then_some(vt::Underline::Single), strike, ..Default::default() }];
                     let ops = row_ops(&row, size(px(8.), px(16.)), None, window);
                     assert_eq!(ops.iter().filter(|op| matches!(op, RowOp::Text { .. })).count(), usize::from(underline || strike));
                 }
             }
+        }).unwrap();
+    }
+
+    #[gpui::test]
+    fn underlines_and_strikes_follow_the_cells_in_style_and_color(cx: &mut gpui::TestAppContext) {
+        use super::*;
+        use vt::{Rgb, Underline};
+        let window = cx.add_window(|_, _| Empty);
+        window.update(cx, |_, window, _| {
+            let (fg, red, blue) = (Rgb(200, 200, 200), Rgb(255, 0, 0), Rgb(0, 0, 255));
+            let cell = |text: &str, underline, underline_color| vt::Cell { text: text.into(), fg, underline, underline_color, ..Default::default() };
+            let decorations = |row: &[vt::Cell], window: &mut Window| -> Vec<_> {
+                row_ops(row, size(px(8.), px(16.)), None, window).iter().filter_map(|op| match op {
+                    RowOp::Decoration { from, to, underline, strike } => Some((*from, *to, *underline, *strike)),
+                    _ => None,
+                }).collect()
+            };
+            // A tab of bufferline.nvim: a blank, a bar (a sprite), text, a wide character and its tail, a powerline icon.
+            let mut row: Vec<_> = ["", "\u{258e}", "a", "\u{754c}", "", "\u{e0b0}"].iter().map(|t| cell(t, Some(Underline::Single), Some(red))).collect();
+            row[3].wide = true;
+            assert_eq!(decorations(&row, window), vec![(0, 6, Some((Underline::Single, hsla(red))), None)]);
+            // A run ends where the style or the color changes; plain cells have none.
+            let row = [cell("a", Some(Underline::Curly), Some(red)), cell("b", Some(Underline::Curly), None), cell("c", Some(Underline::Dashed), None), cell("d", None, None), cell("e", Some(Underline::Dashed), None)];
+            assert_eq!(decorations(&row, window), vec![
+                (0, 1, Some((Underline::Curly, hsla(red))), None),
+                (1, 2, Some((Underline::Curly, hsla(fg))), None),
+                (2, 3, Some((Underline::Dashed, hsla(fg))), None),
+                (4, 5, Some((Underline::Dashed, hsla(fg))), None),
+            ]);
+            // Faint dims the underline with the text; a strikethrough is in the text's color.
+            let struck = |c: vt::Cell| vt::Cell { strike: true, ..c };
+            let faint = vt::Cell { faint: true, ..struck(cell("a", Some(Underline::Dotted), Some(red))) };
+            assert_eq!(decorations(&[faint], window), vec![(0, 1, Some((Underline::Dotted, hsla(red).opacity(0.6))), Some(hsla(fg).opacity(0.6)))]);
+            // Another text color joins an underline that has its own color, but not a strikethrough.
+            let row = [cell("a", Some(Underline::Single), Some(red)), vt::Cell { fg: blue, ..cell("b", Some(Underline::Single), Some(red)) }];
+            assert_eq!(decorations(&row, window), vec![(0, 2, Some((Underline::Single, hsla(red))), None)]);
+            assert_eq!(decorations(&row.map(struck), window).len(), 2);
         }).unwrap();
     }
 
@@ -3764,7 +3862,7 @@ mod tests {
                 for (underline, strike) in [(false, false), (true, false), (false, true), (true, true)] {
                     for text in [format!("{missing}a\u{f10d}"), format!("\u{f10d}{missing}a"), format!("a\u{f10d}{missing}")] {
                         let row: Vec<_> = text.chars().map(|c| crate::vt::Cell {
-                            text: c.to_string(), underline, strike, ..Default::default()
+                            text: c.to_string(), underline: underline.then_some(crate::vt::Underline::Single), strike, ..Default::default()
                         }).collect();
                         let ops = super::row_ops(&row, gpui::size(gpui::px(8.0), gpui::px(16.0)), None, window);
                         let rendered: String = ops.iter().filter_map(|op| match op {
@@ -3813,7 +3911,7 @@ mod tests {
             for code in (0xe000..=0xf8ff).chain(0xf0000..=0xf0fff) {
                 let text = char::from_u32(code).unwrap().to_string();
                 for decorated in [false, true] {
-                    let row = [crate::vt::Cell { text: text.clone(), underline: decorated, strike: decorated, ..Default::default() }];
+                    let row = [crate::vt::Cell { text: text.clone(), underline: decorated.then_some(crate::vt::Underline::Single), strike: decorated, ..Default::default() }];
                     let ops = super::row_ops(&row, gpui::size(gpui::px(8.0), gpui::px(16.0)), None, window);
                     assert_eq!(ops.iter().filter(|op| !matches!(op, super::RowOp::Decoration { .. })).count(), 1, "U+{code:X}");
                     match &ops[0] {

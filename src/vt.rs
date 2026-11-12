@@ -93,9 +93,21 @@ pub struct Cell {
     pub bold: bool,
     pub italic: bool,
     pub faint: bool,
-    pub underline: bool,
+    pub underline: Option<Underline>,
+    /// The underline's own color (SGR 58); `None` draws it in the text's color.
+    pub underline_color: Option<Rgb>,
     pub strike: bool,
     pub wide: bool,
+}
+
+/// How a cell is underlined (SGR 4, 4:1 to 4:5, 21).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum Underline {
+    Single,
+    Double,
+    Curly,
+    Dotted,
+    Dashed,
 }
 
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -1699,7 +1711,7 @@ impl Vt {
                         let mut row = Vec::with_capacity(self.cols as usize);
                         let mut x: u16 = 0;
                         while ghostty_render_state_row_cells_next(self.cells) {
-                            row.push(self.read_cell(fg_default, selected && x >= sel.start_x && x <= sel.end_x));
+                            row.push(self.read_cell(fg_default, &colors.palette, selected && x >= sel.start_x && x <= sel.end_x));
                             x += 1;
                         }
                         Rc::new(row)
@@ -1733,7 +1745,7 @@ impl Vt {
         }
     }
 
-    unsafe fn read_cell(&mut self, fg_default: Rgb, selected: bool) -> Cell {
+    unsafe fn read_cell(&mut self, fg_default: Rgb, palette: &[GhosttyColorRgb; 256], selected: bool) -> Cell {
         unsafe {
             let c = self.cells;
             let mut raw: GhosttyCell = Default::default();
@@ -1788,6 +1800,21 @@ impl Vt {
                 fg = readable(fg, bg.unwrap_or(self.theme.bg), self.theme.minimum_contrast);
             }
 
+            let underline = match style.underline as GhosttySgrUnderline {
+                GHOSTTY_SGR_UNDERLINE_NONE => None,
+                GHOSTTY_SGR_UNDERLINE_DOUBLE => Some(Underline::Double),
+                GHOSTTY_SGR_UNDERLINE_CURLY => Some(Underline::Curly),
+                GHOSTTY_SGR_UNDERLINE_DOTTED => Some(Underline::Dotted),
+                GHOSTTY_SGR_UNDERLINE_DASHED => Some(Underline::Dashed),
+                _ => Some(Underline::Single),
+            };
+            // Reverse video swaps the text's colors, not the underline's own.
+            let underline_color = underline.and(match style.underline_color.tag {
+                GHOSTTY_STYLE_COLOR_PALETTE => Some(Rgb::from(palette[style.underline_color.value.palette as usize])),
+                GHOSTTY_STYLE_COLOR_RGB => Some(Rgb::from(style.underline_color.value.rgb)),
+                _ => None,
+            });
+
             Cell {
                 text,
                 fg,
@@ -1795,7 +1822,8 @@ impl Vt {
                 bold: style.bold,
                 italic: style.italic,
                 faint: style.faint,
-                underline: style.underline != 0,
+                underline,
+                underline_color,
                 strike: style.strikethrough,
                 wide: wide == GHOSTTY_CELL_WIDE_WIDE,
             }
@@ -2549,8 +2577,48 @@ mod tests {
         vt.write("\x1b[4;9m\u{10eeee}\u{305}\u{30d}".as_bytes());
         let frame = vt.frame();
         let c = &frame.rows[0][0];
-        assert!(c.text.is_empty() && !c.underline && !c.strike);
+        assert!(c.text.is_empty() && c.underline.is_none() && !c.strike);
         assert!(vt.placements().is_empty());
+    }
+
+    #[test]
+    fn cells_carry_the_underline_style_and_its_color() {
+        let mut vt = Vt::new(20, 6);
+        // Every way to ask for each style, one cell each.
+        let styles = [
+            ("4", Some(Underline::Single)),
+            ("4:1", Some(Underline::Single)),
+            ("21", Some(Underline::Double)),
+            ("4:2", Some(Underline::Double)),
+            ("4:3", Some(Underline::Curly)),
+            ("4:4", Some(Underline::Dotted)),
+            ("4:5", Some(Underline::Dashed)),
+            ("4:0", None),
+        ];
+        for (sgr, _) in styles {
+            vt.write(format!("\x1b[{sgr}mx\x1b[0m").as_bytes());
+        }
+        let frame = vt.frame();
+        for (x, (sgr, style)) in styles.into_iter().enumerate() {
+            assert_eq!(frame.rows[0][x].underline, style, "SGR {sgr}");
+            assert_eq!(frame.rows[0][x].underline_color, None, "SGR {sgr}");
+        }
+        assert_eq!(frame.rows[0][styles.len()].underline, None);
+
+        // The color in both spellings, from the palette, taken back with 59,
+        // and without an underline to draw it.
+        vt.write(b"\r\n\x1b[38;2;1;2;3m");
+        vt.write(b"\x1b[4:3m\x1b[58:2::255:0:0ma\x1b[58;2;0;255;0mb\x1b[58:5:196mc\x1b[58;5;1md\x1b[59me\x1b[24m\x1b[58:2::255:0:0mf\x1b[0m");
+        let frame = vt.frame();
+        let colors: Vec<_> = frame.rows[1][..6].iter().map(|c| c.underline_color).collect();
+        assert_eq!(colors, [Some(Rgb(255, 0, 0)), Some(Rgb(0, 255, 0)), Some(Rgb(255, 0, 0)), Some(theme().palette16[1]), None, None]);
+        assert!(frame.rows[1][..5].iter().all(|c| c.underline == Some(Underline::Curly) && c.fg == Rgb(1, 2, 3)));
+        assert_eq!(frame.rows[1][5].underline, None);
+
+        // Reverse video swaps the text's colors, not the underline's.
+        vt.write(b"\r\n\x1b[7;4;58:2::9:8:7mr\x1b[0m");
+        let c = vt.frame().rows[2][0].clone();
+        assert_eq!((c.underline, c.underline_color), (Some(Underline::Single), Some(Rgb(9, 8, 7))));
     }
 
     #[test]
