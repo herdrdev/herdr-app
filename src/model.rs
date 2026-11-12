@@ -169,6 +169,27 @@ impl Space {
     }
 }
 
+/// `root` with pane `source` moved onto pane `target`: beside its `edge`
+/// (in a new split `container` when needed), or swapped with it.
+pub fn moved(root: &Node, source: &str, target: &str, edge: Option<crate::layout::Edge>, container: String) -> Option<Node> {
+    let mut root = root.clone();
+    if let Some(edge) = edge {
+        use crate::layout::Edge;
+        let mut pane = root.remove(source)?;
+        pane.size = None;
+        let axis = if matches!(edge, Edge::Left | Edge::Right) { Axis::Row } else { Axis::Column };
+        if !root.split(target, axis, pane, container) {
+            return None;
+        }
+        if matches!(edge, Edge::Left | Edge::Top) {
+            root.swap(source, target);
+        }
+    } else if !root.swap(source, target) {
+        return None;
+    }
+    Some(root)
+}
+
 impl Model {
     pub fn fresh_id(&mut self, prefix: &str) -> String {
         use std::hash::{BuildHasher, Hasher};
@@ -322,23 +343,15 @@ impl Model {
         if !tab.root.find(source).is_some_and(Node::is_pane) || !tab.root.find(target).is_some_and(Node::is_pane) {
             return false;
         }
-        let mut root = tab.root.clone();
-        if let Some(edge) = edge {
-            use crate::layout::Edge;
-            let mut pane = root.remove(source).unwrap();
-            pane.size = None;
-            let axis = if matches!(edge, Edge::Left | Edge::Right) { Axis::Row } else { Axis::Column };
-            let machine = self.space_of(source).and_then(|s| s.machine.clone());
-            let container = self.fresh_id_on("s", machine.as_deref());
-            if !root.split(target, axis, pane, container) {
-                return false;
+        let root = tab.root.clone();
+        let container = match edge {
+            Some(_) => {
+                let machine = self.space_of(source).and_then(|s| s.machine.clone());
+                self.fresh_id_on("s", machine.as_deref())
             }
-            if matches!(edge, Edge::Left | Edge::Top) {
-                root.swap(source, target);
-            }
-        } else if !root.swap(source, target) {
-            return false;
-        }
+            None => String::new(),
+        };
+        let Some(root) = moved(&root, source, target, edge, container) else { return false };
         let tab = self.tab_of_mut(source).unwrap();
         tab.root = root;
         tab.focus(source);
