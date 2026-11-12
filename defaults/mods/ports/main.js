@@ -1,9 +1,14 @@
 // Ports: Inspect listening services on remote machines / WSL and forward ports to localhost.
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { hc, exec, spaces, theme, window, notify, closeOverlay } from "herdr";
+import { hc, exec, spaces, terminals, theme, window, notify, closeOverlay } from "herdr";
 
 const I = (name) => `mods/ports/${name}.svg`;
+
+const DEV_PROCESSES = new Set([
+  "node", "vite", "next", "python", "python3", "uvicorn", "flask", "django",
+  "fastapi", "ruby", "rails", "go", "cargo", "rust", "deno", "bun", "docker-proxy", "nginx"
+]);
 
 function parseListeningSockets(output) {
   if (!output) return [];
@@ -14,15 +19,10 @@ function parseListeningSockets(output) {
   for (const line of lines) {
     if (!line.includes("LISTEN")) continue;
 
-    // ss -tlpn pattern:
-    // LISTEN 0 511 127.0.0.1:30775 0.0.0.0:* users:(("node",pid=765379,fd=45))
-    // or netstat pattern:
-    // tcp 0 0 127.0.0.1:3000 0.0.0.0:* LISTEN 1234/node
     let port = null;
     let procName = "unknown";
     let pid = null;
 
-    // Match port from 127.0.0.1:PORT, 0.0.0.0:PORT, [::]:PORT, [::1]:PORT, *:%tailscale0:PORT
     const portMatch = line.match(/(?:127\.0\.0\.1|0\.0\.0\.0|\[::1?\]|%[a-z0-9_-]+):(\d{2,5})/i);
     if (portMatch) {
       port = parseInt(portMatch[1], 10);
@@ -31,11 +31,10 @@ function parseListeningSockets(output) {
       if (altMatch) port = parseInt(altMatch[1], 10);
     }
 
-    if (!port || port < 80 || port === 22 || port === 53) continue; // Skip ssh, dns, system ports
+    if (!port || port < 80 || port === 22 || port === 53) continue;
     if (seen.has(port)) continue;
     seen.add(port);
 
-    // Match process name and pid: users:(("node",pid=765379,fd=45))
     const procMatch = line.match(/users:\(\("([^"]+)",pid=(\d+)/i) || line.match(/LISTEN\s+(\d+)\/([^\s]+)/i);
     if (procMatch) {
       if (procMatch[1] && isNaN(procMatch[1])) {
@@ -53,6 +52,29 @@ function parseListeningSockets(output) {
   return results.sort((a, b) => a.port - b.port);
 }
 
+function parseTerminalPorts(text) {
+  if (!text) return [];
+  const ports = new Set();
+  const patterns = [
+    /https?:\/\/(?:localhost|127\.0\.0\.1|0\.0\.0\.0|\[::1?\]|(?:\d{1,3}\.){3}\d{1,3}):(\d{2,5})/gi,
+    /(?:listening on|running on|ready on|Server listening|Local:|Network:)\s*.*?[:\s](\d{2,5})/gi,
+    /localhost:(\d{2,5})/gi,
+    /:(\d{4,5})\/?\s/g
+  ];
+
+  for (const re of patterns) {
+    let match;
+    while ((match = re.exec(text)) !== null) {
+      const p = parseInt(match[1], 10);
+      if (p >= 1024 && p <= 65535 && p !== 22022 && p !== 2022) {
+        ports.add(p);
+      }
+    }
+  }
+
+  return Array.from(ports);
+}
+
 export default class Ports extends View {
   init(_props, cx) {
     this.machines = [];
@@ -60,6 +82,8 @@ export default class Ports extends View {
     this.forwarded = this.loadForwarded();
     this.detected = [];
     this.scanning = false;
+    this.autoForward = true;
+    this.autoNotified = new Set();
 
     this.remoteInput = InputState.new({ placeholder: "Remote port (e.g. 3000)" });
     this.localInput = InputState.new({ placeholder: "Local port (default: same)" });
@@ -87,10 +111,11 @@ export default class Ports extends View {
       await this.refresh(cx);
     });
 
-    // Auto refresh detected ports every 8s
-    cx.timer.every(8000, (cx) => {
+    // Auto refresh detected ports and terminal output every 6s
+    cx.timer.every(6000, (cx) => {
       cx.spawn(async (cx) => {
         await this.scanDetected(cx);
+        await this.scanTerminalsForAutoForward(cx);
       });
     });
   }
@@ -121,7 +146,6 @@ export default class Ports extends View {
       }
     } catch (_) {}
 
-    // Find active space machine
     const activeSpace = spaces().find((s) => s.active);
     const spaceMachine = activeSpace?.machine;
 
@@ -131,6 +155,7 @@ export default class Ports extends View {
     }
 
     await this.scanDetected(cx);
+    await this.scanTerminalsForAutoForward(cx);
     this.scanning = false;
     cx.notify();
   }
@@ -146,37 +171,74 @@ export default class Ports extends View {
       if (r && r.stdout) {
         this.detected = parseListeningSockets(r.stdout);
         cx.notify();
+
+        // Auto forward dev processes if enabled
+        if (this.autoForward) {
+          for (const d of this.detected) {
+            const isDev = DEV_PROCESSES.has((d.process || "").toLowerCase()) || (d.port >= 3000 && d.port <= 9999);
+            const isAlready = this.forwarded.some((f) => f.machine === this.selectedMachine && f.remotePort === d.port);
+            if (isDev && !isAlready && !this.autoNotified.has(`${this.selectedMachine}:${d.port}`)) {
+              this.autoNotified.add(`${this.selectedMachine}:${d.port}`);
+              await this.forwardPort(d.port, d.port, cx, true, d.process);
+            }
+          }
+        }
       }
     } catch (_) {}
   }
 
-  async forwardPort(remotePort, localPort, cx) {
+  async scanTerminalsForAutoForward(cx) {
+    if (!this.autoForward) return;
+    try {
+      const termList = typeof terminals === "function" ? terminals() : [];
+      for (const t of termList) {
+        const addr = t.address || "";
+        const machine = addr.includes("/") ? addr.split("/")[0] : null;
+        if (!machine) continue;
+
+        const out = await hc(["read", addr]).catch(() => null);
+        if (!out || !out.stdout) continue;
+
+        const foundPorts = parseTerminalPorts(out.stdout);
+        for (const port of foundPorts) {
+          const isAlready = this.forwarded.some((f) => f.machine === machine && f.remotePort === port);
+          if (!isAlready && !this.autoNotified.has(`${machine}:${port}`)) {
+            this.autoNotified.add(`${machine}:${port}`);
+            await this.forwardPort(port, port, cx, true, t.agent || "terminal");
+          }
+        }
+      }
+    } catch (_) {}
+  }
+
+  async forwardPort(remotePort, localPort, cx, isAuto = false, sourceDesc = "") {
     const rPort = parseInt(remotePort, 10);
     const lPort = parseInt(localPort || remotePort, 10);
     if (!rPort || isNaN(rPort) || !lPort || isNaN(lPort)) {
-      notify({ title: "Invalid Port", body: "Please enter a valid port number", level: "error" });
+      if (!isAuto) {
+        notify({ title: "Invalid Port", body: "Please enter a valid port number", level: "error" });
+      }
       return;
     }
 
     const machineName = this.selectedMachine;
+    if (!machineName) return;
     const mInfo = this.machines.find((m) => m.name === machineName);
     const target = mInfo?.target || machineName;
 
-    // Check if already forwarded
     const existing = this.forwarded.find((f) => f.machine === machineName && f.remotePort === rPort);
     if (existing) {
-      notify({ title: "Already Forwarded", body: `Port ${rPort} is already forwarded to localhost:${existing.localPort}`, level: "info" });
+      if (!isAuto) {
+        notify({ title: "Already Forwarded", body: `Port ${rPort} is already forwarded to localhost:${existing.localPort}`, level: "info" });
+      }
       return;
     }
 
-    // Launch background SSH tunnel
     const isWindows = window()?.platform === "windows";
     try {
       if (isWindows) {
         const cmd = `Start-Process -FilePath ssh -ArgumentList '-N', '-L', '${lPort}:127.0.0.1:${rPort}', '${target}' -WindowStyle Hidden`;
         await exec("powershell", ["-NoProfile", "-Command", cmd]);
-      } else if (window()?.platform === "macos") {
-        await exec("ssh", ["-f", "-N", "-L", `${lPort}:127.0.0.1:${rPort}`, target]);
       } else {
         await exec("ssh", ["-f", "-N", "-L", `${lPort}:127.0.0.1:${rPort}`, target]);
       }
@@ -187,6 +249,7 @@ export default class Ports extends View {
         target,
         remotePort: rPort,
         localPort: lPort,
+        source: sourceDesc,
         createdAt: Date.now(),
       };
 
@@ -194,8 +257,8 @@ export default class Ports extends View {
       this.saveForwarded();
 
       notify({
-        title: "Port Forwarded",
-        body: `${machineName}:${rPort} -> http://localhost:${lPort}`,
+        title: isAuto ? "Auto-Forwarded Port" : "Port Forwarded",
+        body: `${machineName}:${rPort} (${sourceDesc || "service"}) -> http://localhost:${lPort}`,
         level: "success",
       });
 
@@ -205,11 +268,13 @@ export default class Ports extends View {
       this.localPortVal = "";
       cx.notify();
     } catch (e) {
-      notify({
-        title: "Forwarding Failed",
-        body: String(e.message || e),
-        level: "error",
-      });
+      if (!isAuto) {
+        notify({
+          title: "Forwarding Failed",
+          body: String(e.message || e),
+          level: "error",
+        });
+      }
     }
   }
 
@@ -269,7 +334,6 @@ export default class Ports extends View {
   render(cx) {
     const t = theme();
 
-    // Machine selector tabs
     const machineTabs = h_flex()
       .gap(6)
       .items_center()
@@ -299,7 +363,6 @@ export default class Ports extends View {
         })
       );
 
-    // Active Forwarded Ports List
     const activeForwardRows = this.forwarded
       .filter((f) => !this.selectedMachine || f.machine === this.selectedMachine)
       .map((item) => {
@@ -315,15 +378,12 @@ export default class Ports extends View {
           .rounded(7)
           .hover((s) => s.bg(t.hover))
           .child(
-            // Green pulse / active dot
             div().size(8).rounded_full().bg("#22c55e").flex_none()
           )
           .child(
-            // Machine badge
             div().px(6).py(1).rounded(4).bg(t.chrome).border(1).border_color(t.border).text_size(10.5).font_medium().text_color(t.muted).child(item.machine)
           )
           .child(
-            // Ports mapping
             h_flex()
               .gap(6)
               .items_center()
@@ -334,9 +394,13 @@ export default class Ports extends View {
               .child(div().text_color(t.dim).child("→"))
               .child(`localhost:${item.localPort}`)
           )
+          .when(Boolean(item.source), (el) =>
+            el.child(
+              div().px(5).py(1).rounded(3).bg(t.chrome).text_size(10).text_color(t.dim).child(item.source)
+            )
+          )
           .child(div().flex_1())
           .child(
-            // Open Browser button
             h_flex()
               .gap(4)
               .px(8)
@@ -352,7 +416,6 @@ export default class Ports extends View {
               .child(div().text_size(11.5).font_medium().child("Open Browser"))
           )
           .child(
-            // Copy URL button
             div()
               .p(4)
               .rounded(5)
@@ -363,7 +426,6 @@ export default class Ports extends View {
               .child(svg(I("link")).size(13))
           )
           .child(
-            // Stop button
             div()
               .p(4)
               .rounded(5)
@@ -375,7 +437,6 @@ export default class Ports extends View {
           );
       });
 
-    // Detected Candidates Rows
     const detectedRows = this.detected.map((d) => {
       const isAlreadyForwarded = this.forwarded.some((f) => f.machine === this.selectedMachine && f.remotePort === d.port);
       return h_flex()
@@ -392,7 +453,7 @@ export default class Ports extends View {
           div().size(6).rounded_full().bg(isAlreadyForwarded ? "#22c55e" : t.dim).flex_none()
         )
         .child(
-          div().font_mono().font_semibold().text_size(12).text_color(t.foreground).child(`Port ${d.port}`)
+          div().font_bold().text_size(12).text_color(t.foreground).child(`Port ${d.port}`)
         )
         .child(
           div()
@@ -416,7 +477,7 @@ export default class Ports extends View {
                 .text_color("#fff")
                 .cursor_pointer()
                 .hover((s) => s.opacity(0.85))
-                .on_click((_e, cx) => this.forwardPort(d.port, d.port, cx))
+                .on_click((_e, cx) => this.forwardPort(d.port, d.port, cx, false, d.process))
                 .child(div().text_size(11).font_medium().child("+ Forward"))
         );
     });
@@ -439,9 +500,28 @@ export default class Ports extends View {
             v_flex()
               .gap(1)
               .child(div().text_size(15).font_semibold().text_color(t.foreground).child("Port Forwarding"))
-              .child(div().text_size(11.5).text_color(t.dim).child("Forward remote dev servers & APIs to localhost"))
+              .child(div().text_size(11.5).text_color(t.dim).child("Auto-forward dev servers & APIs from terminal agents to localhost"))
           )
           .child(div().flex_1())
+          .child(
+            // Auto Forward Toggle
+            h_flex()
+              .gap(6)
+              .items_center()
+              .px(8)
+              .py(3)
+              .rounded(6)
+              .cursor_pointer()
+              .bg(this.autoForward ? t.selected : t.chrome)
+              .border(1)
+              .border_color(this.autoForward ? t.accent : t.border)
+              .on_click((_e, cx) => {
+                this.autoForward = !this.autoForward;
+                cx.notify();
+              })
+              .child(div().size(6).rounded_full().bg(this.autoForward ? "#22c55e" : t.dim))
+              .child(div().text_size(11).text_color(this.autoForward ? t.foreground : t.muted).child(this.autoForward ? "Auto-detect: ON" : "Auto-detect: OFF"))
+          )
           .child(
             // Refresh button
             div()
@@ -557,7 +637,7 @@ export default class Ports extends View {
                 .text_center()
                 .text_size(12)
                 .text_color(t.dim)
-                .child("No active forwarded ports on this machine. Forward one above or pick from detected ports below.")
+                .child("No active forwarded ports on this machine. Any dev server started by an agent is auto-forwarded here.")
             )
           )
           .when(activeForwardRows.length > 0, (el) => el.children(activeForwardRows))
