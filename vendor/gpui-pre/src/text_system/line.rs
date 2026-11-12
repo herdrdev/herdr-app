@@ -68,6 +68,21 @@ impl ShapedLine {
         self
     }
 
+    /// HERDR: Move each glyph across by `shift(its byte index)`, then keep glyphs in
+    /// text order so per-run colors still apply to right-to-left text. Terminal bidi only.
+    pub fn with_glyph_shifts(mut self, shift: impl Fn(usize) -> Pixels, width: Pixels) -> Self {
+        let layout = Arc::make_mut(&mut self.layout);
+        for run in &mut layout.runs {
+            for glyph in &mut run.glyphs {
+                glyph.position.x += shift(glyph.index);
+            }
+            run.glyphs.sort_by_key(|glyph| glyph.index);
+        }
+        layout.runs.sort_by_key(|run| run.glyphs.first().map_or(usize::MAX, |glyph| glyph.index));
+        layout.width = width;
+        self
+    }
+
     /// Returns a forward-only cursor for this shaped line.
     pub fn cursor(&self) -> ShapedLineCursor<'_> {
         assert_eq!(

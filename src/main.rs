@@ -3,6 +3,7 @@
 
 mod badge;
 mod bench;
+mod bidi;
 mod commands;
 mod control;
 mod core_bin;
