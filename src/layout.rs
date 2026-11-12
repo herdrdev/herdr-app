@@ -262,7 +262,7 @@ pub struct PaneFrame {
     pub shadow: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub border: Option<Line>,
-    /// The border while the pane has focus.
+    /// The border while the pane has focus and multiple panes are visible.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub focus: Option<Line>,
     #[serde(default, skip_serializing_if = "Option::is_none")]

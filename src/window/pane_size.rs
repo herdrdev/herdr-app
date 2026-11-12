@@ -12,8 +12,12 @@ pub(super) fn padding(n: &Node) -> (f32, f32) {
     n.padding.map_or((0.0, 0.0), |p| p.axes())
 }
 
-pub(super) fn frame_border(frame: &PaneFrame, focused: bool) -> Option<&Line> {
-    if focused { frame.focus.as_ref().or(frame.border.as_ref()) } else { frame.border.as_ref() }
+pub(super) fn visible_panes(shown: &Node) -> usize {
+    shown.visible_blocks().into_iter().filter(|node| node.is_pane()).count()
+}
+
+pub(super) fn frame_border(frame: &PaneFrame, focused: bool, visible_panes: usize) -> Option<&Line> {
+    if focused && visible_panes > 1 { frame.focus.as_ref().or(frame.border.as_ref()) } else { frame.border.as_ref() }
 }
 
 pub(super) fn header_height(header: &Header) -> f32 {
@@ -84,13 +88,13 @@ fn shares(children: &[&Node], available: f32, zoom: f32) -> Vec<f32> {
     sizes
 }
 
-fn pane_size(n: &Node, size: Size<Pixels>, target: &str, frame: Option<&PaneFrame>, focused: &HashSet<String>, zoom: f32) -> Option<Size<Pixels>> {
+fn pane_size(n: &Node, size: Size<Pixels>, target: &str, frame: Option<&PaneFrame>, focused: &HashSet<String>, zoom: f32, visible_panes: usize) -> Option<Size<Pixels>> {
     if n.hidden { return None; }
     let mut size = content_size(n, size, focused.contains(&n.id), zoom);
     match &n.kind {
         Kind::Block { .. } if n.id == target => {
             if let Some(frame) = frame.filter(|_| n.is_pane()) {
-                let border = frame_border(frame, focused.contains(&n.id)).map_or(0.0, |line| line.width) * zoom;
+                let border = frame_border(frame, focused.contains(&n.id), visible_panes).map_or(0.0, |line| line.width) * zoom;
                 let header = frame.header.as_ref().filter(|h| !h.hover()).map_or(0.0, header_height) * zoom;
                 size = inset(size, 2.0 * border, 2.0 * border + header);
             }
@@ -103,13 +107,13 @@ fn pane_size(n: &Node, size: Size<Pixels>, target: &str, frame: Option<&PaneFram
             let available = f32::from(if row { size.width } else { size.height }) - separators;
             for (child, span) in children.iter().zip(shares(&children, available, zoom)) {
                 let size = if row { gpui::size(px(span), size.height) } else { gpui::size(size.width, px(span)) };
-                if let Some(size) = pane_size(child, size, target, frame, focused, zoom) { return Some(size); }
+                if let Some(size) = pane_size(child, size, target, frame, focused, zoom, visible_panes) { return Some(size); }
             }
             None
         }
         Kind::Stack { header, .. } => {
             let height = header.as_ref().map_or(0.0, header_height) * zoom;
-            pane_size(n.active_child()?, inset(size, 0.0, height), target, frame, focused, zoom)
+            pane_size(n.active_child()?, inset(size, 0.0, height), target, frame, focused, zoom, visible_panes)
         }
         _ => None,
     }
@@ -151,7 +155,7 @@ impl AppWindow {
         // The absolute bounds canvas already excludes the context border (padding box).
         let (y, x) = padding(context);
         let size = inset(area, 2.0 * x * zoom, 2.0 * y * zoom);
-        let size = pane_size(shown, size, pane, frame, focused, zoom)?;
+        let size = pane_size(shown, size, pane, frame, focused, zoom, visible_panes(shown))?;
         Some(crate::terminal::grid_size(size, crate::terminal::cell_size(window)))
     }
 
@@ -189,5 +193,30 @@ impl AppWindow {
                 }
             }
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn focus_border_only_distinguishes_multiple_visible_panes() {
+        let frame = PaneFrame {
+            border: Some(Line { width: 1.0, color: "border".into() }),
+            focus: Some(Line { width: 3.0, color: "accent".into() }),
+            lone: true,
+            ..Default::default()
+        };
+        // A lone pane and a zoomed split both have one visible pane. Keep
+        // the normal border, including its width, so sizing matches painting.
+        assert_eq!(frame_border(&frame, true, 1), frame.border.as_ref());
+        assert_eq!(frame_border(&frame, false, 1), frame.border.as_ref());
+        assert_eq!(frame_border(&frame, true, 2), frame.focus.as_ref());
+        assert_eq!(frame_border(&frame, false, 2), frame.border.as_ref());
+        let no_border = PaneFrame { border: None, ..frame.clone() };
+        assert_eq!(frame_border(&no_border, true, 1), None);
+        let no_focus = PaneFrame { focus: None, ..frame };
+        assert_eq!(frame_border(&no_focus, true, 2), no_focus.border.as_ref());
     }
 }

@@ -370,7 +370,8 @@ The tab block says how each pane of the shown tab is wrapped:
 ```
 
 - The look applies to every pane; `focus` replaces the border while the
-  pane has the keyboard; `gap` is the space between panes.
+  pane has the keyboard and more than one pane is visible. A lone pane or
+  a zoomed pane keeps the normal border; `gap` is the space between panes.
 - `header`: a mod drawn on each pane, one copy per pane, with
   `props().pane` and `props().terminal`. It reads its live facts from
   `panes()` (title, folder, branch, agent status, focused, zoomed) and its
