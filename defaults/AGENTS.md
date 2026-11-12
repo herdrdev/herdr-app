@@ -620,6 +620,19 @@ The main ones:
   history, not the program: negative lines or pages go up, toward history; pages may be
   fractional, one page is the terminal's rows; on the alternate screen, such as vim or less,
   there is no history, so nothing moves),
+  `terminal.select {terminal?, at?: {row, col} | "cursor", mode?: "cell" | "word" | "line"}`
+  (replaces the selection, at the program's cursor by default; word/line act like double/triple click),
+  `terminal.adjust_selection {terminal?, direction}` (left, right, up, down, page_up, page_down,
+  home, end, line_start, line_end; moves the selection's end and follows it in the view;
+  fails with no selection), `terminal.clear_selection {terminal?}`.
+  These default to the focused terminal, like scroll, and add no default keys or copy mode.
+  `terminal.copy` copies the focused terminal's selection. `terminals()` and `focused()` expose
+  `selection: {start: {row, col}, end: {row, col}} | null` when the selection changes.
+  Start at the cursor with `terminal.select`; use `selection.end` as a copy-mode cursor.
+  Cells are zero-based; rows count from the oldest retained history through the active screen,
+  so output doesn't move an existing position unless history is pruned or reflowed.
+  Selection endpoints are inclusive: start is the anchor, end is the moving end, even when reversed.
+  Selection is null when absent or when no terminal view is attached.
   `terminal.pin {terminal, pinned}` (pins an agent to the top of the agent lists;
   kept on the terminal as `herdr.pinned`, so every Herdr client shows it, and
   gone when the terminal ends; read it as `agents()` `pinned`). Copy, paste, paste-image and implicit

@@ -1451,6 +1451,7 @@ impl AppWindow {
             let sub = cx.subscribe_in(&view, window, move |this, _, ev: &TerminalEvent, window, cx| match ev {
                 TerminalEvent::Peek(address) => this.peek_terminal(address, window, cx),
                 TerminalEvent::TitleChanged => this.publish(cx),
+                TerminalEvent::SelectionChanged => this.publish_selection(&addr, window, cx),
                 TerminalEvent::Ended => this.terminal_ended(&block, window, cx),
                 TerminalEvent::ContextMenu(at) => {
                     this.open_menu("pane", json!({ "pane": block.trim_end_matches(SWAP), "terminal": addr }), Some(*at), window, cx)
@@ -1461,12 +1462,15 @@ impl AppWindow {
                 }
             });
             let focus = view.read(cx).focus_handle().clone();
-            self.terms.insert(id, Term { view, address, focus, _sub: sub });
+            if let Some(previous) = self.terms.insert(id, Term { view, address, focus, _sub: sub }) {
+                self.publish_selection(&previous.address, window, cx);
+            }
         }
         let gone: Vec<String> = self.terms.keys().filter(|id| !want_terms.contains(*id)).cloned().collect();
         for id in gone {
             if let Some(t) = self.terms.remove(&id) {
                 t.view.read(cx).detach();
+                self.publish_selection(&t.address, window, cx);
             }
         }
 
@@ -1651,6 +1655,13 @@ impl AppWindow {
             (view.owns_keyboard_focus(window, cx), view.on_screen_this_frame(), own_pane.as_deref() == Some(pane.as_str()))
         });
         best.map(|(_, t)| t.view.clone()).ok_or_else(|| format!("terminal {address:?} is running but not shown in this window, so it has no view"))
+    }
+
+    fn publish_selection(&self, address: &str, window: &Window, cx: &mut Context<Self>) {
+        let selection = self.shown_terminal_view(address, window, cx).ok().and_then(|view| view.read(cx).selection());
+        if mods::publish_selection(address, json!(selection)) {
+            self.refresh_snapshot_mods(cx);
+        }
     }
 
     fn scroll_terminal(&self, args: &Value, window: &Window, cx: &mut Context<Self>) -> Result<(), String> {
@@ -3246,6 +3257,16 @@ impl AppWindow {
                     Err(error) => self.fail(error),
                 }
                 return;
+            }
+            "terminal.select" | "terminal.adjust_selection" | "terminal.clear_selection" => {
+                let view = match Self::owned(a, "terminal") {
+                    Some(address) => self.shown_terminal_view(&address, window, cx),
+                    None => self.focused_terminal(window, cx).map(|t| t.view.clone()).ok_or_else(|| "no focused terminal to select".into()),
+                };
+                let result = view.and_then(|view| view.update(cx, |view, cx| view.selection_command(name, a, cx)));
+                if let Err(error) = result {
+                    return self.fail(error);
+                }
             }
             "terminal.scroll" => {
                 if let Err(error) = self.scroll_terminal(a, window, cx) {

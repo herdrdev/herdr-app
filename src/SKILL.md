@@ -90,6 +90,18 @@ ready for `terminal.copy`. Without a target it follows keyboard focus. In vim an
 other alternate-screen apps, it selects only that screen. Cmd+A runs it on macOS;
 Linux and Windows have no default, so Ctrl+A stays with the shell.
 
+`terminal.select {terminal?, at?: {row, col} | "cursor", mode?: "cell" | "word" | "line"}`
+replaces the selection, at the program cursor by default. Cells are zero-based; rows
+count from the oldest retained history through the active screen. Word and line
+match double/triple click. `terminal.adjust_selection {terminal?, direction}` moves
+the inclusive moving end and follows it in the view: left, right, up, down, page_up,
+page_down, home, end, line_start, line_end. It fails without a selection.
+`terminal.clear_selection {terminal?}` clears it; `terminal.copy` copies the focused terminal's selection.
+These add no default keys or built-in copy mode. Mods read the inclusive selection
+endpoints from `focused().selection` or `terminals()`; null means none (or no
+attached view). Use `selection.end` as a copy-mode cursor. Selection facts update
+when the selection changes, without refreshing readers on ordinary terminal output.
+
 `terminal.search` opens a find bar in the focused terminal. It searches that
 terminal's screen and scrollback; Enter and Shift-Enter move between matches,
 Escape closes the bar while its find field has focus, and each terminal keeps its own query (reopening selects it, so typing replaces it).

@@ -9,6 +9,18 @@ use std::rc::Rc;
 use std::sync::OnceLock;
 use std::time::{Duration, Instant};
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct CellPosition {
+    pub row: u32,
+    pub col: u16,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, serde::Serialize)]
+pub struct SelectionPositions {
+    pub start: CellPosition,
+    pub end: CellPosition,
+}
+
 #[derive(Clone, Copy, PartialEq, Eq, Debug, Default)]
 pub struct Rgb(pub u8, pub u8, pub u8);
 
@@ -1011,6 +1023,97 @@ impl Vt {
         }
     }
 
+    fn cursor_position(&self) -> CellPosition {
+        let (mut col, mut row) = (0u16, 0u16);
+        unsafe {
+            ghostty_terminal_get(self.term, GHOSTTY_TERMINAL_DATA_CURSOR_X, &mut col as *mut _ as *mut c_void);
+            ghostty_terminal_get(self.term, GHOSTTY_TERMINAL_DATA_CURSOR_Y, &mut row as *mut _ as *mut c_void);
+        }
+        let reference = self.grid_ref(GHOSTTY_POINT_TAG_ACTIVE, col, row as u32).expect("cursor is in the active screen");
+        self.cell_position(&reference).expect("cursor is in the screen")
+    }
+
+    fn cell_position(&self, reference: &GhosttyGridRef) -> Option<CellPosition> {
+        let mut point = GhosttyPointCoordinate::default();
+        (unsafe { ghostty_terminal_point_from_grid_ref(self.term, reference, GHOSTTY_POINT_TAG_SCREEN, &mut point) } == GHOSTTY_SUCCESS)
+            .then_some(CellPosition { row: point.y, col: point.x })
+    }
+
+    fn selection(&self) -> Option<GhosttySelection> {
+        let mut selection = GhosttySelection { size: std::mem::size_of::<GhosttySelection>(), ..Default::default() };
+        (unsafe { ghostty_terminal_get(self.term, GHOSTTY_TERMINAL_DATA_SELECTION, &mut selection as *mut _ as *mut c_void) } == GHOSTTY_SUCCESS)
+            .then_some(selection)
+    }
+
+    pub fn selection_positions(&self) -> Option<SelectionPositions> {
+        let selection = self.selection()?;
+        Some(SelectionPositions { start: self.cell_position(&selection.start)?, end: self.cell_position(&selection.end)? })
+    }
+
+    pub fn select_at(&mut self, at: Option<CellPosition>, mode: &str) -> Result<(), String> {
+        if !matches!(mode, "cell" | "word" | "line") {
+            return Err("terminal.select mode is cell, word or line".into());
+        }
+        let at = at.unwrap_or_else(|| self.cursor_position());
+        let reference = self.grid_ref(GHOSTTY_POINT_TAG_SCREEN, at.col, at.row).ok_or("terminal.select at is outside the screen and history")?;
+        let mut selection = GhosttySelection {
+            size: std::mem::size_of::<GhosttySelection>(), start: reference, end: reference, ..Default::default()
+        };
+        let result = unsafe {
+            match mode {
+                "word" => {
+                    let options = GhosttyTerminalSelectWordOptions { size: std::mem::size_of::<GhosttyTerminalSelectWordOptions>(), ref_: reference, ..Default::default() };
+                    ghostty_terminal_select_word(self.term, &options, &mut selection)
+                }
+                "line" => {
+                    let options = GhosttyTerminalSelectLineOptions { size: std::mem::size_of::<GhosttyTerminalSelectLineOptions>(), ref_: reference, semantic_prompt_boundary: true, ..Default::default() };
+                    ghostty_terminal_select_line(self.term, &options, &mut selection)
+                }
+                _ => GHOSTTY_SUCCESS,
+            }
+        };
+        if result == GHOSTTY_NO_VALUE {
+            self.clear_selection();
+            return Ok(());
+        }
+        if result != GHOSTTY_SUCCESS {
+            return Err("terminal.select could not select that cell".into());
+        }
+        unsafe { ghostty_terminal_set(self.term, GHOSTTY_TERMINAL_OPT_SELECTION, &selection as *const _ as *const c_void); }
+        Ok(())
+    }
+
+    pub fn adjust_selection(&mut self, direction: &str) -> Result<(), String> {
+        let adjustment = match direction {
+            "left" => GHOSTTY_SELECTION_ADJUST_LEFT,
+            "right" => GHOSTTY_SELECTION_ADJUST_RIGHT,
+            "up" => GHOSTTY_SELECTION_ADJUST_UP,
+            "down" => GHOSTTY_SELECTION_ADJUST_DOWN,
+            "page_up" => GHOSTTY_SELECTION_ADJUST_PAGE_UP,
+            "page_down" => GHOSTTY_SELECTION_ADJUST_PAGE_DOWN,
+            "home" => GHOSTTY_SELECTION_ADJUST_HOME,
+            "end" => GHOSTTY_SELECTION_ADJUST_END,
+            "line_start" => GHOSTTY_SELECTION_ADJUST_BEGINNING_OF_LINE,
+            "line_end" => GHOSTTY_SELECTION_ADJUST_END_OF_LINE,
+            _ => return Err("terminal.adjust_selection direction is left, right, up, down, page_up, page_down, home, end, line_start or line_end".into()),
+        };
+        let mut selection = self.selection().ok_or("terminal.adjust_selection needs a selection")?;
+        if unsafe { ghostty_terminal_selection_adjust(self.term, &mut selection, adjustment) } != GHOSTTY_SUCCESS {
+            return Err("terminal.adjust_selection could not move the selection".into());
+        }
+        // Convert before installing the snapshot: any mutating call invalidates its refs.
+        let end = self.cell_position(&selection.end).ok_or("selection end is outside the screen")?;
+        unsafe { ghostty_terminal_set(self.term, GHOSTTY_TERMINAL_OPT_SELECTION, &selection as *const _ as *const c_void); }
+        let scrollbar = self.scrollbar();
+        let row = u64::from(end.row);
+        if row < scrollbar.offset {
+            self.scroll_to_row(row as usize);
+        } else if row >= scrollbar.offset.saturating_add(scrollbar.len) {
+            self.scroll_to_row(row.saturating_sub(scrollbar.len.saturating_sub(1)) as usize);
+        }
+        Ok(())
+    }
+
     /// Select the active screen and its history without formatting or copying text.
     pub fn select_all(&mut self) {
         let mut selection = GhosttySelection { size: std::mem::size_of::<GhosttySelection>(), ..Default::default() };
@@ -1836,6 +1939,81 @@ impl Drop for Vt {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn keyboard_selection_tracks_history_while_output_arrives() {
+        let mut vt = Vt::new(20, 4);
+        for line in 0..12 {
+            vt.write(format!("line {line:02}\r\n").as_bytes());
+        }
+        assert_eq!(vt.cursor_position(), CellPosition { row: 12, col: 0 });
+        vt.select_at(None, "cell").unwrap();
+        vt.adjust_selection("left").unwrap();
+        assert_eq!(vt.selection_positions().unwrap(), SelectionPositions {
+            start: CellPosition { row: 12, col: 0 }, end: CellPosition { row: 11, col: 6 },
+        });
+        vt.adjust_selection("up").unwrap();
+        vt.write(b"more output\r\n");
+        vt.adjust_selection("page_up").unwrap();
+        let selected = vt.selection_positions().unwrap();
+        assert_eq!(selected.start, CellPosition { row: 12, col: 0 });
+        assert_eq!(selected.end, CellPosition { row: 6, col: 6 });
+        assert!(u64::from(selected.end.row) >= vt.scrollbar().offset);
+        assert!(u64::from(selected.end.row) < vt.scrollbar().offset + vt.scrollbar().len);
+        assert_eq!(vt.selection_text().as_deref(), Some("6\nline 07\nline 08\nline 09\nline 10\nline 11\nm"));
+        vt.adjust_selection("page_down").unwrap();
+        vt.adjust_selection("down").unwrap();
+        vt.adjust_selection("line_start").unwrap();
+        assert_eq!(vt.selection_positions().unwrap().end, CellPosition { row: 11, col: 0 });
+        vt.adjust_selection("line_end").unwrap();
+        assert_eq!(vt.selection_positions().unwrap().end, CellPosition { row: 11, col: 19 });
+        vt.adjust_selection("home").unwrap();
+        assert_eq!(vt.selection_positions().unwrap().end, CellPosition { row: 0, col: 0 });
+        vt.adjust_selection("end").unwrap();
+        assert_eq!(vt.selection_positions().unwrap().end, CellPosition { row: 12, col: 19 });
+        vt.clear_selection();
+        assert_eq!(vt.selection_positions(), None);
+        assert!(vt.adjust_selection("left").unwrap_err().contains("needs a selection"));
+    }
+
+    #[test]
+    fn keyboard_selection_matches_mouse_words_lines_and_highlights() {
+        let mut vt = Vt::new(30, 3);
+        vt.write("hello 日本語\r\nsecond line".as_bytes());
+        let at = Some(CellPosition { row: 0, col: 1 });
+        vt.select_at(at, "word").unwrap();
+        assert_eq!(vt.selection_text().as_deref(), Some("hello"));
+        let word = vt.selection_positions();
+        for _ in 0..2 {
+            vt.select(Select::Press, 1, 0, 14.0, 5.0, 10.0, 60.0);
+            vt.select(Select::Release, 1, 0, 14.0, 5.0, 10.0, 60.0);
+        }
+        assert_eq!(vt.selection_positions(), word);
+        vt.select_at(at, "line").unwrap();
+        assert_eq!(vt.selection_text().as_deref(), Some("hello 日本語"));
+        let line = vt.selection_positions();
+        vt.select(Select::Press, 1, 0, 14.0, 5.0, 10.0, 60.0);
+        vt.select(Select::Release, 1, 0, 14.0, 5.0, 10.0, 60.0);
+        assert_eq!(vt.selection_positions(), line);
+        vt.select_at(Some(CellPosition { row: 1, col: 0 }), "cell").unwrap();
+        vt.adjust_selection("right").unwrap();
+        assert_eq!(vt.selection_text().as_deref(), Some("se"));
+        let frame = vt.frame();
+        assert_eq!(frame.rows[1][0].bg, Some(theme().selection_bg));
+        assert_eq!(frame.rows[1][1].bg, Some(theme().selection_bg));
+        assert_ne!(frame.rows[1][2].bg, Some(theme().selection_bg));
+        let selected = vt.selection_positions();
+        assert!(vt.select_at(Some(CellPosition { row: 100, col: 0 }), "cell").is_err());
+        assert!(vt.select_at(at, "invalid").is_err());
+        assert!(vt.adjust_selection("word").is_err());
+        assert_eq!(vt.selection_positions(), selected);
+        vt.write(b"\x1b[?1049h\x1b[H");
+        assert_eq!(vt.cursor_position().row, 0);
+        assert_eq!(vt.selection_positions(), None);
+        vt.select_at(None, "cell").unwrap();
+        vt.adjust_selection("home").unwrap();
+        assert_eq!(vt.selection_positions().unwrap().end.row, 0);
+    }
 
     fn finish_search(vt: &mut Vt) {
         for _ in 0..100_000 {

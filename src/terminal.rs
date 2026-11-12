@@ -70,6 +70,7 @@ enum LinkTarget {
 pub enum TerminalEvent {
     Peek(String),
     TitleChanged,
+    SelectionChanged,
     /// The program ended.
     Ended,
     /// Right-click where the program doesn't take the mouse: the pane menu.
@@ -126,6 +127,7 @@ pub struct TerminalView {
     pub lost: bool,
     /// A left-button selection drag is in progress.
     selecting: bool,
+    published_selection: Option<vt::SelectionPositions>,
     /// A scroll thumb drag is: the px into the thumb it was grabbed at.
     scrollbar_grab: Option<f32>,
     selection_pointer: Point<Pixels>,
@@ -268,6 +270,7 @@ impl TerminalView {
             ended: None,
             lost: false,
             selecting: false,
+            published_selection: None,
             scrollbar_grab: None,
             selection_pointer: Point::default(),
             selection_scroll: None,
@@ -357,6 +360,7 @@ impl TerminalView {
                 Some(wait)
             }
         };
+        self.selection_changed(cx);
         let address = self.address.clone();
         let deadline = cx.background_executor().timer(self.attach_deadline.saturating_duration_since(cx.background_executor().now()));
         // Replacing the task drops an attach still in flight for an older connection.
@@ -434,6 +438,7 @@ impl TerminalView {
                 if let Some(t) = attached.terminal.get("title").and_then(|t| t.as_str()).filter(|t| !t.is_empty()) {
                     self.set_title(t, cx);
                 }
+                cx.emit(TerminalEvent::SelectionChanged);
                 Some(attached.stream)
             }
             // Gone for good (removed, finished, unknown) versus a connection problem.
@@ -555,6 +560,7 @@ impl TerminalView {
             let title = if title.is_empty() { self.address.clone() } else { title };
             self.set_title(&title, cx);
         }
+        self.selection_changed(cx);
         if !open {
             cx.emit(TerminalEvent::Ended);
         }
@@ -770,13 +776,56 @@ impl TerminalView {
         true
     }
 
+    pub fn selection(&self) -> Option<vt::SelectionPositions> {
+        self.grid.borrow().vt.selection_positions()
+    }
+
+    fn selection_changed(&mut self, cx: &mut Context<Self>) {
+        let selection = self.selection();
+        if selection != self.published_selection {
+            self.published_selection = selection;
+            cx.emit(TerminalEvent::SelectionChanged);
+        }
+    }
+
+    pub fn selection_command(&mut self, name: &str, args: &serde_json::Value, cx: &mut Context<Self>) -> Result<(), String> {
+        let mut grid = self.grid.borrow_mut();
+        match name {
+            "terminal.select" => {
+                let at = match args.get("at") {
+                    None => None,
+                    Some(value) if value.as_str() == Some("cursor") => None,
+                    Some(value) => Some(serde_json::from_value::<vt::CellPosition>(value.clone())
+                        .map_err(|_| "terminal.select at is cursor or {row, col} with nonnegative whole numbers")?),
+                };
+                let mode = match args.get("mode") {
+                    None => "cell",
+                    Some(value) => value.as_str().ok_or("terminal.select mode is cell, word or line")?,
+                };
+                grid.vt.select_at(at, mode)?;
+            }
+            "terminal.adjust_selection" => {
+                let direction = args.get("direction").and_then(serde_json::Value::as_str).ok_or("terminal.adjust_selection needs a direction")?;
+                grid.vt.adjust_selection(direction)?;
+            }
+            "terminal.clear_selection" => grid.vt.clear_selection(),
+            _ => unreachable!(),
+        }
+        drop(grid);
+        self.selection_changed(cx);
+        cx.notify();
+        Ok(())
+    }
+
     pub fn select_all(&mut self, cx: &mut Context<Self>) {
         self.grid.borrow_mut().vt.select_all();
+        self.selection_changed(cx);
         cx.notify();
     }
 
     pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
         self.grid.borrow_mut().vt.clear_selection();
+        self.selection_changed(cx);
         cx.notify();
     }
 
@@ -901,7 +950,7 @@ impl TerminalView {
         let k = &ev.keystroke;
         // Typing clears a selection, as in Herdr.
         if !k.key.starts_with("shift") && !k.key.starts_with("control") && !k.key.starts_with("alt") {
-            self.grid.borrow_mut().vt.clear_selection();
+            self.clear_selection(cx);
         }
         let bytes = key_bytes(&mut self.grid.borrow_mut().vt, ev);
         if let Some(bytes) = bytes {
@@ -1055,6 +1104,8 @@ impl TerminalView {
             self.select(Select::Release, pos, cx);
         } else {
             g.vt.clear_selection();
+            drop(g);
+            self.selection_changed(cx);
             cx.notify();
         }
     }
@@ -1068,6 +1119,7 @@ impl TerminalView {
         let height = ch * g.vt.rows as f32;
         g.vt.select(step, col, row, x, y, cw, height);
         drop(g);
+        self.selection_changed(cx);
         if matches!(step, Select::Release) && crate::settings::get().copy_on_select {
             // Copy on select, as in Herdr.
             self.copy(cx);
@@ -2815,6 +2867,28 @@ mod tests {
             }
             assert_eq!(grid.vt.search_progress().total, 1, "query edits must keep working after reconnect");
         }));
+    }
+
+    #[gpui::test]
+    fn keyboard_selection_copies_through_the_existing_clipboard(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+        let terminal = cx.new(|cx| super::TerminalView::attach(crate::hc::offline(), "t1".into(), (20, 3), cx));
+        terminal.update(cx, |terminal, cx| {
+            terminal.grid.borrow_mut().vt.write(b"hello world\r\nsecond line");
+            terminal.selection_command("terminal.select", &serde_json::json!({"at": {"row": 0, "col": 1}, "mode": "line"}), cx).unwrap();
+            assert!(terminal.copy(cx));
+            assert_eq!(cx.read_from_clipboard().unwrap().text().as_deref(), Some("hello world"));
+            terminal.selection_command("terminal.clear_selection", &serde_json::json!({}), cx).unwrap();
+            assert!(!terminal.copy(cx));
+            assert!(terminal.selection_command("terminal.adjust_selection", &serde_json::json!({"direction": "left"}), cx).is_err());
+            for at in [serde_json::json!({"row": -1, "col": 0}), serde_json::json!({"row": 0.5, "col": 0}), serde_json::json!("viewport")] {
+                assert!(terminal.selection_command("terminal.select", &serde_json::json!({"at": at}), cx).is_err());
+            }
+            terminal.selection_command("terminal.select", &serde_json::json!({"at": "cursor"}), cx).unwrap();
+            let selection = terminal.selection().unwrap();
+            assert_eq!(selection.start, crate::vt::CellPosition { row: 1, col: 11 });
+            assert_eq!(selection.end, selection.start);
+        });
     }
 
     #[gpui::test]
