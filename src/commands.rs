@@ -82,7 +82,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("layout.select", &[req("stack"), req("child")], "Show one child of a stack."),
     cmd("layout.reset", &[opt("name")], "Reset a shipped layout and its clicks (the old file is kept aside)."),
     cmd("mod.open", &[req("name")], "Toggle a mod as the overlay its mod.json describes; calling again closes it."),
-    cmd("overlay.close", &[opt("id")], "Close an overlay (default: the top dialog or popup)."),
+    cmd("overlay.close", &[opt("id")], "Close an overlay by its id, or by the name `status` lists it under (default: the top dialog or popup)."),
     // The app.
     cmd("app.help", &[], "Toggle the keys dialog."),
     cmd("app.welcome", &[], "Show the welcome again."),

@@ -3392,8 +3392,18 @@ impl AppWindow {
                 }
             }
             "overlay.close" => {
-                let id = Self::owned(a, "id").or_else(|| self.overlays.iter().rev().find(|o| o.kind.modal_keys()).map(|o| o.id.clone()));
+                let id = match Self::owned(a, "id") {
+                    Some(id) => match self.overlay_id(&id) {
+                        Some(id) => Some(id),
+                        None => return self.fail(format!("no overlay {id:?}: `herdr-app status` names the open ones")),
+                    },
+                    None => self.overlays.iter().rev().find(|o| o.kind.modal_keys()).map(|o| o.id.clone()),
+                };
                 if let Some(id) = id {
+                    // The welcome closed from outside counts as skipped: unrecorded, the next start opens it again.
+                    if mods::shared("frame.welcomed").is_none() && self.overlays.iter().any(|o| o.id == id && self.overlay_name(o).as_deref() == Some("frame-welcome")) {
+                        mods::set_shared("frame.welcomed".into(), json!("skipped"));
+                    }
                     self.close_overlay(&id, window, cx);
                 }
                 return;
@@ -3748,6 +3758,23 @@ impl AppWindow {
         mods::set_shown_copies(shown.iter().filter_map(|(s, i)| self.copies.get(s).filter(|c| c.inst == *i)).map(|c| c.id).collect());
     }
 
+    /// What `status` calls an overlay: its mod, or "layout" for one made of blocks.
+    fn overlay_name(&self, o: &Overlay) -> Option<String> {
+        match &o.layout {
+            Some(_) => Some("layout".to_owned()),
+            None => self.copies.get(&o.slot).map(|c| c.inst.name.clone()),
+        }
+    }
+
+    /// The overlay `overlay.close {id}` means: the one with that id, else the
+    /// topmost one `status` lists under that name.
+    fn overlay_id(&self, id: &str) -> Option<String> {
+        if id == "core-update-error" || self.overlays.iter().any(|o| o.id == id) {
+            return Some(id.to_owned());
+        }
+        self.overlays.iter().rev().find(|o| self.overlay_name(o).as_deref() == Some(id)).map(|o| o.id.clone())
+    }
+
     /// Closes an overlay; a kept window stays closed on the next start too.
     fn close_overlay(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         if id == "core-update-error" {
@@ -3864,10 +3891,7 @@ impl AppWindow {
                 "layout": self.layout_name,
                 "agent": self.shown_agent(),
                 "floats": self.float_status(),
-                "overlays": self.overlays.iter().map(|o| match &o.layout {
-                    Some(_) => Some("layout".to_owned()),
-                    None => self.copies.get(&o.slot).map(|c| c.inst.name.clone()),
-                }).collect::<Vec<_>>(),
+                "overlays": self.overlays.iter().map(|o| self.overlay_name(o)).collect::<Vec<_>>(),
                 "errors": errors,
             });
         }
@@ -6275,6 +6299,48 @@ export default class SystemToast extends View {
         let (id, name) = notify(cx);
         assert_eq!(name, "toast");
         assert!(shown(&id, cx), "an unknown mod falls back to the shipped toast, which stays");
+    }
+
+    #[test]
+    fn overlay_close_takes_the_name_status_lists() {
+        in_own_process("overlay_close_by_name");
+    }
+
+    /// `overlay.close {id}` closes the overlay with that id or the one `status`
+    /// lists under that name, and fails on an id that matches neither. Without
+    /// an id it leaves a window alone.
+    #[gpui::test]
+    fn overlay_close_by_name(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("overlay_close_by_name") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "notes", "", json!({ "id": "root", "type": "row", "children": [] }));
+        let open = |cx: &mut gpui::VisualTestContext| {
+            view.update_in(cx, |this, window, cx| {
+                this.sync_folders(window, cx);
+                let id = crate::mods::new_overlay_id();
+                this.open_overlay(id.clone(), json!({ "mod": "notes", "kind": "window", "width": 300, "height": 200 }), window, cx);
+                id
+            })
+        };
+        let close = |args: serde_json::Value, cx: &mut gpui::VisualTestContext| view.update_in(cx, |this, window, cx| this.run_as("overlay.close", args, false, window, cx));
+        let listed = |cx: &mut gpui::VisualTestContext| view.update_in(cx, |this, window, cx| this.control(json!({ "status": true }), window, cx)["overlays"].clone());
+
+        let id = open(cx);
+        assert_eq!(listed(cx), json!(["notes"]));
+        assert_eq!(close(json!({}), cx), json!({ "ok": true }));
+        assert_eq!(listed(cx), json!(["notes"]), "no id: the top dialog or popup, never a window");
+        let missing = close(json!({ "id": "no-such-overlay" }), cx);
+        assert!(missing["error"].as_str().is_some_and(|e| e.contains("no-such-overlay")), "{missing}");
+        assert_eq!(listed(cx), json!(["notes"]));
+        assert_eq!(close(json!({ "id": "notes" }), cx), json!({ "ok": true }));
+        assert_eq!(listed(cx), json!([]), "closed by the name status lists");
+
+        let id2 = open(cx);
+        assert_ne!(id, id2);
+        assert_eq!(close(json!({ "id": id2 }), cx), json!({ "ok": true }));
+        assert_eq!(listed(cx), json!([]), "closed by its id");
     }
 
     #[test]
