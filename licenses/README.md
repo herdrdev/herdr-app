@@ -2,10 +2,11 @@
 
 `THIRD-PARTY-NOTICES` ships with every release beside `LICENSE`. It includes Cargo licenses for the resolved graph on every platform (including build/dev dependencies), plus the native code, fonts and icons in `inventory.json`. Unused optional packages left in Cargo.lock are not linked into the app.
 
-Install [cargo-about](https://github.com/EmbarkStudios/cargo-about) 0.9.3 and [Bun](https://bun.sh), then run:
+Install [cargo-about](https://github.com/EmbarkStudios/cargo-about) 0.9.3 and [Bun](https://bun.sh). The notices include licenses from the `vendor/ghostty` submodule, so check it out first. Then run:
 
 ```sh
-cargo install --locked cargo-about --version 0.9.3
+cargo install --locked cargo-about --version 0.9.3 --features cli
+git submodule update --init vendor/ghostty
 just notices
 ```
 
