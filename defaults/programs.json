@@ -22,6 +22,7 @@
     "crush": {"name":"Crush","icon":"icons/crush.svg","run":["crush"],"tint":false,"tile":"#1c1d21","color":"#ffffff"},
     "command-code": {"name":"Command Code","icon":"icons/command-code.svg","tint":true,"tile":"#1c1d21","color":"#ffffff"},
     "prime-agent": {"name":"Prime","icon":"icons/prime-agent.svg","tint":true,"tile":"#1c1d21","color":"#ffffff"},
+    "swival": {"name":"Swival","icon":"icons/swival.svg","run":["swival"],"tint":false,"tile":"#1c1d21","color":"#ffffff"},
     "gemini": {"name":"Gemini","icon":"icons/gemini.svg","run":["gemini"],"tint":true,"tile":"#8e75b2","color":"#ffffff"},
     "ollama": {"name":"Ollama","icon":"icons/ollama.svg","tint":true,"tile":"#1c1d21","color":"#ffffff"},
     "agent": {"name":"Agent","icon":"icons/agent.svg","tint":true,"tile":"#1c1d21","color":"#d6d8db"},

@@ -401,6 +401,8 @@ mod tests {
         assert_eq!(key(Some("grok-build"), &["/bin/zsh"]), "grok");
         assert_eq!(key(Some("dsh-tui"), &["/bin/zsh"]), "dsh-tui");
         assert_eq!(key(None, &["dsh-tui"]), "dsh-tui");
+        assert_eq!(key(Some("swival"), &["/bin/zsh"]), "swival");
+        assert_eq!(key(None, &["python3", "/home/me/.local/bin/swival", "fix it"]), "swival");
         assert_eq!(key(Some("newagent"), &[]), "agent");
         assert_eq!(key(None, &["/bin/zsh"]), "shell");
         assert_eq!(key(None, &["-zsh"]), "shell");
