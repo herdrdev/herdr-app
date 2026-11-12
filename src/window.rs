@@ -6198,7 +6198,8 @@ export default class Probe extends View {
                 assert!(this.terms[expected].focus.is_focused(window));
             });
         }
-        cx.simulate_keystrokes("alt-h");
+        let (left, right) = if cfg!(target_os = "macos") { ("cmd-alt-left", "cmd-alt-right") } else { ("alt-h", "alt-l") };
+        cx.simulate_keystrokes(left);
         cx.update(|window, cx| window.draw(cx).clear(cx));
         view.update_in(cx, |this, window, cx| {
             assert_eq!(this.model.active_tab().unwrap().zoomed.as_deref(), Some("a"));
@@ -6206,7 +6207,7 @@ export default class Probe extends View {
             this.run("pane.zoom", json!({}), window, cx);
         });
         cx.update(|window, cx| window.draw(cx).clear(cx));
-        cx.simulate_keystrokes("alt-l");
+        cx.simulate_keystrokes(right);
         cx.update(|window, cx| window.draw(cx).clear(cx));
         view.update_in(cx, |this, window, _| {
             let tab = this.model.active_tab().unwrap();
