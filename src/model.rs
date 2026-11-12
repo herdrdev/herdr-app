@@ -132,8 +132,9 @@ fn origin_address(space: &Space, props: &Value) -> Option<String> {
     }
 }
 
-/// The agent a tab was opened for: the terminal its first mod pane with an
-/// `origin` prop names (`tab.new {mod, props: {origin}}`), as a full address.
+/// The agent a tab was opened for, as a full address: the first terminal that a
+/// mod pane's `origin` prop names (`tab.new {mod, props: {origin}}`, see
+/// `origin_address`).
 pub fn tab_origin(space: &Space, tab: &Tab) -> Option<String> {
     tab.root.panes().into_iter().find_map(|pane| match pane.content() {
         Some(Content::Mod { props, .. }) => origin_address(space, props),

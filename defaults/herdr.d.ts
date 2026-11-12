@@ -108,9 +108,9 @@ export interface TabInfo {
   changed_at: number | null;
   /** Since when an agent in it has been working, or null. */
   working_since: number | null;
-  /** The agent it was opened for: the terminal address (as AgentInfo.address) its first mod pane's
-   *  `origin` prop names (tab.new {mod, props: {origin}}, the terminal as on the space's machine),
-   *  else null. It stays after that agent ends. */
+  /** The agent it was opened for: the terminal address (as AgentInfo.address) of the first mod pane
+   *  whose `origin` prop names a terminal on the space's machine (tab.new {mod, props: {origin}},
+   *  the terminal as on that machine), else null. It stays after that agent ends. */
   origin: string | null;
 }
 
