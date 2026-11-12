@@ -492,3 +492,17 @@ test("a size change with no active row drawn asks for nothing", () => {
   h.handlers.on_size_change({ width: 200, height: 60 }, h.cx);
   expect(h.view.scroll.calls).toEqual([]);
 });
+
+test("the list reveals the active space again when a machine header shifts its place", () => {
+  const h = withHandle(scrollHarness(spaceList(["a", "b", "c", "d"], "b")));
+  h.view.render();
+  expect(h.view.scroll.calls).toEqual([1]);
+  // A machine joins: its header and rows come after this computer's, and now this computer gets a header too,
+  // so the same active space sits one child further down.
+  h.snapshot.push({ id: "r1", folder: "/r1", machine: "cloud", active: false });
+  h.view.shown.add("r1");
+  h.view.render();
+  expect(h.view.scroll.calls).toEqual([1, 2]);
+  h.view.render();
+  expect(h.view.scroll.calls).toEqual([1, 2]);
+});
