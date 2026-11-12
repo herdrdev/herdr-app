@@ -967,7 +967,9 @@ and other interactive controls too.
 them. Text: `TextView.markdown(id, text)` renders markdown; `EditorState.new({
 language, value, readonly, font_family: settings().font_family, syntax: {
 keyword: theme().ansi5, ... } })` + `Editor.new(state)` is a code view (readonly)
-or editor with syntax highlighting, line numbers and folding. A viewer opens
+or editor with syntax highlighting, line numbers and folding. With `language: "markdown"`
+it styles prose too: headings and `**bold**` bold, `*italic*` italic, URLs underlined;
+color them with `syntax: { heading, bold, italic, link, code, quote, punctuation }`. A viewer opens
 beside the shell as a pane: `pane.split {direction, mod, props: { file }}`.
 The full surface is in `gpui-kit.d.ts` next to this file.
 

@@ -3181,6 +3181,10 @@ const BASE: &str = r#"  /** A row. */
       soft_wrap?: boolean;
       /** Semantic colors: keyword, string, comment, function, type, number,
        * constant, variable, operator, punctuation, boolean, string.escape.
+       * Markdown also has heading, bold, italic, link, link.url,
+       * code and quote, which keep their font style (bold headings, italic
+       * emphasis, underlined URLs) whatever their color; their `**` and `#`
+       * delimiters are punctuation.
        * Values are concrete hex colors; unspecified UI colors follow the theme. */
       syntax?: Record<string, string>;
     }) => EditorState;

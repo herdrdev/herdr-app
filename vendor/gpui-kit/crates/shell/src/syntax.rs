@@ -160,7 +160,28 @@ fn resolve_styles(
 
 fn semantic_name(scope: Scope) -> Option<&'static str> {
     let scope = scope.build_string();
-    let name = if scope.starts_with("comment") {
+    // HERDR: Markdown (and other markup) scopes, so prose editors can style
+    // headings, emphasis, links and code. Their delimiters keep `punctuation`.
+    let name = if scope.starts_with("markup.heading") {
+        "heading"
+    } else if scope.starts_with("markup.bold") {
+        "bold"
+    } else if scope.starts_with("markup.italic") {
+        "italic"
+    } else if scope.starts_with("markup.strikethrough") {
+        "strikethrough"
+    } else if scope.starts_with("string.other.link")
+        || scope.starts_with("constant.other.reference.link")
+        || (scope.starts_with("meta.link") && scope.contains(".description"))
+    {
+        "link"
+    } else if scope.starts_with("markup.underline.link") {
+        "link.url"
+    } else if scope.starts_with("markup.raw") {
+        "code"
+    } else if scope.starts_with("markup.quote") {
+        "quote"
+    } else if scope.starts_with("comment") {
         "comment"
     } else if scope.starts_with("constant.character.escape") {
         "string.escape"
@@ -226,12 +247,15 @@ fn brace_fold_ranges(text: &str) -> Vec<FoldRange> {
 }
 
 /// HERDR: semantic overrides fall back to readable, dark-editor defaults.
+/// Markup names also carry a font treatment (bold headings, italic emphasis,
+/// underlined links) that applies whatever their color.
 #[derive(Default)]
 pub(crate) struct SyntaxStyles(pub std::collections::HashMap<String, gpui::Hsla>);
 
 impl HighlightStyleResolver for SyntaxStyles {
     fn style(&self, name: &str) -> Option<HighlightStyle> {
         let root = name.split('.').next()?;
+        let mut style = markup_style(name, root);
         let color = self
             .0
             .get(name)
@@ -247,15 +271,47 @@ impl HighlightStyleResolver for SyntaxStyles {
                     "function" => 0x61afef,
                     "type" => 0xe5c07b,
                     "operator" => 0x56b6c2,
+                    "link" => 0x61afef,
+                    "code" => 0x98c379,
+                    "quote" => 0x7f848e,
                     // Unclassified identifiers and punctuation follow the theme foreground.
                     _ => return None,
                 };
                 Some(gpui::rgb(rgb).into())
             });
-        color.map(|color| HighlightStyle {
-            color: Some(color),
+        style.color = color;
+        (style != HighlightStyle::default()).then_some(style)
+    }
+}
+
+/// HERDR: the font part of a markup name's style; colors come from the resolver.
+fn markup_style(name: &str, root: &str) -> HighlightStyle {
+    let line = || gpui::px(1.);
+    match root {
+        "heading" | "bold" => HighlightStyle {
+            font_weight: Some(gpui::FontWeight::BOLD),
             ..Default::default()
-        })
+        },
+        "italic" | "quote" => HighlightStyle {
+            font_style: Some(gpui::FontStyle::Italic),
+            ..Default::default()
+        },
+        "strikethrough" => HighlightStyle {
+            strikethrough: Some(gpui::StrikethroughStyle {
+                thickness: line(),
+                color: None,
+            }),
+            ..Default::default()
+        },
+        "link" if name == "link.url" => HighlightStyle {
+            underline: Some(gpui::UnderlineStyle {
+                thickness: line(),
+                color: None,
+                wavy: false,
+            }),
+            ..Default::default()
+        },
+        _ => HighlightStyle::default(),
     }
 }
 
@@ -283,5 +339,81 @@ mod tests {
         assert!(find_syntax("rust").is_some());
         assert!(find_syntax("rs").is_some());
         assert!(find_syntax("unknown-language").is_none());
+    }
+
+    /// The semantic name of each highlighted span of `text`, in order.
+    fn markdown_names(text: &str) -> Vec<(String, &'static str)> {
+        let mut highlighter = SyntectHighlighter::new("markdown").expect("markdown syntax");
+        let syntax = find_syntax("markdown").unwrap();
+        let mut parser = ParseState::new(syntax);
+        let mut scopes = ScopeStack::new();
+        let mut offset = 0;
+        for line in LinesWithEndings::from(text) {
+            let operations = parser.parse_line(line, &SYNTAX_SET).unwrap();
+            let mut cursor = 0;
+            for (index, operation) in operations {
+                highlighter.push_highlight(offset + cursor..offset + index, &scopes);
+                scopes.apply(&operation).unwrap();
+                cursor = index;
+            }
+            highlighter.push_highlight(offset + cursor..offset + line.len(), &scopes);
+            offset += line.len();
+        }
+        highlighter
+            .highlights
+            .iter()
+            .map(|(range, name)| (text[range.clone()].to_string(), *name))
+            .collect()
+    }
+
+    #[test]
+    fn markdown_prose_gets_markup_names() {
+        let names = markdown_names(
+            "# Title\n\nSome **bold**, *italic*, ~~gone~~ and `code`, [a link](https://x.dev).\n\n> quoted\n",
+        );
+        let name_of = |text: &str| {
+            names
+                .iter()
+                .find(|(span, _)| span == text)
+                .map(|(_, name)| *name)
+        };
+        assert_eq!(name_of("Title"), Some("heading"));
+        assert_eq!(name_of("#"), Some("punctuation"));
+        assert_eq!(name_of("bold"), Some("bold"));
+        assert_eq!(name_of("**"), Some("punctuation"));
+        assert_eq!(name_of("italic"), Some("italic"));
+        assert_eq!(name_of("code"), Some("code"));
+        assert_eq!(name_of("a link"), Some("link"), "{names:?}");
+        assert_eq!(name_of("https://x.dev"), Some("link.url"));
+        assert!(
+            names
+                .iter()
+                .any(|(span, name)| span.contains("quoted") && *name == "quote")
+        );
+    }
+
+    #[test]
+    fn markup_names_carry_font_styles_and_take_colors() {
+        let color = gpui::rgb(0xe06c75).into();
+        let styles = SyntaxStyles(HashMap::from([("heading".into(), color)]));
+        let heading = styles.style("heading").unwrap();
+        assert_eq!(heading.color, Some(color));
+        assert_eq!(heading.font_weight, Some(gpui::FontWeight::BOLD));
+        let bold = styles.style("bold").unwrap();
+        assert_eq!(bold.color, None);
+        assert_eq!(bold.font_weight, Some(gpui::FontWeight::BOLD));
+        assert_eq!(
+            styles.style("italic").unwrap().font_style,
+            Some(gpui::FontStyle::Italic)
+        );
+        assert!(
+            styles
+                .style("strikethrough")
+                .unwrap()
+                .strikethrough
+                .is_some()
+        );
+        assert!(styles.style("link.url").unwrap().underline.is_some());
+        assert!(styles.style("link").unwrap().underline.is_none());
     }
 }
