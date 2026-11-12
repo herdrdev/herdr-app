@@ -464,7 +464,9 @@ impl Core {
     /// Starts a program in a new core terminal and returns its address (`tN`).
     /// Starts a terminal, here or on another machine (`on`: its name in `hc machine ls`).
     pub fn run(&self, argv: Vec<String>, cwd: Option<String>, labels: Value, on: Option<&str>, size: Option<(u16, u16)>, display: Value) -> Result<String> {
-        let env = json!({"TERM": "xterm-256color", "COLORTERM": "truecolor", "TERM_PROGRAM": "herdr"});
+        // OpenCode uses HERDR_ENV to disable shared session tabs in auto mode,
+        // so each terminal reports its selected session instead of every shared tab.
+        let env = json!({"TERM": "xterm-256color", "COLORTERM": "truecolor", "TERM_PROGRAM": "herdr", "HERDR_ENV": "1"});
         let mut params = json!({"argv": argv, "cwd": cwd, "env": env, "labels": labels, "on": on, "keep": true, "display": display});
         // Released cores ignore unknown parameters, including when forwarding to another machine.
         if let Some((cols, rows)) = size {
@@ -707,6 +709,48 @@ mod tests {
         assert!(core.call("doc.get", json!({"name":"herdr-app"})).unwrap_err().to_string().contains("lost the core"));
         assert!(start.elapsed() < Duration::from_secs(1));
         assert!(core.routes.lock().unwrap().replies.is_empty());
+    }
+
+    #[test]
+    fn new_terminals_identify_herdr_locally_and_remotely() {
+        let (writer, frames) = mpsc::channel();
+        let (_lost_tx, lost) = async_channel::bounded(1);
+        let child = std::process::Command::new(std::env::current_exe().unwrap()).arg("--help").stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+        let core = Core {
+            hello: Value::Null, writer, routes: Arc::new(Mutex::new(Routes::default())),
+            next_id: AtomicU64::new(1), child: Mutex::new(child), lost,
+        };
+        std::thread::scope(|scope| {
+            let core = &core;
+            let replies = scope.spawn(move || {
+                let mut requests = Vec::new();
+                for _ in 0..4 {
+                    let frame = frames.recv_timeout(Duration::from_secs(5)).unwrap();
+                    let (channel, kind, payload) = read_frame(&mut frame.as_slice()).unwrap();
+                    assert_eq!((channel, kind), (0, DATA));
+                    let request: Value = serde_json::from_slice(&payload).unwrap();
+                    let id = request["id"].as_u64().unwrap();
+                    core.routes.lock().unwrap().replies.remove(&id).unwrap().send(Ok(json!({"address": "t1"}))).unwrap();
+                    requests.push(request);
+                }
+                requests
+            });
+            for on in [None, Some("vps")] {
+                for argv in [vec![], vec!["opencode".to_owned()]] {
+                    assert_eq!(core.run(argv, None, json!({}), on, None, json!({})).unwrap(), "t1");
+                }
+            }
+            for (i, request) in replies.join().unwrap().iter().enumerate() {
+                assert_eq!(request["method"], "terminal.run");
+                let params = &request["params"];
+                assert_eq!(params["on"], if i < 2 { Value::Null } else { json!("vps") });
+                assert_eq!(params["argv"], if i % 2 == 0 { json!([]) } else { json!(["opencode"]) });
+                assert_eq!(params["env"]["HERDR_ENV"], "1", "shells and agents must both identify Herdr");
+                assert_eq!(params["env"]["TERM_PROGRAM"], "herdr");
+                assert_eq!(params["env"]["TERM"], "xterm-256color");
+                assert_eq!(params["env"]["COLORTERM"], "truecolor");
+            }
+        });
     }
 
     #[test]
