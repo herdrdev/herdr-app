@@ -560,7 +560,9 @@ The main ones:
   With no `argv`, the target core chooses that machine's default shell (PowerShell 7 when available on Windows).
 - Tabs: `tab.new {name?, space?, folder?, argv?, task?}` (argv: an
   agent to run, task: its first message). Agents run in your interactive
-  shell (including fish), which stays open after the agent exits. A terminal
+  shell (including fish), which stays open after the agent exits. In bash, zsh
+  and fish its prompt hooks run first, so direnv or mise load the folder's
+  environment. A terminal
   that exits with a nonzero code within two seconds of launch shows an error
   toast with its exit code and last output lines. Or `tab.new {name?, space?, mod,
   props?}` for a tab whose only pane is a mod (a file, a board; split a shell

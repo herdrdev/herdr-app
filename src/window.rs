@@ -108,7 +108,7 @@ pub fn shell() -> String {
     std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into())
 }
 
-fn unix_agent_argv(sh: String, cmd: Vec<String>, login: bool) -> Vec<String> {
+pub(crate) fn unix_agent_argv(sh: String, cmd: Vec<String>, login: bool) -> Vec<String> {
     let fish = std::path::Path::new(&sh).file_name().and_then(|s| s.to_str()) == Some("fish");
     let script = match (fish, login) {
         (true, true) => "command $argv[2..]; exec $argv[1] -li",
@@ -116,9 +116,24 @@ fn unix_agent_argv(sh: String, cmd: Vec<String>, login: bool) -> Vec<String> {
         (false, true) => "\"$@\"; exec \"$0\" -li",
         (false, false) => "\"$@\"; exec \"$0\" -i",
     };
-    let mut run = vec![sh.clone(), if login { "-lic" } else { "-ic" }.into(), script.into(), sh];
+    let script = format!("{}{script}", prompt_hooks(&sh));
+    let mut run = vec![sh.clone(), if login { "-lic" } else { "-ic" }.into(), script, sh];
     run.extend(cmd);
     run
+}
+
+/// Runs what `sh` runs before each prompt, where direnv, mise and the like load
+/// a folder's environment (`.envrc`). A `-c` shell shows no prompt before the
+/// agent starts, so without this the agent misses that environment. Safe under
+/// zsh's KSH_ARRAYS and NOUNSET and bash's `set -u`; loop variables stay out of the user's names.
+fn prompt_hooks(sh: &str) -> &'static str {
+    match std::path::Path::new(sh).file_name().and_then(|s| s.to_str()) {
+        Some("zsh") => "if (( ${+functions[precmd]} )); then precmd; fi; for __herdr_f in ${precmd_functions[@]+\"${precmd_functions[@]}\"}; do \"$__herdr_f\"; done; ",
+        // A string before bash 5.1, maybe an array after: both expand this way.
+        Some("bash") => "for __herdr_c in ${PROMPT_COMMAND[@]+\"${PROMPT_COMMAND[@]}\"}; do eval \"$__herdr_c\"; done; ",
+        Some("fish") => "emit fish_prompt; ",
+        _ => "",
+    }
 }
 
 fn launch_failure(record: &Value, output: &str) -> Option<String> {
@@ -5510,7 +5525,13 @@ mod tests {
                     (false, true) => "\"$@\"; exec \"$0\" -li",
                     (false, false) => "\"$@\"; exec \"$0\" -i",
                 };
-                assert_eq!(run[2], expected);
+                let hooks = match sh {
+                    "/bin/zsh" => "if (( ${+functions[precmd]} )); then precmd; fi; for __herdr_f in ${precmd_functions[@]+\"${precmd_functions[@]}\"}; do \"$__herdr_f\"; done; ",
+                    "/bin/bash" => "for __herdr_c in ${PROMPT_COMMAND[@]+\"${PROMPT_COMMAND[@]}\"}; do eval \"$__herdr_c\"; done; ",
+                    "/bin/fish" => "emit fish_prompt; ",
+                    _ => "",
+                };
+                assert_eq!(run[2], format!("{hooks}{expected}"));
             }
         }
     }

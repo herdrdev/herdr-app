@@ -202,6 +202,39 @@ mod tests {
         assert!(String::from_utf8(out.stdout).unwrap().contains("literal 'argument'"));
     }
 
+    /// An agent started on this computer (window::unix_agent_argv) with `rc`
+    /// appended to the shell's profile, once as a login shell and once not.
+    fn local_agent_sees(shell: &str, rc: &str, extra: &str, expected: &str) {
+        use std::io::Write;
+        let home = Home::new();
+        std::fs::OpenOptions::new().append(true).open(home.0.join(rc)).unwrap().write_all(extra.as_bytes()).unwrap();
+        let cmd = vec!["/bin/sh".into(), "-c".into(), "printf '<%s>\\n' \"${HERDR_TEST_HOOK:-ran}\"".into()];
+        for login in [false, true] {
+            let out = home.run(crate::window::unix_agent_argv(shell.into(), cmd.clone(), login), Some(shell));
+            let stdout = String::from_utf8(out.stdout).unwrap();
+            assert!(stdout.contains(expected), "login {login}: {stdout:?}: {}", String::from_utf8_lossy(&out.stderr));
+        }
+    }
+
+    // Prompt hooks (as direnv installs them) run before a local agent starts.
+    #[test]
+    fn zsh_local_agents_see_prompt_hooks() {
+        if !std::path::Path::new("/bin/zsh").exists() {
+            return;
+        }
+        let hooks = "other_hook() { :; }\nfixture_hook() { export HERDR_TEST_HOOK=hooked; }\nprecmd_functions+=(other_hook fixture_hook)\n";
+        local_agent_sees("/bin/zsh", ".zshrc", hooks, "<hooked>\n");
+        local_agent_sees("/bin/zsh", ".zshrc", &format!("{hooks}setopt KSH_ARRAYS NOUNSET\n"), "<hooked>\n");
+        local_agent_sees("/bin/zsh", ".zshrc", "precmd() { export HERDR_TEST_HOOK=hooked; }\n", "<hooked>\n");
+        local_agent_sees("/bin/zsh", ".zshrc", "setopt NOUNSET\n", "<ran>\n");
+    }
+
+    #[test]
+    fn bash_local_agents_see_prompt_hooks() {
+        local_agent_sees("/bin/bash", ".bashrc", "PROMPT_COMMAND='export HERDR_TEST_HOOK=hooked'\n", "<hooked>\n");
+        local_agent_sees("/bin/bash", ".bashrc", "set -u\n", "<ran>\n");
+    }
+
     #[test]
     fn remote_commands_keep_windows_fallback_arguments() {
         let command = vec!["codex".into(), "a 'quoted' task".into(), "".into()];
