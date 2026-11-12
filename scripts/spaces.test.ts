@@ -12,9 +12,14 @@ function harness(replies: unknown[] = [], storage = new Map<string, string>(), s
   const tasks: Promise<unknown>[] = [];
   const availability = [{ name: null as string | null, layout: "ready" }];
   const moves: { id: string; index: number }[] = [];
+  const runs: { name: string; args: unknown }[] = [];
+  // Handlers by event, and by event and button ("on_mouse_down:left") where one is given.
   const handlers: Record<string, (...args: any[]) => void> = {};
   const element: any = new Proxy({}, { get: (_, method) => (...args: any[]) => {
-    if (String(method).startsWith("on_")) handlers[String(method)] = args.at(-1);
+    if (String(method).startsWith("on_")) {
+      handlers[String(method)] = args.at(-1);
+      if (typeof args[0] === "string") handlers[`${String(method)}:${args[0]}`] = args.at(-1);
+    }
     return element;
   } });
   const Spaces = new Function("View", "hc", "localStorage", "spaces", "panes", "run", "v_flex", "h_flex", "div", "svg", "shared", "machines", "exec", "window", "watchFolder", `${source}; return Spaces;`)(
@@ -27,9 +32,9 @@ function harness(replies: unknown[] = [], storage = new Map<string, string>(), s
     },
     { setItem(key: string, value: string) { storage.set(key, value); }, getItem(key: string) { return storage.get(key) ?? null; } },
     () => snapshot, () => [],
-    (name: string, args: { id: string; index: number }) => {
-      expect(name).toBe("space.move");
-      moves.push(args);
+    (name: string, args: any) => {
+      if (name === "space.move") moves.push(args);
+      else runs.push({ name, args });
     },
     ...Array(4).fill(() => element), () => null, () => availability, execGit, () => ({ active: true }), watch,
   );
@@ -38,7 +43,7 @@ function harness(replies: unknown[] = [], storage = new Map<string, string>(), s
   view.folded = new Set(["cloud"]);
   view.refreshMachines = () => {};
   const cx = { timer: { every() {} }, notify() {}, spawn(fn: (cx: unknown) => Promise<unknown>) { tasks.push(fn(cx)); } };
-  return { view, calls, tasks, cx, storage, moves, handlers, snapshot, availability };
+  return { view, calls, tasks, cx, storage, moves, runs, handlers, snapshot, availability };
 }
 
 test("git grouping reads refs for normal, detached, unborn and bare worktrees", async () => {
@@ -314,6 +319,18 @@ test("dragging a main checkout moves the right id and its children follow", () =
   h.flush();
   expect(h.order()).toEqual(["other", "last", "main", "topic"]);
   h.rows();
+  expect(h.moves).toEqual([]);
+});
+
+test("double-clicking a space asks to rename it; a single press only arms a drag", () => {
+  const h = orderedHarness(["main", "other"]);
+  h.view.row(h.rows()[0], {});
+  const press = h.handlers["on_mouse_down:left"];
+  press({ click_count: 1 }, h.cx);
+  expect(h.runs).toEqual([]);
+  expect(h.view.pressed).toBe("main");
+  press({ click_count: 2 }, h.cx);
+  expect(h.runs).toEqual([{ name: "space.rename", args: { id: "main" } }]);
   expect(h.moves).toEqual([]);
 });
 
