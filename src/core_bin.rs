@@ -39,14 +39,21 @@ pub fn path() -> PathBuf {
 pub fn use_core(bin: PathBuf) {
     if let Some(dir) = bin.parent() {
         let path = std::env::var_os("PATH").unwrap_or_default();
-        let mut dirs: Vec<PathBuf> = vec![dir.to_path_buf()];
-        dirs.extend(std::env::split_paths(&path).filter(|d| d != dir));
-        if let Ok(joined) = std::env::join_paths(dirs) {
+        if let Some(joined) = prepend_to_path_if_missing(&path, dir) {
             // SAFETY: set once at start, before other threads read the environment.
             unsafe { std::env::set_var("PATH", joined) };
         }
     }
     *BIN.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(bin);
+}
+
+fn prepend_to_path_if_missing(path: &std::ffi::OsStr, dir: &Path) -> Option<std::ffi::OsString> {
+    if std::env::split_paths(path).any(|d| d == dir) {
+        return None;
+    }
+    let mut dirs: Vec<PathBuf> = vec![dir.to_path_buf()];
+    dirs.extend(std::env::split_paths(path).filter(|d| !d.as_os_str().is_empty()));
+    std::env::join_paths(dirs).ok()
 }
 
 /// Finder and Dock launches don't inherit the person's shell PATH.
@@ -395,5 +402,34 @@ mod tests {
         let real = dir.join("herdr-core");
         assert_eq!(version(&real).as_deref(), Some("hc 0.1.1"));
         assert_eq!(find(Some(real.to_str().unwrap())), Some(real));
+    }
+
+    #[test]
+    fn prepend_to_path_leaves_path_intact_when_directory_already_present() {
+        let path = std::env::join_paths(["/run/wrappers/bin", "/run/current-system/sw/bin"]).unwrap();
+        assert_eq!(
+            prepend_to_path_if_missing(&path, Path::new("/run/current-system/sw/bin")),
+            None
+        );
+    }
+
+    #[test]
+    fn prepend_to_path_prepends_when_directory_missing() {
+        let path = std::env::join_paths(["/usr/bin"]).unwrap();
+        let expected = std::env::join_paths(["/opt/custom/bin", "/usr/bin"]).unwrap();
+        assert_eq!(
+            prepend_to_path_if_missing(&path, Path::new("/opt/custom/bin")),
+            Some(expected)
+        );
+    }
+
+    #[test]
+    fn prepend_to_path_prepends_when_path_empty() {
+        let path = std::ffi::OsString::new();
+        let expected = std::ffi::OsString::from("/opt/custom/bin");
+        assert_eq!(
+            prepend_to_path_if_missing(&path, Path::new("/opt/custom/bin")),
+            Some(expected)
+        );
     }
 }
