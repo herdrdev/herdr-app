@@ -544,7 +544,7 @@ export default class Settings extends View {
         ["terminal_cell_width", "Terminal cell width", 0.8, 2, 0.05],
         ["terminal_scroll_speed", "Terminal scroll speed", 0.1, 5, 0.1],
       ].map(([key, title, min, max, step]) => {
-        const by = (d) => (_e, cx) => this.change((q) => (q[key] = Math.max(min, Math.min(max, Math.round(((q[key] ?? s[key]) + d) / step) * step))), cx);
+        const by = (d) => (_e, cx) => this.change((q) => (q[key] = Math.max(min, Math.min(max, Math.round(Math.round(((q[key] ?? s[key]) + d) / step) * step * 100) / 100))), cx);
         return this.row(
           t, title,
           own(key, s[key], 1) ? "This layout sets its own; yours shows in the others." : null,

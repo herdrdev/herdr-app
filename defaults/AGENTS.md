@@ -341,7 +341,7 @@ layout's look and a block can differ:
   Text stays centred; joining characters, cursors and images follow the rows.
 - `terminal_cell_width`: column width multiplier (default 1, clamped to 0.8..2),
   like Ghostty's `adjust-cell-width` as a percentage (`-5%` is 0.95). Glyphs
-  stay centred in their cells.
+  are placed in their cells as Ghostty places them.
 - `terminal_scroll_speed`: wheel and trackpad multiplier (default 1, clamped
   to 0.1..5), including mouse reports to programs. Small moves accumulate.
 - `font` / `font_size`: the terminals' (px at zoom 1); `ui_font`: the mods'
