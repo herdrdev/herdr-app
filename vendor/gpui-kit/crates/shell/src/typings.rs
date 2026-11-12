@@ -1464,6 +1464,12 @@ const ELEMENT_METHODS: &str = r#"    /**
      * for any button.
      */
     on_mouse_down_out<Self extends Element>(this: Self, handler: (event: MouseButtonEvent, cx: Context) => void): Self;
+    /**
+     * Makes a plain layout element a native file/folder drag source. Paths are
+     * absolute on `on` (a host-owned machine name); omitted/null means local.
+     * The payload keeps its source machine, and an ordinary click still works.
+     */
+    drag_paths<Self extends Element>(this: Self, paths: string[], options?: { on?: string | null }): Self;
     /** Files dropped from outside the app, as absolute paths. Use on a plain layout element. */
     on_drop<Self extends Element>(this: Self, handler: (event: { paths: string[] }, cx: Context) => void): Self;
     /**
@@ -4026,6 +4032,7 @@ mod tests {
         "on_mouse_up",
         "on_mouse_down_out",
         "on_drop",
+        "drag_paths",
         "on_scroll_wheel",
         "on_pinch",
         "on_action",

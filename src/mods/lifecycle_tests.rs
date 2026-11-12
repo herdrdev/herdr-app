@@ -204,6 +204,132 @@ export default class extends View {
     assert_eq!(*paths.borrow(), vec![json!(["/var/tmp/screenshot.png", "/var/tmp/a file.jpg"])]);
 }
 
+struct PathDropTarget {
+    root: gpui::Entity<ShellRoot>,
+    drops: Rc<RefCell<Vec<gpui_shell::DraggedPaths>>>,
+}
+impl Render for PathDropTarget {
+    fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+        use gpui::{InteractiveElement, ParentElement, Styled};
+        let drops = self.drops.clone();
+        gpui::div().w(gpui::px(400.)).h(gpui::px(300.))
+            .on_drop(move |paths: &gpui_shell::DraggedPaths, _, _| drops.borrow_mut().push(paths.clone()))
+            .child(self.root.clone())
+    }
+}
+
+fn assert_path_drag_preview_at(visual: &mut VisualTestContext, cursor: gpui::Point<gpui::Pixels>) {
+    visual.update(|window, cx| {
+        assert!(cx.has_active_drag());
+        window.draw(cx).clear(cx);
+        let scale = window.scale_factor();
+        let mut badges: Vec<_> = window.painted_quads().into_iter().filter(|quad|
+            quad.corner_radii.top_left == gpui::px(6.).scale(scale)
+                && quad.border_widths.top == gpui::px(1.).scale(scale)
+        ).map(|quad| quad.bounds).collect();
+        // Border sides may be separate quads with the same badge bounds.
+        badges.dedup();
+        assert_eq!(badges.len(), 1, "one compact file drag badge is painted");
+        assert_eq!(badges[0].origin, (cursor + gpui::point(gpui::px(12.), gpui::px(12.))).scale(scale),
+            "the compact badge follows the pointer, not the source element's grab offset");
+    });
+}
+
+#[gpui::test]
+fn file_drag_preview_follows_the_pointer_from_either_end_of_wide_sources(cx: &mut TestAppContext) {
+    use gpui::{MouseButton, point, px};
+    cx.update(gpui_shell::init);
+    for width in [180., 800.] {
+        let fixture = Fixture::new(&format!(r#"
+import {{ View, div }} from "gpui-kit";
+export default class extends View {{
+  render() {{
+    return div().id("source").w({width}).h(42).text_right()
+      .drag_paths(["/work/notes.txt"]).child("notes.txt");
+  }}
+}}"#));
+        let runtime = ShellRuntime::new_isolated().unwrap();
+        let window = cx.add_window(|window, cx| Mounted(runtime.try_load(&fixture.0, window, cx).unwrap()));
+        let mut visual = VisualTestContext::from_window(*window.deref(), cx);
+        visual.simulate_resize(gpui::size(px(1000.), px(600.)));
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        visual.run_until_parked();
+        for scale in [1., 2.] {
+            visual.simulate_scale_factor_change(scale);
+            for x in [20., width - 20.] {
+                visual.simulate_mouse_down(point(px(x), px(20.)), MouseButton::Left, Default::default());
+                let start = point(px(x + 10.), px(25.));
+                visual.simulate_mouse_move(start, MouseButton::Left, Default::default());
+                assert_path_drag_preview_at(&mut visual, start);
+                for cursor in [point(px(350.), px(150.)), point(px(80.), px(200.))] {
+                    visual.simulate_mouse_move(cursor, MouseButton::Left, Default::default());
+                    assert_path_drag_preview_at(&mut visual, cursor);
+                }
+                visual.update(|window, cx| assert!(cx.stop_active_drag(window)));
+                visual.simulate_mouse_up(point(px(80.), px(200.)), MouseButton::Left, Default::default());
+                visual.update(|window, cx| window.draw(cx).clear(cx));
+            }
+        }
+    }
+}
+
+#[gpui::test]
+fn file_tree_native_drags_keep_origin_and_do_not_click_on_drop_or_cancel(cx: &mut TestAppContext) {
+    use gpui::{MouseButton, point, px};
+    cx.update(gpui_shell::init);
+    let clicks = Rc::new(Cell::new(0));
+    let calls = clicks.clone();
+    gpui_shell::policy::set_default(Policy::new().with_host_module(
+        HostModule::new("fixture").function("clicked", move |_| {
+            calls.set(calls.get() + 1);
+            Ok(HostValue::Null)
+        })
+    ).unwrap());
+    let script = r#"
+import { View, div } from "gpui-kit";
+import { clicked } from "fixture";
+export default class extends View {
+  render() {
+    const paths = ["/work/中文 O'Brien/file name.txt", "/work/a folder"];
+    const row = div().id("source").w(180).h(80)
+      .drag_paths(paths, {on: "server"}).on_click(() => clicked());
+    paths[0] = "/changed/after/render";
+    return row;
+  }
+}"#;
+    for source in [None, Some("server")] {
+        let fixture = Fixture::new(&script.replace("on: \"server\"", if source.is_some() { "on: \"server\"" } else { "on: null" }));
+        let runtime = ShellRuntime::new_isolated().unwrap();
+        let drops = Rc::new(RefCell::new(Vec::new()));
+        let observed = drops.clone();
+        let window = cx.add_window(|window, cx| PathDropTarget {
+            root: runtime.try_load(&fixture.0, window, cx).unwrap(), drops: observed,
+        });
+        let mut visual = VisualTestContext::from_window(*window.deref(), cx);
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        visual.run_until_parked();
+        let before = clicks.get();
+        visual.simulate_click(point(px(20.), px(20.)), Default::default());
+        assert_eq!(clicks.get(), before + 1, "a normal click still opens the row");
+        for attempt in 0..3 {
+            visual.simulate_mouse_down(point(px(20.), px(20.)), MouseButton::Left, Default::default());
+            visual.simulate_mouse_move(point(px(35.), px(35.)), MouseButton::Left, Default::default());
+            assert_path_drag_preview_at(&mut visual, point(px(35.), px(35.)));
+            if attempt == 2 { visual.update(|window, cx| assert!(cx.stop_active_drag(window))); }
+            let end = if attempt == 1 { point(px(500.), px(400.)) } else { point(px(250.), px(150.)) };
+            visual.simulate_mouse_move(end, MouseButton::Left, Default::default());
+            visual.simulate_mouse_up(end, MouseButton::Left, Default::default());
+            visual.run_until_parked();
+            visual.update(|_, cx| assert!(!cx.has_active_drag()));
+        }
+        assert_eq!(clicks.get(), before + 1, "dragging never previews or expands the row");
+        assert_eq!(*drops.borrow(), vec![gpui_shell::DraggedPaths {
+            paths: vec!["/work/中文 O'Brien/file name.txt".into(), "/work/a folder".into()],
+            on: source.map(str::to_owned),
+        }], "only the completed drop delivers the original snapshot");
+    }
+}
+
 #[gpui::test]
 fn mod_run_rejects_unknown_arguments_before_queueing_a_command(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
