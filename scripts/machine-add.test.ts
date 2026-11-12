@@ -104,7 +104,7 @@ test("pending guidance clears when another terminal adds the host and checks Mac
   expect(s.probes).toEqual(["remote"]);
   const count = s.calls.length;
   await s.poll();
-  expect(s.calls.length).toBe(count);
+  expect(s.calls.length).toBeGreaterThan(count);
 });
 
 test("other failures keep their message and do not poll", async () => {

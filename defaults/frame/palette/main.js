@@ -30,6 +30,7 @@ const NAMED = [
   ["terminal.search", {}, "Terminal", tr("command-terminal-search"), "Find in terminal find search terminal"],
   ["terminal.paste_image", {}, "Terminal", tr("command-terminal-paste-image"), "Paste image paste clipboard image"],
   ["terminal.scroll", {}, "Terminal", tr("command-terminal-scroll"), "Scroll terminal scroll terminal"],
+  ["terminal.select_all", {}, "Terminal", tr("palette-select-all"), "Select all copy scrollback select"],
 
   ["tab.new", {}, "Tab", tr("palette-new-tab"), "New tab tab agent new task"],
   ["mod.open", { name: "picker" }, "Tab", tr("palette-go-to-space-or-tab"), "Go to space or tab… switch jump find"],

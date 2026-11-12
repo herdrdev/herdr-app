@@ -145,8 +145,8 @@ fn main() {
     };
     #[cfg(target_os = "macos")]
     core_bin::install_cli_link();
-    if core.is_ok() {
-        update::after_update();
+    if let Ok(core) = &core {
+        update::after_update(core.clone());
     }
     update::start();
     telemetry::start(settings::telemetry_setting(&person));

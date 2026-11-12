@@ -493,7 +493,9 @@ export default class Settings extends View {
   look(t, cx) {
     const s = settings();
     const p = this.person;
-    const own = (key, composed, def) => (p[key] ?? def) !== composed;
+    // Numbers come back from the host as 32-bit floats: 1.1 reads as 1.100000023841858.
+    const same = (a, b) => (typeof a === "number" && typeof b === "number" ? Math.abs(a - b) < 1e-4 : a === b);
+    const own = (key, composed, def) => !same(p[key] ?? def, composed);
     const size = (key, value, d, cx) => this.change((q) => (q[key] = Math.max(8, Math.min(32, (q[key] ?? value) + d))), cx);
     const fontRow = (which, sizeKey, title, family, def, sizeNow) =>
       v_flex()
@@ -541,6 +543,16 @@ export default class Settings extends View {
         ),
       )
       .child(fontRow("font", "font_size", tr("settings-terminal-font"), s.font_family, DEFAULT_FONT, s.font_size))
+      .children([
+        ["terminal_line_height", tr("settings-terminal-line-height"), 0.8, 2],
+        ["terminal_scroll_speed", tr("settings-terminal-scroll-speed"), 0.1, 5],
+      ].map(([key, title, min, max]) => this.row(
+        t, title,
+        own(key, s[key], 1) ? tr("settings-this-layout-sets-its-own-yours-shows-in-the-others") : null,
+        this.stepper(t, `st-${key}`, `${Math.round(s[key] * 100)}%`,
+          (_e, cx) => this.change((q) => (q[key] = Math.max(min, Math.min(max, Math.round(((q[key] ?? s[key]) - 0.1) * 10) / 10))), cx),
+          (_e, cx) => this.change((q) => (q[key] = Math.max(min, Math.min(max, Math.round(((q[key] ?? s[key]) + 0.1) * 10) / 10))), cx)),
+      )))
       .child(fontRow("ui_font", null, tr("settings-interface-font"), s.ui_font_family, DEFAULT_UI_FONT));
   }
 
@@ -670,6 +682,9 @@ export default class Settings extends View {
         .child(v_flex().flex_1().min_w(0).gap(3)
           .child(div().text_size(14).text_color(t.foreground).child(m.name))
           .child(div().text_size(12.5).text_color(t.dim).child(`${m.target ?? ""} · ${state} · ${m.version ? `hc ${m.version}` : tr("settings-hc-version-unknown")}`)))
+        .when(m.keeps_running_after_logout === false, el => el.child(div().id(`st-m-logout-${m.name}`)
+          .text_color(t.blocked).cursor_pointer().tooltip(tr("common-agents-stop-when-you-disconnect"))
+          .on_click(() => run("mod.open", { name: "machine-add" })).child("⚠")))
         .child(controls.flex_none()));
     if (m.state === "needs_login") {
       const command = `hc machine login ${m.name}`;
@@ -770,7 +785,9 @@ export default class Settings extends View {
         : [result, check("st-check-app")];
     const c = u.core;
     const core = c.managed
-      ? [tr("settings-managed-by-update-it-there", { managed: c.managed }), null]
+      ? [c.ready
+          ? tr("settings-managed-by-update-it-there-available", { managed: c.managed, ready: c.ready })
+          : tr("settings-managed-by-update-it-there", { managed: c.managed }), u.checks ? check("st-check-core") : null]
       : c.updating
         ? [tr("settings-updating-your-terminals-keep-running"), null]
         : c.error

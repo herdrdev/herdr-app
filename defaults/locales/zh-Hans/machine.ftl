@@ -19,3 +19,6 @@ machine-add-your-ssh-config-lists-no-hosts = 你的 ssh 配置里没有任何主
 machine-add-reading-ssh-config = 正在读取 ~/.ssh/config…
 machine-add-also = 还有 { $value1 }
 machine-add-or-type-how-ssh-reaches-it = 或者输入 ssh 连接它的方式
+machine-add-agents-stop-when-you-disconnect = 断开连接后,{ $name } 上的 Agent 会停止
+machine-add-server-ends-your-programs = 你最后一次登录会话关闭时(例如笔记本休眠),服务器会结束你的程序。
+machine-add-run-this-on-once = 在 { $name } 上执行一次:

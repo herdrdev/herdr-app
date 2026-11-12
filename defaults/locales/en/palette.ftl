@@ -53,3 +53,4 @@ palette-group-terminal = Terminal
 palette-group-agent = Agent
 palette-group-window = Window
 palette-group-app = App
+palette-select-all = Select all

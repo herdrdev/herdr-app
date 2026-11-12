@@ -2,7 +2,7 @@ use super::*;
 use gpui::{IntoElement, Render, TestAppContext, VisualTestContext};
 use std::ops::Deref;
 use gpui_shell::{ShellRoot, ShellRuntime, policy::Policy};
-use std::{cell::Cell, rc::Rc, sync::atomic::{AtomicU64, Ordering}, time::Instant};
+use std::{cell::Cell, rc::Rc, sync::{Arc, atomic::{AtomicU64, Ordering}}, time::Instant};
 
 struct Fixture(PathBuf);
 impl Fixture {
@@ -313,6 +313,55 @@ export default class extends View {
     }).unwrap();
     cx.run_until_parked();
     assert_eq!(*seen.borrow(), ["start", "done"]);
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+}
+
+#[gpui::test]
+fn explicit_host_cancellation_drops_work_and_settles_once(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let fixture = Fixture::new(r#"
+import { View, div } from "gpui-kit";
+import { wait, ready, note } from "fixture";
+export default class extends View {
+  init(_props, cx) {
+    cx.spawn(async () => {
+      const pending = wait();
+      pending.cancel();
+      pending.cancel();
+      note(await pending);
+      const done = ready();
+      note(await done);
+      done.cancel();
+      done.cancel();
+    });
+  }
+  render() { return div(); }
+}"#);
+    struct Dropped(Arc<std::sync::atomic::AtomicUsize>);
+    impl Drop for Dropped {
+        fn drop(&mut self) { self.0.fetch_add(1, Ordering::Relaxed); }
+    }
+    let dropped = Arc::new(std::sync::atomic::AtomicUsize::new(0));
+    let work = dropped.clone();
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let calls = seen.clone();
+    gpui_shell::policy::set_default(Policy::new().with_host_module(
+        HostModule::new("fixture")
+            .cancellable_async_function("wait", HostValue::Array(vec![]), move |_| {
+                let guard = Dropped(work.clone());
+                Ok(async move {
+                    let _guard = guard;
+                    std::future::pending::<gpui_shell::HostResult>().await
+                })
+            })
+            .cancellable_async_function("ready", HostValue::Null, |_| Ok(async { Ok(HostValue::Number(7.0)) }))
+            .function("note", move |a| { calls.borrow_mut().push(a.value(0)?.clone()); Ok(HostValue::Null) })
+    ).unwrap());
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|window, cx| Mounted(runtime.try_load(&fixture.0, window, cx).unwrap()));
+    cx.run_until_parked();
+    assert_eq!(*seen.borrow(), [HostValue::Array(vec![]), HostValue::Number(7.0)]);
+    assert_eq!(dropped.load(Ordering::Relaxed), 1);
     window.update(cx, |_, window, _| window.remove_window()).unwrap();
 }
 

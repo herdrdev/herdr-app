@@ -383,6 +383,10 @@ pub struct Person {
     pub font_size: Option<f32>,
     /// Enable programming ligatures in terminal fonts.
     pub font_ligatures: bool,
+    /// Cell height multiplier, 0.8..2.
+    pub terminal_line_height: f32,
+    /// Wheel and trackpad scroll multiplier, 0.1..5.
+    pub terminal_scroll_speed: f32,
     /// The panels' font (their sizes follow zoom).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ui_font: Option<String>,
@@ -455,6 +459,8 @@ impl Default for Person {
             font: None,
             font_size: None,
             font_ligatures: false,
+            terminal_line_height: 1.0,
+            terminal_scroll_speed: 1.0,
             ui_font: None,
             telemetry: true,
             clipboard_write: true,
@@ -476,6 +482,10 @@ pub struct Settings {
     pub font_family: String,
     pub font_size: f32,
     pub font_ligatures: bool,
+    /// Cell height multiplier, 0.8..2.
+    pub terminal_line_height: f32,
+    /// Wheel and trackpad scroll multiplier, 0.1..5.
+    pub terminal_scroll_speed: f32,
     pub ui_font_family: String,
     pub ui_font_size: f32,
     /// How big the whole app is drawn (1 = as designed). The zoom keys change it.
@@ -526,6 +536,8 @@ impl Default for Settings {
             font_family: DEFAULT_FONT.into(),
             font_size: 14.0,
             font_ligatures: false,
+            terminal_line_height: 1.0,
+            terminal_scroll_speed: 1.0,
             ui_font_family: "Geist".into(),
             ui_font_size: 13.0,
             zoom: 1.0,
@@ -564,6 +576,8 @@ impl Settings {
             font_family: look.font.clone().or(person.font.clone()).unwrap_or(d.font_family),
             font_size: look.font_size.or(person.font_size).unwrap_or(d.font_size),
             font_ligatures: person.font_ligatures,
+            terminal_line_height: look.terminal_line_height.unwrap_or(person.terminal_line_height).clamp(0.8, 2.0),
+            terminal_scroll_speed: look.terminal_scroll_speed.unwrap_or(person.terminal_scroll_speed).clamp(0.1, 5.0),
             ui_font_family: look.ui_font.clone().or(person.ui_font.clone()).unwrap_or(d.ui_font_family),
             ui_font_size: d.ui_font_size,
             zoom: person.zoom,
@@ -872,6 +886,24 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn terminal_multipliers_default_inherit_override_and_clamp() {
+        let default: Person = serde_json::from_str("{}").unwrap();
+        let look = crate::layout::Look::default();
+        let s = Settings::compose(&default, &look, true);
+        assert_eq!((s.terminal_line_height, s.terminal_scroll_speed), (1.0, 1.0));
+        let person: Person = serde_json::from_str(r#"{"terminal_line_height":1.3,"terminal_scroll_speed":0.5}"#).unwrap();
+        let roundtrip: Person = serde_json::from_value(serde_json::to_value(&person).unwrap()).unwrap();
+        let s = Settings::compose(&roundtrip, &look, true);
+        assert_eq!((s.terminal_line_height, s.terminal_scroll_speed), (1.3, 0.5));
+        let look: crate::layout::Look = serde_json::from_str(r#"{"terminal_line_height":0.1,"terminal_scroll_speed":10}"#).unwrap();
+        let s = Settings::compose(&person, &look, true);
+        assert_eq!((s.terminal_line_height, s.terminal_scroll_speed), (0.8, 5.0));
+        let person = Person { terminal_line_height: 5.0, terminal_scroll_speed: 0.0, ..default };
+        let s = Settings::compose(&person, &crate::layout::Look::default(), true);
+        assert_eq!((s.terminal_line_height, s.terminal_scroll_speed), (2.0, 0.1));
+    }
 
     #[test]
     fn layout_look_wins_and_settings_fill_what_it_leaves_unset() {

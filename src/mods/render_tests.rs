@@ -10,6 +10,77 @@ use std::{
     time::Instant,
 };
 
+
+#[gpui::test]
+fn mod_text_selection_stays_in_its_shell_root(cx: &mut TestAppContext) {
+    use gpui::*;
+    use gpui_base::{SelectableText, TextSelection, TextView, TextViewState};
+    use gpui_shell::ShellRoot;
+
+    struct Column {
+        texts: Vec<Entity<TextViewState>>,
+        label: &'static str,
+    }
+    impl Render for Column {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().flex().flex_col().size_full().gap(px(20.))
+                .children(self.texts.iter().map(|text| TextView::new(text).scrollable(false).selectable(true)))
+                .child(SelectableText::new("plain", format!("{} plain text", self.label)).document_order(u64::MAX))
+        }
+    }
+    struct Columns {
+        roots: Vec<Entity<ShellRoot>>,
+    }
+    impl Render for Columns {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().flex().size_full().children(self.roots.iter().map(|root| {
+                div().w(px(240.)).h_full().child(root.clone())
+            }))
+        }
+    }
+    cx.update(gpui_shell::init);
+    let mut texts = Vec::new();
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        let roots = ["LEFT", "CENTER", "RIGHT"].into_iter().map(|label| {
+            let blocks = ["first", "middle", "second"].into_iter().map(|block| {
+                cx.new(|cx| TextViewState::markdown(&format!("{label} {block} block"), cx))
+            }).collect::<Vec<_>>();
+            texts.push(blocks.clone());
+            let content = cx.new(|_| Column { texts: blocks, label }).into();
+            cx.new(|cx| ShellRoot::new(content, window, cx))
+        }).collect();
+        Columns { roots }
+    });
+    cx.run_until_parked();
+    let bounds = |column: usize, block: usize, cx: &mut VisualTestContext| {
+        texts[column][block].read_with(cx, |text, _| text.bounds())
+    };
+    let start = bounds(1, 0, cx).origin + point(px(1.), px(10.));
+    let inside = bounds(1, 2, cx);
+    let neighbor = bounds(2, 2, cx);
+    for end in [
+        point(inside.right() - px(1.), inside.top() + px(10.)),
+        point(neighbor.right() - px(1.), neighbor.top() + px(10.)),
+        point(px(900.), px(400.)),
+        point(px(-20.), px(400.)),
+    ] {
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::default());
+        cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        let copied = cx.update(|window, cx| TextSelection::selected_text(window, cx));
+        assert!(copied.contains("CENTER first block"), "{copied:?}");
+        assert!(copied.contains("CENTER middle block"), "end {end:?}: {copied:?}");
+        assert!(copied.contains("CENTER second block"), "end {end:?}: {copied:?}");
+        assert!(!copied.contains("LEFT") && !copied.contains("RIGHT"), "{copied:?}");
+        if end.y == px(400.) {
+            assert!(copied.contains("CENTER plain text"), "{copied:?}");
+        }
+        cx.simulate_mouse_move(neighbor.center(), None, Modifiers::default());
+        assert_eq!(cx.update(|window, cx| TextSelection::selected_text(window, cx)), copied);
+    }
+}
+
 struct Staged(PathBuf);
 impl Staged {
     fn new() -> Self {
@@ -159,9 +230,8 @@ fn module(mut values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> Hos
     module = module.async_function("feedbackPickImages", |_| Ok(async { Ok(HostValue::Array(vec![])) }));
     module = module.async_function("knownAgents", |_| Ok(async { Ok(HostValue::Array(vec![])) }));
     module = module.async_function("pickFolder", |_| Ok(async { Ok(HostValue::Null) }));
-    for name in ["nextCommand", "watchFolder"] {
-        module = module.async_function(name, |_| Ok(std::future::pending::<gpui_shell::HostResult>()));
-    }
+    module = module.async_function("nextCommand", |_| Ok(std::future::pending::<gpui_shell::HostResult>()));
+    module = module.cancellable_async_function("watchFolder", HostValue::Array(vec![]), |_| Ok(std::future::pending::<gpui_shell::HostResult>()));
     for name in ["exec", "hc", "readTextFile", "writeTextFile", "sendFeedback"] {
         let calls = calls.clone();
         module = module.async_function(name, move |a| {
@@ -670,6 +740,22 @@ fn rebuilt_machine_offers_connect_only_for_identity_mismatch(cx: &mut TestAppCon
         assert_eq!(tree.contains("rebuilt ·"), offered, "{tree}");
         assert_eq!(tree.contains("This machine was rebuilt or replaced. Click to connect to the new one."), offered, "{tree}");
         assert!(!tree.contains("machine-reconnect-"), "reconnect belongs in the machine row: {tree}");
+    }
+}
+
+#[gpui::test]
+fn machine_logout_warning_tracks_current_remote_state(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for state in ["false", "true", "null", "undefined"] {
+        let setup = format!("this.hosts = []; this.added = [{{name:'cloud', target:'host', keeps_running_after_logout:{state}, logout_linger_user:'-alice'}}];");
+        let tree = describe(cx, &staged, "mods/machine-add", false, props(), updates("current", "current"), Some(&setup)).unwrap();
+        assert_eq!(tree.contains("Agents on cloud stop when you disconnect"), state == "false", "{tree}");
+        assert_eq!(tree.contains("ma-logout-copy-cloud"), state == "false", "{tree}");
+        if state == "false" { assert!(tree.contains("sudo loginctl enable-linger -- -alice"), "{tree}"); }
+        let setup = format!("this.machines = [{{name:'cloud', target:'host', state:'connected', keeps_running_after_logout:{state}}}];");
+        let tree = describe(cx, &staged, "mods/spaces", false, props(), updates("current", "current"), Some(&setup)).unwrap();
+        assert_eq!(tree.contains("machine-logout-cloud"), state == "false", "{tree}");
     }
 }
 

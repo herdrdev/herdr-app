@@ -53,3 +53,4 @@ palette-group-terminal = 終端機
 palette-group-agent = Agent
 palette-group-window = 視窗
 palette-group-app = 應用程式
+palette-select-all = 全選

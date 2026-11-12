@@ -32,3 +32,4 @@ common-weekday-6 = 六
 common-am = 上午
 common-pm = 下午
 common-long-date = { $year } 年 { $month } { $day } 日
+common-agents-stop-when-you-disconnect = 中斷連線後 Agent 會停止。點擊查看解決方法。

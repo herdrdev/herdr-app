@@ -32,3 +32,4 @@ common-weekday-6 = S
 common-am = AM
 common-pm = PM
 common-long-date = { $month } { $day }, { $year }
+common-agents-stop-when-you-disconnect = Agents stop when you disconnect. Click for the fix.

@@ -1108,7 +1108,7 @@ fn module(inst: Instance, copy: u64) -> HostModule {
             set_shared(a.string(0)?.to_owned(), from_host(a.value(1)?));
             Ok(HostValue::Null)
         })
-        .async_function("watchFolder", |a| {
+        .cancellable_async_function("watchFolder", HostValue::Array(vec![]), |a| {
             let path = a.string(0)?.to_owned();
             Ok(async move { crate::files::next_change(path).await.map(|v| to_host(&json!(v))).map_err(HostError::new) })
         })

@@ -19,3 +19,6 @@ machine-add-your-ssh-config-lists-no-hosts = Your ssh config lists no hosts
 machine-add-reading-ssh-config = Reading ~/.ssh/config…
 machine-add-also = also { $value1 }
 machine-add-or-type-how-ssh-reaches-it = Or type how ssh reaches it
+machine-add-agents-stop-when-you-disconnect = Agents on { $name } stop when you disconnect
+machine-add-server-ends-your-programs = The server ends your programs when your last login closes, for example when your laptop sleeps.
+machine-add-run-this-on-once = Run this on { $name } once:

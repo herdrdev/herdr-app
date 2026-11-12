@@ -60,7 +60,8 @@ const LABELS = {
   "app.zoom_out": "palette-zoom-out",
   "app.zoom_reset": "palette-reset-zoom",
   "app.quit": "palette-quit-herdr",
-  "terminal.search": "command-terminal-search"
+  "terminal.search": "command-terminal-search",
+  "terminal.select_all": "palette-select-all"
 };
 
 function label(action) {

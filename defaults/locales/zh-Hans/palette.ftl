@@ -53,3 +53,4 @@ palette-group-terminal = 终端
 palette-group-agent = Agent
 palette-group-window = 窗口
 palette-group-app = 应用
+palette-select-all = 全选

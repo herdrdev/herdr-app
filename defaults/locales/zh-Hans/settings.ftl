@@ -107,3 +107,6 @@ settings-language-restart = 重启 Herdr 后应用语言更改。
 settings-current-language = 当前语言：{ $name }
 settings-machine-updated-version = 已将 { $name } 更新至 hc { $version }；其终端持续运行。
 settings-machine-updated = 已更新 { $name }；其终端持续运行。
+settings-terminal-line-height = 终端行高
+settings-terminal-scroll-speed = 终端滚动速度
+settings-managed-by-update-it-there-available = 由 { $managed } 管理:请在那里更新。{ $ready } 已可用。

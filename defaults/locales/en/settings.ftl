@@ -107,3 +107,6 @@ settings-language-restart = Restart Herdr to apply the language change.
 settings-current-language = Current language: { $name }
 settings-machine-updated-version = Updated { $name } to hc { $version }; its terminals kept running.
 settings-machine-updated = Updated { $name }; its terminals kept running.
+settings-terminal-line-height = Terminal line height
+settings-terminal-scroll-speed = Terminal scroll speed
+settings-managed-by-update-it-there-available = Managed by { $managed }: update it there. { $ready } is available.
