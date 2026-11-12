@@ -91,7 +91,10 @@ pub fn client(args: &[String]) -> i32 {
         [verb] if verb == "ls" => json!({ "ls": true }),
         [verb, message] if verb == "feedback" => json!({ "do": "app.feedback", "args": { "message": message, "from": "agent" } }),
         [verb, command, rest @ ..] if verb == "do" => match parse_args(rest) {
-            Ok(a) => json!({ "do": command, "args": a, "caller": std::env::var("HC_TERMINAL_ID").ok().filter(|t| !t.is_empty()) }),
+            Ok(a) => {
+                let (caller, caller_core) = caller().map_or((None, None), |(t, c)| (Some(t), c));
+                json!({ "do": command, "args": a, "caller": caller, "caller_core": caller_core })
+            }
             Err(e) => return fail(&e),
         },
         _ => return fail("usage: herdr-app ls | herdr-app commands | herdr-app status | herdr-app shot [file.png] | herdr-app do <command> [--arg value ... | json]"),
@@ -124,6 +127,27 @@ pub fn client(args: &[String]) -> i32 {
         println!("{}", serde_json::to_string_pretty(&reply).unwrap_or_default());
     }
     if reply.get("error").is_some() { 1 } else { 0 }
+}
+
+/// The hc terminal we run in, with the id of the core that owns it (asked over
+/// `HC_TERMINAL_SOCKET`): a terminal id means nothing to another core's window.
+fn caller() -> Option<(String, Option<String>)> {
+    let terminal = std::env::var("HC_TERMINAL_ID").ok().filter(|t| !t.is_empty())?;
+    let Some(socket) = std::env::var_os("HC_TERMINAL_SOCKET") else { return Some((terminal, None)) };
+    let hello = json!({ "jsonrpc": "2.0", "id": 1, "method": "hello", "params": {} });
+    #[cfg(unix)]
+    let stream = {
+        let s = UnixStream::connect(&socket).ok()?;
+        s.set_read_timeout(Some(Duration::from_secs(2))).ok()?;
+        s
+    };
+    #[cfg(windows)]
+    let stream = std::fs::OpenOptions::new().read(true).write(true).open(&socket).ok()?;
+    (&stream).write_all(format!("{hello}\n").as_bytes()).ok()?;
+    let mut line = String::new();
+    BufReader::new(&stream).read_line(&mut line).ok()?;
+    let core = serde_json::from_str::<Value>(&line).ok()?["result"]["core"]["id"].as_str()?.to_owned();
+    Some((terminal, Some(core)))
 }
 
 /// `--name api --argv '["pi"]'` (values that parse as JSON are JSON), or one JSON object.

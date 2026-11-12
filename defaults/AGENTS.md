@@ -590,7 +590,7 @@ The main ones:
   `pane.go` also reaches visible mods whose `mod.json` says `"focusable": true`, and
   starts from that mod while it holds the keyboard.
   `pane.swap {direction}` uses geometry only. Focus history lasts until the window closes.
-  `pane.swap {target}` trades the places of `pane` (default: the focused one) and
+  `pane.swap {target}` trades the places of `pane` (default: the caller's, else the focused one) and
   `target`, another pane of the same tab; give `direction` or `target`, not both.
   A swap moves panes, not focus: the focused pane stays focused in its new place.
   `pane.focus {terminal}` prefers the first visible layout terminal block showing that
@@ -599,6 +599,9 @@ The main ones:
   `terminal.show` fail, as do `terminal.open`/`terminal.keep` with place right/down.
   They never act on the terminal's source pane. An explicit `pane` still targets that
   model pane; composition edits belong to the mod (edit its layout instead).
+  `herdr-app do` run in a terminal of this window's core counts as that terminal's
+  `pane` for split/close/zoom/swap when none is given, so an agent edits its own pane,
+  not the one the person is looking at. `HC_TERMINAL_ID= herdr-app do …` keeps the focused pane.
 - Terminals: `terminal.open {argv?, folder?, place?, name?}` (`folder` sets the
   starting directory for tabs and right/down splits, with or without `argv`), `terminal.kill {terminal}`,
   `terminal.keep {terminal, place?}`, `terminal.park {terminal}`,

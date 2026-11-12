@@ -3821,7 +3821,10 @@ impl AppWindow {
     fn control(&mut self, cmd: Value, window: &mut Window, cx: &mut Context<Self>) -> Value {
         if let Some(name) = cmd.get("do").and_then(Value::as_str) {
             let mut args = cmd.get("args").cloned().unwrap_or(Value::Null);
-            if let Some(caller) = cmd.get("caller").and_then(Value::as_str) {
+            let ours = |core: &Value| core.is_null() || core.as_str() == self.core.hello["core"]["id"].as_str();
+            if let Some(caller) = cmd.get("caller").and_then(Value::as_str)
+                && ours(&cmd["caller_core"])
+            {
                 callers_pane_by_default(&self.model, name, &mut args, caller);
             }
             return self.run_as(name, args, false, window, cx);
@@ -4747,9 +4750,12 @@ fn swap_by(args: &Value) -> Result<SwapBy<'_>, String> {
 
 /// `herdr-app do` from inside a terminal: a command that would take the focused pane takes the caller's.
 fn callers_pane_by_default(model: &Model, name: &str, args: &mut Value, caller: &str) {
-    let command = name.split_once(':').map_or(name, |(n, _)| n);
-    let takes_a_pane = matches!(command, "pane.split" | "pane.close" | "pane.zoom" | "pane.swap" | "terminal.show");
-    if !takes_a_pane || args.get("pane").is_some_and(|p| !p.is_null()) {
+    let (command, short) = name.split_once(':').map_or((name, None), |(n, v)| (n, Some(v)));
+    // terminal.show isn't here: it focuses its pane, which would pull the person to the caller's tab.
+    let takes_a_pane = matches!(command, "pane.split" | "pane.close" | "pane.zoom" | "pane.swap");
+    let named = |a: &Value| a.get("pane").is_some_and(|p| !p.is_null());
+    let short_names = short.zip(crate::commands::find(command)).is_some_and(|(v, c)| named(&crate::commands::shorthand(c, v)));
+    if !takes_a_pane || named(args) || short_names {
         return;
     }
     let Some(pane) = model.pane_of(caller) else { return };
@@ -6406,10 +6412,14 @@ export default class SystemToast extends View {
             args
         };
         assert_eq!(with("pane.split", json!({"direction": "right"}), "t3"), json!({"direction": "right", "pane": "x3"}));
-        for name in ["pane.close", "pane.zoom", "pane.swap", "terminal.show"] {
+        for name in ["pane.close", "pane.zoom", "pane.swap"] {
             assert_eq!(with(name, Value::Null, "t2"), json!({"pane": "x2"}), "{name}");
         }
-        assert_eq!(with("pane.split:right", Value::Null, "t3"), json!({"pane": "x3"}), "shorthand");
+        assert_eq!(with("pane.split:right", Value::Null, "t3"), json!({"pane": "x3"}), "shorthand for another argument");
+        for name in ["pane.close:x1", "pane.zoom:x1"] {
+            assert_eq!(with(name, Value::Null, "t3"), Value::Null, "{name}: the shorthand names the pane");
+        }
+        assert_eq!(with("terminal.show", Value::Null, "t3"), Value::Null, "it would focus the caller's tab");
         assert_eq!(with("pane.close", json!({"pane": "x1"}), "t3"), json!({"pane": "x1"}), "an explicit pane wins");
         assert_eq!(with("pane.close", json!({"pane": 5}), "t3"), json!({"pane": 5}), "a bad pane still fails validation");
         assert_eq!(with("pane.close", json!({"pane": null}), "t3"), json!({"pane": "x3"}), "null means omitted");

@@ -114,7 +114,7 @@ Split a pane (default: the caller's, from a terminal, else the focused one) "rig
 
 ## `pane.close`
 
-Close a pane and end its terminal.
+Close a pane (default: the caller's, from a terminal, else the focused one) and end its terminal.
 
 | Argument | Required |
 |---|---|
@@ -234,7 +234,7 @@ No arguments.
 
 ## `pane.zoom`
 
-Show only this pane of its tab, or all again.
+Show only this pane (default: the caller's, from a terminal, else the focused one) of its tab, or all again.
 
 | Argument | Required |
 |---|---|

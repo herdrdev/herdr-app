@@ -38,9 +38,9 @@ herdr-app do space.new --name eng-123 --folder ~/code/app/eng-123 --argv '["clau
 
 Pick an explicit, useful name for every new space and tab; don't rely on
 default names. Use IDs from `ls` rather than guessing or acting on the wrong
-focused pane. Run from your terminal, `pane.split`, `pane.close`, `pane.zoom`,
-`pane.swap` and `terminal.show` without `pane` act on your own pane, not the
-focused one.
+focused pane. Run from your terminal, `pane.split`, `pane.close`, `pane.zoom` and
+`pane.swap` without `pane` act on your own pane, not the focused one
+(`HC_TERMINAL_ID= herdr-app do …` keeps the focused one).
 
 ```sh
 herdr-app do space.new --name api --folder /path/to/api
