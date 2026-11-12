@@ -113,6 +113,8 @@ fn main() {
         }
     }
 
+    // SAFETY: no threads yet. The window is no terminal's caller, nor are the mods' children.
+    unsafe { std::env::remove_var("HC_TERMINAL_ID") };
     #[cfg(target_os = "macos")]
     core_bin::fill_path();
     tracing_subscriber::fmt()

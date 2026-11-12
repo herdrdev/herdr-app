@@ -91,7 +91,7 @@ pub fn client(args: &[String]) -> i32 {
         [verb] if verb == "ls" => json!({ "ls": true }),
         [verb, message] if verb == "feedback" => json!({ "do": "app.feedback", "args": { "message": message, "from": "agent" } }),
         [verb, command, rest @ ..] if verb == "do" => match parse_args(rest) {
-            Ok(a) => json!({ "do": command, "args": a }),
+            Ok(a) => json!({ "do": command, "args": a, "caller": std::env::var("HC_TERMINAL_ID").ok().filter(|t| !t.is_empty()) }),
             Err(e) => return fail(&e),
         },
         _ => return fail("usage: herdr-app ls | herdr-app commands | herdr-app status | herdr-app shot [file.png] | herdr-app do <command> [--arg value ... | json]"),

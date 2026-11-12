@@ -38,7 +38,9 @@ herdr-app do space.new --name eng-123 --folder ~/code/app/eng-123 --argv '["clau
 
 Pick an explicit, useful name for every new space and tab; don't rely on
 default names. Use IDs from `ls` rather than guessing or acting on the wrong
-focused pane.
+focused pane. Run from your terminal, `pane.split`, `pane.close`, `pane.zoom`,
+`pane.swap` and `terminal.show` without `pane` act on your own pane, not the
+focused one.
 
 ```sh
 herdr-app do space.new --name api --folder /path/to/api
@@ -78,7 +80,7 @@ herdr-app do pane.split '{"direction":"right","pane":"p12"}'
 ```
 
 `pane.swap {pane?, direction | target}` trades the places of `pane` (default:
-the focused one) and its neighbor in a direction, or `target`, another pane of
+yours, else the focused one) and its neighbor in a direction, or `target`, another pane of
 the same tab. Give `direction` or `target`, not both. Focus stays with the same pane:
 
 ```sh
