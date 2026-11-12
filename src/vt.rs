@@ -1966,6 +1966,15 @@ mod tests {
     }
 
     #[test]
+    fn legacy_computing_blocks_take_one_cell() {
+        let mut vt = Vt::new(12, 1);
+        vt.write("\u{1CD0C}\u{1CD17}\u{1CD1A}\u{1CD27}\u{1CDDD}\u{1CDE1}\u{1CDE4}\u{1CEAB}\u{1FB85}\u{1FB00}\u{1CE90}!".as_bytes());
+        let f = vt.frame();
+        assert!(f.rows[0][..11].iter().all(|c| !c.wide && c.text.chars().count() == 1));
+        assert_eq!(f.rows[0][11].text, "!");
+    }
+
+    #[test]
     fn styled_text_reaches_the_frame() {
         let mut vt = Vt::new(20, 3);
         vt.write(b"hi \x1b[1;31mred\x1b[0m\r\n\xe4\xb8\xad!");
