@@ -32,6 +32,10 @@ New spaces and tabs are shown immediately: only create them when asked.
 Pick an explicit, useful name for every new space and tab; don't rely on
 default names. Use IDs from `ls` rather than guessing or acting on the wrong
 focused pane.
+The tab bar's + menu opens a Changes tab in the selected space, keeping the
+focused terminal's folder and machine. From a command, supply that folder:
+`tab.new {name: "Changes", mod: "changes", props: {folder: "/path/to/project", on: null}}`
+(`on`: a machine name for a remote repository).
 
 ```sh
 herdr-app do space.new --name api --folder /path/to/api

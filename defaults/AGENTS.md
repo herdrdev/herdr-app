@@ -173,7 +173,8 @@ Each file is one whole window. `layout.switch` (`ctrl-shift-l`) cycles
 through them, `layout.switch {name}` picks one; `shared("layout")` is the
 shown one's name. Herdr ships `main` ("Herdr": spaces by machine and the
 agents list on the left, `workspace-chrome`; tabs as pills with a + menu
-that starts a terminal or any installed agent, `new-menu`; panes as cards
+that starts a terminal or any installed agent, or opens a Changes tab in the
+selected space, `new-menu`; panes as cards
 with a header; Files and Changes panels on the right, `files` and
 `changes`, opened from the tab bar and remembered per space (which ones:
 shared `"workspace.panels"`, set by the welcome); a status bar,
@@ -184,6 +185,12 @@ writing a new file. The Files panel supports Windows folder paths with spaces,
 parentheses and apostrophes, and preserves Unicode file and folder names
 (including Chinese). Directory links expand as folders; their contents load
 only when expanded.
+The + menu's Changes item opens the same changes list, diff preview and commit
+controls as a tab, keeping the focused terminal's folder and machine when opened.
+It is disabled when no space is selected. To open a particular repository:
+`tab.new {name: "Changes", mod: "changes", props: {folder: "/path/to/project", on: null}}`
+(`on`: a machine name for a remote repository). Changes without folder props,
+including the sidebar, follows the focused pane's folder.
 
 **Herdr's own layouts and mods are read-only.** They are replaced whole
 on every start. Use settings.json for look (fonts, sizes, theme, colors,
