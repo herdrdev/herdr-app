@@ -1028,6 +1028,11 @@ All of it is in `herdr.d.ts`. In short:
   locally and remotely. It rejects on timeout, if the program cannot start or the machine cannot be reached.
   `hc(args)` (`hc read <t>` gives a terminal's text),
   `home()`, `appHome()`, `playSound("done" | "blocked" | file)`.
+  `setBadge(label)`: the dock icon's badge on macOS, e.g. how many agents
+  wait; `agents()` has a row per pane, so count addresses:
+  `setBadge(new Set(agents().filter((a) => a.status === "blocked").map((a) => a.address)).size)`.
+  0, "" or null clears it; one for the whole app, the last call wins.
+  Call it from `cx.timer.every` too: a minimized window may not render.
   `knownAgents({ on })`: the agents people can start (programs.json's
   `run`), most picked first, each `installed` or not there (asked of the
   shell agents start in; a remote Unix machine's login/interactive shell when supported);

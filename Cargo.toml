@@ -58,6 +58,9 @@ gpui_linux = { package = "gpui-pre-linux", version = "=0.3.8", features = ["rend
 [target.'cfg(target_os = "macos")'.dependencies]
 gpui_macos = { package = "gpui-pre-macos", version = "=0.3.8", features = ["render-to-image"] }
 libc = "0.2"
+objc2 = "0.6"
+objc2-app-kit = { version = "0.3.2", default-features = false, features = ["std", "NSApplication", "NSDockTile", "NSResponder"] }
+objc2-foundation = { version = "0.3.2", default-features = false, features = ["std", "NSString"] }
 
 [target.'cfg(windows)'.dependencies]
 gpui_windows = { package = "gpui-pre-windows", version = "=0.3.8", features = ["render-to-image"] }
