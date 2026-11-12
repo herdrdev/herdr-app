@@ -162,6 +162,7 @@ pub fn shot(window: &gpui::Window, path: PathBuf, reply: std::sync::mpsc::Sender
     };
     #[cfg(windows)]
     let host = native_views::host(window);
+    let answer_failure = reply.clone();
     let spawned = std::thread::Builder::new().name("herdr-shot".into()).spawn(move || {
         #[allow(unused_mut)]
         let mut image = image;
@@ -177,7 +178,7 @@ pub fn shot(window: &gpui::Window, path: PathBuf, reply: std::sync::mpsc::Sender
         let _ = reply.send(answer);
     });
     if let Err(error) = spawned {
-        tracing::warn!("cannot start the screenshot thread: {error}");
+        let _ = answer_failure.send(json!({ "error": format!("cannot start the screenshot thread: {error}") }));
     }
 }
 
