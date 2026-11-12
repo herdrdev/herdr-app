@@ -50,6 +50,9 @@ async function both(a, b) {
 // that draws space avatars): one strong color per hue, light and dark alike.
 const MARK = { ansi6: "#22a99a", ansi3: "#e3814f", ansi4: "#5b8def", ansi5: "#8b7cf6", ansi2: "#3fae6a", ansi1: "#d9649a" };
 
+// A space's icon: the emoji the person picked for it, if any.
+const emojiOf = (id) => (shared("space.emojis") ?? {})[id];
+
 // A space speaks up only when something in it needs you.
 export function glyph(status) {
   return status === "blocked" || status === "done" ? "●" : "·";
@@ -421,6 +424,7 @@ export default class Spaces extends View {
     const colors = shared("space.colors") ?? {};
     const color = colors[w.id] ?? "ansi6";
     const fill = color.startsWith("#") ? color : (MARK[color] ?? t[color]);
+    const emoji = emojiOf(w.id);
     return v_flex()
       .relative()
       .id(`space-${w.id}`)
@@ -465,14 +469,17 @@ export default class Spaces extends View {
         h_flex()
           .gap(9)
           .items_center()
-          .when(Boolean(tree), el => el.pl(22).child(svg("mods/workspace-chrome/branch.svg").size(13).text_color(t.dim)))
-          .when(!tree, el => el.child(h_flex().size(18).flex_none().rounded(5).bg(fill).items_center().justify_center().text_size(10.5).font_bold().text_color("#ffffff").child([...w.name][0]?.toUpperCase() ?? "?")))
+          .when(Boolean(tree) && !emoji, el => el.pl(22).child(svg("mods/workspace-chrome/branch.svg").size(13).text_color(t.dim)))
+          .when(!tree || emoji, el => el.child(h_flex().size(18).flex_none().rounded(5).bg(fill).items_center().justify_center().text_size(emoji ? 11.5 : 10.5).font_bold().text_color("#ffffff")
+            .child(div().max_w(18).truncate().child(emoji || ([...w.name][0]?.toUpperCase() ?? "?")))
+            .when(Boolean(tree), (icon) => icon.ml(22))))
           .child(div().flex_shrink(0).max_w(150).truncate().text_color(t.foreground).child(w.name))
           .child(g ? this.gitTail(g, tree, w.name, t) : div().flex_1()),
       );
   }
 
   compact({ w, i }, t) {
+    const emoji = emojiOf(w.id);
     return railCell(h_flex()
       .id(`space-${w.id}`)
       .relative()
@@ -484,7 +491,7 @@ export default class Spaces extends View {
       .when(w.active, (el) => el.bg(t.selected))
       .when(!w.active, (el) => el.hover((s) => s.bg(t.hover)))
       .on_click(() => run("space.select", { id: w.id }))
-      .child(div().text_color(w.active ? t.foreground : t.muted).child(String(i + 1)))
+      .child(div().max_w(20).truncate().text_color(w.active ? t.foreground : t.muted).when(Boolean(emoji), (el) => el.text_size(12.5)).child(emoji || String(i + 1)))
       .child(div().absolute().right(5).text_color(tone(t, w.status)).child(glyph(w.status))));
   }
 
@@ -503,6 +510,10 @@ export default class Spaces extends View {
       changed = true;
     }
     if (changed) setShared("space.colors", kept);
+    // Icons of closed spaces go with them.
+    const emojis = shared("space.emojis") ?? {};
+    const keptEmojis = Object.fromEntries(Object.entries(emojis).filter(([id]) => ids.has(id)));
+    if (Object.keys(keptEmojis).length !== Object.keys(emojis).length) setShared("space.emojis", keptEmojis);
     return v_flex().size_full().min_h(0).bg(t.chrome).text_size(13)
       .child(h_flex().h(31).pl(16).pr(10).items_center().justify_between().text_size(11.5).text_color(t.dim)
         .when(collapsed, el => el.pl(0).pr(0).justify_center())

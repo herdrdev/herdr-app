@@ -110,7 +110,10 @@ the highlighted line shows where it will land.
   a space nobody named is called after where its first terminal is now
   (its repo, else its folder, `~` at home) and follows it; once named
   (`space.rename`), the name stays; renaming to "" goes back.
-  `spaces()[i].named` says which. Where a space is now is its terminals'
+  `spaces()[i].named` says which. A space can also have an icon: Change icon
+  in the spaces sidebar's menu opens the normal prompt, and the value is
+  kept by space id in shared `space.emojis` and drawn in place of the first
+  letter. Where a space is now is its terminals'
   live folders (`panes()[i].cwd`), not the folder it was made in: new
   tabs start where its focused pane is, and the default mods take a
   space's repo from its first terminal.
@@ -430,8 +433,12 @@ The default window:
 Sidebar on the right: swap the two children of `root`. No sidebar: set
 `"hidden": true` on `sidebar` (the user can toggle it: `ctrl-shift-b`).
 Narrower than 160px, the sidebar mods draw a compact rail; folding resizes
-`sidebar` to 44 (76 on macOS, room for the traffic lights). On macOS,
-the tabs also leave room for the window buttons when the sidebar is narrower.
+`sidebar` to 72 (140 on macOS outside fullscreen, room for the traffic
+lights, search and sidebar buttons). A narrower saved or dragged rail is
+brought back to that width so the top buttons fit. On macOS, the tabs also
+leave room for the window buttons when the sidebar is narrower. The top bar
+keeps the search and sidebar buttons in the same order, and the same sidebar
+button collapses and expands it.
 
 ### Layouts and mods other people made
 
