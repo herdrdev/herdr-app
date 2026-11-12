@@ -2,6 +2,7 @@
 #![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 
 mod bench;
+mod bidi;
 mod commands;
 mod control;
 mod core_bin;

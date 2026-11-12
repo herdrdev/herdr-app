@@ -761,6 +761,11 @@ What's about the user, never a look:
   pane's right edge (default `true`). It shows only when the pane has
   scrollback — never on the alternate screen (editors, pagers) — and
   drags to move through it.
+- `terminal_bidi`: `false` draws right-to-left text (Persian, Arabic,
+  Hebrew) in the order programs write it (default `true`). On, each row is
+  reordered for display as in WezTerm (left-to-right base) and Arabic-script
+  letters join; copy, search and the program's own columns stay logical.
+  Box-drawing frames and wide characters keep their places.
 - `telemetry`: `false` stops anonymous usage data and deletes what wasn't
   sent (on when absent; Settings → Privacy shows each report word for
   word, and `telemetry()` in mods). Once a day the app sends counts:
