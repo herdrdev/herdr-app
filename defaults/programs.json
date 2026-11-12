@@ -25,6 +25,7 @@
     "prime-agent": {"name":"Prime","icon":"icons/prime-agent.svg","tint":true,"tile":"#1c1d21","color":"#ffffff"},
     "gemini": {"name":"Gemini","icon":"icons/gemini.svg","run":["gemini"],"tint":true,"tile":"#8e75b2","color":"#ffffff"},
     "ollama": {"name":"Ollama","icon":"icons/ollama.svg","tint":true,"tile":"#1c1d21","color":"#ffffff"},
+    "omp": {"name":"oh-my-pi","icon":"icons/omp.svg","run":["omp"],"match":["oh-my-pi"],"tint":true,"tile":"#1c1d21","color":"#ffffff"},
     "agent": {"name":"Agent","icon":"icons/agent.svg","tint":true,"tile":"#1c1d21","color":"#d6d8db"},
     "shell": {"name":"Shell","icon":"icons/shell.svg","tint":true,"tile":"#16241a","color":"#4ec95f"},
     "program": {"name":"Program","icon":"icons/program.svg","tint":true,"tile":"#1c1d21","color":"#d6d8db"},

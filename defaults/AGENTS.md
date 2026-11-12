@@ -778,7 +778,7 @@ from one table, so every mod shows the same, and the app's own toasts
 else the program the terminal runs (an interpreter shows what it runs:
 `node .../vite` is Vite, `npx vitest` is Vitest); shells are `shell`,
 anything unlisted is `program` with a color of its own. The built-in table
-has 120 programs (agents, editors, runtimes, tools, databases, infra);
+has 123 programs (agents, editors, runtimes, tools, databases, infra);
 `programs.json` here adds to it or changes entries field by field:
 
 ```json
