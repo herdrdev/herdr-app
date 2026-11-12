@@ -3054,6 +3054,10 @@ const BASE: &str = r#"  /** A row. */
      * default) brings it to the near edge, `"center"` to the middle.
      */
     scroll_to_item(index: number, strategy?: "top" | "center"): void;
+    /**
+     * Puts the last item on screen before the next frame: the last of the items
+     * that frame draws, so it can be called in `init()` or right after adding items.
+     */
     scroll_to_bottom(): void;
     /** Releases the handle. Using it afterwards throws. */
     release(): boolean;
