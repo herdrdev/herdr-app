@@ -766,7 +766,9 @@ fn exec_limit(options: Option<&HostValue>) -> Result<Duration, HostError> {
 
 pub(crate) fn run_blocking(command: &str, args: &[String], cwd: Option<String>, limit: Duration) -> Result<(i32, String, String), String> {
     use std::io::Read;
-    let mut child = crate::spawn::command(command)
+    // The core may have no `hc` link beside it (a Windows zip has only herdr-core.exe).
+    let program = if command == "hc" { crate::core_bin::path() } else { PathBuf::from(command) };
+    let mut child = crate::spawn::command(program)
         .args(args)
         .current_dir(cwd.map(PathBuf::from).unwrap_or_else(home))
         .stdin(Stdio::null())
@@ -1212,6 +1214,38 @@ mod tests {
             assert!(exec_limit(Some(&options(ms))).is_err());
         }
         assert!(exec_limit(Some(&HostObject::new().field("timeout", "30").into())).is_err());
+    }
+
+    #[test]
+    fn hc_runs_the_core_the_app_uses_even_without_an_hc_link() {
+        const CHILD: &str = "HERDR_TEST_HC_IS_THE_CORE";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "mods::tests::hc_runs_the_core_the_app_uses_even_without_an_hc_link", "--nocapture"])
+                .env(CHILD, "1").output().unwrap();
+            assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("herdr-hc-is-the-core-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        #[cfg(unix)]
+        let core = {
+            use std::os::unix::fs::PermissionsExt;
+            let core = dir.join("herdr-core");
+            std::fs::write(&core, "#!/bin/sh\necho \"the chosen core: $*\"\n").unwrap();
+            std::fs::set_permissions(&core, std::fs::Permissions::from_mode(0o755)).unwrap();
+            core
+        };
+        #[cfg(windows)]
+        let core = {
+            let core = dir.join("herdr-core.cmd");
+            std::fs::write(&core, "@echo the chosen core: %*\r\n").unwrap();
+            core
+        };
+        crate::core_bin::use_core(core);
+        let (code, stdout, stderr) = run_blocking("hc", &["ls".into()], None, Duration::from_secs(5)).unwrap();
+        assert_eq!((code, stdout.trim()), (0, "the chosen core: ls"), "{stderr}");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[cfg(unix)]
