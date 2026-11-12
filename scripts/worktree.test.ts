@@ -26,23 +26,32 @@ function rowsOf(node: any): any[] {
   return node?.id?.match(/^wt-\d+$/) ? [node] : (node?.children ?? []).flatMap(rowsOf);
 }
 
-function harness() {
+function harness(focusedMachine: string | null = null) {
   let spaceList: any[] = [];
   let paneList: any[] = [];
   const reads = { spaces: 0, panes: 0 };
   const writes: unknown[] = [];
+  const destinations: (string | null)[] = [];
+  const executions: any[] = [];
   const globals = {
     View: class {}, div: element, v_flex: element, h_flex: element,
     Input: { new: element }, Scrollbar: { vertical: element }, theme: () => ({}),
     spaces: () => { reads.spaces++; return structuredClone(spaceList); },
     panes: () => { reads.panes++; return structuredClone(paneList); },
     props: () => ({ overlay: "overlay" }), closeOverlay: () => {},
-    run: (...args: unknown[]) => writes.push(args),
+    run: (command: string, args: any) => {
+      writes.push([command, args]);
+      if (command === "space.new") destinations.push(args.machine === "" ? null : args.machine ?? focusedMachine);
+    },
+    exec: async (command: string, args: string[], options: any) => {
+      executions.push({ command, args, ...options });
+      return { code: 0, stdout: "", stderr: "" };
+    },
   };
   const Worktree = new Function(...Object.keys(globals), `${source}; return Worktree;`)(...Object.values(globals));
   const worktree = new Worktree();
   Object.assign(worktree, { opening: true, text: "", at: 0, repo: { name: "repo" }, userHome: "/home/user" });
-  return { worktree, reads, writes, snapshot: (spaces: any[], panes: any[]) => { spaceList = spaces; paneList = panes; } };
+  return { worktree, reads, writes, destinations, executions, snapshot: (spaces: any[], panes: any[]) => { spaceList = spaces; paneList = panes; } };
 }
 
 test("open render reads spaces and panes once and refreshes both on the next render", () => {
@@ -79,10 +88,27 @@ test("open clicks read fresh snapshots once and select an existing space or crea
   snapshot([], []);
   worktree.open(checkout);
   expect(reads).toEqual({ spaces: 3, panes: 3 });
-  expect(writes[1]).toEqual(["space.new", { folder: checkout.path, machine: undefined }]);
+  expect(writes[1]).toEqual(["space.new", { folder: checkout.path, machine: "" }]);
   worktree.open(undefined);
   expect(reads).toEqual({ spaces: 3, panes: 3 });
 });
+
+for (const on of [undefined, null, "server"]) {
+  for (const focused of [null, "server"]) {
+    test(`create and open stay on ${on ?? "local"} while ${focused ?? "local"} is focused`, async () => {
+      const { worktree, destinations, executions } = harness(focused);
+      Object.assign(worktree, {
+        on, text: "feature", repo: { name: "repo", main: "/repo", top: "/repo" }, list: [],
+      });
+      expect(await worktree.create()).toBe("");
+      expect(executions).toHaveLength(2);
+      expect(executions.every(e => (e.on ?? null) === (on ?? null))).toBe(true);
+      expect(executions[1].args).toEqual(["worktree", "add", "/home/user/.herdr/worktrees/repo/feature", "feature"]);
+      worktree.open({ path: "/repo/existing" });
+      expect(destinations).toEqual([on ?? null, on ?? null]);
+    });
+  }
+}
 
 test("space matching keeps deepest checkout, machine, live-folder and fallback rules", () => {
   const { worktree, reads, writes, snapshot } = harness();
@@ -100,7 +126,7 @@ test("space matching keeps deepest checkout, machine, live-folder and fallback r
   ]);
   for (const checkout of worktree.list) worktree.open(checkout);
   expect(writes).toEqual([
-    ["space.new", { folder: paths[0], machine: undefined }],
+    ["space.new", { folder: paths[0], machine: "" }],
     ["space.select", { id: "nested" }],
     ["space.select", { id: "fallback" }],
     ["space.select", { id: "other" }],

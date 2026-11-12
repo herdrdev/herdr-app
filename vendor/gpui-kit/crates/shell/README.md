@@ -146,7 +146,10 @@ cargo run -p gpui-shell -- examples/js_todolist --watch
 cargo run -p gpui-shell -- examples/js_todolist --dev    # implies --watch
 ```
 
-A reload re-reads every module, entry included. If the new code fails to load,
+A reload gives each copy a fresh instance. Changed source gets a new evaluated
+module graph; unchanged code and module-scope state are shared across copies,
+even after all copies close. Keep copy state and host calls in constructor/init.
+If the new code fails to load,
 the previous view keeps running and the error is reported — a broken save never
 costs you the window.
 

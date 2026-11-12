@@ -1592,8 +1592,10 @@ fn successful_application_reload_purges_old_state_and_keeps_new_generation(
         format!(
             r#"
 import {{ ReloadState }} from "gpui-component";
-ReloadState();
-export default class Reloaded {{ render() {{ return "version {version}"; }} }}
+export default class Reloaded {{
+  constructor() {{ ReloadState(); }}
+  render() {{ return "version {version}"; }}
+}}
 "#
         )
     };
@@ -1612,7 +1614,7 @@ export default class Reloaded {{ render() {{ return "version {version}"; }} }}
             runtime.load_app(&directory, "main.js")
         })
         .unwrap();
-    std::fs::write(directory.join("main.js"), source(2)).unwrap();
+    std::fs::write(directory.join("main.js"), source(22)).unwrap();
     let second = context
         .update(|window, cx| {
             let (_scope, _) = crate::scope::enter_runtime(

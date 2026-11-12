@@ -7,10 +7,11 @@ export interface ExecResult {
   stderr: string;
 }
 
-/** Runs a program with the user's real environment (HOME, PATH, auth). 30 s limit, 8 MiB output.
+/** Runs a program with the user's real environment (HOME, PATH, auth). 8 MiB output.
+ *  `timeout`: milliseconds, defaults to 30,000, capped at 600,000 (10 minutes).
  *  `on`: on that machine (a space's `machine`) through herdr-core, its home by default.
  *  Rejects when it can't start (not installed, no such folder, the machine is unreachable). */
-export function exec(command: string, args?: string[], options?: { cwd?: string; on?: string | null }): Promise<ExecResult>;
+export function exec(command: string, args?: string[], options?: { cwd?: string; on?: string | null; timeout?: number }): Promise<ExecResult>;
 
 /** Runs `hc` (herdr-core) with the given arguments. Add "--json" for machine output. */
 export function hc(args: string[]): Promise<ExecResult>;
@@ -30,7 +31,7 @@ export function writeTextFile(path: string, text: string, expected: string | nul
 /** The agents people can start from a menu (entries with `run` in programs.json), most picked
  *  first, and whether each is installed: asked of the shell agents start in (on another machine,
  *  `on`, its login/interactive shell when supported), at most once a minute per machine.
- *  Start one with its `run` as `argv`. */
+ *  Rejects if the check fails; failed checks are not cached. Start one with its `run` as `argv`. */
 export function knownAgents(options?: { on?: string | null }): Promise<(Program & { run: string[]; installed: boolean })[]>;
 
 /** Opens the system's folder picker (this machine). Resolves with the chosen folder, or null
@@ -55,12 +56,14 @@ export function playSound(sound: string): null;
  *   tab.close {id?}, tab.rename {id?, name}, tab.move {id, index}, tab.select {index | id},
  *   tab.next, tab.prev.
  * Panes: pane.split {direction: "right" | "down", pane?}, pane.close {pane?}, pane.zoom {pane?},
- *   pane.focus {pane | terminal}, pane.go {direction}, pane.swap {direction}. Pane menus get target { pane, terminal }.
+ *   pane.focus {pane | terminal}, pane.go {direction}, pane.swap {pane?, direction | target}.
+ *   Pane menus get target { pane, terminal }.
  * Terminals: terminal.open {argv?, folder?, place?: "tab" | "right" | "down"}, terminal.kill {terminal},
  *   terminal.keep {terminal, place?} (a running one without a pane, e.g. a sub-agent, gets one),
  *   terminal.park {terminal} (its pane goes, it keeps running; the menu's "Send back"),
  *   terminal.peek {terminal} (peek over the tab, with keep-as-tab and close),
  *   terminal.show {terminal?, pane?} (shown in the pane for now, in place of its own), terminal.copy, terminal.paste,
+ *   terminal.select_all {terminal?} (whole screen and scrollback, or only the alternate screen; Cmd+A on macOS).
  *   terminal.right_click {to: "program" | "menu", terminal?} (right-clicks to a program that takes the mouse; Shift: the menu).
  *   terminal.scroll {lines | pages | to: "top" | "bottom", terminal?} (Herdr's view of the history: negative goes up; pages may be fractional).
  * Agents: agent.next, agent.prev (the agents list's order), agent.focus {terminal} (sub-agents too).
@@ -213,7 +216,9 @@ export function setAgentOrder(addresses: string[]): null;
 
 /** Every core terminal as `hc ls --json` describes it (address, argv, name, template, parent,
  *  labels, state, ...), with `status` as a plain word, the agent's report in `report`, and
- *  `program` (see Program). Live. */
+ *  `program` (see Program). Parent addresses use the same machine names as `address`;
+ *  parents on this computer use bare terminal IDs. Parents that cannot be mapped
+ *  stay as the core reported them. Live. */
 export function terminals(): any[];
 
 /** Actual terminal/pane focus. `space` and `tab` are the current window context.
@@ -221,6 +226,9 @@ export function terminals(): any[];
  *  `terminal` and `cwd` describe it; `pane` and `shown` are null, not its source pane.
  *  Implicit pane split/close/zoom/go/swap and terminal.show fail in that case, as do
  *  terminal.open/keep with place right/down. An explicit pane id targets a model pane.
+ *  A terminal in a window (openOverlay with a layout) that has the keyboard is reported
+ *  the same way (`pane` and `shown` null); implicit pane commands still act on the
+ *  focused pane under the window.
  *  pane.focus {terminal} prefers the first visible layout terminal block, then a model pane.
  *  `shown`: terminal.show replacement, if any. `agent`: the agent an agent block shows.
  *  `terminal` is null for mod panes. Live. */
@@ -323,7 +331,9 @@ export function feedbackClearImages(): null;
 export function sendFeedback(body: import("gpui-kit").HostValue, images?: string[]): Promise<string | null>;
 
 /** What the app runs with: the shown layout's look (theme name, fonts, sizes, terminal
- *  padding and opacity) with the person's zoom and sounds. */
+ *  padding and opacity, terminal_line_height and terminal_scroll_speed) with the person's zoom and sounds.
+ *  terminal_line_height: number, default 1, clamped to 0.8..2; terminal_scroll_speed:
+ *  number, default 1, clamped to 0.1..5. Layout values override settings.json. */
 export function settings(): Record<string, unknown>;
 
 /** Every key binding: { section, keys, action }. */
@@ -407,8 +417,18 @@ export function nextCommand(): Promise<string>;
  * above 4096 non-ignored directories reject the watch, so use a timer fallback.
  * macOS and Windows watch recursively, including ignored directories.
  * Pending paths are bounded: a batch containing the root means refresh everything.
- * Shared by every mod. Files also refreshes on its 10-second timer.
+ * Shared by every mod, with at most 64 folders awaiting changes at once.
+ * Idle watches may be reclaimed to make room; reload when starting a watch.
+ * Call cancel() on the returned promise when you stop showing the folder.
+ * It resolves with [] and releases this call; other callers keep watching.
+ * Closing a mod copy cancels its pending calls. Files also refreshes on its 10-second timer.
  *   cx.spawn(async (cx) => { for (;;) { await watchFolder(dir); this.reload(); cx.notify(); } });
  * Watch what you show, not a whole home folder (node_modules is a lot of events).
  */
-export function watchFolder(path: string): Promise<string[]>;
+export function watchFolder(path: string): FolderWatch;
+
+/** One pending watch. Keep this handle while the folder is shown. */
+export interface FolderWatch extends Promise<string[]> {
+  /** Resolves with [] and releases this call's watch. Safe to call again or after settlement. */
+  cancel(): void;
+}

@@ -56,6 +56,15 @@ use crate::{
     view::ScriptView,
 };
 
+/// Whether a path relative to an application root is a relevant source/asset
+/// change. Explicitly imported files are tracked separately, even when ignored.
+pub fn application_file_counts(path: &Path) -> bool {
+    let parts: Vec<_> = path.components().map(|part| part.as_os_str().to_string_lossy()).collect();
+    !parts.iter().any(|part| part.starts_with('.') || part.ends_with('~') || part == "node_modules")
+        && !(parts.len() == 1 && parts[0] == "jsconfig.json")
+        && !parts.last().is_some_and(|part| part == "gpui-kit.d.ts")
+}
+
 /// The default quiet period. An editor writes a file several times in a burst —
 /// truncate, write, rename — and each of those is a distinct change. Reloading
 /// on the first one would evaluate a half-written module.

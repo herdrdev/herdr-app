@@ -219,6 +219,7 @@ pub struct TextSelectionRegistration {
     bounds: Bounds<Pixels>,
     scroll_offset: Point<Pixels>,
     scope: TextSelectionScopeId,
+    boundary: Option<EntityId>,
     document_order: u64,
     text_bounds: Vec<Bounds<Pixels>>,
     self_scroll: bool,
@@ -234,6 +235,7 @@ impl TextSelectionRegistration {
             bounds,
             scroll_offset: Point::default(),
             scope: TextSelectionScopeId::default(),
+            boundary: None,
             document_order: 0,
             text_bounds: Vec::new(),
             self_scroll: false,
@@ -842,6 +844,8 @@ impl TextSelectionHandle {
         if let Some(scope) = current_text_selection_scope(window.window_handle().window_id(), cx) {
             registration.scope = scope;
         }
+        registration.boundary =
+            current_text_selection_boundary(window.window_handle().window_id(), cx);
         let Some(state) = WindowSelectionState::existing(window, cx) else {
             return;
         };
@@ -1847,7 +1851,14 @@ impl WindowSelectionState {
         };
         let anchor = self.endpoint(anchor_point, None, cx);
         let drag = EdgeDrag::begin(edge, snapshot.edge(edge), finger);
-        let cursor = self.endpoint(drag.text_position(finger), Some(window), cx);
+        let boundary = anchor.entity_id().and_then(|id| {
+            self.participants
+                .borrow()
+                .get(&id)
+                .map(|r| r.registration.boundary)
+        });
+        let cursor =
+            self.endpoint_in_boundary(drag.text_position(finger), Some(window), boundary, cx);
         self.did_hit_text = anchor.inside_text || cursor.inside_text;
         self.anchor = Some(anchor);
         self.cursor = Some(cursor);
@@ -2022,7 +2033,17 @@ impl WindowSelectionState {
             .inside
             .then(|| endpoint.participant.clone())
             .flatten();
-        let anchor = previous_anchor.unwrap_or_else(|| endpoint.clone());
+        let boundary_of = |endpoint: &SelectionEndpoint| {
+            endpoint.entity_id().and_then(|id| {
+                self.participants
+                    .borrow()
+                    .get(&id)
+                    .map(|r| r.registration.boundary)
+            })
+        };
+        let anchor = previous_anchor
+            .filter(|anchor| boundary_of(anchor) == boundary_of(&endpoint))
+            .unwrap_or_else(|| endpoint.clone());
         self.anchor = Some(anchor.clone());
         self.cursor = Some(endpoint.clone());
         self.did_hit_text = anchor.inside_text || endpoint.inside_text;
@@ -2039,7 +2060,10 @@ impl WindowSelectionState {
         if !self.is_selecting {
             return;
         }
-        let endpoint = self.endpoint(position, window, cx);
+        let boundary = self
+            .anchor_registration()
+            .map(|(_, registration)| registration.boundary);
+        let endpoint = self.endpoint_in_boundary(position, window, boundary, cx);
         self.did_hit_text |= endpoint.inside_text;
         self.cursor = Some(endpoint);
         if window.is_none() {
@@ -2052,6 +2076,16 @@ impl WindowSelectionState {
         &mut self,
         position: Point<Pixels>,
         window: Option<&Window>,
+        cx: &App,
+    ) -> SelectionEndpoint {
+        self.endpoint_in_boundary(position, window, None, cx)
+    }
+
+    fn endpoint_in_boundary(
+        &mut self,
+        position: Point<Pixels>,
+        window: Option<&Window>,
+        boundary: Option<Option<EntityId>>,
         cx: &App,
     ) -> SelectionEndpoint {
         self.prune_dead_participants();
@@ -2071,6 +2105,7 @@ impl WindowSelectionState {
 
         for registration in self.participants.borrow().values() {
             if registration.registration.scope != self.active_scope
+                || boundary.is_some_and(|boundary| registration.registration.boundary != boundary)
                 || registration.participant.upgrade().is_none()
             {
                 continue;
@@ -2228,6 +2263,9 @@ impl WindowSelectionState {
         let Some(cursor_registration) = self.participants.borrow().get(&cursor).cloned() else {
             return false;
         };
+        if registration.registration.boundary != anchor_registration.registration.boundary {
+            return false;
+        }
         let start = anchor_registration
             .registration
             .document_order
@@ -2396,11 +2434,21 @@ struct PendingTextSelectionScopes(HashMap<gpui::WindowId, TextSelectionScopeId>)
 impl Global for PendingTextSelectionScopes {}
 
 #[derive(Default)]
-struct TextSelectionScopeStacks(HashMap<gpui::WindowId, Vec<TextSelectionScopeId>>);
+struct TextSelectionScopeStacks(HashMap<gpui::WindowId, Vec<TextSelectionContext>>);
+
+#[derive(Clone, Copy, Default)]
+struct TextSelectionContext {
+    scope: Option<TextSelectionScopeId>,
+    boundary: Option<EntityId>,
+}
 
 impl Global for TextSelectionScopeStacks {}
 
-fn push_text_selection_scope(window_id: gpui::WindowId, scope: TextSelectionScopeId, cx: &mut App) {
+fn push_text_selection_context(
+    window_id: gpui::WindowId,
+    context: TextSelectionContext,
+    cx: &mut App,
+) {
     if !cx.has_global::<TextSelectionScopeStacks>() {
         cx.set_global(TextSelectionScopeStacks::default());
     }
@@ -2408,7 +2456,7 @@ fn push_text_selection_scope(window_id: gpui::WindowId, scope: TextSelectionScop
         .0
         .entry(window_id)
         .or_default()
-        .push(scope);
+        .push(context);
 }
 
 fn pop_text_selection_scope(window_id: gpui::WindowId, cx: &mut App) {
@@ -2431,18 +2479,47 @@ fn current_text_selection_scope(
             cx.global::<TextSelectionScopeStacks>()
                 .0
                 .get(&window_id)
-                .and_then(|stack| stack.last().copied())
+                .and_then(|stack| stack.iter().rev().find_map(|context| context.scope))
         })
         .flatten()
 }
 
+#[cfg(test)]
 fn with_text_selection_scope<T>(
     window_id: gpui::WindowId,
     scope: TextSelectionScopeId,
     cx: &mut App,
     callback: impl FnOnce(&mut App) -> T,
 ) -> T {
-    push_text_selection_scope(window_id, scope, cx);
+    with_text_selection_context(
+        window_id,
+        TextSelectionContext {
+            scope: Some(scope),
+            boundary: None,
+        },
+        cx,
+        callback,
+    )
+}
+
+fn current_text_selection_boundary(window_id: gpui::WindowId, cx: &App) -> Option<EntityId> {
+    cx.has_global::<TextSelectionScopeStacks>()
+        .then(|| {
+            cx.global::<TextSelectionScopeStacks>()
+                .0
+                .get(&window_id)
+                .and_then(|stack| stack.iter().rev().find_map(|context| context.boundary))
+        })
+        .flatten()
+}
+
+fn with_text_selection_context<T>(
+    window_id: gpui::WindowId,
+    context: TextSelectionContext,
+    cx: &mut App,
+    callback: impl FnOnce(&mut App) -> T,
+) -> T {
+    push_text_selection_context(window_id, context, cx);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(cx)));
     pop_text_selection_scope(window_id, cx);
     match result {
@@ -2455,6 +2532,18 @@ fn with_text_selection_scope<T>(
 pub struct TextSelection;
 
 impl TextSelection {
+    /// Keeps a drag within one host surface while allowing its text blocks to join.
+    #[doc(hidden)]
+    pub fn boundary(id: EntityId, element: impl IntoElement) -> impl IntoElement {
+        TextSelectionScopeMarker {
+            context: TextSelectionContext {
+                scope: None,
+                boundary: Some(id),
+            },
+            element: element.into_element(),
+        }
+    }
+
     /// Returns whether `position` hits selectable text in the active scope.
     ///
     /// Uses the current frame's registered text geometry and hitboxes without
@@ -2615,13 +2704,16 @@ pub(crate) fn text_selection_scope(
     element: impl IntoElement,
 ) -> impl IntoElement {
     TextSelectionScopeMarker {
-        scope,
+        context: TextSelectionContext {
+            scope: Some(scope),
+            boundary: None,
+        },
         element: element.into_element(),
     }
 }
 
 struct TextSelectionScopeMarker<E> {
-    scope: TextSelectionScopeId,
+    context: TextSelectionContext,
     element: E,
 }
 
@@ -2653,7 +2745,7 @@ impl<E: Element> Element for TextSelectionScopeMarker<E> {
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let window_id = window.window_handle().window_id();
-        with_text_selection_scope(window_id, self.scope, cx, |cx| {
+        with_text_selection_context(window_id, self.context, cx, |cx| {
             self.element.request_layout(id, inspector_id, window, cx)
         })
     }
@@ -2668,7 +2760,7 @@ impl<E: Element> Element for TextSelectionScopeMarker<E> {
         cx: &mut App,
     ) -> Self::PrepaintState {
         let window_id = window.window_handle().window_id();
-        with_text_selection_scope(window_id, self.scope, cx, |cx| {
+        with_text_selection_context(window_id, self.context, cx, |cx| {
             self.element
                 .prepaint(id, inspector_id, bounds, request_layout, window, cx)
         })
@@ -2685,7 +2777,7 @@ impl<E: Element> Element for TextSelectionScopeMarker<E> {
         cx: &mut App,
     ) {
         let window_id = window.window_handle().window_id();
-        with_text_selection_scope(window_id, self.scope, cx, |cx| {
+        with_text_selection_context(window_id, self.context, cx, |cx| {
             self.element.paint(
                 id,
                 inspector_id,

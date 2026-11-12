@@ -88,6 +88,7 @@ first frame or during GPU recovery it reports an error instead of a PNG.
 Shared state is saved atomically in the background, with the latest change winning.
 If `shared.json` is invalid, Herdr logs a warning and keeps it as
 `shared.json.corrupt-<time>` before starting empty.
+`herdr-app check` uses empty shared state in memory and leaves this file untouched.
 
 ## The model: spaces, tabs, terminals
 
@@ -113,6 +114,8 @@ the highlighted line shows where it will land.
   live folders (`panes()[i].cwd`), not the folder it was made in: new
   tabs start where its focused pane is, and the default mods take a
   space's repo from its first terminal.
+  If starting in an inherited folder fails, new spaces, tabs and splits retry in
+  that machine's home. Explicit invalid folders still fail.
 - A **tab** is a piece of work in a space: its terminals and how they're
   split right and down. One nobody named is called by its place (1, 2,
   ...), as in Herdr; `tab.rename` names it ("fix login"). A space
@@ -152,7 +155,9 @@ the highlighted line shows where it will land.
   looking (it becomes `idle` once they look). A space's and a tab's
   status is the most urgent of its agents: blocked > done > working > idle.
 - **Sub-agents** are terminals an agent started with `hc run`: the core
-  records the starter as `parent` (see `terminals()`). They belong to their
+  records the starter as `parent` (see `terminals()`). Parent addresses use
+  the app's machine names, or a bare ID for this computer, when they can be
+  mapped; otherwise they stay as the core reported them. They belong to their
   parent's tab without a pane; the `agents` mod shows them,
   `terminal.peek` opens one, `terminal.keep` gives one a pane.
   Ctrl-click (Cmd-click on macOS) a live terminal address in terminal text to
@@ -265,6 +270,13 @@ Properties any node can have:
   right-clicks (including Shift+right-click). Omit it for the shipped `menu`;
   an unknown mod logs a warning and falls back to `menu`. Clone a shipped
   layout before changing this field. Other menus are unchanged.
+- Root only: `"toast": "my-toast"` chooses the mod that shows notifications
+  (Herdr's own and every `notify()`), in place of the shipped `toast`; an
+  unknown mod logs a warning and falls back to `toast`. It gets the same
+  `props()`: `{title, body, level, icon, action, timeout, overlay}` (`timeout`
+  is optional). A mod that hands them to the system instead
+  (`exec("notify-send", ...)`) closes itself at once
+  with `closeOverlay(props().overlay)`.
 - Colors are theme names (`border`, `accent`, `surface`, ...) or `#rrggbb[aa]`.
 
 A personal terminal menu replaces the whole menu; it doesn't merge items.
@@ -274,7 +286,10 @@ Create `mods/my-menu/main.js` and `mod.json` (e.g.
 its `mod.json` overlay width/height override those defaults. It gets
 `props()` = `{tab: "pane", target: {pane, terminal}, overlay}`. Always use
 `target.terminal` or `target.pane` in actions, not the focused terminal:
-right-clicking a different terminal must act on the one clicked. For example:
+right-clicking a different terminal must act on the one clicked. A terminal
+shown outside a tab (a layout terminal block, a window) has no pane:
+`target.pane` is its block's id, not in `panes()`, so leave out pane items
+there, as the shipped menu does. For example:
 
 ```js
 import { View, div } from "gpui-kit";
@@ -319,6 +334,10 @@ layout's look and a block can differ:
   are upgraded to readable terminal colors; edited theme files are kept.
   A theme named like a layout (`themes/win98.json`) is
   that layout's own: Settings offers it only there.
+- `terminal_line_height`: row height multiplier (default 1, clamped to 0.8..2).
+  Text stays centred; joining characters, cursors and images follow the rows.
+- `terminal_scroll_speed`: wheel and trackpad multiplier (default 1, clamped
+  to 0.1..5), including mouse reports to programs. Small moves accumulate.
 - `font` / `font_size`: the terminals' (px at zoom 1); `ui_font`: the mods'
   (their text sizes are their own, in px, and follow zoom). Optional: without
   them a layout uses settings.json's, else Herdr's (JetBrains Mono 14, Geist).
@@ -360,7 +379,8 @@ The tab block says how each pane of the shown tab is wrapped:
   buttons run pane commands with that pane (`pane.split`, `pane.zoom`,
   `pane.close`). `position`: `top` or `bottom`; `reveal: "hover"` shows it
   only while the pointer is on the pane, drawn over the terminal so the
-  terminal never resizes. The shipped `pane` mod is an example header.
+  terminal never resizes. The shipped `pane` mod keeps its divider on the
+  terminal-facing edge and reads the frame position from `layout()`.
 - `lone: true` frames a tab's only pane too (default: only when split).
 - Each layout has its own, so one can stay bare while another makes
   every pane a card.
@@ -554,12 +574,16 @@ The main ones:
   skip settled tabs).
 - Panes: `pane.split {direction: "right" | "down", pane?, argv? | mod?, props?}` (a new
   terminal, or a mod pane), `pane.close {pane?}`,
-  `pane.zoom {pane?}`, `pane.focus {pane | terminal}`, `pane.go {direction}`, `pane.swap {direction}`.
+  `pane.zoom {pane?}`, `pane.focus {pane | terminal}`, `pane.go {direction}`,
+  `pane.swap {pane?, direction | target}`.
   `pane.go` prefers the most recently focused pane along the nearest edge in that
   direction; unvisited panes fall back to overlap, then top/left layout order.
   `pane.go` also reaches visible mods whose `mod.json` says `"focusable": true`, and
   starts from that mod while it holds the keyboard.
-  `pane.swap` uses geometry only. Focus history lasts until the window closes.
+  `pane.swap {direction}` uses geometry only. Focus history lasts until the window closes.
+  `pane.swap {target}` trades the places of `pane` (default: the focused one) and
+  `target`, another pane of the same tab; give `direction` or `target`, not both.
+  A swap moves panes, not focus: the focused pane stays focused in its new place.
   `pane.focus {terminal}` prefers the first visible layout terminal block showing that
   address, then its model pane. Clicking a terminal block focuses it too.
   While a layout terminal block is focused, implicit split/close/zoom/go/swap and
@@ -571,7 +595,9 @@ The main ones:
   `terminal.keep {terminal, place?}`, `terminal.park {terminal}`,
   `terminal.peek {terminal}` (peek over the tab, with keep-as-tab and close),
   `terminal.show {terminal?, pane?}`, `terminal.search` (screen and scrollback;
-  find bar state stays with that terminal), `terminal.copy`, `terminal.paste` (copied
+  find bar state stays with that terminal), `terminal.select_all {terminal?}` (selects the whole
+  screen and scrollback for copying; only the alternate screen in vim and similar apps;
+  Cmd+A on macOS, no default on Linux/Windows), `terminal.copy`, `terminal.paste` (copied
   files, such as Finder's or a clipboard manager's image, as if dropped; an image
   alone as `terminal.paste_image` pastes it), `terminal.paste_image` (Ctrl+V: an
   image, into a terminal on another machine: copied there, its path pasted; on
@@ -608,9 +634,17 @@ The main ones:
   never one a package manager owns), `app.welcome`, `app.whats_new`, `app.feedback {message?, from?}` (from `"person"` or `"agent"`; opens a review window, where the person can paste up to 3 screenshots; never sends until the person clicks Send), `app.reset`,
   `app.theme {name}`, `app.zoom_in`, `app.zoom_out`, `app.zoom_reset`,
   `app.update` (restart into a downloaded update).
-  Add machine lists all named ssh-config hosts in a scrollable list. Setup
-  prompts open above the picker; close the setup terminal to return to the
-  updated list and any machine-specific guidance. If a remote machine was rebuilt
+  Add machine lists all named ssh-config hosts in a scrollable list. Machines
+  that need a password, a new host key or herdr-core installed show what to run
+  in your own terminal; the picker updates once it is added. Other machines are
+  added quietly. If a Linux server reports that programs stop at logout, its
+  added card warns that agents stop when you disconnect and offers the administrator's
+  `sudo loginctl enable-linger -- <user>` command with Copy. A warning mark in
+  Settings > Machines and the sidebar opens that card; it clears automatically
+  after the administrator enables lingering. Older cores show no warning.
+  Login guidance includes Copy. A machine that needs a login shows
+  `hc machine login <name>` with Copy in Settings > Machines, its sidebar group,
+  the welcome screen and the failed New space toast. If a remote machine was rebuilt
   or replaced and a different core answers there, its sidebar offers Connect:
   explicitly forget the old identity and pair again with the same name and target.
   Other unreachable machines don't offer this.
@@ -653,6 +687,9 @@ What's about the user, never a look:
 - `core`: the herdr-core binary to use, when it isn't where Herdr looks
   (PATH, the login shell's PATH, `~/.local/bin`, Homebrew, mise, Nix,
   cargo). Read at start.
+- `terminal_line_height` (default 1, 0.8..2) and `terminal_scroll_speed`
+  (default 1, 0.1..5): terminal row height and wheel/trackpad speed, used
+  where the layout leaves them unset.
 - `font`, `font_size`, `ui_font`: used where the layout doesn't set its
   own. Herdr (main) leaves these unset. Bigger panels: `zoom`.
 - `font_ligatures`: programming ligatures are off by default; set `true` to
@@ -673,6 +710,9 @@ What's about the user, never a look:
   waiting, the next launch installs it before opening a window. The first
   start after an app update also updates herdr-core
   to the latest release of the same generation, keeping terminals running.
+  Package-managed cores stay with their package manager; Settings shows available releases.
+  A core update error can be dismissed with its × or `overlay.close {id:"core-update-error"}`
+  until the error changes or the update recovers.
   Settings → Updates keeps app and core actions together;
   its What's new button opens the waiting update's release range, or this
   version's notes, in the What's new window. Reading never clears the waiting-update dot.
@@ -739,7 +779,8 @@ What's about the user, never a look:
 ## Programs: `programs.json`
 
 Every pane, agent and terminal carries `program`: its name, icon and tile,
-from one table, so every mod shows the same. An agent's own report wins;
+from one table, so every mod shows the same, and the app's own toasts
+("Kiro finished") use the same names. An agent's own report wins;
 else the program the terminal runs (an interpreter shows what it runs:
 `node .../vite` is Vite, `npx vitest` is Vitest); shells are `shell`,
 anything unlisted is `program` with a color of its own. The built-in table
@@ -763,8 +804,10 @@ has 120 programs (agents, editors, runtimes, tools, databases, infra);
   `"claude": { "run": ["my-claude"] }` or add
   `"claude-alt": { "name": "Claude (alt)", "icon": "icons/claude.svg", "run": ["my-claude-alt"] }`
   inside `programs`. Use programs or shell functions, not aliases (the launcher
-  does not expand them). On macOS the menu launcher loads login profiles before
+  does not expand them). On macOS both checks and the menu launcher load login profiles before
   running the agent and leaves an interactive login shell when it ends.
+  Codex starts as `codex --no-daemon`: a shared Codex daemon would make later
+  sessions use the first terminal's identity and stop with it.
   On remote Unix machines, both the installed-agent check and launcher load
   that user's login/interactive shell for sh, bash, zsh, dash, ksh and fish, so
   its PATH includes shell-configured tools. Other shells keep the sh launcher.
@@ -875,6 +918,9 @@ Rules:
   once; `render(cx)` describes the UI and runs again after `cx.notify()` and
   whenever Herdr's live data changes (spaces, agents, terminals, focus,
   theme, shared state). Don't poll those.
+- Module code runs once per source version and is shared by copies, even after all
+  copies close. Keep instance state and host calls in constructor/init, not module
+  scope. Each copy still gets its own instance, tasks and localStorage.
 - **Never keep a `cx` and use it later.** Every callback gets its own:
   `on_click((event, cx) => …)`, `cx.spawn(async (cx) => …)`,
   `cx.timer.every(ms, (cx) => …)`.
@@ -917,6 +963,11 @@ Chained builders with GPUI's snake_case names: `div()`, `h_flex()`,
 `.rounded(n)`; `.id("unique")` then `.on_click(...)`, `.on_mouse_down("right", ...)`,
 `.hover((s) => s.bg(c))`, `.on_scroll_wheel(...)`; keyboard: `this.h = cx.focus_handle()`
 in init, `.track_focus(this.h).on_key_down((e, cx) => …)`, `this.h.focus()`.
+`ScrollHandle` from `gpui-base` scrolls a plain `overflow_*_scroll()` or
+`overflow_*_scrollbar()` area from code. Create `this.scroll = ScrollHandle.new()`
+in `init`, attach `.track_scroll(this.scroll)`, then call
+`this.scroll.scroll_to_item(index)` to reveal a zero-based direct child with
+only the movement needed. Requests run once after layout; visible children stay put.
 `.on_drop((event, cx) => …)` on a plain layout element receives external files as
 `event.paths` (absolute paths). The feedback form accepts dropped images with
 the same limits, previews and removal as picked images.
@@ -953,7 +1004,9 @@ All of it is in `herdr.d.ts`. In short:
   `focused().agent` is the agent an agent block shows.
   `focused().space`/`tab` describe the current window context. With a layout terminal
   block focused, `pane` and `shown` are null; `terminal` and `cwd` describe that block,
-  not its source pane. Check `focused()?.pane` before offering pane controls.
+  not its source pane. A terminal in a window (`openOverlay` with a `layout`) that has
+  the keyboard is reported the same way; pane commands without a `pane` still act on
+  the focused pane under the window. Check `focused()?.pane` before offering pane controls.
   `panes()` still lists only model panes; none is focused while a terminal block is.
   For composition navigation: `run("pane.focus", {terminal: nextAddress})`.
   Terminal copy/paste and implicit right-click routing follow the focused block.
@@ -963,7 +1016,8 @@ All of it is in `herdr.d.ts`. In short:
   returns an id; the mod gets `props().overlay` and closes itself with
   `closeOverlay(id)`; Esc closes the top dialog or popup. `frame: "none"`
   drops Herdr's border, corners and shadow so the mod draws its own.
-  `notify({ title, body, level, icon, timeout })` posts a notification, drawn by the `toast` mod.
+  `notify({ title, body, level, icon, timeout })` posts a notification, drawn
+  by the layout-chosen mod (default: `toast`).
 - Windows (`kind: "window"`): stay open until closed, over the layout and
   under dialogs; a press the mod doesn't stop drags it (stop it on your
   controls, like a title bar's buttons), it stays where dropped, and the one
@@ -974,15 +1028,16 @@ All of it is in `herdr.d.ts`. In short:
   A window can hold a layout, terminals too: a terminal keeps its presses
   (selecting text), so give it a mod block to drag by, a title bar:
   `openOverlay({ kind: "window", key: "t7", width: 600, height: 400, layout: { type: "column", children: [{ type: "block", size: { px: 28 }, content: { mod: "my-titlebar" } }, { type: "block", content: { terminal: "t7" } }] } })`.
-- Machine: `exec(cmd, args, { cwd, on })` (the user's real environment; use this,
+- Machine: `exec(cmd, args, { cwd, on, timeout })` (the user's real environment; use this,
   not `process.run`; `on: space.machine` runs there, omitted means local).
-  It rejects if the program cannot start or the machine cannot be reached.
+  `timeout` is milliseconds, defaults to 30,000 and is capped at 600,000 (10 minutes),
+  locally and remotely. It rejects on timeout, if the program cannot start or the machine cannot be reached.
   `hc(args)` (`hc read <t>` gives a terminal's text),
   `home()`, `appHome()`, `playSound("done" | "blocked" | file)`.
   `knownAgents({ on })`: the agents people can start (programs.json's
   `run`), most picked first, each `installed` or not there (asked of the
   shell agents start in; a remote Unix machine's login/interactive shell when supported);
-  start one with `argv: agent.run`.
+  rejects if the check fails (failed checks are not cached); start one with `argv: agent.run`.
   `pickFolder({ prompt })`: the system's folder picker (here only),
   resolves with the folder or null.
 - Files: `readTextFile(path, { on })` (here, or on that machine),
@@ -992,6 +1047,12 @@ All of it is in `herdr.d.ts`. In short:
   and trees above 4096 non-ignored directories reject the watch; use a timer fallback.
   macOS and Windows watch recursively, including ignored directories.
   A returned root path means refresh everything (the pending paths are bounded).
+  At most 64 folders can have pending watches at once; further folders reject.
+  Idle watches can be reclaimed to make room, so reload when starting a watch.
+  The returned promise also has `cancel()`: keep it and cancel when you stop
+  showing the folder. Cancellation resolves with `[]` and releases this call
+  without stopping other callers: `const watch = watchFolder(dir); watch.cancel();`.
+  Closing a mod copy cancels its pending calls.
   Files also refreshes on its 10-second timer:
   `cx.spawn(async (cx) => { for (;;) { await watchFolder(dir); this.reload(); cx.notify(); } })`.
 - `notify({ ..., action: { name, args } })`: the toast runs the command when clicked.

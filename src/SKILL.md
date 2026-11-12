@@ -22,6 +22,9 @@ its terminals.
 
 `app.check_updates` checks for newer releases. Settings reports "Up to date"
 only after a successful check; on failure, check the connection and retry.
+Package-managed cores are checked but updated through their package manager.
+Dismiss a core update error with its × or `overlay.close {id:"core-update-error"}`;
+it stays dismissed until the error changes or the update recovers.
 
 ## Show something when asked
 
@@ -51,19 +54,34 @@ login/interactive shell (sh, bash, zsh, dash, ksh or fish), including its
 configured PATH. Other shells keep the sh launcher.
 `terminal.open --folder /path --place down` starts the split in that folder,
 including when `--argv` supplies a program. Without `--folder`, it follows the
-focused terminal's folder.
+focused terminal's folder. If an inherited local folder was deleted, new spaces,
+tabs and splits retry in that machine's home. An explicit invalid folder
+still fails.
 `hc machine ls` lists machines. Use `hc run --on vps ...`, `hc exec --on vps ...`
 and `hc file ... --on vps ...` for remote work, not your local file tools.
 
 `do` accepts `--key value` arguments (JSON for arrays/objects) or one JSON
 object. Unknown argument names fail and list valid names. Target IDs (`id`,
-`pane`, `space`, `terminal`) must be strings; other non-null types fail before
+`pane`, `space`, `target`, `terminal`) must be strings; other non-null types fail before
 the current-target default can apply. Null keeps its omitted-argument meaning.
 Use `commands` to confirm the command's exact shape:
 
 ```sh
 herdr-app do pane.split '{"direction":"right","pane":"p12"}'
 ```
+
+`pane.swap {pane?, direction | target}` trades the places of `pane` (default:
+the focused one) and its neighbor in a direction, or `target`, another pane of
+the same tab. Give `direction` or `target`, not both. Focus stays with the same pane:
+
+```sh
+herdr-app do pane.swap '{"pane":"p12","target":"p14"}'
+```
+
+`terminal.select_all {terminal?}` selects a terminal's whole screen and scrollback,
+ready for `terminal.copy`. Without a target it follows keyboard focus. In vim and
+other alternate-screen apps, it selects only that screen. Cmd+A runs it on macOS;
+Linux and Windows have no default, so Ctrl+A stays with the shell.
 
 `terminal.search` opens a find bar in the focused terminal. It searches that
 terminal's screen and scrollback; Enter and Shift-Enter move between matches,
@@ -92,11 +110,17 @@ set). It is the installed guide to settings, layouts, commands and mods.
 Read the generated `.d.ts` files beside it for full API details; do not edit
 those files or the generated guide. The app rewrites them on start.
 
+- `terminal_line_height` (default 1, 0.8..2) adjusts terminal rows;
+  `terminal_scroll_speed` (default 1, 0.1..5) adjusts wheel and trackpad
+  scrolling, including mouse reports. Set them in settings.json or the
+  layout's look; the layout wins.
 - Home defaults to `~/.config/herdr-app`; `HERDR_APP_HOME` selects another.
 - Mods live in `mods/<name>/` with `main.js` and optional `mod.json`.
   They are trusted JavaScript with command and network access.
   `"focusable": true` in `mod.json` lets `pane.go` move onto a copy; it receives
   `"focus"` from `nextCommand()` and focuses its own keyboard handle.
+- A mod's `watchFolder(dir)` promise has `cancel()`; cancel it when the folder
+  is no longer shown. It resolves with `[]` and releases only that call.
 - Shipped mods belong to Herdr: duplicate with `mod.clone` before editing.
   Shipped layouts likewise use `layout.clone` for a personal copy.
   Discover required arguments with `herdr-app commands`.
@@ -120,7 +144,8 @@ herdr-app shot /tmp/mod.png   # then look at the picture
 ```
 
 `check` loads the mod and renders it once. It exits nonzero with the exact
-error. Never call a mod done without a passing check. Then confirm it is
+error. Its shared state starts empty and stays in memory; it leaves shared.json
+untouched. Never call a mod done without a passing check. Then confirm it is
 shown correctly in the running window with `shot`; don't claim a visual
 check you haven't made.
 

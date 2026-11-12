@@ -595,6 +595,16 @@ fn hyperlink_uri(r: &GhosttyGridRef) -> Option<String> {
     (res == GHOSTTY_SUCCESS && len > 0).then(|| String::from_utf8_lossy(&buf[..len]).into_owned())
 }
 
+fn is_wide(r: &GhosttyGridRef) -> bool {
+    let mut cell: GhosttyCell = Default::default();
+    let mut wide: GhosttyCellWide = GHOSTTY_CELL_WIDE_NARROW;
+    let read = unsafe {
+        ghostty_grid_ref_cell(r, &mut cell) == GHOSTTY_SUCCESS
+            && ghostty_cell_get(cell, GHOSTTY_CELL_DATA_WIDE, &mut wide as *mut _ as *mut c_void) == GHOSTTY_SUCCESS
+    };
+    read && wide == GHOSTTY_CELL_WIDE_WIDE
+}
+
 #[derive(Clone, Copy)]
 pub enum Select {
     Press,
@@ -997,6 +1007,18 @@ impl Vt {
                     ghostty_terminal_set(self.term, GHOSTTY_TERMINAL_OPT_SELECTION, std::ptr::null());
                 }
                 _ => {}
+            }
+        }
+    }
+
+    /// Select the active screen and its history without formatting or copying text.
+    pub fn select_all(&mut self) {
+        let mut selection = GhosttySelection { size: std::mem::size_of::<GhosttySelection>(), ..Default::default() };
+        unsafe {
+            if ghostty_terminal_select_all(self.term, &mut selection) == GHOSTTY_SUCCESS {
+                ghostty_terminal_set(self.term, GHOSTTY_TERMINAL_OPT_SELECTION, &selection as *const _ as *const c_void);
+            } else {
+                self.clear_selection();
             }
         }
     }
@@ -1441,8 +1463,13 @@ impl Vt {
             if start_ok != GHOSTTY_SUCCESS || end_ok != GHOSTTY_SUCCESS {
                 continue;
             }
-            if (start.y, start.x) > (end.y, end.x) {
+            let swapped = (start.y, start.x) > (end.y, end.x);
+            if swapped {
                 std::mem::swap(&mut start, &mut end);
+            }
+            // A match ends on a wide character's first cell; cover its second too.
+            if is_wide(if swapped { &matched.start } else { &matched.end }) {
+                end.x += 1;
             }
             let last_row = end.y.min(self.rows.saturating_sub(1) as u32);
             if start.y >= self.rows as u32 || start.y > last_row {
@@ -1513,6 +1540,10 @@ impl Vt {
             }
             (cursor, generation, colors)
         }
+    }
+
+    pub fn render_hold_deadline(&self) -> Option<Instant> {
+        self.shared.held_since.map(|since| since + MAX_HOLD)
     }
 
     /// Updates the render state (respecting synchronized output) and reads one frame.
@@ -1759,9 +1790,23 @@ impl Vt {
             if action == GHOSTTY_MOUSE_ACTION_MOTION && self.last_mouse_report == buf[..len] {
                 return Vec::new();
             }
+            let report = buf[..len].to_vec();
+            // Remember the motion equivalent of a press/release, so a focus click
+            // cannot start a drag at the same cell. Let the encoder handle each
+            // format's coordinates, including the finer SGR-pixel positions.
+            if action != GHOSTTY_MOUSE_ACTION_MOTION {
+                ghostty_mouse_event_set_action(e, GHOSTTY_MOUSE_ACTION_MOTION);
+                if action == GHOSTTY_MOUSE_ACTION_RELEASE {
+                    ghostty_mouse_event_clear_button(e);
+                }
+                len = 0;
+                if ghostty_mouse_encoder_encode(self.mouse, e, buf.as_mut_ptr() as *mut _, buf.len(), &mut len) != GHOSTTY_SUCCESS {
+                    len = 0;
+                }
+            }
             self.last_mouse_report.clear();
             self.last_mouse_report.extend_from_slice(&buf[..len]);
-            buf[..len].to_vec()
+            report
         }
     }
 }
@@ -1861,6 +1906,23 @@ mod tests {
     }
 
     #[test]
+    fn terminal_search_highlights_both_cells_of_a_wide_character() {
+        let spans = |cols: u16, text: &str, query: &str| {
+            let mut vt = Vt::new(cols, 3);
+            vt.write(text.as_bytes());
+            vt.start_search(query);
+            finish_search(&mut vt);
+            vt.search_spans.iter().map(|span| (span.row, span.start, span.end)).collect::<Vec<_>>()
+        };
+        assert_eq!(spans(20, "日本語 ab", "本"), vec![(0, 2, 3)]);
+        assert_eq!(spans(20, "日本語 ab", "日本"), vec![(0, 0, 3)]);
+        assert_eq!(spans(20, "x😀y", "😀"), vec![(0, 1, 2)]);
+        assert_eq!(spans(6, "abcd日", "日"), vec![(0, 4, 5)], "in the last two columns");
+        assert_eq!(spans(5, "abcd日", "d日"), vec![(0, 3, 4), (1, 0, 1)], "wrapped to the next row");
+        assert_eq!(spans(20, "日本語 ab", "語 a"), vec![(0, 4, 7)], "a narrow end keeps its own cell");
+    }
+
+    #[test]
     fn scrollback_retains_five_thousand_styled_lines() {
         for cols in [80, 200] {
             let mut vt = Vt::new(cols, 25);
@@ -1887,6 +1949,20 @@ mod tests {
         assert!(f.rows[0][0].wide, "also after a reset");
         assert_eq!(f.rows[0][0].text, "\u{270d}\u{fe0f}");
         assert_eq!(f.rows[0][2].text, "!");
+    }
+
+    #[test]
+    fn synchronized_output_releases_at_its_deadline() {
+        let mut vt = Vt::new(20, 3);
+        vt.write(b"before");
+        vt.write(b"\x1b[?2026h\r\x1b[Kafter");
+        let text = |frame: Frame| frame.rows[0].iter().map(|c| c.text.as_str()).collect::<String>();
+        assert!(text(vt.frame()).starts_with("before"));
+        let since = Instant::now() - MAX_HOLD - Duration::from_millis(1);
+        vt.shared.held_since = Some(since);
+        assert_eq!(vt.render_hold_deadline(), Some(since + MAX_HOLD));
+        assert!(text(vt.frame()).starts_with("after"));
+        assert_eq!(vt.render_hold_deadline(), None);
     }
 
     #[test]
@@ -2091,11 +2167,99 @@ mod tests {
     }
 
     #[test]
+    fn mouse_clicks_do_not_report_same_cell_drags_in_any_cell_encoding() {
+        let size = (80, 2, 11.7, 20.0);
+        for tracking in [b"\x1b[?1002h".as_slice(), b"\x1b[?1003h"] {
+            for format in [b"".as_slice(), b"\x1b[?1005h", b"\x1b[?1006h", b"\x1b[?1015h"] {
+                let mut vt = Vt::new(80, 2);
+                vt.write(tracking);
+                vt.write(format);
+                let left = Some(GHOSTTY_MOUSE_BUTTON_LEFT);
+                for _ in 0..2 {
+                    assert!(!vt.encode_mouse(GHOSTTY_MOUSE_ACTION_PRESS, left, 0, 15.0, 5.0, size, true).is_empty());
+                    assert!(vt.encode_mouse(GHOSTTY_MOUSE_ACTION_MOTION, left, 0, 15.0, 5.0, size, true).is_empty());
+                    assert!(vt.encode_mouse(GHOSTTY_MOUSE_ACTION_MOTION, left, 0, 16.0, 6.0, size, true).is_empty());
+                    assert!(!vt.encode_mouse(GHOSTTY_MOUSE_ACTION_RELEASE, left, 0, 16.0, 6.0, size, false).is_empty());
+                    assert!(vt.encode_mouse(GHOSTTY_MOUSE_ACTION_MOTION, None, 0, 16.0, 6.0, size, false).is_empty());
+                }
+                assert!(!vt.encode_mouse(GHOSTTY_MOUSE_ACTION_PRESS, left, 0, 15.0, 5.0, size, true).is_empty());
+                assert!(!vt.encode_mouse(GHOSTTY_MOUSE_ACTION_MOTION, left, 0, 25.0, 5.0, size, true).is_empty());
+                assert!(vt.encode_mouse(GHOSTTY_MOUSE_ACTION_MOTION, left, 0, 26.0, 6.0, size, true).is_empty());
+                // Another button can report at the same cell; press/release are never filtered.
+                let right = Some(GHOSTTY_MOUSE_BUTTON_RIGHT);
+                assert!(!vt.encode_mouse(GHOSTTY_MOUSE_ACTION_PRESS, right, 0, 25.0, 5.0, size, true).is_empty());
+                assert!(vt.encode_mouse(GHOSTTY_MOUSE_ACTION_MOTION, right, 0, 26.0, 6.0, size, true).is_empty());
+                assert!(!vt.encode_mouse(GHOSTTY_MOUSE_ACTION_MOTION, left, 0, 26.0, 6.0, size, true).is_empty());
+                assert!(!vt.encode_mouse(GHOSTTY_MOUSE_ACTION_RELEASE, right, 0, 26.0, 6.0, size, true).is_empty());
+            }
+        }
+    }
+
+    #[test]
     fn button_motion_needs_the_views_press_ownership_gate() {
         let mut vt = Vt::new(80, 2);
         vt.write(b"\x1b[?1002h\x1b[?1006h");
         // Ghostty trusts the event's button even if this pane never saw a press.
         assert_eq!(vt.encode_mouse(GHOSTTY_MOUSE_ACTION_MOTION, Some(GHOSTTY_MOUSE_BUTTON_LEFT), 0, 35.0, 5.0, (80, 2, 10.0, 20.0), false), b"\x1b[<32;4;1M");
+    }
+
+    #[test]
+    fn select_all_covers_history_and_screen_from_any_viewport() {
+        let mut vt = Vt::new(12, 2);
+        vt.write("old 日本語\r\nwrapped abcdefghijklmnop\r\nlast".as_bytes());
+        for scroll in [0, -100, 1] {
+            vt.scroll_viewport(scroll);
+            vt.select_all();
+            assert_eq!(vt.selection_text().as_deref(), Some("old 日本語\nwrapped abcdefghijklmnop\nlast"));
+            vt.clear_selection();
+            assert_eq!(vt.selection_text(), None);
+        }
+    }
+
+    #[test]
+    fn select_all_uses_only_the_active_screen() {
+        let mut vt = Vt::new(20, 3);
+        vt.select_all();
+        assert_eq!(vt.selection_text(), None);
+        vt.write(b"primary history\r\nprimary screen\x1b[?1049h\x1b[Halt only");
+        vt.select_all();
+        assert_eq!(vt.selection_text().as_deref(), Some("alt only"));
+        vt.write(b"\x1b[?1049l");
+        vt.select_all();
+        assert_eq!(vt.selection_text().as_deref(), Some("primary history\nprimary screen"));
+        vt.select(Select::Press, 0, 0, 2.0, 5.0, 10.0, 60.0);
+        assert_eq!(vt.selection_text(), None, "a plain click clears select-all too");
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    #[ignore = "manual 64 MiB scrollback performance check"]
+    fn select_all_large_scrollback() {
+        let mut vt = Vt::new(80, 25);
+        let bytes = 64usize * 1024 * 1024;
+        let lines = usize::MAX;
+        unsafe {
+            ok(ghostty_terminal_set(vt.term, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_BYTES, &bytes as *const _ as *const c_void), "scrollback bytes");
+            ok(ghostty_terminal_set(vt.term, GHOSTTY_TERMINAL_OPT_SCROLLBACK_MAX_LINES, &lines as *const _ as *const c_void), "scrollback lines");
+        }
+        let line = format!("{}\r\n", "x".repeat(79));
+        for _ in 0..200_000 {
+            vt.write(line.as_bytes());
+        }
+        let memory = || {
+            std::fs::read_to_string("/proc/self/status").unwrap().lines()
+                .find(|line| line.starts_with("VmRSS:")).unwrap().to_owned()
+        };
+        let before = memory();
+        let started = Instant::now();
+        for _ in 0..1000 {
+            vt.select_all();
+        }
+        eprintln!("64 MiB budget, {} rows; 1000 selections: {:?}; RSS before {before}, after {}", vt.scrollbar().total, started.elapsed(), memory());
+        let text = vt.selection_text().unwrap();
+        assert!(text.starts_with(&"x".repeat(79)));
+        assert!(text.trim_end().ends_with(&"x".repeat(79)));
+        eprintln!("copy on request: {} bytes", text.len());
     }
 
     #[test]
