@@ -7108,6 +7108,7 @@ globalThis.__gpui = (() => {
         return {
           __handle: handle,
           value: () => __editor_value(handle),
+          selections: () => JSON.parse(__editor_selections(handle)),
           set_value: (value) => __editor_set_value(handle, String(value)),
           on: (event, handler) => __editor_on(handle, String(event), handler),
           release: () => __editor_release(handle),

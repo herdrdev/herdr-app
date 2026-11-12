@@ -115,6 +115,9 @@ those files or the generated guide. The app rewrites them on start.
   scrolling, including mouse reports. Set them in settings.json or the
   layout's look; the layout wins.
 - Home defaults to `~/.config/herdr-app`; `HERDR_APP_HOME` selects another.
+- Code editor mods can read `EditorState.selections()` for a snapshot of all
+  selections (primary first). Each has `start`, `end`, `head`, and `primary`;
+  positions use zero-based rows and UTF-16 columns. Equal ends are a caret.
 - Mods live in `mods/<name>/` with `main.js` and optional `mod.json`.
   They are trusted JavaScript with command and network access.
   `"focusable": true` in `mod.json` lets `pane.go` move onto a copy; it receives

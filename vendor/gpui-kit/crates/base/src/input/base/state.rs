@@ -123,6 +123,24 @@ actions!(
     ]
 );
 
+/// HERDR: a selection's ordered byte range and caret direction.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct SelectionRange {
+    pub range: Range<usize>,
+    /// The caret is at the start rather than the end.
+    pub reversed: bool,
+}
+
+impl SelectionRange {
+    pub fn head(&self) -> usize {
+        if self.reversed {
+            self.range.start
+        } else {
+            self.range.end
+        }
+    }
+}
+
 #[derive(Clone)]
 pub enum InputEvent {
     Change,
@@ -3126,6 +3144,21 @@ impl<M: InputModeKind> InputBaseState<M> {
     /// Laid-out line height; `None` before first layout.
     pub fn line_height(&self) -> Option<gpui::Pixels> {
         self.last_layout.as_ref().map(|l| l.line_height)
+    }
+
+    /// HERDR: all selections, primary first and the rest in document order.
+    /// Reading selections does not move the caret or change the viewport.
+    pub fn selections(&self) -> Vec<SelectionRange> {
+        let mut selections: Vec<_> = self
+            .selections
+            .iter()
+            .map(|selection| SelectionRange {
+                range: selection.start..selection.end,
+                reversed: selection.reversed,
+            })
+            .collect();
+        selections[1..].sort_by_key(|selection| (selection.range.start, selection.range.end));
+        selections
     }
 
     /// Returns the active selection as a byte range into the text.
@@ -8438,6 +8471,35 @@ mod tests {
         full_text.push('\n');
 
         (full_text, cursor_offsets)
+    }
+
+    #[gpui::test]
+    fn reading_selections_preserves_primary_direction_and_state(cx: &mut TestAppContext) {
+        let view = multi_line(cx);
+        let mut cx = VisualTestContext::from_window(view.window_handle.into(), cx);
+        cx.update(|window, cx| {
+            view.input.update(cx, |state, cx| {
+                state.set_value("0123456789", window, cx);
+                let mut primary = CursorSelection::new(state.selections.generate_id(), 6, 9);
+                primary.reversed = true;
+                let last = CursorSelection::new(state.selections.generate_id(), 4, 4);
+                let first = CursorSelection::new(state.selections.generate_id(), 0, 2);
+                state.selections.replace_all(vec![primary, last, first]);
+                let before: Vec<_> = state.selections.iter().copied().collect();
+                let scroll = state.scroll_handle.offset();
+                let actual = state.selections();
+                assert_eq!(
+                    actual.iter().map(|s| s.range.clone()).collect::<Vec<_>>(),
+                    vec![6..9, 0..2, 4..4]
+                );
+                assert_eq!(
+                    actual.iter().map(SelectionRange::head).collect::<Vec<_>>(),
+                    vec![6, 2, 4]
+                );
+                assert_eq!(state.selections.iter().copied().collect::<Vec<_>>(), before);
+                assert_eq!(state.scroll_handle.offset(), scroll);
+            });
+        });
     }
 
     /// Build a multi-line input for multi-cursor tests.

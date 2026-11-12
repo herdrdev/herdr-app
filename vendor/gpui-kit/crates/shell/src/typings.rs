@@ -3156,8 +3156,24 @@ const BASE: &str = r#"  /** A row. */
   export const Textarea: { new: (state: TextareaState) => NativeElement };
 
   // HERDR: built-in source editing and read-only code viewing.
+  /** A document position: zero-based row and UTF-16 column (a JS string index). */
+  export interface EditorPosition {
+    row: number;
+    col: number;
+  }
+  export interface EditorSelection {
+    /** Ordered range; equal endpoints represent a caret. */
+    start: EditorPosition;
+    end: EditorPosition;
+    /** The endpoint holding the caret; preserves selection direction. */
+    head: EditorPosition;
+    primary: boolean;
+  }
   export interface EditorState {
     value(): string;
+    /** Snapshot of all selections: primary first, then the rest in document order.
+     * Reads do not change selections or scroll. Read again after user input or set_value. */
+    selections(): EditorSelection[];
     /** Programmatic replacement works even in readonly mode. */
     set_value(value: string): void;
     on(event: "change" | "submit" | "focus" | "blur" | "paste_other", handler: (event: InputEvent, cx: Context) => void): boolean;

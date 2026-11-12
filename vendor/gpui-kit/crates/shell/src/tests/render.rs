@@ -10818,3 +10818,44 @@ fn a_list_reports_which_item_was_clicked(cx: &mut TestAppContext) {
     // covers 60..80.
     assert_a_click_reports_the_row_key(cx, measured_list_source(), 70.);
 }
+
+// HERDR: read selections through the real JS bridge, including JS string columns.
+#[gpui::test]
+fn an_editor_reads_selection_snapshots_with_utf16_columns(cx: &mut TestAppContext) {
+    cx.update(crate::init);
+    let runtime = ShellRuntime::new_isolated().expect("runtime");
+    cx.update(|cx| runtime.set_global(cx));
+    let source = r#"
+import { View, div } from "gpui-kit";
+import { EditorState } from "gpui-base";
+export default class Code extends View {
+  init() { this.code = EditorState.new({ value: "a😀b\r\nnext", readonly: true }); }
+  render(cx) {
+    return div().child(JSON.stringify(this.code.selections().map(s =>
+      [s.start.row, s.start.col, s.end.row, s.end.col, s.head.row, s.head.col, s.primary])));
+  }
+}
+"#;
+    let view_type = runtime
+        .load_source("read-selections", source)
+        .expect("load");
+    let window = cx.add_window(|_, _| Empty);
+    let mut context = VisualTestContext::from_window(*window.deref(), cx);
+    let object = context
+        .update(|window, cx| runtime.instantiate(&view_type, window, cx))
+        .expect("instantiate");
+    let editor = runtime.entities().first_editor().expect("editor");
+    let render = |context: &mut VisualTestContext| {
+        context
+            .update(|window, cx| runtime.render_to_spec(&object, None, window, cx))
+            .expect("render")
+    };
+    let initial = render(&mut context);
+    assert!(initial.contains("[[0,0,0,0,0,0,true]]"), "{initial}");
+    context.update(|_, cx| editor.update(cx, |state, cx| state.set_selected_range(1..5, cx)));
+    let selected = render(&mut context);
+    assert!(selected.contains("[[0,1,0,3,0,3,true]]"), "{selected}");
+    context.update(|_, cx| editor.update(cx, |state, cx| state.set_selected_range(8..12, cx)));
+    let next = render(&mut context);
+    assert!(next.contains("[[1,0,1,4,1,4,true]]"), "{next}");
+}

@@ -974,6 +974,11 @@ language, value, readonly, font_family: settings().font_family, syntax: {
 keyword: theme().ansi5, ... } })` + `Editor.new(state)` is a code view (readonly)
 or editor with syntax highlighting, line numbers and folding. A viewer opens
 beside the shell as a pane: `pane.split {direction, mod, props: { file }}`.
+`state.selections()` reads all editor selections, primary first, then the rest in
+document order: `{ start, end, head, primary }`. Positions are zero-based
+`{ row, col }`; columns count UTF-16 units, like JS string indices. Equal
+ends are a caret; `head` identifies the caret end of a selection. This is a
+snapshot: read again when needed, including after `set_value`.
 The full surface is in `gpui-kit.d.ts` next to this file.
 
 ### The `herdr` module

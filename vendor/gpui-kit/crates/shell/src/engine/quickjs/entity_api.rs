@@ -487,6 +487,45 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
         ),
     )?;
 
+    let read_selections = runtime.clone();
+    globals.set(
+        "__editor_selections",
+        Func::from(
+            move |ctx: Ctx<'_>, handle: EntityHandle| -> JsResult<String> {
+                let state = live_editor(&ctx, &read_selections, handle)?;
+                scope::with_current_app(|cx| {
+                    let state = state.read(cx);
+                    let text = state.text();
+                    let items: Vec<serde_json::Value> = state
+                        .selections()
+                        .into_iter()
+                        .enumerate()
+                        .map(|(index, selection)| {
+                            let start = editor_position(text, selection.range.start);
+                            let end = editor_position(text, selection.range.end);
+                            // The caret (`SelectionRange::head`) is one of
+                            // the ends: reuse that end's position rather than
+                            // converting it again.
+                            let head = if selection.head() == selection.range.start {
+                                start.clone()
+                            } else {
+                                end.clone()
+                            };
+                            serde_json::json!({
+                                "start": start,
+                                "end": end,
+                                "head": head,
+                                "primary": index == 0,
+                            })
+                        })
+                        .collect();
+                    serde_json::Value::Array(items).to_string()
+                })
+                .ok_or_else(|| needs_call(&ctx, "selections()"))
+            },
+        ),
+    )?;
+
     let write_editor = runtime.clone();
     globals.set(
         "__editor_set_value",
@@ -1827,4 +1866,12 @@ fn needs_call(ctx: &Ctx<'_>, what: &str) -> rquickjs::Error {
         ctx,
         &format!("{what} needs a live host call; call it from render or an event handler"),
     )
+}
+
+// HERDR: script columns index JavaScript strings, so count UTF-16 units.
+fn editor_position(text: &gpui_base::input::Rope, offset: usize) -> serde_json::Value {
+    use gpui_base::input::RopeExt as _;
+    let point = text.offset_to_point(offset);
+    let col = text.slice_line(point.row).byte_to_utf16_idx(point.column);
+    serde_json::json!({ "row": point.row, "col": col })
 }
