@@ -325,6 +325,9 @@ struct Overlay {
     bare: bool,
     /// A window: where its top left is (None: centered) and its name (`key`).
     place: Option<Point<Pixels>>,
+    /// `on_top: true`: a window drawn above the other windows (still under
+    /// dialogs, popups and toasts), however recently they were pressed.
+    on_top: bool,
     key: Option<String>,
     /// The app's own screen (a `frame-` mod: What's new, the welcome): only
     /// its own close ends it, never a layout switch.
@@ -3661,6 +3664,7 @@ impl AppWindow {
             modal: spec.get("modal").and_then(Value::as_bool).unwrap_or(false),
             bare: spec.get("frame").and_then(Value::as_str) == Some("none"),
             place,
+            on_top: kind == OverlayKind::Window && spec.get("on_top").and_then(Value::as_bool) == Some(true),
             key: key.clone(),
             frame: spec.get("mod").and_then(Value::as_str).is_some_and(|m| m.starts_with("frame-")),
         });
@@ -4359,9 +4363,11 @@ impl AppWindow {
         if pill.is_some() {
             toast_y += UPDATE_PILL_HEIGHT + 8.0;
         }
-        // Windows under dialogs, popups and toasts; each kind in the order opened
-        // (a window pressed last is last: on top).
-        let order = self.overlays.iter().filter(|o| o.kind == OverlayKind::Window).chain(self.overlays.iter().filter(|o| o.kind != OverlayKind::Window));
+        // Windows under dialogs, popups and toasts, `on_top` windows above the
+        // other windows; each layer in the order opened (a window pressed last
+        // is last: on top of its layer).
+        let mut order: Vec<&Overlay> = self.overlays.iter().collect();
+        order.sort_by_key(|o| draw_layer(o.kind, o.on_top));
         for o in order {
             let id = o.id.clone();
             // Up to 1: a share of the window (terminals in overlays want room, not px).
@@ -4650,6 +4656,17 @@ fn folder_info(cwd: &str, home: &str, on: Option<&str>) -> (model::FolderInfo, b
     let [top, head] = out.as_slice() else { return (none, true) };
     let branch = (head != "HEAD").then(|| head.clone());
     (model::FolderInfo { top: top.clone(), branch }, true)
+}
+
+/// Which layer an overlay is drawn in, bottom first: windows, `on_top`
+/// windows, then dialogs, popups and toasts. A stable sort keeps each layer in
+/// the order opened (or last pressed).
+fn draw_layer(kind: OverlayKind, on_top: bool) -> u8 {
+    match (kind, on_top) {
+        (OverlayKind::Window, false) => 0,
+        (OverlayKind::Window, true) => 1,
+        _ => 2,
+    }
 }
 
 fn terminal_block<'a>(chrome: &'a Node, focused: Option<&str>) -> Option<&'a Node> {
@@ -6239,6 +6256,24 @@ export default class SystemToast extends View {
         for name in ["pane.focus", "terminal.copy", "terminal.paste", "terminal.paste_image", "terminal.right_click"] {
             assert!(!super::needs_model_pane(name, &json!({})), "{name}");
         }
+    }
+
+    #[test]
+    fn on_top_windows_draw_above_other_windows_and_under_dialogs() {
+        use super::{OverlayKind, draw_layer};
+        // Opened (or last pressed) in this order; the pinned one first.
+        let opened = [
+            ("pinned", OverlayKind::Window, true),
+            ("a", OverlayKind::Window, false),
+            ("menu", OverlayKind::Popup, false),
+            ("b", OverlayKind::Window, false),
+            ("pinned2", OverlayKind::Window, true),
+            ("ask", OverlayKind::Dialog, false),
+        ];
+        let mut order = opened.to_vec();
+        order.sort_by_key(|(_, kind, on_top)| draw_layer(*kind, *on_top));
+        let names: Vec<_> = order.iter().map(|(n, ..)| *n).collect();
+        assert_eq!(names, ["a", "b", "pinned", "pinned2", "menu", "ask"]);
     }
 
     #[test]
