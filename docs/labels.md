@@ -36,6 +36,8 @@ Writing it:
   foreground and that agent drawn on screen (a peek or a floating view
   counts; a pane covered by another terminal doesn't). A screen left on in an empty room
   shouldn't clear everyone's "done".
+  A client may ask for more: the desktop app's `done_until_input` setting
+  counts an agent as looked at only once the person sends it input.
 - Write once per turn while it stays on screen, not on every update: then
   a "mark unread" from another client isn't overruled by a screen nobody
   watches. Looking again later raises it again.

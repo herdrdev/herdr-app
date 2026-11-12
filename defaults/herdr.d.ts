@@ -166,7 +166,8 @@ export interface AgentInfo {
   tab_index: number;
   tab_name: string;
   /** "done" means it finished while you weren't looking; it becomes "idle" once you look
-   *  (here or on another Herdr client). */
+   *  (here or on another Herdr client), or with settings.json `done_until_input` once you
+   *  send it input. */
   status: Status;
   /** What the agent reported (OSC 7501 `app`), e.g. "claude-code", "pi", "codex". */
   app: string | null;
