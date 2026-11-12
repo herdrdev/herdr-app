@@ -3062,6 +3062,8 @@ const BASE: &str = r#"  /** A row. */
     replace_with_token(token: InlineToken): void;
     replace_range_with_token(range: InputRange, token: InlineToken): void;
     set_selected_range(range: InputRange): void;
+    /** The selection (UTF-16 offsets); start equals end at a plain cursor. */
+    selected_range(): InputRange;
     replace(text: string): void;
     value(): string;
     /** Plain text, or a content snapshot to restore its tokens as well. */
@@ -3131,6 +3133,8 @@ const BASE: &str = r#"  /** A row. */
     replace_with_token(token: InlineToken): void;
     replace_range_with_token(range: InputRange, token: InlineToken): void;
     set_selected_range(range: InputRange): void;
+    /** The selection (UTF-16 offsets); start equals end at a plain cursor. */
+    selected_range(): InputRange;
     replace(text: string): void;
     value(): string;
     /** Plain text, or a content snapshot to restore its tokens as well. */
@@ -3160,7 +3164,14 @@ const BASE: &str = r#"  /** A row. */
     value(): string;
     /** Programmatic replacement works even in readonly mode. */
     set_value(value: string): void;
+    /** The selection (UTF-16 offsets); start equals end at a plain cursor. */
+    selected_range(): InputRange;
+    set_selected_range(range: InputRange): void;
+    /** Replaces the selection with `text`, as typing would (one undo step). */
+    replace(text: string): void;
     on(event: "change" | "submit" | "focus" | "blur" | "paste_other", handler: (event: InputEvent, cx: Context) => void): boolean;
+    /** Moves the keyboard onto the editor. */
+    focus(): void;
     release(): boolean;
   }
   export const EditorState: {

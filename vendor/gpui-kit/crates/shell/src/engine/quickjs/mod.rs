@@ -6206,7 +6206,7 @@ globalThis.__gpui = (() => {
   // to read it back off `this`.
   const tokenStateMethods = (handle, invoke) => Object.fromEntries([
     "content", "tokens", "replace_with_token", "replace_range_with_token",
-    "set_selected_range", "replace"
+    "set_selected_range", "selected_range", "replace"
   ].map(name => [name, (...args) => invoke(handle, name, args)]));
   // A value is plain text or a content snapshot with tokens.
   const setValue = (handle, setText, invoke) => (next) =>
@@ -7107,9 +7107,13 @@ globalThis.__gpui = (() => {
         const handle = __editor_state_new(JSON.stringify(options));
         return {
           __handle: handle,
+          selected_range: () => __editor_text_call(handle, "selected_range", []),
+          set_selected_range: (range) => __editor_text_call(handle, "set_selected_range", [range]),
+          replace: (text) => __editor_text_call(handle, "replace", [String(text)]),
           value: () => __editor_value(handle),
           set_value: (value) => __editor_set_value(handle, String(value)),
           on: (event, handler) => __editor_on(handle, String(event), handler),
+          focus: () => __editor_focus(handle),
           release: () => __editor_release(handle),
         };
       },
