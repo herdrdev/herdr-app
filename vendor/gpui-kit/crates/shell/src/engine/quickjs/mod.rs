@@ -2077,6 +2077,11 @@ impl ShellRuntime {
         self.js_runtime.metrics()
     }
 
+    #[cfg(test)]
+    pub(crate) fn collect_garbage(&self) {
+        self.js_runtime.run_gc();
+    }
+
     /// A reading of the two counters, taken now.
     ///
     /// The host gets the reading rather than the instrument: `Metrics` is the
