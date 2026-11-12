@@ -1,0 +1,11 @@
+{
+  "place": "none",
+  "title": "Ports",
+  "overlay": {
+    "kind": "popup",
+    "at": "top",
+    "offset": 42,
+    "width": 680,
+    "height": 0.75
+  }
+}
