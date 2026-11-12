@@ -688,6 +688,10 @@ What's about the user, never a look:
 - `terminal_line_height` (default 1, 0.8..2) and `terminal_scroll_speed`
   (default 1, 0.1..5): terminal row height and wheel/trackpad speed, used
   where the layout leaves them unset.
+- `terminal_padding_fill`: `"off"` (default), `"auto"` (alternate-screen
+  programs), or `"always"`. Extends edge cell background
+  colors into terminal padding. Text positions and grid size stay the same.
+  Changes apply live; also available in Settings > Look > Padding colors.
 - `font`, `font_size`, `ui_font`: used where the layout doesn't set its
   own. Herdr (main) leaves these unset. Bigger panels: `zoom`.
 - `font_ligatures`: programming ligatures are off by default; set `true` to

@@ -384,6 +384,8 @@ pub struct Person {
     pub terminal_line_height: f32,
     /// Wheel and trackpad scroll multiplier, 0.1..5.
     pub terminal_scroll_speed: f32,
+    /// When edge cell backgrounds extend into terminal padding.
+    pub terminal_padding_fill: PaddingFill,
     /// The panels' font (their sizes follow zoom).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ui_font: Option<String>,
@@ -436,6 +438,15 @@ pub enum OptionAsAlt {
     Right,
 }
 
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PaddingFill {
+    #[default]
+    Off,
+    Auto,
+    Always,
+}
+
 impl OptionAsAlt {
     fn is_auto(&self) -> bool {
         *self == Self::Auto
@@ -457,6 +468,7 @@ impl Default for Person {
             font_ligatures: false,
             terminal_line_height: 1.0,
             terminal_scroll_speed: 1.0,
+            terminal_padding_fill: PaddingFill::Off,
             ui_font: None,
             telemetry: true,
             clipboard_write: true,
@@ -499,6 +511,8 @@ pub struct Settings {
     pub pane_scrollbars: bool,
     /// Space between a terminal's edge and its text, in px: [x, y].
     pub terminal_padding: [f32; 2],
+    /// When edge cell backgrounds extend into terminal padding.
+    pub terminal_padding_fill: PaddingFill,
     /// 0..1: below 1, what's behind a terminal shows through.
     pub terminal_opacity: f32,
     pub clipboard_write: bool,
@@ -544,6 +558,7 @@ impl Default for Settings {
             colors: BTreeMap::new(),
             pane_scrollbars: true,
             terminal_padding: [10.0, 6.0],
+            terminal_padding_fill: PaddingFill::Off,
             terminal_opacity: 1.0,
             clipboard_write: true,
             minimum_contrast: 1.0,
@@ -584,6 +599,7 @@ impl Settings {
             colors,
             pane_scrollbars: person.pane_scrollbars,
             terminal_padding: look.terminal_padding.unwrap_or(d.terminal_padding),
+            terminal_padding_fill: person.terminal_padding_fill,
             terminal_opacity: look.terminal_opacity.unwrap_or(1.0).clamp(0.0, 1.0),
             sounds: person.sounds.clone(),
             clipboard_write: person.clipboard_write,
