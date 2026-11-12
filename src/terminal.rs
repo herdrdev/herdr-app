@@ -672,8 +672,25 @@ impl TerminalView {
                             if copies {
                                 let _ = std::fs::remove_file(p);
                             }
-                            let out = out.ok()?;
-                            let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
+                            let out = match out {
+                                Ok(o) => o,
+                                Err(e) => {
+                                    tracing::warn!("hc put failed to spawn for {addr}: {e}");
+                                    return None;
+                                }
+                            };
+                            let v: serde_json::Value = match serde_json::from_slice(&out.stdout) {
+                                Ok(v) => v,
+                                Err(e) => {
+                                    let stderr = String::from_utf8_lossy(&out.stderr);
+                                    tracing::warn!("hc put parse failed for {addr}: {e}, stderr: {stderr}");
+                                    return None;
+                                }
+                            };
+                            if let Some(err) = v.get("error").and_then(|e| e.get("message")).and_then(|m| m.as_str()) {
+                                tracing::warn!("hc put returned error for {addr}: {err}");
+                                return None;
+                            }
                             v.get("path").and_then(|p| p.as_str()).map(str::to_owned)
                         })
                         .collect::<Vec<_>>()
@@ -695,11 +712,11 @@ impl TerminalView {
         let Some(item) = cx.read_from_clipboard() else { return };
         if let Some(paths) = copied_files(&item) {
             self.dropped(paths, cx);
+        } else if item.entries().iter().any(|e| matches!(e, ClipboardEntry::Image(_))) {
+            self.paste_image(cx);
         } else if let Some(text) = item.text() {
             let bytes = self.grid.borrow().vt.paste_bytes(&text);
             self.send(&bytes);
-        } else if item.entries().iter().any(|e| matches!(e, ClipboardEntry::Image(_))) {
-            self.paste_image(cx);
         }
     }
 
@@ -715,16 +732,44 @@ impl TerminalView {
         }
     }
 
-    /// An agent on another machine reads that machine's clipboard, so this
-    /// one's image goes there as a file, and its path is pasted. A local
-    /// program reads the clipboard itself: nothing to do.
+    /// Pastes an image from the clipboard into this terminal:
+    /// - On another machine (`machine/t1`), the image goes there via `hc put` and its remote path is typed.
+    /// - On a local terminal or machine without `machine/`, saves to a temp file and types the local path.
+    /// - Also supports copied image files from file managers.
     fn send_image(&self, cx: &mut Context<Self>) -> bool {
-        if !self.address.contains('/') {
-            return false;
+        let Some(item) = cx.read_from_clipboard() else { return false };
+        if let Some(path) = image_file(&item) {
+            if !self.address.contains('/') {
+                let text = quote_paths([path.to_string_lossy().into_owned()]);
+                let bytes = self.grid.borrow().vt.paste_bytes(&text);
+                self.send(&bytes);
+                return true;
+            }
+            self.put_there(vec![path], true, cx);
+            return true;
         }
-        let Some(path) = cx.read_from_clipboard().and_then(|item| image_file(&item)) else { return false };
-        self.put_there(vec![path], true, cx);
-        true
+        if let Some(paths) = copied_files(&item) {
+            let image_paths: Vec<_> = paths
+                .into_iter()
+                .filter(|p| {
+                    p.extension()
+                        .and_then(|e| e.to_str())
+                        .map(|e| matches!(e.to_lowercase().as_str(), "png" | "jpg" | "jpeg" | "webp" | "gif" | "svg"))
+                        .unwrap_or(false)
+                })
+                .collect();
+            if !image_paths.is_empty() {
+                if !self.address.contains('/') {
+                    let text = quote_paths(image_paths.iter().map(|p| p.to_string_lossy().into_owned()));
+                    let bytes = self.grid.borrow().vt.paste_bytes(&text);
+                    self.send(&bytes);
+                    return true;
+                }
+                self.put_there(image_paths, false, cx);
+                return true;
+            }
+        }
+        false
     }
 
     /// Copies the selection to the clipboard (and the primary selection on Linux).
