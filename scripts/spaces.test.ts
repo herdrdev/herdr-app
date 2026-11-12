@@ -6,18 +6,24 @@ import { join } from "node:path";
 const source = (await readFile(new URL("../defaults/mods/spaces/main.js", import.meta.url), "utf8"))
   .replace(/^import .*;\n/gm, "").replace("export default class Spaces", "class Spaces").replace(/^export /gm, "");
 
-type Space = { id: string; folder: string; machine?: string | null };
+type Space = { id: string; folder: string; machine?: string | null; active?: boolean };
 function harness(replies: unknown[] = [], storage = new Map<string, string>(), snapshot: Space[] = [], execGit?: (...args: any[]) => Promise<unknown>, watch?: (repo: string) => Promise<string[]>) {
   const calls: string[][] = [];
   const tasks: Promise<unknown>[] = [];
   const availability = [{ name: null as string | null, layout: "ready" }];
   const moves: { id: string; index: number }[] = [];
   const handlers: Record<string, (...args: any[]) => void> = {};
+  const env = { layout: null as unknown };
+  // The list's scroll position: the requests the view makes are what the sidebar would scroll by.
+  const ScrollHandle = { new: () => ({ calls: [] as number[], scroll_to_item(index: number) { this.calls.push(index); } }) };
+  const theme = () => new Proxy({}, { get: () => "#000000" });
+  const tracked: unknown[] = [];
   const element: any = new Proxy({}, { get: (_, method) => (...args: any[]) => {
     if (String(method).startsWith("on_")) handlers[String(method)] = args.at(-1);
+    if (method === "track_scroll") tracked.push(args[0]);
     return element;
   } });
-  const Spaces = new Function("View", "hc", "localStorage", "spaces", "panes", "run", "v_flex", "h_flex", "div", "svg", "shared", "machines", "exec", "window", "watchFolder", `${source}; return Spaces;`)(
+  const Spaces = new Function("View", "hc", "localStorage", "spaces", "panes", "run", "v_flex", "h_flex", "div", "svg", "shared", "machines", "exec", "window", "watchFolder", "ScrollHandle", "theme", "layout", "setShared", `${source}; return Spaces;`)(
     class {},
     async (args: string[]) => {
       calls.push(args);
@@ -32,13 +38,14 @@ function harness(replies: unknown[] = [], storage = new Map<string, string>(), s
       moves.push(args);
     },
     ...Array(4).fill(() => element), () => null, () => availability, execGit, () => ({ active: true }), watch,
+    ScrollHandle, theme, () => env.layout, () => {},
   );
   const view = new Spaces();
   view.reconnecting = {};
   view.folded = new Set(["cloud"]);
   view.refreshMachines = () => {};
   const cx = { timer: { every() {} }, notify() {}, spawn(fn: (cx: unknown) => Promise<unknown>) { tasks.push(fn(cx)); } };
-  return { view, calls, tasks, cx, storage, moves, handlers, snapshot, availability };
+  return { view, calls, tasks, cx, storage, moves, handlers, snapshot, availability, env, tracked };
 }
 
 test("git grouping reads refs for normal, detached, unborn and bare worktrees", async () => {
@@ -416,4 +423,72 @@ test("git checks run a few spaces at a time, not every space at once", async () 
   await Promise.all(h.tasks);
   expect(Object.values(h.view.git).filter(Boolean)).toHaveLength(40);
   expect(most).toBeLessThanOrEqual(12);
+});
+
+// The list scrolls by its direct children, so the active space's place counts machine headers too.
+function scrollHarness(spaces: Space[]) {
+  const h = harness([], new Map(), spaces);
+  Object.assign(h.view, { git: {}, checked: {}, unsure: new Set(), pending: new Set(), watching: new Map(), folded: new Set(), machines: [] });
+  h.view.shown = new Set(spaces.map(s => s.id));
+  h.view.born = {};
+  return h;
+}
+const withHandle = (h: ReturnType<typeof harness>) => { h.view.scroll = { calls: [] as number[], scroll_to_item(i: number) { this.calls.push(i); } }; return h; };
+const spaceList = (ids: string[], active: string, remote: string[] = []): Space[] =>
+  ids.map(id => ({ id, folder: "/" + id, active: id === active, ...(remote.includes(id) ? { machine: "cloud" } : {}) }));
+
+test("the active space is brought into view once, and left alone while it stays put", () => {
+  const h = withHandle(scrollHarness(spaceList(["a", "b", "c", "d"], "c")));
+  h.view.render();
+  expect(h.view.scroll.calls).toEqual([2]);
+  expect(h.tracked).toEqual([h.view.scroll]); // the list is the area that handle scrolls
+  h.view.render();
+  h.view.render();
+  expect(h.view.scroll.calls).toEqual([2]);
+  h.snapshot.forEach(s => { s.active = s.id === "a"; });
+  h.view.render();
+  expect(h.view.scroll.calls).toEqual([2, 0]);
+});
+
+test("the active space's place counts a remote machine's header and rows", () => {
+  const ids = ["a", "b", "r1", "r2"];
+  const h = withHandle(scrollHarness(spaceList(ids, "r2", ["r1", "r2"])));
+  h.view.render();
+  // children: this computer's header, a, b, cloud's header, r1, r2
+  expect(h.view.scroll.calls).toEqual([5]);
+});
+
+test("a folded machine's active space has no row to reveal", () => {
+  const h = withHandle(scrollHarness(spaceList(["a", "r1"], "r1", ["r1"])));
+  h.view.folded = new Set(["cloud"]);
+  h.view.render();
+  expect(h.view.scroll.calls).toEqual([]);
+});
+
+test("the narrow rail reveals the same child", () => {
+  const h = withHandle(scrollHarness(spaceList(["a", "b", "c"], "c")));
+  h.env.layout = { id: "sidebar", size: { px: 100 } };
+  h.view.render();
+  expect(h.view.scroll.calls).toEqual([2]);
+});
+
+test("the list reveals the active space again when its own size changes, and only then", () => {
+  const h = withHandle(scrollHarness(spaceList(["a", "b", "c", "d"], "d")));
+  let notified = 0;
+  h.cx.notify = () => { notified++; };
+  h.view.render();
+  expect(h.view.scroll.calls).toEqual([3]);
+  h.handlers.on_size_change({ width: 200, height: 60 }, h.cx);
+  expect(h.view.scroll.calls).toEqual([3, 3]);
+  expect(notified).toBe(1);
+  h.view.render();
+  expect(h.view.scroll.calls).toEqual([3, 3]);
+});
+
+test("a size change with no active row drawn asks for nothing", () => {
+  const h = withHandle(scrollHarness(spaceList(["a", "r1"], "r1", ["r1"])));
+  h.view.folded = new Set(["cloud"]);
+  h.view.render();
+  h.handlers.on_size_change({ width: 200, height: 60 }, h.cx);
+  expect(h.view.scroll.calls).toEqual([]);
 });
