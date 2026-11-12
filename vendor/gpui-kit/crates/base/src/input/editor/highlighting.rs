@@ -154,6 +154,14 @@ impl InputEditorStyle {
             border: or(self.border, colors.border),
             selection,
             caret: or(self.caret, foreground),
+            // HERDR: the palette has no warning colour, and an unset one would
+            // leave the squiggle invisible.
+            diagnostics: DiagnosticColors {
+                error: or(self.diagnostics.error, colors.destructive),
+                warning: or(self.diagnostics.warning, gpui::hsla(0.11, 0.9, 0.5, 1.)),
+                info: or(self.diagnostics.info, colors.primary),
+                hint: or(self.diagnostics.hint, colors.muted_foreground),
+            },
             ..self.clone()
         }
     }
@@ -253,5 +261,22 @@ mod tests {
 
         assert_ne!(first.foreground, second.foreground);
         assert_eq!(second.foreground, light.colors.foreground);
+    }
+
+    #[test]
+    fn unset_diagnostic_colours_are_visible_and_set_ones_are_kept() {
+        let tokens = SemanticThemeTokens::default();
+        let chosen = hsla(0.5, 0.5, 0.5, 1.);
+        let style = InputEditorStyle {
+            diagnostics: super::DiagnosticColors {
+                hint: chosen,
+                ..Default::default()
+            },
+            ..Default::default()
+        }
+        .resolved(&tokens);
+        assert_eq!(style.diagnostics.error, tokens.colors.destructive);
+        assert!(style.diagnostics.warning.a > 0.);
+        assert_eq!(style.diagnostics.hint, chosen);
     }
 }

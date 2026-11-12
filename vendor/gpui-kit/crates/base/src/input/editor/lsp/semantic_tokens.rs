@@ -338,4 +338,22 @@ mod tests {
                 .is_empty()
         );
     }
+
+    #[test]
+    fn pushed_tokens_paint_whatever_order_they_came_in() {
+        let mut lsp = Lsp::default();
+        let token = |line, name: &'static str| {
+            (
+                lsp_types::Range::new(Position::new(line, 0), Position::new(line, 1)),
+                SharedString::from(name),
+            )
+        };
+        lsp.set_semantic_tokens(vec![token(2, "b"), token(0, "a")]);
+        let starts: Vec<u32> = lsp
+            .semantic_tokens
+            .iter()
+            .map(|(range, _)| range.start.line)
+            .collect();
+        assert_eq!(starts, [0, 2]);
+    }
 }

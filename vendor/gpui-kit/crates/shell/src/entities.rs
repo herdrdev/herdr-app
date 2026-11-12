@@ -94,6 +94,8 @@ enum Record {
         font_size: Option<f32>,
         application: Option<Rc<ApplicationGeneration>>,
         subscriptions: Vec<Subscription>,
+        popups: Entity<crate::editor_popups::EditorPopups>,
+        language: crate::editor_language::LanguageHandlers,
     },
     /// A calendar's month, view and selected date.
     ///
@@ -477,8 +479,13 @@ impl EntityStore {
             state.set_editor_style(style);
             state.set_highlighter_factory(
                 Rc::new(|language| {
-                    crate::syntax::SyntectHighlighter::new(language).map(|highlighter| {
-                        Box::new(highlighter) as Box<dyn gpui_base::input::InputHighlighter>
+                    Some(match crate::syntax::SyntectHighlighter::new(language) {
+                        Some(highlighter) => {
+                            Box::new(highlighter) as Box<dyn gpui_base::input::InputHighlighter>
+                        }
+                        None => {
+                            Box::new(crate::syntax::PlainHighlighter(language.to_owned().into()))
+                        }
                     })
                 }),
                 cx,
@@ -486,13 +493,82 @@ impl EntityStore {
             state
         });
         state.update(cx, |state, cx| state.set_value(options.value, window, cx));
+        let popups = cx.new(|cx| crate::editor_popups::EditorPopups::new(state.clone(), cx));
         self.push(Record::Editor {
             state,
             font_family: options.font_family,
             font_size: options.font_size,
             application,
             subscriptions: Vec::new(),
+            popups,
+            language: Default::default(),
         })
+    }
+
+    pub(crate) fn editor_popups(
+        &self,
+        handle: EntityHandle,
+    ) -> Option<Entity<crate::editor_popups::EditorPopups>> {
+        match self.record(handle) {
+            Some(Record::Editor { popups, .. }) => Some(popups.clone()),
+            _ => None,
+        }
+    }
+
+    pub(crate) fn set_editor_language(
+        &mut self,
+        handle: EntityHandle,
+        handlers: crate::editor_language::LanguageHandlers,
+        cx: &mut App,
+    ) -> bool {
+        let Some(Record::Editor {
+            state,
+            popups,
+            language,
+            ..
+        }) = self.record_mut(handle)
+        else {
+            return false;
+        };
+        crate::editor_language::install(state, &handlers, cx);
+        let accepted = handlers.completion_accepted.as_ref().map(Rc::downgrade);
+        popups.update(cx, |popups, _| popups.set_completion_accepted(accepted));
+        *language = handlers;
+        true
+    }
+
+    /// Observes rather than adding an event to gpui-base: the caret moves on
+    /// dozens of paths there, and every one of them has to notify to be drawn.
+    pub(crate) fn subscribe_editor_cursor(
+        &mut self,
+        handle: EntityHandle,
+        window: &mut Window,
+        cx: &mut App,
+        handler: impl Fn(String, &mut Window, &mut App) + 'static,
+    ) -> bool {
+        let Some(Record::Editor {
+            state,
+            subscriptions,
+            ..
+        }) = self.record_mut(handle)
+        else {
+            return false;
+        };
+        let caret = |state: &EditorState| {
+            let selected = state.selected_range();
+            (state.cursor(), selected.start, selected.end)
+        };
+        let last = std::cell::Cell::new(caret(state.read(cx)));
+        subscriptions.push(
+            window.observe(&state.clone(), cx, move |state, window, cx| {
+                let now = caret(state.read(cx));
+                if last.replace(now) != now {
+                    let json = crate::editor_language::cursor_event_json(state.read(cx));
+                    handler(json, window, cx);
+                }
+            }),
+        );
+        true
     }
 
     // HERDR: never resolve an editor as an input or textarea.

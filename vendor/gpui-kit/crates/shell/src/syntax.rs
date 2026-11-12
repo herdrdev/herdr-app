@@ -122,6 +122,38 @@ impl InputHighlighter for SyntectHighlighter {
     }
 }
 
+/// A language with no grammar still has diagnostics and semantic tokens, and the
+/// editor composes those only on top of a highlighter.
+pub(crate) struct PlainHighlighter(pub(crate) SharedString);
+
+impl InputHighlighter for PlainHighlighter {
+    fn language(&self) -> SharedString {
+        self.0.clone()
+    }
+
+    fn update(
+        &mut self,
+        _edit: Option<InputEdit>,
+        _text: &Rope,
+        _folding: bool,
+        _window: &mut Window,
+        _cx: &mut Context<EditorState>,
+    ) {
+    }
+
+    fn styles(
+        &self,
+        range: &Range<usize>,
+        _resolver: &dyn HighlightStyleResolver,
+    ) -> Vec<(Range<usize>, HighlightStyle)> {
+        vec![(range.clone(), HighlightStyle::default())]
+    }
+
+    fn fold_ranges(&self, _: &Rope) -> Vec<FoldRange> {
+        Vec::new()
+    }
+}
+
 /// Turn the highlights overlapping `range` into gap-free style runs.
 ///
 /// `highlights` is ordered and non-overlapping, so the first candidate is found
@@ -272,6 +304,17 @@ mod tests {
         );
         let ranges: Vec<_> = runs.into_iter().map(|(range, _)| range).collect();
         assert_eq!(ranges, vec![0..2, 2..4, 4..6, 6..8, 8..10]);
+    }
+
+    #[test]
+    fn a_language_without_a_grammar_still_gets_a_highlighter() {
+        assert!(SyntectHighlighter::new("kotlin").is_none());
+        let plain = PlainHighlighter("kotlin".into());
+        assert_eq!(
+            plain.styles(&(3..9), &SyntaxStyles::default()),
+            vec![(3..9, HighlightStyle::default())],
+            "the editor needs runs that cover the range to compose diagnostics over"
+        );
     }
 
     #[test]

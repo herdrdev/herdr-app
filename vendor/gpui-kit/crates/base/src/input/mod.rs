@@ -111,7 +111,7 @@ pub use lsp::{
     DocumentRangeSemanticTokensProvider, HoverPopoverState, HoverProvider, InputOverlayKind, Lsp,
     ShowDocumentHandler,
 };
-pub use lsp_types::Position;
+pub use lsp_types::{self, Position};
 pub use mask_pattern::MaskPattern;
 #[cfg(target_os = "macos")]
 #[doc(hidden)]

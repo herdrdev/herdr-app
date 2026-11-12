@@ -50,7 +50,7 @@ impl InputBaseState<EditorMode> {
     }
 
     /// Show code actions for the cursor.
-    pub(crate) fn handle_code_action_trigger(
+    pub fn handle_code_action_trigger(
         &mut self,
         window: &mut Window,
         cx: &mut Context<Self>,
