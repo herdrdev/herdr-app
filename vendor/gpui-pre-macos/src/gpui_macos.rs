@@ -54,7 +54,7 @@ pub(crate) use platform::*;
 pub(crate) use window::*;
 
 #[cfg(feature = "font-kit")]
-pub(crate) use text_system::*;
+pub use text_system::MacTextSystem;
 
 pub use platform::MacPlatform;
 pub use events::{OptionAsAlt, option_as_alt, set_option_as_alt};

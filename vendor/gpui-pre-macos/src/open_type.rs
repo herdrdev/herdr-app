@@ -31,6 +31,53 @@ use font_kit::font::Font as FontKitFont;
 use gpui::{FontFallbacks, FontFeatures};
 use std::ptr;
 
+/// The shear Ghostty applies to a regular face when a family has no italic.
+const ITALIC_SKEW: CGAffineTransform = CGAffineTransform {
+    a: 1.0,
+    b: 0.0,
+    c: 0.267949,
+    d: 1.0,
+    tx: 0.0,
+    ty: 0.0,
+};
+
+/// The face at `size`, with the synthetic italic shear when `skew` is set.
+pub fn font_at_size(font: &FontKitFont, size: f32, skew: bool) -> CTFont {
+    let native = font.native_font();
+    if !skew {
+        return native.clone_with_font_size(size as CGFloat);
+    }
+    unsafe {
+        let font = CTFontCreateCopyWithAttributes(
+            native.as_concrete_TypeRef(),
+            size as CGFloat,
+            &ITALIC_SKEW,
+            ptr::null(),
+        );
+        CTFont::wrap_under_create_rule(font)
+    }
+}
+
+/// A copy of `font` that draws with the synthetic italic shear.
+pub fn with_italic_skew(font: &FontKitFont) -> FontKitFont {
+    let skewed = font_at_size(font, 0.0, true);
+    unsafe { FontKitFont::from_native_font(&skewed) }
+}
+
+/// Whether `font` carries the synthetic italic shear.
+pub fn has_italic_skew(font: &CTFont) -> bool {
+    let mut matrix = CGAffineTransform {
+        a: 1.0,
+        b: 0.0,
+        c: 0.0,
+        d: 1.0,
+        tx: 0.0,
+        ty: 0.0,
+    };
+    unsafe { CTFontGetMatrix(font.as_concrete_TypeRef(), &mut matrix) };
+    matrix.c != 0.0
+}
+
 pub fn apply_features_and_fallbacks(
     font: &mut FontKitFont,
     features: &FontFeatures,
@@ -184,6 +231,7 @@ unsafe extern "C" {
         matrix: *const CGAffineTransform,
         attributes: CTFontDescriptorRef,
     ) -> CTFontRef;
+    fn CTFontGetMatrix(font: CTFontRef, matrix: *mut CGAffineTransform);
     fn CTFontCopyDefaultCascadeListForLanguages(
         font: CTFontRef,
         languagePrefList: CFArrayRef,

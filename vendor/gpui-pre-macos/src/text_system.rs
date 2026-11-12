@@ -48,7 +48,7 @@ use pathfinder_geometry::{
 use smallvec::SmallVec;
 use std::{borrow::Cow, char, convert::TryFrom, sync::Arc, sync::OnceLock};
 
-use crate::open_type::apply_features_and_fallbacks;
+use crate::open_type::{apply_features_and_fallbacks, font_at_size, has_italic_skew, with_italic_skew};
 
 #[allow(non_upper_case_globals)]
 const kCGImageAlphaOnly: u32 = 7;
@@ -71,6 +71,8 @@ struct MacTextSystemState {
     font_ids_by_postscript_name: HashMap<String, FontId>,
     font_ids_by_font_key: HashMap<FontKey, SmallVec<[FontId; 4]>>,
     postscript_names_by_font_id: HashMap<FontId, String>,
+    /// Faces made by shearing a regular face because the family has no italic.
+    synthetic_italic: HashSet<FontId>,
 }
 
 impl MacTextSystem {
@@ -84,6 +86,7 @@ impl MacTextSystem {
             font_ids_by_postscript_name: HashMap::default(),
             font_ids_by_font_key: HashMap::default(),
             postscript_names_by_font_id: HashMap::default(),
+            synthetic_italic: HashSet::default(),
         }))
     }
 }
@@ -158,18 +161,33 @@ impl PlatformTextSystem for MacTextSystem {
                 .map(|font_id| lock.fonts[font_id.0].properties())
                 .collect::<SmallVec<[_; 4]>>();
 
+            let style = fontkit_style(font.style);
             let ix = font_kit::matching::find_best_match(
                 &candidate_properties,
                 &font_kit::properties::Properties {
-                    style: fontkit_style(font.style),
+                    style,
                     weight: fontkit_weight(font.weight),
                     stretch: Default::default(),
                 },
             )?;
 
             let font_id = candidates[ix];
-            lock.font_selections.insert(font.clone(), font_id);
-            Ok(font_id)
+            let wants_italic = matches!(style, FontkitStyle::Italic | FontkitStyle::Oblique);
+            let selected = &candidate_properties[ix];
+            if wants_italic && matches!(selected.style, FontkitStyle::Normal) {
+                let synthetic_id = FontId(lock.fonts.len());
+                let skewed = with_italic_skew(&lock.fonts[font_id.0]);
+                lock.fonts.push(skewed);
+                lock.synthetic_italic.insert(synthetic_id);
+                if let Some(name) = lock.postscript_names_by_font_id.get(&font_id).cloned() {
+                    lock.postscript_names_by_font_id.insert(synthetic_id, name);
+                }
+                lock.font_selections.insert(font.clone(), synthetic_id);
+                Ok(synthetic_id)
+            } else {
+                lock.font_selections.insert(font.clone(), font_id);
+                Ok(font_id)
+            }
         }
     }
 
@@ -398,6 +416,15 @@ impl MacTextSystemState {
 
     fn id_for_native_font(&mut self, requested_font: CTFont) -> FontId {
         let postscript_name = requested_font.postscript_name();
+        if has_italic_skew(&requested_font)
+            && let Some(font_id) = self
+                .synthetic_italic
+                .iter()
+                .copied()
+                .find(|id| self.postscript_names_by_font_id.get(id).is_some_and(|name| name == &postscript_name))
+        {
+            return font_id;
+        }
         if let Some(font_id) = self.font_ids_by_postscript_name.get(&postscript_name) {
             *font_id
         } else {
@@ -433,8 +460,14 @@ impl MacTextSystemState {
             font_kit::canvas::RasterizationOptions::GrayscaleAa,
         )?);
 
-        // Expand the bounds by 1 pixel on each side to give CG room for anti-aliasing.
-        Ok(bounds.dilate(DevicePixels(1)))
+        // Expand the bounds by 1 pixel on each side to give CG room for
+        // anti-aliasing, and by the shear overhang for a synthetic italic.
+        let pad = if self.synthetic_italic.contains(&params.font_id) {
+            1 + (f32::from(params.font_size) * 0.268 * params.scale_factor).ceil() as i32
+        } else {
+            1
+        };
+        Ok(bounds.dilate(DevicePixels(pad)))
     }
 
     fn rasterize_glyph(
@@ -510,17 +543,19 @@ impl MacTextSystemState {
             } else {
                 cx.set_gray_fill_color(0.0, 1.0);
             }
-            self.fonts[params.font_id.0]
-                .native_font()
-                .clone_with_font_size(f32::from(params.font_size) as CGFloat)
-                .draw_glyphs(
-                    &[params.glyph_id.0 as CGGlyph],
-                    &[CGPoint::new(
-                        (subpixel_shift.x / params.scale_factor) as CGFloat,
-                        (subpixel_shift.y / params.scale_factor) as CGFloat,
-                    )],
-                    cx,
-                );
+            font_at_size(
+                &self.fonts[params.font_id.0],
+                f32::from(params.font_size),
+                self.synthetic_italic.contains(&params.font_id),
+            )
+            .draw_glyphs(
+                &[params.glyph_id.0 as CGGlyph],
+                &[CGPoint::new(
+                    (subpixel_shift.x / params.scale_factor) as CGFloat,
+                    (subpixel_shift.y / params.scale_factor) as CGFloat,
+                )],
+                cx,
+            );
 
             if params.is_emoji {
                 // Convert from RGBA with premultiplied alpha to BGRA with straight alpha.
@@ -569,7 +604,7 @@ impl MacTextSystemState {
                     string.set_attribute(
                         cf_range,
                         kCTFontAttributeName,
-                        &font.native_font().clone_with_font_size(font_size.into()),
+                        &font_at_size(font, f32::from(font_size), self.synthetic_italic.contains(&run.font_id)),
                     );
                 }
                 break_ligature = !break_ligature;
