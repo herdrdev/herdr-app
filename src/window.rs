@@ -2271,11 +2271,16 @@ impl AppWindow {
     /// through ssh. A machine's hostname is asked for once.
     fn reported_folders(&mut self, cx: &mut Context<Self>) -> HashMap<String, String> {
         let live = &self.live;
-        self.reported.retain(|addr, r| live.get(addr).is_some_and(|rec| r.still_in_front(rec)));
+        self.reported.retain(|addr, r| r.still_in_front(live.get(addr)));
         let mut held = HashMap::new();
         let mut ask = HashSet::new();
         for (addr, r) in &self.reported {
             let machine = addr.split_once('/').map(|(m, _)| m.to_owned());
+            // A program in a local terminal that runs another system, such as
+            // WSL started from PowerShell: its path means nothing here.
+            if machine.is_none() && crate::folder_report::is_windows(&r.report.path) != cfg!(windows) {
+                continue;
+            }
             let name = match self.hostnames.get(&machine) {
                 Some(Hostname::Known(name)) => Some(name.as_str()),
                 _ => None,
@@ -4656,8 +4661,10 @@ struct Reported {
 }
 
 impl Reported {
-    /// Whether the program in front is still the one that reported.
-    fn still_in_front(&mut self, rec: &Value) -> bool {
+    /// Whether the program in front is still the one that reported. A terminal
+    /// that isn't listed yet (`rec` None) keeps its report for its first listing.
+    fn still_in_front(&mut self, rec: Option<&Value>) -> bool {
+        let Some(rec) = rec else { return self.pid.is_none() };
         let front = front_pid(rec);
         if self.pid.is_none() {
             self.pid = front;
@@ -5178,14 +5185,17 @@ mod tests {
         let report = || crate::folder_report::parse("file:///src/feature").unwrap();
         let mut shell = super::Reported { report: report(), pid: Some(10) };
         // Windows: the core names the PowerShell that Pi runs in, wherever Pi moves.
-        assert!(shell.still_in_front(&json!({ "pid": 10, "foreground": { "pid": 10, "cwd": "C:\\old" } })));
-        assert!(shell.still_in_front(&json!({ "pid": 10 })));
+        assert!(shell.still_in_front(Some(&json!({ "pid": 10, "foreground": { "pid": 10, "cwd": "C:\\old" } }))));
+        assert!(shell.still_in_front(Some(&json!({ "pid": 10 }))));
         // Another program came to the front: the report is over.
-        assert!(!shell.still_in_front(&json!({ "pid": 10, "foreground": { "pid": 11 } })));
-        // Reported before the terminal was listed: its first listing names the program.
+        assert!(!shell.still_in_front(Some(&json!({ "pid": 10, "foreground": { "pid": 11 } }))));
+        // The terminal is gone.
+        assert!(!shell.still_in_front(None));
+        // Reported before the terminal was listed: it waits, and its first listing names the program.
         let mut early = super::Reported { report: report(), pid: None };
-        assert!(early.still_in_front(&json!({ "pid": 20 })));
-        assert!(!early.still_in_front(&json!({ "pid": 20, "foreground": { "pid": 21 } })));
+        assert!(early.still_in_front(None));
+        assert!(early.still_in_front(Some(&json!({ "pid": 20 }))));
+        assert!(!early.still_in_front(Some(&json!({ "pid": 20, "foreground": { "pid": 21 } }))));
     }
 
     #[test]

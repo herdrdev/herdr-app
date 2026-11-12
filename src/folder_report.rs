@@ -53,6 +53,12 @@ pub fn on_machine(host: Option<&str>, name: Option<&str>) -> Option<bool> {
     Some(first(host) == first(name?.trim()))
 }
 
+/// Whether a report's path is a Windows one: a drive's (`C:\src`) or a UNC
+/// share's (`\\server\share`), not a Unix one.
+pub fn is_windows(path: &str) -> bool {
+    path.starts_with(r"\\") || path.as_bytes().get(1) == Some(&b':')
+}
+
 /// Percent-decoding of a URI part into UTF-8 text.
 fn decode(s: &str) -> Option<String> {
     let bytes = s.as_bytes();
@@ -113,7 +119,7 @@ fn native(path: &str) -> Option<String> {
 
 #[cfg(test)]
 mod tests {
-    use super::{on_machine, parse, Report};
+    use super::{is_windows, on_machine, parse, Report};
 
     fn report(host: Option<&str>, path: &str) -> Option<Report> {
         Some(Report {
@@ -164,6 +170,16 @@ mod tests {
             parse(r"\\server\share\x"),
             report(None, r"\\server\share\x")
         );
+    }
+
+    #[test]
+    fn tells_windows_paths_from_unix_ones() {
+        for path in [r"C:\", r"C:\src", r"\\server\share\x"] {
+            assert!(is_windows(path), "{path:?}");
+        }
+        for path in ["/", "/root/dev", "/c/Users"] {
+            assert!(!is_windows(path), "{path:?}");
+        }
     }
 
     #[test]

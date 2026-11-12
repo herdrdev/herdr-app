@@ -120,8 +120,10 @@ Windows, where herdr-core sees only the PowerShell that Pi runs in. A report hol
 while the program that was in front when it arrived stays in front, and only when its
 host is empty, `localhost` or the terminal machine's own hostname (asked once per
 machine with `hostname`); a shell inside `ssh` therefore does not move a local
-terminal. Otherwise the folder of the process in front applies, as before. The core
-replays the last report when the app reattaches, so it survives an app restart.
+terminal. In a terminal of this machine, the path must also be in its system's form:
+a Unix path from WSL started in a Windows terminal is ignored. Otherwise the folder of
+the process in front applies, as before. The core replays the last report when the app
+reattaches, so it survives an app restart.
 
 ## Native view limits
 
