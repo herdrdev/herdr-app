@@ -193,7 +193,8 @@ export interface PaneInfo {
   tab: string;
   /** The terminal's title (what the program set), or the mod's name. */
   title: string;
-  /** Its live folder, and the git branch there. */
+  /** Its live folder (what its program reported with OSC 7, else the folder
+   *  of the process in front), and the git branch there. */
   cwd: string | null;
   branch: string | null;
   /** Agent status if the program reports one, else null. */

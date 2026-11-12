@@ -408,6 +408,10 @@ pub struct AppWindow {
     listed_once: bool,
     /// Live folders by address (from the shell process).
     cwds: HashMap<String, String>,
+    /// The folders programs reported themselves (OSC 7), by address.
+    reported: HashMap<String, Reported>,
+    /// Each machine's own hostname (None: this one), to check a report's host.
+    hostnames: HashMap<Option<String>, Hostname>,
     /// When each terminal's repo and branch were last read, and what it was doing.
     folders_checked: HashMap<String, FolderCheck>,
     /// When Herdr started each terminal: a listing already in flight can't know them yet.
@@ -509,6 +513,8 @@ impl AppWindow {
             live: HashMap::new(),
             listed_once: false,
             cwds: HashMap::new(),
+            reported: HashMap::new(),
+            hostnames: HashMap::new(),
             folders_checked: HashMap::new(),
             born: RefCell::new(HashMap::new()),
             core_generation: 0,
@@ -1415,6 +1421,7 @@ impl AppWindow {
             let sub = cx.subscribe_in(&view, window, move |this, _, ev: &TerminalEvent, window, cx| match ev {
                 TerminalEvent::Peek(address) => this.peek_terminal(address, window, cx),
                 TerminalEvent::TitleChanged => this.publish(cx),
+                TerminalEvent::FolderReported(report) => this.folder_reported(&addr, report.clone(), cx),
                 TerminalEvent::Ended => this.terminal_ended(&block, window, cx),
                 TerminalEvent::ContextMenu(at) => {
                     this.open_menu("pane", json!({ "pane": block.trim_end_matches(SWAP), "terminal": addr }), Some(*at), window, cx)
@@ -2227,21 +2234,91 @@ impl AppWindow {
         }
     }
 
+    /// A program reported its terminal's folder, or cleared it: it holds while
+    /// that program stays in front (see `reported_folders`).
+    fn folder_reported(&mut self, addr: &str, report: Option<crate::folder_report::Report>, cx: &mut Context<Self>) {
+        match report {
+            Some(report) => {
+                let pid = self.live.get(addr).and_then(front_pid);
+                self.reported.insert(addr.to_owned(), Reported { report, pid });
+            }
+            None => {
+                self.reported.remove(addr);
+            }
+        }
+        self.folders_moved(cx);
+    }
+
+    /// Shows a folder change that came outside the core's events.
+    fn folders_moved(&mut self, cx: &mut Context<Self>) {
+        if self.track_folders(cx) {
+            for t in self.terms.values() {
+                self.tell_term(&t.view, &t.address, cx);
+            }
+            self.publish(cx);
+            cx.notify();
+        }
+    }
+
+    /// The reported folders that still hold, by address: the program in front
+    /// is the one that was when the report came (a shell's report doesn't
+    /// outlive it into the next program, nor the next program's into the
+    /// shell), and it named the terminal's own machine, not one it reached
+    /// through ssh. A machine's hostname is asked for once.
+    fn reported_folders(&mut self, cx: &mut Context<Self>) -> HashMap<String, String> {
+        let live = &self.live;
+        self.reported.retain(|addr, r| live.get(addr).is_some_and(|rec| front_pid(rec) == r.pid));
+        let mut held = HashMap::new();
+        let mut ask = HashSet::new();
+        for (addr, r) in &self.reported {
+            let machine = addr.split_once('/').map(|(m, _)| m.to_owned());
+            let name = match self.hostnames.get(&machine) {
+                Some(Hostname::Known(name)) => Some(name.as_str()),
+                _ => None,
+            };
+            match crate::folder_report::on_machine(r.report.host.as_deref(), name) {
+                Some(true) => {
+                    held.insert(addr.clone(), r.report.path.clone());
+                }
+                Some(false) => {}
+                None => {
+                    ask.insert(machine);
+                }
+            }
+        }
+        for machine in ask {
+            self.ask_hostname(machine, cx);
+        }
+        held
+    }
+
+    fn ask_hostname(&mut self, machine: Option<String>, cx: &mut Context<Self>) {
+        match self.hostnames.get(&machine) {
+            Some(Hostname::Asking | Hostname::Known(_)) => return,
+            Some(Hostname::Failed(at)) if at.elapsed() < HOSTNAME_RETRY => return,
+            _ => {}
+        }
+        self.hostnames.insert(machine.clone(), Hostname::Asking);
+        cx.spawn(async move |this, cx| {
+            let on = machine.clone();
+            let name = cx.background_executor().spawn(async move { hostname(on.as_deref()) }).await;
+            let _ = this.update(cx, |this, cx| {
+                this.hostnames.insert(machine, name.map_or_else(|| Hostname::Failed(Instant::now()), Hostname::Known));
+                this.folders_moved(cx);
+            });
+        })
+        .detach();
+    }
+
     /// Reads each terminal's live folder, and its repo and branch for mods.
-    fn track_folders(&mut self, cx: &mut Context<Self>) {
+    /// Returns whether a terminal's folder changed.
+    fn track_folders(&mut self, cx: &mut Context<Self>) -> bool {
         let home = mods::home().to_string_lossy().into_owned();
         let mut todo: HashMap<(Option<String>, String), Vec<String>> = HashMap::new();
         let mut moved = false;
+        let reported = self.reported_folders(cx);
         for (addr, rec) in &self.live {
-            // Core's live folder of what runs there (any machine), else the shell's (local).
-            let cwd = rec
-                .get("foreground")
-                .and_then(|f| f.get("cwd"))
-                .and_then(Value::as_str)
-                .map(str::to_owned)
-                // (a pid on another machine means nothing here)
-                .or_else(|| rec.get("pid").and_then(Value::as_u64).filter(|_| !addr.contains('/')).and_then(crate::process_cwd::read).map(|p| p.to_string_lossy().into_owned()))
-                .or_else(|| rec.get("cwd").and_then(Value::as_str).map(str::to_owned));
+            let cwd = reported.get(addr).cloned().or_else(|| live_folder(addr, rec));
             let Some(cwd) = cwd else { continue };
             let busy = busy(rec);
             let last = self.folders_checked.get_mut(addr);
@@ -2287,6 +2364,7 @@ impl AppWindow {
             })
             .detach();
         }
+        moved
     }
 
     fn terminal_ended(&mut self, block: &str, window: &mut Window, cx: &mut Context<Self>) {
@@ -4563,6 +4641,47 @@ struct FolderCheck {
     busy: bool,
     /// A repo, or git couldn't say (a machine unreachable): worth a look again.
     repo: bool,
+}
+
+/// A folder a program reported itself, and what was in front then.
+struct Reported {
+    report: crate::folder_report::Report,
+    pid: Option<u64>,
+}
+
+/// A machine's own hostname, as `hostname` there prints it.
+enum Hostname {
+    Asking,
+    Known(String),
+    Failed(Instant),
+}
+
+/// How long to wait before asking an unreachable machine's hostname again.
+const HOSTNAME_RETRY: Duration = Duration::from_secs(60);
+
+fn hostname(on: Option<&str>) -> Option<String> {
+    let out = match on {
+        Some(m) => mods::run_remote(m, "hostname", &[], None).ok().filter(|(code, _, _)| *code == 0).map(|(_, out, _)| out),
+        None => crate::spawn::command("hostname").output().ok().filter(|o| o.status.success()).map(|o| o.stdout),
+    }?;
+    let name = String::from_utf8_lossy(&out).trim().to_owned();
+    (!name.is_empty()).then_some(name)
+}
+
+/// The process in front of a terminal: its foreground program, else its own.
+fn front_pid(rec: &Value) -> Option<u64> {
+    rec.pointer("/foreground/pid").or_else(|| rec.get("pid")).and_then(Value::as_u64)
+}
+
+/// The core's live folder of what runs in a terminal (any machine), else the
+/// shell's process folder (this machine), else where it started.
+fn live_folder(addr: &str, rec: &Value) -> Option<String> {
+    rec.pointer("/foreground/cwd")
+        .and_then(Value::as_str)
+        .map(str::to_owned)
+        // (a pid on another machine means nothing here)
+        .or_else(|| rec.get("pid").and_then(Value::as_u64).filter(|_| !addr.contains('/')).and_then(crate::process_cwd::read).map(|p| p.to_string_lossy().into_owned()))
+        .or_else(|| rec.get("cwd").and_then(Value::as_str).map(str::to_owned))
 }
 
 /// Changes made outside Herdr (a commit in another app): looked for this often,

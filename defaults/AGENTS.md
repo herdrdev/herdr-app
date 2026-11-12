@@ -158,6 +158,11 @@ the highlighted line shows where it will land.
   live folders (`panes()[i].cwd`), not the folder it was made in: new
   tabs start where its focused pane is, and the default mods take a
   space's repo from its first terminal.
+  A terminal's live folder is the one its program last reported with
+  OSC 7 (`file://host/path`; also OSC 9;9 and OSC 1337 CurrentDir), while
+  that program stays in front and the host is the terminal's machine;
+  otherwise the folder of the process in front. Pi's Teleport reports it
+  after every move; many shells report it at each prompt.
   If starting in an inherited folder fails, new spaces, tabs and splits retry in
   that machine's home. Explicit invalid folders still fail.
 - A **tab** is a piece of work in a space: its terminals and how they're
