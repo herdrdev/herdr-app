@@ -172,7 +172,7 @@ mod tests {
         assert_eq!(key("Quit Herdr").as_deref(), Some("cmd-q"));
         assert_eq!(key("Copy").as_deref(), Some("cmd-c"));
         assert_eq!(key("Toggle Sidebar").as_deref(), Some("cmd-b"));
-        assert_eq!(key("Minimize"), None);
+        assert_eq!(key("Minimize").as_deref(), Some("cmd-m"));
     }
 
     #[test]
