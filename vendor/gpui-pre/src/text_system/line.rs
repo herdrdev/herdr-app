@@ -53,15 +53,26 @@ impl ShapedLine {
     /// HERDR: Place terminal clusters at explicit cell boundaries. UI shaping is unchanged.
     pub fn with_cell_positions(mut self, positions: &[(usize, Pixels)], width: Pixels) -> Self {
         let layout = Arc::make_mut(&mut self.layout);
-        let mut cluster = None;
+        // CoreText can emit combining marks before their base, including in
+        // separate fallback runs. Anchor each cell to its earliest text index
+        // and apply one shared translation to all of its shaped glyphs.
+        let mut anchors: Vec<Option<(usize, Pixels)>> = vec![None; positions.len()];
+        for run in &layout.runs {
+            for glyph in &run.glyphs {
+                let offset = positions.partition_point(|(index, _)| *index <= glyph.index).saturating_sub(1);
+                if let Some(anchor) = anchors.get_mut(offset)
+                    && anchor.is_none_or(|(index, _)| glyph.index < index)
+                {
+                    *anchor = Some((glyph.index, glyph.position.x));
+                }
+            }
+        }
         for run in &mut layout.runs {
             for glyph in &mut run.glyphs {
                 let offset = positions.partition_point(|(index, _)| *index <= glyph.index).saturating_sub(1);
-                if cluster.is_none_or(|(index, _)| index != offset) {
-                    let target = positions.get(offset).map_or(px(0.), |(_, x)| *x);
-                    cluster = Some((offset, target - glyph.position.x));
+                if let Some((_, anchor)) = anchors.get(offset).copied().flatten() {
+                    glyph.position.x += positions[offset].1 - anchor;
                 }
-                glyph.position.x += cluster.unwrap().1;
             }
         }
         layout.width = width;

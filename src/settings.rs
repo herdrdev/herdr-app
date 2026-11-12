@@ -380,6 +380,10 @@ pub struct Person {
     pub font_size: Option<f32>,
     /// Enable programming ligatures in terminal fonts.
     pub font_ligatures: bool,
+    /// Reorder terminal display cells for mixed right-to-left text.
+    pub terminal_bidi: bool,
+    /// Optional face for Hebrew-script terminal cells only.
+    pub hebrew_font: Option<String>,
     /// The panels' font (their sizes follow zoom).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ui_font: Option<String>,
@@ -451,6 +455,8 @@ impl Default for Person {
             font: None,
             font_size: None,
             font_ligatures: false,
+            terminal_bidi: false,
+            hebrew_font: None,
             ui_font: None,
             telemetry: true,
             clipboard_write: true,
@@ -472,6 +478,10 @@ pub struct Settings {
     pub font_family: String,
     pub font_size: f32,
     pub font_ligatures: bool,
+    /// Reorder terminal display cells for mixed right-to-left text.
+    pub terminal_bidi: bool,
+    /// Optional face for Hebrew-script terminal cells only.
+    pub hebrew_font: Option<String>,
     pub ui_font_family: String,
     pub ui_font_size: f32,
     /// How big the whole app is drawn (1 = as designed). The zoom keys change it.
@@ -522,6 +532,8 @@ impl Default for Settings {
             font_family: DEFAULT_FONT.into(),
             font_size: 14.0,
             font_ligatures: false,
+            terminal_bidi: false,
+            hebrew_font: None,
             ui_font_family: "Geist".into(),
             ui_font_size: 13.0,
             zoom: 1.0,
@@ -560,6 +572,8 @@ impl Settings {
             font_family: look.font.clone().or(person.font.clone()).unwrap_or(d.font_family),
             font_size: look.font_size.or(person.font_size).unwrap_or(d.font_size),
             font_ligatures: person.font_ligatures,
+            terminal_bidi: person.terminal_bidi,
+            hebrew_font: person.hebrew_font.clone(),
             ui_font_family: look.ui_font.clone().or(person.ui_font.clone()).unwrap_or(d.ui_font_family),
             ui_font_size: d.ui_font_size,
             zoom: person.zoom,
@@ -828,6 +842,8 @@ pub const BUNDLED_FONTS: &[&[u8]] = &[
     include_bytes!("../assets/fonts/Geist.ttf"),
     include_bytes!("../assets/fonts/JetBrainsMono-Variable.ttf"),
     include_bytes!("../assets/fonts/JetBrainsMono-Italic-Variable.ttf"),
+    include_bytes!("../assets/fonts/NotoSerifHebrew-Variable.ttf"),
+    include_bytes!("../assets/fonts/NotoRashiHebrew-Variable.ttf"),
     SYMBOLS_FONT_FILE,
 ];
 
@@ -842,6 +858,18 @@ pub const DEFAULT_FONT: &str = "JetBrains Mono";
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn terminal_bidi_is_opt_in_and_round_trips() {
+        use super::*;
+        let person: Person = serde_json::from_str("{}").unwrap();
+        assert!(!Settings::compose(&person, &crate::layout::Look::default(), true).terminal_bidi);
+        assert!(!Settings::default().terminal_bidi);
+        let person: Person = serde_json::from_str(r#"{"terminal_bidi":true}"#).unwrap();
+        let restored: Person = serde_json::from_str(&serde_json::to_string(&person).unwrap()).unwrap();
+        assert!(Settings::compose(&restored, &crate::layout::Look::default(), true).terminal_bidi);
+        assert!(serde_json::from_str::<Person>(r#"{"terminal_bidi":"yes"}"#).is_err());
+    }
+
     #[test]
     fn terminal_ligatures_default_off_and_can_be_enabled() {
         use super::*;

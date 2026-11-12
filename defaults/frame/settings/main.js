@@ -515,7 +515,15 @@ export default class Settings extends View {
         ),
       )
       .child(fontRow("font", "font_size", "Terminal font", s.font_family, DEFAULT_FONT, s.font_size))
-      .child(fontRow("ui_font", null, "Interface font", s.ui_font_family, DEFAULT_UI_FONT));
+      .child(fontRow("ui_font", null, "Interface font", s.ui_font_family, DEFAULT_UI_FONT))
+      .child(this.heading(t, "Hebrew, Aramaic and Yiddish"))
+      .child(this.row(t, "Right-to-left text", "Display mixed Hebrew and English in reading order. Disable for apps that reorder their own output.",
+        this.toggle(t, "st-terminal-bidi", Boolean(p.terminal_bidi), (_e, cx) => this.change((q) => { q.terminal_bidi = !Boolean(q.terminal_bidi); }, cx))))
+      .child(this.row(t, "Hebrew typeface", "Applies to Hebrew letters and marks. English keeps your terminal font.",
+        h_flex().gap(6).flex_wrap().children([
+          [null, "Automatic"], ["Noto Serif Hebrew", "Square"], ["Noto Rashi Hebrew", "Rashi"],
+        ].map(([family, title]) => this.button(t, `st-hebrew-${title}`, (p.hebrew_font ?? null) === family ? `${title} (selected)` : title,
+          (_e, cx) => this.change((q) => { if (family === null) delete q.hebrew_font; else q.hebrew_font = family; }, cx))))));
   }
 
   keyboard(t) {

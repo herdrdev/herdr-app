@@ -676,6 +676,14 @@ What's about the user, never a look:
   cargo). Read at start.
 - `font`, `font_size`, `ui_font`: used where the layout doesn't set its
   own. Herdr (main) leaves these unset. Bigger panels: `zoom`.
+- `hebrew_font`: optional Hebrew-script face: `Noto Serif Hebrew` (square) or
+  `Noto Rashi Hebrew`. Both are bundled under OFL. Unset uses automatic fallback.
+  Settings > Look exposes both choices; Latin/code retains the terminal font.
+- `terminal_bidi`: opt-in mixed Hebrew/Latin terminal display ordering (default
+  `false`). Enable with `true` in settings.json. Terminal text, copied content and
+  key input stay in logical order; only display and pointer coordinates change.
+  Turn it off for programs that already reorder their own output. This is a
+  private local repair, not an upstream capability claim.
 - `font_ligatures`: programming ligatures are off by default; set `true` to
   enable them in terminal fonts such as JetBrains Mono and Fira Code. The cursor
   and background changes (including selections) break ligatures so individual cells stay clear.

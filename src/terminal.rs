@@ -15,6 +15,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::task::Poll;
 use crate::links;
+use crate::terminal_bidi::RowMap;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -116,7 +117,10 @@ struct Grid {
     /// Each row's drawing by position, kept while the row is the same (`Rc`).
     painted: Vec<(Rc<Vec<vt::Cell>>, Vec<RowOp>, Option<usize>)>,
     /// Font size, cell size, font, loaded fonts and ligature setting used to draw.
-    painted_with: (u32, Size<Pixels>, String, u64, bool),
+    painted_with: (u32, Size<Pixels>, String, u64, bool, bool, Option<String>),
+    bidi_rows: Vec<Rc<RowMap>>,
+    bidi_sources: Vec<Rc<Vec<vt::Cell>>>,
+    bidi_enabled: bool,
 }
 
 pub struct TerminalView {
@@ -299,7 +303,10 @@ impl TerminalView {
                 thumb: None,
                 track: None,
                 painted: Vec::new(),
-                painted_with: (0, Size::default(), String::new(), 0, false),
+                painted_with: (0, Size::default(), String::new(), 0, false, false, None),
+                bidi_rows: Vec::new(),
+                bidi_sources: Vec::new(),
+                bidi_enabled: false,
             })),
             focus: cx.focus_handle(),
             was_focused: false,
@@ -971,6 +978,7 @@ impl TerminalView {
     fn link_at(&self, pos: Point<Pixels>) -> Option<(LinkTarget, vt::Spans)> {
         let g = self.grid.borrow();
         let (x, y) = local(&g, pos);
+        let (x, y) = g.logical_point(x, y);
         let (col, row) = (x / f32::from(g.cell.width), y / f32::from(g.cell.height));
         let mut target = None;
         let hit = g.vt.link_at(col as u16, row as u16, |text, at, joined| {
@@ -1013,6 +1021,8 @@ impl TerminalView {
                     let lines = selection_scroll_lines(y, f32::from(g.cell.height), g.vt.rows);
                     if lines != 0 {
                         g.vt.scroll_viewport(lines);
+                        let frame = g.vt.frame();
+                        g.update_bidi_maps(&frame);
                         drop(g);
                         this.select(Select::Drag, this.selection_pointer, cx);
                     }
@@ -1040,6 +1050,7 @@ impl TerminalView {
     fn select(&mut self, step: Select, pos: Point<Pixels>, cx: &mut Context<Self>) {
         let mut g = self.grid.borrow_mut();
         let (x, y) = local(&g, pos);
+        let (x, y) = g.logical_point(x, y);
         let (cw, ch) = (f32::from(g.cell.width), f32::from(g.cell.height));
         let (col, row) = ((x / cw) as u16, (y / ch) as u16);
         let height = ch * g.vt.rows as f32;
@@ -1362,7 +1373,8 @@ fn macos_wheel_steps(ticks: f32) -> i32 {
 /// A pointer position and the grid for mouse reports, in device pixels
 /// (SGR-pixels mode reports pixels, as in Ghostty).
 fn mouse_at(g: &Grid, p: Point<Pixels>) -> ((f32, f32), (u32, u32, f32, f32)) {
-    let ((x, y), s) = (local(g, p), g.scale);
+    let (x, y) = local(g, p);
+    let ((x, y), s) = (g.logical_point(x, y), g.scale);
     ((x * s, y * s), (g.vt.cols as u32, g.vt.rows as u32, f32::from(g.cell.width) * s, f32::from(g.cell.height) * s))
 }
 
@@ -1579,6 +1591,18 @@ fn cell_font(bold: bool, italic: bool) -> Font {
     f
 }
 
+fn is_hebrew_text(text: &str) -> bool {
+    text.chars().any(|c| matches!(c as u32, 0x0590..=0x05ff | 0xfb1d..=0xfb4f))
+}
+
+fn text_cell_font(text: &str, bold: bool, italic: bool) -> Font {
+    let mut font = cell_font(bold, italic);
+    if is_hebrew_text(text) && let Some(family) = &crate::settings::get().hebrew_font {
+        font.family = family.clone().into();
+    }
+    font
+}
+
 // JetBrains Mono joins punctuation, so ordinary ASCII output can keep using
 // the ligatures-off font even when the setting is enabled.
 fn needs_ligatures(text: &str, font: &Font) -> bool {
@@ -1602,12 +1626,23 @@ fn cell_metrics(window: &Window) -> CellMetrics {
     let id = ts.resolve_font(&cell_font(false, false));
     let (fs, scale) = (crate::settings::font_size(), window.scale_factor());
     // Asked for on every frame of every terminal; the answer only changes with the font, size or scale.
-    thread_local!(static LAST: Cell<Option<((FontId, u32, u32), CellMetrics)>> = const { Cell::new(None) });
-    let key = (id, fs.to_bits(), scale.to_bits());
+    let hebrew_id = crate::settings::get().hebrew_font.as_ref().map(|family| ts.resolve_font(&font(family.clone())));
+    thread_local!(static LAST: Cell<Option<((FontId, Option<FontId>, u32, u32), CellMetrics)>> = const { Cell::new(None) });
+    let key = (id, hebrew_id, fs.to_bits(), scale.to_bits());
     if let Some((_, metrics)) = LAST.get().filter(|(last, _)| *last == key) {
         return metrics;
     }
-    let metrics = font_cell_metrics(ts, id, fs, scale);
+    let mut metrics = font_cell_metrics(ts, id, fs, scale);
+    if let Some(hebrew_id) = hebrew_id {
+        let hebrew = font_cell_metrics(ts, hebrew_id, fs, scale);
+        let top = metrics.baseline.max(hebrew.baseline);
+        let bottom = (metrics.size.height - metrics.baseline).max(hebrew.size.height - hebrew.baseline);
+        let delta = top - metrics.baseline;
+        metrics.baseline = top;
+        metrics.size.height = top + bottom;
+        metrics.underline += delta;
+        metrics.strike += delta;
+    }
     LAST.set(Some((key, metrics)));
     metrics
 }
@@ -1689,7 +1724,8 @@ fn fallback_size(c: &vt::Cell, font: &Font, width: Pixels, ts: &gpui::WindowText
     let first = c.text.chars().next()?;
     let size = px(crate::settings::font_size());
     let primary = ts.resolve_font(font);
-    if ts.advance(primary, size, first).is_ok() {
+    let explicit_hebrew = is_hebrew_text(&c.text) && crate::settings::get().hebrew_font.is_some();
+    if !explicit_hebrew && ts.advance(primary, size, first).is_ok() {
         return None;
     }
     let run = TextRun { len: c.text.len(), font: font.clone(), ..Default::default() };
@@ -1708,7 +1744,13 @@ enum RowOp {
 
 /// A row's drawing: its backgrounds, merged into runs of one color, then its
 /// text in runs of one style (wide characters, sprites and icons on their own).
+#[cfg(test)]
 fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: &mut Window) -> Vec<RowOp> {
+    let map = RowMap::new(row, crate::settings::get().terminal_bidi);
+    row_ops_mapped(row, cell, cursor, &map, window)
+}
+
+fn row_ops_mapped(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, map: &RowMap, window: &mut Window) -> Vec<RowOp> {
     crate::bench::count(&crate::bench::ROWS);
     let ligatures = crate::settings::get().font_ligatures;
     let mut ops = Vec::new();
@@ -1722,7 +1764,9 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
         while x < row.len() && row[x].bg == Some(bg) {
             x += 1;
         }
-        ops.push(RowOp::Bg { from: start, to: x, color: hsla(bg) });
+        for (from, to) in map.segments(start, x) {
+            ops.push(RowOp::Bg { from, to, color: hsla(bg) });
+        }
     }
     let mut x = 0;
     while x < row.len() {
@@ -1739,10 +1783,10 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
             color.a = 0.6;
         }
         if crate::sprites::is_sprite(&c.text) {
-            ops.push(RowOp::Sprite { x: start, text: c.text.clone(), color });
+            ops.push(RowOp::Sprite { x: map.visual(start), text: c.text.clone(), color });
             continue;
         }
-        let mut text_font = cell_font(c.bold, c.italic);
+        let mut text_font = text_cell_font(&c.text, c.bold, c.italic);
         if let Some(icon) = fallback_icon(&c.text, &text_font, window.text_system()) {
             // Fit missing icons from the bundled font by their outlines:
             // centered, as tall as fits, two cells wide when a space
@@ -1759,17 +1803,19 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
             let baseline = (h - gh * scale) / 2.0 + icon.y1 * scale;
             let font = window.text_system().resolve_font(&font(crate::settings::SYMBOLS_FONT));
             let size = px(scale * icon.units_per_em);
-            ops.push(RowOp::Icon { x: start, offset: point(px(left), px(baseline)), font, glyph: GlyphId(icon.id), size, color });
+            ops.push(RowOp::Icon { x: map.visual(start), offset: point(px(left), px(baseline)), font, glyph: GlyphId(icon.id), size, color });
             continue;
         }
         let fitted_size = fallback_size(c, &text_font, cell.width, window.text_system());
         let mut text = if c.text.is_empty() { " ".to_owned() } else { c.text.clone() };
-        let mut positions = vec![(0, px(0.0))];
+        let mut positions = vec![(0, cell.width * map.visual(start) as f32)];
         // Shape the cursor cell separately, so its plain glyph doesn't cover a ligature.
         if !c.wide && fitted_size.is_none() && cursor != Some(start) {
             while x < row.len() {
                 let d = &row[x];
                 let same = !d.wide
+                    && map.is_rtl(x) == map.is_rtl(start)
+                    && (crate::settings::get().hebrew_font.is_none() || is_hebrew_text(&d.text) == is_hebrew_text(&c.text))
                     && (!ligatures || d.bg == c.bg)
                     && d.fg == c.fg
                     && d.bold == c.bold
@@ -1781,7 +1827,7 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
                 if !same || cursor == Some(x) || (d.text.is_empty() && !d.underline && !d.strike) || crate::sprites::is_sprite(&d.text) || fallback_icon(&d.text, &text_font, window.text_system()).is_some() || fallback_size(d, &text_font, cell.width, window.text_system()).is_some() {
                     break;
                 }
-                positions.push((text.len(), cell.width * (x - start) as f32));
+                positions.push((text.len(), cell.width * map.visual(x) as f32));
                 text.push_str(if d.text.is_empty() { " " } else { &d.text });
                 x += 1;
             }
@@ -1792,6 +1838,16 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
         if ligatures && needs_ligatures(&text, &text_font) {
             text_font.features = ligature_features(true);
         }
+        // Preserve resolved direction across style/cursor splits. In particular,
+        // a standalone bracket in an RTL run must be mirrored by the shaper.
+        // These formatting controls exist only in the shaping string, never
+        // terminal storage, copying, search or native input context.
+        if map.is_rtl(start) {
+            let prefix = "\u{202e}";
+            for (byte, _) in &mut positions { *byte += prefix.len(); }
+            positions.insert(0, (0, positions[0].1));
+            text = format!("{prefix}{text}\u{202c}");
+        }
         let run = TextRun {
             len: text.len(),
             font: text_font,
@@ -1800,12 +1856,18 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
             underline: None,
             strikethrough: None,
         };
-        let width = cell.width * if c.wide { 2.0 } else { (x - start) as f32 };
+        let spans = map.segments(start, if c.wide { (start + 2).min(row.len()) } else { x });
+        let visual_start = spans.first().map_or(start, |(from, _)| *from);
+        let visual_end = spans.last().map_or(x, |(_, to)| *to);
+        for (_, position) in &mut positions { *position -= cell.width * visual_start as f32; }
+        let width = cell.width * (visual_end - visual_start) as f32;
         let line = window.text_system().shape_line(text.into(), fitted_size.unwrap_or_else(|| px(crate::settings::font_size())), &[run], None)
             .with_cell_positions(&positions, width);
-        ops.push(RowOp::Text { x: start, line });
+        ops.push(RowOp::Text { x: visual_start, line });
         if c.underline || c.strike {
-            ops.push(RowOp::Decoration { from: start, to: if c.wide { start + 2 } else { x }, underline: c.underline, strike: c.strike, color });
+            for (from, to) in map.segments(start, if c.wide { (start + 2).min(row.len()) } else { x }) {
+                ops.push(RowOp::Decoration { from, to, underline: c.underline, strike: c.strike, color });
+            }
         }
     }
     ops
@@ -1839,6 +1901,7 @@ struct AccessibleRow {
     text: String,
     character_lengths: Vec<u8>,
     cells: Vec<(usize, usize)>,
+    directions: Vec<bool>,
 }
 
 #[derive(Clone, Debug, PartialEq, Eq)]
@@ -1907,6 +1970,39 @@ impl InputLine {
 }
 
 impl Grid {
+    fn update_bidi_maps(&mut self, frame: &vt::Frame) {
+        let enabled = crate::settings::get().terminal_bidi;
+        if self.bidi_enabled != enabled {
+            self.bidi_rows.clear();
+            self.bidi_sources.clear();
+            self.bidi_enabled = enabled;
+        }
+        self.bidi_rows.truncate(frame.rows.len());
+        self.bidi_sources.truncate(frame.rows.len());
+        for (y, row) in frame.rows.iter().enumerate() {
+            if self.bidi_sources.get(y).is_some_and(|old| Rc::ptr_eq(old, row)) { continue; }
+            let map = Rc::new(RowMap::new(row, enabled));
+            if y < self.bidi_rows.len() {
+                self.bidi_rows[y] = map;
+                self.bidi_sources[y] = row.clone();
+            } else {
+                self.bidi_rows.push(map);
+                self.bidi_sources.push(row.clone());
+            }
+        }
+    }
+
+    fn map_visual_column(&self, row: usize, logical: usize) -> usize {
+        self.bidi_rows.get(row).map_or(logical, |map| map.leading_edge(logical))
+    }
+
+    fn logical_point(&self, x: f32, y: f32) -> (f32, f32) {
+        let width = f32::from(self.cell.width);
+        let row = (y / f32::from(self.cell.height)) as usize;
+        let x = self.bidi_rows.get(row).map_or(x, |map| map.logical_x(x / width) * width);
+        (x, y)
+    }
+
     fn reset_input_context(&mut self) {
         self.input_line = None;
         self.input_before_send = None;
@@ -1948,10 +2044,17 @@ impl AccessibleRow {
 }
 
 impl AccessibleScreen {
+    #[cfg(test)]
     fn from_frame(frame: &vt::Frame) -> Self {
+        let maps: Vec<_> = frame.rows.iter().map(|row| Rc::new(RowMap::new(row, crate::settings::get().terminal_bidi))).collect();
+        Self::from_frame_mapped(frame, &maps)
+    }
+
+    fn from_frame_mapped(frame: &vt::Frame, maps: &[Rc<RowMap>]) -> Self {
         let mut result = Self::default();
         for (y, row) in frame.rows.iter().enumerate() {
             let mut line = AccessibleRow::default();
+            let map = &maps[y];
             let mut wide_tail = false;
             let mut glyph_start = 0;
             for (x, cell) in row.iter().enumerate() {
@@ -1964,12 +2067,14 @@ impl AccessibleScreen {
                 }
                 glyph_start = line.character_lengths.len();
                 line.push_cell(if cell.text.is_empty() { " " } else { &cell.text });
-                line.cells.resize(line.character_lengths.len(), (x, if cell.wide { 2 } else { 1 }));
+                line.cells.resize(line.character_lengths.len(), (map.visual(x), if cell.wide { 2 } else { 1 }));
+                line.directions.resize(line.character_lengths.len(), map.is_rtl(x));
                 wide_tail = cell.wide;
             }
             if y + 1 < frame.rows.len() {
                 line.push_cell("\n");
                 line.cells.push((row.len(), 0));
+                line.directions.push(false);
             }
             result.rows.push(line);
         }
@@ -1978,26 +2083,45 @@ impl AccessibleScreen {
 
     fn write_tree(&self, builder: &mut A11ySubtreeBuilder) {
         for (y, row) in self.rows.iter().enumerate() {
-            let id = builder.synthetic_node_id(("visible-terminal-line", y));
-            let mut run = accesskit::Node::new(Role::TextRun);
-            run.set_value(row.text.clone());
-            run.set_character_lengths(row.character_lengths.clone());
-            let left = f64::from(self.bounds.origin.x);
-            let top = f64::from(self.bounds.origin.y) + y as f64 * f64::from(self.cell.height);
-            run.set_bounds(accesskit::Rect::new(left, top, left + f64::from(self.bounds.size.width), top + f64::from(self.cell.height)));
-            run.set_character_positions(row.cells.iter().map(|(x, _)| *x as f32 * f32::from(self.cell.width)).collect::<Vec<_>>());
-            run.set_character_widths(row.cells.iter().map(|(_, width)| *width as f32 * f32::from(self.cell.width)).collect::<Vec<_>>());
-            run.set_text_direction(accesskit::TextDirection::LeftToRight);
-            builder.push_child(id, run);
-            if let Some((caret_row, character_index)) = self.caret
-                && caret_row == y
-            {
-                let caret = accesskit::TextPosition { node: id, character_index };
-                builder.parent_node().set_text_selection(accesskit::TextSelection { anchor: caret, focus: caret });
+            let mut first = 0;
+            let mut byte = 0;
+            while first < row.character_lengths.len() {
+                let rtl = row.directions[first];
+                let mut end = first + 1;
+                while end < row.character_lengths.len() && row.directions[end] == rtl { end += 1; }
+                let byte_end = byte + row.character_lengths[first..end].iter().map(|n| *n as usize).sum::<usize>();
+                // AccessKit positions run in the declared direction. Split
+                // mixed rows into logical-order directional runs, and measure
+                // RTL offsets from the right edge of each run's bounds.
+                let cells = &row.cells[first..end];
+                let left_cell = cells.iter().map(|(x, _)| *x).min().unwrap_or(0);
+                let right_cell = cells.iter().map(|(x, w)| x + w).max().unwrap_or(left_cell);
+                let id = builder.synthetic_node_id(("visible-terminal-line", y, first));
+                let mut run = accesskit::Node::new(Role::TextRun);
+                run.set_value(row.text[byte..byte_end].to_owned());
+                run.set_character_lengths(row.character_lengths[first..end].to_vec());
+                let left = f64::from(self.bounds.origin.x) + left_cell as f64 * f64::from(self.cell.width);
+                let top = f64::from(self.bounds.origin.y) + y as f64 * f64::from(self.cell.height);
+                let width = (right_cell - left_cell) as f64 * f64::from(self.cell.width);
+                run.set_bounds(accesskit::Rect::new(left, top, left + width, top + f64::from(self.cell.height)));
+                run.set_character_positions(cells.iter().map(|(x, w)| {
+                    let offset = if rtl { right_cell - x - w } else { x - left_cell };
+                    offset as f32 * f32::from(self.cell.width)
+                }).collect::<Vec<_>>());
+                run.set_character_widths(cells.iter().map(|(_, width)| *width as f32 * f32::from(self.cell.width)).collect::<Vec<_>>());
+                run.set_text_direction(if rtl { accesskit::TextDirection::RightToLeft } else { accesskit::TextDirection::LeftToRight });
+                builder.push_child(id, run);
+                if let Some((caret_row, character_index)) = self.caret
+                    && caret_row == y && character_index >= first && character_index < end
+                {
+                    let caret = accesskit::TextPosition { node: id, character_index: character_index - first };
+                    builder.parent_node().set_text_selection(accesskit::TextSelection { anchor: caret, focus: caret });
+                }
+                first = end;
+                byte = byte_end;
             }
         }
-        // No SetValue handler: a terminal's visible buffer is not an editable
-        // document. In particular, never send its history back to the PTY.
+        // No SetValue handler: visible terminal history is never sent to the PTY.
     }
 }
 
@@ -2045,6 +2169,8 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, frame: vt::Frame
         }
     }
     g.images.retain(|k, _| keep.contains(k));
+    g.update_bidi_maps(&frame);
+    let maps = g.bidi_rows.clone();
     let link_spans = g.link_spans.clone();
     let marked = g.marked.clone();
     drop(g);
@@ -2071,7 +2197,7 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, frame: vt::Frame
     // line rebuilds one row, not the whole screen.
     let ligatures = crate::settings::get().font_ligatures;
     let cursor = frame.cursor_cell.filter(|_| ligatures);
-    let with = (crate::settings::font_size().to_bits(), cell, crate::settings::terminal_font(), crate::settings::fonts_added(), ligatures);
+    let with = (crate::settings::font_size().to_bits(), cell, crate::settings::terminal_font(), crate::settings::fonts_added(), ligatures, crate::settings::get().terminal_bidi, crate::settings::get().hebrew_font.clone());
     // When every row changed (output scrolling), nothing is kept: the next
     // frame would find none of them the same.
     let mut painted = std::mem::take(&mut grid.borrow_mut().painted);
@@ -2082,7 +2208,7 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, frame: vt::Frame
     for (y, row) in frame.rows.iter().enumerate() {
         let column = cursor.filter(|(_, cy)| *cy as usize == y).map(|(x, _)| x as usize);
         if frame.all || painted.get(y).is_none_or(|(r, _, c)| !Rc::ptr_eq(r, row) || *c != column) {
-            let ops = row_ops(row, cell, column, window);
+            let ops = row_ops_mapped(row, cell, column, &maps[y], window);
             if y < painted.len() {
                 painted[y] = (row.clone(), ops, column);
             } else {
@@ -2116,8 +2242,10 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, frame: vt::Frame
             }
             let opacity = if selected { 0.55 } else { 0.28 };
             let highlight = crate::settings::color("accent").opacity(opacity);
-            let b = Bounds::new(at(start, y), size(cell.width * (end - start) as f32, cell.height));
-            window.paint_quad(fill(snap_box(b), highlight));
+            for (from, to) in maps[y].segments(start, end) {
+                let b = Bounds::new(at(from, y), size(cell.width * (to - from) as f32, cell.height));
+                window.paint_quad(fill(snap_box(b), highlight));
+            }
         }
     }
     for (y, (_, ops, _)) in painted.iter().enumerate() {
@@ -2151,8 +2279,10 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, frame: vt::Frame
         let Some(row) = frame.rows.get(y as usize) else { continue };
         let color = row.get(x0 as usize).map_or(hsla(vt::theme().fg), |c| hsla(c.fg));
         let (x0, x1) = (x0 as usize, (x1 as usize + 1).min(row.len()));
-        let line = Bounds::new(at(x0, y as usize) + point(px(0.0), metrics.underline), size(cell.width * (x1 - x0) as f32, metrics.underline_thickness));
-        window.paint_quad(fill(snap_box(line), color));
+        for (from, to) in maps[y as usize].segments(x0, x1) {
+            let line = Bounds::new(at(from, y as usize) + point(px(0.0), metrics.underline), size(cell.width * (to - from) as f32, metrics.underline_thickness));
+            window.paint_quad(fill(snap_box(line), color));
+        }
     }
 
     paint_images(false, window);
@@ -2162,24 +2292,31 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, frame: vt::Frame
         let wide = frame.rows.get(y).and_then(|r| r.get(x)).is_some_and(|c| c.wide);
         let w = cell.width * if wide { 2.0 } else { 1.0 };
         let color = hsla(cur.color);
-        let p = at(x, y);
+        let p = at(maps.get(y).map_or(x, |map| map.visual(x)), y);
         match (focused, cur.shape) {
             (true, CursorShape::Block) => {
                 window.paint_quad(fill(snap_box(Bounds::new(p, size(w, cell.height))), color));
                 if let Some(c) = frame.rows.get(y).and_then(|r| r.get(x)).filter(|c| !c.text.is_empty()) {
+                    let text = if maps[y].is_rtl(x) { format!("\u{202e}{}\u{202c}", c.text) } else { c.text.clone() };
                     let run = TextRun {
-                        len: c.text.len(),
-                        font: cell_font(c.bold, c.italic),
+                        len: text.len(),
+                        font: text_cell_font(&c.text, c.bold, c.italic),
                         color: hsla(frame.bg),
                         background_color: None,
                         underline: None,
                         strikethrough: None,
                     };
-                    let line = window.text_system().shape_line(c.text.clone().into(), px(crate::settings::font_size()), &[run], None);
+                    let fitted = fallback_size(c, &run.font, cell.width, window.text_system());
+                    let positions = if maps[y].is_rtl(x) { vec![(0, px(0.)), (3, px(0.))] } else { vec![(0, px(0.))] };
+                    let line = window.text_system().shape_line(text.into(), fitted.unwrap_or_else(|| px(crate::settings::font_size())), &[run], None)
+                        .with_cell_positions(&positions, w);
                     paint_cell_text(&line, p, metrics, window, cx);
                 }
             }
-            (true, CursorShape::Bar) => window.paint_quad(fill(snap_box(Bounds::new(p, size(px(2.0), cell.height))), color)),
+            (true, CursorShape::Bar) => {
+                let edge = maps.get(y).map_or(x, |map| map.leading_edge(x));
+                window.paint_quad(fill(snap_box(Bounds::new(at(edge, y), size(px(2.0), cell.height))), color));
+            }
             (true, CursorShape::Underline) => window.paint_quad(fill(
                 snap_box(Bounds::new(p + point(px(0.0), cell.height - px(2.0)), size(w, px(2.0)))),
                 color,
@@ -2191,11 +2328,11 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, frame: vt::Frame
     // underlined, on the terminal's background so the cells under it don't
     // show through.
     if let (Some((cx_, cy_)), Some(text)) = (frame.cursor_cell, marked.filter(|t| !t.is_empty())) {
-        let p = at(cx_ as usize, cy_ as usize);
+        let p = at(maps.get(cy_ as usize).map_or(cx_ as usize, |map| map.visual(cx_ as usize)), cy_ as usize);
         let fg = hsla(vt::theme().fg);
         let run = TextRun {
             len: text.len(),
-            font: cell_font(false, false),
+            font: text_cell_font(&text, false, false),
             color: fg,
             background_color: None,
             underline: None,
@@ -2209,7 +2346,7 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, frame: vt::Frame
     }
     {
         let mut g = grid.borrow_mut();
-        g.cursor_at = frame.cursor_cell.map(|(x, y)| Bounds::new(at(x as usize, y as usize), cell));
+        g.cursor_at = frame.cursor_cell.map(|(x, y)| Bounds::new(at(maps.get(y as usize).map_or(x as usize, |map| map.visual(x as usize)), y as usize), cell));
         // As in Herdr, hide on the alternate screen and below five columns.
         g.thumb = None;
         g.track = None;
@@ -2313,14 +2450,29 @@ impl EntityInputHandler for TerminalView {
         let g = self.grid.borrow();
         if g.marked.is_none() && let Some(line) = &g.input_line {
             let (start, end) = line.columns_for_range(range)?;
+            let (start, end) = if start == end {
+                let visual = g.map_visual_column(line.row, start);
+                (visual, visual)
+            } else {
+                let segments = g.bidi_rows.get(line.row).map_or_else(|| vec![(start, end)], |map| map.segments(start, end));
+                (segments.first()?.0, segments.last()?.1)
+            };
             return Some(Bounds::new(g.origin + point(g.cell.width * start as f32, g.cell.height * line.row as f32), size(g.cell.width * (end - start) as f32, g.cell.height)));
         }
         let at = g.cursor_at?;
         Some(Bounds::new(at.origin + point(g.cell.width * range.start as f32, px(0.0)), at.size))
     }
 
-    fn character_index_for_point(&mut self, _point: Point<Pixels>, _w: &mut Window, _cx: &mut Context<Self>) -> Option<usize> {
-        None
+    fn character_index_for_point(&mut self, point: Point<Pixels>, _w: &mut Window, _cx: &mut Context<Self>) -> Option<usize> {
+        let g = self.grid.borrow();
+        if g.marked.is_some() { return None; }
+        let line = g.input_line.as_ref()?;
+        let (x, y) = local(&g, point);
+        let (x, y) = g.logical_point(x, y);
+        if (y / f32::from(g.cell.height)) as usize != line.row { return None; }
+        let column = x / f32::from(g.cell.width);
+        let (range, start, width) = line.spans.iter().find(|(_, start, width)| column >= *start as f32 && column < (start + width) as f32)?;
+        Some(if column - (*start as f32) < *width as f32 / 2.0 { range.start } else { range.end })
     }
 }
 
@@ -2487,9 +2639,10 @@ impl Render for TerminalView {
                         let mut grid = grid.borrow_mut();
                         grid.fit(cols, rows, cell, window.scale_factor());
                         let frame = grid.vt.frame();
+                        grid.update_bidi_maps(&frame);
                         grid.update_input_context(&frame);
                         if window.is_a11y_active() {
-                            let mut screen = AccessibleScreen::from_frame(&frame);
+                            let mut screen = AccessibleScreen::from_frame_mapped(&frame, &grid.bidi_rows);
                             // GPUI accessibility coordinates are device pixels,
                             // including synthetic descendants. Match painting's
                             // padded, centered and snapped grid origin exactly.
@@ -2669,6 +2822,58 @@ impl Focusable for TerminalView {
 mod tests {
     use super::{ScrollTarget, pages_to_lines, scroll_target};
     use serde_json::{Value, json};
+
+    #[test]
+    fn bidi_selection_copies_logical_hebrew_with_marks() {
+        let text = "abc \u{5e9}\u{5b8}\u{5c1}\u{5dc}\u{5d5}\u{5b9}\u{5dd} xyz";
+        let mut vt = crate::vt::Vt::new(40, 2);
+        vt.write(text.as_bytes());
+        let frame = vt.frame();
+        let map = crate::terminal_bidi::RowMap::new(&frame.rows[0], true);
+        // Drag from the visual right edge of shin to the visual left edge
+        // of final mem, using the same inverse mapping as the real handler.
+        for (step, column, fraction) in [
+            (crate::vt::Select::Press, 4, 0.9),
+            (crate::vt::Select::Drag, 7, 0.1),
+            (crate::vt::Select::Release, 7, 0.1),
+        ] {
+            let logical = map.logical_x(map.visual(column) as f32 + fraction);
+            vt.select(step, logical.floor() as u16, 0, logical * 10., 5., 10., 40.);
+        }
+        assert_eq!(vt.selection_text().as_deref(), Some("\u{5e9}\u{5b8}\u{5c1}\u{5dc}\u{5d5}\u{5b9}\u{5dd}"));
+    }
+
+    #[test]
+    fn terminal_bidi_preserves_pointed_hebrew_aramaic_and_yiddish_context() {
+        use crate::terminal_bidi::RowMap;
+        for text in [
+            "test: \u{5e9}\u{5b8}\u{5c1}\u{5dc}\u{5d5}\u{5b9}\u{5dd} 123 /tmp/file",
+            "\u{5d1}\u{5bc}\u{5b0}\u{5e8}\u{5b5}\u{5d0}\u{5e9}\u{5c1}\u{5b4}\u{596}\u{5d9}\u{5ea} 42",
+            "\u{5d0}\u{5de}\u{5e8} \u{5e8}\u{5d1}\u{5d9} \u{5dc}\u{5d0} \u{5e7}\u{5e9}\u{5d9}\u{5d0}",
+            "\u{5f0}\u{5d0}\u{5b8}\u{5e1} \u{5f1} \u{5f2}\u{5b7} 2026",
+        ] {
+            let mut vt = crate::vt::Vt::new(80, 2);
+            vt.write(text.as_bytes());
+            let frame = vt.frame();
+            let row = &frame.rows[0];
+            let logical: String = row.iter().map(|cell| cell.text.as_str()).collect();
+            assert!(logical.starts_with(text));
+            let map = RowMap::new(row, true);
+            for x in 0..row.len() { assert_eq!(map.logical(map.visual(x)), x); }
+            let input = super::InputLine::from_frame(&frame).unwrap();
+            let (context, _) = input.substring(0..usize::MAX).unwrap();
+            assert!(context.starts_with(text));
+            assert_eq!(input.caret, text.encode_utf16().count());
+            let maps: Vec<_> = frame.rows.iter().map(|r| std::rc::Rc::new(RowMap::new(r, true))).collect();
+            let screen = super::AccessibleScreen::from_frame_mapped(&frame, &maps);
+            assert!(screen.rows[0].text.starts_with(text));
+            for (index, cell) in row.iter().enumerate().filter(|(_, c)| c.text.chars().count() > 1) {
+                assert!(cell.text.chars().skip(1).all(|c| matches!(c as u32, 0x591..=0x5c7)));
+                let visual = map.visual(index);
+                assert_eq!(map.logical(visual), index);
+            }
+        }
+    }
 
     #[test]
     fn native_input_context_exposes_displayed_line_and_utf16_caret() {

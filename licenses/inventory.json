@@ -191,6 +191,20 @@
       "files": [
         "LICENSE"
       ]
+    },
+    {
+      "name": "Noto Serif Hebrew font",
+      "source": "https://github.com/google/fonts/tree/main/ofl/notoserifhebrew",
+      "files": [
+        "licenses/NotoSerifHebrew-OFL.txt"
+      ]
+    },
+    {
+      "name": "Noto Rashi Hebrew font",
+      "source": "https://github.com/google/fonts/tree/main/ofl/notorashihebrew",
+      "files": [
+        "licenses/NotoRashiHebrew-OFL.txt"
+      ]
     }
   ]
 }
