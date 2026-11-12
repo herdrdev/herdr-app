@@ -510,8 +510,11 @@ export default class Spaces extends View {
       .child(h_flex().h(31).pl(16).pr(10).items_center().justify_between().text_size(11.5).text_color(t.dim)
         .when(collapsed, el => el.pl(0).pr(0).justify_center())
         .when(!collapsed, el => el.child("Spaces"))
-        .child(div().id("space-new").size(26).flex_none().flex().items_center().justify_center().rounded(6).hover(s => s.bg(t.hover).text_color(t.foreground))
-          .on_click(() => run("space.new")).child(svg("mods/workspace-chrome/plus.svg").size(14))))
+        .child(h_flex().flex_none().items_center()
+          .when(!collapsed, el => el.child(div().id("open-repository").size(26).flex().items_center().justify_center().rounded(6).tooltip("Open repository…").hover(s => s.bg(t.hover).text_color(t.foreground))
+            .on_click(() => run("mod.open", { name: "space-new" })).child(svg("mods/workspace-chrome/folder.svg").size(14))))
+          .child(div().id("space-new").size(26).flex_none().flex().items_center().justify_center().rounded(6).hover(s => s.bg(t.hover).text_color(t.foreground))
+            .on_click(() => run("space.new")).child(svg("mods/workspace-chrome/plus.svg").size(14)))))
       .child(v_flex().flex_1().min_h(0).px(collapsed ? 0 : 8).pb(14).overflow_y_scrollbar().mode("always")
         .on_mouse_up("left", (_e, cx) => { this.pressed = null; cx.notify(); })
         .children(this.grouped(t, collapsed)));

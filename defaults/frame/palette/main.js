@@ -34,6 +34,7 @@ const NAMED = [
   ...["left", "right", "up", "down"].map((d) => ["pane.go", { direction: d }, "Pane", `Focus pane ${d}`, "move go"]),
   ...["left", "right", "up", "down"].map((d) => ["pane.swap", { direction: d }, "Pane", `Swap pane ${d}`, "move"]),
   ["space.new", {}, "Space", "New space", "workspace"],
+  ["mod.open", { name: "space-new" }, "Space", "Open repository…", "git folder checkout"],
   ["space.rename", {}, "Space", "Rename space", "workspace"],
   ["space.close", {}, "Space", "Close space", "workspace kill"],
   ["space.next", {}, "Space", "Next space", "workspace"],
