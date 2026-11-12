@@ -163,7 +163,8 @@ that it left them out.
 If Herdr misbehaves, `herdr-app feedback "<what happened>"` drafts a report.
 The person reviews and sends it; it does not silently send feedback.
 
-Never experiment with pointer/key automation on the person's real display.
-When developing the app on Linux, its `scripts/sandbox` provides an isolated
-home, core and display: `up`, `do`, `status`, `shot`, then `down` when done.
+Clicks and keys in the person's window are fine when a check needs them.
+To try input apart from it, when developing the app on Linux, `scripts/sandbox`
+provides an isolated home, core and display: `up`, `do`, `status`, `shot`,
+then `down` when done.
 Never stop a server or session you didn't start.
