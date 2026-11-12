@@ -106,6 +106,47 @@ export default class extends View {
 }
 
 #[gpui::test]
+fn file_drags_from_other_apps_report_the_held_button(cx: &mut TestAppContext) {
+    use gpui::{ExternalPaths, FileDropEvent, InputEvent};
+    cx.update(gpui_shell::init);
+    let fixture = Fixture::new(r#"
+import { View, div } from "gpui-kit";
+import { note } from "fixture";
+export default class extends View {
+  render() {
+    return div().id("row").size_full().on_mouse_move((e) => note(e.pressed_button ?? "none"));
+  }
+}"#);
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let calls = log.clone();
+    gpui_shell::policy::set_default(Policy::new().with_host_module(
+        HostModule::new("fixture").function("note", move |a| {
+            calls.borrow_mut().push(from_host(a.value(0)?));
+            Ok(HostValue::Null)
+        })
+    ).unwrap());
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|window, cx| Mounted(runtime.try_load(&fixture.0, window, cx).unwrap()));
+    let mut visual = VisualTestContext::from_window(*window.deref(), cx);
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    visual.run_until_parked();
+    visual.update(|window, cx| {
+        window.dispatch_event(FileDropEvent::Entered {
+            position: gpui::point(gpui::px(20.), gpui::px(20.)),
+            paths: ExternalPaths([PathBuf::from("/var/tmp/notes.md")].into_iter().collect()),
+        }.to_platform_input(), cx);
+        window.draw(cx).clear(cx);
+        window.dispatch_event(FileDropEvent::Pending { position: gpui::point(gpui::px(30.), gpui::px(25.)) }.to_platform_input(), cx);
+        window.draw(cx).clear(cx);
+        window.dispatch_event(FileDropEvent::Exited.to_platform_input(), cx);
+    });
+    visual.run_until_parked();
+    let seen = log.borrow().clone();
+    assert!(!seen.is_empty(), "the drag's moves should reach the element");
+    assert!(seen.iter().all(|b| *b == json!("left")), "every move of a file drag should carry the held button: {seen:?}");
+}
+
+#[gpui::test]
 fn window_mouse_events_follow_a_drag_off_the_element(cx: &mut TestAppContext) {
     use gpui::{Modifiers, MouseButton, point, px};
     cx.update(gpui_shell::init);
