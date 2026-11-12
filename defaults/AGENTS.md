@@ -260,6 +260,11 @@ Properties any node can have:
   Windows), the bar draws them with `window.minimize`, `window.maximize`, `window.close`.
   Windows' shipped tab bar and system strip use vector window icons, with a
   restore icon when maximized, rather than font glyphs.
+- Root only: `"window_blur": true` blurs what's behind the window where the
+  system can (macOS, Windows, some Wayland compositors). Colors with alpha
+  then show the desktop through frosted glass: make `background` and
+  `canvas` transparent and give the sidebar a translucent `chrome`
+  (`"#0b102466"`). Nodes with solid colors stay solid.
 - Root only: `"preview": "layouts/<name>.svg"` (or png): the picture the
   settings screen shows for this layout. Draw one when you make a layout;
   without it the person sees a plain frame. New layouts and `themes/*.json`
