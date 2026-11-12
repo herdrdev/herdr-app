@@ -39,6 +39,15 @@ struct Launch {
     /// Fork: the repository that Fork's settings get as the only one of the
     /// active workspace just before the start.
     fork_repo: Option<String>,
+    /// The program opens a target in one window only (Unity locks its
+    /// project): a window already showing the target is adopted instead of
+    /// starting it, and two panes on one target never start it twice.
+    once: bool,
+    /// The program's main window is the one with a Win32 menu bar (Unity),
+    /// which it keeps: it is embedded as a popup, not as a child window.
+    menu_window: bool,
+    /// How long the program may take to show its window.
+    wait: std::time::Duration,
 }
 
 /// A rectangle in device pixels, relative to the host window's client area.
@@ -75,8 +84,53 @@ fn launch(app: &str, target: &str) -> anyhow::Result<Launch> {
     match app {
         "vscode" => vscode(target),
         "fork" => fork(target),
-        other => anyhow::bail!("Unknown native app {other:?}; Herdr knows \"vscode\" and \"fork\""),
+        "unity" => unity(target),
+        other => anyhow::bail!("Unknown native app {other:?}; Herdr knows \"vscode\", \"fork\" and \"unity\""),
     }
+}
+
+/// How long VS Code and Fork may take to show a window.
+const OPEN_WAIT: std::time::Duration = std::time::Duration::from_secs(20);
+
+/// The Unity Editor on a project, in the version the project names. Its
+/// first start imports every asset: that may take many minutes.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn unity(target: &str) -> anyhow::Result<Launch> {
+    let folder = windows_folder(target)?;
+    let version = unity_version(std::path::Path::new(&folder))?;
+    let program = unity_roots().into_iter().map(|root| root.join(&version).join("Editor").join("Unity.exe")).find(|p| p.is_file())
+        .ok_or_else(|| anyhow::anyhow!("Unity {version} is not installed: install it with Unity Hub"))?;
+    let title = folder.rsplit(['\\', '/']).next().unwrap_or_default().to_owned();
+    Ok(Launch {
+        program, args: vec!["-projectPath".into(), folder], class: "UnityContainerWndClass", title,
+        own_process: true, fork_repo: None, once: true, menu_window: true, wait: std::time::Duration::from_secs(30 * 60),
+    })
+}
+
+/// The editor version a Unity project is bound to: `m_EditorVersion` of its
+/// `ProjectSettings/ProjectVersion.txt`.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn unity_version(folder: &std::path::Path) -> anyhow::Result<String> {
+    let not_unity = || anyhow::anyhow!("{} is not a Unity project", folder.display());
+    let text = std::fs::read_to_string(folder.join("ProjectSettings").join("ProjectVersion.txt")).map_err(|_| not_unity())?;
+    editor_version(&text).ok_or_else(|| anyhow::anyhow!("{} names no editor version", folder.join("ProjectSettings").join("ProjectVersion.txt").display()))
+}
+
+#[cfg_attr(not(windows), allow(dead_code))]
+fn editor_version(project_version: &str) -> Option<String> {
+    project_version.lines().find_map(|line| line.trim().strip_prefix("m_EditorVersion:")).map(str::trim).filter(|v| !v.is_empty()).map(str::to_owned)
+}
+
+/// The folders Unity Hub installs editors in, each holding a `<version>`
+/// folder per editor: the one chosen in the Hub's settings
+/// (`%APPDATA%\UnityHub\secondaryInstallPath.json`), then its default.
+#[cfg_attr(not(windows), allow(dead_code))]
+fn unity_roots() -> Vec<PathBuf> {
+    let env = |key: &str| std::env::var_os(key).filter(|v| !v.is_empty()).map(PathBuf::from);
+    let chosen = env("APPDATA").and_then(|d| std::fs::read_to_string(d.join("UnityHub").join("secondaryInstallPath.json")).ok())
+        .and_then(|text| serde_json::from_str::<String>(text.trim_start_matches('\u{feff}')).ok())
+        .filter(|p| !p.is_empty()).map(PathBuf::from);
+    [chosen, env("ProgramFiles").map(|d| d.join("Unity").join("Hub").join("Editor"))].into_iter().flatten().collect()
 }
 
 /// The person's own VS Code: default profile and user data, so a running VS
@@ -102,7 +156,7 @@ fn vscode(target: &str) -> anyhow::Result<Launch> {
     }
     let name = target.trim_end_matches(['/', '\\']).rsplit(['/', '\\']).next().unwrap_or_default();
     let title = url::form_urlencoded::parse(format!("n={name}").as_bytes()).next().map(|(_, v)| v.into_owned()).unwrap_or_default();
-    Ok(Launch { program, args, class: "Chrome_WidgetWin_1", title, own_process: false, fork_repo: None })
+    Ok(Launch { program, args, class: "Chrome_WidgetWin_1", title, own_process: false, fork_repo: None, once: false, menu_window: false, wait: OPEN_WAIT })
 }
 
 /// A Fork (git client) process of the pane's own on a repository. `target`
@@ -122,9 +176,8 @@ fn fork(target: &str) -> anyhow::Result<Launch> {
     ];
     let program = candidates.into_iter().flatten().find(|p| p.is_file())
         .ok_or_else(|| anyhow::anyhow!("Fork is not installed (set HERDR_FORK_EXE to Fork.exe)"))?;
-    let mut folder = windows_folder(target)?;
-    while folder.len() > 3 && folder.ends_with(['\\', '/']) { folder.pop(); }
-    Ok(Launch { program, args: Vec::new(), class: "HwndWrapper[Fork.exe;*", title: String::new(), own_process: true, fork_repo: Some(folder) })
+    let folder = windows_folder(target)?;
+    Ok(Launch { program, args: Vec::new(), class: "HwndWrapper[Fork.exe;*", title: String::new(), own_process: true, fork_repo: Some(folder), once: false, menu_window: false, wait: OPEN_WAIT })
 }
 
 /// The name of the Fork workspace that Herdr's panes start Fork in.
@@ -231,25 +284,32 @@ fn class_matches(pattern: &str, class: &str) -> bool {
     }
 }
 
-/// A Windows path for a folder given as a path or a folder URI.
+/// A Windows path for a folder given as a path or a folder URI, without a
+/// trailing separator.
 #[cfg_attr(not(windows), allow(dead_code))]
 fn windows_folder(target: &str) -> anyhow::Result<String> {
     let target = target.trim();
     anyhow::ensure!(!target.is_empty(), "No folder to open");
     // %XX escapes only: '+' stays itself.
     let decode = |s: &str| url::form_urlencoded::parse(format!("n={}", s.replace('+', "%2B")).as_bytes()).next().map(|(_, v)| v.into_owned()).unwrap_or_default();
-    let Some((scheme, rest)) = target.split_once("://") else { return Ok(target.to_owned()) };
-    let (authority, path) = rest.split_once('/').map_or((rest, ""), |(a, p)| (a, p));
-    let path = decode(path).replace('/', "\\");
-    match scheme {
-        "file" if authority.is_empty() => Ok(path),
-        "file" => Ok(format!(r"\\{authority}\{path}")),
-        "vscode-remote" => match decode(authority).strip_prefix("wsl+") {
-            Some(distro) if !distro.is_empty() => Ok(format!(r"\\wsl.localhost\{distro}\{path}")),
-            _ => anyhow::bail!("Only local and WSL folders open on Windows, not {target}"),
-        },
-        _ => anyhow::bail!("Only local and WSL folders open on Windows, not {target}"),
-    }
+    let mut folder = match target.split_once("://") {
+        None => target.to_owned(),
+        Some((scheme, rest)) => {
+            let (authority, path) = rest.split_once('/').map_or((rest, ""), |(a, p)| (a, p));
+            let path = decode(path).replace('/', "\\");
+            match scheme {
+                "file" if authority.is_empty() => path,
+                "file" => format!(r"\\{authority}\{path}"),
+                "vscode-remote" => match decode(authority).strip_prefix("wsl+") {
+                    Some(distro) if !distro.is_empty() => format!(r"\\wsl.localhost\{distro}\{path}"),
+                    _ => anyhow::bail!("Only local and WSL folders open on Windows, not {target}"),
+                },
+                _ => anyhow::bail!("Only local and WSL folders open on Windows, not {target}"),
+            }
+        }
+    };
+    while folder.len() > 3 && folder.ends_with(['\\', '/']) { folder.pop(); }
+    Ok(folder)
 }
 
 impl Drop for NativeApp {
@@ -372,7 +432,7 @@ pub(super) fn register(registry: &mut ComponentRegistry) {
             APPS.with_borrow_mut(|apps| apps.push(Rc::downgrade(&state)));
             Ok(Box::new(state))
         },
-    ).with_documentation("A program's own window shown in this pane: \"vscode\" (the person's VS Code on a folder URI or path) or \"fork\" (a Fork process of this pane's own, showing only one repository: a local or WSL folder). Closing the pane closes that window.")
+    ).with_documentation("A program's own window shown in this pane: \"vscode\" (the person's VS Code on a folder URI or path), \"fork\" (a Fork process of this pane's own, showing only one repository: a local or WSL folder) or \"unity\" (the Unity Editor on a local Unity project, in the version the project names). Closing the pane closes that window.")
     .with_methods(vec![
         StateMethodDescriptor::new::<State>("status", "(): string", |state, _, _, _| {
             Ok(ComponentDataValue::String(state.borrow().status.clone()))
@@ -418,7 +478,7 @@ mod win {
     use super::{Launch, Rect, State};
     use gpui::{App, Window};
     use raw_window_handle::{HasWindowHandle, RawWindowHandle};
-    use std::{cell::Cell, rc::Rc, time::{Duration, Instant}};
+    use std::{cell::{Cell, RefCell}, rc::Rc, time::{Duration, Instant}};
     use windows_sys::Win32::{
         Foundation::{CloseHandle, HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
         Graphics::Gdi::ClientToScreen,
@@ -437,6 +497,15 @@ mod win {
         /// Device pixels of the window cut off at each side: its title bar and frame.
         crop: Crop,
         pub(super) applied: Option<(Rect, bool, Vec<[i32; 4]>)>,
+        /// A popup inside the container (Unity's main window, which keeps
+        /// its menu bar). It shares no input queue with Herdr, so a busy
+        /// program never stalls Herdr as long as Herdr makes no synchronous
+        /// calls on it; it takes the keyboard as the foreground window
+        /// (see `focus`).
+        popup: bool,
+        /// The program's other windows of the same class (Unity's floating
+        /// editor windows), hidden while the pane is.
+        hidden: Vec<HWND>,
     }
 
     #[derive(Clone, Copy, Default, PartialEq, Debug)]
@@ -449,10 +518,12 @@ mod win {
             // it from a helper thread, so its sent messages never reenter an
             // App update. A clean window closes at once; one with unsaved
             // changes shows its own save prompt on the desktop.
-            let (child, container, style, ex_style) = (self.child as usize, self.container as usize, self.style, self.ex_style);
+            let (child, container, style, ex_style, hidden) = (self.child as usize, self.container as usize, self.style, self.ex_style, std::mem::take(&mut self.hidden).into_iter().map(|h| h as usize).collect::<Vec<_>>());
             let screen = screen_rect(self.container);
             let _ = std::thread::Builder::new().name("native-app-release".into()).spawn(move || {
                 release(child as HWND, style, ex_style, screen);
+                // A save prompt the person cancels keeps the program open.
+                for hwnd in hidden { unsafe { ShowWindowAsync(hwnd as HWND, SW_SHOWNOACTIVATE) }; }
                 unsafe {
                     PostMessageW(child as HWND, WM_CLOSE, 0, 0);
                     // DestroyWindow must run on the container's own thread.
@@ -557,18 +628,23 @@ mod win {
         let weak = Rc::downgrade(state);
         window.spawn(cx, async move |cx| {
             // Fork reads its settings when it starts: one start at a time,
-            // each with its own repository there.
-            let starting = match &launch.fork_repo {
-                Some(folder) => {
-                    while STARTING.get() {
+            // each with its own repository there. Unity opens a project
+            // once: one start per project, and a later pane takes the window.
+            let key = if launch.fork_repo.is_some() { Some("fork".to_owned()) }
+                else if launch.once { Some(format!("{app}\n{target}")) } else { None };
+            let starting = match key {
+                Some(key) => {
+                    while STARTING.with_borrow(|s| s.contains(&key)) {
                         let Some(state) = wanted(&weak, generation) else { return };
-                        state.borrow_mut().status = "Waiting for another Fork to start…".into();
+                        state.borrow_mut().status = format!("Waiting for another {} to start…", launch.program.file_stem().unwrap_or_default().to_string_lossy());
                         drop(state);
                         cx.background_executor().timer(Duration::from_millis(100)).await;
                     }
-                    // A start whose pane went away meanwhile left its window.
-                    if let Some(embedded) = take_orphan(&app, &target) {
-                        let Some(state) = wanted(&weak, generation) else { orphan(&app, &target, embedded); return };
+                    // A start whose pane went away meanwhile left its window;
+                    // a Unity pane that got it keeps it until this one takes it.
+                    let Some(state) = wanted(&weak, generation) else { return };
+                    let left = take_orphan(&app, &target).or_else(|| if launch.once { held(&state, &app, &target) } else { None });
+                    if let Some(embedded) = left {
                         let child = embedded.child as usize;
                         show(&state, moved_to(embedded, host));
                         drop(state);
@@ -576,9 +652,9 @@ mod win {
                         watch_loop(weak, generation, child, cx).await;
                         return;
                     }
-                    let starting = Starting::new();
-                    let folder = folder.clone();
-                    if let Err(error) = cx.background_executor().spawn(async move { super::prepare_fork(&folder) }).await {
+                    drop(state);
+                    let starting = Starting::new(key);
+                    if let Some(folder) = launch.fork_repo.clone() && let Err(error) = cx.background_executor().spawn(async move { super::prepare_fork(&folder) }).await {
                         tracing::warn!(error = format!("{error:#}"), "cannot give Fork the pane's repository");
                     }
                     Some(starting)
@@ -587,53 +663,58 @@ mod win {
             };
             let Some(state) = wanted(&weak, generation) else { return };
             let before = program_windows(&launch);
-            let foreground = unsafe { GetForegroundWindow() };
-            let mut child = match run(&launch) {
-                Ok(child) => child,
-                Err(error) => {
-                    fail(&state, format!("Cannot start {}: {error}", launch.program.display()));
-                    let _ = cx.update(|window, _| window.refresh());
-                    return;
-                }
-            };
-            let pid = child.id();
-            state.borrow_mut().status = "Waiting for its window…".into();
-            drop(state);
-            let opened = Instant::now();
             // A pane that goes away (a mod restarting) leaves a started
             // process of its own: its window waits for the pane's next state.
             let mut abandoned = false;
-            // Adopt the new window.
-            let found = loop {
-                cx.background_executor().timer(Duration::from_millis(100)).await;
-                if !abandoned && wanted(&weak, generation).is_none() {
-                    if !launch.own_process { return; }
-                    abandoned = true;
-                }
-                let mut now = program_windows(&launch);
-                if launch.own_process { now.retain(|&hwnd| window_pid(hwnd) == pid); }
-                if let Some(&hwnd) = now.iter().find(|h| !before.contains(h)) { break hwnd; }
-                // A program that already shows this folder brings that window
-                // to the front instead of opening another. Windows may not let
-                // it come forward: then it is found by its title.
-                let front = unsafe { GetForegroundWindow() };
-                if opened.elapsed() > Duration::from_secs(2) && front != foreground && now.contains(&front) { break front; }
-                if opened.elapsed() > Duration::from_secs(3) && let Some(hwnd) = showing(&now, &launch.title) { break hwnd; }
-                let failed = match child.try_wait() {
-                    Ok(Some(status)) => launch.own_process || !status.success(),
-                    _ => false,
-                };
-                if failed || opened.elapsed() > Duration::from_secs(20) {
-                    if !abandoned && let Some(state) = weak.upgrade() {
-                        let mut app = state.borrow_mut();
-                        app.opening = false;
-                        app.error = Some(format!("{} did not open a window", launch.program.file_name().unwrap_or_default().to_string_lossy()));
+            // Unity opens a project once: an editor already on it comes into
+            // the pane instead.
+            let open = if launch.once { showing(&before, &launch.title) } else { None };
+            let found = if let Some(hwnd) = open { drop(state); hwnd } else {
+                let foreground = unsafe { GetForegroundWindow() };
+                let mut child = match run(&launch) {
+                    Ok(child) => child,
+                    Err(error) => {
+                        fail(&state, format!("Cannot start {}: {error}", launch.program.display()));
                         let _ = cx.update(|window, _| window.refresh());
+                        return;
                     }
-                    return;
+                };
+                let pid = child.id();
+                state.borrow_mut().status = "Waiting for its window…".into();
+                drop(state);
+                let opened = Instant::now();
+                // Adopt the new window.
+                loop {
+                    cx.background_executor().timer(Duration::from_millis(100)).await;
+                    if !abandoned && wanted(&weak, generation).is_none() {
+                        if !launch.own_process { return; }
+                        abandoned = true;
+                    }
+                    let mut now = program_windows(&launch);
+                    if launch.own_process { now.retain(|&hwnd| window_pid(hwnd) == pid); }
+                    if let Some(&hwnd) = now.iter().find(|h| !before.contains(h)) { break hwnd; }
+                    // A program that already shows this folder brings that window
+                    // to the front instead of opening another. Windows may not let
+                    // it come forward: then it is found by its title.
+                    let front = unsafe { GetForegroundWindow() };
+                    if opened.elapsed() > Duration::from_secs(2) && front != foreground && now.contains(&front) { break front; }
+                    if opened.elapsed() > Duration::from_secs(3) && let Some(hwnd) = showing(&now, &launch.title) { break hwnd; }
+                    let failed = match child.try_wait() {
+                        Ok(Some(status)) => launch.own_process || !status.success(),
+                        _ => false,
+                    };
+                    if failed || opened.elapsed() > launch.wait {
+                        if !abandoned && let Some(state) = weak.upgrade() {
+                            let mut app = state.borrow_mut();
+                            app.opening = false;
+                            app.error = Some(format!("{} did not open a window", launch.program.file_name().unwrap_or_default().to_string_lossy()));
+                            let _ = cx.update(|window, _| window.refresh());
+                        }
+                        return;
+                    }
                 }
             };
-            let mut embedded = embed(found, host);
+            let mut embedded = embed(found, host, launch.menu_window, cx).await;
             let child = found as usize;
             // The container stays hidden until the crop is known.
             embedded.crop = cx.background_executor().spawn(async move { measure(child as HWND) }).await;
@@ -652,17 +733,19 @@ mod win {
     }
 
     thread_local! {
-        /// A program that reads its settings at start (Fork) is starting.
-        static STARTING: Cell<bool> = const { Cell::new(false) };
+        /// Starts that must not overlap: "fork" while a Fork (which reads its
+        /// settings at start) starts, "unity\n<project>" while a Unity Editor
+        /// opens that project.
+        static STARTING: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     }
 
-    /// Holds `STARTING` until dropped.
-    struct Starting;
+    /// Holds its key in `STARTING` until dropped.
+    struct Starting(String);
     impl Starting {
-        fn new() -> Self { STARTING.set(true); Starting }
+        fn new(key: String) -> Self { STARTING.with_borrow_mut(|s| s.push(key.clone())); Starting(key) }
     }
     impl Drop for Starting {
-        fn drop(&mut self) { STARTING.set(false); }
+        fn drop(&mut self) { STARTING.with_borrow_mut(|s| s.retain(|k| *k != self.0)); }
     }
 
     fn window_pid(hwnd: HWND) -> u32 {
@@ -773,7 +856,7 @@ mod win {
     fn watch(state: &State) -> bool {
         let mut app = state.borrow_mut();
         let Some(embedded) = app.embedded.as_mut() else { return false };
-        if unsafe { IsWindow(embedded.child) } == 0 || unsafe { GetParent(embedded.child) } != embedded.container {
+        if unsafe { IsWindow(embedded.child) } == 0 || unsafe { GetAncestor(embedded.child, GA_PARENT) } != embedded.container {
             // Closed by the program: nothing to give back.
             let e = std::mem::ManuallyDrop::new(app.embedded.take().unwrap());
             app.closed = true;
@@ -809,7 +892,7 @@ mod win {
         let r = screen_rect(hwnd);
         let mut origin = POINT { x: r.left, y: r.top };
         unsafe {
-            let parent = GetParent(hwnd);
+            let parent = GetAncestor(hwnd, GA_PARENT);
             let mut zero = POINT { x: 0, y: 0 };
             ClientToScreen(parent, &mut zero);
             origin.x -= zero.x;
@@ -844,7 +927,7 @@ mod win {
 
     /// Visible, unowned top-level windows of the launch's program.
     fn program_windows(launch: &Launch) -> Vec<HWND> {
-        struct Search<'a> { class: &'a str, program: String, found: Vec<HWND>, checked: Vec<(u32, bool)> }
+        struct Search<'a> { class: &'a str, menu: bool, program: String, found: Vec<HWND>, checked: Vec<(u32, bool)> }
         unsafe extern "system" fn visit(hwnd: HWND, data: LPARAM) -> windows_sys::core::BOOL {
             let search = unsafe { &mut *(data as *mut Search) };
             if unsafe { IsWindowVisible(hwnd) } == 0 || !unsafe { GetWindow(hwnd, GW_OWNER) }.is_null() { return 1; }
@@ -853,6 +936,7 @@ mod win {
             let mut name = [0u16; 128];
             let len = unsafe { GetClassNameW(hwnd, name.as_mut_ptr(), name.len() as i32) };
             if !super::class_matches(search.class, &String::from_utf16_lossy(&name[..len.max(0) as usize])) { return 1; }
+            if search.menu && unsafe { GetMenu(hwnd) }.is_null() { return 1; }
             let mut pid = 0;
             unsafe { GetWindowThreadProcessId(hwnd, &mut pid) };
             if pid == std::process::id() || unsafe { GetWindowTextLengthW(hwnd) } == 0 { return 1; }
@@ -869,25 +953,43 @@ mod win {
         }
         let program = std::fs::canonicalize(&launch.program).map(|p| p.to_string_lossy().trim_start_matches(r"\\?\").to_owned())
             .unwrap_or_else(|_| launch.program.to_string_lossy().into_owned());
-        let mut search = Search { class: launch.class, program, found: Vec::new(), checked: Vec::new() };
+        let mut search = Search { class: launch.class, menu: launch.menu_window, program, found: Vec::new(), checked: Vec::new() };
+        unsafe { EnumWindows(Some(visit), (&raw mut search) as LPARAM) };
+        search.found
+    }
+
+    /// The visible top-level windows of `child`'s process and class, other
+    /// than `child`: Unity's floating editor windows.
+    fn floating_windows(child: HWND) -> Vec<HWND> {
+        struct Search { child: HWND, pid: u32, class: Vec<u16>, found: Vec<HWND> }
+        fn class(hwnd: HWND) -> Vec<u16> {
+            let mut name = [0u16; 128];
+            let len = unsafe { GetClassNameW(hwnd, name.as_mut_ptr(), name.len() as i32) };
+            name[..len.max(0) as usize].to_vec()
+        }
+        unsafe extern "system" fn visit(hwnd: HWND, data: LPARAM) -> windows_sys::core::BOOL {
+            let search = unsafe { &mut *(data as *mut Search) };
+            if hwnd == search.child || unsafe { IsWindowVisible(hwnd) } == 0 || window_pid(hwnd) != search.pid { return 1; }
+            if class(hwnd) == search.class { search.found.push(hwnd); }
+            1
+        }
+        let mut search = Search { child, pid: window_pid(child), class: class(child), found: Vec::new() };
         unsafe { EnumWindows(Some(visit), (&raw mut search) as LPARAM) };
         search.found
     }
 
     /// Move the program's top-level window into a new container in `host`.
-    fn embed(hwnd: HWND, host: HWND) -> Embedded {
-        unsafe {
+    /// A window with a Win32 menu bar (Unity) keeps it: a child window cannot
+    /// have one, so it stays a captionless popup inside the container.
+    ///
+    /// Restyling and reparenting send messages to the program. A popup's
+    /// program may be busy for a minute (Unity loading a project): its calls
+    /// run on a background thread, and the window appears when they are done.
+    async fn embed(hwnd: HWND, host: HWND, menu: bool, cx: &mut gpui::AsyncWindowContext) -> Embedded {
+        let (container, style, ex_style) = unsafe {
             let container = container::create(host);
-            if IsIconic(hwnd) != 0 || IsZoomed(hwnd) != 0 { ShowWindow(hwnd, SW_RESTORE); }
             let style = GetWindowLongPtrW(hwnd, GWL_STYLE);
             let ex_style = GetWindowLongPtrW(hwnd, GWL_EXSTYLE);
-            // A borderless child. WS_MAXIMIZE makes Chromium treat its edges as
-            // a maximized window's: no resize borders to drag.
-            let child_style = (style as u32 & !(WS_POPUP | WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU))
-                | WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS | WS_MAXIMIZE;
-            SetWindowLongPtrW(hwnd, GWL_STYLE, child_style as isize);
-            let child_ex = ex_style as u32 & !(WS_EX_APPWINDOW | WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE | WS_EX_DLGMODALFRAME | WS_EX_NOPARENTNOTIFY | WS_EX_TOPMOST);
-            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, child_ex as isize);
             // Herdr's flip-model swap chain covers child windows that draw
             // into a redirection surface (WPF, as in Fork). A layered
             // container gets its own DWM surface above it. Programs with
@@ -896,11 +998,27 @@ mod win {
                 SetWindowLongPtrW(container, GWL_EXSTYLE, GetWindowLongPtrW(container, GWL_EXSTYLE) | WS_EX_LAYERED as isize);
                 SetLayeredWindowAttributes(container, 0, 255, LWA_ALPHA);
             }
+            (container, style, ex_style)
+        };
+        let (window, parent) = (hwnd as usize, container as usize);
+        let reparent = move || unsafe {
+            let (hwnd, container) = (window as HWND, parent as HWND);
+            if IsIconic(hwnd) != 0 || IsZoomed(hwnd) != 0 { ShowWindow(hwnd, SW_RESTORE); }
+            // A borderless child, or popup with a menu bar. WS_MAXIMIZE makes
+            // Chromium treat its edges as a maximized window's: no resize
+            // borders to drag.
+            let frameless = style as u32 & !(WS_POPUP | WS_CAPTION | WS_THICKFRAME | WS_MINIMIZEBOX | WS_MAXIMIZEBOX | WS_SYSMENU | WS_MAXIMIZE);
+            let child_style = if menu { frameless | WS_POPUP | WS_CLIPCHILDREN | WS_CLIPSIBLINGS }
+                else { frameless | WS_CHILD | WS_CLIPCHILDREN | WS_CLIPSIBLINGS | WS_MAXIMIZE };
+            SetWindowLongPtrW(hwnd, GWL_STYLE, child_style as isize);
+            let child_ex = ex_style as u32 & !(WS_EX_APPWINDOW | WS_EX_WINDOWEDGE | WS_EX_CLIENTEDGE | WS_EX_DLGMODALFRAME | WS_EX_NOPARENTNOTIFY | WS_EX_TOPMOST);
+            SetWindowLongPtrW(hwnd, GWL_EXSTYLE, child_ex as isize);
             SetParent(hwnd, container);
             SetWindowPos(hwnd, HWND_TOP, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_FRAMECHANGED | SWP_NOACTIVATE | SWP_SHOWWINDOW);
-            focus::adopt(host, container, hwnd);
-            Embedded { child: hwnd, container, style, ex_style, crop: Crop::default(), applied: None }
-        }
+        };
+        if menu { cx.background_executor().spawn(async move { reparent() }).await } else { reparent() }
+        focus::adopt(host, container, hwnd, menu);
+        Embedded { child: hwnd, container, style, ex_style, crop: Crop::default(), applied: None, popup: menu, hidden: Vec::new() }
     }
 
     /// Give the container the pane's latest geometry, visibility and holes.
@@ -909,7 +1027,7 @@ mod win {
     /// borrow: SetFocus and SetWindowPos deliver messages to Herdr's own
     /// window at once, which can draw a frame that reads this state again.
     pub(super) fn apply(state: &State) {
-        let (child, container, crop, rect, visible, holes, give) = {
+        let (child, container, crop, rect, visible, holes, give, hide, reshow, popup) = {
             let mut app = state.borrow_mut();
             app.apply_pending = false;
             if !app.needs_apply() { return; }
@@ -917,9 +1035,19 @@ mod win {
             let give = visible && app.focus_until.take().is_some_and(|until| std::time::Instant::now() <= until);
             app.status = if visible { "Shown.".into() } else { "Hidden while its pane is covered.".into() };
             let embedded = app.embedded.as_mut().unwrap();
+            let was_visible = embedded.applied.as_ref().map(|(_, v, _)| *v);
             embedded.applied = Some((rect, visible, holes.clone()));
-            (embedded.child, embedded.container, embedded.crop, rect, visible, holes, give)
+            // Unity's floating windows go and come back with its pane.
+            let hide = embedded.popup && !visible && was_visible != Some(false);
+            let reshow = if visible { std::mem::take(&mut embedded.hidden) } else { Vec::new() };
+            (embedded.child, embedded.container, embedded.crop, rect, visible, holes, give, hide, reshow, embedded.popup)
         };
+        for hwnd in reshow { unsafe { ShowWindowAsync(hwnd, SW_SHOWNOACTIVATE) }; }
+        if hide {
+            let floating = floating_windows(child);
+            for &hwnd in &floating { unsafe { ShowWindowAsync(hwnd, SW_HIDE) }; }
+            if let Some(e) = state.borrow_mut().embedded.as_mut() { e.hidden.extend(floating); }
+        }
         let width = rect[2].max(1);
         let height = rect[3].max(1);
         unsafe {
@@ -929,14 +1057,16 @@ mod win {
         }
         super::super::win32::set_holes(container, width, height, &holes);
         let [x, y, w, h] = child_rect(width, height, crop);
-        unsafe { SetWindowPos(child, std::ptr::null_mut(), x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE) };
+        // A popup's program gets the move posted: it may be busy.
+        let posted = if popup { SWP_ASYNCWINDOWPOS } else { 0 };
+        unsafe { SetWindowPos(child, std::ptr::null_mut(), x, y, w, h, SWP_NOZORDER | SWP_NOACTIVATE | posted) };
         if give { focus::give(child); }
     }
 
-    /// The window's frame: what lies outside its client area. Everything the
-    /// program draws stays, including VS Code's title bar and the few pixels
-    /// at its edges where it reports resize borders. A resize from there is
-    /// undone by the watcher. No messages are sent to the other process.
+    /// The window's frame: what lies outside its client area, except a menu
+    /// bar. Everything the program draws stays, including VS Code's title bar
+    /// and the few pixels at its edges where it reports resize borders. A
+    /// resize from there is undone by the watcher. Runs off the window thread.
     fn measure(hwnd: HWND) -> Crop {
         unsafe {
             let window = screen_rect(hwnd);
@@ -944,9 +1074,12 @@ mod win {
             GetClientRect(hwnd, &mut client);
             let mut origin = POINT { x: 0, y: 0 };
             ClientToScreen(hwnd, &mut origin);
+            let mut bar: MENUBARINFO = std::mem::zeroed();
+            bar.cbSize = size_of::<MENUBARINFO>() as u32;
+            let top = if GetMenuBarInfo(hwnd, OBJID_MENU, 0, &mut bar) != 0 && bar.rcBar.bottom > bar.rcBar.top { bar.rcBar.top } else { origin.y };
             Crop {
                 left: origin.x - window.left,
-                top: origin.y - window.top,
+                top: top - window.top,
                 right: window.right - (origin.x + client.right),
                 bottom: window.bottom - (origin.y + client.bottom),
             }
@@ -1005,17 +1138,30 @@ mod win {
     /// a click on Herdr's own surface takes focus back, and activating Herdr
     /// returns focus to the adopted window that had it. Reparenting attached
     /// both processes' input queues, so SetFocus works across them.
+    ///
+    /// A popup (Unity) shares no input queue with Herdr and takes the
+    /// keyboard only as the foreground window. A low-level mouse hook on a
+    /// thread of its own sees a press on it and asks Herdr's window to make it
+    /// the foreground window; a click on Herdr's surface activates Herdr again.
     mod focus {
         use std::cell::{Cell, RefCell};
+        use std::sync::Mutex;
         use windows_sys::Win32::{
-            Foundation::{HWND, LPARAM, LRESULT, POINT, WPARAM},
-            Graphics::Gdi::ScreenToClient,
+            Foundation::{HWND, LPARAM, LRESULT, POINT, RECT, WPARAM},
+            Graphics::Gdi::{CreateRectRgn, DeleteObject, GetWindowRgn, PtInRegion, ScreenToClient},
+            System::LibraryLoader::GetModuleHandleW,
             UI::Input::KeyboardAndMouse::{GetFocus, SetFocus},
             UI::Shell::{DefSubclassProc, RemoveWindowSubclass, SetWindowSubclass},
             UI::WindowsAndMessaging::*,
         };
 
         const ID: usize = 0x4845_5244; // "HERD"
+        /// Posted to a host: make the popup in wparam the foreground window.
+        const FOCUS_POPUP: u32 = WM_APP + 0x4844;
+
+        /// (host, container, popup) of every adopted popup, for the hook thread.
+        static POPUPS: Mutex<Vec<(usize, usize, usize)>> = Mutex::new(Vec::new());
+        static HOOK: std::sync::Once = std::sync::Once::new();
 
         thread_local! {
             /// (host, container, adopted window).
@@ -1024,13 +1170,57 @@ mod win {
             static ACTIVE: Cell<HWND> = const { Cell::new(std::ptr::null_mut()) };
         }
 
-        pub fn adopt(host: HWND, container: HWND, hwnd: HWND) {
+        pub fn adopt(host: HWND, container: HWND, hwnd: HWND, popup: bool) {
             let first = EMBEDDED.with_borrow_mut(|list| {
                 let first = !list.iter().any(|&(h, _, _)| h == host);
                 list.push((host, container, hwnd));
                 first
             });
             if first { unsafe { SetWindowSubclass(host, Some(proc), ID, 0) }; }
+            if popup {
+                POPUPS.lock().unwrap().push((host as usize, container as usize, hwnd as usize));
+                HOOK.call_once(|| { let _ = std::thread::Builder::new().name("native-app-mouse".into()).spawn(hook_thread); });
+            }
+        }
+
+        fn is_popup(hwnd: HWND) -> bool {
+            POPUPS.lock().unwrap().iter().any(|&(_, _, p)| p == hwnd as usize)
+        }
+
+        fn hook_thread() {
+            unsafe {
+                if SetWindowsHookExW(WH_MOUSE_LL, Some(mouse), GetModuleHandleW(std::ptr::null()), 0).is_null() { return; }
+                let mut msg: MSG = std::mem::zeroed();
+                while GetMessageW(&mut msg, std::ptr::null_mut(), 0, 0) > 0 {}
+            }
+        }
+
+        /// A press inside a shown popup's container, outside the holes cut for
+        /// Herdr's overlays. No messages are sent: the hook must not wait.
+        unsafe extern "system" fn mouse(code: i32, wparam: WPARAM, lparam: LPARAM) -> LRESULT {
+            // Also on release: the press activates Herdr's window after this.
+            if code >= 0 && matches!(wparam as u32, WM_LBUTTONDOWN | WM_RBUTTONDOWN | WM_MBUTTONDOWN | WM_XBUTTONDOWN | WM_LBUTTONUP | WM_RBUTTONUP | WM_MBUTTONUP | WM_XBUTTONUP) {
+                let point = unsafe { (*(lparam as *const MSLLHOOKSTRUCT)).pt };
+                // Only where Herdr's window is the top one: no other window over it.
+                let top = unsafe { ChildWindowFromPointEx(GetDesktopWindow(), point, CWP_SKIPINVISIBLE | CWP_SKIPDISABLED | CWP_SKIPTRANSPARENT) } as usize;
+                let hit = POPUPS.lock().unwrap().iter().copied().find(|&(host, container, _)| host == top && unsafe { inside(container as HWND, point) });
+                if let Some((host, _, popup)) = hit { unsafe { PostMessageW(host as HWND, FOCUS_POPUP, popup, 0) }; }
+            }
+            unsafe { CallNextHookEx(std::ptr::null_mut(), code, wparam, lparam) }
+        }
+
+        unsafe fn inside(container: HWND, point: POINT) -> bool {
+            unsafe {
+                if IsWindowVisible(container) == 0 { return false; }
+                let mut r = RECT { left: 0, top: 0, right: 0, bottom: 0 };
+                GetWindowRect(container, &mut r);
+                if point.x < r.left || point.x >= r.right || point.y < r.top || point.y >= r.bottom { return false; }
+                let region = CreateRectRgn(0, 0, 0, 0);
+                let shaped = GetWindowRgn(container, region) != 0;
+                let ok = !shaped || PtInRegion(region, point.x - r.left, point.y - r.top) != 0;
+                DeleteObject(region);
+                ok
+            }
         }
 
         pub fn forget(container: HWND) {
@@ -1040,18 +1230,23 @@ mod win {
                 }
                 list.retain(|&(_, c, _)| c != container);
             });
+            POPUPS.lock().unwrap().retain(|&(_, c, _)| c != container as usize);
         }
 
         /// The window is hidden: its typing goes back to Herdr.
         pub fn release(container: HWND, hwnd: HWND) {
             if ACTIVE.get() == hwnd { ACTIVE.set(std::ptr::null_mut()); }
+            let host = unsafe { GetParent(container) };
+            // A hidden popup that had the keyboard gives it back to Herdr.
+            if unsafe { GetForegroundWindow() } == hwnd { unsafe { SetForegroundWindow(host) }; }
             let focus = unsafe { GetFocus() };
             if focus == container || focus == hwnd || unsafe { IsChild(container, focus) } != 0 {
-                unsafe { SetFocus(GetParent(container)) };
+                unsafe { SetFocus(host) };
             }
         }
 
         pub fn give(hwnd: HWND) {
+            if is_popup(hwnd) { unsafe { SetForegroundWindow(hwnd) }; return; }
             ACTIVE.set(hwnd);
             unsafe { SetFocus(hwnd) };
         }
@@ -1062,6 +1257,10 @@ mod win {
         }
 
         unsafe extern "system" fn proc(host: HWND, msg: u32, wparam: WPARAM, lparam: LPARAM, _: usize, _: usize) -> LRESULT {
+            if msg == FOCUS_POPUP {
+                if is_popup(wparam as HWND) { unsafe { SetForegroundWindow(wparam as HWND) }; }
+                return 0;
+            }
             match msg {
                 WM_PARENTNOTIFY => {
                     let event = (wparam & 0xffff) as u32;
@@ -1098,7 +1297,7 @@ mod win {
 
 #[cfg(test)]
 mod tests {
-    use super::{class_matches, fork_workspace, safe_directory, windows_folder};
+    use super::{class_matches, editor_version, fork_workspace, safe_directory, unity_version, windows_folder};
     use serde_json::json;
 
     #[test]
@@ -1152,6 +1351,8 @@ mod tests {
         assert_eq!(windows_folder("vscode-remote://wsl%2BUbuntu-24.04/root").unwrap(), r"\\wsl.localhost\Ubuntu-24.04\root");
         assert!(windows_folder("vscode-remote://ssh-remote+vps/root/app").is_err());
         assert!(windows_folder("  ").is_err());
+        assert_eq!(windows_folder(r"C:\dev\app\").unwrap(), r"C:\dev\app");
+        assert_eq!(windows_folder("file:///C:/").unwrap(), r"C:\");
     }
 
     #[test]
@@ -1160,5 +1361,19 @@ mod tests {
         assert!(!class_matches("Chrome_WidgetWin_1", "Chrome_WidgetWin_10"));
         assert!(class_matches("HwndWrapper[Fork.exe;*", "HwndWrapper[Fork.exe;;f99ed41f-8634-42e2-ab0d-34b527cb1e44]"));
         assert!(!class_matches("HwndWrapper[Fork.exe;*", "HwndWrapper[Other.exe;;f99ed41f]"));
+    }
+
+    #[test]
+    fn unity_projects_name_their_editor_version() {
+        let text = "m_EditorVersion: 6000.6.6f1\nm_EditorVersionWithRevision: 6000.6.6f1 (d20c9ac777da)\n";
+        assert_eq!(editor_version(text).as_deref(), Some("6000.6.6f1"));
+        assert_eq!(editor_version("m_EditorVersion:   \n"), None);
+        let project = std::env::temp_dir().join(format!("herdr-unity-test-{}", std::process::id()));
+        std::fs::create_dir_all(&project).unwrap();
+        assert!(unity_version(&project).unwrap_err().to_string().contains("is not a Unity project"));
+        std::fs::create_dir(project.join("ProjectSettings")).unwrap();
+        std::fs::write(project.join("ProjectSettings").join("ProjectVersion.txt"), "m_EditorVersion: 2022.3.62f3\r\n").unwrap();
+        assert_eq!(unity_version(&project).unwrap(), "2022.3.62f3");
+        std::fs::remove_dir_all(&project).unwrap();
     }
 }
