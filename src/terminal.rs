@@ -107,8 +107,6 @@ pub struct TerminalView {
     selection_scroll: Option<Task<()>>,
     /// The terminal's folder, for links to relative paths.
     pub cwd: Option<PathBuf>,
-    /// The folder its program last reported itself (OSC 7 and its kin).
-    reported: Option<crate::folder_report::Report>,
     /// The link under the pointer while the link modifier is held.
     link: Option<LinkTarget>,
     /// Right-clicks go to the program when it takes the mouse (Shift: the menu).
@@ -248,7 +246,6 @@ impl TerminalView {
             selection_pointer: Point::default(),
             selection_scroll: None,
             cwd: None,
-            reported: None,
             link: None,
             right_click_to_program: false,
             grid: Rc::new(RefCell::new(Grid {
@@ -519,12 +516,8 @@ impl TerminalView {
             let title = if title.is_empty() { self.address.clone() } else { title };
             self.set_title(&title, cx);
         }
-        // Shells repeat it at every prompt: news only when it changed.
-        if let Some(report) = pwd.map(|raw| crate::folder_report::parse(&raw))
-            && report != self.reported
-        {
-            self.reported = report.clone();
-            cx.emit(TerminalEvent::FolderReported(report));
+        if let Some(raw) = pwd {
+            cx.emit(TerminalEvent::FolderReported(crate::folder_report::parse(&raw)));
         }
         if !open {
             cx.emit(TerminalEvent::Ended);

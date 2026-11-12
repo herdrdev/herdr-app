@@ -2237,16 +2237,20 @@ impl AppWindow {
     /// A program reported its terminal's folder, or cleared it: it holds while
     /// that program stays in front (see `reported_folders`).
     fn folder_reported(&mut self, addr: &str, report: Option<crate::folder_report::Report>, cx: &mut Context<Self>) {
-        match report {
+        let news = match report {
             Some(report) => {
                 let pid = self.live.get(addr).and_then(front_pid);
-                self.reported.insert(addr.to_owned(), Reported { report, pid });
+                let report = Reported { report, pid };
+                // Shells repeat it at every prompt.
+                let news = self.reported.get(addr) != Some(&report);
+                self.reported.insert(addr.to_owned(), report);
+                news
             }
-            None => {
-                self.reported.remove(addr);
-            }
+            None => self.reported.remove(addr).is_some(),
+        };
+        if news {
+            self.folders_moved(cx);
         }
-        self.folders_moved(cx);
     }
 
     /// Shows a folder change that came outside the core's events.
@@ -2267,7 +2271,7 @@ impl AppWindow {
     /// through ssh. A machine's hostname is asked for once.
     fn reported_folders(&mut self, cx: &mut Context<Self>) -> HashMap<String, String> {
         let live = &self.live;
-        self.reported.retain(|addr, r| live.get(addr).is_some_and(|rec| front_pid(rec) == r.pid));
+        self.reported.retain(|addr, r| live.get(addr).is_some_and(|rec| r.still_in_front(rec)));
         let mut held = HashMap::new();
         let mut ask = HashSet::new();
         for (addr, r) in &self.reported {
@@ -4644,9 +4648,22 @@ struct FolderCheck {
 }
 
 /// A folder a program reported itself, and what was in front then.
+#[derive(Debug, PartialEq)]
 struct Reported {
     report: crate::folder_report::Report,
+    /// None: the terminal wasn't listed yet; its first listing names the program.
     pid: Option<u64>,
+}
+
+impl Reported {
+    /// Whether the program in front is still the one that reported.
+    fn still_in_front(&mut self, rec: &Value) -> bool {
+        let front = front_pid(rec);
+        if self.pid.is_none() {
+            self.pid = front;
+        }
+        self.pid == front
+    }
 }
 
 /// A machine's own hostname, as `hostname` there prints it.
@@ -5154,6 +5171,22 @@ fn changed_asset_paths(home: &std::path::Path, changed: &[std::path::PathBuf]) -
 mod tests {
     use gpui::{div, point, px, size, Context, IntoElement, Render, TestAppContext, Window};
     use gpui::prelude::*;
+
+    #[test]
+    fn a_reported_folder_holds_while_its_program_stays_in_front() {
+        use serde_json::json;
+        let report = || crate::folder_report::parse("file:///src/feature").unwrap();
+        let mut shell = super::Reported { report: report(), pid: Some(10) };
+        // Windows: the core names the PowerShell that Pi runs in, wherever Pi moves.
+        assert!(shell.still_in_front(&json!({ "pid": 10, "foreground": { "pid": 10, "cwd": "C:\\old" } })));
+        assert!(shell.still_in_front(&json!({ "pid": 10 })));
+        // Another program came to the front: the report is over.
+        assert!(!shell.still_in_front(&json!({ "pid": 10, "foreground": { "pid": 11 } })));
+        // Reported before the terminal was listed: its first listing names the program.
+        let mut early = super::Reported { report: report(), pid: None };
+        assert!(early.still_in_front(&json!({ "pid": 20 })));
+        assert!(!early.still_in_front(&json!({ "pid": 20, "foreground": { "pid": 21 } })));
+    }
 
     #[test]
     fn going_back_into_a_split_column_takes_its_top_pane_whatever_the_fractions() {
