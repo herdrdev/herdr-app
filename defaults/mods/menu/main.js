@@ -94,7 +94,10 @@ function shortcut(name, args) {
 
 export default class Menu extends View {
   init(_props, cx) {
-    this.at = 0;
+    // No row is current until the pointer or the keys pick one: a preselected
+    // row would paint its selected background next to the hovered row, and the
+    // menu would open showing two lit rows.
+    this.at = -1;
     this.git = null;
     this.handle = cx.focus_handle();
     this.handle.focus();
@@ -150,6 +153,11 @@ export default class Menu extends View {
             .text_color(t.foreground)
             .when(i === this.at, (el) => el.bg(t.selected))
             .hover((s) => s.bg(t.hover))
+            .on_hover((hovered, cx) => {
+              if (!hovered || this.at === i) return;
+              this.at = i;
+              cx.notify();
+            })
             .on_click((_e, cx) => this.choose(i, cx))
             .child(svg(menuIcon(it[1])).size(14).flex_none().text_color(t.muted))
             .child(div().flex_1().child(it[0]))

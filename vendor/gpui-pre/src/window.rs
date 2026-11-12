@@ -5921,7 +5921,11 @@ impl Window {
     }
 
     fn dispatch_mouse_event(&mut self, event: &dyn Any, cx: &mut App) {
-        let hit_test = self.rendered_frame.hit_test(self.mouse_position());
+        // Hit-test against the position of the event itself (`self.mouse_position` tracks it),
+        // not the platform's view: on macOS plain mouse-moved events are not in the event
+        // stream for normal windows (a tracking area delivers those), so the platform
+        // location can lag the pointer and hover styles would stick to a stale row.
+        let hit_test = self.rendered_frame.hit_test(self.mouse_position);
         if hit_test != self.mouse_hit_test {
             self.mouse_hit_test = hit_test;
             self.reset_cursor_style(cx);

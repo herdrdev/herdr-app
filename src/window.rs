@@ -6353,4 +6353,140 @@ export default class SystemToast extends View {
         assert!(!super::adoptable(&record("live"), "sp1", Some("tb2"), None));
     }
 
+    #[test]
+    fn popup_menu_hover_does_not_stick() {
+        in_own_process("popup_menu_hover_clears");
+    }
+
+    /// A popup menu row the pointer visited must drop its hover when the
+    /// pointer moves on: no second highlighted row may stay behind.
+    #[gpui::test]
+    fn popup_menu_hover_clears(cx: &mut TestAppContext) {
+        use serde_json::json;
+        if !running_alone("popup_menu_hover_clears") {
+            return;
+        }
+        // A copy of the shipped menu's rows: hover bg on a stateful row, like
+        // both the stock `menu` and flockbook's draw them. Row 0 paints red
+        // and row 5 green while unhovered, so the test can find them among the
+        // painted quads; row 5's hover is opaque magenta, so a lit row 5 reads
+        // unmistakably.
+        const MENU_JS: &str = r##"
+import { View, div } from "gpui-kit";
+import { v_flex, h_flex } from "gpui-base";
+import { theme, props } from "herdr";
+
+const ROW_H = 28, PAD = 6;
+
+export default class Menu extends View {
+  init(_props, _cx) {}
+  render(_cx) {
+    const t = theme();
+    const p = props() ?? {};
+    if (p.view !== "menu") return v_flex().size_full().bg(t.popover);
+    return v_flex().p(PAD).children(
+      (p.items ?? []).map((it, i) =>
+        h_flex().id(`menu-${i}`).h(ROW_H).px(10).items_center().rounded(6)
+          .bg(i === 0 ? "#ff0000" : i === 5 ? "#00ff00" : "#0000ff")
+          .hover((s) => s.bg(i === 5 ? "#ff00ff" : t.hover))
+          .on_click(() => {})
+          .child(div().child(it.label)))
+    );
+  }
+}
+"##;
+        let (view, cx) = open_window(cx, "menu", MENU_JS, json!({
+            "id": "root", "type": "block", "content": { "mod": "menu" }
+        }));
+        let quads = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                let _ = window.draw(cx);
+                window.painted_quads()
+            })
+        };
+        let items = ["Split right", "Split down", "Zoom", "Show chat", "Remove helper", "Close tab"];
+        let red: gpui::Background = gpui::rgb(0xff0000).into();
+        let green: gpui::Background = gpui::rgb(0x00ff00).into();
+        let magenta: gpui::Background = gpui::rgb(0xff00ff).into();
+        let blue: gpui::Background = gpui::rgb(0x0000ff).into();
+        let quad_of = |quads: &[gpui::Quad], bg: &gpui::Background| quads.iter().find(|q| q.background == *bg).cloned();
+
+        // Right-click near the bottom-right edge, like the reported repro: the
+        // popup snaps up and sideways, and the pointer ends up over one of its
+        // rows (the third here, clear of the update pill that also lives in
+        // that corner).
+        let viewport = cx.update(|window, _| window.viewport_size());
+        let at = point(px(f32::from(viewport.width) - 100.0), px(f32::from(viewport.height) - 90.0));
+        let scale = cx.update(|window, _| window.scale_factor());
+        cx.update(|window, cx| window.simulate_mouse_move(at, cx));
+        // Open the popup mid-window, away from every edge, so it is not moved.
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.open_overlay(crate::mods::new_overlay_id(), json!({
+                "kind": "popup", "mod": "menu", "width": 220,
+                "at": { "x": f32::from(at.x) as f64, "y": f32::from(at.y) as f64 },
+                "props": { "view": "menu", "items": items.iter().map(|label| json!({ "label": label })).collect::<Vec<_>>() },
+            }), window, cx);
+        }));
+
+        // The popup paints with the row under the pointer lit: no event has
+        // arrived since the click, the frame's own hit test at the pointer's
+        // position lights it.
+        let body = 'found: {
+            for _ in 0..200 {
+                // The mod copy renders on the runtime's own thread: give it
+                // real time, then let the window take the answer.
+                std::thread::sleep(std::time::Duration::from_millis(25));
+                cx.run_until_parked();
+                let popover: gpui::Background = crate::settings::color("popover").into();
+                let drawn = quads(cx);
+                // The popup body: popover-colored and exactly the asked width.
+                if let Some(q) = drawn.iter().find(|q| {
+                    q.background == popover && q.bounds.size.width.as_f32() == 220.0 * scale
+                }) {
+                    break 'found q.bounds;
+                }
+            }
+            panic!("the popup never painted");
+        };
+        // Rows sit inside the popup's 1px border and 6px padding, 28px tall.
+        // Quad bounds are scaled pixels; `scale` converts.
+        let s = |v: f32| gpui::ScaledPixels(v * scale);
+        let row_bounds = |i: usize| {
+            gpui::Bounds::new(
+                point(body.left() + s(7.0), body.top() + s(7.0 + 28.0 * i as f32)),
+                size(s(206.0), s(28.0)),
+            )
+        };
+        let open_row = 3;
+        let drawn = quads(cx);
+        let near = drawn.iter().filter(|q| q.bounds.intersects(&body)).map(|q| (q.bounds, q.background)).collect::<Vec<_>>();
+        let lit = drawn.iter().find(|q| q.bounds == row_bounds(open_row)).map(|q| q.background);
+        assert!(lit.is_some_and(|bg| bg != blue), "the row under the pointer never lit at open: {lit:?}; near body: {near:?}");
+
+        // Then walk up the menu, one row at a time, a frame after each step,
+        // like a hand crossing the menu.
+        for step in (0..open_row).rev() {
+            let center = row_bounds(step).center();
+            cx.update(|window, cx| window.simulate_mouse_move(
+                point(px(center.x.as_f32() / scale), px(center.y.as_f32() / scale)),
+                cx,
+            ));
+            cx.run_until_parked();
+            quads(cx);
+        }
+
+        let drawn = quads(cx);
+        let at_row0 = drawn.iter().find(|q| q.bounds == row_bounds(0)).map(|q| q.background);
+        assert!(
+            at_row0.is_some_and(|bg| bg != red),
+            "the row under the pointer never lit up: {at_row0:?}",
+        );
+        let left_behind = drawn.iter().find(|q| q.bounds == row_bounds(open_row)).map(|q| q.background);
+        assert_eq!(
+            left_behind,
+            Some(blue),
+            "the row the pointer left keeps its highlight",
+        );
+    }
+
 }
