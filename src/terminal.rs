@@ -2119,8 +2119,12 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
                         Some((vt::Underline::Curly, color)) => {
                             // GPUI's wave is three thicknesses tall, around its middle.
                             let offset = (top - thick).min(cell.height - thick * 3.0);
-                            let style = UnderlineStyle { thickness: thick, color: Some(color), wavy: true };
-                            window.paint_underline(at(*from, y) + point(px(0.0), offset), width, &style);
+                            let bounds = snap_box(Bounds::new(at(*from, y) + point(px(0.0), offset), size(width, thick * 3.0)));
+                            // Share the row's wave origin; clip each color run.
+                            window.with_content_mask(Some(ContentMask { bounds }), |window| {
+                                let style = UnderlineStyle { thickness: thick, color: Some(color), wavy: true };
+                                window.paint_underline(point(origin.x, bounds.origin.y), bounds.right() - origin.x, &style);
+                            });
                         }
                         Some((vt::Underline::Dotted, color)) => {
                             // Dots wider than the line and about a dot apart, at least one a cell, as Ghostty draws them.
@@ -3566,6 +3570,62 @@ mod tests {
                 assert!(inside > 10, "fixture must draw row {y}");
                 assert_eq!(outside, 0, "row {y} glyph must fit its {slots} cell(s)");
             }
+        }).unwrap();
+        crate::settings::set((*original).clone());
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn undercurl_color_changes_preserve_the_wave() {
+        use super::*;
+
+        struct Underlines;
+        impl Render for Underlines {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().bg(rgb(0)).child(canvas(
+                    |_, _, _| {},
+                    |_, _, window, cx| {
+                        let cell = cell_metrics(window).size;
+                        let mut vt = Vt::new(20, 2);
+                        vt.set_theme(vt::Theme { bg: Rgb(0, 0, 0), ..vt::theme() });
+                        let sample = " ".repeat(10);
+                        // First row is red throughout; second row changes from red to green.
+                        vt.write(format!("\x1b[?25l\x1b[4:3;58;2;255;0;0m{sample}{sample}\x1b[2;1H{sample}\x1b[58;2;0;255;0m{sample}").as_bytes());
+                        let grid = Rc::new(RefCell::new(Grid {
+                            vt, core: crate::hc::offline(), channel: None, attach_ready: false, fit_ready: None,
+                            cell, scale: window.scale_factor(), vt_cell: device_cell(cell, window.scale_factor()),
+                            told_display: None, origin: Point::default(), buttons_down: Vec::new(), images: HashMap::new(),
+                            hover: None, link_spans: Vec::new(), marked: None, cursor_at: None, thumb: None, track: None,
+                            painted: Vec::new(), painted_with: (0, Size::default(), String::new(), 0, false),
+                        }));
+                        let bounds = Bounds::new(Point::default(), size(cell.width * 20. + px(8.), cell.height * 2.));
+                        paint_grid(bounds, &grid, false, window, cx);
+                    },
+                ).size_full())
+            }
+        }
+
+        let original = crate::settings::get();
+        let mut settings = (*original).clone();
+        settings.terminal_padding = [4., 0.];
+        settings.terminal_opacity = 1.;
+        settings.pane_scrollbars = false;
+        crate::settings::set(settings);
+        let mut cx = HeadlessAppContext::with_platform(Arc::new(NoopTextSystem), Arc::new(()), gpui_platform::current_headless_renderer);
+        let window = cx.open_window(size(px(400.), px(100.)), |_, cx| cx.new(|_| Underlines)).unwrap();
+        cx.update_window(window.into(), |_, window, cx| {
+            let _ = window.draw(cx);
+            let image = window.render_to_image().unwrap();
+            if let Ok(path) = std::env::var("HERDR_UNDERLINE_PIXELS") { image.save(path).unwrap(); }
+            let scale = window.scale_factor();
+            let cell = cell_metrics(window).size;
+            let (width, height) = ((f32::from(cell.width) * 20. * scale) as u32, (f32::from(cell.height) * scale) as u32);
+            // Ignore hue: changing from red to green must leave the same shape.
+            let row = |y| image::imageops::crop_imm(&image, (4. * scale) as u32, y, width, height)
+                .to_image().pixels().map(|p| p[0].max(p[1])).collect::<Vec<_>>();
+            let reference = row(0);
+            assert!(reference.iter().any(|&p| p > 100), "the probe must draw an undercurl");
+            assert!(row(height) == reference, "a color change must not restart the wave");
         }).unwrap();
         crate::settings::set((*original).clone());
     }
