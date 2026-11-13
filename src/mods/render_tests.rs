@@ -225,16 +225,13 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
     module = module.async_function("pickFolder", |_| Ok(async { Ok(HostValue::Null) }));
     module = module.async_function("nextCommand", |_| Ok(std::future::pending::<gpui_shell::HostResult>()));
     module = module.cancellable_async_function("watchFolder", HostValue::Array(vec![]), |_| Ok(std::future::pending::<gpui_shell::HostResult>()));
-    for name in ["exec", "hc", "readTextFile", "writeTextFile", "sendFeedback"] {
+    for name in ["exec", "hc", "findCore", "readTextFile", "writeTextFile", "sendFeedback"] {
         let calls = calls.clone();
         module = module.async_function(name, move |a| {
             let first = a.get(0).map(from_host).unwrap_or(Value::Null);
             let reply = match name {
                 "readTextFile" if first == "/fixture/app/settings.json" || first == "/fixture/.ssh/config" => Some(Value::Null),
                 "writeTextFile" if first == "/fixture/app/settings.json" => Some(Value::Null),
-                "readTextFile" if first == "/fixture/app/frame/settings/find-core.sh" => {
-                    Some(json!(include_str!("../../defaults/frame/settings/find-core.sh")))
-                }
                 "readTextFile" => first
                     .as_str()
                     .and_then(|p| p.strip_prefix("/fixture/app/layouts/"))
@@ -254,26 +251,11 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
                 "exec" if first == "wsl.exe" && a.get(1).map(from_host) == Some(json!(["--list", "--quiet"])) => {
                     Some(json!({"code":0,"stdout":"Ubuntu\nDebian\ndocker-desktop\n","stderr":""}))
                 }
-                "exec"
-                    if first == "wsl.exe"
-                        && a.get(1)
-                            .map(from_host)
-                            .and_then(|v| v.as_array().and_then(|arr| arr.get(1).and_then(Value::as_str).map(str::to_owned)))
-                            .as_deref()
-                            == Some("Ubuntu") =>
-                {
-                    Some(json!({"code":0,"stdout":"","stderr":""}))
+                // Distro probes: Ubuntu has a guest core, Debian doesn't.
+                "findCore" if first.get("distro").and_then(Value::as_str) == Some("Ubuntu") => {
+                    Some(json!({"path": "/home/test/.local/bin/hc"}))
                 }
-                "exec"
-                    if first == "wsl.exe"
-                        && a.get(1)
-                            .map(from_host)
-                            .and_then(|v| v.as_array().and_then(|arr| arr.get(1).and_then(Value::as_str).map(str::to_owned)))
-                            .as_deref()
-                            == Some("Debian") =>
-                {
-                    Some(json!({"code":1,"stdout":"","stderr":""}))
-                }
+                "findCore" => Some(json!({"missing": true})),
                 "exec"
                     if first == "git"
                         && [
@@ -1272,10 +1254,6 @@ fn status_bar_shows_the_real_palette_key(cx: &mut TestAppContext) {
 fn settings_machines_shows_wsl_distros_on_windows(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
-    assert_eq!(
-        std::fs::read_to_string(staged.0.join("frame/settings/find-core.sh")).unwrap(),
-        include_str!("../../defaults/frame/settings/find-core.sh")
-    );
     let mut p = props();
     p["section"] = json!("machines");
     let mut values = fixture(true, p, updates("current", "current"));
@@ -1303,7 +1281,7 @@ fn settings_machines_shows_wsl_distros_on_windows(cx: &mut TestAppContext) {
     assert!(calls.borrow().unexpected.is_empty(), "{:?}", calls.borrow().unexpected);
     assert!(tree.contains("st-wsl-button"), "WSL dropdown button must render on This computer: {tree}");
     assert!(
-        tree.contains("Couldn't reach WSL (Debian)"),
+        tree.contains("herdr-core (hc) is missing in Debian"),
         "selecting a distro without hc must report an error: {tree}"
     );
     assert!(

@@ -408,7 +408,7 @@ fn write_text_with(mut cmd: Command, path: &str, text: &str, expected: Option<&s
     let mut input = expected.unwrap_or_default().as_bytes().to_vec();
     let expected_len = input.len();
     input.extend_from_slice(text.as_bytes());
-    cmd.args(["-c", include_str!("wsl/write-text.sh"), "sh", path,
+    cmd.args(["-c", write_text_script(), "sh", path,
         if expected.is_some() { "1" } else { "0" }, &expected_len.to_string(), &text.len().to_string()]);
     let out = run_wsl_input(cmd, WSL_TIMEOUT, Some(&input))?;
     require_success(&out, "Cannot save file in WSL")
@@ -421,28 +421,47 @@ fn path_with_core_first(path: &str, dir: &str) -> String {
         .join(":")
 }
 
-const FIND_CORE_SCRIPT: &str = include_str!("../defaults/frame/settings/find-core.sh");
+/// Scripts run through `sh`, as text it can parse: a checkout can hand the
+/// files CRLF, which the shell reads as part of every word.
+fn write_text_script() -> &'static str {
+    static SCRIPT: OnceLock<String> = OnceLock::new();
+    SCRIPT.get_or_init(|| include_str!("wsl/write-text.sh").replace("\r\n", "\n"))
+}
+
+fn find_core_script() -> &'static str {
+    static SCRIPT: OnceLock<String> = OnceLock::new();
+    SCRIPT.get_or_init(|| include_str!("wsl/find-core.sh").replace("\r\n", "\n"))
+}
 
 /// Finds `herdr-core` (`hc`) inside the active WSL distribution.
 pub fn find_core(configured: Option<&str>) -> Result<Option<PathBuf>, String> {
     environment()?;
     let mut cmd = command("sh", None);
-    cmd.args(["-c", FIND_CORE_SCRIPT, "sh", configured.unwrap_or("")]);
+    cmd.args(["-c", find_core_script(), "sh", configured.unwrap_or("")]);
     let out = run_wsl_timed(cmd, WSL_TIMEOUT)?;
-    core_probe_result(&out)
+    core_probe_result(&out, "Cannot reach the selected WSL distribution")
 }
 
-fn core_probe_result(out: &Output) -> Result<Option<PathBuf>, String> {
+/// Finds `herdr-core` (`hc`) inside a distribution that isn't selected yet:
+/// the Settings check (`findCore`) runs the same probe before saving a choice.
+pub fn find_core_in(distro: &str, configured: Option<&str>) -> Result<Option<PathBuf>, String> {
+    let mut cmd = host_command();
+    cmd.args(["-d", distro, "--cd", "~", "-e", "sh", "-c", find_core_script(), "sh", configured.unwrap_or("")]);
+    let out = run_wsl_timed(cmd, WSL_TIMEOUT)?;
+    core_probe_result(&out, &format!("Cannot reach WSL ({distro})"))
+}
+
+fn core_probe_result(out: &Output, unreachable: &str) -> Result<Option<PathBuf>, String> {
     if out.status.code() == Some(3) {
         return Ok(None);
     }
-    require_success(out, "Cannot reach the selected WSL distribution")?;
+    require_success(out, unreachable)?;
     let text = decode_output(&out.stdout);
     let found = text
         .lines()
         .next()
         .filter(|s| !s.is_empty())
-        .ok_or("WSL returned an empty herdr-core probe; check the selected distribution.")?;
+        .ok_or("WSL returned an empty herdr-core probe; check the distribution.")?;
     Ok(Some(PathBuf::from(found)))
 }
 
@@ -802,17 +821,17 @@ mod tests {
             stdout: stdout.to_vec(),
             stderr: b"distribution unavailable".to_vec(),
         };
-        assert_eq!(core_probe_result(&output(3, b"")), Ok(None));
+        assert_eq!(core_probe_result(&output(3, b""), "cannot reach"), Ok(None));
         assert!(
-            core_probe_result(&output(1, b""))
+            core_probe_result(&output(1, b""), "cannot reach")
                 .unwrap_err()
                 .contains("distribution unavailable")
         );
         assert_eq!(
-            core_probe_result(&output(0, b"/home/test/hc\n")),
+            core_probe_result(&output(0, b"/home/test/hc\n"), "cannot reach"),
             Ok(Some("/home/test/hc".into()))
         );
-        assert!(core_probe_result(&output(0, b"")).is_err());
+        assert!(core_probe_result(&output(0, b""), "cannot reach").is_err());
     }
 
     #[cfg(unix)]
@@ -968,7 +987,7 @@ mod tests {
         std::fs::set_permissions(&core, std::fs::Permissions::from_mode(0o755)).unwrap();
         let probe = |configured: &str, shell: &Path| {
             Command::new("/bin/sh")
-                .args(["-c", FIND_CORE_SCRIPT, "sh", configured])
+                .args(["-c", find_core_script(), "sh", configured])
                 .env("HOME", &home)
                 .env("SHELL", shell)
                 .env("PATH", "/nonexistent")

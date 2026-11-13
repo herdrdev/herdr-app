@@ -733,9 +733,9 @@ What's about the user, never a look:
   Settings reports distro-list failures without clearing your selection.
   After three failed WSL reconnects, a Waiting for WSL notification appears;
   retries back off from one to at most five seconds between attempts.
-  Startup discovery and the Settings check share the bundled
-  `frame/settings/find-core.sh`; like the rest of `frame/`,
-  it is rewritten on start, so don't edit it.
+  Selecting a distribution checks it with the same search the app runs at
+  startup (`findCore`), so a distribution without `hc`, or one that won't
+  start, is reported before the choice is saved.
 - `terminal_line_height` (default 1, 0.8..2) and `terminal_scroll_speed`
   (default 1, 0.1..5): terminal row height and wheel/trackpad speed, used
   where the layout leaves them unset.
@@ -1093,6 +1093,10 @@ All of it is in `herdr.d.ts`. In short:
   `timeout` is milliseconds, defaults to 30,000 and is capped at 600,000 (10 minutes),
   locally and remotely. It rejects on timeout, if the program cannot start or the machine cannot be reached.
   `hc(args)` (`hc read <t>` gives a terminal's text),
+  `findCore({ distro, core })`: the core the app would run (the configured
+  `core`, PATH, the login shell's PATH, the usual install places; with
+  `distro`, inside that WSL distribution), as `{ path }` or
+  `{ missing: true }`; rejects when the search couldn't run.
   `home()`, `appHome()`, `playSound("done" | "blocked" | file)`.
   `knownAgents({ on })`: the agents people can start (programs.json's
   `run`), most picked first, each `installed` or not there (asked of the

@@ -2,7 +2,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input, Popup } from "gpui-base";
-import { hc, exec, run, theme, themes, fonts, updates, telemetry, settings, layouts, shared, appHome, readTextFile, writeTextFile, playSound, props, closeOverlay, notify, window } from "herdr";
+import { hc, exec, findCore, run, theme, themes, fonts, updates, telemetry, settings, layouts, shared, appHome, readTextFile, writeTextFile, playSound, props, closeOverlay, notify, window } from "herdr";
 
 const I = (name) => `frame/settings/${name}.svg`;
 
@@ -746,21 +746,18 @@ export default class Settings extends View {
     cx.notify();
     cx.spawn(async (cx) => {
       try {
-        const probe = await readTextFile(`${appHome()}/frame/settings/find-core.sh`);
-        if (!probe?.trim()) throw new Error("Couldn't read the WSL core probe. Restart Herdr and try again.");
-        const r = await exec("wsl.exe", ["-d", value, "--cd", "~", "-e", "sh", "-c", probe, "sh", this.person.core ?? ""]);
-        if (r.code !== 0) {
-          const detail = r.stderr?.trim();
-          this.wslError = r.code === 3
-            ? `herdr-core (hc) is missing in ${value}. Install it in this distribution and try again.`
-            : `Couldn't reach WSL (${value}). ${detail || "Check that the distribution starts, then try again."}`;
+        // The same search the app runs at startup, on a distro that isn't saved yet.
+        const found = await findCore({ distro: value, core: this.person.core ?? "" });
+        if (found.missing) {
+          this.wslError = `herdr-core (hc) is missing in ${value}. Install it in this distribution and try again.`;
           return;
         }
         this.change((p) => {
           p.wsl = value;
         }, cx);
       } catch (e) {
-        this.wslError = String(e);
+        const detail = String(e?.message ?? e).trim();
+        this.wslError = `Couldn't reach WSL (${value}). ${detail || "Check that the distribution starts, then try again."}`;
       } finally {
         this.wslChecking = null;
         cx.notify();

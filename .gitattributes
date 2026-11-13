@@ -1,2 +1,0 @@
-# WSL executes this shared probe with a POSIX shell, including on Windows.
-defaults/frame/settings/find-core.sh text eol=lf
