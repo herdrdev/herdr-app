@@ -1032,32 +1032,6 @@ fn module(inst: Instance, copy: u64) -> HostModule {
             Ok(crate::mod_files::write_text(a.string(0)?.to_owned(), a.string(1)?.to_owned(), expected))
         })
         .async_function("hc", |a| Ok(exec_future("hc".into(), strings(a.get(0)), None, None, EXEC_LIMIT)))
-        .async_function("findCore", |a| {
-            let options = a.get(0).cloned().unwrap_or(HostValue::Null);
-            let distro = opt_str(Some(&options), "distro").filter(|d| !d.is_empty());
-            let configured = opt_str(Some(&options), "core").filter(|c| !c.is_empty());
-            let (tx, rx) = async_channel::bounded(1);
-            let run = move || {
-                let found = match distro {
-                    Some(distro) if cfg!(windows) => crate::wsl::find_core_in(&distro, configured.as_deref()),
-                    Some(_) => Err("WSL is only available on Windows".to_owned()),
-                    None => crate::core_bin::find(configured.as_deref()),
-                };
-                let _ = tx.send_blocking(found);
-            };
-            #[cfg(not(test))]
-            std::thread::spawn(run);
-            // GPUI tests cannot be woken from a foreign thread (see exec_future).
-            #[cfg(test)]
-            run();
-            Ok(async move {
-                let found = rx.recv().await.map_err(|_| HostError::new("the core search was lost"))?.map_err(HostError::new)?;
-                Ok(match found {
-                    Some(path) => to_host(&json!({ "path": path.to_string_lossy() })),
-                    None => to_host(&json!({ "missing": true })),
-                })
-            })
-        })
         .function("home", |_| Ok(home().to_string_lossy().into_owned().into()))
         .function("appHome", |_| Ok(app_dir().to_string_lossy().into_owned().into()))
         .function("fonts", |_| Ok(to_host(&json!(*FONTS.lock().unwrap()))))

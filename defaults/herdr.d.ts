@@ -16,13 +16,6 @@ export function exec(command: string, args?: string[], options?: { cwd?: string;
 /** Runs `hc` (herdr-core) with the given arguments. Add "--json" for machine output. */
 export function hc(args: string[]): Promise<ExecResult>;
 
-/** Finds herdr-core (`hc`) the way Herdr does at startup: settings.json's `core`, PATH, the
- *  login shell's PATH and the usual install places. With `distro`, inside that WSL distribution
- *  (Windows only) instead of this computer; `core` is the configured `core` to try first.
- *  Resolves `{path}` when found, `{missing: true}` when the search found none.
- *  Rejects when the search couldn't run (for example, the distribution did not start). */
-export function findCore(options?: { distro?: string; core?: string | null }): Promise<{ path: string } | { missing: true }>;
-
 /** The user's home directory. */
 export function home(): string;
 /** The app's folder (`~/.config/herdr-app`, or `$HERDR_APP_HOME`): settings.json, keys.json, layouts/. */

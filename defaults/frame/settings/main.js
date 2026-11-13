@@ -2,7 +2,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input, Popup } from "gpui-base";
-import { hc, exec, findCore, run, theme, themes, fonts, updates, telemetry, settings, layouts, shared, appHome, readTextFile, writeTextFile, playSound, props, closeOverlay, notify, window } from "herdr";
+import { hc, exec, run, theme, themes, fonts, updates, telemetry, settings, layouts, shared, appHome, readTextFile, writeTextFile, playSound, props, closeOverlay, notify, window } from "herdr";
 
 const I = (name) => `frame/settings/${name}.svg`;
 
@@ -56,8 +56,6 @@ export default class Settings extends View {
     this.machineNotice = null;
     this.wslDistros = [];
     this.wslListError = null;
-    this.wslChecking = null;
-    this.wslError = null;
     this.handle = cx.focus_handle();
     this.handle.focus();
     cx.spawn(async (cx) => {
@@ -730,44 +728,20 @@ export default class Settings extends View {
   selectWsl(value, cx) {
     const now = this.person.wsl ?? null;
     this.picking = null;
-    this.wslError = null;
     this.handle.focus();
-    if (this.wslChecking || now === value) {
+    if (now === value) {
       cx.notify();
       return;
     }
-    if (value === null) {
-      this.change((p) => {
-        delete p.wsl;
-      }, cx);
-      return;
-    }
-    this.wslChecking = value;
-    cx.notify();
-    cx.spawn(async (cx) => {
-      try {
-        // The same search the app runs at startup, on a distro that isn't saved yet.
-        const found = await findCore({ distro: value, core: this.person.core ?? "" });
-        if (found.missing) {
-          this.wslError = `herdr-core (hc) is missing in ${value}. Install it in this distribution and try again.`;
-          return;
-        }
-        this.change((p) => {
-          p.wsl = value;
-        }, cx);
-      } catch (e) {
-        const detail = String(e?.message ?? e).trim();
-        this.wslError = `Couldn't reach WSL (${value}). ${detail || "Check that the distribution starts, then try again."}`;
-      } finally {
-        this.wslChecking = null;
-        cx.notify();
-      }
-    });
+    // Saved at once: the next start applies it, and Setup installs hc or offers a retry there.
+    this.change((p) => {
+      if (value === null) delete p.wsl;
+      else p.wsl = value;
+    }, cx);
   }
 
   wslButton(t) {
-    const checking = Boolean(this.wslChecking);
-    const open = !checking && this.picking === "wsl";
+    const open = this.picking === "wsl";
     const label = this.person.wsl ? `${this.person.wsl} (WSL)` : "Windows";
     const trigger = h_flex()
       .id("st-wsl-button")
@@ -781,16 +755,12 @@ export default class Settings extends View {
       .border_1()
       .border_color(open ? t.accent : t.border)
       .bg(t.raised)
-      .when(!checking, (el) => el.cursor_pointer().hover((s) => s.bg(t.hover)))
+      .cursor_pointer()
+      .hover((s) => s.bg(t.hover))
       .child(div().text_size(13).text_color(t.foreground).child(label))
-      .child(checking
-        ? svg("mods/workspace-chrome/spinner.svg").size(12).text_color(t.working).spin(900)
-        : svg("mods/workspace-chrome/chevron-down.svg").size(12).text_color(t.muted));
-    // Keep the selector's label and dimensions while validation runs; it is inert.
-    if (checking) return trigger;
+      .child(svg("mods/workspace-chrome/chevron-down.svg").size(12).text_color(t.muted));
     trigger.on_click((_e, cx) => {
       this.picking = open ? null : "wsl";
-      this.wslError = null;
       if (open) this.handle.focus();
       cx.notify();
     });
@@ -840,7 +810,7 @@ export default class Settings extends View {
     const hasWsl = window()?.platform === "windows" && (this.wslDistros.length > 0 || Boolean(selectedWsl) || Boolean(activeWsl));
     const connected = Boolean(version);
     const pendingRestart = hasWsl && selectedWsl !== activeWsl;
-    const localAbout = `${activeWsl ? `WSL (${activeWsl}) · ` : ""}${connected || !hasWsl ? "Connected · " : ""}${version ? `hc ${version}` : "hc version unknown"}${pendingRestart ? ` · Restart to switch to ${selectedWsl ?? "Windows"}` : ""}${this.wslChecking ? ` · Checking ${this.wslChecking}…` : ""}`;
+    const localAbout = `${activeWsl ? `WSL (${activeWsl}) · ` : ""}${connected || !hasWsl ? "Connected · " : ""}${version ? `hc ${version}` : "hc version unknown"}${pendingRestart ? ` · Restart to switch to ${selectedWsl ?? "Windows"}` : ""}`;
     const restartBtn = div()
       .id("st-wsl-restart")
       .px(12)
@@ -868,7 +838,6 @@ export default class Settings extends View {
       .child(div().pb(8).text_size(12.5).line_height("18px").text_color(t.dim).child("On Windows, This computer can use WSL. Other computers are reached over ssh. Their terminals keep running when you disconnect."))
       .child(this.row(t, "This computer", localAbout, localControl).id("st-local-machine"))
       .when(Boolean(this.wslListError), (el) => el.child(div().pt(8).pb(4).text_size(12.5).text_color(t.dim).child(this.wslListError)))
-      .when(Boolean(this.wslError), (el) => el.child(div().pt(8).pb(4).text_size(12.5).text_color(t.blocked).child(this.wslError)))
       .children((this.machineList ?? []).map((m) => this.machineRow(t, m, version)))
       .when(this.machineList === null && !this.machineError, (el) => el.child(h_flex().py(14).gap(8).items_center().child(svg("mods/workspace-chrome/spinner.svg").size(12).text_color(t.working).spin(900)).child(div().text_size(12.5).text_color(t.dim).child("Reading machines…"))))
       .when(this.machineList?.length === 0, (el) => el.child(div().py(14).text_size(12.5).text_color(t.dim).child("No other machines yet.")))

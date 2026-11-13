@@ -715,12 +715,12 @@ What's about the user, never a look:
   runs "This computer": its herdr-core (`hc`), local spaces, terminals,
   agents, shell and local mod commands (`home()`, `exec`, `files`). Absent
   uses Windows itself. Available in Settings → Machines on the This computer
-  row; herdr-core must already be installed there. Choose Restart (or run
-  `app.restart`) to apply a selection; no downloaded update is needed. Until
-  then the current environment stays active. The app and its
-  configuration (`appHome()`) stay on Windows. Startup discovery and the Settings
-  check distinguish an unreachable distribution (retry after it starts) from
-  missing hc (install it in that distribution). Environment probes retry after
+  row. Choose Restart (or run `app.restart`) to apply a selection; no
+  downloaded update is needed. Until then the current environment stays
+  active. The app and its
+  configuration (`appHome()`) stay on Windows. Startup discovery distinguishes
+  an unreachable distribution (retry after it starts) from missing hc (install
+  it in that distribution). Environment probes retry after
   a five-second failure backoff; WSL discovery, path conversion, installation
   and version checks stop after 30 seconds instead of waiting indefinitely.
   Setup retries and executable checks run in the background; while one is pending,
@@ -733,9 +733,12 @@ What's about the user, never a look:
   Settings reports distro-list failures without clearing your selection.
   After three failed WSL reconnects, a Waiting for WSL notification appears;
   retries back off from one to at most five seconds between attempts.
-  Selecting a distribution checks it with the same search the app runs at
-  startup (`findCore`), so a distribution without `hc`, or one that won't
-  start, is reported before the choice is saved.
+  Choosing a distribution saves it at once; the next start applies it, and
+  Setup then installs `hc` in it (Install it for me) or offers Retry, with
+  Continue without WSL on every screen. WSL stops an idle distribution after
+  15 seconds (`instanceIdleTimeout` in `.wslconfig`; set it to -1 to keep one
+  running), so closing the window ends that distribution's terminals, like
+  `wsl --shutdown`.
 - `terminal_line_height` (default 1, 0.8..2) and `terminal_scroll_speed`
   (default 1, 0.1..5): terminal row height and wheel/trackpad speed, used
   where the layout leaves them unset.
@@ -1093,10 +1096,6 @@ All of it is in `herdr.d.ts`. In short:
   `timeout` is milliseconds, defaults to 30,000 and is capped at 600,000 (10 minutes),
   locally and remotely. It rejects on timeout, if the program cannot start or the machine cannot be reached.
   `hc(args)` (`hc read <t>` gives a terminal's text),
-  `findCore({ distro, core })`: the core the app would run (the configured
-  `core`, PATH, the login shell's PATH, the usual install places; with
-  `distro`, inside that WSL distribution), as `{ path }` or
-  `{ missing: true }`; rejects when the search couldn't run.
   `home()`, `appHome()`, `playSound("done" | "blocked" | file)`.
   `knownAgents({ on })`: the agents people can start (programs.json's
   `run`), most picked first, each `installed` or not there (asked of the

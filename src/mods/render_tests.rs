@@ -225,7 +225,7 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
     module = module.async_function("pickFolder", |_| Ok(async { Ok(HostValue::Null) }));
     module = module.async_function("nextCommand", |_| Ok(std::future::pending::<gpui_shell::HostResult>()));
     module = module.cancellable_async_function("watchFolder", HostValue::Array(vec![]), |_| Ok(std::future::pending::<gpui_shell::HostResult>()));
-    for name in ["exec", "hc", "findCore", "readTextFile", "writeTextFile", "sendFeedback"] {
+    for name in ["exec", "hc", "readTextFile", "writeTextFile", "sendFeedback"] {
         let calls = calls.clone();
         module = module.async_function(name, move |a| {
             let first = a.get(0).map(from_host).unwrap_or(Value::Null);
@@ -251,11 +251,6 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
                 "exec" if first == "wsl.exe" && a.get(1).map(from_host) == Some(json!(["--list", "--quiet"])) => {
                     Some(json!({"code":0,"stdout":"Ubuntu\nDebian\ndocker-desktop\n","stderr":""}))
                 }
-                // Distro probes: Ubuntu has a guest core, Debian doesn't.
-                "findCore" if first.get("distro").and_then(Value::as_str) == Some("Ubuntu") => {
-                    Some(json!({"path": "/home/test/.local/bin/hc"}))
-                }
-                "findCore" => Some(json!({"missing": true})),
                 "exec"
                     if first == "git"
                         && [
@@ -1280,14 +1275,8 @@ fn settings_machines_shows_wsl_distros_on_windows(cx: &mut TestAppContext) {
         .unwrap();
     assert!(calls.borrow().unexpected.is_empty(), "{:?}", calls.borrow().unexpected);
     assert!(tree.contains("st-wsl-button"), "WSL dropdown button must render on This computer: {tree}");
-    assert!(
-        tree.contains("herdr-core (hc) is missing in Debian"),
-        "selecting a distro without hc must report an error: {tree}"
-    );
-    assert!(
-        !calls.borrow().effects.iter().any(|(name, _)| name == "writeTextFile"),
-        "missing hc must not write settings.json"
-    );
+    // The hint only appears once settings.json accepted the choice (save sets person.wsl).
+    assert!(tree.contains("Restart to switch to Debian"), "the chosen distro must be saved and offered a restart: {tree}");
 
     // Opening the dropdown lists Windows, Ubuntu, and Debian (excluding docker-desktop),
     // and selecting Ubuntu shows the Restart button once hc is verified.
@@ -1354,7 +1343,7 @@ fn settings_machines_shows_wsl_distros_on_windows(cx: &mut TestAppContext) {
     assert!(tree3.contains("st-wsl-Debian") && tree3.contains("Debian (WSL)"), "Debian (WSL) option must render: {tree3}");
     assert!(!tree3.contains("docker-desktop"), "docker-desktop must be filtered out: {tree3}");
 
-    // Validating a pending selection does not disconnect the active environment.
+    // A saved but not yet applied choice keeps the picker and the active connection visible.
     let mut p4 = props();
     p4["section"] = json!("machines");
     let mut values4 = fixture(true, p4, updates("current", "current"));
@@ -1364,12 +1353,12 @@ fn settings_machines_shows_wsl_distros_on_windows(cx: &mut TestAppContext) {
         &staged,
         "frame/settings",
         values4,
-        Some("this.wslDistros = ['Ubuntu']; this.wslChecking = 'Ubuntu';"),
+        Some("this.wslDistros = ['Ubuntu']; this.person.wsl = 'Ubuntu';"),
     )
     .unwrap();
-    assert!(tree4.contains("Checking Ubuntu…"), "validation target must be explicit: {tree4}");
-    assert!(tree4.contains("st-wsl-button") && tree4.contains("Windows"), "selector must keep its label while checking: {tree4}");
-    assert!(tree4.contains("Connected · hc"), "active connection must remain visible during validation: {tree4}");
+    assert!(tree4.contains("Restart to switch to Ubuntu"), "pending distro must be explicit: {tree4}");
+    assert!(tree4.contains("st-wsl-button") && tree4.contains("Ubuntu (WSL)"), "selector must show the saved choice: {tree4}");
+    assert!(tree4.contains("Connected · hc"), "active connection must remain visible: {tree4}");
     let mut local_lines = tree4.lines().skip_while(|line| !line.contains("st-local-machine"));
     let local_row = local_lines.next().expect("This computer row");
     let indent = local_row.len() - local_row.trim_start().len();

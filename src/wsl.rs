@@ -439,29 +439,20 @@ pub fn find_core(configured: Option<&str>) -> Result<Option<PathBuf>, String> {
     let mut cmd = command("sh", None);
     cmd.args(["-c", find_core_script(), "sh", configured.unwrap_or("")]);
     let out = run_wsl_timed(cmd, WSL_TIMEOUT)?;
-    core_probe_result(&out, "Cannot reach the selected WSL distribution")
+    core_probe_result(&out)
 }
 
-/// Finds `herdr-core` (`hc`) inside a distribution that isn't selected yet:
-/// the Settings check (`findCore`) runs the same probe before saving a choice.
-pub fn find_core_in(distro: &str, configured: Option<&str>) -> Result<Option<PathBuf>, String> {
-    let mut cmd = host_command();
-    cmd.args(["-d", distro, "--cd", "~", "-e", "sh", "-c", find_core_script(), "sh", configured.unwrap_or("")]);
-    let out = run_wsl_timed(cmd, WSL_TIMEOUT)?;
-    core_probe_result(&out, &format!("Cannot reach WSL ({distro})"))
-}
-
-fn core_probe_result(out: &Output, unreachable: &str) -> Result<Option<PathBuf>, String> {
+fn core_probe_result(out: &Output) -> Result<Option<PathBuf>, String> {
     if out.status.code() == Some(3) {
         return Ok(None);
     }
-    require_success(out, unreachable)?;
+    require_success(out, "Cannot reach the selected WSL distribution")?;
     let text = decode_output(&out.stdout);
     let found = text
         .lines()
         .next()
         .filter(|s| !s.is_empty())
-        .ok_or("WSL returned an empty herdr-core probe; check the distribution.")?;
+        .ok_or("WSL returned an empty herdr-core probe; check the selected distribution.")?;
     Ok(Some(PathBuf::from(found)))
 }
 
@@ -821,17 +812,17 @@ mod tests {
             stdout: stdout.to_vec(),
             stderr: b"distribution unavailable".to_vec(),
         };
-        assert_eq!(core_probe_result(&output(3, b""), "cannot reach"), Ok(None));
+        assert_eq!(core_probe_result(&output(3, b"")), Ok(None));
         assert!(
-            core_probe_result(&output(1, b""), "cannot reach")
+            core_probe_result(&output(1, b""))
                 .unwrap_err()
                 .contains("distribution unavailable")
         );
         assert_eq!(
-            core_probe_result(&output(0, b"/home/test/hc\n"), "cannot reach"),
+            core_probe_result(&output(0, b"/home/test/hc\n")),
             Ok(Some("/home/test/hc".into()))
         );
-        assert!(core_probe_result(&output(0, b""), "cannot reach").is_err());
+        assert!(core_probe_result(&output(0, b"")).is_err());
     }
 
     #[cfg(unix)]
