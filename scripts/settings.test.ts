@@ -22,7 +22,7 @@ const values: Record<string, any> = {
 };
 const names = [...source.matchAll(/^import \{([^}]*)\}/gm)].flatMap(m => m[1].split(",").map(n => n.trim()));
 const args = names.map(name => values[name] ?? (() => undefined));
-const Settings = new Function(...names, source.replace(/^import .*;\n/gm, "").replace("export default class Settings", "return class Settings"))(...args);
+const Settings = new Function(...names, source.replace(/^import .*;\r?\n/gm, "").replace("export default class Settings", "return class Settings"))(...args);
 
 /** Runs `edit` through the Settings window's change() on `raw`; the toasts it posts. */
 async function change(raw: string | null, edit: (q: Record<string, any>) => void, fail?: string, readFail?: string) {

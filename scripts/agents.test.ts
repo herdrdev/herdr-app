@@ -2,7 +2,7 @@ import { test, expect } from "bun:test";
 import { readFile } from "node:fs/promises";
 
 const source = (await readFile(new URL("../defaults/mods/agents/main.js", import.meta.url), "utf8"))
-  .replace(/^import .*;\n/gm, "").replace("export default class Agents", "class Agents");
+  .replace(/^import .*;\r?\n/gm, "").replace("export default class Agents", "class Agents");
 
 function harness(pins: string[], globals: Record<string, unknown> = {}) {
   const data = new Map([["pins", JSON.stringify(pins)]]);
@@ -106,7 +106,7 @@ function textOf(node: any): string {
 
 test("a failed agent check keeps cached launchable agents and shows an error instead of missing agents", async () => {
   const menuSource = (await readFile(new URL("../defaults/mods/new-menu/main.js", import.meta.url), "utf8"))
-    .replace(/^import .*;\n/gm, "").replace("export default class NewMenu", "class NewMenu");
+    .replace(/^import .*;\r?\n/gm, "").replace("export default class NewMenu", "class NewMenu");
   const cached = [
     { key: "claude", name: "Claude Code", run: ["claude"], installed: true },
     { key: "codex", name: "Codex", run: ["codex"], installed: false },
