@@ -387,6 +387,10 @@ pub struct Node {
     /// Dragging this node moves the window; a double-click maximizes it.
     #[serde(default, skip_serializing_if = "is_false")]
     pub window_drag: bool,
+    /// Root only: blur what's behind the window where the system can, so
+    /// colors with alpha show the desktop through frosted glass.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub window_blur: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -425,6 +429,7 @@ impl Node {
             terminal_menu: None,
             toast: None,
             window_drag: false,
+            window_blur: false,
         }
     }
 
@@ -801,7 +806,7 @@ mod tests {
 
     #[test]
     fn documents_parse_with_types_sizes_and_looks() {
-        let json = r#"{ "id": "root", "type": "row", "divider": {"width": 1, "color": "border"},
+        let json = r#"{ "id": "root", "type": "row", "divider": {"width": 1, "color": "border"}, "window_blur": true,
           "children": [
             { "id": "sidebar", "type": "column", "size": {"px": 260},
               "children": [ { "id": "spaces", "type": "block", "content": {"mod": "spaces"} },
@@ -809,6 +814,7 @@ mod tests {
             { "id": "main", "type": "block", "content": {"tab": "active"} } ] }"#;
         let n: Node = serde_json::from_str(json).unwrap();
         assert_eq!(n.find("sidebar").unwrap().size, Some(Size::Px { px: 260.0 }));
+        assert!(n.window_blur && !n.find("sidebar").unwrap().window_blur);
         assert_eq!(n.find("main").unwrap().content(), Some(&Content::Context { tab: "active".into(), pane: None }));
         let back: Node = serde_json::from_str(&serde_json::to_string(&n).unwrap()).unwrap();
         assert_eq!(back, n);

@@ -110,3 +110,6 @@ settings-machine-updated = Updated { $name }; its terminals kept running.
 settings-terminal-line-height = Terminal line height
 settings-terminal-scroll-speed = Terminal scroll speed
 settings-managed-by-update-it-there-available = Managed by { $managed }: update it there. { $ready } is available.
+settings-json-has-errors-fix-it-first = settings.json has errors: fix it first
+settings-cannot-read-json = Cannot read settings.json
+settings-not-saved-json = Not saved to settings.json

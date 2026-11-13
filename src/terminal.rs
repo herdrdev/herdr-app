@@ -1,6 +1,8 @@
 //! A pane showing one core terminal: bytes in from the core, frames drawn
 //! with GPUI, keys and mouse encoded by libghostty-vt and sent back.
 
+mod drag_paths;
+
 use crate::hc::{Core, Stream};
 use crate::vt::{self, CursorShape, Rgb, Select, Vt};
 use ghostty_sys::*;
@@ -68,10 +70,13 @@ enum LinkTarget {
 pub enum TerminalEvent {
     Peek(String),
     TitleChanged,
+    SelectionChanged,
     /// The program ended.
     Ended,
     /// Right-click where the program doesn't take the mouse: the pane menu.
     ContextMenu(Point<Pixels>),
+    /// Something the person asked for failed: an error toast.
+    Notice { title: String, body: String },
 }
 
 /// What the canvas closures need, shared outside the entity so prepaint can resize.
@@ -122,6 +127,7 @@ pub struct TerminalView {
     pub lost: bool,
     /// A left-button selection drag is in progress.
     selecting: bool,
+    published_selection: Option<vt::SelectionPositions>,
     /// A scroll thumb drag is: the px into the thumb it was grabbed at.
     scrollbar_grab: Option<f32>,
     selection_pointer: Point<Pixels>,
@@ -264,6 +270,7 @@ impl TerminalView {
             ended: None,
             lost: false,
             selecting: false,
+            published_selection: None,
             scrollbar_grab: None,
             selection_pointer: Point::default(),
             selection_scroll: None,
@@ -353,6 +360,7 @@ impl TerminalView {
                 Some(wait)
             }
         };
+        self.selection_changed(cx);
         let address = self.address.clone();
         let deadline = cx.background_executor().timer(self.attach_deadline.saturating_duration_since(cx.background_executor().now()));
         // Replacing the task drops an attach still in flight for an older connection.
@@ -430,6 +438,7 @@ impl TerminalView {
                 if let Some(t) = attached.terminal.get("title").and_then(|t| t.as_str()).filter(|t| !t.is_empty()) {
                     self.set_title(t, cx);
                 }
+                cx.emit(TerminalEvent::SelectionChanged);
                 Some(attached.stream)
             }
             // Gone for good (removed, finished, unknown) versus a connection problem.
@@ -551,6 +560,7 @@ impl TerminalView {
             let title = if title.is_empty() { self.address.clone() } else { title };
             self.set_title(&title, cx);
         }
+        self.selection_changed(cx);
         if !open {
             cx.emit(TerminalEvent::Ended);
         }
@@ -638,15 +648,37 @@ impl TerminalView {
         }
     }
 
+    fn paste_paths(&self, paths: impl IntoIterator<Item = String>) {
+        match drag_paths::quote_paths(paths, &self.address, cfg!(windows)) {
+            Ok(text) => {
+                let bytes = self.grid.borrow().vt.paste_bytes(&text);
+                self.send(&bytes);
+            }
+            Err(body) => drag_paths::unavailable(body),
+        }
+    }
+
+    fn dropped_from_mod(&mut self, paths: &gpui_shell::DraggedPaths, window: &mut Window, cx: &mut Context<Self>) {
+        match drag_paths::same_machine(paths, &self.address) {
+            Ok(same) => {
+                self.focus.focus(window, cx);
+                if same {
+                    self.paste_paths(paths.paths.clone());
+                } else {
+                    self.dropped(paths.paths.iter().map(PathBuf::from).collect(), cx);
+                }
+            }
+            Err(body) => drag_paths::unavailable(body),
+        }
+    }
+
     /// Files dropped on the terminal: their paths typed in, quoted, as a paste
     /// (agents read a dropped image that way). A terminal on another machine
     /// gets each file copied there first (`hc put`), and its path there.
     fn dropped(&mut self, paths: Vec<std::path::PathBuf>, cx: &mut Context<Self>) {
         if !self.address.contains('/') {
             let paths = stage_temporary_screenshot(&paths).unwrap_or(paths);
-            let text = quote_paths(paths.iter().map(|p| p.to_string_lossy().into_owned()));
-            let bytes = self.grid.borrow().vt.paste_bytes(&text);
-            return self.send(&bytes);
+            return self.paste_paths(paths.iter().map(|p| p.to_string_lossy().into_owned()));
         }
         self.put_there(paths, false, cx);
     }
@@ -654,31 +686,41 @@ impl TerminalView {
     /// Copies files to this terminal's machine (`hc put`) and pastes their
     /// paths there; `copies`: the local files were only for sending.
     fn put_there(&self, paths: Vec<std::path::PathBuf>, copies: bool, cx: &mut Context<Self>) {
+        if let Err(body) = drag_paths::validate_upload(&paths) {
+            return drag_paths::unavailable(body);
+        }
         let addr = self.address.clone();
         cx.spawn(async move |this, cx| {
-            let there = cx
+            let (there, refused) = cx
                 .background_executor()
                 .spawn(async move {
-                    paths
-                        .iter()
-                        .filter_map(|p| {
-                            let out = crate::spawn::command(crate::core_bin::path()).args(["put", "--json", &addr]).arg(p).output();
-                            if copies {
-                                let _ = std::fs::remove_file(p);
-                            }
-                            let out = out.ok()?;
-                            let v: serde_json::Value = serde_json::from_slice(&out.stdout).ok()?;
-                            v.get("path").and_then(|p| p.as_str()).map(str::to_owned)
-                        })
-                        .collect::<Vec<_>>()
+                    let (mut there, mut refused) = (Vec::new(), Vec::new());
+                    for p in &paths {
+                        let name = || if copies { "the pasted image".to_owned() } else { p.file_name().unwrap_or(p.as_os_str()).to_string_lossy().into_owned() };
+                        if let Some(why) = drag_paths::upload_refusal(p) {
+                            refused.push((name(), why.to_owned()));
+                            continue;
+                        }
+                        let out = crate::spawn::command(crate::core_bin::path()).args(["put", "--json", &addr]).arg(p).output();
+                        if copies {
+                            let _ = std::fs::remove_file(p);
+                        }
+                        match out.map_err(|e| e.to_string()).and_then(|o| put_answer(&o.stdout, &o.stderr)) {
+                            Ok(path) => there.push(path),
+                            Err(why) => refused.push((name(), why)),
+                        }
+                    }
+                    (there, refused)
                 })
                 .await;
-            if !there.is_empty() {
-                let _ = this.update(cx, |this, _| {
-                    let bytes = this.grid.borrow().vt.paste_bytes(&quote_paths(there));
-                    this.send(&bytes);
-                });
-            }
+            let _ = this.update(cx, |this, cx| {
+                if !there.is_empty() {
+                    this.paste_paths(there);
+                }
+                if let Some((title, body)) = refusal_notice(&refused) {
+                    cx.emit(TerminalEvent::Notice { title, body });
+                }
+            });
         })
         .detach();
     }
@@ -734,13 +776,56 @@ impl TerminalView {
         true
     }
 
+    pub fn selection(&self) -> Option<vt::SelectionPositions> {
+        self.grid.borrow().vt.selection_positions()
+    }
+
+    fn selection_changed(&mut self, cx: &mut Context<Self>) {
+        let selection = self.selection();
+        if selection != self.published_selection {
+            self.published_selection = selection;
+            cx.emit(TerminalEvent::SelectionChanged);
+        }
+    }
+
+    pub fn selection_command(&mut self, name: &str, args: &serde_json::Value, cx: &mut Context<Self>) -> Result<(), String> {
+        let mut grid = self.grid.borrow_mut();
+        match name {
+            "terminal.select" => {
+                let at = match args.get("at") {
+                    None => None,
+                    Some(value) if value.as_str() == Some("cursor") => None,
+                    Some(value) => Some(serde_json::from_value::<vt::CellPosition>(value.clone())
+                        .map_err(|_| "terminal.select at is cursor or {row, col} with nonnegative whole numbers")?),
+                };
+                let mode = match args.get("mode") {
+                    None => "cell",
+                    Some(value) => value.as_str().ok_or("terminal.select mode is cell, word or line")?,
+                };
+                grid.vt.select_at(at, mode)?;
+            }
+            "terminal.adjust_selection" => {
+                let direction = args.get("direction").and_then(serde_json::Value::as_str).ok_or("terminal.adjust_selection needs a direction")?;
+                grid.vt.adjust_selection(direction)?;
+            }
+            "terminal.clear_selection" => grid.vt.clear_selection(),
+            _ => unreachable!(),
+        }
+        drop(grid);
+        self.selection_changed(cx);
+        cx.notify();
+        Ok(())
+    }
+
     pub fn select_all(&mut self, cx: &mut Context<Self>) {
         self.grid.borrow_mut().vt.select_all();
+        self.selection_changed(cx);
         cx.notify();
     }
 
     pub fn clear_selection(&mut self, cx: &mut Context<Self>) {
         self.grid.borrow_mut().vt.clear_selection();
+        self.selection_changed(cx);
         cx.notify();
     }
 
@@ -865,7 +950,7 @@ impl TerminalView {
         let k = &ev.keystroke;
         // Typing clears a selection, as in Herdr.
         if !k.key.starts_with("shift") && !k.key.starts_with("control") && !k.key.starts_with("alt") {
-            self.grid.borrow_mut().vt.clear_selection();
+            self.clear_selection(cx);
         }
         let bytes = key_bytes(&mut self.grid.borrow_mut().vt, ev);
         if let Some(bytes) = bytes {
@@ -1019,6 +1104,8 @@ impl TerminalView {
             self.select(Select::Release, pos, cx);
         } else {
             g.vt.clear_selection();
+            drop(g);
+            self.selection_changed(cx);
             cx.notify();
         }
     }
@@ -1032,7 +1119,8 @@ impl TerminalView {
         let height = ch * g.vt.rows as f32;
         g.vt.select(step, col, row, x, y, cw, height);
         drop(g);
-        if matches!(step, Select::Release) {
+        self.selection_changed(cx);
+        if matches!(step, Select::Release) && crate::settings::get().copy_on_select {
             // Copy on select, as in Herdr.
             self.copy(cx);
         }
@@ -1158,20 +1246,6 @@ pub(crate) fn shown_title(title: &str) -> std::borrow::Cow<'_, str> {
     }
 }
 
-/// Paths as a shell reads them, space-separated with a trailing space: bare
-/// when plain, else single-quoted (`'` escaped as the shell wants it).
-fn quote_paths(paths: impl IntoIterator<Item = String>) -> String {
-    let quote = |p: String| {
-        if !p.is_empty() && p.chars().all(|c| c.is_ascii_alphanumeric() || "/._-+=,:@%~".contains(c)) {
-            return p;
-        }
-        if cfg!(windows) { format!("'{}'", p.replace('\'', "''")) } else { format!("'{}'", p.replace('\'', "'\\''")) }
-    };
-    let mut out: String = paths.into_iter().map(quote).collect::<Vec<_>>().join(" ");
-    out.push(' ');
-    out
-}
-
 /// A live macOS screenshot thumbnail, dropped before it saved.
 ///
 /// macOS writes such an image into a private `NSIRD_*` directory under
@@ -1236,6 +1310,31 @@ fn copied_files(item: &ClipboardItem) -> Option<Vec<std::path::PathBuf>> {
 }
 
 /// The clipboard's image saved to a file of its own, for its path to be pasted.
+/// `hc put --json`'s answer: the path there, or why it refused (on stderr).
+fn put_answer(stdout: &[u8], stderr: &[u8]) -> Result<String, String> {
+    let json = |b: &[u8]| serde_json::from_slice::<serde_json::Value>(b).unwrap_or_default();
+    if let Some(path) = json(stdout)["path"].as_str() {
+        return Ok(path.to_owned());
+    }
+    if let Some(why) = json(stderr)["error"]["message"].as_str() {
+        return Err(why.to_owned());
+    }
+    let text = String::from_utf8_lossy(stderr).trim().to_owned();
+    Err(if text.is_empty() { "hc put gave no path".to_owned() } else { text })
+}
+
+fn refusal_notice(refused: &[(String, String)]) -> Option<(String, String)> {
+    match refused {
+        [] => None,
+        [(name, why)] => Some((crate::i18n::translate("terminal-couldn-t-send", &serde_json::json!({"name": name})), why.clone())),
+        many => {
+            let mut why: Vec<&str> = many.iter().map(|(_, w)| w.as_str()).collect();
+            why.dedup();
+            Some((crate::i18n::translate("terminal-couldn-t-send-files", &serde_json::json!({"count": many.len()})), why.join("; ")))
+        }
+    }
+}
+
 fn image_file(item: &ClipboardItem) -> Option<std::path::PathBuf> {
     let image = item.entries().iter().find_map(|e| match e {
         ClipboardEntry::Image(i) => Some(i),
@@ -1734,11 +1833,13 @@ enum RowOp {
     Sprite { x: usize, text: String, color: Hsla },
     Icon { x: usize, offset: Point<Pixels>, font: FontId, glyph: GlyphId, size: Pixels, color: Hsla },
     Text { x: usize, line: ShapedLine },
-    Decoration { from: usize, to: usize, underline: bool, strike: bool, color: Hsla },
+    /// An underline in its style and color, a strikethrough in the text's color.
+    Decoration { from: usize, to: usize, underline: Option<(vt::Underline, Hsla)>, strike: Option<Hsla> },
 }
 
 /// A row's drawing: its backgrounds, merged into runs of one color, then its
-/// text in runs of one style (wide characters, sprites and icons on their own).
+/// text in runs of one style (wide characters, sprites and icons on their own),
+/// then its underlines and strikethroughs.
 fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: &mut Window) -> Vec<RowOp> {
     crate::bench::count(&crate::bench::ROWS);
     let ligatures = crate::settings::get().font_ligatures;
@@ -1762,13 +1863,10 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
         // Consume the first cell before dispatch: every path must make progress,
         // even when a private-use character has no bundled icon glyph.
         x += 1;
-        if c.text.is_empty() && !c.underline && !c.strike {
+        if c.text.is_empty() && c.underline.is_none() && !c.strike {
             continue;
         }
-        let mut color = hsla(c.fg);
-        if c.faint {
-            color.a = 0.6;
-        }
+        let color = cell_color(c);
         if crate::sprites::is_sprite(&c.text) {
             ops.push(RowOp::Sprite { x: start, text: c.text.clone(), color });
             continue;
@@ -1809,7 +1907,7 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
                     && d.underline == c.underline
                     && d.strike == c.strike;
                 // Bundled fallback icons are fitted separately from the text run.
-                if !same || cursor == Some(x) || (d.text.is_empty() && !d.underline && !d.strike) || crate::sprites::is_sprite(&d.text) || fallback_icon(&d.text, &text_font, window.text_system()).is_some() || fallback_size(d, &text_font, cell.width, window.text_system()).is_some() {
+                if !same || cursor == Some(x) || (d.text.is_empty() && d.underline.is_none() && !d.strike) || crate::sprites::is_sprite(&d.text) || fallback_icon(&d.text, &text_font, window.text_system()).is_some() || fallback_size(d, &text_font, cell.width, window.text_system()).is_some() {
                     break;
                 }
                 positions.push((text.len(), cell.width * (x - start) as f32));
@@ -1817,7 +1915,7 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
                 x += 1;
             }
         }
-        if text.trim_matches(' ').is_empty() && !c.underline && !c.strike {
+        if text.trim_matches(' ').is_empty() && c.underline.is_none() && !c.strike {
             continue;
         }
         if ligatures && needs_ligatures(&text, &text_font) {
@@ -1835,11 +1933,35 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
         let line = window.text_system().shape_line(text.into(), fitted_size.unwrap_or_else(|| px(crate::settings::font_size())), &[run], None)
             .with_cell_positions(&positions, width);
         ops.push(RowOp::Text { x: start, line });
-        if c.underline || c.strike {
-            ops.push(RowOp::Decoration { from: start, to: if c.wide { start + 2 } else { x }, underline: c.underline, strike: c.strike, color });
+    }
+    row_decorations(row, &mut ops);
+    ops
+}
+
+/// A cell's text color, dimmed when faint.
+fn cell_color(c: &vt::Cell) -> Hsla {
+    hsla(c.fg).opacity(if c.faint { 0.6 } else { 1.0 })
+}
+
+/// A row's underlines and strikethroughs, from its cells alone, so sprites,
+/// icons and blanks get them too. Neighbours that look the same share one.
+fn row_decorations(row: &[vt::Cell], ops: &mut Vec<RowOp>) {
+    let mut x = 0;
+    while x < row.len() {
+        let c = &row[x];
+        let start = x;
+        x += if c.wide { 2 } else { 1 };
+        if c.underline.is_none() && !c.strike {
+            continue;
+        }
+        let color = cell_color(c);
+        let underline = c.underline.map(|s| (s, c.underline_color.map_or(color, |u| hsla(u).opacity(color.a))));
+        let strike = c.strike.then_some(color);
+        match ops.last_mut() {
+            Some(RowOp::Decoration { to, underline: u, strike: s, .. }) if *to == start && *u == underline && *s == strike => *to = x,
+            _ => ops.push(RowOp::Decoration { from: start, to: x, underline, strike }),
         }
     }
-    ops
 }
 
 /// The find field's editor colors, following the theme at open time.
@@ -1981,12 +2103,50 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
                 RowOp::Text { x, line } => {
                     paint_cell_text(line, at(*x, y), metrics, window, cx);
                 }
-                RowOp::Decoration { from, to, underline, strike, color } => {
-                    for (enabled, offset, thickness) in [(*underline, metrics.underline, metrics.underline_thickness), (*strike, metrics.strike, metrics.strike_thickness)] {
-                        if enabled {
-                            let b = Bounds::new(at(*from, y) + point(px(0.0), offset), size(cell.width * (to - from) as f32, thickness));
-                            window.paint_quad(fill(snap_box(b), *color));
+                RowOp::Decoration { from, to, underline, strike } => {
+                    let width = cell.width * (to - from) as f32;
+                    let line = |offset: Pixels, thickness: Pixels| snap_box(Bounds::new(at(*from, y) + point(px(0.0), offset), size(width, thickness)));
+                    let (top, thick) = (metrics.underline, metrics.underline_thickness);
+                    match *underline {
+                        None => {}
+                        Some((vt::Underline::Single, color)) => window.paint_quad(fill(line(top, thick), color)),
+                        Some((vt::Underline::Double, color)) => {
+                            // A line above and a line below where the single one is, as Ghostty draws it.
+                            let top = top.min(cell.height - thick * 2.0);
+                            window.paint_quad(fill(line(top - thick, thick), color));
+                            window.paint_quad(fill(line(top + thick, thick), color));
                         }
+                        Some((vt::Underline::Curly, color)) => {
+                            // GPUI's wave is three thicknesses tall, around its middle.
+                            let offset = (top - thick).min(cell.height - thick * 3.0);
+                            let style = UnderlineStyle { thickness: thick, color: Some(color), wavy: true };
+                            window.paint_underline(at(*from, y) + point(px(0.0), offset), width, &style);
+                        }
+                        Some((vt::Underline::Dotted, color)) => {
+                            // Dots wider than the line and about a dot apart, at least one a cell, as Ghostty draws them.
+                            let (width, radius) = (f32::from(cell.width) * scale, std::f32::consts::FRAC_1_SQRT_2 * f32::from(thick) * scale);
+                            let count = (width / (4.0 * radius)).ceil().min((width / (3.0 * radius)).floor()).min((width / (2.0 * radius + 1.0)).floor()).max(1.0);
+                            let (step, dot) = (cell.width / count, px(2.0 * radius / scale));
+                            let offset = (top + (thick - dot) / 2.0).min(cell.height - dot);
+                            for i in 0..(to - from) * count as usize {
+                                let b = Bounds::new(at(*from, y) + point(step * (i as f32 + 0.5) - dot / 2.0, offset), size(dot, dot));
+                                window.paint_quad(fill(b, color).corner_radii(dot / 2.0));
+                            }
+                        }
+                        Some((vt::Underline::Dashed, color)) => {
+                            // In every cell a dash, a gap, and the start of the next dash, as Ghostty draws it.
+                            let width = f32::from(cell.width) * scale;
+                            let dash = (width / 3.0).floor() + 1.0;
+                            for x in *from..*to {
+                                for (start, len) in [(0.0, dash.min(width)), (2.0 * dash, (width - 2.0 * dash).max(0.0))] {
+                                    let b = Bounds::new(at(x, y) + point(px(start / scale), top), size(px(len / scale), thick));
+                                    window.paint_quad(fill(snap_box(b), color));
+                                }
+                            }
+                        }
+                    }
+                    if let Some(color) = *strike {
+                        window.paint_quad(fill(line(metrics.strike, metrics.strike_thickness), color));
                     }
                 }
             }
@@ -2225,6 +2385,7 @@ impl Render for TerminalView {
             }))
             .on_key_down(cx.listener(Self::key_down))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| this.dropped(paths.paths().to_vec(), cx)))
+            .on_drop(cx.listener(Self::dropped_from_mod))
             .on_scroll_wheel(cx.listener(Self::scroll))
             .when(self.link.is_some(), |d| d.cursor_pointer())
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
@@ -2767,6 +2928,28 @@ mod tests {
             }
             assert_eq!(grid.vt.search_progress().total, 1, "query edits must keep working after reconnect");
         }));
+    }
+
+    #[gpui::test]
+    fn keyboard_selection_copies_through_the_existing_clipboard(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+        let terminal = cx.new(|cx| super::TerminalView::attach(crate::hc::offline(), "t1".into(), (20, 3), cx));
+        terminal.update(cx, |terminal, cx| {
+            terminal.grid.borrow_mut().vt.write(b"hello world\r\nsecond line");
+            terminal.selection_command("terminal.select", &serde_json::json!({"at": {"row": 0, "col": 1}, "mode": "line"}), cx).unwrap();
+            assert!(terminal.copy(cx));
+            assert_eq!(cx.read_from_clipboard().unwrap().text().as_deref(), Some("hello world"));
+            terminal.selection_command("terminal.clear_selection", &serde_json::json!({}), cx).unwrap();
+            assert!(!terminal.copy(cx));
+            assert!(terminal.selection_command("terminal.adjust_selection", &serde_json::json!({"direction": "left"}), cx).is_err());
+            for at in [serde_json::json!({"row": -1, "col": 0}), serde_json::json!({"row": 0.5, "col": 0}), serde_json::json!("viewport")] {
+                assert!(terminal.selection_command("terminal.select", &serde_json::json!({"at": at}), cx).is_err());
+            }
+            terminal.selection_command("terminal.select", &serde_json::json!({"at": "cursor"}), cx).unwrap();
+            let selection = terminal.selection().unwrap();
+            assert_eq!(selection.start, crate::vt::CellPosition { row: 1, col: 11 });
+            assert_eq!(selection.end, selection.start);
+        });
     }
 
     #[gpui::test]
@@ -3415,11 +3598,48 @@ mod tests {
             }
             for text in ["", " ", "   "] {
                 for (underline, strike) in [(false, false), (true, false), (false, true)] {
-                    let row = [vt::Cell { text: text.into(), underline, strike, ..Default::default() }];
+                    let row = [vt::Cell { text: text.into(), underline: underline.then_some(vt::Underline::Single), strike, ..Default::default() }];
                     let ops = row_ops(&row, size(px(8.), px(16.)), None, window);
                     assert_eq!(ops.iter().filter(|op| matches!(op, RowOp::Text { .. })).count(), usize::from(underline || strike));
                 }
             }
+        }).unwrap();
+    }
+
+    #[gpui::test]
+    fn underlines_and_strikes_follow_the_cells_in_style_and_color(cx: &mut gpui::TestAppContext) {
+        use super::*;
+        use vt::{Rgb, Underline};
+        let window = cx.add_window(|_, _| Empty);
+        window.update(cx, |_, window, _| {
+            let (fg, red, blue) = (Rgb(200, 200, 200), Rgb(255, 0, 0), Rgb(0, 0, 255));
+            let cell = |text: &str, underline, underline_color| vt::Cell { text: text.into(), fg, underline, underline_color, ..Default::default() };
+            let decorations = |row: &[vt::Cell], window: &mut Window| -> Vec<_> {
+                row_ops(row, size(px(8.), px(16.)), None, window).iter().filter_map(|op| match op {
+                    RowOp::Decoration { from, to, underline, strike } => Some((*from, *to, *underline, *strike)),
+                    _ => None,
+                }).collect()
+            };
+            // A tab of bufferline.nvim: a blank, a bar (a sprite), text, a wide character and its tail, a powerline icon.
+            let mut row: Vec<_> = ["", "\u{258e}", "a", "\u{754c}", "", "\u{e0b0}"].iter().map(|t| cell(t, Some(Underline::Single), Some(red))).collect();
+            row[3].wide = true;
+            assert_eq!(decorations(&row, window), vec![(0, 6, Some((Underline::Single, hsla(red))), None)]);
+            // A run ends where the style or the color changes; plain cells have none.
+            let row = [cell("a", Some(Underline::Curly), Some(red)), cell("b", Some(Underline::Curly), None), cell("c", Some(Underline::Dashed), None), cell("d", None, None), cell("e", Some(Underline::Dashed), None)];
+            assert_eq!(decorations(&row, window), vec![
+                (0, 1, Some((Underline::Curly, hsla(red))), None),
+                (1, 2, Some((Underline::Curly, hsla(fg))), None),
+                (2, 3, Some((Underline::Dashed, hsla(fg))), None),
+                (4, 5, Some((Underline::Dashed, hsla(fg))), None),
+            ]);
+            // Faint dims the underline with the text; a strikethrough is in the text's color.
+            let struck = |c: vt::Cell| vt::Cell { strike: true, ..c };
+            let faint = vt::Cell { faint: true, ..struck(cell("a", Some(Underline::Dotted), Some(red))) };
+            assert_eq!(decorations(&[faint], window), vec![(0, 1, Some((Underline::Dotted, hsla(red).opacity(0.6))), Some(hsla(fg).opacity(0.6)))]);
+            // Another text color joins an underline that has its own color, but not a strikethrough.
+            let row = [cell("a", Some(Underline::Single), Some(red)), vt::Cell { fg: blue, ..cell("b", Some(Underline::Single), Some(red)) }];
+            assert_eq!(decorations(&row, window), vec![(0, 2, Some((Underline::Single, hsla(red))), None)]);
+            assert_eq!(decorations(&row.map(struck), window).len(), 2);
         }).unwrap();
     }
 
@@ -3468,6 +3688,78 @@ mod tests {
                 assert_eq!(runs, expected, "cursor: {cursor:?}");
             }
         }).unwrap();
+        crate::settings::set((*original).clone());
+    }
+
+    #[gpui::test]
+    fn copy_on_select_can_be_turned_off(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        struct Root(Entity<super::TerminalView>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().w(px(400.)).h(px(100.)).child(self.0.clone())
+            }
+        }
+        cx.update(gpui_base::init);
+        let original = crate::settings::get();
+        let (root, cx) = cx.add_window_view(|_, cx| {
+            Root(cx.new(|cx| super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 5), cx)))
+        });
+        cx.run_until_parked();
+
+        let drag = |root: &Entity<Root>, cx: &mut VisualTestContext| {
+            root.update(cx, |root, cx| {
+                root.0.update(cx, |terminal, cx| {
+                    terminal.select(super::Select::Press, point(px(1.), px(1.)), cx);
+                    terminal.select(super::Select::Drag, point(px(16.), px(1.)), cx);
+                    terminal.select(super::Select::Release, point(px(31.), px(1.)), cx);
+                });
+            });
+            cx.run_until_parked();
+        };
+        root.update(cx, |root, cx| {
+            root.0.update(cx, |terminal, _| terminal.grid.borrow_mut().vt.write(b"hello"));
+        });
+
+        let mut settings = (*original).clone();
+        settings.copy_on_select = false;
+        crate::settings::set(settings);
+        cx.update(|_, app| {
+            app.write_to_clipboard(ClipboardItem::new_string("unchanged".into()));
+            #[cfg(target_os = "linux")]
+            app.write_to_primary(ClipboardItem::new_string("primary unchanged".into()));
+        });
+        drag(&root, cx);
+        cx.update(|_, app| {
+            assert_eq!(app.read_from_clipboard().unwrap().text().as_deref(), Some("unchanged"));
+            #[cfg(target_os = "linux")]
+            assert_eq!(app.read_from_primary().unwrap().text().as_deref(), Some("primary unchanged"));
+        });
+        let selected = root.update(cx, |root, cx| {
+            root.0.update(cx, |terminal, cx| {
+                let selected = terminal.grid.borrow().vt.selection_text().unwrap();
+                assert!(!selected.is_empty());
+                assert!(terminal.copy(cx));
+                selected
+            })
+        });
+        cx.update(|_, app| {
+            assert_eq!(app.read_from_clipboard().unwrap().text().as_deref(), Some(selected.as_str()));
+            #[cfg(target_os = "linux")]
+            assert_eq!(app.read_from_primary().unwrap().text().as_deref(), Some(selected.as_str()));
+            app.write_to_clipboard(ClipboardItem::new_string("unchanged".into()));
+        });
+
+        let mut settings = (*original).clone();
+        settings.copy_on_select = true;
+        crate::settings::set(settings);
+        drag(&root, cx);
+        let selected = root.read_with(cx, |root, cx| root.0.read_with(cx, |terminal, _| terminal.grid.borrow().vt.selection_text().unwrap()));
+        assert!(!selected.is_empty());
+        cx.update(|_, app| {
+            assert_eq!(app.read_from_clipboard().unwrap().text().as_deref(), Some(selected.as_str()));
+        });
         crate::settings::set((*original).clone());
     }
 
@@ -3570,7 +3862,7 @@ mod tests {
                 for (underline, strike) in [(false, false), (true, false), (false, true), (true, true)] {
                     for text in [format!("{missing}a\u{f10d}"), format!("\u{f10d}{missing}a"), format!("a\u{f10d}{missing}")] {
                         let row: Vec<_> = text.chars().map(|c| crate::vt::Cell {
-                            text: c.to_string(), underline, strike, ..Default::default()
+                            text: c.to_string(), underline: underline.then_some(crate::vt::Underline::Single), strike, ..Default::default()
                         }).collect();
                         let ops = super::row_ops(&row, gpui::size(gpui::px(8.0), gpui::px(16.0)), None, window);
                         let rendered: String = ops.iter().filter_map(|op| match op {
@@ -3619,7 +3911,7 @@ mod tests {
             for code in (0xe000..=0xf8ff).chain(0xf0000..=0xf0fff) {
                 let text = char::from_u32(code).unwrap().to_string();
                 for decorated in [false, true] {
-                    let row = [crate::vt::Cell { text: text.clone(), underline: decorated, strike: decorated, ..Default::default() }];
+                    let row = [crate::vt::Cell { text: text.clone(), underline: decorated.then_some(crate::vt::Underline::Single), strike: decorated, ..Default::default() }];
                     let ops = super::row_ops(&row, gpui::size(gpui::px(8.0), gpui::px(16.0)), None, window);
                     assert_eq!(ops.iter().filter(|op| !matches!(op, super::RowOp::Decoration { .. })).count(), 1, "U+{code:X}");
                     match &ops[0] {
@@ -3868,12 +4160,18 @@ mod tests {
     }
 
     #[test]
-    #[cfg(not(windows))]
-    fn dropped_paths_are_typed_as_the_shell_reads_them() {
-        let q = |v: &[&str]| super::quote_paths(v.iter().map(|s| s.to_string()));
-        assert_eq!(q(&["/tmp/shot.png"]), "/tmp/shot.png ");
-        assert_eq!(q(&["/tmp/my shot.png", "/a/b"]), "'/tmp/my shot.png' /a/b ");
-        assert_eq!(q(&["/tmp/it's.png"]), "'/tmp/it'\\''s.png' ");
+    fn a_file_the_core_refuses_is_named_with_its_reason() {
+        use super::{put_answer, refusal_notice};
+        assert_eq!(put_answer(br#"{"path":"/tmp/a b.png"}"#, b""), Ok("/tmp/a b.png".to_owned()));
+        let big = br#"{"error":{"hint":"see `hc schema`","kind":"invalid_params","message":"too big to send to studio (16 MB at most)"}}"#;
+        let why = put_answer(b"", big).unwrap_err();
+        assert_eq!(why, "too big to send to studio (16 MB at most)");
+        assert_eq!(put_answer(b"", b"no such machine\n"), Err("no such machine".to_owned()));
+        assert_eq!(refusal_notice(&[]), None);
+        assert_eq!(refusal_notice(&[("clip.mp4".into(), why.clone())]), Some(("Couldn't send clip.mp4".into(), why.clone())));
+        let two = refusal_notice(&[("a.mp4".into(), why.clone()), ("b.mov".into(), why.clone())]).unwrap();
+        assert_eq!(two.0, "Couldn't send 2 files");
+        assert_eq!(two.1, why);
     }
 
     #[test]

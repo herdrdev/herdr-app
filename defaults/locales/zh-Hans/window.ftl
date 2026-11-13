@@ -34,3 +34,6 @@ window-updates-ready = Herdr { $app } 和 herdr-core { $core } 已就绪
 window-app-ready = Herdr { $version } 已就绪
 window-core-ready = herdr-core { $version } 已就绪
 window-updated = 已更新至 { $version }
+window-no-update-ready = 还没有可用的更新
+window-couldn-t-replace-files = 无法替换 Herdr 的文件：{ $error }。
+window-close-terminals-and-retry = 关闭 Herdr 的终端（或重启 Windows）后重试。{ $reason }

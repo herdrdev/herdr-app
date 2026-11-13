@@ -270,6 +270,9 @@ pub fn install(bindings: Vec<KeyBinding>, cx: &mut App) {
         KeyBinding::new(ESCAPE_HATCH, ShellAction::new("app.reset"), None),
         KeyBinding::new("escape", ShellAction::new("overlay.close"), Some("Overlay")),
     ]);
+    // The menu bar shows the keys it finds when it's built.
+    #[cfg(target_os = "macos")]
+    crate::macos::refresh_menus(cx);
 }
 
 #[cfg(test)]

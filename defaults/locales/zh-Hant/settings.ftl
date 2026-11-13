@@ -110,3 +110,6 @@ settings-machine-updated = 已更新 { $name }；其終端機持續執行。
 settings-terminal-line-height = 終端機列高
 settings-terminal-scroll-speed = 終端機捲動速度
 settings-managed-by-update-it-there-available = 由 { $managed } 管理:請在那裡更新。{ $ready } 已可用。
+settings-json-has-errors-fix-it-first = settings.json 有錯誤:請先修復
+settings-cannot-read-json = 無法讀取 settings.json
+settings-not-saved-json = 未儲存到 settings.json

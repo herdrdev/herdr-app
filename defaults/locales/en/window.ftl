@@ -34,3 +34,6 @@ window-updates-ready = Herdr { $app } and herdr-core { $core } are ready
 window-app-ready = Herdr { $version } is ready
 window-core-ready = herdr-core { $version } is ready
 window-updated = Updated to { $version }
+window-no-update-ready = no update is ready yet
+window-couldn-t-replace-files = Couldn't replace Herdr's files: { $error }.
+window-close-terminals-and-retry = Close Herdr's terminals (or restart Windows) and try again. { $reason }

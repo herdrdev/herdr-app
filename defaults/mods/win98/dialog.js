@@ -687,6 +687,10 @@ export default class Dialog {
       );
     const month = tr(`common-month-${mo + 1}`);
     const time = [d.getHours(), d.getMinutes(), d.getSeconds()].map(n => String(n).padStart(2, "0")).join(":");
+    const offset = -d.getTimezoneOffset();
+    const offsetHours = String(Math.floor(Math.abs(offset) / 60)).padStart(2, "0");
+    const offsetMinutes = String(Math.abs(offset) % 60).padStart(2, "0");
+    const timeZone = `UTC${offset < 0 ? "-" : "+"}${offsetHours}:${offsetMinutes}`;
     return v_flex()
       .p(u(10))
       .gap(u(10))
@@ -702,7 +706,7 @@ export default class Dialog {
           )
           .child(v_flex().gap(u(6)).items_center().child(clockFace(u, d)).child(field(u, div().w(u(90)).flex().justify_center().child(time)))),
       )
-      .child(div().child(tr("win98-time-zone", { value1: Intl.DateTimeFormat().resolvedOptions().timeZone })))
+      .child(div().child(tr("win98-time-zone", { value1: timeZone })))
       .child(this.buttons(u, [this.btn(u, "ok", tr("common-ok"), () => this.close(), { default: true }), this.btn(u, "cancel", tr("win98-cancel"), () => this.close())], "end"));
   }
 
