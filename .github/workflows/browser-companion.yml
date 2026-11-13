@@ -7,6 +7,9 @@ on:
     paths: ['contrib/browser/**', '.github/workflows/browser-companion.yml']
 permissions:
   contents: read
+concurrency:
+  group: browser-companion-${{ github.head_ref || github.ref }}
+  cancel-in-progress: true
 jobs:
   browser:
     strategy:

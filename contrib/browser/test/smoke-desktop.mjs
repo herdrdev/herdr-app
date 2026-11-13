@@ -50,7 +50,7 @@ try {
   await app.run('overlay.close', {});
   const world = await app.world();
   const space = world.spaces.find(s => s.name === 'Browser test');
-  const installed = await installMod(env.HERDR_APP_HOME);
+  const installed = await installMod(env.HERDR_APP_HOME, 'browser-launcher', terminal);
   await waitUntil(async () => {
     try { return await app.run('mod.open', { name: installed.name }); }
     catch (error) { if (error.message.includes('no mod folder')) return null; throw error; }

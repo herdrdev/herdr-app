@@ -43,7 +43,7 @@ export async function main(argv = process.argv.slice(2)) {
   if (values.help || !command) { process.stdout.write(help); return; }
   const app = new HerdrApp(values['herdr-home']);
   if (command === 'install-mod') {
-    const installed = await installMod(app.home);
+    const installed = await installMod(app.home, 'browser-launcher', values.binary);
     process.stdout.write(`${JSON.stringify(installed, null, 2)}\n`);
     return;
   }

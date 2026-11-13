@@ -1,6 +1,6 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
-import { terminalAdapter } from '../src/herdr.mjs';
+import { HerdrApp, terminalAdapter } from '../src/herdr.mjs';
 import { request } from '../src/rpc.mjs';
 
 test('terminal socket routes splits by identity and refuses another tab', async t => {
@@ -24,4 +24,18 @@ test('terminal socket routes splits by identity and refuses another tab', async 
   await call('split', { from: { id: 'p2' }, direction: 'left', command: argv });
   assert.deepEqual(commands[0], { command: 'pane.split', args: { pane: 'p2', direction: 'right', argv } });
   assert.deepEqual(commands[1], { command: 'pane.swap', args: { pane: 'p4', target: 'p2' } });
+});
+
+test('background tab creation checks the live command schema before mutating', async () => {
+  const app = new HerdrApp('/unused');
+  const calls = [];
+  app.call = async () => [{ name: 'tab.new', args: [{ name: 'space' }, { name: 'argv' }] }];
+  app.run = async (name, args) => { calls.push({ name, args }); return {}; };
+  await assert.rejects(app.newTab({ space: 's1', focus: false }), /cannot create background tabs/);
+  assert.equal(calls.length, 0);
+  await app.newTab({ space: 's1', focus: true });
+  assert.deepEqual(calls[0], { name: 'tab.new', args: { space: 's1' } });
+  app.call = async () => [{ name: 'tab.new', args: [{ name: 'focus' }] }];
+  await app.newTab({ space: 's1', focus: false });
+  assert.equal(calls[1].args.focus, false);
 });
