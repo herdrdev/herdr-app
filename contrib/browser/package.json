@@ -1,0 +1,20 @@
+{
+  "name": "@herdr-contrib/browser",
+  "version": "0.1.0",
+  "private": true,
+  "type": "module",
+  "description": "An external Chromium browser companion for Herdr App using Playwright's agent tools",
+  "license": "Apache-2.0",
+  "engines": { "node": ">=22" },
+  "bin": { "herdr-browser": "src/cli.mjs" },
+  "scripts": {
+    "test": "node --test test/*.test.mjs",
+    "test:browser": "node --test test/*.integration.mjs",
+    "check": "node --check src/cli.mjs && node --check src/server.mjs"
+  },
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "1.32.2",
+    "@playwright/mcp": "0.0.85",
+    "playwright": "1.66.0-alpha-2026-11-09"
+  }
+}
