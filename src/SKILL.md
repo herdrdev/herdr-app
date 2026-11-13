@@ -89,6 +89,8 @@ herdr-app do pane.swap '{"pane":"p12","target":"p14"}'
 Visible layout terminal blocks still win, then the topmost matching floating
 window, then the model pane. A floating target leaves the selected pane/tab as
 they are and never takes the keyboard from a dialog or popup.
+Closing a dialog or popup over an overlay terminal returns the keyboard to that
+same displayed terminal if it is still visible; otherwise the current pane is used.
 
 `terminal.select_all {terminal?}` selects a terminal's whole screen and scrollback,
 ready for `terminal.copy`. Without a target it follows keyboard focus. In vim and

@@ -322,6 +322,8 @@ struct Overlay {
     size: Size<f32>,
     expires: Option<Instant>,
     focus: FocusHandle,
+    /// Exact displayed overlay terminal to return to after a modal closes.
+    return_terminal: Option<String>,
     /// Blocks instead of one mod (terminals too), ids prefixed with the overlay's.
     layout: Option<Node>,
     /// `at: "top"`: centered, this far below the window's top.
@@ -1641,6 +1643,14 @@ impl AppWindow {
         self.terms.values().find(|t| t.view.read(cx).owns_keyboard_focus(window, cx))
             .or_else(|| self.focused_pane.as_deref().and_then(|p| self.pane_term(p)))
             .or_else(|| self.model.focused_pane().and_then(|p| self.pane_term(&p)))
+    }
+
+    /// Actual keyboard owner only: never the model pane behind a popup.
+    fn focused_overlay_terminal(&self, window: &Window, cx: &App) -> Option<&str> {
+        self.terms.iter().find(|(id, t)| {
+            overlay_terminal_block(&self.overlays, Some(id.as_str())).is_some()
+                && t.view.read(cx).owns_keyboard_focus(window, cx)
+        }).map(|(id, _)| id.as_str())
     }
 
     fn shown_terminal_view(&self, address: &str, window: &Window, cx: &App) -> Result<Entity<TerminalView>, String> {
@@ -3707,6 +3717,10 @@ impl AppWindow {
             _ => 5000.0,
         });
         let slot = format!("overlay:{id}");
+        let return_terminal = if kind.modal_keys() {
+            self.focused_overlay_terminal(window, cx).map(str::to_owned)
+                .or_else(|| self.overlays.iter().rev().find(|o| o.kind.modal_keys()).and_then(|o| o.return_terminal.clone()))
+        } else { None };
         // The frame takes the keyboard first, so a mod that focuses itself while loading wins.
         let focus = cx.focus_handle();
         if kind.modal_keys() {
@@ -3732,6 +3746,7 @@ impl AppWindow {
             size,
             expires: (kind == OverlayKind::Toast).then(|| Instant::now() + Duration::from_millis(timeout as u64)),
             focus,
+            return_terminal,
             layout,
             top,
             fit,
@@ -3799,6 +3814,9 @@ impl AppWindow {
     fn remove_overlay(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(i) = self.overlays.iter().position(|o| o.id == id) {
             let o = self.overlays.remove(i);
+            // The removed overlay is no longer eligible. A different overlay's
+            // terminal may already have the keyboard (a launcher closing).
+            let active_terminal = self.focused_overlay_terminal(window, cx).map(str::to_owned);
             if self.win_drag.as_ref().is_some_and(|d| d.id == o.id) {
                 self.win_drag = None;
             }
@@ -3809,12 +3827,18 @@ impl AppWindow {
             } else {
                 self.publish_shown_copies();
             }
-            // The keyboard never ends up nowhere: back to a dialog still open,
-            // else the pane, else the window (where the app's keys work). A
-            // window in the background had none to give back (one that had it:
-            // `restore_focus` runs on its own when its focus goes).
+            // Keep another overlay terminal's keyboard, or return to the source
+            // still on screen. Remaining modals win; stale sources use the fallback.
             if o.kind.modal_keys() {
-                self.restore_focus(window, cx);
+                let modal = self.overlays.iter().rev().find(|o| o.kind.modal_keys());
+                let focus = active_terminal.as_deref().into_iter().chain(o.return_terminal.as_deref())
+                    .filter(|id| modal.is_none_or(|m| m.layout.as_ref().is_some_and(|l| l.find(id).is_some())))
+                    .find_map(|id| {
+                        overlay_terminal_block(&self.overlays, Some(id))?;
+                        self.pane_focus(id, cx)
+                    });
+                if let Some(focus) = focus { focus.focus(window, cx); }
+                else { self.restore_focus(window, cx); }
             }
             cx.notify();
         }
@@ -6166,6 +6190,81 @@ mod tests {
             assert_eq!(this.model.active_tab().unwrap().id, "tb2", "a hidden window must not prevent the model-pane fallback");
             let reply = this.run_as("pane.focus", json!({ "terminal": "missing" }), false, window, cx);
             assert_eq!(reply["error"], "no such pane");
+        });
+    }
+
+    #[test]
+    fn popups_return_to_the_previous_overlay_terminal() {
+        in_own_process("overlay_terminal_return");
+    }
+
+    #[gpui::test]
+    fn overlay_terminal_return(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("overlay_terminal_return") { return; }
+        cx.update(gpui_base::init);
+        let (view, cx) = open_window(cx, "input-popup", r#"
+import { View } from "gpui-kit";
+import { Input, InputState } from "gpui-base";
+export default class Popup extends View {
+  init() { this.input = InputState.new({value: ""}); this.input.focus(); }
+  render() { return Input.new(this.input); }
+}
+"#, json!({ "type": "block", "content": { "tab": "active" } }));
+        view.update_in(cx, |this, window, cx| {
+            this.model.add_space("s1", "", "/tmp", crate::model::Tab::new("tb1", "", "p1", "t1"));
+            this.model.add_tab("s1", crate::model::Tab::new("tb2", "", "p2", "t2"));
+            this.model.select_tab("tb1");
+            this.sync(window, cx);
+            this.open_overlay("floating".into(), json!({ "kind": "window", "width": 600, "height": 240,
+                "layout": { "type": "row", "children": [
+                    { "id": "first", "type": "block", "content": { "terminal": "t10" } },
+                    { "id": "second", "type": "block", "content": { "terminal": "t11" } }
+                ]}
+            }), window, cx);
+            this.run("pane.focus", json!({ "terminal": "t11" }), window, cx);
+        });
+        cx.run_until_parked();
+        for kind in ["popup", "dialog"] {
+            view.update_in(cx, |this, window, cx| {
+                this.open_overlay("menu".into(), json!({ "kind": kind, "mod": "input-popup" }), window, cx);
+            });
+            cx.run_until_parked();
+            view.update_in(cx, |this, window, cx| this.close_overlay("menu", window, cx));
+            cx.run_until_parked();
+            view.update_in(cx, |this, window, cx| {
+                assert!(this.pane_focus("ovfloating/second", cx).unwrap().is_focused(window), "{kind} must return to the second terminal");
+            });
+        }
+        view.update_in(cx, |this, window, cx| {
+            // A self-focusing popup can close before its first frame too.
+            this.open_overlay("instant".into(), json!({ "kind": "popup", "mod": "input-popup" }), window, cx);
+            this.close_overlay("instant", window, cx);
+            assert!(this.pane_focus("ovfloating/second", cx).unwrap().is_focused(window));
+            this.open_overlay("outer".into(), json!({ "kind": "popup" }), window, cx);
+            this.open_overlay("inner".into(), json!({ "kind": "dialog" }), window, cx);
+            this.close_overlay("inner", window, cx);
+            assert!(this.overlays.last().unwrap().focus.is_focused(window), "the outer modal still holds the keyboard");
+            this.close_overlay("outer", window, cx);
+            assert!(this.pane_focus("ovfloating/second", cx).unwrap().is_focused(window));
+            // Closing a launcher must leave a different overlay's terminal alone.
+            this.open_overlay("launcher".into(), json!({ "kind": "popup" }), window, cx);
+            this.open_overlay("child".into(), json!({ "kind": "dialog", "width": 300, "height": 200,
+                "layout": { "id": "body", "type": "block", "content": { "terminal": "t12" } }
+            }), window, cx);
+            this.pane_focus("ovchild/body", cx).unwrap().focus(window, cx);
+            this.close_overlay("launcher", window, cx);
+            assert!(this.pane_focus("ovchild/body", cx).unwrap().is_focused(window));
+            this.close_overlay("child", window, cx);
+            assert!(this.pane_focus("ovfloating/second", cx).unwrap().is_focused(window));
+            // A menu can outlive its source window. Fall back to the current pane.
+            this.open_overlay("last".into(), json!({ "kind": "popup" }), window, cx);
+            this.close_overlay("floating", window, cx);
+            this.model.select_tab("tb2");
+            this.sync(window, cx);
+            this.close_overlay("last", window, cx);
+            assert_eq!(this.model.active_tab().unwrap().id, "tb2");
+            assert!(this.pane_focus("p2", cx).unwrap().is_focused(window));
         });
     }
 

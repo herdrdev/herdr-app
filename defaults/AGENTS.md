@@ -1052,6 +1052,9 @@ All of it is in `herdr.d.ts`. In short:
   returns an id; the mod gets `props().overlay` and closes itself with
   `closeOverlay(id)`; Esc closes the top dialog or popup. `frame: "none"`
   drops Herdr's border, corners and shadow so the mod draws its own.
+  A dialog or popup opened over an overlay terminal returns the keyboard to
+  that same displayed terminal when closed, if it is still visible. Nested
+  dialogs/popups keep the keyboard until closed; a gone source uses the current pane.
   `notify({ title, body, level, icon, timeout })` posts a notification, drawn
   by the layout-chosen mod (default: `toast`).
 - Windows (`kind: "window"`): stay open until closed, over the layout and

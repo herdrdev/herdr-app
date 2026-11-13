@@ -398,7 +398,8 @@ export interface OverlaySpec {
 export function openOverlay(spec: OverlaySpec): string;
 
 /** Closes an overlay (mods close themselves with closeOverlay(props().overlay)). Esc closes the top
- *  dialog or popup. A kept window closed this way stays closed. */
+ *  dialog or popup. A modal opened over an overlay terminal returns the keyboard there
+ *  if it is still visible, respecting any remaining modal. A kept window stays closed. */
 export function closeOverlay(id: string): null;
 
 /** Posts a notification. Shown by the `toast` mod (replaceable), which runs `action` when clicked.
