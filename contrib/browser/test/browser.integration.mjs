@@ -51,6 +51,12 @@ test('real Chromium, official Playwright tools, DOM events and region captures',
   const tools = (await client.listTools()).tools;
   trace('tool schemas loaded');
   for (const name of ['browser_snapshot', 'browser_click', 'browser_type', 'browser_tabs', 'browser_events', 'browser_screenshot_region']) assert.ok(tools.some(t => t.name === name), name);
+  assert.ok(!tools.some(t => t.name.startsWith('browser_run_code') || t.name === 'browser_install'), 'host-code tools and installation must not be advertised');
+  for (const name of ['browser_run_code', 'browser_run_code_unsafe', 'browser_install']) {
+    const denied = await client.callTool({ name, arguments: {} });
+    assert.equal(denied.isError, true, name);
+    assert.match(denied.content[0].text, /not exposed by this companion/);
+  }
   const call = async (name, args = {}) => {
     const result = await client.callTool({ name, arguments: args });
     assert.ok(!result.isError, JSON.stringify(result));

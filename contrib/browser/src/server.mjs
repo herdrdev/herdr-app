@@ -24,7 +24,7 @@ const extraTools = [
     inputSchema: { ...object({ x: { type: 'number', minimum: 0 }, y: { type: 'number', minimum: 0 }, width: { type: 'number', exclusiveMinimum: 0 }, height: { type: 'number', exclusiveMinimum: 0 }, includeImage: { type: 'boolean', default: false } }), required: ['x', 'y', 'width', 'height'] },
   },
 ];
-const hidden = new Set(['browser_install', 'browser_run_code']);
+const hidden = name => name === 'browser_install' || name.startsWith('browser_run_code');
 const result = value => ({ content: [{ type: 'text', text: JSON.stringify(value) }], structuredContent: value });
 
 export class BrowserBridge {
@@ -118,7 +118,7 @@ export class BrowserBridge {
     if (this.toolList) return this.toolList;
     const { client } = await this.session();
     const { tools } = await client.listTools();
-    this.toolList = [...tools.filter(t => !hidden.has(t.name)), ...extraTools];
+    this.toolList = [...tools.filter(t => !hidden(t.name)), ...extraTools];
     return this.toolList;
   }
 
@@ -131,7 +131,7 @@ export class BrowserBridge {
       if (name === 'browser_close') return result(await this.host.tabs({ action: 'close' }));
       if (name === 'browser_observe_dom') return result(await this.host.observeDom(args));
       if (name === 'browser_screenshot_region') return this.region(args);
-      if (hidden.has(name)) throw new Error(`${name} is not exposed by this companion; it attaches to a browser owned by terminal-browser`);
+      if (hidden(name)) throw new Error(`${name} is not exposed by this companion; it attaches to a browser owned by terminal-browser`);
       await this.host.touch();
       const { client } = await this.session();
       return client.callTool({ name, arguments: args }, undefined, { signal, timeout: 60_000 });

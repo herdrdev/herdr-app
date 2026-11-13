@@ -80,8 +80,9 @@ This exposes the official Playwright tool definitions, including
 implementation. The companion routes tab lifecycle through terminal-browser, so
 new tabs are registered with the visible browser. Each selected page has its own
 Playwright MCP session. Selection is pinned to a CDP target, including when two
-pages have the same URL. Arbitrary `browser_run_code` and `browser_install` are
-excluded; this integration attaches to an existing browser.
+pages have the same URL. Host-code tools (`browser_run_code`, including its
+`browser_run_code_unsafe` variant) and `browser_install` are excluded from both
+discovery and dispatch; this integration attaches to an existing browser.
 
 The definitions are available through `node src/cli.mjs tools --browser <key>`.
 The included [agent skill](skill/SKILL.md) covers opening a Herdr browser tab,
