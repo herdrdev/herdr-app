@@ -68,6 +68,10 @@ pub struct Theme {
     pub bg: Rgb,
     pub cursor: Rgb,
     pub selection_bg: Rgb,
+    /// `terminal_bold`, like Ghostty's `bold-color`: bold text in the default
+    /// foreground takes it, and bold text in palette colors 0–7 takes its
+    /// bright counterpart (8–15). Unset, bold text keeps its color.
+    pub bold: Option<Rgb>,
     pub palette16: [Rgb; 16],
     pub minimum_contrast: f32,
 }
@@ -81,7 +85,8 @@ pub fn theme() -> Theme {
     for (i, c) in palette16.iter_mut().enumerate() {
         *c = get(&format!("ansi{i}"));
     }
-    Theme { fg: get("terminal_foreground"), bg: get("background"), cursor: get("cursor"), selection_bg: get("selection"), palette16, minimum_contrast: crate::settings::get().minimum_contrast }
+    let bold = t.get("terminal_bold").map(String::as_str).map(rgb);
+    Theme { fg: get("terminal_foreground"), bg: get("background"), cursor: get("cursor"), selection_bg: get("selection"), bold, palette16, minimum_contrast: crate::settings::get().minimum_contrast }
 }
 
 #[derive(Clone, Default, PartialEq)]
@@ -1694,6 +1699,9 @@ impl Vt {
             ghostty_render_state_get(state, GHOSTTY_RENDER_STATE_DATA_COLORS, &mut colors as *mut _ as *mut c_void);
             let fg_default = Rgb::from(colors.foreground);
             let bg_default = Rgb::from(colors.background);
+            // The theme's bold color, with the bright colors (as the program
+            // may have set them) that bold text in palette colors 0–7 takes.
+            let bold: Option<(Rgb, [Rgb; 8])> = self.theme.bold.map(|color| (color, std::array::from_fn(|i| Rgb::from(colors.palette[i + 8]))));
 
             // Rows libghostty keeps clean are taken as read last frame (see
             // "Row Identity" in its render.h); a resize or new colors (which
@@ -1725,7 +1733,7 @@ impl Vt {
                         let mut row = Vec::with_capacity(self.cols as usize);
                         let mut x: u16 = 0;
                         while ghostty_render_state_row_cells_next(self.cells) {
-                            row.push(self.read_cell(fg_default, &colors.palette, selected && x >= sel.start_x && x <= sel.end_x));
+                            row.push(self.read_cell(fg_default, &colors.palette, bold.as_ref(), selected && x >= sel.start_x && x <= sel.end_x));
                             x += 1;
                         }
                         Rc::new(row)
@@ -1759,7 +1767,8 @@ impl Vt {
         }
     }
 
-    unsafe fn read_cell(&mut self, fg_default: Rgb, palette: &[GhosttyColorRgb; 256], selected: bool) -> Cell {
+    /// `bold`: the theme's bold color and the bright colors 8–15, when it has one.
+    unsafe fn read_cell(&mut self, fg_default: Rgb, palette: &[GhosttyColorRgb; 256], bold: Option<&(Rgb, [Rgb; 8])>, selected: bool) -> Cell {
         unsafe {
             let c = self.cells;
             let mut raw: GhosttyCell = Default::default();
@@ -1782,6 +1791,19 @@ impl Vt {
             let bg = (ghostty_render_state_row_cells_get(c, GHOSTTY_RENDER_STATE_ROW_CELLS_DATA_BG_COLOR, &mut bg as *mut _ as *mut c_void)
                 == GHOSTTY_SUCCESS)
                 .then(|| Rgb::from(bg));
+
+            // libghostty leaves bold colors to the caller. As Ghostty's
+            // `bold-color` does: the default foreground (or an RGB color equal
+            // to it) takes the bold color, palette colors 0–7 their bright 8–15.
+            let fg = match bold {
+                Some((color, bright)) if style.bold => match style.fg_color.tag {
+                    GHOSTTY_STYLE_COLOR_NONE => *color,
+                    GHOSTTY_STYLE_COLOR_PALETTE if style.fg_color.value.palette < 8 => bright[usize::from(style.fg_color.value.palette)],
+                    GHOSTTY_STYLE_COLOR_RGB if fg == fg_default => *color,
+                    _ => fg,
+                },
+                _ => fg,
+            };
 
             let (mut fg, mut bg) = (fg, bg);
             if style.inverse {
@@ -2201,6 +2223,34 @@ mod tests {
         assert_eq!(f.rows[1][2].text, "!");
         let c = f.cursor.unwrap();
         assert_eq!((c.x, c.y), (3, 1));
+    }
+
+    #[test]
+    fn bold_text_takes_the_theme_bold_color_as_in_ghostty() {
+        let mut vt = Vt::new(20, 2);
+        let original = vt.theme.clone();
+        let Rgb(r, g, b) = original.fg;
+        // Bold: the default color, red, bright red, another RGB color and an RGB
+        // color equal to the default foreground; then plain text and inverse bold.
+        let line = format!("\x1b[1ma\x1b[31mb\x1b[91mc\x1b[38;2;1;2;3md\x1b[38;2;{r};{g};{b}me\x1b[0mf\x1b[1;7mg\x1b[0m");
+        vt.write(line.as_bytes());
+        let plain = vt.frame();
+        assert_eq!(plain.rows[0][0].fg, original.fg, "without a bold color, bold text keeps its color");
+        assert_eq!(plain.rows[0][1].fg, original.palette16[1]);
+
+        let (white, bright_red) = (Rgb(255, 255, 255), Rgb(250, 0, 9));
+        let mut theme = original.clone();
+        theme.bold = Some(white);
+        theme.palette16[9] = bright_red;
+        vt.set_theme(theme);
+        let f = vt.frame();
+        let fg: Vec<Rgb> = f.rows[0][..6].iter().map(|c| c.fg).collect();
+        assert_eq!(fg, [white, bright_red, bright_red, Rgb(1, 2, 3), white, original.fg]);
+        assert_eq!(f.rows[0][6].bg, Some(white), "inverse bold text has the bold color behind it");
+
+        // Bold red follows bright red when the program sets it.
+        vt.write(b"\x1b]4;9;rgb:12/34/56\x1b\\");
+        assert_eq!(vt.frame().rows[0][1].fg, Rgb(0x12, 0x34, 0x56));
     }
 
     #[test]

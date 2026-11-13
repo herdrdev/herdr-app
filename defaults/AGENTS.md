@@ -337,6 +337,10 @@ layout's look and a block can differ:
   are upgraded to readable terminal colors; edited theme files are kept.
   A theme named like a layout (`themes/win98.json`) is
   that layout's own: Settings offers it only there.
+  Bold text keeps its color unless `terminal_bold` is set (in any `colors`),
+  which works like Ghostty's `bold-color`: bold text in the default foreground
+  takes it, and bold text in palette colors 0–7 takes its bright counterpart
+  (8–15).
 - `terminal_line_height`: row height multiplier (default 1, clamped to 0.8..2).
   Text stays centred; joining characters, cursors and images follow the rows.
 - `terminal_scroll_speed`: wheel and trackpad multiplier (default 1, clamped
