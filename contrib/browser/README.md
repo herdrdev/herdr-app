@@ -67,11 +67,41 @@ place. `--herdr-home <directory>` selects an isolated app home for development.
 
 ## Connect an agent
 
+Opening the browser, installing the skill and configuring MCP are separate
+steps. The personal launcher opens a browser; it does not register a skill or
+redirect an existing Playwright server. Complete both setup steps below, then
+verify the connection from the agent before testing an application.
+
 Use the browser key printed by `list`. An MCP client can start:
 
 ```sh
 node /absolute/path/contrib/browser/src/cli.mjs mcp --browser <browser-key>
 ```
+
+Give this connection a distinct server name, such as `herdr_browser`. In a
+JSON-based MCP configuration, a complete entry looks like:
+
+```json
+{
+  "mcpServers": {
+    "herdr_browser": {
+      "command": "/absolute/path/to/node",
+      "args": [
+        "/absolute/path/contrib/browser/src/cli.mjs", "mcp",
+        "--browser", "<browser-key>", "--target", "<content-target-id>",
+        "--binary", "/absolute/path/to/terminal-browser", "--lean"
+      ]
+    }
+  }
+}
+```
+
+Replace the paths and identities with the running instance's values; use your
+harness's configuration syntax and scope. If the renderer uses custom XDG
+directories, supply those same environment values to this process for discovery.
+A separate server running `npx @playwright/mcp` uses its own browser unless it
+was independently configured to attach elsewhere. Calling its similarly named
+tools does not route them to this companion.
 
 This exposes the official Playwright tool definitions, including
 `browser_snapshot`, `browser_navigate`, `browser_click`, `browser_type`,
@@ -97,6 +127,31 @@ The skill's [workflow reference](skill/references/workflows.md) provides service
 setup, multi-page examples, DOM and event waits, screenshot scopes, failure
 recovery and remote connection recipes. It is included when linking or copying
 the complete skill directory.
+
+### Verify the agent connection
+
+1. Confirm that the harness discovers `herdr-browser` from the installed skill
+   directory and that the dedicated MCP connection is available. Resolve startup
+   or discovery errors before proceeding with application actions.
+2. From that MCP connection, list tools and call `browser_tabs`. The companion
+   exposes `browser_events` and `browser_observe_dom`; its tab result includes
+   `browser` and stable `target` identities. For a renderer connection, match
+   those values to `list`, including its containing Herdr pane. An explicit CDP
+   attachment reports `browser: cdp`; compare its target to the configured one.
+3. Call `browser_snapshot` and inspect the requested page. Matching URLs alone
+   are insufficient: another browser can open the same application. Completion
+   means the server, browser and content target are the intended connection.
+
+After adding a server to an already-running harness, check that session's actual
+tool list. If it has not loaded the new connection, use the persistent CLI
+workflow below or reconnect through the harness's supported mechanism. Installed
+configuration alone is not evidence that an active agent switched servers.
+
+For concurrent workers, use independent services and explicit page targets.
+Pages in one profile share authentication. Named `isolatedContext` values are
+unsupported by this adapter; use distinct browser profiles for separate
+identities. Multiple workers sharing one selected-page connection can interleave
+selections and actions even when they intend to use separate pages.
 
 ### Reduce agent output
 
@@ -201,6 +256,13 @@ The browser test requires a test Chromium installed with
 It drives real Chromium through the MCP transport, verifies semantic interaction,
 DOM events, target identity, native-control lifecycle, screenshots, persistent CLI
 connections and detachment. CI runs the tests on macOS and Linux.
+
+`test/stdio.integration.mjs` additionally copies the skill into a fresh directory,
+loads a generated MCP configuration, and starts its wrapper as a separate stdio
+process outside the checkout. It verifies tool discovery, explicit target
+selection between equal-URL pages, DOM actions with persistent references, denied
+host-code tools and detachment. This exercises harness-style process setup with
+the MCP SDK; it does not automate a particular vendor's skill-discovery UI.
 
 `test/smoke-desktop.mjs` is an opt-in visible desktop check using a separate app
 home, core session and browser state. It requires explicit native app and browser

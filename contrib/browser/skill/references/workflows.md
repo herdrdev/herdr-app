@@ -8,18 +8,31 @@ arguments; they also work through `call --socket <path> <tool> '<json>'`.
 ## Start a service
 
 First open or discover a browser using the skill's Open or attach steps. Record
-its browser key, content target and containing Herdr tab. For direct MCP, configure
-the harness to start the skill wrapper with these arguments:
+its browser key, content target and containing Herdr tab. Register a dedicated
+MCP server, for example `herdr_browser`, that starts the skill wrapper:
 
 ```json
 {
   "command": "/absolute/path/to/skill/scripts/herdr-browser",
-  "args": ["mcp", "--browser", "<browser-key>", "--target", "<content-target>"]
+  "args": ["mcp", "--browser", "<browser-key>", "--target", "<content-target>"],
+  "env": {"HERDR_BROWSER_CLI": "/absolute/path/contrib/browser/src/cli.mjs"}
 }
 ```
 
-The harness receives the tool definitions through MCP. To share a persistent
-connection with shell calls, start a service instead:
+The `env` entry locates the companion for a copied skill; a linked skill resolves
+it from the checkout. Supply `TERMINAL_BROWSER_BIN` or `--binary` if the renderer
+is outside PATH, and preserve any custom XDG discovery environment.
+
+The harness receives the tool definitions through MCP. Before application
+actions, confirm that this connection exposes `browser_events`, then call
+`browser_tabs` and match its browser key and target to the recorded renderer.
+An explicit CDP connection reports browser `cdp`; match the configured target.
+Take a snapshot of that page. This verifies routing; another server's matching
+URL or similar tool names do not identify the Herdr browser. If an existing
+session has not loaded the connection, use shell access until its supported
+reload or reconnect mechanism makes the tools available.
+
+To share a persistent connection with shell calls, start a service instead:
 
 ```sh
 browser_state=$(mktemp -d /tmp/herdr-agent.XXXXXX)
