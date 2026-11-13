@@ -993,6 +993,12 @@ in init, `.track_focus(this.h).on_key_down((e, cx) => …)`, `this.h.focus()`.
 in `init`, attach `.track_scroll(this.scroll)`, then call
 `this.scroll.scroll_to_item(index)` to reveal a zero-based direct child with
 only the movement needed. Requests run once after layout; visible children stay put.
+Lazy lists: `list` and `uniform_list` come from `gpui-kit`, where `div` is;
+`v_virtual_list` and `h_virtual_list` come from `gpui-base`. They need a
+definite height from their container: a `flex_1()` chain with no explicit
+`h(n)` anywhere lays out at zero and draws nothing. `track_scroll` works on a
+plain scroll area and the virtual-list pair; `list` and `uniform_list` keep
+their own position, so pair a `Scrollbar` of the same id instead.
 `.on_drop((event, cx) => …)` on a plain layout element receives external files as
 `event.paths` (absolute paths). The feedback form accepts dropped images with
 the same limits, previews and removal as picked images.
