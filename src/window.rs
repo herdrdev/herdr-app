@@ -1668,7 +1668,16 @@ impl AppWindow {
 
     fn publish_selection(&self, address: &str, window: &Window, cx: &mut Context<Self>) {
         let selection = self.shown_terminal_view(address, window, cx).ok().and_then(|view| view.read(cx).selection());
-        if mods::publish_selection(address, json!(selection)) {
+        let changed = mods::publish_selection(address, json!(selection));
+        self.publish_focused_selection(window, cx);
+        if changed {
+            self.refresh_snapshot_mods(cx);
+        }
+    }
+
+    fn publish_focused_selection(&self, window: &Window, cx: &mut Context<Self>) {
+        let selection = self.focused_terminal(window, cx).and_then(|t| t.view.read(cx).selection());
+        if mods::publish_focused_selection(json!(selection)) {
             self.refresh_snapshot_mods(cx);
         }
     }
@@ -5076,6 +5085,7 @@ impl Render for AppWindow {
             self.synced_model_pane = self.model.focused_pane();
             self.publish(cx);
         }
+        self.publish_focused_selection(window, cx);
         self.tick_floats(window);
         self.apply_titlebar(window);
         self.apply_blur(window);
@@ -6324,6 +6334,69 @@ export default class Probe extends View {
             assert_eq!(seen(cx), Some(json!(true)), "focused: {:?}", crate::mods::shared("probe.seen"));
             cx.deactivate_window();
             assert_eq!(seen(cx), Some(json!(false)), "blurred: {:?}", crate::mods::shared("probe.seen"));
+        }
+    }
+
+    #[test]
+    fn focused_selection_follows_the_terminal_receiving_commands() {
+        in_own_process("selection_view_focus");
+    }
+
+    #[gpui::test]
+    fn selection_view_focus(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("selection_view_focus") {
+            return;
+        }
+        let probe = r#"import { View, div } from "gpui-kit";
+import { focused, setShared } from "herdr";
+export default class Probe extends View {
+  render() {
+    const value = focused();
+    const text = JSON.stringify(value);
+    if (text !== this.last) {
+      this.last = text;
+      setShared("probe.focused", value);
+    }
+    return div();
+  }
+}
+"#;
+        let (view, cx) = open_window(cx, "selection-probe", probe, json!({
+            "id": "root", "type": "row", "children": [
+                {"id": "main", "type": "block", "content": {"tab": "active"}},
+                {"id": "agent", "type": "block", "content": {"agent": "focused"}},
+                {"id": "probe", "type": "block", "content": {"mod": "selection-probe"}}
+            ],
+            "floating": [{"id": "float", "content": {"terminal": "t2"}}]
+        }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.model.add_space("s1", "one", "", crate::model::Tab::new("a", "a", "pa", "t1"));
+            for address in ["t1", "t2", "t3"] {
+                this.live.insert(address.into(), json!({"address": address}));
+            }
+            this.agent = Some("t3".into());
+            this.sync(window, cx);
+        }));
+        cx.run_until_parked();
+        for (slot, col) in [("pa", 1), ("float:float", 2), ("agent", 3)] {
+            cx.update(|window, cx| view.update(cx, |this, cx| {
+                this.terms[slot].focus.focus(window, cx);
+                let result = this.run_as("terminal.select", json!({"at": {"row": 0, "col": col}}), false, window, cx);
+                assert!(result.get("error").is_none(), "{result}");
+                assert_eq!(this.focused_terminal(window, cx).unwrap().address, this.terms[slot].address);
+            }));
+            cx.run_until_parked();
+            let focused = crate::mods::shared("probe.focused").unwrap();
+            assert_eq!(focused["terminal"], "t1", "logical identity stays with the model pane");
+            assert_eq!(focused["selection"]["end"], json!({"row": 0, "col": col}), "{slot}: {focused}");
+        }
+        // Moving the keyboard alone must publish the destination's existing selection.
+        for (slot, col) in [("float:float", 2), ("pa", 1), ("agent", 3)] {
+            cx.update(|window, cx| view.update(cx, |this, cx| this.terms[slot].focus.focus(window, cx)));
+            cx.run_until_parked();
+            let focused = crate::mods::shared("probe.focused").unwrap();
+            assert_eq!(focused["selection"]["end"], json!({"row": 0, "col": col}), "{slot}: {focused}");
         }
     }
 
