@@ -1,7 +1,7 @@
 import { test } from 'node:test';
 import assert from 'node:assert/strict';
 import http from 'node:http';
-import { mkdtemp, readFile, writeFile, cp, rm } from 'node:fs/promises';
+import { mkdtemp, readFile, writeFile, cp, symlink, rm } from 'node:fs/promises';
 import { join } from 'node:path';
 import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
@@ -42,11 +42,13 @@ test('fresh copied skill and configured stdio process attach to the requested ex
   const port = Number((await readFile(join(profile, 'DevToolsActivePort'), 'utf8')).split('\n')[0]);
   const skill = join(root, 'skill');
   await cp(fileURLToPath(new URL('../skill', import.meta.url)), skill, { recursive: true });
+  const linkedPackage = join(root, 'current');
+  await symlink(fileURLToPath(new URL('../', import.meta.url)), linkedPackage, 'dir');
   const configPath = join(root, 'mcp.json');
   await writeFile(configPath, JSON.stringify({ mcpServers: { herdr_browser: {
     command: join(skill, 'scripts', 'herdr-browser'),
     args: ['mcp', '--endpoint', `http://127.0.0.1:${port}`, '--target', target, '--lean', '--output-dir', join(root, 'artifacts')],
-    env: { HERDR_BROWSER_CLI: fileURLToPath(new URL('../src/cli.mjs', import.meta.url)) },
+    env: { HERDR_BROWSER_CLI: join(linkedPackage, 'src/cli.mjs') },
   } } }));
   const config = JSON.parse(await readFile(configPath, 'utf8')).mcpServers.herdr_browser;
   const transport = new StdioClientTransport({ ...config, cwd: root, stderr: 'pipe' });

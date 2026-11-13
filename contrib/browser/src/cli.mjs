@@ -3,6 +3,7 @@ import { parseArgs } from 'node:util';
 import { spawn } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
+import { realpath } from 'node:fs/promises';
 import { StdioServerTransport } from '@modelcontextprotocol/sdk/server/stdio.js';
 import { BrowserHost, listBrowsers } from './host.mjs';
 import { BrowserBridge, createAgentServer } from './server.mjs';
@@ -137,4 +138,5 @@ export async function main(argv = process.argv.slice(2)) {
   } finally { await bridge.close(); }
 }
 
-if (process.argv[1] && resolve(process.argv[1]) === cli) main().catch(error => { process.stderr.write(`${error.message}\n`); process.exitCode = 1; });
+const entry = process.argv[1] ? await realpath(process.argv[1]).catch(() => null) : null;
+if (entry === cli) main().catch(error => { process.stderr.write(`${error.message}\n`); process.exitCode = 1; });
