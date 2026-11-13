@@ -1992,28 +1992,37 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     g.origin = origin;
     let frame = g.vt.frame();
     let placements = g.vt.placements();
-    let mut images: Vec<(bool, Bounds<Pixels>, Arc<RenderImage>)> = Vec::new();
+    let mut images: Vec<(bool, Bounds<Pixels>, Bounds<Pixels>, Arc<RenderImage>)> = Vec::new();
     let mut keep = std::collections::HashSet::new();
     for p in &placements {
-        let key = (p.image, p.generation, p.source);
+        let (cell_w, cell_h) = (f32::from(cell.width), f32::from(cell.height));
+        // Placeholder rows draw their part of one shared whole-image texture: a
+        // texture per row lets linear filtering pull transparent atlas texels
+        // into each row's edges, which shows as a seam between rows.
+        let whole = p.whole_geometry(cell_w, cell_h);
+        let source = if whole.is_some() { [0, 0, u32::MAX, u32::MAX] } else { p.source };
+        let key = (p.image, p.generation, source);
         keep.insert(key);
         if !g.images.contains_key(&key)
-            && let Some((w, h, bgra)) = g.vt.image_bgra(p.image, p.source)
+            && let Some((w, h, bgra)) = g.vt.image_bgra(p.image, source)
             && let Some(buf) = image::RgbaImage::from_raw(w, h, bgra)
         {
             g.images.insert(key, Arc::new(RenderImage::new(smallvec::smallvec![image::Frame::new(buf)])));
         }
         if let Some(img) = g.images.get(&key) {
-            let [x, y, mut width, mut height] = p.pixel_geometry(f32::from(cell.width), f32::from(cell.height));
+            let [x, y, mut width, mut height] = p.pixel_geometry(cell_w, cell_h);
             if p.cell_pixels.is_none() {
                 // Direct placements are in device pixels.
                 width /= scale;
                 height /= scale;
             }
-            let pos = origin + point(px(x), px(y));
+            let visible = Bounds::new(origin + point(px(x), px(y)), size(px(width), px(height)));
+            let image_bounds = whole.map_or(visible, |[x, y, width, height]| {
+                Bounds::new(origin + point(px(x), px(y)), size(px(width), px(height)))
+            });
             // Placeholder runs contain no text and must cover explicit cell backgrounds.
             let below = p.z < 0 && p.cell_pixels.is_none();
-            images.push((below, Bounds::new(pos, size(px(width), px(height))), img.clone()));
+            images.push((below, visible, image_bounds, img.clone()));
         }
     }
     g.images.retain(|k, _| keep.contains(k));
@@ -2030,9 +2039,9 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
         Bounds::new(point(x0, y0), size(x1 - x0, y1 - y0))
     };
     let paint_images = |below: bool, window: &mut Window| {
-        for (image_below, b, img) in &images {
+        for (image_below, visible, image_bounds, img) in &images {
             if *image_below == below {
-                let _ = window.paint_image(*b, *b, Corners::default(), img.clone(), 0, false);
+                let _ = window.paint_image(*visible, *image_bounds, Corners::default(), img.clone(), 0, false);
             }
         }
     };

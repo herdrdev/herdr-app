@@ -189,18 +189,30 @@ pub struct Placement {
     pub offset: [u32; 2],
     /// Placeholder geometry uses integer cells; the view may use fractional cells.
     pub cell_pixels: Option<[u32; 2]>,
+    /// For a placeholder run, the whole image relative to the run's cell, in placeholder pixels.
+    pub whole: Option<[f32; 4]>,
     pub z: i32,
 }
 
 impl Placement {
+    fn view_scale(&self, cell_width: f32, cell_height: f32) -> [f32; 2] {
+        self.cell_pixels.map_or([1.0, 1.0], |[w, h]| [cell_width / w as f32, cell_height / h as f32])
+    }
+
     pub fn pixel_geometry(&self, cell_width: f32, cell_height: f32) -> [f32; 4] {
-        let [sx, sy] = self.cell_pixels.map_or([1.0, 1.0], |[w, h]| [cell_width / w as f32, cell_height / h as f32]);
+        let [sx, sy] = self.view_scale(cell_width, cell_height);
         [
             self.col as f32 * cell_width + self.offset[0] as f32 * sx,
             self.row as f32 * cell_height + self.offset[1] as f32 * sy,
             self.width as f32 * sx,
             self.height as f32 * sy,
         ]
+    }
+
+    pub fn whole_geometry(&self, cell_width: f32, cell_height: f32) -> Option<[f32; 4]> {
+        let [x, y, w, h] = self.whole?;
+        let [sx, sy] = self.view_scale(cell_width, cell_height);
+        Some([self.col as f32 * cell_width + x * sx, self.row as f32 * cell_height + y * sy, w * sx, h * sy])
     }
 }
 
@@ -330,6 +342,12 @@ fn kitty_virtual_placement_geometry(
         source: [sx0, sy0, sx1 - sx0, sy1 - sy0],
         offset: [(x0.round() - left) as u32, (y0.round() - top) as u32],
         cell_pixels: Some([cell_width, cell_height]),
+        whole: Some([
+            (image_left - left) as f32,
+            (image_top - top) as f32,
+            (f64::from(image_width) * scale) as f32,
+            (f64::from(image_height) * scale) as f32,
+        ]),
         // Ghostty gives placeholder images a fixed layer, ignoring the virtual placement's z.
         z: -1,
     })
@@ -852,6 +870,7 @@ impl Vt {
                         source: [info.source_x, info.source_y, info.source_width, info.source_height],
                         offset: [0, 0],
                         cell_pixels: None,
+                        whole: None,
                         z,
                     });
                 }
@@ -2535,6 +2554,25 @@ mod tests {
         assert_eq!(p.len(), 2, "{p:?}");
         assert_eq!((p[0].row, p[0].source), (0, [0, 2, 8, 1]));
         assert_eq!((p[1].row, p[1].source), (1, [0, 3, 8, 1]));
+    }
+
+    #[test]
+    fn kitty_placeholder_rows_point_at_the_same_whole_image() {
+        let mut vt = Vt::new(20, 6);
+        vt.resize(20, 6, 8, 8);
+        virtual_image(&mut vt, 7, 0);
+        vt.write(b"\x1b[38;5;7m");
+        for row in 0..4 {
+            for col in 0..8 {
+                vt.write(placeholder(row, col, None).as_bytes());
+            }
+            vt.write(b"\r\n");
+        }
+        let p = vt.placements();
+        assert_eq!(p.len(), 4, "{p:?}");
+        for p in &p {
+            assert_eq!(p.whole_geometry(9.75, 20.5), Some([0.0, 0.0, 78.0, 82.0]));
+        }
     }
 
     #[test]
