@@ -1885,7 +1885,21 @@ impl PlatformWindow for MacWindow {
             };
             this.native_window.setBackgroundColor_(background_color);
 
-            if background_appearance != WindowBackgroundAppearance::Blurred {
+            // From macOS 26 Liquid Glass rebuilt the layers under NSVisualEffectView, so the
+            // view below no longer blurs: the window turns see-through without frost. Ask the
+            // window server for the blur directly there instead.
+            if is_macos_version_at_least(NSOperatingSystemVersion::new(26, 0, 0)) {
+                let blurred = background_appearance == WindowBackgroundAppearance::Blurred;
+                let window_number: NSInteger = msg_send![this.native_window, windowNumber];
+                CGSSetWindowBackgroundBlurRadius(
+                    CGSMainConnectionID(),
+                    window_number,
+                    if blurred { WINDOW_SERVER_BLUR_RADIUS } else { 0 },
+                );
+                if let Some(blur_view) = this.blurred_view.take() {
+                    NSView::removeFromSuperview(blur_view);
+                }
+            } else if background_appearance != WindowBackgroundAppearance::Blurred {
                 if let Some(blur_view) = this.blurred_view {
                     NSView::removeFromSuperview(blur_view);
                     this.blurred_view = None;
@@ -3817,6 +3831,15 @@ fn display_id_for_screen(screen: id) -> Option<CGDirectDisplayID> {
         let screen_number: NSUInteger = msg_send![screen_number, unsignedIntegerValue];
         Some(screen_number as CGDirectDisplayID)
     }
+}
+
+/// How far the window server blurs the desktop behind a blurred window (macOS 26+).
+const WINDOW_SERVER_BLUR_RADIUS: i64 = 50;
+
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn CGSMainConnectionID() -> id;
+    fn CGSSetWindowBackgroundBlurRadius(connection_id: id, window_id: NSInteger, radius: i64) -> i32;
 }
 
 extern "C" fn blurred_view_init_with_frame(this: &Object, _: Sel, frame: NSRect) -> id {

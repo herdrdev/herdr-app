@@ -140,12 +140,10 @@ impl InputEditorStyle {
         let or = |value: Hsla, fallback: Hsla| if unset(value) { fallback } else { value };
 
         let foreground = or(self.foreground, colors.foreground);
-        let mut selection = self.selection;
-        if unset(selection) {
-            selection = colors.accent;
-            // A selection must not hide the glyphs it selects.
-            selection.a = 0.4;
-        }
+        // The palette's own selection colour, so an input's highlight matches
+        // the terminal's and a text view's. The text paints after it, so the
+        // highlight cannot hide the glyphs it selects.
+        let selection = or(self.selection, colors.selection);
 
         Self {
             foreground,
@@ -191,7 +189,8 @@ mod tests {
         tokens.colors.muted_foreground = hsla(0., 0., 0.64, 1.0);
         tokens.colors.surface = hsla(0., 0., 0.04, 1.0);
         tokens.colors.border = hsla(0., 0., 0.15, 1.0);
-        tokens.colors.accent = hsla(0.6, 0.5, 0.5, 1.0);
+        tokens.colors.accent = hsla(0.1, 0.5, 0.5, 1.0);
+        tokens.colors.selection = hsla(0.6, 0.5, 0.5, 0.3);
         tokens
     }
 
@@ -205,6 +204,7 @@ mod tests {
         assert_eq!(resolved.muted_foreground, tokens.colors.muted_foreground);
         assert_eq!(resolved.background, tokens.colors.surface);
         assert_eq!(resolved.border, tokens.colors.border);
+        assert_eq!(resolved.selection, tokens.colors.selection);
         // The point of the change: every one of these was transparent, so an
         // input nothing projected onto painted its text in nothing at all.
         for colour in [
@@ -218,9 +218,14 @@ mod tests {
     }
 
     #[test]
-    fn a_selection_stays_translucent_enough_to_read_through() {
-        let resolved = InputEditorStyle::default().resolved(&dark());
-        assert_eq!(resolved.selection.a, 0.4);
+    fn a_selection_takes_the_palette_selection_token() {
+        let tokens = dark();
+        let resolved = InputEditorStyle::default().resolved(&tokens);
+        // Not the accent: in a real palette that is a hover wash, often the
+        // same value as the surface, so a selected range looked unselected.
+        assert_eq!(resolved.selection, tokens.colors.selection);
+        assert_ne!(resolved.selection, tokens.colors.accent);
+        assert_eq!(resolved.selection.a, tokens.colors.selection.a);
     }
 
     #[test]

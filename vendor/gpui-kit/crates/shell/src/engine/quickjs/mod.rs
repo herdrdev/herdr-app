@@ -4282,12 +4282,7 @@ impl ShellRuntime {
         };
         let position = event.position;
         let modifiers = event.modifiers;
-        let touch_phase = match event.touch_phase {
-            gpui::TouchPhase::Started => "started",
-            gpui::TouchPhase::Moved => "moved",
-            gpui::TouchPhase::Ended => "ended",
-            gpui::TouchPhase::Cancelled => "cancelled",
-        };
+        let touch_phase = touch_phase_name(event.touch_phase);
         self.dispatch_simple_event(id, "scroll wheel", window, cx, move |ctx| {
             let payload = Object::new(ctx.clone())?;
             let delta = Object::new(ctx.clone())?;
@@ -4303,6 +4298,29 @@ impl ShellRuntime {
                 }
                 None => payload.set("delta_lines", rquickjs::Undefined)?,
             }
+            payload.set("touch_phase", touch_phase)?;
+            set_pointer_geometry(ctx, &payload, position, bounds)?;
+            payload.set("modifiers", modifiers_object(ctx, modifiers)?)?;
+            Ok(payload)
+        });
+    }
+
+    /// Delivers one trackpad pinch to a script handler.
+    pub(crate) fn dispatch_pinch(
+        self: &Rc<Self>,
+        id: CallbackId,
+        event: &gpui::PinchEvent,
+        bounds: Option<gpui::Bounds<gpui::Pixels>>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let delta = event.delta;
+        let position = event.position;
+        let modifiers = event.modifiers;
+        let touch_phase = touch_phase_name(event.phase);
+        self.dispatch_simple_event(id, "pinch", window, cx, move |ctx| {
+            let payload = Object::new(ctx.clone())?;
+            payload.set("delta", delta)?;
             payload.set("touch_phase", touch_phase)?;
             set_pointer_geometry(ctx, &payload, position, bounds)?;
             payload.set("modifiers", modifiers_object(ctx, modifiers)?)?;
@@ -6206,7 +6224,7 @@ globalThis.__gpui = (() => {
   // to read it back off `this`.
   const tokenStateMethods = (handle, invoke) => Object.fromEntries([
     "content", "tokens", "replace_with_token", "replace_range_with_token",
-    "set_selected_range", "replace"
+    "set_selected_range", "selected_range", "replace"
   ].map(name => [name, (...args) => invoke(handle, name, args)]));
   // A value is plain text or a content snapshot with tokens.
   const setValue = (handle, setText, invoke) => (next) =>
@@ -6446,6 +6464,17 @@ globalThis.__gpui = (() => {
   methods.toggle_zoom = function (group) {
     const api = "toggle_zoom(group)";
     __apply(this.__id, "toggle_zoom", [dockTarget(group, api), groupNode(group, api)]);
+    return this;
+  };
+  methods.drag_paths = function (paths, options = {}) {
+    if (!Array.isArray(paths) || paths.length === 0 || paths.some(p => typeof p !== "string" || !p || p.includes("\0"))) {
+      throw new TypeError("drag_paths(paths, options) expects non-empty paths without NUL characters");
+    }
+    const on = options.on ?? null;
+    if (on !== null && (typeof on !== "string" || !on)) {
+      throw new TypeError("drag_paths options.on must be a machine name or null");
+    }
+    __apply(this.__id, "drag_paths", [JSON.stringify({paths, on})]);
     return this;
   };
   methods.drag_tab = function (group, index) {
@@ -7107,9 +7136,13 @@ globalThis.__gpui = (() => {
         const handle = __editor_state_new(JSON.stringify(options));
         return {
           __handle: handle,
+          selected_range: () => __editor_text_call(handle, "selected_range", []),
+          set_selected_range: (range) => __editor_text_call(handle, "set_selected_range", [range]),
+          replace: (text) => __editor_text_call(handle, "replace", [String(text)]),
           value: () => __editor_value(handle),
           set_value: (value) => __editor_set_value(handle, String(value)),
           on: (event, handler) => __editor_on(handle, String(event), handler),
+          focus: () => __editor_focus(handle),
           release: () => __editor_release(handle),
         };
       },
@@ -7260,6 +7293,7 @@ impl ShellRuntime {
                 "on_mouse_down_out",
                 "on_drop",
                 "on_scroll_wheel",
+                "on_pinch",
                 "on_action",
                 "key_context",
                 "aria_level",
@@ -8262,6 +8296,7 @@ impl ShellRuntime {
             | "on_mouse_down_out"
             | "on_drop"
             | "on_scroll_wheel"
+            | "on_pinch"
             | "tab_bar"
             | "empty_group"
             | "drop_indicator"
@@ -8324,6 +8359,7 @@ impl ShellRuntime {
             | "tab_index"
             | "tab_stop"
             | "href"
+            | "drag_paths"
             | "id"
             | "overflow_scroll"
             | "overflow_x_scroll"
@@ -8415,6 +8451,7 @@ impl ShellRuntime {
                     "spin" => "spin",
                     "loop" => "loop",
                     "href" => "href",
+                    "drag_paths" => "drag_paths",
                     _ => "accessibility_label",
                 };
                 if name == "id"
@@ -9704,6 +9741,15 @@ fn mouse_button_payload<'js>(
     Ok(payload)
 }
 
+fn touch_phase_name(phase: gpui::TouchPhase) -> &'static str {
+    match phase {
+        gpui::TouchPhase::Started => "started",
+        gpui::TouchPhase::Moved => "moved",
+        gpui::TouchPhase::Ended => "ended",
+        gpui::TouchPhase::Cancelled => "cancelled",
+    }
+}
+
 fn set_pointer_geometry<'js>(
     ctx: &Ctx<'js>,
     payload: &Object<'js>,
@@ -10250,6 +10296,7 @@ fn callback_op_name(method: &str) -> Option<&'static str> {
         "on_mouse_down_out" => "on_mouse_down_out",
         "on_drop" => "on_drop",
         "on_scroll_wheel" => "on_scroll_wheel",
+        "on_pinch" => "on_pinch",
         "on_item_click" => "on_item_click",
         "on_item_secondary_click" => "on_item_secondary_click",
         "on_resize" => "on_resize",

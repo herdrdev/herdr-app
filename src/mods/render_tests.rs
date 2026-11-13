@@ -10,12 +10,83 @@ use std::{
     time::Instant,
 };
 
+
+#[gpui::test]
+fn mod_text_selection_stays_in_its_shell_root(cx: &mut TestAppContext) {
+    use gpui::*;
+    use gpui_base::{SelectableText, TextSelection, TextView, TextViewState};
+    use gpui_shell::ShellRoot;
+
+    struct Column {
+        texts: Vec<Entity<TextViewState>>,
+        label: &'static str,
+    }
+    impl Render for Column {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().flex().flex_col().size_full().gap(px(20.))
+                .children(self.texts.iter().map(|text| TextView::new(text).scrollable(false).selectable(true)))
+                .child(SelectableText::new("plain", format!("{} plain text", self.label)).document_order(u64::MAX))
+        }
+    }
+    struct Columns {
+        roots: Vec<Entity<ShellRoot>>,
+    }
+    impl Render for Columns {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().flex().size_full().children(self.roots.iter().map(|root| {
+                div().w(px(240.)).h_full().child(root.clone())
+            }))
+        }
+    }
+    cx.update(gpui_shell::init);
+    let mut texts = Vec::new();
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        let roots = ["LEFT", "CENTER", "RIGHT"].into_iter().map(|label| {
+            let blocks = ["first", "middle", "second"].into_iter().map(|block| {
+                cx.new(|cx| TextViewState::markdown(&format!("{label} {block} block"), cx))
+            }).collect::<Vec<_>>();
+            texts.push(blocks.clone());
+            let content = cx.new(|_| Column { texts: blocks, label }).into();
+            cx.new(|cx| ShellRoot::new(content, window, cx))
+        }).collect();
+        Columns { roots }
+    });
+    cx.run_until_parked();
+    let bounds = |column: usize, block: usize, cx: &mut VisualTestContext| {
+        texts[column][block].read_with(cx, |text, _| text.bounds())
+    };
+    let start = bounds(1, 0, cx).origin + point(px(1.), px(10.));
+    let inside = bounds(1, 2, cx);
+    let neighbor = bounds(2, 2, cx);
+    for end in [
+        point(inside.right() - px(1.), inside.top() + px(10.)),
+        point(neighbor.right() - px(1.), neighbor.top() + px(10.)),
+        point(px(900.), px(400.)),
+        point(px(-20.), px(400.)),
+    ] {
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::default());
+        cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        let copied = cx.update(|window, cx| TextSelection::selected_text(window, cx));
+        assert!(copied.contains("CENTER first block"), "{copied:?}");
+        assert!(copied.contains("CENTER middle block"), "end {end:?}: {copied:?}");
+        assert!(copied.contains("CENTER second block"), "end {end:?}: {copied:?}");
+        assert!(!copied.contains("LEFT") && !copied.contains("RIGHT"), "{copied:?}");
+        if end.y == px(400.) {
+            assert!(copied.contains("CENTER plain text"), "{copied:?}");
+        }
+        cx.simulate_mouse_move(neighbor.center(), None, Modifiers::default());
+        assert_eq!(cx.update(|window, cx| TextSelection::selected_text(window, cx)), copied);
+    }
+}
+
 struct Staged(PathBuf);
 impl Staged {
     fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let path = PathBuf::from(format!(
-            "/var/tmp/herdr-render-{}-{}",
+        let path = crate::test_tmp().join(format!(
+            "herdr-render-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
@@ -126,7 +197,7 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
         shared.borrow_mut().shared.insert(a.string(0)?.into(), from_host(a.value(1)?));
         Ok(HostValue::Null)
     });
-    for name in ["run", "playSound", "setAgentOrder", "openOverlay", "closeOverlay", "notify", "presentUpdateNotes"] {
+    for name in ["run", "playSound", "setAgentOrder", "setWindowTitle", "openOverlay", "closeOverlay", "notify", "presentUpdateNotes"] {
         let calls = calls.clone();
         module = module.function(name, move |a| {
             if name == "run" {
@@ -152,9 +223,8 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
     module = module.async_function("feedbackPickImages", |_| Ok(async { Ok(HostValue::Array(vec![])) }));
     module = module.async_function("knownAgents", |_| Ok(async { Ok(HostValue::Array(vec![])) }));
     module = module.async_function("pickFolder", |_| Ok(async { Ok(HostValue::Null) }));
-    for name in ["nextCommand", "watchFolder"] {
-        module = module.async_function(name, |_| Ok(std::future::pending::<gpui_shell::HostResult>()));
-    }
+    module = module.async_function("nextCommand", |_| Ok(std::future::pending::<gpui_shell::HostResult>()));
+    module = module.cancellable_async_function("watchFolder", HostValue::Array(vec![]), |_| Ok(std::future::pending::<gpui_shell::HostResult>()));
     for name in ["exec", "hc", "readTextFile", "writeTextFile", "sendFeedback"] {
         let calls = calls.clone();
         module = module.async_function(name, move |a| {
@@ -516,6 +586,66 @@ fn font_pickers_contain_scroll_on_the_wrapper(cx: &mut TestAppContext) {
     }
 }
 
+struct RootedView(gpui::Entity<gpui_shell::ShellRoot>);
+impl gpui::Render for RootedView {
+    fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+        self.0.clone()
+    }
+}
+
+#[gpui::test]
+fn a_mod_hears_a_pinch_only_over_its_element(cx: &mut TestAppContext) {
+    use gpui::{AppContext as _, Modifiers, PinchEvent, TouchPhase, VisualTestContext, point, px};
+
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    std::fs::write(staged.0.join("main.js"), r#"
+import { View, div } from "gpui-kit";
+import { v_flex } from "gpui-base";
+export default class Demo extends View {
+  init() { this.log = []; }
+  render() {
+    return v_flex().w(300).h(200)
+      .child(div().w(100).h(50).on_pinch((event, cx) => {
+        this.log.push(`${event.delta}:${event.touch_phase}:${event.local_position.x}:${event.modifiers.platform}`);
+        cx.notify();
+      }))
+      .child(div().child(`log=${this.log.join(" ")}`));
+  }
+}
+"#).unwrap();
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|window, cx| {
+        RootedView(runtime.try_load(&staged.0, window, cx).unwrap())
+    });
+    let mut context = VisualTestContext::from_window(window.into(), cx);
+    context.update(|window, cx| window.draw(cx).clear(cx));
+    let view: gpui::Entity<gpui_shell::ScriptView> = window
+        .root(&mut context)
+        .unwrap()
+        .read_with(&context, |root, cx| root.0.read(cx).content().clone().downcast().unwrap());
+
+    let pinch = |x: f32, delta: f32, phase: TouchPhase, platform: bool| PinchEvent {
+        position: point(px(x), px(20.)),
+        delta,
+        modifiers: Modifiers { platform, ..Modifiers::default() },
+        phase,
+    };
+    // A hitbox counts as hovered only once the last input is the pointer.
+    context.simulate_mouse_move(point(px(20.), px(20.)), None, Modifiers::default());
+    context.simulate_event(pinch(20., 0.5, TouchPhase::Moved, true));
+    // Outside the element: GPUI only calls the listener on its hitbox.
+    context.simulate_event(pinch(250., 0.25, TouchPhase::Moved, false));
+    context.simulate_event(pinch(30., -0.25, TouchPhase::Ended, false));
+    context.run_until_parked();
+    context.update(|window, cx| window.draw(cx).clear(cx));
+
+    let tree = context.update(|_, cx| {
+        view.read(cx).snapshot().map(gpui_shell::RenderSnapshot::debug_tree).unwrap_or_default()
+    });
+    assert!(tree.contains("log=0.5:moved:20:true -0.25:ended:30:false"), "{tree}");
+}
+
 #[gpui::test]
 fn long_theme_names_stay_inside_their_card(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
@@ -624,6 +754,37 @@ fn check_materializes_retained_elements_in_a_rendered_view(cx: &mut TestAppConte
 }
 
 #[gpui::test]
+fn long_space_names_use_the_sidebar_width(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let name = "quarterly infrastructure cost review";
+    let mut values = fixture(true, props(), updates("current", "current"));
+    let spaces = values.get_mut("spaces").unwrap().as_array_mut().unwrap();
+    spaces[0]["name"] = json!(name);
+    // A worktree of the first space's repo, drawn nested under it.
+    spaces.insert(1, json!({"id":"s3","index":2,"name":"portal rewrite","folder":"/fixture/portal","machine":null,"branch":null,"active":false,"status":"idle","tabs":[]}));
+    // The remote space is on main in a repo named after it: its tail has nothing to show.
+    let git = "this.git[JSON.stringify([null, '/fixture/project'])] = { name: 'herdr', branch: 'feature/rate-limiting', ahead: 0, behind: 0, repo: JSON.stringify([null, '/fixture/project/.git']), linked: false };
+        this.git[JSON.stringify([null, '/fixture/portal'])] = { name: 'herdr', branch: 'portal-rewrite', ahead: 0, behind: 0, repo: JSON.stringify([null, '/fixture/project/.git']), linked: true };
+        this.git[JSON.stringify(['remote', '/remote/project'])] = { name: 'remote', branch: 'main', ahead: 0, behind: 0, repo: JSON.stringify(['remote', '/remote/project/.git']), linked: false };";
+    let tree = describe_with_values(cx, &staged, "mods/spaces", values, Some(git)).unwrap();
+    let lines: Vec<&str> = tree.lines().collect();
+    let text = lines.iter().position(|l| l.contains(&format!("text {name:?}"))).unwrap();
+    let label = lines[text - 1];
+    assert!(!label.contains(".max_w"), "a wider sidebar must show more of the name: {label}");
+    assert!(!label.contains(".flex_shrink[Number(0.0)]"), "the name must give way when the row is full: {label}");
+    assert!(label.contains(".min_w[Number(48.0)]"), "the name shrinks, but a short one stays readable: {label}");
+    let tail = lines[text + 1..].iter().find(|l| l.contains(".justify_end")).unwrap();
+    assert!(tail.contains(".flex_auto") && !tail.contains(".flex_1"), "the git tail must start from its text's width, so both sides give way in proportion: {tail}");
+    assert!(tail.contains(".min_w[Number(48.0)]"), "the git tail shrinks, but a short one stays readable: {tail}");
+    let remote = lines.iter().position(|l| l.contains("text \"Remote\"")).unwrap();
+    let empty = lines[remote + 1..].iter().find(|l| l.contains(".justify_end")).unwrap();
+    assert!(empty.contains(".min_w[Number(0.0)]"), "an empty git tail must not take room from the name: {empty}");
+    let icon = lines.iter().find(|l| l.contains("branch.svg")).expect("the worktree space is nested");
+    assert!(icon.contains(".flex_none"), "a worktree's icon keeps its size while the name gives way: {icon}");
+}
+
+#[gpui::test]
 fn rebuilt_machine_offers_connect_only_for_identity_mismatch(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
@@ -642,6 +803,22 @@ fn rebuilt_machine_offers_connect_only_for_identity_mismatch(cx: &mut TestAppCon
         assert_eq!(tree.contains("rebuilt ·"), offered, "{tree}");
         assert_eq!(tree.contains("This machine was rebuilt or replaced. Click to connect to the new one."), offered, "{tree}");
         assert!(!tree.contains("machine-reconnect-"), "reconnect belongs in the machine row: {tree}");
+    }
+}
+
+#[gpui::test]
+fn machine_logout_warning_tracks_current_remote_state(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for state in ["false", "true", "null", "undefined"] {
+        let setup = format!("this.hosts = []; this.added = [{{name:'cloud', target:'host', keeps_running_after_logout:{state}, logout_linger_user:'-alice'}}];");
+        let tree = describe(cx, &staged, "mods/machine-add", false, props(), updates("current", "current"), Some(&setup)).unwrap();
+        assert_eq!(tree.contains("Agents on cloud stop when you disconnect"), state == "false", "{tree}");
+        assert_eq!(tree.contains("ma-logout-copy-cloud"), state == "false", "{tree}");
+        if state == "false" { assert!(tree.contains("sudo loginctl enable-linger -- -alice"), "{tree}"); }
+        let setup = format!("this.machines = [{{name:'cloud', target:'host', state:'connected', keeps_running_after_logout:{state}}}];");
+        let tree = describe(cx, &staged, "mods/spaces", false, props(), updates("current", "current"), Some(&setup)).unwrap();
+        assert_eq!(tree.contains("machine-logout-cloud"), state == "false", "{tree}");
     }
 }
 

@@ -477,6 +477,47 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
         ),
     )?;
 
+    // HERDR: a textarea's selection operations (read, set, replace).
+    let token_editor = runtime.clone();
+    globals.set(
+        "__editor_text_call",
+        Func::from(
+            move |ctx: Ctx<'_>,
+                  handle: EntityHandle,
+                  method: String,
+                  args: super::PlainDataArguments|
+                  -> JsResult<super::DataResult> {
+                if !crate::input_tokens::EDITOR_METHODS
+                    .iter()
+                    .any(|(name, readonly)| *name == method && *readonly)
+                {
+                    refuse_mutation_in_render(&ctx, &method)?;
+                }
+                let state = live_editor(&ctx, &token_editor, handle)?;
+                scope::with_current(|window, cx| {
+                    crate::input_tokens::invoke_editor(&state, &method, &args.0, window, cx)
+                })
+                .ok_or_else(|| {
+                    Exception::throw_type(&ctx, "editor operation requires a live host call")
+                })?
+                .map(super::DataResult)
+                .map_err(|e| super::state_operation_error(&ctx, e))
+            },
+        ),
+    )?;
+
+    let focus_editor = runtime.clone();
+    globals.set(
+        "__editor_focus",
+        Func::from(move |ctx: Ctx<'_>, handle: EntityHandle| -> JsResult<()> {
+            let state = live_editor(&ctx, &focus_editor, handle)?;
+            scope::with_current(|window, cx| {
+                state.update(cx, |state, cx| state.focus(window, cx));
+            })
+            .ok_or_else(|| needs_call(&ctx, "focus()"))
+        }),
+    )?;
+
     let read_editor = runtime.clone();
     globals.set(
         "__editor_value",

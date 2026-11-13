@@ -251,3 +251,25 @@ for (const sort of ["priority", "grouped"]) test(`${sort}: a kept sub-agent keep
   expect(pinned.texts.get("ag-t3")).toContain("t3");
   expect(keptRender(sort, { kept: [{ address: "t3", parent: "t9" }] }).ids).toContain("ag-t3"); // its parent ended
 });
+
+test("a title that opens with a bracket keeps it; each agent's own prefix still goes", () => {
+  const title = new Function("View", "localStorage", "props", "run", `${source}; return title;`)(class {}, {}, () => ({}), () => {});
+  const clean = new Function("View", "localStorage", "props", "run", `${source}; return clean;`)(class {}, {}, () => ({}), () => {});
+  const claude = { program: { name: "claude", key: "claude" }, title: "" };
+  // The reported bug: a Claude Code session renamed "[herdr] config" showed as "herdr] config".
+  expect(title({ name: "3", named: false }, { ...claude, title: "[herdr] config" })).toBe("[herdr] config");
+  // Titles as each agent writes them (from its source).
+  const titles: [string, string][] = [
+    ["[herdr] config", "[herdr] config"], // Claude Code: the session name
+    ["⠋ [herdr] config | herdr-app", "[herdr] config | herdr-app"], // Codex working
+    ["[ ! ] Action Required | [herdr] config | herdr-app", "Action Required | [herdr] config | herdr-app"], // Codex needs you
+    ["[ . ] Action Required | [herdr] config | herdr-app", "Action Required | [herdr] config | herdr-app"], // ... its other blink phase
+    ["● [ ! ] Action Required | herdr-app", "Action Required | herdr-app"], // ... with the microphone on
+    ["✦  [herdr] config (herdr-app)", "[herdr] config (herdr-app)"], // Gemini working
+    ["◇  Ready (herdr-app)", "Ready (herdr-app)"], // Gemini idle
+    ["OC | [herdr] config", "OC | [herdr] config"], // OpenCode
+    ["π - [herdr] config - herdr-app", "π - [herdr] config - herdr-app"], // Pi
+    ["⠋ - Thinking - [herdr] config - grok", "Thinking - [herdr] config - grok"], // Grok: the spinner's " - " goes too
+  ];
+  for (const [raw, shown] of titles) expect(clean(raw)).toBe(shown);
+});

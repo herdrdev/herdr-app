@@ -13,7 +13,8 @@ Input-SHA256: 9ccb6b1a96db08162bbeea238747fcf1e6d08537260f92529ae2eebe74d0f1b3 c
 Input-SHA256: fbc6bf4ca768aadc8a6fed045721777034e8d4e2679af7cac7facac54dbce432 crates/ghostty-sys/build.rs
 Input-SHA256: add9d7531d1b21646317a8958e38fc727506fa39d24bdecb44154d943c82753a defaults/icons/LICENSE-LobeHub.txt
 Input-SHA256: b495047bd93a9b06913511076f504daba17d5bbeb3e0650f3bb53a4220329c57 defaults/icons/LICENSE-Lucide.txt
-Input-SHA256: 7b3925ce431fc0984bdb1a47da2663c48262191259dda8c23f2fa6ed8accb841 defaults/icons/LICENSES.md
+Input-SHA256: 16c45f9d667442781f03fa198914cc39abcaa48ec5ed8f644643e554ca2fbf63 defaults/icons/LICENSE-oh-my-pi.txt
+Input-SHA256: df51f0268b1749b0c94b3cfb9ba2851e94632062bae6935365c6f7a6c8e1cc50 defaults/icons/LICENSES.md
 Input-SHA256: e7bae1721866dc0152e9e8f9fb8c0033a6f8ee98f63c4d64b0f06bf6f27a13e8 defaults/mods/win98/fonts/LICENSE-MSSansSerif.txt
 Input-SHA256: 9348ddfd44da5a127c59141981954746a860ec8e03e0412cf3af7134af0f97e2 defaults/mods/win98/fonts/LICENSE-PxPlus.txt
 Input-SHA256: 3f941b3b89cf7b8370ceb83cc76d2120d471b58735d8ca60238a751a48d7f72f licenses/CC-BY-SA-3.0.txt
@@ -28,7 +29,7 @@ Input-SHA256: f8ac2c75e7f629a87565c80d61ff9fe5aa15cdea0bda997d52a4dc13fdbd19cb l
 Input-SHA256: 5c537d6853e005298a285d508cff9ac7192cea23576c840d485b2b586a7ff177 licenses/Zig.txt
 Input-SHA256: d25e82e26acd42ca3ccc9993622631163425b869b9e16284226d534cff6470f2 licenses/highway-BSD3.txt
 Input-SHA256: 43070e2d4e532684de521b885f385d0841030efa2b1a20bafb76133a5e1379c1 licenses/highway.txt
-Input-SHA256: 6f440b2e11f1729f94e191d7a2c106c6cbf5b5a40bae8915f321b5f361251d79 licenses/inventory.json
+Input-SHA256: 3d021fc839b8da87824d5ae085e1c3723d59223a5d7b80bd92f8ef3ed6c4ede4 licenses/inventory.json
 Input-SHA256: f9bc4423732350eb0b3f7ed7e91d530298476f8fec0c6c427a1c04ade22655af licenses/musl.txt
 Input-SHA256: 204bbed08ddeeecb362b4da36d3479a0167b7356a9d6024a24f9833affbe228a licenses/simdutf-TH.txt
 Input-SHA256: fc8dbc04e03ad4efc08a647ffe7f995b811a95bc04c0e85a56d5277c6593fa5f licenses/simdutf.txt
@@ -20251,6 +20252,36 @@ https://github.com/lobehub/lobe-icons
 MIT License
 
 Copyright (c) 2023 LobeHub
+
+Permission is hereby granted, free of charge, to any person obtaining a copy
+of this software and associated documentation files (the "Software"), to deal
+in the Software without restriction, including without limitation the rights
+to use, copy, modify, merge, publish, distribute, sublicense, and/or sell
+copies of the Software, and to permit persons to whom the Software is
+furnished to do so, subject to the following conditions:
+
+The above copyright notice and this permission notice shall be included in all
+copies or substantial portions of the Software.
+
+THE SOFTWARE IS PROVIDED "AS IS", WITHOUT WARRANTY OF ANY KIND, EXPRESS OR
+IMPLIED, INCLUDING BUT NOT LIMITED TO THE WARRANTIES OF MERCHANTABILITY,
+FITNESS FOR A PARTICULAR PURPOSE AND NONINFRINGEMENT. IN NO EVENT SHALL THE
+AUTHORS OR COPYRIGHT HOLDERS BE LIABLE FOR ANY CLAIM, DAMAGES OR OTHER
+LIABILITY, WHETHER IN AN ACTION OF CONTRACT, TORT OR OTHERWISE, ARISING FROM,
+OUT OF OR IN CONNECTION WITH THE SOFTWARE OR THE USE OR OTHER DEALINGS IN THE
+SOFTWARE.
+
+
+----------------------------------------------------------------------
+oh-my-pi agent icon
+https://github.com/can1357/oh-my-pi
+
+--- defaults/icons/LICENSE-oh-my-pi.txt ---
+MIT License
+
+Copyright (c) 2025 Mario Zechner
+Copyright (c) 2025-2026 Can Bölük
+Copyright (c) 2026 Stencil Labs, Inc.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
