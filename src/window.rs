@@ -277,6 +277,8 @@ struct Term {
 enum TerminalChange {
     Keep { space: String, tab: String, pane: String, name: String, target: Option<String>, axis: Axis },
     Park,
+    /// Reverse a Keep into a removed shared space without editing the current layout.
+    UndoKeep,
 }
 
 struct PendingTerminalChange {
@@ -479,6 +481,9 @@ impl AppWindow {
         }
         mods::note_fonts(cx);
         let seen = std::fs::read_to_string(file("seen.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+        let initial_view: Option<crate::mirror::View> = std::fs::read_to_string(file("view.json")).ok().and_then(|s| serde_json::from_str(&s).ok());
+        let mut model = Model::default();
+        if let Some(view) = &initial_view { view.restore_dismissed(&mut model); }
         let mut w = AppWindow {
             core,
             runtime,
@@ -496,7 +501,7 @@ impl AppWindow {
             float_reveal: HashMap::new(),
             float_hover: HashSet::new(),
             float_leave: HashMap::new(),
-            model: Model::default(),
+            model,
             terms: HashMap::new(),
             copies: HashMap::new(),
             overlays: Vec::new(),
@@ -534,7 +539,7 @@ impl AppWindow {
                 local.connection(true, None, None);
                 [(String::new(), local)].into()
             },
-            initial_view: std::fs::read_to_string(file("view.json")).ok().and_then(|s| serde_json::from_str(&s).ok()),
+            initial_view,
             pointer: Point::default(),
             drag_from: None,
             titlebar_applied: None,
@@ -1362,7 +1367,7 @@ impl AppWindow {
         let focused = self.model.focused_pane().and_then(|p| self.model.address_of(&p));
         self.agent
             .clone()
-            .filter(|a| self.live.contains_key(a))
+            .filter(|a| self.live.contains_key(a) && !self.dismissed_agent(a))
             .or_else(|| focused.filter(|a| self.model.status(a).is_some()))
             .or_else(|| self.agent_order().into_iter().next())
     }
@@ -1393,21 +1398,45 @@ impl AppWindow {
         self.agent = Some(addr.to_owned());
     }
 
-    /// The parent chain's top: the agent a sub-agent belongs to in the agent order.
-    fn root_agent(&self, addr: &str) -> String {
-        let mut cur = addr.to_owned();
+    /// Whether `addr` or any agent above it was closed locally on a remote machine and isn't shown.
+    fn dismissed_agent(&self, addr: &str) -> bool {
+        if self.model.pane_of(addr).is_some() { return false; }
+        self.agent_chain(addr).iter().any(|a| self.dismissed_here(a))
+    }
+
+    /// Whether `addr` itself was dismissed: by terminal, or through its own space or tab.
+    fn dismissed_here(&self, addr: &str) -> bool {
+        if self.model.dismissed_terminal(addr) { return true; }
+        let machine = addr.split_once('/').map(|(m, _)| m);
+        let labels = self.live.get(addr).and_then(|r| r.get("labels"));
+        let Some(space) = labels.and_then(|l| l.get("herdr.space")).and_then(Value::as_str) else { return false };
+        let space = crate::mirror::qualify(space, machine);
+        let tab = labels.and_then(|l| l.get("herdr.tab")).and_then(Value::as_str).map(|t| crate::mirror::qualify(t, machine));
+        self.model.dismissed_target(addr, &space, tab.as_deref())
+    }
+
+    /// `addr` and its parents up to the top, `addr` first.
+    fn agent_chain(&self, addr: &str) -> Vec<String> {
+        let mut chain = vec![addr.to_owned()];
         for _ in 0..32 {
-            let parent = self.live.get(&cur).and_then(|r| r.get("parent")).and_then(Value::as_str);
+            let cur = chain.last().unwrap();
+            let parent = self.live.get(cur).and_then(|r| r.get("parent")).and_then(Value::as_str);
             match parent {
-                Some(p) if self.live.contains_key(p) => cur = p.to_owned(),
+                Some(p) if self.live.contains_key(p) => chain.push(p.to_owned()),
                 _ => break,
             }
         }
-        cur
+        chain
+    }
+
+    /// The parent chain's top: the agent a sub-agent belongs to in the agent order.
+    fn root_agent(&self, addr: &str) -> String {
+        self.agent_chain(addr).pop().unwrap()
     }
 
     /// Creates what's visible, drops what isn't, publishes state, saves, focuses.
     fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.agent.as_deref().is_some_and(|a| self.dismissed_agent(a)) { self.agent = None; }
         self.model.order_spaces();
         let (model, live) = (&self.model, &self.live);
         self.swapped.retain(|p, a| model.address_of(p).is_some() && live.contains_key(a));
@@ -1832,11 +1861,21 @@ impl AppWindow {
         let m = &self.model;
         let home = home();
         let mut want: HashMap<String, String> = HashMap::new();
+        // Private dismissal must not renumber remote terminals' process labels.
+        // Name visible work against the full shared layout, including hidden siblings.
+        let full: HashMap<_, _> = self.documents.iter()
+            .filter(|(machine, _)| m.dismissed.values().any(|d| &d.machine == *machine))
+            .map(|(machine, slot)| {
+                let on = Some(machine.as_str());
+                let doc = slot.capture(m, on);
+                (machine.as_str(), doc.project(on))
+            }).collect();
         for p in &m.spaces {
-            let name = m.space_name(p, &home);
+            let shared = p.machine.as_deref().and_then(|machine| full.get(machine)).and_then(|spaces| spaces.iter().find(|s| s.id == p.id)).unwrap_or(p);
+            let name = m.space_name(shared, &home);
             for c in &p.tabs {
                 for a in model::addresses(&c.root) {
-                    want.insert(a, format!("{name} / {}", Model::tab_name(p, c)));
+                    want.insert(a, format!("{name} / {}", Model::tab_name(shared, c)));
                 }
             }
         }
@@ -1883,7 +1922,7 @@ impl AppWindow {
         for (machine, slot) in &mut self.documents {
             slot.dirty |= refresh;
             if !slot.ready() { continue; }
-            let doc = crate::mirror::Document::capture(&self.model, (!machine.is_empty()).then_some(machine.as_str()));
+            let doc = slot.capture(&self.model, (!machine.is_empty()).then_some(machine.as_str()));
             let write = (self.drag.is_none() && slot.available && slot.document.as_ref() != Some(&doc)).then_some(doc);
             if write.is_none() && slot.available && !slot.dirty { continue; }
             let (tx, rx) = std::sync::mpsc::channel();
@@ -1941,7 +1980,7 @@ impl AppWindow {
                 }
             }
             let slot = &self.documents[&machine];
-            let doc = crate::mirror::Document::capture(&self.model, (!machine.is_empty()).then_some(machine.as_str()));
+            let doc = slot.capture(&self.model, (!machine.is_empty()).then_some(machine.as_str()));
             if slot.document.as_ref() == Some(&doc) { continue; }
             if !slot.available {
                 tracing::error!("layout on {machine:?} could not save before quit: {}", slot.error.as_deref().unwrap_or("machine unavailable"));
@@ -1970,7 +2009,7 @@ impl AppWindow {
             let (document, version, replace, conflict) = match result {
                 Outcome::Read(d, v) => {
                     let replace = !slot.available || slot.version != v || slot.document.is_none();
-                    let projection = crate::mirror::Document::capture(&self.model, (!machine.is_empty()).then_some(machine.as_str()));
+                    let projection = slot.capture(&self.model, (!machine.is_empty()).then_some(machine.as_str()));
                     let unsent = slot.document.as_ref().is_some_and(|old| old != &projection);
                     let conflict = replace && unsent && projection != d;
                     (d, v, replace, conflict)
@@ -1999,7 +2038,12 @@ impl AppWindow {
             slot.available = slot.connected;
             slot.blocked = false;
             if slot.connected { slot.error = None; slot.notified_error = None; }
-            slot.document = Some(document.clone());
+            if replace {
+                slot.staged = None;
+                slot.document = Some(document.clone());
+            } else {
+                slot.acknowledge(document.clone(), &self.model, (!machine.is_empty()).then_some(machine.as_str()));
+            }
             if replace {
                 let on = (!machine.is_empty()).then_some(machine.as_str());
                 document.replace(&mut self.model, on);
@@ -2134,6 +2178,7 @@ impl AppWindow {
     /// toast (drawn by the `toast` mod; click it to go there) unless they're
     /// looking at that agent.
     fn alert(&mut self, addr: &str, alert: model::Alert, looking: bool, window: &mut Window, cx: &mut Context<Self>) {
+        if self.dismissed_agent(addr) { return; }
         if settings::get().sounds.enabled {
             crate::sound::play(if alert == model::Alert::Blocked { "blocked" } else { "done" });
         }
@@ -2193,7 +2238,10 @@ impl AppWindow {
                 let labels = r.get("labels")?;
                 let space = labels.get("herdr.space")?.as_str().filter(|s| !s.is_empty())?;
                 let tab = labels.get("herdr.tab").and_then(Value::as_str).filter(|s| !s.is_empty());
-                Some((a.clone(), crate::mirror::qualify(space, machine), tab.map(|t| crate::mirror::qualify(t, machine))))
+                let space = crate::mirror::qualify(space, machine);
+                let tab = tab.map(|t| crate::mirror::qualify(t, machine));
+                if self.model.dismissed_target(a, &space, tab.as_deref()) { return None; }
+                Some((a.clone(), space, tab))
             }).collect::<Vec<_>>();
         orphans.sort();
         for (addr, space, tab) in orphans {
@@ -2203,32 +2251,56 @@ impl AppWindow {
     }
 
     fn start_adoption(&mut self, addr: String, space: String, tab: Option<String>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.model.dismissed_target(&addr, &space, tab.as_deref()) { return; }
         self.changing_terminals.insert(addr.clone());
         let core = self.core.clone();
         let generation = self.core_generation;
         cx.spawn_in(window, async move |this, cx| {
             let (address, wanted_space, wanted_tab) = (addr.clone(), space.clone(), tab.clone());
-            let ready = cx.background_executor().spawn(async move {
-                let record = core.call("terminal.get", json!({"terminal":address}))?;
+            let reader = core.clone();
+            let record = cx.background_executor().spawn(async move {
+                let record = reader.call("terminal.get", json!({"terminal":address}))?;
                 let machine = address.split_once('/').map(|(m, _)| m);
-                if !adoptable(&record, &wanted_space, wanted_tab.as_deref(), machine) { return Ok(false); }
-                if record["keep"].as_bool() != Some(true) {
-                    core.call("terminal.keep", json!({"terminal":address,"keep":true}))?;
-                }
-                anyhow::Ok(true)
+                anyhow::Ok(adoptable(&record, &wanted_space, wanted_tab.as_deref(), machine).then_some(record))
             }).await;
+            // A close can happen while terminal.get is pending. Check on the
+            // foreground before asking core to keep it, as well as before adoption.
+            let allowed = this.update_in(cx, |this, _, _| {
+                let allowed = generation == this.core_generation && !this.draining
+                    && matches!(&record, Ok(Some(_)))
+                    && !this.model.dismissed_target(&addr, &space, tab.as_deref())
+                    && this.require_document(addr.split_once('/').map(|(m, _)| m)).is_ok();
+                if !allowed { this.changing_terminals.remove(&addr); }
+                allowed
+            }).unwrap_or(false);
+            if !allowed { return; }
+            let ready = if let Ok(Some(record)) = record {
+                let address = addr.clone();
+                cx.background_executor().spawn(async move {
+                    if record["keep"].as_bool() != Some(true) {
+                        core.call("terminal.keep", json!({"terminal":address,"keep":true}))?;
+                    }
+                    anyhow::Ok(true)
+                }).await
+            } else { return; };
             let _ = this.update_in(cx, |this, window, cx| {
                 this.changing_terminals.remove(&addr);
                 if generation != this.core_generation || this.draining { return; }
-                if matches!(ready, Ok(true)) && this.model.pane_of(&addr).is_none()
-                    && this.require_document(addr.split_once('/').map(|(m, _)| m)).is_ok()
-                {
-                    this.adopt(&addr, &space, tab.as_deref());
-                    this.sync(window, cx);
-                    this.flush_documents(false, window, cx);
-                }
+                if matches!(ready, Ok(true)) { this.finish_adoption(&addr, &space, tab.as_deref(), window, cx); }
             });
         }).detach();
+    }
+
+    /// Recheck after asynchronous keep/get: local close may have won the race.
+    fn finish_adoption(&mut self, addr: &str, space: &str, tab: Option<&str>, window: &mut Window, cx: &mut Context<Self>) {
+        if self.model.pane_of(addr).is_none()
+            && !self.model.dismissed_target(addr, space, tab)
+            && self.require_document(addr.split_once('/').map(|(m, _)| m)).is_ok()
+        {
+            self.adopt(addr, space, tab);
+            self.sync(window, cx);
+            self.flush_documents(false, window, cx);
+        }
     }
 
     /// Puts a live terminal where its labels say, without changing what's
@@ -2338,6 +2410,18 @@ impl AppWindow {
         }
     }
 
+    /// Preserve current parent metadata before a local removal can erase the
+    /// last visible sibling of dismissed work. Authoritative replacement never
+    /// uses this path: its document must remain the source of hidden content.
+    fn stage_removal(&mut self, id: &str) {
+        let machine = self.model.space(id).or_else(|| self.model.space_of(id)).and_then(|s| s.machine.clone());
+        if let Some(machine) = machine
+            && self.model.dismissed.values().any(|d| d.machine == machine)
+            && let Some(slot) = self.documents.get_mut(&machine) {
+            slot.stage_dismissal(&self.model, &machine);
+        }
+    }
+
     fn terminal_ended(&mut self, block: &str, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(pane) = block.strip_suffix(SWAP) {
             self.swapped.remove(pane);
@@ -2363,6 +2447,7 @@ impl AppWindow {
                 return self.sync(window, cx);
             }
             if closed && self.model.address_of(block).as_deref() == Some(t.address.as_str()) {
+                self.stage_removal(block);
                 self.model.remove_pane(block);
                 return self.sync(window, cx);
             }
@@ -2599,6 +2684,7 @@ impl AppWindow {
                 };
                 if closed {
                     self.notify_launch_failure(&addr, window, cx);
+                    self.stage_removal(&pane);
                     self.model.remove_pane(&pane);
                     changed = true;
                 }
@@ -2617,6 +2703,9 @@ impl AppWindow {
     /// Gives a running terminal without a pane (a sub-agent, say) one in the
     /// shown space and focuses it; already in a pane: focuses that.
     fn keep_terminal(&mut self, addr: &str, place: &str, window: &mut Window, cx: &mut Context<Self>) -> Result<Value, String> {
+        if self.dismissed_agent(addr) {
+            return Err("terminal belongs to a view closed on this screen; restore it with space.select or tab.select and its saved ID".into());
+        }
         if let Some(p) = self.model.pane_of(addr) {
             self.model.focus_pane(&p);
             return Ok(json!({ "pane": p }));
@@ -2645,6 +2734,9 @@ impl AppWindow {
 
     /// Parking changes labels/keep in the background; only a successful reply removes the pane.
     fn park_terminal(&mut self, addr: &str, window: &mut Window, cx: &mut Context<Self>) -> Result<Value, String> {
+        if self.dismissed_agent(addr) {
+            return Err("terminal belongs to a view closed on this screen; restore it with space.select or tab.select and its saved ID".into());
+        }
         self.require_document(addr.split_once('/').map(|(m, _)| m))?;
         if self.changing_terminals.contains(addr) { return Err("This terminal already has a pane change in progress.".into()); }
         self.start_terminal_change(addr.to_owned(), TerminalChange::Park, window, cx);
@@ -2657,7 +2749,7 @@ impl AppWindow {
             TerminalChange::Keep { space, tab, .. } => (true, json!({
                 "herdr.space":crate::mirror::local(space, machine), "herdr.tab":crate::mirror::local(tab, machine),
             })),
-            TerminalChange::Park => (false, json!({"herdr.space":"","herdr.tab":""})),
+            TerminalChange::Park | TerminalChange::UndoKeep => (false, json!({"herdr.space":"","herdr.tab":""})),
         };
         let (tx, rx) = std::sync::mpsc::channel();
         self.changing_terminals.insert(address.clone());
@@ -2694,13 +2786,15 @@ impl AppWindow {
         match change {
             TerminalChange::Keep { space, tab, pane, name, target, axis } => {
                 if !self.live.contains_key(&address) { return; }
-                if self.model.space(&space).is_none() {
-                    if let Err(error) = self.park_terminal(&address, window, cx) {
-                        tracing::error!("cannot undo pane placement into closed space: {error}");
-                    }
-                    return;
-                }
                 if self.model.pane_of(&address).is_none() {
+                    // Closing on this screen keeps the remote placement and keep protection.
+                    // Check first: dismissing a whole space also removes it from this model.
+                    if self.model.dismissed_target(&address, &space, Some(&tab)) { return; }
+                    if self.model.space(&space).is_none() {
+                        // A genuinely removed shared space retains the existing cleanup policy.
+                        self.start_terminal_change(address, TerminalChange::UndoKeep, window, cx);
+                        return;
+                    }
                     let destination = target.filter(|p| self.model.tab_of(p).is_some_and(|t| t.id == tab))
                         .or_else(|| self.model.tab(&tab).and_then(|t| t.root.panes().first().map(|p| p.id.clone())));
                     if let Some(target) = destination {
@@ -2711,8 +2805,14 @@ impl AppWindow {
                 }
                 if let Some(pane) = self.model.pane_of(&address) { self.model.focus_pane(&pane); }
             }
+            // A sync read may have placed this terminal elsewhere while cleanup ran.
+            // Only explicit Park may remove that placement or publish a layout edit.
+            TerminalChange::UndoKeep => return,
             TerminalChange::Park => {
-                if let Some(pane) = self.model.pane_of(&address) { self.model.remove_pane(&pane); }
+                if let Some(pane) = self.model.pane_of(&address) {
+                    self.stage_removal(&pane);
+                    self.model.remove_pane(&pane);
+                }
             }
         }
         if !self.draining {
@@ -2889,13 +2989,74 @@ impl AppWindow {
             if !args.is_object() { args = json!({}); }
             args["machine"] = json!(machine);
         }
+        let closing = matches!(name, "space.close" | "tab.close" | "pane.close");
+        if closing {
+            // Resolve and validate explicit IDs before availability routing. Never
+            // silently fall back to the active machine for an invalid target.
+            let target = match name {
+                "space.close" => Self::owned(&args, "id").or_else(|| self.model.active.clone()),
+                "tab.close" => Self::owned(&args, "id").or_else(|| self.model.active_tab().map(|t| t.id.clone())),
+                _ => Self::owned(&args, "pane").or_else(|| self.model.focused_pane()),
+            };
+            let Some(id) = target else { return json!({"error":"nothing to close"}) };
+            let space = match name {
+                "space.close" => self.model.space(&id),
+                "tab.close" if self.model.tab(&id).is_none() => None,
+                "pane.close" if self.model.tab_of(&id).and_then(|t| t.root.find(&id)).is_none() => None,
+                _ => self.model.space_of(&id),
+            };
+            let Some(space) = space else { return json!({"error":format!("no target {id:?}")}) };
+            let machine = space.machine.clone();
+            let local = args.get("local").and_then(Value::as_bool) == Some(true);
+            if local && machine.is_none() { return json!({"error":"local: true requires a remote tab or space"}); }
+            if name == "pane.close" && self.model.tab_of(&id).and_then(|t| t.root.find(&id)).is_some_and(|n| !n.closable()) {
+                return json!({"ok":true});
+            }
+            let unavailable = self.require_document(machine.as_deref()).err();
+            if local || (machine.is_some() && unavailable.is_some()) {
+                if name == "pane.close" && self.model.tab_of(&id).is_some_and(|t| t.root.panes().len() != 1) {
+                    return json!({"error":"local pane close requires the last pane; close its tab with tab.close and local: true"});
+                }
+                if !local {
+                    if !person { return json!({"error":"remote layout unavailable; pass local: true to close only on this screen and keep remote terminals running"}); }
+                    let key = if name == "pane.close" { "pane" } else { "id" };
+                    let detail = format!("{} is unavailable. Its terminals keep running there; other screens are unchanged.", machine.as_deref().unwrap());
+                    self.confirm("Close on this screen?", &detail, name, json!({key:id,"local":true,"confirmed":true}), window, cx);
+                    return json!({"asked":"local"});
+                }
+                if !args.is_object() { args = json!({}); }
+                args[if name == "pane.close" { "pane" } else { "id" }] = json!(id);
+            } else if let Some(error) = unavailable { return json!({"error":error}); }
+        }
+        if closing && args.get("local").and_then(Value::as_bool) == Some(true) {
+            let key = if name == "pane.close" { "pane" } else { "id" };
+            let machine = Self::arg(&args, key)
+                .and_then(|id| self.model.space(id).or_else(|| self.model.space_of(id)))
+                .and_then(|s| s.machine.clone());
+            if let Some(machine) = machine
+                && let Some(slot) = self.documents.get_mut(&machine) {
+                slot.stage_dismissal(&self.model, &machine);
+            }
+        }
+        if matches!(name, "terminal.keep" | "terminal.park")
+            && Self::arg(&args, "terminal").is_some_and(|addr| self.dismissed_agent(addr)) {
+            return json!({"error":"terminal belongs to a view closed on this screen; restore it with space.select or tab.select and its saved ID"});
+        }
+        if matches!(name, "space.select" | "tab.select")
+            && let Some(id) = Self::arg(&args, "id")
+            && let Some((machine, _)) = id.split_once('/')
+            && self.documents.get(machine).is_some_and(|s| s.available)
+            && let Some(doc) = self.documents.get(machine).and_then(|s| s.source().cloned())
+        {
+            doc.restore(&mut self.model, machine, id, name == "tab.select");
+        }
         if matches!(name, "space.new" | "space.close" | "space.rename" | "space.move" | "tab.new" | "tab.close" | "tab.rename" | "tab.move" | "pane.split" | "pane.close" | "pane.swap" | "terminal.keep" | "terminal.park") {
             let node = ["id", "space", "pane"].into_iter().find_map(|k| Self::arg(&args, k));
             let target = node.and_then(|id| self.model.space(id).or_else(|| self.model.space_of(id))).or_else(|| self.model.active_space());
             let machine = if name == "space.new" { Self::arg(&args, "machine") }
                 else if name == "terminal.park" { Self::arg(&args, "terminal").and_then(|a| a.split_once('/').map(|(m, _)| m)) }
                 else { target.and_then(|s| s.machine.as_deref()) };
-            if let Err(error) = self.require_document(machine) { return json!({"error":error}); }
+            if !closing && let Err(error) = self.require_document(machine) { return json!({"error":error}); }
         }
         if name == "layout.resize"
             && let Some(space) = Self::arg(&args, "id").and_then(|id| self.model.space_of(id))
@@ -2950,17 +3111,23 @@ impl AppWindow {
             "space.close" => {
                 let Some(id) = Self::owned(a, "id").or_else(|| self.model.active.clone()) else { return self.fail("no space to close") };
                 let Some(p) = self.model.space(&id) else { return self.fail(format!("no space {id:?}")) };
-                if a.get("confirmed").and_then(Value::as_bool) != Some(true) {
-                    if !person {
-                        return self.fail("space.close ends its terminals: pass confirmed: true");
+                if a.get("local").and_then(Value::as_bool) == Some(true) {
+                    self.model.dismiss_space(&id);
+                    self.reply = Some(json!({"ok":true,"local":true}));
+                } else {
+                    if a.get("confirmed").and_then(Value::as_bool) != Some(true) {
+                        if !person {
+                            return self.fail("space.close ends its terminals: pass confirmed: true");
+                        }
+                        let panes: usize = p.tabs.iter().map(|c| c.root.panes().len()).sum();
+                        let detail = format!("{} \u{2014} {} tabs, {} terminals", self.model.space_name(p, &home()), p.tabs.len(), panes);
+                        self.confirm("Close space?", &detail, "space.close", json!({ "id": id, "confirmed": true }), window, cx);
+                        return;
                     }
-                    let panes: usize = p.tabs.iter().map(|c| c.root.panes().len()).sum();
-                    let detail = format!("{} \u{2014} {} tabs, {} terminals", self.model.space_name(p, &home()), p.tabs.len(), panes);
-                    self.confirm("Close space?", &detail, "space.close", json!({ "id": id, "confirmed": true }), window, cx);
-                    return;
+                    self.stage_removal(&id);
+                    let addrs = self.model.remove_space(&id);
+                    self.kill(&addrs, cx);
                 }
-                let addrs = self.model.remove_space(&id);
-                self.kill(&addrs, cx);
             }
             "space.rename" => {
                 let Some(id) = Self::owned(a, "id").or_else(|| self.model.active.clone()) else { return self.fail("no space to rename") };
@@ -3010,10 +3177,17 @@ impl AppWindow {
                 if p.tabs.len() == 1 {
                     let mut args = json!({ "id": p.id });
                     args["confirmed"] = a.get("confirmed").cloned().unwrap_or(Value::Null);
+                    args["local"] = a.get("local").cloned().unwrap_or(Value::Null);
                     return self.dispatch("space.close", &args, person, window, cx);
                 }
-                let (addrs, _) = self.model.remove_tab(&id);
-                self.kill(&addrs, cx);
+                if a.get("local").and_then(Value::as_bool) == Some(true) {
+                    self.model.dismiss_tab(&id);
+                    self.reply = Some(json!({"ok":true,"local":true}));
+                } else {
+                    self.stage_removal(&id);
+                    let (addrs, _) = self.model.remove_tab(&id);
+                    self.kill(&addrs, cx);
+                }
             }
             "tab.rename" => {
                 let Some(id) = Self::owned(a, "id").or(active_ctx) else { return self.fail("no tab to rename") };
@@ -3074,9 +3248,10 @@ impl AppWindow {
                 }
                 if c.root.panes().len() == 1 {
                     let id = c.id.clone();
-                    return self.dispatch("tab.close", &json!({ "id": id }), person, window, cx);
+                    return self.dispatch("tab.close", &json!({ "id": id, "local": a.get("local"), "confirmed": a.get("confirmed") }), person, window, cx);
                 }
                 let addr = self.model.address_of(&pane);
+                self.stage_removal(&pane);
                 self.model.remove_pane(&pane);
                 self.kill(&addr.into_iter().collect::<Vec<_>>(), cx);
             }
@@ -3278,6 +3453,9 @@ impl AppWindow {
                 let t = Self::arg(a, "terminal").unwrap_or_default().to_owned();
                 if !self.live.contains_key(&t) {
                     return self.fail(format!("no running terminal {t:?}"));
+                }
+                if self.dismissed_agent(&t) {
+                    return self.fail("terminal belongs to a view closed on this screen; restore it with space.select or tab.select and its saved ID");
                 }
                 self.focus_agent(&t);
             }
@@ -5827,6 +6005,501 @@ mod tests {
                 assert_eq!(&this.chrome, expected);
                 assert_eq!(&saved(this), expected);
             }
+        }));
+    }
+
+    #[test]
+    fn pending_keep_respects_closed_tab() { in_own_process("pending_keep_tab"); }
+
+    #[test]
+    fn pending_keep_preserves_remote_keep_for_closed_space() { in_own_process("pending_keep_space"); }
+
+    #[test]
+    fn pending_keep_drain_preserves_hidden_layout() { in_own_process("pending_keep_drain"); }
+
+    #[test]
+    fn pending_keep_preserves_valid_destinations() { in_own_process("pending_keep_valid"); }
+
+    #[gpui::test]
+    fn pending_keep_tab(cx: &mut gpui::TestAppContext) {
+        if running_alone("pending_keep_tab") { pending_keep_case(cx, "tab"); }
+    }
+
+    #[gpui::test]
+    fn pending_keep_space(cx: &mut gpui::TestAppContext) {
+        if running_alone("pending_keep_space") { pending_keep_case(cx, "space"); }
+    }
+
+    #[gpui::test]
+    fn pending_keep_drain(cx: &mut gpui::TestAppContext) {
+        if running_alone("pending_keep_drain") {
+            for case in ["draining", "drain"] { pending_keep_case(cx, case); }
+        }
+    }
+
+    #[gpui::test]
+    fn pending_keep_valid(cx: &mut gpui::TestAppContext) {
+        if running_alone("pending_keep_valid") {
+            for case in ["restore", "fresh", "visible", "failed", "moved", "removed", "closed-shared"] {
+                pending_keep_case(cx, case);
+            }
+        }
+    }
+
+    #[test]
+    fn pending_keep_preserves_adoption_before_and_after_reply() { in_own_process("pending_keep_adopted"); }
+
+    #[gpui::test]
+    fn pending_keep_adopted(cx: &mut gpui::TestAppContext) {
+        if running_alone("pending_keep_adopted") {
+            for case in ["adopted-before", "adopted-after"] {
+                pending_keep_case(cx, case);
+            }
+        }
+    }
+
+    /// Control the callback order without a remote host or executor timing.
+    fn pending_keep_case(cx: &mut gpui::TestAppContext, case: &str) {
+        use serde_json::json;
+        use crate::{mirror::Document, model::{Model, Tab}};
+        let (view, cx) = open_window(cx, "unused", "", json!({"id":"main","type":"block","content":{"tab":"active"}}));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            let mut source = Model::default();
+            source.add_space("s", "remote", "/tmp", Tab::new("t", "original", "p", "term"));
+            source.split("p", crate::layout::Axis::Row, "pa", "term-a");
+            source.space_mut("s").unwrap().tabs.push(Tab::new("t2", "sibling", "p2", "term2"));
+            let doc = Document::capture(&source, None);
+            this.model = Model::default();
+            doc.replace(&mut this.model, Some("remote"));
+            let slot = this.documents.entry("remote".into()).or_default();
+            slot.document = Some(doc.clone());
+            slot.available = true;
+            slot.connected = true;
+            // Keep document writes controlled too; callbacks below run synchronously.
+            let (document_tx, document_rx) = std::sync::mpsc::channel();
+            slot.pending = Some(document_rx);
+            this.live.insert("remote/parent".into(), json!({}));
+            this.live.insert("remote/new".into(), json!({"name":"newcomer", "parent":"remote/parent", "keep":true}));
+            this.model.focus_pane("remote/p");
+            let reply = this.keep_terminal("remote/new", if case == "fresh" { "tab" } else { "right" }, window, cx).unwrap();
+            assert_eq!(reply["pending"], true);
+            let mut pending = this.pending_terminals.remove("remote/new").unwrap();
+            let command = if case == "space" || case == "visible" { "space.close" } else { "tab.close" };
+            if case == "closed-shared" {
+                let empty = Document::capture(&Model::default(), None);
+                this.documents_updated(None, vec![("remote".into(), crate::mirror_sync::Outcome::Read(empty, 1))], window, cx);
+                assert!(this.model.dismissed.is_empty());
+                assert!(this.model.space("remote/s").is_none());
+            } else if case == "removed" {
+                this.model.remove_tab("remote/t");
+            } else if case == "moved" {
+                this.model.tab_mut("remote/t").unwrap().root.find_mut("remote/p").unwrap().id = "remote/moved".into();
+            } else {
+                assert_eq!(this.run_as(command, json!({"id":if command == "space.close" { "remote/s" } else { "remote/t" },"local":true}), false, window, cx), json!({"ok":true,"local":true}));
+            }
+            // A live snapshot may already contain labels from the successful RPC.
+            this.live.get_mut("remote/new").unwrap()["labels"] = json!({"herdr.space":"s","herdr.tab":reply["tab"].as_str().unwrap().strip_prefix("remote/").unwrap()});
+            if case == "restore" {
+                assert_eq!(this.run_as("tab.select", json!({"id":"remote/t"}), false, window, cx), json!({"ok":true}));
+            }
+            if case == "visible" {
+                // Another screen placed it elsewhere while our Keep was pending.
+                let mut elsewhere = Model::default();
+                elsewhere.add_space("elsewhere", "elsewhere", "/tmp", Tab::new("other", "", "other-pane", "new"));
+                let replacement = Document::capture(&elsewhere, None);
+                this.documents_updated(None, vec![("remote".into(), crate::mirror_sync::Outcome::Read(replacement, 1))], window, cx);
+                assert!(this.model.space("remote/s").is_none());
+            }
+            let adopted = if case.starts_with("adopted-") {
+                source.split("p2", crate::layout::Axis::Row, "pn", "new");
+                Some(Document::capture(&source, None))
+            } else { None };
+            if case == "adopted-before" {
+                this.documents_updated(None, vec![("remote".into(), crate::mirror_sync::Outcome::Read(adopted.clone().unwrap(), 2))], window, cx);
+                assert_eq!(this.model.pane_of("remote/new").as_deref(), Some("remote/pn"));
+            }
+            if case == "drain" {
+                // Feed the accepted Keep result through the real quit-time drain.
+                let (tx, rx) = std::sync::mpsc::channel();
+                tx.send(Ok(())).unwrap();
+                pending.reply = rx;
+                this.pending_terminals.insert("remote/new".into(), pending);
+                this.documents.get_mut("remote").unwrap().pending = None;
+                this.drain_documents(window, cx);
+                assert!(this.pending_terminals.is_empty());
+                assert!(!this.changing_terminals.contains("remote/new"));
+                assert_eq!(this.live["remote/new"]["labels"]["herdr.space"], "s");
+                assert_eq!(this.live["remote/new"]["keep"], true);
+                assert!(!this.model.dismissed.is_empty());
+                assert!(this.model.tab("remote/t").is_none(), "drain must not resurrect the dismissed tab");
+                assert_eq!(this.documents["remote"].capture(&this.model, Some("remote")), doc);
+                return;
+            }
+            if case == "draining" { this.draining = true; }
+            let result = if case == "failed" { Err("keep failed".into()) } else { Ok(()) };
+            this.apply_terminal_change("remote/new".into(), pending.change, result, window, cx);
+            match case {
+                "draining" => {
+                    // Observe the drain-mode completion before a drain loop could
+                    // consume a newly scheduled cleanup and hide that regression.
+                    assert!(this.pending_terminals.is_empty(), "drain-mode Keep must not schedule cleanup");
+                    assert!(!this.changing_terminals.contains("remote/new"));
+                    assert!(this.model.tab("remote/t").is_none());
+                    assert!(!this.model.dismissed.is_empty());
+                    assert_eq!(this.documents["remote"].capture(&this.model, Some("remote")), doc);
+                    assert_eq!(this.live["remote/new"]["labels"]["herdr.space"], "s");
+                    assert_eq!(this.live["remote/new"]["keep"], true);
+                }
+                "tab" | "space" | "adopted-before" | "adopted-after" => {
+                    // Scheduling cleanup is itself destructive: start_terminal_change is
+                    // the only remote-call entry from this completion, and queues it first.
+                    assert!(this.pending_terminals.is_empty(), "private dismissal must not schedule remote label/keep cleanup");
+                    assert!(!this.changing_terminals.contains("remote/new"));
+                    assert!(this.model.tab("remote/t").is_none(), "late Keep must not resurrect the dismissed tab");
+                    if case == "adopted-after" {
+                        this.documents_updated(None, vec![("remote".into(), crate::mirror_sync::Outcome::Read(adopted.clone().unwrap(), 2))], window, cx);
+                    }
+                    let canonical = adopted.as_ref().unwrap_or(&doc);
+                    assert_eq!(this.documents["remote"].capture(&this.model, Some("remote")), *canonical, "original split and metadata must remain canonical");
+                    if adopted.is_some() {
+                        assert_eq!(this.model.pane_of("remote/new").as_deref(), Some("remote/pn"));
+                    }
+                    assert!(this.documents["remote"].pending.is_some(), "completion must not replace the controlled document write");
+                    assert_eq!(this.live["remote/new"]["labels"]["herdr.space"], "s");
+                    assert_eq!(this.live["remote/new"]["labels"]["herdr.tab"], "t");
+                    assert_eq!(this.live["remote/new"]["keep"], true);
+                    // This snapshot alone is not a remote RPC proof; pair it with
+                    // the no-cleanup scheduling assertion above.
+                    this.kill(&["remote/parent".into()], cx);
+                    assert!(this.closing_terminals.contains_key("remote/parent"));
+                    assert!(!this.closing_terminals.contains_key("remote/new"), "kept child must survive parent close");
+                    this.closing_terminals.clear();
+                    let dismissed = this.model.dismissed.clone();
+                    assert!(!dismissed.is_empty());
+                    this.documents_updated(None, vec![("remote".into(), crate::mirror_sync::Outcome::Written(canonical.clone(), 3))], window, cx);
+                    assert_eq!(this.model.dismissed, dismissed, "an acknowledgement must retain the private dismissal");
+                    assert_eq!(this.documents["remote"].capture(&this.model, Some("remote")), *canonical);
+                    this.reconcile(window, cx);
+                    assert!(!this.changing_terminals.contains("remote/new"), "same-screen reconciliation must not re-adopt hidden work");
+                    if adopted.is_none() {
+                        let command = if case == "space" { "space.select" } else { "tab.select" };
+                        let id = if case == "space" { "remote/s" } else { "remote/t" };
+                        assert_eq!(this.run_as(command, json!({"id":id}), false, window, cx), json!({"ok":true}));
+                        assert!(this.model.pane_of("remote/term-a").is_some(), "restore must preserve the original split");
+                        this.reconcile(window, cx);
+                        assert!(this.changing_terminals.contains("remote/new"), "explicit restore permits adoption from preserved labels");
+                        this.finish_adoption("remote/new", "remote/s", Some("remote/t"), window, cx);
+                        assert!(this.model.pane_of("remote/new").is_some());
+                    }
+                }
+                "closed-shared" => {
+                    let cleanup = this.pending_terminals.remove("remote/new").expect("genuinely removed shared space retains cleanup policy");
+                    assert!(matches!(cleanup.change, super::TerminalChange::UndoKeep));
+                    assert!(this.changing_terminals.contains("remote/new"));
+                    this.apply_terminal_change("remote/new".into(), cleanup.change, Ok(()), window, cx);
+                    assert!(this.model.space("remote/s").is_none());
+                    assert!(this.pending_terminals.is_empty());
+                }
+                "failed" => {
+                    assert!(this.model.tab("remote/t").is_none());
+                    assert!(this.pending_terminals.is_empty());
+                    assert_eq!(this.documents["remote"].capture(&this.model, Some("remote")), doc);
+                }
+                "visible" => {
+                    assert_eq!(this.model.pane_of("remote/new").as_deref(), Some("remote/other-pane"));
+                    assert!(this.pending_terminals.is_empty(), "old destination disappearance must not park an already-visible terminal");
+                }
+                _ => {
+                    let pane = this.model.pane_of("remote/new").expect("valid placement must complete");
+                    assert_eq!(this.model.tab_of(&pane).unwrap().id, reply["tab"].as_str().unwrap());
+                    assert!(this.pending_terminals.is_empty());
+                    if case == "restore" { assert!(this.model.pane_of("remote/term-a").is_some()); }
+                    if case == "fresh" { assert!(this.model.tab("remote/t").is_none()); }
+                }
+            }
+            drop(document_tx);
+            this.documents.get_mut("remote").unwrap().pending = None;
+        }));
+    }
+
+    #[test]
+    fn remote_local_close_commands_are_non_destructive() {
+        in_own_process("remote_local_close");
+    }
+
+    #[gpui::test]
+    fn remote_local_close(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        use crate::{mirror::Document, model::{Model, Tab}};
+        if !running_alone("remote_local_close") { return; }
+        let (view, cx) = open_window(cx, "unused", "", json!({"id":"main","type":"block","content":{"tab":"active"}}));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            let mut source = Model::default();
+            source.add_space("s", "remote", "/tmp", Tab::new("t", "first", "p", "term"));
+            source.space_mut("s").unwrap().tabs.push(Tab::new("t2", "", "p2", "term2"));
+            let doc = Document::capture(&source, None);
+            doc.replace(&mut this.model, Some("remote"));
+            this.documents.entry("remote".into()).or_default().document = Some(doc.clone());
+            this.model.add_space("local", "local", "/tmp", Tab::new("lt", "", "lp", "lterm"));
+            let before = Document::capture(&this.model, Some("remote"));
+            for args in [json!({"id":"missing","local":true}), json!({"id":"local","local":true}), json!({"id":"remote/s","local":"true"}), json!({"id":"remote/s","local":null})] {
+                assert!(this.run_as("space.close", args, false, window, cx).get("error").is_some());
+                assert_eq!(Document::capture(&this.model, Some("remote")), before);
+            }
+            let denied = this.run_as("tab.close", json!({"id":"remote/t"}), false, window, cx);
+            assert!(denied["error"].as_str().unwrap().contains("local: true"));
+            // Non-last panes are refused without modifying the model.
+            this.model.split("remote/p", crate::layout::Axis::Row, "remote/extra", "remote/extra-term");
+            let split = Document::capture(&this.model, Some("remote"));
+            assert!(this.run_as("pane.close", json!({"pane":"remote/p","local":true}), false, window, cx).get("error").is_some());
+            assert_eq!(Document::capture(&this.model, Some("remote")), split);
+            this.model.remove_pane("remote/extra");
+            this.model.tab_mut("remote/t").unwrap().root.find_mut("remote/p").unwrap().closable = Some(false);
+            assert_eq!(this.run_as("pane.close", json!({"pane":"remote/p","local":true}), false, window, cx), json!({"ok":true}));
+            assert!(this.model.tab("remote/t").is_some());
+            this.model.tab_mut("remote/t").unwrap().root.find_mut("remote/p").unwrap().closable = None;
+            // Removing a test split can leave a structural wrapper: begin the
+            // pure-dismissal check from the actual authoritative projection.
+            doc.replace(&mut this.model, Some("remote"));
+            assert_eq!(Document::capture(&this.model, Some("remote")), doc);
+            // A person's confirmation carries a fixed ID and local:true, even
+            // when the connection recovers before the confirmation is submitted.
+            assert_eq!(this.run_as("tab.close", json!({"id":"remote/t"}), true, window, cx), json!({"asked":"local"}));
+            let overlay = this.overlays.last().unwrap();
+            let confirmation = this.copies[&overlay.slot].inst.props["command"].clone();
+            assert_eq!(confirmation["name"], "tab.close");
+            assert_eq!(confirmation["args"], json!({"id":"remote/t","local":true,"confirmed":true}));
+            this.live.insert("remote/term2".into(), json!({"labels":{"herdr.space":"s","herdr.tab":"t2"}}));
+            this.written_where.insert("remote/term2".into(), "remote / 2".into());
+            this.documents.get_mut("remote").unwrap().available = true;
+            assert_eq!(this.run_as(confirmation["name"].as_str().unwrap(), confirmation["args"].clone(), true, window, cx), json!({"ok":true,"local":true}));
+            assert!(this.model.tab("remote/t").is_none());
+            assert_eq!(this.written_where["remote/term2"], "remote / 2", "local dismissal must not relabel the remaining unnamed tab");
+            assert_eq!(Document::capture_with_base(&this.model, Some("remote"), Some(&doc)), doc);
+            let slot = this.documents.get_mut("remote").unwrap();
+            slot.connected = true;
+            slot.version = 1;
+            slot.available = false; // first authoritative read after reconnect must filter
+            let overlays = this.overlays.len();
+            this.documents_updated(None, vec![("remote".into(), crate::mirror_sync::Outcome::Read(doc.clone(), 1))], window, cx);
+            assert_eq!(this.overlays.len(), overlays, "local dismissal must not cause conflict notice");
+            assert!(this.model.tab("remote/t").is_none());
+            this.live.insert("remote/term".into(), json!({"labels":{"herdr.space":"s","herdr.tab":"t"}}));
+            this.reconcile(window, cx);
+            assert!(!this.changing_terminals.contains("remote/term"));
+            this.start_adoption("remote/term".into(), "remote/s".into(), Some("remote/t".into()), window, cx);
+            assert!(!this.changing_terminals.contains("remote/term"));
+            this.finish_adoption("remote/term", "remote/s", Some("remote/t"), window, cx);
+            assert!(this.model.tab("remote/t").is_none(), "a successful adoption response after dismissal must not reopen it");
+            this.live.insert("remote/child".into(), json!({"parent":"remote/term"}));
+            assert!(this.run_as("agent.focus", json!({"terminal":"remote/child"}), false, window, cx).get("error").is_some());
+            this.alert("remote/child", crate::model::Alert::Done, false, window, cx);
+            this.alert("remote/term", crate::model::Alert::Done, false, window, cx);
+            assert_eq!(this.overlays.len(), overlays, "dismissed agent must not alert");
+            this.documents.get_mut("remote").unwrap().available = false;
+            let dismissed_before = this.model.dismissed.clone();
+            assert!(this.run_as("tab.select", json!({"id":"remote/t"}), false, window, cx).get("error").is_some());
+            assert_eq!(this.model.dismissed, dismissed_before);
+            this.model.select_tab("remote/t2");
+            let layout_before = Document::capture_with_base(&this.model, Some("remote"), Some(&doc));
+            let labels_before = this.live["remote/term"].clone();
+            for command in ["terminal.keep", "terminal.park"] {
+                this.documents.get_mut("remote").unwrap().available = true;
+                let reply = this.run_as(command, json!({"terminal":"remote/term"}), false, window, cx);
+                assert!(reply["error"].as_str().is_some_and(|s| s.contains("restore")), "{command}: {reply}");
+                assert_eq!(Document::capture_with_base(&this.model, Some("remote"), Some(&doc)), layout_before);
+                assert_eq!(this.live["remote/term"], labels_before);
+                assert!(this.pending_terminals.is_empty());
+                assert!(this.changing_terminals.is_empty());
+                assert!(this.closing_terminals.is_empty());
+            }
+            this.documents.get_mut("remote").unwrap().available = true;
+            assert_eq!(this.run_as("tab.select", json!({"id":"remote/t"}), false, window, cx), json!({"ok":true}));
+            assert_eq!(this.run_as("terminal.keep", json!({"terminal":"remote/term"}), false, window, cx), json!({"pane":"remote/p"}));
+            assert!(this.pending_terminals.is_empty());
+            assert!(this.model.tab("remote/t").is_some());
+            // Last pane cascades through last tab and space, retaining flags.
+            this.model.select_tab("remote/t");
+            assert_eq!(this.run_as("tab.close", json!({"local":true}), false, window, cx), json!({"ok":true,"local":true}));
+            this.model.select_tab("remote/t2");
+            this.model.focus_pane("remote/p2");
+            assert_eq!(this.run_as("pane.close", json!({"local":true,"confirmed":true}), false, window, cx), json!({"ok":true,"local":true}));
+            assert!(this.model.space("remote/s").is_none());
+            assert!(this.closing_terminals.is_empty(), "kill() always records its addresses before any RPC");
+            assert!(this.pending_terminals.is_empty());
+            assert!(this.changing_terminals.is_empty());
+            assert_eq!(Document::capture_with_base(&this.model, Some("remote"), Some(&doc)), doc);
+            assert_eq!(this.run_as("space.select", json!({"id":"remote/s"}), false, window, cx), json!({"ok":true}));
+            assert_eq!(this.model.active.as_deref(), Some("remote/s"));
+            assert!(this.model.tab("remote/t").is_none(), "restoring a space keeps separately dismissed tabs closed");
+            assert_eq!(this.run_as("space.close", json!({"local":true}), false, window, cx), json!({"ok":true,"local":true}));
+            assert!(this.closing_terminals.is_empty());
+            // Ordinary connected close still kills, and last-pane cascade keeps confirmed.
+            this.model.dismissed.clear();
+            doc.replace(&mut this.model, Some("remote"));
+            assert_eq!(this.run_as("tab.close", json!({"id":"remote/t"}), false, window, cx), json!({"ok":true}));
+            assert!(this.closing_terminals.contains_key("remote/term"));
+            assert!(this.run_as("pane.close", json!({"pane":"remote/p2"}), false, window, cx).get("error").is_some());
+            assert!(this.model.space("remote/s").is_some());
+            assert_eq!(this.run_as("pane.close", json!({"pane":"remote/p2","confirmed":true}), false, window, cx), json!({"ok":true}));
+            assert!(this.closing_terminals.contains_key("remote/term2"));
+            assert!(this.model.space("remote/s").is_none());
+            // A pending older write must not lose the hidden tab's parent metadata
+            // when an ordinary command closes the final visible tab.
+            this.model.dismissed.clear();
+            doc.replace(&mut this.model, Some("remote"));
+            {
+                let slot = this.documents.get_mut("remote").unwrap();
+                slot.document = Some(doc.clone());
+                slot.staged = None;
+                slot.available = true;
+                slot.connected = true;
+                let (_tx, rx) = std::sync::mpsc::channel();
+                slot.pending = Some(rx);
+            }
+            assert_eq!(this.run_as("tab.close", json!({"id":"remote/t","local":true}), false, window, cx), json!({"ok":true,"local":true}));
+            assert_eq!(this.run_as("space.rename", json!({"id":"remote/s","name":"new parent"}), false, window, cx), json!({"ok":true}));
+            this.model.space_mut("remote/s").unwrap().folder = "/new-folder".into();
+            this.closing_terminals.clear();
+            assert_eq!(this.run_as("tab.close", json!({"id":"remote/t2","confirmed":true}), false, window, cx), json!({"ok":true}));
+            let captured = serde_json::to_value(this.documents["remote"].capture(&this.model, Some("remote"))).unwrap();
+            assert_eq!(captured["spaces"][0]["name"], "new parent");
+            assert_eq!(captured["spaces"][0]["folder"], "/new-folder");
+            assert_eq!(captured["spaces"][0]["tabs"].as_array().unwrap().len(), 1);
+            assert_eq!(captured["spaces"][0]["tabs"][0]["id"], "t");
+            assert!(!this.closing_terminals.contains_key("remote/term"));
+            assert!(this.closing_terminals.contains_key("remote/term2"));
+            this.documents_updated(None, vec![("remote".into(), crate::mirror_sync::Outcome::Written(doc.clone(), 2))], window, cx);
+            let after_ack = serde_json::to_value(this.documents["remote"].capture(&this.model, Some("remote"))).unwrap();
+            assert_eq!(after_ack, captured, "an older acknowledgement must retain the new parent metadata");
+            this.documents.get_mut("remote").unwrap().pending = None;
+            // Automatic successful park removes the final visible pane too.
+            this.model.dismissed.clear();
+            doc.replace(&mut this.model, Some("remote"));
+            {
+                let slot = this.documents.get_mut("remote").unwrap();
+                slot.document = Some(doc.clone());
+                slot.staged = None;
+                let (_tx, rx) = std::sync::mpsc::channel();
+                slot.pending = Some(rx);
+            }
+            this.run_as("tab.close", json!({"id":"remote/t","local":true}), false, window, cx);
+            this.run_as("space.rename", json!({"id":"remote/s","name":"parked parent"}), false, window, cx);
+            this.model.space_mut("remote/s").unwrap().folder = "/parked-folder".into();
+            this.apply_terminal_change("remote/term2".into(), super::TerminalChange::Park, Ok(()), window, cx);
+            let captured = serde_json::to_value(this.documents["remote"].capture(&this.model, Some("remote"))).unwrap();
+            assert_eq!(captured["spaces"][0]["name"], "parked parent");
+            assert_eq!(captured["spaces"][0]["folder"], "/parked-folder");
+            assert_eq!(captured["spaces"][0]["tabs"].as_array().unwrap().len(), 1);
+            assert!(this.model.space("remote/s").is_none());
+            this.documents.get_mut("remote").unwrap().pending = None;
+            // Real dispatch stages edits before removing a target while B1 is pending.
+            for command in ["tab.close", "space.close"] {
+                this.model.dismissed.clear();
+                doc.replace(&mut this.model, Some("remote"));
+                this.model.tab_mut("remote/t").unwrap().name = "pending rename".into();
+                this.model.split("remote/p", crate::layout::Axis::Row, "remote/new-pane", "remote/new-term");
+                this.model.space_mut("remote/s").unwrap().tabs.push(Tab::new("remote/new-tab", "new", "remote/pn", "remote/tn"));
+                this.model.select_tab("remote/t");
+                let expected = Document::capture(&this.model, Some("remote"));
+                let slot = this.documents.get_mut("remote").unwrap();
+                slot.document = Some(doc.clone());
+                slot.staged = None;
+                slot.available = true;
+                slot.connected = true;
+                let (_tx, rx) = std::sync::mpsc::channel();
+                slot.pending = Some(rx);
+                assert_eq!(this.run_as(command, json!({"local":true}), false, window, cx), json!({"ok":true,"local":true}));
+                assert_eq!(this.documents["remote"].capture(&this.model, Some("remote")), expected);
+                this.documents_updated(None, vec![("remote".into(), crate::mirror_sync::Outcome::Written(doc.clone(), 2))], window, cx);
+                assert_eq!(this.documents["remote"].capture(&this.model, Some("remote")), expected);
+                assert!(this.documents["remote"].staged.is_some());
+                if command == "tab.close" {
+                    this.model.tab_mut("remote/t2").unwrap().name = "new visible edit".into();
+                }
+                assert_eq!(this.run_as("tab.select", json!({"id":"remote/t"}), false, window, cx), json!({"ok":true}));
+                assert_eq!(this.model.tab("remote/t").unwrap().name, "pending rename");
+                assert!(this.model.tab("remote/new-tab").is_some());
+                assert!(this.model.pane_of("remote/new-term").is_some());
+                if command == "tab.close" {
+                    assert_eq!(this.model.tab("remote/t2").unwrap().name, "new visible edit");
+                }
+                this.documents.get_mut("remote").unwrap().pending = None;
+            }
+            // Authoritative replacement discards ephemeral pending hidden edits;
+            // neither later capture nor explicit restore may replay them.
+            for conflict in [false, true] {
+                this.model.dismissed.clear();
+                doc.replace(&mut this.model, Some("remote"));
+                this.model.tab_mut("remote/t").unwrap().name = "unacknowledged".into();
+                let slot = this.documents.get_mut("remote").unwrap();
+                slot.document = Some(doc.clone());
+                slot.available = true;
+                slot.connected = true;
+                slot.version = 1;
+                slot.stage_dismissal(&this.model, "remote");
+                this.model.dismiss_tab("remote/t");
+                let stale = slot.staged.clone().unwrap();
+                this.documents_updated(None, vec![("remote".into(), crate::mirror_sync::Outcome::Written(doc.clone(), 2))], window, cx);
+                assert_eq!(this.documents["remote"].staged.as_ref(), Some(&stale));
+                let overlays = this.overlays.len();
+                let outcome = if conflict { crate::mirror_sync::Outcome::Conflict(doc.clone(), 3) }
+                    else { crate::mirror_sync::Outcome::Read(doc.clone(), 3) };
+                this.documents_updated(None, vec![("remote".into(), outcome)], window, cx);
+                assert_eq!(this.overlays.len(), overlays + 1, "real unsent edits retain the conflict notice policy");
+                let slot = &this.documents["remote"];
+                assert!(slot.staged.is_none());
+                assert_eq!(slot.capture(&this.model, Some("remote")), doc);
+                assert!(this.model.tab("remote/t").is_none());
+                assert!(slot.source().unwrap().restore(&mut this.model, "remote", "remote/t", true));
+                assert_eq!(this.model.tab("remote/t").unwrap().name, "first");
+            }
+        }));
+    }
+
+    #[test]
+    fn a_kept_sub_agent_in_a_locally_closed_tab_is_dismissed() {
+        in_own_process("dismissed_sub_agent");
+    }
+
+    #[gpui::test]
+    fn dismissed_sub_agent(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        use crate::{mirror::Document, model::{Model, Tab}};
+        if !running_alone("dismissed_sub_agent") { return; }
+        let (view, cx) = open_window(cx, "unused", "", json!({"id":"main","type":"block","content":{"tab":"active"}}));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            let mut source = Model::default();
+            source.add_space("s", "remote", "/tmp", Tab::new("t", "first", "p", "term"));
+            source.space_mut("s").unwrap().tabs.push(Tab::new("t2", "second", "p2", "child"));
+            let doc = Document::capture(&source, None);
+            doc.replace(&mut this.model, Some("remote"));
+            let slot = this.documents.entry("remote".into()).or_default();
+            slot.document = Some(doc.clone());
+            slot.available = true;
+            this.live.insert("remote/term".into(), json!({"labels":{"herdr.space":"s","herdr.tab":"t"}}));
+            this.live.insert("remote/child".into(), json!({"parent":"remote/term","keep":true,"labels":{"herdr.space":"s","herdr.tab":"t2"}}));
+            assert!(!this.dismissed_agent("remote/child"), "a sub-agent with a pane is shown");
+            assert_eq!(this.run_as("tab.close", json!({"id":"remote/t2","local":true,"confirmed":true}), true, window, cx), json!({"ok":true,"local":true}));
+            assert!(this.model.tab("remote/t2").is_none());
+            assert!(this.model.tab("remote/t").is_some(), "the parent's tab stays open");
+            let overlays = this.overlays.len();
+            assert!(this.run_as("agent.focus", json!({"terminal":"remote/child"}), false, window, cx).get("error").is_some());
+            this.alert("remote/child", crate::model::Alert::Done, false, window, cx);
+            assert_eq!(this.overlays.len(), overlays, "a dismissed sub-agent must not alert");
+            let layout_before = Document::capture_with_base(&this.model, Some("remote"), Some(&doc));
+            let labels_before = this.live["remote/child"].clone();
+            for command in ["terminal.keep", "terminal.park"] {
+                let reply = this.run_as(command, json!({"terminal":"remote/child"}), false, window, cx);
+                assert!(reply["error"].as_str().is_some_and(|s| s.contains("restore")), "{command}: {reply}");
+                assert_eq!(Document::capture_with_base(&this.model, Some("remote"), Some(&doc)), layout_before);
+                assert_eq!(this.live["remote/child"], labels_before);
+                assert!(this.pending_terminals.is_empty());
+                assert!(this.changing_terminals.is_empty());
+                assert!(this.closing_terminals.is_empty());
+            }
+            assert!(!this.dismissed_agent("remote/term"), "the parent stays visible");
+            assert!(this.run_as("agent.focus", json!({"terminal":"remote/term"}), false, window, cx).get("error").is_none());
         }));
     }
 
