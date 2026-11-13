@@ -509,8 +509,14 @@ shortcuts must then be added by hand.
 ```
 
 - Sections: `global`, `layout:<name>` (while `layouts/<name>.json` shows),
-  `terminal` (a terminal has focus), `mod:<name>`. The more specific section
+  `terminal` (a terminal has focus), `terminal:<name>`, `mod:<name>`. The more specific section
   wins: `layout:terminals` over `global`, `terminal` over both.
+- An overlay opened with `terminal_context: "scratch"` uses `terminal:scratch`
+  for its layout's terminal blocks, ahead of `terminal`. Unlisted keys keep the
+  ordinary bindings; `"terminal"` as an action sends that key to the program.
+  Names use letters, digits, `_` or `-`. This is per displayed block: another view
+  of that terminal keeps its own bindings, and the overlay's mods/inputs keep
+  their `mod:<name>` context. For example, `"terminal:scratch": {"ctrl-tab": "scratch.next"}`.
 - An action is a command (`name`, or `name:value`: the value fills the
   command's first argument), `send:<text>` (types into the terminal),
   `<mod>.<command>` (delivered to that mod's `nextCommand()`), or `terminal`
@@ -1055,6 +1061,8 @@ All of it is in `herdr.d.ts`. In short:
   returns an id; the mod gets `props().overlay` and closes itself with
   `closeOverlay(id)`; Esc closes the top dialog or popup. `frame: "none"`
   drops Herdr's border, corners and shadow so the mod draws its own.
+  With `layout`, optional `terminal_context: "scratch"` applies the keys.json
+  section `terminal:scratch` to its terminal blocks (see Keys).
   `notify({ title, body, level, icon, timeout })` posts a notification, drawn
   by the layout-chosen mod (default: `toast`).
 - Windows (`kind: "window"`): stay open until closed, over the layout and

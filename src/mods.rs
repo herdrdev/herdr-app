@@ -1114,6 +1114,7 @@ fn module(inst: Instance, copy: u64) -> HostModule {
             if spec.get("mod").and_then(Value::as_str).is_none() && !spec.get("layout").is_some_and(Value::is_object) {
                 return Err(HostError::new("openOverlay needs { mod: \"<folder>\" } or { layout: {...} }"));
             }
+            crate::keys::terminal_context(&spec).map_err(HostError::new)?;
             let id = new_overlay_id();
             request(Request::OpenOverlay { id: id.clone(), spec });
             Ok(id.into())

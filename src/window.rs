@@ -336,6 +336,7 @@ struct Overlay {
     focus: FocusHandle,
     /// Blocks instead of one mod (terminals too), ids prefixed with the overlay's.
     layout: Option<Node>,
+    terminal_context: Option<String>,
     /// `at: "top"`: centered, this far below the window's top.
     top: Option<f32>,
     /// As tall as its content (size.height is the most).
@@ -3686,6 +3687,10 @@ impl AppWindow {
     }
 
     fn open_overlay(&mut self, id: String, spec: Value, window: &mut Window, cx: &mut Context<Self>) {
+        let terminal_context = match crate::keys::terminal_context(&spec) {
+            Ok(name) => name.map(str::to_owned),
+            Err(error) => { tracing::warn!("overlay: {error}"); return; }
+        };
         let kind = match spec.get("kind").and_then(Value::as_str) {
             Some("popup") => OverlayKind::Popup,
             Some("toast") => OverlayKind::Toast,
@@ -3765,6 +3770,7 @@ impl AppWindow {
             expires: (kind == OverlayKind::Toast).then(|| Instant::now() + Duration::from_millis(timeout as u64)),
             focus,
             layout,
+            terminal_context,
             top,
             fit,
             modal: spec.get("modal").and_then(Value::as_bool).unwrap_or(false),
@@ -4358,8 +4364,12 @@ impl AppWindow {
             Content::Terminal { .. } => match self.pane_term(&n.id) {
                 Some(t) => {
                     let id = n.id.clone();
+                    let context = self.overlays.iter()
+                        .find(|o| o.layout.as_ref().is_some_and(|l| l.find(&n.id).is_some()))
+                        .and_then(|o| o.terminal_context.as_deref());
                     div()
                         .size_full()
+                        .when_some(context, |d, name| d.key_context(format!("terminal_context = {name}").as_str()))
                         .on_any_mouse_down(cx.listener(move |this, _, _, cx| {
                             // Overlay terminals keep their own focus; chrome blocks share the pane focus API.
                             if this.focused_pane.as_deref() != Some(id.as_str())
@@ -6634,6 +6644,63 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(root.read_with(cx, |r, _| r.toast_count()), 0, "the toast timed out and left");
         assert_eq!(running(cx), 0, "and the clock stopped with it");
+    }
+
+    #[test]
+    fn overlay_terminal_context_uses_display_location() {
+        in_own_process("terminal_context_keys");
+    }
+
+    #[gpui::test]
+    fn terminal_context_keys(cx: &mut gpui::TestAppContext) {
+        use super::{Axis, ShellAction};
+        use gpui::KeyBinding;
+        use serde_json::json;
+        if !running_alone("terminal_context_keys") { return; }
+        let (view, cx) = open_window(cx, "unused", "", json!({ "type": "block", "content": { "tab": "active" } }));
+        cx.update(|_, cx| cx.bind_keys([
+            KeyBinding::new("f6", ShellAction::new("tab.next"), Some("Terminal")),
+            KeyBinding::new("f6", ShellAction::new("pane.zoom"), Some("terminal_context == float-space > Terminal")),
+        ]));
+        view.update_in(cx, |this, window, cx| {
+            this.model.add_space("s1", "", "/tmp", crate::model::Tab::new("tb1", "", "p1", "t1"));
+            this.model.split("p1", Axis::Row, "p2", "t2");
+            this.model.add_tab("s1", crate::model::Tab::new("tb2", "", "p3", "t3"));
+            this.model.select_tab("tb1");
+            this.sync(window, cx);
+        });
+        for (kind, scope, scoped) in [
+            ("window", Some("float-space"), true), ("window", Some("other"), false),
+            ("window", None, false), ("popup", Some("float-space"), true), ("dialog", Some("float-space"), true),
+        ] {
+            view.update_in(cx, |this, window, cx| {
+                this.model.select_tab("tb1");
+                this.model.tab_mut("tb1").unwrap().zoomed = None;
+                this.sync(window, cx);
+                this.open_overlay("scoped".into(), json!({ "kind": kind, "terminal_context": scope, "width": 400, "height": 240,
+                    "layout": { "id": "body", "type": "block", "content": { "terminal": "t1" } }
+                }), window, cx);
+                this.pane_focus("ovscoped/body", cx).unwrap().focus(window, cx);
+            });
+            cx.run_until_parked();
+            cx.simulate_keystrokes("f6");
+            view.update_in(cx, |this, window, cx| {
+                assert_eq!(this.model.active_tab().unwrap().id, if scoped { "tb1" } else { "tb2" }, "{kind}: {scope:?}");
+                assert_eq!(this.model.tab("tb1").unwrap().zoomed.is_some(), scoped);
+                if kind == "window" {
+                    // The same core terminal also has a workspace view; it stays generic.
+                    this.model.select_tab("tb1");
+                    this.sync(window, cx);
+                    this.pane_focus("p1", cx).unwrap().focus(window, cx);
+                }
+            });
+            if kind == "window" {
+                cx.run_until_parked();
+                cx.simulate_keystrokes("f6");
+                view.read_with(cx, |this, _| assert_eq!(this.model.active_tab().unwrap().id, "tb2"));
+            }
+            view.update_in(cx, |this, window, cx| this.close_overlay("scoped", window, cx));
+        }
     }
 
     /// Mods see window().active follow the focus, losing it too: a probe mod

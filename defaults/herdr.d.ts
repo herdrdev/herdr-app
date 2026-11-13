@@ -369,6 +369,11 @@ export interface OverlaySpec {
    *  `props().overlay`. Esc goes to its terminals (agents use it), so give it a way to close.
    *  Closes itself when its terminal ends. */
   layout?: unknown;
+  /** Optional keys.json `terminal:<name>` context for terminal blocks in this layout.
+   *  Overrides matching `terminal` bindings; other keys fall back to them. Mod inputs
+   *  and other views of the same terminal keep their own contexts. Letters, digits,
+   *  `_` and `-` only, nonempty. Omitted: ordinary terminal bindings. */
+  terminal_context?: string;
   /** dialog: centered, dims the window. popup: at `at` (default: the pointer).
    *  window: stays open until closed (no dimming, a click beside it doesn't close it, Esc goes to
    *  the mod); dragged by any press the mod doesn't stop (`cx.stop_propagation()` on its controls'
