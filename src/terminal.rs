@@ -1709,7 +1709,7 @@ fn font_cell_metrics(ts: &WindowTextSystem, id: FontId, fs: f32, scale: f32, lin
     let face_width = (' '..='~').filter_map(|c| ts.advance(id, px(fs * scale), c).ok())
         .map(|s| f32::from(s.width)).reduce(f32::max).unwrap_or(fs * scale * 0.6);
     // As Ghostty's adjust-cell-width: scale the rounded cell; glyph_x re-centres the face in it.
-    let width = (face_width.round().max(1.0) * cell_width).round().max(1.0);
+    let width = adjusted_cell_width(face_width.round().max(1.0), cell_width);
     CellMetrics {
         size: size(px(width / scale), px(height / scale)),
         glyph_x: px(glyph_x(width, face_width) / scale),
@@ -1719,6 +1719,13 @@ fn font_cell_metrics(ts: &WindowTextSystem, id: FontId, fs: f32, scale: f32, lin
         strike: px((baseline - st_pos).round() / scale),
         strike_thickness: px(st_thick.ceil().max(1.0) / scale),
     }
+}
+
+// Ghostty's `Metrics` modifier: the cell times (1 + percent / 100) in f64, rounded. Taking the
+// product in f32 from the multiplier can land on the other side of a half pixel (30 px at 1.05).
+fn adjusted_cell_width(width: f32, multiplier: f32) -> f32 {
+    let percent = ((f64::from(multiplier) - 1.0) * 100.0 * 1e4).round() / 1e4;
+    ((f64::from(width) * (1.0 + percent / 100.0)).round() as f32).max(1.0)
 }
 
 // Ghostty puts an odd extra pixel on the edge that best centres the face.
@@ -3280,7 +3287,7 @@ mod tests {
             for multiplier in [0.8, 0.95, 1.3, 2.0] {
                 let adjusted = font_cell_metrics(&ts, id, fs, scale, 1.0, multiplier);
                 assert_eq!(adjusted.size.height, metrics.size.height);
-                assert_eq!(adjusted.size.width * scale, px((width * multiplier).round().max(1.0)));
+                assert_eq!(adjusted.size.width * scale, px(adjusted_cell_width(width, multiplier)));
                 assert_eq!((adjusted.baseline, adjusted.underline, adjusted.strike), (metrics.baseline, metrics.underline, metrics.strike));
             }
             let text = "H".repeat(60);
@@ -3873,6 +3880,16 @@ mod tests {
         let mut scrolled = point(0.0, 0.0);
         assert_eq!(super::scroll_delta_steps(&mut scrolled, ScrollDelta::Lines(point(1.0, 0.0)), TouchPhase::Moved, cell, 80, 24, 0.5), point(1, 0));
         assert_eq!(super::scroll_delta_steps(&mut scrolled, ScrollDelta::Pixels(point(px(10.0), px(-40.0))), TouchPhase::Moved, cell, 80, 24, 0.5), point(1, -1));
+    }
+
+    #[test]
+    fn adjusted_cell_width_rounds_half_pixels_like_ghostty() {
+        for (width, multiplier, expected) in [
+            (10.0, 0.95, 10.0), (14.0, 0.95, 13.0), (16.0, 0.95, 15.0), (10.0, 1.05, 11.0),
+            (30.0, 1.05, 32.0), (50.0, 1.05, 53.0), (50.0, 1.15, 57.0), (45.0, 1.3, 59.0), (8.0, 1.0, 8.0),
+        ] {
+            assert_eq!(super::adjusted_cell_width(width, multiplier), expected, "{width} x {multiplier}");
+        }
     }
 
     #[test]
