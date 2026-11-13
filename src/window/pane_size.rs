@@ -29,11 +29,7 @@ pub(super) fn separator_width(n: &Node, gap: f32) -> f32 {
 }
 
 pub(super) fn weight(n: &Node) -> f32 {
-    match n.size {
-        Some(Span::Px { .. }) => 0.0,
-        Some(Span::Weight { weight }) => weight,
-        None => 1.0,
-    }
+    FlexSize::from(n).weight()
 }
 
 fn inset(size: Size<Pixels>, x: f32, y: f32) -> Size<Pixels> {
@@ -46,12 +42,42 @@ fn content_size(n: &Node, size: Size<Pixels>, focused: bool, zoom: f32) -> Size<
     inset(size, 2.0 * (x + border) * zoom, 2.0 * (y + border) * zoom)
 }
 
+/// The sizing inputs a split needs, without copying layout subtrees.
+#[derive(Clone, Copy)]
+pub(super) struct FlexSize {
+    pub size: Option<Span>,
+    pub min: Option<f32>,
+    pub max: Option<f32>,
+}
+
+impl From<&Node> for FlexSize {
+    fn from(node: &Node) -> Self {
+        Self { size: node.size, min: node.min, max: node.max }
+    }
+}
+
+impl FlexSize {
+    pub fn weight(&self) -> f32 {
+        match self.size {
+            Some(Span::Px { .. }) => 0.0,
+            Some(Span::Weight { weight }) => weight,
+            None => 1.0,
+        }
+    }
+}
+
 /// Flex shares after fixed siblings, gaps and min/max constraints.
 pub(super) fn shares(children: &[&Node], available: f32, zoom: f32) -> Vec<f32> {
+    flex_shares(children, available, zoom)
+}
+
+pub(super) fn flex_shares(children: &[impl std::marker::Copy + Into<FlexSize>], available: f32, zoom: f32) -> Vec<f32> {
+    let sizing = |i: usize| -> FlexSize { children[i].into() };
     let mut sizes = vec![0.0; children.len()];
     let mut pending = Vec::new();
     let mut left = available;
-    for (i, n) in children.iter().enumerate() {
+    for i in 0..children.len() {
+        let n = sizing(i);
         match n.size {
             Some(Span::Px { px }) => {
                 sizes[i] = (px * zoom).max(n.min.unwrap_or(0.0) * zoom).min(n.max.unwrap_or(f32::INFINITY) * zoom);
@@ -60,16 +86,16 @@ pub(super) fn shares(children: &[&Node], available: f32, zoom: f32) -> Vec<f32> 
             _ => pending.push(i),
         }
     }
-    let total_weight = pending.iter().map(|&i| weight(children[i])).sum::<f32>().max(f32::EPSILON);
+    let total_weight = pending.iter().map(|&i| sizing(i).weight()).sum::<f32>().max(f32::EPSILON);
     let initial_free = left.max(0.0);
     while !pending.is_empty() {
-        let total = pending.iter().map(|&i| weight(children[i])).sum::<f32>().max(f32::EPSILON);
+        let total = pending.iter().map(|&i| sizing(i).weight()).sum::<f32>().max(f32::EPSILON);
         // Grow factors stay normalized to the original siblings after an item freezes.
         let free = left.max(0.0).min(initial_free * (total / total_weight));
         let mut violations = Vec::new();
         for &i in &pending {
-            let n = children[i];
-            let share = free * weight(n) / total;
+            let n = sizing(i);
+            let share = free * n.weight() / total;
             sizes[i] = share.min(n.max.unwrap_or(f32::INFINITY) * zoom).max(n.min.unwrap_or(0.0) * zoom);
             violations.push((i, sizes[i] - share));
         }

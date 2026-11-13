@@ -69,9 +69,9 @@ pub(super) fn pair<'a>(root: &'a Node, pane: &str, axis: Axis) -> Option<(&'a No
 /// representation cannot preserve the other siblings and the pair's extent.
 pub(super) fn sizes(parent: &Node, index: usize, available: f32, delta: f32) -> Option<Vec<Option<Size>>> {
     if !available.is_finite() || available <= 0.0 || !delta.is_finite() || delta == 0.0 { return None; }
-    let mut children: Vec<Node> = parent.children().iter().filter(|n| !n.hidden).cloned().collect();
+    let mut children: Vec<_> = parent.children().iter().filter(|n| !n.hidden).map(super::pane_size::FlexSize::from).collect();
     let (a, b) = (children.get(index)?, children.get(index.checked_add(1)?)?);
-    let measure = |nodes: &[Node]| super::pane_size::shares(&nodes.iter().collect::<Vec<_>>(), available, 1.0);
+    let measure = |sizes: &[super::pane_size::FlexSize]| super::pane_size::flex_shares(sizes, available, 1.0);
     let before = measure(&children);
     if before.iter().any(|v| !v.is_finite() || *v < 0.0) { return None; }
     let (la, lb) = (before[index], before[index + 1]);
@@ -91,7 +91,7 @@ pub(super) fn sizes(parent: &Node, index: usize, available: f32, delta: f32) -> 
     if !fixed_a || !fixed_b {
         // Weights are grow factors normalized over ALL siblings, not just the
         // pair. Solve against the shared layout calculation, including clamps.
-        let weight = |n: &Node| super::pane_size::weight(n);
+        let weight = super::pane_size::FlexSize::weight;
         let sum: f32 = children.iter().map(weight).sum();
         if !sum.is_finite() || sum <= 0.0 { return None; }
         let variable = if fixed_a { index + 1 } else { index };
