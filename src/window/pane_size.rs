@@ -144,6 +144,35 @@ pub(super) enum HiddenFit {
     Done(Geometry),
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{block_bounds, pane_size};
+    use crate::layout::Node;
+    use gpui::{Bounds, Point, point, px};
+    use serde_json::json;
+    use std::collections::HashSet;
+
+    #[test]
+    fn split_content_bounds_apply_padding_once_at_fractional_zoom() {
+        let root: Node = serde_json::from_value(json!({
+            "id":"root", "type":"row", "padding":[10,20],
+            "border":{"width":2,"color":"border"}, "children":[
+                {"id":"split", "type":"column", "padding":[3,5],
+                 "border":{"width":1,"color":"border"}, "children":[
+                    {"id":"a", "type":"block", "content":{"terminal":"a"}},
+                    {"id":"b", "type":"block", "content":{"terminal":"b"}}
+                ]},
+                {"id":"c", "type":"block", "content":{"terminal":"c"}}
+            ]
+        })).unwrap();
+        let area = gpui::size(px(800.0), px(600.0));
+        let focused = HashSet::new();
+        let bounds = block_bounds(&root, Bounds::new(Point::default(), area), "split", None, &focused, 1.5).unwrap();
+        assert_eq!(bounds, Bounds::new(point(px(42.0), px(24.0)), gpui::size(px(349.0), px(552.0))));
+        assert_eq!(pane_size(&root, area, "a", None, &focused, 1.5), Some(gpui::size(px(349.0), px(276.0))));
+    }
+}
+
 impl AppWindow {
     /// Full tab geometry, even while a single pane is zoomed. Read only the
     /// context's viewport bounds; child sizes come from the current model.
