@@ -26,6 +26,8 @@ const help = `herdr-browser: external Chromium companion for Herdr App
 
 Connection options: --target <CDP-target-id>, --endpoint <CDP-url>,
 --binary <terminal-browser-path>, --output-dir <directory>, --herdr-home <dir>.
+--lean omits automatic action snapshots and generated code; explicit snapshots
+remain available. Set it on serve or a direct connection, not on --socket clients.
 call, tools and events also accept --socket to reuse a service.
 --endpoint connects to an existing browser, including over an SSH tunnel;
 it does not stream its display into Herdr. No browser is downloaded here.
@@ -37,7 +39,7 @@ export async function main(argv = process.argv.slice(2)) {
     binary: { type: 'string', default: process.env.TERMINAL_BROWSER_BIN ?? 'terminal-browser' },
     'output-dir': { type: 'string', default: '.artifacts' }, 'herdr-home': { type: 'string' },
     space: { type: 'string' }, url: { type: 'string', default: 'about:blank' }, name: { type: 'string', default: 'Browser' },
-    focus: { type: 'boolean', default: false }, ssh: { type: 'string' }, cursor: { type: 'string' }, types: { type: 'string' }, socket: { type: 'string' },
+    focus: { type: 'boolean', default: false }, lean: { type: 'boolean', default: false }, ssh: { type: 'string' }, cursor: { type: 'string' }, types: { type: 'string' }, socket: { type: 'string' },
   } });
   const [command, tool, raw = '{}'] = positionals;
   if (values.help || !command) { process.stdout.write(help); return; }
@@ -64,7 +66,9 @@ export async function main(argv = process.argv.slice(2)) {
     const argv = command === 'host' ? JSON.parse(tool) : [values.binary, 'open', values.url, '--no-merge', ...(values.ssh ? ['--ssh', values.ssh] : [])];
     if (!Array.isArray(argv) || !argv.length || argv.some(a => typeof a !== 'string')) throw new Error('host needs an argv array');
     const adapter = await terminalAdapter(app, process.env.HC_TERMINAL_ID, argv => [process.execPath, cli, 'host', JSON.stringify(argv), '--herdr-home', app.home]);
-    const child = spawn(argv[0], argv.slice(1), { stdio: 'inherit', env: { ...process.env, TERMINAL_BROWSER_TERMINAL_SOCKET: adapter.socketPath } });
+    // Herdr's terminal reports CSS pixels. Pixel otherwise uses the screen's
+    // Retina scale and renders the page at twice the intended size on macOS.
+    const child = spawn(argv[0], argv.slice(1), { stdio: 'inherit', env: { ...process.env, PIXEL_DISPLAY_SCALE: process.env.PIXEL_DISPLAY_SCALE ?? '1', TERMINAL_BROWSER_TERMINAL_SOCKET: adapter.socketPath } });
     const signals = ['SIGTERM', 'SIGINT'];
     const forward = signal => child.kill(signal);
     const handlers = signals.map(signal => { const handle = () => forward(signal); process.on(signal, handle); return [signal, handle]; });
@@ -86,7 +90,8 @@ export async function main(argv = process.argv.slice(2)) {
     return;
   }
   if (!['mcp', 'tools', 'call', 'events', 'serve'].includes(command)) throw new Error(`Unknown command: ${command}\n${help}`);
-  const options = { outputDir: resolve(values['output-dir']) };
+  const options = { outputDir: resolve(values['output-dir']), lean: values.lean };
+  if (values.lean && values.socket && command !== 'serve') throw new Error('Configure --lean on the serve process, not on --socket clients');
   if (command === 'serve' && !values.socket) throw new Error('serve needs --socket in a private directory');
   const host = values.socket && command !== 'serve' ? null : await BrowserHost.connect({ endpoint: values.endpoint, browserKey: values.browser, binary: values.binary, target: values.target });
   if (command === 'serve') {

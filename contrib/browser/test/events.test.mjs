@@ -26,6 +26,24 @@ test('event eviction and a restarted collector are explicit', async () => {
   await assert.rejects(new EventLog().read({ cursor }), /event_session_changed/);
 });
 
+test('long event payloads respect the byte budget and expose eviction gaps', async () => {
+  const log = new EventLog(1024, 700);
+  const { cursor } = await log.read();
+  log.push('navigation', 'tab-1', { url: 'x'.repeat(400) });
+  log.push('navigation', 'tab-1', { url: 'y'.repeat(400) });
+  const batch = await log.read({ cursor });
+  assert.equal(batch.gap, true);
+  assert.equal(batch.events.length, 1);
+  assert.ok(log.bytes <= 700);
+  log.push('navigation', 'tab-1', { url: 'z'.repeat(1000) });
+  const oversized = await log.read({ cursor: batch.cursor });
+  assert.equal(oversized.gap, true);
+  assert.equal(oversized.events.length, 0);
+  assert.equal(log.bytes, 0);
+  log.push('navigation', 'tab-1', { url: '/small' });
+  assert.equal((await log.read({ cursor: oversized.cursor })).events[0].data.url, '/small');
+});
+
 test('cancelled event waits release their listeners', async () => {
   const log = new EventLog();
   const controller = new AbortController();

@@ -45,6 +45,10 @@ The adapter supports pane identity, listing, focus and splits using existing
 Herdr App commands. It does not advertise clipboard or text delivery operations
 that it cannot implement correctly.
 
+The adapter uses a display scale of 1 because Herdr reports terminal sizes in
+CSS pixels. This keeps pages at the intended size on Retina displays. An explicit
+`PIXEL_DISPLAY_SCALE` environment value overrides that default.
+
 Omit `--focus` to request a background tab. Older releases that do not support
 background creation reject that request before opening anything. The live app's
 command schema determines support, rather than its version number.
@@ -80,8 +84,47 @@ pages have the same URL. Arbitrary `browser_run_code` and `browser_install` are
 excluded; this integration attaches to an existing browser.
 
 The definitions are available through `node src/cli.mjs tools --browser <key>`.
-The included [agent skill](skill/SKILL.md) explains targeting, events and recovery;
-it is not automatically installed into global agent configuration.
+The included [agent skill](skill/SKILL.md) covers opening a Herdr browser tab,
+targeting pages, events, and closing either a page or its containing Herdr tab.
+Its `scripts/herdr-browser` entry point resolves the companion from the checkout.
+It is not automatically installed into global agent configuration. Link the
+complete `skill/` directory into a skill-discovery directory supported by the
+agent harness. A copied skill can locate a separately installed companion with
+`HERDR_BROWSER_CLI=/absolute/path/contrib/browser/src/cli.mjs`.
+
+The skill's [workflow reference](skill/references/workflows.md) provides service
+setup, multi-page examples, DOM and event waits, screenshot scopes, failure
+recovery and remote connection recipes. It is included when linking or copying
+the complete skill directory.
+
+### Reduce agent output
+
+Prefer one persistent connection. After inspecting the page, request a focused
+snapshot with `browser_snapshot {"target":"<selector-or-ref>"}`; `depth` also
+controls tree depth. Request the full snapshot when you need page-wide context.
+Use event cursors, a narrow `types` filter and `waitMs` instead of polling full
+snapshots. Region screenshots return a path by default; request image content
+only when the agent needs to inspect pixels.
+
+For workflows that explicitly inspect results, start `serve` or a directly
+connected `mcp` with `--lean`. It omits generated Playwright code and automatic
+action snapshots using upstream configuration. All tools, explicit full or
+focused snapshots, event streams and error responses remain available. Obtain a
+new explicit snapshot after navigation or when an action reveals new controls.
+Set `--lean` on the service process; socket clients inherit that service's mode.
+
+### Local trust and artifacts
+
+The companion is trusted local automation. Restrict MCP access to trusted agents
+and carry remote CDP over an authenticated tunnel. An agent controls the selected
+browser profile, including its authenticated sessions; page text and events are
+untrusted data. This is not a sandbox for hostile agents.
+
+The output directory is created or restricted to mode 700 and must be an actual
+directory owned by the current user. A directory symlink is refused. Automatic
+artifacts stay within that private directory; region files use mode 600. An
+explicit filename outside it uses the destination's permissions. Treat saved
+DOM, screenshots and console output as private browsing data.
 
 For repeated CLI calls, start one service in a private directory:
 
@@ -110,8 +153,9 @@ MCP connection.
 
 `browser_events` returns `{cursor, gap, events}`. Obtain a cursor before an
 action, then pass it with `types`, optional `tab` (a stable target ID), and
-`waitMs` to await matching events. It keeps 1,024 events, returns at most 500
-per request, and reports eviction explicitly. Cursors belong to one service
+`waitMs` to await matching events. It retains up to 1,024 events and 1 MiB of
+serialized event data, returns at most 500 per request, and reports eviction
+explicitly, including an individual event exceeding the byte budget. Cursors belong to one service
 lifetime; reconnecting to that service preserves them, restarting it does not.
 The CLI event command emits NDJSON batches, including cursors and gap markers.
 

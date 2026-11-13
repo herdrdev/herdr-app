@@ -2,8 +2,11 @@ import { randomUUID } from 'node:crypto';
 import { setTimeout as delay } from 'node:timers/promises';
 
 export class EventLog {
-  constructor(capacity = 1024) {
+  constructor(capacity = 1024, maxBytes = 1024 * 1024) {
     this.capacity = capacity;
+    this.maxBytes = maxBytes;
+    this.bytes = 0;
+    this.sizes = [];
     this.epoch = randomUUID();
     this.sequence = 0;
     this.events = [];
@@ -13,7 +16,15 @@ export class EventLog {
   push(type, tab, data = {}) {
     const event = { sequence: ++this.sequence, timestamp: new Date().toISOString(), type, tab, data };
     this.events.push(event);
-    if (this.events.length > this.capacity) this.events.shift();
+    const bytes = Buffer.byteLength(JSON.stringify(event));
+    this.sizes.push(bytes);
+    this.bytes += bytes;
+    // A count limit alone does not bound memory when a page emits long URLs.
+    // Byte eviction uses the same explicit cursor-gap recovery as count eviction.
+    while (this.events.length && (this.events.length > this.capacity || this.bytes > this.maxBytes)) {
+      this.events.shift();
+      this.bytes -= this.sizes.shift();
+    }
     for (const wake of [...this.waiters]) wake();
     return event;
   }

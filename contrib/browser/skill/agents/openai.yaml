@@ -1,4 +1,4 @@
 interface:
   display_name: "Herdr Browser"
   short_description: "Drive Herdr Chromium tabs with Playwright and events"
-  default_prompt: "Use $herdr-browser to inspect and interact with the Chromium tab visible in Herdr."
+  default_prompt: "Use $herdr-browser to open or attach to the requested Herdr Chromium browser, select pages by their recorded identities, and verify actions with scoped DOM snapshots and events. Close only the requested browser page, pane or Herdr tab."

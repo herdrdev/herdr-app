@@ -66,6 +66,8 @@ try {
   const host = await BrowserHost.connect({ browserKey: browsers[0].key, binary: terminal });
   bridge = new BrowserBridge(host, { outputDir: artifacts });
   await host.current().page.waitForLoadState('domcontentloaded');
+  const pageWidth = await host.current().page.evaluate(() => innerWidth);
+  assert.ok(pageWidth > browsers[0].viewport.width * 0.9, 'the browser must use Herdr CSS pixels, including on Retina displays');
   const snapshot = await bridge.call('browser_snapshot');
   const tree = snapshot.content.filter(c => c.type === 'text').map(c => c.text).join('\n');
   assert.match(tree, /heading "Chromium in Herdr"/);

@@ -1,0 +1,9 @@
+#!/bin/sh
+set -eu
+browser_skill_dir=$(CDPATH= cd -- "$(dirname -- "$0")/.." && pwd -P)
+browser_cli=${HERDR_BROWSER_CLI:-"$browser_skill_dir/../src/cli.mjs"}
+if [ ! -f "$browser_cli" ]; then
+  printf '%s\n' 'Set HERDR_BROWSER_CLI to the companion src/cli.mjs, or link the complete skill directory from its checkout.' >&2
+  exit 1
+fi
+exec node "$browser_cli" "$@"

@@ -186,9 +186,13 @@ export class BrowserHost {
     const id = randomUUID();
     if (!this.domBindings.has(page)) {
       const binding = `__herdrBrowser_${randomUUID().replaceAll('-', '')}`;
-      await page.exposeBinding(binding, (_source, data) => {
+      await page.exposeBinding(binding, (source, data) => {
+        if (!data || typeof data.watch !== 'string' || !Number.isSafeInteger(data.mutations) || data.mutations < 1 || typeof data.connected !== 'boolean') return;
         const watch = this.domWatches.get(data.watch);
-        if (watch?.page === page) this.events.push('dom.changed', tab, { watch: data.watch, selector: watch.selector, mutations: data.mutations, connected: data.connected });
+        if (watch?.page !== page || source.frame !== page.mainFrame()) return;
+        // Page bindings are callable by untrusted page scripts. Retain only
+        // validated primitive values in the bounded event buffer.
+        this.events.push('dom.changed', tab, { watch: data.watch, selector: watch.selector, mutations: data.mutations, connected: data.connected });
       });
       this.domBindings.set(page, binding);
     }
@@ -235,10 +239,17 @@ export class BrowserHost {
   }
 
   async dispose() {
-    for (const watch of [...this.domWatches.values()]) watch.cleanup();
+    const ownedWatches = [...this.domWatches];
+    for (const [, watch] of ownedWatches) watch.cleanup();
     for (const [page, dispose] of this.observers) {
       dispose();
-      if (!page.isClosed()) await page.evaluate(() => { for (const watch of globalThis.__herdrBrowserWatches?.values() ?? []) watch.disconnect(); globalThis.__herdrBrowserWatches?.clear(); }).catch(() => {});
+      const ids = ownedWatches.filter(([, watch]) => watch.page === page).map(([id]) => id);
+      if (ids.length && !page.isClosed()) await page.evaluate(ids => {
+        for (const id of ids) {
+          globalThis.__herdrBrowserWatches?.get(id)?.disconnect();
+          globalThis.__herdrBrowserWatches?.delete(id);
+        }
+      }, ids).catch(() => {});
     }
     if (this.record && this.browser.isConnected()) await this.control('agent-release').catch(() => {});
     await this.browser.close();
