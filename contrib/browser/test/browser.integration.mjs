@@ -1,0 +1,130 @@
+import { test } from 'node:test';
+import assert from 'node:assert/strict';
+import http from 'node:http';
+import { mkdtemp, readFile, rm, stat } from 'node:fs/promises';
+import { join } from 'node:path';
+import { tmpdir } from 'node:os';
+import { chromium } from 'playwright';
+import { Client } from '@modelcontextprotocol/sdk/client/index.js';
+import { InMemoryTransport } from '@modelcontextprotocol/sdk/inMemory.js';
+import { BrowserHost } from '../src/host.mjs';
+import { createBridgeServer } from '../src/server.mjs';
+import { waitUntil } from '../src/events.mjs';
+import { startDaemon, daemonClient } from '../src/daemon.mjs';
+
+test('real Chromium, official Playwright tools, DOM events and region captures', { timeout: 60_000 }, async t => {
+  const trace = message => { if (process.env.HERDR_BROWSER_TEST_DEBUG) process.stderr.write(`[browser-test] ${message}\n`); };
+  const root = await mkdtemp(join(tmpdir(), 'herdr-browser-test-'));
+  let context, bridge, client, daemon;
+  const fixture = http.createServer((_request, response) => {
+    response.setHeader('Content-Type', 'text/html');
+    response.end(`<!doctype html><title>Browser fixture</title><main><h1>Herdr test</h1><label>Email<input aria-label="Email"></label><button onclick="document.querySelector('#status').textContent='Saved';console.log('saved')">Save</button><p id="status">Ready</p><div style="height:2000px"></div></main>`);
+  });
+  t.after(async () => {
+    await daemon?.close();
+    await client?.close();
+    await bridge?.close();
+    await context?.close();
+    fixture.closeAllConnections();
+    await new Promise(resolve => fixture.close(resolve));
+    await rm(root, { recursive: true, force: true });
+  });
+  await new Promise(resolve => fixture.listen(0, '127.0.0.1', resolve));
+  const url = `http://127.0.0.1:${fixture.address().port}`;
+  context = await chromium.launchPersistentContext(join(root, 'profile'), {
+    channel: process.env.HERDR_BROWSER_TEST_CHANNEL ?? 'chrome', headless: true,
+    executablePath: process.env.HERDR_BROWSER_TEST_EXECUTABLE,
+    args: ['--remote-debugging-port=0'], viewport: { width: 800, height: 600 },
+  });
+  trace('Chromium launched');
+  const port = Number((await readFile(join(root, 'profile', 'DevToolsActivePort'), 'utf8')).split('\n')[0]);
+  const host = await BrowserHost.connect({ endpoint: `http://127.0.0.1:${port}` });
+  trace('CDP connected');
+  const connected = await createBridgeServer(host, { outputDir: join(root, 'captures') });
+  const server = connected.server;
+  bridge = connected.bridge;
+  client = new Client({ name: 'integration', version: '1' });
+  const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
+  await server.connect(serverTransport);
+  await client.connect(clientTransport);
+  trace('MCP connected');
+  const tools = (await client.listTools()).tools;
+  trace('tool schemas loaded');
+  for (const name of ['browser_snapshot', 'browser_click', 'browser_type', 'browser_tabs', 'browser_events', 'browser_screenshot_region']) assert.ok(tools.some(t => t.name === name), name);
+  assert.ok(!tools.some(t => t.name.startsWith('browser_run_code') || t.name === 'browser_install'), 'host-code tools and installation must not be advertised');
+  for (const name of ['browser_run_code', 'browser_run_code_unsafe', 'browser_install']) {
+    const denied = await client.callTool({ name, arguments: {} });
+    assert.equal(denied.isError, true, name);
+    assert.match(denied.content[0].text, /not exposed by this companion/);
+  }
+  const call = async (name, args = {}) => {
+    const result = await client.callTool({ name, arguments: args });
+    assert.ok(!result.isError, JSON.stringify(result));
+    return result;
+  };
+  const text = result => result.content.filter(c => c.type === 'text').map(c => c.text).join('\n');
+  await call('browser_navigate', { url });
+  trace('navigation completed');
+  const snapshot = text(await call('browser_snapshot'));
+  assert.match(snapshot, /heading "Herdr test"/);
+  const email = snapshot.match(/textbox "Email".*\[ref=(e\d+)\]/)?.[1];
+  const save = snapshot.match(/button "Save".*\[ref=(e\d+)\]/)?.[1];
+  assert.ok(email && save, snapshot);
+  await call('browser_type', { target: email, text: 'agent@example.test' });
+  assert.equal(await host.current().page.getByLabel('Email').inputValue(), 'agent@example.test');
+  const watch = (await call('browser_observe_dom', { selector: '#status', debounceMs: 50 })).structuredContent;
+  const invalidCursor = (await call('browser_events')).structuredContent.cursor;
+  await host.current().page.evaluate(async id => {
+    const binding = Object.keys(globalThis).find(key => key.startsWith('__herdrBrowser_'));
+    await globalThis[binding]({ watch: id, mutations: { unexpected: 'page-controlled object' }, connected: 'yes' });
+  }, watch.watch);
+  assert.equal((await host.events.read({ cursor: invalidCursor, types: ['dom.changed'] })).events.length, 0, 'reject malformed page binding payloads');
+  const otherHost = await BrowserHost.connect({ endpoint: `http://127.0.0.1:${port}` });
+  const otherWatch = await otherHost.observeDom({ selector: '#status', debounceMs: 50 });
+  await otherHost.close();
+  assert.equal(await host.current().page.evaluate(id => globalThis.__herdrBrowserWatches.has(id), otherWatch.watch), false, 'detach removes its own observer');
+  const cursor = (await call('browser_events')).structuredContent.cursor;
+  const eventWait = call('browser_events', { cursor, types: ['dom.changed'], waitMs: 5000 });
+  await call('browser_click', { target: save });
+  const changed = (await eventWait).structuredContent;
+  trace('DOM event received');
+  assert.equal(changed.events[0].data.watch, watch.watch);
+  assert.equal(changed.events[0].data.mutations > 0, true, 'another connection detaching must preserve this observer');
+  assert.equal(await host.current().page.locator('#status').textContent(), 'Saved');
+  const shot = (await call('browser_screenshot_region', { x: 0, y: 0, width: 160, height: 80 })).structuredContent;
+  const png = await readFile(shot.path);
+  assert.equal(png.readUInt32BE(16), 160);
+  assert.equal(png.readUInt32BE(20), 80);
+  assert.equal((await stat(join(root, 'captures'))).mode & 0o777, 0o700);
+  assert.equal((await stat(shot.path)).mode & 0o777, 0o600);
+  const originalTarget = host.selected;
+  await call('browser_tabs', { action: 'new', url });
+  assert.notEqual(host.selected, originalTarget);
+  const listing = (await call('browser_tabs', { action: 'list' })).structuredContent;
+  assert.equal(listing.tabs.length, 2);
+  await call('browser_tabs', { action: 'select', index: listing.tabs.find(t => t.target === originalTarget).index });
+  assert.equal(await host.current().page.getByLabel('Email').inputValue(), 'agent@example.test');
+  const navigationCursor = (await call('browser_events')).structuredContent.cursor;
+  await call('browser_navigate', { url: `${url}/next` });
+  const ended = await host.events.read({ cursor: navigationCursor, types: ['dom.observer.ended'], waitMs: 1000 });
+  assert.equal(ended.events[0].data.watch, watch.watch);
+  const serviceHost = await BrowserHost.connect({ endpoint: `http://127.0.0.1:${port}`, target: originalTarget });
+  daemon = await startDaemon(serviceHost, join(root, 'service.sock'), { outputDir: join(root, 'service-captures') });
+  const firstClient = daemonClient(join(root, 'service.sock'));
+  const serviceSnapshot = text(await firstClient.call('browser_snapshot', {}));
+  const buttonRef = serviceSnapshot.match(/button "Save".*\[ref=(e\d+)\]/)?.[1];
+  const serviceCursor = (await firstClient.call('browser_events', {})).structuredContent.cursor;
+  await firstClient.close();
+  const secondClient = daemonClient(join(root, 'service.sock'));
+  assert.ok(!(await secondClient.call('browser_click', { target: buttonRef })).isError);
+  const replay = await secondClient.call('browser_events', { cursor: serviceCursor, types: ['console'], waitMs: 1000 });
+  assert.equal(replay.structuredContent.events[0].data.text, 'saved');
+  await daemon.close();
+  trace('daemon detached');
+  await client.close();
+  await bridge.close();
+  trace('MCP detached');
+  assert.equal(await context.pages()[0].title(), 'Browser fixture');
+  await waitUntil(() => !host.browser.isConnected());
+  trace('assertions complete');
+});
