@@ -245,7 +245,9 @@ export interface TerminalSelectionState {
  *  A terminal in a window (openOverlay with a layout) that has the keyboard is reported
  *  the same way (`pane` and `shown` null); implicit pane commands still act on the
  *  focused pane under the window.
- *  pane.focus {terminal} prefers the first visible layout terminal block, then a model pane.
+ *  pane.focus {terminal} prefers the first visible layout terminal block, then a visible
+ *  terminal in a floating window (topmost first), then a model pane. Floating terminals
+ *  never take the keyboard from a dialog or popup; the selected pane and tab stay.
  *  `shown`: terminal.show replacement, if any. `agent`: the agent an agent block shows.
  *  `terminal` is null for mod panes. Selection describes the terminal that receives
  *  terminal commands (including a shown replacement or peek). Live. */

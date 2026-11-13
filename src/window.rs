@@ -3106,6 +3106,20 @@ impl AppWindow {
                     cx.notify();
                     return;
                 }
+                if Self::arg(a, "pane").is_none()
+                    && let Some(terminal) = Self::arg(a, "terminal")
+                    && let Some(id) = self.overlays.iter().rev()
+                        .filter(|o| o.kind == OverlayKind::Window)
+                        .filter_map(|o| o.layout.as_ref())
+                        .find_map(|l| l.visible_blocks().into_iter().find(|n| n.terminal() == Some(terminal)).map(|n| n.id.clone()))
+                {
+                    // Like clicking the floating terminal: only its keyboard changes.
+                    if !self.overlays.iter().any(|o| o.kind.modal_keys()) && let Some(f) = self.pane_focus(&id, cx) {
+                        f.focus(window, cx);
+                    }
+                    cx.notify();
+                    return;
+                }
                 let pane = Self::owned(a, "pane").or_else(|| Self::arg(a, "terminal").and_then(|t| self.model.pane_of(t)));
                 let Some(p) = pane.filter(|p| self.model.tab_of(p).is_some()) else { return self.fail("no such pane") };
                 self.focused_block = None;
@@ -6098,6 +6112,61 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(root.read_with(cx, |r, _| r.toast_count()), 0, "the toast timed out and left");
         assert_eq!(running(cx), 0, "and the clock stopped with it");
+    }
+
+    #[test]
+    fn pane_focus_targets_floating_terminals() {
+        in_own_process("floating_terminal_focus");
+    }
+
+    #[gpui::test]
+    fn floating_terminal_focus(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("floating_terminal_focus") { return; }
+        let (view, cx) = open_window(cx, "unused", "", json!({
+            "type": "row", "children": [
+                { "id": "layout", "type": "block", "content": { "terminal": "t3" } },
+                { "type": "block", "content": { "tab": "active" } }
+            ]
+        }));
+        let floating = |terminal: &str, hidden| json!({ "kind": "window", "width": 300, "height": 200,
+            "layout": { "id": "body", "type": "block", "hidden": hidden, "content": { "terminal": terminal } } });
+        view.update_in(cx, |this, window, cx| {
+            this.model.add_space("s1", "", "/tmp", crate::model::Tab::new("tb1", "", "p1", "t1"));
+            this.model.add_tab("s1", crate::model::Tab::new("tb2", "", "p2", "t2"));
+            this.model.select_tab("tb1");
+            this.sync(window, cx);
+            this.run("pane.focus", json!({ "pane": "p1" }), window, cx);
+            this.open_overlay("first".into(), floating("t2", false), window, cx);
+            this.open_overlay("hidden".into(), floating("t2", true), window, cx);
+            assert!(this.pane_focus("p1", cx).unwrap().is_focused(window), "opening a window must not take the keyboard");
+            this.run("pane.focus", json!({ "terminal": "t2" }), window, cx);
+            assert!(this.pane_focus("ovfirst/body", cx).unwrap().is_focused(window), "skip the hidden terminal above it");
+            this.open_overlay("second".into(), floating("t2", false), window, cx);
+            this.run("pane.focus", json!({ "terminal": "t2" }), window, cx);
+            assert!(this.pane_focus("ovsecond/body", cx).unwrap().is_focused(window), "the topmost visible match wins");
+            assert_eq!(this.model.active_tab().unwrap().id, "tb1");
+            assert_eq!(this.model.focused_pane().as_deref(), Some("p1"));
+            assert_eq!(this.focused_pane.as_deref(), Some("p1"));
+            for kind in ["popup", "dialog"] {
+                this.open_overlay("modal".into(), json!({ "kind": kind }), window, cx);
+                let modal = this.overlays.last().unwrap().focus.clone();
+                this.run("pane.focus", json!({ "terminal": "t2" }), window, cx);
+                assert!(modal.is_focused(window), "a floating terminal must not bypass a {kind}");
+                this.close_overlay("modal", window, cx);
+            }
+            this.open_overlay("layout-copy".into(), floating("t3", false), window, cx);
+            this.run("pane.focus", json!({ "terminal": "t3" }), window, cx);
+            assert!(this.pane_focus("layout", cx).unwrap().is_focused(window), "the layout's terminal still wins");
+            this.run("pane.focus", json!({ "pane": "p1", "terminal": "t2" }), window, cx);
+            assert!(this.pane_focus("p1", cx).unwrap().is_focused(window), "an explicit pane still wins");
+            this.close_overlay("first", window, cx);
+            this.close_overlay("second", window, cx);
+            this.run("pane.focus", json!({ "terminal": "t2" }), window, cx);
+            assert_eq!(this.model.active_tab().unwrap().id, "tb2", "a hidden window must not prevent the model-pane fallback");
+            let reply = this.run_as("pane.focus", json!({ "terminal": "missing" }), false, window, cx);
+            assert_eq!(reply["error"], "no such pane");
+        });
     }
 
     /// Mods see window().active follow the focus, losing it too: a probe mod
