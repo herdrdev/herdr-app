@@ -3027,8 +3027,26 @@ const BASE: &str = r#"  /** A row. */
     render: (range: ItemRange, cx: Context) => Element[],
   ): NativeElement;
 
+  /**
+   * Where a scroll area is, read from its handle. Lengths are in the pixels a
+   * script writes, so a row written `.h(30)` moves `offset()` by 30 at any zoom.
+   * They are the last frame's: read them in an event handler or a task, not to
+   * lay out the frame being built. All zero before the first frame.
+   */
+  export interface ScrollPosition {
+    /** How far the content has scrolled from its start: `{ x: 0, y: 0 }` there, never negative. */
+    offset(): import("gpui-kit").Point;
+    /** The size of everything the area scrolls through, on screen or not. */
+    content_size(): import("gpui-kit").Size;
+    /**
+     * The size of the part on screen. The area is at its end when
+     * `offset().y + viewport_size().height >= content_size().height - 1`.
+     */
+    viewport_size(): import("gpui-kit").Size;
+  }
+
   /** A plain scroll area's position. Create in init() and attach with track_scroll. */
-  export interface ScrollHandle {
+  export interface ScrollHandle extends ScrollPosition {
     /** Reveal the zero-based direct child with the smallest scroll needed.
      * Works on plain overflow_*_scroll and overflow_*_scrollbar elements.
      * Requests are consumed once, after layout; already visible children stay put.
@@ -3046,9 +3064,10 @@ const BASE: &str = r#"  /** A row. */
    * it. Create it in `init()` and hand it to the list with `track_scroll`.
    *
    * A list without one still scrolls, and a `Scrollbar` named after the list
-   * still drives it; this is only needed to scroll it from code.
+   * still drives it; this is only needed to scroll it from code, or to read
+   * where it is.
    */
-  export interface VirtualListScrollHandle {
+  export interface VirtualListScrollHandle extends ScrollPosition {
     /**
      * Puts the item at `index` on screen before the next frame. `"top"` (the
      * default) brings it to the near edge, `"center"` to the middle.

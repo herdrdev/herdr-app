@@ -15,6 +15,7 @@ use std::rc::Weak;
 use gpui::ScrollStrategy;
 use gpui_base::NumberStep;
 use gpui_base::VirtualListScrollHandle;
+use gpui_base::ScrollbarHandle;
 use gpui_base::input::{InputBaseState, InputModeKind};
 use gpui_base::slider::{SliderScale, SliderValue};
 use rquickjs::{
@@ -1276,6 +1277,41 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
         }),
     )?;
 
+    // HERDR: where a scroll area is, read back by the script. Either kind of
+    // handle; pairs of scalars, shaped into objects by the prelude. Offsets
+    // count up from the start (GPUI's count down), in the pixels a script
+    // writes, so they compare with its own row heights at any zoom.
+    let offset = runtime.clone();
+    globals.set(
+        "__scroll_offset",
+        Func::from(move |ctx: Ctx<'_>, handle: EntityHandle| -> JsResult<Vec<f64>> {
+            read_scroll(&ctx, &offset, handle, |scroll| {
+                let offset = scroll.offset();
+                vec![scrolled(offset.x), scrolled(offset.y)]
+            })
+        }),
+    )?;
+    let content_size = runtime.clone();
+    globals.set(
+        "__scroll_content_size",
+        Func::from(move |ctx: Ctx<'_>, handle: EntityHandle| -> JsResult<Vec<f64>> {
+            read_scroll(&ctx, &content_size, handle, |scroll| {
+                let size = scroll.content_size();
+                vec![crate::value::script_px(size.width), crate::value::script_px(size.height)]
+            })
+        }),
+    )?;
+    let viewport_size = runtime.clone();
+    globals.set(
+        "__scroll_viewport_size",
+        Func::from(move |ctx: Ctx<'_>, handle: EntityHandle| -> JsResult<Vec<f64>> {
+            read_scroll(&ctx, &viewport_size, handle, |scroll| {
+                let size = scroll.viewport_bounds().size;
+                vec![crate::value::script_px(size.width), crate::value::script_px(size.height)]
+            })
+        }),
+    )?;
+
     let discard_virtual_scroll = runtime.clone();
     globals.set(
         "__virtual_scroll_release",
@@ -1719,6 +1755,30 @@ fn live_virtual_scroll(
         .entities()
         .virtual_scroll(handle)
         .ok_or_else(|| Exception::throw_type(ctx, "this scroll handle has been released"))
+}
+
+// HERDR: reads the position behind a `ScrollHandle` or a `VirtualListScrollHandle`.
+fn read_scroll<R>(
+    ctx: &Ctx<'_>,
+    runtime: &Weak<ShellRuntime>,
+    handle: EntityHandle,
+    read: impl FnOnce(&dyn ScrollbarHandle) -> R,
+) -> JsResult<R> {
+    let runtime = alive(ctx, runtime)?;
+    let entities = runtime.entities();
+    if let Some(scroll) = entities.scroll(handle) {
+        return Ok(read(&scroll.handle));
+    }
+    if let Some(scroll) = entities.virtual_scroll(handle) {
+        return Ok(read(&scroll));
+    }
+    Err(Exception::throw_type(ctx, "this scroll handle has been released"))
+}
+
+// HERDR: GPUI's offset falls below zero as the content scrolls; a script reads
+// how far it has scrolled. Never negative, an overscroll included.
+fn scrolled(offset: gpui::Pixels) -> f64 {
+    (0. - crate::value::script_px(offset)).max(0.)
 }
 
 fn live_focus(
