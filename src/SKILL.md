@@ -138,6 +138,10 @@ those files or the generated guide. The app rewrites them on start.
   They are trusted JavaScript with command and network access.
   `"focusable": true` in `mod.json` lets `pane.go` move onto a copy; it receives
   `"focus"` from `nextCommand()` and focuses its own keyboard handle.
+- `openOverlay({layout, terminal_context: "scratch", ...})` scopes its terminal
+  blocks to keys.json's `terminal:scratch` section. It overrides `terminal` for
+  listed keys; others fall back. Other views of that terminal and mod inputs
+  keep their bindings. Context names use letters, digits, `_` or `-`.
 - A mod's `watchFolder(dir)` promise has `cancel()`; cancel it when the folder
   is no longer shown. It resolves with `[]` and releases only that call.
 - Shipped mods belong to Herdr: duplicate with `mod.clone` before editing.
