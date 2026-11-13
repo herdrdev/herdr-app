@@ -136,3 +136,16 @@ test("space matching keeps deepest checkout, machine, live-folder and fallback r
   expect(writes[4]).toEqual(["space.select", { id: "remote" }]);
   expect(reads).toEqual({ spaces: 5, panes: 5 });
 });
+
+test("a bare repo hidden beside its worktrees is named after its project", async () => {
+  const replies: Record<string, string> = {
+    "--show-toplevel": "/home/user/project/topic",
+    "--git-common-dir": "/home/user/project/.bare",
+  };
+  const exec = async (_command: string, args: string[]) => ({ code: 0, stdout: replies[args.at(-1)!] + "\n", stderr: "" });
+  const globals = { View: class {}, div: element, v_flex: element, h_flex: element, Input: { new: element }, Scrollbar: { vertical: element }, theme: () => ({}), exec };
+  const repoOf = new Function(...Object.keys(globals), `${source}; return repoOf;`)(...Object.values(globals));
+  expect(await repoOf("/home/user/project/topic", null)).toEqual({
+    top: "/home/user/project/topic", main: "/home/user/project/.bare", name: "project", linked: true,
+  });
+});
