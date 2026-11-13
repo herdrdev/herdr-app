@@ -137,6 +137,8 @@ been exercised by this companion's automated tests.
 For an already running remote Chromium, forward its loopback CDP endpoint over
 SSH and supply `--endpoint http://127.0.0.1:<forwarded-port>` instead of
 `--browser`. CDP attachment alone does not stream a remote display into Herdr.
+Use `list --endpoint <url>` to discover content targets, and `--target <id>`
+to select one explicitly when the endpoint has several pages.
 Remote rendering, viewer reconnection and unattended browser ownership are
 separate follow-up work. There is no silent switch between local and remote
 browser hosts, and no WebKit implementation.

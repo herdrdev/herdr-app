@@ -77,7 +77,14 @@ export async function main(argv = process.argv.slice(2)) {
     }
     return;
   }
-  if (command === 'list') { process.stdout.write(`${JSON.stringify(await listBrowsers(values.binary), null, 2)}\n`); return; }
+  if (command === 'list') {
+    if (values.endpoint) {
+      const host = await BrowserHost.connect({ endpoint: values.endpoint, discovery: true });
+      try { process.stdout.write(`${JSON.stringify(await host.tabs(), null, 2)}\n`); }
+      finally { await host.close(); }
+    } else process.stdout.write(`${JSON.stringify(await listBrowsers(values.binary), null, 2)}\n`);
+    return;
+  }
   if (!['mcp', 'tools', 'call', 'events', 'serve'].includes(command)) throw new Error(`Unknown command: ${command}\n${help}`);
   const options = { outputDir: resolve(values['output-dir']) };
   if (command === 'serve' && !values.socket) throw new Error('serve needs --socket in a private directory');

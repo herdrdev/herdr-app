@@ -13,30 +13,43 @@ import { waitUntil } from '../src/events.mjs';
 import { startDaemon, daemonClient } from '../src/daemon.mjs';
 
 test('real Chromium, official Playwright tools, DOM events and region captures', { timeout: 60_000 }, async t => {
+  const trace = message => { if (process.env.HERDR_BROWSER_TEST_DEBUG) process.stderr.write(`[browser-test] ${message}\n`); };
   const root = await mkdtemp(join(tmpdir(), 'herdr-browser-test-'));
-  t.after(() => rm(root, { recursive: true, force: true }));
+  let context, bridge, client, daemon;
   const fixture = http.createServer((_request, response) => {
     response.setHeader('Content-Type', 'text/html');
     response.end(`<!doctype html><title>Browser fixture</title><main><h1>Herdr test</h1><label>Email<input aria-label="Email"></label><button onclick="document.querySelector('#status').textContent='Saved';console.log('saved')">Save</button><p id="status">Ready</p><div style="height:2000px"></div></main>`);
   });
+  t.after(async () => {
+    await daemon?.close();
+    await client?.close();
+    await bridge?.close();
+    await context?.close();
+    fixture.closeAllConnections();
+    await new Promise(resolve => fixture.close(resolve));
+    await rm(root, { recursive: true, force: true });
+  });
   await new Promise(resolve => fixture.listen(0, '127.0.0.1', resolve));
-  t.after(() => new Promise(resolve => fixture.close(resolve)));
   const url = `http://127.0.0.1:${fixture.address().port}`;
-  const context = await chromium.launchPersistentContext(join(root, 'profile'), {
+  context = await chromium.launchPersistentContext(join(root, 'profile'), {
     channel: process.env.HERDR_BROWSER_TEST_CHANNEL ?? 'chrome', headless: true,
     executablePath: process.env.HERDR_BROWSER_TEST_EXECUTABLE,
     args: ['--remote-debugging-port=0'], viewport: { width: 800, height: 600 },
   });
-  t.after(() => context.close());
+  trace('Chromium launched');
   const port = Number((await readFile(join(root, 'profile', 'DevToolsActivePort'), 'utf8')).split('\n')[0]);
   const host = await BrowserHost.connect({ endpoint: `http://127.0.0.1:${port}` });
-  const { server, bridge } = await createBridgeServer(host, { outputDir: join(root, 'captures') });
-  const client = new Client({ name: 'integration', version: '1' });
+  trace('CDP connected');
+  const connected = await createBridgeServer(host, { outputDir: join(root, 'captures') });
+  const server = connected.server;
+  bridge = connected.bridge;
+  client = new Client({ name: 'integration', version: '1' });
   const [clientTransport, serverTransport] = InMemoryTransport.createLinkedPair();
   await server.connect(serverTransport);
   await client.connect(clientTransport);
-  t.after(async () => { await client.close(); await bridge.close(); });
+  trace('MCP connected');
   const tools = (await client.listTools()).tools;
+  trace('tool schemas loaded');
   for (const name of ['browser_snapshot', 'browser_click', 'browser_type', 'browser_tabs', 'browser_events', 'browser_screenshot_region']) assert.ok(tools.some(t => t.name === name), name);
   const call = async (name, args = {}) => {
     const result = await client.callTool({ name, arguments: args });
@@ -45,6 +58,7 @@ test('real Chromium, official Playwright tools, DOM events and region captures',
   };
   const text = result => result.content.filter(c => c.type === 'text').map(c => c.text).join('\n');
   await call('browser_navigate', { url });
+  trace('navigation completed');
   const snapshot = text(await call('browser_snapshot'));
   assert.match(snapshot, /heading "Herdr test"/);
   const email = snapshot.match(/textbox "Email".*\[ref=(e\d+)\]/)?.[1];
@@ -57,6 +71,7 @@ test('real Chromium, official Playwright tools, DOM events and region captures',
   const eventWait = call('browser_events', { cursor, types: ['dom.changed'], waitMs: 5000 });
   await call('browser_click', { target: save });
   const changed = (await eventWait).structuredContent;
+  trace('DOM event received');
   assert.equal(changed.events[0].data.watch, watch.watch);
   assert.equal(await host.current().page.locator('#status').textContent(), 'Saved');
   const shot = (await call('browser_screenshot_region', { x: 0, y: 0, width: 160, height: 80 })).structuredContent;
@@ -75,8 +90,7 @@ test('real Chromium, official Playwright tools, DOM events and region captures',
   const ended = await host.events.read({ cursor: navigationCursor, types: ['dom.observer.ended'], waitMs: 1000 });
   assert.equal(ended.events[0].data.watch, watch.watch);
   const serviceHost = await BrowserHost.connect({ endpoint: `http://127.0.0.1:${port}`, target: originalTarget });
-  const daemon = await startDaemon(serviceHost, join(root, 'service.sock'), { outputDir: join(root, 'service-captures') });
-  t.after(() => daemon.close());
+  daemon = await startDaemon(serviceHost, join(root, 'service.sock'), { outputDir: join(root, 'service-captures') });
   const firstClient = daemonClient(join(root, 'service.sock'));
   const serviceSnapshot = text(await firstClient.call('browser_snapshot', {}));
   const buttonRef = serviceSnapshot.match(/button "Save".*\[ref=(e\d+)\]/)?.[1];
@@ -87,8 +101,11 @@ test('real Chromium, official Playwright tools, DOM events and region captures',
   const replay = await secondClient.call('browser_events', { cursor: serviceCursor, types: ['console'], waitMs: 1000 });
   assert.equal(replay.structuredContent.events[0].data.text, 'saved');
   await daemon.close();
+  trace('daemon detached');
   await client.close();
   await bridge.close();
+  trace('MCP detached');
   assert.equal(await context.pages()[0].title(), 'Browser fixture');
   await waitUntil(() => !host.browser.isConnected());
+  trace('assertions complete');
 });

@@ -85,6 +85,9 @@ try {
   await new Promise(resolve => setTimeout(resolve, 1000));
   await app.call({ shot: join(artifacts, 'desktop.png') });
   await writeFile(join(artifacts, 'desktop-smoke.json'), JSON.stringify({ root, created, browser: browsers[0].key, tabs: listing, status, snapshot: tree }, null, 2));
+  await host.tabs({ action: 'close', index: 1 });
+  const last = await host.tabs({ action: 'close' });
+  assert.ok(last.tabs.length <= 1, 'closing the last tab either ends the instance or replaces it with a start page');
   console.log(JSON.stringify({ passed: true, root, created, artifacts, browser: browsers[0].key, tabs: listing.tabs.length }));
 } finally {
   if (bridge) await bridge.close();

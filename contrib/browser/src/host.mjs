@@ -56,13 +56,14 @@ export class BrowserHost {
     this.browser.on('disconnected', () => this.events.push('browser.disconnected', null));
   }
 
-  static async connect({ endpoint, browserKey, binary, target } = {}) {
+  static async connect({ endpoint, browserKey, binary, target, discovery = false } = {}) {
     const record = endpoint ? null : chooseBrowser(await listBrowsers(binary), browserKey);
     const browser = await chromium.connectOverCDP(endpoint ?? `http://127.0.0.1:${record.cdpPort}`, { timeout: 10_000, noDefaults: true });
     const host = new BrowserHost(browser, record);
     try {
       await host.refresh();
       if (target && !host.targets.has(target)) throw new Error(`No tab with target ${target}`);
+      if (!record && !target && !discovery && host.targets.size > 1) throw new Error('Several CDP pages are open. Use list --endpoint to discover targets, then pass --target explicitly.');
       host.selected = target ?? [...host.targets.values()].find(t => t.active)?.id ?? host.targets.keys().next().value ?? null;
       if (!host.selected) throw new Error('Browser has no registered content tabs');
       for (const context of browser.contexts()) {
@@ -120,6 +121,7 @@ export class BrowserHost {
 
   async tabs({ action = 'list', index, url, isolatedContext } = {}) {
     if (isolatedContext && isolatedContext !== 'default') throw new Error('Create profiles in terminal-browser; isolatedContext is not supported by this adapter');
+    if (this.closedInstance && action !== 'list') throw new Error('The browser instance has closed; open a new Herdr browser tab');
     await this.refresh();
     let entries = [...this.targets.values()];
     if (index !== undefined && (!Number.isInteger(index) || index < 0 || index >= entries.length)) throw new Error('Tab index is out of range; refresh browser_tabs first');
@@ -129,7 +131,8 @@ export class BrowserHost {
         const created = await this.control('open-tab', { url: url ?? 'about:blank' });
         target = await waitUntil(async () => { await this.refresh(); return [...this.targets.values()].find(t => t.nativeId === created.openedTab); });
       } else {
-        const context = this.current().page.context();
+        const context = this.targets.size ? this.current().page.context() : this.browser.contexts()[0];
+        if (!context) throw new Error('The browser has no context for a new tab');
         const page = await context.newPage();
         await this.refresh();
         target = this.targets.get(await this.idFor(page));
@@ -145,11 +148,18 @@ export class BrowserHost {
       const target = index === undefined ? this.current() : entries[index];
       if (this.record) await this.control('close-tab', { tab: target.nativeId });
       else await target.page.close();
-      if (entries.length === 1) {
-        this.closedInstance = Boolean(this.record);
-        this.targets.clear();
-        this.selected = null;
-        return { browser: this.record?.key ?? 'cdp', tabs: [] };
+      if (this.record && entries.length === 1) {
+        await waitUntil(async () => {
+          try { await this.refresh(); return this.targets.size; }
+          catch (error) {
+            if (!['ENOENT', 'ECONNREFUSED'].includes(error.code)) throw error;
+            this.closedInstance = true;
+            this.targets.clear();
+            this.selected = null;
+            this.events.push('browser.closed', null);
+            return true;
+          }
+        });
       }
     } else if (action !== 'list') throw new Error('action must be list, new, select or close');
     await this.refresh();
