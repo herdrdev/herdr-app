@@ -714,6 +714,9 @@ What's about the user, never a look:
   where the layout leaves them unset.
 - `font`, `font_size`, `ui_font`: used where the layout doesn't set its
   own. Herdr (main) leaves these unset. Bigger panels: `zoom`.
+- `text_rendering_mode`: `platform_default` (the default), `subpixel`, or
+  `grayscale`. Grayscale removes colored fringes around text on some displays,
+  including code in the PR diff.
 - `font_ligatures`: programming ligatures are off by default; set `true` to
   enable them in terminal fonts such as JetBrains Mono and Fira Code. The cursor
   and background changes (including selections) break ligatures so individual cells stay clear.

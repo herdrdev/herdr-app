@@ -387,6 +387,9 @@ pub struct Person {
     /// The panels' font (their sizes follow zoom).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ui_font: Option<String>,
+    /// How glyph edges are rendered throughout the app.
+    #[serde(skip_serializing_if = "TextRenderingMode::is_platform_default")]
+    pub text_rendering_mode: TextRenderingMode,
     /// Anonymous usage data (telemetry.rs). On unless set to false.
     #[serde(skip_serializing_if = "is_true")]
     pub telemetry: bool,
@@ -429,6 +432,29 @@ impl Appearance {
 }
 
 #[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum TextRenderingMode {
+    #[default]
+    PlatformDefault,
+    Subpixel,
+    Grayscale,
+}
+
+impl TextRenderingMode {
+    fn is_platform_default(&self) -> bool {
+        *self == Self::PlatformDefault
+    }
+
+    pub fn gpui(self) -> gpui::TextRenderingMode {
+        match self {
+            Self::PlatformDefault => gpui::TextRenderingMode::PlatformDefault,
+            Self::Subpixel => gpui::TextRenderingMode::Subpixel,
+            Self::Grayscale => gpui::TextRenderingMode::Grayscale,
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
 #[serde(rename_all = "lowercase")]
 pub enum OptionAsAlt {
     #[default]
@@ -461,6 +487,7 @@ impl Default for Person {
             terminal_line_height: 1.0,
             terminal_scroll_speed: 1.0,
             ui_font: None,
+            text_rendering_mode: TextRenderingMode::PlatformDefault,
             telemetry: true,
             clipboard_write: true,
             copy_on_select: true,
@@ -966,6 +993,19 @@ mod tests {
     }
 
     #[test]
+    fn text_rendering_mode_defaults_to_platform_and_round_trips() {
+        let default: Person = serde_json::from_str("{}").unwrap();
+        assert_eq!(default.text_rendering_mode, TextRenderingMode::PlatformDefault);
+        assert!(serde_json::to_value(default).unwrap().get("text_rendering_mode").is_none());
+        for (value, expected) in [("subpixel", TextRenderingMode::Subpixel), ("grayscale", TextRenderingMode::Grayscale)] {
+            let person: Person = serde_json::from_value(serde_json::json!({"text_rendering_mode": value})).unwrap();
+            assert_eq!(person.text_rendering_mode, expected);
+            assert_eq!(serde_json::to_value(person).unwrap()["text_rendering_mode"], value);
+        }
+        assert!(serde_json::from_str::<Person>(r#"{"text_rendering_mode":"unknown"}"#).is_err());
+    }
+
+    #[test]
     fn shipped_looks_and_theme_clicks_have_the_same_precedence() {
         use crate::layout::{Node, ThemeChoice};
         let person = Person { font_size: Some(19.0), theme: Some(ThemeChoice::One("moss".into())), ..Person::default() };
@@ -990,7 +1030,7 @@ mod tests {
     /// settings.json key.
     #[test]
     fn the_guide_explains_every_setting() {
-        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), ui_font: Some(String::new()), telemetry: false, clipboard_write: false, copy_on_select: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), ..Person::default() };
+        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), ui_font: Some(String::new()), text_rendering_mode: TextRenderingMode::Grayscale, telemetry: false, clipboard_write: false, copy_on_select: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), ..Person::default() };
         let keys: Vec<String> = serde_json::to_value(&all).unwrap().as_object().unwrap().keys().cloned().collect();
         let guide = include_str!("../defaults/AGENTS.md");
         let section = guide.split("## The person").nth(1).and_then(|s| s.split("\n## ").next()).unwrap_or_default();

@@ -874,6 +874,11 @@ impl AppWindow {
 
     /// Runs with the shown layout's look (its root node) at the person's zoom.
     fn apply_look(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let text_mode = self.person.text_rendering_mode.gpui();
+        if cx.text_rendering_mode() != text_mode {
+            cx.set_text_rendering_mode(text_mode);
+            cx.refresh_windows();
+        }
         // A layout's fonts arrive with its mod: added since the start, they load now.
         if settings::load_home_fonts(cx) {
             mods::note_fonts(cx);
