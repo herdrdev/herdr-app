@@ -789,6 +789,15 @@ What's about the user, never a look:
   pane's right edge (default `true`). It shows only when the pane has
   scrollback — never on the alternate screen (editors, pagers) — and
   drags to move through it.
+- `focus_follows_mouse`: `true` focuses a terminal pane when the pointer
+  enters it and stays, as a click would (default `false`).
+  `focus_follows_mouse_delay_ms` is how long it stays first (default `150`,
+  up to `2000`), so sweeping across a pane doesn't focus it. A key press
+  cancels the wait; a focus change made another way (keys, a command, a
+  mod's `pane.focus`) stays until the pointer leaves the pane and enters
+  a pane again. Never while a button is held, something is being dragged, a
+  dialog or popup is open, something covers the pane where the pointer is,
+  or the window isn't active.
 - `telemetry`: `false` stops anonymous usage data and deletes what wasn't
   sent (on when absent; Settings → Privacy shows each report word for
   word, and `telemetry()` in mods). Once a day the app sends counts:
