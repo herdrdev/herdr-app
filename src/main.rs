@@ -16,7 +16,8 @@ mod mirror;
 mod mirror_sync;
 mod place;
 mod persist;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod macos;
 #[cfg(target_os = "macos")]
 mod macos_check;

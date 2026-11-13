@@ -2980,6 +2980,142 @@ mod tests {
     }
 
     #[gpui::test]
+    fn macos_edit_menu_follows_keyboard_focus(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+        use gpui_base::input::{Input, InputState};
+        use gpui_shell::action::ShellAction;
+
+        struct Root {
+            terminal: Entity<super::TerminalView>,
+            input: Entity<InputState>,
+            plain: FocusHandle,
+        }
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                div().size_full()
+                    .on_action(cx.listener(|this, action: &ShellAction, window, cx| {
+                        if crate::macos::dispatch_edit(action, this.terminal.read(cx).owns_keyboard_focus(window, cx), window, cx) {
+                            return;
+                        }
+                        this.terminal.update(cx, |terminal, cx| match action.id() {
+                            "terminal.copy" => { terminal.copy(cx); }
+                            "terminal.paste" => terminal.paste(cx),
+                            _ => cx.propagate(),
+                        });
+                    }))
+                    .child(Input::new(&self.input))
+                    .child(div().track_focus(&self.plain).h(px(30.)).child("sidebar"))
+                    .child(div().h(px(150.)).child(self.terminal.clone()))
+            }
+        }
+
+        let menu_action = |title: &str| {
+            crate::macos::menus(&[], None).into_iter()
+                .find(|menu| menu.name == "Edit").unwrap().items.into_iter()
+                .find_map(|item| match item {
+                    MenuItem::Action { name, action, .. } if name == title => Some(action.as_any().downcast_ref::<ShellAction>().unwrap().clone()),
+                    _ => None,
+                }).unwrap()
+        };
+        cx.update(gpui_base::init);
+        cx.update(|app| app.bind_keys([
+            KeyBinding::new("cmd-v", ShellAction::new("terminal.paste"), None),
+            KeyBinding::new("cmd-c", ShellAction::new("terminal.copy"), None),
+        ]));
+        let (root, cx) = cx.add_window_view(|window, cx| Root {
+            terminal: cx.new(|cx| {
+                let terminal = super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 6), cx);
+                terminal.grid.borrow_mut().vt.write(b"terminal selection");
+                terminal
+            }),
+            input: cx.new(|cx| InputState::new(window, cx).default_value("field selection")),
+            plain: cx.focus_handle(),
+        });
+        cx.run_until_parked();
+        cx.update(|window, app| root.update(app, |root, app| {
+            root.terminal.update(app, |terminal, cx| {
+                terminal.selection_command("terminal.select", &serde_json::json!({"at": {"row": 0, "col": 0}, "mode": "line"}), cx).unwrap();
+            });
+            root.input.update(app, |input, cx| {
+                input.focus(window, cx);
+                input.select_all(window, cx);
+            });
+        }));
+        cx.run_until_parked();
+
+        cx.dispatch_action(menu_action("Copy"));
+        cx.run_until_parked();
+        cx.update(|_, app| assert_eq!(app.read_from_clipboard().unwrap().text().as_deref(), Some("field selection")));
+        cx.update(|_, app| app.write_to_clipboard(ClipboardItem::new_string("pasted\ntext".into())));
+        cx.dispatch_action(menu_action("Paste"));
+        cx.run_until_parked();
+        root.read_with(cx, |root, app| {
+            assert_eq!(root.input.read(app).value().as_str(), "pastedtext");
+            assert!(root.terminal.read(app).typed_at.get().is_none(), "paste reached the terminal behind the field");
+        });
+
+        for from_menu in [true, false] {
+            cx.update(|window, app| root.update(app, |root, app| {
+                root.plain.focus(window, app);
+                root.terminal.update(app, |terminal, _| terminal.typed_at.set(None));
+                app.write_to_clipboard(ClipboardItem::new_string("plain focus paste".into()));
+            }));
+            cx.run_until_parked();
+            if from_menu {
+                cx.dispatch_action(menu_action("Paste"));
+            } else {
+                cx.simulate_keystrokes("cmd-v");
+            }
+            cx.run_until_parked();
+            root.read_with(cx, |root, app| {
+                assert!(root.terminal.read(app).typed_at.get().is_some(), "plain focus swallowed paste (menu={from_menu})");
+                assert_eq!(root.input.read(app).value().as_str(), "pastedtext");
+            });
+            if from_menu {
+                cx.dispatch_action(menu_action("Copy"));
+            } else {
+                cx.simulate_keystrokes("cmd-c");
+            }
+            cx.run_until_parked();
+            cx.update(|_, app| assert_eq!(app.read_from_clipboard().unwrap().text().as_deref(), Some("terminal selection")));
+        }
+
+        cx.update(|window, app| root.read_with(app, |root, _| root.terminal.clone()).update(app, |terminal, cx| {
+            terminal.focus_handle().focus(window, cx);
+        }));
+        cx.run_until_parked();
+        cx.dispatch_action(menu_action("Copy"));
+        cx.run_until_parked();
+        cx.update(|_, app| assert_eq!(app.read_from_clipboard().unwrap().text().as_deref(), Some("terminal selection")));
+        cx.dispatch_action(menu_action("Paste"));
+        cx.run_until_parked();
+        root.read_with(cx, |root, app| {
+            assert!(root.terminal.read(app).typed_at.get().is_some(), "focused terminal did not receive paste");
+            assert_eq!(root.input.read(app).value().as_str(), "pastedtext");
+        });
+
+        cx.update(|window, app| root.read_with(app, |root, _| root.terminal.clone()).update(app, |terminal, cx| {
+            terminal.typed_at.set(None);
+            terminal.open_search(window, cx);
+        }));
+        cx.run_until_parked();
+        cx.update(|_, app| app.write_to_clipboard(ClipboardItem::new_string("find needle".into())));
+        cx.dispatch_action(menu_action("Paste"));
+        cx.run_until_parked();
+        root.read_with(cx, |root, app| {
+            let terminal = root.terminal.read(app);
+            assert_eq!(terminal.search_query, "find needle");
+            assert!(terminal.typed_at.get().is_none(), "Find paste reached the terminal");
+        });
+        cx.update(|window, app| root.read_with(app, |root, _| root.terminal.clone()).update(app, |terminal, cx| {
+            terminal.search_input.as_ref().unwrap().update(cx, |input, cx| input.select_all(window, cx));
+        }));
+        cx.dispatch_action(menu_action("Copy"));
+        cx.run_until_parked();
+        cx.update(|_, app| assert_eq!(app.read_from_clipboard().unwrap().text().as_deref(), Some("find needle")));
+    }
+
+    #[gpui::test]
     fn shipped_clipboard_aliases_edit_find_without_terminal_input(cx: &mut gpui::TestAppContext) {
         use gpui::*;
 

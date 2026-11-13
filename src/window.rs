@@ -5110,6 +5110,11 @@ impl Render for AppWindow {
             .text_color(c("foreground"))
             .font_family(settings::get().ui_font_family.clone())
             .on_action(cx.listener(|this, a: &ShellAction, w, cx| {
+                #[cfg(any(target_os = "macos", test))]
+                if matches!(a.id(), "terminal.copy" | "terminal.paste")
+                    && crate::macos::dispatch_edit(a, this.terms.values().any(|t| t.view.read(cx).owns_keyboard_focus(w, cx)), w, cx) {
+                    return;
+                }
                 // Nothing selected: the copy chord goes to the program (#216).
                 if a.id() == "terminal.copy" {
                     if !this.copy_key(w, cx) {

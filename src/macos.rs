@@ -43,9 +43,27 @@ fn command(title: &str, command: &str) -> MenuItem {
     }
 }
 
+/// Menu items keep the terminal command's shortcut, but editing belongs to
+/// a focused control that handles editing. Other focus keeps the terminal fallback.
+pub fn dispatch_edit(action: &ShellAction, terminal_focused: bool, window: &mut Window, cx: &mut App) -> bool {
+    if terminal_focused {
+        return false;
+    }
+    let action: Box<dyn Action> = match action.id() {
+        "terminal.copy" => Box::new(gpui_base::input::Copy),
+        "terminal.paste" => Box::new(gpui_base::input::Paste),
+        _ => return false,
+    };
+    if !window.is_action_available(action.as_ref(), cx) {
+        return false;
+    }
+    window.dispatch_action(action, cx);
+    true
+}
+
 /// GPUI registers the menu named "Window" as the app's windows menu, so
 /// macOS adds its own window items there (tiling, the window list).
-fn menus(layouts: &[String], shown: Option<&str>) -> Vec<Menu> {
+pub(crate) fn menus(layouts: &[String], shown: Option<&str>) -> Vec<Menu> {
     let layout_items = layouts
         .iter()
         .map(|name| command(name, &format!("layout.switch:{name}")).checked(Some(name.as_str()) == shown))
@@ -80,8 +98,8 @@ fn menus(layouts: &[String], shown: Option<&str>) -> Vec<Menu> {
             command("Close Space", "space.close"),
         ]),
         Menu::new("Edit").items([
-            command("Copy", "terminal.copy"),
-            command("Paste", "terminal.paste"),
+            MenuItem::os_action("Copy", ShellAction::new("terminal.copy"), OsAction::Copy),
+            MenuItem::os_action("Paste", ShellAction::new("terminal.paste"), OsAction::Paste),
             MenuItem::separator(),
             command("Find…", "terminal.search"),
         ]),
@@ -157,6 +175,7 @@ mod tests {
     }
 
     /// Items show the key the keymap binds to the same command.
+    #[cfg(target_os = "macos")]
     #[test]
     fn menu_items_show_the_shipped_keys() {
         let keymap = Keymap::new(crate::keys::parse(crate::keys::DEFAULTS).unwrap());
@@ -173,6 +192,16 @@ mod tests {
         assert_eq!(key("Copy").as_deref(), Some("cmd-c"));
         assert_eq!(key("Toggle Sidebar").as_deref(), Some("cmd-b"));
         assert_eq!(key("Minimize").as_deref(), Some("cmd-m"));
+    }
+
+    #[test]
+    fn clipboard_items_show_personal_keys() {
+        let keymap = Keymap::new(crate::keys::parse(r#"{"global":{"cmd-alt-c":"terminal.copy","cmd-alt-v":"terminal.paste"}}"#).unwrap());
+        let items = all(&menus(&[], None));
+        for (title, shortcut) in [("Copy", "cmd-alt-c"), ("Paste", "cmd-alt-v")] {
+            let (_, action) = items.iter().find(|(name, _)| name == title).unwrap();
+            assert_eq!(keymap.bindings_for_action(action.as_ref()).next().unwrap().keystrokes()[0], gpui::KeyBinding::new(shortcut, gpui::NoAction, None).keystrokes()[0]);
+        }
     }
 
     #[test]
