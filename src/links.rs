@@ -6,9 +6,10 @@ use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
-/// Ghostty's default link pattern (`src/config/url.zig`), unchanged.
+/// Ghostty's default link pattern (`src/config/url.zig`), plus the editor
+/// remote schemes (`cursor://vscode-remote/...`, `vscode://vscode-remote/...`).
 static PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-    let schemes = r"https?://|mailto:|ftp://|file:|ssh:|git://|ssh://|tel:|magnet:|ipfs://|ipns://|gemini://|gopher://|news:";
+    let schemes = r"https?://|mailto:|ftp://|file:|ssh:|git://|ssh://|tel:|magnet:|ipfs://|ipns://|gemini://|gopher://|news:|cursor://|vscode://";
     let ipv6 = r"(?:\[[:0-9a-fA-F]+(?:[:0-9a-fA-F]*)+\](?::[0-9]+)?)";
     let scheme_chars = r"[\w\-.~:/?#@!$&*+,;=%]";
     let path_chars = r"[\w\-.~:\/?#@!$&*+;=%]";
@@ -317,6 +318,20 @@ mod tests {
                 _ => Target::Url(url.into()),
             };
             assert_eq!(resolve(&text[range], None), Some(expected));
+        }
+    }
+
+    #[test]
+    fn editor_remote_links_keep_their_whole_uri() {
+        for url in [
+            "cursor://vscode-remote/ssh-remote+dev_host/data/1/user/my_project",
+            "vscode://vscode-remote/ssh-remote+dev_host/data/1/user/my_project",
+        ] {
+            let text = format!("Open {url} to continue.");
+            let at = text.find(url).unwrap();
+            let range = find(&text, at).unwrap();
+            assert_eq!(&text[range.clone()], url);
+            assert_eq!(resolve(&text[range], None), Some(Target::Url(url.into())));
         }
     }
 
