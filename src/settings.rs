@@ -96,9 +96,28 @@ fn preset(name: &str) -> Option<&'static Palette> {
 /// The shipped theme files (defaults/themes), written to `themes/` when missing.
 const THEMES: &[(&str, &str)] = &[
     ("atom-one-dark", include_str!("../defaults/themes/atom-one-dark.json")),
+    ("catppuccin-macchiato", include_str!("../defaults/themes/catppuccin-macchiato.json")),
+    ("catppuccin-mocha", include_str!("../defaults/themes/catppuccin-mocha.json")),
+    ("everforest-dark", include_str!("../defaults/themes/everforest-dark.json")),
+    ("github-dark", include_str!("../defaults/themes/github-dark.json")),
+    ("gruvbox-dark", include_str!("../defaults/themes/gruvbox-dark.json")),
+    ("kanagawa", include_str!("../defaults/themes/kanagawa.json")),
+    ("monokai", include_str!("../defaults/themes/monokai.json")),
+    ("tokyo-night", include_str!("../defaults/themes/tokyo-night.json")),
     ("win98", include_str!("../defaults/themes/win98.json")),
 ];
-pub const SHIPPED_THEMES: &[&str] = &["atom-one-dark", "win98"];
+pub const SHIPPED_THEMES: &[&str] = &[
+    "atom-one-dark",
+    "catppuccin-macchiato",
+    "catppuccin-mocha",
+    "everforest-dark",
+    "github-dark",
+    "gruvbox-dark",
+    "kanagawa",
+    "monokai",
+    "tokyo-night",
+    "win98",
+];
 
 /// `themes/<name>.json`: a palette, plus `colors` overrides like settings.json's.
 #[derive(Deserialize)]
