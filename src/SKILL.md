@@ -135,6 +135,12 @@ those files or the generated guide. The app rewrites them on start.
   scrolling, including mouse reports. Set them in settings.json or the
   layout's look; the layout wins.
 - Home defaults to `~/.config/herdr-app`; `HERDR_APP_HOME` selects another.
+- `worktrees.directory` in settings.json sets the shipped New worktree destination,
+  e.g. `{"worktrees":{"directory":"~/Developer/worktrees"}}`. Default:
+  `~/.herdr/worktrees`; checkouts use `<directory>/<repo>/<branch>` (slashes in
+  branches become dashes). Use an absolute path or `~` / `~/...`, resolved on the
+  space's machine. Read on dialog open; existing checkouts stay put. No clones
+  needed, and the app does not read the TUI's config.toml.
 - Mods live in `mods/<name>/` with `main.js` and optional `mod.json`.
   They are trusted JavaScript with command and network access.
   `"focusable": true` in `mod.json` lets `pane.go` move onto a copy; it receives
