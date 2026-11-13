@@ -1458,8 +1458,8 @@ fn materialize_component(
             if let Some(ms) = behavior.spin {
                 let turn = (loop_clock_ms() % ms) / ms;
                 image = image.with_transformation(gpui::Transformation::rotate(gpui::radians((turn * std::f64::consts::TAU) as f32)));
-                // ~10 fps: a small spinner looks the same, and each step redraws its whole view.
-                wake_view_after(Duration::from_millis(100), window, cx);
+                // Each step redraws its whole view when the spinner has to stay inline.
+                wake_view_after(SPIN_STEP, window, cx);
             }
             image.into_any_element()
         }
@@ -2829,6 +2829,9 @@ struct Spin {
     ms: f64,
 }
 
+/// One spinner step: about 30 fps, the rate `spin` promises (as `loop` does).
+const SPIN_STEP: Duration = Duration::from_millis(33);
+
 thread_local! {
     static SPINS: RefCell<std::collections::HashMap<gpui::EntityId, Vec<Spin>>> =
         RefCell::new(std::collections::HashMap::new());
@@ -2939,7 +2942,7 @@ pub(crate) fn spin_layer(view: gpui::EntityId) -> AnyElement {
                     let _ = window.paint_svg(s.bounds, s.path, None, matrix, s.color, cx);
                 });
             }
-            wake_view_after(Duration::from_millis(100), window, cx);
+            wake_view_after(SPIN_STEP, window, cx);
         },
     )
     .absolute()
