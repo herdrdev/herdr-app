@@ -72,6 +72,7 @@ Remote work keeps running when your local window closes or your laptop sleeps, a
 ## Make it yours
 
 Open the command palette to find an action by name, or open Settings to change fonts, colors, sounds and other preferences.
+Settings > Look also adjusts terminal line height and scroll speed. Both default to 100%; layouts can override them with `terminal_line_height` (0.8–2) and `terminal_scroll_speed` (0.1–5).
 The built-in layouts include Herdr, Terminals and Herdr 98.
 A **layout** arranges the window. **Mods** are small JavaScript programs that draw its panels, menus and dialogs.
 
@@ -80,6 +81,10 @@ Save a personal layout, mod or key file and the window reloads it.
 A broken edit keeps the last good version and reports the error.
 
 Ctrl+Shift+P shows every command and its key (Cmd+Shift+P on macOS). Change any key in `keys.json`; see [the keys section](defaults/AGENTS.md#keys-keysjson) of the mod guide for the format, including JSON objects for named, typed command arguments.
+
+On macOS, Cmd+A selects the terminal's whole screen and scrollback, ready for Cmd+C.
+In vim and other alternate-screen apps, it selects only that screen.
+Linux and Windows keep Ctrl+A for the shell; bind `terminal.select_all` in `keys.json` if desired.
 
 [Layouts and mods](docs/mods.md) · [Commands](docs/commands.md)
 

@@ -2,7 +2,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input, Popup } from "gpui-base";
-import { hc, exec, run, theme, themes, fonts, updates, telemetry, settings, layouts, shared, appHome, readTextFile, writeTextFile, playSound, props, closeOverlay, window } from "herdr";
+import { hc, exec, run, theme, themes, fonts, updates, telemetry, settings, layouts, shared, appHome, readTextFile, writeTextFile, playSound, props, closeOverlay, notify, window } from "herdr";
 
 const I = (name) => `frame/settings/${name}.svg`;
 
@@ -44,7 +44,6 @@ export default class Settings extends View {
     });
     this.person = {};
     this.raw = null;
-    this.saveError = null;
     this.previews = {}; // layout name -> its "preview" picture
     this.previewsOf = "";
     this.showData = false;
@@ -62,7 +61,7 @@ export default class Settings extends View {
     this.handle = cx.focus_handle();
     this.handle.focus();
     cx.spawn(async (cx) => {
-      try { await this.load(); } catch (e) { this.saveError = String(e); }
+      await this.load();
       if (this.section === "machines") await this.loadMachines();
       cx.notify();
     });
@@ -103,31 +102,53 @@ export default class Settings extends View {
     });
   }
 
+  // `broken`: settings.json doesn't parse (mid-edit), or isn't an object, so
+  // nothing may be written over it.
   async load() {
     this.raw = await readTextFile(this.file());
-    // Do not replace a broken settings file with defaults when changing WSL.
-    const person = this.raw ? JSON.parse(this.raw) : {};
-    if (!person || typeof person !== "object" || Array.isArray(person)) throw new Error("settings.json must contain an object.");
-    this.person = person;
+    try {
+      const person = this.raw ? JSON.parse(this.raw) : {};
+      this.broken = !person || typeof person !== "object" || Array.isArray(person);
+      this.person = this.broken ? {} : person;
+    } catch {
+      this.person = {};
+      this.broken = true;
+    }
   }
 
-  // Read, change, write only if nobody changed the snapshot in the meantime.
+  // Changes settings.json the way an agent would: read, change, write back
+  // only if nobody changed it meanwhile (else read again and redo). Says so
+  // when it couldn't.
   change(edit, cx) {
     cx.spawn(async (cx) => {
-      this.saveError = null;
-      for (let attempt = 0; attempt < 3; attempt++) {
-        try {
-          await this.load();
-          const next = JSON.parse(JSON.stringify(this.person));
-          edit(next);
-          await writeTextFile(this.file(), JSON.stringify(next, null, 2) + "\n", this.raw);
-          this.person = next;
-          this.saveError = null;
-          break;
-        } catch (e) { this.saveError = `Couldn't save settings: ${e}`; }
-      }
+      const failed = await this.save(edit);
+      if (failed) notify({ ...failed, level: "error" });
       cx.notify();
     });
+  }
+
+  // The toast saying why `edit` wasn't written, or null once it is.
+  async save(edit) {
+    let error;
+    for (let attempt = 0; attempt < 3; attempt++) {
+      let next;
+      try {
+        await this.load();
+        if (this.broken) return { title: "settings.json has errors: fix it first" };
+        next = JSON.parse(JSON.stringify(this.person));
+        edit(next);
+      } catch (e) {
+        return { title: "Cannot read settings.json", body: String(e?.message ?? e) };
+      }
+      try {
+        await writeTextFile(this.file(), JSON.stringify(next, null, 2) + "\n", this.raw);
+        this.person = next;
+        return null;
+      } catch (e) {
+        error = e;
+      }
+    }
+    return { title: "Not saved to settings.json", body: String(error?.message ?? error) };
   }
 
   close() {
@@ -475,7 +496,9 @@ export default class Settings extends View {
   look(t, cx) {
     const s = settings();
     const p = this.person;
-    const own = (key, composed, def) => (p[key] ?? def) !== composed;
+    // Numbers come back from the host as 32-bit floats: 1.1 reads as 1.100000023841858.
+    const same = (a, b) => (typeof a === "number" && typeof b === "number" ? Math.abs(a - b) < 1e-4 : a === b);
+    const own = (key, composed, def) => !same(p[key] ?? def, composed);
     const size = (key, value, d, cx) => this.change((q) => (q[key] = Math.max(8, Math.min(32, (q[key] ?? value) + d))), cx);
     const fontRow = (which, sizeKey, title, family, def, sizeNow) =>
       v_flex()
@@ -520,6 +543,16 @@ export default class Settings extends View {
         ),
       )
       .child(fontRow("font", "font_size", "Terminal font", s.font_family, DEFAULT_FONT, s.font_size))
+      .children([
+        ["terminal_line_height", "Terminal line height", 0.8, 2],
+        ["terminal_scroll_speed", "Terminal scroll speed", 0.1, 5],
+      ].map(([key, title, min, max]) => this.row(
+        t, title,
+        own(key, s[key], 1) ? "This layout sets its own; yours shows in the others." : null,
+        this.stepper(t, `st-${key}`, `${Math.round(s[key] * 100)}%`,
+          (_e, cx) => this.change((q) => (q[key] = Math.max(min, Math.min(max, Math.round(((q[key] ?? s[key]) - 0.1) * 10) / 10))), cx),
+          (_e, cx) => this.change((q) => (q[key] = Math.max(min, Math.min(max, Math.round(((q[key] ?? s[key]) + 0.1) * 10) / 10))), cx)),
+      )))
       .child(fontRow("ui_font", null, "Interface font", s.ui_font_family, DEFAULT_UI_FONT));
   }
 
@@ -662,6 +695,9 @@ export default class Settings extends View {
         .child(v_flex().flex_1().min_w(0).gap(3)
           .child(div().text_size(14).text_color(t.foreground).child(m.name))
           .child(div().text_size(12.5).text_color(t.dim).child(`${m.target ?? ""} · ${state} · ${m.version ? `hc ${m.version}` : "hc version unknown"}`)))
+        .when(m.keeps_running_after_logout === false, el => el.child(div().id(`st-m-logout-${m.name}`)
+          .text_color(t.blocked).cursor_pointer().tooltip("Agents stop when you disconnect. Click for the fix.")
+          .on_click(() => run("mod.open", { name: "machine-add" })).child("⚠")))
         .child(controls.flex_none()));
     if (m.state === "needs_login") {
       const command = `hc machine login ${m.name}`;
@@ -902,7 +938,7 @@ export default class Settings extends View {
         : [result, check("st-check-app")];
     const c = u.core;
     const core = c.managed
-      ? [`Managed by ${c.managed}: update it there.`, null]
+      ? [`Managed by ${c.managed}: update it there.${c.ready ? ` ${c.ready} is available.` : ""}`, u.checks ? check("st-check-core") : null]
       : c.updating
         ? ["Updating\u2026 your terminals keep running.", null]
         : c.error
@@ -1081,7 +1117,6 @@ export default class Settings extends View {
                 div()
                   .px(28)
                   .py(22)
-                  .when(Boolean(this.saveError), (el) => el.child(div().id("st-save-error").pb(12).text_size(12.5).text_color(t.blocked).child(this.saveError)))
                   .child(
                     this.section === "look"
                       ? this.look(t, cx)

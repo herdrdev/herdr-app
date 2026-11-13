@@ -394,6 +394,8 @@ pub enum Request {
     Run { name: String, args: Value },
     OpenOverlay { id: String, spec: Value },
     CloseOverlay { id: String },
+    /// The OS window's title; `None` restores the default.
+    SetWindowTitle(Option<String>),
     Refresh,
     /// From `herdr-app do` / `herdr-app status` (control.rs); answer on `reply`.
     Control { cmd: Value, reply: std::sync::mpsc::Sender<Value> },
@@ -610,9 +612,39 @@ pub fn publish_agents(v: Value) -> bool {
 pub fn publish_panes(v: Value) -> bool {
     publish("panes", |s| (std::mem::replace(&mut s.panes, v.clone()), v))
 }
-pub fn publish_terminals(v: Value) -> bool {
-    publish("terminals", |s| (std::mem::replace(&mut s.terminals, v.clone()), v))
+pub fn publish_terminals(mut v: Value) -> bool {
+    publish("terminals", |s| {
+        let selections: HashMap<_, _> = s.terminals.as_array().into_iter().flatten()
+            .filter_map(|t| Some((t["address"].as_str()?, t["selection"].clone()))).collect();
+        for terminal in v.as_array_mut().into_iter().flatten() {
+            terminal["selection"] = terminal["address"].as_str().and_then(|address| selections.get(address)).cloned().unwrap_or(Value::Null);
+        }
+        (std::mem::replace(&mut s.terminals, v.clone()), v)
+    })
 }
+/// Only selection changes refresh readers; output and cursor motion do not.
+pub fn publish_selection(address: &str, selection: Value) -> bool {
+    let mut changed = publish("terminals", |s| {
+        let old = s.terminals.clone();
+        if let Some(terminal) = s.terminals.as_array_mut().and_then(|list| list.iter_mut().find(|t| t["address"] == address)) {
+            terminal["selection"] = selection.clone();
+        }
+        (old, s.terminals.clone())
+    });
+    changed |= publish("focused", |s| {
+        let old = s.focused.clone();
+        if focused_address(&s.focused) == Some(address) {
+            s.focused["selection"] = selection.clone();
+        }
+        (old, s.focused.clone())
+    });
+    changed
+}
+
+fn focused_address(focused: &Value) -> Option<&str> {
+    focused["shown"].as_str().or_else(|| focused["terminal"].as_str())
+}
+
 pub fn terminal_address(word: &str, source: &str) -> Option<String> {
     SNAPSHOT.with(|s| {
         let s = s.borrow();
@@ -627,8 +659,14 @@ pub fn publish_floats(v: Value) -> bool {
 pub fn publish_window(v: Value) -> bool {
     publish("window", |s| (std::mem::replace(&mut s.window, v.clone()), v))
 }
-pub fn publish_focused(v: Value) -> bool {
-    publish("focused", |s| (std::mem::replace(&mut s.focused, v.clone()), v))
+pub fn publish_focused(mut v: Value) -> bool {
+    publish("focused", |s| {
+        if v.is_object() {
+            v["selection"] = focused_address(&v).and_then(|address| s.terminals.as_array()?.iter().find(|t| t["address"] == address))
+                .map_or(Value::Null, |terminal| terminal["selection"].clone());
+        }
+        (std::mem::replace(&mut s.focused, v.clone()), v)
+    })
 }
 
 #[derive(Default)]
@@ -785,15 +823,16 @@ fn exec_output(bytes: &[u8], wsl_list: bool) -> String {
 pub(crate) fn run_blocking(command: &str, args: &[String], cwd: Option<String>, limit: Duration) -> Result<(i32, String, String), String> {
     use std::io::Read;
     let wsl_host = cfg!(windows) && (command.eq_ignore_ascii_case("wsl.exe") || command.eq_ignore_ascii_case("wsl"));
+    // The core may have no `hc` link beside it (a Windows zip has only herdr-core.exe).
+    let program = if command == "hc" { crate::core_bin::path() } else { PathBuf::from(command) };
     let mut cmd = if wsl_host {
         wsl_host_command(args, cwd.as_deref())?
     } else if crate::wsl::active().is_some() {
-        let prog = if command == "hc" { crate::core_bin::path() } else { PathBuf::from(command) };
-        let mut c = crate::wsl::command(prog, cwd.as_deref());
+        let mut c = crate::wsl::command(program, cwd.as_deref());
         c.args(args);
         c
     } else {
-        let mut c = crate::spawn::command(command);
+        let mut c = crate::spawn::command(program);
         c.args(args).current_dir(cwd.map(PathBuf::from).unwrap_or_else(home));
         c
     };
@@ -1111,6 +1150,14 @@ fn module(inst: Instance, copy: u64) -> HostModule {
             AGENT_ORDER.with(|s| *s.borrow_mut() = strings(a.get(0)));
             Ok(HostValue::Null)
         })
+        .function("setWindowTitle", |a| {
+            let title = match a.get(0) {
+                Some(v) if !v.is_null() => Some(a.string(0)?.to_owned()),
+                _ => None,
+            };
+            request(Request::SetWindowTitle(title));
+            Ok(HostValue::Null)
+        })
         .function("terminals", reader(reads.clone(), "terminals", |s| &s.terminals))
         .function("focused", reader(reads.clone(), "focused", |s| &s.focused))
         .function("layout", reader(reads.clone(), "layout", |s| &s.layout))
@@ -1170,7 +1217,7 @@ fn module(inst: Instance, copy: u64) -> HostModule {
             set_shared(a.string(0)?.to_owned(), from_host(a.value(1)?));
             Ok(HostValue::Null)
         })
-        .async_function("watchFolder", |a| {
+        .cancellable_async_function("watchFolder", HostValue::Array(vec![]), |a| {
             let path = a.string(0)?.to_owned();
             Ok(async move { crate::files::next_change(path).await.map(|v| to_host(&json!(v))).map_err(HostError::new) })
         })
@@ -1322,6 +1369,17 @@ mod tests {
     }
 
     #[test]
+    fn an_input_selection_uses_the_theme_selection_colour() {
+        let mut tokens = gpui_base::SemanticThemeTokens::default();
+        tokens.colors.accent = gpui::hsla(0.1, 0.5, 0.5, 1.0);
+        tokens.colors.selection = gpui::hsla(0.6, 0.5, 0.5, 0.3);
+
+        let style = gpui_base::input::InputEditorStyle::default().resolved(&tokens);
+
+        assert_eq!(style.selection, tokens.colors.selection);
+    }
+
+    #[test]
     fn exec_timeout_defaults_caps_and_rejects_invalid_values() {
         assert_eq!(exec_limit(None).unwrap(), EXEC_LIMIT);
         assert_eq!(exec_limit(Some(&HostObject::new().field("timeout", HostValue::Null).into())).unwrap(), EXEC_LIMIT);
@@ -1332,6 +1390,38 @@ mod tests {
             assert!(exec_limit(Some(&options(ms))).is_err());
         }
         assert!(exec_limit(Some(&HostObject::new().field("timeout", "30").into())).is_err());
+    }
+
+    #[test]
+    fn hc_runs_the_core_the_app_uses_even_without_an_hc_link() {
+        const CHILD: &str = "HERDR_TEST_HC_IS_THE_CORE";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "mods::tests::hc_runs_the_core_the_app_uses_even_without_an_hc_link", "--nocapture"])
+                .env(CHILD, "1").output().unwrap();
+            assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("herdr-hc-is-the-core-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        #[cfg(unix)]
+        let core = {
+            use std::os::unix::fs::PermissionsExt;
+            let core = dir.join("herdr-core");
+            std::fs::write(&core, "#!/bin/sh\necho \"the chosen core: $*\"\n").unwrap();
+            std::fs::set_permissions(&core, std::fs::Permissions::from_mode(0o755)).unwrap();
+            core
+        };
+        #[cfg(windows)]
+        let core = {
+            let core = dir.join("herdr-core.cmd");
+            std::fs::write(&core, "@echo the chosen core: %*\r\n").unwrap();
+            core
+        };
+        crate::core_bin::use_core(core);
+        let (code, stdout, stderr) = run_blocking("hc", &["ls".into()], None, Duration::from_secs(5)).unwrap();
+        assert_eq!((code, stdout.trim()), (0, "the chosen core: ls"), "{stderr}");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[cfg(unix)]
@@ -1376,6 +1466,32 @@ mod tests {
         list.record("focused", &revisions);
         revisions.insert("focused", 1);
         assert!(list.changed(&revisions));
+    }
+
+    #[test]
+    fn selection_snapshots_survive_core_refresh_and_follow_focus() {
+        std::thread::spawn(|| {
+            let list = json!([{"address":"t1"}, {"address":"t2"}]);
+            publish_terminals(list.clone());
+            publish_focused(json!({"terminal":"t1"}));
+            let selection = json!({"start":{"row":5,"col":2},"end":{"row":1,"col":8}});
+            publish_selection("t1", selection.clone());
+            publish_terminals(list);
+            publish_focused(json!({"terminal":"t1"}));
+            SNAPSHOT.with_borrow(|s| {
+                assert_eq!(s.terminals[0]["selection"], selection);
+                assert_eq!(s.focused["selection"], selection);
+            });
+            publish_focused(json!({"terminal":"t2"}));
+            SNAPSHOT.with_borrow(|s| assert_eq!(s.focused["selection"], Value::Null));
+            publish_focused(json!({"terminal":"t2","shown":"t1"}));
+            SNAPSHOT.with_borrow(|s| assert_eq!(s.focused["selection"], selection));
+            publish_selection("t1", Value::Null);
+            SNAPSHOT.with_borrow(|s| {
+                assert_eq!(s.terminals[0]["selection"], Value::Null);
+                assert_eq!(s.focused["selection"], Value::Null);
+            });
+        }).join().unwrap();
     }
 
     #[test]
@@ -1463,7 +1579,7 @@ mod tests {
 
     #[test]
     fn shared_bursts_persist_only_complete_snapshots_and_finish_at_final_state() {
-        let root = if cfg!(target_os = "linux") { PathBuf::from("/var/tmp") } else { std::env::temp_dir() };
+        let root = if cfg!(target_os = "linux") { crate::test_tmp() } else { std::env::temp_dir() };
         let dir = root.join(format!("herdr-shared-stress-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("shared.json");
@@ -1504,7 +1620,7 @@ mod tests {
 
     #[test]
     fn corrupt_shared_file_is_kept_before_starting_empty() {
-        let root = if cfg!(target_os = "linux") { PathBuf::from("/var/tmp") } else { std::env::temp_dir() };
+        let root = if cfg!(target_os = "linux") { crate::test_tmp() } else { std::env::temp_dir() };
         let dir = root.join(format!("herdr-shared-corrupt-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("shared.json");

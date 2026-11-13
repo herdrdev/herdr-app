@@ -383,6 +383,10 @@ pub struct Person {
     pub font_size: Option<f32>,
     /// Enable programming ligatures in terminal fonts.
     pub font_ligatures: bool,
+    /// Cell height multiplier, 0.8..2.
+    pub terminal_line_height: f32,
+    /// Wheel and trackpad scroll multiplier, 0.1..5.
+    pub terminal_scroll_speed: f32,
     /// The panels' font (their sizes follow zoom).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ui_font: Option<String>,
@@ -392,6 +396,9 @@ pub struct Person {
     /// Allow terminal programs (including remote ones) to copy text locally.
     #[serde(skip_serializing_if = "is_true")]
     pub clipboard_write: bool,
+    /// Copy a mouse selection to the clipboard when the button is released.
+    #[serde(skip_serializing_if = "is_true")]
+    pub copy_on_select: bool,
     /// A draggable scroll position thumb at a terminal pane's right edge.
     #[serde(skip_serializing_if = "is_true")]
     pub pane_scrollbars: bool,
@@ -455,9 +462,12 @@ impl Default for Person {
             font: None,
             font_size: None,
             font_ligatures: false,
+            terminal_line_height: 1.0,
+            terminal_scroll_speed: 1.0,
             ui_font: None,
             telemetry: true,
             clipboard_write: true,
+            copy_on_select: true,
             pane_scrollbars: true,
             minimum_contrast: 1.0,
             option_as_alt: OptionAsAlt::Auto,
@@ -476,6 +486,10 @@ pub struct Settings {
     pub font_family: String,
     pub font_size: f32,
     pub font_ligatures: bool,
+    /// Cell height multiplier, 0.8..2.
+    pub terminal_line_height: f32,
+    /// Wheel and trackpad scroll multiplier, 0.1..5.
+    pub terminal_scroll_speed: f32,
     pub ui_font_family: String,
     pub ui_font_size: f32,
     /// How big the whole app is drawn (1 = as designed). The zoom keys change it.
@@ -496,6 +510,7 @@ pub struct Settings {
     /// 0..1: below 1, what's behind a terminal shows through.
     pub terminal_opacity: f32,
     pub clipboard_write: bool,
+    pub copy_on_select: bool,
     pub minimum_contrast: f32,
     pub option_as_alt: OptionAsAlt,
     #[serde(skip_serializing_if = "Option::is_none")]
@@ -528,6 +543,8 @@ impl Default for Settings {
             font_family: DEFAULT_FONT.into(),
             font_size: 14.0,
             font_ligatures: false,
+            terminal_line_height: 1.0,
+            terminal_scroll_speed: 1.0,
             ui_font_family: "Geist".into(),
             ui_font_size: 13.0,
             zoom: 1.0,
@@ -540,6 +557,7 @@ impl Default for Settings {
             terminal_padding: [10.0, 6.0],
             terminal_opacity: 1.0,
             clipboard_write: true,
+            copy_on_select: true,
             minimum_contrast: 1.0,
             option_as_alt: OptionAsAlt::Auto,
             wsl: None,
@@ -567,6 +585,8 @@ impl Settings {
             font_family: look.font.clone().or(person.font.clone()).unwrap_or(d.font_family),
             font_size: look.font_size.or(person.font_size).unwrap_or(d.font_size),
             font_ligatures: person.font_ligatures,
+            terminal_line_height: look.terminal_line_height.unwrap_or(person.terminal_line_height).clamp(0.8, 2.0),
+            terminal_scroll_speed: look.terminal_scroll_speed.unwrap_or(person.terminal_scroll_speed).clamp(0.1, 5.0),
             ui_font_family: look.ui_font.clone().or(person.ui_font.clone()).unwrap_or(d.ui_font_family),
             ui_font_size: d.ui_font_size,
             zoom: person.zoom,
@@ -580,6 +600,7 @@ impl Settings {
             terminal_opacity: look.terminal_opacity.unwrap_or(1.0).clamp(0.0, 1.0),
             sounds: person.sounds.clone(),
             clipboard_write: person.clipboard_write,
+            copy_on_select: person.copy_on_select,
             minimum_contrast: person.minimum_contrast,
             option_as_alt: person.option_as_alt,
             wsl: crate::wsl::active().map(str::to_owned),
@@ -867,6 +888,24 @@ mod tests {
     use super::*;
 
     #[test]
+    fn terminal_multipliers_default_inherit_override_and_clamp() {
+        let default: Person = serde_json::from_str("{}").unwrap();
+        let look = crate::layout::Look::default();
+        let s = Settings::compose(&default, &look, true);
+        assert_eq!((s.terminal_line_height, s.terminal_scroll_speed), (1.0, 1.0));
+        let person: Person = serde_json::from_str(r#"{"terminal_line_height":1.3,"terminal_scroll_speed":0.5}"#).unwrap();
+        let roundtrip: Person = serde_json::from_value(serde_json::to_value(&person).unwrap()).unwrap();
+        let s = Settings::compose(&roundtrip, &look, true);
+        assert_eq!((s.terminal_line_height, s.terminal_scroll_speed), (1.3, 0.5));
+        let look: crate::layout::Look = serde_json::from_str(r#"{"terminal_line_height":0.1,"terminal_scroll_speed":10}"#).unwrap();
+        let s = Settings::compose(&person, &look, true);
+        assert_eq!((s.terminal_line_height, s.terminal_scroll_speed), (0.8, 5.0));
+        let person = Person { terminal_line_height: 5.0, terminal_scroll_speed: 0.0, ..default };
+        let s = Settings::compose(&person, &crate::layout::Look::default(), true);
+        assert_eq!((s.terminal_line_height, s.terminal_scroll_speed), (2.0, 0.1));
+    }
+
+    #[test]
     fn layout_look_wins_and_settings_fill_what_it_leaves_unset() {
         let person = Person {
             font: Some("person".into()), font_size: Some(19.0), ui_font: Some("person-ui".into()),
@@ -926,6 +965,16 @@ mod tests {
     }
 
     #[test]
+    fn copy_on_select_defaults_on_and_can_be_disabled() {
+        let default: Person = serde_json::from_str("{}").unwrap();
+        assert!(default.copy_on_select);
+        assert!(Settings::default().copy_on_select);
+        let off: Person = serde_json::from_str(r#"{"copy_on_select":false}"#).unwrap();
+        assert!(!Settings::compose(&off, &crate::layout::Look::default(), true).copy_on_select);
+        assert_eq!(serde_json::to_value(off).unwrap()["copy_on_select"], false);
+    }
+
+    #[test]
     fn shipped_looks_and_theme_clicks_have_the_same_precedence() {
         use crate::layout::{Node, ThemeChoice};
         let person = Person { font_size: Some(19.0), theme: Some(ThemeChoice::One("moss".into())), ..Person::default() };
@@ -950,7 +999,7 @@ mod tests {
     /// settings.json key.
     #[test]
     fn the_guide_explains_every_setting() {
-        let all = Person { core: Some(String::new()), wsl: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), ui_font: Some(String::new()), telemetry: false, clipboard_write: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), ..Person::default() };
+        let all = Person { core: Some(String::new()), wsl: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), ui_font: Some(String::new()), telemetry: false, clipboard_write: false, copy_on_select: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), ..Person::default() };
         let keys: Vec<String> = serde_json::to_value(&all).unwrap().as_object().unwrap().keys().cloned().collect();
         let guide = include_str!("../defaults/AGENTS.md");
         let section = guide.split("## The person").nth(1).and_then(|s| s.split("\n## ").next()).unwrap_or_default();

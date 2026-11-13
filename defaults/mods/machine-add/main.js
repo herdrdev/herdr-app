@@ -81,7 +81,7 @@ export default class MachineAdd extends View {
       cx.notify();
     });
     cx.timer.every(3000, (cx) => {
-      if (!this.pending.size || this.refreshing) return;
+      if ((!this.pending.size && !this.added.length) || this.refreshing) return;
       this.refreshing = true;
       cx.spawn(async (cx) => {
         try {
@@ -158,6 +158,22 @@ export default class MachineAdd extends View {
     if (os === "Darwin") this.macs[target] = { name: m.name, core: core ?? "~/.local/bin/herdr-core" };
   }
 
+  logoutCard(t, m) {
+    const command = `sudo loginctl enable-linger -- ${shellArg(m.logout_linger_user ?? "<user>")}`;
+    return v_flex().id(`ma-logout-${m.name}`).mx(10).mb(8).p(12).gap(8).rounded(10)
+      .bg(t.blocked + "14").border_1().border_color(t.blocked + "40")
+      .child(div().text_size(12.8).font_semibold().text_color(t.foreground).child(`Agents on ${m.name} stop when you disconnect`))
+      .child(div().text_size(12.5).line_height("18px").text_color(t.muted)
+        .child("The server ends your programs when your last login closes, for example when your laptop sleeps."))
+      .child(div().text_size(12.5).text_color(t.muted).child(`Run this on ${m.name} once:`))
+      .child(h_flex().gap(8).items_center()
+        .child(div().flex_1().min_w(0).text_size(12).text_color(t.foreground).child(command))
+        .child(div().id(`ma-logout-copy-${m.name}`).px(10).py(4).rounded(6).bg(t.raised).text_color(t.foreground)
+          .text_size(12).cursor_pointer().hover(s => s.bg(t.hover))
+          .on_click((_e, cx) => { cx.write_to_clipboard(command); this.copiedCommand = command; cx.notify(); })
+          .child(this.copiedCommand === command ? "Copied" : "Copy")));
+  }
+
   macCard(t, target) {
     const mac = this.macs[target];
     return v_flex()
@@ -230,6 +246,7 @@ export default class MachineAdd extends View {
   row(t, target, label, sub) {
     const st = this.state[target];
     const done = this.isAdded(target);
+    const machine = this.added.find(m => m.target === target || m.name === target || m.host === target);
     const right = done
       ? h_flex().gap(5).items_center().text_size(12).text_color(t.ansi2).child(svg(I("circle-check")).size(13)).child("Added")
       : st === "adding"
@@ -269,7 +286,8 @@ export default class MachineAdd extends View {
           .child(right),
       )
       .when(typeof st === "string" && st !== "adding", (el) => el.child(div().px(35).pb(6).child(this.message(t, target))))
-      .when(Boolean(this.macs[target]), (el) => el.child(this.macCard(t, target)));
+      .when(Boolean(this.macs[target]), (el) => el.child(this.macCard(t, target)))
+      .when(machine?.keeps_running_after_logout === false, el => el.child(this.logoutCard(t, machine)));
   }
 
   render() {
@@ -304,9 +322,11 @@ export default class MachineAdd extends View {
           .children(
             this.hosts === null
               ? [div().px(10).py(8).text_size(12.5).text_color(t.dim).child("Reading ~/.ssh/config…")]
-              : hosts.map((h) => this.row(t, h.alias, h.alias, [h.user, h.hostname].filter(Boolean).join("@") || (h.aliases.length ? `also ${h.aliases.join(", ")}` : ""))),
+              : hosts.filter(h => !this.isAdded(h.alias)).map((h) => this.row(t, h.alias, h.alias, [h.user, h.hostname].filter(Boolean).join("@") || (h.aliases.length ? `also ${h.aliases.join(", ")}` : ""))),
           ),
       )
+      .when(this.added.length > 0, el => el.child(v_flex().id("ma-added").max_h(280).min_h(0).overflow_y_scroll()
+        .children(this.added.map(m => this.row(t, m.target, m.name, m.target)))))
       .child(div().pt(14).pb(6).text_size(11.5).font_medium().text_color(t.dim).child("Or type how ssh reaches it"))
       .child(
         h_flex()

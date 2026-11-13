@@ -64,6 +64,12 @@ agents. The app shows them and arranges them in spaces and tabs.
 Home: ~/.config/herdr-app (HERDR_APP_HOME picks another).
 ";
 
+/// The folder tests put their scratch data in: `HERDR_TEST_TMPDIR` if set, else /var/tmp.
+#[cfg(test)]
+fn test_tmp() -> std::path::PathBuf {
+    std::env::var_os("HERDR_TEST_TMPDIR").map_or_else(|| "/var/tmp".into(), Into::into)
+}
+
 /// A Windows window app has no console: answers to `herdr-app ls` and the
 /// like go to the terminal it was started from. Output already piped (agents,
 /// scripts) keeps its pipes.
@@ -146,8 +152,8 @@ fn main() {
     };
     #[cfg(target_os = "macos")]
     core_bin::install_cli_link();
-    if core.is_ok() {
-        update::after_update();
+    if let Ok(core) = &core {
+        update::after_update(core.clone());
     }
     update::start();
     telemetry::start(settings::telemetry_setting(&person));
@@ -182,7 +188,7 @@ fn main() {
                 }
                 mods::finish_shared();
                 telemetry::quit();
-                update::apply();
+                let _ = update::apply();
                 async {}
             })
             .detach();

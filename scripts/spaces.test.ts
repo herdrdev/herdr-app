@@ -1,23 +1,29 @@
 import { test, expect, spyOn } from "bun:test";
 import { readFile } from "node:fs/promises";
-import { mkdtempSync, mkdirSync, rmSync } from "node:fs";
+import { mkdtempSync, mkdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 const source = (await readFile(new URL("../defaults/mods/spaces/main.js", import.meta.url), "utf8"))
   .replace(/^import .*;\n/gm, "").replace("export default class Spaces", "class Spaces").replace(/^export /gm, "");
 
-type Space = { id: string; folder: string; machine?: string | null };
-function harness(replies: unknown[] = [], storage = new Map<string, string>(), snapshot: Space[] = [], execGit?: (...args: any[]) => Promise<unknown>) {
+type Space = { id: string; folder: string; machine?: string | null; active?: boolean };
+function harness(replies: unknown[] = [], storage = new Map<string, string>(), snapshot: Space[] = [], execGit?: (...args: any[]) => Promise<unknown>, watch?: (repo: string) => Promise<string[]>) {
   const calls: string[][] = [];
   const tasks: Promise<unknown>[] = [];
   const availability = [{ name: null as string | null, layout: "ready" }];
   const moves: { id: string; index: number }[] = [];
   const handlers: Record<string, (...args: any[]) => void> = {};
+  const env = { layout: null as unknown };
+  // The list's scroll position: the requests the view makes are what the sidebar would scroll by.
+  const ScrollHandle = { new: () => ({ calls: [] as number[], scroll_to_item(index: number) { this.calls.push(index); } }) };
+  const theme = () => new Proxy({}, { get: () => "#000000" });
+  const tracked: unknown[] = [];
   const element: any = new Proxy({}, { get: (_, method) => (...args: any[]) => {
     if (String(method).startsWith("on_")) handlers[String(method)] = args.at(-1);
+    if (method === "track_scroll") tracked.push(args[0]);
     return element;
   } });
-  const Spaces = new Function("View", "hc", "localStorage", "spaces", "panes", "run", "v_flex", "h_flex", "div", "svg", "shared", "machines", "exec", `${source}; return Spaces;`)(
+  const Spaces = new Function("View", "hc", "localStorage", "spaces", "panes", "run", "v_flex", "h_flex", "div", "svg", "shared", "machines", "exec", "window", "watchFolder", "ScrollHandle", "theme", "layout", "setShared", `${source}; return Spaces;`)(
     class {},
     async (args: string[]) => {
       calls.push(args);
@@ -31,18 +37,20 @@ function harness(replies: unknown[] = [], storage = new Map<string, string>(), s
       expect(name).toBe("space.move");
       moves.push(args);
     },
-    ...Array(4).fill(() => element), () => null, () => availability, execGit,
+    ...Array(4).fill(() => element), () => null, () => availability, execGit, () => ({ active: true }), watch,
+    ScrollHandle, theme, () => env.layout, () => {},
   );
   const view = new Spaces();
   view.reconnecting = {};
   view.folded = new Set(["cloud"]);
   view.refreshMachines = () => {};
   const cx = { timer: { every() {} }, notify() {}, spawn(fn: (cx: unknown) => Promise<unknown>) { tasks.push(fn(cx)); } };
-  return { view, calls, tasks, cx, storage, moves, handlers, snapshot, availability };
+  return { view, calls, tasks, cx, storage, moves, handlers, snapshot, availability, env, tracked };
 }
 
 test("git grouping reads refs for normal, detached, unborn and bare worktrees", async () => {
-  const root = mkdtempSync(join(tmpdir(), "herdr-spaces-"));
+  // Git answers with real paths, and the temp folder is behind a link on macOS (/var -> /private/var).
+  const root = realpathSync(mkdtempSync(join(tmpdir(), "herdr-spaces-")));
   const git = (cwd: string, ...args: string[]) => {
     const result = Bun.spawnSync(["git", ...args], { cwd, env: { ...process.env, GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_AUTHOR_NAME: "Test", GIT_AUTHOR_EMAIL: "test@example.com", GIT_COMMITTER_NAME: "Test", GIT_COMMITTER_EMAIL: "test@example.com" } });
     if (result.exitCode) throw new Error(result.stderr.toString());
@@ -89,6 +97,71 @@ test("git grouping reads refs for normal, detached, unborn and bare worktrees", 
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
+});
+
+test("closing spaces forgets old git state but keeps a shown worktree", () => {
+  const h = harness();
+  Object.assign(h.view, { git: {}, checked: {}, unsure: new Set(), watching: new Map(), at: {}, busy: {}, ready: {} });
+  const key = (folder: string) => JSON.stringify([null, folder]);
+  for (let i = 0; i < 75; i++) {
+    const folder = "/repo-" + i, repo = folder + "/.git";
+    h.view.git[key(folder)] = { repo: key(repo) };
+    h.view.checked[key(folder)] = 1;
+    h.view.unsure.add(key(folder));
+    h.view.due(100, [{ id: "current", folder }], []);
+    expect(Object.keys(h.view.git)).toEqual([key(folder)]);
+    expect([...h.view.unsure]).toEqual([key(folder)]);
+    expect(Object.keys(h.view.checked)).toEqual([key(folder)]);
+  }
+  const repo = "/repo-74/.git";
+  h.view.git[key("/worktree")] = { repo: key(repo) };
+  h.view.due(100, [{ id: "tree", folder: "/worktree" }], []);
+  h.view.due(100, [], []);
+  expect(h.view.git).toEqual({});
+  expect(h.view.checked).toEqual({});
+  expect(h.view.unsure.size).toBe(0);
+  expect(h.view.watching.size).toBe(0);
+});
+
+test("closing 75 quiet repos cancels each watch, preserving a shown worktree and reopened watch", async () => {
+  const pending = new Set<Promise<string[]>>();
+  let cancelled = 0;
+  const h = harness([], new Map(), [], undefined, () => {
+    let settle!: (paths: string[]) => void;
+    const promise = Object.assign(new Promise<string[]>(resolve => { settle = resolve; }), {
+      cancel() { if (pending.delete(promise)) { cancelled++; settle([]); } },
+    });
+    pending.add(promise);
+    return promise;
+  });
+  Object.assign(h.view, { git: {}, watching: new Map(), checked: {}, unsure: new Set(), at: {}, busy: {}, ready: {} });
+  let refreshes = 0;
+  h.view.refreshGit = () => refreshes++;
+  const key = (folder: string) => JSON.stringify([null, folder]);
+  for (let i = 0; i < 75; i++) {
+    const repo = "/repo-" + i + "/.git", folder = "/repo-" + i;
+    h.view.git[key(folder)] = { repo: key(repo) };
+    h.view.git[key("/worktree")] = { repo: key(repo) };
+    h.view.watch(repo, h.cx);
+    h.view.watch(repo, h.cx);
+    expect(pending.size).toBe(1);
+    h.view.due(100, [{ id: "tree", folder: "/worktree" }], []);
+    expect(pending.size).toBe(1);
+    h.view.due(100, [], []);
+    expect(pending.size).toBe(0);
+  }
+  // Reopen before the old cancelled continuation runs.
+  const repo = "/repo-74/.git";
+  h.view.git[key("/repo-74")] = { repo: key(repo) };
+  h.view.watch(repo, h.cx);
+  await Promise.resolve();
+  expect(h.view.watching.has(repo)).toBe(true);
+  expect(pending.size).toBe(1);
+  h.view.due(100, [], []);
+  await Promise.all(h.tasks);
+  expect(cancelled).toBe(76);
+  expect(refreshes).toBe(0);
+  expect(h.view.watching.size).toBe(0);
 });
 
 const machine = { name: "cloud", id: "old", target: "user@host", session: null, via: false };
@@ -343,11 +416,93 @@ test("git checks run a few spaces at a time, not every space at once", async () 
     return { code: 0, stdout: "/repo\n", stderr: "" };
   };
   const h = harness([], new Map(), [], execGit);
-  Object.assign(h.view, { git: {}, checked: {}, unsure: new Set(), pending: new Set(), watching: new Set() });
+  Object.assign(h.view, { git: {}, checked: {}, unsure: new Set(), pending: new Set(), watching: new Map() });
   h.view.watch = () => {};
   const keys = Array.from({ length: 40 }, (_, i) => JSON.stringify([null, `/repo/${i}`]));
   h.view.refreshGit(keys, h.cx);
   await Promise.all(h.tasks);
   expect(Object.values(h.view.git).filter(Boolean)).toHaveLength(40);
   expect(most).toBeLessThanOrEqual(12);
+});
+
+// The list scrolls by its direct children, so the active space's place counts machine headers too.
+function scrollHarness(spaces: Space[]) {
+  const h = harness([], new Map(), spaces);
+  Object.assign(h.view, { git: {}, checked: {}, unsure: new Set(), pending: new Set(), watching: new Map(), folded: new Set(), machines: [] });
+  h.view.shown = new Set(spaces.map(s => s.id));
+  h.view.born = {};
+  return h;
+}
+const withHandle = (h: ReturnType<typeof harness>) => { h.view.scroll = { calls: [] as number[], scroll_to_item(i: number) { this.calls.push(i); } }; return h; };
+const spaceList = (ids: string[], active: string, remote: string[] = []): Space[] =>
+  ids.map(id => ({ id, folder: "/" + id, active: id === active, ...(remote.includes(id) ? { machine: "cloud" } : {}) }));
+
+test("the active space is brought into view once, and left alone while it stays put", () => {
+  const h = withHandle(scrollHarness(spaceList(["a", "b", "c", "d"], "c")));
+  h.view.render();
+  expect(h.view.scroll.calls).toEqual([2]);
+  expect(h.tracked).toEqual([h.view.scroll]); // the list is the area that handle scrolls
+  h.view.render();
+  h.view.render();
+  expect(h.view.scroll.calls).toEqual([2]);
+  h.snapshot.forEach(s => { s.active = s.id === "a"; });
+  h.view.render();
+  expect(h.view.scroll.calls).toEqual([2, 0]);
+});
+
+test("the active space's place counts a remote machine's header and rows", () => {
+  const ids = ["a", "b", "r1", "r2"];
+  const h = withHandle(scrollHarness(spaceList(ids, "r2", ["r1", "r2"])));
+  h.view.render();
+  // children: this computer's header, a, b, cloud's header, r1, r2
+  expect(h.view.scroll.calls).toEqual([5]);
+});
+
+test("a folded machine's active space has no row to reveal", () => {
+  const h = withHandle(scrollHarness(spaceList(["a", "r1"], "r1", ["r1"])));
+  h.view.folded = new Set(["cloud"]);
+  h.view.render();
+  expect(h.view.scroll.calls).toEqual([]);
+});
+
+test("the narrow rail reveals the same child", () => {
+  const h = withHandle(scrollHarness(spaceList(["a", "b", "c"], "c")));
+  h.env.layout = { id: "sidebar", size: { px: 100 } };
+  h.view.render();
+  expect(h.view.scroll.calls).toEqual([2]);
+});
+
+test("the list reveals the active space again when its own size changes, and only then", () => {
+  const h = withHandle(scrollHarness(spaceList(["a", "b", "c", "d"], "d")));
+  let notified = 0;
+  h.cx.notify = () => { notified++; };
+  h.view.render();
+  expect(h.view.scroll.calls).toEqual([3]);
+  h.handlers.on_size_change({ width: 200, height: 60 }, h.cx);
+  expect(h.view.scroll.calls).toEqual([3, 3]);
+  expect(notified).toBe(1);
+  h.view.render();
+  expect(h.view.scroll.calls).toEqual([3, 3]);
+});
+
+test("a size change with no active row drawn asks for nothing", () => {
+  const h = withHandle(scrollHarness(spaceList(["a", "r1"], "r1", ["r1"])));
+  h.view.folded = new Set(["cloud"]);
+  h.view.render();
+  h.handlers.on_size_change({ width: 200, height: 60 }, h.cx);
+  expect(h.view.scroll.calls).toEqual([]);
+});
+
+test("the list reveals the active space again when a machine header shifts its place", () => {
+  const h = withHandle(scrollHarness(spaceList(["a", "b", "c", "d"], "b")));
+  h.view.render();
+  expect(h.view.scroll.calls).toEqual([1]);
+  // A machine joins: its header and rows come after this computer's, and now this computer gets a header too,
+  // so the same active space sits one child further down.
+  h.snapshot.push({ id: "r1", folder: "/r1", machine: "cloud", active: false });
+  h.view.shown.add("r1");
+  h.view.render();
+  expect(h.view.scroll.calls).toEqual([1, 2]);
+  h.view.render();
+  expect(h.view.scroll.calls).toEqual([1, 2]);
 });

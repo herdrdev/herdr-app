@@ -138,7 +138,7 @@ mod tests {
 
     #[test]
     fn creates_updates_and_rejects_stale_text() {
-        let root = std::env::temp_dir().join(format!(
+        let root = crate::test_tmp().join(format!(
             "herdr-app-files-{}",
             std::time::SystemTime::now()
                 .duration_since(std::time::UNIX_EPOCH)

@@ -8,19 +8,67 @@ const source = (await readFile(new URL("../defaults/frame/settings/main.js", imp
 
 const coreProbe = await readFile(new URL("../defaults/frame/settings/find-core.sh", import.meta.url), "utf8");
 
-function harness(raw: string | null = null, writeError?: string, probeError = "", probe: string | null = coreProbe) {
-  const writes: unknown[][] = [], commands: unknown[][] = [], pending: Promise<unknown>[] = [];
-  const Settings = new Function("View", "window", "appHome", "readTextFile", "writeTextFile", "exec", `${source}; return Settings;`)(
+// The window's settings mod, without a window or a core: reads and writes go to
+// this harness, and toasts are collected instead of shown.
+function harness(raw: string | null = null, writeError?: string, probeError = "", probe: string | null = coreProbe, readError?: string) {
+  const writes: unknown[][] = [], commands: unknown[][] = [], toasts: unknown[] = [], pending: Promise<unknown>[] = [];
+  const Settings = new Function("View", "window", "appHome", "readTextFile", "writeTextFile", "exec", "notify", `${source}; return Settings;`)(
     class {}, () => ({ platform: "windows" }), () => "C:/fixture/app",
-    async (path: string) => path === "C:/fixture/app/frame/settings/find-core.sh" ? probe : raw,
-    async (...args: unknown[]) => { if (writeError) throw new Error(writeError); writes.push(args); raw = args[1] as string; },
+    async (path: string) => {
+      if (readError) throw new Error(readError);
+      return path === "C:/fixture/app/frame/settings/find-core.sh" ? probe : raw;
+    },
+    async (...args: unknown[]) => { writes.push(args); if (writeError) throw new Error(writeError); raw = args[1] as string; },
     async (command: string, args: string[]) => { commands.push([command, args]); return { code: args[1] === "Missing" ? 3 : args[1] === "Removed" ? 1 : 0, stdout: "", stderr: probeError }; },
+    (toast: unknown) => { toasts.push(toast); },
   );
   const view = new Settings();
   Object.assign(view, { person: {}, raw: null, handle: { focus() {} } });
   const cx = { notify() {}, spawn(fn: (cx: unknown) => Promise<unknown>) { pending.push(fn(cx)); } };
-  return { view, cx, writes, commands, async settle() { for (let i = 0; i < pending.length; i++) await pending[i]; } };
+  return { view, cx, writes, commands, toasts, async settle() { for (let i = 0; i < pending.length; i++) await pending[i]; } };
 }
+
+test("a change writes settings.json, keeping what else it holds", async () => {
+  const h = harness('{"font_size": 15}');
+  h.view.change((q: Record<string, unknown>) => { q.wsl = "Ubuntu"; }, h.cx);
+  await h.settle();
+  expect(JSON.parse(String(h.writes.at(-1)![1]))).toEqual({ font_size: 15, wsl: "Ubuntu" });
+  expect(h.view.person).toEqual({ font_size: 15, wsl: "Ubuntu" });
+  expect(h.toasts).toEqual([]);
+});
+
+test("a broken settings.json is never written over, and says so", async () => {
+  for (const raw of ['{"font_size": 15, "theme": "x",}', "null", "[]", "42", "{broken"]) {
+    const h = harness(raw);
+    h.view.change((q: Record<string, unknown>) => { q.wsl = "Ubuntu"; }, h.cx);
+    await h.settle();
+    expect(h.writes).toHaveLength(0);
+    expect(h.toasts).toEqual([{ title: "settings.json has errors: fix it first", level: "error" }]);
+  }
+});
+
+test("a write that keeps failing is reported, not dropped", async () => {
+  const h = harness("{}", "disk full");
+  h.view.change((q: Record<string, unknown>) => { q.wsl = "Ubuntu"; }, h.cx);
+  await h.settle();
+  expect(h.writes).toHaveLength(3);
+  expect(h.toasts).toEqual([{ title: "Not saved to settings.json", body: "disk full", level: "error" }]);
+  expect(h.view.person.wsl).toBeUndefined();
+});
+
+test("a settings.json that can't be read, or an edit that throws, says why", async () => {
+  const unread = harness("{}", undefined, "", coreProbe, "permission denied");
+  unread.view.change((q: Record<string, unknown>) => { q.wsl = "Ubuntu"; }, unread.cx);
+  await unread.settle();
+  expect(unread.writes).toHaveLength(0);
+  expect(unread.toasts).toEqual([{ title: "Cannot read settings.json", body: "permission denied", level: "error" }]);
+
+  const thrown = harness("{}");
+  thrown.view.change(() => { throw new Error("no such section"); }, thrown.cx);
+  await thrown.settle();
+  expect(thrown.writes).toHaveLength(0);
+  expect(thrown.toasts).toEqual([{ title: "Cannot read settings.json", body: "no such section", level: "error" }]);
+});
 
 test("Settings surfaces distro list failures and recovers without losing the selected distro", async () => {
   let result: { code: number; stdout: string; stderr: string } | Error = new Error("wsl.exe unavailable");
@@ -52,21 +100,6 @@ test("Settings WSL Restart runs app.restart without requesting an update", () =>
   const onClick = new Function("run", `return (${click});`)((name: string) => commands.push(name));
   onClick();
   expect(commands).toEqual(["app.restart"]);
-});
-
-test("Settings refuses to overwrite invalid JSON and reports write failures", async () => {
-  for (const raw of ["{broken", "null", "[]", "42"]) {
-    const h = harness(raw);
-    h.view.change((p: { wsl: string }) => { p.wsl = "Ubuntu"; }, h.cx);
-    await h.settle();
-    expect(h.writes).toHaveLength(0);
-    expect(h.view.saveError).toContain("Couldn't save settings");
-  }
-  const h = harness('{"font":"Geist"}', "disk full");
-  h.view.change((p: { wsl: string }) => { p.wsl = "Ubuntu"; }, h.cx);
-  await h.settle();
-  expect(h.view.saveError).toContain("disk full");
-  expect(h.view.person.wsl).toBeUndefined();
 });
 
 test("Settings verifies hc before saving a distro and retains unrelated keys", async () => {

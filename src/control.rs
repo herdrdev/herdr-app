@@ -182,6 +182,12 @@ mod tests {
     use super::*;
 
     #[test]
+    fn flag_values_that_parse_as_json_are_json() {
+        let args: Vec<String> = ["--name", "eng-123", "--focus", "false", "--argv", r#"["claude"]"#].map(String::from).into();
+        assert_eq!(parse_args(&args).unwrap(), json!({ "name": "eng-123", "focus": false, "argv": ["claude"] }));
+    }
+
+    #[test]
     fn a_second_launch_raises_the_running_window() {
         let dir = std::env::temp_dir().join(format!("herdr-app-raise-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
