@@ -336,6 +336,20 @@ mod tests {
         assert_eq!(serde_json::from_value::<Document>(serde_json::json!({})).unwrap(), Document::default());
     }
     #[test]
+    fn pane_names_are_shared_and_older_documents_have_none() {
+        let mut m = model();
+        m.rename_pane("p", "build");
+        let doc: Document = serde_json::from_str(&serde_json::to_string(&Document::capture(&m, None)).unwrap()).unwrap();
+        let mut other = Model::default();
+        doc.replace(&mut other, Some("mac"));
+        assert_eq!(other.pane_name("mac/p"), Some("build"));
+        let old: Document = serde_json::from_value(serde_json::json!({"spaces":[{"id":"s","tabs":[{"id":"t","root":
+            {"id":"t","type":"row","children":[{"id":"p","type":"block","content":{"terminal":"t1"}}]}}]}]})).unwrap();
+        old.replace(&mut other, None);
+        assert_eq!(other.address_of("p").as_deref(), Some("t1"));
+        assert_eq!(other.pane_name("p"), None);
+    }
+    #[test]
     fn machine_blocks_are_deterministic_and_moves_stay_inside_them() {
         let doc = Document::capture(&model(), None);
         let mut m = Model::default();

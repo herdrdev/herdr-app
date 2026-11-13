@@ -126,7 +126,10 @@ the highlighted line shows where it will land.
   tab); a mod that does can hide or fold settled tabs. Showing one, or an
   agent in it needing the user, brings it back.
 - A **pane** is a terminal on screen, or a **mod** beside them (a markdown
-  viewer, a board, a git panel): `pane.split {direction, mod, props}`. A
+  viewer, a board, a git panel): `pane.split {direction, mod, props}`. One
+  nobody named shows its program (an agent's name, else the terminal's
+  title); `pane.rename` names it ("server"), saved with its tab, and
+  `panes()[i].name` gives the name (null: none). A
   mod pane splits, zooms, closes and gets a header like any pane, keeps
   the keyboard when clicked, and is saved with its tab; its `props` tell
   it what to show (a file, a folder). Closing a terminal pane ends its
@@ -154,6 +157,13 @@ the highlighted line shows where it will land.
   `working`, `blocked`, `idle`, or `done` = finished while the user wasn't
   looking (it becomes `idle` once they look). A space's and a tab's
   status is the most urgent of its agents: blocked > done > working > idle.
+  The shipped Agents sidebar uses each agent's own pane name first, else its
+  tab's name or the agent's live title. A user-named tab wins over a live title,
+  except a tab named after the agent's program, or shared by several agents,
+  still follows each agent's useful title. Clearing the pane name restores
+  this fallback. Pane names may be Unicode,
+  numeric or repeated; they don't change terminal addresses or command aliases.
+  Workers without a pane keep their own labels.
 - **Sub-agents** are terminals an agent started with `hc run`: the core
   records the starter as `parent` (see `terminals()`). Parent addresses use
   the app's machine names, or a bare ID for this computer, when they can be
@@ -378,7 +388,7 @@ The tab block says how each pane of the shown tab is wrapped:
   pane has the keyboard; `gap` is the space between panes.
 - `header`: a mod drawn on each pane, one copy per pane, with
   `props().pane` and `props().terminal`. It reads its live facts from
-  `panes()` (title, folder, branch, agent status, focused, zoomed) and its
+  `panes()` (name, title, folder, branch, agent status, focused, zoomed) and its
   buttons run pane commands with that pane (`pane.split`, `pane.zoom`,
   `pane.close`). `position`: `top` or `bottom`; `reveal: "hover"` shows it
   only while the pointer is on the pane, drawn over the terminal so the
@@ -582,7 +592,7 @@ The main ones:
   space shown, the new space is shown), for work the person looks at later;
   such tabs go last in their space, in the order made. `focus` is a boolean.
 - Panes: `pane.split {direction: "right" | "down", pane?, argv? | mod?, props?}` (a new
-  terminal, or a mod pane), `pane.close {pane?}`,
+  terminal, or a mod pane), `pane.close {pane?}`, `pane.rename {pane?, name}` ("": its program's name again),
   `pane.zoom {pane?}`, `pane.focus {pane | terminal}`, `pane.go {direction}`,
   `pane.swap {pane?, direction | target}`.
   `pane.go` prefers the most recently focused pane along the nearest edge in that
