@@ -1099,7 +1099,18 @@ fn module(inst: Instance, copy: u64) -> HostModule {
         })
         .function("window", reader(reads.clone(), "window", |s| &s.window))
         .function("theme", |_| Ok(to_host(&serde_json::to_value(&*crate::settings::theme()).unwrap_or(Value::Null))))
-        .function("settings", |_| Ok(to_host(&serde_json::to_value(&*crate::settings::get()).unwrap_or(Value::Null))))
+        .function("settings", |_| {
+            let mut value = serde_json::to_value(&*crate::settings::get()).unwrap_or(Value::Null);
+            value["language_preference"] = json!(crate::i18n::preference());
+            Ok(to_host(&value))
+        })
+        .function("locale", |_| Ok(crate::i18n::locale().into()))
+        .function("languages", |_| Ok(to_host(&crate::i18n::languages())))
+        .function("t", |a| {
+            let key = a.string(0)?;
+            let params = a.value(1).ok().map(from_host).unwrap_or(Value::Null);
+            Ok(crate::i18n::translate(key, &params).into())
+        })
         .function("keys", |_| {
             let list: Vec<Value> = crate::keys::listing().into_iter().map(|(s, k, a)| json!({ "section": s, "keys": k, "action": a })).collect();
             Ok(to_host(&Value::Array(list)))

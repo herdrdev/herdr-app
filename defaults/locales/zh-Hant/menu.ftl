@@ -1,0 +1,20 @@
+# Explicit interface messages. Variables are user data; never translate their values.
+menu-split-right = 向右拆分
+menu-split-down = 向下拆分
+menu-zoom = 縮放
+menu-use-herdr-right-click-menu = 使用 Herdr 的右鍵菜單
+menu-send-right-clicks-to-pane = 把右鍵點擊發送給窗格里的程序
+menu-send-back-to = 送回給 { $address }
+menu-close-pane = 關閉窗格
+menu-rename = 重命名
+menu-new-tab = 新建分頁
+menu-close = 關閉
+menu-new-worktree = 新建工作樹
+menu-open-worktree = 打開工作樹
+menu-remove-worktree = 移除工作樹
+menu-new-space = 新建空間
+menu-keybinds = 快捷鍵
+menu-theme-graphite = 主題:石墨
+menu-theme-ink = 主題:墨色
+menu-theme-moss = 主題:苔蘚
+menu-theme-atom-one-dark = 主題:Atom One Dark

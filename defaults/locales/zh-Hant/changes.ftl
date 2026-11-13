@@ -1,0 +1,19 @@
+# Explicit interface messages. Variables are user data; never translate their values.
+changes-commit-message = 提交資訊
+changes-not-a-git-repository = 不是 git 倉庫
+changes-cannot-preview-this-diff-too-large-or-unreadable = 無法預覽此差異(太大或無法讀取)
+changes-cannot-preview-this-file-binary-too-large-or-unreadable = 無法預覽此文件(二進制、太大或無法讀取)
+changes-binary-file-no-text-diff = 二進制文件 · 無文本差異
+changes-binary-file-changed = 二進制文件已更改
+changes-no-text-diff-available = 沒有可顯示的文本差異
+changes-cannot-preview-this-diff-too-large-or-unreadable-2 = 無法預覽此差異(太大或無法讀取):{ $e }
+changes-commit-failed = 提交失敗:{ $e }
+changes-changes = 更改
+changes-files = { $count1 } 個文件
+changes-loading-changes = 正在加載更改…
+changes-no-uncommitted-changes = 沒有未提交的更改
+changes-no-folder = 沒有資料夾
+changes-showing-the-first-1-000-changed-files = 僅顯示前 1,000 個已更改文件
+changes-select-a-file-to-view-its-changes = 選擇一個文件以查看其更改
+changes-committing = 提交中…
+changes-commit = 提交

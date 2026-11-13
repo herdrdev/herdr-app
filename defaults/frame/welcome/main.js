@@ -1,3 +1,4 @@
+import { t as tr } from "herdr";
 // First-run welcome over the live app; records finished/skipped in frame.welcomed.
 
 import { View, div, svg, image } from "gpui-kit";
@@ -7,17 +8,17 @@ import { spaces, run, theme, props, closeOverlay, setShared, shared, hc, appHome
 const I = (name) => `frame/welcome/${name}.svg`;
 const W = (name) => `mods/workspace-chrome/${name}.svg`;
 const PAGES = 4;
-const ASK = "Read ~/.config/herdr-app/AGENTS.md, then tell me what you can change in Herdr.";
-const MIGRATE = "Read `herdr-app --skill`, then migrate my keybinds and settings from ~/.config/herdr/config.toml";
+const ASK = tr("welcome-read-config-herdr-app-agents-md-then-tell-me-what-you-can-change-in-herdr");
+const MIGRATE = tr("welcome-read-herdr-app-skill-then-migrate-my-keybinds-and-settings-from-config-herdr-config-t");
 const APPEARANCES = [
-  [null, "System"],
-  ["light", "Light"],
-  ["dark", "Dark"],
+  [null, tr("welcome-system")],
+  ["light", tr("welcome-light")],
+  ["dark", tr("welcome-dark")],
 ];
 // The panels the layout offers (its "panel-body" stack), as the tab bar's buttons.
 const PANELS = [
-  { id: "files", icon: "files", title: "Files", about: "The folder you're in as a tree. Open a file to read it, highlighted." },
-  { id: "changes", icon: "git-compare", title: "Changes", about: "What your agents changed: every file with its diff, and a commit box." },
+  { id: "files", icon: "files", title: tr("welcome-files"), about: tr("welcome-the-folder-you-re-in-as-a-tree-open-a-file-to-read-it-highlighted") },
+  { id: "changes", icon: "git-compare", title: tr("welcome-changes"), about: tr("welcome-what-your-agents-changed-every-file-with-its-diff-and-a-commit-box") },
 ];
 
 // The key bound to a command, as people press it: "Ctrl+Shift+P".
@@ -253,7 +254,7 @@ export default class Welcome extends View {
               this.copied = id;
               cx.notify();
             })
-            .child(copied ? "Copied" : "Copy"),
+            .child(copied ? tr("welcome-copied") : tr("welcome-copy")),
         ),
       );
   }
@@ -271,11 +272,11 @@ export default class Welcome extends View {
           .gap(10)
           .items_center()
           .child(svg(I("terminal")).size(16).text_color(t.muted))
-          .child(div().text_size(13.5).font_semibold().text_color(t.foreground).child("Coming from herdr?")),
+          .child(div().text_size(13.5).font_semibold().text_color(t.foreground).child(tr("welcome-coming-from-herdr"))),
       )
-      .child(this.para(t, "This is a new app on a new core. Your herdr workspaces stay where they are; nothing moves over."))
-      .child(this.para(t, "Same idea as before: spaces, tabs and terminals."))
-      .child(this.para(t, "Want your keybinds and settings carried over? Give your agent this line:"))
+      .child(this.para(t, tr("welcome-this-is-a-new-app-on-a-new-core-your-herdr-workspaces-stay-where-they-are-nothing-mov")))
+      .child(this.para(t, tr("welcome-same-idea-as-before-spaces-tabs-and-terminals")))
+      .child(this.para(t, tr("welcome-want-your-keybinds-and-settings-carried-over-give-your-agent-this-line")))
       .child(this.copyLine(t, MIGRATE, "w-migrate-copy"));
   }
 
@@ -284,13 +285,13 @@ export default class Welcome extends View {
   pageOne(t) {
     return v_flex()
       .gap(18)
-      .child(this.title(t, "Herdr runs your terminals in the background", "The terminals and agents you open here don't live in this window. They run in herdr-core, a small background program on your computer. Close Herdr, update it, or let it crash, and your agents keep working. Open it again and everything is where you left it, as long as the computer is on."))
-      .child(this.feature(t, "bot", "Agents tell you when they need you", "A ring while one works, \u201cNeeds you\u201d when it asks something, a sound when it finishes."))
-      .child(this.feature(t, "messages", "Agents can start helpers", "They show up under the agent that started them. Click one to watch it."))
-      .child(this.feature(t, "layers", "Your other machines, in the same window", "A server or a Mac mini runs its own herdr-core, so its agents keep going even while this laptop sleeps."))
+      .child(this.title(t, tr("welcome-herdr-runs-your-terminals-in-the-background"), tr("welcome-the-terminals-and-agents-you-open-here-don-t-live-in-this-window-they-run-in-herdr-co")))
+      .child(this.feature(t, "bot", tr("welcome-agents-tell-you-when-they-need-you"), tr("welcome-a-ring-while-one-works-needs-you-when-it-asks-something-a-sound-when-it-finishes")))
+      .child(this.feature(t, "messages", tr("welcome-agents-can-start-helpers"), tr("welcome-they-show-up-under-the-agent-that-started-them-click-one-to-watch-it")))
+      .child(this.feature(t, "layers", tr("welcome-your-other-machines-in-the-same-window"), tr("welcome-a-server-or-a-mac-mini-runs-its-own-herdr-core-so-its-agents-keep-going-even-while-th")))
       .child(div().h(1).bg(t.border))
-      .child(h_flex().gap(10).items_center().child(div().w(84).text_size(13).text_color(t.muted).child("Appearance")).child(this.segment(t, APPEARANCES, this.appearance, (v, cx) => this.setAppearance(v, cx))))
-      .child(h_flex().gap(10).items_center().child(div().w(84).text_size(13).text_color(t.muted).child("Size")).child(this.sizeControl(t)))
+      .child(h_flex().gap(10).items_center().child(div().w(84).text_size(13).text_color(t.muted).child(tr("welcome-appearance"))).child(this.segment(t, APPEARANCES, this.appearance, (v, cx) => this.setAppearance(v, cx))))
+      .child(h_flex().gap(10).items_center().child(div().w(84).text_size(13).text_color(t.muted).child(tr("welcome-size"))).child(this.sizeControl(t)))
       .child(this.comingFromHerdr(t));
   }
 
@@ -311,7 +312,7 @@ export default class Welcome extends View {
   pageTwo(t) {
     return v_flex()
       .gap(18)
-      .child(this.title(t, "Add your other machines", "Pick a host from your ssh config. Herdr connects, installs herdr-core there if it's missing, and lists that machine in the sidebar with its own spaces."))
+      .child(this.title(t, tr("welcome-add-your-other-machines"), tr("welcome-pick-a-host-from-your-ssh-config-herdr-connects-installs-herdr-core-there-if-it-s-mis")))
       .child(
         v_flex()
           .rounded(12)
@@ -319,11 +320,11 @@ export default class Welcome extends View {
           .border_color(t.border)
           .bg(t.background)
           .overflow_hidden()
-          .child(this.machineRow(t, "monitor", "This computer", "here", true))
+          .child(this.machineRow(t, "monitor", tr("welcome-this-computer"), "here", true))
           .children(this.machines.map((m) => v_flex()
             .child(this.machineRow(t, "server", m.name, m.state === "connected" ? "connected" : (m.state ?? "offline").replace(/_/g, " "), m.state === "connected"))
             .when(m.state === "needs_login", el => el.child(v_flex().p(12).gap(6)
-              .child(div().text_size(12).text_color(t.blocked).child("needs a login: run"))
+              .child(div().text_size(12).text_color(t.blocked).child(tr("welcome-needs-a-login-run")))
               .child(this.copyLine(t, `hc machine login ${m.name}`, `w-login-copy-${m.name}`))))))
           .child(
             h_flex()
@@ -339,10 +340,10 @@ export default class Welcome extends View {
               .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
               .on_click(() => run("mod.open", { name: "machine-add" }))
               .child(svg(W("plus")).size(15))
-              .child("Add a machine"),
+              .child(tr("welcome-add-a-machine")),
           ),
       )
-      .child(this.para(t, "Not now? Add machine is at the bottom of the sidebar too."));
+      .child(this.para(t, tr("welcome-not-now-add-machine-is-at-the-bottom-of-the-sidebar-too")));
   }
 
   panelCard(t, p) {
@@ -399,7 +400,7 @@ export default class Welcome extends View {
     if (shared("workspace.panels") === undefined || shared("workspace.panels") === null) setShared("workspace.panels", []);
     return v_flex()
       .gap(14)
-      .child(this.title(t, "Choose your panels", "Herdr comes with a couple of panels. Turn one on and it appears beside your terminals. Drag this window aside to see it. Later, the buttons in the tab bar open and close them."))
+      .child(this.title(t, tr("welcome-choose-your-panels"), tr("welcome-herdr-comes-with-a-couple-of-panels-turn-one-on-and-it-appears-beside-your-terminals")))
       .children(PANELS.map((p) => this.panelCard(t, p)))
       .child(
         h_flex()
@@ -408,7 +409,7 @@ export default class Welcome extends View {
           .p(12)
           .rounded(10)
           .bg(t.raised)
-          .child(this.para(t, "Ask your agent for a board of your agents, your pull requests, a cost meter, or the sidebar on the right. Not sure what's possible? Ask it that too.")),
+          .child(this.para(t, tr("welcome-ask-your-agent-for-a-board-of-your-agents-your-pull-requests-a-cost-meter-or-the-side"))),
       );
   }
 
@@ -432,22 +433,22 @@ export default class Welcome extends View {
                 .flex_1()
                 .min_w(0)
                 .gap(2)
-                .child(div().text_size(13.5).font_semibold().text_color(t.foreground).child("One key opens everything"))
-                .child(this.para(t, "It opens the command palette, with every action by name and its key. It works the same in every layout.")),
+                .child(div().text_size(13.5).font_semibold().text_color(t.foreground).child(tr("welcome-one-key-opens-everything")))
+                .child(this.para(t, tr("welcome-it-opens-the-command-palette-with-every-action-by-name-and-its-key-it-works-the-same"))),
             ),
         ),
       )
-      .child(this.title(t, "Make it yours", "Every part of this window is a layout or a mod: plain files your agent can change or add to. Give it this line to start:"))
+      .child(this.title(t, tr("welcome-make-it-yours"), tr("welcome-every-part-of-this-window-is-a-layout-or-a-mod-plain-files-your-agent-can-change-or-a")))
       .child(this.copyLine(t, ASK))
-      .child(this.para(t, "Then ask for anything: \u201cmove the sidebar to the right\u201d, \u201ca panel with my pull requests\u201d."))
+      .child(this.para(t, tr("welcome-then-ask-for-anything-move-the-sidebar-to-the-right-a-panel-with-my-pull-requests")))
       .child(
         v_flex()
           .gap(6)
           .p(12)
           .rounded(10)
           .bg(t.raised)
-          .child(div().text_size(13.5).font_semibold().text_color(t.foreground).child("Your terminals, outside this window too"))
-          .child(this.para(t, "hc is herdr-core's command line. In any terminal, hc ls lists everything running and hc attach t3 jumps into one. Your agents can use it to start and watch other agents for you. Tell them to read hc's help, or make it a skill.")),
+          .child(div().text_size(13.5).font_semibold().text_color(t.foreground).child(tr("welcome-your-terminals-outside-this-window-too")))
+          .child(this.para(t, tr("welcome-hc-is-herdr-core-s-command-line-in-any-terminal-hc-ls-lists-everything-running-and-hc"))),
       )
       .child(
         v_flex()
@@ -455,10 +456,10 @@ export default class Welcome extends View {
           .p(12)
           .rounded(10)
           .bg(t.raised)
-          .child(div().text_size(13.5).font_semibold().text_color(t.foreground).child("More examples in Settings"))
-          .child(this.para(t, "Settings \u203a Look has more layouts to try or start from, Herdr 98 among them. Your agent can copy any of them and change anything.")),
+          .child(div().text_size(13.5).font_semibold().text_color(t.foreground).child(tr("welcome-more-examples-in-settings")))
+          .child(this.para(t, tr("welcome-settings-look-has-more-layouts-to-try-or-start-from-herdr-98-among-them-your-agent-ca"))),
       )
-      .child(this.para(t, "Something off or missing? Settings \u203a Send feedback. We read every one."));
+      .child(this.para(t, tr("welcome-something-off-or-missing-settings-send-feedback-we-read-every-one")));
   }
 
   render() {
@@ -500,10 +501,10 @@ export default class Welcome extends View {
           .border_b(1)
           .border_color(t.border)
           .child(image("frame/welcome/herdr.png").w(24).h(24).rounded(6).flex_none())
-          .child(div().text_size(14).font_semibold().text_color(t.foreground).child("Welcome to Herdr"))
-          .child(div().px(6).py(0.5).rounded(5).border_1().border_color(t.input).text_color(t.muted).text_size(10.5).font_semibold().child("BETA"))
+          .child(div().text_size(14).font_semibold().text_color(t.foreground).child(tr("welcome-welcome-to-herdr")))
+          .child(div().px(6).py(0.5).rounded(5).border_1().border_color(t.input).text_color(t.muted).text_size(10.5).font_semibold().child(tr("welcome-beta")))
           .child(div().flex_1())
-          .child(div().text_size(11.5).text_color(t.dim).child("Drag to move"))
+          .child(div().text_size(11.5).text_color(t.dim).child(tr("welcome-drag-to-move")))
           .child(
             div()
               .id("w-close")
@@ -551,11 +552,11 @@ export default class Welcome extends View {
           .border_color(t.border)
           .child(div().pl(6).child(dots))
           .child(div().flex_1())
-          .when(this.page > 1, (el) => el.child(this.button(t, "w-back", "Back", false, (_e, cx) => go(this.page - 1, cx))))
+          .when(this.page > 1, (el) => el.child(this.button(t, "w-back", tr("welcome-back"), false, (_e, cx) => go(this.page - 1, cx))))
           .child(
             this.page < PAGES
-              ? this.button(t, "w-next", this.page === 2 && !this.machines.length ? "Not now" : "Next", true, (_e, cx) => go(this.page + 1, cx), "arrow-right")
-              : this.button(t, "w-start", spaces().length ? "Done" : "Open a space", true, () => this.start(), "arrow-right"),
+              ? this.button(t, "w-next", this.page === 2 && !this.machines.length ? tr("welcome-not-now") : tr("welcome-next"), true, (_e, cx) => go(this.page + 1, cx), "arrow-right")
+              : this.button(t, "w-start", spaces().length ? tr("welcome-done") : tr("welcome-open-a-space"), true, () => this.start(), "arrow-right"),
           ),
       );
   }

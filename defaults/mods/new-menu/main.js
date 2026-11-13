@@ -1,3 +1,4 @@
+import { t as tr } from "herdr";
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex, v_flex } from "gpui-base";
 import { theme, spaces, panes, knownAgents, run, openOverlay, closeOverlay, props, window, keys, shared, setShared } from "herdr";
@@ -9,7 +10,7 @@ function shortcut(name) {
   const k = keys().find(b => b.section === "global" && b.action === name);
   if (!k?.keys.trim()) return "";
   const mac = window()?.platform === "macos";
-  const names = mac ? { ctrl: "⌃", alt: "⌥", shift: "⇧", cmd: "⌘", fn: "fn" } : { ctrl: "Ctrl", alt: "Alt", shift: "Shift", cmd: "Super", fn: "Fn" };
+  const names = mac ? { ctrl: "⌃", alt: "⌥", shift: "⇧", cmd: "⌘", fn: "fn" } : { ctrl: "Ctrl", alt: tr("new-menu-alt"), shift: "Shift", cmd: "Super", fn: "Fn" };
   const alias = { secondary: mac ? "cmd" : "ctrl", super: "cmd", win: "cmd" };
   return k.keys.trim().split(/\s+/).map(stroke => {
     const parts = stroke.split("-");
@@ -59,15 +60,15 @@ export default class NewMenu extends View {
         closeOverlay(props().overlay);
         run("tab.new", { name: agent.name, space: space?.id, argv: agent.run });
       })
-      .child(this.row("terminal", svg("icons/shell.svg").size(14), "Terminal", () => run("tab.new", { space: space?.id }), shortcut("tab.new")))
-      .child(div().px(9).pt(8).pb(4).text_size(11).text_color(t.dim).child("Start an agent"))
+      .child(this.row("terminal", svg("icons/shell.svg").size(14), tr("new-menu-terminal"), () => run("tab.new", { space: space?.id }), shortcut("tab.new")))
+      .child(div().px(9).pt(8).pb(4).text_size(11).text_color(t.dim).child(tr("new-menu-start-an-agent")))
       .child(v_flex().flex_1().min_h(0).overflow_y_scrollbar()
         .children(choices.map((a, i) => this.row(a.key, a.tint ? svg(a.icon).size(14).text_color(t.foreground) : image(a.icon).size(14), a.name,
-          () => run("tab.new", { name: a.name, space: space?.id, argv: a.run }), a.installed ? (i < 9 ? String(i + 1) : "") : "not installed", a.installed)))
-        .when(this.failed || this.agents.length === 0, el => el.child(div().px(9).py(6).text_color(t.dim).child(this.failed ? "Could not check installed agents" : "Checking installed agents…"))))
+          () => run("tab.new", { name: a.name, space: space?.id, argv: a.run }), a.installed ? (i < 9 ? String(i + 1) : "") : tr("new-menu-not-installed"), a.installed)))
+        .when(this.failed || this.agents.length === 0, el => el.child(div().px(9).py(6).text_color(t.dim).child(this.failed ? tr("new-menu-could-not-check-installed-agents") : tr("new-menu-checking-installed-agents")))))
       .child(div().h(1).mx(4).my(5).bg(t.border))
-      .child(this.row("space", div().w(14).child("+"), "New space", () => run("space.new"), shortcut("space.new")))
-      .child(this.row("worktree", svg("mods/workspace-chrome/branch.svg").size(14), "New worktree…", () => openOverlay({ mod: "worktree", kind: "dialog", width: 460, height: 280, props: { space: space?.id, folder: panes().find(p => p.focused)?.cwd, action: "new" } }), "", Boolean(space)))
-      .child(this.row("worktree-open", svg("mods/workspace-chrome/branch.svg").size(14), "Open worktree\u2026", () => openOverlay({ mod: "worktree", kind: "dialog", width: 560, height: 480, props: { space: space?.id, folder: panes().find(p => p.focused)?.cwd, action: "open" } }), "", Boolean(space)));
+      .child(this.row("space", div().w(14).child("+"), tr("new-menu-new-space"), () => run("space.new"), shortcut("space.new")))
+      .child(this.row("worktree", svg("mods/workspace-chrome/branch.svg").size(14), tr("new-menu-new-worktree"), () => openOverlay({ mod: "worktree", kind: "dialog", width: 460, height: 280, props: { space: space?.id, folder: panes().find(p => p.focused)?.cwd, action: "new" } }), "", Boolean(space)))
+      .child(this.row("worktree-open", svg("mods/workspace-chrome/branch.svg").size(14), tr("new-menu-open-worktree"), () => openOverlay({ mod: "worktree", kind: "dialog", width: 560, height: 480, props: { space: space?.id, folder: panes().find(p => p.focused)?.cwd, action: "open" } }), "", Boolean(space)));
   }
 }

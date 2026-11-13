@@ -1,3 +1,4 @@
+import { t as tr } from "herdr";
 // The frame's command palette: everything you can do, by name, with its key.
 // Places (spaces, tabs) stay in the picker. Fuzzy: your letters in
 // order, word starts and runs rank higher. Empty: recent first, then every
@@ -18,48 +19,58 @@ const ROW_H = 32;
 const HEAD_H = 26;
 const LIST_H = SHOWN * ROW_H;
 const GROUPS = ["Recent", "Tab", "Pane", "Space", "Layout", "Terminal", "Agent", "Window", "App"];
+const groupLabel = (group) => GROUPS.includes(group) ? tr(`palette-group-${group.toLowerCase()}`) : group;
 
 // The palette's names for commands: [command, args, group, title, keywords].
 const NAMED = [
-  ["tab.new", {}, "Tab", "New tab", "tab agent new task"],
-  ["mod.open", { name: "picker" }, "Tab", "Go to space or tab…", "switch jump find"],
-  ["tab.rename", {}, "Tab", "Rename tab", "tab"],
-  ["tab.close", {}, "Tab", "Close tab", "tab kill"],
-  ["tab.next", {}, "Tab", "Next tab", "tab"],
-  ["tab.prev", {}, "Tab", "Previous tab", "tab"],
-  ["pane.split", { direction: "right" }, "Pane", "Split right", "vertical"],
-  ["pane.split", { direction: "down" }, "Pane", "Split down", "horizontal"],
-  ["pane.close", {}, "Pane", "Close pane", "kill"],
-  ["pane.zoom", {}, "Pane", "Zoom pane", "maximize fullscreen"],
-  ...["left", "right", "up", "down"].map((d) => ["pane.go", { direction: d }, "Pane", `Focus pane ${d}`, "move go"]),
-  ...["left", "right", "up", "down"].map((d) => ["pane.swap", { direction: d }, "Pane", `Swap pane ${d}`, "move"]),
-  ["space.new", {}, "Space", "New space", "workspace"],
-  ["space.rename", {}, "Space", "Rename space", "workspace"],
-  ["space.close", {}, "Space", "Close space", "workspace kill"],
-  ["space.next", {}, "Space", "Next space", "workspace"],
-  ["space.prev", {}, "Space", "Previous space", "workspace"],
-  ["layout.switch", {}, "Layout", "Next layout", "look switch"],
-  ["layout.reset", {}, "Layout", "Reset layout", "new version default restore herdr's"],
-  ["layout.clone", {}, "Layout", "Duplicate layout", "clone copy customize"],
-  ["mod.clone", {}, "Layout", "Duplicate mod", "clone copy customize"],
-  ["terminal.open", {}, "Terminal", "New terminal", "shell"],
-  ["terminal.copy", {}, "Terminal", "Copy", "clipboard"],
-  ["terminal.paste", {}, "Terminal", "Paste", "clipboard"],
-  ["agent.next", {}, "Agent", "Next agent", ""],
-  ["agent.prev", {}, "Agent", "Previous agent", ""],
-  ["window.minimize", {}, "Window", "Minimize window", ""],
-  ["window.maximize", {}, "Window", "Maximize window", "restore"],
-  ["window.close", {}, "Window", "Close window", "quit"],
-  ["app.settings", {}, "App", "Settings", "preferences options config look font theme sound"],
-  ["app.help", {}, "App", "Keys", "keybindings shortcuts help"],
-  ["app.welcome", {}, "App", "Welcome", "intro start onboarding"],
-  ["app.whats_new", {}, "App", "What's new", "release changes news update"],
-  ["app.reset", {}, "App", "Reset to the default screen", "escape hatch broken restore"],
-  ["app.zoom_in", {}, "App", "Zoom in", "bigger font size"],
-  ["app.zoom_out", {}, "App", "Zoom out", "smaller font size"],
-  ["app.zoom_reset", {}, "App", "Reset zoom", "font size"],
-  ["app.quit", {}, "App", "Quit Herdr", "exit"],
-  ...["graphite", "ink", "moss", "atom-one-dark"].map((n) => ["app.theme", { name: n }, "App", `Theme: ${n.replace(/-/g, " ")}`, "colors look"]),
+  ["app.feedback", {}, "App", tr("command-app-feedback"), "Send feedback feedback report issue"],
+  ["app.check_updates", {}, "App", tr("command-app-check-updates"), "Check for updates check updates"],
+  ["app.update_core", {}, "App", tr("command-app-update-core"), "Update herdr-core update core"],
+  ["app.update", {}, "App", tr("command-app-update"), "Restart to update restart update"],
+  ["terminal.search", {}, "Terminal", tr("command-terminal-search"), "Find in terminal find search terminal"],
+  ["terminal.paste_image", {}, "Terminal", tr("command-terminal-paste-image"), "Paste image paste clipboard image"],
+  ["terminal.scroll", {}, "Terminal", tr("command-terminal-scroll"), "Scroll terminal scroll terminal"],
+  ["terminal.select_all", {}, "Terminal", tr("palette-select-all"), "Select all copy scrollback select"],
+
+  ["tab.new", {}, "Tab", tr("palette-new-tab"), "New tab tab agent new task"],
+  ["mod.open", { name: "picker" }, "Tab", tr("palette-go-to-space-or-tab"), "Go to space or tab… switch jump find"],
+  ["tab.rename", {}, "Tab", tr("palette-rename-tab"), "Rename tab tab"],
+  ["tab.close", {}, "Tab", tr("palette-close-tab"), "Close tab tab kill"],
+  ["tab.next", {}, "Tab", tr("palette-next-tab"), "Next tab tab"],
+  ["tab.prev", {}, "Tab", tr("palette-previous-tab"), "Previous tab tab"],
+  ["pane.split", { direction: "right" }, "Pane", tr("palette-split-right"), "Split right vertical"],
+  ["pane.split", { direction: "down" }, "Pane", tr("palette-split-down"), "Split down horizontal"],
+  ["pane.close", {}, "Pane", tr("palette-close-pane"), "Close pane kill"],
+  ["pane.zoom", {}, "Pane", tr("palette-zoom-pane"), "Zoom pane maximize fullscreen"],
+  ...["left", "right", "up", "down"].map((d) => ["pane.go", { direction: d }, "Pane", tr("palette-focus-pane", { d: tr(`common-direction-${d}`) }), `focus move go ${d}`]),
+  ...["left", "right", "up", "down"].map((d) => ["pane.swap", { direction: d }, "Pane", tr("palette-swap-pane", { d: tr(`common-direction-${d}`) }), `swap move ${d}`]),
+  ["space.new", {}, "Space", tr("palette-new-space"), "New space workspace"],
+  ["space.rename", {}, "Space", tr("palette-rename-space"), "Rename space workspace"],
+  ["space.close", {}, "Space", tr("palette-close-space"), "Close space workspace kill"],
+  ["space.next", {}, "Space", tr("palette-next-space"), "Next space workspace"],
+  ["space.prev", {}, "Space", tr("palette-previous-space"), "Previous space workspace"],
+  ["layout.switch", {}, "Layout", tr("palette-next-layout"), "Next layout look switch"],
+  ["layout.reset", {}, "Layout", tr("palette-reset-layout"), "Reset layout new version default restore herdr's"],
+  ["layout.clone", {}, "Layout", tr("palette-duplicate-layout"), "Duplicate layout clone copy customize"],
+  ["mod.clone", {}, "Layout", tr("palette-duplicate-mod"), "Duplicate mod clone copy customize"],
+  ["terminal.open", {}, "Terminal", tr("palette-new-terminal"), "New terminal shell"],
+  ["terminal.copy", {}, "Terminal", tr("palette-copy"), "Copy clipboard"],
+  ["terminal.paste", {}, "Terminal", tr("palette-paste"), "Paste clipboard"],
+  ["agent.next", {}, "Agent", tr("palette-next-agent"), "Next agent "],
+  ["agent.prev", {}, "Agent", tr("palette-previous-agent"), "Previous agent "],
+  ["window.minimize", {}, "Window", tr("palette-minimize-window"), "Minimize window "],
+  ["window.maximize", {}, "Window", tr("palette-maximize-window"), "Maximize window restore"],
+  ["window.close", {}, "Window", tr("palette-close-window"), "Close window quit"],
+  ["app.settings", {}, "App", tr("palette-settings"), "Settings preferences options config look font theme sound"],
+  ["app.help", {}, "App", tr("palette-keys"), "Keys keybindings shortcuts help"],
+  ["app.welcome", {}, "App", tr("palette-welcome"), "Welcome intro start onboarding"],
+  ["app.whats_new", {}, "App", tr("palette-what-s-new"), "What's new release changes news update"],
+  ["app.reset", {}, "App", tr("palette-reset-to-the-default-screen"), "Reset to the default screen escape hatch broken restore"],
+  ["app.zoom_in", {}, "App", tr("palette-zoom-in"), "Zoom in bigger font size"],
+  ["app.zoom_out", {}, "App", tr("palette-zoom-out"), "Zoom out smaller font size"],
+  ["app.zoom_reset", {}, "App", tr("palette-reset-zoom"), "Reset zoom font size"],
+  ["app.quit", {}, "App", tr("palette-quit-herdr"), "Quit Herdr exit"],
+  ...["graphite", "ink", "moss", "atom-one-dark"].map((n) => ["app.theme", { name: n }, "App", tr("palette-theme", { value1: n.replace(/-/g, " ") }), "colors look"]),
 ];
 
 // Commands that act on something you point at (ids, terminals): not for a list.
@@ -84,8 +95,8 @@ function entries() {
     .filter(([n]) => !(mac && n.startsWith("window.")))
     .map(([name, args, group, title, words]) => ({ name, args, group, title, words }));
   for (const l of layouts()) {
-    const t = { main: "Herdr", terminals: "Terminals", win98: "Herdr 98" }[l] ?? l.charAt(0).toUpperCase() + l.slice(1);
-    list.push({ name: "layout.switch", args: { name: l }, group: "Layout", title: `Layout: ${t}`, words: `look ${l}` });
+    const t = { main: "Herdr", terminals: tr("palette-terminals"), win98: "Herdr 98" }[l] ?? l.charAt(0).toUpperCase() + l.slice(1);
+    list.push({ name: "layout.switch", args: { name: l }, group: "Layout", title: tr("palette-layout", { t: t }), words: `look ${l}` });
   }
   // Anything new in the app shows up too, until it gets a better name here.
   const named = new Set(NAMED.map(([n]) => n));
@@ -131,7 +142,7 @@ function fuzzy(q, text) {
 export default class Palette extends View {
   init(_props, cx) {
     this.query = "";
-    this.input = InputState.new({ placeholder: "Type a command…" });
+    this.input = InputState.new({ placeholder: tr("palette-type-a-command") });
     this.input.on("change", (_e, cx) => { this.query = this.input.value(); this.at = 0; cx.notify(); });
     this.input.on("submit", () => this.go(this.rows()[this.at]?.e));
     this.input.focus();
@@ -154,7 +165,7 @@ export default class Palette extends View {
     this.close();
     if (e.name === "mod.clone") {
       openOverlay({ mod: "prompt", kind: "dialog", width: 380, props: {
-        title: "Duplicate mod", hint: "Mod to copy; creates <name>-copy",
+        title: tr("palette-duplicate-mod"), hint: tr("palette-mod-to-copy-creates-name-copy"),
         command: { name: "mod.clone", args: {} },
       } });
     } else {
@@ -176,7 +187,7 @@ export default class Palette extends View {
     return all
       .map((e) => {
         const title = fuzzy(q, e.title);
-        const more = fuzzy(q, `${e.group} ${e.title} ${e.name} ${e.words}`);
+        const more = fuzzy(q, `${groupLabel(e.group)} ${e.group} ${e.title} ${e.name} ${e.words}`);
         const best = title ?? (more && { score: more.score - 4, hits: [] });
         return best && { e, score: best.score, hits: best.hits };
       })
@@ -241,7 +252,7 @@ export default class Palette extends View {
     const list = [];
     rows.forEach((r, i) => {
       const { head, title, row } = tops[i];
-      if (head && visible(title, row)) list.push(place(h_flex(), title, row).px(14).pb(4).items_end().text_size(11).font_semibold().text_color(t.dim).child(r.head));
+      if (head && visible(title, row)) list.push(place(h_flex(), title, row).px(14).pb(4).items_end().text_size(11).font_semibold().text_color(t.dim).child(groupLabel(r.head)));
       if (!visible(row, row + ROW_H)) return;
       const on = i === this.at;
       const k = keyOf(r.e, bound);
@@ -259,7 +270,7 @@ export default class Palette extends View {
           .hover((s) => s.bg(t.hover))
           .on_click(() => this.go(r.e))
           .child(div().flex_1().min_w(0).child(this.title(t, r.e.title, r.hits, on)))
-          .when(Boolean(this.query), (el) => el.child(div().text_size(11.5).text_color(t.dim).child(r.e.group)))
+          .when(Boolean(this.query), (el) => el.child(div().text_size(11.5).text_color(t.dim).child(groupLabel(r.e.group))))
           .when(Boolean(k), (el) => el.child(key(k))),
       );
     });
@@ -296,7 +307,7 @@ export default class Palette extends View {
           .bg(t.background)
           .child(svg(win()?.platform === "macos" ? "frame/palette/command.svg" : "mods/workspace-chrome/search.svg").size(16).text_color(t.dim))
           .child(Input.new(this.input).flex_1().h_full().text_size(12.8).text_color(t.foreground))
-          .child(div().text_size(11).text_color(t.dim).child("Esc")),
+          .child(div().text_size(11).text_color(t.dim).child(tr("palette-esc"))),
       )
       .child(
         rows.length
@@ -315,7 +326,7 @@ export default class Palette extends View {
                 cx.notify();
               })
               .children(fixed ? list : [v_flex().children(list)])
-          : div().px(16).py(14).text_size(13).text_color(t.dim).child(`Nothing matches "${this.query}". Places are in the picker.`),
+          : div().px(16).py(14).text_size(13).text_color(t.dim).child(tr("palette-nothing-matches-places-are-in-the-picker", { query: this.query })),
       );
   }
 }

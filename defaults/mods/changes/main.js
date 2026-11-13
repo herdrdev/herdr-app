@@ -1,3 +1,4 @@
+import { t as tr } from "herdr";
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar, v_virtual_list } from "gpui-base";
 import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings } from "herdr";
@@ -34,7 +35,7 @@ function diffRows(lines) {
 export default class Changes extends View {
   init(_props, cx) {
     this.files = []; this.rows = []; this.diffWidth = 0; this.message = ""; this.handle = cx.focus_handle();
-    this.input = InputState.new({ placeholder: "Commit message" });
+    this.input = InputState.new({ placeholder: tr("changes-commit-message") });
     this.input.on("change", (_e, cx) => {
       const hadMessage = Boolean(this.message.trim());
       this.message = this.input.value();
@@ -73,7 +74,7 @@ export default class Changes extends View {
       try {
         const top = await exec("git", ["rev-parse", "--show-toplevel"], { cwd, on });
         if (key() !== context) return;
-        if (top.code !== 0) { this.root = null; this.files = []; this.setLines([]); this.open = null; this.error = "Not a git repository"; return; }
+        if (top.code !== 0) { this.root = null; this.files = []; this.setLines([]); this.open = null; this.error = tr("changes-not-a-git-repository"); return; }
         const root = top.stdout.trim(), git = (args) => exec("git", [...READ, ...args], { cwd: root, on });
         const status = await git(["status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"]);
         if (status.code !== 0) throw new Error(status.stderr);
@@ -106,7 +107,7 @@ export default class Changes extends View {
         if (!this.open && !this.closed && files.length) this.open = files[0].path;
         if (this.open) {
           try { await this.load(this.open, context); }
-          catch { if (key() === context) this.setLines(["Cannot preview this diff (too large or unreadable)"]); }
+          catch { if (key() === context) this.setLines([tr("changes-cannot-preview-this-diff-too-large-or-unreadable")]); }
         }
       } catch (e) { if (key() === context) this.error = String(e); }
       finally { this.loading = false; cx.notify(); }
@@ -119,8 +120,8 @@ export default class Changes extends View {
     let lines;
     if (file.fresh || (!this.hasHead && file.status === "A")) {
       const text = await readTextFile(`${root}/${path}`, { on }).catch(() => null);
-      if (text === null) lines = ["Cannot preview this file (binary, too large, or unreadable)"];
-      else if (text.includes("\0")) lines = ["Binary file · no text diff"];
+      if (text === null) lines = [tr("changes-cannot-preview-this-file-binary-too-large-or-unreadable")];
+      else if (text.includes("\0")) lines = [tr("changes-binary-file-no-text-diff")];
       else {
         file.add = countLines(text);
         lines = [`@@ -0,0 +1,${file.add} @@`, ...text.slice(0, 400000).replace(/\n$/, "").split("\n").slice(0, 1500).map(l => `+${l}`)];
@@ -129,7 +130,7 @@ export default class Changes extends View {
       const r = await exec("git", [...READ, "diff", ...(this.hasHead ? ["HEAD"] : []), "--no-ext-diff", "--no-textconv", "--no-color", "--", path], { cwd: root, on });
       if (r.code !== 0) throw new Error(r.stderr);
       const all = r.stdout.replace(/\n$/, "").split("\n"), first = all.findIndex((l) => l.startsWith("@@"));
-      lines = first < 0 ? [file.binary ? "Binary file changed" : "No text diff available"] : all.slice(first);
+      lines = first < 0 ? [file.binary ? tr("changes-binary-file-changed") : tr("changes-no-text-diff-available")] : all.slice(first);
     }
     if (key() === context && this.open === path) this.setLines(lines.slice(0, 1500).map(line => line.length > 4000 ? line.slice(0, 4000) + "… (line truncated)" : line));
   }
@@ -145,7 +146,7 @@ export default class Changes extends View {
     const context = this.context;
     if (this.open) cx.spawn(async (cx) => {
       try { await this.load(path, context); }
-      catch (e) { if (key() === context && this.open === path) this.note = `Cannot preview this diff (too large or unreadable): ${e}`; }
+      catch (e) { if (key() === context && this.open === path) this.note = tr("changes-cannot-preview-this-diff-too-large-or-unreadable-2", { e: e }); }
       cx.notify();
     });
     cx.notify();
@@ -162,7 +163,7 @@ export default class Changes extends View {
           if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
         }
         if (key() === context) { this.message = ""; this.input.set_value(""); }
-      } catch (e) { if (key() === context) this.note = `Commit failed: ${e}`; }
+      } catch (e) { if (key() === context) this.note = tr("changes-commit-failed", { e: e }); }
       finally { this.busy = false; this.refresh(cx); cx.notify(); }
     });
     cx.notify();
@@ -184,8 +185,8 @@ export default class Changes extends View {
         if (e.key === "escape" && this.typing) { this.typing = false; this.handle.focus(); cx.stop_propagation(); cx.notify(); }
       })
       .child(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
-        .child(div().font_semibold().child("Changes"))
-        .child(div().px(5).py(1).rounded(4).border_1().border_color(t.border).text_size(10).text_color(t.muted).child(`${this.files.length} files`))
+        .child(div().font_semibold().child(tr("changes-changes")))
+        .child(div().px(5).py(1).rounded(4).border_1().border_color(t.border).text_size(10).text_color(t.muted).child(tr("changes-files", { count1: this.files.length })))
         .child(div().flex_1()).child(div().text_size(11).text_color(t.ansi2).child(`+${add}`)).child(div().text_size(11).text_color(t.ansi1).child(`−${del}`)))
       // overflow_y_scrollbar() wraps the list, so its flex sizing never reached the panel's layout.
       .child(div().flex_1().min_h(44).max_h(this.files.length * 28 + 12).relative().border_b(1).border_color(t.border)
@@ -195,18 +196,18 @@ export default class Changes extends View {
           .child(div().w(14).text_size(11).text_color(f.status === "A" ? t.ansi2 : f.status === "D" ? t.ansi1 : f.status === "U" ? t.ansi1 : t.blocked).child(f.status))
           .child(h_flex().flex_1().min_w(0).child(div().text_color(t.dim).truncate().child(parts.length ? parts.join("/") + "/" : "")).child(div().max_w(260).min_w(0).truncate().child(name)))
           .when(f.add > 0, (e) => e.child(div().text_size(11).text_color(t.ansi2).child(`+${f.add}`))).when(f.del > 0, (e) => e.child(div().text_size(11).text_color(t.ansi1).child(`−${f.del}`)));
-      })).when(!this.files.length, (e) => e.child(div().p(8).text_color(t.dim).child(this.error || (this.loading ? "Loading changes…" : this.root ? "No uncommitted changes" : "No folder")))))
+      })).when(!this.files.length, (e) => e.child(div().p(8).text_color(t.dim).child(this.error || (this.loading ? tr("changes-loading-changes") : this.root ? tr("changes-no-uncommitted-changes") : tr("changes-no-folder"))))))
         .child(Scrollbar.vertical("changes-list").absolute().inset_0()))
-      .when(this.limited, el => el.child(div().px(12).py(4).text_size(11).text_color(t.dim).child("Showing the first 1,000 changed files")))
+      .when(this.limited, el => el.child(div().px(12).py(4).text_size(11).text_color(t.dim).child(tr("changes-showing-the-first-1-000-changed-files"))))
       .child(div().flex_1().min_h(0).relative().font_family(settings().font_family ?? "JetBrains Mono").text_size(11)
         .child(div().id("changes-diff-x").size_full().overflow_x_scrollbar()
           .child(div().w_full().min_w(this.diffWidth).h_full().child(v_virtual_list("changes-diff", this.rows.length, 20, (i) => String(i),
             (range) => this.rows.slice(range.start, range.end).map((row) => this.diffRow(row, t))).size_full())))
         .child(Scrollbar.vertical("changes-diff").viewport_from_layout().absolute().inset_0())
-        .when(!this.open && this.files.length > 0, (e) => e.child(div().absolute().top(6).px(12).text_color(t.dim).child("Select a file to view its changes"))))
+        .when(!this.open && this.files.length > 0, (e) => e.child(div().absolute().top(6).px(12).text_color(t.dim).child(tr("changes-select-a-file-to-view-its-changes")))))
       .when(Boolean(this.note), (e) => e.child(div().px(10).pb(8).text_size(11).text_color(t.ansi1).child(this.note)))
       .child(h_flex().flex_none().p(10).gap(8).border_t(1).border_color(t.border)
         .child(div().id("commit-message").flex_1().min_w(0).h(32).px(10).flex().items_center().rounded(8).border_1().border_color(this.typing ? t.accent : t.border).cursor_text().on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(this.input).h_full().text_size(12).text_color(t.foreground)))
-        .child(div().id("commit").h(32).px(14).flex().items_center().rounded(8).bg(enabled ? t.solid : t.raised).text_color(enabled ? t.solid_foreground : t.dim).text_size(12).when(enabled, (e) => e.cursor_pointer()).on_click((_e, cx) => this.commit(cx)).child(this.busy ? "Committing…" : "Commit")));
+        .child(div().id("commit").h(32).px(14).flex().items_center().rounded(8).bg(enabled ? t.solid : t.raised).text_color(enabled ? t.solid_foreground : t.dim).text_size(12).when(enabled, (e) => e.cursor_pointer()).on_click((_e, cx) => this.commit(cx)).child(this.busy ? tr("changes-committing") : tr("changes-commit"))));
   }
 }

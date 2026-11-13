@@ -72,6 +72,9 @@ Remote work keeps running when your local window closes or your laptop sleeps, a
 ## Make it yours
 
 Open the command palette to find an action by name, or open Settings to change fonts, colors, sounds and other preferences.
+The interface follows your system language (English, 简体中文 or 繁體中文).
+Choose another language in Settings → Look, then reopen Herdr to apply it.
+See [interface languages](docs/internationalization.md) for configuration and translation contributions.
 Settings > Look also adjusts terminal line height and scroll speed. Both default to 100%; layouts can override them with `terminal_line_height` (0.8–2) and `terminal_scroll_speed` (0.1–5).
 The built-in layouts include Herdr, Terminals and Herdr 98.
 A **layout** arranges the window. **Mods** are small JavaScript programs that draw its panels, menus and dialogs.

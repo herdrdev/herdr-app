@@ -1,6 +1,8 @@
 use gpui::*;
 use gpui_shell::action::ShellAction;
 
+use crate::i18n::text;
+
 actions!(herdr, [Quit, Hide, HideOthers, ShowAll, Settings]);
 
 pub fn init(cx: &mut App) {
@@ -49,70 +51,70 @@ fn menus(layouts: &[String], shown: Option<&str>) -> Vec<Menu> {
     let layout_items = layouts
         .iter()
         .map(|name| command(name, &format!("layout.switch:{name}")).checked(Some(name.as_str()) == shown))
-        .chain([MenuItem::separator(), command("Next Layout", "layout.switch")]);
+        .chain([MenuItem::separator(), command(&text("macos-next-layout"), "layout.switch")]);
     vec![
         Menu::new("Herdr").items([
-            command("What's New", "app.whats_new"),
-            command("Check for Updates…", "app.settings:updates"),
+            command(&text("macos-what-s-new"), "app.whats_new"),
+            command(&text("macos-check-for-updates"), "app.settings:updates"),
             MenuItem::separator(),
-            command("Settings…", "app.settings"),
+            command(&text("macos-settings"), "app.settings"),
             MenuItem::separator(),
             MenuItem::os_submenu("Services", SystemMenuType::Services),
             MenuItem::separator(),
-            command("Hide Herdr", "app.hide"),
-            command("Hide Others", "app.hide_others"),
-            command("Show All", "app.show_all"),
+            command(&text("macos-hide"), "app.hide"),
+            command(&text("macos-hide-others"), "app.hide_others"),
+            command(&text("macos-show-all"), "app.show_all"),
             MenuItem::separator(),
-            command("Quit Herdr", "app.quit"),
+            command(&text("macos-quit"), "app.quit"),
         ]),
         Menu::new("File").items([
-            command("New Tab", "tab.new"),
-            command("New Space", "space.new"),
+            command(&text("macos-new-tab"), "tab.new"),
+            command(&text("macos-new-space"), "space.new"),
             MenuItem::separator(),
-            command("Split Right", "pane.split:right"),
-            command("Split Down", "pane.split:down"),
+            command(&text("macos-split-right"), "pane.split:right"),
+            command(&text("macos-split-down"), "pane.split:down"),
             MenuItem::separator(),
-            command("Rename Tab…", "tab.rename"),
-            command("Rename Space…", "space.rename"),
+            command(&text("macos-rename-tab"), "tab.rename"),
+            command(&text("macos-rename-space"), "space.rename"),
             MenuItem::separator(),
-            command("Close Pane", "pane.close"),
-            command("Close Tab", "tab.close"),
-            command("Close Space", "space.close"),
+            command(&text("macos-close-pane"), "pane.close"),
+            command(&text("macos-close-tab"), "tab.close"),
+            command(&text("macos-close-space"), "space.close"),
         ]),
         Menu::new("Edit").items([
-            command("Copy", "terminal.copy"),
-            command("Paste", "terminal.paste"),
+            command(&text("macos-copy"), "terminal.copy"),
+            command(&text("macos-paste"), "terminal.paste"),
             MenuItem::separator(),
-            command("Find…", "terminal.search"),
+            command(&text("macos-find"), "terminal.search"),
         ]),
         Menu::new("View").items([
             MenuItem::submenu(Menu::new("Layout").items(layout_items)),
-            command("Toggle Sidebar", "layout.toggle:sidebar"),
-            command("Zoom Pane", "pane.zoom"),
+            command(&text("macos-toggle-sidebar"), "layout.toggle:sidebar"),
+            command(&text("macos-zoom-pane"), "pane.zoom"),
             MenuItem::separator(),
-            command("Actual Size", "app.zoom_reset"),
-            command("Zoom In", "app.zoom_in"),
-            command("Zoom Out", "app.zoom_out"),
+            command(&text("macos-actual-size"), "app.zoom_reset"),
+            command(&text("macos-zoom-in"), "app.zoom_in"),
+            command(&text("macos-zoom-out"), "app.zoom_out"),
             MenuItem::separator(),
-            command("Command Palette…", "app.palette"),
+            command(&text("macos-command-palette"), "app.palette"),
         ]),
         Menu::new("Window").items([
-            command("Minimize", "window.minimize"),
-            command("Zoom", "window.maximize"),
+            command(&text("macos-minimize"), "window.minimize"),
+            command(&text("macos-zoom"), "window.maximize"),
             MenuItem::separator(),
-            command("Go to Tab…", "mod.open:picker"),
-            command("Next Tab", "tab.next"),
-            command("Previous Tab", "tab.prev"),
-            command("Next Space", "space.next"),
-            command("Previous Space", "space.prev"),
-            command("Next Agent", "agent.next"),
-            command("Previous Agent", "agent.prev"),
+            command(&text("macos-go-to-tab"), "mod.open:picker"),
+            command(&text("macos-next-tab"), "tab.next"),
+            command(&text("macos-previous-tab"), "tab.prev"),
+            command(&text("macos-next-space"), "space.next"),
+            command(&text("macos-previous-space"), "space.prev"),
+            command(&text("macos-next-agent"), "agent.next"),
+            command(&text("macos-previous-agent"), "agent.prev"),
         ]),
         Menu::new("Help").items([
-            command("Keyboard Shortcuts", "app.help"),
-            command("Welcome to Herdr", "app.welcome"),
+            command(&text("macos-keyboard-shortcuts"), "app.help"),
+            command(&text("macos-welcome"), "app.welcome"),
             MenuItem::separator(),
-            command("Send Feedback…", "app.feedback"),
+            command(&text("macos-send-feedback"), "app.feedback"),
         ]),
     ]
 }

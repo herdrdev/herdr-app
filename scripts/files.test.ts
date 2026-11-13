@@ -1,3 +1,4 @@
+import "./i18n-fixture";
 import { test, expect } from "bun:test";
 import { readFile, mkdtemp, mkdir, writeFile, rm, symlink } from "node:fs/promises";
 import { tmpdir } from "node:os";

@@ -33,6 +33,10 @@ serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 fancy-regex = "0.19"
+fluent-bundle = "0.16"
+fluent-syntax = "0.12"
+unic-langid = "0.9"
+sys-locale = "0.3"
 notify = "7"
 sha2 = "0.10"
 

@@ -1,3 +1,4 @@
+import { t as tr } from "herdr";
 // Go to a tab. Drops from the Terminals layout's space chip (popup, at: "top"). Spaces with
 // something that needs you come first, quiet spaces (no agent running)
 // fold into "earlier". Type to filter, ↑/↓ and Enter to go, ctrl+d to close
@@ -37,7 +38,7 @@ function spaceColor(t, p) {
 export default class Picker extends View {
   init(_props, cx) {
     this.filter = "";
-    this.input = InputState.new({ placeholder: "Go to a tab, space or agent…" });
+    this.input = InputState.new({ placeholder: tr("picker-go-to-a-tab-space-or-agent") });
     this.input.on("change", (_e, cx) => {
       this.filter = this.input.value();
       this.at = this.filter ? Math.max(0, this.rows().filter(r => r.kind !== "head").findIndex(r => r.kind === "ctx")) : 0;
@@ -181,11 +182,11 @@ export default class Picker extends View {
           .when(r === sel, (el) => el.bg(t.hover).text_color(t.foreground))
           .hover((s) => s.bg(t.hover).text_color(t.foreground))
           .on_click((_e, cx) => this.go(r, cx))
-          .child(`earlier: ${r.count} quiet space${r.count > 1 ? "s" : ""} ${this.showEarlier ? "▴" : "▾"}`);
+          .child(tr("picker-earlier-spaces", { count: r.count, arrow: this.showEarlier ? "▴" : "▾" }));
       }
       const on = r === sel;
       if (r.kind === "new" || r.kind === "space") {
-        const label = r.kind === "new" ? "new tab" : r.machine ? `new space on ${r.machine}` : "new space";
+        const label = r.kind === "new" ? tr("picker-new-tab") : r.machine ? tr("picker-new-space-on", { machine: r.machine }) : tr("picker-new-space");
         return h_flex()
           .id(r.kind === "new" ? "pk-new" : `pk-space-${r.machine ?? "here"}`)
           .mx(4)
@@ -219,8 +220,8 @@ export default class Picker extends View {
         .on_click(() => this.go(r))
         .child(this.glyph(t, r.ctx.status))
         .child(div().flex_1().truncate().text_color(t.foreground).when(here, (d) => d.font_semibold()).child(r.ctx.name))
-        .when(r.ctx.status === "blocked", (el) => el.child(div().text_size(11).text_color(t.blocked).child("needs you")))
-        .when(r.ctx.status === "done", (el) => el.child(div().text_size(11).text_color(t.done).child("finished")))
+        .when(r.ctx.status === "blocked", (el) => el.child(div().text_size(11).text_color(t.blocked).child(tr("picker-needs-you"))))
+        .when(r.ctx.status === "done", (el) => el.child(div().text_size(11).text_color(t.done).child(tr("picker-finished"))))
         .child(div().text_size(11).text_color(t.dim).child(who + (r.team ? `  +${r.team}` : "")));
     };
 
@@ -247,7 +248,7 @@ export default class Picker extends View {
         cx.stop_propagation();
         cx.notify();
       })
-      .child(h_flex().items_center().child(div().flex_1().text_size(15).font_semibold().text_color(t.foreground).child("Go to…")).child(div().id("picker-esc").px(6).py(2).rounded(5).text_size(11).text_color(t.dim).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground)).on_click(() => this.close()).child("Esc")))
+      .child(h_flex().items_center().child(div().flex_1().text_size(15).font_semibold().text_color(t.foreground).child(tr("picker-go-to"))).child(div().id("picker-esc").px(6).py(2).rounded(5).text_size(11).text_color(t.dim).cursor_pointer().hover((s) => s.bg(t.hover).text_color(t.foreground)).on_click(() => this.close()).child(tr("picker-esc"))))
       .child(
         h_flex().h(36).flex_none().px(10).gap(8).items_center().rounded(9).border_1().border_color(t.accent).bg(t.background)
           .child(svg("mods/workspace-chrome/search.svg").size(15).text_color(t.dim))

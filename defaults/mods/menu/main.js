@@ -1,3 +1,4 @@
+import { t as tr } from "herdr";
 // Context menus (Herdr's items). Opened as a popup with
 // props { tab: "pane" | "tab" | "space" | "global", target }.
 // ↑/↓ move, Enter runs, Esc closes. An item is [label, command, args];
@@ -38,43 +39,43 @@ function items(p, git) {
       return [
         ...(inTab
           ? [
-              ["Split right", "pane.split", { direction: "right", pane: tg.pane }],
-              ["Split down", "pane.split", { direction: "down", pane: tg.pane }],
-              ["Zoom", "pane.zoom", { pane: tg.pane }],
+              [tr("menu-split-right"), "pane.split", { direction: "right", pane: tg.pane }],
+              [tr("menu-split-down"), "pane.split", { direction: "down", pane: tg.pane }],
+              [tr("menu-zoom"), "pane.zoom", { pane: tg.pane }],
             ]
           : []),
         ...(term
           ? [
               toProgram
-                ? ["Use Herdr right-click menu", "terminal.right_click", { terminal: term.address, to: "menu" }]
-                : ["Send right-clicks to pane", "terminal.right_click", { terminal: term.address, to: "program" }],
+                ? [tr("menu-use-herdr-right-click-menu"), "terminal.right_click", { terminal: term.address, to: "menu" }]
+                : [tr("menu-send-right-clicks-to-pane"), "terminal.right_click", { terminal: term.address, to: "program" }],
             ]
           : []),
-        ...(parent ? [[`Send back to ${parent.name || parent.address}`, "terminal.park", { terminal: term.address }]] : []),
-        ...(inTab ? [["Close pane", "pane.close", { pane: tg.pane }]] : []),
+        ...(parent ? [[tr("menu-send-back-to", { address: parent.name || parent.address }), "terminal.park", { terminal: term.address }]] : []),
+        ...(inTab ? [[tr("menu-close-pane"), "pane.close", { pane: tg.pane }]] : []),
       ];
     }
     case "tab":
       return [
-        ["Rename", "tab.rename", { id: tg.id }],
-        ["New tab", "tab.new", { space: tg.space }],
-        ["Close", "tab.close", { id: tg.id }],
+        [tr("menu-rename"), "tab.rename", { id: tg.id }],
+        [tr("menu-new-tab"), "tab.new", { space: tg.space }],
+        [tr("menu-close"), "tab.close", { id: tg.id }],
       ];
     case "space":
       return [
-        ["Rename", "space.rename", { id: tg.id }],
-        ...(git ? [["New worktree", "worktree", { space: tg.id, action: "new" }], ["Open worktree", "worktree", { space: tg.id, action: "open" }]] : []),
-        ...(git === "linked" ? [["Remove worktree", "worktree", { space: tg.id, action: "remove" }]] : []),
-        ["Close", "space.close", { id: tg.id }],
+        [tr("menu-rename"), "space.rename", { id: tg.id }],
+        ...(git ? [[tr("menu-new-worktree"), "worktree", { space: tg.id, action: "new" }], [tr("menu-open-worktree"), "worktree", { space: tg.id, action: "open" }]] : []),
+        ...(git === "linked" ? [[tr("menu-remove-worktree"), "worktree", { space: tg.id, action: "remove" }]] : []),
+        [tr("menu-close"), "space.close", { id: tg.id }],
       ];
     default:
       return [
-        ["New space", "space.new", {}],
-        ["Keybinds", "app.help", {}],
-        ["Theme: graphite", "app.theme", { name: "graphite" }],
-        ["Theme: ink", "app.theme", { name: "ink" }],
-        ["Theme: moss", "app.theme", { name: "moss" }],
-        ["Theme: atom one dark", "app.theme", { name: "atom-one-dark" }],
+        [tr("menu-new-space"), "space.new", {}],
+        [tr("menu-keybinds"), "app.help", {}],
+        [tr("menu-theme-graphite"), "app.theme", { name: "graphite" }],
+        [tr("menu-theme-ink"), "app.theme", { name: "ink" }],
+        [tr("menu-theme-moss"), "app.theme", { name: "moss" }],
+        [tr("menu-theme-atom-one-dark"), "app.theme", { name: "atom-one-dark" }],
       ];
   }
 }

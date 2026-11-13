@@ -38,6 +38,7 @@ fn main() {
     embed(&base, "defaults/mods", "DEFAULT_MODS", "default_mods.rs");
     embed(&base, "defaults/icons", "DEFAULT_ICONS", "default_icons.rs");
     embed(&base, "defaults/frame", "FRAME_MODS", "frame_mods.rs");
+    embed(&base, "defaults/locales", "LOCALES", "locales.rs");
 
     // Windows takes the window, taskbar and Start menu icon from the program file.
     #[cfg(windows)]

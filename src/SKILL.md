@@ -8,6 +8,13 @@ Your terminal address is `$HC_TERMINAL_ID`; it is not a pane ID.
 
 ## Inspect before acting
 
+The interface follows the system language by default (English, Simplified
+Chinese or Traditional Chinese). `settings.json` can set `language` to `system`,
+`en`, `zh-Hans` or `zh-Hant` (`zh-CN` is a legacy alias). It takes effect next
+launch: ask the person to reopen Herdr; never restart their app or core.
+Command names, argument keys and machine-readable replies are independent of
+the interface language. Use IDs, not translated screen labels, to drive it.
+
 ```sh
 herdr-app ls          # spaces > tabs > terminals, including pane IDs
 herdr-app status      # current layout, focus, overlays, zoom and file/mod errors

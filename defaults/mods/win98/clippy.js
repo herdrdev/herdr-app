@@ -1,3 +1,4 @@
+import { t as tr } from "herdr";
 // The Office Assistant, floating over the desktop. When an agent needs you
 // (blocked) or finished while you looked away (done), it pops a balloon that
 // takes you there. Click it for a tip. Display Properties (or its balloon)
@@ -9,15 +10,15 @@ import { agents, run, shared, setShared, placement } from "herdr";
 import { C, ASSETS, unit, root, button, label, sfx, own } from "./kit.js";
 
 const TIPS = [
-  "It looks like you're herding agents.\n\nDid you know? Ctrl+Esc opens the Start menu.",
-  "Click a tab's taskbar button while it's\nshown to minimize it (Herdr settles it).\nClick again to bring it back.",
-  "Ctrl+Shift+Esc opens Close Program:\nevery terminal Herdr runs, and End Task.",
-  "Right-click a folder on the desktop to\nrename or close that space.",
-  "Waiting on an agent? Mines is on\nthe desktop. I won't tell anyone.",
-  "Double-click a window's title bar to\nmaximize it. Double-click again to restore.",
-  "Start > Run... opens any command line\nin a new window, like it's 1998.",
-  "Shut Down > Restart in DOS mode\ntakes you to the Terminals layout.",
-  "Log Off takes you back to Herdr's\nnormal layout. I'll miss you.",
+  tr("win98-it-looks-like-you-re-herding-agents-did-you-know-ctrl-esc-opens-the-start-menu"),
+  tr("win98-click-a-tab-s-taskbar-button-while-it-s-shown-to-minimize-it-herdr-settles-it-click-a"),
+  tr("win98-ctrl-shift-esc-opens-close-program-every-terminal-herdr-runs-and-end-task"),
+  tr("win98-right-click-a-folder-on-the-desktop-to-rename-or-close-that-space"),
+  tr("win98-waiting-on-an-agent-mines-is-on-the-desktop-i-won-t-tell-anyone"),
+  tr("win98-double-click-a-window-s-title-bar-to-maximize-it-double-click-again-to-restore"),
+  tr("win98-start-run-opens-any-command-line-in-a-new-window-like-it-s-1998"),
+  tr("win98-shut-down-restart-in-dos-mode-takes-you-to-the-terminals-layout"),
+  tr("win98-log-off-takes-you-back-to-herdr-s-normal-layout-i-ll-miss-you"),
 ];
 
 export default class Clippy {
@@ -41,24 +42,24 @@ export default class Clippy {
     const right = placement()?.edge !== "left";
     let balloon = null;
     if (a) {
-      const name = a.program?.name ?? a.app ?? "Your agent";
+      const name = a.program?.name ?? a.app ?? tr("win98-your-agent");
       const where = `'${a.space_name} \\ ${a.tab_name}'`;
       const text =
         a.status === "blocked"
-          ? `It looks like ${name} in\n${where} is waiting for you.\n\nWould you like help?`
-          : `It looks like ${name} finished\nin ${where}.\n\nWant to see what it did?`;
+          ? tr("win98-it-looks-like-in-is-waiting-for-you-would-you-like-help", { value1: name, value2: where })
+          : tr("win98-it-looks-like-finished-in-want-to-see-what-it-did", { value1: name, value2: where });
       balloon = this.balloon(u, text, [
-        ["Take me there", () => {
+        [tr("win98-take-me-there"), () => {
           run("agent.focus", { terminal: a.address });
           this.dismissed.add(`${a.address}:${a.status}`);
         }],
-        ["Not now", () => this.dismissed.add(`${a.address}:${a.status}`)],
+        [tr("win98-not-now"), () => this.dismissed.add(`${a.address}:${a.status}`)],
       ]);
     } else if (this.tip !== null) {
       balloon = this.balloon(u, TIPS[this.tip % TIPS.length], [
-        ["Next tip", () => (this.tip = (this.tip + 1) % TIPS.length)],
-        ["Close", () => (this.tip = null)],
-        ["Hide me", () => setShared("win98.clippy", "off")],
+        [tr("win98-next-tip"), () => (this.tip = (this.tip + 1) % TIPS.length)],
+        [tr("win98-close"), () => (this.tip = null)],
+        [tr("win98-hide-me"), () => setShared("win98.clippy", "off")],
       ]);
     }
     // Clean the dismissed list once their agents moved on.

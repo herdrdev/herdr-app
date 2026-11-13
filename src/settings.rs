@@ -367,6 +367,9 @@ fn resolve(p: &Palette, overrides: &BTreeMap<String, String>) -> Theme {
 #[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
 #[serde(default)]
 pub struct Person {
+    /// Interface language; absent or "system" follows the OS on next launch.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub language: Option<String>,
     /// How big the whole app is drawn (1 = as designed). The zoom keys change it.
     pub zoom: f32,
     pub sounds: Sounds,
@@ -452,6 +455,7 @@ fn is_true(b: &bool) -> bool {
 impl Default for Person {
     fn default() -> Self {
         Person {
+            language: None,
             zoom: 1.0,
             sounds: Sounds::default(),
             core: None,
@@ -864,6 +868,18 @@ pub const DEFAULT_FONT: &str = "JetBrains Mono";
 #[cfg(test)]
 mod tests {
     #[test]
+    fn language_preferences_preserve_old_and_unknown_values() {
+        use super::*;
+        assert!(serde_json::from_str::<Person>("{}").unwrap().language.is_none());
+        for language in ["system", "en", "zh-Hans", "zh-Hant", "zh-CN", "future-language"] {
+            let person: Person = serde_json::from_value(serde_json::json!({"language":language,"zoom":1.5})).unwrap();
+            assert_eq!(person.language.as_deref(), Some(language));
+            let saved = serde_json::to_value(person).unwrap();
+            assert_eq!(saved["language"], language);
+            assert_eq!(saved["zoom"], 1.5);
+        }
+    }
+    #[test]
     fn terminal_ligatures_default_off_and_can_be_enabled() {
         use super::*;
         let person: Person = serde_json::from_str("{}").unwrap();
@@ -991,6 +1007,7 @@ mod tests {
     #[test]
     fn the_guide_explains_every_setting() {
         let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), ui_font: Some(String::new()), telemetry: false, clipboard_write: false, copy_on_select: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), ..Person::default() };
+        let all = Person { language: Some("system".into()), ..all };
         let keys: Vec<String> = serde_json::to_value(&all).unwrap().as_object().unwrap().keys().cloned().collect();
         let guide = include_str!("../defaults/AGENTS.md");
         let section = guide.split("## The person").nth(1).and_then(|s| s.split("\n## ").next()).unwrap_or_default();

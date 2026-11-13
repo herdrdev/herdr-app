@@ -1,5 +1,6 @@
 import { expect, test } from "bun:test";
 import { readFile } from "node:fs/promises";
+import { tr } from "./i18n-fixture";
 
 // What a click in the Settings window writes to settings.json, without a window or a core.
 const source = await readFile(new URL("../defaults/frame/settings/main.js", import.meta.url), "utf8");
@@ -19,8 +20,10 @@ const values: Record<string, any> = {
     if (expected !== disk.raw) throw new Error("changed since read");
     disk.raw = text;
   },
+  tr,
 };
-const names = [...source.matchAll(/^import \{([^}]*)\}/gm)].flatMap(m => m[1].split(",").map(n => n.trim()));
+// `import { t as tr }` binds `tr`: the harness passes the bound name, not the exported one.
+const names = [...source.matchAll(/^import \{([^}]*)\}/gm)].flatMap(m => m[1].split(",").map(n => n.trim().split(/\s+as\s+/).pop()!));
 const args = names.map(name => values[name] ?? (() => undefined));
 const Settings = new Function(...names, source.replace(/^import .*;\n/gm, "").replace("export default class Settings", "return class Settings"))(...args);
 

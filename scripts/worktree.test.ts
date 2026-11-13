@@ -1,3 +1,4 @@
+import "./i18n-fixture";
 import { test, expect } from "bun:test";
 import { readFile } from "node:fs/promises";
 
