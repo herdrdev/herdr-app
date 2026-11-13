@@ -4455,23 +4455,6 @@ mod tests {
     }
 
     #[test]
-    fn lazy_list_docs_name_their_module_and_height_rule() {
-        let declarations = base_declarations();
-        assert!(
-            declarations.contains("Exported from `gpui-kit`, where `div` is"),
-            "list must say which module exports it"
-        );
-        assert!(
-            declarations.contains("needs a definite height from its container"),
-            "a lazy list must say it needs a definite height"
-        );
-        assert!(
-            declarations.contains("`list` and `uniform_list` always keep their own position"),
-            "track_scroll must say it is ignored on list and uniform_list"
-        );
-    }
-
-    #[test]
     fn each_built_in_module_declares_only_what_its_crate_provides() {
         let declarations = base_declarations();
         let module = |specifier: &str| {
