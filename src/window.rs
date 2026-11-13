@@ -1459,7 +1459,7 @@ impl AppWindow {
             let (block, addr) = (id.clone(), address.clone());
             let sub = cx.subscribe_in(&view, window, move |this, _, ev: &TerminalEvent, window, cx| match ev {
                 TerminalEvent::Peek(address) => this.peek_terminal(address, window, cx),
-                TerminalEvent::TitleChanged => this.publish(cx),
+                TerminalEvent::TitleChanged | TerminalEvent::ScrollChanged => this.publish(cx),
                 TerminalEvent::SelectionChanged => this.publish_selection(&addr, window, cx),
                 TerminalEvent::Ended => this.terminal_ended(&block, window, cx),
                 TerminalEvent::ContextMenu(at) => {
@@ -1795,11 +1795,13 @@ impl AppWindow {
                     let title = self.terms.get(&p.id).map(|t| t.view.read(cx).title.clone()).or_else(|| {
                         self.live.get(addr).and_then(|r| r.get("title")).and_then(Value::as_str).map(str::to_owned)
                     });
+                    let scroll = self.terms.get(&p.id).and_then(|t| t.view.read(cx).scroll_metrics()).map(|m| m.json());
                     panes.push(json!({
                         "pane": p.id, "terminal": addr, "tab": ctx.id, "title": title.clone().unwrap_or_default(),
                         "cwd": self.cwds.get(addr), "branch": m.folder_info.get(addr).and_then(|f| f.branch.clone()),
                         "status": m.status(addr), "app": a.and_then(|a| a.app.clone()), "program": self.program(addr),
                         "focused": focused, "zoomed": zoomed, "movable": self.pane_movable(&p.id),
+                        "scroll": scroll,
                     }));
                     let Some(status) = m.status(addr) else { continue };
                     agents.push(json!({

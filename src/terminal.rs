@@ -71,12 +71,59 @@ pub enum TerminalEvent {
     Peek(String),
     TitleChanged,
     SelectionChanged,
+    /// History scroll position changed enough for mods that watch `panes().scroll`.
+    ScrollChanged,
     /// The program ended.
     Ended,
     /// Right-click where the program doesn't take the mouse: the pane menu.
     ContextMenu(Point<Pixels>),
     /// Something the person asked for failed: an error toast.
     Notice { title: String, body: String },
+}
+
+/// Rows of scrollback history as Ghostty's scrollbar reports them. `from_bottom`
+/// is 0 when the viewport is at (or past) the end; absent on the alternate screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScrollMetrics {
+    pub total: u64,
+    pub offset: u64,
+    pub len: u64,
+    pub from_bottom: u64,
+}
+
+impl ScrollMetrics {
+    pub fn json(self) -> Value {
+        json!({
+            "total": self.total,
+            "offset": self.offset,
+            "len": self.len,
+            "from_bottom": self.from_bottom,
+        })
+    }
+}
+
+const JUMP_END_MS: f32 = 200.0;
+/// Show the jump control once the viewport is more than this many rows from the end.
+const JUMP_END_THRESHOLD: u64 = 2;
+const JUMP_END_SIZE: f32 = 36.0;
+
+/// Ease toward shown (1) or hidden (0) for the jump-to-end control.
+struct JumpEndReveal {
+    from: f32,
+    to: f32,
+    start: Instant,
+}
+
+impl JumpEndReveal {
+    fn now(&self) -> f32 {
+        let t = (self.start.elapsed().as_secs_f32() * 1000.0 / JUMP_END_MS).clamp(0.0, 1.0);
+        let e = 1.0 - (1.0 - t).powi(3);
+        self.from + (self.to - self.from) * e
+    }
+
+    fn running(&self) -> bool {
+        (self.now() - self.to).abs() > 1e-3
+    }
 }
 
 /// What the canvas closures need, shared outside the entity so prepaint can resize.
@@ -157,6 +204,10 @@ pub struct TerminalView {
     pending_search_nav: Option<bool>,
     search_task: Option<Task<()>>,
     attach_deadline: Instant,
+    /// Last `from_bottom` published via `ScrollChanged` (None = alt-screen / unset).
+    published_from_bottom: Option<u64>,
+    /// Ease for the jump-to-end control (0 hidden, 1 shown).
+    jump_end_reveal: Option<JumpEndReveal>,
     _render_hold: Option<(Instant, Task<()>)>,
     _reader: Option<Task<()>>,
 }
@@ -311,6 +362,8 @@ impl TerminalView {
             pending_search_nav: None,
             search_task: None,
             attach_deadline,
+            published_from_bottom: None,
+            jump_end_reveal: None,
             _render_hold: None,
             _reader: None,
         };
@@ -577,6 +630,7 @@ impl TerminalView {
                 });
             })));
         }
+        self.publish_scroll_if_changed(cx);
         // Output in a terminal nobody sees doesn't redraw the window; it's
         // drawn fresh when shown again. Nor does output that changed nothing
         // on screen (an agent spinning its title).
@@ -988,6 +1042,8 @@ impl TerminalView {
         } else {
             g.vt.scroll_viewport(if up { -(n as isize) } else { n as isize });
         }
+        drop(g);
+        self.publish_scroll_if_changed(cx);
         cx.notify();
     }
 
@@ -1001,7 +1057,34 @@ impl TerminalView {
             ScrollTarget::Top => g.vt.scroll_to_top(),
             ScrollTarget::Bottom => g.vt.scroll_to_bottom(),
         }
+        drop(g);
+        self.publish_scroll_if_changed(cx);
         cx.notify();
+    }
+
+    /// History scroll metrics for mods (`panes().scroll`). None on the alternate screen.
+    pub fn scroll_metrics(&self) -> Option<ScrollMetrics> {
+        let g = self.grid.borrow();
+        if g.vt.alt_screen() {
+            return None;
+        }
+        let sb = g.vt.scrollbar();
+        let from_bottom = sb.total.saturating_sub(sb.offset.saturating_add(sb.len));
+        Some(ScrollMetrics { total: sb.total, offset: sb.offset, len: sb.len, from_bottom })
+    }
+
+    fn publish_scroll_if_changed(&mut self, cx: &mut Context<Self>) {
+        let from_bottom = self.scroll_metrics().map(|m| m.from_bottom);
+        if from_bottom == self.published_from_bottom {
+            return;
+        }
+        self.published_from_bottom = from_bottom;
+        cx.emit(TerminalEvent::ScrollChanged);
+    }
+
+    fn want_jump_end(&self, focused: bool) -> bool {
+        focused
+            && self.scroll_metrics().is_some_and(|m| m.from_bottom > JUMP_END_THRESHOLD)
     }
 
     /// The program tracks the mouse and Shift isn't held (Shift keeps the mouse Herdr's).
@@ -2354,6 +2437,22 @@ impl Render for TerminalView {
             format!("{} matches", search_progress.total)
         };
         let address = self.address.clone();
+        // Jump-to-end: ease in when scrolled into history on the focused pane;
+        // keep mounted while easing out so scale/fade can finish.
+        let want_jump = ended.is_none() && self.want_jump_end(focused);
+        let jump_now = self.jump_end_reveal.as_ref().map_or(0.0, JumpEndReveal::now);
+        if self.jump_end_reveal.as_ref().is_none_or(|r| (r.to - if want_jump { 1.0 } else { 0.0 }).abs() > 1e-3) {
+            self.jump_end_reveal = Some(JumpEndReveal {
+                from: jump_now,
+                to: if want_jump { 1.0 } else { 0.0 },
+                start: Instant::now(),
+            });
+        }
+        let jump_t = self.jump_end_reveal.as_ref().map_or(0.0, JumpEndReveal::now);
+        if self.jump_end_reveal.as_ref().is_some_and(JumpEndReveal::running) {
+            window.request_animation_frame();
+        }
+        let jump_end = (jump_t > 0.01).then(|| (jump_t, address.clone()));
 
         div()
             .id(SharedString::from(format!("term-{}", self.address)))
@@ -2425,6 +2524,7 @@ impl Render for TerminalView {
                         g.vt.scroll_to_row(scrollbar_row_at(sb.total, sb.len, f32::from(track.size.height), min, top));
                     }
                     drop(g);
+                    this.publish_scroll_if_changed(cx);
                     cx.notify();
                     cx.stop_propagation();
                     return;
@@ -2485,6 +2585,7 @@ impl Render for TerminalView {
                                         let top = f32::from(ev.position.y - g.origin.y) - this.scrollbar_grab.unwrap_or(0.0);
                                         g.vt.scroll_to_row(scrollbar_row_at(sb.total, sb.len, track, min, top));
                                         drop(g);
+                                        this.publish_scroll_if_changed(cx);
                                         cx.notify();
                                         return;
                                     }
@@ -2623,6 +2724,37 @@ impl Render for TerminalView {
                         .child(format!("[{why}]")),
                 )
             })
+            .when_some(jump_end, |d, (t, address)| {
+                let size = JUMP_END_SIZE * (0.85 + 0.15 * t);
+                d.child(
+                    div()
+                        .id(SharedString::from(format!("jump-end-{address}")))
+                        .absolute()
+                        .bottom_3()
+                        .right_3()
+                        .w(px(size))
+                        .h(px(size))
+                        .flex()
+                        .items_center()
+                        .justify_center()
+                        .rounded_full()
+                        .border_1()
+                        .border_color(crate::settings::color("border"))
+                        .bg(crate::settings::color("popover"))
+                        .shadow_md()
+                        .opacity(t)
+                        .text_color(crate::settings::color("foreground"))
+                        .text_size(px(16.0))
+                        .cursor_pointer()
+                        .hover(|s| s.bg(crate::settings::color("hover")))
+                        .occlude()
+                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
+                        .on_click(cx.listener(|this, _, _, cx| {
+                            this.scroll_history(ScrollTarget::Bottom, cx);
+                        }))
+                        .child("↓"),
+                )
+            })
     }
 }
 
@@ -2636,6 +2768,15 @@ impl Focusable for TerminalView {
 mod tests {
     use super::{ScrollTarget, pages_to_lines, scroll_target};
     use serde_json::{Value, json};
+
+    #[test]
+    fn scroll_from_bottom_is_zero_at_end_and_grows_into_history() {
+        let at_end = |total: u64, offset: u64, len: u64| total.saturating_sub(offset.saturating_add(len));
+        assert_eq!(at_end(100, 80, 20), 0);
+        assert_eq!(at_end(100, 70, 20), 10);
+        assert_eq!(at_end(20, 0, 20), 0);
+        assert!(at_end(100, 0, 20) > super::JUMP_END_THRESHOLD);
+    }
 
     #[test]
     fn output_turns_preserve_bytes_budget_and_close_order() {

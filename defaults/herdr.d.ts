@@ -189,6 +189,15 @@ export interface AgentInfo {
 /** Terminals whose program reports a status (agents), in space, tab, pane order. Live. */
 export function agents(): AgentInfo[];
 
+/** History scroll as Ghostty reports it. Rows from the top of retained history.
+ *  `from_bottom` is 0 at the end; null on the alternate screen or with no view. */
+export interface PaneScroll {
+  total: number;
+  offset: number;
+  len: number;
+  from_bottom: number;
+}
+
 export interface PaneInfo {
   pane: string;
   /** null for a mod pane (`pane.split {mod}`): then `mod` names it, and only
@@ -209,6 +218,8 @@ export interface PaneInfo {
   zoomed: boolean;
   /** The app's top-center grip can rearrange this pane. False when zoomed or alone. */
   movable: boolean;
+  /** History scroll for a terminal pane's attached view; null for mod panes / alt-screen. Live. */
+  scroll?: PaneScroll | null;
 }
 
 /** Every pane in every tab. A pane header mod finds its own with
