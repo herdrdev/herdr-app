@@ -392,6 +392,8 @@ pub enum Request {
     CloseOverlay { id: String },
     /// The OS window's title; `None` restores the default.
     SetWindowTitle(Option<String>),
+    /// The app icon's badge (the Dock on macOS); `None` clears it.
+    SetBadge(Option<String>),
     Refresh,
     /// From `herdr-app do` / `herdr-app status` (control.rs); answer on `reply`.
     Control { cmd: Value, reply: std::sync::mpsc::Sender<Value> },
@@ -1081,6 +1083,14 @@ fn module(inst: Instance, copy: u64) -> HostModule {
                 _ => None,
             };
             request(Request::SetWindowTitle(title));
+            Ok(HostValue::Null)
+        })
+        .function("setBadge", |a| {
+            let text = match a.get(0) {
+                Some(v) if !v.is_null() => Some(a.string(0)?.to_owned()),
+                _ => None,
+            };
+            request(Request::SetBadge(text));
             Ok(HostValue::Null)
         })
         .function("terminals", reader(reads.clone(), "terminals", |s| &s.terminals))
