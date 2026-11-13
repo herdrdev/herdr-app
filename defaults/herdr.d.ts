@@ -281,6 +281,12 @@ export function window(): {
  *  again when your mod starts. Call it when the title changes, not on every render. */
 export function setWindowTitle(title: string | null): null;
 
+/** Sets the badge on the app's icon: the red label on the macOS Dock icon, e.g. how many agents
+ *  need you. The last call wins, whichever mod made it; null or "" clears it. Other platforms
+ *  ignore it for now. It doesn't outlive the app, so set it again when your mod starts. Call it
+ *  when the text changes, not on every render. */
+export function setBadge(text: string | null): null;
+
 /** For a floating mod: where it sits now. `vertical` on the left/right edges, horizontal on
  *  top/bottom; while dragged, where it would land. `hovered` is true while the pointer is on it
  *  (or it's dragged); a `peek` drawer is open then. Null for mods that don't float. */

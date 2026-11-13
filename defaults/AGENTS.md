@@ -1097,6 +1097,9 @@ All of it is in `herdr.d.ts`. In short:
 - Window title: `setWindowTitle(title)` sets the OS window's title, which window switchers,
   taskbars and time trackers read. The last call wins; `null` restores `Herdr`. Call it when the
   title changes, not on every render.
+- App icon badge: `setBadge(text)` puts `text` on the app's Dock icon (macOS; other platforms
+  ignore it), e.g. `setBadge(blocked ? String(blocked) : null)`. The last call wins; `null` or `""`
+  clears it.
 - `notify({ ..., action: { name, args } })`: the toast runs the command when clicked.
 - This copy: `props()`, `shared(key)` / `setShared(key, value)` (every mod
   sees it; setting re-renders all), `nextCommand()` (key commands for this
