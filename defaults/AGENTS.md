@@ -77,7 +77,7 @@ first frame or during GPU recovery it reports an error instead of a PNG.
 |---|---|---|
 | `layouts/<name>.json` | the window and its whole look: blocks, theme, fonts, backgrounds, pane frames; one file per layout (`main`, `terminals`, `win98`, any you add) | live |
 | `keys.json` | what every key does | live |
-| `settings.json` | the person: zoom, sounds, fonts for every layout | live |
+| `settings.json` | the person: zoom, sounds, fonts for every layout, worktree directory | live |
 | `mods/<name>/` | panels: small JavaScript programs | live (hot reload) |
 | `programs.json` | how programs show (name, icon, tile), on top of the built-in table | live |
 | `icons/` | the shipped program icons | written by Herdr (put your own elsewhere) |
@@ -709,6 +709,15 @@ What's about the user, never a look:
 - `core`: the herdr-core binary to use, when it isn't where Herdr looks
   (PATH, the login shell's PATH, `~/.local/bin`, Homebrew, mise, Nix,
   cargo). Read at start.
+- `worktrees`: `{ "directory": "~/Developer/worktrees" }` sets where the shipped
+  New worktree dialog creates checkouts: `<directory>/<repo>/<branch>` (branch
+  slashes become dashes). Default: `~/.herdr/worktrees`. Use an absolute path or
+  `~` / `~/...`; Windows paths work too. The setting lives in this app's
+  settings.json; the path and `~` refer to the space's machine, including remote
+  spaces. Read when New worktree opens; existing checkouts are not moved, and
+  Open / Remove worktree still use Git's checkout list. No mod clones needed.
+  The app does not read the TUI's config.toml; set its `[worktrees] directory`
+  to the same place if both should create checkouts together.
 - `terminal_line_height` (default 1, 0.8..2) and `terminal_scroll_speed`
   (default 1, 0.1..5): terminal row height and wheel/trackpad speed, used
   where the layout leaves them unset.
@@ -886,8 +895,8 @@ has 124 programs (agents, editors, runtimes, tools, databases, infra);
   action: "new" | "open" | "remove"}` (the repo: folder, else where the
   space's first terminal is), or with `{branch, tab?, argv?}` to make one at once with
   that first tab; checkouts go to
-  `~/.herdr/worktrees/<repo>/<branch>` on the space's machine, a constant
-  at its top; the
+  `<worktrees.directory>/<repo>/<branch>` on the space's machine (default
+  `~/.herdr/worktrees`; see settings.json above); the
   `spaces` sidebar nests worktree spaces under their repo's and shows each
   space's repo, branch, ahead/behind and uncommitted changes). Shipped mods
   are Herdr's; duplicate with `mod.clone` before editing.
