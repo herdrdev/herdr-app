@@ -2626,6 +2626,9 @@ mod tests {
         assert_eq!(colors, [Some(Rgb(255, 0, 0)), Some(Rgb(0, 255, 0)), Some(Rgb(255, 0, 0)), Some(theme().palette16[1]), None, None]);
         assert!(frame.rows[1][..5].iter().all(|c| c.underline == Some(Underline::Curly) && c.fg == Rgb(1, 2, 3)));
         assert_eq!(frame.rows[1][5].underline, None);
+        // Changing the palette also recolors underlines in cached rows.
+        vt.write(b"\x1b]4;1;rgb:00/ff/00\x1b\\");
+        assert_eq!(vt.frame().rows[1][3].underline_color, Some(Rgb(0, 255, 0)));
 
         // Reverse video swaps the text's colors, not the underline's.
         vt.write(b"\r\n\x1b[7;4;58:2::9:8:7mr\x1b[0m");
