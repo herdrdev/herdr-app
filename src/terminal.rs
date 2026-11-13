@@ -2357,6 +2357,7 @@ impl Render for TerminalView {
 
         div()
             .id(SharedString::from(format!("term-{}", self.address)))
+            .role(Role::Terminal)
             .track_focus(&self.focus)
             .key_context("Terminal")
             .size_full()
