@@ -112,6 +112,16 @@ test("a tab Herdr named after its agent follows the agent's session title", () =
   expect(label({ name: "Claude Code", named: true }, { ...claude, title: "renamed-task" })).toBe("renamed-task");
 });
 
+test("an empty OSC title published as the terminal address keeps the program label", () => {
+  for (const terminal of ["t2", "remote/t2"]) {
+    const lead = { ...claude, terminal, title: terminal };
+    expect(label({ name: "2", named: false }, lead)).toBe("Claude Code");
+    expect(label({ name: "Claude Code", named: true }, lead)).toBe("Claude Code");
+    expect(label({ name: "fix login", named: true }, lead)).toBe("fix login");
+    expect(label({ name: "2", named: false }, { ...lead, title: "renamed-task" })).toBe("renamed-task");
+  }
+});
+
 test("a name the person gave stays", () => {
   expect(label({ name: "fix login", named: true }, claude)).toBe("fix login");
 });
