@@ -424,8 +424,12 @@ export default class Settings extends View {
         this.picking = open ? null : which;
         this.filter = "";
         this.fontInput.set_value("");
-        if (this.picking) this.fontInput.focus();
-        else this.handle.focus();
+        if (this.picking) {
+          this.fontInput.focus();
+          // The field is drawn with the list just now: as in the palette, focus
+          // it again once it is there, so typing can find a font by name.
+          cx.timer.after(600, () => { if (this.picking === which) this.fontInput.focus(); });
+        } else this.handle.focus();
         cx.notify();
       })
       .child(div().font_family(family).text_size(13.5).text_color(t.foreground).child(family));
@@ -435,7 +439,9 @@ export default class Settings extends View {
 
   fontList(t, which, def) {
     const q = this.filter.toLowerCase();
-    const matches = fonts().filter((f) => f.toLowerCase().includes(q)).slice(0, 200);
+    // Every family: a font installed since the last look can sort anywhere, and
+    // a list cut short hides it until the person thinks to type its name.
+    const matches = fonts().filter((f) => f.toLowerCase().includes(q));
     const choose = (name, cx) => {
       this.change((p) => {
         if (name === null) delete p[which];
