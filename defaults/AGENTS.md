@@ -62,7 +62,7 @@ commands. They're rewritten on every start to match this version.
 
 ## Seeing the window
 
-`herdr-app shot [file.png]` saves the last rendered window frame as a PNG
+`herdr-app shot [file.png]` saves the current window frame as a PNG
 and prints its absolute path (default: `herdr-shot.png` in your current
 folder). Use it when debugging mod UIs: inspect spacing, colors, terminal
 images, overlays, popups and floats. It captures the app, not the desktop,

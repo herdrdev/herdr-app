@@ -175,7 +175,7 @@ untouched. Never call a mod done without a passing check. Then confirm it is
 shown correctly in the running window with `shot`; don't claim a visual
 check you haven't made.
 
-`herdr-app shot [file.png]` saves the window's last frame and prints its
+`herdr-app shot [file.png]` saves the window's current frame and prints its
 absolute path (default: `herdr-shot.png` in your current folder). It is the
 app's own rendering at full pixel size: terminals, images, overlays and
 floats included, even when the window is covered or minimized. No screen

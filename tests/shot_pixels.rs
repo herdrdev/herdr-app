@@ -129,6 +129,121 @@ fn check(window: &mut Window, cx: &mut App) {
     );
 }
 
+struct CaptureScene {
+    color: u32,
+    cascade_on_next_frame: bool,
+    cascade_on_defer: bool,
+}
+
+impl CaptureScene {
+    fn new(cx: &mut Context<Self>, model: &Entity<u32>) -> Self {
+        cx.observe(model, |this, model, cx| {
+            this.color = *model.read(cx);
+            cx.notify();
+        })
+        .detach();
+        Self {
+            color: 0xff0000,
+            cascade_on_next_frame: false,
+            cascade_on_defer: false,
+        }
+    }
+}
+
+impl Render for CaptureScene {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        if self.cascade_on_next_frame {
+            self.cascade_on_next_frame = false;
+            let view = cx.entity();
+            window.on_next_frame(move |_, cx| {
+                view.update(cx, |this, cx| {
+                    this.color = 0xffff00;
+                    cx.notify();
+                });
+            });
+        }
+        if self.cascade_on_defer {
+            self.cascade_on_defer = false;
+            let view = cx.entity();
+            cx.defer(move |cx| {
+                view.update(cx, |this, cx| {
+                    this.color = 0x00ffff;
+                    cx.notify();
+                });
+            });
+        }
+        div().size_full().bg(rgb(self.color))
+    }
+}
+
+fn assert_solid_color<C: AppContext>(
+    window: WindowHandle<CaptureScene>,
+    cx: &mut C,
+    expected: [u8; 4],
+    label: &str,
+) {
+    let image = window
+        .render_current_to_image(cx)
+        .unwrap_or_else(|err| panic!("{label}: capture failed: {err:#}"));
+    assert_eq!(image.get_pixel(4, 4).0, expected, "{label}");
+    assert_eq!(
+        image,
+        window.render_current_to_image(cx).unwrap(),
+        "{label}: repeat capture must be idempotent"
+    );
+}
+
+fn check_capture_settles_pending_updates<C: AppContext>(
+    window: WindowHandle<CaptureScene>,
+    model: Entity<u32>,
+    cx: &mut C,
+) {
+    assert_solid_color(window, cx, [255, 0, 0, 255], "initial frame");
+
+    window
+        .update(cx, |view, _, cx| {
+            view.color = 0x00ff00;
+            cx.notify();
+        })
+        .unwrap();
+    assert_solid_color(window, cx, [0, 255, 0, 255], "cx.notify without manual draw");
+
+    model.update(cx, |color, cx| {
+        *color = 0x0000ff;
+        cx.notify();
+    });
+    assert_solid_color(window, cx, [0, 0, 255, 255], "observed model cx.notify");
+
+    window
+        .update(cx, |_, window, cx| {
+            let view = cx.entity();
+            window.on_next_frame(move |_, cx| {
+                view.update(cx, |this, cx| {
+                    this.color = 0x8040c0;
+                    cx.notify();
+                });
+            });
+        })
+        .unwrap();
+    assert_solid_color(window, cx, [0x80, 0x40, 0xc0, 255], "pending on_next_frame callback");
+
+    window
+        .update(cx, |view, _, cx| {
+            view.cascade_on_next_frame = true;
+            cx.notify();
+        })
+        .unwrap();
+    assert_solid_color(window, cx, [255, 255, 0, 255], "mid-render on_next_frame cascade");
+
+    window
+        .update(cx, |view, _, cx| {
+            view.cascade_on_defer = true;
+            cx.notify();
+        })
+        .unwrap();
+    assert_solid_color(window, cx, [0, 255, 255, 255], "mid-render cx.defer cascade");
+}
+
 #[cfg(not(windows))]
 fn headless() {
     let mut cx = HeadlessAppContext::with_platform(
@@ -137,6 +252,27 @@ fn headless() {
         gpui_platform::current_headless_renderer,
     );
     markdown_selection_pixels(&mut cx);
+    let mut model_slot = None;
+    let capture_window = cx
+        .open_window(size(px(64.), px(48.)), |window, cx| {
+            let err = window.render_to_image().unwrap_err().to_string();
+            assert!(err.contains("no window frame has been rendered yet"), "{err}");
+            let model = cx.new(|_| 0xff0000);
+            model_slot = Some(model.clone());
+            cx.new(|cx| CaptureScene::new(cx, &model))
+        })
+        .unwrap();
+    check_capture_settles_pending_updates(capture_window, model_slot.unwrap(), &mut cx);
+    capture_window
+        .update(&mut cx, |view, window, cx| {
+            view.color = 0x112233;
+            cx.notify();
+            window.resize(size(px(90.), px(40.)));
+        })
+        .unwrap();
+    let resized = capture_window.render_current_to_image(&mut cx).unwrap();
+    assert_eq!(resized.dimensions(), (180, 80));
+    assert_eq!(resized.get_pixel(170, 70).0, [0x11, 0x22, 0x33, 255]);
     // TestPlatform uses 2x HiDPI; these physical widths force row padding.
     for width in [129., 131.] {
         let window = cx
@@ -220,9 +356,33 @@ fn native() {
                 |_, cx| cx.new(|_| Scene),
             )
             .unwrap();
+        let mut model_slot = None;
+        let capture_window = cx
+            .open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                        point(px(0.), px(0.)),
+                        size(px(80.), px(60.)),
+                    ))),
+                    show: false,
+                    focus: false,
+                    titlebar: None,
+                    ..Default::default()
+                },
+                |window, cx| {
+                    let err = window.render_to_image().unwrap_err().to_string();
+                    assert!(err.contains("no window frame has been rendered yet"), "{err}");
+                    let model = cx.new(|_| 0xff0000);
+                    model_slot = Some(model.clone());
+                    cx.new(|cx| CaptureScene::new(cx, &model))
+                },
+            )
+            .unwrap();
+        let model = model_slot.unwrap();
         cx.spawn(async move |cx| {
             cx.update_window(window.into(), |_, window, cx| check(window, cx))
                 .unwrap();
+            check_capture_settles_pending_updates(capture_window, model, cx);
             cx.update(|cx| cx.quit());
         })
         .detach();
