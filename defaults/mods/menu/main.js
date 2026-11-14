@@ -5,7 +5,7 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { run, props, closeOverlay, openOverlay, theme, keys, terminals, spaces, panes, exec } from "herdr";
+import { run, props, closeOverlay, openOverlay, theme, themes, keys, terminals, spaces, panes, exec } from "herdr";
 
 // Where a space is now: its first terminal's live folder, else where it was made.
 function place(s) {
@@ -71,16 +71,15 @@ function items(p, git) {
       return [
         ["New space", "space.new", {}],
         ["Keybinds", "app.help", {}],
-        ["Theme: graphite", "app.theme", { name: "graphite" }],
-        ["Theme: ink", "app.theme", { name: "ink" }],
-        ["Theme: moss", "app.theme", { name: "moss" }],
-        ["Theme: atom one dark", "app.theme", { name: "atom-one-dark" }],
+        ["Theme", "menu.themes", {}],
       ];
+    case "theme":
+      return themes().map((t) => [t.name[0].toUpperCase() + t.name.slice(1).replaceAll("-", " "), "app.theme", { name: t.name }]);
   }
 }
 
 function menuIcon(command) {
-  const name = command.endsWith(".close") ? "x" : command.endsWith(".rename") ? "square-pen" : command.endsWith(".new") ? "plus" : command === "worktree" ? "git-branch" : command === "app.help" ? "terminal" : command === "app.theme" ? "settings" : command === "pane.split" ? "panel-right" : command === "pane.zoom" ? "square" : "terminal";
+  const name = command.endsWith(".close") ? "x" : command.endsWith(".rename") ? "square-pen" : command.endsWith(".new") ? "plus" : command === "worktree" ? "git-branch" : command === "app.help" ? "terminal" : command === "app.theme" || command === "menu.themes" ? "settings" : command === "pane.split" ? "panel-right" : command === "pane.zoom" ? "square" : "terminal";
   return `mods/workspace-chrome/${name}.svg`;
 }
 
@@ -113,6 +112,7 @@ export default class Menu extends View {
     if (!it) return;
     closeOverlay(props()?.overlay);
     if (it[1] === "worktree") openOverlay({ mod: "worktree", kind: "dialog", ...(it[2].action === "open" ? { width: 560, height: 480 } : { width: 440, height: 260 }), props: it[2] });
+    else if (it[1] === "menu.themes") { closeOverlay(props()?.overlay); openOverlay({ mod: "menu", kind: "popup", width: 220, height: 0.75, props: { tab: "theme" } }); }
     else run(it[1], it[2]);
   }
 
