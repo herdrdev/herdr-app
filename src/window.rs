@@ -290,6 +290,18 @@ struct PendingTerminalChange {
 /// The slot of a terminal shown in a pane in place of its own (`<pane>#swap`).
 const SWAP: &str = "#swap";
 
+/// The share of the script VM's heap ceiling past which a mod edit starts a
+/// new VM instead of reloading into the old one (`files_changed`).
+const RESTART_MODS_AT: f64 = 0.75;
+
+/// QuickJS reports allocation failures both as exceptions and as host errors.
+fn out_of_memory(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        let message = cause.to_string();
+        message.contains("out of memory") || message.contains("Allocation failed while creating object")
+    })
+}
+
 struct Copy {
     inst: Instance,
     /// Its number for commands (`mods::prepare_load`); 0 if it never loaded.
@@ -359,6 +371,10 @@ struct Watched {
 pub struct AppWindow {
     core: Arc<Core>,
     runtime: Option<Rc<ShellRuntime>>,
+    restarting_mods: bool,
+    load_recovery: Option<Instant>,
+    failed_loads: HashSet<String>,
+    mod_stamps: RefCell<HashMap<String, crate::files::ModStamp>>,
     chrome: Node,
     /// Which layout `chrome` is (`layouts/<name>.json`).
     layout_name: String,
@@ -475,8 +491,12 @@ pub struct AppWindow {
 
 impl AppWindow {
     pub fn new(core: Arc<Core>, requests: async_channel::Receiver<Request>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let runtime = ShellRuntime::new(cx).map_err(|e| tracing::error!("script runtime failed, mods are off: {e:#}")).ok();
         let file_events = crate::files::watch(&mods::app_dir(), #[cfg(test)] cx.background_executor().clone());
+        Self::with_file_events(core, requests, file_events, window, cx)
+    }
+
+    fn with_file_events(core: Arc<Core>, requests: async_channel::Receiver<Request>, file_events: Option<crate::files::FileEvents>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let runtime = ShellRuntime::new(cx).map_err(|e| tracing::error!("script runtime failed, mods are off: {e:#}")).ok();
         if let (Some(runtime), Some(events)) = (&runtime, &file_events) {
             runtime.set_source_revision_provider(events.revision_provider());
         }
@@ -485,6 +505,10 @@ impl AppWindow {
         let mut w = AppWindow {
             core,
             runtime,
+            restarting_mods: false,
+            load_recovery: None,
+            failed_loads: HashSet::new(),
+            mod_stamps: RefCell::new(HashMap::new()),
             chrome: default_layout("main"),
             layout_name: "main".into(),
             agent: None,
@@ -1677,7 +1701,16 @@ impl AppWindow {
 
     fn publish_selection(&self, address: &str, window: &Window, cx: &mut Context<Self>) {
         let selection = self.shown_terminal_view(address, window, cx).ok().and_then(|view| view.read(cx).selection());
-        if mods::publish_selection(address, json!(selection)) {
+        let changed = mods::publish_selection(address, json!(selection));
+        self.publish_focused_selection(window, cx);
+        if changed {
+            self.refresh_snapshot_mods(cx);
+        }
+    }
+
+    fn publish_focused_selection(&self, window: &Window, cx: &mut Context<Self>) {
+        let selection = self.focused_terminal(window, cx).and_then(|t| t.view.read(cx).selection());
+        if mods::publish_focused_selection(json!(selection)) {
             self.refresh_snapshot_mods(cx);
         }
     }
@@ -1718,6 +1751,8 @@ impl AppWindow {
             return copy;
         };
         copy.id = mods::prepare_load(&copy.inst);
+        self.mod_stamps.borrow_mut().entry(copy.inst.name.clone()).or_insert_with(|| crate::files::mod_stamp(&folder.dir));
+        let near_limit = runtime.memory_share() >= RESTART_MODS_AT;
         match runtime.try_load(&folder.dir, window, cx) {
             Ok(root) => {
                 if self.file_events.is_none() {
@@ -1728,6 +1763,17 @@ impl AppWindow {
             Err(e) => {
                 tracing::warn!("mod {} failed to load: {e:#}", copy.inst.name);
                 copy.error = Some(format!("{e:#}"));
+                if !self.restarting_mods && (near_limit || runtime.memory_share() >= RESTART_MODS_AT || out_of_memory(&e)) {
+                    // Finish mounting before retrying all copies. Other failures on
+                    // this VM must not restart the replacement again.
+                    let failed = Rc::downgrade(runtime);
+                    let name = copy.inst.name.clone();
+                    cx.defer_in(window, move |this, window, cx| {
+                        if failed.upgrade().is_some_and(|failed| this.runtime.as_ref().is_some_and(|current| Rc::ptr_eq(&failed, current))) {
+                            this.recover_mods(&BTreeSet::from([name]), window, cx);
+                        }
+                    });
+                }
             }
         }
         copy
@@ -4045,23 +4091,130 @@ impl AppWindow {
         if changed.iter().any(|p| p.parent() == Some(std::path::Path::new("layouts"))) {
             crate::macos::refresh_menus(cx);
         }
-        let edited: BTreeSet<String> = changed.iter().filter_map(|p| crate::files::mod_of(p)).collect();
+        let changed_mods: BTreeSet<String> = changed.iter().filter_map(|p| crate::files::mod_of(p)).collect();
+        let edited: BTreeSet<String> = changed_mods.into_iter().filter(|name| {
+            let Some(folder) = self.folders.get(name) else { return true };
+            let stamp = crate::files::mod_stamp(&folder.dir);
+            // An incomplete scan cannot prove that the source is unchanged.
+            stamp.is_none() || self.mod_stamps.borrow_mut().insert(name.clone(), stamp.clone()).as_ref() != Some(&stamp)
+        }).collect();
         if edited.is_empty() {
             return;
         }
+        self.failed_loads.retain(|name| !edited.contains(name));
         // Copies that load now (a new folder, a fixed failed load) already run the
         // saved code: reloading them too would start them twice.
         let loaded: BTreeSet<u64> = self.copies.values().filter(|c| c.root.is_some()).map(|c| c.id).collect();
+        let count = self.copies.len();
+        self.copies.retain(|_, c| c.root.is_some() || !edited.contains(&c.inst.name));
+        let retry = self.copies.len() != count;
         self.sync_folders(window, cx);
+        if retry {
+            self.sync(window, cx);
+        }
         let Some(runtime) = self.runtime.clone() else { return };
+        // A reload keeps the code it replaces: QuickJS frees evaluated modules
+        // only with the whole context. Before the window's VM runs out, start a
+        // new one, which also loads the saved code.
+        if runtime.memory_share() >= RESTART_MODS_AT
+            && self.copies.values().any(|c| edited.contains(&c.inst.name) && loaded.contains(&c.id))
+        {
+            if self.load_recovery.is_none_or(|last| last.elapsed() >= Duration::from_secs(60)) && self.copies.values().all(|c| c.error.is_none()) {
+                self.restart_mods(window, cx);
+                return;
+            }
+            if self.recover_mods(&edited, window, cx) {
+                return;
+            }
+        }
+        let mut exhausted = BTreeSet::new();
         for copy in self.copies.values_mut().filter(|c| edited.contains(&c.inst.name) && loaded.contains(&c.id)) {
             let Some(root) = &copy.root else { continue };
-            let error = runtime.reload_now(root, window, cx).err().map(|e| format!("{e:#}"));
+            let near_limit = runtime.memory_share() >= RESTART_MODS_AT;
+            let error = runtime.reload_now(root, window, cx).err();
+            if error.as_ref().is_some_and(|e| near_limit || out_of_memory(e) || runtime.memory_share() >= RESTART_MODS_AT) {
+                exhausted.insert(copy.inst.name.clone());
+            }
+            let error = error.map(|e| format!("{e:#}"));
             if let Some(e) = &error {
                 tracing::warn!("mod reload failed: {e}");
             }
             copy.error = error;
         }
+        if !exhausted.is_empty() {
+            self.recover_mods(&exhausted, window, cx);
+        }
+    }
+
+    fn recover_mods(&mut self, names: &BTreeSet<String>, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.load_recovery.is_some_and(|last| last.elapsed() < Duration::from_secs(60))
+            || names.iter().all(|name| self.failed_loads.contains(name))
+        {
+            return false;
+        }
+        if !self.restart_mods(window, cx) {
+            return false;
+        }
+        self.load_recovery = Some(Instant::now());
+        true
+    }
+
+    /// The window's mods on a new VM, as when the window opens: every copy
+    /// closes on the old one and the shown ones load again, open popups,
+    /// dialogs and windows too (toasts close). Hidden copies start fresh when
+    /// shown. Terminals, the core and the layout stay.
+    fn restart_mods(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let fresh = match ShellRuntime::replace_default(cx) {
+            Ok(fresh) => fresh,
+            Err(e) => {
+                tracing::error!("could not start a new script runtime: {e:#}");
+                return false;
+            }
+        };
+        tracing::warn!("mod memory was nearly used up; restarting this window's mods");
+        if let Some(events) = &self.file_events {
+            fresh.set_source_revision_provider(events.revision_provider());
+        }
+        // A toast would show (or send) its notification again: it closes.
+        let toasts: Vec<String> = self.overlays.iter().filter(|o| o.kind == OverlayKind::Toast).map(|o| o.id.clone()).collect();
+        for id in toasts {
+            self.remove_overlay(&id, window, cx);
+        }
+        // An overlay's own mod loads when it opens, not in `sync`: it loads
+        // again here, in its frame.
+        let reopen: Vec<(String, Instance, bool)> = self
+            .overlays
+            .iter()
+            .filter(|o| o.layout.is_none())
+            .filter_map(|o| self.copies.get(&o.slot).map(|c| (o.slot.clone(), c.inst.clone(), o.fit)))
+            .collect();
+        let slots: Vec<String> = self.copies.keys().cloned().collect();
+        for slot in slots {
+            self.remove_copy(&slot, window, cx);
+        }
+        self.runtime = Some(fresh);
+        // A failure in the fresh VM gets reported, not retried forever.
+        self.restarting_mods = true;
+        // The frame takes the keyboard first, as when it opened.
+        if let Some(focus) = self.overlays.iter().rev().find(|o| o.kind.modal_keys()).map(|o| o.focus.clone()) {
+            focus.focus(window, cx);
+        }
+        for (slot, inst, fit) in reopen {
+            let copy = self.load(inst, window, cx);
+            if fit
+                && let Some(root) = &copy.root
+            {
+                root.update(cx, |r, cx| r.set_fit_content(true, cx));
+            }
+            self.copies.insert(slot, copy);
+        }
+        self.sync(window, cx);
+        self.restarting_mods = false;
+        if self.copies.values().any(|c| c.error.is_some()) {
+            self.load_recovery = Some(Instant::now());
+            self.failed_loads.extend(self.copies.values().filter(|c| c.error.is_some()).map(|c| c.inst.name.clone()));
+        }
+        true
     }
 
     fn sync_folders(&mut self, window: &mut Window, cx: &mut Context<Self>) {
@@ -4073,6 +4226,7 @@ impl AppWindow {
         let added = found.keys().any(|k| !self.folders.contains_key(k));
         let removed = self.folders.keys().any(|k| !found.contains_key(k));
         let fresh: Vec<Found> = found.values().filter(|f| !self.seen.contains(&f.id)).cloned().collect();
+        self.mod_stamps.borrow_mut().retain(|name, _| found.contains_key(name));
         self.folders = found;
 
         // Copies that failed get another try when their folder changes; loaded ones hot-reload.
@@ -5045,6 +5199,7 @@ impl Render for AppWindow {
             self.synced_model_pane = self.model.focused_pane();
             self.publish(cx);
         }
+        self.publish_focused_selection(window, cx);
         self.tick_floats(window);
         self.apply_titlebar(window);
         self.apply_blur(window);
@@ -5069,6 +5224,11 @@ impl Render for AppWindow {
             .text_color(c("foreground"))
             .font_family(settings::get().ui_font_family.clone())
             .on_action(cx.listener(|this, a: &ShellAction, w, cx| {
+                #[cfg(any(target_os = "macos", test))]
+                if matches!(a.id(), "terminal.copy" | "terminal.paste")
+                    && crate::macos::dispatch_edit(a, this.terms.values().any(|t| t.view.read(cx).owns_keyboard_focus(w, cx)), w, cx) {
+                    return;
+                }
                 // Nothing selected: the copy chord goes to the program (#216).
                 if a.id() == "terminal.copy" {
                     if !this.copy_key(w, cx) {
@@ -5812,9 +5972,348 @@ mod tests {
         let requests = crate::mods::install_policy();
         crate::mods::set_shared("layout".into(), json!("test"));
         crate::mods::set_shared("frame.welcomed".into(), json!("test"));
-        let (view, cx) = cx.add_window_view(|window, cx| super::AppWindow::new(crate::hc::offline(), requests, window, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| super::AppWindow::with_file_events(crate::hc::offline(), requests, Some(crate::files::FileEvents::for_test(home.clone())), window, cx));
         assert_eq!(view.update(cx, |this, _| this.layout_name.clone()), "test");
         (view, cx)
+    }
+
+    /// A mod whose every version keeps `mib` MiB alive at module scope, in
+    /// 1 MiB strings so no single allocation is large.
+    fn heavy_mod(version: usize, mib: usize) -> String {
+        format!("import {{ View, div }} from \"gpui-kit\";\n\
+            const kept = Array.from({{ length: {mib} }}, (_, i) => \"{version}-\".padEnd(1 << 20, String(i)));\n\
+            export default class Heavy extends View {{ render() {{ return div().child(String(kept.length)); }} }}\n")
+    }
+
+    /// Saves `heavy`'s main.js as `version` and lets the window apply it, then
+    /// returns the mounted copies and their errors.
+    fn edit_heavy(view: &gpui::Entity<super::AppWindow>, version: usize, mib: usize, cx: &mut gpui::VisualTestContext) -> (usize, Vec<String>) {
+        std::fs::write(crate::mods::app_dir().join("mods/heavy/main.js"), heavy_mod(version, mib)).unwrap();
+        cx.update(|window, cx| view.update(cx, |this, cx| this.files_changed(vec!["mods/heavy/main.js".into()], window, cx)));
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        view.update(cx, |this, _| (
+            this.copies.values().filter(|c| c.root.is_some()).count(),
+            this.copies.values().filter_map(|c| c.error.clone()).collect(),
+        ))
+    }
+
+    fn open_heavy(cx: &mut gpui::TestAppContext, mib: usize) -> (gpui::Entity<super::AppWindow>, &mut gpui::VisualTestContext) {
+        let (view, cx) = open_window(cx, "heavy", &heavy_mod(0, mib), serde_json::json!({ "id": "heavy", "type": "block", "content": { "mod": "heavy" } }));
+        cx.run_until_parked();
+        assert_eq!(view.update(cx, |this, _| this.copies.values().filter(|c| c.root.is_some()).count()), 1, "the mod loads");
+        (view, cx)
+    }
+
+    #[test]
+    fn repeated_mod_edits_start_a_new_vm_before_the_old_one_fills() {
+        in_own_process("edits_restart_full_vm");
+    }
+
+    /// QuickJS frees evaluated modules only with their context, so each edit
+    /// leaves the replaced version in the window's VM. At 16 MiB a version the
+    /// 256 MiB ceiling fails a reload within twenty edits unless the window
+    /// moves its mods to a new VM first. The full VM and its code cache go away.
+    #[gpui::test]
+    fn edits_restart_full_vm(cx: &mut gpui::TestAppContext) {
+        if !running_alone("edits_restart_full_vm") {
+            return;
+        }
+        let (view, cx) = open_heavy(cx, 16);
+        let first = view.update(cx, |this, _| std::rc::Rc::downgrade(this.runtime.as_ref().unwrap()));
+        for version in 1..=40 {
+            assert_eq!(edit_heavy(&view, version, 16, cx), (1, vec![]), "edit {version}");
+        }
+        assert!(first.upgrade().is_none(), "the replaced VM, with its code cache, is freed");
+        let share = view.update(cx, |this, _| this.runtime.as_ref().unwrap().memory_share());
+        assert!(share < super::RESTART_MODS_AT, "the current VM has room: {share}");
+    }
+
+    #[test]
+    fn a_reload_that_runs_out_of_memory_starts_a_new_vm() {
+        in_own_process("out_of_memory_restarts_vm");
+    }
+
+    /// One version fills more than half the VM, so the first edit cannot fit
+    /// beside it. The reload fails with out of memory. The window then loads
+    /// the saved code in a new VM instead of leaving the failed view.
+    #[gpui::test]
+    fn out_of_memory_restarts_vm(cx: &mut gpui::TestAppContext) {
+        if !running_alone("out_of_memory_restarts_vm") {
+            return;
+        }
+        let (view, cx) = open_heavy(cx, 140);
+        let first = view.update(cx, |this, _| std::rc::Rc::downgrade(this.runtime.as_ref().unwrap()));
+        assert!(view.update(cx, |this, _| this.runtime.as_ref().unwrap().memory_share()) < super::RESTART_MODS_AT);
+        assert_eq!(edit_heavy(&view, 1, 140, cx), (1, vec![]));
+        assert!(first.upgrade().is_none(), "the exhausted VM is freed");
+    }
+
+    #[test]
+    fn reload_errors_share_the_load_recovery_cap() {
+        in_own_process("reload_recovery_cap");
+    }
+
+    #[gpui::test]
+    fn reload_recovery_cap(cx: &mut gpui::TestAppContext) {
+        if !running_alone("reload_recovery_cap") {
+            return;
+        }
+        let (view, cx) = open_heavy(cx, 140);
+        assert_eq!(edit_heavy(&view, 1, 140, cx), (1, vec![]));
+        let fresh = view.update(cx, |this, _| std::rc::Rc::downgrade(this.runtime.as_ref().unwrap()));
+        let (loaded, errors) = edit_heavy(&view, 2, 140, cx);
+        assert_eq!(loaded, 1, "a failed reload keeps the previous view");
+        assert_eq!(errors.len(), 1, "the capped reload error is reported");
+        view.update(cx, |this, _| {
+            assert!(std::rc::Rc::ptr_eq(&fresh.upgrade().unwrap(), this.runtime.as_ref().unwrap()));
+            this.load_recovery = Some(std::time::Instant::now() - std::time::Duration::from_secs(61));
+        });
+        assert_eq!(edit_heavy(&view, 3, 140, cx), (1, vec![]));
+        assert!(fresh.upgrade().is_none(), "a later edit can recover again");
+    }
+
+    #[test]
+    fn unchanged_mod_events_do_not_restart_a_healthy_vm() {
+        in_own_process("unchanged_mod_events");
+    }
+
+    #[gpui::test]
+    fn unchanged_mod_events(cx: &mut gpui::TestAppContext) {
+        if !running_alone("unchanged_mod_events") {
+            return;
+        }
+        let (view, cx) = open_heavy(cx, 200);
+        let first = view.update(cx, |this, _| std::rc::Rc::downgrade(this.runtime.as_ref().unwrap()));
+        std::fs::write(crate::mods::app_dir().join("mods/heavy/gpui-kit.d.ts"), "generated").unwrap();
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.files_changed(vec!["mods/heavy".into(), "mods/heavy/main.js".into()], window, cx);
+        }));
+        cx.run_until_parked();
+        view.update(cx, |this, _| {
+            assert!(std::rc::Rc::ptr_eq(&first.upgrade().unwrap(), this.runtime.as_ref().unwrap()));
+            assert!(this.copies.values().all(|c| c.error.is_none()));
+        });
+        assert_eq!(edit_heavy(&view, 1, 200, cx), (1, vec![]));
+        assert!(first.upgrade().is_none(), "a real edit refreshes the healthy full VM");
+        assert_eq!(edit_heavy(&view, 2, 200, cx), (1, vec![]), "healthy proactive refreshes are not capped");
+    }
+
+    #[test]
+    fn failed_mass_mounts_retry_on_a_fresh_vm() {
+        in_own_process("mounts_restart_full_vm");
+    }
+
+    #[gpui::test]
+    fn mounts_restart_full_vm(cx: &mut gpui::TestAppContext) {
+        if !running_alone("mounts_restart_full_vm") {
+            return;
+        }
+        let (view, cx) = open_heavy(cx, 140);
+        let first = view.update(cx, |this, _| {
+            std::rc::Rc::downgrade(this.runtime.as_ref().unwrap())
+        });
+        cx.update(|window, cx| {
+            view.update(cx, |this, cx| {
+                this.chrome = serde_json::from_value(
+                    serde_json::json!({"id":"empty","type":"column","children":[]}),
+                )
+                .unwrap();
+                this.sync(window, cx);
+            })
+        });
+        assert_eq!(edit_heavy(&view, 1, 140, cx), (0, vec![]));
+        let share = view.update(cx, |this, _| this.runtime.as_ref().unwrap().memory_share());
+        eprintln!("heap share before mount: {share}");
+        assert!(share < super::RESTART_MODS_AT);
+        cx.update(|window, cx| {
+            view.update(cx, |this, cx| {
+                this.chrome = serde_json::from_value(serde_json::json!({
+                    "id":"many","type":"column","children": (0..20).map(|i| serde_json::json!({
+                        "id":format!("copy{i}"),"type":"block","content":{"mod":"heavy"}
+                    })).collect::<Vec<_>>()
+                }))
+                .unwrap();
+                this.sync(window, cx);
+                eprintln!(
+                    "heap share after mount: {}",
+                    this.runtime.as_ref().unwrap().memory_share()
+                );
+            })
+        });
+        cx.run_until_parked();
+        let (loaded, errors) = view.update(cx, |this, _| {
+            (
+                this.copies.values().filter(|c| c.root.is_some()).count(),
+                this.copies
+                    .values()
+                    .filter_map(|c| c.error.clone())
+                    .collect::<Vec<_>>(),
+            )
+        });
+        assert_eq!(loaded, 20, "{errors:?}");
+        assert!(errors.is_empty());
+        assert!(first.upgrade().is_none(), "the exhausted VM is freed");
+    }
+
+    #[test]
+    fn opaque_load_errors_near_the_limit_retry_only_once() {
+        in_own_process("opaque_load_recovery");
+    }
+
+    #[gpui::test]
+    fn opaque_load_recovery(cx: &mut gpui::TestAppContext) {
+        if running_alone("opaque_load_recovery") {
+            check_failed_load_recovery(cx, 200, "throw null;");
+        }
+    }
+
+    #[test]
+    fn oversized_mods_do_not_restart_forever() {
+        in_own_process("oversized_load_recovery");
+    }
+
+    #[gpui::test]
+    fn oversized_load_recovery(cx: &mut gpui::TestAppContext) {
+        if running_alone("oversized_load_recovery") {
+            check_failed_load_recovery(cx, 1, &heavy_mod(0, 300));
+        }
+    }
+
+    fn check_failed_load_recovery(cx: &mut gpui::TestAppContext, held_mib: usize, broken: &str) {
+        let (view, cx) = open_heavy(cx, held_mib);
+        let folder = crate::mods::app_dir().join("mods/broken");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("mod.json"), r#"{"place":"none"}"#).unwrap();
+        std::fs::write(folder.join("main.js"), broken).unwrap();
+        crate::mods::set_shared("vmdead.sentinel".into(), serde_json::json!(42));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.open_overlay("dialog".into(), serde_json::json!({"kind":"dialog","mod":"heavy"}), window, cx);
+        }));
+        let first = view.update(cx, |this, _| {
+            std::rc::Rc::downgrade(this.runtime.as_ref().unwrap())
+        });
+        cx.update(|window, cx| {
+            view.update(cx, |this, cx| {
+                this.sync_folders(window, cx);
+                this.chrome = serde_json::from_value(serde_json::json!({
+                    "id":"root","type":"row","children":[
+                        {"id":"heavy","type":"block","content":{"mod":"heavy"}},
+                        {"id":"broken","type":"block","content":{"mod":"broken"}}
+                    ]
+                }))
+                .unwrap();
+                this.sync(window, cx);
+            })
+        });
+        cx.run_until_parked();
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(first.upgrade().is_none(), "a failed load gets one fresh VM");
+        let fresh = view.update(cx, |this, _| {
+            std::rc::Rc::downgrade(this.runtime.as_ref().unwrap())
+        });
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(2));
+        cx.run_until_parked();
+        view.update(cx, |this, _| {
+            assert!(std::rc::Rc::ptr_eq(
+                &fresh.upgrade().unwrap(),
+                this.runtime.as_ref().unwrap()
+            ));
+            assert_eq!(this.copies.values().filter(|c| c.root.is_some()).count(), 2);
+            assert_eq!(crate::mods::shared("vmdead.sentinel"), Some(serde_json::json!(42)));
+            let errors: Vec<_> = this
+                .copies
+                .values()
+                .filter_map(|c| c.error.as_ref())
+                .collect();
+            assert_eq!(errors.len(), 1, "the broken mod's error is still reported");
+            if held_mib == 200 {
+                assert!(this.runtime.as_ref().unwrap().memory_share() >= super::RESTART_MODS_AT);
+                assert!(!errors[0].contains("out of memory"), "{errors:?}");
+            }
+        });
+        cx.update(|window, cx| {
+            let this = view.read(cx);
+            let dialog = this.overlays.iter().find(|o| o.id == "dialog").unwrap();
+            assert!(this.copies[&dialog.slot].root.is_some());
+            assert!(dialog.focus.contains_focused(window, cx), "the reopened dialog keeps the keyboard");
+        });
+    }
+
+
+    #[test]
+    fn persistent_load_errors_do_not_restart_on_layout_switches() {
+        in_own_process("load_recovery_survives_switches");
+    }
+
+    #[gpui::test]
+    fn load_recovery_survives_switches(cx: &mut gpui::TestAppContext) {
+        if !running_alone("load_recovery_survives_switches") {
+            return;
+        }
+        let home = crate::mods::app_dir();
+        std::fs::create_dir_all(home.join("layouts")).unwrap();
+        for name in ["broken", "other"] {
+            let folder = home.join("mods").join(name);
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(folder.join("mod.json"), r#"{"place":"none"}"#).unwrap();
+            std::fs::write(folder.join("main.js"), "export default class {").unwrap();
+        }
+        for (layout, bad) in [("bad-a", "broken"), ("bad-b", "broken"), ("bad-other", "other")] {
+            std::fs::write(home.join(format!("layouts/{layout}.json")), serde_json::json!({
+                "id":"root","type":"row","children":[
+                    {"id":"heavy","type":"block","content":{"mod":"heavy"}},
+                    {"id":"bad","type":"block","content":{"mod":bad}}
+                ]
+            }).to_string()).unwrap();
+        }
+        let (view, cx) = open_heavy(cx, 200);
+        let first = view.update(cx, |this, _| std::rc::Rc::downgrade(this.runtime.as_ref().unwrap()));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.sync_folders(window, cx);
+            this.switch_layout(Some("bad-a"), window, cx);
+        }));
+        cx.run_until_parked();
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(first.upgrade().is_none(), "the initial load failure gets one recovery");
+        let fresh = view.update(cx, |this, _| std::rc::Rc::downgrade(this.runtime.as_ref().unwrap()));
+        for (layout, expired) in [("bad-b", false), ("bad-a", false), ("bad-other", false), ("bad-b", true)] {
+            if expired {
+                view.update(cx, |this, _| this.load_recovery = Some(std::time::Instant::now() - std::time::Duration::from_secs(61)));
+            }
+            cx.update(|window, cx| view.update(cx, |this, cx| {
+                this.switch_layout(Some(layout), window, cx);
+                this.files_changed(vec!["layouts/.state/bad-a.json".into()], window, cx);
+                this.files_changed(vec!["mods/heavy".into()], window, cx);
+            }));
+            cx.run_until_parked();
+            if layout == "bad-b" && !expired {
+                let (_, errors) = edit_heavy(&view, 1, 200, cx);
+                assert_eq!(errors.len(), 2, "a real edit reports its reload error during the cooldown");
+                let (_, errors) = edit_heavy(&view, 2, 1, cx);
+                assert_eq!(errors.len(), 1, "a small repair can still reload in the current VM");
+            }
+            view.update(cx, |this, _| {
+                assert!(std::rc::Rc::ptr_eq(&fresh.upgrade().unwrap(), this.runtime.as_ref().unwrap()), "{layout} must not restart the VM");
+                assert!(this.runtime.as_ref().unwrap().memory_share() >= super::RESTART_MODS_AT);
+                assert_eq!(this.copies.values().filter(|c| c.error.is_some()).count(), 1);
+                assert_eq!(this.copies.values().filter(|c| c.root.is_some()).count(), 1);
+            });
+        }
+        std::fs::write(home.join("mods/broken/main.js"), "throw null;").unwrap();
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.files_changed(vec!["mods/broken/main.js".into()], window, cx);
+        }));
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        let state = view.update(cx, |this, _| format!("cooldown={:?} suppressed={:?} copies={:?}", this.load_recovery.map(|t| t.elapsed()), this.failed_loads, this.copies.values().map(|c| (&c.inst.name, &c.error)).collect::<Vec<_>>()));
+        assert!(fresh.upgrade().is_none(), "its own source edit allows another recovery: {state}");
+        view.update(cx, |this, _| {
+            assert_eq!(this.copies.values().filter(|c| c.error.is_some()).count(), 1);
+        });
     }
 
     #[test]
@@ -5879,6 +6378,43 @@ mod tests {
                 assert_eq!(&saved(this), expected);
             }
         }));
+    }
+
+    #[test]
+    fn a_new_vm_loads_the_open_popup_again() {
+        in_own_process("new_vm_keeps_popup");
+    }
+
+    /// A popup's copy loads when it opens, not with the layout's. When the
+    /// window moves its mods to a new VM, the open popup loads there too
+    /// instead of staying an empty frame that holds the keyboard.
+    #[gpui::test]
+    fn new_vm_keeps_popup(cx: &mut gpui::TestAppContext) {
+        if !running_alone("new_vm_keeps_popup") {
+            return;
+        }
+        let (view, cx) = open_heavy(cx, 1);
+        cx.update(|window, cx| view.update(cx, |this, cx| this.open_overlay("menu".into(), serde_json::json!({ "kind": "popup", "mod": "heavy" }), window, cx)));
+        cx.run_until_parked();
+        let popup = |view: &gpui::Entity<super::AppWindow>, cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                let this = view.read(cx);
+                let o = this.overlays.iter().find(|o| o.id == "menu").expect("the popup stays open");
+                let copy = this.copies.get(&o.slot);
+                (copy.is_some_and(|c| c.root.is_some() && c.error.is_none()), o.focus.contains_focused(window, cx))
+            })
+        };
+        assert_eq!(popup(&view, cx), (true, true), "the popup shows its mod and holds the keyboard");
+        let note = serde_json::json!({ "kind": "toast", "notification": { "title": "Saved", "body": "", "level": "info" } });
+        cx.update(|window, cx| view.update(cx, |this, cx| this.open_overlay("note".into(), note, window, cx)));
+        let first = view.update(cx, |this, _| std::rc::Rc::downgrade(this.runtime.as_ref().unwrap()));
+        cx.update(|window, cx| view.update(cx, |this, cx| this.restart_mods(window, cx)));
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(first.upgrade().is_none(), "the old VM is freed");
+        assert_eq!(popup(&view, cx), (true, true), "on the new VM the popup shows its mod again");
+        assert!(view.update(cx, |this, _| !this.overlays.iter().any(|o| o.id == "note")), "a toast is not shown twice");
+        assert_eq!(view.update(cx, |this, _| this.copies.values().filter(|c| c.root.is_some()).count()), 2, "the block and the popup");
     }
 
     #[test]
@@ -6194,6 +6730,69 @@ export default class Probe extends View {
             assert_eq!(seen(cx), Some(json!(true)), "focused: {:?}", crate::mods::shared("probe.seen"));
             cx.deactivate_window();
             assert_eq!(seen(cx), Some(json!(false)), "blurred: {:?}", crate::mods::shared("probe.seen"));
+        }
+    }
+
+    #[test]
+    fn focused_selection_follows_the_terminal_receiving_commands() {
+        in_own_process("selection_view_focus");
+    }
+
+    #[gpui::test]
+    fn selection_view_focus(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("selection_view_focus") {
+            return;
+        }
+        let probe = r#"import { View, div } from "gpui-kit";
+import { focused, setShared } from "herdr";
+export default class Probe extends View {
+  render() {
+    const value = focused();
+    const text = JSON.stringify(value);
+    if (text !== this.last) {
+      this.last = text;
+      setShared("probe.focused", value);
+    }
+    return div();
+  }
+}
+"#;
+        let (view, cx) = open_window(cx, "selection-probe", probe, json!({
+            "id": "root", "type": "row", "children": [
+                {"id": "main", "type": "block", "content": {"tab": "active"}},
+                {"id": "agent", "type": "block", "content": {"agent": "focused"}},
+                {"id": "probe", "type": "block", "content": {"mod": "selection-probe"}}
+            ],
+            "floating": [{"id": "float", "content": {"terminal": "t2"}}]
+        }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.model.add_space("s1", "one", "", crate::model::Tab::new("a", "a", "pa", "t1"));
+            for address in ["t1", "t2", "t3"] {
+                this.live.insert(address.into(), json!({"address": address}));
+            }
+            this.agent = Some("t3".into());
+            this.sync(window, cx);
+        }));
+        cx.run_until_parked();
+        for (slot, col) in [("pa", 1), ("float:float", 2), ("agent", 3)] {
+            cx.update(|window, cx| view.update(cx, |this, cx| {
+                this.terms[slot].focus.focus(window, cx);
+                let result = this.run_as("terminal.select", json!({"at": {"row": 0, "col": col}}), false, window, cx);
+                assert!(result.get("error").is_none(), "{result}");
+                assert_eq!(this.focused_terminal(window, cx).unwrap().address, this.terms[slot].address);
+            }));
+            cx.run_until_parked();
+            let focused = crate::mods::shared("probe.focused").unwrap();
+            assert_eq!(focused["terminal"], "t1", "logical identity stays with the model pane");
+            assert_eq!(focused["selection"]["end"], json!({"row": 0, "col": col}), "{slot}: {focused}");
+        }
+        // Moving the keyboard alone must publish the destination's existing selection.
+        for (slot, col) in [("float:float", 2), ("pa", 1), ("agent", 3)] {
+            cx.update(|window, cx| view.update(cx, |this, cx| this.terms[slot].focus.focus(window, cx)));
+            cx.run_until_parked();
+            let focused = crate::mods::shared("probe.focused").unwrap();
+            assert_eq!(focused["selection"]["end"], json!({"row": 0, "col": col}), "{slot}: {focused}");
         }
     }
 

@@ -38,6 +38,12 @@ impl Revisions {
 }
 
 impl FileEvents {
+    #[cfg(test)]
+    pub fn for_test(root: PathBuf) -> Self {
+        let (_, changes) = async_channel::unbounded();
+        Self { changes, root, revisions: Arc::new(Mutex::new(Revisions::default())) }
+    }
+
     pub fn revision_provider(&self) -> impl Fn(&Path) -> Option<u64> + 'static {
         let base = self.root.clone();
         let revisions = self.revisions.clone();
@@ -454,6 +460,33 @@ fn deliver_pending(root: &Path, generation: &Arc<()>, pending: HashSet<String>) 
         }
     }
     true
+}
+
+/// Source file metadata, excluding generated editor helpers and directory mtimes.
+pub type ModStamp = Option<std::collections::BTreeMap<PathBuf, (u64, Option<std::time::SystemTime>)>>;
+
+pub fn mod_stamp(root: &Path) -> ModStamp {
+    let mut stamp = std::collections::BTreeMap::new();
+    let mut pending = vec![(root.to_path_buf(), 0)];
+    let mut count = 0;
+    while let Some((dir, depth)) = pending.pop() {
+        for entry in std::fs::read_dir(dir).ok()? {
+            let entry = entry.ok()?;
+            count += 1;
+            if count > 4096 { return None; }
+            let path = entry.path();
+            let Ok(relative) = path.strip_prefix(root) else { continue };
+            if !gpui_shell::application_file_counts(relative) { continue; }
+            let meta = std::fs::metadata(&path).ok()?;
+            if meta.is_dir() {
+                if depth >= 8 { return None; }
+                pending.push((path, depth + 1));
+            } else if meta.is_file() {
+                stamp.insert(relative.to_path_buf(), (meta.len(), meta.modified().ok()));
+            }
+        }
+    }
+    Some(stamp)
 }
 
 /// The mod a changed path belongs to (`mods/<name>/...`).
