@@ -450,6 +450,13 @@ pub struct AppWindow {
     documents: std::collections::BTreeMap<String, crate::mirror_sync::Slot>,
     initial_view: Option<crate::mirror::View>,
     pointer: Point<Pixels>,
+    /// Focus follows mouse: the terminal block the pointer is on, and the wait
+    /// to focus it (dropping the task cancels it).
+    follow_over: Option<String>,
+    follow_wait: Option<Task<()>>,
+    /// Each terminal block's hitbox from the last frame: which one is under the
+    /// pointer, uncovered (floats and windows occlude what's below).
+    follow_hitboxes: Rc<RefCell<HashMap<String, Hitbox>>>,
     /// Where a press on a `window_drag` node started, until it moves the window.
     drag_from: Option<Point<Pixels>>,
     titlebar_applied: Option<(crate::layout::Titlebar, Option<[f32; 2]>)>,
@@ -560,6 +567,9 @@ impl AppWindow {
             },
             initial_view: std::fs::read_to_string(file("view.json")).ok().and_then(|s| serde_json::from_str(&s).ok()),
             pointer: Point::default(),
+            follow_over: None,
+            follow_wait: None,
+            follow_hitboxes: Rc::default(),
             drag_from: None,
             titlebar_applied: None,
             // Windows open opaque: leave the platform alone until a layout asks for blur.
@@ -1720,6 +1730,74 @@ impl AppWindow {
         if let Some(f) = self.focused_pane.as_ref().and_then(|p| self.pane_focus(p, cx)) {
             f.focus(window, cx);
         }
+    }
+
+    /// A pointer move reached the root: entering a terminal pane starts the
+    /// wait. A focus moved another way stays until the pointer leaves the
+    /// pane and enters one again.
+    fn follow_mouse(&mut self, ev: &MouseMoveEvent, window: &mut Window, cx: &mut Context<Self>) {
+        let s = settings::get();
+        if !s.focus_follows_mouse {
+            return;
+        }
+        // Inactive: nothing is entered yet, so the first move once active starts the wait.
+        let over = self.pointed_terminal(window).filter(|_| ev.pressed_button.is_none() && window.is_window_active());
+        if over == self.follow_over {
+            return;
+        }
+        self.follow_over = over.clone();
+        let (delay, before) = (Duration::from_millis(s.focus_follows_mouse_delay_ms.into()), self.focus_id());
+        self.follow_wait = over.map(|id| {
+            cx.spawn_in(window, async move |this, cx| {
+                cx.background_executor().timer(delay).await;
+                let _ = this.update_in(cx, |this, window, cx| {
+                    // Turned off, or the focus moved another way, while it waited.
+                    if settings::get().focus_follows_mouse && this.focus_id() == before {
+                        this.focus_pointed(&id, window, cx);
+                    }
+                });
+            })
+        });
+    }
+
+    /// The pointer stayed on terminal block `id`: it takes the focus as a click
+    /// would, unless something else holds the pointer or the keyboard.
+    fn focus_pointed(&mut self, id: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let busy = self.drag.is_some() || self.pane_drag.is_some() || self.float_drag.is_some() || self.win_drag.is_some();
+        if busy || !window.is_window_active() || self.overlays.iter().any(|o| o.kind.modal_keys()) {
+            // Turned away for now: the next move may try again.
+            self.follow_over = None;
+            return;
+        }
+        if self.focus_id().as_deref() == Some(id) {
+            return;
+        }
+        // Something opened over it since the pointer entered (no move to tell).
+        if self.pointed_terminal(window).as_deref() != Some(id) {
+            return;
+        }
+        let args = if self.model.active_tab().is_some_and(|t| t.shown().visible_blocks().iter().any(|n| n.id == id)) {
+            json!({ "pane": id })
+        } else if let Some(terminal) = terminal_block(&self.chrome, Some(id)).and_then(|n| n.terminal()) {
+            json!({ "terminal": terminal })
+        } else {
+            return;
+        };
+        // Not the person's command: no telemetry, and nothing to show if it fails.
+        self.run_as("pane.focus", args, false, window, cx);
+    }
+
+    /// The terminal block under the pointer, if nothing covers it there.
+    fn pointed_terminal(&self, window: &Window) -> Option<String> {
+        self.follow_hitboxes.borrow().iter().find(|(_, h)| h.is_hovered(window)).map(|(id, _)| id.clone())
+    }
+
+    /// What holds the focus: a mod block, a layout terminal block, else the tab's pane.
+    fn focus_id(&self) -> Option<String> {
+        self.focused_block
+            .clone()
+            .or_else(|| terminal_block(&self.chrome, self.focused_pane.as_deref()).map(|n| n.id.clone()))
+            .or_else(|| self.model.focused_pane())
     }
 
     fn pane_focus(&self, pane: &str, cx: &App) -> Option<FocusHandle> {
@@ -4358,6 +4436,7 @@ impl AppWindow {
             Content::Terminal { .. } => match self.pane_term(&n.id) {
                 Some(t) => {
                     let id = n.id.clone();
+                    let (boxes, boxed) = (self.follow_hitboxes.clone(), n.id.clone());
                     div()
                         .size_full()
                         .on_any_mouse_down(cx.listener(move |this, _, _, cx| {
@@ -4374,6 +4453,16 @@ impl AppWindow {
                             }
                         }))
                         .child(shown_terminal(&t.view, cx))
+                        // Last, so the terminal's own parts (its scrollbar) don't cover it.
+                        .when(settings::get().focus_follows_mouse, |d| {
+                            d.child(
+                                canvas(move |b, window, _| { boxes.borrow_mut().insert(boxed, window.insert_hitbox(b, HitboxBehavior::Normal)); }, |_, _, _, _| {})
+                                    .absolute()
+                                    .top_0()
+                                    .left_0()
+                                    .size_full(),
+                            )
+                        })
                         .into_any_element()
                 }
                 None => div().into_any_element(),
@@ -5219,6 +5308,7 @@ impl Render for AppWindow {
                 }
             }))
             .capture_key_down(cx.listener(|this, ev: &KeyDownEvent, window, cx| {
+                this.follow_wait = None;
                 if ev.keystroke.key == "escape" {
                     if this.pane_drag.is_some() {
                         this.cancel_pane_drag(cx);
@@ -5230,6 +5320,7 @@ impl Render for AppWindow {
             }))
             .capture_any_mouse_down(cx.listener(|this, ev: &MouseDownEvent, _, _| this.pointer = ev.position))
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, window, cx| {
+                this.follow_mouse(ev, window, cx);
                 this.drag_window(ev, window);
                 if this.drag.is_none() {
                     return;
@@ -6781,6 +6872,7 @@ export default class Probe extends View {
     }
 
     include!("window/pane_size_tests.rs");
+    include!("window/follow_mouse_tests.rs");
 
     #[test]
     fn directional_navigation_moves_zoom_and_keyboard_focus() {
