@@ -776,6 +776,13 @@ impl TerminalView {
         true
     }
 
+    fn copy_primary(&self, _cx: &mut Context<Self>) {
+        #[cfg(target_os = "linux")]
+        if let Some(text) = self.grid.borrow().vt.selection_text() {
+            _cx.write_to_primary(ClipboardItem::new_string(text));
+        }
+    }
+
     pub fn selection(&self) -> Option<vt::SelectionPositions> {
         self.grid.borrow().vt.selection_positions()
     }
@@ -813,6 +820,7 @@ impl TerminalView {
         }
         drop(grid);
         self.selection_changed(cx);
+        self.copy_primary(cx);
         cx.notify();
         Ok(())
     }
@@ -820,6 +828,7 @@ impl TerminalView {
     pub fn select_all(&mut self, cx: &mut Context<Self>) {
         self.grid.borrow_mut().vt.select_all();
         self.selection_changed(cx);
+        self.copy_primary(cx);
         cx.notify();
     }
 
@@ -1120,9 +1129,13 @@ impl TerminalView {
         g.vt.select(step, col, row, x, y, cw, height);
         drop(g);
         self.selection_changed(cx);
-        if matches!(step, Select::Release) && crate::settings::get().copy_on_select {
-            // Copy on select, as in Herdr.
-            self.copy(cx);
+        if matches!(step, Select::Release) {
+            if crate::settings::get().copy_on_select {
+                // Copy on select, as in Herdr.
+                self.copy(cx);
+            } else {
+                self.copy_primary(cx);
+            }
         }
         cx.notify();
     }
@@ -2448,9 +2461,16 @@ impl Render for TerminalView {
                     cx.emit(TerminalEvent::ContextMenu(ev.position));
                 }
             }))
-            .on_mouse_down(MouseButton::Middle, cx.listener(|this, ev: &MouseDownEvent, _, cx| {
+            .on_mouse_down(MouseButton::Middle, cx.listener(|this, ev: &MouseDownEvent, _, _cx| {
                 if !this.mouse(GHOSTTY_MOUSE_ACTION_PRESS, Some(ev.button), ev.position, ev.modifiers) {
-                    this.paste(cx);
+                    // macOS has no PRIMARY selection, so an unclaimed middle-click does nothing.
+                    #[cfg(target_os = "linux")]
+                    if let Some(text) = _cx.read_from_primary().and_then(|item| item.text()).filter(|text| !text.is_empty()) {
+                        let bytes = this.grid.borrow().vt.paste_bytes(&text);
+                        this.send(&bytes);
+                    }
+                    #[cfg(target_os = "windows")]
+                    this.paste(_cx);
                 }
             }))
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
@@ -2936,7 +2956,11 @@ mod tests {
         let terminal = cx.new(|cx| super::TerminalView::attach(crate::hc::offline(), "t1".into(), (20, 3), cx));
         terminal.update(cx, |terminal, cx| {
             terminal.grid.borrow_mut().vt.write(b"hello world\r\nsecond line");
+            cx.write_to_clipboard(ClipboardItem::new_string("untouched".into()));
             terminal.selection_command("terminal.select", &serde_json::json!({"at": {"row": 0, "col": 1}, "mode": "line"}), cx).unwrap();
+            assert_eq!(cx.read_from_clipboard().unwrap().text().as_deref(), Some("untouched"));
+            #[cfg(target_os = "linux")]
+            assert_eq!(cx.read_from_primary().unwrap().text().as_deref(), Some("hello world"));
             assert!(terminal.copy(cx));
             assert_eq!(cx.read_from_clipboard().unwrap().text().as_deref(), Some("hello world"));
             terminal.selection_command("terminal.clear_selection", &serde_json::json!({}), cx).unwrap();
@@ -3847,8 +3871,12 @@ mod tests {
         let drag = |root: &Entity<Root>, cx: &mut VisualTestContext| {
             root.update(cx, |root, cx| {
                 root.0.update(cx, |terminal, cx| {
+                    #[cfg(target_os = "linux")]
+                    let primary = cx.read_from_primary().and_then(|item| item.text());
                     terminal.select(super::Select::Press, point(px(1.), px(1.)), cx);
                     terminal.select(super::Select::Drag, point(px(16.), px(1.)), cx);
+                    #[cfg(target_os = "linux")]
+                    assert_eq!(cx.read_from_primary().and_then(|item| item.text()), primary);
                     terminal.select(super::Select::Release, point(px(31.), px(1.)), cx);
                 });
             });
@@ -3867,10 +3895,12 @@ mod tests {
             app.write_to_primary(ClipboardItem::new_string("primary unchanged".into()));
         });
         drag(&root, cx);
+        #[cfg(target_os = "linux")]
+        let selected = root.read_with(cx, |root, cx| root.0.read_with(cx, |terminal, _| terminal.grid.borrow().vt.selection_text().unwrap()));
         cx.update(|_, app| {
             assert_eq!(app.read_from_clipboard().unwrap().text().as_deref(), Some("unchanged"));
             #[cfg(target_os = "linux")]
-            assert_eq!(app.read_from_primary().unwrap().text().as_deref(), Some("primary unchanged"));
+            assert_eq!(app.read_from_primary().unwrap().text().as_deref(), Some(selected.as_str()));
         });
         let selected = root.update(cx, |root, cx| {
             root.0.update(cx, |terminal, cx| {
