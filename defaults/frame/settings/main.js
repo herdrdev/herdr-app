@@ -496,6 +496,7 @@ export default class Settings extends View {
     const same = (a, b) => (typeof a === "number" && typeof b === "number" ? Math.abs(a - b) < 1e-4 : a === b);
     const own = (key, composed, def) => !same(p[key] ?? def, composed);
     const size = (key, value, d, cx) => this.change((q) => (q[key] = Math.max(8, Math.min(32, (q[key] ?? value) + d))), cx);
+    const step = (key, value, d, lo, hi, cx) => this.change((q) => (q[key] = Math.round(Math.max(lo, Math.min(hi, (q[key] ?? value) + d)) * 100) / 100), cx);
     const fontRow = (which, sizeKey, title, family, def, sizeNow) =>
       v_flex()
         .w_full()
@@ -539,16 +540,26 @@ export default class Settings extends View {
         ),
       )
       .child(fontRow("font", "font_size", "Terminal font", s.font_family, DEFAULT_FONT, s.font_size))
+      .child(
+        this.row(
+          t,
+          "Terminal font weight",
+          own("font_weight", s.font_weight, 500) ? "This layout sets its own; yours shows in the others." : "Bold text stays at 700.",
+          this.stepper(t, "st-font_weight", `${s.font_weight}`, (_e, cx) => step("font_weight", s.font_weight, -100, 100, 900, cx), (_e, cx) => step("font_weight", s.font_weight, 100, 100, 900, cx)),
+        ),
+      )
       .children([
-        ["terminal_line_height", "Terminal line height", 0.8, 2],
-        ["terminal_scroll_speed", "Terminal scroll speed", 0.1, 5],
-      ].map(([key, title, min, max]) => this.row(
-        t, title,
-        own(key, s[key], 1) ? "This layout sets its own; yours shows in the others." : null,
-        this.stepper(t, `st-${key}`, `${Math.round(s[key] * 100)}%`,
-          (_e, cx) => this.change((q) => (q[key] = Math.max(min, Math.min(max, Math.round(((q[key] ?? s[key]) - 0.1) * 10) / 10))), cx),
-          (_e, cx) => this.change((q) => (q[key] = Math.max(min, Math.min(max, Math.round(((q[key] ?? s[key]) + 0.1) * 10) / 10))), cx)),
-      )))
+        ["terminal_line_height", "Terminal line height", 0.8, 2, 0.1],
+        ["terminal_cell_width", "Terminal cell width", 0.8, 2, 0.05],
+        ["terminal_scroll_speed", "Terminal scroll speed", 0.1, 5, 0.1],
+      ].map(([key, title, min, max, step]) => {
+        const by = (d) => (_e, cx) => this.change((q) => (q[key] = Math.max(min, Math.min(max, Math.round(Math.round(((q[key] ?? s[key]) + d) / step) * step * 100) / 100))), cx);
+        return this.row(
+          t, title,
+          own(key, s[key], 1) ? "This layout sets its own; yours shows in the others." : null,
+          this.stepper(t, `st-${key}`, `${Math.round(s[key] * 100)}%`, by(-step), by(step)),
+        );
+      }))
       .child(fontRow("ui_font", null, "Interface font", s.ui_font_family, DEFAULT_UI_FONT));
   }
 

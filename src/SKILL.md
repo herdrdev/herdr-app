@@ -130,10 +130,17 @@ Read the generated `.d.ts` files beside it for full API details; do not edit
 those files or the generated guide. The app rewrites them on start.
 
 - `terminal_line_height` (default 1, 0.8..2) adjusts terminal rows;
+  `terminal_cell_width` (default 1, 0.8..2) adjusts terminal columns;
   `terminal_scroll_speed` (default 1, 0.1..5) adjusts wheel and trackpad
   scrolling, including mouse reports. Set them in settings.json or the
   layout's look; the layout wins.
 - Home defaults to `~/.config/herdr-app`; `HERDR_APP_HOME` selects another.
+- `worktrees.directory` in settings.json sets the shipped New worktree destination,
+  e.g. `{"worktrees":{"directory":"~/Developer/worktrees"}}`. Default:
+  `~/.herdr/worktrees`; checkouts use `<directory>/<repo>/<branch>` (slashes in
+  branches become dashes). Use an absolute path or `~` / `~/...`, resolved on the
+  space's machine. Read on dialog open; existing checkouts stay put. No clones
+  needed, and the app does not read the TUI's config.toml.
 - Mods live in `mods/<name>/` with `main.js` and optional `mod.json`.
   They are trusted JavaScript with command and network access.
   `"focusable": true` in `mod.json` lets `pane.go` move onto a copy; it receives

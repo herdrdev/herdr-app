@@ -620,25 +620,23 @@ pub fn publish_terminals(mut v: Value) -> bool {
 }
 /// Only selection changes refresh readers; output and cursor motion do not.
 pub fn publish_selection(address: &str, selection: Value) -> bool {
-    let mut changed = publish("terminals", |s| {
+    publish("terminals", |s| {
         let old = s.terminals.clone();
         if let Some(terminal) = s.terminals.as_array_mut().and_then(|list| list.iter_mut().find(|t| t["address"] == address)) {
             terminal["selection"] = selection.clone();
         }
         (old, s.terminals.clone())
-    });
-    changed |= publish("focused", |s| {
-        let old = s.focused.clone();
-        if focused_address(&s.focused) == Some(address) {
-            s.focused["selection"] = selection.clone();
-        }
-        (old, s.focused.clone())
-    });
-    changed
+    })
 }
 
-fn focused_address(focused: &Value) -> Option<&str> {
-    focused["shown"].as_str().or_else(|| focused["terminal"].as_str())
+pub fn publish_focused_selection(selection: Value) -> bool {
+    publish("focused", |s| {
+        let old = s.focused.clone();
+        if s.focused.is_object() {
+            s.focused["selection"] = selection;
+        }
+        (old, s.focused.clone())
+    })
 }
 
 pub fn terminal_address(word: &str, source: &str) -> Option<String> {
@@ -658,8 +656,7 @@ pub fn publish_window(v: Value) -> bool {
 pub fn publish_focused(mut v: Value) -> bool {
     publish("focused", |s| {
         if v.is_object() {
-            v["selection"] = focused_address(&v).and_then(|address| s.terminals.as_array()?.iter().find(|t| t["address"] == address))
-                .map_or(Value::Null, |terminal| terminal["selection"].clone());
+            v["selection"] = s.focused["selection"].clone();
         }
         (std::mem::replace(&mut s.focused, v.clone()), v)
     })
@@ -1350,28 +1347,19 @@ mod tests {
     }
 
     #[test]
-    fn selection_snapshots_survive_core_refresh_and_follow_focus() {
+    fn selection_snapshots_survive_core_refresh() {
         std::thread::spawn(|| {
             let list = json!([{"address":"t1"}, {"address":"t2"}]);
             publish_terminals(list.clone());
-            publish_focused(json!({"terminal":"t1"}));
             let selection = json!({"start":{"row":5,"col":2},"end":{"row":1,"col":8}});
             publish_selection("t1", selection.clone());
             publish_terminals(list);
-            publish_focused(json!({"terminal":"t1"}));
             SNAPSHOT.with_borrow(|s| {
                 assert_eq!(s.terminals[0]["selection"], selection);
-                assert_eq!(s.focused["selection"], selection);
+                assert_eq!(s.terminals[1]["selection"], Value::Null);
             });
-            publish_focused(json!({"terminal":"t2"}));
-            SNAPSHOT.with_borrow(|s| assert_eq!(s.focused["selection"], Value::Null));
-            publish_focused(json!({"terminal":"t2","shown":"t1"}));
-            SNAPSHOT.with_borrow(|s| assert_eq!(s.focused["selection"], selection));
             publish_selection("t1", Value::Null);
-            SNAPSHOT.with_borrow(|s| {
-                assert_eq!(s.terminals[0]["selection"], Value::Null);
-                assert_eq!(s.focused["selection"], Value::Null);
-            });
+            SNAPSHOT.with_borrow(|s| assert_eq!(s.terminals[0]["selection"], Value::Null));
         }).join().unwrap();
     }
 

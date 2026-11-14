@@ -77,7 +77,7 @@ first frame or during GPU recovery it reports an error instead of a PNG.
 |---|---|---|
 | `layouts/<name>.json` | the window and its whole look: blocks, theme, fonts, backgrounds, pane frames; one file per layout (`main`, `terminals`, `win98`, any you add) | live |
 | `keys.json` | what every key does | live |
-| `settings.json` | the person: zoom, sounds, fonts for every layout | live |
+| `settings.json` | the person: zoom, sounds, fonts for every layout, worktree directory | live |
 | `mods/<name>/` | panels: small JavaScript programs | live (hot reload) |
 | `programs.json` | how programs show (name, icon, tile), on top of the built-in table | live |
 | `icons/` | the shipped program icons | written by Herdr (put your own elsewhere) |
@@ -339,6 +339,9 @@ layout's look and a block can differ:
   that layout's own: Settings offers it only there.
 - `terminal_line_height`: row height multiplier (default 1, clamped to 0.8..2).
   Text stays centred; joining characters, cursors and images follow the rows.
+- `terminal_cell_width`: column width multiplier (default 1, clamped to 0.8..2),
+  like Ghostty's `adjust-cell-width` as a percentage (`-5%` is 0.95). Glyphs
+  are placed in their cells as Ghostty places them.
 - `terminal_scroll_speed`: wheel and trackpad multiplier (default 1, clamped
   to 0.1..5), including mouse reports to programs. Small moves accumulate.
 - `font` / `font_size`: the terminals' (px at zoom 1); `ui_font`: the mods'
@@ -352,6 +355,9 @@ layout's look and a block can differ:
   folder (or the home's `fonts/`) load at start and on the next look change,
   so a layout and its mod folder travel together (Herdr 98's do: its pixel
   fonts are in `mods/win98/fonts/`).
+- `font_weight` (100..900): the terminals' text weight. Default 500
+  (Medium); 400 is Regular, 300 Light, using the family's nearest face.
+  Bold text stays at 700.
 - `pane_scrollbars` in settings.json (default `true`): show terminal scrollback
   with a slim thumb and track. Drag the thumb or click the track to jump there.
   With little or no terminal padding, the hit lane overlays the last 8px;
@@ -709,10 +715,20 @@ What's about the user, never a look:
 - `core`: the herdr-core binary to use, when it isn't where Herdr looks
   (PATH, the login shell's PATH, `~/.local/bin`, Homebrew, mise, Nix,
   cargo). Read at start.
-- `terminal_line_height` (default 1, 0.8..2) and `terminal_scroll_speed`
-  (default 1, 0.1..5): terminal row height and wheel/trackpad speed, used
-  where the layout leaves them unset.
-- `font`, `font_size`, `ui_font`: used where the layout doesn't set its
+- `worktrees`: `{ "directory": "~/Developer/worktrees" }` sets where the shipped
+  New worktree dialog creates checkouts: `<directory>/<repo>/<branch>` (branch
+  slashes become dashes). Default: `~/.herdr/worktrees`. Use an absolute path or
+  `~` / `~/...`; Windows paths work too. The setting lives in this app's
+  settings.json; the path and `~` refer to the space's machine, including remote
+  spaces. Read when New worktree opens; existing checkouts are not moved, and
+  Open / Remove worktree still use Git's checkout list. No mod clones needed.
+  The app does not read the TUI's config.toml; set its `[worktrees] directory`
+  to the same place if both should create checkouts together.
+- `terminal_line_height` (default 1, 0.8..2), `terminal_cell_width`
+  (default 1, 0.8..2) and `terminal_scroll_speed` (default 1, 0.1..5):
+  terminal row height, column width and wheel/trackpad speed, used where the
+  layout leaves them unset.
+- `font`, `font_size`, `font_weight`, `ui_font`: used where the layout doesn't set its
   own. Herdr (main) leaves these unset. Bigger panels: `zoom`.
 - `font_ligatures`: programming ligatures are off by default; set `true` to
   enable them in terminal fonts such as JetBrains Mono and Fira Code. The cursor
@@ -782,9 +798,12 @@ What's about the user, never a look:
   are treated as the system clipboard.
   Clipboard reads (`?`) are never allowed.
 - `copy_on_select`: copy a mouse selection to the clipboard on release (default
-  `true`), and to PRIMARY on Linux. Set `false` to leave both untouched while
-  keeping the selection visible; `terminal.copy` (Cmd+C/Ctrl+Shift+C) still
-  copies it. Hold Shift while dragging in programs that capture the mouse.
+  `true`). Set `false` to leave the clipboard untouched while keeping the selection
+  visible; `terminal.copy` (Cmd+C/Ctrl+Shift+C) still copies it. On Linux, terminal
+  selections always set PRIMARY, independently of this setting. Middle-click
+  pastes PRIMARY on Linux, does nothing on macOS, and pastes the clipboard on
+  Windows. Programs that capture the mouse still receive middle-clicks.
+  Hold Shift while dragging in programs that capture the mouse.
 - `pane_scrollbars`: `false` hides the scroll position thumb at a terminal
   pane's right edge (default `true`). It shows only when the pane has
   scrollback — never on the alternate screen (editors, pagers) — and
@@ -895,8 +914,8 @@ has 124 programs (agents, editors, runtimes, tools, databases, infra);
   action: "new" | "open" | "remove"}` (the repo: folder, else where the
   space's first terminal is), or with `{branch, tab?, argv?}` to make one at once with
   that first tab; checkouts go to
-  `~/.herdr/worktrees/<repo>/<branch>` on the space's machine, a constant
-  at its top; the
+  `<worktrees.directory>/<repo>/<branch>` on the space's machine (default
+  `~/.herdr/worktrees`; see settings.json above); the
   `spaces` sidebar nests worktree spaces under their repo's and shows each
   space's repo, branch, ahead/behind and uncommitted changes). Shipped mods
   are Herdr's; duplicate with `mod.clone` before editing.
