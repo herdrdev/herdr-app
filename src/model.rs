@@ -54,10 +54,18 @@ pub struct Recent {
 
 #[derive(Clone, Copy, Debug, PartialEq)]
 pub enum Alert {
-    /// Needs the person (blocked or error).
+    /// Needs the person: blocked on a question, a permission or a login.
     Blocked,
+    /// Needs the person: stopped on an error.
+    Error,
     /// Finished while the person wasn't looking.
     Done,
+}
+
+impl Alert {
+    pub fn needs_you(self) -> bool {
+        self != Alert::Done
+    }
 }
 
 /// What core and the user's attention say about one terminal.
@@ -525,7 +533,7 @@ impl Model {
         let blocked = |w: Option<&str>| matches!(w, Some("blocked" | "error"));
         let busy = |w: Option<&str>| matches!(w, Some("working" | "blocked" | "error"));
         if blocked(new) && !blocked(prev) {
-            Some(Alert::Blocked)
+            Some(if new == Some("error") { Alert::Error } else { Alert::Blocked })
         } else if busy(prev) && new.is_some() && !busy(new) && !looking {
             Some(Alert::Done)
         } else {
@@ -713,6 +721,8 @@ mod tests {
         let alert = Model::alert;
         assert_eq!(alert(Some("working"), Some("blocked"), true), Some(Alert::Blocked));
         assert_eq!(alert(Some("blocked"), Some("error"), false), None);
+        assert_eq!(alert(Some("working"), Some("error"), false), Some(Alert::Error));
+        assert_eq!(alert(Some("error"), Some("blocked"), false), None);
         assert_eq!(alert(Some("working"), Some("idle"), false), Some(Alert::Done));
         assert_eq!(alert(Some("blocked"), Some("done"), false), Some(Alert::Done));
         assert_eq!(alert(Some("working"), Some("idle"), true), None);
