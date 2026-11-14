@@ -1797,7 +1797,7 @@ impl Vt {
         let mut bg = GhosttyColorRgb::default();
         unsafe { ghostty_terminal_get(self.term, GHOSTTY_TERMINAL_DATA_COLOR_BACKGROUND, &mut bg as *mut _ as *mut c_void) };
         let row = Rc::new(vec![Cell::default(); self.cols as usize]);
-        Frame { rows: vec![row; self.rows as usize], cursor: None, cursor_cell: None, bg: bg.into(), search_spans: Vec::new() }
+        Frame { rows: vec![row; self.rows as usize], all: true, cursor: None, cursor_cell: None, bg: bg.into(), search_spans: Vec::new() }
     }
 
     /// Frees what drawing keeps from frame to frame: libghostty's copy of the
