@@ -274,6 +274,14 @@ impl PlatformTextSystem for CosmicTextSystem {
         self.0.write().prewarm_fonts(font_ids);
     }
 
+    fn font_table(&self, font_id: FontId, tag: [u8; 4]) -> Option<Vec<u8>> {
+        let state = self.0.read();
+        let font = &state.loaded_font(font_id).font;
+        let index = state.font_system.db().face(font.id())?.index;
+        let face = ttf_parser::RawFace::parse(font.data(), index).ok()?;
+        Some(face.table(ttf_parser::Tag::from_bytes(&tag))?.to_vec())
+    }
+
     fn font_metrics(&self, font_id: FontId) -> FontMetrics {
         let metrics = self
             .0

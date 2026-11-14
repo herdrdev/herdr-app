@@ -231,6 +231,7 @@ pub struct TextSystem {
     platform_text_system: Arc<dyn PlatformTextSystem>,
     font_ids_by_font: RwLock<FxHashMap<Font, Result<FontId>>>,
     font_metrics: RwLock<FxHashMap<FontId, FontMetrics>>,
+    font_tables: RwLock<FxHashMap<(FontId, [u8; 4]), Option<Arc<[u8]>>>>,
     raster_bounds: RwLock<FxHashMap<RenderGlyphParams, Bounds<DevicePixels>>>,
     wrapper_pool: Mutex<FxHashMap<FontIdWithSize, Vec<LineWrapper>>>,
     font_runs_pool: Mutex<Vec<Vec<FontRun>>>,
@@ -248,6 +249,7 @@ impl TextSystem {
         TextSystem {
             platform_text_system,
             font_metrics: RwLock::default(),
+            font_tables: RwLock::default(),
             raster_bounds: RwLock::default(),
             font_ids_by_font: RwLock::default(),
             wrapper_pool: Mutex::default(),
@@ -525,6 +527,21 @@ impl TextSystem {
         let descent = self.descent(font_id, font_size);
         let padding_top = (line_height - ascent - descent) / 2.;
         padding_top + ascent
+    }
+
+    /// HERDR: Unscaled metrics for terminal cell geometry.
+    pub fn font_metrics(&self, font_id: FontId) -> FontMetrics {
+        self.read_metrics(font_id, |metrics| *metrics)
+    }
+
+    /// HERDR: OpenType data for terminal metrics, without changing UI metrics.
+    pub fn font_table(&self, font_id: FontId, tag: [u8; 4]) -> Option<Arc<[u8]>> {
+        if let Some(table) = self.font_tables.read().get(&(font_id, tag)) {
+            return table.clone();
+        }
+        let table = self.platform_text_system.font_table(font_id, tag).map(Arc::from);
+        self.font_tables.write().insert((font_id, tag), table.clone());
+        table
     }
 
     fn read_metrics<T>(&self, font_id: FontId, read: impl FnOnce(&FontMetrics) -> T) -> T {
