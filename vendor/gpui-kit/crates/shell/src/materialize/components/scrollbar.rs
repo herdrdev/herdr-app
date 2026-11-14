@@ -30,7 +30,7 @@ use gpui::{
     Refineable as _, ScrollHandle, SharedString, Size, StatefulInteractiveElement, StyleRefinement,
     Styled, UniformListScrollHandle, Window, div, px,
 };
-use gpui_base::{Scrollbar, ScrollbarAxis, ScrollbarHandle};
+use gpui_base::{ElementExt as _, Scrollbar, ScrollbarAxis, ScrollbarHandle};
 
 use crate::materialize::{Behavior, Children, StateStyles, warn_ignored_key, warn_unhonoured_a11y};
 
@@ -107,9 +107,10 @@ pub(in crate::materialize) fn scrollbar(
 ///
 /// Called from `flex_element` for every `overflow_*_scroll` element, which is
 /// what turns `id("watchlist")` into a name a bar elsewhere can address.
-pub(in crate::materialize) fn track_scroll_position<E: StatefulInteractiveElement>(
+pub(in crate::materialize) fn track_scroll_position<E: StatefulInteractiveElement + ParentElement>(
     element: E,
     identity: &ElementId,
+    owned: Option<crate::entities::PlainScrollHandle>,
     window: &mut Window,
     cx: &mut App,
 ) -> E {
@@ -117,15 +118,33 @@ pub(in crate::materialize) fn track_scroll_position<E: StatefulInteractiveElemen
     if crate::materialize::checking() {
         return element;
     }
-    element.track_scroll(&scroll_position(identity, window, cx))
+    let mut element = element;
+    let handle = if let Some(owned) = owned {
+        if let Some(index) = owned.pending.take() {
+            let requested = owned.handle.clone();
+            // Native scrolling needs the viewport and overflow from a completed layout.
+            element = element.on_prepaint(move |_, window, _| {
+                window.on_next_frame(move |window, _| {
+                    requested.scroll_to_item(index);
+                    window.refresh();
+                });
+            });
+        }
+        shared_scroll_position(identity, window, cx).update(cx, |shared, _| {
+            *shared = SharedScroll::Handle(owned.handle.clone());
+        });
+        owned.handle
+    } else {
+        scroll_position(identity, window, cx)
+    };
+    element.track_scroll(&handle)
 }
 
 /// The scroll position shared by a scroll area and the bars driving it.
 ///
 /// Keyed by the element's own identity rather than by anything the description
-/// carries: a [`ScrollHandle`] is not an entity, so it cannot live in the
-/// runtime's entity store, and window element state is the one place both sides
-/// of the pairing can reach with nothing but a name.
+/// carries: without a script-owned handle, window element state is the one
+/// place both sides of the pairing can reach with nothing but a name.
 fn scroll_position(identity: &ElementId, window: &mut Window, cx: &mut App) -> ScrollHandle {
     // The area keeps its position under a key of its own rather than in the
     // shared slot. A lazy list of the same name overwrites that slot on every
