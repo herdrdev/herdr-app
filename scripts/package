@@ -17,6 +17,12 @@ cd "$(dirname "$0")/.."
 version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
 
 triple=${1:-}
+if [[ -z $triple && $(uname -s) == Darwin ]]; then
+  # A Rosetta shell can run a native ARM Rust toolchain (or the reverse).
+  # Pin Cargo's target rather than naming its output from the shell's uname.
+  triple=$("${RUSTC:-rustc}" -vV | sed -n 's/^host: //p')
+  [[ $triple == *-apple-darwin ]] || { echo "package: cannot determine macOS Rust compiler host" >&2; exit 1; }
+fi
 if [[ -n $triple ]]; then
   case "$triple" in
     *-linux-*) os=linux ;;
@@ -41,11 +47,14 @@ case "$arch" in
   arm64 | aarch64) arch=aarch64 ;;
   *) echo "package: unsupported CPU $arch" >&2; exit 1 ;;
 esac
-if [[ $os == macos && $arch != aarch64 ]]; then
-  echo "package: Intel Macs aren't supported; build from source instead." >&2
-  exit 1
-fi
 target="$os-$arch"
+
+if [[ $os == macos ]]; then
+  min_macos=$(sed -n 's/^MACOSX_DEPLOYMENT_TARGET = "\([0-9.]*\)"$/\1/p' .cargo/config.toml)
+  [[ $min_macos =~ ^[0-9]+\.[0-9]+(\.[0-9]+)?$ ]] || { echo "package: missing macOS deployment target" >&2; exit 1; }
+  # All release artifacts use the dependency floor, even with a host override.
+  export MACOSX_DEPLOYMENT_TARGET=$min_macos
+fi
 
 sha256() { if command -v sha256sum >/dev/null; then sha256sum "$1" | cut -d' ' -f1; else shasum -a 256 "$1" | cut -d' ' -f1; fi; }
 
@@ -55,6 +64,18 @@ for notice in LICENSE THIRD-PARTY-NOTICES; do
 done
 # Only release builds update themselves (src/update.rs).
 HERDR_APP_RELEASE=1 cargo build --release --locked ${triple:+--target "$triple"}
+
+if [[ $os == macos ]]; then
+  expected_arch=$arch
+  [[ $arch != aarch64 ]] || expected_arch=arm64
+  actual_arch=$(lipo -archs "$bin/herdr-app")
+  [[ $actual_arch == "$expected_arch" ]] || { echo "package: expected $expected_arch Mach-O, found $actual_arch" >&2; exit 1; }
+  actual_min=$(otool -l "$bin/herdr-app" | awk '
+    $1 == "cmd" { build = ($2 == "LC_BUILD_VERSION" || $2 == "LC_VERSION_MIN_MACOSX") }
+    build && ($1 == "minos" || $1 == "version") && !minimum { minimum = $2 }
+    END { print minimum }')
+  [[ $actual_min == "$min_macos" ]] || { echo "package: expected macOS $min_macos deployment target, found ${actual_min:-unknown}" >&2; exit 1; }
+fi
 
 if [[ $os == linux ]]; then export TMPDIR=${TMPDIR:-/var/tmp}; fi
 work=$(mktemp -d)
@@ -88,6 +109,7 @@ else
     <key>CFBundlePackageType</key><string>APPL</string>
     <key>CFBundleShortVersionString</key><string>$version</string>
     <key>CFBundleVersion</key><string>$version</string>
+    <key>LSMinimumSystemVersion</key><string>$min_macos</string>
     <key>NSMicrophoneUsageDescription</key><string>Terminal programs running in Herdr can use the microphone, for example for voice input.</string>
     <key>NSCameraUsageDescription</key><string>Terminal programs running in Herdr can use the camera.</string>
     <key>NSAppleEventsUsageDescription</key><string>Terminal programs running in Herdr can use AppleScript to control other apps.</string>

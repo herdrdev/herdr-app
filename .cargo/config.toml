@@ -1,0 +1,4 @@
+[env]
+# Pinned Ghostty's Config.osVersionMinLibVt requires macOS 13.0.
+# scripts/package reads this value; the standalone installer checks it too.
+MACOSX_DEPLOYMENT_TARGET = "13.0"
