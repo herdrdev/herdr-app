@@ -228,6 +228,12 @@ pub(crate) struct TextWrapper {
     pub(crate) lines: SumTree<LineItem>,
 
     inline_metrics: Rc<[(Range<usize>, Pixels)]>,
+    /// HERDR: decides hidden, replaced and scaled text per line.
+    presenter: Option<Rc<std::cell::RefCell<dyn crate::input::LinePresenter>>>,
+    /// HERDR: the caret's row and the selection inside it; its markers show as source.
+    reveal: Option<(usize, Range<usize>)>,
+    /// HERDR: the row height, to count the rows a presented picture needs.
+    line_height: Pixels,
     _initialized: bool,
 }
 
@@ -242,7 +248,160 @@ impl TextWrapper {
             wrapping_indent: WrappingIndent::default(),
             lines: SumTree::new(&()),
             inline_metrics: Rc::from([]),
+            presenter: None,
+            reveal: None,
+            line_height: px(0.),
             _initialized: false,
+        }
+    }
+
+    /// HERDR: the editor's row height; pictures are counted in rows of it.
+    pub(crate) fn set_line_height(&mut self, line_height: Pixels, cx: &mut App) -> bool {
+        if self.line_height == line_height {
+            return false;
+        }
+        self.line_height = line_height;
+        if self.presenter.is_some() && self._initialized {
+            self.update_all(&self.text.clone(), cx);
+            return true;
+        }
+        false
+    }
+
+    /// HERDR: wrap everything again: what the presenter draws changed without
+    /// the text changing (a picture finished loading).
+    pub(crate) fn refresh_presentation(&mut self, cx: &mut App) {
+        if self.presenter.is_some() && self._initialized {
+            self.update_all(&self.text.clone(), cx);
+        }
+    }
+
+    /// HERDR: rows `rows` (just wrapped) grow by the empty rows their pictures
+    /// need. The text stays on the first row; the rest are blank rows the
+    /// picture is painted over.
+    fn add_picture_rows(&mut self, rows: std::ops::RangeInclusive<usize>) {
+        let Some(presenter) = self.presenter.clone() else {
+            return;
+        };
+        if self.line_height <= px(0.) {
+            return;
+        }
+        let available = self.wrap_width.unwrap_or(px(720.));
+        let mut grown: Vec<(usize, usize)> = Vec::new();
+        for row in rows {
+            if row >= self.lines_count() {
+                break;
+            }
+            let line: String = self.text.slice_line(row).into();
+            let extra = presenter
+                .borrow()
+                .line(row, &line, self.reveal_for(row))
+                .map_or(0, |p| p.extra_rows(available, self.line_height));
+            if extra > 0 {
+                grown.push((row, extra));
+            }
+        }
+        if grown.is_empty() {
+            return;
+        }
+        let mut cursor = self.lines.cursor::<BufferRows>(&());
+        let mut tree = SumTree::new(&());
+        for (row, extra) in grown {
+            tree.append(cursor.slice(&BufferRows(row), Bias::Right), &());
+            if let Some(item) = cursor.item() {
+                let mut item = item.clone();
+                let end = item.len();
+                item.wrapped_lines.extend((0..extra).map(|_| end..end));
+                tree.push(item, &());
+                cursor.next();
+            }
+        }
+        tree.append(cursor.suffix(), &());
+        drop(cursor);
+        self.lines = tree;
+    }
+
+    /// HERDR: install (or remove) the line presenter and wrap again with it.
+    pub(crate) fn set_presenter(
+        &mut self,
+        presenter: Option<Rc<std::cell::RefCell<dyn crate::input::LinePresenter>>>,
+        cx: &mut App,
+    ) {
+        self.presenter = presenter;
+        self.reveal = None;
+        if self._initialized {
+            self.update_all(&self.text.clone(), cx);
+        }
+    }
+
+    pub(crate) fn presenter(
+        &self,
+    ) -> Option<&Rc<std::cell::RefCell<dyn crate::input::LinePresenter>>> {
+        self.presenter.as_ref()
+    }
+
+    /// HERDR: the selection inside `row`, when the caret is on it.
+    pub(crate) fn reveal_for(&self, row: usize) -> Option<Range<usize>> {
+        self.reveal
+            .as_ref()
+            .filter(|(reveal_row, _)| *reveal_row == row)
+            .map(|(_, range)| range.clone())
+    }
+
+    /// HERDR: how `row` is presented right now, if a presenter changes it.
+    pub(crate) fn presentation(&self, row: usize, line: &str) -> Option<crate::input::LinePresentation> {
+        self.presenter
+            .as_ref()?
+            .borrow()
+            .line(row, line, self.reveal_for(row))
+    }
+
+    /// HERDR: move the reveal with the caret; the rows it leaves and enters wrap
+    /// again, since hidden markers change their widths. Returns whether it moved.
+    pub(crate) fn set_reveal(&mut self, reveal: Option<(usize, Range<usize>)>, cx: &mut App) -> bool {
+        if self.presenter.is_none() || self.reveal == reveal {
+            return false;
+        }
+        let mut rows: Vec<usize> = self
+            .reveal
+            .iter()
+            .chain(reveal.iter())
+            .map(|(row, _)| *row)
+            .collect();
+        rows.sort_unstable();
+        rows.dedup();
+        self.reveal = reveal;
+        if self._initialized {
+            self.rewrap_rows(&rows, cx);
+        }
+        true
+    }
+
+    /// HERDR: wrap these buffer rows again without changing the text.
+    fn rewrap_rows(&mut self, rows: &[usize], cx: &mut App) {
+        let text = self.text.clone();
+        let count = self.lines_count();
+        let mut ix = 0;
+        while ix < rows.len() {
+            let first = rows[ix];
+            let mut last = first;
+            while ix + 1 < rows.len() && rows[ix + 1] <= last + 1 {
+                ix += 1;
+                last = rows[ix];
+            }
+            ix += 1;
+            if first >= count {
+                break;
+            }
+            let last = last.min(count.saturating_sub(1));
+            let start = text.line_start_offset(first);
+            let end = text.line_end_offset(last);
+            self.update_inner(
+                &text,
+                &(start..end),
+                &Rope::from(text.slice(start..end).to_string()),
+                cx,
+            );
         }
     }
 
@@ -369,6 +528,40 @@ impl TextWrapper {
         new_text: &Rope,
         cx: &mut App,
     ) {
+        // HERDR: let the presenter see the new text first; rows it restyles
+        // beyond the edit (a code fence opening) wrap again after the edit.
+        let restyled = match self.presenter.clone() {
+            Some(presenter) => {
+                let count = self.lines_count();
+                let edit = (count > 0).then(|| {
+                    let clamp = |row: usize| row.min(count.saturating_sub(1));
+                    crate::input::PresenterEdit {
+                        start_row: clamp(self.text.offset_to_point(range.start).row),
+                        old_end_row: clamp(self.text.offset_to_point(range.end).row),
+                        new_end_row: changed_text
+                            .offset_to_point(range.start + new_text.len())
+                            .row,
+                    }
+                });
+                presenter.borrow_mut().sync(changed_text, edit)
+            }
+            None => Vec::new(),
+        };
+        self.update_inner(changed_text, range, new_text, cx);
+        if !restyled.is_empty() {
+            self.rewrap_rows(&restyled, cx);
+        }
+    }
+
+    fn update_inner(
+        &mut self,
+        changed_text: &Rope,
+        range: &Range<usize>,
+        new_text: &Rope,
+        cx: &mut App,
+    ) {
+        let presenter = self.presenter.clone();
+        let reveal = self.reveal.clone();
         let mut line_wrapper = cx
             .text_system()
             .line_wrapper(self.font.clone(), self.font_size);
@@ -404,6 +597,42 @@ impl TextWrapper {
                     fragments.push(LineFragment::element(*width, range.len()));
                     offset = range.end;
                 }
+                // HERDR: a presented line is measured as it will be drawn:
+                // hidden markers take no room, headings use their own size.
+                if fragments.is_empty()
+                    && let Some(presenter) = &presenter
+                {
+                    let row = changed_text.offset_to_point(line_start).row;
+                    let reveal = reveal
+                        .as_ref()
+                        .filter(|(reveal_row, _)| *reveal_row == row)
+                        .map(|(_, range)| range.clone());
+                    if let Some(presentation) = presenter
+                        .borrow()
+                        .line(row, line_str, reveal)
+                        .filter(|presentation| presentation.changes_layout())
+                    {
+                        let base = line_str.as_ptr() as usize;
+                        let size = font_size * presentation.scale;
+                        return measured_wrap_boundaries(
+                            line_str,
+                            wrap_width,
+                            wrapping_indent,
+                            |part| {
+                                let start = part.as_ptr() as usize - base;
+                                let (text, runs) = presentation.visible_text(
+                                    line_str,
+                                    start..start + part.len(),
+                                    &font,
+                                );
+                                if text.is_empty() {
+                                    return px(0.);
+                                }
+                                text_system.layout_line(&text, size, &runs, None).width
+                            },
+                        );
+                    }
+                }
                 if fragments.is_empty() {
                     return measured_wrap_boundaries(
                         line_str,
@@ -436,6 +665,12 @@ impl TextWrapper {
                     .collect()
             },
         );
+        // HERDR: the rows just wrapped grow to hold their pictures.
+        let first = changed_text.offset_to_point(range.start).row;
+        let last = changed_text
+            .offset_to_point(range.start + new_text.len())
+            .row;
+        self.add_picture_rows(first..=last);
     }
 
     pub(crate) fn adjust_inline_metrics(&mut self, range: &Range<usize>, new_len: usize) {
@@ -749,6 +984,18 @@ pub(crate) struct LineLayout {
     /// Whether any run of this line carries a background color, so [`Self::paint_background`]
     /// can skip the glyph walk for the common case of a line without highlights.
     has_background: bool,
+    /// HERDR: row fills, a left bar and a rule drawn behind a presented line.
+    pub(crate) decor: Option<LineDecor>,
+}
+
+/// HERDR: what a presented line paints behind its text.
+#[derive(Clone)]
+pub(crate) struct LineDecor {
+    pub(crate) background: Option<gpui::Hsla>,
+    pub(crate) left_bar: Option<gpui::Hsla>,
+    pub(crate) rule: Option<gpui::Hsla>,
+    /// A picture and the size it is drawn at.
+    pub(crate) image: Option<(std::sync::Arc<gpui::RenderImage>, Size<Pixels>)>,
 }
 
 impl LineLayout {
@@ -761,6 +1008,64 @@ impl LineLayout {
             whitespace_chars: Vec::new(),
             whitespace_indicators: None,
             has_background: false,
+            decor: None,
+        }
+    }
+
+    /// HERDR: fills, bar and rule to paint behind this line.
+    pub(crate) fn with_decor(mut self, decor: Option<LineDecor>) -> Self {
+        self.decor = decor;
+        self
+    }
+
+    /// HERDR: paint the line's decor across `width`, from the text's left edge.
+    pub(crate) fn paint_decor(
+        &self,
+        pos: Point<Pixels>,
+        line_height: Pixels,
+        width: Pixels,
+        window: &mut Window,
+    ) {
+        let Some(decor) = self.decor.as_ref() else {
+            return;
+        };
+        if let Some((image, shown)) = &decor.image {
+            // The picture takes the line's last rows: all of them when its
+            // source is hidden, the ones under the text when it is showing.
+            let own = crate::input::LineImage::rows(*shown, line_height);
+            let top = self.wrapped_lines.len().saturating_sub(own) * line_height;
+            let bounds = gpui::Bounds::new(point(pos.x, pos.y + top + px(4.)), *shown);
+            let _ = window.paint_image(
+                bounds,
+                bounds,
+                gpui::Corners::all(px(4.)),
+                image.clone(),
+                0,
+                false,
+            );
+        }
+        let rows = self.wrapped_lines.len().max(1);
+        let height = rows * line_height;
+        if let Some(color) = decor.background {
+            window.paint_quad(gpui::fill(
+                gpui::Bounds::new(pos, size(width, height)),
+                color,
+            ));
+        }
+        if let Some(color) = decor.left_bar {
+            window.paint_quad(gpui::fill(
+                gpui::Bounds::new(pos, size(px(3.), height)),
+                color,
+            ));
+        }
+        if let Some(color) = decor.rule {
+            window.paint_quad(gpui::fill(
+                gpui::Bounds::new(
+                    point(pos.x, pos.y + line_height.half()),
+                    size(width, px(1.)),
+                ),
+                color,
+            ));
         }
     }
 

@@ -7158,6 +7158,8 @@ globalThis.__gpui = (() => {
         return {
           __handle: handle,
           selected_range: () => __editor_text_call(handle, "selected_range", []),
+          cursor_bounds: () => __editor_text_call(handle, "cursor_bounds", []),
+          set_images: (images) => __editor_text_call(handle, "set_images", [images]),
           set_selected_range: (range) => __editor_text_call(handle, "set_selected_range", [range]),
           replace: (text) => __editor_text_call(handle, "replace", [String(text)]),
           value: () => __editor_value(handle),

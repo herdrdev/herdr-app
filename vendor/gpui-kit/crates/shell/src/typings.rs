@@ -3209,6 +3209,15 @@ const BASE: &str = r#"  /** A row. */
     set_selected_range(range: InputRange): void;
     /** Replaces the selection with `text`, as typing would (one undo step). */
     replace(text: string): void;
+    /** HERDR: where the caret was last drawn (null before the first frame),
+     * to anchor a popup such as a completion list: `x`/`y` in window pixels,
+     * `local_x`/`local_y` from the Editor element's top-left corner. */
+    cursor_bounds(): { x: number; y: number; local_x: number; local_y: number; width: number; height: number } | null;
+    /** HERDR: the pictures a `live_preview` editor draws for lines that are
+     * only an embed (`![[shot.png]]`, `![alt](shot.png)`): `target` as the
+     * note writes it, `path` the file on this computer (png, jpg, webp, gif,
+     * svg, bmp, tiff). Replaces the previous set; unchanged files are not read again. */
+    set_images(images: { target: string; path: string }[]): void;
     on(event: "change" | "submit" | "focus" | "blur" | "paste_other", handler: (event: InputEvent, cx: Context) => void): boolean;
     /** Moves the keyboard onto the editor. */
     focus(): void;
@@ -3234,6 +3243,21 @@ const BASE: &str = r#"  /** A row. */
        * constant, variable, operator, punctuation, boolean, string.escape.
        * Values are concrete hex colors; unspecified UI colors follow the theme. */
       syntax?: Record<string, string>;
+      /** HERDR: read the text as Markdown and draw it formatted in place:
+       * markers (`**`, `#`, link URLs) hide until the caret touches their
+       * element, headings are larger, bullets and checkboxes are glyphs, code
+       * and quotes get their own look. The text is never changed. `language`
+       * is ignored. Colors come from `syntax`: heading, punctuation (shown
+       * markers), link, code, code.background, quote, quote.bar, tag,
+       * tag.background, highlight, rule, muted, checkbox. Give the editor a
+       * line height of about 1.75 so large headings fit their row. */
+      live_preview?: boolean;
+      /** HERDR: the font live preview draws code in; the theme's mono font when unset. */
+      code_font_family?: string;
+      /** HERDR: an icon font with Font Awesome's square glyphs (Herdr ships
+       * "Symbols Nerd Font") for live preview's task checkboxes; plain box
+       * characters when unset. */
+      symbol_font_family?: string;
     }) => EditorState;
   };
   export const Editor: { new: (state: EditorState) => NativeElement };

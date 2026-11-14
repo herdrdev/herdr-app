@@ -64,6 +64,8 @@ pub(crate) mod capability;
 mod component;
 mod component_registry;
 mod input_tokens;
+// HERDR: live-preview Markdown presentation for script editors.
+mod markdown_live;
 // HERDR: syntax highlighting shipped with script editors.
 mod syntax;
 pub use input_tokens::{
