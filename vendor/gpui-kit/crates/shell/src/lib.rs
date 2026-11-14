@@ -72,6 +72,8 @@ pub use input_tokens::{
 };
 pub(crate) mod dependencies;
 pub mod dock;
+mod drag_paths;
+pub use drag_paths::DraggedPaths;
 pub(crate) mod engine;
 pub(crate) mod entities;
 pub(crate) mod error;
@@ -99,6 +101,7 @@ mod typings;
 pub(crate) mod value;
 pub mod view;
 pub(crate) mod watch;
+pub use watch::application_file_counts;
 
 pub use anyhow;
 pub use value::set_pixel_scale;

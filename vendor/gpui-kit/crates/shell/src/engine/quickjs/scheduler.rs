@@ -1315,6 +1315,28 @@ where
     Ok(promise)
 }
 
+/// Adds explicit cancellation without changing owning-view cancellation.
+pub(super) fn awaiting_cancellable<'js, T>(
+    ctx: &Ctx<'js>,
+    api: &'static str,
+    work: impl Future<Output = Result<T, String>> + Send + 'static,
+    cancellation_value: Option<T>,
+) -> JsResult<Promise<'js>>
+where
+    T: for<'a> IntoJs<'a> + Send + 'static,
+{
+    let Some(value) = cancellation_value else { return awaiting(ctx, api, work) };
+    let (stop, stopped) = async_channel::bounded::<()>(1);
+    let promise = awaiting(ctx, api, smol::future::or(
+        async move { let _ = stopped.recv().await; Ok(value) },
+        work,
+    ))?;
+    promise.as_object().expect("a promise is an object").set("cancel", Func::from(move || {
+        let _ = stop.try_send(());
+    }))?;
+    Ok(promise)
+}
+
 fn settle_awaited<'js, T: IntoJs<'js>>(
     ctx: &Ctx<'js>,
     resolve: Option<Persistent<Function<'static>>>,

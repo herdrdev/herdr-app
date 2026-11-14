@@ -11,10 +11,11 @@ use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
 
+#[derive(Clone)]
 pub(crate) struct CachedLoad<T> {
     state: Rc<RefCell<CachedLoadState<T>>>,
     // Keep the owner outside the state so publishing a result cannot cancel its own task.
-    _task: Task<()>,
+    _task: Rc<Task<()>>,
 }
 
 enum CachedLoadState<T> {
@@ -24,6 +25,10 @@ enum CachedLoadState<T> {
 
 impl<T: Clone + Send + 'static> CachedLoad<T> {
     pub(crate) fn new(future: impl Future<Output = T> + Send + 'static, cx: &App) -> Self {
+        Self::new_with_refresh(future, cx, false)
+    }
+
+    pub(crate) fn new_with_refresh(future: impl Future<Output = T> + Send + 'static, cx: &App, refresh: bool) -> Self {
         let state = Rc::new(RefCell::new(CachedLoadState::Loading(FxHashSet::default())));
         let task = cx.background_executor().spawn(future);
         let task = cx.spawn({
@@ -39,13 +44,26 @@ impl<T: Clone + Send + 'static> CachedLoad<T> {
                     unreachable!("a cached load completes only once");
                 };
                 cx.update(|cx| {
+                    let has_subscribers = !views.is_empty();
                     for view in views {
                         cx.notify(view);
                     }
+                    if refresh && !has_subscribers { cx.refresh_windows(); }
                 });
             }
         });
-        Self { state, _task: task }
+        Self { state, _task: Rc::new(task) }
+    }
+
+    pub(crate) fn loading_for(&self, views: &FxHashSet<EntityId>) -> bool {
+        match &*self.state.borrow() {
+            CachedLoadState::Loading(subscribers) => subscribers.iter().any(|view| views.contains(view)),
+            CachedLoadState::Loaded(_) => false,
+        }
+    }
+
+    pub(crate) fn is_shared(&self) -> bool {
+        Rc::strong_count(&self.state) > 1
     }
 
     pub(crate) fn get(&self) -> Option<T> {
@@ -103,6 +121,11 @@ pub trait Asset: 'static {
     /// The loaded asset
     type Output: Clone + Send;
 
+    /// Identity used to share an asset load, without changing its source.
+    fn cache_key(source: &Self::Source, _cx: &App) -> u64 {
+        hash(source)
+    }
+
     /// Load the asset asynchronously
     fn load(
         source: Self::Source,
@@ -125,6 +148,10 @@ where
     type Source = T::Source;
 
     type Output = T::Output;
+
+    fn cache_key(source: &Self::Source, cx: &App) -> u64 {
+        T::cache_key(source, cx)
+    }
 
     fn load(
         source: Self::Source,

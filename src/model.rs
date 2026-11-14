@@ -22,6 +22,9 @@ pub struct Tab {
     /// Put away (ms since the epoch): out of the lists, still running. Comes
     /// back when it's shown or one of its agents needs the person.
     pub settled: Option<u64>,
+    /// Fields of its document entry this build doesn't read (a newer build's),
+    /// written back as they were.
+    pub rest: serde_json::Map<String, serde_json::Value>,
 }
 
 /// A place to work, plus the folder its new terminals start in.
@@ -37,6 +40,9 @@ pub struct Space {
     pub tabs: Vec<Tab>,
     /// The selected tab.
     pub active: Option<String>,
+    /// Fields of its document entry this build doesn't read (a newer build's),
+    /// written back as they were.
+    pub rest: serde_json::Map<String, serde_json::Value>,
 }
 
 /// A closed space, so opening it again doesn't ask for its name.
@@ -115,6 +121,7 @@ impl Tab {
             root: Node::container(id, Axis::Row, vec![pane]),
             zoomed: None,
             settled: None,
+            rest: Default::default(),
         }
     }
 
@@ -190,6 +197,27 @@ impl Model {
         true
     }
 
+    /// Moves a tab within its space (1 = first). Only a tab id: not `space_of`, which also
+    /// finds the space of a pane or container, and those have no place in `tabs`.
+    pub fn move_tab(&mut self, id: &str, index: usize) -> bool {
+        let Some((p, from)) = self.spaces.iter_mut().find_map(|p| p.tabs.iter().position(|c| c.id == id).map(|from| (p, from))) else { return false };
+        let tab = p.tabs.remove(from);
+        let to = index.saturating_sub(1).min(p.tabs.len());
+        p.tabs.insert(to, tab);
+        true
+    }
+
+    /// Moves a tab `by` places, skipping settled tabs as `tab.next` does, wrapping at
+    /// either end.
+    pub fn shift_tab(&mut self, id: &str, by: i64) -> bool {
+        let Some(p) = self.spaces.iter().find(|p| p.tabs.iter().any(|c| c.id == id)) else { return false };
+        let shown: Vec<_> = p.tabs.iter().enumerate().filter(|(_, c)| c.settled.is_none() || c.id == id).map(|(i, _)| i).collect();
+        let from = shown.iter().position(|&i| p.tabs[i].id == id).unwrap();
+        let n = shown.len() as i64;
+        let to = shown[(from as i64 + by.rem_euclid(n)).rem_euclid(n) as usize];
+        self.move_tab(id, to + 1)
+    }
+
     pub fn active_index(&self) -> Option<usize> {
         let id = self.active.as_deref()?;
         self.spaces.iter().position(|p| p.id == id).or((!self.spaces.is_empty()).then_some(0))
@@ -260,19 +288,43 @@ impl Model {
     }
 
     pub fn add_space(&mut self, id: &str, name: &str, folder: &str, ctx: Tab) {
+        self.insert_space(id, name, folder, ctx, true);
+    }
+
+    /// Adds a space without showing it; with no space shown yet, it is shown.
+    pub fn add_space_unshown(&mut self, id: &str, name: &str, folder: &str, ctx: Tab) {
+        self.insert_space(id, name, folder, ctx, false);
+    }
+
+    fn insert_space(&mut self, id: &str, name: &str, folder: &str, ctx: Tab, show: bool) {
+        let show = show || self.active_index().is_none();
         let active = Some(ctx.id.clone());
-        self.spaces.push(Space { id: id.to_owned(), name: name.to_owned(), folder: folder.to_owned(), machine: None, tabs: vec![ctx], active });
+        self.spaces.push(Space { id: id.to_owned(), name: name.to_owned(), folder: folder.to_owned(), machine: None, tabs: vec![ctx], active, rest: Default::default() });
         self.recent.retain(|r| r.name != name);
-        self.active = Some(id.to_owned());
+        if show {
+            self.active = Some(id.to_owned());
+        }
     }
 
     /// Adds a tab after the space's selected one and selects it (not the space).
     pub fn add_tab(&mut self, space: &str, ctx: Tab) -> bool {
+        self.insert_tab(space, ctx, true)
+    }
+
+    /// Adds a tab at the end of the space, so several keep their order; its selected tab stays.
+    pub fn add_tab_unselected(&mut self, space: &str, ctx: Tab) -> bool {
+        self.insert_tab(space, ctx, false)
+    }
+
+    fn insert_tab(&mut self, space: &str, ctx: Tab, select: bool) -> bool {
         let Some(p) = self.space_mut(space) else { return false };
+        if !select {
+            p.tabs.push(ctx);
+            return true;
+        }
         let at = p.active.as_deref().and_then(|a| p.tabs.iter().position(|c| c.id == a)).map_or(p.tabs.len(), |i| i + 1);
-        let id = ctx.id.clone();
+        p.active = Some(ctx.id.clone());
         p.tabs.insert(at, ctx);
-        p.active = Some(id);
         true
     }
 
@@ -326,6 +378,25 @@ impl Model {
         tab.root = root;
         tab.focus(source);
         true
+    }
+
+    pub fn swap_panes(&mut self, pane: &str, target: &str) -> Result<(), String> {
+        let is_pane = |m: &Model, id: &str| m.tab_of(id).and_then(|c| c.root.find(id)).is_some_and(Node::is_pane);
+        if !is_pane(self, pane) {
+            return Err(format!("no pane {pane:?}"));
+        }
+        if !is_pane(self, target) {
+            return Err(format!("no target pane {target:?}"));
+        }
+        if pane == target {
+            return Err("pane.swap target is the pane itself".into());
+        }
+        let Some(c) = self.tab_of_mut(pane) else { return Err(format!("no pane {pane:?}")) };
+        if c.root.find(target).is_none() {
+            return Err(format!("pane.swap target {target:?} is in another tab"));
+        }
+        c.root.swap(pane, target);
+        Ok(())
     }
 
     /// Removes a pane. Returns what else closed: the tab, and the space if it was its last.
@@ -414,6 +485,23 @@ impl Model {
 
     pub fn unsettle(&mut self, ctx: &str) -> bool {
         self.tab_mut(ctx).is_some_and(|c| c.settled.take().is_some())
+    }
+
+    /// Zooms a pane, or unzooms it when it's the zoomed one. A tab with one
+    /// pane doesn't zoom. Zooming focuses the pane: a zoomed tab never hides
+    /// the pane that has the keyboard. Returns whether the pane is now zoomed.
+    pub fn toggle_zoom(&mut self, pane_id: &str) -> bool {
+        let Some(c) = self.tab_of_mut(pane_id) else { return false };
+        if c.root.panes().len() < 2 {
+            return false;
+        }
+        if c.zoomed.as_deref() == Some(pane_id) {
+            c.zoomed = None;
+            return false;
+        }
+        c.zoomed = Some(pane_id.to_owned());
+        c.focus(pane_id);
+        true
     }
 
     /// Focuses a pane anywhere: selects its space and tab.
@@ -672,10 +760,91 @@ mod tests {
         assert_eq!(m.alert_for("t1", true, Some("working"), Some("blocked"), false), None);
     }
 
+    #[test]
+    fn tab_move_refuses_panes_and_containers_and_leaves_the_tabs_alone() {
+        let mut m = Model::default();
+        m.add_space("s1", "api", "/src", Tab::new("c1", "", "x1", "t1"));
+        m.split("x1", crate::layout::Axis::Column, "x2", "t2");
+        m.add_tab("s1", Tab::new("c2", "", "x3", "t3"));
+        // The column split wraps x1 and x2 in a container of their own, inside the tab's root.
+        let inner = &m.tab("c1").unwrap().root.children()[0];
+        assert!(!inner.is_pane() && inner.id != "c1");
+        let container = inner.id.clone();
+        let tabs = |m: &Model| m.space("s1").unwrap().tabs.iter().map(|c| c.id.clone()).collect::<Vec<_>>();
+        for id in ["x1", "x3", container.as_str(), "s1", "nope"] {
+            assert!(!m.move_tab(id, 2), "{id}");
+            assert_eq!(tabs(&m), ["c1", "c2"], "{id}");
+        }
+        assert!(m.move_tab("c2", 1));
+        assert_eq!(tabs(&m), ["c2", "c1"]);
+        assert!(m.move_tab("c2", 9));
+        assert_eq!(tabs(&m), ["c1", "c2"]);
+    }
+
+    #[test]
+    fn shift_tab_steps_over_the_shown_tabs_and_wraps() {
+        let mut m = Model::default();
+        m.add_space("s1", "api", "/src", Tab::new("c1", "", "x1", "t1"));
+        for (c, x) in [("c2", "x2"), ("c3", "x3"), ("c4", "x4")] {
+            m.add_tab("s1", Tab::new(c, "", x, "t"));
+        }
+        let tabs = |m: &Model| m.space("s1").unwrap().tabs.iter().map(|c| c.id.clone()).collect::<Vec<_>>();
+        assert!(m.shift_tab("c2", 1));
+        assert_eq!(tabs(&m), ["c1", "c3", "c2", "c4"]);
+        assert!(m.shift_tab("c2", -1));
+        assert_eq!(tabs(&m), ["c1", "c2", "c3", "c4"]);
+        // Past either end: to the other end.
+        assert!(m.shift_tab("c4", 1));
+        assert_eq!(tabs(&m), ["c4", "c1", "c2", "c3"]);
+        assert!(m.shift_tab("c4", -1));
+        assert_eq!(tabs(&m), ["c1", "c2", "c3", "c4"]);
+        // A settled tab isn't shown, so a step goes past it.
+        m.space_mut("s1").unwrap().tabs[2].settled = Some(1);
+        assert!(m.shift_tab("c2", 1));
+        assert_eq!(tabs(&m), ["c1", "c3", "c4", "c2"]);
+        assert!(m.shift_tab("c2", 0));
+        assert_eq!(tabs(&m), ["c1", "c3", "c4", "c2"]);
+        // Past the end with the settled one before it: to the front.
+        assert!(m.shift_tab("c2", 1));
+        assert_eq!(tabs(&m), ["c2", "c1", "c3", "c4"]);
+        // The settled tab itself moves among the shown ones.
+        assert!(m.shift_tab("c3", -1));
+        assert_eq!(tabs(&m), ["c2", "c3", "c1", "c4"]);
+        // More places than tabs wraps round; i64's ends don't overflow.
+        assert!(m.shift_tab("c4", 7));
+        assert_eq!(tabs(&m), ["c4", "c2", "c3", "c1"]);
+        assert!(m.shift_tab("c4", i64::MAX));
+        assert!(m.shift_tab("c4", i64::MIN));
+        assert!(!m.shift_tab("x1", 1));
+        assert!(!m.shift_tab("nope", 1));
+    }
+
     fn model_with_one() -> Model {
         let mut m = Model::default();
         m.add_space("p1", "api", "/src/api", Tab::new("c1", "fix login", "x1", "t1"));
         m
+    }
+
+    #[test]
+    fn unshown_spaces_and_unselected_tabs_keep_what_is_shown() {
+        let mut m = Model::default();
+        m.add_space_unshown("p1", "", "/a", Tab::new("c1", "", "x1", "t1"));
+        assert_eq!(m.active.as_deref(), Some("p1"), "with nothing shown, the new space is");
+        m.add_space_unshown("p2", "", "/b", Tab::new("c2", "", "x2", "t2"));
+        assert_eq!(m.active.as_deref(), Some("p1"));
+        assert_eq!(m.space("p2").unwrap().active.as_deref(), Some("c2"), "shown later, it opens on its tab");
+        assert!(m.add_tab_unselected("p1", Tab::new("c3", "", "x3", "t3")));
+        assert!(m.add_tab_unselected("p2", Tab::new("c4", "", "x4", "t4")));
+        assert_eq!(m.active_tab().map(|c| c.id.as_str()), Some("c1"));
+        assert_eq!(m.space("p2").unwrap().active.as_deref(), Some("c2"));
+        assert!(m.add_tab_unselected("p1", Tab::new("c5", "", "x5", "t5")));
+        let order: Vec<&str> = m.space("p1").unwrap().tabs.iter().map(|c| c.id.as_str()).collect();
+        assert_eq!(order, ["c1", "c3", "c5"], "at the end, in the order they came");
+        assert_eq!(m.active_tab().map(|c| c.id.as_str()), Some("c1"));
+
+        let mut stale = Model { active: Some("gone".into()), ..Model::default() };
+        stale.add_space_unshown("p9", "", "/c", Tab::new("c9", "", "x9", "t9"));
+        assert_eq!(stale.active.as_deref(), Some("p9"), "a stale id shows nothing, so the new space is shown");
     }
 
     #[test]
@@ -788,6 +957,58 @@ mod tests {
         assert_eq!(m.active_tab().map(|c| c.id.as_str()), Some("c3"));
     }
 
+    fn three_panes_and_another_tab() -> Model {
+        let mut m = model_with_one();
+        m.split("x1", Axis::Row, "x2", "t2");
+        m.split("x2", Axis::Row, "x3", "t3");
+        m.add_tab("p1", Tab::new("c2", "docs", "x4", "t4"));
+        m.select_tab("c1");
+        m.focus_pane("x1");
+        m
+    }
+
+    fn pane_order(m: &Model, tab: &str) -> Vec<String> {
+        m.tab(tab).unwrap().root.panes().iter().map(|n| n.id.clone()).collect()
+    }
+
+    #[test]
+    fn swapping_panes_by_id_trades_places_and_keeps_focus_on_the_same_id() {
+        let mut m = three_panes_and_another_tab();
+        assert_eq!(m.swap_panes("x1", "x3"), Ok(()));
+        assert_eq!(pane_order(&m, "c1"), ["x3", "x2", "x1"]);
+        assert_eq!(m.focused_pane().as_deref(), Some("x1"));
+        assert_eq!(m.address_of("x1").as_deref(), Some("t1"));
+        assert_eq!(m.swap_panes("x2", "x3"), Ok(()));
+        assert_eq!(pane_order(&m, "c1"), ["x2", "x3", "x1"]);
+        assert_eq!(m.focused_pane().as_deref(), Some("x1"));
+    }
+
+    #[test]
+    fn swapping_panes_by_id_refuses_each_bad_pair_without_changes() {
+        let mut m = three_panes_and_another_tab();
+        let cases = [
+            ("nope", "x2", "no pane \"nope\""),
+            ("x1", "nope", "no target pane \"nope\""),
+            ("x1", "x1", "pane.swap target is the pane itself"),
+            ("x1", "x4", "pane.swap target \"x4\" is in another tab"),
+        ];
+        for (pane, target, error) in cases {
+            assert_eq!(m.swap_panes(pane, target), Err(error.to_owned()), "{pane} {target}");
+            assert_eq!(pane_order(&m, "c1"), ["x1", "x2", "x3"], "{pane} {target}");
+            assert_eq!(pane_order(&m, "c2"), ["x4"], "{pane} {target}");
+            assert_eq!(m.focused_pane().as_deref(), Some("x1"), "{pane} {target}");
+        }
+    }
+
+    #[test]
+    fn swapping_refuses_a_container_as_pane_or_target() {
+        let mut m = three_panes_and_another_tab();
+        let container = m.tab("c1").unwrap().root.id.clone();
+        assert_eq!(m.swap_panes(&container, "x1"), Err(format!("no pane {container:?}")));
+        assert_eq!(m.swap_panes("x1", &container), Err(format!("no target pane {container:?}")));
+        assert_eq!(pane_order(&m, "c1"), ["x1", "x2", "x3"]);
+    }
+
     #[test]
     fn splits_focus_the_new_pane_and_closing_it_moves_focus() {
         let mut m = model_with_one();
@@ -874,6 +1095,24 @@ mod tests {
         m.tab_mut("c1").unwrap().zoomed = None;
         assert!(m.focus_pane("x2"));
         assert_eq!(m.tab("c1").unwrap().zoomed, None);
+    }
+
+    #[test]
+    fn zooming_a_pane_focuses_it() {
+        let mut m = model_with_one();
+        // A tab with one pane doesn't zoom.
+        assert!(!m.toggle_zoom("x1"));
+        assert!(m.split("x1", Axis::Row, "x2", "t2"));
+        assert!(m.focus_pane("x2"));
+        // Zooming the other pane (its header's button) shows it and gives it the keyboard.
+        assert!(m.toggle_zoom("x1"));
+        assert_eq!(m.tab("c1").unwrap().zoomed.as_deref(), Some("x1"));
+        assert_eq!(m.focused_pane().as_deref(), Some("x1"));
+        assert_eq!(m.tab("c1").unwrap().before, ["x2"]);
+        // Unzooming leaves focus where it is.
+        assert!(!m.toggle_zoom("x1"));
+        assert_eq!(m.tab("c1").unwrap().zoomed, None);
+        assert_eq!(m.focused_pane().as_deref(), Some("x1"));
     }
 
     #[test]
