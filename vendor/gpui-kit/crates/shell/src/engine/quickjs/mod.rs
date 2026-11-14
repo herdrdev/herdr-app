@@ -7332,6 +7332,7 @@ impl ShellRuntime {
                 "disabled",
                 "selectable",
                 "scrollable",
+                "raw_html",
                 "selected",
                 "checked",
                 "accessibility_label",
@@ -8363,6 +8364,7 @@ impl ShellRuntime {
             "disabled"
             | "selectable"
             | "scrollable"
+            | "raw_html"
             | "selected"
             | "checked"
             | "accessibility_label"
@@ -8421,6 +8423,7 @@ impl ShellRuntime {
                     "disabled" => "disabled",
                     "selectable" => "selectable",
                     "scrollable" => "scrollable",
+                    "raw_html" => "raw_html",
                     "selected" => "selected",
                     "checked" => "checked",
                     "tooltip" => "tooltip",
