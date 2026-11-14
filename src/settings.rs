@@ -826,11 +826,80 @@ pub fn ui_font_size() -> f32 {
     get().ui_font_size * zoom()
 }
 
-/// Font families on this machine (the bundled ones and the home's included).
+/// Font families on this machine (the bundled ones and the home's included),
+/// lowercased for lookup.
 static FONTS: Mutex<Option<std::collections::HashSet<String>>> = Mutex::new(None);
 
-pub fn note_fonts(names: Vec<String>) {
-    *FONTS.lock().unwrap() = Some(names.into_iter().map(|n| n.to_lowercase()).collect());
+/// The same families as mods' `fonts()` lists them.
+static FONT_NAMES: Mutex<Option<Vec<String>>> = Mutex::new(None);
+
+/// Every family a person can pick in a font picker (`fonts()`): the system's
+/// private ones (macOS names them with a leading ".") left out, ordered by
+/// lowercase.
+pub fn font_names() -> Vec<String> {
+    FONT_NAMES.lock().unwrap().clone().unwrap_or_default()
+}
+
+/// Records the families the text system reports; true when they differ from
+/// what was known.
+fn note_fonts(names: Vec<String>) -> bool {
+    let have: std::collections::HashSet<String> = names.iter().map(|n| n.to_lowercase()).collect();
+    let mut listed: Vec<String> = names.into_iter().filter(|n| !n.starts_with('.')).collect();
+    listed.sort_by_key(|n| n.to_lowercase());
+    listed.dedup();
+    let mut fonts = FONTS.lock().unwrap();
+    let mut pickable = FONT_NAMES.lock().unwrap();
+    let changed = fonts.as_ref() != Some(&have) || pickable.as_ref() != Some(&listed);
+    if changed {
+        *fonts = Some(have);
+        *pickable = Some(listed);
+    }
+    changed
+}
+
+/// Where the system keeps fonts: a font installed while Herdr runs lands in one
+/// of these (macOS reads them live; Linux and Windows read them at start).
+fn font_dirs() -> Vec<PathBuf> {
+    let home = crate::mods::home();
+    vec![home.join("Library/Fonts"), "/Library/Fonts".into(), "/System/Library/Fonts".into()]
+}
+
+/// The font folders' stamps, in `font_dirs` order: cheap to read, unlike every
+/// family on the machine (~40 ms on macOS).
+static FONT_DIRS: Mutex<Option<Vec<Option<std::time::SystemTime>>>> = Mutex::new(None);
+
+fn font_dirs_stamp() -> Vec<Option<std::time::SystemTime>> {
+    font_dirs().iter().map(|dir| std::fs::metadata(dir).and_then(|m| m.modified()).ok()).collect()
+}
+
+/// Reads this machine's fonts again (a font installed while Herdr runs isn't in
+/// the list read at start), for terminals and mods alike. True when the
+/// families changed: text shaped before may now use the new font.
+pub fn refresh_fonts(cx: &gpui::App) -> bool {
+    // Stamped first: a font landing while the list is read looks changed next time.
+    *FONT_DIRS.lock().unwrap() = Some(font_dirs_stamp());
+    let changed = note_fonts(cx.text_system().all_font_names());
+    if changed {
+        // A family that couldn't be found before it was installed is cached as
+        // missing: an empty add clears that, and rows shaped before redraw.
+        let _ = cx.text_system().add_fonts(Vec::new());
+        FONTS_ADDED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    }
+    changed
+}
+
+/// `refresh_fonts` unless no font folder changed since the last read: what a
+/// window activation or a look change can afford.
+pub fn refresh_fonts_if_changed(cx: &gpui::App) -> bool {
+    if *FONT_DIRS.lock().unwrap() == Some(font_dirs_stamp()) {
+        return false;
+    }
+    refresh_fonts(cx)
+}
+
+/// Whether this machine has `family`, in any case.
+pub fn knows_font(family: &str) -> bool {
+    FONTS.lock().unwrap().as_ref().is_some_and(|have| have.contains(&family.to_lowercase()))
 }
 
 /// Font files the home brings: `fonts/` and each mod's `fonts/` (a layout's
@@ -857,9 +926,10 @@ pub fn load_home_fonts(cx: &mut gpui::App) -> bool {
     }
     if let Err(e) = cx.text_system().add_fonts(new) {
         tracing::warn!("fonts in {} not loaded: {e:#}", home.display());
+        return false;
     }
     FONTS_ADDED.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
-    note_fonts(cx.text_system().all_font_names());
+    refresh_fonts(cx);
     true
 }
 
@@ -916,6 +986,25 @@ mod tests {
     }
 
     use super::*;
+
+    #[test]
+    fn fonts_are_remembered_in_any_case_and_changes_are_reported() {
+        let saved = FONTS.lock().unwrap().clone();
+        let saved_names = FONT_NAMES.lock().unwrap().clone();
+        let names = || vec![".SystemUIFont".into(), "Lato".into(), "geist".into(), "JetBrains Mono".into(), "Lato".into()];
+        assert!(note_fonts(names()));
+        assert!(knows_font("LATO"));
+        assert_eq!(font_names(), ["geist", "JetBrains Mono", "Lato"]);
+        assert!(!note_fonts(names()));
+        // Only the spelling a picker shows changed.
+        assert!(note_fonts(vec![".SystemUIFont".into(), "lato".into(), "geist".into(), "JetBrains Mono".into()]));
+        assert_eq!(font_names(), ["geist", "JetBrains Mono", "lato"]);
+        assert!(note_fonts(vec![".SystemUIFont".into(), "Inter".into()]));
+        assert!(knows_font("inter"));
+        assert!(!knows_font("Lato"));
+        *FONTS.lock().unwrap() = saved;
+        *FONT_NAMES.lock().unwrap() = saved_names;
+    }
 
     #[test]
     fn zoom_writes_preserve_mod_preferences_and_clear_unset_app_fields() {

@@ -497,7 +497,8 @@ impl AppWindow {
         if let (Some(runtime), Some(events)) = (&runtime, &file_events) {
             runtime.set_source_revision_provider(events.revision_provider());
         }
-        mods::note_fonts(cx);
+        // The fonts read at start, or since the last read for a second window.
+        settings::refresh_fonts_if_changed(cx);
         let seen = std::fs::read_to_string(file("seen.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
         let mut w = AppWindow {
             core,
@@ -890,10 +891,16 @@ impl AppWindow {
     /// Runs with the shown layout's look (its root node) at the person's zoom.
     fn apply_look(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         // A layout's fonts arrive with its mod: added since the start, they load now.
-        if settings::load_home_fonts(cx) {
-            mods::note_fonts(cx);
-        }
+        let mut fonts_changed = settings::load_home_fonts(cx);
         let s = settings::Settings::compose(&self.person, &self.chrome.look, self.system_dark);
+        // A font installed while Herdr runs isn't in the list read at start.
+        if !settings::knows_font(&s.font_family) {
+            fonts_changed |= settings::refresh_fonts_if_changed(cx);
+        }
+        if fonts_changed {
+            self.refresh_mods(cx);
+            window.refresh();
+        }
         let problems = s.problems();
         if !problems.is_empty() {
             self.report_layout(&problems.join("; "));
@@ -3496,6 +3503,10 @@ impl AppWindow {
                 return;
             }
             "app.settings" => {
+                // A font installed since Settings last opened shows in the picker.
+                if settings::refresh_fonts(cx) {
+                    self.refresh_mods(cx);
+                }
                 // Once: a second press doesn't stack another; asking for a section opens it there.
                 let section = Self::owned(a, "section");
                 let open = self.overlays.iter().any(|o| o.id == "settings");
@@ -4022,6 +4033,11 @@ impl AppWindow {
         if active != self.window_active {
             self.window_active = active;
             if active {
+                // A font may have been installed while another app was in front.
+                if settings::refresh_fonts_if_changed(cx) {
+                    self.refresh_mods(cx);
+                    window.refresh();
+                }
                 self.sync(window, cx);
             } else {
                 self.looked.clear();

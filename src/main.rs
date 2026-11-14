@@ -168,7 +168,7 @@ fn main() {
             if let Err(e) = cx.text_system().add_fonts(fonts) {
                 tracing::warn!("bundled fonts not loaded: {e:#}");
             }
-            settings::note_fonts(cx.text_system().all_font_names());
+            settings::refresh_fonts(cx);
             settings::load_home_fonts(cx);
             mods::init(cx);
             // Not restarted for it: the update goes in when the app quits.
