@@ -671,6 +671,9 @@ The main ones:
   explicitly forget the old identity and pair again with the same name and target.
   Other unreachable machines don't offer this.
 - Window: `window.minimize`, `window.maximize` (or back), `window.close`.
+  `window.fill` (macOS) covers the whole screen, the notch row included: no
+  title bar, the menu bar and Dock hidden; again to go back. `window().fullscreen`
+  is true while filled.
 - macOS: `app.quit`, `app.hide`, `app.hide_others`, `app.show_all`.
 
 When the user runs a command without a required name (a key, a click), Herdr
