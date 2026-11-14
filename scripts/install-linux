@@ -25,4 +25,8 @@ EOF
 update-desktop-database "$data/applications" 2>/dev/null || true
 # A stale icon cache hides new icons until it's rebuilt.
 [[ -f $data/icons/hicolor/icon-theme.cache ]] && gtk-update-icon-cache -f -t "$data/icons/hicolor" >/dev/null 2>&1 || true
+# Plasma remembers a missing icon until it is told the theme changed,
+# so a fresh install shows an empty page in the taskbar.
+command -v dbus-send >/dev/null 2>&1 &&
+  dbus-send --session --type=signal /KIconLoader org.kde.KIconLoader.iconChanged int32:0 2>/dev/null || true
 echo "Installed herdr-app. Quit and reopen Herdr to use the new build."

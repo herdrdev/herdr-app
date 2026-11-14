@@ -239,7 +239,7 @@ fn bundle_completion_path(bin: &Path, home: &Path) -> bool {
 #[cfg(any(target_os = "macos", all(test, unix)))]
 fn bundle_completion_writable(bin: &Path) -> bool {
     bin.parent().is_some_and(|dir| {
-        Command::new("/bin/test").arg("-w").arg(dir).status().is_ok_and(|status| status.success())
+        Command::new("/bin/sh").args(["-c", "test -w \"$1\"", "sh"]).arg(dir).status().is_ok_and(|status| status.success())
     })
 }
 

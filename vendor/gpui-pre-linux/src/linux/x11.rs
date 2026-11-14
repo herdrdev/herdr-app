@@ -4,6 +4,7 @@ mod display;
 mod event;
 mod window;
 mod xim_handler;
+mod xkb;
 
 pub(crate) use client::*;
 pub(crate) use clipboard::wait_for_clipboard_handovers;
