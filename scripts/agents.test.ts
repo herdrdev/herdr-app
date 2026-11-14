@@ -265,6 +265,15 @@ for (const sort of ["priority", "grouped"]) test(`${sort}: a kept sub-agent keep
   expect(keptRender(sort, { kept: [{ address: "t3", parent: "t9" }] }).ids).toContain("ag-t3"); // its parent ended
 });
 
+test("a kept sub-agent keeps its own done status; a pane-less one stays idle", () => {
+  const kidStatus = new Function("View", `${source}; return kidStatus;`)(class {});
+  const listed = new Map([["t3", "done"]]);
+  expect(kidStatus({ address: "t3", status: "done" }, listed)).toBe("done");
+  expect(kidStatus({ address: "t4", status: "done" }, listed)).toBe("idle");
+  expect(kidStatus({ address: "t4", status: "error" }, listed)).toBe("blocked");
+  expect(kidStatus({ address: "t4", status: "working" }, listed)).toBe("working");
+});
+
 test("a title that opens with a bracket keeps it; each agent's own prefix still goes", () => {
   const title = new Function("View", "localStorage", "props", "run", `${source}; return title;`)(class {}, {}, () => ({}), () => {});
   const clean = new Function("View", "localStorage", "props", "run", `${source}; return clean;`)(class {}, {}, () => ({}), () => {});
