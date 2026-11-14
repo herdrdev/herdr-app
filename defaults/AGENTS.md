@@ -389,9 +389,9 @@ The tab block says how each pane of the shown tab is wrapped:
   `pane.close`). `scroll` is `{ total, offset, len, from_bottom }` for a
   terminal pane's history viewport (`from_bottom` is 0 at the end; `scroll`
   is null on the alternate screen). Reads get current numbers. Mods refresh
-  on user scrolling and transitions between the end, history, and the
-  alternate screen; ordinary output within one of those states does not
-  refresh them just because the numbers changed. `position`: `top` or
+  only on transitions between the end, history, and the alternate screen;
+  scrolling and output within one of those states do not refresh them just
+  because the numbers changed. `position`: `top` or
   `bottom`; `reveal: "hover"` shows it only while the pointer is on the pane,
   drawn over the terminal so the terminal never resizes. The shipped `pane`
   mod keeps its divider on the terminal-facing edge and reads the frame

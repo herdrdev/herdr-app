@@ -102,6 +102,10 @@ impl ScrollMetrics {
     }
 }
 
+fn scroll_state_changed(previous: Option<u64>, current: Option<u64>) -> bool {
+    previous.map(|n| n > 0) != current.map(|n| n > 0)
+}
+
 /// What the canvas closures need, shared outside the entity so prepaint can resize.
 struct Grid {
     vt: Vt,
@@ -609,7 +613,7 @@ impl TerminalView {
                 });
             })));
         }
-        self.publish_scroll_if_changed(false, cx);
+        self.publish_scroll_if_changed(cx);
         // Output in a terminal nobody sees doesn't redraw the window; it's
         // drawn fresh when shown again. Nor does output that changed nothing
         // on screen (an agent spinning its title).
@@ -851,7 +855,7 @@ impl TerminalView {
         }
         drop(grid);
         self.selection_changed(cx);
-        self.publish_scroll_if_changed(true, cx);
+        self.publish_scroll_if_changed(cx);
         self.copy_primary(cx);
         cx.notify();
         Ok(())
@@ -934,6 +938,7 @@ impl TerminalView {
         if self.grid.borrow().vt.search_progress().complete {
             self.pending_search_nav = None;
             if self.grid.borrow_mut().vt.search_navigate(previous) {
+                self.publish_scroll_if_changed(cx);
                 cx.notify();
             }
         } else {
@@ -968,6 +973,7 @@ impl TerminalView {
                 let busy = !grid.vt.search_progress().complete || this.pending_search_nav.is_some();
                 drop(grid);
                 if changed {
+                    this.publish_scroll_if_changed(cx);
                     cx.notify();
                 }
                 Some(if busy { Duration::from_millis(33) } else { Duration::from_millis(200) })
@@ -1030,7 +1036,7 @@ impl TerminalView {
             g.vt.scroll_viewport(if up { -(n as isize) } else { n as isize });
         }
         drop(g);
-        self.publish_scroll_if_changed(true, cx);
+        self.publish_scroll_if_changed(cx);
         cx.notify();
     }
 
@@ -1045,7 +1051,7 @@ impl TerminalView {
             ScrollTarget::Bottom => g.vt.scroll_to_bottom(),
         }
         drop(g);
-        self.publish_scroll_if_changed(true, cx);
+        self.publish_scroll_if_changed(cx);
         cx.notify();
     }
 
@@ -1060,16 +1066,11 @@ impl TerminalView {
         Some(ScrollMetrics { total: sb.total, offset: sb.offset, len: sb.len, from_bottom })
     }
 
-    fn publish_scroll_if_changed(&mut self, user_scroll: bool, cx: &mut Context<Self>) {
+    fn publish_scroll_if_changed(&mut self, cx: &mut Context<Self>) {
         let from_bottom = self.scroll_metrics().map(|m| m.from_bottom);
         let previous = self.published_from_bottom;
         self.published_from_bottom = from_bottom;
-        let changed = if user_scroll {
-            from_bottom != previous
-        } else {
-            from_bottom.map(|n| n > 0) != previous.map(|n| n > 0)
-        };
-        if changed {
+        if scroll_state_changed(previous, from_bottom) {
             cx.emit(TerminalEvent::ScrollChanged);
         }
     }
@@ -1157,7 +1158,7 @@ impl TerminalView {
                         g.vt.scroll_viewport(lines);
                         drop(g);
                         this.select(Select::Drag, this.selection_pointer, cx);
-                        this.publish_scroll_if_changed(true, cx);
+                        this.publish_scroll_if_changed(cx);
                     }
                     true
                 }).unwrap_or(false);
@@ -2397,7 +2398,7 @@ impl EntityInputHandler for TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.publish_scroll_if_changed(false, cx);
+        self.publish_scroll_if_changed(cx);
         crate::bench::count(&crate::bench::TERMINAL);
         let terminal_focused = self.focus.is_focused(window);
         if terminal_focused {
@@ -2512,7 +2513,7 @@ impl Render for TerminalView {
                         g.vt.scroll_to_row(scrollbar_row_at(sb.total, sb.len, f32::from(track.size.height), min, top));
                     }
                     drop(g);
-                    this.publish_scroll_if_changed(true, cx);
+                    this.publish_scroll_if_changed(cx);
                     cx.notify();
                     cx.stop_propagation();
                     return;
@@ -2580,7 +2581,7 @@ impl Render for TerminalView {
                                         let top = f32::from(ev.position.y - g.origin.y) - this.scrollbar_grab.unwrap_or(0.0);
                                         g.vt.scroll_to_row(scrollbar_row_at(sb.total, sb.len, track, min, top));
                                         drop(g);
-                                        this.publish_scroll_if_changed(true, cx);
+                                        this.publish_scroll_if_changed(cx);
                                         cx.notify();
                                         return;
                                     }
@@ -2730,16 +2731,26 @@ impl Focusable for TerminalView {
 
 #[cfg(test)]
 mod tests {
-    use super::{ScrollTarget, pages_to_lines, scroll_target};
+    use super::{ScrollTarget, pages_to_lines, scroll_target, scroll_state_changed};
     use serde_json::{Value, json};
 
     #[test]
-    fn scroll_from_bottom_is_zero_at_end_and_grows_into_history() {
-        let at_end = |total: u64, offset: u64, len: u64| total.saturating_sub(offset.saturating_add(len));
-        assert_eq!(at_end(100, 80, 20), 0);
-        assert_eq!(at_end(100, 70, 20), 10);
-        assert_eq!(at_end(20, 0, 20), 0);
-        assert_eq!(at_end(100, 0, 20), 80);
+    fn scroll_refreshes_only_when_leaving_or_reaching_end_or_alternate_screen() {
+        for (previous, current, changed) in [
+            (Some(0), Some(10), true),
+            (Some(10), Some(0), true),
+            (Some(10), Some(20), false),
+            (Some(20), Some(10), false),
+            (Some(0), Some(0), false),
+            (Some(10), Some(10), false),
+            (Some(0), None, true),
+            (Some(10), None, true),
+            (None, Some(0), true),
+            (None, Some(10), true),
+            (None, None, false),
+        ] {
+            assert_eq!(scroll_state_changed(previous, current), changed, "{previous:?} -> {current:?}");
+        }
     }
 
     #[test]
