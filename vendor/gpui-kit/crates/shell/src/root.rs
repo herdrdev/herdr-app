@@ -843,7 +843,7 @@ impl Render for ShellRoot {
         let tokens = Theme::global(cx).tokens;
         let (colors, radius, spacing) = (tokens.colors, tokens.radius, tokens.spacing);
 
-        div()
+        let root = div()
             .id("shell-root")
             // The window's base text size, from the theme rather than from
             // GPUI's default rem.
@@ -901,7 +901,8 @@ impl Render for ShellRoot {
             .children(self.dialog_layer(&colors, &radius, &spacing, cx))
             .child(self.toast_layer(&colors, &radius, &spacing, cx))
             .child(self.tooltip_overlay.clone())
-            .children(self.fps_layer(window, cx))
+            .children(self.fps_layer(window, cx));
+        TextSelection::boundary(cx.entity_id(), root)
     }
 }
 

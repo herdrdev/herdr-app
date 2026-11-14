@@ -19,7 +19,7 @@ const AGENTS = [
   ["opencode", "OpenCode", "icons/opencode.svg"],
   ["amp", "Amp", "icons/amp.svg"],
   ["gemini", "Gemini", "icons/gemini.svg"],
-  ["cursor-agent", "Cursor", "icons/cursor.svg"],
+  ["agent", "Cursor", "icons/cursor.svg"],
   ["copilot", "Copilot", "icons/copilot.svg"],
   ["grok", "Grok", "icons/grok.svg"],
   ["kimi", "Kimi", "icons/kimi.svg"],
