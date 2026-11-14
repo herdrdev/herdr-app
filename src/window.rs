@@ -7128,7 +7128,63 @@ export default class SystemToast extends View {
         assert!(!super::adoptable(&record("live"), "sp1", Some("tb2"), None));
     }
 
+    #[test]
+    fn a_mod_section_key_beats_the_kits_tab_from_the_first_start() {
+        in_own_process("mod_section_tab");
+    }
 
+    /// Fetch's case: keys.json's `mod:<name>` binds tab inside a popup whose
+    /// search field has the keyboard. From a fresh start (no keys.json reload
+    /// after the mod loaded) tab goes to the mod as a command and the field
+    /// keeps the keyboard; shift-tab, unbound there, still moves focus.
+    #[gpui::test]
+    fn mod_section_tab(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("mod_section_tab") {
+            return;
+        }
+        let main_js = r#"import { View, div } from "gpui-kit";
+import { InputState, Input } from "gpui-base";
+import { nextCommand, setShared } from "herdr";
+export default class Picker extends View {
+  init(_props, cx) {
+    this.commands = 0;
+    setShared("picker.commands", 0);
+    this.input = InputState.new({});
+    this.input.focus();
+    cx.spawn(async (cx) => {
+      for (;;) { if (await nextCommand() === "next") setShared("picker.commands", ++this.commands); cx.notify(); }
+    });
+  }
+  render() {
+    return div().w_full().h(200).child(Input.new(this.input).w(100).h(20));
+  }
+}"#;
+        std::fs::create_dir_all(crate::mods::app_dir()).unwrap();
+        std::fs::write(crate::keys::path(), r#"{ "mod:picker": { "tab": "picker.next" } }"#).unwrap();
+        let (view, cx) = open_window(cx, "picker", main_js, json!({ "id": "main", "type": "block", "content": { "tab": "active" } }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.model.add_space("s1", "one", "", crate::model::Tab::new("a", "a", "pa", "t1"));
+            this.model.select_tab("a");
+            this.sync(window, cx);
+            this.dispatch("mod.open", &json!({ "name": "picker" }), true, window, cx);
+        }));
+        cx.run_until_parked();
+        let commands = |_: &mut gpui::VisualTestContext| crate::mods::shared("picker.commands").and_then(|v| v.as_u64());
+        let in_input = |cx: &mut gpui::VisualTestContext| cx.update(|window, _| window.context_stack().last().is_some_and(|c| c.contains("Input")));
+        assert!(in_input(cx), "the field has the keyboard");
+        assert_eq!(commands(cx), Some(0));
+        cx.simulate_keystrokes("tab");
+        cx.run_until_parked();
+        assert_eq!(commands(cx), Some(1), "tab reached the mod");
+        assert!(in_input(cx), "tab left the field");
+        cx.simulate_keystrokes("tab");
+        cx.run_until_parked();
+        assert_eq!(commands(cx), Some(2));
+        cx.simulate_keystrokes("shift-tab");
+        cx.run_until_parked();
+        assert!(!in_input(cx), "shift-tab, bound by no section, still moves focus");
+    }
 
     /// A popup opened near the right edge must snap back inside the window
     /// with the 8 px margin: its body may not paint past the window border
