@@ -168,6 +168,8 @@ struct Shared {
     state: GhosttyRenderState,
     size: GhosttySizeReportSize,
     held_since: Option<Instant>,
+    /// The kitty placements when the hold began, as the render state keeps the text.
+    held_placements: Vec<Placement>,
     title_changed: bool,
     /// Replies the terminal writes back to the program (e.g. kitty graphics acks).
     replies: Vec<u8>,
@@ -645,9 +647,11 @@ unsafe extern "C" fn on_render_hold(_t: GhosttyTerminal, userdata: *mut c_void, 
     if held {
         // Capture the finished frame the program wants on screen before it redraws.
         unsafe { ghostty_render_state_update(shared.state, _t) };
+        shared.held_placements = unsafe { Vt::read_placements(_t, shared.size.columns, shared.size.rows) };
         shared.held_since = Some(Instant::now());
     } else {
         shared.held_since = None;
+        shared.held_placements.clear();
     }
 }
 
@@ -699,7 +703,7 @@ impl Vt {
             ok(ghostty_mouse_event_new(std::ptr::null(), &mut mouse_event), "mouse_event_new");
 
             install_png_decoder();
-            let mut shared = Box::new(Shared { state, size: GhosttySizeReportSize { rows: rows.max(1), columns: cols.max(1), cell_width: 0, cell_height: 0 }, held_since: None, title_changed: false, replies: Vec::new(), clipboard_write: true, clipboard: [None, None] });
+            let mut shared = Box::new(Shared { state, size: GhosttySizeReportSize { rows: rows.max(1), columns: cols.max(1), cell_width: 0, cell_height: 0 }, held_since: None, held_placements: Vec::new(), title_changed: false, replies: Vec::new(), clipboard_write: true, clipboard: [None, None] });
             let ud = &mut *shared as *mut Shared as *const c_void;
             ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_USERDATA, ud);
             let hold: GhosttyTerminalRenderHoldFn = Some(on_render_hold);
@@ -802,15 +806,27 @@ impl Vt {
         std::mem::take(&mut self.shared.replies)
     }
 
-    /// Visible kitty graphics placements, bottom layer first.
+    /// Visible kitty graphics placements, bottom layer first. While output is
+    /// synchronized, the ones when it began, like the text: a program replacing
+    /// an image removes its placement before the new image is complete.
     pub fn placements(&self) -> Vec<Placement> {
+        if self.shared.held_since.is_some() {
+            return self.shared.held_placements.clone();
+        }
         if let Some(placements) = self.placements_cache.borrow().as_ref() {
             return placements.clone();
         }
+        let out = unsafe { Self::read_placements(self.term, self.cols, self.rows) };
+        *self.placements_cache.borrow_mut() = Some(out.clone());
+        out
+    }
+
+    /// Reads the placements from the terminal (also in its callbacks, without a `Vt`).
+    unsafe fn read_placements(term: GhosttyTerminal, cols: u16, rows: u16) -> Vec<Placement> {
         let mut out = Vec::new();
         unsafe {
             let mut g: GhosttyKittyGraphics = std::ptr::null_mut();
-            if ghostty_terminal_get(self.term, GHOSTTY_TERMINAL_DATA_KITTY_GRAPHICS, &mut g as *mut _ as *mut c_void) != GHOSTTY_SUCCESS || g.is_null() {
+            if ghostty_terminal_get(term, GHOSTTY_TERMINAL_DATA_KITTY_GRAPHICS, &mut g as *mut _ as *mut c_void) != GHOSTTY_SUCCESS || g.is_null() {
                 return out;
             }
             let mut it: GhosttyKittyGraphicsPlacementIterator = std::ptr::null_mut();
@@ -837,7 +853,7 @@ impl Vt {
                         continue;
                     }
                     let mut info = GhosttyKittyGraphicsPlacementRenderInfo { size: std::mem::size_of::<GhosttyKittyGraphicsPlacementRenderInfo>(), ..Default::default() };
-                    if ghostty_kitty_graphics_placement_render_info(it, img, self.term, &mut info) != GHOSTTY_SUCCESS || !info.viewport_visible {
+                    if ghostty_kitty_graphics_placement_render_info(it, img, term, &mut info) != GHOSTTY_SUCCESS || !info.viewport_visible {
                         continue;
                     }
                     let mut generation = 0u64;
@@ -857,27 +873,26 @@ impl Vt {
                 }
             }
             ghostty_kitty_graphics_placement_iterator_free(it);
-            out.extend(self.kitty_virtual_image_placements(g, &specs));
+            out.extend(Self::kitty_virtual_image_placements(term, cols, rows, g, &specs));
         }
         out.sort_by_key(|p| p.z);
-        *self.placements_cache.borrow_mut() = Some(out.clone());
         out
     }
 
-    fn kitty_virtual_image_placements(&self, graphics: GhosttyKittyGraphics, specs: &[KittyVirtualPlacementSpec]) -> Vec<Placement> {
+    fn kitty_virtual_image_placements(term: GhosttyTerminal, cols: u16, rows: u16, graphics: GhosttyKittyGraphics, specs: &[KittyVirtualPlacementSpec]) -> Vec<Placement> {
         if specs.is_empty() {
             return Vec::new();
         }
         let (mut width, mut height) = (0u32, 0u32);
         unsafe {
-            ghostty_terminal_get(self.term, GHOSTTY_TERMINAL_DATA_WIDTH_PX, &mut width as *mut _ as *mut c_void);
-            ghostty_terminal_get(self.term, GHOSTTY_TERMINAL_DATA_HEIGHT_PX, &mut height as *mut _ as *mut c_void);
+            ghostty_terminal_get(term, GHOSTTY_TERMINAL_DATA_WIDTH_PX, &mut width as *mut _ as *mut c_void);
+            ghostty_terminal_get(term, GHOSTTY_TERMINAL_DATA_HEIGHT_PX, &mut height as *mut _ as *mut c_void);
         }
-        let cell_width = (width / u32::from(self.cols.max(1))).max(1);
-        let cell_height = (height / u32::from(self.rows.max(1))).max(1);
+        let cell_width = (width / u32::from(cols.max(1))).max(1);
+        let cell_height = (height / u32::from(rows.max(1))).max(1);
         let mut runs = Vec::new();
-        for y in 0..self.rows {
-            let Some(first) = self.grid_ref(GHOSTTY_POINT_TAG_VIEWPORT, 0, u32::from(y)) else { continue };
+        for y in 0..rows {
+            let Some(first) = Self::grid_ref_in(term, GHOSTTY_POINT_TAG_VIEWPORT, 0, u32::from(y)) else { continue };
             let mut row = GhosttyRow::default();
             let mut placeholders = false;
             unsafe {
@@ -888,8 +903,8 @@ impl Vt {
                 continue;
             }
             let mut current: Option<KittyVirtualRun> = None;
-            for x in 0..self.cols {
-                let cell = self.grid_ref(GHOSTTY_POINT_TAG_VIEWPORT, x, u32::from(y))
+            for x in 0..cols {
+                let cell = Self::grid_ref_in(term, GHOSTTY_POINT_TAG_VIEWPORT, x, u32::from(y))
                     .and_then(|grid_ref| kitty_virtual_cell(x, y, &grid_ref));
                 match cell {
                     Some(cell) => {
@@ -1177,10 +1192,14 @@ impl Vt {
     }
 
     fn grid_ref(&self, tag: GhosttyPointTag, x: u16, y: u32) -> Option<GhosttyGridRef> {
+        Self::grid_ref_in(self.term, tag, x, y)
+    }
+
+    fn grid_ref_in(term: GhosttyTerminal, tag: GhosttyPointTag, x: u16, y: u32) -> Option<GhosttyGridRef> {
         let mut r = GhosttyGridRef { size: std::mem::size_of::<GhosttyGridRef>(), ..Default::default() };
         let mut p = GhosttyPoint { tag, ..Default::default() };
         p.value.coordinate = GhosttyPointCoordinate { x, y };
-        (unsafe { ghostty_terminal_grid_ref(self.term, p, &mut r) } == GHOSTTY_SUCCESS).then_some(r)
+        (unsafe { ghostty_terminal_grid_ref(term, p, &mut r) } == GHOSTTY_SUCCESS).then_some(r)
     }
 
     /// The link at a viewport cell: a link the program marked (OSC 8), or a
@@ -1370,6 +1389,14 @@ impl Vt {
 
     pub fn take_clipboard(&mut self) -> [Option<String>; 2] {
         std::mem::take(&mut self.shared.clipboard)
+    }
+
+    /// Lets kitty images arrive in shared memory, as in Ghostty: a frame is a
+    /// name instead of megabytes of base64. Only for programs on this machine;
+    /// the name is opened (and unlinked) here.
+    pub fn allow_shared_memory_images(&mut self) {
+        let on = true;
+        unsafe { ghostty_terminal_set(self.term, GHOSTTY_TERMINAL_OPT_KITTY_IMAGE_MEDIUM_SHARED_MEM, &on as *const _ as *const c_void) };
     }
 
     pub fn resize(&mut self, cols: u16, rows: u16, cell_w: u32, cell_h: u32) {
@@ -2509,6 +2536,90 @@ mod tests {
         assert_eq!(&bgra[..], &[0, 0, 255, 255]);
         let reply = String::from_utf8(vt.take_replies()).unwrap();
         assert!(reply.contains("i=7") && reply.contains("OK"), "{reply:?}");
+    }
+
+    #[test]
+    fn kitty_images_hold_with_the_text_during_synchronized_output() {
+        let mut vt = Vt::new(20, 5);
+        vt.resize(20, 5, 8, 16);
+        let red = "/wAA/w==";
+        vt.write(format!("\x1b_Ga=T,f=32,s=1,v=1,i=1,p=1,q=2;{red}\x1b\\").as_bytes());
+        vt.frame();
+        let shown = vt.placements();
+        assert_eq!(shown.len(), 1);
+        // terminal-browser's frame swap: drop the placement, then send the next
+        // image in chunks, all inside one synchronized update.
+        vt.write(b"\x1b[?2026h\x1b_Ga=d,d=i,i=1,p=1,q=2\x1b\\\x1b_Ga=T,f=32,s=1,v=1,i=1,p=1,q=2,m=1;AP8A\x1b\\");
+        vt.frame();
+        assert_eq!(vt.placements(), shown);
+        vt.write(b"\x1b_Gm=0;/w==\x1b\\\x1b[?2026l");
+        vt.frame();
+        let p = vt.placements();
+        assert_eq!(p.len(), 1);
+        assert_ne!(p[0].generation, shown[0].generation);
+        assert_eq!(vt.image_bgra(1, p[0].source).unwrap().2, [0, 255, 0, 255]);
+
+        // Updates back to back, never seen between: the next one starts with
+        // the image the last one finished.
+        vt.write(b"\x1b[?2026h\x1b_Ga=d,d=i,i=1,p=1,q=2\x1b\\\x1b_Ga=T,f=32,s=1,v=1,i=1,p=1,q=2;AAD//w==\x1b\\\x1b[?2026l\x1b[?2026h\x1b_Ga=d,d=i,i=1,p=1,q=2\x1b\\");
+        vt.frame();
+        let held = vt.placements();
+        assert_eq!(held.len(), 1);
+        assert_ne!(held[0].generation, p[0].generation);
+    }
+
+    #[cfg(any(target_os = "macos", target_os = "linux"))]
+    #[test]
+    fn kitty_images_come_in_shared_memory_once_allowed() {
+        use base64::Engine;
+        // On Linux a shared memory object is a file in /dev/shm.
+        #[cfg(target_os = "linux")]
+        fn shared(name: &str, pixel: [u8; 4]) {
+            std::fs::write(format!("/dev/shm{name}"), pixel).unwrap();
+        }
+        #[cfg(target_os = "linux")]
+        fn unshare(name: &str) {
+            let _ = std::fs::remove_file(format!("/dev/shm{name}"));
+        }
+        #[cfg(target_os = "macos")]
+        fn unshare(name: &str) {
+            let c = std::ffi::CString::new(name).unwrap();
+            unsafe { libc::shm_unlink(c.as_ptr()) };
+        }
+        #[cfg(target_os = "macos")]
+        fn shared(name: &str, pixel: [u8; 4]) {
+            // macOS sizes a shared memory object only once.
+            unshare(name);
+            let c = std::ffi::CString::new(name).unwrap();
+            unsafe {
+                let fd = libc::shm_open(c.as_ptr(), libc::O_CREAT | libc::O_RDWR, 0o600 as libc::c_uint);
+                assert!(fd >= 0);
+                assert_eq!(libc::ftruncate(fd, 4), 0);
+                let map = libc::mmap(std::ptr::null_mut(), 4, libc::PROT_WRITE, libc::MAP_SHARED, fd, 0);
+                assert_ne!(map, libc::MAP_FAILED);
+                std::ptr::copy_nonoverlapping(pixel.as_ptr(), map as *mut u8, 4);
+                libc::munmap(map, 4);
+                libc::close(fd);
+            }
+        }
+        let show = |vt: &mut Vt, name: &str| {
+            let name64 = base64::engine::general_purpose::STANDARD.encode(name);
+            vt.write(format!("\x1b_Ga=T,t=s,f=32,s=1,v=1,i=1,p=1,q=2;{name64}\x1b\\").as_bytes());
+            vt.frame();
+            vt.placements().len()
+        };
+        let name = format!("/herdr-vt-test-{}", std::process::id());
+
+        shared(&name, [0, 0, 255, 255]);
+        let mut vt = Vt::new(20, 5);
+        vt.resize(20, 5, 8, 16);
+        assert_eq!(show(&mut vt, &name), 0);
+
+        shared(&name, [0, 0, 255, 255]);
+        vt.allow_shared_memory_images();
+        assert_eq!(show(&mut vt, &name), 1);
+        assert_eq!(vt.image_bgra(1, vt.placements()[0].source).unwrap().2, [255, 0, 0, 255]);
+        unshare(&name);
     }
 
     fn virtual_image(vt: &mut Vt, id: u32, placement: u32) {
