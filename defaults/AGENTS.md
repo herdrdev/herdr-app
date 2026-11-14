@@ -515,6 +515,10 @@ shortcuts must then be added by hand.
   command's first argument), `send:<text>` (types into the terminal),
   `<mod>.<command>` (delivered to that mod's `nextCommand()`), or `terminal`
   (the program gets the key).
+- A tmux-style prefix is a key sequence separated by spaces:
+  `"ctrl-b %": "pane.split:right"`, `"ctrl-b ctrl-b": "send:\u0002"` (the
+  prefix itself for the program). After the prefix, a key bound in no
+  sequence gives both keys to the program.
 - Named, typed command arguments use an object instead of a string:
   `"ctrl-shift-r": {"command": "layout.resize", "args": {"id": "sidebar", "px": 240}}`.
   `command` names an app command; `args` is an object (optional, defaults to `{}`).

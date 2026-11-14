@@ -3408,6 +3408,66 @@ mod tests {
     }
 
     #[gpui::test]
+    fn prefix_sequences_run_commands_and_replay_unbound_keys_to_the_program(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        struct Root(Entity<super::TerminalView>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .key_context("Herdr")
+                    .size_full()
+                    .on_action(cx.listener(|this, action: &gpui_shell::action::ShellAction, window, cx| {
+                        if action.id() == "terminal.search" {
+                            this.0.update(cx, |terminal, cx| terminal.open_search(window, cx));
+                        } else {
+                            cx.propagate();
+                        }
+                    }))
+                    .child(self.0.clone())
+            }
+        }
+
+        cx.update(gpui_base::init);
+        let bindings = crate::keys::parse(r#"{"global":{"ctrl-b f":"terminal.search"}}"#).expect("prefix keys parse");
+        cx.update(|app| crate::keys::install(bindings, app));
+        let (root, cx) = cx.add_window_view(|_, cx| {
+            Root(cx.new(|cx| super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 6), cx)))
+        });
+        cx.run_until_parked();
+        cx.update(|window, app| {
+            root.update(app, |root, app| {
+                root.0.update(app, |terminal, cx| terminal.focus.focus(window, cx));
+            });
+        });
+
+        // An unbound key after the prefix gives both keys back to the program.
+        cx.simulate_keystrokes("ctrl-b x");
+        cx.run_until_parked();
+        root.read_with(cx, |root, cx| {
+            let terminal = root.0.read(cx);
+            assert!(!terminal.search_open);
+            assert!(terminal.typed_at.get().is_some(), "unbound sequence must reach the program");
+        });
+        root.read_with(cx, |root, cx| root.0.read(cx).typed_at.set(None));
+
+        cx.simulate_keystrokes("ctrl-b");
+        cx.run_until_parked();
+        root.read_with(cx, |root, cx| {
+            let terminal = root.0.read(cx);
+            assert!(!terminal.search_open);
+            assert!(terminal.typed_at.get().is_none(), "the prefix waits for the next key");
+        });
+        cx.simulate_keystrokes("f");
+        cx.run_until_parked();
+        root.read_with(cx, |root, cx| {
+            let terminal = root.0.read(cx);
+            assert!(terminal.search_open);
+            assert!(terminal.typed_at.get().is_none(), "a bound sequence never reaches the program");
+        });
+    }
+
+    #[gpui::test]
     fn shipped_find_binding_opens_search_but_ctrl_f_reaches_the_program(cx: &mut gpui::TestAppContext) {
         use gpui::*;
 
