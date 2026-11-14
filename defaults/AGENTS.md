@@ -382,6 +382,10 @@ The tab block says how each pane of the shown tab is wrapped:
 
 - The look applies to every pane; `focus` replaces the border while the
   pane has the keyboard; `gap` is the space between panes.
+- `veil`: a color (name or `#rrggbbaa`) drawn over a pane's terminal while
+  another pane has focus. The terminal's own background at some alpha
+  (`"veil": "#21252b99"`) fades unfocused panes without changing their
+  background. Clicks go through it.
 - `header`: a mod drawn on each pane, one copy per pane, with
   `props().pane` and `props().terminal`. It reads its live facts from
   `panes()` (title, folder, branch, agent status, focused, zoomed) and its
