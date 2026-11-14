@@ -3151,6 +3151,47 @@ mod tests {
     }
 
     #[gpui::test]
+    fn mac_resize_shortcuts_are_consumed_before_terminal_input(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        struct Root {
+            terminal: Entity<super::TerminalView>,
+            commands: Vec<String>,
+        }
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                div().key_context("Herdr").size_full()
+                    .on_action(cx.listener(|this, action: &gpui_shell::action::ShellAction, _, cx| {
+                        if action.id().starts_with("pane.resize:") {
+                            this.commands.push(action.id().to_owned());
+                        } else { cx.propagate(); }
+                    }))
+                    .child(self.terminal.clone())
+            }
+        }
+        cx.update(gpui_base::init);
+        let (root, cx) = cx.add_window_view(|_, cx| Root {
+            terminal: cx.new(|cx| super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 6), cx)),
+            commands: Vec::new(),
+        });
+        cx.update(|window, app| {
+            let focus = root.read(app).terminal.read(app).focus.clone();
+            focus.focus(window, app);
+        });
+        cx.run_until_parked();
+        let bindings = crate::keys::parse(include_str!("../defaults/keys.macos.json")).unwrap();
+        cx.update(|_, app| crate::keys::install(bindings, app));
+        for direction in ["left", "right", "up", "down", "left", "left"] {
+            cx.simulate_keystrokes(&format!("cmd-ctrl-{direction}"));
+            cx.run_until_parked();
+        }
+        root.read_with(cx, |root, cx| {
+            assert_eq!(root.commands, ["left", "right", "up", "down", "left", "left"].map(|d| format!("pane.resize:{d}")));
+            assert!(root.terminal.read(cx).typed_at.get().is_none(), "resize shortcuts leaked into terminal input");
+        });
+    }
+
+    #[gpui::test]
     fn shipped_clipboard_aliases_edit_find_without_terminal_input(cx: &mut gpui::TestAppContext) {
         use gpui::*;
 

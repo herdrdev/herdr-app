@@ -29,11 +29,7 @@ pub(super) fn separator_width(n: &Node, gap: f32) -> f32 {
 }
 
 pub(super) fn weight(n: &Node) -> f32 {
-    match n.size {
-        Some(Span::Px { .. }) => 0.0,
-        Some(Span::Weight { weight }) => weight,
-        None => 1.0,
-    }
+    FlexSize::from(n).weight()
 }
 
 fn inset(size: Size<Pixels>, x: f32, y: f32) -> Size<Pixels> {
@@ -46,12 +42,42 @@ fn content_size(n: &Node, size: Size<Pixels>, focused: bool, zoom: f32) -> Size<
     inset(size, 2.0 * (x + border) * zoom, 2.0 * (y + border) * zoom)
 }
 
+/// The sizing inputs a split needs, without copying layout subtrees.
+#[derive(Clone, Copy)]
+pub(super) struct FlexSize {
+    pub size: Option<Span>,
+    pub min: Option<f32>,
+    pub max: Option<f32>,
+}
+
+impl From<&Node> for FlexSize {
+    fn from(node: &Node) -> Self {
+        Self { size: node.size, min: node.min, max: node.max }
+    }
+}
+
+impl FlexSize {
+    pub fn weight(&self) -> f32 {
+        match self.size {
+            Some(Span::Px { .. }) => 0.0,
+            Some(Span::Weight { weight }) => weight,
+            None => 1.0,
+        }
+    }
+}
+
 /// Flex shares after fixed siblings, gaps and min/max constraints.
-fn shares(children: &[&Node], available: f32, zoom: f32) -> Vec<f32> {
+pub(super) fn shares(children: &[&Node], available: f32, zoom: f32) -> Vec<f32> {
+    flex_shares(children, available, zoom)
+}
+
+pub(super) fn flex_shares(children: &[impl std::marker::Copy + Into<FlexSize>], available: f32, zoom: f32) -> Vec<f32> {
+    let sizing = |i: usize| -> FlexSize { children[i].into() };
     let mut sizes = vec![0.0; children.len()];
     let mut pending = Vec::new();
     let mut left = available;
-    for (i, n) in children.iter().enumerate() {
+    for i in 0..children.len() {
+        let n = sizing(i);
         match n.size {
             Some(Span::Px { px }) => {
                 sizes[i] = (px * zoom).max(n.min.unwrap_or(0.0) * zoom).min(n.max.unwrap_or(f32::INFINITY) * zoom);
@@ -60,16 +86,16 @@ fn shares(children: &[&Node], available: f32, zoom: f32) -> Vec<f32> {
             _ => pending.push(i),
         }
     }
-    let total_weight = pending.iter().map(|&i| weight(children[i])).sum::<f32>().max(f32::EPSILON);
+    let total_weight = pending.iter().map(|&i| sizing(i).weight()).sum::<f32>().max(f32::EPSILON);
     let initial_free = left.max(0.0);
     while !pending.is_empty() {
-        let total = pending.iter().map(|&i| weight(children[i])).sum::<f32>().max(f32::EPSILON);
+        let total = pending.iter().map(|&i| sizing(i).weight()).sum::<f32>().max(f32::EPSILON);
         // Grow factors stay normalized to the original siblings after an item freezes.
         let free = left.max(0.0).min(initial_free * (total / total_weight));
         let mut violations = Vec::new();
         for &i in &pending {
-            let n = children[i];
-            let share = free * weight(n) / total;
+            let n = sizing(i);
+            let share = free * n.weight() / total;
             sizes[i] = share.min(n.max.unwrap_or(f32::INFINITY) * zoom).max(n.min.unwrap_or(0.0) * zoom);
             violations.push((i, sizes[i] - share));
         }
@@ -95,6 +121,7 @@ fn block_bounds(n: &Node, bounds: Bounds<Pixels>, target: &str, frame: Option<&P
     let (y, x) = padding(n);
     origin += point(px(x * zoom), px(y * zoom));
     let size = content_size(n, bounds.size, focused.contains(&n.id), zoom);
+    if n.id == target && n.axis().is_some() { return Some(Bounds::new(origin, size)); }
     match &n.kind {
         Kind::Row { children } | Kind::Column { children } => {
             let row = n.axis() == Some(Axis::Row);
@@ -143,7 +170,54 @@ pub(super) enum HiddenFit {
     Done(Geometry),
 }
 
+#[cfg(test)]
+mod tests {
+    use super::{block_bounds, pane_size};
+    use crate::layout::Node;
+    use gpui::{Bounds, Point, point, px};
+    use serde_json::json;
+    use std::collections::HashSet;
+
+    #[test]
+    fn split_content_bounds_apply_padding_once_at_fractional_zoom() {
+        let root: Node = serde_json::from_value(json!({
+            "id":"root", "type":"row", "padding":[10,20],
+            "border":{"width":2,"color":"border"}, "children":[
+                {"id":"split", "type":"column", "padding":[3,5],
+                 "border":{"width":1,"color":"border"}, "children":[
+                    {"id":"a", "type":"block", "content":{"terminal":"a"}},
+                    {"id":"b", "type":"block", "content":{"terminal":"b"}}
+                ]},
+                {"id":"c", "type":"block", "content":{"terminal":"c"}}
+            ]
+        })).unwrap();
+        let area = gpui::size(px(800.0), px(600.0));
+        let focused = HashSet::new();
+        let bounds = block_bounds(&root, Bounds::new(Point::default(), area), "split", None, &focused, 1.5).unwrap();
+        assert_eq!(bounds, Bounds::new(point(px(42.0), px(24.0)), gpui::size(px(349.0), px(552.0))));
+        assert_eq!(pane_size(&root, area, "a", None, &focused, 1.5), Some(gpui::size(px(349.0), px(276.0))));
+    }
+}
+
 impl AppWindow {
+    /// Full tab geometry, even while a single pane is zoomed. Read only the
+    /// context's viewport bounds; child sizes come from the current model.
+    pub(super) fn split_available(&self, tab: &Tab, split: &Node) -> Option<f32> {
+        let (context, area) = self.context_area()?;
+        let frame = match context.content() {
+            Some(Content::Context { pane: Some(frame), .. }) if frame.lone || tab.root.panes().len() > 1 => Some(frame),
+            _ => None,
+        };
+        let zoom = settings::zoom();
+        let (y, x) = padding(context);
+        let size = inset(area, 2.0 * x * zoom, 2.0 * y * zoom);
+        let focused = tab.focused_pane().and_then(|p| tab.root.path_to(&p)).unwrap_or_default().into_iter().collect();
+        let size = block_bounds(&tab.root, Bounds::new(Point::default(), size), &split.id, frame, &focused, zoom)?.size;
+        let extent = match split.axis()? { Axis::Row => size.width, Axis::Column => size.height };
+        let separators = split.children().iter().filter(|n| !n.hidden).count().saturating_sub(1);
+        Some(f32::from(extent) / zoom - separator_width(split, gap(split, frame)) * separators as f32)
+    }
+
     pub(super) fn initial_size(&self, root: &Node, pane: &str, window: &Window) -> Option<(u16, u16)> {
         let focused = root.path_to(pane)?.into_iter().collect();
         self.displayed_size(root, root.panes().len(), pane, &focused, window)

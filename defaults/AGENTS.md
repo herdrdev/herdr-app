@@ -591,6 +591,8 @@ The main ones:
   terminal, or a mod pane), `pane.close {pane?}`,
   `pane.zoom {pane?}`, `pane.focus {pane | terminal}`, `pane.go {direction}`,
   `pane.swap {pane?, direction | target}`.
+  `pane.resize {direction: "left" | "right" | "up" | "down", px?, pane?}`
+  moves the nearest divider (default: 10 logical pixels). macOS: Cmd+Ctrl+arrows.
   `pane.go` prefers the most recently focused pane along the nearest edge in that
   direction; unvisited panes fall back to overlap, then top/left layout order.
   `pane.go` also reaches visible mods whose `mod.json` says `"focusable": true`, and
@@ -601,7 +603,7 @@ The main ones:
   A swap moves panes, not focus: the focused pane stays focused in its new place.
   `pane.focus {terminal}` prefers the first visible layout terminal block showing that
   address, then its model pane. Clicking a terminal block focuses it too.
-  While a layout terminal block is focused, implicit split/close/zoom/go/swap and
+  While a layout terminal block is focused, implicit split/resize/close/zoom/go/swap and
   `terminal.show` fail, as do `terminal.open`/`terminal.keep` with place right/down.
   They never act on the terminal's source pane. An explicit `pane` still targets that
   model pane; composition edits belong to the mod (edit its layout instead).

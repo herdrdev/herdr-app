@@ -60,6 +60,9 @@ export function playSound(sound: string): null;
  * With no space shown, a new space is shown even with focus: false.
  * Panes: pane.split {direction: "right" | "down", pane?}, pane.close {pane?}, pane.zoom {pane?},
  *   pane.focus {pane | terminal}, pane.go {direction}, pane.swap {pane?, direction | target}.
+ *   pane.resize {direction: "left" | "right" | "up" | "down", px?, pane?} moves
+ *   the nearest divider by positive logical pixels (default 10), within the shown tab.
+ *   Preserves focus, clears zoom on success; limits or unrepresentable moves are no-ops.
  *   Pane menus get target { pane, terminal }.
  * Terminals: terminal.open {argv?, folder?, place?: "tab" | "right" | "down"}, terminal.kill {terminal},
  *   terminal.keep {terminal, place?} (a running one without a pane, e.g. a sub-agent, gets one),
@@ -240,7 +243,7 @@ export interface TerminalSelectionState {
 /** Actual terminal/pane focus. `space` and `tab` are the current window context.
  *  Clicking a visible layout terminal block, or pane.focus {terminal}, focuses that block:
  *  `terminal` and `cwd` describe it; `pane` and `shown` are null, not its source pane.
- *  Implicit pane split/close/zoom/go/swap and terminal.show fail in that case, as do
+ *  Implicit pane split/resize/close/zoom/go/swap and terminal.show fail in that case, as do
  *  terminal.open/keep with place right/down. An explicit pane id targets a model pane.
  *  A terminal in a window (openOverlay with a layout) that has the keyboard is reported
  *  the same way (`pane` and `shown` null); implicit pane commands still act on the

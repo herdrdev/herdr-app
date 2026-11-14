@@ -40,6 +40,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("tab.rename", &[opt("id"), opt("name")], "Rename a tab (asks the person when no name; an empty name: called by its number again)."),
     cmd("tab.move", &[req("id"), req("index")], "Move a tab to a position in its space (1 = first)."),
     cmd("pane.split", &[req("direction"), opt("pane"), opt("argv"), opt("mod"), opt("props")], "Split a pane (default: the focused one) \"right\" or \"down\" with a new terminal, or with a mod (`mod`, its `props`) beside it."),
+    cmd("pane.resize", &[req("direction"), opt("px"), opt("pane")], "Move the nearest split divider left, right, up or down (default: 10 logical pixels; px must be finite and positive). Targets the focused pane or an explicit pane in the shown tab. Resizes the target branch and its next visible sibling, or previous sibling when last. Preserves focus; a successful resize clears pane zoom. Missing splits, limits and unrepresentable constrained moves are no-ops."),
     cmd("pane.close", &[opt("pane")], "Close a pane and end its terminal."),
     cmd("terminal.open", &[opt("argv"), opt("folder"), opt("place"), opt("name")], "Start a terminal: as a new tab (place \"tab\", default), or \"right\"/\"down\" of the focused pane."),
     cmd("terminal.keep", &[req("terminal"), opt("place")], "Give a running terminal without a pane (a sub-agent) a pane: a new tab, or \"right\"/\"down\"."),
@@ -223,6 +224,7 @@ mod tests {
         assert_eq!(names.len(), COMMANDS.len());
         assert_eq!(shorthand(find("tab.select").unwrap(), "3"), json!({ "index": 3 }));
         assert_eq!(shorthand(find("pane.split").unwrap(), "right"), json!({ "direction": "right" }));
+        assert_eq!(shorthand(find("pane.resize").unwrap(), "left"), json!({ "direction": "left" }));
         let move_ = find("space.move").unwrap();
         assert_eq!(missing(move_, &json!({ "id": " ", "index": 1 })), Some("id"));
         assert_eq!(missing(move_, &json!({ "id": "sp1", "index": 1 })), None);

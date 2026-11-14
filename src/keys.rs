@@ -434,4 +434,15 @@ mod tests {
             assert_eq!(super::parse(keys).err(), None);
         }
     }
+
+    #[test]
+    fn mac_resize_chords_match_ghostty() {
+        let bindings = super::parse(include_str!("../defaults/keys.macos.json")).unwrap();
+        for direction in ["left", "right", "up", "down"] {
+            let event = gpui::Keystroke::parse(&format!("cmd-ctrl-{direction}")).unwrap();
+            let binding = bindings.iter().find(|b| b.match_keystrokes(&[event.clone()]) == Some(false)).unwrap();
+            let action = binding.action().as_any().downcast_ref::<gpui_shell::action::ShellAction>().unwrap();
+            assert_eq!(action.id(), format!("pane.resize:{direction}"));
+        }
+    }
 }
