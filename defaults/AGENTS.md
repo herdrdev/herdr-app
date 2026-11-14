@@ -1108,6 +1108,8 @@ All of it is in `herdr.d.ts`. In short:
 Mods are trusted code: commands and network access (including `fetch`) are unrestricted.
 Other built-ins: `localStorage` (per mod copy), `console.log`, `fetch`,
 `import * as fs from "fs/promises"` (read in home, write under `~/.config/herdr-app`).
+`net.connect(host, port)` sockets close when their mod copy is removed or reloaded;
+use `socket.close()` to close them earlier.
 
 ## herdr-core (`hc`)
 

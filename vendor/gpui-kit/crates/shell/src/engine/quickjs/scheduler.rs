@@ -53,6 +53,7 @@ use std::{
     collections::{HashMap, HashSet},
     future::Future,
     rc::Rc,
+    sync::{Arc, Mutex},
     time::Duration,
 };
 
@@ -1343,15 +1344,23 @@ fn settle_awaited<'js, T: IntoJs<'js>>(
     reject: Option<Persistent<Function<'static>>>,
     outcome: Result<T, String>,
 ) -> JsResult<()> {
-    match outcome {
-        Ok(value) => match resolve {
-            Some(resolve) => resolve.restore(ctx)?.call::<_, ()>((value,)),
-            None => Ok(()),
+    let outcome = match outcome {
+        Ok(value) => match value.into_js(ctx) {
+            Ok(value) => Ok(value),
+            Err(rquickjs::Error::Exception) => Err(ctx.catch()),
+            Err(error) => {
+                Err(Exception::from_message(ctx.clone(), &error.to_string())?.into_value())
+            }
         },
-        Err(message) => match reject {
-            Some(reject) => reject.restore(ctx)?.call::<_, ()>((Exception::from_message(ctx.clone(), &message)?,)),
-            None => Ok(()),
-        },
+        Err(message) => Err(Exception::from_message(ctx.clone(), &message)?.into_value()),
+    };
+    let (callback, value) = match outcome {
+        Ok(value) => (resolve, value),
+        Err(error) => (reject, error),
+    };
+    match callback {
+        Some(callback) => callback.restore(ctx)?.call::<_, ()>((value,)),
+        None => Ok(()),
     }
 }
 
@@ -1403,19 +1412,7 @@ where
                     &running.policy(),
                     running.application.clone(),
                     owner,
-                    move |ctx, _| match outcome {
-                        Ok(value) => match resolve {
-                            Some(resolve) => resolve.restore(ctx)?.call::<_, ()>((value,)),
-                            None => Ok(()),
-                        },
-                        Err(message) => match reject {
-                            Some(reject) => {
-                                let error = Exception::from_message(ctx.clone(), &message)?;
-                                reject.restore(ctx)?.call::<_, ()>((error,))
-                            }
-                            None => Ok(()),
-                        },
-                    },
+                    move |ctx, _| settle_awaited(ctx, resolve, reject, outcome),
                 );
             }
             finish(&running);
@@ -1577,6 +1574,67 @@ fn finish(task: &Rc<TaskState>) {
     TASKS.with_borrow_mut(|tasks| tasks.remove(&task.id));
 }
 
+/// HERDR: releases a resource on explicit close, owner teardown or its last use.
+pub(super) struct ResourceGuard {
+    cleanup: Mutex<Option<Box<dyn FnOnce() + Send>>>,
+    released: async_channel::Sender<()>,
+}
+
+impl ResourceGuard {
+    pub(super) fn close(&self) {
+        let cleanup = self
+            .cleanup
+            .lock()
+            .expect("resource cleanup lock poisoned")
+            .take();
+        if let Some(cleanup) = cleanup {
+            cleanup();
+        }
+        self.released.close();
+    }
+}
+
+impl Drop for ResourceGuard {
+    fn drop(&mut self) {
+        self.close();
+    }
+}
+
+pub(super) fn track_resource(
+    ctx: &Ctx<'_>,
+    api: &'static str,
+    cleanup: impl FnOnce() + Send + 'static,
+) -> JsResult<Arc<ResourceGuard>> {
+    let host = host(ctx, api)?;
+    let (released, finished) = async_channel::bounded::<()>(1);
+    let cleanup = Arc::new(ResourceGuard {
+        cleanup: Mutex::new(Some(Box::new(cleanup))),
+        released,
+    });
+    let owner_cleanup = Arc::downgrade(&cleanup);
+    let task = register(
+        ctx,
+        TaskState::new(
+            api,
+            scope::current_view().map(|view| view.downgrade()),
+            None,
+        )
+        .with_cancellation(move || {
+            if let Some(cleanup) = owner_cleanup.upgrade() {
+                cleanup.close();
+            }
+        }),
+    )?;
+    host.foreground
+        .clone()
+        .spawn(async move {
+            let _ = finished.recv().await;
+            finish(&task);
+        })
+        .detach();
+    Ok(cleanup)
+}
+
 /// `handle.cancel()`.
 ///
 /// A timer stops before its next tick and a sleep's promise is never settled.
@@ -1736,6 +1794,36 @@ mod tests {
             "globalThis.__gpui = { __context_members: (check) => ({ theme: () => (check(), null) }) };",
         )
         .expect("context members");
+    }
+
+    #[test]
+    fn result_conversion_failure_rejects_with_the_original_error() {
+        struct FailingValue<'js>(Value<'js>);
+        impl<'js> IntoJs<'js> for FailingValue<'js> {
+            fn into_js(self, ctx: &Ctx<'js>) -> JsResult<Value<'js>> {
+                Err(ctx.throw(self.0))
+            }
+        }
+
+        let (_runtime, context) = context();
+        context.with(|ctx| {
+            let error: Value = ctx.eval("new RangeError('conversion failed')").unwrap();
+            let (promise, resolve, reject) = ctx.promise().unwrap();
+
+            settle_awaited(
+                &ctx,
+                Some(Persistent::save(&ctx, resolve)),
+                Some(Persistent::save(&ctx, reject)),
+                Ok(FailingValue(error.clone())),
+            )
+            .expect("settle promise");
+
+            assert!(matches!(
+                promise.result::<Value>(),
+                Some(Err(rquickjs::Error::Exception))
+            ));
+            assert_eq!(ctx.catch(), error);
+        });
     }
 
     /// The failure this module exists to prevent: without a drain, a resolved
