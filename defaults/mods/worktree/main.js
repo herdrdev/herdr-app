@@ -3,7 +3,7 @@
 
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar } from "gpui-base";
-import { run, props, closeOverlay, theme, spaces, panes, exec, home } from "herdr";
+import { run, props, closeOverlay, theme, spaces, panes, exec, home, appHome, readTextFile } from "herdr";
 
 // Where a space is now: its first terminal's live folder, else where it was made.
 function place(s, all = panes()) {
@@ -12,8 +12,16 @@ function place(s, all = panes()) {
   return all.find((p) => tabs.has(p.tab) && p.cwd)?.cwd || s.folder || null;
 }
 
-// Checkouts go to <ROOT>/<repo>/<branch, slashes as dashes>.
-const ROOT = (home) => `${home}/.herdr/worktrees`;
+// The mod owns this preference; paths belong to the space's machine, not the app.
+async function root(userHome) {
+  const raw = await readTextFile(`${appHome()}/settings.json`);
+  const directory = (raw === null ? {} : JSON.parse(raw))?.worktrees?.directory ?? "~/.herdr/worktrees";
+  if (typeof directory !== "string" || !directory.trim()) throw new Error("worktrees.directory must be a non-empty path.");
+  let path = directory.replace(/\\/g, "/");
+  if (path === "~" || path.startsWith("~/")) path = userHome.replace(/\\/g, "/").replace(/\/$/, "") + path.slice(1);
+  if (!path.startsWith("/") && !/^[A-Za-z]:\//.test(path)) throw new Error("worktrees.directory must be an absolute path or start with ~/.");
+  return path.replace(/\/+$/, "");
+}
 // Home as ~ (git says C:/Users/x where Windows says C:\Users\x).
 const tilde = (path, userHome) => {
   const [p, h] = [path, userHome].map((s) => s.replace(/\\/g, "/"));
@@ -118,17 +126,14 @@ export default class Worktree extends View {
     this.inputFocused = true;
     this.input.on("focus", (_e, cx) => { this.inputFocused = true; cx.notify(); });
     this.input.on("blur", (_e, cx) => { this.inputFocused = false; cx.notify(); });
-    if (props()?.action !== "remove") {
-      this.input.focus();
-      cx.timer.after(600, () => this.input.focus());
-    }
+    this.handle = cx.focus_handle();
+    this.handle.focus(); // the root is mounted from the first frame: keep the keyboard here while loading
+    if (props()?.action !== "remove") this.input.focus();
     this.busy = false;
     this.error = "";
     this.repo = undefined; // undefined: looking, null: not in git
     this.dirty = false;
     this.unpushed = [];
-    this.handle = cx.focus_handle();
-    if (props()?.action === "remove") this.handle.focus();
     cx.spawn(async (cx) => {
       try {
         if (this.on) {
@@ -138,6 +143,7 @@ export default class Worktree extends View {
           if (result.code !== 0 || !result.stdout.trim()) throw new Error("Could not find the remote home folder.");
           this.userHome = result.stdout.trim().replace(/\\/g, "/");
         }
+        if (!this.opening && props()?.action !== "remove") this.root = await root(this.userHome);
         this.folder = props()?.folder || place(this.space()) || this.userHome;
         // The repo is set last: Enter does nothing until the warnings it consents to are known.
         const repo = await repoOf(this.folder, this.on);
@@ -148,6 +154,11 @@ export default class Worktree extends View {
         if (repo && this.opening) this.list = await checkouts(repo, this.on);
         this.repo = repo;
         cx.notify();
+        // The list (and with it the filter input) only mounts once loading is
+        // done, so the keyboard must move there now — a focus call made while
+        // loading lands on nothing and the dialog stays keyboard-dead.
+        this.handle.focus();
+        if (props().action !== "remove") cx.timer.after(100, () => this.input.focus());
         if (props().branch) await this.work(cx);
       } catch (error) { this.repo = null; this.error = String(error); cx.notify(); }
     });
@@ -182,14 +193,14 @@ export default class Worktree extends View {
   async create() {
     const branch = this.text.trim();
     if (!branch) return "Type a branch name.";
-    const path = `${ROOT(this.userHome)}/${this.repo.name}/${slug(branch)}`;
+    const path = `${this.root}/${this.repo.name}/${slug(branch)}`;
     const exists = (await git(this.repo.main, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], this.on)).ok;
     const add = exists ? ["worktree", "add", path, branch] : ["worktree", "add", "-b", branch, path, "HEAD"];
     const r = await git(this.repo.top, add, this.on, 600_000);
     if (!r.ok) return r.err || "git worktree add failed.";
     const p = props();
     // Leave spaces unnamed so they follow the checkout folder and nest under the repo.
-    run("space.new", { folder: path, machine: this.on, tab: p.tab, argv: p.argv });
+    run("space.new", { folder: path, machine: this.on ?? "", tab: p.tab, argv: p.argv });
     return "";
   }
 
@@ -203,7 +214,7 @@ export default class Worktree extends View {
     this.close();
     const s = spaceOf(c.path, this.list, this.on, spaces(), panes());
     if (s) run("space.select", { id: s.id });
-    else run("space.new", { folder: c.path, machine: this.on });
+    else run("space.new", { folder: c.path, machine: this.on ?? "" });
   }
 
   async remove() {
@@ -320,7 +331,7 @@ export default class Worktree extends View {
             ? !r.linked
               ? "This is the repository's main checkout, not a worktree."
               : `Closes the space and deletes ${tilde(r.top, this.userHome)}. The branch stays.`
-            : `A new space on a checkout in ${tilde(ROOT(this.userHome), this.userHome)}/${r.name}/. A branch that exists is checked out; a new one starts from here.`;
+            : `A new space on a checkout in ${tilde(this.root, this.userHome)}/${r.name}/. A branch that exists is checked out; a new one starts from here.`;
     const blocked = !r || (remove && !r.linked);
     return v_flex()
       .id("worktree")

@@ -419,6 +419,7 @@ pub struct HostModule {
     /// synchronous or asynchronous, never both.
     async_functions: BTreeMap<String, HostAsyncFunction>,
     components: BTreeMap<String, ComponentFactory>,
+    cancellation_values: BTreeMap<String, HostValue>,
     /// The module's TypeScript face, if the host wrote one. See
     /// [`HostModule::declarations`].
     declarations: Option<String>,
@@ -437,6 +438,7 @@ impl HostModule {
             functions: BTreeMap::new(),
             async_functions: BTreeMap::new(),
             components: BTreeMap::new(),
+            cancellation_values: BTreeMap::new(),
             declarations: None,
         }
     }
@@ -455,6 +457,7 @@ impl HostModule {
         let name = name.into();
         self.functions.remove(&name);
         self.async_functions.remove(&name);
+        self.cancellation_values.remove(&name);
         self.components.insert(name, ComponentFactory::new(build));
         self
     }
@@ -489,6 +492,7 @@ impl HostModule {
         let name = name.into();
         self.components.remove(&name);
         self.async_functions.remove(&name);
+        self.cancellation_values.remove(&name);
         self.functions.insert(name, Rc::new(body));
         self
     }
@@ -554,6 +558,7 @@ impl HostModule {
     {
         let name = name.into();
         self.components.remove(&name);
+        self.cancellation_values.remove(&name);
         // One name, one kind. Registering over the other table rather than
         // beside it keeps `function_names` a single list and stops a call
         // having to decide which of two entries it meant.
@@ -566,6 +571,28 @@ impl HostModule {
             }),
         );
         self
+    }
+
+    /// Registers an async function whose returned promise has `cancel()`.
+    /// Explicit cancellation drops its future and resolves with `cancelled`.
+    /// Closing its owning view still leaves the promise pending.
+    pub fn cancellable_async_function<F>(
+        self,
+        name: impl Into<String>,
+        cancelled: HostValue,
+        body: impl Fn(&HostArguments) -> Result<F, HostError> + 'static,
+    ) -> Self
+    where
+        F: Future<Output = HostResult> + Send + 'static,
+    {
+        let name = name.into();
+        let mut module = self.async_function(name.clone(), body);
+        module.cancellation_values.insert(name, cancelled);
+        module
+    }
+
+    pub(crate) fn cancellation_value(&self, name: &str) -> Option<HostValue> {
+        self.cancellation_values.get(name).cloned()
     }
 
     /// Describes this module in TypeScript, for the generated declarations.
