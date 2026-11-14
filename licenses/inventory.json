@@ -45,6 +45,13 @@
   ],
   "components": [
     {
+      "name": "Gomod syntax",
+      "source": "https://github.com/mitranim/sublime-gomod/tree/e0200f024a394d6e7d6b7b37a070bb8ef324b19b (WTFPL; adapted for Herdr)",
+      "files": [
+        "licenses/sublime-gomod.txt"
+      ]
+    },
+    {
       "name": "Ghostty (libghostty-vt)",
       "source": "https://github.com/ghostty-org/ghostty/tree/291fd050b9e9c293c8adb6a140742649b7e42d3a",
       "files": [

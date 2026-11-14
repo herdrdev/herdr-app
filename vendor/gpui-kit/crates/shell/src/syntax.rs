@@ -10,6 +10,8 @@ use syntect::{
     util::LinesWithEndings,
 };
 
+mod gomod;
+
 /// Loading the default syntax definitions deserializes a few megabytes, so share
 /// one set across every highlighter instance.
 static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_newlines);
@@ -57,9 +59,17 @@ impl SyntectHighlighter {
 }
 
 fn find_syntax(language: &str) -> Option<&'static SyntaxReference> {
-    SYNTAX_SET
+    syntax_set(language)
         .find_syntax_by_token(language)
-        .or_else(|| SYNTAX_SET.find_syntax_by_extension(language))
+        .or_else(|| syntax_set(language).find_syntax_by_extension(language))
+}
+
+fn syntax_set(language: &str) -> &'static SyntaxSet {
+    if language.eq_ignore_ascii_case("go.mod") {
+        &gomod::SYNTAX_SET
+    } else {
+        &SYNTAX_SET
+    }
 }
 
 impl InputHighlighter for SyntectHighlighter {
@@ -86,7 +96,7 @@ impl InputHighlighter for SyntectHighlighter {
         self.highlights.clear();
 
         for line in LinesWithEndings::from(&text) {
-            if let Ok(operations) = parser.parse_line(line, &SYNTAX_SET) {
+            if let Ok(operations) = parser.parse_line(line, syntax_set(self.language.as_ref())) {
                 let mut cursor = 0;
                 for (index, operation) in operations {
                     self.push_highlight(offset + cursor..offset + index, &scopes);
@@ -283,5 +293,21 @@ mod tests {
         assert!(find_syntax("rust").is_some());
         assert!(find_syntax("rs").is_some());
         assert!(find_syntax("unknown-language").is_none());
+    }
+
+    #[test]
+    fn gomod_uses_its_own_syntax_set_and_theme_categories() {
+        assert!(find_syntax("go.mod").is_some());
+        assert!(find_syntax("go").is_some());
+        assert!(find_syntax("sum").is_none());
+        assert!(find_syntax("gomod").is_none());
+        for (scope, expected) in [
+            ("keyword.gomod", "keyword"),
+            ("string.unquoted.path.gomod", "string"),
+            ("constant.other.version.gomod", "constant"),
+            ("comment.line.gomod", "comment"),
+        ] {
+            assert_eq!(semantic_name(Scope::new(scope).unwrap()), Some(expected));
+        }
     }
 }

@@ -1,0 +1,140 @@
+%YAML 1.2
+---
+# Adapted from mitranim/sublime-gomod e0200f0 (WTFPL).
+# See scripts/gomod-syntax/README.md for local changes and regeneration.
+# http://www.sublimetext.com/docs/3/syntax.html
+
+# https://research.swtch.com/vgo-module
+# https://github.com/golang/go/tree/master/src/cmd/go/internal/modfile
+
+name: Go Module
+file_extensions: [go.mod]
+scope: source.gomod
+
+# Note: in Go 1.11, identifiers may include ANY non-whitespace except `//`. This
+# means they may include `()` in any quantity and order. This latter part is
+# probably an artifact of the implementation, unintuitive and likely to be
+# changed in the future. At the time of writing, no valid `go.mod` should rely
+# on this "feature", so we parse parens separately to future-proof the syntax.
+variables:
+  ident_body: '(?:"(?:\\.|[^"\\\r\n])*"|`[^`\r\n]*`|(?:[^\s/()"`]|/(?!/))+)'
+  ident_terminator: '//|\(|\)|\s|$'
+  ident: '{{ident_body}}(?={{ident_terminator}})'
+
+contexts:
+  main:
+    - include: comment-match
+    - include: punctuation-match
+    - include: statement-match
+
+  nonroot-match:
+    - include: comment-match
+    - include: punctuation-match
+    - match: '{{ident}}'
+      scope: variable.gomod
+
+  comment-match:
+    - match: (//)(?:.|\s)*
+      scope: comment.line.gomod
+      captures:
+        1: punctuation.definition.comment.gomod
+
+  punctuation-match:
+    - match: \(
+      scope: punctuation.section.parens.begin.gomod
+    - match: \)
+      scope: punctuation.section.parens.end.gomod
+
+  statement-match:
+    - match: (?:go|toolchain)(?={{ident_terminator}})
+      scope: keyword.gomod
+      push:
+        - include: before-eol-or-comment-pop
+        - match: '{{ident}}'
+          scope: constant.other.version.gomod
+    - match: retract(?={{ident_terminator}})
+      scope: keyword.gomod
+      push: retractions-pop
+    - match: godebug(?={{ident_terminator}})
+      scope: keyword.gomod
+      push: settings-pop
+    - match: (?:exclude|module|replace|require|tool)(?={{ident_terminator}})
+      scope: keyword.gomod
+      push: modvers-or-replacements-pop
+    - match: '{{ident}}'
+      scope: keyword.gomod
+      push:
+        - include: before-eol-or-comment-pop
+        - include: nonroot-match
+
+  # For code after `exclude`, `replace`, `require` or `tool`:
+  #   package
+  #   package version
+  #   package [version] => package [version]
+  modvers-or-replacements-pop:
+    - match: \(
+      scope: punctuation.section.parens.begin.gomod
+      set:
+        - match: \)
+          scope: punctuation.section.parens.end.gomod
+          # Note: go.mod expects only comments after a closing paren
+          set:
+            - include: comment-match
+            - include: before-eol-or-comment-pop
+        - include: comment-match
+        - include: modver-or-replacement-match
+    - include: before-eol-or-comment-pop
+    - include: modver-or-replacement-match
+
+  modver-or-replacement-match:
+    - match: (?=\))
+      pop: true
+
+    - match: =>(?={{ident_terminator}})
+      scope: keyword.operator.gomod
+
+    - match: '({{ident_body}})[ \t]+(=>)(?={{ident_terminator}})'
+      captures:
+        1: string.unquoted.path.gomod
+        2: keyword.operator.gomod
+
+    - match: '({{ident_body}})[ \t]+({{ident_body}})(?={{ident_terminator}})'
+      captures:
+        1: string.unquoted.path.gomod
+        2: constant.other.version.gomod
+
+    - match: '{{ident}}'
+      scope: string.unquoted.path.gomod
+
+  retractions-pop:
+    - match: \(
+      scope: punctuation.section.parens.begin.gomod
+      set:
+        - match: \)
+          scope: punctuation.section.parens.end.gomod
+          pop: true
+        - include: comment-match
+        - include: retraction-match
+    - include: before-eol-or-comment-pop
+    - include: retraction-match
+
+  retraction-match:
+    - match: '[\[\],]'
+      scope: punctuation.separator.gomod
+    - match: '[^\s\[\],()/]+'
+      scope: constant.other.version.gomod
+
+  settings-pop:
+    - match: \(
+      scope: punctuation.section.parens.begin.gomod
+      set:
+        - match: \)
+          scope: punctuation.section.parens.end.gomod
+          pop: true
+        - include: nonroot-match
+    - include: before-eol-or-comment-pop
+    - include: nonroot-match
+
+  before-eol-or-comment-pop:
+    - match: (?=//|$)
+      pop: true

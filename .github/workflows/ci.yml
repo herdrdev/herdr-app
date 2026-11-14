@@ -84,6 +84,10 @@ jobs:
         run: echo "LIBCLANG_PATH=C:\\Program Files\\LLVM\\bin" >> "$GITHUB_ENV"
       - name: Keep unchanged sources fresh
         run: scripts/ci-sources restore
+      - name: Check Go module syntax
+        run: |
+          cargo run --locked --manifest-path scripts/gomod-syntax/Cargo.toml -- --check
+          cargo test --locked --manifest-path scripts/gomod-syntax/Cargo.toml
       # Compile the screenshot harness everywhere, even without a desktop.
       # Disable optimized dev dependencies in CI to reduce test compile time.
       - name: Build tests
@@ -129,6 +133,7 @@ jobs:
       - name: Check documentation
         if: matrix.platform == 'linux-x86_64'
         run: |
+          ~/.bun/bin/bun test scripts/files.test.ts
           ~/.bun/bin/bun test scripts/docs.test.ts
           ~/.bun/bin/bun scripts/docs.ts check
 

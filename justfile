@@ -43,6 +43,8 @@ build:
     cargo build --locked
 
 test:
+    cargo run --locked --manifest-path scripts/gomod-syntax/Cargo.toml -- --check
+    cargo test --locked --manifest-path scripts/gomod-syntax/Cargo.toml
     bun test scripts/files.test.ts scripts/machine-add.test.ts scripts/picker.test.ts scripts/palette.test.ts scripts/agents.test.ts scripts/spaces.test.ts scripts/worktree.test.ts scripts/settings.test.ts
     cargo test --locked
 

@@ -4,6 +4,30 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 
 const source = await readFile(new URL("../defaults/mods/files/main.js", import.meta.url), "utf8");
+
+test("Files selects Go module syntax by filename and preserves other languages", async () => {
+  const captured: { language: string; value: string; readonly: boolean }[] = [];
+  const Files = new Function("View", "EditorState", "readTextFile", "theme", "settings",
+    source.replace(/^import .*;\r?\n/gm, "").replace("export default class Files", "return class Files"))(
+    class {}, { new: (options: any) => { captured.push(options); return { release() {} }; } },
+    async () => "module example.com/app\n", () => ({}), () => ({}));
+  const view = new Files();
+  view.root = "/project";
+  view.current = () => true;
+  let pending: Promise<void>;
+  const cx = { notify() {}, spawn: (callback: Function) => { pending = callback(cx); } };
+  for (const [path, language] of [
+    ["go.mod", "go.mod"], ["nested/go.mod", "go.mod"], ["nested\\go.mod", "go.mod"],
+    ["go.sum", "sum"], ["music.mod", "mod"], ["go.mod.backup", "backup"],
+    ["notes.gomod", "gomod"],
+    ["main.go", "go"], ["main.ts", "js"], ["config.json", "json"],
+  ]) {
+    view.show(path, cx);
+    await pending!;
+    expect(view.fileError).toBeNull();
+    expect(captured.at(-1)).toMatchObject({ language, readonly: true, value: "module example.com/app\n" });
+  }
+});
 const directorySource = source.slice(source.indexOf("async function directory("), source.indexOf("\nexport default class"));
 const loadDirectory = (exec: Function, platform: string) => new Function("exec", "window", `${directorySource}; return directory;`)(exec, () => ({ platform }));
 const directory = loadDirectory(

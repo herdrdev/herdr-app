@@ -183,7 +183,9 @@ the title bar, panes as cards, a space picker) and `win98`
 writing a new file. The Files panel supports Windows folder paths with spaces,
 parentheses and apostrophes, and preserves Unicode file and folder names
 (including Chinese). Directory links expand as folders; their contents load
-only when expanded.
+only when expanded. Files named `go.mod` have Go module syntax highlighting,
+including module paths, versions, directives and comments. Mods can select
+the same grammar with `EditorState.new({ language: "go.mod", ... })`.
 
 **Herdr's own layouts and mods are read-only.** They are replaced whole
 on every start. Use settings.json for look (fonts, sizes, theme, colors,
