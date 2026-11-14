@@ -358,7 +358,7 @@ mod tests {
     }
     #[test]
     fn cached_media_reads_dimensions_from_extensionless_files() {
-        let root = std::path::PathBuf::from(format!("/var/tmp/herdr-media-test-{}", std::process::id()));
+        let root = crate::test_tmp().join(format!("herdr-media-test-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let file = root.join("hashed-image");
         image::RgbaImage::new(12, 7).save_with_format(&file, image::ImageFormat::Png).unwrap();
@@ -370,7 +370,7 @@ mod tests {
     }
     #[test]
     fn media_cache_reads_once_and_retries_after_download() {
-        let root = std::path::PathBuf::from(format!("/var/tmp/herdr-media-cache-test-{}", std::process::id()));
+        let root = crate::test_tmp().join(format!("herdr-media-cache-test-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let file = root.join("hashed-image");
         let mut cache = MediaCache::default();

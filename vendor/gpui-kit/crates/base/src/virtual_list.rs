@@ -33,6 +33,8 @@ struct VirtualListScrollHandleState {
     /// Content bounds size (excluding padding and border) from the last frame.
     last_content_size: Option<Size<Pixels>>,
     pub deferred_scroll_to_item: Option<DeferredScrollToItem>,
+    // HERDR: `scroll_to_bottom` was asked for; the last row is known when the list is drawn.
+    deferred_scroll_to_bottom: bool,
 }
 
 /// A scroll handle for [`VirtualList`].
@@ -93,6 +95,7 @@ impl VirtualListScrollHandle {
                 items_count: 0,
                 last_content_size: None,
                 deferred_scroll_to_item: None,
+                deferred_scroll_to_bottom: false,
             })),
             base_handle: ScrollHandle::default(),
         }
@@ -111,6 +114,7 @@ impl VirtualListScrollHandle {
     /// Scroll to the item at the given index, with an additional offset items.
     fn scroll_to_item_with_offset(&self, ix: usize, strategy: ScrollStrategy, offset: usize) {
         let mut state = self.state.borrow_mut();
+        state.deferred_scroll_to_bottom = false;
         state.deferred_scroll_to_item = Some(DeferredScrollToItem {
             item_index: ix,
             strategy,
@@ -121,8 +125,12 @@ impl VirtualListScrollHandle {
 
     /// Scrolls to the bottom of the list.
     pub fn scroll_to_bottom(&self) {
-        let items_count = self.state.borrow().items_count;
-        self.scroll_to_item(items_count.saturating_sub(1), ScrollStrategy::Top);
+        // HERDR: the last row is picked when the list is drawn, not here. The
+        // count kept here is the last frame's: zero before the first one, and
+        // short by the rows the caller has just added.
+        let mut state = self.state.borrow_mut();
+        state.deferred_scroll_to_item = None;
+        state.deferred_scroll_to_bottom = true;
     }
 }
 
@@ -636,6 +644,16 @@ impl Element for VirtualList {
         scroll_state.axis = axis;
         scroll_state.items_count = self.items_count;
         scroll_state.last_content_size = Some(content_bounds.size);
+
+        // HERDR: `scroll_to_bottom` lands on the last of the rows drawn now.
+        if std::mem::take(&mut scroll_state.deferred_scroll_to_bottom) && self.items_count > 0 {
+            scroll_state.deferred_scroll_to_item = Some(DeferredScrollToItem {
+                item_index: self.items_count - 1,
+                strategy: ScrollStrategy::Top,
+                offset: 0,
+                scroll_strict: false,
+            });
+        }
 
         let mut scroll_offset = self.scroll_handle.offset();
         if let Some(scroll_to_item) = scroll_state.deferred_scroll_to_item.take() {

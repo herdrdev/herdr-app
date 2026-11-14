@@ -384,8 +384,17 @@ pub struct Person {
     pub font: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font_size: Option<f32>,
+    /// The terminals' text weight, 100 to 900; bold text stays at 700.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub font_weight: Option<u16>,
     /// Enable programming ligatures in terminal fonts.
     pub font_ligatures: bool,
+    /// Cell height multiplier, 0.8..2.
+    pub terminal_line_height: f32,
+    /// Cell width multiplier, 0.8..2.
+    pub terminal_cell_width: f32,
+    /// Wheel and trackpad scroll multiplier, 0.1..5.
+    pub terminal_scroll_speed: f32,
     /// The panels' font (their sizes follow zoom).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ui_font: Option<String>,
@@ -395,6 +404,9 @@ pub struct Person {
     /// Allow terminal programs (including remote ones) to copy text locally.
     #[serde(skip_serializing_if = "is_true")]
     pub clipboard_write: bool,
+    /// Copy a mouse selection to the clipboard when the button is released.
+    #[serde(skip_serializing_if = "is_true")]
+    pub copy_on_select: bool,
     /// A draggable scroll position thumb at a terminal pane's right edge.
     #[serde(skip_serializing_if = "is_true")]
     pub pane_scrollbars: bool,
@@ -475,10 +487,15 @@ impl Default for Person {
             core: None,
             font: None,
             font_size: None,
+            font_weight: None,
             font_ligatures: false,
+            terminal_line_height: 1.0,
+            terminal_cell_width: 1.0,
+            terminal_scroll_speed: 1.0,
             ui_font: None,
             telemetry: true,
             clipboard_write: true,
+            copy_on_select: true,
             pane_scrollbars: true,
             minimum_contrast: 1.0,
             option_as_alt: OptionAsAlt::Auto,
@@ -496,7 +513,15 @@ impl Default for Person {
 pub struct Settings {
     pub font_family: String,
     pub font_size: f32,
+    /// The terminals' text weight (bold text stays at 700).
+    pub font_weight: u16,
     pub font_ligatures: bool,
+    /// Cell height multiplier, 0.8..2.
+    pub terminal_line_height: f32,
+    /// Cell width multiplier, 0.8..2.
+    pub terminal_cell_width: f32,
+    /// Wheel and trackpad scroll multiplier, 0.1..5.
+    pub terminal_scroll_speed: f32,
     pub ui_font_family: String,
     pub ui_font_size: f32,
     /// How big the whole app is drawn (1 = as designed). The zoom keys change it.
@@ -517,6 +542,7 @@ pub struct Settings {
     /// 0..1: below 1, what's behind a terminal shows through.
     pub terminal_opacity: f32,
     pub clipboard_write: bool,
+    pub copy_on_select: bool,
     pub minimum_contrast: f32,
     pub option_as_alt: OptionAsAlt,
     pub sounds: Sounds,
@@ -548,7 +574,11 @@ impl Default for Settings {
         Settings {
             font_family: DEFAULT_FONT.into(),
             font_size: 14.0,
+            font_weight: 500,
             font_ligatures: false,
+            terminal_line_height: 1.0,
+            terminal_cell_width: 1.0,
+            terminal_scroll_speed: 1.0,
             ui_font_family: "Geist".into(),
             ui_font_size: 13.0,
             zoom: 1.0,
@@ -561,6 +591,7 @@ impl Default for Settings {
             terminal_padding: [10.0, 6.0],
             terminal_opacity: 1.0,
             clipboard_write: true,
+            copy_on_select: true,
             minimum_contrast: 1.0,
             option_as_alt: OptionAsAlt::Auto,
             sounds: Sounds::default(),
@@ -588,7 +619,11 @@ impl Settings {
             // The layout's own, else the person's, else Herdr's.
             font_family: look.font.clone().or(person.font.clone()).unwrap_or(d.font_family),
             font_size: look.font_size.or(person.font_size).unwrap_or(d.font_size),
+            font_weight: look.font_weight.or(person.font_weight).unwrap_or(d.font_weight),
             font_ligatures: person.font_ligatures,
+            terminal_line_height: look.terminal_line_height.unwrap_or(person.terminal_line_height).clamp(0.8, 2.0),
+            terminal_cell_width: look.terminal_cell_width.unwrap_or(person.terminal_cell_width).clamp(0.8, 2.0),
+            terminal_scroll_speed: look.terminal_scroll_speed.unwrap_or(person.terminal_scroll_speed).clamp(0.1, 5.0),
             ui_font_family: look.ui_font.clone().or(person.ui_font.clone()).unwrap_or(d.ui_font_family),
             ui_font_size: d.ui_font_size,
             zoom: person.zoom,
@@ -604,6 +639,7 @@ impl Settings {
             system_notifications: person.system_notifications,
             dock_bounce: person.dock_bounce,
             clipboard_write: person.clipboard_write,
+            copy_on_select: person.copy_on_select,
             minimum_contrast: person.minimum_contrast,
             option_as_alt: person.option_as_alt,
         }
@@ -652,6 +688,9 @@ impl Settings {
         }
         if !(1.0..=21.0).contains(&self.minimum_contrast) {
             out.push(format!("minimum_contrast {} is outside 1..21", self.minimum_contrast));
+        }
+        if !(100..=900).contains(&self.font_weight) {
+            out.push(format!("font_weight {} is outside 100..900", self.font_weight));
         }
         if !(6.0..=72.0).contains(&self.font_size) {
             out.push(format!("font_size {} is outside 6..72", self.font_size));
@@ -718,7 +757,28 @@ pub fn telemetry_setting(person: &Result<Person, String>) -> bool {
 }
 
 pub fn write_person(person: &Person) -> std::io::Result<()> {
-    crate::persist::write_atomic(&path(), serde_json::to_string_pretty(person).unwrap_or_default() + "\n")
+    let path = path();
+    let previous = match std::fs::read_to_string(&path) {
+        Ok(text) => text,
+        Err(e) if e.kind() == std::io::ErrorKind::NotFound => "{}".into(),
+        Err(e) => return Err(e),
+    };
+    crate::persist::write_atomic(&path, person_text(person, &previous)?)
+}
+
+// Zoom writes replace app-owned fields, not preferences owned by mods.
+fn person_text(person: &Person, previous: &str) -> std::io::Result<String> {
+    let old: Person = serde_json::from_str(previous)?;
+    let mut raw: serde_json::Map<String, serde_json::Value> = serde_json::from_str(previous)?;
+    if let serde_json::Value::Object(owned) = serde_json::to_value(old)? {
+        for key in owned.keys() {
+            raw.remove(key);
+        }
+    }
+    if let serde_json::Value::Object(owned) = serde_json::to_value(person)? {
+        raw.extend(owned);
+    }
+    Ok(serde_json::to_string_pretty(&raw)? + "\n")
 }
 
 /// Installs new settings; returns whether anything changed.
@@ -889,6 +949,59 @@ mod tests {
     use super::*;
 
     #[test]
+    fn zoom_writes_preserve_mod_preferences_and_clear_unset_app_fields() {
+        let raw = r#"{"zoom":1,"font":"custom","telemetry":false,"worktrees":{"directory":"~/Developer/worktrees","future":true},"another_mod":{"enabled":true}}"#;
+        let mut person: Person = serde_json::from_str(raw).unwrap();
+        person.zoom = 1.5;
+        person.font = None;
+        person.telemetry = true;
+        let saved: serde_json::Value = serde_json::from_str(&person_text(&person, raw).unwrap()).unwrap();
+        assert_eq!(saved["zoom"], 1.5);
+        assert_eq!(saved["worktrees"], serde_json::json!({"directory":"~/Developer/worktrees","future":true}));
+        assert_eq!(saved["another_mod"], serde_json::json!({"enabled":true}));
+        assert!(saved.get("font").is_none());
+        assert!(saved.get("telemetry").is_none());
+        assert_eq!(serde_json::from_value::<Person>(saved).unwrap().zoom, 1.5);
+        for broken in ["{", "null", "[]", r#"{"zoom":"big"}"#] {
+            assert!(person_text(&person, broken).is_err());
+        }
+    }
+
+    #[test]
+    fn terminal_multipliers_default_inherit_override_and_clamp() {
+        let default: Person = serde_json::from_str("{}").unwrap();
+        let look = crate::layout::Look::default();
+        let s = Settings::compose(&default, &look, true);
+        assert_eq!((s.terminal_line_height, s.terminal_scroll_speed), (1.0, 1.0));
+        let person: Person = serde_json::from_str(r#"{"terminal_line_height":1.3,"terminal_scroll_speed":0.5}"#).unwrap();
+        let roundtrip: Person = serde_json::from_value(serde_json::to_value(&person).unwrap()).unwrap();
+        let s = Settings::compose(&roundtrip, &look, true);
+        assert_eq!((s.terminal_line_height, s.terminal_scroll_speed), (1.3, 0.5));
+        let look: crate::layout::Look = serde_json::from_str(r#"{"terminal_line_height":0.1,"terminal_scroll_speed":10}"#).unwrap();
+        let s = Settings::compose(&person, &look, true);
+        assert_eq!((s.terminal_line_height, s.terminal_scroll_speed), (0.8, 5.0));
+        let person = Person { terminal_line_height: 5.0, terminal_scroll_speed: 0.0, ..default };
+        let s = Settings::compose(&person, &crate::layout::Look::default(), true);
+        assert_eq!((s.terminal_line_height, s.terminal_scroll_speed), (2.0, 0.1));
+    }
+
+    #[test]
+    fn terminal_cell_width_defaults_inherits_overrides_and_clamps() {
+        let default: Person = serde_json::from_str("{}").unwrap();
+        let none = crate::layout::Look::default();
+        assert_eq!(Settings::compose(&default, &none, true).terminal_cell_width, 1.0);
+        let person: Person = serde_json::from_str(r#"{"terminal_cell_width":0.95}"#).unwrap();
+        let roundtrip: Person = serde_json::from_value(serde_json::to_value(&person).unwrap()).unwrap();
+        assert_eq!(Settings::compose(&roundtrip, &none, true).terminal_cell_width, 0.95);
+        let look: crate::layout::Look = serde_json::from_str(r#"{"terminal_cell_width":1.1}"#).unwrap();
+        assert_eq!(Settings::compose(&person, &look, true).terminal_cell_width, 1.1);
+        let look: crate::layout::Look = serde_json::from_str(r#"{"terminal_cell_width":0.1}"#).unwrap();
+        assert_eq!(Settings::compose(&person, &look, true).terminal_cell_width, 0.8);
+        let person = Person { terminal_cell_width: 5.0, ..default };
+        assert_eq!(Settings::compose(&person, &none, true).terminal_cell_width, 2.0);
+    }
+
+    #[test]
     fn layout_look_wins_and_settings_fill_what_it_leaves_unset() {
         let person = Person {
             font: Some("person".into()), font_size: Some(19.0), ui_font: Some("person-ui".into()),
@@ -925,6 +1038,22 @@ mod tests {
     }
 
     #[test]
+    fn font_weight_defaults_to_medium_and_validates_the_range() {
+        let default: Person = serde_json::from_str("{}").unwrap();
+        assert_eq!(Settings::compose(&default, &crate::layout::Look::default(), true).font_weight, 500);
+        assert!(serde_json::to_value(&default).unwrap().get("font_weight").is_none());
+        for weight in [100, 300, 400, 900, 50, 950] {
+            let person: Person = serde_json::from_value(serde_json::json!({"font_weight": weight})).unwrap();
+            let settings = Settings::compose(&person, &crate::layout::Look::default(), true);
+            assert_eq!(settings.font_weight, weight);
+            assert_eq!(settings.problems().is_empty(), (100..=900).contains(&weight));
+        }
+        let look = crate::layout::Look { font_weight: Some(300), ..Default::default() };
+        let person = Person { font_weight: Some(400), ..Person::default() };
+        assert_eq!(Settings::compose(&person, &look, true).font_weight, 300);
+    }
+
+    #[test]
     fn minimum_contrast_defaults_off_and_validates_the_ratio() {
         let default: Person = serde_json::from_str("{}").unwrap();
         assert_eq!(default.minimum_contrast, 1.0);
@@ -945,6 +1074,16 @@ mod tests {
         let off: Person = serde_json::from_str(r#"{"clipboard_write":false}"#).unwrap();
         assert!(!Settings::compose(&off, &crate::layout::Look::default(), true).clipboard_write);
         assert_eq!(serde_json::to_value(off).unwrap()["clipboard_write"], false);
+    }
+
+    #[test]
+    fn copy_on_select_defaults_on_and_can_be_disabled() {
+        let default: Person = serde_json::from_str("{}").unwrap();
+        assert!(default.copy_on_select);
+        assert!(Settings::default().copy_on_select);
+        let off: Person = serde_json::from_str(r#"{"copy_on_select":false}"#).unwrap();
+        assert!(!Settings::compose(&off, &crate::layout::Look::default(), true).copy_on_select);
+        assert_eq!(serde_json::to_value(off).unwrap()["copy_on_select"], false);
     }
 
     #[test]
@@ -986,7 +1125,7 @@ mod tests {
     /// settings.json key.
     #[test]
     fn the_guide_explains_every_setting() {
-        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), ui_font: Some(String::new()), telemetry: false, clipboard_write: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), system_notifications: SystemNotifications::Off, dock_bounce: true, ..Person::default() };
+        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), font_weight: Some(400), ui_font: Some(String::new()), telemetry: false, clipboard_write: false, copy_on_select: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), system_notifications: SystemNotifications::Off, dock_bounce: true, ..Person::default() };
         let keys: Vec<String> = serde_json::to_value(&all).unwrap().as_object().unwrap().keys().cloned().collect();
         let guide = include_str!("../defaults/AGENTS.md");
         let section = guide.split("## The person").nth(1).and_then(|s| s.split("\n## ").next()).unwrap_or_default();
