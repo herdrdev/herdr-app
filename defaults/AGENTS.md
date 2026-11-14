@@ -364,6 +364,24 @@ layout's look and a block can differ:
   terminal columns do not change. Hidden in alternate-screen programs.
 - `terminal_opacity` (0..1): below 1, the background behind a terminal
   (a pane frame's, the layout's gradient) shows through its text.
+- `window_opacity` (0..1): below 1 the desktop shows through the window, at
+  that opacity. Terminals, cards and bars become see-through together, and
+  `terminal_opacity` stops applying. On macOS dialogs and menus (`popover`)
+  show the desktop at that opacity but hide the window's content under them;
+  elsewhere they stay solid. Nothing dims the window behind a dialog, so
+  dialogs, windows and popups hung from the top (the palette) take an
+  `accent` border instead; menus at the pointer, toasts and `frame: "none"`
+  overlays keep theirs. Cells a program colors stay solid too. A default background a program sets (OSC 11)
+  shows at `window_opacity` instead of the window's; over a solid surface it
+  sits on top of that surface. Literal colors in a layout or mod stay as
+  written. The theme's `background`, `surface`, `canvas` and `chrome` stop
+  being separate surfaces: all four show the one `background` color, painted
+  at the window root, so a layout or theme that tells them apart loses that
+  difference. `raised` paints as a white (dark theme) or black (light theme)
+  tint of the same color, like `hover`, so raised areas stay as see-through
+  as what they sit on. 1 (default) is an ordinary window. Add the root's
+  `window_blur` to blur what shows through:
+  `{ "id": "root", "window_blur": true, "window_opacity": 0.85, ... }`.
 - Switching layouts switches the look. The theme menu changes the shown
   layout's root `theme`.
 - Today only the root's look applies; a block's own look is coming.

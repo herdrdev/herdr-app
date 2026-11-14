@@ -770,6 +770,15 @@ impl Vt {
         }
     }
 
+    /// The default background now: the one a program set (OSC 11), else the theme's.
+    pub fn background(&self) -> Rgb {
+        let mut bg = GhosttyColorRgb::default();
+        unsafe {
+            ghostty_terminal_get(self.term, GHOSTTY_TERMINAL_DATA_COLOR_BACKGROUND, &mut bg as *mut _ as *mut c_void);
+        }
+        Rgb::from(bg)
+    }
+
     /// Switches colors live (settings.json changed).
     pub fn set_theme(&mut self, theme: Theme) {
         if self.theme != theme {
