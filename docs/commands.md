@@ -93,12 +93,13 @@ Rename a tab (asks the person when no name; an empty name: called by its number 
 
 ## `tab.move`
 
-Move a tab to a position in its space (1 = first).
+Move a tab (the active one if no id) to a position in its space (1 = first), or `by` places left (-) or right (+), wrapping.
 
 | Argument | Required |
 |---|---|
-| `id` | yes |
-| `index` | yes |
+| `id` | no |
+| `index` | no |
+| `by` | no |
 
 ## `pane.split`
 

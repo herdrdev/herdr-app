@@ -146,8 +146,12 @@ fn parse_args(rest: &[String]) -> Result<Value, String> {
 }
 
 /// Encode before opening the destination: GPU errors must not truncate a good shot.
-pub fn save_shot(window: &gpui::Window, path: &std::path::Path) -> anyhow::Result<()> {
-    let image = window.render_to_image()?;
+pub fn save_shot<C: gpui::AppContext>(
+    window: gpui::AnyWindowHandle,
+    cx: &mut C,
+    path: &std::path::Path,
+) -> anyhow::Result<()> {
+    let image = window.render_current_to_image(cx)?;
     let mut bytes = Vec::new();
     {
         let mut encoder = png::Encoder::new(&mut bytes, image.width(), image.height());

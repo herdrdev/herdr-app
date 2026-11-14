@@ -6,7 +6,7 @@ use gpui::App;
 use gpui_shell::{Capabilities, ExecuteGrant, HostError, HostModule, HostObject, HostValue, NetworkGrant};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -32,6 +32,17 @@ pub fn frame_dir() -> PathBuf {
 pub fn home() -> PathBuf {
     // HOME, or the profile folder on Windows.
     std::env::home_dir().unwrap_or_else(|| "/".into())
+}
+
+thread_local! {
+    static CHECKING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// True while `herdr-app check` loads a mod: `init()` runs there with live
+/// exec and write capabilities, so mods can see it (`herdr.checking()`) and
+/// those side effects warn.
+fn checking() -> bool {
+    CHECKING.with(|c| c.get())
 }
 
 /// The fonts on this machine (`fonts()`): read when the window opens and
@@ -392,6 +403,8 @@ pub enum Request {
     CloseOverlay { id: String },
     /// The OS window's title; `None` restores the default.
     SetWindowTitle(Option<String>),
+    /// The app icon's badge (the Dock on macOS); `None` clears it.
+    SetBadge(Option<String>),
     Refresh,
     /// From `herdr-app do` / `herdr-app status` (control.rs); answer on `reply`.
     Control { cmd: Value, reply: std::sync::mpsc::Sender<Value> },
@@ -545,6 +558,7 @@ thread_local! {
     /// Snapshots the window publishes; mods read them synchronously and
     /// re-render when they change.
     static SNAPSHOT: RefCell<Snapshot> = RefCell::new(Snapshot::default());
+    static PANE_VIEWS: RefCell<HashMap<String, gpui::WeakEntity<crate::terminal::TerminalView>>> = RefCell::new(HashMap::new());
     static AGENT_ORDER: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     static SHARED: RefCell<Option<SharedStore>> = const { RefCell::new(None) };
     /// Where key commands for each loaded copy go: (copy, mod, sender).
@@ -605,7 +619,18 @@ pub fn publish_spaces(v: Value) -> bool {
 pub fn publish_agents(v: Value) -> bool {
     publish("agents", |s| (std::mem::replace(&mut s.agents, v.clone()), v))
 }
+pub fn panes_scrolled() {
+    REVISIONS.with_borrow_mut(|r| *r.entry("panes").or_default() += 1);
+}
+
+pub fn track_pane_view(pane: String, view: &gpui::Entity<crate::terminal::TerminalView>) {
+    PANE_VIEWS.with_borrow_mut(|views| { views.insert(pane, view.downgrade()); });
+}
+
 pub fn publish_panes(v: Value) -> bool {
+    PANE_VIEWS.with_borrow_mut(|views| views.retain(|pane, _| {
+        v.as_array().into_iter().flatten().any(|p| p["pane"].as_str() == Some(pane))
+    }));
     publish("panes", |s| (std::mem::replace(&mut s.panes, v.clone()), v))
 }
 pub fn publish_terminals(mut v: Value) -> bool {
@@ -683,7 +708,24 @@ impl LiveReads {
 
 fn read(reads: &RefCell<LiveReads>, key: &'static str, f: impl FnOnce(&Snapshot) -> &Value) -> HostValue {
     REVISIONS.with_borrow(|r| reads.borrow_mut().record(key, r));
-    SNAPSHOT.with(|s| to_host(f(&s.borrow())))
+    SNAPSHOT.with(|s| {
+        let snapshot = s.borrow();
+        if key != "panes" {
+            return to_host(f(&snapshot));
+        }
+        // Output and resizing change these numbers without invalidating mods.
+        let mut panes = snapshot.panes.clone();
+        gpui_shell::with_current_app(|cx| {
+            PANE_VIEWS.with_borrow(|views| {
+                for pane in panes.as_array_mut().into_iter().flatten() {
+                    if let Some(view) = pane["pane"].as_str().and_then(|id| views.get(id)).and_then(|v| v.upgrade()) {
+                        pane["scroll"] = view.read(cx).scroll_metrics().map(|m| m.json()).unwrap_or(Value::Null);
+                    }
+                }
+            });
+        });
+        to_host(&panes)
+    })
 }
 
 fn reader(reads: Rc<RefCell<LiveReads>>, key: &'static str, f: fn(&Snapshot) -> &Value) -> impl Fn(&gpui_shell::HostArguments) -> gpui_shell::HostResult {
@@ -946,6 +988,7 @@ fn module(inst: Instance, copy: u64) -> HostModule {
         .declarations(DECLARATIONS)
         .async_function("exec", |a| {
             let command = a.string(0)?.to_owned();
+            if checking() { tracing::warn!("check: mod exec'd `{command}`; the child runs for real"); }
             Ok(exec_future(command, strings(a.get(1)), opt_str(a.get(2), "cwd"), opt_str(a.get(2), "on"), exec_limit(a.get(2))?))
         })
         .async_function("readTextFile", |a| {
@@ -958,9 +1001,15 @@ fn module(inst: Instance, copy: u64) -> HostModule {
         })
         .async_function("writeTextFile", |a| {
             let expected = a.get(2).and_then(|v| match v { HostValue::Str(s) => Some(s.clone()), _ => None });
-            Ok(crate::mod_files::write_text(a.string(0)?.to_owned(), a.string(1)?.to_owned(), expected))
+            let path = a.string(0)?.to_owned();
+            if checking() { tracing::warn!("check: mod wrote `{path}`; the write lands for real"); }
+            Ok(crate::mod_files::write_text(path, a.string(1)?.to_owned(), expected))
         })
-        .async_function("hc", |a| Ok(exec_future("hc".into(), strings(a.get(0)), None, None, EXEC_LIMIT)))
+        .async_function("hc", |a| {
+            if checking() { tracing::warn!("check: mod called hc; it runs for real"); }
+            Ok(exec_future("hc".into(), strings(a.get(0)), None, None, EXEC_LIMIT))
+        })
+        .function("checking", |_| Ok(HostValue::Bool(checking())))
         .function("home", |_| Ok(home().to_string_lossy().into_owned().into()))
         .function("appHome", |_| Ok(app_dir().to_string_lossy().into_owned().into()))
         .function("fonts", |_| Ok(to_host(&json!(*FONTS.lock().unwrap()))))
@@ -1083,6 +1132,14 @@ fn module(inst: Instance, copy: u64) -> HostModule {
             request(Request::SetWindowTitle(title));
             Ok(HostValue::Null)
         })
+        .function("setBadge", |a| {
+            let text = match a.get(0) {
+                Some(v) if !v.is_null() => Some(a.string(0)?.to_owned()),
+                _ => None,
+            };
+            request(Request::SetBadge(text));
+            Ok(HostValue::Null)
+        })
         .function("terminals", reader(reads.clone(), "terminals", |s| &s.terminals))
         .function("focused", reader(reads.clone(), "focused", |s| &s.focused))
         .function("layout", reader(reads.clone(), "layout", |s| &s.layout))
@@ -1194,8 +1251,11 @@ fn capabilities() -> Capabilities {
         .clipboard_write(true)
 }
 
-/// Checks exercise shared state in memory, without reading or writing the person's file.
+/// Checks exercise shared state in memory, without reading or writing the person's
+/// file. A check still loads the mod for real, so mods are told (`herdr.checking()`)
+/// and its exec and write side effects warn.
 pub fn install_check_policy() {
+    CHECKING.with(|c| c.set(true));
     SHARED.with_borrow_mut(|slot| *slot = Some(SharedStore { values: Default::default(), path: app_dir().join("shared.json"), writable: false, writer: None }));
     install_policy();
 }
