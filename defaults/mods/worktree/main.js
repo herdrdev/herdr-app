@@ -27,7 +27,15 @@ const tilde = (path, userHome) => {
   const [p, h] = [path, userHome].map((s) => s.replace(/\\/g, "/"));
   return p.startsWith(h) ? `~${p.slice(h.length)}` : path;
 };
-const slug = (branch) => branch.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+const slug = (branch) => {
+  const normalized = branch.normalize("NFC");
+  const name = normalized.replace(/[^\p{L}\p{N}._-]+/gu, "-").replace(/^-+|-+$/g, "");
+  if (name) return name;
+  // Hash the original name so symbol-only branches do not share a folder.
+  let hash = 2166136261;
+  for (const char of normalized) hash = Math.imul(hash ^ char.codePointAt(0), 16777619);
+  return `branch-${(hash >>> 0).toString(16).padStart(8, "0")}`;
+};
 const ago = (s) => {
   const d = Date.now() / 1000 - s;
   return d < 3600 ? `${Math.max(1, Math.round(d / 60))}m` : d < 86400 ? `${Math.round(d / 3600)}h` : d < 86400 * 60 ? `${Math.round(d / 86400)}d` : `${Math.round(d / 86400 / 30)}mo`;

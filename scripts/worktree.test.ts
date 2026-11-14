@@ -111,6 +111,36 @@ for (const on of [undefined, null, "server"]) {
   }
 }
 
+for (const [branch, folder] of [
+  ["음악수행", "음악수행"], ["쪼지학", "쪼지학"],
+  ["feature/음악수행-１２٣", "feature-음악수행-１２٣"],
+  ["음악수행".normalize("NFD"), "음악수행"],
+  ["feature/ASCII_1.2--fix", "feature-ASCII_1.2--fix"],
+]) {
+  test(`branch ${branch} uses folder ${folder}`, async () => {
+    const { worktree, executions, writes } = harness();
+    Object.assign(worktree, { text: branch, repo: { name: "repo", main: "/repo", top: "/repo" } });
+    expect(await worktree.create()).toBe("");
+    const path = `/home/user/.herdr/worktrees/repo/${folder}`;
+    expect(executions[1].args).toEqual(["worktree", "add", path, branch]);
+    expect(writes[0][1].folder).toBe(path);
+  });
+}
+
+test("symbol-only branches get stable distinct non-empty folders", async () => {
+  const folders: string[] = [];
+  for (const branch of ["🎵", "🎶", "🎵"]) {
+    const { worktree, executions } = harness();
+    Object.assign(worktree, { text: branch, repo: { name: "repo", main: "/repo", top: "/repo" } });
+    expect(await worktree.create()).toBe("");
+    const path = executions[1].args[2];
+    expect(path).toMatch(/\/repo\/branch-[0-9a-f]{8}$/);
+    folders.push(path);
+  }
+  expect(folders[0]).toBe(folders[2]);
+  expect(folders[0]).not.toBe(folders[1]);
+});
+
 test("space matching keeps deepest checkout, machine, live-folder and fallback rules", () => {
   const { worktree, reads, writes, snapshot } = harness();
   const paths = ["C:/repo", "C:/repo/nested", "C:/repo/fallback", "C:/repo-other"];
