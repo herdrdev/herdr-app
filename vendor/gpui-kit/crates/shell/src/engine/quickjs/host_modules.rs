@@ -460,6 +460,31 @@ pub(super) fn into_js<'js>(ctx: &Ctx<'js>, value: HostValue) -> JsResult<Value<'
             }
             object.into_value()
         }
+        HostValue::Json(value) => json_into_js(ctx, &value)?,
+    })
+}
+
+fn json_into_js<'js>(ctx: &Ctx<'js>, value: &serde_json::Value) -> JsResult<Value<'js>> {
+    use serde_json::Value as Json;
+    Ok(match value {
+        Json::Null => Value::new_null(ctx.clone()),
+        Json::Bool(flag) => Value::new_bool(ctx.clone(), *flag),
+        Json::Number(number) => Value::new_number(ctx.clone(), number.as_f64().unwrap_or(0.0)),
+        Json::String(text) => rquickjs::String::from_str(ctx.clone(), text)?.into_value(),
+        Json::Array(values) => {
+            let array = Array::new(ctx.clone())?;
+            for (index, value) in values.iter().enumerate() {
+                array.set(index, json_into_js(ctx, value)?)?;
+            }
+            array.into_value()
+        }
+        Json::Object(fields) => {
+            let object = Object::new(ctx.clone())?;
+            for (key, value) in fields {
+                object.set(key.as_str(), json_into_js(ctx, value)?)?;
+            }
+            object.into_value()
+        }
     })
 }
 
@@ -491,6 +516,25 @@ mod tests {
                 message.contains("array") && message.contains("limit"),
                 "{message}"
             );
+        });
+    }
+
+    #[test]
+    fn a_shared_json_value_reaches_the_script_as_its_own_copy() {
+        let runtime = JsRuntime::new().expect("runtime");
+        let context = JsContext::full(&runtime).expect("context");
+        context.with(|ctx| {
+            let shared = std::sync::Arc::new(serde_json::json!([
+                { "pane": "p1", "n": 2.5, "on": true, "cwd": null, "tags": ["a", "\u{e9}"] }
+            ]));
+            let first = into_js(&ctx, HostValue::Json(shared.clone())).expect("first");
+            let second = into_js(&ctx, HostValue::Json(shared.clone())).expect("second");
+            ctx.globals().set("first", first).expect("set");
+            ctx.globals().set("second", second).expect("set");
+            let read: String = ctx
+                .eval("first[0].n = 9; first.push(1); JSON.stringify(second)")
+                .expect("stringify");
+            assert_eq!(read, serde_json::to_string(&*shared).expect("json"));
         });
     }
 
