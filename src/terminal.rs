@@ -366,6 +366,9 @@ impl TerminalView {
                 Some(wait)
             }
         };
+        // A new screen keeps what a synchronized update holds (`Vt::new`):
+        // never drawn, it is released as any hidden terminal is.
+        self.watch_hidden(cx);
         self.selection_changed(cx);
         let address = self.address.clone();
         let deadline = cx.background_executor().timer(self.attach_deadline.saturating_duration_since(cx.background_executor().now()));
@@ -643,9 +646,10 @@ impl TerminalView {
         self.shown_in.get() == FRAME.load(Ordering::Relaxed)
     }
 
-    /// Once drawn, checks every `HIDDEN_CHECK` whether the window still shows
-    /// this terminal; off screen for two checks in a row (2 to 4 s), it frees
-    /// what drawing it kept (`release_frame_caches`) and stops until drawn again.
+    /// Once attached or drawn, checks every `HIDDEN_CHECK` whether the window
+    /// shows this terminal; off screen for two checks in a row (2 to 4 s), it
+    /// frees what drawing it kept (`release_frame_caches`) and stops until
+    /// drawn again.
     /// Flipping back within a check keeps everything; a release costs the next
     /// paint a full read, which showing a hidden tab mostly pays anyway.
     fn watch_hidden(&mut self, cx: &mut Context<Self>) {

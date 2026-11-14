@@ -6690,6 +6690,76 @@ mod tests {
     }
 
     #[test]
+    fn a_hidden_terminal_shown_mid_hold_draws_the_finished_screen() {
+        in_own_process("hidden_hold");
+    }
+
+    /// A terminal hidden long enough to free its drawing caches, then its
+    /// program starts a synchronized update: shown mid-update, it draws
+    /// neither the half-drawn screen nor the one before (which it didn't
+    /// keep), and the finished screen as soon as the update ends.
+    #[gpui::test]
+    fn hidden_hold(cx: &mut gpui::TestAppContext) {
+        use crate::layout::{Axis, Node};
+        use crate::model::{Tab, pane};
+        use serde_json::json;
+        use std::time::Duration;
+        if !running_alone("hidden_hold") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "unused", "", json!({ "id": "main", "type": "block", "content": { "tab": "active" } }));
+        view.update_in(cx, |this, window, cx| {
+            for id in this.overlays.iter().map(|o| o.id.clone()).collect::<Vec<_>>() {
+                this.close_overlay(&id, window, cx);
+            }
+            let mut tab = Tab::new("t", "", "a", "ta");
+            tab.root = Node::container("t", Axis::Row, vec![pane("a", "ta")]);
+            this.model.add_space("s", "", "/tmp", tab);
+            this.model.add_tab("s", Tab::new("u", "", "d", "td"));
+            this.model.select_tab("t");
+            this.run_as("pane.focus", json!({ "pane": "a" }), false, window, cx);
+        });
+        cx.run_until_parked();
+        let wait = |cx: &mut gpui::VisualTestContext, ms: u64| {
+            cx.executor().advance_clock(Duration::from_millis(ms));
+            cx.run_until_parked();
+        };
+        let keys = |cx: &mut gpui::VisualTestContext, command: &str| {
+            view.update_in(cx, |this, window, cx| this.run_as(command, json!({}), false, window, cx));
+            cx.run_until_parked();
+        };
+        let term = view.update(cx, |this, _| this.terms["a"].view.clone());
+        let send = |cx: &mut gpui::VisualTestContext, bytes: &[u8]| {
+            term.update(cx, |t, cx| t.ingest(vec![crate::hc::Stream::Data(bytes.to_vec())], cx));
+            wait(cx, 100);
+        };
+        let drawing = |cx: &mut gpui::VisualTestContext| term.update(cx, |t, _| t.drawing());
+        send(cx, b"before");
+        assert!(drawing(cx).0.contains("before"));
+
+        // A terminal in a tab never shown keeps what drawing reads
+        // (`Vt::new`) only until it is released as a hidden one.
+        let never_drawn = view.update(cx, |this, _| this.terms["d"].view.clone());
+        never_drawn.update(cx, |t, cx| t.ingest(vec![crate::hc::Stream::Data(b"\x1b[?2026hheld\x1b[?2026l".to_vec())], cx));
+        wait(cx, 5000);
+        assert!(never_drawn.update(cx, |t, _| t.drawing()).1, "a terminal never drawn kept its drawing caches");
+
+        keys(cx, "tab.next");
+        wait(cx, 5000);
+        assert!(drawing(cx).1, "hidden 5 s, the drawing caches are still held");
+        send(cx, b"\x1b[?2026h\x1b[2J\x1b[Hhalf");
+        keys(cx, "tab.prev");
+        wait(cx, 100);
+        let (waiting, _) = drawing(cx);
+        let rows: Vec<&str> = waiting.lines().take_while(|l| !l.starts_with("cursor ")).collect();
+        assert!(rows.len() > 1 && rows.iter().all(|row| row.starts_with("\"\" ")), "drew a screen the update doesn't want shown: {waiting}");
+
+        send(cx, b" done\x1b[?2026l");
+        let (done, _) = drawing(cx);
+        assert!(done.contains("half done"), "the finished screen isn't drawn: {done}");
+    }
+
+    #[test]
     fn the_toast_clock_runs_only_while_a_toast_is_up() {
         in_own_process("toast_clock");
     }
