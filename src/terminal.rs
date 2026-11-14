@@ -1685,6 +1685,15 @@ fn cell_font(bold: bool, italic: bool) -> Font {
     f
 }
 
+/// A cell's font. Bold wide (CJK) cells keep the regular weight, as in
+/// Ghostty: the monospace font has no CJK glyphs, so a bold request falls back
+/// to a heavy face (PingFang Semibold on macOS) whose strokes run together.
+/// Latin text in the same bold run stays bold, since wide cells are shaped on
+/// their own.
+fn cell_text_font(c: &vt::Cell) -> Font {
+    cell_font(c.bold && !c.wide, c.italic)
+}
+
 // JetBrains Mono joins punctuation, so ordinary ASCII output can keep using
 // the ligatures-off font even when the setting is enabled.
 fn needs_ligatures(text: &str, font: &Font) -> bool {
@@ -1894,7 +1903,7 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
             ops.push(RowOp::Sprite { x: start, text: c.text.clone(), color });
             continue;
         }
-        let mut text_font = cell_font(c.bold, c.italic);
+        let mut text_font = cell_text_font(c);
         if let Some(icon) = fallback_icon(&c.text, &text_font, window.text_system()) {
             // Fit missing icons from the bundled font by their outlines:
             // centered, as tall as fits, two cells wide when a space
@@ -2203,7 +2212,7 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
                 if let Some(c) = frame.rows.get(y).and_then(|r| r.get(x)).filter(|c| !c.text.is_empty()) {
                     let run = TextRun {
                         len: c.text.len(),
-                        font: cell_font(c.bold, c.italic),
+                        font: cell_text_font(c),
                         color: hsla(frame.bg),
                         background_color: None,
                         underline: None,
@@ -3745,6 +3754,17 @@ mod tests {
             }
         }).unwrap();
         crate::settings::set((*original).clone());
+    }
+
+    #[test]
+    fn bold_wide_cells_keep_the_regular_weight() {
+        use super::*;
+        let regular = cell_font(false, false).weight;
+        let cell = |bold, wide| vt::Cell { text: if wide { "\u{754c}" } else { "a" }.into(), bold, wide, ..Default::default() };
+        assert_eq!(cell_text_font(&cell(true, true)).weight, regular);
+        assert_eq!(cell_text_font(&cell(false, true)).weight, regular);
+        assert_eq!(cell_text_font(&cell(true, false)).weight, FontWeight::BOLD);
+        assert_eq!(cell_text_font(&cell(false, false)).weight, regular);
     }
 
     #[test]

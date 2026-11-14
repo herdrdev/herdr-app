@@ -357,7 +357,8 @@ layout's look and a block can differ:
   fonts are in `mods/win98/fonts/`).
 - `font_weight` (100..900): the terminals' text weight. Default 500
   (Medium); 400 is Regular, 300 Light, using the family's nearest face.
-  Bold text stays at 700.
+  Bold text stays at 700; bold wide (CJK) characters use this weight, as
+  in Ghostty.
 - `pane_scrollbars` in settings.json (default `true`): show terminal scrollback
   with a slim thumb and track. Drag the thumb or click the track to jump there.
   With little or no terminal padding, the hit lane overlays the last 8px;
