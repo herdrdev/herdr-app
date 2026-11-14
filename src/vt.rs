@@ -168,6 +168,12 @@ struct Shared {
     state: GhosttyRenderState,
     size: GhosttySizeReportSize,
     held_since: Option<Instant>,
+    /// `state` is new (`Vt::release_frame_caches`) and holds no frame yet;
+    /// with `held_since`, a hold began while released and kept no frame.
+    released: bool,
+    /// Drawn empty while released (`Vt::blank_frame`): on screen, so the
+    /// hold's end keeps its finished frame for the holds after it.
+    shown_blank: bool,
     title_changed: bool,
     /// Replies the terminal writes back to the program (e.g. kitty graphics acks).
     replies: Vec<u8>,
@@ -643,11 +649,22 @@ fn ok(r: GhosttyResult, what: &str) {
 unsafe extern "C" fn on_render_hold(_t: GhosttyTerminal, userdata: *mut c_void, held: bool) {
     let shared = unsafe { &mut *(userdata as *mut Shared) };
     if held {
-        // Capture the finished frame the program wants on screen before it redraws.
-        unsafe { ghostty_render_state_update(shared.state, _t) };
+        // Capture the finished frame the program wants on screen before it
+        // redraws. Not while released: nothing of this terminal is on screen
+        // to keep, so `frame` draws nothing until the hold ends instead.
+        if !shared.released {
+            unsafe { ghostty_render_state_update(shared.state, _t) };
+        }
         shared.held_since = Some(Instant::now());
     } else {
         shared.held_since = None;
+        if shared.released && shared.shown_blank {
+            // Shown while the hold ran: capture the finished frame now, so a
+            // program that holds again at once keeps it on screen.
+            unsafe { ghostty_render_state_update(shared.state, _t) };
+            shared.released = false;
+            shared.shown_blank = false;
+        }
     }
 }
 
@@ -699,7 +716,7 @@ impl Vt {
             ok(ghostty_mouse_event_new(std::ptr::null(), &mut mouse_event), "mouse_event_new");
 
             install_png_decoder();
-            let mut shared = Box::new(Shared { state, size: GhosttySizeReportSize { rows: rows.max(1), columns: cols.max(1), cell_width: 0, cell_height: 0 }, held_since: None, title_changed: false, replies: Vec::new(), clipboard_write: true, clipboard: [None, None] });
+            let mut shared = Box::new(Shared { state, size: GhosttySizeReportSize { rows: rows.max(1), columns: cols.max(1), cell_width: 0, cell_height: 0 }, held_since: None, released: false, shown_blank: false, title_changed: false, replies: Vec::new(), clipboard_write: true, clipboard: [None, None] });
             let ud = &mut *shared as *mut Shared as *const c_void;
             ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_USERDATA, ud);
             let hold: GhosttyTerminalRenderHoldFn = Some(on_render_hold);
@@ -804,6 +821,10 @@ impl Vt {
 
     /// Visible kitty graphics placements, bottom layer first.
     pub fn placements(&self) -> Vec<Placement> {
+        if self.shared.held_since.is_some() && self.shared.released {
+            // Where they are mid-update, over an empty screen (`blank_frame`).
+            return Vec::new();
+        }
         if let Some(placements) = self.placements_cache.borrow().as_ref() {
             return placements.clone();
         }
@@ -1675,20 +1696,30 @@ impl Vt {
         self.shared.held_since.map(|since| since + MAX_HOLD)
     }
 
+    /// Ends a synchronized update held past `MAX_HOLD`: the program stalled in it.
+    fn expire_hold(&mut self) {
+        if let Some(since) = self.shared.held_since
+            && since.elapsed() > MAX_HOLD
+        {
+            let cfg = GhosttyTerminalModeConfig { mode: SYNC_OUTPUT, value: false };
+            unsafe { ghostty_terminal_set(self.term, GHOSTTY_TERMINAL_OPT_MODE, &cfg as *const _ as *const c_void) };
+            self.shared.held_since = None;
+        }
+    }
+
     /// Updates the render state (respecting synchronized output) and reads one frame.
     pub fn frame(&mut self) -> Frame {
         unsafe {
-            if let Some(since) = self.shared.held_since
-                && since.elapsed() > MAX_HOLD
-            {
-                let cfg = GhosttyTerminalModeConfig { mode: SYNC_OUTPUT, value: false };
-                ghostty_terminal_set(self.term, GHOSTTY_TERMINAL_OPT_MODE, &cfg as *const _ as *const c_void);
-                self.shared.held_since = None;
+            self.expire_hold();
+            if self.shared.held_since.is_some() && self.shared.released {
+                self.shared.shown_blank = true;
+                return self.blank_frame();
             }
             let state = self.shared.state;
             if self.shared.held_since.is_none() {
                 ghostty_render_state_update(state, self.term);
             }
+            self.shared.released = false;
 
             let mut colors = GhosttyRenderStateColors { size: std::mem::size_of::<GhosttyRenderStateColors>(), ..Default::default() };
             ghostty_render_state_get(state, GHOSTTY_RENDER_STATE_DATA_COLORS, &mut colors as *mut _ as *mut c_void);
@@ -1757,6 +1788,47 @@ impl Vt {
             let cursor_cell = cur.viewport_has_value.then_some((cur.viewport_x, cur.viewport_y));
             Frame { rows, all, cursor, cursor_cell, bg: bg_default, search_spans: self.search_spans.clone() }
         }
+    }
+
+    /// An empty screen in the terminal's background, for a terminal shown
+    /// while a hold begun hidden runs: the screen before the hold wasn't kept
+    /// (`on_render_hold`), and the one after isn't finished.
+    fn blank_frame(&self) -> Frame {
+        let mut bg = GhosttyColorRgb::default();
+        unsafe { ghostty_terminal_get(self.term, GHOSTTY_TERMINAL_DATA_COLOR_BACKGROUND, &mut bg as *mut _ as *mut c_void) };
+        let row = Rc::new(vec![Cell::default(); self.cols as usize]);
+        Frame { rows: vec![row; self.rows as usize], all: true, cursor: None, cursor_cell: None, bg: bg.into(), search_spans: Vec::new() }
+    }
+
+    /// Frees what drawing keeps from frame to frame: libghostty's copy of the
+    /// screen (its render state) and the rows read from it, a few MB for a full
+    /// screen. The screen itself, scrollback, selection and images stay; the
+    /// next `frame` reads everything again. Not while the program holds a
+    /// synchronized update: the held frame is what gets shown next, until
+    /// `MAX_HOLD` ends it.
+    pub fn release_frame_caches(&mut self) -> bool {
+        self.expire_hold();
+        if self.shared.held_since.is_some() && !self.shared.released {
+            return false;
+        }
+        self.shared.shown_blank = false;
+        if !self.shared.released {
+            unsafe {
+                let mut state = std::ptr::null_mut();
+                ok(ghostty_render_state_new(std::ptr::null(), &mut state), "render_state_new");
+                ghostty_render_state_free(self.shared.state);
+                self.shared.state = state;
+            }
+            self.shared.released = true;
+            self.seen = HashMap::new();
+            self.seen_with = (0, 0);
+        }
+        true
+    }
+
+    #[cfg(test)]
+    pub fn frame_caches_released(&self) -> bool {
+        self.shared.released && self.seen.is_empty()
     }
 
     unsafe fn read_cell(&mut self, fg_default: Rgb, palette: &[GhosttyColorRgb; 256], selected: bool) -> Cell {
@@ -1983,6 +2055,31 @@ mod tests {
     use super::*;
 
     #[test]
+    fn released_frame_caches_read_the_same_frame_again() {
+        let cells = |f: &Frame| f.rows.iter().map(|r| (**r).clone()).collect::<Vec<_>>();
+        let mut vt = Vt::new(20, 4);
+        vt.write(b"\x1b[31mred\x1b[0m \x1b[1;44mbold\x1b[0m\r\nplain\r\n$ ");
+        let shown = vt.frame();
+        assert!(vt.release_frame_caches());
+        assert!(vt.frame_caches_released());
+        let again = vt.frame();
+        assert!(!vt.frame_caches_released());
+        assert!(cells(&shown) == cells(&again) && shown.cursor_cell == again.cursor_cell && shown.bg == again.bg, "a released terminal read a different frame");
+
+        // Held mid synchronized update: the held frame is what shows next.
+        vt.write(b"\x1b[?2026hhalf");
+        assert!(!vt.release_frame_caches(), "released the frame a synchronized update holds");
+        vt.write(b" done\x1b[?2026l");
+        assert!(vt.release_frame_caches());
+        // Released, a synchronized update doesn't fill the render state again.
+        vt.write(b"\x1b[?2026hnext");
+        assert!(vt.frame_caches_released());
+        vt.write(b"\x1b[?2026l");
+        let text: String = vt.frame().rows[2].iter().map(|c| c.text.as_str()).collect();
+        assert!(text.starts_with("$ half donenext"), "{text:?}");
+    }
+
+    #[test]
     fn keyboard_selection_tracks_history_while_output_arrives() {
         let mut vt = Vt::new(20, 4);
         for line in 0..12 {
@@ -2183,6 +2280,77 @@ mod tests {
         assert_eq!(vt.render_hold_deadline(), Some(since + MAX_HOLD));
         assert!(text(vt.frame()).starts_with("after"));
         assert_eq!(vt.render_hold_deadline(), None);
+    }
+
+    /// Drawn, then hidden long enough to release its frame caches, then a
+    /// synchronized update begins with the `half`-drawn screen.
+    fn released_mid_hold() -> Vt {
+        let mut vt = Vt::new(20, 3);
+        vt.write(b"\x1b]11;rgb:12/34/56\x1b\\before");
+        let _ = vt.frame();
+        assert!(vt.release_frame_caches());
+        vt.write(b"\x1b[?2026h\r\x1b[Khalf");
+        vt
+    }
+
+    fn row_text(frame: &Frame, y: usize) -> String {
+        frame.rows[y].iter().map(|c| c.text.as_str()).collect()
+    }
+
+    #[test]
+    fn a_released_terminal_shown_mid_hold_draws_nothing_until_the_hold_ends() {
+        let mut vt = released_mid_hold();
+        let waiting = vt.frame();
+        assert_eq!((waiting.rows.len(), waiting.rows[0].len()), (3, 20));
+        assert!(waiting.rows.iter().flat_map(|r| r.iter()).all(|c| c.text.is_empty() && c.bg.is_none()), "showed the half-drawn screen");
+        assert!(waiting.cursor.is_none() && waiting.cursor_cell.is_none());
+        assert_eq!(waiting.bg, Rgb(0x12, 0x34, 0x56), "not in the terminal's background");
+        assert!(vt.render_hold_deadline().is_some(), "no wake-up at the hold's deadline");
+        assert!(vt.frame_caches_released(), "drawing nothing filled the render state");
+        assert!(vt.release_frame_caches(), "a hold that kept nothing keeps it released");
+        vt.write(b" done\x1b[?2026l");
+        assert!(vt.shows_change(), "the finished screen asks for no redraw");
+        assert!(row_text(&vt.frame(), 0).starts_with("half done"));
+        assert!(!vt.frame_caches_released());
+    }
+
+    #[test]
+    fn a_released_terminal_shown_mid_hold_keeps_its_finished_frame_for_the_next_hold() {
+        let mut vt = released_mid_hold();
+        assert!(row_text(&vt.frame(), 0).is_empty());
+        vt.write(b" done\x1b[?2026l\x1b[?2026h\r\x1b[Knext");
+        assert!(row_text(&vt.frame(), 0).starts_with("half done"), "drew nothing, or the half-drawn screen, while the next hold runs");
+        assert!(!vt.release_frame_caches(), "released the frame the next hold keeps");
+        vt.write(b"\x1b[?2026l");
+        assert!(row_text(&vt.frame(), 0).starts_with("next"));
+
+        // Hidden again before its hold ends, it captures nothing.
+        let mut vt = released_mid_hold();
+        let _ = vt.frame();
+        assert!(vt.release_frame_caches());
+        vt.write(b" done\x1b[?2026l");
+        assert!(vt.frame_caches_released(), "captured a frame for a terminal hidden again");
+    }
+
+    #[test]
+    fn a_hold_past_its_deadline_no_longer_keeps_a_hidden_terminal_from_releasing() {
+        let mut vt = Vt::new(20, 3);
+        vt.write(b"before\x1b[?2026hstalled");
+        assert!(!vt.release_frame_caches());
+        vt.shared.held_since = Some(Instant::now() - MAX_HOLD - Duration::from_millis(1));
+        assert!(vt.release_frame_caches(), "a program stalled mid-update kept the render state");
+        assert_eq!(vt.render_hold_deadline(), None);
+        assert!(row_text(&vt.frame(), 0).starts_with("beforestalled"));
+    }
+
+    #[test]
+    fn a_released_terminal_shown_mid_hold_draws_at_the_deadline() {
+        let mut vt = released_mid_hold();
+        assert!(row_text(&vt.frame(), 0).is_empty());
+        vt.shared.held_since = Some(Instant::now() - MAX_HOLD - Duration::from_millis(1));
+        assert!(row_text(&vt.frame(), 0).starts_with("half"));
+        assert_eq!(vt.render_hold_deadline(), None);
+        assert!(!vt.frame_caches_released());
     }
 
     #[test]

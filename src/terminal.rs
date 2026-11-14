@@ -156,6 +156,8 @@ pub struct TerminalView {
     search_input: Option<Entity<InputState>>,
     pending_search_nav: Option<bool>,
     search_task: Option<Task<()>>,
+    /// A task checks whether the terminal went off screen (`watch_hidden`).
+    watching_hidden: bool,
     attach_deadline: Instant,
     _render_hold: Option<(Instant, Task<()>)>,
     _reader: Option<Task<()>>,
@@ -168,6 +170,9 @@ thread_local! {
 
 /// The window's frame number, counted where the window renders.
 static FRAME: AtomicU64 = AtomicU64::new(0);
+
+/// How often a drawn terminal checks whether it's still on screen.
+const HIDDEN_CHECK: Duration = Duration::from_secs(2);
 
 pub fn next_frame() {
     FRAME.fetch_add(1, Ordering::Relaxed);
@@ -309,6 +314,7 @@ impl TerminalView {
             search_query: String::new(),
             search_input: None,
             pending_search_nav: None,
+            watching_hidden: false,
             search_task: None,
             attach_deadline,
             _render_hold: None,
@@ -360,6 +366,9 @@ impl TerminalView {
                 Some(wait)
             }
         };
+        // A new screen keeps what a synchronized update holds (`Vt::new`):
+        // never drawn, it is released as any hidden terminal is.
+        self.watch_hidden(cx);
         self.selection_changed(cx);
         let address = self.address.clone();
         let deadline = cx.background_executor().timer(self.attach_deadline.saturating_duration_since(cx.background_executor().now()));
@@ -515,7 +524,7 @@ impl TerminalView {
     }
 
     /// Feeds relayed bytes in; returns false once the stream is over.
-    fn ingest(&mut self, batch: impl IntoIterator<Item = Stream>, cx: &mut Context<Self>) -> bool {
+    pub(crate) fn ingest(&mut self, batch: impl IntoIterator<Item = Stream>, cx: &mut Context<Self>) -> bool {
         let mut open = true;
         let title = {
             let mut g = self.grid.borrow_mut();
@@ -635,6 +644,71 @@ impl TerminalView {
 
     pub fn on_screen_this_frame(&self) -> bool {
         self.shown_in.get() == FRAME.load(Ordering::Relaxed)
+    }
+
+    /// Once attached or drawn, checks every `HIDDEN_CHECK` whether the window
+    /// shows this terminal; off screen for two checks in a row (2 to 4 s), it
+    /// frees what drawing it kept (`release_frame_caches`) and stops until
+    /// drawn again.
+    /// Flipping back within a check keeps everything; a release costs the next
+    /// paint a full read, which showing a hidden tab mostly pays anyway.
+    fn watch_hidden(&mut self, cx: &mut Context<Self>) {
+        if self.watching_hidden {
+            return;
+        }
+        self.watching_hidden = true;
+        cx.spawn(async |this, cx| {
+            let mut hidden_checks = 0;
+            loop {
+                cx.background_executor().timer(HIDDEN_CHECK).await;
+                let Ok(released) = this.update(cx, |t, _| {
+                    hidden_checks = if t.on_screen_this_frame() { 0 } else { hidden_checks + 1 };
+                    let released = hidden_checks >= 2 && t.release_frame_caches();
+                    if released {
+                        t.watching_hidden = false;
+                    }
+                    released
+                }) else {
+                    return;
+                };
+                if released {
+                    return;
+                }
+            }
+        })
+        .detach();
+    }
+
+    /// What the last paint drew, row by row (cells, cursor column, drawing),
+    /// the cursor and the selection; and whether the drawing caches are released.
+    #[cfg(test)]
+    pub fn drawing(&self) -> (String, bool) {
+        let g = self.grid.borrow();
+        let rows: Vec<String> = g.painted.iter().map(|(cells, ops, cursor)| {
+            let text: String = cells.iter().map(|c| c.text.as_str()).collect();
+            let ops: Vec<String> = ops.iter().map(|op| match op {
+                RowOp::Bg { from, to, color } => format!("bg {from}..{to} {color:?}"),
+                RowOp::Sprite { x, text, color } => format!("sprite {x} {text} {color:?}"),
+                RowOp::Icon { x, offset, glyph, size, color, .. } => format!("icon {x} {offset:?} {glyph:?} {size:?} {color:?}"),
+                RowOp::Text { x, line } => format!("text {x} {line:?}"),
+                RowOp::Decoration { from, to, underline, strike } => format!("decoration {from}..{to} {underline:?} {strike:?}"),
+            }).collect();
+            format!("{text:?} {cursor:?} {}", ops.join(" | "))
+        }).collect();
+        let drawing = format!("{}\ncursor {:?}\nselection {:?}\nimages {}", rows.join("\n"), g.cursor_at, g.vt.selection_text(), g.images.len());
+        (drawing, g.painted.is_empty() && g.vt.frame_caches_released())
+    }
+
+    /// Frees the drawing caches of a terminal that isn't on screen: libghostty's
+    /// render state, the rows read from it and their drawings. The screen,
+    /// scrollback, selection, scroll position and kitty images stay.
+    fn release_frame_caches(&mut self) -> bool {
+        let mut g = self.grid.borrow_mut();
+        if !g.vt.release_frame_caches() {
+            return false;
+        }
+        g.painted = Vec::new();
+        true
     }
 
     fn send(&self, bytes: &[u8]) {
@@ -2336,6 +2410,7 @@ impl EntityInputHandler for TerminalView {
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         crate::bench::count(&crate::bench::TERMINAL);
+        self.watch_hidden(cx);
         let terminal_focused = self.focus.is_focused(window);
         if terminal_focused {
             self.search_keys = false;
