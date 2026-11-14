@@ -572,6 +572,8 @@ thread_local! {
     static KEYS_PART: RefCell<Option<(FileStamp, std::sync::Arc<Value>)>> = const { RefCell::new(None) };
     /// Snapshot parts by key, with the revision they were copied at (`shared_part`).
     static SHARED_PARTS: RefCell<HashMap<&'static str, (u64, std::sync::Arc<Value>)>> = RefCell::new(HashMap::new());
+    /// `panes()` with its live scroll positions, from the part and numbers it was made of (`panes_part`).
+    static PANES_PART: RefCell<Option<(std::sync::Arc<Value>, PaneScrolls, std::sync::Arc<Value>)>> = const { RefCell::new(None) };
     static COPY_SEQ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static OVERLAY_SEQ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
@@ -712,31 +714,53 @@ impl LiveReads {
 
 fn read(reads: &RefCell<LiveReads>, key: &'static str, f: impl FnOnce(&Snapshot) -> &Value) -> HostValue {
     REVISIONS.with_borrow(|r| reads.borrow_mut().record(key, r));
-    SNAPSHOT.with(|s| {
-        let snapshot = s.borrow();
-        if key != "panes" {
-            return to_host(f(&snapshot));
-        }
-        // Output and resizing change these numbers without invalidating mods.
-        let mut panes = snapshot.panes.clone();
-        gpui_shell::with_current_app(|cx| {
-            PANE_VIEWS.with_borrow(|views| {
-                for pane in panes.as_array_mut().into_iter().flatten() {
-                    if let Some(view) = pane["pane"].as_str().and_then(|id| views.get(id)).and_then(|v| v.upgrade()) {
-                        pane["scroll"] = view.read(cx).scroll_metrics().map(|m| m.json()).unwrap_or(Value::Null);
-                    }
-                }
-            });
-        });
-        to_host(&panes)
-    })
+    SNAPSHOT.with(|s| to_host(f(&s.borrow())))
 }
 
 fn reader(reads: Rc<RefCell<LiveReads>>, key: &'static str, f: fn(&Snapshot) -> &Value) -> impl Fn(&gpui_shell::HostArguments) -> gpui_shell::HostResult {
     move |_| {
         REVISIONS.with_borrow(|r| reads.borrow_mut().record(key, r));
-        Ok(HostValue::Json(shared_part(key, f)))
+        Ok(HostValue::Json(if key == "panes" { panes_part(f) } else { shared_part(key, f) }))
     }
+}
+
+/// `panes()`: the shared part with each terminal pane's `scroll` read live,
+/// as output and resizing move it without a new revision. Copied again only
+/// when the part or a pane's numbers changed.
+fn panes_part(f: fn(&Snapshot) -> &Value) -> std::sync::Arc<Value> {
+    let base = shared_part("panes", f);
+    let scrolls: PaneScrolls = gpui_shell::with_current_app(|cx| {
+        PANE_VIEWS.with_borrow(|views| {
+            let panes = base.as_array().into_iter().flatten().enumerate();
+            panes.filter_map(|(i, pane)| {
+                let view = pane["pane"].as_str().and_then(|id| views.get(id)).and_then(|v| v.upgrade())?;
+                Some((i, view.read(cx).scroll_metrics()))
+            }).collect()
+        })
+    }).unwrap_or_default();
+    with_scrolls(base, scrolls)
+}
+
+type PaneScrolls = Vec<(usize, Option<crate::terminal::ScrollMetrics>)>;
+
+/// `base` with `scroll` set on the panes at those places, the last answer
+/// reused while `base` and the numbers are the same.
+fn with_scrolls(base: std::sync::Arc<Value>, scrolls: PaneScrolls) -> std::sync::Arc<Value> {
+    PANES_PART.with_borrow_mut(|cached| {
+        if let Some((seen_base, seen, part)) = cached.as_ref()
+            && std::sync::Arc::ptr_eq(seen_base, &base)
+            && *seen == scrolls
+        {
+            return part.clone();
+        }
+        let mut panes = (*base).clone();
+        for (i, scroll) in &scrolls {
+            panes[*i]["scroll"] = scroll.map_or(Value::Null, crate::terminal::ScrollMetrics::json);
+        }
+        let part = std::sync::Arc::new(panes);
+        *cached = Some((base, scrolls, part.clone()));
+        part
+    })
 }
 
 /// `keys()`, listed again only once keys.json or the mods folder changed: a
@@ -1500,6 +1524,27 @@ mod tests {
         assert_eq!(*cached_part(&mut part, at(1), || json!("one")), json!("one"));
         assert_eq!(*cached_part(&mut part, at(1), || json!("two")), json!("one"));
         assert_eq!(*cached_part(&mut part, at(2), || json!("two")), json!("two"));
+    }
+
+    #[test]
+    fn panes_carry_live_scroll_numbers_on_the_shared_copy() {
+        std::thread::spawn(|| {
+            use crate::terminal::ScrollMetrics;
+            let panes: fn(&Snapshot) -> &Value = |s| &s.panes;
+            publish_panes(json!([{"pane":"p1"},{"pane":"m1"}]));
+            let base = shared_part("panes", panes);
+            let at = |from_bottom| Some(ScrollMetrics { total: 100, offset: 80 - from_bottom, len: 20, from_bottom });
+            let end = with_scrolls(base.clone(), vec![(0, at(0))]);
+            assert_eq!(*end, json!([{"pane":"p1","scroll":{"total":100,"offset":80,"len":20,"from_bottom":0}},{"pane":"m1"}]), "a pane without a terminal view gets no scroll");
+            assert!(std::sync::Arc::ptr_eq(&end, &with_scrolls(base.clone(), vec![(0, at(0))])), "the same numbers share one copy");
+            let up = with_scrolls(base.clone(), vec![(0, at(10))]);
+            assert_eq!(up[0]["scroll"]["from_bottom"], json!(10), "numbers moved without a new revision are read again");
+            assert_eq!(with_scrolls(base.clone(), vec![(0, None)])[0]["scroll"], Value::Null, "the alternate screen has none");
+            assert_eq!(*base, json!([{"pane":"p1"},{"pane":"m1"}]), "the shared part itself is untouched");
+            publish_panes(json!([{"pane":"p1","status":"working"}]));
+            let next = with_scrolls(shared_part("panes", panes), vec![(0, at(10))]);
+            assert_eq!(next[0]["status"], json!("working"), "a new revision is read again with the same numbers");
+        }).join().unwrap();
     }
 
     #[test]
