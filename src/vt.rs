@@ -1823,7 +1823,8 @@ impl Vt {
                 _ => Some(Underline::Single),
             };
             // Reverse video swaps the text's colors, not the underline's own.
-            let underline_color = underline.and(match style.underline_color.tag {
+            // Lazy, so cells without an underline skip the decode.
+            let underline_color = underline.and_then(|_| match style.underline_color.tag {
                 GHOSTTY_STYLE_COLOR_PALETTE => Some(Rgb::from(palette[style.underline_color.value.palette as usize])),
                 GHOSTTY_STYLE_COLOR_RGB => Some(Rgb::from(style.underline_color.value.rgb)),
                 _ => None,
@@ -2631,6 +2632,17 @@ mod tests {
         vt.write(b"\r\n\x1b[7;4;58:2::9:8:7mr\x1b[0m");
         let c = vt.frame().rows[2][0].clone();
         assert_eq!((c.underline, c.underline_color), (Some(Underline::Single), Some(Rgb(9, 8, 7))));
+    }
+
+    #[test]
+    fn underline_color_set_before_the_underline_appears_with_it() {
+        let mut vt = Vt::new(20, 2);
+        // 58 first, no underline yet: the color waits on the style, not the order.
+        vt.write(b"\x1b[58:5:196ma\x1b[4:2mb\x1b[24mc\x1b[4md\x1b[58:2::1:2:3me\x1b[0m");
+        let frame = vt.frame();
+        let cells: Vec<_> = frame.rows[0][..5].iter().map(|c| (c.underline, c.underline_color)).collect();
+        let (red, own) = (Some(Rgb(255, 0, 0)), Some(Rgb(1, 2, 3)));
+        assert_eq!(cells, [(None, None), (Some(Underline::Double), red), (None, None), (Some(Underline::Single), red), (Some(Underline::Single), own)]);
     }
 
     #[test]
