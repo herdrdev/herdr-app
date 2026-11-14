@@ -2,12 +2,15 @@
 // Places (spaces, tabs) stay in the picker. Fuzzy: your letters in
 // order, word starts and runs rank higher. Empty: recent first, then every
 // group. Choices are entries of their own ("Layout: Zen"); commands that need
-// a name ask for it. Enter runs, ↑/↓ move, Esc closes.
+// a name ask for it. Mods that open as an overlay and have a title (mod.json
+// `title` and `overlay`) are entries too ("Open Jump"), with their key.
+// Enter runs, ↑/↓ move, Esc closes.
 // The app's own mod: rewritten from the binary on every start.
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { commands, layouts, keys, run, theme, props, closeOverlay, openOverlay, shared, window as win } from "herdr";
+import { commands, layouts, keys, run, theme, props, closeOverlay, openOverlay, shared, appHome, readTextFile, window as win } from "herdr";
+import { readdir } from "fs/promises";
 
 // The list keeps one height while you move: rows and group titles have fixed
 // heights, and the window shows as many as fit in LIST_H.
@@ -17,7 +20,7 @@ const SHOWN = 10;
 const ROW_H = 32;
 const HEAD_H = 26;
 const LIST_H = SHOWN * ROW_H;
-const GROUPS = ["Recent", "Tab", "Pane", "Space", "Layout", "Terminal", "Agent", "Window", "App"];
+const GROUPS = ["Recent", "Tab", "Pane", "Space", "Layout", "Terminal", "Agent", "Window", "Mod", "App"];
 
 // The palette's names for commands: [command, args, group, title, keywords].
 const NAMED = [
@@ -76,8 +79,24 @@ function titleOf(name) {
   return { group: noun.charAt(0).toUpperCase() + noun.slice(1), title: `${verb.replace(/_/g, " ")} ${noun}`.replace(/^./, (c) => c.toUpperCase()) };
 }
 
-// Every entry for the state we're in now.
-function entries() {
+// The mods a person can open by name: a title and an overlay in mod.json.
+// [{ name, title }], by title. A folder without a readable mod.json is skipped.
+async function overlayMods() {
+  const dir = `${appHome()}/mods`;
+  const names = await readdir(dir).catch(() => []);
+  const found = await Promise.all(names.filter((n) => !n.startsWith(".")).map(async (name) => {
+    try {
+      const m = JSON.parse((await readTextFile(`${dir}/${name}/mod.json`)) ?? "null");
+      return m && typeof m.title === "string" && m.title.trim() && m.overlay ? { name, title: m.title.trim() } : null;
+    } catch {
+      return null;
+    }
+  }));
+  return found.filter(Boolean).sort((a, b) => a.title.localeCompare(b.title));
+}
+
+// Every entry for the state we're in now; `mods` from overlayMods().
+function entries(mods = []) {
   const known = new Set(commands().map((c) => c.name));
   const mac = win()?.platform === "macos";
   const list = NAMED.filter(([n]) => known.has(n))
@@ -86,6 +105,11 @@ function entries() {
   for (const l of layouts()) {
     const t = { main: "Herdr", terminals: "Terminals", win98: "Herdr 98" }[l] ?? l.charAt(0).toUpperCase() + l.slice(1);
     list.push({ name: "layout.switch", args: { name: l }, group: "Layout", title: `Layout: ${t}`, words: `look ${l}` });
+  }
+  // A mod NAMED already lists (the picker) keeps its name there.
+  const opened = new Set(NAMED.filter(([n]) => n === "mod.open").map(([, a]) => a.name));
+  if (known.has("mod.open")) for (const m of mods) {
+    if (!opened.has(m.name)) list.push({ name: "mod.open", args: { name: m.name }, group: "Mod", title: `Open ${m.title}`, words: `mod ${m.name}` });
   }
   // Anything new in the app shows up too, until it gets a better name here.
   const named = new Set(NAMED.map(([n]) => n));
@@ -141,6 +165,11 @@ export default class Palette extends View {
     this.scroll = 0;
     this.recent = JSON.parse(localStorage.getItem("recent") ?? "[]");
     this.handle = cx.focus_handle();
+    this.mods = [];
+    cx.spawn(async (cx) => {
+      this.mods = await overlayMods().catch(() => []);
+      cx.notify();
+    });
   }
 
   close() {
@@ -164,7 +193,7 @@ export default class Palette extends View {
 
   // The rows to show: grouped when empty, ranked while typing.
   rows() {
-    const all = entries();
+    const all = entries(this.mods);
     const q = this.query.trim().toLowerCase().replace(/\s+/g, "");
     if (!q) {
       const recent = this.recent.map((id) => all.find((e) => e.id === id)).filter(Boolean).slice(0, 5);

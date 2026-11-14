@@ -877,6 +877,12 @@ has 124 programs (agents, editors, runtimes, tools, databases, infra);
   again after a popup over it closes. Leave with `run("pane.go", {direction})`.
   Without this opt-in, navigation and clicks stay unchanged.
 
+- A mod with a `"title"` and an `"overlay"` in `mod.json` (it opens with
+  `mod.open`, e.g. `{ "place": "none", "title": "Jump", "overlay": { "kind": "popup" } }`)
+  is listed in the command palette as "Open <title>", with the key bound to
+  `mod.open:<name>` if there is one. Leave out `title` to keep it off the list
+  (a menu or dialog that needs props to open).
+
 - The first time Herdr sees a folder, it docks one copy per `mod.json` into
   the shown layout (`"none"`: only where a layout or another mod puts it).
   After that, the layouts decide. Saving any file reloads every copy in place
