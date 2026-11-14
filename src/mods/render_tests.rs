@@ -1240,3 +1240,22 @@ fn status_bar_shows_the_real_palette_key(cx: &mut TestAppContext) {
     assert!(tree.contains("commands"), "unbound hint still offers commands: {tree}");
     assert!(!tree.contains("Shift P"), "unbound hint must not invent a key: {tree}");
 }
+
+#[gpui::test]
+fn status_bar_counts_agents_in_the_singular_and_the_plural(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let agent = |n: u32| json!({"address":format!("t{n}"),"pane":format!("p{n}"),"space":"s1","space_name":"Local","tab":"tab1","tab_index":1,"tab_name":"Build","status":"blocked","app":"pi","program":null,"title":"Build","seq":n,"focused":n==1});
+
+    let mut one = fixture(true, props(), updates("current", "current"));
+    one.insert("agents".into(), json!([agent(1)]));
+    let tree = describe_with_values(cx, &staged, "mods/workspace-status", one, None).unwrap();
+    assert!(tree.contains("1 agent") && !tree.contains("1 agents"), "one agent is singular: {tree}");
+    assert!(tree.contains("1 needs you"), "one blocked agent needs you: {tree}");
+
+    let mut two = fixture(true, props(), updates("current", "current"));
+    two.insert("agents".into(), json!([agent(1), agent(2)]));
+    let tree = describe_with_values(cx, &staged, "mods/workspace-status", two, None).unwrap();
+    assert!(tree.contains("2 agents"), "two agents are plural: {tree}");
+    assert!(tree.contains("2 need you") && !tree.contains("2 needs you"), "two blocked agents need you: {tree}");
+}
