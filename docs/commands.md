@@ -242,7 +242,7 @@ Show only this pane of its tab, or all again.
 
 ## `pane.focus`
 
-Focus a pane (or the pane showing a terminal).
+Focus a pane or a visible terminal block.
 
 | Argument | Required |
 |---|---|
