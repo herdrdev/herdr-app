@@ -34,16 +34,10 @@ pub fn home() -> PathBuf {
     std::env::home_dir().unwrap_or_else(|| "/".into())
 }
 
-/// The fonts on this machine (`fonts()`): read when the window opens and
-/// again when the home brings new ones.
-static FONTS: std::sync::Mutex<Vec<String>> = std::sync::Mutex::new(Vec::new());
-
-pub fn note_fonts(cx: &gpui::App) {
-    // Names starting with "." are the system's private UI fonts (macOS).
-    let mut names: Vec<String> = cx.text_system().all_font_names().into_iter().filter(|n| !n.starts_with('.')).collect();
-    names.sort_by_key(|n| n.to_lowercase());
-    names.dedup();
-    *FONTS.lock().unwrap() = names;
+/// The fonts on this machine (`fonts()`): read when a window opens and again
+/// when the machine or the home brings new ones.
+pub fn fonts() -> Vec<String> {
+    crate::settings::font_names()
 }
 
 /// The app's home: `$HERDR_APP_HOME` (tests, experiments), else
@@ -963,7 +957,7 @@ fn module(inst: Instance, copy: u64) -> HostModule {
         .async_function("hc", |a| Ok(exec_future("hc".into(), strings(a.get(0)), None, None, EXEC_LIMIT)))
         .function("home", |_| Ok(home().to_string_lossy().into_owned().into()))
         .function("appHome", |_| Ok(app_dir().to_string_lossy().into_owned().into()))
-        .function("fonts", |_| Ok(to_host(&json!(*FONTS.lock().unwrap()))))
+        .function("fonts", |_| Ok(to_host(&json!(fonts()))))
         .function("updates", |_| Ok(to_host(&crate::update::status())))
         .function("presentUpdateNotes", |a| {
             crate::update_notes::presented(&strings(a.get(0)));
