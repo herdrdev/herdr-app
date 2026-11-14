@@ -431,6 +431,8 @@ impl TerminalView {
                     return None;
                 }
                 g.channel = Some(attached.channel);
+                // Programs detect Kitty graphics by XTVERSION: answer as the core does.
+                g.vt.set_xtversion(attached.terminal["identity"].as_str().unwrap_or(""));
                 // The theme or cell may have changed while the attach was in flight.
                 let cell = device_cell(g.cell, g.scale);
                 g.refresh_theme(&vt::theme(), cell);

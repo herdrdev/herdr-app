@@ -173,6 +173,8 @@ struct Shared {
     replies: Vec<u8>,
     clipboard_write: bool,
     clipboard: [Option<String>; 2],
+    /// What XTVERSION answers: the core's identity of the terminal, as `hc run` does.
+    xtversion: String,
 }
 
 /// One kitty graphics image on screen, in cells of the viewport.
@@ -660,6 +662,12 @@ unsafe extern "C" fn on_size(_t: GhosttyTerminal, userdata: *mut c_void, out: *m
     true
 }
 
+// Empty answers libghostty's default ("libghostty"), like the core does then.
+unsafe extern "C" fn on_xtversion(_t: GhosttyTerminal, userdata: *mut c_void) -> GhosttyString {
+    let shared = unsafe { &*(userdata as *const Shared) };
+    GhosttyString { ptr: shared.xtversion.as_ptr(), len: shared.xtversion.len() }
+}
+
 unsafe extern "C" fn on_title(_t: GhosttyTerminal, userdata: *mut c_void) {
     let shared = unsafe { &mut *(userdata as *mut Shared) };
     shared.title_changed = true;
@@ -699,7 +707,7 @@ impl Vt {
             ok(ghostty_mouse_event_new(std::ptr::null(), &mut mouse_event), "mouse_event_new");
 
             install_png_decoder();
-            let mut shared = Box::new(Shared { state, size: GhosttySizeReportSize { rows: rows.max(1), columns: cols.max(1), cell_width: 0, cell_height: 0 }, held_since: None, title_changed: false, replies: Vec::new(), clipboard_write: true, clipboard: [None, None] });
+            let mut shared = Box::new(Shared { state, size: GhosttySizeReportSize { rows: rows.max(1), columns: cols.max(1), cell_width: 0, cell_height: 0 }, held_since: None, title_changed: false, replies: Vec::new(), clipboard_write: true, clipboard: [None, None], xtversion: String::new() });
             let ud = &mut *shared as *mut Shared as *const c_void;
             ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_USERDATA, ud);
             let hold: GhosttyTerminalRenderHoldFn = Some(on_render_hold);
@@ -708,6 +716,8 @@ impl Vt {
             ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_TITLE_CHANGED, std::mem::transmute(title));
             let size: GhosttyTerminalSizeFn = Some(on_size);
             ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_SIZE, std::mem::transmute(size));
+            let xtversion: GhosttyTerminalXtversionFn = Some(on_xtversion);
+            ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_XTVERSION, std::mem::transmute(xtversion));
             let write: GhosttyTerminalWritePtyFn = Some(on_write_pty);
             ghostty_terminal_set(term, GHOSTTY_TERMINAL_OPT_WRITE_PTY, std::mem::transmute(write));
             let clipboard: GhosttyTerminalClipboardWriteFn = Some(on_clipboard_write);
@@ -798,6 +808,11 @@ impl Vt {
 
 
     /// What the terminal wants to say back to the program since the last call.
+    /// Answers XTVERSION with the terminal's identity (e.g. "ghostty 1.2.3").
+    pub fn set_xtversion(&mut self, identity: &str) {
+        self.shared.xtversion = identity.to_owned();
+    }
+
     pub fn take_replies(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.shared.replies)
     }
@@ -2201,6 +2216,16 @@ mod tests {
         assert_eq!(f.rows[1][2].text, "!");
         let c = f.cursor.unwrap();
         assert_eq!((c.x, c.y), (3, 1));
+    }
+
+    #[test]
+    fn xtversion_answers_the_terminal_identity() {
+        let mut vt = Vt::new(20, 4);
+        vt.write(b"\x1b[>0q");
+        assert_eq!(vt.take_replies(), b"\x1bP>|libghostty\x1b\\");
+        vt.set_xtversion("ghostty 1.2.3");
+        vt.write(b"\x1b[>0q");
+        assert_eq!(vt.take_replies(), b"\x1bP>|ghostty 1.2.3\x1b\\");
     }
 
     #[test]
