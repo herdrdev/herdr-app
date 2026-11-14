@@ -3892,7 +3892,13 @@ impl AppWindow {
 
     fn control(&mut self, cmd: Value, window: &mut Window, cx: &mut Context<Self>) -> Value {
         if let Some(name) = cmd.get("do").and_then(Value::as_str) {
-            let args = cmd.get("args").cloned().unwrap_or(Value::Null);
+            let mut args = cmd.get("args").cloned().unwrap_or(Value::Null);
+            let ours = |core: &Value| core.is_null() || core.as_str() == self.core.hello["core"]["id"].as_str();
+            if let Some(caller) = cmd.get("caller").and_then(Value::as_str)
+                && ours(&cmd["caller_core"])
+            {
+                callers_pane_by_default(&self.model, name, &mut args, caller);
+            }
             return self.run_as(name, args, false, window, cx);
         }
         if let Some(path) = cmd.get("shot").and_then(Value::as_str) {
@@ -4919,6 +4925,26 @@ fn swap_by(args: &Value) -> Result<SwapBy<'_>, String> {
         (None, Some(target)) => Ok(SwapBy::Target(target)),
         (Some(dir @ ("left" | "right" | "up" | "down")), None) => Ok(SwapBy::Direction(dir)),
         (Some(dir), None) => Err(format!("pane.swap direction is left, right, up or down, not {dir:?}")),
+    }
+}
+
+/// `herdr-app do` from inside a terminal: a command that would take the focused pane takes the caller's.
+fn callers_pane_by_default(model: &Model, name: &str, args: &mut Value, caller: &str) {
+    let (command, short) = name.split_once(':').map_or((name, None), |(n, v)| (n, Some(v)));
+    // terminal.show isn't here: it focuses its pane, which would pull the person to the caller's tab.
+    let takes_a_pane = matches!(command, "pane.split" | "pane.close" | "pane.zoom" | "pane.swap");
+    let named = |a: &Value| a.get("pane").is_some_and(|p| !p.is_null());
+    let short_names = short.zip(crate::commands::find(command)).is_some_and(|(v, c)| named(&crate::commands::shorthand(c, v)));
+    if !takes_a_pane || named(args) || short_names {
+        return;
+    }
+    let Some(pane) = model.pane_of(caller) else { return };
+    match args {
+        Value::Null => *args = json!({ "pane": pane }),
+        Value::Object(a) => {
+            a.insert("pane".into(), json!(pane));
+        }
+        _ => {}
     }
 }
 
@@ -7057,6 +7083,32 @@ export default class SystemToast extends View {
             assert_eq!(super::swap_by(&neither), Err("pane.swap needs direction or target".into()), "{neither}");
         }
         assert_eq!(super::swap_by(&json!({"direction": "sideways"})), Err("pane.swap direction is left, right, up or down, not \"sideways\"".into()));
+    }
+
+    #[test]
+    fn herdr_app_do_from_a_terminal_acts_on_its_own_pane() {
+        use serde_json::{Value, json};
+        // x1 is focused in the shown tab; t3's pane x3 is in a hidden tab.
+        let m = swap_model();
+        let with = |name: &str, mut args: Value, caller: &str| {
+            super::callers_pane_by_default(&m, name, &mut args, caller);
+            args
+        };
+        assert_eq!(with("pane.split", json!({"direction": "right"}), "t3"), json!({"direction": "right", "pane": "x3"}));
+        for name in ["pane.close", "pane.zoom", "pane.swap"] {
+            assert_eq!(with(name, Value::Null, "t2"), json!({"pane": "x2"}), "{name}");
+        }
+        assert_eq!(with("pane.split:right", Value::Null, "t3"), json!({"pane": "x3"}), "shorthand for another argument");
+        for name in ["pane.close:x1", "pane.zoom:x1"] {
+            assert_eq!(with(name, Value::Null, "t3"), Value::Null, "{name}: the shorthand names the pane");
+        }
+        assert_eq!(with("terminal.show", Value::Null, "t3"), Value::Null, "it would focus the caller's tab");
+        assert_eq!(with("pane.close", json!({"pane": "x1"}), "t3"), json!({"pane": "x1"}), "an explicit pane wins");
+        assert_eq!(with("pane.close", json!({"pane": 5}), "t3"), json!({"pane": 5}), "a bad pane still fails validation");
+        assert_eq!(with("pane.close", json!({"pane": null}), "t3"), json!({"pane": "x3"}), "null means omitted");
+        assert_eq!(with("pane.close", json!({}), "t9"), json!({}), "a caller with no pane: the focused one, as before");
+        assert_eq!(with("pane.go", json!({"direction": "left"}), "t3"), json!({"direction": "left"}), "moving focus stays the person's");
+        assert_eq!(with("tab.new", Value::Null, "t3"), Value::Null);
     }
 
     #[test]
