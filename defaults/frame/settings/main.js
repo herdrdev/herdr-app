@@ -406,9 +406,14 @@ export default class Settings extends View {
       );
   }
 
-  // The font in use, written in itself; a click opens the list.
+  // The font in use, written in itself; a click opens the list. A family this
+  // machine doesn't have stays the setting (it may come back, and terminals take
+  // their own fallback meanwhile), but the button says so and stops drawing in
+  // it: a family removed in this session can still be drawn from the text
+  // system's copy, which would make it look installed.
   fontButton(t, which, family, def) {
     const open = this.picking === which;
+    const installed = fonts().some((f) => f.toLowerCase() === family.toLowerCase());
     const trigger = div()
       .id(`st-f-${which}`)
       .w(220)
@@ -432,7 +437,21 @@ export default class Settings extends View {
         } else this.handle.focus();
         cx.notify();
       })
-      .child(div().font_family(family).text_size(13.5).text_color(t.foreground).child(family));
+      .child(
+        h_flex()
+          .min_w(0)
+          .gap(0)
+          .child(
+            div()
+              .min_w(0)
+              .truncate()
+              .text_size(13.5)
+              .text_color(installed ? t.foreground : t.muted)
+              .when(installed, (el) => el.font_family(family))
+              .child(family),
+          )
+          .when(!installed, (el) => el.child(div().flex_none().text_size(13.5).text_color(t.dim).child(" — not installed"))),
+      );
     return Popup.new(`st-fp-${which}`, trigger)
       .when(open, (el) => el.content(this.fontList(t, which, def)));
   }
@@ -501,6 +520,8 @@ export default class Settings extends View {
     // Numbers come back from the host as 32-bit floats: 1.1 reads as 1.100000023841858.
     const same = (a, b) => (typeof a === "number" && typeof b === "number" ? Math.abs(a - b) < 1e-4 : a === b);
     const own = (key, composed, def) => !same(p[key] ?? def, composed);
+    // The setting keeps a family this machine lacks; say what is drawn instead.
+    const missing = (family) => !fonts().some((f) => f.toLowerCase() === family.toLowerCase());
     const size = (key, value, d, cx) => this.change((q) => (q[key] = Math.max(8, Math.min(32, (q[key] ?? value) + d))), cx);
     const step = (key, value, d, lo, hi, cx) => this.change((q) => (q[key] = Math.round(Math.max(lo, Math.min(hi, (q[key] ?? value) + d)) * 100) / 100), cx);
     const fontRow = (which, sizeKey, title, family, def, sizeNow) =>
@@ -510,7 +531,11 @@ export default class Settings extends View {
           this.row(
             t,
             title,
-            own(which, family, def) ? "This layout sets its own; yours shows in the others." : null,
+            missing(family)
+              ? "Not installed. Herdr's own font stands in until it's back."
+              : own(which, family, def)
+                ? "This layout sets its own; yours shows in the others."
+                : null,
             h_flex()
               .gap(8)
               .items_center()
