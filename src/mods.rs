@@ -6,7 +6,7 @@ use gpui::App;
 use gpui_shell::{Capabilities, ExecuteGrant, HostError, HostModule, HostObject, HostValue, NetworkGrant};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::cell::RefCell;
+use std::cell::{Cell, RefCell};
 use std::collections::HashMap;
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
@@ -32,6 +32,17 @@ pub fn frame_dir() -> PathBuf {
 pub fn home() -> PathBuf {
     // HOME, or the profile folder on Windows.
     std::env::home_dir().unwrap_or_else(|| "/".into())
+}
+
+thread_local! {
+    static CHECKING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// True while `herdr-app check` loads a mod: `init()` runs there with live
+/// exec and write capabilities, so mods can see it (`herdr.checking()`) and
+/// those side effects warn.
+fn checking() -> bool {
+    CHECKING.with(|c| c.get())
 }
 
 /// The fonts on this machine (`fonts()`): read when the window opens and
@@ -946,6 +957,7 @@ fn module(inst: Instance, copy: u64) -> HostModule {
         .declarations(DECLARATIONS)
         .async_function("exec", |a| {
             let command = a.string(0)?.to_owned();
+            if checking() { tracing::warn!("check: mod exec'd `{command}`; the child runs for real"); }
             Ok(exec_future(command, strings(a.get(1)), opt_str(a.get(2), "cwd"), opt_str(a.get(2), "on"), exec_limit(a.get(2))?))
         })
         .async_function("readTextFile", |a| {
@@ -958,9 +970,15 @@ fn module(inst: Instance, copy: u64) -> HostModule {
         })
         .async_function("writeTextFile", |a| {
             let expected = a.get(2).and_then(|v| match v { HostValue::Str(s) => Some(s.clone()), _ => None });
-            Ok(crate::mod_files::write_text(a.string(0)?.to_owned(), a.string(1)?.to_owned(), expected))
+            let path = a.string(0)?.to_owned();
+            if checking() { tracing::warn!("check: mod wrote `{path}`; the write lands for real"); }
+            Ok(crate::mod_files::write_text(path, a.string(1)?.to_owned(), expected))
         })
-        .async_function("hc", |a| Ok(exec_future("hc".into(), strings(a.get(0)), None, None, EXEC_LIMIT)))
+        .async_function("hc", |a| {
+            if checking() { tracing::warn!("check: mod called hc; it runs for real"); }
+            Ok(exec_future("hc".into(), strings(a.get(0)), None, None, EXEC_LIMIT))
+        })
+        .function("checking", |_| Ok(HostValue::Bool(checking())))
         .function("home", |_| Ok(home().to_string_lossy().into_owned().into()))
         .function("appHome", |_| Ok(app_dir().to_string_lossy().into_owned().into()))
         .function("fonts", |_| Ok(to_host(&json!(*FONTS.lock().unwrap()))))
@@ -1194,8 +1212,11 @@ fn capabilities() -> Capabilities {
         .clipboard_write(true)
 }
 
-/// Checks exercise shared state in memory, without reading or writing the person's file.
+/// Checks exercise shared state in memory, without reading or writing the person's
+/// file. A check still loads the mod for real, so mods are told (`herdr.checking()`)
+/// and its exec and write side effects warn.
 pub fn install_check_policy() {
+    CHECKING.with(|c| c.set(true));
     SHARED.with_borrow_mut(|slot| *slot = Some(SharedStore { values: Default::default(), path: app_dir().join("shared.json"), writable: false, writer: None }));
     install_policy();
 }
