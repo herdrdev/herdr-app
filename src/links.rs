@@ -79,6 +79,10 @@ pub fn resolve(link: &str, cwd: Option<&Path>) -> Option<Target> {
         s.len() > 1 && s.starts_with(|c: char| c.is_ascii_alphabetic()) && s.chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
     });
     if scheme {
+        // Windows can't open a file URL whose path is percent-encoded, the way programs write them.
+        if let Some(path) = file_url_path(link).filter(|p| p.exists()) {
+            return Some(Target::File(path));
+        }
         return Some(Target::Url(link.to_owned()));
     }
     let home = std::env::home_dir();
@@ -109,6 +113,34 @@ pub fn resolve(link: &str, cwd: Option<&Path>) -> Option<Target> {
         }
     }
     Path::new(bare).exists().then(|| Target::File(PathBuf::from(bare)))
+}
+
+/// The path a `file:` URL names on this computer, percent-decoded.
+fn file_url_path(link: &str) -> Option<PathBuf> {
+    let rest = link.strip_prefix("file://")?;
+    let rest = rest.strip_prefix("localhost").unwrap_or(rest);
+    // Another host's file, or no path.
+    if !rest.starts_with('/') {
+        return None;
+    }
+    let rest = rest.split(['?', '#']).next()?;
+    let mut bytes = Vec::with_capacity(rest.len());
+    let mut i = 0;
+    while i < rest.len() {
+        if rest.as_bytes()[i] == b'%' {
+            bytes.push(u8::from_str_radix(rest.get(i + 1..i + 3)?, 16).ok()?);
+            i += 3;
+        } else {
+            bytes.push(rest.as_bytes()[i]);
+            i += 1;
+        }
+    }
+    let path = String::from_utf8(bytes).ok()?;
+    // `/C:/Users/...` names `C:\Users\...`.
+    if cfg!(windows) && path.as_bytes().get(2) == Some(&b':') && path.as_bytes()[1].is_ascii_alphabetic() {
+        return Some(PathBuf::from(path[1..].replace('/', "\\")));
+    }
+    Some(PathBuf::from(path))
 }
 
 /// Hands the target to the system's default handler.
@@ -279,7 +311,12 @@ mod tests {
             let text = format!("Dashboard: {url}");
             let range = find(&text, text.find(url).unwrap()).unwrap();
             assert_eq!(&text[range.clone()], url);
-            assert_eq!(resolve(&text[range], None), Some(Target::Url(url.into())));
+            // winver.exe exists on Windows, where it opens as the file.
+            let expected = match url.strip_prefix("file:///") {
+                Some(path) if cfg!(windows) => Target::File(path.replace('/', "\\").into()),
+                _ => Target::Url(url.into()),
+            };
+            assert_eq!(resolve(&text[range], None), Some(expected));
         }
     }
 
@@ -366,6 +403,29 @@ mod tests {
             let dotted = dir.join("src/main.rs.");
             std::fs::write(&dotted, "").unwrap();
             assert_eq!(resolve("src/main.rs.", Some(&dir)), Some(Target::File(dotted)));
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn file_urls_open_as_the_file_they_name() {
+        let dir = std::env::temp_dir().join(format!("herdr-file-urls-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("测试 #1.txt");
+        std::fs::write(&path, "").unwrap();
+        // As programs write them: every byte outside the unreserved set encoded.
+        let slashed = path.to_str().unwrap().replace('\\', "/");
+        let encoded: String = slashed
+            .bytes()
+            .map(|b| if b.is_ascii_alphanumeric() || b"/-._~:".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") })
+            .collect();
+        let root = if cfg!(windows) { "/" } else { "" };
+        let file = Some(Target::File(path.clone()));
+        assert_eq!(resolve(&format!("file://{root}{encoded}"), None), file);
+        assert_eq!(resolve(&format!("file://localhost{root}{encoded}"), None), file);
+        assert_eq!(resolve(&format!("file://{root}{}", slashed.replace('#', "%23")), None), file);
+        for url in [format!("file://{root}{encoded}.gone"), format!("file://{root}{encoded}%ZZ"), format!("file://box{root}{encoded}")] {
+            assert_eq!(resolve(&url, None), Some(Target::Url(url.clone())), "{url}");
         }
         std::fs::remove_dir_all(dir).unwrap();
     }

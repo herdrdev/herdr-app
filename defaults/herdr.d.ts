@@ -31,7 +31,7 @@ export function writeTextFile(path: string, text: string, expected: string | nul
 /** The agents people can start from a menu (entries with `run` in programs.json), most picked
  *  first, and whether each is installed: asked of the shell agents start in (on another machine,
  *  `on`, its login/interactive shell when supported), at most once a minute per machine.
- *  Start one with its `run` as `argv`. */
+ *  Rejects if the check fails; failed checks are not cached. Start one with its `run` as `argv`. */
 export function knownAgents(options?: { on?: string | null }): Promise<(Program & { run: string[]; installed: boolean })[]>;
 
 /** Opens the system's folder picker (this machine). Resolves with the chosen folder, or null
@@ -49,12 +49,15 @@ export function playSound(sound: string): null;
  * the call returns; terminal.keep/park finish in the background and toast on failure.
  * A rename without a name is asked for;
  * "" gives the space or tab Herdr's automatic name again. The main ones:
- * Spaces: space.new {name?, folder?, tab?, argv?, task?, machine?}, space.close {id?}, space.rename {id?, name},
+ * Spaces: space.new {name?, folder?, tab?, argv?, task?, machine?, focus?}, space.close {id?}, space.rename {id?, name},
  *   space.move {id, index}, space.select {index | id}, space.next, space.prev.
- * Tabs: tab.new {name?, space?, folder?, argv?, task?} (argv: an agent, task: its first message)
- *   or {name?, space?, mod, props?} (a tab whose only pane is a mod),
+ * Tabs: tab.new {name?, space?, folder?, argv?, task?, focus?} (argv: an agent, task: its first message)
+ *   or {name?, space?, mod, props?, focus?} (a tab whose only pane is a mod),
  *   tab.close {id?}, tab.rename {id?, name}, tab.move {id, index}, tab.select {index | id},
  *   tab.next, tab.prev.
+ * New spaces and tabs take focus by default. Boolean focus: false keeps the shown
+ * space, selected tab and keyboard focus; background tabs are appended in creation order.
+ * With no space shown, a new space is shown even with focus: false.
  * Panes: pane.split {direction: "right" | "down", pane?}, pane.close {pane?}, pane.zoom {pane?},
  *   pane.focus {pane | terminal}, pane.go {direction}, pane.swap {pane?, direction | target}.
  *   Pane menus get target { pane, terminal }.
@@ -63,6 +66,10 @@ export function playSound(sound: string): null;
  *   terminal.park {terminal} (its pane goes, it keeps running; the menu's "Send back"),
  *   terminal.peek {terminal} (peek over the tab, with keep-as-tab and close),
  *   terminal.show {terminal?, pane?} (shown in the pane for now, in place of its own), terminal.copy, terminal.paste,
+ *   terminal.select {terminal?, at?: {row, col} | "cursor", mode?: "cell" | "word" | "line"} (replaces the selection; defaults to cursor and cell).
+ *   terminal.adjust_selection {terminal?, direction: "left" | "right" | "up" | "down" | "page_up" | "page_down" | "home" | "end" | "line_start" | "line_end"} (moves the inclusive moving end; view follows; fails without selection).
+ *   terminal.clear_selection {terminal?}. No default keys or built-in copy mode.
+ *   terminal.select_all {terminal?} (whole screen and scrollback, or only the alternate screen; Cmd+A on macOS).
  *   terminal.right_click {to: "program" | "menu", terminal?} (right-clicks to a program that takes the mouse; Shift: the menu).
  *   terminal.scroll {lines | pages | to: "top" | "bottom", terminal?} (Herdr's view of the history: negative goes up; pages may be fractional).
  * Agents: agent.next, agent.prev (the agents list's order), agent.focus {terminal} (sub-agents too).
@@ -215,8 +222,20 @@ export function setAgentOrder(addresses: string[]): null;
 
 /** Every core terminal as `hc ls --json` describes it (address, argv, name, template, parent,
  *  labels, state, ...), with `status` as a plain word, the agent's report in `report`, and
- *  `program` (see Program). Live. */
-export function terminals(): any[];
+ *  `program` (see Program). Parent addresses use the same machine names as `address`;
+ *  parents on this computer use bare terminal IDs. Parents that cannot be mapped
+ *  stay as the core reported them. View-local selection uses TerminalCell positions;
+ *  selection is null when absent or without an attached view. Updates when selection changes,
+ *  not on cursor motion or output. Start at the cursor with terminal.select and read selection.end. Live. */
+export function terminals(): (Record<string, any> & TerminalSelectionState)[];
+
+/** Zero-based cells. Rows count from the oldest retained history through the active screen.
+ *  Output preserves positions until history is pruned or the grid reflows. */
+export interface TerminalCell { row: number; col: number; }
+export interface TerminalSelectionState {
+  /** Inclusive endpoints: start is the anchor, end is the moving end (may precede start). */
+  selection: { start: TerminalCell; end: TerminalCell } | null;
+}
 
 /** Actual terminal/pane focus. `space` and `tab` are the current window context.
  *  Clicking a visible layout terminal block, or pane.focus {terminal}, focuses that block:
@@ -228,8 +247,9 @@ export function terminals(): any[];
  *  focused pane under the window.
  *  pane.focus {terminal} prefers the first visible layout terminal block, then a model pane.
  *  `shown`: terminal.show replacement, if any. `agent`: the agent an agent block shows.
- *  `terminal` is null for mod panes. Live. */
-export function focused(): { space: string; tab: string; pane: string | null; terminal: string | null; shown: string | null; agent: string | null; cwd: string | null } | null;
+ *  `terminal` is null for mod panes. Selection describes the terminal that receives
+ *  terminal commands (including a shown replacement or peek). Live. */
+export function focused(): ({ space: string; tab: string; pane: string | null; terminal: string | null; shown: string | null; agent: string | null; cwd: string | null } & TerminalSelectionState) | null;
 
 /** The shown layout (layouts/<name>.json). Its name is shared("layout").
  *  Root `terminal_menu?: string` chooses a terminal right-click menu mod (default: "menu").
@@ -255,6 +275,11 @@ export function window(): {
   fullscreen: boolean;
   active: boolean;
 };
+
+/** Sets the OS window's title, which window switchers, taskbars and time trackers read. The last
+ *  call wins, whichever mod made it; null restores "Herdr". It doesn't outlive the app, so set it
+ *  again when your mod starts. Call it when the title changes, not on every render. */
+export function setWindowTitle(title: string | null): null;
 
 /** For a floating mod: where it sits now. `vertical` on the left/right edges, horizontal on
  *  top/bottom; while dragged, where it would land. `hovered` is true while the pointer is on it
@@ -328,7 +353,10 @@ export function feedbackClearImages(): null;
 export function sendFeedback(body: import("gpui-kit").HostValue, images?: string[]): Promise<string | null>;
 
 /** What the app runs with: the shown layout's look (theme name, fonts, sizes, terminal
- *  padding and opacity) with the person's zoom and sounds. */
+ *  padding and opacity, terminal_line_height, terminal_cell_width and terminal_scroll_speed) with the
+ *  person's zoom and sounds. terminal_line_height and terminal_cell_width: number, default 1, clamped
+ *  to 0.8..2; terminal_scroll_speed: number, default 1, clamped to 0.1..5. Layout values override
+ *  settings.json. */
 export function settings(): Record<string, unknown>;
 
 /** Every key binding: { section, keys, action }. */
@@ -412,8 +440,18 @@ export function nextCommand(): Promise<string>;
  * above 4096 non-ignored directories reject the watch, so use a timer fallback.
  * macOS and Windows watch recursively, including ignored directories.
  * Pending paths are bounded: a batch containing the root means refresh everything.
- * Shared by every mod. Files also refreshes on its 10-second timer.
+ * Shared by every mod, with at most 64 folders awaiting changes at once.
+ * Idle watches may be reclaimed to make room; reload when starting a watch.
+ * Call cancel() on the returned promise when you stop showing the folder.
+ * It resolves with [] and releases this call; other callers keep watching.
+ * Closing a mod copy cancels its pending calls. Files also refreshes on its 10-second timer.
  *   cx.spawn(async (cx) => { for (;;) { await watchFolder(dir); this.reload(); cx.notify(); } });
  * Watch what you show, not a whole home folder (node_modules is a lot of events).
  */
-export function watchFolder(path: string): Promise<string[]>;
+export function watchFolder(path: string): FolderWatch;
+
+/** One pending watch. Keep this handle while the folder is shown. */
+export interface FolderWatch extends Promise<string[]> {
+  /** Resolves with [] and releases this call's watch. Safe to call again or after settlement. */
+  cancel(): void;
+}
