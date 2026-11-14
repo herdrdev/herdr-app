@@ -5,6 +5,7 @@ Run: uv run --no-project python -m unittest discover -s scripts -p test_distribu
 
 import hashlib
 import os
+import plistlib
 import shutil
 import tarfile
 from pathlib import Path
@@ -231,7 +232,7 @@ printf 'dev PATH added' >> "$3"''')
         checkout = self.bin / "checkout"
         for path in [
             "Cargo.toml", "LICENSE", "THIRD-PARTY-NOTICES", "scripts/package",
-            "assets/icons/herdr-ui-icon-clean.svg", "assets/icons/Herdr.icns",
+            "assets/icons/herdr-ui-icon-clean.svg", "assets/icons/Herdr.icns", "assets/icons/Assets.car",
         ]:
             destination = checkout / path
             destination.parent.mkdir(parents=True, exist_ok=True)
@@ -258,6 +259,15 @@ printf 'dev PATH added' >> "$3"''')
                             archive.extractfile(f"{prefix}/{name}").read(),
                             (ROOT / name).read_bytes(),
                         )
+                    if target == "macos-aarch64":
+                        # macOS 26 and later take the light, dark and tinted icon from Assets.car.
+                        self.assertEqual(
+                            archive.extractfile(f"{prefix}/Assets.car").read(),
+                            (ROOT / "assets/icons/Assets.car").read_bytes(),
+                        )
+                        plist = plistlib.loads(archive.extractfile("Herdr.app/Contents/Info.plist").read())
+                        self.assertEqual(plist["CFBundleIconName"], "Herdr")
+                        self.assertEqual(plist["CFBundleIconFile"], "Herdr")
         self.stub("cargo", 'echo "unexpected build" >&2; exit 97')
         for name in ("LICENSE", "THIRD-PARTY-NOTICES"):
             notice = checkout / name
