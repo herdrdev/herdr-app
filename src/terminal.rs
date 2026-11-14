@@ -180,7 +180,7 @@ pub struct TerminalView {
     pending_search_nav: Option<bool>,
     search_task: Option<Task<()>>,
     attach_deadline: Instant,
-    /// Last `from_bottom` published via `ScrollChanged` (None = alt-screen / unset).
+    /// Last observed distance; output only publishes transitions to/from the end.
     published_from_bottom: Option<u64>,
     _render_hold: Option<(Instant, Task<()>)>,
     _reader: Option<Task<()>>,
@@ -609,7 +609,7 @@ impl TerminalView {
                 });
             })));
         }
-        self.publish_scroll_if_changed(cx);
+        self.publish_scroll_if_changed(false, cx);
         // Output in a terminal nobody sees doesn't redraw the window; it's
         // drawn fresh when shown again. Nor does output that changed nothing
         // on screen (an agent spinning its title).
@@ -851,6 +851,7 @@ impl TerminalView {
         }
         drop(grid);
         self.selection_changed(cx);
+        self.publish_scroll_if_changed(true, cx);
         self.copy_primary(cx);
         cx.notify();
         Ok(())
@@ -1029,7 +1030,7 @@ impl TerminalView {
             g.vt.scroll_viewport(if up { -(n as isize) } else { n as isize });
         }
         drop(g);
-        self.publish_scroll_if_changed(cx);
+        self.publish_scroll_if_changed(true, cx);
         cx.notify();
     }
 
@@ -1044,7 +1045,7 @@ impl TerminalView {
             ScrollTarget::Bottom => g.vt.scroll_to_bottom(),
         }
         drop(g);
-        self.publish_scroll_if_changed(cx);
+        self.publish_scroll_if_changed(true, cx);
         cx.notify();
     }
 
@@ -1059,13 +1060,18 @@ impl TerminalView {
         Some(ScrollMetrics { total: sb.total, offset: sb.offset, len: sb.len, from_bottom })
     }
 
-    fn publish_scroll_if_changed(&mut self, cx: &mut Context<Self>) {
+    fn publish_scroll_if_changed(&mut self, user_scroll: bool, cx: &mut Context<Self>) {
         let from_bottom = self.scroll_metrics().map(|m| m.from_bottom);
-        if from_bottom == self.published_from_bottom {
-            return;
-        }
+        let previous = self.published_from_bottom;
         self.published_from_bottom = from_bottom;
-        cx.emit(TerminalEvent::ScrollChanged);
+        let changed = if user_scroll {
+            from_bottom != previous
+        } else {
+            from_bottom.map(|n| n > 0) != previous.map(|n| n > 0)
+        };
+        if changed {
+            cx.emit(TerminalEvent::ScrollChanged);
+        }
     }
 
     /// The program tracks the mouse and Shift isn't held (Shift keeps the mouse Herdr's).
@@ -1151,6 +1157,7 @@ impl TerminalView {
                         g.vt.scroll_viewport(lines);
                         drop(g);
                         this.select(Select::Drag, this.selection_pointer, cx);
+                        this.publish_scroll_if_changed(true, cx);
                     }
                     true
                 }).unwrap_or(false);
@@ -2390,6 +2397,7 @@ impl EntityInputHandler for TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.publish_scroll_if_changed(false, cx);
         crate::bench::count(&crate::bench::TERMINAL);
         let terminal_focused = self.focus.is_focused(window);
         if terminal_focused {
@@ -2504,7 +2512,7 @@ impl Render for TerminalView {
                         g.vt.scroll_to_row(scrollbar_row_at(sb.total, sb.len, f32::from(track.size.height), min, top));
                     }
                     drop(g);
-                    this.publish_scroll_if_changed(cx);
+                    this.publish_scroll_if_changed(true, cx);
                     cx.notify();
                     cx.stop_propagation();
                     return;
@@ -2572,7 +2580,7 @@ impl Render for TerminalView {
                                         let top = f32::from(ev.position.y - g.origin.y) - this.scrollbar_grab.unwrap_or(0.0);
                                         g.vt.scroll_to_row(scrollbar_row_at(sb.total, sb.len, track, min, top));
                                         drop(g);
-                                        this.publish_scroll_if_changed(cx);
+                                        this.publish_scroll_if_changed(true, cx);
                                         cx.notify();
                                         return;
                                     }

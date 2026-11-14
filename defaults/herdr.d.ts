@@ -192,8 +192,11 @@ export interface AgentInfo {
 /** Terminals whose program reports a status (agents), in space, tab, pane order. Live. */
 export function agents(): AgentInfo[];
 
-/** History scroll as Ghostty reports it. Rows from the top of retained history.
- *  `from_bottom` is 0 at the end; null on the alternate screen or with no view. */
+/** History scroll as Ghostty reports it, read fresh by panes().
+ *  Rows from the top of retained history; `from_bottom` is 0 at the end.
+ *  PaneInfo.scroll is null on the alternate screen or with no view.
+ *  Mods refresh on user scrolling or transitions between end/history/alternate
+ *  screen, not on ordinary output that only changes the numbers. */
 export interface PaneScroll {
   total: number;
   offset: number;

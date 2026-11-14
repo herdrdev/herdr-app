@@ -558,6 +558,7 @@ thread_local! {
     /// Snapshots the window publishes; mods read them synchronously and
     /// re-render when they change.
     static SNAPSHOT: RefCell<Snapshot> = RefCell::new(Snapshot::default());
+    static PANE_VIEWS: RefCell<HashMap<String, gpui::WeakEntity<crate::terminal::TerminalView>>> = RefCell::new(HashMap::new());
     static AGENT_ORDER: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     static SHARED: RefCell<Option<SharedStore>> = const { RefCell::new(None) };
     /// Where key commands for each loaded copy go: (copy, mod, sender).
@@ -618,7 +619,18 @@ pub fn publish_spaces(v: Value) -> bool {
 pub fn publish_agents(v: Value) -> bool {
     publish("agents", |s| (std::mem::replace(&mut s.agents, v.clone()), v))
 }
+pub fn panes_scrolled() {
+    REVISIONS.with_borrow_mut(|r| *r.entry("panes").or_default() += 1);
+}
+
+pub fn track_pane_view(pane: String, view: &gpui::Entity<crate::terminal::TerminalView>) {
+    PANE_VIEWS.with_borrow_mut(|views| { views.insert(pane, view.downgrade()); });
+}
+
 pub fn publish_panes(v: Value) -> bool {
+    PANE_VIEWS.with_borrow_mut(|views| views.retain(|pane, _| {
+        v.as_array().into_iter().flatten().any(|p| p["pane"].as_str() == Some(pane))
+    }));
     publish("panes", |s| (std::mem::replace(&mut s.panes, v.clone()), v))
 }
 pub fn publish_terminals(mut v: Value) -> bool {
@@ -696,7 +708,24 @@ impl LiveReads {
 
 fn read(reads: &RefCell<LiveReads>, key: &'static str, f: impl FnOnce(&Snapshot) -> &Value) -> HostValue {
     REVISIONS.with_borrow(|r| reads.borrow_mut().record(key, r));
-    SNAPSHOT.with(|s| to_host(f(&s.borrow())))
+    SNAPSHOT.with(|s| {
+        let snapshot = s.borrow();
+        if key != "panes" {
+            return to_host(f(&snapshot));
+        }
+        // Output and resizing change these numbers without invalidating mods.
+        let mut panes = snapshot.panes.clone();
+        gpui_shell::with_current_app(|cx| {
+            PANE_VIEWS.with_borrow(|views| {
+                for pane in panes.as_array_mut().into_iter().flatten() {
+                    if let Some(view) = pane["pane"].as_str().and_then(|id| views.get(id)).and_then(|v| v.upgrade()) {
+                        pane["scroll"] = view.read(cx).scroll_metrics().map(|m| m.json()).unwrap_or(Value::Null);
+                    }
+                }
+            });
+        });
+        to_host(&panes)
+    })
 }
 
 fn reader(reads: Rc<RefCell<LiveReads>>, key: &'static str, f: fn(&Snapshot) -> &Value) -> impl Fn(&gpui_shell::HostArguments) -> gpui_shell::HostResult {
