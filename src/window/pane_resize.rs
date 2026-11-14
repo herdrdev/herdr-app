@@ -88,7 +88,10 @@ pub(super) fn sizes(parent: &Node, index: usize, available: f32, delta: f32) -> 
     let fixed_b = matches!(b.size, Some(Size::Px { .. }));
     if fixed_a { children[index].size = Some(Size::Px { px: new_a }); }
     if fixed_b { children[index + 1].size = Some(Size::Px { px: total - new_a }); }
-    if !fixed_a || !fixed_b {
+    let matches_expected = |actual: &[f32]| actual.iter().zip(&expected).all(|(a, b)| a.is_finite() && (a - b).abs() <= 0.001);
+    // Changing a fixed size may already produce the requested geometry. Keep
+    // existing weights in that case: a lone grow factor has no unique solution.
+    if (!fixed_a || !fixed_b) && !matches_expected(&measure(&children)) {
         // Weights are grow factors normalized over ALL siblings, not just the
         // pair. Solve against the shared layout calculation, including clamps.
         let weight = super::pane_size::FlexSize::weight;
@@ -118,7 +121,7 @@ pub(super) fn sizes(parent: &Node, index: usize, available: f32, delta: f32) -> 
         }
     }
     let actual = measure(&children);
-    if actual.iter().zip(&expected).any(|(a, b)| !a.is_finite() || (a - b).abs() > 0.001) { return None; }
+    if !matches_expected(&actual) { return None; }
     Some(children.iter().map(|n| n.size).collect())
 }
 
@@ -197,6 +200,37 @@ mod tests {
             for delta in [-10.0, 10.0] {
                 close(&resized(&root, 0, 300.0, delta), &[100.0 + delta, 100.0 - delta, 100.0]);
                 assert_eq!(sizes(&root, 0, 300.0, delta).unwrap()[2], None);
+            }
+        }
+    }
+
+    #[test]
+    fn mixed_pair_preserves_a_lone_weight_across_repeated_resizes() {
+        for fixed_first in [false, true] {
+            for original in [None, Some(Size::Weight { weight: 1.0 }), Some(Size::Weight { weight: 3.0 })] {
+                let mut weighted = Node::new("weighted", Kind::Column { children: vec![pane("a", "a"), pane("b", "b")] });
+                weighted.size = original;
+                let mut fixed = pane("fixed", "fixed");
+                fixed.size = Some(Size::Px { px: 150.0 });
+                let mut other = pane("other", "other");
+                other.size = Some(Size::Px { px: 240.0 });
+                let pair = if fixed_first { vec![fixed, weighted, other] } else { vec![weighted, fixed, other] };
+                let mut root = row(pair);
+                for step in 0..100 {
+                    let delta = if step % 2 == 0 { 10.0 } else { -10.0 };
+                    let updates = sizes(&root, 0, 870.0, delta).expect("mixed pair remains resizable");
+                    for (child, size) in root.children_mut().unwrap().iter_mut().zip(updates) { child.size = size; }
+                    assert_eq!(root.find("weighted").unwrap().size, original);
+                    let children: Vec<_> = root.children().iter().collect();
+                    let moved = if step % 2 == 0 { 10.0 } else { 0.0 };
+                    let expected = if fixed_first { [150.0 + moved, 480.0 - moved, 240.0] } else { [480.0 + moved, 150.0 - moved, 240.0] };
+                    close(&super::super::pane_size::shares(&children, 870.0, 1.0), &expected);
+                }
+                root.find_mut("other").unwrap().size = Some(Size::Weight { weight: 1.0 });
+                let children: Vec<_> = root.children().iter().collect();
+                let measured = super::super::pane_size::shares(&children, 870.0, 1.0);
+                let weight = match original { Some(Size::Weight { weight }) => weight, _ => 1.0 };
+                assert!((measured[2] - 720.0 / (weight + 1.0)).abs() < 0.001, "{measured:?}");
             }
         }
     }
