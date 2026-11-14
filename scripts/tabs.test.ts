@@ -100,3 +100,43 @@ test("each wheel notch switches one tab", () => {
   send(2, "moved", 0.1);
   expect(commands).toEqual(["tab.next", "tab.next", "tab.prev"]);
 });
+
+const label = new Function("View", `${source.replace(/^import .*;\n/gm, "").replace("export default class Tabs", "class Tabs")}; return label;`)(class {});
+
+const claude = { program: { name: "Claude Code", key: "claude", agent: true }, title: "my-task" };
+
+test("a tab Herdr named after its agent follows the agent's session title", () => {
+  expect(label({ name: "Claude Code", named: true }, claude)).toBe("my-task");
+  expect(label({ name: "", named: false }, claude)).toBe("my-task");
+  expect(label({ name: "", named: false }, { ...claude, title: "✦ [web] login" })).toBe("[web] login");
+  expect(label({ name: "Claude Code", named: true }, { ...claude, title: "renamed-task" })).toBe("renamed-task");
+});
+
+test("an empty OSC title published as the terminal address keeps the program label", () => {
+  for (const terminal of ["t2", "remote/t2"]) {
+    const lead = { ...claude, terminal, title: terminal };
+    expect(label({ name: "2", named: false }, lead)).toBe("Claude Code");
+    expect(label({ name: "Claude Code", named: true }, lead)).toBe("Claude Code");
+    expect(label({ name: "fix login", named: true }, lead)).toBe("fix login");
+    expect(label({ name: "2", named: false }, { ...lead, title: "renamed-task" })).toBe("renamed-task");
+  }
+});
+
+test("a name the person gave stays", () => {
+  expect(label({ name: "fix login", named: true }, claude)).toBe("fix login");
+});
+
+test("a title that says nothing new keeps the tab's own name", () => {
+  expect(label({ name: "Claude Code", named: true }, { ...claude, title: "Claude Code" })).toBe("Claude Code");
+  expect(label({ name: "Claude Code", named: true }, { ...claude, title: "me@build-box" })).toBe("Claude Code");
+  expect(label({ name: "", named: false }, { ...claude, title: "" })).toBe("Claude Code");
+  expect(label({ name: "", named: false }, { ...claude, title: "~/src/api" })).toBe("Claude Code");
+  expect(label({ name: "", named: false }, { ...claude, title: "✦ /tmp" })).toBe("Claude Code");
+});
+
+test("a shell's title never replaces its tab's name", () => {
+  const shell = { program: { name: "zsh", key: "zsh" }, title: "vim notes.md" };
+  expect(label({ name: "", named: false }, shell)).toBe("zsh");
+  expect(label({ name: "notes", named: true }, shell)).toBe("notes");
+  expect(label({ name: "", named: false }, undefined)).toBe("Terminal");
+});
