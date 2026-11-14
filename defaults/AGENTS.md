@@ -388,8 +388,7 @@ The tab block says how each pane of the shown tab is wrapped:
   and its buttons run pane commands with that pane (`pane.split`, `pane.zoom`,
   `pane.close`). `scroll` is `{ total, offset, len, from_bottom }` for a
   terminal pane's history viewport (`from_bottom` is 0 at the end; null on
-  the alternate screen). A focused terminal that is scrolled into history
-  shows a jump-to-end control at the bottom-right. `position`: `top` or
+  the alternate screen). `position`: `top` or
   `bottom`; `reveal: "hover"` shows it only while the pointer is on the pane,
   drawn over the terminal so the terminal never resizes. The shipped `pane`
   mod keeps its divider on the terminal-facing edge and reads the frame

@@ -102,30 +102,6 @@ impl ScrollMetrics {
     }
 }
 
-const JUMP_END_MS: f32 = 200.0;
-/// Show the jump control once the viewport is more than this many rows from the end.
-const JUMP_END_THRESHOLD: u64 = 2;
-const JUMP_END_SIZE: f32 = 36.0;
-
-/// Ease toward shown (1) or hidden (0) for the jump-to-end control.
-struct JumpEndReveal {
-    from: f32,
-    to: f32,
-    start: Instant,
-}
-
-impl JumpEndReveal {
-    fn now(&self) -> f32 {
-        let t = (self.start.elapsed().as_secs_f32() * 1000.0 / JUMP_END_MS).clamp(0.0, 1.0);
-        let e = 1.0 - (1.0 - t).powi(3);
-        self.from + (self.to - self.from) * e
-    }
-
-    fn running(&self) -> bool {
-        (self.now() - self.to).abs() > 1e-3
-    }
-}
-
 /// What the canvas closures need, shared outside the entity so prepaint can resize.
 struct Grid {
     vt: Vt,
@@ -206,8 +182,6 @@ pub struct TerminalView {
     attach_deadline: Instant,
     /// Last `from_bottom` published via `ScrollChanged` (None = alt-screen / unset).
     published_from_bottom: Option<u64>,
-    /// Ease for the jump-to-end control (0 hidden, 1 shown).
-    jump_end_reveal: Option<JumpEndReveal>,
     _render_hold: Option<(Instant, Task<()>)>,
     _reader: Option<Task<()>>,
 }
@@ -369,7 +343,6 @@ impl TerminalView {
             search_task: None,
             attach_deadline,
             published_from_bottom: None,
-            jump_end_reveal: None,
             _render_hold: None,
             _reader: None,
         };
@@ -1093,11 +1066,6 @@ impl TerminalView {
         }
         self.published_from_bottom = from_bottom;
         cx.emit(TerminalEvent::ScrollChanged);
-    }
-
-    fn want_jump_end(&self, focused: bool) -> bool {
-        focused
-            && self.scroll_metrics().is_some_and(|m| m.from_bottom > JUMP_END_THRESHOLD)
     }
 
     /// The program tracks the mouse and Shift isn't held (Shift keeps the mouse Herdr's).
@@ -2465,22 +2433,6 @@ impl Render for TerminalView {
             format!("{} matches", search_progress.total)
         };
         let address = self.address.clone();
-        // Jump-to-end: ease in when scrolled into history on the focused pane;
-        // keep mounted while easing out so scale/fade can finish.
-        let want_jump = ended.is_none() && self.want_jump_end(focused);
-        let jump_now = self.jump_end_reveal.as_ref().map_or(0.0, JumpEndReveal::now);
-        if self.jump_end_reveal.as_ref().is_none_or(|r| (r.to - if want_jump { 1.0 } else { 0.0 }).abs() > 1e-3) {
-            self.jump_end_reveal = Some(JumpEndReveal {
-                from: jump_now,
-                to: if want_jump { 1.0 } else { 0.0 },
-                start: Instant::now(),
-            });
-        }
-        let jump_t = self.jump_end_reveal.as_ref().map_or(0.0, JumpEndReveal::now);
-        if self.jump_end_reveal.as_ref().is_some_and(JumpEndReveal::running) {
-            window.request_animation_frame();
-        }
-        let jump_end = (jump_t > 0.01).then(|| (jump_t, address.clone()));
 
         div()
             .id(SharedString::from(format!("term-{}", self.address)))
@@ -2759,37 +2711,6 @@ impl Render for TerminalView {
                         .child(format!("[{why}]")),
                 )
             })
-            .when_some(jump_end, |d, (t, address)| {
-                let size = JUMP_END_SIZE * (0.85 + 0.15 * t);
-                d.child(
-                    div()
-                        .id(SharedString::from(format!("jump-end-{address}")))
-                        .absolute()
-                        .bottom_3()
-                        .right_3()
-                        .w(px(size))
-                        .h(px(size))
-                        .flex()
-                        .items_center()
-                        .justify_center()
-                        .rounded_full()
-                        .border_1()
-                        .border_color(crate::settings::color("border"))
-                        .bg(crate::settings::color("popover"))
-                        .shadow_md()
-                        .opacity(t)
-                        .text_color(crate::settings::color("foreground"))
-                        .text_size(px(16.0))
-                        .cursor_pointer()
-                        .hover(|s| s.bg(crate::settings::color("hover")))
-                        .occlude()
-                        .on_mouse_down(MouseButton::Left, |_, _, cx| cx.stop_propagation())
-                        .on_click(cx.listener(|this, _, _, cx| {
-                            this.scroll_history(ScrollTarget::Bottom, cx);
-                        }))
-                        .child("↓"),
-                )
-            })
     }
 }
 
@@ -2810,7 +2731,7 @@ mod tests {
         assert_eq!(at_end(100, 80, 20), 0);
         assert_eq!(at_end(100, 70, 20), 10);
         assert_eq!(at_end(20, 0, 20), 0);
-        assert!(at_end(100, 0, 20) > super::JUMP_END_THRESHOLD);
+        assert_eq!(at_end(100, 0, 20), 80);
     }
 
     #[test]
