@@ -130,6 +130,7 @@ Read the generated `.d.ts` files beside it for full API details; do not edit
 those files or the generated guide. The app rewrites them on start.
 
 - `terminal_line_height` (default 1, 0.8..2) adjusts terminal rows;
+  `terminal_cell_width` (default 1, 0.8..2) adjusts terminal columns;
   `terminal_scroll_speed` (default 1, 0.1..5) adjusts wheel and trackpad
   scrolling, including mouse reports. Set them in settings.json or the
   layout's look; the layout wins.

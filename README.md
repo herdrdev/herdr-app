@@ -72,7 +72,7 @@ Remote work keeps running when your local window closes or your laptop sleeps, a
 ## Make it yours
 
 Open the command palette to find an action by name, or open Settings to change fonts, colors, sounds and other preferences.
-Settings > Look also adjusts terminal line height and scroll speed. Both default to 100%; layouts can override them with `terminal_line_height` (0.8–2) and `terminal_scroll_speed` (0.1–5).
+Settings > Look also adjusts terminal line height, cell width and scroll speed. All default to 100%; layouts can override them with `terminal_line_height` (0.8–2), `terminal_cell_width` (0.8–2) and `terminal_scroll_speed` (0.1–5).
 The built-in layouts include Herdr, Terminals and Herdr 98.
 A **layout** arranges the window. **Mods** are small JavaScript programs that draw its panels, menus and dialogs.
 
