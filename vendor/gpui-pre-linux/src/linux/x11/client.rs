@@ -37,8 +37,9 @@ use x11rb::{
     xcb_ffi::XCBConnection,
 };
 use xim::{AttributeName, Client, InputStyle, x11rb::X11rbClient};
-use xkbc::x11::ffi::{XKB_X11_MIN_MAJOR_XKB_VERSION, XKB_X11_MIN_MINOR_XKB_VERSION};
 use xkbcommon::xkb::{self as xkbc, STATE_LAYOUT_EFFECTIVE};
+
+use super::xkb::XkbX11;
 
 use super::{
     ButtonOrScroll, ScrollDirection, X11Display, X11WindowStatePtr, XcbAtoms, XimCallbackEvent,
@@ -200,6 +201,7 @@ pub struct X11ClientState {
 
     pub(crate) scale_factor: f32,
 
+    xkb_x11: XkbX11,
     xkb_context: xkbc::Context,
     pub(crate) xcb_connection: Rc<XCBConnection>,
     xkb_device_id: i32,
@@ -428,8 +430,7 @@ impl X11Connection {
 
         let xkb = get_reply(
             || "Failed to initialize XKB extension",
-            xcb_connection
-                .xkb_use_extension(XKB_X11_MIN_MAJOR_XKB_VERSION, XKB_X11_MIN_MINOR_XKB_VERSION),
+            xcb_connection.xkb_use_extension(1, 0),
         )?;
         anyhow::ensure!(xkb.supported, "X server does not support XKB");
 
@@ -457,16 +458,9 @@ impl X11Connection {
         )?;
 
         let xkb_context = new_xkb_context()?;
-        let xkb_device_id = xkbc::x11::get_core_keyboard_device_id(&xcb_connection);
-        let xkb_state = {
-            let xkb_keymap = xkbc::x11::keymap_new_from_device(
-                &xkb_context,
-                &xcb_connection,
-                xkb_device_id,
-                xkbc::KEYMAP_COMPILE_NO_FLAGS,
-            );
-            xkbc::x11::state_new_from_device(&xkb_keymap, &xcb_connection, xkb_device_id)
-        };
+        let xkb_x11 = XkbX11::load()?;
+        let xkb_device_id = xkb_x11.device_id(&xcb_connection)?;
+        let xkb_state = xkb_x11.state(&xkb_context, &xcb_connection, xkb_device_id)?;
         let compose_state = get_xkb_compose_state(&xkb_context);
         let layout_idx = xkb_state.serialize_layout(STATE_LAYOUT_EFFECTIVE);
         let layout_name = xkb_state
@@ -521,6 +515,7 @@ impl X11Connection {
                 compositor_gpu,
                 scale_factor,
 
+                xkb_x11,
                 xkb_context,
                 xcb_connection,
                 xkb_device_id,
@@ -1099,20 +1094,17 @@ impl X11Client {
             }
             Event::XkbNewKeyboardNotify(_) | Event::XkbMapNotify(_) => {
                 let mut state = self.0.borrow_mut();
-                let xkb_state = {
-                    let xkb_keymap = xkbc::x11::keymap_new_from_device(
-                        &state.xkb_context,
-                        &state.xcb_connection,
-                        state.xkb_device_id,
-                        xkbc::KEYMAP_COMPILE_NO_FLAGS,
-                    );
-                    xkbc::x11::state_new_from_device(
-                        &xkb_keymap,
-                        &state.xcb_connection,
-                        state.xkb_device_id,
-                    )
-                };
-                state.xkb = xkb_state;
+                match state.xkb_x11.state(
+                    &state.xkb_context,
+                    &state.xcb_connection,
+                    state.xkb_device_id,
+                ) {
+                    Ok(xkb_state) => state.xkb = xkb_state,
+                    Err(error) => {
+                        log::error!("Failed to update X11 keyboard: {error:#}");
+                        return None;
+                    }
+                }
                 drop(state);
                 self.handle_keyboard_layout_change();
             }

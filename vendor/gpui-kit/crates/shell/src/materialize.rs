@@ -121,7 +121,7 @@ fn materialize_factory_subtree(
 use smallvec::SmallVec;
 
 use gpui::{
-    AbsoluteLength, AnyElement, App, Bounds, DefiniteLength, InteractiveElement, IntoElement,
+    AbsoluteLength, AnyElement, App, AppContext, Bounds, DefiniteLength, InteractiveElement, IntoElement,
     Length, MouseButton, ParentElement, Pixels, Refineable as _, SharedString,
     StatefulInteractiveElement, StyleRefinement, Styled, Window, div,
 };
@@ -377,8 +377,11 @@ struct Behavior {
     /// script had no way to.
     on_mouse_down_out: Option<CallbackId>,
     on_drop: Option<CallbackId>,
+    drag_paths: Option<crate::DraggedPaths>,
     /// Wheel and trackpad scrolling over this element.
     on_scroll_wheel: Option<CallbackId>,
+    /// A trackpad pinch over this element, on platforms that report one.
+    on_pinch: Option<CallbackId>,
     /// Handlers for named actions, one entry per action listened for.
     ///
     /// A list because an element that responds to actions usually responds to
@@ -470,7 +473,7 @@ struct Behavior {
     ///
     /// [`DockChromeSlots`]: crate::dock::DockChromeSlots
     dock_chrome: crate::dock::DockChromeHooks,
-    /// The retained scroll position a `VirtualList` was told to drive.
+    /// The retained scroll position a plain area or `VirtualList` was told to drive.
     virtual_scroll: Option<crate::entities::EntityHandle>,
     /// This item's one-based position in its collection, and the collection's
     /// size — "tab 2 of 5". Announced, never drawn.
@@ -577,6 +580,7 @@ impl Behavior {
             || !self.on_mouse_up.is_empty()
             || self.on_mouse_down_out.is_some()
             || self.on_scroll_wheel.is_some()
+            || self.on_pinch.is_some()
             || self.on_hover.is_some()
     }
 
@@ -598,12 +602,14 @@ impl Behavior {
             || self.on_hover.is_some()
             || self.on_key_down.is_some()
             || self.on_drop.is_some()
+            || self.drag_paths.is_some()
             || self.on_key_up.is_some()
             || self.on_modifiers_changed.is_some()
             || !self.on_mouse_down.is_empty()
             || !self.on_mouse_up.is_empty()
             || self.on_mouse_down_out.is_some()
             || self.on_scroll_wheel.is_some()
+            || self.on_pinch.is_some()
             || !self.on_action.is_empty()
             || self.key_context.is_some()
     }
@@ -1789,6 +1795,12 @@ where
     E: StatefulInteractiveElement + ParentElement,
 {
     let mut element = element;
+    if let Some(paths) = &behavior.drag_paths {
+        element = element.on_drag(paths.clone(), |paths, cursor_offset, _, cx| {
+            cx.stop_propagation();
+            cx.new(|_| crate::drag_paths::DraggedPathsPreview { paths: paths.clone(), cursor_offset })
+        });
+    }
     if let Some(callback) = behavior.on_drop {
         let runtime = Rc::downgrade(runtime);
         element = element.on_drop(move |paths: &gpui::ExternalPaths, window, cx| {
@@ -1860,6 +1872,16 @@ where
             let bounds = Rc::clone(&bounds);
             element = element.on_mouse_down_out(move |event, window, cx| {
                 dispatch_mouse_button(&runtime, callback, event, bounds.get(), window, cx);
+            });
+        }
+        if let Some(callback) = behavior.on_pinch {
+            let runtime = Rc::downgrade(runtime);
+            let bounds = Rc::clone(&bounds);
+            element = element.on_pinch(move |event, window, cx| {
+                let Some(runtime) = runtime.upgrade() else {
+                    return;
+                };
+                runtime.dispatch_pinch(callback, event, bounds.get(), window, cx);
             });
         }
         if let Some(callback) = behavior.on_scroll_wheel {
@@ -2022,6 +2044,7 @@ fn warn_unhonoured_input(component: &Component, behavior: &Behavior) {
         ("on_key_down", behavior.on_key_down.is_some()),
         ("on_key_up", behavior.on_key_up.is_some()),
         ("on_drop", behavior.on_drop.is_some()),
+        ("drag_paths", behavior.drag_paths.is_some()),
         (
             "on_modifiers_changed",
             behavior.on_modifiers_changed.is_some(),
@@ -2030,6 +2053,7 @@ fn warn_unhonoured_input(component: &Component, behavior: &Behavior) {
         ("on_mouse_up", !behavior.on_mouse_up.is_empty()),
         ("on_mouse_down_out", behavior.on_mouse_down_out.is_some()),
         ("on_scroll_wheel", behavior.on_scroll_wheel.is_some()),
+        ("on_pinch", behavior.on_pinch.is_some()),
         ("on_action", !behavior.on_action.is_empty()),
         ("key_context", behavior.key_context.is_some()),
     ];
@@ -2154,6 +2178,7 @@ fn flex_element(
         && behavior.on_mouse_up.is_empty()
         && behavior.on_mouse_down_out.is_none()
         && behavior.on_scroll_wheel.is_none()
+        && behavior.on_pinch.is_none()
         && behavior.on_action.is_empty()
         && behavior.key_context.is_none()
         && !behavior.scroll_x
@@ -2162,6 +2187,13 @@ fn flex_element(
         return finish(element, refinement, children);
     }
 
+    // Keep script child indices ahead of the invisible geometry observers
+    // installed by pointer handlers.
+    let (element, children) = if behavior.virtual_scroll.is_some() {
+        (element.children(children), Children::new())
+    } else {
+        (element, children)
+    };
     let scroll_x = behavior.scroll_x;
     let scroll_y = behavior.scroll_y;
     // A plain element has no focus or role of its own, so GPUI's builders are
@@ -2198,6 +2230,7 @@ fn flex_element(
         });
     }
     let stateful = components::tooltip::with_tooltip(stateful, &behavior, window);
+    let scroll_handle = behavior.virtual_scroll.and_then(|handle| runtime.entities().scroll(handle));
     if behavior.scrollbar {
         let mut stateful = stateful;
         stateful.style().refine(&refinement);
@@ -2206,14 +2239,17 @@ fn flex_element(
             (true, true) => Scrollable::new(stateful, ScrollbarAxis::Both)
                 .id(identity.clone())
                 .mode(behavior.scrollbar_mode)
+                .track_scroll(scroll_handle.clone())
                 .into_any_element(),
             (true, false) => Scrollable::new(stateful, ScrollbarAxis::Horizontal)
                 .id(identity.clone())
                 .mode(behavior.scrollbar_mode)
+                .track_scroll(scroll_handle.clone())
                 .into_any_element(),
             (false, true) => Scrollable::new(stateful, ScrollbarAxis::Vertical)
                 .id(identity.clone())
                 .mode(behavior.scrollbar_mode)
+                .track_scroll(scroll_handle.clone())
                 .into_any_element(),
             (false, false) => stateful.into_any_element(),
         };
@@ -2226,15 +2262,15 @@ fn flex_element(
     // `Scrollable` owns a position of its own, on the inner area it builds.
     let stateful = match (scroll_x, scroll_y) {
         (true, true) => {
-            components::scrollbar::track_scroll_position(stateful, &identity, window, cx)
+            components::scrollbar::track_scroll_position(stateful, &identity, scroll_handle.clone(), window, cx)
                 .overflow_scroll()
         }
         (true, false) => {
-            components::scrollbar::track_scroll_position(stateful, &identity, window, cx)
+            components::scrollbar::track_scroll_position(stateful, &identity, scroll_handle.clone(), window, cx)
                 .overflow_x_scroll()
         }
         (false, true) => {
-            components::scrollbar::track_scroll_position(stateful, &identity, window, cx)
+            components::scrollbar::track_scroll_position(stateful, &identity, scroll_handle.clone(), window, cx)
                 .overflow_y_scroll()
         }
         (false, false) => stateful,
@@ -2714,6 +2750,7 @@ pub(in crate::materialize) fn resolve_ops(
                 "on_mouse_down_out" => behavior.on_mouse_down_out = Some(*id),
                 "on_drop" => behavior.on_drop = Some(*id),
                 "on_scroll_wheel" => behavior.on_scroll_wheel = Some(*id),
+                "on_pinch" => behavior.on_pinch = Some(*id),
                 "on_resize" => behavior.on_resize = Some(*id),
                 "on_size_change" => behavior.on_size_change = Some(*id),
                 "on_change" => behavior.on_change = Some(*id),
@@ -3410,6 +3447,10 @@ fn apply_behavior(behavior: &mut Behavior, name: &str, args: &[Bridged]) {
                 .first()
                 .and_then(|value| value.as_str().ok())
                 .map(SharedString::from);
+        }
+        "drag_paths" => {
+            behavior.drag_paths = args.first().and_then(|v| v.as_str().ok())
+                .and_then(|v| serde_json::from_str(v).ok());
         }
         "href" => {
             behavior.href = args

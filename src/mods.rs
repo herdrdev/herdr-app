@@ -390,6 +390,8 @@ pub enum Request {
     Run { name: String, args: Value },
     OpenOverlay { id: String, spec: Value },
     CloseOverlay { id: String },
+    /// The OS window's title; `None` restores the default.
+    SetWindowTitle(Option<String>),
     Refresh,
     /// From `herdr-app do` / `herdr-app status` (control.rs); answer on `reply`.
     Control { cmd: Value, reply: std::sync::mpsc::Sender<Value> },
@@ -606,9 +608,37 @@ pub fn publish_agents(v: Value) -> bool {
 pub fn publish_panes(v: Value) -> bool {
     publish("panes", |s| (std::mem::replace(&mut s.panes, v.clone()), v))
 }
-pub fn publish_terminals(v: Value) -> bool {
-    publish("terminals", |s| (std::mem::replace(&mut s.terminals, v.clone()), v))
+pub fn publish_terminals(mut v: Value) -> bool {
+    publish("terminals", |s| {
+        let selections: HashMap<_, _> = s.terminals.as_array().into_iter().flatten()
+            .filter_map(|t| Some((t["address"].as_str()?, t["selection"].clone()))).collect();
+        for terminal in v.as_array_mut().into_iter().flatten() {
+            terminal["selection"] = terminal["address"].as_str().and_then(|address| selections.get(address)).cloned().unwrap_or(Value::Null);
+        }
+        (std::mem::replace(&mut s.terminals, v.clone()), v)
+    })
 }
+/// Only selection changes refresh readers; output and cursor motion do not.
+pub fn publish_selection(address: &str, selection: Value) -> bool {
+    publish("terminals", |s| {
+        let old = s.terminals.clone();
+        if let Some(terminal) = s.terminals.as_array_mut().and_then(|list| list.iter_mut().find(|t| t["address"] == address)) {
+            terminal["selection"] = selection.clone();
+        }
+        (old, s.terminals.clone())
+    })
+}
+
+pub fn publish_focused_selection(selection: Value) -> bool {
+    publish("focused", |s| {
+        let old = s.focused.clone();
+        if s.focused.is_object() {
+            s.focused["selection"] = selection;
+        }
+        (old, s.focused.clone())
+    })
+}
+
 pub fn terminal_address(word: &str, source: &str) -> Option<String> {
     SNAPSHOT.with(|s| {
         let s = s.borrow();
@@ -623,8 +653,13 @@ pub fn publish_floats(v: Value) -> bool {
 pub fn publish_window(v: Value) -> bool {
     publish("window", |s| (std::mem::replace(&mut s.window, v.clone()), v))
 }
-pub fn publish_focused(v: Value) -> bool {
-    publish("focused", |s| (std::mem::replace(&mut s.focused, v.clone()), v))
+pub fn publish_focused(mut v: Value) -> bool {
+    publish("focused", |s| {
+        if v.is_object() {
+            v["selection"] = s.focused["selection"].clone();
+        }
+        (std::mem::replace(&mut s.focused, v.clone()), v)
+    })
 }
 
 #[derive(Default)]
@@ -764,9 +799,11 @@ fn exec_limit(options: Option<&HostValue>) -> Result<Duration, HostError> {
     }
 }
 
-fn run_blocking(command: &str, args: &[String], cwd: Option<String>, limit: Duration) -> Result<(i32, String, String), String> {
+pub(crate) fn run_blocking(command: &str, args: &[String], cwd: Option<String>, limit: Duration) -> Result<(i32, String, String), String> {
     use std::io::Read;
-    let mut child = crate::spawn::command(command)
+    // The core may have no `hc` link beside it (a Windows zip has only herdr-core.exe).
+    let program = if command == "hc" { crate::core_bin::path() } else { PathBuf::from(command) };
+    let mut child = crate::spawn::command(program)
         .args(args)
         .current_dir(cwd.map(PathBuf::from).unwrap_or_else(home))
         .stdin(Stdio::null())
@@ -830,25 +867,20 @@ fn run_remote_with_limit(machine: &str, command: &str, args: &[String], cwd: Opt
     Ok((code, bytes("stdout")?, bytes("stderr")?))
 }
 
-/// A program's output here, if it ran (for the app's own checks).
-pub fn run_here(command: &str, args: &[String]) -> Option<String> {
-    run_blocking(command, args, None, EXEC_LIMIT).ok().map(|(_, out, _)| out)
-}
-
 /// The agents a machine can start (`knownAgents()`), asked at most once a minute.
-fn known_agents(on: Option<String>, list: Vec<Value>) -> Value {
+fn known_agents(on: Option<String>, list: Vec<Value>) -> Result<Value, String> {
     type InstalledCache = std::collections::HashMap<Option<String>, (std::time::Instant, Vec<String>, Vec<String>)>;
     static SEEN: std::sync::Mutex<Option<InstalledCache>> = std::sync::Mutex::new(None);
     let commands: Vec<String> = list.iter().filter_map(|a| a["run"][0].as_str().map(str::to_owned)).collect();
     let cached = SEEN.lock().ok().and_then(|s| s.as_ref()?.get(&on).filter(|(at, checked, _)| at.elapsed().as_secs() < 60 && checked == &commands).map(|(_, _, v)| v.clone()));
-    let have = cached.unwrap_or_else(|| {
-        let found = crate::programs::installed(&commands, on.as_deref());
+    let have = if let Some(cached) = cached { cached } else {
+        let found = crate::programs::installed(&commands, on.as_deref())?;
         if let Ok(mut s) = SEEN.lock() {
             s.get_or_insert_with(std::collections::HashMap::new).insert(on.clone(), (std::time::Instant::now(), commands, found.clone()));
         }
         found
-    });
-    Value::Array(
+    };
+    Ok(Value::Array(
         list.into_iter()
             .map(|mut a| {
                 let run = a["run"][0].as_str().unwrap_or_default().to_owned();
@@ -856,7 +888,7 @@ fn known_agents(on: Option<String>, list: Vec<Value>) -> Value {
                 a
             })
             .collect(),
-    )
+    ))
 }
 
 /// A text file on another machine: `cat`, or `type` where there is none (Windows).
@@ -980,7 +1012,10 @@ fn module(inst: Instance, copy: u64) -> HostModule {
             std::thread::spawn(move || {
                 let _ = tx.send_blocking(known_agents(on, list));
             });
-            Ok(async move { Ok(to_host(&rx.recv().await.unwrap_or(Value::Array(Vec::new())))) })
+            Ok(async move {
+                let agents = rx.recv().await.map_err(|_| HostError::new("the agent check was lost"))?.map_err(HostError::new)?;
+                Ok(to_host(&agents))
+            })
         })
         .async_function("pickFolder", |a| {
             let prompt = a.get(0).map(from_host).and_then(|v| v.get("prompt").and_then(Value::as_str).map(str::to_owned)).unwrap_or_else(|| "Open".into());
@@ -1038,6 +1073,14 @@ fn module(inst: Instance, copy: u64) -> HostModule {
         .function("panes", reader(reads.clone(), "panes", |s| &s.panes))
         .function("setAgentOrder", |a| {
             AGENT_ORDER.with(|s| *s.borrow_mut() = strings(a.get(0)));
+            Ok(HostValue::Null)
+        })
+        .function("setWindowTitle", |a| {
+            let title = match a.get(0) {
+                Some(v) if !v.is_null() => Some(a.string(0)?.to_owned()),
+                _ => None,
+            };
+            request(Request::SetWindowTitle(title));
             Ok(HostValue::Null)
         })
         .function("terminals", reader(reads.clone(), "terminals", |s| &s.terminals))
@@ -1099,7 +1142,7 @@ fn module(inst: Instance, copy: u64) -> HostModule {
             set_shared(a.string(0)?.to_owned(), from_host(a.value(1)?));
             Ok(HostValue::Null)
         })
-        .async_function("watchFolder", |a| {
+        .cancellable_async_function("watchFolder", HostValue::Array(vec![]), |a| {
             let path = a.string(0)?.to_owned();
             Ok(async move { crate::files::next_change(path).await.map(|v| to_host(&json!(v))).map_err(HostError::new) })
         })
@@ -1204,6 +1247,17 @@ mod tests {
     use super::*;
 
     #[test]
+    fn an_input_selection_uses_the_theme_selection_colour() {
+        let mut tokens = gpui_base::SemanticThemeTokens::default();
+        tokens.colors.accent = gpui::hsla(0.1, 0.5, 0.5, 1.0);
+        tokens.colors.selection = gpui::hsla(0.6, 0.5, 0.5, 0.3);
+
+        let style = gpui_base::input::InputEditorStyle::default().resolved(&tokens);
+
+        assert_eq!(style.selection, tokens.colors.selection);
+    }
+
+    #[test]
     fn exec_timeout_defaults_caps_and_rejects_invalid_values() {
         assert_eq!(exec_limit(None).unwrap(), EXEC_LIMIT);
         assert_eq!(exec_limit(Some(&HostObject::new().field("timeout", HostValue::Null).into())).unwrap(), EXEC_LIMIT);
@@ -1214,6 +1268,38 @@ mod tests {
             assert!(exec_limit(Some(&options(ms))).is_err());
         }
         assert!(exec_limit(Some(&HostObject::new().field("timeout", "30").into())).is_err());
+    }
+
+    #[test]
+    fn hc_runs_the_core_the_app_uses_even_without_an_hc_link() {
+        const CHILD: &str = "HERDR_TEST_HC_IS_THE_CORE";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "mods::tests::hc_runs_the_core_the_app_uses_even_without_an_hc_link", "--nocapture"])
+                .env(CHILD, "1").output().unwrap();
+            assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        let dir = std::env::temp_dir().join(format!("herdr-hc-is-the-core-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        #[cfg(unix)]
+        let core = {
+            use std::os::unix::fs::PermissionsExt;
+            let core = dir.join("herdr-core");
+            std::fs::write(&core, "#!/bin/sh\necho \"the chosen core: $*\"\n").unwrap();
+            std::fs::set_permissions(&core, std::fs::Permissions::from_mode(0o755)).unwrap();
+            core
+        };
+        #[cfg(windows)]
+        let core = {
+            let core = dir.join("herdr-core.cmd");
+            std::fs::write(&core, "@echo the chosen core: %*\r\n").unwrap();
+            core
+        };
+        crate::core_bin::use_core(core);
+        let (code, stdout, stderr) = run_blocking("hc", &["ls".into()], None, Duration::from_secs(5)).unwrap();
+        assert_eq!((code, stdout.trim()), (0, "the chosen core: ls"), "{stderr}");
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[cfg(unix)]
@@ -1258,6 +1344,23 @@ mod tests {
         list.record("focused", &revisions);
         revisions.insert("focused", 1);
         assert!(list.changed(&revisions));
+    }
+
+    #[test]
+    fn selection_snapshots_survive_core_refresh() {
+        std::thread::spawn(|| {
+            let list = json!([{"address":"t1"}, {"address":"t2"}]);
+            publish_terminals(list.clone());
+            let selection = json!({"start":{"row":5,"col":2},"end":{"row":1,"col":8}});
+            publish_selection("t1", selection.clone());
+            publish_terminals(list);
+            SNAPSHOT.with_borrow(|s| {
+                assert_eq!(s.terminals[0]["selection"], selection);
+                assert_eq!(s.terminals[1]["selection"], Value::Null);
+            });
+            publish_selection("t1", Value::Null);
+            SNAPSHOT.with_borrow(|s| assert_eq!(s.terminals[0]["selection"], Value::Null));
+        }).join().unwrap();
     }
 
     #[test]
@@ -1332,11 +1435,11 @@ mod tests {
     #[test]
     fn known_agents_uses_snapshot_and_refreshes_changed_commands() {
         let snapshot = vec![json!({"key": "claude", "run": ["herdr_issue57_not_installed"]})];
-        let first = std::thread::spawn(move || known_agents(None, snapshot)).join().unwrap();
+        let first = std::thread::spawn(move || known_agents(None, snapshot)).join().unwrap().unwrap();
         assert_eq!(first[0]["run"], json!(["herdr_issue57_not_installed"]));
         assert_eq!(first[0]["installed"], false);
         let snapshot = vec![json!({"key": "claude", "run": ["printf"]}), json!({"key": "claude-alt", "run": ["printf"]})];
-        let next = std::thread::spawn(move || known_agents(None, snapshot)).join().unwrap();
+        let next = std::thread::spawn(move || known_agents(None, snapshot)).join().unwrap().unwrap();
         assert_eq!(next.as_array().unwrap().len(), 2);
         assert_eq!(next[0]["installed"], true);
         assert_eq!(next[1]["key"], "claude-alt");
@@ -1345,7 +1448,7 @@ mod tests {
 
     #[test]
     fn shared_bursts_persist_only_complete_snapshots_and_finish_at_final_state() {
-        let root = if cfg!(target_os = "linux") { PathBuf::from("/var/tmp") } else { std::env::temp_dir() };
+        let root = if cfg!(target_os = "linux") { crate::test_tmp() } else { std::env::temp_dir() };
         let dir = root.join(format!("herdr-shared-stress-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("shared.json");
@@ -1386,7 +1489,7 @@ mod tests {
 
     #[test]
     fn corrupt_shared_file_is_kept_before_starting_empty() {
-        let root = if cfg!(target_os = "linux") { PathBuf::from("/var/tmp") } else { std::env::temp_dir() };
+        let root = if cfg!(target_os = "linux") { crate::test_tmp() } else { std::env::temp_dir() };
         let dir = root.join(format!("herdr-shared-corrupt-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         let path = dir.join("shared.json");
