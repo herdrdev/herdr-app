@@ -20,8 +20,9 @@ const ICON: &[u8] = include_bytes!("../assets/icons/herdr-ui-icon-clean.png");
 const APP_INSTALL: &str = "curl -fsSL https://releases.herdr.dev/app/install.sh | sh";
 #[cfg(windows)]
 const APP_INSTALL: &str = "powershell -c \"irm https://releases.herdr.dev/app/install.ps1 | iex\"";
+const LINUX_CORE_INSTALL: &str = "curl -fsSL https://releases.herdr.dev/core/install.sh | sh";
 #[cfg(not(windows))]
-const CORE_INSTALL: &str = "curl -fsSL https://releases.herdr.dev/core/install.sh | sh";
+const CORE_INSTALL: &str = LINUX_CORE_INSTALL;
 #[cfg(windows)]
 const CORE_INSTALL: &str = "powershell -c \"irm https://releases.herdr.dev/core/install.ps1 | iex\"";
 const CORE_PLACE: &str = if cfg!(windows) { r"%LOCALAPPDATA%\Programs\herdr-core" } else { "~/.local/bin" };
@@ -87,47 +88,38 @@ pub fn open(need: Need, requests: async_channel::Receiver<Request>, cx: &mut App
 }
 
 impl Setup {
-    /// Connects to the core; if it serves this app, closes this window and
-    /// opens the main one, else says what's still needed.
+    /// All discovery, version probes and connection handshakes run off the UI thread.
     fn start(&mut self, window: &mut Window, cx: &mut Context<Self>) {
-        match Core::connect() {
-            Ok(core) => match crate::hc::check(&core.hello) {
-                Ok(()) => {
-                    let Some(requests) = self.requests.take() else { return };
-                    window.remove_window();
-                    crate::open_main(core, requests, cx);
-                    return;
-                }
-                Err(m) => {
-                    self.need = Need::Fix(m);
-                    self.state = State::Ready;
-                }
-            },
-            Err(e) => {
-                self.need = Need::connection(e);
-                self.state = State::Ready;
-            }
-        }
-        cx.notify();
+        self.run("Connecting to herdr-core…", || Ok(None), window, cx);
     }
 
-    /// Runs `work` off the UI thread, then `start` again (or shows the error).
-    fn run(&mut self, label: &'static str, work: fn() -> Result<Option<PathBuf>, String>, window: &mut Window, cx: &mut Context<Self>) {
+    /// Runs `work` and reconnects off the UI thread, then applies the result once.
+    fn run(&mut self, label: &'static str, work: impl FnOnce() -> Result<Option<PathBuf>, String> + Send + 'static, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.state, State::Busy(_)) { return; }
         self.state = State::Busy(label);
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
-            let result = cx.background_executor().spawn(async move { work() }).await;
-            let _ = this.update_in(cx, |this, window, cx| match result {
-                Ok(bin) => {
-                    if let Some(bin) = bin {
-                        crate::core_bin::use_core(bin);
+            let result = cx.background_executor().spawn(async move {
+                work().map(|bin| {
+                    if let Some(bin) = bin { crate::core_bin::use_core(bin); }
+                    connect()
+                })
+            }).await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                match result {
+                    Ok(Ok(core)) => {
+                        let Some(requests) = this.requests.take() else { return; };
+                        window.remove_window();
+                        crate::open_main(core, requests, cx);
+                        return;
                     }
-                    this.start(window, cx);
+                    Ok(Err(need)) => {
+                        this.need = need;
+                        this.state = State::Ready;
+                    }
+                    Err(error) => this.state = State::Failed(error),
                 }
-                Err(e) => {
-                    this.state = State::Failed(e);
-                    cx.notify();
-                }
+                cx.notify();
             });
         })
         .detach();
@@ -142,37 +134,59 @@ impl Setup {
     }
 
     fn choose(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if matches!(self.state, State::Busy(_)) { return; }
+        self.state = State::Busy("Choosing herdr-core…");
+        cx.notify();
         let paths = cx.prompt_for_paths(PathPromptOptions { files: true, directories: false, multiple: false, prompt: Some("Use this herdr-core".into()) });
         cx.spawn_in(window, async move |this, cx| {
-            let Ok(Ok(Some(paths))) = paths.await else { return };
-            let Some(bin) = paths.into_iter().next() else { return };
+            let paths = paths.await;
             let _ = this.update_in(cx, |this, window, cx| {
-                if crate::core_bin::version(&bin).is_none() {
-                    this.state = State::Failed(format!("{} isn't herdr-core (it should answer `--version` with `hc …`)", bin.display()));
-                    cx.notify();
-                    return;
-                }
-                // Remembered: next time Herdr looks there first.
-                let mut person = settings::load_person().unwrap_or_default();
-                person.core = Some(bin.to_string_lossy().into_owned());
-                let _ = settings::write_person(&person);
-                crate::core_bin::use_core(bin);
-                this.start(window, cx);
+                this.state = State::Ready;
+                cx.notify();
+                let Ok(Ok(Some(paths))) = paths else { return; };
+                let Some(bin) = paths.into_iter().next() else { return; };
+                this.run("Checking herdr-core…", move || choose_core(bin).map(Some), window, cx);
             });
         })
         .detach();
     }
 
+    fn use_windows(&mut self, cx: &mut Context<Self>) {
+        let result = settings::load_person().and_then(|mut person| {
+            person.wsl = None;
+            settings::write_person(&person).map_err(|e| e.to_string())
+        });
+        if let Err(e) = result {
+            self.state = State::Failed(format!("Cannot save settings: {e}"));
+            cx.notify();
+            return;
+        }
+        if !crate::update::relaunch() {
+            self.state = State::Failed("Cannot restart Herdr. Close and reopen it to continue without WSL.".into());
+            cx.notify();
+            return;
+        }
+        cx.quit();
+    }
+
     /// Title, what's going on, and the line under the buttons.
     fn words(&self) -> (String, String, String) {
+        let wsl = crate::wsl::active();
+        let (place, installer) = if wsl.is_some() { ("~/.local/bin", LINUX_CORE_INSTALL) } else { (CORE_PLACE, CORE_INSTALL) };
         match &self.need {
             Need::Install => (
-                "Herdr needs herdr-core".into(),
-                "herdr-core runs your terminals and agents, and keeps them alive when this window closes. Herdr couldn't find it on this computer.".into(),
-                format!("Install it for me puts it in {CORE_PLACE} (with hc), like its own installer: {CORE_INSTALL}"),
+                match wsl {
+                    Some(d) => format!("Herdr needs herdr-core in {d}"),
+                    None => "Herdr needs herdr-core".into(),
+                },
+                match wsl {
+                    Some(d) => format!("herdr-core runs your terminals and agents, and keeps them alive when this window closes. Herdr couldn't find it in WSL ({d})."),
+                    None => "herdr-core runs your terminals and agents, and keeps them alive when this window closes. Herdr couldn't find it on this computer.".into(),
+                },
+                format!("Install it for me puts it in {place} (with hc), like its own installer: {installer}"),
             ),
             Need::Connect(error) => (
-                "Herdr can't connect to herdr-core".into(),
+                wsl.map_or_else(|| "Herdr can't connect to herdr-core".into(), |d| format!("Herdr can't reach WSL ({d}) or its herdr-core")),
                 error.clone(),
                 "Once you've resolved this, try again.".into(),
             ),
@@ -195,6 +209,37 @@ impl Setup {
     }
 }
 
+/// Blocking setup work, shared by retry, install, update and file selection.
+fn connect() -> Result<Arc<Core>, Need> {
+    if crate::wsl::active().is_some() {
+        let configured = settings::load_person().ok().and_then(|p| p.core);
+        let bin = crate::core_bin::find(configured.as_deref())
+            .map_err(Need::Connect)?.ok_or(Need::Install)?;
+        crate::core_bin::use_core(bin);
+    }
+    let core = Core::connect().map_err(Need::connection)?;
+    crate::hc::check(&core.hello).map_err(Need::Fix)?;
+    Ok(core)
+}
+
+fn choose_core(bin: PathBuf) -> Result<PathBuf, String> {
+    let bin = PathBuf::from(crate::wsl::linux_path_if_active(&bin)?);
+    let version = if crate::wsl::active().is_some() {
+        crate::wsl::version(&bin)?
+    } else {
+        crate::core_bin::version(&bin)
+    };
+    if version.is_none() {
+        return Err(format!("{} isn't herdr-core (it should answer `--version` with `hc …`)", bin.display()));
+    }
+    // Remember only a validated executable, leaving the previous choice on failure.
+    settings::load_person().and_then(|mut person| {
+        person.core = Some(bin.to_string_lossy().into_owned());
+        settings::write_person(&person).map_err(|e| e.to_string())
+    }).map_err(|e| format!("Cannot save settings: {e}"))?;
+    Ok(bin)
+}
+
 fn button(id: &'static str, label: &'static str, primary: bool) -> Stateful<Div> {
     div()
         .id(id)
@@ -215,21 +260,29 @@ impl Render for Setup {
     fn render(&mut self, _window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
         let busy = matches!(self.state, State::Busy(_));
         let (title, body, foot) = self.words();
+        let wsl = crate::wsl::active().is_some();
         let actions = match &self.need {
             Need::Install => div()
                 .flex()
                 .gap(px(10.0))
                 .child(button("install", "Install it for me", true).when(!busy, |d| d.on_click(cx.listener(|this, _, w, cx| this.install(w, cx)))))
-                .child(button("choose", "I have it somewhere…", false).when(!busy, |d| d.on_click(cx.listener(|this, _, w, cx| this.choose(w, cx))))),
-            Need::Connect(_) => div().child(button("retry", "Retry", true).on_click(cx.listener(|this, _, w, cx| this.start(w, cx)))),
+                .child(button("choose", "I have it somewhere…", false).when(!busy, |d| d.on_click(cx.listener(|this, _, w, cx| this.choose(w, cx)))))
+                .when(wsl, |d| d.child(button("use-windows", "Continue without WSL", false).when(!busy, |d| d.on_click(cx.listener(|this, _, _, cx| this.use_windows(cx)))))),
+            Need::Connect(_) => div()
+                .flex()
+                .gap(px(10.0))
+                .child(button("retry", "Retry", true).when(!busy, |d| d.on_click(cx.listener(|this, _, w, cx| this.start(w, cx)))))
+                .when(wsl, |d| d.child(button("use-windows", "Continue without WSL", false).when(!busy, |d| d.on_click(cx.listener(|this, _, _, cx| this.use_windows(cx)))))),
             Need::Fix(Mismatch::Newer { .. }) => div()
                 .flex()
                 .gap(px(10.0))
-                .child(button("quit", "Quit", false).on_click(cx.listener(|_, _, _, cx| cx.quit()))),
+                .child(button("quit", "Quit", false).on_click(cx.listener(|_, _, _, cx| cx.quit())))
+                .when(wsl, |d| d.child(button("use-windows", "Continue without WSL", false).on_click(cx.listener(|this, _, _, cx| this.use_windows(cx))))),
             Need::Fix(_) => div()
                 .flex()
                 .gap(px(10.0))
-                .child(button("update", "Update herdr-core", true).when(!busy, |d| d.on_click(cx.listener(|this, _, w, cx| this.update(w, cx))))),
+                .child(button("update", "Update herdr-core", true).when(!busy, |d| d.on_click(cx.listener(|this, _, w, cx| this.update(w, cx)))))
+                .when(wsl, |d| d.child(button("use-windows", "Continue without WSL", false).when(!busy, |d| d.on_click(cx.listener(|this, _, _, cx| this.use_windows(cx)))))),
         };
         div()
             .size_full()
@@ -250,8 +303,10 @@ impl Render for Setup {
                             .flex()
                             .items_center()
                             .gap(px(14.0))
-                            .child(img(self.icon.clone()).w(px(48.0)).h(px(48.0)))
-                            .child(div().text_size(px(22.0)).font_weight(FontWeight::SEMIBOLD).child(title)),
+                            .child(img(self.icon.clone()).w(px(48.0)).h(px(48.0)).flex_shrink_0())
+                            // Constrain the title to the space beside the icon so long
+                            // WSL distro names wrap instead of widening the whole row.
+                            .child(div().flex_1().min_w_0().text_size(px(22.0)).font_weight(FontWeight::SEMIBOLD).child(title)),
                     )
                     .child(div().text_size(px(14.0)).line_height(px(21.0)).text_color(c("muted")).child(body))
                     .child(actions)

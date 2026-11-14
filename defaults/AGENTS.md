@@ -661,7 +661,9 @@ The main ones:
   `app.check_updates` (only a successful check reports Up to date; a failed check clears the checked time and can be retried), `app.update_core` (a newer herdr-core of this generation, terminals kept;
   never one a package manager owns), `app.welcome`, `app.whats_new`, `app.feedback {message?, from?}` (from `"person"` or `"agent"`; opens a review window, where the person can paste up to 3 screenshots; never sends until the person clicks Send), `app.reset`,
   `app.theme {name}`, `app.zoom_in`, `app.zoom_out`, `app.zoom_reset`,
-  `app.update` (restart into a downloaded update).
+  `app.update` (restart into a downloaded update),
+  `app.restart` (save layout documents and restart without requiring an update;
+  terminals keep running).
   Add machine lists all named ssh-config hosts in a scrollable list. Machines
   that need a password, a new host key or herdr-core installed show what to run
   in your own terminal; the picker updates once it is added. Other machines are
@@ -715,6 +717,34 @@ What's about the user, never a look:
 - `core`: the herdr-core binary to use, when it isn't where Herdr looks
   (PATH, the login shell's PATH, `~/.local/bin`, Homebrew, mise, Nix,
   cargo). Read at start.
+- `wsl`: Windows only, the WSL distribution name (such as `"Ubuntu"`) that
+  runs "This computer": its herdr-core (`hc`), local spaces, terminals,
+  agents, shell and local mod commands (`home()`, `exec`, `files`). Absent
+  uses Windows itself. Available in Settings → Machines on the This computer
+  row. Choose Restart (or run `app.restart`) to apply a selection; no
+  downloaded update is needed. Until then the current environment stays
+  active. The app and its
+  configuration (`appHome()`) stay on Windows. Startup discovery distinguishes
+  an unreachable distribution (retry after it starts) from missing hc (install
+  it in that distribution). Environment probes retry after
+  a five-second failure backoff; WSL discovery, path conversion, installation
+  and version checks stop after 30 seconds instead of waiting indefinitely.
+  Setup retries and executable checks run in the background; while one is pending,
+  Setup shows progress and prevents duplicate actions without blocking the window.
+  Successful path conversions are cached (up to 512 entries per process);
+  restarting clears the cache. Guest paths still use the direct fast path.
+  WSL file links expand only `$HOME` and `$PWD`, never Windows environment
+  variables. Local `file://` links resolve in the selected distribution too.
+  `HC_SESSION` is passed explicitly to guest commands, preserving the selected core session.
+  Settings reports distro-list failures without clearing your selection.
+  After three failed WSL reconnects, a Waiting for WSL notification appears;
+  retries back off from one to at most five seconds between attempts.
+  Choosing a distribution saves it at once; the next start applies it, and
+  Setup then installs `hc` in it (Install it for me) or offers Retry, with
+  Continue without WSL on every screen. WSL stops an idle distribution after
+  15 seconds (`instanceIdleTimeout` in `.wslconfig`; set it to -1 to keep one
+  running), so closing the window ends that distribution's terminals, like
+  `wsl --shutdown`.
 - `worktrees`: `{ "directory": "~/Developer/worktrees" }` sets where the shipped
   New worktree dialog creates checkouts: `<directory>/<repo>/<branch>` (branch
   slashes become dashes). Default: `~/.herdr/worktrees`. Use an absolute path or
@@ -1101,7 +1131,16 @@ All of it is in `herdr.d.ts`. In short:
 - Files: `readTextFile(path, { on })` (here, or on that machine),
   `writeTextFile(path, text, expected)` (here only), and
   `watchFolder(dir)` (here only; poll a remote space's folder): resolves with the changed paths the next time anything
-  under `dir` changes. On Linux, Git-ignored directories and Git objects are skipped,
+  under `dir` changes. With WSL active, local guest paths stay Linux paths for reads,
+  writes, the folder picker and watch results; `appHome()` paths remain on Windows.
+  Host paths use the selected distro's actual mount configuration, not a guessed `/mnt/c`.
+  Guest writes run inside the distribution, preserving POSIX permission bits and symlinks
+  and rejecting stale editor contents. Guest paths containing a literal backslash, `..`,
+  or a name ending in a space or period cannot be watched through the Windows file API;
+  use `exec` in the guest for those watches.
+  Reads use a bounded guest command for those paths so Windows cannot redirect them to a different file;
+  invalid UTF-8 and read errors are reported rather than treated as missing files.
+  On Linux, Git-ignored directories and Git objects are skipped,
   and trees above 4096 non-ignored directories reject the watch; use a timer fallback.
   macOS and Windows watch recursively, including ignored directories.
   A returned root path means refresh everything (the pending paths are bounded).

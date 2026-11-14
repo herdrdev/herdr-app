@@ -93,6 +93,18 @@ pub fn read_with(
     }
 }
 
+fn write_in_namespace(path: &Path, text: &str, expected: Option<&str>, distro: Option<&str>) -> Result<(), String> {
+    if let Some(guest) = distro.and_then(|d| crate::wsl::guest_path(path, d)) {
+        let _guard = WRITES.lock().map_err(|e| e.to_string())?;
+        if text.len() as u64 > LIMIT || expected.is_some_and(|s| s.len() as u64 > LIMIT) {
+            return Err("Text file exceeds 1 MiB".into());
+        }
+        crate::wsl::write_text(&guest, text, expected)
+    } else {
+        write(path, text, expected)
+    }
+}
+
 pub fn write_text(
     path: String,
     text: String,
@@ -100,13 +112,15 @@ pub fn write_text(
 ) -> impl std::future::Future<Output = Result<HostValue, HostError>> + Send {
     let (tx, rx) = async_channel::bounded(1);
     std::thread::spawn(move || {
-        let _ = tx.send_blocking(write(Path::new(&path), &text, expected.as_deref()));
+        // Guest writes must retain POSIX permissions; do not save through UNC.
+        let _ = tx.send_blocking(write_in_namespace(Path::new(&path), &text, expected.as_deref(), crate::wsl::active()));
     });
     async move {
         rx.recv()
             .await
             .map_err(|e| HostError::new(e.to_string()))?
             .map_err(HostError::new)?;
+        crate::mods::request(crate::mods::Request::Refresh);
         Ok(HostValue::Null)
     }
 }
@@ -114,6 +128,14 @@ pub fn write_text(
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn guest_write_paths_preserve_linux_names_and_leave_host_files_native() {
+        let host = Path::new(r"C:\Herdr\settings.json");
+        let literal = Path::new(r"/home/alice/back\slash.txt");
+        assert_eq!(crate::wsl::guest_path(host, "Ubuntu"), None);
+        assert_eq!(crate::wsl::guest_path(literal, "Ubuntu").as_deref(), literal.to_str());
+    }
+
     #[test]
     fn creates_updates_and_rejects_stale_text() {
         let root = crate::test_tmp().join(format!(

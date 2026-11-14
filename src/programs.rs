@@ -102,7 +102,7 @@ pub fn installed(commands: &[String], on: Option<&str>) -> Result<Vec<String>, S
             };
             result.map(|(code, out, err)| (code, String::from_utf8_lossy(&out).into_owned(), String::from_utf8_lossy(&err).into_owned()))
         }
-        None if cfg!(windows) => {
+        None if cfg!(windows) && crate::wsl::active().is_none() => {
             // The core refreshes user/system PATH; the app may have inherited only the system PATH.
             let mut args = vec!["exec".into(), "--".into(), crate::window::shell()];
             args.extend(installed_powershell(commands));
@@ -111,7 +111,7 @@ pub fn installed(commands: &[String], on: Option<&str>) -> Result<Vec<String>, S
         None => {
             let shell = crate::window::shell();
             let line = installed_line(commands, base(&shell) == "fish");
-            let mode = if cfg!(target_os = "macos") { "-lic" } else { "-ic" };
+            let mode = if cfg!(target_os = "macos") || crate::wsl::active().is_some() { "-lic" } else { "-ic" };
             crate::mods::run_blocking(&shell, &[mode.into(), line], None, std::time::Duration::from_secs(30))
         }
     };

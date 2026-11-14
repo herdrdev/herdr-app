@@ -231,6 +231,7 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
             let first = a.get(0).map(from_host).unwrap_or(Value::Null);
             let reply = match name {
                 "readTextFile" if first == "/fixture/app/settings.json" || first == "/fixture/.ssh/config" => Some(Value::Null),
+                "writeTextFile" if first == "/fixture/app/settings.json" => Some(Value::Null),
                 "readTextFile" => first
                     .as_str()
                     .and_then(|p| p.strip_prefix("/fixture/app/layouts/"))
@@ -246,6 +247,9 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
                 // The files panel lists a folder with sh: kind and name pairs.
                 "exec" if first == "sh" && a.get(1).map(from_host).and_then(|v| v.get(2).cloned()) == Some(json!("files")) => {
                     Some(json!({"code":0,"stdout":"d\u{0}src\u{0}f\u{0}README.md\u{0}","stderr":""}))
+                }
+                "exec" if first == "wsl.exe" && a.get(1).map(from_host) == Some(json!(["--list", "--quiet"])) => {
+                    Some(json!({"code":0,"stdout":"Ubuntu\nDebian\ndocker-desktop\n","stderr":""}))
                 }
                 "exec"
                     if first == "git"
@@ -1239,4 +1243,164 @@ fn status_bar_shows_the_real_palette_key(cx: &mut TestAppContext) {
     let tree = describe_with_values(cx, &staged, "mods/workspace-status", unbound, None).unwrap();
     assert!(tree.contains("commands"), "unbound hint still offers commands: {tree}");
     assert!(!tree.contains("Shift P"), "unbound hint must not invent a key: {tree}");
+}
+
+#[gpui::test]
+fn settings_machines_shows_wsl_distros_on_windows(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut p = props();
+    p["section"] = json!("machines");
+    let mut values = fixture(true, p, updates("current", "current"));
+    values.get_mut("window").unwrap()["platform"] = json!("windows");
+    let calls = Rc::new(RefCell::new(Calls::default()));
+    let policy = Policy::new().with_host_module(module(values, calls.clone())).unwrap();
+    let root = staged.wrapper(
+        "frame/settings",
+        "this.picking = 'wsl'; cx.spawn(async (cx) => { await this.loadMachines(); this.selectWsl('Debian', cx); });",
+    );
+    let window = cx.add_window(|_, _| Empty);
+    let mut session = window
+        .update(cx, |_, window, cx| {
+            DescriptionSession::load(ShellRuntime::new_isolated().unwrap(), root, policy, window, cx).unwrap()
+        })
+        .unwrap();
+    cx.run_until_parked();
+    let tree = window
+        .update(cx, |_, window, cx| {
+            let tree = session.describe(window, cx).unwrap();
+            window.remove_window();
+            tree
+        })
+        .unwrap();
+    assert!(calls.borrow().unexpected.is_empty(), "{:?}", calls.borrow().unexpected);
+    assert!(tree.contains("st-wsl-button"), "WSL dropdown button must render on This computer: {tree}");
+    // The hint only appears once settings.json accepted the choice (save sets person.wsl).
+    assert!(tree.contains("Restart to switch to Debian"), "the chosen distro must be saved and offered a restart: {tree}");
+
+    // Opening the dropdown lists Windows, Ubuntu, and Debian (excluding docker-desktop),
+    // and selecting Ubuntu shows the Restart button once hc is verified.
+    let mut p2 = props();
+    p2["section"] = json!("machines");
+    let mut values2 = fixture(true, p2, updates("current", "current"));
+    values2.get_mut("window").unwrap()["platform"] = json!("windows");
+    let calls2 = Rc::new(RefCell::new(Calls::default()));
+    let policy2 = Policy::new().with_host_module(module(values2, calls2.clone())).unwrap();
+    let root2 = staged.wrapper(
+        "frame/settings",
+        "this.picking = 'wsl'; cx.spawn(async (cx) => { await this.loadMachines(); this.selectWsl('Ubuntu', cx); });",
+    );
+    let window2 = cx.add_window(|_, _| Empty);
+    let mut session2 = window2
+        .update(cx, |_, window, cx| {
+            DescriptionSession::load(ShellRuntime::new_isolated().unwrap(), root2, policy2, window, cx).unwrap()
+        })
+        .unwrap();
+    cx.run_until_parked();
+    let tree2 = window2
+        .update(cx, |_, window, cx| {
+            let tree = session2.describe(window, cx).unwrap();
+            window.remove_window();
+            tree
+        })
+        .unwrap();
+    assert!(calls2.borrow().unexpected.is_empty(), "{:?}", calls2.borrow().unexpected);
+    assert!(tree2.contains("st-wsl-restart"), "Restart button must render after selecting Ubuntu: {tree2}");
+    assert!(tree2.contains("Restart to switch to Ubuntu"), "Restart hint must render: {tree2}");
+
+    // Opening the dropdown lists Windows, Ubuntu, and Debian (excluding docker-desktop).
+    let mut p3 = props();
+    p3["section"] = json!("machines");
+    let mut values3 = fixture(true, p3, updates("current", "current"));
+    values3.get_mut("window").unwrap()["platform"] = json!("windows");
+    let calls3 = Rc::new(RefCell::new(Calls::default()));
+    let policy3 = Policy::new().with_host_module(module(values3, calls3.clone())).unwrap();
+    let root3 = staged.wrapper("frame/settings", "this.picking = 'wsl';");
+    let window3 = cx.add_window(|_, _| Empty);
+    let mut session3 = window3
+        .update(cx, |_, window, cx| {
+            DescriptionSession::load(ShellRuntime::new_isolated().unwrap(), root3, policy3, window, cx).unwrap()
+        })
+        .unwrap();
+    cx.run_until_parked();
+    let tree3 = window3
+        .update(cx, |_, window, cx| {
+            let tree = session3.describe(window, cx).unwrap();
+            window.remove_window();
+            tree
+        })
+        .unwrap();
+    assert!(calls3.borrow().unexpected.is_empty(), "{:?}", calls3.borrow().unexpected);
+    assert!(
+        tree3.contains("Popup \"st-wsl-popover\"") && tree3.contains("@trigger") && tree3.contains("@content"),
+        "dropdown must open in an anchored Popup attached to its trigger button: {tree3}"
+    );
+    assert!(tree3.contains("st-wsl-list"), "dropdown list must render when picking='wsl': {tree3}");
+    let list_line = tree3.lines().find(|l| l.contains("st-wsl-list")).unwrap();
+    assert!(!list_line.contains(".w_full"), "dropdown popover must not stretch w_full: {list_line}");
+    assert!(tree3.contains("st-wsl-windows"), "Windows option must render: {tree3}");
+    assert!(tree3.contains("st-wsl-Ubuntu") && tree3.contains("Ubuntu (WSL)"), "Ubuntu (WSL) option must render: {tree3}");
+    assert!(tree3.contains("st-wsl-Debian") && tree3.contains("Debian (WSL)"), "Debian (WSL) option must render: {tree3}");
+    assert!(!tree3.contains("docker-desktop"), "docker-desktop must be filtered out: {tree3}");
+
+    // A saved but not yet applied choice keeps the picker and the active connection visible.
+    let mut p4 = props();
+    p4["section"] = json!("machines");
+    let mut values4 = fixture(true, p4, updates("current", "current"));
+    values4.get_mut("window").unwrap()["platform"] = json!("windows");
+    let tree4 = describe_with_values(
+        cx,
+        &staged,
+        "frame/settings",
+        values4,
+        Some("this.wslDistros = ['Ubuntu']; this.person.wsl = 'Ubuntu';"),
+    )
+    .unwrap();
+    assert!(tree4.contains("Restart to switch to Ubuntu"), "pending distro must be explicit: {tree4}");
+    assert!(tree4.contains("st-wsl-button") && tree4.contains("Ubuntu (WSL)"), "selector must show the saved choice: {tree4}");
+    assert!(tree4.contains("Connected · hc"), "active connection must remain visible: {tree4}");
+    let mut local_lines = tree4.lines().skip_while(|line| !line.contains("st-local-machine"));
+    let local_row = local_lines.next().expect("This computer row");
+    let indent = local_row.len() - local_row.trim_start().len();
+    let local = local_lines.take_while(|line| line.len() - line.trim_start().len() > indent).collect::<Vec<_>>().join("\n");
+    assert!(local.contains(".w[Number(7.0)] .h[Number(7.0)]"), "This computer's status dot must remain visible: {local}");
+}
+
+#[gpui::test]
+fn settings_wsl_list_error_keeps_selected_or_active_picker(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for active in [false, true] {
+        let mut p = props();
+        p["section"] = json!("machines");
+        let mut values = fixture(true, p, updates("current", "current"));
+        values.get_mut("window").unwrap()["platform"] = json!("windows");
+        values.get_mut("settings").unwrap()["wsl"] = if active { json!("Ubuntu") } else { Value::Null };
+        let setup = format!("this.wslDistros = []; this.person.wsl = {}; this.wslListError = \"Couldn't list WSL distros: unavailable\";", if active { "null" } else { "'Ubuntu'" });
+        let tree = describe_with_values(cx, &staged, "frame/settings", values, Some(&setup)).unwrap();
+        assert!(tree.contains("Couldn't list WSL distros: unavailable"), "list failure must be visible: {tree}");
+        assert!(tree.contains("st-wsl-button"), "selected or active WSL must keep the picker: {tree}");
+    }
+}
+
+#[gpui::test]
+fn settings_wsl_distinguishes_active_and_pending_distros(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut p = props();
+    p["section"] = json!("machines");
+    let mut values = fixture(true, p, updates("current", "current"));
+    values.get_mut("window").unwrap()["platform"] = json!("windows");
+    values.get_mut("settings").unwrap()["wsl"] = json!("Ubuntu");
+    values.get_mut("updates").unwrap()["core"]["version"] = Value::Null;
+    let tree = describe_with_values(
+        cx,
+        &staged,
+        "frame/settings",
+        values,
+        Some("this.wslDistros = ['Ubuntu', 'Debian']; this.person.wsl = 'Debian';"),
+    ).unwrap();
+    assert!(tree.contains("WSL (Ubuntu)"), "active distro remains Ubuntu until restart: {tree}");
+    assert!(tree.contains("Restart to switch to Debian"), "pending distro must be explicit even before core version arrives: {tree}");
+    assert!(tree.contains("st-wsl-restart"), "restart must not depend on the core version check: {tree}");
 }

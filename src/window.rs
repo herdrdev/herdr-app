@@ -100,6 +100,9 @@ fn mtime(p: &std::path::Path) -> Option<SystemTime> {
 }
 
 pub fn shell() -> String {
+    if let Some(sh) = crate::wsl::shell() {
+        return sh;
+    }
     if cfg!(windows) {
         let path = std::env::var_os("PATH").unwrap_or_default();
         return std::env::split_paths(&path)
@@ -757,13 +760,27 @@ impl AppWindow {
                 core.closed().await;
                 tracing::warn!("lost the core; reconnecting");
                 crate::telemetry::count("core_lost");
+                let mut failures = 0u32;
+                let notice = crate::wsl::active().map(|_| mods::new_overlay_id());
                 let fresh = loop {
-                    cx.background_executor().timer(Duration::from_millis(1000)).await;
+                    let (delay, message) = reconnect_wait(crate::wsl::active(), failures);
+                    if failures == 3 && let (Some(message), Some(id)) = (message, notice.as_ref()) {
+                        if this.update_in(cx, |this, window, cx| {
+                            this.open_overlay(id.clone(), json!({"kind":"toast", "notification":{
+                                "title":message, "body":"Herdr will reconnect automatically. Your last layout is kept.", "level":"warning"
+                            }}), window, cx);
+                        }).is_err() { return; }
+                    }
+                    cx.background_executor().timer(delay).await;
                     if let Ok(core) = cx.background_executor().spawn(async { Core::connect() }).await {
                         break core;
                     }
+                    failures = failures.saturating_add(1);
                 };
-                if this.update(cx, |this, cx| this.reconnected(fresh, cx)).is_err() {
+                if this.update_in(cx, |this, window, cx| {
+                    if let Some(id) = &notice { this.close_overlay(id, window, cx); }
+                    this.reconnected(fresh, cx);
+                }).is_err() {
                     break;
                 }
             }
@@ -909,8 +926,9 @@ impl AppWindow {
     }
 
     fn reload_config(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let first_load = self.watched.settings.is_none();
         let s_time = mtime(&settings::path());
-        if s_time.is_none() || s_time != self.watched.settings {
+        if first_load || s_time.is_none() || s_time != self.watched.settings {
             let loaded = settings::load_person();
             crate::telemetry::set_setting(settings::telemetry_setting(&loaded));
             match loaded {
@@ -2334,8 +2352,8 @@ impl AppWindow {
                 .and_then(|f| f.get("cwd"))
                 .and_then(Value::as_str)
                 .map(str::to_owned)
-                // (a pid on another machine means nothing here)
-                .or_else(|| rec.get("pid").and_then(Value::as_u64).filter(|_| !addr.contains('/')).and_then(crate::process_cwd::read).map(|p| p.to_string_lossy().into_owned()))
+                // (a pid on another machine or inside WSL means nothing here)
+                .or_else(|| rec.get("pid").and_then(Value::as_u64).filter(|_| !addr.contains('/') && crate::wsl::active().is_none()).and_then(crate::process_cwd::read).map(|p| p.to_string_lossy().into_owned()))
                 .or_else(|| rec.get("cwd").and_then(Value::as_str).map(str::to_owned));
             let Some(cwd) = cwd else { continue };
             let busy = busy(rec);
@@ -2503,12 +2521,12 @@ impl AppWindow {
                 return crate::remote_shell::launch(cmd);
             }
             let sh = shell();
-            if cfg!(windows) {
+            if cfg!(windows) && crate::wsl::active().is_none() {
                 // PowerShell has no `-ic`: run it, then stay. `&` finds npm's `.cmd` shims too.
                 return vec![sh, "-NoExit".into(), "-Command".into(), crate::programs::powershell_line(&cmd)];
             }
-            // macOS terminal sessions load login profiles (including Homebrew's PATH).
-            unix_agent_argv(sh, cmd, cfg!(target_os = "macos"))
+            // macOS and WSL terminal sessions load login profiles (including Homebrew's/user's PATH).
+            unix_agent_argv(sh, cmd, cfg!(target_os = "macos") || crate::wsl::active().is_some())
         })
     }
 
@@ -3560,7 +3578,16 @@ impl AppWindow {
                     }
                 }
                 self.drain_documents(window, cx);
-                crate::update::relaunch();
+                if !crate::update::relaunch() {
+                    return self.fail("cannot restart Herdr; close and reopen it to switch");
+                }
+                cx.quit();
+            }
+            "app.restart" => {
+                self.drain_documents(window, cx);
+                if !crate::update::relaunch() {
+                    return self.fail("cannot restart Herdr; close and reopen it to switch");
+                }
                 cx.quit();
             }
             "window.close" | "window.minimize" | "window.maximize" => return self.window_command(name, window, cx),
@@ -3883,7 +3910,10 @@ impl AppWindow {
             Request::OpenOverlay { id, spec } => self.open_overlay(id, spec, window, cx),
             Request::CloseOverlay { id } => self.close_overlay(&id, window, cx),
             Request::SetWindowTitle(title) => window.set_window_title(title.as_deref().unwrap_or("Herdr")),
-            Request::Refresh => self.refresh_mods(cx),
+            Request::Refresh => {
+                self.reload_config(window, cx);
+                self.refresh_mods(cx);
+            }
             Request::Control { cmd, reply } => {
                 let _ = reply.send(self.control(cmd, window, cx));
             }
@@ -4861,6 +4891,7 @@ fn folder_info(cwd: &str, home: &str, on: Option<&str>) -> (model::FolderInfo, b
     let args = ["-C", cwd, "rev-parse", "--show-toplevel", "--abbrev-ref", "HEAD"].map(str::to_owned);
     let ran = match on {
         Some(m) => mods::run_remote(m, "git", &args, None).ok().map(|(code, out, err)| (code == 0, out, err)),
+        None if crate::wsl::active().is_some() => crate::wsl::command("git", None).args(&args).output().ok().map(|o| (o.status.success(), o.stdout, o.stderr)),
         None => crate::spawn::command("git").args(&args).output().ok().map(|o| (o.status.success(), o.stdout, o.stderr)),
     };
     let Some((true, out, _)) = ran else {
@@ -4928,6 +4959,16 @@ fn needs_model_pane(name: &str, args: &Value) -> bool {
         "pane.go" => true,
         "terminal.open" | "terminal.keep" => matches!(AppWindow::arg(args, "place"), Some("right" | "down")),
         _ => false,
+    }
+}
+
+fn reconnect_wait(distro: Option<&str>, failures: u32) -> (Duration, Option<String>) {
+    match distro {
+        Some(distro) => (
+            Duration::from_secs(u64::from(failures.saturating_add(1).min(5))),
+            (failures >= 3).then(|| format!("Waiting for WSL ({distro})…")),
+        ),
+        None => (Duration::from_secs(1), None),
     }
 }
 
@@ -5312,6 +5353,16 @@ fn reconcile_core_update_error(dismissed: &mut Option<String>, core: &crate::upd
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn wsl_reconnect_wait_shows_status_after_three_failures_and_caps_backoff() {
+        use std::time::Duration;
+        assert_eq!(super::reconnect_wait(Some("Ubuntu"), 0), (Duration::from_secs(1), None));
+        assert_eq!(super::reconnect_wait(Some("Ubuntu"), 2), (Duration::from_secs(3), None));
+        assert_eq!(super::reconnect_wait(Some("Ubuntu"), 3), (Duration::from_secs(4), Some("Waiting for WSL (Ubuntu)…".into())));
+        assert_eq!(super::reconnect_wait(Some("Ubuntu"), u32::MAX).0, Duration::from_secs(5));
+        assert_eq!(super::reconnect_wait(None, 100), (Duration::from_secs(1), None));
+    }
+
     use gpui::{div, point, px, size, Context, IntoElement, Render, TestAppContext, Window};
     use gpui::prelude::*;
 

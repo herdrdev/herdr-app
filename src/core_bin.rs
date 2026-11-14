@@ -34,16 +34,33 @@ pub fn path() -> PathBuf {
     BIN.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone().unwrap_or_else(|| PathBuf::from("hc"))
 }
 
+/// A command that runs the active `herdr-core` (on the host or inside WSL).
+pub fn command() -> Command {
+    command_for(&path())
+}
+
+fn command_for(bin: &Path) -> Command {
+    if crate::wsl::active().is_some() {
+        crate::wsl::command(bin, None)
+    } else {
+        crate::spawn::command(bin)
+    }
+}
+
 /// Uses this core from now on, and puts its folder first on PATH so mods'
 /// `hc()` and anything the app runs find the same one.
 pub fn use_core(bin: PathBuf) {
     if let Some(dir) = bin.parent() {
-        let path = std::env::var_os("PATH").unwrap_or_default();
-        let mut dirs: Vec<PathBuf> = vec![dir.to_path_buf()];
-        dirs.extend(std::env::split_paths(&path).filter(|d| d != dir));
-        if let Ok(joined) = std::env::join_paths(dirs) {
-            // SAFETY: set once at start, before other threads read the environment.
-            unsafe { std::env::set_var("PATH", joined) };
+        if crate::wsl::active().is_some() {
+            crate::wsl::prepend_path(dir);
+        } else {
+            let path = std::env::var_os("PATH").unwrap_or_default();
+            let mut dirs: Vec<PathBuf> = vec![dir.to_path_buf()];
+            dirs.extend(std::env::split_paths(&path).filter(|d| d != dir));
+            if let Ok(joined) = std::env::join_paths(dirs) {
+                // SAFETY: set once at start, before other threads read the environment.
+                unsafe { std::env::set_var("PATH", joined) };
+            }
         }
     }
     *BIN.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(bin);
@@ -75,13 +92,23 @@ fn merged_path(login: Option<&std::ffi::OsStr>, usual: &[PathBuf], current: &std
 
 /// `hc X.Y.Z` if this binary is herdr-core and runs.
 pub fn version(bin: &Path) -> Option<String> {
-    let out = crate::spawn::command(bin).arg("--version").stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
-    let text = String::from_utf8_lossy(&out.stdout).trim().to_owned();
+    if crate::wsl::active().is_some() {
+        return crate::wsl::version(bin).ok().flatten();
+    }
+    let out = command_for(bin).arg("--version").stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
+    let text = crate::wsl::decode_output(&out.stdout).trim().to_owned();
     (out.status.success() && text.starts_with("hc ")).then_some(text)
 }
 
-/// The first herdr-core found, or None.
-pub fn find(configured: Option<&str>) -> Option<PathBuf> {
+/// The first herdr-core found, or None; WSL reachability failures remain errors.
+pub fn find(configured: Option<&str>) -> Result<Option<PathBuf>, String> {
+    if crate::wsl::active().is_some() {
+        return crate::wsl::find_core(configured);
+    }
+    Ok(find_host(configured))
+}
+
+fn find_host(configured: Option<&str>) -> Option<PathBuf> {
     let home = crate::mods::home();
     let pick = |candidates: Vec<PathBuf>| candidates.into_iter().filter(|c| c.is_file()).find(|c| version(c).is_some());
     if let Some(found) = pick(configured.map(|c| vec![expand(c, &home)]).unwrap_or_default()) {
@@ -171,6 +198,9 @@ fn login_shell_path() -> Option<std::ffi::OsString> {
 /// ~/.local/bin, or HC_INSTALL_DIR), then finds it. Err: what went wrong.
 pub fn install() -> Result<PathBuf, String> {
     let releases = std::env::var("HERDR_RELEASES_URL").unwrap_or_else(|_| "https://releases.herdr.dev".into());
+    if crate::wsl::active().is_some() {
+        return crate::wsl::install_core(&releases);
+    }
     let mut cmd = if cfg!(windows) {
         let mut c = crate::spawn::command("powershell");
         c.args(["-NoProfile", "-Command", &format!("irm {releases}/core/install.ps1 | iex")]);
@@ -206,7 +236,7 @@ pub fn update() -> Result<String, String> {
 
 /// `hc update --version X`: at least X (a newer core stays). Cores before 0.1.5 lack it.
 pub fn update_to(at_least: Option<&str>) -> Result<String, String> {
-    let mut cmd = crate::spawn::command(path());
+    let mut cmd = command();
     cmd.args(["update", "--json"]);
     if let Some(v) = at_least {
         cmd.args(["--version", v]);
@@ -320,7 +350,7 @@ mod tests {
         std::fs::write(&bad, "#!/bin/sh\nif [ \"$1\" = --version ]; then echo hc 0.1.18; exit; fi\nread hello\necho unusable >&2\nexit 1\n").unwrap();
         std::fs::set_permissions(&bad, std::fs::Permissions::from_mode(0o755)).unwrap();
         for replacement in ["chosen", "installed"] {
-            use_core(find(Some(bad.to_str().unwrap())).unwrap());
+            use_core(find(Some(bad.to_str().unwrap())).unwrap().unwrap());
             assert!(crate::hc::Core::connect().is_err());
             let good = root.join(replacement);
             let hello = serde_json::json!({"result": {"selected": replacement}});
@@ -394,6 +424,6 @@ mod tests {
         assert_eq!(version(&dir.join("hc")), None);
         let real = dir.join("herdr-core");
         assert_eq!(version(&real).as_deref(), Some("hc 0.1.1"));
-        assert_eq!(find(Some(real.to_str().unwrap())), Some(real));
+        assert_eq!(find(Some(real.to_str().unwrap())), Ok(Some(real)));
     }
 }

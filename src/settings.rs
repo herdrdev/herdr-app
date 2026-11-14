@@ -373,6 +373,9 @@ pub struct Person {
     /// The herdr-core to use, when it isn't where Herdr looks (core_bin.rs).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub core: Option<String>,
+    /// Windows only: the WSL distribution that runs "This computer" (wsl.rs).
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wsl: Option<String>,
     /// Fonts for layouts that don't set their own.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font: Option<String>,
@@ -460,6 +463,7 @@ impl Default for Person {
             zoom: 1.0,
             sounds: Sounds::default(),
             core: None,
+            wsl: None,
             font: None,
             font_size: None,
             font_weight: None,
@@ -520,6 +524,8 @@ pub struct Settings {
     pub copy_on_select: bool,
     pub minimum_contrast: f32,
     pub option_as_alt: OptionAsAlt,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub wsl: Option<String>,
     pub sounds: Sounds,
 }
 
@@ -567,6 +573,7 @@ impl Default for Settings {
             copy_on_select: true,
             minimum_contrast: 1.0,
             option_as_alt: OptionAsAlt::Auto,
+            wsl: None,
             sounds: Sounds::default(),
         }
     }
@@ -611,6 +618,7 @@ impl Settings {
             copy_on_select: person.copy_on_select,
             minimum_contrast: person.minimum_contrast,
             option_as_alt: person.option_as_alt,
+            wsl: crate::wsl::active().map(str::to_owned),
         }
     }
 }
@@ -706,7 +714,8 @@ pub fn load_person() -> Result<Person, String> {
         let _ = crate::persist::write_atomic(&p, serde_json::to_string_pretty(&Person::default()).unwrap() + "\n");
     }
     let text = std::fs::read_to_string(&p).map_err(|e| e.to_string())?;
-    let person: Person = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    let mut person: Person = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    person.wsl = person.wsl.map(|d| d.trim().to_owned()).filter(|d| !d.is_empty());
     if !(ZOOM_MIN..=ZOOM_MAX).contains(&person.zoom) {
         return Err(format!("zoom {} is outside {ZOOM_MIN}..{ZOOM_MAX}", person.zoom));
     }
@@ -1080,7 +1089,7 @@ mod tests {
     /// settings.json key.
     #[test]
     fn the_guide_explains_every_setting() {
-        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), font_weight: Some(400), ui_font: Some(String::new()), telemetry: false, clipboard_write: false, copy_on_select: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), ..Person::default() };
+        let all = Person { core: Some(String::new()), wsl: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), font_weight: Some(400), ui_font: Some(String::new()), telemetry: false, clipboard_write: false, copy_on_select: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), ..Person::default() };
         let keys: Vec<String> = serde_json::to_value(&all).unwrap().as_object().unwrap().keys().cloned().collect();
         let guide = include_str!("../defaults/AGENTS.md");
         let section = guide.split("## The person").nth(1).and_then(|s| s.split("\n## ").next()).unwrap_or_default();

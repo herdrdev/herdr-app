@@ -115,6 +115,13 @@ terminal was created, not that its program started correctly. If it exits
 with a nonzero code within two seconds, the window shows an error toast with
 the exit code and last output lines.
 
+On Windows, Settings → Machines can run "This computer" inside a WSL
+distribution with herdr-core installed. Choose Restart or run `app.restart` to
+apply a selection without a downloaded update; until then the current
+distribution stays active. `app.restart` saves layout documents before relaunching
+and keeps terminals running; `app.update` requires a downloaded update. Local folders, shells,
+and commands use that distribution, while the app home stays on Windows.
+
 A terminal started with hc opts into the window with `herdr.space=<id>`.
 `herdr.tab=<id>` chooses its tab; without it, Herdr creates a tab in that space.
 Unlabeled workers stay hidden. Do not add labels just to run a background

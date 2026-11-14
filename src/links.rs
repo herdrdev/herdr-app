@@ -79,32 +79,33 @@ pub fn resolve(link: &str, cwd: Option<&Path>) -> Option<Target> {
         s.len() > 1 && s.starts_with(|c: char| c.is_ascii_alphabetic()) && s.chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
     });
     if scheme {
-        // Windows can't open a file URL whose path is percent-encoded, the way programs write them.
-        if let Some(path) = file_url_path(link).filter(|p| p.exists()) {
-            return Some(Target::File(path));
-        }
-        return Some(Target::Url(link.to_owned()));
+        return resolve_url(link, crate::wsl::active().is_some(), |path| crate::wsl::host_path_if_active(path));
     }
-    let home = std::env::home_dir();
+    let guest = crate::wsl::active().is_some();
+    let home = if guest { crate::wsl::home() } else { std::env::home_dir() };
     let expanded = if let Some(rest) = link.strip_prefix("~/") {
-        home?.join(rest)
+        join_file_path(&home?, rest, guest)
     } else if let Some(var) = link.strip_prefix('$') {
         let (name, rest) = var.split_once('/').unwrap_or((var, ""));
-        let base = match name {
-            "PWD" => cwd?.to_path_buf(),
-            "HOME" => home?,
-            _ => PathBuf::from(std::env::var_os(name)?),
-        };
-        base.join(rest)
+        let base = link_variable(name, cwd, home.as_deref(), guest)?;
+        join_file_path(&base, rest, guest)
     } else {
         PathBuf::from(link)
     };
-    let full = if expanded.is_absolute() { expanded } else { cwd?.join(expanded) };
+    let abs = expanded.is_absolute() || (guest && expanded.to_string_lossy().starts_with('/'));
+    let full = if abs { expanded } else { join_file_path(cwd?, expanded.to_str()?, guest) };
+    let host = crate::wsl::host_path_if_active(&full);
     // Windows ignores a trailing period when checking whether a path exists.
-    if !(cfg!(windows) && full.extension().is_some_and(|ext| ext.is_empty())) && full.exists() {
-        return Some(Target::File(full));
+    if let Ok(host) = &host
+        && !(cfg!(windows) && host.extension().is_some_and(|ext| ext.is_empty())) && host.exists()
+    {
+        return Some(Target::File(host.clone()));
     }
-    // The period ending a sentence, or `:42` / `:42:7` naming a place in the file.
+    // An actual guest `note.` must never open the separate host-visible `note`.
+    if host.is_err() && full.to_string_lossy().ends_with('.')
+        && crate::wsl::command("test", None).args(["-e", full.to_str()?]).status().ok()?.success()
+    { return None; }
+    // Strip punctuation in the original namespace, before converting to Windows.
     let mut bare = full.to_str()?.strip_suffix('.').unwrap_or(full.to_str()?);
     for _ in 0..2 {
         match bare.rsplit_once(':') {
@@ -112,7 +113,55 @@ pub fn resolve(link: &str, cwd: Option<&Path>) -> Option<Target> {
             _ => break,
         }
     }
-    Path::new(bare).exists().then(|| Target::File(PathBuf::from(bare)))
+    if bare == full.to_str()? { return None; }
+    let bare = crate::wsl::host_path_if_active(Path::new(bare)).ok()?;
+    bare.exists().then(|| Target::File(bare))
+}
+
+fn resolve_url(link: &str, guest: bool, host_path: impl FnOnce(&Path) -> Result<PathBuf, String>) -> Option<Target> {
+    // Decode before converting: file:///home/... belongs to the same namespace
+    // as a plain /home/... link, not the Windows drive hosting the app.
+    if let Some(path) = file_url_path(link) {
+        let host = host_path(&path).ok()?;
+        if host.exists() {
+            return Some(Target::File(host));
+        }
+        // Do not let the host handler reinterpret an absent guest file.
+        if guest { return None; }
+    }
+    Some(Target::Url(link.to_owned()))
+}
+
+#[cfg(test)]
+#[test]
+fn guest_file_urls_convert_decoded_paths_before_opening() {
+    let file = std::env::temp_dir().join(format!("herdr-guest-url-{}", std::process::id()));
+    std::fs::write(&file, "").unwrap();
+    assert_eq!(resolve_url("file:///home/test/a%20b%23.txt", true, |path| {
+        assert_eq!(path, Path::new("/home/test/a b#.txt"));
+        Ok(file.clone())
+    }), Some(Target::File(file.clone())));
+    std::fs::remove_file(&file).unwrap();
+    assert_eq!(resolve_url("file:///home/test/missing", true, |_| Ok(file)), None);
+    assert_eq!(resolve_url("file:///home/test/missing", true, |_| Err("unavailable".into())), None);
+    assert_eq!(resolve_url("https://example.com", true, |_| panic!("not a file")), Some(Target::Url("https://example.com".into())));
+}
+
+fn link_variable(name: &str, cwd: Option<&Path>, home: Option<&Path>, guest: bool) -> Option<PathBuf> {
+    match name {
+        "PWD" => cwd.map(Path::to_path_buf),
+        "HOME" => home.map(Path::to_path_buf),
+        _ if guest => None,
+        _ => std::env::var_os(name).map(PathBuf::from),
+    }
+}
+
+fn join_file_path(base: &Path, rest: &str, guest: bool) -> PathBuf {
+    if guest && base.to_string_lossy().starts_with('/') {
+        PathBuf::from(format!("{}/{}", base.to_string_lossy().trim_end_matches('/'), rest))
+    } else {
+        base.join(rest)
+    }
 }
 
 /// The path a `file:` URL names on this computer, percent-decoded.
@@ -201,6 +250,25 @@ fn open_system(arg: &std::ffi::OsStr) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guest_link_variables_never_read_host_environment() {
+        let home = Path::new("/home/guest");
+        let cwd = Path::new("/work");
+        assert_eq!(link_variable("HOME", Some(cwd), Some(home), true), Some(home.to_path_buf()));
+        assert_eq!(link_variable("PWD", Some(cwd), Some(home), true), Some(cwd.to_path_buf()));
+        assert_eq!(link_variable("HOME", Some(cwd), None, true), None);
+        assert_eq!(link_variable("PATH", Some(cwd), Some(home), true), None);
+        assert_eq!(link_variable("PATH", None, None, false), std::env::var_os("PATH").map(PathBuf::from));
+    }
+
+    #[test]
+    fn guest_file_joins_keep_posix_separators_on_every_host() {
+        assert_eq!(join_file_path(Path::new("/home/alice"), "src/main.rs", true), PathBuf::from("/home/alice/src/main.rs"));
+        assert_eq!(join_file_path(Path::new("/"), "src/main.rs", true), PathBuf::from("/src/main.rs"));
+        assert_eq!(join_file_path(Path::new(r"C:\Users\alice"), "src/main.rs", true), Path::new(r"C:\Users\alice").join("src/main.rs"));
+        assert_eq!(join_file_path(Path::new("/home/alice"), "src/main.rs", false), Path::new("/home/alice").join("src/main.rs"));
+    }
 
     fn first(text: &str) -> Option<&str> {
         PATTERN.find(text).unwrap().map(|m| m.as_str())

@@ -29,9 +29,13 @@ pub fn frame_dir() -> PathBuf {
     app_dir().join("frame")
 }
 
-pub fn home() -> PathBuf {
+fn os_home() -> PathBuf {
     // HOME, or the profile folder on Windows.
     std::env::home_dir().unwrap_or_else(|| "/".into())
+}
+
+pub fn home() -> PathBuf {
+    crate::wsl::home().unwrap_or_else(os_home)
 }
 
 /// The fonts on this machine (`fonts()`): read when the window opens and
@@ -50,7 +54,7 @@ pub fn note_fonts(cx: &gpui::App) {
 /// `$XDG_CONFIG_HOME/herdr-app`, else `~/.config/herdr-app`, on every OS.
 pub fn app_dir() -> PathBuf {
     let env = |k: &str| std::env::var_os(k).filter(|v| !v.is_empty()).map(PathBuf::from);
-    env("HERDR_APP_HOME").unwrap_or_else(|| env("XDG_CONFIG_HOME").unwrap_or_else(|| home().join(".config")).join("herdr-app"))
+    env("HERDR_APP_HOME").unwrap_or_else(|| env("XDG_CONFIG_HOME").unwrap_or_else(|| os_home().join(".config")).join("herdr-app"))
 }
 
 pub fn mods_dir() -> PathBuf {
@@ -799,26 +803,53 @@ fn exec_limit(options: Option<&HostValue>) -> Result<Duration, HostError> {
     }
 }
 
+fn wsl_host_command(args: &[String], cwd: Option<&str>) -> Result<std::process::Command, String> {
+    let cwd = match cwd {
+        Some(path) => crate::wsl::host_path_if_active(Path::new(path))?,
+        None => os_home(),
+    };
+    let mut c = crate::wsl::host_command();
+    c.args(args).current_dir(cwd);
+    Ok(c)
+}
+
+fn exec_output(bytes: &[u8], wsl_list: bool) -> String {
+    if wsl_list { crate::wsl::decode_output(bytes) } else { String::from_utf8_lossy(bytes).into_owned() }
+}
+
 pub(crate) fn run_blocking(command: &str, args: &[String], cwd: Option<String>, limit: Duration) -> Result<(i32, String, String), String> {
     use std::io::Read;
+    let wsl_host = cfg!(windows) && (command.eq_ignore_ascii_case("wsl.exe") || command.eq_ignore_ascii_case("wsl"));
     // The core may have no `hc` link beside it (a Windows zip has only herdr-core.exe).
     let program = if command == "hc" { crate::core_bin::path() } else { PathBuf::from(command) };
-    let mut child = crate::spawn::command(program)
-        .args(args)
-        .current_dir(cwd.map(PathBuf::from).unwrap_or_else(home))
+    let mut cmd = if wsl_host {
+        wsl_host_command(args, cwd.as_deref())?
+    } else if crate::wsl::active().is_some() {
+        let mut c = crate::wsl::command(program, cwd.as_deref());
+        c.args(args);
+        c
+    } else {
+        let mut c = crate::spawn::command(program);
+        c.args(args).current_dir(cwd.map(PathBuf::from).unwrap_or_else(home));
+        c
+    };
+    // Only distro listings use wsl.exe's legacy UTF-16 output. Guest programs
+    // return their own bytes, including legitimate UTF-8 NULs and CRLFs.
+    let wsl_list = wsl_host && args.first().is_some_and(|a| a == "--list" || a == "-l");
+    let mut child = cmd
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("cannot run {command}: {e}"))?;
     // Bounded: a chatty command can't fill memory; the rest is drained and dropped.
-    let drain = |r: Box<dyn Read + Send>| {
+    let drain = move |r: Box<dyn Read + Send>| {
         std::thread::spawn(move || {
             let mut buf = Vec::new();
             let mut r = r;
             let _ = (&mut r).take(EXEC_OUTPUT).read_to_end(&mut buf);
             let _ = std::io::copy(&mut r, &mut std::io::sink());
-            String::from_utf8_lossy(&buf).into_owned()
+            exec_output(&buf, wsl_list)
         })
     };
     let out = drain(Box::new(child.stdout.take().unwrap()));
@@ -891,6 +922,43 @@ fn known_agents(on: Option<String>, list: Vec<Value>) -> Result<Value, String> {
     ))
 }
 
+/// A text file on this machine (or inside the active WSL distribution).
+fn read_local(path: &str) -> Result<Option<String>, String> {
+    if crate::wsl::active().is_some() && path.starts_with('/') {
+        return read_wsl_with(path, crate::wsl::host_path_if_active(Path::new(path)), |path| {
+            read_guest_with(crate::wsl::command("env", None), path)
+        });
+    }
+    crate::mod_files::read(Path::new(path))
+}
+
+fn read_wsl_with(path: &str, host: Result<PathBuf, String>, guest: impl FnOnce(&str) -> Result<Option<String>, String>) -> Result<Option<String>, String> {
+    // A policy rejection must never try a Windows read: preserve Linux spelling
+    // (including symlink/.. semantics) and go straight to the guest.
+    if let Ok(host) = host
+        && let Some(text) = crate::mod_files::read(&host)?
+    {
+        return Ok(Some(text));
+    }
+    guest(path)
+}
+
+// Keep raw bytes until UTF-8 validation; head bounds output even for a huge file.
+fn read_guest_with(mut command: std::process::Command, path: &str) -> Result<Option<String>, String> {
+    let out = command.args(["LC_ALL=C", "head", "-c", &(crate::mod_files::LIMIT + 1).to_string(), "--", path])
+        .stdin(std::process::Stdio::null()).output().map_err(|e| e.to_string())?;
+    if !out.status.success() {
+        let error = String::from_utf8_lossy(&out.stderr);
+        // Check head's errno, not `test -e`: an inaccessible parent is not absence.
+        if out.status.code() == Some(1) && error.starts_with("head:") && error.trim_end().ends_with(": No such file or directory") {
+            return Ok(None);
+        }
+        return Err(if error.is_empty() { format!("Cannot read {path}: guest command failed") } else { error.into_owned() });
+    }
+    if out.stdout.len() as u64 > crate::mod_files::LIMIT { return Err("Text file exceeds 1 MiB".into()); }
+    String::from_utf8(out.stdout).map(Some).map_err(|e| e.to_string())
+}
+
 /// A text file on another machine: `cat`, or `type` where there is none (Windows).
 fn read_remote(machine: &str, path: &str) -> Result<Option<String>, String> {
     let (code, out, _) = match run_remote(machine, "cat", &["--".into(), path.into()], None) {
@@ -953,7 +1021,7 @@ fn module(inst: Instance, copy: u64) -> HostModule {
             let on = opt_str(a.get(1), "on");
             Ok(crate::mod_files::read_with(move || match on {
                 Some(m) => read_remote(&m, &path),
-                None => crate::mod_files::read(Path::new(&path)),
+                None => read_local(&path),
             }))
         })
         .async_function("writeTextFile", |a| {
@@ -1024,7 +1092,11 @@ fn module(inst: Instance, copy: u64) -> HostModule {
             })).ok_or_else(|| HostError::new("no window to pick from"))?;
             Ok(async move {
                 let path = picked.await.ok().and_then(Result::ok).flatten().and_then(|p| p.into_iter().next());
-                Ok(path.map(|p| HostValue::Str(p.to_string_lossy().into_owned())).unwrap_or(HostValue::Null))
+                let Some(path) = path else { return Ok(HostValue::Null) };
+                let (tx, rx) = async_channel::bounded(1);
+                std::thread::spawn(move || { let _ = tx.send_blocking(crate::wsl::linux_path_if_active(&path)); });
+                let path = rx.recv().await.map_err(|e| HostError::new(e.to_string()))?.map_err(HostError::new)?;
+                Ok(HostValue::Str(path))
             })
         })
         .function("feedbackClearImages", move |_| {
@@ -1185,7 +1257,7 @@ pub fn apply_theme(cx: &mut App) {
 
 fn capabilities() -> Capabilities {
     Capabilities::new()
-        .read_roots([home()])
+        .read_roots([os_home(), home()])
         .write_roots([app_dir()])
         .execute(ExecuteGrant::Unrestricted)
         .network(NetworkGrant::Unrestricted)
@@ -1245,6 +1317,53 @@ pub fn prepare_load(inst: &Instance) -> u64 {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn rejected_host_paths_go_directly_to_guest_read_unchanged() {
+        for path in ["/work/link/../file", "/work/literal\\name", "/work/note.", "/work/note "] {
+            let text = read_wsl_with(path, Err("Windows path policy".into()), |guest_path| {
+                assert_eq!(guest_path, path);
+                Ok(Some("guest text".into()))
+            }).unwrap();
+            assert_eq!(text.as_deref(), Some("guest text"));
+        }
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn guest_text_read_preserves_utf8_size_and_error_contract() {
+        let root = std::env::temp_dir().join(format!("herdr-guest-read-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        let read = |path: &Path| read_guest_with(std::process::Command::new("env"), path.to_str().unwrap());
+        let file = root.join("literal\\name ");
+        std::fs::write(&file, "literal").unwrap();
+        assert_eq!(read(&file).unwrap().as_deref(), Some("literal"));
+        std::fs::write(&file, [0xff]).unwrap();
+        assert!(read(&file).is_err(), "invalid UTF-8 is not replacement text");
+        std::fs::write(&file, vec![b'x'; crate::mod_files::LIMIT as usize + 1]).unwrap();
+        assert!(read(&file).unwrap_err().contains("1 MiB"));
+        assert!(read(&root).is_err(), "directories are not absent");
+        assert_eq!(read(&root.join("absent")).unwrap(), None);
+        assert!(read(&file.join("child")).is_err(), "ENOTDIR is not absence");
+        use std::os::unix::fs::PermissionsExt;
+        let locked = root.join("locked");
+        std::fs::create_dir(&locked).unwrap();
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o000)).unwrap();
+        let inaccessible = read(&locked.join("absent"));
+        std::fs::set_permissions(&locked, std::fs::Permissions::from_mode(0o700)).unwrap();
+        assert!(inaccessible.is_err(), "inaccessible parents are not absence");
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn wsl_host_exec_preserves_explicit_cwd_and_guest_output_bytes() {
+        let cwd = Path::new(r"C:\Users\Alice Smith\repo");
+        let command = wsl_host_command(&["-e".into(), "pwd".into()], Some(cwd.to_str().unwrap())).unwrap();
+        assert_eq!(command.get_current_dir(), Some(cwd));
+        assert_eq!(exec_output(b"a\0b\r\n", false), "a\0b\r\n");
+        let list: Vec<u8> = "Ubuntu\r\n".encode_utf16().flat_map(u16::to_le_bytes).collect();
+        assert_eq!(exec_output(&list, true), "Ubuntu\n");
+    }
 
     #[test]
     fn an_input_selection_uses_the_theme_selection_colour() {

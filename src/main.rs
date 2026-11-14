@@ -39,6 +39,7 @@ mod update_notes;
 mod vt;
 mod win32_keys;
 mod window;
+mod wsl;
 
 use gpui::*;
 
@@ -133,10 +134,12 @@ fn main() {
     let fresh = !settings::path().exists();
     // The core people installed; without one, the setup screen installs it.
     let person = settings::load_person();
+    wsl::init(person.as_ref().ok().and_then(|p| p.wsl.clone()));
     let configured = person.as_ref().ok().and_then(|p| p.core.clone());
     let core: Result<std::sync::Arc<hc::Core>, setup::Need> = match core_bin::find(configured.as_deref()) {
-        None => Err(setup::Need::Install),
-        Some(bin) => {
+        Err(error) => Err(setup::Need::Connect(error)),
+        Ok(None) => Err(setup::Need::Install),
+        Ok(Some(bin)) => {
             core_bin::use_core(bin);
             match hc::Core::connect() {
                 // One that can't serve this app gets the screen that fixes it.

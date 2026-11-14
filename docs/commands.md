@@ -566,6 +566,12 @@ Restart into the update Herdr downloaded (your terminals keep running).
 
 No arguments.
 
+## `app.restart`
+
+Restart Herdr without requiring a downloaded update (your terminals keep running).
+
+No arguments.
+
 ## `app.quit`
 
 Quit (macOS).
