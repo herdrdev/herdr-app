@@ -198,7 +198,8 @@ impl AppWindow {
     /// Terminals in hidden tabs keep the size they last had on screen, so a tab shown
     /// after the window changed size draws its old screens, then jumps once the programs
     /// redraw. Once the window settles (the same at two ticks), they are sized as their
-    /// panes would be, so the programs redraw out of sight.
+    /// panes would be, so the programs redraw out of sight. Only the shown space's tabs:
+    /// another window may be showing the other spaces at its own size.
     pub(super) fn fit_hidden_tabs(&mut self, window: &Window, cx: &App) {
         let Some((_, area)) = self.context_area() else { return };
         let cell = crate::terminal::cell_size(window);
@@ -212,8 +213,8 @@ impl AppWindow {
             }
         }
         let scale = window.scale_factor();
-        let active = self.model.active_tab().map(|t| t.id.clone());
-        for tab in self.model.tabs().filter(|t| Some(&t.id) != active.as_ref()) {
+        let Some(space) = self.model.active_space() else { return };
+        for tab in space.tabs.iter().filter(|t| Some(&t.id) != space.active_tab().map(|a| &a.id)) {
             for pane in tab.shown().panes() {
                 if let Some(t) = self.terms.get(&pane.id)
                     && let Some((cols, rows)) = self.shown_size(tab, &pane.id, window)

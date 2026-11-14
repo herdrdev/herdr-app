@@ -206,3 +206,201 @@ fn hidden_tabs_follow(cx: &mut gpui::TestAppContext) {
     cx.update(|window, cx| window.draw(cx).clear(cx));
     assert_eq!(dims(cx), fitted, "hidden tabs must have been sized as their panes draw them");
 }
+
+#[test]
+fn other_spaces_keep_their_size() {
+    in_own_process("other_spaces_keep_size");
+}
+
+#[gpui::test]
+fn other_spaces_keep_size(cx: &mut gpui::TestAppContext) {
+    use gpui::{px, size};
+    if !running_alone("other_spaces_keep_size") { return; }
+    let main: serde_json::Value = serde_json::from_str(include_str!("../../defaults/layouts/main.json")).unwrap();
+    let (view, cx) = open_window(cx, "size-probe", "export default () => null;", main);
+    // Space "other" may be on screen in another window; "space" is the one shown here.
+    view.update_in(cx, |this, window, cx| {
+        this.folders.retain(|id, _| id == "size-probe");
+        this.model = crate::model::Model::default();
+        this.live.insert("probe-a".into(), serde_json::json!({"state": "live", "cols": 77, "rows": 33}));
+        this.model.add_space("other", "other", "/", super::Tab::new("ta", "", "a", "probe-a"));
+        this.model.add_space("space", "test", "/", super::Tab::new("tb", "", "b", "probe-b"));
+        this.sync(window, cx);
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    let dims = |cx: &mut gpui::VisualTestContext| view.update(cx, |this, cx| this.terms["a"].view.read(cx).dimensions());
+    let before = dims(cx);
+    cx.simulate_resize(size(px(1400.0), px(900.0)));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    view.update_in(cx, |this, window, cx| this.fit_hidden_tabs(window, cx));
+    view.update_in(cx, |this, window, cx| this.fit_hidden_tabs(window, cx));
+    assert_eq!(dims(cx), before, "a settled window must leave other spaces' terminals alone");
+}
+
+#[test]
+fn other_spaces_attach_at_their_own_size() {
+    in_own_process("other_spaces_attach_size");
+}
+
+#[gpui::test]
+fn other_spaces_attach_size(cx: &mut gpui::TestAppContext) {
+    if !running_alone("other_spaces_attach_size") { return; }
+    let main: serde_json::Value = serde_json::from_str(include_str!("../../defaults/layouts/main.json")).unwrap();
+    let (view, cx) = open_window(cx, "size-probe", "export default () => null;", main);
+    // Before the first listing, attaching "probe-a" would set it to a guessed size.
+    view.update_in(cx, |this, window, cx| {
+        this.folders.retain(|id, _| id == "size-probe");
+        this.model = crate::model::Model::default();
+        this.live.clear();
+        this.model.add_space("other", "other", "/", super::Tab::new("ta", "", "a", "probe-a"));
+        this.model.add_space("space", "test", "/", super::Tab::new("tb", "", "b", "probe-b"));
+        this.sync(window, cx);
+    });
+    view.update(cx, |this, _| {
+        assert!(!this.terms.contains_key("a"), "another space's terminal must wait for its size");
+        assert!(this.terms.contains_key("b"), "the shown space's terminal attaches right away");
+    });
+    view.update_in(cx, |this, window, cx| {
+        let listed = serde_json::json!({"terminals": [
+            {"address": "probe-a", "state": "live", "cols": 77, "rows": 33},
+            {"address": "probe-b", "state": "live", "cols": 90, "rows": 30},
+        ]});
+        this.terminals_listed(listed, window, cx);
+    });
+    let dims = view.update(cx, |this, cx| this.terms["a"].view.read(cx).dimensions());
+    assert_eq!(dims, (77, 33), "once listed, it attaches at the size the core reports");
+}
+
+#[test]
+fn a_space_shown_again_tells_the_core_its_size() {
+    in_own_process("shown_again_resizes");
+}
+
+#[gpui::test]
+fn shown_again_resizes(cx: &mut gpui::TestAppContext) {
+    use crate::hc::Sent;
+    if !running_alone("shown_again_resizes") { return; }
+    let main: serde_json::Value = serde_json::from_str(include_str!("../../defaults/layouts/main.json")).unwrap();
+    let (view, cx) = open_window(cx, "size-probe", "export default () => null;", main);
+    let (core, sent) = crate::hc::recording();
+    view.update_in(cx, |this, window, cx| {
+        this.folders.retain(|id, _| id == "size-probe");
+        this.core = core;
+        this.model = crate::model::Model::default();
+        this.model.add_space("two", "two", "/", super::Tab::new("tb", "", "b", "probe-b"));
+        this.model.add_space("one", "one", "/", super::Tab::new("ta", "", "a", "probe-a"));
+        this.sync(window, cx);
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    cx.run_until_parked();
+    let select = |space: &str, cx: &mut gpui::VisualTestContext| {
+        view.update_in(cx, |this, window, cx| {
+            this.model.active = Some(space.into());
+            this.sync(window, cx);
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.run_until_parked();
+    };
+    // Another window may size "a" while this one shows space "two".
+    select("two", cx);
+    let attaches = sent.try_iter().filter(|s| matches!(s, Sent::Attach(p) if p["terminal"] == "probe-a")).count();
+    assert_eq!(attaches, 1, "a attached once");
+    select("one", cx);
+    let dims = view.update(cx, |this, cx| this.terms["a"].view.read(cx).dimensions());
+    let resize = std::iter::from_fn(|| sent.recv_timeout(std::time::Duration::from_secs(2)).ok()).find_map(|s| match s { Sent::Resize(c, r) => Some((c, r)), _ => None });
+    assert_eq!(resize, Some(dims), "a terminal back on screen must tell the core its size");
+}
+
+#[test]
+fn reattaching_leaves_other_spaces_their_size() {
+    in_own_process("reattach_resumed");
+}
+
+#[gpui::test]
+fn reattach_resumed(cx: &mut gpui::TestAppContext) {
+    use crate::hc::Sent;
+    if !running_alone("reattach_resumed") { return; }
+    let main: serde_json::Value = serde_json::from_str(include_str!("../../defaults/layouts/main.json")).unwrap();
+    let (view, cx) = open_window(cx, "size-probe", "export default () => null;", main);
+    let (core, _) = crate::hc::recording();
+    view.update_in(cx, |this, window, cx| {
+        this.folders.retain(|id, _| id == "size-probe");
+        this.core = core;
+        this.model = crate::model::Model::default();
+        this.live.insert("probe-b".into(), serde_json::json!({"state": "live", "cols": 77, "rows": 33}));
+        this.model.add_space("two", "two", "/", super::Tab::new("tb", "", "b", "probe-b"));
+        this.model.add_space("one", "one", "/", super::Tab::new("ta", "", "a", "probe-a"));
+        this.sync(window, cx);
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    cx.executor().advance_clock(std::time::Duration::from_millis(100));
+    cx.run_until_parked();
+    // A restarted core: "b" may be on screen in another window.
+    let (core, sent) = crate::hc::recording();
+    view.update(cx, |this, cx| this.reconnected(core, cx));
+    cx.run_until_parked();
+    let resumed: std::collections::BTreeMap<String, serde_json::Value> = sent.try_iter()
+        .filter_map(|s| match s { Sent::Attach(p) => Some((p["terminal"].as_str().unwrap().to_owned(), p["resumed"].clone())), _ => None })
+        .collect();
+    assert_eq!(resumed["probe-b"], true, "a terminal off screen here must not take the size back");
+    assert_eq!(resumed["probe-a"], false, "a terminal on screen here sets its size");
+}
+
+#[test]
+fn other_spaces_attach_without_taking_the_size() {
+    in_own_process("other_spaces_attach_resumed");
+}
+
+#[gpui::test]
+fn other_spaces_attach_resumed(cx: &mut gpui::TestAppContext) {
+    use crate::hc::Sent;
+    if !running_alone("other_spaces_attach_resumed") { return; }
+    let main: serde_json::Value = serde_json::from_str(include_str!("../../defaults/layouts/main.json")).unwrap();
+    let (view, cx) = open_window(cx, "size-probe", "export default () => null;", main);
+    let (core, sent) = crate::hc::recording();
+    // "b" may be on screen in another window that started first.
+    view.update_in(cx, |this, window, cx| {
+        this.folders.retain(|id, _| id == "size-probe");
+        this.core = core;
+        this.model = crate::model::Model::default();
+        this.live.insert("probe-b".into(), serde_json::json!({"state": "live", "cols": 77, "rows": 33}));
+        this.model.add_space("two", "two", "/", super::Tab::new("tb", "", "b", "probe-b"));
+        this.model.add_space("one", "one", "/", super::Tab::new("ta", "", "a", "probe-a"));
+        this.sync(window, cx);
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    cx.executor().advance_clock(std::time::Duration::from_millis(100));
+    cx.run_until_parked();
+    let resumed: std::collections::BTreeMap<String, serde_json::Value> = sent.try_iter()
+        .filter_map(|s| match s { Sent::Attach(p) => Some((p["terminal"].as_str().unwrap().to_owned(), p["resumed"].clone())), _ => None })
+        .collect();
+    assert_eq!(resumed["probe-b"], true, "another space's terminal must not take the size from the window showing it");
+    assert_eq!(resumed["probe-a"], false, "the shown space's terminal sets its size");
+}
+
+#[test]
+fn shown_while_attaching_tells_the_core_once_attached() {
+    in_own_process("shown_before_attached");
+}
+
+#[gpui::test]
+fn shown_before_attached(cx: &mut gpui::TestAppContext) {
+    use crate::hc::Sent;
+    use gpui::{px, size};
+    if !running_alone("shown_before_attached") { return; }
+    let (core, sent) = crate::hc::recording();
+    let view = cx.new(|cx| crate::terminal::TerminalView::attach(core, "probe".into(), (80, 24), cx));
+    view.update(cx, |v, _| v.resumed = true);
+    // Its space is shown while its resumed attach is on the way.
+    crate::terminal::next_frame();
+    crate::terminal::next_frame();
+    view.read_with(cx, |v, _| {
+        v.mark_shown();
+        v.fit(80, 24, size(px(8.), px(18.)), 1.);
+    });
+    cx.run_until_parked();
+    assert!(matches!(sent.try_recv(), Ok(Sent::Attach(p)) if p["resumed"] == true));
+    view.read_with(cx, |v, _| v.fit(80, 24, size(px(8.), px(18.)), 1.));
+    let resize = std::iter::from_fn(|| sent.recv_timeout(std::time::Duration::from_secs(2)).ok()).find_map(|s| match s { Sent::Resize(c, r) => Some((c, r)), _ => None });
+    assert_eq!(resize, Some((80, 24)), "once attached, a terminal shown meanwhile must tell the core its size");
+}
