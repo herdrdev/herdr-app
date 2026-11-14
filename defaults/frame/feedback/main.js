@@ -82,7 +82,7 @@ export default class Feedback extends View {
     const body = preview.body;
     const disabled = !preview.available || this.sending || !this.message.value().trim();
     const label = (text) => div().text_size(13).text_color(t.muted).child(text);
-    const field = (el) => el.w_full().p(10).rounded(7).border_1().border_color(t.border).bg(t.background).text_color(t.foreground).text_size(14);
+    const field = (el) => el.w_full().p(10).rounded(7).border_1().border_color(t.border).bg(t.input).text_color(t.foreground).text_size(14);
     return v_flex().id("feedback").track_focus(this.handle).w_full().min_h(0).h(650).bg(t.popover)
       .on_drop((e, cx) => {
         if (this.sending || this.sent) return;

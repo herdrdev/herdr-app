@@ -41,7 +41,7 @@ export default class Prompt extends View {
       .child(h_flex().items_center().child(div().flex_1().text_size(15).font_semibold().child((p.title ?? "").replace(/^./, (c) => c.toUpperCase())))
         .child(div().text_size(11).text_color(t.dim).child("Esc")))
       .child(label("Name"))
-      .child(Input.new(this.input).h(36).px(10).rounded(9).border_1().border_color(this.inputFocused ? t.accent : t.input).bg(t.background).text_size(12.8).text_color(t.foreground))
+      .child(Input.new(this.input).h(36).px(10).rounded(9).border_1().border_color(this.inputFocused ? t.accent : t.input).bg(t.input).text_size(12.8).text_color(t.foreground))
       .when(Boolean(p.hint), el => el.child(div().pt(6).text_size(11.5).text_color(t.dim).child(p.hint)))
       .child(h_flex().pt(20).gap(8).justify_end()
         .child(button("pm-cancel", "Cancel", false, () => closeOverlay(p.overlay)))

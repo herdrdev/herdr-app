@@ -341,7 +341,7 @@ export default class MachineAdd extends View {
               .rounded(8)
               .border_1()
               .border_color(this.inputFocused ? t.accent : t.input)
-              .bg(t.background)
+              .bg(t.input)
               .text_size(13)
               .text_color(t.foreground),
           )
