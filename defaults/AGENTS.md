@@ -62,7 +62,7 @@ commands. They're rewritten on every start to match this version.
 
 ## Seeing the window
 
-`herdr-app shot [file.png]` saves the last rendered window frame as a PNG
+`herdr-app shot [file.png]` saves the current window frame as a PNG
 and prints its absolute path (default: `herdr-shot.png` in your current
 folder). Use it when debugging mod UIs: inspect spacing, colors, terminal
 images, overlays, popups and floats. It captures the app, not the desktop,
@@ -384,12 +384,18 @@ The tab block says how each pane of the shown tab is wrapped:
   pane has the keyboard; `gap` is the space between panes.
 - `header`: a mod drawn on each pane, one copy per pane, with
   `props().pane` and `props().terminal`. It reads its live facts from
-  `panes()` (title, folder, branch, agent status, focused, zoomed) and its
-  buttons run pane commands with that pane (`pane.split`, `pane.zoom`,
-  `pane.close`). `position`: `top` or `bottom`; `reveal: "hover"` shows it
-  only while the pointer is on the pane, drawn over the terminal so the
-  terminal never resizes. The shipped `pane` mod keeps its divider on the
-  terminal-facing edge and reads the frame position from `layout()`.
+  `panes()` (title, folder, branch, agent status, focused, zoomed, scroll)
+  and its buttons run pane commands with that pane (`pane.split`, `pane.zoom`,
+  `pane.close`). `scroll` is `{ total, offset, len, from_bottom }` for a
+  terminal pane's history viewport (`from_bottom` is 0 at the end; `scroll`
+  is null on the alternate screen). Reads get current numbers. Mods refresh
+  on user scrolling and transitions between the end, history, and the
+  alternate screen; ordinary output within one of those states does not
+  refresh them just because the numbers changed. `position`: `top` or
+  `bottom`; `reveal: "hover"` shows it only while the pointer is on the pane,
+  drawn over the terminal so the terminal never resizes. The shipped `pane`
+  mod keeps its divider on the terminal-facing edge and reads the frame
+  position from `layout()`.
 - `lone: true` frames a tab's only pane too (default: only when split).
 - Each layout has its own, so one can stay bare while another makes
   every pane a card.
@@ -579,7 +585,7 @@ The main ones:
   props?, focus?}` for a tab whose only pane is a mod (a file, a board; split a shell
   in beside it like any tab), `tab.close {id?, confirmed?}` (closing the last tab
   closes its space and asks first unless confirmed),
-  `tab.rename {id?, name}` ("": its number again), `tab.move {id, index}`,
+  `tab.rename {id?, name}` ("": its number again), `tab.move {id?, index | by}` (by: places left (-) or right (+), skipping settled tabs as `tab.next` does, wrapping),
   `tab.select {index | id}`, `tab.next`, `tab.prev`,
   `tab.settle {id?}`, `tab.unsettle {id?}` (index, next and prev
   skip settled tabs).
@@ -591,6 +597,8 @@ The main ones:
   terminal, or a mod pane), `pane.close {pane?}`,
   `pane.zoom {pane?}`, `pane.focus {pane | terminal}`, `pane.go {direction}`,
   `pane.swap {pane?, direction | target}`.
+  `pane.zoom` also makes the pane its tab's focused one (the tab isn't
+  selected); on the zoomed pane it unzooms and focus stays.
   `pane.go` prefers the most recently focused pane along the nearest edge in that
   direction; unvisited panes fall back to overlap, then top/left layout order.
   `pane.go` also reaches visible mods whose `mod.json` says `"focusable": true`, and
@@ -932,6 +940,11 @@ herdr-app check ~/.config/herdr-app/mods/<name>
 Loads the mod, renders it once, exits nonzero with the exact error. Run it
 after every change. Never call a mod done without a passing check.
 
+`init()` runs for real during a check. Import `checking` from `"herdr"` and
+use `if (checking()) return;` before starting helpers or writing files.
+`checking()` is true throughout a check and false in a live window.
+`exec`, `hc` and `writeTextFile` still run during checks and warn when called.
+
 ### A mod
 
 ```js
@@ -1128,6 +1141,9 @@ All of it is in `herdr.d.ts`. In short:
 - Window title: `setWindowTitle(title)` sets the OS window's title, which window switchers,
   taskbars and time trackers read. The last call wins; `null` restores `Herdr`. Call it when the
   title changes, not on every render.
+- App icon badge: `setBadge(text)` puts `text` on the app's Dock icon (macOS; other platforms
+  ignore it), e.g. `setBadge(blocked ? String(blocked) : null)`. The last call wins; `null` or `""`
+  clears it.
 - `notify({ ..., action: { name, args } })`: the toast runs the command when clicked.
 - This copy: `props()`, `shared(key)` / `setShared(key, value)` (every mod
   sees it; setting re-renders all), `nextCommand()` (key commands for this

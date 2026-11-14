@@ -171,11 +171,14 @@ herdr-app shot /tmp/mod.png   # then look at the picture
 
 `check` loads the mod and renders it once. It exits nonzero with the exact
 error. Its shared state starts empty and stays in memory; it leaves shared.json
-untouched. Never call a mod done without a passing check. Then confirm it is
-shown correctly in the running window with `shot`; don't claim a visual
+untouched. Its `init()` still runs: import `checking` from `"herdr"` and guard
+process side effects with `if (checking()) return;`. It is true throughout a
+check and false in a live window; `exec`, `hc` and `writeTextFile` still run
+and warn during checks. Never call a mod done without a passing check.
+Then confirm it is shown correctly in the running window with `shot`; don't claim a visual
 check you haven't made.
 
-`herdr-app shot [file.png]` saves the window's last frame and prints its
+`herdr-app shot [file.png]` saves the window's current frame and prints its
 absolute path (default: `herdr-shot.png` in your current folder). It is the
 app's own rendering at full pixel size: terminals, images, overlays and
 floats included, even when the window is covered or minimized. No screen
