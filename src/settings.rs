@@ -378,7 +378,7 @@ pub struct Person {
     pub font: Option<String>,
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font_size: Option<f32>,
-    /// The terminals' text weight, 100 to 900; bold text is at least 700.
+    /// The terminals' text weight, 100 to 900; bold text stays at 700.
     #[serde(skip_serializing_if = "Option::is_none")]
     pub font_weight: Option<u16>,
     /// Enable programming ligatures in terminal fonts.
@@ -488,7 +488,7 @@ impl Default for Person {
 pub struct Settings {
     pub font_family: String,
     pub font_size: f32,
-    /// The terminals' text weight (bold text is at least 700).
+    /// The terminals' text weight (bold text stays at 700).
     pub font_weight: u16,
     pub font_ligatures: bool,
     /// Cell height multiplier, 0.8..2.
