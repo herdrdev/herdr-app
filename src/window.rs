@@ -11,7 +11,7 @@ mod pane_drag;
 mod pane_size;
 mod titlebar;
 
-use crate::layout::{Axis, Background as Paint, Content, Fit, HeaderContent, Kind, Line, Node, PaneFrame, Size as Span};
+use crate::layout::{Axis, Background as Paint, Content, Divider, Fit, HeaderContent, Kind, Line, Node, PaneFrame, Size as Span};
 use crate::model::{self, Tab, Model};
 use crate::mods::{self, Found, Instance, Request};
 use crate::settings;
@@ -395,6 +395,7 @@ pub struct AppWindow {
     float_hover: HashSet<String>,
     /// Bumped on every hover change, so a delayed leave knows it's still current.
     float_leave: HashMap<String, u64>,
+    divider_hover: Option<(String, usize)>,
     model: Model,
     /// Terminal views by block id (panes and chrome terminal blocks).
     terms: HashMap<String, Term>,
@@ -520,6 +521,7 @@ impl AppWindow {
             float_reveal: HashMap::new(),
             float_hover: HashSet::new(),
             float_leave: HashMap::new(),
+            divider_hover: None,
             model: Model::default(),
             terms: HashMap::new(),
             copies: HashMap::new(),
@@ -1031,6 +1033,7 @@ impl AppWindow {
         self.float_anims.clear();
         self.float_reveal.clear();
         self.float_hover.clear();
+        self.divider_hover = None;
         let other = next != self.layout_name;
         if other {
             self.close_windows(window, cx);
@@ -4485,7 +4488,10 @@ impl AppWindow {
     fn separator(&self, n: &Node, axis: Axis, gap: f32, index: usize, cx: &mut Context<Self>) -> AnyElement {
         let row = axis == Axis::Row;
         let zoom = settings::zoom();
-        let line = n.divider.as_ref().map(|d| (d.width * zoom, c(&d.color)));
+        let hovered = self.divider_hover.as_ref().is_some_and(|(id, i)| *id == n.id && *i == index);
+        let dragging = self.drag.as_ref().is_some_and(|d| d.container == n.id && d.index == index);
+        let line = n.divider.as_ref().map(|d| (d.width * zoom, c(d.color_for(hovered, dragging))));
+        let tracks_hover = n.divider.as_ref().is_some_and(|d| d.hover.is_some());
         let width = pane_size::separator_width(n, gap) * zoom;
         let mut sep = div().flex_none().relative().flex().items_center().justify_center();
         sep = if row { sep.w(px(width)).h_full() } else { sep.h(px(width)).w_full() };
@@ -4503,6 +4509,7 @@ impl AppWindow {
             let hit = HANDLE.max(width);
             sep = sep.child(
                 div()
+                    .id(SharedString::from(format!("divider-{}-{index}", n.id)))
                     .absolute()
                     .when(row, |d| d.top_0().bottom_0().left(px((width - hit) / 2.0)).w(px(hit)).cursor_col_resize())
                     .when(!row, |d| d.left_0().right_0().top(px((width - hit) / 2.0)).h(px(hit)).cursor_row_resize())
@@ -4513,8 +4520,17 @@ impl AppWindow {
                                 && this.require_document(space.machine.as_deref()).is_err() { return; }
                             this.drag = Some(Drag { container: container.clone(), index, axis });
                             cx.stop_propagation();
+                            cx.notify();
                         }),
-                    ),
+                    )
+                    .when(tracks_hover, |d| {
+                        let container = n.id.clone();
+                        d.on_hover(cx.listener(move |this, over: &bool, _, cx| {
+                            let key = Some((container.clone(), index));
+                            if *over { this.divider_hover = key; } else if this.divider_hover == key { this.divider_hover = None; }
+                            cx.notify();
+                        }))
+                    }),
             );
         }
         sep.into_any_element()
@@ -5029,7 +5045,7 @@ fn dock(root: &mut Node, block: Node, place: &str, wrapper_id: String) {
     let mut wrapper = Node::container(wrapper_id, axis, children);
     wrapper.toast = toast;
     wrapper.terminal_menu = terminal_menu;
-    wrapper.divider = Some(Line { width: 1.0, color: "border".into() });
+    wrapper.divider = Some(Divider { width: 1.0, color: "border".into(), hover: None, active: None });
     *root = wrapper;
 }
 
@@ -5238,6 +5254,7 @@ impl Render for AppWindow {
                     this.drag = None;
                     this.save();
                     this.publish(cx);
+                    cx.notify();
                     return;
                 }
                 this.drag_to(ev.position);
@@ -5246,6 +5263,7 @@ impl Render for AppWindow {
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, window, cx| {
                 this.drag_from = None;
                 if this.drag.take().is_some() {
+                    cx.notify();
                     this.save();
                     // Mods see the new sizes (the sidebar picks its rail by width).
                     this.publish(cx);
