@@ -77,6 +77,8 @@ pub enum TerminalEvent {
     ContextMenu(Point<Pixels>),
     /// Something the person asked for failed: an error toast.
     Notice { title: String, body: String },
+    /// Text came through the input method (no key down reaches the window then).
+    Typed,
 }
 
 /// What the canvas closures need, shared outside the entity so prepaint can resize.
@@ -2302,6 +2304,7 @@ impl EntityInputHandler for TerminalView {
         if !self.find_field_focused(window, cx) {
             self.send(text.as_bytes());
         }
+        cx.emit(TerminalEvent::Typed);
         cx.notify();
     }
 
@@ -2319,6 +2322,7 @@ impl EntityInputHandler for TerminalView {
             return;
         }
         self.grid.borrow_mut().marked = (!text.is_empty()).then(|| text.to_owned());
+        cx.emit(TerminalEvent::Typed);
         cx.notify();
     }
 

@@ -1487,6 +1487,8 @@ impl AppWindow {
                 TerminalEvent::TitleChanged => this.publish(cx),
                 TerminalEvent::SelectionChanged => this.publish_selection(&addr, window, cx),
                 TerminalEvent::Ended => this.terminal_ended(&block, window, cx),
+                // Typing through an input method cancels the wait, as a key down does.
+                TerminalEvent::Typed => this.follow_wait = None,
                 TerminalEvent::ContextMenu(at) => {
                     this.open_menu("pane", json!({ "pane": block.trim_end_matches(SWAP), "terminal": addr }), Some(*at), window, cx)
                 }
@@ -1746,13 +1748,14 @@ impl AppWindow {
             return;
         }
         self.follow_over = over.clone();
-        let (delay, before) = (Duration::from_millis(s.focus_follows_mouse_delay_ms.into()), self.focus_id());
+        // What has the keyboard now: anything else taking it while it waits wins.
+        let (delay, before) = (Duration::from_millis(s.focus_follows_mouse_delay_ms.into()), window.focused(cx));
         self.follow_wait = over.map(|id| {
             cx.spawn_in(window, async move |this, cx| {
                 cx.background_executor().timer(delay).await;
                 let _ = this.update_in(cx, |this, window, cx| {
                     // Turned off, or the focus moved another way, while it waited.
-                    if settings::get().focus_follows_mouse && this.focus_id() == before {
+                    if settings::get().focus_follows_mouse && window.focused(cx) == before {
                         this.focus_pointed(&id, window, cx);
                     }
                 });
@@ -1769,22 +1772,17 @@ impl AppWindow {
             self.follow_over = None;
             return;
         }
-        if self.focus_id().as_deref() == Some(id) {
-            return;
-        }
         // Something opened over it since the pointer entered (no move to tell).
         if self.pointed_terminal(window).as_deref() != Some(id) {
             return;
         }
-        let args = if self.model.active_tab().is_some_and(|t| t.shown().visible_blocks().iter().any(|n| n.id == id)) {
-            json!({ "pane": id })
-        } else if let Some(terminal) = terminal_block(&self.chrome, Some(id)).and_then(|n| n.terminal()) {
-            json!({ "terminal": terminal })
-        } else {
+        let Some(view) = self.pane_term(id).map(|t| t.view.read(cx)) else { return };
+        if view.owns_keyboard_focus(window, cx) {
             return;
-        };
-        // Not the person's command: no telemetry, and nothing to show if it fails.
-        self.run_as("pane.focus", args, false, window, cx);
+        }
+        let keys = view.focus_target(cx);
+        self.click_pane(id, cx);
+        keys.focus(window, cx);
     }
 
     /// The terminal block under the pointer, if nothing covers it there.
@@ -1792,12 +1790,19 @@ impl AppWindow {
         self.follow_hitboxes.borrow().iter().find(|(_, h)| h.is_hovered(window)).map(|(id, _)| id.clone())
     }
 
-    /// What holds the focus: a mod block, a layout terminal block, else the tab's pane.
-    fn focus_id(&self) -> Option<String> {
-        self.focused_block
-            .clone()
-            .or_else(|| terminal_block(&self.chrome, self.focused_pane.as_deref()).map(|n| n.id.clone()))
-            .or_else(|| self.model.focused_pane())
+    /// A press on terminal block `id` (the view takes the keyboard itself): a tab
+    /// pane or layout terminal block becomes the focused pane. Overlay terminals
+    /// keep their own focus.
+    fn click_pane(&mut self, id: &str, cx: &mut Context<Self>) {
+        if self.focused_pane.as_deref() == Some(id) || (self.model.tab_of(id).is_none() && terminal_block(&self.chrome, Some(id)).is_none()) {
+            return;
+        }
+        self.model.focus_pane(id);
+        self.focused_pane = Some(id.to_owned());
+        self.synced_model_pane = self.model.focused_pane();
+        self.publish(cx);
+        self.save();
+        cx.notify();
     }
 
     fn pane_focus(&self, pane: &str, cx: &App) -> Option<FocusHandle> {
@@ -4439,19 +4444,7 @@ impl AppWindow {
                     let (boxes, boxed) = (self.follow_hitboxes.clone(), n.id.clone());
                     div()
                         .size_full()
-                        .on_any_mouse_down(cx.listener(move |this, _, _, cx| {
-                            // Overlay terminals keep their own focus; chrome blocks share the pane focus API.
-                            if this.focused_pane.as_deref() != Some(id.as_str())
-                                && (this.model.tab_of(&id).is_some() || terminal_block(&this.chrome, Some(&id)).is_some())
-                            {
-                                this.model.focus_pane(&id);
-                                this.focused_pane = Some(id.clone());
-                                this.synced_model_pane = this.model.focused_pane();
-                                this.publish(cx);
-                                this.save();
-                                cx.notify();
-                            }
-                        }))
+                        .on_any_mouse_down(cx.listener(move |this, _, _, cx| this.click_pane(&id, cx)))
                         .child(shown_terminal(&t.view, cx))
                         // Last, so the terminal's own parts (its scrollbar) don't cover it.
                         .when(settings::get().focus_follows_mouse, |d| {

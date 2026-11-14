@@ -3,7 +3,7 @@ fn focus_follows_the_pointer_that_stays_on_a_pane() {
     in_own_process("focus_follows_mouse");
 }
 
-/// The whole path, from a pointer move over a painted pane to `pane.focus`.
+/// The whole path, from a pointer move over a painted pane to its focus.
 #[gpui::test]
 fn focus_follows_mouse(cx: &mut gpui::TestAppContext) {
     use crate::model::pane;
@@ -74,6 +74,43 @@ fn focus_follows_mouse(cx: &mut gpui::TestAppContext) {
     cx.simulate_mouse_move(b + point(px(5.0), px(0.0)), None, Modifiers::none());
     wait(cx);
     assert_eq!(focused(cx), "b", "the first move once it's active counts as entering");
+
+    // The keyboard went elsewhere while b stayed the tab's pane: entering b gives it back.
+    view.update_in(cx, |this, window, cx| this.focus.focus(window, cx));
+    cx.simulate_mouse_move(a, None, Modifiers::none());
+    cx.simulate_mouse_move(b, None, Modifiers::none());
+    wait(cx);
+    view.update_in(cx, |this, window, _| assert!(this.terms["b"].focus.is_focused(window), "the keyboard comes back to b"));
+
+    // b shows another terminal: taking the focus keeps it there, as a click does.
+    view.update_in(cx, |this, window, cx| {
+        this.live.insert("term-c".into(), json!({ "address": "term-c" }));
+        this.run("terminal.show", json!({ "pane": "b", "terminal": "term-c" }), window, cx);
+        this.run("pane.focus", json!({ "pane": "a" }), window, cx);
+    });
+    cx.simulate_mouse_move(a, None, Modifiers::none());
+    wait(cx);
+    assert_eq!(focused(cx), "a");
+    cx.simulate_mouse_move(b, None, Modifiers::none());
+    wait(cx);
+    assert_eq!(focused(cx), "b");
+    view.update(cx, |this, _| assert_eq!(this.swapped.get("b").map(String::as_str), Some("term-c"), "b still shows term-c"));
+    view.update_in(cx, |this, window, cx| assert!(this.pane_term("b").unwrap().view.read(cx).owns_keyboard_focus(window, cx), "term-c has the keyboard"));
+    cx.simulate_mouse_move(a, None, Modifiers::none());
+    wait(cx);
+
+    // Typing through an input method (no key down reaches the window) cancels the wait too.
+    cx.simulate_mouse_move(b, None, Modifiers::none());
+    view.update_in(cx, |this, window, cx| {
+        use gpui::EntityInputHandler;
+        this.terms["a"].view.update(cx, |v, cx| v.replace_and_mark_text_in_range(None, "j", None, window, cx));
+    });
+    wait(cx);
+    assert_eq!(focused(cx), "a", "composing in a cancels the wait on b");
+    cx.simulate_mouse_move(a, None, Modifiers::none());
+    cx.simulate_mouse_move(b, None, Modifiers::none());
+    wait(cx);
+    assert_eq!(focused(cx), "b", "entering b again does");
 
     // A window opens over b while the pointer waits there.
     cx.simulate_mouse_move(a, None, Modifiers::none());
