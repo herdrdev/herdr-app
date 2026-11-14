@@ -207,6 +207,17 @@ impl Model {
         true
     }
 
+    /// Moves a tab `by` places, skipping settled tabs as `tab.next` does, wrapping at
+    /// either end.
+    pub fn shift_tab(&mut self, id: &str, by: i64) -> bool {
+        let Some(p) = self.spaces.iter().find(|p| p.tabs.iter().any(|c| c.id == id)) else { return false };
+        let shown: Vec<_> = p.tabs.iter().enumerate().filter(|(_, c)| c.settled.is_none() || c.id == id).map(|(i, _)| i).collect();
+        let from = shown.iter().position(|&i| p.tabs[i].id == id).unwrap();
+        let n = shown.len() as i64;
+        let to = shown[(from as i64 + by.rem_euclid(n)).rem_euclid(n) as usize];
+        self.move_tab(id, to + 1)
+    }
+
     pub fn active_index(&self) -> Option<usize> {
         let id = self.active.as_deref()?;
         self.spaces.iter().position(|p| p.id == id).or((!self.spaces.is_empty()).then_some(0))
@@ -751,6 +762,44 @@ mod tests {
         assert_eq!(tabs(&m), ["c2", "c1"]);
         assert!(m.move_tab("c2", 9));
         assert_eq!(tabs(&m), ["c1", "c2"]);
+    }
+
+    #[test]
+    fn shift_tab_steps_over_the_shown_tabs_and_wraps() {
+        let mut m = Model::default();
+        m.add_space("s1", "api", "/src", Tab::new("c1", "", "x1", "t1"));
+        for (c, x) in [("c2", "x2"), ("c3", "x3"), ("c4", "x4")] {
+            m.add_tab("s1", Tab::new(c, "", x, "t"));
+        }
+        let tabs = |m: &Model| m.space("s1").unwrap().tabs.iter().map(|c| c.id.clone()).collect::<Vec<_>>();
+        assert!(m.shift_tab("c2", 1));
+        assert_eq!(tabs(&m), ["c1", "c3", "c2", "c4"]);
+        assert!(m.shift_tab("c2", -1));
+        assert_eq!(tabs(&m), ["c1", "c2", "c3", "c4"]);
+        // Past either end: to the other end.
+        assert!(m.shift_tab("c4", 1));
+        assert_eq!(tabs(&m), ["c4", "c1", "c2", "c3"]);
+        assert!(m.shift_tab("c4", -1));
+        assert_eq!(tabs(&m), ["c1", "c2", "c3", "c4"]);
+        // A settled tab isn't shown, so a step goes past it.
+        m.space_mut("s1").unwrap().tabs[2].settled = Some(1);
+        assert!(m.shift_tab("c2", 1));
+        assert_eq!(tabs(&m), ["c1", "c3", "c4", "c2"]);
+        assert!(m.shift_tab("c2", 0));
+        assert_eq!(tabs(&m), ["c1", "c3", "c4", "c2"]);
+        // Past the end with the settled one before it: to the front.
+        assert!(m.shift_tab("c2", 1));
+        assert_eq!(tabs(&m), ["c2", "c1", "c3", "c4"]);
+        // The settled tab itself moves among the shown ones.
+        assert!(m.shift_tab("c3", -1));
+        assert_eq!(tabs(&m), ["c2", "c3", "c1", "c4"]);
+        // More places than tabs wraps round; i64's ends don't overflow.
+        assert!(m.shift_tab("c4", 7));
+        assert_eq!(tabs(&m), ["c4", "c2", "c3", "c1"]);
+        assert!(m.shift_tab("c4", i64::MAX));
+        assert!(m.shift_tab("c4", i64::MIN));
+        assert!(!m.shift_tab("x1", 1));
+        assert!(!m.shift_tab("nope", 1));
     }
 
     fn model_with_one() -> Model {
