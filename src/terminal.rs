@@ -2004,6 +2004,11 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     let origin = point(snap(origin.x), snap(origin.y));
     g.origin = origin;
     let frame = g.vt.frame();
+    let fill_padding = match crate::settings::get().terminal_padding_fill {
+        crate::settings::PaddingFill::Off => false,
+        crate::settings::PaddingFill::Auto => g.vt.alt_screen(),
+        crate::settings::PaddingFill::Always => true,
+    };
     let placements = g.vt.placements();
     let mut images: Vec<(bool, Bounds<Pixels>, Arc<RenderImage>)> = Vec::new();
     let mut keep = std::collections::HashSet::new();
@@ -2083,7 +2088,16 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
         for op in ops {
             match op {
                 RowOp::Bg { from, to, color } => {
-                    let b = Bounds::new(at(*from, y), size(cell.width * (to - from) as f32, cell.height));
+                    let mut b = Bounds::new(at(*from, y), size(cell.width * (to - from) as f32, cell.height));
+                    // Carry edge cell colors into the padding when enabled.
+                    // Only backgrounds grow: text, input and grid size stay put.
+                    if fill_padding {
+                        let left = if *from == 0 { bounds.left() } else { b.left() };
+                        let right = if *to == frame.rows[y].len() { bounds.right() } else { b.right() };
+                        let top = if y == 0 { bounds.top() } else { b.top() };
+                        let bottom = if y + 1 == frame.rows.len() { bounds.bottom() } else { b.bottom() };
+                        b = Bounds::from_corners(point(left, top), point(right, bottom));
+                    }
                     window.paint_quad(fill(snap_box(b), *color));
                 }
                 _ => {}
@@ -2656,6 +2670,77 @@ impl Focusable for TerminalView {
 mod tests {
     use super::{ScrollTarget, pages_to_lines, scroll_target};
     use serde_json::{Value, json};
+
+    #[gpui::test]
+    fn padding_fill_follows_settings_without_moving_cells(cx: &mut gpui::TestAppContext) {
+        use super::*;
+
+        struct Scene(Entity<TerminalView>);
+        impl Render for Scene {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                let grid = self.0.read(cx).grid.clone();
+                div().size_full().child(
+                    canvas(|_, _, _| {}, move |bounds, _, window, cx| paint_grid(bounds, &grid, false, window, cx))
+                        .absolute().left(px(20.)).top(px(30.)).w(px(101.)).h(px(83.)),
+                )
+            }
+        }
+
+        let original = crate::settings::get();
+        let (root, cx) = cx.add_window_view(|_, cx| {
+            Scene(cx.new(|cx| TerminalView::attach(crate::hc::offline(), "t1".into(), (8, 3), cx)))
+        });
+        for (value, mode, extended) in [
+            (None, "", false),
+            (None, "\x1b[?1049h", false),
+            (Some("auto"), "", true),
+            (Some("off"), "", false),
+            (Some("always"), "", true),
+            (Some("auto"), "\x1b[?1049l", false),
+            (Some("always"), "", true),
+            (Some("off"), "", false),
+            (Some("auto"), "\x1b[?1049h", true),
+            (Some("auto"), "\x1b[?1049l", false),
+        ] {
+            let saved = value.map_or(json!({}), |v| json!({"terminal_padding_fill": v}));
+            let person: crate::settings::Person = serde_json::from_value(saved).unwrap();
+            let restored = serde_json::from_value(serde_json::to_value(person).unwrap()).unwrap();
+            crate::settings::set(crate::settings::Settings::compose(&restored, &crate::layout::Look::default(), true));
+            root.update(cx, |root, cx| {
+                root.0.update(cx, |terminal, _| {
+                    let mut grid = terminal.grid.borrow_mut();
+                    grid.cell = size(px(10.), px(20.));
+                    grid.vt.write(mode.as_bytes());
+                    // Separate top corners, an interior block, and a full-width status bar.
+                    grid.vt.write(b"\x1b[?25l\x1b[0m\x1b[2J\x1b[H\x1b[48;2;255;0;0m \x1b[8G\x1b[48;2;0;0;255m ");
+                    grid.vt.write(b"\x1b[2;3H\x1b[48;2;0;255;0m    \x1b[3;1H\x1b[48;2;255;255;0m        \x1b[0m");
+                });
+                cx.notify();
+            });
+            cx.update(|window, app| {
+                let _ = window.draw(app);
+                for (color, plain, filled) in [
+                    (Rgb(255, 0, 0), (30., 41., 10., 20.), (20., 30., 20., 31.)),
+                    (Rgb(0, 0, 255), (100., 41., 10., 20.), (100., 30., 21., 31.)),
+                    (Rgb(0, 255, 0), (50., 61., 40., 20.), (50., 61., 40., 20.)),
+                    (Rgb(255, 255, 0), (30., 81., 80., 20.), (20., 81., 101., 32.)),
+                ] {
+                    let background: Background = hsla(color).into();
+                    let painted: Vec<_> = window.painted_quads().iter()
+                        .filter(|quad| quad.background == background).map(|quad| quad.bounds).collect();
+                    let (x, y, w, h) = if extended { filled } else { plain };
+                    assert_eq!(painted, vec![Bounds::new(point(px(x), px(y)), size(px(w), px(h))).scale(window.scale_factor())],
+                        "background {color:?}, setting {value:?}, extended {extended}");
+                }
+            });
+            root.read_with(cx, |root, cx| {
+                let grid = root.0.read(cx).grid.borrow();
+                assert_eq!((grid.vt.cols, grid.vt.rows), (8, 3));
+                assert_eq!(grid.origin, point(px(30.), px(41.)), "text must keep its padding");
+            });
+        }
+        crate::settings::set((*original).clone());
+    }
 
     #[test]
     fn output_turns_preserve_bytes_budget_and_close_order() {

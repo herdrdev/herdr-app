@@ -539,6 +539,12 @@ export default class Settings extends View {
         ),
       )
       .child(fontRow("font", "font_size", "Terminal font", s.font_family, DEFAULT_FONT, s.font_size))
+      .child(this.row(t, "Padding colors", "Automatic fills padding in full-screen programs.",
+        h_flex().gap(4).children([["off", "Off"], ["auto", "Automatic"], ["always", "Always"]].map(([value, label]) =>
+          this.button(t, `st-padding-fill-${value}`, label, (_e, cx) => this.change((p) => { p.terminal_padding_fill = value; }, cx))
+            .when(s.terminal_padding_fill === value, (el) => el.border_color(t.accent)),
+        )),
+      ))
       .children([
         ["terminal_line_height", "Terminal line height", 0.8, 2],
         ["terminal_scroll_speed", "Terminal scroll speed", 0.1, 5],
