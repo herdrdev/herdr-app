@@ -413,7 +413,9 @@ export interface OverlaySpec {
   /** px, or up to 1: a share of the window. */
   width?: number;
   height?: number;
-  at?: "pointer" | { x: number; y: number };
+  /** A popup's spot: the pointer (default), `{x, y}`, or "bottom": along the window's bottom
+   *  edge from its left (width 1 spans it), for a mode or status line that holds the keyboard. */
+  at?: "pointer" | "bottom" | { x: number; y: number };
 }
 
 /** Shows a mod (or a layout) above everything. Returns its id. The mod gets `props().overlay` = that id. */
