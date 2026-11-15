@@ -53,9 +53,14 @@ const RANK = { blocked: 4, done: 3, working: 2, idle: 1 };
 // A sub-agent without a pane isn't in agents(): its raw word, error counting as
 // blocked. It's never done: it reports to its parent, and the parent's done is the news.
 const kidStatus = (k, listed) => {
-  const s = listed.get(k.address) ?? k.status;
+  const s = listed.get(k.address) ?? busiest(k.status, k.records);
   return s === "error" ? "blocked" : s === "done" ? "idle" : s;
 };
+// A program can say it's idle while its background work goes on, reported as
+// child 7501 records (Claude Code's background agents): the busiest one shows.
+const BUSY = { working: "working", blocked: "blocked", error: "blocked" };
+const busiest = (word, records) =>
+  Object.values(records ?? {}).reduce((m, r) => ((RANK[BUSY[r?.state]] ?? 0) > (RANK[m] ?? 0) ? BUSY[r.state] : m), word);
 const SORTS = [
   { id: "priority", label: "Priority", icon: "clock" },
   { id: "grouped", label: "Grouped by space", icon: "layers" },
@@ -221,9 +226,10 @@ export default class Agents extends View {
     if (props()?.sortMenu) return this.sortMenu(t);
     const collapsed = narrow();
     const sort = sortOf();
-    let list = agents();
-    this.listed = new Map(list.map((a) => [a.address, a.status]));
     const all = terminals();
+    const records = new Map(all.map((k) => [k.address, k.records]));
+    let list = agents().map((a) => ({ ...a, status: busiest(a.status, records.get(a.address)) }));
+    this.listed = new Map(list.map((a) => [a.address, a.status]));
     this.migratePins(all);
     const shown = focused()?.agent;
     const now = Date.now();
