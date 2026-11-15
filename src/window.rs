@@ -452,6 +452,9 @@ pub struct AppWindow {
     /// Each machine owns a document; the empty key is this core.
     documents: std::collections::BTreeMap<String, crate::mirror_sync::Slot>,
     initial_view: Option<crate::mirror::View>,
+    /// The person selected a space since launch: a machine that loads after
+    /// that keeps its saved view, but its saved space doesn't take the window.
+    space_selected: bool,
     pointer: Point<Pixels>,
     /// Where a press on a `window_drag` node started, until it moves the window.
     drag_from: Option<Point<Pixels>>,
@@ -562,6 +565,7 @@ impl AppWindow {
                 [(String::new(), local)].into()
             },
             initial_view: std::fs::read_to_string(file("view.json")).ok().and_then(|s| serde_json::from_str(&s).ok()),
+            space_selected: false,
             pointer: Point::default(),
             drag_from: None,
             titlebar_applied: None,
@@ -2080,7 +2084,11 @@ impl AppWindow {
             if replace {
                 let on = (!machine.is_empty()).then_some(machine.as_str());
                 document.replace(&mut self.model, on);
-                if first && let Some(view) = &self.initial_view { view.apply_machine(&mut self.model, on); }
+                if first && let Some(view) = &self.initial_view {
+                    // Once the person has selected a space or typed, a machine that loads late doesn't take the window.
+                    let show = !self.space_selected && !self.terms.values().any(|t| t.view.read(cx).typed());
+                    view.apply_machine(&mut self.model, on, show);
+                }
                 changed = true;
             }
             if conflict {
@@ -3058,12 +3066,14 @@ impl AppWindow {
                     Some(id) => self.model.active = Some(id),
                     None => return self.fail("no such space"),
                 }
+                self.space_selected |= person;
             }
             "space.next" | "space.prev" => {
                 let n = self.model.spaces.len();
                 if let Some(i) = self.model.active_index().filter(|_| n > 0) {
                     let j = if name == "space.next" { (i + 1) % n } else { (i + n - 1) % n };
                     self.model.active = Some(self.model.spaces[j].id.clone());
+                    self.space_selected |= person;
                 }
             }
             // ---- tabs

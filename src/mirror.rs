@@ -159,8 +159,10 @@ impl View {
     }
 
     /// Restore saved choices when a machine's first document arrives, without
-    /// resetting choices already made on other machines during startup.
-    pub fn apply_machine(&self, model: &mut Model, machine: Option<&str>) {
+    /// resetting choices already made on other machines during startup. The
+    /// saved space is shown again only with `show`: not once the person has
+    /// selected a space or typed.
+    pub fn apply_machine(&self, model: &mut Model, machine: Option<&str>, show: bool) {
         let mut merged = Self::capture(model);
         for space in model.spaces.iter().filter(|s| s.machine.as_deref() == machine) {
             if let Some(active) = self.spaces.get(&space.id) {
@@ -171,7 +173,7 @@ impl View {
                     merged.tabs.insert(tab.id.clone(), view.clone());
                 }
             }
-            if self.active.as_deref() == Some(&space.id) {
+            if show && self.active.as_deref() == Some(&space.id) {
                 merged.active = self.active.clone();
             }
         }
@@ -284,10 +286,26 @@ mod tests {
         m.active = Some("s".into());
         m.tab_mut("t").unwrap().settled = Some(42);
         doc.replace(&mut m, Some("mac"));
-        saved.apply_machine(&mut m, Some("mac"));
+        saved.apply_machine(&mut m, Some("mac"), true);
         assert_eq!(m.tab("t").unwrap().settled, Some(42));
         assert_eq!(m.tab("mac/t").unwrap().zoomed.as_deref(), Some("mac/p"));
         assert_eq!(m.active.as_deref(), Some("mac/s"));
+    }
+    #[test]
+    fn late_remote_load_keeps_the_shown_space_once_the_person_acted() {
+        let mut m = model();
+        Document::capture(&m, None).replace(&mut m, Some("mac"));
+        m.tab_mut("mac/t").unwrap().zoomed = Some("mac/p".into());
+        m.active = Some("mac/s".into());
+        let saved = View::capture(&m);
+        let doc = Document::capture(&m, Some("mac"));
+        m.spaces.retain(|s| s.machine.is_none());
+        m.active = Some("s".into());
+        doc.replace(&mut m, Some("mac"));
+        saved.apply_machine(&mut m, Some("mac"), false);
+        assert_eq!(m.active.as_deref(), Some("s"));
+        assert_eq!(m.focused_pane().as_deref(), Some("p"));
+        assert_eq!(m.tab("mac/t").unwrap().zoomed.as_deref(), Some("mac/p"));
     }
     #[test]
     fn seen_attention_survives_a_screen_restart_but_not_a_new_word() {
@@ -296,10 +314,10 @@ mod tests {
         m.agents.get_mut("t1").unwrap().seen = false;
         let saved = View::capture(&m);
         m.agents.clear();
-        saved.apply_machine(&mut m, None);
+        saved.apply_machine(&mut m, None, true);
         assert!(!m.agents["t1"].seen);
         m.set_word("t1", Some("working".into()), None, false);
-        saved.apply_machine(&mut m, None);
+        saved.apply_machine(&mut m, None, true);
         assert!(m.agents["t1"].seen);
     }
     /// A newer build may add fields to a space or tab (#718's `floating`): this
