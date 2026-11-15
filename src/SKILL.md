@@ -85,6 +85,12 @@ the same tab. Give `direction` or `target`, not both. Focus stays with the same 
 herdr-app do pane.swap '{"pane":"p12","target":"p14"}'
 ```
 
+`tab.close` and `pane.close` ask a person before ending a running program or
+live agent session (including an agent between turns); an idle shell closes
+without a prompt. Closing the last tab (or last pane) closes its space and asks
+first even when idle, like `space.close`. Agent-issued closes require
+`--confirmed true` in those cases.
+
 `terminal.select_all {terminal?}` selects a terminal's whole screen and scrollback,
 ready for `terminal.copy`. Without a target it follows keyboard focus. In vim and
 other alternate-screen apps, it selects only that screen. Cmd+A runs it on macOS;

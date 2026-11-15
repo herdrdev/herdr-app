@@ -583,8 +583,9 @@ The main ones:
   that exits with a nonzero code within two seconds of launch shows an error
   toast with its exit code and last output lines. Or `tab.new {name?, space?, mod,
   props?, focus?}` for a tab whose only pane is a mod (a file, a board; split a shell
-  in beside it like any tab), `tab.close {id?, confirmed?}` (closing the last tab
-  closes its space and asks first unless confirmed),
+  in beside it like any tab), `tab.close {id?, confirmed?}` (closing the last
+  tab closes its space and asks first unless confirmed; otherwise asks first for
+  running programs and live agents, even between turns — idle shells close instantly),
   `tab.rename {id?, name}` ("": its number again), `tab.move {id?, index | by}` (by: places left (-) or right (+), skipping settled tabs as `tab.next` does, wrapping),
   `tab.select {index | id}`, `tab.next`, `tab.prev`,
   `tab.settle {id?}`, `tab.unsettle {id?}` (index, next and prev
@@ -594,7 +595,9 @@ The main ones:
   space shown, the new space is shown), for work the person looks at later;
   such tabs go last in their space, in the order made. `focus` is a boolean.
 - Panes: `pane.split {direction: "right" | "down", pane?, argv? | mod?, props?}` (a new
-  terminal, or a mod pane), `pane.close {pane?}`,
+  terminal, or a mod pane), `pane.close {pane?, confirmed?}` (closing the last
+  pane closes its tab as `tab.close` does; otherwise asks first for running
+  programs and live agents, even between turns — idle shells close instantly),
   `pane.zoom {pane?}`, `pane.focus {pane | terminal}`, `pane.go {direction}`,
   `pane.swap {pane?, direction | target}`.
   `pane.zoom` also makes the pane its tab's focused one (the tab isn't
