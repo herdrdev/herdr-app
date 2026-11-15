@@ -747,7 +747,10 @@ What's about the user, never a look:
   Bidirectional Algorithm as a left-to-right paragraph (the terminal-wg
   "implicit" mode, as in iTerm2 and mlterm); the program, copy and
   selection keep the row in logical order, and the cursor is drawn on its
-  cell's new place. Rows without right-to-left text are unchanged.
+  cell's new place. Table and frame borders and gaps of two or more blanks
+  keep their columns (each column is reordered on its own), and in file
+  paths and URLs the folders stay in order. Rows without right-to-left text
+  are unchanged.
 - `theme`: a theme name or `{light, dark}`; used where the layout sets none.
   The theme picker overrides any layout and stays on that layout.
 - `colors`: theme color overrides (`{"accent":"#ff8800"}`), with the same

@@ -53,15 +53,25 @@ impl ShapedLine {
     /// HERDR: Place terminal clusters at explicit cell boundaries. UI shaping is unchanged.
     pub fn with_cell_positions(mut self, positions: &[(usize, Pixels)], width: Pixels) -> Self {
         let layout = Arc::make_mut(&mut self.layout);
-        let mut cluster = None;
+        let cluster_of = |index: usize| positions.partition_point(|(at, _)| *at <= index).saturating_sub(1);
+        // HERDR: each cluster moves by one shift, taken from its glyph with the
+        // lowest text index (its base). In right-to-left runs CoreText can
+        // emit a combining mark (Hebrew niqqud) before its base, so the first
+        // glyph met is not always the base.
+        let mut anchors: Vec<Option<(usize, Pixels)>> = vec![None; positions.len()];
+        for glyph in layout.runs.iter().flat_map(|run| &run.glyphs) {
+            if let Some(anchor) = anchors.get_mut(cluster_of(glyph.index))
+                && anchor.is_none_or(|(index, _)| glyph.index < index)
+            {
+                *anchor = Some((glyph.index, glyph.position.x));
+            }
+        }
         for run in &mut layout.runs {
             for glyph in &mut run.glyphs {
-                let offset = positions.partition_point(|(index, _)| *index <= glyph.index).saturating_sub(1);
-                if cluster.is_none_or(|(index, _)| index != offset) {
-                    let target = positions.get(offset).map_or(px(0.), |(_, x)| *x);
-                    cluster = Some((offset, target - glyph.position.x));
+                let cluster = cluster_of(glyph.index);
+                if let (Some((_, target)), Some(Some((_, base)))) = (positions.get(cluster), anchors.get(cluster)) {
+                    glyph.position.x += *target - *base;
                 }
-                glyph.position.x += cluster.unwrap().1;
             }
         }
         layout.width = width;

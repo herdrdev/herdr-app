@@ -4017,6 +4017,27 @@ mod tests {
         }).unwrap();
     }
 
+    /// A shaper may emit a combining mark before its base (CoreText does in
+    /// right-to-left runs): the base still lands on its cell and the mark
+    /// keeps its place over it.
+    #[test]
+    fn niqqud_before_its_base_stays_on_the_base() {
+        use gpui::{FontId, GlyphId, ShapedGlyph, ShapedLine, ShapedRun, point, px};
+        let glyph = |index: usize, x: f32| ShapedGlyph { id: GlyphId(0), position: point(px(x), px(0.)), index, is_emoji: false };
+        // "שָׁל": the shin and its marks are one cell (bytes 0..6), lamed the
+        // next (byte 6). The shaper put the marks first, as drawn: right to left.
+        let mut line = ShapedLine::default();
+        std::sync::Arc::make_mut(&mut line).runs = vec![ShapedRun {
+            font_id: FontId(0),
+            glyphs: vec![glyph(6, 1.), glyph(4, 13.), glyph(2, 12.), glyph(0, 10.)],
+        }];
+        let line = line.with_cell_positions(&[(0, px(8.)), (6, px(0.))], px(16.));
+        let x: Vec<(usize, f32)> = line.runs[0].glyphs.iter().map(|g| (g.index, f32::from(g.position.x))).collect();
+        // The shin at its cell (8), its marks still 2 and 3 px right of it;
+        // the lamed at 0.
+        assert_eq!(x, vec![(6, 0.), (4, 11.), (2, 10.), (0, 8.)]);
+    }
+
     /// Background runs and the cursor follow the cells they belong to.
     #[gpui::test]
     fn backgrounds_follow_reordered_cells(cx: &mut gpui::TestAppContext) {
