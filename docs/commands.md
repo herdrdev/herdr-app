@@ -241,6 +241,15 @@ Show only this pane of its tab, or all again.
 |---|---|
 | `pane` | no |
 
+## `pane.rename`
+
+Name a pane (default: the focused one; asks the person when no name; an empty name: unnamed again).
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+| `name` | no |
+
 ## `pane.focus`
 
 Focus a pane (or the pane showing a terminal).

@@ -596,7 +596,8 @@ The main ones:
 - Panes: `pane.split {direction: "right" | "down", pane?, argv? | mod?, props?}` (a new
   terminal, or a mod pane), `pane.close {pane?}`,
   `pane.zoom {pane?}`, `pane.focus {pane | terminal}`, `pane.go {direction}`,
-  `pane.swap {pane?, direction | target}`.
+  `pane.swap {pane?, direction | target}`, `pane.rename {pane?, name}` ("": unnamed
+  again; `panes()[i].name`, kept with its tab).
   `pane.zoom` also makes the pane its tab's focused one (the tab isn't
   selected); on the zoomed pane it unzooms and focus stays.
   `pane.go` prefers the most recently focused pane along the nearest edge in that

@@ -1843,7 +1843,7 @@ impl AppWindow {
                     let zoomed = ctx.zoomed.as_deref() == Some(p.id.as_str());
                     // A mod pane: what it shows, no terminal.
                     if let Some(Content::Mod { name, .. }) = p.content() {
-                        panes.push(json!({ "pane": p.id, "terminal": null, "mod": name, "tab": ctx.id, "title": name, "focused": focused, "zoomed": zoomed, "movable": self.pane_movable(&p.id) }));
+                        panes.push(json!({ "pane": p.id, "terminal": null, "mod": name, "tab": ctx.id, "title": name, "name": p.title, "focused": focused, "zoomed": zoomed, "movable": self.pane_movable(&p.id) }));
                         continue;
                     }
                     let Some(addr) = p.terminal() else { continue };
@@ -1852,7 +1852,7 @@ impl AppWindow {
                         self.live.get(addr).and_then(|r| r.get("title")).and_then(Value::as_str).map(str::to_owned)
                     });
                     panes.push(json!({
-                        "pane": p.id, "terminal": addr, "tab": ctx.id, "title": title.clone().unwrap_or_default(),
+                        "pane": p.id, "terminal": addr, "tab": ctx.id, "title": title.clone().unwrap_or_default(), "name": p.title,
                         "cwd": self.cwds.get(addr), "branch": m.folder_info.get(addr).and_then(|f| f.branch.clone()),
                         "status": m.status(addr), "app": a.and_then(|a| a.app.clone()), "program": self.program(addr),
                         "focused": focused, "zoomed": zoomed, "movable": self.pane_movable(&p.id),
@@ -1860,7 +1860,7 @@ impl AppWindow {
                     let Some(status) = m.status(addr) else { continue };
                     agents.push(json!({
                         "address": addr, "pane": p.id, "space": pr.id, "space_name": m.space_name(pr, &home),
-                        "tab": ctx.id, "tab_index": ci + 1, "tab_name": Model::tab_name(pr, ctx),
+                        "tab": ctx.id, "tab_index": ci + 1, "tab_name": Model::tab_name(pr, ctx), "pane_name": p.title,
                         "status": status, "app": a.and_then(|a| a.app.clone()), "program": self.program(addr), "title": title.unwrap_or_default(),
                         "seq": a.map(|a| a.seq).unwrap_or(0),
                         "pinned": self.live.get(addr).and_then(|r| r.pointer("/labels/herdr.pinned")).and_then(Value::as_str).is_some_and(|v| !v.is_empty()),
@@ -2963,7 +2963,7 @@ impl AppWindow {
             if !args.is_object() { args = json!({}); }
             args["machine"] = json!(machine);
         }
-        if matches!(name, "space.new" | "space.close" | "space.rename" | "space.move" | "tab.new" | "tab.close" | "tab.rename" | "tab.move" | "pane.split" | "pane.close" | "pane.swap" | "terminal.keep" | "terminal.park") {
+        if matches!(name, "space.new" | "space.close" | "space.rename" | "space.move" | "tab.new" | "tab.close" | "tab.rename" | "tab.move" | "pane.split" | "pane.close" | "pane.swap" | "pane.rename" | "terminal.keep" | "terminal.park") {
             let node = ["id", "space", "pane"].into_iter().find_map(|k| Self::arg(&args, k));
             let target = node.and_then(|id| self.model.space(id).or_else(|| self.model.space_of(id))).or_else(|| self.model.active_space());
             let machine = if name == "space.new" { Self::arg(&args, "machine") }
@@ -2981,7 +2981,7 @@ impl AppWindow {
         self.reply.take().unwrap_or_else(|| json!({ "ok": true }))
     }
 
-    /// Asks the person for a new name (space.rename, tab.rename), then runs it with it.
+    /// Asks the person for a new name (space.rename, tab.rename, pane.rename), then runs it with it.
     /// The prompt starts with the name someone gave, empty for an automatic one.
     fn ask_name(&mut self, name: &str, mut args: Value, window: &mut Window, cx: &mut Context<Self>) {
         if !args.is_object() {
@@ -2993,6 +2993,12 @@ impl AppWindow {
                 let current = id.as_deref().and_then(|i| self.model.space(i)).map(|p| p.name.clone());
                 args["id"] = json!(id);
                 ("rename space", "empty: named after its folder", current)
+            }
+            "pane.rename" => {
+                let id = Self::owned(&args, "pane").or_else(|| self.model.focused_pane());
+                let current = id.as_deref().and_then(|i| self.model.tab_of(i)?.root.find(i)?.title.clone());
+                args["pane"] = json!(id);
+                ("rename pane", "empty: unnamed", current)
             }
             _ => {
                 let id = Self::owned(&args, "id").or_else(|| self.model.active_tab().map(|c| c.id.clone()));
@@ -3103,6 +3109,16 @@ impl AppWindow {
                     _ => return self.fail("tab.move needs index or by"),
                 };
                 if !moved { return self.fail(format!("no tab {id:?}")); }
+            }
+            "pane.rename" => {
+                let Some(pane) = Self::owned(a, "pane").or_else(|| self.model.focused_pane()) else { return self.fail("no pane to rename") };
+                let Some(name) = Self::arg(a, "name") else { return self.fail("pane.rename needs name (empty: unnamed)") };
+                let tab = self.model.tab_of(&pane).map(|c| c.id.clone());
+                let Some(node) = tab.and_then(|t| self.model.tab_mut(&t)).and_then(|c| c.root.find_mut(&pane)).filter(|n| n.is_pane()) else {
+                    return self.fail(format!("no pane {pane:?}"));
+                };
+                let name = name.trim();
+                node.title = (!name.is_empty()).then(|| name.to_owned());
             }
             "tab.settle" | "tab.unsettle" => {
                 let Some(id) = Self::owned(a, "id").or(active_ctx) else { return self.fail("no tab") };
@@ -4947,7 +4963,7 @@ fn swap_by(args: &Value) -> Result<SwapBy<'_>, String> {
 
 fn needs_model_pane(name: &str, args: &Value) -> bool {
     match name {
-        "pane.split" | "pane.close" | "pane.zoom" | "pane.swap" | "terminal.show" => AppWindow::arg(args, "pane").is_none(),
+        "pane.split" | "pane.close" | "pane.zoom" | "pane.swap" | "pane.rename" | "terminal.show" => AppWindow::arg(args, "pane").is_none(),
         "pane.go" => true,
         "terminal.open" | "terminal.keep" => matches!(AppWindow::arg(args, "place"), Some("right" | "down")),
         _ => false,
@@ -6491,6 +6507,37 @@ mod tests {
             assert_eq!(prompts(this), 0, "a second press closes the prompt");
             this.run("tab.rename", json!({}), window, cx);
             assert_eq!(prompts(this), 1, "and a third opens it again");
+        }));
+    }
+
+    #[test]
+    fn panes_take_names() {
+        in_own_process("pane_rename_names_and_clears");
+    }
+
+    #[gpui::test]
+    fn pane_rename_names_and_clears(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("pane_rename_names_and_clears") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "unused", "", json!({
+            "id": "root", "type": "block", "content": { "tab": "active" }
+        }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.model.add_space("sp1", "", "/tmp", crate::model::Tab::new("tb1", "", "p1", "t1"));
+            this.documents.entry(String::new()).or_default().available = true;
+            this.sync(window, cx);
+            let title = |this: &super::AppWindow| this.model.tab("tb1").and_then(|c| c.root.find("p1")).and_then(|n| n.title.clone());
+            let r = this.run_as("pane.rename", json!({ "pane": "p1", "name": "  server  " }), false, window, cx);
+            assert!(r.get("error").is_none(), "{r}");
+            assert_eq!(title(this).as_deref(), Some("server"), "trimmed");
+            assert!(this.run_as("pane.rename", json!({ "name": "" }), false, window, cx).get("error").is_none());
+            assert_eq!(title(this), None, "empty: unnamed again (default: the focused pane)");
+            assert!(this.run_as("pane.rename", json!({ "pane": "nope", "name": "x" }), false, window, cx).get("error").is_some());
+            assert!(this.run_as("pane.rename", json!({ "pane": "p1" }), false, window, cx).get("error").is_some(), "scripts get no prompt");
+            this.run("pane.rename", json!({}), window, cx);
+            assert_eq!(this.overlays.iter().filter(|o| o.id == "rename").count(), 1, "a person is asked");
         }));
     }
 
