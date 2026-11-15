@@ -594,7 +594,9 @@ The main ones:
   space shown, the new space is shown), for work the person looks at later;
   such tabs go last in their space, in the order made. `focus` is a boolean.
 - Panes: `pane.split {direction: "right" | "down", pane?, argv? | mod?, props?}` (a new
-  terminal, or a mod pane), `pane.close {pane?}`,
+  terminal, or a mod pane; `argv` starts in your interactive shell, for its PATH, and the
+  pane ends with it, keeping its exit code; that shell PATH needs sh, bash, zsh, dash, ksh or
+  fish: with other shells (nushell) and on Windows `argv` runs directly), `pane.close {pane?}`,
   `pane.zoom {pane?}`, `pane.focus {pane | terminal}`, `pane.go {direction}`,
   `pane.swap {pane?, direction | target}`.
   `pane.zoom` also makes the pane its tab's focused one (the tab isn't
@@ -614,7 +616,10 @@ The main ones:
   They never act on the terminal's source pane. An explicit `pane` still targets that
   model pane; composition edits belong to the mod (edit its layout instead).
 - Terminals: `terminal.open {argv?, folder?, place?, name?}` (`folder` sets the
-  starting directory for tabs and right/down splits, with or without `argv`), `terminal.kill {terminal}`,
+  starting directory for tabs and right/down splits, with or without `argv`; `argv` starts in
+  your interactive shell wherever it goes: a tab's shell stays after it, a split ends with it;
+  only with sh, bash, zsh, dash, ksh or fish: other shells (nushell) and Windows don't give
+  `argv` that shell's PATH, and a split there runs `argv` directly), `terminal.kill {terminal}`,
   `terminal.keep {terminal, place?}`, `terminal.park {terminal}`,
   `terminal.peek {terminal}` (peek over the tab, with keep-as-tab and close),
   `terminal.show {terminal?, pane?}`, `terminal.search` (screen and scrollback;
