@@ -670,7 +670,6 @@ struct MacWindowState {
     wake_source: Option<dispatch2::DispatchRetained<dispatch2::DispatchSource>>,
     woken: bool,
     idle_frames: u32,
-    parked: bool,
     renderer: renderer::Renderer,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     event_callback: Option<Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>>,
@@ -1107,7 +1106,6 @@ impl MacWindow {
                 wake_source: None,
                 woken: false,
                 idle_frames: 0,
-                parked: false,
                 renderer: renderer::new_renderer(
                     renderer_context,
                     native_window as *mut _,
@@ -3375,7 +3373,6 @@ extern "C" fn step(view: *mut c_void) {
             lock.idle_frames += 1;
             if lock.idle_frames >= 3 && lock.frame_source.as_ref().is_some_and(|f| f.is_running()) {
                 lock.stop_display_link();
-                lock.parked = true;
             }
         }
     }
@@ -3388,7 +3385,9 @@ extern "C" fn wake_frames(view: *mut c_void) {
     let mut lock = window_state.lock();
     lock.woken = true;
     lock.idle_frames = 0;
-    if std::mem::take(&mut lock.parked) {
+    if lock.request_frame_callback.is_some()
+        && !lock.frame_source.as_ref().is_some_and(|f| f.is_running())
+    {
         lock.start_display_link();
     }
 }
