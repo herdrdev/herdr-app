@@ -258,6 +258,16 @@ Focus the pane or focusable mod to the "left", "right", "up" or "down".
 |---|---|
 | `direction` | yes |
 
+## `pane.resize`
+
+Move the border of a pane (default: the focused one) "left", "right", "up" or "down" by px (default 40), like dragging the divider.
+
+| Argument | Required |
+|---|---|
+| `direction` | yes |
+| `pane` | no |
+| `px` | no |
+
 ## `pane.swap`
 
 Swap a pane (default: the focused one) with its neighbor in a direction, or with another pane of its tab (target). Give exactly one of direction or target.
