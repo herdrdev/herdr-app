@@ -187,6 +187,8 @@ only when expanded.
 In the remote SFTP browser, select a file for a read-only text preview and use
 Back to return to its folder. Text previews are limited to 1 MiB and use the
 remote core's file-reading facility; binary files need downloading to open.
+Mouse selections in that preview copy to the clipboard on release when
+`copy_on_select` is enabled, as in the terminal.
 
 **Herdr's own layouts and mods are read-only.** They are replaced whole
 on every start. Use settings.json for look (fonts, sizes, theme, colors,

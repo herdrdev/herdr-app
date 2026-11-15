@@ -149,6 +149,12 @@ export class SftpBrowser {
     cx?.notify();
   }
 
+  copyPreviewSelection(cx) {
+    if (!this.previewCode || settings().copy_on_select === false) return;
+    const { start, end } = this.previewCode.selected_range();
+    if (end > start) cx.write_to_clipboard(this.previewCode.value().slice(start, end));
+  }
+
   openPreview(entry, t, cx) {
     if (!this.machineId || entry.isDirectory) return;
     this.closePreview();
@@ -863,7 +869,11 @@ export class SftpBrowser {
       .child(h_flex().h(36).px(8).gap(8).items_center()
         .child(div().id("sftp-preview-back").cursor_pointer().on_click((_e, cx) => this.closePreview(cx)).child("← Back"))
         .child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(this.preview.path)))
-      .child(this.previewCode ? Editor.new(this.previewCode).flex_1().min_h(0) : div().p(12).text_color(t.dim).child(this.preview.error || "Loading file…"));
+      .child(this.previewCode
+        ? div().id("sftp-preview-editor").flex_1().min_h(0)
+          .on_mouse_up("left", (_e, cx) => this.copyPreviewSelection(cx))
+          .child(Editor.new(this.previewCode).size_full().min_h(0))
+        : div().p(12).text_color(t.dim).child(this.preview.error || "Loading file…"));
     const visible = filterSftpEntries(this.entries, this.showHidden);
     return v_flex()
       .id("sftp-browser")

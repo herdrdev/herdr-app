@@ -119,3 +119,21 @@ test("remote preview reads the selected machine and ignores stale results", asyn
   assert.equal(browser.preview, null);
   assert.equal(browser.previewCode, null);
 });
+
+test("preview copies a nonempty selection on release when copy-on-select is enabled", () => {
+  let enabled = true, copied = [];
+  const classSource = sftpSource.slice(sftpSource.indexOf("export class SftpBrowser")).replace("export class SftpBrowser", "class SftpBrowser");
+  const Browser = new Function("settings", `${classSource}\nreturn SftpBrowser;`)(() => ({ copy_on_select: enabled }));
+  const browser = new Browser();
+  const cx = { write_to_clipboard: text => copied.push(text) };
+  let range = { start: 2, end: 4 };
+  browser.previewCode = { selected_range: () => range, value: () => "a 😀 b" };
+  browser.copyPreviewSelection(cx);
+  assert.deepEqual(copied, ["😀"]);
+  range = { start: 1, end: 1 };
+  browser.copyPreviewSelection(cx);
+  enabled = false;
+  range = { start: 0, end: 1 };
+  browser.copyPreviewSelection(cx);
+  assert.deepEqual(copied, ["😀"]);
+});

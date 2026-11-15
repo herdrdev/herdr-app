@@ -27,6 +27,9 @@ Binary files cannot be previewed. Transfers and destructive actions should be
 tested on disposable files first. This preview has not had a full end-to-end
 test across all platforms or server configurations.
 
+In the text preview, a nonempty mouse selection is copied on release when the
+Herdr setting `copy_on_select` is enabled. Release the mouse inside the preview.
+
 ## Build from source
 
 On x64 Windows, install Git, Rust 1.95.0, Zig 0.16.0, LLVM/libclang, and Visual
