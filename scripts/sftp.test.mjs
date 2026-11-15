@@ -73,3 +73,49 @@ test("main.js preserves directory() slice boundary for scripts/files.test.ts", (
   const slice = mainSource.slice(start, end);
   assert.ok(!slice.includes("SftpBrowser"), "directory() slice must stay clean");
 });
+
+test("SFTP file and directory rows use supported element methods", () => {
+  const supported = new Set(["id", "h", "w", "px", "py", "mx", "mb", "p", "gap", "items_center", "justify_center", "rounded", "cursor_pointer", "hover", "tooltip", "on_mouse_down", "on_click", "child", "size", "text_color", "flex_none", "flex_1", "min_w", "truncate", "text_size", "border_1", "border_color", "bg"]);
+  const element = () => {
+    const el = {};
+    for (const method of supported) el[method] = () => el;
+    el.when = (condition, fn) => condition ? fn(el) : el;
+    return el;
+  };
+  const classSource = sftpSource.slice(sftpSource.indexOf("export class SftpBrowser")).replace("export class SftpBrowser", "class SftpBrowser");
+  const Browser = new Function("v_flex", "h_flex", "div", "svg", "formatBytes", `${classSource}\nreturn SftpBrowser;`)(element, element, element, element, helpers.formatBytes);
+  const browser = Object.create(Browser.prototype);
+  const theme = {};
+  for (const entry of [{ path: "/file", name: "file", size: 10, isDirectory: false }, { path: "/dir", name: "dir", isDirectory: true }]) {
+    browser.selectedPath = entry.path;
+    browser.menuEntry = entry;
+    assert.doesNotThrow(() => browser.renderRow(entry, theme));
+  }
+});
+
+test("remote preview reads the selected machine and ignores stale results", async () => {
+  let resolveRead;
+  const readTextFile = (path, options) => {
+    assert.equal(path, "/notes.txt");
+    assert.equal(options.on, "server");
+    return new Promise(resolve => { resolveRead = resolve; });
+  };
+  const classSource = sftpSource.slice(sftpSource.indexOf("export class SftpBrowser")).replace("export class SftpBrowser", "class SftpBrowser");
+  const EditorState = { new: options => ({ options, release() {} }) };
+  const Browser = new Function("readTextFile", "EditorState", "settings", "PREVIEW_LANG", `${classSource}\nreturn SftpBrowser;`)(readTextFile, EditorState, () => ({}), {});
+  const browser = new Browser();
+  browser.machineId = "server";
+  let pending;
+  const cx = { notify() {}, spawn(fn) { pending = fn(cx); } };
+  browser.openPreview({ path: "/notes.txt", name: "notes.txt", size: 4 }, {}, cx);
+  resolveRead("hello");
+  await pending;
+  assert.equal(browser.previewCode.options.value, "hello");
+  assert.equal(browser.previewCode.options.readonly, true);
+  browser.openPreview({ path: "/notes.txt", name: "notes.txt", size: 4 }, {}, cx);
+  browser.closePreview();
+  resolveRead("stale");
+  await pending;
+  assert.equal(browser.preview, null);
+  assert.equal(browser.previewCode, null);
+});

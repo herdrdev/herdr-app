@@ -184,6 +184,9 @@ writing a new file. The Files panel supports Windows folder paths with spaces,
 parentheses and apostrophes, and preserves Unicode file and folder names
 (including Chinese). Directory links expand as folders; their contents load
 only when expanded.
+In the remote SFTP browser, select a file for a read-only text preview and use
+Back to return to its folder. Text previews are limited to 1 MiB and use the
+remote core's file-reading facility; binary files need downloading to open.
 
 **Herdr's own layouts and mods are read-only.** They are replaced whole
 on every start. Use settings.json for look (fonts, sizes, theme, colors,

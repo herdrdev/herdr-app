@@ -1,5 +1,9 @@
 # Herdr
 
+> **ECidno fork preview:** This branch adds a native SFTP browser. See the
+> [Windows preview and build instructions](docs/sftp-fork.md). It is not an
+> official Herdr release or a standalone mod for stock Herdr.
+
 Herdr is a desktop app for terminals and coding agents. Keep work in spaces, see which agents need you, and leave terminals running when you close the window.
 
 ## Install

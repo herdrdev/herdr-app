@@ -1,5 +1,5 @@
 import { div, svg } from "gpui-kit";
-import { v_flex, h_flex, Input, InputState } from "gpui-base";
+import { v_flex, h_flex, Input, InputState, Editor, EditorState } from "gpui-base";
 import {
   sftpResolveInitialPath,
   sftpListDir,
@@ -10,7 +10,11 @@ import {
   sftpRenameEntry,
   sftpDeleteEntry,
   notify,
+  readTextFile,
+  settings,
 } from "herdr";
+
+const PREVIEW_LANG = { ts: "js", tsx: "js", mts: "js", cts: "js", jsx: "js", mjs: "js", toml: "yaml", jsonc: "json", svelte: "html", vue: "html" };
 
 export function normalizePosixPath(raw) {
   const slash = String(raw || "/").replace(/\\/g, "/");
@@ -103,10 +107,14 @@ export class SftpBrowser {
     this.prompt = null; // { kind: "mkdir" | "rename", entry?, input, value, focused }
     this.confirmDelete = null; // SftpEntry
     this.requestSeq = 0;
+    this.previewSeq = 0;
+    this.preview = null;
+    this.previewCode = null;
   }
 
   syncMachine(machineId, workspacePath, activeMode, cx) {
     const changed = machineId !== this.machineId;
+    if (changed) this.closePreview();
     this.workspacePath = workspacePath || null;
     if (!machineId) {
       this.machineId = null;
@@ -131,6 +139,39 @@ export class SftpBrowser {
       this.confirmDelete = null;
       if (activeMode) this.openInitial(cx);
     }
+  }
+
+  closePreview(cx) {
+    this.previewSeq++;
+    this.previewCode?.release();
+    this.previewCode = null;
+    this.preview = null;
+    cx?.notify();
+  }
+
+  openPreview(entry, t, cx) {
+    if (!this.machineId || entry.isDirectory) return;
+    this.closePreview();
+    const machineId = this.machineId, seq = this.previewSeq;
+    this.preview = { path: entry.path, name: entry.name, error: null };
+    this.menuEntry = null;
+    cx.notify();
+    cx.spawn(async cx => {
+      try {
+        if (entry.size > 1024 * 1024) throw new Error("File exceeds the 1 MiB preview limit");
+        const text = await readTextFile(entry.path, { on: machineId });
+        if (this.machineId !== machineId || this.previewSeq !== seq) return;
+        if (text === null) throw new Error("File is unavailable or cannot be read");
+        if (text.includes("\0")) throw new Error("Binary file · no text preview");
+        const ext = entry.name.includes(".") ? entry.name.split(".").pop().toLowerCase() : "txt";
+        this.previewCode = EditorState.new({ language: PREVIEW_LANG[ext] ?? ext, readonly: true,
+          value: text.length > 400000 ? text.slice(0, 400000) + "\n… (file truncated)" : text,
+          font_family: settings().font_family, font_size: 12,
+          syntax: { keyword: t.ansi5, string: t.ansi2, comment: t.dim, function: t.ansi4, type: t.ansi3, number: t.ansi1, constant: t.ansi6 } });
+      } catch (e) {
+        if (this.machineId === machineId && this.previewSeq === seq) this.preview.error = String(e?.message ?? e);
+      } finally { cx.notify(); }
+    });
   }
 
   openInitial(cx) {
@@ -718,6 +759,7 @@ export class SftpBrowser {
       .border_color(t.border)
       .bg(t.popover)
       .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+      .when(!entry.isDirectory, el => el.child(item(`sftp-act-open-${entry.path}`, "file", "Preview", false, cx => this.openPreview(entry, t, cx))))
       .when(!entry.isDirectory, el => el.child(item(`sftp-act-dl-${entry.path}`, "download", "Download", false, cx => this.download(entry, cx))))
       .child(item(`sftp-act-rn-${entry.path}`, "pencil", "Rename", false, cx => this.openPrompt("rename", entry, cx)))
       .child(item(`sftp-act-cp-${entry.path}`, "copy", "Copy Remote Path", false, cx => this.copyRemotePath(entry, cx)))
@@ -743,7 +785,7 @@ export class SftpBrowser {
         .child(svg(`mods/files/${icon}.svg`).size(12).text_color(danger ? t.ansi1 : t.dim));
 
     return v_flex()
-      .key(entry.path)
+      .id(`sftp-entry-${entry.path}`)
       .child(
         h_flex()
           .id(`sftp-row-${entry.path}`)
@@ -766,9 +808,7 @@ export class SftpBrowser {
             if (entry.isDirectory) {
               this.navigate(entry.path, cx);
             } else {
-              this.selectedPath = entry.path;
-              this.menuEntry = null;
-              cx.notify();
+              this.openPreview(entry, t, cx);
             }
           })
           .child(svg(`mods/files/${entry.isDirectory ? "folder" : "file"}.svg`).size(14).flex_none().text_color(entry.isDirectory ? t.accent : t.muted))
@@ -819,6 +859,11 @@ export class SftpBrowser {
   }
 
   render(t, cx) {
+    if (this.preview) return v_flex().id("sftp-preview").flex_1().min_h(0)
+      .child(h_flex().h(36).px(8).gap(8).items_center()
+        .child(div().id("sftp-preview-back").cursor_pointer().on_click((_e, cx) => this.closePreview(cx)).child("← Back"))
+        .child(div().flex_1().min_w(0).truncate().text_color(t.dim).child(this.preview.path)))
+      .child(this.previewCode ? Editor.new(this.previewCode).flex_1().min_h(0) : div().p(12).text_color(t.dim).child(this.preview.error || "Loading file…"));
     const visible = filterSftpEntries(this.entries, this.showHidden);
     return v_flex()
       .id("sftp-browser")
