@@ -295,6 +295,7 @@ fn takes_typed_children(component: &Component) -> bool {
 #[derive(Default)]
 struct StateStyles {
     hover: Option<StyleRefinement>,
+    drag_over: Option<StyleRefinement>,
     active: Option<StyleRefinement>,
     focus: Option<StyleRefinement>,
 }
@@ -1657,13 +1658,20 @@ where
 /// differ. Components that are not interactive silently ignore state styles
 /// rather than failing the render — the script gets a `tracing` warning.
 fn with_hover<E: InteractiveElement>(element: E, states: &StateStyles) -> E {
-    match states.hover.clone() {
+    let mut element = match states.hover.clone() {
         Some(hover) => element.hover(move |mut style| {
             style.refine(&hover);
             style
         }),
         None => element,
+    };
+    if let Some(drag_over) = states.drag_over.clone() {
+        element = element.drag_over::<gpui::ExternalPaths>(move |mut style, _, _, _| {
+            style.refine(&drag_over);
+            style
+        });
     }
+    element
 }
 
 fn with_active_and_focus<E: StatefulInteractiveElement>(element: E, states: &StateStyles) -> E {
@@ -2713,6 +2721,7 @@ pub(in crate::materialize) fn resolve_ops(
                 let resolved = resolve_state(arena, *node);
                 match *name {
                     "hover" => states.hover = Some(resolved),
+                    "drag_over" => states.drag_over = Some(resolved),
                     "active" => states.active = Some(resolved),
                     "focus" => states.focus = Some(resolved),
                     // Not a runtime state at all: the one style from which

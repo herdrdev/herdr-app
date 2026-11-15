@@ -29,6 +29,7 @@ mod programs;
 mod remote_shell;
 mod settings;
 mod setup;
+mod sftp;
 mod sound;
 mod spawn;
 mod sprites;
@@ -186,6 +187,7 @@ fn main() {
                     }
                 }
                 mods::finish_shared();
+                sftp::service().disconnect_all();
                 telemetry::quit();
                 let _ = update::apply();
                 async {}

@@ -5199,6 +5199,7 @@ impl ShellRuntime {
     fn begin_state(&self, ctx: &Ctx<'_>, id: SpecId, name: &str) -> JsResult<SpecId> {
         let interned = match name {
             "hover" => "hover",
+            "drag_over" => "drag_over",
             "active" => "active",
             "focus" => "focus",
             // Not a runtime state, but the same mechanism: a detached node
@@ -5819,6 +5820,7 @@ globalThis.__gpui = (() => {
     };
 
   methods.hover = state("hover");
+  methods.drag_over = state("drag_over");
   methods.active = state("active");
   methods.focus = state("focus");
   // Not a state: the filled part of a slider, declared the same way because

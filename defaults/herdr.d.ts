@@ -41,6 +41,39 @@ export function knownAgents(options?: { on?: string | null }): Promise<(Program 
  *  when the person cancels. `prompt`: the confirm button's text (default "Open"). */
 export function pickFolder(options?: { prompt?: string }): Promise<string | null>;
 
+export interface SftpEntry {
+  name: string;
+  path: string;
+  isDirectory: boolean;
+  isSymlink: boolean;
+  size: number;
+  modifiedAt: number | null;
+  permissions: string;
+}
+
+export interface UploadedFile {
+  localPath: string;
+  remotePath: string;
+  bytes: number;
+}
+
+/** Resolves the initial POSIX remote directory for SFTP (configured workspace path or realpath(".")). */
+export function sftpResolveInitialPath(machineId: string, workspacePath?: string | null): Promise<string>;
+/** Lists entries in a POSIX remote directory over SFTP (directories first, sorted alphabetically). */
+export function sftpListDir(machineId: string, remotePath: string): Promise<SftpEntry[]>;
+/** Prompts for a local Save path and streams the remote file to it over SFTP. */
+export function sftpDownloadFile(machineId: string, remotePath: string): Promise<{ canceled: boolean; localPath?: string; bytes?: number }>;
+/** Opens a local multi-file picker and uploads selected files into the remote POSIX directory. */
+export function sftpPickAndUploadFiles(machineId: string, remoteTargetDir: string): Promise<{ canceled: boolean; uploaded: UploadedFile[] }>;
+/** Streams one or more local file/folder paths into the remote POSIX directory without a dialog (for drag-and-drop). */
+export function sftpUploadFiles(machineId: string, localFilePaths: string[], remoteTargetDir: string): Promise<{ uploaded: UploadedFile[] }>;
+/** Creates a directory at the given POSIX remote path over SFTP. */
+export function sftpCreateDirectory(machineId: string, remotePath: string): Promise<null>;
+/** Renames or moves a remote entry over SFTP. */
+export function sftpRenameEntry(machineId: string, oldPath: string, newPath: string): Promise<null>;
+/** Deletes a remote file, symlink, or directory (recursively when non-empty) over SFTP. */
+export function sftpDeleteEntry(machineId: string, remotePath: string, isDirectory?: boolean): Promise<null>;
+
 /** Plays "done" or "blocked" (the attention sounds, or the files settings.json names), or an MP3
  *  file (absolute, or relative to ~/.config/herdr-app). */
 export function playSound(sound: string): null;

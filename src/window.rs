@@ -2091,6 +2091,10 @@ impl AppWindow {
             for machine in kept() {
                 let Some(name) = machine["name"].as_str() else { continue };
                 let state = machine["state"].as_str().unwrap_or("unavailable");
+                if state != "connected" {
+                    let machine_name = name.to_owned();
+                    std::thread::spawn(move || crate::sftp::service().disconnect_machine(&machine_name));
+                }
                 let reason = (state != "connected").then(|| machine["why"].as_str().map(str::to_owned).unwrap_or_else(|| match state {
                     "needs_update" => format!("{name} needs a core update; run hc machine update {name}"),
                     "needs_login" => format!("{name} needs login; run hc machine login {name}"),
@@ -2104,6 +2108,9 @@ impl AppWindow {
                     view.preserve_unloaded(saved, |m| self.documents.get(m.unwrap_or("")).is_some_and(|s| s.document.is_some()));
                 }
                 self.initial_view = Some(view);
+            }
+            for removed in self.documents.keys().filter(|m| !m.is_empty() && !states.contains_key(m.as_str())).cloned().collect::<Vec<_>>() {
+                std::thread::spawn(move || crate::sftp::service().disconnect_machine(&removed));
             }
             self.documents.retain(|m, _| m.is_empty() || states.contains_key(m.as_str()));
             let before = self.model.spaces.len();

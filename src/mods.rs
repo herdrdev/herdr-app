@@ -969,6 +969,24 @@ fn exec_future(command: String, args: Vec<String>, cwd: Option<String>, on: Opti
     }
 }
 
+fn sftp_future<F>(work: F) -> impl std::future::Future<Output = Result<HostValue, HostError>> + Send
+where
+    F: FnOnce() -> Result<Value, String> + Send + 'static,
+{
+    let (tx, rx) = async_channel::bounded(1);
+    let run = move || {
+        let _ = tx.send_blocking(work());
+    };
+    #[cfg(not(test))]
+    std::thread::spawn(run);
+    #[cfg(test)]
+    run();
+    async move {
+        let value = rx.recv().await.map_err(|_| HostError::new("the SFTP request was lost"))?.map_err(HostError::new)?;
+        Ok(to_host(&value))
+    }
+}
+
 fn module(inst: Instance, copy: u64) -> HostModule {
     let reads = Rc::new(RefCell::new(LiveReads::default()));
     LIVE_READS.with_borrow_mut(|copies| {
@@ -1075,6 +1093,108 @@ fn module(inst: Instance, copy: u64) -> HostModule {
                 let path = picked.await.ok().and_then(Result::ok).flatten().and_then(|p| p.into_iter().next());
                 Ok(path.map(|p| HostValue::Str(p.to_string_lossy().into_owned())).unwrap_or(HostValue::Null))
             })
+        })
+        .async_function("sftpResolveInitialPath", |a| {
+            let machine_id = a.string(0)?.to_owned();
+            let workspace_path = a.get(1).and_then(|v| v.as_str()).map(str::to_owned);
+            Ok(sftp_future(move || {
+                crate::sftp::service().resolve_initial_path(&machine_id, workspace_path.as_deref()).map(|p| json!(p))
+            }))
+        })
+        .async_function("sftpListDir", |a| {
+            let machine_id = a.string(0)?.to_owned();
+            let remote_path = a.string(1)?.to_owned();
+            Ok(sftp_future(move || {
+                crate::sftp::service().list_dir(&machine_id, &remote_path).map(|entries| json!(entries))
+            }))
+        })
+        .async_function("sftpDownloadFile", |a| {
+            let machine_id = a.string(0)?.to_owned();
+            let remote_path = a.string(1)?.to_owned();
+            let norm = crate::sftp::normalize_posix_path(&remote_path);
+            let suggested = norm.rsplit('/').next().filter(|s| !s.is_empty()).unwrap_or("download").to_owned();
+            let downloads = home().join("Downloads");
+            let initial_dir = if downloads.is_dir() { downloads } else { home() };
+            let chosen = gpui_shell::with_current_app(|cx| cx.prompt_for_new_path(&initial_dir, Some(&suggested)))
+                .ok_or_else(|| HostError::new("no window to save from"))?;
+            Ok(async move {
+                let Some(local_path) = chosen.await.ok().and_then(Result::ok).flatten() else {
+                    return Ok(to_host(&json!({ "canceled": true })));
+                };
+                let target = local_path.clone();
+                let (tx, rx) = async_channel::bounded(1);
+                let run = move || {
+                    let _ = tx.send_blocking(crate::sftp::service().download_file(&machine_id, &norm, &target));
+                };
+                #[cfg(not(test))]
+                std::thread::spawn(run);
+                #[cfg(test)]
+                run();
+                let bytes = rx.recv().await.map_err(|_| HostError::new("the SFTP download was lost"))?.map_err(HostError::new)?;
+                Ok(to_host(&json!({
+                    "canceled": false,
+                    "localPath": local_path.to_string_lossy().into_owned(),
+                    "bytes": bytes,
+                })))
+            })
+        })
+        .async_function("sftpPickAndUploadFiles", |a| {
+            let machine_id = a.string(0)?.to_owned();
+            let remote_target_dir = a.string(1)?.to_owned();
+            let picked = gpui_shell::with_current_app(|cx| cx.prompt_for_paths(gpui::PathPromptOptions {
+                files: true, directories: false, multiple: true, prompt: Some("Upload".into()),
+            })).ok_or_else(|| HostError::new("no window to pick files from"))?;
+            Ok(async move {
+                let paths = picked.await.ok().and_then(Result::ok).flatten().unwrap_or_default();
+                if paths.is_empty() {
+                    return Ok(to_host(&json!({ "canceled": true, "uploaded": [] })));
+                }
+                let (tx, rx) = async_channel::bounded(1);
+                let run = move || {
+                    let _ = tx.send_blocking(crate::sftp::service().upload_files(&machine_id, &paths, &remote_target_dir));
+                };
+                #[cfg(not(test))]
+                std::thread::spawn(run);
+                #[cfg(test)]
+                run();
+                let uploaded = rx.recv().await.map_err(|_| HostError::new("the SFTP upload was lost"))?.map_err(HostError::new)?;
+                Ok(to_host(&json!({ "canceled": false, "uploaded": uploaded })))
+            })
+        })
+        .async_function("sftpUploadFiles", |a| {
+            let machine_id = a.string(0)?.to_owned();
+            let local_paths: Vec<PathBuf> = strings(a.get(1)).into_iter().map(PathBuf::from).collect();
+            let remote_target_dir = a.string(2)?.to_owned();
+            Ok(sftp_future(move || {
+                let uploaded = crate::sftp::service().upload_files(&machine_id, &local_paths, &remote_target_dir)?;
+                Ok(json!({ "uploaded": uploaded }))
+            }))
+        })
+        .async_function("sftpCreateDirectory", |a| {
+            let machine_id = a.string(0)?.to_owned();
+            let remote_path = a.string(1)?.to_owned();
+            Ok(sftp_future(move || {
+                crate::sftp::service().create_directory(&machine_id, &remote_path)?;
+                Ok(Value::Null)
+            }))
+        })
+        .async_function("sftpRenameEntry", |a| {
+            let machine_id = a.string(0)?.to_owned();
+            let old_path = a.string(1)?.to_owned();
+            let new_path = a.string(2)?.to_owned();
+            Ok(sftp_future(move || {
+                crate::sftp::service().rename_entry(&machine_id, &old_path, &new_path)?;
+                Ok(Value::Null)
+            }))
+        })
+        .async_function("sftpDeleteEntry", |a| {
+            let machine_id = a.string(0)?.to_owned();
+            let remote_path = a.string(1)?.to_owned();
+            let is_directory = a.get(2).and_then(|v| match v { HostValue::Bool(b) => Some(*b), _ => None }).unwrap_or(false);
+            Ok(sftp_future(move || {
+                crate::sftp::service().delete_entry(&machine_id, &remote_path, is_directory)?;
+                Ok(Value::Null)
+            }))
         })
         .function("feedbackClearImages", move |_| {
             if feedback_frame { crate::feedback::clear_shots(); }
