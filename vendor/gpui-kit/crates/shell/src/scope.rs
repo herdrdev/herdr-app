@@ -253,6 +253,41 @@ pub(crate) fn enter_application(
     Some((CallScopeGuard { _private: () }, generation))
 }
 
+/// Rebinds the innermost active host call to a task's or entity's owner.
+///
+/// Preserves the active phase so render and layout guards still trigger if a
+/// captured async context or entity handle is used from those phases.
+pub(crate) fn enter_owner(
+    view: Option<Entity<ScriptView>>,
+    policy: Rc<Policy>,
+    application: Option<Rc<ApplicationGeneration>>,
+) -> Option<(CallScopeGuard, u64)> {
+    let frame = STACK.with(|stack| {
+        let stack = stack.borrow();
+        let frame = stack.last()?;
+        Some((frame.window, frame.app, frame.phase, frame.runtime.clone()))
+    })?;
+    let generation = NEXT_GENERATION.with(|next| {
+        let value = next.get();
+        next.set(value + 1);
+        value
+    });
+    STACK.with(|stack| {
+        stack.borrow_mut().push(Frame {
+            window: frame.0,
+            app: frame.1,
+            phase: frame.2,
+            generation,
+            adopted: None,
+            view,
+            policy,
+            application,
+            runtime: frame.3,
+        });
+    });
+    Some((CallScopeGuard { _private: () }, generation))
+}
+
 fn enter_with_runtime_opt(
     window: &mut Window,
     app: &mut App,
@@ -262,6 +297,17 @@ fn enter_with_runtime_opt(
     runtime: Option<&Rc<ShellRuntime>>,
     application: Option<Rc<ApplicationGeneration>>,
 ) -> (CallScopeGuard, u64) {
+    // Flush queued render microtasks under their owning render view before
+    // entering another script event or task, so unrelated views never drain
+    // another view's render continuations under the wrong scope.
+    if matches!(phase, ScopePhase::Event | ScopePhase::Task)
+        && STACK.with(|stack| stack.borrow().is_empty())
+    {
+        if let Some(runtime) = runtime {
+            runtime.flush_pending_render_drains(window, app);
+        }
+    }
+
     let generation = NEXT_GENERATION.with(|next| {
         let value = next.get();
         next.set(value + 1);

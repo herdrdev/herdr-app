@@ -22,9 +22,12 @@
 //! materialization cost proportional to application activity rather than frame
 //! rate.
 
-use std::rc::Rc;
+use std::{collections::HashSet, rc::Rc};
 
-use gpui::{AnyElement, Context, EntityId, IntoElement, ParentElement as _, Render, Styled as _, Window, div};
+use gpui::{
+    AnyElement, App, Context, Entity, EntityId, IntoElement, ParentElement as _, Render,
+    Styled as _, Window, div,
+};
 
 use crate::{
     engine::{ShellRuntime, ViewObject},
@@ -169,7 +172,72 @@ impl ScriptView {
     /// is invalidated with it.
     pub(crate) fn replace_object(&mut self, object: ViewObject) {
         self.object = object;
+        self.error = None;
         self.dirty = true;
+    }
+
+    pub(crate) fn is_retired(&self) -> bool {
+        self.retired
+    }
+
+    pub(crate) fn collect_build_errors(
+        &self,
+        cx: &App,
+        seen: &mut HashSet<EntityId>,
+        out: &mut Vec<String>,
+    ) {
+        if self.retired {
+            return;
+        }
+        if let Some(error) = &self.error {
+            out.push(error.clone());
+        }
+        let Some(snapshot) = self.current.as_ref() else {
+            return;
+        };
+        for id in 0..snapshot.len() as u32 {
+            let Some(node) = snapshot.arena().node(id) else {
+                continue;
+            };
+            match node.component() {
+                Some(crate::spec::Component::ChildView(child)) => {
+                    let view = child.view();
+                    if seen.insert(view.entity_id()) {
+                        view.read(cx).collect_build_errors(cx, seen, out);
+                    }
+                }
+                Some(crate::spec::Component::DockArea(handle)) => {
+                    let Some(area) = self.runtime.entities().dock(*handle) else {
+                        continue;
+                    };
+                    let area = area.read(cx);
+                    for placement in [
+                        gpui_base::dock::DockPlacement::Center,
+                        gpui_base::dock::DockPlacement::Left,
+                        gpui_base::dock::DockPlacement::Right,
+                        gpui_base::dock::DockPlacement::Bottom,
+                    ] {
+                        let Some(tree) = area.layout(placement) else {
+                            continue;
+                        };
+                        for panel_id in tree.panels() {
+                            let Some(panel) = area.panel(panel_id) else {
+                                continue;
+                            };
+                            if let Some(script_panel) =
+                                panel.as_any().downcast_ref::<Entity<crate::dock::ScriptPanel>>()
+                            {
+                                let view = script_panel.read(cx).view();
+                                if seen.insert(view.entity_id()) {
+                                    view.read(cx).collect_build_errors(cx, seen, out);
+                                }
+                            }
+                        }
+                    }
+                }
+                _ => {}
+            }
+        }
     }
 
     /// The script state behind this view, for host code that needs to read it.
@@ -278,6 +346,7 @@ impl Drop for ScriptView {
                 // Child-owned retained records are removed by EntityStore in
                 // the same operation that removes the child handle. Reaching
                 // back into that RefCell here would re-enter its mutable borrow.
+                self.runtime.forget_retired_view(entity_id);
                 crate::engine::quickjs::cancel_view_tasks(&self.runtime, entity_id);
             }
         }

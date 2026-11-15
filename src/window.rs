@@ -308,6 +308,21 @@ struct Copy {
     error: Option<String>,
 }
 
+impl Copy {
+    fn errors(&self, cx: &App) -> Vec<String> {
+        let mut out = Vec::new();
+        if let Some(error) = &self.error {
+            out.push(format!("mod {}: {error}", self.inst.name));
+        }
+        if let Some(root) = &self.root {
+            for error in root.read(cx).build_errors(cx) {
+                out.push(format!("mod {}: {error}", self.inst.name));
+            }
+        }
+        out
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum OverlayKind {
     Dialog,
@@ -3941,7 +3956,7 @@ impl AppWindow {
             let errors: Vec<String> = ["settings", "keys", "layout", "programs"]
                 .iter()
                 .filter_map(|w| std::fs::read_to_string(file(&format!("{w}.error"))).ok())
-                .chain(self.copies.values().filter_map(|c| Some(format!("mod {}: {}", c.inst.name, c.error.as_ref()?))))
+                .chain(self.copies.values().flat_map(|c| c.errors(cx)))
                 .chain(self.documents.iter().filter_map(|(m, s)| s.error.as_ref().map(|e| format!("layout {}: {e}", if m.is_empty() { "local" } else { m }))))
                 .collect();
             return json!({
@@ -7223,6 +7238,259 @@ export default class SystemToast extends View {
             bounds.left() >= gpui::px(8.),
             "popup lost its left margin: left = {:?}",
             bounds.left(),
+        );
+    }
+
+    #[test]
+    fn mod_render_errors_appear_in_window_status() {
+        in_own_process("status_reports_mod_render_errors");
+    }
+
+    #[gpui::test]
+    fn status_reports_mod_render_errors(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("status_reports_mod_render_errors") {
+            return;
+        }
+        let broken_root = r#"import { View } from "gpui-kit";
+export default class BrokenPanel extends View {
+  render() {
+    throw new Error("boom in render");
+  }
+}
+"#;
+        let layout = json!({
+            "id": "broken",
+            "type": "block",
+            "content": { "mod": "broken-panel" }
+        });
+        let (view, cx) = open_window(cx, "broken-panel", broken_root, layout);
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        let status = view.update_in(cx, |this, window, cx| {
+            this.control(json!({ "status": true }), window, cx)
+        });
+        let errors = status["errors"].as_array().expect("errors array");
+        assert!(
+            errors.iter().any(|e| {
+                let s = e.as_str().unwrap_or("");
+                s.contains("mod broken-panel:") && s.contains("boom in render")
+            }),
+            "expected root render error in status: {status}"
+        );
+
+        let broken_nested = r#"import { View, div } from "gpui-kit";
+class BrokenChild extends View {
+  render() {
+    throw new Error("nested render boom");
+  }
+}
+export default class BrokenPanel extends View {
+  init(_props, cx) {
+    this.child = cx.new(BrokenChild, {});
+  }
+  render() {
+    return div().child(this.child);
+  }
+}
+"#;
+        let main_js = crate::mods::app_dir().join("mods/broken-panel/main.js");
+        std::fs::write(&main_js, broken_nested).unwrap();
+        cx.update(|window, cx| {
+            view.update(cx, |this, cx| {
+                this.files_changed(vec!["mods/broken-panel/main.js".into()], window, cx)
+            })
+        });
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        let status = view.update_in(cx, |this, window, cx| {
+            this.control(json!({ "status": true }), window, cx)
+        });
+        let errors = status["errors"].as_array().expect("errors array");
+        assert!(
+            errors.iter().any(|e| {
+                let s = e.as_str().unwrap_or("");
+                s.contains("mod broken-panel:") && s.contains("nested render boom")
+            }),
+            "expected nested child render error in status: {status}"
+        );
+        assert!(
+            !errors.iter().any(|e| e.as_str().unwrap_or("").contains("boom in render")),
+            "expected stale root render error to clear after reload: {status}"
+        );
+
+        let healthy = r#"import { View, div } from "gpui-kit";
+export default class HealthyPanel extends View {
+  render() {
+    return div().child("healthy");
+  }
+}
+"#;
+        std::fs::write(&main_js, healthy).unwrap();
+        cx.update(|window, cx| {
+            view.update(cx, |this, cx| {
+                this.files_changed(vec!["mods/broken-panel/main.js".into()], window, cx)
+            })
+        });
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        let status = view.update_in(cx, |this, window, cx| {
+            this.control(json!({ "status": true }), window, cx)
+        });
+        let errors = status["errors"].as_array().expect("errors array");
+        assert!(
+            !errors.iter().any(|e| e.as_str().unwrap_or("").contains("mod broken-panel:")),
+            "expected no mod errors after fix: {status}"
+        );
+    }
+
+    #[test]
+    fn mod_reload_with_render_promise_keeps_nested_child_healthy() {
+        in_own_process("reload_mods_with_render_triggered_promise_keeps_nested_child_healthy");
+    }
+
+    #[gpui::test]
+    fn reload_mods_with_render_triggered_promise_keeps_nested_child_healthy(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        use serde_json::json;
+        if !running_alone("reload_mods_with_render_triggered_promise_keeps_nested_child_healthy") {
+            return;
+        }
+
+        let panel_source = |version: &str| {
+            format!(
+                r#"import {{ View, div }} from "gpui-kit";
+class Child extends View {{
+  init(props) {{
+    this.label = props.label;
+  }}
+  update(props) {{
+    this.label = props.label;
+  }}
+  render() {{
+    return `child:${{this.label}}`;
+  }}
+}}
+export default class ConductorPanel extends View {{
+  init(_props, cx) {{
+    this.child = null;
+    this.sent = false;
+    let resolveMail = null;
+    this.wake = (value) => {{
+      if (resolveMail) {{
+        const r = resolveMail;
+        resolveMail = null;
+        r(value);
+      }}
+    }};
+    const inbox = new Promise((r) => {{
+      resolveMail = r;
+    }});
+    cx.spawn(async (taskCx) => {{
+      const label = await inbox;
+      const child = taskCx.new(Child, {{ label: `${{label}}-init` }});
+      child.set_props({{ label }});
+      this.child = child;
+      taskCx.notify();
+    }});
+  }}
+  render() {{
+    if (!this.sent) {{
+      this.sent = true;
+      this.wake("render-{version}");
+    }}
+    return this.child ? div().child(this.child) : div().child("pending-{version}");
+  }}
+}}
+"#
+            )
+        };
+        let tabs_source = |version: &str| {
+            format!(
+                r#"import {{ View, div }} from "gpui-kit";
+export default class SiblingTabs extends View {{
+  init(_props, cx) {{
+    cx.spawn(async (cx) => {{
+      await cx.sleep(0);
+    }});
+  }}
+  render() {{
+    return div().child("tabs-{version}");
+  }}
+}}
+"#
+            )
+        };
+
+        let layout = json!({
+            "id": "panel",
+            "type": "block",
+            "content": { "mod": "conductor-panel" }
+        });
+        let (view, cx) = open_window(cx, "conductor-panel", &panel_source("v1"), layout);
+        let home = crate::mods::app_dir();
+        let tabs_dir = home.join("mods/sibling-tabs");
+        std::fs::create_dir_all(&tabs_dir).unwrap();
+        std::fs::write(tabs_dir.join("mod.json"), r#"{ "place": "none" }"#).unwrap();
+        std::fs::write(tabs_dir.join("main.js"), tabs_source("v1")).unwrap();
+        cx.update(|window, cx| {
+            view.update(cx, |this, cx| {
+                this.sync_folders(window, cx);
+                this.chrome = serde_json::from_value(json!({
+                    "id": "root",
+                    "type": "row",
+                    "children": [
+                        { "id": "panel", "type": "block", "content": { "mod": "conductor-panel" } },
+                        { "id": "tabs", "type": "block", "content": { "mod": "sibling-tabs" } }
+                    ]
+                }))
+                .unwrap();
+                this.sync(window, cx);
+            })
+        });
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.executor().advance_clock(std::time::Duration::from_millis(100));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        std::fs::write(home.join("mods/conductor-panel/main.js"), panel_source("v2")).unwrap();
+        std::fs::write(tabs_dir.join("main.js"), tabs_source("v2")).unwrap();
+        cx.update(|window, cx| {
+            view.update(cx, |this, cx| {
+                this.files_changed(
+                    vec![
+                        "mods/conductor-panel/main.js".into(),
+                        "mods/sibling-tabs/main.js".into(),
+                    ],
+                    window,
+                    cx,
+                )
+            })
+        });
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.executor().advance_clock(std::time::Duration::from_millis(100));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+
+        let status = view.update_in(cx, |this, window, cx| {
+            this.control(json!({ "status": true }), window, cx)
+        });
+        let errors = status["errors"].as_array().expect("errors array");
+        assert!(
+            !errors.iter().any(|e| {
+                let s = e.as_str().unwrap_or("");
+                s.contains("mod conductor-panel:") || s.contains("has been released")
+            }),
+            "expected no mod error after reload with render promise: {status}"
         );
     }
 }

@@ -63,7 +63,9 @@ impl ShellRuntime {
                 let close: Value = instance.get("close")?;
                 let Some(close) = close.into_function() else { return Ok(None) };
                 let binding = ContextBinding::Task(Rc::new(TaskBinding {
+                    runtime: Rc::downgrade(self),
                     owner: Some(view.downgrade()),
+                    policy: Some(Rc::downgrade(&policy)),
                     application: Some(Rc::downgrade(&application)),
                 }));
                 let result: Value = close.call((This(instance), context_object(ctx, binding)?))?;
