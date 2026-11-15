@@ -27,6 +27,7 @@ base64 = "0.22"
 image = { version = "0.25", default-features = false, features = ["png", "tiff", "bmp"] }
 png = "0.17"
 ttf-parser = "0.25"
+unicode-bidi = "0.3"
 smallvec = "1"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
