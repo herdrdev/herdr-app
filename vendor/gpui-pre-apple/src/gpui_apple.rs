@@ -8,5 +8,7 @@
 mod dispatcher;
 mod metal_atlas;
 pub mod metal_renderer;
+// HERDR: full-window post-process shaders.
+mod post_process;
 
 pub use dispatcher::{AppleActivity, AppleDispatcher};

@@ -45,6 +45,8 @@ harness = false
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8", features = ["test-support"] }
 gpui = { package = "gpui-pre", version = "=0.3.8", features = ["test-support"] }
 gpui-shell = { path = "vendor/gpui-kit/crates/shell", features = ["render-test-support"] }
+# Checks that custom shaders (src/shaders.rs) are GLSL the backends accept.
+naga = { version = "29", features = ["glsl-in"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 gpui_wgpu = { package = "gpui-pre-wgpu", path = "vendor/gpui-pre-wgpu", features = ["test-support"] }

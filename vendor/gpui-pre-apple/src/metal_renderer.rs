@@ -131,6 +131,8 @@ pub struct MetalRenderer {
     path_intermediate_texture: Option<metal::Texture>,
     path_intermediate_msaa_texture: Option<metal::Texture>,
     path_sample_count: u32,
+    // HERDR: shaders run over each finished frame (see `post_process`).
+    post_process: crate::post_process::PostProcess,
     /// Offscreen render target reused across `render_scene` calls when
     /// rendering headlessly without reading pixels back.
     #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
@@ -388,6 +390,7 @@ impl MetalRenderer {
             path_intermediate_texture: None,
             path_intermediate_msaa_texture: None,
             path_sample_count: PATH_SAMPLE_COUNT,
+            post_process: Default::default(),
             #[cfg(any(test, feature = "bench-support", feature = "test-support"))]
             headless_render_target: None,
         }
@@ -413,6 +416,16 @@ impl MetalRenderer {
         if let Some(layer) = &self.layer {
             layer.set_presents_with_transaction(presents_with_transaction);
         }
+    }
+
+    /// HERDR: GLSL 450 fragment shaders run over each finished frame, in order.
+    pub fn set_post_process_shaders(&mut self, shaders: &[String]) -> Result<()> {
+        self.post_process.set_shaders(&self.device, shaders)
+    }
+
+    /// HERDR: the post-process shaders' uniform values, by name.
+    pub fn set_post_process_values(&mut self, values: &[(&str, gpui::ShaderValue)]) {
+        self.post_process.set_values(values);
     }
 
     pub fn update_drawable_size(&mut self, size: Size<DevicePixels>) {
@@ -496,13 +509,23 @@ impl MetalRenderer {
             return;
         };
 
-        let command_buffer = match self.render_frame(scene, drawable.texture(), viewport_size) {
+        // HERDR: with post-process shaders the scene goes to an offscreen
+        // frame, and the shaders draw it into the drawable.
+        let frame = self
+            .post_process
+            .is_active()
+            .then(|| self.post_process.frame_target(&self.device, viewport_size));
+        let target = frame.as_deref().unwrap_or(drawable.texture());
+        let command_buffer = match self.render_frame(scene, target, viewport_size) {
             Ok(command_buffer) => command_buffer,
             Err(error) => {
                 log::error!("failed to render: {error:#}");
                 return;
             }
         };
+        if frame.is_some() {
+            self.post_process.encode(&self.device, &command_buffer, drawable.texture(), viewport_size);
+        }
 
         if self.presents_with_transaction {
             command_buffer.commit();

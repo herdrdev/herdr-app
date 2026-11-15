@@ -2961,6 +2961,17 @@ impl Window {
             .set_background_appearance(background_appearance);
     }
 
+    /// HERDR: sets the window's post-process shaders (GLSL 450 fragment
+    /// shaders run over each finished frame, in order). Empty: none.
+    pub fn set_post_process_shaders(&self, shaders: &[String]) -> anyhow::Result<()> {
+        self.platform_window.set_post_process_shaders(shaders)
+    }
+
+    /// HERDR: sets uniform values for the post-process shaders, by name.
+    pub fn set_post_process_values(&self, values: &[(&str, crate::ShaderValue)]) {
+        self.platform_window.set_post_process_values(values);
+    }
+
     /// Mark the window as dirty at the platform level.
     pub fn set_window_edited(&mut self, edited: bool) {
         self.platform_window.set_edited(edited);
