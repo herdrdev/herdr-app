@@ -338,6 +338,8 @@ struct Overlay {
     layout: Option<Node>,
     /// `at: "top"`: centered, this far below the window's top.
     top: Option<f32>,
+    /// A popup pinned along the window's bottom edge (`"at": "bottom"`): a mode or status line.
+    bottom: bool,
     /// As tall as its content (size.height is the most).
     fit: bool,
     /// A click beside it doesn't close it (the first-run welcome).
@@ -3794,6 +3796,7 @@ impl AppWindow {
             focus,
             layout,
             top,
+            bottom: spec.get("at").and_then(Value::as_str) == Some("bottom"),
             fit,
             modal: spec.get("modal").and_then(Value::as_bool).unwrap_or(false),
             bare: spec.get("frame").and_then(Value::as_str) == Some("none"),
@@ -4662,7 +4665,11 @@ impl AppWindow {
                                 let id = o.id.clone();
                                 move |this, _, w, cx| this.close_overlay(&id, w, cx)
                             }))
-                            .child(position_popup(at, body))
+                            .child(if o.bottom {
+                                div().absolute().left_0().bottom_0().child(body).into_any_element()
+                            } else {
+                                position_popup(at, body).into_any_element()
+                            })
                             .into_any_element(),
                     );
                 }
@@ -6491,6 +6498,29 @@ mod tests {
             assert_eq!(prompts(this), 0, "a second press closes the prompt");
             this.run("tab.rename", json!({}), window, cx);
             assert_eq!(prompts(this), 1, "and a third opens it again");
+        }));
+    }
+
+    #[test]
+    fn popups_can_sit_along_the_bottom() {
+        in_own_process("popup_at_bottom");
+    }
+
+    #[gpui::test]
+    fn popup_at_bottom(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("popup_at_bottom") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "unused", "", json!({
+            "id": "root", "type": "block", "content": { "tab": "active" }
+        }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.open_overlay("bar".into(), json!({ "kind": "popup", "at": "bottom", "width": 1, "height": 26 }), window, cx);
+            this.open_overlay("menu".into(), json!({ "kind": "popup" }), window, cx);
+            let bottom = |id: &str| this.overlays.iter().find(|o| o.id == id).map(|o| o.bottom);
+            assert_eq!(bottom("bar"), Some(true));
+            assert_eq!(bottom("menu"), Some(false), "at the pointer by default");
         }));
     }
 
