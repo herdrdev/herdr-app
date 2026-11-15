@@ -28,7 +28,7 @@ const values: Record<string, unknown> = {
   ScrollHandle: { new: () => ({ scroll_to_item() {} }) },
   spaces: () => [{ id: "s1", active: true, tabs: [{ id: "t1", name: "a" }, { id: "t2", name: "b", active: true }, { id: "t3", name: "c" }] }],
   panes: () => [], run(command: string) { commands.push(command); }, openOverlay() {}, theme: () => ({}),
-  window: () => null, shared: () => null, layout: () => null, settings: () => ({ zoom: 1 }),
+  window: () => null, shared: () => null, layout: () => null, settings: () => ({ zoom: 1 }), withShortcut: (label: string) => label,
   localStorage: { getItem: (key: string) => store[key] ?? null, setItem(key: string, value: string) { store[key] = value; } },
 };
 const Tabs = new Function(...Object.keys(values), source.replace(/^import .*;\n/gm, "").replace("export default class Tabs", "return class Tabs"))(...Object.values(values));

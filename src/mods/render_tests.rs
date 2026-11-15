@@ -181,6 +181,14 @@ fn fixture(populated: bool, props: Value, update: Value) -> BTreeMap<String, Val
 
 fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostModule {
     let mut module = HostModule::new("herdr");
+    let listing: Vec<(String, String, String)> = values.get("keys").and_then(Value::as_array).into_iter().flatten()
+        .map(|b| (b["section"].as_str().unwrap_or_default().to_owned(), b["keys"].as_str().unwrap_or_default().to_owned(), b["action"].as_str().unwrap_or_default().to_owned()))
+        .collect();
+    let hints = values.get("settings").and_then(|s| s.get("shortcut_hints")).and_then(Value::as_bool).unwrap_or(true);
+    module = module.function("withShortcut", move |a| {
+        let label = a.string(0)?;
+        Ok(if hints { crate::keys::with_shortcut(&listing, label, a.string(1)?, None, false) } else { label.to_owned() }.into())
+    });
     for (name, value) in values {
         module = module.function(name, move |_| Ok(to_host(&value)));
     }
@@ -1223,6 +1231,27 @@ fn picker_scrolls_the_selection_into_view(cx: &mut TestAppContext) {
         .unwrap_or_else(|| panic!("selected row missing: {tree}"));
     let px: f64 = top.split(".top[Number(").nth(1).unwrap_or_else(|| panic!("selected row must be placed inside the scrolled list: {tree}")).split(")").next().unwrap().parse().unwrap();
     assert!(px <= 320.0 - 32.0, "selected row at {px}px is below the visible list: {tree}");
+}
+
+#[gpui::test]
+fn tab_bar_tooltips_name_their_keys_unless_turned_off(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let tree = describe_with_values(cx, &staged, "mods/tabs", fixture(true, props(), updates("current", "current")), None).unwrap();
+    for tip in ["Close tab  Ctrl+Shift+W", "New tab  Ctrl+Shift+T", "Build  Ctrl+1", "Minimize"] {
+        assert!(tree.contains(&format!(":tooltip[Str(\"{tip}\")]")), "missing tooltip {tip:?}: {tree}");
+    }
+
+    let mut off = fixture(true, props(), updates("current", "current"));
+    off.get_mut("settings").unwrap()["shortcut_hints"] = json!(false);
+    let tree = describe_with_values(cx, &staged, "mods/tabs", off, None).unwrap();
+    assert!(tree.contains(":tooltip[Str(\"Close tab\")]"), "the label stays: {tree}");
+    assert!(!tree.contains("Ctrl+Shift+W"), "no key once shortcut_hints is off: {tree}");
+
+    let mut p = props();
+    p["section"] = json!("look");
+    let tree = describe_with_values(cx, &staged, "frame/settings", fixture(true, p, updates("current", "current")), None).unwrap();
+    assert!(tree.contains("Shortcuts in tooltips") && tree.contains("st-shortcut-hints"), "Settings → Look offers the switch: {tree}");
 }
 
 #[gpui::test]

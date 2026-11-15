@@ -1,6 +1,6 @@
 import { View, div, svg } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { spaces, agents, theme, run, window, keys } from "herdr";
+import { spaces, agents, theme, run, window, keys, withShortcut } from "herdr";
 
 export default class WorkspaceStatus extends View {
   // The palette key as actually bound, not a hardcoded one; without a
@@ -26,6 +26,6 @@ export default class WorkspaceStatus extends View {
       .child(h_flex().gap(6).items_center().child(div().size(6).rounded(3).bg(t.dim)).child(`${list.length} agents`)
         .when(needs > 0, el => el.child(div().text_color(t.blocked).child(`· ${needs} needs you`))))
       .child(div().flex_1())
-      .child(div().id("palette").text_color(t.dim).on_click(() => run("app.palette")).child(this.hint(t)));
+      .child(div().id("palette").tooltip(withShortcut("Command palette", "app.palette")).text_color(t.dim).on_click(() => run("app.palette")).child(this.hint(t)));
   }
 }

@@ -454,6 +454,7 @@ export default class Agents extends View {
             .child(
               div()
                 .id("collapse")
+                .tooltip("Expand sidebar")
                 .text_size(13)
                 .text_color(t.dim)
                 .hover((s) => s.text_color(t.foreground))
