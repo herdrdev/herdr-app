@@ -113,8 +113,11 @@ pub fn shell() -> String {
 fn unix_agent_argv(sh: String, cmd: Vec<String>, login: bool) -> Vec<String> {
     let name = std::path::Path::new(&sh).file_name().and_then(|s| s.to_str());
     if !matches!(name, Some("sh" | "bash" | "zsh" | "dash" | "ksh" | "fish")) {
-        // Other shells cannot parse our wrapper; return to the person's shell after the command.
-        let mut run = vec!["/bin/sh".into(), "-c".into(), "\"$@\"; exec \"$0\" -i".into(), sh];
+        // Other shells cannot parse our wrapper: sh runs the command on the app's PATH, which the
+        // installed check searches when the shell can't run it (`programs::installed_here`),
+        // then the person's shell takes over.
+        let path = std::env::var("PATH").map(|p| format!("PATH='{}' ", p.replace('\'', "'\\''"))).unwrap_or_default();
+        let mut run = vec!["/bin/sh".into(), "-c".into(), format!("{path}\"$@\"; exec \"$0\" -i"), sh];
         run.extend(cmd);
         return run;
     }
@@ -5777,7 +5780,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn other_shells_run_the_command_then_return_to_the_shell() {
+    fn other_shells_run_the_command_on_the_app_path_then_return_to_the_shell() {
         use std::os::unix::fs::PermissionsExt;
         let temp = if cfg!(target_os = "linux") { std::path::PathBuf::from("/var/tmp") } else { std::env::temp_dir() };
         let dir = temp.join(format!("herdr-other-shell-test-{}", std::process::id()));
@@ -5787,10 +5790,11 @@ mod tests {
         std::fs::write(&nu, "#!/bin/sh\nprintf 'shell:%s\\n' \"$@\"\n").unwrap();
         std::fs::set_permissions(&nu, std::fs::Permissions::from_mode(0o755)).unwrap();
         let task = "a 'quoted' task; $(not-a-command)\nnext line";
-        let cmd = vec!["printf".to_owned(), "[%s]\n".to_owned(), task.to_owned(), "".to_owned()];
+        // `env` is found only on this PATH, not on the PATH the terminal starts with.
+        let cmd = vec!["env".to_owned(), "printf".to_owned(), "[%s]\n".to_owned(), task.to_owned(), "".to_owned()];
         for login in [false, true] {
             let run = super::unix_agent_argv(nu.to_string_lossy().into(), cmd.clone(), login);
-            let out = std::process::Command::new(&run[0]).args(&run[1..]).output().unwrap();
+            let out = std::process::Command::new(&run[0]).args(&run[1..]).env("PATH", "/nonexistent").output().unwrap();
             assert_eq!(String::from_utf8(out.stdout).unwrap(), format!("[{task}]\n[]\nshell:-i\n"));
         }
         std::fs::remove_dir_all(&dir).unwrap();

@@ -144,7 +144,7 @@ fn login_shell_path() -> Option<std::ffi::OsString> {
     }
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
     let mut child = Command::new(shell)
-        .args(["-lc", "printf %s \"$PATH\""])
+        .args(["-lc", "printf 'herdr-path[%s]herdr-path' \"$PATH\""])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -164,7 +164,15 @@ fn login_shell_path() -> Option<std::ffi::OsString> {
     }
     let mut out = String::new();
     std::io::Read::read_to_string(&mut child.stdout.take()?, &mut out).ok()?;
-    Some(out.into())
+    login_path_answer(&out)
+}
+
+/// The PATH inside the probe's frame: a chatty profile prints around it, and a shell that
+/// doesn't speak sh (nushell) answers an error, nothing, or `$PATH` literally.
+fn login_path_answer(out: &str) -> Option<std::ffi::OsString> {
+    let (_, rest) = out.split_once("herdr-path[")?;
+    let (path, _) = rest.rsplit_once("]herdr-path")?;
+    (!path.is_empty() && path != "$PATH").then(|| path.into())
 }
 
 /// Installs the core's latest release with its own installer (into
@@ -290,6 +298,18 @@ fn ensure_core_bundle(version: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_login_shell_answer_is_the_path_inside_the_frame() {
+        for path in ["/opt/homebrew/bin:/usr/bin::/bin", ".:/custom/agents/bin:/usr/bin", "~/bin:/opt/$x/bin:bin", ":/usr/bin:", ":"] {
+            let framed = format!("Welcome!\nherdr-path[{path}]herdr-path\nbye\n");
+            assert_eq!(login_path_answer(&framed).as_deref(), Some(std::ffi::OsStr::new(path)), "{path:?}");
+        }
+        // What nushell answers, a shell that printed nothing, and an unexpanded PATH.
+        for garbage in ["Error: nu::parser::missing_flag_param", "", "/usr/bin:/bin", "herdr-path[]herdr-path", "herdr-path[$PATH]herdr-path"] {
+            assert_eq!(login_path_answer(garbage), None, "{garbage:?}");
+        }
+    }
 
     #[cfg(target_os = "macos")]
     #[test]
