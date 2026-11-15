@@ -682,6 +682,11 @@ impl TerminalView {
         self.shown_in.get() == FRAME.load(Ordering::Relaxed)
     }
 
+    /// The person has typed here (keys, a paste, a drop).
+    pub fn typed(&self) -> bool {
+        self.typed_at.get().is_some()
+    }
+
     fn send(&self, bytes: &[u8]) {
         self.typed_at.set(Some(Instant::now()));
         let mut g = self.grid.borrow_mut();
