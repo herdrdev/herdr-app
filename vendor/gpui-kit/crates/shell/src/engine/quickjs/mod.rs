@@ -7308,6 +7308,7 @@ globalThis.__gpui = (() => {
           set_value: (value) => __editor_set_value(handle, String(value)),
           on: (event, handler) => __editor_on(handle, String(event), handler),
           focus: () => __editor_focus(handle),
+          set_soft_wrap: (wrap) => __editor_set_soft_wrap(handle, Boolean(wrap)),
           release: () => __editor_release(handle),
         };
       },
