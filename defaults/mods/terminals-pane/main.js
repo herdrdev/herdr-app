@@ -2,7 +2,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { panes, props, run, home } from "herdr";
+import { panes, props, run, home, theme } from "herdr";
 
 
 function folder(cwd) {
@@ -17,13 +17,14 @@ export default class TerminalsPane extends View {
   }
 
   button(id, icon, command, args) {
+    const t = theme();
     return div()
       .id(id)
       .p(4)
       .rounded(5)
-      .text_color("#5d6168")
+      .text_color(t.dim)
       .cursor_pointer()
-      .hover((s) => s.bg("#ffffff0d").text_color("#d6d8db"))
+      .hover((s) => s.bg(t.hover).text_color(t.foreground))
       .on_click((_e, cx) => {
         cx.stop_propagation();
         run(command, args);
@@ -32,6 +33,7 @@ export default class TerminalsPane extends View {
   }
 
   render() {
+    const t = theme();
     const p = this.me();
     if (!p) return div();
     const pane = p.pane;
@@ -50,10 +52,10 @@ export default class TerminalsPane extends View {
       .text_size(14)
       .on_click(() => run("pane.focus", { pane }))
       .when(Boolean(g?.icon), (el) =>
-        el.child(g.tint ? svg(g.icon).size(16).flex_none().text_color("#d6d8db") : image(g.icon).w(15).h(15).flex_none()),
+        el.child(g.tint ? svg(g.icon).size(16).flex_none().text_color(t.foreground) : image(g.icon).w(15).h(15).flex_none()),
       )
-      .child(div().flex_none().max_w(320).truncate().font_semibold().text_color(p.focused ? "#e8e9eb" : "#a9adb3").child(title))
-      .child(div().flex_1().truncate().text_color("#8b8f95").child(dir))
+      .child(div().flex_none().max_w(320).truncate().font_semibold().text_color(p.focused ? t.foreground : t.muted).child(title))
+      .child(div().flex_1().truncate().text_color(t.dim).child(dir))
       .child(this.button(`th-r-${pane}`, "split-right", "pane.split", { direction: "right", pane }))
       .child(this.button(`th-d-${pane}`, "split-down", "pane.split", { direction: "down", pane }))
       .child(this.button(`th-z-${pane}`, p.zoomed ? "unzoom" : "zoom", "pane.zoom", { pane }))
