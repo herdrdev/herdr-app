@@ -2020,6 +2020,27 @@ impl ShellRuntime {
         cx.set_global(RuntimeGlobal(Rc::downgrade(self)));
     }
 
+    /// HERDR: a new VM that becomes the application's default runtime, for a
+    /// host replacing one whose copies are still closing. [`Self::new`] refuses
+    /// while the previous runtime is alive. Its copies keep it until they finish
+    /// closing, and it is freed when the last of them drops it.
+    pub fn replace_default(cx: &mut App) -> Result<Rc<Self>> {
+        let runtime = Self::new_isolated_with_components(FrozenComponentRegistry::default())?;
+        runtime.set_global(cx);
+        Ok(runtime)
+    }
+
+    /// HERDR: how much of its heap ceiling this VM holds, from 0 to 1.
+    ///
+    /// Each reload evaluates the application again in the same context, and
+    /// QuickJS frees evaluated modules only with the context, so this grows
+    /// with every reload. A host can start a new runtime before reaching the
+    /// limit.
+    pub fn memory_share(&self) -> f64 {
+        let used = self.js_runtime.memory_usage().malloc_size.max(0) as f64;
+        used / sandbox::memory_limit_bytes() as f64
+    }
+
     pub(crate) fn global(cx: &App) -> Option<Rc<Self>> {
         cx.try_global::<RuntimeGlobal>()
             .and_then(|global| global.0.upgrade())

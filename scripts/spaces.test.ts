@@ -99,6 +99,45 @@ test("git grouping reads refs for normal, detached, unborn and bare worktrees", 
   }
 });
 
+test.each(["--show-toplevel", "--git-common-dir"])("a failed %s keeps worktrees nested until git can answer again", async (failedRead) => {
+  let failure: string | null = null;
+  const snapshot = [{ id: "main", folder: "/repo" }, { id: "tree", folder: "/tree" }];
+  const h = harness([], new Map(), snapshot, async (_command: string, args: string[], { cwd }: { cwd: string }) => {
+    if (cwd === "/repo" && args.includes(failedRead) && failure) return { code: 128, stdout: "", stderr: failure };
+    const stdout = args.includes("--show-toplevel") ? cwd + "\n"
+      : args.includes("--git-common-dir") ? "/repo/.git\n"
+      : args[0] === "symbolic-ref" ? "refs/heads/main\n" : "0 0\n";
+    return { code: 0, stdout, stderr: "" };
+  });
+  h.view.init({}, h.cx);
+  h.view.watch = () => {};
+  const main = JSON.stringify([null, "/repo"]);
+  const tree = JSON.stringify([null, "/tree"]);
+  await h.view.check(main, h.cx);
+  await h.view.check(tree, h.cx);
+  const nesting = () => h.view.ordered().map((r: any) => [r.w.id, r.tree]);
+  expect(nesting()).toEqual([["main", null], ["tree", "└─"]]);
+  const cached = h.view.git[main];
+
+  failure = "fatal: unable to create thread: Too many open files";
+  await h.view.check(main, h.cx);
+  expect(nesting()).toEqual([["main", null], ["tree", "└─"]]);
+  expect(h.view.git[main]).toBe(cached);
+  expect(h.view.unsure.has(main)).toBe(true);
+  expect(h.view.due(Date.now() + 60001, snapshot, []).has(main)).toBe(true);
+
+  failure = null;
+  await h.view.check(main, h.cx);
+  expect(h.view.unsure.has(main)).toBe(false);
+  expect(nesting()).toEqual([["main", null], ["tree", "└─"]]);
+
+  failure = "fatal: not a git repository (or any of the parent directories): .git";
+  await h.view.check(main, h.cx);
+  expect(h.view.git[main]).toBeNull();
+  expect(h.view.unsure.has(main)).toBe(false);
+  expect(nesting()).toEqual([["main", null], ["tree", null]]);
+});
+
 test("closing spaces forgets old git state but keeps a shown worktree", () => {
   const h = harness();
   Object.assign(h.view, { git: {}, checked: {}, unsure: new Set(), watching: new Map(), at: {}, busy: {}, ready: {} });
