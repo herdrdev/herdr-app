@@ -23,11 +23,12 @@ const source = await readFile(new URL("../defaults/mods/picker/main.js", import.
 const element = () => new Element();
 const commands: unknown[][] = [];
 let testSpaces: any[] = [];
+let testAgents: any[] = [];
 let closed = 0;
 const values: Record<string, any> = {
   View: class {}, div: element, svg: element, v_flex: element, h_flex: element,
   Input: { new: element }, InputState: { new: () => ({ handlers: {} as Record<string, any>, on(name: string, handler: any) { this.handlers[name] = handler; }, focus() {} }) },
-  agents: () => [], spaces: () => testSpaces, terminals: () => [], theme: () => ({ hover: "hover" }),
+  agents: () => testAgents, spaces: () => testSpaces, terminals: () => [], theme: () => ({ hover: "hover" }),
   settings: () => ({ zoom: 1.2 }), props: () => ({}), shared: () => ({}),
   setShared() {}, closeOverlay() { closed++; }, openOverlay() {}, run(...args: unknown[]) { commands.push(args); }, hc() {},
 };
@@ -35,6 +36,7 @@ const Picker = new Function(...Object.keys(values), source.replace(/^import .*;\
 const cx = { notify() {}, stop_propagation() {}, timer: { after() {} }, focus_handle() {}, spawn() {} };
 function picker(machines = 12) {
   testSpaces = [];
+  testAgents = [];
   closed = 0;
   const view = new Picker();
   view.init({}, cx);
@@ -188,4 +190,50 @@ test("picker preserves small pixel touchpad deltas", () => {
     list.calls.on_scroll_wheel[0]({ delta: { y: delta } }, cx);
     expect(view.scroll).toBe(-delta);
   }
+});
+
+function texts(root: any): string[] {
+  if (typeof root === "string") return [root];
+  return (root?.nodes ?? []).flatMap(texts);
+}
+
+const claude = { name: "Claude Code", key: "claude", agent: true };
+function agentTab(tab: any, title: string, address = "t1") {
+  testSpaces = [{ id: "s1", name: "api", status: "working", active: true, tabs: [{ id: tab.id, active: true, ...tab }] }];
+  testAgents = [{ address, tab: tab.id, program: claude, title }];
+}
+
+test("picker rows show an agent's session title for a tab Herdr named", () => {
+  for (const [tab, title, shown] of [
+    [{ id: "a", name: "1", named: false }, "✦ Fix login bug", "Fix login bug"],
+    [{ id: "a", name: "Claude Code", named: true }, "⠋ [web] login", "[web] login"],
+    [{ id: "a", name: "fix login", named: true }, "Other task", "fix login"],
+    [{ id: "a", name: "1", named: false }, "t1", "1"],
+    [{ id: "a", name: "1", named: false }, "✦ ~/src/api", "1"],
+    [{ id: "a", name: "1", named: false }, "Claude Code", "1"],
+    [{ id: "a", name: "1", named: false }, "me@build-box", "1"],
+  ] as const) {
+    const view = picker(0);
+    agentTab(tab, title);
+    expect(texts(find(view.render(), "pk-a"))).toContain(shown);
+  }
+});
+
+test("picker search finds a tab by any of its agents' session titles", () => {
+  const view = picker(0);
+  testSpaces = [{ id: "s1", name: "api", status: "working", active: true, tabs: [{ id: "a", name: "1", named: false, active: true }, { id: "b", name: "2", named: false }] }];
+  testAgents = [
+    { address: "t1", tab: "a", program: claude, title: "Write docs" },
+    { address: "t2", tab: "b", program: claude, title: "Review" },
+    { address: "t3", tab: "b", program: claude, title: "✦ Fix login bug" },
+  ];
+  commands.length = 0;
+  view.render();
+  view.input.value = () => "login";
+  view.input.handlers.change({}, cx);
+  const tree = view.render();
+  expect(find(tree, "pk-a")).toBeUndefined();
+  expect(texts(find(tree, "pk-b"))).toContain("Review");
+  view.input.handlers.submit({}, cx);
+  expect(commands).toEqual([["tab.select", { id: "b" }]]);
 });
