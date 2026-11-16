@@ -9,6 +9,9 @@ use std::{sync::mpsc, time::Duration};
 #[derive(Default)]
 pub struct Slot {
     pub document: Option<Document>,
+    /// Ephemeral projection at dismissal, retaining edits awaiting acknowledgement.
+    /// Never persisted or replayed across an authoritative replacement.
+    pub staged: Option<Document>,
     pub version: u64,
     pub available: bool,
     pub read_attempted: bool,
@@ -22,6 +25,26 @@ pub struct Slot {
 }
 
 impl Slot {
+    pub fn source(&self) -> Option<&Document> { self.staged.as_ref().or(self.document.as_ref()) }
+
+    pub fn capture(&self, model: &crate::model::Model, machine: Option<&str>) -> Document {
+        Document::capture_with_base(model, machine, self.source())
+    }
+
+    /// Called before removing visible work, while its full current content exists.
+    pub fn stage_dismissal(&mut self, model: &crate::model::Model, machine: &str) {
+        let current = self.capture(model, Some(machine));
+        self.staged = (self.document.as_ref() != Some(&current)).then_some(current);
+    }
+
+    pub fn acknowledge(&mut self, document: Document, model: &crate::model::Model, machine: Option<&str>) {
+        self.document = Some(document);
+        if self.staged.is_some()
+            && self.capture(model, machine) == Document::capture_with_base(model, machine, self.document.as_ref()) {
+            self.staged = None;
+        }
+    }
+
     pub fn layout(&self) -> &'static str {
         if self.available { "ready" }
         else if self.connected && !self.read_attempted { "loading" }
@@ -113,6 +136,62 @@ pub fn round_timeout(core: &Core, work: Work, timeout: Duration) -> (String, Out
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn remote() -> (crate::model::Model, Document) {
+        use crate::model::{Model, Tab};
+        let mut local = Model::default();
+        local.add_space("s", "space", "/tmp", Tab::new("a", "A", "pa", "ta"));
+        local.space_mut("s").unwrap().tabs.push(Tab::new("b", "B", "pb", "tb"));
+        let doc = Document::capture(&local, None);
+        let mut model = Model::default();
+        doc.replace(&mut model, Some("remote"));
+        (model, doc)
+    }
+
+    #[test]
+    fn staged_dismissal_preserves_pending_rename_new_tab_and_split() {
+        use crate::model::Tab;
+        let (mut model, doc) = remote();
+        let mut slot = Slot { document: Some(doc.clone()), version: 7, ..Default::default() };
+        let (_tx, rx) = mpsc::channel();
+        slot.pending = Some(rx);
+        model.tab_mut("remote/b").unwrap().name = "newer rename".into();
+        model.split("remote/pb", crate::layout::Axis::Row, "remote/new-pane", "remote/new-term");
+        model.space_mut("remote/s").unwrap().tabs.push(Tab::new("remote/new-tab", "new", "remote/pn", "remote/tn"));
+        let expected = Document::capture(&model, Some("remote"));
+        slot.stage_dismissal(&model, "remote");
+        assert_eq!(slot.document.as_ref(), Some(&doc));
+        assert_eq!(slot.version, 7);
+        model.dismiss_tab("remote/b");
+        model.dismiss_tab("remote/new-tab");
+        assert_ne!(Document::capture_with_base(&model, Some("remote"), slot.document.as_ref()), expected,
+            "the old authoritative-only projection loses the pending rename, split and newborn tab");
+        assert_eq!(slot.capture(&model, Some("remote")), expected);
+        slot.acknowledge(doc.clone(), &model, Some("remote"));
+        assert!(slot.staged.is_some(), "older Written must not discard newer hidden edits");
+        assert_eq!(slot.capture(&model, Some("remote")), expected);
+        // Unrelated visible edits must not keep staging alive after hidden edits land.
+        model.tab_mut("remote/a").unwrap().name = "visible edit after write".into();
+        slot.acknowledge(expected, &model, Some("remote"));
+        assert!(slot.staged.is_none());
+        assert!(slot.capture(&model, Some("remote")).project(Some("remote"))[0].tabs.iter().any(|t| t.name == "visible edit after write"));
+    }
+
+    #[test]
+    fn staged_identity_replacement_survives_older_written_and_restore() {
+        let (mut model, doc) = remote();
+        let mut slot = Slot { document: Some(doc.clone()), ..Default::default() };
+        model.tab_mut("remote/b").unwrap().root = crate::model::Tab::new("remote/b", "", "remote/new-pane", "remote/new-terminal").root;
+        let expected = Document::capture(&model, Some("remote"));
+        slot.stage_dismissal(&model, "remote");
+        model.dismiss_tab("remote/b");
+        slot.acknowledge(doc, &model, Some("remote"));
+        assert_eq!(slot.capture(&model, Some("remote")), expected);
+        model.tab_mut("remote/a").unwrap().name = "visible".into();
+        assert!(slot.source().unwrap().restore(&mut model, "remote", "remote/b", true));
+        assert_eq!(model.tab("remote/a").unwrap().name, "visible");
+        assert_eq!(model.pane_of("remote/new-terminal").as_deref(), Some("remote/new-pane"));
+    }
 
     #[test]
     fn layout_loading_ends_on_read_failure_and_restarts_on_reconnect() {

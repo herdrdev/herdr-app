@@ -33,12 +33,13 @@ Make a space: its name (default: none, so it's called after where its first term
 
 ## `space.close`
 
-Close a space and end its terminals (asks first unless confirmed).
+Close a space and end its visible terminals (asks first unless confirmed; already dismissed work is preserved); local: true closes a remote view on this screen only.
 
 | Argument | Required |
 |---|---|
 | `id` | no |
 | `confirmed` | no |
+| `local` | no |
 
 ## `space.rename`
 
@@ -75,12 +76,13 @@ Make a tab in a space (default: the selected one; name default: none, so it's ca
 
 ## `tab.close`
 
-Close a tab and end its terminals.
+Close a tab and end its visible terminals; local: true closes a remote view on this screen only.
 
 | Argument | Required |
 |---|---|
 | `id` | no |
 | `confirmed` | no |
+| `local` | no |
 
 ## `tab.rename`
 
@@ -115,11 +117,13 @@ Split a pane (default: the focused one) "right" or "down" with a new terminal, o
 
 ## `pane.close`
 
-Close a pane and end its terminal.
+Close a pane and end its terminal; local: true supports only the last pane of a remote tab.
 
 | Argument | Required |
 |---|---|
 | `pane` | no |
+| `confirmed` | no |
+| `local` | no |
 
 ## `terminal.open`
 
@@ -177,7 +181,7 @@ End a terminal and its sub-agents.
 
 ## `space.select`
 
-Show a space (by position or id).
+Show a space (by position or id); an explicit saved remote id restores a view closed on this screen when its layout is available.
 
 | Argument | Required |
 |---|---|
@@ -198,7 +202,7 @@ No arguments.
 
 ## `tab.select`
 
-Show a tab (by position in the space, or id).
+Show a tab (by position in the space, or id); an explicit saved remote id restores a view closed on this screen when its layout is available.
 
 | Argument | Required |
 |---|---|

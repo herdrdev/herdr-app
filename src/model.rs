@@ -80,9 +80,56 @@ pub struct Agent {
     pub since: u64,
 }
 
+/// A screen-private exclusion, retaining stable content identities as well as its ID.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) struct Dismissed {
+    pub machine: String,
+    pub kind: DismissedKind,
+    terminals: Vec<String>,
+    fingerprints: Vec<String>,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+pub(crate) enum DismissedKind { Space, Tab }
+
+impl Dismissed {
+    pub fn tab(machine: &str, tab: &Tab) -> Self {
+        let terminals = addresses(&tab.root);
+        let fingerprints = Self::fingerprints(&tab.root);
+        Self { machine: machine.into(), kind: DismissedKind::Tab, terminals, fingerprints }
+    }
+
+    pub fn space(space: &Space) -> Self {
+        let terminals: Vec<_> = space.tabs.iter().flat_map(|t| addresses(&t.root)).collect();
+        let mut fingerprints: Vec<_> = space.tabs.iter().flat_map(|t| Self::fingerprints(&t.root)).collect();
+        if space.tabs.is_empty() { fingerprints.push(format!("space:{}", space.id)); }
+        Self { machine: space.machine.clone().unwrap_or_default(), kind: DismissedKind::Space, terminals, fingerprints }
+    }
+
+    fn fingerprints(root: &Node) -> Vec<String> {
+        let mut identities: Vec<_> = root.walk().into_iter()
+            .filter(|node| node.children().is_empty() && node.terminal().is_none())
+            .map(|node| format!("pane:{}", node.id))
+            .collect();
+        for node in root.walk() {
+            identities.extend(node.floating.iter().filter(|float| !matches!(float.content, Content::Terminal { .. })).map(|float| format!("pane:{}", float.id)));
+        }
+        // Terminal addresses, never their reusable pane IDs, identify terminal work.
+        if identities.is_empty() && addresses(root).is_empty() { identities.push(format!("root:{}", root.id)); }
+        identities
+    }
+
+    pub fn matches(&self, other: &Self) -> bool {
+        self.kind == other.kind && self.machine == other.machine
+            && (self.terminals.iter().any(|t| other.terminals.contains(t))
+                || self.fingerprints.iter().any(|f| other.fingerprints.contains(f)))
+    }
+}
+
 #[derive(Default)]
 pub struct Model {
     pub spaces: Vec<Space>,
+    pub(crate) dismissed: BTreeMap<String, Dismissed>,
     /// The selected space.
     pub active: Option<String>,
     pub recent: Vec<Recent>,
@@ -419,6 +466,34 @@ impl Model {
         let id = c.id.clone();
         let (_, space_closed) = self.remove_tab(&id);
         (true, space_closed)
+    }
+
+    /// Remove only this screen's view. No terminal addresses escape this path.
+    pub fn dismiss_space(&mut self, id: &str) -> bool {
+        let Some(space) = self.space(id).filter(|s| s.machine.is_some()) else { return false };
+        self.dismissed.insert(id.into(), Dismissed::space(space));
+        self.remove_space(id);
+        true
+    }
+
+    pub fn dismiss_tab(&mut self, id: &str) -> bool {
+        let Some(space) = self.space_of(id).filter(|s| s.machine.is_some()) else { return false };
+        let Some(tab) = space.tab(id) else { return false };
+        if space.tabs.len() == 1 { return self.dismiss_space(&space.id.clone()); }
+        let entry = Dismissed::tab(space.machine.as_deref().unwrap(), tab);
+        self.dismissed.insert(id.into(), entry);
+        self.remove_tab(id);
+        true
+    }
+
+    pub fn dismissed_terminal(&self, address: &str) -> bool {
+        self.pane_of(address).is_none() && self.dismissed.values().any(|d| d.terminals.iter().any(|t| t == address))
+    }
+
+    pub fn dismissed_target(&self, address: &str, space: &str, tab: Option<&str>) -> bool {
+        self.pane_of(address).is_none() && (self.dismissed_terminal(address)
+            || self.dismissed.get(space).is_some_and(|d| d.kind == DismissedKind::Space)
+            || tab.is_some_and(|t| self.dismissed.get(t).is_some_and(|d| d.kind == DismissedKind::Tab)))
     }
 
     /// Removes a tab. Returns its terminal addresses and whether its space closed.
