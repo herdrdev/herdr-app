@@ -86,7 +86,13 @@ impl<'js> IntoJs<'js> for ReadChunk {
 impl<'js> IntoJs<'js> for Socket {
     fn into_js(self, ctx: &Ctx<'js>) -> Result<Value<'js>> {
         let socket = Object::new(ctx.clone())?;
+        let closer = self.closer;
+        // HERDR: JavaScript and pending I/O keep the socket alive; its owner can close it.
+        let cleanup = scheduler::track_resource(ctx, "net socket", move || {
+            let _ = closer.shutdown(Shutdown::Both);
+        })?;
         let writer = self.writer;
+        let write_cleanup = cleanup.clone();
         socket.set(
             "write",
             Func::from(move |ctx: Ctx<'js>, data: String| -> Result<Promise<'js>> {
@@ -97,7 +103,9 @@ impl<'js> IntoJs<'js> for Socket {
                     ));
                 }
                 let stream = writer.clone();
+                let cleanup = write_cleanup.clone();
                 scheduler::blocking(&ctx, "socket.write(data)", move || {
+                    let _cleanup = cleanup;
                     stream
                         .lock()
                         .map_err(|_| "socket lock was poisoned".to_owned())?
@@ -107,6 +115,7 @@ impl<'js> IntoJs<'js> for Socket {
             }),
         )?;
         let reader = self.reader;
+        let read_cleanup = cleanup.clone();
         socket.set(
             "read",
             Func::from(
@@ -119,7 +128,9 @@ impl<'js> IntoJs<'js> for Socket {
                         ));
                     }
                     let stream = reader.clone();
+                    let cleanup = read_cleanup.clone();
                     scheduler::blocking(&ctx, "socket.read(size)", move || {
+                        let _cleanup = cleanup;
                         let mut bytes = vec![0; size];
                         let count = stream
                             .lock()
@@ -135,11 +146,10 @@ impl<'js> IntoJs<'js> for Socket {
                 },
             ),
         )?;
-        let closer = self.closer;
         socket.set(
             "close",
             Func::from(move || {
-                let _ = closer.shutdown(Shutdown::Both);
+                cleanup.close();
             }),
         )?;
         Ok(socket.into_value())

@@ -105,6 +105,53 @@ export default class Probe extends View {
 }
 "#;
 
+const NET_LIFETIME_PROBE: &str = r#"
+import { View, div } from "gpui-kit";
+import { connect } from "net";
+
+export default class Probe extends View {
+  init(_props, cx) {
+    cx.spawn(async () => {
+      this.socket = await connect("127.0.0.1", __PORT__);
+      // Keep a reference so garbage collection cannot hide a leaked socket.
+      (globalThis.savedSockets ??= []).push(this.socket);
+      await this.socket.write("r");
+    });
+  }
+  render() {
+    return div().id("send").w(100).h(40).on_click((_event, cx) => {
+      cx.spawn(async () => { await this.socket.write("p"); });
+    });
+  }
+}
+"#;
+
+const NET_PENDING_READ_GC_PROBE: &str = r#"
+import { View, div } from "gpui-kit";
+import { connect } from "net";
+
+export default class Probe extends View {
+  init(_props, cx) {
+    cx.spawn(async () => {
+      const socket = await connect("127.0.0.1", __PORT__);
+      this.read = socket.read;
+      await socket.write("r");
+    });
+  }
+  render() {
+    return div().id("read").child(this.reply ?? "pending").on_click((_event, cx) => {
+      const reading = this.read(1);
+      this.read = null;
+      cx.spawn(async (cx) => {
+        const bytes = await reading;
+        this.reply = bytes === null ? "closed" : `reply:${String.fromCharCode(...bytes)}`;
+        cx.notify();
+      });
+    });
+  }
+}
+"#;
+
 const WEBSOCKET_PROBE: &str = r#"
 import { div, View } from "gpui-kit";
 import { v_flex } from "gpui-base";
@@ -441,6 +488,54 @@ fn net_close_does_not_wait_for_a_pending_read(cx: &mut TestAppContext) {
         "socket.close() waited {close_elapsed:?} for the pending read"
     );
     assert!(rendered.contains("closed"), "{rendered}");
+}
+
+#[gpui::test]
+fn reloading_a_view_closes_its_idle_tcp_socket(cx: &mut TestAppContext) {
+    let mut app = SocketModTest::new(cx, NET_LIFETIME_PROBE);
+    let (view, mut socket) = app.open_copy();
+    let (other_view, mut other_socket) = app.open_copy();
+
+    app.reload(&view);
+
+    assert_eq!(socket.read(&mut [0]).expect("closed socket"), 0);
+    app.send_from(&other_view);
+    other_socket
+        .read_exact(&mut [0])
+        .expect("other copy can still send");
+}
+
+#[gpui::test]
+fn removing_a_view_closes_its_idle_tcp_socket(cx: &mut TestAppContext) {
+    let mut app = SocketModTest::new(cx, NET_LIFETIME_PROBE);
+    let (view, mut socket) = app.open_copy();
+    let (other_view, mut other_socket) = app.open_copy();
+
+    drop(view);
+    app.context.update(|_, _| {});
+
+    assert_eq!(socket.read(&mut [0]).expect("closed socket"), 0);
+    app.send_from(&other_view);
+    other_socket
+        .read_exact(&mut [0])
+        .expect("other copy can still send");
+}
+
+#[gpui::test]
+fn pending_read_survives_socket_garbage_collection(cx: &mut TestAppContext) {
+    let mut app = SocketModTest::new(cx, NET_PENDING_READ_GC_PROBE);
+    let registrations_before = crate::engine::quickjs::task_count();
+    let (view, mut socket) = app.open_copy();
+
+    app.click(&view);
+    app.runtime.collect_garbage();
+    socket.write_all(b"p").expect("reply to pending read");
+    app.context.run_until_parked();
+
+    draw(&mut app.context, &view);
+    assert!(snapshot(&mut app.context, &view).contains("reply:p"));
+    assert_eq!(socket.read(&mut [0]).expect("completed socket closes"), 0);
+    assert_eq!(crate::engine::quickjs::task_count(), registrations_before);
 }
 
 #[gpui::test]
@@ -1142,6 +1237,87 @@ fn two_runtimes_keep_distinct_network_policies(cx: &mut TestAppContext) {
         "{denied}"
     );
     server.join().expect("HTTP server");
+}
+
+/// Loads real mod copies so removal and reload exercise application ownership.
+struct SocketModTest {
+    runtime: std::rc::Rc<ShellRuntime>,
+    context: VisualTestContext,
+    directory: tempfile::TempDir,
+    listener: TcpListener,
+}
+
+impl SocketModTest {
+    fn new(cx: &mut TestAppContext, source: &str) -> Self {
+        let listener = TcpListener::bind("127.0.0.1:0").expect("TCP listener");
+        listener.set_nonblocking(true).unwrap();
+        let port = listener.local_addr().unwrap().port();
+        let source = source.replace("__PORT__", &port.to_string());
+        let directory = tempfile::tempdir().expect("mod directory");
+        std::fs::write(directory.path().join("main.js"), source).unwrap();
+
+        cx.update(crate::init);
+        crate::set_capabilities(Capabilities::new().network_hosts(["127.0.0.1".to_owned()]));
+        let runtime = ShellRuntime::new_isolated().expect("runtime");
+        cx.update(|cx| runtime.set_global(cx));
+        let window = cx.add_window(|_, _| Empty);
+        let context = VisualTestContext::from_window(*window.deref(), cx);
+        Self {
+            runtime,
+            context,
+            directory,
+            listener,
+        }
+    }
+
+    fn open_copy(&mut self) -> (Entity<ScriptView>, std::net::TcpStream) {
+        let view_type = self
+            .runtime
+            .load_app(self.directory.path(), "main.js")
+            .expect("load mod");
+        let view = self
+            .context
+            .update(|window, cx| self.runtime.instantiate_view(&view_type, window, cx))
+            .expect("create copy");
+        self.context.run_until_parked();
+
+        let (mut socket, _) = self.listener.accept().expect("mod connected");
+        socket.set_nonblocking(false).unwrap();
+        socket
+            .set_read_timeout(Some(Duration::from_secs(2)))
+            .unwrap();
+        socket.read_exact(&mut [0]).expect("mod ready");
+        (view, socket)
+    }
+
+    fn reload(&mut self, view: &Entity<ScriptView>) {
+        self.context
+            .update(|window, cx| {
+                crate::watch::reload(
+                    &self.runtime,
+                    view,
+                    self.directory.path(),
+                    "main.js",
+                    window,
+                    cx,
+                )
+            })
+            .expect("reload mod");
+    }
+
+    fn send_from(&mut self, view: &Entity<ScriptView>) {
+        self.click(view);
+        self.context.run_until_parked();
+    }
+
+    fn click(&mut self, view: &Entity<ScriptView>) {
+        draw(&mut self.context, view);
+        let click = self.runtime.live_callback_ids()[0];
+        self.context.update(|window, cx| {
+            self.runtime
+                .dispatch_click(click, &gpui::ClickEvent::default(), window, cx);
+        });
+    }
 }
 
 fn probe(
