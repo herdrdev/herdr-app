@@ -224,6 +224,8 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
     module = module.async_function("feedbackPickImages", |_| Ok(async { Ok(HostValue::Array(vec![])) }));
     module = module.async_function("knownAgents", |_| Ok(async { Ok(HostValue::Array(vec![])) }));
     module = module.async_function("pickFolder", |_| Ok(async { Ok(HostValue::Null) }));
+    module = module.async_function("links", |_| Ok(async { Ok(HostValue::Array(vec![])) }));
+    module = module.async_function("setTerminalHints", |_| Ok(async { Ok(HostValue::Null) }));
     module = module.async_function("nextCommand", |_| Ok(std::future::pending::<gpui_shell::HostResult>()));
     module = module.cancellable_async_function("watchFolder", HostValue::Array(vec![]), |_| Ok(std::future::pending::<gpui_shell::HostResult>()));
     for name in ["exec", "hc", "readTextFile", "writeTextFile", "sendFeedback"] {

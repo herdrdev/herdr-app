@@ -259,6 +259,28 @@ export interface TerminalSelectionState {
   selection: { start: TerminalCell; end: TerminalCell } | null;
 }
 
+/** A link a terminal shows. */
+export interface TerminalLink {
+  /** What Ctrl+click opens: the URL (an OSC 8 link's own), or an existing file's full path. */
+  target: string;
+  kind: "url" | "file";
+  /** The text that shows (an OSC 8 link's label). */
+  text: string;
+  /** Where it shows: `len` cells from `col` per row, first to last, only rows on screen.
+   *  Rows count as in TerminalCell. */
+  spans: { row: number; col: number; len: number }[];
+}
+
+/** The links a terminal shows now (default: the focused one), top to bottom: OSC 8 hyperlinks,
+ *  and the URLs and existing files Ctrl+click opens. Rejects when the terminal isn't shown. */
+export function links(terminal?: string | null): Promise<TerminalLink[]>;
+
+/** Draws short labels on a terminal's cells (default: the focused one), over the text, replacing
+ *  this mod copy's earlier ones. On the view links() read last for that terminal. `[]` clears them;
+ *  so does closing this copy. Rows hold as TerminalCell positions do: read links() again while
+ *  labels show. A label stays on its row; one past the right edge moves left. */
+export function setTerminalHints(terminal: string | null, hints: { row: number; col: number; text: string }[]): Promise<null>;
+
 /** Actual terminal/pane focus. `space` and `tab` are the current window context.
  *  Clicking a visible layout terminal block, or pane.focus {terminal}, focuses that block:
  *  `terminal` and `cwd` describe it; `pane` and `shown` are null, not its source pane.
