@@ -195,8 +195,8 @@ export function agents(): AgentInfo[];
 /** History scroll as Ghostty reports it, read fresh by panes().
  *  Rows from the top of retained history; `from_bottom` is 0 at the end.
  *  PaneInfo.scroll is null on the alternate screen or with no view.
- *  Mods refresh on user scrolling or transitions between end/history/alternate
- *  screen, not on ordinary output that only changes the numbers. */
+ *  Mods refresh only on transitions between end/history/alternate screen,
+ *  not on scrolling or output within one of those states that only changes the numbers. */
 export interface PaneScroll {
   total: number;
   offset: number;

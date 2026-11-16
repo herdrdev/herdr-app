@@ -635,7 +635,7 @@ pub fn track_pane_view(pane: String, view: &gpui::Entity<crate::terminal::Termin
 
 pub fn publish_panes(v: Value) -> bool {
     PANE_VIEWS.with_borrow_mut(|views| views.retain(|pane, _| {
-        v.as_array().into_iter().flatten().any(|p| p["pane"].as_str() == Some(pane))
+        v.as_array().into_iter().flatten().any(|p| p["pane"].as_str() == Some(pane.strip_suffix("#swap").unwrap_or(pane)))
     }));
     publish("panes", |s| (std::mem::replace(&mut s.panes, v.clone()), v))
 }
@@ -729,16 +729,23 @@ fn reader(reads: Rc<RefCell<LiveReads>>, key: &'static str, f: fn(&Snapshot) -> 
 /// when the part or a pane's numbers changed.
 fn panes_part(f: fn(&Snapshot) -> &Value) -> std::sync::Arc<Value> {
     let base = shared_part("panes", f);
-    let scrolls: PaneScrolls = gpui_shell::with_current_app(|cx| {
-        PANE_VIEWS.with_borrow(|views| {
-            let panes = base.as_array().into_iter().flatten().enumerate();
-            panes.filter_map(|(i, pane)| {
-                let view = pane["pane"].as_str().and_then(|id| views.get(id)).and_then(|v| v.upgrade())?;
-                Some((i, view.read(cx).scroll_metrics()))
-            }).collect()
-        })
-    }).unwrap_or_default();
+    let scrolls = gpui_shell::with_current_app(|cx| pane_scrolls(&base, cx)).unwrap_or_default();
     with_scrolls(base, scrolls)
+}
+
+/// Each listed pane's scroll, from the terminal it shows (`shown_view`).
+fn pane_scrolls(panes: &Value, cx: &gpui::App) -> PaneScrolls {
+    PANE_VIEWS.with_borrow(|views| {
+        panes.as_array().into_iter().flatten().enumerate().filter_map(|(i, pane)| {
+            let view = pane["pane"].as_str().and_then(|id| shown_view(views, id))?;
+            Some((i, view.read(cx).scroll_metrics()))
+        }).collect()
+    })
+}
+
+/// The terminal a pane shows: one swapped in (`<pane>#swap`, `terminal.show`) over its own.
+fn shown_view(views: &HashMap<String, gpui::WeakEntity<crate::terminal::TerminalView>>, pane: &str) -> Option<gpui::Entity<crate::terminal::TerminalView>> {
+    views.get(&format!("{pane}#swap")).and_then(|v| v.upgrade()).or_else(|| views.get(pane).and_then(|v| v.upgrade()))
 }
 
 type PaneScrolls = Vec<(usize, Option<crate::terminal::ScrollMetrics>)>;
