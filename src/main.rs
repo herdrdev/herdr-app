@@ -1,6 +1,7 @@
 // Windows: a window app, but tests inherit Cargo's console for their child processes.
 #![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 
+mod badge;
 mod bench;
 mod commands;
 mod control;
@@ -16,7 +17,8 @@ mod mirror;
 mod mirror_sync;
 mod place;
 mod persist;
-#[cfg(target_os = "macos")]
+#[cfg(any(target_os = "macos", test))]
+#[cfg_attr(not(target_os = "macos"), allow(dead_code))]
 mod macos;
 #[cfg(target_os = "macos")]
 mod macos_check;
@@ -51,7 +53,7 @@ Usage:
   herdr-app feedback <text>        draft feedback for the person to review and send
   herdr-app commands               every command, its arguments, what it does
   herdr-app status                 what the window shows, and any errors
-  herdr-app shot [file.png]        save the last window frame (default: herdr-shot.png)
+  herdr-app shot [file.png]        save the current window frame (default: herdr-shot.png)
   herdr-app check <mod folder>     load a mod once and report what's wrong
   herdr-app --skill                Agent Skill: driving the window, and where hc fits
   herdr-app --version

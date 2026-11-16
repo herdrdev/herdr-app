@@ -71,12 +71,39 @@ pub enum TerminalEvent {
     Peek(String),
     TitleChanged,
     SelectionChanged,
+    /// History scroll position changed enough for mods that watch `panes().scroll`.
+    ScrollChanged,
     /// The program ended.
     Ended,
     /// Right-click where the program doesn't take the mouse: the pane menu.
     ContextMenu(Point<Pixels>),
     /// Something the person asked for failed: an error toast.
     Notice { title: String, body: String },
+}
+
+/// Rows of scrollback history as Ghostty's scrollbar reports them. `from_bottom`
+/// is 0 when the viewport is at (or past) the end; absent on the alternate screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScrollMetrics {
+    pub total: u64,
+    pub offset: u64,
+    pub len: u64,
+    pub from_bottom: u64,
+}
+
+impl ScrollMetrics {
+    pub fn json(self) -> Value {
+        json!({
+            "total": self.total,
+            "offset": self.offset,
+            "len": self.len,
+            "from_bottom": self.from_bottom,
+        })
+    }
+}
+
+fn scroll_state_changed(previous: Option<u64>, current: Option<u64>) -> bool {
+    previous.map(|n| n > 0) != current.map(|n| n > 0)
 }
 
 /// What the canvas closures need, shared outside the entity so prepaint can resize.
@@ -115,8 +142,8 @@ struct Grid {
     track: Option<Bounds<Pixels>>,
     /// Each row's drawing by position, kept while the row is the same (`Rc`).
     painted: Vec<(Rc<Vec<vt::Cell>>, Vec<RowOp>, Option<usize>)>,
-    /// Font size, cell size, font, loaded fonts and ligature setting used to draw.
-    painted_with: (u32, Size<Pixels>, String, u64, bool),
+    /// Font size, cell size, cell font, loaded fonts and ligature setting used to draw.
+    painted_with: (u32, Size<Pixels>, Font, u64, bool),
 }
 
 pub struct TerminalView {
@@ -157,6 +184,8 @@ pub struct TerminalView {
     pending_search_nav: Option<bool>,
     search_task: Option<Task<()>>,
     attach_deadline: Instant,
+    /// Last observed distance; output only publishes transitions to/from the end.
+    published_from_bottom: Option<u64>,
     _render_hold: Option<(Instant, Task<()>)>,
     _reader: Option<Task<()>>,
 }
@@ -171,6 +200,12 @@ static FRAME: AtomicU64 = AtomicU64::new(0);
 
 pub fn next_frame() {
     FRAME.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn flush_output_clock(cx: &mut gpui::App) {
+    for view in OUTPUT_CLOCK.with(|c| std::mem::take(&mut *c.borrow_mut())) {
+        let _ = view.update(cx, |_, cx| cx.notify());
+    }
 }
 
 impl EventEmitter<TerminalEvent> for TerminalView {}
@@ -297,7 +332,7 @@ impl TerminalView {
                 thumb: None,
                 track: None,
                 painted: Vec::new(),
-                painted_with: (0, Size::default(), String::new(), 0, false),
+                painted_with: (0, Size::default(), font(""), 0, false),
             })),
             focus: cx.focus_handle(),
             was_focused: false,
@@ -311,6 +346,7 @@ impl TerminalView {
             pending_search_nav: None,
             search_task: None,
             attach_deadline,
+            published_from_bottom: None,
             _render_hold: None,
             _reader: None,
         };
@@ -577,6 +613,7 @@ impl TerminalView {
                 });
             })));
         }
+        self.publish_scroll_if_changed(cx);
         // Output in a terminal nobody sees doesn't redraw the window; it's
         // drawn fresh when shown again. Nor does output that changed nothing
         // on screen (an agent spinning its title).
@@ -604,9 +641,7 @@ impl TerminalView {
         if start {
             cx.spawn(async |_, cx| {
                 cx.background_executor().timer(Duration::from_millis(33)).await;
-                for view in OUTPUT_CLOCK.with(|c| std::mem::take(&mut *c.borrow_mut())) {
-                    let _ = view.update(cx, |_, cx| cx.notify());
-                }
+                cx.update(flush_output_clock);
             })
             .detach();
         }
@@ -776,6 +811,13 @@ impl TerminalView {
         true
     }
 
+    fn copy_primary(&self, _cx: &mut Context<Self>) {
+        #[cfg(target_os = "linux")]
+        if let Some(text) = self.grid.borrow().vt.selection_text() {
+            _cx.write_to_primary(ClipboardItem::new_string(text));
+        }
+    }
+
     pub fn selection(&self) -> Option<vt::SelectionPositions> {
         self.grid.borrow().vt.selection_positions()
     }
@@ -813,6 +855,8 @@ impl TerminalView {
         }
         drop(grid);
         self.selection_changed(cx);
+        self.publish_scroll_if_changed(cx);
+        self.copy_primary(cx);
         cx.notify();
         Ok(())
     }
@@ -820,6 +864,7 @@ impl TerminalView {
     pub fn select_all(&mut self, cx: &mut Context<Self>) {
         self.grid.borrow_mut().vt.select_all();
         self.selection_changed(cx);
+        self.copy_primary(cx);
         cx.notify();
     }
 
@@ -893,6 +938,7 @@ impl TerminalView {
         if self.grid.borrow().vt.search_progress().complete {
             self.pending_search_nav = None;
             if self.grid.borrow_mut().vt.search_navigate(previous) {
+                self.publish_scroll_if_changed(cx);
                 cx.notify();
             }
         } else {
@@ -927,6 +973,7 @@ impl TerminalView {
                 let busy = !grid.vt.search_progress().complete || this.pending_search_nav.is_some();
                 drop(grid);
                 if changed {
+                    this.publish_scroll_if_changed(cx);
                     cx.notify();
                 }
                 Some(if busy { Duration::from_millis(33) } else { Duration::from_millis(200) })
@@ -988,6 +1035,8 @@ impl TerminalView {
         } else {
             g.vt.scroll_viewport(if up { -(n as isize) } else { n as isize });
         }
+        drop(g);
+        self.publish_scroll_if_changed(cx);
         cx.notify();
     }
 
@@ -1001,7 +1050,29 @@ impl TerminalView {
             ScrollTarget::Top => g.vt.scroll_to_top(),
             ScrollTarget::Bottom => g.vt.scroll_to_bottom(),
         }
+        drop(g);
+        self.publish_scroll_if_changed(cx);
         cx.notify();
+    }
+
+    /// History scroll metrics for mods (`panes().scroll`). None on the alternate screen.
+    pub fn scroll_metrics(&self) -> Option<ScrollMetrics> {
+        let g = self.grid.borrow();
+        if g.vt.alt_screen() {
+            return None;
+        }
+        let sb = g.vt.scrollbar();
+        let from_bottom = sb.total.saturating_sub(sb.offset.saturating_add(sb.len));
+        Some(ScrollMetrics { total: sb.total, offset: sb.offset, len: sb.len, from_bottom })
+    }
+
+    fn publish_scroll_if_changed(&mut self, cx: &mut Context<Self>) {
+        let from_bottom = self.scroll_metrics().map(|m| m.from_bottom);
+        let previous = self.published_from_bottom;
+        self.published_from_bottom = from_bottom;
+        if scroll_state_changed(previous, from_bottom) {
+            cx.emit(TerminalEvent::ScrollChanged);
+        }
     }
 
     /// The program tracks the mouse and Shift isn't held (Shift keeps the mouse Herdr's).
@@ -1087,6 +1158,7 @@ impl TerminalView {
                         g.vt.scroll_viewport(lines);
                         drop(g);
                         this.select(Select::Drag, this.selection_pointer, cx);
+                        this.publish_scroll_if_changed(cx);
                     }
                     true
                 }).unwrap_or(false);
@@ -1120,9 +1192,13 @@ impl TerminalView {
         g.vt.select(step, col, row, x, y, cw, height);
         drop(g);
         self.selection_changed(cx);
-        if matches!(step, Select::Release) && crate::settings::get().copy_on_select {
-            // Copy on select, as in Herdr.
-            self.copy(cx);
+        if matches!(step, Select::Release) {
+            if crate::settings::get().copy_on_select {
+                // Copy on select, as in Herdr.
+                self.copy(cx);
+            } else {
+                self.copy_primary(cx);
+            }
         }
         cx.notify();
     }
@@ -1666,7 +1742,8 @@ fn ligature_features(enabled: bool) -> FontFeatures {
 fn cell_font(bold: bool, italic: bool) -> Font {
     let mut f = font(crate::settings::terminal_font());
     f.features = ligature_features(false);
-    f.weight = if bold { FontWeight::BOLD } else { FontWeight::MEDIUM };
+    let weight = crate::settings::get().font_weight.clamp(100, 900);
+    f.weight = if bold { FontWeight::BOLD } else { FontWeight(weight as f32) };
     f.style = if italic { FontStyle::Italic } else { FontStyle::Normal };
     f
 }
@@ -1695,19 +1772,20 @@ fn cell_metrics(window: &Window) -> CellMetrics {
     let ts = window.text_system();
     let id = ts.resolve_font(&cell_font(false, false));
     let (fs, scale) = (crate::settings::font_size(), window.scale_factor());
-    // Asked for on every frame; changes with the font, size, scale or line height.
-    thread_local!(static LAST: Cell<Option<((FontId, u32, u32, u32), CellMetrics)>> = const { Cell::new(None) });
-    let line_height = crate::settings::get().terminal_line_height;
-    let key = (id, fs.to_bits(), scale.to_bits(), line_height.to_bits());
+    // Asked for on every frame; changes with the font, size, scale, line height or cell width.
+    thread_local!(static LAST: Cell<Option<((FontId, u32, u32, u32, u32), CellMetrics)>> = const { Cell::new(None) });
+    let s = crate::settings::get();
+    let (line_height, cell_width) = (s.terminal_line_height, s.terminal_cell_width);
+    let key = (id, fs.to_bits(), scale.to_bits(), line_height.to_bits(), cell_width.to_bits());
     if let Some((_, metrics)) = LAST.get().filter(|(last, _)| *last == key) {
         return metrics;
     }
-    let metrics = font_cell_metrics(ts, id, fs, scale, line_height);
+    let metrics = font_cell_metrics(ts, id, fs, scale, line_height, cell_width);
     LAST.set(Some((key, metrics)));
     metrics
 }
 
-fn font_cell_metrics(ts: &WindowTextSystem, id: FontId, fs: f32, scale: f32, line_height: f32) -> CellMetrics {
+fn font_cell_metrics(ts: &WindowTextSystem, id: FontId, fs: f32, scale: f32, line_height: f32, cell_width: f32) -> CellMetrics {
     // FreeType uses integer y_ppem for metrics; CoreText uses the requested size.
     let em = if cfg!(target_os = "macos") { fs * scale } else { (fs * scale).round().max(1.0) };
     let metrics = ts.font_metrics(id);
@@ -1759,7 +1837,8 @@ fn font_cell_metrics(ts: &WindowTextSystem, id: FontId, fs: f32, scale: f32, lin
     let st_pos = st.filter(|m| m.thickness != 0 || m.position != 0).map_or((ex * unit + st_thick) * 0.5, |m| m.position as f32 * unit);
     let face_width = (' '..='~').filter_map(|c| ts.advance(id, px(fs * scale), c).ok())
         .map(|s| f32::from(s.width)).reduce(f32::max).unwrap_or(fs * scale * 0.6);
-    let width = face_width.round().max(1.0);
+    // As Ghostty's adjust-cell-width: scale the rounded cell; glyph_x re-centres the face in it.
+    let width = adjusted_cell_width(face_width.round().max(1.0), cell_width);
     CellMetrics {
         size: size(px(width / scale), px(height / scale)),
         glyph_x: px(glyph_x(width, face_width) / scale),
@@ -1769,6 +1848,13 @@ fn font_cell_metrics(ts: &WindowTextSystem, id: FontId, fs: f32, scale: f32, lin
         strike: px((baseline - st_pos).round() / scale),
         strike_thickness: px(st_thick.ceil().max(1.0) / scale),
     }
+}
+
+// Ghostty's `Metrics` modifier: the cell times (1 + percent / 100) in f64, rounded. Taking the
+// product in f32 from the multiplier can land on the other side of a half pixel (30 px at 1.05).
+fn adjusted_cell_width(width: f32, multiplier: f32) -> f32 {
+    let percent = ((f64::from(multiplier) - 1.0) * 100.0 * 1e4).round() / 1e4;
+    ((f64::from(width) * (1.0 + percent / 100.0)).round() as f32).max(1.0)
 }
 
 // Ghostty puts an odd extra pixel on the edge that best centres the face.
@@ -2043,7 +2129,8 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     // line rebuilds one row, not the whole screen.
     let ligatures = crate::settings::get().font_ligatures;
     let cursor = frame.cursor_cell.filter(|_| ligatures);
-    let with = (crate::settings::font_size().to_bits(), cell, crate::settings::terminal_font(), crate::settings::fonts_added(), ligatures);
+    // The whole cell font, so a weight change redraws kept rows too.
+    let with = (crate::settings::font_size().to_bits(), cell, cell_font(false, false), crate::settings::fonts_added(), ligatures);
     // When every row changed (output scrolling), nothing is kept: the next
     // frame would find none of them the same.
     let mut painted = std::mem::take(&mut grid.borrow_mut().painted);
@@ -2311,6 +2398,7 @@ impl EntityInputHandler for TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.publish_scroll_if_changed(cx);
         crate::bench::count(&crate::bench::TERMINAL);
         let terminal_focused = self.focus.is_focused(window);
         if terminal_focused {
@@ -2425,6 +2513,7 @@ impl Render for TerminalView {
                         g.vt.scroll_to_row(scrollbar_row_at(sb.total, sb.len, f32::from(track.size.height), min, top));
                     }
                     drop(g);
+                    this.publish_scroll_if_changed(cx);
                     cx.notify();
                     cx.stop_propagation();
                     return;
@@ -2448,9 +2537,16 @@ impl Render for TerminalView {
                     cx.emit(TerminalEvent::ContextMenu(ev.position));
                 }
             }))
-            .on_mouse_down(MouseButton::Middle, cx.listener(|this, ev: &MouseDownEvent, _, cx| {
+            .on_mouse_down(MouseButton::Middle, cx.listener(|this, ev: &MouseDownEvent, _, _cx| {
                 if !this.mouse(GHOSTTY_MOUSE_ACTION_PRESS, Some(ev.button), ev.position, ev.modifiers) {
-                    this.paste(cx);
+                    // macOS has no PRIMARY selection, so an unclaimed middle-click does nothing.
+                    #[cfg(target_os = "linux")]
+                    if let Some(text) = _cx.read_from_primary().and_then(|item| item.text()).filter(|text| !text.is_empty()) {
+                        let bytes = this.grid.borrow().vt.paste_bytes(&text);
+                        this.send(&bytes);
+                    }
+                    #[cfg(target_os = "windows")]
+                    this.paste(_cx);
                 }
             }))
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
@@ -2485,6 +2581,7 @@ impl Render for TerminalView {
                                         let top = f32::from(ev.position.y - g.origin.y) - this.scrollbar_grab.unwrap_or(0.0);
                                         g.vt.scroll_to_row(scrollbar_row_at(sb.total, sb.len, track, min, top));
                                         drop(g);
+                                        this.publish_scroll_if_changed(cx);
                                         cx.notify();
                                         return;
                                     }
@@ -2634,8 +2731,27 @@ impl Focusable for TerminalView {
 
 #[cfg(test)]
 mod tests {
-    use super::{ScrollTarget, pages_to_lines, scroll_target};
+    use super::{ScrollTarget, pages_to_lines, scroll_target, scroll_state_changed};
     use serde_json::{Value, json};
+
+    #[test]
+    fn scroll_refreshes_only_when_leaving_or_reaching_end_or_alternate_screen() {
+        for (previous, current, changed) in [
+            (Some(0), Some(10), true),
+            (Some(10), Some(0), true),
+            (Some(10), Some(20), false),
+            (Some(20), Some(10), false),
+            (Some(0), Some(0), false),
+            (Some(10), Some(10), false),
+            (Some(0), None, true),
+            (Some(10), None, true),
+            (None, Some(0), true),
+            (None, Some(10), true),
+            (None, None, false),
+        ] {
+            assert_eq!(scroll_state_changed(previous, current), changed, "{previous:?} -> {current:?}");
+        }
+    }
 
     #[test]
     fn output_turns_preserve_bytes_budget_and_close_order() {
@@ -2936,7 +3052,11 @@ mod tests {
         let terminal = cx.new(|cx| super::TerminalView::attach(crate::hc::offline(), "t1".into(), (20, 3), cx));
         terminal.update(cx, |terminal, cx| {
             terminal.grid.borrow_mut().vt.write(b"hello world\r\nsecond line");
+            cx.write_to_clipboard(ClipboardItem::new_string("untouched".into()));
             terminal.selection_command("terminal.select", &serde_json::json!({"at": {"row": 0, "col": 1}, "mode": "line"}), cx).unwrap();
+            assert_eq!(cx.read_from_clipboard().unwrap().text().as_deref(), Some("untouched"));
+            #[cfg(target_os = "linux")]
+            assert_eq!(cx.read_from_primary().unwrap().text().as_deref(), Some("hello world"));
             assert!(terminal.copy(cx));
             assert_eq!(cx.read_from_clipboard().unwrap().text().as_deref(), Some("hello world"));
             terminal.selection_command("terminal.clear_selection", &serde_json::json!({}), cx).unwrap();
@@ -2977,6 +3097,142 @@ mod tests {
                 assert_eq!(terminal.grid.borrow().vt.selection_text(), None);
             });
         });
+    }
+
+    #[gpui::test]
+    fn macos_edit_menu_follows_keyboard_focus(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+        use gpui_base::input::{Input, InputState};
+        use gpui_shell::action::ShellAction;
+
+        struct Root {
+            terminal: Entity<super::TerminalView>,
+            input: Entity<InputState>,
+            plain: FocusHandle,
+        }
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                div().size_full()
+                    .on_action(cx.listener(|this, action: &ShellAction, window, cx| {
+                        if crate::macos::dispatch_edit(action, this.terminal.read(cx).owns_keyboard_focus(window, cx), window, cx) {
+                            return;
+                        }
+                        this.terminal.update(cx, |terminal, cx| match action.id() {
+                            "terminal.copy" => { terminal.copy(cx); }
+                            "terminal.paste" => terminal.paste(cx),
+                            _ => cx.propagate(),
+                        });
+                    }))
+                    .child(Input::new(&self.input))
+                    .child(div().track_focus(&self.plain).h(px(30.)).child("sidebar"))
+                    .child(div().h(px(150.)).child(self.terminal.clone()))
+            }
+        }
+
+        let menu_action = |title: &str| {
+            crate::macos::menus(&[], None).into_iter()
+                .find(|menu| menu.name == "Edit").unwrap().items.into_iter()
+                .find_map(|item| match item {
+                    MenuItem::Action { name, action, .. } if name == title => Some(action.as_any().downcast_ref::<ShellAction>().unwrap().clone()),
+                    _ => None,
+                }).unwrap()
+        };
+        cx.update(gpui_base::init);
+        cx.update(|app| app.bind_keys([
+            KeyBinding::new("cmd-v", ShellAction::new("terminal.paste"), None),
+            KeyBinding::new("cmd-c", ShellAction::new("terminal.copy"), None),
+        ]));
+        let (root, cx) = cx.add_window_view(|window, cx| Root {
+            terminal: cx.new(|cx| {
+                let terminal = super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 6), cx);
+                terminal.grid.borrow_mut().vt.write(b"terminal selection");
+                terminal
+            }),
+            input: cx.new(|cx| InputState::new(window, cx).default_value("field selection")),
+            plain: cx.focus_handle(),
+        });
+        cx.run_until_parked();
+        cx.update(|window, app| root.update(app, |root, app| {
+            root.terminal.update(app, |terminal, cx| {
+                terminal.selection_command("terminal.select", &serde_json::json!({"at": {"row": 0, "col": 0}, "mode": "line"}), cx).unwrap();
+            });
+            root.input.update(app, |input, cx| {
+                input.focus(window, cx);
+                input.select_all(window, cx);
+            });
+        }));
+        cx.run_until_parked();
+
+        cx.dispatch_action(menu_action("Copy"));
+        cx.run_until_parked();
+        cx.update(|_, app| assert_eq!(app.read_from_clipboard().unwrap().text().as_deref(), Some("field selection")));
+        cx.update(|_, app| app.write_to_clipboard(ClipboardItem::new_string("pasted\ntext".into())));
+        cx.dispatch_action(menu_action("Paste"));
+        cx.run_until_parked();
+        root.read_with(cx, |root, app| {
+            assert_eq!(root.input.read(app).value().as_str(), "pastedtext");
+            assert!(root.terminal.read(app).typed_at.get().is_none(), "paste reached the terminal behind the field");
+        });
+
+        for from_menu in [true, false] {
+            cx.update(|window, app| root.update(app, |root, app| {
+                root.plain.focus(window, app);
+                root.terminal.update(app, |terminal, _| terminal.typed_at.set(None));
+                app.write_to_clipboard(ClipboardItem::new_string("plain focus paste".into()));
+            }));
+            cx.run_until_parked();
+            if from_menu {
+                cx.dispatch_action(menu_action("Paste"));
+            } else {
+                cx.simulate_keystrokes("cmd-v");
+            }
+            cx.run_until_parked();
+            root.read_with(cx, |root, app| {
+                assert!(root.terminal.read(app).typed_at.get().is_some(), "plain focus swallowed paste (menu={from_menu})");
+                assert_eq!(root.input.read(app).value().as_str(), "pastedtext");
+            });
+            if from_menu {
+                cx.dispatch_action(menu_action("Copy"));
+            } else {
+                cx.simulate_keystrokes("cmd-c");
+            }
+            cx.run_until_parked();
+            cx.update(|_, app| assert_eq!(app.read_from_clipboard().unwrap().text().as_deref(), Some("terminal selection")));
+        }
+
+        cx.update(|window, app| root.read_with(app, |root, _| root.terminal.clone()).update(app, |terminal, cx| {
+            terminal.focus_handle().focus(window, cx);
+        }));
+        cx.run_until_parked();
+        cx.dispatch_action(menu_action("Copy"));
+        cx.run_until_parked();
+        cx.update(|_, app| assert_eq!(app.read_from_clipboard().unwrap().text().as_deref(), Some("terminal selection")));
+        cx.dispatch_action(menu_action("Paste"));
+        cx.run_until_parked();
+        root.read_with(cx, |root, app| {
+            assert!(root.terminal.read(app).typed_at.get().is_some(), "focused terminal did not receive paste");
+            assert_eq!(root.input.read(app).value().as_str(), "pastedtext");
+        });
+
+        cx.update(|window, app| root.read_with(app, |root, _| root.terminal.clone()).update(app, |terminal, cx| {
+            terminal.typed_at.set(None);
+            terminal.open_search(window, cx);
+        }));
+        cx.run_until_parked();
+        cx.update(|_, app| app.write_to_clipboard(ClipboardItem::new_string("find needle".into())));
+        cx.dispatch_action(menu_action("Paste"));
+        cx.run_until_parked();
+        root.read_with(cx, |root, app| {
+            let terminal = root.terminal.read(app);
+            assert_eq!(terminal.search_query, "find needle");
+            assert!(terminal.typed_at.get().is_none(), "Find paste reached the terminal");
+        });
+        cx.update(|window, app| root.read_with(app, |root, _| root.terminal.clone()).update(app, |terminal, cx| {
+            terminal.search_input.as_ref().unwrap().update(cx, |input, cx| input.select_all(window, cx));
+        }));
+        cx.dispatch_action(menu_action("Copy"));
+        cx.run_until_parked();
+        cx.update(|_, app| assert_eq!(app.read_from_clipboard().unwrap().text().as_deref(), Some("find needle")));
     }
 
     #[gpui::test]
@@ -3395,11 +3651,11 @@ mod tests {
             (16., 0.9, 9., 18., 14.), (16., 1.1, 11., 24., 19.),
             (13.5, 1., 8., 18., 14.),
         ] {
-            let metrics = font_cell_metrics(&ts, id, fs, scale, 1.0);
+            let metrics = font_cell_metrics(&ts, id, fs, scale, 1.0, 1.0);
             assert_eq!(metrics.size.map(|v| v * scale), size(px(width), px(height)));
             assert_eq!(metrics.baseline * scale, px(baseline));
             for multiplier in [0.8, 1.3, 2.0] {
-                let adjusted = font_cell_metrics(&ts, id, fs, scale, multiplier);
+                let adjusted = font_cell_metrics(&ts, id, fs, scale, multiplier, 1.0);
                 assert_eq!(adjusted.size.width, metrics.size.width);
                 assert_eq!(adjusted.size.height * scale, px((height * multiplier).round()));
                 let shift = adjusted.baseline - metrics.baseline;
@@ -3409,6 +3665,12 @@ mod tests {
                 assert!((f32::from(adjusted.underline - metrics.underline - shift)).abs() < 1e-4);
                 assert!((f32::from(adjusted.strike - metrics.strike - shift)).abs() < 1e-4);
                 assert_eq!(adjusted.underline_thickness, metrics.underline_thickness);
+            }
+            for multiplier in [0.8, 0.95, 1.3, 2.0] {
+                let adjusted = font_cell_metrics(&ts, id, fs, scale, 1.0, multiplier);
+                assert_eq!(adjusted.size.height, metrics.size.height);
+                assert_eq!(adjusted.size.width * scale, px(adjusted_cell_width(width, multiplier)));
+                assert_eq!((adjusted.baseline, adjusted.underline, adjusted.strike), (metrics.baseline, metrics.underline, metrics.strike));
             }
             let text = "H".repeat(60);
             let run = TextRun { len: text.len(), font: font.clone(), ..Default::default() };
@@ -3711,8 +3973,12 @@ mod tests {
         let drag = |root: &Entity<Root>, cx: &mut VisualTestContext| {
             root.update(cx, |root, cx| {
                 root.0.update(cx, |terminal, cx| {
+                    #[cfg(target_os = "linux")]
+                    let primary = cx.read_from_primary().and_then(|item| item.text());
                     terminal.select(super::Select::Press, point(px(1.), px(1.)), cx);
                     terminal.select(super::Select::Drag, point(px(16.), px(1.)), cx);
+                    #[cfg(target_os = "linux")]
+                    assert_eq!(cx.read_from_primary().and_then(|item| item.text()), primary);
                     terminal.select(super::Select::Release, point(px(31.), px(1.)), cx);
                 });
             });
@@ -3731,10 +3997,12 @@ mod tests {
             app.write_to_primary(ClipboardItem::new_string("primary unchanged".into()));
         });
         drag(&root, cx);
+        #[cfg(target_os = "linux")]
+        let selected = root.read_with(cx, |root, cx| root.0.read_with(cx, |terminal, _| terminal.grid.borrow().vt.selection_text().unwrap()));
         cx.update(|_, app| {
             assert_eq!(app.read_from_clipboard().unwrap().text().as_deref(), Some("unchanged"));
             #[cfg(target_os = "linux")]
-            assert_eq!(app.read_from_primary().unwrap().text().as_deref(), Some("primary unchanged"));
+            assert_eq!(app.read_from_primary().unwrap().text().as_deref(), Some(selected.as_str()));
         });
         let selected = root.update(cx, |root, cx| {
             root.0.update(cx, |terminal, cx| {
@@ -4037,6 +4305,16 @@ mod tests {
         let mut scrolled = point(0.0, 0.0);
         assert_eq!(super::scroll_delta_steps(&mut scrolled, ScrollDelta::Lines(point(1.0, 0.0)), TouchPhase::Moved, cell, 80, 24, 0.5), point(1, 0));
         assert_eq!(super::scroll_delta_steps(&mut scrolled, ScrollDelta::Pixels(point(px(10.0), px(-40.0))), TouchPhase::Moved, cell, 80, 24, 0.5), point(1, -1));
+    }
+
+    #[test]
+    fn adjusted_cell_width_rounds_half_pixels_like_ghostty() {
+        for (width, multiplier, expected) in [
+            (10.0, 0.95, 10.0), (14.0, 0.95, 13.0), (16.0, 0.95, 15.0), (10.0, 1.05, 11.0),
+            (30.0, 1.05, 32.0), (50.0, 1.05, 53.0), (50.0, 1.15, 57.0), (45.0, 1.3, 59.0), (8.0, 1.0, 8.0),
+        ] {
+            assert_eq!(super::adjusted_cell_width(width, multiplier), expected, "{width} x {multiplier}");
+        }
     }
 
     #[test]
@@ -4627,5 +4905,40 @@ mod tests {
         assert_eq!(pages_to_lines(-0.5, 24), -12);
         assert_eq!(pages_to_lines(-0.5, 25), -13, "half of an odd row count rounds away from zero");
         assert_eq!(pages_to_lines(0.02, 24), 0);
+    }
+
+    #[gpui::test]
+    fn flush_output_clock_notifies_pending_terminals_before_the_33ms_timer(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+        use std::cell::Cell;
+        use std::rc::Rc;
+        use std::time::Duration;
+
+        let terminal = cx.new(|cx| super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 5), cx));
+        let notifies = Rc::new(Cell::new(0usize));
+        let _sub = cx.update(|cx| {
+            cx.observe(&terminal, {
+                let notifies = notifies.clone();
+                move |_, _| {
+                    notifies.set(notifies.get() + 1);
+                }
+            })
+        });
+        cx.run_until_parked();
+        notifies.set(0);
+
+        terminal.update(cx, |terminal, cx| {
+            terminal.mark_shown();
+            assert!(terminal.ingest([crate::hc::Stream::Data(b"hello output\r\n".to_vec())], cx));
+        });
+        assert_eq!(notifies.get(), 0, "output clock batches notifications until 33ms elapses");
+
+        cx.update(super::flush_output_clock);
+        cx.run_until_parked();
+        assert_eq!(notifies.get(), 1, "flushing output clock must notify immediately before 33ms");
+
+        cx.executor().advance_clock(Duration::from_millis(33));
+        cx.run_until_parked();
+        assert_eq!(notifies.get(), 1, "subsequent 33ms tick must not emit a duplicate notification");
     }
 }

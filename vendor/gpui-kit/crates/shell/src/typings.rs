@@ -1728,6 +1728,11 @@ const ELEMENT_METHODS: &str = r#"    /**
      * Optional. Without one the list keeps a position of its own, filed under
      * the id it was built with — which is the same place a `Scrollbar` named
      * after that id looks, so the bar works either way.
+     *
+     * `list` and `uniform_list` always keep their own position: a handle
+     * passed to them is ignored (the app logs a warning), so pair a
+     * `Scrollbar` of the same name instead. `v_virtual_list` and
+     * `h_virtual_list` use the handle.
      */
     track_scroll<Self extends Element>(this: Self, handle: import("gpui-base").VirtualListScrollHandle | import("gpui-base").ScrollHandle): Self;
     /**
@@ -2119,6 +2124,11 @@ const ELEMENTS: &str = r#"
   /**
    * GPUI's own lazy list: rows of any height, measured as they are drawn.
    *
+   * Exported from `gpui-kit`, where `div` is — not from `gpui-base`. The
+   * `gpui-base` pair is `v_virtual_list` / `h_virtual_list`. Like every lazy
+   * list, it needs a definite height from its container: a `flex_1()` chain
+   * with no explicit height anywhere lays out at zero and draws nothing.
+   *
    * Where `v_virtual_list` places rows by the sizes the script states, `list`
    * asks nothing about size. `render(index, cx)` is called for each item that
    * is on screen, from inside layout as a virtual list's renderer is, and the
@@ -2167,6 +2177,10 @@ const ELEMENTS: &str = r#"
   /**
    * GPUI's own uniform list: one row is measured and every row takes its
    * height.
+   *
+   * Exported from `gpui-kit`, same as `list`; the `gpui-base` pair is
+   * `v_virtual_list` / `h_virtual_list`. It needs a definite height from its
+   * container too.
    *
    * The same contract as `v_virtual_list` with a single size, without the
    * size: the first row (or the one `with_item_to_measure_index` names) is

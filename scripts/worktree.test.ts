@@ -26,7 +26,7 @@ function rowsOf(node: any): any[] {
   return node?.id?.match(/^wt-\d+$/) ? [node] : (node?.children ?? []).flatMap(rowsOf);
 }
 
-function harness(focusedMachine: string | null = null) {
+function harness(focusedMachine: string | null = null, raw: string | null = null) {
   let spaceList: any[] = [];
   let paneList: any[] = [];
   const reads = { spaces: 0, panes: 0 };
@@ -36,6 +36,7 @@ function harness(focusedMachine: string | null = null) {
   const globals = {
     View: class {}, div: element, v_flex: element, h_flex: element,
     Input: { new: element }, Scrollbar: { vertical: element }, theme: () => ({}),
+    appHome: () => "/app", readTextFile: async () => raw,
     spaces: () => { reads.spaces++; return structuredClone(spaceList); },
     panes: () => { reads.panes++; return structuredClone(paneList); },
     props: () => ({ overlay: "overlay" }), closeOverlay: () => {},
@@ -48,10 +49,10 @@ function harness(focusedMachine: string | null = null) {
       return { code: 0, stdout: "", stderr: "" };
     },
   };
-  const Worktree = new Function(...Object.keys(globals), `${source}; return Worktree;`)(...Object.values(globals));
+  const { Worktree, root } = new Function(...Object.keys(globals), `${source}; return { Worktree, root };`)(...Object.values(globals));
   const worktree = new Worktree();
-  Object.assign(worktree, { opening: true, text: "", at: 0, repo: { name: "repo" }, userHome: "/home/user" });
-  return { worktree, reads, writes, destinations, executions, snapshot: (spaces: any[], panes: any[]) => { spaceList = spaces; paneList = panes; } };
+  Object.assign(worktree, { opening: true, text: "", at: 0, repo: { name: "repo" }, userHome: "/home/user", root: "/home/user/.herdr/worktrees" });
+  return { worktree, root, reads, writes, destinations, executions, snapshot: (spaces: unknown[], panes: unknown[]) => { spaceList = spaces; paneList = panes; } };
 }
 
 test("open render reads spaces and panes once and refreshes both on the next render", () => {
@@ -110,6 +111,40 @@ for (const on of [undefined, null, "server"]) {
   }
 }
 
+for (const [branch, folder] of [
+  ["음악수행", "음악수행"], ["쪼지학", "쪼지학"],
+  ["हिन्दी", "हिन्दी"], ["हिंदी", "हिंदी"],
+  ["का", "का"], ["कि", "कि"],
+  ["বাংলা", "বাংলা"],
+  ["feature/हिन्दी", "feature-हिन्दी"],
+  ["feature/음악수행-１２٣", "feature-음악수행-１２٣"],
+  ["음악수행".normalize("NFD"), "음악수행"],
+  ["feature/ASCII_1.2--fix", "feature-ASCII_1.2--fix"],
+]) {
+  test(`branch ${branch} uses folder ${folder}`, async () => {
+    const { worktree, executions, writes } = harness();
+    Object.assign(worktree, { text: branch, repo: { name: "repo", main: "/repo", top: "/repo" } });
+    expect(await worktree.create()).toBe("");
+    const path = `/home/user/.herdr/worktrees/repo/${folder}`;
+    expect(executions[1].args).toEqual(["worktree", "add", path, branch]);
+    expect(writes[0][1].folder).toBe(path);
+  });
+}
+
+test("symbol-only branches get stable distinct non-empty folders", async () => {
+  const folders: string[] = [];
+  for (const branch of ["🎵", "🎶", "🎵"]) {
+    const { worktree, executions } = harness();
+    Object.assign(worktree, { text: branch, repo: { name: "repo", main: "/repo", top: "/repo" } });
+    expect(await worktree.create()).toBe("");
+    const path = executions[1].args[2];
+    expect(path).toMatch(/\/repo\/branch-[0-9a-f]{8}$/);
+    folders.push(path);
+  }
+  expect(folders[0]).toBe(folders[2]);
+  expect(folders[0]).not.toBe(folders[1]);
+});
+
 test("space matching keeps deepest checkout, machine, live-folder and fallback rules", () => {
   const { worktree, reads, writes, snapshot } = harness();
   const paths = ["C:/repo", "C:/repo/nested", "C:/repo/fallback", "C:/repo-other"];
@@ -135,4 +170,34 @@ test("space matching keeps deepest checkout, machine, live-folder and fallback r
   worktree.open(worktree.list[0]);
   expect(writes[4]).toEqual(["space.select", { id: "remote" }]);
   expect(reads).toEqual({ spaces: 5, panes: 5 });
+});
+
+test("configured roots drive both the checkout and its space, expanding the target home", async () => {
+  for (const [directory, userHome, on, expected] of [
+    [undefined, "/home/user", null, "/home/user/.herdr/worktrees"],
+    ["~/Developer/worktrees", "/home/remote", "server", "/home/remote/Developer/worktrees"],
+    ["/srv/worktrees/", "/home/remote", "server", "/srv/worktrees"],
+    ["C:\\Developer\\Work Trees\\", "C:\\Users\\user", null, "C:/Developer/Work Trees"],
+    ["~\\Developer\\worktrees", "C:\\Users\\user", "server", "C:/Users/user/Developer/worktrees"],
+    ["~", "/home/user", null, "/home/user"],
+    ["/", "/home/user", null, ""],
+  ] as const) {
+    const { worktree, root, executions, writes } = harness(null, JSON.stringify({ worktrees: { directory } }));
+    Object.assign(worktree, { opening: false, on, userHome, text: "feature/new", repo: { name: "repo", main: "/repo", top: "/repo" }, root: await root(userHome) });
+    const folder = `${expected}/repo/feature-new`;
+    expect(await worktree.create()).toBe("");
+    expect(executions[1].args).toEqual(["worktree", "add", folder, "feature/new"]);
+    expect(executions[1].on).toBe(on);
+    expect(writes).toEqual([["space.new", { folder, machine: on ?? "", tab: undefined, argv: undefined }]]);
+    expect(textOf(worktree.render({}).node)).toContain(`${expected.replace(userHome.replace(/\\/g, "/"), "~")}/repo/`);
+  }
+});
+
+test("missing settings keep the old location, while invalid directories cannot create elsewhere", async () => {
+  expect(await harness().root("/home/user")).toBe("/home/user/.herdr/worktrees");
+  for (const directory of ["", "   ", 42, {}, "relative/worktrees", "C:relative"]) {
+    const { root } = harness(null, JSON.stringify({ worktrees: { directory } }));
+    await expect(root("/home/user")).rejects.toThrow("worktrees.directory");
+  }
+  await expect(harness(null, "{").root("/home/user")).rejects.toThrow();
 });
