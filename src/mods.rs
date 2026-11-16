@@ -629,7 +629,7 @@ pub fn track_pane_view(pane: String, view: &gpui::Entity<crate::terminal::Termin
 
 pub fn publish_panes(v: Value) -> bool {
     PANE_VIEWS.with_borrow_mut(|views| views.retain(|pane, _| {
-        v.as_array().into_iter().flatten().any(|p| p["pane"].as_str() == Some(pane))
+        v.as_array().into_iter().flatten().any(|p| p["pane"].as_str() == Some(pane.strip_suffix("#swap").unwrap_or(pane)))
     }));
     publish("panes", |s| (std::mem::replace(&mut s.panes, v.clone()), v))
 }
@@ -718,7 +718,10 @@ fn read(reads: &RefCell<LiveReads>, key: &'static str, f: impl FnOnce(&Snapshot)
         gpui_shell::with_current_app(|cx| {
             PANE_VIEWS.with_borrow(|views| {
                 for pane in panes.as_array_mut().into_iter().flatten() {
-                    if let Some(view) = pane["pane"].as_str().and_then(|id| views.get(id)).and_then(|v| v.upgrade()) {
+                    if let Some(view) = pane["pane"].as_str().and_then(|id| {
+                        views.get(&format!("{id}#swap")).and_then(|v| v.upgrade())
+                            .or_else(|| views.get(id).and_then(|v| v.upgrade()))
+                    }) {
                         pane["scroll"] = view.read(cx).scroll_metrics().map(|m| m.json()).unwrap_or(Value::Null);
                     }
                 }

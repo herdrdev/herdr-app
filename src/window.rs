@@ -110,32 +110,48 @@ pub fn shell() -> String {
     std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into())
 }
 
-fn unix_agent_argv(sh: String, cmd: Vec<String>, login: bool) -> Vec<String> {
+/// `cmd` in the person's shell, after their rc files (and so their PATH). `stay`: the
+/// shell stays after it (a tab); else the shell becomes it, so its pane ends with it.
+fn unix_agent_argv(sh: String, cmd: Vec<String>, login: bool, stay: bool) -> Vec<String> {
     let name = std::path::Path::new(&sh).file_name().and_then(|s| s.to_str());
     if !matches!(name, Some("sh" | "bash" | "zsh" | "dash" | "ksh" | "fish")) {
-        // Other shells cannot parse our wrapper; return to the person's shell after the command.
-        let mut run = vec!["/bin/sh".into(), "-c".into(), "\"$@\"; exec \"$0\" -i".into(), sh];
+        if !stay {
+            return cmd;
+        }
+        // Other shells cannot parse our wrapper: sh runs the command on the app's PATH, which the
+        // installed check searches when the shell can't run it (`programs::installed_here`),
+        // then the person's shell takes over.
+        let path = std::env::var("PATH").map(|p| format!("PATH='{}' ", p.replace('\'', "'\\''"))).unwrap_or_default();
+        let mut run = vec!["/bin/sh".into(), "-c".into(), format!("{path}\"$@\"; exec \"$0\" -i"), sh];
         run.extend(cmd);
         return run;
     }
     let fish = name == Some("fish");
-    let script = match (fish, login) {
-        (true, true) => "command $argv[2..]; exec $argv[1] -li",
-        (true, false) => "command $argv[2..]; exec $argv[1] -i",
-        (false, true) => "\"$@\"; exec \"$0\" -li",
-        (false, false) => "\"$@\"; exec \"$0\" -i",
+    let script = match (fish, login, stay) {
+        (true, true, true) => "command $argv[2..]; exec $argv[1] -li",
+        (true, false, true) => "command $argv[2..]; exec $argv[1] -i",
+        (false, true, true) => "\"$@\"; exec \"$0\" -li",
+        (false, false, true) => "\"$@\"; exec \"$0\" -i",
+        (true, _, false) => crate::remote_shell::FISH_EXEC,
+        (false, _, false) => crate::remote_shell::POSIX_EXEC,
     };
     let mut run = vec![sh.clone(), if login { "-lic" } else { "-ic" }.into(), script.into(), sh];
     run.extend(cmd);
     run
 }
 
-fn launch_failure(record: &Value, output: &str) -> Option<String> {
+/// A terminal that ended within 2 s, with an error. A split's wrapper that can't find its
+/// program says so only after the person's shell config, however long that took.
+fn launch_failure(record: &Value, output: impl FnOnce() -> String) -> Option<String> {
     let code = record["exit_code"].as_i64().filter(|c| *c != 0)?;
     let elapsed = record["finished_ms"].as_u64()?.checked_sub(record["created_ms"].as_u64()?)?;
-    if record["reason"].as_str() != Some("exited") || elapsed > 2000 {
+    if record["reason"].as_str() != Some("exited") || (elapsed > 2000 && code != 127) {
         return None;
     }
+    if elapsed > 2000 && !crate::remote_shell::cannot_start(record) {
+        return None;
+    }
+    let output = output();
     let lines = output.lines().filter(|l| !l.trim().is_empty()).collect::<Vec<_>>();
     let tail = lines[lines.len().saturating_sub(5)..].join("\n");
     Some(if tail.is_empty() { format!("Exit code {code}") } else { format!("Exit code {code}\n{tail}") })
@@ -2453,9 +2469,10 @@ impl AppWindow {
         cx.spawn_in(window, async move |this, cx| {
             let failure = cx.background_executor().spawn(async move {
                 let record = core.call("terminal.get", json!({"terminal": address})).ok()?;
-                launch_failure(&record, "")?;
-                let output = core.call("terminal.read", json!({"terminal": address, "lines": 5})).unwrap_or(Value::Null);
-                launch_failure(&record, output["text"].as_str().unwrap_or_default())
+                launch_failure(&record, || {
+                    let output = core.call("terminal.read", json!({"terminal": address, "lines": 5})).unwrap_or(Value::Null);
+                    output["text"].as_str().unwrap_or_default().to_owned()
+                })
             }).await;
             if let Some(body) = failure {
                 let _ = this.update_in(cx, |this, window, cx| {
@@ -2493,15 +2510,22 @@ impl AppWindow {
 
     /// Starts a terminal for `space`, on `on` (another machine) or here. An
     /// empty `cwd`: the machine's home. With no argv, that machine's core
-    /// picks its own shell.
-    fn spawn(&mut self, argv: Option<Vec<String>>, cwd: String, follow: bool, space: &str, ctx: &str, on: Option<&str>, size: Option<(u16, u16)>, window: &Window) -> Result<(String, String), String> {
+    /// picks its own shell. `stay`: `argv` is an agent in a shell that stays
+    /// (`agent_argv`), else a program its shell becomes (`split_argv`).
+    fn spawn(&mut self, argv: Option<Vec<String>>, stay: bool, cwd: String, follow: bool, space: &str, ctx: &str, on: Option<&str>, size: Option<(u16, u16)>, window: &Window) -> Result<(String, String), String> {
         let argv = argv.unwrap_or_default();
         self.require_document(on)?;
-        let labels = json!({ "herdr.space": crate::mirror::local(space, on), "herdr.tab": crate::mirror::local(ctx, on), "herdr.seen": "0" });
+        let mut labels = json!({ "herdr.space": crate::mirror::local(space, on), "herdr.tab": crate::mirror::local(ctx, on), "herdr.seen": "0" });
+        // A split's wrapper shows it only when it can't start the program (`remote_shell::cannot_start`).
+        if !stay && !argv.is_empty() {
+            use std::hash::{BuildHasher, Hasher};
+            labels["herdr.launch"] = format!("herdr-launch-{:016x}", std::collections::hash_map::RandomState::new().build_hasher().finish()).into();
+        }
         let (addr, cwd) = run_following_folder(cwd, follow, on, |cwd| match self.core.run(argv.clone(), cwd.clone(), labels.clone(), on, size, crate::terminal::initial_display(window)) {
-            // An agent on a machine without `sh` (Windows): in its PowerShell instead.
+            // A start on a machine without `sh` (Windows): in its PowerShell, or as given.
             Err(e) if on.is_some() && argv.first().map(String::as_str) == Some("sh") && format!("{e:#}").contains("not found") => {
-                self.core.run(Self::powershell_argv(&argv), cwd, labels.clone(), on, size, crate::terminal::initial_display(window))
+                let argv = if stay { Self::powershell_argv(&argv) } else { argv.get(4..).unwrap_or_default().to_vec() };
+                self.core.run(argv, cwd, labels.clone(), on, size, crate::terminal::initial_display(window))
             }
             r => r,
         })
@@ -2536,8 +2560,20 @@ impl AppWindow {
                 return vec![sh, "-NoExit".into(), "-Command".into(), crate::programs::powershell_line(&cmd)];
             }
             // macOS terminal sessions load login profiles (including Homebrew's PATH).
-            unix_agent_argv(sh, cmd, cfg!(target_os = "macos"))
+            unix_agent_argv(sh, cmd, cfg!(target_os = "macos"), true)
         })
+    }
+
+    /// A split's program, in your shell (for your PATH) that then becomes it: the
+    /// pane ends with it, keeping its exit code. Elsewhere (PowerShell, nushell) as given.
+    fn split_argv(cmd: Vec<String>, on: Option<&str>) -> Vec<String> {
+        if on.is_some() {
+            return crate::remote_shell::exec(cmd);
+        }
+        if cfg!(windows) {
+            return cmd;
+        }
+        unix_agent_argv(shell(), cmd, cfg!(target_os = "macos"), false)
     }
 
     /// A space with its first tab and terminal, shown at once unless focus is false.
@@ -2552,7 +2588,7 @@ impl AppWindow {
         let folder = folder.or_else(here).unwrap_or_else(|| if on.is_some() { String::new() } else { home() });
         let (space, ctx, pane) = (self.model.fresh_id_on("sp", on), self.model.fresh_id_on("tb", on), self.model.fresh_id_on("p", on));
         let size = self.initial_size(&Tab::new(&ctx, "", &pane, "").root, &pane, window);
-        let (addr, folder) = self.spawn(Self::agent_argv(argv.clone(), task, on).or(argv), folder, follow, &space, &ctx, on, size, window)?;
+        let (addr, folder) = self.spawn(Self::agent_argv(argv.clone(), task, on).or(argv), true, folder, follow, &space, &ctx, on, size, window)?;
         let ctx_name = ctx_name.map(str::trim).unwrap_or_default();
         let tab = Tab::new(&ctx, ctx_name, &pane, &addr);
         if focus { self.model.add_space(&space, name.trim(), &folder, tab) } else { self.model.add_space_unshown(&space, name.trim(), &folder, tab) }
@@ -2573,7 +2609,7 @@ impl AppWindow {
         let on = self.machine_of(&space);
         let (ctx, pane) = (self.model.fresh_id_on("tb", on.as_deref()), self.model.fresh_id_on("p", on.as_deref()));
         let size = self.initial_size(&Tab::new(&ctx, "", &pane, "").root, &pane, window);
-        let (addr, _) = self.spawn(Self::agent_argv(argv.clone(), task, on.as_deref()).or(argv), folder, follow, &space, &ctx, on.as_deref(), size, window)?;
+        let (addr, _) = self.spawn(Self::agent_argv(argv.clone(), task, on.as_deref()).or(argv), true, folder, follow, &space, &ctx, on.as_deref(), size, window)?;
         self.add_new_tab(&space, Tab::new(&ctx, name.trim(), &pane, &addr), focus);
         Ok(json!({ "space": space, "tab": ctx, "terminal": addr }))
     }
@@ -2618,7 +2654,8 @@ impl AppWindow {
         root.split(&target, axis, Node::block(new.clone(), Content::Terminal { terminal: String::new() }), "initial-size".into());
         let size = self.model.active_tab().filter(|tab| tab.id == ctx)
             .and_then(|_| self.initial_size(&root, &new, window));
-        let (addr, _) = self.spawn(argv, cwd, follow, &space, &ctx, on.as_deref(), size, window)?;
+        let argv = argv.filter(|a| !a.is_empty()).map(|a| Self::split_argv(a, on.as_deref()));
+        let (addr, _) = self.spawn(argv, false, cwd, follow, &space, &ctx, on.as_deref(), size, window)?;
         self.model.split(&target, axis, &new, &addr);
         Ok(json!({ "pane": new, "terminal": addr }))
     }
@@ -5767,7 +5804,7 @@ mod tests {
         let cmd = vec!["agent".to_owned(), "a 'quoted' task; $(not-a-command)\nnext line".to_owned(), "".to_owned()];
         for login in [false, true] {
             for sh in ["/bin/bash", "/bin/zsh", "/bin/sh", "/bin/dash", "/bin/fish"] {
-                let run = super::unix_agent_argv(sh.into(), cmd.clone(), login);
+                let run = super::unix_agent_argv(sh.into(), cmd.clone(), login, true);
                 assert_eq!(run[0], sh);
                 assert_eq!(run[1], if login { "-lic" } else { "-ic" });
                 assert_eq!(run[3], sh);
@@ -5780,7 +5817,7 @@ mod tests {
                 };
                 assert_eq!(run[2], expected);
                 // Whatever the wrapper, a pane shows the agent it runs, not the shell.
-                let agent = super::unix_agent_argv(sh.into(), vec!["cursor-agent".into()], login);
+                let agent = super::unix_agent_argv(sh.into(), vec!["cursor-agent".into()], login, true);
                 assert_eq!(crate::programs::of(None, &agent)["key"], "cursor", "{agent:?}");
             }
         }
@@ -5788,7 +5825,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn other_shells_run_the_command_then_return_to_the_shell() {
+    fn other_shells_run_the_command_on_the_app_path_then_return_to_the_shell() {
         use std::os::unix::fs::PermissionsExt;
         let temp = if cfg!(target_os = "linux") { std::path::PathBuf::from("/var/tmp") } else { std::env::temp_dir() };
         let dir = temp.join(format!("herdr-other-shell-test-{}", std::process::id()));
@@ -5798,31 +5835,165 @@ mod tests {
         std::fs::write(&nu, "#!/bin/sh\nprintf 'shell:%s\\n' \"$@\"\n").unwrap();
         std::fs::set_permissions(&nu, std::fs::Permissions::from_mode(0o755)).unwrap();
         let task = "a 'quoted' task; $(not-a-command)\nnext line";
-        let cmd = vec!["printf".to_owned(), "[%s]\n".to_owned(), task.to_owned(), "".to_owned()];
+        // `env` is found only on this PATH, not on the PATH the terminal starts with.
+        let cmd = vec!["env".to_owned(), "printf".to_owned(), "[%s]\n".to_owned(), task.to_owned(), "".to_owned()];
         for login in [false, true] {
-            let run = super::unix_agent_argv(nu.to_string_lossy().into(), cmd.clone(), login);
-            let out = std::process::Command::new(&run[0]).args(&run[1..]).output().unwrap();
+            let run = super::unix_agent_argv(nu.to_string_lossy().into(), cmd.clone(), login, true);
+            let out = std::process::Command::new(&run[0]).args(&run[1..]).env("PATH", "/nonexistent").output().unwrap();
             assert_eq!(String::from_utf8(out.stdout).unwrap(), format!("[{task}]\n[]\nshell:-i\n"));
         }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// A split's program runs after your rc files (their PATH), then the shell
+    /// becomes it: its exit code ends the pane, a missing one fails as the core's does.
+    #[cfg(unix)]
+    #[test]
+    fn a_split_program_replaces_your_shell() {
+        use std::os::unix::{fs::PermissionsExt, process::CommandExt};
+        let temp = if cfg!(target_os = "linux") { std::path::PathBuf::from("/var/tmp") } else { std::env::temp_dir() };
+        let home = temp.join(format!("herdr-split-shell-test-{}", std::process::id()));
+        std::fs::create_dir_all(home.join("rc bin")).unwrap();
+        std::fs::create_dir_all(home.join(".config/fish")).unwrap();
+        let rc = "case $- in *i*) export PATH=\"$HOME/rc bin:$PATH\";; esac\n";
+        for file in [".bashrc", ".zshrc", ".profile", ".bash_profile", ".zprofile"] {
+            std::fs::write(home.join(file), rc).unwrap();
+        }
+        std::fs::write(home.join(".config/fish/config.fish"), "if status is-interactive\nset -gx PATH \"$HOME/rc bin\" $PATH\nend\n").unwrap();
+        let tool = home.join("rc bin/rc-tool");
+        std::fs::write(&tool, "#!/bin/sh\nprintf '<%s>\\n' \"$@\"\nexit 7\n").unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let arg = "a 'quoted' $HOME; $(not-a-command)\nnext line";
+        let run = |argv: Vec<String>| {
+            let mut cmd = std::process::Command::new(&argv[0]);
+            cmd.args(&argv[1..]).env_clear().env("HOME", &home).env("ZDOTDIR", &home)
+                .env("PATH", "/usr/bin:/bin").env("TERM", "dumb").stdin(std::process::Stdio::null());
+            unsafe extern "C" {
+                fn setsid() -> std::ffi::c_int;
+            }
+            // Interactive shells otherwise take the test runner's terminal.
+            unsafe { cmd.pre_exec(|| if setsid() == -1 { Err(std::io::Error::last_os_error()) } else { Ok(()) }) };
+            cmd.output().unwrap()
+        };
+        for sh in ["/bin/bash", "/bin/sh", "/bin/zsh", "/usr/bin/fish"] {
+            if !std::path::Path::new(sh).exists() {
+                continue;
+            }
+            // dash reads no rc file unless it is a login shell.
+            for login in [sh.ends_with("/sh"), true] {
+                let out = run(super::unix_agent_argv(sh.into(), vec!["rc-tool".into(), arg.into(), "".into()], login, false));
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                assert!(stdout.ends_with(&format!("<{arg}>\n<>\n")), "{sh}: {stdout:?} {}", String::from_utf8_lossy(&out.stderr));
+                assert_eq!(out.status.code(), Some(7), "{sh}");
+                let out = run(super::unix_agent_argv(sh.into(), vec!["no-such-program".into()], login, false));
+                assert_eq!(out.status.code(), Some(127), "{sh}");
+                assert!(String::from_utf8_lossy(&out.stderr).contains("cannot start \"no-such-program\": No such file or directory"), "{sh}: {}", String::from_utf8_lossy(&out.stderr));
+                // Until the shell becomes it, a pane shows the agent, not the shell.
+                let agent = super::unix_agent_argv(sh.into(), vec!["cursor-agent".into()], login, false);
+                assert_eq!(crate::programs::of(None, &agent)["key"], "cursor", "{agent:?}");
+            }
+        }
+        // A shell that can't parse the wrapper (nushell): the program as given.
+        let cmd = vec!["rc-tool".to_owned(), arg.to_owned()];
+        assert_eq!(super::unix_agent_argv("/usr/bin/nu".into(), cmd.clone(), false, false), cmd);
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
     #[test]
     fn early_launch_failures_show_exit_code_and_last_output_lines() {
         let mut record = serde_json::json!({"reason":"exited", "exit_code":127, "created_ms":1000, "finished_ms":3000});
-        assert_eq!(super::launch_failure(&record, "old\none\ntwo\nthree\nfour\nfive\n\n").as_deref(), Some("Exit code 127\none\ntwo\nthree\nfour\nfive"));
-        assert_eq!(super::launch_failure(&record, "").as_deref(), Some("Exit code 127"));
+        assert_eq!(super::launch_failure(&record, || "old\none\ntwo\nthree\nfour\nfive\n\n".into()).as_deref(), Some("Exit code 127\none\ntwo\nthree\nfour\nfive"));
+        assert_eq!(super::launch_failure(&record, String::new).as_deref(), Some("Exit code 127"));
         record["exit_code"] = 0.into();
-        assert!(super::launch_failure(&record, "").is_none());
+        assert!(super::launch_failure(&record, String::new).is_none());
         record["exit_code"] = 1.into();
         record["finished_ms"] = 3001.into();
-        assert!(super::launch_failure(&record, "").is_none());
+        assert!(super::launch_failure(&record, String::new).is_none());
         record["finished_ms"] = 999.into();
-        assert!(super::launch_failure(&record, "").is_none());
+        assert!(super::launch_failure(&record, String::new).is_none());
         record["finished_ms"] = 2000.into();
         record["reason"] = "killed".into();
-        assert!(super::launch_failure(&record, "").is_none());
-        assert!(super::launch_failure(&serde_json::Value::Null, "").is_none());
+        assert!(super::launch_failure(&record, String::new).is_none());
+        assert!(super::launch_failure(&serde_json::Value::Null, String::new).is_none());
+    }
+
+    /// The split wrapper's own "cannot start" comes after the person's shell config, so a
+    /// slow config can't hide it. Its program's own exits keep the 2 s rule, even an exit 127
+    /// that prints the same words: only the wrapper knows its launch token.
+    #[cfg(unix)]
+    #[test]
+    fn a_split_that_cannot_start_its_program_fails_however_slow_the_shell() {
+        use std::os::unix::process::CommandExt;
+        let temp = if cfg!(target_os = "linux") { std::path::PathBuf::from("/var/tmp") } else { std::env::temp_dir() };
+        let home = temp.join(format!("herdr-split-slow-test-{}", std::process::id()));
+        std::fs::create_dir_all(home.join(".config/fish")).unwrap();
+        let rc = "case $- in *i*) [ -z \"$SLOW_RC\" ] || sleep 2.1;; esac\n";
+        for file in [".bashrc", ".zshrc", ".profile", ".bash_profile", ".zprofile"] {
+            std::fs::write(home.join(file), rc).unwrap();
+        }
+        std::fs::write(home.join(".config/fish/config.fish"), "if status is-interactive; and set -q SLOW_RC\nsleep 2.1\nend\n").unwrap();
+        let token = "herdr-test-launch-token";
+        // As the core records it: exit, start and end, argv, the last title the terminal set, labels.
+        let run = |argv: Vec<String>, shell: &str, slow: bool| {
+            let mut cmd = std::process::Command::new(&argv[0]);
+            cmd.args(&argv[1..]).env_clear().env("HOME", &home).env("ZDOTDIR", &home).env("SHELL", shell)
+                .env("PATH", "/usr/bin:/bin").env("TERM", "dumb").env("HERDR_LAUNCH", token).stdin(std::process::Stdio::null());
+            if slow {
+                cmd.env("SLOW_RC", "1");
+            }
+            unsafe extern "C" {
+                fn setsid() -> std::ffi::c_int;
+            }
+            unsafe { cmd.pre_exec(|| if setsid() == -1 { Err(std::io::Error::last_os_error()) } else { Ok(()) }) };
+            let start = std::time::Instant::now();
+            let out = cmd.output().unwrap();
+            let bytes = [out.stdout, out.stderr].concat();
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            let title = text.rsplit("\x1b]2;").next().filter(|_| text.contains("\x1b]2;")).and_then(|t| t.split('\x07').next()).unwrap_or_default().to_owned();
+            let record = serde_json::json!({"reason":"exited", "exit_code":out.status.code(), "created_ms":0, "finished_ms":start.elapsed().as_millis() as u64,
+                "argv":argv, "title":title, "labels":{"herdr.launch":token}});
+            (record, text.replace(&format!("\x1b]2;{title}\x07"), ""))
+        };
+        let missing = vec!["no-such-prog".to_owned()];
+        // Astra's case: `sh` starts, runs past 2 s, says the wrapper's words itself, exits 127.
+        let own_127 = ["sh", "-c", "sleep 2.1; printf 'cannot start \"sh\": No such file or directory\\n'; exit 127"].map(String::from).to_vec();
+        let shells = ["/bin/bash", "/bin/zsh", "/usr/bin/fish"].into_iter().filter(|s| std::path::Path::new(s).exists());
+        let wrapped = |cmd: &Vec<String>| shells.clone().flat_map(|sh| [(sh, super::unix_agent_argv(sh.into(), cmd.clone(), false, false)), (sh, crate::remote_shell::exec(cmd.clone()))]).collect::<Vec<_>>();
+        std::thread::scope(|s| {
+            let mut checks = vec![];
+            for (sh, argv) in wrapped(&missing) {
+                checks.push(s.spawn(move || {
+                    let (record, output) = run(argv.clone(), sh, true);
+                    assert!(record["finished_ms"].as_u64().unwrap() > 2000, "{argv:?}: {record}");
+                    let toast = super::launch_failure(&record, || output.clone());
+                    assert!(toast.as_deref().is_some_and(|t| t.starts_with("Exit code 127\n") && t.contains("\ncannot start \"no-such-prog\": No such file or directory")), "{argv:?}: {toast:?} {record} {output:?}");
+                }));
+            }
+            for (sh, argv) in wrapped(&own_127) {
+                checks.push(s.spawn(move || {
+                    let (record, output) = run(argv.clone(), sh, false);
+                    assert_eq!(record["exit_code"], 127, "{argv:?}: {output:?}");
+                    assert!(output.contains("cannot start \"sh\": No such file or directory"), "{argv:?}: {output:?}");
+                    assert!(record["finished_ms"].as_u64().unwrap() > 2000, "{argv:?}: {record}");
+                    assert_eq!(super::launch_failure(&record, || output.clone()), None, "{argv:?}: {record} {output:?}");
+                }));
+            }
+            // The program never sees the token, so it can't say it by accident.
+            for (sh, argv) in wrapped(&vec!["env".to_owned()]) {
+                checks.push(s.spawn(move || {
+                    let (record, output) = run(argv.clone(), sh, false);
+                    assert_eq!(record["exit_code"], 0, "{argv:?}: {output:?}");
+                    assert!(output.contains("SHELL=") && !output.contains(token), "{argv:?}: {output:?}");
+                }));
+            }
+            for check in checks {
+                check.join().unwrap();
+            }
+        });
+        // A late exit with the wrapper's token in the title but another code keeps the 2 s rule.
+        let record = serde_json::json!({"reason":"exited", "exit_code":7, "created_ms":0, "finished_ms":9000, "title":token, "labels":{"herdr.launch":token}});
+        assert!(super::launch_failure(&record, || "cannot start \"x\": No such file or directory\n".into()).is_none());
+        std::fs::remove_dir_all(&home).unwrap();
     }
 
     #[gpui::test]
@@ -5942,6 +6113,10 @@ mod tests {
     /// shipped ones run programs on threads of their own, which the test
     /// executor refuses.
     fn open_window<'a>(cx: &'a mut gpui::TestAppContext, mod_name: &str, main_js: &str, layout: serde_json::Value) -> (gpui::Entity<super::AppWindow>, &'a mut gpui::VisualTestContext) {
+        open_window_on(cx, crate::hc::offline(), mod_name, main_js, layout)
+    }
+
+    fn open_window_on<'a>(cx: &'a mut gpui::TestAppContext, core: std::sync::Arc<crate::hc::Core>, mod_name: &str, main_js: &str, layout: serde_json::Value) -> (gpui::Entity<super::AppWindow>, &'a mut gpui::VisualTestContext) {
         use serde_json::json;
         let home = crate::mods::app_dir();
         crate::mods::write_workspace().unwrap();
@@ -5955,7 +6130,7 @@ mod tests {
         let requests = crate::mods::install_policy();
         crate::mods::set_shared("layout".into(), json!("test"));
         crate::mods::set_shared("frame.welcomed".into(), json!("test"));
-        let (view, cx) = cx.add_window_view(|window, cx| super::AppWindow::with_file_events(crate::hc::offline(), requests, Some(crate::files::FileEvents::for_test(home.clone())), window, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| super::AppWindow::with_file_events(core, requests, Some(crate::files::FileEvents::for_test(home.clone())), window, cx));
         assert_eq!(view.update(cx, |this, _| this.layout_name.clone()), "test");
         (view, cx)
     }
@@ -6539,6 +6714,44 @@ mod tests {
     #[test]
     fn new_tabs_without_focus_leave_the_shown_tab() {
         in_own_process("tab_new_without_focus");
+    }
+
+    #[test]
+    fn a_split_starts_a_program_in_your_shell() {
+        in_own_process("split_in_shell");
+    }
+
+    /// `terminal.open --argv` runs the program in your shell whatever the place, so
+    /// it reads your rc files (and so your PATH). A split's shell becomes the program.
+    #[gpui::test]
+    fn split_in_shell(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("split_in_shell") {
+            return;
+        }
+        let (core, runs) = crate::hc::answering();
+        let (view, cx) = open_window_on(cx, core, "board", "", json!({
+            "id": "main", "type": "block", "content": { "tab": "active" }
+        }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.documents.entry(String::new()).or_default().available = true;
+            this.model.add_space("s1", "one", "", crate::model::Tab::new("a", "a", "pa", "t1"));
+            this.model.select_tab("a");
+            this.sync(window, cx);
+        }));
+        let mut started = Vec::new();
+        for place in ["tab", "right", "down"] {
+            let r = cx.update(|window, cx| view.update(cx, |this, cx| {
+                this.run_as("terminal.open", json!({ "argv": ["node", "tool.js"], "place": place }), false, window, cx)
+            }));
+            assert!(r.get("terminal").is_some(), "{place}: {r}");
+            started.push(runs.try_iter().last().unwrap_or_else(|| panic!("{place}: no terminal.run")));
+        }
+        let cmd = vec!["node".to_owned(), "tool.js".to_owned()];
+        let split = json!(if cfg!(windows) { cmd } else { super::unix_agent_argv(super::shell(), cmd, cfg!(target_os = "macos"), false) });
+        assert_ne!(started[0], json!(["node", "tool.js"]), "a tab runs it in a shell");
+        assert_eq!(started[1], split, "right");
+        assert_eq!(started[2], split, "down");
     }
 
     /// `tab.new {mod, focus: false}` adds the tab at the end of its space,
