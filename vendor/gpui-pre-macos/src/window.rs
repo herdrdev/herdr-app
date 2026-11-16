@@ -1866,6 +1866,14 @@ impl PlatformWindow for MacWindow {
 
     fn set_app_id(&mut self, _app_id: &str) {}
 
+    fn set_post_process_shaders(&self, shaders: &[String]) -> anyhow::Result<()> {
+        self.0.as_ref().lock().renderer.set_post_process_shaders(shaders)
+    }
+
+    fn set_post_process_values(&self, values: &[(&str, gpui::ShaderValue)]) {
+        self.0.as_ref().lock().renderer.set_post_process_values(values);
+    }
+
     fn set_background_appearance(&self, background_appearance: WindowBackgroundAppearance) {
         let mut this = self.0.as_ref().lock();
         this.background_appearance = background_appearance;

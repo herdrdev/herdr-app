@@ -470,6 +470,8 @@ pub struct AppWindow {
     drag_from: Option<Point<Pixels>>,
     titlebar_applied: Option<(crate::layout::Titlebar, Option<[f32; 2]>)>,
     blur_applied: bool,
+    /// The layout's custom shaders and their per-frame state.
+    shaders: crate::shaders::Shaders,
     focused_pane: Option<String>,
     /// The mod block holding the keyboard for directional navigation.
     focused_block: Option<String>,
@@ -580,6 +582,7 @@ impl AppWindow {
             titlebar_applied: None,
             // Windows open opaque: leave the platform alone until a layout asks for blur.
             blur_applied: false,
+            shaders: Default::default(),
             focused_pane: None,
             focused_block: None,
             synced_model_pane: None,
@@ -5287,6 +5290,12 @@ impl Render for AppWindow {
         self.tick_floats(window);
         self.apply_titlebar(window);
         self.apply_blur(window);
+        if let Some(error) = self.shaders.sync(&self.chrome.shaders, window) {
+            let spec = json!({"kind":"toast", "notification":{"title":"A shader didn't load", "body":error, "level":"error", "timeout": 12000}});
+            self.open_overlay(mods::new_overlay_id(), spec, window, cx);
+        }
+        let cursor = self.focused_pane.as_ref().and_then(|p| self.terms.get(p)).and_then(|t| t.view.read(cx).cursor_bounds());
+        self.shaders.frame(window, cursor);
         if mods::publish_window(self.window_json(window)) {
             self.refresh_snapshot_mods(cx);
         }

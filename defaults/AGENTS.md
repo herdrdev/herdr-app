@@ -265,6 +265,16 @@ Properties any node can have:
   then show the desktop through frosted glass: make `background` and
   `canvas` transparent and give the sidebar a translucent `chrome`
   (`"#0b102466"`). Nodes with solid colors stay solid.
+- Root only: `"shaders": ["shaders/glow.glsl", ...]` runs Ghostty-style custom
+  shaders over the whole window after every frame, in order (macOS for now;
+  paths from this folder, `~/` from home; edits reload). Each is a Shadertoy
+  `void mainImage(out vec4 fragColor, in vec2 fragCoord)` that reads the frame
+  from `iChannel0`, with Ghostty's uniforms: `iResolution`, `iTime`,
+  `iCurrentCursor` / `iPreviousCursor` (the focused terminal's cursor cell,
+  from the bottom left) and `iTimeCursorChange`, `iCurrentCursorColor`,
+  `iFocus` / `iTimeFocus`, `iPalette[256]`, `iBackgroundColor`, ... So a
+  Ghostty `custom-shader` file works as is. Frames keep coming while the window
+  has focus. A shader that doesn't compile shows why and none run.
 - Root only: `"preview": "layouts/<name>.svg"` (or png): the picture the
   settings screen shows for this layout. Draw one when you make a layout;
   without it the person sees a plain frame. New layouts and `themes/*.json`

@@ -529,6 +529,11 @@ impl TerminalView {
         self.focus.is_focused(window) || self.find_field_focused(window, cx)
     }
 
+    /// The cursor's cell in window coordinates from the last paint, if shown.
+    pub fn cursor_bounds(&self) -> Option<Bounds<Pixels>> {
+        self.grid.borrow().cursor_at
+    }
+
     pub fn focus_target(&self, cx: &App) -> FocusHandle {
         if self.search_open && self.search_keys
             && let Some(input) = &self.search_input

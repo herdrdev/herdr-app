@@ -397,6 +397,10 @@ pub struct Node {
     /// colors with alpha show the desktop through frosted glass.
     #[serde(default, skip_serializing_if = "is_false")]
     pub window_blur: bool,
+    /// Root only: Ghostty-style custom shaders run over the whole window after
+    /// every frame, in order (paths relative to the app's folder, `~` for home).
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub shaders: Vec<String>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -436,6 +440,7 @@ impl Node {
             toast: None,
             window_drag: false,
             window_blur: false,
+            shaders: Vec::new(),
         }
     }
 

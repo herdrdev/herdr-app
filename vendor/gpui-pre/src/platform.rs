@@ -1200,6 +1200,23 @@ pub trait PlatformWindow: HasWindowHandle + HasDisplayHandle {
     fn background_appearance(&self) -> WindowBackgroundAppearance;
     fn set_title(&mut self, title: &str);
     fn set_background_appearance(&self, background_appearance: WindowBackgroundAppearance);
+    /// HERDR: full-window post-processing. Each shader is a GLSL 450 fragment
+    /// shader run over the finished frame, in order: the frame is
+    /// `layout(set = 0, binding = 0) uniform texture2D`, sampled with a linear,
+    /// clamp-to-edge sampler the backend provides at binding 1, and its values
+    /// are one uniform block at binding 2, set by name with
+    /// [`Self::set_post_process_values`]. `gl_FragCoord` is the backend's own
+    /// (top-left origin on Metal). An empty list turns post-processing off.
+    fn set_post_process_shaders(&self, shaders: &[String]) -> anyhow::Result<()> {
+        if shaders.is_empty() {
+            Ok(())
+        } else {
+            Err(anyhow::anyhow!("post-process shaders aren't supported on this platform yet"))
+        }
+    }
+    /// HERDR: values for the post-process shaders' uniform block, by member name.
+    /// Unknown names are ignored; members never set read as zero.
+    fn set_post_process_values(&self, _values: &[(&str, ShaderValue)]) {}
     fn minimize(&self);
     fn zoom(&self);
     fn toggle_fullscreen(&self);
@@ -2731,6 +2748,25 @@ pub enum WindowAppearance {
     ///
     /// On macOS, this corresponds to the `NSAppearanceNameVibrantDark` appearance.
     VibrantDark,
+}
+
+/// HERDR: a value for a post-process shader's uniform block member.
+#[derive(Clone, Debug, PartialEq)]
+pub enum ShaderValue {
+    /// `float`
+    Float(f32),
+    /// `int`
+    Int(i32),
+    /// `vec2`
+    Vec2([f32; 2]),
+    /// `vec3`
+    Vec3([f32; 3]),
+    /// `vec4`
+    Vec4([f32; 4]),
+    /// `vec3[N]`; extra elements are dropped, missing ones stay zero.
+    Vec3Array(Vec<[f32; 3]>),
+    /// `vec4[N]`; extra elements are dropped, missing ones stay zero.
+    Vec4Array(Vec<[f32; 4]>),
 }
 
 /// The appearance of the background of the window itself, when there is
