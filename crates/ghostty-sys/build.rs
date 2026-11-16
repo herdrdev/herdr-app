@@ -32,6 +32,23 @@ fn main() {
     println!("cargo:rerun-if-env-changed=ZIG");
 
     let zig = std::env::var("ZIG").unwrap_or_else(|_| "zig".into());
+    // Zig prints its paths relative to the directory it runs in.
+    let zig_env = Command::new(&zig)
+        .current_dir(&src)
+        .arg("env")
+        .output()
+        .unwrap_or_else(|e| panic!("cannot run {zig:?} (Zig 0.16 required): {e}"));
+    let zig_env = String::from_utf8_lossy(&zig_env.stdout);
+    let zig_path = |key: &str| {
+        let prefix = format!(".{key} = \"");
+        zig_env
+            .lines()
+            .find_map(|l| l.trim().strip_prefix(prefix.as_str()).and_then(|l| l.strip_suffix("\",")))
+            .map(|p| src.join(p))
+            .unwrap_or_else(|| panic!("zig env has no {key}"))
+    };
+    let zig_lib = zig_path("lib_dir").display().to_string();
+
     let status = Command::new(&zig)
         .current_dir(&src)
         // Only the static library is linked. Ghostty builds the xcframework whenever it finds
@@ -40,10 +57,11 @@ fn main() {
         .arg(format!("-Dtarget={}", zig_target(&std::env::var("TARGET").unwrap())))
         .arg("--prefix")
         .arg(out.join("zig-out"))
+        // Content addressed, so every target dir and profile shares one build.
         .arg("--cache-dir")
-        .arg(out.join("zig-cache"))
+        .arg(zig_path("global_cache_dir"))
         .status()
-        .unwrap_or_else(|e| panic!("cannot run {zig:?} (Zig 0.16 required): {e}"));
+        .expect("zig build");
     assert!(status.success(), "zig build of libghostty-vt failed: {status}");
 
     // Only the static archive in the search path, so the linker can't pick the shared one.
@@ -56,15 +74,6 @@ fn main() {
     }
     println!("cargo:rustc-link-search=native={}", lib.display());
     println!("cargo:rustc-link-lib=static=ghostty-vt");
-
-    // libclang without a full clang install lacks its builtin headers; Zig ships the same ones.
-    let zig_env = Command::new(&zig).arg("env").output().expect("zig env");
-    let zig_env = String::from_utf8_lossy(&zig_env.stdout);
-    let zig_lib = zig_env
-        .lines()
-        .find_map(|l| l.trim().strip_prefix(".lib_dir = \""))
-        .and_then(|l| l.strip_suffix("\","))
-        .expect("zig env has no lib_dir");
 
     let include = src.join("include");
     let mut builder = bindgen::Builder::default()

@@ -102,5 +102,11 @@ quickjs-jit-runtime = { path = "vendor/quickjs-jit-runtime" }
 [profile.release.build-override]
 strip = "none"
 
+# An edit rebuilds in about 5 s instead of 16.
+[profile.release]
+incremental = true
+lto = "off"
+
 [profile.dev.package."*"]
-opt-level = 2
+opt-level = 1
+debug = 0
