@@ -437,6 +437,10 @@ pub struct AppWindow {
     person: settings::Person,
     /// What the last command made or why it didn't (for callers that wait for it).
     reply: Option<Value>,
+    /// While a `herdr-app do` typed in a terminal runs: that terminal's pane (a
+    /// sub-agent's, its nearest parent's). New panes and tabs go there, not
+    /// where the person is looking.
+    caller: Option<String>,
     /// The `where` label last written per terminal address.
     written_where: HashMap<String, String>,
     /// `herdr.seen` turns written but not yet back from the core.
@@ -553,6 +557,7 @@ impl AppWindow {
             written_view: String::new(),
             person: settings::Person::default(),
             reply: None,
+            caller: None,
             written_where: HashMap::new(),
             written_seen: HashMap::new(),
             looked: HashMap::new(),
@@ -2485,11 +2490,37 @@ impl AppWindow {
     // ---- creating terminals ------------------------------------------------
 
     /// The folder new terminals in `space` start in: where its shown tab's focused
-    /// pane is now (Herdr's "follow"), else the folder the space was made in.
+    /// pane is now (Herdr's "follow"; the caller's pane in its own space), else the
+    /// folder the space was made in.
     fn folder_for(&self, space: &str) -> String {
         let p = self.model.space(space);
-        let here = p.and_then(|p| p.active_tab()).and_then(|c| c.focused_pane()).and_then(|f| self.model.address_of(&f)).and_then(|a| self.cwds.get(&a).cloned());
+        let focused = p.and_then(|p| p.active_tab()).and_then(|c| c.focused_pane());
+        let pane = self.caller.clone().filter(|c| self.model.space_of(c).is_some_and(|s| s.id == space)).or(focused);
+        let here = pane.and_then(|f| self.model.address_of(&f)).and_then(|a| self.cwds.get(&a).cloned());
         here.or_else(|| p.map(|p| p.folder.clone())).unwrap_or_else(home)
+    }
+
+    /// The pane showing a terminal, else its nearest parent's (an `hc run`
+    /// sub-agent has none of its own).
+    fn pane_or_parents(&self, terminal: &str) -> Option<String> {
+        let mut cur = terminal;
+        for _ in 0..32 {
+            if let Some(pane) = self.model.pane_of(cur) {
+                return Some(pane);
+            }
+            cur = self.live.get(cur)?.get("parent")?.as_str()?;
+        }
+        None
+    }
+
+    /// The pane new panes go beside: the caller's, else the focused one.
+    fn here_pane(&self) -> Option<String> {
+        self.caller.clone().or_else(|| self.model.focused_pane())
+    }
+
+    /// The space new tabs go to: the caller's, else the shown one.
+    fn here_space(&self) -> Option<String> {
+        self.caller.as_deref().and_then(|p| self.model.space_of(p)).or_else(|| self.model.active_space()).map(|s| s.id.clone())
     }
 
     /// The machine a space's terminals run on, None for this one.
@@ -2581,8 +2612,8 @@ impl AppWindow {
     fn new_space(&mut self, name: &str, folder: Option<String>, ctx_name: Option<&str>, argv: Option<Vec<String>>, task: Option<&str>, machine: Option<String>, focus: bool, window: &Window) -> Result<Value, String> {
         let follow = folder.is_none();
         let on = machine.as_deref();
-        // The focused pane's folder only means something on its own machine.
-        let here = || self.model.focused_pane().and_then(|p| self.model.address_of(&p))
+        // The focused (or calling) pane's folder only means something on its own machine.
+        let here = || self.here_pane().and_then(|p| self.model.address_of(&p))
             .filter(|a| a.split_once('/').map(|(m, _)| m) == on)
             .and_then(|a| self.cwds.get(&a).cloned());
         let folder = folder.or_else(here).unwrap_or_else(|| if on.is_some() { String::new() } else { home() });
@@ -2598,9 +2629,9 @@ impl AppWindow {
         Ok(json!({ "space": space, "tab": ctx, "terminal": addr }))
     }
 
-    /// A tab in a space (default: the shown one), shown at once unless focus is false.
+    /// A tab in a space (default: the caller's, else the shown one), shown at once unless focus is false.
     fn new_tab(&mut self, space: Option<String>, name: &str, folder: Option<String>, argv: Option<Vec<String>>, task: Option<&str>, focus: bool, window: &Window) -> Result<Value, String> {
-        let space = space.or_else(|| self.model.active_space().map(|p| p.id.clone())).ok_or("no space yet: make one first (space.new)")?;
+        let space = space.or_else(|| self.here_space()).ok_or("no space yet: make one first (space.new)")?;
         if self.model.space(&space).is_none() {
             return Err(format!("no space {space:?}"));
         }
@@ -2626,7 +2657,7 @@ impl AppWindow {
 
     /// A tab whose only pane is a mod (a file, a board), shown at once unless focus is false.
     fn new_mod_tab(&mut self, space: Option<String>, name: &str, m: String, props: Value, focus: bool) -> Result<Value, String> {
-        let space = space.or_else(|| self.model.active_space().map(|p| p.id.clone())).ok_or("no space yet: make one first (space.new)")?;
+        let space = space.or_else(|| self.here_space()).ok_or("no space yet: make one first (space.new)")?;
         if self.model.space(&space).is_none() {
             return Err(format!("no space {space:?}"));
         }
@@ -2641,7 +2672,7 @@ impl AppWindow {
     }
 
     fn split(&mut self, pane: Option<String>, axis: Axis, argv: Option<Vec<String>>, folder: Option<String>, window: &Window) -> Result<Value, String> {
-        let target = pane.or_else(|| self.model.focused_pane()).ok_or("no pane to split")?;
+        let target = pane.or_else(|| self.here_pane()).ok_or("no pane to split")?;
         let (Some(p), Some(c)) = (self.model.space_of(&target), self.model.tab_of(&target)) else { return Err(format!("no pane {target:?}")) };
         let (space, ctx, fallback) = (p.id.clone(), c.id.clone(), p.folder.clone());
         let target_addr = self.model.address_of(&target);
@@ -2662,7 +2693,7 @@ impl AppWindow {
 
     /// A mod as a pane beside the target (a viewer next to the shell).
     fn split_mod(&mut self, pane: Option<String>, axis: Axis, name: String, props: Value) -> Result<Value, String> {
-        let target = pane.or_else(|| self.model.focused_pane()).ok_or("no pane to split")?;
+        let target = pane.or_else(|| self.here_pane()).ok_or("no pane to split")?;
         if self.model.tab_of(&target).is_none() {
             return Err(format!("no pane {target:?}"));
         }
@@ -2726,7 +2757,7 @@ impl AppWindow {
     }
 
     /// Gives a running terminal without a pane (a sub-agent, say) one in the
-    /// shown space and focuses it; already in a pane: focuses that.
+    /// caller's or shown space and focuses it; already in a pane: focuses that.
     fn keep_terminal(&mut self, addr: &str, place: &str, window: &mut Window, cx: &mut Context<Self>) -> Result<Value, String> {
         if let Some(p) = self.model.pane_of(addr) {
             self.model.focus_pane(&p);
@@ -2734,13 +2765,13 @@ impl AppWindow {
         }
         if !self.live.contains_key(addr) { return Err(format!("no running terminal {addr:?}")); }
         if self.changing_terminals.contains(addr) { return Err("This terminal already has a pane change in progress.".into()); }
-        let space = self.model.active_space().map(|p| p.id.clone()).ok_or("no space to keep it in")?;
+        let space = self.here_space().ok_or("no space to keep it in")?;
         let machine = self.machine_of(&space);
         if addr.split_once('/').map(|(m, _)| m) != machine.as_deref() {
             return Err("A terminal's pane must stay on its own machine.".into());
         }
         self.require_document(machine.as_deref())?;
-        let target = matches!(place, "right" | "down").then(|| self.model.focused_pane()).flatten();
+        let target = matches!(place, "right" | "down").then(|| self.here_pane()).flatten();
         let ctx = target.as_deref().and_then(|p| self.model.tab_of(p)).map(|t| t.id.clone())
             .unwrap_or_else(|| self.model.fresh_id_on("tb", machine.as_deref()));
         let pane = self.model.fresh_id_on("p", machine.as_deref());
@@ -2982,6 +3013,8 @@ impl AppWindow {
         if terminal_block(&self.chrome, self.focused_pane.as_deref()).is_some()
             && needs_model_pane(name, &args)
             && !(name == "pane.go" && self.focused_block.is_some())
+            // Typed in a terminal: what it makes goes beside that one, whatever is focused.
+            && !(self.caller.is_some() && matches!(name, "pane.split" | "terminal.open" | "terminal.keep"))
         {
             return json!({ "error": "a terminal layout block is focused, not a pane; focus a pane or pass an explicit pane id" });
         }
@@ -3002,7 +3035,8 @@ impl AppWindow {
         }
         if matches!(name, "space.new" | "space.close" | "space.rename" | "space.move" | "tab.new" | "tab.close" | "tab.rename" | "tab.move" | "pane.split" | "pane.close" | "pane.swap" | "terminal.keep" | "terminal.park") {
             let node = ["id", "space", "pane"].into_iter().find_map(|k| Self::arg(&args, k));
-            let target = node.and_then(|id| self.model.space(id).or_else(|| self.model.space_of(id))).or_else(|| self.model.active_space());
+            let here = self.caller.as_deref().filter(|_| matches!(name, "tab.new" | "pane.split" | "terminal.keep")).and_then(|p| self.model.space_of(p));
+            let target = node.and_then(|id| self.model.space(id).or_else(|| self.model.space_of(id))).or(here).or_else(|| self.model.active_space());
             let machine = if name == "space.new" { Self::arg(&args, "machine") }
                 else if name == "terminal.park" { Self::arg(&args, "terminal").and_then(|a| a.split_once('/').map(|(m, _)| m)) }
                 else { target.and_then(|s| s.machine.as_deref()) };
@@ -3959,7 +3993,11 @@ impl AppWindow {
     fn control(&mut self, cmd: Value, window: &mut Window, cx: &mut Context<Self>) -> Value {
         if let Some(name) = cmd.get("do").and_then(Value::as_str) {
             let args = cmd.get("args").cloned().unwrap_or(Value::Null);
-            return self.run_as(name, args, false, window, cx);
+            self.caller = caller_terminal(&cmd, self.core.hello.pointer("/core/id").and_then(Value::as_str))
+                .and_then(|terminal| self.pane_or_parents(terminal));
+            let reply = self.run_as(name, args, false, window, cx);
+            self.caller = None;
+            return reply;
         }
         if cmd.get("commands").is_some() {
             return crate::commands::listing();
@@ -4979,6 +5017,18 @@ fn swap_by(args: &Value) -> Result<SwapBy<'_>, String> {
         (None, Some(target)) => Ok(SwapBy::Target(target)),
         (Some(dir @ ("left" | "right" | "up" | "down")), None) => Ok(SwapBy::Direction(dir)),
         (Some(dir), None) => Err(format!("pane.swap direction is left, right, up or down, not {dir:?}")),
+    }
+}
+
+/// The terminal a `herdr-app do` was typed in, when this window's `core` runs it:
+/// a terminal id means nothing to another core. A caller without a core id
+/// (no `HC_TERMINAL_SOCKET`) is taken at its word.
+fn caller_terminal<'a>(cmd: &'a Value, core: Option<&str>) -> Option<&'a str> {
+    let caller = cmd.get("caller")?;
+    let terminal = caller.get("terminal").and_then(Value::as_str).filter(|t| !t.is_empty())?;
+    match caller.get("core").and_then(Value::as_str) {
+        Some(theirs) => (Some(theirs) == core).then_some(terminal),
+        None => Some(terminal),
     }
 }
 
@@ -6741,6 +6791,84 @@ mod tests {
         assert_ne!(started[0], json!(["node", "tool.js"]), "a tab runs it in a shell");
         assert_eq!(started[1], split, "right");
         assert_eq!(started[2], split, "down");
+    }
+
+    #[test]
+    fn herdr_app_do_in_a_terminal_makes_panes_where_that_terminal_is() {
+        in_own_process("caller_places_new_panes");
+    }
+
+    /// The person asked the agent in t1 for a pane, then went to another space.
+    /// What `herdr-app do` in t1 makes goes beside t1 and into its space, in its
+    /// folder; a sub-agent's goes beside its parent. Another core's terminal, an
+    /// explicit pane and a script outside Herdr keep the focused pane.
+    #[gpui::test]
+    fn caller_places_new_panes(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("caller_places_new_panes") {
+            return;
+        }
+        let (core, _runs) = crate::hc::answering();
+        let (view, cx) = open_window_on(cx, core, "board", "", json!({
+            "id": "main", "type": "block", "content": { "tab": "active" }
+        }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.documents.entry(String::new()).or_default().available = true;
+            this.model.add_space("s1", "agent", "", crate::model::Tab::new("a", "a", "pa", "t1"));
+            this.model.add_space("s2", "person", "", crate::model::Tab::new("b", "b", "pb", "t2"));
+            this.model.select_tab("b");
+            this.cwds.insert("t1".into(), "/agent".into());
+            this.cwds.insert("t2".into(), "/person".into());
+            this.sync(window, cx);
+        }));
+        let control = |cmd: serde_json::Value, cx: &mut gpui::VisualTestContext| cx.update(|window, cx| view.update(cx, |this, cx| {
+            // A sub-agent of t1's (`hc run`), without a pane of its own.
+            this.live.insert("t9".into(), json!({ "address": "t9", "parent": "t1" }));
+            this.control(cmd, window, cx)
+        }));
+        // The space of what was made, the space shown, and the folder its terminal starts in.
+        let place = |made: &serde_json::Value, cx: &mut gpui::VisualTestContext| {
+            let node = made["pane"].as_str().or(made["tab"].as_str()).unwrap_or_else(|| panic!("nothing made: {made}")).to_owned();
+            let terminal = made["terminal"].as_str().map(str::to_owned);
+            cx.update(|_, cx| view.read_with(cx, |this, _| (
+                this.model.space_of(&node).map(|s| s.id.clone()).unwrap_or_default(),
+                this.model.active.clone().unwrap_or_default(),
+                terminal.and_then(|t| this.cwds.get(&t).cloned()),
+            )))
+        };
+
+        let made = control(json!({ "do": "pane.split", "args": { "direction": "right" }, "caller": { "terminal": "t1" } }), cx);
+        assert_eq!(place(&made, cx), ("s1".into(), "s2".into(), Some("/agent".into())), "pane.split: {made}");
+        let made = control(json!({ "do": "terminal.open", "args": { "place": "down" }, "caller": { "terminal": "t1" } }), cx);
+        assert_eq!(place(&made, cx), ("s1".into(), "s2".into(), Some("/agent".into())), "terminal.open down: {made}");
+        let made = control(json!({ "do": "tab.new", "args": { "name": "tests", "focus": false }, "caller": { "terminal": "t1" } }), cx);
+        assert_eq!(place(&made, cx), ("s1".into(), "s2".into(), Some("/agent".into())), "tab.new: {made}");
+        let made = control(json!({ "do": "pane.split", "args": { "direction": "down" }, "caller": { "terminal": "t9" } }), cx);
+        assert_eq!(place(&made, cx), ("s1".into(), "s2".into(), Some("/agent".into())), "a sub-agent's split: {made}");
+
+        // Not this window's core: its t1 is another terminal.
+        let made = control(json!({ "do": "pane.split", "args": { "direction": "right" }, "caller": { "terminal": "t1", "core": "another" } }), cx);
+        assert_eq!(place(&made, cx), ("s2".into(), "s2".into(), Some("/person".into())), "another core's caller: {made}");
+        let made = control(json!({ "do": "pane.split", "args": { "direction": "down", "pane": "pb" }, "caller": { "terminal": "t1" } }), cx);
+        assert_eq!(place(&made, cx), ("s2".into(), "s2".into(), Some("/person".into())), "an explicit pane: {made}");
+        let made = control(json!({ "do": "pane.split", "args": { "direction": "right" } }), cx);
+        assert_eq!(place(&made, cx), ("s2".into(), "s2".into(), Some("/person".into())), "no caller: {made}");
+
+        // A new tab is shown at once, so the person goes to the caller's space.
+        let made = control(json!({ "do": "terminal.open", "args": { "place": "tab" }, "caller": { "terminal": "t1" } }), cx);
+        assert_eq!(place(&made, cx), ("s1".into(), "s1".into(), Some("/agent".into())), "terminal.open tab: {made}");
+    }
+
+    #[test]
+    fn a_caller_counts_only_on_its_own_core() {
+        use serde_json::json;
+        let cmd = |caller: serde_json::Value| json!({ "do": "pane.split", "args": { "direction": "right" }, "caller": caller });
+        assert_eq!(super::caller_terminal(&cmd(json!({ "terminal": "t1", "core": "c1" })), Some("c1")), Some("t1"));
+        assert_eq!(super::caller_terminal(&cmd(json!({ "terminal": "t1", "core": "c2" })), Some("c1")), None, "another core's t1");
+        assert_eq!(super::caller_terminal(&cmd(json!({ "terminal": "t1", "core": "c1" })), None), None, "a core that never said hello");
+        assert_eq!(super::caller_terminal(&cmd(json!({ "terminal": "t1", "core": null })), Some("c1")), Some("t1"), "no core socket to ask");
+        assert_eq!(super::caller_terminal(&cmd(json!({ "terminal": "" })), Some("c1")), None, "HC_TERMINAL_ID=");
+        assert_eq!(super::caller_terminal(&json!({ "do": "pane.split" }), Some("c1")), None, "a script outside Herdr");
     }
 
     /// `tab.new {mod, focus: false}` adds the tab at the end of its space,

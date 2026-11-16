@@ -40,6 +40,13 @@ Pick an explicit, useful name for every new space and tab; don't rely on
 default names. Use IDs from `ls` rather than guessing or acting on the wrong
 focused pane.
 
+Run from your terminal, new panes and tabs go where you are, even after the
+person has moved to another space: `pane.split` and
+`terminal.open --place right` (or `down`) split your pane, and `tab.new` and
+`terminal.open` tabs go to your space, starting in your folder. A sub-agent
+without a pane gets its parent's. Other commands (`pane.close`, `pane.zoom`,
+renames) still act on what the person has focused: pass IDs.
+
 ```sh
 herdr-app do space.new --name api --folder /path/to/api
 herdr-app do tab.new --name "fix login" --argv '["claude"]' --task "Look at the login bug"
