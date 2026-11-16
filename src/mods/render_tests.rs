@@ -517,6 +517,20 @@ fn brand_leaves_room_for_macos_traffic_lights_only_outside_full_screen(cx: &mut 
 }
 
 #[gpui::test]
+fn rail_centers_the_sidebar_toggle(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut values = fixture(true, props(), updates("current", "current"));
+    let layout = values.get_mut("layout").unwrap();
+    assert_eq!(layout["children"][0]["id"], "sidebar");
+    layout["children"][0]["size"]["px"] = json!(44);
+    let tree = describe_with_values(cx, &staged, "mods/workspace-chrome", values, None).unwrap();
+    let root = tree.lines().next().unwrap();
+    assert!(root.contains(".px[Number(0.0)]") && root.contains(".justify_center"), "{tree}");
+    assert!(tree.contains("sidebar-toggle"), "{tree}");
+}
+
+#[gpui::test]
 fn tabs_leave_room_for_macos_traffic_lights(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
