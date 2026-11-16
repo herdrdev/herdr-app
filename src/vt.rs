@@ -553,6 +553,7 @@ struct Spot {
 
 /// A screen row's text, where each character shows, and whether the
 /// terminal wrapped it onto the next.
+#[derive(Clone)]
 struct Row {
     text: String,
     spots: Vec<Spot>,
@@ -599,6 +600,34 @@ fn word_range(text: &str, at: usize) -> std::ops::Range<usize> {
     let start = text[..at].rfind(char::is_whitespace).map_or(0, |i| i + text[i..].chars().next().map_or(1, char::len_utf8));
     let end = text[at..].find(char::is_whitespace).map_or(text.len(), |i| at + i);
     start..end
+}
+
+/// A link the viewport shows: its OSC 8 URI, if it is one, the text that shows, and
+/// where, one span per screen row.
+#[derive(Clone, Debug, PartialEq)]
+pub struct FoundLink {
+    pub uri: Option<String>,
+    pub text: String,
+    pub spans: Vec<CellSpan>,
+}
+
+/// `len` cells from `col` on screen row `row` (counted from the top of the scrollback).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct CellSpan {
+    pub row: u32,
+    pub col: u16,
+    pub len: u16,
+}
+
+fn cell_spans(spots: &[Spot]) -> Vec<CellSpan> {
+    let mut spans: Vec<CellSpan> = Vec::new();
+    for s in spots {
+        match spans.last_mut() {
+            Some(last) if last.row == s.y && last.col + last.len == s.x => last.len += s.width,
+            _ => spans.push(CellSpan { row: s.y, col: s.x, len: s.width }),
+        }
+    }
+    spans
 }
 
 /// A link found in the terminal: what it says, and where it shows.
@@ -1193,15 +1222,7 @@ impl Vt {
         if col >= self.cols || row >= self.rows {
             return None;
         }
-        // Screen rows count from the top of the scrollback; the viewport starts at `top`.
-        let top = unsafe {
-            let r = self.grid_ref(GHOSTTY_POINT_TAG_VIEWPORT, 0, 0)?;
-            let mut p = GhosttyPointCoordinate::default();
-            if ghostty_terminal_point_from_grid_ref(self.term, &r, GHOSTTY_POINT_TAG_SCREEN, &mut p) != GHOSTTY_SUCCESS {
-                return None;
-            }
-            p.y
-        };
+        let top = self.viewport_top()?;
         let hovered = top + row as u32;
         // A URL longer than this many rows isn't one worth finding.
         const REACH: u32 = 32;
@@ -1279,6 +1300,154 @@ impl Vt {
             None if fresh => hit,
             None => self.link_in(&text, &spots, top, at, &mut find, false),
         }
+    }
+
+    /// The screen row the viewport starts at: screen rows count from the top of the scrollback.
+    pub fn viewport_top(&self) -> Option<u32> {
+        unsafe {
+            let r = self.grid_ref(GHOSTTY_POINT_TAG_VIEWPORT, 0, 0)?;
+            let mut p = GhosttyPointCoordinate::default();
+            if ghostty_terminal_point_from_grid_ref(self.term, &r, GHOSTTY_POINT_TAG_SCREEN, &mut p) != GHOSTTY_SUCCESS {
+                return None;
+            }
+            Some(p.y)
+        }
+    }
+
+    /// Every link the viewport shows, top to bottom: OSC 8 hyperlinks, and what `find`
+    /// sees in the text of each line the terminal wrapped (scanned whole, also where it
+    /// runs past the viewport), or across lines a program broke itself where `joined`
+    /// accepts it (as Ctrl+click: an existing file). Spans are clipped to the viewport.
+    pub fn visible_links(&self, find: impl Fn(&str) -> Vec<std::ops::Range<usize>>, joined: impl Fn(&str) -> bool) -> Vec<FoundLink> {
+        // A URL longer than this many rows isn't one worth finding.
+        const REACH: u32 = 32;
+        // Lines a program broke, joined, as `link_at` does.
+        const BROKEN: usize = 4;
+        let Some(top) = self.viewport_top() else { return Vec::new() };
+        let bottom = top + self.rows as u32;
+        // Where the line the terminal wrapped onto row `y` starts.
+        let start_of = |mut y: u32| {
+            let from = y;
+            while y > 0 && from - y < REACH && self.wraps(y - 1) {
+                y -= 1;
+            }
+            y
+        };
+        let mut y = start_of(top);
+        // Lines a program broke above the viewport, back to where one doesn't run into the edge.
+        for _ in 0..2 * BROKEN {
+            if y == 0 {
+                break;
+            }
+            let above = start_of(y - 1);
+            if !self.link_row(y - 1).is_some_and(|row| row.full(self.cols)) {
+                break;
+            }
+            y = above;
+        }
+        // The lines the terminal wrapped, each as its rows; past the viewport only while
+        // the one before runs into the edge.
+        let mut lines: Vec<Vec<Row>> = Vec::new();
+        let mut after = 0;
+        while y < bottom || (after < 2 * BROKEN && lines.last().and_then(|rows| rows.last()).is_some_and(|row| row.full(self.cols))) {
+            if y >= bottom {
+                after += 1;
+            }
+            let mut rows = Vec::new();
+            while let Some(row) = self.link_row(y) {
+                let wraps = row.wraps;
+                rows.push(row);
+                y += 1;
+                if !wraps || y >= bottom + REACH {
+                    break;
+                }
+            }
+            if rows.is_empty() {
+                break;
+            }
+            lines.push(rows);
+        }
+        let mut found: Vec<FoundLink> = Vec::new();
+        for rows in &lines {
+            let (text, spots) = link_text(rows);
+            let mut i = 0;
+            while i < spots.len() {
+                let Some(uri) = spots[i].uri.clone() else { i += 1; continue };
+                let end = spots[i..].iter().position(|s| s.uri.as_deref() != Some(uri.as_str())).map_or(spots.len(), |n| i + n);
+                let run = &spots[i..end];
+                let shown = text[run[0].byte..spots.get(end).map_or(text.len(), |s| s.byte)].to_owned();
+                // A program that breaks a hyperlink's text over lines itself writes one run per line.
+                match found.last_mut() {
+                    Some(last) if last.uri.as_deref() == Some(uri.as_str()) && last.spans.last().is_some_and(|s| s.row + 1 == run[0].y) => {
+                        last.text.push_str(&shown);
+                        last.spans.extend(cell_spans(run));
+                    }
+                    _ => found.push(FoundLink { uri: Some(uri), text: shown, spans: cell_spans(run) }),
+                }
+                i = end;
+            }
+            for range in find(&text) {
+                // Where it runs into a hyperlink, Ctrl+click opens the hyperlink.
+                let run: Vec<Spot> = spots.iter().filter(|s| range.contains(&s.byte) && s.uri.is_none()).cloned().collect();
+                if run.is_empty() {
+                    continue;
+                }
+                found.push(FoundLink { uri: None, text: text[range].to_owned(), spans: cell_spans(&run) });
+            }
+        }
+        // Lines that run into the right edge, joined with the ones after them: fewest lines
+        // first, and the longest file a join names wins, as with Ctrl+click.
+        let mut taken: Vec<FoundLink> = Vec::new();
+        let mut first = 0;
+        while first < lines.len() {
+            let mut joins: Vec<FoundLink> = Vec::new();
+            let mut last = first;
+            // Ctrl+click joins up to BROKEN lines on each side of the one it is on.
+            while last + 1 < lines.len() && last - first < 2 * BROKEN && lines[last].last().is_some_and(|row| row.full(self.cols)) {
+                last += 1;
+                let rows: Vec<Row> = lines[first..=last].iter().flatten().cloned().collect();
+                let (text, spots) = link_text(&rows);
+                for range in find(&text) {
+                    let whole: Vec<&Spot> = spots.iter().filter(|s| range.contains(&s.byte)).collect();
+                    let line_of = |s: &Spot| lines[first..=last].iter().position(|rows| rows.iter().any(|r| r.spots.first().is_some_and(|f| f.y == s.y)));
+                    if whole.is_empty() || whole.iter().all(|s| line_of(s) == line_of(whole[0])) || !joined(&text[range.clone()]) {
+                        continue;
+                    }
+                    // Where it runs into a hyperlink, Ctrl+click opens the hyperlink.
+                    let run: Vec<Spot> = whole.into_iter().filter(|s| s.uri.is_none()).cloned().collect();
+                    if run.is_empty() {
+                        continue;
+                    }
+                    let link = FoundLink { uri: None, text: text[range].to_owned(), spans: cell_spans(&run) };
+                    // A longer join that starts in the same cell names the same file better.
+                    let start = |l: &FoundLink| (l.spans[0].row, l.spans[0].col);
+                    joins.retain(|j| start(j) != start(&link) || j.text.len() > link.text.len());
+                    if !joins.iter().any(|j| start(j) == start(&link)) {
+                        joins.push(link);
+                    }
+                }
+            }
+            let within = |outer: &FoundLink, inner: &FoundLink| {
+                inner.spans.iter().all(|s| outer.spans.iter().any(|o| o.row == s.row && o.col <= s.col && s.col + s.len <= o.col + o.len))
+            };
+            for link in joins {
+                // A join from a line before took this one in already.
+                if taken.iter().any(|t| within(t, &link)) {
+                    continue;
+                }
+                // What each line read on its own was a piece of it.
+                found.retain(|f| f.uri.is_some() || !within(&link, f));
+                taken.push(link.clone());
+                found.push(link);
+            }
+            first += 1;
+        }
+        for link in &mut found {
+            link.spans.retain(|s| top <= s.row && s.row < bottom);
+        }
+        found.retain(|l| !l.spans.is_empty());
+        found.sort_by_key(|l| (l.spans[0].row, l.spans[0].col));
+        found
     }
 
     /// Whether the terminal wrapped screen row `y` onto the next.
@@ -2851,6 +3020,137 @@ mod tests {
         assert_eq!(hit.target, "https://herdr.dev");
         assert_eq!(hit.spans, vec![(0, 4, 11)]);
         assert_eq!(vt.link_at(13, 0, found), None);
+    }
+
+    fn span(row: u32, col: u16, len: u16) -> CellSpan {
+        CellSpan { row, col, len }
+    }
+
+    #[test]
+    fn visible_links_list_text_and_marked_links_in_screen_order() {
+        let mut vt = Vt::new(20, 4);
+        vt.write(b"go https://example.com/a/long/path ok\r\n");
+        vt.write(b"\x1b]8;;https://herdr.dev\x1b\\the docs\x1b]8;;\x1b\\ ~/x");
+        let found = vt.visible_links(crate::links::find_all, |_| false);
+        assert_eq!(found, vec![
+            FoundLink { uri: None, text: "https://example.com/a/long/path".into(), spans: vec![span(0, 3, 17), span(1, 0, 14)] },
+            FoundLink { uri: Some("https://herdr.dev".into()), text: "the docs".into(), spans: vec![span(2, 0, 8)] },
+            FoundLink { uri: None, text: "~/x".into(), spans: vec![span(2, 9, 3)] },
+        ]);
+    }
+
+    #[test]
+    fn visible_links_keep_whole_text_but_only_rows_on_screen() {
+        let mut vt = Vt::new(10, 2);
+        vt.write(b"https://example.com/abcdefgh");
+        // Three rows of link on a two-row screen: the first scrolled away.
+        let found = vt.visible_links(crate::links::find_all, |_| false);
+        assert_eq!(found.len(), 1);
+        assert_eq!(found[0].text, "https://example.com/abcdefgh");
+        assert_eq!(found[0].spans, vec![span(1, 0, 10), span(2, 0, 8)]);
+        // Scrolled up, the history rows show and the live row does not.
+        vt.scroll_viewport(-1);
+        assert_eq!(vt.visible_links(crate::links::find_all, |_| false)[0].spans, vec![span(0, 0, 10), span(1, 0, 10)]);
+    }
+
+    #[test]
+    fn visible_links_join_files_a_program_broke_as_ctrl_click_does() {
+        let exists = |text: &str| ["/tmp/abc/defg/x.png", "/Users/me/ab/Workspace/o/x.rs"].contains(&text);
+        let mut vt = Vt::new(20, 4);
+        vt.write(b"  see /tmp/abc/de\r\n  fg/x.png ok");
+        let found = vt.visible_links(crate::links::find_all, exists);
+        assert_eq!(found, vec![FoundLink { uri: None, text: "/tmp/abc/defg/x.png".into(), spans: vec![span(0, 6, 11), span(1, 2, 8)] }]);
+        // Broken next to slashes, over three lines: the whole path, not the folders.
+        let mut vt = Vt::new(15, 4);
+        vt.write(b"  /Users/me/ab\r\n  /Workspace/o\r\n  /x.rs end");
+        let found = vt.visible_links(crate::links::find_all, exists);
+        assert_eq!(found.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(), ["/Users/me/ab/Workspace/o/x.rs"]);
+        // A join that isn't an existing file leaves the lines as they read.
+        let mut vt = Vt::new(26, 4);
+        vt.write(b"Visit https://example.com\r\n  and then run it");
+        let found = vt.visible_links(crate::links::find_all, exists);
+        assert_eq!(found.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(), ["https://example.com"]);
+    }
+
+    #[test]
+    fn visible_links_join_the_lines_a_file_needs_and_read_past_the_viewport() {
+        let exists = |text: &str| ["/tmp/abc/defg/x.png", "/tmp/abc/defg123456789/x.png"].contains(&text);
+        let texts = |vt: &Vt| vt.visible_links(crate::links::find_all, exists).into_iter().map(|l| (l.text, l.spans)).collect::<Vec<_>>();
+        // The second line runs into the edge too: the join of all three names no file.
+        let mut vt = Vt::new(20, 4);
+        vt.write(b"  see /tmp/abc/de\r\n  fg123456789/x.png\r\nnext command");
+        assert_eq!(texts(&vt), vec![("/tmp/abc/defg123456789/x.png".into(), vec![span(0, 6, 11), span(1, 2, 17)])]);
+        // Its first line scrolled away above the viewport.
+        let mut vt = Vt::new(20, 2);
+        vt.write(b"  see /tmp/abc/de\r\n  fg/x.png ok\r\n");
+        assert_eq!(texts(&vt), vec![("/tmp/abc/defg/x.png".into(), vec![span(1, 2, 8)])]);
+        // Its last line below it.
+        let mut vt = Vt::new(20, 2);
+        vt.write(b"a\r\n  see /tmp/abc/de\r\n  fg/x.png ok");
+        vt.scroll_viewport(-1);
+        assert_eq!(texts(&vt), vec![("/tmp/abc/defg/x.png".into(), vec![span(1, 6, 11)])]);
+    }
+
+    #[test]
+    fn visible_links_keep_the_unmarked_part_of_a_url_a_hyperlink_starts() {
+        let mut vt = Vt::new(40, 2);
+        vt.write(b"\x1b]8;;https://x.org\x1b\\https://example.com\x1b]8;;\x1b\\/path");
+        let found = vt.visible_links(crate::links::find_all, |_| false);
+        assert_eq!(found, vec![
+            FoundLink { uri: Some("https://x.org".into()), text: "https://example.com".into(), spans: vec![span(0, 0, 19)] },
+            FoundLink { uri: None, text: "https://example.com/path".into(), spans: vec![span(0, 19, 5)] },
+        ]);
+    }
+
+    #[test]
+    fn visible_links_keep_the_unmarked_part_of_a_broken_file_a_hyperlink_starts() {
+        let mut vt = Vt::new(20, 4);
+        vt.write(b"  see \x1b]8;;https://x.org\x1b\\/tmp/abc/de\x1b]8;;\x1b\\\r\n  fg/x.png ok");
+        let found = vt.visible_links(crate::links::find_all, |text| text == "/tmp/abc/defg/x.png");
+        assert_eq!(found, vec![
+            FoundLink { uri: Some("https://x.org".into()), text: "/tmp/abc/de".into(), spans: vec![span(0, 6, 11)] },
+            FoundLink { uri: None, text: "/tmp/abc/defg/x.png".into(), spans: vec![span(1, 2, 8)] },
+        ]);
+    }
+
+    #[test]
+    fn visible_links_find_joins_that_share_a_line() {
+        let exists = |text: &str| ["/tmp/alpha/long/var/shared/dir", "/var/shared/dir/entry.txt"].contains(&text);
+        let mut vt = Vt::new(16, 4);
+        vt.write(b"/tmp/alpha/long\r\n/var/shared/dir\r\n/entry.txt");
+        let found = vt.visible_links(crate::links::find_all, exists);
+        assert_eq!(found.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(), ["/tmp/alpha/long/var/shared/dir", "/var/shared/dir/entry.txt"]);
+        // Where a hyperlink starts it, the longest file still wins over a shorter one from the same cell.
+        let exists = |text: &str| ["/tmp/abc/defg/long_file_name", "/tmp/abc/defg/long_file_name:backup.rs"].contains(&text);
+        let mut vt = Vt::new(20, 4);
+        vt.write(b"  see \x1b]8;;https://x.org\x1b\\/tmp/abc/de\x1b]8;;\x1b\\\r\n  fg/long_file_name:\r\n  backup.rs");
+        let texts: Vec<String> = vt.visible_links(crate::links::find_all, exists).into_iter().filter(|l| l.uri.is_none()).map(|l| l.text).collect();
+        assert_eq!(texts, ["/tmp/abc/defg/long_file_name:backup.rs"]);
+    }
+
+    #[test]
+    fn visible_links_join_as_many_lines_as_ctrl_click() {
+        let path = "/a1234/b1234/c1234/d1234/e1234/f.rs";
+        let mut vt = Vt::new(6, 8);
+        vt.write(b"/a1234\r\n/b1234\r\n/c1234\r\n/d1234\r\n/e1234\r\n/f.rs");
+        let found = vt.visible_links(crate::links::find_all, |text| text == path);
+        assert_eq!(found.iter().map(|l| l.text.as_str()).collect::<Vec<_>>(), [path]);
+        assert_eq!(vt.link_at(1, 3, |text, at, _| crate::links::find(text, at).filter(|r| &text[r.clone()] == path)).unwrap().target, path);
+    }
+
+    #[test]
+    fn marked_links_a_program_broke_are_one_link() {
+        let mut vt = Vt::new(12, 4);
+        // A label the program wraps itself, one hyperlink run per line, with a URL in it.
+        vt.write(b"\x1b]8;;https://herdr.dev/a\x1b\\see http://x\x1b]8;;\x1b\\\r\n");
+        vt.write(b"\x1b]8;;https://herdr.dev/a\x1b\\.io/docs\x1b]8;;\x1b\\\r\n");
+        vt.write(b"\x1b]8;;https://herdr.dev/a\x1b\\again\x1b]8;;\x1b\\");
+        let found = vt.visible_links(crate::links::find_all, |_| false);
+        assert_eq!(found, vec![FoundLink {
+            uri: Some("https://herdr.dev/a".into()),
+            text: "see http://x.io/docsagain".into(),
+            spans: vec![span(0, 0, 12), span(1, 0, 8), span(2, 0, 5)],
+        }]);
     }
 
     #[test]

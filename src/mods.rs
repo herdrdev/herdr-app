@@ -406,6 +406,8 @@ pub enum Request {
     /// The app icon's badge (the Dock on macOS); `None` clears it.
     SetBadge(Option<String>),
     Refresh,
+    /// `links()`: the links a terminal's view shows (default: the focused terminal's).
+    Links { terminal: Option<String>, reply: async_channel::Sender<Result<Value, String>> },
     /// From `herdr-app do` / `herdr-app status` (control.rs); answer on `reply`.
     Control { cmd: Value, reply: std::sync::mpsc::Sender<Value> },
 }
@@ -989,6 +991,12 @@ fn module(inst: Instance, copy: u64) -> HostModule {
     });
     HostModule::new("herdr")
         .declarations(DECLARATIONS)
+        .async_function("links", |a| {
+            let terminal = optional_terminal(a.get(0))?;
+            let (reply, answer) = async_channel::bounded(1);
+            request(Request::Links { terminal, reply });
+            Ok(window_answer(answer))
+        })
         .async_function("exec", |a| {
             let command = a.string(0)?.to_owned();
             if checking() { tracing::warn!("check: mod exec'd `{command}`; the child runs for real"); }
@@ -1210,6 +1218,21 @@ fn module(inst: Instance, copy: u64) -> HostModule {
             let rx = commands.clone();
             Ok(async move { rx.recv().await.map(HostValue::Str).map_err(|_| HostError::new("herdr-app is shutting down")) })
         })
+}
+
+fn optional_terminal(v: Option<&HostValue>) -> Result<Option<String>, HostError> {
+    match v {
+        None | Some(HostValue::Null) => Ok(None),
+        Some(HostValue::Str(s)) if !s.is_empty() => Ok(Some(s.clone())),
+        Some(_) => Err(HostError::new("terminal is an address such as \"t7\", or null for the focused one")),
+    }
+}
+
+fn window_answer(answer: async_channel::Receiver<Result<Value, String>>) -> impl std::future::Future<Output = Result<HostValue, HostError>> {
+    async move {
+        let value = answer.recv().await.map_err(|_| HostError::new("herdr-app is shutting down"))?.map_err(HostError::new)?;
+        Ok(to_host(&value))
+    }
 }
 
 /// The runtime's base layer, themed from settings.json.

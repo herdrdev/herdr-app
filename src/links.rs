@@ -42,6 +42,11 @@ pub fn find(text: &str, at: usize) -> Option<Range<usize>> {
     None
 }
 
+/// Every link in `text`, in order.
+pub fn find_all(text: &str) -> Vec<Range<usize>> {
+    PATTERN.find_iter(text).map_while(Result::ok).map(|m| m.range()).collect()
+}
+
 /// The address-shaped word under the pointer, excluding surrounding punctuation.
 pub fn word(text: &str, at: usize) -> Option<Range<usize>> {
     let allowed = |c: char| c.is_alphanumeric() || matches!(c, '-' | '_' | '/' | '.');

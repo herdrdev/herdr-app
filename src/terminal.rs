@@ -1137,6 +1137,23 @@ impl TerminalView {
         self.grid.borrow().hover.is_some()
     }
 
+    /// The links this view shows, as mods get them from `links()`.
+    pub fn visible_links(&self) -> Value {
+        let g = self.grid.borrow();
+        let cwd = self.cwd.as_deref();
+        let found = g.vt.visible_links(links::find_all, |text| matches!(links::resolve(text, cwd), Some(links::Target::File(_))));
+        let list: Vec<Value> = found.into_iter().filter_map(|link| {
+            let target = links::resolve(link.uri.as_deref().unwrap_or(&link.text), self.cwd.as_deref())?;
+            let (kind, target) = match target {
+                links::Target::Url(url) => ("url", url),
+                links::Target::File(path) => ("file", path.to_string_lossy().into_owned()),
+            };
+            let spans: Vec<Value> = link.spans.iter().map(|s| json!({ "row": s.row, "col": s.col, "len": s.len })).collect();
+            Some(json!({ "target": target, "kind": kind, "text": link.text, "spans": spans }))
+        }).collect();
+        Value::Array(list)
+    }
+
     /// The link at a window position, and where it shows.
     fn link_at(&self, pos: Point<Pixels>) -> Option<(LinkTarget, vt::Spans)> {
         let g = self.grid.borrow();
@@ -2860,6 +2877,27 @@ mod tests {
         });
         cx.run_until_parked();
         assert_eq!(ends.read_with(cx, |count, _| *count), 1);
+    }
+
+    #[gpui::test]
+    fn mods_get_what_links_open_and_where_they_show(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+        let dir = std::env::temp_dir().join(format!("herdr-visible-links-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/a.rs"), "").unwrap();
+        let view = cx.new(|cx| super::TerminalView::attach(crate::hc::offline(), "t1".into(), (60, 3), cx));
+        let links = view.update(cx, |view, _| {
+            view.cwd = Some(dir.clone());
+            view.grid.borrow_mut().vt.write(b"https://herdr.dev src/a.rs gone/b.rs \x1b]8;;https://example.com\x1b\\label\x1b]8;;\x1b\\");
+            view.visible_links()
+        });
+        let file = dir.join("src/a.rs").to_string_lossy().into_owned();
+        assert_eq!(links, json!([
+            { "target": "https://herdr.dev", "kind": "url", "text": "https://herdr.dev", "spans": [{ "row": 0, "col": 0, "len": 17 }] },
+            { "target": file, "kind": "file", "text": "src/a.rs", "spans": [{ "row": 0, "col": 18, "len": 8 }] },
+            { "target": "https://example.com", "kind": "url", "text": "label", "spans": [{ "row": 0, "col": 37, "len": 5 }] },
+        ]));
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[gpui::test]

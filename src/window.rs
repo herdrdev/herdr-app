@@ -1726,6 +1726,43 @@ impl AppWindow {
         best.map(|(_, t)| t.view.clone()).ok_or_else(|| format!("terminal {address:?} is running but not shown in this window, so it has no view"))
     }
 
+    /// The view of a terminal (default: the focused one) a mod reads links from: the one
+    /// drawn on top, as a peek over its own pane, whatever has the keyboard (a mod's popup may).
+    fn mod_terminal_view(&self, terminal: Option<&str>, window: &Window, cx: &App) -> Result<Entity<TerminalView>, String> {
+        let address = match terminal {
+            Some(address) => address.to_owned(),
+            None => self.focused_terminal(window, cx).map(|t| t.address.clone()).ok_or("no focused terminal")?,
+        };
+        let (shown, _) = self.visible();
+        let covered: HashSet<&str> = shown.iter().filter_map(|(slot, _)| slot.strip_suffix(SWAP)).collect();
+        let mut shown: Vec<(String, String)> = shown.iter().filter(|(slot, _)| !covered.contains(slot.as_str())).cloned().collect();
+        // An agent block draws its agent's pane view, also from a tab that isn't shown or
+        // whose pane shows another terminal for now.
+        if self.shows_agent()
+            && self.shown_agent().as_deref() == Some(address.as_str())
+            && let Some(pane) = self.model.pane_of(&address)
+        {
+            shown.insert(0, (pane, address.clone()));
+        }
+        // Drawn bottom to top: the layout and the tab's panes, floats, then overlays as `render_overlays` orders them.
+        let windows = self.overlays.iter().filter(|o| o.kind == OverlayKind::Window);
+        let overlay_layouts: Vec<&Node> = windows.chain(self.overlays.iter().filter(|o| o.kind != OverlayKind::Window))
+            .filter_map(|o| o.layout.as_ref()).collect();
+        let layer = |slot: &str| match overlay_layouts.iter().position(|l| l.walk().iter().any(|n| n.id == slot)) {
+            Some(i) => 2 + i,
+            None => usize::from(slot.starts_with(&floats::slot(""))),
+        };
+        let top = shown.iter().enumerate()
+            .filter(|(_, (_, a))| *a == address)
+            .max_by_key(|(i, (slot, _))| (layer(slot), *i))
+            .and_then(|(_, (slot, _))| self.terms.get(slot));
+        match top {
+            Some(t) => Ok(t.view.clone()),
+            None if self.live.contains_key(&address) => Err(format!("terminal {address:?} isn't shown in this window")),
+            None => Err(format!("no running terminal {address:?}")),
+        }
+    }
+
     fn publish_selection(&self, address: &str, window: &Window, cx: &mut Context<Self>) {
         let selection = self.shown_terminal_view(address, window, cx).ok().and_then(|view| view.read(cx).selection());
         let changed = mods::publish_selection(address, json!(selection));
@@ -4031,6 +4068,10 @@ impl AppWindow {
             Request::SetWindowTitle(title) => window.set_window_title(title.as_deref().unwrap_or("Herdr")),
             Request::SetBadge(text) => crate::badge::set(text.as_deref()),
             Request::Refresh => self.refresh_mods(cx),
+            Request::Links { terminal, reply } => {
+                let view = self.mod_terminal_view(terminal.as_deref(), window, cx);
+                let _ = reply.try_send(view.map(|view| view.read(cx).visible_links()));
+            }
             Request::Control { cmd, reply } => {
                 let _ = reply.send(self.control(cmd, window, cx));
             }
@@ -6678,6 +6719,73 @@ mod tests {
         assert!(!pane_focused(cx), "hidden, the pane can't hold the keyboard");
         select("main", cx);
         assert!(pane_focused(cx));
+    }
+
+    #[test]
+    fn mods_read_the_view_drawn_on_top() {
+        in_own_process("mod_terminal_view_on_top");
+    }
+
+    #[gpui::test]
+    fn mod_terminal_view_on_top(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("mod_terminal_view_on_top") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "home", "", json!({ "id": "main", "type": "block", "content": { "tab": "active" } }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.live.insert("t1".into(), json!({"state": "live"}));
+            this.live.insert("t2".into(), json!({"state": "live"}));
+            this.model.add_space("sp1", "", "/tmp", crate::model::Tab::new("tb1", "", "p1", "t1"));
+            this.sync(window, cx);
+            let pane = this.terms["p1"].view.clone();
+            assert_eq!(this.mod_terminal_view(Some("t1"), window, cx), Ok(pane.clone()));
+            // A peek over its own pane is what the person sees.
+            this.peek_terminal("t1", window, cx);
+            let peek = this.mod_terminal_view(Some("t1"), window, cx).unwrap();
+            assert_ne!(peek, pane);
+            assert!(this.terms.iter().any(|(slot, t)| t.view == peek && slot != "p1"));
+            // A window opened later is still drawn under the peek.
+            this.open_overlay("w1".into(), json!({ "kind": "window", "layout": { "id": "w", "type": "block", "content": { "terminal": "t1" } } }), window, cx);
+            assert_eq!(this.terms.values().filter(|t| t.address == "t1").count(), 3);
+            assert_eq!(this.mod_terminal_view(Some("t1"), window, cx), Ok(peek));
+            this.close_overlay("terminal-peek", window, cx);
+            this.close_overlay("w1", window, cx);
+            // A terminal kept in a tab that isn't shown has no view to read or label.
+            this.model.add_tab("sp1", crate::model::Tab::new("tb2", "", "p2", "t2"));
+            this.sync(window, cx);
+            assert!(this.terms.contains_key("p1"), "hidden tabs keep their views");
+            assert_eq!(this.mod_terminal_view(Some("t1"), window, cx), Err("terminal \"t1\" isn't shown in this window".into()));
+            assert_eq!(this.mod_terminal_view(Some("t9"), window, cx), Err("no running terminal \"t9\"".into()));
+        }));
+    }
+
+    #[test]
+    fn mods_read_the_view_an_agent_block_draws() {
+        in_own_process("mod_terminal_view_agent_block");
+    }
+
+    #[gpui::test]
+    fn mod_terminal_view_agent_block(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("mod_terminal_view_agent_block") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "home", "", json!({ "id": "root", "type": "row", "children": [
+            { "id": "agent", "type": "block", "content": { "agent": "focused" } },
+            { "id": "main", "type": "block", "content": { "tab": "active" } }
+        ] }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.live.insert("t1".into(), json!({"state": "live"}));
+            this.live.insert("t2".into(), json!({"state": "live"}));
+            this.model.add_space("sp1", "", "/tmp", crate::model::Tab::new("tb1", "", "p1", "t1"));
+            this.agent = Some("t1".into());
+            // Its pane shows another terminal for now; the agent block still draws the pane's own view.
+            this.swapped.insert("p1".into(), "t2".into());
+            this.sync(window, cx);
+            assert_eq!(this.mod_terminal_view(Some("t1"), window, cx), Ok(this.terms["p1"].view.clone()));
+            assert_eq!(this.mod_terminal_view(Some("t2"), window, cx), Ok(this.terms["p1#swap"].view.clone()));
+        }));
     }
 
     #[test]
