@@ -3232,6 +3232,17 @@ impl AppWindow {
                 }
                 return self.go(dir, window, cx);
             }
+            "pane.resize" => {
+                let dir = Self::owned(a, "direction").unwrap_or_default();
+                let amount = a.get("px").and_then(Value::as_f64).unwrap_or(40.0) as f32;
+                let Some(pane) = Self::owned(a, "pane").or_else(|| self.model.focused_pane()) else {
+                    return self.fail("no pane to resize");
+                };
+                if let Err(e) = self.resize_pane(&pane, &dir, amount) {
+                    return self.fail(e);
+                }
+                self.save();
+            }
             "pane.swap" => {
                 let by = match swap_by(a) {
                     Ok(by) => by,
@@ -3707,6 +3718,60 @@ impl AppWindow {
     /// Its mod.json says `"focusable": true` (`go` asks only of visible blocks).
     fn focusable(&self, id: &str) -> bool {
         self.copies.get(id).and_then(|c| self.folders.get(&c.inst.name)).is_some_and(|f| f.hint.focusable)
+    }
+
+    /// Moves the divider nearest a pane along `dir`'s axis, as a mouse drag would.
+    /// The border moves in `dir` whichever side of it the pane is on (like tmux).
+    fn resize_pane(&mut self, pane: &str, dir: &str, amount: f32) -> Result<(), String> {
+        let (axis, sign) = match dir {
+            "left" => (Axis::Row, -1.0),
+            "right" => (Axis::Row, 1.0),
+            "up" => (Axis::Column, -1.0),
+            "down" => (Axis::Column, 1.0),
+            _ => return Err(format!("direction must be left, right, up or down, not {dir:?}")),
+        };
+        let found = {
+            let tab = self.model.tab_of(pane).ok_or_else(|| format!("no pane {pane:?}"))?;
+            if tab.zoomed.is_some() {
+                return Ok(());
+            }
+            let root = &tab.root;
+            let path = root.path_to(pane).ok_or_else(|| format!("no pane {pane:?}"))?;
+            let mut found = None;
+            for i in (0..path.len().saturating_sub(1)).rev() {
+                let Some(node) = root.find(&path[i]) else { continue };
+                if node.axis() != Some(axis) || !node.resizable() {
+                    continue;
+                }
+                let shown: Vec<&Node> = node.children().iter().filter(|c| !c.hidden).collect();
+                if shown.len() < 2 {
+                    continue;
+                }
+                let Some(idx) = shown.iter().position(|c| c.id == path[i + 1]) else { continue };
+                let index = if sign > 0.0 {
+                    if idx + 1 < shown.len() { idx } else { idx - 1 }
+                } else if idx > 0 {
+                    idx - 1
+                } else {
+                    idx
+                };
+                found = Some((node.id.clone(), index, shown[index].id.clone()));
+                break;
+            }
+            found
+        };
+        // Nothing split that way: a no-op, like a keyboard resize in a terminal multiplexer.
+        let Some((container, index, a_id)) = found else { return Ok(()) };
+        let b = self.bounds.borrow().get(&a_id).copied().ok_or("that pane isn't on screen")?;
+        let delta = px(sign * amount * settings::zoom());
+        let pos = match axis {
+            Axis::Row => point(b.right() + delta, b.top()),
+            Axis::Column => point(b.left(), b.bottom() + delta),
+        };
+        self.drag = Some(Drag { container, index, axis });
+        self.drag_to(pos);
+        self.drag = None;
+        Ok(())
     }
 
     fn swap_pane(&mut self, from: &str, explicit: bool, dir: &str) -> Result<(), String> {
@@ -4984,7 +5049,7 @@ fn swap_by(args: &Value) -> Result<SwapBy<'_>, String> {
 
 fn needs_model_pane(name: &str, args: &Value) -> bool {
     match name {
-        "pane.split" | "pane.close" | "pane.zoom" | "pane.swap" | "terminal.show" => AppWindow::arg(args, "pane").is_none(),
+        "pane.split" | "pane.close" | "pane.zoom" | "pane.swap" | "pane.resize" | "terminal.show" => AppWindow::arg(args, "pane").is_none(),
         "pane.go" => true,
         "terminal.open" | "terminal.keep" => matches!(AppWindow::arg(args, "place"), Some("right" | "down")),
         _ => false,
@@ -6666,6 +6731,31 @@ mod tests {
             assert_eq!(prompts(this), 0, "a second press closes the prompt");
             this.run("tab.rename", json!({}), window, cx);
             assert_eq!(prompts(this), 1, "and a third opens it again");
+        }));
+    }
+
+    #[test]
+    fn panes_resize_from_the_keyboard() {
+        in_own_process("pane_resize_checks_direction");
+    }
+
+    #[gpui::test]
+    fn pane_resize_checks_direction(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("pane_resize_checks_direction") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "unused", "", json!({
+            "id": "root", "type": "block", "content": { "tab": "active" }
+        }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.model.add_space("sp1", "", "/tmp", crate::model::Tab::new("tb1", "", "p1", "t1"));
+            this.sync(window, cx);
+            let r = this.run_as("pane.resize", json!({ "pane": "p1", "direction": "sideways" }), false, window, cx);
+            assert!(r.get("error").is_some(), "{r}");
+            let r = this.run_as("pane.resize", json!({ "pane": "p1", "direction": "left" }), false, window, cx);
+            assert!(r.get("error").is_none(), "a pane with nothing beside it: nothing to move, {r}");
+            assert!(this.run_as("pane.resize", json!({ "pane": "nope", "direction": "left" }), false, window, cx).get("error").is_some());
         }));
     }
 
