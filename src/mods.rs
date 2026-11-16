@@ -407,7 +407,9 @@ pub enum Request {
     SetBadge(Option<String>),
     Refresh,
     /// `links()`: the links a terminal's view shows (default: the focused terminal's).
-    Links { terminal: Option<String>, reply: async_channel::Sender<Result<Value, String>> },
+    Links { copy: u64, terminal: Option<String>, reply: async_channel::Sender<Result<Value, String>> },
+    /// `setTerminalHints()`: the labels mod copy `copy` draws on a terminal; none clears them.
+    Hints { copy: u64, terminal: Option<String>, hints: Vec<crate::terminal::Hint>, reply: async_channel::Sender<Result<Value, String>> },
     /// From `herdr-app do` / `herdr-app status` (control.rs); answer on `reply`.
     Control { cmd: Value, reply: std::sync::mpsc::Sender<Value> },
 }
@@ -991,10 +993,21 @@ fn module(inst: Instance, copy: u64) -> HostModule {
     });
     HostModule::new("herdr")
         .declarations(DECLARATIONS)
-        .async_function("links", |a| {
+        .async_function("links", move |a| {
             let terminal = optional_terminal(a.get(0))?;
             let (reply, answer) = async_channel::bounded(1);
-            request(Request::Links { terminal, reply });
+            request(Request::Links { copy, terminal, reply });
+            Ok(window_answer(answer))
+        })
+        .async_function("setTerminalHints", move |a| {
+            let terminal = optional_terminal(a.get(0))?;
+            let hints = serde_json::from_value::<Vec<crate::terminal::Hint>>(a.get(1).map(from_host).unwrap_or(Value::Null))
+                .map_err(|e| HostError::new(format!("setTerminalHints hints are [{{row, col, text}}] with nonnegative whole numbers: {e}")))?;
+            if let Some(hint) = hints.iter().find(|h| h.text.is_empty() || h.text.chars().any(char::is_control)) {
+                return Err(HostError::new(format!("setTerminalHints text must be printable and not empty: {:?}", hint.text)));
+            }
+            let (reply, answer) = async_channel::bounded(1);
+            request(Request::Hints { copy, terminal, hints, reply });
             Ok(window_answer(answer))
         })
         .async_function("exec", |a| {

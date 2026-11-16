@@ -399,6 +399,10 @@ pub struct AppWindow {
     /// Panes showing another terminal for now (pane → address), e.g. a sub-agent
     /// looked at in place of its parent. Not saved; the pane keeps its own.
     swapped: HashMap<String, String>,
+    /// Per mod copy: the terminal and view its last `links()` read, where its labels go.
+    link_views: HashMap<u64, (String, WeakEntity<TerminalView>)>,
+    /// Per mod copy: the view its labels are on.
+    hint_views: HashMap<u64, WeakEntity<TerminalView>>,
     float_drag: Option<floats::FloatDrag>,
     pane_drag: Option<pane_drag::PaneDrag>,
     pane_grip_hover: Option<String>,
@@ -527,6 +531,8 @@ impl AppWindow {
             agent: None,
             agent_focused: None,
             swapped: HashMap::new(),
+            link_views: HashMap::new(),
+            hint_views: HashMap::new(),
             float_drag: None,
             pane_drag: None,
             pane_grip_hover: None,
@@ -1386,10 +1392,25 @@ impl AppWindow {
     }
 
     fn remove_copy(&mut self, slot: &str, window: &mut Window, cx: &mut Context<Self>) {
-        if let Some(copy) = self.copies.remove(slot)
-            && let (Some(runtime), Some(root)) = (&self.runtime, copy.root)
-        {
+        let Some(copy) = self.copies.remove(slot) else { return };
+        // Its labels go with it, however it closed; it may live on a while in its close().
+        self.link_views.remove(&copy.id);
+        self.set_mod_hints(copy.id, None, Vec::new(), cx);
+        if let (Some(runtime), Some(root)) = (&self.runtime, copy.root) {
             runtime.close(&root, std::time::Instant::now() + Duration::from_millis(250), window, cx).detach();
+        }
+    }
+
+    /// Puts mod copy `copy`'s labels on `view` (none: clears them), off any view it labelled before.
+    fn set_mod_hints(&mut self, copy: u64, view: Option<Entity<TerminalView>>, hints: Vec<crate::terminal::Hint>, cx: &mut App) {
+        if let Some(old) = self.hint_views.remove(&copy).and_then(|v| v.upgrade())
+            && view.as_ref() != Some(&old)
+        {
+            old.update(cx, |v, cx| v.set_hints(copy, Vec::new(), cx));
+        }
+        if let Some(view) = view {
+            self.hint_views.insert(copy, view.downgrade());
+            view.update(cx, |v, cx| v.set_hints(copy, hints, cx));
         }
     }
 
@@ -1761,6 +1782,22 @@ impl AppWindow {
             None if self.live.contains_key(&address) => Err(format!("terminal {address:?} isn't shown in this window")),
             None => Err(format!("no running terminal {address:?}")),
         }
+    }
+
+    /// The view a mod copy's labels go on: the one its last `links()` read when that
+    /// was the same terminal (so the rows are that grid's), else as `links()` picks.
+    fn mod_hints_view(&self, copy: u64, terminal: Option<&str>, window: &Window, cx: &App) -> Result<Entity<TerminalView>, String> {
+        let address = match terminal {
+            Some(address) => address.to_owned(),
+            None => self.focused_terminal(window, cx).map(|t| t.address.clone()).ok_or("no focused terminal")?,
+        };
+        if let Some((read, view)) = self.link_views.get(&copy)
+            && *read == address
+            && let Some(view) = view.upgrade()
+        {
+            return Ok(view);
+        }
+        self.mod_terminal_view(Some(&address), window, cx)
     }
 
     fn publish_selection(&self, address: &str, window: &Window, cx: &mut Context<Self>) {
@@ -4068,9 +4105,25 @@ impl AppWindow {
             Request::SetWindowTitle(title) => window.set_window_title(title.as_deref().unwrap_or("Herdr")),
             Request::SetBadge(text) => crate::badge::set(text.as_deref()),
             Request::Refresh => self.refresh_mods(cx),
-            Request::Links { terminal, reply } => {
+            Request::Links { copy, terminal, reply } => {
                 let view = self.mod_terminal_view(terminal.as_deref(), window, cx);
-                let _ = reply.try_send(view.map(|view| view.read(cx).visible_links()));
+                let _ = reply.try_send(view.map(|view| {
+                    let (address, links) = { let v = view.read(cx); (v.address.clone(), v.visible_links()) };
+                    self.link_views.insert(copy, (address, view.downgrade()));
+                    links
+                }));
+            }
+            Request::Hints { copy, terminal, hints, reply } => {
+                // A copy whose load failed is dropped without `remove_copy`: it labels nothing.
+                let view = if !self.copies.values().any(|c| c.id == copy && c.root.is_some()) {
+                    Err("this mod copy is closed".to_owned())
+                } else if hints.is_empty() {
+                    Ok(None)
+                } else {
+                    self.mod_hints_view(copy, terminal.as_deref(), window, cx).map(Some)
+                };
+                let answer = view.map(|view| self.set_mod_hints(copy, view, hints, cx)).map(|()| Value::Null);
+                let _ = reply.try_send(answer);
             }
             Request::Control { cmd, reply } => {
                 let _ = reply.send(self.control(cmd, window, cx));
@@ -4280,10 +4333,14 @@ impl AppWindow {
             }
         }
         let mut exhausted = BTreeSet::new();
+        let mut reloaded = Vec::new();
         for copy in self.copies.values_mut().filter(|c| edited.contains(&c.inst.name) && loaded.contains(&c.id)) {
             let Some(root) = &copy.root else { continue };
             let near_limit = runtime.memory_share() >= RESTART_MODS_AT;
             let error = runtime.reload_now(root, window, cx).err();
+            if error.is_none() {
+                reloaded.push(copy.id);
+            }
             if error.as_ref().is_some_and(|e| near_limit || out_of_memory(e) || runtime.memory_share() >= RESTART_MODS_AT) {
                 exhausted.insert(copy.inst.name.clone());
             }
@@ -4292,6 +4349,11 @@ impl AppWindow {
                 tracing::warn!("mod reload failed: {e}");
             }
             copy.error = error;
+        }
+        // The new code starts over: the old one's labels would outlive what it knew of them.
+        for copy in reloaded {
+            self.link_views.remove(&copy);
+            self.set_mod_hints(copy, None, Vec::new(), cx);
         }
         if !exhausted.is_empty() {
             self.recover_mods(&exhausted, window, cx);
@@ -6755,6 +6817,9 @@ mod tests {
             this.model.add_tab("sp1", crate::model::Tab::new("tb2", "", "p2", "t2"));
             this.sync(window, cx);
             assert!(this.terms.contains_key("p1"), "hidden tabs keep their views");
+            // Labels for the focused terminal follow the focus, not the terminal links() read before.
+            this.link_views.insert(7, ("t1".into(), pane.downgrade()));
+            assert_eq!(this.mod_hints_view(7, None, window, cx), Ok(this.terms["p2"].view.clone()));
             assert_eq!(this.mod_terminal_view(Some("t1"), window, cx), Err("terminal \"t1\" isn't shown in this window".into()));
             assert_eq!(this.mod_terminal_view(Some("t9"), window, cx), Err("no running terminal \"t9\"".into()));
         }));
@@ -6786,6 +6851,39 @@ mod tests {
             assert_eq!(this.mod_terminal_view(Some("t1"), window, cx), Ok(this.terms["p1"].view.clone()));
             assert_eq!(this.mod_terminal_view(Some("t2"), window, cx), Ok(this.terms["p1#swap"].view.clone()));
         }));
+    }
+
+    #[test]
+    fn a_mod_that_reloads_drops_its_hints() {
+        in_own_process("hot_reload_drops_hints");
+    }
+
+    #[gpui::test]
+    fn hot_reload_drops_hints(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("hot_reload_drops_hints") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "heavy", &heavy_mod(0, 1), json!({ "id": "root", "type": "row", "children": [
+            { "id": "heavy", "type": "block", "content": { "mod": "heavy" } },
+            { "id": "main", "type": "block", "content": { "tab": "active" } }
+        ] }));
+        cx.run_until_parked();
+        let copy = cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.live.insert("t1".into(), json!({"state": "live"}));
+            this.model.add_space("sp1", "", "/tmp", crate::model::Tab::new("tb1", "", "p1", "t1"));
+            this.sync(window, cx);
+            let copy = this.copies["heavy"].id;
+            let pane = this.terms["p1"].view.clone();
+            this.link_views.insert(copy, ("t1".into(), pane.downgrade()));
+            this.set_mod_hints(copy, Some(pane), vec![crate::terminal::Hint { row: 0, col: 0, text: "s".into() }], cx);
+            copy
+        }));
+        assert_eq!(edit_heavy(&view, 1, 1, cx), (1, vec![]));
+        view.update(cx, |this, _| {
+            assert_eq!(this.copies["heavy"].id, copy, "a hot reload keeps the copy");
+            assert!(!this.hint_views.contains_key(&copy) && !this.link_views.contains_key(&copy));
+        });
     }
 
     #[test]

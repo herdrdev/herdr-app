@@ -130,6 +130,8 @@ struct Grid {
     hover: Option<Point<Pixels>>,
     /// The link under the pointer to underline: (row, first column, last column).
     link_spans: vt::Spans,
+    /// Labels mods draw on cells, by the mod copy that drew them.
+    hints: Vec<(u64, Vec<Hint>)>,
     /// Text an input method is still composing ("nihao" before "\u{4f60}\u{597d}"),
     /// drawn at the cursor; the program sees only the finished text.
     marked: Option<String>,
@@ -144,6 +146,15 @@ struct Grid {
     painted: Vec<(Rc<Vec<vt::Cell>>, Vec<RowOp>, Option<usize>)>,
     /// Font size, cell size, cell font, loaded fonts and ligature setting used to draw.
     painted_with: (u32, Size<Pixels>, Font, u64, bool),
+}
+
+/// A label a mod draws on a cell: screen rows count from the top of the scrollback.
+#[derive(Clone, Debug, PartialEq, serde::Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct Hint {
+    pub row: u32,
+    pub col: u16,
+    pub text: String,
 }
 
 pub struct TerminalView {
@@ -331,6 +342,7 @@ impl TerminalView {
                 images: HashMap::new(),
                 hover: None,
                 link_spans: Vec::new(),
+                hints: Vec::new(),
                 marked: None,
                 cursor_at: None,
                 thumb: None,
@@ -1152,6 +1164,19 @@ impl TerminalView {
             Some(json!({ "target": target, "kind": kind, "text": link.text, "spans": spans }))
         }).collect();
         Value::Array(list)
+    }
+
+    /// Replaces the labels mod copy `copy` draws on this view; none clears them.
+    pub fn set_hints(&mut self, copy: u64, hints: Vec<Hint>, cx: &mut Context<Self>) {
+        let mut g = self.grid.borrow_mut();
+        let before = g.hints.clone();
+        g.hints.retain(|(c, _)| *c != copy);
+        if !hints.is_empty() {
+            g.hints.push((copy, hints));
+        }
+        if g.hints != before {
+            cx.notify();
+        }
     }
 
     /// The link at a window position, and where it shows.
@@ -2148,6 +2173,9 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     }
     g.images.retain(|k, _| keep.contains(k));
     let link_spans = g.link_spans.clone();
+    let hints: Vec<Hint> = g.hints.iter().flat_map(|(_, h)| h.iter().cloned()).collect();
+    let hints_top = if hints.is_empty() { None } else { g.vt.viewport_top() };
+    let cols = g.vt.cols as usize;
     let marked = g.marked.clone();
     drop(g);
 
@@ -2347,6 +2375,27 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
         paint_cell_text(&line, p, metrics, window, cx);
         let underline = Bounds::new(p + point(px(0.0), metrics.underline), size(line.width, metrics.underline_thickness));
         window.paint_quad(fill(snap_box(underline), fg));
+    }
+    // Mods' labels go over everything, kept inside the row: black on yellow, as foot's jump labels.
+    if let Some(top) = hints_top {
+        let palette = vt::theme().palette16;
+        let (ink, back) = (hsla(palette[0]), hsla(palette[3]));
+        for hint in &hints {
+            let Some(y) = hint.row.checked_sub(top).map(|y| y as usize).filter(|y| *y < frame.rows.len()) else { continue };
+            let run = TextRun {
+                len: hint.text.len(),
+                font: cell_font(true, false),
+                color: ink,
+                background_color: None,
+                underline: None,
+                strikethrough: None,
+            };
+            let line = window.text_system().shape_line(hint.text.clone().into(), px(crate::settings::font_size()), &[run], None);
+            let width = ((line.width / cell.width).ceil() as usize).clamp(1, cols.max(1));
+            let x = (hint.col as usize).min(cols.saturating_sub(width));
+            window.paint_quad(fill(snap_box(Bounds::new(at(x, y), size(cell.width * width as f32, cell.height))), back));
+            paint_cell_text(&line, at(x, y), metrics, window, cx);
+        }
     }
     {
         let mut g = grid.borrow_mut();
@@ -2898,6 +2947,21 @@ mod tests {
             { "target": "https://example.com", "kind": "url", "text": "label", "spans": [{ "row": 0, "col": 37, "len": 5 }] },
         ]));
         let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    #[gpui::test]
+    fn each_mod_copy_replaces_and_clears_only_its_own_hints(cx: &mut gpui::TestAppContext) {
+        use gpui::AppContext as _;
+        let view = cx.new(|cx| super::TerminalView::attach(crate::hc::offline(), "t1".into(), (20, 3), cx));
+        let hint = |text: &str| super::Hint { row: 0, col: 0, text: text.into() };
+        view.update(cx, |view, cx| {
+            view.set_hints(1, vec![hint("a")], cx);
+            view.set_hints(2, vec![hint("b")], cx);
+            view.set_hints(1, vec![hint("c")], cx);
+            assert_eq!(view.grid.borrow().hints, vec![(2, vec![hint("b")]), (1, vec![hint("c")])]);
+            view.set_hints(1, Vec::new(), cx);
+            assert_eq!(view.grid.borrow().hints, vec![(2, vec![hint("b")])]);
+        });
     }
 
     #[gpui::test]
