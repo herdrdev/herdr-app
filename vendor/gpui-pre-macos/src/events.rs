@@ -696,6 +696,31 @@ mod tests {
     }
 
     #[test]
+    fn native_return_and_tab_reach_the_input_method() {
+        let _guard = NATIVE_KEY_TEST.lock().unwrap();
+        for (code, text, key, normalized) in [
+            (0x24, "\r", "enter", "\n"),
+            (0x4c, "\u{3}", "enter", "\n"),
+            (0x30, "\t", "tab", "\t"),
+        ] {
+            for modifiers in [NSEventModifierFlags::empty(), NSEventModifierFlags::NSShiftKeyMask] {
+                let event = native_key_with_text(code, modifiers, text);
+                assert_eq!(event.key, key);
+                assert_eq!(event.key_char.as_deref(), Some(normalized));
+                assert!(crate::key_routing::input_method_first(&event, false, false));
+            }
+            for modifiers in [
+                NSEventModifierFlags::NSControlKeyMask,
+                NSEventModifierFlags::NSCommandKeyMask,
+                NSEventModifierFlags::NSFunctionKeyMask,
+            ] {
+                let event = native_key_with_text(code, modifiers, text);
+                assert!(!crate::key_routing::input_method_first(&event, false, false));
+            }
+        }
+    }
+
+    #[test]
     fn shifted_punctuation_matches_base_key_and_shifted_symbol() {
         use gpui::KeybindingKeystroke;
         let _guard = NATIVE_KEY_TEST.lock().unwrap();

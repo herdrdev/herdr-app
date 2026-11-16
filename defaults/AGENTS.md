@@ -544,6 +544,11 @@ shortcuts must then be added by hand.
 - Windows AltGr and dead-key compositions type text in terminals. macOS
   dead keys compose accents through native text input; Option keeps its
   keyboard-layout characters rather than acting as Alt.
+- On macOS, non-printing keys reach the input method before the terminal,
+  including keys carrying control characters (Enter and Tab) when no composition
+  is visible. This keeps Shift+Enter from triggering Rime's Shift language switch.
+  Unhandled keys still reach the terminal; Ctrl, Fn and Cmd shortcuts keep their
+  existing routing.
 - On macOS, shifted punctuation shortcuts accept both spellings from the
   current layout: `cmd-shift-]` and `cmd-}` match the same US-layout keypress.
   Existing `keys.json` files don't need to change.
