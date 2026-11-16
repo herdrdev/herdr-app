@@ -469,8 +469,9 @@ pub struct AppWindow {
     /// Each machine owns a document; the empty key is this core.
     documents: std::collections::BTreeMap<String, crate::mirror_sync::Slot>,
     initial_view: Option<crate::mirror::View>,
-    /// The person selected a space since launch: a machine that loads after
-    /// that keeps its saved view, but its saved space doesn't take the window.
+    /// The person chose the shown space since launch (selected it, or ran a
+    /// command that showed another): a machine that loads after that keeps
+    /// its saved view, but its saved space doesn't take the window.
     space_selected: bool,
     pointer: Point<Pixels>,
     /// Where a press on a `window_drag` node started, until it moves the window.
@@ -3150,7 +3151,11 @@ impl AppWindow {
             && let Err(error) = self.require_document(space.machine.as_deref())
         { return json!({"error":error}); }
         self.reply = None;
+        let shown = self.model.active.clone();
         self.dispatch(name, &args, person, window, cx);
+        // Any command of the person's that lands on another space selects it:
+        // a click on an agent's row (pane.focus), a tab, a new space.
+        self.space_selected |= person && self.model.active != shown;
         self.flush_documents(false, window, cx);
         self.reply.take().unwrap_or_else(|| json!({ "ok": true }))
     }
@@ -3235,6 +3240,7 @@ impl AppWindow {
                     Some(id) => self.model.active = Some(id),
                     None => return self.fail("no such space"),
                 }
+                // Selecting the space already shown is a choice too.
                 self.space_selected |= person;
             }
             "space.next" | "space.prev" => {
@@ -3242,7 +3248,6 @@ impl AppWindow {
                 if let Some(i) = self.model.active_index().filter(|_| n > 0) {
                     let j = if name == "space.next" { (i + 1) % n } else { (i + n - 1) % n };
                     self.model.active = Some(self.model.spaces[j].id.clone());
-                    self.space_selected |= person;
                 }
             }
             // ---- tabs
@@ -7253,6 +7258,64 @@ mod tests {
             this.run("pane.zoom", json!({ "pane": "pb" }), window, cx);
             assert_eq!(this.model.focused_pane().as_deref(), Some("pb"));
             assert_eq!((this.veil(Some(0.5), "pa"), this.veil(Some(0.5), "pb")), (None, None), "a zoomed tab isn't veiled");
+        }));
+    }
+
+    #[test]
+    fn a_late_machine_leaves_the_window_once_the_person_changed_space() {
+        in_own_process("late_machine_show");
+    }
+
+    /// A machine that loads late shows its saved space only while the person
+    /// hasn't gone to a space themselves, by whatever command took them there
+    /// (a click on an agent's row runs `pane.focus`). A script's command
+    /// doesn't count.
+    #[gpui::test]
+    fn late_machine_show(cx: &mut gpui::TestAppContext) {
+        use crate::mirror::{Document, View};
+        use crate::model::{Model, Tab};
+        use serde_json::json;
+        if !running_alone("late_machine_show") {
+            return;
+        }
+        let local = || {
+            let mut m = Model::default();
+            m.add_space("s", "", "/tmp", Tab::new("t", "", "p", "t1"));
+            m.add_space("s2", "", "/tmp", Tab::new("t2", "", "p2", "t2"));
+            m.active = Some("s".into());
+            m
+        };
+        // What the last run saved: mac's space was the shown one.
+        let mut last = local();
+        Document::capture(&last, None).replace(&mut last, Some("mac"));
+        last.active = Some("mac/s".into());
+        let (saved, doc) = (View::capture(&last), Document::capture(&last, Some("mac")));
+
+        let (view, cx) = open_window(cx, "unused", "", json!({
+            "id": "main", "type": "block", "content": { "tab": "active" }
+        }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.initial_view = Some(saved);
+            let cases: [(Option<(&str, serde_json::Value, bool)>, &str); 6] = [
+                (None, "mac/s"),
+                (Some(("space.select", json!({ "id": "s2" }), true)), "s2"),
+                (Some(("space.select", json!({ "id": "s" }), true)), "s"),
+                (Some(("pane.focus", json!({ "pane": "p2" }), true)), "s2"),
+                (Some(("tab.select", json!({ "id": "t2" }), true)), "s2"),
+                (Some(("pane.focus", json!({ "pane": "p2" }), false)), "mac/s"),
+            ];
+            for (command, shown) in cases {
+                // A new launch, mac not loaded yet.
+                this.model = local();
+                this.space_selected = false;
+                this.documents.insert("mac".into(), Default::default());
+                if let Some((name, args, person)) = &command {
+                    assert_eq!(this.run_as(name, args.clone(), *person, window, cx), json!({ "ok": true }), "{command:?}");
+                }
+                this.documents_updated(None, vec![("mac".into(), crate::mirror_sync::Outcome::Read(doc.clone(), 1))], window, cx);
+                assert!(this.model.space("mac/s").is_some(), "mac's spaces load either way");
+                assert_eq!(this.model.active.as_deref(), Some(shown), "after {command:?}");
+            }
         }));
     }
 
