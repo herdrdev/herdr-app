@@ -802,8 +802,13 @@ fn anchor_type() -> String {
         let _ = writeln!(out, "    | \"{name}\"");
     }
     out.push_str("    ;\n\n");
-    out.push_str("  /** Which pointer button opens a `Popover`. */\n");
-    out.push_str("  export type MouseButton = \"left\" | \"right\" | \"middle\";\n\n");
+    out.push_str("  /**\n");
+    out.push_str("   * A pointer button, for `on_mouse_down`, `on_mouse_up` and which one opens\n");
+    out.push_str("   * a `Popover`. HERDR: `back` and `forward` are the mouse's side buttons.\n");
+    out.push_str("   */\n");
+    out.push_str(
+        "  export type MouseButton = \"left\" | \"right\" | \"middle\" | \"back\" | \"forward\";\n\n",
+    );
     out
 }
 
