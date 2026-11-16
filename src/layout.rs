@@ -91,6 +91,27 @@ pub struct Line {
     pub color: String,
 }
 
+/// `hover` shows while the pointer is over a resizable edge, `active` while dragging it.
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+pub struct Divider {
+    #[serde(default = "one")]
+    pub width: f32,
+    #[serde(default = "border_token")]
+    pub color: String,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub hover: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub active: Option<String>,
+}
+
+impl Divider {
+    pub fn color_for(&self, hovered: bool, dragging: bool) -> &str {
+        let active = if dragging { self.active.as_ref().or(self.hover.as_ref()) } else { None };
+        let hover = if hovered { self.hover.as_ref() } else { None };
+        active.or(hover).unwrap_or(&self.color)
+    }
+}
+
 fn one() -> f32 {
     1.0
 }
@@ -364,7 +385,7 @@ pub struct Node {
     pub gap: Option<f32>,
     /// row/column: one line between children.
     #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub divider: Option<Line>,
+    pub divider: Option<Divider>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub movable: Option<bool>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
@@ -825,6 +846,26 @@ mod tests {
         assert_eq!(n.find("main").unwrap().content(), Some(&Content::Context { tab: "active".into(), pane: None }));
         let back: Node = serde_json::from_str(&serde_json::to_string(&n).unwrap()).unwrap();
         assert_eq!(back, n);
+    }
+
+    #[test]
+    fn dividers_take_hover_and_active_colors_only_when_given() {
+        let plain: Divider = serde_json::from_str(r#"{"width": 1, "color": "border"}"#).unwrap();
+        assert_eq!((plain.hover.as_deref(), plain.active.as_deref()), (None, None));
+        assert_eq!(serde_json::to_value(&plain).unwrap(), serde_json::json!({"width": 1.0, "color": "border"}));
+        for (hovered, dragging) in [(false, false), (true, false), (false, true), (true, true)] {
+            assert_eq!(plain.color_for(hovered, dragging), "border");
+        }
+        let lit: Divider = serde_json::from_str(r##"{"color": "#00000000", "hover": "accent", "active": "#3b82f6"}"##).unwrap();
+        assert_eq!(lit.width, 1.0);
+        assert_eq!(lit.color_for(false, false), "#00000000");
+        assert_eq!(lit.color_for(true, false), "accent");
+        assert_eq!(lit.color_for(false, true), "#3b82f6");
+        assert_eq!(lit.color_for(true, true), "#3b82f6");
+        let hover_only = Divider { active: None, ..lit.clone() };
+        assert_eq!(hover_only.color_for(false, true), "accent");
+        let back: Divider = serde_json::from_str(&serde_json::to_string(&lit).unwrap()).unwrap();
+        assert_eq!(back, lit);
     }
 
     #[test]
