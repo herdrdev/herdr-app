@@ -97,6 +97,11 @@ match double/triple click. `terminal.adjust_selection {terminal?, direction}` mo
 the inclusive moving end and follows it in the view: left, right, up, down, page_up,
 page_down, home, end, line_start, line_end. It fails without a selection.
 `terminal.clear_selection {terminal?}` clears it; `terminal.copy` copies the focused terminal's selection.
+App selection copies, including mouse copy-on-select, briefly show the copied
+character count as a right-aligned line above the visible input box. Shaded or
+ruled boxes are located around the cursor; otherwise the hint uses the line above
+the cursor (the viewport top if it is offscreen).
+Terminal programs that copy for themselves keep their own feedback.
 These add no default keys or built-in copy mode. Mods read the inclusive selection
 endpoints from `focused().selection` or `terminals()`; null means none (or no
 attached view). Use `selection.end` as a copy-mode cursor. Selection facts update

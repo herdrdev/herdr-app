@@ -816,6 +816,11 @@ What's about the user, never a look:
   selections always set PRIMARY, independently of this setting. Middle-click
   pastes PRIMARY on Linux, does nothing on macOS, and pastes the clipboard on
   Windows. Programs that capture the mouse still receive middle-clicks.
+  App selection copies briefly show the copied character count at the right above
+  the visible input box, using the terminal font and theme accent. The app locates
+  shaded or ruled input boxes around the cursor; otherwise the hint follows the
+  line above the cursor (the viewport top if it is offscreen). Clipboard writes
+  from terminal programs keep their own feedback.
   Hold Shift while dragging in programs that capture the mouse.
 - `pane_scrollbars`: `false` hides the scroll position thumb at a terminal
   pane's right edge (default `true`). It shows only when the pane has
