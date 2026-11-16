@@ -1,6 +1,7 @@
 #!/usr/bin/env node
 import { parseArgs } from 'node:util';
 import { spawn } from 'node:child_process';
+import { constants, accessSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
 import { resolve } from 'node:path';
 import { realpath } from 'node:fs/promises';
@@ -9,11 +10,17 @@ import { BrowserHost, listBrowsers } from './host.mjs';
 import { BrowserBridge, createAgentServer } from './server.mjs';
 import { HerdrApp, terminalAdapter, panes } from './herdr.mjs';
 import { startDaemon, daemonClient } from './daemon.mjs';
-import { installMod } from './install.mjs';
+import { installMod, linkTerminalBrowser } from './install.mjs';
 
 const cli = fileURLToPath(import.meta.url);
+const localTerminalBrowser = fileURLToPath(new URL('../.runtime/terminal-browser/bin/terminal-browser', import.meta.url));
+function defaultTerminalBrowser() {
+  if (process.env.TERMINAL_BROWSER_BIN) return process.env.TERMINAL_BROWSER_BIN;
+  try { accessSync(localTerminalBrowser, constants.X_OK); return localTerminalBrowser; } catch { return 'terminal-browser'; }
+}
 const help = `herdr-browser: external Chromium companion for Herdr App
 
+  setup [--binary <path>] [--bin-dir <dir>] expose terminal-browser in the user PATH
   open --space <id> [--url <url>] [--name <name>] [--focus]
   run [--url <url>] [--ssh <host>]       render in the current Herdr terminal
   list                                 list browser instances and CDP targets
@@ -37,13 +44,18 @@ it does not stream its display into Herdr. No browser is downloaded here.
 export async function main(argv = process.argv.slice(2)) {
   const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, options: {
     help: { type: 'boolean' }, browser: { type: 'string' }, target: { type: 'string' }, endpoint: { type: 'string' },
-    binary: { type: 'string', default: process.env.TERMINAL_BROWSER_BIN ?? 'terminal-browser' },
+    binary: { type: 'string', default: defaultTerminalBrowser() }, 'bin-dir': { type: 'string' },
     'output-dir': { type: 'string', default: '.artifacts' }, 'herdr-home': { type: 'string' },
     space: { type: 'string' }, url: { type: 'string', default: 'about:blank' }, name: { type: 'string', default: 'Browser' },
     focus: { type: 'boolean', default: false }, lean: { type: 'boolean', default: false }, ssh: { type: 'string' }, cursor: { type: 'string' }, types: { type: 'string' }, socket: { type: 'string' },
   } });
   const [command, tool, raw = '{}'] = positionals;
   if (values.help || !command) { process.stdout.write(help); return; }
+  if (command === 'setup') {
+    const installed = await linkTerminalBrowser(values.binary, values['bin-dir']);
+    process.stdout.write(`${JSON.stringify(installed, null, 2)}\n`);
+    return;
+  }
   const app = new HerdrApp(values['herdr-home']);
   if (command === 'install-mod') {
     const installed = await installMod(app.home, 'browser-launcher', values.binary);

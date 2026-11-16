@@ -8,6 +8,11 @@ commands; its `--help` is the command reference. It resolves the adjacent packag
 through a skill-directory symlink. A separately copied skill needs
 `HERDR_BROWSER_CLI` pointing to the companion's `src/cli.mjs`.
 
+For a checkout-local terminal-browser runtime, run `scripts/herdr-browser setup`
+once. It exposes that runtime as `~/.local/bin/terminal-browser`, refuses to
+replace another command, and is safe to repeat. If the runtime is elsewhere,
+pass its absolute path with `--binary`.
+
 For a copyable service setup, multi-page workflow, DOM/event wait, screenshot,
 failure recovery or remote connection, load the corresponding section of
 [workflows](references/workflows.md). Tool schemas from MCP or `tools` are the

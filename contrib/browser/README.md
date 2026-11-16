@@ -28,6 +28,20 @@ Chromium runtime. This package attaches through CDP and never downloads a second
 browser engine. An installed Chrome can be used through an explicit CDP endpoint;
 its application bundle cannot replace terminal-browser's embedded runtime.
 
+When a checkout-local runtime lives under
+`contrib/browser/.runtime/terminal-browser`, expose that same installation as the
+normal user command once:
+
+```sh
+node src/cli.mjs setup
+```
+
+The command creates `~/.local/bin/terminal-browser` as a symbolic link, is safe
+to repeat, and refuses to replace a different command. It also reports whether
+`~/.local/bin` is already in `PATH`. Pass `--binary /absolute/path/to/terminal-browser`
+when the runtime is stored elsewhere. This keeps the browser launcher, the agent
+skill and direct shell use on the same executable without installing a second copy.
+
 ## Open a browser tab
 
 Get a local space ID from `herdr-app ls`, then run:
