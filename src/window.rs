@@ -3000,7 +3000,7 @@ impl AppWindow {
             if !args.is_object() { args = json!({}); }
             args["machine"] = json!(machine);
         }
-        if matches!(name, "space.new" | "space.close" | "space.rename" | "space.move" | "tab.new" | "tab.close" | "tab.rename" | "tab.move" | "pane.split" | "pane.close" | "pane.swap" | "pane.rename" | "terminal.keep" | "terminal.park") {
+        if matches!(name, "space.new" | "space.close" | "space.rename" | "space.move" | "tab.new" | "tab.close" | "tab.rename" | "tab.move" | "pane.split" | "pane.close" | "pane.swap" | "pane.rename" | "pane.resize" | "terminal.keep" | "terminal.park") {
             let node = ["id", "space", "pane"].into_iter().find_map(|k| Self::arg(&args, k));
             let target = node.and_then(|id| self.model.space(id).or_else(|| self.model.space_of(id))).or_else(|| self.model.active_space());
             let machine = if name == "space.new" { Self::arg(&args, "machine") }
@@ -3748,11 +3748,18 @@ impl AppWindow {
         };
         let found = {
             let tab = self.model.tab_of(pane).ok_or_else(|| format!("no pane {pane:?}"))?;
+            // Measurements of a tab not drawn now are stale (or missing).
+            if !self.shows_tab() || self.model.active_tab().map(|t| &t.id) != Some(&tab.id) {
+                return Err("that pane isn't on screen".into());
+            }
             if tab.zoomed.is_some() {
                 return Ok(());
             }
             let root = &tab.root;
             let path = root.path_to(pane).ok_or_else(|| format!("no pane {pane:?}"))?;
+            if path.iter().any(|id| root.find(id).is_some_and(|n| n.hidden)) {
+                return Err("that pane isn't on screen".into());
+            }
             let mut found = None;
             for i in (0..path.len().saturating_sub(1)).rev() {
                 let Some(node) = root.find(&path[i]) else { continue };
@@ -6764,15 +6771,53 @@ mod tests {
         let (view, cx) = open_window(cx, "unused", "", json!({
             "id": "root", "type": "block", "content": { "tab": "active" }
         }));
-        cx.update(|window, cx| view.update(cx, |this, cx| {
-            this.model.add_space("sp1", "", "/tmp", crate::model::Tab::new("tb1", "", "p1", "t1"));
+        cx.simulate_resize(gpui::size(gpui::px(1000.0), gpui::px(600.0)));
+        let mut split = crate::model::Tab::new("tb1", "", "p1", "t1");
+        split.root.split("p1", super::Axis::Row, crate::model::pane("p2", "t2"), "row".into());
+        view.update_in(cx, |this, window, cx| {
+            this.model.add_space("sp1", "", "/tmp", split);
+            this.documents.entry(String::new()).or_default().available = true;
             this.sync(window, cx);
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let sizes = |this: &super::AppWindow| serde_json::to_value(&this.model.tab("tb1").unwrap().root).unwrap();
+        view.update_in(cx, |this, window, cx| {
+            let before = sizes(this);
             let r = this.run_as("pane.resize", json!({ "pane": "p1", "direction": "sideways" }), false, window, cx);
             assert!(r.get("error").is_some(), "{r}");
-            let r = this.run_as("pane.resize", json!({ "pane": "p1", "direction": "left" }), false, window, cx);
-            assert!(r.get("error").is_none(), "a pane with nothing beside it: nothing to move, {r}");
             assert!(this.run_as("pane.resize", json!({ "pane": "nope", "direction": "left" }), false, window, cx).get("error").is_some());
-        }));
+            this.documents.get_mut("").unwrap().available = false;
+            let r = this.run_as("pane.resize", json!({ "pane": "p1", "direction": "right" }), false, window, cx);
+            assert!(r.get("error").is_some(), "its machine's layout is unavailable: {r}");
+            assert_eq!(sizes(this), before);
+            this.documents.get_mut("").unwrap().available = true;
+            let r = this.run_as("pane.resize", json!({ "pane": "p1", "direction": "right" }), false, window, cx);
+            assert!(r.get("error").is_none(), "{r}");
+            assert_ne!(sizes(this), before, "the divider moved");
+            this.model.tab_mut("tb1").unwrap().root.split("p1", super::Axis::Column, crate::model::pane("p3", "t3"), "col".into());
+            this.sync(window, cx);
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let hide = |this: &mut super::AppWindow, hidden: bool| this.model.tab_mut("tb1").unwrap().root.find_mut("col").unwrap().hidden = hidden;
+        view.update_in(cx, |this, window, cx| {
+            hide(this, true);
+            let before = sizes(this);
+            let r = this.run_as("pane.resize", json!({ "pane": "p1", "direction": "down" }), false, window, cx);
+            assert!(r.get("error").is_some(), "drawn before, but in a hidden branch now: {r}");
+            assert_eq!(sizes(this), before);
+            hide(this, false);
+            this.model.add_tab("sp1", crate::model::Tab::new("tb2", "", "q1", "u1"));
+            this.sync(window, cx);
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        view.update_in(cx, |this, window, cx| {
+            let before = sizes(this);
+            let r = this.run_as("pane.resize", json!({ "pane": "p1", "direction": "left" }), false, window, cx);
+            assert!(r.get("error").is_some(), "drawn before, but not on screen now: {r}");
+            assert_eq!(sizes(this), before);
+            let r = this.run_as("pane.resize", json!({ "direction": "left" }), false, window, cx);
+            assert!(r.get("error").is_none(), "the focused pane, with nothing beside it: nothing to move, {r}");
+        });
     }
 
     #[test]
