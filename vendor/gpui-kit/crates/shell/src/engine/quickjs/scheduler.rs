@@ -284,10 +284,49 @@ pub(crate) fn drain_jobs_transactionally(
 /// rendering when it was queued. A notify from there marks the view for the
 /// *next* frame, which is exactly right: the snapshot just published is not
 /// invalidated by work that had not finished when it was built.
+#[derive(Clone)]
+pub(crate) struct PendingRenderDrain(std::rc::Weak<TaskState>);
+
+fn run_render_drain_task(
+    runtime: &Rc<ShellRuntime>,
+    task: &Rc<TaskState>,
+    window: &mut gpui::Window,
+    cx: &mut gpui::App,
+) {
+    let Readiness::Ready(Some(view)) = task.readiness() else {
+        finish(task);
+        return;
+    };
+    let (guard, _) = scope::enter_with_application(
+        runtime,
+        window,
+        cx,
+        ScopePhase::Task,
+        Some(view),
+        task.policy(),
+        task.application.clone(),
+    );
+    drain_runtime_jobs(runtime, window, cx);
+    drop(guard);
+    finish(task);
+}
+
+pub(crate) fn run_pending_render_drain(
+    runtime: &Rc<ShellRuntime>,
+    drain: PendingRenderDrain,
+    window: &mut gpui::Window,
+    cx: &mut gpui::App,
+) {
+    if let Some(task) = drain.0.upgrade() {
+        run_render_drain_task(runtime, &task, window, cx);
+    }
+}
+
 pub fn drain_after_render(
     runtime: &Rc<ShellRuntime>,
     view: Entity<ScriptView>,
     policy: Rc<Policy>,
+    application: Option<Rc<ApplicationGeneration>>,
     window: &mut gpui::Window,
     cx: &mut gpui::App,
 ) {
@@ -300,6 +339,7 @@ pub fn drain_after_render(
 
     let mut task = TaskState::new("deferred render drain", Some(view.downgrade()), None);
     task.policy.replace(Some(policy));
+    task.application = application;
     task.runtime = Rc::downgrade(runtime);
     let task = match try_register(task) {
         Ok(task) => task,
@@ -308,6 +348,7 @@ pub fn drain_after_render(
             return;
         }
     };
+    runtime.push_pending_render_drain(PendingRenderDrain(Rc::downgrade(&task)));
     let handle = window.window_handle();
     let mut app = cx.to_async();
     cx.foreground_executor()
@@ -317,20 +358,7 @@ pub fn drain_after_render(
                     tracing::debug!("deferred drain dropped: the shell runtime has shut down");
                     return;
                 };
-                let Readiness::Ready(Some(view)) = task.readiness() else {
-                    tracing::debug!("deferred drain dropped: its owner or policy was cancelled");
-                    return;
-                };
-                let (guard, _) = scope::enter_with_runtime(
-                    &runtime,
-                    window,
-                    cx,
-                    ScopePhase::Task,
-                    Some(view),
-                    task.policy(),
-                );
-                drain_runtime_jobs(&runtime, window, cx);
-                drop(guard);
+                run_render_drain_task(&runtime, &task, window, cx);
             });
 
             if let Err(error) = entered {
@@ -946,7 +974,9 @@ impl TaskState {
     /// owner and ends with the task's build.
     fn binding(&self) -> ContextBinding {
         ContextBinding::Task(Rc::new(TaskBinding {
+            runtime: self.runtime.clone(),
             owner: self.owner.clone(),
+            policy: self.policy.borrow().as_ref().map(Rc::downgrade),
             application: self.application.as_ref().map(Rc::downgrade),
         }))
     }
@@ -2079,7 +2109,7 @@ mod tests {
         let policy = Rc::new(Policy::default());
 
         context.update(|window, cx| {
-            drain_after_render(&runtime, view.clone(), policy.clone(), window, cx)
+            drain_after_render(&runtime, view.clone(), policy.clone(), None, window, cx)
         });
         cancel_policy(&policy);
         drop(view);

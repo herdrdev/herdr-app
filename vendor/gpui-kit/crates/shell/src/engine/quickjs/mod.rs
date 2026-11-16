@@ -24,8 +24,8 @@ use std::{
 use anyhow::{Context as _, Result, anyhow};
 use gpui::{App, AppContext as _, ClickEvent, Entity, Global, Subscription, WeakEntity, Window};
 use rquickjs::{
-    Array, Context as JsContext, Ctx, Error as JsError, Exception, FromJs, Function, Object,
-    Persistent, Result as JsResult, Value,
+    Array, Context as JsContext, Ctx, Error as JsError, Exception, FromJs, Function, IntoJs as _,
+    Object, Persistent, Result as JsResult, Value,
     function::{Args as JsArgs, Func, Opt, This},
     loader::{BuiltinResolver, ImportAttributes, Loader, ModuleLoader, Resolver},
     module::Declared,
@@ -999,6 +999,12 @@ impl NestedViewProvenance {
             _ => false,
         }
     }
+
+    fn is_active(&self) -> bool {
+        self.application
+            .as_ref()
+            .is_none_or(|expected| expected.is_active())
+    }
 }
 
 #[derive(Clone)]
@@ -1064,6 +1070,15 @@ struct NestedFlushGuard<'a>(&'a Cell<bool>);
 impl Drop for NestedFlushGuard<'_> {
     fn drop(&mut self) {
         self.0.set(false);
+    }
+}
+
+struct InitializingViewGuard<'a>(&'a ShellRuntime);
+
+impl Drop for InitializingViewGuard<'_> {
+    fn drop(&mut self) {
+        let initializing = self.0.initializing_views.borrow_mut().pop();
+        debug_assert!(initializing.is_some());
     }
 }
 
@@ -1398,9 +1413,12 @@ pub struct ShellRuntime {
     /// declared before `context` because it owns persistent JS values.
     pending_nested: RefCell<VecDeque<PendingNestedOperation>>,
     flushing_nested: Cell<bool>,
+    pending_render_drains: RefCell<VecDeque<scheduler::PendingRenderDrain>>,
+    flushing_render_drains: Cell<bool>,
     in_flight_nested: RefCell<HashMap<u32, NestedViewProvenance>>,
-    initializing_views: RefCell<Vec<ViewObject>>,
+    initializing_views: RefCell<Vec<(Option<Entity<ScriptView>>, ViewObject)>>,
     nested_view_handles: RefCell<HashMap<u32, NestedViewAlias>>,
+    retired_views: RefCell<HashSet<gpui::EntityId>>,
     next_nested_view_token: Cell<u32>,
     /// The panel builders this runtime registered, by their interned name.
     ///
@@ -1743,9 +1761,12 @@ impl ShellRuntime {
             entities: RefCell::new(entities),
             pending_nested: RefCell::new(VecDeque::new()),
             flushing_nested: Cell::new(false),
+            pending_render_drains: RefCell::new(VecDeque::new()),
+            flushing_render_drains: Cell::new(false),
             in_flight_nested: RefCell::new(HashMap::new()),
             initializing_views: RefCell::new(Vec::new()),
             nested_view_handles: RefCell::new(HashMap::new()),
+            retired_views: RefCell::new(HashSet::new()),
             next_nested_view_token: Cell::new(0),
             panel_scripts: RefCell::new(HashMap::new()),
             active_context: Cell::new(None),
@@ -2356,6 +2377,7 @@ impl ShellRuntime {
                 return Err(error);
             }
         };
+        let _init_guard = self.push_initializing_view(None, instance.clone());
         if let Err(error) = self.initialize(&instance, None) {
             if let Some(application) = application {
                 self.release_application_generation(&application, cx);
@@ -2419,8 +2441,10 @@ impl ShellRuntime {
             policy,
             application.clone(),
         );
+        let init_guard = self.push_initializing_view(Some(view.clone()), object.clone());
         let initialized = self.initialize(&object, None);
         let nested = self.flush_pending_nested_views(window, cx);
+        drop(init_guard);
         if let Err(error) = initialized.and(nested) {
             if let Some(application) = application {
                 self.release_application_generation(&application, cx);
@@ -2499,12 +2523,14 @@ impl ShellRuntime {
             policy,
             application,
         );
+        let init_guard = self.push_initializing_view(Some(view), object.clone());
         let initialized = self.initialize(&object, initial_props);
         let nested = self.flush_pending_nested_views(window, cx);
         // The queue was empty before init entered. Draining its whole causal
         // wave here therefore assigns only init continuations to the child and
         // prevents a throwing init from leaving work beyond local rollback.
         let init_jobs = scheduler::drain_jobs_transactionally(self, window, cx);
+        drop(init_guard);
         if let Err(error) = initialized.and(nested).and(init_jobs) {
             scheduler::rollback_runtime_tasks(task_checkpoint);
             let released = self.release_view_handle(handle, cx);
@@ -2542,8 +2568,9 @@ impl ShellRuntime {
         let provenance = self
             .initializing_views
             .borrow()
-            .last()
-            .cloned()
+            .iter()
+            .rev()
+            .find_map(|(owner, view)| (owner.as_ref() == Some(&parent)).then(|| view.clone()))
             .unwrap_or(parent_object);
         let application =
             scope::current_application_generation().or_else(|| provenance.application_generation());
@@ -2762,10 +2789,13 @@ impl ShellRuntime {
                             application: view_type.application.clone(),
                             policy: policy.clone(),
                         };
-                        if !provenance.is_current() {
+                        if !provenance.is_active() {
                             anyhow::bail!(
                                 "this Entity creation does not belong to the current application"
                             );
+                        }
+                        if owner.read(cx).is_retired() {
+                            anyhow::bail!("this Entity creation belongs to a retired view");
                         }
                         runtime
                             .in_flight_nested
@@ -2804,7 +2834,7 @@ impl ShellRuntime {
                         let runtime = runtime.upgrade().ok_or_else(|| {
                             anyhow!("the shell runtime shut down before a dock edit was applied")
                         })?;
-                        if !provenance.is_current() {
+                        if !provenance.is_active() {
                             anyhow::bail!(
                                 "this dock edit does not belong to the current application"
                             );
@@ -2829,7 +2859,7 @@ impl ShellRuntime {
                         let runtime = runtime.upgrade().ok_or_else(|| {
                             anyhow!("the shell runtime shut down during child update")
                         })?;
-                        if !provenance.is_current() {
+                        if !provenance.is_active() {
                             anyhow::bail!("this Entity does not belong to the current application");
                         }
                         let handle = runtime
@@ -2860,7 +2890,7 @@ impl ShellRuntime {
                         let runtime = runtime.upgrade().ok_or_else(|| {
                             anyhow!("the shell runtime shut down during child notification")
                         })?;
-                        if !provenance.is_current() {
+                        if !provenance.is_active() {
                             anyhow::bail!("this Entity does not belong to the current application");
                         }
                         let view = runtime
@@ -2893,7 +2923,7 @@ impl ShellRuntime {
                         let runtime = runtime.upgrade().ok_or_else(|| {
                             anyhow!("the shell runtime shut down during child release")
                         })?;
-                        if !provenance.is_current() {
+                        if !provenance.is_active() {
                             anyhow::bail!("this Entity does not belong to the current application");
                         }
                         let alias = runtime
@@ -3018,7 +3048,7 @@ impl ShellRuntime {
             window,
             cx,
             ScopePhase::Event,
-            Some(view),
+            Some(view.clone()),
             policy,
             application.clone(),
         );
@@ -3031,9 +3061,12 @@ impl ShellRuntime {
                 return Err(error);
             }
         };
+        let init_guard = self.push_initializing_view(Some(view), object.clone());
         let initialized = self.initialize(&object, None);
         let nested = self.flush_pending_nested_views(window, cx);
-        if let Err(error) = initialized.and(nested) {
+        let init_jobs = scheduler::drain_jobs_transactionally(self, window, cx);
+        drop(init_guard);
+        if let Err(error) = initialized.and(nested).and(init_jobs) {
             if let Some(application) = application {
                 self.release_application_generation(&application, cx);
             }
@@ -3101,12 +3134,39 @@ impl ShellRuntime {
         })
     }
 
+    pub(crate) fn push_pending_render_drain(&self, drain: scheduler::PendingRenderDrain) {
+        self.pending_render_drains.borrow_mut().push_back(drain);
+    }
+
+    pub(crate) fn flush_pending_render_drains(
+        self: &Rc<Self>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        if self.flushing_render_drains.replace(true) {
+            return;
+        }
+        let _flush_guard = NestedFlushGuard(&self.flushing_render_drains);
+        while let Some(drain) = self.pending_render_drains.borrow_mut().pop_front() {
+            scheduler::run_pending_render_drain(self, drain, window, cx);
+        }
+    }
+
+    fn push_initializing_view(
+        &self,
+        owner: Option<Entity<ScriptView>>,
+        object: ViewObject,
+    ) -> InitializingViewGuard<'_> {
+        self.initializing_views.borrow_mut().push((owner, object));
+        InitializingViewGuard(self)
+    }
+
     /// Whether `object` is the instance whose `init` is running now.
     pub(super) fn is_initializing<'js>(&self, ctx: &Ctx<'js>, object: &Object<'js>) -> bool {
         self.initializing_views
             .borrow()
             .last()
-            .and_then(|view| view.value.clone().restore(ctx).ok())
+            .and_then(|(_, view)| view.value.clone().restore(ctx).ok())
             .is_some_and(|value| &value == object)
     }
 
@@ -3115,8 +3175,7 @@ impl ShellRuntime {
         object: &ViewObject,
         initial_props: Option<Persistent<Value<'static>>>,
     ) -> Result<()> {
-        self.initializing_views.borrow_mut().push(object.clone());
-        let initialized = self.with_jit_suspended(|| {
+        self.with_jit_suspended(|| {
             self.with_js(|ctx| {
                 let instance = object.value.clone().restore(ctx)?;
                 let initialize: Function = ctx.globals().get("__initialize")?;
@@ -3126,10 +3185,7 @@ impl ShellRuntime {
                 };
                 initialize.call::<_, ()>((instance, props))
             })
-        });
-        let initializing = self.initializing_views.borrow_mut().pop();
-        debug_assert!(initializing.is_some());
-        initialized
+        })
     }
 
     fn update_in_context<'js>(
@@ -3206,7 +3262,14 @@ impl ShellRuntime {
                 self.callbacks.borrow_mut().abort();
                 self.arena.borrow_mut().reset();
                 if let Some(view) = view {
-                    scheduler::drain_after_render(self, view, policy, window, cx);
+                    scheduler::drain_after_render(
+                        self,
+                        view,
+                        policy,
+                        object.application_generation(),
+                        window,
+                        cx,
+                    );
                 }
                 return Err(error);
             }
@@ -3232,7 +3295,14 @@ impl ShellRuntime {
         // the last path it belongs on. It costs one check when nothing is
         // queued, which is the usual case.
         if let Some(view) = view {
-            scheduler::drain_after_render(self, view, policy, window, cx);
+            scheduler::drain_after_render(
+                self,
+                view,
+                policy,
+                object.application_generation(),
+                window,
+                cx,
+            );
         }
 
         Ok(snapshot)
@@ -3272,12 +3342,21 @@ impl ShellRuntime {
     /// Retires every callback registered by one retained view, including
     /// generations still held by a rendered frame.
     pub(crate) fn retire_view_callbacks(&self, entity_id: gpui::EntityId) {
+        self.retired_views.borrow_mut().insert(entity_id);
         self.callbacks.borrow_mut().retain(|entry| {
             entry
                 .view
                 .as_ref()
                 .is_none_or(|owner| owner.entity_id() != entity_id)
         });
+    }
+
+    pub(crate) fn forget_retired_view(&self, entity_id: gpui::EntityId) {
+        self.retired_views.borrow_mut().remove(&entity_id);
+    }
+
+    pub(crate) fn is_view_retired(&self, entity_id: gpui::EntityId) -> bool {
+        self.retired_views.borrow().contains(&entity_id)
     }
 
     /// How many handlers are callable right now. See [`CallbackArena::len`].
@@ -6390,15 +6469,24 @@ globalThis.__gpui = (() => {
     release: () => __focus_release(handle),
   });
 
+  const withEntityOwner = (enterOwner, fn) => {
+    if (!enterOwner || !enterOwner()) return fn();
+    try {
+      return fn();
+    } finally {
+      __leave_task_scope();
+    }
+  };
+
   // `__entity` is the discriminant `.child()` needs: every retained handle in
   // this API is a `{__handle: number}` wrapper, so a focus handle and an entity
   // are otherwise indistinguishable, and mounting the wrong one would report a
   // released view rather than the mistake that was made.
-  const entity = (handle) => ({
+  const entity = (handle, enterOwner) => ({
     __entity: true,
     __handle: handle,
-    set_props: (props) => __view_set_props(handle, props),
-    release: () => __view_release(handle),
+    set_props: (props) => withEntityOwner(enterOwner, () => __view_set_props(handle, props)),
+    release: () => withEntityOwner(enterOwner, () => __view_release(handle)),
   });
 
   // A dockable layout, and the commands its chrome carries.
@@ -6849,69 +6937,52 @@ globalThis.__gpui = (() => {
     return cachedTheme;
   };
 
-  // Every member of `cx` gates on `check()` and then does ordinary ambient
-  // work. That gate is the whole difference between a call-scoped `cx` and an
-  // async one, so a member added here is right for both flavors at once and
-  // the two cannot drift.
-  const contextMembers = (check) => ({
-    theme: () => {
+  // Every member of `cx` validates through `check()` and runs inside the
+  // task's owner scope when `enterTask` is provided. Defining them once here
+  // keeps call-scoped and async contexts in lockstep.
+  const contextMembers = (check, enterTask, leaveTask) => {
+    const inScope = (fn) => {
       check();
-      return currentTheme();
-    },
-    open_url: (url) => {
-      check();
-      return __open_url(String(url));
-    },
-    read_from_clipboard: () => {
-      check();
-      return __clipboard_read_text();
-    },
-    write_to_clipboard: (text) => {
-      check();
-      return __clipboard_write_text(String(text));
-    },
-    focus_handle: () => {
-      check();
-      return focusHandle(__focus_handle_new());
-    },
-    // `App::bind_keys`, so `cx`. The keymap belongs to the application rather
-    // than to a window, which is why binding a chord in one view makes it live
-    // everywhere its `context` predicate matches.
-    bind_keys: (bindings) => {
-      check();
-      if (!Array.isArray(bindings)) {
-        throw new TypeError(
-          "cx.bind_keys(bindings) expects an array of { keystroke, action, context? }",
-        );
+      if (!enterTask || !enterTask()) return fn();
+      try {
+        return fn();
+      } finally {
+        leaveTask();
       }
-      return __bind_keys(bindings);
-    },
-    new: (Class, props) => {
-      check();
-      if (typeof Class !== "function" || !(Class.prototype instanceof View)) {
-        throw new TypeError("cx.new(Class, props) expects a View subclass");
-      }
-      return entity(__view_new(Class, props));
-    },
-    spawn: (body, opts) => {
-      check();
-      return __spawn(body, opts);
-    },
-    sleep: (ms) => {
-      check();
-      return __sleep(ms);
-    },
-    timer: {
-      after: (ms, handler, opts) => {
-        check();
-        return __timer_after(ms, handler, opts);
+    };
+    return {
+      theme: () => inScope(() => currentTheme()),
+      open_url: (url) => inScope(() => __open_url(String(url))),
+      read_from_clipboard: () => inScope(() => __clipboard_read_text()),
+      write_to_clipboard: (text) => inScope(() => __clipboard_write_text(String(text))),
+      focus_handle: () => inScope(() => focusHandle(__focus_handle_new())),
+      // `App::bind_keys`, so `cx`. The keymap belongs to the application rather
+      // than to a window, which is why binding a chord in one view makes it live
+      // everywhere its `context` predicate matches.
+      bind_keys: (bindings) =>
+        inScope(() => {
+          if (!Array.isArray(bindings)) {
+            throw new TypeError(
+              "cx.bind_keys(bindings) expects an array of { keystroke, action, context? }",
+            );
+          }
+          return __bind_keys(bindings);
+        }),
+      new: (Class, props) =>
+        inScope(() => {
+          if (typeof Class !== "function" || !(Class.prototype instanceof View)) {
+            throw new TypeError("cx.new(Class, props) expects a View subclass");
+          }
+          return entity(__view_new(Class, props), __capture_entity_enter());
+        }),
+      spawn: (body, opts) => inScope(() => __spawn(body, opts)),
+      sleep: (ms) => inScope(() => __sleep(ms)),
+      timer: {
+        after: (ms, handler, opts) => inScope(() => __timer_after(ms, handler, opts)),
+        every: (ms, handler, opts) => inScope(() => __timer_every(ms, handler, opts)),
       },
-      every: (ms, handler, opts) => {
-        check();
-        return __timer_every(ms, handler, opts);
-      },
-    },
-  });
+    };
+  };
 
   // A description recorded once and filled per call.
   //
@@ -7809,6 +7880,14 @@ impl ShellRuntime {
             globals.set(
                 "__async_cx",
                 Func::from(async_context_object),
+            )?;
+            globals.set(
+                "__capture_entity_enter",
+                Func::from(capture_entity_enter),
+            )?;
+            globals.set(
+                "__leave_task_scope",
+                Func::from(pop_task_guard),
             )?;
 
             let attach_runtime = runtime.clone();
@@ -9580,16 +9659,69 @@ pub(crate) enum ContextBinding {
     Task(Rc<TaskBinding>),
 }
 
+#[derive(Clone)]
 pub(crate) struct TaskBinding {
+    pub(crate) runtime: std::rc::Weak<ShellRuntime>,
     pub(crate) owner: Option<WeakEntity<ScriptView>>,
+    pub(crate) policy: Option<std::rc::Weak<Policy>>,
     pub(crate) application: Option<std::rc::Weak<ApplicationGeneration>>,
 }
 
+thread_local! {
+    static ENTERED_TASK_GUARDS: RefCell<Vec<scope::CallScopeGuard>> = const { RefCell::new(Vec::new()) };
+}
+
+fn push_task_guard(guard: scope::CallScopeGuard) {
+    ENTERED_TASK_GUARDS.with_borrow_mut(|guards| guards.push(guard));
+}
+
+fn pop_task_guard() {
+    let popped = ENTERED_TASK_GUARDS.with_borrow_mut(Vec::pop);
+    debug_assert!(popped.is_some());
+}
+
 impl TaskBinding {
+    fn from_current_scope() -> Option<Self> {
+        let policy = scope::current_policy()?;
+        Some(Self {
+            runtime: scope::current_runtime()
+                .map_or_else(std::rc::Weak::new, |runtime| Rc::downgrade(&runtime)),
+            owner: scope::current_view().map(|view| view.downgrade()),
+            policy: Some(Rc::downgrade(&policy)),
+            application: scope::current_application_generation()
+                .as_ref()
+                .map(Rc::downgrade),
+        })
+    }
+
     fn ended(&self) -> bool {
         self.application
             .as_ref()
             .is_some_and(|generation| generation.upgrade().is_none_or(|g| !g.is_active()))
+            || self.owner.as_ref().is_some_and(|owner| {
+                owner.upgrade().is_none()
+                    || self
+                        .runtime
+                        .upgrade()
+                        .is_some_and(|runtime| runtime.is_view_retired(owner.entity_id()))
+            })
+    }
+
+    fn enter_scope(&self) -> Option<(scope::CallScopeGuard, u64)> {
+        let view = match &self.owner {
+            Some(owner) => Some(owner.upgrade()?),
+            None => None,
+        };
+        let application = match &self.application {
+            Some(generation) => Some(generation.upgrade()?),
+            None => None,
+        };
+        let policy = self
+            .policy
+            .as_ref()
+            .and_then(std::rc::Weak::upgrade)
+            .or_else(scope::current_policy)?;
+        scope::enter_owner(view, policy, application)
     }
 
     /// The view a bare `cx.notify()` redraws: the owner; the running view only
@@ -9618,7 +9750,15 @@ impl ContextBinding {
                 "this cx belongs to a build of the script that was reloaded or closed; its \
                  tasks have to stop",
             )),
-            Self::Ambient | Self::Task(_) => scope::with_current_app(body).ok_or_else(|| {
+            Self::Task(_) => scope::with_current_app(body).ok_or_else(|| {
+                Exception::throw_type(
+                    ctx,
+                    "this cx has no host call to speak for. An async cx works inside the task \
+                     that owns it: from a handler the scheduler resumed, not from a bare \
+                     promise callback or after the task was cancelled.",
+                )
+            }),
+            Self::Ambient => scope::with_current_app(body).ok_or_else(|| {
                 Exception::throw_type(
                     ctx,
                     "this cx has no host call to speak for. An async cx works inside the task \
@@ -9806,13 +9946,31 @@ fn set_pointer_geometry<'js>(
 /// `globalThis.__async_cx()`. A free function rather than a closure because it
 /// has to be generic over the JS lifetime.
 fn async_context_object<'js>(ctx: Ctx<'js>) -> JsResult<Object<'js>> {
-    context_object(&ctx, ContextBinding::Ambient)
+    let binding = TaskBinding::from_current_scope()
+        .map_or(ContextBinding::Ambient, |task| ContextBinding::Task(Rc::new(task)));
+    context_object(&ctx, binding)
+}
+
+fn capture_entity_enter<'js>(ctx: Ctx<'js>) -> JsResult<Value<'js>> {
+    let owner = TaskBinding::from_current_scope();
+    Func::from(move || -> bool {
+        if !scope::current_phase().is_some_and(ScopePhase::allows_notify) {
+            return false;
+        }
+        owner
+            .as_ref()
+            .filter(|task| !task.ended())
+            .and_then(TaskBinding::enter_scope)
+            .map(|(guard, _)| push_task_guard(guard))
+            .is_some()
+    })
+    .into_js(&ctx)
 }
 
 /// The script-side `cx`.
 ///
-/// It carries no state a script can reach — only the binding above, closed over
-/// by the members — so `Object.keys(cx)` still shows nothing but methods and a
+/// It carries no state a script can reach: only the binding above, closed over
+/// by the members, so `Object.keys(cx)` still shows nothing but methods and a
 /// generation cannot be forged.
 fn context_object<'js>(ctx: &Ctx<'js>, binding: ContextBinding) -> JsResult<Object<'js>> {
     let object = Object::new(ctx.clone())?;
@@ -9823,7 +9981,22 @@ fn context_object<'js>(ctx: &Ctx<'js>, binding: ContextBinding) -> JsResult<Obje
         let binding = binding.clone();
         move |ctx: Ctx<'_>| -> JsResult<()> { binding.check(&ctx) }
     });
-    let members: Object = members.call((check,))?;
+    let enter_task = Func::from({
+        let binding = binding.clone();
+        move || -> bool {
+            match &binding {
+                ContextBinding::Task(task) if !task.ended() => task
+                    .enter_scope()
+                    .map(|(guard, _)| push_task_guard(guard))
+                    .is_some(),
+                ContextBinding::Task(_) | ContextBinding::Call(_) | ContextBinding::Ambient => {
+                    false
+                }
+            }
+        }
+    });
+    let leave_task = Func::from(pop_task_guard);
+    let members: Object = members.call((check, enter_task, leave_task))?;
     for name in members.keys::<String>() {
         let name = name?;
         let member: Value = members.get(&name as &str)?;
@@ -9853,9 +10026,14 @@ fn context_object<'js>(ctx: &Ctx<'js>, binding: ContextBinding) -> JsResult<Obje
                     ));
                 }
 
+                binding.check(&ctx)?;
                 let current = match binding {
                     ContextBinding::Task(task) => task.view(),
                     _ => scope::current_view(),
+                };
+                let _task_guard = match binding {
+                    ContextBinding::Task(task) => task.enter_scope(),
+                    _ => None,
                 };
                 let target = match target.0 {
                     None => None,
@@ -11527,6 +11705,7 @@ export default class BrokenChild extends View {
                 &runtime,
                 parent_entity.clone(),
                 crate::policy::default(),
+                None,
                 window,
                 cx,
             )

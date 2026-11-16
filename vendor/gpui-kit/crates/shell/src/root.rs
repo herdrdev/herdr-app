@@ -12,7 +12,7 @@
 //! `gpui-base` only (see `docs/gpui-shell.md` §4.2), so the equivalent
 //! host has to be written here rather than reused.
 
-use std::{path::PathBuf, rc::Rc, time::Duration};
+use std::{collections::HashSet, path::PathBuf, rc::Rc, time::Duration};
 
 use gpui::{
     Anchor, AnyElement, AnyView, App, AppContext as _, ClickEvent, ClipboardItem, Context,
@@ -298,6 +298,27 @@ impl ShellRoot {
     /// The view this window was opened with, below every overlay.
     pub fn content(&self) -> &AnyView {
         &self.content
+    }
+
+    pub fn build_errors(&self, cx: &App) -> Vec<String> {
+        let mut seen = HashSet::new();
+        let mut errors = Vec::new();
+        let mut visit = |any_view: &AnyView| {
+            if let Ok(view) = any_view.clone().downcast::<ScriptView>()
+                && seen.insert(view.entity_id())
+            {
+                view.read(cx)
+                    .collect_build_errors(cx, &mut seen, &mut errors);
+            }
+        };
+        visit(&self.content);
+        for dialog in &self.dialogs {
+            visit(&dialog.content);
+        }
+        if let Some(sheet) = &self.sheet {
+            visit(&sheet.content);
+        }
+        errors
     }
 
     pub(crate) fn application(&self) -> Option<&MountedApplication> {
