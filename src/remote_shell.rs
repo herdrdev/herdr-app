@@ -9,11 +9,34 @@ pub fn launch(command: Vec<String>) -> Vec<String> {
     in_shell("\"$@\"; exec \"$0\" -li", "command $argv[2..]; exec $argv[1] -li", "\"$@\"; exec \"${SHELL:-sh}\" -i", command)
 }
 
+/// The shell becomes the program (`exec`), so it ends with the program's exit code. A
+/// missing program fails as the core reports one: exit 127, `cannot start "x": ...`, and
+/// it sets the title to `$HERDR_LAUNCH`, which the program never sees (`cannot_start`).
+/// A program named like an option (`-x`) runs by its path: bash's and zsh's `exec`
+/// would read it as one, dash's takes no `--`, and a script's `#!` interpreter gets the
+/// path as its first argument. fish's `exec` reads no options.
+pub const POSIX_EXEC: &str = r#"p=$1; case $p in -*) p=$(command -v -- "$p") && case $p in /*) ;; */*) p=./$p ;; *) false ;; esac ;; *) command -v -- "$p" ;; esac >/dev/null 2>&1 || { printf '\033]2;%s\007cannot start "%s": No such file or directory\n' "$HERDR_LAUNCH" "$1" >&2; exit 127; }; unset HERDR_LAUNCH; shift; exec "$p" "$@""#;
+pub const FISH_EXEC: &str = r#"if not command -q -- $argv[2]; printf '\e]2;%s\acannot start "%s": No such file or directory\n' "$HERDR_LAUNCH" $argv[2] >&2; exit 127; end; set -e HERDR_LAUNCH; set -l p $argv[2]; string match -q -- '-*/*' $p; and set p ./$p; exec $p $argv[3..]"#;
+
+/// `command` in that machine's shell, which then becomes it (`POSIX_EXEC`).
+pub fn exec(command: Vec<String>) -> Vec<String> {
+    in_shell(POSIX_EXEC, FISH_EXEC, POSIX_EXEC, command)
+}
+
+/// Whether a terminal's `POSIX_EXEC` or `FISH_EXEC` said it can't start its program: the
+/// title in its `terminal.get` record is its launch token, which only the wrapper sees.
+pub fn cannot_start(record: &serde_json::Value) -> bool {
+    record["labels"]["herdr.launch"].as_str().is_some_and(|t| !t.is_empty() && record["title"] == t)
+}
+
+fn quote(s: &str) -> String {
+    s.replace('\'', "'\\''")
+}
+
 /// Select the shell there, not the viewer's shell. The core may have started
 /// with only the SSH session's minimal PATH; load login and interactive profiles
 /// before checking or launching. Only our fixed scripts become shell source.
 fn in_shell(posix: &str, fish: &str, fallback: &str, args: Vec<String>) -> Vec<String> {
-    let quote = |s: &str| s.replace('\'', "'\\''");
     let script = format!(
         r#"shell=${{SHELL:-/bin/sh}}
 case "${{shell##*/}}" in
@@ -66,11 +89,13 @@ mod tests {
         fn run(&self, argv: Vec<String>, shell: Option<&str>) -> Output {
             let mut cmd = Command::new(&argv[0]);
             cmd.args(&argv[1..])
+                .current_dir(&self.0)
                 .env_clear()
                 .env("HOME", &self.0)
                 .env("ZDOTDIR", &self.0)
                 .env("PATH", "/usr/bin:/bin:/usr/sbin:/sbin")
                 .env("TERM", "dumb")
+                .env("HERDR_LAUNCH", "test-token")
                 .stdin(Stdio::null());
             if let Some(shell) = shell {
                 cmd.env("SHELL", shell);
@@ -200,6 +225,91 @@ mod tests {
         assert!(String::from_utf8(out.stdout).unwrap().contains("herdr-has:printf\n"));
         let out = home.run(launch(vec!["/usr/bin/printf".into(), "%s".into(), "literal 'argument'".into()]), Some("/bin/tcsh"));
         assert!(String::from_utf8(out.stdout).unwrap().contains("literal 'argument'"));
+    }
+
+    /// A split's program replaces the shell: its exit code is the terminal's,
+    /// and a missing one fails like the core's own `cannot start`.
+    #[test]
+    fn remote_programs_replace_the_shell() {
+        let home = Home::new();
+        let config = home.0.join(".config/fish");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(config.join("config.fish"), "if status is-interactive\nset -gx PATH \"$HOME/agent bin\" $PATH\nend\n").unwrap();
+        std::fs::write(home.0.join("agent bin/exits"), "#!/bin/sh\nprintf '<%s>\\n' \"$HERDR_LAUNCH\" \"$@\"\nexit 7\n").unwrap();
+        use std::os::unix::fs::PermissionsExt;
+        std::fs::set_permissions(home.0.join("agent bin/exits"), std::fs::Permissions::from_mode(0o755)).unwrap();
+        let arg = "a 'quoted' $HOME; $(not-a-command)\nnext line";
+        for shell in [Some("/bin/bash"), Some("/bin/zsh"), Some("/usr/bin/fish"), None] {
+            if shell.is_some_and(|s| !std::path::Path::new(s).exists()) {
+                continue;
+            }
+            let out = home.run(exec(vec!["exits".into(), arg.into(), "".into()]), shell);
+            let stdout = String::from_utf8_lossy(&out.stdout);
+            if shell.is_some() {
+                // The program never sees the launch token.
+                assert!(stdout.ends_with(&format!("<>\n<{arg}>\n<>\n")), "{shell:?}: {stdout:?} {}", String::from_utf8_lossy(&out.stderr));
+                assert_eq!(out.status.code(), Some(7), "{shell:?}");
+            }
+            let out = home.run(exec(vec!["no-such-program".into()]), shell);
+            assert_eq!(out.status.code(), Some(127), "{shell:?}");
+            assert!(String::from_utf8_lossy(&out.stderr).contains("cannot start \"no-such-program\": No such file or directory"), "{shell:?}: {}", String::from_utf8_lossy(&out.stderr));
+        }
+    }
+
+    /// The program is argv[0] even when it looks like an option: `--` is a missing
+    /// program, not the end of the wrapper's options, and `-dashprog` still runs.
+    #[test]
+    fn programs_named_like_options_are_programs() {
+        use std::os::unix::fs::PermissionsExt;
+        let home = Home::new();
+        let config = home.0.join(".config/fish");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(config.join("config.fish"), "if status is-interactive\nset -gx PATH \"$HOME/agent bin\" $PATH\nend\n").unwrap();
+        // One on the rc PATH, one by a path relative to the folder it starts in.
+        for path in [home.0.join("agent bin/-dashprog"), home.0.join("-dir/prog")] {
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(&path, "#!/bin/sh\nprintf '<%s>\\n' dashprog \"$@\"\n").unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+        }
+        let path = format!("PATH={}:/usr/bin:/bin", home.0.join("agent bin").display());
+        let cases: [(&[&str], Result<&str, &str>); 5] = [
+            (&["--", "/bin/echo", "X"], Err("--")),
+            (&["--"], Err("--")),
+            (&["-h"], Err("-h")),
+            (&["-dashprog", "a"], Ok("<dashprog>\n<a>\n")),
+            (&["-dir/prog", "b"], Ok("<dashprog>\n<b>\n")),
+        ];
+        for (cmd, want) in cases {
+            let cmd = cmd.iter().map(|a| a.to_string()).collect::<Vec<_>>();
+            let mut runs = vec![];
+            for shell in ["/bin/bash", "/bin/zsh", "/usr/bin/fish"] {
+                runs.push((Some(shell), exec(cmd.clone())));
+            }
+            // Each shell's own `command` and `exec`, as a local split runs them.
+            for sh in ["/bin/sh", "/bin/dash", "/bin/bash", "/bin/zsh", "/usr/bin/fish"] {
+                let script = if sh.ends_with("/fish") { FISH_EXEC } else { POSIX_EXEC };
+                let mut argv = vec!["/usr/bin/env".to_owned(), path.clone(), sh.into(), "-c".into(), script.into(), sh.into()];
+                argv.extend(cmd.clone());
+                runs.push((Some(sh), argv));
+            }
+            for (shell, argv) in runs {
+                if shell.is_some_and(|s| !std::path::Path::new(s).exists()) {
+                    continue;
+                }
+                let out = home.run(argv.clone(), shell);
+                let (stdout, stderr) = (String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
+                match want {
+                    Ok(want) => {
+                        assert!(stdout.ends_with(want), "{argv:?}: {stdout:?} {stderr}");
+                        assert_eq!(out.status.code(), Some(0), "{argv:?}");
+                    }
+                    Err(name) => {
+                        assert_eq!(out.status.code(), Some(127), "{argv:?}: {stdout:?}");
+                        assert!(stderr.contains(&format!("\x1b]2;test-token\x07cannot start \"{name}\": No such file or directory")), "{argv:?}: {stderr:?}");
+                    }
+                }
+            }
+        }
     }
 
     #[test]

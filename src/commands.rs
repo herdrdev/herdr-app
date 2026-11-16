@@ -60,6 +60,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("pane.rename", &[opt("pane"), opt("name")], "Name a pane (default: the focused one; asks the person when no name; an empty name: unnamed again)."),
     cmd("pane.focus", &[opt("pane"), opt("terminal")], "Focus a pane (or the pane showing a terminal)."),
     cmd("pane.go", &[req("direction")], "Focus the pane or focusable mod to the \"left\", \"right\", \"up\" or \"down\"."),
+    cmd("pane.resize", &[req("direction"), opt("pane"), opt("px")], "Move the border of a pane (default: the focused one) \"left\", \"right\", \"up\" or \"down\" by px (default 40), like dragging the divider."),
     cmd("pane.swap", &[opt("direction"), opt("pane"), opt("target")], "Swap a pane (default: the focused one) with its neighbor in a direction, or with another pane of its tab (target). Give exactly one of direction or target."),
     cmd("terminal.peek", &[req("terminal")], "Peek at a running terminal over the tab, with keep-as-tab and close controls."),
     cmd("terminal.show", &[opt("terminal"), opt("pane")], "Show a terminal in a pane for now, in place of its own (no terminal: back)."),

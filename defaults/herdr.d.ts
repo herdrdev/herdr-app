@@ -62,6 +62,7 @@ export function playSound(sound: string): null;
  * space, selected tab and keyboard focus; background tabs are appended in creation order.
  * With no space shown, a new space is shown even with focus: false.
  * Panes: pane.split {direction: "right" | "down", pane?}, pane.close {pane?}, pane.zoom {pane?}, pane.rename {pane?, name},
+ *   pane.resize {direction, pane?, px?},
  *   pane.focus {pane | terminal}, pane.go {direction}, pane.swap {pane?, direction | target}.
  *   Pane menus get target { pane, terminal }.
  * Terminals: terminal.open {argv?, folder?, place?: "tab" | "right" | "down"}, terminal.kill {terminal},
@@ -197,8 +198,8 @@ export function agents(): AgentInfo[];
 /** History scroll as Ghostty reports it, read fresh by panes().
  *  Rows from the top of retained history; `from_bottom` is 0 at the end.
  *  PaneInfo.scroll is null on the alternate screen or with no view.
- *  Mods refresh on user scrolling or transitions between end/history/alternate
- *  screen, not on ordinary output that only changes the numbers. */
+ *  Mods refresh only on transitions between end/history/alternate screen,
+ *  not on scrolling or output within one of those states that only changes the numbers. */
 export interface PaneScroll {
   total: number;
   offset: number;
