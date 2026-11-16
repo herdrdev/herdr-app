@@ -73,7 +73,7 @@ export function playSound(sound: string): null;
  *   terminal.adjust_selection {terminal?, direction: "left" | "right" | "up" | "down" | "page_up" | "page_down" | "home" | "end" | "line_start" | "line_end"} (moves the inclusive moving end; view follows; fails without selection).
  *   terminal.clear_selection {terminal?}. No default keys or built-in copy mode.
  *   terminal.select_all {terminal?} (whole screen and scrollback, or only the alternate screen; Cmd+A on macOS).
- *   terminal.right_click {to: "program" | "menu", terminal?} (right-clicks to a program that takes the mouse; Shift: the menu).
+ *   terminal.right_click {to: "program" | "menu", terminal?} (right-clicks are the program's own while it tracks the mouse; "menu" pins Herdr's; Shift: the menu).
  *   terminal.scroll {lines | pages | to: "top" | "bottom", terminal?} (Herdr's view of the history: negative goes up; pages may be fractional).
  * Agents: agent.next, agent.prev (the agents list's order), agent.focus {terminal} (sub-agents too).
  * Layout (the shown layout's nodes by id): layout.toggle|show|hide {id}, layout.resize {id, px | weight},

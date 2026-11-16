@@ -2138,10 +2138,14 @@ impl AppWindow {
     /// What a terminal view takes from the core's facts: its folder, where right-clicks go.
     fn tell_term(&self, view: &Entity<TerminalView>, addr: &str, cx: &mut Context<Self>) {
         let cwd = self.cwds.get(addr).map(std::path::PathBuf::from);
-        let to_program = self.live.get(addr).and_then(|r| r.pointer("/labels/herdr.right-click")).and_then(Value::as_str) == Some("program");
+        let right_click = match self.live.get(addr).and_then(|r| r.pointer("/labels/herdr.right-click")).and_then(Value::as_str) {
+            Some("program") => Some(true),
+            Some("menu") => Some(false),
+            _ => None,
+        };
         view.update(cx, |v, _| {
             v.cwd = cwd;
-            v.right_click_to_program = to_program;
+            v.right_click = right_click;
         });
     }
 
@@ -3286,7 +3290,7 @@ impl AppWindow {
             "terminal.right_click" => {
                 let to = match Self::arg(a, "to") {
                     Some("program") => "program",
-                    Some("menu") => "",
+                    Some("menu") => "menu",
                     other => return self.fail(format!("terminal.right_click to is \"program\" or \"menu\", not {other:?}")),
                 };
                 let t = Self::owned(a, "terminal").or_else(|| self.focused_terminal(window, cx).map(|t| t.address.clone()));

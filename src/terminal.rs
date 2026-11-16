@@ -163,8 +163,11 @@ pub struct TerminalView {
     pub cwd: Option<PathBuf>,
     /// The link under the pointer while the link modifier is held.
     link: Option<LinkTarget>,
-    /// Right-clicks go to the program when it takes the mouse (Shift: the menu).
-    pub right_click_to_program: bool,
+    /// Plain right-clicks go to the program while it tracks the mouse (its own
+    /// menu opens), Herdr's menu otherwise; Shift is always Herdr's. The pane's
+    /// `herdr.right-click` label pins Herdr's menu (`Some(false)`), or records
+    /// sending them to the program (`Some(true)`); unset follows capture.
+    pub right_click: Option<bool>,
     grid: Rc<RefCell<Grid>>,
     focus: FocusHandle,
     was_focused: bool,
@@ -311,7 +314,7 @@ impl TerminalView {
             selection_scroll: None,
             cwd: None,
             link: None,
-            right_click_to_program: false,
+            right_click: None,
             grid: Rc::new(RefCell::new(Grid {
                 vt: Vt::new(size_hint.0.max(2), size_hint.1.max(1)),
                 core: core.clone(),
@@ -1078,6 +1081,14 @@ impl TerminalView {
     /// The program tracks the mouse and Shift isn't held (Shift keeps the mouse Herdr's).
     fn takes_mouse(&self, mods: Modifiers) -> bool {
         self.grid.borrow().vt.mouse_tracking() && !mods.shift
+    }
+
+    /// Whether a plain right-click goes to the program: it does while the
+    /// program tracks the mouse — its own menu opens, agent TUIs included —
+    /// and Herdr's menu opens otherwise. Shift is always Herdr's, and the
+    /// pane's `herdr.right-click` label can pin Herdr's menu.
+    fn right_click_to_program(&self, mods: Modifiers) -> bool {
+        self.right_click != Some(false) && self.takes_mouse(mods)
     }
 
     /// Sends a mouse event to a program that tracks the mouse. Returns whether it did
@@ -2526,12 +2537,12 @@ impl Render for TerminalView {
                     this.start_selection(ev.position, cx);
                 }
             }))
-            // Right-click is Herdr's menu, even when the program tracks the mouse
-            // (agent TUIs do, and then a pane had no menu at all), unless the pane
-            // sends right-clicks to its program.
+            // Right-click is the program's own while it tracks the mouse (agent
+            // TUIs have menus of their own), Herdr's otherwise; Shift and the
+            // pane's herdr.right-click pin keep it Herdr's.
             .on_mouse_down(MouseButton::Right, cx.listener(|this, ev: &MouseDownEvent, _, cx| {
                 cx.stop_propagation();
-                if this.right_click_to_program && this.takes_mouse(ev.modifiers) {
+                if this.right_click_to_program(ev.modifiers) {
                     this.mouse(GHOSTTY_MOUSE_ACTION_PRESS, Some(ev.button), ev.position, ev.modifiers);
                 } else {
                     cx.emit(TerminalEvent::ContextMenu(ev.position));
@@ -4062,6 +4073,81 @@ mod tests {
         assert_eq!(terminal.read_with(cx, |t, _| t.grid.borrow().vt.selection_text()), None);
     }
 
+    /// A pane for the right-click routing tests, plus a count of the Herdr
+    /// menus opened on it.
+    fn routed_pane<'a>(cx: &'a mut gpui::TestAppContext) -> (gpui::Entity<super::TerminalView>, gpui::Entity<usize>, &'a mut gpui::VisualTestContext) {
+        use gpui::*;
+
+        struct Root(Entity<super::TerminalView>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().w(px(400.)).h(px(100.)).child(self.0.clone())
+            }
+        }
+        cx.update(gpui_base::init);
+        let (root, cx) = cx.add_window_view(|_, cx| {
+            Root(cx.new(|cx| super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 5), cx)))
+        });
+        cx.run_until_parked();
+        let terminal = root.read_with(cx, |root, _| root.0.clone());
+        let menus = cx.new(|cx| {
+            cx.subscribe(&terminal, |menus: &mut usize, _, event: &super::TerminalEvent, _| {
+                if matches!(event, super::TerminalEvent::ContextMenu(_)) {
+                    *menus += 1;
+                }
+            }).detach();
+            0usize
+        });
+        (terminal, menus, cx)
+    }
+
+    fn right_click(terminal: &gpui::Entity<super::TerminalView>, cx: &mut gpui::VisualTestContext, mods: Modifiers) {
+        use gpui::{point, px, MouseButton};
+        cx.simulate_mouse_down(point(px(50.), px(50.)), MouseButton::Right, mods);
+        cx.simulate_mouse_up(point(px(50.), px(50.)), MouseButton::Right, mods);
+    }
+
+    #[gpui::test]
+    fn right_click_reaches_a_program_that_tracks_the_mouse(cx: &mut gpui::TestAppContext) {
+        use gpui::{point, px};
+        let (terminal, menus, cx) = routed_pane(cx);
+        terminal.update(cx, |t, _| t.grid.borrow_mut().vt.write(b"\x1b[?1000h"));
+        assert!(terminal.read_with(cx, |t, _| t.grid.borrow().vt.mouse_tracking()));
+        cx.simulate_mouse_down(point(px(50.), px(50.)), MouseButton::Right, Modifiers::default());
+        assert!(terminal.read_with(cx, |t, _| t.grid.borrow().buttons_down.contains(&MouseButton::Right)), "the program has the press");
+        cx.simulate_mouse_up(point(px(50.), px(50.)), MouseButton::Right, Modifiers::default());
+        assert!(!terminal.read_with(cx, |t, _| t.grid.borrow().buttons_down.contains(&MouseButton::Right)), "and the release");
+        assert_eq!(menus.read_with(cx, |menus, _| *menus), 0, "the program's own menu opens, not Herdr's");
+    }
+
+    #[gpui::test]
+    fn right_click_opens_herdr_menu_when_the_program_does_not_track_the_mouse(cx: &mut gpui::TestAppContext) {
+        let (terminal, menus, cx) = routed_pane(cx);
+        right_click(&terminal, cx, Modifiers::default());
+        assert_eq!(menus.read_with(cx, |menus, _| *menus), 1);
+        assert!(!terminal.read_with(cx, |t, _| t.grid.borrow().buttons_down.contains(&MouseButton::Right)), "the press never went to the program");
+    }
+
+    #[gpui::test]
+    fn shift_right_click_keeps_herdr_menu_while_the_program_tracks_the_mouse(cx: &mut gpui::TestAppContext) {
+        let (terminal, menus, cx) = routed_pane(cx);
+        terminal.update(cx, |t, _| t.grid.borrow_mut().vt.write(b"\x1b[?1000h"));
+        let shift = Modifiers { shift: true, ..Modifiers::default() };
+        right_click(&terminal, cx, shift);
+        assert_eq!(menus.read_with(cx, |menus, _| *menus), 1, "Shift is always Herdr's menu");
+    }
+
+    #[gpui::test]
+    fn a_pane_pinned_to_herdr_menu_keeps_it_while_the_program_tracks_the_mouse(cx: &mut gpui::TestAppContext) {
+        let (terminal, menus, cx) = routed_pane(cx);
+        terminal.update(cx, |t, _| {
+            t.grid.borrow_mut().vt.write(b"\x1b[?1000h");
+            t.right_click = Some(false);
+        });
+        right_click(&terminal, cx, Modifiers::default());
+        assert_eq!(menus.read_with(cx, |menus, _| *menus), 1, "the herdr.right-click=menu pin wins over capture");
+    }
+
     #[gpui::test]
     fn ligatures_break_at_selection_boundaries(cx: &mut gpui::TestAppContext) {
         use super::*;
@@ -4241,7 +4327,7 @@ mod tests {
 
     use super::key_bytes;
     use crate::vt::Vt;
-    use gpui::{KeyDownEvent, Keystroke, Modifiers};
+    use gpui::{KeyDownEvent, Keystroke, Modifiers, MouseButton};
 
     #[test]
     fn mouse_modifiers_reach_clicks_drags_and_wheels_in_each_encoding() {

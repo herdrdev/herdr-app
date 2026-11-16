@@ -151,7 +151,7 @@ Take a terminal's pane away and disable core keep; it keeps running (a sub-agent
 
 ## `terminal.right_click`
 
-Where right-clicks in a terminal (default: the focused one) go when its program takes the mouse: "program" or "menu" (Herdr's, the default). Shift+right-click is always the menu.
+Where right-clicks in a terminal (default: the focused one) go: while its program tracks the mouse they are the program's own (its menu opens), Herdr's menu otherwise. "menu" keeps Herdr's menu even then; "program" undoes that pin. Shift+right-click is always the menu.
 
 | Argument | Required |
 |---|---|

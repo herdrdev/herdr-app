@@ -634,9 +634,10 @@ The main ones:
   Windows, clipboard text is pasted; otherwise Ctrl+V goes to the program, which
   reads the clipboard itself). TIFF and BMP clipboard
   images are converted to PNG before sending,
-  `terminal.right_click {to: "program" | "menu", terminal?}` (where right-clicks go
-  when the program takes the mouse; kept as its label `herdr.right-click=program`;
-  Shift+right-click is always Herdr's menu),
+  `terminal.right_click {to: "program" | "menu", terminal?}` (right-clicks are the
+  program's own while it tracks the mouse — its menu opens, agent TUIs included —
+  and Herdr's menu otherwise; `to: "menu"` keeps Herdr's menu even then, kept in
+  the terminal's `herdr.right-click` label; Shift+right-click is always Herdr's menu),
   `terminal.scroll {lines | pages | to: "top" | "bottom", terminal?}` (moves Herdr's view of the
   history, not the program: negative lines or pages go up, toward history; pages may be
   fractional, one page is the terminal's rows; on the alternate screen, such as vim or less,
