@@ -28,6 +28,12 @@ static PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(&format!("{scheme_url}|{rooted_path}|{bare_path}")).expect("link pattern")
 });
 
+/// Every link in `text`, in order (terminal bidi keeps their separators
+/// left to right: bidi.rs).
+pub fn spans(text: &str) -> impl Iterator<Item = Range<usize>> + '_ {
+    PATTERN.find_iter(text).filter_map(|m| m.ok()).map(|m| m.range())
+}
+
 /// The link in `text` that covers byte `at`.
 pub fn find(text: &str, at: usize) -> Option<Range<usize>> {
     for m in PATTERN.find_iter(text) {

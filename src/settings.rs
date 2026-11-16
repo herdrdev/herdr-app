@@ -389,6 +389,9 @@ pub struct Person {
     pub terminal_cell_width: f32,
     /// Wheel and trackpad scroll multiplier, 0.1..5.
     pub terminal_scroll_speed: f32,
+    /// Draw right-to-left text (Hebrew, Arabic) in reading order in terminals.
+    #[serde(skip_serializing_if = "is_false")]
+    pub terminal_bidi: bool,
     /// The panels' font (their sizes follow zoom).
     #[serde(skip_serializing_if = "Option::is_none")]
     pub ui_font: Option<String>,
@@ -454,6 +457,10 @@ fn is_true(b: &bool) -> bool {
     *b
 }
 
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
 impl Default for Person {
     fn default() -> Self {
         Person {
@@ -467,6 +474,7 @@ impl Default for Person {
             terminal_line_height: 1.0,
             terminal_cell_width: 1.0,
             terminal_scroll_speed: 1.0,
+            terminal_bidi: false,
             ui_font: None,
             telemetry: true,
             clipboard_write: true,
@@ -497,6 +505,8 @@ pub struct Settings {
     pub terminal_cell_width: f32,
     /// Wheel and trackpad scroll multiplier, 0.1..5.
     pub terminal_scroll_speed: f32,
+    /// Render-only bidirectional text in terminal rows (bidi.rs).
+    pub terminal_bidi: bool,
     pub ui_font_family: String,
     pub ui_font_size: f32,
     /// How big the whole app is drawn (1 = as designed). The zoom keys change it.
@@ -552,6 +562,7 @@ impl Default for Settings {
             terminal_line_height: 1.0,
             terminal_cell_width: 1.0,
             terminal_scroll_speed: 1.0,
+            terminal_bidi: false,
             ui_font_family: "Geist".into(),
             ui_font_size: 13.0,
             zoom: 1.0,
@@ -595,6 +606,7 @@ impl Settings {
             terminal_line_height: look.terminal_line_height.unwrap_or(person.terminal_line_height).clamp(0.8, 2.0),
             terminal_cell_width: look.terminal_cell_width.unwrap_or(person.terminal_cell_width).clamp(0.8, 2.0),
             terminal_scroll_speed: look.terminal_scroll_speed.unwrap_or(person.terminal_scroll_speed).clamp(0.1, 5.0),
+            terminal_bidi: person.terminal_bidi,
             ui_font_family: look.ui_font.clone().or(person.ui_font.clone()).unwrap_or(d.ui_font_family),
             ui_font_size: d.ui_font_size,
             zoom: person.zoom,
@@ -1080,7 +1092,7 @@ mod tests {
     /// settings.json key.
     #[test]
     fn the_guide_explains_every_setting() {
-        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), font_weight: Some(400), ui_font: Some(String::new()), telemetry: false, clipboard_write: false, copy_on_select: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), ..Person::default() };
+        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), font_weight: Some(400), ui_font: Some(String::new()), telemetry: false, terminal_bidi: true, clipboard_write: false, copy_on_select: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), ..Person::default() };
         let keys: Vec<String> = serde_json::to_value(&all).unwrap().as_object().unwrap().keys().cloned().collect();
         let guide = include_str!("../defaults/AGENTS.md");
         let section = guide.split("## The person").nth(1).and_then(|s| s.split("\n## ").next()).unwrap_or_default();
