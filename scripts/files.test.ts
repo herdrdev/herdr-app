@@ -127,3 +127,73 @@ test("Files follows directory links one level at a time", async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+type Watch = Promise<string[]> & { root: string; cancel(): void; change(): void };
+// A timer turn runs every promise continuation that is ready.
+const settled = () => new Promise(resolve => setTimeout(resolve));
+
+// The panel over empty folders outside any repo. Folder watches stay pending
+// like the app's: until they are cancelled or their folder changes.
+async function panel() {
+  const at = { cwd: "/folder-0", machine: null as string | null };
+  const watching = new Set<Watch>();
+  const count = { listed: 0 };
+  const Files = new Function("View", "spaces", "panes", "focused", "exec", "watchFolder", "window",
+    `${source.replace(/^import .*;\n/gm, "").replace("export default class Files", "class Files")}; return Files;`)(
+    class {},
+    () => [{ id: "space", active: true, folder: at.cwd, machine: at.machine }], () => [], () => null,
+    async (command: string) => {
+      if (command !== "sh") return { code: 128, stdout: "", stderr: "not a git repository" };
+      count.listed++;
+      return { code: 0, stdout: "", stderr: "" };
+    },
+    (root: string) => {
+      let settle!: (paths: string[]) => void;
+      const watch: Watch = Object.assign(new Promise<string[]>(resolve => { settle = resolve; }), {
+        root,
+        cancel() { if (watching.delete(watch)) settle([]); },
+        change() { if (watching.delete(watch)) settle([root]); },
+      });
+      watching.add(watch);
+      return watch;
+    },
+    () => ({ platform: "linux" }),
+  );
+  const view = new Files();
+  const cx = { timer: { every() {} }, notify() {}, spawn(task: (cx: unknown) => Promise<unknown>) { task(cx); } };
+  const show = async (cwd: string, machine: string | null = null) => {
+    Object.assign(at, { cwd, machine });
+    view.refresh(cx);
+    await settled();
+  };
+  view.init({}, cx);
+  await settled();
+  return { watching, count, show, roots: () => [...watching].map(watch => watch.root) };
+}
+
+test("Files holds one folder watch while the focused pane moves through 75 quiet folders", async () => {
+  const h = await panel();
+  for (let i = 0; i < 75; i++) {
+    await h.show(`/folder-${i}`);
+    expect(h.roots()).toEqual([`/folder-${i}`]);
+  }
+});
+
+test("Files watches a folder it comes back to once, and lists it again when it changes", async () => {
+  const h = await panel();
+  await h.show("/folder-1");
+  await h.show("/folder-0");
+  expect(h.roots()).toEqual(["/folder-0"]);
+  const listed = h.count.listed;
+  [...h.watching][0].change();
+  await settled();
+  expect(h.count.listed).toBe(listed + 1);
+  expect(h.roots()).toEqual(["/folder-0"]);
+});
+
+test("Files releases its watch when the pane moves to a remote folder", async () => {
+  const h = await panel();
+  // A remote space's folder is polled, not watched.
+  await h.show("/folder-0", "vm");
+  expect(h.roots()).toEqual([]);
+});
