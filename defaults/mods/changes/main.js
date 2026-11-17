@@ -75,7 +75,10 @@ export default class Changes extends View {
       this.context = context; this.root = null; this.files = []; this.open = null;
       this.setLines([]); this.message = ""; this.input.set_value(""); this.error = null; this.note = null; this.closed = false; this.limited = false;
     }
-    if (!cwd) { this.watch(null); return; }
+    // Nothing to watch here: no folder, or a remote space's, which the timer polls.
+    // Released before git runs, as a machine that is away fails the refresh.
+    if (!cwd || on) this.watch(null);
+    if (!cwd) return;
     this.loading = true;
     cx.spawn(async (cx) => {
       try {
@@ -108,8 +111,7 @@ export default class Changes extends View {
         }
         if (key() !== context) return;
         this.root = root; this.on = on; this.hasHead = head.code === 0; this.files = files; this.limited = entries.length > 1000; this.error = null;
-        // A remote space's repo is polled by the timer, not watched.
-        this.watch(on ? null : root, cx);
+        if (!on) this.watch(root, cx);
         if (this.open && !files.some((f) => f.path === this.open)) { this.open = null; this.setLines([]); }
         // The first file's diff shows until you pick another.
         if (!this.open && !this.closed && files.length) this.open = files[0].path;

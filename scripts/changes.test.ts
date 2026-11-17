@@ -25,7 +25,8 @@ async function panel() {
     class {},
     { new: () => ({ on() {}, value: () => "", set_value() {} }) },
     () => [{ active: true, folder: at.cwd, machine: at.machine }], () => [], () => null,
-    async (_git: string, args: string[], { cwd }: { cwd: string }) => {
+    async (_git: string, args: string[], { cwd, on }: { cwd: string; on: string | null }) => {
+      if (on === "away") throw new Error("herdr.exec: away is not connected");
       if (args.includes("--show-toplevel")) {
         const repo = /^\/repo-\d+/.exec(cwd)?.[0];
         return repo ? { code: 0, stdout: `${repo}\n`, stderr: "" } : { code: 128, stdout: "", stderr: "not a git repository" };
@@ -86,6 +87,12 @@ test("Changes releases its watch when the pane leaves for a folder it does not w
   expect(h.roots()).toEqual(["/repo-1"]);
   // A remote space's repo is polled, not watched.
   await h.show("/repo-1", "vm");
+  expect(h.roots()).toEqual([]);
+});
+
+test("Changes releases its watch when the pane leaves for a remote space it cannot reach", async () => {
+  const h = await panel();
+  await h.show("/repo-0", "away");
   expect(h.roots()).toEqual([]);
 });
 
