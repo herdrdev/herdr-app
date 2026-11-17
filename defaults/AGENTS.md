@@ -1132,6 +1132,16 @@ All of it is in `herdr.d.ts`. In short:
 - App icon badge: `setBadge(text)` puts `text` on the app's Dock icon (macOS; other platforms
   ignore it), e.g. `setBadge(blocked ? String(blocked) : null)`. The last call wins; `null` or `""`
   clears it.
+- System notifications: `systemNotify({ tag, title, body })` posts a native notification
+  (Notification Center on macOS) as Herdr. A newer one from this mod with the same `tag`
+  replaces the older one; other mods' tags never clash with yours. `withdrawSystemNotification(tag)`
+  takes it down. `nextSystemNotificationClick()` resolves with `{ tag }` when the person clicks
+  one this mod posted, after Herdr comes forward; the mod decides what a click does
+  (e.g. `run("agent.focus", { terminal })`). A click on one from an earlier run (it can start
+  Herdr) waits until this mod loads. Herdr posts none on its own, and decides nothing about when:
+  check `window().active` if one should only show while the person is away. macOS asks permission
+  the first time; Send a test notification in Settings > Alerts (`app.test_notification`) asks
+  while the person is there. A build not run from an app bundle posts none.
 - `notify({ ..., action: { name, args } })`: the toast runs the command when clicked.
 - This copy: `props()`, `shared(key)` / `setShared(key, value)` (every mod
   sees it; setting re-renders all), `nextCommand()` (key commands for this

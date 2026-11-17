@@ -304,6 +304,20 @@ export function setWindowTitle(title: string | null): null;
  *  when the text changes, not on every render. */
 export function setBadge(text: string | null): null;
 
+/** Posts a native notification (Notification Center on macOS) as Herdr. A newer one from this mod
+ *  with the same `tag` replaces the older one; another mod's tags never clash with yours. Nothing
+ *  decides for you when to post: check `window().active` yourself if it should only show while
+ *  the person is away. Builds not run from an app bundle post nothing. */
+export function systemNotify(notification: { tag: string; title: string; body?: string }): null;
+
+/** Takes down this mod's notification with `tag`, if it is still up. */
+export function withdrawSystemNotification(tag: string): null;
+
+/** Waits for a click on a notification this mod posted, after Herdr comes forward. A click on one
+ *  from an earlier run (it can start Herdr) waits until this mod loads.
+ *   cx.spawn(async () => { for (;;) { const { tag } = await nextSystemNotificationClick(); ... } }); */
+export function nextSystemNotificationClick(): Promise<{ tag: string }>;
+
 /** For a floating mod: where it sits now. `vertical` on the left/right edges, horizontal on
  *  top/bottom; while dragged, where it would land. `hovered` is true while the pointer is on it
  *  (or it's dragged); a `peek` drawer is open then. Null for mods that don't float. */
