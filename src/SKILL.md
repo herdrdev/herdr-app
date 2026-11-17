@@ -91,6 +91,13 @@ the same tab. Give `direction` or `target`, not both. Focus stays with the same 
 herdr-app do pane.swap '{"pane":"p12","target":"p14"}'
 ```
 
+`pane.present {pane?, mod, props?}` shows a mod in an existing terminal pane
+in place, keeping the pane id, tab and layout slot. The terminal keeps running,
+parked, with its scrollback. The mod receives `pane` and `terminal` in its
+props. `pane.restore {pane?}` brings the terminal back in the same pane; closing
+the presented pane does the same. A presented pane reports `terminal: null` and
+its mod name.
+
 `terminal.select_all {terminal?}` selects a terminal's whole screen and scrollback,
 ready for `terminal.copy`. Without a target it follows keyboard focus. In vim and
 other alternate-screen apps, it selects only that screen. Cmd+A runs it on macOS;

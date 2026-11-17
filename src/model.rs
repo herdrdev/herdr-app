@@ -347,6 +347,17 @@ impl Model {
         true
     }
 
+    /// Replaces a pane's content in place, keeping its id and layout slot.
+    /// The caller keeps ownership of the replaced terminal.
+    pub fn set_content(&mut self, pane_id: &str, content: Content) -> bool {
+        let Some(tab) = self.tab_of_mut(pane_id) else { return false };
+        let Some(node) = tab.root.find_mut(pane_id) else { return false };
+        if !node.is_pane() { return false; }
+        let crate::layout::Kind::Block { content: current } = &mut node.kind else { return false };
+        *current = content;
+        true
+    }
+
     /// Rearranges existing panes in one tab without changing their terminal addresses.
     /// No edge swaps their places; an edge places the source beside the target.
     pub fn move_pane(&mut self, source: &str, target: &str, edge: Option<crate::layout::Edge>) -> bool {
@@ -518,6 +529,11 @@ impl Model {
         self.tabs().find_map(|c| c.root.find(pane_id)).and_then(|n| n.terminal()).map(str::to_owned)
     }
 
+    /// The terminal parked behind a presented mod pane.
+    pub fn presented_terminal_of(&self, pane_id: &str) -> Option<String> {
+        self.tabs().find_map(|c| c.root.find(pane_id)).and_then(|n| n.presented_terminal()).map(str::to_owned)
+    }
+
     pub fn pane_of(&self, address: &str) -> Option<String> {
         self.tabs().flat_map(|c| c.root.terminals()).find(|n| n.terminal() == Some(address)).map(|n| n.id.clone())
     }
@@ -654,6 +670,12 @@ pub fn now_ms() -> u64 {
 
 pub fn addresses(node: &Node) -> Vec<String> {
     node.terminals().iter().filter_map(|n| n.terminal().map(str::to_owned)).collect()
+}
+
+/// Terminals parked behind presented mod panes in a subtree. They are not
+/// visible terminals, but closing their tab or space ends them.
+pub fn presented_addresses(node: &Node) -> Vec<String> {
+    node.walk().into_iter().filter_map(|n| n.presented_terminal().map(str::to_owned)).collect()
 }
 
 #[derive(Clone, Debug, Default, PartialEq)]
@@ -893,6 +915,36 @@ mod tests {
         assert_eq!(m.address_of("x2"), None);
         assert_eq!(m.remove_pane("x1"), (false, false));
         assert_eq!(m.tab("c1").unwrap().root.panes().len(), 1);
+    }
+
+    #[test]
+    fn pane_content_can_be_presented_and_restored_in_place() {
+        let mut m = model_with_one();
+        let content = Content::Presented {
+            terminal: "t1".into(),
+            name: "viewer".into(),
+            props: json!({ "file": "README.md" }),
+        };
+        assert!(m.set_content("x1", content));
+        assert_eq!(m.address_of("x1"), None);
+        assert_eq!(m.presented_terminal_of("x1").as_deref(), Some("t1"));
+        assert_eq!(m.tab("c1").unwrap().focused_pane().as_deref(), Some("x1"));
+        assert!(m.set_content("x1", Content::Terminal { terminal: "t1".into() }));
+        assert_eq!(m.address_of("x1").as_deref(), Some("t1"));
+        assert_eq!(m.presented_terminal_of("x1"), None);
+    }
+
+    #[test]
+    fn presented_panes_are_collected_for_tab_close() {
+        let mut m = model_with_one();
+        let content = Content::Presented {
+            terminal: "t1".into(),
+            name: "viewer".into(),
+            props: Value::Null,
+        };
+        assert!(m.set_content("x1", content));
+        assert_eq!(presented_addresses(&m.tab("c1").unwrap().root), ["t1"]);
+        assert_eq!(addresses(&m.tab("c1").unwrap().root), Vec::<String>::new());
     }
 
     #[test]

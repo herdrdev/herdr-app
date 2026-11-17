@@ -289,6 +289,12 @@ struct Term {
 enum TerminalChange {
     Keep { space: String, tab: String, pane: String, name: String, target: Option<String>, axis: Axis },
     Park,
+    /// A terminal already changed to a presented pane. The core must stop
+    /// keeping it; the pane and its terminal content are already in place.
+    Present { pane: String },
+    /// A terminal restored into its pane. The content is already back; the
+    /// core must keep it under the pane's space and tab again.
+    Restore { space: String, tab: String, pane: String },
 }
 
 struct PendingTerminalChange {
@@ -1284,7 +1290,8 @@ impl AppWindow {
         let mut mods = Vec::new();
         let visit = |n: &Node, terms: &mut Vec<(String, String)>, mods: &mut Vec<(String, Instance)>| match n.content() {
             Some(Content::Terminal { terminal }) => terms.push((n.id.clone(), terminal.clone())),
-            Some(Content::Mod { name, props }) => mods.push((n.id.clone(), Instance { name: name.clone(), props: props.clone() })),
+            Some(Content::Mod { name, props } | Content::Presented { name, props, .. }) =>
+                mods.push((n.id.clone(), Instance { name: name.clone(), props: props.clone() })),
             _ => {}
         };
         let stacks = |root: &Node, mods: &mut Vec<(String, Instance)>| {
@@ -1310,7 +1317,8 @@ impl AppWindow {
         for n in visible_nodes(&self.chrome) {
             for f in n.floating.iter().filter(|f| !f.hidden) {
                 match &f.content {
-                    Content::Mod { name, props } => mods.push(float_mod(&f.id, name, props)),
+                    Content::Mod { name, props } | Content::Presented { name, props, .. } =>
+                        mods.push(float_mod(&f.id, name, props)),
                     Content::Terminal { terminal } => terms.push((floats::slot(&f.id), terminal.clone())),
                     _ => {}
                 }
@@ -1353,9 +1361,9 @@ impl AppWindow {
     /// tab (zoomed or not shown), and the overlays.
     fn owned_mods(&self) -> HashMap<String, Instance> {
         let mut out = HashMap::new();
-        let inst = |name: &String, props: &Value| Instance { name: name.clone(), props: props.clone() };
+        let inst = |name: &str, props: &Value| Instance { name: name.to_owned(), props: props.clone() };
         for n in self.chrome.walk() {
-            if let Some(Content::Mod { name, props }) = n.content() {
+            if let Some((name, props)) = n.mod_parts() {
                 out.insert(n.id.clone(), inst(name, props));
             }
             if let Kind::Stack { header: Some(h), .. } = &n.kind
@@ -1364,7 +1372,7 @@ impl AppWindow {
                 out.insert(format!("{}#header", n.id), inst(name, props));
             }
             for f in &n.floating {
-                if let Content::Mod { name, props } = &f.content {
+                if let Content::Mod { name, props } | Content::Presented { name, props, .. } = &f.content {
                     let (slot, i) = float_mod(&f.id, name, props);
                     out.insert(slot, i);
                 }
@@ -1385,7 +1393,7 @@ impl AppWindow {
             });
         for c in self.model.tabs() {
             for n in c.root.walk() {
-                if let Some(Content::Mod { name, props }) = n.content() {
+                if let Some((name, props)) = n.mod_parts() {
                     out.insert(n.id.clone(), inst(name, props));
                 }
                 if let Some((name, props)) = &header
@@ -1402,7 +1410,7 @@ impl AppWindow {
             }
             if let Some(l) = &o.layout {
                 for n in l.visible_blocks() {
-                    if let Some(Content::Mod { name, props }) = n.content() {
+                    if let Some((name, props)) = n.mod_parts() {
                         out.insert(n.id.clone(), inst(name, props));
                     }
                 }
@@ -1954,8 +1962,9 @@ impl AppWindow {
                 for p in ctx.root.panes() {
                     let focused = m.active.as_deref() == Some(pr.id.as_str()) && focused_pane.as_deref() == Some(p.id.as_str());
                     let zoomed = ctx.zoomed.as_deref() == Some(p.id.as_str());
-                    // A mod pane: what it shows, no terminal.
-                    if let Some(Content::Mod { name, .. }) = p.content() {
+                    // A mod pane: what it shows, no terminal. A presented mod
+                    // keeps its terminal parked behind it.
+                    if let Some((name, _)) = p.mod_parts() {
                         panes.push(json!({ "pane": p.id, "terminal": null, "mod": name, "tab": ctx.id, "title": name, "name": p.title, "focused": focused, "zoomed": zoomed, "movable": self.pane_movable(&p.id) }));
                         continue;
                     }
@@ -2424,6 +2433,11 @@ impl AppWindow {
         }
         let missing = self.model.tabs().flat_map(|c| c.root.terminals()).chain(self.chrome.terminals())
             .filter_map(|n| n.terminal().filter(|a| !self.live.contains_key(*a) && !self.just_born(a)).map(|a| (n.id.clone(), a.to_owned())))
+            .chain(self.model.tabs().flat_map(|c| c.root.walk()).filter_map(|n| {
+                n.presented_terminal()
+                    .filter(|a| !self.live.contains_key(*a) && !self.just_born(a) && !self.changing_terminals.contains(*a))
+                    .map(|a| (n.id.clone(), a.to_owned()))
+            }))
             .collect::<Vec<_>>();
         if !missing.is_empty() && !self.checking_closed {
             self.check_closed(missing, window, cx);
@@ -2846,6 +2860,15 @@ impl AppWindow {
                     self.model.remove_pane(&pane);
                     changed = true;
                 }
+            } else if self.model.presented_terminal_of(&pane).as_deref() == Some(&addr) {
+                let closed = match result {
+                    Ok(v) => v["state"] == "finished" || matches!(v["reason"].as_str(), Some("exited" | "killed")),
+                    Err(e) => crate::hc::error_kind(&e) == Some("not_found"),
+                };
+                if closed {
+                    self.model.remove_pane(&pane);
+                    changed = true;
+                }
             }
         }
         if changed { self.sync(window, cx); }
@@ -2864,6 +2887,9 @@ impl AppWindow {
         if let Some(p) = self.model.pane_of(addr) {
             self.model.focus_pane(&p);
             return Ok(json!({ "pane": p }));
+        }
+        if self.model.tabs().any(|c| c.root.walk().iter().any(|n| n.presented_terminal() == Some(addr))) {
+            return Err("This terminal is parked behind a presented pane; use pane.restore.".into());
         }
         if !self.live.contains_key(addr) { return Err(format!("no running terminal {addr:?}")); }
         if self.changing_terminals.contains(addr) { return Err("This terminal already has a pane change in progress.".into()); }
@@ -2895,13 +2921,83 @@ impl AppWindow {
         Ok(json!({"pending":true,"terminal":addr}))
     }
 
+    /// Replace a terminal pane with a mod while keeping the pane id and
+    /// parking the terminal. The terminal's content stays recoverable through
+    /// `pane.restore`, including after a document reload.
+    fn present_pane(&mut self, pane: Option<String>, name: String, props: Value, window: &mut Window, cx: &mut Context<Self>) -> Result<Value, String> {
+        let target = pane.or_else(|| self.model.focused_pane()).ok_or("no pane to present")?;
+        let Some(tab) = self.model.tab_of(&target) else { return Err(format!("no pane {target:?}")) };
+        if !self.folders.contains_key(&name) {
+            return Err(format!("no mod {name:?} in mods/"));
+        }
+        let Some(node) = tab.root.find(&target) else { return Err(format!("no pane {target:?}")) };
+        if node.presented_terminal().is_some() {
+            return Err(format!("pane {target:?} is already presented"));
+        }
+        let Some(terminal) = node.terminal().map(str::to_owned) else {
+            return Err(format!("pane {target:?} has no terminal to present"));
+        };
+        if !self.live.contains_key(&terminal) {
+            return Err(format!("terminal {terminal:?} is no longer running"));
+        }
+        let space = self.model.space_of(&target).map(|s| s.id.clone()).ok_or_else(|| format!("no space for pane {target:?}"))?;
+        let machine = self.machine_of(&space);
+        self.require_document(machine.as_deref())?;
+        if self.changing_terminals.contains(&terminal) {
+            return Err("This terminal already has a pane change in progress.".into());
+        }
+        self.swapped.remove(&target);
+        self.model.set_content(&target, Content::Presented { terminal: terminal.clone(), name, props: presented_props(props, &target, &terminal) });
+        self.start_terminal_change(
+            terminal.clone(),
+            TerminalChange::Present { pane: target.clone() },
+            window,
+            cx,
+        );
+        self.sync(window, cx);
+        self.save();
+        Ok(json!({ "pane": target, "terminal": terminal, "pending": true }))
+    }
+
+    /// Restore the terminal parked behind a presented mod pane, in the same
+    /// pane and slot. The terminal must still be running in core.
+    fn restore_pane(&mut self, pane: Option<String>, window: &mut Window, cx: &mut Context<Self>) -> Result<Value, String> {
+        let target = pane.or_else(|| self.model.focused_pane()).ok_or("no pane to restore")?;
+        let Some(tab) = self.model.tab_of(&target) else { return Err(format!("no pane {target:?}")) };
+        let Some(terminal) = tab.root.find(&target).and_then(Node::presented_terminal).map(str::to_owned) else {
+            return Err(format!("pane {target:?} is not presented"));
+        };
+        if !self.live.contains_key(&terminal) {
+            return Err(format!("terminal {terminal:?} is no longer running"));
+        }
+        let Some(space) = self.model.space_of(&target).map(|s| s.id.clone()) else {
+            return Err(format!("no space for pane {target:?}"));
+        };
+        let tab_id = tab.id.clone();
+        if self.changing_terminals.contains(&terminal) {
+            return Err("This terminal already has a pane change in progress.".into());
+        }
+        let machine = self.machine_of(&space);
+        self.require_document(machine.as_deref())?;
+        self.model.set_content(&target, Content::Terminal { terminal: terminal.clone() });
+        self.start_terminal_change(
+            terminal.clone(),
+            TerminalChange::Restore { space, tab: tab_id, pane: target.clone() },
+            window,
+            cx,
+        );
+        self.sync(window, cx);
+        self.save();
+        Ok(json!({ "pane": target, "terminal": terminal, "pending": true }))
+    }
+
     fn start_terminal_change(&mut self, address: String, change: TerminalChange, window: &mut Window, cx: &mut Context<Self>) {
         let machine = address.split_once('/').map(|(m, _)| m);
         let (keep, labels) = match &change {
-            TerminalChange::Keep { space, tab, .. } => (true, json!({
+            TerminalChange::Keep { space, tab, .. } | TerminalChange::Restore { space, tab, .. } => (true, json!({
                 "herdr.space":crate::mirror::local(space, machine), "herdr.tab":crate::mirror::local(tab, machine),
             })),
-            TerminalChange::Park => (false, json!({"herdr.space":"","herdr.tab":""})),
+            TerminalChange::Park | TerminalChange::Present { .. } => (false, json!({"herdr.space":"","herdr.tab":""})),
         };
         let (tx, rx) = std::sync::mpsc::channel();
         self.changing_terminals.insert(address.clone());
@@ -2931,8 +3027,21 @@ impl AppWindow {
     fn apply_terminal_change(&mut self, address: String, change: TerminalChange, result: Result<(), String>, window: &mut Window, cx: &mut Context<Self>) {
         self.changing_terminals.remove(&address);
         if let Err(error) = result {
+            // A presented pane is only valid if core stopped keeping its
+            // terminal. If that failed, put the terminal back rather than
+            // leaving the pane half-presented.
+            if let TerminalChange::Present { pane } = &change
+                && let Some(node) = self.model.tab_of(pane).and_then(|tab| tab.root.find(pane))
+                && node.presented_terminal() == Some(address.as_str())
+            {
+                let _ = self.model.set_content(pane, Content::Terminal { terminal: address.clone() });
+            }
             tracing::error!("terminal change for {address} failed: {error}");
-            if !self.draining { self.layout_notice("Could not change terminal pane", &error, window, cx); }
+            if !self.draining {
+                self.layout_notice("Could not change terminal pane", &error, window, cx);
+                self.sync(window, cx);
+                self.save();
+            }
             return;
         }
         match change {
@@ -2957,6 +3066,18 @@ impl AppWindow {
             }
             TerminalChange::Park => {
                 if let Some(pane) = self.model.pane_of(&address) { self.model.remove_pane(&pane); }
+            }
+            TerminalChange::Present { pane } => {
+                // The mod pane is already visible; the terminal is parked in
+                // core and has no model pane to remove.
+                tracing::debug!("presented terminal {address} in pane {pane}");
+            }
+            TerminalChange::Restore { pane, .. } => {
+                if let Some(node) = self.model.tab_of(&pane).and_then(|tab| tab.root.find(&pane))
+                    && node.terminal() == Some(address.as_str())
+                {
+                    self.model.focus_pane(&pane);
+                }
             }
         }
         if !self.draining {
@@ -3129,7 +3250,7 @@ impl AppWindow {
             if !args.is_object() { args = json!({}); }
             args["machine"] = json!(machine);
         }
-        if matches!(name, "space.new" | "space.close" | "space.rename" | "space.move" | "tab.new" | "tab.close" | "tab.rename" | "tab.move" | "pane.split" | "pane.close" | "pane.swap" | "pane.rename" | "pane.resize" | "terminal.keep" | "terminal.park") {
+        if matches!(name, "space.new" | "space.close" | "space.rename" | "space.move" | "tab.new" | "tab.close" | "tab.rename" | "tab.move" | "pane.split" | "pane.present" | "pane.restore" | "pane.close" | "pane.swap" | "pane.rename" | "pane.resize" | "terminal.keep" | "terminal.park") {
             let node = ["id", "space", "pane"].into_iter().find_map(|k| Self::arg(&args, k));
             let target = node.and_then(|id| self.model.space(id).or_else(|| self.model.space_of(id))).or_else(|| self.model.active_space());
             let machine = if name == "space.new" { Self::arg(&args, "machine") }
@@ -3205,7 +3326,9 @@ impl AppWindow {
                     self.confirm("Close space?", &detail, "space.close", json!({ "id": id, "confirmed": true }), window, cx);
                     return;
                 }
-                let addrs = self.model.remove_space(&id);
+                let hidden: Vec<String> = p.tabs.iter().flat_map(|t| model::presented_addresses(&t.root)).collect();
+                let mut addrs = self.model.remove_space(&id);
+                addrs.extend(hidden);
                 self.close_terminals(addrs, cx);
             }
             "space.rename" => {
@@ -3258,7 +3381,9 @@ impl AppWindow {
                     args["confirmed"] = a.get("confirmed").cloned().unwrap_or(Value::Null);
                     return self.dispatch("space.close", &args, person, window, cx);
                 }
-                let (addrs, _) = self.model.remove_tab(&id);
+                let hidden = self.model.tab(&id).map(|t| model::presented_addresses(&t.root)).unwrap_or_default();
+                let (mut addrs, _) = self.model.remove_tab(&id);
+                addrs.extend(hidden);
                 self.close_terminals(addrs, cx);
             }
             "tab.rename" => {
@@ -3327,15 +3452,53 @@ impl AppWindow {
                 };
                 self.answer(r);
             }
+            "pane.present" => {
+                let Some(name) = Self::owned(a, "mod") else { return self.fail("pane.present needs mod") };
+                let r = self.present_pane(
+                    Self::owned(a, "pane"),
+                    name,
+                    a.get("props").cloned().unwrap_or(Value::Null),
+                    window,
+                    cx,
+                );
+                self.answer(r);
+            }
+            "pane.restore" => {
+                let r = self.restore_pane(Self::owned(a, "pane"), window, cx);
+                self.answer(r);
+            }
             "pane.close" => {
                 let Some(pane) = Self::owned(a, "pane").or_else(|| self.model.focused_pane()) else { return self.fail("no pane to close") };
-                let Some(c) = self.model.tab_of(&pane) else { return self.fail(format!("no pane {pane:?}")) };
-                if c.root.find(&pane).is_some_and(|n| !n.closable()) {
+                let (presented, last, tab) = {
+                    let Some(c) = self.model.tab_of(&pane) else { return self.fail(format!("no pane {pane:?}")) };
+                    if c.root.find(&pane).is_some_and(|n| !n.closable()) {
+                        return;
+                    }
+                    (c.root.find(&pane).and_then(Node::presented_terminal).map(str::to_owned), c.root.panes().len() == 1, c.id.clone())
+                };
+                // A presented pane is a view over a terminal: closing the view
+                // gives the terminal back rather than ending it. If the parked
+                // terminal already ended, close the pane like a finished
+                // terminal pane instead of leaving a dead presentation.
+                if let Some(terminal) = presented {
+                    match self.restore_pane(Some(pane.clone()), window, cx) {
+                        Ok(value) => { self.answer(Ok(value)); }
+                        Err(_error) if !self.live.contains_key(&terminal) => {
+                            if last {
+                                let args = json!({ "id": tab, "confirmed": true });
+                                self.dispatch("tab.close", &args, person, window, cx);
+                            } else {
+                                self.model.remove_pane(&pane);
+                                self.sync(window, cx);
+                                self.answer(Ok(json!({ "pane": pane })));
+                            }
+                        }
+                        Err(error) => { self.answer(Err(error)); }
+                    }
                     return;
                 }
-                if c.root.panes().len() == 1 {
-                    let id = c.id.clone();
-                    return self.dispatch("tab.close", &json!({ "id": id }), person, window, cx);
+                if last {
+                    return self.dispatch("tab.close", &json!({ "id": tab }), person, window, cx);
                 }
                 let addr = self.model.address_of(&pane);
                 self.model.remove_pane(&pane);
@@ -3870,7 +4033,7 @@ impl AppWindow {
     /// A mod block on screen: in the layout, or a mod pane of the shown tab.
     fn mod_block_shown(&self, id: &str) -> bool {
         self.copies.contains_key(id)
-            && (self.chrome.visible_blocks().iter().any(|n| n.id == id && matches!(n.content(), Some(Content::Mod { .. })))
+            && (self.chrome.visible_blocks().iter().any(|n| n.id == id && matches!(n.content(), Some(Content::Mod { .. } | Content::Presented { .. })))
                 || self.model.active_tab().is_some_and(|t| t.shown().visible_blocks().iter().any(|n| n.id == id)))
     }
 
@@ -4710,7 +4873,7 @@ impl AppWindow {
                 }
                 None => div().into_any_element(),
             },
-            Content::Mod { .. } => self.render_slot(&n.id, cx),
+            Content::Mod { .. } | Content::Presented { .. } => self.render_slot(&n.id, cx),
             Content::Agent { .. } => match self.shown_agent() {
                 Some(addr) => match self.agent_view(&n.id, &addr) {
                     Some(t) => div().size_full().child(shown_terminal(&t.view, cx)).into_any_element(),
@@ -5285,7 +5448,7 @@ fn overlay_layout(mut n: Node, overlay: &str) -> Node {
     fn walk(n: &mut Node, overlay: &str, seq: &mut usize) {
         *seq += 1;
         n.id = if n.id.is_empty() { format!("ov{overlay}/{seq}") } else { format!("ov{overlay}/{}", n.id) };
-        if let Kind::Block { content: Content::Mod { props, .. } } = &mut n.kind {
+        if let Kind::Block { content: Content::Mod { props, .. } | Content::Presented { props, .. } } = &mut n.kind {
             if !props.is_object() {
                 *props = json!({});
             }
@@ -5404,7 +5567,7 @@ fn swap_by(args: &Value) -> Result<SwapBy<'_>, String> {
 
 fn needs_model_pane(name: &str, args: &Value) -> bool {
     match name {
-        "pane.split" | "pane.close" | "pane.zoom" | "pane.swap" | "pane.rename" | "pane.resize" | "terminal.show" => AppWindow::arg(args, "pane").is_none(),
+        "pane.split" | "pane.close" | "pane.present" | "pane.restore" | "pane.zoom" | "pane.swap" | "pane.rename" | "pane.resize" | "terminal.show" => AppWindow::arg(args, "pane").is_none(),
         "pane.go" => true,
         "terminal.open" | "terminal.keep" => matches!(AppWindow::arg(args, "place"), Some("right" | "down")),
         _ => false,
@@ -5458,6 +5621,14 @@ fn float_mod(id: &str, name: &str, props: &Value) -> (String, Instance) {
     let mut props = if props.is_object() { props.clone() } else { json!({}) };
     props["float"] = json!(id);
     (floats::slot(id), Instance { name: name.to_owned(), props })
+}
+
+/// A presented mod learns which pane and parked terminal it is over.
+fn presented_props(props: Value, pane: &str, terminal: &str) -> Value {
+    let mut props = if props.is_object() { props } else { json!({}) };
+    props["pane"] = json!(pane);
+    props["terminal"] = json!(terminal);
+    props
 }
 
 /// A pane header's slot and copy, told which pane it sits on (a mod pane has no terminal).
@@ -8340,11 +8511,84 @@ export default class Probe extends View { render() { return div().child("probe")
         assert!(!super::adoptable(&record("live"), "sp1", Some("tb2"), None));
     }
 
+    #[gpui::test]
+    fn pane_present_and_restore_commands_keep_the_pane_id(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        let (core, _runs) = crate::hc::answering();
+        let (view, cx) = open_window_on(cx, core, "present-test", "", json!({
+            "id": "context", "type": "block", "content": { "tab": "active" }
+        }));
+        view.update_in(cx, |this, window, cx| {
+            this.documents.entry(String::new()).or_default().available = true;
+            this.live.insert("term-a".into(), json!({ "address": "term-a", "state": "live" }));
+            this.model.add_space("space", "test", "/", super::Tab::new("tab", "", "a", "term-a"));
+            this.sync(window, cx);
+            let out = this.run_as("pane.present", json!({ "pane": "a", "mod": "present-test" }), true, window, cx);
+            assert!(out.get("error").is_none(), "{out}");
+            assert_eq!(this.model.presented_terminal_of("a").as_deref(), Some("term-a"));
+            assert_eq!(this.model.tab("tab").unwrap().focused_pane().as_deref(), Some("a"));
+            let copy = &this.copies["a"].inst.props;
+            assert_eq!(copy["pane"], "a");
+            assert_eq!(copy["terminal"], "term-a");
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |this, window, cx| {
+            let out = this.run_as("pane.restore", json!({ "pane": "a" }), false, window, cx);
+            assert!(out.get("error").is_none(), "{out}");
+            assert_eq!(this.model.address_of("a").as_deref(), Some("term-a"));
+            assert_eq!(this.model.tab("tab").unwrap().focused_pane().as_deref(), Some("a"));
+            assert!(!this.copies.contains_key("a"));
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |this, window, cx| {
+            let out = this.run_as("pane.present", json!({ "pane": "a", "mod": "present-test" }), false, window, cx);
+            assert!(out.get("error").is_none(), "{out}");
+        });
+        cx.run_until_parked();
+        view.update_in(cx, |this, window, cx| {
+            let out = this.run_as("pane.close", json!({ "pane": "a" }), false, window, cx);
+            assert!(out.get("error").is_none(), "{out}");
+            assert_eq!(this.model.address_of("a").as_deref(), Some("term-a"));
+            assert_eq!(this.model.tab("tab").unwrap().focused_pane().as_deref(), Some("a"));
+            let out = this.run_as("pane.present", json!({ "pane": "a", "mod": "missing" }), false, window, cx);
+            assert!(out.get("error").is_some(), "{out}");
+            assert_eq!(this.model.address_of("a").as_deref(), Some("term-a"));
+            let out = this.run_as("pane.restore", json!({ "pane": "a" }), false, window, cx);
+            assert!(out.get("error").is_some(), "{out}");
+        });
+    }
 
+    #[gpui::test]
+    fn presented_pane_swaps_the_mod_and_terminal_in_place(cx: &mut gpui::TestAppContext) {
+        use crate::layout::Content;
+        use serde_json::json;
+        let (view, cx) = open_window(cx, "present-test", "", json!({
+            "id": "context", "type": "block", "content": { "tab": "active" }
+        }));
+        view.update_in(cx, |this, window, cx| {
+            this.documents.entry(String::new()).or_default().available = true;
+            this.model.add_space("space", "test", "/", super::Tab::new("tab", "", "a", "term-a"));
+            this.sync(window, cx);
+            assert!(this.terms.contains_key("a"), "the terminal starts attached");
+            let presented = Content::Presented {
+                terminal: "term-a".into(),
+                name: "present-test".into(),
+                props: json!({ "file": "README.md" }),
+            };
+            assert!(this.model.set_content("a", presented));
+            this.sync(window, cx);
+            assert!(!this.terms.contains_key("a"), "the terminal view is detached");
+            assert!(this.copies.contains_key("a"), "the mod owns the same pane id");
+            assert_eq!(this.model.tab("tab").unwrap().focused_pane().as_deref(), Some("a"));
+            assert_eq!(this.model.presented_terminal_of("a").as_deref(), Some("term-a"));
+            assert!(this.model.set_content("a", Content::Terminal { terminal: "term-a".into() }));
+            this.sync(window, cx);
+            assert!(this.terms.contains_key("a"), "the terminal view comes back");
+            assert!(!this.copies.contains_key("a"));
+            assert_eq!(this.model.address_of("a").as_deref(), Some("term-a"));
+        });
+    }
 
-    /// A popup opened near the right edge must snap back inside the window
-    /// with the 8 px margin: its body may not paint past the window border
-    /// (the reported right-edge menu clip).
     #[gpui::test]
     fn popup_at_right_edge_snaps_inside(cx: &mut TestAppContext) {
         struct PopupView { at: gpui::Point<gpui::Pixels> }
