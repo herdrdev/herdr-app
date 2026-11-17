@@ -164,7 +164,8 @@ the highlighted line shows where it will land.
   peek at it. Bare addresses refer to the machine of the terminal showing them;
   use `machine/address` for another machine. Names and non-live addresses aren't links.
   Held over any other link, the same key shows where the link goes under it
-  (an OSC 8 link's text can differ); clicking that copies it.
+  (an OSC 8 link's text can differ); clicking that copies it. `link_preview: false`
+  turns this off.
 - **Agent navigation order** belongs to the mods. A mod displaying agents calls
   `setAgentOrder(list.map(a => a.address))` on render so `agent.next` /
   `agent.prev` follow its list.
@@ -822,6 +823,9 @@ What's about the user, never a look:
   pastes PRIMARY on Linux, does nothing on macOS, and pastes the clipboard on
   Windows. Programs that capture the mouse still receive middle-clicks.
   Hold Shift while dragging in programs that capture the mouse.
+- `link_preview`: holding the link key (Cmd on macOS, Ctrl elsewhere) over a link
+  shows where it goes under it, and a click on that copies it (default `true`).
+  Set `false` to turn the preview off; the key still opens links.
 - `pane_scrollbars`: `false` hides the scroll position thumb at a terminal
   pane's right edge (default `true`). It shows only when the pane has
   scrollback — never on the alternate screen (editors, pagers) — and

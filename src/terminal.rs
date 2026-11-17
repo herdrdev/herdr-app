@@ -2544,6 +2544,11 @@ impl Render for TerminalView {
         };
         let address = self.address.clone();
         let now = Instant::now();
+        let previews = crate::settings::get().link_preview;
+        if !previews {
+            // Turned off (link_preview): none shows, and one already up goes at once.
+            self.preview = None;
+        }
         if let Some(p) = self.preview.as_mut().filter(|p| p.hovered) {
             // A hover can end unseen (the pane hidden under the pointer): only near it is it still on.
             if !p.near(window.mouse_position(), cell.height) {
@@ -2557,7 +2562,7 @@ impl Render for TerminalView {
         }
         let under = {
             let g = self.grid.borrow();
-            self.link.as_ref().and_then(link_preview).zip(preview_anchor(&g.link_spans, g.vt.rows)).map(|(target, (x, y, above))| {
+            self.link.as_ref().filter(|_| previews).and_then(link_preview).zip(preview_anchor(&g.link_spans, g.vt.rows)).map(|(target, (x, y, above))| {
                 let at = g.origin + point(g.cell.width * x as f32, g.cell.height * y as f32);
                 (target, at, above)
             })
@@ -3118,6 +3123,57 @@ mod tests {
             cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
             assert!(!root.read_with(cx, |root, cx| root.text.read(cx).selected_text()).is_empty());
         }
+    }
+
+    #[gpui::test]
+    fn the_link_preview_can_be_turned_off(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        struct Root(Entity<super::TerminalView>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().w(px(320.0)).h(px(150.0)).child(self.0.clone())
+            }
+        }
+        cx.update(gpui_base::init);
+        let original = crate::settings::get();
+        let target = "https://example.com/where-it-goes";
+        let (root, cx) = cx.add_window_view(|_, cx| {
+            Root(cx.new(|cx| {
+                let terminal = super::TerminalView::attach(crate::hc::offline(), "t1".into(), (32, 6), cx);
+                terminal.grid.borrow_mut().vt.write(format!("\x1b]8;;{target}\x1b\\here\x1b]8;;\x1b\\").as_bytes());
+                terminal
+            }))
+        });
+        cx.run_until_parked();
+        let key = if cfg!(target_os = "macos") { Modifiers::command() } else { Modifiers::control() };
+        let (on_link, off_link) = root.read_with(cx, |r, cx| {
+            let g = r.0.read(cx).grid.borrow();
+            (g.origin + point(g.cell.width * 1.5, g.cell.height * 0.5), g.origin + point(g.cell.width * 20.5, g.cell.height * 3.5))
+        });
+        let hover = |at: Point<Pixels>, cx: &mut VisualTestContext| {
+            cx.simulate_mouse_move(at, None, key);
+            cx.run_until_parked();
+        };
+
+        let mut settings = (*original).clone();
+        settings.link_preview = false;
+        crate::settings::set(settings);
+        hover(on_link, cx);
+        root.read_with(cx, |r, cx| {
+            let t = r.0.read(cx);
+            assert!(t.link.is_some(), "the link key still finds the link, to open it");
+            assert!(t.preview.is_none(), "no preview while link_preview is off");
+        });
+
+        let mut settings = (*original).clone();
+        settings.link_preview = true;
+        crate::settings::set(settings);
+        hover(off_link, cx);
+        hover(on_link, cx);
+        let shown = root.read_with(cx, |r, cx| r.0.read(cx).preview.as_ref().map(|p| p.target.clone()));
+        assert_eq!(shown.as_deref(), Some(target), "on again, the same link previews");
+        crate::settings::set((*original).clone());
     }
 
     #[gpui::test]

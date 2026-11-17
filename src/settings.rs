@@ -401,6 +401,9 @@ pub struct Person {
     /// Copy a mouse selection to the clipboard when the button is released.
     #[serde(skip_serializing_if = "is_true")]
     pub copy_on_select: bool,
+    /// Holding the link key over a link shows where it goes, under it.
+    #[serde(skip_serializing_if = "is_true")]
+    pub link_preview: bool,
     /// A draggable scroll position thumb at a terminal pane's right edge.
     #[serde(skip_serializing_if = "is_true")]
     pub pane_scrollbars: bool,
@@ -471,6 +474,7 @@ impl Default for Person {
             telemetry: true,
             clipboard_write: true,
             copy_on_select: true,
+            link_preview: true,
             pane_scrollbars: true,
             minimum_contrast: 1.0,
             option_as_alt: OptionAsAlt::Auto,
@@ -518,6 +522,7 @@ pub struct Settings {
     pub terminal_opacity: f32,
     pub clipboard_write: bool,
     pub copy_on_select: bool,
+    pub link_preview: bool,
     pub minimum_contrast: f32,
     pub option_as_alt: OptionAsAlt,
     pub sounds: Sounds,
@@ -565,6 +570,7 @@ impl Default for Settings {
             terminal_opacity: 1.0,
             clipboard_write: true,
             copy_on_select: true,
+            link_preview: true,
             minimum_contrast: 1.0,
             option_as_alt: OptionAsAlt::Auto,
             sounds: Sounds::default(),
@@ -609,6 +615,7 @@ impl Settings {
             sounds: person.sounds.clone(),
             clipboard_write: person.clipboard_write,
             copy_on_select: person.copy_on_select,
+            link_preview: person.link_preview,
             minimum_contrast: person.minimum_contrast,
             option_as_alt: person.option_as_alt,
         }
@@ -1056,6 +1063,18 @@ mod tests {
     }
 
     #[test]
+    fn link_preview_defaults_on_and_can_be_disabled() {
+        let default: Person = serde_json::from_str("{}").unwrap();
+        assert!(default.link_preview);
+        assert!(Settings::default().link_preview);
+        assert!(Settings::compose(&default, &crate::layout::Look::default(), true).link_preview);
+        assert!(serde_json::to_value(&default).unwrap().get("link_preview").is_none(), "the default isn't written");
+        let off: Person = serde_json::from_str(r#"{"link_preview":false}"#).unwrap();
+        assert!(!Settings::compose(&off, &crate::layout::Look::default(), true).link_preview);
+        assert_eq!(serde_json::to_value(off).unwrap()["link_preview"], false);
+    }
+
+    #[test]
     fn shipped_looks_and_theme_clicks_have_the_same_precedence() {
         use crate::layout::{Node, ThemeChoice};
         let person = Person { font_size: Some(19.0), theme: Some(ThemeChoice::One("moss".into())), ..Person::default() };
@@ -1080,7 +1099,7 @@ mod tests {
     /// settings.json key.
     #[test]
     fn the_guide_explains_every_setting() {
-        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), font_weight: Some(400), ui_font: Some(String::new()), telemetry: false, clipboard_write: false, copy_on_select: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), ..Person::default() };
+        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), font_weight: Some(400), ui_font: Some(String::new()), telemetry: false, clipboard_write: false, copy_on_select: false, link_preview: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), ..Person::default() };
         let keys: Vec<String> = serde_json::to_value(&all).unwrap().as_object().unwrap().keys().cloned().collect();
         let guide = include_str!("../defaults/AGENTS.md");
         let section = guide.split("## The person").nth(1).and_then(|s| s.split("\n## ").next()).unwrap_or_default();
