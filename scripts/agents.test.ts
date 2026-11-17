@@ -262,12 +262,40 @@ for (const sort of ["priority", "grouped"]) for (const named of [false, true]) t
   expect(rows().get("ag-t0")).toContain(named ? "Named tab" : "Alpha task");
 });
 
+test("grandchild records nest under their owning terminal, not under other records", () => {
+  const { agents } = harness([]);
+  const record = { app: "pi-subagents", state: "working", title: "worker" };
+  const root = { address: "remote/t1", state: "live", records: { "subagents/root": record } };
+  const child = { address: "remote/t2", parent: root.address, state: "live", records: {
+    "subagents/child": record, "subagents/grandchild": record,
+  } as Record<string, typeof record> };
+  const grandchild = { address: "remote/t3", parent: child.address, state: "live" };
+  expect(agents.tree([root, child, grandchild], root.address).map((s: any) => [s.t.address, s.lines])).toEqual([
+    ["remote/t2", ["├"]],
+    ["remote/t3", ["│", "├"]],
+    ["remote/t2#subagents/child", ["│", "├"]],
+    ["remote/t2#subagents/grandchild", ["│", "└"]],
+    ["remote/t1#subagents/root", ["└"]],
+  ]);
+  child.records = {};
+  expect(agents.tree([root, child, grandchild], root.address).map((s: any) => s.t.address)).toEqual([
+    "remote/t2", "remote/t3", "remote/t1#subagents/root",
+  ]);
+});
+
 // A kept sub-agent: started by t1 (`hc run`), then given a pane (`terminal.keep`).
-function keptRender(sort: string, { width = 268, kept = [{ address: "t3", parent: "t1" }], paneless = [] as { address: string; parent: string }[], pinned = [] as string[] } = {}) {
+function keptRender(sort: string, {
+  width = 268,
+  kept = [{ address: "t3", parent: "t1" }],
+  paneless = [] as { address: string; parent: string }[],
+  pinned = [] as string[],
+  records = {} as Record<string, Record<string, unknown>>,
+  status = "working",
+} = {}) {
   const program = { name: "Claude", key: "claude", agent: true };
-  const row = (address: string, seq: number) => ({ address, pane: `p-${address}`, tab: "tab1", space: "s1", space_name: "Project", program, title: `Task ${address}`, status: "working", seq, pinned: pinned.includes(address) });
+  const row = (address: string, seq: number) => ({ address, pane: `p-${address}`, tab: "tab1", space: "s1", space_name: "Project", program, title: `Task ${address}`, status, seq, pinned: pinned.includes(address) });
   const list = [row("t1", 1), ...kept.map((k, i) => row(k.address, i + 2))];
-  const live = (address: string, parent: string | null) => ({ address, parent, state: "live", status: "working", program, labels: {} });
+  const live = (address: string, parent: string | null) => ({ address, parent, state: "live", status, program, labels: {}, records: records[address] });
   const orders: string[][] = [];
   const { agents, writes } = harness([], {
     agents: () => list,
@@ -308,6 +336,26 @@ for (const sort of ["priority", "grouped"]) test(`${sort}: a kept sub-agent unde
   expect(ids).toContain("sub-t3");
   expect(ids).toContain("sub-t4");
   expect(ids).not.toContain("ag-t4");
+});
+
+for (const sort of ["priority", "grouped"]) for (const state of ["working", "error"]) test(`${sort}: a headless grandchild reporting ${state} is shown once and focuses its owning terminal`, () => {
+  const { ids, texts, clicks, writes, order } = keptRender(sort, {
+    status: "idle",
+    paneless: [{ address: "t3", parent: "t1" }],
+    kept: [{ address: "t4", parent: "t3" }],
+    records: { t3: { "subagents/test": { app: "pi-subagents", state, title: "grandchild", msg: "Checking" } } },
+  });
+  expect(ids.filter(id => id === "sub-t3#subagents/test")).toHaveLength(1);
+  expect(ids.indexOf("sub-t3")).toBeLessThan(ids.indexOf("sub-t3#subagents/test"));
+  expect(ids).toContain("sub-t4"); // Terminal-backed grandchild still appears.
+  expect(ids).not.toContain("ag-t4");
+  expect(texts.get("sub-t3#subagents/test")).toContain("grandchild · Checking");
+  expect(order).toEqual(["t1"]);
+  if (sort === "priority") expect(texts.get("ag-list")).toContain(state === "error" ? "Needs you" : "Working");
+  clicks.get("sub-t3#subagents/test")!();
+  expect(writes).toEqual([["pane.focus", { terminal: "t3" }]]);
+  clicks.get("sub-t4")!();
+  expect(writes.at(-1)).toEqual(["pane.focus", { terminal: "t4" }]);
 });
 
 for (const sort of ["priority", "grouped"]) test(`${sort}: a kept sub-agent keeps its own row where no tree shows it`, () => {
