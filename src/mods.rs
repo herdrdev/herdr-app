@@ -1441,7 +1441,12 @@ mod tests {
 
     #[test]
     fn a_shared_value_redraws_only_the_copies_that_read_it() {
-        std::thread::spawn(|| {
+        let root = if cfg!(target_os = "linux") { crate::test_tmp() } else { std::env::temp_dir() };
+        let dir = root.join(format!("herdr-shared-reads-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let _ = std::fs::remove_file(dir.join("shared.json"));
+        std::thread::spawn(move || {
+            SHARED.with_borrow_mut(|s| *s = Some(SharedStore::load(dir.join("shared.json"))));
             let (theme, list) = (Rc::new(RefCell::new(LiveReads::default())), Rc::new(RefCell::new(LiveReads::default())));
             LIVE_READS.with_borrow_mut(|copies| {
                 copies.insert(1, Rc::downgrade(&theme));
@@ -1449,10 +1454,8 @@ mod tests {
             });
             record(&theme, &shared_key("test.theme"));
             record(&list, &shared_key("test.sort"));
-            // shared.json outlives a test run: start from values no earlier run left.
-            let run = json!(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos().to_string());
-            set_shared("test.theme".into(), run.clone());
-            set_shared("test.sort".into(), run);
+            set_shared("test.theme".into(), json!("light"));
+            set_shared("test.sort".into(), json!("size"));
             assert!(snapshot_changed(1) && snapshot_changed(2));
             set_shared("test.sort".into(), json!("name"));
             assert!(!snapshot_changed(1), "a key it never read");
