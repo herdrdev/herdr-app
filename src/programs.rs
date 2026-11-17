@@ -423,6 +423,10 @@ mod tests {
         assert_eq!(key(None, &["dsh-tui"]), "dsh-tui");
         assert_eq!(key(Some("goose"), &["/bin/zsh"]), "goose");
         assert_eq!(key(None, &["goose"]), "goose");
+        assert_eq!(key(Some("deepagents-code"), &["/bin/zsh"]), "dcode");
+        assert_eq!(key(None, &["/u/.local/share/uv/tools/deepagents-code/bin/python", "/u/.local/bin/dcode"]), "dcode");
+        assert_eq!(key(None, &["/u/.local/share/uv/tools/deepagents-code/bin/python3", "/u/.local/bin/deepagents-code"]), "dcode");
+        assert_eq!(key(None, &["/u/.local/share/uv/tools/deepagents-code/bin/python", "-m", "deepagents_code"]), "dcode");
         assert_eq!(key(None, &["agent"]), "cursor");
         assert_eq!(key(Some("agent"), &[]), "cursor");
         assert_eq!(key(Some("cursor-agent"), &[]), "cursor");

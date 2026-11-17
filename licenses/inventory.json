@@ -150,6 +150,13 @@
       ]
     },
     {
+      "name": "Deep Agents Code agent icon (LangChain mark)",
+      "source": "https://github.com/langchain-ai/langgraphjs/tree/085a07f569b6d7d79728eb7eb6eb3a0c67fcdefb",
+      "files": [
+        "defaults/icons/LICENSE-langgraphjs.txt"
+      ]
+    },
+    {
       "name": "Simple Icons brand icons",
       "source": "https://simpleicons.org; brands remain their owners' trademarks.",
       "files": [
