@@ -39,7 +39,7 @@ test("Pi status records appear beneath their owning terminal without inventing t
   expect(kidStatus(tree[2].t, new Map())).toBe("idle");
   expect(kidStatus(tree[3].t, new Map())).toBe("blocked");
   expect(agents.tree([{ ...owner, records: {} }], owner.address)).toEqual([]);
-  agents.listed = new Map();
+  agents.listed = new Map([[owner.address, "idle"]]);
   const row = agents.subRow({ raised: "selected" }, tree[1], owner.address, false).node;
   expect(textOf(row)).toContain("worker · Reading");
   expect(row.bg).toBeUndefined(); // Focusing the parent doesn't select every worker.
@@ -338,11 +338,11 @@ for (const sort of ["priority", "grouped"]) test(`${sort}: a kept sub-agent unde
   expect(ids).not.toContain("ag-t4");
 });
 
-for (const sort of ["priority", "grouped"]) for (const state of ["working", "error"]) test(`${sort}: a headless grandchild reporting ${state} is shown once and focuses its owning terminal`, () => {
+for (const sort of ["priority", "grouped"]) for (const state of ["working", "error"]) for (const keptOwner of [false, true]) test(`${sort}: a ${state} grandchild opens its ${keptOwner ? "kept" : "pane-less"} owning terminal`, () => {
   const { ids, texts, clicks, writes, order } = keptRender(sort, {
     status: "idle",
-    paneless: [{ address: "t3", parent: "t1" }],
-    kept: [{ address: "t4", parent: "t3" }],
+    paneless: keptOwner ? [] : [{ address: "t3", parent: "t1" }],
+    kept: [...(keptOwner ? [{ address: "t3", parent: "t1" }] : []), { address: "t4", parent: "t3" }],
     records: { t3: { "subagents/test": { app: "pi-subagents", state, title: "grandchild", msg: "Checking" } } },
   });
   expect(ids.filter(id => id === "sub-t3#subagents/test")).toHaveLength(1);
@@ -353,7 +353,7 @@ for (const sort of ["priority", "grouped"]) for (const state of ["working", "err
   expect(order).toEqual(["t1"]);
   if (sort === "priority") expect(texts.get("ag-list")).toContain(state === "error" ? "Needs you" : "Working");
   clicks.get("sub-t3#subagents/test")!();
-  expect(writes).toEqual([["pane.focus", { terminal: "t3" }]]);
+  expect(writes).toEqual([[keptOwner ? "pane.focus" : "terminal.peek", { terminal: "t3" }]]);
   clicks.get("sub-t4")!();
   expect(writes.at(-1)).toEqual(["pane.focus", { terminal: "t4" }]);
 });

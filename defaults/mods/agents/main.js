@@ -213,7 +213,7 @@ export default class Agents extends View {
       .text_size(12.5)
       .when(on, (el) => el.bg(t.raised))
       .hover((s) => s.bg(t.hover))
-      .on_click(() => (k.owner || this.listed.has(target) ? run("pane.focus", { terminal: target }) : this.peek(target)))
+      .on_click(() => (this.listed.has(target) ? run("pane.focus", { terminal: target }) : this.peek(target)))
       .children(s.lines.map(l => div().self_start().mt(-4).w(9).h(17).mr(4).flex_none()
         .when(Boolean(l), el => el.border_l(1.5).border_color(t.input))
         .when(l === "└" || l === "├", el => el.border_b(1.5).rounded_bl(6))))

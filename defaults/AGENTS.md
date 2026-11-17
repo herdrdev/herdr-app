@@ -165,8 +165,9 @@ the highlighted line shows where it will land.
   use `machine/address` for another machine. Names and non-live addresses aren't links.
   Headless `pi-subagents` workers report through their parent's OSC 7501
   `records` instead of separate terminals. The `agents` mod shows their status
-  and message under the parent; clicking one focuses the parent Pi session.
-  These workers cannot be peeked or kept as separate panes.
+  and message under the parent; clicking one opens the parent's Pi session
+  (focus its pane, or peek if it has none). The headless workers themselves
+  cannot be peeked or kept as separate panes.
 - **Agent navigation order** belongs to the mods. A mod displaying agents calls
   `setAgentOrder(list.map(a => a.address))` on render so `agent.next` /
   `agent.prev` follow its list.
