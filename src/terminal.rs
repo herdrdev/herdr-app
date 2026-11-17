@@ -1126,7 +1126,11 @@ impl TerminalView {
             MouseButton::Middle => GHOSTTY_MOUSE_BUTTON_MIDDLE,
             _ => GHOSTTY_MOUSE_BUTTON_UNKNOWN,
         });
-        let ((x, y), size) = mouse_at(&g, pos);
+        let ((mut x, y), size) = mouse_at(&g, pos);
+        // The program reports cells as it laid them out, not as they show reordered.
+        if let Some(cells) = g.vt.viewport_row((y / size.3) as u16) {
+            x = bidi_shift_x(&cells, x, size.2);
+        }
         let any = !g.buttons_down.is_empty();
         let bytes = g.vt.encode_mouse(action, b, mouse_mods(mods), x, y, size, any);
         if let Some(ch) = g.channel {
@@ -1145,6 +1149,8 @@ impl TerminalView {
         let g = self.grid.borrow();
         let (x, y) = local(&g, pos);
         let (col, row) = (x / f32::from(g.cell.width), y / f32::from(g.cell.height));
+        // The link is in logical columns, the pointer in visual ones.
+        let col = g.vt.viewport_row(row as u16).map_or(col, |cells| bidi_logical_column(&cells, col as usize) as f32);
         let active = self.link_handlers.borrow();
         let cwd = self.cwd.as_deref();
         let remote = self.address.contains('/');
@@ -1228,8 +1234,13 @@ impl TerminalView {
         let mut g = self.grid.borrow_mut();
         let (x, y) = local(&g, pos);
         let (cw, ch) = (f32::from(g.cell.width), f32::from(g.cell.height));
-        let (col, row) = ((x / cw) as u16, (y / ch) as u16);
+        let row = (y / ch) as u16;
         let height = ch * g.vt.rows as f32;
+        // A right-to-left row shows its cells reordered: the pointer is over a visual
+        // column, the selection wants the logical cell shown there. The row is read
+        // from the screen now, as the autoscroll tick has just moved it.
+        let x = g.vt.viewport_row(row.min(g.vt.rows.saturating_sub(1))).map_or(x, |cells| bidi_shift_x(&cells, x, cw));
+        let col = (x / cw) as u16;
         g.vt.select(step, col, row, x, y, cw, height);
         drop(g);
         self.selection_changed(cx);
@@ -1954,6 +1965,186 @@ fn fallback_size(c: &vt::Cell, font: &Font, width: Pixels, ts: &gpui::WindowText
     (line.width() > width).then(|| size * f32::from(width) / f32::from(line.width()))
 }
 
+/// Visual order of a row that holds right-to-left text: the reordered cells and,
+/// per visual column, the logical column it shows. `None` when nothing moves.
+/// Each paragraph between runs of box-drawing characters has a left-to-right
+/// base direction (as WezTerm's AutoLeftToRight), and those runs never move, so
+/// table frames keep their columns. A wide character moves with its tail cell.
+fn bidi_row(row: &[vt::Cell]) -> Option<(Vec<vt::Cell>, Vec<usize>)> {
+    if !row.iter().any(|c| c.text.chars().any(|ch| !ch.is_ascii() && starts_right_to_left(ch))) {
+        return None;
+    }
+    let mut cells = row.to_vec();
+    let mut map: Vec<usize> = (0..row.len()).collect();
+    let mut changed = false;
+    let mut start = 0;
+    while start < row.len() {
+        if is_box_drawing(&row[start]) {
+            start += 1;
+            continue;
+        }
+        let mut end = start;
+        while end < row.len() && !is_box_drawing(&row[end]) {
+            end += 1;
+        }
+        changed |= reorder_paragraph(row, &mut cells, start..end, &mut map);
+        start = end;
+    }
+    if !changed {
+        return None;
+    }
+    let out = map.iter().map(|&logical| cells[logical].clone()).collect();
+    Some((out, map))
+}
+
+/// Resolves one paragraph of `row`: mirrors single brackets at right-to-left
+/// levels in `cells`, and writes its visual order into `map`. Returns whether
+/// anything changed.
+fn reorder_paragraph(row: &[vt::Cell], cells: &mut [vt::Cell], range: std::ops::Range<usize>, map: &mut [usize]) -> bool {
+    // Each unit is the cell range of one grapheme; a wide tail joins its head.
+    let mut units: Vec<(usize, usize)> = Vec::new();
+    let mut offsets = Vec::new();
+    let mut text = String::new();
+    for index in range.clone() {
+        if index > range.start && row[index - 1].wide && row[index].text.is_empty() {
+            if let Some(unit) = units.last_mut() {
+                unit.1 = index + 1;
+                continue;
+            }
+        }
+        offsets.push(text.len());
+        units.push((index, index + 1));
+        text.push_str(if row[index].text.is_empty() { " " } else { &row[index].text });
+    }
+
+    let info = unicode_bidi::ParagraphBidiInfo::new(&text, Some(unicode_bidi::Level::ltr()));
+    if !info.has_rtl() {
+        return false;
+    }
+    let levels = info.reordered_levels(0..text.len());
+    let unit_levels: Vec<unicode_bidi::Level> = offsets.iter().map(|&offset| levels[offset]).collect();
+
+    let mut mirrored = false;
+    for (&(first, end), level) in units.iter().zip(&unit_levels) {
+        if !level.is_rtl() || end - first != 1 {
+            continue;
+        }
+        let mut chars = row[first].text.chars();
+        if let (Some(c), None) = (chars.next(), chars.next()) {
+            if let Some(mirror) = mirrored_bracket(c) {
+                cells[first].text = mirror.to_string();
+                mirrored = true;
+            }
+        }
+    }
+
+    let mut column = range.start;
+    let mut moved = false;
+    for logical in unicode_bidi::ParagraphBidiInfo::reorder_visual(&unit_levels) {
+        let (first, end) = units[logical];
+        for cell in first..end {
+            moved |= cell != column;
+            map[column] = cell;
+            column += 1;
+        }
+    }
+    moved || mirrored
+}
+
+fn starts_right_to_left(c: char) -> bool {
+    use unicode_bidi::BidiClass::*;
+    matches!(unicode_bidi::bidi_class(c), R | AL | AN | RLE | RLO | RLI | FSI)
+}
+
+fn is_box_drawing(cell: &vt::Cell) -> bool {
+    cell.text.chars().next().is_some_and(|c| ('\u{2500}'..='\u{259F}').contains(&c))
+}
+
+/// Rule L4 for common paired brackets (Bidi_Mirroring_Glyph).
+fn mirrored_bracket(c: char) -> Option<char> {
+    Some(match c {
+        '(' => ')',
+        ')' => '(',
+        '[' => ']',
+        ']' => '[',
+        '{' => '}',
+        '}' => '{',
+        '<' => '>',
+        '>' => '<',
+        '«' => '»',
+        '»' => '«',
+        '‹' => '›',
+        '›' => '‹',
+        _ => return None,
+    })
+}
+
+/// The logical column that shows at visual column `col` of a row.
+fn bidi_logical_column(row: &[vt::Cell], col: usize) -> usize {
+    bidi_row(row).and_then(|(_, map)| map.get(col).copied()).unwrap_or(col)
+}
+
+/// Moves a pointer's x (in any unit; `cell_w` is one cell) from the visual column
+/// it is over to the logical cell shown there, keeping its place inside the cell.
+fn bidi_shift_x(row: &[vt::Cell], x: f32, cell_w: f32) -> f32 {
+    if cell_w <= 0.0 || x < 0.0 {
+        return x;
+    }
+    let col = (x / cell_w) as usize;
+    let logical = bidi_logical_column(row, col);
+    x + (logical as f32 - col as f32) * cell_w
+}
+
+/// The visual column of each logical column in `from..=to`, merged into
+/// inclusive runs of neighbouring columns (a reordered span may split in two).
+fn bidi_visual_runs(map: Option<&[usize]>, from: usize, to: usize) -> Vec<(usize, usize)> {
+    let Some(map) = map else { return vec![(from, to)] };
+    let mut columns: Vec<usize> = (0..map.len()).filter(|&v| (from..=to).contains(&map[v])).collect();
+    if columns.is_empty() {
+        return vec![(from, to)];
+    }
+    columns.sort_unstable();
+    let mut runs: Vec<(usize, usize)> = Vec::new();
+    for column in columns {
+        match runs.last_mut() {
+            Some(last) if last.1 + 1 == column => last.1 = column,
+            _ => runs.push((column, column)),
+        }
+    }
+    runs
+}
+
+/// A cell holding only right-to-left letters (Hebrew, Arabic), which a shaper
+/// joins or places by their logical neighbours.
+fn is_rtl_letter(cell: &vt::Cell) -> bool {
+    !cell.wide && !cell.text.is_empty() && cell.text.chars().next().is_some_and(|c| matches!(unicode_bidi::bidi_class(c), unicode_bidi::BidiClass::R | unicode_bidi::BidiClass::AL))
+}
+
+/// The order in which the cells `range` of a visual row go to the shaper. A
+/// stretch of right-to-left letters, which `map` shows in reverse, goes in
+/// logical order: Arabic letters take their joined form from the letters
+/// before and after them in reading order, and the shaper applies its own bidi.
+fn bidi_shaping_order(row: &[vt::Cell], range: std::ops::Range<usize>, map: Option<&[usize]>) -> Vec<usize> {
+    let Some(map) = map else { return range.collect() };
+    let mut order = Vec::with_capacity(range.len());
+    let mut i = range.start;
+    while i < range.end {
+        let mut j = i;
+        if is_rtl_letter(&row[i]) {
+            while j + 1 < range.end && is_rtl_letter(&row[j + 1]) && map[j + 1] + 1 == map[j] {
+                j += 1;
+            }
+        }
+        if j > i {
+            order.extend((i..=j).rev());
+        } else {
+            order.push(i);
+        }
+        i = j + 1;
+    }
+    order
+}
+
 /// One piece of a row's drawing, in cells from the row's start.
 enum RowOp {
     Bg { from: usize, to: usize, color: Hsla },
@@ -1969,6 +2160,13 @@ enum RowOp {
 /// then its underlines and strikethroughs.
 fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: &mut Window) -> Vec<RowOp> {
     crate::bench::count(&crate::bench::ROWS);
+    // Right-to-left text is drawn in visual order; the cursor follows its cell.
+    let visual = bidi_row(row);
+    let (row, cursor) = match &visual {
+        Some((cells, map)) => (cells.as_slice(), cursor.and_then(|c| map.iter().position(|&l| l == c))),
+        None => (row, cursor),
+    };
+    let map = visual.as_ref().map(|(_, map)| map.as_slice());
     let ligatures = crate::settings::get().font_ligatures;
     let mut ops = Vec::new();
     let mut x = 0;
@@ -2040,6 +2238,19 @@ fn row_ops(row: &[vt::Cell], cell: Size<Pixels>, cursor: Option<usize>, window: 
                 positions.push((text.len(), cell.width * (x - start) as f32));
                 text.push_str(if d.text.is_empty() { " " } else { &d.text });
                 x += 1;
+            }
+        }
+        // Right-to-left letters are shaped in reading order (Arabic joining) and each
+        // glyph is placed in the cell where its letter shows.
+        if map.is_some() && x - start > 1 {
+            let order = bidi_shaping_order(row, start..x, map);
+            if order.iter().zip(start..x).any(|(a, b)| *a != b) {
+                text.clear();
+                positions.clear();
+                for index in order {
+                    positions.push((text.len(), cell.width * (index - start) as f32));
+                    text.push_str(if row[index].text.is_empty() { " " } else { &row[index].text });
+                }
             }
         }
         if text.trim_matches(' ').is_empty() && c.underline.is_none() && !c.strike {
@@ -2205,6 +2416,9 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
             }
         }
     }
+    // Cells and columns in the frame are logical; a right-to-left row shows them reordered.
+    let visual_row = |y: usize| frame.rows.get(y).and_then(|row| bidi_row(row));
+    let visual_column = |x: u16, y: u16| visual_row(y as usize).and_then(|(_, map)| map.iter().position(|&l| l == x as usize)).unwrap_or(x as usize);
     for selected in [false, true] {
         for span in frame.search_spans.iter().filter(|span| span.selected == selected) {
             let y = span.row as usize;
@@ -2216,8 +2430,11 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
             }
             let opacity = if selected { 0.55 } else { 0.28 };
             let highlight = crate::settings::color("accent").opacity(opacity);
-            let b = Bounds::new(at(start, y), size(cell.width * (end - start) as f32, cell.height));
-            window.paint_quad(fill(snap_box(b), highlight));
+            let visual = visual_row(y);
+            for (from, to) in bidi_visual_runs(visual.as_ref().map(|v| v.1.as_slice()), start, end - 1) {
+                let b = Bounds::new(at(from, y), size(cell.width * (to + 1 - from) as f32, cell.height));
+                window.paint_quad(fill(snap_box(b), highlight));
+            }
         }
     }
     for (y, (_, ops, _)) in painted.iter().enumerate() {
@@ -2289,22 +2506,34 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
         let Some(row) = frame.rows.get(y as usize) else { continue };
         let color = row.get(x0 as usize).map_or(hsla(vt::theme().fg), |c| hsla(c.fg));
         let (x0, x1) = (x0 as usize, (x1 as usize + 1).min(row.len()));
-        let line = Bounds::new(at(x0, y as usize) + point(px(0.0), metrics.underline), size(cell.width * (x1 - x0) as f32, metrics.underline_thickness));
-        window.paint_quad(fill(snap_box(line), color));
+        if x0 >= x1 {
+            continue;
+        }
+        let visual = visual_row(y as usize);
+        for (from, to) in bidi_visual_runs(visual.as_ref().map(|v| v.1.as_slice()), x0, x1 - 1) {
+            let line = Bounds::new(at(from, y as usize) + point(px(0.0), metrics.underline), size(cell.width * (to + 1 - from) as f32, metrics.underline_thickness));
+            window.paint_quad(fill(snap_box(line), color));
+        }
     }
 
     paint_images(false, window);
 
     if let Some(cur) = frame.cursor {
         let (x, y) = (cur.x as usize, cur.y as usize);
-        let wide = frame.rows.get(y).and_then(|r| r.get(x)).is_some_and(|c| c.wide);
+        // The cursor stays on its logical cell, wherever that shows.
+        let shown = visual_row(y);
+        let (x, row) = match &shown {
+            Some((cells, map)) => (map.iter().position(|&l| l == x).unwrap_or(x), Some(cells.as_slice())),
+            None => (x, frame.rows.get(y).map(|r| r.as_slice())),
+        };
+        let wide = row.and_then(|r| r.get(x)).is_some_and(|c| c.wide);
         let w = cell.width * if wide { 2.0 } else { 1.0 };
         let color = hsla(cur.color);
         let p = at(x, y);
         match (focused, cur.shape) {
             (true, CursorShape::Block) => {
                 window.paint_quad(fill(snap_box(Bounds::new(p, size(w, cell.height))), color));
-                if let Some(c) = frame.rows.get(y).and_then(|r| r.get(x)).filter(|c| !c.text.is_empty()) {
+                if let Some(c) = row.and_then(|r| r.get(x)).filter(|c| !c.text.is_empty()) {
                     let run = TextRun {
                         len: c.text.len(),
                         font: cell_font(c.bold, c.italic),
@@ -2329,7 +2558,7 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     // underlined, on the terminal's background so the cells under it don't
     // show through.
     if let (Some((cx_, cy_)), Some(text)) = (frame.cursor_cell, marked.filter(|t| !t.is_empty())) {
-        let p = at(cx_ as usize, cy_ as usize);
+        let p = at(visual_column(cx_, cy_), cy_ as usize);
         let fg = hsla(vt::theme().fg);
         let run = TextRun {
             len: text.len(),
@@ -2347,7 +2576,7 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     }
     {
         let mut g = grid.borrow_mut();
-        g.cursor_at = frame.cursor_cell.map(|(x, y)| Bounds::new(at(x as usize, y as usize), cell));
+        g.cursor_at = frame.cursor_cell.map(|(x, y)| Bounds::new(at(visual_column(x, y), y as usize), cell));
         // As in Herdr, hide on the alternate screen and below five columns.
         g.thumb = None;
         g.track = None;
@@ -5037,5 +5266,148 @@ mod tests {
         cx.executor().advance_clock(Duration::from_millis(33));
         cx.run_until_parked();
         assert_eq!(notifies.get(), 1, "subsequent 33ms tick must not emit a duplicate notification");
+    }
+
+    fn bidi_cell(text: &str) -> crate::vt::Cell {
+        crate::vt::Cell { text: text.into(), ..Default::default() }
+    }
+
+    fn bidi_texts(cells: &[crate::vt::Cell]) -> Vec<String> {
+        cells.iter().map(|c| c.text.clone()).collect()
+    }
+
+    #[test]
+    fn bidi_row_reverses_pure_hebrew() {
+        let row: Vec<_> = "שלום".chars().map(|c| bidi_cell(&c.to_string())).collect();
+        let (out, map) = super::bidi_row(&row).expect("a Hebrew row moves");
+        assert_eq!(map, vec![3, 2, 1, 0]);
+        assert_eq!(bidi_texts(&out), vec!["ם", "ו", "ל", "ש"]);
+    }
+
+    #[test]
+    fn bidi_row_keeps_latin_and_digits_left_to_right_around_hebrew() {
+        let row: Vec<_> = "abc שלום 12".chars().map(|c| bidi_cell(&c.to_string())).collect();
+        let (out, map) = super::bidi_row(&row).expect("mixed row moves its Hebrew run");
+        // The space and the digits after Hebrew resolve to the right-to-left run (UAX#9 N1),
+        // so "שלום 12" displays as "12 םולש".
+        assert_eq!(map, vec![0, 1, 2, 3, 9, 10, 8, 7, 6, 5, 4]);
+        assert_eq!(bidi_texts(&out), vec!["a", "b", "c", " ", "1", "2", " ", "ם", "ו", "ל", "ש"]);
+    }
+
+    #[test]
+    fn bidi_row_never_moves_box_drawing_cells() {
+        let row: Vec<_> = "שלום│ab".chars().map(|c| bidi_cell(&c.to_string())).collect();
+        let (out, map) = super::bidi_row(&row).expect("the Hebrew paragraph moves");
+        assert_eq!(map, vec![3, 2, 1, 0, 4, 5, 6], "the box cell keeps its column and the Latin paragraph stays");
+        assert_eq!(bidi_texts(&out), vec!["ם", "ו", "ל", "ש", "│", "a", "b"]);
+    }
+
+    #[test]
+    fn bidi_row_mirrors_brackets_between_right_to_left_letters() {
+        let row: Vec<_> = "א(ב)ג".chars().map(|c| bidi_cell(&c.to_string())).collect();
+        let (out, map) = super::bidi_row(&row).expect("a Hebrew row moves");
+        assert_eq!(map, vec![4, 3, 2, 1, 0]);
+        assert_eq!(bidi_texts(&out), vec!["ג", "(", "ב", ")", "א"], "brackets in a right-to-left run are mirrored");
+    }
+
+    #[test]
+    fn bidi_row_moves_a_wide_cell_with_its_tail() {
+        let mut wide = bidi_cell("（");
+        wide.wide = true;
+        let row = vec![bidi_cell("א"), wide, bidi_cell(""), bidi_cell("ב")];
+        let (out, map) = super::bidi_row(&row).expect("the right-to-left run moves");
+        assert_eq!(map, vec![3, 1, 2, 0], "the wide head and its empty tail move together");
+        assert_eq!(bidi_texts(&out), vec!["ב", "（", "", "א"]);
+        assert!(out[1].wide, "the head keeps its wide flag");
+    }
+
+    #[test]
+    fn bidi_row_returns_none_for_ascii_rows() {
+        let row: Vec<_> = "abc 123".chars().map(|c| bidi_cell(&c.to_string())).collect();
+        assert!(super::bidi_row(&row).is_none());
+    }
+
+    fn bidi_cells(text: &str) -> Vec<crate::vt::Cell> {
+        text.chars().map(|c| bidi_cell(&c.to_string())).collect()
+    }
+
+    #[test]
+    fn bidi_shift_x_maps_the_pointer_to_the_logical_cell() {
+        // "אבגד" shows as "דגבא": visual column 0 holds logical column 3.
+        let row = bidi_cells("אבגד");
+        assert_eq!(super::bidi_shift_x(&row, 5.0, 10.0), 35.0);
+        assert_eq!(super::bidi_shift_x(&row, 35.0, 10.0), 5.0);
+        // The place inside the cell is kept, up to its last pixel (no clamping needed).
+        assert_eq!(super::bidi_shift_x(&row, 9.75, 10.0), 39.75);
+        assert_eq!(super::bidi_shift_x(&row, 39.75, 10.0), 9.75);
+    }
+
+    #[test]
+    fn bidi_shift_x_leaves_other_pointers_alone() {
+        assert_eq!(super::bidi_shift_x(&bidi_cells("abcd"), 5.0, 10.0), 5.0);
+        // Past the last cell of a Hebrew row (padding) nothing maps.
+        assert_eq!(super::bidi_shift_x(&bidi_cells("אבגד"), 45.0, 10.0), 45.0);
+        assert_eq!(super::bidi_shift_x(&bidi_cells("אבגד"), -1.0, 10.0), -1.0);
+    }
+
+    #[test]
+    fn bidi_shift_x_keeps_a_wide_cell_whole() {
+        let mut wide = bidi_cell("（");
+        wide.wide = true;
+        let row = vec![bidi_cell("א"), wide, bidi_cell(""), bidi_cell("ב")];
+        // Visual order is ב, wide head, wide tail, א: the tail stays right of its head.
+        assert_eq!(super::bidi_shift_x(&row, 15.0, 10.0), 15.0, "the wide head");
+        assert_eq!(super::bidi_shift_x(&row, 25.0, 10.0), 25.0, "the wide tail");
+        assert_eq!(super::bidi_shift_x(&row, 5.0, 10.0), 35.0);
+        assert_eq!(super::bidi_shift_x(&row, 35.0, 10.0), 5.0);
+    }
+
+    #[test]
+    fn bidi_visual_runs_follow_a_logical_range() {
+        let row = bidi_cells("abc שלום 12");
+        let (_, map) = super::bidi_row(&row).unwrap();
+        // Logical 4..=7 ("שלום") shows reversed in one run; logical 3..=5 splits around it.
+        assert_eq!(super::bidi_visual_runs(Some(&map), 4, 7), vec![(7, 10)]);
+        assert_eq!(super::bidi_visual_runs(Some(&map), 3, 5), vec![(3, 3), (9, 10)]);
+        assert_eq!(super::bidi_visual_runs(None, 2, 4), vec![(2, 4)]);
+    }
+
+    #[test]
+    fn bidi_shaping_order_puts_arabic_letters_in_reading_order() {
+        let row = bidi_cells("سلام");
+        let (visual, map) = super::bidi_row(&row).unwrap();
+        // The cells show reversed; the shaper still gets the word as typed, so letters join.
+        let order = super::bidi_shaping_order(&visual, 0..4, Some(&map));
+        assert_eq!(order, vec![3, 2, 1, 0]);
+        let shaped: String = order.iter().map(|&i| visual[i].text.as_str()).collect();
+        assert_eq!(shaped, "سلام");
+    }
+
+    #[test]
+    fn bidi_shaping_order_stops_at_neutral_and_left_to_right_cells() {
+        let row = bidi_cells("سلام (دنیا) ab");
+        let (visual, map) = super::bidi_row(&row).unwrap();
+        let order = super::bidi_shaping_order(&visual, 0..visual.len(), Some(&map));
+        let shaped: String = order.iter().map(|&i| visual[i].text.as_str()).collect();
+        // The brackets keep the visual order (and their mirrored form); only letter stretches turn.
+        assert!(shaped.contains("سلام"), "{shaped}");
+        assert!(shaped.contains("دنیا"), "{shaped}");
+        assert_eq!(order.len(), visual.len());
+        let mut sorted = order.clone();
+        sorted.sort_unstable();
+        assert_eq!(sorted, (0..visual.len()).collect::<Vec<_>>(), "every cell goes to the shaper once");
+        assert_eq!(super::bidi_shaping_order(&visual, 2..4, None), vec![2, 3]);
+    }
+
+    #[test]
+    fn bidi_viewport_row_reads_cells_for_the_pointer_map() {
+        let mut vt = crate::vt::Vt::new(10, 2);
+        vt.write("\r\nאבגד".as_bytes());
+        let row = vt.viewport_row(1).expect("row 1 exists");
+        assert_eq!(row.len(), 10);
+        assert_eq!(bidi_texts(&row[..4]), vec!["א", "ב", "ג", "ד"]);
+        assert_eq!(super::bidi_shift_x(&row, 5.0, 10.0), 35.0, "column 0 of the bottom row is logical column 3");
+        assert_eq!(super::bidi_shift_x(&vt.viewport_row(0).unwrap(), 5.0, 10.0), 5.0, "a blank row is unchanged");
+        assert!(vt.viewport_row(2).is_none());
     }
 }

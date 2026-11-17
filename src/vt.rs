@@ -1190,6 +1190,36 @@ impl Vt {
         (unsafe { ghostty_terminal_grid_ref(self.term, p, &mut r) } == GHOSTTY_SUCCESS).then_some(r)
     }
 
+    /// The text and width of the cells of viewport row `row`, as the screen holds
+    /// them now (not as last painted): enough to find where right-to-left text
+    /// shows. A wide character's tail cell is empty.
+    pub fn viewport_row(&self, row: u16) -> Option<Vec<Cell>> {
+        if row >= self.rows {
+            return None;
+        }
+        let mut r = self.grid_ref(GHOSTTY_POINT_TAG_VIEWPORT, 0, row as u32)?;
+        let mut cells = Vec::with_capacity(self.cols as usize);
+        for x in 0..self.cols {
+            r.x = x;
+            let mut cell = Cell::default();
+            unsafe {
+                let mut raw: GhosttyCell = Default::default();
+                ghostty_grid_ref_cell(&r, &mut raw);
+                let mut wide: GhosttyCellWide = GHOSTTY_CELL_WIDE_NARROW;
+                ghostty_cell_get(raw, GHOSTTY_CELL_DATA_WIDE, &mut wide as *mut _ as *mut c_void);
+                cell.wide = wide == GHOSTTY_CELL_WIDE_WIDE;
+                if wide != GHOSTTY_CELL_WIDE_SPACER_TAIL && wide != GHOSTTY_CELL_WIDE_SPACER_HEAD {
+                    let mut cps = [0u32; 16];
+                    let mut len = 0usize;
+                    ghostty_grid_ref_graphemes(&r, cps.as_mut_ptr(), cps.len(), &mut len);
+                    cell.text.extend(cps[..len.min(cps.len())].iter().filter_map(|c| char::from_u32(*c)));
+                }
+            }
+            cells.push(cell);
+        }
+        Some(cells)
+    }
+
     /// The link at a viewport cell: a link the program marked (OSC 8), or a
     /// URL or path in the text. Follows lines the terminal wrapped, also into
     /// rows scrolled out of view. Then tries the lines around joined, their
