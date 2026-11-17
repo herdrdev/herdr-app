@@ -525,7 +525,7 @@ No arguments.
 
 ## `app.test_notification`
 
-Send a system notification now, whatever system_notifications says (macOS asks for permission the first time).
+Send a test system notification now (macOS asks for permission the first time).
 
 No arguments.
 

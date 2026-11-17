@@ -21,11 +21,6 @@ const APPEARANCES = [
   ["light", "Light"],
   ["dark", "Dark"],
 ];
-const SYSTEM_NOTIFICATIONS = [
-  ["background", "When away"],
-  ["always", "Always"],
-  ["off", "Off"],
-];
 
 // What the app uses when settings.json names no font (settings.rs).
 const DEFAULT_FONT = "JetBrains Mono";
@@ -325,11 +320,8 @@ export default class Settings extends View {
       );
   }
 
-  // One of `choices` for settings.json's `key`; the first is the default,
-  // left out of the file.
-  choicePicker(t, id, key, choices) {
-    const def = choices[0][0];
-    const now = this.person[key] ?? def;
+  appearancePicker(t, cx) {
+    const now = this.person.appearance ?? null;
     return h_flex()
       .p(2)
       .gap(2)
@@ -338,9 +330,9 @@ export default class Settings extends View {
       .border_color(t.border)
       .bg(t.background)
       .children(
-        choices.map(([value, label]) =>
+        APPEARANCES.map(([value, label]) =>
           div()
-            .id(`${id}-${label}`)
+            .id(`st-ap-${label}`)
             .px(12)
             .py(4)
             .rounded(6)
@@ -350,8 +342,8 @@ export default class Settings extends View {
             .when(now !== value, (el) => el.text_color(t.muted).hover((s) => s.text_color(t.foreground)))
             .on_click((_e, cx) =>
               this.change((p) => {
-                if (value === def) delete p[key];
-                else p[key] = value;
+                if (value === null) delete p.appearance;
+                else p.appearance = value;
               }, cx),
             )
             .child(label),
@@ -527,7 +519,7 @@ export default class Settings extends View {
       .child(this.layoutPicker(t, cx))
       .child(div().h(18))
       .child(this.heading(t, "Theme"))
-      .child(this.row(t, "Appearance", "Light or dark, or as your system is now.", this.choicePicker(t, "st-ap", "appearance", APPEARANCES)))
+      .child(this.row(t, "Appearance", "Light or dark, or as your system is now.", this.appearancePicker(t, cx)))
       .child(div().pt(12).pb(8).text_size(12.5).text_color(t.dim).child("For the layout you're in: each layout keeps its own light and dark theme."))
       .child(div().pb(6).text_size(12.5).font_medium().text_color(t.muted).child("Dark"))
       .child(this.themePicker(t, false))
@@ -746,7 +738,6 @@ export default class Settings extends View {
   // Alerts ---------------------------------------------------------------
 
   alerts(t) {
-    const macos = window()?.platform === "macos";
     const sounds = this.person.sounds ?? {};
     const on = sounds.enabled !== false;
     const file = (f) => (f ? f.split(/[\\/]/).pop() : "Herdr's sound");
@@ -768,34 +759,11 @@ export default class Settings extends View {
       .child(
         this.row(
           t,
-          "System notifications",
-          "When away: only while Herdr isn't the app in front. Never for the agent you're looking at.",
-          this.choicePicker(t, "st-sn", "system_notifications", SYSTEM_NOTIFICATIONS),
-        ),
-      )
-      .child(
-        this.row(
-          t,
           "Send a test notification",
-          macos
-            ? "The first time, macOS asks whether Herdr may send notifications. Answer here, so no agent's alert is lost to the question."
-            : "See how an alert shows outside Herdr.",
+          window()?.platform === "macos"
+            ? "The first time, macOS asks whether Herdr may send notifications. Answer here, so no mod's notification is lost to the question."
+            : "See how a notification shows outside Herdr.",
           this.button(t, "st-test-notification", "Send", () => run("app.test_notification")),
-        ),
-      )
-      .when(macos, (el) =>
-        el.child(
-          this.row(
-            t,
-            "Bounce the Dock icon",
-            "When an agent needs you while Herdr is in the background.",
-            this.toggle(t, "st-dock_bounce", this.person.dock_bounce === true, (_e, cx) =>
-              this.change((p) => {
-                if (p.dock_bounce) delete p.dock_bounce;
-                else p.dock_bounce = true;
-              }, cx),
-            ),
-          ),
         ),
       );
   }
