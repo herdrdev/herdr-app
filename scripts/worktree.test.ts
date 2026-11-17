@@ -209,13 +209,15 @@ const repo = { name: "repo", main: "/home/user/code/repo", top: "/home/user/code
 const shared = (settings: unknown) => ({ [`${repo.main}/.herdr/worktree.json`]: JSON.stringify(settings) });
 const sh = (argv: string[], cwd: string) => spawnSync(argv[0], argv.slice(1), { cwd, encoding: "utf8", env: { ...process.env, SHELL: "/bin/sh" } });
 
-test("a repo's .herdr/worktree.json and the person's worktrees.repos entry choose where its checkouts go", async () => {
+test("a repo's .herdr/worktree.json, else the person's worktrees.repos entry, chooses where its checkouts go", async () => {
   for (const [settings, files, expected] of [
     [null, {}, "/home/user/.herdr/worktrees/repo"],
     [null, shared({ directory: ".claude/worktrees" }), "/home/user/code/repo/.claude/worktrees"],
     [null, shared({ directory: "../repo.worktrees/" }), "/home/user/code/repo.worktrees"],
     [null, shared({ directory: "~/wt/repo" }), "/home/user/wt/repo"],
-    [{ worktrees: { directory: "/srv/all", repos: { "~/code/repo": { directory: ".worktrees" } } } }, shared({ directory: ".claude/worktrees" }), "/home/user/code/repo/.worktrees"],
+    [{ worktrees: { directory: "/srv/all", repos: { "~/code/repo": { directory: ".worktrees" } } } }, shared({ directory: ".claude/worktrees" }), "/home/user/code/repo/.claude/worktrees"],
+    [{ worktrees: { directory: "/srv/all", repos: { "~/code/repo": { directory: ".worktrees" } } } }, shared({ setup: "make" }), "/home/user/code/repo/.worktrees"],
+    [{ worktrees: { directory: "/srv/all", repos: { "~/code/repo": { directory: ".worktrees" } } } }, {}, "/home/user/code/repo/.worktrees"],
     [{ worktrees: { repos: { "/home/user/code/other": { directory: "/elsewhere" } } } }, shared({ directory: ".claude/worktrees" }), "/home/user/code/repo/.claude/worktrees"],
     [{ worktrees: { directory: "/srv/all", repos: { "/home/user/code/repo/": { setup: "make" } } } }, {}, "/srv/all/repo"],
   ] as const) {
@@ -311,6 +313,8 @@ test("broken repo and person settings say what is wrong instead of creating else
     [{ worktrees: { repos: [] } }, {}, "worktrees.repos must be an object."],
     [{ worktrees: { repos: { "code/repo": {} } } }, {}, "worktrees.repos key code/repo must be an absolute path"],
     [{ worktrees: { repos: { "~/code/repo": ".worktrees" } } }, {}, 'worktrees.repos["~/code/repo"] must be an object.'],
+    [{ worktrees: { repos: { "~/code/repo": { directory: "" } } } }, shared({ setup: "make" }), 'worktrees.repos["~/code/repo"] directory must be a non-empty path.'],
+    [{ worktrees: { repos: { "~/code/repo": { directory: ".ok" } } } }, shared({ directory: "" }), ".herdr/worktree.json directory must be a non-empty path."],
   ] as const) {
     const { plan } = harness(null, settings && JSON.stringify(settings), files as Record<string, string>);
     await expect(plan(repo, "/home/user", null, true)).rejects.toThrow(message);

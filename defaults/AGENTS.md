@@ -748,7 +748,7 @@ What's about the user, never a look:
   "./.herdr/setup.sh", "teardown": "docker compose down" }`. Its `directory`
   holds the checkouts directly (`<directory>/<branch>`); a relative one starts
   at the main checkout. `worktrees.repos` sets the same keys for a repo you
-  don't control and wins over its file: `{ "repos": { "~/code/app": {
+  don't control, where its file says nothing: `{ "repos": { "~/code/app": {
   "directory": ".worktrees" } } }` (keys are main checkout paths).
   `worktrees.setup` and `worktrees.teardown` are yours, for every repo.
   Setup runs in the new space's first terminal, yours then the repo's, before

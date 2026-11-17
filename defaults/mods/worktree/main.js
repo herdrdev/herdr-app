@@ -62,18 +62,19 @@ async function repoSettings(repo, userHome, on) {
   const main = tidy(repo.main.replace(/\\/g, "/"));
   const key = Object.keys(repos).find((k) => expand(k, userHome, `worktrees.repos key ${k}`) === main);
   if (key && !object(repos[key])) throw new Error(`worktrees.repos["${key}"] must be an object.`);
-  return { mine, here: { ...shared, ...(key ? repos[key] : {}) }, from: key ? `worktrees.repos["${key}"]` : ".herdr/worktree.json" };
+  const from = (name) => `${name in shared || !key ? ".herdr/worktree.json" : `worktrees.repos["${key}"]`} ${name}`;
+  return { mine, here: { ...(key ? repos[key] : {}), ...shared }, from };
 }
 
 async function plan(repo, userHome, on, creating) {
   const { mine, here, from } = await repoSettings(repo, userHome, on);
   const parent = !creating ? null : here.directory === undefined
     ? `${await root(userHome)}/${repo.name}`
-    : expand(here.directory, userHome, `${from} directory`, repo.main);
+    : expand(here.directory, userHome, from("directory"), repo.main);
   return {
     parent,
-    setup: [...command(mine.setup, "worktrees.setup"), ...command(here.setup, `${from} setup`)],
-    teardown: [...command(here.teardown, `${from} teardown`), ...command(mine.teardown, "worktrees.teardown")],
+    setup: [...command(mine.setup, "worktrees.setup"), ...command(here.setup, from("setup"))],
+    teardown: [...command(here.teardown, from("teardown")), ...command(mine.teardown, "worktrees.teardown")],
   };
 }
 
