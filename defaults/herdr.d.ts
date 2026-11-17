@@ -447,10 +447,11 @@ export function notify(n: {
  * The exported View may implement async close(cx) for bounded final cleanup. */
 export function props(): any;
 
-/** Reads a value every mod can see (persisted). */
+/** Reads a value every mod can see (persisted). Live: a copy that read a key
+ *  (in render, a callback or a child) re-renders when that key changes. */
 export function shared(key: string): unknown;
 
-/** Sets a shared value; every mod re-renders so it can react. */
+/** Sets a shared value; the copies that read that key re-render so they can react. */
 export function setShared(key: string, value: unknown): null;
 
 /**

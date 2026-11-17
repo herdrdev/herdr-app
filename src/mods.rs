@@ -405,7 +405,10 @@ pub enum Request {
     SetWindowTitle(Option<String>),
     /// The app icon's badge (the Dock on macOS); `None` clears it.
     SetBadge(Option<String>),
+    /// Every copy re-renders.
     Refresh,
+    /// Copies whose reads changed re-render (`snapshot_changed`).
+    Changed,
     /// From `herdr-app do` / `herdr-app status` (control.rs); answer on `reply`.
     Control { cmd: Value, reply: std::sync::mpsc::Sender<Value> },
 }
@@ -448,11 +451,17 @@ pub fn shared(key: &str) -> Option<Value> {
     with_shared(|s| s.values.get(key).cloned())
 }
 
-/// Sets a value every mod can read (persisted in shared.json); mods re-render.
+/// Sets a value every mod can read (persisted in shared.json); the copies that read it re-render.
 pub fn set_shared(key: String, value: Value) {
+    let read_key = shared_key(&key);
     if with_shared(|s| s.set(key, value)) {
-        request(Request::Refresh);
+        bump_revision(&read_key);
+        request(Request::Changed);
     }
+}
+
+fn shared_key(key: &str) -> String {
+    format!("shared\u{0}{key}")
 }
 
 fn with_shared<R>(f: impl FnOnce(&mut SharedStore) -> R) -> R {
@@ -567,7 +576,8 @@ thread_local! {
     /// not act on the person's keys).
     static SHOWN_COPIES: RefCell<std::collections::HashSet<u64>> = RefCell::new(std::collections::HashSet::new());
     static LIVE_READS: RefCell<HashMap<u64, Weak<RefCell<LiveReads>>>> = RefCell::new(HashMap::new());
-    static REVISIONS: RefCell<HashMap<&'static str, u64>> = RefCell::new(HashMap::new());
+    /// How often each thing mods read has changed: a snapshot key, `shared\0<key>`.
+    static REVISIONS: RefCell<HashMap<String, u64>> = RefCell::new(HashMap::new());
     static COPY_SEQ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
     static OVERLAY_SEQ: std::cell::Cell<u64> = const { std::cell::Cell::new(0) };
 }
@@ -601,9 +611,19 @@ fn publish(key: &'static str, set: impl FnOnce(&mut Snapshot) -> (Value, Value))
         old != new
     });
     if changed {
-        REVISIONS.with_borrow_mut(|r| *r.entry(key).or_default() += 1);
+        bump_revision(key);
     }
     changed
+}
+
+/// Something mods read changed: the copies that read it redraw.
+fn bump_revision(key: &str) {
+    REVISIONS.with_borrow_mut(|r| match r.get_mut(key) {
+        Some(n) => *n += 1,
+        None => {
+            r.insert(key.to_owned(), 1);
+        }
+    });
 }
 
 pub fn publish_layout(layout: &Node) -> bool {
@@ -620,7 +640,7 @@ pub fn publish_agents(v: Value) -> bool {
     publish("agents", |s| (std::mem::replace(&mut s.agents, v.clone()), v))
 }
 pub fn panes_scrolled() {
-    REVISIONS.with_borrow_mut(|r| *r.entry("panes").or_default() += 1);
+    bump_revision("panes");
 }
 
 pub fn track_pane_view(pane: String, view: &gpui::Entity<crate::terminal::TerminalView>) {
@@ -688,17 +708,19 @@ pub fn publish_focused(mut v: Value) -> bool {
 }
 
 #[derive(Default)]
-struct LiveReads(HashMap<&'static str, u64>);
+struct LiveReads(HashMap<String, u64>);
 
 impl LiveReads {
-    fn record(&mut self, key: &'static str, revisions: &HashMap<&'static str, u64>) {
-        self.0.entry(key).or_insert_with(|| revisions.get(key).copied().unwrap_or(0));
+    fn record(&mut self, key: &str, revisions: &HashMap<String, u64>) {
+        if !self.0.contains_key(key) {
+            self.0.insert(key.to_owned(), revisions.get(key).copied().unwrap_or(0));
+        }
     }
 
-    fn changed(&mut self, revisions: &HashMap<&'static str, u64>) -> bool {
+    fn changed(&mut self, revisions: &HashMap<String, u64>) -> bool {
         let mut changed = false;
         for (key, seen) in &mut self.0 {
-            let revision = revisions.get(key).copied().unwrap_or(0);
+            let revision = revisions.get(key.as_str()).copied().unwrap_or(0);
             changed |= *seen != revision;
             *seen = revision;
         }
@@ -706,8 +728,12 @@ impl LiveReads {
     }
 }
 
-fn read(reads: &RefCell<LiveReads>, key: &'static str, f: impl FnOnce(&Snapshot) -> &Value) -> HostValue {
+fn record(reads: &RefCell<LiveReads>, key: &str) {
     REVISIONS.with_borrow(|r| reads.borrow_mut().record(key, r));
+}
+
+fn read(reads: &RefCell<LiveReads>, key: &'static str, f: impl FnOnce(&Snapshot) -> &Value) -> HostValue {
+    record(reads, key);
     SNAPSHOT.with(|s| {
         let snapshot = s.borrow();
         if key != "panes" {
@@ -1194,9 +1220,13 @@ fn module(inst: Instance, copy: u64) -> HostModule {
             move |_| Ok(float.as_ref().map_or(HostValue::Null, |id| read(&reads, "floats", |s| s.floats.get(id).unwrap_or(&Value::Null))))
         })
         .function("props", move |_| Ok(to_host(&props)))
-        .function("shared", |a| {
-            let k = a.string(0)?;
-            Ok(with_shared(|s| s.values.get(k).map(to_host).unwrap_or(HostValue::Null)))
+        .function("shared", {
+            let reads = reads.clone();
+            move |a| {
+                let k = a.string(0)?;
+                record(&reads, &shared_key(k));
+                Ok(with_shared(|s| s.values.get(k).map(to_host).unwrap_or(HostValue::Null)))
+            }
         })
         .function("setShared", |a| {
             set_shared(a.string(0)?.to_owned(), from_host(a.value(1)?));
@@ -1394,10 +1424,10 @@ mod tests {
         let mut chrome = LiveReads::default();
         list.record("agents", &revisions);
         chrome.record("layout", &revisions);
-        revisions.insert("terminals", 1);
+        revisions.insert("terminals".into(), 1);
         assert!(!list.changed(&revisions));
         assert!(!chrome.changed(&revisions));
-        revisions.insert("agents", 1);
+        revisions.insert("agents".into(), 1);
         // A callback reading the new snapshot must not swallow a pending redraw.
         list.record("agents", &revisions);
         assert!(list.changed(&revisions));
@@ -1405,8 +1435,34 @@ mod tests {
         assert!(!list.changed(&revisions));
         // Dependencies first read by a child or a callback remain subscribed.
         list.record("focused", &revisions);
-        revisions.insert("focused", 1);
+        revisions.insert("focused".into(), 1);
         assert!(list.changed(&revisions));
+    }
+
+    #[test]
+    fn a_shared_value_redraws_only_the_copies_that_read_it() {
+        std::thread::spawn(|| {
+            let (theme, list) = (Rc::new(RefCell::new(LiveReads::default())), Rc::new(RefCell::new(LiveReads::default())));
+            LIVE_READS.with_borrow_mut(|copies| {
+                copies.insert(1, Rc::downgrade(&theme));
+                copies.insert(2, Rc::downgrade(&list));
+            });
+            record(&theme, &shared_key("test.theme"));
+            record(&list, &shared_key("test.sort"));
+            // shared.json outlives a test run: start from values no earlier run left.
+            let run = json!(std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos().to_string());
+            set_shared("test.theme".into(), run.clone());
+            set_shared("test.sort".into(), run);
+            assert!(snapshot_changed(1) && snapshot_changed(2));
+            set_shared("test.sort".into(), json!("name"));
+            assert!(!snapshot_changed(1), "a key it never read");
+            assert!(snapshot_changed(2));
+            set_shared("test.sort".into(), json!("name"));
+            assert!(!snapshot_changed(2), "the same value is no change");
+            set_shared("test.theme".into(), json!("dark"));
+            assert!(snapshot_changed(1));
+            assert!(!snapshot_changed(2));
+        }).join().unwrap();
     }
 
     #[test]
