@@ -144,11 +144,14 @@ fn mod_file_counts(rest: std::path::Components) -> bool {
 /// Folders mods watch (`watchFolder`): one OS watcher each, shared by every
 /// mod waiting on it. Bounded invalidations collect even while nobody waits.
 struct Folder {
-    _watcher: std::sync::mpsc::Sender<()>,
+    /// The only sender of its worker's events: letting the folder go ends the worker.
+    _watcher: Arc<FolderEvents>,
     generation: Arc<()>,
     waiters: Vec<async_channel::Sender<Vec<String>>>,
     pending: HashSet<String>,
 }
+
+type FolderEvents = std::sync::mpsc::SyncSender<notify::Result<notify::Event>>;
 
 static FOLDERS: OnceLock<std::sync::Mutex<std::collections::HashMap<PathBuf, Folder>>> = OnceLock::new();
 /// Changes are batched this long (an editor's save is several events).
@@ -340,17 +343,40 @@ fn collect_event(event: notify::Event, root: &Path, directories: &HashSet<PathBu
     refresh
 }
 
-fn start_folder(root: &Path, generation: Arc<()>) -> Result<std::sync::mpsc::Sender<()>, String> {
+/// Sleeps until a folder's next event, then hands `each` every event of the
+/// batch it opens: a quiet folder costs no wakeups. False once the senders are
+/// gone, which is how a sleeping worker learns its folder was let go.
+fn next_batch<T>(events: &std::sync::mpsc::Receiver<T>, mut each: impl FnMut(T)) -> bool {
+    let Ok(first) = events.recv() else { return false };
+    each(first);
+    let deadline = std::time::Instant::now() + BATCH;
+    while let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) {
+        match events.recv_timeout(left) {
+            Ok(event) => each(event),
+            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
+            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return false,
+        }
+    }
+    true
+}
+
+fn start_folder(root: &Path, generation: Arc<()>) -> Result<Arc<FolderEvents>, String> {
     let mut directories = watch_directories(root).inspect_err(|e| tracing::warn!("{e}"))?;
     let (tx, events) = std::sync::mpsc::sync_channel(1024);
+    // The OS watcher lives in the worker, so it must not keep the worker's wait open.
+    let tx = Arc::new(tx);
+    let sender = Arc::downgrade(&tx);
     let overflow = std::sync::Arc::new(std::sync::atomic::AtomicBool::new(false));
     let lost = overflow.clone();
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
         if event.as_ref().is_ok_and(|e| !e.need_rescan() && matches!(e.kind, notify::EventKind::Access(_))) {
             return;
         }
+        let Some(tx) = sender.upgrade() else { return };
         if tx.try_send(event).is_err() {
             lost.store(true, std::sync::atomic::Ordering::Relaxed);
+            // The worker may have emptied the queue and gone back to sleep since: wake it.
+            let _ = tx.try_send(Err(notify::Error::generic("folder events were lost")));
         }
     })
     .map_err(|e| format!("cannot watch: {e}"))?;
@@ -358,29 +384,22 @@ fn start_folder(root: &Path, generation: Arc<()>) -> Result<std::sync::mpsc::Sen
         watcher.watch(path, folder_watch_mode()).map_err(|e| format!("cannot watch {}: {e}", path.display()))?;
     }
     let root = root.to_path_buf();
-    let (stop, stopped) = std::sync::mpsc::channel::<()>();
     std::thread::spawn(move || {
         'watching: loop {
-            if matches!(stopped.try_recv(), Err(std::sync::mpsc::TryRecvError::Disconnected)) {
-                break;
-            }
-            let deadline = std::time::Instant::now() + BATCH;
             let mut pending = HashSet::new();
             let mut refresh = false;
             let mut removed = HashSet::new();
-            while let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) {
-                match events.recv_timeout(left) {
-                    Ok(Ok(event)) => {
-                        refresh |= collect_event(event, &root, &directories, &mut pending, &mut removed);
-                    }
-                    Ok(Err(_)) => {
-                        removed.extend(directories.iter().cloned());
-                        refresh = true;
-                        pending.clear();
-                        pending.insert(root.to_string_lossy().into_owned());
-                    }
-                    Err(_) => break,
+            let watched = next_batch(&events, |event| match event {
+                Ok(event) => refresh |= collect_event(event, &root, &directories, &mut pending, &mut removed),
+                Err(_) => {
+                    removed.extend(directories.iter().cloned());
+                    refresh = true;
+                    pending.clear();
+                    pending.insert(root.to_string_lossy().into_owned());
                 }
+            });
+            if !watched {
+                break;
             }
             if overflow.swap(false, std::sync::atomic::Ordering::Relaxed) {
                 removed.extend(directories.iter().cloned());
@@ -428,7 +447,7 @@ fn start_folder(root: &Path, generation: Arc<()>) -> Result<std::sync::mpsc::Sen
             }
         }
     });
-    Ok(stop)
+    Ok(tx)
 }
 
 fn remove_folder(root: &Path, generation: &Arc<()>) {
@@ -790,7 +809,8 @@ mod tests {
         let mut live = Vec::new();
         let mut workers = Vec::new();
         for i in 0..MAX_FOLDERS {
-            let (stop, stopped) = std::sync::mpsc::channel();
+            let (stop, stopped) = std::sync::mpsc::sync_channel(1);
+            let stop = Arc::new(stop);
             let (tx, rx) = async_channel::bounded(1);
             if i % 3 == 0 {
                 drop(rx); // A mod copy closed or its host future was cancelled.
@@ -833,10 +853,10 @@ mod tests {
         let root = test_repo("replacement");
         let retired = Arc::new(());
         let generation = Arc::new(());
-        let (stop, _stopped) = std::sync::mpsc::channel();
+        let (stop, _stopped) = std::sync::mpsc::sync_channel(1);
         let (tx, rx) = async_channel::bounded(1);
         folders().insert(root.clone(), Folder {
-            _watcher: stop, generation: generation.clone(), waiters: vec![tx], pending: HashSet::new(),
+            _watcher: Arc::new(stop), generation: generation.clone(), waiters: vec![tx], pending: HashSet::new(),
         });
         remove_folder(&root, &retired);
         assert!(!deliver_pending(&root, &retired, HashSet::from(["stale".into()])));
@@ -845,6 +865,50 @@ mod tests {
         assert_eq!(rx.try_recv().unwrap(), vec!["fresh".to_owned()]);
         remove_folder(&root, &generation);
         assert!(!folders().contains_key(&root));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_folder_worker_sleeps_until_an_event_and_ends_when_its_sender_is_dropped() {
+        use std::sync::mpsc::RecvTimeoutError;
+        let patience = std::time::Duration::from_secs(10);
+        let (tx, events) = std::sync::mpsc::sync_channel(8);
+        let (done, batches) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut batch = Vec::new();
+            while next_batch(&events, |event| batch.push(event)) {
+                done.send(std::mem::take(&mut batch)).unwrap();
+            }
+        });
+        // Nothing changes: the worker hands over no empty batch, it is asleep.
+        assert_eq!(batches.recv_timeout(BATCH * 3), Err(RecvTimeoutError::Timeout));
+        tx.send("one").unwrap();
+        tx.send("two").unwrap();
+        let mut seen = Vec::new();
+        while seen.len() < 2 {
+            let batch = batches.recv_timeout(patience).unwrap();
+            assert!(!batch.is_empty());
+            seen.extend(batch);
+        }
+        assert_eq!(seen, ["one", "two"]);
+        // The folder is let go while its worker sleeps.
+        drop(tx);
+        assert_eq!(batches.recv_timeout(patience), Err(RecvTimeoutError::Disconnected));
+    }
+
+    #[test]
+    fn a_quiet_folder_worker_ends_when_its_folder_is_let_go() {
+        let root = test_repo("let-go");
+        let generation = Arc::new(());
+        // The worker keeps a generation of its own until it ends.
+        let watcher = start_folder(&root, generation.clone()).unwrap();
+        assert_eq!(Arc::strong_count(&generation), 2);
+        drop(watcher);
+        let deadline = std::time::Instant::now() + std::time::Duration::from_secs(5);
+        while Arc::strong_count(&generation) > 1 {
+            assert!(std::time::Instant::now() < deadline, "the worker of a folder nobody watches kept running");
+            std::thread::sleep(std::time::Duration::from_millis(10));
+        }
         std::fs::remove_dir_all(root).unwrap();
     }
 
