@@ -17,6 +17,59 @@ function harness(pins: string[], globals: Record<string, unknown> = {}) {
   return { agents, data, writes };
 }
 
+test("Pi status records appear beneath their owning terminal without inventing terminals", () => {
+  const { agents, writes } = harness([], { h_flex: element, div: element, svg: element, image: element });
+  const owner = { address: "remote/t1", state: "live", program: { name: "Pi" }, records: {
+    "subagents/active": { app: "pi-subagents", state: "working", title: "worker", msg: "Reading" },
+    "subagents/done": { app: "pi-subagents", state: "done", title: "reviewer" },
+    "subagents/error": { app: "pi-subagents", state: "error", title: "failed" },
+    "other": { app: "pi", state: "working" },
+    "subagents/foreign": { app: "other", state: "working" },
+    "subagents/invalid": { app: "pi-subagents", state: "unexpected" },
+    "subagents/null": null,
+  } };
+  const child = { address: "remote/t2", parent: owner.address, state: "live" };
+  const tree = agents.tree([owner, child], owner.address);
+  expect(tree.map((s: any) => s.t.address)).toEqual([
+    "remote/t2", "remote/t1#subagents/active", "remote/t1#subagents/done", "remote/t1#subagents/error",
+  ]);
+  expect(tree[1].t.message).toBe("Reading");
+  expect(tree[3].lines).toEqual(["└"]);
+  const kidStatus = new Function("View", `${source}; return kidStatus;`)(class {});
+  expect(kidStatus(tree[2].t, new Map())).toBe("idle");
+  expect(kidStatus(tree[3].t, new Map())).toBe("blocked");
+  expect(agents.tree([{ ...owner, records: {} }], owner.address)).toEqual([]);
+  agents.listed = new Map();
+  const row = agents.subRow({ raised: "selected" }, tree[1], owner.address, false).node;
+  expect(textOf(row)).toContain("worker · Reading");
+  expect(row.bg).toBeUndefined(); // Focusing the parent doesn't select every worker.
+  row.click();
+  expect(writes).toEqual([["pane.focus", { terminal: "remote/t1" }]]);
+});
+
+for (const sort of ["priority", "grouped"]) test(`${sort}: a headless Pi worker renders under its idle parent`, () => {
+  const parent = { address: "t1", pane: "p1", tab: "tab1", space: "s1", space_name: "Project",
+    program: { name: "Pi", key: "pi", agent: true }, status: "idle", seq: 1 };
+  let records: Record<string, unknown> = { "subagents/test": { app: "pi-subagents", state: "working", title: "worker", msg: "Inspecting" } };
+  const { agents } = harness([], {
+    agents: () => [parent], terminals: () => [{ ...parent, state: "live", records }],
+    panes: () => [{ ...parent, terminal: parent.address }], focused: () => null,
+    spaces: () => [{ id: "s1", tabs: [{ id: "tab1", name: "Pi", named: true }] }],
+    layout: () => ({ id: "sidebar", size: { px: 268 } }), shared: () => sort,
+    theme: () => ({}), setAgentOrder() {},
+    div: element, v_flex: element, h_flex: element, svg: element, image: element,
+  });
+  expect(textOf(agents.render({}).node)).toContain("worker · Inspecting");
+  if (sort === "priority") expect(textOf(agents.render({}).node)).toContain("Working");
+  records = { "subagents/test": { app: "pi-subagents", state: "error", title: "worker", msg: "Failed" } };
+  expect(textOf(agents.render({}).node)).toContain("worker · Failed");
+  expect(textOf(agents.render({}).node)).toContain("Needs you");
+  records = { "subagents/test": { app: "pi-subagents", state: "done", title: "worker", msg: "Finished" } };
+  expect(textOf(agents.render({}).node)).toContain("worker · Finished");
+  records = {};
+  expect(textOf(agents.render({}).node)).not.toContain("worker");
+});
+
 test("legacy pins migrate once listed, retaining offline pins until their labels arrive", () => {
   const { agents, data, writes } = harness(["t1", "offline/t2"]);
   agents.migratePins([]);

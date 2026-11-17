@@ -56,6 +56,17 @@ const kidStatus = (k, listed) => {
   const s = listed.get(k.address) ?? k.status;
   return s === "error" ? "blocked" : s === "done" ? "idle" : s;
 };
+// Headless Pi children report through their parent's terminal, not their own.
+function recordKids(terminal) {
+  return Object.entries(terminal?.records ?? {})
+    .filter(([id, r]) => id.startsWith("subagents/") && r?.app === "pi-subagents"
+      && ["working", "blocked", "error", "done", "idle"].includes(r.state))
+    .map(([id, r]) => ({
+      address: `${terminal.address}#${id}`, owner: terminal.address,
+      status: r.state, name: r.title || "Pi worker", message: r.msg, program: terminal.program,
+    }));
+}
+
 const SORTS = [
   { id: "priority", label: "Priority", icon: "clock" },
   { id: "grouped", label: "Grouped by space", icon: "layers" },
@@ -169,12 +180,15 @@ export default class Agents extends View {
 
   // Live sub-agents of `addr`, depth first, each with the tree lines in front of it.
   tree(all, addr, lead = []) {
-    const kids = all.filter((k) => k.parent === addr && k.state === "live");
+    const kids = [
+      ...all.filter((k) => k.parent === addr && k.state === "live"),
+      ...recordKids(all.find((k) => k.address === addr)),
+    ];
     return kids.flatMap((k, i) => {
       const last = i === kids.length - 1;
       return [
         { t: k, lines: [...lead, last ? "└" : "├"] },
-        ...this.tree(all, k.address, [...lead, last ? "" : "│"]),
+        ...(k.owner ? [] : this.tree(all, k.address, [...lead, last ? "" : "│"])),
       ];
     });
   }
@@ -184,6 +198,9 @@ export default class Agents extends View {
     const st = kidStatus(k, this.listed);
     const pic = icon(k.program, 14, t.foreground);
     const on = k.address === shown;
+    const target = k.owner ?? k.address;
+    const name = k.name || k.template || k.program?.name || k.address;
+    const label = k.message ? `${name} · ${k.message}` : name;
     return h_flex()
       .id(`sub-${k.address}`)
       .pl(39)
@@ -196,12 +213,12 @@ export default class Agents extends View {
       .text_size(12.5)
       .when(on, (el) => el.bg(t.raised))
       .hover((s) => s.bg(t.hover))
-      .on_click(() => (this.listed.has(k.address) ? run("pane.focus", { terminal: k.address }) : this.peek(k.address)))
+      .on_click(() => (k.owner || this.listed.has(target) ? run("pane.focus", { terminal: target }) : this.peek(target)))
       .children(s.lines.map(l => div().self_start().mt(-4).w(9).h(17).mr(4).flex_none()
         .when(Boolean(l), el => el.border_l(1.5).border_color(t.input))
         .when(l === "└" || l === "├", el => el.border_b(1.5).rounded_bl(6))))
       .when(Boolean(pic), el => el.child(div().mr(8).child(pic)))
-      .child(div().flex_1().truncate().text_color(on ? t.foreground : t.muted).child(k.name || k.template || k.program?.name || k.address))
+      .child(div().flex_1().truncate().text_color(on ? t.foreground : t.muted).child(label))
       .child(this.status(t, { status: st }, compact));
   }
 
