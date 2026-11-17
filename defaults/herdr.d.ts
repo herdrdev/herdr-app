@@ -61,7 +61,8 @@ export function playSound(sound: string): null;
  * New spaces and tabs take focus by default. Boolean focus: false keeps the shown
  * space, selected tab and keyboard focus; background tabs are appended in creation order.
  * With no space shown, a new space is shown even with focus: false.
- * Panes: pane.split {direction: "right" | "down", pane?}, pane.close {pane?}, pane.zoom {pane?},
+ * Panes: pane.split {direction: "right" | "down", pane?}, pane.close {pane?}, pane.zoom {pane?}, pane.rename {pane?, name},
+ *   pane.resize {direction, pane?, px?},
  *   pane.focus {pane | terminal}, pane.go {direction}, pane.swap {pane?, direction | target}.
  *   Pane menus get target { pane, terminal }.
  * Terminals: terminal.open {argv?, folder?, place?: "tab" | "right" | "down"}, terminal.kill {terminal},
@@ -182,6 +183,8 @@ export interface AgentInfo {
   program: Program;
   /** The terminal's title. */
   title: string;
+  /** Its pane's name (`pane.rename`), or null. */
+  pane_name: string | null;
   /** Higher = changed more recently. */
   seq: number;
   /** Pinned with `terminal.pin`, on any Herdr client. */
@@ -192,15 +195,29 @@ export interface AgentInfo {
 /** Terminals whose program reports a status (agents), in space, tab, pane order. Live. */
 export function agents(): AgentInfo[];
 
+/** History scroll as Ghostty reports it, read fresh by panes().
+ *  Rows from the top of retained history; `from_bottom` is 0 at the end.
+ *  PaneInfo.scroll is null on the alternate screen or with no view.
+ *  Mods refresh only on transitions between end/history/alternate screen,
+ *  not on scrolling or output within one of those states that only changes the numbers. */
+export interface PaneScroll {
+  total: number;
+  offset: number;
+  len: number;
+  from_bottom: number;
+}
+
 export interface PaneInfo {
   pane: string;
   /** null for a mod pane (`pane.split {mod}`): then `mod` names it, and only
-   *  pane, mod, tab, title, focused and zoomed are set. */
+   *  pane, mod, tab, title, name, focused and zoomed are set. */
   terminal: string | null;
   mod?: string;
   tab: string;
   /** The terminal's title (what the program set), or the mod's name. */
   title: string;
+  /** The name someone gave it (`pane.rename`), or null. */
+  name: string | null;
   /** Its live folder, and the git branch there. */
   cwd: string | null;
   branch: string | null;
@@ -212,6 +229,8 @@ export interface PaneInfo {
   zoomed: boolean;
   /** The app's top-center grip can rearrange this pane. False when zoomed or alone. */
   movable: boolean;
+  /** History scroll for a terminal pane's attached view; null for mod panes / alt-screen. Live. */
+  scroll?: PaneScroll | null;
 }
 
 /** Every pane in every tab. A pane header mod finds its own with

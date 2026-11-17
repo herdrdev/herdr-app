@@ -241,6 +241,15 @@ Show only this pane (default: the caller's, from a terminal, else the focused on
 |---|---|
 | `pane` | no |
 
+## `pane.rename`
+
+Name a pane (default: the caller's, from a terminal, else the focused one; asks the person when no name; an empty name: unnamed again).
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+| `name` | no |
+
 ## `pane.focus`
 
 Focus a pane (or the pane showing a terminal).
@@ -257,6 +266,16 @@ Focus the pane or focusable mod to the "left", "right", "up" or "down".
 | Argument | Required |
 |---|---|
 | `direction` | yes |
+
+## `pane.resize`
+
+Move the border of a pane (default: the caller's, from a terminal, else the focused one) "left", "right", "up" or "down" by px (default 40), like dragging the divider.
+
+| Argument | Required |
+|---|---|
+| `direction` | yes |
+| `pane` | no |
+| `px` | no |
 
 ## `pane.swap`
 
