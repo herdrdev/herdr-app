@@ -1178,6 +1178,12 @@ fn module(inst: Instance, copy: u64) -> HostModule {
             request(Request::OpenOverlay { id: id.clone(), spec });
             Ok(id.into())
         })
+        .function("openUrlSystem", |a| {
+            let url = a.string(0)?;
+            if url.contains('\0') { return Err(HostError::new("URL contains NUL")); }
+            if !checking() { crate::links::open(&crate::links::Target::Url(url.to_owned())); }
+            Ok(HostValue::Null)
+        })
         .function("closeOverlay", |a| {
             request(Request::CloseOverlay { id: a.string(0)?.to_owned() });
             Ok(HostValue::Null)

@@ -428,6 +428,10 @@ export function openOverlay(spec: OverlaySpec): string;
  *  dialog or popup. A kept window closed this way stays closed. */
 export function closeOverlay(id: string): null;
 
+/** Opens a URL with the OS handler without re-entering terminal_link_handler.
+ * Personal URL handlers call this to decline a link. No side effects during checking(). */
+export function openUrlSystem(url: string): null;
+
 /** Posts a notification. Shown by the `toast` mod (replaceable), which runs `action` when clicked.
  *  Herdr posts one itself when an agent needs you or finished while you weren't looking. Returns its id. */
 export function notify(n: {

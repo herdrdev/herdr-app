@@ -387,6 +387,9 @@ pub struct Node {
     /// Root only: the terminal right-click menu's mod (default: `menu`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_menu: Option<String>,
+    /// Root only: a personal mod handling activated terminal URLs; unset uses the OS opener.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_link_handler: Option<String>,
     /// Root only: the mod that shows notifications (default: `toast`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub toast: Option<String>,
@@ -433,6 +436,7 @@ impl Node {
             traffic_lights: None,
             preview: None,
             terminal_menu: None,
+            terminal_link_handler: None,
             toast: None,
             window_drag: false,
             window_blur: false,

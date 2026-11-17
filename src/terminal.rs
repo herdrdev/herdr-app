@@ -68,6 +68,8 @@ enum LinkTarget {
 }
 
 pub enum TerminalEvent {
+    /// Activated URL, routed by the window with this view's immutable source address.
+    OpenUrl(String),
     Peek(String),
     TitleChanged,
     SelectionChanged,
@@ -2522,6 +2524,7 @@ impl Render for TerminalView {
                     && let Some((target, _)) = this.link_at(ev.position)
                 {
                     match target {
+                        LinkTarget::External(links::Target::Url(url)) => cx.emit(TerminalEvent::OpenUrl(url)),
                         LinkTarget::External(target) => links::open(&target),
                         LinkTarget::Terminal(address) => cx.emit(TerminalEvent::Peek(address)),
                     }

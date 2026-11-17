@@ -273,6 +273,16 @@ Properties any node can have:
   right-clicks (including Shift+right-click). Omit it for the shipped `menu`;
   an unknown mod logs a warning and falls back to `menu`. Clone a shipped
   layout before changing this field. Other menus are unchanged.
+- Root only: `"terminal_link_handler": "remote-links"` routes activated terminal URLs to
+  a personal mod with immutable `props()` = `{url, terminal, machine, activated: true, overlay}`.
+  `machine` is null for a local terminal. File and terminal-address links are unchanged.
+  Without a handler, or when its folder is missing, the normal system opener is used.
+  The handler opens as a short-lived dialog, may show progress/errors, and closes itself
+  with `closeOverlay(overlay)`. Call `openUrlSystem(url)` to pass a URL through without
+  recursively invoking the handler. A broken handler does not silently fall back:
+  its error is shown, so a failed remote loopback link never opens a local service.
+  Clone a shipped layout before configuring this field. Browser and forwarding policy
+  belong in the personal mod/helper, not the app.
 - Root only: `"toast": "my-toast"` chooses the mod that shows notifications
   (Herdr's own and every `notify()`), in place of the shipped `toast`; an
   unknown mod logs a warning and falls back to `toast`. It gets the same

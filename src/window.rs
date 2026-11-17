@@ -1514,6 +1514,7 @@ impl AppWindow {
             mods::track_pane_view(id.clone(), &view);
             let (block, addr) = (id.clone(), address.clone());
             let sub = cx.subscribe_in(&view, window, move |this, _, ev: &TerminalEvent, window, cx| match ev {
+                TerminalEvent::OpenUrl(url) => this.open_terminal_url(url, &addr, window, cx),
                 TerminalEvent::Peek(address) => this.peek_terminal(address, window, cx),
                 TerminalEvent::TitleChanged => this.publish(cx),
                 TerminalEvent::ScrollChanged => {
@@ -3827,6 +3828,22 @@ impl AppWindow {
         self.open_overlay(mods::new_overlay_id(), spec, window, cx);
     }
 
+    /// Route the clicked view's URL, never the currently focused pane's source.
+    fn open_terminal_url(&mut self, url: &str, terminal: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let Some(name) = self.chrome.terminal_link_handler.clone() else {
+            crate::links::open(&crate::links::Target::Url(url.to_owned()));
+            return;
+        };
+        let Some(folder) = self.folders.get(&name) else {
+            tracing::warn!(mod_name = name, "terminal link handler not found; using system opener");
+            crate::links::open(&crate::links::Target::Url(url.to_owned()));
+            return;
+        };
+        let defaults = mod_overlay(&folder.dir);
+        let spec = terminal_link_spec(&name, &defaults, url, terminal);
+        self.open_overlay(mods::new_overlay_id(), spec, window, cx);
+    }
+
     /// The layout's notification mod (`"toast"` on the root), else the shipped `toast`.
     fn toast_mod(&self) -> &str {
         let requested = self.chrome.toast.as_deref().unwrap_or("toast");
@@ -5116,6 +5133,14 @@ fn terminal_menu_spec(name: &str, defaults: &Value, tab: &str, target: Value) ->
         "props": { "tab": tab, "target": target } })
 }
 
+fn terminal_link_spec(name: &str, defaults: &Value, url: &str, terminal: &str) -> Value {
+    json!({ "mod": name, "kind": "dialog",
+        "width": defaults.get("width").and_then(Value::as_f64).unwrap_or(480.0),
+        "height": defaults.get("height").and_then(Value::as_f64).unwrap_or(280.0),
+        "props": { "url": url, "terminal": terminal,
+            "machine": terminal.split_once('/').map(|(machine, _)| machine), "activated": true } })
+}
+
 fn num_in(v: &Value, k: &str) -> f32 {
     v.get(k).and_then(Value::as_f64).unwrap_or(0.0) as f32
 }
@@ -5173,10 +5198,12 @@ fn dock(root: &mut Node, block: Node, place: &str, wrapper_id: String) {
     let mut old = std::mem::replace(root, Node::new("", Kind::Row { children: vec![] }));
     let toast = old.toast.take();
     let terminal_menu = old.terminal_menu.take();
+    let terminal_link_handler = old.terminal_link_handler.take();
     let children = if first { vec![block, old] } else { vec![old, block] };
     let mut wrapper = Node::container(wrapper_id, axis, children);
     wrapper.toast = toast;
     wrapper.terminal_menu = terminal_menu;
+    wrapper.terminal_link_handler = terminal_link_handler;
     wrapper.divider = Some(Line { width: 1.0, color: "border".into() });
     *root = wrapper;
 }
@@ -6150,6 +6177,24 @@ mod tests {
                 assert_eq!(bounds.origin, point(px(100.0), px(200.0)));
             }
         }
+    }
+
+    #[test]
+    fn terminal_link_handler_roundtrips_and_uses_clicked_source() {
+        use super::{Kind, Node};
+        use serde_json::json;
+        let mut root = Node::new("root", Kind::Row { children: vec![] });
+        assert_eq!(root.terminal_link_handler, None);
+        root.terminal_link_handler = Some("remote-links".into());
+        let restored: Node = serde_json::from_value(serde_json::to_value(root).unwrap()).unwrap();
+        assert_eq!(restored.terminal_link_handler.as_deref(), Some("remote-links"));
+        let spec = super::terminal_link_spec("remote-links", &json!({}), "http://127.0.0.1:3000/a?x=1#b", "dev/t7");
+        assert_eq!(spec["props"]["terminal"], "dev/t7");
+        assert_eq!(spec["props"]["machine"], "dev");
+        assert_eq!(spec["props"]["url"], "http://127.0.0.1:3000/a?x=1#b");
+        assert_eq!(spec["props"]["activated"], true);
+        let local = super::terminal_link_spec("remote-links", &json!({}), "https://example.com", "t8");
+        assert!(local["props"]["machine"].is_null());
     }
 
     #[test]
