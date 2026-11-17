@@ -3719,6 +3719,7 @@ dependencies = [
  "objc2-foundation 0.3.2",
  "png 0.17.16",
  "raw-window-handle",
+ "regex",
  "serde",
  "serde_json",
  "sha2 0.10.9",
