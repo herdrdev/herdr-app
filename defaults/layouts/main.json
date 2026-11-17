@@ -160,6 +160,13 @@
                       "content": {
                         "mod": "changes"
                       }
+                    },
+                    {
+                      "id": "notes",
+                      "type": "block",
+                      "content": {
+                        "mod": "notes"
+                      }
                     }
                   ]
                 }
