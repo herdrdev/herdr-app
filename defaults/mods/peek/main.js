@@ -1,11 +1,12 @@
 // The bar on top of a peeked agent (an overlay the agents list opens for a
 // sub-agent, or a terminal address link): who it is and how it's doing, ↗ to
-// go to its pane (or, without one, keep it as a tab of the shown space), ✕ to
-// close. Props: { terminal, overlay }.
+// go to its pane (or, without one, keep it as a tab in a space on its machine:
+// the shown one, else its parent's, else the first), ✕ to close.
+// Props: { terminal, overlay }.
 
 import { View, div, image, svg } from "gpui-kit";
 import { h_flex } from "gpui-base";
-import { agents, terminals, panes, run, theme, props, closeOverlay } from "herdr";
+import { agents, terminals, panes, spaces, run, theme, props, closeOverlay } from "herdr";
 
 const SPIN = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
 // The icon from the app's program table: a one-color glyph or a picture.
@@ -26,6 +27,17 @@ export default class Peek extends View {
   status() {
     const addr = props()?.terminal;
     return agents().find((a) => a.address === addr)?.status ?? this.term()?.status ?? null;
+  }
+
+  // A pane stays on its terminal's machine (terminal.keep refuses another one's space).
+  keepSpace(terminal, parent) {
+    const machine = terminal?.includes("/") ? terminal.split("/")[0] : null;
+    const all = spaces();
+    const shown = all.find((s) => s.active) ?? all[0];
+    if ((shown?.machine ?? null) === machine) return shown;
+    const there = all.filter((s) => (s.machine ?? null) === machine);
+    const tab = panes().find((p) => p.terminal === parent)?.tab;
+    return there.find((s) => s.tabs.some((c) => c.id === tab)) ?? there[0];
   }
 
   button(t, id, label, onClick) {
@@ -49,6 +61,7 @@ export default class Peek extends View {
     const pic = icon(k?.program, 14, t.foreground);
     const parent = k?.parent ? terminals().find((p) => p.address === k.parent) : null;
     const home = panes().some((p) => p.terminal === terminal);
+    const space = home ? null : this.keepSpace(terminal, k?.parent);
     const glyph = st === "working" ? SPIN[0] : st === "idle" ? "○" : st ? "●" : "·";
     return h_flex()
       .size_full()
@@ -65,11 +78,14 @@ export default class Peek extends View {
       .when(Boolean(st), (el) => el.child(div().flex_none().text_color(t[st] ?? t.dim).child(WORDS[st] ?? st)))
       .when(Boolean(parent), (el) => el.child(div().truncate().text_color(t.dim).child(`from ${parent.name || parent.address}`)))
       .child(div().flex_1())
-      .child(
-        this.button(t, "keep", home ? "↗ go to" : "↗ keep", () => {
-          run(home ? "pane.focus" : "terminal.keep", { terminal });
-          closeOverlay(overlay);
-        }),
+      .when(home || Boolean(space), (el) =>
+        el.child(
+          this.button(t, "keep", home ? "↗ go to" : "↗ keep", () => {
+            if (space && !space.active) run("space.select", { id: space.id });
+            run(home ? "pane.focus" : "terminal.keep", { terminal });
+            closeOverlay(overlay);
+          }),
+        ),
       )
       .child(this.button(t, "close", "✕", () => closeOverlay(overlay)));
   }
