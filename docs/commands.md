@@ -374,6 +374,14 @@ Show the previous agent.
 
 No arguments.
 
+## `agent.select`
+
+Show an agent by position in the agents list (1 = first), in the order `agent.next` follows.
+
+| Argument | Required |
+|---|---|
+| `index` | yes |
+
 ## `layout.switch`
 
 Show a layout (layouts/<name>.json), or the next one.
