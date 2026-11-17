@@ -545,3 +545,35 @@ test("the list reveals the active space again when a machine header shifts its p
   h.view.render();
   expect(h.view.scroll.calls).toEqual([1, 2]);
 });
+
+// A repository's branches fold like a machine's spaces: the helper the list draws from.
+test("a folded repository hides its branches, all but the active one", () => {
+  const foldBranches = new Function("View", `${source}\nreturn foldBranches;`)(class {}) as
+    (rows: any[], folded: Set<string>) => any[];
+  const row = (id: string, repo: string, tree: string | null, active = false) =>
+    ({ w: { id, active }, i: 0, g: { repo, linked: Boolean(tree) }, tree });
+  const rows = [
+    row("main-a", "A", null), row("a1", "A", "├─"), row("a2", "A", "└─"),
+    row("plain", "P", null),
+    row("main-b", "B", null), row("b1", "B", "└─"),
+  ];
+  const ids = (list: any[]) => list.map((r) => r.w.id);
+  const kids = (list: any[]) => Object.fromEntries(list.filter((r) => !r.tree).map((r) => [r.w.id, r.kids]));
+
+  // nothing folded: every row, and each main checkout knows how many branches follow it
+  const open = foldBranches(rows, new Set());
+  expect(ids(open)).toEqual(["main-a", "a1", "a2", "plain", "main-b", "b1"]);
+  expect(kids(open)).toEqual({ "main-a": 2, plain: 0, "main-b": 1 });
+
+  // A folded: its branches go, B's stay, and the count is still there to draw the chevron with
+  const folded = foldBranches(rows, new Set(["A"]));
+  expect(ids(folded)).toEqual(["main-a", "plain", "main-b", "b1"]);
+  expect(kids(folded)["main-a"]).toBe(2);
+
+  // the active branch of a folded repository stays, alone: the list never hides where you are
+  const active = rows.map((r) => (r.w.id === "a2" ? row("a2", "A", "└─", true) : r));
+  expect(ids(foldBranches(active, new Set(["A"])))).toEqual(["main-a", "a2", "plain", "main-b", "b1"]);
+
+  // the order is the rows' own, and the rows given are not changed
+  expect(rows.every((r) => !("kids" in r))).toBe(true);
+});
