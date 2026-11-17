@@ -23,11 +23,12 @@ const source = await readFile(new URL("../defaults/mods/picker/main.js", import.
 const element = () => new Element();
 const commands: unknown[][] = [];
 let testSpaces: any[] = [];
+let testAgents: any[] = [];
 let closed = 0;
 const values: Record<string, any> = {
   View: class {}, div: element, svg: element, v_flex: element, h_flex: element,
   Input: { new: element }, InputState: { new: () => ({ handlers: {} as Record<string, any>, on(name: string, handler: any) { this.handlers[name] = handler; }, focus() {} }) },
-  agents: () => [], spaces: () => testSpaces, terminals: () => [], theme: () => ({ hover: "hover" }),
+  agents: () => testAgents, spaces: () => testSpaces, terminals: () => [], theme: () => ({ hover: "hover", selected: "selected" }),
   settings: () => ({ zoom: 1.2 }), props: () => ({}), shared: () => ({}),
   setShared() {}, closeOverlay() { closed++; }, openOverlay() {}, run(...args: unknown[]) { commands.push(args); }, hc() {},
 };
@@ -35,6 +36,7 @@ const Picker = new Function(...Object.keys(values), source.replace(/^import .*;\
 const cx = { notify() {}, stop_propagation() {}, timer: { after() {} }, focus_handle() {}, spawn() {} };
 function picker(machines = 12) {
   testSpaces = [];
+  testAgents = [];
   closed = 0;
   const view = new Picker();
   view.init({}, cx);
@@ -188,4 +190,101 @@ test("picker preserves small pixel touchpad deltas", () => {
     list.calls.on_scroll_wheel[0]({ delta: { y: delta } }, cx);
     expect(view.scroll).toBe(-delta);
   }
+});
+
+function strings(root: any): string[] {
+  if (typeof root === "string") return [root];
+  return (root?.nodes ?? []).flatMap(strings);
+}
+function statusPicker() {
+  const view = picker(0);
+  testSpaces = [
+    { id: "a", name: "alpha", status: "blocked", tabs: [
+      { id: "a1", name: "one", status: "blocked" },
+      { id: "a2", name: "two", status: "working" },
+      { id: "a3", name: "three", status: "idle" },
+    ] },
+    { id: "b", name: "beta", status: "done", tabs: [{ id: "b1", name: "four", status: "done" }] },
+    { id: "q", name: "quiet", tabs: [{ id: "q1", name: "five" }] },
+  ];
+  testAgents = [
+    { address: "t1", tab: "a1", status: "blocked" },
+    { address: "t2", tab: "a1", status: "idle" },
+    { address: "t3", tab: "a2", status: "working" },
+    { address: "t4", tab: "a3", status: "idle" },
+    { address: "t5", tab: "b1", status: "done" },
+  ];
+  commands.length = 0;
+  return view;
+}
+function shown(view: any): string[] {
+  return view.rows().filter((r: any) => r.kind === "ctx").map((r: any) => r.ctx.id);
+}
+function press(view: any, key: string, control = true) {
+  view.render().calls.on_key_down[0]({ key, modifiers: { control } }, cx);
+}
+
+test("ctrl+b/w/f/i show tabs with an agent in that status, and the same key shows all again", () => {
+  const view = statusPicker();
+  press(view, "b");
+  expect(shown(view)).toEqual(["a1"]);
+  press(view, "w");
+  expect(shown(view)).toEqual(["a2"]);
+  press(view, "i");
+  expect(shown(view)).toEqual(["a1", "a3"]);
+  press(view, "f");
+  expect(shown(view)).toEqual(["b1"]);
+  expect(view.rows().some((r: any) => r.kind === "earlier")).toBe(false);
+  press(view, "f");
+  expect(view.status).toBe(null);
+  expect(shown(view)).toEqual(["a1", "a2", "a3", "b1"]);
+  press(view, "b", false);
+  expect(view.status).toBe(null);
+});
+
+test("a status filter selects its first tab and Enter goes there", () => {
+  const view = statusPicker();
+  press(view, "i");
+  press(view, "down");
+  expect(find(view.render(), "pk-a3").calls.bg).toEqual(["hover"]);
+  view.input.handlers.submit({}, cx);
+  expect(commands).toEqual([["tab.select", { id: "a3" }]]);
+  const again = statusPicker();
+  press(again, "w");
+  expect(find(again.render(), "pk-a2").calls.bg).toEqual(["hover"]);
+});
+
+test("status chips count the searched tabs and click to filter", () => {
+  const view = statusPicker();
+  let tree = view.render();
+  expect(strings(find(tree, "pk-status-all"))).toEqual(["all"]);
+  expect(strings(find(tree, "pk-status-blocked"))).toEqual(["●", "blocked", "1"]);
+  expect(strings(find(tree, "pk-status-working"))).toEqual(["working", "1"]);
+  expect(strings(find(tree, "pk-status-done"))).toEqual(["●", "finished", "1"]);
+  expect(strings(find(tree, "pk-status-idle"))).toEqual(["○", "idle", "2"]);
+  view.input.value = () => "beta";
+  view.input.handlers.change({}, cx);
+  tree = view.render();
+  expect(strings(find(tree, "pk-status-idle"))).toEqual(["○", "idle", "0"]);
+  expect(strings(find(tree, "pk-status-done"))).toEqual(["●", "finished", "1"]);
+  view.input.value = () => "";
+  view.input.handlers.change({}, cx);
+  find(view.render(), "pk-status-working").calls.on_click[0]({}, cx);
+  tree = view.render();
+  expect(shown(view)).toEqual(["a2"]);
+  expect(find(tree, "pk-status-working").calls.bg).toEqual(["selected"]);
+  expect(find(tree, "pk-status-all").calls.bg).toBeUndefined();
+  find(tree, "pk-status-all").calls.on_click[0]({}, cx);
+  expect(view.status).toBe(null);
+  expect(shown(view)).toEqual(["a1", "a2", "a3", "b1"]);
+});
+
+test("search and a status filter combine, and ctrl+d still closes the selected tab", () => {
+  const view = statusPicker();
+  view.input.value = () => "three";
+  view.input.handlers.change({}, cx);
+  press(view, "i");
+  expect(shown(view)).toEqual(["a3"]);
+  press(view, "d");
+  expect(commands).toEqual([["tab.close", { id: "a3" }]]);
 });
