@@ -1120,7 +1120,7 @@ All of it is in `herdr.d.ts`. In short:
   `pickFolder({ prompt })`: the system's folder picker (here only),
   resolves with the folder or null.
 - Files: `readTextFile(path, { on })` (here, or on that machine),
-  `writeTextFile(path, text, expected)` (here only), and
+  `writeTextFile(path, text, expected, { on })` (here, or on that machine), and
   `watchFolder(dir)` (here only; poll a remote space's folder): resolves with the changed paths the next time anything
   under `dir` changes. On Linux, Git-ignored directories and Git objects are skipped,
   and trees above 4096 non-ignored directories reject the watch; use a timer fallback.

@@ -28,8 +28,9 @@ export function checking(): boolean;
  *  `on`: from that machine (a space's `machine`). */
 export function readTextFile(path: string, options?: { on?: string | null }): Promise<string | null>;
 /** Writes UTF-8 text only if it still matches expected (null creates a new file).
- * Rejects on a stale snapshot; existing files are replaced atomically. */
-export function writeTextFile(path: string, text: string, expected: string | null): Promise<null>;
+ * Rejects on a stale snapshot; existing files are replaced atomically.
+ * `on`: on that machine (a space's `machine`), replaced whole by its core. */
+export function writeTextFile(path: string, text: string, expected: string | null, options?: { on?: string | null }): Promise<null>;
 
 /** The agents people can start from a menu (entries with `run` in programs.json), most picked
  *  first, and whether each is installed: asked of the shell agents start in (on another machine,
