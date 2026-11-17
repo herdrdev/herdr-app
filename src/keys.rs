@@ -15,6 +15,11 @@
 //! `<mod>.<command>` (delivered to that mod's `nextCommand()`), or `terminal`
 //! (the program gets the key: the binding is switched off where this section
 //! applies).
+//!
+//! A key can also be a double tap, `"shift shift"`: a modifier pressed and
+//! released twice within 300 ms, nothing else between (taps.rs).
+
+pub mod taps;
 
 use gpui::{App, KeyBinding, KeyBindingContextPredicate, NoAction};
 use std::rc::Rc;
@@ -243,7 +248,10 @@ pub fn parse(text: &str) -> Result<Vec<KeyBinding>, String> {
             };
             let binding = KeyBinding::load(keys, action, predicate, false, None, &gpui::DummyKeyboardMapper);
             match binding {
-                Ok(b) => out.push(b),
+                Ok(b) => match taps::double_tap(&b) {
+                    Some(Err(e)) => problems.push(format!("{section}.{keys}: {e}")),
+                    _ => out.push(b),
+                },
                 Err(e) => problems.push(format!("{section}.{keys}: {e}")),
             }
         }
@@ -257,12 +265,15 @@ struct KitKeys(Vec<KeyBinding>);
 impl gpui::Global for KitKeys {}
 
 /// Restores kit bindings, installs user bindings, then adds reserved bindings.
+/// Double taps go to a keymap of their own (taps.rs).
 pub fn install(bindings: Vec<KeyBinding>, cx: &mut App) {
     if !cx.has_global::<KitKeys>() {
         let kit = cx.key_bindings().borrow().bindings().cloned().collect();
         cx.set_global(KitKeys(kit));
     }
     let kit = cx.global::<KitKeys>().0.clone();
+    let (double_taps, bindings): (Vec<_>, Vec<_>) = bindings.into_iter().partition(|b| matches!(taps::double_tap(b), Some(Ok(_))));
+    taps::install(double_taps, cx);
     cx.clear_key_bindings();
     cx.bind_keys(kit);
     cx.bind_keys(bindings);
@@ -426,6 +437,68 @@ mod tests {
             assert_eq!(crate::commands::shorthand(crate::commands::find(name).unwrap(), payload), json!({"name":value}));
         }
         assert_eq!(crate::commands::shorthand(crate::commands::find("tab.select").unwrap(), "3"), json!({"index":3}));
+    }
+
+    #[test]
+    fn double_taps_are_one_modifier_twice() {
+        use super::taps::double_tap;
+        use serde_json::json;
+        for (keys, tap) in [
+            ("shift shift", Some("shift")), ("Shift Shift", Some("shift")),
+            ("ctrl ctrl", Some("control")), ("alt alt", Some("alt")),
+            ("cmd cmd", Some("platform")), ("super super", Some("platform")), ("win win", Some("platform")),
+            ("fn fn", Some("function")),
+            // One modifier alone, or with another key, stays GPUI's.
+            ("shift", None), ("shift f1", None), ("ctrl-shift-t", None), ("a a", None),
+        ] {
+            for section in ["global", "terminal", "layout:main", "mod:editor"] {
+                let bindings = super::parse(&json!({ section: { keys: "app.palette" } }).to_string()).unwrap();
+                assert_eq!(bindings.len(), 1, "{section}.{keys}");
+                assert_eq!(double_tap(&bindings[0]).map(Result::unwrap), tap, "{section}.{keys}");
+            }
+        }
+        for keys in ["shift ctrl", "shift shift shift", "ctrl-shift ctrl-shift", "alt shift alt"] {
+            let error = super::parse(&json!({ "terminal": { keys: "app.palette", "ctrl-shift-t": "tab.new" } }).to_string()).unwrap_err();
+            assert_eq!(error, format!("terminal.{keys}: a double tap is one modifier twice, like \"shift shift\" or \"ctrl ctrl\""));
+        }
+        // An unknown action on a double tap is reported as on any key.
+        assert_eq!(super::parse(r#"{"global":{"shift shift":"nope"}}"#).unwrap_err(), r#"global.shift shift: unknown action "nope""#);
+    }
+
+    #[gpui::test]
+    fn double_taps_stay_out_of_gpui_and_follow_section_rules(cx: &mut gpui::TestAppContext) {
+        use gpui::KeyContext;
+        let bindings = super::parse(r#"{
+            "global": { "shift shift": "app.palette", "ctrl ctrl": "app.help", "ctrl-shift-t": "tab.new" },
+            "layout:main": { "shift shift": "tab.new" },
+            "mod:editor": { "shift shift": "pane.zoom" },
+            "terminal": { "shift shift": "terminal", "ctrl ctrl": "pane.zoom" }
+        }"#).unwrap();
+        cx.update(|cx| {
+            super::install(bindings, cx);
+            let keymap = cx.key_bindings();
+            assert!(keymap.borrow().bindings().all(|b| super::taps::double_tap(b).is_none()));
+            assert!(keymap.borrow().bindings().any(|b| b.match_keystrokes(&[gpui::Keystroke::parse("ctrl-shift-t").unwrap()]) == Some(false)));
+            let run = |modifier: &str, contexts: &[&str], cx: &gpui::App| {
+                let stack: Vec<_> = contexts.iter().map(|c| KeyContext::parse(c).unwrap()).collect();
+                super::taps::action(modifier, &stack, cx)
+                    .map(|a| a.as_any().downcast_ref::<gpui_shell::action::ShellAction>().unwrap().id().to_owned())
+            };
+            let other = "Herdr layout = other";
+            let main = "Herdr layout = main";
+            assert_eq!(run("shift", &[other], cx).as_deref(), Some("app.palette"));
+            assert_eq!(run("control", &[other], cx).as_deref(), Some("app.help"));
+            assert_eq!(run("alt", &[other], cx), None);
+            // The shown layout's section over global; a focused terminal's over both.
+            assert_eq!(run("shift", &[main], cx).as_deref(), Some("tab.new"));
+            assert_eq!(run("shift", &[main, "Terminal"], cx), None);
+            assert_eq!(run("control", &[main, "Terminal"], cx).as_deref(), Some("pane.zoom"));
+            assert_eq!(run("shift", &[other, "Mod mod = editor"], cx).as_deref(), Some("pane.zoom"));
+            assert_eq!(run("shift", &[other, "Mod mod = files"], cx).as_deref(), Some("app.palette"));
+            // A keys.json without them takes them away.
+            super::install(vec![], cx);
+            assert_eq!(run("shift", &[other], cx), None);
+        });
     }
 
     #[test]

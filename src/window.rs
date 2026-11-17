@@ -497,6 +497,10 @@ pub struct AppWindow {
     _tasks: Vec<Task<()>>,
     /// Gives the keyboard back when what had it leaves the screen (`restore_focus`).
     _focus_lost: Option<Subscription>,
+    /// Double modifier taps (keys.json `"shift shift"`), from every keystroke,
+    /// bound or not (`_keystrokes`), and every click (`render`).
+    taps: crate::keys::taps::Taps,
+    _keystrokes: Option<Subscription>,
     /// Remembers where the window is (`place.rs`); the write waiting to settle.
     _place: Option<Subscription>,
     place_write: Option<Task<()>>,
@@ -598,10 +602,24 @@ impl AppWindow {
             focus: cx.focus_handle(),
             _tasks: Vec::new(),
             _focus_lost: None,
+            taps: Default::default(),
+            _keystrokes: None,
             _place: None,
             place_write: None,
         };
         w._focus_lost = Some(cx.on_focus_lost(window, |this, window, cx| this.restore_focus(window, cx)));
+        // GPUI's lone-modifier keystrokes, and every other key, even one a
+        // binding takes: two taps of a modifier run its double tap.
+        let (own, typed) = (window.window_handle(), cx.weak_entity());
+        w._keystrokes = Some(cx.intercept_keystrokes(move |event, window, cx| {
+            if window.window_handle() != own {
+                return;
+            }
+            let tapped = typed.update(cx, |this, _| this.taps.key(&event.keystroke, Instant::now())).ok().flatten();
+            if let Some(action) = tapped.and_then(|m| crate::keys::taps::action(m, &event.context_stack, cx)) {
+                window.dispatch_action(action, cx);
+            }
+        }));
         w._place = Some(cx.observe_window_bounds(window, |this, window, cx| {
             if let Some(t) = crate::place::changed(window, cx) {
                 this.place_write = Some(t);
@@ -5320,6 +5338,16 @@ impl Render for AppWindow {
         let tracker = self.float_tracker(cx);
         let win_tracker = self.window_tracker(cx);
         let pane_drag = self.pane_drag_layer(cx);
+        // A press anywhere, even on what covers the root (floats, overlays),
+        // ends any double tap.
+        let own = cx.entity().downgrade();
+        let clicks = canvas(|_, _, _| {}, move |_, _, window, _| {
+            window.on_mouse_event(move |ev: &MouseDownEvent, phase, _, cx| {
+                if phase == DispatchPhase::Capture {
+                    let _ = own.update(cx, |this, _| this.taps.click(ev.modifiers.modified()));
+                }
+            });
+        });
         div()
             .id("herdr")
             .track_focus(&self.focus)
@@ -5405,6 +5433,7 @@ impl Render for AppWindow {
             .children(tracker)
             .children(win_tracker)
             .child(pane_drag)
+            .child(clicks.absolute().size_full())
             .child(crate::bench::frame_end())
     }
 }
@@ -7021,6 +7050,85 @@ mod tests {
         cx.update(|window, cx| view.update(cx, |this, _| {
             assert!(this.pane_term("pa").unwrap().focus.is_focused(window));
         }));
+    }
+
+    #[test]
+    fn a_modifier_tapped_twice_runs_its_key_from_a_terminal() {
+        in_own_process("double_taps");
+    }
+
+    #[gpui::test]
+    fn double_taps(cx: &mut gpui::TestAppContext) {
+        use gpui::Modifiers;
+        use serde_json::json;
+        if !running_alone("double_taps") {
+            return;
+        }
+        cx.update(gpui_base::init);
+        std::fs::create_dir_all(crate::mods::app_dir()).unwrap();
+        std::fs::write(crate::keys::path(), r#"{
+            "terminal": { "shift shift": "tab.next" },
+            "global": { "shift-f6": "tab.next" }
+        }"#).unwrap();
+        let (view, cx) = open_window(cx, "unused", "", json!({
+            "id": "main", "type": "block", "content": { "tab": "active" }
+        }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.model.add_space("s1", "one", "", crate::model::Tab::new("a", "a", "pa", "t1"));
+            this.model.add_tab("s1", crate::model::Tab::new("b", "b", "pb", "t2"));
+            this.model.select_tab("a");
+            this.sync(window, cx);
+            window.focus(&this.pane_term("pa").unwrap().focus, cx);
+        }));
+        cx.run_until_parked();
+        let shown = |cx: &mut gpui::VisualTestContext| view.update(cx, |this, _| this.model.active_tab().unwrap().id.clone());
+        // Shift down, then `keys` typed (or `click`ed) while it's held, Shift up.
+        let shift = |keys: &str, cx: &mut gpui::VisualTestContext| {
+            cx.simulate_modifiers_change(Modifiers::shift());
+            match keys {
+                "" => {}
+                "click" => {
+                    let at = gpui::point(gpui::px(100.), gpui::px(100.));
+                    cx.simulate_mouse_down(at, gpui::MouseButton::Left, Modifiers::shift());
+                    cx.simulate_mouse_up(at, gpui::MouseButton::Left, Modifiers::shift());
+                }
+                // The other Shift too, before letting go of both.
+                "shift" => cx.simulate_modifiers_change(Modifiers::shift()),
+                keys => cx.simulate_keystrokes(keys),
+            }
+            cx.simulate_modifiers_change(Modifiers::none());
+            cx.run_until_parked();
+        };
+
+        shift("", cx);
+        assert_eq!(shown(cx), "a");
+        shift("shift", cx);
+        assert_eq!(shown(cx), "b", "the terminal section's double tap, from its terminal");
+
+        // Capitals are no taps.
+        shift("shift-a", cx);
+        shift("shift-a", cx);
+        assert_eq!(shown(cx), "b");
+        // Nor is Shift held for a key a binding takes (each moves one tab).
+        shift("shift-f6", cx);
+        shift("shift-f6", cx);
+        assert_eq!(shown(cx), "b");
+        // Nor Shift held through a click (selecting text).
+        shift("click", cx);
+        shift("click", cx);
+        assert_eq!(shown(cx), "b");
+        // A single tap expires.
+        shift("", cx);
+        std::thread::sleep(std::time::Duration::from_millis(350));
+        shift("", cx);
+        assert_eq!(shown(cx), "b");
+
+        // Three taps fire once (after the late tap above expires as well).
+        std::thread::sleep(std::time::Duration::from_millis(350));
+        for _ in 0..3 {
+            shift("", cx);
+        }
+        assert_eq!(shown(cx), "a");
     }
 
     #[test]
