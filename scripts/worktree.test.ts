@@ -1,5 +1,7 @@
 import { test, expect } from "bun:test";
-import { readFile } from "node:fs/promises";
+import { readFile, mkdtemp } from "node:fs/promises";
+import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
 
 const source = (await readFile(new URL("../defaults/mods/worktree/main.js", import.meta.url), "utf8"))
   .replace(/^import .*;\n/gm, "").replace("export default class Worktree", "class Worktree");
@@ -26,7 +28,8 @@ function rowsOf(node: any): any[] {
   return node?.id?.match(/^wt-\d+$/) ? [node] : (node?.children ?? []).flatMap(rowsOf);
 }
 
-function harness(focusedMachine: string | null = null, raw: string | null = null) {
+type Reply = { code: number; stdout?: string; stderr?: string };
+function harness(focusedMachine: string | null = null, raw: string | null = null, files: Record<string, string> = {}, extra: Record<string, unknown> = {}, reply: (command: string, args: string[]) => Reply | undefined = () => undefined) {
   let spaceList: any[] = [];
   let paneList: any[] = [];
   const reads = { spaces: 0, panes: 0 };
@@ -36,23 +39,23 @@ function harness(focusedMachine: string | null = null, raw: string | null = null
   const globals = {
     View: class {}, div: element, v_flex: element, h_flex: element,
     Input: { new: element }, Scrollbar: { vertical: element }, theme: () => ({}),
-    appHome: () => "/app", readTextFile: async () => raw,
+    appHome: () => "/app", readTextFile: async (path: string) => path === "/app/settings.json" ? raw : files[path] ?? null,
     spaces: () => { reads.spaces++; return structuredClone(spaceList); },
     panes: () => { reads.panes++; return structuredClone(paneList); },
-    props: () => ({ overlay: "overlay" }), closeOverlay: () => {},
+    props: () => ({ overlay: "overlay", ...extra }), closeOverlay: () => {},
     run: (command: string, args: any) => {
       writes.push([command, args]);
       if (command === "space.new") destinations.push(args.machine === "" ? null : args.machine ?? focusedMachine);
     },
     exec: async (command: string, args: string[], options: any) => {
       executions.push({ command, args, ...options });
-      return { code: 0, stdout: "", stderr: "" };
+      return { stdout: "", stderr: "", ...(reply(command, args) ?? { code: 0 }) };
     },
   };
-  const { Worktree, root } = new Function(...Object.keys(globals), `${source}; return { Worktree, root };`)(...Object.values(globals));
+  const { Worktree, root, plan } = new Function(...Object.keys(globals), `${source}; return { Worktree, root, plan };`)(...Object.values(globals));
   const worktree = new Worktree();
   Object.assign(worktree, { opening: true, text: "", at: 0, repo: { name: "repo" }, userHome: "/home/user", root: "/home/user/.herdr/worktrees" });
-  return { worktree, root, reads, writes, destinations, executions, snapshot: (spaces: unknown[], panes: unknown[]) => { spaceList = spaces; paneList = panes; } };
+  return { worktree, root, plan, reads, writes, destinations, executions, snapshot: (spaces: unknown[], panes: unknown[]) => { spaceList = spaces; paneList = panes; } };
 }
 
 test("open render reads spaces and panes once and refreshes both on the next render", () => {
@@ -200,4 +203,116 @@ test("missing settings keep the old location, while invalid directories cannot c
     await expect(root("/home/user")).rejects.toThrow("worktrees.directory");
   }
   await expect(harness(null, "{").root("/home/user")).rejects.toThrow();
+});
+
+const repo = { name: "repo", main: "/home/user/code/repo", top: "/home/user/code/repo" };
+const shared = (settings: unknown) => ({ [`${repo.main}/.herdr/worktree.json`]: JSON.stringify(settings) });
+const sh = (argv: string[], cwd: string) => spawnSync(argv[0], argv.slice(1), { cwd, encoding: "utf8", env: { ...process.env, SHELL: "/bin/sh" } });
+
+test("a repo's .herdr/worktree.json and the person's worktrees.repos entry choose where its checkouts go", async () => {
+  for (const [settings, files, expected] of [
+    [null, {}, "/home/user/.herdr/worktrees/repo"],
+    [null, shared({ directory: ".claude/worktrees" }), "/home/user/code/repo/.claude/worktrees"],
+    [null, shared({ directory: "../repo.worktrees/" }), "/home/user/code/repo.worktrees"],
+    [null, shared({ directory: "~/wt/repo" }), "/home/user/wt/repo"],
+    [{ worktrees: { directory: "/srv/all", repos: { "~/code/repo": { directory: ".worktrees" } } } }, shared({ directory: ".claude/worktrees" }), "/home/user/code/repo/.worktrees"],
+    [{ worktrees: { repos: { "/home/user/code/other": { directory: "/elsewhere" } } } }, shared({ directory: ".claude/worktrees" }), "/home/user/code/repo/.claude/worktrees"],
+    [{ worktrees: { directory: "/srv/all", repos: { "/home/user/code/repo/": { setup: "make" } } } }, {}, "/srv/all/repo"],
+  ] as const) {
+    const { worktree, plan, executions, writes } = harness(null, settings && JSON.stringify(settings), files as Record<string, string>);
+    Object.assign(worktree, { opening: false, text: "feature/new", repo, plan: await plan(repo, "/home/user", null, true) });
+    expect(await worktree.create()).toBe("");
+    expect(executions[1].args).toEqual(["worktree", "add", `${expected}/feature-new`, "feature/new"]);
+    expect(writes[0][1].folder).toBe(`${expected}/feature-new`);
+    expect(textOf(worktree.render({}).node)).toContain(`in ${expected.replace("/home/user", "~")}/.`);
+  }
+});
+
+test("setup runs the person's commands, then the repo's, in the new terminal before its program", async () => {
+  const dir = await mkdtemp(`${tmpdir()}/worktree-setup-`);
+  const settings = JSON.stringify({ worktrees: { setup: "echo mine >> log" } });
+  const files = shared({ setup: 'echo "repo $HERDR_WORKTREE_BRANCH $HERDR_WORKTREE_PATH $HERDR_WORKTREE_REPO" >> log\nexport FROM_SETUP=yes\nfalse' });
+  const { worktree, plan, writes } = harness(null, settings, files, { argv: ["/bin/sh", "-c", 'echo "end $FROM_SETUP" >> log'] });
+  Object.assign(worktree, { opening: false, text: "feature/new", repo, plan: await plan(repo, "/home/user", null, true) });
+  expect(textOf(worktree.render({}).node)).toContain("Then runs echo mine >> log, then echo \"repo $HERDR_WORKTREE_BRANCH");
+  expect(await worktree.create()).toBe("");
+  const { argv, folder } = writes[0][1];
+  expect(folder).toBe("/home/user/.herdr/worktrees/repo/feature-new");
+  expect(argv.slice(3, 7)).toEqual(["sh", repo.main, folder, "feature/new"]);
+  const ran = sh(argv, dir);
+  expect(ran.status).toBe(0);
+  expect(ran.stdout).toContain("herdr: setup step failed (exit 1): echo \"repo");
+  expect(await readFile(`${dir}/log`, "utf8")).toBe(`mine\nrepo feature/new ${folder} ${repo.main}\nend yes\n`);
+  const bare = sh(argv.slice(0, 7), dir);
+  expect(bare.status).toBe(0);
+  expect(await readFile(`${dir}/log`, "utf8")).toBe(`mine\nrepo feature/new ${folder} ${repo.main}\nend yes\nmine\nrepo feature/new ${folder} ${repo.main}\n`);
+});
+
+test("without setup the first terminal runs what it was given, and Windows skips the scripts", async () => {
+  const none = harness(null, null, {}, { argv: ["claude"] });
+  Object.assign(none.worktree, { opening: false, text: "x", repo, plan: await none.plan(repo, "/home/user", null, true) });
+  expect(await none.worktree.create()).toBe("");
+  expect(none.writes[0][1].argv).toEqual(["claude"]);
+  const win = harness(null, JSON.stringify({ worktrees: { setup: "make" } }), {}, { argv: ["claude"] });
+  Object.assign(win.worktree, { opening: false, text: "x", userHome: "C:\\Users\\user", repo, plan: await win.plan(repo, "C:\\Users\\user", null, true) });
+  expect(textOf(win.worktree.render({}).node)).toContain("Setup scripts need sh, so they don't run on Windows.");
+  expect(await win.worktree.create()).toBe("");
+  expect(win.writes[0][1].argv).toEqual(["claude"]);
+});
+
+test("teardown runs the repo's commands, then the person's, and a failure keeps the checkout until Enter again", async () => {
+  const linked = { ...repo, top: "/home/user/code/repo/.claude/worktrees/feature-new", linked: true };
+  const settings = JSON.stringify({ worktrees: { teardown: "echo mine" } });
+  let fail = true;
+  const { worktree, plan, writes, executions, snapshot } = harness(null, settings, shared({ teardown: "docker compose down" }), { action: "remove", space: "s1" },
+    (command) => command === "/bin/sh" && fail ? { code: 3, stdout: "a\nb", stderr: "compose: no such service" } : undefined);
+  snapshot([{ id: "s1", name: "feature-new", tabs: [] }], []);
+  Object.assign(worktree, { opening: false, repo: linked, dirty: false, unpushed: [], plan: await plan(linked, "/home/user", null, false) });
+  expect(textOf(worktree.render({}).node)).toContain("First runs docker compose down, then echo mine in the checkout.");
+  const error = await worktree.remove();
+  expect(error).toContain("Teardown failed (exit 3), nothing was removed.");
+  expect(error).toContain("compose: no such service");
+  expect(error).toContain("Enter again removes it without the teardown.");
+  expect(writes).toEqual([]);
+  expect(executions.some((e) => e.args.includes("remove"))).toBe(false);
+  const run = executions.find((e) => e.command === "/bin/sh");
+  expect(run.cwd).toBe(linked.top);
+  expect(run.timeout).toBe(600_000);
+  const dir = await mkdtemp(`${tmpdir()}/worktree-teardown-`);
+  const real = sh(["/bin/sh", run.args[0], run.args[1].replace("docker compose down", "echo repo >> log; exit 4"), ...run.args.slice(2)], dir);
+  expect(real.status).toBe(4);
+  expect(await readFile(`${dir}/log`, "utf8")).toBe("repo\n");
+  fail = false;
+  const before = executions.length;
+  expect(await worktree.remove()).toBe("");
+  expect(executions.slice(before).some((e) => e.command === "/bin/sh")).toBe(false);
+  expect(writes).toEqual([["space.close", { id: "s1", confirmed: true }]]);
+  expect(executions.at(-1).args).toEqual(["worktree", "remove", linked.top]);
+});
+
+test("a teardown that can't start or times out still lets Enter again remove the checkout", async () => {
+  const linked = { ...repo, top: "/home/user/code/repo/.claude/worktrees/x", linked: true };
+  const { worktree, plan, writes, snapshot } = harness(null, null, shared({ teardown: "sleep 9999" }), { action: "remove", space: "s1" },
+    (command) => { if (command === "/bin/sh") throw new Error("timed out"); return undefined; });
+  snapshot([{ id: "s1", name: "x", tabs: [] }], []);
+  Object.assign(worktree, { opening: false, repo: linked, dirty: false, unpushed: [], plan: await plan(linked, "/home/user", null, false) });
+  expect(await worktree.remove()).toBe("Teardown failed, nothing was removed.\ntimed out\nEnter again removes it without the teardown.");
+  expect(await worktree.remove()).toBe("");
+  expect(writes).toEqual([["space.close", { id: "s1", confirmed: true }]]);
+});
+
+test("broken repo and person settings say what is wrong instead of creating elsewhere", async () => {
+  for (const [settings, files, message] of [
+    [null, { [`${repo.main}/.herdr/worktree.json`]: "{" }, ".herdr/worktree.json:"],
+    [null, { [`${repo.main}/.herdr/worktree.json`]: "[]" }, ".herdr/worktree.json must be a JSON object."],
+    [null, shared({ directory: "" }), ".herdr/worktree.json directory must be a non-empty path."],
+    [null, shared({ setup: 42 }), ".herdr/worktree.json setup must be a command."],
+    [{ worktrees: { setup: ["make"] } }, {}, "worktrees.setup must be a command."],
+    [{ worktrees: { repos: [] } }, {}, "worktrees.repos must be an object."],
+    [{ worktrees: { repos: { "code/repo": {} } } }, {}, "worktrees.repos key code/repo must be an absolute path"],
+    [{ worktrees: { repos: { "~/code/repo": ".worktrees" } } }, {}, 'worktrees.repos["~/code/repo"] must be an object.'],
+  ] as const) {
+    const { plan } = harness(null, settings && JSON.stringify(settings), files as Record<string, string>);
+    await expect(plan(repo, "/home/user", null, true)).rejects.toThrow(message);
+  }
 });

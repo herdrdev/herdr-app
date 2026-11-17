@@ -743,6 +743,20 @@ What's about the user, never a look:
   Open / Remove worktree still use Git's checkout list. No mod clones needed.
   The app does not read the TUI's config.toml; set its `[worktrees] directory`
   to the same place if both should create checkouts together.
+  A repo can choose for itself in a committed `.herdr/worktree.json`, read
+  from its main checkout: `{ "directory": ".claude/worktrees", "setup":
+  "./.herdr/setup.sh", "teardown": "docker compose down" }`. Its `directory`
+  holds the checkouts directly (`<directory>/<branch>`); a relative one starts
+  at the main checkout. `worktrees.repos` sets the same keys for a repo you
+  don't control and wins over its file: `{ "repos": { "~/code/app": {
+  "directory": ".worktrees" } } }` (keys are main checkout paths).
+  `worktrees.setup` and `worktrees.teardown` are yours, for every repo.
+  Setup runs in the new space's first terminal, yours then the repo's, before
+  its shell or program, with `HERDR_WORKTREE_REPO`, `HERDR_WORKTREE_PATH` and
+  `HERDR_WORKTREE_BRANCH` set; a failed step is reported and the terminal
+  carries on. Teardown runs in the checkout before Remove worktree, the repo's
+  then yours; if one fails, nothing is removed and Enter again removes it
+  without them. Both are `sh` commands and don't run on Windows machines.
 - `terminal_line_height` (default 1, 0.8..2), `terminal_cell_width`
   (default 1, 0.8..2) and `terminal_scroll_speed` (default 1, 0.1..5):
   terminal row height, column width and wheel/trackpad speed, used where the
@@ -926,7 +940,8 @@ has 124 programs (agents, editors, runtimes, tools, databases, infra);
   space's first terminal is), or with `{branch, tab?, argv?}` to make one at once with
   that first tab; checkouts go to
   `<worktrees.directory>/<repo>/<branch>` on the space's machine (default
-  `~/.herdr/worktrees`; see settings.json above); the
+  `~/.herdr/worktrees`), or where the repo's `.herdr/worktree.json` says,
+  with its setup and teardown (see settings.json above); the
   `spaces` sidebar nests worktree spaces under their repo's and shows each
   space's repo, branch, ahead/behind and uncommitted changes). Shipped mods
   are Herdr's; duplicate with `mod.clone` before editing.
