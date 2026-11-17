@@ -3,11 +3,16 @@ import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState } from "gpui-base";
 import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings, window } from "herdr";
 
+// A mod pane has no folder, so focusing one keeps the space's last folder.
+const lastLocation = new Map();
 function location() {
   const space = spaces().find(s => s.active), f = focused();
   const pane = f?.pane ? panes().find(p => p.pane === f.pane) : null;
+  if (pane?.terminal === null && lastLocation.has(space?.id)) return lastLocation.get(space?.id);
   const on = f?.pane === null ? (f.terminal?.includes("/") ? f.terminal.split("/")[0] : null) : space?.machine ?? null;
-  return { cwd: pane?.cwd || f?.cwd || space?.folder, on, space: space?.id };
+  const here = { cwd: pane?.cwd || f?.cwd || space?.folder, on, space: space?.id };
+  if (pane?.terminal !== null) lastLocation.set(space?.id, here);
+  return here;
 }
 const key = () => JSON.stringify(location());
 const LANG = { ts: "js", tsx: "js", mts: "js", cts: "js", jsx: "js", mjs: "js", toml: "yaml", jsonc: "json", svelte: "html", vue: "html" };
