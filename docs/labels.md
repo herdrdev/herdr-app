@@ -27,6 +27,12 @@ Showing an agent:
 With no `herdr.seen` label, use your own seen rules for that terminal.
 A missing label is not `0`.
 
+A passive message or a repeated status report does not by itself make an
+idle, seen agent **done**. With a shared seen label, the turn must advance
+beyond what the person has seen. A reply that does run and finish a new turn still counts, even
+if the client missed its brief `working` report. A passive update also
+must not clear an earlier unseen completion.
+
 Writing it:
 
 - When a person is looking at an agent, write `herdr.seen=<turn>`. Write

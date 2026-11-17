@@ -1061,6 +1061,57 @@ mod tests {
     }
 
     #[test]
+    fn passive_reports_without_a_new_turn_keep_a_seen_agent_idle() {
+        // A message can refresh an idle program's report. Without a new turn,
+        // even a repeated raw `done` word is not a new completion to show.
+        for seen_turn in [None, Some(0), Some(17)] {
+            let mut m = model_with_one();
+            let turn = seen_turn.unwrap_or(0);
+            m.set_word("t1", Some("idle".into()), Some("claude-code".into()), true);
+            m.set_turn("t1", turn, seen_turn);
+            for word in ["idle", "done", "idle"] {
+                let prev = m.agents["t1"].word.clone();
+                assert_eq!(m.alert_for("t1", false, prev.as_deref(), Some(word), false), None);
+                m.set_word("t1", Some(word.into()), None, false);
+                m.set_turn("t1", turn, seen_turn);
+                assert_eq!(m.status("t1"), Some("idle"), "{seen_turn:?}: {word}");
+                assert_eq!(m.rollup(&m.all_addresses()), Some("idle"));
+            }
+        }
+    }
+
+    #[test]
+    fn passive_reports_do_not_clear_an_existing_unseen_completion() {
+        for seen_turn in [None, Some(0)] {
+            let mut m = model_with_one();
+            m.set_word("t1", Some("working".into()), None, false);
+            m.set_word("t1", Some("done".into()), None, false);
+            m.set_turn("t1", 1, seen_turn);
+            assert_eq!(m.status("t1"), Some("done"));
+            for word in ["done", "idle", "done"] {
+                m.set_word("t1", Some(word.into()), None, false);
+                m.set_turn("t1", 1, seen_turn);
+                assert_eq!(m.status("t1"), Some("done"), "{seen_turn:?}: {word}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_completed_reply_is_done_even_when_its_working_report_was_not_seen() {
+        let mut m = model_with_one();
+        m.set_word("t1", Some("idle".into()), None, true);
+        m.set_turn("t1", 17, Some(17));
+        // Core saw the working interval and advanced the turn, but the app
+        // received only its final report. A short reply is still a completion.
+        m.set_word("t1", Some("done".into()), None, false);
+        m.set_turn("t1", 18, Some(17));
+        assert_eq!(m.status("t1"), Some("done"));
+        assert_eq!(m.rollup(&m.all_addresses()), Some("done"));
+        m.set_turn("t1", 18, Some(18));
+        assert_eq!(m.status("t1"), Some("idle"));
+    }
+
+    #[test]
     fn a_shared_seen_turn_decides_over_this_screen() {
         let mut m = model_with_one();
         m.set_word("t1", Some("working".into()), None, true);
