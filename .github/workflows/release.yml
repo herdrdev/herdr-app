@@ -26,6 +26,8 @@ on:
     paths:
       - Cargo.lock
       - Cargo.toml
+      - build.rs
+      - .cargo/config.toml
       - vendor/**
       - crates/**
       - scripts/package
@@ -38,6 +40,8 @@ on:
       - scripts/mac-sign
       - scripts/macos-entitlements.plist
       - scripts/mac-dmg
+      - scripts/dmg_manifest.py
+      - scripts/publish_dmg.py
       - distribution/macos/dmg/**
       - scripts/ci-sources
       - .github/workflows/release.yml
@@ -69,6 +73,7 @@ jobs:
           - { target: linux-x86_64, runner: ubuntu-22.04 }
           - { target: linux-aarch64, runner: ubuntu-22.04-arm }
           - { target: macos-aarch64, runner: macos-15 }
+          - { target: macos-x86_64, runner: macos-15-intel }
           - { target: windows-x86_64, runner: windows-2022 }
     runs-on: ${{ matrix.runner }}
     # Only tags can access the release environment's Apple certificate.
@@ -236,7 +241,13 @@ jobs:
     needs: [build, ci-passed]
     if: github.event_name == 'push' && github.ref_type == 'tag' && github.triggering_actor == 'ogulcancelik'
     environment: release
-    runs-on: macos-15
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { target: macos-aarch64, runner: macos-15 }
+          - { target: macos-x86_64, runner: macos-15-intel }
+    runs-on: ${{ matrix.runner }}
     timeout-minutes: 40
     continue-on-error: true
     steps:
@@ -245,11 +256,12 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
-          name: herdr-app-macos-aarch64
+          name: herdr-app-${{ matrix.target }}
           path: dist
       - name: Install DMG tools
         run: brew install create-dmg jq awscli
       - name: Build, sign, notarize and verify DMG
+        id: dmg
         env:
           APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
           APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
@@ -257,8 +269,8 @@ jobs:
           APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
           APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
         run: |
-          tar -xzf dist/herdr-app-macos-aarch64.tar.gz -C dist
-          scripts/mac-dmg dist/Herdr.app dist/Herdr.dmg
+          tar -xzf dist/herdr-app-${{ matrix.target }}.tar.gz -C dist
+          scripts/mac-dmg dist/Herdr.app dist/Herdr-${{ matrix.target }}.dmg '${{ matrix.target }}'
       - name: Upload website download
         env:
           AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
@@ -268,8 +280,51 @@ jobs:
           BUCKET: ${{ vars.R2_BUCKET }}
         run: |
           version="${GITHUB_REF_NAME#v}"
-          aws s3 cp --endpoint-url "$ENDPOINT" dist/Herdr.dmg "s3://$BUCKET/app/$version/Herdr.dmg" --cache-control "public, max-age=31536000, immutable" --content-type application/x-apple-diskimage
-          aws s3 cp --endpoint-url "$ENDPOINT" dist/Herdr.dmg "s3://$BUCKET/app/Herdr.dmg" --cache-control "no-cache" --content-type application/x-apple-diskimage
+          file=Herdr-${{ matrix.target }}.dmg
+          python3 scripts/publish_dmg.py image "$version" '${{ matrix.target }}' "dist/$file"
+      # Retain the signed image even if a later network/alias operation failed.
+      # The finalizer verifies remote bytes before advertising this artifact.
+      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        if: ${{ !cancelled() && steps.dmg.outcome == 'success' }}
+        with:
+          name: herdr-dmg-${{ matrix.target }}
+          path: dist/Herdr-${{ matrix.target }}.dmg
+          if-no-files-found: error
+          overwrite: true
+          retention-days: 7
+
+  # Homebrew must not discover a version before both notarized DMGs exist.
+  # Individual ARM website uploads still work if Intel fails. Neither this nor
+  # the DMG builds gate the existing tarball/app-update publisher.
+  publish-dmg-manifest:
+    needs: mac-dmg
+    if: >-
+      needs.mac-dmg.result == 'success'
+      && github.event_name == 'push' && github.ref_type == 'tag' && github.triggering_actor == 'ogulcancelik'
+    environment: release
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    continue-on-error: true
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
+        with:
+          pattern: herdr-dmg-*
+          path: dist
+          merge-multiple: true
+      - name: Publish complete DMG release last
+        env:
+          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
+          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
+          AWS_DEFAULT_REGION: auto
+          ENDPOINT: https://${{ vars.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
+          BUCKET: ${{ vars.R2_BUCKET }}
+          RELEASES_URL: ${{ vars.RELEASES_URL }}
+        run: |
+          version="${GITHUB_REF_NAME#v}"
+          python3 scripts/publish_dmg.py manifest "$version" dist "$RELEASES_URL"
 
   publish:
     needs: [build, sign-windows, ci-passed]
@@ -297,6 +352,7 @@ jobs:
           persist-credentials: false
       - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
         with:
+          pattern: herdr-app-*
           path: dist
           merge-multiple: true
       - name: Install Bun for release media check

@@ -34,6 +34,8 @@ fn embed(base: &Path, folder: &str, name: &str, file: &str) {
 }
 
 fn main() {
+    // Relink cached apps when the macOS deployment target changes.
+    println!("cargo:rerun-if-env-changed=MACOSX_DEPLOYMENT_TARGET");
     let base = std::path::PathBuf::from(std::env::var("CARGO_MANIFEST_DIR").unwrap());
     embed(&base, "defaults/mods", "DEFAULT_MODS", "default_mods.rs");
     embed(&base, "defaults/icons", "DEFAULT_ICONS", "default_icons.rs");

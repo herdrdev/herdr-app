@@ -4,11 +4,25 @@
 # Uses the same APPLE_CERTIFICATE_* and APPLE_API_* secrets as mac-sign/notary-test.
 set -euo pipefail
 
-app=${1:?usage: mac-dmg signed-Herdr.app output.dmg}
-out=${2:?usage: mac-dmg signed-Herdr.app output.dmg}
+app=${1:?usage: mac-dmg signed-Herdr.app output.dmg [macos-aarch64|macos-x86_64]}
+out=${2:?usage: mac-dmg signed-Herdr.app output.dmg [macos-aarch64|macos-x86_64]}
+target=${3:-}
 [[ $(uname -s) == Darwin ]] || { echo 'mac-dmg requires macOS' >&2; exit 1; }
 [[ $(basename "$app") == Herdr.app && -d $app ]] || { echo 'expected a signed Herdr.app' >&2; exit 1; }
 [[ $out == *.dmg && ! -e $out ]] || { echo 'output must be a new .dmg file' >&2; exit 1; }
+binary=Contents/MacOS/Herdr
+arch=$(lipo -archs "$app/$binary")
+case $arch in
+  arm64) actual=macos-aarch64 ;;
+  x86_64) actual=macos-x86_64 ;;
+  *) echo "DMG requires a thin ARM or Intel app, got: $arch" >&2; exit 1 ;;
+esac
+[[ -z $target || $target == "$actual" ]] || { echo "DMG target $target does not match app $actual" >&2; exit 1; }
+case $(basename "$out" .dmg) in
+  Herdr-macos-*)
+    [[ $(basename "$out" .dmg) == "Herdr-$actual" ]] \
+      || { echo "DMG filename does not match app $actual" >&2; exit 1; } ;;
+esac
 : "${APPLE_CERTIFICATE_P12:?missing certificate}"
 : "${APPLE_CERTIFICATE_PASSWORD:?missing certificate password}"
 : "${APPLE_API_KEY:?missing notary API private key}"
@@ -58,6 +72,16 @@ create-dmg --volname Herdr --volicon "$root/assets/icons/Herdr.icns" \
   --window-size 660 400 --background "$work/background.tiff" \
   --icon-size 128 --icon Herdr.app 165 190 --hide-extension Herdr.app \
   --app-drop-link 495 190 "$work/Herdr.dmg" "$work/source"
+# Inspect the actual image before signing or submitting it. Creating an image
+# successfully does not prove it contains the app we were given.
+mkdir "$work/mounted"
+hdiutil attach "$work/Herdr.dmg" -readonly -nobrowse -mountpoint "$work/mounted" >/dev/null
+[[ -L $work/mounted/Applications && $(readlink "$work/mounted/Applications") == /Applications ]] \
+  || { echo 'DMG is missing its Applications link' >&2; exit 1; }
+codesign --verify --deep --strict "$work/mounted/Herdr.app"
+cmp "$app/$binary" "$work/mounted/Herdr.app/$binary"
+cmp "$app/Contents/Info.plist" "$work/mounted/Herdr.app/Contents/Info.plist"
+hdiutil detach "$work/mounted"
 "$root/scripts/mac-sign" "$work/Herdr.dmg"
 build_seconds=$((SECONDS - started))
 printf '%s' "$APPLE_API_KEY" > "$work/key.p8"
