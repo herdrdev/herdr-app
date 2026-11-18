@@ -930,6 +930,10 @@ has 124 programs (agents, editors, runtimes, tools, databases, infra);
   `spaces` sidebar nests worktree spaces under their repo's and shows each
   space's repo, branch, ahead/behind and uncommitted changes). Shipped mods
   are Herdr's; duplicate with `mod.clone` before editing.
+- Icon buttons in the shipped mods (`+`, the sidebar toggle, search, the
+  pane header's split, zoom and close) show a tooltip only while shared
+  `"button.tooltips"` is `true`: Settings > Look > Buttons, off by default.
+  Your own mods can read the same key: `.when(shared("button.tooltips") === true, (el) => el.tooltip("New tab"))`.
 
 ### Terminal link handlers
 
