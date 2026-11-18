@@ -23,7 +23,7 @@ function harness(replies: unknown[] = [], storage = new Map<string, string>(), s
     if (method === "track_scroll") tracked.push(args[0]);
     return element;
   } });
-  const Spaces = new Function("View", "hc", "localStorage", "spaces", "panes", "run", "v_flex", "h_flex", "div", "svg", "shared", "machines", "exec", "window", "watchFolder", "ScrollHandle", "theme", "layout", "setShared", `${source}; return Spaces;`)(
+  const Spaces = new Function("View", "hc", "localStorage", "spaces", "panes", "run", "v_flex", "h_flex", "div", "svg", "shared", "machines", "exec", "window", "watchFolder", "ScrollHandle", "theme", "layout", "setShared", "withShortcut", `${source}; return Spaces;`)(
     class {},
     async (args: string[]) => {
       calls.push(args);
@@ -38,7 +38,7 @@ function harness(replies: unknown[] = [], storage = new Map<string, string>(), s
       moves.push(args);
     },
     ...Array(4).fill(() => element), () => null, () => availability, execGit, () => ({ active: true }), watch,
-    ScrollHandle, theme, () => env.layout, () => {},
+    ScrollHandle, theme, () => env.layout, () => {}, (label: string) => label,
   );
   const view = new Spaces();
   view.reconnecting = {};

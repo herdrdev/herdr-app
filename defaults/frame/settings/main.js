@@ -560,7 +560,15 @@ export default class Settings extends View {
           this.stepper(t, `st-${key}`, `${Math.round(s[key] * 100)}%`, by(-step), by(step)),
         );
       }))
-      .child(fontRow("ui_font", null, "Interface font", s.ui_font_family, DEFAULT_UI_FONT));
+      .child(fontRow("ui_font", null, "Interface font", s.ui_font_family, DEFAULT_UI_FONT))
+      .child(
+        this.row(
+          t,
+          "Shortcuts in tooltips",
+          "A button's tooltip shows the key that does the same thing.",
+          this.toggle(t, "st-shortcut-hints", p.shortcut_hints !== false, (_e, cx) => this.change((q) => (q.shortcut_hints = q.shortcut_hints === false), cx)),
+        ),
+      );
   }
 
   keyboard(t) {
