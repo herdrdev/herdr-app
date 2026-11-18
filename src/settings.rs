@@ -404,6 +404,12 @@ pub struct Person {
     /// A draggable scroll position thumb at a terminal pane's right edge.
     #[serde(skip_serializing_if = "is_true")]
     pub pane_scrollbars: bool,
+    /// The pointer resting on a terminal pane focuses it (window.rs, `follow_mouse`).
+    #[serde(skip_serializing_if = "is_false")]
+    pub focus_follows_mouse: bool,
+    /// How long the pointer stays on a pane before it takes the focus.
+    #[serde(skip_serializing_if = "is_default_follow_delay")]
+    pub focus_follows_mouse_delay_ms: u32,
     /// Minimum terminal text contrast ratio; 1 leaves program colors unchanged.
     pub minimum_contrast: f32,
     /// macOS Option sends Alt shortcuts, or follows the keyboard layout.
@@ -454,6 +460,17 @@ fn is_true(b: &bool) -> bool {
     *b
 }
 
+fn is_false(b: &bool) -> bool {
+    !*b
+}
+
+const FOLLOW_DELAY_MS: u32 = 150;
+const FOLLOW_DELAY_MAX_MS: u32 = 2000;
+
+fn is_default_follow_delay(ms: &u32) -> bool {
+    *ms == FOLLOW_DELAY_MS
+}
+
 impl Default for Person {
     fn default() -> Self {
         Person {
@@ -472,6 +489,8 @@ impl Default for Person {
             clipboard_write: true,
             copy_on_select: true,
             pane_scrollbars: true,
+            focus_follows_mouse: false,
+            focus_follows_mouse_delay_ms: FOLLOW_DELAY_MS,
             minimum_contrast: 1.0,
             option_as_alt: OptionAsAlt::Auto,
             appearance: Appearance::System,
@@ -512,6 +531,9 @@ pub struct Settings {
     pub colors: BTreeMap<String, String>,
     /// A draggable scroll position thumb at a terminal pane's right edge.
     pub pane_scrollbars: bool,
+    pub focus_follows_mouse: bool,
+    /// Up to FOLLOW_DELAY_MAX_MS.
+    pub focus_follows_mouse_delay_ms: u32,
     /// Space between a terminal's edge and its text, in px: [x, y].
     pub terminal_padding: [f32; 2],
     /// 0..1: below 1, what's behind a terminal shows through.
@@ -561,6 +583,8 @@ impl Default for Settings {
             dark: true,
             colors: BTreeMap::new(),
             pane_scrollbars: true,
+            focus_follows_mouse: false,
+            focus_follows_mouse_delay_ms: FOLLOW_DELAY_MS,
             terminal_padding: [10.0, 6.0],
             terminal_opacity: 1.0,
             clipboard_write: true,
@@ -604,6 +628,8 @@ impl Settings {
             dark,
             colors,
             pane_scrollbars: person.pane_scrollbars,
+            focus_follows_mouse: person.focus_follows_mouse,
+            focus_follows_mouse_delay_ms: person.focus_follows_mouse_delay_ms.min(FOLLOW_DELAY_MAX_MS),
             terminal_padding: look.terminal_padding.unwrap_or(d.terminal_padding),
             terminal_opacity: look.terminal_opacity.unwrap_or(1.0).clamp(0.0, 1.0),
             sounds: person.sounds.clone(),
@@ -994,6 +1020,22 @@ mod tests {
     }
 
     #[test]
+    fn focus_follows_mouse_defaults_off_and_caps_the_delay() {
+        let compose = |json| Settings::compose(&serde_json::from_value(json).unwrap(), &crate::layout::Look::default(), true);
+        let off = compose(serde_json::json!({}));
+        assert_eq!((off.focus_follows_mouse, off.focus_follows_mouse_delay_ms), (false, 150));
+        let on = compose(serde_json::json!({"focus_follows_mouse": true}));
+        assert_eq!((on.focus_follows_mouse, on.focus_follows_mouse_delay_ms), (true, 150));
+        assert_eq!(compose(serde_json::json!({"focus_follows_mouse": true, "focus_follows_mouse_delay_ms": 99999})).focus_follows_mouse_delay_ms, 2000);
+        // Mods read them as settings.json says them.
+        let shown = serde_json::to_value(on).unwrap();
+        assert_eq!((&shown["focus_follows_mouse"], &shown["focus_follows_mouse_delay_ms"]), (&serde_json::json!(true), &serde_json::json!(150)));
+        // Untouched, they stay out of a settings.json the app writes back.
+        let written = serde_json::to_value(Person::default()).unwrap();
+        assert!(written.get("focus_follows_mouse").is_none() && written.get("focus_follows_mouse_delay_ms").is_none());
+    }
+
+    #[test]
     fn option_as_alt_defaults_to_auto_and_round_trips() {
         let default: Person = serde_json::from_str("{}").unwrap();
         assert_eq!(default.option_as_alt, OptionAsAlt::Auto);
@@ -1080,7 +1122,7 @@ mod tests {
     /// settings.json key.
     #[test]
     fn the_guide_explains_every_setting() {
-        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), font_weight: Some(400), ui_font: Some(String::new()), telemetry: false, clipboard_write: false, copy_on_select: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), ..Person::default() };
+        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), font_weight: Some(400), ui_font: Some(String::new()), telemetry: false, clipboard_write: false, copy_on_select: false, focus_follows_mouse: true, focus_follows_mouse_delay_ms: 0, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), ..Person::default() };
         let keys: Vec<String> = serde_json::to_value(&all).unwrap().as_object().unwrap().keys().cloned().collect();
         let guide = include_str!("../defaults/AGENTS.md");
         let section = guide.split("## The person").nth(1).and_then(|s| s.split("\n## ").next()).unwrap_or_default();
