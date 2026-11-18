@@ -312,7 +312,41 @@ pub(crate) const EDITOR_METHODS: &[(&str, bool)] = &[
     ("selected_range", true),
     ("set_selected_range", false),
     ("replace", false),
+    // HERDR: scroll position in rows and whole-line decorations.
+    ("scroll_top", true),
+    ("set_scroll_top", false),
+    ("set_line_decorations", false),
 ];
+
+/// HERDR: `{line, kind, color?}` → a tint and gutter marker; `kind` picks the default color.
+fn line_decoration(value: &Data) -> Result<gpui_base::input::LineDecoration> {
+    let Data::Number(line) = field(value, "line")? else {
+        bail!("line decoration `line` must be a number");
+    };
+    if !line.is_finite() || *line < 0. || line.fract() != 0. {
+        bail!("line decoration `line` must be a whole number from 0");
+    }
+    let kind = string(field(value, "kind")?)?;
+    let default = match kind {
+        "added" => "#2ea043",
+        "removed" => "#f85149",
+        "changed" => "#d29922",
+        _ => bail!("line decoration `kind` must be \"added\", \"removed\" or \"changed\""),
+    };
+    let color = match field(value, "color") {
+        Ok(Data::Null) | Err(_) => default,
+        Ok(color) => string(color)?,
+    };
+    let marker = color
+        .strip_prefix('#')
+        .and_then(crate::value::parse_hex)
+        .ok_or_else(|| anyhow!("line decoration `color` must be #rgb, #rrggbb or #rrggbbaa"))?;
+    Ok(gpui_base::input::LineDecoration {
+        line: *line as usize,
+        background: marker.opacity(0.18),
+        marker,
+    })
+}
 pub(crate) fn invoke_editor(
     entity: &Entity<EditorState>,
     name: &str,
@@ -333,6 +367,17 @@ pub(crate) fn invoke_editor(
         ("replace", [text]) => {
             let text = string(text)?;
             entity.update(cx, |state, cx| state.replace(text, window, cx));
+            Ok(Data::Null)
+        }
+        ("scroll_top", []) => Ok(Data::Number(entity.read(cx).scroll_top_rows() as f64)),
+        ("set_scroll_top", [Data::Number(rows)]) if rows.is_finite() => {
+            let rows = *rows as f32;
+            entity.update(cx, |state, cx| state.set_scroll_top_rows(rows, cx));
+            Ok(Data::Null)
+        }
+        ("set_line_decorations", [Data::Array(items)]) => {
+            let decorations = items.iter().map(line_decoration).collect::<Result<Vec<_>>>()?;
+            entity.update(cx, |state, cx| state.set_line_decorations(decorations, cx));
             Ok(Data::Null)
         }
         _ => bail!("invalid arguments for editor state operation `{name}`"),
