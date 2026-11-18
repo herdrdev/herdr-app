@@ -2,6 +2,10 @@
 
 <!-- Written by the Herdr app on every start. Edits here are overwritten. -->
 
+If `AGENTS.local.md` is in this folder, read it too: the person's own notes
+on their setup (what they changed and how they like it). Herdr never writes
+or replaces it; put lasting notes about this machine's setup there.
+
 This folder is **the Herdr app's whole interface, as files**. The Herdr app
 is a desktop app for terminals and coding agents, and it redraws itself from
 these files while it runs: change a layout, a key or a panel here and the
@@ -79,6 +83,7 @@ first frame or during GPU recovery it reports an error instead of a PNG.
 | `keys.json` | what every key does | live |
 | `settings.json` | the person: zoom, sounds, fonts for every layout, worktree directory | live |
 | `mods/<name>/` | panels: small JavaScript programs | live (hot reload) |
+| `AGENTS.local.md` | the person's notes on their setup, for agents | never written by Herdr |
 | `programs.json` | how programs show (name, icon, tile), on top of the built-in table | live |
 | `icons/` | the shipped program icons | written by Herdr (put your own elsewhere) |
 | `frame/` | the app's own screens (welcome, ...) | rewritten by Herdr on every start: don't edit, it won't stick |
