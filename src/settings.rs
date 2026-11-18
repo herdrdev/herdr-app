@@ -516,6 +516,8 @@ pub struct Settings {
     pub terminal_padding: [f32; 2],
     /// 0..1: below 1, what's behind a terminal shows through.
     pub terminal_opacity: f32,
+    /// 0..1: below 1, the desktop shows through the window.
+    pub window_opacity: f32,
     pub clipboard_write: bool,
     pub copy_on_select: bool,
     pub minimum_contrast: f32,
@@ -563,6 +565,7 @@ impl Default for Settings {
             pane_scrollbars: true,
             terminal_padding: [10.0, 6.0],
             terminal_opacity: 1.0,
+            window_opacity: 1.0,
             clipboard_write: true,
             copy_on_select: true,
             minimum_contrast: 1.0,
@@ -605,7 +608,9 @@ impl Settings {
             colors,
             pane_scrollbars: person.pane_scrollbars,
             terminal_padding: look.terminal_padding.unwrap_or(d.terminal_padding),
-            terminal_opacity: look.terminal_opacity.unwrap_or(1.0).clamp(0.0, 1.0),
+            // A see-through window is painted once, at its root (see_through).
+            terminal_opacity: if look.window_opacity.is_some_and(|o| o < 1.0) { 0.0 } else { look.terminal_opacity.unwrap_or(1.0).clamp(0.0, 1.0) },
+            window_opacity: look.window_opacity.unwrap_or(1.0),
             sounds: person.sounds.clone(),
             clipboard_write: person.clipboard_write,
             copy_on_select: person.copy_on_select,
@@ -615,14 +620,19 @@ impl Settings {
     }
 }
 
-pub fn parse_hex(s: &str) -> Option<Hsla> {
+/// A `#rrggbb[aa]` value as its color and alpha.
+fn hex_parts(s: &str) -> Option<(u32, u32)> {
     let h = s.trim().trim_start_matches('#');
     let v = u32::from_str_radix(h, 16).ok()?;
-    let (rgb, a) = match h.len() {
-        6 => (v, 255),
-        8 => (v >> 8, v & 255),
-        _ => return None,
-    };
+    match h.len() {
+        6 => Some((v, 255)),
+        8 => Some((v >> 8, v & 255)),
+        _ => None,
+    }
+}
+
+pub fn parse_hex(s: &str) -> Option<Hsla> {
+    let (rgb, a) = hex_parts(s)?;
     Some(
         Rgba {
             r: ((rgb >> 16) & 255) as f32 / 255.0,
@@ -634,9 +644,14 @@ pub fn parse_hex(s: &str) -> Option<Hsla> {
     )
 }
 
+/// A theme value without its alpha; one that is no color stays as written.
+pub fn opaque(v: &str) -> String {
+    hex_parts(v).map_or_else(|| v.to_owned(), |(rgb, _)| format!("#{rgb:06x}"))
+}
+
 pub fn rgb(s: &str) -> Rgb {
     let h = s.trim().trim_start_matches('#');
-    let v = u32::from_str_radix(&h[..h.len().min(6)], 16).unwrap_or(0xff00ff);
+    let v = h.get(..h.len().min(6)).and_then(|h| u32::from_str_radix(h, 16).ok()).unwrap_or(0xff00ff);
     Rgb((v >> 16) as u8, (v >> 8) as u8, v as u8)
 }
 
@@ -658,6 +673,9 @@ impl Settings {
         if !(1.0..=21.0).contains(&self.minimum_contrast) {
             out.push(format!("minimum_contrast {} is outside 1..21", self.minimum_contrast));
         }
+        if !(0.0..=1.0).contains(&self.window_opacity) {
+            out.push(format!("window_opacity {} is outside 0..1", self.window_opacity));
+        }
         if !(100..=900).contains(&self.font_weight) {
             out.push(format!("font_weight {} is outside 100..900", self.font_weight));
         }
@@ -665,6 +683,12 @@ impl Settings {
             out.push(format!("font_size {} is outside 6..72", self.font_size));
         }
         out
+    }
+
+    /// What the window applies once `problems` are reported: an opacity out of range at its nearest end.
+    pub fn in_range(mut self) -> Self {
+        self.window_opacity = self.window_opacity.clamp(0.0, 1.0);
+        self
     }
 }
 
@@ -692,6 +716,11 @@ pub fn theme() -> Rc<Theme> {
 /// A theme color as GPUI paint (magenta if missing, so mistakes show).
 pub fn color(name: &str) -> Hsla {
     theme().get(name).and_then(|v| parse_hex(v)).unwrap_or(gpui::hsla(0.83, 1.0, 0.5, 1.0))
+}
+
+/// A theme color without its alpha, for what must stay readable in a see-through window.
+pub fn solid(name: &str) -> Hsla {
+    Hsla { a: 1.0, ..color(name) }
 }
 
 /// A theme color name, or a literal `#rrggbb[aa]`.
@@ -750,6 +779,55 @@ fn person_text(person: &Person, previous: &str) -> std::io::Result<String> {
     Ok(serde_json::to_string_pretty(&raw)? + "\n")
 }
 
+/// The window's root paints the one background of a see-through window: these
+/// layers stack on it (cards on canvas on the root), and alpha at each would
+/// add up to nearly opaque. The color stays beside its zero alpha for what
+/// reads it as a color. A value that is no color stays as written: `problems`
+/// reports it.
+///
+/// Overlays (`popover`) take the window's opacity where the renderer can make
+/// them replace what's below (`REPLACES_BELOW`): they show the desktop, never
+/// the window's own text under them. Elsewhere they stay solid.
+///
+/// `raised` becomes the lift it paints as a tint (white on a dark theme, black
+/// on a light one), like `hover` and `selected`: a solid one would be the one
+/// opaque patch in a see-through dialog or card.
+fn see_through(theme: &mut Theme, opacity: f32) {
+    if let (Some((bg, _)), Some((raised, 255))) = (theme.get("background").and_then(|v| hex_parts(v)), theme.get("raised").and_then(|v| hex_parts(v))) {
+        theme.insert("raised".to_owned(), tint(bg, raised));
+    }
+    for name in ["background", "surface", "canvas", "chrome"] {
+        if let Some(v) = theme.get_mut(name) {
+            if let Some((rgb, _)) = hex_parts(v) {
+                *v = format!("#{rgb:06x}00");
+            }
+        }
+    }
+    if REPLACES_BELOW {
+        if let Some(v) = theme.get_mut("popover") {
+            if let Some((rgb, _)) = hex_parts(v) {
+                *v = format!("#{rgb:06x}{:02x}", (opacity.clamp(0.0, 1.0) * 255.0).round() as u32);
+            }
+        }
+    }
+}
+
+/// `over` painted on `bg`, as white or black at the alpha that gives the same color.
+fn tint(bg: u32, over: u32) -> String {
+    let target = if is_light(bg) { 0 } else { 0xffffff };
+    let a = (0..3)
+        .map(|i| {
+            let [b, o, t] = [bg, over, target].map(|c| ((c >> (8 * i)) & 255) as f32);
+            if t == b { 0.0 } else { (o - b) / (t - b) }
+        })
+        .fold(0.0f32, f32::max)
+        .clamp(0.0, 1.0);
+    format!("#{target:06x}{:02x}", (a * 255.0).round() as u32)
+}
+
+/// Whether the renderer draws a `popover` quad over cleared pixels (Metal only).
+const REPLACES_BELOW: bool = cfg!(target_os = "macos");
+
 /// Installs new settings; returns whether anything changed.
 pub fn set(s: Settings) -> bool {
     #[cfg(target_os = "macos")]
@@ -765,10 +843,15 @@ pub fn set(s: Settings) -> bool {
         // have new colors under the same name.
         let (p, mut colors) = palette(&s.theme).unwrap_or_else(|_| (GRAPHITE.clone(), BTreeMap::new()));
         colors.extend(s.colors.clone());
-        let theme = resolve(&p, &colors);
+        let mut theme = resolve(&p, &colors);
+        if s.window_opacity < 1.0 {
+            see_through(&mut theme, s.window_opacity);
+        }
         if *c.borrow().0 == s && *c.borrow().1 == theme {
             return false;
         }
+        let replacing = (REPLACES_BELOW && s.window_opacity < 1.0).then(|| theme.get("popover").and_then(|v| parse_hex(v))).flatten().filter(|c| c.a >= 1.0 / 255.0);
+        gpui::set_replacing_color(replacing);
         gpui_shell::set_pixel_scale(s.zoom);
         *c.borrow_mut() = (Rc::new(s), Rc::new(theme));
         true
@@ -1074,6 +1157,82 @@ mod tests {
         let clicks = crate::layout_sync::State { theme: Some(ThemeChoice::One("ink".into())), ..Default::default() };
         clicks.apply(&mut win98);
         assert_eq!(Settings::compose(&person, &win98.look, true).theme, "ink");
+    }
+
+    #[test]
+    fn a_window_opacity_out_of_range_is_reported_then_applied_at_its_nearest_end() {
+        for (asked, applied) in [(-0.5, 0.0), (1.5, 1.0), (0.4, 0.4)] {
+            let look = crate::layout::Look { window_opacity: Some(asked), ..Default::default() };
+            let s = Settings::compose(&Person::default(), &look, true);
+            assert_eq!(s.problems().iter().any(|p| p.starts_with("window_opacity")), asked != applied, "{asked}");
+            assert_eq!(s.in_range().window_opacity, applied);
+        }
+    }
+
+    #[test]
+    fn a_see_through_window_paints_its_background_once() {
+        let look = crate::layout::Look { window_opacity: Some(0.8), ..Default::default() };
+        let s = Settings::compose(&Person::default(), &look, true);
+        assert_eq!(s.terminal_opacity, 0.0);
+        let opaque = resolve(&GRAPHITE, &BTreeMap::new());
+        let mut theme = opaque.clone();
+        see_through(&mut theme, 0.8);
+        for name in ["background", "surface", "canvas", "chrome"] {
+            assert_eq!(parse_hex(&theme[name]).unwrap().a, 0.0, "{name}");
+            assert_eq!(rgb(&theme[name]), rgb(&opaque[name]), "{name}");
+        }
+        // Raised is a tint that paints the same color on the background.
+        assert_eq!(theme["raised"], "#ffffff17");
+        assert_eq!(tint(0xf0f0f0, mix(0xf0f0f0, 0, 0.035)), "#00000009");
+        // Overlays take the window's opacity only where the renderer clears what's below them.
+        let popover = parse_hex(&theme["popover"]).unwrap().a;
+        assert!((popover - if REPLACES_BELOW { 0.8 } else { 1.0 }).abs() < 0.01, "{popover}");
+        assert_eq!(rgb(&theme["popover"]), rgb(&opaque["popover"]));
+    }
+
+    #[test]
+    fn see_through_leaves_a_value_that_is_no_color_as_written() {
+        let colors = [("background".to_owned(), "日本語x".to_owned())].into();
+        let mut theme = resolve(&GRAPHITE, &colors);
+        see_through(&mut theme, 0.8);
+        assert_eq!(theme["background"], "日本語x");
+    }
+
+    #[test]
+    fn see_through_clears_every_form_of_color_that_paints() {
+        let forms = ["12345678", " #123456", "#123456", "#12345678"];
+        let cleared = forms.map(|v| {
+            let colors = [("background".to_owned(), v.to_owned())].into();
+            let mut theme = resolve(&GRAPHITE, &colors);
+            see_through(&mut theme, 0.8);
+            theme["background"].clone()
+        });
+        assert_eq!(cleared, ["#12345600"; 4]);
+        for v in &cleared {
+            assert_eq!(parse_hex(v).unwrap().a, 0.0);
+            assert_eq!(rgb(v), Rgb(0x12, 0x34, 0x56));
+        }
+    }
+
+    #[test]
+    fn setting_the_same_see_through_settings_again_changes_nothing() {
+        let (before, look) = (get(), crate::layout::Look { window_opacity: Some(0.8), ..Default::default() });
+        let s = Settings::compose(&Person::default(), &look, true);
+        set(s.clone());
+        let again = set(s);
+        set((*before).clone());
+        assert!(!again);
+    }
+
+    #[test]
+    fn rgb_shows_magenta_for_text_cut_inside_a_character() {
+        assert_eq!(rgb("ab日本"), Rgb(0xff, 0x00, 0xff));
+    }
+
+    #[test]
+    fn an_opaque_window_keeps_the_layouts_terminal_opacity() {
+        let look = crate::layout::Look { terminal_opacity: Some(0.85), ..Default::default() };
+        assert_eq!(Settings::compose(&Person::default(), &look, true).terminal_opacity, 0.85);
     }
 
     /// The guide agents read (written to the home folder) explains every

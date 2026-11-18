@@ -230,7 +230,7 @@ export default class Settings extends View {
       .rounded(10)
       .p(2)
       .cursor_pointer()
-      .bg(on ? t.accent : t.hover)
+      .bg(on ? t.accent : t.input)
       .flex()
       .when(on, (el) => el.justify_end())
       .on_click(onClick)
