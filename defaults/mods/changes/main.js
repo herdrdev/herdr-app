@@ -14,6 +14,17 @@ const key = () => JSON.stringify(location());
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
 const countLines = (text) => text ? text.split("\n").length - Number(text.endsWith("\n")) : 0;
 
+// Added/removed row colors. A tint of the theme's own ansi green/red is nearly invisible on
+// themes with pastel ansi colors, so rows get a clear fixed tint for the theme's brightness.
+const isDark = (hex) => {
+  const n = parseInt(hex.slice(1, 7), 16);
+  return (((n >> 16) & 255) * 299 + ((n >> 8) & 255) * 587 + (n & 255) * 114) / 1000 < 128;
+};
+const DIFF_COLORS = {
+  dark: { add: "#0b2e0b", del: "#3a0707", addSign: "#4cd964", delSign: "#ff5d55" },
+  light: { add: "#d6f5d6", del: "#fcdada", addSign: "#1a7f37", delSign: "#cf222e" },
+};
+
 // Text draws a tab as nothing: pad each to the next 4-column stop.
 const untab = (text) => text.replace(/[^\t]*\t/g, (s) => s.slice(0, -1).padEnd((s.length - 1) - (s.length - 1) % 4 + 4));
 
@@ -170,8 +181,10 @@ export default class Changes extends View {
 
   diffRow({ kind, number, text }, t) {
     if (kind === "@") return div().w_full().px(12).h(20).flex_none().truncate().bg(t.raised).text_color(t.dim).child(text);
-    return h_flex().w_full().h(20).flex_none().gap(10).when(kind === "+", (e) => e.bg(t.ansi2 + "18")).when(kind === "-", (e) => e.bg(t.ansi1 + "18"))
+    const colors = DIFF_COLORS[isDark(t.background) ? "dark" : "light"];
+    return h_flex().w_full().h(20).flex_none().gap(6).when(kind === "+", (e) => e.bg(colors.add)).when(kind === "-", (e) => e.bg(colors.del))
       .child(div().w(30).flex_none().text_right().text_color(t.dim).child(number === undefined ? "" : String(number)))
+      .child(div().w(10).flex_none().text_color(kind === "+" ? colors.addSign : colors.delSign).child(kind === "+" ? "+" : kind === "-" ? "−" : ""))
       .child(div().flex_1().min_w(0).truncate().child(text));
   }
 
