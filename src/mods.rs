@@ -1,13 +1,13 @@
 //! Mods: folders of JavaScript under ~/.config/herdr-app/mods that agents write and
 //! Herdr runs live (gpui-shell), plus the `herdr` module they import.
 
-use crate::layout::Node;
+use crate::{layout::Node, links};
 use gpui::App;
 use gpui_shell::{Capabilities, ExecuteGrant, HostError, HostModule, HostObject, HostValue, NetworkGrant};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::cell::RefCell;
-use std::collections::HashMap;
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::rc::{Rc, Weak};
@@ -32,6 +32,17 @@ pub fn frame_dir() -> PathBuf {
 pub fn home() -> PathBuf {
     // HOME, or the profile folder on Windows.
     std::env::home_dir().unwrap_or_else(|| "/".into())
+}
+
+thread_local! {
+    static CHECKING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// True while `herdr-app check` loads a mod: `init()` runs there with live
+/// exec and write capabilities, so mods can see it (`herdr.checking()`) and
+/// those side effects warn.
+fn checking() -> bool {
+    CHECKING.with(|c| c.get())
 }
 
 /// The fonts on this machine (`fonts()`): read when the window opens and
@@ -345,34 +356,71 @@ pub struct Hint {
     pub focusable: bool,
 }
 
-#[derive(Clone)]
-pub struct Found {
-    pub id: String,
-    pub dir: PathBuf,
-    pub hint: Hint,
-    pub stamp: SystemTime,
+fn parse_link_rules(source: &std::io::Result<String>, link_manifest: bool) -> Result<Vec<links::Rule>, String> {
+    let manifest: Value = match source {
+        Ok(source) => match serde_json::from_str(source) {
+            Ok(manifest) => manifest,
+            Err(e) if link_manifest => return Err(format!("mod.json: {e}")),
+            Err(_) => return Ok(Vec::new()),
+        },
+        Err(e) if link_manifest && e.kind() != std::io::ErrorKind::NotFound => return Err(format!("mod.json: {e}")),
+        Err(_) => return Ok(Vec::new()),
+    };
+    if link_manifest && !manifest.is_object() {
+        return Err("mod.json: expected a top-level object".into());
+    }
+    match manifest.get("link_handlers") {
+        Some(rules) => serde_json::from_value(rules.clone()).map_err(|e| format!("mod.json link_handlers: {e}")),
+        None => Ok(Vec::new()),
+    }
 }
 
-/// Every mod folder that has a main.js.
-pub fn scan() -> Vec<Found> {
-    let mut found = scan_dir(&mods_dir(), "");
-    found.extend(scan_dir(&frame_dir(), "frame-"));
-    found.sort_by(|a, b| a.id.cmp(&b.id));
+#[derive(Clone)]
+pub struct Found {
+    pub dir: PathBuf,
+    pub hint: Hint,
+    pub has_view: bool,
+    pub link_rules: Rc<[links::Rule]>,
+    pub stamp: SystemTime,
+    pub manifest_error: Option<String>,
+}
+
+pub fn scan(previous: &BTreeMap<String, Found>) -> BTreeMap<String, Found> {
+    let mut found = scan_dir(&mods_dir(), "", previous);
+    found.extend(scan_dir(&frame_dir(), "frame-", previous));
     found
 }
 
-fn scan_dir(root: &Path, prefix: &str) -> Vec<Found> {
-    let Ok(entries) = std::fs::read_dir(root) else { return Vec::new() };
+fn scan_dir(root: &Path, prefix: &str, previous: &BTreeMap<String, Found>) -> BTreeMap<String, Found> {
+    let Ok(entries) = std::fs::read_dir(root) else { return BTreeMap::new() };
     entries
         .flatten()
-        .filter(|e| e.path().join("main.js").is_file())
         .filter_map(|e| {
             let id = format!("{prefix}{}", e.file_name().to_str()?);
             if id.starts_with('.') {
                 return None;
             }
             let dir = e.path();
-            let hint = std::fs::read_to_string(dir.join("mod.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+            let has_view = dir.join("main.js").is_file();
+            let has_link = dir.join("link.js").is_file();
+            let manifest_path = dir.join("mod.json");
+            if !has_view && !has_link && !manifest_path.is_file() {
+                return None;
+            }
+            let source = std::fs::read_to_string(manifest_path);
+            let hint = source.as_ref().ok().and_then(|s| serde_json::from_str(s).ok()).unwrap_or_default();
+            let previous_rules = previous.get(&id).filter(|old| old.dir == dir).map(|old| &old.link_rules);
+            let link_manifest = has_link || previous_rules.is_some_and(|rules| !rules.is_empty());
+            let (link_rules, manifest_error) = match parse_link_rules(&source, link_manifest) {
+                Ok(rules) => {
+                    let error = (!rules.is_empty() && !has_link).then(|| "mod.json declares link_handlers but link.js is missing".to_owned());
+                    (rules.into(), error)
+                }
+                Err(error) => (previous_rules.cloned().unwrap_or_default(), Some(error)),
+            };
+            if !has_view && !has_link && link_rules.is_empty() && manifest_error.is_none() {
+                return None;
+            }
             let stamp = std::fs::read_dir(&dir)
                 .into_iter()
                 .flatten()
@@ -380,7 +428,7 @@ fn scan_dir(root: &Path, prefix: &str) -> Vec<Found> {
                 .filter_map(|f| f.metadata().ok()?.modified().ok())
                 .max()
                 .unwrap_or(SystemTime::UNIX_EPOCH);
-            Some(Found { id, dir, hint, stamp })
+            Some((id, Found { dir, hint, has_view, link_rules, stamp, manifest_error }))
         })
         .collect()
 }
@@ -392,6 +440,8 @@ pub enum Request {
     CloseOverlay { id: String },
     /// The OS window's title; `None` restores the default.
     SetWindowTitle(Option<String>),
+    /// The app icon's badge (the Dock on macOS); `None` clears it.
+    SetBadge(Option<String>),
     Refresh,
     /// From `herdr-app do` / `herdr-app status` (control.rs); answer on `reply`.
     Control { cmd: Value, reply: std::sync::mpsc::Sender<Value> },
@@ -545,6 +595,7 @@ thread_local! {
     /// Snapshots the window publishes; mods read them synchronously and
     /// re-render when they change.
     static SNAPSHOT: RefCell<Snapshot> = RefCell::new(Snapshot::default());
+    static PANE_VIEWS: RefCell<HashMap<String, gpui::WeakEntity<crate::terminal::TerminalView>>> = RefCell::new(HashMap::new());
     static AGENT_ORDER: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     static SHARED: RefCell<Option<SharedStore>> = const { RefCell::new(None) };
     /// Where key commands for each loaded copy go: (copy, mod, sender).
@@ -605,7 +656,18 @@ pub fn publish_spaces(v: Value) -> bool {
 pub fn publish_agents(v: Value) -> bool {
     publish("agents", |s| (std::mem::replace(&mut s.agents, v.clone()), v))
 }
+pub fn panes_scrolled() {
+    REVISIONS.with_borrow_mut(|r| *r.entry("panes").or_default() += 1);
+}
+
+pub fn track_pane_view(pane: String, view: &gpui::Entity<crate::terminal::TerminalView>) {
+    PANE_VIEWS.with_borrow_mut(|views| { views.insert(pane, view.downgrade()); });
+}
+
 pub fn publish_panes(v: Value) -> bool {
+    PANE_VIEWS.with_borrow_mut(|views| views.retain(|pane, _| {
+        v.as_array().into_iter().flatten().any(|p| p["pane"].as_str() == Some(pane.strip_suffix("#swap").unwrap_or(pane)))
+    }));
     publish("panes", |s| (std::mem::replace(&mut s.panes, v.clone()), v))
 }
 pub fn publish_terminals(mut v: Value) -> bool {
@@ -620,25 +682,23 @@ pub fn publish_terminals(mut v: Value) -> bool {
 }
 /// Only selection changes refresh readers; output and cursor motion do not.
 pub fn publish_selection(address: &str, selection: Value) -> bool {
-    let mut changed = publish("terminals", |s| {
+    publish("terminals", |s| {
         let old = s.terminals.clone();
         if let Some(terminal) = s.terminals.as_array_mut().and_then(|list| list.iter_mut().find(|t| t["address"] == address)) {
             terminal["selection"] = selection.clone();
         }
         (old, s.terminals.clone())
-    });
-    changed |= publish("focused", |s| {
-        let old = s.focused.clone();
-        if focused_address(&s.focused) == Some(address) {
-            s.focused["selection"] = selection.clone();
-        }
-        (old, s.focused.clone())
-    });
-    changed
+    })
 }
 
-fn focused_address(focused: &Value) -> Option<&str> {
-    focused["shown"].as_str().or_else(|| focused["terminal"].as_str())
+pub fn publish_focused_selection(selection: Value) -> bool {
+    publish("focused", |s| {
+        let old = s.focused.clone();
+        if s.focused.is_object() {
+            s.focused["selection"] = selection;
+        }
+        (old, s.focused.clone())
+    })
 }
 
 pub fn terminal_address(word: &str, source: &str) -> Option<String> {
@@ -658,8 +718,7 @@ pub fn publish_window(v: Value) -> bool {
 pub fn publish_focused(mut v: Value) -> bool {
     publish("focused", |s| {
         if v.is_object() {
-            v["selection"] = focused_address(&v).and_then(|address| s.terminals.as_array()?.iter().find(|t| t["address"] == address))
-                .map_or(Value::Null, |terminal| terminal["selection"].clone());
+            v["selection"] = s.focused["selection"].clone();
         }
         (std::mem::replace(&mut s.focused, v.clone()), v)
     })
@@ -686,7 +745,27 @@ impl LiveReads {
 
 fn read(reads: &RefCell<LiveReads>, key: &'static str, f: impl FnOnce(&Snapshot) -> &Value) -> HostValue {
     REVISIONS.with_borrow(|r| reads.borrow_mut().record(key, r));
-    SNAPSHOT.with(|s| to_host(f(&s.borrow())))
+    SNAPSHOT.with(|s| {
+        let snapshot = s.borrow();
+        if key != "panes" {
+            return to_host(f(&snapshot));
+        }
+        // Output and resizing change these numbers without invalidating mods.
+        let mut panes = snapshot.panes.clone();
+        gpui_shell::with_current_app(|cx| {
+            PANE_VIEWS.with_borrow(|views| {
+                for pane in panes.as_array_mut().into_iter().flatten() {
+                    if let Some(view) = pane["pane"].as_str().and_then(|id| {
+                        views.get(&format!("{id}#swap")).and_then(|v| v.upgrade())
+                            .or_else(|| views.get(id).and_then(|v| v.upgrade()))
+                    }) {
+                        pane["scroll"] = view.read(cx).scroll_metrics().map(|m| m.json()).unwrap_or(Value::Null);
+                    }
+                }
+            });
+        });
+        to_host(&panes)
+    })
 }
 
 fn reader(reads: Rc<RefCell<LiveReads>>, key: &'static str, f: fn(&Snapshot) -> &Value) -> impl Fn(&gpui_shell::HostArguments) -> gpui_shell::HostResult {
@@ -949,6 +1028,7 @@ fn module(inst: Instance, copy: u64) -> HostModule {
         .declarations(DECLARATIONS)
         .async_function("exec", |a| {
             let command = a.string(0)?.to_owned();
+            if checking() { tracing::warn!("check: mod exec'd `{command}`; the child runs for real"); }
             Ok(exec_future(command, strings(a.get(1)), opt_str(a.get(2), "cwd"), opt_str(a.get(2), "on"), exec_limit(a.get(2))?))
         })
         .async_function("readTextFile", |a| {
@@ -961,9 +1041,15 @@ fn module(inst: Instance, copy: u64) -> HostModule {
         })
         .async_function("writeTextFile", |a| {
             let expected = a.get(2).and_then(|v| match v { HostValue::Str(s) => Some(s.clone()), _ => None });
-            Ok(crate::mod_files::write_text(a.string(0)?.to_owned(), a.string(1)?.to_owned(), expected))
+            let path = a.string(0)?.to_owned();
+            if checking() { tracing::warn!("check: mod wrote `{path}`; the write lands for real"); }
+            Ok(crate::mod_files::write_text(path, a.string(1)?.to_owned(), expected))
         })
-        .async_function("hc", |a| Ok(exec_future("hc".into(), strings(a.get(0)), None, None, EXEC_LIMIT)))
+        .async_function("hc", |a| {
+            if checking() { tracing::warn!("check: mod called hc; it runs for real"); }
+            Ok(exec_future("hc".into(), strings(a.get(0)), None, None, EXEC_LIMIT))
+        })
+        .function("checking", |_| Ok(HostValue::Bool(checking())))
         .function("home", |_| Ok(home().to_string_lossy().into_owned().into()))
         .function("appHome", |_| Ok(app_dir().to_string_lossy().into_owned().into()))
         .function("fonts", |_| Ok(to_host(&json!(*FONTS.lock().unwrap()))))
@@ -1086,6 +1172,14 @@ fn module(inst: Instance, copy: u64) -> HostModule {
             request(Request::SetWindowTitle(title));
             Ok(HostValue::Null)
         })
+        .function("setBadge", |a| {
+            let text = match a.get(0) {
+                Some(v) if !v.is_null() => Some(a.string(0)?.to_owned()),
+                _ => None,
+            };
+            request(Request::SetBadge(text));
+            Ok(HostValue::Null)
+        })
         .function("terminals", reader(reads.clone(), "terminals", |s| &s.terminals))
         .function("focused", reader(reads.clone(), "focused", |s| &s.focused))
         .function("layout", reader(reads.clone(), "layout", |s| &s.layout))
@@ -1197,8 +1291,11 @@ fn capabilities() -> Capabilities {
         .clipboard_write(true)
 }
 
-/// Checks exercise shared state in memory, without reading or writing the person's file.
+/// Checks exercise shared state in memory, without reading or writing the person's
+/// file. A check still loads the mod for real, so mods are told (`herdr.checking()`)
+/// and its exec and write side effects warn.
 pub fn install_check_policy() {
+    CHECKING.with(|c| c.set(true));
     SHARED.with_borrow_mut(|slot| *slot = Some(SharedStore { values: Default::default(), path: app_dir().join("shared.json"), writable: false, writer: None }));
     install_policy();
 }
@@ -1217,10 +1314,16 @@ pub fn install_policy() -> async_channel::Receiver<Request> {
 
 /// Gives the next mod copy to load a policy of its own: its `herdr` module
 /// (its props, its identity) and its localStorage file. The shell hands every
-/// view a copy of the default that *shares* modules and storage, so each copy
-/// needs a fresh default rather than an edit of the old one.
+/// view a copy of the default, so each copy needs a fresh policy for its host
+/// module. Persistent storage is shared by path.
 /// Readies the next load of `inst`; returns the copy's number (for commands).
 pub fn prepare_load(inst: &Instance) -> u64 {
+    let (copy, policy) = mod_policy(inst);
+    gpui_shell::policy::set_default(policy);
+    copy
+}
+
+fn mod_policy(inst: &Instance) -> (u64, gpui_shell::policy::Policy) {
     let copy = COPY_SEQ.with(|s| {
         s.set(s.get() + 1);
         s.get()
@@ -1238,16 +1341,106 @@ pub fn prepare_load(inst: &Instance) -> u64 {
     let policy = gpui_shell::policy::Policy::new()
         .with_application(inst.key())
         .with_capabilities(capabilities())
-        .with_storage_path(dir.join(file))
+        .with_shared_storage_path(dir.join(file))
         .with_host_module(module(inst.clone(), copy))
         .expect("herdr module is valid");
-    gpui_shell::policy::set_default(policy);
-    copy
+    (copy, policy)
+}
+
+pub fn handle_link(
+    name: &str,
+    dir: &Path,
+    click: &Value,
+    window: &mut gpui::Window,
+    cx: &mut App,
+) -> impl std::future::Future<Output = anyhow::Result<String>> + use<> {
+    let (_, policy) = mod_policy(&Instance { name: name.to_owned(), props: Value::Null });
+    gpui_shell::ShellRuntime::call_module(dir, "link.js", "handleLink", click, Rc::new(policy), window, cx)
+}
+
+pub fn check_link_mod(dir: &Path) -> anyhow::Result<bool> {
+    let has_link = dir.join("link.js").is_file();
+    let source = std::fs::read_to_string(dir.join("mod.json"));
+    let rules = parse_link_rules(&source, has_link).map_err(anyhow::Error::msg)?;
+    anyhow::ensure!(rules.is_empty() || has_link, "mod.json declares link_handlers but link.js is missing");
+    if has_link {
+        gpui_shell::ShellRuntime::check_module(dir, "link.js", "handleLink")?;
+    }
+    Ok(has_link)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn link_check_requires_the_named_export_without_running_the_module() {
+        let dir = crate::test_tmp().join(format!("herdr-link-export-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let entry = dir.join("link.js");
+        std::fs::write(&entry, "export default function handleLink() {}").unwrap();
+        let error = check_link_mod(&dir).unwrap_err().to_string();
+        assert!(error.contains("handleLink"), "{error}");
+
+        std::fs::write(dir.join("implementation.js"), r#"
+            throw new Error("dependency ran");
+            export function open() { throw new Error("handler ran"); }
+        "#).unwrap();
+        std::fs::write(&entry, r#"
+            throw new Error("module ran");
+            export { open as handleLink } from "./implementation.js";
+        "#).unwrap();
+        assert!(check_link_mod(&dir).unwrap());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn scan_and_check_reject_a_broken_manifest_when_the_mod_handles_links() {
+        let root = std::env::temp_dir().join(format!("herdr-link-manifest-{}", std::process::id()));
+        let dir = root.join("example");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("main.js"), "export default class {}").unwrap();
+        std::fs::write(dir.join("mod.json"), r#"{"place":"none",}"#).unwrap();
+
+        let views = scan_dir(&root, "", &BTreeMap::new());
+        assert!(!check_link_mod(&dir).unwrap(), "a plain view still runs the normal view check");
+        assert!(views["example"].manifest_error.is_none());
+
+        std::fs::write(dir.join("link.js"), r#"export function handleLink() { return "handled"; }"#).unwrap();
+        let error = check_link_mod(&dir).unwrap_err().to_string();
+        assert!(error.starts_with("mod.json:"), "{error}");
+        let links = scan_dir(&root, "", &views);
+        assert_eq!(links["example"].manifest_error.as_deref(), Some(error.as_str()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_nonobject_link_manifest_is_rejected_and_keeps_working_rules() {
+        let root = std::env::temp_dir().join(format!("herdr-link-manifest-object-{}", std::process::id()));
+        let dir = root.join("example");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("link.js"), "export function handleLink() {}").unwrap();
+        let manifest = dir.join("mod.json");
+        std::fs::write(&manifest, r#"{"link_handlers":[{"kind":"url","pattern":"^http://localhost:"}]}"#).unwrap();
+        let original = scan_dir(&root, "", &BTreeMap::new());
+        assert_eq!(original["example"].link_rules.len(), 1);
+
+        for invalid in ["[]", "null", "\"rules\"", "7", "false"] {
+            std::fs::write(&manifest, invalid).unwrap();
+            let error = "mod.json: expected a top-level object";
+            assert_eq!(check_link_mod(&dir).unwrap_err().to_string(), error);
+            let found = scan_dir(&root, "", &original);
+            assert_eq!(found["example"].manifest_error.as_deref(), Some(error));
+            assert!(Rc::ptr_eq(&found["example"].link_rules, &original["example"].link_rules));
+        }
+
+        std::fs::write(&manifest, "{}").unwrap();
+        assert!(check_link_mod(&dir).unwrap());
+        let found = scan_dir(&root, "", &original);
+        assert!(found["example"].link_rules.is_empty());
+        assert!(found["example"].manifest_error.is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn an_input_selection_uses_the_theme_selection_colour() {
@@ -1350,28 +1543,19 @@ mod tests {
     }
 
     #[test]
-    fn selection_snapshots_survive_core_refresh_and_follow_focus() {
+    fn selection_snapshots_survive_core_refresh() {
         std::thread::spawn(|| {
             let list = json!([{"address":"t1"}, {"address":"t2"}]);
             publish_terminals(list.clone());
-            publish_focused(json!({"terminal":"t1"}));
             let selection = json!({"start":{"row":5,"col":2},"end":{"row":1,"col":8}});
             publish_selection("t1", selection.clone());
             publish_terminals(list);
-            publish_focused(json!({"terminal":"t1"}));
             SNAPSHOT.with_borrow(|s| {
                 assert_eq!(s.terminals[0]["selection"], selection);
-                assert_eq!(s.focused["selection"], selection);
+                assert_eq!(s.terminals[1]["selection"], Value::Null);
             });
-            publish_focused(json!({"terminal":"t2"}));
-            SNAPSHOT.with_borrow(|s| assert_eq!(s.focused["selection"], Value::Null));
-            publish_focused(json!({"terminal":"t2","shown":"t1"}));
-            SNAPSHOT.with_borrow(|s| assert_eq!(s.focused["selection"], selection));
             publish_selection("t1", Value::Null);
-            SNAPSHOT.with_borrow(|s| {
-                assert_eq!(s.terminals[0]["selection"], Value::Null);
-                assert_eq!(s.focused["selection"], Value::Null);
-            });
+            SNAPSHOT.with_borrow(|s| assert_eq!(s.terminals[0]["selection"], Value::Null));
         }).join().unwrap();
     }
 

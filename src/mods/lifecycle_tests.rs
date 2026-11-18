@@ -470,6 +470,57 @@ export default class extends View {
 }
 
 #[gpui::test]
+fn herdr_checking_is_false_in_a_live_load(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let fixture = Fixture::new(r#"
+import { View, div } from "gpui-kit";
+import { checking } from "herdr";
+import { note } from "fixture";
+export default class extends View {
+  init() { note(String(checking())); }
+  render() { return div(); }
+}"#);
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let calls = seen.clone();
+    gpui_shell::policy::set_default(Policy::new()
+        .with_host_module(module(Instance { name: "test".into(), props: Value::Null }, 0)).unwrap()
+        .with_host_module(HostModule::new("fixture").function("note", move |a| {
+            calls.borrow_mut().push(a.string(0)?.to_owned());
+            Ok(HostValue::Null)
+        })).unwrap());
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|_, _| Empty);
+    let _root = window.update(cx, |_, window, cx| runtime.try_load(&fixture.0, window, cx).unwrap()).unwrap();
+    assert_eq!(*seen.borrow(), ["false"]);
+}
+
+#[gpui::test]
+fn herdr_checking_is_true_while_a_check_loads_the_mod(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let fixture = Fixture::new(r#"
+import { View, div } from "gpui-kit";
+import { checking } from "herdr";
+import { note } from "fixture";
+export default class extends View {
+  init() { note(String(checking())); }
+  render() { return div(); }
+}"#);
+    let seen = Rc::new(RefCell::new(Vec::new()));
+    let calls = seen.clone();
+    gpui_shell::policy::set_default(Policy::new().with_host_module(
+        HostModule::new("fixture").function("note", move |a| {
+            calls.borrow_mut().push(a.string(0)?.to_owned());
+            Ok(HostValue::Null)
+        })
+    ).unwrap());
+    install_check_policy();
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|_, _| Empty);
+    let _root = window.update(cx, |_, window, cx| runtime.try_load(&fixture.0, window, cx).unwrap()).unwrap();
+    assert_eq!(*seen.borrow(), ["true"]);
+}
+
+#[gpui::test]
 fn close_is_once_and_awaits_its_promise(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let fixture = Fixture::new(r#"
@@ -500,6 +551,64 @@ export default class extends View {
     }).unwrap();
     cx.run_until_parked();
     assert_eq!(*seen.borrow(), ["start", "done"]);
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+}
+
+#[gpui::test]
+fn reload_releases_a_pending_tcp_read_without_a_close_hook(cx: &mut TestAppContext) {
+    use std::io::Read as _;
+    use std::net::TcpListener;
+
+    cx.update(gpui_shell::init);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let source = r#"
+import { View, div } from "gpui-kit";
+import { nextCommand } from "herdr";
+import { connect } from "net";
+import { noteRead } from "fixture";
+export default class extends View {
+  init(_, cx) {
+    cx.spawn(async () => {
+      const socket = await connect("127.0.0.1", __PORT__);
+      await nextCommand();
+      noteRead();
+      await socket.read(1);
+    });
+  }
+  render() { return div(); }
+}"#.replace("__PORT__", &listener.local_addr().unwrap().port().to_string());
+    let fixture = Fixture::new(&source);
+    let reading = Rc::new(Cell::new(false));
+    let started = reading.clone();
+    gpui_shell::policy::set_default(Policy::new().with_capabilities(capabilities())
+        .with_host_module(module(Instance { name: "read-test".into(), props: Value::Null }, 44)).unwrap()
+        .with_host_module(HostModule::new("fixture").function("noteRead", move |_| {
+            started.set(true);
+            Ok(HostValue::Null)
+        })).unwrap());
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|_, _| Empty);
+    let root = window.update(cx, |_, window, cx| runtime.try_load(&fixture.0, window, cx).unwrap()).unwrap();
+    cx.run_until_parked();
+
+    let (mut peer, _) = listener.accept().unwrap();
+    peer.set_nonblocking(false).unwrap();
+    peer.set_read_timeout(Some(Duration::from_secs(2))).unwrap();
+    let peer = std::thread::spawn(move || peer.read(&mut [0]));
+    set_shown_copies([44].into());
+    assert!(send_command_to(44, "read"));
+    cx.run_until_parked();
+    assert!(reading.get());
+
+    std::fs::write(fixture.0.join("main.js"), r#"
+import { View, div } from "gpui-kit";
+export default class extends View { render() { return div(); } }
+"#).unwrap();
+    window.update(cx, |_, window, cx| runtime.reload_now(&root, window, cx).unwrap()).unwrap();
+    cx.run_until_parked();
+    assert_eq!(peer.join().unwrap().expect("the old socket is still open"), 0);
+    set_shown_copies(Default::default());
     window.update(cx, |_, window, _| window.remove_window()).unwrap();
 }
 

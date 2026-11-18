@@ -2,6 +2,8 @@
 //! points to, and handing it to the system to open.
 
 use fancy_regex::Regex;
+use serde::Deserialize;
+use serde_json::{Value, json};
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -73,19 +75,48 @@ pub enum Target {
     File(PathBuf),
 }
 
+fn has_scheme(link: &str) -> bool {
+    link.split_once(':').is_some_and(|(s, _)| {
+        s.len() > 1 && s.starts_with(|c: char| c.is_ascii_alphabetic()) && s.chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
+    })
+}
+
+/// A spelling selected by the native detector or supplied by OSC 8.
+pub struct Resolved<'a> {
+    raw: &'a str,
+    spelling: &'a str,
+    pub native: Option<Target>,
+}
+
 /// What a link opens. File paths count only when they exist here; relative
 /// ones need the terminal's folder.
-pub fn resolve(link: &str, cwd: Option<&Path>) -> Option<Target> {
-    let scheme = link.split_once(':').is_some_and(|(s, _)| {
-        s.len() > 1 && s.starts_with(|c: char| c.is_ascii_alphabetic()) && s.chars().all(|c| c.is_ascii_alphanumeric() || "+-.".contains(c))
-    });
-    if scheme {
-        // Windows can't open a file URL whose path is percent-encoded, the way programs write them.
-        if let Some(path) = file_url_path(link).filter(|p| p.exists()) {
-            return Some(Target::File(path));
-        }
-        return Some(Target::Url(link.to_owned()));
+pub fn resolve<'a>(link: &'a str, cwd: Option<&Path>) -> Resolved<'a> {
+    let (native, spelling) = if has_scheme(link) {
+        let native = file_url_spelling(link)
+            .as_deref()
+            .map(file_url_path)
+            .filter(|p| p.exists())
+            .map_or_else(|| Target::Url(link.to_owned()), Target::File);
+        (Some(native), link)
+    } else if let Some((path, spelling)) = local_file(link, cwd) {
+        (Some(Target::File(path)), spelling)
+    } else {
+        (None, without_suffix(link))
+    };
+    Resolved { raw: link, spelling, native }
+}
+
+fn local_file<'a>(link: &'a str, cwd: Option<&Path>) -> Option<(PathBuf, &'a str)> {
+    let full = expand_file(link, cwd)?;
+    // Windows ignores a trailing period when checking whether a path exists.
+    if !(cfg!(windows) && full.extension().is_some_and(|ext| ext.is_empty())) && full.exists() {
+        return Some((full, link));
     }
+    let bare = without_suffix(full.to_str()?);
+    Path::new(bare).exists().then(|| (PathBuf::from(bare), without_suffix(link)))
+}
+
+fn expand_file(link: &str, cwd: Option<&Path>) -> Option<PathBuf> {
     let home = std::env::home_dir();
     let expanded = if let Some(rest) = link.strip_prefix("~/") {
         home?.join(rest)
@@ -100,31 +131,53 @@ pub fn resolve(link: &str, cwd: Option<&Path>) -> Option<Target> {
     } else {
         PathBuf::from(link)
     };
-    let full = if expanded.is_absolute() { expanded } else { cwd?.join(expanded) };
-    // Windows ignores a trailing period when checking whether a path exists.
-    if !(cfg!(windows) && full.extension().is_some_and(|ext| ext.is_empty())) && full.exists() {
-        return Some(Target::File(full));
-    }
-    // The period ending a sentence, or `:42` / `:42:7` naming a place in the file.
-    let mut bare = full.to_str()?.strip_suffix('.').unwrap_or(full.to_str()?);
+    Some(if expanded.is_absolute() { expanded } else { cwd?.join(expanded) })
+}
+
+// The period ending a sentence, or `:42` / `:42:7` naming a place in the file.
+fn without_suffix(path: &str) -> &str {
+    let mut bare = path.strip_suffix('.').unwrap_or(path);
     for _ in 0..2 {
         match bare.rsplit_once(':') {
-            Some((head, n)) if !n.is_empty() && n.bytes().all(|b| b.is_ascii_digit()) => bare = head,
+            Some((head, n)) if is_number(n) => bare = head,
             _ => break,
         }
     }
-    Path::new(bare).exists().then(|| Target::File(PathBuf::from(bare)))
+    bare
 }
 
-/// The path a `file:` URL names on this computer, percent-decoded.
-fn file_url_path(link: &str) -> Option<PathBuf> {
+fn is_number(text: &str) -> bool {
+    !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit())
+}
+
+/// The path spelling in a local `file:` URL, percent-decoded.
+fn file_url_spelling(link: &str) -> Option<String> {
     let rest = link.strip_prefix("file://")?;
     let rest = rest.strip_prefix("localhost").unwrap_or(rest);
     // Another host's file, or no path.
     if !rest.starts_with('/') {
         return None;
     }
+    decode_file_url_path(rest)
+}
+
+/// File rules see all file URIs. Only an empty authority or localhost
+/// can name a local file.
+fn handler_file_uri(link: &str) -> Option<(&str, &str)> {
+    let (scheme, rest) = link.split_once(':')?;
+    if !scheme.eq_ignore_ascii_case("file") {
+        return None;
+    }
     let rest = rest.split(['?', '#']).next()?;
+    Some(if let Some(rest) = rest.strip_prefix("//").or_else(|| rest.strip_prefix(r"\\")) {
+        rest.split_at(rest.find(['/', '\\']).unwrap_or(rest.len()))
+    } else {
+        ("", rest)
+    })
+}
+
+fn decode_file_url_path(path: &str) -> Option<String> {
+    let rest = path.split(['?', '#']).next()?;
     let mut bytes = Vec::with_capacity(rest.len());
     let mut i = 0;
     while i < rest.len() {
@@ -136,12 +189,152 @@ fn file_url_path(link: &str) -> Option<PathBuf> {
             i += 1;
         }
     }
-    let path = String::from_utf8(bytes).ok()?;
+    String::from_utf8(bytes).ok()
+}
+
+fn file_url_path(path: &str) -> PathBuf {
     // `/C:/Users/...` names `C:\Users\...`.
     if cfg!(windows) && path.as_bytes().get(2) == Some(&b':') && path.as_bytes()[1].is_ascii_alphabetic() {
-        return Some(PathBuf::from(path[1..].replace('/', "\\")));
+        return PathBuf::from(path[1..].replace('/', "\\"));
     }
-    Some(PathBuf::from(path))
+    PathBuf::from(path)
+}
+
+fn can_verify_handler_path(path: &Path) -> bool {
+    #[cfg(windows)]
+    {
+        use std::path::{Component, Prefix};
+
+        let bytes = path.as_os_str().as_encoded_bytes();
+        if bytes.starts_with(br"\\") || bytes.starts_with(b"//")
+            || matches!(path.components().next(), Some(Component::Prefix(prefix))
+                if matches!(prefix.kind(), Prefix::UNC(..) | Prefix::VerbatimUNC(..) | Prefix::DeviceNS(..)))
+        {
+            return false;
+        }
+    }
+    path.has_root()
+}
+
+#[derive(Clone, Copy, Debug, Deserialize, PartialEq)]
+#[serde(rename_all = "lowercase")]
+pub enum Kind {
+    Url,
+    File,
+}
+
+#[derive(Clone, Debug, Deserialize)]
+#[serde(try_from = "RuleSpec")]
+pub struct Rule {
+    kind: Kind,
+    pattern: regex::Regex,
+}
+
+#[derive(Deserialize)]
+struct RuleSpec {
+    kind: Kind,
+    pattern: String,
+}
+
+impl TryFrom<RuleSpec> for Rule {
+    type Error = regex::Error;
+
+    fn try_from(spec: RuleSpec) -> Result<Self, Self::Error> {
+        Ok(Self { kind: spec.kind, pattern: regex::Regex::new(&spec.pattern)? })
+    }
+}
+
+pub type Handlers = Vec<(String, std::rc::Rc<[Rule]>)>;
+
+#[derive(Clone, Debug, PartialEq)]
+pub struct Click {
+    /// Each mod receives the link view selected by its first matching rule.
+    pub handlers: Vec<(String, Value)>,
+    pub native: Option<Target>,
+}
+
+impl Resolved<'_> {
+    pub fn click(self, remote: bool, active: &Handlers) -> Option<Click> {
+        let Self { raw, spelling, native } = self;
+        if active.is_empty() {
+            return native.map(native_click);
+        }
+
+        let is_url = has_scheme(raw);
+        let uri = handler_file_uri(raw);
+        let decoded = uri.and_then(|(_, path)| decode_file_url_path(path));
+        let file_spelling = if let Some((_, path)) = uri {
+            Some(decoded.as_deref().unwrap_or(path))
+        } else if !is_url {
+            // The desktop's files cannot tell us whether a remote suffix is literal.
+            Some(if remote { without_suffix(raw) } else { spelling })
+        } else {
+            None
+        };
+
+        let mut handlers = Vec::new();
+        let mut file_link = None;
+        let mut url_link = None;
+        for (id, rules) in active {
+            if handlers.iter().any(|(name, _)| name == id) {
+                continue;
+            }
+            let Some(rule) = rules.iter().find(|rule| match rule.kind {
+                Kind::Url => is_url && rule.pattern.is_match(raw),
+                Kind::File => file_spelling.is_some_and(|path| rule.pattern.is_match(path)),
+            }) else { continue };
+            let link = match rule.kind {
+                Kind::Url => url_link.get_or_insert_with(|| json!({"kind": "url", "raw": raw, "url": raw})),
+                Kind::File => file_link.get_or_insert_with(|| {
+                    let url_file;
+                    let path = if remote {
+                        None
+                    } else {
+                        match &native {
+                            Some(Target::File(path)) => Some(path.as_path()),
+                            _ if uri.is_some_and(|(host, _)| host.is_empty() || host.eq_ignore_ascii_case("localhost")) => {
+                                url_file = decoded.as_deref().map(file_url_path)
+                                    .filter(|path| can_verify_handler_path(path) && path.exists());
+                                url_file.as_deref()
+                            }
+                            _ => None,
+                        }
+                    };
+                    json!({"kind": "file", "raw": raw, "path": path.and_then(Path::to_str)})
+                }),
+            };
+            handlers.push((id.clone(), link.clone()));
+        }
+        if handlers.is_empty() {
+            return native.map(native_click);
+        }
+
+        let native = if remote && file_spelling.is_some() { None } else { native };
+        Some(Click { handlers, native })
+    }
+}
+
+fn native_click(native: Target) -> Click {
+    Click { handlers: Vec::new(), native: Some(native) }
+}
+
+/// Returns true when a mod handles the click and false when native opening can proceed.
+pub async fn dispatch<T, F>(
+    handlers: impl IntoIterator<Item = (String, T)>,
+    mut call: impl FnMut(&str, T) -> F,
+) -> Result<bool, (String, String)>
+where
+    F: std::future::Future<Output = Result<String, String>>,
+{
+    for (name, entry) in handlers {
+        let result = call(&name, entry).await.map_err(|error| (name.clone(), error))?;
+        match result.as_str() {
+            "handled" => return Ok(true),
+            "pass" => {}
+            _ => return Err((name, format!("handleLink returned {result:?}; expected \"handled\" or \"pass\""))),
+        }
+    }
+    Ok(false)
 }
 
 /// Hands the target to the system's default handler.
@@ -202,6 +395,244 @@ fn open_system(arg: &std::ffi::OsStr) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn rules(value: Value) -> std::rc::Rc<[Rule]> {
+        serde_json::from_value::<Vec<Rule>>(value).unwrap().into()
+    }
+
+    #[test]
+    fn rules_match_the_link_kind_and_full_destination_in_layout_order() {
+        let localhost = rules(json!([
+            {"kind": "url", "pattern": "^https?://localhost(?::[0-9]+)?(?:[/?#]|$)"},
+            {"kind": "url", "pattern": "#anchor$"}
+        ]));
+        let active = [
+            ("specialist".into(), localhost.clone()),
+            ("viewer".into(), rules(json!([{"kind": "file", "pattern": "\\.png$"}]))),
+            ("browser".into(), rules(json!([{"kind": "url", "pattern": "^https?:"}]))),
+            ("specialist".into(), localhost),
+        ].to_vec();
+        let url = "http://localhost:8123/view.png?a=1#anchor";
+        let hit = resolve(url, None).click(true, &active).unwrap();
+        let payload = json!({"kind":"url", "raw":url, "url":url});
+        assert_eq!(hit.handlers, [("specialist".to_owned(), payload.clone()), ("browser".to_owned(), payload)]);
+        assert_eq!(hit.native, Some(Target::Url(url.into())));
+
+        let other = resolve("http://localhost.example.com", None).click(false, &active).unwrap();
+        assert_eq!(other.handlers.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), ["browser"]);
+        let foreign = "file://server/plot.png";
+        let hit = resolve(foreign, None).click(false, &active).unwrap();
+        assert_eq!(hit.handlers, [("viewer".to_owned(), json!({"kind":"file", "raw":foreign, "path":null}))]);
+        assert_eq!(hit.native, Some(Target::Url(foreign.into())));
+    }
+
+    #[test]
+    fn handlers_use_the_native_match_and_opener_destination() {
+        use Kind::{File, Url};
+
+        let tmp = if cfg!(windows) { std::env::temp_dir() } else { crate::test_tmp() };
+        let cwd = tmp.join(format!("herdr-link-targets-{}", std::process::id()));
+        for name in ["src/main.rs", "plot.png", "test folder/file.txt", "folder/file.txt", "peer/t7"] {
+            let path = cwd.join(name);
+            std::fs::create_dir_all(path.parent().unwrap()).unwrap();
+            std::fs::write(path, "").unwrap();
+        }
+        #[cfg(unix)]
+        std::fs::write(cwd.join("src/main.rs:7"), "").unwrap();
+        let literal = if cfg!(unix) { "./src/main.rs:7" } else { "./src/main.rs" };
+        let active = vec![("editor".into(), rules(json!([
+            {"kind": "url", "pattern": r"^(?:https?://localhost:|tel:|file://nas/)"},
+            {"kind": "file", "pattern": r"\.(png|rs|txt|ini)$|^(\./src/main\.rs:7|src/\.\.)$"}
+        ])))];
+        let unmatched = vec![("unused".into(), rules(json!([{"kind":"file","pattern":"^$"},{"kind":"url","pattern":"^$"}])))];
+        let f = |path: &str| Some(Target::File(cwd.join(path)));
+        let u = |url: &str| Some(Target::Url(url.into()));
+        let localhost = "http://localhost:8080/docs";
+        let full_url = "http://localhost:8123/view.png?a=1#anchor";
+        let nas = "file://nas/tmp/plot.png";
+        let slashed = cwd.join("plot.png").to_string_lossy().replace('\\', "/");
+        let encoded: String = slashed.bytes().map(|b| {
+            if b.is_ascii_alphanumeric() || b"/-._~:".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }
+        }).collect();
+        let root = if cfg!(windows) { "/" } else { "" };
+        let file_uri = format!("file://localhost{root}{encoded}");
+        let upper_uri = format!("FiLe://LOCALHOST{root}{encoded}");
+        let uri_file = Some(Target::File(file_url_path(&format!("{root}{slashed}"))));
+
+        // No pointer means OSC 8. The first target is master's opener
+        // destination, the second is the destination after a handler passes.
+        let cases = [
+            ("(http://localhost:8080/docs)", Some("docs"), false, Some((Url, localhost)), u(localhost), u(localhost)),
+            (full_url, None, true, Some((Url, full_url)), u(full_url), u(full_url)),
+            ("tel:12345", Some("12345"), false, Some((Url, "tel:12345")), u("tel:12345"), u("tel:12345")),
+            ("src/main.rs:12:5: error", Some("main.rs"), false, Some((File, "src/main.rs:12:5")), f("src/main.rs"), f("src/main.rs")),
+            ("./src/main.rs:7", Some("main.rs"), false, Some((File, "./src/main.rs:7")), f(literal), f(literal)),
+            ("src/..", Some(".."), false, Some((File, "src/..")), f("src/.."), f("src/..")),
+            ("./test folder/file.txt", Some("file.txt"), false, Some((File, "./test folder/file.txt")), f("./test folder/file.txt"), f("./test folder/file.txt")),
+            ("--out=$PWD/plot.png", Some("plot.png"), false, Some((File, "$PWD/plot.png")), f("plot.png"), f("plot.png")),
+            ("./x.png", Some("x.png"), false, Some((File, "./x.png")), None, None),
+            ("./gone.rs:42:7", Some("gone.rs"), false, Some((File, "./gone.rs:42:7")), None, None),
+            ("./plot.png", Some("plot.png"), true, Some((File, "./plot.png")), f("./plot.png"), None),
+            ("./x.png", Some("x.png"), true, Some((File, "./x.png")), None, None),
+            (file_uri.as_str(), None, false, Some((File, file_uri.as_str())), uri_file.clone(), uri_file.clone()),
+            (file_uri.as_str(), None, true, Some((File, file_uri.as_str())), uri_file, None),
+            (upper_uri.as_str(), None, true, Some((File, upper_uri.as_str())), u(&upper_uri), None),
+            ("file:C:/Windows/win.ini", Some("win.ini"), true, Some((File, "file:C:/Windows/win.ini")), u("file:C:/Windows/win.ini"), None),
+            ("FiLe:C:/Windows/win.ini", None, true, Some((File, "FiLe:C:/Windows/win.ini")), u("FiLe:C:/Windows/win.ini"), None),
+            (r"file:C:\Windows\win.ini", None, true, Some((File, r"file:C:\Windows\win.ini")), u(r"file:C:\Windows\win.ini"), None),
+            (nas, Some("plot.png"), false, Some((Url, nas)), u(nas), u(nas)),
+            ("https://example.com/outside", Some("outside"), false, None, u("https://example.com/outside"), u("https://example.com/outside")),
+            ("can't open plot.png", Some("plot.png"), false, None, None, None),
+            ("peer/t7", Some("t7"), false, None, None, None),
+        ];
+
+        for (text, pointer, remote, handled, expected_native, expected_pass) in cases {
+            let raw = match pointer {
+                Some(word) => {
+                    let at = text.find(word).unwrap() + word.len() - 1;
+                    find(text, at).map(|range| &text[range])
+                }
+                None => Some(text),
+            };
+            let click = |rules: &Handlers| raw.and_then(|raw| resolve(raw, Some(&cwd)).click(remote, rules));
+            let expected_payload = handled.map(|(kind, expected_raw)| {
+                assert_eq!(raw, Some(expected_raw), "{text}");
+                match kind {
+                    Url => json!({"kind":"url", "raw":expected_raw, "url":expected_raw}),
+                    File => {
+                        let path = match &expected_pass { Some(Target::File(path)) => Some(path.as_path()), _ => None };
+                        json!({"kind":"file", "raw":expected_raw, "path":path.map(Path::to_string_lossy)})
+                    }
+                }
+            });
+            let hit = click(&active);
+            let payload = hit.as_ref().and_then(|click| click.handlers.first().map(|(_, link)| link));
+            assert_eq!(payload, expected_payload.as_ref(), "handler payload for {text}");
+            assert_eq!(hit.and_then(|click| click.native), expected_pass, "opener after pass for {text}");
+            assert_eq!(click(&Vec::new()), expected_native.clone().map(native_click), "no handlers for {text}");
+            assert_eq!(click(&unmatched), expected_native.map(native_click), "no rule matched {text}");
+        }
+        let at = "peer/t7".len() - 1;
+        assert_eq!(terminal_address(&"peer/t7"[word("peer/t7", at).unwrap()], "t1", ["peer/t7"]).as_deref(), Some("peer/t7"));
+        std::fs::remove_dir_all(cwd).unwrap();
+    }
+
+    #[test]
+    fn file_uris_offer_both_views_and_keep_the_local_opener() {
+        let dir = std::env::temp_dir().join(format!("herdr-file-uri-handlers-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("plot.png"), "").unwrap();
+        let slashed = dir.to_string_lossy().replace('\\', "/");
+        let root = if cfg!(windows) { "/" } else { "" };
+        let encoded: String = slashed.bytes().map(|b| {
+            if b.is_ascii_alphanumeric() || b"/-._~:".contains(&b) { (b as char).to_string() } else { format!("%{b:02X}") }
+        }).collect();
+        let active = vec![
+            ("files".into(), rules(json!([{"kind":"file", "pattern":r"\.png$"}]))),
+            ("urls".into(), rules(json!([{"kind":"url", "pattern":"(?i)^file:"}]))),
+        ];
+        let urls_only = vec![active[1].clone()];
+        let drive_uri = "file:C:/Windows/win.ini";
+        assert_eq!(resolve(drive_uri, None).click(true, &urls_only).unwrap().native, None);
+        let unmatched = vec![("unused".into(), rules(json!([{"kind":"url", "pattern":"^https:"}])))];
+        let existing = file_url_path(&format!("{root}{slashed}/plot.png"));
+        for (name, exists) in [("plot.png", true), ("missing.png", false)] {
+            let variants = [
+                (format!("file:{root}{encoded}/{name}"), "", true),
+                (format!("file://{root}{encoded}/{name}"), "", true),
+                (format!("file://localhost{root}{encoded}/{name}"), "localhost", true),
+                (format!("file://host{root}{encoded}/{name}"), "host", false),
+                (format!(r"file:\\nas\share\{name}"), "nas", false),
+                (format!(r"file://\\nas\share\{name}"), "", false),
+                #[cfg(windows)]
+                (format!("file:%2F%2Fnas%2Fshare%2F{name}"), "", false),
+                #[cfg(windows)]
+                (format!("file:%5C%5C%3F%5CUNC%5Cnas%5Cshare%5C{name}"), "", false),
+                #[cfg(windows)]
+                (format!("file:%5C%5C.%5Cdevice%5C{name}"), "", false),
+                (format!("FiLe:{name}"), "", false),
+            ];
+            for (raw, authority, can_verify_local) in variants {
+                let (host, spelling) = handler_file_uri(&raw).unwrap();
+                assert_eq!(host, authority, "{raw}");
+                if host.is_empty() && !can_verify_local {
+                    // Check the guard before the click can reach a filesystem probe.
+                    let path = file_url_path(&decode_file_url_path(spelling).unwrap());
+                    assert!(!can_verify_handler_path(&path), "{raw}");
+                }
+                let original = native_target(&raw, None);
+                for remote in [false, true] {
+                    let verified = exists && !remote && can_verify_local;
+                    let hit = resolve(&raw, None).click(remote, &active).unwrap();
+                    let path = verified.then(|| existing.to_str().unwrap());
+                    let url = json!({"kind":"url", "raw":raw, "url":raw});
+                    let file = json!({"kind":"file", "raw":raw, "path":path});
+                    let native = if remote { None } else { original.clone() };
+                    assert_eq!(hit.handlers, [("files".to_owned(), file), ("urls".to_owned(), url.clone())], "{raw}");
+                    assert_eq!(hit.native, native, "{raw}");
+
+                    let hit = resolve(&raw, None).click(remote, &urls_only).unwrap();
+                    assert_eq!(hit.handlers, [("urls".to_owned(), url)], "{raw}");
+                    assert_eq!(hit.native, native, "{raw}");
+                    assert_eq!(
+                        resolve(&raw, None).click(remote, &unmatched),
+                        original.clone().map(native_click),
+                        "{raw}"
+                    );
+                }
+            }
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn a_non_utf8_path_is_null_in_the_payload_and_exact_for_a_pass() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let dir = crate::test_tmp().join(format!("herdr-link-non-utf8-{}", std::process::id()));
+        let cwd = dir.join(std::ffi::OsString::from_vec(b"assets-\xff".to_vec()));
+        std::fs::create_dir_all(&cwd).unwrap();
+        std::fs::write(cwd.join("plot.png"), "").unwrap();
+        let active = vec![("files".into(), rules(json!([{"kind":"file", "pattern":r"\.png$"}])))];
+        let raw = "./plot.png";
+        let hit = resolve(raw, Some(&cwd)).click(false, &active).unwrap();
+        assert_eq!(hit.handlers[0].1, json!({"kind":"file", "raw":raw, "path":null}));
+        assert_eq!(hit.native, Some(Target::File(cwd.join(raw))));
+
+        let uri = format!("file://{}/assets-%FF/plot.png", dir.display());
+        let hit = resolve(&uri, None).click(false, &active).unwrap();
+        assert_eq!(hit.handlers[0].1, json!({"kind":"file", "raw":uri, "path":null}));
+        assert_eq!(hit.native, Some(Target::Url(uri)));
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn dispatch_keeps_passing_in_order_and_stops_on_handled_or_error() {
+        use std::{future::{Future, ready}, pin::pin, task::{Context, Poll, Waker}};
+
+        for (second, expected, calls) in [
+            (Ok("pass"), Ok(false), 3),
+            (Ok("handled"), Ok(true), 2),
+            (Ok("invalid"), Err(("second".to_owned(), "handleLink returned \"invalid\"; expected \"handled\" or \"pass\"".into())), 2),
+            (Err("tunnel failed"), Err(("second".to_owned(), "tunnel failed".into())), 2),
+        ] {
+            let mut visited = Vec::new();
+            let handlers = [("first".into(), Ok("pass")), ("second".into(), second), ("third".into(), Ok("pass"))];
+            {
+                let mut future = pin!(dispatch(handlers, |name, result| {
+                    visited.push(name.to_owned());
+                    ready(result.map(str::to_owned).map_err(str::to_owned))
+                }));
+                assert_eq!(future.as_mut().poll(&mut Context::from_waker(Waker::noop())), Poll::Ready(expected));
+            }
+            assert_eq!(visited, ["first", "second", "third"][..calls]);
+        }
+    }
+
+    fn native_target(link: &str, cwd: Option<&Path>) -> Option<Target> {
+        resolve(link, cwd).native
+    }
 
     fn first(text: &str) -> Option<&str> {
         PATTERN.find(text).unwrap().map(|m| m.as_str())
@@ -317,7 +748,7 @@ mod tests {
                 Some(path) if cfg!(windows) => Target::File(path.replace('/', "\\").into()),
                 _ => Target::Url(url.into()),
             };
-            assert_eq!(resolve(&text[range], None), Some(expected));
+            assert_eq!(native_target(&text[range], None), Some(expected));
         }
     }
 
@@ -403,21 +834,21 @@ mod tests {
         std::fs::create_dir_all(dir.join("src")).unwrap();
         std::fs::write(dir.join("src/main.rs"), "").unwrap();
         let file = Target::File(dir.join("src/main.rs"));
-        assert_eq!(resolve("src/main.rs", Some(&dir)), Some(file.clone()));
-        assert_eq!(resolve("src/main.rs:42:7", Some(&dir)), Some(file.clone()));
-        assert_eq!(resolve("src/main.rs.", Some(&dir)), Some(file.clone()));
-        assert_eq!(resolve("src/.", Some(&dir)), Some(Target::File(dir.join("src/."))));
-        assert_eq!(resolve("src/..", Some(&dir)), Some(Target::File(dir.join("src/.."))));
-        assert_eq!(resolve("$PWD/src/main.rs", Some(&dir)), Some(file.clone()));
-        assert_eq!(resolve(dir.join("src/main.rs").to_str().unwrap(), None), Some(file));
-        assert_eq!(resolve("src/gone.rs", Some(&dir)), None);
-        assert_eq!(resolve("src/main.rs", None), None);
-        assert_eq!(resolve("https://a.com/x", None), Some(Target::Url("https://a.com/x".into())));
+        assert_eq!(native_target("src/main.rs", Some(&dir)), Some(file.clone()));
+        assert_eq!(native_target("src/main.rs:42:7", Some(&dir)), Some(file.clone()));
+        assert_eq!(native_target("src/main.rs.", Some(&dir)), Some(file.clone()));
+        assert_eq!(native_target("src/.", Some(&dir)), Some(Target::File(dir.join("src/."))));
+        assert_eq!(native_target("src/..", Some(&dir)), Some(Target::File(dir.join("src/.."))));
+        assert_eq!(native_target("$PWD/src/main.rs", Some(&dir)), Some(file.clone()));
+        assert_eq!(native_target(dir.join("src/main.rs").to_str().unwrap(), None), Some(file));
+        assert_eq!(native_target("src/gone.rs", Some(&dir)), None);
+        assert_eq!(native_target("src/main.rs", None), None);
+        assert_eq!(native_target("https://a.com/x", None), Some(Target::Url("https://a.com/x".into())));
         #[cfg(unix)]
         {
             let dotted = dir.join("src/main.rs.");
             std::fs::write(&dotted, "").unwrap();
-            assert_eq!(resolve("src/main.rs.", Some(&dir)), Some(Target::File(dotted)));
+            assert_eq!(native_target("src/main.rs.", Some(&dir)), Some(Target::File(dotted)));
         }
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -436,11 +867,11 @@ mod tests {
             .collect();
         let root = if cfg!(windows) { "/" } else { "" };
         let file = Some(Target::File(path.clone()));
-        assert_eq!(resolve(&format!("file://{root}{encoded}"), None), file);
-        assert_eq!(resolve(&format!("file://localhost{root}{encoded}"), None), file);
-        assert_eq!(resolve(&format!("file://{root}{}", slashed.replace('#', "%23")), None), file);
+        assert_eq!(native_target(&format!("file://{root}{encoded}"), None), file);
+        assert_eq!(native_target(&format!("file://localhost{root}{encoded}"), None), file);
+        assert_eq!(native_target(&format!("file://{root}{}", slashed.replace('#', "%23")), None), file);
         for url in [format!("file://{root}{encoded}.gone"), format!("file://{root}{encoded}%ZZ"), format!("file://box{root}{encoded}")] {
-            assert_eq!(resolve(&url, None), Some(Target::Url(url.clone())), "{url}");
+            assert_eq!(native_target(&url, None), Some(Target::Url(url.clone())), "{url}");
         }
         std::fs::remove_dir_all(dir).unwrap();
     }

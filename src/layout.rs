@@ -162,9 +162,15 @@ pub struct Look {
     pub font: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub font_size: Option<f32>,
+    /// The terminals' text weight, 100 to 900.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_weight: Option<u16>,
     /// Cell height multiplier, 0.8..2 (1 keeps the font's natural rows).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_line_height: Option<f32>,
+    /// Cell width multiplier, 0.8..2 (1 keeps the font's natural columns).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_cell_width: Option<f32>,
     /// Wheel and trackpad scroll multiplier, 0.1..5.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_scroll_speed: Option<f32>,
@@ -381,6 +387,9 @@ pub struct Node {
     /// Root only: the terminal right-click menu's mod (default: `menu`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_menu: Option<String>,
+    /// Root only: mods that can handle a terminal link, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub link_handlers: Vec<String>,
     /// Root only: the mod that shows notifications (default: `toast`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub toast: Option<String>,
@@ -427,6 +436,7 @@ impl Node {
             traffic_lights: None,
             preview: None,
             terminal_menu: None,
+            link_handlers: Vec::new(),
             toast: None,
             window_drag: false,
             window_blur: false,
@@ -775,13 +785,14 @@ mod tests {
 
     #[test]
     fn nodes_carry_looks_backgrounds_padding_and_shadows() {
-        let json = r##"{ "id": "root", "type": "column", "theme": "ink", "font": "Berkeley Mono", "font_size": 13,
+        let json = r##"{ "id": "root", "type": "column", "theme": "ink", "font": "Berkeley Mono", "font_size": 13, "font_weight": 300,
           "terminal_opacity": 0.85, "padding": [16, 12], "shadow": "lg",
           "background": { "gradient": ["#123a6e", "#2a6db3"], "angle": 160 },
           "children": [ { "id": "a", "type": "block", "content": { "mod": "x" }, "background": "surface", "padding": 8 },
                         { "id": "b", "type": "block", "content": { "mod": "y" }, "background": { "image": "bg/sky.jpg" } } ] }"##;
         let n: Node = serde_json::from_str(json).unwrap();
         assert_eq!((n.look.theme.as_ref().map(|t| t.pick(true)), n.look.font_size, n.look.terminal_opacity), (Some("ink"), Some(13.0), Some(0.85)));
+        assert_eq!(n.look.font_weight, Some(300));
         assert_eq!(n.padding.map(Padding::axes), Some((16.0, 12.0)));
         assert!(matches!(n.background, Some(Background::Gradient { angle, .. }) if angle == 160.0));
         assert_eq!(n.find("a").unwrap().background, Some(Background::Color("surface".into())));

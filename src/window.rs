@@ -110,32 +110,48 @@ pub fn shell() -> String {
     std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into())
 }
 
-fn unix_agent_argv(sh: String, cmd: Vec<String>, login: bool) -> Vec<String> {
+/// `cmd` in the person's shell, after their rc files (and so their PATH). `stay`: the
+/// shell stays after it (a tab); else the shell becomes it, so its pane ends with it.
+fn unix_agent_argv(sh: String, cmd: Vec<String>, login: bool, stay: bool) -> Vec<String> {
     let name = std::path::Path::new(&sh).file_name().and_then(|s| s.to_str());
     if !matches!(name, Some("sh" | "bash" | "zsh" | "dash" | "ksh" | "fish")) {
-        // Other shells cannot parse our wrapper; return to the person's shell after the command.
-        let mut run = vec!["/bin/sh".into(), "-c".into(), "\"$@\"; exec \"$0\" -i".into(), sh];
+        if !stay {
+            return cmd;
+        }
+        // Other shells cannot parse our wrapper: sh runs the command on the app's PATH, which the
+        // installed check searches when the shell can't run it (`programs::installed_here`),
+        // then the person's shell takes over.
+        let path = std::env::var("PATH").map(|p| format!("PATH='{}' ", p.replace('\'', "'\\''"))).unwrap_or_default();
+        let mut run = vec!["/bin/sh".into(), "-c".into(), format!("{path}\"$@\"; exec \"$0\" -i"), sh];
         run.extend(cmd);
         return run;
     }
     let fish = name == Some("fish");
-    let script = match (fish, login) {
-        (true, true) => "command $argv[2..]; exec $argv[1] -li",
-        (true, false) => "command $argv[2..]; exec $argv[1] -i",
-        (false, true) => "\"$@\"; exec \"$0\" -li",
-        (false, false) => "\"$@\"; exec \"$0\" -i",
+    let script = match (fish, login, stay) {
+        (true, true, true) => "command $argv[2..]; exec $argv[1] -li",
+        (true, false, true) => "command $argv[2..]; exec $argv[1] -i",
+        (false, true, true) => "\"$@\"; exec \"$0\" -li",
+        (false, false, true) => "\"$@\"; exec \"$0\" -i",
+        (true, _, false) => crate::remote_shell::FISH_EXEC,
+        (false, _, false) => crate::remote_shell::POSIX_EXEC,
     };
     let mut run = vec![sh.clone(), if login { "-lic" } else { "-ic" }.into(), script.into(), sh];
     run.extend(cmd);
     run
 }
 
-fn launch_failure(record: &Value, output: &str) -> Option<String> {
+/// A terminal that ended within 2 s, with an error. A split's wrapper that can't find its
+/// program says so only after the person's shell config, however long that took.
+fn launch_failure(record: &Value, output: impl FnOnce() -> String) -> Option<String> {
     let code = record["exit_code"].as_i64().filter(|c| *c != 0)?;
     let elapsed = record["finished_ms"].as_u64()?.checked_sub(record["created_ms"].as_u64()?)?;
-    if record["reason"].as_str() != Some("exited") || elapsed > 2000 {
+    if record["reason"].as_str() != Some("exited") || (elapsed > 2000 && code != 127) {
         return None;
     }
+    if elapsed > 2000 && !crate::remote_shell::cannot_start(record) {
+        return None;
+    }
+    let output = output();
     let lines = output.lines().filter(|l| !l.trim().is_empty()).collect::<Vec<_>>();
     let tail = lines[lines.len().saturating_sub(5)..].join("\n");
     Some(if tail.is_empty() { format!("Exit code {code}") } else { format!("Exit code {code}\n{tail}") })
@@ -163,6 +179,15 @@ fn shipped_layout(name: &str) -> &'static str {
 /// A layout as shipped (main for names Herdr doesn't ship).
 fn default_layout(name: &str) -> Node {
     serde_json::from_str(shipped_layout(name)).expect("defaults/layouts are valid")
+}
+
+/// `Name key = value`, built rather than parsed: gpui's parser never returns
+/// on a value with a character like `.` (a mod folder `a.b`), so names go in whole.
+fn key_context(name: &'static str, key: &'static str, value: &str) -> KeyContext {
+    let mut context = KeyContext::default();
+    context.add(name);
+    context.set(key, value.to_owned());
+    context
 }
 
 fn layout_path(name: &str) -> PathBuf {
@@ -287,6 +312,18 @@ struct PendingTerminalChange {
 /// The slot of a terminal shown in a pane in place of its own (`<pane>#swap`).
 const SWAP: &str = "#swap";
 
+/// The share of the script VM's heap ceiling past which a mod edit starts a
+/// new VM instead of reloading into the old one (`files_changed`).
+const RESTART_MODS_AT: f64 = 0.75;
+
+/// QuickJS reports allocation failures both as exceptions and as host errors.
+fn out_of_memory(error: &anyhow::Error) -> bool {
+    error.chain().any(|cause| {
+        let message = cause.to_string();
+        message.contains("out of memory") || message.contains("Allocation failed while creating object")
+    })
+}
+
 struct Copy {
     inst: Instance,
     /// Its number for commands (`mods::prepare_load`); 0 if it never loaded.
@@ -356,6 +393,10 @@ struct Watched {
 pub struct AppWindow {
     core: Arc<Core>,
     runtime: Option<Rc<ShellRuntime>>,
+    restarting_mods: bool,
+    load_recovery: Option<Instant>,
+    failed_loads: HashSet<String>,
+    mod_stamps: RefCell<HashMap<String, crate::files::ModStamp>>,
     chrome: Node,
     /// Which layout `chrome` is (`layouts/<name>.json`).
     layout_name: String,
@@ -386,7 +427,11 @@ pub struct AppWindow {
     copies: HashMap<String, Copy>,
     overlays: Vec<Overlay>,
     folders: BTreeMap<String, Found>,
-    /// Mods placed once; later the layout decides where (or whether) they show.
+    link_handlers: Rc<RefCell<crate::links::Handlers>>,
+    failed_link_enrollments: HashSet<String>,
+    link_errors: BTreeMap<String, String>,
+    link_tasks: HashMap<String, Task<()>>,
+    /// View placements and link enrollments already offered to a layout.
     seen: BTreeSet<String>,
     bounds: Rc<RefCell<HashMap<String, Bounds<Pixels>>>>,
     hidden_fit: pane_size::HiddenFit,
@@ -472,8 +517,12 @@ pub struct AppWindow {
 
 impl AppWindow {
     pub fn new(core: Arc<Core>, requests: async_channel::Receiver<Request>, window: &mut Window, cx: &mut Context<Self>) -> Self {
-        let runtime = ShellRuntime::new(cx).map_err(|e| tracing::error!("script runtime failed, mods are off: {e:#}")).ok();
         let file_events = crate::files::watch(&mods::app_dir(), #[cfg(test)] cx.background_executor().clone());
+        Self::with_file_events(core, requests, file_events, window, cx)
+    }
+
+    fn with_file_events(core: Arc<Core>, requests: async_channel::Receiver<Request>, file_events: Option<crate::files::FileEvents>, window: &mut Window, cx: &mut Context<Self>) -> Self {
+        let runtime = ShellRuntime::new(cx).map_err(|e| tracing::error!("script runtime failed, mods are off: {e:#}")).ok();
         if let (Some(runtime), Some(events)) = (&runtime, &file_events) {
             runtime.set_source_revision_provider(events.revision_provider());
         }
@@ -482,6 +531,10 @@ impl AppWindow {
         let mut w = AppWindow {
             core,
             runtime,
+            restarting_mods: false,
+            load_recovery: None,
+            failed_loads: HashSet::new(),
+            mod_stamps: RefCell::new(HashMap::new()),
             chrome: default_layout("main"),
             layout_name: "main".into(),
             agent: None,
@@ -500,7 +553,11 @@ impl AppWindow {
             terms: HashMap::new(),
             copies: HashMap::new(),
             overlays: Vec::new(),
-            folders: mods::scan().into_iter().map(|f| (f.id.clone(), f)).collect(),
+            folders: mods::scan(&BTreeMap::new()),
+            link_handlers: Rc::default(),
+            failed_link_enrollments: HashSet::new(),
+            link_errors: BTreeMap::new(),
+            link_tasks: HashMap::new(),
             seen,
             bounds: Default::default(),
             hidden_fit: Default::default(),
@@ -624,6 +681,30 @@ impl AppWindow {
         }
         w._tasks.push(cx.spawn_in(window, async move |this, cx| {
             while let Ok(req) = requests.recv().await {
+                let req = match req {
+                    Request::Control { cmd, reply } => {
+                        if let Some(path) = cmd.get("shot").and_then(Value::as_str) {
+                            if this.upgrade().is_none() {
+                                break;
+                            }
+                            (**cx).update(crate::terminal::flush_output_clock);
+                            let body = match crate::control::save_shot(
+                                cx.window_handle(),
+                                cx,
+                                std::path::Path::new(path),
+                            ) {
+                                Ok(()) => json!({ "path": path }),
+                                Err(error) => {
+                                    json!({ "error": format!("cannot save screenshot: {error:#}") })
+                                }
+                            };
+                            let _ = reply.send(body);
+                            continue;
+                        }
+                        Request::Control { cmd, reply }
+                    }
+                    other => other,
+                };
                 if this.update_in(cx, |this, window, cx| this.handle(req, window, cx)).is_err() {
                     break;
                 }
@@ -932,6 +1013,7 @@ impl AppWindow {
     /// broken), with the person's clicks on it.
     fn load_layout(&mut self, name: &str) {
         self.layout_name = name.to_owned();
+        self.failed_link_enrollments.clear();
         self.written_layout.clear();
         let mut from_file = false;
         // A file that's there but broken or unreadable is shown as shipped for
@@ -1030,6 +1112,7 @@ impl AppWindow {
         if text == self.written_layout {
             return;
         }
+        self.failed_link_enrollments.clear();
         match serde_json::from_str::<Node>(&text) {
             Ok(mut n) => {
                 self.written_layout = text;
@@ -1092,6 +1175,11 @@ impl AppWindow {
         if self.layout_file_ok {
             self.write_state(&state);
         }
+        self.save_layout();
+        self.save_view();
+    }
+
+    fn save_layout(&mut self) {
         let edited = layout_sync::without_clicks(&self.file_chrome, &self.chrome);
         if edited != self.file_chrome && self.layout_file_ok && !shipped_layouts().contains(&self.layout_name.as_str()) {
             let path = layout_path(&self.layout_name);
@@ -1108,7 +1196,6 @@ impl AppWindow {
                 }
             }
         }
-        self.save_view();
     }
 
     fn save_view(&mut self) {
@@ -1406,8 +1493,57 @@ impl AppWindow {
         cur
     }
 
+    fn unseen_link_handlers(&self) -> impl Iterator<Item = &String> {
+        let eligible = self.runtime.is_some() && self.layout_file_ok && !shipped_layouts().contains(&self.layout_name.as_str());
+        self.folders.iter().filter(move |(id, found)| {
+            eligible && !found.link_rules.is_empty()
+                && !self.failed_link_enrollments.contains(*id)
+                && !self.seen.contains(&format!("links:{id}"))
+        }).map(|(id, _)| id)
+    }
+
+    fn enroll_link_handlers(&mut self) {
+        let pending: Vec<_> = self.unseen_link_handlers().cloned().collect();
+        if pending.is_empty() || QUITTING.load(std::sync::atomic::Ordering::SeqCst) {
+            return;
+        }
+        let added: Vec<_> = pending.iter().filter(|id| !self.chrome.link_handlers.contains(id)).cloned().collect();
+        if !added.is_empty() {
+            self.chrome.link_handlers.extend(added.iter().cloned());
+            self.save_layout();
+        }
+
+        // A write can fail or lose to an external edit. Remove any unsaved
+        // additions and retry those IDs when the layout changes or reopens.
+        let persisted = std::fs::read_to_string(layout_path(&self.layout_name)).ok()
+            .and_then(|text| serde_json::from_str::<Node>(&text).ok())
+            .map(|layout| layout.link_handlers)
+            .unwrap_or_default();
+        self.chrome.link_handlers.retain(|id| !added.contains(id) || persisted.contains(id));
+        let seen_before = self.seen.len();
+        for id in pending {
+            if persisted.contains(&id) {
+                self.seen.insert(format!("links:{id}"));
+            } else {
+                self.failed_link_enrollments.insert(id);
+            }
+        }
+        if self.seen.len() != seen_before {
+            write_atomic(&file("seen.json"), &serde_json::to_string(&self.seen).unwrap_or_default());
+        }
+    }
+
+    fn refresh_link_handlers(&self) {
+        *self.link_handlers.borrow_mut() = self.chrome.link_handlers.iter().filter_map(|id| {
+            let rules = &self.folders.get(id)?.link_rules;
+            (!rules.is_empty()).then(|| (id.clone(), rules.clone()))
+        }).collect();
+    }
+
     /// Creates what's visible, drops what isn't, publishes state, saves, focuses.
     fn sync(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.enroll_link_handlers();
+        self.refresh_link_handlers();
         self.model.order_spaces();
         let (model, live) = (&self.model, &self.live);
         self.swapped.retain(|p, a| model.address_of(p).is_some() && live.contains_key(a));
@@ -1447,19 +1583,22 @@ impl AppWindow {
             let size_hint = (dim("cols", 120), dim("rows", 40));
             let view = cx.new(|cx| TerminalView::attach(self.core.clone(), address.clone(), size_hint, cx));
             self.tell_term(&view, &address, cx);
+            mods::track_pane_view(id.clone(), &view);
             let (block, addr) = (id.clone(), address.clone());
             let sub = cx.subscribe_in(&view, window, move |this, _, ev: &TerminalEvent, window, cx| match ev {
                 TerminalEvent::Peek(address) => this.peek_terminal(address, window, cx),
+                TerminalEvent::Link(click) => this.handle_link(&block, &addr, click, window, cx),
                 TerminalEvent::TitleChanged => this.publish(cx),
+                TerminalEvent::ScrollChanged => {
+                    mods::panes_scrolled();
+                    this.refresh_snapshot_mods(cx);
+                }
                 TerminalEvent::SelectionChanged => this.publish_selection(&addr, window, cx),
                 TerminalEvent::Ended => this.terminal_ended(&block, window, cx),
                 TerminalEvent::ContextMenu(at) => {
                     this.open_menu("pane", json!({ "pane": block.trim_end_matches(SWAP), "terminal": addr }), Some(*at), window, cx)
                 }
-                TerminalEvent::Notice { title, body } => {
-                    let spec = json!({"kind":"toast", "notification":{"title":title, "body":body, "level":"error"}});
-                    this.open_overlay(mods::new_overlay_id(), spec, window, cx)
-                }
+                TerminalEvent::Notice { title, body } => this.error_notice(title, body, window, cx),
             });
             let focus = view.read(cx).focus_handle().clone();
             if let Some(previous) = self.terms.insert(id, Term { view, address, focus, _sub: sub }) {
@@ -1601,6 +1740,11 @@ impl AppWindow {
     /// else the window, where the app's keys work.
     fn restore_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let dialog = self.overlays.iter().rev().find(|o| o.kind.modal_keys()).map(|o| o.focus.clone());
+        // A dialog whose mod already focused something inside it (its input) keeps that:
+        // handing the keyboard to the frame would leave typing with nowhere to go.
+        if dialog.as_ref().is_some_and(|d| d.contains_focused(window, cx)) {
+            return;
+        }
         // A mod block holding the keyboard gets it back (a popup over it closed).
         if dialog.is_none() && self.focused_block.as_ref().is_some_and(|b| self.mod_block_shown(b)) {
             self.focus.focus(window, cx);
@@ -1659,7 +1803,16 @@ impl AppWindow {
 
     fn publish_selection(&self, address: &str, window: &Window, cx: &mut Context<Self>) {
         let selection = self.shown_terminal_view(address, window, cx).ok().and_then(|view| view.read(cx).selection());
-        if mods::publish_selection(address, json!(selection)) {
+        let changed = mods::publish_selection(address, json!(selection));
+        self.publish_focused_selection(window, cx);
+        if changed {
+            self.refresh_snapshot_mods(cx);
+        }
+    }
+
+    fn publish_focused_selection(&self, window: &Window, cx: &mut Context<Self>) {
+        let selection = self.focused_terminal(window, cx).and_then(|t| t.view.read(cx).selection());
+        if mods::publish_focused_selection(json!(selection)) {
             self.refresh_snapshot_mods(cx);
         }
     }
@@ -1693,13 +1846,18 @@ impl AppWindow {
         self.pane_term(pane).map(|t| t.view.read(cx).focus_target(cx))
     }
 
+    fn view_mod(&self, name: &str) -> Option<&Found> {
+        self.folders.get(name).filter(|folder| folder.has_view)
+    }
+
     fn load(&self, inst: Instance, window: &mut Window, cx: &mut Context<Self>) -> Copy {
         let mut copy = Copy { inst, id: 0, root: None, _watch: None, error: None };
-        let (Some(runtime), Some(folder)) = (&self.runtime, self.folders.get(&copy.inst.name)) else {
+        let (Some(runtime), Some(folder)) = (&self.runtime, self.view_mod(&copy.inst.name)) else {
             copy.error = Some(format!("no mod folder ~/.config/herdr-app/mods/{}", copy.inst.name));
             return copy;
         };
         copy.id = mods::prepare_load(&copy.inst);
+        self.mod_stamps.borrow_mut().entry(copy.inst.name.clone()).or_insert_with(|| crate::files::mod_stamp(&folder.dir));
         match runtime.try_load(&folder.dir, window, cx) {
             Ok(root) => {
                 if self.file_events.is_none() {
@@ -1710,6 +1868,17 @@ impl AppWindow {
             Err(e) => {
                 tracing::warn!("mod {} failed to load: {e:#}", copy.inst.name);
                 copy.error = Some(format!("{e:#}"));
+                if !self.restarting_mods && (out_of_memory(&e) || runtime.memory_share() >= RESTART_MODS_AT) {
+                    // Finish mounting before retrying all copies. Other failures on
+                    // this VM must not restart the replacement again.
+                    let failed = Rc::downgrade(runtime);
+                    let name = copy.inst.name.clone();
+                    cx.defer_in(window, move |this, window, cx| {
+                        if failed.upgrade().is_some_and(|failed| this.runtime.as_ref().is_some_and(|current| Rc::ptr_eq(&failed, current))) {
+                            this.recover_mods(&BTreeSet::from([name]), window, cx);
+                        }
+                    });
+                }
             }
         }
         copy
@@ -1769,7 +1938,7 @@ impl AppWindow {
                     let zoomed = ctx.zoomed.as_deref() == Some(p.id.as_str());
                     // A mod pane: what it shows, no terminal.
                     if let Some(Content::Mod { name, .. }) = p.content() {
-                        panes.push(json!({ "pane": p.id, "terminal": null, "mod": name, "tab": ctx.id, "title": name, "focused": focused, "zoomed": zoomed, "movable": self.pane_movable(&p.id) }));
+                        panes.push(json!({ "pane": p.id, "terminal": null, "mod": name, "tab": ctx.id, "title": name, "name": p.title, "focused": focused, "zoomed": zoomed, "movable": self.pane_movable(&p.id) }));
                         continue;
                     }
                     let Some(addr) = p.terminal() else { continue };
@@ -1778,7 +1947,7 @@ impl AppWindow {
                         self.live.get(addr).and_then(|r| r.get("title")).and_then(Value::as_str).map(str::to_owned)
                     });
                     panes.push(json!({
-                        "pane": p.id, "terminal": addr, "tab": ctx.id, "title": title.clone().unwrap_or_default(),
+                        "pane": p.id, "terminal": addr, "tab": ctx.id, "title": title.clone().unwrap_or_default(), "name": p.title,
                         "cwd": self.cwds.get(addr), "branch": m.folder_info.get(addr).and_then(|f| f.branch.clone()),
                         "status": m.status(addr), "app": a.and_then(|a| a.app.clone()), "program": self.program(addr),
                         "focused": focused, "zoomed": zoomed, "movable": self.pane_movable(&p.id),
@@ -1786,7 +1955,7 @@ impl AppWindow {
                     let Some(status) = m.status(addr) else { continue };
                     agents.push(json!({
                         "address": addr, "pane": p.id, "space": pr.id, "space_name": m.space_name(pr, &home),
-                        "tab": ctx.id, "tab_index": ci + 1, "tab_name": Model::tab_name(pr, ctx),
+                        "tab": ctx.id, "tab_index": ci + 1, "tab_name": Model::tab_name(pr, ctx), "pane_name": p.title,
                         "status": status, "app": a.and_then(|a| a.app.clone()), "program": self.program(addr), "title": title.unwrap_or_default(),
                         "seq": a.map(|a| a.seq).unwrap_or(0),
                         "pinned": self.live.get(addr).and_then(|r| r.pointer("/labels/herdr.pinned")).and_then(Value::as_str).is_some_and(|v| !v.is_empty()),
@@ -2045,12 +2214,66 @@ impl AppWindow {
 
     // ---- core facts --------------------------------------------------------
 
+    fn handle_link(&mut self, block: &str, address: &str, click: &crate::links::Click, window: &mut Window, cx: &mut Context<Self>) {
+        let pane = block.strip_suffix(SWAP).unwrap_or(block);
+        let tab = self.model.tab_of(pane);
+        let space = self.model.space_of(pane).or_else(|| self.model.active_space());
+        let source = json!({
+            "terminal": address,
+            "machine": address.split_once('/').map(|(machine, _)| machine),
+            "cwd": self.cwds.get(address),
+            "pane": tab.map(|_| pane),
+            "tab": tab.or_else(|| self.model.active_tab()).map(|t| &t.id),
+            "space": space.map(|s| &s.id),
+        });
+        let handlers: Vec<_> = click.handlers.iter().map(|(id, link)| {
+            (id.clone(), (self.folders.get(id).map(|f| f.dir.clone()), link.clone()))
+        }).collect();
+        let native = click.native.clone();
+        let id = mods::new_overlay_id();
+        let task_id = id.clone();
+        let task = cx.spawn_in(window, async move |this, cx| {
+            let result = crate::links::dispatch(handlers, |name, (dir, link)| {
+                let call = this.update_in(cx, |this, window, cx| {
+                    this.link_errors.remove(name);
+                    let dir = dir.ok_or_else(|| anyhow::anyhow!("no mod folder {name:?}"))?;
+                    let payload = json!({ "link": link, "source": source });
+                    Ok::<_, anyhow::Error>(mods::handle_link(name, &dir, &payload, window, cx))
+                });
+                async move {
+                    let call = call.map_err(|e| e.to_string())?.map_err(|e| format!("{e:#}"))?;
+                    call.await.map_err(|e| format!("{e:#}"))
+                }
+            }).await;
+            let _ = this.update_in(cx, |this, window, cx| {
+                if let Some(task) = this.link_tasks.remove(&task_id) {
+                    task.detach();
+                }
+                match result {
+                    Ok(false) => {
+                        if let Some(target) = native {
+                            crate::links::open(&target);
+                        }
+                    }
+                    Ok(true) => {}
+                    Err((name, error)) => {
+                        tracing::warn!(mod_name = %name, "link.js: {error}");
+                        this.error_notice(&format!("Link handler {name} failed"), &error, window, cx);
+                        this.link_errors.insert(name, error);
+                    }
+                }
+            });
+        });
+        self.link_tasks.insert(id, task);
+    }
+
     /// What a terminal view takes from the core's facts: its folder, where right-clicks go.
     fn tell_term(&self, view: &Entity<TerminalView>, addr: &str, cx: &mut Context<Self>) {
         let cwd = self.cwds.get(addr).map(std::path::PathBuf::from);
         let to_program = self.live.get(addr).and_then(|r| r.pointer("/labels/herdr.right-click")).and_then(Value::as_str) == Some("program");
         view.update(cx, |v, _| {
             v.cwd = cwd;
+            v.link_handlers = self.link_handlers.clone();
             v.right_click_to_program = to_program;
         });
     }
@@ -2379,9 +2602,10 @@ impl AppWindow {
         cx.spawn_in(window, async move |this, cx| {
             let failure = cx.background_executor().spawn(async move {
                 let record = core.call("terminal.get", json!({"terminal": address})).ok()?;
-                launch_failure(&record, "")?;
-                let output = core.call("terminal.read", json!({"terminal": address, "lines": 5})).unwrap_or(Value::Null);
-                launch_failure(&record, output["text"].as_str().unwrap_or_default())
+                launch_failure(&record, || {
+                    let output = core.call("terminal.read", json!({"terminal": address, "lines": 5})).unwrap_or(Value::Null);
+                    output["text"].as_str().unwrap_or_default().to_owned()
+                })
             }).await;
             if let Some(body) = failure {
                 let _ = this.update_in(cx, |this, window, cx| {
@@ -2419,15 +2643,22 @@ impl AppWindow {
 
     /// Starts a terminal for `space`, on `on` (another machine) or here. An
     /// empty `cwd`: the machine's home. With no argv, that machine's core
-    /// picks its own shell.
-    fn spawn(&mut self, argv: Option<Vec<String>>, cwd: String, follow: bool, space: &str, ctx: &str, on: Option<&str>, size: Option<(u16, u16)>, window: &Window) -> Result<(String, String), String> {
+    /// picks its own shell. `stay`: `argv` is an agent in a shell that stays
+    /// (`agent_argv`), else a program its shell becomes (`split_argv`).
+    fn spawn(&mut self, argv: Option<Vec<String>>, stay: bool, cwd: String, follow: bool, space: &str, ctx: &str, on: Option<&str>, size: Option<(u16, u16)>, window: &Window) -> Result<(String, String), String> {
         let argv = argv.unwrap_or_default();
         self.require_document(on)?;
-        let labels = json!({ "herdr.space": crate::mirror::local(space, on), "herdr.tab": crate::mirror::local(ctx, on), "herdr.seen": "0" });
+        let mut labels = json!({ "herdr.space": crate::mirror::local(space, on), "herdr.tab": crate::mirror::local(ctx, on), "herdr.seen": "0" });
+        // A split's wrapper shows it only when it can't start the program (`remote_shell::cannot_start`).
+        if !stay && !argv.is_empty() {
+            use std::hash::{BuildHasher, Hasher};
+            labels["herdr.launch"] = format!("herdr-launch-{:016x}", std::collections::hash_map::RandomState::new().build_hasher().finish()).into();
+        }
         let (addr, cwd) = run_following_folder(cwd, follow, on, |cwd| match self.core.run(argv.clone(), cwd.clone(), labels.clone(), on, size, crate::terminal::initial_display(window)) {
-            // An agent on a machine without `sh` (Windows): in its PowerShell instead.
+            // A start on a machine without `sh` (Windows): in its PowerShell, or as given.
             Err(e) if on.is_some() && argv.first().map(String::as_str) == Some("sh") && format!("{e:#}").contains("not found") => {
-                self.core.run(Self::powershell_argv(&argv), cwd, labels.clone(), on, size, crate::terminal::initial_display(window))
+                let argv = if stay { Self::powershell_argv(&argv) } else { argv.get(4..).unwrap_or_default().to_vec() };
+                self.core.run(argv, cwd, labels.clone(), on, size, crate::terminal::initial_display(window))
             }
             r => r,
         })
@@ -2462,12 +2693,25 @@ impl AppWindow {
                 return vec![sh, "-NoExit".into(), "-Command".into(), crate::programs::powershell_line(&cmd)];
             }
             // macOS terminal sessions load login profiles (including Homebrew's PATH).
-            unix_agent_argv(sh, cmd, cfg!(target_os = "macos"))
+            unix_agent_argv(sh, cmd, cfg!(target_os = "macos"), true)
         })
     }
 
+    /// A split's program, in your shell (for your PATH) that then becomes it: the
+    /// pane ends with it, keeping its exit code. Elsewhere (PowerShell, nushell) as given.
+    fn split_argv(cmd: Vec<String>, on: Option<&str>) -> Vec<String> {
+        if on.is_some() {
+            return crate::remote_shell::exec(cmd);
+        }
+        if cfg!(windows) {
+            return cmd;
+        }
+        unix_agent_argv(shell(), cmd, cfg!(target_os = "macos"), false)
+    }
+
     /// A space with its first tab and terminal, shown at once unless focus is false.
-    /// `machine`: another machine (`hc machine ls`); its space starts in that machine's home.
+    /// `machine`: another machine (`hc machine ls`). Without `folder`, it starts in the
+    /// focused pane's folder when that pane is on the same machine, else in that machine's home.
     fn new_space(&mut self, name: &str, folder: Option<String>, ctx_name: Option<&str>, argv: Option<Vec<String>>, task: Option<&str>, machine: Option<String>, focus: bool, window: &Window) -> Result<Value, String> {
         let follow = folder.is_none();
         let on = machine.as_deref();
@@ -2478,7 +2722,7 @@ impl AppWindow {
         let folder = folder.or_else(here).unwrap_or_else(|| if on.is_some() { String::new() } else { home() });
         let (space, ctx, pane) = (self.model.fresh_id_on("sp", on), self.model.fresh_id_on("tb", on), self.model.fresh_id_on("p", on));
         let size = self.initial_size(&Tab::new(&ctx, "", &pane, "").root, &pane, window);
-        let (addr, folder) = self.spawn(Self::agent_argv(argv.clone(), task, on).or(argv), folder, follow, &space, &ctx, on, size, window)?;
+        let (addr, folder) = self.spawn(Self::agent_argv(argv.clone(), task, on).or(argv), true, folder, follow, &space, &ctx, on, size, window)?;
         let ctx_name = ctx_name.map(str::trim).unwrap_or_default();
         let tab = Tab::new(&ctx, ctx_name, &pane, &addr);
         if focus { self.model.add_space(&space, name.trim(), &folder, tab) } else { self.model.add_space_unshown(&space, name.trim(), &folder, tab) }
@@ -2499,7 +2743,7 @@ impl AppWindow {
         let on = self.machine_of(&space);
         let (ctx, pane) = (self.model.fresh_id_on("tb", on.as_deref()), self.model.fresh_id_on("p", on.as_deref()));
         let size = self.initial_size(&Tab::new(&ctx, "", &pane, "").root, &pane, window);
-        let (addr, _) = self.spawn(Self::agent_argv(argv.clone(), task, on.as_deref()).or(argv), folder, follow, &space, &ctx, on.as_deref(), size, window)?;
+        let (addr, _) = self.spawn(Self::agent_argv(argv.clone(), task, on.as_deref()).or(argv), true, folder, follow, &space, &ctx, on.as_deref(), size, window)?;
         self.add_new_tab(&space, Tab::new(&ctx, name.trim(), &pane, &addr), focus);
         Ok(json!({ "space": space, "tab": ctx, "terminal": addr }))
     }
@@ -2520,7 +2764,7 @@ impl AppWindow {
         if self.model.space(&space).is_none() {
             return Err(format!("no space {space:?}"));
         }
-        if !self.folders.contains_key(&m) {
+        if self.view_mod(&m).is_none() {
             return Err(format!("no mod {m:?} in mods/"));
         }
         let machine = self.machine_of(&space);
@@ -2544,7 +2788,8 @@ impl AppWindow {
         root.split(&target, axis, Node::block(new.clone(), Content::Terminal { terminal: String::new() }), "initial-size".into());
         let size = self.model.active_tab().filter(|tab| tab.id == ctx)
             .and_then(|_| self.initial_size(&root, &new, window));
-        let (addr, _) = self.spawn(argv, cwd, follow, &space, &ctx, on.as_deref(), size, window)?;
+        let argv = argv.filter(|a| !a.is_empty()).map(|a| Self::split_argv(a, on.as_deref()));
+        let (addr, _) = self.spawn(argv, false, cwd, follow, &space, &ctx, on.as_deref(), size, window)?;
         self.model.split(&target, axis, &new, &addr);
         Ok(json!({ "pane": new, "terminal": addr }))
     }
@@ -2555,7 +2800,7 @@ impl AppWindow {
         if self.model.tab_of(&target).is_none() {
             return Err(format!("no pane {target:?}"));
         }
-        if !self.folders.contains_key(&name) {
+        if self.view_mod(&name).is_none() {
             return Err(format!("no mod {name:?} in mods/"));
         }
         let machine = self.model.space_of(&target).and_then(|s| s.machine.clone());
@@ -2889,7 +3134,7 @@ impl AppWindow {
             if !args.is_object() { args = json!({}); }
             args["machine"] = json!(machine);
         }
-        if matches!(name, "space.new" | "space.close" | "space.rename" | "space.move" | "tab.new" | "tab.close" | "tab.rename" | "tab.move" | "pane.split" | "pane.close" | "pane.swap" | "terminal.keep" | "terminal.park") {
+        if matches!(name, "space.new" | "space.close" | "space.rename" | "space.move" | "tab.new" | "tab.close" | "tab.rename" | "tab.move" | "pane.split" | "pane.close" | "pane.swap" | "pane.rename" | "pane.resize" | "terminal.keep" | "terminal.park") {
             let node = ["id", "space", "pane"].into_iter().find_map(|k| Self::arg(&args, k));
             let target = node.and_then(|id| self.model.space(id).or_else(|| self.model.space_of(id))).or_else(|| self.model.active_space());
             let machine = if name == "space.new" { Self::arg(&args, "machine") }
@@ -2907,7 +3152,7 @@ impl AppWindow {
         self.reply.take().unwrap_or_else(|| json!({ "ok": true }))
     }
 
-    /// Asks the person for a new name (space.rename, tab.rename), then runs it with it.
+    /// Asks the person for a new name (space.rename, tab.rename, pane.rename), then runs it with it.
     /// The prompt starts with the name someone gave, empty for an automatic one.
     fn ask_name(&mut self, name: &str, mut args: Value, window: &mut Window, cx: &mut Context<Self>) {
         if !args.is_object() {
@@ -2919,6 +3164,12 @@ impl AppWindow {
                 let current = id.as_deref().and_then(|i| self.model.space(i)).map(|p| p.name.clone());
                 args["id"] = json!(id);
                 ("rename space", "empty: named after its folder", current)
+            }
+            "pane.rename" => {
+                let id = Self::owned(&args, "pane").or_else(|| self.model.focused_pane());
+                let current = id.as_deref().and_then(|i| self.model.tab_of(i)?.root.find(i)?.title.clone());
+                args["pane"] = json!(id);
+                ("rename pane", "empty: unnamed", current)
             }
             _ => {
                 let id = Self::owned(&args, "id").or_else(|| self.model.active_tab().map(|c| c.id.clone()));
@@ -3022,8 +3273,23 @@ impl AppWindow {
                 c.name = name.trim().to_owned();
             }
             "tab.move" => {
-                let (Some(id), Some(i)) = (Self::arg(a, "id"), a.get("index").and_then(Value::as_u64)) else { return self.fail("tab.move needs id and index") };
-                if !self.model.move_tab(id, i as usize) { return self.fail(format!("no tab {id:?}")); }
+                let Some(id) = Self::owned(a, "id").or(active_ctx) else { return self.fail("no tab") };
+                let moved = match (a.get("index").and_then(Value::as_u64), a.get("by").and_then(Value::as_i64)) {
+                    (Some(i), None) => self.model.move_tab(&id, i as usize),
+                    (None, Some(by)) => self.model.shift_tab(&id, by),
+                    _ => return self.fail("tab.move needs index or by"),
+                };
+                if !moved { return self.fail(format!("no tab {id:?}")); }
+            }
+            "pane.rename" => {
+                let Some(pane) = Self::owned(a, "pane").or_else(|| self.model.focused_pane()) else { return self.fail("no pane to rename") };
+                let Some(name) = Self::arg(a, "name") else { return self.fail("pane.rename needs name (empty: unnamed)") };
+                let tab = self.model.tab_of(&pane).map(|c| c.id.clone());
+                let Some(node) = tab.and_then(|t| self.model.tab_mut(&t)).and_then(|c| c.root.find_mut(&pane)).filter(|n| n.is_pane()) else {
+                    return self.fail(format!("no pane {pane:?}"));
+                };
+                let name = name.trim();
+                node.title = (!name.is_empty()).then(|| name.to_owned());
             }
             "tab.settle" | "tab.unsettle" => {
                 let Some(id) = Self::owned(a, "id").or(active_ctx) else { return self.fail("no tab") };
@@ -3081,13 +3347,8 @@ impl AppWindow {
                 self.kill(&addr.into_iter().collect::<Vec<_>>(), cx);
             }
             "pane.zoom" => {
-                let pane = Self::owned(a, "pane").or_else(|| self.model.focused_pane());
-                if let Some(pane) = pane
-                    && let Some(ctx) = self.model.tab_of(&pane).map(|c| c.id.clone())
-                    && let Some(c) = self.model.tab_mut(&ctx)
-                    && c.root.panes().len() > 1
-                {
-                    c.zoomed = if c.zoomed.as_deref() == Some(pane.as_str()) { None } else { Some(pane) };
+                if let Some(pane) = Self::owned(a, "pane").or_else(|| self.model.focused_pane()) {
+                    self.model.toggle_zoom(&pane);
                 }
             }
             "pane.focus" => {
@@ -3120,6 +3381,17 @@ impl AppWindow {
                     return self.fail(format!("{name} direction is left, right, up or down, not {dir:?}"));
                 }
                 return self.go(dir, window, cx);
+            }
+            "pane.resize" => {
+                let dir = Self::owned(a, "direction").unwrap_or_default();
+                let amount = a.get("px").and_then(Value::as_f64).unwrap_or(40.0) as f32;
+                let Some(pane) = Self::owned(a, "pane").or_else(|| self.model.focused_pane()) else {
+                    return self.fail("no pane to resize");
+                };
+                if let Err(e) = self.resize_pane(&pane, &dir, amount) {
+                    return self.fail(e);
+                }
+                self.save();
             }
             "pane.swap" => {
                 let by = match swap_by(a) {
@@ -3318,7 +3590,7 @@ impl AppWindow {
                 if let Err(e) = mods::clone_mod(name, &to) {
                     return self.fail(format!("cannot clone mod: {e}"));
                 }
-                self.folders = mods::scan().into_iter().map(|f| (f.id.clone(), f)).collect();
+                self.sync_folders(window, cx);
             }
             "layout.set" if shipped_layouts().contains(&self.layout_name.as_str()) => {
                 let n = match serde_json::from_value::<Node>(a.get("layout").cloned().unwrap_or_default()) {
@@ -3344,6 +3616,9 @@ impl AppWindow {
                     let text = layout_sync::text_of(&n);
                     if !write_atomic(&layout_path(&self.layout_name), &text) {
                         return self.fail(format!("cannot write layouts/{}.json", self.layout_name));
+                    }
+                    if text != self.written_layout {
+                        self.failed_link_enrollments.clear();
                     }
                     self.written_layout = text;
                     self.layout_file_ok = true;
@@ -3401,7 +3676,7 @@ impl AppWindow {
             }
             "mod.open" => {
                 let name = Self::arg(a, "name").unwrap_or_default();
-                let Some(f) = self.folders.get(name) else { return self.fail(format!("no mod folder {name:?}")) };
+                let Some(f) = self.view_mod(name) else { return self.fail(format!("no mod folder {name:?}")) };
                 let mut spec = mod_overlay(&f.dir);
                 spec["mod"] = json!(name);
                 // One popup per mod: running mod.open again toggles it, like app.settings.
@@ -3595,7 +3870,68 @@ impl AppWindow {
 
     /// Its mod.json says `"focusable": true` (`go` asks only of visible blocks).
     fn focusable(&self, id: &str) -> bool {
-        self.copies.get(id).and_then(|c| self.folders.get(&c.inst.name)).is_some_and(|f| f.hint.focusable)
+        self.copies.get(id).and_then(|c| self.view_mod(&c.inst.name)).is_some_and(|f| f.hint.focusable)
+    }
+
+    /// Moves the divider nearest a pane along `dir`'s axis, as a mouse drag would.
+    /// The border moves in `dir` whichever side of it the pane is on (like tmux).
+    fn resize_pane(&mut self, pane: &str, dir: &str, amount: f32) -> Result<(), String> {
+        let (axis, sign) = match dir {
+            "left" => (Axis::Row, -1.0),
+            "right" => (Axis::Row, 1.0),
+            "up" => (Axis::Column, -1.0),
+            "down" => (Axis::Column, 1.0),
+            _ => return Err(format!("direction must be left, right, up or down, not {dir:?}")),
+        };
+        let found = {
+            let tab = self.model.tab_of(pane).ok_or_else(|| format!("no pane {pane:?}"))?;
+            // Measurements of a tab not drawn now are stale (or missing).
+            if !self.shows_tab() || self.model.active_tab().map(|t| &t.id) != Some(&tab.id) {
+                return Err("that pane isn't on screen".into());
+            }
+            if tab.zoomed.is_some() {
+                return Ok(());
+            }
+            let root = &tab.root;
+            let path = root.path_to(pane).ok_or_else(|| format!("no pane {pane:?}"))?;
+            if path.iter().any(|id| root.find(id).is_some_and(|n| n.hidden)) {
+                return Err("that pane isn't on screen".into());
+            }
+            let mut found = None;
+            for i in (0..path.len().saturating_sub(1)).rev() {
+                let Some(node) = root.find(&path[i]) else { continue };
+                if node.axis() != Some(axis) || !node.resizable() {
+                    continue;
+                }
+                let shown: Vec<&Node> = node.children().iter().filter(|c| !c.hidden).collect();
+                if shown.len() < 2 {
+                    continue;
+                }
+                let Some(idx) = shown.iter().position(|c| c.id == path[i + 1]) else { continue };
+                let index = if sign > 0.0 {
+                    if idx + 1 < shown.len() { idx } else { idx - 1 }
+                } else if idx > 0 {
+                    idx - 1
+                } else {
+                    idx
+                };
+                found = Some((node.id.clone(), index, shown[index].id.clone()));
+                break;
+            }
+            found
+        };
+        // Nothing split that way: a no-op, like a keyboard resize in a terminal multiplexer.
+        let Some((container, index, a_id)) = found else { return Ok(()) };
+        let b = self.bounds.borrow().get(&a_id).copied().ok_or("that pane isn't on screen")?;
+        let delta = px(sign * amount * settings::zoom());
+        let pos = match axis {
+            Axis::Row => point(b.right() + delta, b.top()),
+            Axis::Column => point(b.left(), b.bottom() + delta),
+        };
+        self.drag = Some(Drag { container, index, axis });
+        self.drag_to(pos);
+        self.drag = None;
+        Ok(())
     }
 
     fn swap_pane(&mut self, from: &str, explicit: bool, dir: &str) -> Result<(), String> {
@@ -3617,13 +3953,13 @@ impl AppWindow {
             self.pointer = p;
         }
         let requested = self.chrome.terminal_menu.as_deref().unwrap_or("menu");
-        let name = if self.folders.contains_key(requested) {
+        let name = if self.view_mod(requested).is_some() {
             requested
         } else {
             tracing::warn!(mod_name = requested, "terminal menu mod not found; using menu");
             "menu"
         };
-        let defaults = self.folders.get(name).map(|f| mod_overlay(&f.dir)).unwrap_or_else(|| json!({}));
+        let defaults = self.view_mod(name).map(|f| mod_overlay(&f.dir)).unwrap_or_else(|| json!({}));
         let spec = terminal_menu_spec(name, &defaults, tab, target);
         self.open_overlay(mods::new_overlay_id(), spec, window, cx);
     }
@@ -3631,12 +3967,17 @@ impl AppWindow {
     /// The layout's notification mod (`"toast"` on the root), else the shipped `toast`.
     fn toast_mod(&self) -> &str {
         let requested = self.chrome.toast.as_deref().unwrap_or("toast");
-        if self.folders.contains_key(requested) {
+        if self.view_mod(requested).is_some() {
             requested
         } else {
             tracing::warn!(mod_name = requested, "toast mod not found; using toast");
             "toast"
         }
+    }
+
+    fn error_notice(&mut self, title: &str, body: &str, window: &mut Window, cx: &mut Context<Self>) {
+        let spec = json!({"kind":"toast", "notification":{"title":title, "body":body, "level":"error"}});
+        self.open_overlay(mods::new_overlay_id(), spec, window, cx);
     }
 
     fn open_overlay(&mut self, id: String, spec: Value, window: &mut Window, cx: &mut Context<Self>) {
@@ -3837,6 +4178,7 @@ impl AppWindow {
             Request::OpenOverlay { id, spec } => self.open_overlay(id, spec, window, cx),
             Request::CloseOverlay { id } => self.close_overlay(&id, window, cx),
             Request::SetWindowTitle(title) => window.set_window_title(title.as_deref().unwrap_or("Herdr")),
+            Request::SetBadge(text) => crate::badge::set(text.as_deref()),
             Request::Refresh => self.refresh_mods(cx),
             Request::Control { cmd, reply } => {
                 let _ = reply.send(self.control(cmd, window, cx));
@@ -3848,12 +4190,6 @@ impl AppWindow {
         if let Some(name) = cmd.get("do").and_then(Value::as_str) {
             let args = cmd.get("args").cloned().unwrap_or(Value::Null);
             return self.run_as(name, args, false, window, cx);
-        }
-        if let Some(path) = cmd.get("shot").and_then(Value::as_str) {
-            return match crate::control::save_shot(window, std::path::Path::new(path)) {
-                Ok(()) => json!({ "path": path }),
-                Err(error) => json!({ "error": format!("cannot save screenshot: {error:#}") }),
-            };
         }
         if cmd.get("commands").is_some() {
             return crate::commands::listing();
@@ -3873,6 +4209,8 @@ impl AppWindow {
                 .iter()
                 .filter_map(|w| std::fs::read_to_string(file(&format!("{w}.error"))).ok())
                 .chain(self.copies.values().filter_map(|c| Some(format!("mod {}: {}", c.inst.name, c.error.as_ref()?))))
+                .chain(self.folders.iter().filter_map(|(id, f)| Some(format!("mod {id}: {}", f.manifest_error.as_ref()?))))
+                .chain(self.link_errors.iter().map(|(id, err)| format!("mod {id}: link.js: {err}")))
                 .chain(self.documents.iter().filter_map(|(m, s)| s.error.as_ref().map(|e| format!("layout {}: {e}", if m.is_empty() { "local" } else { m }))))
                 .collect();
             return json!({
@@ -4015,34 +4353,144 @@ impl AppWindow {
         if changed.iter().any(|p| p.parent() == Some(std::path::Path::new("layouts"))) {
             crate::macos::refresh_menus(cx);
         }
-        let edited: BTreeSet<String> = changed.iter().filter_map(|p| crate::files::mod_of(p)).collect();
+        let changed_mods: BTreeSet<String> = changed.iter().filter_map(|p| crate::files::mod_of(p)).collect();
+        let edited: BTreeSet<String> = changed_mods.into_iter().filter(|name| {
+            let Some(folder) = self.folders.get(name) else { return true };
+            let stamp = crate::files::mod_stamp(&folder.dir);
+            // An incomplete scan cannot prove that the source is unchanged.
+            stamp.is_none() || self.mod_stamps.borrow_mut().insert(name.clone(), stamp.clone()).as_ref() != Some(&stamp)
+        }).collect();
         if edited.is_empty() {
             return;
         }
+        self.failed_loads.retain(|name| !edited.contains(name));
         // Copies that load now (a new folder, a fixed failed load) already run the
         // saved code: reloading them too would start them twice.
         let loaded: BTreeSet<u64> = self.copies.values().filter(|c| c.root.is_some()).map(|c| c.id).collect();
+        let count = self.copies.len();
+        self.copies.retain(|_, c| c.root.is_some() || !edited.contains(&c.inst.name));
+        let retry = self.copies.len() != count;
         self.sync_folders(window, cx);
+        if retry {
+            self.sync(window, cx);
+        }
         let Some(runtime) = self.runtime.clone() else { return };
+        // A reload keeps the code it replaces: QuickJS frees evaluated modules
+        // only with the whole context. Before the window's VM runs out, start a
+        // new one, which also loads the saved code.
+        if runtime.memory_share() >= RESTART_MODS_AT
+            && self.copies.values().any(|c| edited.contains(&c.inst.name) && loaded.contains(&c.id))
+        {
+            if self.load_recovery.is_none_or(|last| last.elapsed() >= Duration::from_secs(60)) && self.copies.values().all(|c| c.error.is_none()) {
+                self.restart_mods(window, cx);
+                return;
+            }
+            if self.recover_mods(&edited, window, cx) {
+                return;
+            }
+        }
+        let mut exhausted = BTreeSet::new();
         for copy in self.copies.values_mut().filter(|c| edited.contains(&c.inst.name) && loaded.contains(&c.id)) {
             let Some(root) = &copy.root else { continue };
-            let error = runtime.reload_now(root, window, cx).err().map(|e| format!("{e:#}"));
+            let near_limit = runtime.memory_share() >= RESTART_MODS_AT;
+            let error = runtime.reload_now(root, window, cx).err();
+            if error.as_ref().is_some_and(|e| near_limit || out_of_memory(e) || runtime.memory_share() >= RESTART_MODS_AT) {
+                exhausted.insert(copy.inst.name.clone());
+            }
+            let error = error.map(|e| format!("{e:#}"));
             if let Some(e) = &error {
                 tracing::warn!("mod reload failed: {e}");
             }
             copy.error = error;
         }
+        if !exhausted.is_empty() {
+            self.recover_mods(&exhausted, window, cx);
+        }
+    }
+
+    fn recover_mods(&mut self, names: &BTreeSet<String>, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        if self.load_recovery.is_some_and(|last| last.elapsed() < Duration::from_secs(60))
+            || names.iter().all(|name| self.failed_loads.contains(name))
+        {
+            return false;
+        }
+        if !self.restart_mods(window, cx) {
+            return false;
+        }
+        self.load_recovery = Some(Instant::now());
+        true
+    }
+
+    /// The window's mods on a new VM, as when the window opens: every copy
+    /// closes on the old one and the shown ones load again, open popups,
+    /// dialogs and windows too (toasts close). Hidden copies start fresh when
+    /// shown. Terminals, the core and the layout stay.
+    fn restart_mods(&mut self, window: &mut Window, cx: &mut Context<Self>) -> bool {
+        let fresh = match ShellRuntime::replace_default(cx) {
+            Ok(fresh) => fresh,
+            Err(e) => {
+                tracing::error!("could not start a new script runtime: {e:#}");
+                return false;
+            }
+        };
+        tracing::warn!("mod memory was nearly used up; restarting this window's mods");
+        if let Some(events) = &self.file_events {
+            fresh.set_source_revision_provider(events.revision_provider());
+        }
+        // A toast would show (or send) its notification again: it closes.
+        let toasts: Vec<String> = self.overlays.iter().filter(|o| o.kind == OverlayKind::Toast).map(|o| o.id.clone()).collect();
+        for id in toasts {
+            self.remove_overlay(&id, window, cx);
+        }
+        // An overlay's own mod loads when it opens, not in `sync`: it loads
+        // again here, in its frame.
+        let reopen: Vec<(String, Instance, bool)> = self
+            .overlays
+            .iter()
+            .filter(|o| o.layout.is_none())
+            .filter_map(|o| self.copies.get(&o.slot).map(|c| (o.slot.clone(), c.inst.clone(), o.fit)))
+            .collect();
+        let slots: Vec<String> = self.copies.keys().cloned().collect();
+        for slot in slots {
+            self.remove_copy(&slot, window, cx);
+        }
+        self.runtime = Some(fresh);
+        // A failure in the fresh VM gets reported, not retried forever.
+        self.restarting_mods = true;
+        // The frame takes the keyboard first, as when it opened.
+        if let Some(focus) = self.overlays.iter().rev().find(|o| o.kind.modal_keys()).map(|o| o.focus.clone()) {
+            focus.focus(window, cx);
+        }
+        for (slot, inst, fit) in reopen {
+            let copy = self.load(inst, window, cx);
+            if fit
+                && let Some(root) = &copy.root
+            {
+                root.update(cx, |r, cx| r.set_fit_content(true, cx));
+            }
+            self.copies.insert(slot, copy);
+        }
+        self.sync(window, cx);
+        self.restarting_mods = false;
+        if self.copies.values().any(|c| c.error.is_some()) {
+            self.load_recovery = Some(Instant::now());
+            self.failed_loads.extend(self.copies.values().filter(|c| c.error.is_some()).map(|c| c.inst.name.clone()));
+        }
+        true
     }
 
     fn sync_folders(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         if self.runtime.is_none() {
             return;
         }
-        let found: BTreeMap<String, Found> = mods::scan().into_iter().map(|f| (f.id.clone(), f)).collect();
-        let edited: BTreeSet<String> = found.values().filter(|f| self.folders.get(&f.id).is_some_and(|o| o.stamp != f.stamp)).map(|f| f.id.clone()).collect();
+        let found = mods::scan(&self.folders);
+        let edited: BTreeSet<String> = found.iter().filter_map(|(id, f)| {
+            self.folders.get(id).filter(|old| old.stamp != f.stamp || old.has_view != f.has_view).map(|_| id.clone())
+        }).collect();
         let added = found.keys().any(|k| !self.folders.contains_key(k));
         let removed = self.folders.keys().any(|k| !found.contains_key(k));
-        let fresh: Vec<Found> = found.values().filter(|f| !self.seen.contains(&f.id)).cloned().collect();
+        self.mod_stamps.borrow_mut().retain(|name, _| found.contains_key(name));
+        self.link_errors.retain(|name, _| found.contains_key(name) && !edited.contains(name));
         self.folders = found;
 
         // Copies that failed get another try when their folder changes; loaded ones hot-reload.
@@ -4051,22 +4499,32 @@ impl AppWindow {
             self.copies.remove(slot);
         }
         // A mod seen for the first time goes where it asked (unless the layout already shows it).
-        for f in fresh {
-            if shipped_layouts().contains(&self.layout_name.as_str()) && f.hint.place.as_deref().unwrap_or("right") != "none" {
+        let seen_before = self.seen.len();
+        let shipped = shipped_layouts().contains(&self.layout_name.as_str());
+        let mut layout_changed = false;
+        for (id, f) in &self.folders {
+            let place = f.hint.place.as_deref().unwrap_or("right");
+            if !f.has_view || (shipped && place != "none") || !self.seen.insert(id.clone()) {
                 continue;
             }
-            self.seen.insert(f.id.clone());
-            write_atomic(&file("seen.json"), &serde_json::to_string(&self.seen).unwrap_or_default());
-            let shown = self.chrome.walk().iter().any(|n| matches!(n.content(), Some(Content::Mod { name, .. }) if *name == f.id));
-            let place = f.hint.place.as_deref().unwrap_or("right");
-            if !shown && place != "none" && !shipped_layouts().contains(&self.layout_name.as_str()) {
-                let mut block = Node::block(self.model.fresh_id("b"), Content::Mod { name: f.id.clone(), props: Value::Null });
+            let shown = self.chrome.walk().iter().any(|n| matches!(n.content(), Some(Content::Mod { name, .. }) if name == id));
+            if !shown && place != "none" {
+                let mut block = Node::block(self.model.fresh_id("b"), Content::Mod { name: id.clone(), props: Value::Null });
                 block.size = Some(Span::Px { px: f.hint.size.unwrap_or(320.0) });
                 dock(&mut self.chrome, block, place, self.model.fresh_id("r"));
+                layout_changed = true;
             }
         }
-        if !retry.is_empty() || added || removed {
+        if self.seen.len() != seen_before {
+            write_atomic(&file("seen.json"), &serde_json::to_string(&self.seen).unwrap_or_default());
+        }
+        if !retry.is_empty() || added || removed || layout_changed || self.unseen_link_handlers().next().is_some() {
             self.sync(window, cx);
+        } else {
+            self.refresh_link_handlers();
+            if !edited.is_empty() {
+                cx.notify();
+            }
         }
     }
 
@@ -4265,7 +4723,7 @@ impl AppWindow {
         match self.copies.get(slot) {
             Some(Copy { root: Some(root), inst, .. }) => div()
                 .size_full()
-                .key_context(format!("Mod mod = {}", inst.name).as_str())
+                .key_context(key_context("Mod", "mod", &inst.name))
                 .when(in_pane, |d| {
                     let id = slot.to_owned();
                     d.on_any_mouse_down(cx.listener(move |this, _, _, cx| {
@@ -4770,7 +5228,7 @@ fn swap_by(args: &Value) -> Result<SwapBy<'_>, String> {
 
 fn needs_model_pane(name: &str, args: &Value) -> bool {
     match name {
-        "pane.split" | "pane.close" | "pane.zoom" | "pane.swap" | "terminal.show" => AppWindow::arg(args, "pane").is_none(),
+        "pane.split" | "pane.close" | "pane.zoom" | "pane.swap" | "pane.rename" | "pane.resize" | "terminal.show" => AppWindow::arg(args, "pane").is_none(),
         "pane.go" => true,
         "terminal.open" | "terminal.keep" => matches!(AppWindow::arg(args, "place"), Some("right" | "down")),
         _ => false,
@@ -4871,10 +5329,12 @@ fn dock(root: &mut Node, block: Node, place: &str, wrapper_id: String) {
     let mut old = std::mem::replace(root, Node::new("", Kind::Row { children: vec![] }));
     let toast = old.toast.take();
     let terminal_menu = old.terminal_menu.take();
+    let link_handlers = std::mem::take(&mut old.link_handlers);
     let children = if first { vec![block, old] } else { vec![old, block] };
     let mut wrapper = Node::container(wrapper_id, axis, children);
     wrapper.toast = toast;
     wrapper.terminal_menu = terminal_menu;
+    wrapper.link_handlers = link_handlers;
     wrapper.divider = Some(Line { width: 1.0, color: "border".into() });
     *root = wrapper;
 }
@@ -5004,6 +5464,7 @@ impl Render for AppWindow {
             self.synced_model_pane = self.model.focused_pane();
             self.publish(cx);
         }
+        self.publish_focused_selection(window, cx);
         self.tick_floats(window);
         self.apply_titlebar(window);
         self.apply_blur(window);
@@ -5021,13 +5482,18 @@ impl Render for AppWindow {
             .id("herdr")
             .track_focus(&self.focus)
             // `layout:<name>` key sections apply while that layout shows.
-            .key_context(format!("Herdr layout = {}", self.layout_name).as_str())
+            .key_context(key_context("Herdr", "layout", &self.layout_name))
             .size_full()
             .relative()
             .bg(c("background"))
             .text_color(c("foreground"))
             .font_family(settings::get().ui_font_family.clone())
             .on_action(cx.listener(|this, a: &ShellAction, w, cx| {
+                #[cfg(any(target_os = "macos", test))]
+                if matches!(a.id(), "terminal.copy" | "terminal.paste")
+                    && crate::macos::dispatch_edit(a, this.terms.values().any(|t| t.view.read(cx).owns_keyboard_focus(w, cx)), w, cx) {
+                    return;
+                }
                 // Nothing selected: the copy chord goes to the program (#216).
                 if a.id() == "terminal.copy" {
                     if !this.copy_key(w, cx) {
@@ -5573,7 +6039,7 @@ mod tests {
         let cmd = vec!["agent".to_owned(), "a 'quoted' task; $(not-a-command)\nnext line".to_owned(), "".to_owned()];
         for login in [false, true] {
             for sh in ["/bin/bash", "/bin/zsh", "/bin/sh", "/bin/dash", "/bin/fish"] {
-                let run = super::unix_agent_argv(sh.into(), cmd.clone(), login);
+                let run = super::unix_agent_argv(sh.into(), cmd.clone(), login, true);
                 assert_eq!(run[0], sh);
                 assert_eq!(run[1], if login { "-lic" } else { "-ic" });
                 assert_eq!(run[3], sh);
@@ -5586,7 +6052,7 @@ mod tests {
                 };
                 assert_eq!(run[2], expected);
                 // Whatever the wrapper, a pane shows the agent it runs, not the shell.
-                let agent = super::unix_agent_argv(sh.into(), vec!["cursor-agent".into()], login);
+                let agent = super::unix_agent_argv(sh.into(), vec!["cursor-agent".into()], login, true);
                 assert_eq!(crate::programs::of(None, &agent)["key"], "cursor", "{agent:?}");
             }
         }
@@ -5594,7 +6060,7 @@ mod tests {
 
     #[cfg(unix)]
     #[test]
-    fn other_shells_run_the_command_then_return_to_the_shell() {
+    fn other_shells_run_the_command_on_the_app_path_then_return_to_the_shell() {
         use std::os::unix::fs::PermissionsExt;
         let temp = if cfg!(target_os = "linux") { std::path::PathBuf::from("/var/tmp") } else { std::env::temp_dir() };
         let dir = temp.join(format!("herdr-other-shell-test-{}", std::process::id()));
@@ -5604,31 +6070,165 @@ mod tests {
         std::fs::write(&nu, "#!/bin/sh\nprintf 'shell:%s\\n' \"$@\"\n").unwrap();
         std::fs::set_permissions(&nu, std::fs::Permissions::from_mode(0o755)).unwrap();
         let task = "a 'quoted' task; $(not-a-command)\nnext line";
-        let cmd = vec!["printf".to_owned(), "[%s]\n".to_owned(), task.to_owned(), "".to_owned()];
+        // `env` is found only on this PATH, not on the PATH the terminal starts with.
+        let cmd = vec!["env".to_owned(), "printf".to_owned(), "[%s]\n".to_owned(), task.to_owned(), "".to_owned()];
         for login in [false, true] {
-            let run = super::unix_agent_argv(nu.to_string_lossy().into(), cmd.clone(), login);
-            let out = std::process::Command::new(&run[0]).args(&run[1..]).output().unwrap();
+            let run = super::unix_agent_argv(nu.to_string_lossy().into(), cmd.clone(), login, true);
+            let out = std::process::Command::new(&run[0]).args(&run[1..]).env("PATH", "/nonexistent").output().unwrap();
             assert_eq!(String::from_utf8(out.stdout).unwrap(), format!("[{task}]\n[]\nshell:-i\n"));
         }
         std::fs::remove_dir_all(&dir).unwrap();
     }
 
+    /// A split's program runs after your rc files (their PATH), then the shell
+    /// becomes it: its exit code ends the pane, a missing one fails as the core's does.
+    #[cfg(unix)]
+    #[test]
+    fn a_split_program_replaces_your_shell() {
+        use std::os::unix::{fs::PermissionsExt, process::CommandExt};
+        let temp = if cfg!(target_os = "linux") { std::path::PathBuf::from("/var/tmp") } else { std::env::temp_dir() };
+        let home = temp.join(format!("herdr-split-shell-test-{}", std::process::id()));
+        std::fs::create_dir_all(home.join("rc bin")).unwrap();
+        std::fs::create_dir_all(home.join(".config/fish")).unwrap();
+        let rc = "case $- in *i*) export PATH=\"$HOME/rc bin:$PATH\";; esac\n";
+        for file in [".bashrc", ".zshrc", ".profile", ".bash_profile", ".zprofile"] {
+            std::fs::write(home.join(file), rc).unwrap();
+        }
+        std::fs::write(home.join(".config/fish/config.fish"), "if status is-interactive\nset -gx PATH \"$HOME/rc bin\" $PATH\nend\n").unwrap();
+        let tool = home.join("rc bin/rc-tool");
+        std::fs::write(&tool, "#!/bin/sh\nprintf '<%s>\\n' \"$@\"\nexit 7\n").unwrap();
+        std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let arg = "a 'quoted' $HOME; $(not-a-command)\nnext line";
+        let run = |argv: Vec<String>| {
+            let mut cmd = std::process::Command::new(&argv[0]);
+            cmd.args(&argv[1..]).env_clear().env("HOME", &home).env("ZDOTDIR", &home)
+                .env("PATH", "/usr/bin:/bin").env("TERM", "dumb").stdin(std::process::Stdio::null());
+            unsafe extern "C" {
+                fn setsid() -> std::ffi::c_int;
+            }
+            // Interactive shells otherwise take the test runner's terminal.
+            unsafe { cmd.pre_exec(|| if setsid() == -1 { Err(std::io::Error::last_os_error()) } else { Ok(()) }) };
+            cmd.output().unwrap()
+        };
+        for sh in ["/bin/bash", "/bin/sh", "/bin/zsh", "/usr/bin/fish"] {
+            if !std::path::Path::new(sh).exists() {
+                continue;
+            }
+            // dash reads no rc file unless it is a login shell.
+            for login in [sh.ends_with("/sh"), true] {
+                let out = run(super::unix_agent_argv(sh.into(), vec!["rc-tool".into(), arg.into(), "".into()], login, false));
+                let stdout = String::from_utf8_lossy(&out.stdout);
+                assert!(stdout.ends_with(&format!("<{arg}>\n<>\n")), "{sh}: {stdout:?} {}", String::from_utf8_lossy(&out.stderr));
+                assert_eq!(out.status.code(), Some(7), "{sh}");
+                let out = run(super::unix_agent_argv(sh.into(), vec!["no-such-program".into()], login, false));
+                assert_eq!(out.status.code(), Some(127), "{sh}");
+                assert!(String::from_utf8_lossy(&out.stderr).contains("cannot start \"no-such-program\": No such file or directory"), "{sh}: {}", String::from_utf8_lossy(&out.stderr));
+                // Until the shell becomes it, a pane shows the agent, not the shell.
+                let agent = super::unix_agent_argv(sh.into(), vec!["cursor-agent".into()], login, false);
+                assert_eq!(crate::programs::of(None, &agent)["key"], "cursor", "{agent:?}");
+            }
+        }
+        // A shell that can't parse the wrapper (nushell): the program as given.
+        let cmd = vec!["rc-tool".to_owned(), arg.to_owned()];
+        assert_eq!(super::unix_agent_argv("/usr/bin/nu".into(), cmd.clone(), false, false), cmd);
+        std::fs::remove_dir_all(&home).unwrap();
+    }
+
     #[test]
     fn early_launch_failures_show_exit_code_and_last_output_lines() {
         let mut record = serde_json::json!({"reason":"exited", "exit_code":127, "created_ms":1000, "finished_ms":3000});
-        assert_eq!(super::launch_failure(&record, "old\none\ntwo\nthree\nfour\nfive\n\n").as_deref(), Some("Exit code 127\none\ntwo\nthree\nfour\nfive"));
-        assert_eq!(super::launch_failure(&record, "").as_deref(), Some("Exit code 127"));
+        assert_eq!(super::launch_failure(&record, || "old\none\ntwo\nthree\nfour\nfive\n\n".into()).as_deref(), Some("Exit code 127\none\ntwo\nthree\nfour\nfive"));
+        assert_eq!(super::launch_failure(&record, String::new).as_deref(), Some("Exit code 127"));
         record["exit_code"] = 0.into();
-        assert!(super::launch_failure(&record, "").is_none());
+        assert!(super::launch_failure(&record, String::new).is_none());
         record["exit_code"] = 1.into();
         record["finished_ms"] = 3001.into();
-        assert!(super::launch_failure(&record, "").is_none());
+        assert!(super::launch_failure(&record, String::new).is_none());
         record["finished_ms"] = 999.into();
-        assert!(super::launch_failure(&record, "").is_none());
+        assert!(super::launch_failure(&record, String::new).is_none());
         record["finished_ms"] = 2000.into();
         record["reason"] = "killed".into();
-        assert!(super::launch_failure(&record, "").is_none());
-        assert!(super::launch_failure(&serde_json::Value::Null, "").is_none());
+        assert!(super::launch_failure(&record, String::new).is_none());
+        assert!(super::launch_failure(&serde_json::Value::Null, String::new).is_none());
+    }
+
+    /// The split wrapper's own "cannot start" comes after the person's shell config, so a
+    /// slow config can't hide it. Its program's own exits keep the 2 s rule, even an exit 127
+    /// that prints the same words: only the wrapper knows its launch token.
+    #[cfg(unix)]
+    #[test]
+    fn a_split_that_cannot_start_its_program_fails_however_slow_the_shell() {
+        use std::os::unix::process::CommandExt;
+        let temp = if cfg!(target_os = "linux") { std::path::PathBuf::from("/var/tmp") } else { std::env::temp_dir() };
+        let home = temp.join(format!("herdr-split-slow-test-{}", std::process::id()));
+        std::fs::create_dir_all(home.join(".config/fish")).unwrap();
+        let rc = "case $- in *i*) [ -z \"$SLOW_RC\" ] || sleep 2.1;; esac\n";
+        for file in [".bashrc", ".zshrc", ".profile", ".bash_profile", ".zprofile"] {
+            std::fs::write(home.join(file), rc).unwrap();
+        }
+        std::fs::write(home.join(".config/fish/config.fish"), "if status is-interactive; and set -q SLOW_RC\nsleep 2.1\nend\n").unwrap();
+        let token = "herdr-test-launch-token";
+        // As the core records it: exit, start and end, argv, the last title the terminal set, labels.
+        let run = |argv: Vec<String>, shell: &str, slow: bool| {
+            let mut cmd = std::process::Command::new(&argv[0]);
+            cmd.args(&argv[1..]).env_clear().env("HOME", &home).env("ZDOTDIR", &home).env("SHELL", shell)
+                .env("PATH", "/usr/bin:/bin").env("TERM", "dumb").env("HERDR_LAUNCH", token).stdin(std::process::Stdio::null());
+            if slow {
+                cmd.env("SLOW_RC", "1");
+            }
+            unsafe extern "C" {
+                fn setsid() -> std::ffi::c_int;
+            }
+            unsafe { cmd.pre_exec(|| if setsid() == -1 { Err(std::io::Error::last_os_error()) } else { Ok(()) }) };
+            let start = std::time::Instant::now();
+            let out = cmd.output().unwrap();
+            let bytes = [out.stdout, out.stderr].concat();
+            let text = String::from_utf8_lossy(&bytes).into_owned();
+            let title = text.rsplit("\x1b]2;").next().filter(|_| text.contains("\x1b]2;")).and_then(|t| t.split('\x07').next()).unwrap_or_default().to_owned();
+            let record = serde_json::json!({"reason":"exited", "exit_code":out.status.code(), "created_ms":0, "finished_ms":start.elapsed().as_millis() as u64,
+                "argv":argv, "title":title, "labels":{"herdr.launch":token}});
+            (record, text.replace(&format!("\x1b]2;{title}\x07"), ""))
+        };
+        let missing = vec!["no-such-prog".to_owned()];
+        // Astra's case: `sh` starts, runs past 2 s, says the wrapper's words itself, exits 127.
+        let own_127 = ["sh", "-c", "sleep 2.1; printf 'cannot start \"sh\": No such file or directory\\n'; exit 127"].map(String::from).to_vec();
+        let shells = ["/bin/bash", "/bin/zsh", "/usr/bin/fish"].into_iter().filter(|s| std::path::Path::new(s).exists());
+        let wrapped = |cmd: &Vec<String>| shells.clone().flat_map(|sh| [(sh, super::unix_agent_argv(sh.into(), cmd.clone(), false, false)), (sh, crate::remote_shell::exec(cmd.clone()))]).collect::<Vec<_>>();
+        std::thread::scope(|s| {
+            let mut checks = vec![];
+            for (sh, argv) in wrapped(&missing) {
+                checks.push(s.spawn(move || {
+                    let (record, output) = run(argv.clone(), sh, true);
+                    assert!(record["finished_ms"].as_u64().unwrap() > 2000, "{argv:?}: {record}");
+                    let toast = super::launch_failure(&record, || output.clone());
+                    assert!(toast.as_deref().is_some_and(|t| t.starts_with("Exit code 127\n") && t.contains("\ncannot start \"no-such-prog\": No such file or directory")), "{argv:?}: {toast:?} {record} {output:?}");
+                }));
+            }
+            for (sh, argv) in wrapped(&own_127) {
+                checks.push(s.spawn(move || {
+                    let (record, output) = run(argv.clone(), sh, false);
+                    assert_eq!(record["exit_code"], 127, "{argv:?}: {output:?}");
+                    assert!(output.contains("cannot start \"sh\": No such file or directory"), "{argv:?}: {output:?}");
+                    assert!(record["finished_ms"].as_u64().unwrap() > 2000, "{argv:?}: {record}");
+                    assert_eq!(super::launch_failure(&record, || output.clone()), None, "{argv:?}: {record} {output:?}");
+                }));
+            }
+            // The program never sees the token, so it can't say it by accident.
+            for (sh, argv) in wrapped(&vec!["env".to_owned()]) {
+                checks.push(s.spawn(move || {
+                    let (record, output) = run(argv.clone(), sh, false);
+                    assert_eq!(record["exit_code"], 0, "{argv:?}: {output:?}");
+                    assert!(output.contains("SHELL=") && !output.contains(token), "{argv:?}: {output:?}");
+                }));
+            }
+            for check in checks {
+                check.join().unwrap();
+            }
+        });
+        // A late exit with the wrapper's token in the title but another code keeps the 2 s rule.
+        let record = serde_json::json!({"reason":"exited", "exit_code":7, "created_ms":0, "finished_ms":9000, "title":token, "labels":{"herdr.launch":token}});
+        assert!(super::launch_failure(&record, || "cannot start \"x\": No such file or directory\n".into()).is_none());
+        std::fs::remove_dir_all(&home).unwrap();
     }
 
     #[gpui::test]
@@ -5748,6 +6348,10 @@ mod tests {
     /// shipped ones run programs on threads of their own, which the test
     /// executor refuses.
     fn open_window<'a>(cx: &'a mut gpui::TestAppContext, mod_name: &str, main_js: &str, layout: serde_json::Value) -> (gpui::Entity<super::AppWindow>, &'a mut gpui::VisualTestContext) {
+        open_window_on(cx, crate::hc::offline(), mod_name, main_js, layout)
+    }
+
+    fn open_window_on<'a>(cx: &'a mut gpui::TestAppContext, core: std::sync::Arc<crate::hc::Core>, mod_name: &str, main_js: &str, layout: serde_json::Value) -> (gpui::Entity<super::AppWindow>, &'a mut gpui::VisualTestContext) {
         use serde_json::json;
         let home = crate::mods::app_dir();
         crate::mods::write_workspace().unwrap();
@@ -5761,9 +6365,348 @@ mod tests {
         let requests = crate::mods::install_policy();
         crate::mods::set_shared("layout".into(), json!("test"));
         crate::mods::set_shared("frame.welcomed".into(), json!("test"));
-        let (view, cx) = cx.add_window_view(|window, cx| super::AppWindow::new(crate::hc::offline(), requests, window, cx));
+        let (view, cx) = cx.add_window_view(|window, cx| super::AppWindow::with_file_events(core, requests, Some(crate::files::FileEvents::for_test(home.clone())), window, cx));
         assert_eq!(view.update(cx, |this, _| this.layout_name.clone()), "test");
         (view, cx)
+    }
+
+    /// A mod whose every version keeps `mib` MiB alive at module scope, in
+    /// 1 MiB strings so no single allocation is large.
+    fn heavy_mod(version: usize, mib: usize) -> String {
+        format!("import {{ View, div }} from \"gpui-kit\";\n\
+            const kept = Array.from({{ length: {mib} }}, (_, i) => \"{version}-\".padEnd(1 << 20, String(i)));\n\
+            export default class Heavy extends View {{ render() {{ return div().child(String(kept.length)); }} }}\n")
+    }
+
+    /// Saves `heavy`'s main.js as `version` and lets the window apply it, then
+    /// returns the mounted copies and their errors.
+    fn edit_heavy(view: &gpui::Entity<super::AppWindow>, version: usize, mib: usize, cx: &mut gpui::VisualTestContext) -> (usize, Vec<String>) {
+        std::fs::write(crate::mods::app_dir().join("mods/heavy/main.js"), heavy_mod(version, mib)).unwrap();
+        cx.update(|window, cx| view.update(cx, |this, cx| this.files_changed(vec!["mods/heavy/main.js".into()], window, cx)));
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        view.update(cx, |this, _| (
+            this.copies.values().filter(|c| c.root.is_some()).count(),
+            this.copies.values().filter_map(|c| c.error.clone()).collect(),
+        ))
+    }
+
+    fn open_heavy(cx: &mut gpui::TestAppContext, mib: usize) -> (gpui::Entity<super::AppWindow>, &mut gpui::VisualTestContext) {
+        let (view, cx) = open_window(cx, "heavy", &heavy_mod(0, mib), serde_json::json!({ "id": "heavy", "type": "block", "content": { "mod": "heavy" } }));
+        cx.run_until_parked();
+        assert_eq!(view.update(cx, |this, _| this.copies.values().filter(|c| c.root.is_some()).count()), 1, "the mod loads");
+        (view, cx)
+    }
+
+    #[test]
+    fn repeated_mod_edits_start_a_new_vm_before_the_old_one_fills() {
+        in_own_process("edits_restart_full_vm");
+    }
+
+    /// QuickJS frees evaluated modules only with their context, so each edit
+    /// leaves the replaced version in the window's VM. At 16 MiB a version the
+    /// 256 MiB ceiling fails a reload within twenty edits unless the window
+    /// moves its mods to a new VM first. The full VM and its code cache go away.
+    #[gpui::test]
+    fn edits_restart_full_vm(cx: &mut gpui::TestAppContext) {
+        if !running_alone("edits_restart_full_vm") {
+            return;
+        }
+        let (view, cx) = open_heavy(cx, 16);
+        let first = view.update(cx, |this, _| std::rc::Rc::downgrade(this.runtime.as_ref().unwrap()));
+        for version in 1..=40 {
+            assert_eq!(edit_heavy(&view, version, 16, cx), (1, vec![]), "edit {version}");
+        }
+        assert!(first.upgrade().is_none(), "the replaced VM, with its code cache, is freed");
+        let share = view.update(cx, |this, _| this.runtime.as_ref().unwrap().memory_share());
+        assert!(share < super::RESTART_MODS_AT, "the current VM has room: {share}");
+    }
+
+    #[test]
+    fn a_reload_that_runs_out_of_memory_starts_a_new_vm() {
+        in_own_process("out_of_memory_restarts_vm");
+    }
+
+    /// One version fills more than half the VM, so the first edit cannot fit
+    /// beside it. The reload fails with out of memory. The window then loads
+    /// the saved code in a new VM instead of leaving the failed view.
+    #[gpui::test]
+    fn out_of_memory_restarts_vm(cx: &mut gpui::TestAppContext) {
+        if !running_alone("out_of_memory_restarts_vm") {
+            return;
+        }
+        let (view, cx) = open_heavy(cx, 140);
+        let first = view.update(cx, |this, _| std::rc::Rc::downgrade(this.runtime.as_ref().unwrap()));
+        assert!(view.update(cx, |this, _| this.runtime.as_ref().unwrap().memory_share()) < super::RESTART_MODS_AT);
+        assert_eq!(edit_heavy(&view, 1, 140, cx), (1, vec![]));
+        assert!(first.upgrade().is_none(), "the exhausted VM is freed");
+    }
+
+    #[test]
+    fn reload_errors_share_the_load_recovery_cap() {
+        in_own_process("reload_recovery_cap");
+    }
+
+    #[gpui::test]
+    fn reload_recovery_cap(cx: &mut gpui::TestAppContext) {
+        if !running_alone("reload_recovery_cap") {
+            return;
+        }
+        let (view, cx) = open_heavy(cx, 140);
+        assert_eq!(edit_heavy(&view, 1, 140, cx), (1, vec![]));
+        let fresh = view.update(cx, |this, _| std::rc::Rc::downgrade(this.runtime.as_ref().unwrap()));
+        let (loaded, errors) = edit_heavy(&view, 2, 140, cx);
+        assert_eq!(loaded, 1, "a failed reload keeps the previous view");
+        assert_eq!(errors.len(), 1, "the capped reload error is reported");
+        view.update(cx, |this, _| {
+            assert!(std::rc::Rc::ptr_eq(&fresh.upgrade().unwrap(), this.runtime.as_ref().unwrap()));
+            this.load_recovery = Some(std::time::Instant::now() - std::time::Duration::from_secs(61));
+        });
+        assert_eq!(edit_heavy(&view, 3, 140, cx), (1, vec![]));
+        assert!(fresh.upgrade().is_none(), "a later edit can recover again");
+    }
+
+    #[test]
+    fn unchanged_mod_events_do_not_restart_a_healthy_vm() {
+        in_own_process("unchanged_mod_events");
+    }
+
+    #[gpui::test]
+    fn unchanged_mod_events(cx: &mut gpui::TestAppContext) {
+        if !running_alone("unchanged_mod_events") {
+            return;
+        }
+        let (view, cx) = open_heavy(cx, 200);
+        let first = view.update(cx, |this, _| std::rc::Rc::downgrade(this.runtime.as_ref().unwrap()));
+        std::fs::write(crate::mods::app_dir().join("mods/heavy/gpui-kit.d.ts"), "generated").unwrap();
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.files_changed(vec!["mods/heavy".into(), "mods/heavy/main.js".into()], window, cx);
+        }));
+        cx.run_until_parked();
+        view.update(cx, |this, _| {
+            assert!(std::rc::Rc::ptr_eq(&first.upgrade().unwrap(), this.runtime.as_ref().unwrap()));
+            assert!(this.copies.values().all(|c| c.error.is_none()));
+        });
+        assert_eq!(edit_heavy(&view, 1, 200, cx), (1, vec![]));
+        assert!(first.upgrade().is_none(), "a real edit refreshes the healthy full VM");
+        assert_eq!(edit_heavy(&view, 2, 200, cx), (1, vec![]), "healthy proactive refreshes are not capped");
+    }
+
+    #[test]
+    fn failed_mass_mounts_retry_on_a_fresh_vm() {
+        in_own_process("mounts_restart_full_vm");
+    }
+
+    #[gpui::test]
+    fn mounts_restart_full_vm(cx: &mut gpui::TestAppContext) {
+        if !running_alone("mounts_restart_full_vm") {
+            return;
+        }
+        let (view, cx) = open_heavy(cx, 140);
+        let first = view.update(cx, |this, _| {
+            std::rc::Rc::downgrade(this.runtime.as_ref().unwrap())
+        });
+        cx.update(|window, cx| {
+            view.update(cx, |this, cx| {
+                this.chrome = serde_json::from_value(
+                    serde_json::json!({"id":"empty","type":"column","children":[]}),
+                )
+                .unwrap();
+                this.sync(window, cx);
+            })
+        });
+        assert_eq!(edit_heavy(&view, 1, 140, cx), (0, vec![]));
+        let share = view.update(cx, |this, _| this.runtime.as_ref().unwrap().memory_share());
+        eprintln!("heap share before mount: {share}");
+        assert!(share < super::RESTART_MODS_AT);
+        cx.update(|window, cx| {
+            view.update(cx, |this, cx| {
+                this.chrome = serde_json::from_value(serde_json::json!({
+                    "id":"many","type":"column","children": (0..20).map(|i| serde_json::json!({
+                        "id":format!("copy{i}"),"type":"block","content":{"mod":"heavy"}
+                    })).collect::<Vec<_>>()
+                }))
+                .unwrap();
+                this.sync(window, cx);
+                eprintln!(
+                    "heap share after mount: {}",
+                    this.runtime.as_ref().unwrap().memory_share()
+                );
+            })
+        });
+        cx.run_until_parked();
+        let (loaded, errors) = view.update(cx, |this, _| {
+            (
+                this.copies.values().filter(|c| c.root.is_some()).count(),
+                this.copies
+                    .values()
+                    .filter_map(|c| c.error.clone())
+                    .collect::<Vec<_>>(),
+            )
+        });
+        assert_eq!(loaded, 20, "{errors:?}");
+        assert!(errors.is_empty());
+        assert!(first.upgrade().is_none(), "the exhausted VM is freed");
+    }
+
+    #[test]
+    fn opaque_load_errors_near_the_limit_retry_only_once() {
+        in_own_process("opaque_load_recovery");
+    }
+
+    #[gpui::test]
+    fn opaque_load_recovery(cx: &mut gpui::TestAppContext) {
+        if running_alone("opaque_load_recovery") {
+            check_failed_load_recovery(cx, 200, "throw null;");
+        }
+    }
+
+    #[test]
+    fn oversized_mods_do_not_restart_forever() {
+        in_own_process("oversized_load_recovery");
+    }
+
+    #[gpui::test]
+    fn oversized_load_recovery(cx: &mut gpui::TestAppContext) {
+        if running_alone("oversized_load_recovery") {
+            check_failed_load_recovery(cx, 1, &heavy_mod(0, 300));
+        }
+    }
+
+    fn check_failed_load_recovery(cx: &mut gpui::TestAppContext, held_mib: usize, broken: &str) {
+        let (view, cx) = open_heavy(cx, held_mib);
+        let folder = crate::mods::app_dir().join("mods/broken");
+        std::fs::create_dir_all(&folder).unwrap();
+        std::fs::write(folder.join("mod.json"), r#"{"place":"none"}"#).unwrap();
+        std::fs::write(folder.join("main.js"), broken).unwrap();
+        crate::mods::set_shared("vmdead.sentinel".into(), serde_json::json!(42));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.open_overlay("dialog".into(), serde_json::json!({"kind":"dialog","mod":"heavy"}), window, cx);
+        }));
+        let first = view.update(cx, |this, _| {
+            std::rc::Rc::downgrade(this.runtime.as_ref().unwrap())
+        });
+        cx.update(|window, cx| {
+            view.update(cx, |this, cx| {
+                this.sync_folders(window, cx);
+                this.chrome = serde_json::from_value(serde_json::json!({
+                    "id":"root","type":"row","children":[
+                        {"id":"heavy","type":"block","content":{"mod":"heavy"}},
+                        {"id":"broken","type":"block","content":{"mod":"broken"}}
+                    ]
+                }))
+                .unwrap();
+                this.sync(window, cx);
+            })
+        });
+        cx.run_until_parked();
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(first.upgrade().is_none(), "a failed load gets one fresh VM");
+        let fresh = view.update(cx, |this, _| {
+            std::rc::Rc::downgrade(this.runtime.as_ref().unwrap())
+        });
+        cx.executor()
+            .advance_clock(std::time::Duration::from_secs(2));
+        cx.run_until_parked();
+        view.update(cx, |this, _| {
+            assert!(std::rc::Rc::ptr_eq(
+                &fresh.upgrade().unwrap(),
+                this.runtime.as_ref().unwrap()
+            ));
+            assert_eq!(this.copies.values().filter(|c| c.root.is_some()).count(), 2);
+            assert_eq!(crate::mods::shared("vmdead.sentinel"), Some(serde_json::json!(42)));
+            let errors: Vec<_> = this
+                .copies
+                .values()
+                .filter_map(|c| c.error.as_ref())
+                .collect();
+            assert_eq!(errors.len(), 1, "the broken mod's error is still reported");
+            if held_mib == 200 {
+                assert!(this.runtime.as_ref().unwrap().memory_share() >= super::RESTART_MODS_AT);
+                assert!(!errors[0].contains("out of memory"), "{errors:?}");
+            }
+        });
+        cx.update(|window, cx| {
+            let this = view.read(cx);
+            let dialog = this.overlays.iter().find(|o| o.id == "dialog").unwrap();
+            assert!(this.copies[&dialog.slot].root.is_some());
+            assert!(dialog.focus.contains_focused(window, cx), "the reopened dialog keeps the keyboard");
+        });
+    }
+
+
+    #[test]
+    fn persistent_load_errors_do_not_restart_on_layout_switches() {
+        in_own_process("load_recovery_survives_switches");
+    }
+
+    #[gpui::test]
+    fn load_recovery_survives_switches(cx: &mut gpui::TestAppContext) {
+        if !running_alone("load_recovery_survives_switches") {
+            return;
+        }
+        let home = crate::mods::app_dir();
+        std::fs::create_dir_all(home.join("layouts")).unwrap();
+        for name in ["broken", "other"] {
+            let folder = home.join("mods").join(name);
+            std::fs::create_dir_all(&folder).unwrap();
+            std::fs::write(folder.join("mod.json"), r#"{"place":"none"}"#).unwrap();
+            std::fs::write(folder.join("main.js"), "export default class {").unwrap();
+        }
+        for (layout, bad) in [("bad-a", "broken"), ("bad-b", "broken"), ("bad-other", "other")] {
+            std::fs::write(home.join(format!("layouts/{layout}.json")), serde_json::json!({
+                "id":"root","type":"row","children":[
+                    {"id":"heavy","type":"block","content":{"mod":"heavy"}},
+                    {"id":"bad","type":"block","content":{"mod":bad}}
+                ]
+            }).to_string()).unwrap();
+        }
+        let (view, cx) = open_heavy(cx, 200);
+        let first = view.update(cx, |this, _| std::rc::Rc::downgrade(this.runtime.as_ref().unwrap()));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.sync_folders(window, cx);
+            this.switch_layout(Some("bad-a"), window, cx);
+        }));
+        cx.run_until_parked();
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(first.upgrade().is_none(), "the initial load failure gets one recovery");
+        let fresh = view.update(cx, |this, _| std::rc::Rc::downgrade(this.runtime.as_ref().unwrap()));
+        for (layout, expired) in [("bad-b", false), ("bad-a", false), ("bad-other", false), ("bad-b", true)] {
+            if expired {
+                view.update(cx, |this, _| this.load_recovery = Some(std::time::Instant::now() - std::time::Duration::from_secs(61)));
+            }
+            cx.update(|window, cx| view.update(cx, |this, cx| {
+                this.switch_layout(Some(layout), window, cx);
+                this.files_changed(vec!["layouts/.state/bad-a.json".into()], window, cx);
+                this.files_changed(vec!["mods/heavy".into()], window, cx);
+            }));
+            cx.run_until_parked();
+            if layout == "bad-b" && !expired {
+                let (_, errors) = edit_heavy(&view, 1, 200, cx);
+                assert_eq!(errors.len(), 2, "a real edit reports its reload error during the cooldown");
+                let (_, errors) = edit_heavy(&view, 2, 1, cx);
+                assert_eq!(errors.len(), 1, "a small repair can still reload in the current VM");
+            }
+            view.update(cx, |this, _| {
+                assert!(std::rc::Rc::ptr_eq(&fresh.upgrade().unwrap(), this.runtime.as_ref().unwrap()), "{layout} must not restart the VM");
+                assert!(this.runtime.as_ref().unwrap().memory_share() >= super::RESTART_MODS_AT);
+                assert_eq!(this.copies.values().filter(|c| c.error.is_some()).count(), 1);
+                assert_eq!(this.copies.values().filter(|c| c.root.is_some()).count(), 1);
+            });
+        }
+        std::fs::write(home.join("mods/broken/main.js"), "throw null;").unwrap();
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.files_changed(vec!["mods/broken/main.js".into()], window, cx);
+        }));
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        let state = view.update(cx, |this, _| format!("cooldown={:?} suppressed={:?} copies={:?}", this.load_recovery.map(|t| t.elapsed()), this.failed_loads, this.copies.values().map(|c| (&c.inst.name, &c.error)).collect::<Vec<_>>()));
+        assert!(fresh.upgrade().is_none(), "its own source edit allows another recovery: {state}");
+        view.update(cx, |this, _| {
+            assert_eq!(this.copies.values().filter(|c| c.error.is_some()).count(), 1);
+        });
     }
 
     #[test]
@@ -5828,6 +6771,43 @@ mod tests {
                 assert_eq!(&saved(this), expected);
             }
         }));
+    }
+
+    #[test]
+    fn a_new_vm_loads_the_open_popup_again() {
+        in_own_process("new_vm_keeps_popup");
+    }
+
+    /// A popup's copy loads when it opens, not with the layout's. When the
+    /// window moves its mods to a new VM, the open popup loads there too
+    /// instead of staying an empty frame that holds the keyboard.
+    #[gpui::test]
+    fn new_vm_keeps_popup(cx: &mut gpui::TestAppContext) {
+        if !running_alone("new_vm_keeps_popup") {
+            return;
+        }
+        let (view, cx) = open_heavy(cx, 1);
+        cx.update(|window, cx| view.update(cx, |this, cx| this.open_overlay("menu".into(), serde_json::json!({ "kind": "popup", "mod": "heavy" }), window, cx)));
+        cx.run_until_parked();
+        let popup = |view: &gpui::Entity<super::AppWindow>, cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| {
+                let this = view.read(cx);
+                let o = this.overlays.iter().find(|o| o.id == "menu").expect("the popup stays open");
+                let copy = this.copies.get(&o.slot);
+                (copy.is_some_and(|c| c.root.is_some() && c.error.is_none()), o.focus.contains_focused(window, cx))
+            })
+        };
+        assert_eq!(popup(&view, cx), (true, true), "the popup shows its mod and holds the keyboard");
+        let note = serde_json::json!({ "kind": "toast", "notification": { "title": "Saved", "body": "", "level": "info" } });
+        cx.update(|window, cx| view.update(cx, |this, cx| this.open_overlay("note".into(), note, window, cx)));
+        let first = view.update(cx, |this, _| std::rc::Rc::downgrade(this.runtime.as_ref().unwrap()));
+        cx.update(|window, cx| view.update(cx, |this, cx| this.restart_mods(window, cx)));
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert!(first.upgrade().is_none(), "the old VM is freed");
+        assert_eq!(popup(&view, cx), (true, true), "on the new VM the popup shows its mod again");
+        assert!(view.update(cx, |this, _| !this.overlays.iter().any(|o| o.id == "note")), "a toast is not shown twice");
+        assert_eq!(view.update(cx, |this, _| this.copies.values().filter(|c| c.root.is_some()).count()), 2, "the block and the popup");
     }
 
     #[test]
@@ -5936,6 +6916,100 @@ mod tests {
     }
 
     #[test]
+    fn panes_resize_from_the_keyboard() {
+        in_own_process("pane_resize_checks_direction");
+    }
+
+    #[gpui::test]
+    fn pane_resize_checks_direction(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("pane_resize_checks_direction") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "unused", "", json!({
+            "id": "root", "type": "block", "content": { "tab": "active" }
+        }));
+        cx.simulate_resize(gpui::size(gpui::px(1000.0), gpui::px(600.0)));
+        let mut split = crate::model::Tab::new("tb1", "", "p1", "t1");
+        split.root.split("p1", super::Axis::Row, crate::model::pane("p2", "t2"), "row".into());
+        view.update_in(cx, |this, window, cx| {
+            this.model.add_space("sp1", "", "/tmp", split);
+            this.documents.entry(String::new()).or_default().available = true;
+            this.sync(window, cx);
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let sizes = |this: &super::AppWindow| serde_json::to_value(&this.model.tab("tb1").unwrap().root).unwrap();
+        view.update_in(cx, |this, window, cx| {
+            let before = sizes(this);
+            let r = this.run_as("pane.resize", json!({ "pane": "p1", "direction": "sideways" }), false, window, cx);
+            assert!(r.get("error").is_some(), "{r}");
+            assert!(this.run_as("pane.resize", json!({ "pane": "nope", "direction": "left" }), false, window, cx).get("error").is_some());
+            this.documents.get_mut("").unwrap().available = false;
+            let r = this.run_as("pane.resize", json!({ "pane": "p1", "direction": "right" }), false, window, cx);
+            assert!(r.get("error").is_some(), "its machine's layout is unavailable: {r}");
+            assert_eq!(sizes(this), before);
+            this.documents.get_mut("").unwrap().available = true;
+            let r = this.run_as("pane.resize", json!({ "pane": "p1", "direction": "right" }), false, window, cx);
+            assert!(r.get("error").is_none(), "{r}");
+            assert_ne!(sizes(this), before, "the divider moved");
+            this.model.tab_mut("tb1").unwrap().root.split("p1", super::Axis::Column, crate::model::pane("p3", "t3"), "col".into());
+            this.sync(window, cx);
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let hide = |this: &mut super::AppWindow, hidden: bool| this.model.tab_mut("tb1").unwrap().root.find_mut("col").unwrap().hidden = hidden;
+        view.update_in(cx, |this, window, cx| {
+            hide(this, true);
+            let before = sizes(this);
+            let r = this.run_as("pane.resize", json!({ "pane": "p1", "direction": "down" }), false, window, cx);
+            assert!(r.get("error").is_some(), "drawn before, but in a hidden branch now: {r}");
+            assert_eq!(sizes(this), before);
+            hide(this, false);
+            this.model.add_tab("sp1", crate::model::Tab::new("tb2", "", "q1", "u1"));
+            this.sync(window, cx);
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        view.update_in(cx, |this, window, cx| {
+            let before = sizes(this);
+            let r = this.run_as("pane.resize", json!({ "pane": "p1", "direction": "left" }), false, window, cx);
+            assert!(r.get("error").is_some(), "drawn before, but not on screen now: {r}");
+            assert_eq!(sizes(this), before);
+            let r = this.run_as("pane.resize", json!({ "direction": "left" }), false, window, cx);
+            assert!(r.get("error").is_none(), "the focused pane, with nothing beside it: nothing to move, {r}");
+        });
+    }
+
+    #[test]
+    fn panes_take_names() {
+        in_own_process("pane_rename_names_and_clears");
+    }
+
+    #[gpui::test]
+    fn pane_rename_names_and_clears(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("pane_rename_names_and_clears") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "unused", "", json!({
+            "id": "root", "type": "block", "content": { "tab": "active" }
+        }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.model.add_space("sp1", "", "/tmp", crate::model::Tab::new("tb1", "", "p1", "t1"));
+            this.documents.entry(String::new()).or_default().available = true;
+            this.sync(window, cx);
+            let title = |this: &super::AppWindow| this.model.tab("tb1").and_then(|c| c.root.find("p1")).and_then(|n| n.title.clone());
+            let r = this.run_as("pane.rename", json!({ "pane": "p1", "name": "  server  " }), false, window, cx);
+            assert!(r.get("error").is_none(), "{r}");
+            assert_eq!(title(this).as_deref(), Some("server"), "trimmed");
+            assert!(this.run_as("pane.rename", json!({ "name": "" }), false, window, cx).get("error").is_none());
+            assert_eq!(title(this), None, "empty: unnamed again (default: the focused pane)");
+            assert!(this.run_as("pane.rename", json!({ "pane": "nope", "name": "x" }), false, window, cx).get("error").is_some());
+            assert!(this.run_as("pane.rename", json!({ "pane": "p1" }), false, window, cx).get("error").is_some(), "scripts get no prompt");
+            this.run("pane.rename", json!({}), window, cx);
+            assert_eq!(this.overlays.iter().filter(|o| o.id == "rename").count(), 1, "a person is asked");
+        }));
+    }
+
+    #[test]
     fn pane_ring_follows_keyboard_focus() {
         in_own_process("pane_ring_focus");
     }
@@ -5969,6 +7043,44 @@ mod tests {
     #[test]
     fn new_tabs_without_focus_leave_the_shown_tab() {
         in_own_process("tab_new_without_focus");
+    }
+
+    #[test]
+    fn a_split_starts_a_program_in_your_shell() {
+        in_own_process("split_in_shell");
+    }
+
+    /// `terminal.open --argv` runs the program in your shell whatever the place, so
+    /// it reads your rc files (and so your PATH). A split's shell becomes the program.
+    #[gpui::test]
+    fn split_in_shell(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("split_in_shell") {
+            return;
+        }
+        let (core, runs) = crate::hc::answering();
+        let (view, cx) = open_window_on(cx, core, "board", "", json!({
+            "id": "main", "type": "block", "content": { "tab": "active" }
+        }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.documents.entry(String::new()).or_default().available = true;
+            this.model.add_space("s1", "one", "", crate::model::Tab::new("a", "a", "pa", "t1"));
+            this.model.select_tab("a");
+            this.sync(window, cx);
+        }));
+        let mut started = Vec::new();
+        for place in ["tab", "right", "down"] {
+            let r = cx.update(|window, cx| view.update(cx, |this, cx| {
+                this.run_as("terminal.open", json!({ "argv": ["node", "tool.js"], "place": place }), false, window, cx)
+            }));
+            assert!(r.get("terminal").is_some(), "{place}: {r}");
+            started.push(runs.try_iter().last().unwrap_or_else(|| panic!("{place}: no terminal.run")));
+        }
+        let cmd = vec!["node".to_owned(), "tool.js".to_owned()];
+        let split = json!(if cfg!(windows) { cmd } else { super::unix_agent_argv(super::shell(), cmd, cfg!(target_os = "macos"), false) });
+        assert_ne!(started[0], json!(["node", "tool.js"]), "a tab runs it in a shell");
+        assert_eq!(started[1], split, "right");
+        assert_eq!(started[2], split, "down");
     }
 
     /// `tab.new {mod, focus: false}` adds the tab at the end of its space,
@@ -6147,6 +7259,69 @@ export default class Probe extends View {
     }
 
     #[test]
+    fn focused_selection_follows_the_terminal_receiving_commands() {
+        in_own_process("selection_view_focus");
+    }
+
+    #[gpui::test]
+    fn selection_view_focus(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("selection_view_focus") {
+            return;
+        }
+        let probe = r#"import { View, div } from "gpui-kit";
+import { focused, setShared } from "herdr";
+export default class Probe extends View {
+  render() {
+    const value = focused();
+    const text = JSON.stringify(value);
+    if (text !== this.last) {
+      this.last = text;
+      setShared("probe.focused", value);
+    }
+    return div();
+  }
+}
+"#;
+        let (view, cx) = open_window(cx, "selection-probe", probe, json!({
+            "id": "root", "type": "row", "children": [
+                {"id": "main", "type": "block", "content": {"tab": "active"}},
+                {"id": "agent", "type": "block", "content": {"agent": "focused"}},
+                {"id": "probe", "type": "block", "content": {"mod": "selection-probe"}}
+            ],
+            "floating": [{"id": "float", "content": {"terminal": "t2"}}]
+        }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.model.add_space("s1", "one", "", crate::model::Tab::new("a", "a", "pa", "t1"));
+            for address in ["t1", "t2", "t3"] {
+                this.live.insert(address.into(), json!({"address": address}));
+            }
+            this.agent = Some("t3".into());
+            this.sync(window, cx);
+        }));
+        cx.run_until_parked();
+        for (slot, col) in [("pa", 1), ("float:float", 2), ("agent", 3)] {
+            cx.update(|window, cx| view.update(cx, |this, cx| {
+                this.terms[slot].focus.focus(window, cx);
+                let result = this.run_as("terminal.select", json!({"at": {"row": 0, "col": col}}), false, window, cx);
+                assert!(result.get("error").is_none(), "{result}");
+                assert_eq!(this.focused_terminal(window, cx).unwrap().address, this.terms[slot].address);
+            }));
+            cx.run_until_parked();
+            let focused = crate::mods::shared("probe.focused").unwrap();
+            assert_eq!(focused["terminal"], "t1", "logical identity stays with the model pane");
+            assert_eq!(focused["selection"]["end"], json!({"row": 0, "col": col}), "{slot}: {focused}");
+        }
+        // Moving the keyboard alone must publish the destination's existing selection.
+        for (slot, col) in [("float:float", 2), ("pa", 1), ("agent", 3)] {
+            cx.update(|window, cx| view.update(cx, |this, cx| this.terms[slot].focus.focus(window, cx)));
+            cx.run_until_parked();
+            let focused = crate::mods::shared("probe.focused").unwrap();
+            assert_eq!(focused["selection"]["end"], json!({"row": 0, "col": col}), "{slot}: {focused}");
+        }
+    }
+
+    #[test]
     fn mods_set_the_window_title() {
         in_own_process("window_title");
     }
@@ -6182,6 +7357,43 @@ export default class Probe extends View {
     }
 
     include!("window/pane_size_tests.rs");
+
+    /// What a `{"command":"tab.move","args":{"by":-1}}` key runs.
+    #[test]
+    fn tab_move_by_steps_the_active_tab() {
+        in_own_process("tab_move_by");
+    }
+
+    #[gpui::test]
+    fn tab_move_by(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("tab_move_by") { return; }
+        let (view, cx) = open_window(cx, "unused", "", json!({
+            "id": "context", "type": "block", "content": { "tab": "active" }
+        }));
+        let order = |this: &super::AppWindow|this.model.active_space().unwrap().tabs.iter().map(|c| c.id.clone()).collect::<Vec<_>>();
+        view.update_in(cx, |this, window, cx| {
+            this.model.add_space("space", "test", "/", super::Tab::new("t1", "", "a", "term-a"));
+            this.model.add_tab_unselected("space", super::Tab::new("t2", "", "b", "term-b"));
+            this.model.add_tab_unselected("space", super::Tab::new("t3", "", "c", "term-c"));
+            this.documents.entry(String::new()).or_default().available = true;
+            this.sync(window, cx);
+            for (by, expected) in [(1, ["t2", "t1", "t3"]), (1, ["t2", "t3", "t1"]), (1, ["t1", "t2", "t3"]), (-1, ["t2", "t3", "t1"])] {
+                let out = this.run_as("tab.move", json!({ "by": by }), false, window, cx);
+                assert!(out.get("error").is_none(), "{out}");
+                assert_eq!(order(this), expected, "by {by}");
+                assert_eq!(this.model.active_tab().unwrap().id, "t1");
+            }
+            let out = this.run_as("tab.move", json!({ "index": 1 }), false, window, cx);
+            assert!(out.get("error").is_none(), "{out}");
+            assert_eq!(order(this), ["t1", "t2", "t3"]);
+            for args in [json!({}), json!({ "index": 1, "by": 1 })] {
+                let out = this.run_as("tab.move", args.clone(), false, window, cx);
+                assert!(out.get("error").is_some(), "{args}: {out}");
+                assert_eq!(order(this), ["t1", "t2", "t3"]);
+            }
+        });
+    }
 
     #[test]
     fn directional_navigation_moves_zoom_and_keyboard_focus() {
@@ -6296,6 +7508,223 @@ export default class SystemToast extends View {
         let (id, name) = notify(cx);
         assert_eq!(name, "toast");
         assert!(shown(&id, cx), "an unknown mod falls back to the shipped toast, which stays");
+    }
+
+    #[test]
+    fn link_runtimes_and_the_live_view_share_one_store() {
+        in_own_process("link_calls_share_view_storage");
+    }
+
+    #[gpui::test]
+    fn link_calls_share_view_storage(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        use std::{cell::RefCell, rc::Rc, time::Duration};
+
+        if !running_alone("link_calls_share_view_storage") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "viewer", r#"
+            import { View, div } from "gpui-kit";
+            export default class Viewer extends View {
+                init(_, cx) {
+                    localStorage.setItem("view", "ready");
+                    cx.spawn(async (cx) => {
+                        await cx.sleep(300);
+                        const values = [localStorage.getItem("fast"), localStorage.getItem("slow")];
+                        localStorage.setItem("view", values.join(" "));
+                        await localStorage.flush();
+                    });
+                }
+                render() { return div(); }
+            }
+        "#, json!({ "id": "mod", "type": "block", "content": { "mod": "viewer" } }));
+        let home = crate::mods::app_dir();
+        let folder = home.join("mods/viewer").canonicalize().unwrap();
+        #[cfg(windows)]
+        assert!(folder.to_string_lossy().starts_with(r"\\?\"));
+        std::fs::write(folder.join("link.js"), r#"
+            let calls = 0;
+            export async function handleLink({ key, delay }) {
+                if (++calls !== 1) throw new Error("reused a handler runtime");
+                if (localStorage.getItem("view") !== "ready") throw new Error("missing live view storage");
+                if (delay) await __sleep(delay);
+                localStorage.setItem(key, key);
+                await localStorage.flush();
+                return "handled";
+            }
+        "#).unwrap();
+
+        let completed = Rc::new(RefCell::new(Vec::new()));
+        let start = |key, delay, cx: &mut gpui::VisualTestContext| {
+            let call = view.update_in(cx, |_, window, cx| {
+                crate::mods::handle_link("viewer", &folder, &json!({ "key": key, "delay": delay }), window, cx)
+            });
+            let completed = completed.clone();
+            cx.spawn(move |_| async move {
+                assert_eq!(call.await.unwrap(), "handled");
+                completed.borrow_mut().push(key);
+            }).detach();
+            cx.run_until_parked();
+        };
+        start("slow", 100, cx);
+        assert!(completed.borrow().is_empty());
+        start("fast", 0, cx);
+        assert_eq!(*completed.borrow(), ["fast"]);
+
+        cx.executor().advance_clock(Duration::from_millis(100));
+        cx.run_until_parked();
+        assert_eq!(*completed.borrow(), ["fast", "slow"]);
+        cx.executor().advance_clock(Duration::from_millis(200));
+        cx.run_until_parked();
+        let store: serde_json::Value = serde_json::from_slice(&std::fs::read(home.join("data/viewer/store.json")).unwrap()).unwrap();
+        assert_eq!(store, json!({ "view": "fast slow", "fast": "fast", "slow": "slow" }));
+    }
+
+    #[test]
+    fn link_enrollment_retries_after_an_external_layout_edit() {
+        in_own_process("link_enrollment_loses_to_external_edit");
+    }
+
+    #[gpui::test]
+    fn link_enrollment_loses_to_external_edit(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("link_enrollment_loses_to_external_edit") {
+            return;
+        }
+        let layout = json!({ "id": "root", "type": "row", "children": [] });
+        let (view, cx) = open_window(cx, "example", "", layout.clone());
+        let home = crate::mods::app_dir();
+        let path = home.join("layouts/test.json");
+        let folder = home.join("mods/example");
+        std::fs::write(folder.join("link.js"), "export function handleLink() {}").unwrap();
+        std::fs::write(folder.join("mod.json"), r#"{"place":"none","link_handlers":[{"kind":"file","pattern":"\\.png$"}]}"#).unwrap();
+        let mut external = layout;
+        external["gap"] = json!(8);
+        std::fs::write(&path, external.to_string()).unwrap();
+
+        view.update_in(cx, |this, window, cx| {
+            this.sync_folders(window, cx);
+            assert!(this.chrome.link_handlers.is_empty());
+            assert!(!this.seen.contains("links:example"));
+        });
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), external.to_string());
+        let seen = home.join("seen.json");
+        assert!(!std::fs::read_to_string(&seen).unwrap_or_default().contains("links:example"));
+
+        // The same loaded layout would save now, but an ordinary sync must not retry.
+        let original = json!({ "id": "root", "type": "row", "children": [] });
+        std::fs::write(&path, original.to_string()).unwrap();
+        view.update_in(cx, |this, window, cx| this.sync(window, cx));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), original.to_string());
+
+        // Installing a different handler gets a first attempt without retrying the first.
+        let new_handler = home.join("mods/new-link");
+        std::fs::create_dir(&new_handler).unwrap();
+        std::fs::copy(folder.join("link.js"), new_handler.join("link.js")).unwrap();
+        std::fs::copy(folder.join("mod.json"), new_handler.join("mod.json")).unwrap();
+        view.update_in(cx, |this, window, cx| {
+            this.sync_folders(window, cx);
+            this.sync(window, cx);
+            assert!(this.seen.contains("links:new-link"));
+            assert!(!this.seen.contains("links:example"));
+        });
+        let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["link_handlers"], json!(["new-link"]));
+
+        std::fs::write(&path, external.to_string()).unwrap();
+        view.update_in(cx, |this, window, cx| this.check_layout_file(window, cx));
+        let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["gap"], 8);
+        assert_eq!(saved["link_handlers"], json!(["example"]));
+        assert!(std::fs::read_to_string(&seen).unwrap().contains("links:example"));
+
+        // Even with an unwritable seen marker, a removal must stick in this session.
+        std::fs::remove_file(&seen).unwrap();
+        std::fs::create_dir(&seen).unwrap();
+        let other = home.join("mods/other");
+        std::fs::create_dir(&other).unwrap();
+        std::fs::copy(folder.join("link.js"), other.join("link.js")).unwrap();
+        std::fs::copy(folder.join("mod.json"), other.join("mod.json")).unwrap();
+        view.update_in(cx, |this, window, cx| {
+            this.sync_folders(window, cx);
+            assert!(this.seen.contains("links:other"));
+        });
+        let saved: serde_json::Value = serde_json::from_slice(&std::fs::read(&path).unwrap()).unwrap();
+        assert_eq!(saved["link_handlers"], json!(["example", "other"]));
+        std::fs::write(&path, external.to_string()).unwrap();
+        view.update_in(cx, |this, window, cx| this.check_layout_file(window, cx));
+        assert_eq!(std::fs::read_to_string(&path).unwrap(), external.to_string());
+    }
+
+    #[test]
+    fn new_link_rules_enroll_after_the_layout_is_repaired() {
+        in_own_process("link_enrollment_waits_for_layout_repair");
+    }
+
+    #[gpui::test]
+    fn link_enrollment_waits_for_layout_repair(cx: &mut gpui::TestAppContext) {
+        if !running_alone("link_enrollment_waits_for_layout_repair") {
+            return;
+        }
+        let layout = serde_json::json!({ "id": "root", "type": "row", "children": [] });
+        let (view, cx) = open_window(cx, "existing", "", layout.clone());
+        let home = crate::mods::app_dir();
+        let path = home.join("layouts/test.json");
+        std::fs::write(&path, "{").unwrap();
+        let folder = home.join("mods/existing");
+        std::fs::write(folder.join("link.js"), r#"export function handleLink() { return "handled"; }"#).unwrap();
+        std::fs::write(folder.join("mod.json"), r#"{"place":"none","link_handlers":[{"kind":"url","pattern":"^https://example.com/"}]}"#).unwrap();
+
+        view.update_in(cx, |this, window, cx| {
+            this.check_layout_file(window, cx);
+            this.sync_folders(window, cx);
+            assert!(this.chrome.link_handlers.is_empty());
+            assert!(!this.seen.contains("links:existing"));
+        });
+
+        std::fs::write(&path, layout.to_string()).unwrap();
+        view.update_in(cx, |this, window, cx| {
+            this.check_layout_file(window, cx);
+            this.sync_folders(window, cx);
+        });
+        let saved: super::Node = serde_json::from_str(&std::fs::read_to_string(path).unwrap()).unwrap();
+        assert_eq!(saved.link_handlers, ["existing"]);
+    }
+
+    #[test]
+    fn mods_and_layouts_named_with_any_characters_render() {
+        in_own_process("odd_names_render");
+    }
+
+    #[gpui::test]
+    fn odd_names_render(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("odd_names_render") {
+            return;
+        }
+        let name = "zz-probe.off";
+        let probe = r#"import { View, div } from "gpui-kit";
+export default class Probe extends View { render() { return div().child("probe"); } }
+"#;
+        let layout = json!({
+            "id": "root", "type": "row",
+            "children": [{"id": "block", "type": "block", "content": {"mod": name}}],
+            "floating": [{"id": "float", "content": {"mod": name}}]
+        });
+        let (view, cx) = open_window(cx, name, probe, layout.clone());
+        view.update_in(cx, |this, window, cx| this.run("mod.open", json!({ "name": name }), window, cx));
+        cx.run_until_parked();
+        std::fs::write(crate::mods::app_dir().join("layouts/my.copy.json"), layout.to_string()).unwrap();
+        view.update_in(cx, |this, window, cx| {
+            this.load_layout("my.copy");
+            this.sync(window, cx);
+        });
+        cx.run_until_parked();
+        view.update(cx, |this, _| {
+            assert_eq!(this.layout_name, "my.copy");
+            let mounted: Vec<&str> = this.copies.iter().filter(|(_, c)| c.inst.name == name && c.root.is_some()).map(|(slot, _)| slot.as_str()).collect();
+            assert_eq!(mounted.len(), 3, "block, float and popup: {mounted:?}");
+        });
     }
 
     #[test]
