@@ -3563,6 +3563,15 @@ impl AppWindow {
                 let addr = order[next].clone();
                 self.focus_agent(&addr);
             }
+            "agent.select" => {
+                let Some(index) = a.get("index").and_then(Value::as_u64).and_then(|i| i.checked_sub(1)) else {
+                    return self.fail("agent.select needs an index (1 = first)");
+                };
+                let Some(addr) = usize::try_from(index).ok().and_then(|i| self.agent_order().into_iter().nth(i)) else {
+                    return self.fail("no such agent");
+                };
+                self.focus_agent(&addr);
+            }
             // ---- layout
             "layout.switch" => {
                 self.switch_layout(Self::arg(a, "name"), window, cx);
@@ -6906,6 +6915,39 @@ mod tests {
             assert_eq!(prompts(this), 0, "a second press closes the prompt");
             this.run("tab.rename", json!({}), window, cx);
             assert_eq!(prompts(this), 1, "and a third opens it again");
+        }));
+    }
+
+    #[test]
+    fn agent_select_uses_the_list_order() {
+        in_own_process("agent_select_position");
+    }
+
+    #[gpui::test]
+    fn agent_select_position(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("agent_select_position") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "unused", "", json!({
+            "id": "root", "type": "block", "content": { "tab": "active" }
+        }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.folders.retain(|id, _| id == "unused");
+            this.model = crate::model::Model::default();
+            let mut tab = crate::model::Tab::new("tb1", "", "p1", "t1");
+            tab.root.split("p1", super::Axis::Row, crate::model::pane("p2", "t2"), "split".into());
+            this.model.add_space("sp1", "", "/tmp", tab);
+            this.model.set_word("t1", Some("idle".into()), Some("claude".into()), false);
+            this.model.set_word("t2", Some("idle".into()), Some("codex".into()), false);
+            let reply = this.run_as("agent.select", json!({ "index": 2 }), true, window, cx);
+            assert!(reply.get("error").is_none(), "{reply}");
+            assert_eq!(this.model.focused_pane().as_deref(), Some("p2"));
+            this.run_as("agent.select", json!({ "index": 1 }), true, window, cx);
+            assert_eq!(this.model.focused_pane().as_deref(), Some("p1"));
+            let reply = this.run_as("agent.select", json!({ "index": 3 }), true, window, cx);
+            assert!(reply.get("error").is_some(), "{reply}");
+            assert_eq!(this.model.focused_pane().as_deref(), Some("p1"), "out of range leaves focus alone");
         }));
     }
 
