@@ -82,7 +82,8 @@ function entries() {
   const list = NAMED.filter(([n]) => known.has(n))
     .filter(([n]) => !(mac && n.startsWith("window.")))
     .map(([name, args, group, title, words]) => ({ name, args, group, title, words }));
-  for (const l of layouts()) {
+  const shown = layouts();
+  for (const l of shown) {
     const t = { main: "Herdr", terminals: "Terminals", win98: "Herdr 98" }[l] ?? l.charAt(0).toUpperCase() + l.slice(1);
     list.push({ name: "layout.switch", args: { name: l }, group: "Layout", title: `Layout: ${t}`, words: `look ${l}` });
   }
@@ -91,7 +92,7 @@ function entries() {
   // light one. A theme named like a layout is that layout's own (as in Settings).
   const dark = Boolean(settings().dark);
   for (const { name, light } of themes()) {
-    if (Boolean(light) === dark || (name !== shared("layout") && layouts().includes(name))) continue;
+    if (Boolean(light) === dark || (name !== shared("layout") && shown.includes(name))) continue;
     list.push({ name: "app.theme", args: { name }, group: "App", title: `Theme: ${name.replace(/-/g, " ")}`, words: "colors look" });
   }
   // Anything new in the app shows up too, until it gets a better name here.
