@@ -103,7 +103,7 @@ Move a tab (the active one if no id) to a position in its space (1 = first), or 
 
 ## `pane.split`
 
-Split a pane (default: the focused one) "right" or "down" with a new terminal, or with a mod (`mod`, its `props`) beside it.
+Split a pane (default: the caller's, from a terminal, else the focused one) "right" or "down" with a new terminal, or with a mod (`mod`, its `props`) beside it.
 
 | Argument | Required |
 |---|---|
@@ -115,7 +115,7 @@ Split a pane (default: the focused one) "right" or "down" with a new terminal, o
 
 ## `pane.close`
 
-Close a pane and end its terminal.
+Close a pane (default: the caller's, from a terminal, else the focused one) and end its terminal.
 
 | Argument | Required |
 |---|---|
@@ -235,7 +235,7 @@ No arguments.
 
 ## `pane.zoom`
 
-Show only this pane of its tab, or all again.
+Show only this pane (default: the caller's, from a terminal, else the focused one) of its tab, or all again.
 
 | Argument | Required |
 |---|---|
@@ -243,7 +243,7 @@ Show only this pane of its tab, or all again.
 
 ## `pane.rename`
 
-Name a pane (default: the focused one; asks the person when no name; an empty name: unnamed again).
+Name a pane (default: the caller's, from a terminal, else the focused one; asks the person when no name; an empty name: unnamed again).
 
 | Argument | Required |
 |---|---|
@@ -269,7 +269,7 @@ Focus the pane or focusable mod to the "left", "right", "up" or "down".
 
 ## `pane.resize`
 
-Move the border of a pane (default: the focused one) "left", "right", "up" or "down" by px (default 40), like dragging the divider.
+Move the border of a pane (default: the caller's, from a terminal, else the focused one) "left", "right", "up" or "down" by px (default 40), like dragging the divider.
 
 | Argument | Required |
 |---|---|
@@ -279,7 +279,7 @@ Move the border of a pane (default: the focused one) "left", "right", "up" or "d
 
 ## `pane.swap`
 
-Swap a pane (default: the focused one) with its neighbor in a direction, or with another pane of its tab (target). Give exactly one of direction or target.
+Swap a pane (default: the caller's, from a terminal, else the focused one) with its neighbor in a direction, or with another pane of its tab (target). Give exactly one of direction or target.
 
 | Argument | Required |
 |---|---|
