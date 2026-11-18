@@ -955,7 +955,8 @@ Export `handleLink(click)` from `link.js` (it can be async). It receives
 `{link, source}` and can import the usual functions from `"herdr"`. The source
 names the clicked terminal and its machine, cwd, pane, tab and space.
 `link.raw` keeps the original text or the OSC 8 destination. `link.path` is
-null for remote, unresolved or non-UTF-8 paths. For a file URI, Herdr can verify
+null for remote, unresolved or non-UTF-8 paths. A `:line` or `:line:column` suffix
+after a plain path is in `link.line` and `link.column` (1-based, absent when not given). For a file URI, Herdr can verify
 a local path when the host is empty or `localhost`. A link handler starts without opening
 a view and shares `localStorage` with views of the same mod with null props.
 Return `"handled"` when done or `"pass"` to try the next matching mod.
