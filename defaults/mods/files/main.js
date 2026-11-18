@@ -1,6 +1,6 @@
 // A lazy file browser for the focused pane's folder, with bounded read-only previews.
 import { View, div, svg } from "gpui-kit";
-import { v_flex, h_flex, Editor, EditorState } from "gpui-base";
+import { v_flex, h_flex, Editor, EditorState, TextView } from "gpui-base";
 import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings, window } from "herdr";
 
 function location() {
@@ -12,6 +12,7 @@ function location() {
 const key = () => JSON.stringify(location());
 const LANG = { ts: "js", tsx: "js", mts: "js", cts: "js", jsx: "js", mjs: "js", toml: "yaml", jsonc: "json", svelte: "html", vue: "html" };
 const PER_FOLDER = 500, TOTAL = 5000;
+const markdown = path => /\.(md|markdown)$/i.test(path ?? "");
 const preview = text => text.length > 400000 ? text.slice(0, 400000) + "\n… (file truncated)" : text;
 
 async function directory(path, on) {
@@ -139,6 +140,7 @@ export default class Files extends View {
         if (text === null) { this.fileError = "This file is no longer available"; return; }
         if (text.includes("\0")) { this.fileError = "Binary file · no text preview"; return; }
         const t = theme(), ext = path.includes(".") ? path.split(".").pop() : "txt";
+        this.text = preview(text);
         this.code = EditorState.new({ language: LANG[ext] ?? ext, readonly: true,
           value: preview(text),
           font_family: settings().font_family, font_size: 12,
@@ -157,7 +159,7 @@ export default class Files extends View {
       if (this.file !== path || !this.current(context) || !this.code) return;
       if (text === null) { this.code.release(); this.code = null; this.fileError = "This file is no longer available"; }
       else if (text.includes("\0")) { this.code.release(); this.code = null; this.fileError = "Binary file · no text preview"; }
-      else if (this.code.value() !== preview(text)) this.code.set_value(preview(text));
+      else if (this.code.value() !== preview(text)) { this.text = preview(text); this.code.set_value(this.text); }
       else return;
       cx.notify();
     } catch {}
@@ -186,10 +188,14 @@ export default class Files extends View {
       .child(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
         .when(Boolean(this.file), el => el.child(div().id("files-back").w(20).cursor_pointer().text_color(t.muted).on_click((_e, cx) => { this.show(null); cx.notify(); }).child("←")))
         .child(div().font_semibold().child("Files"))
-        .child(div().flex_1().min_w(0).truncate().text_right().text_size(12).text_color(t.dim).child(this.file ?? this.root?.split(/[\\/]/).pop() ?? "")))
+        .child(div().flex_1().min_w(0).truncate().text_right().text_size(12).text_color(t.dim).child(this.file ?? this.root?.split(/[\\/]/).pop() ?? ""))
+        .when(Boolean(this.code) && markdown(this.file), el => el.child(div().id("files-md-toggle").flex_none().cursor_pointer().text_size(12).text_color(t.muted).hover(s => s.text_color(t.foreground))
+          .on_click((_e, cx) => { this.source = !this.source; cx.notify(); }).child(this.source ? "Preview" : "Source"))))
       .when(!this.file, el => el.child(v_flex().id("files-tree").flex_1().min_h(0).overflow_y_scrollbar().p(6).children(this.rows("", 0, [], t))
         .when(Boolean(this.error) || !this.entries.get("")?.length, el => el.child(div().p(8).text_size(12).text_color(t.dim).child(this.error || (this.loading ? "Loading files…" : this.root ? "No files" : "No folder"))))
         .when(this.limited, el => el.child(div().p(8).text_size(11).text_color(t.dim).child("File list limited to 500 entries per folder and 5,000 total")))))
-      .when(Boolean(this.file), el => el.child(this.code ? Editor.new(this.code).flex_1().min_h(0) : div().p(12).text_color(t.dim).child(this.fileError || "Loading file…")));
+      .when(Boolean(this.file), el => el.child(this.code && markdown(this.file) && !this.source
+        ? TextView.markdown("files-md", this.text).flex_1().min_h(0).px(18).py(12).text_color(t.foreground).selectable().scrollable()
+        : this.code ? Editor.new(this.code).flex_1().min_h(0) : div().p(12).text_color(t.dim).child(this.fileError || "Loading file…")));
   }
 }
