@@ -1,7 +1,7 @@
 // The bar on top of a peeked agent (an overlay the agents list opens for a
 // sub-agent, or a terminal address link): who it is and how it's doing, ↗ to
 // go to its pane (or, without one, keep it as a tab in a space on its machine:
-// the shown one, else its parent's, else the first), ✕ to close.
+// the shown one, else its nearest ancestor's, else the first), ✕ to close.
 // Props: { terminal, overlay }.
 
 import { View, div, image, svg } from "gpui-kit";
@@ -36,8 +36,18 @@ export default class Peek extends View {
     const shown = all.find((s) => s.active) ?? all[0];
     if ((shown?.machine ?? null) === machine) return shown;
     const there = all.filter((s) => (s.machine ?? null) === machine);
-    const tab = panes().find((p) => p.terminal === parent)?.tab;
-    return there.find((s) => s.tabs.some((c) => c.id === tab)) ?? there[0];
+    if (there.length < 2) return there[0];
+    const allPanes = panes();
+    const allTerminals = terminals();
+    const seen = new Set();
+    while (parent && !seen.has(parent)) {
+      seen.add(parent);
+      const tab = allPanes.find((p) => p.terminal === parent)?.tab;
+      const space = there.find((s) => s.tabs.some((c) => c.id === tab));
+      if (space) return space;
+      parent = allTerminals.find((t) => t.address === parent)?.parent;
+    }
+    return there[0];
   }
 
   button(t, id, label, onClick) {

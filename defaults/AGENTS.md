@@ -160,6 +160,9 @@ the highlighted line shows where it will land.
   mapped; otherwise they stay as the core reported them. They belong to their
   parent's tab without a pane; the `agents` mod shows them,
   `terminal.peek` opens one, `terminal.keep` gives one a pane.
+  When the shown space is on another machine, the peek's Keep button uses the
+  nearest ancestor's space on the terminal's machine, or the first space there
+  if no ancestor has a pane there. Keep is hidden if that machine has no space.
   Ctrl-click (Cmd-click on macOS) a live terminal address in terminal text to
   peek at it. Bare addresses refer to the machine of the terminal showing them;
   use `machine/address` for another machine. Names and non-live addresses aren't links.
