@@ -9,6 +9,12 @@ use metal::Device;
 use parking_lot::Mutex;
 use std::borrow::Cow;
 
+// Max texture size on all modern Apple GPUs. Anything bigger crashes in validateWithDevice.
+const MAX_ATLAS_SIZE: Size<DevicePixels> = Size {
+    width: DevicePixels(16384),
+    height: DevicePixels(16384),
+};
+
 pub struct MetalAtlas(Mutex<AtlasState<MetalAtlasTextures>>);
 
 impl MetalAtlas {
@@ -62,11 +68,47 @@ impl AtlasBackend for MetalAtlasTextures {
         size: Size<DevicePixels>,
         bytes: &[u8],
     ) -> Result<AtlasTile> {
-        let tile = self.allocate(size, kind).context("failed to allocate")?;
+        // At the texture size limit, the sampler clamps at the texture edge instead.
+        let padded_size =
+            if kind == AtlasTextureKind::Polychrome && size.width.0 > 0 && size.height.0 > 0 {
+                Size {
+                    width: DevicePixels(size.width.0.saturating_add(2)),
+                    height: DevicePixels(size.height.0.saturating_add(2)),
+                }
+                .min(&MAX_ATLAS_SIZE)
+                .max(&size)
+            } else {
+                size
+            };
+        let mut tile = self
+            .allocate(padded_size, kind)
+            .context("failed to allocate")?;
         let texture = self
             .texture(tile.texture_id)
             .context("allocated tile refers to a missing texture")?;
-        texture.upload(tile.bounds, bytes);
+        if padded_size == size {
+            texture.upload(tile.bounds, bytes);
+        } else {
+            let left = (padded_size.width.0 - size.width.0).min(1) as u32;
+            let top = (padded_size.height.0 - size.height.0).min(1) as u32;
+            // Repeat edge texels so linear filtering never samples a neighboring image,
+            // while cropped images can still interpolate across their crop boundary.
+            let padded = image::RgbaImage::from_fn(
+                padded_size.width.0 as u32,
+                padded_size.height.0 as u32,
+                |x, y| {
+                    let x = x.saturating_sub(left).min(size.width.0 as u32 - 1);
+                    let y = y.saturating_sub(top).min(size.height.0 as u32 - 1);
+                    let offset = (y as usize * size.width.0 as usize + x as usize) * 4;
+                    image::Rgba(bytes[offset..offset + 4].try_into().unwrap())
+                },
+            );
+            texture.upload(tile.bounds, padded.as_raw());
+            tile.bounds.origin.x += DevicePixels(left as i32);
+            tile.bounds.origin.y += DevicePixels(top as i32);
+            tile.bounds.size = size;
+            tile.padding = 1;
+        }
         Ok(tile)
     }
 
@@ -133,11 +175,6 @@ impl MetalAtlasTextures {
         const DEFAULT_ATLAS_SIZE: Size<DevicePixels> = Size {
             width: DevicePixels(1024),
             height: DevicePixels(1024),
-        };
-        // Max texture size on all modern Apple GPUs. Anything bigger than that crashes in validateWithDevice.
-        const MAX_ATLAS_SIZE: Size<DevicePixels> = Size {
-            width: DevicePixels(16384),
-            height: DevicePixels(16384),
         };
         let size = min_size.min(&MAX_ATLAS_SIZE).max(&DEFAULT_ATLAS_SIZE);
         let texture_descriptor = metal::TextureDescriptor::new();
