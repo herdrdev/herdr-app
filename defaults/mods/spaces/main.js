@@ -62,6 +62,19 @@ export function tone(t, status) {
   return t[status] ?? t.unknown;
 }
 
+// The rows, with a repository's branches folded away: each main checkout's row learns how many
+// branches (its worktree spaces) follow it, and a folded repository's are left out, all but the
+// active one, so the list never hides where you are. The order is not touched: it stays the
+// spaces' own, which the keys and the rail's numbers follow.
+export function foldBranches(rows, folded) {
+  return rows.flatMap((r, n) => {
+    if (r.tree) return folded.has(r.g.repo) && !r.w.active ? [] : [r];
+    let kids = 0;
+    while (rows[n + 1 + kids]?.tree) kids++;
+    return [{ ...r, kids }];
+  });
+}
+
 export default class Spaces extends View {
   init(_props, cx) {
     this.git = {}; // where() -> { name, branch, ahead, behind, repo, linked }, null: not a repo
@@ -89,6 +102,8 @@ export default class Spaces extends View {
     try { this.folded = new Set(JSON.parse(localStorage.getItem("machines.folded") ?? "[]")); } catch { this.folded = new Set(); }
     this.refreshMachines(cx);
     cx.timer.every(15000, cx => this.refreshMachines(cx));
+    // Repositories whose branches are folded, by their repo (machine and git folder).
+    try { this.repoFolded = new Set(JSON.parse(localStorage.getItem("repos.folded") ?? "[]")); } catch { this.repoFolded = new Set(); }
     // Refresh only when the refs could have changed (see `due`).
     cx.timer.every(250, (cx) => this.checkNew(cx));
   }
@@ -337,7 +352,7 @@ export default class Spaces extends View {
 
   // The rows, under a header per machine once one isn't this computer.
   grouped(t, collapsed) {
-    const rows = this.ordered();
+    const rows = collapsed ? this.ordered() : foldBranches(this.ordered(), this.repoFolded);
     const draw = (r) => (collapsed ? this.compact(r, t) : this.row(r, t));
     // Where the active space's row lands among the children this returns: the list scrolls by its direct
     // children, and machine headers, login notes and loading rows count too.
@@ -441,7 +456,7 @@ export default class Spaces extends View {
       .when(g.behind > 0, (el) => el.child(div().flex_none().text_color(t.ansi1).child(`\u2193${g.behind}`)));
   }
 
-  row({ w, i, g, tree }, t) {
+  row({ w, i, g, tree, kids }, t) {
     const on = w.active;
     const fromIndex = this.pressed === null ? -1 : spaces().findIndex(s => s.id === this.pressed);
     const colors = shared("space.colors") ?? {};
@@ -494,7 +509,22 @@ export default class Spaces extends View {
           .when(Boolean(tree), el => el.pl(22).child(svg("mods/workspace-chrome/branch.svg").size(13).flex_none().text_color(t.dim)))
           .when(!tree, el => el.child(h_flex().size(18).flex_none().rounded(5).bg(fill).items_center().justify_center().text_size(10.5).font_bold().text_color("#ffffff").child([...w.name][0]?.toUpperCase() ?? "?")))
           .child(div().flex_initial().min_w(SIDE_MIN).truncate().text_color(t.foreground).child(w.name))
-          .child(g ? this.gitTail(g, tree, w.name, t) : div().flex_1()),
+          .child(g ? this.gitTail(g, tree, w.name, t) : div().flex_1())
+          // A main checkout with branches under it folds them, as a machine's header folds its spaces.
+          .when(kids > 0, (el) => {
+            const folded = this.repoFolded.has(g.repo);
+            return el.child(div().id(`space-fold-${w.id}`).flex_none().px(3).py(2).rounded(4).text_color(t.dim)
+              .hover((s) => s.bg(t.hover).text_color(t.foreground))
+              .tooltip(`${folded ? "Show" : "Hide"} ${kids} branch${kids === 1 ? "" : "es"}`)
+              .on_mouse_down("left", (_e, cx) => cx.stop_propagation())
+              .on_click((_e, cx) => {
+                cx.stop_propagation();
+                folded ? this.repoFolded.delete(g.repo) : this.repoFolded.add(g.repo);
+                localStorage.setItem("repos.folded", JSON.stringify([...this.repoFolded]));
+                cx.notify();
+              })
+              .child(svg(`mods/workspace-chrome/chevron-${folded ? "right" : "down"}.svg`).size(11)));
+          }),
       );
   }
 
