@@ -2,6 +2,7 @@
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState } from "gpui-base";
 import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings, window } from "herdr";
+import { SftpBrowser } from "./sftp.js";
 
 function location() {
   const space = spaces().find(s => s.active), f = focused();
@@ -42,8 +43,20 @@ export default class Files extends View {
   init(_props, cx) {
     this.saved = new Map();
     this.entries = new Map(); this.folders = new Set(); this.pending = new Set(); this.marks = {};
+    this.mode = "workspace";
+    this.sftp = new SftpBrowser();
     this.refresh(cx);
     cx.timer.every(10000, cx => this.refresh(cx));
+  }
+
+  setMode(next, cx) {
+    if (next === this.mode) return;
+    if (next === "sftp" && !this.on) return;
+    this.mode = next;
+    if (next === "sftp" && this.on && !this.sftp.entries.length && !this.sftp.loading) {
+      this.sftp.openInitial(cx);
+    }
+    cx.notify();
   }
 
   watch(root, cx) {
@@ -77,9 +90,11 @@ export default class Files extends View {
       this.context = { key: next, cwd, on }; this.root = cwd; this.on = on; this.entries = new Map(); this.folders = new Set(saved?.folders);
       this.pending = new Set(); this.marks = {}; this.show(null); this.watched = null; this.error = null; this.limited = false;
       this.loading = false;
+      if (!on && this.mode === "sftp") this.mode = "workspace";
+      this.sftp.syncMachine(on, cwd, this.mode === "sftp", cx);
       if (saved?.file) this.show(saved.file, cx);
     }
-    if (!cwd || this.loading) return;
+    if (!cwd || this.loading || this.mode === "sftp") return;
     const context = this.context;
     this.loading = true;
     this.limited = false;
@@ -166,14 +181,42 @@ export default class Files extends View {
   render(cx) {
     if (key() !== this.context?.key) this.refresh(cx);
     const t = theme();
+    const sftpActive = Boolean(this.on) && this.mode === "sftp";
+    const modeTab = (id, label, active, action) =>
+      div()
+        .id(id)
+        .px(8)
+        .py(3)
+        .rounded(5)
+        .cursor_pointer()
+        .text_size(11.5)
+        .when(active, el => el.bg(t.selected).text_color(t.foreground).font_medium())
+        .when(!active, el => el.text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground)))
+        .on_click((_e, cx) => action(cx))
+        .child(label);
+
     return v_flex().id("files").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
       .child(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
-        .when(Boolean(this.file), el => el.child(div().id("files-back").w(20).cursor_pointer().text_color(t.muted).on_click((_e, cx) => { this.show(null); cx.notify(); }).child("←")))
+        .when(!sftpActive && Boolean(this.file), el => el.child(div().id("files-back").w(20).cursor_pointer().text_color(t.muted).on_click((_e, cx) => { this.show(null); cx.notify(); }).child("←")))
         .child(div().font_semibold().child("Files"))
-        .child(div().flex_1().min_w(0).truncate().text_right().text_size(12).text_color(t.dim).child(this.file ?? this.root?.split(/[\\/]/).pop() ?? "")))
-      .when(!this.file, el => el.child(v_flex().id("files-tree").flex_1().min_h(0).overflow_y_scrollbar().p(6).children(this.rows("", 0, [], t))
+        .when(Boolean(this.on), el =>
+          el.child(
+            h_flex()
+              .p(2)
+              .gap(2)
+              .rounded(7)
+              .bg(t.surface)
+              .border_1()
+              .border_color(t.border)
+              .child(modeTab("files-mode-workspace", "Workspace", !sftpActive, cx => this.setMode("workspace", cx)))
+              .child(modeTab("files-mode-sftp", "SFTP", sftpActive, cx => this.setMode("sftp", cx)))
+          )
+        )
+        .child(div().flex_1().min_w(0).truncate().text_right().text_size(12).text_color(t.dim).child(sftpActive ? this.on : (this.file ?? this.root?.split(/[\\/]/).pop() ?? ""))))
+      .when(sftpActive, el => el.child(this.sftp.render(t, cx)))
+      .when(!sftpActive && !this.file, el => el.child(v_flex().id("files-tree").flex_1().min_h(0).overflow_y_scrollbar().p(6).children(this.rows("", 0, [], t))
         .when(Boolean(this.error) || !this.entries.get("")?.length, el => el.child(div().p(8).text_size(12).text_color(t.dim).child(this.error || (this.loading ? "Loading files…" : this.root ? "No files" : "No folder"))))
         .when(this.limited, el => el.child(div().p(8).text_size(11).text_color(t.dim).child("File list limited to 500 entries per folder and 5,000 total")))))
-      .when(Boolean(this.file), el => el.child(this.code ? Editor.new(this.code).flex_1().min_h(0) : div().p(12).text_color(t.dim).child(this.fileError || "Loading file…")));
+      .when(!sftpActive && Boolean(this.file), el => el.child(this.code ? Editor.new(this.code).flex_1().min_h(0) : div().p(12).text_color(t.dim).child(this.fileError || "Loading file…")));
   }
 }

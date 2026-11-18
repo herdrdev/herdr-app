@@ -1968,6 +1968,8 @@ const ELEMENT_METHODS: &str = r#"    /**
      * ignored, so a chain and a block body both work.
      */
     hover<Self extends Element>(this: Self, declare: (el: NativeElement) => NativeElement | void): Self;
+    /** Styles applied while external files are dragged over the element. */
+    drag_over<Self extends Element>(this: Self, declare: (el: NativeElement) => NativeElement | void): Self;
     /** Styles applied while the element is pressed. */
     active<Self extends Element>(this: Self, declare: (el: NativeElement) => NativeElement | void): Self;
     /** Styles applied while the element has focus. */
@@ -4132,6 +4134,7 @@ mod tests {
         "loop",
         "spin",
         "hover",
+        "drag_over",
         "active",
         "focus",
     ];
