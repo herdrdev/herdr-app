@@ -5777,6 +5777,64 @@ export default class Notes extends View {
     assert!(tree.contains("picked=6-11 after=15-15"), "{tree}");
 }
 
+// HERDR: a live editor switches wrapping both ways and keeps its text and selection.
+#[gpui::test]
+fn a_script_editor_toggles_soft_wrap_in_place(cx: &mut TestAppContext) {
+    cx.update(|cx| crate::init(cx));
+    let runtime = ShellRuntime::new_isolated().expect("runtime");
+    cx.update(|cx| runtime.set_global(cx));
+    let source = r#"
+import { View } from "gpui-kit";
+import { v_flex, Button, Editor, EditorState } from "gpui-base";
+export default class Code extends View {
+  init() {
+    this.wrap = false;
+    this.code = EditorState.new({ language: "rust", value: "word ".repeat(200), readonly: true });
+    this.code.set_selected_range({ start: 5, end: 9 });
+  }
+  render(cx) {
+    return v_flex().w(300).h(240)
+      .child(Button.new("wrap").h(40).on_click((_event, cx) => {
+        this.wrap = !this.wrap;
+        this.code.set_soft_wrap(this.wrap);
+        cx.notify();
+      }))
+      .child(Editor.new(this.code).h(200));
+  }
+}
+"#;
+    let view_type = runtime.load_source("wrap-code", source).expect("load");
+    let runtime_for_view = runtime.clone();
+    let (_root, context) = cx.add_window_view(move |window, cx| {
+        let object = runtime_for_view
+            .instantiate(&view_type, window, cx)
+            .expect("instantiate");
+        let view = cx.new(|_| ScriptView::new(runtime_for_view, object));
+        crate::root::ShellRoot::new(view.into(), window, cx)
+    });
+    context.update(|window, cx| window.draw(cx).clear(cx));
+    let editor = runtime.entities().first_editor().expect("editor");
+    let text = editor.read_with(context, |state, _| state.value());
+    // Whether the one line wrapped: its end sits on a lower row than its start.
+    let rows_below = |context: &mut VisualTestContext| {
+        editor.read_with(context, |state, _| {
+            assert_eq!(state.value(), text);
+            assert_eq!(state.selected_range(), 5..9);
+            let top = |offset: usize| state.range_to_bounds(&(offset..offset)).map(|b| b.top());
+            top(text.len() - 1)
+                .zip(top(0))
+                .is_some_and(|(end, start)| end > start)
+        })
+    };
+    assert!(!rows_below(context), "starts on one row");
+    for wrapped in [true, false, true] {
+        context.simulate_click(point(px(20.), px(20.)), Modifiers::default());
+        context.run_until_parked();
+        context.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(rows_below(context), wrapped, "wrapped = {wrapped}");
+    }
+}
+
 // HERDR: readonly rejects keyboard edits without disabling selection or programmatic refresh.
 #[gpui::test]
 fn a_readonly_script_editor_remains_selectable(cx: &mut TestAppContext) {

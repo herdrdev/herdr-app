@@ -3212,6 +3212,8 @@ const BASE: &str = r#"  /** A row. */
     on(event: "change" | "submit" | "focus" | "blur" | "paste_other", handler: (event: InputEvent, cx: Context) => void): boolean;
     /** Moves the keyboard onto the editor. */
     focus(): void;
+    /** Wraps long lines instead of scrolling sideways, keeping the text and selection. */
+    set_soft_wrap(wrap: boolean): void;
     release(): boolean;
   }
   export const EditorState: {
