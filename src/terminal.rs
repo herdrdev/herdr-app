@@ -2544,7 +2544,8 @@ impl Render for TerminalView {
         };
         let address = self.address.clone();
         let now = Instant::now();
-        let previews = crate::settings::get().link_preview;
+        let settings = crate::settings::get();
+        let previews = settings.link_preview;
         if !previews {
             // Turned off (link_preview): none shows, and one already up goes at once.
             self.preview = None;
@@ -2895,13 +2896,16 @@ impl Render for TerminalView {
                     anchored().anchor(corner).position(at).snap_to_window_with_margin(px(4.0)).child(
                         div()
                             .id("link-preview")
+                            .debug_selector(|| "link-preview".to_owned())
                             .max_w(px(640.0))
                             .px_2()
                             .py_1()
                             .rounded_md()
-                            .bg(crate::settings::color("raised"))
-                            .text_color(hsla(vt::theme().fg))
+                            .bg(crate::settings::color("link_preview"))
+                            .text_color(crate::settings::color("link_preview_foreground"))
                             .text_xs()
+                            .when_some(settings.link_preview_font.clone(), |d, f| d.font_family(f))
+                            .when_some(settings.link_preview_font_size, |d, s| d.text_size(px(s * crate::settings::zoom())))
                             .truncate()
                             .cursor_pointer()
                             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
@@ -3173,6 +3177,47 @@ mod tests {
         hover(on_link, cx);
         let shown = root.read_with(cx, |r, cx| r.0.read(cx).preview.as_ref().map(|p| p.target.clone()));
         assert_eq!(shown.as_deref(), Some(target), "on again, the same link previews");
+        crate::settings::set((*original).clone());
+    }
+
+    #[gpui::test]
+    fn the_link_preview_takes_its_font_size_from_the_look(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        struct Root(Entity<super::TerminalView>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().w(px(320.0)).h(px(150.0)).child(self.0.clone())
+            }
+        }
+        cx.update(gpui_base::init);
+        let original = crate::settings::get();
+        let (root, cx) = cx.add_window_view(|_, cx| {
+            Root(cx.new(|cx| {
+                let terminal = super::TerminalView::attach(crate::hc::offline(), "t1".into(), (32, 6), cx);
+                terminal.grid.borrow_mut().vt.write(b"\x1b]8;;https://example.com/a\x1b\\here\x1b]8;;\x1b\\");
+                terminal
+            }))
+        });
+        cx.run_until_parked();
+        let key = if cfg!(target_os = "macos") { Modifiers::command() } else { Modifiers::control() };
+        let (on_link, off_link) = root.read_with(cx, |r, cx| {
+            let g = r.0.read(cx).grid.borrow();
+            (g.origin + point(g.cell.width * 1.5, g.cell.height * 0.5), g.origin + point(g.cell.width * 20.5, g.cell.height * 3.5))
+        });
+        let shown_height = |size: Option<f32>, cx: &mut VisualTestContext| {
+            let mut settings = (*original).clone();
+            settings.link_preview_font_size = size;
+            crate::settings::set(settings);
+            cx.simulate_mouse_move(off_link, None, key);
+            cx.run_until_parked();
+            cx.simulate_mouse_move(on_link, None, key);
+            cx.run_until_parked();
+            cx.debug_bounds("link-preview").expect("the preview shows").size.height
+        };
+        let default = shown_height(None, cx);
+        let big = shown_height(Some(28.0), cx);
+        assert!(big > default + px(10.0), "28px text makes a taller preview: {default:?} -> {big:?}");
         crate::settings::set((*original).clone());
     }
 

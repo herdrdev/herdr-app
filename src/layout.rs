@@ -177,6 +177,11 @@ pub struct Look {
     /// The mods' font.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui_font: Option<String>,
+    /// The link preview's font and text size (px at zoom 1).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_preview_font: Option<String>,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub link_preview_font_size: Option<f32>,
     /// Space between a terminal's edge and its text, px: [x, y].
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_padding: Option<[f32; 2]>,

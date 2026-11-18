@@ -358,6 +358,10 @@ layout's look and a block can differ:
   folder (or the home's `fonts/`) load at start and on the next look change,
   so a layout and its mod folder travel together (Herdr 98's do: its pixel
   fonts are in `mods/win98/fonts/`).
+- `link_preview_font` / `link_preview_font_size`: the link preview's font and
+  text size (px at zoom 1, 6..72); unset, settings.json's, else the panels'
+  font at a small size. Its colors: `colors.link_preview` (background) and
+  `colors.link_preview_foreground` (text).
 - `font_weight` (100..900): the terminals' text weight. Default 500
   (Medium); 400 is Regular, 300 Light, using the family's nearest face.
   Bold text stays at 700.
@@ -826,6 +830,12 @@ What's about the user, never a look:
 - `link_preview`: holding the link key (Cmd on macOS, Ctrl elsewhere) over a link
   shows where it goes under it, and a click on that copies it (default `true`).
   Set `false` to turn the preview off; the key still opens links.
+- `link_preview_font` / `link_preview_font_size`: the preview's font and text
+  size (px at zoom 1, clamped to 6..72). Unset, it uses the panels' font at a
+  small size. A layout can set them too, and its own win. Its colors are the
+  theme colors `link_preview` (background, default `raised`) and
+  `link_preview_foreground` (text, default the terminals' text color), set
+  in `colors`.
 - `pane_scrollbars`: `false` hides the scroll position thumb at a terminal
   pane's right edge (default `true`). It shows only when the pane has
   scrollback — never on the alternate screen (editors, pagers) — and
@@ -1080,7 +1090,8 @@ All of it is in `herdr.d.ts`. In short:
   (every core terminal), `focused()`, `layout()`, `theme()` (every color by
   name: background (the terminals', cards), canvas (behind cards), chrome
   (sidebars, bars), surface, popover, raised, hover, selected, border,
-  input (a stronger border), foreground, muted, dim, accent,
+  input (a stronger border), link_preview and link_preview_foreground (the
+  link preview's background and text), foreground, muted, dim, accent,
   accent_foreground, solid and solid_foreground (a primary button),
   selection, working, blocked, done, idle, unknown, ansi0..15; light and
   dark themes name the same ones), `settings()` (with `dark`: the

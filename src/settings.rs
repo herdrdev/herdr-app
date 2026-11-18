@@ -331,6 +331,8 @@ fn resolve(p: &Palette, overrides: &BTreeMap<String, String>) -> Theme {
         ("canvas", hex(canvas)),
         ("chrome", hex(chrome)),
         ("popover", popover),
+        ("link_preview", raised.clone()),
+        ("link_preview_foreground", hex(p.foreground)),
         ("raised", raised),
         ("hover", hover),
         ("selected", selected),
@@ -404,6 +406,11 @@ pub struct Person {
     /// Holding the link key over a link shows where it goes, under it.
     #[serde(skip_serializing_if = "is_true")]
     pub link_preview: bool,
+    /// The link preview's font and text size (px at zoom 1); unset, the panels'.
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link_preview_font: Option<String>,
+    #[serde(skip_serializing_if = "Option::is_none")]
+    pub link_preview_font_size: Option<f32>,
     /// A draggable scroll position thumb at a terminal pane's right edge.
     #[serde(skip_serializing_if = "is_true")]
     pub pane_scrollbars: bool,
@@ -475,6 +482,8 @@ impl Default for Person {
             clipboard_write: true,
             copy_on_select: true,
             link_preview: true,
+            link_preview_font: None,
+            link_preview_font_size: None,
             pane_scrollbars: true,
             minimum_contrast: 1.0,
             option_as_alt: OptionAsAlt::Auto,
@@ -523,6 +532,9 @@ pub struct Settings {
     pub clipboard_write: bool,
     pub copy_on_select: bool,
     pub link_preview: bool,
+    /// The link preview's font and text size (px at zoom 1); None keeps the panels'.
+    pub link_preview_font: Option<String>,
+    pub link_preview_font_size: Option<f32>,
     pub minimum_contrast: f32,
     pub option_as_alt: OptionAsAlt,
     pub sounds: Sounds,
@@ -571,6 +583,8 @@ impl Default for Settings {
             clipboard_write: true,
             copy_on_select: true,
             link_preview: true,
+            link_preview_font: None,
+            link_preview_font_size: None,
             minimum_contrast: 1.0,
             option_as_alt: OptionAsAlt::Auto,
             sounds: Sounds::default(),
@@ -616,6 +630,8 @@ impl Settings {
             clipboard_write: person.clipboard_write,
             copy_on_select: person.copy_on_select,
             link_preview: person.link_preview,
+            link_preview_font: look.link_preview_font.clone().or(person.link_preview_font.clone()),
+            link_preview_font_size: look.link_preview_font_size.or(person.link_preview_font_size).map(|s| s.clamp(6.0, 72.0)),
             minimum_contrast: person.minimum_contrast,
             option_as_alt: person.option_as_alt,
         }
@@ -1063,6 +1079,30 @@ mod tests {
     }
 
     #[test]
+    fn the_link_preview_has_its_own_colors_defaulting_to_raised_and_the_terminal_text() {
+        let t = resolve(&GRAPHITE, &BTreeMap::new());
+        assert_eq!(t["link_preview"], t["raised"]);
+        assert_eq!(t["link_preview_foreground"], t["terminal_foreground"]);
+        let o = resolve(&GRAPHITE, &[("link_preview".to_owned(), "#123456".to_owned())].into());
+        assert_eq!(o["link_preview"], "#123456");
+        assert_eq!(o["raised"], t["raised"], "only the preview changes");
+    }
+
+    #[test]
+    fn the_link_preview_font_comes_from_the_layout_then_settings() {
+        use crate::layout::Look;
+        let font = |s: Settings| (s.link_preview_font, s.link_preview_font_size);
+        assert_eq!(font(Settings::compose(&Person::default(), &Look::default(), true)), (None, None), "unset, it keeps the panels' font and size");
+        assert!(serde_json::to_value(Person::default()).unwrap().get("link_preview_font_size").is_none(), "the default isn't written");
+        let person: Person = serde_json::from_str(r#"{"link_preview_font":"Geist","link_preview_font_size":11}"#).unwrap();
+        assert_eq!(font(Settings::compose(&person, &Look::default(), true)), (Some("Geist".into()), Some(11.0)));
+        let look: Look = serde_json::from_str(r#"{"link_preview_font":"Geist Mono","link_preview_font_size":16}"#).unwrap();
+        assert_eq!(font(Settings::compose(&person, &look, true)), (Some("Geist Mono".into()), Some(16.0)), "the layout's wins");
+        let huge: Look = serde_json::from_str(r#"{"link_preview_font_size":500}"#).unwrap();
+        assert_eq!(Settings::compose(&person, &huge, true).link_preview_font_size, Some(72.0), "clamped to 6..72");
+    }
+
+    #[test]
     fn link_preview_defaults_on_and_can_be_disabled() {
         let default: Person = serde_json::from_str("{}").unwrap();
         assert!(default.link_preview);
@@ -1099,7 +1139,7 @@ mod tests {
     /// settings.json key.
     #[test]
     fn the_guide_explains_every_setting() {
-        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), font_weight: Some(400), ui_font: Some(String::new()), telemetry: false, clipboard_write: false, copy_on_select: false, link_preview: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), ..Person::default() };
+        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), font_weight: Some(400), ui_font: Some(String::new()), telemetry: false, clipboard_write: false, copy_on_select: false, link_preview: false, link_preview_font: Some(String::new()), link_preview_font_size: Some(1.0), appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), ..Person::default() };
         let keys: Vec<String> = serde_json::to_value(&all).unwrap().as_object().unwrap().keys().cloned().collect();
         let guide = include_str!("../defaults/AGENTS.md");
         let section = guide.split("## The person").nth(1).and_then(|s| s.split("\n## ").next()).unwrap_or_default();
