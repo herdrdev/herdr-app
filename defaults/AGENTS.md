@@ -160,6 +160,10 @@ the highlighted line shows where it will land.
   mapped; otherwise they stay as the core reported them. They belong to their
   parent's tab without a pane; the `agents` mod shows them,
   `terminal.peek` opens one, `terminal.keep` gives one a pane.
+  What a program runs inside its own process (Claude Code's subagents and
+  background shells) has no terminal: it arrives as `records` on that program's
+  terminal (`terminals()[i].records`: id to `{app, state, title}`), and the
+  `agents` mod lists each one under its agent; clicking it goes to the agent.
   Ctrl-click (Cmd-click on macOS) a live terminal address in terminal text to
   peek at it. Bare addresses refer to the machine of the terminal showing them;
   use `machine/address` for another machine. Names and non-live addresses aren't links.

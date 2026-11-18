@@ -310,3 +310,77 @@ test("a title that opens with a bracket keeps it; each agent's own prefix still 
   ];
   for (const [raw, shown] of titles) expect(clean(raw)).toBe(shown);
 });
+
+// What render() hands to records(): spawn keeps the lookup so a test can run it.
+function recordsHarness(exec: (...args: any[]) => Promise<{ stdout: string }> = async () => ({ stdout: "" })) {
+  const calls: unknown[][] = [];
+  const { agents } = harness([], { exec: (...args: unknown[]) => { calls.push(args); return exec(...args); } });
+  const spawned: ((cx: unknown) => Promise<void>)[] = [];
+  const cx = { spawn: (body: (cx: unknown) => Promise<void>) => spawned.push(body), notify() {}, sleep: async () => {} };
+  const rows = (all: any[], address: string) => {
+    agents.recs = agents.records(all, cx);
+    return agents.tree(all, address).map((s: any) => [s.t.name, s.lines.length, s.t.status]);
+  };
+  return { agents, calls, spawned, cx, rows };
+}
+const REVIEW = "a1111111111111111";
+const SEARCH = "a2222222222222222";
+const claude = (address: string, records: Record<string, unknown>) => ({ address, state: "live", program: { name: "Claude Code" }, foreground: { pid: 7 }, records });
+
+test("an agent's records are rows under it, and a subagent's own subagent sits under that one", () => {
+  const { agents, rows } = recordsHarness();
+  agents.meta.set(`t1#${REVIEW}`, { up: null, name: "Review" });
+  agents.meta.set(`t1#${SEARCH}`, { up: REVIEW, name: "Search" });
+  const t1 = claude("t1", {
+    [REVIEW]: { app: "claude-code", state: "working", title: "Review" },
+    [SEARCH]: { app: "claude-code", state: "blocked", title: "Search" },
+    b9x2k: { app: "claude-code", state: "working", title: "dev server" },
+  });
+  expect(rows([t1], "t1")).toEqual([["Review", 1, "working"], ["Search", 2, "blocked"], ["dev server", 1, "working"]]);
+  // A kept record of a finished or failed run is not work and does not ask for the user.
+  const kept = claude("t3", { "subagents/1": { app: "pi-subagents", state: "error", title: "worker" }, "subagents/2": { app: "pi-subagents", state: "done", title: "scout" } });
+  expect(rows([kept], "t3")).toEqual([["worker", 1, "idle"], ["scout", 1, "idle"]]);
+  // Another agent's rows stay its own, and a terminal that ended has none.
+  expect(rows([t1, claude("t2", {})], "t2")).toEqual([]);
+  expect(rows([{ ...t1, state: "exited" }], "t1")).toEqual([]);
+});
+
+test("a subagent waiting on its own subagent stays as an idle row above it", () => {
+  const { agents, rows } = recordsHarness();
+  agents.meta.set(`t1#${REVIEW}`, { up: null, name: "Review" });
+  agents.meta.set(`t1#${SEARCH}`, { up: REVIEW, name: "Search" });
+  // Claude Code reports only the one still working.
+  const t1 = claude("t1", { [SEARCH]: { app: "claude-code", state: "working", title: "Search" } });
+  expect(rows([t1], "t1")).toEqual([["Review", 1, "idle"], ["Search", 2, "working"]]);
+});
+
+test("a subagent not seen before is looked up once, on its agent's machine; a shell never is", async () => {
+  const file = (id: string, json: object) => `/home/u/.claude/projects/-w/s1/subagents/agent-${id}.meta.json:${JSON.stringify(json)}`;
+  const { calls, spawned, cx, rows } = recordsHarness(async () => ({
+    stdout: [file(REVIEW, { description: "Review", spawnDepth: 1 }), file(SEARCH, { description: "Search", parentAgentId: REVIEW, spawnDepth: 2 })].join("\n") + "\n",
+  }));
+  const remote = claude("vps/t3", { [SEARCH]: { app: "claude-code", state: "working", title: "Search" } });
+  // Before the answer it sits directly under its agent.
+  expect(rows([remote], "vps/t3")).toEqual([["Search", 1, "working"]]);
+  rows([remote], "vps/t3");
+  expect(spawned).toHaveLength(1);
+  await spawned[0](cx);
+  expect(calls).toHaveLength(1);
+  expect(calls[0][0]).toBe("sh");
+  expect((calls[0][1] as string[]).slice(2)).toEqual(["sh", "7"]);
+  expect(calls[0][2]).toEqual({ on: "vps", timeout: 8000 });
+  expect(rows([remote], "vps/t3")).toEqual([["Review", 1, "idle"], ["Search", 2, "working"]]);
+  expect(spawned).toHaveLength(1);
+  rows([claude("t4", { b9x2k: { app: "claude-code", state: "working", title: "dev server" } })], "t4");
+  expect(spawned).toHaveLength(1);
+});
+
+test("a subagent whose file never shows stays under its agent, after six looks", async () => {
+  const { calls, spawned, cx, rows } = recordsHarness();
+  const t1 = claude("t1", { [SEARCH]: { app: "claude-code", state: "working", title: "Search" } });
+  rows([t1], "t1");
+  await spawned[0](cx);
+  expect(calls).toHaveLength(6);
+  expect(rows([t1], "t1")).toEqual([["Search", 1, "working"]]);
+  expect(spawned).toHaveLength(1);
+});
