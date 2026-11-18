@@ -383,10 +383,171 @@ fn native() {
             cx.update_window(window.into(), |_, window, cx| check(window, cx))
                 .unwrap();
             check_capture_settles_pending_updates(capture_window, model, cx);
+            #[cfg(target_os = "macos")]
+            cx.update(image_edges::check);
             cx.update(|cx| cx.quit());
         })
         .detach();
     });
+}
+
+#[cfg(target_os = "macos")]
+mod image_edges {
+    use super::*;
+    use std::sync::Arc;
+
+    struct Images(Vec<Arc<RenderImage>>);
+
+    impl Render for Images {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let images = self.0.clone();
+            div().size_full().bg(rgb(0x123456)).child(
+                canvas(
+                    |_, _, _| {},
+                    move |_, _, window, _| {
+                        let scale = window.scale_factor();
+                        let mut paint = |index: usize, x, y, width, height| {
+                            let bounds = Bounds::new(
+                                point(px(x / scale), px(y / scale)),
+                                size(px(width / scale), px(height / scale)),
+                            );
+                            window
+                                .paint_image(
+                                    bounds,
+                                    bounds,
+                                    Corners::default(),
+                                    images[index].clone(),
+                                    0,
+                                    false,
+                                )
+                                .unwrap();
+                        };
+                        // Insert a contrasting neighbor before the images under test.
+                        paint(0, 320., 10., 32., 32.);
+                        for row in 0..3 {
+                            for (x, width) in [(10., 32.), (60., 48.), (120., 64.), (200., 96.)] {
+                                paint(row + 1, x, 10. + row as f32 * 110., width, width);
+                            }
+                        }
+                        paint(4, 320., 60., 3., 3.);
+                        paint(5, 320., 100., 8., 8.);
+                        paint(6, 340., 100., 8., 8.);
+                        window
+                            .paint_image(
+                                Bounds::new(
+                                    point(px(324. / scale), px(80. / scale)),
+                                    size(px(4. / scale), px(4. / scale)),
+                                ),
+                                Bounds::new(
+                                    point(px(320. / scale), px(80. / scale)),
+                                    size(px(8. / scale), px(4. / scale)),
+                                ),
+                                Corners::default(),
+                                images[4].clone(),
+                                0,
+                                false,
+                            )
+                            .unwrap();
+                    },
+                )
+                .size_full(),
+            )
+        }
+    }
+
+    pub(super) fn check(cx: &mut App) {
+        use image::{Frame, Rgba, RgbaImage};
+
+        let images = [
+            RgbaImage::from_pixel(32, 32, Rgba([255, 0, 255, 255])),
+            RgbaImage::from_fn(32, 32, |x, y| {
+                if (8..24).contains(&x) && (8..24).contains(&y) {
+                    Rgba([255; 4])
+                } else {
+                    Rgba([0; 4])
+                }
+            }),
+            RgbaImage::from_pixel(32, 32, Rgba([255; 4])),
+            RgbaImage::from_pixel(1, 1, Rgba([255; 4])),
+            RgbaImage::from_fn(2, 1, |x, _| {
+                Rgba([x as u8 * 255, x as u8 * 255, x as u8 * 255, 255])
+            }),
+            RgbaImage::from_pixel(16383, 1, Rgba([255; 4])),
+            RgbaImage::from_pixel(1, 16384, Rgba([255; 4])),
+        ]
+        .into_iter()
+        .map(|image| Arc::new(RenderImage::new(smallvec::smallvec![Frame::new(image)])))
+        .collect();
+        let window = cx
+            .open_window(
+                WindowOptions {
+                    window_bounds: Some(WindowBounds::Windowed(Bounds::new(
+                        point(px(0.), px(0.)),
+                        size(px(360.), px(340.)),
+                    ))),
+                    show: false,
+                    focus: false,
+                    titlebar: None,
+                    ..Default::default()
+                },
+                |_, cx| cx.new(|_| Images(images)),
+            )
+            .unwrap();
+        cx.update_window(window.into(), |_, window, cx| {
+            let _ = window.draw(cx);
+            let image = window.render_to_image().unwrap();
+            for row in 0..3 {
+                let y = 10 + row * 110;
+                let expected = if row == 0 {
+                    [0x12, 0x34, 0x56, 255]
+                } else {
+                    [255; 4]
+                };
+                for (x, width) in [(10, 32), (60, 48), (120, 64), (200, 96)] {
+                    for offset in 0..width {
+                        for (px, py) in [
+                            (x, y + offset),
+                            (x + width - 1, y + offset),
+                            (x + offset, y),
+                            (x + offset, y + width - 1),
+                        ] {
+                            assert_eq!(
+                                image.get_pixel(px, py).0,
+                                expected,
+                                "image row {row}, width {width}, edge ({px}, {py})"
+                            );
+                        }
+                    }
+                    assert_eq!(image.get_pixel(x + width / 2, y + width / 2).0, [255; 4]);
+                }
+            }
+            let middle = image.get_pixel(321, 61).0;
+            assert!(
+                middle[..3].iter().all(|v| (127..=128).contains(v)),
+                "linear filtering: {middle:?}"
+            );
+            assert_eq!(middle[3], 255);
+            let cropped = image.get_pixel(324, 81).0;
+            assert!(
+                cropped[..3].iter().all(|v| (159..=160).contains(v)),
+                "cropped filtering: {cropped:?}"
+            );
+            assert_eq!(cropped[3], 255);
+            for x in [320, 340] {
+                for dx in 0..8 {
+                    for dy in 0..8 {
+                        assert_eq!(
+                            image.get_pixel(x + dx, 100 + dy).0,
+                            [255; 4],
+                            "texture size limit"
+                        );
+                    }
+                }
+            }
+            println!("image edge pixels passed at 1x, 1.5x, 2x and 3x enlargement");
+        })
+        .unwrap();
+    }
 }
 
 fn main() {
