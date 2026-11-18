@@ -927,7 +927,8 @@ has 124 programs (agents, editors, runtimes, tools, databases, infra);
   that first tab; checkouts go to
   `<worktrees.directory>/<repo>/<branch>` on the space's machine (default
   `~/.herdr/worktrees`; see settings.json above); the
-  `spaces` sidebar nests worktree spaces under their repo's and shows each
+  `spaces` sidebar nests worktree spaces under their repo's main-checkout space
+  (including submodules and checkouts with a separate Git directory) and shows each
   space's repo, branch, ahead/behind and uncommitted changes). Shipped mods
   are Herdr's; duplicate with `mod.clone` before editing.
 

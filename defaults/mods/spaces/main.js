@@ -245,15 +245,22 @@ export default class Spaces extends View {
         } else this.git[key] = null;
         return;
       }
-      // The repo's own .git folder names it; a worktree's top differs from it.
       const top = r.stdout.replace(/\n$/, ""), repo = common.stdout.replace(/\n$/, "");
+      let linked = repo !== `${top}/.git`;
+      if (linked) {
+        // A submodule or --separate-git-dir checkout also keeps metadata elsewhere.
+        // Only linked worktrees have a private git dir distinct from the common dir.
+        const dir = await exec("git", ["rev-parse", "--absolute-git-dir"], { cwd, on });
+        if (dir.code !== 0) throw new Error(dir.stderr);
+        linked = dir.stdout.replace(/\n$/, "") !== repo;
+      }
       const [branch, counts] = await both(
         exec("git", ["symbolic-ref", "-q", "HEAD"], { cwd, on }),
         exec("git", ["rev-list", "--left-right", "--count", "HEAD...@{upstream}"], { cwd, on }),
       );
       const name = repo.endsWith("/.git") ? base(repo.slice(0, -5)) : base(repo).replace(/\.git$/, "");
       const [ahead, behind] = counts.code === 0 ? counts.stdout.trim().split(/\s+/).map(Number) : [0, 0];
-      const info = { name, branch: branch.code === 0 ? branch.stdout.trim().replace(/^refs\/heads\//, "") : "(detached)", ahead, behind, repo: JSON.stringify([on, repo]), linked: repo !== `${top}/.git` };
+      const info = { name, branch: branch.code === 0 ? branch.stdout.trim().replace(/^refs\/heads\//, "") : "(detached)", ahead, behind, repo: JSON.stringify([on, repo]), linked };
       this.git[key] = info;
       if (!on) this.watch(repo, cx);
     } catch {

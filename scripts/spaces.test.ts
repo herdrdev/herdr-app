@@ -48,7 +48,7 @@ function harness(replies: unknown[] = [], storage = new Map<string, string>(), s
   return { view, calls, tasks, cx, storage, moves, handlers, snapshot, availability, env, tracked };
 }
 
-test("git grouping reads refs for normal, detached, unborn and bare worktrees", async () => {
+test("git grouping handles normal, detached, unborn, bare, submodule and separate-dir checkouts", async () => {
   // Git answers with real paths, and the temp folder is behind a link on macOS (/var -> /private/var).
   const root = realpathSync(mkdtempSync(join(tmpdir(), "herdr-spaces-")));
   const git = (cwd: string, ...args: string[]) => {
@@ -87,6 +87,30 @@ test("git grouping reads refs for normal, detached, unborn and bare worktrees", 
     expect(await check(tree)).toMatchObject({ branch: "topic", ahead: 0, behind: 0, linked: true, repo: JSON.stringify([null, join(repo, ".git")]) });
     git(tree, "checkout", "--detach");
     expect(await check(tree)).toMatchObject({ branch: "(detached)", ahead: 0, behind: 0 });
+    // A submodule's main checkout uses a .git file; its metadata lives in
+    // the superproject's .git/modules, not under its own working directory.
+    const parent = join(root, "parent"), submodule = join(parent, "module"), subTree = join(root, "module-topic");
+    mkdirSync(parent);
+    git(parent, "init", "-b", "main");
+    git(parent, "-c", "protocol.file.allow=always", "submodule", "add", repo, "module");
+    const subMain = await check(submodule);
+    expect(subMain).toMatchObject({ name: "module", linked: false });
+    git(submodule, "worktree", "add", "-b", "sub-topic", subTree);
+    const subLinked = await check(subTree);
+    expect(subLinked).toMatchObject({ linked: true, repo: subMain.repo });
+    h.snapshot.push({ id: "sub-tree", folder: subTree }, { id: "sub-main", folder: submodule });
+    h.view.shown = new Set(h.snapshot.map(s => s.id));
+    h.view.born = {};
+    expect(h.view.ordered().map((r: any) => [r.w.id, r.tree])).toEqual([["sub-main", null], ["sub-tree", "└─"]]);
+
+    // The same distinction holds for an ordinary checkout with relocated metadata.
+    const separate = join(root, "separate"), metadata = join(root, "metadata"), separateTree = join(root, "separate-topic");
+    mkdirSync(separate);
+    git(separate, "init", "-b", "main", "--separate-git-dir", metadata);
+    git(separate, "commit", "--allow-empty", "-m", "base");
+    expect(await check(separate)).toMatchObject({ linked: false });
+    git(separate, "worktree", "add", "-b", "separate-topic", separateTree);
+    expect(await check(separateTree)).toMatchObject({ linked: true, repo: JSON.stringify([null, metadata]) });
     expect(await check(root)).toBeNull();
     expect(h.view.unsure.has(JSON.stringify([null, root]))).toBe(false);
     const bare = join(root, "bare.git"), bareTree = join(root, "bare-tree");
@@ -99,6 +123,33 @@ test("git grouping reads refs for normal, detached, unborn and bare worktrees", 
   }
 });
 
+test.each([null, "cloud"])("a failed private git-dir read preserves cached submodule state on %s", async (on) => {
+  let fail = false;
+  const folder = "/parent/module", common = "/parent/.git/modules/module";
+  const h = harness([], new Map(), [], async (_command: string, args: string[], options: { cwd: string; on: string | null }) => {
+    expect(options).toMatchObject({ cwd: folder, on });
+    if (args.includes("--absolute-git-dir") && fail) return { code: 128, stdout: "", stderr: "temporary read failure" };
+    const stdout = args.includes("--show-toplevel") ? folder + "\n"
+      : args.includes("--git-common-dir") || args.includes("--absolute-git-dir") ? common + "\n"
+      : args[0] === "symbolic-ref" ? "refs/heads/main\n" : "0 0\n";
+    return { code: 0, stdout, stderr: "" };
+  });
+  Object.assign(h.view, { git: {}, checked: {}, unsure: new Set() });
+  h.view.watch = () => {};
+  const key = JSON.stringify([on, folder]);
+  await h.view.check(key, h.cx);
+  const cached = h.view.git[key];
+  expect(cached).toMatchObject({ linked: false, repo: JSON.stringify([on, common]) });
+  fail = true;
+  await h.view.check(key, h.cx);
+  expect(h.view.git[key]).toBe(cached);
+  expect(h.view.unsure.has(key)).toBe(true);
+  fail = false;
+  await h.view.check(key, h.cx);
+  expect(h.view.git[key]).toMatchObject({ linked: false });
+  expect(h.view.unsure.has(key)).toBe(false);
+});
+
 test.each(["--show-toplevel", "--git-common-dir"])("a failed %s keeps worktrees nested until git can answer again", async (failedRead) => {
   let failure: string | null = null;
   const snapshot = [{ id: "main", folder: "/repo" }, { id: "tree", folder: "/tree" }];
@@ -106,6 +157,7 @@ test.each(["--show-toplevel", "--git-common-dir"])("a failed %s keeps worktrees 
     if (cwd === "/repo" && args.includes(failedRead) && failure) return { code: 128, stdout: "", stderr: failure };
     const stdout = args.includes("--show-toplevel") ? cwd + "\n"
       : args.includes("--git-common-dir") ? "/repo/.git\n"
+      : args.includes("--absolute-git-dir") ? "/repo/.git/worktrees/tree\n"
       : args[0] === "symbolic-ref" ? "refs/heads/main\n" : "0 0\n";
     return { code: 0, stdout, stderr: "" };
   });
