@@ -762,7 +762,7 @@ mod tests {
             let at = text.find(url).unwrap();
             let range = find(&text, at).unwrap();
             assert_eq!(&text[range.clone()], url);
-            assert_eq!(resolve(&text[range], None), Some(Target::Url(url.into())));
+            assert_eq!(native_target(&text[range], None), Some(Target::Url(url.into())));
         }
     }
 
