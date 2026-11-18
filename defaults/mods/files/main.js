@@ -12,6 +12,7 @@ function location() {
 const key = () => JSON.stringify(location());
 const LANG = { ts: "js", tsx: "js", mts: "js", cts: "js", jsx: "js", mjs: "js", toml: "yaml", jsonc: "json", svelte: "html", vue: "html" };
 const PER_FOLDER = 500, TOTAL = 5000;
+const preview = text => text.length > 400000 ? text.slice(0, 400000) + "\n… (file truncated)" : text;
 
 async function directory(path, on) {
   const windowsDirectory = async () => {
@@ -100,7 +101,7 @@ export default class Files extends View {
           }
         }
         if (!this.current(context)) return;
-        this.marks = marks; this.error = null; this.watch(cwd, cx);
+        this.marks = marks; this.error = null; this.watch(cwd, cx); await this.reload(context, cx);
       } catch (e) { if (this.current(context)) this.error = String(e); }
       finally { if (this.context === context) this.loading = false; cx.notify(); }
     });
@@ -139,12 +140,27 @@ export default class Files extends View {
         if (text.includes("\0")) { this.fileError = "Binary file · no text preview"; return; }
         const t = theme(), ext = path.includes(".") ? path.split(".").pop() : "txt";
         this.code = EditorState.new({ language: LANG[ext] ?? ext, readonly: true,
-          value: text.length > 400000 ? text.slice(0, 400000) + "\n… (file truncated)" : text,
+          value: preview(text),
           font_family: settings().font_family, font_size: 12,
           syntax: { keyword: t.ansi5, string: t.ansi2, comment: t.dim, function: t.ansi4, type: t.ansi3, number: t.ansi1, constant: t.ansi6 } });
       } catch { if (this.file === path && this.current(context)) this.fileError = "Cannot preview this file (binary, too large, or unreadable)"; }
       finally { cx.notify(); }
     });
+  }
+
+  async reload(context, cx) {
+    const path = this.file;
+    if (!path) return;
+    if (!this.code) { if (this.fileError) this.show(path, cx); return; }
+    try {
+      const text = await readTextFile(`${this.root}/${path}`, { on: this.on });
+      if (this.file !== path || !this.current(context) || !this.code) return;
+      if (text === null) { this.code.release(); this.code = null; this.fileError = "This file is no longer available"; }
+      else if (text.includes("\0")) { this.code.release(); this.code = null; this.fileError = "Binary file · no text preview"; }
+      else if (this.code.value() !== preview(text)) this.code.set_value(preview(text));
+      else return;
+      cx.notify();
+    } catch {}
   }
 
   rows(prefix, depth, out, t) {
