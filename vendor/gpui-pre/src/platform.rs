@@ -132,6 +132,8 @@ pub enum ActivationPolicy {
     Regular,
     /// Run without foreground application UI while retaining the ability to open windows.
     Accessory,
+    /// Never activate or show foreground application UI (for command-line checks).
+    Prohibited,
 }
 
 #[cfg(any(test, feature = "test-support", feature = "bench-support"))]
@@ -1448,6 +1450,8 @@ pub trait PlatformTextSystem: Send + Sync {
     fn font_id(&self, descriptor: &Font) -> Result<FontId>;
     /// Prewarm any system font caches needed to shape text.
     fn prewarm_fonts(&self, _font_ids: &[FontId]) {}
+    /// HERDR: Read an OpenType table from the selected face for terminal metrics.
+    fn font_table(&self, _font_id: FontId, _tag: [u8; 4]) -> Option<Vec<u8>> { None }
     /// Get metrics for a font.
     fn font_metrics(&self, font_id: FontId) -> FontMetrics;
     /// Get typographic bounds for a glyph.

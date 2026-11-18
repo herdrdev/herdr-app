@@ -102,6 +102,10 @@ StartupWMClass=herdr-app
 EOF
   command -v update-desktop-database >/dev/null 2>&1 && update-desktop-database "$data/applications" 2>/dev/null || true
   [ -f "$data/icons/hicolor/icon-theme.cache" ] && gtk-update-icon-cache -f -t "$data/icons/hicolor" >/dev/null 2>&1 || true
+  # Plasma remembers a missing icon until it is told the theme changed,
+  # so a fresh install shows an empty page in the taskbar.
+  command -v dbus-send >/dev/null 2>&1 &&
+    dbus-send --session --type=signal /KIconLoader org.kde.KIconLoader.iconChanged int32:0 2>/dev/null || true
 else
   apps="$HOME/Applications"
   app="$apps/Herdr.app"

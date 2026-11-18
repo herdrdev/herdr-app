@@ -4,7 +4,7 @@ use std::{
     ops::Deref,
     sync::mpsc,
     thread,
-    time::Duration,
+    time::{Duration, Instant},
 };
 
 use gpui::{Entity, IntoElement as _, TestAppContext, VisualTestContext};
@@ -93,12 +93,15 @@ export default class Probe extends View {
     this.state = "pending";
     cx.spawn(async (cx) => {
       const socket = await connect("127.0.0.1", __PORT__);
-      const reading = socket.read(1).catch(() => undefined);
+      const reading = socket.read(1).catch(() => null).then((bytes) => {
+        this.state = bytes === null ? "closed" : "unexpected data";
+        cx.notify();
+      });
+      this.state = "read pending";
+      cx.notify();
       await cx.sleep(50);
       socket.close();
       await reading;
-      this.state = "closed";
-      cx.notify();
     });
   }
   render() { return v_flex().child(this.state); }
@@ -404,12 +407,14 @@ fn net_connect_is_bounded_and_capability_gated(cx: &mut TestAppContext) {
     });
 
     let source = NET_PROBE.replace("__PORT__", &port.to_string());
+    cx.executor().allow_parking();
     let (_runtime, view, mut context) = probe(cx, &source);
-    context.run_until_parked();
-    draw(&mut context, &view);
+    let expected = "true|112,111,110,103|true";
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let rendered = wait_for_socket_snapshot(&mut context, &view, expected, deadline);
     assert!(
-        snapshot(&mut context, &view).contains("true|112,111,110,103|true"),
-        "raw TCP reads should preserve bytes and report EOF"
+        rendered.contains(expected),
+        "raw TCP reads should preserve bytes and report EOF: {rendered}"
     );
     server.join().expect("TCP server");
 }
@@ -418,29 +423,31 @@ fn net_connect_is_bounded_and_capability_gated(cx: &mut TestAppContext) {
 fn net_close_does_not_wait_for_a_pending_read(cx: &mut TestAppContext) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("TCP listener");
     let port = listener.local_addr().expect("listener address").port();
-    let server = thread::spawn(move || {
-        let (mut stream, _) = listener.accept().expect("TCP connection");
-        thread::sleep(Duration::from_millis(300));
-        let _ = stream.write_all(b"x");
+    let server = thread::spawn(move || -> std::io::Result<_> {
+        let (mut stream, _) = listener.accept()?;
+        stream.set_read_timeout(Some(Duration::from_secs(2)))?;
+        let count = stream.read(&mut [0])?;
+        Ok((stream, count))
     });
 
     let source = NET_PENDING_READ_CLOSE_PROBE.replace("__PORT__", &port.to_string());
+    cx.executor().allow_parking();
     let (_runtime, view, mut context) = probe(cx, &source);
-    context.run_until_parked();
-    thread::sleep(Duration::from_millis(20));
-    context.executor().advance_clock(Duration::from_millis(50));
-    let started = std::time::Instant::now();
-    context.run_until_parked();
-    let close_elapsed = started.elapsed();
-    draw(&mut context, &view);
-    let rendered = snapshot(&mut context, &view);
+    let deadline = Instant::now() + Duration::from_secs(2);
+    let pending = wait_for_socket_snapshot(&mut context, &view, "read pending", deadline);
+    assert!(pending.contains("read pending"), "{pending}");
 
-    server.join().expect("TCP server");
+    let started = Instant::now();
+    let close_budget = Duration::from_millis(150);
+    context.executor().advance_clock(Duration::from_millis(50));
+    let rendered = wait_for_socket_snapshot(&mut context, &view, "closed", started + close_budget);
+    let close_elapsed = started.elapsed();
     assert!(
-        close_elapsed < Duration::from_millis(150),
-        "socket.close() waited {close_elapsed:?} for the pending read"
+        rendered.contains("closed") && close_elapsed < close_budget,
+        "socket.close() did not unblock the pending read within {close_budget:?} ({close_elapsed:?}): {rendered}"
     );
-    assert!(rendered.contains("closed"), "{rendered}");
+    let (_peer, count) = server.join().expect("TCP server").expect("peer saw EOF");
+    assert_eq!(count, 0);
 }
 
 #[gpui::test]
@@ -1173,6 +1180,24 @@ fn draw(context: &mut VisualTestContext, view: &Entity<ScriptView>) {
         gpui::size(gpui::px(400.), gpui::px(300.)),
         move |_, _| view.into_any_element(),
     );
+}
+
+fn wait_for_socket_snapshot(
+    context: &mut VisualTestContext,
+    view: &Entity<ScriptView>,
+    expected: &str,
+    deadline: Instant,
+) -> String {
+    // The socket reactor wakes the work from outside GPUI's test scheduler.
+    loop {
+        context.run_until_parked();
+        draw(context, view);
+        let rendered = snapshot(context, view);
+        if rendered.contains(expected) || Instant::now() >= deadline {
+            return rendered;
+        }
+        thread::sleep(Duration::from_millis(1));
+    }
 }
 
 fn snapshot(context: &mut VisualTestContext, view: &Entity<ScriptView>) -> String {

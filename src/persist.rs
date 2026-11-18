@@ -30,6 +30,13 @@ pub fn write_atomic(path: &Path, body: impl AsRef<[u8]>) -> std::io::Result<()> 
     let tmp = std::path::PathBuf::from(name);
     let result = (|| {
         let mut file = std::fs::OpenOptions::new().write(true).create_new(true).open(&tmp)?;
+        // The replacement keeps the file's permissions: settings.json may be
+        // private (0600), and a fresh file would take the umask's (0644).
+        match std::fs::metadata(path) {
+            Ok(existing) => file.set_permissions(existing.permissions())?,
+            Err(e) if e.kind() == std::io::ErrorKind::NotFound => {}
+            Err(e) => return Err(e),
+        }
         file.write_all(body.as_ref())?;
         drop(file);
         std::fs::rename(&tmp, path)
@@ -69,6 +76,35 @@ mod tests {
             assert!(std::fs::symlink_metadata(&link).unwrap().is_symlink());
             assert!(std::fs::symlink_metadata(&intermediate).unwrap().is_symlink());
         }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn atomic_write_keeps_the_files_permissions() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = std::env::temp_dir().join(format!("herdr-persist-mode-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        std::fs::create_dir_all(&root).unwrap();
+        let file = root.join("settings.json");
+        let mode = |p: &Path| std::fs::metadata(p).unwrap().permissions().mode() & 0o777;
+        write_atomic(&file, "created").unwrap();
+        let fresh = mode(&file);
+        for kept in [0o600, 0o640, 0o644] {
+            std::fs::set_permissions(&file, std::fs::Permissions::from_mode(kept)).unwrap();
+            write_atomic(&file, "updated").unwrap();
+            assert_eq!(mode(&file), kept, "{kept:o} after a rewrite");
+            assert_eq!(std::fs::read_to_string(&file).unwrap(), "updated");
+        }
+        // Through a link, the target's permissions are the ones kept.
+        let link = root.join("link.json");
+        symlink(&file, &link).unwrap();
+        std::fs::set_permissions(&file, std::fs::Permissions::from_mode(0o600)).unwrap();
+        write_atomic(&link, "linked").unwrap();
+        assert_eq!(mode(&file), 0o600);
+        // A new file takes the process's default, as before.
+        let new = root.join("new.json");
+        write_atomic(&new, "new").unwrap();
+        assert_eq!(mode(&new), fresh);
         std::fs::remove_dir_all(root).unwrap();
     }
 

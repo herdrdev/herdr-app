@@ -79,6 +79,7 @@ usvg = { version = "0.46", default-features = false }
 tracing.workspace = true
 
 [dev-dependencies]
+tempfile = "3"
 gpui = { workspace = true, features = ["test-support"] }
 gpui-fast = { workspace = true, features = ["test-support"] }
 
