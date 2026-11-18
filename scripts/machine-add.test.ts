@@ -1,9 +1,16 @@
 import { expect, test } from "bun:test";
 import { mkdir, mkdtemp, readFile, rm, writeFile } from "node:fs/promises";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 
 const source = await readFile(new URL("../defaults/mods/machine-add/main.js", import.meta.url), "utf8");
+
+// Git for Windows puts git.exe on PATH, but not its POSIX shell.
+const git = Bun.which("git");
+const shell = Bun.which("sh") ?? (process.platform === "win32" && git
+  ? Bun.which("sh", { PATH: join(dirname(git), "..", "bin") }) : null);
+if (!shell) throw new Error("The SSH tests need sh; install Git for Windows or add sh to PATH.");
+const shellEnv = { ...process.env, PATH: [dirname(shell), process.env.PATH].filter(Boolean).join(delimiter) };
 
 function setup(result: any) {
   const calls: string[][] = [];
@@ -31,7 +38,7 @@ function setup(result: any) {
       return { code: 0, stdout: JSON.stringify({ machines }) };
     },
   };
-  const MachineAdd = new Function(...Object.keys(values), source.replace(/^import .*;\n/gm, "").replace("export default class MachineAdd", "return class MachineAdd"))(...Object.values(values));
+  const MachineAdd = new Function(...Object.keys(values), source.replace(/^import .*;\r?\n/gm, "").replace("export default class MachineAdd", "return class MachineAdd"))(...Object.values(values));
   const view = new MachineAdd();
   const cx = {
     notify() {}, focus_handle() {}, spawn(fn: any) { task = fn(cx); },
@@ -80,7 +87,7 @@ for (const [target, quoted] of [
     await s.add(target);
     expect(s.view.state[target]).toContain(`\`hc machine add ${quoted}\``);
     expect(s.calls.find((args) => args[1] === "add")?.[2]).toBe(target);
-    const shell = Bun.spawnSync(["sh", "-c", `printf '%s' ${quoted}`]);
+    const shell = Bun.spawnSync(["sh", "-c", `printf '%s' ${quoted}`], { env: shellEnv, windowsHide: true });
     expect(shell.exitCode).toBe(0);
     expect(shell.stdout.toString()).toBe(target);
   });
@@ -142,7 +149,7 @@ async function hostsUnder(prefix: string) {
       home: () => home,
       readTextFile: (file: string) => readFile(file, "utf8"),
       exec: async (program: string, args: string[]) => {
-        const p = Bun.spawnSync([program, ...args]);
+        const p = Bun.spawnSync([program, ...args], { env: shellEnv, windowsHide: true });
         return { code: p.exitCode, stdout: p.stdout.toString(), stderr: p.stderr.toString() };
       },
     };

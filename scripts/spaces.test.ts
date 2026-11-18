@@ -2,9 +2,9 @@ import { test, expect, spyOn } from "bun:test";
 import { readFile } from "node:fs/promises";
 import { mkdtempSync, mkdirSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { join, sep } from "node:path";
 const source = (await readFile(new URL("../defaults/mods/spaces/main.js", import.meta.url), "utf8"))
-  .replace(/^import .*;\n/gm, "").replace("export default class Spaces", "class Spaces").replace(/^export /gm, "");
+  .replace(/^import .*;\r?\n/gm, "").replace("export default class Spaces", "class Spaces").replace(/^export /gm, "");
 
 type Space = { id: string; folder: string; machine?: string | null; active?: boolean };
 function harness(replies: unknown[] = [], storage = new Map<string, string>(), snapshot: Space[] = [], execGit?: (...args: any[]) => Promise<unknown>, watch?: (repo: string) => Promise<string[]>) {
@@ -84,7 +84,8 @@ test("git grouping reads refs for normal, detached, unborn and bare worktrees", 
     expect(await check(repo)).toMatchObject({ name: "repo", branch: "main", ahead: 1, behind: 1, linked: false });
     const tree = join(root, "tree");
     git(repo, "worktree", "add", "-b", "topic", tree);
-    expect(await check(tree)).toMatchObject({ branch: "topic", ahead: 0, behind: 0, linked: true, repo: JSON.stringify([null, join(repo, ".git")]) });
+    // Git reports forward slashes on Windows as well as POSIX systems.
+    expect(await check(tree)).toMatchObject({ branch: "topic", ahead: 0, behind: 0, linked: true, repo: JSON.stringify([null, join(repo, ".git").split(sep).join("/")]) });
     git(tree, "checkout", "--detach");
     expect(await check(tree)).toMatchObject({ branch: "(detached)", ahead: 0, behind: 0 });
     expect(await check(root)).toBeNull();
@@ -93,7 +94,7 @@ test("git grouping reads refs for normal, detached, unborn and bare worktrees", 
     git(root, "clone", "--bare", repo, bare);
     expect(await check(bare)).toBeNull();
     git(bare, "worktree", "add", "-b", "bare-topic", bareTree);
-    expect(await check(bareTree)).toMatchObject({ name: "bare", branch: "bare-topic", linked: true, repo: JSON.stringify([null, bare]) });
+    expect(await check(bareTree)).toMatchObject({ name: "bare", branch: "bare-topic", linked: true, repo: JSON.stringify([null, bare.split(sep).join("/")]) });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

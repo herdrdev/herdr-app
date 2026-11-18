@@ -135,7 +135,9 @@ The platform installer builds a release and adds the app to your desktop.
 On Linux it links to this checkout, so keep the checkout in place.
 Quit and reopen Herdr to use the new build.
 
-Documentation checks also need [Bun](https://bun.sh): `just docs-check` checks generated pages and CLI examples; `just docs-generate` refreshes the reference pages.
+Tests and documentation checks need [Bun](https://bun.sh) (CI uses 1.4.4). CI runs the mod tests on Linux, macOS and Windows. The SSH configuration tests also need `sh`; Git for Windows includes it, and the tests find it beside Git when it is not on PATH.
+
+`just docs-check` checks generated pages and CLI examples; `just docs-generate` refreshes the reference pages.
 
 To compare drawing changes on Windows, Linux or macOS, run the same fixed workloads against each build:
 
