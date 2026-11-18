@@ -59,6 +59,14 @@ async function panel(statuses: Record<string, Answer<{ files: string[] }>[]> = {
   };
 }
 
+test.each([
+  ["Bengali spacing marks", "বাংলা ".repeat(8) + "END", 51],
+  ["tab-indented CJK glyphs", "\t" + "界".repeat(20) + "END", 47],
+])("Changes leaves horizontal room for %s", async (_name, text, columns) => {
+  const h = await panel({}, { "/repo-a/a.txt": [{ text }] });
+  expect(h.view.longest).toBeGreaterThanOrEqual(columns);
+});
+
 test("Changes follows a space switch while the last repo's preview never finishes", async () => {
   const h = await panel({}, { "/repo-a/a.txt": [{ text: "", wait: never }] });
   expect(h.paths()).toEqual(["a.txt"]);
