@@ -1,7 +1,9 @@
 import { test, expect } from "bun:test";
-import { readFile, mkdtemp } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
 import { spawnSync } from "node:child_process";
 import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const source = (await readFile(new URL("../defaults/mods/worktree/main.js", import.meta.url), "utf8"))
   .replace(/^import .*;\n/gm, "").replace("export default class Worktree", "class Worktree");
@@ -29,7 +31,7 @@ function rowsOf(node: any): any[] {
 }
 
 type Reply = { code: number; stdout?: string; stderr?: string };
-function harness(focusedMachine: string | null = null, raw: string | null = null, files: Record<string, string> = {}, extra: Record<string, unknown> = {}, reply: (command: string, args: string[]) => Reply | undefined = () => undefined) {
+function harness(focusedMachine: string | null = null, raw: string | null = null, files: Record<string, string> = {}, extra: Record<string, unknown> = {}, reply: (command: string, args: string[]) => Reply | undefined = () => undefined, overrides: Record<string, unknown> = {}) {
   let spaceList: any[] = [];
   let paneList: any[] = [];
   const reads = { spaces: 0, panes: 0 };
@@ -51,6 +53,8 @@ function harness(focusedMachine: string | null = null, raw: string | null = null
       executions.push({ command, args, ...options });
       return { stdout: "", stderr: "", ...(reply(command, args) ?? { code: 0 }) };
     },
+    window: () => ({ platform: "linux" }),
+    ...overrides,
   };
   const { Worktree, root, plan } = new Function(...Object.keys(globals), `${source}; return { Worktree, root, plan };`)(...Object.values(globals));
   const worktree = new Worktree();
@@ -175,6 +179,19 @@ test("space matching keeps deepest checkout, machine, live-folder and fallback r
   expect(reads).toEqual({ spaces: 5, panes: 5 });
 });
 
+test("a bare repo hidden beside its worktrees is named after its project", async () => {
+  const replies: Record<string, string> = {
+    "--show-toplevel": "/home/user/project/topic",
+    "--git-common-dir": "/home/user/project/.bare",
+  };
+  const exec = async (_command: string, args: string[]) => ({ code: 0, stdout: replies[args.at(-1)!] + "\n", stderr: "" });
+  const globals = { View: class {}, div: element, v_flex: element, h_flex: element, Input: { new: element }, Scrollbar: { vertical: element }, theme: () => ({}), exec };
+  const repoOf = new Function(...Object.keys(globals), `${source}; return repoOf;`)(...Object.values(globals));
+  expect(await repoOf("/home/user/project/topic", null)).toEqual({
+    top: "/home/user/project/topic", main: "/home/user/project/.bare", name: "project", linked: true,
+  });
+});
+
 test("configured roots drive both the checkout and its space, expanding the target home", async () => {
   for (const [directory, userHome, on, expected] of [
     [undefined, "/home/user", null, "/home/user/.herdr/worktrees"],
@@ -207,6 +224,7 @@ test("missing settings keep the old location, while invalid directories cannot c
 
 const repo = { name: "repo", main: "/home/user/code/repo", top: "/home/user/code/repo" };
 const shared = (settings: unknown) => ({ [`${repo.main}/.herdr/worktree.json`]: JSON.stringify(settings) });
+const listed = (top: string, args: string[]) => args.includes("list") ? { code: 0, stdout: `worktree ${repo.main}\nbranch refs/heads/main\n\nworktree ${top}\nbranch refs/heads/x\n` } : undefined;
 const sh = (argv: string[], cwd: string) => spawnSync(argv[0], argv.slice(1), { cwd, encoding: "utf8", env: { ...process.env, SHELL: "/bin/sh" } });
 
 test("a repo's .herdr/worktree.json, else the person's worktrees.repos entry, chooses where its checkouts go", async () => {
@@ -267,7 +285,7 @@ test("teardown runs the repo's commands, then the person's, and a failure keeps 
   const settings = JSON.stringify({ worktrees: { teardown: "echo mine" } });
   let fail = true;
   const { worktree, plan, writes, executions, snapshot } = harness(null, settings, shared({ teardown: "docker compose down" }), { action: "remove", space: "s1" },
-    (command) => command === "/bin/sh" && fail ? { code: 3, stdout: "a\nb", stderr: "compose: no such service" } : undefined);
+    (command, args) => command === "/bin/sh" && fail ? { code: 3, stdout: "a\nb", stderr: "compose: no such service" } : listed(linked.top, args));
   snapshot([{ id: "s1", name: "feature-new", tabs: [] }], []);
   Object.assign(worktree, { opening: false, repo: linked, dirty: false, unpushed: [], plan: await plan(linked, "/home/user", null, false) });
   expect(textOf(worktree.render({}).node)).toContain("First runs docker compose down, then echo mine in the checkout.");
@@ -295,7 +313,7 @@ test("teardown runs the repo's commands, then the person's, and a failure keeps 
 test("a teardown that can't start or times out still lets Enter again remove the checkout", async () => {
   const linked = { ...repo, top: "/home/user/code/repo/.claude/worktrees/x", linked: true };
   const { worktree, plan, writes, snapshot } = harness(null, null, shared({ teardown: "sleep 9999" }), { action: "remove", space: "s1" },
-    (command) => { if (command === "/bin/sh") throw new Error("timed out"); return undefined; });
+    (command, args) => { if (command === "/bin/sh") throw new Error("timed out"); return listed(linked.top, args); });
   snapshot([{ id: "s1", name: "x", tabs: [] }], []);
   Object.assign(worktree, { opening: false, repo: linked, dirty: false, unpushed: [], plan: await plan(linked, "/home/user", null, false) });
   expect(await worktree.remove()).toBe("Teardown failed, nothing was removed.\ntimed out\nEnter again removes it without the teardown.");
@@ -320,3 +338,128 @@ test("broken repo and person settings say what is wrong instead of creating else
     await expect(plan(repo, "/home/user", null, true)).rejects.toThrow(message);
   }
 });
+
+function execute(command: string, args: string[], { cwd }: { cwd: string }) {
+  const result = Bun.spawnSync([command, ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+  return { code: result.exitCode, stdout: result.stdout.toString(), stderr: result.stderr.toString() };
+}
+
+function fixtureGit(cwd: string, ...args: string[]) {
+  const result = execute("git", args, { cwd });
+  if (result.code !== 0) throw new Error(result.stderr);
+  return result.stdout.trim();
+}
+
+async function withLinkedCheckout(runTest: (main: string, linked: string) => Promise<void>) {
+  const folder = await mkdtemp(join(process.platform === "linux" ? "/var/tmp" : tmpdir(), "herdr-worktree-"));
+  try {
+    const root = await realpath(folder);
+    const main = join(root, "main"), linked = join(root, "linked with spaces");
+    fixtureGit(root, "init", "--initial-branch=main", main);
+    fixtureGit(main, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--no-gpg-sign", "--allow-empty", "-m", "fixture");
+    fixtureGit(main, "worktree", "add", "-b", "linked", linked);
+    await runTest(main, linked);
+  } finally {
+    await rm(folder, { recursive: true, force: true });
+  }
+}
+
+function removeDialog(folder: string, { branch, platform = "linux", exec = execute }: {
+  branch?: string; platform?: string; exec?: typeof execute;
+} = {}) {
+  const closedSpaces: { id: string; checkoutPresent: boolean }[] = [];
+  const closedOverlays: string[] = [];
+  const { worktree, snapshot } = harness(null, null, {}, {}, undefined, {
+    home: () => folder,
+    window: () => ({ platform }),
+    props: () => ({ space: "target", action: "remove", overlay: "dialog", branch }),
+    InputState: { new: () => ({ on() {}, focus() {} }) },
+    run: (command: string, args: { id: string }) => {
+      if (command === "space.close") closedSpaces.push({ id: args.id, checkoutPresent: existsSync(folder) });
+    },
+    closeOverlay: (id: string) => closedOverlays.push(id),
+    exec,
+  });
+  snapshot([{ id: "target", name: "Worktree", folder }], []);
+  let pending = Promise.resolve();
+  const cx = {
+    notify() {},
+    focus_handle: () => ({ focus() {} }),
+    spawn: (task: (context: { notify(): void }) => Promise<void>) => { pending = task(cx); },
+  };
+  worktree.init({}, cx);
+  return {
+    worktree, closedSpaces, closedOverlays, ready: pending,
+    enter: async () => { worktree.key({ key: "enter" }, cx); await pending; },
+  };
+}
+
+test("remove leaves the main checkout and its space alone on Enter and with a branch prop", async () => {
+  await withLinkedCheckout(async (main) => {
+    for (const branch of [undefined, "main"]) {
+      const dialog = removeDialog(main, { branch });
+      await dialog.ready;
+      if (!branch) await dialog.enter();
+      expect(dialog.closedSpaces).toEqual([]);
+      expect(dialog.closedOverlays).toEqual([]);
+      expect(textOf(dialog.worktree.render({}).node)).toContain("This is the repository's main checkout");
+      expect(dialog.worktree.error).toBe("");
+      expect(existsSync(main)).toBe(true);
+    }
+  });
+});
+
+test("remove shows a locked checkout's reason and keeps the space open on Windows", async () => {
+  await withLinkedCheckout(async (main, linked) => {
+    fixtureGit(main, "worktree", "lock", "--reason", "Réservé for another machine\nLeave this checkout in place", linked);
+    const dialog = removeDialog(linked, { platform: "windows" });
+    await dialog.ready;
+    await dialog.enter();
+    const message = textOf(dialog.worktree.render({}).node);
+    expect(message).toContain("This worktree is locked:");
+    expect(message).toContain("Réservé for another machine");
+    expect(message).toContain("Leave this checkout in place");
+    expect(dialog.closedSpaces).toEqual([]);
+    expect(dialog.closedOverlays).toEqual([]);
+    expect(existsSync(linked)).toBe(true);
+  });
+});
+
+test("remove keeps the space open if Git refuses a removal on Unix after preflight", async () => {
+  await withLinkedCheckout(async (main, linked) => {
+    const dialog = removeDialog(linked, {
+      exec: (command, args, options) => {
+        if (args[0] === "worktree" && args[1] === "remove") {
+          fixtureGit(main, "worktree", "lock", "--reason", "locked just before removal", linked);
+        }
+        return execute(command, args, options);
+      },
+    });
+    await dialog.ready;
+    await dialog.enter();
+    expect(dialog.worktree.error).toContain("locked just before removal");
+    expect(dialog.closedSpaces).toEqual([]);
+    expect(dialog.closedOverlays).toEqual([]);
+    expect(existsSync(linked)).toBe(true);
+  });
+});
+
+for (const platform of ["linux", "windows"]) {
+  test(`remove warns about new changes and closes a successfully removed checkout on ${platform}`, async () => {
+    await withLinkedCheckout(async (main, linked) => {
+      const dialog = removeDialog(linked, { platform });
+      await dialog.ready;
+      await writeFile(join(linked, "untracked.txt"), "uncommitted");
+      await dialog.enter();
+      expect(textOf(dialog.worktree.render({}).node)).toContain("It has uncommitted changes");
+      expect(dialog.closedSpaces).toEqual([]);
+      expect(existsSync(join(linked, "untracked.txt"))).toBe(true);
+
+      await dialog.enter();
+      expect(dialog.closedSpaces).toEqual([{ id: "target", checkoutPresent: platform === "windows" }]);
+      expect(dialog.closedOverlays).toEqual(["dialog"]);
+      expect(existsSync(linked)).toBe(false);
+      expect(fixtureGit(main, "branch", "--list", "linked")).toBe("linked");
+    });
+  });
+}
