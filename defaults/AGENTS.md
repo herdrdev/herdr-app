@@ -187,9 +187,9 @@ only when expanded.
 
 **Herdr's own layouts and mods are read-only.** They are replaced whole
 on every start. Use settings.json for look (fonts, sizes, theme, colors,
-sounds), where the layout leaves them unset. Herdr (main) has no look of
-its own, so your settings decide it; Herdr 98 and Terminals bring their own
-look. The theme picker overrides any layout. To change a shipped layout's
+sounds), where the layout leaves them unset. Herdr (main) and Terminals
+have no look of their own, so your settings decide it; Herdr 98 brings its
+own look. The theme picker overrides any layout. To change a shipped layout's
 look beyond that, or its structure/code, clone it and edit the clone:
 
 ```sh
