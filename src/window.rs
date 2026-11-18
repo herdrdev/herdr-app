@@ -2314,13 +2314,16 @@ impl AppWindow {
         for (addr, rec) in &self.live {
             let word = rec.get("status").and_then(Value::as_str).map(str::to_owned);
             let app = rec.get("report").and_then(|r| r.get("app")).and_then(Value::as_str).filter(|s| !s.is_empty()).map(str::to_owned);
+            // Core says the program reported a status at least once: an agent
+            // between turns keeps its place in the list while its word is empty.
+            let reported = rec.get("reported").and_then(Value::as_bool).unwrap_or(false);
             let looking = visible.contains(addr) && self.window_active;
             let prev = self.model.agents.get(addr).and_then(|a| a.word.clone());
             let child = rec.get("parent").and_then(Value::as_str).is_some_and(|p| !p.is_empty());
             if let Some(alert) = self.model.alert_for(addr, child, prev.as_deref(), word.as_deref(), looking) {
                 alerts.push((addr.clone(), alert, looking));
             }
-            changed |= self.model.set_word(addr, word, app, looking);
+            changed |= self.model.set_word(addr, word, app, reported, looking);
             let turn = rec.get("turn").and_then(Value::as_u64).unwrap_or(0);
             let label = rec.pointer("/labels/herdr.seen").and_then(Value::as_str).and_then(|s| s.parse::<u64>().ok());
             changed |= self.model.set_turn(addr, turn, label.max(self.written_seen.get(addr).copied()));

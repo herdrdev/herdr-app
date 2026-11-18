@@ -645,6 +645,7 @@ mod tests {
         lines.push(event(8, "status", "t2", json!({"status": {"state": "working"}, "records": {}, "reported": true})).as_bytes());
         lines.push(event(9, "foreground", "t2", json!({"pid": 7, "name": "vim", "argv": ["vim"], "cwd": "/src"})).as_bytes());
         assert_eq!(lines.live()["terminals"][1]["status"]["state"], "working");
+        assert_eq!(lines.live()["terminals"][1]["reported"], true, "reported is a terminal fact, not part of status");
         assert_eq!(lines.live()["terminals"][1]["foreground"]["cwd"], "/src");
         lines.push(event(10, "finished", "t1", json!({"reason": "exited", "exit_code": 0, "signal": null, "finished_ms": 1})).as_bytes());
         assert_eq!(addresses(&lines), ["t2"], "finished: no longer live");
@@ -655,6 +656,10 @@ mod tests {
         assert!(got.terminals && got.docs, "missed: everything again");
         assert_eq!(addresses(&lines), ["t9"]);
         assert!(lines.push(format!("{}\n", json!({"method": "event", "params": {"seq": 21, "type": "doc"}})).as_bytes()).docs);
+        // A cleared status keeps `reported`: core still calls it an agent (#1132).
+        lines.push(format!("{}\n", json!({"method": "event", "params": {"seq": 22, "type": "status", "terminal": "t9", "data": {"status": null, "records": {}, "reported": true}}})).as_bytes());
+        assert!(lines.live()["terminals"][0]["status"].is_null());
+        assert_eq!(lines.live()["terminals"][0]["reported"], true);
     }
 
     #[test]
