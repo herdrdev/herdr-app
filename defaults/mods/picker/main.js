@@ -34,13 +34,22 @@ function spaceColor(t, p) {
   return c.startsWith("#") ? c : (MARK[c] ?? t[c]);
 }
 
+const STATUSES = ["blocked", "working", "done", "idle"];
+const STATUS_KEYS = { b: "blocked", w: "working", f: "done", i: "idle" };
+const STATUS_LABELS = { done: "finished" };
+
+function hasStatus(c, status) {
+  return !status || c.mine.some((a) => a.status === status);
+}
+
 export default class Picker extends View {
   init(_props, cx) {
     this.filter = "";
+    this.status = null;
     this.input = InputState.new({ placeholder: "Go to a tab, space or agent…" });
     this.input.on("change", (_e, cx) => {
       this.filter = this.input.value();
-      this.at = this.filter ? Math.max(0, this.rows().filter(r => r.kind !== "head").findIndex(r => r.kind === "ctx")) : 0;
+      this.refilter();
       cx.notify();
     });
     this.input.on("submit", (_e, cx) => this.go(this.rows().filter(r => r.kind !== "head")[this.at], cx));
@@ -64,7 +73,17 @@ export default class Picker extends View {
     closeOverlay(props().overlay);
   }
 
-  rows() {
+  refilter() {
+    this.at = this.filter || this.status ? Math.max(0, this.rows().filter(r => r.kind !== "head").findIndex(r => r.kind === "ctx")) : 0;
+  }
+
+  setStatus(status) {
+    this.status = status;
+    this.refilter();
+    this.input.focus();
+  }
+
+  groups() {
     const f = this.filter.toLowerCase();
     const all = agents();
     const live = terminals().filter((x) => x.state === "live");
@@ -74,7 +93,7 @@ export default class Picker extends View {
       addrs.forEach(walk);
       return n;
     };
-    const groups = spaces().map((w) => {
+    return spaces().map((w) => {
       const ctxs = w.tabs
         .map((ctx) => {
           const mine = all.filter((a) => a.tab === ctx.id);
@@ -83,6 +102,11 @@ export default class Picker extends View {
         .filter((c) => !f || [w.name, c.ctx.name, ...c.mine.map((a) => a.program?.name ?? "")].join(" ").toLowerCase().includes(f));
       return { w, ctxs };
     });
+  }
+
+  rows(searched = this.groups()) {
+    const f = this.filter.toLowerCase();
+    const groups = searched.map((p) => ({ w: p.w, ctxs: p.ctxs.filter((c) => hasStatus(c, this.status)) }));
     const busy = groups.filter((p) => p.w.status && p.ctxs.length);
     const quiet = groups.filter((p) => !p.w.status && p.ctxs.length);
     busy.sort((a, b) => (b.w.status === "blocked") - (a.w.status === "blocked"));
@@ -122,9 +146,35 @@ export default class Picker extends View {
     return div().w(12).flex_none().text_color(t[st] ?? t.dim).child(st === "idle" ? "○" : st ? "●" : "·");
   }
 
+  chip(t, status, count) {
+    const on = this.status === status;
+    return h_flex()
+      .id(`pk-status-${status ?? "all"}`)
+      .h(24)
+      .px(8)
+      .gap(6)
+      .items_center()
+      .rounded(6)
+      .text_size(11.5)
+      .text_color(on ? t.foreground : t.dim)
+      .cursor_pointer()
+      .when(on, (el) => el.bg(t.selected))
+      .hover((s) => s.bg(t.hover).text_color(t.foreground))
+      .on_click((_e, cx) => {
+        this.setStatus(status);
+        cx.notify();
+      })
+      .when(Boolean(status), (el) => el.child(this.glyph(t, status)))
+      .child(STATUS_LABELS[status] ?? status ?? "all")
+      .when(count !== undefined, (el) => el.child(div().text_color(t.dim).child(String(count))));
+  }
+
   render() {
     const t = theme();
-    const rows = this.rows();
+    const searched = this.groups();
+    const tabs = searched.flatMap((p) => p.ctxs);
+    const counts = Object.fromEntries(STATUSES.map((s) => [s, tabs.filter((c) => hasStatus(c, s)).length]));
+    const rows = this.rows(searched);
     const pickable = rows.filter((r) => r.kind !== "head");
     // Opens on where you are.
     if (this.at === null) this.at = Math.max(0, pickable.findIndex((r) => r.kind === "ctx" && r.w.active && r.ctx.active));
@@ -243,6 +293,8 @@ export default class Picker extends View {
             this.close();
             run("tab.close", { id: sel.ctx.id });
           }
+        } else if (e.modifiers.control && STATUS_KEYS[k]) {
+          this.setStatus(this.status === STATUS_KEYS[k] ? null : STATUS_KEYS[k]);
         } else return;
         cx.stop_propagation();
         cx.notify();
@@ -253,6 +305,7 @@ export default class Picker extends View {
           .child(svg("mods/workspace-chrome/search.svg").size(15).text_color(t.dim))
           .child(Input.new(this.input).flex_1().h_full().text_size(12.8).text_color(t.foreground)),
       )
+      .child(h_flex().flex_none().gap(4).items_center().children([null, ...STATUSES].map((s) => this.chip(t, s, counts[s]))))
       .child(
         v_flex()
           .id("pk-list")
