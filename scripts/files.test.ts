@@ -127,3 +127,26 @@ test("Files follows directory links one level at a time", async () => {
     await rm(root, { recursive: true, force: true });
   }
 });
+
+test("Files keeps its folder while a mod pane has focus", () => {
+  const state: { spaces: any[]; panes: any[]; focused: any } = { spaces: [], panes: [], focused: null };
+  const locationSource = source.slice(source.indexOf("// A mod pane has no folder"), source.indexOf("const key ="));
+  const location = new Function("spaces", "panes", "focused", `${locationSource}; return location;`)(() => state.spaces, () => state.panes, () => state.focused);
+  state.spaces = [{ id: "s1", active: true, folder: "/tmp", machine: null }, { id: "s2", active: false, folder: "/srv", machine: null }];
+  state.panes = [
+    { pane: "p1", terminal: "t1", tab: "a", cwd: "/tmp" },
+    { pane: "p2", terminal: "t2", tab: "a", cwd: "/home/me/repo" },
+    { pane: "p3", terminal: null, mod: "files-viewer", tab: "a", cwd: null },
+  ];
+  const focus = (pane: string) => (state.focused = { space: "s1", tab: "a", pane, terminal: state.panes.find(p => p.pane === pane).terminal, cwd: null });
+  focus("p2");
+  expect(location().cwd).toBe("/home/me/repo");
+  focus("p3");
+  expect(location().cwd).toBe("/home/me/repo");
+  focus("p1");
+  expect(location().cwd).toBe("/tmp");
+  // A space with no folder shown yet still starts at its own folder.
+  state.spaces = state.spaces.map(s => ({ ...s, active: s.id === "s2" }));
+  state.focused = { space: "s2", tab: "b", pane: "p3", terminal: null, cwd: null };
+  expect(location()).toEqual({ cwd: "/srv", on: null, space: "s2" });
+});

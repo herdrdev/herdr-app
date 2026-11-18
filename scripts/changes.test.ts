@@ -10,6 +10,18 @@ test("Changes keeps tab indentation, to the next 4-column stop", () => {
   expect(rows.map((r: { text: string }) => r.text)).toEqual(["@@ -1,2 +1,2 @@", "    if x {", "        if x {", "a   b", "    spaces"]);
 });
 
+test("Changes keeps its folder while a mod pane has focus", () => {
+  const state: { panes: any[]; focused: any } = { panes: [], focused: null };
+  const locationSource = source.slice(source.indexOf("// A mod pane has no folder"), source.indexOf("const key ="));
+  const space = { id: "s1", active: true, folder: "/tmp", machine: null };
+  const location = new Function("spaces", "panes", "focused", `${locationSource}; return location;`)(() => [space], () => state.panes, () => state.focused);
+  state.panes = [{ pane: "p1", terminal: "t1", cwd: "/home/me/repo" }, { pane: "p2", terminal: null, mod: "viewer", cwd: null }];
+  state.focused = { space: "s1", pane: "p1", terminal: "t1", cwd: null };
+  expect(location().cwd).toBe("/home/me/repo");
+  state.focused = { space: "s1", pane: "p2", terminal: null, cwd: null };
+  expect(location().cwd).toBe("/home/me/repo");
+});
+
 // A timer turn runs every promise continuation that is ready.
 const settled = () => new Promise(resolve => setTimeout(resolve));
 const held = () => { let release!: () => void; const wait = new Promise<void>(resolve => { release = resolve; }); return { wait, release }; };
