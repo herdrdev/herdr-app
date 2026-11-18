@@ -5350,6 +5350,88 @@ mod tests {
         assert_eq!(super::bidi_shift_x(&bidi_cells("אבגד"), -1.0, 10.0), -1.0);
     }
 
+    /// Lays out `input` (one cell per char) and returns the visual text, after
+    /// checking the map is a permutation of the columns.
+    fn bidi_visual(input: &str) -> String {
+        let row = bidi_cells(input);
+        match super::bidi_row(&row) {
+            Some((out, map)) => {
+                let mut sorted = map.clone();
+                sorted.sort_unstable();
+                assert!(sorted.iter().enumerate().all(|(i, &v)| i == v), "{input}: map is a permutation");
+                bidi_texts(&out).concat()
+            }
+            None => input.to_string(),
+        }
+    }
+
+    #[test]
+    fn bidi_row_numbers_and_mixed_runs_follow_uax9() {
+        assert_eq!(bidi_visual("abc אבג 123"), "abc 123 גבא");
+        assert_eq!(bidi_visual("abc שלום 123 עולם xyz"), "abc םלוע 123 םולש xyz");
+        assert_eq!(bidi_visual("קובץ config.toml לא נמצא"), "ץבוק config.toml אצמנ אל");
+        assert_eq!(bidi_visual("אב 12"), "12 בא");
+        assert_eq!(bidi_visual("שלום     "), "םולש     ");
+        assert_eq!(bidi_visual("א 12 ב"), "ב 12 א");
+        assert_eq!(bidi_visual("س ١٢"), "١٢ س");
+    }
+
+    #[test]
+    fn bidi_row_keeps_combining_marks_on_their_base_cell() {
+        let row: Vec<_> = ["a", " ", "שָׁ", "לוֹ", "ם"].iter().map(|t| bidi_cell(t)).collect();
+        let (out, _) = super::bidi_row(&row).expect("hebrew moves");
+        assert_eq!(bidi_texts(&out), vec!["a", " ", "ם", "לוֹ", "שָׁ"]);
+        let row: Vec<_> = ["x", " ", "بِ", "سْ", "م"].iter().map(|t| bidi_cell(t)).collect();
+        let (out, _) = super::bidi_row(&row).expect("arabic moves");
+        assert_eq!(bidi_texts(&out), vec!["x", " ", "م", "سْ", "بِ"]);
+    }
+
+    #[test]
+    fn bidi_row_wide_graphemes_keep_head_then_tail() {
+        let mut emoji = bidi_cell("😀");
+        emoji.wide = true;
+        let row = vec![bidi_cell("א"), emoji, bidi_cell(""), bidi_cell("ב")];
+        let (out, map) = super::bidi_row(&row).expect("reordered");
+        assert_eq!(bidi_texts(&out), vec!["ב", "😀", "", "א"]);
+        assert_eq!(map, vec![3, 1, 2, 0]);
+
+        let mut cjk = bidi_cell("中");
+        cjk.wide = true;
+        let row = vec![cjk, bidi_cell(""), bidi_cell(" "), bidi_cell("א"), bidi_cell("ב")];
+        let (out, _) = super::bidi_row(&row).expect("reordered");
+        assert_eq!(bidi_texts(&out), vec!["中", "", " ", "ב", "א"]);
+    }
+
+    #[test]
+    fn bidi_row_mirrors_more_brackets_and_splits_at_box_frames() {
+        assert_eq!(bidi_visual("(שלום)"), "(םולש)");
+        assert_eq!(bidi_visual("א (ב) ג"), "ג (ב) א");
+        assert_eq!(bidi_visual("א «ב» ג"), "ג «ב» א");
+        assert_eq!(bidi_visual("│ שלום │ עולם │"), "│ םולש │ םלוע │");
+        assert_eq!(bidi_visual("─אב─גד─"), "─בא─דג─");
+    }
+
+    #[test]
+    fn bidi_row_leaves_rows_without_rtl_text_untouched() {
+        for input in ["abc 123 xyz", "中文 テスト", "┌──┐ │ab│ └──┘", "café ñ"] {
+            assert!(super::bidi_row(&bidi_cells(input)).is_none(), "{input}");
+        }
+    }
+
+    #[test]
+    fn bidi_row_explicit_formatting_characters_follow_uax9() {
+        assert_eq!(bidi_visual("x\u{202E}ab\u{202C}y"), "x\u{202E}\u{202C}bay");
+        assert_eq!(bidi_visual("a \u{2067}אב\u{2069} c"), "a \u{2067}בא\u{2069} c");
+        assert_eq!(bidi_visual("ab\u{200F}cd"), "ab\u{200F}cd");
+    }
+
+    #[test]
+    fn bidi_row_keeps_a_leading_orphan_tail_cell() {
+        let row = vec![bidi_cell(""), bidi_cell("א"), bidi_cell("ב")];
+        let (out, _) = super::bidi_row(&row).expect("reordered");
+        assert_eq!(bidi_texts(&out), vec!["", "ב", "א"]);
+    }
+
     #[test]
     fn bidi_shift_x_keeps_a_wide_cell_whole() {
         let mut wide = bidi_cell("（");
