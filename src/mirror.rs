@@ -72,17 +72,37 @@ pub fn local<'a>(id: &'a str, machine: Option<&str>) -> &'a str {
     machine.and_then(|m| id.strip_prefix(m).and_then(|s| s.strip_prefix('/'))).unwrap_or(id)
 }
 
+fn map_presented_props(props: &mut serde_json::Value, map: &impl Fn(&str) -> String) {
+    let Some(obj) = props.as_object_mut() else { return };
+    for key in ["pane", "terminal"] {
+        if let Some(value) = obj.get_mut(key)
+            && let Some(s) = value.as_str()
+        {
+            *value = serde_json::Value::String(map(s));
+        }
+    }
+}
+
 fn map_node(node: &mut Node, map: &impl Fn(&str) -> String) {
     node.id = map(&node.id);
     match &mut node.kind {
         Kind::Block { content: Content::Terminal { terminal } } => *terminal = map(terminal),
+        Kind::Block { content: Content::Presented { terminal, props, .. } } => {
+            *terminal = map(terminal);
+            map_presented_props(props, map);
+        }
         Kind::Stack { active: Some(active), .. } => *active = map(active),
         _ => {}
     }
     for float in &mut node.floating {
         float.id = map(&float.id);
-        if let Content::Terminal { terminal } = &mut float.content {
-            *terminal = map(terminal);
+        match &mut float.content {
+            Content::Terminal { terminal } => *terminal = map(terminal),
+            Content::Presented { terminal, props, .. } => {
+                *terminal = map(terminal);
+                map_presented_props(props, map);
+            }
+            _ => {}
         }
     }
     if let Some(children) = node.children_mut() {
@@ -259,6 +279,29 @@ mod tests {
         assert!(m.space("s").is_some());
         assert!(m.space("mac/s").is_some());
     }
+    #[test]
+    fn presented_panes_round_trip_with_their_parked_terminal() {
+        let mut m = model();
+        assert!(m.set_content("p", Content::Presented {
+            terminal: "t1".into(),
+            name: "viewer".into(),
+            props: serde_json::json!({ "file": "README.md", "pane": "p", "terminal": "t1" }),
+        }));
+        let doc = Document::capture(&m, None);
+        let text = serde_json::to_value(&doc).unwrap();
+        let content = &text["spaces"][0]["tabs"][0]["root"]["children"][0]["content"];
+        assert_eq!(content["terminal"], "t1");
+        assert_eq!(content["mod"], "viewer");
+        let mut other = Model::default();
+        doc.replace(&mut other, Some("mac"));
+        assert_eq!(other.presented_terminal_of("mac/p").as_deref(), Some("mac/t1"));
+        assert_eq!(other.address_of("mac/p"), None);
+        let props = &other.tab("mac/t").unwrap().root.find("mac/p").unwrap().mod_parts().unwrap().1;
+        assert_eq!(props["pane"], "mac/p");
+        assert_eq!(props["terminal"], "mac/t1");
+        assert_eq!(serde_json::to_value(Document::capture(&other, Some("mac"))).unwrap()["spaces"][0]["tabs"][0]["root"]["children"][0]["content"]["terminal"], "t1");
+    }
+
     #[test]
     fn replacement_preserves_valid_view_and_falls_back_when_deleted() {
         let mut m = model();
