@@ -4573,7 +4573,13 @@ impl AppWindow {
             el = el.border(settings::z(l.width)).border_color(c(&l.color));
         }
         el = shadow(el, f.shadow.as_deref());
-        let body = div().flex_1().min_h_0().flex().child(inner);
+        let mut body = div().flex_1().min_h_0().flex().relative().child(inner);
+        // No listeners, so no hitbox: clicks still reach the terminal below.
+        if let Some(v) = self.veil(f.veil, &n.id) {
+            // The terminal's own background, solid as the terminal paints it: a
+            // glass layout's transparent `background` would make the veil vanish.
+            body = body.child(div().absolute().inset_0().bg(crate::terminal::hsla(crate::vt::theme().bg).opacity(v)));
+        }
         let Some(h) = &f.header else { return el.child(body).into_any_element() };
         let head = div().flex_none().h(settings::z(pane_size::header_height(h))).w_full().flex()
             .child(self.render_slot(&format!("{}#frame", n.id), cx));
@@ -4583,6 +4589,14 @@ impl AppWindow {
             return el.child(body).child(head).into_any_element();
         }
         if h.bottom() { el.child(body).child(head) } else { el.child(head).child(body) }.into_any_element()
+    }
+
+    /// How much a frame's `veil` fades this pane: the shown tab's panes but
+    /// its selected one, none while it is zoomed.
+    fn veil(&self, veil: Option<f32>, pane: &str) -> Option<f32> {
+        let v = veil?;
+        let tab = self.model.active_tab()?;
+        (tab.zoomed.is_none() && tab.focused_pane().as_deref() != Some(pane)).then_some(v.clamp(0., 1.))
     }
 
     /// `frame`: how panes are wrapped here (inside a framed tab), else None.
@@ -7031,6 +7045,54 @@ mod tests {
         cx.deactivate_window();
         cx.update(|window, cx| view.update(cx, |this, cx| {
             assert!(this.focused_path(window, cx).contains("pane"));
+        }));
+    }
+
+    #[test]
+    fn the_veil_covers_the_panes_that_are_not_selected() {
+        in_own_process("pane_veil");
+    }
+
+    /// A frame's `veil` fades every pane but the tab's selected one. It
+    /// follows the selection, not the keyboard: a dialog or input taking the
+    /// keyboard veils nothing more. A zoomed tab shows one pane, unveiled.
+    #[gpui::test]
+    fn pane_veil(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("pane_veil") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "unused", "", json!({
+            "id": "main", "type": "block", "content": { "tab": "active", "pane": { "veil": 0.5 } }
+        }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.model.add_space("s1", "one", "", crate::model::Tab::new("a", "a", "pa", "t1"));
+            assert!(this.model.split("pa", crate::layout::Axis::Row, "pb", "t2"));
+            this.model.select_tab("a");
+            assert!(this.model.focus_pane("pa"));
+            this.sync(window, cx);
+            let veils = |this: &super::AppWindow| {
+                let v = this.pane_frame().and_then(|f| f.veil);
+                (this.veil(v, "pa"), this.veil(v, "pb"))
+            };
+            assert_eq!(veils(this), (None, Some(0.5)));
+            let input = cx.focus_handle();
+            input.focus(window, cx);
+            assert_eq!(veils(this), (None, Some(0.5)), "the keyboard elsewhere veils nothing more");
+            assert!(this.model.focus_pane("pb"));
+            this.sync(window, cx);
+            assert_eq!(veils(this), (Some(0.5), None));
+        }));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let veiled = cx.update(|_, cx| view.read_with(cx, |this, _| this.bounds.borrow().get("pa").copied())).expect("pa was painted");
+        cx.simulate_click(veiled.center(), Default::default());
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            assert_eq!(this.model.focused_pane().as_deref(), Some("pa"), "a click goes through the veil");
+            assert_eq!((this.veil(Some(0.5), "pa"), this.veil(Some(0.5), "pb")), (None, Some(0.5)));
+            // Zooming the other pane selects it: it's the one drawn.
+            this.run("pane.zoom", json!({ "pane": "pb" }), window, cx);
+            assert_eq!(this.model.focused_pane().as_deref(), Some("pb"));
+            assert_eq!((this.veil(Some(0.5), "pa"), this.veil(Some(0.5), "pb")), (None, None), "a zoomed tab isn't veiled");
         }));
     }
 
