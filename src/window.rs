@@ -390,6 +390,19 @@ struct Watched {
     programs: Option<SystemTime>,
 }
 
+/// A click on a mod's system notification brings Herdr forward, then goes to
+/// that mod (alert.rs). Set up before any window opens, so a click that
+/// started Herdr isn't lost.
+pub fn follow_notification_clicks(cx: &mut App) {
+    cx.on_system_notification_response(|response, cx| {
+        cx.activate(true);
+        if let Some(main) = cx.windows().into_iter().find_map(|w| w.downcast::<AppWindow>()) {
+            let _ = main.update(cx, |_, window, _| window.activate_window());
+        }
+        crate::alert::clicked(&response.tag);
+    });
+}
+
 pub struct AppWindow {
     core: Arc<Core>,
     runtime: Option<Rc<ShellRuntime>>,
@@ -3740,6 +3753,7 @@ impl AppWindow {
                 return;
             }
             "app.check_updates" => crate::update::check_now(),
+            "app.test_notification" => cx.show_system_notification(crate::alert::test_notification()),
             "app.update_core" => {
                 if crate::update::core().ready.is_none() && crate::update::core().error.is_none() {
                     return self.fail("herdr-core is up to date");
@@ -4189,6 +4203,8 @@ impl AppWindow {
             Request::CloseOverlay { id } => self.close_overlay(&id, window, cx),
             Request::SetWindowTitle(title) => window.set_window_title(title.as_deref().unwrap_or("Herdr")),
             Request::SetBadge(text) => crate::badge::set(text.as_deref()),
+            Request::SystemNotify(notification) => cx.show_system_notification(notification),
+            Request::WithdrawSystemNotification(tag) => cx.dismiss_system_notification(&tag),
             Request::Refresh => self.refresh_mods(cx),
             Request::Control { cmd, reply } => {
                 let _ = reply.send(self.control(cmd, window, cx));
@@ -6931,6 +6947,69 @@ mod tests {
         assert_eq!(popup(&view, cx), (true, true), "on the new VM the popup shows its mod again");
         assert!(view.update(cx, |this, _| !this.overlays.iter().any(|o| o.id == "note")), "a toast is not shown twice");
         assert_eq!(view.update(cx, |this, _| this.copies.values().filter(|c| c.root.is_some()).count()), 2, "the block and the popup");
+    }
+
+    #[test]
+    fn mods_post_system_notifications() {
+        in_own_process("system_notifications");
+    }
+
+    /// A mod posts and withdraws its own notifications; the same tag replaces.
+    /// A click comes back to the mod that posted it, also one from before the
+    /// mod loaded (a click that started Herdr), and never to another mod.
+    #[gpui::test]
+    fn system_notifications(cx: &mut gpui::TestAppContext) {
+        use gpui::SystemNotificationResponse;
+        use serde_json::json;
+        if !running_alone("system_notifications") {
+            return;
+        }
+        let click = |tag: &str| SystemNotificationResponse { tag: tag.to_owned().into(), action_id: None };
+        let main_js = r#"
+import { View, div } from "gpui-kit";
+import { systemNotify, withdrawSystemNotification, nextSystemNotificationClick, shared, setShared } from "herdr";
+export default class extends View {
+  init(_props, cx) {
+    systemNotify({ tag: "t1", title: "Claude finished" });
+    systemNotify({ tag: "t1", title: "Claude needs you", body: "approve Bash: make" });
+    systemNotify({ tag: "t2", title: "Codex finished" });
+    withdrawSystemNotification("t2");
+    cx.spawn(async () => {
+      for (;;) {
+        const { tag } = await nextSystemNotificationClick();
+        setShared("clicks", [...(shared("clicks") ?? []), tag]);
+      }
+    });
+  }
+  render() { return div(); }
+}
+"#;
+        cx.update(|cx| {
+            cx.set_app_identity("dev.herdr.test", "Herdr");
+            super::follow_notification_clicks(cx);
+        });
+        // Clicked in Notification Center while Herdr wasn't running.
+        cx.simulate_system_notification_response(click("herdr-mod/notes/t0"));
+        cx.simulate_system_notification_response(click("herdr-mod/other/x"));
+        let (view, cx) = open_window(cx, "notes", main_js, json!({ "id": "notes", "type": "block", "content": { "mod": "notes" } }));
+        cx.run_until_parked();
+        let clicks = || crate::mods::shared("clicks").unwrap_or(json!([]));
+        assert_eq!(clicks(), json!(["t0"]), "the held click reaches its mod once it loads");
+
+        let delivered: Vec<(String, String, String)> = cx.delivered_system_notifications().iter().map(|n| (n.tag.to_string(), n.title.to_string(), n.body.to_string())).collect();
+        assert_eq!(delivered, [("herdr-mod/notes/t1".to_owned(), "Claude needs you".to_owned(), "approve Bash: make".to_owned())], "the same tag replaces, a withdrawn one goes");
+        assert!(cx.dismissed_system_notifications().iter().any(|t| t.as_ref() == "herdr-mod/notes/t2"));
+
+        cx.simulate_system_notification_response(click("herdr-mod/notes/t1"));
+        cx.run_until_parked();
+        assert_eq!(clicks(), json!(["t0", "t1"]));
+
+        // Settings' test button posts with its own tag; a click on it reaches no mod.
+        cx.update(|window, cx| view.update(cx, |this, cx| this.run("app.test_notification", serde_json::Value::Null, window, cx)));
+        assert_eq!(cx.shown_system_notifications().last().map(|n| n.tag.to_string()), Some("herdr-test".into()));
+        cx.simulate_system_notification_response(click("herdr-test"));
+        cx.run_until_parked();
+        assert_eq!(clicks(), json!(["t0", "t1"]));
     }
 
     #[test]

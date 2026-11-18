@@ -1,6 +1,7 @@
 // Windows: a window app, but tests inherit Cargo's console for their child processes.
 #![cfg_attr(all(windows, not(test)), windows_subsystem = "windows")]
 
+mod alert;
 mod badge;
 mod bench;
 mod commands;
@@ -213,6 +214,7 @@ fn main() {
             .detach();
             #[cfg(target_os = "macos")]
             macos::init(cx);
+            window::follow_notification_clicks(cx);
             if fresh {
                 let width = cx.primary_display().map(|d| f32::from(d.bounds().size.width));
                 let zoom = settings::first_zoom(width);
