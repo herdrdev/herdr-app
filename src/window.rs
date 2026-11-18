@@ -1740,6 +1740,11 @@ impl AppWindow {
     /// else the window, where the app's keys work.
     fn restore_focus(&mut self, window: &mut Window, cx: &mut Context<Self>) {
         let dialog = self.overlays.iter().rev().find(|o| o.kind.modal_keys()).map(|o| o.focus.clone());
+        // A dialog whose mod already focused something inside it (its input) keeps that:
+        // handing the keyboard to the frame would leave typing with nowhere to go.
+        if dialog.as_ref().is_some_and(|d| d.contains_focused(window, cx)) {
+            return;
+        }
         // A mod block holding the keyboard gets it back (a popup over it closed).
         if dialog.is_none() && self.focused_block.as_ref().is_some_and(|b| self.mod_block_shown(b)) {
             self.focus.focus(window, cx);
