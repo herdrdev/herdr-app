@@ -804,28 +804,18 @@ impl TerminalView {
         }
     }
 
-    /// Ctrl+V: a remote image, clipboard text on Windows, or the key itself.
+    /// Ctrl+V sends a remote image first, then follows the platform's text paste convention.
     pub fn paste_image(&mut self, cx: &mut Context<Self>) {
-        if self.send_image(cx) {
+        let remote = self.address.contains('/');
+        let item = if remote || cfg!(windows) { cx.read_from_clipboard() } else { None };
+        if remote && let Some(path) = item.as_ref().and_then(image_file) {
+            self.put_there(vec![path], true, cx);
             return;
         }
-        let text = if cfg!(windows) { cx.read_from_clipboard().and_then(|c| c.text()) } else { None };
-        let bytes = paste_image_fallback(&mut self.grid.borrow_mut().vt, text.as_deref());
+        let bytes = paste_image_fallback(&mut self.grid.borrow_mut().vt, remote, item.as_ref());
         if let Some(bytes) = bytes {
             self.send(&bytes);
         }
-    }
-
-    /// An agent on another machine reads that machine's clipboard, so this
-    /// one's image goes there as a file, and its path is pasted. A local
-    /// program reads the clipboard itself: nothing to do.
-    fn send_image(&self, cx: &mut Context<Self>) -> bool {
-        if !self.address.contains('/') {
-            return false;
-        }
-        let Some(path) = cx.read_from_clipboard().and_then(|item| image_file(&item)) else { return false };
-        self.put_there(vec![path], true, cx);
-        true
     }
 
     /// Copies the selection to the clipboard (and the primary selection on Linux).
@@ -1617,10 +1607,9 @@ fn fallback_icon(text: &str, font: &Font, ts: &gpui::TextSystem) -> Option<IconG
     icon_glyph(c)
 }
 
-fn paste_image_fallback(vt: &mut vt::Vt, text: Option<&str>) -> Option<Vec<u8>> {
-    // Windows console programs expect the terminal to paste clipboard text.
-    if cfg!(windows) && let Some(text) = text {
-        return Some(vt.paste_bytes(text));
+fn paste_image_fallback(vt: &mut vt::Vt, remote: bool, item: Option<&ClipboardItem>) -> Option<Vec<u8>> {
+    if (cfg!(windows) || (cfg!(target_os = "linux") && remote)) && let Some(text) = item.and_then(ClipboardItem::text) {
+        return Some(vt.paste_bytes(&text));
     }
     let keystroke = Keystroke::parse("ctrl-v").ok()?;
     key_bytes(vt, &KeyDownEvent { keystroke, is_held: false, prefer_character_input: false })
@@ -4627,12 +4616,18 @@ mod tests {
     #[test]
     fn ctrl_v_clipboard_text_follows_platform_paste_convention() {
         let mut vt = Vt::new(20, 3);
-        assert_eq!(super::paste_image_fallback(&mut vt, None).unwrap(), b"\x16");
-        for bracketed in [false, true] {
-            vt.write(if bracketed { b"\x1b[?2004h" } else { b"\x1b[?2004l" });
-            let bytes = super::paste_image_fallback(&mut vt, Some("paste-probe")).unwrap();
-            let expected = if cfg!(windows) { vt.paste_bytes("paste-probe") } else { vec![0x16] };
-            assert_eq!(bytes, expected);
+        let item = gpui::ClipboardItem::new_string("paste-probe".into());
+        for remote in [false, true] {
+            assert_eq!(super::paste_image_fallback(&mut vt, remote, None).unwrap(), b"\x16");
+            for bracketed in [false, true] {
+                vt.write(if bracketed { b"\x1b[?2004h" } else { b"\x1b[?2004l" });
+                let pasted = if bracketed { b"\x1b[200~paste-probe\x1b[201~".as_slice() } else { b"paste-probe" };
+                let expected = match (std::env::consts::OS, remote) {
+                    ("windows", _) | ("linux", true) => pasted,
+                    _ => b"\x16",
+                };
+                assert_eq!(super::paste_image_fallback(&mut vt, remote, Some(&item)).unwrap(), expected);
+            }
         }
     }
 

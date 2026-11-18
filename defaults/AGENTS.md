@@ -633,10 +633,11 @@ The main ones:
   screen and scrollback for copying; only the alternate screen in vim and similar apps;
   Cmd+A on macOS, no default on Linux/Windows), `terminal.copy`, `terminal.paste` (copied
   files, such as Finder's or a clipboard manager's image, as if dropped; an image
-  alone as `terminal.paste_image` pastes it), `terminal.paste_image` (Ctrl+V: an
-  image, into a terminal on another machine: copied there, its path pasted; on
-  Windows, clipboard text is pasted; otherwise Ctrl+V goes to the program, which
-  reads the clipboard itself). TIFF and BMP clipboard
+  alone as `terminal.paste_image` pastes it), `terminal.paste_image` (Ctrl+V sends
+  a clipboard image to a remote terminal as a file and pastes its path. It also
+  pastes clipboard text on Windows and into remote terminals from Linux. Otherwise
+  the program receives Ctrl+V). Bind `"ctrl-v": "terminal"` in the terminal
+  section of `keys.json` to always send the key to the program. TIFF and BMP clipboard
   images are converted to PNG before sending,
   `terminal.right_click {to: "program" | "menu", terminal?}` (where right-clicks go
   when the program takes the mouse; kept as its label `herdr.right-click=program`;

@@ -364,7 +364,7 @@ No arguments.
 
 ## `terminal.paste_image`
 
-Ctrl+V: the clipboard's image as a file on the focused terminal's machine, when that's another one; on Windows, paste clipboard text; otherwise Ctrl+V goes to the terminal.
+Ctrl+V sends a clipboard image to a remote terminal as a file. It also pastes clipboard text on Windows and into remote terminals from Linux. Otherwise the program receives Ctrl+V.
 
 No arguments.
 
