@@ -882,17 +882,29 @@ fn exec_limit(options: Option<&HostValue>) -> Result<Duration, HostError> {
 }
 
 pub(crate) fn run_blocking(command: &str, args: &[String], cwd: Option<String>, limit: Duration) -> Result<(i32, String, String), String> {
+    run_with_input(command, args, cwd, limit, None)
+}
+
+/// `run_blocking`, with `input` written to the program's stdin.
+fn run_with_input(command: &str, args: &[String], cwd: Option<String>, limit: Duration, input: Option<Vec<u8>>) -> Result<(i32, String, String), String> {
     use std::io::Read;
     // The core may have no `hc` link beside it (a Windows zip has only herdr-core.exe).
     let program = if command == "hc" { crate::core_bin::path() } else { PathBuf::from(command) };
     let mut child = crate::spawn::command(program)
         .args(args)
         .current_dir(cwd.map(PathBuf::from).unwrap_or_else(home))
-        .stdin(Stdio::null())
+        .stdin(if input.is_some() { Stdio::piped() } else { Stdio::null() })
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
         .spawn()
         .map_err(|e| format!("cannot run {command}: {e}"))?;
+    if let (Some(bytes), Some(mut stdin)) = (input, child.stdin.take()) {
+        // Off this thread: a program that reads late must not block the deadline.
+        std::thread::spawn(move || {
+            use std::io::Write;
+            let _ = stdin.write_all(&bytes);
+        });
+    }
     // Bounded: a chatty command can't fill memory; the rest is drained and dropped.
     let drain = |r: Box<dyn Read + Send>| {
         std::thread::spawn(move || {
@@ -973,6 +985,20 @@ fn known_agents(on: Option<String>, list: Vec<Value>) -> Result<Value, String> {
     ))
 }
 
+/// Writes a text file on another machine, checked against `expected` like a
+/// local write; that machine's core swaps it in whole (`hc file write`).
+fn write_remote(machine: &str, path: &str, text: &str, expected: Option<&str>) -> Result<(), String> {
+    crate::mod_files::write_checked(text, expected, || read_remote(machine, path), || {
+        let args: Vec<String> = ["file", "write", "--json", "--on", machine, "--", path].map(String::from).into();
+        let (code, _, err) = run_with_input("hc", &args, None, EXEC_LIMIT, Some(text.as_bytes().to_vec()))?;
+        if code == 0 {
+            return Ok(());
+        }
+        let v: Value = serde_json::from_str(err.trim()).unwrap_or(Value::Null);
+        Err(v["error"]["message"].as_str().map_or_else(|| format!("hc file write: {}", err.trim()), str::to_owned))
+    })
+}
+
 /// A text file on another machine: `cat`, or `type` where there is none (Windows).
 fn read_remote(machine: &str, path: &str) -> Result<Option<String>, String> {
     let (code, out, _) = match run_remote(machine, "cat", &["--".into(), path.into()], None) {
@@ -1042,8 +1068,13 @@ fn module(inst: Instance, copy: u64) -> HostModule {
         .async_function("writeTextFile", |a| {
             let expected = a.get(2).and_then(|v| match v { HostValue::Str(s) => Some(s.clone()), _ => None });
             let path = a.string(0)?.to_owned();
+            let text = a.string(1)?.to_owned();
+            let on = opt_str(a.get(3), "on");
             if checking() { tracing::warn!("check: mod wrote `{path}`; the write lands for real"); }
-            Ok(crate::mod_files::write_text(path, a.string(1)?.to_owned(), expected))
+            Ok(crate::mod_files::write_with(move || match on {
+                Some(m) => write_remote(&m, &path, &text, expected.as_deref()),
+                None => crate::mod_files::write(Path::new(&path), &text, expected.as_deref()),
+            }))
         })
         .async_function("hc", |a| {
             if checking() { tracing::warn!("check: mod called hc; it runs for real"); }
@@ -1495,6 +1526,50 @@ mod tests {
         crate::core_bin::use_core(core);
         let (code, stdout, stderr) = run_blocking("hc", &["ls".into()], None, Duration::from_secs(5)).unwrap();
         assert_eq!((code, stdout.trim()), (0, "the chosen core: ls"), "{stderr}");
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn remote_writes_check_the_draft_and_go_through_that_machines_core() {
+        const CHILD: &str = "HERDR_TEST_REMOTE_WRITE";
+        if std::env::var_os(CHILD).is_none() {
+            let output = std::process::Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "mods::tests::remote_writes_check_the_draft_and_go_through_that_machines_core", "--nocapture"])
+                .env(CHILD, "1").output().unwrap();
+            assert!(output.status.success(), "{}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+            return;
+        }
+        use std::os::unix::fs::PermissionsExt;
+        let dir = std::env::temp_dir().join(format!("herdr-remote-write-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        // A core whose machine shares this disk: exec cats a file, file write takes stdin.
+        let core = dir.join("herdr-core");
+        std::fs::write(&core, r#"#!/bin/sh
+for last; do :; done
+case "$1" in
+exec) if [ -f "$last" ]; then printf '{"code":0,"stdout":"%s","stderr":""}' "$(base64 < "$last" | tr -d '\n')"; else printf '{"code":1,"stdout":"","stderr":""}'; fi ;;
+file) echo "$*" >> "${last%/*}/calls"
+  case "$last" in *denied) echo '{"error":{"kind":"io","message":"permission denied"}}' >&2; exit 1 ;; esac
+  cat > "$last"; echo '{}' ;;
+esac
+"#).unwrap();
+        std::fs::set_permissions(&core, std::fs::Permissions::from_mode(0o755)).unwrap();
+        crate::core_bin::use_core(core);
+        let file = dir.join("notes.md");
+        let (path, text) = (file.to_str().unwrap(), |p: &Path| std::fs::read_to_string(p).unwrap());
+
+        write_remote("box", path, "one\n", None).unwrap();
+        assert_eq!(text(&file), "one\n");
+        for stale in [None, Some("old\n")] {
+            assert_eq!(write_remote("box", path, "two\n", stale).unwrap_err(), crate::mod_files::STALE);
+        }
+        write_remote("box", path, "two\n", Some("one\n")).unwrap();
+        assert_eq!(text(&file), "two\n");
+        let denied = dir.join("denied");
+        assert_eq!(write_remote("box", denied.to_str().unwrap(), "x", None).unwrap_err(), "permission denied");
+        let calls = text(&dir.join("calls"));
+        assert_eq!(calls.lines().filter(|l| *l == format!("file write --json --on box -- {path}")).count(), 2, "{calls}");
         std::fs::remove_dir_all(dir).unwrap();
     }
 

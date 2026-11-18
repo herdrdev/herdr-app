@@ -6,6 +6,7 @@ use std::sync::Mutex;
 
 pub const LIMIT: u64 = 1024 * 1024;
 static WRITES: Mutex<()> = Mutex::new(());
+pub const STALE: &str = "The file changed outside Herdr. Reload before saving; your draft is still here.";
 
 pub fn read(path: &Path) -> Result<Option<String>, String> {
     let file = match std::fs::File::open(path) {
@@ -23,17 +24,29 @@ pub fn read(path: &Path) -> Result<Option<String>, String> {
     Ok(Some(text))
 }
 
-fn write(path: &Path, text: &str, expected: Option<&str>) -> Result<(), String> {
+/// Writes `text` only if `current()` still matches `expected`, then `put`s it.
+/// One write at a time, here or on a machine.
+pub fn write_checked(
+    text: &str,
+    expected: Option<&str>,
+    current: impl FnOnce() -> Result<Option<String>, String>,
+    put: impl FnOnce() -> Result<(), String>,
+) -> Result<(), String> {
     let _guard = WRITES.lock().map_err(|e| e.to_string())?;
     if text.len() as u64 > LIMIT {
         return Err("Text file exceeds 1 MiB".into());
     }
-    if read(path)?.as_deref() != expected {
-        return Err(
-            "The file changed outside Herdr. Reload before saving; your draft is still here."
-                .into(),
-        );
+    if current()?.as_deref() != expected {
+        return Err(STALE.into());
     }
+    put()
+}
+
+pub fn write(path: &Path, text: &str, expected: Option<&str>) -> Result<(), String> {
+    write_checked(text, expected, || read(path), || replace(path, text, expected))
+}
+
+fn replace(path: &Path, text: &str, expected: Option<&str>) -> Result<(), String> {
     let parent = path.parent().ok_or("File needs a parent directory")?;
     std::fs::create_dir_all(parent).map_err(|e| e.to_string())?;
     if expected.is_none() {
@@ -93,14 +106,13 @@ pub fn read_with(
     }
 }
 
-pub fn write_text(
-    path: String,
-    text: String,
-    expected: Option<String>,
+/// Writes off the UI thread.
+pub fn write_with(
+    write: impl FnOnce() -> Result<(), String> + Send + 'static,
 ) -> impl std::future::Future<Output = Result<HostValue, HostError>> + Send {
     let (tx, rx) = async_channel::bounded(1);
     std::thread::spawn(move || {
-        let _ = tx.send_blocking(write(Path::new(&path), &text, expected.as_deref()));
+        let _ = tx.send_blocking(write());
     });
     async move {
         rx.recv()
