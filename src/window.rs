@@ -369,6 +369,8 @@ struct Overlay {
     modal: bool,
     /// `frame: "none"`: no border, corners, shadow or background; the mod draws its own.
     bare: bool,
+    /// A window: keeps the selected pane's `focus` look while it holds the keyboard.
+    keep_pane_focus: bool,
     /// A window: where its top left is (None: centered) and its name (`key`).
     place: Option<Point<Pixels>>,
     key: Option<String>,
@@ -4058,6 +4060,7 @@ impl AppWindow {
             fit,
             modal: spec.get("modal").and_then(Value::as_bool).unwrap_or(false),
             bare: spec.get("frame").and_then(Value::as_str) == Some("none"),
+            keep_pane_focus: kind == OverlayKind::Window && spec.get("keep_pane_focus").and_then(Value::as_bool).unwrap_or(false),
             place,
             key: key.clone(),
             frame: spec.get("mod").and_then(Value::as_str).is_some_and(|m| m.starts_with("frame-")),
@@ -4533,7 +4536,10 @@ impl AppWindow {
         }
         if let Some(p) = &self.focused_pane {
             // Pane selection survives an input, float or dialog taking the keyboard.
-            if self.pane_term(p).is_some_and(|t| !t.view.read(cx).owns_keyboard_focus(window, cx)) {
+            let pane_lost_keys = self.pane_term(p).is_some_and(|t| !t.view.read(cx).owns_keyboard_focus(window, cx));
+            // A marked window keeps the pane's look while it holds the keyboard.
+            let kept_by_window = self.overlays.iter().any(|o| o.keep_pane_focus && o.focus.contains_focused(window, cx));
+            if pane_lost_keys && !kept_by_window {
                 return out;
             }
             if let Some(c) = self.model.active_tab()
@@ -6804,6 +6810,20 @@ mod tests {
         assert_eq!(view.update(cx, |this, _| this.copies.values().filter(|c| c.root.is_some()).count()), 2, "the block and the popup");
     }
 
+    /// The window with one selected terminal pane, `pane`, and the overlay
+    /// `spec` opened over it as `overlay_id`.
+    fn open_overlay_over_pane<'a>(cx: &'a mut gpui::TestAppContext, overlay_id: &str, spec: serde_json::Value) -> (gpui::Entity<super::AppWindow>, &'a mut gpui::VisualTestContext) {
+        let (view, cx) = open_window(cx, "unused", "", serde_json::json!({
+            "id": "pane", "type": "block", "content": { "terminal": "t1" }
+        }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.focused_pane = Some("pane".into());
+            this.open_overlay(overlay_id.into(), spec, window, cx);
+        }));
+        cx.run_until_parked();
+        (view, cx)
+    }
+
     #[test]
     fn showing_the_tab_again_gives_its_pane_the_keyboard() {
         in_own_process("tab_shown_again");
@@ -7121,6 +7141,124 @@ mod tests {
         let shown_now = new_tab(json!({ "space": "s2", "mod": "board" }), cx);
         let tab = shown_now["tab"].as_str().unwrap().to_owned();
         assert_eq!(shown(cx), ("s2".into(), tab));
+    }
+
+    #[test]
+    fn a_marked_window_keeps_the_pane_look() {
+        in_own_process("keep_pane_focus_marked_window");
+    }
+
+    #[gpui::test]
+    fn keep_pane_focus_marked_window(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("keep_pane_focus_marked_window") {
+            return;
+        }
+        let (view, cx) = open_overlay_over_pane(cx, "marked", json!({
+            "kind": "window", "mod": "unused", "keep_pane_focus": true
+        }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            let overlay = this.overlays.iter().find(|o| o.id == "marked").unwrap();
+            overlay.focus.focus(window, cx);
+        }));
+        cx.run_until_parked();
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            assert!(!this.pane_term("pane").unwrap().view.read(cx).owns_keyboard_focus(window, cx), "the window holds the keyboard");
+            assert!(this.focused_path(window, cx).contains("pane"), "a marked window keeps the pane look");
+        }));
+    }
+
+    #[test]
+    fn a_marked_window_keeps_the_pane_look_for_a_focused_terminal() {
+        in_own_process("keep_pane_focus_marked_window_terminal");
+    }
+
+    #[gpui::test]
+    fn keep_pane_focus_marked_window_terminal(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("keep_pane_focus_marked_window_terminal") {
+            return;
+        }
+        let (view, cx) = open_overlay_over_pane(cx, "marked", json!({
+            "kind": "window", "keep_pane_focus": true,
+            "layout": { "id": "t1", "type": "block", "content": { "terminal": "t2" } }
+        }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            let overlay = this.overlays.iter().find(|o| o.id == "marked").unwrap();
+            let terminal = this.terms.get("ovmarked/t1").unwrap();
+            terminal.view.read(cx).focus_target(cx).focus(window, cx);
+            assert!(!overlay.focus.is_focused(window), "the window's own handle is not focused");
+            assert!(overlay.focus.contains_focused(window, cx), "focus is inside the window");
+            assert!(!this.pane_term("pane").unwrap().view.read(cx).owns_keyboard_focus(window, cx), "the window holds the keyboard");
+            assert!(this.focused_path(window, cx).contains("pane"), "a marked window keeps the pane look");
+        }));
+    }
+
+    #[test]
+    fn a_mod_pane_keeps_the_pane_look() {
+        in_own_process("keep_pane_focus_mod_pane");
+    }
+
+    #[gpui::test]
+    fn keep_pane_focus_mod_pane(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("keep_pane_focus_mod_pane") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "unused", "", json!({
+            "id": "root", "type": "block", "content": { "tab": "active" }
+        }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            let pane = super::Node::block("mod-pane", super::Content::Mod { name: "unused".into(), props: json!({}) });
+            this.model.add_space("sp1", "", "/tmp", crate::model::Tab::with_pane("tb1", "", pane));
+            this.sync(window, cx);
+            this.focused_pane = Some("mod-pane".into());
+            assert!(this.pane_term("mod-pane").is_none(), "a mod pane has no terminal");
+            assert!(this.focused_path(window, cx).contains("mod-pane"), "a mod pane keeps the pane look");
+        }));
+    }
+
+    #[test]
+    fn an_unmarked_window_hides_the_pane_look() {
+        in_own_process("keep_pane_focus_unmarked_window");
+    }
+
+    #[gpui::test]
+    fn keep_pane_focus_unmarked_window(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("keep_pane_focus_unmarked_window") {
+            return;
+        }
+        let (view, cx) = open_overlay_over_pane(cx, "plain", json!({ "kind": "window", "mod": "unused" }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            let overlay = this.overlays.iter().find(|o| o.id == "plain").unwrap();
+            overlay.focus.focus(window, cx);
+        }));
+        cx.run_until_parked();
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            assert!(!this.pane_term("pane").unwrap().view.read(cx).owns_keyboard_focus(window, cx), "the window holds the keyboard");
+            assert!(this.focused_path(window, cx).is_empty(), "an unmarked window hides the pane look");
+        }));
+    }
+
+    #[test]
+    fn a_marked_dialog_hides_the_pane_look() {
+        in_own_process("keep_pane_focus_marked_dialog");
+    }
+
+    #[gpui::test]
+    fn keep_pane_focus_marked_dialog(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("keep_pane_focus_marked_dialog") {
+            return;
+        }
+        let (view, cx) = open_overlay_over_pane(cx, "marked-dialog", json!({
+            "kind": "dialog", "mod": "unused", "keep_pane_focus": true
+        }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            assert!(!this.pane_term("pane").unwrap().view.read(cx).owns_keyboard_focus(window, cx), "the dialog holds the keyboard");
+            assert!(this.focused_path(window, cx).is_empty(), "keep_pane_focus is ignored for a dialog");
+        }));
     }
 
     #[test]
