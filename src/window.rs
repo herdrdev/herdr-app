@@ -2705,7 +2705,8 @@ impl AppWindow {
     }
 
     /// A space with its first tab and terminal, shown at once unless focus is false.
-    /// `machine`: another machine (`hc machine ls`); its space starts in that machine's home.
+    /// `machine`: another machine (`hc machine ls`). Without `folder`, it starts in the
+    /// focused pane's folder when that pane is on the same machine, else in that machine's home.
     fn new_space(&mut self, name: &str, folder: Option<String>, ctx_name: Option<&str>, argv: Option<Vec<String>>, task: Option<&str>, machine: Option<String>, focus: bool, window: &Window) -> Result<Value, String> {
         let follow = folder.is_none();
         let on = machine.as_deref();
