@@ -1,8 +1,12 @@
 // Agents in grouped or priority views; parents take their most urgent sub-agent's place.
+// What an agent runs inside its own process is listed too: Claude Code reports each
+// background subagent and shell as an OSC 7501 record, which terminals() carries as
+// `records`. Each record gets a row under its agent, and a subagent started by another
+// subagent sits under that one.
 
 import { View, div, image, svg } from "gpui-kit";
 import { v_flex, h_flex } from "gpui-base";
-import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, openOverlay, closeOverlay, props, window, layout } from "herdr";
+import { agents, terminals, panes, focused, spaces, run, theme, shared, setShared, setAgentOrder, openOverlay, closeOverlay, props, window, layout, exec } from "herdr";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -56,6 +60,16 @@ const kidStatus = (k, listed) => {
   const s = listed.get(k.address) ?? k.status;
   return s === "error" ? "blocked" : s === "done" ? "idle" : s;
 };
+// Records are flat: who started a subagent is only in the file Claude Code keeps per subagent
+// (`parentAgentId` in agent-<id>.meta.json, beside the session's transcript). Undocumented, so
+// when it's missing or changes the rows still show, all directly under the agent.
+// $1 is the agent's pid. Prints `path:json` for every subagent of that pid's session.
+const META = `for s in "$HOME"/.claude*/sessions/"$1".json; do [ -f "$s" ] || continue
+sid=$(sed -n 's/.*"sessionId":"\\([^"]*\\)".*/\\1/p' "$s" | head -1); [ -n "$sid" ] || continue
+grep -H . "$(dirname "$(dirname "$s")")"/projects/*/"$sid"/subagents/agent-*.meta.json 2>/dev/null
+done; true`;
+// Claude Code's subagent ids; a background shell's record has a short id and no file.
+const SUBAGENT = /^a[0-9a-f]{12,}$/;
 const SORTS = [
   { id: "priority", label: "Priority", icon: "clock" },
   { id: "grouped", label: "Grouped by space", icon: "layers" },
@@ -90,6 +104,92 @@ export default class Agents extends View {
     if (!this.pendingPins.length) localStorage.removeItem("pins");
     this.migratingPins = new Set();
     cx.timer.every(30000, (cx) => cx.notify());
+    // "<agent address>#<record id>" -> { up, name }: read once per subagent, never polled.
+    this.meta = new Map();
+    this.tries = new Map();
+    this.loading = new Set();
+    this.recs = new Map();
+  }
+
+  // Looks up the subagents of `address` that render() met for the first time. The file can
+  // land a moment after the record does: look again, each time later.
+  lookup(cx, address, job) {
+    if (this.loading.has(address)) return;
+    this.loading.add(address);
+    cx.spawn(async (cx) => {
+      for (let n = await this.loadMeta(address, job); n; n = await this.loadMeta(address, job)) {
+        cx.notify();
+        await cx.sleep(Math.min(500 * 2 ** (n - 1), 8000));
+      }
+      this.loading.delete(address);
+      cx.notify();
+    });
+  }
+
+  // How many looks the least lucky of `ids` has had, 0 when none needs another.
+  async loadMeta(address, { pid, ids }) {
+    const machine = address.includes("/") ? address.split("/")[0] : null;
+    let out = "";
+    if (pid) {
+      try { out = (await exec("sh", ["-c", META, "sh", String(pid)], { on: machine, timeout: 8000 })).stdout ?? ""; } catch {}
+    }
+    for (const line of out.split("\n")) {
+      const m = /agent-([0-9a-z]+)\.meta\.json:(\{.*\})\s*$/.exec(line);
+      if (!m) continue;
+      try {
+        const j = JSON.parse(m[2]);
+        this.meta.set(`${address}#${m[1]}`, { up: j.parentAgentId ?? null, name: j.description ?? null });
+      } catch {}
+    }
+    let again = 0;
+    for (const id of ids) {
+      const key = `${address}#${id}`;
+      if (this.meta.has(key)) continue;
+      const n = (this.tries.get(key) ?? 0) + 1;
+      this.tries.set(key, n);
+      // Give up: the row stays, directly under its agent.
+      if (n >= 6) this.meta.set(key, {});
+      else again = Math.max(again, n);
+    }
+    return again;
+  }
+
+  // Each agent's records as rows shaped like terminals, so the tree, the fold count and the
+  // priority sections treat them as they treat `hc run` sub-agents.
+  records(all, cx) {
+    const out = new Map();
+    for (const t of all) {
+      if (t.state !== "live" || !t.records || typeof t.records !== "object") continue;
+      const ids = Object.keys(t.records);
+      if (!ids.length) continue;
+      const meta = (id) => this.meta.get(`${t.address}#${id}`);
+      const node = (id, more) => ({ rec: true, owner: t.address, id, address: `${t.address}#${id}`, ...more });
+      const nodes = new Map(ids.map((id) => {
+        const r = t.records[id] ?? {};
+        // Only work and a wait for the user count: a program may keep a finished or failed
+        // run's record, and that must not hold its agent under Needs you.
+        const status = r.state === "working" || r.state === "blocked" ? r.state : "idle";
+        // The owner's icon for a subagent; a shell goes without.
+        return [id, node(id, { name: r.title || meta(id)?.name || id, status, program: SUBAGENT.test(id) ? t.program : null })];
+      }));
+      for (const start of [...nodes.values()]) {
+        let cur = start;
+        for (let hop = 0; hop < 8; hop++) {
+          const up = meta(cur.id)?.up;
+          if (!up) break;
+          cur.up = up;
+          if (nodes.has(up)) break;
+          // Claude Code can drop a subagent from the records while it waits on its own
+          // subagent: keep it as an idle row so the child stays under it.
+          cur = node(up, { ghost: true, name: meta(up)?.name || "subagent", status: "idle", program: t.program });
+          nodes.set(up, cur);
+        }
+      }
+      out.set(t.address, [...nodes.values()]);
+      const unknown = ids.filter((id) => SUBAGENT.test(id) && !this.meta.has(`${t.address}#${id}`));
+      if (unknown.length) this.lookup(cx, t.address, { pid: t.foreground?.pid, ids: unknown });
+    }
+    return out;
   }
 
   // Stamps agents whose state changed. Done and idle count as one: looking at a
@@ -167,14 +267,17 @@ export default class Agents extends View {
     run("terminal.peek", { terminal: addr });
   }
 
-  // Live sub-agents of `addr`, depth first, each with the tree lines in front of it.
-  tree(all, addr, lead = []) {
-    const kids = all.filter((k) => k.parent === addr && k.state === "live");
+  // Live sub-agents of `addr` and its records, depth first, each with the tree lines in
+  // front of it. `rec`: the record row whose own subagents are wanted.
+  tree(all, addr, lead = [], rec = null) {
+    const kids = rec
+      ? (this.recs.get(rec.owner) ?? []).filter((n) => n.up === rec.id)
+      : [...all.filter((k) => k.parent === addr && k.state === "live"), ...(this.recs.get(addr) ?? []).filter((n) => !n.up)];
     return kids.flatMap((k, i) => {
       const last = i === kids.length - 1;
       return [
         { t: k, lines: [...lead, last ? "└" : "├"] },
-        ...this.tree(all, k.address, [...lead, last ? "" : "│"]),
+        ...this.tree(all, k.address, [...lead, last ? "" : "│"], k.rec ? k : null),
       ];
     });
   }
@@ -196,12 +299,12 @@ export default class Agents extends View {
       .text_size(12.5)
       .when(on, (el) => el.bg(t.raised))
       .hover((s) => s.bg(t.hover))
-      .on_click(() => (this.listed.has(k.address) ? run("pane.focus", { terminal: k.address }) : this.peek(k.address)))
+      .on_click(() => (k.rec ? run("pane.focus", { terminal: k.owner }) : this.listed.has(k.address) ? run("pane.focus", { terminal: k.address }) : this.peek(k.address)))
       .children(s.lines.map(l => div().self_start().mt(-4).w(9).h(17).mr(4).flex_none()
         .when(Boolean(l), el => el.border_l(1.5).border_color(t.input))
         .when(l === "└" || l === "├", el => el.border_b(1.5).rounded_bl(6))))
       .when(Boolean(pic), el => el.child(div().mr(8).child(pic)))
-      .child(div().flex_1().truncate().text_color(on ? t.foreground : t.muted).child(k.name || k.template || k.program?.name || k.address))
+      .child(div().flex_1().truncate().text_color(on ? t.foreground : k.ghost ? t.dim : t.muted).child(k.name || k.template || k.program?.name || k.address))
       .child(this.status(t, { status: st }, compact));
   }
 
@@ -224,6 +327,7 @@ export default class Agents extends View {
     let list = agents();
     this.listed = new Map(list.map((a) => [a.address, a.status]));
     const all = terminals();
+    this.recs = this.records(all, cx);
     this.migratePins(all);
     const shown = focused()?.agent;
     const now = Date.now();
@@ -317,7 +421,10 @@ export default class Agents extends View {
           .child(h_flex().w(14).flex_none().items_center().justify_center().child(this.status(t, a, true)));
       }
       const when = this.since(a);
-      const idle = a.status === "idle" && !a.focused;
+      // Its own turn ended but something it started still works or needs the user: say that.
+      const under = a.status === "idle" ? subs.map((s) => kidStatus(s.t, this.listed)) : [];
+      const busy = under.includes("blocked") ? "blocked" : under.includes("working") ? "working" : null;
+      const idle = a.status === "idle" && !a.focused && !busy;
       const isPinned = a.pinned;
       const pin = div()
         .id(`pin-${a.address}`)
@@ -370,7 +477,7 @@ export default class Agents extends View {
         .when(subs.length > 0, el => el.child(fold(a, subs)))
         .when(this.hovered === a.address, el => el.child(pin))
         .when(this.hovered !== a.address && Boolean(when), el => el.child(div().flex_none().text_size(11).text_color(t.dim).child(duration(now - when))))
-        .child(this.status(t, a, byPriority && !isPinned));
+        .child(this.status(t, busy ? { status: busy } : a, byPriority && !isPinned));
     };
 
     // Groups in list order: spaces (grouped) or priority sections. Agents of a
