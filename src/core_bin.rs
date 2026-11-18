@@ -34,19 +34,50 @@ pub fn path() -> PathBuf {
     BIN.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone().unwrap_or_else(|| PathBuf::from("hc"))
 }
 
-/// Uses this core from now on, and puts its folder first on PATH so mods'
-/// `hc()` and anything the app runs find the same one.
+/// Uses this core from now on, and puts its folder on PATH ahead of any
+/// other `hc`, so mods' `hc()` and anything the app runs find the same one.
 pub fn use_core(bin: PathBuf) {
-    if let Some(dir) = bin.parent() {
-        let path = std::env::var_os("PATH").unwrap_or_default();
-        let mut dirs: Vec<PathBuf> = vec![dir.to_path_buf()];
-        dirs.extend(std::env::split_paths(&path).filter(|d| d != dir));
-        if let Ok(joined) = std::env::join_paths(dirs) {
-            // SAFETY: set once at start, before other threads read the environment.
-            unsafe { std::env::set_var("PATH", joined) };
-        }
+    let path = std::env::var_os("PATH").unwrap_or_default();
+    if let Some(joined) = path_for_core(&path, &bin, &hc_names()) {
+        // SAFETY: set once at start, before other threads read the environment.
+        unsafe { std::env::set_var("PATH", joined) };
     }
     *BIN.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = Some(bin);
+}
+
+/// PATH where `hc` finds `bin`, or None if it already does. The folder goes
+/// just before the first entry that may hold another `hc`, so NixOS keeps
+/// /run/wrappers/bin ahead of it.
+fn path_for_core(path: &std::ffi::OsStr, bin: &Path, hc_names: &[String]) -> Option<std::ffi::OsString> {
+    let dir = bin.parent()?;
+    let dirs: Vec<PathBuf> = if path.is_empty() { Vec::new() } else { std::env::split_paths(path).collect() };
+    // Relative entries (``, `.`) are another folder in each pane: assume an `hc` there.
+    // Shells pick different names, so another folder is ours only if every `hc` in it is the core.
+    let hcs_in = |d: &Path| hc_names.iter().map(|name| d.join(name)).filter(|hc| hc.is_file()).collect::<Vec<_>>();
+    let stop = dirs.iter().position(|d| d.is_relative() || !hcs_in(d).is_empty());
+    if let Some(d) = stop.map(|i| &dirs[i])
+        && d.is_absolute()
+        && (d == dir || bin.canonicalize().is_ok_and(|core| hcs_in(d).iter().all(|hc| hc.canonicalize().is_ok_and(|hc| hc == core))))
+    {
+        return None;
+    }
+    let (before, after) = dirs.split_at(stop.unwrap_or(0));
+    let others = |d: &&PathBuf| *d != dir;
+    let dirs = before.iter().filter(others).map(PathBuf::as_path).chain([dir]).chain(after.iter().filter(others).map(PathBuf::as_path));
+    std::env::join_paths(dirs).ok()
+}
+
+/// The file names a shell runs for `hc`.
+fn hc_names() -> Vec<String> {
+    if cfg!(windows) { pathext_names(&std::env::var("PATHEXT").unwrap_or_default()) } else { vec!["hc".into()] }
+}
+
+/// Windows shells try each PATHEXT extension, and PowerShell also runs
+/// `.ps1` scripts, so an earlier `hc.cmd` or `hc.ps1` wins over our `hc.exe`.
+fn pathext_names(pathext: &str) -> Vec<String> {
+    let pathext = if pathext.trim().is_empty() { ".COM;.EXE;.BAT;.CMD" } else { pathext };
+    let exts = pathext.split(';').map(str::trim).filter(|ext| !ext.is_empty());
+    exts.chain([".ps1"]).map(|ext| format!("hc{}", ext.to_ascii_lowercase())).collect()
 }
 
 /// Finder and Dock launches don't inherit the person's shell PATH.
@@ -144,7 +175,7 @@ fn login_shell_path() -> Option<std::ffi::OsString> {
     }
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
     let mut child = Command::new(shell)
-        .args(["-lc", "printf %s \"$PATH\""])
+        .args(["-lc", "printf 'herdr-path[%s]herdr-path' \"$PATH\""])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
         .stderr(Stdio::null())
@@ -164,7 +195,15 @@ fn login_shell_path() -> Option<std::ffi::OsString> {
     }
     let mut out = String::new();
     std::io::Read::read_to_string(&mut child.stdout.take()?, &mut out).ok()?;
-    Some(out.into())
+    login_path_answer(&out)
+}
+
+/// The PATH inside the probe's frame: a chatty profile prints around it, and a shell that
+/// doesn't speak sh (nushell) answers an error, nothing, or `$PATH` literally.
+fn login_path_answer(out: &str) -> Option<std::ffi::OsString> {
+    let (_, rest) = out.split_once("herdr-path[")?;
+    let (path, _) = rest.rsplit_once("]herdr-path")?;
+    (!path.is_empty() && path != "$PATH").then(|| path.into())
 }
 
 /// Installs the core's latest release with its own installer (into
@@ -239,7 +278,7 @@ fn bundle_completion_path(bin: &Path, home: &Path) -> bool {
 #[cfg(any(target_os = "macos", all(test, unix)))]
 fn bundle_completion_writable(bin: &Path) -> bool {
     bin.parent().is_some_and(|dir| {
-        Command::new("/bin/test").arg("-w").arg(dir).status().is_ok_and(|status| status.success())
+        Command::new("/bin/sh").args(["-c", "test -w \"$1\"", "sh"]).arg(dir).status().is_ok_and(|status| status.success())
     })
 }
 
@@ -290,6 +329,18 @@ fn ensure_core_bundle(version: &str) -> Result<(), String> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn a_login_shell_answer_is_the_path_inside_the_frame() {
+        for path in ["/opt/homebrew/bin:/usr/bin::/bin", ".:/custom/agents/bin:/usr/bin", "~/bin:/opt/$x/bin:bin", ":/usr/bin:", ":"] {
+            let framed = format!("Welcome!\nherdr-path[{path}]herdr-path\nbye\n");
+            assert_eq!(login_path_answer(&framed).as_deref(), Some(std::ffi::OsStr::new(path)), "{path:?}");
+        }
+        // What nushell answers, a shell that printed nothing, and an unexpanded PATH.
+        for garbage in ["Error: nu::parser::missing_flag_param", "", "/usr/bin:/bin", "herdr-path[]herdr-path", "herdr-path[$PATH]herdr-path"] {
+            assert_eq!(login_path_answer(garbage), None, "{garbage:?}");
+        }
+    }
 
     #[cfg(target_os = "macos")]
     #[test]
@@ -395,5 +446,104 @@ mod tests {
         let real = dir.join("herdr-core");
         assert_eq!(version(&real).as_deref(), Some("hc 0.1.1"));
         assert_eq!(find(Some(real.to_str().unwrap())), Some(real));
+    }
+
+    /// Folders under a fresh temp root, each holding the named (empty) programs.
+    fn bin_dirs(test: &str, dirs: &[(&str, &[&str])]) -> PathBuf {
+        let root = std::env::temp_dir().join(format!("herdr-app-core-path-{test}-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&root);
+        for (dir, programs) in dirs {
+            std::fs::create_dir_all(root.join(dir)).unwrap();
+            for program in *programs {
+                std::fs::write(root.join(dir).join(format!("{program}{}", std::env::consts::EXE_SUFFIX)), "").unwrap();
+            }
+        }
+        root
+    }
+
+    fn path_of(root: &Path, dirs: &[&str]) -> std::ffi::OsString {
+        std::env::join_paths(dirs.iter().map(|d| if d.is_empty() { PathBuf::new() } else { root.join(d) })).unwrap()
+    }
+
+    fn core_in(root: &Path, dir: &str) -> PathBuf {
+        root.join(dir).join(format!("herdr-core{}", std::env::consts::EXE_SUFFIX))
+    }
+
+    #[test]
+    fn path_stays_when_the_core_is_already_first() {
+        let root = bin_dirs("first", &[("core", &["herdr-core", "hc"]), ("wrappers", &["sudo"])]);
+        assert_eq!(path_for_core(&path_of(&root, &["core", "wrappers"]), &core_in(&root, "core"), &hc_names()), None);
+    }
+
+    #[test]
+    fn path_keeps_nixos_wrappers_ahead_of_the_core() {
+        let root = bin_dirs("nixos", &[("wrappers", &["sudo"]), ("sw", &["herdr-core", "hc", "sudo"])]);
+        assert_eq!(path_for_core(&path_of(&root, &["wrappers", "sw"]), &core_in(&root, "sw"), &hc_names()), None);
+    }
+
+    #[test]
+    fn path_moves_the_core_just_ahead_of_another_hc() {
+        let root = bin_dirs("shadow", &[("wrappers", &["sudo"]), ("wm", &["hc"]), ("core", &["herdr-core", "hc"])]);
+        let path = path_for_core(&path_of(&root, &["wrappers", "wm", "core"]), &core_in(&root, "core"), &hc_names());
+        assert_eq!(path, Some(path_of(&root, &["wrappers", "core", "wm"])));
+    }
+
+    #[test]
+    fn windows_counts_every_pathext_hc_and_powershell_scripts() {
+        assert_eq!(pathext_names(".COM;.EXE;.BAT;.CMD;.PY"), ["hc.com", "hc.exe", "hc.bat", "hc.cmd", "hc.py", "hc.ps1"]);
+        assert_eq!(pathext_names(""), ["hc.com", "hc.exe", "hc.bat", "hc.cmd", "hc.ps1"]);
+    }
+
+    #[test]
+    fn path_moves_the_core_ahead_of_an_earlier_powershell_script() {
+        let root = bin_dirs("ps1", &[("tools", &[]), ("core", &["herdr-core"])]);
+        std::fs::write(root.join("tools/hc.ps1"), "").unwrap();
+        std::fs::write(root.join("core/hc.exe"), "").unwrap();
+        let path = path_for_core(&path_of(&root, &["tools", "core"]), &core_in(&root, "core"), &pathext_names(""));
+        assert_eq!(path, Some(path_of(&root, &["core", "tools"])));
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn path_stays_when_an_earlier_hc_is_the_same_core() {
+        let root = bin_dirs("link", &[("core", &["herdr-core"]), ("links", &[])]);
+        std::os::unix::fs::symlink(core_in(&root, "core"), root.join("links/hc")).unwrap();
+        assert_eq!(path_for_core(&path_of(&root, &["links", "core"]), &core_in(&root, "core"), &hc_names()), None);
+    }
+
+    /// cmd may run the linked `hc.exe` while PowerShell runs the other `hc.ps1`.
+    #[cfg(unix)]
+    #[test]
+    fn path_moves_the_core_ahead_of_a_link_folder_with_another_hc() {
+        let root = bin_dirs("mixed", &[("core", &["herdr-core"]), ("links", &[])]);
+        std::os::unix::fs::symlink(core_in(&root, "core"), root.join("links/hc.exe")).unwrap();
+        let path = path_of(&root, &["links", "core"]);
+        assert_eq!(path_for_core(&path, &core_in(&root, "core"), &pathext_names("")), None);
+        std::fs::write(root.join("links/hc.ps1"), "").unwrap();
+        assert_eq!(path_for_core(&path, &core_in(&root, "core"), &pathext_names("")), Some(path_of(&root, &["core", "links"])));
+    }
+
+    /// `""` and `tools` are a different folder in each pane, so either may hold another `hc`.
+    #[test]
+    fn path_moves_the_core_ahead_of_relative_entries_and_keeps_them() {
+        let root = bin_dirs("relative", &[("wrappers", &["sudo"]), ("core", &["herdr-core", "hc"])]);
+        let path_with = |dirs: [&Path; 4]| std::env::join_paths(dirs).unwrap();
+        let (wrappers, core) = (root.join("wrappers"), root.join("core"));
+        let path = path_for_core(&path_with([&wrappers, "".as_ref(), "tools".as_ref(), &core]), &core_in(&root, "core"), &hc_names());
+        assert_eq!(path, Some(path_with([&wrappers, &core, "".as_ref(), "tools".as_ref()])));
+    }
+
+    #[test]
+    fn path_gets_a_missing_core_first() {
+        let root = bin_dirs("missing", &[("wrappers", &["sudo"]), ("other", &[]), ("core", &["herdr-core", "hc"])]);
+        let path = path_for_core(&path_of(&root, &["wrappers", "other"]), &core_in(&root, "core"), &hc_names());
+        assert_eq!(path, Some(path_of(&root, &["core", "wrappers", "other"])));
+    }
+
+    #[test]
+    fn path_is_just_the_core_when_empty() {
+        let root = bin_dirs("empty", &[("core", &["herdr-core", "hc"])]);
+        let path = path_for_core(std::ffi::OsStr::new(""), &core_in(&root, "core"), &hc_names());
+        assert_eq!(path, Some(root.join("core").into_os_string()));
     }
 }

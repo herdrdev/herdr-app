@@ -56,7 +56,7 @@ use crate::{
     TextRenderingMode, TextSystem, ThermalState, Window, WindowAppearance, WindowButtonLayout,
     WindowHandle, WindowId, WindowInvalidator, WindowingRequest,
     colors::{Colors, GlobalColors},
-    hash, init_app_menus,
+    init_app_menus,
 };
 
 mod async_context;
@@ -817,6 +817,8 @@ pub struct App {
 
     // assets
     pub(crate) loading_assets: FxHashMap<(TypeId, u64), Box<dyn Any>>,
+    image_asset_recency: FxHashMap<(TypeId, u64), u64>,
+    image_asset_clock: u64,
     asset_source: Arc<dyn AssetSource>,
     pub(crate) svg_renderer: SvgRenderer,
     http_client: Arc<dyn HttpClient>,
@@ -906,6 +908,8 @@ impl App {
                 hang_monitor: None,
                 svg_renderer: SvgRenderer::new(asset_source.clone()),
                 loading_assets: Default::default(),
+                image_asset_recency: Default::default(),
+                image_asset_clock: 0,
                 asset_source,
                 http_client,
                 globals_by_type: Default::default(),
@@ -2895,21 +2899,58 @@ impl App {
 
     /// Remove an asset from GPUI's cache
     pub fn remove_asset<A: Asset>(&mut self, source: &A::Source) {
-        let asset_id = (TypeId::of::<A>(), hash(source));
+        let asset_id = (TypeId::of::<A>(), A::cache_key(source, self));
         self.loading_assets.remove(&asset_id);
+    }
+
+    pub(crate) fn prune_image_assets(&mut self) {
+        // Drop animations first: each one owns its still source.
+        self.loading_assets.retain(|(kind, _), entry| {
+            if *kind != TypeId::of::<crate::ImageAnimationLoader>() { return true; }
+            let Some(load) = entry.downcast_ref::<crate::ImageLoad>() else { return true; };
+            load.is_shared() || load.get().is_some_and(|result| {
+                result.is_ok_and(|image| Arc::strong_count(&image) > 2)
+            })
+        });
+        let mut idle = Vec::new();
+        self.loading_assets.retain(|key, entry| {
+            if key.0 != TypeId::of::<crate::ImgResourceLoader>() { return true; }
+            let Some(load) = entry.downcast_ref::<crate::ImageLoad>() else { return true; };
+            if load.is_shared() { return true; }
+            match load.get() {
+                Some(Ok(image)) if Arc::strong_count(&image) > 2 => true,
+                Some(Ok(image)) if !self.windows.is_empty() => {
+                    idle.push((*key, self.image_asset_recency.get(key).copied().unwrap_or(0), image.cache_bytes()));
+                    true
+                }
+                _ => false,
+            }
+        });
+        // Enough for the three large backgrounds, including encoded sources, without
+        // letting a history of layouts retain unbounded decoded pixels.
+        idle.sort_unstable_by_key(|(_, recency, _)| std::cmp::Reverse(*recency));
+        let mut bytes = 0usize;
+        for (index, (key, _, size)) in idle.into_iter().enumerate() {
+            if bytes.saturating_add(size) > 128 * 1024 * 1024 || index >= 128 {
+                self.loading_assets.remove(&key);
+            } else {
+                bytes += size;
+            }
+        }
+        self.image_asset_recency.retain(|key, _| self.loading_assets.contains_key(key));
     }
 
     /// Check whether an asset is present in GPUI's cache (loading or loaded),
     /// without fetching it.
     #[cfg(any(test, feature = "test-support"))]
     pub fn has_asset<A: Asset>(&self, source: &A::Source) -> bool {
-        let asset_id = (TypeId::of::<A>(), hash(source));
+        let asset_id = (TypeId::of::<A>(), A::cache_key(source, self));
         self.loading_assets.contains_key(&asset_id)
     }
 
     /// Return a completed cached asset without starting a load.
     pub fn cached_asset<A: Asset>(&self, source: &A::Source) -> Option<A::Output> {
-        let asset_id = (TypeId::of::<A>(), hash(source));
+        let asset_id = (TypeId::of::<A>(), A::cache_key(source, self));
         self.loading_assets.get(&asset_id)
             .and_then(|entry| entry.downcast_ref::<CachedLoad<A::Output>>())
             .and_then(CachedLoad::get)
@@ -2924,10 +2965,16 @@ impl App {
     }
 
     pub(crate) fn asset_entry<A: Asset>(&mut self, source: &A::Source) -> &CachedLoad<A::Output> {
-        let asset_id = (TypeId::of::<A>(), hash(source));
+        let asset_id = (TypeId::of::<A>(), A::cache_key(source, self));
+        if TypeId::of::<A>() == TypeId::of::<crate::ImgResourceLoader>() {
+            self.image_asset_clock += 1;
+            self.image_asset_recency.insert(asset_id, self.image_asset_clock);
+        }
         if !self.loading_assets.contains_key(&asset_id) {
             let future = A::load(source.clone(), self);
-            let entry = CachedLoad::new(future, self);
+            let refresh = TypeId::of::<A>() == TypeId::of::<crate::ImageAnimationLoader>()
+                || TypeId::of::<A>() == TypeId::of::<crate::ImgResourceLoader>();
+            let entry = CachedLoad::new_with_refresh(future, self, refresh);
             self.loading_assets.insert(asset_id, Box::new(entry));
         }
         self.loading_assets
@@ -3072,6 +3119,8 @@ impl App {
                         true
                     });
 
+                    drop(window);
+                    cx.prune_image_assets();
                     let quit_on_empty = match cx.quit_mode {
                         QuitMode::Explicit => false,
                         QuitMode::LastWindowClosed => true,

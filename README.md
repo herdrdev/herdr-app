@@ -72,6 +72,7 @@ Remote work keeps running when your local window closes or your laptop sleeps, a
 ## Make it yours
 
 Open the command palette to find an action by name, or open Settings to change fonts, colors, sounds and other preferences.
+Settings > Look also adjusts terminal line height, cell width and scroll speed. All default to 100%; layouts can override them with `terminal_line_height` (0.8–2), `terminal_cell_width` (0.8–2) and `terminal_scroll_speed` (0.1–5).
 The built-in layouts include Herdr, Terminals and Herdr 98.
 A **layout** arranges the window. **Mods** are small JavaScript programs that draw its panels, menus and dialogs.
 
@@ -80,6 +81,10 @@ Save a personal layout, mod or key file and the window reloads it.
 A broken edit keeps the last good version and reports the error.
 
 Ctrl+Shift+P shows every command and its key (Cmd+Shift+P on macOS). Change any key in `keys.json`; see [the keys section](defaults/AGENTS.md#keys-keysjson) of the mod guide for the format, including JSON objects for named, typed command arguments.
+
+On macOS, Cmd+A selects the terminal's whole screen and scrollback, ready for Cmd+C.
+In vim and other alternate-screen apps, it selects only that screen.
+Linux and Windows keep Ctrl+A for the shell; bind `terminal.select_all` in `keys.json` if desired.
 
 [Layouts and mods](docs/mods.md) · [Commands](docs/commands.md)
 
@@ -138,6 +143,6 @@ To compare drawing changes on Windows, Linux or macOS, run the same fixed worklo
 python scripts/bench.py --bin <app executable> --set spinners --seconds 20
 ```
 
-The runner requires `hc` on PATH and uses the Python executable running the script. It prints a unique artifact folder with the run settings, counters and results, then stops its private app, terminals and core. Both sets use Python fixture programs; the default set’s TUI workload replaces historical `btop` measurements. `--only spinners` measures just the quiet native spinner scenario. Keep the window visible and the display awake, and compare the same window activity and display settings; inactive windows may draw at a lower rate. Windows records visibility, foreground activity and display Hz at each measurement boundary; other platforms mark these observations unavailable. Visibility does not establish occlusion. Draws are window render calls. Render-to-paint elapsed time stops before scene finalization, backend drawing, uploads and presentation; it is separate from OS process CPU time. Neither measures physical presentation or the FPS HUD’s derived MAX FPS.
+The runner requires `hc` on PATH and uses the Python executable running the script. It prints a unique artifact folder with the run settings, counters and results, then stops its private app, terminals and core. Every set uses Python fixture programs; the default set’s TUI workload replaces historical `btop` measurements. `--only spinners` measures just the quiet native spinner scenario. `--set titles` runs eight agents whose titles spin after a prefix (`π ⠹ task`) on the main layout. Keep the window visible and the display awake, and compare the same window activity and display settings; inactive windows may draw at a lower rate. Windows records visibility, foreground activity and display Hz at each measurement boundary; other platforms mark these observations unavailable. Visibility does not establish occlusion. Draws are window render calls. Render-to-paint elapsed time stops before scene finalization, backend drawing, uploads and presentation; it is separate from OS process CPU time. Neither measures physical presentation or the FPS HUD’s derived MAX FPS.
 
 `python scripts/bench_compare.py ghostty --root <artifact folder>` reuses a run’s fake agent for the macOS comparison. Benchmark checks: `python -m unittest discover -s scripts -p test_bench.py`.

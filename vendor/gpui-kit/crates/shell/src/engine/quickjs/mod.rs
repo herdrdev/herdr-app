@@ -1182,6 +1182,7 @@ pub(crate) mod exports {
         "v_virtual_list",
         "h_virtual_list",
         "VirtualListScrollHandle",
+        "ScrollHandle",
         // Text editing.
         "Input",
         "InputState",
@@ -1532,6 +1533,130 @@ impl ShellRuntime {
     /// Loaded source files are always re-stated, even if watcher events are lost.
     pub fn set_source_revision_provider(&self, provider: impl Fn(&Path) -> Option<u64> + 'static) {
         *self.source_revision.borrow_mut() = Some(Box::new(provider));
+    }
+
+    // HERDR: terminal links can be checked without running mod code.
+    /// Compiles a module and checks a named export without evaluating the module.
+    pub fn check_module(directory: &Path, entry: &str, export: &str) -> Result<()> {
+        let runtime = Self::new_isolated()?;
+        let (root, dependencies) = prepare_module(&runtime.dependency_store, directory, entry)?;
+        let lease = runtime.app_modules.register_with_dependencies(root.clone(), dependencies);
+        let name = module_name(&root, ".herdr-check.js", &lease);
+        let specifier = serde_json::to_string(&format!("./{entry}"))?;
+        let export = serde_json::to_string(export)?;
+        // QuickJS links every static import before evaluating the graph. This last
+        // import always fails to link, even after the requested export was found.
+        // Its name is fresh so an error from the mod cannot be mistaken for ours.
+        let nonce = std::hash::BuildHasher::hash_one(&std::hash::RandomState::new(), &name);
+        let stop = format!("__herdr_link_check_{nonce:016x}__");
+        let expected = format!("Could not find export '{stop}' in module 'gpui-shell'");
+        let source = format!("import {{ {export} as entry }} from {specifier};\n\
+            import {{ {stop} }} from 'gpui-shell';");
+        runtime.with_js(|ctx| {
+            match Module::declare(ctx.clone(), name, source)?.eval() {
+                Err(JsError::Exception) => {
+                    let error = ctx.catch();
+                    if error.as_exception().and_then(Exception::message).as_deref()
+                        == Some(expected.as_str())
+                    {
+                        Ok(())
+                    } else {
+                        Err(ctx.throw(error))
+                    }
+                }
+                Err(error) => Err(error),
+                Ok(_) => Err(Exception::throw_message(ctx, "module export check did not stop at linking")),
+            }
+        })
+    }
+
+    // HERDR: terminal link handlers run once per click, even without a view.
+    /// Invokes one export without mounting a view. The returned future owns the runtime
+    /// so dropping it on window close also cancels the script's pending host work.
+    pub fn call_module(
+        directory: &Path,
+        entry: &'static str,
+        export: &'static str,
+        argument: &serde_json::Value,
+        policy: Rc<Policy>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> impl std::future::Future<Output = Result<String>> + use<> {
+        let directory = directory.to_path_buf();
+        let prepare = cx.background_executor().spawn(async move {
+            prepare_module(&GitDependencyStore::for_user()?, &directory, entry)
+        });
+        let window = window.window_handle();
+        let mut app = cx.to_async();
+        let argument = argument.clone();
+        async move {
+            let (root, dependencies) = prepare.await?;
+            let call = window.update(&mut app, |_, window, cx| {
+                let runtime = Self::new_isolated()?;
+                let lease = runtime.app_modules.register_with_dependencies(root.clone(), dependencies);
+                runtime.invoke_module(&root, lease, entry, export, &argument, policy, window, cx)
+            })??;
+            call.await
+        }
+    }
+
+    fn invoke_module(
+        self: Rc<Self>,
+        root: &Path,
+        lease: ApplicationModuleLease,
+        entry: &str,
+        export: &str,
+        argument: &serde_json::Value,
+        policy: Rc<Policy>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<impl std::future::Future<Output = Result<String>> + use<>> {
+        let runtime = self;
+        let name = module_name(root, ".herdr-call.js", &lease);
+        let specifier = serde_json::to_string(&format!("./{entry}"))?;
+        let export = serde_json::to_string(export)?;
+        let source = format!(r#"
+            export async function invoke(arg, resolve, reject) {{
+                try {{
+                    const handler = (await import({specifier}))[{export}];
+                    if (typeof handler !== "function") throw new TypeError("Expected a function export " + {export});
+                    resolve(await handler(arg));
+                }} catch (error) {{
+                    reject(error);
+                }}
+            }}
+        "#);
+        let (tx, rx) = async_channel::bounded(1);
+        let reject = tx.clone();
+        let argument = serde_json::to_string(argument)?;
+        {
+            let (_scope, _) = scope::enter_with_application(
+                &runtime, window, cx, ScopePhase::Event, None, policy, None,
+            );
+            runtime.with_jit_suspended(|| runtime.with_js(|ctx| {
+                let (module, loaded) = Module::declare(ctx.clone(), name, source)?.eval()?;
+                loaded.finish::<()>()?;
+                let invoke: Function = module.get("invoke")?;
+                let resolve = Func::from(move |value: Value<'_>| {
+                    let result = value.as_string().and_then(|s| s.to_string().ok())
+                        .ok_or_else(|| "expected a string result".to_owned());
+                    let _ = tx.try_send(result);
+                });
+                let reject = Func::from(move |value: Value<'_>| {
+                    let ctx = value.ctx();
+                    let error = CodeError::capture(ctx, ctx.throw(value.clone()));
+                    let _ = reject.try_send(Err(error.to_string()));
+                });
+                invoke.call::<_, Value>((ctx.json_parse(argument)?, resolve, reject))?;
+                Ok(())
+            }))?;
+            scheduler::drain_jobs_transactionally(&runtime, window, cx)?;
+        }
+        Ok(async move {
+            let result = rx.recv().await.map_err(|_| anyhow!("module call ended without a result"))?;
+            drop((lease, runtime));
+            result.map_err(anyhow::Error::msg)
+        })
     }
 
     /// Loads an application's JavaScript entry without exposing engine values.
@@ -2017,6 +2142,27 @@ impl ShellRuntime {
 
     pub(crate) fn set_global(self: &Rc<Self>, cx: &mut App) {
         cx.set_global(RuntimeGlobal(Rc::downgrade(self)));
+    }
+
+    /// HERDR: a new VM that becomes the application's default runtime, for a
+    /// host replacing one whose copies are still closing. [`Self::new`] refuses
+    /// while the previous runtime is alive. Its copies keep it until they finish
+    /// closing, and it is freed when the last of them drops it.
+    pub fn replace_default(cx: &mut App) -> Result<Rc<Self>> {
+        let runtime = Self::new_isolated_with_components(FrozenComponentRegistry::default())?;
+        runtime.set_global(cx);
+        Ok(runtime)
+    }
+
+    /// HERDR: how much of its heap ceiling this VM holds, from 0 to 1.
+    ///
+    /// Each reload evaluates the application again in the same context, and
+    /// QuickJS frees evaluated modules only with the context, so this grows
+    /// with every reload. A host can start a new runtime before reaching the
+    /// limit.
+    pub fn memory_share(&self) -> f64 {
+        let used = self.js_runtime.memory_usage().malloc_size.max(0) as f64;
+        used / sandbox::memory_limit_bytes() as f64
     }
 
     pub(crate) fn global(cx: &App) -> Option<Rc<Self>> {
@@ -4281,12 +4427,7 @@ impl ShellRuntime {
         };
         let position = event.position;
         let modifiers = event.modifiers;
-        let touch_phase = match event.touch_phase {
-            gpui::TouchPhase::Started => "started",
-            gpui::TouchPhase::Moved => "moved",
-            gpui::TouchPhase::Ended => "ended",
-            gpui::TouchPhase::Cancelled => "cancelled",
-        };
+        let touch_phase = touch_phase_name(event.touch_phase);
         self.dispatch_simple_event(id, "scroll wheel", window, cx, move |ctx| {
             let payload = Object::new(ctx.clone())?;
             let delta = Object::new(ctx.clone())?;
@@ -4302,6 +4443,29 @@ impl ShellRuntime {
                 }
                 None => payload.set("delta_lines", rquickjs::Undefined)?,
             }
+            payload.set("touch_phase", touch_phase)?;
+            set_pointer_geometry(ctx, &payload, position, bounds)?;
+            payload.set("modifiers", modifiers_object(ctx, modifiers)?)?;
+            Ok(payload)
+        });
+    }
+
+    /// Delivers one trackpad pinch to a script handler.
+    pub(crate) fn dispatch_pinch(
+        self: &Rc<Self>,
+        id: CallbackId,
+        event: &gpui::PinchEvent,
+        bounds: Option<gpui::Bounds<gpui::Pixels>>,
+        window: &mut Window,
+        cx: &mut App,
+    ) {
+        let delta = event.delta;
+        let position = event.position;
+        let modifiers = event.modifiers;
+        let touch_phase = touch_phase_name(event.phase);
+        self.dispatch_simple_event(id, "pinch", window, cx, move |ctx| {
+            let payload = Object::new(ctx.clone())?;
+            payload.set("delta", delta)?;
             payload.set("touch_phase", touch_phase)?;
             set_pointer_geometry(ctx, &payload, position, bounds)?;
             payload.set("modifiers", modifiers_object(ctx, modifiers)?)?;
@@ -5342,6 +5506,26 @@ struct ApplicationModuleRegistration {
     sources: Rc<code_cache::SourceFiles>,
 }
 
+// HERDR: standalone entries use the same dependencies as views. Preparing
+// them needs no runtime, so a click can wait for Git off the UI thread.
+fn prepare_module(
+    store: &GitDependencyStore,
+    directory: &Path,
+    entry: &str,
+) -> Result<(std::path::PathBuf, BTreeMap<String, MaterializedDependency>)> {
+    let root = crate::runtime::resolve_app_root(directory, entry)?;
+    let dependencies = if root.join(crate::plugin::MANIFEST_FILE).is_file() {
+        store.materialize_all(&crate::plugin::PluginManifest::read(&root)?)?
+    } else {
+        BTreeMap::new()
+    };
+    Ok((root, dependencies))
+}
+
+fn module_name(root: &Path, file: &str, lease: &ApplicationModuleLease) -> String {
+    format!("{}?v={}", root.join(file).display(), lease.generation())
+}
+
 impl ApplicationModuleLease {
     fn generation(&self) -> u32 {
         self.0.generation
@@ -5750,7 +5934,7 @@ globalThis.__gpui = (() => {
   methods.track_scroll = function (handle) {
     if (typeof handle?.__handle !== "number") {
       throw new TypeError(
-        "track_scroll(handle) expects a VirtualListScrollHandle from VirtualListScrollHandle.new()",
+        "track_scroll(handle) expects a ScrollHandle or VirtualListScrollHandle",
       );
     }
     __apply(this.__id, "track_scroll", [handle.__handle]);
@@ -6205,7 +6389,7 @@ globalThis.__gpui = (() => {
   // to read it back off `this`.
   const tokenStateMethods = (handle, invoke) => Object.fromEntries([
     "content", "tokens", "replace_with_token", "replace_range_with_token",
-    "set_selected_range", "replace"
+    "set_selected_range", "selected_range", "replace"
   ].map(name => [name, (...args) => invoke(handle, name, args)]));
   // A value is plain text or a content snapshot with tokens.
   const setValue = (handle, setText, invoke) => (next) =>
@@ -6447,6 +6631,17 @@ globalThis.__gpui = (() => {
     __apply(this.__id, "toggle_zoom", [dockTarget(group, api), groupNode(group, api)]);
     return this;
   };
+  methods.drag_paths = function (paths, options = {}) {
+    if (!Array.isArray(paths) || paths.length === 0 || paths.some(p => typeof p !== "string" || !p || p.includes("\0"))) {
+      throw new TypeError("drag_paths(paths, options) expects non-empty paths without NUL characters");
+    }
+    const on = options.on ?? null;
+    if (on !== null && (typeof on !== "string" || !on)) {
+      throw new TypeError("drag_paths options.on must be a machine name or null");
+    }
+    __apply(this.__id, "drag_paths", [JSON.stringify({paths, on})]);
+    return this;
+  };
   methods.drag_tab = function (group, index) {
     const api = "drag_tab(group, index)";
     __apply(this.__id, "drag_tab", [dockTarget(group, api), groupNode(group, api), wholeAt(index, api)]);
@@ -6567,6 +6762,17 @@ globalThis.__gpui = (() => {
     zoom_out: () => __dock_zoom_out(handle),
     on: (event, handler) => __dock_on(handle, String(event), handler),
     release: () => __dock_release(handle),
+  });
+
+  const scrollHandle = (handle) => ({
+    __handle: handle,
+    scroll_to_item: (index) => {
+      if (!Number.isSafeInteger(index) || index < 0) {
+        throw new TypeError("scroll_to_item(index) needs a whole, non-negative index");
+      }
+      __scroll_to_item(handle, index);
+    },
+    release: () => __scroll_release(handle),
   });
 
   const virtualScrollHandle = (handle) => ({
@@ -7070,6 +7276,7 @@ globalThis.__gpui = (() => {
     h_virtual_list: virtualList(__h_virtual_list, "h_virtual_list"),
     list: lazyList(__list, "list", true),
     uniform_list: lazyList(__uniform_list, "uniform_list", false),
+    ScrollHandle: { new: () => scrollHandle(__scroll_new()) },
     VirtualListScrollHandle: { new: () => virtualScrollHandle(__virtual_scroll_new()) },
     Scrollbar: {
       new: (id) => element(__scrollbar(String(id))),
@@ -7094,9 +7301,13 @@ globalThis.__gpui = (() => {
         const handle = __editor_state_new(JSON.stringify(options));
         return {
           __handle: handle,
+          selected_range: () => __editor_text_call(handle, "selected_range", []),
+          set_selected_range: (range) => __editor_text_call(handle, "set_selected_range", [range]),
+          replace: (text) => __editor_text_call(handle, "replace", [String(text)]),
           value: () => __editor_value(handle),
           set_value: (value) => __editor_set_value(handle, String(value)),
           on: (event, handler) => __editor_on(handle, String(event), handler),
+          focus: () => __editor_focus(handle),
           release: () => __editor_release(handle),
         };
       },
@@ -7247,6 +7458,7 @@ impl ShellRuntime {
                 "on_mouse_down_out",
                 "on_drop",
                 "on_scroll_wheel",
+                "on_pinch",
                 "on_action",
                 "key_context",
                 "aria_level",
@@ -8249,6 +8461,7 @@ impl ShellRuntime {
             | "on_mouse_down_out"
             | "on_drop"
             | "on_scroll_wheel"
+            | "on_pinch"
             | "tab_bar"
             | "empty_group"
             | "drop_indicator"
@@ -8311,6 +8524,7 @@ impl ShellRuntime {
             | "tab_index"
             | "tab_stop"
             | "href"
+            | "drag_paths"
             | "id"
             | "overflow_scroll"
             | "overflow_x_scroll"
@@ -8402,6 +8616,7 @@ impl ShellRuntime {
                     "spin" => "spin",
                     "loop" => "loop",
                     "href" => "href",
+                    "drag_paths" => "drag_paths",
                     _ => "accessibility_label",
                 };
                 if name == "id"
@@ -9691,6 +9906,15 @@ fn mouse_button_payload<'js>(
     Ok(payload)
 }
 
+fn touch_phase_name(phase: gpui::TouchPhase) -> &'static str {
+    match phase {
+        gpui::TouchPhase::Started => "started",
+        gpui::TouchPhase::Moved => "moved",
+        gpui::TouchPhase::Ended => "ended",
+        gpui::TouchPhase::Cancelled => "cancelled",
+    }
+}
+
 fn set_pointer_geometry<'js>(
     ctx: &Ctx<'js>,
     payload: &Object<'js>,
@@ -10237,6 +10461,7 @@ fn callback_op_name(method: &str) -> Option<&'static str> {
         "on_mouse_down_out" => "on_mouse_down_out",
         "on_drop" => "on_drop",
         "on_scroll_wheel" => "on_scroll_wheel",
+        "on_pinch" => "on_pinch",
         "on_item_click" => "on_item_click",
         "on_item_secondary_click" => "on_item_secondary_click",
         "on_resize" => "on_resize",

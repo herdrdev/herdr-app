@@ -253,6 +253,22 @@ impl PlatformTextSystem for DirectWriteTextSystem {
         }
     }
 
+    fn font_table(&self, font_id: FontId, tag: [u8; 4]) -> Option<Vec<u8>> {
+        let state = self.state.read();
+        let face = &state.fonts[font_id.0].font_face;
+        unsafe {
+            let mut data = std::ptr::null_mut();
+            let mut len = 0;
+            let mut context = std::ptr::null_mut();
+            let mut exists = Default::default();
+            face.TryGetFontTable(u32::from_le_bytes(tag), &mut data, &mut len, &mut context, &mut exists).ok()?;
+            if !exists.as_bool() { return None; }
+            let table = std::slice::from_raw_parts(data.cast::<u8>(), len as usize).to_vec();
+            face.ReleaseFontTable(context);
+            Some(table)
+        }
+    }
+
     fn font_metrics(&self, font_id: FontId) -> FontMetrics {
         self.state.read().font_metrics(font_id)
     }
