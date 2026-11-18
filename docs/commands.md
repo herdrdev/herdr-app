@@ -14,12 +14,13 @@ herdr-app do pane.split '{"direction":"right"}'
 
 Arguments can be named flags or one JSON object. Required arguments are marked below.
 Actions use the current selection unless you give an explicit target.
+New panes and tabs from `herdr-app do` in a Herdr terminal go where that terminal is, not where the person is looking.
 Some actions close terminals; read their descriptions before running them.
 Mods can add their own actions, which are not listed here.
 
 ## `space.new`
 
-Make a space: its name (default: none, so it's called after where its first terminal is), the folder its terminals start in (default: the focused terminal's), its first tab's name (default: none, so it's called by its number), optionally an agent (argv) and its first message (task), and the machine it lives on (`hc machine ls`; default the focused space's machine for keys and clicks, this computer for scripts; empty string: this computer; its terminals start in that machine's home unless folder). It is shown at once; focus false keeps the shown space and tab (with no space shown, the new space is shown).
+Make a space: its name (default: none, so it's called after where its first terminal is), the folder its terminals start in (default: the focused terminal's, or from `herdr-app do` in a terminal, that terminal's), its first tab's name (default: none, so it's called by its number), optionally an agent (argv) and its first message (task), and the machine it lives on (`hc machine ls`; default the focused space's machine for keys and clicks, this computer for scripts; empty string: this computer; its terminals start in that machine's home unless folder). It is shown at once; focus false keeps the shown space and tab (with no space shown, the new space is shown).
 
 | Argument | Required |
 |---|---|
@@ -60,7 +61,7 @@ Move a space to a position (1 = first).
 
 ## `tab.new`
 
-Make a tab in a space (default: the selected one; name default: none, so it's called by its number) with a terminal in folder (default: the focused terminal's), optionally an agent (argv) and its first message (task); or with a mod as its only pane (`mod`, its `props`: a file, a board). It is shown at once; focus false adds it last in its space and keeps the shown space and the target space's selected tab. With no space open, a person's new tab starts a space (as space.new).
+Make a tab in a space (default: the selected one, or from `herdr-app do` in a terminal, that terminal's; name default: none, so it's called by its number) with a terminal in folder (default: the focused terminal's, or that terminal's), optionally an agent (argv) and its first message (task); or with a mod as its only pane (`mod`, its `props`: a file, a board). It is shown at once; focus false adds it last in its space and keeps the shown space and the target space's selected tab. With no space open, a person's new tab starts a space (as space.new).
 
 | Argument | Required |
 |---|---|
@@ -103,7 +104,7 @@ Move a tab (the active one if no id) to a position in its space (1 = first), or 
 
 ## `pane.split`
 
-Split a pane (default: the focused one) "right" or "down" with a new terminal, or with a mod (`mod`, its `props`) beside it.
+Split a pane (default: the one `herdr-app do` runs in, else the focused one) "right" or "down" with a new terminal, or with a mod (`mod`, its `props`) beside it.
 
 | Argument | Required |
 |---|---|
@@ -123,7 +124,7 @@ Close a pane and end its terminal.
 
 ## `terminal.open`
 
-Start a terminal: as a new tab (place "tab", default), or "right"/"down" of the focused pane.
+Start a terminal: as a new tab (place "tab", default), or "right"/"down" of the focused pane; from `herdr-app do` in a terminal, in that terminal's space or beside its pane.
 
 | Argument | Required |
 |---|---|
@@ -134,7 +135,7 @@ Start a terminal: as a new tab (place "tab", default), or "right"/"down" of the 
 
 ## `terminal.keep`
 
-Give a running terminal without a pane (a sub-agent) a pane: a new tab, or "right"/"down".
+Give a running terminal without a pane (a sub-agent) a pane: a new tab, or "right"/"down" of the focused pane; from `herdr-app do` in a terminal, in that terminal's space or beside its pane.
 
 | Argument | Required |
 |---|---|

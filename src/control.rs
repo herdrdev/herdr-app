@@ -91,7 +91,7 @@ pub fn client(args: &[String]) -> i32 {
         [verb] if verb == "ls" => json!({ "ls": true }),
         [verb, message] if verb == "feedback" => json!({ "do": "app.feedback", "args": { "message": message, "from": "agent" } }),
         [verb, command, rest @ ..] if verb == "do" => match parse_args(rest) {
-            Ok(a) => json!({ "do": command, "args": a }),
+            Ok(a) => with_caller(json!({ "do": command, "args": a })),
             Err(e) => return fail(&e),
         },
         _ => return fail("usage: herdr-app ls | herdr-app commands | herdr-app status | herdr-app shot [file.png] | herdr-app do <command> [--arg value ... | json]"),
@@ -124,6 +124,56 @@ pub fn client(args: &[String]) -> i32 {
         println!("{}", serde_json::to_string_pretty(&reply).unwrap_or_default());
     }
     if reply.get("error").is_some() { 1 } else { 0 }
+}
+
+/// Run in a Herdr terminal, says which one (`HC_TERMINAL_ID`), so what the command
+/// makes goes there rather than where the person is looking. The id belongs to the
+/// core that runs the terminal (`HC_TERMINAL_SOCKET`), whose own id goes with it: a
+/// window on another core leaves it alone. An empty `HC_TERMINAL_ID` names no caller.
+fn with_caller(mut cmd: Value) -> Value {
+    let Some(terminal) = std::env::var("HC_TERMINAL_ID").ok().filter(|t| !t.is_empty()) else { return cmd };
+    let core = match std::env::var_os("HC_TERMINAL_SOCKET").filter(|s| !s.is_empty()) {
+        None => None,
+        // A core that doesn't answer can't vouch for its terminal.
+        Some(socket) => Some(match core_id(PathBuf::from(socket), Duration::from_secs(2)) {
+            Some(id) => id,
+            None => return cmd,
+        }),
+    };
+    cmd["caller"] = json!({ "terminal": terminal, "core": core });
+    cmd
+}
+
+/// Asks the core serving `socket` for its id, waiting at most `wait`: the asking
+/// runs on its own thread, as a pipe read on Windows has no timeout of its own.
+fn core_id(socket: PathBuf, wait: Duration) -> Option<String> {
+    let (tx, rx) = std::sync::mpsc::channel();
+    std::thread::spawn(move || {
+        let ask = || -> Option<String> {
+            let stream = connect_core(&socket).ok()?;
+            let hello = json!({ "jsonrpc": "2.0", "id": 1, "method": "hello", "params": {} });
+            (&stream).write_all(format!("{hello}\n").as_bytes()).ok()?;
+            let mut line = String::new();
+            BufReader::new(&stream).read_line(&mut line).ok()?;
+            serde_json::from_str::<Value>(&line).ok()?.pointer("/result/core/id")?.as_str().map(str::to_owned)
+        };
+        let _ = tx.send(ask());
+    });
+    rx.recv_timeout(wait).ok().flatten()
+}
+
+#[cfg(unix)]
+fn connect_core(socket: &std::path::Path) -> std::io::Result<UnixStream> {
+    UnixStream::connect(socket)
+}
+
+/// herdr-core serves a named pipe on Windows. The path comes from the environment:
+/// identification only, so whoever serves it can't act as this process.
+#[cfg(windows)]
+fn connect_core(socket: &std::path::Path) -> std::io::Result<std::fs::File> {
+    use std::os::windows::fs::OpenOptionsExt;
+    const SECURITY_IDENTIFICATION: u32 = 1 << 16;
+    std::fs::OpenOptions::new().read(true).write(true).security_qos_flags(SECURITY_IDENTIFICATION).open(socket)
 }
 
 /// `--name api --argv '["pi"]'` (values that parse as JSON are JSON), or one JSON object.
@@ -189,6 +239,31 @@ mod tests {
     fn flag_values_that_parse_as_json_are_json() {
         let args: Vec<String> = ["--name", "eng-123", "--focus", "false", "--argv", r#"["claude"]"#].map(String::from).into();
         assert_eq!(parse_args(&args).unwrap(), json!({ "name": "eng-123", "focus": false, "argv": ["claude"] }));
+    }
+
+    #[test]
+    fn a_callers_core_is_asked_its_id_but_never_waited_on() {
+        let dir = std::env::temp_dir().join(format!("herdr-app-caller-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&dir);
+        std::fs::create_dir_all(&dir).unwrap();
+        let (answers, silent, missing) = (dir.join("answers.sock"), dir.join("silent.sock"), dir.join("missing.sock"));
+        let listener = UnixListener::bind(&answers).unwrap();
+        let asked = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().unwrap();
+            let mut line = String::new();
+            BufReader::new(&stream).read_line(&mut line).unwrap();
+            (&stream).write_all(b"{\"jsonrpc\":\"2.0\",\"id\":1,\"result\":{\"core\":{\"id\":\"c1\",\"name\":\"host\"}}}\n").unwrap();
+            serde_json::from_str::<Value>(&line).unwrap()
+        });
+        assert_eq!(core_id(answers, Duration::from_secs(5)).as_deref(), Some("c1"));
+        assert_eq!(asked.join().unwrap()["method"], "hello");
+        // A core that takes the connection and never answers: no caller, soon.
+        let _silent = UnixListener::bind(&silent).unwrap();
+        let started = std::time::Instant::now();
+        assert_eq!(core_id(silent, Duration::from_millis(200)), None);
+        assert!(started.elapsed() < Duration::from_secs(2), "waited {:?}", started.elapsed());
+        assert_eq!(core_id(missing, Duration::from_secs(5)), None);
+        let _ = std::fs::remove_dir_all(&dir);
     }
 
     #[test]

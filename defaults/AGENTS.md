@@ -569,6 +569,14 @@ valid names; they never fall back to the current target. For example, closing a
 space uses `herdr-app do space.close --id <id> --confirmed true`, not `--space`.
 Target IDs (`id`, `pane`, `space`, `terminal`) must be strings. Other non-null
 types are rejected before a current-target default applies; null means omitted.
+`herdr-app do` run in a Herdr terminal (`$HC_TERMINAL_ID`) makes things where
+that terminal is, even after the person has moved to another space: `pane.split`
+and `terminal.open`/`terminal.keep` right/down go beside its pane, `tab.new` and
+those commands' tabs into its space, and new terminals start in its folder
+(`space.new` too). A terminal without a pane (an `hc run` sub-agent) uses its
+nearest parent's. Other commands still default to the focused pane or tab: pass
+IDs. Keys, mods and scripts outside Herdr are unchanged;
+`HC_TERMINAL_ID= herdr-app do ...` uses the focused pane as before.
 The main ones:
 
 - Spaces: `space.new {name?, folder?, tab?, argv?, task?, machine?, focus?}`
@@ -620,7 +628,8 @@ The main ones:
   While a layout terminal block is focused, implicit split/close/zoom/go/swap and
   `terminal.show` fail, as do `terminal.open`/`terminal.keep` with place right/down.
   They never act on the terminal's source pane. An explicit `pane` still targets that
-  model pane; composition edits belong to the mod (edit its layout instead).
+  model pane; composition edits belong to the mod (edit its layout instead). A
+  `herdr-app do` from a terminal with a pane splits that pane whatever is focused.
 - Terminals: `terminal.open {argv?, folder?, place?, name?}` (`folder` sets the
   starting directory for tabs and right/down splits, with or without `argv`; `argv` starts in
   your interactive shell wherever it goes: a tab's shell stays after it, a split ends with it;

@@ -134,6 +134,13 @@ fn main() {
             std::process::exit(2);
         }
     }
+    // The window runs in no terminal, even when started from one: a `herdr-app do`
+    // its mods run must not pass for that terminal (control.rs `with_caller`).
+    // SAFETY: main has not started any threads yet.
+    unsafe {
+        std::env::remove_var("HC_TERMINAL_ID");
+        std::env::remove_var("HC_TERMINAL_SOCKET");
+    }
 
     #[cfg(target_os = "macos")]
     core_bin::fill_path();
