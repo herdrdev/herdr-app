@@ -1145,6 +1145,7 @@ All of it is in `herdr.d.ts`. In short:
   not `process.run`; `on: space.machine` runs there, omitted means local).
   `timeout` is milliseconds, defaults to 30,000 and is capped at 600,000 (10 minutes),
   locally and remotely. It rejects on timeout, if the program cannot start or the machine cannot be reached.
+  It keeps 8 MiB of stdout and of stderr; `truncated` is true when more was dropped.
   `hc(args)` (`hc read <t>` gives a terminal's text),
   `home()`, `appHome()`, `playSound("done" | "blocked" | file)`.
   `knownAgents({ on })`: the agents people can start (programs.json's
