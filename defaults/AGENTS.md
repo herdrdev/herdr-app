@@ -694,7 +694,9 @@ The main ones:
   the welcome screen and the failed New space toast. If a remote machine was rebuilt
   or replaced and a different core answers there, its sidebar offers Connect:
   explicitly forget the old identity and pair again with the same name and target.
-  Other unreachable machines don't offer this.
+  Other unreachable machines don't offer this. A failed pairing stays in the sidebar
+  as retryable until it connects or its × dismisses it; a reconnect whose machine
+  the core no longer knows goes by itself.
 - Window: `window.minimize`, `window.maximize` (or back), `window.close`.
 - macOS: `app.quit`, `app.hide`, `app.hide_others`, `app.show_all`.
 
