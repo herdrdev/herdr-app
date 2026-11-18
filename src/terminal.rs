@@ -160,6 +160,9 @@ pub struct TerminalView {
     scrollbar_grab: Option<f32>,
     selection_pointer: Point<Pixels>,
     selection_scroll: Option<Task<()>>,
+    /// Brief feedback for this pane's own copy, separate from the program's output.
+    copy_feedback: Option<usize>,
+    copy_feedback_task: Option<Task<()>>,
     /// The terminal's folder, for links to relative paths.
     pub cwd: Option<PathBuf>,
     pub link_handlers: Rc<RefCell<links::Handlers>>,
@@ -346,6 +349,8 @@ impl TerminalView {
             shown_in: Cell::new(0),
             typed_at: Cell::new(None),
             scrolled: point(0.0, 0.0),
+            copy_feedback: None,
+            copy_feedback_task: None,
             search_open: false,
             search_keys: false,
             search_query: String::new(),
@@ -835,9 +840,19 @@ impl TerminalView {
         let Some(text) = self.grid.borrow().vt.selection_text() else {
             return false;
         };
+        let chars = text.chars().count();
         cx.write_to_clipboard(ClipboardItem::new_string(text.clone()));
         #[cfg(target_os = "linux")]
         cx.write_to_primary(ClipboardItem::new_string(text));
+        self.copy_feedback = Some(chars);
+        self.copy_feedback_task = Some(cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(2)).await;
+            let _ = this.update(cx, |this, cx| {
+                this.copy_feedback = None;
+                cx.notify();
+            });
+        }));
+        cx.notify();
         true
     }
 
@@ -2104,7 +2119,35 @@ fn find_input_style() -> InputEditorStyle {
     }
 }
 
-fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, window: &mut Window, cx: &mut App) {
+/// Terminals expose cells, not editor widgets. Recognize the visible input box
+/// around the cursor: a shaded block or paired horizontal rules (also when the
+/// cursor is on a later input line). Otherwise use the line above the cursor.
+fn copy_feedback_row(frame: &vt::Frame) -> usize {
+    let cursor = frame.cursor_cell.map_or(0, |(_, row)| row as usize).min(frame.rows.len().saturating_sub(1));
+    let Some(row) = frame.rows.get(cursor) else { return 0 };
+    let uniform_background = |row: &[vt::Cell], bg: vt::Rgb| {
+        row.iter().filter(|c| c.bg == Some(bg)).count() * 4 >= row.len().max(1) * 3
+    };
+    if let Some(bg) = frame.cursor_cell.and_then(|(col, _)| row.get(col as usize)).and_then(|c| c.bg)
+        .filter(|bg| *bg != frame.bg && uniform_background(row, *bg))
+    {
+        let mut top = cursor;
+        while top > 0 && uniform_background(&frame.rows[top - 1], bg) { top -= 1; }
+        return top.saturating_sub(1);
+    }
+    let rule = |row: &[vt::Cell]| {
+        let count = row.iter().filter(|cell| matches!(cell.text.as_str(), "─" | "━" | "═" | "╌" | "┄" | "┈" | "-" | "_")).count();
+        count >= 3 && count * 4 >= row.len().max(1) * 3
+    };
+    if frame.rows.iter().skip(cursor + 1).any(|row| rule(row))
+        && let Some(top) = (0..cursor).rev().find(|&y| rule(&frame.rows[y]))
+    {
+        return top.saturating_sub(1);
+    }
+    cursor.saturating_sub(1)
+}
+
+fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, copy_feedback: Option<usize>, window: &mut Window, cx: &mut App) {
     crate::bench::count(&crate::bench::GRID);
     let mut g = grid.borrow_mut();
     let cell = g.cell;
@@ -2295,6 +2338,22 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
 
     paint_images(false, window);
 
+    if let Some(chars) = copy_feedback {
+        let cols = frame.rows.first().map_or(0, |row| row.len());
+        let label = [format!("Copied {chars} chars to host clipboard"), format!("Copied {chars} chars"), "Copied".into()]
+            .into_iter().find(|label| label.len() < cols).unwrap_or_else(|| "✓".into());
+        let run = TextRun {
+            len: label.len(), font: cell_font(false, false), color: crate::settings::color("accent"),
+            background_color: None, underline: None, strikethrough: None,
+        };
+        let line = window.text_system().shape_line(label.into(), px(crate::settings::font_size()), &[run], None);
+        let row = copy_feedback_row(&frame);
+        let right = at(cols.saturating_sub(1), row).x;
+        let pos = point((right - line.width).max(origin.x), at(0, row).y);
+        window.paint_quad(fill(snap_box(Bounds::new(pos, size(line.width, cell.height))), hsla(frame.bg)));
+        paint_cell_text(&line, pos, metrics, window, cx);
+    }
+
     if let Some(cur) = frame.cursor {
         let (x, y) = (cur.x as usize, cur.y as usize);
         let wide = frame.rows.get(y).and_then(|r| r.get(x)).is_some_and(|c| c.wide);
@@ -2483,6 +2542,7 @@ impl Render for TerminalView {
             format!("{} matches", search_progress.total)
         };
         let address = self.address.clone();
+        let copy_feedback = self.copy_feedback;
 
         div()
             .id(SharedString::from(format!("term-{}", self.address)))
@@ -2611,7 +2671,7 @@ impl Render for TerminalView {
                         grid.borrow_mut().fit(cols, rows, cell, window.scale_factor());
                     },
                     move |bounds, _, window, cx| {
-                        paint_grid(bounds, &grid_paint, focused, window, cx);
+                        paint_grid(bounds, &grid_paint, focused, copy_feedback, window, cx);
                         let view = selection_view.clone();
                         window.on_mouse_event(move |ev: &MouseMoveEvent, phase, _, cx| {
                             if phase == DispatchPhase::Capture {
@@ -2812,6 +2872,34 @@ mod tests {
         ] {
             assert_eq!(scroll_state_changed(previous, current), changed, "{previous:?} -> {current:?}");
         }
+    }
+
+    #[test]
+    fn copy_hint_is_above_the_input_box_instead_of_the_terminal_footer() {
+        let mut vt = crate::vt::Vt::new(40, 20);
+        // Pi's editor: an upper rule, multiline input, lower rule and footer.
+        let rule = "─".repeat(40);
+        vt.write(format!("\x1b[10;1H{rule}\x1b[11;1H> first line\x1b[12;1Hsecond line\x1b[13;1H{rule}\x1b[14;1Hstatus footer\x1b[12;5H").as_bytes());
+        assert_eq!(super::copy_feedback_row(&vt.frame()), 8, "hint belongs above the upper rule even on the second input line");
+        vt.write(b"\x1b[11;3H");
+        assert_eq!(super::copy_feedback_row(&vt.frame()), 8, "moving within the editor must not move the hint");
+
+        // The reference: a shaded input with padding above its first text line.
+        let mut vt = crate::vt::Vt::new(40, 20);
+        let blank = " ".repeat(40);
+        for row in 10..=13 {
+            vt.write(format!("\x1b[{row};1H\x1b[48;2;210;210;210m{blank}\x1b[0m").as_bytes());
+        }
+        vt.write(b"\x1b[11;3H\x1b[48;2;210;210;210m> first\x1b[12;3Hsecond\x1b[0m\x1b[12;5H");
+        assert_eq!(super::copy_feedback_row(&vt.frame()), 8, "hint must sit above the whole shaded editor");
+        vt.write(b"\x1b[11;5H");
+        assert_eq!(super::copy_feedback_row(&vt.frame()), 8);
+
+        let mut vt = crate::vt::Vt::new(40, 20);
+        vt.write(b"\x1b[11;3H> plain prompt");
+        assert_eq!(super::copy_feedback_row(&vt.frame()), 9, "unboxed prompts use the preceding line");
+        vt.write(b"\x1b[1;1H");
+        assert_eq!(super::copy_feedback_row(&vt.frame()), 0, "the hint must stay inside the viewport");
     }
 
     #[test]
@@ -4065,6 +4153,7 @@ mod tests {
         let (root, cx) = cx.add_window_view(|_, cx| {
             Root(cx.new(|cx| super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 5), cx)))
         });
+        let terminal = root.read_with(cx, |root, _| root.0.clone());
         cx.run_until_parked();
 
         let drag = |root: &Entity<Root>, cx: &mut VisualTestContext| {
@@ -4096,6 +4185,7 @@ mod tests {
         drag(&root, cx);
         #[cfg(target_os = "linux")]
         let selected = root.read_with(cx, |root, cx| root.0.read_with(cx, |terminal, _| terminal.grid.borrow().vt.selection_text().unwrap()));
+        assert_eq!(terminal.read_with(cx, |t, _| t.copy_feedback), None, "disabled copy-on-select must not show feedback");
         cx.update(|_, app| {
             assert_eq!(app.read_from_clipboard().unwrap().text().as_deref(), Some("unchanged"));
             #[cfg(target_os = "linux")]
@@ -4109,6 +4199,10 @@ mod tests {
                 selected
             })
         });
+        cx.run_until_parked();
+        assert_eq!(terminal.read_with(cx, |t, _| t.copy_feedback), Some(selected.chars().count()), "explicit copy must show its character count");
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
         cx.update(|_, app| {
             assert_eq!(app.read_from_clipboard().unwrap().text().as_deref(), Some(selected.as_str()));
             #[cfg(target_os = "linux")]
@@ -4121,10 +4215,26 @@ mod tests {
         crate::settings::set(settings);
         drag(&root, cx);
         let selected = root.read_with(cx, |root, cx| root.0.read_with(cx, |terminal, _| terminal.grid.borrow().vt.selection_text().unwrap()));
+        assert_eq!(terminal.read_with(cx, |t, _| t.copy_feedback), Some(selected.chars().count()), "mouse release must show feedback");
+        cx.executor().advance_clock(std::time::Duration::from_millis(1100));
+        cx.run_until_parked();
+        assert!(terminal.read_with(cx, |t, _| t.copy_feedback.is_some()), "a repeated copy must restart the two-second timeout");
+        let selected = root.read_with(cx, |root, cx| root.0.read_with(cx, |terminal, _| terminal.grid.borrow().vt.selection_text().unwrap()));
         assert!(!selected.is_empty());
         cx.update(|_, app| {
             assert_eq!(app.read_from_clipboard().unwrap().text().as_deref(), Some(selected.as_str()));
         });
+        root.update(cx, |root, cx| root.0.update(cx, |terminal, cx| {
+            terminal.clear_selection(cx);
+            assert!(!terminal.copy(cx));
+            // Programs such as Codex and Claude supply their own copy feedback.
+            terminal.ingest([crate::hc::Stream::Data(b"\x1b]52;c;cHJvZ3JhbQ==\x07".to_vec())], cx);
+        }));
+        cx.run_until_parked();
+        cx.executor().advance_clock(std::time::Duration::from_millis(900));
+        cx.run_until_parked();
+        assert_eq!(terminal.read_with(cx, |t, _| t.copy_feedback), None, "the hint must expire; empty copies and OSC 52 must not restart it");
+        cx.update(|_, app| assert_eq!(app.read_from_clipboard().unwrap().text().as_deref(), Some("program")));
         crate::settings::set((*original).clone());
     }
 
