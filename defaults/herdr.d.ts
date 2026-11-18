@@ -444,7 +444,7 @@ export function notify(n: {
 export interface LinkClick {
   link:
     | { kind: "url"; raw: string; url: string }
-    | { kind: "file"; raw: string; path: string | null };
+    | { kind: "file"; raw: string; path: string | null; line?: number; column?: number };
   source: {
     terminal: string;
     machine: string | null;

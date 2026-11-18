@@ -146,6 +146,17 @@ fn without_suffix(path: &str) -> &str {
     bare
 }
 
+/// The `:line[:column]` that `raw` adds after the path spelling `bare`.
+fn place(raw: &str, bare: &str) -> Option<(u32, Option<u32>)> {
+    let rest = raw.strip_prefix(bare)?.strip_prefix(':')?;
+    let rest = rest.strip_suffix('.').unwrap_or(rest);
+    let (line, column) = match rest.split_once(':') {
+        Some((line, column)) => (line, Some(column.parse().ok()?)),
+        None => (rest, None),
+    };
+    Some((line.parse().ok()?, column))
+}
+
 fn is_number(text: &str) -> bool {
     !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit())
 }
@@ -300,7 +311,14 @@ impl Resolved<'_> {
                             _ => None,
                         }
                     };
-                    json!({"kind": "file", "raw": raw, "path": path.and_then(Path::to_str)})
+                    let mut link = json!({"kind": "file", "raw": raw, "path": path.and_then(Path::to_str)});
+                    if let Some((line, column)) = file_spelling.and_then(|bare| place(raw, bare)) {
+                        link["line"] = line.into();
+                        if let Some(column) = column {
+                            link["column"] = column.into();
+                        }
+                    }
+                    link
                 }),
             };
             handlers.push((id.clone(), link.clone()));
@@ -501,7 +519,20 @@ mod tests {
                     Url => json!({"kind":"url", "raw":expected_raw, "url":expected_raw}),
                     File => {
                         let path = match &expected_pass { Some(Target::File(path)) => Some(path.as_path()), _ => None };
-                        json!({"kind":"file", "raw":expected_raw, "path":path.map(Path::to_string_lossy)})
+                        let mut link = json!({"kind":"file", "raw":expected_raw, "path":path.map(Path::to_string_lossy)});
+                        let place = match expected_raw {
+                            "src/main.rs:12:5" => Some((12, Some(5))),
+                            "./gone.rs:42:7" => Some((42, Some(7))),
+                            "./src/main.rs:7" if !cfg!(unix) => Some((7, None)),
+                            _ => None,
+                        };
+                        if let Some((line, column)) = place {
+                            link["line"] = json!(line);
+                            if let Some(column) = column {
+                                link["column"] = json!(column);
+                            }
+                        }
+                        link
                     }
                 }
             });
@@ -515,6 +546,17 @@ mod tests {
         let at = "peer/t7".len() - 1;
         assert_eq!(terminal_address(&"peer/t7"[word("peer/t7", at).unwrap()], "t1", ["peer/t7"]).as_deref(), Some("peer/t7"));
         std::fs::remove_dir_all(cwd).unwrap();
+    }
+
+    #[test]
+    fn places_come_from_the_suffix_after_the_path() {
+        assert_eq!(place("src/a.rs:12:5", "src/a.rs"), Some((12, Some(5))));
+        assert_eq!(place("src/a.rs:12", "src/a.rs"), Some((12, None)));
+        assert_eq!(place("src/a.rs:12.", "src/a.rs"), Some((12, None)));
+        assert_eq!(place("src/a.rs", "src/a.rs"), None);
+        assert_eq!(place("src/a.rs:7", "src/a.rs:7"), None);
+        assert_eq!(place("src/a.rs:x", "src/a.rs"), None);
+        assert_eq!(place("file:///a.rs", "/a.rs"), None);
     }
 
     #[test]
