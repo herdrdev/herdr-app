@@ -13,13 +13,23 @@ function harness(replies: unknown[] = [], storage = new Map<string, string>(), s
   const availability = [{ name: null as string | null, layout: "ready" }];
   const moves: { id: string; index: number }[] = [];
   const handlers: Record<string, (...args: any[]) => void> = {};
+  const byId: Record<string, Record<string, (...args: any[]) => void>> = {};
+  let currentId: string | null = null;
   const env = { layout: null as unknown };
   // The list's scroll position: the requests the view makes are what the sidebar would scroll by.
   const ScrollHandle = { new: () => ({ calls: [] as number[], scroll_to_item(index: number) { this.calls.push(index); } }) };
   const theme = () => new Proxy({}, { get: () => "#000000" });
   const tracked: unknown[] = [];
   const element: any = new Proxy({}, { get: (_, method) => (...args: any[]) => {
-    if (String(method).startsWith("on_")) handlers[String(method)] = args.at(-1);
+    // Run `.when` branches like the real builder, so buttons drawn inside them register.
+    if (method === "when" && args[0]) args[1](element);
+    if (method === "id") currentId = String(args[0]);
+    if (String(method).startsWith("on_")) {
+      handlers[String(method)] = args.at(-1);
+      // Elements register clicks in build order, and unused ones are still built:
+      // key by the element's own id to reach a specific button.
+      if (currentId) (byId[currentId] ??= {})[String(method)] = args.at(-1);
+    }
     if (method === "track_scroll") tracked.push(args[0]);
     return element;
   } });
@@ -45,7 +55,7 @@ function harness(replies: unknown[] = [], storage = new Map<string, string>(), s
   view.folded = new Set(["cloud"]);
   view.refreshMachines = () => {};
   const cx = { timer: { every() {} }, notify() {}, spawn(fn: (cx: unknown) => Promise<unknown>) { tasks.push(fn(cx)); } };
-  return { view, calls, tasks, cx, storage, moves, handlers, snapshot, availability, env, tracked };
+  return { view, calls, tasks, cx, storage, moves, handlers, byId, snapshot, availability, env, tracked };
 }
 
 test("git grouping reads refs for normal, detached, unborn and bare worktrees", async () => {
@@ -279,8 +289,71 @@ test("unexpected transport failures clear the busy state", async () => {
   expect(view.reconnecting.cloud.error).toBe("offline");
 });
 
+// The harness stubs the periodic refresh away; these tests want the real one.
+const refreshMachines = (view: any, cx: any) => Object.getPrototypeOf(view).refreshMachines.call(view, cx);
+const listing = (machines: unknown[]) => ({ code: 0, stdout: JSON.stringify({ machines }), stderr: "" });
+
+test("a saved reconnect whose machine the core no longer knows is dropped; a failed pairing's retry and a busy one stay", async () => {
+  const h = harness([listing([{ name: "temp", temporary: true }])]);
+  h.view.reconnecting = {
+    gone: { machine: { ...machine, name: "gone" }, removed: false, busy: false, error: "unreachable" },
+    pairing: { machine: { ...machine, name: "pairing" }, removed: true, busy: false, error: "core too old" },
+    flying: { machine: { ...machine, name: "flying" }, removed: false, busy: true },
+    temp: { machine: { ...machine, name: "temp", temporary: true }, removed: false, busy: false, error: "no connection" },
+  };
+  h.view.folded = new Set(["gone", "pairing", "flying", "temp"]);
+  refreshMachines(h.view, h.cx);
+  await Promise.all(h.tasks);
+  expect(Object.keys(h.view.reconnecting).sort()).toEqual(["flying", "pairing", "temp"]);
+  expect(JSON.parse(h.storage.get("machines.reconnecting")!)).toEqual(h.view.reconnecting);
+  expect([...h.view.folded].sort()).toEqual(["flying", "pairing", "temp"]);
+  expect(JSON.parse(h.storage.get("machines.folded")!).sort()).toEqual(["flying", "pairing", "temp"]);
+  expect(h.view.machines).toEqual([]); // temporary machines stay out of the sidebar list
+});
+
+test("a machine listing that fails, or cannot be read, drops nothing", async () => {
+  const h = harness([{ code: 1, stdout: "", stderr: "no core" }, new Error("offline"), { code: 0, stdout: "not json", stderr: "" }]);
+  h.view.reconnecting = { gone: { machine: { ...machine, name: "gone" }, removed: false, busy: false } };
+  h.view.folded = new Set(["gone"]);
+  for (let i = 0; i < 3; i++) {
+    refreshMachines(h.view, h.cx);
+    await Promise.all(h.tasks);
+  }
+  expect(Object.keys(h.view.reconnecting)).toEqual(["gone"]);
+  expect(h.storage.has("machines.reconnecting")).toBe(false);
+  expect([...h.view.folded]).toEqual(["gone"]);
+});
+
+test("forget dismisses a failed pairing and unfolds it", () => {
+  const h = harness();
+  h.view.reconnecting = { cloud: { machine, removed: true, busy: false, error: "core too old" } };
+  h.view.folded = new Set(["cloud"]);
+  h.view.forget("cloud");
+  expect(h.view.reconnecting).toEqual({});
+  expect(JSON.parse(h.storage.get("machines.reconnecting")!)).toEqual({});
+  expect(h.view.folded.has("cloud")).toBe(false);
+  expect(JSON.parse(h.storage.get("machines.folded")!)).toEqual([]);
+});
+
+test("a failed pairing's row offers a retry and a dismiss that forgets it", () => {
+  const h = harness();
+  h.view.machines = [machine];
+  h.view.reconnecting = { cloud: { machine, removed: true, busy: false, error: "core too old" } };
+  h.view.grouped(new Proxy({}, { get: () => "#000000" }), false);
+  expect(h.byId["machine-connect-cloud"]).toBeTruthy();
+  h.byId["machine-forget-cloud"].on_click({}, { stop_propagation() {}, notify() {} });
+  expect(h.view.reconnecting).toEqual({});
+  expect(JSON.parse(h.storage.get("machines.reconnecting")!)).toEqual({});
+  // While a pairing is in flight there is nothing to dismiss yet.
+  const flying = harness();
+  flying.view.machines = [machine];
+  flying.view.reconnecting = { cloud: { machine, removed: true, busy: true } };
+  flying.view.grouped(new Proxy({}, { get: () => "#000000" }), false);
+  expect(flying.byId["machine-forget-cloud"]).toBeUndefined();
+});
+
 function orderedHarness(ids: string[]) {
-  const h = harness([], new Map(), ids.map(id => ({ id, folder: "/" + id })));
+  const h = harness([], new Map(), ids.map(id => ({ id, name: id, folder: "/" + id })));
   h.view.git = {};
   h.view.shown = new Set(ids);
   h.view.born = {};
@@ -474,7 +547,7 @@ function scrollHarness(spaces: Space[]) {
 }
 const withHandle = (h: ReturnType<typeof harness>) => { h.view.scroll = { calls: [] as number[], scroll_to_item(i: number) { this.calls.push(i); } }; return h; };
 const spaceList = (ids: string[], active: string, remote: string[] = []): Space[] =>
-  ids.map(id => ({ id, folder: "/" + id, active: id === active, ...(remote.includes(id) ? { machine: "cloud" } : {}) }));
+  ids.map(id => ({ id, name: id, folder: "/" + id, active: id === active, ...(remote.includes(id) ? { machine: "cloud" } : {}) }));
 
 test("the active space is brought into view once, and left alone while it stays put", () => {
   const h = withHandle(scrollHarness(spaceList(["a", "b", "c", "d"], "c")));
@@ -538,7 +611,7 @@ test("the list reveals the active space again when a machine header shifts its p
   expect(h.view.scroll.calls).toEqual([1]);
   // A machine joins: its header and rows come after this computer's, and now this computer gets a header too,
   // so the same active space sits one child further down.
-  h.snapshot.push({ id: "r1", folder: "/r1", machine: "cloud", active: false });
+  h.snapshot.push({ id: "r1", name: "r1", folder: "/r1", machine: "cloud", active: false });
   h.view.shown.add("r1");
   h.view.render();
   expect(h.view.scroll.calls).toEqual([1, 2]);
