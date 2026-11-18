@@ -163,6 +163,11 @@ the highlighted line shows where it will land.
   Ctrl-click (Cmd-click on macOS) a live terminal address in terminal text to
   peek at it. Bare addresses refer to the machine of the terminal showing them;
   use `machine/address` for another machine. Names and non-live addresses aren't links.
+  Headless `pi-subagents` workers report through their parent's OSC 7501
+  `records` instead of separate terminals. The `agents` mod shows their status
+  and message under the parent; clicking one opens the parent's Pi session
+  (focus its pane, or peek if it has none). The headless workers themselves
+  cannot be peeked or kept as separate panes.
 - **Agent navigation order** belongs to the mods. A mod displaying agents calls
   `setAgentOrder(list.map(a => a.address))` on render so `agent.next` /
   `agent.prev` follow its list.
@@ -1105,7 +1110,8 @@ All of it is in `herdr.d.ts`. In short:
   the first read even if it fails, and offline machines are unavailable),
   `agents()` (status, app, space, tab, pinned, focused; "done" turns "idle"
   once someone looks at it on any Herdr client), `terminals()`
-  (every core terminal), `focused()`, `layout()`, `theme()` (every color by
+  (every core terminal, including OSC 7501 child `records`), `focused()`,
+  `layout()`, `theme()` (every color by
   name: background (the terminals', cards), canvas (behind cards), chrome
   (sidebars, bars), surface, popover, raised, hover, selected, border,
   input (a stronger border), foreground, muted, dim, accent,
