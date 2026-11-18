@@ -4053,7 +4053,11 @@ impl ShellRuntime {
                     payload.set("secondary", *secondary)?;
                     payload.set("shift", *shift)?;
                 }
-                InputEvent::Change | InputEvent::Focus | InputEvent::Blur | InputEvent::PasteWithoutText => {}
+                InputEvent::Change
+                | InputEvent::Focus
+                | InputEvent::Blur
+                | InputEvent::PasteWithoutText
+                | InputEvent::Scroll => {}
             }
             handler.call::<_, ()>((
                 payload,
@@ -7304,6 +7308,10 @@ globalThis.__gpui = (() => {
           selected_range: () => __editor_text_call(handle, "selected_range", []),
           set_selected_range: (range) => __editor_text_call(handle, "set_selected_range", [range]),
           replace: (text) => __editor_text_call(handle, "replace", [String(text)]),
+          scroll_top: () => __editor_text_call(handle, "scroll_top", []),
+          set_scroll_top: (line) => __editor_text_call(handle, "set_scroll_top", [Number(line)]),
+          set_line_decorations: (decorations) =>
+            __editor_text_call(handle, "set_line_decorations", [decorations]),
           value: () => __editor_value(handle),
           set_value: (value) => __editor_set_value(handle, String(value)),
           on: (event, handler) => __editor_on(handle, String(event), handler),

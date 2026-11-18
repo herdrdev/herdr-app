@@ -99,7 +99,7 @@ impl Bridged {
     }
 }
 
-fn parse_hex(hex: &str) -> Option<Hsla> {
+pub(crate) fn parse_hex(hex: &str) -> Option<Hsla> {
     let expand = |c: char| {
         let d = c.to_digit(16)?;
         Some(d * 17)

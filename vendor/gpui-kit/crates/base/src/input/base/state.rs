@@ -131,6 +131,17 @@ pub enum InputEvent {
     Blur,
     /// A paste found no text on the clipboard (an image, say): the owner may read it.
     PasteWithoutText,
+    /// HERDR: the vertical scroll position changed (see [`InputBaseState::scroll_top_rows`]).
+    Scroll,
+}
+
+/// HERDR: a whole-line highlight: a background tint across the line and a
+/// marker in the gutter. `line` is the 0-based buffer line.
+#[derive(Clone, Debug, PartialEq)]
+pub struct LineDecoration {
+    pub line: usize,
+    pub background: gpui::Hsla,
+    pub marker: gpui::Hsla,
 }
 
 pub(super) const CONTEXT: &str = "Input";
@@ -489,6 +500,12 @@ pub struct InputBaseState<M: InputModeKind> {
     pub(crate) scroll_handle: ScrollHandle,
     /// The deferred scroll offset to apply on next layout.
     pub(crate) deferred_scroll_offset: Option<Point<Pixels>>,
+    /// HERDR: a scroll position in rows set before the first layout knew the line height.
+    pub(crate) pending_scroll_rows: Option<f32>,
+    /// HERDR: the vertical offset last reported with [`InputEvent::Scroll`].
+    pub(crate) reported_scroll_y: Pixels,
+    /// HERDR: whole-line highlights, painted under the text and in the gutter.
+    pub(crate) line_decorations: Vec<LineDecoration>,
     /// The size of the scrollable content.
     pub(crate) scroll_size: gpui::Size<Pixels>,
     pub(super) editor_scrollbar_snapshot: Cell<Option<EditorScrollbarSnapshot>>,
@@ -860,6 +877,9 @@ impl<M: InputModeKind> InputBaseState<M> {
             longest_line_width: Cell::new(None),
             editor_paddings: Edges::default(),
             deferred_scroll_offset: None,
+            pending_scroll_rows: None,
+            reported_scroll_y: px(0.),
+            line_decorations: Vec::new(),
             placeholder: SharedString::default(),
             mask_pattern: MaskPattern::default(),
             mask_pattern_set: false,
@@ -3121,6 +3141,46 @@ impl<M: InputModeKind> InputBaseState<M> {
     pub fn set_scroll_offset(&mut self, offset: gpui::Point<gpui::Pixels>, cx: &mut Context<Self>) {
         self.deferred_scroll_offset = Some(offset);
         cx.notify();
+    }
+
+    /// HERDR: the first visible row, fractional, counted from the top. It
+    /// equals the buffer line when soft wrap is off.
+    pub fn scroll_top_rows(&self) -> f32 {
+        if let Some(rows) = self.pending_scroll_rows {
+            return rows;
+        }
+        match self.line_height() {
+            Some(height) if height > px(0.) => (-self.scroll_handle.offset().y / height).max(0.),
+            _ => 0.,
+        }
+    }
+
+    /// HERDR: scrolls so that row `rows` is at the top, clamped to the content.
+    pub fn set_scroll_top_rows(&mut self, rows: f32, cx: &mut Context<Self>) {
+        let rows = rows.max(0.);
+        match self.line_height() {
+            Some(height) => {
+                self.pending_scroll_rows = None;
+                let x = self.scroll_handle.offset().x;
+                self.set_scroll_offset(point(x, -height * rows), cx);
+            }
+            None => {
+                self.pending_scroll_rows = Some(rows);
+                cx.notify();
+            }
+        }
+    }
+
+    /// HERDR: replaces the whole-line highlights.
+    pub fn set_line_decorations(&mut self, decorations: Vec<LineDecoration>, cx: &mut Context<Self>) {
+        if self.line_decorations != decorations {
+            self.line_decorations = decorations;
+            cx.notify();
+        }
+    }
+
+    pub fn line_decorations(&self) -> &[LineDecoration] {
+        &self.line_decorations
     }
 
     /// Laid-out line height; `None` before first layout.
