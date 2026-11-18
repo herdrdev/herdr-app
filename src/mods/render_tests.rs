@@ -507,12 +507,16 @@ fn a_described_mod_leaves_no_folder_behind(cx: &mut TestAppContext) {
 fn brand_leaves_room_for_macos_traffic_lights_only_outside_full_screen(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
-    for (fullscreen, inset) in [(false, true), (true, false)] {
+    for (fullscreen, zoom, inset) in [(false, 1.0, Some(76)), (false, 0.5, Some(152)), (false, 2.0, Some(38)), (true, 1.0, None)] {
         let mut values = fixture(true, props(), updates("current", "current"));
         values.insert("window".into(), json!({"platform":"macos","titlebar":"none","fullscreen":fullscreen,"buttons":false}));
+        values.get_mut("settings").unwrap()["zoom"] = json!(zoom);
         let tree = describe_with_values(cx, &staged, "mods/workspace-chrome", values, None).unwrap();
         let root = tree.lines().next().unwrap();
-        assert_eq!(root.contains(".pl[Number(76.0)]"), inset, "fullscreen={fullscreen}: {tree}");
+        match inset {
+            Some(px) => assert!(root.contains(&format!(".pl[Number({px}.0)]")), "zoom={zoom}: {tree}"),
+            None => assert!(!root.contains(".pl[Number(76.0)]"), "fullscreen: {tree}"),
+        }
     }
 }
 
