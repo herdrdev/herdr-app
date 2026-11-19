@@ -1411,6 +1411,16 @@ impl<M: InputModeKind> InputBaseState<M> {
         });
     }
 
+    /// Take keyboard focus off the input field, leaving nothing in the window
+    /// focused. Does nothing when the field (or something inside it, such as
+    /// its context menu) does not have focus, so it never takes focus from
+    /// another element. The `Blur` event follows as it does for any focus loss.
+    pub fn blur(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.focus_handle.contains_focused(window, cx) {
+            window.blur(cx);
+        }
+    }
+
     /// Refresh the input, so the next render re-runs syntax highlighting and
     /// the LSP providers, not just a redraw.
     ///

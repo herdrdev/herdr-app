@@ -219,6 +219,18 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
         }),
     )?;
 
+    let blur_input = runtime.clone();
+    globals.set(
+        "__input_blur",
+        Func::from(move |ctx: Ctx<'_>, handle: EntityHandle| -> JsResult<()> {
+            let state = live(&ctx, &blur_input, handle)?;
+            scope::with_current(|window, cx| {
+                state.update(cx, |state, cx| state.blur(window, cx));
+            })
+            .ok_or_else(|| needs_call(&ctx, "blur()"))
+        }),
+    )?;
+
     let masked_runtime = runtime.clone();
     globals.set(
         "__input_set_masked",
@@ -386,6 +398,18 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
         }),
     )?;
 
+    let blur_textarea = runtime.clone();
+    globals.set(
+        "__textarea_blur",
+        Func::from(move |ctx: Ctx<'_>, handle: EntityHandle| -> JsResult<()> {
+            let state = live_textarea(&ctx, &blur_textarea, handle)?;
+            scope::with_current(|window, cx| {
+                state.update(cx, |state, cx| state.blur(window, cx));
+            })
+            .ok_or_else(|| needs_call(&ctx, "blur()"))
+        }),
+    )?;
+
     let wrap_runtime = runtime.clone();
     globals.set(
         "__textarea_set_soft_wrap",
@@ -515,6 +539,18 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
                 state.update(cx, |state, cx| state.focus(window, cx));
             })
             .ok_or_else(|| needs_call(&ctx, "focus()"))
+        }),
+    )?;
+
+    let blur_editor = runtime.clone();
+    globals.set(
+        "__editor_blur",
+        Func::from(move |ctx: Ctx<'_>, handle: EntityHandle| -> JsResult<()> {
+            let state = live_editor(&ctx, &blur_editor, handle)?;
+            scope::with_current(|window, cx| {
+                state.update(cx, |state, cx| state.blur(window, cx));
+            })
+            .ok_or_else(|| needs_call(&ctx, "blur()"))
         }),
     )?;
 
