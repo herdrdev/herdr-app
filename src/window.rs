@@ -9,6 +9,7 @@ mod floats;
 mod movable;
 mod pane_drag;
 mod pane_size;
+mod space_views;
 mod titlebar;
 
 use crate::layout::{Axis, Background as Paint, Content, Fit, HeaderContent, Kind, Line, Node, PaneFrame, Size as Span};
@@ -436,6 +437,8 @@ pub struct AppWindow {
     seen: BTreeSet<String>,
     bounds: Rc<RefCell<HashMap<String, Bounds<Pixels>>>>,
     hidden_fit: pane_size::HiddenFit,
+    /// What the tab block without a `space` showed last (see `space_views`).
+    main_space: RefCell<Option<String>>,
     drag: Option<Drag>,
     written_layout: String,
     /// The shown layout as its file has it; `chrome` is this plus the clicks
@@ -563,6 +566,7 @@ impl AppWindow {
             seen,
             bounds: Default::default(),
             hidden_fit: Default::default(),
+            main_space: RefCell::new(None),
             drag: None,
             written_layout: String::new(),
             file_chrome: default_layout("main"),
@@ -1304,10 +1308,8 @@ impl AppWindow {
                 }
             }
         }
-        if self.shows_tab()
-            && let Some(c) = self.model.active_tab()
-        {
-            let header = self.pane_frame().and_then(|f| f.header.as_ref()).and_then(|h| match &h.content {
+        for (block, c) in self.shown_tabs() {
+            let header = self.frame_of(block, c).and_then(|f| f.header.as_ref()).and_then(|h| match &h.content {
                 HeaderContent::Mod { name, props } => Some((name.clone(), props.clone())),
                 HeaderContent::Builtin(_) => None,
             });
@@ -1916,6 +1918,10 @@ impl AppWindow {
     fn publish(&mut self, cx: &mut Context<Self>) {
         let m = &self.model;
         let home = home();
+        let on_screen: HashSet<String> = self.shown_tabs().into_iter()
+            .filter_map(|(_, t)| m.spaces.iter().find(|p| p.tab(&t.id).is_some()).map(|p| p.id.clone()))
+            .collect();
+        let m = &self.model;
         let spaces: Vec<Value> = m
             .spaces
             .iter()
@@ -1924,7 +1930,9 @@ impl AppWindow {
                 // The branch of the terminal the space shows first.
                 let first = p.active_tab().and_then(|c| c.focused_pane()).and_then(|pane| m.address_of(&pane));
                 let branch = first.and_then(|a| m.folder_info.get(&a)).and_then(|f| f.branch.clone());
-                model::space_json(m, p, i, branch.as_deref(), &home)
+                let mut space = model::space_json(m, p, i, branch.as_deref(), &home);
+                space["shown"] = json!(on_screen.contains(&p.id));
+                space
             })
             .collect();
         // A window's terminal with the keyboard first, then a layout terminal block.
@@ -2788,8 +2796,7 @@ impl AppWindow {
         let new = self.model.fresh_id_on("p", on.as_deref());
         let mut root = self.model.tab(&ctx).expect("target tab").root.clone();
         root.split(&target, axis, Node::block(new.clone(), Content::Terminal { terminal: String::new() }), "initial-size".into());
-        let size = self.model.active_tab().filter(|tab| tab.id == ctx)
-            .and_then(|_| self.initial_size(&root, &new, window));
+        let size = self.tab_shown(&ctx).then(|| self.initial_size_in(Some(&ctx), &root, &new, window)).flatten();
         let argv = argv.filter(|a| !a.is_empty()).map(|a| Self::split_argv(a, on.as_deref()));
         let (addr, _) = self.spawn(argv, false, cwd, follow, &space, &ctx, on.as_deref(), size, window)?;
         self.model.split(&target, axis, &new, &addr);
@@ -3816,8 +3823,8 @@ impl AppWindow {
     fn neighbor(&self, from: &str, dir: &str, use_history: bool) -> Option<String> {
         let bounds = self.bounds.borrow();
         let cur = *bounds.get(from)?;
-        let mut candidates: Vec<String> = self.model.active_tab().into_iter()
-            .flat_map(|c| c.shown().visible_blocks().into_iter().filter(|n| n.is_pane()).map(|n| n.id.clone()))
+        let mut candidates: Vec<String> = self.shown_tabs().into_iter()
+            .flat_map(|(_, c)| c.shown().visible_blocks().into_iter().filter(|n| n.is_pane()).map(|n| n.id.clone()))
             .collect();
         if use_history {
             candidates.extend(self.chrome.visible_blocks().into_iter().filter(|n| self.focusable(&n.id)).map(|n| n.id.clone()));
@@ -3867,7 +3874,7 @@ impl AppWindow {
     fn mod_block_shown(&self, id: &str) -> bool {
         self.copies.contains_key(id)
             && (self.chrome.visible_blocks().iter().any(|n| n.id == id && matches!(n.content(), Some(Content::Mod { .. })))
-                || self.model.active_tab().is_some_and(|t| t.shown().visible_blocks().iter().any(|n| n.id == id)))
+                || self.shown_tabs().into_iter().any(|(_, t)| t.shown().visible_blocks().iter().any(|n| n.id == id)))
     }
 
     /// Its mod.json says `"focusable": true` (`go` asks only of visible blocks).
@@ -3888,7 +3895,7 @@ impl AppWindow {
         let found = {
             let tab = self.model.tab_of(pane).ok_or_else(|| format!("no pane {pane:?}"))?;
             // Measurements of a tab not drawn now are stale (or missing).
-            if !self.shows_tab() || self.model.active_tab().map(|t| &t.id) != Some(&tab.id) {
+            if !self.tab_shown(&tab.id) {
                 return Err("that pane isn't on screen".into());
             }
             if tab.zoomed.is_some() {
@@ -4552,7 +4559,7 @@ impl AppWindow {
             if self.pane_term(p).is_some_and(|t| !t.view.read(cx).owns_keyboard_focus(window, cx)) {
                 return out;
             }
-            if let Some(c) = self.model.active_tab()
+            if let Some(c) = self.model.tab_of(p)
                 && let Some(path) = c.root.path_to(p)
             {
                 out.extend(path);
@@ -4560,17 +4567,6 @@ impl AppWindow {
             out.insert(p.clone());
         }
         out
-    }
-
-    /// The shown tab block's pane frame, if its panes are framed now: when
-    /// the tab is split, or always with `lone`.
-    fn pane_frame(&self) -> Option<&PaneFrame> {
-        let frame = self.chrome.visible_blocks().into_iter().find_map(|n| match n.content() {
-            Some(Content::Context { pane, .. }) => pane.as_ref(),
-            _ => None,
-        })?;
-        let ctx = self.model.active_tab()?;
-        (frame.lone || ctx.root.panes().len() > 1).then_some(frame)
     }
 
     /// A pane in its frame: the look, and the header mod above or below it
@@ -4707,8 +4703,10 @@ impl AppWindow {
                     .child("no agents yet. start claude, codex or pi in a terminal")
                     .into_any_element(),
             },
-            Content::Context { .. } => match self.model.active_tab() {
-                Some(c) => self.render_node(c.shown(), focused, self.pane_frame(), cx),
+            Content::Context { space, .. } => match self.block_tab(&n.id) {
+                Some(c) => self.render_node(c.shown(), focused, self.frame_of(n, c), cx),
+                // Pinned to a space that is gone, or shown by another block.
+                None if space.is_some() => div().size_full().into_any_element(),
                 None if self.documents.get("").is_some_and(|s| s.layout() == "loading") => div().size_full().into_any_element(),
                 None => {
                     let key = crate::keys::listing().into_iter().find(|(_, _, a)| a == "space.new").map(|(_, k, _)| format!(" ({k})"));
@@ -7480,6 +7478,55 @@ export default class Probe extends View {
     }
 
     include!("window/pane_size_tests.rs");
+
+    /// A tab block pinned to a space shows it beside the main one; focusing it
+    /// moves the keyboard there without changing what the main block shows.
+    #[test]
+    fn space_views_keep_the_main_space() {
+        in_own_process("space_views");
+    }
+
+    #[gpui::test]
+    fn space_views(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("space_views") { return; }
+        let (view, cx) = open_window(cx, "unused", "", json!({
+            "id": "root", "type": "row", "children": [
+                { "id": "main", "type": "block", "content": { "tab": "active" } },
+                { "id": "side", "type": "block", "content": { "tab": "active", "space": "b" } },
+                { "id": "gone", "type": "block", "content": { "tab": "active", "space": "missing" } }
+            ]
+        }));
+        let shown = |this: &super::AppWindow| this.shown_tabs().into_iter().map(|(n, t)| (n.id.clone(), t.id.clone())).collect::<Vec<_>>();
+        let pair = |a: &str, b: &str| (a.to_owned(), b.to_owned());
+        view.update_in(cx, |this, window, cx| {
+            this.model.add_space("a", "a", "/", super::Tab::new("ta", "", "pa", "term-a"));
+            this.model.add_space_unshown("b", "b", "/", super::Tab::new("tb", "", "pb", "term-b"));
+            this.model.add_space_unshown("c", "c", "/", super::Tab::new("tc", "", "pc", "term-c"));
+            this.documents.entry(String::new()).or_default().available = true;
+            this.sync(window, cx);
+            assert_eq!(shown(this), [pair("main", "ta"), pair("side", "tb")]);
+            assert!(this.visible_addresses().contains(&"term-b".to_owned()));
+
+            // The keyboard goes to the pinned view: b is selected, main keeps a.
+            this.model.focus_pane("pb");
+            this.sync(window, cx);
+            assert_eq!(this.model.active_space().unwrap().id, "b");
+            assert_eq!(shown(this), [pair("main", "ta"), pair("side", "tb")]);
+
+            // A space nobody pins goes to the main block.
+            let out = this.run_as("space.select", json!({ "id": "c" }), false, window, cx);
+            assert!(out.get("error").is_none(), "{out}");
+            assert_eq!(shown(this), [pair("main", "tc"), pair("side", "tb")]);
+
+            // Another tab of the pinned space shows there; main keeps c.
+            this.model.add_tab_unselected("b", super::Tab::new("tb2", "", "pb2", "term-b2"));
+            let out = this.run_as("tab.select", json!({ "id": "tb2" }), false, window, cx);
+            assert!(out.get("error").is_none(), "{out}");
+            assert_eq!(this.model.active_space().unwrap().id, "b");
+            assert_eq!(shown(this), [pair("main", "tc"), pair("side", "tb2")]);
+        });
+    }
 
     /// What a `{"command":"tab.move","args":{"by":-1}}` key runs.
     #[test]

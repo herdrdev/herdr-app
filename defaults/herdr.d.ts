@@ -135,8 +135,10 @@ export interface SpaceInfo {
   machine: string | null;
   /** The git branch of the terminal it shows first, if any. */
   branch: string | null;
-  /** The shown space. */
+  /** The shown space: the one the keyboard is in. */
   active: boolean;
+  /** On screen: the selected space, or one a tab block with `space` shows. */
+  shown: boolean;
   /** Most urgent agent status in it (blocked > done > working > idle), or null. */
   status: Status | null;
   tabs: TabInfo[];
