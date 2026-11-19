@@ -209,6 +209,111 @@ for (const sort of ["priority", "grouped"]) for (const named of [false, true]) t
   expect(rows().get("ag-t0")).toContain(named ? "Named tab" : "Alpha task");
 });
 
+// `pane_name` is the name `pane.rename` stored. A decoy `panes().name` must not win:
+// the row reads the agent field, matched to that agent, not the pane list order.
+function paneNameRows(sort: string) {
+  const program = { name: "Claude", key: "claude", agent: true };
+  const list = [
+    { address: "t0", pane: "p0", tab: "shared", space: "s1", space_name: "Project", program, title: "Alpha task", pane_name: "API" as string | null, status: "idle", seq: 0 },
+    { address: "t1", pane: "p1", tab: "shared", space: "s1", space_name: "Project", program, title: "Beta task", pane_name: "UI" as string | null, status: "idle", seq: 1 },
+    { address: "t2", pane: "p2", tab: "solo", space: "s1", space_name: "Project", program, title: "Solo task", pane_name: null as string | null, status: "idle", seq: 2 },
+  ];
+  const terminals = list.map(a => ({ ...a, state: "live", name: `${a.address}-alias` }));
+  let reads = 0;
+  const orders: string[][] = [];
+  const { agents, writes } = harness([], {
+    agents: () => list, terminals: () => terminals,
+    panes: () => { reads++; return [...list].reverse().map(a => ({ ...a, terminal: a.address, name: "not-the-pane-name" })); },
+    focused: () => null,
+    spaces: () => [{ tabs: [{ id: "shared", name: "Shared tab", named: true }, { id: "solo", name: "Solo tab", named: true }] }],
+    layout: () => ({ id: "sidebar", size: { px: 268 } }), shared: () => sort,
+    theme: () => ({}), setAgentOrder: (order: string[]) => orders.push(order),
+    div: element, v_flex: element, h_flex: element, svg: element, image: element,
+  });
+  const render = () => {
+    const rows = new Map<string, { text: string; click?: () => void }>();
+    const walk = (node: any) => {
+      if (node?.id?.startsWith("ag-")) rows.set(node.id, { text: textOf(node), click: node.click });
+      (node?.children ?? []).forEach(walk);
+    };
+    walk(agents.render({}).node);
+    return rows;
+  };
+  return { list, terminals, reads: () => reads, orders, writes, render };
+}
+
+for (const sort of ["priority", "grouped"]) test(`${sort}: agents sharing a tab show their own pane names`, () => {
+  const h = paneNameRows(sort);
+  const rows = h.render();
+  expect(h.reads()).toBe(1);
+  expect(rows.get("ag-t0")!.text).toContain("API");
+  expect(rows.get("ag-t0")!.text).not.toContain("UI");
+  expect(rows.get("ag-t0")!.text).not.toContain("Alpha task");
+  expect(rows.get("ag-t0")!.text).not.toContain("Shared tab");
+  expect(rows.get("ag-t0")!.text).not.toContain("not-the-pane-name");
+  expect(rows.get("ag-t1")!.text).toContain("UI");
+  expect(rows.get("ag-t1")!.text).not.toContain("API");
+  expect(rows.get("ag-t1")!.text).not.toContain("Beta task");
+  expect(rows.get("ag-t2")!.text).toContain("Solo tab");
+  expect(rows.get("ag-t2")!.text).not.toContain("Solo task");
+  if (sort === "priority") {
+    expect(rows.get("ag-t0")!.text).toContain("· API");
+    expect(rows.get("ag-t1")!.text).toContain("· UI");
+  }
+  rows.get("ag-t0")!.click!();
+  rows.get("ag-t1")!.click!();
+  expect(h.writes).toEqual([["pane.focus", { pane: "p0" }], ["pane.focus", { pane: "p1" }]]);
+  expect(h.orders.at(-1)).toEqual(sort === "priority" ? ["t2", "t1", "t0"] : ["t0", "t1", "t2"]);
+  expect(h.terminals.map(t => t.name)).toEqual(["t0-alias", "t1-alias", "t2-alias"]);
+});
+
+for (const sort of ["priority", "grouped"]) test(`${sort}: clearing a pane name restores that agent's own title`, () => {
+  const h = paneNameRows(sort);
+  for (const cleared of [null, "", "   "]) {
+    h.list[0].pane_name = cleared;
+    const rows = h.render();
+    expect(rows.get("ag-t0")!.text).toContain("Alpha task");
+    expect(rows.get("ag-t0")!.text).not.toContain("API");
+    expect(rows.get("ag-t0")!.text).not.toContain("Shared tab");
+    expect(rows.get("ag-t0")!.text).not.toContain("not-the-pane-name");
+    expect(rows.get("ag-t1")!.text).toContain("UI");
+    expect(rows.get("ag-t1")!.text).not.toContain("Alpha task");
+  }
+  h.list.splice(1, 1);
+  const alone = h.render().get("ag-t0")!.text;
+  expect(alone).toContain("Shared tab");
+  expect(alone).not.toContain("Alpha task");
+});
+
+for (const sort of ["priority", "grouped"]) test(`${sort}: numeric, unicode and duplicate pane names stay on the row`, () => {
+  const h = paneNameRows(sort);
+  h.list[0].pane_name = "42";
+  h.list[1].pane_name = "42";
+  h.list[2].pane_name = "1";
+  const tokens = (text: string) => text.split(/\s+/);
+  let rows = h.render();
+  for (const id of ["ag-t0", "ag-t1"]) {
+    expect(tokens(rows.get(id)!.text)).toContain("42");
+    expect(rows.get(id)!.text).not.toContain("Claude");
+    expect(rows.get(id)!.text).not.toContain("Alpha task");
+    expect(rows.get(id)!.text).not.toContain("Beta task");
+  }
+  expect(tokens(rows.get("ag-t2")!.text)).toContain("1");
+  expect(rows.get("ag-t2")!.text).not.toContain("Claude");
+  expect(rows.get("ag-t2")!.text).not.toContain("Solo tab");
+  for (const names of [["中文 · 接口 🧪", "🧭 前端"], ["同名", "同名"]] as const) {
+    h.list[0].pane_name = names[0];
+    h.list[1].pane_name = names[1];
+    rows = h.render();
+    expect(rows.get("ag-t0")!.text).toContain(names[0]);
+    expect(rows.get("ag-t1")!.text).toContain(names[1]);
+    expect(rows.get("ag-t0")!.text).not.toContain("Alpha task");
+  }
+  h.list[2].pane_name = "Claude";
+  expect(h.render().get("ag-t2")!.text).toContain("Claude");
+  expect(h.render().get("ag-t2")!.text).not.toContain("Solo tab");
+});
+
 // A kept sub-agent: started by t1 (`hc run`), then given a pane (`terminal.keep`).
 function keptRender(sort: string, { width = 268, kept = [{ address: "t3", parent: "t1" }], paneless = [] as { address: string; parent: string }[], pinned = [] as string[], statuses = {} as Record<string, string>, others = [] as string[] } = {}) {
   const program = { name: "Claude", key: "claude", agent: true };
