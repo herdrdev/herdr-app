@@ -7,6 +7,7 @@ import { tmpdir } from 'node:os';
 import { fileURLToPath } from 'node:url';
 
 const cli = fileURLToPath(new URL('../src/cli.mjs', import.meta.url));
+const { namedTabIds, resolveOpenSpace } = await import('../src/cli.mjs');
 
 test('CLI starts through executable and parent-directory symlinks', async t => {
   const root = await mkdtemp(join(tmpdir(), 'herdr-cli-'));
@@ -27,6 +28,21 @@ test('importing the CLI from stdin does not start its command handler', () => {
     input: `await import(${JSON.stringify(new URL('../src/cli.mjs', import.meta.url).href)}); process.stdout.write('imported');`,
   });
   assert.equal(stdout, 'imported');
+});
+
+test('named browser tabs are singletons within their space', () => {
+  const space = { tabs: [{ id: 'one', name: 'Senso Reader' }, { id: 'two', name: 'shell' }, { id: 'three', name: 'Senso Reader' }] };
+  assert.deepEqual(namedTabIds(space, 'Senso Reader'), ['one', 'three']);
+  assert.deepEqual(namedTabIds(space, 'Other'), []);
+});
+
+test('open stays in the calling terminal space when another space is active', () => {
+  const world = { spaces: [
+    { id: 'agent-space', active: false, tabs: [{ id: 'agent-tab', terminals: [{ terminal: 'agent-terminal', pane: 'agent-pane' }] }] },
+    { id: 'focused-space', active: true, tabs: [{ id: 'focused-tab', terminals: [{ terminal: 'focused-terminal', pane: 'focused-pane' }] }] },
+  ] };
+  assert.equal(resolveOpenSpace(world, undefined, 'agent-terminal').id, 'agent-space');
+  assert.throws(() => resolveOpenSpace(world, 'focused-space', 'agent-terminal'), /calling terminal belongs to agent-space/);
 });
 
 test('setup exposes terminal-browser in a user bin directory and is idempotent', async t => {

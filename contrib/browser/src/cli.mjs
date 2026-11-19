@@ -21,7 +21,7 @@ function defaultTerminalBrowser() {
 const help = `herdr-browser: external Chromium companion for Herdr App
 
   setup [--binary <path>] [--bin-dir <dir>] expose terminal-browser in the user PATH
-  open --space <id> [--url <url>] [--name <name>] [--focus]
+  open [--space <id>] [--url <url>] [--name <name>] [--focus]
   run [--url <url>] [--ssh <host>]       render in the current Herdr terminal
   list                                 list browser instances and CDP targets
   mcp --browser <key>                   serve Playwright MCP on stdio
@@ -40,6 +40,18 @@ call, tools and events also accept --socket to reuse a service.
 --endpoint connects to an existing browser, including over an SSH tunnel;
 it does not stream its display into Herdr. No browser is downloaded here.
 `;
+
+export function resolveOpenSpace(world, requested, terminal = process.env.HC_TERMINAL_ID) {
+  const inferred = panes(world).find(pane => pane.terminal === terminal)?.space;
+  if (inferred && requested && requested !== inferred) {
+    throw new Error(`The calling terminal belongs to ${inferred}; refusing to open the browser in ${requested}`);
+  }
+  return world.spaces.find(space => space.id === (inferred ?? requested));
+}
+
+export function namedTabIds(space, name) {
+  return (space?.tabs ?? []).filter(tab => tab.name === name).map(tab => tab.id);
+}
 
 export async function main(argv = process.argv.slice(2)) {
   const { values, positionals } = parseArgs({ args: argv, allowPositionals: true, options: {
@@ -64,10 +76,11 @@ export async function main(argv = process.argv.slice(2)) {
   }
   if (command === 'open') {
     const world = await app.world();
-    const inferred = panes(world).find(p => p.terminal === process.env.HC_TERMINAL_ID)?.space;
-    const space = world.spaces.find(s => s.id === (values.space ?? inferred));
+    const space = resolveOpenSpace(world, values.space);
     if (!space) throw new Error('Choose an existing space with --space <id> from herdr-app ls');
     if (space.machine) throw new Error('For a remote space, deploy the companion and terminal-browser there; use a local space with run --ssh for local rendering and remote networking');
+    // A named launcher is a singleton in its space: replace stale duplicates before opening the new URL.
+    for (const id of namedTabIds(space, values.name)) await app.run('tab.close', { id, confirmed: true });
     const args = [process.execPath, cli, 'run', '--url', values.url, '--binary', values.binary, '--herdr-home', app.home];
     if (values.ssh) args.push('--ssh', values.ssh);
     const created = await app.newTab({ space: space.id, name: values.name, argv: args, focus: values.focus });
