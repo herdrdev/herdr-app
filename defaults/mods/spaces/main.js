@@ -297,6 +297,14 @@ export default class Spaces extends View {
     openOverlay({ mod: "menu", kind: "popup", width: 200, height: 260, props: { tab: "space", target: { id: w.id } } });
   }
 
+  closeBrowserTabs(cx) {
+    const ids = new Set(spaces().flatMap((s) => s.tabs ?? [])
+      .filter((tab) => tab.name === "Senso Reader" || tab.name.startsWith("Senso Reader - "))
+      .map((tab) => tab.id));
+    for (const id of ids) run("tab.close", { id, confirmed: true });
+    if (ids.size) cx.notify();
+  }
+
   orderingDue(now) {
     return this.ordering && now - this.ordering.at >= 1000
       && this.ordering.machines.every(name => machines().some(m => m.name === name && m.layout === "ready"));
@@ -396,8 +404,12 @@ export default class Spaces extends View {
               .tooltip(repair?.error || "This machine was rebuilt or replaced. Click to connect to the new one.")
               .on_click((_e, cx) => { cx.stop_propagation(); this.reconnect(machine, cx); })
               .child(repair?.busy ? "Connecting…" : "Connect"))))
-          .when(connected, el => el.child(div().id(`machine-add-${m ?? "local"}`).flex_none().px(4).rounded(4).hover(s => s.bg(t.hover).text_color(t.foreground))
-            .on_click((_e, cx) => { cx.stop_propagation(); run("space.new", { machine: m ?? "" }); }).child("+")))
+          .when(connected, el => el
+            .when(!m && spaces().some((s) => (s.tabs ?? []).some((tab) => tab.name === "Senso Reader" || tab.name.startsWith("Senso Reader - "))), el => el.child(div().id("close-browser-tabs").flex_none().px(4).rounded(4).hover(s => s.bg(t.hover).text_color(t.foreground))
+              .tooltip("Close all Senso Reader tabs")
+              .on_click((_e, cx) => { cx.stop_propagation(); this.closeBrowserTabs(cx); }).child(svg("mods/workspace-chrome/x.svg").size(12))))
+            .child(div().id(`machine-add-${m ?? "local"}`).flex_none().px(4).rounded(4).hover(s => s.bg(t.hover).text_color(t.foreground))
+              .on_click((_e, cx) => { cx.stop_propagation(); run("space.new", { machine: m ?? "" }); }).child("+")))
           .child(div().size(6).rounded(3).flex_none().bg(connected ? t.ansi2 : t.dim))
           .child(svg(`mods/workspace-chrome/chevron-${folded ? "right" : "down"}.svg`).size(11).flex_none()));
       const empty = h_flex().id(`machine-new-${m ?? "local"}`).h(28).flex_none().px(collapsed ? 0 : 8).gap(7).items_center().rounded(7)
