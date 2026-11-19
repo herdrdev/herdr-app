@@ -571,6 +571,20 @@ impl Node {
         self.walk().into_iter().filter(|n| n.is_pane()).collect()
     }
 
+    /// Pane blocks in tree order, without hidden ones. A tab's frame, zoom and
+    /// pane moves count these, so a pane a mod keeps hidden doesn't make a
+    /// one-pane tab look split.
+    pub fn shown_panes(&self) -> Vec<&Node> {
+        if self.hidden {
+            return vec![];
+        }
+        let mut out = if self.is_pane() { vec![self] } else { vec![] };
+        for c in self.children() {
+            out.extend(c.shown_panes());
+        }
+        out
+    }
+
     /// Visible blocks (hidden nodes and inactive stack children skipped).
     pub fn visible_blocks(&self) -> Vec<&Node> {
         if self.hidden {

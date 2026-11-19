@@ -146,16 +146,16 @@ pub(super) enum HiddenFit {
 impl AppWindow {
     pub(super) fn initial_size(&self, root: &Node, pane: &str, window: &Window) -> Option<(u16, u16)> {
         let focused = root.path_to(pane)?.into_iter().collect();
-        self.displayed_size(root, root.panes().len(), pane, &focused, window)
+        self.displayed_size(root, root.shown_panes().len(), pane, &focused, window)
     }
 
     /// The grid `pane` gets when `tab` is the one shown.
     pub(super) fn shown_size(&self, tab: &Tab, pane: &str, window: &Window) -> Option<(u16, u16)> {
         let focused = tab.focused_pane().and_then(|f| tab.root.path_to(&f)).unwrap_or_default().into_iter().collect();
-        self.displayed_size(tab.shown(), tab.root.panes().len(), pane, &focused, window)
+        self.displayed_size(tab.shown(), tab.root.shown_panes().len(), pane, &focused, window)
     }
 
-    /// `shown`: the tree on screen; `panes`: how many the tab has (its frame needs more than one, or `lone`).
+    /// `shown`: the tree on screen; `panes`: how many the tab shows (its frame needs more than one, or `lone`).
     fn displayed_size(&self, shown: &Node, panes: usize, pane: &str, focused: &HashSet<String>, window: &Window) -> Option<(u16, u16)> {
         let (context, area) = self.context_area()?;
         let frame = match context.content() {
@@ -174,7 +174,7 @@ impl AppWindow {
     pub(super) fn unzoomed_neighbor(&self, tab: &Tab, from: &str, dir: &str) -> Option<String> {
         let (context, area) = self.context_area()?;
         let frame = match context.content() {
-            Some(Content::Context { pane: Some(frame), .. }) if frame.lone || tab.root.panes().len() > 1 => Some(frame),
+            Some(Content::Context { pane: Some(frame), .. }) if frame.lone || tab.root.shown_panes().len() > 1 => Some(frame),
             _ => None,
         };
         let zoom = settings::zoom();
