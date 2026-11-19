@@ -37,7 +37,7 @@ fn inherited_movable(root: &Node, id: &str) -> Option<bool> {
 impl AppWindow {
     pub(super) fn pane_movable(&self, pane: &str) -> bool {
         let Some(tab) = self.model.active_tab() else { return false };
-        if tab.zoomed.is_some() || tab.root.panes().len() < 2 || !tab.root.find(pane).is_some_and(Node::is_pane) {
+        if tab.zoomed.is_some() || tab.root.shown_panes().len() < 2 || !tab.root.find(pane).is_some_and(Node::is_pane) {
             return false;
         }
         let owner = self.chrome.visible_blocks().into_iter().find(|n| matches!(n.content(), Some(Content::Context { .. })));
