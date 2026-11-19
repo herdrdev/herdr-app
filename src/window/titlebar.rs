@@ -92,7 +92,7 @@ impl AppWindow {
             "titlebar": if self.titlebar() == Titlebar::Layout { "none" } else { "system" },
             "buttons": buttons,
             "maximized": window.is_maximized(),
-            "fullscreen": window.is_fullscreen(),
+            "fullscreen": window.is_fullscreen() || window.is_simple_fullscreen(),
             "active": self.window_active,
         })
     }
@@ -140,8 +140,8 @@ impl AppWindow {
     pub(super) fn window_frame(&self, tree: AnyElement, window: &Window, cx: &mut Context<Self>) -> AnyElement {
         #[cfg(target_os = "macos")]
         {
-            let _ = window;
-            if self.titlebar() == Titlebar::System {
+            // Filled, the window has no buttons to leave room for.
+            if self.titlebar() == Titlebar::System && !window.is_simple_fullscreen() {
                 let strip = self.window_drag(div().flex_none().h(px(MAC_STRIP)).w_full(), cx);
                 return div().size_full().flex().flex_col().child(strip).child(div().flex_1().min_h_0().flex().child(tree)).into_any_element();
             }
@@ -218,6 +218,8 @@ impl AppWindow {
             "window.maximize" => win::toggle_maximize(window),
             #[cfg(not(windows))]
             "window.maximize" => window.zoom_window(),
+            // Borderless over the whole screen, notch row included (macOS; a no-op elsewhere).
+            "window.fill" => window.toggle_simple_fullscreen(),
             _ => {}
         }
     }
