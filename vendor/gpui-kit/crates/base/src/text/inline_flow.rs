@@ -1105,6 +1105,17 @@ fn layout_measured_flow(
     }
 }
 
+/// Fallback for fonts whose OS/2 table predates version 2, which carry no cap
+/// height: swash reports zero for them (DejaVu Sans Mono, the Linux default).
+/// 0.7 em is that font's capital height and stays inside the line box.
+fn code_cap_height(cap_height: Pixels, font_size: Pixels) -> Pixels {
+    if cap_height > Pixels::ZERO {
+        cap_height
+    } else {
+        font_size * 0.7
+    }
+}
+
 /// The rounded box behind a code span, relative to the fragment: centered on
 /// the capital-height body of the text, with the descender room shared
 /// between both sides instead of added only below. Takes the background
@@ -1119,13 +1130,14 @@ fn code_background(
     baseline: Pixels,
     window: &Window,
 ) -> Option<(Bounds<Pixels>, Hsla)> {
-    let cap_height = runs
+    let reported_cap_height = runs
         .iter()
         .map(|run| {
             let font = window.text_system().resolve_font(&run.font);
             window.text_system().cap_height(font, font_size)
         })
         .fold(Pixels::ZERO, Pixels::max);
+    let cap_height = code_cap_height(reported_cap_height, font_size);
     let vertical_padding = font_size * 0.125 + shaped_line.descent / 2.;
     let color = highlights
         .iter()

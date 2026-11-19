@@ -252,6 +252,7 @@ fn headless() {
         gpui_platform::current_headless_renderer,
     );
     markdown_selection_pixels(&mut cx);
+    inline_code_background_pixels(&mut cx);
     let mut model_slot = None;
     let capture_window = cx
         .open_window(size(px(64.), px(48.)), |window, cx| {
@@ -337,6 +338,63 @@ fn markdown_selection_pixels(cx: &mut HeadlessAppContext) {
         assert!(selected_glyphs >= unselected_glyphs * 9 / 10,
             "selection must be behind glyphs");
     }).unwrap();
+}
+
+#[cfg(not(windows))]
+fn inline_code_background_pixels(cx: &mut HeadlessAppContext) {
+    use gpui_base::{TextView, TextViewState, TextViewStyle};
+
+    struct CodeScene {
+        text: Entity<TextViewState>,
+    }
+    impl Render for CodeScene {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .size_full()
+                .bg(rgb(0x000000))
+                .child(
+                    TextView::new(&self.text)
+                        .scrollable(false)
+                        .style(
+                            TextViewStyle::default()
+                                .with_foreground(rgb(0xffffff).into())
+                                // Only the inline code span paints this color, so
+                                // the rows it covers are the box behind the code.
+                                .with_inline_code(gpui::HighlightStyle {
+                                    background_color: Some(rgb(0x00ff00).into()),
+                                    ..Default::default()
+                                }),
+                        ),
+                )
+        }
+    }
+
+    const FONT_SIZE: f32 = 24.;
+    let window = cx
+        .open_window(size(px(240.), px(80.)), |_, cx| {
+            gpui_base::init(cx);
+            let text = cx.new(|cx| TextViewState::markdown("the `code` box", cx));
+            cx.new(|_| CodeScene { text })
+        })
+        .unwrap();
+    cx.update_window(window.into(), |_, window, cx| {
+        let _ = window.draw(cx);
+        let image = window.render_to_image().unwrap();
+        let (top, bottom) = image
+            .enumerate_pixels()
+            .filter(|(_, _, pixel)| pixel.0[1] > 200 && pixel.0[0] < 80 && pixel.0[2] < 80)
+            .fold((u32::MAX, 0), |(top, bottom), (_, y, _)| (top.min(y), bottom.max(y)));
+        assert!(top <= bottom, "the fixture must paint a code background");
+        let height = (bottom - top + 1) as f32;
+        println!("inline code box: {height}px tall at {FONT_SIZE}px text");
+        // A font that reports no cap height (DejaVu Sans Mono, the Linux
+        // default) used to leave only the padding here: about 12px.
+        assert!(
+            height > FONT_SIZE * 0.75,
+            "the code box is {height}px, a strip around the baseline instead of a box behind the glyphs"
+        );
+    })
+    .unwrap();
 }
 
 fn native() {
