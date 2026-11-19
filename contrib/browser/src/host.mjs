@@ -11,7 +11,24 @@ import { EventLog, observePage, waitUntil } from './events.mjs';
 
 const execute = promisify(execFile);
 
-export async function listBrowsers(binary = process.env.TERMINAL_BROWSER_BIN ?? 'terminal-browser') {
+// terminal-browser waits up to 10 s for each instance's `targets` reply and then
+// lists that instance without tabs. A longer limit here lets one stalled instance
+// produce a partial list instead of killing the whole command.
+export const LIST_TIMEOUT_MS = 15_000;
+const STDERR_LIMIT = 2000;
+
+export function listFailure(binary, error, timeout) {
+  const stderr = String(error.stderr ?? '').trim();
+  const reason = error.killed && error.signal
+    ? `timed out after ${timeout} ms (stopped with ${error.signal})`
+    : error.signal ? `stopped by ${error.signal}`
+      : typeof error.code === 'number' ? `exited with code ${error.code}`
+        : error.code ? `could not start (${error.code})` : error.message;
+  const tail = stderr.length > STDERR_LIMIT ? `…${stderr.slice(-STDERR_LIMIT)}` : stderr;
+  return new Error(`${binary} ls --all --json ${reason}; ${tail ? `stderr: ${tail}` : 'no stderr'}`, { cause: error });
+}
+
+export async function listBrowsers(binary = process.env.TERMINAL_BROWSER_BIN ?? 'terminal-browser', { timeout = LIST_TIMEOUT_MS } = {}) {
   const folder = await mkdtemp(join(tmpdir(), 'hbr-list-'));
   const socketPath = join(folder, 'terminal.sock');
   const server = net.createServer(socket => serveLine(socket, async ({ method }) => {
@@ -22,9 +39,9 @@ export async function listBrowsers(binary = process.env.TERMINAL_BROWSER_BIN ?? 
     await new Promise((resolve, reject) => { server.once('error', reject); server.listen(socketPath, resolve); });
     await chmod(socketPath, 0o600);
     const { stdout } = await execute(binary, ['ls', '--all', '--json'], {
-      timeout: 10_000, maxBuffer: 4 * 1024 * 1024,
+      timeout, maxBuffer: 4 * 1024 * 1024,
       env: { ...process.env, TERMINAL_BROWSER_TERMINAL_SOCKET: socketPath },
-    });
+    }).catch(error => { throw listFailure(binary, error, timeout); });
     const result = JSON.parse(stdout);
     if (!Array.isArray(result.browsers)) throw new Error('terminal-browser ls returned no browsers array');
     return result.browsers;
