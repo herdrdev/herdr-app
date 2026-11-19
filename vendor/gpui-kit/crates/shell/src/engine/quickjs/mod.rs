@@ -7448,6 +7448,7 @@ impl ShellRuntime {
             for (index, name) in [
                 "on_click",
                 "on_link_click",
+                "on_selection_change",
                 "on_mouse_move",
                 "on_hover",
                 "on_key_down",
@@ -7475,6 +7476,7 @@ impl ShellRuntime {
                 "on_step",
                 "disabled",
                 "selectable",
+                "highlight_range",
                 "scrollable",
                 "selected",
                 "checked",
@@ -8441,6 +8443,7 @@ impl ShellRuntime {
             }
             "on_click"
             | "on_link_click"
+            | "on_selection_change"
             | "on_resize"
             | "on_size_change"
             | "on_change"
@@ -8506,6 +8509,7 @@ impl ShellRuntime {
             }
             "disabled"
             | "selectable"
+            | "highlight_range"
             | "scrollable"
             | "selected"
             | "checked"
@@ -8564,6 +8568,7 @@ impl ShellRuntime {
                 let name = match method {
                     "disabled" => "disabled",
                     "selectable" => "selectable",
+                    "highlight_range" => "highlight_range",
                     "scrollable" => "scrollable",
                     "selected" => "selected",
                     "checked" => "checked",
@@ -10453,6 +10458,7 @@ fn callback_op_name(method: &str) -> Option<&'static str> {
     Some(match method {
         "on_click" => "on_click",
         "on_link_click" => "on_link_click",
+        "on_selection_change" => "on_selection_change",
         "on_mouse_move" => "on_mouse_move",
         "on_hover" => "on_hover",
         "on_key_down" => "on_key_down",
