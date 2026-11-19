@@ -648,6 +648,75 @@ export default class Demo extends View {
 }
 
 #[gpui::test]
+fn a_mod_reads_a_text_view_selection_once_it_settles(cx: &mut TestAppContext) {
+    use gpui::{AppContext as _, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, VisualTestContext, point, px};
+
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    std::fs::write(staged.0.join("main.js"), r#"
+import { View, div } from "gpui-kit";
+import { TextView, v_flex } from "gpui-base";
+const texts = ["héllo **wörld**", "**wörld**"];
+export default class Demo extends View {
+  init() { this.log = []; }
+  render() {
+    const view = (id, text) => div().h(40).child(TextView.markdown(id, text).selectable(true)
+      .on_selection_change((s, cx) => {
+        this.log.push(s ? `${s.text.trim()}:${text.slice(s.start, s.end)}:${s.position ? "at" : "-"}` : "null");
+        cx.notify();
+      }));
+    return v_flex().w(300).h(200)
+      .child(view("drag", texts[0]))
+      .child(view("word", texts[1]))
+      .child(div().child(`log=${this.log.join(" ")}`));
+  }
+}
+"#).unwrap();
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|window, cx| {
+        RootedView(runtime.try_load(&staged.0, window, cx).unwrap())
+    });
+    let mut context = VisualTestContext::from_window(window.into(), cx);
+    context.update(|window, cx| window.draw(cx).clear(cx));
+    let view: gpui::Entity<gpui_shell::ScriptView> = window
+        .root(&mut context)
+        .unwrap()
+        .read_with(&context, |root, cx| root.0.read(cx).content().clone().downcast().unwrap());
+    let settle = |context: &mut VisualTestContext| {
+        context.run_until_parked();
+        context.update(|window, cx| window.draw(cx).clear(cx));
+        context.run_until_parked();
+    };
+    let press = |context: &mut VisualTestContext, x: f32, y: f32, click_count: usize| {
+        let position = point(px(x), px(y));
+        let modifiers = Modifiers::default();
+        context.simulate_event(MouseDownEvent { button: MouseButton::Left, position, modifiers, click_count, first_mouse: false });
+        context.simulate_event(MouseUpEvent { button: MouseButton::Left, position, modifiers, click_count });
+        settle(context);
+    };
+
+    // A drag reports on release, with offsets into the Markdown it came from.
+    context.simulate_mouse_down(point(px(1.), px(8.)), MouseButton::Left, Modifiers::default());
+    context.simulate_mouse_move(point(px(290.), px(8.)), MouseButton::Left, Modifiers::default());
+    settle(&mut context);
+    context.simulate_mouse_up(point(px(290.), px(8.)), MouseButton::Left, Modifiers::default());
+    settle(&mut context);
+    // The first click clears the drag; the double click reports its word in
+    // the frame it paints in.
+    press(&mut context, 5., 48., 1);
+    press(&mut context, 5., 48., 2);
+    // Clicking away reports the clear once.
+    press(&mut context, 250., 150., 1);
+    press(&mut context, 250., 150., 1);
+
+    let tree = view.read_with(&context, |view, _| {
+        view.snapshot().map(gpui_shell::RenderSnapshot::debug_tree).unwrap_or_default()
+    });
+    // The source range ends at the last selected character, before the `**`.
+    assert!(tree.contains("log=héllo wörld:héllo **wörld:at null wörld:wörld:at null\""), "{tree}");
+}
+
+#[gpui::test]
 fn long_theme_names_stay_inside_their_card(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();

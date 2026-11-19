@@ -117,6 +117,12 @@ pub struct TextViewState {
     pub(super) table_actions: Option<std::sync::Arc<TableActionsFn>>,
     pub(super) image_source: Option<std::sync::Arc<super::text_view::ImageSourceFn>>,
     pub(super) link_click_handler: Option<std::sync::Arc<LinkClickHandlerFn>>,
+    /// HERDR: a selection settled or was cleared since the last paint.
+    pub(super) selection_report_pending: bool,
+    /// HERDR: whether the last report was a selection, so clearing it is reported.
+    reported_selection: bool,
+    /// HERDR: the source highlights last applied, and the revision they were mapped at.
+    applied_source_highlights: Option<(usize, Vec<(Range<usize>, gpui::Hsla)>)>,
     pub(super) markdown_extensions: Arc<MarkdownExtensions>,
 
     pub(super) is_selecting: bool,
@@ -222,6 +228,9 @@ impl TextViewState {
             code_block_highlighter: None,
             table_actions: None,
             link_click_handler: None,
+            selection_report_pending: false,
+            reported_selection: false,
+            applied_source_highlights: None,
             image_source: None,
             markdown_extensions: Arc::default(),
             is_selecting: false,
@@ -662,6 +671,43 @@ impl TextViewState {
         Ok(())
     }
 
+    /// HERDR: maps highlights given as Markdown source ranges onto the
+    /// rendered text and applies them, only when they or the text changed.
+    pub(super) fn apply_source_highlights(
+        &mut self,
+        highlights: &[(Range<usize>, gpui::Hsla)],
+        cx: &mut Context<Self>,
+    ) {
+        if self.format != TextViewFormat::Markdown {
+            return;
+        }
+        let revision = self.committed_revision;
+        let unchanged = match &self.applied_source_highlights {
+            Some((applied, list)) => *applied == revision && list.as_slice() == highlights,
+            None => highlights.is_empty(),
+        };
+        if unchanged {
+            return;
+        }
+        self.applied_source_highlights = Some((revision, highlights.to_vec()));
+        if highlights.is_empty() {
+            self.clear_range_highlights(cx);
+            return;
+        }
+        let text = self.rendered_text();
+        let ranges: Vec<RangeHighlight> = highlights
+            .iter()
+            .filter_map(|(source, background)| {
+                text.range_for_source(source.clone())
+                    .filter(|range| !range.is_empty())
+                    .map(|range| RangeHighlight::new(range, *background))
+            })
+            .collect();
+        if let Err(error) = self.set_range_highlights(ranges, cx) {
+            tracing::warn!("text view source highlights rejected: {error:?}");
+        }
+    }
+
     /// Scroll the line `range` starts on into view, `range` indexing the
     /// current rendered text, as with [`Self::set_range_highlights`].
     ///
@@ -875,6 +921,8 @@ impl TextViewState {
         self.selected_text_override = None;
         self.select_all = true;
         self.is_selecting = false;
+        // HERDR: select-all settles at once.
+        self.selection_report_pending = true;
         self.auto_scroll.stop();
         self.selection_adapter.set_local_selection(true, cx);
         cx.notify();
@@ -898,6 +946,8 @@ impl TextViewState {
         self.selected_text_override = Some(selected_text);
         self.select_all = false;
         self.is_selecting = false;
+        // HERDR: report the word or paragraph once it has painted.
+        self.selection_report_pending = true;
         self.auto_scroll.stop();
         self.selection_adapter.set_local_selection(true, cx);
     }
@@ -960,6 +1010,33 @@ impl TextViewState {
 
     pub(crate) fn is_all_selected(&self) -> bool {
         self.select_all
+    }
+
+    /// HERDR: the settled selection to report, once painting has resolved it
+    /// (a double or triple click is only turned into a range while its text
+    /// paints). `None` when there is nothing new to report, `Some(None)` when
+    /// a reported selection was cleared.
+    pub(super) fn take_selection_report(
+        &mut self,
+        cx: &App,
+    ) -> Option<Option<super::text_view::TextViewSelection>> {
+        if !std::mem::take(&mut self.selection_report_pending) {
+            return None;
+        }
+        let text = self.selected_text();
+        let selection = (!text.trim().is_empty()).then(|| super::text_view::TextViewSelection {
+            text,
+            source_range: self.selected_source_range(),
+            position: self
+                .selection_points(cx)
+                .map(|(_, cursor)| cursor)
+                .or_else(|| self.multi_click_selection().map(|click| click.pos)),
+        });
+        if selection.is_none() && !self.reported_selection {
+            return None;
+        }
+        self.reported_selection = selection.is_some();
+        Some(selection)
     }
 
     pub(crate) fn multi_click_selection(&self) -> Option<TextViewMultiClickSelection> {

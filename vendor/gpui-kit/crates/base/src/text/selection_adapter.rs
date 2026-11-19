@@ -119,8 +119,13 @@ impl TextViewSelectionAdapter {
                             if snapshot.is_none() || changed {
                                 state.preserve_inline_selection = false;
                             }
+                            let was_selecting = state.is_selecting;
                             state.is_selecting =
                                 snapshot.is_some_and(|snapshot| snapshot.is_selecting());
+                            // HERDR: report a drag once it ends, and a clear.
+                            if (was_selecting && !state.is_selecting) || snapshot.is_none() {
+                                state.selection_report_pending = true;
+                            }
                             cx.notify();
                         });
                     }
@@ -150,6 +155,8 @@ impl TextViewSelectionAdapter {
                 blocks_for_clear.replace(VirtualBlockSelection::default());
                 let _ = view_for_clear.update(cx, |state, cx| {
                     state.reset_selection();
+                    // HERDR: report the clear.
+                    state.selection_report_pending = true;
                     cx.notify();
                 });
             },
