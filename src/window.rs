@@ -3166,7 +3166,7 @@ impl AppWindow {
             if !args.is_object() { args = json!({}); }
             args["machine"] = json!(machine);
         }
-        if matches!(name, "space.new" | "space.close" | "space.rename" | "space.move" | "tab.new" | "tab.close" | "tab.rename" | "tab.move" | "pane.split" | "pane.close" | "pane.swap" | "pane.rename" | "pane.resize" | "terminal.keep" | "terminal.park") {
+        if matches!(name, "space.new" | "space.close" | "space.rename" | "space.move" | "tab.new" | "tab.close" | "tab.rename" | "tab.move" | "pane.split" | "pane.close" | "pane.swap" | "pane.move" | "pane.balance" | "pane.rename" | "pane.resize" | "terminal.keep" | "terminal.park") {
             let node = ["id", "space", "pane"].into_iter().find_map(|k| Self::arg(&args, k));
             let target = node.and_then(|id| self.model.space(id).or_else(|| self.model.space_of(id))).or_else(|| self.model.active_space());
             let machine = if name == "space.new" { Self::arg(&args, "machine") }
@@ -3457,6 +3457,8 @@ impl AppWindow {
                 if let Err(e) = self.move_pane(&pane, &target, edge, cx) {
                     return self.fail(e);
                 }
+                // A pane from a tab that wasn't on screen has no view yet: give it the keyboard once it does.
+                cx.defer_in(window, |this, window, cx| this.restore_focus(window, cx));
             }
             "pane.balance" => {
                 let tab = Self::owned(a, "tab").or_else(|| self.model.active_tab().map(|t| t.id.clone()));
@@ -7532,6 +7534,34 @@ export default class Probe extends View {
     }
 
     include!("window/pane_size_tests.rs");
+
+    /// `pane.move` brings a pane from another space; the keyboard goes with it.
+    #[test]
+    fn pane_move_across_spaces_focuses_the_moved_pane() {
+        in_own_process("pane_move_across");
+    }
+
+    #[gpui::test]
+    fn pane_move_across(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("pane_move_across") { return; }
+        let (view, cx) = open_window(cx, "unused", "", json!({ "id": "main", "type": "block", "content": { "tab": "active" } }));
+        view.update_in(cx, |this, window, cx| {
+            this.model.add_space("b", "b", "/", super::Tab::new("tb", "", "pb", "term-b"));
+            this.model.split("pb", super::Axis::Row, "pb2", "term-b2");
+            this.model.add_space("a", "a", "/", super::Tab::new("ta", "", "pa", "term-a"));
+            this.documents.entry(String::new()).or_default().available = true;
+            this.sync(window, cx);
+            assert_eq!(this.model.focused_pane().as_deref(), Some("pa"));
+            let out = this.run_as("pane.move", json!({ "pane": "pb2", "target": "pa", "edge": "right" }), false, window, cx);
+            assert!(out.get("error").is_none(), "{out}");
+            assert_eq!(this.model.tab_of("pb2").unwrap().id, "ta");
+            assert_eq!(this.model.focused_pane().as_deref(), Some("pb2"));
+            this.sync(window, cx);
+            assert_eq!(this.focused_pane.as_deref(), Some("pb2"));
+            assert_eq!(this.model.focused_pane().as_deref(), Some("pb2"));
+        });
+    }
 
     /// What a `{"command":"tab.move","args":{"by":-1}}` key runs.
     #[test]
