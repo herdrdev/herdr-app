@@ -2454,6 +2454,12 @@ const BASE: &str = r#"  /** A row. */
     on_link_click(handler: (url: string, cx: Context) => void): this;
     selectable(value?: boolean): this;
     scrollable(value?: boolean): this;
+    /**
+     * Whether raw HTML in Markdown is drawn as HTML (the default). `false`
+     * shows a tag such as `<b>` as the text it is written as, and loads
+     * nothing from it; autolinks stay links. No effect on `TextView.html`.
+     */
+    raw_html(value?: boolean): this;
   }
   export const TextView: {
     html(id: string, html: string): TextViewElement;
@@ -4746,6 +4752,7 @@ mod tests {
         assert!(!element.contains("on_link_click("));
         assert!(!element.contains("selectable("));
         assert!(!element.contains("scrollable("));
+        assert!(!element.contains("raw_html("));
         assert!(declarations.contains("export interface TextViewElement extends NativeElement"));
         assert!(declarations.contains("html(id: string, html: string): TextViewElement;"));
     }
