@@ -383,6 +383,13 @@ pub struct Person {
     pub font_weight: Option<u16>,
     /// Enable programming ligatures in terminal fonts.
     pub font_ligatures: bool,
+    /// Thicken terminal text as Ghostty's `font-thicken` does: the same for
+    /// every text color (macOS), or turn font smoothing off.
+    #[serde(skip_serializing_if = "Thicken::is_auto")]
+    pub font_thicken: Thicken,
+    /// How much `font_thicken` thickens, 0 to 255.
+    #[serde(skip_serializing_if = "is_full_strength")]
+    pub font_thicken_strength: u16,
     /// Cell height multiplier, 0.8..2.
     pub terminal_line_height: f32,
     /// Cell width multiplier, 0.8..2.
@@ -450,6 +457,79 @@ impl OptionAsAlt {
     }
 }
 
+/// Ghostty's `font-thicken-strength` default.
+pub const THICKEN_STRENGTH_DEFAULT: u16 = 255;
+
+/// `font_thicken`: absent or `"auto"` leaves macOS font smoothing to pick
+/// by text color, `true` thickens at a fixed strength and `false` turns
+/// smoothing off, both the same for every text color. Any other string is
+/// kept, so `problems()` can name it, and draws as `"auto"`.
+#[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(from = "ThickenValue", into = "ThickenValue")]
+pub enum Thicken {
+    #[default]
+    Auto,
+    On,
+    Off,
+    Unknown(String),
+}
+
+#[derive(Clone, Serialize, Deserialize)]
+#[serde(untagged)]
+enum ThickenValue {
+    On(bool),
+    Named(String),
+}
+
+impl From<ThickenValue> for Thicken {
+    fn from(v: ThickenValue) -> Self {
+        match v {
+            ThickenValue::On(true) => Thicken::On,
+            ThickenValue::On(false) => Thicken::Off,
+            ThickenValue::Named(s) if s == "auto" => Thicken::Auto,
+            ThickenValue::Named(s) => Thicken::Unknown(s),
+        }
+    }
+}
+
+impl From<Thicken> for ThickenValue {
+    fn from(t: Thicken) -> Self {
+        match t {
+            Thicken::Auto => ThickenValue::Named("auto".into()),
+            Thicken::On => ThickenValue::On(true),
+            Thicken::Off => ThickenValue::On(false),
+            Thicken::Unknown(s) => ThickenValue::Named(s),
+        }
+    }
+}
+
+impl Thicken {
+    fn is_auto(&self) -> bool {
+        *self == Thicken::Auto
+    }
+
+    /// How the glyphs rasterise: thickened at `strength`, unsmoothed, or
+    /// (auto or unknown) by text color.
+    pub fn glyph(&self, strength: u16) -> gpui::GlyphThicken {
+        match self {
+            Thicken::On => gpui::GlyphThicken::Strength(strength.min(255) as u8),
+            Thicken::Off => gpui::GlyphThicken::Off,
+            Thicken::Auto | Thicken::Unknown(_) => gpui::GlyphThicken::Auto,
+        }
+    }
+
+    fn problem(&self, key: &str) -> Option<String> {
+        match self {
+            Thicken::Unknown(s) => Some(format!("{key} {s:?} is not \"auto\", true or false")),
+            _ => None,
+        }
+    }
+}
+
+fn is_full_strength(v: &u16) -> bool {
+    *v == THICKEN_STRENGTH_DEFAULT
+}
+
 fn is_true(b: &bool) -> bool {
     *b
 }
@@ -464,6 +544,8 @@ impl Default for Person {
             font_size: None,
             font_weight: None,
             font_ligatures: false,
+            font_thicken: Thicken::Auto,
+            font_thicken_strength: THICKEN_STRENGTH_DEFAULT,
             terminal_line_height: 1.0,
             terminal_cell_width: 1.0,
             terminal_scroll_speed: 1.0,
@@ -491,6 +573,8 @@ pub struct Settings {
     /// The terminals' text weight (bold text stays at 700).
     pub font_weight: u16,
     pub font_ligatures: bool,
+    pub font_thicken: Thicken,
+    pub font_thicken_strength: u16,
     /// Cell height multiplier, 0.8..2.
     pub terminal_line_height: f32,
     /// Cell width multiplier, 0.8..2.
@@ -549,6 +633,8 @@ impl Default for Settings {
             font_size: 14.0,
             font_weight: 500,
             font_ligatures: false,
+            font_thicken: Thicken::Auto,
+            font_thicken_strength: THICKEN_STRENGTH_DEFAULT,
             terminal_line_height: 1.0,
             terminal_cell_width: 1.0,
             terminal_scroll_speed: 1.0,
@@ -592,6 +678,8 @@ impl Settings {
             font_size: look.font_size.or(person.font_size).unwrap_or(d.font_size),
             font_weight: look.font_weight.or(person.font_weight).unwrap_or(d.font_weight),
             font_ligatures: person.font_ligatures,
+            font_thicken: person.font_thicken.clone(),
+            font_thicken_strength: person.font_thicken_strength,
             terminal_line_height: look.terminal_line_height.unwrap_or(person.terminal_line_height).clamp(0.8, 2.0),
             terminal_cell_width: look.terminal_cell_width.unwrap_or(person.terminal_cell_width).clamp(0.8, 2.0),
             terminal_scroll_speed: look.terminal_scroll_speed.unwrap_or(person.terminal_scroll_speed).clamp(0.1, 5.0),
@@ -657,6 +745,10 @@ impl Settings {
         }
         if !(1.0..=21.0).contains(&self.minimum_contrast) {
             out.push(format!("minimum_contrast {} is outside 1..21", self.minimum_contrast));
+        }
+        out.extend(self.font_thicken.problem("font_thicken"));
+        if self.font_thicken_strength > 255 {
+            out.push(format!("font_thicken_strength {} is outside 0..255", self.font_thicken_strength));
         }
         if !(100..=900).contains(&self.font_weight) {
             out.push(format!("font_weight {} is outside 100..900", self.font_weight));
@@ -918,6 +1010,46 @@ mod tests {
     use super::*;
 
     #[test]
+    fn font_thicken_defaults_auto_at_ghosttys_strength_and_validates_it() {
+        let default: Person = serde_json::from_str("{}").unwrap();
+        assert_eq!(default.font_thicken, Thicken::Auto);
+        assert_eq!(default.font_thicken_strength, 255);
+        assert_eq!(serde_json::to_value(&default).unwrap().get("font_thicken"), None);
+        assert_eq!(serde_json::to_value(&default).unwrap().get("font_thicken_strength"), None);
+        for strength in [0, 30, 255, 256] {
+            let person: Person = serde_json::from_value(serde_json::json!({"font_thicken": true, "font_thicken_strength": strength})).unwrap();
+            let settings = Settings::compose(&person, &crate::layout::Look::default(), true);
+            assert_eq!(settings.font_thicken, Thicken::On);
+            assert_eq!(settings.font_thicken_strength, strength);
+            assert_eq!(settings.problems().is_empty(), strength <= 255, "strength {strength}");
+        }
+        assert_eq!(Thicken::On.glyph(30), gpui::GlyphThicken::Strength(30));
+        assert_eq!(Thicken::On.glyph(256), gpui::GlyphThicken::Strength(255));
+    }
+
+    #[test]
+    fn font_thicken_is_auto_true_or_false_and_names_anything_else() {
+        let cases = [
+            (serde_json::json!("auto"), Thicken::Auto, gpui::GlyphThicken::Auto, None),
+            (serde_json::json!(true), Thicken::On, gpui::GlyphThicken::Strength(30), Some(serde_json::json!(true))),
+            (serde_json::json!(false), Thicken::Off, gpui::GlyphThicken::Off, Some(serde_json::json!(false))),
+            (serde_json::json!("on"), Thicken::Unknown("on".into()), gpui::GlyphThicken::Auto, Some(serde_json::json!("on"))),
+        ];
+        for (value, thicken, glyph, saved) in cases {
+            let person: Person = serde_json::from_value(serde_json::json!({"font_thicken": value, "font_thicken_strength": 30})).unwrap();
+            assert_eq!(person.font_thicken, thicken, "{value}");
+            assert_eq!(serde_json::to_value(&person).unwrap().get("font_thicken"), saved.as_ref(), "{value}");
+            let settings = Settings::compose(&person, &crate::layout::Look::default(), true);
+            assert_eq!(settings.font_thicken.glyph(settings.font_thicken_strength), glyph, "{value}");
+            assert_eq!(settings.problems(), match thicken {
+                Thicken::Unknown(_) => vec![r#"font_thicken "on" is not "auto", true or false"#.to_string()],
+                _ => Vec::new(),
+            });
+        }
+        assert!(serde_json::from_str::<Person>(r#"{"font_thicken":1}"#).is_err());
+    }
+
+    #[test]
     fn zoom_writes_preserve_mod_preferences_and_clear_unset_app_fields() {
         let raw = r#"{"zoom":1,"font":"custom","telemetry":false,"worktrees":{"directory":"~/Developer/worktrees","future":true},"another_mod":{"enabled":true}}"#;
         let mut person: Person = serde_json::from_str(raw).unwrap();
@@ -1080,7 +1212,7 @@ mod tests {
     /// settings.json key.
     #[test]
     fn the_guide_explains_every_setting() {
-        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), font_weight: Some(400), ui_font: Some(String::new()), telemetry: false, clipboard_write: false, copy_on_select: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), ..Person::default() };
+        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), font_weight: Some(400), font_thicken: Thicken::Off, font_thicken_strength: 30, ui_font: Some(String::new()), telemetry: false, clipboard_write: false, copy_on_select: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), ..Person::default() };
         let keys: Vec<String> = serde_json::to_value(&all).unwrap().as_object().unwrap().keys().cloned().collect();
         let guide = include_str!("../defaults/AGENTS.md");
         let section = guide.split("## The person").nth(1).and_then(|s| s.split("\n## ").next()).unwrap_or_default();

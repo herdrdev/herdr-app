@@ -383,6 +383,7 @@ fn params(id: gpui::FontId, glyph: &gpui::ShapedGlyph) -> RenderGlyphParams {
         subpixel_rendering: false,
         dilation: 0,
         foreground: [0, 0, 0, 255],
+        thicken: gpui::GlyphThicken::Auto,
     }
 }
 
