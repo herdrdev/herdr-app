@@ -1,0 +1,19 @@
+#!/bin/bash
+# Rebuilds assets/icons/Assets.car from assets/icons/Herdr.icon, the Icon
+# Composer source of the macOS app icon (light, dark and tinted looks).
+# macOS 26 and later draw the icon from Assets.car; Herdr.icns stays for
+# everything else. Needs Xcode 26 or later, which the CI runners don't have,
+# so the result is committed: run this after changing Herdr.icon.
+set -euo pipefail
+
+[[ $(uname -s) == Darwin ]] || { echo 'mac-icon: requires macOS with Xcode 26 or later.' >&2; exit 1; }
+cd "$(dirname "$0")/.."
+
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
+xcrun actool assets/icons/Herdr.icon --compile "$work" --app-icon Herdr \
+  --output-partial-info-plist "$work/partial.plist" \
+  --platform macosx --minimum-deployment-target 11.0 >/dev/null
+[[ -s $work/Assets.car ]] || { echo 'mac-icon: actool wrote no Assets.car; is Xcode 26 or later selected?' >&2; exit 1; }
+cp "$work/Assets.car" assets/icons/Assets.car
+echo "mac-icon: assets/icons/Assets.car"
