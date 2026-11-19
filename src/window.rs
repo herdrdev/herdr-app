@@ -2890,6 +2890,36 @@ impl AppWindow {
         Ok(reply)
     }
 
+    /// `pane.move`: within its tab as a drag does, or into another tab on the same
+    /// machine. A moved terminal's labels follow it, so it comes back there after a restart.
+    fn move_pane(&mut self, pane: &str, target: &str, edge: Option<crate::layout::Edge>, cx: &mut Context<Self>) -> Result<(), String> {
+        let terminals: Vec<String> = [pane, target].iter().filter_map(|p| self.model.address_of(p)).collect();
+        if let Some(t) = terminals.iter().find(|t| self.changing_terminals.contains(*t)) {
+            return Err(format!("{t} already has a pane change in progress"));
+        }
+        let machine = self.model.space_of(pane).and_then(|s| s.machine.clone());
+        self.require_document(machine.as_deref())?;
+        let moved = self.model.move_pane_to(pane, target, edge)?;
+        for (pane, space, tab) in moved {
+            let Some(addr) = self.model.address_of(&pane) else { continue };
+            let on = addr.split_once('/').map(|(m, _)| m.to_owned());
+            let labels = json!({
+                "herdr.space": crate::mirror::local(&space, on.as_deref()),
+                "herdr.tab": crate::mirror::local(&tab, on.as_deref()),
+            });
+            let core = self.core.clone();
+            cx.background_executor()
+                .spawn(async move {
+                    if let Err(e) = core.call("terminal.label", json!({ "terminal": addr, "labels": labels })) {
+                        tracing::warn!("moved pane labels: {e:#}");
+                    }
+                })
+                .detach();
+        }
+        self.focused_pane = Some(pane.to_owned());
+        Ok(())
+    }
+
     /// Parking changes labels/keep in the background; only a successful reply removes the pane.
     fn park_terminal(&mut self, addr: &str, window: &mut Window, cx: &mut Context<Self>) -> Result<Value, String> {
         self.require_document(addr.split_once('/').map(|(m, _)| m))?;
@@ -3410,6 +3440,28 @@ impl AppWindow {
                 };
                 if let Err(e) = r {
                     return self.fail(e);
+                }
+            }
+            "pane.move" => {
+                let pane = Self::owned(a, "pane").or_else(|| self.model.focused_pane());
+                let Some(target) = Self::owned(a, "target") else { return self.fail("pane.move needs a target pane") };
+                let edge = match Self::arg(a, "edge") {
+                    None | Some("center") => None,
+                    Some("left") => Some(crate::layout::Edge::Left),
+                    Some("right") => Some(crate::layout::Edge::Right),
+                    Some("top") => Some(crate::layout::Edge::Top),
+                    Some("bottom") => Some(crate::layout::Edge::Bottom),
+                    Some(e) => return self.fail(format!("edge must be left, right, top, bottom or center, not {e:?}")),
+                };
+                let Some(pane) = pane else { return self.fail("no pane to move") };
+                if let Err(e) = self.move_pane(&pane, &target, edge, cx) {
+                    return self.fail(e);
+                }
+            }
+            "pane.balance" => {
+                let tab = Self::owned(a, "tab").or_else(|| self.model.active_tab().map(|t| t.id.clone()));
+                if !tab.is_some_and(|t| self.model.balance(&t)) {
+                    return self.fail("no tab to balance");
                 }
             }
             // ---- terminals
@@ -5351,7 +5403,7 @@ fn swap_by(args: &Value) -> Result<SwapBy<'_>, String> {
 
 fn needs_model_pane(name: &str, args: &Value) -> bool {
     match name {
-        "pane.split" | "pane.close" | "pane.zoom" | "pane.swap" | "pane.rename" | "pane.resize" | "terminal.show" => AppWindow::arg(args, "pane").is_none(),
+        "pane.split" | "pane.close" | "pane.zoom" | "pane.swap" | "pane.move" | "pane.rename" | "pane.resize" | "terminal.show" => AppWindow::arg(args, "pane").is_none(),
         "pane.go" => true,
         "terminal.open" | "terminal.keep" => matches!(AppWindow::arg(args, "place"), Some("right" | "down")),
         _ => false,
