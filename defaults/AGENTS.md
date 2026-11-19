@@ -163,8 +163,8 @@ the highlighted line shows where it will land.
   When the shown space is on another machine, the peek's Keep button uses the
   nearest ancestor's space on the terminal's machine, or the first space there
   if no ancestor has a pane there. Keep is hidden if that machine has no space.
-  Ctrl-click (Cmd-click on macOS) a live terminal address in terminal text to
-  peek at it. Bare addresses refer to the machine of the terminal showing them;
+  Ctrl-click (Cmd-click on macOS, or the `link_click` setting's click) a live
+  terminal address in terminal text to peek at it. Bare addresses refer to the machine of the terminal showing them;
   use `machine/address` for another machine. Names and non-live addresses aren't links.
 - **Agent navigation order** belongs to the mods. A mod displaying agents calls
   `setAgentOrder(list.map(a => a.address))` on render so `agent.next` /
@@ -277,7 +277,7 @@ Properties any node can have:
   an unknown mod logs a warning and falls back to `menu`. Clone a shipped
   layout before changing this field. Other menus are unchanged.
 - Root only: `"link_handlers": ["my-browser", "my-viewer"]` chooses which mods
-  handle Ctrl-clicks (Cmd-clicks on macOS) in terminals, in order. Clone a
+  handle link clicks in terminals (Ctrl, Cmd on macOS, or `link_click`), in order. Clone a
   shipped layout before adding link handlers.
 - Root only: `"toast": "my-toast"` chooses the mod that shows notifications
   (Herdr's own and every `notify()`), in place of the shipped `toast`; an
@@ -828,6 +828,20 @@ What's about the user, never a look:
   pastes PRIMARY on Linux, does nothing on macOS, and pastes the clipboard on
   Windows. Programs that capture the mouse still receive middle-clicks.
   Hold Shift while dragging in programs that capture the mouse.
+- `link_click`: the click that opens a link, file path or terminal address in
+  terminal text, and underlines it under the pointer. `"auto"` (default) is
+  Cmd+click on macOS and Ctrl+click elsewhere. `"cmd"` (the Windows or Super key
+  off macOS), `"ctrl"`, `"alt"` and `"shift"` need exactly that modifier;
+  `"none"` is a plain click. Cmd, Ctrl and Alt open on press. `"shift"` and
+  `"none"` open on release, and only when the pointer stayed in its cell and
+  nothing was selected, so dragging still selects. Mod link handlers and
+  terminal-address peeks follow the setting too. Programs that track the mouse
+  (fullscreen agent TUIs) keep every plain click, since some open their own
+  links on click: with `"none"`, Herdr opens nothing on a plain click there,
+  and Cmd+click (Ctrl+click elsewhere) opens links in any program. Shift
+  already takes the mouse from such programs, so `"shift"` works in them. With
+  `"none"`, the click that focuses a pane doesn't open a link. On macOS,
+  Ctrl+click is a right click, so `"ctrl"` shows the menu instead.
 - `pane_scrollbars`: `false` hides the scroll position thumb at a terminal
   pane's right edge (default `true`). It shows only when the pane has
   scrollback — never on the alternate screen (editors, pagers) — and

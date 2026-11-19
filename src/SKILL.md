@@ -142,8 +142,8 @@ those files or the generated guide. The app rewrites them on start.
   space's machine. Read on dialog open; existing checkouts stay put. No clones
   needed, and the app does not read the TUI's config.toml.
 - Mods live in `mods/<name>/` with `main.js` for a view or `link.js` for
-  Ctrl/Cmd-clicked terminal links. They are trusted JavaScript with command
-  and network access. `mod.json` declares link rules. A personal layout's
+  terminal links opened with Ctrl/Cmd-click (or the `link_click` setting).
+  They are trusted JavaScript with command and network access. `mod.json` declares link rules. A personal layout's
   root `link_handlers` array selects the mods and their order.
   `"focusable": true` in `mod.json` lets `pane.go` move onto a copy; it receives
   `"focus"` from `nextCommand()` and focuses its own keyboard handle.
