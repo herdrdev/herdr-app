@@ -1113,7 +1113,7 @@ All of it is in `herdr.d.ts`. In short:
   (every core terminal), `focused()`, `layout()`, `theme()` (every color by
   name: background (the terminals', cards), canvas (behind cards), chrome
   (sidebars, bars), surface, popover, raised, hover, selected, border,
-  input (a stronger border), foreground, muted, dim, accent,
+  input (text fields, a stronger border), foreground, muted, dim, accent,
   accent_foreground, solid and solid_foreground (a primary button),
   selection, working, blocked, done, idle, unknown, ansi0..15; light and
   dark themes name the same ones), `settings()` (with `dark`: the
