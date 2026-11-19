@@ -12,6 +12,30 @@ const key = () => JSON.stringify(location());
 // Reads write nothing under .git (no index refresh or lock, no fsmonitor cookie):
 // the folder watch would see it, and every refresh would start the next one.
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
+const JJ = ["--no-pager", "--color=never"];
+const JJ_DIFF = [
+  'json(commit_id) ++ "\\t" ++ json(change_id.shortest(8)) ++ "\\t" ++ json(description.first_line()) ++ "\\n"',
+  'diff.stat().files().map(|f| json(f.path()) ++ "\\t" ++ f.status_char() ++ "\\t" ++ f.lines_added() ++ "\\t" ++ f.lines_removed() ++ "\\n").join("")',
+  'diff.files().filter(|f| f.target().conflict()).map(|f| json(f.path()) ++ "\\n").join("")',
+].join(" ++ ");
+
+async function jjChanges(root, on) {
+  // Snapshot edits once. The list and its previews then use the same working-copy commit.
+  const result = await exec("jj", [...JJ, "--quiet", "log", "--no-graph", "-r", "@", "-T", JJ_DIFF], { cwd: root, on });
+  if (result.code !== 0) throw new Error(result.stderr);
+  const [header, ...entries] = result.stdout.trimEnd().split("\n");
+  const [commit, { prefix, rest }, description] = header.split("\t").map(JSON.parse);
+  const conflicts = new Set(), files = [];
+  for (const entry of entries) {
+    const [raw, status, add, del] = entry.split("\t");
+    const path = JSON.parse(raw);
+    if (!status) conflicts.add(path);
+    else files.push({ path, status, add: Number(add), del: Number(del) });
+  }
+  for (const file of files) if (conflicts.has(file.path)) file.status = "U";
+  return { commit, change: prefix + rest, description, files: files.slice(0, 1000), limited: files.length > 1000 };
+}
+
 const countLines = (text) => text ? text.split("\n").length - Number(text.endsWith("\n")) : 0;
 const wideGlyph = /[\p{Ideographic}\p{Emoji_Presentation}\p{Extended_Pictographic}\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\ufe10-\ufe19\ufe30-\ufe6f\uff01-\uff60\uffe0-\uffe6]/gu;
 
@@ -60,14 +84,18 @@ export default class Changes extends View {
     cx.timer.every(10000, (cx) => this.refresh(cx));
   }
 
-  watch(root, cx) {
+  watch(root, cx, jj) {
     if (this.on || this.watched === root) return;
     this.watched = root;
     cx.spawn(async (cx) => {
       try {
         while (this.watched === root) {
-          await watchFolder(root);
-          if (this.watched === root) this.refresh(cx);
+          const paths = await watchFolder(root);
+          // A jj snapshot itself changes repository metadata.
+          if (this.watched === root && (!jj || paths.some(path => {
+            const relative = path.slice(root.length + 1).replace(/\\/g, "/");
+            return !/^(?:\.jj|\.git)(?:\/|$)/.test(relative);
+          }))) this.refresh(cx);
         }
       } catch { this.watched = null; }
     });
@@ -81,7 +109,7 @@ export default class Changes extends View {
   refresh(cx) {
     const { cwd, on } = location(), next = key();
     if (next !== this.context?.key) {
-      this.context = { key: next }; this.root = null; this.files = []; this.open = null;
+      this.context = { key: next }; this.root = null; this.jj = null; this.files = []; this.open = null;
       this.setLines([]); this.message = ""; this.input.set_value(""); this.error = null; this.note = null; this.watched = null; this.closed = false; this.limited = false;
       this.loading = false;
     }
@@ -91,6 +119,15 @@ export default class Changes extends View {
     this.loading = true;
     cx.spawn(async (cx) => {
       try {
+        const jj = await exec("jj", [...JJ, "--ignore-working-copy", "--at-op=@", "workspace", "root"], { cwd, on }).catch(() => null);
+        if (!this.current(context)) return;
+        if (jj?.code === 0 && /^(?:[A-Za-z]:[\\/]|\/|\\\\)/.test(jj.stdout)) {
+          const root = jj.stdout.replace(/\r?\n$/, "");
+          const { files, limited, ...metadata } = await jjChanges(root, on);
+          if (this.current(context)) await this.showChanges(root, on, files, limited, context, cx, metadata);
+          return;
+        }
+        if (jj?.code && !/there is no jj repo/i.test(jj.stderr)) throw new Error(jj.stderr);
         const top = await exec("git", ["rev-parse", "--show-toplevel"], { cwd, on });
         if (!this.current(context)) return;
         if (top.code !== 0) { this.root = null; this.files = []; this.setLines([]); this.open = null; this.error = "Not a git repository"; return; }
@@ -119,25 +156,30 @@ export default class Changes extends View {
           files.push({ path, status: s, fresh, ...stat });
         }
         if (!this.current(context)) return;
-        this.root = root; this.on = on; this.hasHead = head.code === 0; this.files = files; this.limited = entries.length > 1000; this.error = null;
-        this.watch(root, cx);
-        if (this.open && !files.some((f) => f.path === this.open)) { this.open = null; this.setLines([]); }
-        // The first file's diff shows until you pick another.
-        if (!this.open && !this.closed && files.length) this.open = files[0].path;
-        if (this.open) {
-          try { await this.load(this.open, context); }
-          catch { if (this.current(context)) this.setLines(["Cannot preview this diff (too large or unreadable)"]); }
-        }
+        this.hasHead = head.code === 0;
+        await this.showChanges(root, on, files, entries.length > 1000, context, cx);
       } catch (e) { if (this.current(context)) this.error = String(e); }
       finally { if (this.context === context) this.loading = false; cx.notify(); }
     });
+  }
+
+  async showChanges(root, on, files, limited, context, cx, jj = null) {
+    this.root = root; this.on = on; this.jj = jj; this.files = files; this.limited = limited; this.error = null;
+    this.watch(root, cx, jj);
+    if (this.open && !files.some((f) => f.path === this.open)) { this.open = null; this.setLines([]); }
+    if (!this.open && !this.closed && files.length) this.open = files[0].path;
+    if (this.open) {
+      const path = this.open;
+      try { await this.load(path, context); }
+      catch { if (this.current(context) && this.open === path) this.setLines(["Cannot preview this diff (too large or unreadable)"]); }
+    }
   }
 
   async load(path, context) {
     const file = this.files.find((f) => f.path === path), root = this.root, on = this.on;
     if (!file) return;
     let lines;
-    if (file.fresh || (!this.hasHead && file.status === "A")) {
+    if (!this.jj && (file.fresh || (!this.hasHead && file.status === "A"))) {
       const text = await readTextFile(`${root}/${path}`, { on }).catch(() => null);
       if (text === null) lines = ["Cannot preview this file (binary, too large, or unreadable)"];
       else if (text.includes("\0")) lines = ["Binary file · no text diff"];
@@ -146,10 +188,12 @@ export default class Changes extends View {
         lines = [`@@ -0,0 +1,${file.add} @@`, ...text.slice(0, 400000).replace(/\n$/, "").split("\n").slice(0, 1500).map(l => `+${l}`)];
       }
     } else {
-      const r = await exec("git", [...READ, "diff", ...(this.hasHead ? ["HEAD"] : []), "--no-ext-diff", "--no-textconv", "--no-color", "--", path], { cwd: root, on });
+      const r = this.jj
+        ? await exec("jj", [...JJ, "--ignore-working-copy", "--at-op=@", "diff", "--git", "-r", this.jj.commit, "--", `root-file:${JSON.stringify(path)}`], { cwd: root, on })
+        : await exec("git", [...READ, "diff", ...(this.hasHead ? ["HEAD"] : []), "--no-ext-diff", "--no-textconv", "--no-color", "--", path], { cwd: root, on });
       if (r.code !== 0) throw new Error(r.stderr);
       const all = r.stdout.replace(/\n$/, "").split("\n"), first = all.findIndex((l) => l.startsWith("@@"));
-      lines = first < 0 ? [file.binary ? "Binary file changed" : "No text diff available"] : all.slice(first);
+      lines = first < 0 ? [file.binary || all.some(l => l.startsWith("Binary files ")) ? "Binary file changed" : "No text diff available"] : all.slice(first);
     }
     if (this.current(context) && this.open === path) this.setLines(lines.slice(0, 1500).map(line => line.length > 4000 ? line.slice(0, 4000) + "… (line truncated)" : line));
   }
@@ -172,18 +216,23 @@ export default class Changes extends View {
     cx.notify();
   }
 
-  commit(cx) {
-    if (!this.message.trim() || !this.root || this.busy || this.loading || this.context?.key !== key()) return;
-    const root = this.root, on = this.on, context = this.context, message = this.message.trim();
+  commit(cx, describe = false) {
+    const message = this.message.trim(), jj = this.jj;
+    if ((!message && (!jj || describe)) || !this.root || this.error || this.busy || this.loading || this.context?.key !== key()) return;
+    const root = this.root, on = this.on, context = this.context;
+    const program = jj ? "jj" : "git";
+    const commands = jj
+      ? [[...JJ, ...(describe ? ["describe", "-m", message] : message ? ["commit", "-m", message] : ["new"])]]
+      : [["add", "-A"], ["commit", "-m", message]];
     this.busy = true; this.note = null;
     cx.spawn(async (cx) => {
       try {
-        for (const args of [["add", "-A"], ["commit", "-m", message]]) {
-          const r = await exec("git", args, { cwd: root, on });
+        for (const args of commands) {
+          const r = await exec(program, args, { cwd: root, on });
           if (r.code !== 0) throw new Error((r.stderr || r.stdout).trim());
         }
         if (this.current(context)) { this.message = ""; this.input.set_value(""); }
-      } catch (e) { if (this.current(context)) this.note = `Commit failed: ${e}`; }
+      } catch (e) { if (this.current(context)) this.note = `${describe ? "Describe failed" : jj ? "Could not start a new change" : "Commit failed"}: ${e}`; }
       finally { this.busy = false; this.refresh(cx); cx.notify(); }
     });
     cx.notify();
@@ -202,13 +251,15 @@ export default class Changes extends View {
   render(cx) {
     if (key() !== this.context?.key) this.refresh(cx);
     const t = theme(), size = settings().font_size, add = this.files.reduce((n, f) => n + f.add, 0), del = this.files.reduce((n, f) => n + f.del, 0);
-    const enabled = Boolean(this.message.trim() && this.root && !this.busy && !this.loading);
+    const ready = this.root && !this.error && !this.busy && !this.loading;
+    const enabled = Boolean(ready && (this.jj || this.message.trim()));
     return v_flex().id("changes").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13).track_focus(this.handle)
       .on_key_down((e, cx) => {
         if (e.key === "escape" && this.typing) { this.typing = false; this.handle.focus(); cx.stop_propagation(); cx.notify(); }
       })
       .child(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
         .child(div().font_semibold().child("Changes"))
+        .when(Boolean(this.jj), e => e.child(div().min_w(0).truncate().text_size(11).text_color(t.muted).child([`@ ${this.jj.change}`, this.jj.description].filter(Boolean).join(" · "))))
         .child(div().px(5).py(1).rounded(4).border_1().border_color(t.border).text_size(10).text_color(t.muted).child(`${this.files.length} files`))
         .child(div().flex_1()).child(div().text_size(11).text_color(t.ansi2).child(`+${add}`)).child(div().text_size(11).text_color(t.ansi1).child(`−${del}`)))
       // overflow_y_scrollbar() wraps the list, so its flex sizing never reached the panel's layout.
@@ -219,7 +270,7 @@ export default class Changes extends View {
           .child(div().w(14).text_size(11).text_color(f.status === "A" ? t.ansi2 : f.status === "D" ? t.ansi1 : f.status === "U" ? t.ansi1 : t.blocked).child(f.status))
           .child(h_flex().flex_1().min_w(0).child(div().text_color(t.dim).truncate().child(parts.length ? parts.join("/") + "/" : "")).child(div().max_w(260).min_w(0).truncate().child(name)))
           .when(f.add > 0, (e) => e.child(div().text_size(11).text_color(t.ansi2).child(`+${f.add}`))).when(f.del > 0, (e) => e.child(div().text_size(11).text_color(t.ansi1).child(`−${f.del}`)));
-      })).when(!this.files.length, (e) => e.child(div().p(8).text_color(t.dim).child(this.error || (this.loading ? "Loading changes…" : this.root ? "No uncommitted changes" : "No folder")))))
+      })).when(!this.files.length, (e) => e.child(div().p(8).text_color(t.dim).child(this.error || (this.loading ? "Loading changes…" : this.jj ? "Empty working-copy change" : this.root ? "No uncommitted changes" : "No folder")))))
         .child(Scrollbar.vertical("changes-list").absolute().inset_0()))
       .when(this.limited, el => el.child(div().px(12).py(4).text_size(11).text_color(t.dim).child("Showing the first 1,000 changed files")))
       .child(div().flex_1().min_h(0).relative().font_family(settings().font_family ?? "JetBrains Mono").text_size(size)
@@ -229,8 +280,11 @@ export default class Changes extends View {
         .child(Scrollbar.vertical("changes-diff").viewport_from_layout().absolute().inset_0())
         .when(!this.open && this.files.length > 0, (e) => e.child(div().absolute().top(6).px(12).text_size(11).text_color(t.dim).child("Select a file to view its changes"))))
       .when(Boolean(this.note), (e) => e.child(div().px(10).pb(8).text_size(11).text_color(t.ansi1).child(this.note)))
+      .when(this.files.length > 0 && Boolean(this.error), (e) => e.child(div().px(10).pb(8).text_size(11).text_color(t.ansi1).child(this.error)))
       .child(h_flex().flex_none().p(10).gap(8).border_t(1).border_color(t.border)
         .child(div().id("commit-message").flex_1().min_w(0).h(32).px(10).flex().items_center().rounded(8).border_1().border_color(this.typing ? t.accent : t.border).cursor_text().on_mouse_down("left", (_e, cx) => cx.stop_propagation()).child(Input.new(this.input).h_full().text_size(12).text_color(t.foreground)))
-        .child(div().id("commit").h(32).px(14).flex().items_center().rounded(8).bg(enabled ? t.solid : t.raised).text_color(enabled ? t.solid_foreground : t.dim).text_size(12).when(enabled, (e) => e.cursor_pointer()).on_click((_e, cx) => this.commit(cx)).child(this.busy ? "Committing…" : "Commit")));
+        .when(Boolean(this.jj), e => e.child(div().id("describe").h(32).px(10).flex().items_center().rounded(8).bg(t.raised)
+          .text_color(ready && this.message.trim() ? t.foreground : t.dim).text_size(12).on_click((_e, cx) => this.commit(cx, true)).child("Describe")))
+        .child(div().id("commit").h(32).px(14).flex().items_center().rounded(8).bg(enabled ? t.solid : t.raised).text_color(enabled ? t.solid_foreground : t.dim).text_size(12).when(enabled, (e) => e.cursor_pointer()).on_click((_e, cx) => this.commit(cx)).child(this.jj ? this.busy ? "Working…" : "New change" : this.busy ? "Committing…" : "Commit")));
   }
 }

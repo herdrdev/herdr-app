@@ -7,7 +7,7 @@ const source = (await readFile(new URL("../defaults/mods/spaces/main.js", import
   .replace(/^import .*;\n/gm, "").replace("export default class Spaces", "class Spaces").replace(/^export /gm, "");
 
 type Space = { id: string; folder: string; machine?: string | null; active?: boolean };
-function harness(replies: unknown[] = [], storage = new Map<string, string>(), snapshot: Space[] = [], execGit?: (...args: any[]) => Promise<unknown>, watch?: (repo: string) => Promise<string[]>) {
+function harness(replies: unknown[] = [], storage = new Map<string, string>(), snapshot: Space[] = [], execGit?: (...args: any[]) => Promise<unknown>, watch?: (repo: string) => Promise<string[]>, read?: (path: string) => Promise<string | null>) {
   const calls: string[][] = [];
   const tasks: Promise<unknown>[] = [];
   const availability = [{ name: null as string | null, layout: "ready" }];
@@ -23,7 +23,7 @@ function harness(replies: unknown[] = [], storage = new Map<string, string>(), s
     if (method === "track_scroll") tracked.push(args[0]);
     return element;
   } });
-  const Spaces = new Function("View", "hc", "localStorage", "spaces", "panes", "run", "v_flex", "h_flex", "div", "svg", "shared", "machines", "exec", "window", "watchFolder", "ScrollHandle", "theme", "layout", "setShared", `${source}; return Spaces;`)(
+  const Spaces = new Function("View", "hc", "localStorage", "spaces", "panes", "run", "v_flex", "h_flex", "div", "svg", "shared", "machines", "exec", "window", "watchFolder", "ScrollHandle", "theme", "layout", "setShared", "readTextFile", `${source}; return Spaces;`)(
     class {},
     async (args: string[]) => {
       calls.push(args);
@@ -38,7 +38,7 @@ function harness(replies: unknown[] = [], storage = new Map<string, string>(), s
       moves.push(args);
     },
     ...Array(4).fill(() => element), () => null, () => availability, execGit, () => ({ active: true }), watch,
-    ScrollHandle, theme, () => env.layout, () => {},
+    ScrollHandle, theme, () => env.layout, () => {}, read,
   );
   const view = new Spaces();
   view.reconnecting = {};
@@ -48,6 +48,28 @@ function harness(replies: unknown[] = [], storage = new Map<string, string>(), s
   return { view, calls, tasks, cx, storage, moves, handlers, snapshot, availability, env, tracked };
 }
 
+test("jj sidebar reads never snapshot and group linked workspaces with their repo", async () => {
+  const calls: string[][] = [];
+  const snapshot = [{ id: "main", folder: "/repo" }, { id: "review", folder: "/checkouts/review" }];
+  const h = harness([], new Map(), snapshot, async (command, args, { cwd }) => {
+    expect(command).toBe("jj");
+    calls.push(args);
+    const info = cwd === "/repo" ? [{ prefix: "qa", rest: "werty" }, ["main"]] : [{ prefix: "zy", rest: "xwv" }, []];
+    return { code: 0, stdout: args.includes("root") ? `${cwd}\n` : info.map(JSON.stringify).join("\t"), stderr: "" };
+  }, undefined, async path => path === "/checkouts/review/.jj/repo" ? "../../../repo/.jj/repo" : null);
+  h.view.init({}, h.cx);
+  const watched: string[] = [];
+  h.view.watch = (_repo: string, _cx: unknown, folder: string) => watched.push(folder);
+  for (const space of snapshot) await h.view.check(JSON.stringify([null, space.folder]), h.cx);
+  expect(calls).toHaveLength(4);
+  expect(calls.every(args => args.includes("--ignore-working-copy") && args.includes("--at-op=@"))).toBe(true);
+  expect(watched).toEqual(["/repo/.jj/repo/op_heads", "/repo/.jj/repo/op_heads"]);
+  expect(h.view.ordered().map(({ g, tree }: any) => [g.name, g.revision, g.bookmarks, tree])).toEqual([
+    ["repo", "qawerty", ["main"], null],
+    ["repo", "zyxwv", [], "└─"],
+  ]);
+});
+
 test("git grouping reads refs for normal, detached, unborn and bare worktrees", async () => {
   // Git answers with real paths, and the temp folder is behind a link on macOS (/var -> /private/var).
   const root = realpathSync(mkdtempSync(join(tmpdir(), "herdr-spaces-")));
@@ -56,7 +78,8 @@ test("git grouping reads refs for normal, detached, unborn and bare worktrees", 
     if (result.exitCode) throw new Error(result.stderr.toString());
     return result.stdout.toString().trim();
   };
-  const execGit = async (_command: string, args: string[], { cwd }: { cwd: string }) => {
+  const execGit = async (command: string, args: string[], { cwd }: { cwd: string }) => {
+    if (command === "jj") return { code: 1, stdout: "", stderr: "There is no jj repo" };
     const result = Bun.spawnSync(["git", ...args], { cwd });
     return { code: result.exitCode, stdout: result.stdout.toString(), stderr: result.stderr.toString() };
   };
@@ -452,12 +475,12 @@ test("no reconciliation without a rendered sidebar", () => {
 
 test("git checks run a few spaces at a time, not every space at once", async () => {
   let running = 0, most = 0;
-  const execGit = async () => {
+  const execGit = async (command: string) => {
     running++;
     most = Math.max(most, running);
     await new Promise((resolve) => setTimeout(resolve, 1));
     running--;
-    return { code: 0, stdout: "/repo\n", stderr: "" };
+    return command === "jj" ? { code: 1, stdout: "", stderr: "There is no jj repo" } : { code: 0, stdout: "/repo\n", stderr: "" };
   };
   const h = harness([], new Map(), [], execGit);
   Object.assign(h.view, { git: {}, checked: {}, unsure: new Set(), pending: new Set(), watching: new Map() });

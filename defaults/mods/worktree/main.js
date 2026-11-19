@@ -1,6 +1,3 @@
-// Worktree dialog: { space, action: "new" | "open" | "remove" } or
-// { folder, machine } for a repo without a space; optional { branch, tab, argv }.
-
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar } from "gpui-base";
 import { run, props, closeOverlay, theme, spaces, panes, exec, home, appHome, readTextFile, window } from "herdr";
@@ -40,6 +37,50 @@ const ago = (s) => {
   const d = Date.now() / 1000 - s;
   return d < 3600 ? `${Math.max(1, Math.round(d / 60))}m` : d < 86400 ? `${Math.round(d / 3600)}h` : d < 86400 * 60 ? `${Math.round(d / 86400)}d` : `${Math.round(d / 86400 / 30)}mo`;
 };
+
+const JJ = ["--no-pager", "--color=never"];
+const JJ_READ = [...JJ, "--ignore-working-copy", "--at-op=@"];
+const checkoutPath = (path) => /^[A-Za-z]:[\\/]|^\\\\/.test(path) ? path.replace(/\\/g, "/") : path;
+
+async function jj(cwd, args, on, timeout) {
+  const result = await exec("jj", args, { cwd, on, timeout });
+  if (result.code !== 0) throw new Error((result.stderr || result.stdout).trim());
+  return result.stdout;
+}
+
+async function jjRepo(folder, on) {
+  const result = await exec("jj", [...JJ_READ, "workspace", "root"], { cwd: folder, on }).catch(() => null);
+  if (!result || /there is no jj repo/i.test(result.stderr)) return null;
+  if (result.code !== 0) throw new Error((result.stderr || result.stdout).trim());
+  const top = checkoutPath(result.stdout.replace(/\r?\n$/, ""));
+  if (!/^(?:\/|[A-Za-z]:\/)/.test(top)) return null;
+  const pointer = await readTextFile(`${top}/.jj/repo`, { on }).catch(() => null);
+  const main = pointer ? checkoutPath(pointer).replace(/\/\.jj\/repo$/, "") : top;
+  return { jj: true, top, name: main.split("/").at(-1) };
+}
+
+async function jjWorkspaces(repo, on) {
+  const template = 'json(name) ++ "\\t" ++ json(root) ++ "\\t" ++ json(target.current_working_copy()) ++ "\\t" ++ json(target.change_id().shortest(8)) ++ "\\t" ++ json(target.local_bookmarks().map(|b| b.name())) ++ "\\n"';
+  const out = await jj(repo.top, [...JJ_READ, "workspace", "list", "-T", template], on);
+  const list = out.trimEnd().split("\n").filter(Boolean).map((line) => {
+    const [workspace, root, current, id, bookmarks] = line.split("\t").map(JSON.parse);
+    const revision = id.prefix + id.rest;
+    return { workspace, path: root && checkoutPath(root), current, revision, bookmarks };
+  });
+  // Older workspaces may have no recorded path. The current one is identifiable
+  // by its working-copy change if no other workspace points to it.
+  const current = list.filter((c) => c.current);
+  if (current.length === 1) current[0].path = repo.top;
+  return list.filter((c) => c.path).sort((a, b) => (b.path === repo.top) - (a.path === repo.top));
+}
+
+async function jjBookmarks(repo, on) {
+  const out = await jj(repo.top, [...JJ_READ, "bookmark", "list", "-T", 'if(!remote, json(name) ++ "\\t" ++ name ++ "\\n")'], on);
+  return out.trimEnd().split("\n").filter(Boolean).map((line) => {
+    const [label, revision] = line.split("\t");
+    return { label: JSON.parse(label), revision };
+  });
+}
 
 // Every checkout of a repo (`git worktree list`), the main one first, then
 // the most recently committed: { path, branch, main, at }.
@@ -113,6 +154,8 @@ async function submodules(top, on) {
 // The repo a folder belongs to: its main checkout and name, and whether
 // the folder is itself a linked worktree. null outside git.
 async function repoOf(folder, on) {
+  const jujutsu = await jjRepo(folder, on);
+  if (jujutsu) return jujutsu;
   const top = await git(folder, ["rev-parse", "--show-toplevel"], on);
   const common = await git(folder, ["rev-parse", "--path-format=absolute", "--git-common-dir"], on);
   if (!top.ok || !common.ok) return null;
@@ -127,10 +170,12 @@ export default class Worktree extends View {
     this.on = this.space()?.machine;
     this.userHome = this.on ? null : home();
     this.opening = props()?.action === "open";
+    this.revising = props()?.action === "revision";
     this.text = props()?.branch ?? "";
+    this.bookmarks = [];
     this.list = undefined; // open: the checkouts, once read
     this.at = 0;
-    this.input = InputState.new({ value: this.text, placeholder: this.opening ? "filter worktrees" : "branch name" });
+    this.input = InputState.new({ value: this.text, placeholder: this.opening ? "Filter by name or path" : "Branch name" });
     this.input.on("change", (_e, cx) => { this.text = this.input.value(); this.error = ""; this.at = 0; cx.notify(); });
     this.input.on("submit", (_e, cx) => this.go(cx));
     this.inputFocused = true;
@@ -153,23 +198,33 @@ export default class Worktree extends View {
           if (result.code !== 0 || !result.stdout.trim()) throw new Error("Could not find the remote home folder.");
           this.userHome = result.stdout.trim().replace(/\\/g, "/");
         }
-        if (!this.opening && props()?.action !== "remove") this.root = await root(this.userHome);
+        if (!this.opening && !this.revising && props()?.action !== "remove") this.root = await root(this.userHome);
         this.folder = props()?.folder || place(this.space()) || this.userHome;
         // The repo is set last: Enter does nothing until the warnings it consents to are known.
         const repo = await repoOf(this.folder, this.on);
+        if (repo?.jj && props().action === "remove") throw new Error("Use jj workspace remove for this workspace.");
+        if (repo && !repo.jj && this.revising) throw new Error("Changing revisions requires a jj workspace.");
         if (repo && props().action === "remove") {
           this.dirty = (await git(repo.top, ["--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain"], this.on)).out !== "";
           this.unpushed = (await submodules(repo.top, this.on)).unpushed;
         }
-        if (repo && this.opening) this.list = await checkouts(repo, this.on);
+        if (repo && this.opening) this.list = await (repo.jj ? jjWorkspaces(repo, this.on) : checkouts(repo, this.on));
+        if (repo?.jj && !this.opening) {
+          const name = props()?.name ?? "";
+          const revision = props()?.revision ?? "";
+          this.setupJjInputs(name, revision);
+          if (!name || this.revising) {
+            this.bookmarks = await jjBookmarks(repo, this.on).catch(() => []);
+          }
+        }
         this.repo = repo;
         cx.notify();
         // The list (and with it the filter input) only mounts once loading is
         // done, so the keyboard must move there now — a focus call made while
         // loading lands on nothing and the dialog stays keyboard-dead.
         this.handle.focus();
-        if (props().action !== "remove") cx.timer.after(100, () => this.input.focus());
-        if (props().branch) await this.work(cx);
+        if (props().action !== "remove") cx.timer.after(100, () => (this.revising ? this.revision : this.input)?.focus());
+        if (repo?.jj ? props().action === "new" && props().name : props().branch) await this.work(cx);
       } catch (error) { this.repo = null; this.error = String(error); cx.notify(); }
     });
   }
@@ -183,18 +238,30 @@ export default class Worktree extends View {
     closeOverlay(props().overlay);
   }
 
-  go(cx) {
-    if (this.busy || !this.repo) return;
-    cx.spawn(async (cx) => this.work(cx));
+  setupJjInputs(name, revision) {
+    this.input = InputState.new({ value: name, placeholder: "Workspace name" });
+    this.revision = InputState.new({ value: revision, placeholder: this.revising ? "Bookmark, change ID, or revset" : "Bookmark, change ID, or revset (default @)" });
+    for (const input of [this.input, this.revision]) {
+      input.on("change", (_e, cx) => { this.error = ""; cx.notify(); });
+      input.on("submit", (_e, cx) => this.go(cx, this.revising ? "new" : undefined));
+    }
   }
 
-  async work(cx) {
+  go(cx, change) {
+    if (this.busy || !this.repo) return;
+    cx.spawn(async (cx) => this.work(cx, change));
+  }
+
+  async work(cx, change) {
     const remove = props()?.action === "remove";
     if (this.busy || !this.repo || (remove && !this.repo.linked)) return;
     this.busy = true;
     this.error = "";
     cx.notify();
-    try { this.error = remove ? await this.remove() : await this.create(); }
+    try {
+      if (change) this.error = await this.changeRevision(change);
+      else this.error = remove ? await this.remove() : await this.create();
+    }
     catch (error) { this.error = String(error); }
     this.busy = false;
     if (!this.error) this.close();
@@ -202,6 +269,7 @@ export default class Worktree extends View {
   }
 
   async create() {
+    if (this.repo.jj) return this.createWorkspace();
     const branch = this.text.trim();
     if (!branch) return "Type a branch name.";
     const path = `${this.root}/${this.repo.name}/${slug(branch)}`;
@@ -215,9 +283,41 @@ export default class Worktree extends View {
     return "";
   }
 
+  async createWorkspace() {
+    const name = this.input.value().trim();
+    if (!name) return "Type a workspace name.";
+    const folder = slug(name);
+    if (folder === "." || folder === "..") return "Choose a workspace name other than ‘.’ or ‘..’.";
+    const parent = `${this.root}/${this.repo.name}`;
+    const path = `${parent}/${folder}`;
+    const { top } = this.repo;
+    const on = this.on;
+    const revision = this.revision.value().trim() || "@";
+    // Older jj versions can leave a partly created directory for an invalid revset.
+    if (!await jj(top, [...JJ_READ, "log", "--no-graph", "--limit=1", "-r", revision, "-T", "commit_id"], on)) return "The revset did not match any changes.";
+    // jj workspace add expects its destination's parent directory to exist.
+    const windows = /^(?:[A-Za-z]:\/|\/\/)/.test(top);
+    const literal = `'${parent.replace(/['‘’‚‛]/g, "$&$&")}'`;
+    const mkdir = windows
+      ? await exec("powershell.exe", ["-NoProfile", "-NonInteractive", "-Command", `[void][IO.Directory]::CreateDirectory(${literal})`], { cwd: top, on })
+      : await exec("mkdir", ["-p", "--", parent], { cwd: top, on });
+    if (mkdir.code !== 0) throw new Error((mkdir.stderr || mkdir.stdout).trim());
+    await jj(top, [...JJ, "workspace", "add", `--name=${name}`, `--revision=${revision}`, "--", path], on, 600_000);
+    const { tab, argv } = props();
+    run("space.new", { folder: path, machine: on ?? "", tab, argv });
+    return "";
+  }
+
+  async changeRevision(action) {
+    const revision = this.revision.value().trim();
+    if (!revision) return "Type a bookmark, change ID, or revset.";
+    await jj(this.repo.top, [...JJ, action, "--", revision], this.on, 600_000);
+    return "";
+  }
+
   shown() {
     const f = this.text.trim().toLowerCase();
-    return (this.list ?? []).filter((c) => !f || `${c.branch ?? ""} ${c.path}`.toLowerCase().includes(f));
+    return (this.list ?? []).filter((c) => !f || [c.branch, c.workspace, c.revision, ...(c.bookmarks ?? []), c.path].join(" ").toLowerCase().includes(f));
   }
 
   open(c) {
@@ -297,14 +397,15 @@ export default class Worktree extends View {
           h_flex()
             .gap(8)
             .items_center()
-            .child(div().flex_1().min_w(0).truncate().text_color(t.foreground).child(c.branch ?? "detached"))
+            .child(div().flex_1().min_w(0).truncate().text_color(t.foreground).child(c.workspace ?? c.branch ?? "detached"))
+            .when(Boolean(c.revision), (el) => el.child(div().min_w(0).truncate().text_size(11).text_color(t.dim).child([c.revision, ...(c.bookmarks ?? [])].join(" · "))))
             .when(c.main, (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child("main checkout")))
             .when(Boolean(there), (el) => el.child(div().flex_none().text_size(11).text_color(t.accent).child("open")))
             .when(!there && c.at > 0, (el) => el.child(div().flex_none().text_size(11).text_color(t.dim).child(ago(c.at)))),
         )
         .child(div().truncate().text_size(11.5).text_color(t.dim).child(tilde(c.path, this.userHome ?? "")));
     };
-    const count = rows.length === all.length ? `${all.length} checkouts` : `${rows.length}/${all.length} checkouts`;
+    const count = `${rows.length === all.length ? all.length : `${rows.length}/${all.length}`} ${r?.jj ? "workspaces" : "checkouts"}`;
     return v_flex()
       .id("worktree")
       .track_focus(this.handle)
@@ -314,9 +415,9 @@ export default class Worktree extends View {
       .gap(10)
       .bg(t.popover)
       .text_size(13)
-      .child(h_flex().child(div().flex_1().font_semibold().text_color(t.foreground).child(`Open worktree${r ? ` of ${r.name}` : ""}`)).child(div().text_size(11).text_color(t.dim).child(r ? count : "")))
+      .child(h_flex().child(div().flex_1().font_semibold().text_color(t.foreground).child(`Open ${r?.jj ? "jj workspace" : "worktree"}${r ? ` of ${r.name}` : ""}`)).child(div().text_size(11).text_color(t.dim).child(r ? count : "")))
       .when(r === undefined || (r && this.list === undefined), (el) => el.child(div().text_color(t.muted).child("\u2026")))
-      .when(r === null, (el) => el.child(div().text_color(t.muted).child(`${this.folder ? tilde(this.folder, this.userHome ?? "") : "This folder"} is not in a git repository.`)))
+      .when(r === null, (el) => el.child(div().text_color(t.muted).child(this.error || `${this.folder ? tilde(this.folder, this.userHome ?? "") : "This folder"} is outside a Git or jj repository.`)))
       .when(Boolean(r && this.list), (el) =>
         el
           .child(Input.new(this.input).h(32).px(10).items_center().rounded(6).border(1).border_color(this.inputFocused ? t.accent : t.input).bg(t.background).text_color(t.foreground))
@@ -331,7 +432,7 @@ export default class Worktree extends View {
                   .size_full()
                   .overflow_y_scroll()
                   .children(rows.map(row))
-                  .when(rows.length === 0, (el) => el.child(div().p(10).text_color(t.dim).child("No matching worktrees."))),
+                  .when(rows.length === 0, (el) => el.child(div().p(10).text_color(t.dim).child(r.jj ? "No matching workspaces." : "No matching worktrees."))),
               )
               .child(Scrollbar.vertical("wt-list").absolute().inset_0()),
           ),
@@ -339,18 +440,44 @@ export default class Worktree extends View {
       .child(h_flex().justify_end().text_size(11).text_color(t.dim).child("\u2191\u2193 choose \u00b7 \u21b5 open \u00b7 esc close"));
   }
 
+  renderJj(t) {
+    const field = (input) => Input.new(input).h(32).px(10).items_center().rounded(6).border(1).border_color(t.input).bg(t.background).text_color(t.foreground);
+    const button = (label, click) => h_flex().id(label).h(30).px(10).items_center().rounded(6).bg(t.raised)
+      .text_color(this.busy ? t.dim : t.foreground).when(!this.busy, el => el.cursor_pointer().hover(s => s.bg(t.hover)))
+      .on_click(click).child(label);
+    return v_flex().id("worktree").track_focus(this.handle).on_key_down((e, cx) => this.key(e, cx)).size_full()
+      .p(16).gap(10).bg(t.popover).text_size(13)
+      .child(div().font_semibold().text_color(t.foreground).child(this.revising ? "Change revision" : `New jj workspace of ${this.repo.name}`))
+      .child(div().text_color(t.muted).child(this.revising
+        ? "Start a new change on the selected revision or make it your working-copy change."
+        : `Creates a workspace under ${tilde(this.root, this.userHome)}/${this.repo.name}/ with a new change on the selected revision.`))
+      .when(!this.revising, el => el.child(field(this.input)))
+      .child(field(this.revision))
+      .when(this.bookmarks.length > 0, el => el.child(v_flex().id("jj-bookmarks").flex_1().min_h(0).overflow_y_scroll().gap(3)
+        .child(div().text_color(t.dim).text_size(11).child("Bookmarks"))
+        .children(this.bookmarks.map(({ label, revision }) => div().id(`bookmark-${label}`).p(5).flex_none().rounded(6).text_color(t.foreground)
+          .cursor_pointer().hover(s => s.bg(t.hover)).on_click((_e, cx) => { this.revision.set_value(revision); cx.notify(); }).child(label)))))
+      .when(Boolean(this.error), el => el.child(div().text_color(t.blocked).child(this.error)))
+      .when(this.bookmarks.length === 0, el => el.child(div().flex_1()))
+      .child(h_flex().gap(8).flex_none().justify_end()
+        .when(this.busy, el => el.child(div().text_color(t.dim).child("Working…")))
+        .when(this.revising, el => el.child(button("Edit change", (_e, cx) => this.go(cx, "edit"))))
+        .child(button(this.revising ? "New change on revision" : "Create workspace", (_e, cx) => this.go(cx, this.revising ? "new" : undefined))));
+  }
+
   render(cx) {
     const t = theme();
     if (this.opening) return this.renderOpen(t);
+    if (this.repo?.jj) return this.renderJj(t);
     const remove = props()?.action === "remove";
     const s = this.space();
     const r = this.repo;
-    const title = remove ? `Remove worktree ${s?.name ?? ""}?` : `New worktree${r ? ` of ${r.name}` : ""}`;
+    const title = this.revising ? "Change revision" : remove ? `Remove worktree ${s?.name ?? ""}?` : `New worktree${r ? ` of ${r.name}` : ""}`;
     const detail =
       r === undefined
         ? "…"
         : r === null
-          ? `${this.folder ? tilde(this.folder, this.userHome) : "This folder"} is not in a git repository.`
+          ? this.error ? "" : `${this.folder ? tilde(this.folder, this.userHome) : "This folder"} is outside a Git or jj repository.`
           : remove
             ? !r.linked
               ? "This is the repository's main checkout, not a worktree."

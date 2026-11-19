@@ -181,7 +181,9 @@ test("a bare repo hidden beside its worktrees is named after its project", async
     "--show-toplevel": "/home/user/project/topic",
     "--git-common-dir": "/home/user/project/.bare",
   };
-  const exec = async (_command: string, args: string[]) => ({ code: 0, stdout: replies[args.at(-1)!] + "\n", stderr: "" });
+  const exec = async (command: string, args: string[]) => command === "jj"
+    ? { code: 1, stdout: "", stderr: "There is no jj repo" }
+    : { code: 0, stdout: replies[args.at(-1)!] + "\n", stderr: "" };
   const globals = { View: class {}, div: element, v_flex: element, h_flex: element, Input: { new: element }, Scrollbar: { vertical: element }, theme: () => ({}), exec };
   const repoOf = new Function(...Object.keys(globals), `${source}; return repoOf;`)(...Object.values(globals));
   expect(await repoOf("/home/user/project/topic", null)).toEqual({
@@ -224,6 +226,73 @@ function execute(command: string, args: string[], { cwd }: { cwd: string }) {
   return { code: result.exitCode, stdout: result.stdout.toString(), stderr: result.stderr.toString() };
 }
 
+test.skipIf(!Bun.which("jj"))("colocated jj workspaces open by name and distinguish new from edit", async () => {
+  const folder = await mkdtemp(join(tmpdir(), "herdr-jj-"));
+  try {
+    const root = await realpath(folder), main = join(root, "repo");
+    const executeJj = (command: string, args: string[], options: { cwd: string }) => {
+      if (command === "git") throw new Error("A jj workspace must use jj even with Git colocated");
+      return execute(command, command === "jj" ? ["--config", "user.name=Test", "--config", "user.email=test@example.com", ...args] : args, options);
+    };
+    function jj(cwd: string, ...args: string[]) {
+      const result = executeJj("jj", args, { cwd });
+      if (result.code !== 0) throw new Error(result.stderr);
+      return result.stdout.trim();
+    }
+    jj(root, "git", "init", "--colocate", main);
+    jj(main, "describe", "-m", "base");
+    jj(main, "bookmark", "set", "topic", "-r", "@");
+    const bookmarked = jj(main, "log", "--no-graph", "-r", "topic", "-T", "change_id");
+    const open = (action: string) => {
+      const h = harness(null, JSON.stringify({ worktrees: { directory: join(root, "checkouts") } }), {
+        home: () => root,
+        props: () => ({ folder: main, action }),
+        InputState: { new: ({ value = "" }) => ({ on() {}, focus() {}, value: () => value, set_value(next: string) { value = next; } }) },
+        readTextFile: async (path: string) => path.endsWith("settings.json")
+          ? JSON.stringify({ worktrees: { directory: join(root, "checkouts") } }) : readFile(path, "utf8"),
+        exec: async (...args: Parameters<typeof executeJj>) => executeJj(...args),
+      });
+      const tasks: Promise<void>[] = [];
+      const cx = { notify() {}, timer: { after() {} }, focus_handle: () => ({ focus() {} }), spawn: (task: (cx: unknown) => Promise<void>) => tasks.push(task(cx)) };
+      h.worktree.init({}, cx);
+      return { ...h, ready: tasks[0] };
+    };
+    const create = open("new");
+    await create.ready;
+    expect(create.worktree.bookmarks).toContainEqual({ label: "topic", revision: "topic" });
+    create.worktree.input.set_value("review");
+    create.worktree.revision.set_value("missing-revision");
+    await expect(create.worktree.create()).rejects.toThrow();
+    expect(existsSync(join(root, "checkouts"))).toBe(false);
+    create.worktree.revision.set_value("topic");
+    expect(await create.worktree.create()).toBe("");
+    const linked = join(root, "checkouts", "repo", "review");
+    expect(jj(linked, "log", "--no-graph", "-r", "@-", "-T", "change_id")).toBe(bookmarked);
+    expect(jj(linked, "log", "--no-graph", "-r", "@", "-T", "change_id")).not.toBe(bookmarked);
+    expect(create.writes).toEqual([["space.new", { folder: linked, machine: "", tab: undefined, argv: undefined }]]);
+
+    const list = open("open");
+    await list.ready;
+    expect(list.worktree.list).toEqual([
+      expect.objectContaining({ workspace: "default", path: main, bookmarks: ["topic"] }),
+      expect.objectContaining({ workspace: "review", path: linked, bookmarks: [] }),
+    ]);
+    list.worktree.text = "review";
+    list.worktree.open(list.worktree.shown()[0]);
+    expect(list.writes).toEqual([["space.new", { folder: linked, machine: "" }]]);
+
+    const revision = open("revision");
+    await revision.ready;
+    revision.worktree.revision.set_value("topic");
+    expect(await revision.worktree.changeRevision("new")).toBe("");
+    expect(jj(main, "log", "--no-graph", "-r", "@-", "-T", "change_id")).toBe(bookmarked);
+    expect(await revision.worktree.changeRevision("edit")).toBe("");
+    expect(jj(main, "log", "--no-graph", "-r", "@", "-T", "change_id")).toBe(bookmarked);
+  } finally {
+    await rm(folder, { recursive: true, force: true });
+  }
+});
+
 function fixtureGit(cwd: string, ...args: string[]) {
   const result = execute("git", args, { cwd });
   if (result.code !== 0) throw new Error(result.stderr);
@@ -258,7 +327,7 @@ function removeDialog(folder: string, { branch, platform = "linux", exec = execu
       if (command === "space.close") closedSpaces.push({ id: args.id, checkoutPresent: existsSync(folder) });
     },
     closeOverlay: (id: string) => closedOverlays.push(id),
-    exec,
+    exec: async (command: string, args: string[], options: { cwd: string }) => exec(command, args, options),
   });
   snapshot([{ id: "target", name: "Worktree", folder }], []);
   let pending = Promise.resolve();

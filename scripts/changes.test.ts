@@ -1,5 +1,7 @@
 import { test, expect } from "bun:test";
-import { readFile } from "node:fs/promises";
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const source = await readFile(new URL("../defaults/mods/changes/main.js", import.meta.url), "utf8");
 const rowsSource = source.slice(source.indexOf("const untab ="), source.indexOf("\nexport default class"));
@@ -19,15 +21,18 @@ type Answer<T> = T & { wait?: Promise<void> };
 // The panel on a machine with git repos /repo-a and /repo-b; any other folder is not a repo.
 // Each git status in a repo, and each read of a file, takes the next answer queued for it, after its
 // wait; without one, a repo has one untracked file (a.txt, b.txt) and a file reads "text".
-async function panel(statuses: Record<string, Answer<{ files: string[] }>[]> = {}, reads: Record<string, Answer<{ text: string }>[]> = {}) {
-  const at = { cwd: "/repo-a" };
+async function panel(statuses: Record<string, Answer<{ files: string[] }>[]> = {}, reads: Record<string, Answer<{ text: string }>[]> = {}, fixture?: {
+  cwd: string, exec: (command: string, args: string[], options: { cwd: string }) => unknown,
+}) {
+  const at = { cwd: fixture?.cwd ?? "/repo-a" };
   const asked: string[] = [];
   const Changes = new Function("View", "InputState", "spaces", "panes", "focused", "exec", "readTextFile", "watchFolder",
     `${source.replace(/^import .*;\n/gm, "").replace("export default class Changes", "class Changes")}; return Changes;`)(
     class {},
     { new: () => ({ on() {}, value: () => "", set_value() {} }) },
     () => [{ active: true, folder: at.cwd, machine: null }], () => [], () => null,
-    async (_git: string, args: string[], { cwd }: { cwd: string }) => {
+    fixture?.exec ?? (async (command: string, args: string[], { cwd }: { cwd: string }) => {
+      if (command === "jj") return { code: 1, stdout: "", stderr: "There is no jj repo" };
       const repo = /^\/repo-[ab]/.exec(cwd)?.[0];
       if (!repo) return { code: 128, stdout: "", stderr: "not a git repository" };
       if (args.includes("--show-toplevel")) return { code: 0, stdout: `${repo}\n`, stderr: "" };
@@ -39,7 +44,7 @@ async function panel(statuses: Record<string, Answer<{ files: string[] }>[]> = {
       }
       if (args.includes("HEAD")) return { code: 128, stdout: "", stderr: "no HEAD" };
       return { code: 0, stdout: "", stderr: "" };
-    },
+    }),
     async (path: string) => {
       const answer = reads[path]?.shift() ?? { text: "text\n" };
       await answer.wait;
@@ -113,4 +118,43 @@ test("Changes keeps the newer preview when one from an earlier visit to the repo
   first.release();
   await settled();
   expect(h.preview()).toEqual(["@@ -0,0 +1,1 @@", "new"]);
+});
+
+test.skipIf(!Bun.which("jj"))("jj Changes snapshots @, describes it, and starts a child change", async () => {
+  const folder = await mkdtemp(join(tmpdir(), "herdr-jj-changes-"));
+  try {
+    const cwd = await realpath(folder);
+    const call = (args: string[], at = cwd) => {
+      const result = Bun.spawnSync(["jj", "--config", "user.name=Test", "--config", "user.email=test@example.com", ...args], { cwd: at });
+      return { code: result.exitCode, stdout: result.stdout.toString(), stderr: result.stderr.toString() };
+    };
+    const jj = (...args: string[]) => {
+      const result = call(args);
+      if (result.code !== 0) throw new Error(result.stderr);
+      return result.stdout.trim();
+    };
+    jj("git", "init", "--no-colocate");
+    await writeFile(join(cwd, "[notes].txt"), "hello\n");
+    const h = await panel({}, {}, {
+      cwd,
+      exec: async (command, args, options) => {
+        expect(command).toBe("jj");
+        return call(args, options.cwd);
+      },
+    });
+    expect(h.view.files).toEqual([{ path: "[notes].txt", add: 1, del: 0, status: "A" }]);
+    expect(h.preview()).toEqual([expect.stringMatching(/^@@ -0,0 \+1,1 @@/), "hello"]);
+    const change = jj("log", "--no-graph", "-r", "@", "-T", "change_id");
+    h.view.message = "Describe current change";
+    h.view.commit(h.cx, true);
+    await settled();
+    expect(jj("log", "--no-graph", "-r", "@", "-T", "change_id")).toBe(change);
+    expect(jj("log", "--no-graph", "-r", "@", "-T", "description")).toBe("Describe current change");
+    h.view.commit(h.cx);
+    await settled();
+    expect(jj("log", "--no-graph", "-r", "@-", "-T", "change_id")).toBe(change);
+    expect(h.view.files).toEqual([]);
+  } finally {
+    await rm(folder, { recursive: true, force: true });
+  }
 });

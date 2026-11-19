@@ -248,6 +248,9 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
                 "exec" if first == "sh" && a.get(1).map(from_host).and_then(|v| v.get(2).cloned()) == Some(json!("files")) => {
                     Some(json!({"code":0,"stdout":"d\u{0}src\u{0}f\u{0}README.md\u{0}","stderr":""}))
                 }
+                "exec" if first == "jj" && a.get(1).map(from_host) == Some(json!(["--no-pager", "--color=never", "--ignore-working-copy", "--at-op=@", "workspace", "root"])) => {
+                    Some(json!({"code":1,"stdout":"","stderr":"fixture: There is no jj repo"}))
+                }
                 "exec"
                     if first == "git"
                         && [

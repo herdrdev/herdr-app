@@ -5,7 +5,7 @@
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, ScrollHandle } from "gpui-base";
-import { spaces, machines, panes, run, openOverlay, exec, hc, theme, shared, setShared, watchFolder, window, layout } from "herdr";
+import { spaces, machines, panes, run, openOverlay, exec, hc, theme, shared, setShared, watchFolder, window, layout, readTextFile } from "herdr";
 
 function find(node, id) {
   if (node?.id === id) return node;
@@ -40,6 +40,39 @@ const repoName = (common) => {
   const own = base(common);
   return own === ".bare" ? base(common.slice(0, -own.length - 1)) : own.replace(/\.git$/, "");
 };
+const JJ_READ = ["--no-pager", "--color=never", "--ignore-working-copy", "--at-op=@"];
+const JJ_LABEL = 'json(change_id.shortest(8)) ++ "\\t" ++ json(local_bookmarks.map(|b| b.name()))';
+
+async function jjInfo(cwd, on) {
+  const result = await exec("jj", [...JJ_READ, "workspace", "root"], { cwd, on }).catch(() => null);
+  if (!result || /there is no jj repo/i.test(result.stderr)) return null;
+  if (result.code !== 0) throw new Error(result.stderr);
+  const raw = result.stdout.replace(/\r?\n$/, "");
+  if (!/^(?:[A-Za-z]:[\\/]|\/|\\\\)/.test(raw)) return null;
+  const windows = /^[A-Za-z]:[\\/]|^\\\\/.test(raw);
+  const path = (s) => windows ? s.replace(/\\/g, "/") : s;
+  const top = path(raw);
+  const localRepo = `${top}/.jj/repo`;
+  const pointer = await readTextFile(localRepo, { on }).catch(() => null);
+  // A linked workspace stores a path to the shared repo in .jj/repo.
+  const target = pointer && path(pointer);
+  let repo = localRepo;
+  if (target) {
+    if (/^(?:[A-Za-z]:\/|\/)/.test(target)) repo = target;
+    else {
+      const parts = `${top}/.jj`.split("/");
+      for (const part of target.split("/")) {
+        if (part === "..") parts.pop();
+        else if (part && part !== ".") parts.push(part);
+      }
+      repo = parts.join("/");
+    }
+  }
+  const log = await exec("jj", [...JJ_READ, "log", "--no-graph", "-r", "@", "-T", JJ_LABEL], { cwd: top, on });
+  if (log.code !== 0) throw new Error(log.stderr);
+  const [{ prefix, rest }, bookmarks] = log.stdout.trimEnd().split("\t").map(JSON.parse);
+  return { repo, name: base(repo.replace(/\/\.jj\/repo$/, "")), linked: repo !== localRepo, revision: prefix + rest, bookmarks };
+}
 // Changes made outside Herdr (an editor's save, a commit in another app): looked
 // for this often, in repos the list shows, while the window is in front.
 const FALLBACK = 60000;
@@ -238,6 +271,12 @@ export default class Spaces extends View {
     this.checked[key] = Date.now();
     this.unsure.delete(key);
     try {
+      const jj = await jjInfo(cwd, on);
+      if (jj) {
+        this.git[key] = { ...jj, repo: JSON.stringify([on, jj.repo]) };
+        if (!on) this.watch(jj.repo, cx, `${jj.repo}/op_heads`);
+        return;
+      }
       // Ref-only reads avoid scanning the worktree or waking its index watch.
       // Two reads: a folder name may itself contain a newline.
       const [r, common] = await both(
@@ -270,9 +309,9 @@ export default class Spaces extends View {
     }
   }
 
-  watch(repo, cx) {
+  watch(repo, cx, folder = repo) {
     if (this.watching.has(repo)) return;
-    const pending = watchFolder(repo);
+    const pending = watchFolder(folder);
     this.watching.set(repo, pending);
     cx.spawn(async (cx) => {
       let current = pending;
@@ -284,7 +323,7 @@ export default class Spaces extends View {
           const keys = Object.keys(this.git).filter((k) => this.git[k]?.repo === mine);
           if (!keys.length) break;
           this.refreshGit(keys, cx);
-          current = watchFolder(repo);
+          current = watchFolder(folder);
           this.watching.set(repo, current);
         }
       } catch {}
@@ -432,7 +471,7 @@ export default class Spaces extends View {
   gitTail(g, tree, name, t) {
     const raw = g.branch ?? "detached";
     const same = (a) => a.toLowerCase() === name.toLowerCase();
-    const branch = same(raw) || raw === "master" || raw === "main" ? "" : raw;
+    const branch = g.revision ? [g.revision, ...g.bookmarks].join(" · ") : same(raw) || raw === "master" || raw === "main" ? "" : raw;
     const repo = tree || same(g.name) ? "" : g.name;
     const where = [repo, branch].filter(Boolean).join(" \u00b7 ");
     return h_flex()

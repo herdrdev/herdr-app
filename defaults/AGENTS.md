@@ -740,14 +740,14 @@ What's about the user, never a look:
   (PATH, the login shell's PATH, `~/.local/bin`, Homebrew, mise, Nix,
   cargo). Read at start.
 - `worktrees`: `{ "directory": "~/Developer/worktrees" }` sets where the shipped
-  New worktree dialog creates checkouts: `<directory>/<repo>/<branch>` (branch
-  slashes become dashes). Default: `~/.herdr/worktrees`. Use an absolute path or
+  dialogs create Git worktrees and jj workspaces. Paths are
+  `<directory>/<repo>/<branch-or-workspace-name>`, with slashes in names
+  replaced by dashes. Default: `~/.herdr/worktrees`. Use an absolute path or
   `~` / `~/...`; Windows paths work too. The setting lives in this app's
   settings.json; the path and `~` refer to the space's machine, including remote
-  spaces. Read when New worktree opens; existing checkouts are not moved, and
-  Open / Remove worktree still use Git's checkout list. No mod clones needed.
-  The app does not read the TUI's config.toml; set its `[worktrees] directory`
-  to the same place if both should create checkouts together.
+  spaces. The dialogs read it on open. Git and jj supply the locations of
+  existing worktrees and workspaces. Set the TUI's `[worktrees] directory`
+  separately to share a destination for new checkouts.
 - `terminal_line_height` (default 1, 0.8..2), `terminal_cell_width`
   (default 1, 0.8..2) and `terminal_scroll_speed` (default 1, 0.1..5):
   terminal row height, column width and wheel/trackpad speed, used where the
@@ -923,18 +923,28 @@ has 124 programs (agents, editors, runtimes, tools, databases, infra);
 - The defaults are mods too, read them as examples: `spaces`, `agents`,
   `tabs` (the tab bar), `menu`, `prompt`, `confirm`, `help`, `toast`,
   Terminals' `picker`, `peek`, and `pane` (an
-  example pane header, not used by the default layouts), and `worktree`
-  (git worktrees as spaces: the space menu's and the + menu's New worktree,
-  Open worktree (the repo's checkouts, filtered; one already shown is gone
-  to) and Remove worktree open it as a dialog with props `{space, folder?,
-  action: "new" | "open" | "remove"}` (the repo: folder, else where the
-  space's first terminal is), or with `{branch, tab?, argv?}` to make one at once with
-  that first tab; checkouts go to
-  `<worktrees.directory>/<repo>/<branch>` on the space's machine (default
-  `~/.herdr/worktrees`; see settings.json above); the
-  `spaces` sidebar nests worktree spaces under their repo's and shows each
-  space's repo, branch, ahead/behind and uncommitted changes). Shipped mods
-  are Herdr's; duplicate with `mod.clone` before editing.
+  example pane header). Shipped mods are Herdr's; duplicate with `mod.clone`
+  before editing.
+
+- `worktree` opens from the space and + menus. It takes
+  `{space, folder?, action: "new" | "open" | "remove" | "revision"}`.
+  It uses `folder` or the first terminal's folder in `space`. For a folder
+  without a space, pass `{folder, machine?}`. Open selects an existing space
+  for the checkout or creates one on the same machine.
+- Git supports New, Open, and Remove worktree. For one-step creation, add
+  `{branch, tab?, argv?}` to the New dialog's props.
+- jj workspaces take precedence in colocated checkouts. New jj workspace
+  creates a fresh change on a bookmark, change ID, or revset (default `@`).
+  For one-step creation use `{action: "new", name: "review", revision: "main"}`
+  with a space or folder. Add `tab` or `argv` to configure the first tab.
+  Open jj workspace lists locations known to jj. Change revision
+  (`action: "revision"`) lets you choose a local bookmark or enter a revset,
+  then start a child change (`jj new`) or edit the selected change (`jj edit`).
+- The `spaces` sidebar groups linked checkouts under their repo and shows
+  Git branches or jj change IDs and local bookmarks. The `changes` panel
+  snapshots jj's working copy to show the diff for `@`. Describe updates
+  that change's description. New change starts a child, applying the typed
+  description to the current change if supplied.
 
 ### Terminal link handlers
 

@@ -135,12 +135,17 @@ those files or the generated guide. The app rewrites them on start.
   scrolling, including mouse reports. Set them in settings.json or the
   layout's look; the layout wins.
 - Home defaults to `~/.config/herdr-app`; `HERDR_APP_HOME` selects another.
-- `worktrees.directory` in settings.json sets the shipped New worktree destination,
-  e.g. `{"worktrees":{"directory":"~/Developer/worktrees"}}`. Default:
-  `~/.herdr/worktrees`; checkouts use `<directory>/<repo>/<branch>` (slashes in
-  branches become dashes). Use an absolute path or `~` / `~/...`, resolved on the
-  space's machine. Read on dialog open; existing checkouts stay put. No clones
-  needed, and the app does not read the TUI's config.toml.
+- `worktrees.directory` in settings.json sets the destination for new Git
+  worktrees and jj workspaces, e.g.
+  `{"worktrees":{"directory":"~/Developer/worktrees"}}`. The default
+  is `~/.herdr/worktrees`. Checkouts use `<directory>/<repo>/<name>`,
+  with slashes in the branch or workspace name replaced by dashes.
+  Use an absolute path or `~` / `~/...`, resolved on the space's machine.
+- The space and + menus recognize jj workspaces, including colocated
+  checkouts. New jj workspace starts a fresh change on a bookmark, change
+  ID, or revset (default `@`). Open jj workspace opens a recorded workspace
+  as a space. Change revision in the space menu offers `jj new` and `jj edit`.
+  The Changes panel shows `@` and can describe it or start a child change.
 - Mods live in `mods/<name>/` with `main.js` for a view or `link.js` for
   Ctrl/Cmd-clicked terminal links. They are trusted JavaScript with command
   and network access. `mod.json` declares link rules. A personal layout's

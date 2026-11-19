@@ -13,8 +13,11 @@ function place(s) {
   return panes().find((p) => tabs.has(p.tab) && p.cwd)?.cwd || s.folder;
 }
 
-// A space's checkout: "main" (a repo's own), "linked" (a worktree), or null.
+// A space's checkout: a jj workspace, a main Git checkout, or a linked worktree.
 async function checkout(folder, on) {
+  const jj = await exec("jj", ["--no-pager", "--color=never", "--ignore-working-copy", "--at-op=@", "workspace", "root"], { cwd: folder, on }).catch(() => null);
+  if (jj?.code === 0 && jj.stdout.trim()) return "jj";
+  if (jj?.code && !/there is no jj repo/i.test(jj.stderr)) return null;
   const top = await exec("git", ["rev-parse", "--show-toplevel"], { cwd: folder, on });
   const common = await exec("git", ["rev-parse", "--path-format=absolute", "--git-common-dir"], { cwd: folder, on });
   if (top.code !== 0 || common.code !== 0) return null;
@@ -64,7 +67,11 @@ function items(p, git) {
     case "space":
       return [
         ["Rename", "space.rename", { id: tg.id }],
-        ...(git ? [["New worktree", "worktree", { space: tg.id, action: "new" }], ["Open worktree", "worktree", { space: tg.id, action: "open" }]] : []),
+        ...(git ? [
+          [git === "jj" ? "New jj workspace" : "New worktree", "worktree", { space: tg.id, action: "new" }],
+          [git === "jj" ? "Open jj workspace" : "Open worktree", "worktree", { space: tg.id, action: "open" }],
+        ] : []),
+        ...(git === "jj" ? [["Change revision…", "worktree", { space: tg.id, action: "revision" }]] : []),
         ...(git === "linked" ? [["Remove worktree", "worktree", { space: tg.id, action: "remove" }]] : []),
         ["Close", "space.close", { id: tg.id }],
       ];
@@ -113,7 +120,10 @@ export default class Menu extends View {
     const it = items(props(), this.git)[i];
     if (!it) return;
     closeOverlay(props()?.overlay);
-    if (it[1] === "worktree") openOverlay({ mod: "worktree", kind: "dialog", ...(it[2].action === "open" ? { width: 560, height: 480 } : { width: 440, height: 260 }), props: it[2] });
+    if (it[1] === "worktree") {
+      const large = it[2].action === "open" || this.git === "jj";
+      openOverlay({ mod: "worktree", kind: "dialog", width: large ? 560 : 440, height: large ? 480 : 260, props: it[2] });
+    }
     else run(it[1], it[2]);
   }
 
