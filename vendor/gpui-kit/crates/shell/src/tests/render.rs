@@ -5830,6 +5830,101 @@ export default class Code extends View {
     });
 }
 
+// HERDR: what Tab inserts in a script editor made from `init`, which may set
+// the indent with `EditorState.new` options or `set_tab_size`.
+fn editor_tab_inserts(cx: &mut TestAppContext, init: &str) -> String {
+    cx.update(|cx| crate::init(cx));
+    let runtime = ShellRuntime::new_isolated().expect("runtime");
+    cx.update(|cx| runtime.set_global(cx));
+    let source = format!(
+        r#"
+import {{ View }} from "gpui-kit";
+import {{ Editor, EditorState }} from "gpui-base";
+export default class Code extends View {{
+  init() {{ {init} }}
+  render(cx) {{ return Editor.new(this.code).h(240); }}
+}}
+"#
+    );
+    let view_type = runtime.load_source("tab-code", &source).expect("load");
+    let runtime_for_view = runtime.clone();
+    let (_root, context) = cx.add_window_view(move |window, cx| {
+        let object = runtime_for_view
+            .instantiate(&view_type, window, cx)
+            .expect("instantiate");
+        let view = cx.new(|_| ScriptView::new(runtime_for_view, object));
+        crate::root::ShellRoot::new(view.into(), window, cx)
+    });
+    context.update(|window, cx| window.draw(cx).clear(cx));
+    let editor = runtime.entities().first_editor().expect("editor");
+    context.update(|window, cx| {
+        editor.update(cx, |state, cx| {
+            state.focus(window, cx);
+            state.set_selected_range(0..0, cx);
+        })
+    });
+    context.update(|window, cx| window.draw(cx).clear(cx));
+    context.simulate_keystrokes("tab");
+    context.update(|_, cx| editor.read(cx).value().to_string())
+}
+
+// HERDR: `tab_size` and `hard_tabs` decide what Tab inserts; omitted, it stays 2 spaces.
+#[gpui::test]
+fn a_script_editor_indents_by_its_tab_size(cx: &mut TestAppContext) {
+    let new = |options: &str| {
+        format!("this.code = EditorState.new({{ language: \"python\", value: \"x\", {options} }});")
+    };
+    assert_eq!(editor_tab_inserts(cx, &new("")), "  x");
+    assert_eq!(editor_tab_inserts(cx, &new("tab_size: 4")), "    x");
+    assert_eq!(editor_tab_inserts(cx, &new("hard_tabs: true")), "\tx");
+    assert_eq!(
+        editor_tab_inserts(
+            cx,
+            &format!("{} this.code.set_tab_size(3);", new("hard_tabs: true"))
+        ),
+        "   x"
+    );
+    assert_eq!(
+        editor_tab_inserts(cx, &format!("{} this.code.set_tab_size(8, true);", new(""))),
+        "\tx"
+    );
+}
+
+// HERDR: a tab size that is not a whole number of columns from 1 to 16 is refused.
+#[gpui::test]
+fn a_script_editor_refuses_a_bad_tab_size(cx: &mut TestAppContext) {
+    cx.update(|cx| crate::init(cx));
+    let runtime = ShellRuntime::new_isolated().expect("runtime");
+    cx.update(|cx| runtime.set_global(cx));
+    let window = cx.add_window(|_, _| Empty);
+    let mut context = VisualTestContext::from_window(*window.deref(), cx);
+    for (name, init) in [
+        ("zero", "EditorState.new({ tab_size: 0 })"),
+        ("huge", "EditorState.new({ tab_size: 17 })"),
+        ("fraction", "EditorState.new({ tab_size: 2.5 })"),
+        ("setter", "EditorState.new({}).set_tab_size(0)"),
+    ] {
+        let source = format!(
+            r#"
+import {{ View, div }} from "gpui-kit";
+import {{ EditorState }} from "gpui-base";
+export default class Bad extends View {{
+  init() {{ this.code = {init}; }}
+  render(cx) {{ return div(); }}
+}}
+"#
+        );
+        let view_type = runtime.load_source(name, &source).expect("load");
+        let error = context
+            .update(|window, cx| runtime.instantiate(&view_type, window, cx))
+            .expect_err(name);
+        assert!(
+            error.to_string().contains("a whole number from 1 to 16"),
+            "{name}: {error}"
+        );
+    }
+}
+
 #[gpui::test]
 fn an_unknown_input_event_names_the_valid_ones(cx: &mut TestAppContext) {
     cx.update(|cx| crate::init(cx));
