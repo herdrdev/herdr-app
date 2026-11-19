@@ -22,7 +22,6 @@ use collections::HashMap;
 use filedescriptor::Pipe;
 use gpui_util::ResultExt as _;
 use http_client::Url;
-use smallvec::SmallVec;
 use wayland_backend::client::ObjectId;
 use wayland_backend::protocol::WEnum;
 use wayland_client::event_created_child;
@@ -90,7 +89,9 @@ use crate::linux::{
     keystroke_from_xkb, keystroke_underlying_dead_key, modifiers_from_xkb, new_xkb_context,
     open_uri_internal, read_fd_with_timeout, reveal_path_internal,
     wayland::{
-        clipboard::{Clipboard, DataOffer, FILE_LIST_MIME_TYPE, TEXT_MIME_TYPES},
+        clipboard::{
+            Clipboard, DataOffer, FILE_LIST_MIME_TYPE, TEXT_MIME_TYPES, parse_file_uri_list,
+        },
         cursor::Cursor,
         serial::{Serial, SerialKind, SerialTracker},
         to_shape,
@@ -2848,17 +2849,7 @@ impl Dispatch<wl_data_device::WlDataDevice, ()> for WaylandClientStatePtr {
                                 }
                             };
 
-                            let paths: SmallVec<[_; 2]> = file_list
-                                .lines()
-                                .filter_map(|path| Url::parse(path).log_err())
-                                .filter_map(|url| match url.to_file_path() {
-                                    Ok(url) => Some(url),
-                                    Err(()) => {
-                                        log::error!("Failed turn {url:?} into a file path");
-                                        None
-                                    }
-                                })
-                                .collect();
+                            let paths = parse_file_uri_list(&file_list);
                             let position = Point::new(x.into(), y.into());
 
                             // Prevent dropping text from other programs.
@@ -3110,6 +3101,8 @@ impl Dispatch<XdgDialogV1, ()> for WaylandClientStatePtr {
 #[cfg(test)]
 mod tests {
     use std::cell::Cell;
+
+    use smallvec::SmallVec;
 
     use super::*;
 
