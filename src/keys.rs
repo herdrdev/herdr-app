@@ -21,6 +21,19 @@ use std::rc::Rc;
 use gpui_shell::action::ShellAction;
 use std::collections::BTreeMap;
 
+fn context_name(name: &str) -> bool {
+    !name.is_empty() && name.chars().all(|c| c.is_alphanumeric() || matches!(c, '_' | '-'))
+}
+
+/// Shared validation for script-opened and restored overlays, and keys.json sections.
+pub fn terminal_context(spec: &serde_json::Value) -> Result<Option<&str>, &'static str> {
+    match spec.get("terminal_context") {
+        None | Some(serde_json::Value::Null) => Ok(None),
+        Some(serde_json::Value::String(name)) if context_name(name) => Ok(Some(name)),
+        _ => Err("terminal_context must be a nonempty name (letters, digits, _ or -)"),
+    }
+}
+
 /// The reserved shortcut that restores the default layout and keys.
 pub const ESCAPE_HATCH: &str = "ctrl-alt-shift-escape";
 
@@ -117,6 +130,12 @@ pub fn path() -> std::path::PathBuf {
 /// it would beat `layout:` (same depth, added earlier) and only lose to
 /// `terminal` and `mod:` by order.
 fn tab(section: &str) -> Result<String, String> {
+    if let Some(name) = section.strip_prefix("terminal:") {
+        if !context_name(name) { return Err(format!("invalid terminal context {name:?}: use letters, digits, _ or -")); }
+        // The terminal is still the deepest match. BTreeMap puts this section after
+        // `terminal`, so its bindings win at that same depth, not over mod inputs.
+        return Ok(format!("terminal_context == {name} > Terminal"));
+    }
     match section {
         "global" => Ok("Herdr".into()),
         "terminal" => Ok("Terminal".into()),
@@ -124,7 +143,7 @@ fn tab(section: &str) -> Result<String, String> {
             (Some(p), _) if !p.is_empty() => Ok(format!("mod == {p}")),
             // While layouts/<name>.json is shown (the window's tab says which).
             (_, Some(l)) if !l.is_empty() => Ok(format!("layout == {l}")),
-            _ => Err(format!("unknown section {s:?}: use \"global\", \"terminal\", \"layout:<name>\" or \"mod:<name>\"")),
+            _ => Err(format!("unknown section {s:?}: use \"global\", \"terminal\", \"terminal:<name>\", \"layout:<name>\" or \"mod:<name>\"")),
         },
     }
 }
@@ -277,6 +296,56 @@ pub fn install(bindings: Vec<KeyBinding>, cx: &mut App) {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn terminal_context_names_are_validated_before_building_key_predicates() {
+        use serde_json::json;
+        for spec in [json!({}), json!({"terminal_context": null})] {
+            assert_eq!(super::terminal_context(&spec), Ok(None));
+        }
+        assert_eq!(super::terminal_context(&json!({"terminal_context": "float-space_2"})), Ok(Some("float-space_2")));
+        for name in ["", "two names", "a.b", "x > Terminal", "x = y", "x\nTerminal"] {
+            assert!(super::terminal_context(&json!({"terminal_context": name})).is_err());
+            assert!(super::parse(&json!({format!("terminal:{name}"): {"f6": "send:x"}}).to_string()).is_err());
+        }
+        for name in [json!(2), json!(false), json!([]), json!({})] {
+            assert!(super::terminal_context(&json!({"terminal_context": name})).is_err());
+        }
+    }
+
+    #[test]
+    fn terminal_context_bindings_override_only_their_terminal() {
+        use gpui::{KeyContext, Keymap, Keystroke};
+        use serde_json::json;
+        let map = Keymap::new(super::parse(&json!({
+            "global": { "f6": "send:global" },
+            "terminal": { "f6": "send:terminal", "f7": "send:fallback", "f8": "send:generic" },
+            "terminal:float-space": { "f6": "send:float", "f8": "terminal" },
+            "terminal:other": { "f6": "send:other" }
+        }).to_string()).unwrap());
+        let stack = |scope: Option<&str>, leaf: &str| {
+            let mut stack = vec![KeyContext::parse("Herdr").unwrap()];
+            if let Some(scope) = scope { stack.push(KeyContext::parse(&format!("terminal_context = {scope}")).unwrap()); }
+            stack.push(KeyContext::parse(leaf).unwrap());
+            stack
+        };
+        for (scope, leaf, expected) in [
+            (None, "Terminal", "send:terminal"),
+            (Some("float-space"), "Terminal", "send:float"),
+            (Some("other"), "Terminal", "send:other"),
+            (Some("unknown"), "Terminal", "send:terminal"),
+            (Some("float-space"), "Input", "send:global"),
+        ] {
+            let (bindings, _) = map.bindings_for_input(&[Keystroke::parse("f6").unwrap()], &stack(scope, leaf));
+            let action = bindings[0].action().as_any().downcast_ref::<super::ShellAction>().unwrap();
+            assert_eq!(action.id(), expected);
+        }
+        let scoped = stack(Some("float-space"), "Terminal");
+        let (fallback, _) = map.bindings_for_input(&[Keystroke::parse("f7").unwrap()], &scoped);
+        assert_eq!(fallback[0].action().as_any().downcast_ref::<super::ShellAction>().unwrap().id(), "send:fallback");
+        let (disabled, _) = map.bindings_for_input(&[Keystroke::parse("f8").unwrap()], &scoped);
+        assert!(disabled.is_empty(), "terminal must disable the generic binding only in this scope");
+    }
+
     #[test]
     fn only_byte_identical_shipped_keys_are_upgraded() {
         let dir = std::env::temp_dir().join(format!("herdr-keys-migration-{}", std::process::id()));
