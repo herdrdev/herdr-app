@@ -6411,6 +6411,7 @@ globalThis.__gpui = (() => {
     set_masked: (masked) => __input_set_masked(handle, Boolean(masked)),
     set_loading: (loading) => __input_set_loading(handle, Boolean(loading)),
     focus: () => __input_focus(handle),
+    blur: () => __input_blur(handle),
     release: () => __input_release(handle),
   });
 
@@ -6431,6 +6432,7 @@ globalThis.__gpui = (() => {
       ),
     set_soft_wrap: (wrap) => __textarea_set_soft_wrap(handle, Boolean(wrap)),
     focus: () => __textarea_focus(handle),
+    blur: () => __textarea_blur(handle),
     release: () => __textarea_release(handle),
   });
 
@@ -7308,6 +7310,7 @@ globalThis.__gpui = (() => {
           set_value: (value) => __editor_set_value(handle, String(value)),
           on: (event, handler) => __editor_on(handle, String(event), handler),
           focus: () => __editor_focus(handle),
+          blur: () => __editor_blur(handle),
           release: () => __editor_release(handle),
         };
       },

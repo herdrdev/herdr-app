@@ -3129,6 +3129,12 @@ const BASE: &str = r#"  /** A row. */
     set_loading(loading: boolean): void;
     /** Moves the keyboard onto the input. */
     focus(): void;
+    /**
+     * Takes the keyboard off the input if it has it, leaving nothing focused.
+     * The state stays usable; `blur` fires as it does when focus moves away.
+     */
+    blur(): void;
+    /** Frees the state; it can't be read or drawn afterwards. Not a blur. */
     release(): boolean;
   }
 
@@ -3189,6 +3195,12 @@ const BASE: &str = r#"  /** A row. */
     set_soft_wrap(wrap: boolean): void;
     /** Moves the keyboard onto the textarea. */
     focus(): void;
+    /**
+     * Takes the keyboard off the textarea if it has it, leaving nothing focused.
+     * The state stays usable; `blur` fires as it does when focus moves away.
+     */
+    blur(): void;
+    /** Frees the state; it can't be read or drawn afterwards. Not a blur. */
     release(): boolean;
   }
 
@@ -3212,6 +3224,12 @@ const BASE: &str = r#"  /** A row. */
     on(event: "change" | "submit" | "focus" | "blur" | "paste_other", handler: (event: InputEvent, cx: Context) => void): boolean;
     /** Moves the keyboard onto the editor. */
     focus(): void;
+    /**
+     * Takes the keyboard off the editor if it has it, leaving nothing focused.
+     * The state stays usable; `blur` fires as it does when focus moves away.
+     */
+    blur(): void;
+    /** Frees the state; it can't be read or drawn afterwards. Not a blur. */
     release(): boolean;
   }
   export const EditorState: {
