@@ -4579,26 +4579,52 @@ impl AppWindow {
         let line = pane_size::frame_border(f, on);
         let group = SharedString::from(format!("pane-{}", n.id));
         let mut el = div().size_full().relative().flex().flex_col().overflow_hidden().group(group.clone());
-        if let Some(r) = f.radius {
+        let mut bevel = None;
+        let cut = f.corner_cut.filter(|v| v.is_finite() && *v > 0.0);
+        if let Some(r) = f.radius.filter(|_| cut.is_none()) {
             el = el.rounded(settings::z(r));
         }
         if let Some(bg) = &f.background {
             el = paint(el, bg);
         }
         if let Some(l) = line {
-            el = el.border(settings::z(l.width)).border_color(c(&l.color));
+            let width = settings::z(l.width);
+            let color = c(&l.color);
+            if let Some(cut) = cut {
+                // Preserve the same content inset as the standard border.
+                el = el.border(width).border_color(gpui::transparent_black());
+                let cut = settings::z(cut);
+                bevel = Some(canvas(|_, _, _| (), move |bounds, _, window, _| {
+                    // The absolute canvas fills the area inside the border; recover
+                    // the outer frame bounds so the stroke uses the reserved inset.
+                    let bounds = bounds.dilate(width);
+                    let half = width / 2.0;
+                    let left = bounds.left() + half;
+                    let top = bounds.top() + half;
+                    let right = bounds.right() - half;
+                    let bottom = bounds.bottom() - half;
+                    let cut = cut.min((right - left) / 2.0).min((bottom - top) / 2.0).max(px(0.0));
+                    let mut path = PathBuilder::stroke(width);
+                    path.add_polygon(&[point(left + cut, top), point(right - cut, top), point(right, top + cut),
+                        point(right, bottom - cut), point(right - cut, bottom), point(left + cut, bottom),
+                        point(left, bottom - cut), point(left, top + cut)], true);
+                    if let Ok(path) = path.build() { window.paint_path(path, color); }
+                }).absolute().size_full().into_any_element());
+            } else {
+                el = el.border(width).border_color(color);
+            }
         }
         el = shadow(el, f.shadow.as_deref());
         let body = div().flex_1().min_h_0().flex().child(inner);
-        let Some(h) = &f.header else { return el.child(body).into_any_element() };
+        let Some(h) = &f.header else { return el.child(body).children(bevel).into_any_element() };
         let head = div().flex_none().h(settings::z(pane_size::header_height(h))).w_full().flex()
             .child(self.render_slot(&format!("{}#frame", n.id), cx));
         if h.hover() {
             let head = head.absolute().left_0().right_0().opacity(0.).group_hover(group, |s| s.opacity(1.));
             let head = if h.bottom() { head.bottom_0() } else { head.top_0() };
-            return el.child(body).child(head).into_any_element();
+            return el.child(body).child(head).children(bevel).into_any_element();
         }
-        if h.bottom() { el.child(body).child(head) } else { el.child(head).child(body) }.into_any_element()
+        if h.bottom() { el.child(body).child(head) } else { el.child(head).child(body) }.children(bevel).into_any_element()
     }
 
     /// `frame`: how panes are wrapped here (inside a framed tab), else None.
