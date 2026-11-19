@@ -1123,7 +1123,10 @@ impl ToastRequest {
 }
 
 /// Binds root navigation and selected-text copy once per `App`.
-fn install_key_bindings(cx: &mut App) {
+///
+/// HERDR: [`crate::init`] binds them up front, so a host that snapshots and
+/// rebinds the keymap sees them whether or not a root existed yet.
+pub(crate) fn install_key_bindings(cx: &mut App) {
     if cx.has_global::<KeyBindingsInstalled>() {
         return;
     }
