@@ -21,6 +21,13 @@ mod change;
 mod cursor;
 #[path = "editor/decorations.rs"]
 mod decorations;
+// HERDR: lines drawn differently from their bytes (live-preview Markdown).
+#[path = "editor/presentation.rs"]
+mod presentation;
+pub use presentation::{
+    LineImage, LinePresentation, LinePresenter, PresentationSpan, PresenterEdit, SpanKind,
+    SpanStyle,
+};
 #[path = "editor/diagnostics.rs"]
 mod diagnostics;
 #[path = "editor/display_map/mod.rs"]

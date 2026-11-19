@@ -3064,6 +3064,45 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.selections.merge_overlapping();
     }
 
+    /// HERDR: the caret's row and the selection inside it, for a presenter to
+    /// show that row's markers as source. `None` without focus, so an editor
+    /// nobody is typing in reads as a finished page. A selection that leaves
+    /// the caret's row reveals the whole row.
+    pub(super) fn presentation_reveal(&self, window: &Window) -> Option<(usize, Range<usize>)> {
+        if !self.focus_handle.is_focused(window) {
+            return None;
+        }
+        let cursor = self.cursor().min(self.text.len());
+        let row = self.text.offset_to_point(cursor).row;
+        let start = self.text.line_start_offset(row);
+        let end = self.text.line_end_offset(row);
+        let selection = self.selected_range();
+        let local = if selection.start >= start && selection.end <= end {
+            selection.start - start..selection.end - start
+        } else {
+            0..end - start
+        };
+        Some((row, local))
+    }
+
+    /// HERDR: install (or remove) the presenter that hides, replaces and
+    /// scales text per line.
+    pub fn set_line_presenter(
+        &mut self,
+        presenter: Option<Rc<std::cell::RefCell<dyn crate::input::LinePresenter>>>,
+        cx: &mut Context<Self>,
+    ) {
+        self.display_map.set_presenter(presenter, cx);
+        cx.notify();
+    }
+
+    /// HERDR: what the presenter draws changed without the text changing
+    /// (a picture finished loading): wrap and draw again.
+    pub fn refresh_line_presentation(&mut self, cx: &mut Context<Self>) {
+        self.display_map.refresh_presentation(cx);
+        cx.notify();
+    }
+
     /// Get byte offset of the cursor.
     ///
     /// The offset is the UTF-8 offset.

@@ -195,6 +195,12 @@ pub(crate) struct EditorOptions {
     pub syntax: HashMap<String, String>,
     pub font_family: Option<String>,
     pub font_size: Option<f32>,
+    /// HERDR: read the text as Markdown and draw it formatted in place.
+    pub live_preview: bool,
+    /// HERDR: the font live preview draws code in; the theme's mono font when unset.
+    pub code_font_family: Option<String>,
+    /// HERDR: an icon font for live preview's task checkboxes.
+    pub symbol_font_family: Option<String>,
 }
 
 impl Default for EditorOptions {
@@ -209,6 +215,9 @@ impl Default for EditorOptions {
             syntax: HashMap::new(),
             font_family: None,
             font_size: None,
+            live_preview: false,
+            code_font_family: None,
+            symbol_font_family: None,
         }
     }
 }
@@ -462,14 +471,30 @@ impl EntityStore {
         &mut self,
         options: EditorOptions,
         style: InputEditorStyle,
+        colors: &HashMap<String, gpui::Hsla>,
         application: Option<Rc<ApplicationGeneration>>,
         window: &mut Window,
         cx: &mut App,
     ) -> Result<EntityHandle, EntityLimitError> {
         self.ensure_capacity()?;
+        // HERDR: live preview styles Markdown itself, so the grammar stays off.
+        let live_preview = options.live_preview.then(|| {
+            let mono = options.code_font_family.clone().map_or_else(
+                || gpui_base::Theme::global(cx).tokens.typography.mono.clone(),
+                Into::into,
+            );
+            let mut theme = crate::markdown_live::MarkdownTheme::from_colors(colors, mono);
+            theme.symbols = options.symbol_font_family.clone().map(Into::into);
+            theme
+        });
+        let language = if live_preview.is_some() {
+            String::new()
+        } else {
+            options.language
+        };
         let state = cx.new(|cx| {
             let mut state = EditorState::new(window, cx)
-                .language(options.language)
+                .language(language)
                 .line_number(options.line_numbers)
                 .folding(options.folding)
                 .soft_wrap(options.soft_wrap);
@@ -485,7 +510,16 @@ impl EntityStore {
             );
             state
         });
-        state.update(cx, |state, cx| state.set_value(options.value, window, cx));
+        state.update(cx, |state, cx| {
+            state.set_value(options.value, window, cx);
+            if let Some(theme) = live_preview {
+                let presenter = Rc::new(RefCell::new(
+                    crate::markdown_live::MarkdownPresenter::new(theme),
+                ));
+                crate::markdown_live::register(cx.entity_id(), &presenter);
+                state.set_line_presenter(Some(presenter), cx);
+            }
+        });
         self.push(Record::Editor {
             state,
             font_family: options.font_family,
