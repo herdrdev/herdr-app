@@ -409,6 +409,9 @@ pub struct Person {
     /// macOS Option sends Alt shortcuts, or follows the keyboard layout.
     #[serde(skip_serializing_if = "OptionAsAlt::is_auto")]
     pub option_as_alt: OptionAsAlt,
+    /// The click that opens a link in terminal text.
+    #[serde(skip_serializing_if = "LinkClick::is_auto")]
+    pub link_click: LinkClick,
     /// Light or dark: the system's, or one always.
     #[serde(skip_serializing_if = "Appearance::is_system")]
     pub appearance: Appearance,
@@ -450,6 +453,30 @@ impl OptionAsAlt {
     }
 }
 
+/// What opens a link (and a terminal address) in terminal text. `Shift` and
+/// `Plain` open it when the button is released, so a drag still selects.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum LinkClick {
+    /// Cmd on macOS, Ctrl elsewhere.
+    #[default]
+    Auto,
+    /// Cmd on macOS, the Windows or Super key elsewhere.
+    Cmd,
+    Ctrl,
+    Alt,
+    Shift,
+    /// A click with no modifier.
+    #[serde(rename = "none")]
+    Plain,
+}
+
+impl LinkClick {
+    fn is_auto(&self) -> bool {
+        *self == Self::Auto
+    }
+}
+
 fn is_true(b: &bool) -> bool {
     *b
 }
@@ -474,6 +501,7 @@ impl Default for Person {
             pane_scrollbars: true,
             minimum_contrast: 1.0,
             option_as_alt: OptionAsAlt::Auto,
+            link_click: LinkClick::Auto,
             appearance: Appearance::System,
             theme: None,
             colors: BTreeMap::new(),
@@ -520,6 +548,7 @@ pub struct Settings {
     pub copy_on_select: bool,
     pub minimum_contrast: f32,
     pub option_as_alt: OptionAsAlt,
+    pub link_click: LinkClick,
     pub sounds: Sounds,
 }
 
@@ -567,6 +596,7 @@ impl Default for Settings {
             copy_on_select: true,
             minimum_contrast: 1.0,
             option_as_alt: OptionAsAlt::Auto,
+            link_click: LinkClick::Auto,
             sounds: Sounds::default(),
         }
     }
@@ -611,6 +641,7 @@ impl Settings {
             copy_on_select: person.copy_on_select,
             minimum_contrast: person.minimum_contrast,
             option_as_alt: person.option_as_alt,
+            link_click: person.link_click,
         }
     }
 }
@@ -1007,6 +1038,21 @@ mod tests {
     }
 
     #[test]
+    fn link_click_defaults_to_auto_and_round_trips() {
+        let default: Person = serde_json::from_str("{}").unwrap();
+        assert_eq!(default.link_click, LinkClick::Auto);
+        assert!(serde_json::to_value(&default).unwrap().get("link_click").is_none());
+        assert_eq!(Settings::default().link_click, LinkClick::Auto);
+        for (value, expected) in [("auto", LinkClick::Auto), ("cmd", LinkClick::Cmd), ("ctrl", LinkClick::Ctrl), ("alt", LinkClick::Alt), ("shift", LinkClick::Shift), ("none", LinkClick::Plain)] {
+            let person: Person = serde_json::from_value(serde_json::json!({"link_click": value})).unwrap();
+            let settings = Settings::compose(&person, &crate::layout::Look::default(), true);
+            assert_eq!(settings.link_click, expected);
+            assert_eq!(serde_json::to_value(settings).unwrap()["link_click"], value);
+        }
+        assert!(serde_json::from_value::<Person>(serde_json::json!({"link_click": "invalid"})).is_err());
+    }
+
+    #[test]
     fn font_weight_defaults_to_medium_and_validates_the_range() {
         let default: Person = serde_json::from_str("{}").unwrap();
         assert_eq!(Settings::compose(&default, &crate::layout::Look::default(), true).font_weight, 500);
@@ -1080,7 +1126,7 @@ mod tests {
     /// settings.json key.
     #[test]
     fn the_guide_explains_every_setting() {
-        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), font_weight: Some(400), ui_font: Some(String::new()), telemetry: false, clipboard_write: false, copy_on_select: false, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), ..Person::default() };
+        let all = Person { core: Some(String::new()), font: Some(String::new()), font_size: Some(1.0), font_weight: Some(400), ui_font: Some(String::new()), telemetry: false, clipboard_write: false, copy_on_select: false, link_click: LinkClick::Shift, appearance: Appearance::Light, theme: Some(crate::layout::ThemeChoice::One(String::new())), colors: [("text".into(), String::new())].into(), ..Person::default() };
         let keys: Vec<String> = serde_json::to_value(&all).unwrap().as_object().unwrap().keys().cloned().collect();
         let guide = include_str!("../defaults/AGENTS.md");
         let section = guide.split("## The person").nth(1).and_then(|s| s.split("\n## ").next()).unwrap_or_default();
