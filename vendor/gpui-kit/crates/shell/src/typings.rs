@@ -3210,6 +3210,8 @@ const BASE: &str = r#"  /** A row. */
     /** Replaces the selection with `text`, as typing would (one undo step). */
     replace(text: string): void;
     on(event: "change" | "submit" | "focus" | "blur" | "paste_other", handler: (event: InputEvent, cx: Context) => void): boolean;
+    /** Changes the indent once the file's style is known: see `tab_size` and `hard_tabs` on `new`. */
+    set_tab_size(tab_size: number, hard_tabs?: boolean): void;
     /** Moves the keyboard onto the editor. */
     focus(): void;
     release(): boolean;
@@ -3230,6 +3232,10 @@ const BASE: &str = r#"  /** A row. */
       readonly?: boolean;
       /** Defaults to false. */
       soft_wrap?: boolean;
+      /** Columns per tab, and spaces Tab inserts; a whole number from 1 to 16. Defaults to 2. */
+      tab_size?: number;
+      /** Tab inserts a `\t` instead of spaces. Defaults to false. */
+      hard_tabs?: boolean;
       /** Semantic colors: keyword, string, comment, function, type, number,
        * constant, variable, operator, punctuation, boolean, string.escape.
        * Values are concrete hex colors; unspecified UI colors follow the theme. */
