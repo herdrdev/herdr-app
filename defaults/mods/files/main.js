@@ -12,6 +12,10 @@ function location() {
 const key = () => JSON.stringify(location());
 const LANG = { ts: "js", tsx: "js", mts: "js", cts: "js", jsx: "js", mjs: "js", toml: "yaml", jsonc: "json", svelte: "html", vue: "html" };
 const PER_FOLDER = 500, TOTAL = 5000;
+// A load Herdr cuts off at its time limit never finishes, not even its finally; after this
+// long one counts as gone and the next refresh may start another.
+const GIVE_UP = 120000;
+const running = (since) => Boolean(since) && Date.now() - since < GIVE_UP;
 
 async function directory(path, on) {
   const windowsDirectory = async () => {
@@ -41,7 +45,7 @@ async function directory(path, on) {
 export default class Files extends View {
   init(_props, cx) {
     this.saved = new Map();
-    this.entries = new Map(); this.folders = new Set(); this.pending = new Set(); this.marks = {};
+    this.entries = new Map(); this.folders = new Set(); this.pending = new Map(); this.marks = {};
     this.refresh(cx);
     cx.timer.every(10000, cx => this.refresh(cx));
   }
@@ -75,13 +79,12 @@ export default class Files extends View {
       if (this.context) this.saved.set(this.context.key, { folders: this.folders, file: this.file });
       const saved = this.saved.get(next);
       this.context = { key: next, cwd, on }; this.root = cwd; this.on = on; this.entries = new Map(); this.folders = new Set(saved?.folders);
-      this.pending = new Set(); this.marks = {}; this.show(null); this.watched = null; this.error = null; this.limited = false;
+      this.pending = new Map(); this.marks = {}; this.show(null); this.watched = null; this.error = null; this.limited = false;
       this.loading = false;
       if (saved?.file) this.show(saved.file, cx);
     }
-    if (!cwd || this.loading) return;
-    const context = this.context;
-    this.loading = true;
+    if (!cwd || running(this.loading)) return;
+    const context = this.context, started = this.loading = Date.now();
     this.limited = false;
     cx.spawn(async cx => {
       try {
@@ -102,7 +105,7 @@ export default class Files extends View {
         if (!this.current(context)) return;
         this.marks = marks; this.error = null; this.watch(cwd, cx);
       } catch (e) { if (this.current(context)) this.error = String(e); }
-      finally { if (this.context === context) this.loading = false; cx.notify(); }
+      finally { if (this.loading === started) this.loading = false; cx.notify(); }
     });
   }
 
@@ -114,13 +117,13 @@ export default class Files extends View {
       }
     } else {
       this.folders.add(path);
-      if (!this.entries.has(path) && !this.pending.has(path)) {
-        const context = this.context;
-        this.pending.add(path);
+      if (!this.entries.has(path) && !running(this.pending.get(path))) {
+        const context = this.context, started = Date.now();
+        this.pending.set(path, started);
         cx.spawn(async cx => {
           try { await this.loadFolder(path, context); }
           catch (e) { if (this.current(context)) this.error = String(e); }
-          finally { if (this.context === context) this.pending.delete(path); cx.notify(); }
+          finally { if (this.pending.get(path) === started) this.pending.delete(path); cx.notify(); }
         });
       }
     }
