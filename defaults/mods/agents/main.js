@@ -171,8 +171,9 @@ export default class Agents extends View {
   }
 
   // Live sub-agents of `addr`, depth first, each with the tree lines in front of it.
+  // With `ownRows`, a kept sub-agent (`this.placed`) isn't drawn in the tree: it has a row.
   tree(all, addr, lead = []) {
-    const kids = all.filter((k) => k.parent === addr && k.state === "live");
+    const kids = all.filter((k) => k.parent === addr && k.state === "live" && !this.placed?.has(k.address));
     return kids.flatMap((k, i) => {
       const last = i === kids.length - 1;
       return [
@@ -226,6 +227,9 @@ export default class Agents extends View {
     const sort = sortOf();
     let list = agents();
     this.listed = new Map(list.map((a) => [a.address, a.status]));
+    // A layout may ask for a row per kept sub-agent (`ownRows`) instead of a nested
+    // tree: they keep their own status there, so nothing rolls up into the parent.
+    this.placed = props()?.ownRows ? new Set(list.map((a) => a.address)) : undefined;
     const all = terminals();
     this.migratePins(all);
     const shown = focused()?.agent;
