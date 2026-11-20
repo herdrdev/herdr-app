@@ -882,11 +882,16 @@ fn exec_limit(options: Option<&HostValue>) -> Result<Duration, HostError> {
 }
 
 pub(crate) fn run_blocking(command: &str, args: &[String], cwd: Option<String>, limit: Duration) -> Result<(i32, String, String), String> {
-    use std::io::Read;
     // The core may have no `hc` link beside it (a Windows zip has only herdr-core.exe).
     let program = if command == "hc" { crate::core_bin::path() } else { PathBuf::from(command) };
-    let mut child = crate::spawn::command(program)
-        .args(args)
+    run_blocking_command(crate::spawn::command(program).args(args), command, cwd, limit)
+}
+
+pub(crate) fn run_blocking_command(
+    process: &mut std::process::Command, command: &str, cwd: Option<String>, limit: Duration,
+) -> Result<(i32, String, String), String> {
+    use std::io::Read;
+    let mut child = process
         .current_dir(cwd.map(PathBuf::from).unwrap_or_else(home))
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
