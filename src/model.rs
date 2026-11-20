@@ -529,14 +529,16 @@ impl Model {
     /// Applies a status word from core (Herdr's seen rules).
     pub fn set_word(&mut self, address: &str, word: Option<String>, app: Option<String>, looking: bool) -> bool {
         let a = self.agents.entry(address.to_owned()).or_insert_with(|| Agent { seen: true, ..Default::default() });
+        let app_changed = app.is_some() && app != a.app;
         a.app = app.or(a.app.take());
         if a.word == word {
-            return false;
+            return app_changed;
         }
         let was_busy = matches!(a.word.as_deref(), Some("working" | "blocked"));
         match word.as_deref() {
             Some("working" | "blocked") => a.seen = true,
             // A finish you didn't watch is "done" until you look at it.
+            Some("done") if a.app.as_deref() == Some("codex") => a.seen = looking,
             Some(_) if was_busy => a.seen = looking,
             _ => {}
         }
@@ -549,12 +551,17 @@ impl Model {
 
     /// Herdr's attention rule for a change of 7501 word: needing you always
     /// alerts; finishing alerts only if the person wasn't looking.
-    pub fn alert(prev: Option<&str>, new: Option<&str>, looking: bool) -> Option<Alert> {
+    pub fn alert(prev: Option<&str>, new: Option<&str>, app: Option<&str>, looking: bool) -> Option<Alert> {
         let blocked = |w: Option<&str>| matches!(w, Some("blocked" | "error"));
         let busy = |w: Option<&str>| matches!(w, Some("working" | "blocked" | "error"));
         if blocked(new) && !blocked(prev) {
             Some(Alert::Blocked)
-        } else if busy(prev) && new.is_some() && !busy(new) && !looking {
+        } else if looking {
+            None
+        } else if app == Some("codex") {
+            // Codex also reports working during MCP setup. Only its explicit done is a result.
+            (prev.is_some() && prev != new && new == Some("done")).then_some(Alert::Done)
+        } else if busy(prev) && new.is_some() && !busy(new) {
             Some(Alert::Done)
         } else {
             None
@@ -564,11 +571,17 @@ impl Model {
     /// `alert` for one terminal: only ours ring. A sub-agent reports to its
     /// parent; a terminal in none of the spaces (another machine's, another
     /// app's) isn't the person's business here.
-    pub fn alert_for(&self, addr: &str, sub_agent: bool, prev: Option<&str>, new: Option<&str>, looking: bool) -> Option<Alert> {
+    pub fn alert_for(&self, addr: &str, sub_agent: bool, new: Option<&str>, app: Option<&str>, looking: bool) -> Option<Alert> {
         if sub_agent || self.pane_of(addr).is_none() {
             return None;
         }
-        Self::alert(prev, new, looking)
+        let previous = self.agents.get(addr);
+        Self::alert(
+            previous.and_then(|a| a.word.as_deref()),
+            new,
+            app.or_else(|| previous.and_then(|a| a.app.as_deref())),
+            looking,
+        )
     }
 
     /// Marks what the person is looking at as seen.
@@ -599,6 +612,7 @@ impl Model {
         Some(match a.word.as_deref()? {
             "working" => "working",
             "blocked" | "error" => "blocked",
+            "idle" if a.app.as_deref() == Some("codex") => "idle",
             _ if a.seen_turn.map_or(!a.seen, |s| a.turn > s) => "done",
             _ => "idle",
         })
@@ -738,7 +752,7 @@ mod tests {
 
     #[test]
     fn alerts_follow_herdr() {
-        let alert = Model::alert;
+        let alert = |prev, new, looking| Model::alert(prev, new, None, looking);
         assert_eq!(alert(Some("working"), Some("blocked"), true), Some(Alert::Blocked));
         assert_eq!(alert(Some("blocked"), Some("error"), false), None);
         assert_eq!(alert(Some("working"), Some("idle"), false), Some(Alert::Done));
@@ -750,14 +764,16 @@ mod tests {
 
     #[test]
     fn only_our_own_agents_alert() {
-        let m = model_with_one();
+        let mut m = model_with_one();
+        m.set_word("t1", Some("working".into()), None, false);
         // In a space: it rings.
-        assert_eq!(m.alert_for("t1", false, Some("working"), Some("done"), false), Some(Alert::Done));
+        assert_eq!(m.alert_for("t1", false, Some("done"), None, false), Some(Alert::Done));
         // Another machine's, or another app's, in none of the spaces: quiet.
-        assert_eq!(m.alert_for("vps/t7", false, Some("working"), Some("done"), false), None);
-        assert_eq!(m.alert_for("t9", false, Some("working"), Some("blocked"), false), None);
+        m.set_word("vps/t7", Some("working".into()), None, false);
+        assert_eq!(m.alert_for("vps/t7", false, Some("done"), None, false), None);
+        assert_eq!(m.alert_for("t9", false, Some("blocked"), None, false), None);
         // A sub-agent reports to its parent, not to the person.
-        assert_eq!(m.alert_for("t1", true, Some("working"), Some("blocked"), false), None);
+        assert_eq!(m.alert_for("t1", true, Some("blocked"), None, false), None);
     }
 
     #[test]
@@ -1058,6 +1074,48 @@ mod tests {
         assert_eq!(m.status("t1"), Some("idle"));
         m.set_word("t1", Some("blocked".into()), None, true);
         assert_eq!(m.rollup(&m.all_addresses()), Some("blocked"));
+    }
+
+    #[test]
+    fn codex_mcp_refresh_stays_idle_despite_core_turn_increment() {
+        let mut m = model_with_one();
+        m.set_word("t1", Some("idle".into()), Some("codex".into()), false);
+        m.set_turn("t1", 1, Some(1));
+        m.set_word("t1", Some("working".into()), None, false);
+        assert_eq!(m.alert_for("t1", false, Some("idle"), None, false), None);
+        m.set_word("t1", Some("idle".into()), None, false);
+        m.set_turn("t1", 2, Some(1));
+        assert_eq!(m.status("t1"), Some("idle"));
+        assert_eq!(m.rollup(&m.all_addresses()), Some("idle"));
+        m.set_turn("t1", 2, None);
+        assert_eq!(m.status("t1"), Some("idle"));
+    }
+
+    #[test]
+    fn codex_explicit_done_is_unread_and_alerts_once() {
+        // The desktop can receive a completion without an intermediate working snapshot.
+        for previous in ["idle", "working"] {
+            let mut m = model_with_one();
+            m.set_word("t1", Some(previous.into()), Some("codex".into()), false);
+            m.set_turn("t1", 1, Some(1));
+            assert_eq!(m.alert_for("t1", false, Some("done"), None, false), Some(Alert::Done));
+            assert_eq!(m.alert_for("t1", false, Some("done"), None, true), None);
+            m.set_word("t1", Some("done".into()), None, false);
+            m.set_turn("t1", 2, Some(1));
+            assert_eq!(m.status("t1"), Some("done"));
+            assert_eq!(m.alert_for("t1", false, Some("done"), None, false), None);
+            m.set_turn("t1", 2, Some(2));
+            assert_eq!(m.status("t1"), Some("idle"));
+        }
+    }
+
+    #[test]
+    fn codex_approval_still_alerts_when_visible() {
+        let mut m = model_with_one();
+        m.set_word("t1", Some("working".into()), Some("codex".into()), true);
+        assert_eq!(m.alert_for("t1", false, Some("blocked"), None, true), Some(Alert::Blocked));
+        m.set_word("t1", Some("blocked".into()), None, true);
+        assert_eq!(m.status("t1"), Some("blocked"));
     }
 
     #[test]

@@ -27,6 +27,10 @@ Showing an agent:
 With no `herdr.seen` label, use your own seen rules for that terminal.
 A missing label is not `0`.
 
+For Codex, Herdr Desktop requires the program to report `done` before it
+shows an unread completion. Codex can also return to `idle` after MCP
+initialization, which advances core's counter without completing a user turn.
+
 Writing it:
 
 - When a person is looking at an agent, write `herdr.seen=<turn>`. Write
