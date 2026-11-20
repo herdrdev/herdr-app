@@ -2,12 +2,14 @@
 // Places (spaces, tabs) stay in the picker. Fuzzy: your letters in
 // order, word starts and runs rank higher. Empty: recent first, then every
 // group. Choices are entries of their own ("Layout: Zen"); commands that need
-// a name ask for it. Enter runs, ↑/↓ move, Esc closes.
+// a name ask for it. Mods add entries of their own with `palette` in their
+// mod.json. Enter runs, ↑/↓ move, Esc closes.
 // The app's own mod: rewritten from the binary on every start.
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { commands, layouts, keys, run, theme, themes, settings, props, closeOverlay, openOverlay, shared, window as win } from "herdr";
+import { readdir, readFile } from "fs/promises";
+import { appHome, commands, layouts, keys, run, theme, themes, settings, props, closeOverlay, openOverlay, shared, window as win } from "herdr";
 
 // The list keeps one height while you move: rows and group titles have fixed
 // heights, and the window shows as many as fit in LIST_H.
@@ -17,7 +19,7 @@ const SHOWN = 10;
 const ROW_H = 32;
 const HEAD_H = 26;
 const LIST_H = SHOWN * ROW_H;
-const GROUPS = ["Recent", "Tab", "Pane", "Space", "Layout", "Terminal", "Agent", "Window", "App"];
+const GROUPS = ["Recent", "Tab", "Pane", "Space", "Layout", "Terminal", "Agent", "Window", "Mod", "App"];
 
 // The palette's names for commands: [command, args, group, title, keywords].
 const NAMED = [
@@ -75,8 +77,48 @@ function titleOf(name) {
   return { group: noun.charAt(0).toUpperCase() + noun.slice(1), title: `${verb.replace(/_/g, " ")} ${noun}`.replace(/^./, (c) => c.toUpperCase()) };
 }
 
+// The `palette` list of each mods/<name>/mod.json; unreadable ones are skipped.
+export async function modPalettes(root) {
+  const found = { folders: [], entries: [] };
+  let names = [];
+  try {
+    names = (await readdir(`${root}/mods`)).filter((n) => !n.startsWith(".")).sort();
+  } catch {
+    return found;
+  }
+  for (const mod of names) {
+    found.folders.push(mod);
+    try {
+      const list = JSON.parse(await readFile(`${root}/mods/${mod}/mod.json`, "utf8")).palette;
+      if (Array.isArray(list)) found.entries.push(...list.map((p) => ({ mod, ...p })));
+    } catch {}
+  }
+  return found;
+}
+
+const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+
+// A mod's entry as a row, or null when it can't run (renames may leave `name` to the dialog).
+function modEntry(p, known, folders, list) {
+  if (!isObject(p) || typeof p.title !== "string" || !p.title.trim() || typeof p.command !== "string") return null;
+  const args = p.args ?? {};
+  if (!isObject(args)) return null;
+  if (p.command.includes(".") && known.has(p.command)) {
+    const c = list.find((c) => c.name === p.command);
+    if (p.command === "mod.clone" || p.command === "layout.clone") return null;
+    const names = c.args.map((a) => a.name);
+    if (Object.keys(args).some((k) => !names.includes(k))) return null;
+    if (c.args.some((a) => a.required && !(a.name in args) && !(a.name === "name" && p.command.endsWith(".rename")))) return null;
+  } else {
+    const [mod, ...rest] = p.command.split(".");
+    if (!mod || rest.length !== 1 || !folders.includes(mod) || Object.keys(args).length) return null;
+  }
+  const group = typeof p.group === "string" && p.group.trim() ? p.group : "Mod";
+  return { name: p.command, args, group, title: p.title, words: `${typeof p.words === "string" ? p.words : ""} ${p.mod}` };
+}
+
 // Every entry for the state we're in now.
-function entries() {
+function entries(mods = { folders: [], entries: [] }) {
   const known = new Set(commands().map((c) => c.name));
   const mac = win()?.platform === "macos";
   const list = NAMED.filter(([n]) => known.has(n))
@@ -101,7 +143,17 @@ function entries() {
     if (named.has(c.name) || HIDDEN.has(c.name) || c.args.some((a) => a.required && a.name !== "name")) continue;
     list.push({ name: c.name, args: {}, ...titleOf(c.name), words: c.about });
   }
-  return list.map((e) => ({ ...e, id: `${e.name}:${JSON.stringify(e.args)}` }));
+  const all = list.map((e) => ({ ...e, id: `${e.name}:${JSON.stringify(e.args)}` }));
+  const have = new Set(all.map((e) => e.id));
+  const cmds = commands();
+  for (const p of mods.entries) {
+    const e = modEntry(p, known, mods.folders, cmds);
+    const id = e && `${e.name}:${JSON.stringify(e.args)}`;
+    if (!e || have.has(id)) continue;
+    have.add(id);
+    all.push({ ...e, id });
+  }
+  return all;
 }
 
 // The key bound to an entry: `name` or `name:value` in keys.json.
@@ -149,6 +201,11 @@ export default class Palette extends View {
     this.scroll = 0;
     this.recent = JSON.parse(localStorage.getItem("recent") ?? "[]");
     this.handle = cx.focus_handle();
+    this.mods = { folders: [], entries: [] };
+    cx.spawn(async (cx) => {
+      this.mods = await modPalettes(appHome());
+      cx.notify();
+    });
   }
 
   close() {
@@ -172,7 +229,7 @@ export default class Palette extends View {
 
   // The rows to show: grouped when empty, ranked while typing.
   rows() {
-    const all = entries();
+    const all = entries(this.mods);
     const q = this.query.trim().toLowerCase().replace(/\s+/g, "");
     if (!q) {
       const recent = this.recent.map((id) => all.find((e) => e.id === id)).filter(Boolean).slice(0, 5);

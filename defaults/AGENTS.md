@@ -902,6 +902,12 @@ has 124 programs (agents, editors, runtimes, tools, databases, infra);
   again after a popup over it closes. Leave with `run("pane.go", {direction})`.
   Without this opt-in, navigation and clicks stay unchanged.
 
+- `"palette"` in `mod.json` adds entries to the command palette, under "Mod":
+  `"palette": [{ "title": "TUI sessions", "command": "mod.open", "args": { "name": "tui-sessions" }, "words": "agents" }]`.
+  `command` is an app command with all its required arguments in `args`, or the
+  mod's own `<mod>.<command>` (no arguments). `group` and `words` are optional.
+  Entries that can't run, or repeat one the palette has, are left out.
+
 - The first time Herdr sees a folder, it docks one copy per `mod.json` into
   the shown layout (`"none"`: only where a layout or another mod puts it).
   After that, the layouts decide. Saving any file reloads every copy in place
