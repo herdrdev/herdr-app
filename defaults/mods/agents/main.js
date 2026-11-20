@@ -31,8 +31,8 @@ function toggleSidebar() {
 // and at an emoji ("🔴 login"): a person put it there, status glyphs are text-style symbols.
 const clean = (s) => (s ?? "").replace(/^[^\p{L}\p{N}\p{Ps}\p{Pi}\p{Emoji_Presentation}]+/u, "").replace(/^\[ [!.] \] /, "").trim();
 
-// OMP puts its own marker before the task, including a braille spinner while working.
-const taskTitle = (s, program) => program?.key === "omp" ? (s ?? "").replace(/^π (?:> |[\u2800-\u28ff] )/, "") : s ?? "";
+// Herdr removes OMP's working spinner before publishing titles; idle keeps its "> " marker.
+const taskTitle = (s, program) => program?.key === "omp" ? (s ?? "").replace(/^π (?:> )?/, "") : s ?? "";
 const displayTitle = (s, program) => {
   const task = taskTitle(s, program);
   return task !== (s ?? "") ? task : clean(task);

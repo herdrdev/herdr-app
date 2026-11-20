@@ -62,16 +62,16 @@ test("OMP task titles drop only the idle or working marker", () => {
   const title = new Function("View", `${source}; return title;`)(class {});
   const omp = { program: { name: "oh-my-pi", key: "omp" }, title: "" };
   const tab = { name: "3", named: false };
-  for (const marker of ["π > ", "π ⠦ ", "π ⠋ "]) {
-    for (const task of ["Fix sidebar", "🔴 login", "[web] login", "- preserve punctuation"]) {
+  for (const marker of ["π > ", "π "]) {
+    for (const task of ["Fix sidebar", "🔴 login", "[web] login", "- preserve punctuation", ">inside title", "⠦ task"]) {
       expect(title(tab, { ...omp, title: marker + task })).toBe(task);
     }
     expect(title({ name: "My tab", named: true }, { ...omp, title: marker + "Fix sidebar" })).toBe("My tab");
     expect(title(tab, { ...omp, title: marker + "~/src" })).toBe("3");
     expect(title(tab, { program: { name: "Pi", key: "pi" }, title: marker + "Fix sidebar" })).toBe(marker + "Fix sidebar");
   }
-  expect(title(tab, { ...omp, title: "π - ordinary title" })).toBe("π - ordinary title");
-  expect(title(tab, { ...omp, title: "π >inside title" })).toBe("π >inside title");
+  expect(title(tab, { ...omp, title: "π - ordinary title" })).toBe("- ordinary title");
+  expect(title(tab, { ...omp, title: "π >inside title" })).toBe(">inside title");
 });
 
 test("an empty OSC title published as the terminal address keeps the tab name", () => {
@@ -202,7 +202,8 @@ for (const sort of ["priority", "grouped"]) test(`${sort}: OMP rows show task ti
     theme: () => ({}), setAgentOrder() {},
     div: element, v_flex: element, h_flex: element, svg: element, image: element,
   });
-  for (const raw of ["π > 🔴 Fix sidebar", "π ⠦ 🔴 Fix sidebar"]) {
+  // shown_title strips the working spinner before agents() and terminals() publish it.
+  for (const raw of ["π > 🔴 Fix sidebar", "π 🔴 Fix sidebar"]) {
     agent.title = raw;
     const rendered = textOf(agents.render({}).node);
     expect(rendered).toContain("🔴 Fix sidebar");
