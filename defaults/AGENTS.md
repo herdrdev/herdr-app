@@ -1025,6 +1025,15 @@ Rules:
   copies close. Keep instance state and host calls in constructor/init, not module
   scope. Each copy gets its own instance and tasks. Views with the same mod
   and props share live `localStorage` values.
+- Time limits: a render gets 50 ms. An event handler, a timer, or a task's run
+  until it waits on Herdr (`exec`, `fetch`, a file read, a timer) gets 500 ms,
+  shared with the promise callbacks that run right after it (an `await` that
+  doesn't wait doesn't reset it). Past that, the code is stopped where it is:
+  no `catch` or `finally` after that point runs, and an async function stopped
+  there never settles. Herdr keeps the last frame and logs the stop. So
+  nothing a later line resets may outlive a call (a cache cleared in
+  `finally`, a busy flag cleared after an `await`): store the time it was set
+  and let it lapse instead.
 - **Never keep a `cx` and use it later.** Every callback gets its own:
   `on_click((event, cx) => …)`, `cx.spawn(async (cx) => …)`,
   `cx.timer.every(ms, (cx) => …)`.
