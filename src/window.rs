@@ -7282,6 +7282,158 @@ mod tests {
     }
 
     #[test]
+    fn pane_typing_pulse_follows_active_framed_terminal() {
+        in_own_process("typing_pulse_focus");
+    }
+
+    #[gpui::test]
+    fn typing_pulse_focus(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+
+        fn frame(window: &mut super::AppWindow) -> &mut super::PaneFrame {
+            let super::Kind::Block { content: super::Content::Context { pane: Some(frame), .. } } =
+                &mut window.chrome.kind else { panic!("the test layout must frame panes") };
+            frame
+        }
+
+        if !running_alone("typing_pulse_focus") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "unused", "", json!({
+            "id": "tab", "type": "block",
+            "content": { "tab": "active", "pane": { "lone": true, "focus": { "width": 2, "color": "accent" } } }
+        }));
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.model.add_space("sp1", "", "/tmp", crate::model::Tab::new("tb1", "", "p1", "t1"));
+            this.sync(window, cx);
+            let terminal = this.pane_term("p1").unwrap().view.entity_id();
+
+            this.pulse_typed_pane("p1", terminal, window, cx);
+            assert!(this.typing_pulse.is_none(), "the layout must opt in");
+
+            frame(this).typing_pulse = true;
+            frame(this).lone = false;
+            this.pulse_typed_pane("p1", terminal, window, cx);
+            assert!(this.typing_pulse.is_none(), "an unframed single pane cannot pulse");
+
+            frame(this).lone = true;
+            frame(this).focus.as_mut().unwrap().width = 0.0;
+            this.pulse_typed_pane("p1", terminal, window, cx);
+            assert!(this.typing_pulse.is_none(), "a zero-width border cannot pulse");
+
+            frame(this).focus.as_mut().unwrap().width = 2.0;
+            this.pulse_typed_pane("offscreen", terminal, window, cx);
+            assert!(this.typing_pulse.is_none(), "only a focused pane can pulse");
+
+            let replaced_terminal = cx.new(|_| ()).entity_id();
+            this.pulse_typed_pane("p1", replaced_terminal, window, cx);
+            assert!(this.typing_pulse.is_none(), "a replaced terminal cannot pulse a reused pane");
+
+            this.pulse_typed_pane("p1", terminal, window, cx);
+            let pulse = this.typing_pulse.as_ref().unwrap();
+            assert_eq!(pulse.pane, "p1");
+            let started = pulse.started;
+            this.pulse_typed_pane("p1", terminal, window, cx);
+            assert_eq!(this.typing_pulse.as_ref().unwrap().started, started);
+        }));
+        cx.deactivate_window();
+        cx.run_until_parked();
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.typing_pulse = None;
+            let terminal = this.pane_term("p1").unwrap().view.entity_id();
+            this.pulse_typed_pane("p1", terminal, window, cx);
+            assert!(this.typing_pulse.is_none(), "an inactive window cannot start a pulse");
+        }));
+    }
+
+    #[test]
+    fn pane_typing_pulse_routes_events_and_restarts_at_expiry() {
+        in_own_process("typing_pulse_lifecycle");
+    }
+
+    #[gpui::test]
+    fn typing_pulse_lifecycle(cx: &mut gpui::TestAppContext) {
+        use crate::terminal::TerminalEvent;
+        use serde_json::json;
+        use std::time::Duration;
+
+        if !running_alone("typing_pulse_lifecycle") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "unused", "", json!({
+            "id": "tab", "type": "block",
+            "content": { "tab": "active", "pane": { "typing_pulse": true, "focus": { "width": 2, "color": "accent" } } }
+        }));
+        cx.update(|window, _| window.activate_window());
+        cx.run_until_parked();
+        let (first, second) = cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.model.add_space("sp1", "", "/tmp", crate::model::Tab::new("tb1", "", "p1", "t1"));
+            assert!(this.model.split("p1", super::Axis::Row, "p2", "t2"));
+            this.model.focus_pane("p1");
+            this.sync(window, cx);
+            (this.pane_term("p1").unwrap().view.clone(), this.pane_term("p2").unwrap().view.clone())
+        }));
+        cx.run_until_parked();
+
+        let pulse = |cx: &mut gpui::VisualTestContext| view.read_with(cx, |this, _| {
+            this.typing_pulse.as_ref().map(|pulse| (pulse.terminal, pulse.started, pulse.sequence, pulse.burst.color))
+        });
+
+        second.update(cx, |_, cx| cx.emit(TerminalEvent::Typed));
+        assert!(pulse(cx).is_none(), "background input cannot start a pulse");
+
+        first.update(cx, |_, cx| cx.emit(TerminalEvent::Typed));
+        let initial = pulse(cx).unwrap();
+        assert_eq!(initial.0, first.entity_id());
+
+        let tick = Duration::from_millis(1);
+        cx.executor().advance_clock(super::pane_pulse::DURATION - tick);
+        first.update(cx, |_, cx| cx.emit(TerminalEvent::Typed));
+        assert_eq!(pulse(cx), Some(initial), "repeat input must keep the active burst");
+
+        cx.executor().advance_clock(tick);
+        first.update(cx, |_, cx| cx.emit(TerminalEvent::Typed));
+        let next = pulse(cx).unwrap();
+        assert_eq!(next.1.duration_since(initial.1), super::pane_pulse::DURATION);
+        assert_eq!(next.2, initial.2 + 1);
+        assert_ne!(next.3, initial.3);
+
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.model.focus_pane("p2");
+            this.sync(window, cx);
+        }));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(pulse(cx).is_none(), "switching panes clears the old burst");
+
+        first.update(cx, |_, cx| cx.emit(TerminalEvent::Typed));
+        assert!(pulse(cx).is_none(), "late input from the old pane is ignored");
+        second.update(cx, |_, cx| cx.emit(TerminalEvent::Typed));
+        assert_eq!(pulse(cx).unwrap().0, second.entity_id());
+
+        cx.update(|window, cx| second.update(cx, |terminal, cx| terminal.open_search(window, cx)));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(pulse(cx).is_none(), "opening Find clears the burst");
+        second.update(cx, |_, cx| cx.emit(TerminalEvent::Typed));
+        assert!(pulse(cx).is_none(), "a late event cannot pulse while Find owns the keyboard");
+
+        cx.update(|window, cx| {
+            let focus = second.read(cx).focus_handle().clone();
+            focus.focus(window, cx);
+        });
+        second.update(cx, |_, cx| cx.emit(TerminalEvent::Typed));
+        assert_eq!(pulse(cx).unwrap().0, second.entity_id());
+
+        cx.deactivate_window();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(pulse(cx).is_none(), "the glow clears when the window loses focus");
+        second.update(cx, |_, cx| cx.emit(TerminalEvent::Typed));
+        assert!(pulse(cx).is_none(), "an inactive window ignores incoming typing events");
+    }
+
+    #[test]
     fn new_tabs_without_focus_leave_the_shown_tab() {
         in_own_process("tab_new_without_focus");
     }
