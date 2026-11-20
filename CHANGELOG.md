@@ -1,5 +1,10 @@
 # Herdr changelog
 
+## Unreleased
+
+### Fixed
+- The agents list shows oh-my-pi task titles without its idle marker or working spinner.
+
 ## [0.1.16] - 2026-11-14
 
 ### New

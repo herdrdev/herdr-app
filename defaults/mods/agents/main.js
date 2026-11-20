@@ -31,6 +31,13 @@ function toggleSidebar() {
 // and at an emoji ("🔴 login"): a person put it there, status glyphs are text-style symbols.
 const clean = (s) => (s ?? "").replace(/^[^\p{L}\p{N}\p{Ps}\p{Pi}\p{Emoji_Presentation}]+/u, "").replace(/^\[ [!.] \] /, "").trim();
 
+// Herdr removes OMP's working spinner before publishing titles; idle keeps its "> " marker.
+const taskTitle = (s, program) => program?.key === "omp" ? (s ?? "").replace(/^π (?:> )?/, "") : s ?? "";
+const displayTitle = (s, program) => {
+  const task = taskTitle(s, program);
+  return task !== (s ?? "") ? task : clean(task);
+};
+
 function leadPanes(all) {
   const leads = new Map();
   for (const p of all) {
@@ -44,9 +51,10 @@ function leadPanes(all) {
 
 function title(tab, l) {
   const prog = l?.program?.name;
-  const live = clean(l?.title);
+  const raw = taskTitle(l?.title, l?.program);
+  const live = displayTitle(l?.title, l?.program);
   // clean() would strip a path's leading ~ or /: test the title with only its status glyph gone.
-  const path = /^[~/]|^[A-Za-z]:\\/.test((l?.title ?? "").replace(/^[^\p{L}\p{N}~/]+/u, ""));
+  const path = /^[~/]|^[A-Za-z]:\\/.test(raw.replace(/^[^\p{L}\p{N}~/]+/u, ""));
   const telling = live && live !== (l?.terminal ?? l?.address) && live !== prog && !path && !live.includes("@") && live.toLowerCase() !== l?.program?.key;
   return (tab.name === prog || !tab.named) && telling ? live : tab.name;
 }
@@ -290,7 +298,7 @@ export default class Agents extends View {
     const labels = new Map(list.map(a => {
       const tab = tabs.get(a.tab);
       const many = tabCounts.get(a.tab) > 1;
-      return [a.address, tab ? title(many ? { ...tab, named: false } : tab, many ? a : leads.get(a.tab)) : (a.title || a.program?.name || "")];
+      return [a.address, tab ? title(many ? { ...tab, named: false } : tab, many ? a : leads.get(a.tab)) : ((a.program?.key === "omp" ? displayTitle(a.title, a.program) : a.title) || a.program?.name || "")];
     }));
     const label = (a) => labels.get(a.address);
     const detail = new Map(list.map(a => [a.address, /^\d+$/.test(label(a)) ? null : label(a)]));
