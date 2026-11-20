@@ -18,11 +18,16 @@ pub enum Content {
         props: Value,
     },
     /// A tab's terminals as it arranges them (`"active"`: the selected one),
-    /// each pane wrapped as `pane` says.
+    /// each pane wrapped as `pane` says. With `space`, that space's selected
+    /// tab instead: a second space beside the main one.
     Context {
         /// `context`: 0.1.0's word, in layouts made then.
         #[serde(alias = "context")]
         tab: String,
+        /// A space this block always shows. Without it, the block shows the
+        /// selected space, unless another block shows that one.
+        #[serde(default, skip_serializing_if = "Option::is_none")]
+        space: Option<String>,
         #[serde(default, skip_serializing_if = "Option::is_none")]
         pane: Option<PaneFrame>,
     },
@@ -826,7 +831,7 @@ mod tests {
         let n: Node = serde_json::from_str(json).unwrap();
         assert_eq!(n.find("sidebar").unwrap().size, Some(Size::Px { px: 260.0 }));
         assert!(n.window_blur && !n.find("sidebar").unwrap().window_blur);
-        assert_eq!(n.find("main").unwrap().content(), Some(&Content::Context { tab: "active".into(), pane: None }));
+        assert_eq!(n.find("main").unwrap().content(), Some(&Content::Context { tab: "active".into(), space: None, pane: None }));
         let back: Node = serde_json::from_str(&serde_json::to_string(&n).unwrap()).unwrap();
         assert_eq!(back, n);
     }

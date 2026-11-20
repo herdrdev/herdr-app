@@ -229,6 +229,15 @@ A layout is a tree of nodes. Four types:
   terminals as it arranges them), or `{ "agent": "focused" }` (one agent's
   terminal, full size: the one chosen with `agent.focus` / `agent.next`, else
   the focused pane's agent, else the first agent).
+- Two spaces at once: `{ "tab": "active", "space": "<space id>" }` shows that
+  space's selected tab, splits and pane frames included, beside the block
+  without `space`. Clicking into it selects that space (the tab bar, `tab.new`,
+  `pane.split` follow the keyboard), but the block without `space` keeps
+  showing the space it showed: it shows the selected space only when no block
+  is pinned to it. A space shows once; a block pinned to a missing space is
+  empty. `pane.go` and pane drags work across both. `spaces()[i].shown` says
+  which spaces are on screen. A mod adds and removes these blocks with
+  `layout.set`, e.g. on a space dropped from the sidebar.
 - `row` / `column`: children side by side / stacked.
 - `stack`: shows one child (`"active": "<child id>"`), with an optional
   `"header"` (a mod that draws tabs, or `"tabs"` for a plain built-in strip).

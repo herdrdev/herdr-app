@@ -145,19 +145,25 @@ pub(super) enum HiddenFit {
 
 impl AppWindow {
     pub(super) fn initial_size(&self, root: &Node, pane: &str, window: &Window) -> Option<(u16, u16)> {
+        let tab = self.model.active_tab().map(|t| t.id.clone());
+        self.initial_size_in(tab.as_deref(), root, pane, window)
+    }
+
+    /// `initial_size` for a tree drawn where `tab` is (the main tab block when it isn't shown).
+    pub(super) fn initial_size_in(&self, tab: Option<&str>, root: &Node, pane: &str, window: &Window) -> Option<(u16, u16)> {
         let focused = root.path_to(pane)?.into_iter().collect();
-        self.displayed_size(root, root.panes().len(), pane, &focused, window)
+        self.displayed_size(tab, root, root.panes().len(), pane, &focused, window)
     }
 
     /// The grid `pane` gets when `tab` is the one shown.
     pub(super) fn shown_size(&self, tab: &Tab, pane: &str, window: &Window) -> Option<(u16, u16)> {
         let focused = tab.focused_pane().and_then(|f| tab.root.path_to(&f)).unwrap_or_default().into_iter().collect();
-        self.displayed_size(tab.shown(), tab.root.panes().len(), pane, &focused, window)
+        self.displayed_size(Some(&tab.id), tab.shown(), tab.root.panes().len(), pane, &focused, window)
     }
 
     /// `shown`: the tree on screen; `panes`: how many the tab has (its frame needs more than one, or `lone`).
-    fn displayed_size(&self, shown: &Node, panes: usize, pane: &str, focused: &HashSet<String>, window: &Window) -> Option<(u16, u16)> {
-        let (context, area) = self.context_area()?;
+    fn displayed_size(&self, tab: Option<&str>, shown: &Node, panes: usize, pane: &str, focused: &HashSet<String>, window: &Window) -> Option<(u16, u16)> {
+        let (context, area) = self.context_area(tab)?;
         let frame = match context.content() {
             Some(Content::Context { pane: Some(frame), .. }) if frame.lone || panes > 1 => Some(frame),
             _ => None,
@@ -172,7 +178,7 @@ impl AppWindow {
 
     /// Use the full split layout even if it has never been drawn unzoomed.
     pub(super) fn unzoomed_neighbor(&self, tab: &Tab, from: &str, dir: &str) -> Option<String> {
-        let (context, area) = self.context_area()?;
+        let (context, area) = self.context_area(Some(&tab.id))?;
         let frame = match context.content() {
             Some(Content::Context { pane: Some(frame), .. }) if frame.lone || tab.root.panes().len() > 1 => Some(frame),
             _ => None,
@@ -188,9 +194,9 @@ impl AppWindow {
         nearest(geometry(from)?, dir, candidates, &self.pane_history)
     }
 
-    /// The block tabs show in, and the area it was last drawn with.
-    fn context_area(&self) -> Option<(&Node, Size<Pixels>)> {
-        let context = self.chrome.visible_blocks().into_iter().find(|n| matches!(n.content(), Some(Content::Context { .. })))?;
+    /// The block `tab` shows in (a tab not on screen: the main one), and the area it was last drawn with.
+    fn context_area(&self, tab: Option<&str>) -> Option<(&Node, Size<Pixels>)> {
+        let context = tab.and_then(|t| self.tab_home(t)).or_else(|| self.main_block())?;
         let size = self.bounds.borrow().get(&context.id)?.size;
         (size.width > px(0.0) && size.height > px(0.0)).then_some((context, size))
     }
@@ -200,7 +206,7 @@ impl AppWindow {
     /// redraw. Once the window settles (the same at two ticks), they are sized as their
     /// panes would be, so the programs redraw out of sight.
     pub(super) fn fit_hidden_tabs(&mut self, window: &Window, cx: &App) {
-        let Some((_, area)) = self.context_area() else { return };
+        let Some((_, area)) = self.context_area(None) else { return };
         let cell = crate::terminal::cell_size(window);
         let now = (area, cell);
         match self.hidden_fit {
@@ -212,8 +218,9 @@ impl AppWindow {
             }
         }
         let scale = window.scale_factor();
-        let active = self.model.active_tab().map(|t| t.id.clone());
-        for tab in self.model.tabs().filter(|t| Some(&t.id) != active.as_ref()) {
+        // Every tab on screen is sized by its own block as it draws.
+        let shown: HashSet<String> = self.shown_tabs().into_iter().map(|(_, t)| t.id.clone()).collect();
+        for tab in self.model.tabs().filter(|t| !shown.contains(&t.id)) {
             for pane in tab.shown().panes() {
                 if let Some(t) = self.terms.get(&pane.id)
                     && let Some((cols, rows)) = self.shown_size(tab, &pane.id, window)
