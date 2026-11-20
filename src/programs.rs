@@ -423,6 +423,9 @@ mod tests {
         assert_eq!(key(None, &["dsh-tui"]), "dsh-tui");
         assert_eq!(key(Some("goose"), &["/bin/zsh"]), "goose");
         assert_eq!(key(None, &["goose"]), "goose");
+        assert_eq!(key(Some("codebuddy"), &["/bin/zsh"]), "codebuddy");
+        assert_eq!(key(Some("codebuddy-code"), &[]), "codebuddy");
+        assert_eq!(key(None, &["node", "/usr/local/bin/codebuddy", "fix it"]), "codebuddy");
         assert_eq!(key(None, &["agent"]), "cursor");
         assert_eq!(key(Some("agent"), &[]), "cursor");
         assert_eq!(key(Some("cursor-agent"), &[]), "cursor");
