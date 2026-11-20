@@ -1,10 +1,10 @@
 //! Attention sounds, as Herdr plays them: one when an agent needs you, one
 //! when it finished while you weren't looking. Bundled sounds (Herdr's), or a
 //! file from settings.json; played with whichever MP3-capable player exists
-//! (Windows plays them itself).
+//! (Windows and macOS play them themselves).
 
 use std::path::{Path, PathBuf};
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 use std::process::Stdio;
 #[cfg(not(windows))]
 use std::time::{Duration, Instant};
@@ -13,10 +13,8 @@ const DONE: &[u8] = include_bytes!("../assets/sounds/done.mp3");
 const BLOCKED: &[u8] = include_bytes!("../assets/sounds/request.mp3");
 
 /// Players that decode MP3, tried in order (never bare `aplay`: it plays MP3 bytes as noise).
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 const PLAYERS: &[(&str, &[&str])] = &[
-    #[cfg(target_os = "macos")]
-    ("afplay", &[]),
     ("paplay", &[]),
     ("pw-play", &[]),
     ("ffplay", &["-nodisp", "-autoexit", "-loglevel", "quiet"]),
@@ -92,7 +90,54 @@ fn play_file(path: &Path) -> Result<(), String> {
     played
 }
 
-#[cfg(not(windows))]
+/// macOS plays the file itself (AVAudioPlayer), so the app stays one Core
+/// Audio client. An `afplay` per sound made a new client each time, and
+/// coreaudiod kept a power assertion and IO state for every player that
+/// exited: under bursts it climbed to several cores and gigabytes and all
+/// audio on the Mac crackled until it was restarted (herdrdev/herdr#4595).
+/// AVAudioPlayer rather than NSSound: NSSound's isPlaying never clears on a
+/// thread without a run loop, like this one.
+#[cfg(target_os = "macos")]
+fn play_file(path: &Path) -> Result<(), String> {
+    use objc2::rc::{Retained, autoreleasepool};
+    use objc2::runtime::{AnyClass, AnyObject};
+    use objc2::msg_send;
+    use objc2_foundation::{NSString, NSURL};
+
+    // AVAudioPlayer's framework. For the app's macOS 11 minimum the linker
+    // records AVFoundation, which held it before 11.3 and re-exports it since.
+    #[link(name = "AVFAudio", kind = "framework")]
+    unsafe extern "C" {}
+
+    let class = AnyClass::get(c"AVAudioPlayer").ok_or("AVAudioPlayer is missing")?;
+    autoreleasepool(|_| {
+        let url = NSURL::fileURLWithPath(&NSString::from_str(&path.to_string_lossy()));
+        // SAFETY: AVAudioPlayer's -initWithContentsOfURL:error: takes an
+        // NSURL and an optional NSError out-pointer, and returns nil when
+        // the file can't be read or decoded.
+        let no_error = std::ptr::null_mut::<*mut AnyObject>();
+        let player: Option<Retained<AnyObject>> =
+            unsafe { msg_send![msg_send![class, alloc], initWithContentsOfURL: &*url, error: no_error] };
+        let player = player.ok_or("cannot open it")?;
+        // SAFETY: -play, -isPlaying and -stop take no arguments; the first
+        // two return BOOL. AVAudioPlayer can be used from any thread.
+        let started: bool = unsafe { msg_send![&*player, play] };
+        if !started {
+            return Err("cannot play it".into());
+        }
+        let start = Instant::now();
+        while unsafe { msg_send![&*player, isPlaying] } {
+            if start.elapsed() > PLAYER_LIMIT {
+                let _: () = unsafe { msg_send![&*player, stop] };
+                return Err("took too long".into());
+            }
+            std::thread::sleep(Duration::from_millis(25));
+        }
+        Ok(())
+    })
+}
+
+#[cfg(not(any(windows, target_os = "macos")))]
 fn play_file(path: &Path) -> Result<(), String> {
     let mut errors = Vec::new();
     for (program, args) in PLAYERS {
@@ -104,7 +149,7 @@ fn play_file(path: &Path) -> Result<(), String> {
     Err(format!("no MP3 player worked ({})", errors.join("; ")))
 }
 
-#[cfg(not(windows))]
+#[cfg(not(any(windows, target_os = "macos")))]
 fn run(program: &str, args: &[&str], path: &Path) -> Result<(), String> {
     let mut child = crate::spawn::command(program)
         .args(args)
@@ -127,5 +172,63 @@ fn run(program: &str, args: &[&str], path: &Path) -> Result<(), String> {
             Ok(None) => std::thread::sleep(Duration::from_millis(25)),
             Err(e) => return Err(e.to_string()),
         }
+    }
+}
+
+#[cfg(all(test, target_os = "macos"))]
+mod tests {
+    use super::*;
+
+    /// A mono 16-bit WAV of `ms` milliseconds of silence.
+    fn silent_wav(ms: u32) -> Vec<u8> {
+        let rate = 8000u32;
+        let data = rate * ms / 1000 * 2;
+        let mut wav = Vec::new();
+        wav.extend_from_slice(b"RIFF");
+        wav.extend_from_slice(&(36 + data).to_le_bytes());
+        wav.extend_from_slice(b"WAVEfmt ");
+        wav.extend_from_slice(&16u32.to_le_bytes());
+        wav.extend_from_slice(&1u16.to_le_bytes()); // PCM
+        wav.extend_from_slice(&1u16.to_le_bytes()); // mono
+        wav.extend_from_slice(&rate.to_le_bytes());
+        wav.extend_from_slice(&(rate * 2).to_le_bytes());
+        wav.extend_from_slice(&2u16.to_le_bytes());
+        wav.extend_from_slice(&16u16.to_le_bytes());
+        wav.extend_from_slice(b"data");
+        wav.extend_from_slice(&data.to_le_bytes());
+        wav.resize(wav.len() + data as usize, 0);
+        wav
+    }
+
+    fn scratch(name: &str) -> PathBuf {
+        let dir = std::env::temp_dir().join(format!("herdr-sound-{name}-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        dir
+    }
+
+    #[test]
+    #[ignore = "needs an audio output device (CI's macOS runners have none); run with -- --ignored"]
+    fn plays_a_file_in_process_and_returns_when_it_ends() {
+        let dir = scratch("silence");
+        let path = dir.join("silence.wav");
+        std::fs::write(&path, silent_wav(200)).unwrap();
+        let start = Instant::now();
+        let played = play_file(&path);
+        let _ = std::fs::remove_dir_all(&dir);
+        played.unwrap();
+        // Off the main thread there's no run loop; playback must still end on its own.
+        assert!(start.elapsed() < Duration::from_secs(5), "took {:?}", start.elapsed());
+    }
+
+    #[test]
+    fn a_file_that_is_not_audio_is_an_error() {
+        let dir = scratch("not-audio");
+        let path = dir.join("not-audio.mp3");
+        std::fs::write(&path, b"not audio").unwrap();
+        let garbage = play_file(&path);
+        let missing = play_file(&dir.join("missing.mp3"));
+        let _ = std::fs::remove_dir_all(&dir);
+        assert!(garbage.is_err());
+        assert!(missing.is_err());
     }
 }
