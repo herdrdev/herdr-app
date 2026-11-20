@@ -1708,12 +1708,8 @@ fn outside_host_call(ctx: &Ctx<'_>, api: &str) -> rquickjs::Error {
 /// Renders a thrown value the way its author would want to read it: message
 /// first, then the script stack that produced it.
 fn describe_value<'js>(ctx: &Ctx<'js>, value: &Value<'js>) -> String {
-    if let Some(exception) = value.as_exception() {
-        let message = exception.message().unwrap_or_else(|| "error".to_owned());
-        return match exception.stack() {
-            Some(stack) => format!("{message}\n{stack}"),
-            None => message,
-        };
+    if value.as_exception().is_some() {
+        return super::describe_exception(value);
     }
 
     if let Some(text) = value.as_string().and_then(|text| text.to_string().ok()) {
