@@ -423,12 +423,13 @@ mod tests {
         assert_eq!(key(None, &["dsh-tui"]), "dsh-tui");
         assert_eq!(key(Some("goose"), &["/bin/zsh"]), "goose");
         assert_eq!(key(None, &["goose"]), "goose");
-        assert_eq!(key(Some("codebuddy"), &["/bin/zsh"]), "codebuddy");
-        assert_eq!(key(Some("codebuddy-code"), &[]), "codebuddy");
-        assert_eq!(key(None, &["node", "/usr/local/bin/codebuddy", "fix it"]), "codebuddy");
         assert_eq!(key(None, &["agent"]), "cursor");
         assert_eq!(key(Some("agent"), &[]), "cursor");
         assert_eq!(key(Some("cursor-agent"), &[]), "cursor");
+        assert_eq!(key(Some("codebuddy"), &["/bin/zsh"]), "codebuddy");
+        assert_eq!(key(Some("codebuddy-code"), &[]), "codebuddy");
+        assert_eq!(key(None, &["node", "/usr/local/bin/codebuddy", "fix it"]), "codebuddy");
+        assert_eq!(key(None, &["node", "--optimize-for-size", "--max-semi-space-size=2", "/usr/local/bin/codebuddy-lowmem"]), "codebuddy");
         assert_eq!(key(Some("swival"), &["/bin/zsh"]), "swival");
         assert_eq!(key(None, &["python3", "/home/me/.local/bin/swival", "fix it"]), "swival");
         assert_eq!(key(Some("newagent"), &[]), "agent");
