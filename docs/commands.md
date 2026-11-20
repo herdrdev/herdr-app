@@ -252,7 +252,7 @@ Name a pane (default: the focused one; asks the person when no name; an empty na
 
 ## `pane.focus`
 
-Focus a pane (or the pane showing a terminal).
+Focus a pane (or the pane, or else the window, showing a terminal).
 
 | Argument | Required |
 |---|---|

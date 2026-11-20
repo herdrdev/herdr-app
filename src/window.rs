@@ -3356,7 +3356,7 @@ impl AppWindow {
             "pane.focus" => {
                 if Self::arg(a, "pane").is_none()
                     && let Some(terminal) = Self::arg(a, "terminal")
-                    && let Some(block) = self.chrome.visible_blocks().into_iter().find(|n| n.terminal() == Some(terminal))
+                    && let Some(block) = first_block_showing([&self.chrome], terminal)
                 {
                     let id = block.id.clone();
                     self.focused_block = None;
@@ -3370,7 +3370,27 @@ impl AppWindow {
                     return;
                 }
                 let pane = Self::owned(a, "pane").or_else(|| Self::arg(a, "terminal").and_then(|t| self.model.pane_of(t)));
-                let Some(p) = pane.filter(|p| self.model.tab_of(p).is_some()) else { return self.fail("no such pane") };
+                let pane = pane.filter(|p| self.model.tab_of(p).is_some());
+                // A terminal with no pane may sit in a window: the top one showing it comes forward, as on a click.
+                if pane.is_none()
+                    && Self::arg(a, "pane").is_none()
+                    && let Some(terminal) = Self::arg(a, "terminal")
+                    && let Some((win, id)) = self.overlays.iter().rev().filter(|o| o.kind == OverlayKind::Window)
+                        .find_map(|o| first_block_showing(&o.layout, terminal).map(|n| (o.id.clone(), n.id.clone())))
+                {
+                    if self.overlays.iter().any(|o| o.kind.modal_keys()) {
+                        return self.fail("a dialog or popup has the keyboard");
+                    }
+                    let Some(f) = self.pane_focus(&id, cx) else { return self.fail("that window has not drawn its terminal yet") };
+                    self.raise_window(&win, cx);
+                    self.focused_block = None;
+                    f.focus(window, cx);
+                    self.window_terminal = Some(id);
+                    self.publish(cx);
+                    cx.notify();
+                    return;
+                }
+                let Some(p) = pane else { return self.fail("no such pane") };
                 self.focused_block = None;
                 self.model.focus_pane(&p);
                 self.focused_pane = None;
@@ -5313,6 +5333,10 @@ fn overlay_terminal_block<'a>(overlays: &'a [Overlay], id: Option<&str>) -> Opti
     overlays.iter().filter_map(|o| o.layout.as_ref()).find_map(|l| l.visible_blocks().into_iter().find(|n| n.id == id && n.terminal().is_some()))
 }
 
+fn first_block_showing<'a>(layouts: impl IntoIterator<Item = &'a Node>, terminal: &str) -> Option<&'a Node> {
+    layouts.into_iter().find_map(|l| l.visible_blocks().into_iter().find(|n| n.terminal() == Some(terminal)))
+}
+
 #[derive(Debug, PartialEq)]
 enum SwapBy<'a> {
     Direction(&'a str),
@@ -6966,6 +6990,71 @@ mod tests {
         assert!(!pane_focused(cx), "hidden, the pane can't hold the keyboard");
         select("main", cx);
         assert!(pane_focused(cx));
+    }
+
+    #[test]
+    fn pane_focus_gives_the_keyboard_to_a_terminal_in_a_window() {
+        in_own_process("window_terminal_focus");
+    }
+
+    /// A terminal with no pane, shown in windows: pane.focus brings the top one showing it forward and focuses its
+    /// block. A terminal with a pane still goes to its pane while a window or the peek shows it, and a dialog keeps
+    /// the keyboard.
+    #[gpui::test]
+    fn window_terminal_focus(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("window_terminal_focus") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "home", "", json!({ "id": "main", "type": "block", "content": { "tab": "active" } }));
+        let window_with = |terminal: &str| json!({ "kind": "window", "width": 400, "height": 300, "layout": {
+            "type": "column", "children": [{ "type": "block", "content": { "terminal": terminal } }]
+        } });
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.model.add_space("sp1", "", "/tmp", crate::model::Tab::new("tb1", "", "p1", "t1"));
+            this.model.add_tab("sp1", crate::model::Tab::new("tb2", "", "p2", "t2"));
+            this.sync(window, cx);
+            this.open_overlay("w1".into(), window_with("t9"), window, cx);
+            this.open_overlay("w2".into(), window_with("t9"), window, cx);
+            this.open_overlay("w3".into(), window_with("t1"), window, cx);
+            this.open_overlay("w4".into(), window_with("t8"), window, cx);
+        }));
+        cx.run_until_parked();
+        let run = |name: &str, args: serde_json::Value, cx: &mut gpui::VisualTestContext| {
+            cx.update(|window, cx| view.update(cx, |this, cx| this.run(name, args, window, cx)));
+            cx.run_until_parked();
+        };
+        let block = |win: &str, terminal: &str, cx: &mut gpui::VisualTestContext| cx.update(|_, cx| {
+            let o = view.read(cx).overlays.iter().find(|o| o.id == win).unwrap();
+            super::first_block_showing(&o.layout, terminal).unwrap().id.clone()
+        });
+        let focused = |id: &str, cx: &mut gpui::VisualTestContext| cx.update(|window, cx| view.read(cx).pane_focus(id, cx).unwrap().is_focused(window));
+        let (t9, t1) = (block("w2", "t9", cx), block("w3", "t1", cx));
+
+        run("pane.focus", json!({ "terminal": "t9" }), cx);
+        assert!(focused(&t9, cx), "the top window showing it, w2, gets the keyboard");
+        cx.update(|_, cx| {
+            let this = view.read(cx);
+            assert_eq!(this.overlays.last().map(|o| o.id.as_str()), Some("w2"), "its window comes forward");
+            assert_eq!(this.window_terminal.as_deref(), Some(t9.as_str()), "focused() reports it at once");
+        });
+
+        run("pane.focus", json!({ "pane": "p2" }), cx);
+        run("pane.focus", json!({ "terminal": "t1" }), cx);
+        assert_eq!(cx.update(|_, cx| view.read(cx).model.focused_pane()).as_deref(), Some("p1"), "a window showing it doesn't take its pane's place");
+        assert!(!focused(&t1, cx));
+
+        run("pane.focus", json!({ "pane": "p2" }), cx);
+        // terminal.peek wants a live terminal, which the offline core has none of.
+        cx.update(|window, cx| view.update(cx, |this, cx| this.peek_terminal("t1", window, cx)));
+        cx.run_until_parked();
+        run("pane.focus", json!({ "terminal": "t1" }), cx);
+        assert_eq!(cx.update(|_, cx| view.read(cx).model.focused_pane()).as_deref(), Some("p1"), "the peek's go to reaches the pane");
+
+        cx.update(|window, cx| view.read(cx).pane_focus("p1", cx).unwrap().focus(window, cx));
+        run("pane.focus", json!({ "terminal": "t9" }), cx);
+        assert!(focused("p1", cx) && !focused(&t9, cx), "while the peek is open the keyboard stays put");
+        assert_eq!(cx.update(|_, cx| view.read(cx).overlays.iter().rev().find(|o| o.kind == super::OverlayKind::Window).map(|o| o.id.clone())).as_deref(), Some("w2"), "and no window moves");
     }
 
     #[test]

@@ -621,7 +621,11 @@ The main ones:
   `target`, another pane of the same tab; give `direction` or `target`, not both.
   A swap moves panes, not focus: the focused pane stays focused in its new place.
   `pane.focus {terminal}` prefers the first visible layout terminal block showing that
-  address, then its model pane. Clicking a terminal block focuses it too.
+  address, then its model pane. A terminal with neither, shown in a `kind: "window"`
+  overlay, gets the keyboard there (a window doesn't take it when it opens): the top
+  window showing it comes to the front, as on a click. It fails while a dialog or popup
+  is open, and right after `openOverlay` until the window has drawn its terminal; try
+  again. Clicking a terminal block focuses it too.
   While a layout terminal block is focused, implicit split/close/zoom/go/swap and
   `terminal.show` fail, as do `terminal.open`/`terminal.keep` with place right/down.
   They never act on the terminal's source pane. An explicit `pane` still targets that

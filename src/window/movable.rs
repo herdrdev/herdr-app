@@ -127,7 +127,7 @@ impl AppWindow {
         div().absolute().left(x).top(y).when(measured.is_none(), |d| d.opacity(0.0)).child(body).into_any_element()
     }
 
-    fn raise_window(&mut self, id: &str, cx: &mut Context<Self>) {
+    pub(super) fn raise_window(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(i) = self.overlays.iter().position(|o| o.id == id) else { return };
         if i + 1 < self.overlays.len() {
             let o = self.overlays.remove(i);
