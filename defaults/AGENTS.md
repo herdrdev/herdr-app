@@ -620,6 +620,12 @@ The main ones:
   `pane.swap {target}` trades the places of `pane` (default: the focused one) and
   `target`, another pane of the same tab; give `direction` or `target`, not both.
   A swap moves panes, not focus: the focused pane stays focused in its new place.
+  `pane.move {pane?, target, edge?}` puts `pane` beside `target` (edge `left`, `right`,
+  `top`, `bottom`; `center` or none trades places), also in another tab or space on
+  the same machine: bring an agent's terminal from another project into this tab. The
+  terminal keeps running and its labels follow it; a tab left empty closes (and its
+  space, if it was the last). `pane.balance {tab?}` gives every split an equal share,
+  so three side-by-side panes are thirds rather than a half and two quarters.
   `pane.focus {terminal}` prefers the first visible layout terminal block showing that
   address, then its model pane. Clicking a terminal block focuses it too.
   While a layout terminal block is focused, implicit split/close/zoom/go/swap and

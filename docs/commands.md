@@ -287,6 +287,24 @@ Swap a pane (default: the focused one) with its neighbor in a direction, or with
 | `pane` | no |
 | `target` | no |
 
+## `pane.move`
+
+Move a pane (default: the focused one) beside another pane, in any tab of its machine: edge left, right, top or bottom; center or none trades places. A tab left empty closes.
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+| `target` | yes |
+| `edge` | no |
+
+## `pane.balance`
+
+Give every split in a tab (default: the shown one) an equal share.
+
+| Argument | Required |
+|---|---|
+| `tab` | no |
+
 ## `terminal.peek`
 
 Peek at a running terminal over the tab, with keep-as-tab and close controls.

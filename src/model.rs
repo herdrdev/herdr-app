@@ -380,6 +380,76 @@ impl Model {
         true
     }
 
+    /// Moves a pane beside `target` (`edge`), or trades places with it (no edge), in
+    /// any tab on the same machine. A tab left empty closes, and its space if it was
+    /// the last. Returns the panes whose tab changed, with their new space and tab.
+    pub fn move_pane_to(&mut self, source: &str, target: &str, edge: Option<crate::layout::Edge>) -> Result<Vec<(String, String, String)>, String> {
+        use crate::layout::Edge;
+        let is_pane = |m: &Model, id: &str| m.tab_of(id).and_then(|c| c.root.find(id)).is_some_and(Node::is_pane);
+        if !is_pane(self, source) {
+            return Err(format!("no pane {source:?}"));
+        }
+        if !is_pane(self, target) {
+            return Err(format!("no target pane {target:?}"));
+        }
+        if source == target {
+            return Err("the target is the pane itself".into());
+        }
+        let from = self.tab_of(source).unwrap().id.clone();
+        let to = self.tab_of(target).unwrap().id.clone();
+        if from == to {
+            return if self.move_pane(source, target, edge) { Ok(vec![]) } else { Err("cannot move it there".into()) };
+        }
+        let (from_space, to_space) = (self.space_of(source).unwrap(), self.space_of(target).unwrap());
+        if from_space.machine != to_space.machine {
+            return Err("a pane can only move to a tab on its own machine".into());
+        }
+        let (from_space, to_space) = (from_space.id.clone(), to_space.id.clone());
+        let moved = |pane: &str, space: &str, tab: &str| (pane.to_owned(), space.to_owned(), tab.to_owned());
+        let Some(edge) = edge else {
+            // Trade places: each takes the other's spot and share.
+            let a = self.tab_of(source).unwrap().root.find(source).cloned().unwrap();
+            let b = self.tab_of(target).unwrap().root.find(target).cloned().unwrap();
+            if let Some(x) = self.tab_mut(&from).and_then(|t| t.root.find_mut(source)) {
+                *x = Node { size: a.size, ..b.clone() };
+            }
+            if let Some(y) = self.tab_mut(&to).and_then(|t| t.root.find_mut(target)) {
+                *y = Node { size: b.size, ..a };
+            }
+            for (tab, gone, here) in [(&from, source, target), (&to, target, source)] {
+                if let Some(t) = self.tab_mut(tab) {
+                    t.before.retain(|p| p != gone);
+                    if t.focused.as_deref() == Some(gone) {
+                        t.focused = Some(here.to_owned());
+                    }
+                    if t.zoomed.as_deref() == Some(gone) {
+                        t.zoomed = None;
+                    }
+                }
+            }
+            self.focus_pane(source);
+            return Ok(vec![moved(source, &to_space, &to), moved(target, &from_space, &from)]);
+        };
+        let mut pane = self.tab_of(source).unwrap().root.find(source).cloned().unwrap();
+        pane.size = None;
+        let machine = self.space(&to_space).and_then(|s| s.machine.clone());
+        let container = self.fresh_id_on("s", machine.as_deref());
+        let axis = if matches!(edge, Edge::Left | Edge::Right) { Axis::Row } else { Axis::Column };
+        let mut root = self.tab(&to).unwrap().root.clone();
+        if !root.split(target, axis, pane, container) {
+            return Err("cannot move it there".into());
+        }
+        if matches!(edge, Edge::Left | Edge::Top) {
+            root.swap(source, target);
+        }
+        // Out of its tab first (pane ids are unique, so tab_of finds the old one).
+        self.remove_pane(source);
+        let Some(t) = self.tab_mut(&to) else { return Err("the target tab closed".into()) };
+        t.root = root;
+        self.focus_pane(source);
+        Ok(vec![moved(source, &to_space, &to)])
+    }
+
     pub fn swap_panes(&mut self, pane: &str, target: &str) -> Result<(), String> {
         let is_pane = |m: &Model, id: &str| m.tab_of(id).and_then(|c| c.root.find(id)).is_some_and(Node::is_pane);
         if !is_pane(self, pane) {
@@ -397,6 +467,21 @@ impl Model {
         }
         c.root.swap(pane, target);
         Ok(())
+    }
+
+    /// Gives every split in a tab equal shares.
+    pub fn balance(&mut self, tab: &str) -> bool {
+        let Some(t) = self.tab_mut(tab) else { return false };
+        fn even(n: &mut Node) {
+            if let Some(children) = n.children_mut() {
+                for c in children {
+                    c.size = None;
+                    even(c);
+                }
+            }
+        }
+        even(&mut t.root);
+        true
     }
 
     /// Removes a pane. Returns what else closed: the tab, and the space if it was its last.
@@ -944,6 +1029,78 @@ mod tests {
             assert!(!m.move_pane(source, target, None));
             assert_eq!(format!("{:?}", m.spaces), before);
         }
+    }
+
+    impl Model {
+        fn root_parent_axis(&self, pane: &str) -> Option<Axis> {
+            self.tab_of(pane)?.root.parent_of(pane)?.axis()
+        }
+    }
+
+    #[test]
+    fn a_pane_moves_into_another_space_and_its_empty_tab_closes() {
+        use crate::layout::Edge;
+        let mut m = model_with_one();
+        m.split("x1", Axis::Row, "x5", "t5");
+        m.add_space("p2", "web", "/src/web", Tab::new("c2", "", "x2", "t2"));
+        m.add_tab("p2", Tab::new("c3", "", "x3", "t3"));
+        // x3 is alone in c3: moving it beside x1 closes c3, and p2 keeps c2.
+        let moved = m.move_pane_to("x3", "x1", Some(Edge::Bottom)).unwrap();
+        assert_eq!(moved, [("x3".into(), "p1".into(), "c1".into())]);
+        assert!(m.tab("c3").is_none());
+        assert_eq!(m.space("p2").unwrap().tabs.len(), 1);
+        assert_eq!(m.tab_of("x3").unwrap().id, "c1");
+        assert_eq!(m.address_of("x3").as_deref(), Some("t3"));
+        assert_eq!(m.root_parent_axis("x3"), Some(Axis::Column));
+        assert_eq!(m.focused_pane().as_deref(), Some("x3"));
+        assert_eq!(m.active.as_deref(), Some("p1"));
+        // The last pane of a space takes the space with it.
+        let moved = m.move_pane_to("x2", "x5", Some(Edge::Left)).unwrap();
+        assert_eq!(moved.len(), 1);
+        assert!(m.space("p2").is_none());
+        let ids: Vec<_> = m.tab("c1").unwrap().root.panes().iter().map(|n| n.id.clone()).collect();
+        assert_eq!(ids, ["x1", "x3", "x2", "x5"]);
+    }
+
+    #[test]
+    fn panes_in_two_tabs_trade_places() {
+        let mut m = model_with_one();
+        m.split("x1", Axis::Row, "x5", "t5");
+        m.add_space("p2", "web", "/src/web", Tab::new("c2", "", "x2", "t2"));
+        let moved = m.move_pane_to("x1", "x2", None).unwrap();
+        assert_eq!(moved, [("x1".into(), "p2".into(), "c2".into()), ("x2".into(), "p1".into(), "c1".into())]);
+        assert_eq!(m.tab_of("x1").unwrap().id, "c2");
+        assert_eq!(m.tab_of("x2").unwrap().id, "c1");
+        assert_eq!(m.tab("c1").unwrap().root.panes()[0].id, "x2");
+        // c1 kept its focused pane (x5); the moved pane has the keyboard in c2.
+        assert_eq!(m.tab("c1").unwrap().focused.as_deref(), Some("x5"));
+        assert_eq!(m.focused_pane().as_deref(), Some("x1"));
+    }
+
+    #[test]
+    fn panes_do_not_move_between_machines_or_onto_themselves() {
+        let mut m = model_with_one();
+        m.add_space("vps/p2", "api", "/srv", Tab::new("vps/c2", "", "vps/x2", "vps/t2"));
+        m.space_mut("vps/p2").unwrap().machine = Some("vps".into());
+        let before = format!("{:?}", m.spaces);
+        for (source, target) in [("x1", "vps/x2"), ("x1", "x1"), ("x1", "missing"), ("c1", "x1")] {
+            assert!(m.move_pane_to(source, target, None).is_err(), "{source} -> {target}");
+            assert_eq!(format!("{:?}", m.spaces), before);
+        }
+    }
+
+    #[test]
+    fn balance_gives_every_split_an_equal_share() {
+        use crate::layout::Size;
+        let mut m = model_with_one();
+        m.split("x1", Axis::Row, "x2", "t2");
+        m.split("x2", Axis::Row, "x3", "t3");
+        let shares = |m: &Model| m.tab("c1").unwrap().root.children().iter().map(|n| n.size).collect::<Vec<_>>();
+        assert_ne!(shares(&m), [None, None, None]);
+        m.tab_mut("c1").unwrap().root.find_mut("x1").unwrap().size = Some(Size::Px { px: 120. });
+        assert!(m.balance("c1"));
+        assert_eq!(shares(&m), [None, None, None]);
+        assert!(!m.balance("missing"));
     }
 
     #[test]

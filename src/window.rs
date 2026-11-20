@@ -2890,6 +2890,36 @@ impl AppWindow {
         Ok(reply)
     }
 
+    /// `pane.move`: within its tab as a drag does, or into another tab on the same
+    /// machine. A moved terminal's labels follow it, so it comes back there after a restart.
+    fn move_pane(&mut self, pane: &str, target: &str, edge: Option<crate::layout::Edge>, cx: &mut Context<Self>) -> Result<(), String> {
+        let terminals: Vec<String> = [pane, target].iter().filter_map(|p| self.model.address_of(p)).collect();
+        if let Some(t) = terminals.iter().find(|t| self.changing_terminals.contains(*t)) {
+            return Err(format!("{t} already has a pane change in progress"));
+        }
+        let machine = self.model.space_of(pane).and_then(|s| s.machine.clone());
+        self.require_document(machine.as_deref())?;
+        let moved = self.model.move_pane_to(pane, target, edge)?;
+        for (pane, space, tab) in moved {
+            let Some(addr) = self.model.address_of(&pane) else { continue };
+            let on = addr.split_once('/').map(|(m, _)| m.to_owned());
+            let labels = json!({
+                "herdr.space": crate::mirror::local(&space, on.as_deref()),
+                "herdr.tab": crate::mirror::local(&tab, on.as_deref()),
+            });
+            let core = self.core.clone();
+            cx.background_executor()
+                .spawn(async move {
+                    if let Err(e) = core.call("terminal.label", json!({ "terminal": addr, "labels": labels })) {
+                        tracing::warn!("moved pane labels: {e:#}");
+                    }
+                })
+                .detach();
+        }
+        self.focused_pane = Some(pane.to_owned());
+        Ok(())
+    }
+
     /// Parking changes labels/keep in the background; only a successful reply removes the pane.
     fn park_terminal(&mut self, addr: &str, window: &mut Window, cx: &mut Context<Self>) -> Result<Value, String> {
         self.require_document(addr.split_once('/').map(|(m, _)| m))?;
@@ -3136,7 +3166,7 @@ impl AppWindow {
             if !args.is_object() { args = json!({}); }
             args["machine"] = json!(machine);
         }
-        if matches!(name, "space.new" | "space.close" | "space.rename" | "space.move" | "tab.new" | "tab.close" | "tab.rename" | "tab.move" | "pane.split" | "pane.close" | "pane.swap" | "pane.rename" | "pane.resize" | "terminal.keep" | "terminal.park") {
+        if matches!(name, "space.new" | "space.close" | "space.rename" | "space.move" | "tab.new" | "tab.close" | "tab.rename" | "tab.move" | "pane.split" | "pane.close" | "pane.swap" | "pane.move" | "pane.balance" | "pane.rename" | "pane.resize" | "terminal.keep" | "terminal.park") {
             let node = ["id", "space", "pane"].into_iter().find_map(|k| Self::arg(&args, k));
             let target = node.and_then(|id| self.model.space(id).or_else(|| self.model.space_of(id))).or_else(|| self.model.active_space());
             let machine = if name == "space.new" { Self::arg(&args, "machine") }
@@ -3410,6 +3440,30 @@ impl AppWindow {
                 };
                 if let Err(e) = r {
                     return self.fail(e);
+                }
+            }
+            "pane.move" => {
+                let pane = Self::owned(a, "pane").or_else(|| self.model.focused_pane());
+                let Some(target) = Self::owned(a, "target") else { return self.fail("pane.move needs a target pane") };
+                let edge = match Self::arg(a, "edge") {
+                    None | Some("center") => None,
+                    Some("left") => Some(crate::layout::Edge::Left),
+                    Some("right") => Some(crate::layout::Edge::Right),
+                    Some("top") => Some(crate::layout::Edge::Top),
+                    Some("bottom") => Some(crate::layout::Edge::Bottom),
+                    Some(e) => return self.fail(format!("edge must be left, right, top, bottom or center, not {e:?}")),
+                };
+                let Some(pane) = pane else { return self.fail("no pane to move") };
+                if let Err(e) = self.move_pane(&pane, &target, edge, cx) {
+                    return self.fail(e);
+                }
+                // A pane from a tab that wasn't on screen has no view yet: give it the keyboard once it does.
+                cx.defer_in(window, |this, window, cx| this.restore_focus(window, cx));
+            }
+            "pane.balance" => {
+                let tab = Self::owned(a, "tab").or_else(|| self.model.active_tab().map(|t| t.id.clone()));
+                if !tab.is_some_and(|t| self.model.balance(&t)) {
+                    return self.fail("no tab to balance");
                 }
             }
             // ---- terminals
@@ -5351,7 +5405,7 @@ fn swap_by(args: &Value) -> Result<SwapBy<'_>, String> {
 
 fn needs_model_pane(name: &str, args: &Value) -> bool {
     match name {
-        "pane.split" | "pane.close" | "pane.zoom" | "pane.swap" | "pane.rename" | "pane.resize" | "terminal.show" => AppWindow::arg(args, "pane").is_none(),
+        "pane.split" | "pane.close" | "pane.zoom" | "pane.swap" | "pane.move" | "pane.rename" | "pane.resize" | "terminal.show" => AppWindow::arg(args, "pane").is_none(),
         "pane.go" => true,
         "terminal.open" | "terminal.keep" => matches!(AppWindow::arg(args, "place"), Some("right" | "down")),
         _ => false,
@@ -7480,6 +7534,34 @@ export default class Probe extends View {
     }
 
     include!("window/pane_size_tests.rs");
+
+    /// `pane.move` brings a pane from another space; the keyboard goes with it.
+    #[test]
+    fn pane_move_across_spaces_focuses_the_moved_pane() {
+        in_own_process("pane_move_across");
+    }
+
+    #[gpui::test]
+    fn pane_move_across(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("pane_move_across") { return; }
+        let (view, cx) = open_window(cx, "unused", "", json!({ "id": "main", "type": "block", "content": { "tab": "active" } }));
+        view.update_in(cx, |this, window, cx| {
+            this.model.add_space("b", "b", "/", super::Tab::new("tb", "", "pb", "term-b"));
+            this.model.split("pb", super::Axis::Row, "pb2", "term-b2");
+            this.model.add_space("a", "a", "/", super::Tab::new("ta", "", "pa", "term-a"));
+            this.documents.entry(String::new()).or_default().available = true;
+            this.sync(window, cx);
+            assert_eq!(this.model.focused_pane().as_deref(), Some("pa"));
+            let out = this.run_as("pane.move", json!({ "pane": "pb2", "target": "pa", "edge": "right" }), false, window, cx);
+            assert!(out.get("error").is_none(), "{out}");
+            assert_eq!(this.model.tab_of("pb2").unwrap().id, "ta");
+            assert_eq!(this.model.focused_pane().as_deref(), Some("pb2"));
+            this.sync(window, cx);
+            assert_eq!(this.focused_pane.as_deref(), Some("pb2"));
+            assert_eq!(this.model.focused_pane().as_deref(), Some("pb2"));
+        });
+    }
 
     /// What a `{"command":"tab.move","args":{"by":-1}}` key runs.
     #[test]
