@@ -8,6 +8,7 @@ use crate::hc::Core;
 mod floats;
 mod movable;
 mod pane_drag;
+mod pane_pulse;
 mod pane_size;
 mod titlebar;
 
@@ -27,7 +28,7 @@ use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
 use std::path::PathBuf;
 use std::rc::Rc;
 use std::sync::Arc;
-use std::time::{Duration, Instant, SystemTime};
+use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 const HEADER_HEIGHT: f32 = 30.0;
 const HANDLE: f32 = 6.0;
@@ -390,6 +391,14 @@ struct Watched {
     programs: Option<SystemTime>,
 }
 
+struct PaneTypingPulse {
+    pane: String,
+    terminal: EntityId,
+    started: Instant,
+    sequence: u64,
+    burst: pane_pulse::Burst,
+}
+
 pub struct AppWindow {
     core: Arc<Core>,
     runtime: Option<Rc<ShellRuntime>>,
@@ -423,6 +432,7 @@ pub struct AppWindow {
     model: Model,
     /// Terminal views by block id (panes and chrome terminal blocks).
     terms: HashMap<String, Term>,
+    typing_pulse: Option<PaneTypingPulse>,
     /// Mod copies by slot (block id, `<stack>#header`, or `overlay:<id>`).
     copies: HashMap<String, Copy>,
     overlays: Vec<Overlay>,
@@ -552,6 +562,7 @@ impl AppWindow {
             float_leave: HashMap::new(),
             model: Model::default(),
             terms: HashMap::new(),
+            typing_pulse: None,
             copies: HashMap::new(),
             overlays: Vec::new(),
             toast_scroll: ScrollHandle::new(),
@@ -1587,7 +1598,7 @@ impl AppWindow {
             self.tell_term(&view, &address, cx);
             mods::track_pane_view(id.clone(), &view);
             let (block, addr) = (id.clone(), address.clone());
-            let sub = cx.subscribe_in(&view, window, move |this, _, ev: &TerminalEvent, window, cx| match ev {
+            let sub = cx.subscribe_in(&view, window, move |this, terminal, ev: &TerminalEvent, window, cx| match ev {
                 TerminalEvent::Peek(address) => this.peek_terminal(address, window, cx),
                 TerminalEvent::Link(click) => this.handle_link(&block, &addr, click, window, cx),
                 TerminalEvent::TitleChanged => this.publish(cx),
@@ -1596,7 +1607,9 @@ impl AppWindow {
                     this.refresh_snapshot_mods(cx);
                 }
                 TerminalEvent::SelectionChanged => this.publish_selection(&addr, window, cx),
-                TerminalEvent::Typed => {},
+                TerminalEvent::Typed => {
+                    this.pulse_typed_pane(block.trim_end_matches(SWAP), terminal.entity_id(), window, cx);
+                }
                 TerminalEvent::Ended => this.terminal_ended(&block, window, cx),
                 TerminalEvent::ContextMenu(at) => {
                     this.open_menu("pane", json!({ "pane": block.trim_end_matches(SWAP), "terminal": addr }), Some(*at), window, cx)
@@ -4574,6 +4587,88 @@ impl AppWindow {
         (frame.lone || ctx.root.panes().len() > 1).then_some(frame)
     }
 
+    fn pane_has_typing_focus(&self, pane: &str, terminal: EntityId, window: &Window) -> bool {
+        // A pane can show a different terminal or lose the keyboard while an event is queued.
+        window.is_window_active()
+            && self.focused_pane.as_deref() == Some(pane)
+            && self.pane_term(pane).is_some_and(|term| {
+                term.view.entity_id() == terminal && term.focus.is_focused(window)
+            })
+    }
+
+    fn pulse_typed_pane(
+        &mut self,
+        pane: &str,
+        terminal: EntityId,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.pane_has_typing_focus(pane, terminal, window) {
+            return;
+        }
+
+        let now = cx.background_executor().now();
+        let previous = self.typing_pulse.as_ref();
+        if previous.is_some_and(|pulse| {
+            pulse.terminal == terminal && now.duration_since(pulse.started) < pane_pulse::DURATION
+        }) {
+            return;
+        }
+
+        if !self.pane_frame().is_some_and(|frame| {
+            frame.typing_pulse && pane_size::frame_border(frame, true).is_some_and(|line| line.width > 0.0)
+        }) || !self.model.active_tab().is_some_and(|tab| tab.shown().find(pane).is_some())
+        {
+            return;
+        }
+
+        let seed = SystemTime::now().duration_since(UNIX_EPOCH).unwrap_or_default().subsec_nanos();
+        self.typing_pulse = Some(PaneTypingPulse {
+            pane: pane.to_owned(),
+            terminal,
+            started: now,
+            sequence: previous.map_or(0, |p| p.sequence.wrapping_add(1)),
+            burst: pane_pulse::Burst::new(seed, previous.map(|p| p.burst.color)),
+        });
+        cx.notify();
+    }
+
+    fn animate_typing_frame(frame: Div, pulse: &PaneTypingPulse, color: Hsla, radius: Pixels) -> AnyElement {
+        let burst = pulse.burst;
+        let tint = c(pane_pulse::COLORS[burst.color]);
+        let light = tint.blend(rgb(0xf6f8ff).alpha(0.82).into());
+        let layers = [(14.0, 0.08), (9.0, 0.16), (5.0, 0.28), (2.0, 0.47)]
+            .map(|(width, opacity)| (settings::z(width), opacity));
+
+        frame.with_animation(
+            ("pane-typing", pulse.sequence),
+            Animation::new(pane_pulse::DURATION),
+            move |frame, progress| {
+                let strength = burst.intensity(progress * pane_pulse::DURATION.as_millis() as f32);
+                if strength == 0.0 {
+                    return frame;
+                }
+
+                frame.border_color(color.blend(light.alpha(strength))).child(
+                    canvas(|_, _, _| (), move |bounds, _, window, _| {
+                        // The inset glow paints over the pane without taking space or input.
+                        for (width, opacity) in layers {
+                            let width = width.min(bounds.size.width.min(bounds.size.height) / 2.);
+                            window.paint_quad(quad(
+                                bounds,
+                                Corners::all(radius),
+                                Hsla::transparent_black(),
+                                Edges::all(width),
+                                tint.alpha(opacity * strength),
+                                BorderStyle::Solid,
+                            ));
+                        }
+                    }).absolute().inset_0(),
+                )
+            },
+        ).into_any_element()
+    }
+
     /// A pane in its frame: the look, and the header mod above or below it
     /// (on hover: drawn over the terminal, so it never resizes).
     fn frame_pane(&self, n: &Node, f: &PaneFrame, on: bool, inner: AnyElement, cx: &mut Context<Self>) -> AnyElement {
@@ -4591,15 +4686,32 @@ impl AppWindow {
         }
         el = shadow(el, f.shadow.as_deref());
         let body = div().flex_1().min_h_0().flex().child(inner);
-        let Some(h) = &f.header else { return el.child(body).into_any_element() };
-        let head = div().flex_none().h(settings::z(pane_size::header_height(h))).w_full().flex()
-            .child(self.render_slot(&format!("{}#frame", n.id), cx));
-        if h.hover() {
-            let head = head.absolute().left_0().right_0().opacity(0.).group_hover(group, |s| s.opacity(1.));
-            let head = if h.bottom() { head.bottom_0() } else { head.top_0() };
-            return el.child(body).child(head).into_any_element();
+        let el = if let Some(h) = &f.header {
+            let head = div().flex_none().h(settings::z(pane_size::header_height(h))).w_full().flex()
+                .child(self.render_slot(&format!("{}#frame", n.id), cx));
+            if h.hover() {
+                let head = head.absolute().left_0().right_0().opacity(0.).group_hover(group, |s| s.opacity(1.));
+                let head = if h.bottom() { head.bottom_0() } else { head.top_0() };
+                el.child(body).child(head)
+            } else if h.bottom() {
+                el.child(body).child(head)
+            } else {
+                el.child(head).child(body)
+            }
+        } else {
+            el.child(body)
+        };
+
+        if on && f.typing_pulse
+            && let Some(line) = line
+            && let Some(pulse) = self.typing_pulse.as_ref()
+            && pulse.pane == n.id
+            && cx.background_executor().now().duration_since(pulse.started) < pane_pulse::DURATION
+            && self.pane_term(&n.id).is_some_and(|term| term.view.entity_id() == pulse.terminal)
+        {
+            return Self::animate_typing_frame(el, pulse, c(&line.color), settings::z(f.radius.unwrap_or_default()));
         }
-        if h.bottom() { el.child(body).child(head) } else { el.child(head).child(body) }.into_any_element()
+        el.into_any_element()
     }
 
     /// `frame`: how panes are wrapped here (inside a framed tab), else None.
@@ -5596,6 +5708,11 @@ impl Render for AppWindow {
             self.refresh_snapshot_mods(cx);
         }
         let focused = self.focused_path(window, cx);
+        if self.typing_pulse.as_ref().is_some_and(|pulse| {
+            !focused.contains(&pulse.pane) || !self.pane_has_typing_focus(&pulse.pane, pulse.terminal, window)
+        }) {
+            self.typing_pulse = None;
+        }
         let tree = self.render_node(&self.chrome, &focused, None, cx);
         let tree = self.window_frame(tree, window, cx);
         let overlays = self.render_overlays(window.viewport_size(), cx);

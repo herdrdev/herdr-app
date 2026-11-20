@@ -271,6 +271,9 @@ pub struct PaneFrame {
     /// The border while the pane has focus.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub focus: Option<Line>,
+    /// Pulse the focused border when keyboard input reaches its terminal.
+    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
+    pub typing_pulse: bool,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub radius: Option<f32>,
     /// Space between panes.
@@ -758,6 +761,18 @@ pub fn snap(x: f32, y: f32, w: f32, h: f32) -> (Edge, Align) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn pane_typing_pulse_is_opt_in() {
+        let frame: PaneFrame = serde_json::from_value(serde_json::json!({})).unwrap();
+        assert!(!frame.typing_pulse);
+        assert!(serde_json::to_value(frame).unwrap().get("typing_pulse").is_none());
+
+        let frame: PaneFrame =
+            serde_json::from_value(serde_json::json!({"typing_pulse": true})).unwrap();
+        assert!(frame.typing_pulse);
+        assert_eq!(serde_json::to_value(frame).unwrap()["typing_pulse"], true);
+    }
 
     #[test]
     fn floats_snap_to_the_nearest_edge_and_third() {

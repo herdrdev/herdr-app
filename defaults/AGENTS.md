@@ -389,6 +389,9 @@ The tab block says how each pane of the shown tab is wrapped:
 
 - The look applies to every pane; `focus` replaces the border while the
   pane has the keyboard; `gap` is the space between panes.
+- `typing_pulse: true` makes the focused pane's border pulse when its
+  terminal receives keyboard input. The glow uses the layout's colors and
+  takes no space inside the pane.
 - `header`: a mod drawn on each pane, one copy per pane, with
   `props().pane` and `props().terminal`. It reads its live facts from
   `panes()` (title, folder, branch, agent status, focused, zoomed, scroll)
