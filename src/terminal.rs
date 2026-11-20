@@ -72,6 +72,8 @@ pub enum TerminalEvent {
     Link(links::Click),
     TitleChanged,
     SelectionChanged,
+    /// A focused terminal forwarded keyboard input. Carries no key or text data.
+    Typed,
     /// History scroll position changed enough for mods that watch `panes().scroll`.
     ScrollChanged,
     /// The program ended.
@@ -679,7 +681,7 @@ impl TerminalView {
         self.shown_in.get() == FRAME.load(Ordering::Relaxed)
     }
 
-    fn send(&self, bytes: &[u8]) {
+    fn send(&self, bytes: &[u8]) -> bool {
         self.typed_at.set(Some(Instant::now()));
         let mut g = self.grid.borrow_mut();
         if let Some(ch) = g.channel
@@ -687,6 +689,14 @@ impl TerminalView {
         {
             g.vt.scroll_to_bottom();
             g.core.input(ch, bytes);
+            return true;
+        }
+        false
+    }
+
+    fn send_typed(&self, bytes: &[u8], window: &Window, cx: &mut Context<Self>) {
+        if self.send(bytes) && self.focus.is_focused(window) {
+            cx.emit(TerminalEvent::Typed);
         }
     }
 
@@ -1031,7 +1041,7 @@ impl TerminalView {
         }
         let bytes = key_bytes(&mut self.grid.borrow_mut().vt, ev);
         if let Some(bytes) = bytes {
-            self.send(&bytes);
+            self.send_typed(&bytes, window, cx);
             cx.stop_propagation();
         }
     }
@@ -2404,7 +2414,7 @@ impl EntityInputHandler for TerminalView {
         // be a way around that (see `key_down`); with the terminal focused,
         // input methods type into the program as usual.
         if !self.find_field_focused(window, cx) {
-            self.send(text.as_bytes());
+            self.send_typed(text.as_bytes(), window, cx);
         }
         cx.notify();
     }
@@ -2508,7 +2518,7 @@ impl Render for TerminalView {
                 // `send:<text>` bindings from keys.json type into this terminal.
                 match a.id().strip_prefix("send:") {
                     Some(_) if this.find_field_focused(window, cx) => cx.stop_propagation(),
-                    Some(text) => this.send(text.as_bytes()),
+                    Some(text) => this.send_typed(text.as_bytes(), window, cx),
                     None => cx.propagate(),
                 }
             }))
@@ -3544,6 +3554,93 @@ mod tests {
     }
 
     #[gpui::test]
+    fn typing_pulse_matches_forwarded_keyboard_input(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+        use gpui_shell::action::ShellAction;
+        use std::{cell::Cell, rc::Rc};
+
+        const CHANNEL: u32 = 7;
+
+        struct Root(Entity<super::TerminalView>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(self.0.clone())
+            }
+        }
+
+        let (core, drain_input) = crate::hc::record_terminal_input();
+        let typed = Rc::new(Cell::new(0));
+        let observed = typed.clone();
+
+        cx.update(gpui_base::init);
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let terminal = cx.new(|cx| {
+                super::TerminalView::attach(core, "t1".into(), (40, 6), cx)
+            });
+            cx.subscribe(&terminal, move |_, _, event: &super::TerminalEvent, _| {
+                if matches!(event, super::TerminalEvent::Typed) {
+                    observed.set(observed.get() + 1);
+                }
+            }).detach();
+            let focus = terminal.read(cx).focus_handle().clone();
+            focus.focus(window, cx);
+            Root(terminal)
+        });
+        cx.run_until_parked();
+
+        let terminal = root.read_with(cx, |root, _| root.0.clone());
+        let expect = |case, events, sent: &[&[u8]]| {
+            assert_eq!(typed.replace(0), events, "{case}: typing events");
+            let expected: Vec<_> = sent.iter().map(|bytes| (CHANNEL, bytes.to_vec())).collect();
+            assert_eq!(drain_input(), expected, "{case}: bytes written to the core");
+        };
+
+        cx.simulate_keystrokes("x");
+        expect("disconnected terminal", 0, &[]);
+
+        terminal.update(cx, |terminal, _| terminal.grid.borrow_mut().channel = Some(CHANNEL));
+        cx.simulate_keystrokes("a");
+        expect("ordinary key", 1, &[b"a"]);
+
+        cx.update(|window, app| terminal.update(app, |terminal, cx| {
+            terminal.replace_and_mark_text_in_range(None, "nihon", None, window, cx);
+        }));
+        expect("IME composition preview", 0, &[]);
+
+        cx.update(|window, app| terminal.update(app, |terminal, cx| {
+            terminal.replace_text_in_range(None, "日本", window, cx);
+            terminal.replace_text_in_range(None, "", window, cx);
+        }));
+        expect("IME commit and empty update", 1, &["日本".as_bytes()]);
+
+        cx.dispatch_action(ShellAction::new("send:ready"));
+        expect("send key binding", 1, &[b"ready"]);
+        cx.dispatch_action(ShellAction::new("send:"));
+        expect("empty send key binding", 0, &[]);
+
+        terminal.update(cx, |terminal, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string("pasted".into()));
+            terminal.paste(cx);
+        });
+        expect("clipboard paste", 0, &[b"pasted"]);
+
+        terminal.update(cx, |terminal, cx| {
+            assert!(terminal.ingest([crate::hc::Stream::Data(b"program output\r\n".to_vec())], cx));
+        });
+        expect("program output", 0, &[]);
+
+        cx.update(|window, app| terminal.update(app, |terminal, cx| terminal.open_search(window, cx)));
+        cx.run_until_parked();
+        cx.simulate_keystrokes("x");
+        cx.dispatch_action(ShellAction::new("send:ignored"));
+        cx.update(|window, app| terminal.update(app, |terminal, cx| {
+            terminal.replace_text_in_range(None, "ignored", window, cx);
+        }));
+        expect("Find owns the keyboard", 0, &[]);
+        assert_eq!(terminal.read_with(cx, |terminal, _| terminal.search_query.clone()), "x");
+    }
+
+    #[gpui::test]
     fn typing_reaches_the_program_while_the_find_bar_is_open(cx: &mut gpui::TestAppContext) {
         use gpui::*;
 
@@ -3560,14 +3657,25 @@ mod tests {
         })));
         cx.run_until_parked();
 
+        let typed = std::rc::Rc::new(std::cell::Cell::new(0));
         cx.update(|window, app| {
-            root.update(app, |root, app| {
-                root.0.update(app, |terminal, cx| terminal.open_search(window, cx));
+            root.update(app, |root, cx| {
+                let typed = typed.clone();
+                cx.subscribe(&root.0, move |_, _, event: &super::TerminalEvent, _| {
+                    if matches!(event, super::TerminalEvent::Typed) {
+                        typed.set(typed.get() + 1);
+                    }
+                }).detach();
+                root.0.update(cx, |terminal, cx| {
+                    terminal.grid.borrow_mut().channel = Some(1);
+                    terminal.open_search(window, cx);
+                });
             });
         });
         cx.run_until_parked();
         cx.simulate_keystrokes("l s");
         cx.run_until_parked();
+        assert_eq!(typed.get(), 0, "find input should not trigger the pane border");
         root.read_with(cx, |root, cx| {
             let terminal = root.0.read(cx);
             assert_eq!(terminal.search_query, "ls");
@@ -3582,6 +3690,7 @@ mod tests {
         cx.run_until_parked();
         cx.simulate_keystrokes("l s");
         cx.run_until_parked();
+        assert_eq!(typed.get(), 2, "terminal input should trigger the activity event");
         root.read_with(cx, |root, cx| {
             let terminal = root.0.read(cx);
             assert!(terminal.search_open);

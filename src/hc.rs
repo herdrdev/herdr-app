@@ -569,19 +569,39 @@ impl Drop for Core {
 /// fails at once, and it never reports the loss (so nothing reconnects).
 #[cfg(test)]
 pub fn offline() -> Arc<Core> {
-    let (writer, frames) = mpsc::channel();
+    let (core, frames) = disconnected();
     std::mem::forget(frames);
+    core
+}
+
+#[cfg(test)]
+fn disconnected() -> (Arc<Core>, mpsc::Receiver<Vec<u8>>) {
+    let (writer, frames) = mpsc::channel();
     let (lost_tx, lost) = async_channel::bounded(1);
     std::mem::forget(lost_tx);
     let child = std::process::Command::new(std::env::current_exe().unwrap()).arg("--help").stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
-    Arc::new(Core {
+    let core = Arc::new(Core {
         hello: Value::Null,
         writer,
         routes: Arc::new(Mutex::new(Routes { closed: true, ..Default::default() })),
         next_id: AtomicU64::new(1),
         child: Mutex::new(child),
         lost,
-    })
+    });
+    (core, frames)
+}
+
+/// Records terminal DATA frames without starting or contacting a real core.
+#[cfg(test)]
+pub fn record_terminal_input() -> (Arc<Core>, impl Fn() -> Vec<(u32, Vec<u8>)>) {
+    let (core, frames) = disconnected();
+    let drain = move || {
+        frames.try_iter().filter_map(|frame| {
+            let (channel, kind, bytes) = read_frame(&mut frame.as_slice()).unwrap();
+            (channel != 0 && kind == DATA).then_some((channel, bytes))
+        }).collect()
+    };
+    (core, drain)
 }
 
 /// A core that answers every call at once: `terminal.run` with a new address,

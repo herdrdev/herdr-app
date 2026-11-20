@@ -1596,6 +1596,7 @@ impl AppWindow {
                     this.refresh_snapshot_mods(cx);
                 }
                 TerminalEvent::SelectionChanged => this.publish_selection(&addr, window, cx),
+                TerminalEvent::Typed => {},
                 TerminalEvent::Ended => this.terminal_ended(&block, window, cx),
                 TerminalEvent::ContextMenu(at) => {
                     this.open_menu("pane", json!({ "pane": block.trim_end_matches(SWAP), "terminal": addr }), Some(*at), window, cx)
