@@ -58,6 +58,22 @@ test("an unnamed tab's row reads its terminal's title, not the tab number", () =
   expect(title({ name: "3", named: false }, { ...claude, title: "claude" })).toBe("3");
 });
 
+test("OMP task titles drop only the idle or working marker", () => {
+  const title = new Function("View", `${source}; return title;`)(class {});
+  const omp = { program: { name: "oh-my-pi", key: "omp" }, title: "" };
+  const tab = { name: "3", named: false };
+  for (const marker of ["π > ", "π ⠦ ", "π ⠋ "]) {
+    for (const task of ["Fix sidebar", "🔴 login", "[web] login", "- preserve punctuation"]) {
+      expect(title(tab, { ...omp, title: marker + task })).toBe(task);
+    }
+    expect(title({ name: "My tab", named: true }, { ...omp, title: marker + "Fix sidebar" })).toBe("My tab");
+    expect(title(tab, { ...omp, title: marker + "~/src" })).toBe("3");
+    expect(title(tab, { program: { name: "Pi", key: "pi" }, title: marker + "Fix sidebar" })).toBe(marker + "Fix sidebar");
+  }
+  expect(title(tab, { ...omp, title: "π - ordinary title" })).toBe("π - ordinary title");
+  expect(title(tab, { ...omp, title: "π >inside title" })).toBe("π >inside title");
+});
+
 test("an empty OSC title published as the terminal address keeps the tab name", () => {
   const title = new Function("View", `${source}; return title;`)(class {});
   for (const address of ["t2", "remote/t2"]) {
@@ -173,6 +189,25 @@ for (const sort of ["priority", "grouped"]) test(`${sort} render reads panes onc
   expect(second).toContain("Updated task");
   expect(second).not.toContain("Task 63");
   expect(orders[1]).toEqual(orders[0]);
+});
+
+for (const sort of ["priority", "grouped"]) test(`${sort}: OMP rows show task titles as their status changes`, () => {
+  const program = { name: "oh-my-pi", key: "omp", agent: true };
+  const agent = { address: "t1", pane: "p1", tab: "tab1", space: "s1", space_name: "Project", program, title: "π > 🔴 Fix sidebar", status: "idle", seq: 0 };
+  const { agents } = harness([], {
+    agents: () => [agent], terminals: () => [{ ...agent, state: "live" }],
+    panes: () => [{ ...agent, terminal: agent.address }], focused: () => null,
+    spaces: () => [{ tabs: [{ id: "tab1", name: "1", named: false }] }],
+    layout: () => ({ id: "sidebar", size: { px: 268 } }), shared: () => sort,
+    theme: () => ({}), setAgentOrder() {},
+    div: element, v_flex: element, h_flex: element, svg: element, image: element,
+  });
+  for (const raw of ["π > 🔴 Fix sidebar", "π ⠦ 🔴 Fix sidebar"]) {
+    agent.title = raw;
+    const rendered = textOf(agents.render({}).node);
+    expect(rendered).toContain("🔴 Fix sidebar");
+    expect(rendered).not.toContain(raw);
+  }
 });
 
 for (const sort of ["priority", "grouped"]) for (const named of [false, true]) test(`${sort}: agents sharing a ${named ? "named" : "numbered"} tab keep their own titles`, () => {
