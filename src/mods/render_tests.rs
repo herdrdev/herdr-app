@@ -448,6 +448,22 @@ fn changes_retries_when_the_files_copy_owning_its_git_scan_closes_or_reloads(cx:
 }
 
 #[gpui::test]
+fn a_cut_off_render_names_its_limit_and_what_did_not_run(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let root = staged.0.join("slow");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("main.js"), "import { View } from 'gpui-kit';\nexport default class Slow extends View { render() { while (true) {} } }\n").unwrap();
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|_, _| Empty);
+    window.update(cx, |_, window, cx| {
+        let mut session = DescriptionSession::load(runtime.clone(), &root, Policy::new(), window, cx).unwrap();
+        let error = session.describe(window, cx).unwrap_err().to_string();
+        assert!(error.starts_with("render() was stopped at its 50 ms limit") && error.contains("not even finally"), "{error}");
+    }).unwrap();
+}
+
+#[gpui::test]
 fn mod_code_revisions_share_successes_and_failures_without_poisoning_old_copies(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();

@@ -10704,13 +10704,20 @@ fn describe(ctx: &Ctx<'_>, error: JsError) -> String {
 
 fn describe_exception(value: &Value<'_>) -> String {
     match value.as_exception() {
-        Some(exception) => match exception.stack() {
-            Some(stack) => format!(
-                "{}\n{stack}",
-                exception.message().unwrap_or_else(|| "error".into())
-            ),
-            None => exception.message().unwrap_or_else(|| "error".into()),
-        },
+        Some(exception) => {
+            let mut message = exception.message().unwrap_or_else(|| "error".into());
+            // HERDR: a cut says what was stopped and what that skipped (sandbox.rs, INTERRUPTION).
+            if message == "interrupted"
+                && unsafe { rquickjs::qjs::JS_IsUncatchableError(value.as_raw()) }
+                && let Some(explained) = sandbox::explain_interruption()
+            {
+                message = explained;
+            }
+            match exception.stack() {
+                Some(stack) => format!("{message}\n{stack}"),
+                None => message,
+            }
+        }
         None => format!("{value:?}"),
     }
 }
