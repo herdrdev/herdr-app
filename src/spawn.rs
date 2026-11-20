@@ -15,3 +15,18 @@ pub fn command(program: impl AsRef<OsStr>) -> Command {
     }
     cmd
 }
+
+/// Interactive shell probes must not read the app's controlling terminal.
+#[cfg(unix)]
+pub fn detach_terminal(cmd: &mut Command) {
+    use std::os::unix::process::CommandExt;
+    // SAFETY: setsid is async-signal-safe and runs only in the new child.
+    unsafe {
+        cmd.pre_exec(|| {
+            if libc::setsid() == -1 {
+                return Err(std::io::Error::last_os_error());
+            }
+            Ok(())
+        });
+    }
+}

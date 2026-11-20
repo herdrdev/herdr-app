@@ -117,7 +117,10 @@ fn installed_here(shell: &str, commands: &[String]) -> Result<Vec<String>, Strin
     let limit = std::time::Duration::from_secs(30);
     let mode = if cfg!(target_os = "macos") { "-lic" } else { "-ic" };
     let line = installed_line(commands, base(shell) == "fish");
-    installed_result(commands, crate::mods::run_blocking(shell, &[mode.into(), line], None, limit)).or_else(|err| {
+    let mut probe = crate::spawn::command(shell);
+    #[cfg(unix)]
+    crate::spawn::detach_terminal(&mut probe);
+    installed_result(commands, crate::mods::run_blocking_command(probe.arg(mode).arg(line), shell, None, limit)).or_else(|err| {
         // A shell that can't run the check (nushell): sh searches the app's PATH,
         // which is where agents for such shells start (`window::unix_agent_argv`).
         let sh = crate::mods::run_blocking("/bin/sh", &["-c".into(), installed_line(commands, false)], None, limit);
@@ -496,6 +499,24 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(posix.unwrap(), ["sh", "issue240-rc-agent"]);
         assert_eq!(nu.unwrap(), ["sh"]);
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn agent_check_runs_in_its_own_session() {
+        use std::os::unix::fs::PermissionsExt;
+        let dir = crate::test_tmp().join(format!("herdr-agent-check-session-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let shell = dir.join("check-session");
+        std::fs::write(
+            &shell,
+            "#!/bin/sh\n[ \"$(ps -o sid= -p $$ | tr -d ' ')\" = \"$$\" ] || exit 1\nprobe_in_own_session() { :; }\neval \"$2\"\n",
+        ).unwrap();
+        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let commands = ["probe_in_own_session".to_owned()];
+        let found = installed_here(shell.to_str().unwrap(), &commands);
+        std::fs::remove_dir_all(dir).unwrap();
+        assert_eq!(found.unwrap(), commands);
     }
 
     #[test]
