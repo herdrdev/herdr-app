@@ -94,6 +94,11 @@ test("git grouping reads refs for normal, detached, unborn and bare worktrees", 
     expect(await check(bare)).toBeNull();
     git(bare, "worktree", "add", "-b", "bare-topic", bareTree);
     expect(await check(bareTree)).toMatchObject({ name: "bare", branch: "bare-topic", linked: true, repo: JSON.stringify([null, bare]) });
+    // A bare repo hidden beside its worktrees (<project>/.bare) is named after its project.
+    const project = join(root, "project"), hidden = join(project, ".bare"), projectTree = join(project, "topic");
+    git(root, "clone", "--bare", repo, hidden);
+    git(hidden, "worktree", "add", "-b", "project-topic", projectTree);
+    expect(await check(projectTree)).toMatchObject({ name: "project", branch: "project-topic", linked: true, repo: JSON.stringify([null, hidden]) });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }

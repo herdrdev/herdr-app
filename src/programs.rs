@@ -426,6 +426,8 @@ mod tests {
         assert_eq!(key(None, &["agent"]), "cursor");
         assert_eq!(key(Some("agent"), &[]), "cursor");
         assert_eq!(key(Some("cursor-agent"), &[]), "cursor");
+        assert_eq!(key(Some("swival"), &["/bin/zsh"]), "swival");
+        assert_eq!(key(None, &["python3", "/home/me/.local/bin/swival", "fix it"]), "swival");
         assert_eq!(key(Some("newagent"), &[]), "agent");
         assert!(startable().iter().any(|a| a["key"] == "cursor" && a["run"] == json!(["agent"])));
         // A person's own key still beats a built-in `match` (python matches python3).

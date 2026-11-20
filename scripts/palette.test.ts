@@ -22,7 +22,13 @@ const source = await readFile(new URL("../defaults/frame/palette/main.js", impor
 const element = () => new Element();
 let platform = "linux";
 const icons: string[] = [];
-const values = { View: class {}, div: element, svg: (path: string) => { icons.push(path); return element(); }, v_flex: element, h_flex: element, Input: { new: element }, theme: () => ({}), keys: () => [], win: () => ({ platform }) };
+let dark = true;
+const shipped = [["graphite", false], ["ink", false], ["moss", false], ["paper", true], ["atom-one-dark", false], ["mine-light", true], ["win98", true]];
+const values = {
+  View: class {}, div: element, svg: (path: string) => { icons.push(path); return element(); }, v_flex: element, h_flex: element, Input: { new: element }, theme: () => ({}), keys: () => [], win: () => ({ platform }),
+  commands: () => [{ name: "app.theme", args: [{ name: "name", required: true }], about: "Use a theme." }], layouts: () => ["main", "win98"], shared: () => "main",
+  themes: () => shipped.map(([name, light]) => ({ name, light })), settings: () => ({ dark }),
+};
 const Palette = new Function(...Object.keys(values), source.replace(/^import .*;\n/gm, "").replace("export default class Palette", "return class Palette"))(...Object.values(values));
 function find(root: Element, id: string): Element | undefined {
   if (root?.calls?.id?.[0] === id) return root;
@@ -69,4 +75,17 @@ test("palette scrolls past group titles with small movements", () => {
     }
     expect(view.scroll).toBe(view.maxScroll);
   }
+});
+
+test("palette offers only the themes that can show in the current appearance", () => {
+  const offered = () => {
+    const view = new Palette();
+    view.query = ""; view.recent = [];
+    return view.rows().map((r: any) => r.e).filter((e: any) => e.name === "app.theme").map((e: any) => e.args.name);
+  };
+  dark = true;
+  expect(offered()).toEqual(["graphite", "ink", "moss", "atom-one-dark"]);
+  dark = false;
+  // win98 is the Herdr 98 layout's own theme, so it isn't offered here.
+  expect(offered()).toEqual(["paper", "mine-light"]);
 });
