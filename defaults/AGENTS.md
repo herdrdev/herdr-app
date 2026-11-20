@@ -160,6 +160,8 @@ the highlighted line shows where it will land.
   mapped; otherwise they stay as the core reported them. They belong to their
   parent's tab without a pane; the `agents` mod shows them,
   `terminal.peek` opens one, `terminal.keep` gives one a pane.
+  A layout's `agents` block nests one with a pane under its parent; with
+  `"props": { "ownRows": true }` it keeps its own row, and its own status, instead.
   When the shown space is on another machine, the peek's Keep button uses the
   nearest ancestor's space on the terminal's machine, or the first space there
   if no ancestor has a pane there. Keep is hidden if that machine has no space.
