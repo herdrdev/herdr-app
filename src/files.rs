@@ -344,17 +344,27 @@ fn collect_event(event: notify::Event, root: &Path, directories: &HashSet<PathBu
 }
 
 /// Sleeps until a folder's next event, then hands `each` every event of the
-/// batch it opens: a quiet folder costs no wakeups. False once the senders are
-/// gone, which is how a sleeping worker learns its folder was let go.
-fn next_batch<T>(events: &std::sync::mpsc::Receiver<T>, mut each: impl FnMut(T)) -> bool {
-    let Ok(first) = events.recv() else { return false };
-    each(first);
+/// batch it opens: a quiet folder costs no wakeups. Given a time to `wake`, it
+/// sleeps that long at most and then comes back with no event, so a periodic
+/// check can run on the worker. False once the senders are gone, which is how a
+/// sleeping worker learns its folder was let go.
+fn next_batch<T>(events: &std::sync::mpsc::Receiver<T>, wake: Option<std::time::Duration>, mut each: impl FnMut(T)) -> bool {
+    use std::sync::mpsc::RecvTimeoutError;
+    let first = match wake {
+        Some(wake) => events.recv_timeout(wake),
+        None => events.recv().map_err(|_| RecvTimeoutError::Disconnected),
+    };
+    match first {
+        Ok(event) => each(event),
+        Err(RecvTimeoutError::Timeout) => return true,
+        Err(RecvTimeoutError::Disconnected) => return false,
+    }
     let deadline = std::time::Instant::now() + BATCH;
     while let Some(left) = deadline.checked_duration_since(std::time::Instant::now()) {
         match events.recv_timeout(left) {
             Ok(event) => each(event),
-            Err(std::sync::mpsc::RecvTimeoutError::Timeout) => break,
-            Err(std::sync::mpsc::RecvTimeoutError::Disconnected) => return false,
+            Err(RecvTimeoutError::Timeout) => break,
+            Err(RecvTimeoutError::Disconnected) => return false,
         }
     }
     true
@@ -389,7 +399,7 @@ fn start_folder(root: &Path, generation: Arc<()>) -> Result<Arc<FolderEvents>, S
             let mut pending = HashSet::new();
             let mut refresh = false;
             let mut removed = HashSet::new();
-            let watched = next_batch(&events, |event| match event {
+            let watched = next_batch(&events, None, |event| match event {
                 Ok(event) => refresh |= collect_event(event, &root, &directories, &mut pending, &mut removed),
                 Err(_) => {
                     removed.extend(directories.iter().cloned());
@@ -876,7 +886,7 @@ mod tests {
         let (done, batches) = std::sync::mpsc::channel();
         std::thread::spawn(move || {
             let mut batch = Vec::new();
-            while next_batch(&events, |event| batch.push(event)) {
+            while next_batch(&events, None, |event| batch.push(event)) {
                 done.send(std::mem::take(&mut batch)).unwrap();
             }
         });
@@ -894,6 +904,32 @@ mod tests {
         // The folder is let go while its worker sleeps.
         drop(tx);
         assert_eq!(batches.recv_timeout(patience), Err(RecvTimeoutError::Disconnected));
+    }
+
+    #[test]
+    fn a_folder_worker_told_when_to_wake_comes_back_with_no_event_and_ends_when_its_sender_is_dropped() {
+        use std::sync::mpsc::RecvTimeoutError;
+        let patience = std::time::Duration::from_secs(10);
+        let (tx, events) = std::sync::mpsc::sync_channel::<&str>(8);
+        let (done, batches) = std::sync::mpsc::channel();
+        std::thread::spawn(move || {
+            let mut batch = Vec::new();
+            while next_batch(&events, Some(BATCH), |event| batch.push(event)) {
+                done.send(std::mem::take(&mut batch)).unwrap();
+            }
+        });
+        // Nothing changes: the worker still comes back, for a periodic check to run.
+        assert_eq!(batches.recv_timeout(patience), Ok(Vec::new()));
+        // The folder is let go while its worker waits.
+        drop(tx);
+        let deadline = std::time::Instant::now() + patience;
+        let ended = loop {
+            match batches.recv_timeout(patience) {
+                Ok(_) => assert!(std::time::Instant::now() < deadline, "the worker of a folder nobody watches kept running"),
+                Err(e) => break e,
+            }
+        };
+        assert_eq!(ended, RecvTimeoutError::Disconnected);
     }
 
     #[test]
