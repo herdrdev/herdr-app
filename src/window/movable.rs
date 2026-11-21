@@ -127,6 +127,13 @@ impl AppWindow {
         div().absolute().left(x).top(y).when(measured.is_none(), |d| d.opacity(0.0)).child(body).into_any_element()
     }
 
+    /// The window border included: its bounds are measured inside the border,
+    /// but `size` and `place` include it.
+    fn outer_bounds(&self, o: &Overlay) -> Option<Bounds<Pixels>> {
+        let b = self.bounds.borrow().get(&o.slot).copied()?;
+        Some(if o.bare { b } else { b.dilate(px(1.0)) })
+    }
+
     fn raise_window(&mut self, id: &str, cx: &mut Context<Self>) {
         let Some(i) = self.overlays.iter().position(|o| o.id == id) else { return };
         if i + 1 < self.overlays.len() {
@@ -145,16 +152,17 @@ impl AppWindow {
         if on_terminal {
             return;
         }
-        let Some(b) = self.bounds.borrow().get(&format!("overlay:{id}")).copied() else { return };
+        // Outer, as `place` is: grabbed inside the border, a drop would shift it 1 px.
+        let Some(b) = self.overlays.iter().find(|o| o.id == id).and_then(|o| self.outer_bounds(o)) else { return };
         self.win_drag = Some(WinDrag { id: id.to_owned(), grab: at - b.origin, down: at, pointer: at, moving: false });
         cx.notify();
     }
 
     fn window_move(&mut self, at: Point<Pixels>, pressed: bool, cx: &mut Context<Self>) {
         let Some(d) = &mut self.win_drag else { return };
+        // Released outside the app: no mouse up comes, so this one ends the drag.
         if !pressed {
-            self.win_drag = None;
-            cx.notify();
+            self.window_release(cx);
             return;
         }
         d.pointer = at;
