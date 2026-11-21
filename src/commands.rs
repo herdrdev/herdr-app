@@ -83,6 +83,8 @@ pub const COMMANDS: &[Command] = &[
     cmd("layout.toggle", &[req("id")], "Hide or show a layout node."),
     cmd("layout.show", &[req("id")], "Show a layout node."),
     cmd("layout.hide", &[req("id")], "Hide a layout node."),
+    cmd("layout.detach", &[req("id")], "Show a mod block of the layout in its own OS window, for example on another monitor. The block leaves the layout and its window opens again, in the same place, when Herdr starts or you switch back to the layout. Closing the window or layout.attach puts the block back for good."),
+    cmd("layout.attach", &[req("id")], "Close a detached block's window and show the block in the layout again; it is not opened again."),
     cmd("layout.resize", &[req("id"), opt("px"), opt("weight")], "Size a layout node."),
     cmd("layout.select", &[req("stack"), req("child")], "Show one child of a stack."),
     cmd("layout.reset", &[opt("name")], "Reset a shipped layout and its clicks (the old file is kept aside)."),

@@ -83,7 +83,7 @@ first frame or during GPU recovery it reports an error instead of a PNG.
 | `icons/` | the shipped program icons | written by Herdr (put your own elsewhere) |
 | `frame/` | the app's own screens (welcome, ...) | rewritten by Herdr on every start: don't edit, it won't stick |
 | `view.json` | this screen's selected space/tab/pane, zoom, settled tabs, recent spaces and seen attention | written by Herdr |
-| `shared.json`, `data/`, `seen.json`, `installed.json`, `window.json`, `windows.json` | mod state, bookkeeping, where the window was (size, maximized), mods' windows (spots, kept ones) | written by Herdr |
+| `shared.json`, `data/`, `seen.json`, `installed.json`, `window.json`, `windows.json` | mod state, bookkeeping, where the window was (size, maximized), mods' windows (spots, kept ones), detached blocks' windows (place, display) | written by Herdr |
 
 Shared state is saved atomically in the background, with the latest change winning.
 If `shared.json` is invalid, Herdr logs a warning and keeps it as
@@ -679,7 +679,11 @@ The main ones:
   `layout.resize {id, px | weight}`, `layout.select {stack, child}`, `layout.set {layout}`
   (personal tree edits; on shipped layouts only click/look fields change),
   `layout.reset {name?}` (reset a shipped layout and its clicks),
-  `layout.clone {name, as?}` (duplicate, then switch; default `<name>-copy`).
+  `layout.clone {name, as?}` (duplicate, then switch; default `<name>-copy`),
+  `layout.detach {id}` (show a mod block in its own OS window, for example on another monitor; the block
+  leaves the layout, and the mod keeps running as one instance; the window opens again in the same place
+  when Herdr starts or the layout is shown again), `layout.attach {id}` (close that window and show the
+  block again for good; closing the window does the same).
 - App: `mod.clone {name, as?}` (duplicate; default `<name>-copy`), `mod.open {name}` (again: closes it), `overlay.close {id?}`, `app.help` (again: closes it), `app.palette` (again: closes it), `app.settings {section?}`
   (sections: `look`, `machines`, `alerts`, `updates`, `privacy`; Machines lists, updates, renames and removes ssh machines; settings edit the same files you do).
   `app.check_updates` (only a successful check reports Up to date; a failed check clears the checked time and can be retried), `app.update_core` (a newer herdr-core of this generation, terminals kept;
