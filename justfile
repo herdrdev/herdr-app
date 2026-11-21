@@ -43,7 +43,7 @@ build:
     cargo build --locked
 
 test:
-    node --test scripts/claude-usage.test.cjs scripts/codex-usage.test.cjs scripts/cursor-agy-usage.test.cjs
+    node --test scripts/claude-usage.test.cjs scripts/codex-usage.test.cjs scripts/cursor-agy-usage.test.cjs scripts/status-bar-usage.test.cjs
     bun test scripts/changes.test.ts scripts/files.test.ts scripts/machine-add.test.ts scripts/picker.test.ts scripts/palette.test.ts scripts/agents.test.ts scripts/spaces.test.ts scripts/mod-storage.test.ts scripts/worktree.test.ts scripts/settings.test.ts scripts/tabs.test.ts
     cargo test --locked
 

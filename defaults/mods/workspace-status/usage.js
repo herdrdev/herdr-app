@@ -5,6 +5,7 @@ import { focused, terminals, appHome, exec, shared, setShared, openOverlay, clos
 export const names = { codex: "Codex", cursor: "Cursor", agy: "Agy", claude: "Claude Code" };
 const preference = "workspace.usage.providers";
 const resumeFlags = { codex: ["resume"], cursor: ["--resume"], agy: ["--conversation"], claude: ["--resume", "--session-id"] };
+const UUID = /^[0-9a-f]{8}-(?:[0-9a-f]{4}-){3}[0-9a-f]{12}$/i;
 
 function selection() {
   const terminal = focused()?.terminal;
@@ -12,12 +13,22 @@ function selection() {
   const t = terminals().find(row => row.address === terminal);
   const provider = t?.program?.key === "antigravity" ? "agy" : t?.program?.key;
   if (!Object.prototype.hasOwnProperty.call(names, provider)) return {};
-  const binding = t.labels?.["workspace.usage"]?.split("/");
-  const argv = t.foreground?.argv ?? t.argv;
+  const foreground = t.foreground?.argv;
+  const argv = Array.isArray(foreground) && foreground.length ? foreground : t.argv;
   const args = Array.isArray(argv) ? argv : [];
-  const at = args.findIndex(arg => resumeFlags[provider].includes(arg));
-  const id = binding?.[0] === provider ? binding[1] : at >= 0 ? args[at + 1] : null;
-  return { provider, terminal, id: /^[\w.-]{1,160}$/.test(id || "") ? id : "" };
+  let explicit;
+  for (const [index, arg] of args.entries()) {
+    const equal = typeof arg === "string" && arg.startsWith("--") ? arg.indexOf("=") : -1;
+    const flag = equal === -1 ? arg : arg.slice(0, equal);
+    if (!resumeFlags[provider].includes(flag)) continue;
+    explicit = equal === -1 ? args[index + 1] : arg.slice(equal + 1);
+    break;
+  }
+  const binding = t.labels?.["workspace.usage"];
+  const prefix = provider + "/";
+  const bound = binding?.startsWith(prefix) ? binding.slice(prefix.length) : "";
+  const id = [explicit, bound].find(id => typeof id === "string" && UUID.test(id)) ?? "";
+  return { provider, terminal, id };
 }
 
 function enabled() {
@@ -27,6 +38,12 @@ function enabled() {
 
 function keyFor(provider, selected) {
   return provider === selected.provider ? JSON.stringify([selected.terminal, selected.id]) : "";
+}
+
+function selectedSession(rows, selected, active) {
+  if (!active.includes(selected.provider)) return null;
+  const row = rows[selected.provider];
+  return row?.key === keyFor(selected.provider, selected) ? row.session : null;
 }
 
 function reading(w) {
@@ -82,8 +99,7 @@ export class Usage {
   button(compact) {
     const selected = selection();
     const active = enabled();
-    const current = this.rows[selected.provider];
-    const session = current && current.key === keyFor(selected.provider, selected) ? current.session : null;
+    const session = selectedSession(this.rows, selected, active);
     const labels = [];
     if (session) labels.push(sessionText(session));
     for (const id of active) {
@@ -91,7 +107,7 @@ export class Usage {
       const first = row?.key === keyFor(id, selected) && row.windows?.[0];
       if (first) labels.push(names[id] + " " + first.label + " " + reading(first) + " left");
     }
-    const text = compact ? (labels[session ? 1 : 0] || "Usage") : (labels.join("   ·   ") || "Usage");
+    const text = compact ? (labels[session ? 1 : 0] || labels[0] || "Usage") : (labels.join("   ·   ") || "Usage");
     return div().id("workspace-usage").cursor_pointer().overflow_hidden().whitespace_nowrap()
       .tooltip("Session and local subscription usage").on_click(() => openOverlay({
         mod: "workspace-status", kind: "dialog", width: 460, height: 350,
@@ -103,8 +119,7 @@ export class Usage {
 export function details({ rows = {}, selected = {}, overlay }) {
   const t = theme();
   const active = enabled();
-  const focusedRow = rows[selected.provider];
-  const session = focusedRow?.key === keyFor(selected.provider, selected) ? focusedRow?.session : null;
+  const session = selectedSession(rows, selected, active);
   const line = (text) => div().text_size(12).text_color(t.muted).child(text);
   const content = v_flex().gap(8).p(16).text_color(t.foreground)
     .child(div().font_semibold().child("Current session"))
