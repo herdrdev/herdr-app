@@ -515,8 +515,8 @@ the build doesn't do.
 ## Keys: `keys.json`
 
 On upgrade, an untouched keys file from an earlier release gets the current
-shortcuts. Any edit, even whitespace, keeps the entire file as yours; new default
-shortcuts must then be added by hand.
+shortcuts. Any edit, even whitespace, keeps the entire file as yours; new
+shortcuts shipped in that file must then be added by hand.
 
 ```json
 {
@@ -554,6 +554,10 @@ shortcuts must then be added by hand.
 - On macOS, shifted punctuation shortcuts accept both spellings from the
   current layout: `cmd-shift-]` and `cmd-}` match the same US-layout keypress.
   Existing `keys.json` files don't need to change.
+- On macOS, `ctrl-cmd-space` opens the system Emoji & Symbols picker in a
+  focused terminal. A personal binding for that key takes precedence; use
+  `"ctrl-cmd-space": "terminal"` in the `terminal` section to leave the key to
+  the terminal instead.
 - The macOS menu bar runs the same commands and shows the key that keys.json
   binds to each (string actions only). Rebinding updates the menus live.
 - Terminal keys honor the program's negotiated Kitty mode, including on Windows.
