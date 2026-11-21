@@ -71,6 +71,13 @@ impl AppAssets {
             .into()
     }
 
+    /// HERDR: [`Self::cache_key`] for a path that names something inside the
+    /// directory, or `None` (empty, only `.` or `/`, or with `..`) instead of
+    /// falling back to the path as written.
+    pub(crate) fn relative_key(path: &str) -> Option<SharedString> {
+        Self::relative_path(path).map(|path| path.to_string_lossy().into_owned().into())
+    }
+
     fn relative_path(path: &str) -> Option<PathBuf> {
         let mut resolved = PathBuf::new();
         for component in std::path::Path::new(path).components() {

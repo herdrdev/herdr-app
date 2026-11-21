@@ -79,6 +79,8 @@ pub(crate) mod entities;
 pub(crate) mod error;
 pub mod host;
 pub mod host_modules;
+// HERDR: pictures from memory for image(path).
+pub mod live_image;
 pub(crate) mod materialize;
 pub mod metrics;
 pub(crate) mod path;

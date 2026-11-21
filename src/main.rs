@@ -24,6 +24,7 @@ mod macos;
 mod macos_check;
 mod mods;
 mod mod_files;
+mod mod_images;
 mod process_cwd;
 mod programs;
 mod remote_shell;
