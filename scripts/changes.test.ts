@@ -10,6 +10,23 @@ test("Changes keeps tab indentation, to the next 4-column stop", () => {
   expect(rows.map((r: { text: string }) => r.text)).toEqual(["@@ -1,2 +1,2 @@", "    if x {", "        if x {", "a   b", "    spaces"]);
 });
 
+const untab = new Function(`${rowsSource}; return untab;`)() as (text: string) => string;
+const oldUntab = (text: string) => text.replace(/[^\t]*\t/g, (s) => s.slice(0, -1).padEnd((s.length - 1) - (s.length - 1) % 4 + 4));
+
+test("untab matches the regex it replaced", () => {
+  const long = "x".repeat(4000);
+  const inputs = ["", "abc", "\t", "\tx", "\t\tx", "a\tb", "ab\tc", "abc\tx", "abcd\tx", "abcde\tx", "a\tb\tc\td", "tail\t", "\t\t\t",
+    "日本\tx", "😀\tx", long, `${long}\t${long}`, `\t${long}`, `${long.slice(0, 3999)}\t`, ("ab\t" + "c".repeat(5)).repeat(500)];
+  for (const input of inputs) expect(untab(input)).toBe(oldUntab(input));
+});
+
+test("untab takes linear time on long lines without a tab", () => {
+  const line = "x".repeat(4000);
+  const start = performance.now();
+  for (let i = 0; i < 1500; i++) untab(line);
+  expect(performance.now() - start).toBeLessThan(500);
+});
+
 // A timer turn runs every promise continuation that is ready.
 const settled = () => new Promise(resolve => setTimeout(resolve));
 const held = () => { let release!: () => void; const wait = new Promise<void>(resolve => { release = resolve; }); return { wait, release }; };

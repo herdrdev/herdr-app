@@ -28,7 +28,13 @@ function displayColumns(text) {
 const rowHeight = size => Math.ceil(size * 1.8), charWidth = size => size * 0.64;
 
 // Text draws a tab as nothing: pad each to the next 4-column stop.
-const untab = (text) => text.replace(/[^\t]*\t/g, (s) => s.slice(0, -1).padEnd((s.length - 1) - (s.length - 1) % 4 + 4));
+// Each stop counts code units since the previous tab, not since the line start.
+// A regex like /[^\t]*\t/ rescans a tab-free line from every index, so split instead.
+const untab = (text) => {
+  if (!text.includes("\t")) return text;
+  const parts = text.split("\t"), last = parts.pop();
+  return parts.map((part) => part.padEnd(part.length - part.length % 4 + 4)).join("") + last;
+};
 
 // Numbers each diff line once, so a frame only draws the rows on screen.
 function diffRows(lines) {
