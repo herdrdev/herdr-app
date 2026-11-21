@@ -620,7 +620,7 @@ pub struct Snapshot {
     pub focused: Value,
     /// Floating blocks by id: { edge, align, vertical }.
     pub floats: Value,
-    /// { platform, titlebar, buttons, maximized, fullscreen, active }.
+    /// { platform, titlebar, buttons, maximized, fullscreen, active, visible }.
     pub window: Value,
 }
 
