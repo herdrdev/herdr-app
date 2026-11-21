@@ -5777,6 +5777,58 @@ export default class Notes extends View {
     assert!(tree.contains("picked=6-11 after=15-15"), "{tree}");
 }
 
+// HERDR: an editor reports which lines it shows, so a script can keep the reading
+// position when it swaps the editor for another view of the same text.
+#[gpui::test]
+fn a_script_editor_reports_its_visible_lines(cx: &mut TestAppContext) {
+    cx.update(|cx| crate::init(cx));
+    let runtime = ShellRuntime::new_isolated().expect("runtime");
+    cx.update(|cx| runtime.set_global(cx));
+    let source = r#"
+import { View, div } from "gpui-kit";
+import { Editor, EditorState } from "gpui-base";
+export default class Long extends View {
+  init() {
+    this.code = EditorState.new({ value: Array.from({ length: 200 }, (_, i) => `línea ${i}`).join("\n") });
+  }
+  render(cx) {
+    const shown = this.code.visible_range();
+    return div().child(Editor.new(this.code).h(120))
+      .child(shown ? `visible=${shown.start}-${shown.end}` : "visible=none");
+  }
+}
+"#;
+    let view_type = runtime.load_source("visible", source).expect("load");
+    let window = cx.add_window(|_, _| Empty);
+    let mut context = VisualTestContext::from_window(*window.deref(), cx);
+    let object = context
+        .update(|window, cx| runtime.instantiate(&view_type, window, cx))
+        .expect("instantiate");
+    let tree = context
+        .update(|window, cx| runtime.render_to_spec(&object, None, window, cx))
+        .expect("editor render");
+    assert!(tree.contains("visible=none"), "{tree}");
+
+    let view = context.update(|_, cx| cx.new(|_| ScriptView::new(runtime.clone(), object.clone())));
+    draw(&mut context, &view);
+    let editor = runtime.entities().first_editor().expect("editor");
+    context.update(|_, cx| {
+        editor.update(cx, |state, cx| {
+            let height = state.line_height().expect("laid out");
+            state.set_scroll_offset(gpui::point(gpui::px(0.), -height * 50.5), cx);
+        })
+    });
+    // A deferred scroll is committed by prepaint and reflected next frame.
+    draw(&mut context, &view);
+    draw(&mut context, &view);
+    let tree = context
+        .update(|window, cx| runtime.render_to_spec(&object, None, window, cx))
+        .expect("scrolled render");
+    // "línea N\n" is 8 UTF-16 units for N < 10 and 9 for N < 100: line 50 starts at 10 * 8 + 40 * 9.
+    let start = 10 * 8 + 40 * 9;
+    assert!(tree.contains(&format!("visible={start}-")), "{tree}");
+}
+
 // HERDR: readonly rejects keyboard edits without disabling selection or programmatic refresh.
 #[gpui::test]
 fn a_readonly_script_editor_remains_selectable(cx: &mut TestAppContext) {
