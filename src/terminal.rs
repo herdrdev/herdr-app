@@ -2488,6 +2488,14 @@ impl Render for TerminalView {
             .id(SharedString::from(format!("term-{}", self.address)))
             .track_focus(&self.focus)
             .key_context("Terminal")
+            // On macOS the terminal uses the same native picker as the input kit.
+            .when(cfg!(target_os = "macos"), |d| d.on_action(cx.listener(|this, _: &gpui_base::input::ShowCharacterPalette, window, cx| {
+                if this.focus.is_focused(window) {
+                    window.show_character_palette();
+                } else {
+                    cx.propagate();
+                }
+            })))
             .size_full()
             .relative()
             // Below 1, the layout's background shows through (cells a program colors stay solid).
