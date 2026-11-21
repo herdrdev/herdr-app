@@ -310,6 +310,7 @@ state_binding!(TextareaState, invoke_textarea, textarea_token_state_methods);
 /// the selection. Editors have no inline tokens.
 pub(crate) const EDITOR_METHODS: &[(&str, bool)] = &[
     ("selected_range", true),
+    ("visible_range", true),
     ("set_selected_range", false),
     ("replace", false),
 ];
@@ -334,6 +335,12 @@ pub(crate) fn invoke_editor(
             let text = string(text)?;
             entity.update(cx, |state, cx| state.replace(text, window, cx));
             Ok(Data::Null)
+        }
+        ("visible_range", []) => {
+            let state = entity.read(cx);
+            Ok(state
+                .visible_range()
+                .map_or(Data::Null, |range| range_data(&state.value(), range)))
         }
         _ => bail!("invalid arguments for editor state operation `{name}`"),
     }
