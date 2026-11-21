@@ -514,6 +514,8 @@ pub struct AppWindow {
     /// Remembers where the window is (`place.rs`); the write waiting to settle.
     _place: Option<Subscription>,
     place_write: Option<Task<()>>,
+    /// Tells mods when the window stops or starts being shown (`window().visible`).
+    _visibility: Option<Subscription>,
 }
 
 impl AppWindow {
@@ -619,11 +621,19 @@ impl AppWindow {
             _focus_lost: None,
             _place: None,
             place_write: None,
+            _visibility: None,
         };
         w._focus_lost = Some(cx.on_focus_lost(window, |this, window, cx| this.restore_focus(window, cx)));
         w._place = Some(cx.observe_window_bounds(window, |this, window, cx| {
             if let Some(t) = crate::place::changed(window, cx) {
                 this.place_write = Some(t);
+            }
+        }));
+        // A hidden window draws no frames, so publish here rather than in render:
+        // a mod's timer can see it and stop work nobody can see.
+        w._visibility = Some(cx.observe_window_visibility(window, |this, _, window, cx| {
+            if mods::publish_window(this.window_json(window)) {
+                this.refresh_snapshot_mods(cx);
             }
         }));
         let closing = cx.weak_entity();
@@ -7378,6 +7388,50 @@ export default class Probe extends View {
             assert_eq!(seen(cx), Some(json!(true)), "focused: {:?}", crate::mods::shared("probe.seen"));
             cx.deactivate_window();
             assert_eq!(seen(cx), Some(json!(false)), "blurred: {:?}", crate::mods::shared("probe.seen"));
+        }
+    }
+
+    /// Mods see window().visible follow the platform from a timer, which is
+    /// all a hidden window runs: it draws no frame to publish it in.
+    #[test]
+    fn mods_see_the_window_hide_and_show_without_a_frame() {
+        in_own_process("visible_window");
+    }
+
+    #[gpui::test]
+    fn visible_window(cx: &mut gpui::TestAppContext) {
+        use gpui::WindowVisibility::{Hidden, Visible};
+        use serde_json::json;
+        if !running_alone("visible_window") {
+            return;
+        }
+        let probe = r#"import { View, div } from "gpui-kit";
+import { window, setShared } from "herdr";
+
+export default class Probe extends View {
+  init(_props, cx) {
+    cx.timer.every(100, () => setShared("probe.visible", window()?.visible ?? null));
+  }
+  render() {
+    return div();
+  }
+}
+"#;
+        let layout = json!({ "id": "root", "type": "row", "children": [
+            { "id": "probe", "type": "block", "content": { "mod": "visible-probe" } }
+        ] });
+        let (_view, cx) = open_window(cx, "visible-probe", probe, layout);
+        let seen = |cx: &mut gpui::VisualTestContext| {
+            cx.executor().advance_clock(std::time::Duration::from_millis(300));
+            cx.run_until_parked();
+            crate::mods::shared("probe.visible")
+        };
+        assert_eq!(seen(cx), Some(json!(true)), "a shown window is visible");
+        for _ in 0..2 {
+            cx.simulate_visibility_change(Hidden);
+            assert_eq!(seen(cx), Some(json!(false)), "hidden");
+            cx.simulate_visibility_change(Visible);
+            assert_eq!(seen(cx), Some(json!(true)), "shown again");
         }
     }
 

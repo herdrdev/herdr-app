@@ -289,7 +289,11 @@ export function commands(): { name: string; args: { name: string; required: bool
 
 /** The window, for layouts that draw their own title bar (`"titlebar": "none"`). `buttons`:
  *  the system draws no window buttons, so draw them (`window.minimize`, `window.maximize`,
- *  `window.close`); on macOS the traffic lights always stay. Live. */
+ *  `window.close`); on macOS the traffic lights always stay. `visible`: the window is being shown.
+ *  It turns false when the window is minimized or hidden, and on macOS also when it is fully
+ *  covered, on another Space or the display sleeps. A hidden window draws nothing and doesn't run
+ *  `render`, so check it from a timer and stop work nobody can see; `render` runs again when the
+ *  window shows. Live. */
 export function window(): {
   platform: "linux" | "macos" | "windows";
   titlebar: "system" | "none";
@@ -297,6 +301,7 @@ export function window(): {
   maximized: boolean;
   fullscreen: boolean;
   active: boolean;
+  visible: boolean;
 };
 
 /** Sets the OS window's title, which window switchers, taskbars and time trackers read. The last

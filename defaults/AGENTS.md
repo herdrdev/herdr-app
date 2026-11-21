@@ -1055,7 +1055,10 @@ Rules:
   0.4, to: 1, period: 1200 })` (also width, height, left, top), and
   `.transition(...)` for changes: they run without your script and stop
   when not shown. Timers are for data (a clock, a fetch), and only as often
-  as what they show changes.
+  as what they show changes. Mod timers keep running while the window is
+  hidden; a mod that streams or polls checks `window().visible` from its
+  timer and stops while it's false, then restarts from `render`, which runs
+  again once the window shows.
 
 ### UI
 
