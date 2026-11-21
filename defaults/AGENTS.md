@@ -871,8 +871,8 @@ has 124 programs (agents, editors, runtimes, tools, databases, infra);
   inside `programs`. Use programs or shell functions, not aliases (the launcher
   does not expand them). On macOS both checks and the menu launcher load login profiles before
   running the agent and leaves an interactive login shell when it ends.
-  Codex starts as `codex --no-daemon`: a shared Codex daemon would make later
-  sessions use the first terminal's identity and stop with it.
+  Codex starts with `--no-daemon` to keep its sessions independent. The
+  PowerShell launcher omits the flag when the installed Codex rejects it.
   An explicit key still wins over another entry's `match`, so a personal
   `"python3": { "name": "…" }` keeps its name; only the generic `agent`
   fallback yields to a `match` (Cursor's process is `agent`).

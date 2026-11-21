@@ -249,9 +249,25 @@ fn base(s: &str) -> &str {
 /// PowerShell's single quotes, which include the curly ones.
 const PS_QUOTES: [char; 5] = ['\'', '\u{2018}', '\u{2019}', '\u{201A}', '\u{201B}'];
 
+// Keep the daemon off when supported. Probe in the launch shell so the same
+// profile, PATH and Codex executable are used for the probe and the launch.
+const CODEX_POWERSHELL_LAUNCH: &str = concat!(
+    "& { $herdrCodexArgs = @(); ",
+    "try { & 'codex' '--no-daemon' '--version' *> $null; ",
+    "if ($?) { $herdrCodexArgs = @('--no-daemon') } } catch {}; ",
+    "& 'codex' @herdrCodexArgs",
+);
+
 /// `& 'prog' 'arg 1'`: a command for PowerShell's `-Command`, each word quoted.
 pub fn powershell_line(cmd: &[String]) -> String {
-    format!("& {}", cmd.iter().map(|w| powershell_quote(w)).collect::<Vec<_>>().join(" "))
+    let quote = |words: &[String]| words.iter().map(|w| powershell_quote(w)).collect::<Vec<_>>().join(" ");
+    if let [name, flag, rest @ ..] = cmd
+        && name == "codex"
+        && flag == "--no-daemon"
+    {
+        return format!("{CODEX_POWERSHELL_LAUNCH} {} }}", quote(rest));
+    }
+    format!("& {}", quote(cmd))
 }
 
 fn powershell_quote(word: &str) -> String {
@@ -267,8 +283,12 @@ fn powershell_quote(word: &str) -> String {
 
 /// The words back from `powershell_line`.
 fn powershell_words(line: &str) -> Option<Vec<String>> {
-    let mut chars = line.strip_prefix("& ")?.chars().peekable();
-    let mut words = Vec::new();
+    let (mut words, args) = if let Some(args) = line.strip_prefix(CODEX_POWERSHELL_LAUNCH) {
+        (vec!["codex".into(), "--no-daemon".into()], args.strip_suffix(" }")?)
+    } else {
+        (Vec::new(), line.strip_prefix("& ")?)
+    };
+    let mut chars = args.chars().peekable();
     while let Some(c) = chars.next() {
         if c == ' ' {
             continue;
@@ -397,6 +417,40 @@ mod tests {
         let line = powershell_line(&words);
         assert_eq!(line, "& 'pi' 'it''s \u{2019}\u{2019}fine\u{2019}\u{2019}' '' 'a  b'");
         assert_eq!(powershell_words(&line), Some(words));
+    }
+
+    #[test]
+    fn powershell_codex_wrapper_preserves_program_and_arguments() {
+        let words = ["codex", "--no-daemon", "fix what's here"].map(String::from);
+        let line = powershell_line(&words);
+        assert_eq!(powershell_words(&line).as_deref(), Some(words.as_slice()));
+        assert_eq!(key(None, &["pwsh.exe", "-NoExit", "-Command", &line]), "codex");
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn powershell_codex_uses_no_daemon_only_when_supported() {
+        let folder = std::env::temp_dir().join(format!("herdr-codex-{}", std::process::id()));
+        std::fs::create_dir_all(&folder).unwrap();
+        let shim = folder.join("codex.cmd");
+        let line = powershell_line(&["codex".into(), "--no-daemon".into(), "fix what's here".into()]);
+        let setup = format!("Set-Alias codex {}; {line}", powershell_quote(&shim.to_string_lossy()));
+        let argv = ["-NoProfile".into(), "-Command".into(), setup];
+        let limit = std::time::Duration::from_secs(120);
+        for (status, expected) in [(0, "--no-daemon \"fix what's here\""), (2, "\"fix what's here\"")] {
+            std::fs::write(
+                &shim,
+                format!("@if \"%~2\"==\"--version\" (\r\n  @echo codex fixture\r\n  @exit /b {status}\r\n)\r\n@echo(%*\r\n"),
+            )
+            .unwrap();
+            let result = crate::mods::run_blocking("powershell.exe", &argv, None, limit);
+            std::fs::remove_file(&shim).unwrap();
+            let (code, out, err) = result.unwrap();
+            assert_eq!(code, 0, "{err}");
+            assert_eq!(out.trim(), expected);
+            assert!(err.is_empty(), "{err}");
+        }
+        std::fs::remove_dir(&folder).unwrap();
     }
 
     #[test]
