@@ -51,6 +51,7 @@ function title(tab, l) {
   return (tab.name === prog || !tab.named) && telling ? live : tab.name;
 }
 const RANK = { blocked: 4, done: 3, working: 2, idle: 1 };
+const TREE_RANK = { blocked: 4, working: 3, done: 2, idle: 1 };
 // A sub-agent without a pane isn't in agents(): its raw word, error counting as
 // blocked. It's never done: it reports to its parent, and the parent's done is the news.
 // A kept sub-agent (one with a pane) is in agents() too: it keeps its own status, done included.
@@ -136,10 +137,6 @@ export default class Agents extends View {
     return this.changed[a.address]?.at ?? 0;
   }
 
-  rank(a) {
-    return RANK[a.status] ?? 0;
-  }
-
   sortMenu(t) {
     const on = sortOf().id;
     return v_flex()
@@ -182,9 +179,9 @@ export default class Agents extends View {
     });
   }
 
-  subRow(t, s, shown, compact) {
+  subRow(t, s, shown, compact, status) {
     const k = s.t;
-    const st = kidStatus(k, this.listed);
+    const st = status ?? kidStatus(k, this.listed);
     const pic = icon(k.program, 14, t.foreground);
     const on = k.address === shown;
     return h_flex()
@@ -233,14 +230,22 @@ export default class Agents extends View {
     this.track(list, now);
     // A kept sub-agent (one with a pane) is in agents() too: where a tree shows
     // it, it gets no row of its own, unless it's pinned.
-    const nested = new Set(collapsed ? [] : list.flatMap((a) => this.tree(all, a.address).map((s) => s.t.address)));
+    const trees = new Map(list.map((a) => [a.address, this.tree(all, a.address)]));
+    const nested = new Set(collapsed ? [] : list.flatMap((a) => trees.get(a.address).map((s) => s.t.address)));
     list = list.filter((a) => a.pinned || !nested.has(a.address));
     const tabCounts = new Map();
     for (const a of list) tabCounts.set(a.tab, (tabCounts.get(a.tab) ?? 0) + 1);
     const byPriority = sort.id === "priority";
     // A helper's done is its own row's news: it doesn't pull a working parent out of Working.
     const kidRank = (k) => { const s = kidStatus(k, this.listed); return RANK[s === "done" ? "idle" : s] ?? 0; };
-    const urgency = new Map(list.map((a) => [a.address, Math.max(this.rank(a), ...this.tree(all, a.address).map((s) => kidRank(s.t)))]));
+    // Keep the unseen turn intact. Its Done marker can return when all work in the tree stops.
+    const rowStatus = new Map([...this.listed].map(([address, status]) => [
+      address,
+      status === "done" && trees.get(address).some((s) => kidStatus(s.t, this.listed) === "working") ? "idle" : status,
+    ]));
+    const urgency = new Map(list.map((a) => [
+      a.address, Math.max(RANK[rowStatus.get(a.address)] ?? 0, ...trees.get(a.address).map((s) => kidRank(s.t))),
+    ]));
     const rankOf = (a) => urgency.get(a.address);
     if (byPriority) list = [...list].sort((x, y) => rankOf(y) - rankOf(x) || this.since(y) - this.since(x) || y.seq - x.seq);
     const pinned = list.filter((a) => a.pinned);
@@ -249,16 +254,16 @@ export default class Agents extends View {
     setAgentOrder(list.map((a) => a.address));
 
     const withKids = (a, i) => {
-      const subs = collapsed ? [] : this.tree(all, a.address);
-      const r = row(a, i, subs);
+      const subs = collapsed ? [] : trees.get(a.address);
+      const r = row({ ...a, status: rowStatus.get(a.address) }, i, subs);
       if (this.folded.has(a.address)) return [r];
-      return [r, ...subs.map((s) => this.subRow(t, s, shown, byPriority))];
+      return [r, ...subs.map((s) => this.subRow(t, s, shown, byPriority, rowStatus.get(s.t.address)))];
     };
 
     // The fold chevron; folded, the count too, colored by the most urgent one.
     const fold = (a, subs) => {
       const sts = subs.map((s) => kidStatus(s.t, this.listed));
-      const top = sts.reduce((m, s) => ((RANK[s] ?? 0) > (RANK[m] ?? 0) ? s : m), null);
+      const top = sts.reduce((m, s) => ((TREE_RANK[s] ?? 0) > (TREE_RANK[m] ?? 0) ? s : m), null);
       const open = !this.folded.has(a.address);
       return div()
         .id(`fold-${a.address}`)
@@ -391,7 +396,7 @@ export default class Agents extends View {
     // A group's header; it folds the group. Folded, it says how many and the most urgent state.
     const header = (g) => {
       const open = !this.folded.has(g.id);
-      const top = g.members.reduce((m, a) => ((RANK[a.status] ?? 0) > (RANK[m] ?? 0) ? a.status : m), null);
+      const top = SECTION_STATUS[Math.max(...g.members.map(rankOf))];
       return h_flex()
         .id(g.id)
         .px(8)
