@@ -3,11 +3,37 @@ import { readFile } from "node:fs/promises";
 
 const source = await readFile(new URL("../defaults/mods/changes/main.js", import.meta.url), "utf8");
 const rowsSource = source.slice(source.indexOf("const untab ="), source.indexOf("\nexport default class"));
-const diffRows = new Function(`${rowsSource}; return diffRows;`)();
+const { diffRows, untab } = new Function(`${rowsSource}; return { diffRows, untab };`)() as {
+  diffRows: (lines: string[]) => { text: string }[];
+  untab: (text: string) => string;
+};
 
 test("Changes keeps tab indentation, to the next 4-column stop", () => {
   const rows = diffRows(["@@ -1,2 +1,2 @@", "-\tif x {", "+\t\tif x {", " a\tb", "+    spaces"]);
   expect(rows.map((r: { text: string }) => r.text)).toEqual(["@@ -1,2 +1,2 @@", "    if x {", "        if x {", "a   b", "    spaces"]);
+});
+
+const oldUntab = (text: string) => text.replace(/[^\t]*\t/g, (s) => s.slice(0, -1).padEnd((s.length - 1) - (s.length - 1) % 4 + 4));
+
+test("untab matches the regex it replaced", () => {
+  const long = "x".repeat(4000);
+  const inputs = ["", "abc", "\t", "\tx", "\t\tx", "a\tb", "ab\tc", "abc\tx", "abcd\tx", "abcde\tx", "a\tb\tc\td", "tail\t", "\t\t\t",
+    "日本\tx", "😀\tx", long, `${long}\t${long}`, `\t${long}`, `${long.slice(0, 3999)}\t`, ("ab\t" + "c".repeat(5)).repeat(500)];
+  for (const input of inputs) expect(untab(input)).toBe(oldUntab(input));
+});
+
+// The same total length as short and as long lines: linear work takes about as long both ways, quadratic work
+// about ten times longer on the long lines. A ratio holds on a slow machine, where a fixed time limit would not.
+test("untab takes linear time on long lines without a tab", () => {
+  const time = (length: number, times: number) => {
+    const line = "x".repeat(length);
+    const start = performance.now();
+    for (let i = 0; i < times; i++) untab(line);
+    return performance.now() - start;
+  };
+  time(4000, 200);
+  const short = time(4000, 1500), long = time(40000, 150);
+  expect(long).toBeLessThan(Math.max(short, 1) * 4);
 });
 
 // A timer turn runs every promise continuation that is ready.
