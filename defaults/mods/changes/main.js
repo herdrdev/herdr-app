@@ -28,7 +28,7 @@ function displayColumns(text) {
 const rowHeight = size => Math.ceil(size * 1.8), charWidth = size => size * 0.64;
 
 // Text draws a tab as nothing: pad each to the next 4-column stop.
-// Stops count code units, not display columns, as the regex this replaced did.
+// Stops count code units, not display columns, so a wide or astral character shifts later stops.
 // A regex like /[^\t]*\t/ rescans a tab-free line from every index, so split instead.
 const untab = (text) => {
   if (!text.includes("\t")) return text;
