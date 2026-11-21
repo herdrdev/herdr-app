@@ -31,18 +31,91 @@ static PATTERN: LazyLock<Regex> = LazyLock::new(|| {
     Regex::new(&format!("{scheme_url}|{rooted_path}|{bare_path}")).expect("link pattern")
 });
 
+/// `C:\Windows\System32\winver.exe:12`. Ghostty's pattern has no backslash, so a
+/// Windows tool's path is not a link. Spaces stay out of the pattern; a later
+/// step keeps them when that longer path exists (`C:\Program Files\...`).
+#[cfg(windows)]
+static WINDOWS_DRIVE_PATH: LazyLock<Regex> = LazyLock::new(|| {
+    Regex::new(r#"(?<![A-Za-z0-9])[A-Za-z]:\\(?:[^\\/:*?"<>|\r\n]+\\)*[^\\/:*?"<>|\s]+(?::\d+){0,2}"#).expect("windows drive pattern")
+});
+
 /// The link in `text` that covers byte `at`.
 pub fn find(text: &str, at: usize) -> Option<Range<usize>> {
     for m in PATTERN.find_iter(text) {
         let m = m.ok()?;
-        if m.start() > at {
-            return None;
+        let range = include_windows_drive(text, m.range());
+        if range.start > at {
+            break;
         }
-        if at < m.end() {
-            return Some(m.range());
+        if at < range.end {
+            return Some(range);
         }
     }
-    None
+    windows_backslash_at(text, at)
+}
+
+/// `C:/Windows/...` matches as `/Windows/...`, which then opens on the terminal's
+/// current drive. Put the drive letter back. Other platforms keep Ghostty's match.
+fn include_windows_drive(text: &str, range: Range<usize>) -> Range<usize> {
+    if !cfg!(windows) {
+        return range;
+    }
+    let bytes = text.as_bytes();
+    let start = range.start;
+    let widened = if start >= 2 && bytes.get(start) == Some(&b'/') && bytes[start - 1] == b':' && bytes[start - 2].is_ascii_alphabetic() {
+        let drive = start - 2;
+        if drive == 0 || !bytes[drive - 1].is_ascii_alphanumeric() { drive..range.end } else { range }
+    } else {
+        range
+    };
+    extend_existing_tail(text, widened)
+}
+
+fn extend_existing_tail(text: &str, range: Range<usize>) -> Range<usize> {
+    let link = text.get(range.start..range.end).unwrap_or("");
+    let bytes = link.as_bytes();
+    if bytes.get(1) != Some(&b':') || !bytes.first().is_some_and(u8::is_ascii_alphabetic) {
+        return range;
+    }
+    let raw = text.as_bytes();
+    let mut end = range.end;
+    while raw.get(end) == Some(&b' ') {
+        let mut next = end + 1;
+        while raw.get(next).is_some_and(|b| !matches!(b, b' ' | b'\n' | b'\r' | b'\t')) {
+            next += 1;
+        }
+        if next == end + 1 {
+            break;
+        }
+        if Path::new(without_suffix(&text[range.start..next])).exists() {
+            end = next;
+        } else {
+            break;
+        }
+    }
+    range.start..end
+}
+
+fn windows_backslash_at(text: &str, at: usize) -> Option<Range<usize>> {
+    #[cfg(not(windows))]
+    {
+        let _ = (text, at);
+        None
+    }
+    #[cfg(windows)]
+    {
+        for m in WINDOWS_DRIVE_PATH.find_iter(text) {
+            let m = m.ok()?;
+            let range = extend_existing_tail(text, m.range());
+            if range.start > at {
+                return None;
+            }
+            if at < range.end {
+                return Some(range);
+            }
+        }
+        None
+    }
 }
 
 /// The address-shaped word under the pointer, excluding surrounding punctuation.
@@ -774,6 +847,53 @@ mod tests {
         assert_eq!(find(text, 16).map(|r| &text[r]), Some("https://a.com"));
         assert_eq!(find(text, 17), None);
         assert_eq!(find(text, 25).map(|r| &text[r]), Some("/tmp/x.txt."));
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn windows_drive_links_keep_the_drive_letter() {
+        let forward = "open C:/Windows/System32/winver.exe please";
+        let at = forward.find("C:/").unwrap();
+        let range = find(forward, at).unwrap();
+        assert_eq!(&forward[range.clone()], "C:/Windows/System32/winver.exe");
+        // The dropped drive used to join `/Windows/...` onto this folder's drive.
+        let elsewhere = Path::new(r"D:\herdr-not-the-windows-drive");
+        match native_target(&forward[range], Some(elsewhere)) {
+            Some(Target::File(path)) => {
+                assert!(path.exists(), "{}", path.display());
+                assert!(path.to_string_lossy().starts_with("C:"), "{}", path.display());
+            }
+            other => panic!("expected the C: file, got {other:?}"),
+        }
+
+        let backward = r"error: C:\Windows\System32\winver.exe:12:3";
+        let at = backward.find("winver").unwrap();
+        let range = find(backward, at).unwrap();
+        assert_eq!(&backward[range.clone()], r"C:\Windows\System32\winver.exe:12:3");
+        match native_target(&backward[range], Some(elsewhere)) {
+            Some(Target::File(path)) => {
+                assert!(path.exists(), "{}", path.display());
+                assert!(path.to_string_lossy().to_ascii_lowercase().ends_with(r"\windows\system32\winver.exe"), "{}", path.display());
+            }
+            other => panic!("expected winver.exe, got {other:?}"),
+        }
+
+        if Path::new(r"C:\Program Files").is_dir() {
+            let spaced = r"in C:\Program Files\Common Files later";
+            let at = spaced.find("Files").unwrap();
+            let got = &spaced[find(spaced, at).unwrap()];
+            assert!(got.starts_with(r"C:\Program Files"), "{got}");
+            assert!(Path::new(without_suffix(got)).exists(), "{got}");
+        }
+    }
+
+    #[cfg(not(windows))]
+    #[test]
+    fn a_drive_shaped_path_keeps_the_slash_match() {
+        let text = "see C:/Windows/System32/winver.exe now";
+        let range = find(text, text.find("/Windows").unwrap()).unwrap();
+        assert_eq!(&text[range], "/Windows/System32/winver.exe");
+        assert_eq!(find(r"see C:\Windows\System32\winver.exe now", 4), None);
     }
 
     #[test]
