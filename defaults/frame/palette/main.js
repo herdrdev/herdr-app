@@ -112,11 +112,6 @@ function keyOf(e, bound) {
   return k ? k.keys : null;
 }
 
-// "ctrl-shift-p" -> ["ctrl", "shift", "p"]; "ctrl--" -> ["ctrl", "-"].
-function keyParts(k) {
-  return k.endsWith("--") ? [...k.slice(0, -2).split("-"), "-"] : k.split("-");
-}
-
 // Fuzzy score of `q` in `text`, with the matched positions; null: no match.
 function fuzzy(q, text) {
   const t = text.toLowerCase();
@@ -236,7 +231,7 @@ export default class Palette extends View {
     }
     this.scroll = Math.max(0, Math.min(this.scroll, this.maxScroll));
     const key = (k) =>
-      h_flex().gap(3).children(keyParts(k).map((p) => div().px(5).rounded(4).border_1().border_color(t.border).bg(t.raised).text_size(11).text_color(t.dim).child(p)));
+      h_flex().gap(3).children(k.trim().split(/\s+/).map((s) => div().px(5).rounded(4).border_1().border_color(t.border).bg(t.raised).text_size(11).text_color(t.dim).child(s)));
     // In a scrolling list each item is placed at its edges from the model
     // above, not stacked: GPUI rounds every height to whole pixels, and a
     // stack of rounded heights drifts away from the model (19 px at zoom 1.3
