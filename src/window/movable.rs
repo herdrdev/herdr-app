@@ -39,6 +39,12 @@ fn edit(f: impl FnOnce(&mut Value)) {
     }
 }
 
+/// `at` pulled back so KEEP_SHOWN px of a window of `size` stay in the viewport.
+fn keep_shown(at: Point<Pixels>, size: Size<Pixels>, viewport: Size<Pixels>) -> Point<Pixels> {
+    let keep = px(KEEP_SHOWN);
+    point(at.x.min(viewport.width - keep).max(keep - size.width), at.y.min(viewport.height - keep).max(px(0.0)))
+}
+
 pub fn place_of(key: &str) -> Option<Point<Pixels>> {
     let p = read().get("places")?.get(key)?.as_array()?.clone();
     Some(point(px(p.first()?.as_f64()? as f32), px(p.get(1)?.as_f64()? as f32)))
@@ -94,9 +100,7 @@ impl AppWindow {
             (_, Some(p)) => p,
             _ => point((viewport.width - size.width) / 2.0, (viewport.height - size.height) / 2.0),
         };
-        let keep = px(KEEP_SHOWN);
-        let x = at.x.min(viewport.width - keep).max(keep - size.width);
-        let y = at.y.min(viewport.height - keep).max(px(0.0));
+        let Point { x, y } = keep_shown(at, size, viewport);
         let measure = {
             let (bounds, slot, known) = (self.bounds.clone(), o.slot.clone(), measured.is_some());
             canvas(
@@ -129,7 +133,7 @@ impl AppWindow {
 
     /// The window border included: its bounds are measured inside the border,
     /// but `size` and `place` include it.
-    fn outer_bounds(&self, o: &Overlay) -> Option<Bounds<Pixels>> {
+    pub(super) fn outer_bounds(&self, o: &Overlay) -> Option<Bounds<Pixels>> {
         let b = self.bounds.borrow().get(&o.slot).copied()?;
         Some(if o.bare { b } else { b.dilate(px(1.0)) })
     }
@@ -158,11 +162,11 @@ impl AppWindow {
         cx.notify();
     }
 
-    fn window_move(&mut self, at: Point<Pixels>, pressed: bool, cx: &mut Context<Self>) {
+    fn window_move(&mut self, at: Point<Pixels>, pressed: bool, viewport: Size<Pixels>, cx: &mut Context<Self>) {
         let Some(d) = &mut self.win_drag else { return };
         // Released outside the app: no mouse up comes, so this one ends the drag.
         if !pressed {
-            self.window_release(cx);
+            self.window_release(viewport, cx);
             return;
         }
         d.pointer = at;
@@ -175,13 +179,16 @@ impl AppWindow {
 
     /// Ends a press: a drag leaves the window there (and remembers it under its
     /// key); returns true so the release doesn't also click what's under it.
-    fn window_release(&mut self, cx: &mut Context<Self>) -> bool {
+    fn window_release(&mut self, viewport: Size<Pixels>, cx: &mut Context<Self>) -> bool {
         let Some(d) = self.win_drag.take() else { return false };
         cx.notify();
         if !d.moving {
             return false;
         }
         let at = d.pointer - d.grab;
+        let measured = self.overlays.iter().find(|o| o.id == d.id).and_then(|o| self.bounds.borrow().get(&o.slot).map(|b| b.size));
+        // A release outside the app reports a pointer far off screen; saving that would lose the window.
+        let at = keep_shown(at, measured.unwrap_or_default(), viewport);
         if let Some(o) = self.overlays.iter_mut().find(|o| o.id == d.id) {
             o.place = Some(at);
             if let Some(k) = &o.key {
@@ -200,14 +207,16 @@ impl AppWindow {
                 |_, _, _| {},
                 move |_, _, window, _| {
                     let t = this.clone();
-                    window.on_mouse_event(move |ev: &MouseMoveEvent, phase, _, cx| {
+                    window.on_mouse_event(move |ev: &MouseMoveEvent, phase, window, cx| {
                         if phase == DispatchPhase::Capture {
-                            let _ = t.update(cx, |this, cx| this.window_move(ev.position, ev.pressed_button == Some(MouseButton::Left), cx));
+                            let viewport = window.viewport_size();
+                            let _ = t.update(cx, |this, cx| this.window_move(ev.position, ev.pressed_button == Some(MouseButton::Left), viewport, cx));
                         }
                     });
                     let t = this.clone();
-                    window.on_mouse_event(move |ev: &MouseUpEvent, phase, _, cx| {
-                        if phase == DispatchPhase::Capture && ev.button == MouseButton::Left && t.update(cx, |this, cx| this.window_release(cx)).unwrap_or(false) {
+                    window.on_mouse_event(move |ev: &MouseUpEvent, phase, window, cx| {
+                        let viewport = window.viewport_size();
+                        if phase == DispatchPhase::Capture && ev.button == MouseButton::Left && t.update(cx, |this, cx| this.window_release(viewport, cx)).unwrap_or(false) {
                             cx.stop_propagation();
                         }
                     });
