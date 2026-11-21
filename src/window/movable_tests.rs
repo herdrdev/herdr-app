@@ -108,6 +108,26 @@ fn window_move_released_outside(cx: &mut gpui::TestAppContext) {
 }
 
 #[test]
+fn a_mouse_up_off_screen_clamps_the_dropped_window() {
+    in_own_process("window_move_mouse_up_off_screen");
+}
+
+#[gpui::test]
+fn window_move_mouse_up_off_screen(cx: &mut gpui::TestAppContext) {
+    use serde_json::json;
+    if !running_alone("window_move_mouse_up_off_screen") {
+        return;
+    }
+    let (view, cx) = open_probe_window(cx, moved_spec());
+    press_and_move(cx, (200.0, 150.0), &[(5000.0, 4000.0)]);
+    release(cx, (5000.0, 4000.0));
+    assert!(view.update(cx, |this, _| this.win_drag.is_none()));
+    // The grab is (100, 50) inside the window; KEEP_SHOWN (48) px stay on screen.
+    assert_eq!(drawn(&view, cx), [952.0, 552.0, 300.0, 200.0]);
+    assert_eq!(stored()["places"]["moved"], json!([952.0, 552.0]));
+}
+
+#[test]
 fn a_press_that_never_became_a_drag_leaves_the_window_alone() {
     in_own_process("window_press_without_drag");
 }

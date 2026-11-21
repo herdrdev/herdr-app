@@ -228,3 +228,34 @@ impl AppWindow {
         )
     }
 }
+
+#[cfg(test)]
+mod tests {
+    // Not `super::*`: it brings gpui's `test` attribute, which expands to `#[test]` again and recurses.
+    use super::keep_shown;
+    use gpui::{point, px};
+
+    fn clamped(at: (f32, f32), size: (f32, f32)) -> (f32, f32) {
+        let p = keep_shown(point(px(at.0), px(at.1)), gpui::size(px(size.0), px(size.1)), gpui::size(px(1000.0), px(600.0)));
+        (f32::from(p.x), f32::from(p.y))
+    }
+
+    #[test]
+    fn a_drop_far_past_any_side_keeps_a_strip_of_the_window_shown() {
+        // Left: the window's right 48 px stay on screen. Top: the title bar must not leave.
+        assert_eq!(clamped((-9999.0, -9999.0), (300.0, 200.0)), (-252.0, 0.0));
+        assert_eq!(clamped((9999.0, 9999.0), (300.0, 200.0)), (952.0, 552.0));
+        assert_eq!(clamped((9999.0, -9999.0), (300.0, 200.0)), (952.0, 0.0));
+        assert_eq!(clamped((-9999.0, 9999.0), (300.0, 200.0)), (-252.0, 552.0));
+    }
+
+    #[test]
+    fn a_spot_already_shown_is_left_alone() {
+        assert_eq!(clamped((100.0, 100.0), (300.0, 200.0)), (100.0, 100.0));
+    }
+
+    #[test]
+    fn an_unmeasured_zero_size_window_is_still_pulled_inside() {
+        assert_eq!(clamped((-500.0, -500.0), (0.0, 0.0)), (48.0, 0.0));
+    }
+}
