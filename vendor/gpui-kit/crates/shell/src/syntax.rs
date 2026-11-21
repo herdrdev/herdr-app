@@ -160,6 +160,9 @@ fn resolve_styles(
 
 fn semantic_name(scope: Scope) -> Option<&'static str> {
     let scope = scope.build_string();
+    if let Some(name) = markup_name(&scope) {
+        return Some(name);
+    }
     let name = if scope.starts_with("comment") {
         "comment"
     } else if scope.starts_with("constant.character.escape") {
@@ -191,6 +194,54 @@ fn semantic_name(scope: Scope) -> Option<&'static str> {
         return None;
     };
     Some(name)
+}
+
+/// HERDR: Markdown's scopes, so a Markdown editor shows its structure. A marker
+/// (`#`, `**`, a list bullet) takes its construct's name rather than
+/// `punctuation`, the way VS Code colors it. Lists and links name only their
+/// marker and URL: the list item's own text stays plain.
+fn markup_name(scope: &str) -> Option<&'static str> {
+    const NAMES: &[(&[&str], &str)] = &[
+        (
+            &["markup.heading", "punctuation.definition.heading"],
+            "heading",
+        ),
+        (&["markup.bold", "punctuation.definition.bold"], "strong"),
+        (
+            &["markup.italic", "punctuation.definition.italic"],
+            "emphasis",
+        ),
+        (&["markup.raw", "punctuation.definition.raw"], "code"),
+        (
+            &["markup.quote", "punctuation.definition.blockquote"],
+            "quote",
+        ),
+        (
+            &[
+                "markup.list.numbered.bullet",
+                "markup.list.unnumbered.bullet",
+                "punctuation.definition.list_item",
+            ],
+            "list",
+        ),
+        (&["markup.underline.link"], "link"),
+    ];
+    NAMES
+        .iter()
+        .find(|(prefixes, _)| prefixes.iter().any(|prefix| scope.starts_with(prefix)))
+        .map(|(_, name)| *name)
+}
+
+/// HERDR: a Markdown name a mod gave no color takes the color of a code name,
+/// so a mod that themes `keyword`, `string` and `comment` themes Markdown too.
+fn markup_fallback(root: &str) -> Option<&'static str> {
+    Some(match root {
+        "heading" | "strong" | "list" => "keyword",
+        "code" => "string",
+        "quote" => "comment",
+        "link" => "function",
+        _ => return None,
+    })
 }
 
 fn brace_fold_ranges(text: &str) -> Vec<FoldRange> {
@@ -232,13 +283,15 @@ pub(crate) struct SyntaxStyles(pub std::collections::HashMap<String, gpui::Hsla>
 impl HighlightStyleResolver for SyntaxStyles {
     fn style(&self, name: &str) -> Option<HighlightStyle> {
         let root = name.split('.').next()?;
+        let fallback = markup_fallback(root);
         let color = self
             .0
             .get(name)
             .or_else(|| self.0.get(root))
+            .or_else(|| fallback.and_then(|fallback| self.0.get(fallback)))
             .copied()
             .or_else(|| {
-                let rgb = match root {
+                let rgb = match fallback.unwrap_or(root) {
                     "comment" => 0x7f848e,
                     "string" => 0x98c379,
                     "number" => 0xd19a66,
@@ -252,8 +305,12 @@ impl HighlightStyleResolver for SyntaxStyles {
                 };
                 Some(gpui::rgb(rgb).into())
             });
-        color.map(|color| HighlightStyle {
-            color: Some(color),
+        let font_weight = matches!(root, "heading" | "strong").then_some(gpui::FontWeight::BOLD);
+        let font_style = (root == "emphasis").then_some(gpui::FontStyle::Italic);
+        (color.is_some() || font_weight.is_some() || font_style.is_some()).then(|| HighlightStyle {
+            color,
+            font_weight,
+            font_style,
             ..Default::default()
         })
     }
@@ -283,5 +340,81 @@ mod tests {
         assert!(find_syntax("rust").is_some());
         assert!(find_syntax("rs").is_some());
         assert!(find_syntax("unknown-language").is_none());
+    }
+
+    /// The names Markdown text gets, as (text, name) pairs, skipping plain text.
+    fn markdown_names(text: &str) -> Vec<(String, &'static str)> {
+        let mut highlighter = SyntectHighlighter::new("markdown").expect("markdown");
+        let mut state = ParseState::new(find_syntax("markdown").unwrap());
+        let mut scopes = ScopeStack::new();
+        let mut offset = 0;
+        for line in LinesWithEndings::from(text) {
+            let mut last = 0;
+            for (index, op) in state.parse_line(line, &SYNTAX_SET).unwrap() {
+                highlighter.push_highlight(offset + last..offset + index, &scopes);
+                last = index;
+                scopes.apply(&op).unwrap();
+            }
+            highlighter.push_highlight(offset + last..offset + line.len(), &scopes);
+            offset += line.len();
+        }
+        highlighter
+            .highlights
+            .iter()
+            .map(|(range, name)| (text[range.clone()].to_string(), *name))
+            .filter(|(text, _)| !text.trim().is_empty())
+            .collect()
+    }
+
+    #[test]
+    fn markdown_shows_its_structure() {
+        let names = markdown_names(
+            "# Title\n\n- a `code` and **bold** and *it*\n\n> quote\n\n[x](http://x)\n",
+        );
+        for expected in [
+            ("#", "heading"),
+            ("Title", "heading"),
+            ("-", "list"),
+            ("`", "code"),
+            ("code", "code"),
+            ("**", "strong"),
+            ("bold", "strong"),
+            ("it", "emphasis"),
+            ("quote", "quote"),
+            ("http://x", "link"),
+        ] {
+            assert!(
+                names
+                    .iter()
+                    .any(|(text, name)| text.contains(expected.0) && *name == expected.1),
+                "{expected:?} not in {names:?}"
+            );
+        }
+        // A list item's own text stays plain.
+        assert!(
+            !names.iter().any(|(text, _)| text.contains(" a ")),
+            "{names:?}"
+        );
+    }
+
+    #[test]
+    fn markdown_names_follow_code_colors_and_set_weight() {
+        let keyword = gpui::rgb(0x112233).into();
+        let heading = gpui::rgb(0x445566).into();
+        let styles = SyntaxStyles(HashMap::from([("keyword".into(), keyword)]));
+        let style = styles.style("heading").unwrap();
+        assert_eq!(style.color, Some(keyword));
+        assert_eq!(style.font_weight, Some(gpui::FontWeight::BOLD));
+        assert_eq!(
+            styles.style("emphasis").unwrap().font_style,
+            Some(gpui::FontStyle::Italic)
+        );
+        assert!(styles.style("code").unwrap().color.is_some());
+
+        let styles = SyntaxStyles(HashMap::from([
+            ("keyword".into(), keyword),
+            ("heading".into(), heading),
+        ]));
+        assert_eq!(styles.style("heading").unwrap().color, Some(heading));
     }
 }
