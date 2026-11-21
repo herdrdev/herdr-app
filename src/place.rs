@@ -45,7 +45,7 @@ fn load() -> Option<Place> {
     std::fs::read_to_string(path()).ok().and_then(|s| serde_json::from_str(&s).ok())
 }
 
-fn uuid(d: &dyn gpui::PlatformDisplay) -> Option<String> {
+pub(crate) fn uuid(d: &dyn gpui::PlatformDisplay) -> Option<String> {
     d.uuid().ok().map(|u| u.to_string())
 }
 

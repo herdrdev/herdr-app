@@ -27,11 +27,11 @@ fn path() -> PathBuf {
     file("windows.json")
 }
 
-fn read() -> Value {
+pub(super) fn read() -> Value {
     std::fs::read_to_string(path()).ok().and_then(|s| serde_json::from_str(&s).ok()).filter(Value::is_object).unwrap_or_else(|| json!({}))
 }
 
-fn edit(f: impl FnOnce(&mut Value)) {
+pub(super) fn edit(f: impl FnOnce(&mut Value)) {
     let mut v = read();
     f(&mut v);
     if let Ok(s) = serde_json::to_string_pretty(&v) {
@@ -70,6 +70,7 @@ fn kept(layout: &str) -> Vec<Value> {
 impl AppWindow {
     /// The windows a layout keeps, reopened (at start, or on switching to it).
     pub(super) fn open_kept_windows(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        self.restore_detached(window, cx);
         for spec in kept(&self.layout_name) {
             self.open_overlay(mods::new_overlay_id(), spec, window, cx);
         }
@@ -77,6 +78,9 @@ impl AppWindow {
 
     /// Leaving a layout: its windows close (the kept ones come back with it).
     pub(super) fn close_windows(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        // Detached blocks leave too; their places stay saved, so they return with the layout.
+        detach::close_all(cx);
+        self.detached.clear();
         // The layout's windows go with it; the app's own (What's new) stay.
         let ids: Vec<String> = self.overlays.iter().filter(|o| o.kind == OverlayKind::Window && !o.frame).map(|o| o.id.clone()).collect();
         for id in ids {

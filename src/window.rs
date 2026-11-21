@@ -5,6 +5,7 @@
 //! anything: keys, mods, menus and agents all run them.
 
 use crate::hc::Core;
+mod detach;
 mod floats;
 mod movable;
 mod pane_drag;
@@ -425,6 +426,9 @@ pub struct AppWindow {
     terms: HashMap<String, Term>,
     /// Mod copies by slot (block id, `<stack>#header`, or `overlay:<id>`).
     copies: HashMap<String, Copy>,
+    /// Mod blocks shown in their own OS window (`detach.rs`): hidden in the
+    /// layout, their mods still mounted.
+    detached: HashSet<String>,
     overlays: Vec<Overlay>,
     toast_scroll: ScrollHandle,
     folders: BTreeMap<String, Found>,
@@ -553,6 +557,7 @@ impl AppWindow {
             model: Model::default(),
             terms: HashMap::new(),
             copies: HashMap::new(),
+            detached: HashSet::new(),
             overlays: Vec::new(),
             toast_scroll: ScrollHandle::new(),
             folders: mods::scan(&BTreeMap::new()),
@@ -638,6 +643,8 @@ impl AppWindow {
                 this.drain_documents(window, cx);
                 this.close_mods_now(std::time::Instant::now() + Duration::from_millis(250), window, cx);
             });
+            // Detached windows go with the app; their places stay saved, so they return.
+            detach::close_all(cx);
             crate::place::save(window, cx);
             true
         });
@@ -1295,6 +1302,13 @@ impl AppWindow {
             }
         }
         stacks(&self.chrome, &mut mods);
+        // A detached block is hidden here but drawn in its own window: its mod
+        // must run, even from an inactive stack child.
+        for id in &self.detached {
+            if let Some(n) = self.chrome.find(id) {
+                visit(n, &mut terms, &mut mods);
+            }
+        }
         for n in visible_nodes(&self.chrome) {
             for f in n.floating.iter().filter(|f| !f.hidden) {
                 match &f.content {
@@ -3640,6 +3654,31 @@ impl AppWindow {
                     "layout.show" => false,
                     _ => true,
                 };
+            }
+            "layout.detach" => {
+                let id = Self::arg(a, "id").unwrap_or_default().to_owned();
+                if self.chrome.find(&id).is_none() {
+                    return self.fail(format!("no node {id:?} in the shown layout"));
+                }
+                if !self.detachable(&id) {
+                    return self.fail(format!("{id:?} is not a mod block: only mod blocks can be detached"));
+                }
+                if let Err(e) = self.detach_block(&id, None, window, cx) {
+                    return self.fail(e);
+                }
+            }
+            "layout.attach" => {
+                let id = Self::arg(a, "id").unwrap_or_default().to_owned();
+                if self.chrome.find(&id).is_none() {
+                    return self.fail(format!("no node {id:?} in the shown layout"));
+                }
+                detach::close(&id, cx);
+                self.detached.remove(&id);
+                detach::forget(&self.layout_name, &id);
+                if let Some(n) = self.chrome.find_mut(&id) {
+                    n.hidden = false;
+                }
+                self.save();
             }
             "layout.resize" => {
                 let id = Self::arg(a, "id").unwrap_or_default();
@@ -6519,6 +6558,190 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(view.update(cx, |this, _| this.copies.values().filter(|c| c.root.is_some()).count()), 1, "the mod loads");
         (view, cx)
+    }
+
+    #[test]
+    fn a_detached_mod_block_gets_its_own_window_and_comes_back() {
+        in_own_process("detach_mod_block");
+    }
+
+    /// `layout.detach` hides a mod block and opens a window drawing the same
+    /// mod view; `layout.attach` and closing that window both show the block again.
+    #[gpui::test]
+    fn detach_mod_block(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("detach_mod_block") {
+            return;
+        }
+        let side = "import { View, div } from \"gpui-kit\";\n\
+            export default class Side extends View { render() { return div().child(\"side\"); } }\n";
+        let (view, cx) = open_window(cx, "side", side, json!({
+            "id": "root", "type": "row", "children": [
+                { "id": "a", "type": "block", "content": { "mod": "side" } },
+                { "id": "b", "type": "block", "content": { "mod": "side" } }
+            ]
+        }));
+        cx.run_until_parked();
+        let hidden = |view: &gpui::Entity<super::AppWindow>, cx: &mut gpui::VisualTestContext, id: &str| {
+            view.update(cx, |this, _| this.chrome.find(id).unwrap().hidden)
+        };
+        let windows = |cx: &mut gpui::VisualTestContext| {
+            cx.update(|_, cx| cx.try_global::<super::detach::Detached>().map_or(0, |d| d.0.len()))
+        };
+        let run = |view: &gpui::Entity<super::AppWindow>, cx: &mut gpui::VisualTestContext, name: &str, id: &str| {
+            cx.update(|window, cx| view.update(cx, |this, cx| this.run(name, json!({ "id": id }), window, cx)));
+            cx.run_until_parked();
+        };
+        let main_root = view.update(cx, |this, _| this.copies["a"].root.clone().expect("the mod loads"));
+
+        run(&view, cx, "layout.detach", "a");
+        assert!(hidden(&view, cx, "a"), "the block leaves the layout");
+        assert!(!hidden(&view, cx, "b"), "its neighbor stays");
+        assert_eq!(windows(cx), 1, "one window opened");
+        let window = cx.update(|_, cx| cx.global::<super::detach::Detached>().0["a"].clone());
+        let drawn = cx.update(|_, cx| window.update(cx, |this, _, _| this.root())).unwrap();
+        assert_eq!(drawn.map(|r| r.entity_id()), Some(main_root.entity_id()), "the window draws the main window's own mod view");
+
+        run(&view, cx, "layout.detach", "a");
+        assert_eq!(windows(cx), 1, "detaching twice activates the window it has");
+
+        run(&view, cx, "layout.attach", "a");
+        assert!(!hidden(&view, cx, "a"), "attach shows the block again");
+        assert_eq!(windows(cx), 0, "and closes its window");
+
+        run(&view, cx, "layout.detach", "a");
+        assert_eq!(windows(cx), 1);
+        let window = cx.update(|_, cx| cx.global::<super::detach::Detached>().0["a"].clone());
+        cx.update(|_, cx| window.update(cx, |this, _, cx| this.release(cx))).unwrap();
+        cx.run_until_parked();
+        assert!(!hidden(&view, cx, "a"), "closing the window shows the block again");
+        assert_eq!(windows(cx), 0);
+
+        run(&view, cx, "layout.detach", "root");
+        assert!(!hidden(&view, cx, "root"), "only a mod block can be detached");
+    }
+
+    fn detached_count(cx: &mut gpui::VisualTestContext) -> usize {
+        cx.update(|_, cx| cx.try_global::<super::detach::Detached>().map_or(0, |d| d.0.len()))
+    }
+
+    fn run_on(view: &gpui::Entity<super::AppWindow>, cx: &mut gpui::VisualTestContext, name: &str, id: &str) {
+        cx.update(|window, cx| view.update(cx, |this, cx| this.run(name, serde_json::json!({ "id": id }), window, cx)));
+        cx.run_until_parked();
+    }
+
+    fn hidden_in_layout(view: &gpui::Entity<super::AppWindow>, cx: &mut gpui::VisualTestContext, id: &str) -> bool {
+        view.update(cx, |this, _| this.chrome.find(id).unwrap().hidden)
+    }
+
+    /// What closing the app's windows for a layout switch does, then what the
+    /// next start (or the switch back) does: the same two calls.
+    fn leave_layout(view: &gpui::Entity<super::AppWindow>, cx: &mut gpui::VisualTestContext) {
+        cx.update(|window, cx| view.update(cx, |this, cx| this.close_windows(window, cx)));
+        cx.run_until_parked();
+    }
+
+    fn return_to_layout(view: &gpui::Entity<super::AppWindow>, cx: &mut gpui::VisualTestContext) {
+        cx.update(|window, cx| view.update(cx, |this, cx| this.open_kept_windows(window, cx)));
+        cx.run_until_parked();
+    }
+
+    fn detached_window(cx: &mut gpui::VisualTestContext, id: &str) -> gpui::WindowHandle<super::detach::DetachedNode> {
+        cx.update(|_, cx| cx.global::<super::detach::Detached>().0[id].clone())
+    }
+
+    #[test]
+    fn detached_windows_come_back_where_they_were() {
+        in_own_process("detach_restore");
+    }
+
+    /// Detached blocks, even one that was never shown (an inactive stack
+    /// child), come back when the layout does, in the same place; one the
+    /// person attached or closed does not.
+    #[gpui::test]
+    fn detach_restore(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("detach_restore") {
+            return;
+        }
+        let side = "import { View, div } from \"gpui-kit\";\n\
+            export default class Side extends View { render() { return div().child(\"side\"); } }\n";
+        let (view, cx) = open_window(cx, "side", side, json!({
+            "id": "root", "type": "row", "children": [
+                { "id": "a", "type": "block", "content": { "mod": "side" } },
+                { "id": "center", "type": "stack", "active": "b", "children": [
+                    { "id": "b", "type": "block", "content": { "mod": "side" } },
+                    { "id": "c", "type": "block", "content": { "mod": "side" } }
+                ] }
+            ]
+        }));
+        cx.run_until_parked();
+        assert!(view.update(cx, |this, _| !this.copies.contains_key("c")), "an inactive stack child has no mod running");
+
+        run_on(&view, cx, "layout.detach", "a");
+        run_on(&view, cx, "layout.detach", "c");
+        assert_eq!(detached_count(cx), 2);
+        assert!(hidden_in_layout(&view, cx, "a") && hidden_in_layout(&view, cx, "c"));
+        let c = detached_window(cx, "c");
+        assert!(cx.update(|_, cx| c.update(cx, |this, _, _| this.root())).unwrap().is_some(), "its mod was started for the window");
+        let mut ids: Vec<String> = super::detach::saved("test").into_iter().map(|(id, _)| id).collect();
+        ids.sort();
+        assert_eq!(ids, ["a", "c"], "both are remembered");
+
+        // Away and back (a layout switch, or the next start).
+        leave_layout(&view, cx);
+        assert_eq!(detached_count(cx), 0, "the windows leave with the layout");
+        assert_eq!(super::detach::saved("test").len(), 2, "and stay remembered");
+        return_to_layout(&view, cx);
+        assert_eq!(detached_count(cx), 2, "they open again");
+        assert!(hidden_in_layout(&view, cx, "a") && hidden_in_layout(&view, cx, "c"));
+
+        // The size and place they had come back; a display that is gone falls back to centered.
+        let display = cx.update(|_, cx| cx.displays().first().and_then(|d| crate::place::uuid(d.as_ref())));
+        let bounds = |cx: &mut gpui::VisualTestContext| {
+            let a = detached_window(cx, "a");
+            let (gpui::WindowBounds::Windowed(b) | gpui::WindowBounds::Maximized(b) | gpui::WindowBounds::Fullscreen(b)) =
+                cx.update(|_, cx| a.update(cx, |_, window, _| window.inner_window_bounds())).unwrap();
+            b
+        };
+        let spot = |display: Option<String>| super::detach::Spot { bounds: [40.0, 50.0, 500.0, 400.0], display };
+        super::detach::remember("test", "a", &spot(display.clone()));
+        leave_layout(&view, cx);
+        return_to_layout(&view, cx);
+        let b = bounds(cx);
+        assert_eq!((f32::from(b.size.width), f32::from(b.size.height)), (500.0, 400.0), "its size");
+        if display.is_some() && !cfg!(target_os = "linux") {
+            assert_eq!((f32::from(b.origin.x), f32::from(b.origin.y)), (40.0, 50.0), "and its place");
+        }
+        super::detach::remember("test", "a", &spot(Some("a display that is gone".into())));
+        leave_layout(&view, cx);
+        return_to_layout(&view, cx);
+        let b = bounds(cx);
+        assert_eq!((f32::from(b.size.width), f32::from(b.size.height)), (500.0, 400.0), "the size survives a lost display");
+
+        // Attached: not opened again.
+        run_on(&view, cx, "layout.attach", "a");
+        assert!(!hidden_in_layout(&view, cx, "a"));
+        assert_eq!(detached_count(cx), 1);
+        leave_layout(&view, cx);
+        return_to_layout(&view, cx);
+        assert_eq!(detached_count(cx), 1, "only the one still detached");
+
+        // Closed by the person: not opened again either.
+        let c = detached_window(cx, "c");
+        cx.update(|_, cx| c.update(cx, |this, _, cx| this.release(cx))).unwrap();
+        cx.run_until_parked();
+        assert!(!hidden_in_layout(&view, cx, "c"));
+        assert_eq!(detached_count(cx), 0);
+        leave_layout(&view, cx);
+        return_to_layout(&view, cx);
+        assert_eq!(detached_count(cx), 0);
+        assert!(super::detach::saved("test").is_empty());
+
+        // A block the layout no longer has is skipped, not an error.
+        super::detach::remember("test", "ghost", &spot(None));
+        return_to_layout(&view, cx);
+        assert_eq!(detached_count(cx), 0);
     }
 
     #[test]
