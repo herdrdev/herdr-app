@@ -855,6 +855,8 @@ pub fn from_host(v: &HostValue) -> Value {
         HostValue::Str(s) => Value::String(s.clone()),
         HostValue::Array(a) => Value::Array(a.iter().map(from_host).collect()),
         HostValue::Object(o) => Value::Object(o.iter().map(|(k, v)| (k.clone(), from_host(v))).collect()),
+        // The shape a Uint8Array had before it crossed as bytes: a field per byte.
+        HostValue::Bytes(b) => Value::Object(b.iter().enumerate().map(|(i, &n)| (i.to_string(), Value::from(n))).collect()),
     }
 }
 
@@ -1049,6 +1051,7 @@ fn module(inst: Instance, copy: u64) -> HostModule {
             if checking() { tracing::warn!("check: mod called hc; it runs for real"); }
             Ok(exec_future("hc".into(), strings(a.get(0)), None, None, EXEC_LIMIT))
         })
+        .async_function("setImage", { let name = inst.name.clone(); move |a| crate::mod_images::set_image(copy, &name, a) })
         .function("checking", |_| Ok(HostValue::Bool(checking())))
         .function("home", |_| Ok(home().to_string_lossy().into_owned().into()))
         .function("appHome", |_| Ok(app_dir().to_string_lossy().into_owned().into()))

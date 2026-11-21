@@ -111,9 +111,11 @@ use crate::component::ComponentFactory;
 
 /// A value crossing the host boundary, in either direction.
 ///
-/// The six cases are the intersection of what a script engine and JSON can both
-/// carry, which is what keeps one registry usable from any engine behind the
-/// seam rather than from QuickJS alone.
+/// The six JSON-like cases are the intersection of what a script engine and
+/// JSON can both carry, which is what keeps one registry usable from any engine
+/// behind the seam rather than from QuickJS alone. `Bytes` is the one
+/// exception: binary data crosses as one buffer instead of an object with a
+/// field per byte.
 #[derive(Clone, Debug, PartialEq)]
 pub enum HostValue {
     Null,
@@ -124,6 +126,8 @@ pub enum HostValue {
     /// Insertion-ordered, because an object is frequently a record the script
     /// renders in order, and a map would decide that order for it.
     Object(Vec<(String, HostValue)>),
+    /// HERDR: a `Uint8Array`, copied once in each direction.
+    Bytes(Vec<u8>),
 }
 
 impl HostValue {
@@ -166,6 +170,13 @@ impl HostValue {
         }
     }
 
+    pub fn as_bytes(&self) -> Option<&[u8]> {
+        match self {
+            HostValue::Bytes(bytes) => Some(bytes),
+            _ => None,
+        }
+    }
+
     /// The value of one object field, or `None` for a non-object.
     pub fn get(&self, key: &str) -> Option<&HostValue> {
         self.as_object()?
@@ -183,6 +194,7 @@ impl HostValue {
             HostValue::Str(_) => "a string",
             HostValue::Array(_) => "an array",
             HostValue::Object(_) => "an object",
+            HostValue::Bytes(_) => "a Uint8Array",
         }
     }
 }
