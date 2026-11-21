@@ -188,6 +188,9 @@ parentheses and apostrophes, and preserves Unicode file and folder names
 (including Chinese). Directory links expand as folders; their contents load
 only when expanded.
 
+Click **Usage** in the default status bar to enable local Codex, Cursor, Agy or Claude Code
+quota and focused-session metrics. Provider setup is in `mods/workspace-status/README.md`.
+
 **Herdr's own layouts and mods are read-only.** They are replaced whole
 on every start. Use settings.json for look (fonts, sizes, theme, colors,
 sounds), where the layout leaves them unset. Herdr (main) has no look of

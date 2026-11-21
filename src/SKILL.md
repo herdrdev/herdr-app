@@ -6,6 +6,8 @@ what the person sees. For starting, reading, messaging, waiting on or cleaning
 up agents and programs, read `hc --skill` and use hc.
 Your terminal address is `$HC_TERMINAL_ID`; it is not a pane ID.
 
+Click **Usage** in the Herdr status bar to enable local subscription tracking per provider and view focused local session metrics alongside remaining quota windows. See `mods/workspace-status/README.md` in the app home for provider setup.
+
 ## Inspect before acting
 
 ```sh

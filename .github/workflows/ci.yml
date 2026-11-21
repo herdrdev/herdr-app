@@ -82,6 +82,8 @@ jobs:
       - name: Windows build dependencies
         if: runner.os == 'Windows'
         run: echo "LIBCLANG_PATH=C:\\Program Files\\LLVM\\bin" >> "$GITHUB_ENV"
+      - name: Test status bar usage collectors
+        run: node --test scripts/*usage.test.cjs
       - name: Keep unchanged sources fresh
         run: scripts/ci-sources restore
       # Compile the screenshot harness everywhere, even without a desktop.
