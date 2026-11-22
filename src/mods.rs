@@ -410,7 +410,7 @@ fn scan_dir(root: &Path, prefix: &str, previous: &BTreeMap<String, Found>) -> BT
             let source = std::fs::read_to_string(manifest_path);
             let hint = source.as_ref().ok().and_then(|s| serde_json::from_str(s).ok()).unwrap_or_default();
             let previous_rules = previous.get(&id).filter(|old| old.dir == dir).map(|old| &old.link_rules);
-            let link_manifest = has_link || previous_rules.is_some_and(|rules| !rules.is_empty());
+            let link_manifest = (has_link && !has_view) || previous_rules.is_some_and(|rules| !rules.is_empty());
             let (link_rules, manifest_error) = match parse_link_rules(&source, link_manifest) {
                 Ok(rules) => {
                     let error = (!rules.is_empty() && !has_link).then(|| "mod.json declares link_handlers but link.js is missing".to_owned());
@@ -1360,13 +1360,15 @@ pub fn handle_link(
 
 pub fn check_link_mod(dir: &Path) -> anyhow::Result<bool> {
     let has_link = dir.join("link.js").is_file();
+    let standalone = has_link && !dir.join("main.js").is_file();
     let source = std::fs::read_to_string(dir.join("mod.json"));
-    let rules = parse_link_rules(&source, has_link).map_err(anyhow::Error::msg)?;
+    let rules = parse_link_rules(&source, standalone).map_err(anyhow::Error::msg)?;
     anyhow::ensure!(rules.is_empty() || has_link, "mod.json declares link_handlers but link.js is missing");
-    if has_link {
+    let handles_links = standalone || !rules.is_empty();
+    if handles_links {
         gpui_shell::ShellRuntime::check_module(dir, "link.js", "handleLink")?;
     }
-    Ok(has_link)
+    Ok(handles_links)
 }
 
 #[cfg(test)]
@@ -1406,7 +1408,17 @@ mod tests {
         assert!(!check_link_mod(&dir).unwrap(), "a plain view still runs the normal view check");
         assert!(views["example"].manifest_error.is_none());
 
-        std::fs::write(dir.join("link.js"), r#"export function handleLink() { return "handled"; }"#).unwrap();
+        std::fs::write(dir.join("link.js"), "export function helper() {}").unwrap();
+        assert!(!check_link_mod(&dir).unwrap(), "a view with an ordinary helper still uses the view check");
+        let helpers = scan_dir(&root, "", &views);
+        assert!(helpers["example"].manifest_error.is_none());
+
+        let manifest = dir.join("mod.json");
+        std::fs::write(&manifest, r#"{"link_handlers":[{"kind":"url","pattern":"^http://localhost:"}]}"#).unwrap();
+        assert!(check_link_mod(&dir).unwrap_err().to_string().contains("handleLink"));
+
+        std::fs::remove_file(dir.join("main.js")).unwrap();
+        std::fs::write(&manifest, r#"{"place":"none",}"#).unwrap();
         let error = check_link_mod(&dir).unwrap_err().to_string();
         assert!(error.starts_with("mod.json:"), "{error}");
         let links = scan_dir(&root, "", &views);

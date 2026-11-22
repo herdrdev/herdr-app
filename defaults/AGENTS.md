@@ -973,9 +973,10 @@ the click, shows a toast and appears in `herdr-app status`.
 herdr-app check ~/.config/herdr-app/mods/<name>
 ```
 
-Loads and renders the mod's view if it has one. It checks link rules and
-verifies that `link.js` exports `handleLink` without running the module or
-its imports. It exits nonzero with the exact error. Run it after every change.
+Loads and renders the mod's view if it has one. It validates link rules.
+For mods with link rules and standalone link mods, it verifies that `link.js`
+exports `handleLink` without running the module or its imports. It exits
+nonzero with the exact error. Run it after every change.
 
 `init()` runs for real during a check. Import `checking` from `"herdr"` and
 use `if (checking()) return;` before starting helpers or writing files.
