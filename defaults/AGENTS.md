@@ -964,8 +964,9 @@ a local path when the host is empty or `localhost`. A link handler starts withou
 a view and shares `localStorage` with views of the same mod with null props.
 Return `"handled"` when done or `"pass"` to try the next matching mod.
 If all pass, a local terminal uses the usual opener target. A matched file
-from a remote terminal has no opener target. A load or handler error stops
-the click, shows a toast and appears in `herdr-app status`.
+from a remote terminal has no opener target. A handler has 30 seconds to
+answer. A load or handler error stops the click, shows a toast and appears in
+`herdr-app status`.
 
 ### Check before you finish
 

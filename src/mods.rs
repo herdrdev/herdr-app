@@ -1368,8 +1368,20 @@ pub fn handle_link(
     window: &mut gpui::Window,
     cx: &mut App,
 ) -> impl std::future::Future<Output = anyhow::Result<String>> + use<> {
+    use std::{future::{Future, poll_fn}, pin::pin, task::Poll};
     let (_, policy) = mod_policy(&Instance { name: name.to_owned(), props: Value::Null });
-    gpui_shell::ShellRuntime::call_module(dir, "link.js", "handleLink", click, Rc::new(policy), window, cx)
+    let call = gpui_shell::ShellRuntime::call_module(dir, "link.js", "handleLink", click, Rc::new(policy), window, cx);
+    let timeout = cx.background_executor().timer(Duration::from_secs(30));
+    async move {
+        let mut call = pin!(call);
+        let mut timeout = pin!(timeout);
+        poll_fn(|cx| {
+            if let Poll::Ready(result) = call.as_mut().poll(cx) {
+                return Poll::Ready(result);
+            }
+            timeout.as_mut().poll(cx).map(|()| Err(anyhow::anyhow!("The link handler did not answer within 30 seconds.")))
+        }).await
+    }
 }
 
 pub fn check_link_mod(dir: &Path) -> anyhow::Result<bool> {

@@ -7729,8 +7729,9 @@ export default class Fixture extends View {
         assert!(folder.to_string_lossy().starts_with(r"\\?\"));
         std::fs::write(folder.join("link.js"), r#"
             let calls = 0;
-            export async function handleLink({ key, delay }) {
+            export async function handleLink({ key, delay, link }) {
                 if (++calls !== 1) throw new Error("reused a handler runtime");
+                if (link === "hang") await __sleep(60000);
                 if (localStorage.getItem("view") !== "ready") throw new Error("missing live view storage");
                 if (delay) await __sleep(delay);
                 localStorage.setItem(key, key);
@@ -7763,6 +7764,23 @@ export default class Fixture extends View {
         cx.run_until_parked();
         let store: serde_json::Value = serde_json::from_slice(&std::fs::read(home.join("data/viewer/store.json")).unwrap()).unwrap();
         assert_eq!(store, json!({ "view": "fast slow", "fast": "fast", "slow": "slow" }));
+
+        view.update_in(cx, |this, window, cx| {
+            let click = crate::links::Click { handlers: vec![("viewer".into(), json!("hang"))], native: None };
+            this.handle_link("mod", "t1", &click, window, cx);
+        });
+        cx.run_until_parked();
+        cx.executor().advance_clock(Duration::from_secs(29));
+        cx.run_until_parked();
+        view.update(cx, |this, _| {
+            assert_eq!(this.link_tasks.len(), 1, "{:?}", this.link_errors);
+        });
+        cx.executor().advance_clock(Duration::from_secs(1));
+        cx.run_until_parked();
+        view.update(cx, |this, _| {
+            assert!(this.link_tasks.is_empty());
+            assert!(this.link_errors["viewer"].contains("did not answer within 30 seconds"));
+        });
     }
 
     #[test]
