@@ -135,9 +135,7 @@ fn unix_agent_argv(sh: String, cmd: Vec<String>, login: bool, stay: bool) -> Vec
         (true, _, false) => crate::remote_shell::FISH_EXEC,
         (false, _, false) => crate::remote_shell::POSIX_EXEC,
     };
-    let mut run = vec![sh.clone(), if login { "-lic" } else { "-ic" }.into(), script.into(), sh];
-    run.extend(cmd);
-    run
+    crate::remote_shell::local(sh, if login { "-lic" } else { "-ic" }, script, fish, cmd)
 }
 
 /// A terminal that ended within 2 s, with an error. A split's wrapper that can't find its
@@ -2677,7 +2675,7 @@ impl AppWindow {
     /// then a shell that stays.
     fn powershell_argv(sh: &[String]) -> Vec<String> {
         let cmd = sh.get(4..).unwrap_or_default();
-        vec!["powershell.exe".into(), "-NoLogo".into(), "-NoExit".into(), "-Command".into(), crate::programs::powershell_line(cmd)]
+        vec!["powershell.exe".into(), "-NoLogo".into(), "-NoExit".into(), "-Command".into(), crate::programs::powershell_launch(cmd)]
     }
 
     /// An agent with its first message, in a shell that stays when the agent exits
@@ -2692,7 +2690,7 @@ impl AppWindow {
             let sh = shell();
             if cfg!(windows) {
                 // PowerShell has no `-ic`: run it, then stay. `&` finds npm's `.cmd` shims too.
-                return vec![sh, "-NoExit".into(), "-Command".into(), crate::programs::powershell_line(&cmd)];
+                return vec![sh, "-NoExit".into(), "-Command".into(), crate::programs::powershell_launch(&cmd)];
             }
             // macOS terminal sessions load login profiles (including Homebrew's PATH).
             unix_agent_argv(sh, cmd, cfg!(target_os = "macos"), true)
@@ -6163,17 +6161,8 @@ mod tests {
         for login in [false, true] {
             for sh in ["/bin/bash", "/bin/zsh", "/bin/sh", "/bin/dash", "/bin/fish"] {
                 let run = super::unix_agent_argv(sh.into(), cmd.clone(), login, true);
-                assert_eq!(run[0], sh);
-                assert_eq!(run[1], if login { "-lic" } else { "-ic" });
                 assert_eq!(run[3], sh);
                 assert_eq!(run[4..], cmd);
-                let expected = match (sh.ends_with("/fish"), login) {
-                    (true, true) => "command $argv[2..]; exec $argv[1] -li",
-                    (true, false) => "command $argv[2..]; exec $argv[1] -i",
-                    (false, true) => "\"$@\"; exec \"$0\" -li",
-                    (false, false) => "\"$@\"; exec \"$0\" -i",
-                };
-                assert_eq!(run[2], expected);
                 // Whatever the wrapper, a pane shows the agent it runs, not the shell.
                 let agent = super::unix_agent_argv(sh.into(), vec!["cursor-agent".into()], login, true);
                 assert_eq!(crate::programs::of(None, &agent)["key"], "cursor", "{agent:?}");
@@ -6213,18 +6202,21 @@ mod tests {
         let home = temp.join(format!("herdr-split-shell-test-{}", std::process::id()));
         std::fs::create_dir_all(home.join("rc bin")).unwrap();
         std::fs::create_dir_all(home.join(".config/fish")).unwrap();
-        let rc = "case $- in *i*) export PATH=\"$HOME/rc bin:$PATH\";; esac\n";
+        let rc = "case $- in *i*) export PATH=\"$HOME/rc bin:$PATH\"; cd /;; esac\n";
         for file in [".bashrc", ".zshrc", ".profile", ".bash_profile", ".zprofile"] {
             std::fs::write(home.join(file), rc).unwrap();
         }
-        std::fs::write(home.join(".config/fish/config.fish"), "if status is-interactive\nset -gx PATH \"$HOME/rc bin\" $PATH\nend\n").unwrap();
+        std::fs::write(home.join(".config/fish/config.fish"), "if status is-interactive\nset -gx PATH \"$HOME/rc bin\" $PATH\ncd /\nend\n").unwrap();
         let tool = home.join("rc bin/rc-tool");
-        std::fs::write(&tool, "#!/bin/sh\nprintf '<%s>\\n' \"$@\"\nexit 7\n").unwrap();
+        std::fs::write(&tool, "#!/bin/sh\nprintf '<%s>\\n' \"$PWD\" \"$HERDR_START_DIR\" \"$@\"\nexit 7\n").unwrap();
         std::fs::set_permissions(&tool, std::fs::Permissions::from_mode(0o755)).unwrap();
         let arg = "a 'quoted' $HOME; $(not-a-command)\nnext line";
+        let folder = home.join("work 'tree\n");
+        std::fs::create_dir(&folder).unwrap();
+        let cwd = folder.canonicalize().unwrap();
         let run = |argv: Vec<String>| {
             let mut cmd = std::process::Command::new(&argv[0]);
-            cmd.args(&argv[1..]).env_clear().env("HOME", &home).env("ZDOTDIR", &home)
+            cmd.args(&argv[1..]).current_dir(&folder).env_clear().env("HOME", &home).env("ZDOTDIR", &home)
                 .env("PATH", "/usr/bin:/bin").env("TERM", "dumb").stdin(std::process::Stdio::null());
             unsafe extern "C" {
                 fn setsid() -> std::ffi::c_int;
@@ -6241,7 +6233,7 @@ mod tests {
             for login in [sh.ends_with("/sh"), true] {
                 let out = run(super::unix_agent_argv(sh.into(), vec!["rc-tool".into(), arg.into(), "".into()], login, false));
                 let stdout = String::from_utf8_lossy(&out.stdout);
-                assert!(stdout.ends_with(&format!("<{arg}>\n<>\n")), "{sh}: {stdout:?} {}", String::from_utf8_lossy(&out.stderr));
+                assert!(stdout.ends_with(&format!("<{}>\n<>\n<{arg}>\n<>\n", cwd.display())), "{sh}: {stdout:?} {}", String::from_utf8_lossy(&out.stderr));
                 assert_eq!(out.status.code(), Some(7), "{sh}");
                 let out = run(super::unix_agent_argv(sh.into(), vec!["no-such-program".into()], login, false));
                 assert_eq!(out.status.code(), Some(127), "{sh}");

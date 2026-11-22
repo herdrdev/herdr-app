@@ -250,8 +250,15 @@ fn base(s: &str) -> &str {
 const PS_QUOTES: [char; 5] = ['\'', '\u{2018}', '\u{2019}', '\u{201A}', '\u{201B}'];
 
 /// `& 'prog' 'arg 1'`: a command for PowerShell's `-Command`, each word quoted.
-pub fn powershell_line(cmd: &[String]) -> String {
+fn powershell_line(cmd: &[String]) -> String {
     format!("& {}", cmd.iter().map(|w| powershell_quote(w)).collect::<Vec<_>>().join(" "))
+}
+
+// PowerShell profiles can change the shell's location independently of the process cwd.
+const POWERSHELL_RESTORE_FOLDER: &str = "try { Set-Location -LiteralPath ([Environment]::CurrentDirectory) -ErrorAction Stop } catch { Write-Error $_; exit 127 }; ";
+
+pub fn powershell_launch(cmd: &[String]) -> String {
+    format!("{POWERSHELL_RESTORE_FOLDER}{}", powershell_line(cmd))
 }
 
 fn powershell_quote(word: &str) -> String {
@@ -329,7 +336,7 @@ fn resolve(t: &Table, app: Option<&str>, argv: &[String]) -> Value {
         && t.shells.iter().any(|s| s == base(&argv[0]))
         && argv[1] == "-NoExit"
         && argv[2] == "-Command"
-        && let Some(words) = powershell_words(&argv[3])
+        && let Some(words) = powershell_words(argv[3].strip_prefix(POWERSHELL_RESTORE_FOLDER).unwrap_or(&argv[3]))
     {
         return resolve(t, None, &words);
     }

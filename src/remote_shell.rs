@@ -2,11 +2,11 @@
 
 pub fn check(commands: &[String]) -> Vec<String> {
     let posix = "for c; do unalias -- \"$c\" 2>/dev/null; command -v \"$c\" >/dev/null 2>&1 && printf 'herdr-has:%s\\n' \"$c\"; done; printf '\\nherdr-check-complete\\n'";
-    in_shell(posix, "for c in $argv[2..]; command -v $c >/dev/null 2>&1; and printf 'herdr-has:%s\\n' $c; end; printf '\\nherdr-check-complete\\n'", posix, commands.to_vec())
+    in_shell("", posix, "for c in $argv[2..]; command -v $c >/dev/null 2>&1; and printf 'herdr-has:%s\\n' $c; end; printf '\\nherdr-check-complete\\n'", posix, commands.to_vec())
 }
 
 pub fn launch(command: Vec<String>) -> Vec<String> {
-    in_shell("\"$@\"; exec \"$0\" -li", "command $argv[2..]; exec $argv[1] -li", "\"$@\"; exec \"${SHELL:-sh}\" -i", command)
+    launch_in_shell("\"$@\"; exec \"$0\" -li", "command $argv[2..]; exec $argv[1] -li", "\"$@\"; exec \"${SHELL:-sh}\" -i", command)
 }
 
 /// The shell becomes the program (`exec`), so it ends with the program's exit code. A
@@ -20,7 +20,34 @@ pub const FISH_EXEC: &str = r#"if not command -q -- $argv[2]; printf '\e]2;%s\ac
 
 /// `command` in that machine's shell, which then becomes it (`POSIX_EXEC`).
 pub fn exec(command: Vec<String>) -> Vec<String> {
-    in_shell(POSIX_EXEC, FISH_EXEC, POSIX_EXEC, command)
+    launch_in_shell(POSIX_EXEC, FISH_EXEC, POSIX_EXEC, command)
+}
+
+// Capture the cwd before the user's rc files run, even when the core chose it
+// (e.g. a remote retry in its home). The suffix preserves trailing newlines.
+const CAPTURE_FOLDER: &str = r#"HERDR_START_DIR=$(pwd -P && printf .) || exit 127
+export HERDR_START_DIR=${HERDR_START_DIR%??}
+"#;
+
+fn restore_folder(script: &str, fish: bool) -> String {
+    let restore = if fish {
+        r#"builtin cd -- "$HERDR_START_DIR"; or begin; test -n "$HERDR_LAUNCH"; and printf '\e]2;%s\a' "$HERDR_LAUNCH" >&2; exit 127; end; set -e HERDR_START_DIR; "#
+    } else {
+        r#"if command -v builtin >/dev/null 2>&1; then builtin cd -P "$HERDR_START_DIR"; else command cd -P "$HERDR_START_DIR"; fi || { [ -z "$HERDR_LAUNCH" ] || printf '\033]2;%s\007' "$HERDR_LAUNCH" >&2; exit 127; }; unset HERDR_START_DIR; "#
+    };
+    format!("{restore}{script}")
+}
+
+pub fn local(shell: String, flag: &str, script: &str, fish: bool, command: Vec<String>) -> Vec<String> {
+    let script = quote(&restore_folder(script, fish));
+    let outer = format!("{CAPTURE_FOLDER}exec \"$0\" {flag} '{script}' \"$0\" \"$@\"");
+    let mut argv = vec!["/bin/sh".into(), "-c".into(), outer, shell];
+    argv.extend(command);
+    argv
+}
+
+fn launch_in_shell(posix: &str, fish: &str, fallback: &str, command: Vec<String>) -> Vec<String> {
+    in_shell(CAPTURE_FOLDER, &restore_folder(posix, false), &restore_folder(fish, true), &restore_folder(fallback, false), command)
 }
 
 /// Whether a terminal's `POSIX_EXEC` or `FISH_EXEC` said it can't start its program: the
@@ -36,9 +63,9 @@ fn quote(s: &str) -> String {
 /// Select the shell there, not the viewer's shell. The core may have started
 /// with only the SSH session's minimal PATH; load login and interactive profiles
 /// before checking or launching. Only our fixed scripts become shell source.
-fn in_shell(posix: &str, fish: &str, fallback: &str, args: Vec<String>) -> Vec<String> {
+fn in_shell(prefix: &str, posix: &str, fish: &str, fallback: &str, args: Vec<String>) -> Vec<String> {
     let script = format!(
-        r#"shell=${{SHELL:-/bin/sh}}
+        r#"{prefix}shell=${{SHELL:-/bin/sh}}
 case "${{shell##*/}}" in
   fish) exec "$shell" -lic '{}' "$shell" "$@" ;;
   sh|bash|zsh|dash|ksh) exec "$shell" -lic '{}' "$shell" "$@" ;;
@@ -87,9 +114,13 @@ mod tests {
         }
 
         fn run(&self, argv: Vec<String>, shell: Option<&str>) -> Output {
+            self.run_in(argv, shell, &self.0)
+        }
+
+        fn run_in(&self, argv: Vec<String>, shell: Option<&str>, cwd: &std::path::Path) -> Output {
             let mut cmd = Command::new(&argv[0]);
             cmd.args(&argv[1..])
-                .current_dir(&self.0)
+                .current_dir(cwd)
                 .env_clear()
                 .env("HOME", &self.0)
                 .env("ZDOTDIR", &self.0)
@@ -318,5 +349,26 @@ mod tests {
         let argv = launch(command.clone());
         assert_eq!(argv[0], "sh");
         assert_eq!(argv[4..], command);
+    }
+
+    #[test]
+    fn commands_restore_the_core_working_directory_after_shell_startup() {
+        let home = Home::new();
+        let checkout = home.0.join("chosen checkout");
+        std::fs::create_dir(&checkout).unwrap();
+        std::fs::write(home.0.join(".bash_profile"), "cd /\n").unwrap();
+        for folder in [&checkout, &home.0] {
+            let cmd = vec!["/bin/pwd".into(), "-P".into()];
+            for argv in [exec(cmd.clone()), launch(cmd.clone()), local("/bin/bash".into(), "-lic", "\"$@\"; exec \"$0\" -li", false, cmd)] {
+                let out = home.run_in(argv, Some("/bin/bash"), folder);
+                let cwd = folder.canonicalize().unwrap();
+                assert_eq!(String::from_utf8_lossy(&out.stdout).trim_end(), cwd.to_str().unwrap(), "{}", String::from_utf8_lossy(&out.stderr));
+            }
+        }
+        std::fs::write(home.0.join(".bash_profile"), "cd /; rmdir \"$HERDR_START_DIR\"\n").unwrap();
+        let out = home.run_in(exec(vec!["/bin/pwd".into()]), Some("/bin/bash"), &checkout);
+        assert_eq!(out.status.code(), Some(127));
+        assert!(out.stdout.is_empty());
+        assert!(String::from_utf8_lossy(&out.stderr).contains("\x1b]2;test-token\x07"));
     }
 }
