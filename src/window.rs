@@ -3889,14 +3889,14 @@ impl AppWindow {
             if !self.shows_tab() || self.model.active_tab().map(|t| &t.id) != Some(&tab.id) {
                 return Err("that pane isn't on screen".into());
             }
+            if !tab.shown().visible_blocks().iter().any(|node| node.id == pane && node.is_pane()) {
+                return Err("that pane isn't on screen".into());
+            }
             if tab.zoomed.is_some() {
                 return Ok(());
             }
             let root = &tab.root;
             let path = root.path_to(pane).ok_or_else(|| format!("no pane {pane:?}"))?;
-            if path.iter().any(|id| root.find(id).is_some_and(|n| n.hidden)) {
-                return Err("that pane isn't on screen".into());
-            }
             let mut found = None;
             for i in (0..path.len().saturating_sub(1)).rev() {
                 let Some(node) = root.find(&path[i]) else { continue };
@@ -7079,6 +7079,14 @@ mod tests {
             assert!(r.get("error").is_some(), "drawn before, but in a hidden branch now: {r}");
             assert_eq!(sizes(this), before);
             hide(this, false);
+            let stack = this.model.tab_mut("tb1").unwrap().root.find_mut("col").unwrap();
+            stack.kind = super::Kind::Stack { children: stack.children().to_vec(), active: Some("p3".into()), header: None };
+            let before = sizes(this);
+            for pane in ["p1", "col"] {
+                let r = this.run_as("pane.resize", json!({ "pane": pane, "direction": "right" }), false, window, cx);
+                assert!(r.get("error").is_some(), "the inactive pane and its container cannot resize the visible row: {r}");
+                assert_eq!(sizes(this), before);
+            }
             this.model.add_tab("sp1", crate::model::Tab::new("tb2", "", "q1", "u1"));
             this.sync(window, cx);
         });
