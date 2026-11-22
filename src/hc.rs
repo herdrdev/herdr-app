@@ -576,32 +576,31 @@ impl Drop for Core {
 /// fails at once, and it never reports the loss (so nothing reconnects).
 #[cfg(test)]
 pub fn offline() -> Arc<Core> {
-    let (core, frames) = disconnected();
+    let (writer, frames) = mpsc::channel();
     std::mem::forget(frames);
-    core
+    offline_with_writer(writer)
 }
 
 #[cfg(test)]
-fn disconnected() -> (Arc<Core>, mpsc::Receiver<Vec<u8>>) {
-    let (writer, frames) = mpsc::channel();
+fn offline_with_writer(writer: mpsc::Sender<Vec<u8>>) -> Arc<Core> {
     let (lost_tx, lost) = async_channel::bounded(1);
     std::mem::forget(lost_tx);
     let child = std::process::Command::new(std::env::current_exe().unwrap()).arg("--help").stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
-    let core = Arc::new(Core {
+    Arc::new(Core {
         hello: Value::Null,
         writer,
         routes: Arc::new(Mutex::new(Routes { closed: true, ..Default::default() })),
         next_id: AtomicU64::new(1),
         child: Mutex::new(child),
         lost,
-    });
-    (core, frames)
+    })
 }
 
 /// Records terminal DATA frames without starting or contacting a real core.
 #[cfg(test)]
 pub fn record_terminal_input() -> (Arc<Core>, impl Fn() -> Vec<(u32, Vec<u8>)>) {
-    let (core, frames) = disconnected();
+    let (writer, frames) = mpsc::channel();
+    let core = offline_with_writer(writer);
     let drain = move || {
         frames.try_iter().filter_map(|frame| {
             let (channel, kind, bytes) = read_frame(&mut frame.as_slice()).unwrap();
