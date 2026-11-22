@@ -64,6 +64,9 @@ including when `--argv` supplies a program. Without `--folder`, it follows the
 focused terminal's folder. If an inherited local folder was deleted, new spaces,
 tabs and splits retry in that machine's home. An explicit invalid folder
 still fails.
+For a split with `argv`, the reply gives you the new pane and terminal IDs when the
+shell starts. If the shell cannot find the program, the pane closes with exit
+127 and Herdr shows a failure toast.
 `hc machine ls` lists machines. Use `hc run --on vps ...`, `hc exec --on vps ...`
 and `hc file ... --on vps ...` for remote work, not your local file tools.
 

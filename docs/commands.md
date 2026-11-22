@@ -103,7 +103,7 @@ Move a tab (the active one if no id) to a position in its space (1 = first), or 
 
 ## `pane.split`
 
-Split a pane (default: the focused one) "right" or "down" with a new terminal, or with a mod (`mod`, its `props`) beside it.
+Split a pane (default: the focused one) "right" or "down" with a new terminal, or with a mod (`mod`, its `props`) beside it. For `argv` started through the user's shell, the reply gives the IDs when the shell starts. A missing program ends the pane with exit 127 and shows a failure toast.
 
 | Argument | Required |
 |---|---|
@@ -123,7 +123,7 @@ Close a pane and end its terminal.
 
 ## `terminal.open`
 
-Start a terminal: as a new tab (place "tab", default), or "right"/"down" of the focused pane.
+Start a terminal: as a new tab (place "tab", default), or "right"/"down" of the focused pane. Right/down splits follow the reply and exit-code rules of `pane.split`.
 
 | Argument | Required |
 |---|---|
