@@ -200,7 +200,9 @@ export default class Changes extends View {
   }
 
   render(cx) {
-    if (key() !== this.context?.key) this.refresh(cx);
+    // Not during the frame: the input refuses set_value there, and a refresh cut short
+    // left the last folder's load holding `loading` until Herdr restarted.
+    if (key() !== this.context?.key) cx.timer.after(0, (cx) => this.refresh(cx));
     const t = theme(), size = settings().font_size, add = this.files.reduce((n, f) => n + f.add, 0), del = this.files.reduce((n, f) => n + f.del, 0);
     const enabled = Boolean(this.message.trim() && this.root && !this.busy && !this.loading);
     return v_flex().id("changes").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13).track_focus(this.handle)

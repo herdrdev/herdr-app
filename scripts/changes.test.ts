@@ -22,10 +22,15 @@ type Answer<T> = T & { wait?: Promise<void> };
 async function panel(statuses: Record<string, Answer<{ files: string[] }>[]> = {}, reads: Record<string, Answer<{ text: string }>[]> = {}) {
   const at = { cwd: "/repo-a" };
   const asked: string[] = [];
+  // Like the runtime, an input refuses changes while the panel renders.
+  const phase = { rendering: false };
+  const later: ((cx: unknown) => void)[] = [];
+  const element: any = new Proxy(function () {}, { get: (_t, name) => name === "then" ? undefined : element, apply: () => element });
   const Changes = new Function("View", "InputState", "spaces", "panes", "focused", "exec", "readTextFile", "watchFolder",
+    "div", "v_flex", "h_flex", "Input", "Scrollbar", "v_virtual_list", "theme", "settings",
     `${source.replace(/^import .*;\n/gm, "").replace("export default class Changes", "class Changes")}; return Changes;`)(
     class {},
-    { new: () => ({ on() {}, value: () => "", set_value() {} }) },
+    { new: () => ({ on() {}, value: () => "", set_value() { if (phase.rendering) throw new TypeError("set_value cannot run during render or layout"); } }) },
     () => [{ active: true, folder: at.cwd, machine: null }], () => [], () => null,
     async (_git: string, args: string[], { cwd }: { cwd: string }) => {
       const repo = /^\/repo-[ab]/.exec(cwd)?.[0];
@@ -46,14 +51,22 @@ async function panel(statuses: Record<string, Answer<{ files: string[] }>[]> = {
       return answer.text;
     },
     () => new Promise(() => {}),
+    element, element, element, element, element, element, () => ({}), () => ({ font_size: 13 }),
   );
   const view = new Changes();
-  const cx = { focus_handle: () => ({}), timer: { every() {} }, notify() {}, spawn(task: (cx: unknown) => Promise<unknown>) { task(cx); } };
+  const cx = { focus_handle: () => ({}), timer: { every() {}, after(_ms: number, task: (cx: unknown) => void) { later.push(task); } }, notify() {}, spawn(task: (cx: unknown) => Promise<unknown>) { task(cx); } };
   view.init({}, cx);
   await settled();
   const show = async (cwd: string) => { at.cwd = cwd; view.refresh(cx); await settled(); };
+  // A frame, then the timers it set (a render error is logged and the frame dropped).
+  const render = async () => {
+    phase.rendering = true;
+    try { view.render(cx); } catch {} finally { phase.rendering = false; }
+    for (const task of later.splice(0)) task(cx);
+    await settled();
+  };
   return {
-    view, cx, show, asked,
+    view, cx, show, asked, at, render,
     paths: () => view.files.map((f: { path: string }) => f.path),
     preview: () => view.rows.map((r: { text: string }) => r.text),
   };
@@ -113,4 +126,17 @@ test("Changes keeps the newer preview when one from an earlier visit to the repo
   first.release();
   await settled();
   expect(h.preview()).toEqual(["@@ -0,0 +1,1 @@", "new"]);
+});
+
+test("Changes follows a folder change first seen by a render while a load is running (#1253)", async () => {
+  const first = held();
+  const h = await panel({ "/repo-a": [{ files: ["a.txt"], wait: first.wait }] });
+  h.at.cwd = "/repo-b";
+  await h.render();
+  first.release();
+  await settled();
+  h.view.refresh(h.cx);
+  await settled();
+  expect(h.paths()).toEqual(["b.txt"]);
+  expect(h.view.loading).toBe(false);
 });
