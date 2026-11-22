@@ -82,6 +82,7 @@ impl VirtualBlockSelection {
 #[derive(Clone)]
 pub(super) struct TextViewSelectionAdapter {
     selection: TextSelectionHandle,
+    virtual_blocks: Rc<RefCell<VirtualBlockSelection>>,
     /// What the view's text painted this frame, shared by the adapter's
     /// clones. Inlines report it as they paint, through a read of the view's
     /// state: reporting it is not a change of the view.
@@ -97,6 +98,8 @@ struct PaintedText {
     /// The caret boxes at the first and last selected character painted this
     /// frame, where the touch handles go.
     selection_edges: Option<(Bounds<Pixels>, Bounds<Pixels>)>,
+    /// Tight union bounding rectangle of visible selection quads painted this frame.
+    selection_bounds: Option<Bounds<Pixels>>,
 }
 
 impl TextViewSelectionAdapter {
@@ -119,8 +122,13 @@ impl TextViewSelectionAdapter {
                             if snapshot.is_none() || changed {
                                 state.preserve_inline_selection = false;
                             }
+                            let was_selecting = state.is_selecting;
                             state.is_selecting =
                                 snapshot.is_some_and(|snapshot| snapshot.is_selecting());
+                            // HERDR: report a settled selection after drag release, or a clear.
+                            if (was_selecting && !state.is_selecting) || snapshot.is_none() {
+                                state.selection_report_pending = true;
+                            }
                             cx.notify();
                         });
                     }
@@ -196,6 +204,7 @@ impl TextViewSelectionAdapter {
 
         Self {
             selection,
+            virtual_blocks,
             frame: Rc::default(),
             layout_revision: None,
         }
@@ -221,6 +230,37 @@ impl TextViewSelectionAdapter {
         let mut frame = self.frame.borrow_mut();
         let first = frame.selection_edges.map_or(start, |(first, _)| first);
         frame.selection_edges = Some((first, end));
+    }
+
+    /// Unions one inline's painted selection rectangle into this view's selection bounds.
+    pub(super) fn register_selection_bounds(&self, bounds: Bounds<Pixels>) {
+        let mut frame = self.frame.borrow_mut();
+        frame.selection_bounds = Some(match frame.selection_bounds {
+            Some(acc) => Bounds::from_corners(
+                gpui::point(acc.left().min(bounds.left()), acc.top().min(bounds.top())),
+                gpui::point(
+                    acc.right().max(bounds.right()),
+                    acc.bottom().max(bounds.bottom()),
+                ),
+            ),
+            None => bounds,
+        });
+    }
+
+    pub(super) fn selection_bounds(&self) -> Option<Bounds<Pixels>> {
+        self.frame.borrow().selection_bounds
+    }
+
+    pub(super) fn selected_block_range(&self, last: usize) -> Option<RangeInclusive<usize>> {
+        self.virtual_blocks
+            .borrow()
+            .block_range(self.selection.entity_id(), last)
+    }
+
+    pub(super) fn is_selecting(&self, cx: &App) -> bool {
+        self.selection
+            .snapshot(cx)
+            .is_some_and(|snapshot| snapshot.is_selecting())
     }
 
     pub(super) fn register_text_run(&self, run: TextSelectionRun) {
@@ -252,6 +292,10 @@ impl TextViewSelectionAdapter {
             .with_rendered_element(&self.selection, window, cx);
         let registration = match frame.selection_edges {
             Some((start, end)) => registration.with_selection_edges(start, end),
+            None => registration,
+        };
+        let registration = match frame.selection_bounds {
+            Some(selection_bounds) => registration.with_selection_bounds(selection_bounds),
             None => registration,
         };
         drop(frame);

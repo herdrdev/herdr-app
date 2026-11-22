@@ -117,6 +117,10 @@ pub struct TextViewState {
     pub(super) table_actions: Option<std::sync::Arc<TableActionsFn>>,
     pub(super) image_source: Option<std::sync::Arc<super::text_view::ImageSourceFn>>,
     pub(super) link_click_handler: Option<std::sync::Arc<LinkClickHandlerFn>>,
+    /// HERDR: a selection settled or was cleared since the last paint.
+    pub(super) selection_report_pending: bool,
+    /// HERDR: whether the last report was a selection, so clearing it is reported.
+    reported_selection: bool,
     pub(super) markdown_extensions: Arc<MarkdownExtensions>,
 
     pub(super) is_selecting: bool,
@@ -222,6 +226,8 @@ impl TextViewState {
             code_block_highlighter: None,
             table_actions: None,
             link_click_handler: None,
+            selection_report_pending: false,
+            reported_selection: false,
             image_source: None,
             markdown_extensions: Arc::default(),
             is_selecting: false,
@@ -843,6 +849,9 @@ impl TextViewState {
         self.selected_text_override = None;
         self.select_all = false;
         self.is_selecting = false;
+        if self.reported_selection {
+            self.selection_report_pending = true;
+        }
         self.auto_scroll.stop();
         // Clear the inline selection state synchronously, so offscreen
         // (virtualized) views that won't repaint don't leak stale selection
@@ -875,6 +884,8 @@ impl TextViewState {
         self.selected_text_override = None;
         self.select_all = true;
         self.is_selecting = false;
+        // HERDR: select-all settles at once.
+        self.selection_report_pending = true;
         self.auto_scroll.stop();
         self.selection_adapter.set_local_selection(true, cx);
         cx.notify();
@@ -898,6 +909,8 @@ impl TextViewState {
         self.selected_text_override = Some(selected_text);
         self.select_all = false;
         self.is_selecting = false;
+        // HERDR: report the word, line, or paragraph once it has painted.
+        self.selection_report_pending = true;
         self.auto_scroll.stop();
         self.selection_adapter.set_local_selection(true, cx);
     }
@@ -960,6 +973,44 @@ impl TextViewState {
 
     pub(crate) fn is_all_selected(&self) -> bool {
         self.select_all
+    }
+
+    /// HERDR: the settled selection to report once painting has resolved it.
+    /// Returns `None` when there is nothing new to report, `Some(None)` when
+    /// a previously reported selection was cleared.
+    pub(super) fn take_selection_report(
+        &mut self,
+        element_bounds: Bounds<Pixels>,
+        cx: &App,
+    ) -> Option<Option<super::text_view::TextViewSelection>> {
+        if self.selection_adapter.is_selecting(cx) {
+            if std::mem::take(&mut self.selection_report_pending) && self.reported_selection {
+                self.reported_selection = false;
+                return Some(None);
+            }
+            return None;
+        }
+        if !std::mem::take(&mut self.selection_report_pending) {
+            return None;
+        }
+        let last = self.parsed_content.document.blocks.len().saturating_sub(1);
+        let blocks = self.selection_adapter.selected_block_range(last);
+        let text = self.selected_text_in(blocks);
+        let selection = (!text.trim().is_empty()).then(|| super::text_view::TextViewSelection {
+            text,
+            source_range: self.selected_source_range(),
+            bounds: self.selection_adapter.selection_bounds(),
+            element_bounds,
+            position: self
+                .selection_points(cx)
+                .map(|(_, cursor)| cursor)
+                .or_else(|| self.multi_click_selection().map(|click| click.pos)),
+        });
+        if selection.is_none() && !self.reported_selection {
+            return None;
+        }
+        self.reported_selection = selection.is_some();
+        Some(selection)
     }
 
     pub(crate) fn multi_click_selection(&self) -> Option<TextViewMultiClickSelection> {

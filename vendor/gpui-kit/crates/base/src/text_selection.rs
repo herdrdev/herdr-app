@@ -224,6 +224,7 @@ pub struct TextSelectionRegistration {
     text_bounds: Vec<Bounds<Pixels>>,
     self_scroll: bool,
     selection_edges: Option<(Bounds<Pixels>, Bounds<Pixels>)>,
+    selection_bounds: Option<Bounds<Pixels>>,
     rendered: Option<WeakEntity<RenderedMarker>>,
 }
 
@@ -240,6 +241,7 @@ impl TextSelectionRegistration {
             text_bounds: Vec::new(),
             self_scroll: false,
             selection_edges: None,
+            selection_bounds: None,
             rendered: None,
         }
     }
@@ -320,6 +322,13 @@ impl TextSelectionRegistration {
         self
     }
 
+    /// Sets the union bounding rectangle of the selection quads this participant
+    /// painted in the current frame, in window coordinates.
+    pub fn with_selection_bounds(mut self, bounds: Bounds<Pixels>) -> Self {
+        self.selection_bounds = Some(bounds);
+        self
+    }
+
     /// Returns the participant hitbox.
     pub fn hitbox(&self) -> &Hitbox {
         &self.hitbox
@@ -353,6 +362,11 @@ impl TextSelectionRegistration {
     /// Returns the caret line boxes at the participant's selection ends.
     pub const fn selection_edges(&self) -> Option<(Bounds<Pixels>, Bounds<Pixels>)> {
         self.selection_edges
+    }
+
+    /// Returns the union bounding rectangle of the participant's painted selection.
+    pub const fn selection_bounds(&self) -> Option<Bounds<Pixels>> {
+        self.selection_bounds
     }
 }
 
@@ -1572,6 +1586,31 @@ impl WindowSelectionState {
             })
     }
 
+    /// Returns the union bounding rectangle of the currently painted selection
+    /// in window coordinates across all participating blocks in the active scope.
+    pub fn selection_bounds(&self, cx: &App) -> Option<Bounds<Pixels>> {
+        if !self.has_selection(cx) {
+            return None;
+        }
+        let mut combined: Option<Bounds<Pixels>> = None;
+        for registration in self.participants.borrow().values() {
+            let geometry = &registration.registration;
+            if geometry.scope != self.active_scope {
+                continue;
+            }
+            let Some(participant) = registration.participant.upgrade() else {
+                continue;
+            };
+            if !participant.read(cx).has_selection_to_clear() {
+                continue;
+            }
+            if let Some(bounds) = geometry.selection_bounds {
+                combined = Some(combined.map_or(bounds, |acc| union_bounds(acc, bounds)));
+            }
+        }
+        combined
+    }
+
     /// Returns the current resolved selection endpoints.
     pub fn snapshot(&self) -> Option<TextSelectionSnapshot> {
         if !self.did_hit_text {
@@ -2570,6 +2609,13 @@ impl TextSelection {
         resolve_copy_items(items, cx)
     }
 
+    /// Returns the union bounding rectangle of the currently painted selection
+    /// in window coordinates, or `None` when nothing is selected or visible.
+    pub fn selection_bounds(window: &Window, cx: &App) -> Option<Bounds<Pixels>> {
+        WindowSelectionState::existing(window, cx)
+            .and_then(|state| state.read(cx).selection_bounds(cx))
+    }
+
     /// Returns whether the window has a geometry selection or any participant
     /// has an active participant-local selection such as select-all.
     pub fn has_selection(window: &mut Window, cx: &mut App) -> bool {
@@ -3149,6 +3195,13 @@ fn paint_text_selection(state: &Entity<WindowSelectionState>, window: &mut Windo
             WindowSelectionState::resolve_content_keys(&state, cx);
         }
     });
+}
+
+fn union_bounds(a: Bounds<Pixels>, b: Bounds<Pixels>) -> Bounds<Pixels> {
+    Bounds::from_corners(
+        point(a.left().min(b.left()), a.top().min(b.top())),
+        point(a.right().max(b.right()), a.bottom().max(b.bottom())),
+    )
 }
 
 fn live_text_selection_state(
@@ -4842,6 +4895,72 @@ mod tests {
             let selection = view.read(cx).selection.clone();
             selection.update_runs(&[text_run(0, text, layout)], cx);
             assert_eq!(TextSelection::selected_text(window, cx), "alpha beta");
+        });
+    }
+
+    #[gpui::test]
+    fn selection_bounds_unions_active_scope_participants_with_selection(cx: &mut TestAppContext) {
+        let scope_a = TextSelectionScopeId::new();
+        let scope_b = TextSelectionScopeId::new();
+        let (first, second, inactive, other_scope) = cx.update(|cx| {
+            let first = TextSelectionHandle::new("first", cx);
+            let second = TextSelectionHandle::new("second", cx);
+            let inactive = TextSelectionHandle::new("inactive", cx);
+            let other_scope = TextSelectionHandle::new("other", cx);
+            first.set_local_selection(true, cx);
+            second.set_local_selection(true, cx);
+            other_scope.set_local_selection(true, cx);
+            (first, second, inactive, other_scope)
+        });
+        struct BoundsTestView;
+        impl Render for BoundsTestView {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(TextSelectionLayer)
+            }
+        }
+        let (_, cx) = cx.add_window_view(|_, _| BoundsTestView);
+        cx.update(|window, cx| {
+            TextSelection::activate_scope(scope_a, window, cx);
+            let _ = window.draw(cx);
+            let hb = |origin: Point<Pixels>| window.insert_hitbox(Bounds::new(origin, size(px(100.), px(20.))), HitboxBehavior::Normal);
+            first.register(
+                TextSelectionRegistration::new(hb(point(px(10.), px(20.))), Bounds::new(point(px(10.), px(20.)), size(px(100.), px(20.))))
+                    .with_scope(scope_a)
+                    .with_selection_bounds(Bounds::new(point(px(12.), px(22.)), size(px(40.), px(16.)))),
+                window,
+                cx,
+            );
+            second.register(
+                TextSelectionRegistration::new(hb(point(px(10.), px(50.))), Bounds::new(point(px(10.), px(50.)), size(px(100.), px(20.))))
+                    .with_scope(scope_a)
+                    .with_selection_bounds(Bounds::new(point(px(10.), px(50.)), size(px(80.), px(18.)))),
+                window,
+                cx,
+            );
+            // Active scope, no selection -> ignored.
+            inactive.register(
+                TextSelectionRegistration::new(hb(point(px(0.), px(0.))), Bounds::new(point(px(0.), px(0.)), size(px(10.), px(10.))))
+                    .with_scope(scope_a)
+                    .with_selection_bounds(Bounds::new(point(px(0.), px(0.)), size(px(10.), px(10.)))),
+                window,
+                cx,
+            );
+            // Different scope -> ignored.
+            other_scope.register(
+                TextSelectionRegistration::new(hb(point(px(200.), px(200.))), Bounds::new(point(px(200.), px(200.)), size(px(50.), px(20.))))
+                    .with_scope(scope_b)
+                    .with_selection_bounds(Bounds::new(point(px(200.), px(200.)), size(px(50.), px(20.)))),
+                window,
+                cx,
+            );
+
+            assert_eq!(
+                TextSelection::selection_bounds(window, cx),
+                Some(Bounds::from_corners(point(px(10.), px(22.)), point(px(90.), px(68.))))
+            );
+
+            TextSelection::clear(window, cx);
+            assert_eq!(TextSelection::selection_bounds(window, cx), None);
         });
     }
 }

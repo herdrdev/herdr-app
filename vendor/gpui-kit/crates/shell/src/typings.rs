@@ -2365,6 +2365,19 @@ const WINDOW: &str = r#"
     is_fullscreen(): boolean;
     /** `Window::is_maximized`. */
     is_maximized(): boolean;
+    /**
+     * Currently selected text in logical document order across selectable
+     * `TextView` elements in the window, or `""` when nothing is selected.
+     * Legal from `render`, `init`, event handlers, and tasks.
+     */
+    selected_text(): string;
+    /**
+     * Union bounding rectangle of the currently painted text selection in window
+     * coordinates (covering single or cross-`TextView` selections), or `null`
+     * when nothing is selected or visible. Legal from `render`, `init`, event
+     * handlers, and tasks.
+     */
+    selection_bounds(): import("gpui-shell").ElementBounds | null;
 
     /**
      * `Window::set_rem_size`. Rescales everything expressed in rems.
@@ -2374,6 +2387,12 @@ const WINDOW: &str = r#"
      * from an event handler or a task.
      */
     set_rem_size(size: number): void;
+    /**
+     * Clears the active window text selection and any participant-local
+     * selections, notifying affected `TextView` elements with `null`.
+     * Illegal from `render`.
+     */
+    clear_selection(): void;
     /**
      * `Window::refresh`: redraw every view in this window, not just this one.
      *
@@ -2448,10 +2467,42 @@ const BASE: &str = r#"  /** A row. */
   export const Checkbox: ComponentType;
   /** A controlled switch. No styling. */
   export const Switch: ComponentType;
+  /** HERDR: a settled selection in a `TextView`. */
+  export interface TextViewSelection {
+    /** The selected text, as copying it would give. */
+    text: string;
+    /**
+     * UTF-16 offsets into the Markdown source the selection came from, so
+     * `markdown.slice(start, end)` includes any markup inside it. Absent in
+     * HTML or when the selection doesn't map back to the source.
+     */
+    start?: number;
+    end?: number;
+    /**
+     * Tight union bounding rectangle of the visible painted selection in window
+     * coordinates. Absent when the selection is scrolled off-screen.
+     */
+    bounds?: import("gpui-shell").ElementBounds;
+    /**
+     * Same rectangle as `bounds`, relative to this `TextView`'s origin
+     * (`x - element_bounds.x`, `y - element_bounds.y`). Absent when `bounds` is absent.
+     */
+    local_bounds?: import("gpui-shell").ElementBounds;
+    /** This `TextView`'s own painted bounds in window coordinates. */
+    element_bounds: import("gpui-shell").ElementBounds;
+    /** Where the selection ended, in window coordinates. Absent for select-all. */
+    position?: import("gpui-kit").Point;
+  }
   /** Rich HTML or Markdown text. CSS in HTML is not supported. */
   export interface TextViewElement extends NativeElement {
     /** Overrides TextView's default URL opening and reports the resolved URL. */
     on_link_click(handler: (url: string, cx: Context) => void): this;
+    /**
+     * HERDR: called once a selection settles (pointer release, double/triple
+     * click, or select-all), and with `null` when a previously reported
+     * selection is cleared. Whitespace-only selections report as `null`.
+     */
+    on_selection_change(handler: (selection: TextViewSelection | null, cx: Context) => void): this;
     selectable(value?: boolean): this;
     scrollable(value?: boolean): this;
   }
@@ -4744,10 +4795,16 @@ mod tests {
             .expect("end of Element declaration")
             .0;
         assert!(!element.contains("on_link_click("));
+        assert!(!element.contains("on_selection_change("));
         assert!(!element.contains("selectable("));
         assert!(!element.contains("scrollable("));
+        assert!(declarations.contains("export interface TextViewSelection"));
         assert!(declarations.contains("export interface TextViewElement extends NativeElement"));
+        assert!(declarations.contains("on_selection_change(handler: (selection: TextViewSelection | null, cx: Context) => void): this;"));
         assert!(declarations.contains("html(id: string, html: string): TextViewElement;"));
+        assert!(declarations.contains("selected_text(): string;"));
+        assert!(declarations.contains("selection_bounds(): import(\"gpui-shell\").ElementBounds | null;"));
+        assert!(declarations.contains("clear_selection(): void;"));
     }
 
     #[test]

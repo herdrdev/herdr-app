@@ -756,78 +756,73 @@ impl Inline {
         ))
     }
 
-    /// Paint the selection background.
+    /// Paint the selection background and return the union bounds of visible quads.
     fn paint_selection(
         selection: &Selection,
         text_layout: &TextLayout,
         bounds: &Bounds<Pixels>,
         window: &mut Window,
         color: gpui::Hsla,
-    ) {
+    ) -> Option<Bounds<Pixels>> {
         let mut start = selection.start;
         let mut end = selection.end;
         if end < start {
             std::mem::swap(&mut start, &mut end);
         }
-        let Some(start_position) = text_layout.position_for_index(start) else {
-            return;
-        };
-        let Some(end_position) = text_layout.position_for_index(end) else {
-            return;
+        let start_position = text_layout.position_for_index(start)?;
+        let end_position = text_layout.position_for_index(end)?;
+
+        let mask_bounds = window.content_mask().bounds;
+        let mut union: Option<Bounds<Pixels>> = None;
+        let mut paint_quad_with_bounds = |quad_bounds: Bounds<Pixels>| {
+            let visible = quad_bounds.intersect(&mask_bounds);
+            if visible.size.width > px(0.) && visible.size.height > px(0.) {
+                union = Some(match union {
+                    Some(acc) => Bounds::from_corners(
+                        point(acc.left().min(visible.left()), acc.top().min(visible.top())),
+                        point(
+                            acc.right().max(visible.right()),
+                            acc.bottom().max(visible.bottom()),
+                        ),
+                    ),
+                    None => visible,
+                });
+            }
+            window.paint_quad(quad(
+                quad_bounds,
+                px(0.),
+                color,
+                Edges::default(),
+                gpui::transparent_black(),
+                BorderStyle::default(),
+            ));
         };
 
         let line_height = text_layout.line_height();
         if start_position.y == end_position.y {
-            window.paint_quad(quad(
-                Bounds::from_corners(
-                    start_position,
-                    point(end_position.x, end_position.y + line_height),
-                ),
-                px(0.),
-                color,
-                Edges::default(),
-                gpui::transparent_black(),
-                BorderStyle::default(),
+            paint_quad_with_bounds(Bounds::from_corners(
+                start_position,
+                point(end_position.x, end_position.y + line_height),
             ));
         } else {
-            window.paint_quad(quad(
-                Bounds::from_corners(
-                    start_position,
-                    point(bounds.right(), start_position.y + line_height),
-                ),
-                px(0.),
-                color,
-                Edges::default(),
-                gpui::transparent_black(),
-                BorderStyle::default(),
+            paint_quad_with_bounds(Bounds::from_corners(
+                start_position,
+                point(bounds.right(), start_position.y + line_height),
             ));
 
             if end_position.y > start_position.y + line_height {
-                window.paint_quad(quad(
-                    Bounds::from_corners(
-                        point(bounds.left(), start_position.y + line_height),
-                        point(bounds.right(), end_position.y),
-                    ),
-                    px(0.),
-                    color,
-                    Edges::default(),
-                    gpui::transparent_black(),
-                    BorderStyle::default(),
+                paint_quad_with_bounds(Bounds::from_corners(
+                    point(bounds.left(), start_position.y + line_height),
+                    point(bounds.right(), end_position.y),
                 ));
             }
 
-            window.paint_quad(quad(
-                Bounds::from_corners(
-                    point(bounds.left(), end_position.y),
-                    point(end_position.x, end_position.y + line_height),
-                ),
-                px(0.),
-                color,
-                Edges::default(),
-                gpui::transparent_black(),
-                BorderStyle::default(),
+            paint_quad_with_bounds(Bounds::from_corners(
+                point(bounds.left(), end_position.y),
+                point(end_position.x, end_position.y + line_height),
             ));
         }
+        union
     }
 
     /// Paint each range highlight behind the text of its range.
@@ -1001,14 +996,16 @@ impl Element for Inline {
                 .text_view_state()
                 .map(|state| state.read(cx).text_view_style.selection())
                 .unwrap_or_else(|| crate::Theme::global(cx).tokens.colors.selection);
-            Self::paint_selection(selection, &text_layout, &bounds, window, color);
-            if let Some((start, end)) = Self::selection_edges(selection, &text_layout)
-                && let Some(text_view_state) = GlobalState::global(cx).text_view_state()
-            {
-                text_view_state
-                    .read(cx)
-                    .selection_adapter
-                    .register_selection_edges(start, end);
+            let selection_bounds =
+                Self::paint_selection(selection, &text_layout, &bounds, window, color);
+            if let Some(text_view_state) = GlobalState::global(cx).text_view_state() {
+                let adapter = &text_view_state.read(cx).selection_adapter;
+                if let Some(selection_bounds) = selection_bounds {
+                    adapter.register_selection_bounds(selection_bounds);
+                }
+                if let Some((start, end)) = Self::selection_edges(selection, &text_layout) {
+                    adapter.register_selection_edges(start, end);
+                }
             }
         }
 

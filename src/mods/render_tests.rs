@@ -1264,3 +1264,292 @@ fn status_bar_counts_agents_in_the_singular_and_the_plural(cx: &mut TestAppConte
     assert!(tree.contains("2 agents"), "two agents are plural: {tree}");
     assert!(tree.contains("2 need you") && !tree.contains("2 needs you"), "two blocked agents need you: {tree}");
 }
+
+#[gpui::test]
+fn a_mod_reads_a_text_view_selection_with_bounds_and_offsets(cx: &mut TestAppContext) {
+    use gpui::{
+        Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, VisualTestContext, point, px,
+    };
+
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    std::fs::write(
+        staged.0.join("main.js"),
+        r#"
+import { View, div } from "gpui-kit";
+import { TextView, v_flex } from "gpui-base";
+const md = "héllo 🎉 **wörld** 中文\n\nSecond line";
+const html = "<p>alpha <b>beta</b></p>";
+export default class Demo extends View {
+  init() { this.log = []; }
+  record(tag, source, s, cx) {
+    if (!s) {
+      this.log.push(`${tag}:null`);
+      cx.notify();
+      return;
+    }
+    const eb = s.element_bounds;
+    const validElem = eb && eb.width > 0 && eb.height > 0;
+    const b = s.bounds;
+    const lb = s.local_bounds;
+    const validBounds = b && lb
+      && b.width > 0 && b.height > 0
+      && Math.abs(lb.x - (b.x - eb.x)) < 0.01
+      && Math.abs(lb.y - (b.y - eb.y)) < 0.01
+      && Math.abs(lb.width - b.width) < 0.01
+      && Math.abs(lb.height - b.height) < 0.01
+      && b.y >= eb.y - 0.1;
+    const slice = source !== null && s.start !== undefined && s.end !== undefined
+      ? source.slice(s.start, s.end)
+      : `nostart(${s.start},${s.end})`;
+    const pos = s.position ? "pos" : "nopos";
+    this.log.push(`${tag}:${s.text.trim()}:${slice}:${validElem && validBounds}:${pos}`);
+    cx.notify();
+  }
+  render() {
+    return v_flex().w(340).h(260)
+      .child(div().h(20))
+      .child(div().h(80).child(
+        TextView.markdown("md", md).selectable(true)
+          .on_selection_change((s, cx) => this.record("md", md, s, cx))
+      ))
+      .child(div().h(40).child(
+        TextView.html("html", html).selectable(true)
+          .on_selection_change((s, cx) => this.record("html", null, s, cx))
+      ))
+      .child(div().child(`log=${this.log.join("|")}`));
+  }
+}
+"#,
+    )
+    .unwrap();
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|window, cx| {
+        RootedView(runtime.try_load(&staged.0, window, cx).unwrap())
+    });
+    let mut context = VisualTestContext::from_window(window.into(), cx);
+    context.update(|window, cx| window.draw(cx).clear(cx));
+    let view: gpui::Entity<gpui_shell::ScriptView> = window
+        .root(&mut context)
+        .unwrap()
+        .read_with(&context, |root, cx| root.0.read(cx).content().clone().downcast().unwrap());
+    let settle = |context: &mut VisualTestContext| {
+        context.run_until_parked();
+        context.update(|window, cx| window.draw(cx).clear(cx));
+        context.run_until_parked();
+    };
+    let press = |context: &mut VisualTestContext, x: f32, y: f32, click_count: usize| {
+        let position = point(px(x), px(y));
+        let modifiers = Modifiers::default();
+        context.simulate_event(MouseDownEvent {
+            button: MouseButton::Left,
+            position,
+            modifiers,
+            click_count,
+            first_mouse: false,
+        });
+        context.simulate_event(MouseUpEvent {
+            button: MouseButton::Left,
+            position,
+            modifiers,
+            click_count,
+        });
+        settle(context);
+    };
+    let read_tree = |view: &gpui::Entity<gpui_shell::ScriptView>, context: &VisualTestContext| {
+        view.read_with(context, |view, _| {
+            view.snapshot()
+                .map(gpui_shell::RenderSnapshot::debug_tree)
+                .unwrap_or_default()
+        })
+    };
+
+    // Mid-drag must not fire `on_selection_change`.
+    context.simulate_mouse_down(point(px(1.), px(28.)), MouseButton::Left, Modifiers::default());
+    context.simulate_mouse_move(point(px(320.), px(28.)), Some(MouseButton::Left), Modifiers::default());
+    settle(&mut context);
+    let mid_drag = read_tree(&view, &context);
+    assert!(mid_drag.contains("log=\""), "no mid-drag callback expected: {mid_drag}");
+
+    // Releasing reports the settled Markdown selection with UTF-16 offsets and bounds.
+    context.simulate_mouse_up(point(px(320.), px(28.)), MouseButton::Left, Modifiers::default());
+    settle(&mut context);
+    let after_drag = read_tree(&view, &context);
+    assert!(
+        after_drag.contains("md:héllo 🎉 wörld 中文:héllo 🎉 **wörld** 中文:true:pos"),
+        "{after_drag}"
+    );
+
+    // Starting a new drag inside the same TextView clears the old selection without leaking mid-drag text.
+    context.simulate_mouse_down(point(px(1.), px(62.)), MouseButton::Left, Modifiers::default());
+    context.simulate_mouse_move(point(px(150.), px(62.)), Some(MouseButton::Left), Modifiers::default());
+    settle(&mut context);
+    let second_mid = read_tree(&view, &context);
+    assert!(
+        second_mid.contains("md:héllo 🎉 wörld 中文:héllo 🎉 **wörld** 中文:true:pos|md:null\""),
+        "new drag should clear prior selection without leaking partial text: {second_mid}"
+    );
+    context.simulate_mouse_up(point(px(150.), px(62.)), MouseButton::Left, Modifiers::default());
+    settle(&mut context);
+    let after_second = read_tree(&view, &context);
+    assert!(after_second.contains("md:Second line:Second line:true:pos"), "{after_second}");
+
+    // Double-click in HTML reports word, bounds, and omits source offsets.
+    press(&mut context, 5., 108., 1);
+    press(&mut context, 5., 108., 2);
+    let after_html = read_tree(&view, &context);
+    assert!(
+        after_html.contains("md:null|html:alpha:nostart(undefined,undefined):true:pos"),
+        "{after_html}"
+    );
+
+    // Clicking back into Markdown gives it focus and clears HTML; SelectAll reports full Markdown without position.
+    press(&mut context, 5., 28., 1);
+    context.dispatch_action(gpui_base::input::SelectAll);
+    settle(&mut context);
+    let after_all = read_tree(&view, &context);
+    assert!(
+        after_all.contains(r"html:null|md:héllo 🎉 wörld 中文\nSecond line:héllo 🎉 **wörld** 中文\n\nSecond line:true:nopos"),
+        "{after_all}"
+    );
+
+    // Clicking empty space clears once; a second click does not duplicate `null`.
+    press(&mut context, 280., 210., 1);
+    let cleared_once = read_tree(&view, &context);
+    press(&mut context, 280., 210., 1);
+    let cleared_twice = read_tree(&view, &context);
+    assert!(cleared_once.ends_with("md:null\"") || cleared_once.contains("md:null\""), "{cleared_once}");
+    assert_eq!(
+        cleared_once.matches("md:null").count(),
+        cleared_twice.matches("md:null").count(),
+        "repeated outside click must not emit duplicate null: {cleared_twice}"
+    );
+}
+
+#[gpui::test]
+fn a_mod_reads_and_clears_cross_text_view_selection_via_window(cx: &mut TestAppContext) {
+    use gpui::{Modifiers, MouseButton, VisualTestContext, point, px};
+
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    std::fs::write(
+        staged.0.join("main.js"),
+        r#"
+import { View, div } from "gpui-kit";
+import { TextView, v_flex } from "gpui-base";
+export default class CrossSelectionDemo extends View {
+  init(_props, cx) {
+    this.focus = cx.focus_handle();
+    cx.bind_keys([{ keystroke: "escape", action: "test_clear_sel", context: "CrossRoot" }]);
+    this.events = [];
+    this.clearStats = "none";
+    this.renderClearErr = "none";
+    this.firstBounds = null;
+    this.secondBounds = null;
+  }
+  render() {
+    if (this.renderClearErr === "none") {
+      try {
+        window.clear_selection();
+      } catch (error) {
+        this.renderClearErr = error.name;
+      }
+    }
+    const selText = window.selected_text().trim().replace(/\n+/g, "/");
+    const selBounds = window.selection_bounds();
+    let encloses = false;
+    if (selBounds && this.firstBounds && this.secondBounds) {
+      const eps = 0.1;
+      encloses = selBounds.x <= Math.min(this.firstBounds.x, this.secondBounds.x) + eps
+        && selBounds.y <= Math.min(this.firstBounds.y, this.secondBounds.y) + eps
+        && selBounds.x + selBounds.width >= Math.max(this.firstBounds.x + this.firstBounds.width, this.secondBounds.x + this.secondBounds.width) - eps
+        && selBounds.y + selBounds.height >= Math.max(this.firstBounds.y + this.firstBounds.height, this.secondBounds.y + this.secondBounds.height) - eps;
+    }
+    const boundsDesc = selBounds ? `${selBounds.height > 30}:${encloses}` : "null";
+    return v_flex().w(300).h(220)
+      .key_context("CrossRoot")
+      .track_focus(this.focus)
+      .on_action("test_clear_sel", (_event, cx) => {
+        const beforeText = window.selected_text().trim().replace(/\n+/g, "/");
+        const beforeBounds = window.selection_bounds() !== null;
+        window.clear_selection();
+        const afterText = window.selected_text();
+        const afterBounds = window.selection_bounds();
+        this.clearStats = `${beforeText}:${beforeBounds}:${afterText === ""}:${afterBounds === null}`;
+        cx.notify();
+      })
+      .child(div().h(16))
+      .child(div().h(40).child(
+        TextView.markdown("first", "First block text").selectable(true)
+          .on_selection_change((s, cx) => {
+            this.firstBounds = s ? s.bounds ?? null : null;
+            this.events.push(s ? `1:${s.text.trim()}` : "1:null");
+            cx.notify();
+          })
+      ))
+      .child(div().h(40).child(
+        TextView.markdown("second", "Second block text").selectable(true)
+          .on_selection_change((s, cx) => {
+            this.secondBounds = s ? s.bounds ?? null : null;
+            this.events.push(s ? `2:${s.text.trim()}` : "2:null");
+            cx.notify();
+          })
+      ))
+      .child(div().child(`state=${this.renderClearErr}|${selText}|${boundsDesc}|${this.clearStats}|${this.events.join(",")}`));
+  }
+}
+"#,
+    )
+    .unwrap();
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|window, cx| {
+        RootedView(runtime.try_load(&staged.0, window, cx).unwrap())
+    });
+    let mut context = VisualTestContext::from_window(window.into(), cx);
+    context.update(|window, cx| window.draw(cx).clear(cx));
+    let view: gpui::Entity<gpui_shell::ScriptView> = window
+        .root(&mut context)
+        .unwrap()
+        .read_with(&context, |root, cx| root.0.read(cx).content().clone().downcast().unwrap());
+    let settle = |context: &mut VisualTestContext| {
+        context.run_until_parked();
+        context.update(|window, cx| window.draw(cx).clear(cx));
+        context.run_until_parked();
+    };
+    let read_tree = |view: &gpui::Entity<gpui_shell::ScriptView>, context: &VisualTestContext| {
+        view.read_with(context, |view, _| {
+            view.snapshot()
+                .map(gpui_shell::RenderSnapshot::debug_tree)
+                .unwrap_or_default()
+        })
+    };
+
+    let initial = read_tree(&view, &context);
+    assert!(initial.contains("state=TypeError||null|none|\""), "{initial}");
+
+    // Drag from first TextView down into second TextView.
+    context.simulate_mouse_down(point(px(2.), px(24.)), MouseButton::Left, Modifiers::default());
+    context.simulate_mouse_move(point(px(250.), px(64.)), Some(MouseButton::Left), Modifiers::default());
+    context.simulate_mouse_up(point(px(250.), px(64.)), MouseButton::Left, Modifiers::default());
+    settle(&mut context);
+    // One more settle so `render()` reads `this.firstBounds`/`this.secondBounds` updated by deferred handlers.
+    settle(&mut context);
+
+    let selected = read_tree(&view, &context);
+    assert!(
+        selected.contains("First block text/Second block text|true:true|none|"),
+        "expected cross-TextView selection and enclosing bounds: {selected}"
+    );
+
+    // Press Escape while TextView focus is inside CrossRoot: clears active cross-TextView selection
+    // immediately inside the action handler and notifies both TextViews with `null`.
+    context.simulate_keystrokes("escape");
+    settle(&mut context);
+
+    let cleared = read_tree(&view, &context);
+    assert!(
+        cleared.contains("state=TypeError||null|First block text/Second block text:true:true:true|"),
+        "expected immediate clear in handler and empty render state: {cleared}"
+    );
+    assert!(cleared.contains("1:null") && cleared.contains("2:null"), "{cleared}");
+}

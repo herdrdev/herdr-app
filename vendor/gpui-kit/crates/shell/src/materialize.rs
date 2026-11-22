@@ -127,7 +127,7 @@ use gpui::{
 };
 use gpui_base::{
     Button, Checkbox, CheckboxState, ElementExt as _, Link, ScrollbarAxis, Switch, TextView,
-    TextViewStyle, Theme,
+    TextViewSelection, TextViewStyle, Theme,
     animation::{ease_in_cubic, ease_in_out_cubic, ease_out_cubic},
     h_flex,
     input::{Input, InputBase},
@@ -317,6 +317,8 @@ struct Behavior {
     selectable: Option<bool>,
     text_scrollable: Option<bool>,
     on_link_click: Option<CallbackId>,
+    /// HERDR: `on_selection_change(handler)` on a `TextView`.
+    on_selection_change: Option<CallbackId>,
 
     /// Whether a `NumberInput` stacks both step buttons to the right of the
     /// text, rather than putting one on each side of it.
@@ -1107,6 +1109,8 @@ fn materialize_component(
             )
         }
         Component::TextView(spec) => {
+            // HERDR: retain a cheap `SharedString` handle for UTF-16 source offset mapping.
+            let source_text = spec.text.clone();
             let mut view = match spec.format {
                 crate::spec::TextViewFormat::Html => TextView::html(spec.id, spec.text),
                 crate::spec::TextViewFormat::Markdown => TextView::markdown(spec.id, spec.text),
@@ -1117,6 +1121,18 @@ fn materialize_component(
             }
             if let Some(scrollable) = behavior.text_scrollable {
                 view = view.scrollable(scrollable);
+            }
+            if let Some(callback) = behavior.on_selection_change {
+                let route = crate::script_callback::ScriptCallbackRoute::new(
+                    Rc::downgrade(runtime),
+                    callback,
+                );
+                view = view.on_selection_change(move |selection, window, cx| {
+                    let value = selection.map_or(crate::HostValue::Null, |selection| {
+                        selection_value(&source_text, selection)
+                    });
+                    route.emit(value, window, cx);
+                });
             }
             if let Some(callback) = behavior.on_link_click {
                 let route = crate::script_callback::ScriptCallbackRoute::new(
@@ -2732,6 +2748,7 @@ pub(in crate::materialize) fn resolve_ops(
             SpecOp::Callback(name, id) => match *name {
                 "on_click" => behavior.on_click = Some(*id),
                 "on_link_click" => behavior.on_link_click = Some(*id),
+                "on_selection_change" => behavior.on_selection_change = Some(*id),
                 "on_mouse_move" => behavior.on_mouse_move = Some(*id),
                 "on_hover" => behavior.on_hover = Some(*id),
                 "on_key_down" => behavior.on_key_down = Some(*id),
@@ -3916,4 +3933,45 @@ fn dispatch_click(
         return;
     };
     runtime.dispatch_click(callback, event, window, cx);
+}
+
+/// HERDR: logical window pixel rectangle `{ x, y, width, height }`.
+fn bounds_value(bounds: Bounds<Pixels>) -> crate::HostValue {
+    use crate::HostValue::{Number, Object};
+    Object(vec![
+        ("x".into(), Number(f32::from(bounds.origin.x) as f64)),
+        ("y".into(), Number(f32::from(bounds.origin.y) as f64)),
+        ("width".into(), Number(f32::from(bounds.size.width) as f64)),
+        ("height".into(), Number(f32::from(bounds.size.height) as f64)),
+    ])
+}
+
+/// HERDR: what `on_selection_change` hands a script.
+fn selection_value(source: &str, selection: &TextViewSelection) -> crate::HostValue {
+    use crate::HostValue::{Number, Object, Str};
+    let utf16 =
+        |byte: usize| Number(source.get(..byte).map_or(0, |s| s.encode_utf16().count()) as f64);
+    let mut fields = vec![
+        ("text".to_string(), Str(selection.text.clone())),
+        ("element_bounds".into(), bounds_value(selection.element_bounds)),
+    ];
+    if let Some(range) = &selection.source_range {
+        fields.push(("start".into(), utf16(range.start)));
+        fields.push(("end".into(), utf16(range.end)));
+    }
+    if let Some(bounds) = selection.bounds {
+        fields.push(("bounds".into(), bounds_value(bounds)));
+        let local = Bounds::new(bounds.origin - selection.element_bounds.origin, bounds.size);
+        fields.push(("local_bounds".into(), bounds_value(local)));
+    }
+    if let Some(position) = selection.position {
+        fields.push((
+            "position".into(),
+            Object(vec![
+                ("x".into(), Number(f32::from(position.x) as f64)),
+                ("y".into(), Number(f32::from(position.y) as f64)),
+            ]),
+        ));
+    }
+    Object(fields)
 }
