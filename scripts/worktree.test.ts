@@ -305,26 +305,27 @@ test("remove shows a locked checkout's reason and keeps the space open on Window
   });
 });
 
-test("remove keeps the space open if Git refuses a removal on Unix after preflight", async () => {
-  await withLinkedCheckout(async (main, linked) => {
-    const dialog = removeDialog(linked, {
-      exec: (command, args, options) => {
-        if (args[0] === "worktree" && args[1] === "remove") {
-          fixtureGit(main, "worktree", "lock", "--reason", "locked just before removal", linked);
-        }
-        return execute(command, args, options);
-      },
-    });
-    await dialog.ready;
-    await dialog.enter();
-    expect(dialog.worktree.error).toContain("locked just before removal");
-    expect(dialog.closedSpaces).toEqual([]);
-    expect(dialog.closedOverlays).toEqual([]);
-    expect(existsSync(linked)).toBe(true);
-  });
-});
-
 for (const platform of ["linux", "windows"]) {
+  test("remove keeps the space open if Git refuses after preflight on " + platform, async () => {
+    await withLinkedCheckout(async (main, linked) => {
+      const dialog = removeDialog(linked, {
+        platform,
+        exec: (command, args, options) => {
+          if (args[0] === "worktree" && args[1] === "remove") {
+            fixtureGit(main, "worktree", "lock", "--reason", "locked just before removal", linked);
+          }
+          return execute(command, args, options);
+        },
+      });
+      await dialog.ready;
+      await dialog.enter();
+      expect(dialog.worktree.error).toContain("locked just before removal");
+      expect(dialog.closedSpaces).toEqual([]);
+      expect(dialog.closedOverlays).toEqual([]);
+      expect(existsSync(linked)).toBe(true);
+    });
+  });
+
   test(`remove warns about new changes and closes a successfully removed checkout on ${platform}`, async () => {
     await withLinkedCheckout(async (main, linked) => {
       const dialog = removeDialog(linked, { platform });
@@ -336,7 +337,7 @@ for (const platform of ["linux", "windows"]) {
       expect(existsSync(join(linked, "untracked.txt"))).toBe(true);
 
       await dialog.enter();
-      expect(dialog.closedSpaces).toEqual([{ id: "target", checkoutPresent: platform === "windows" }]);
+      expect(dialog.closedSpaces).toEqual([{ id: "target", checkoutPresent: false }]);
       expect(dialog.closedOverlays).toEqual(["dialog"]);
       expect(existsSync(linked)).toBe(false);
       expect(fixtureGit(main, "branch", "--list", "linked")).toBe("linked");
