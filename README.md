@@ -2,14 +2,6 @@
 
 Herdr is a desktop app for terminals and coding agents. Keep work in spaces, see which agents need you, and leave terminals running when you close the window.
 
-## Pane typing feedback prototype
-
-[Watch the side-by-side demo](https://github.com/no-complect/herdr-app/blob/233fc4b4e062673f567eebcf9d8e645a52289adf/docs/typing-pulse-demo.mp4?raw=true)
-
-Both panes show the same input going through the normal terminal send path. The right pane opts into `typing_pulse: true`. After the desktop app queues the input, a private observer receives the terminal identity and a timestamp. The frame uses that activity signal to draw the pulse. The signal carries neither keys nor text.
-
-The recording uses two takes from a local macOS render test. The test writer echoes the queued bytes so the input is visible in both panes. The prototype is discussed in [Herdr issue #1272](https://github.com/herdrdev/herdr-app/issues/1272).
-
 ## Install
 
 ### Linux and macOS
