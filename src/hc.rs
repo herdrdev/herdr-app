@@ -434,7 +434,11 @@ impl Core {
     }
 
     pub fn send(&self, channel: u32, kind: u8, payload: &[u8]) {
-        let _ = self.writer.send(encode(channel, kind, payload));
+        self.queue(channel, kind, payload);
+    }
+
+    fn queue(&self, channel: u32, kind: u8, payload: &[u8]) -> bool {
+        self.writer.send(encode(channel, kind, payload)).is_ok()
     }
 
     pub fn call(&self, method: &str, params: Value) -> Result<Value> {
@@ -514,9 +518,12 @@ impl Core {
     }
 
     pub fn input(&self, channel: u32, bytes: &[u8]) {
-        if !bytes.is_empty() {
-            self.send(channel, DATA, bytes);
-        }
+        self.queue_input(channel, bytes);
+    }
+
+    /// Whether the desktop writer accepted the bytes into its queue.
+    pub(crate) fn queue_input(&self, channel: u32, bytes: &[u8]) -> bool {
+        !bytes.is_empty() && self.queue(channel, DATA, bytes)
     }
 
     /// Terminal-engine replies are not typing. Older paths require legacy DATA.

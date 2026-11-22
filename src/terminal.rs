@@ -18,7 +18,7 @@ use std::future::Future;
 use std::task::Poll;
 use crate::links;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::Arc;
 
 const OUTPUT_TIME_PER_TURN: Duration = Duration::from_millis(6);
@@ -72,8 +72,6 @@ pub enum TerminalEvent {
     Link(links::Click),
     TitleChanged,
     SelectionChanged,
-    /// A focused terminal forwarded keyboard input. Carries no key or text data.
-    Typed,
     /// History scroll position changed enough for mods that watch `panes().scroll`.
     ScrollChanged,
     /// The program ended.
@@ -82,6 +80,11 @@ pub enum TerminalEvent {
     ContextMenu(Point<Pixels>),
     /// Something the person asked for failed: an error toast.
     Notice { title: String, body: String },
+}
+
+/// A focused terminal queued keyboard input. The emitter identifies the terminal.
+pub(crate) struct KeyboardInputQueued {
+    pub(crate) at: Instant,
 }
 
 /// Rows of scrollback history as Ghostty's scrollbar reports them. `from_bottom`
@@ -179,6 +182,8 @@ pub struct TerminalView {
     shown_in: Cell<u64>,
     /// When the person last typed here: output right after is shown at once.
     typed_at: Cell<Option<Instant>>,
+    /// The observer owns the lifetime of its opt-in.
+    keyboard_input_observer: Weak<()>,
     /// Scrolled this gesture, in lines, toward the next whole one.
     scrolled: Point<f32>,
     /// Search UI and query belong to this terminal view, not the window. Each
@@ -216,6 +221,7 @@ pub fn flush_output_clock(cx: &mut gpui::App) {
 }
 
 impl EventEmitter<TerminalEvent> for TerminalView {}
+impl EventEmitter<KeyboardInputQueued> for TerminalView {}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct DisplayFacts {
@@ -347,6 +353,7 @@ impl TerminalView {
             was_focused: false,
             shown_in: Cell::new(0),
             typed_at: Cell::new(None),
+            keyboard_input_observer: Weak::new(),
             scrolled: point(0.0, 0.0),
             search_open: false,
             search_keys: false,
@@ -688,15 +695,20 @@ impl TerminalView {
             && !bytes.is_empty()
         {
             g.vt.scroll_to_bottom();
-            g.core.input(ch, bytes);
-            return true;
+            return g.core.queue_input(ch, bytes);
         }
         false
     }
 
-    fn send_typed(&self, bytes: &[u8], window: &Window, cx: &mut Context<Self>) {
-        if self.send(bytes) && self.focus.is_focused(window) {
-            cx.emit(TerminalEvent::Typed);
+    pub(crate) fn enable_keyboard_input_observer(&mut self) -> Rc<()> {
+        let observer = Rc::new(());
+        self.keyboard_input_observer = Rc::downgrade(&observer);
+        observer
+    }
+
+    fn notify_keyboard_input(&self, window: &Window, cx: &mut Context<Self>) {
+        if self.keyboard_input_observer.strong_count() > 0 && self.focus.is_focused(window) {
+            cx.emit(KeyboardInputQueued { at: cx.background_executor().now() });
         }
     }
 
@@ -1041,7 +1053,9 @@ impl TerminalView {
         }
         let bytes = key_bytes(&mut self.grid.borrow_mut().vt, ev);
         if let Some(bytes) = bytes {
-            self.send_typed(&bytes, window, cx);
+            if self.send(&bytes) {
+                self.notify_keyboard_input(window, cx);
+            }
             cx.stop_propagation();
         }
     }
@@ -2413,8 +2427,8 @@ impl EntityInputHandler for TerminalView {
         // While the find field holds the keys, the input-method path must not
         // be a way around that (see `key_down`); with the terminal focused,
         // input methods type into the program as usual.
-        if !self.find_field_focused(window, cx) {
-            self.send_typed(text.as_bytes(), window, cx);
+        if !self.find_field_focused(window, cx) && self.send(text.as_bytes()) {
+            self.notify_keyboard_input(window, cx);
         }
         cx.notify();
     }
@@ -2518,7 +2532,11 @@ impl Render for TerminalView {
                 // `send:<text>` bindings from keys.json type into this terminal.
                 match a.id().strip_prefix("send:") {
                     Some(_) if this.find_field_focused(window, cx) => cx.stop_propagation(),
-                    Some(text) => this.send_typed(text.as_bytes(), window, cx),
+                    Some(text) => {
+                        if this.send(text.as_bytes()) {
+                            this.notify_keyboard_input(window, cx);
+                        }
+                    }
                     None => cx.propagate(),
                 }
             }))
@@ -3554,7 +3572,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn typing_pulse_matches_forwarded_keyboard_input(cx: &mut gpui::TestAppContext) {
+    fn keyboard_activity_observer_is_optional(cx: &mut gpui::TestAppContext) {
         use gpui::*;
         use gpui_shell::action::ShellAction;
         use std::{cell::Cell, rc::Rc};
@@ -3577,10 +3595,8 @@ mod tests {
             let terminal = cx.new(|cx| {
                 super::TerminalView::attach(core, "t1".into(), (40, 6), cx)
             });
-            cx.subscribe(&terminal, move |_, _, event: &super::TerminalEvent, _| {
-                if matches!(event, super::TerminalEvent::Typed) {
-                    observed.set(observed.get() + 1);
-                }
+            cx.subscribe(&terminal, move |_, _, _: &super::KeyboardInputQueued, _| {
+                observed.set(observed.get() + 1);
             }).detach();
             let focus = terminal.read(cx).focus_handle().clone();
             focus.focus(window, cx);
@@ -3600,7 +3616,11 @@ mod tests {
 
         terminal.update(cx, |terminal, _| terminal.grid.borrow_mut().channel = Some(CHANNEL));
         cx.simulate_keystrokes("a");
-        expect("ordinary key", 1, &[b"a"]);
+        expect("ordinary key without an observer enabled", 0, &[b"a"]);
+
+        let observer = terminal.update(cx, |terminal, _| terminal.enable_keyboard_input_observer());
+        cx.simulate_keystrokes("a");
+        expect("ordinary key with an observer enabled", 1, &[b"a"]);
 
         cx.update(|window, app| terminal.update(app, |terminal, cx| {
             terminal.replace_and_mark_text_in_range(None, "nihon", None, window, cx);
@@ -3629,6 +3649,11 @@ mod tests {
         });
         expect("program output", 0, &[]);
 
+        drop(observer);
+        cx.simulate_keystrokes("b");
+        expect("ordinary key after dropping the observer", 0, &[b"b"]);
+
+        let _observer = terminal.update(cx, |terminal, _| terminal.enable_keyboard_input_observer());
         cx.update(|window, app| terminal.update(app, |terminal, cx| terminal.open_search(window, cx)));
         cx.run_until_parked();
         cx.simulate_keystrokes("x");
@@ -3638,6 +3663,49 @@ mod tests {
         }));
         expect("Find owns the keyboard", 0, &[]);
         assert_eq!(terminal.read_with(cx, |terminal, _| terminal.search_query.clone()), "x");
+    }
+
+    #[gpui::test]
+    fn keyboard_activity_requires_a_live_writer_queue(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+        use std::{cell::Cell, rc::Rc};
+
+        struct Root(Entity<super::TerminalView>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(self.0.clone())
+            }
+        }
+
+        let (core, drain_input) = crate::hc::record_terminal_input();
+        let observed = Rc::new(Cell::new(0));
+        let count = observed.clone();
+
+        cx.update(gpui_base::init);
+        let (root, cx) = cx.add_window_view(|window, cx| {
+            let terminal = cx.new(|cx| {
+                super::TerminalView::attach(core, "t1".into(), (40, 6), cx)
+            });
+            cx.subscribe(&terminal, move |_, _, _: &super::KeyboardInputQueued, _| {
+                count.set(count.get() + 1);
+            }).detach();
+            terminal.read(cx).focus_handle().clone().focus(window, cx);
+            Root(terminal)
+        });
+        cx.run_until_parked();
+
+        let terminal = root.read_with(cx, |root, _| root.0.clone());
+        let _observer = terminal.update(cx, |terminal, _| {
+            terminal.grid.borrow_mut().channel = Some(7);
+            terminal.enable_keyboard_input_observer()
+        });
+        cx.simulate_keystrokes("a");
+        assert_eq!(drain_input(), vec![(7, b"a".to_vec())]);
+        assert_eq!(observed.get(), 1);
+
+        drop(drain_input);
+        cx.simulate_keystrokes("b");
+        assert_eq!(observed.get(), 1, "a closed writer queue must not be reported as input");
     }
 
     #[gpui::test]
@@ -3658,19 +3726,18 @@ mod tests {
         cx.run_until_parked();
 
         let typed = std::rc::Rc::new(std::cell::Cell::new(0));
-        cx.update(|window, app| {
+        let _observer = cx.update(|window, app| {
             root.update(app, |root, cx| {
                 let typed = typed.clone();
-                cx.subscribe(&root.0, move |_, _, event: &super::TerminalEvent, _| {
-                    if matches!(event, super::TerminalEvent::Typed) {
-                        typed.set(typed.get() + 1);
-                    }
+                cx.subscribe(&root.0, move |_, _, _: &super::KeyboardInputQueued, _| {
+                    typed.set(typed.get() + 1);
                 }).detach();
                 root.0.update(cx, |terminal, cx| {
                     terminal.grid.borrow_mut().channel = Some(1);
                     terminal.open_search(window, cx);
-                });
-            });
+                    terminal.enable_keyboard_input_observer()
+                })
+            })
         });
         cx.run_until_parked();
         cx.simulate_keystrokes("l s");

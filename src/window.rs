@@ -17,7 +17,7 @@ use crate::model::{self, Tab, Model};
 use crate::mods::{self, Found, Instance, Request};
 use crate::settings;
 use crate::layout_sync;
-use crate::terminal::{TerminalEvent, TerminalView, scroll_target};
+use crate::terminal::{KeyboardInputQueued, TerminalEvent, TerminalView, scroll_target};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_shell::action::ShellAction;
@@ -298,6 +298,7 @@ struct Term {
     address: String,
     focus: FocusHandle,
     _sub: Subscription,
+    typing_observer: Option<(Rc<()>, Subscription)>,
 }
 
 enum TerminalChange {
@@ -1598,7 +1599,7 @@ impl AppWindow {
             self.tell_term(&view, &address, cx);
             mods::track_pane_view(id.clone(), &view);
             let (block, addr) = (id.clone(), address.clone());
-            let sub = cx.subscribe_in(&view, window, move |this, terminal, ev: &TerminalEvent, window, cx| match ev {
+            let sub = cx.subscribe_in(&view, window, move |this, _, ev: &TerminalEvent, window, cx| match ev {
                 TerminalEvent::Peek(address) => this.peek_terminal(address, window, cx),
                 TerminalEvent::Link(click) => this.handle_link(&block, &addr, click, window, cx),
                 TerminalEvent::TitleChanged => this.publish(cx),
@@ -1607,9 +1608,6 @@ impl AppWindow {
                     this.refresh_snapshot_mods(cx);
                 }
                 TerminalEvent::SelectionChanged => this.publish_selection(&addr, window, cx),
-                TerminalEvent::Typed => {
-                    this.pulse_typed_pane(block.trim_end_matches(SWAP), terminal.entity_id(), window, cx);
-                }
                 TerminalEvent::Ended => this.terminal_ended(&block, window, cx),
                 TerminalEvent::ContextMenu(at) => {
                     this.open_menu("pane", json!({ "pane": block.trim_end_matches(SWAP), "terminal": addr }), Some(*at), window, cx)
@@ -1617,7 +1615,7 @@ impl AppWindow {
                 TerminalEvent::Notice { title, body } => this.error_notice(title, body, window, cx),
             });
             let focus = view.read(cx).focus_handle().clone();
-            if let Some(previous) = self.terms.insert(id, Term { view, address, focus, _sub: sub }) {
+            if let Some(previous) = self.terms.insert(id, Term { view, address, focus, _sub: sub, typing_observer: None }) {
                 self.publish_selection(&previous.address, window, cx);
             }
         }
@@ -1628,6 +1626,7 @@ impl AppWindow {
                 self.publish_selection(&t.address, window, cx);
             }
         }
+        self.sync_typing_observers(window, cx);
 
         // A mod copy lives while its slot is in the layout, hidden or not (an
         // inactive stack child, a hidden column, a pane in another tab), so it
@@ -4596,10 +4595,41 @@ impl AppWindow {
             })
     }
 
+    fn typing_pulse_enabled(&self) -> bool {
+        self.pane_frame().is_some_and(|frame| {
+            frame.typing_pulse && pane_size::frame_border(frame, true).is_some_and(|line| line.width > 0.0)
+        })
+    }
+
+    fn sync_typing_observers(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let shown: HashSet<_> = self.model.active_tab().filter(|_| self.typing_pulse_enabled())
+            .into_iter()
+            .flat_map(|tab| tab.shown().visible_blocks())
+            .filter_map(|pane| self.pane_term(&pane.id).map(|term| term.view.entity_id()))
+            .collect();
+
+        for (slot, term) in &mut self.terms {
+            if !shown.contains(&term.view.entity_id()) {
+                term.typing_observer = None;
+            } else if term.typing_observer.is_none() {
+                let pane = slot.strip_suffix(SWAP).unwrap_or(slot).to_owned();
+                let observer = term.view.update(cx, |terminal, _| terminal.enable_keyboard_input_observer());
+                let subscription = cx.subscribe_in(&term.view, window, move |this, terminal, input: &KeyboardInputQueued, window, cx| {
+                    this.pulse_typed_pane(&pane, terminal.entity_id(), input.at, window, cx);
+                });
+                term.typing_observer = Some((observer, subscription));
+            }
+        }
+        if self.typing_pulse.as_ref().is_some_and(|pulse| !shown.contains(&pulse.terminal)) {
+            self.typing_pulse = None;
+        }
+    }
+
     fn pulse_typed_pane(
         &mut self,
         pane: &str,
         terminal: EntityId,
+        at: Instant,
         window: &Window,
         cx: &mut Context<Self>,
     ) {
@@ -4607,17 +4637,17 @@ impl AppWindow {
             return;
         }
 
-        let now = cx.background_executor().now();
         let previous = self.typing_pulse.as_ref();
+        if cx.background_executor().now().duration_since(at) >= pane_pulse::DURATION {
+            return;
+        }
         if previous.is_some_and(|pulse| {
-            pulse.terminal == terminal && now.duration_since(pulse.started) < pane_pulse::DURATION
+            pulse.terminal == terminal && at.duration_since(pulse.started) < pane_pulse::DURATION
         }) {
             return;
         }
 
-        if !self.pane_frame().is_some_and(|frame| {
-            frame.typing_pulse && pane_size::frame_border(frame, true).is_some_and(|line| line.width > 0.0)
-        }) || !self.model.active_tab().is_some_and(|tab| tab.shown().find(pane).is_some())
+        if !self.typing_pulse_enabled() || !self.model.active_tab().is_some_and(|tab| tab.shown().find(pane).is_some())
         {
             return;
         }
@@ -4626,7 +4656,7 @@ impl AppWindow {
         self.typing_pulse = Some(PaneTypingPulse {
             pane: pane.to_owned(),
             terminal,
-            started: now,
+            started: at,
             sequence: previous.map_or(0, |p| p.sequence.wrapping_add(1)),
             burst: pane_pulse::Burst::new(seed, previous.map(|p| p.burst.color)),
         });
@@ -7311,32 +7341,32 @@ mod tests {
             this.sync(window, cx);
             let terminal = this.pane_term("p1").unwrap().view.entity_id();
 
-            this.pulse_typed_pane("p1", terminal, window, cx);
+            this.pulse_typed_pane("p1", terminal, cx.background_executor().now(), window, cx);
             assert!(this.typing_pulse.is_none(), "the layout must opt in");
 
             frame(this).typing_pulse = true;
             frame(this).lone = false;
-            this.pulse_typed_pane("p1", terminal, window, cx);
+            this.pulse_typed_pane("p1", terminal, cx.background_executor().now(), window, cx);
             assert!(this.typing_pulse.is_none(), "an unframed single pane cannot pulse");
 
             frame(this).lone = true;
             frame(this).focus.as_mut().unwrap().width = 0.0;
-            this.pulse_typed_pane("p1", terminal, window, cx);
+            this.pulse_typed_pane("p1", terminal, cx.background_executor().now(), window, cx);
             assert!(this.typing_pulse.is_none(), "a zero-width border cannot pulse");
 
             frame(this).focus.as_mut().unwrap().width = 2.0;
-            this.pulse_typed_pane("offscreen", terminal, window, cx);
+            this.pulse_typed_pane("offscreen", terminal, cx.background_executor().now(), window, cx);
             assert!(this.typing_pulse.is_none(), "only a focused pane can pulse");
 
             let replaced_terminal = cx.new(|_| ()).entity_id();
-            this.pulse_typed_pane("p1", replaced_terminal, window, cx);
+            this.pulse_typed_pane("p1", replaced_terminal, cx.background_executor().now(), window, cx);
             assert!(this.typing_pulse.is_none(), "a replaced terminal cannot pulse a reused pane");
 
-            this.pulse_typed_pane("p1", terminal, window, cx);
+            this.pulse_typed_pane("p1", terminal, cx.background_executor().now(), window, cx);
             let pulse = this.typing_pulse.as_ref().unwrap();
             assert_eq!(pulse.pane, "p1");
             let started = pulse.started;
-            this.pulse_typed_pane("p1", terminal, window, cx);
+            this.pulse_typed_pane("p1", terminal, cx.background_executor().now(), window, cx);
             assert_eq!(this.typing_pulse.as_ref().unwrap().started, started);
         }));
         cx.deactivate_window();
@@ -7344,7 +7374,7 @@ mod tests {
         cx.update(|window, cx| view.update(cx, |this, cx| {
             this.typing_pulse = None;
             let terminal = this.pane_term("p1").unwrap().view.entity_id();
-            this.pulse_typed_pane("p1", terminal, window, cx);
+            this.pulse_typed_pane("p1", terminal, cx.background_executor().now(), window, cx);
             assert!(this.typing_pulse.is_none(), "an inactive window cannot start a pulse");
         }));
     }
@@ -7356,7 +7386,7 @@ mod tests {
 
     #[gpui::test]
     fn typing_pulse_lifecycle(cx: &mut gpui::TestAppContext) {
-        use crate::terminal::TerminalEvent;
+        use crate::terminal::{KeyboardInputQueued, TerminalView};
         use serde_json::json;
         use std::time::Duration;
 
@@ -7382,20 +7412,44 @@ mod tests {
             this.typing_pulse.as_ref().map(|pulse| (pulse.terminal, pulse.started, pulse.sequence, pulse.burst.color))
         });
 
-        second.update(cx, |_, cx| cx.emit(TerminalEvent::Typed));
+        let emit_input = |terminal: &gpui::Entity<TerminalView>, cx: &mut gpui::VisualTestContext| {
+            terminal.update(cx, |_, cx| {
+                cx.emit(KeyboardInputQueued { at: cx.background_executor().now() });
+            });
+        };
+        let set_enabled = |cx: &mut gpui::VisualTestContext, enabled| {
+            cx.update(|window, cx| view.update(cx, |this, cx| {
+                let super::Kind::Block { content: super::Content::Context { pane: Some(frame), .. } } =
+                    &mut this.chrome.kind else { panic!("the test layout must frame panes") };
+                frame.typing_pulse = enabled;
+                this.sync(window, cx);
+            }));
+        };
+
+        set_enabled(cx, false);
+        view.read_with(cx, |this, _| {
+            let term = this.pane_term("p1").unwrap();
+            assert_eq!(term.view.entity_id(), first.entity_id());
+            assert!(term.typing_observer.is_none());
+        });
+        emit_input(&first, cx);
+        assert!(pulse(cx).is_none(), "disabling the layout removes the handler");
+
+        set_enabled(cx, true);
+        emit_input(&second, cx);
         assert!(pulse(cx).is_none(), "background input cannot start a pulse");
 
-        first.update(cx, |_, cx| cx.emit(TerminalEvent::Typed));
+        emit_input(&first, cx);
         let initial = pulse(cx).unwrap();
         assert_eq!(initial.0, first.entity_id());
 
         let tick = Duration::from_millis(1);
         cx.executor().advance_clock(super::pane_pulse::DURATION - tick);
-        first.update(cx, |_, cx| cx.emit(TerminalEvent::Typed));
+        emit_input(&first, cx);
         assert_eq!(pulse(cx), Some(initial), "repeat input must keep the active burst");
 
         cx.executor().advance_clock(tick);
-        first.update(cx, |_, cx| cx.emit(TerminalEvent::Typed));
+        emit_input(&first, cx);
         let next = pulse(cx).unwrap();
         assert_eq!(next.1.duration_since(initial.1), super::pane_pulse::DURATION);
         assert_eq!(next.2, initial.2 + 1);
@@ -7408,28 +7462,28 @@ mod tests {
         cx.update(|window, cx| window.draw(cx).clear(cx));
         assert!(pulse(cx).is_none(), "switching panes clears the old burst");
 
-        first.update(cx, |_, cx| cx.emit(TerminalEvent::Typed));
+        emit_input(&first, cx);
         assert!(pulse(cx).is_none(), "late input from the old pane is ignored");
-        second.update(cx, |_, cx| cx.emit(TerminalEvent::Typed));
+        emit_input(&second, cx);
         assert_eq!(pulse(cx).unwrap().0, second.entity_id());
 
         cx.update(|window, cx| second.update(cx, |terminal, cx| terminal.open_search(window, cx)));
         cx.update(|window, cx| window.draw(cx).clear(cx));
         assert!(pulse(cx).is_none(), "opening Find clears the burst");
-        second.update(cx, |_, cx| cx.emit(TerminalEvent::Typed));
+        emit_input(&second, cx);
         assert!(pulse(cx).is_none(), "a late event cannot pulse while Find owns the keyboard");
 
         cx.update(|window, cx| {
             let focus = second.read(cx).focus_handle().clone();
             focus.focus(window, cx);
         });
-        second.update(cx, |_, cx| cx.emit(TerminalEvent::Typed));
+        emit_input(&second, cx);
         assert_eq!(pulse(cx).unwrap().0, second.entity_id());
 
         cx.deactivate_window();
         cx.update(|window, cx| window.draw(cx).clear(cx));
         assert!(pulse(cx).is_none(), "the glow clears when the window loses focus");
-        second.update(cx, |_, cx| cx.emit(TerminalEvent::Typed));
+        emit_input(&second, cx);
         assert!(pulse(cx).is_none(), "an inactive window ignores incoming typing events");
     }
 
