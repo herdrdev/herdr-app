@@ -261,7 +261,7 @@ pub fn powershell_launch(cmd: &[String]) -> String {
     format!("{POWERSHELL_RESTORE_FOLDER}{}", powershell_line(cmd))
 }
 
-fn powershell_quote(word: &str) -> String {
+pub(crate) fn powershell_quote(word: &str) -> String {
     let mut s = String::from("'");
     for ch in word.chars() {
         if PS_QUOTES.contains(&ch) {

@@ -973,10 +973,20 @@ fn known_agents(on: Option<String>, list: Vec<Value>) -> Result<Value, String> {
     ))
 }
 
-/// A text file on another machine: `cat`, or `type` where there is none (Windows).
+/// Only open regular files, and return at most one byte over the preview limit.
 fn read_remote(machine: &str, path: &str) -> Result<Option<String>, String> {
-    let (code, out, _) = match run_remote(machine, "cat", &["--".into(), path.into()], None) {
-        Err(e) if e.contains("cannot start") => run_remote(machine, "cmd", &["/d".into(), "/c".into(), "type".into(), path.replace('/', "\\")], None)?,
+    let max = crate::mod_files::LIMIT + 1;
+    let script = r#"test -f "$1" || exit 1; exec head -c "$2" -- "$1""#;
+    let (code, out, _) = match run_remote(machine, "sh", &["-c".into(), script.into(), "sh".into(), path.into(), max.to_string()], None) {
+        Err(e) if e.contains("cannot start") => {
+            let path = crate::programs::powershell_quote(&path.replace('/', "\\"));
+            let script = format!("$file = Get-Item -LiteralPath {path} -Force -ErrorAction SilentlyContinue; \
+                if ($file -isnot [IO.FileInfo]) {{ exit 1 }}; \
+                $reader = [IO.BinaryReader]::new($file.OpenRead()); \
+                try {{ $bytes = $reader.ReadBytes({max}); [Console]::OpenStandardOutput().Write($bytes, 0, $bytes.Length) }} \
+                finally {{ $reader.Dispose() }}");
+            run_remote(machine, "powershell.exe", &["-NoProfile".into(), "-Command".into(), script], None)?
+        }
         r => r?,
     };
     if code != 0 {
@@ -1034,10 +1044,14 @@ fn module(inst: Instance, copy: u64) -> HostModule {
         .async_function("readTextFile", |a| {
             let path = a.string(0)?.to_owned();
             let on = opt_str(a.get(1), "on");
-            Ok(crate::mod_files::read_with(move || match on {
-                Some(m) => read_remote(&m, &path),
-                None => crate::mod_files::read(Path::new(&path)),
-            }))
+            let read = crate::mod_files::read_with(on, path, |on, path| match on {
+                Some(m) => read_remote(m, path),
+                None => crate::mod_files::read(Path::new(path)),
+            });
+            Ok(async move {
+                let text = read.recv().await.map_err(|e| HostError::new(e.to_string()))?.map_err(HostError::new)?;
+                Ok(text.map(HostValue::from).unwrap_or(HostValue::Null))
+            })
         })
         .async_function("writeTextFile", |a| {
             let expected = a.get(2).and_then(|v| match v { HostValue::Str(s) => Some(s.clone()), _ => None });
