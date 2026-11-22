@@ -7910,6 +7910,12 @@ export default class Probe extends View { render() { return div().child("probe")
             let mounted: Vec<&str> = this.copies.iter().filter(|(_, c)| c.inst.name == name && c.root.is_some()).map(|(slot, _)| slot.as_str()).collect();
             assert_eq!(mounted.len(), 3, "block, float and popup: {mounted:?}");
         });
+        for (section, kind, value) in [("mod:zz-probe.off", "mod", name), ("layout:my.copy", "layout", "my.copy")] {
+            let bindings = crate::keys::parse(&json!({ (section): { "f6": "app.help" }, "global": { "f7": "app.help" } }).to_string()).unwrap();
+            assert_eq!(bindings.len(), 2);
+            let predicate = gpui::KeyBindingContextPredicate::Equal(kind.into(), value.into());
+            assert!(bindings.iter().any(|binding| binding.predicate().as_deref() == Some(&predicate)));
+        }
     }
 
     #[test]
