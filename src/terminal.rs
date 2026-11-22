@@ -688,16 +688,26 @@ impl TerminalView {
         self.shown_in.get() == FRAME.load(Ordering::Relaxed)
     }
 
-    fn send(&self, bytes: &[u8]) -> bool {
+    fn send(&self, bytes: &[u8], keyboard_input: Option<(&Window, &mut Context<Self>)>) {
         self.typed_at.set(Some(Instant::now()));
         let mut g = self.grid.borrow_mut();
         if let Some(ch) = g.channel
             && !bytes.is_empty()
         {
             g.vt.scroll_to_bottom();
-            return g.core.queue_input(ch, bytes);
+            if let Some((window, cx)) = keyboard_input
+                && self.keyboard_input_observer.strong_count() > 0
+                && self.focus.is_focused(window)
+            {
+                let queued = g.core.queue_input(ch, bytes);
+                drop(g);
+                if queued {
+                    cx.emit(KeyboardInputQueued { at: cx.background_executor().now() });
+                }
+            } else {
+                g.core.input(ch, bytes);
+            }
         }
-        false
     }
 
     pub(crate) fn enable_keyboard_input_observer(&mut self) -> Rc<()> {
@@ -706,17 +716,11 @@ impl TerminalView {
         observer
     }
 
-    fn notify_keyboard_input(&self, window: &Window, cx: &mut Context<Self>) {
-        if self.keyboard_input_observer.strong_count() > 0 && self.focus.is_focused(window) {
-            cx.emit(KeyboardInputQueued { at: cx.background_executor().now() });
-        }
-    }
-
     fn paste_paths(&self, paths: impl IntoIterator<Item = String>) {
         match drag_paths::quote_paths(paths, &self.address, cfg!(windows)) {
             Ok(text) => {
                 let bytes = self.grid.borrow().vt.paste_bytes(&text);
-                self.send(&bytes);
+                self.send(&bytes, None);
             }
             Err(body) => drag_paths::unavailable(body),
         }
@@ -820,7 +824,7 @@ impl TerminalView {
             self.dropped(paths, cx);
         } else if let Some(text) = item.text() {
             let bytes = self.grid.borrow().vt.paste_bytes(&text);
-            self.send(&bytes);
+            self.send(&bytes, None);
         } else if item.entries().iter().any(|e| matches!(e, ClipboardEntry::Image(_))) {
             self.paste_image(cx);
         }
@@ -834,7 +838,7 @@ impl TerminalView {
         let text = if cfg!(windows) { cx.read_from_clipboard().and_then(|c| c.text()) } else { None };
         let bytes = paste_image_fallback(&mut self.grid.borrow_mut().vt, text.as_deref());
         if let Some(bytes) = bytes {
-            self.send(&bytes);
+            self.send(&bytes, None);
         }
     }
 
@@ -1053,9 +1057,7 @@ impl TerminalView {
         }
         let bytes = key_bytes(&mut self.grid.borrow_mut().vt, ev);
         if let Some(bytes) = bytes {
-            if self.send(&bytes) {
-                self.notify_keyboard_input(window, cx);
-            }
+            self.send(&bytes, Some((window, cx)));
             cx.stop_propagation();
         }
     }
@@ -2427,8 +2429,8 @@ impl EntityInputHandler for TerminalView {
         // While the find field holds the keys, the input-method path must not
         // be a way around that (see `key_down`); with the terminal focused,
         // input methods type into the program as usual.
-        if !self.find_field_focused(window, cx) && self.send(text.as_bytes()) {
-            self.notify_keyboard_input(window, cx);
+        if !self.find_field_focused(window, cx) {
+            self.send(text.as_bytes(), Some((window, cx)));
         }
         cx.notify();
     }
@@ -2532,11 +2534,7 @@ impl Render for TerminalView {
                 // `send:<text>` bindings from keys.json type into this terminal.
                 match a.id().strip_prefix("send:") {
                     Some(_) if this.find_field_focused(window, cx) => cx.stop_propagation(),
-                    Some(text) => {
-                        if this.send(text.as_bytes()) {
-                            this.notify_keyboard_input(window, cx);
-                        }
-                    }
+                    Some(text) => this.send(text.as_bytes(), Some((window, cx))),
                     None => cx.propagate(),
                 }
             }))
@@ -2617,7 +2615,7 @@ impl Render for TerminalView {
                     #[cfg(target_os = "linux")]
                     if let Some(text) = _cx.read_from_primary().and_then(|item| item.text()).filter(|text| !text.is_empty()) {
                         let bytes = this.grid.borrow().vt.paste_bytes(&text);
-                        this.send(&bytes);
+                        this.send(&bytes, None);
                     }
                     #[cfg(target_os = "windows")]
                     this.paste(_cx);
@@ -3617,6 +3615,14 @@ mod tests {
         terminal.update(cx, |terminal, _| terminal.grid.borrow_mut().channel = Some(CHANNEL));
         cx.simulate_keystrokes("a");
         expect("ordinary key without an observer enabled", 0, &[b"a"]);
+
+        cx.update(|window, app| terminal.update(app, |terminal, cx| {
+            terminal.replace_text_in_range(None, "日本", window, cx);
+        }));
+        expect("IME commit without an observer enabled", 0, &["日本".as_bytes()]);
+
+        cx.dispatch_action(ShellAction::new("send:ready"));
+        expect("send key binding without an observer enabled", 0, &[b"ready"]);
 
         let observer = terminal.update(cx, |terminal, _| terminal.enable_keyboard_input_observer());
         cx.simulate_keystrokes("a");
