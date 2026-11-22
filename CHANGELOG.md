@@ -4,28 +4,27 @@
 <!-- spotlight -->
 
 ### New
-- **Decide what a Ctrl/Cmd-click does.** Links and file paths in your terminals can open where you want: a localhost link through your SSH tunnel, file.rs:42 in the Neovim already running in that space, a screenshot in a preview pane. A small mod says which links it takes, and Herdr hands it the click with the terminal, folder and machine it came from. Ask your agent to write one; the mod guide in your Herdr folder explains how. (#228, #1203)
-- **Resize panes from the keyboard.** Bind pane.resize in keys.json, for example to Ctrl+Alt+arrows, and grow or shrink the focused pane. (#1087, thanks @darkwebber)
-- **Name your panes.** Rename is now first in the pane menu, and scripts can use pane.rename. (#1086, #1160, thanks @darkwebber and @abhijit-s)
-- For mod authors: a layout turns link mods on with link_handlers, and open copies of the same mod with the same props now share their localStorage.
-- Cursor and VS Code remote links (cursor://, vscode://) open on Ctrl/Cmd-click. (#998, thanks @martintrifunov)
-- The Files preview and the Changes diff follow your terminal font size. (#648, thanks @carun)
-- **Swival, Empryo and BoldCreate** show with their own icon and name and start from the new agent menu. (#947, #1050, #989, thanks @jedisct1, @victorhramos-dev and @ValanArockiyaKiraswin-sf3952)
+- **Choose what a Ctrl/Cmd-click does.** A mod can take over clicks on links and file paths in your terminals. Open localhost links through your SSH tunnel, jump to file.rs:42 in the Neovim you already have open, or show a screenshot in a pane. Ask your agent to write one for you. (#228, #1203)
+- **Resize panes from the keyboard.** Add pane.resize to keys.json, for example on Ctrl+Alt+arrows. (#1087, thanks @darkwebber)
+- **Name your panes.** Rename is at the top of the pane menu. (#1086, #1160, thanks @darkwebber and @abhijit-s)
+- Cursor and VS Code remote links open when you Ctrl/Cmd-click them. (#998, thanks @martintrifunov)
+- The file preview and the Changes diff use your terminal font size. (#648, thanks @carun)
+- For mod authors: a layout turns link mods on with link_handlers, scripts can name panes with pane.rename, and copies of a mod with the same props now share localStorage.
 
 ### Fixed
-- **Opening a mod or layout with a dot, colon or emoji in its name no longer crashes Herdr,** including when it reopens at startup. Its section in keys.json works too.
-- **Remove worktree is safer.** It won't remove a main checkout and says when a worktree is locked, before closing anything. On macOS and Linux it closes the space only after git has removed the folder, so a refusal keeps your terminals.
-- **The Changes panel follows the space you switch to,** even while the last repository is still loading or a file preview is stuck. Previews of special files like named pipes show an error instead of waiting forever. (#1253)
-- **Mods waiting on a TCP socket no longer freeze the whole window,** and saving such a mod reloads it in a moment instead of several seconds. Old copies' sockets close on reload. (#1234)
-- **Toasts show their whole message,** long errors included, and scroll when very long. Toasts with a fixed height keep it. (#782, thanks @Danipulok)
+- **A mod or layout with a dot, colon or emoji in its name no longer crashes Herdr.** Before, it crashed every time that mod or layout opened, startup included.
+- **Remove worktree checks before it closes anything.** It refuses a main checkout and tells you when a worktree is locked. On macOS and Linux it also waits until git has removed the folder, so your terminals stay if git says no.
+- **The Changes panel keeps up when you switch spaces,** even if the last repository was slow or a file preview got stuck. (#1253)
+- **A mod waiting on a TCP connection no longer freezes the whole window.** Saving it reloads in a moment instead of several seconds. (#1234)
+- **Toasts show the whole message,** long errors included, and scroll if it doesn't fit. (#782, thanks @Danipulok)
 - Keeping a peeked agent from another machine puts it in a space on that machine. (#1165, thanks @DeevsDeevs)
-- In the agents list, a sub-agent you kept as a pane shows its own done, names keep a leading emoji, and the rail marks the focused agent. (#1004, #1141, #969, thanks @martintrifunov, @eatnows and @jaklimoff)
-- The command palette offers only the themes that fit a light or dark window. (#1120, thanks @Fiyxxx)
-- A dialog's text field keeps the keyboard when focus comes back. (#1089, thanks @darkwebber)
-- A repository kept as project/.bare is named after its project. (#1001, thanks @mfassaie)
-- Agents are found and started under shells like nushell, and NixOS wrappers stay ahead of the core on PATH. (#240, #686, thanks @gek0v)
-- Pasting an image or files into a terminal on another machine shows "Sending" while it takes a while.
-- The app log says which mod tasks a reload interrupted. (#1034, thanks @tjbtiller)
+- In the agents list, a sub-agent you kept as a pane shows its own "done", names keep an emoji at the start, and the rail marks the agent you're on. (#1004, #1141, #969, thanks @martintrifunov, @eatnows and @jaklimoff)
+- The command palette only offers themes that fit your light or dark window. (#1120, thanks @Fiyxxx)
+- A text field in a dialog keeps the keyboard when you come back to it. (#1089, thanks @darkwebber)
+- A repository kept as project/.bare is named after the project. (#1001, thanks @mfassaie)
+- Agents start and show up under shells like nushell, and NixOS wrappers stay first on PATH. (#240, #686, thanks @gek0v)
+- Pasting an image or files into a terminal on another machine shows "Sending" while it's on the way.
+- After a mod reload, the app log says which of its tasks were cut off. (#1034, thanks @tjbtiller)
 - The status bar says "1 agent", and Split down has its own icon. (#982, #996, thanks @henrik and @nhat251)
 
 ## [0.1.16] - 2026-11-14
