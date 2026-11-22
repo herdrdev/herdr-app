@@ -1,10 +1,28 @@
-use crate::layout::{TypingPulse, TypingPulseStep};
+use crate::layout::{Line, TypingPulse, TypingPulseStep};
 use crate::settings;
-use gpui::{App, BorderStyle, Corners, Div, Edges, EntityId, Hsla, ParentElement, Pixels, Styled, Task, Window, canvas, quad, rgb};
+use gpui::{AnyElement, App, BorderStyle, Corners, Div, Edges, EntityId, Hsla, IntoElement, ParentElement, Pixels, Styled, Task, Window, canvas, quad, rgb};
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub(super) const DEFAULT_DURATION: Duration = Duration::from_millis(880);
 const COLORS: [&str; 4] = ["accent", "ansi4", "ansi5", "ansi6"];
+
+pub(super) fn finish_frame(
+    frame: Div,
+    pulse: Option<&PaneTypingPulse>,
+    line: Option<&Line>,
+    radius: Option<f32>,
+    cx: &App,
+) -> AnyElement {
+    if let (Some(pulse), Some(line)) = (pulse, line)
+        && !cx.reduce_motion()
+    {
+        let color = settings::color_or_literal(&line.color);
+        let radius = settings::z(radius.unwrap_or_default());
+        let now = cx.background_executor().now();
+        return pulse.paint(frame, color, radius, now).into_any_element();
+    }
+    frame.into_any_element()
+}
 
 pub(super) struct PaneTypingPulse {
     pub(super) pane: String,
@@ -90,7 +108,7 @@ impl PaneTypingPulse {
         }
     }
 
-    pub(super) fn paint(&self, frame: Div, color: Hsla, radius: Pixels, now: Instant) -> Div {
+    fn paint(&self, frame: Div, color: Hsla, radius: Pixels, now: Instant) -> Div {
         let elapsed = now.duration_since(self.started);
         let (strength, _) = self.burst.sample(elapsed);
         if strength == 0.0 {

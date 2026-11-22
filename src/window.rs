@@ -4660,29 +4660,20 @@ impl AppWindow {
         }
         el = shadow(el, f.shadow.as_deref());
         let body = div().flex_1().min_h_0().flex().child(inner);
-        let el = if let Some(h) = &f.header {
-            let head = div().flex_none().h(settings::z(pane_size::header_height(h))).w_full().flex()
-                .child(self.render_slot(&format!("{}#frame", n.id), cx));
-            if h.hover() {
-                let head = head.absolute().left_0().right_0().opacity(0.).group_hover(group, |s| s.opacity(1.));
-                let head = if h.bottom() { head.bottom_0() } else { head.top_0() };
-                el.child(body).child(head)
-            } else if h.bottom() {
-                el.child(body).child(head)
-            } else {
-                el.child(head).child(body)
-            }
-        } else {
-            el.child(body)
-        };
+        let pulse = self.typing_pulse.as_ref()
+            .filter(|pulse| on && f.typing_pulse.is_enabled() && pulse.pane == n.id);
+        let finish_frame = |el, cx: &App| pane_pulse::finish_frame(el, pulse, line, f.radius, cx);
 
-        if on && f.typing_pulse.is_enabled() && !cx.reduce_motion()
-            && let (Some(line), Some(pulse)) = (line, &self.typing_pulse)
-            && pulse.pane == n.id
-        {
-            return pulse.paint(el, c(&line.color), settings::z(f.radius.unwrap_or_default()), cx.background_executor().now()).into_any_element();
+        let Some(h) = &f.header else { return finish_frame(el.child(body), cx) };
+        let head = div().flex_none().h(settings::z(pane_size::header_height(h))).w_full().flex()
+            .child(self.render_slot(&format!("{}#frame", n.id), cx));
+        if h.hover() {
+            let head = head.absolute().left_0().right_0().opacity(0.).group_hover(group, |s| s.opacity(1.));
+            let head = if h.bottom() { head.bottom_0() } else { head.top_0() };
+            return finish_frame(el.child(body).child(head), cx);
         }
-        el.into_any_element()
+        let el = if h.bottom() { el.child(body).child(head) } else { el.child(head).child(body) };
+        finish_frame(el, cx)
     }
 
     /// `frame`: how panes are wrapped here (inside a framed tab), else None.
