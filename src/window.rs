@@ -12,12 +12,12 @@ mod pane_pulse;
 mod pane_size;
 mod titlebar;
 
-use crate::layout::{Axis, Background as Paint, Content, Fit, HeaderContent, Kind, Line, Node, PaneFrame, Size as Span, TypingPulse};
+use crate::layout::{Axis, Background as Paint, Content, Fit, HeaderContent, Kind, Line, Node, PaneFrame, Size as Span};
 use crate::model::{self, Tab, Model};
 use crate::mods::{self, Found, Instance, Request};
 use crate::settings;
 use crate::layout_sync;
-use crate::terminal::{KeyboardInputQueued, TerminalEvent, TerminalView, scroll_target};
+use crate::terminal::{TerminalEvent, TerminalView, scroll_target};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
 use gpui_shell::action::ShellAction;
@@ -4578,71 +4578,6 @@ impl AppWindow {
         (frame.lone || ctx.root.panes().len() > 1).then_some(frame)
     }
 
-    fn pane_has_typing_focus(&self, pane: &str, terminal: EntityId, window: &Window) -> bool {
-        // A pane can show a different terminal or lose the keyboard while an event is queued.
-        window.is_window_active()
-            && self.focused_pane.as_deref() == Some(pane)
-            && self.pane_term(pane).is_some_and(|term| {
-                term.view.entity_id() == terminal && term.focus.is_focused(window)
-            })
-    }
-
-    fn typing_pulse_timing(&self) -> Option<&TypingPulse> {
-        let frame = self.pane_frame()?;
-        let border = pane_size::frame_border(frame, true)?;
-        (frame.typing_pulse.is_enabled() && border.width > 0.0).then_some(&frame.typing_pulse)
-    }
-
-    fn sync_typing_observers(&mut self, window: &Window, cx: &mut Context<Self>) {
-        let shown: HashSet<_> = self.model.active_tab().filter(|_| self.typing_pulse_timing().is_some())
-            .into_iter()
-            .flat_map(|tab| tab.shown().visible_blocks())
-            .filter_map(|pane| self.pane_term(&pane.id).map(|term| term.view.entity_id()))
-            .collect();
-
-        for (slot, term) in &mut self.terms {
-            if !shown.contains(&term.view.entity_id()) {
-                term.typing_observer = None;
-            } else if term.typing_observer.is_none() {
-                let pane = slot.strip_suffix(SWAP).unwrap_or(slot).to_owned();
-                let observer = term.view.update(cx, |terminal, _| terminal.enable_keyboard_input_observer());
-                let subscription = cx.subscribe_in(&term.view, window, move |this, terminal, input: &KeyboardInputQueued, window, cx| {
-                    this.pulse_typed_pane(&pane, terminal.entity_id(), input.at, window, cx);
-                });
-                term.typing_observer = Some((observer, subscription));
-            }
-        }
-        if self.typing_pulse.as_ref().is_some_and(|pulse| {
-            !shown.contains(&pulse.terminal) || self.typing_pulse_timing() != Some(&pulse.timing)
-        }) {
-            self.typing_pulse = None;
-        }
-    }
-
-    fn pulse_typed_pane(
-        &mut self,
-        pane: &str,
-        terminal: EntityId,
-        at: Instant,
-        window: &Window,
-        cx: &mut Context<Self>,
-    ) {
-        if !self.pane_has_typing_focus(pane, terminal, window) {
-            return;
-        }
-
-        if !self.model.active_tab().is_some_and(|tab| tab.shown().find(pane).is_some()) {
-            return;
-        }
-
-        let Some(timing) = self.typing_pulse_timing() else { return };
-        let now = cx.background_executor().now();
-        if let Some(pulse) = pane_pulse::PaneTypingPulse::start(pane, terminal, at, now, self.typing_pulse.as_ref(), timing) {
-            self.typing_pulse = Some(pulse);
-            cx.notify();
-        }
-    }
-
     /// A pane in its frame: the look, and the header mod above or below it
     /// (on hover: drawn over the terminal, so it never resizes).
     fn frame_pane(&self, n: &Node, f: &PaneFrame, on: bool, inner: AnyElement, cx: &mut Context<Self>) -> AnyElement {
@@ -5670,13 +5605,7 @@ impl Render for AppWindow {
             self.refresh_snapshot_mods(cx);
         }
         let focused = self.focused_path(window, cx);
-        if self.typing_pulse.as_ref().is_some_and(|pulse| {
-            !focused.contains(&pulse.pane) || !self.pane_has_typing_focus(&pulse.pane, pulse.terminal, window)
-        }) {
-            self.typing_pulse = None;
-        } else if let Some(pulse) = self.typing_pulse.as_mut() {
-            pulse.schedule_frame(window, cx);
-        }
+        self.update_typing_pulse(&focused, window, cx);
         let tree = self.render_node(&self.chrome, &focused, None, cx);
         let tree = self.window_frame(tree, window, cx);
         let overlays = self.render_overlays(window.viewport_size(), cx);

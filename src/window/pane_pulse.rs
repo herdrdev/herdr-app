@@ -1,10 +1,90 @@
+use super::{AppWindow, SWAP, pane_size};
 use crate::layout::{Line, TypingPulse, TypingPulseStep};
 use crate::settings;
-use gpui::{AnyElement, App, BorderStyle, Corners, Div, Edges, EntityId, Hsla, IntoElement, ParentElement, Pixels, Styled, Task, Window, canvas, quad, rgb};
+use crate::terminal::KeyboardInputQueued;
+use gpui::{AnyElement, App, BorderStyle, Context, Corners, Div, Edges, EntityId, Hsla, IntoElement, ParentElement, Pixels, Styled, Task, Window, canvas, quad, rgb};
+use std::collections::HashSet;
 use std::time::{Duration, Instant, SystemTime, UNIX_EPOCH};
 
 pub(super) const DEFAULT_DURATION: Duration = Duration::from_millis(880);
 const COLORS: [&str; 4] = ["accent", "ansi4", "ansi5", "ansi6"];
+
+impl AppWindow {
+    fn pane_has_typing_focus(&self, pane: &str, terminal: EntityId, window: &Window) -> bool {
+        // A pane can show a different terminal or lose the keyboard while an event is queued.
+        window.is_window_active()
+            && self.focused_pane.as_deref() == Some(pane)
+            && self.pane_term(pane).is_some_and(|term| {
+                term.view.entity_id() == terminal && term.focus.is_focused(window)
+            })
+    }
+
+    fn typing_pulse_timing(&self) -> Option<&TypingPulse> {
+        let frame = self.pane_frame()?;
+        let border = pane_size::frame_border(frame, true)?;
+        (frame.typing_pulse.is_enabled() && border.width > 0.0).then_some(&frame.typing_pulse)
+    }
+
+    pub(super) fn sync_typing_observers(&mut self, window: &Window, cx: &mut Context<Self>) {
+        let shown: HashSet<_> = self.model.active_tab().filter(|_| self.typing_pulse_timing().is_some())
+            .into_iter()
+            .flat_map(|tab| tab.shown().visible_blocks())
+            .filter_map(|pane| self.pane_term(&pane.id).map(|term| term.view.entity_id()))
+            .collect();
+
+        for (slot, term) in &mut self.terms {
+            if !shown.contains(&term.view.entity_id()) {
+                term.typing_observer = None;
+            } else if term.typing_observer.is_none() {
+                let pane = slot.strip_suffix(SWAP).unwrap_or(slot).to_owned();
+                let observer = term.view.update(cx, |terminal, _| terminal.enable_keyboard_input_observer());
+                let subscription = cx.subscribe_in(&term.view, window, move |this, terminal, input: &KeyboardInputQueued, window, cx| {
+                    this.pulse_typed_pane(&pane, terminal.entity_id(), input.at, window, cx);
+                });
+                term.typing_observer = Some((observer, subscription));
+            }
+        }
+        if self.typing_pulse.as_ref().is_some_and(|pulse| {
+            !shown.contains(&pulse.terminal) || self.typing_pulse_timing() != Some(&pulse.timing)
+        }) {
+            self.typing_pulse = None;
+        }
+    }
+
+    pub(super) fn pulse_typed_pane(
+        &mut self,
+        pane: &str,
+        terminal: EntityId,
+        at: Instant,
+        window: &Window,
+        cx: &mut Context<Self>,
+    ) {
+        if !self.pane_has_typing_focus(pane, terminal, window) {
+            return;
+        }
+
+        if !self.model.active_tab().is_some_and(|tab| tab.shown().find(pane).is_some()) {
+            return;
+        }
+
+        let Some(timing) = self.typing_pulse_timing() else { return };
+        let now = cx.background_executor().now();
+        if let Some(pulse) = PaneTypingPulse::start(pane, terminal, at, now, self.typing_pulse.as_ref(), timing) {
+            self.typing_pulse = Some(pulse);
+            cx.notify();
+        }
+    }
+
+    pub(super) fn update_typing_pulse(&mut self, focused: &HashSet<String>, window: &Window, cx: &mut App) {
+        if self.typing_pulse.as_ref().is_some_and(|pulse| {
+            !focused.contains(&pulse.pane) || !self.pane_has_typing_focus(&pulse.pane, pulse.terminal, window)
+        }) {
+            self.typing_pulse = None;
+        } else if let Some(pulse) = self.typing_pulse.as_mut() {
+            pulse.schedule_frame(window, cx);
+        }
+    }
+}
 
 pub(super) fn finish_frame(
     frame: Div,
@@ -28,7 +108,7 @@ pub(super) struct PaneTypingPulse {
     pub(super) pane: String,
     pub(super) terminal: EntityId,
     pub(super) started: Instant,
-    pub(super) timing: TypingPulse,
+    timing: TypingPulse,
     burst: Burst,
     wake: Option<Wake>,
 }
@@ -40,7 +120,7 @@ struct Wake {
 }
 
 impl PaneTypingPulse {
-    pub(super) fn start(
+    fn start(
         pane: &str,
         terminal: EntityId,
         at: Instant,
@@ -74,7 +154,7 @@ impl PaneTypingPulse {
         now.duration_since(self.started) < self.burst.duration
     }
 
-    pub(super) fn schedule_frame(&mut self, window: &Window, cx: &mut App) {
+    fn schedule_frame(&mut self, window: &Window, cx: &mut App) {
         if cx.reduce_motion() {
             self.wake = None;
             return;
