@@ -89,3 +89,23 @@ test("palette offers only the themes that can show in the current appearance", (
   // win98 is the Herdr 98 layout's own theme, so it isn't offered here.
   expect(offered()).toEqual(["paper", "mine-light"]);
 });
+
+test("palette moves with ctrl-n and ctrl-p as with down and up", () => {
+  const view = new Palette();
+  view.query = "command"; view.at = 0; view.scroll = 0; view.input = {}; view.handle = {};
+  view.rows = () => Array.from({ length: 5 }, (_, i) => ({ e: { name: "test", title: `Command ${i}`, args: {} } }));
+  const press = (key: string, keystroke: string) => {
+    let stopped = false;
+    find(view.render(), "palette")!.calls.on_key_down[0]({ key, keystroke }, { notify() {}, stop_propagation() { stopped = true; } });
+    return stopped;
+  };
+  expect(press("n", "ctrl-n")).toBe(true);
+  expect(press("n", "ctrl-n")).toBe(true);
+  expect(view.at).toBe(2);
+  expect(press("p", "ctrl-p")).toBe(true);
+  expect(view.at).toBe(1);
+  // Plain letters are typing, not movement.
+  expect(press("n", "n")).toBe(false);
+  expect(press("p", "p")).toBe(false);
+  expect(view.at).toBe(1);
+});

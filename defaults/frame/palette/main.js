@@ -2,7 +2,7 @@
 // Places (spaces, tabs) stay in the picker. Fuzzy: your letters in
 // order, word starts and runs rank higher. Empty: recent first, then every
 // group. Choices are entries of their own ("Layout: Zen"); commands that need
-// a name ask for it. Enter runs, ↑/↓ move, Esc closes.
+// a name ask for it. Enter runs, ↑/↓ (or ctrl-n/ctrl-p) move, Esc closes.
 // The app's own mod: rewritten from the binary on every start.
 
 import { View, div, svg } from "gpui-kit";
@@ -280,7 +280,9 @@ export default class Palette extends View {
       .gap(10)
       .bg(t.popover)
       .on_key_down((e, cx) => {
-        const k = e.key;
+        // ctrl-n/ctrl-p move too, as in Emacs and most pickers.
+        const ks = e.keystroke;
+        const k = ks === "ctrl-n" ? "down" : ks === "ctrl-p" ? "up" : e.key;
         if (k === "escape") return this.close();
         // Stops at the ends: wrapping jumps out of sight.
         if (k === "down") this.at = Math.min(this.at + 1, rows.length - 1);
