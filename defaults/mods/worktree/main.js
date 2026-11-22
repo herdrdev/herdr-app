@@ -3,7 +3,7 @@
 
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar } from "gpui-base";
-import { run, props, closeOverlay, theme, spaces, panes, exec, home, appHome, readTextFile } from "herdr";
+import { run, props, closeOverlay, theme, spaces, panes, exec, home, appHome, readTextFile, window } from "herdr";
 
 // Where a space is now: its first terminal's live folder, else where it was made.
 function place(s, all = panes()) {
@@ -247,10 +247,15 @@ export default class Worktree extends View {
     const lock = checkout?.find((field) => field === "locked" || field.startsWith("locked "));
     if (lock) return lock === "locked" ? "This worktree is locked." : `This worktree is locked: ${lock.slice(7)}`;
 
+    // Git on a remote Windows machine reports a drive-letter or UNC path.
+    const windows = this.on ? /^(?:[A-Za-z]:\/|\/\/)/.test(this.repo.top) : window().platform === "windows";
+    const closeSpace = () => { if (s?.id) run("space.close", { id: s.id, confirmed: true }); };
+    // A shell sitting in the folder can keep it busy on Windows.
+    if (windows) closeSpace();
     const force = this.dirty || mods.length > 0;
     const r = await git(this.repo.main, ["worktree", "remove", ...(force ? ["--force"] : []), this.repo.top], this.on, 600_000);
     if (!r.ok) return r.err || "git worktree remove failed.";
-    if (s?.id) run("space.close", { id: s.id, confirmed: true });
+    if (!windows) closeSpace();
     return "";
   }
 
