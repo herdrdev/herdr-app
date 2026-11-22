@@ -244,8 +244,7 @@ export default class Worktree extends View {
     if (!list.ok) return list.err || "git worktree list failed.";
     const checkout = list.out.split(/\n\n+/).map((record) => record.split("\n"))
       .find(([path]) => path === `worktree ${this.repo.top}`);
-    if (!checkout) return "Git could not find this worktree.";
-    const lock = checkout.find((field) => field === "locked" || field.startsWith("locked "));
+    const lock = checkout?.find((field) => field === "locked" || field.startsWith("locked "));
     if (lock) return lock === "locked" ? "This worktree is locked." : `This worktree is locked: ${lock.slice(7)}`;
 
     const force = this.dirty || mods.length > 0;

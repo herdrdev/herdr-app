@@ -305,6 +305,25 @@ test("remove shows a locked checkout's reason and keeps the space open on Window
   });
 });
 
+test("remove lets Git resolve the checkout when its listed path is spelled differently", async () => {
+  await withLinkedCheckout(async (_main, linked) => {
+    const dialog = removeDialog(linked, {
+      exec: async (command, args, options) => {
+        const result = await execute(command, args, options);
+        if (args.includes("--porcelain") && args.includes("worktree")) {
+          result.stdout = result.stdout.replaceAll(/^(worktree .*\/)linked$/gm, "$1LINKED");
+        }
+        return result;
+      },
+    });
+    await dialog.ready;
+    await dialog.enter();
+    expect(dialog.worktree.error).toBe("");
+    expect(dialog.closedSpaces).toEqual([{ id: "target", checkoutPresent: false }]);
+    expect(existsSync(linked)).toBe(false);
+  });
+});
+
 for (const platform of ["linux", "windows"]) {
   test("remove keeps the space open if Git refuses after preflight on " + platform, async () => {
     await withLinkedCheckout(async (main, linked) => {
