@@ -307,11 +307,17 @@ test("remove shows a locked checkout's reason and keeps the space open on Window
 
 test("remove lets Git resolve the checkout when its listed path is spelled differently", async () => {
   await withLinkedCheckout(async (_main, linked) => {
+    const top = fixtureGit(linked, "rev-parse", "--show-toplevel");
+    const record = `worktree ${top}`;
+    const differentlySpelled = record.replace(/linked with spaces$/, "LINKED WITH SPACES");
+    expect(differentlySpelled).not.toBe(record);
     const dialog = removeDialog(linked, {
       exec: async (command, args, options) => {
         const result = await execute(command, args, options);
-        if (args.includes("--porcelain") && args.includes("worktree")) {
-          result.stdout = result.stdout.replaceAll(/^(worktree .*\/)linked$/gm, "$1LINKED");
+        if (args.includes("worktree") && args.includes("list") && args.includes("--porcelain")) {
+          const records = result.stdout.split(/\r?\n/);
+          expect(records).toContain(record);
+          result.stdout = records.map(line => line === record ? differentlySpelled : line).join("\n");
         }
         return result;
       },
