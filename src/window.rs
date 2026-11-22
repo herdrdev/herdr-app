@@ -8,6 +8,7 @@ use crate::hc::Core;
 mod floats;
 mod movable;
 mod pane_drag;
+mod pane_pulse;
 mod pane_size;
 mod titlebar;
 
@@ -297,6 +298,7 @@ struct Term {
     address: String,
     focus: FocusHandle,
     _sub: Subscription,
+    typing_observer: Option<(Rc<()>, Subscription)>,
 }
 
 enum TerminalChange {
@@ -423,6 +425,7 @@ pub struct AppWindow {
     model: Model,
     /// Terminal views by block id (panes and chrome terminal blocks).
     terms: HashMap<String, Term>,
+    typing_pulse: Option<pane_pulse::PaneTypingPulse>,
     /// Mod copies by slot (block id, `<stack>#header`, or `overlay:<id>`).
     copies: HashMap<String, Copy>,
     overlays: Vec<Overlay>,
@@ -552,6 +555,7 @@ impl AppWindow {
             float_leave: HashMap::new(),
             model: Model::default(),
             terms: HashMap::new(),
+            typing_pulse: None,
             copies: HashMap::new(),
             overlays: Vec::new(),
             toast_scroll: ScrollHandle::new(),
@@ -1603,7 +1607,7 @@ impl AppWindow {
                 TerminalEvent::Notice { title, body } => this.error_notice(title, body, window, cx),
             });
             let focus = view.read(cx).focus_handle().clone();
-            if let Some(previous) = self.terms.insert(id, Term { view, address, focus, _sub: sub }) {
+            if let Some(previous) = self.terms.insert(id, Term { view, address, focus, _sub: sub, typing_observer: None }) {
                 self.publish_selection(&previous.address, window, cx);
             }
         }
@@ -1614,6 +1618,7 @@ impl AppWindow {
                 self.publish_selection(&t.address, window, cx);
             }
         }
+        self.sync_typing_observers(window, cx);
 
         // A mod copy lives while its slot is in the layout, hidden or not (an
         // inactive stack child, a hidden column, a pane in another tab), so it
@@ -4590,15 +4595,20 @@ impl AppWindow {
         }
         el = shadow(el, f.shadow.as_deref());
         let body = div().flex_1().min_h_0().flex().child(inner);
-        let Some(h) = &f.header else { return el.child(body).into_any_element() };
+        let pulse = self.typing_pulse.as_ref()
+            .filter(|pulse| on && f.typing_pulse.is_enabled() && pulse.pane == n.id);
+        let finish_frame = |el, cx: &App| pane_pulse::finish_frame(el, pulse, line, f.radius, cx);
+
+        let Some(h) = &f.header else { return finish_frame(el.child(body), cx) };
         let head = div().flex_none().h(settings::z(pane_size::header_height(h))).w_full().flex()
             .child(self.render_slot(&format!("{}#frame", n.id), cx));
         if h.hover() {
             let head = head.absolute().left_0().right_0().opacity(0.).group_hover(group, |s| s.opacity(1.));
             let head = if h.bottom() { head.bottom_0() } else { head.top_0() };
-            return el.child(body).child(head).into_any_element();
+            return finish_frame(el.child(body).child(head), cx);
         }
-        if h.bottom() { el.child(body).child(head) } else { el.child(head).child(body) }.into_any_element()
+        let el = if h.bottom() { el.child(body).child(head) } else { el.child(head).child(body) };
+        finish_frame(el, cx)
     }
 
     /// `frame`: how panes are wrapped here (inside a framed tab), else None.
@@ -5595,6 +5605,7 @@ impl Render for AppWindow {
             self.refresh_snapshot_mods(cx);
         }
         let focused = self.focused_path(window, cx);
+        self.update_typing_pulse(&focused, window, cx);
         let tree = self.render_node(&self.chrome, &focused, None, cx);
         let tree = self.window_frame(tree, window, cx);
         let overlays = self.render_overlays(window.viewport_size(), cx);
@@ -7162,6 +7173,8 @@ mod tests {
             assert!(this.focused_path(window, cx).contains("pane"));
         }));
     }
+
+    include!("window/pane_pulse_tests.rs");
 
     #[test]
     fn new_tabs_without_focus_leave_the_shown_tab() {

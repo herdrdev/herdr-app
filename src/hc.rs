@@ -519,6 +519,11 @@ impl Core {
         }
     }
 
+    /// Whether the desktop writer accepted the bytes into its queue.
+    pub(crate) fn queue_input(&self, channel: u32, bytes: &[u8]) -> bool {
+        !bytes.is_empty() && self.writer.send(encode(channel, DATA, bytes)).is_ok()
+    }
+
     /// Terminal-engine replies are not typing. Older paths require legacy DATA.
     pub fn automatic_input(&self, channel: u32, bytes: &[u8]) {
         if !bytes.is_empty() {
@@ -571,6 +576,11 @@ impl Drop for Core {
 pub fn offline() -> Arc<Core> {
     let (writer, frames) = mpsc::channel();
     std::mem::forget(frames);
+    offline_with_writer(writer)
+}
+
+#[cfg(test)]
+fn offline_with_writer(writer: mpsc::Sender<Vec<u8>>) -> Arc<Core> {
     let (lost_tx, lost) = async_channel::bounded(1);
     std::mem::forget(lost_tx);
     let child = std::process::Command::new(std::env::current_exe().unwrap()).arg("--help").stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
@@ -582,6 +592,20 @@ pub fn offline() -> Arc<Core> {
         child: Mutex::new(child),
         lost,
     })
+}
+
+/// Records terminal DATA frames without starting or contacting a real core.
+#[cfg(test)]
+pub fn record_terminal_input() -> (Arc<Core>, impl Fn() -> Vec<(u32, Vec<u8>)>) {
+    let (writer, frames) = mpsc::channel();
+    let core = offline_with_writer(writer);
+    let drain = move || {
+        frames.try_iter().filter_map(|frame| {
+            let (channel, kind, bytes) = read_frame(&mut frame.as_slice()).unwrap();
+            (channel != 0 && kind == DATA).then_some((channel, bytes))
+        }).collect()
+    };
+    (core, drain)
 }
 
 /// A core that answers every call at once: `terminal.run` with a new address,

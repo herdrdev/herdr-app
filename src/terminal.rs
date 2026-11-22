@@ -18,7 +18,7 @@ use std::future::Future;
 use std::task::Poll;
 use crate::links;
 use std::path::{Path, PathBuf};
-use std::rc::Rc;
+use std::rc::{Rc, Weak};
 use std::sync::Arc;
 
 const OUTPUT_TIME_PER_TURN: Duration = Duration::from_millis(6);
@@ -80,6 +80,11 @@ pub enum TerminalEvent {
     ContextMenu(Point<Pixels>),
     /// Something the person asked for failed: an error toast.
     Notice { title: String, body: String },
+}
+
+/// A focused terminal queued keyboard input. The emitter identifies the terminal.
+pub(crate) struct KeyboardInputQueued {
+    pub(crate) at: Instant,
 }
 
 /// Rows of scrollback history as Ghostty's scrollbar reports them. `from_bottom`
@@ -177,6 +182,8 @@ pub struct TerminalView {
     shown_in: Cell<u64>,
     /// When the person last typed here: output right after is shown at once.
     typed_at: Cell<Option<Instant>>,
+    /// The observer owns the lifetime of its opt-in.
+    keyboard_input_observer: Weak<()>,
     /// Scrolled this gesture, in lines, toward the next whole one.
     scrolled: Point<f32>,
     /// Search UI and query belong to this terminal view, not the window. Each
@@ -214,6 +221,7 @@ pub fn flush_output_clock(cx: &mut gpui::App) {
 }
 
 impl EventEmitter<TerminalEvent> for TerminalView {}
+impl EventEmitter<KeyboardInputQueued> for TerminalView {}
 
 #[derive(Clone, Copy, PartialEq, Eq)]
 struct DisplayFacts {
@@ -345,6 +353,7 @@ impl TerminalView {
             was_focused: false,
             shown_in: Cell::new(0),
             typed_at: Cell::new(None),
+            keyboard_input_observer: Weak::new(),
             scrolled: point(0.0, 0.0),
             search_open: false,
             search_keys: false,
@@ -679,22 +688,39 @@ impl TerminalView {
         self.shown_in.get() == FRAME.load(Ordering::Relaxed)
     }
 
-    fn send(&self, bytes: &[u8]) {
+    fn send(&self, bytes: &[u8], keyboard_input: Option<(&Window, &mut Context<Self>)>) {
         self.typed_at.set(Some(Instant::now()));
         let mut g = self.grid.borrow_mut();
         if let Some(ch) = g.channel
             && !bytes.is_empty()
         {
             g.vt.scroll_to_bottom();
-            g.core.input(ch, bytes);
+            if let Some((window, cx)) = keyboard_input
+                && self.keyboard_input_observer.strong_count() > 0
+                && self.focus.is_focused(window)
+            {
+                let queued = g.core.queue_input(ch, bytes);
+                drop(g);
+                if queued {
+                    cx.emit(KeyboardInputQueued { at: cx.background_executor().now() });
+                }
+            } else {
+                g.core.input(ch, bytes);
+            }
         }
+    }
+
+    pub(crate) fn enable_keyboard_input_observer(&mut self) -> Rc<()> {
+        let observer = Rc::new(());
+        self.keyboard_input_observer = Rc::downgrade(&observer);
+        observer
     }
 
     fn paste_paths(&self, paths: impl IntoIterator<Item = String>) {
         match drag_paths::quote_paths(paths, &self.address, cfg!(windows)) {
             Ok(text) => {
                 let bytes = self.grid.borrow().vt.paste_bytes(&text);
-                self.send(&bytes);
+                self.send(&bytes, None);
             }
             Err(body) => drag_paths::unavailable(body),
         }
@@ -798,7 +824,7 @@ impl TerminalView {
             self.dropped(paths, cx);
         } else if let Some(text) = item.text() {
             let bytes = self.grid.borrow().vt.paste_bytes(&text);
-            self.send(&bytes);
+            self.send(&bytes, None);
         } else if item.entries().iter().any(|e| matches!(e, ClipboardEntry::Image(_))) {
             self.paste_image(cx);
         }
@@ -812,7 +838,7 @@ impl TerminalView {
         let text = if cfg!(windows) { cx.read_from_clipboard().and_then(|c| c.text()) } else { None };
         let bytes = paste_image_fallback(&mut self.grid.borrow_mut().vt, text.as_deref());
         if let Some(bytes) = bytes {
-            self.send(&bytes);
+            self.send(&bytes, None);
         }
     }
 
@@ -1031,7 +1057,7 @@ impl TerminalView {
         }
         let bytes = key_bytes(&mut self.grid.borrow_mut().vt, ev);
         if let Some(bytes) = bytes {
-            self.send(&bytes);
+            self.send(&bytes, Some((window, cx)));
             cx.stop_propagation();
         }
     }
@@ -2404,7 +2430,7 @@ impl EntityInputHandler for TerminalView {
         // be a way around that (see `key_down`); with the terminal focused,
         // input methods type into the program as usual.
         if !self.find_field_focused(window, cx) {
-            self.send(text.as_bytes());
+            self.send(text.as_bytes(), Some((window, cx)));
         }
         cx.notify();
     }
@@ -2508,7 +2534,7 @@ impl Render for TerminalView {
                 // `send:<text>` bindings from keys.json type into this terminal.
                 match a.id().strip_prefix("send:") {
                     Some(_) if this.find_field_focused(window, cx) => cx.stop_propagation(),
-                    Some(text) => this.send(text.as_bytes()),
+                    Some(text) => this.send(text.as_bytes(), Some((window, cx))),
                     None => cx.propagate(),
                 }
             }))
@@ -2589,7 +2615,7 @@ impl Render for TerminalView {
                     #[cfg(target_os = "linux")]
                     if let Some(text) = _cx.read_from_primary().and_then(|item| item.text()).filter(|text| !text.is_empty()) {
                         let bytes = this.grid.borrow().vt.paste_bytes(&text);
-                        this.send(&bytes);
+                        this.send(&bytes, None);
                     }
                     #[cfg(target_os = "windows")]
                     this.paste(_cx);
@@ -3542,6 +3568,8 @@ mod tests {
             assert!(terminal.typed_at.get().is_some(), "text did not reach the program once the terminal held the keys");
         });
     }
+
+    include!("terminal/keyboard_input_tests.rs");
 
     #[gpui::test]
     fn typing_reaches_the_program_while_the_find_bar_is_open(cx: &mut gpui::TestAppContext) {
