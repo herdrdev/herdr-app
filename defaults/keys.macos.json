@@ -71,5 +71,9 @@
     "cmd-left": "send:\u0001",
     "cmd-right": "send:\u0005",
     "cmd-backspace": "send:\u0015"
+  },
+  "mod:frame-palette": {
+    "ctrl-n": "frame-palette.down",
+    "ctrl-p": "frame-palette.up"
   }
 }

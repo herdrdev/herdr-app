@@ -2,12 +2,13 @@
 // Places (spaces, tabs) stay in the picker. Fuzzy: your letters in
 // order, word starts and runs rank higher. Empty: recent first, then every
 // group. Choices are entries of their own ("Layout: Zen"); commands that need
-// a name ask for it. Enter runs, ↑/↓ (or ctrl-n/ctrl-p) move, Esc closes.
+// a name ask for it. Enter runs, ↑/↓ move, Esc closes. keys.json's
+// `mod:frame-palette` moves it too (`frame-palette.down`, ctrl-n by default).
 // The app's own mod: rewritten from the binary on every start.
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { commands, layouts, keys, run, theme, themes, settings, props, closeOverlay, openOverlay, shared, window as win } from "herdr";
+import { commands, layouts, keys, run, theme, themes, settings, props, closeOverlay, openOverlay, shared, nextCommand, window as win } from "herdr";
 
 // The list keeps one height while you move: rows and group titles have fixed
 // heights, and the window shows as many as fit in LIST_H.
@@ -149,6 +150,20 @@ export default class Palette extends View {
     this.scroll = 0;
     this.recent = JSON.parse(localStorage.getItem("recent") ?? "[]");
     this.handle = cx.focus_handle();
+    // keys.json's `mod:frame-palette` section: ctrl-n/ctrl-p by default.
+    cx.spawn(async (cx) => {
+      for (;;) {
+        if (this.move(await nextCommand(), this.rows())) cx.notify();
+      }
+    });
+  }
+
+  // Moves the selection; stops at the ends: wrapping jumps out of sight.
+  move(how, rows) {
+    const steps = { down: 1, up: -1, page_down: SHOWN, page_up: -SHOWN };
+    if (!Object.hasOwn(steps, how)) return false;
+    this.at = Math.max(0, Math.min(this.at + steps[how], rows.length - 1));
+    return true;
   }
 
   close() {
@@ -280,16 +295,9 @@ export default class Palette extends View {
       .gap(10)
       .bg(t.popover)
       .on_key_down((e, cx) => {
-        // ctrl-n/ctrl-p move too, as in Emacs and most pickers.
-        const ks = e.keystroke;
-        const k = ks === "ctrl-n" ? "down" : ks === "ctrl-p" ? "up" : e.key;
+        const k = e.key;
         if (k === "escape") return this.close();
-        // Stops at the ends: wrapping jumps out of sight.
-        if (k === "down") this.at = Math.min(this.at + 1, rows.length - 1);
-        else if (k === "up") this.at = Math.max(this.at - 1, 0);
-        else if (k === "pagedown") this.at = Math.min(this.at + SHOWN, rows.length - 1);
-        else if (k === "pageup") this.at = Math.max(this.at - SHOWN, 0);
-        else return;
+        if (!this.move({ pagedown: "page_down", pageup: "page_up" }[k] ?? k, rows)) return;
         cx.stop_propagation();
         cx.notify();
       })

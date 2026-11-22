@@ -1176,7 +1176,12 @@ fn shipped_layouts_and_keys() {
         layouts.insert(path.file_stem().unwrap().to_str().unwrap().to_owned());
     }
     assert_eq!(layouts, crate::window::shipped_layouts().into_iter().map(str::to_owned).collect());
-    let mod_commands = ["ribbon.next"];
+    let mod_commands = ["ribbon.next", "frame-palette.down", "frame-palette.up"];
+    // The app's own mods (`frame-<name>`) ship in defaults/frame/<name>.
+    let shipped_mod = |m: &str| match m.strip_prefix("frame-") {
+        Some(f) => Path::new(env!("CARGO_MANIFEST_DIR")).join("defaults/frame").join(f).join("main.js").is_file(),
+        None => mods.contains(m),
+    };
     for text in [
         include_str!("../../defaults/keys.json"),
         include_str!("../../defaults/keys.macos.json"),
@@ -1201,7 +1206,7 @@ fn shipped_layouts_and_keys() {
                     action == "terminal"
                         || action.starts_with("send:")
                         || crate::commands::COMMANDS.iter().any(|c| c.name == name)
-                        || (mod_commands.contains(&name) && mods.contains(name.split('.').next().unwrap())),
+                        || (mod_commands.contains(&name) && shipped_mod(name.split('.').next().unwrap())),
                     "unknown shipped key action {action}"
                 );
             }

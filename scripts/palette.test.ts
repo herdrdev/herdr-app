@@ -24,10 +24,16 @@ let platform = "linux";
 const icons: string[] = [];
 let dark = true;
 const shipped = [["graphite", false], ["ink", false], ["moss", false], ["paper", true], ["atom-one-dark", false], ["mine-light", true], ["win98", true]];
+// nextCommand() resolves with what the next key binding sends.
+const commandQueue: ((c: string) => void)[] = [];
+const nextCommand = () => new Promise<string>((resolve) => commandQueue.push(resolve));
+const storage = { getItem: () => null, setItem() {} };
+const inputState = { new: () => ({ on() {}, focus() {}, value: () => "" }) };
 const values = {
   View: class {}, div: element, svg: (path: string) => { icons.push(path); return element(); }, v_flex: element, h_flex: element, Input: { new: element }, theme: () => ({}), keys: () => [], win: () => ({ platform }),
   commands: () => [{ name: "app.theme", args: [{ name: "name", required: true }], about: "Use a theme." }], layouts: () => ["main", "win98"], shared: () => "main",
   themes: () => shipped.map(([name, light]) => ({ name, light })), settings: () => ({ dark }),
+  nextCommand, localStorage: storage, InputState: inputState,
 };
 const Palette = new Function(...Object.keys(values), source.replace(/^import .*;\n/gm, "").replace("export default class Palette", "return class Palette"))(...Object.values(values));
 function find(root: Element, id: string): Element | undefined {
@@ -90,22 +96,45 @@ test("palette offers only the themes that can show in the current appearance", (
   expect(offered()).toEqual(["paper", "mine-light"]);
 });
 
-test("palette moves with ctrl-n and ctrl-p as with down and up", () => {
+test("palette moves with the commands keys.json sends it, and arrows still move it", async () => {
   const view = new Palette();
-  view.query = "command"; view.at = 0; view.scroll = 0; view.input = {}; view.handle = {};
-  view.rows = () => Array.from({ length: 5 }, (_, i) => ({ e: { name: "test", title: `Command ${i}`, args: {} } }));
-  const press = (key: string, keystroke: string) => {
+  const tasks: Promise<void>[] = [];
+  let notified = 0;
+  const cx = { spawn: (f: any) => tasks.push(f({ notify: () => notified++ })), timer: { after() {} }, focus_handle: () => ({}) };
+  view.init({}, cx);
+  view.rows = () => Array.from({ length: 25 }, (_, i) => ({ e: { name: "test", title: `Command ${i}`, args: {} } }));
+  const send = async (c: string) => { commandQueue.shift()!(c); await new Promise((r) => setTimeout(r, 0)); };
+  await send("down");
+  await send("down");
+  expect(view.at).toBe(2);
+  await send("up");
+  expect(view.at).toBe(1);
+  await send("page_down");
+  expect(view.at).toBe(11);
+  await send("page_down");
+  await send("page_down");
+  expect(view.at).toBe(24);
+  await send("page_up");
+  expect(view.at).toBe(14);
+  // Unknown commands (and prototype names) leave the selection alone and don't redraw.
+  const before = notified;
+  await send("toString");
+  await send("nope");
+  expect(view.at).toBe(14);
+  expect(notified).toBe(before);
+  expect(notified).toBe(7);
+
+  const press = (key: string) => {
     let stopped = false;
-    find(view.render(), "palette")!.calls.on_key_down[0]({ key, keystroke }, { notify() {}, stop_propagation() { stopped = true; } });
+    view.query = "command"; view.input = {};
+    find(view.render(), "palette")!.calls.on_key_down[0]({ key }, { notify() {}, stop_propagation() { stopped = true; } });
     return stopped;
   };
-  expect(press("n", "ctrl-n")).toBe(true);
-  expect(press("n", "ctrl-n")).toBe(true);
-  expect(view.at).toBe(2);
-  expect(press("p", "ctrl-p")).toBe(true);
-  expect(view.at).toBe(1);
-  // Plain letters are typing, not movement.
-  expect(press("n", "n")).toBe(false);
-  expect(press("p", "p")).toBe(false);
-  expect(view.at).toBe(1);
+  expect(press("down")).toBe(true);
+  expect(view.at).toBe(15);
+  expect(press("pageup")).toBe(true);
+  expect(view.at).toBe(5);
+  // Letters are typing, not movement.
+  expect(press("n")).toBe(false);
+  expect(view.at).toBe(5);
 });
