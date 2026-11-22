@@ -5,7 +5,8 @@ fn pane_typing_pulse_routes_events_and_restarts_at_expiry() {
 
 #[gpui::test]
 fn typing_pulse_lifecycle(cx: &mut TestAppContext) {
-    use super::pane_pulse::DURATION;
+    use super::pane_pulse::DEFAULT_DURATION;
+    use crate::layout::{TypingPulse, TypingPulseStep};
     use crate::terminal::{KeyboardInputQueued, TerminalView};
     use gpui::Entity;
     use serde_json::json;
@@ -51,7 +52,7 @@ fn typing_pulse_lifecycle(cx: &mut TestAppContext) {
     assert!(pulse(cx).is_none(), "the layout must opt in");
 
     edit_frame(cx, |frame| {
-        frame.typing_pulse = true;
+        frame.typing_pulse = TypingPulse::Enabled(true);
         frame.lone = false;
     });
     emit_input(&first, cx);
@@ -88,21 +89,36 @@ fn typing_pulse_lifecycle(cx: &mut TestAppContext) {
     assert_eq!(initial.0, first.entity_id());
 
     let tick = Duration::from_millis(1);
-    cx.executor().advance_clock(DURATION - tick);
+    cx.executor().advance_clock(DEFAULT_DURATION - tick);
     emit_input(&first, cx);
     assert_eq!(pulse(cx), Some(initial), "repeat input must keep the active burst");
 
     cx.executor().advance_clock(tick);
     emit_input(&first, cx);
-    assert_eq!(pulse(cx).unwrap().1.duration_since(initial.1), DURATION);
+    assert_eq!(pulse(cx).unwrap().1.duration_since(initial.1), DEFAULT_DURATION);
 
-    edit_frame(cx, |frame| frame.typing_pulse = false);
+    edit_frame(cx, |frame| frame.typing_pulse = TypingPulse::Enabled(false));
     emit_input(&first, cx);
     assert!(pulse(cx).is_none(), "disabling the layout clears the pulse and removes the handler");
     assert!(view.read_with(cx, |app, _| app.pane_term("p1").unwrap().typing_observer.is_none()));
-    edit_frame(cx, |frame| frame.typing_pulse = true);
+    edit_frame(cx, |frame| frame.typing_pulse = TypingPulse::Enabled(true));
     emit_input(&first, cx);
     assert_eq!(pulse(cx).unwrap().0, first.entity_id());
+
+    edit_frame(cx, |frame| {
+        frame.typing_pulse = TypingPulse::Custom { pulses: vec![
+            TypingPulseStep { at_ms: 12, hold_ms: 31, fade_ms: 17, strength: 0.6 }
+        ] };
+    });
+    assert!(pulse(cx).is_none(), "a layout edit clears the old burst");
+    emit_input(&first, cx);
+    let custom = pulse(cx).unwrap();
+    cx.executor().advance_clock(Duration::from_millis(59));
+    emit_input(&first, cx);
+    assert_eq!(pulse(cx), Some(custom));
+    cx.executor().advance_clock(tick);
+    emit_input(&first, cx);
+    assert_eq!(pulse(cx).unwrap().1.duration_since(custom.1), Duration::from_millis(60));
 
     cx.update(|window, cx| view.update(cx, |app, cx| {
         app.model.focus_pane("p2");

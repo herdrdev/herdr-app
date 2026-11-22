@@ -255,6 +255,49 @@ impl Header {
     }
 }
 
+#[derive(Clone, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(untagged)]
+pub enum TypingPulse {
+    Enabled(bool),
+    Custom { pulses: Vec<TypingPulseStep> },
+}
+
+impl Default for TypingPulse {
+    fn default() -> Self {
+        Self::Enabled(false)
+    }
+}
+
+impl TypingPulse {
+    fn is_off(&self) -> bool {
+        matches!(self, Self::Enabled(false))
+    }
+
+    pub fn is_enabled(&self) -> bool {
+        match self {
+            Self::Enabled(enabled) => *enabled,
+            Self::Custom { pulses } => !pulses.is_empty(),
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Serialize, Deserialize)]
+#[serde(deny_unknown_fields)]
+pub struct TypingPulseStep {
+    #[serde(default)]
+    pub at_ms: u64,
+    #[serde(default)]
+    pub hold_ms: u64,
+    #[serde(default)]
+    pub fade_ms: u64,
+    #[serde(default = "full_pulse_strength")]
+    pub strength: f32,
+}
+
+fn full_pulse_strength() -> f32 {
+    1.0
+}
+
 /// How a layout wraps each pane of the tab it shows: a look, and a
 /// header mod per pane (told its `pane` and `terminal` in props).
 #[derive(Clone, Debug, Default, PartialEq, Serialize, Deserialize)]
@@ -272,8 +315,8 @@ pub struct PaneFrame {
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub focus: Option<Line>,
     /// Pulse the focused border when keyboard input reaches its terminal.
-    #[serde(default, skip_serializing_if = "std::ops::Not::not")]
-    pub typing_pulse: bool,
+    #[serde(default, skip_serializing_if = "TypingPulse::is_off")]
+    pub typing_pulse: TypingPulse,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub radius: Option<f32>,
     /// Space between panes.
@@ -765,13 +808,32 @@ mod tests {
     #[test]
     fn pane_typing_pulse_is_opt_in() {
         let frame: PaneFrame = serde_json::from_value(serde_json::json!({})).unwrap();
-        assert!(!frame.typing_pulse);
+        assert!(!frame.typing_pulse.is_enabled());
         assert!(serde_json::to_value(frame).unwrap().get("typing_pulse").is_none());
 
         let frame: PaneFrame =
             serde_json::from_value(serde_json::json!({"typing_pulse": true})).unwrap();
-        assert!(frame.typing_pulse);
+        assert!(frame.typing_pulse.is_enabled());
         assert_eq!(serde_json::to_value(frame).unwrap()["typing_pulse"], true);
+    }
+
+    #[test]
+    fn pane_typing_pulse_accepts_custom_layout_timing() {
+        let frame: PaneFrame = serde_json::from_value(serde_json::json!({
+            "typing_pulse": { "pulses": [
+                { "hold_ms": 40, "fade_ms": 970 },
+                { "at_ms": 1500, "hold_ms": 50, "fade_ms": 320, "strength": 0.37 }
+            ]}
+        })).unwrap();
+        assert!(frame.typing_pulse.is_enabled());
+        let saved = serde_json::to_value(&frame).unwrap();
+        assert_eq!(saved["typing_pulse"]["pulses"][0]["strength"], 1.0);
+        assert_eq!(serde_json::from_value::<PaneFrame>(saved).unwrap(), frame);
+
+        let frame: PaneFrame = serde_json::from_value(serde_json::json!({
+            "typing_pulse": { "pulses": [] }
+        })).unwrap();
+        assert!(!frame.typing_pulse.is_enabled());
     }
 
     #[test]

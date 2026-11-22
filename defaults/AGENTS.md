@@ -393,6 +393,12 @@ The tab block says how each pane of the shown tab is wrapped:
   desktop app queues keyboard input for its terminal. The frame receives an
   activity signal without keys or text. The glow uses the layout's colors
   and takes no space inside the pane.
+- Use `"typing_pulse": { "pulses": [{ "hold_ms": 45, "fade_ms": 180 },
+  { "at_ms": 360, "fade_ms": 110, "strength": 0.4 }] }` for a custom pattern.
+  Supply any number of pulses. `at_ms` is relative to the start of the
+  pattern. Start, hold, and fade default to zero. Strength defaults to
+  `1.0` and is clamped to `0.0`–`1.0`. A later pulse replaces the previous
+  one when it starts. An empty list turns the effect off.
 - `header`: a mod drawn on each pane, one copy per pane, with
   `props().pane` and `props().terminal`. It reads its live facts from
   `panes()` (title, folder, branch, agent status, focused, zoomed, scroll)

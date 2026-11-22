@@ -107,6 +107,7 @@ terminal's screen and scrollback; Enter and Shift-Enter move between matches,
 Escape closes the bar while its find field has focus, and each terminal keeps its own query (reopening selects it, so typing replaces it).
 Clicking the terminal while the bar is open puts typing, including Escape, back in the program; the bar and its matches stay.
 Set `typing_pulse: true` in a layout's pane frame to flash its focused border after the desktop app queues keyboard input for the terminal. The frame receives an activity signal without keys or text.
+For custom timing, set `typing_pulse` to an object with a `pulses` list. Each pulse accepts `at_ms`, `hold_ms`, `fade_ms`, and `strength`. See the pane frame section in the layout guide for an example.
 
 It prints the created IDs (for example `{ "pane": "...", "terminal": "..." }`)
 or `{ "error": "..." }` and exits 1. Read the result, then inspect `ls` or

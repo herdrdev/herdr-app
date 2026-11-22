@@ -12,7 +12,7 @@ mod pane_pulse;
 mod pane_size;
 mod titlebar;
 
-use crate::layout::{Axis, Background as Paint, Content, Fit, HeaderContent, Kind, Line, Node, PaneFrame, Size as Span};
+use crate::layout::{Axis, Background as Paint, Content, Fit, HeaderContent, Kind, Line, Node, PaneFrame, Size as Span, TypingPulse};
 use crate::model::{self, Tab, Model};
 use crate::mods::{self, Found, Instance, Request};
 use crate::settings;
@@ -4587,14 +4587,14 @@ impl AppWindow {
             })
     }
 
-    fn typing_pulse_enabled(&self) -> bool {
-        self.pane_frame().is_some_and(|frame| {
-            frame.typing_pulse && pane_size::frame_border(frame, true).is_some_and(|line| line.width > 0.0)
-        })
+    fn typing_pulse_timing(&self) -> Option<&TypingPulse> {
+        let frame = self.pane_frame()?;
+        let border = pane_size::frame_border(frame, true)?;
+        (frame.typing_pulse.is_enabled() && border.width > 0.0).then_some(&frame.typing_pulse)
     }
 
     fn sync_typing_observers(&mut self, window: &Window, cx: &mut Context<Self>) {
-        let shown: HashSet<_> = self.model.active_tab().filter(|_| self.typing_pulse_enabled())
+        let shown: HashSet<_> = self.model.active_tab().filter(|_| self.typing_pulse_timing().is_some())
             .into_iter()
             .flat_map(|tab| tab.shown().visible_blocks())
             .filter_map(|pane| self.pane_term(&pane.id).map(|term| term.view.entity_id()))
@@ -4612,7 +4612,9 @@ impl AppWindow {
                 term.typing_observer = Some((observer, subscription));
             }
         }
-        if self.typing_pulse.as_ref().is_some_and(|pulse| !shown.contains(&pulse.terminal)) {
+        if self.typing_pulse.as_ref().is_some_and(|pulse| {
+            !shown.contains(&pulse.terminal) || self.typing_pulse_timing() != Some(&pulse.timing)
+        }) {
             self.typing_pulse = None;
         }
     }
@@ -4629,13 +4631,13 @@ impl AppWindow {
             return;
         }
 
-        if !self.typing_pulse_enabled() || !self.model.active_tab().is_some_and(|tab| tab.shown().find(pane).is_some())
-        {
+        if !self.model.active_tab().is_some_and(|tab| tab.shown().find(pane).is_some()) {
             return;
         }
 
+        let Some(timing) = self.typing_pulse_timing() else { return };
         let now = cx.background_executor().now();
-        if let Some(pulse) = pane_pulse::PaneTypingPulse::start(pane, terminal, at, now, self.typing_pulse.as_ref()) {
+        if let Some(pulse) = pane_pulse::PaneTypingPulse::start(pane, terminal, at, now, self.typing_pulse.as_ref(), timing) {
             self.typing_pulse = Some(pulse);
             cx.notify();
         }
@@ -4674,7 +4676,7 @@ impl AppWindow {
             el.child(body)
         };
 
-        if on && f.typing_pulse && !cx.reduce_motion()
+        if on && f.typing_pulse.is_enabled() && !cx.reduce_motion()
             && let (Some(line), Some(pulse)) = (line, &self.typing_pulse)
             && pulse.pane == n.id
         {
@@ -5677,12 +5679,12 @@ impl Render for AppWindow {
             self.refresh_snapshot_mods(cx);
         }
         let focused = self.focused_path(window, cx);
-        if let Some(pulse) = &self.typing_pulse {
-            if !focused.contains(&pulse.pane) || !self.pane_has_typing_focus(&pulse.pane, pulse.terminal, window) {
-                self.typing_pulse = None;
-            } else if !cx.reduce_motion() && pulse.is_active(cx.background_executor().now()) {
-                window.request_animation_frame();
-            }
+        if self.typing_pulse.as_ref().is_some_and(|pulse| {
+            !focused.contains(&pulse.pane) || !self.pane_has_typing_focus(&pulse.pane, pulse.terminal, window)
+        }) {
+            self.typing_pulse = None;
+        } else if let Some(pulse) = self.typing_pulse.as_mut() {
+            pulse.schedule_frame(window, cx);
         }
         let tree = self.render_node(&self.chrome, &focused, None, cx);
         let tree = self.window_frame(tree, window, cx);
