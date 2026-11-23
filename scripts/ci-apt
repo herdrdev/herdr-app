@@ -1,0 +1,34 @@
+#!/usr/bin/env bash
+# Installs Linux build packages on a CI runner. The runner image's cloud
+# mirror, and at times every ubuntu.com name, is unreachable for minutes or
+# hours: after one bounded try, move on to the next archive. Packages stay
+# signature-checked whichever mirror serves them.
+set -euo pipefail
+
+apt=(-o Acquire::ForceIPv4=true -o Acquire::Retries=1 -o Acquire::http::Timeout=15 -o Acquire::https::Timeout=15 -o APT::Update::Error-Mode=any)
+
+install() {
+  # timeout runs under sudo: sudo does not pass on a signal from its own caller.
+  sudo timeout 90 apt-get "${apt[@]}" update &&
+    sudo timeout 240 apt-get "${apt[@]}" install -y --no-install-recommends "$@"
+}
+
+case "$(dpkg --print-architecture)" in
+  amd64 | i386) fallbacks=(http://archive.ubuntu.com/ubuntu/ http://mirrors.kernel.org/ubuntu/) ;;
+  *) fallbacks=(http://ports.ubuntu.com/ubuntu-ports/ http://mirrors.ocf.berkeley.edu/ubuntu-ports/) ;;
+esac
+
+current=mirror+file:/etc/apt/apt-mirrors.txt
+for next in "${fallbacks[@]}" ""; do
+  if install "$@"; then
+    exit 0
+  fi
+  [ -n "$next" ] || break
+  echo "package archive $current failed; using $next"
+  sudo sed -i "s|$current|$next|g" /etc/apt/sources.list
+  current=$next
+  # An install cut off by the timeout can leave packages half set up.
+  sudo dpkg --configure -a || true
+done
+echo "no package archive could be reached" >&2
+exit 1

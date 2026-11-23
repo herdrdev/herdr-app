@@ -3,18 +3,90 @@ use super::*;
 use gpui::TestAppContext;
 use gpui_shell::{ShellRuntime, plugin::DescriptionSession, policy::Policy};
 use std::{
+    cell::Cell,
     collections::{BTreeMap, BTreeSet},
     rc::Rc,
     sync::atomic::{AtomicU64, Ordering},
     time::Instant,
 };
 
+
+#[gpui::test]
+fn mod_text_selection_stays_in_its_shell_root(cx: &mut TestAppContext) {
+    use gpui::*;
+    use gpui_base::{SelectableText, TextSelection, TextView, TextViewState};
+    use gpui_shell::ShellRoot;
+
+    struct Column {
+        texts: Vec<Entity<TextViewState>>,
+        label: &'static str,
+    }
+    impl Render for Column {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().flex().flex_col().size_full().gap(px(20.))
+                .children(self.texts.iter().map(|text| TextView::new(text).scrollable(false).selectable(true)))
+                .child(SelectableText::new("plain", format!("{} plain text", self.label)).document_order(u64::MAX))
+        }
+    }
+    struct Columns {
+        roots: Vec<Entity<ShellRoot>>,
+    }
+    impl Render for Columns {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().flex().size_full().children(self.roots.iter().map(|root| {
+                div().w(px(240.)).h_full().child(root.clone())
+            }))
+        }
+    }
+    cx.update(gpui_shell::init);
+    let mut texts = Vec::new();
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        let roots = ["LEFT", "CENTER", "RIGHT"].into_iter().map(|label| {
+            let blocks = ["first", "middle", "second"].into_iter().map(|block| {
+                cx.new(|cx| TextViewState::markdown(&format!("{label} {block} block"), cx))
+            }).collect::<Vec<_>>();
+            texts.push(blocks.clone());
+            let content = cx.new(|_| Column { texts: blocks, label }).into();
+            cx.new(|cx| ShellRoot::new(content, window, cx))
+        }).collect();
+        Columns { roots }
+    });
+    cx.run_until_parked();
+    let bounds = |column: usize, block: usize, cx: &mut VisualTestContext| {
+        texts[column][block].read_with(cx, |text, _| text.bounds())
+    };
+    let start = bounds(1, 0, cx).origin + point(px(1.), px(10.));
+    let inside = bounds(1, 2, cx);
+    let neighbor = bounds(2, 2, cx);
+    for end in [
+        point(inside.right() - px(1.), inside.top() + px(10.)),
+        point(neighbor.right() - px(1.), neighbor.top() + px(10.)),
+        point(px(900.), px(400.)),
+        point(px(-20.), px(400.)),
+    ] {
+        cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::default());
+        cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
+        cx.run_until_parked();
+        let copied = cx.update(|window, cx| TextSelection::selected_text(window, cx));
+        assert!(copied.contains("CENTER first block"), "{copied:?}");
+        assert!(copied.contains("CENTER middle block"), "end {end:?}: {copied:?}");
+        assert!(copied.contains("CENTER second block"), "end {end:?}: {copied:?}");
+        assert!(!copied.contains("LEFT") && !copied.contains("RIGHT"), "{copied:?}");
+        if end.y == px(400.) {
+            assert!(copied.contains("CENTER plain text"), "{copied:?}");
+        }
+        cx.simulate_mouse_move(neighbor.center(), None, Modifiers::default());
+        assert_eq!(cx.update(|window, cx| TextSelection::selected_text(window, cx)), copied);
+    }
+}
+
 struct Staged(PathBuf);
 impl Staged {
     fn new() -> Self {
         static NEXT: AtomicU64 = AtomicU64::new(0);
-        let path = PathBuf::from(format!(
-            "/var/tmp/herdr-render-{}-{}",
+        let path = crate::test_tmp().join(format!(
+            "herdr-render-{}-{}",
             std::process::id(),
             NEXT.fetch_add(1, Ordering::Relaxed)
         ));
@@ -75,6 +147,7 @@ fn fixture(populated: bool, props: Value, update: Value) -> BTreeMap<String, Val
         json!({"key":"pi", "name":"Pi", "icon":null, "tint":true, "tile":"#334455", "color":"#aabbcc", "shell":false, "agent":true});
     let mut values = BTreeMap::from([
         ("props".into(), props),
+        ("checking".into(), json!(false)),
         ("machines".into(), json!([{ "name": null, "layout": "ready" }])),
         ("spaces".into(), json!([])), ("agents".into(), json!([])), ("terminals".into(), json!([])), ("panes".into(), json!([])), ("focused".into(), Value::Null),
         ("layout".into(), serde_json::from_str(include_str!("../../defaults/layouts/main.json")).unwrap()),
@@ -84,7 +157,7 @@ fn fixture(populated: bool, props: Value, update: Value) -> BTreeMap<String, Val
         ("themes".into(), json!([{"name":"graphite", "colors": &*crate::settings::theme()}])),  ("fonts".into(), json!(["Monospace", "Sans"])),
         ("updates".into(), update),
         ("telemetry".into(), json!({"enabled":true,"setting":true,"sends":true,"off_because":null,"endpoint":"https://invalid.example", "draft":{},"queued":[],"last_sent":null})),
-        ("window".into(), json!({"platform":"linux","titlebar":"none","buttons":true,"maximized":false,"fullscreen":false,"active":true})),
+        ("window".into(), json!({"platform":"linux","titlebar":"none","buttons":true,"maximized":false,"fullscreen":false,"active":true,"visible":true})),
         ("placement".into(), Value::Null),
         ("home".into(), json!("/fixture")), ("appHome".into(), json!("/fixture/app")),
         ("keys".into(), Value::Array(serde_json::from_str::<BTreeMap<String, BTreeMap<String, String>>>(include_str!("../../defaults/keys.json")).unwrap().into_iter().flat_map(|(section, bindings)| bindings.into_iter().map(move |(keys, action)| json!({"section":section,"keys":keys,"action":action}))).collect())),
@@ -125,7 +198,7 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
         shared.borrow_mut().shared.insert(a.string(0)?.into(), from_host(a.value(1)?));
         Ok(HostValue::Null)
     });
-    for name in ["run", "playSound", "setAgentOrder", "openOverlay", "closeOverlay", "notify", "presentUpdateNotes"] {
+    for name in ["run", "playSound", "setAgentOrder", "setWindowTitle", "setBadge", "openOverlay", "closeOverlay", "notify", "presentUpdateNotes"] {
         let calls = calls.clone();
         module = module.function(name, move |a| {
             if name == "run" {
@@ -151,9 +224,9 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
     module = module.async_function("feedbackPickImages", |_| Ok(async { Ok(HostValue::Array(vec![])) }));
     module = module.async_function("knownAgents", |_| Ok(async { Ok(HostValue::Array(vec![])) }));
     module = module.async_function("pickFolder", |_| Ok(async { Ok(HostValue::Null) }));
-    for name in ["nextCommand", "watchFolder"] {
-        module = module.async_function(name, |_| Ok(std::future::pending::<gpui_shell::HostResult>()));
-    }
+    module = module.async_function("pickFiles", |_| Ok(async { Ok(HostValue::Null) }));
+    module = module.async_function("nextCommand", |_| Ok(std::future::pending::<gpui_shell::HostResult>()));
+    module = module.cancellable_async_function("watchFolder", HostValue::Array(vec![]), |_| Ok(std::future::pending::<gpui_shell::HostResult>()));
     for name in ["exec", "hc", "readTextFile", "writeTextFile", "sendFeedback"] {
         let calls = calls.clone();
         module = module.async_function(name, move |a| {
@@ -169,8 +242,8 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
                 "hc" if first == json!(["machine", "ls", "--json"]) => {
                     Some(json!({"code":0,"stdout":"{\"machines\":[{\"name\":\"remote\",\"state\":\"online\"}]}","stderr":""}))
                 }
-                "hc" if first.as_array().and_then(|a| a.first()).and_then(Value::as_str) == Some("run") => {
-                    Some(json!({"code":0,"stdout":"{\"address\":\"t-setup\"}","stderr":""}))
+                "hc" if first == json!(["machine", "add", "host", "--json"]) => {
+                    Some(json!({"code":1,"stdout":"{\"error\":{\"kind\":\"host_key\",\"message\":\"unknown host key\"}}","stderr":""}))
                 }
                 // The files panel lists a folder with sh: kind and name pairs.
                 "exec" if first == "sh" && a.get(1).map(from_host).and_then(|v| v.get(2).cloned()) == Some(json!("files")) => {
@@ -203,6 +276,254 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
         });
     }
     module.declarations(DECLARATIONS)
+}
+
+#[gpui::test]
+fn mod_copies_share_code_without_sharing_props_state_or_lifetime(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let root = staged.0.join("cache");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("main.js"), r#"
+import { View, div } from 'gpui-kit';
+import { props, mark, next } from 'copy';
+const evaluation = mark();
+const row = globalThis.__template(value => div().child(value));
+export default class Panel extends View {
+  init(_, cx) {
+    if (props() === 'bad') throw Error('bad props');
+    this.count = 0;
+    this.count++;
+    this.async = 'waiting';
+    cx.spawn(async cx => { await next(); this.async = props(); cx.notify(); });
+  }
+  render() { return row(props() + ':' + this.count + ':' + evaluation + ':' + this.async); }
+}
+"#).unwrap();
+    let marks = Rc::new(Cell::new(0));
+    let policy = |name: &'static str| {
+        let marks = marks.clone();
+        Policy::new().with_host_module(HostModule::new("copy")
+            .function("props", move |_| Ok(name.into()))
+            .function("mark", move |_| { marks.set(marks.get() + 1); Ok((marks.get() as f64).into()) })
+            .async_function("next", |_| Ok(std::future::ready(Ok(HostValue::Null))))
+        ).unwrap()
+    };
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|_, _| Empty);
+    let (first, mut second) = window.update(cx, |_, window, cx| {
+        let mut first = DescriptionSession::load(runtime.clone(), &root, policy("A"), window, cx).unwrap();
+        let mut second = DescriptionSession::load(runtime.clone(), &root, policy("B"), window, cx).unwrap();
+        assert!(first.describe(window, cx).unwrap().contains("A:1:1"));
+        assert!(second.describe(window, cx).unwrap().contains("B:1:1"));
+        assert!(DescriptionSession::load(runtime.clone(), &root, policy("bad"), window, cx).is_err());
+        (first, second)
+    }).unwrap();
+    cx.run_until_parked();
+    drop(first);
+    cx.run_until_parked();
+    window.update(cx, |_, window, cx| {
+        let tree = second.describe(window, cx).unwrap();
+        assert!(tree.contains("B:1:1:B"), "{tree}");
+    }).unwrap();
+    drop(second);
+    cx.run_until_parked();
+    window.update(cx, |_, window, cx| {
+        let mut reopened = DescriptionSession::load(runtime.clone(), &root, policy("C"), window, cx).unwrap();
+        assert!(reopened.describe(window, cx).unwrap().contains("C:1:1"));
+    }).unwrap();
+    assert_eq!(marks.get(), 1, "reopening and failed init must reuse evaluated code");
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn changes_retries_when_the_files_copy_owning_its_git_scan_closes_or_reloads(cx: &mut TestAppContext) {
+    use std::time::Duration;
+
+    cx.update(gpui_shell::init);
+    for started in [false, true] {
+        for reload in [false, true] {
+            let staged = Staged::new();
+            let runtime = ShellRuntime::new_isolated().unwrap();
+            let files_entry = staged.0.join("mods/files/main.js");
+            let files_source = std::fs::read_to_string(&files_entry).unwrap();
+            // GPUI advances the timers, so use the same clock for scan timestamps.
+            // Files loads first and sets Date.now() for both mods in this VM.
+            std::fs::write(
+                &files_entry,
+                format!("import {{ now }} from 'test-clock'; Date.now = now;\n{files_source}"),
+            ).unwrap();
+            let revision = Rc::new(Cell::new(0));
+            let source_revision = revision.clone();
+            runtime.set_source_revision_provider(move |_| Some(source_revision.get()));
+            let git_calls = Rc::new(Cell::new(0));
+            let calls = git_calls.clone();
+            let preview_reads = Rc::new(Cell::new(0));
+            let reads = preview_reads.clone();
+            let mut values = fixture(true, Value::Null, updates("current", "current"));
+            values.insert("focused".into(), Value::Null);
+            let herdr = module(values, Rc::new(RefCell::new(Calls::default())))
+                .async_function("exec", move |a| {
+                    let args = strings(a.get(1));
+                    let (output, blocked) = if a.string(0)? == "sh" {
+                        ("f\0recovered.txt\0", false)
+                    } else if args.iter().any(|arg| arg == "--show-toplevel") {
+                        ("/fixture/project\n", false)
+                    } else {
+                        assert!(args.iter().any(|arg| arg == "status"), "{args:?}");
+                        calls.set(calls.get() + 1);
+                        ("?? recovered.txt\0", started && calls.get() == 1)
+                    };
+                    Ok(async move {
+                        if blocked {
+                            std::future::pending().await
+                        } else {
+                            Ok(to_host(&json!({"code":0,"stdout":output,"stderr":""})))
+                        }
+                    })
+                })
+                .async_function("readTextFile", move |a| {
+                    assert_eq!(a.string(0)?, "/fixture/project/recovered.txt");
+                    reads.set(reads.get() + 1);
+                    Ok(std::future::ready(Ok("recovered diff".into())))
+                });
+            let executor = cx.executor();
+            let epoch = executor.now();
+            let clock = HostModule::new("test-clock").function("now", move |_| {
+                Ok((executor.now().duration_since(epoch).as_millis() as f64).into())
+            });
+            let policy = Policy::new()
+                .with_host_module(herdr).unwrap()
+                .with_host_module(clock).unwrap();
+            gpui_shell::policy::set_default(policy);
+
+            let window = cx.add_window(|_, _| Empty);
+            let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+            let files = visual.update(|window, cx| {
+                runtime.try_load(staged.0.join("mods/files"), window, cx).unwrap()
+            });
+            visual.run_until_parked();
+            let changes = visual.update(|window, cx| {
+                let root = runtime.try_load(staged.0.join("mods/changes"), window, cx).unwrap();
+                let view: gpui::Entity<gpui_shell::ScriptView> = root.read(cx).content().clone().downcast().unwrap();
+                window.replace_root(cx, |_, _| RootedView(root));
+                view
+            });
+            visual.run_until_parked();
+            if started {
+                visual.executor().advance_clock(Duration::from_millis(25));
+                visual.run_until_parked();
+            }
+            assert_eq!(git_calls.get(), usize::from(started));
+
+            visual.update(|window, cx| {
+                if reload {
+                    std::fs::write(&files_entry, r#"
+                        import { View, div } from "gpui-kit";
+                        export default class extends View { render() { return div(); } }
+                    "#).unwrap();
+                    revision.set(1);
+                    runtime.reload_now(&files, window, cx).unwrap();
+                } else {
+                    runtime.close_now(&files, Instant::now() + Duration::from_millis(250), window, cx);
+                }
+            });
+            drop(files);
+            visual.run_until_parked();
+            for _ in 0..4 {
+                visual.executor().advance_clock(Duration::from_millis(50));
+                visual.run_until_parked();
+            }
+            assert_eq!(git_calls.get(), 1 + usize::from(started), "started={started}, reload={reload}");
+            let tree = visual.update(|window, cx| {
+                window.draw(cx).clear(cx);
+                changes.read(cx).snapshot().unwrap().debug_tree()
+            });
+            assert!(tree.contains("recovered.txt"), "{tree}");
+            assert_eq!(preview_reads.get(), 1, "started={started}, reload={reload}");
+            visual.update(|window, _| window.remove_window());
+        }
+    }
+}
+
+#[gpui::test]
+fn mod_code_revisions_share_successes_and_failures_without_poisoning_old_copies(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let root = staged.0.join("cache");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("main.js"), r#"
+import { View, div } from 'gpui-kit';
+import { version } from './part.js';
+export default class Panel extends View { render() { return div().child('version:' + version); } }
+"#).unwrap();
+    std::fs::write(root.join("part.js"), "import { mark } from 'copy'; mark(); export const version = 1;").unwrap();
+    let marks = Rc::new(Cell::new(0));
+    let policy = || {
+        let marks = marks.clone();
+        Policy::new().with_host_module(HostModule::new("copy").function("mark", move |_| {
+            marks.set(marks.get() + 1); Ok(HostValue::Null)
+        })).unwrap()
+    };
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|_, _| Empty);
+    window.update(cx, |_, window, cx| {
+        let mut old = DescriptionSession::load(runtime.clone(), &root, policy(), window, cx).unwrap();
+        for version in [2, 3] {
+            std::fs::write(root.join("part.js"), format!("import {{ mark }} from 'copy'; mark(); export const version = {version};{}", " ".repeat(version))).unwrap();
+            for _ in 0..20 {
+                let mut new = DescriptionSession::load(runtime.clone(), &root, policy(), window, cx).unwrap();
+                assert!(new.describe(window, cx).unwrap().contains(&format!("version:{version}")));
+            }
+        }
+        assert_eq!(marks.get(), 3);
+        std::fs::write(root.join("part.js"), "import { mark } from 'copy'; mark(); throw Error('broken save'); export const version = 4;").unwrap();
+        for _ in 0..20 {
+            assert!(DescriptionSession::load(runtime.clone(), &root, policy(), window, cx).is_err());
+        }
+        assert_eq!(marks.get(), 4, "a failed revision evaluates once, not on every open");
+        assert!(old.describe(window, cx).unwrap().contains("version:1"));
+        std::fs::write(root.join("part.js"), "import { mark } from 'copy'; mark(); export const version = 5;").unwrap();
+        let mut fixed = DescriptionSession::load(runtime.clone(), &root, policy(), window, cx).unwrap();
+        assert!(fixed.describe(window, cx).unwrap().contains("version:5"));
+        assert_eq!(marks.get(), 5);
+        assert!(DescriptionSession::load(runtime.clone(), &root, Policy::new(), window, cx).is_err(),
+            "an ungranted host module must not reuse another policy's linked class");
+    }).unwrap();
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+    cx.run_until_parked();
+}
+
+#[gpui::test]
+fn mod_host_imports_keep_sync_async_and_missing_export_surfaces_distinct(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let root = staged.0.join("cache");
+    std::fs::create_dir_all(&root).unwrap();
+    std::fs::write(root.join("main.js"), r#"
+import { View, div } from 'gpui-kit';
+import { value } from 'copy';
+export default class Panel extends View {
+  init() { this.kind = typeof value(); }
+  render() { return div().child('kind:' + this.kind); }
+}
+"#).unwrap();
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|_, _| Empty);
+    window.update(cx, |_, window, cx| {
+        let sync = HostModule::new("copy").function("value", |_| Ok(HostValue::Number(1.0)));
+        let mut a = DescriptionSession::load(runtime.clone(), &root, Policy::new().with_host_module(sync).unwrap(), window, cx).unwrap();
+        assert!(a.describe(window, cx).unwrap().contains("kind:number"));
+        let asynchronous = HostModule::new("copy").async_function("value", |_| Ok(std::future::ready(Ok(HostValue::Null))));
+        let mut b = DescriptionSession::load(runtime.clone(), &root, Policy::new().with_host_module(asynchronous).unwrap(), window, cx).unwrap();
+        assert!(b.describe(window, cx).unwrap().contains("kind:object"));
+        let missing = HostModule::new("copy").function("other", |_| Ok(HostValue::Null));
+        assert!(DescriptionSession::load(runtime.clone(), &root, Policy::new().with_host_module(missing).unwrap(), window, cx).is_err());
+        assert!(a.describe(window, cx).unwrap().contains("kind:number"));
+    }).unwrap();
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+    cx.run_until_parked();
 }
 
 struct Empty;
@@ -248,6 +569,9 @@ fn describe_with_values(
         Ok(second)
     })?;
     window.update(cx, |_, window, _| window.remove_window())?;
+    // localStorage writes land on the executor: let them finish while the
+    // staged folder is still there, or they recreate it after its drop.
+    cx.run_until_parked();
     assert!(calls.borrow().unexpected.is_empty(), "{entry}: {:?}", calls.borrow().unexpected);
     result
 }
@@ -275,6 +599,19 @@ fn shipped_initial_descriptions(cx: &mut TestAppContext) {
         entries.len(),
         start.elapsed()
     );
+}
+
+/// A mod's localStorage write lands on the executor; one that lands after the
+/// staged folder's drop recreates it, and the folder outlives the test.
+#[gpui::test]
+fn a_described_mod_leaves_no_folder_behind(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let path = staged.0.clone();
+    describe(cx, &staged, "mods/agents", true, props(), updates("current", "current"), None).unwrap();
+    drop(staged);
+    cx.run_until_parked();
+    assert!(!path.exists(), "left behind: {:?}", std::fs::read_dir(&path).map(|d| d.flatten().map(|e| e.file_name()).collect::<Vec<_>>()));
 }
 
 #[gpui::test]
@@ -361,6 +698,305 @@ fn font_pickers_contain_scroll_on_the_wrapper(cx: &mut TestAppContext) {
     }
 }
 
+struct RootedView(gpui::Entity<gpui_shell::ShellRoot>);
+impl gpui::Render for RootedView {
+    fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+        self.0.clone()
+    }
+}
+
+#[gpui::test]
+fn a_mod_hears_a_pinch_only_over_its_element(cx: &mut TestAppContext) {
+    use gpui::{AppContext as _, Modifiers, PinchEvent, TouchPhase, VisualTestContext, point, px};
+
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    std::fs::write(staged.0.join("main.js"), r#"
+import { View, div } from "gpui-kit";
+import { v_flex } from "gpui-base";
+export default class Demo extends View {
+  init() { this.log = []; }
+  render() {
+    return v_flex().w(300).h(200)
+      .child(div().w(100).h(50).on_pinch((event, cx) => {
+        this.log.push(`${event.delta}:${event.touch_phase}:${event.local_position.x}:${event.modifiers.platform}`);
+        cx.notify();
+      }))
+      .child(div().child(`log=${this.log.join(" ")}`));
+  }
+}
+"#).unwrap();
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|window, cx| {
+        RootedView(runtime.try_load(&staged.0, window, cx).unwrap())
+    });
+    let mut context = VisualTestContext::from_window(window.into(), cx);
+    context.update(|window, cx| window.draw(cx).clear(cx));
+    let view: gpui::Entity<gpui_shell::ScriptView> = window
+        .root(&mut context)
+        .unwrap()
+        .read_with(&context, |root, cx| root.0.read(cx).content().clone().downcast().unwrap());
+
+    let pinch = |x: f32, delta: f32, phase: TouchPhase, platform: bool| PinchEvent {
+        position: point(px(x), px(20.)),
+        delta,
+        modifiers: Modifiers { platform, ..Modifiers::default() },
+        phase,
+    };
+    // A hitbox counts as hovered only once the last input is the pointer.
+    context.simulate_mouse_move(point(px(20.), px(20.)), None, Modifiers::default());
+    context.simulate_event(pinch(20., 0.5, TouchPhase::Moved, true));
+    // Outside the element: GPUI only calls the listener on its hitbox.
+    context.simulate_event(pinch(250., 0.25, TouchPhase::Moved, false));
+    context.simulate_event(pinch(30., -0.25, TouchPhase::Ended, false));
+    context.run_until_parked();
+    context.update(|window, cx| window.draw(cx).clear(cx));
+
+    let tree = context.update(|_, cx| {
+        view.read(cx).snapshot().map(gpui_shell::RenderSnapshot::debug_tree).unwrap_or_default()
+    });
+    assert!(tree.contains("log=0.5:moved:20:true -0.25:ended:30:false"), "{tree}");
+}
+
+#[gpui::test]
+fn a_mod_reads_a_text_view_selection_once_it_settles(cx: &mut TestAppContext) {
+    use gpui::{
+        Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, VisualTestContext, point, px,
+    };
+
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    std::fs::write(staged.0.join("main.js"), r#"
+import { View, div } from "gpui-kit";
+import { TextView, v_flex } from "gpui-base";
+export default class Demo extends View {
+  init() { this.log = []; this.word = "**wörld**"; }
+  render() {
+    const view = (id, text) => div().h(40).child(TextView.markdown(id, text).selectable(true)
+      .on_selection_change((s, cx) => {
+        this.log.push(s ? `${s.text}:${text.slice(s.range.start, s.range.end)}:${s.position ? "at" : "-"}` : "null");
+        if (s && id === "word") this.word = "replacement";
+        cx.notify();
+      }));
+    return v_flex().w(300).h(200)
+      .child(view("drag", "😀 héllo **wörld**"))
+      .child(view("word", this.word))
+      .child(div().child(`log=${this.log.join(" ")}`));
+  }
+}
+"#).unwrap();
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|window, cx| {
+        RootedView(runtime.try_load(&staged.0, window, cx).unwrap())
+    });
+    let mut context = VisualTestContext::from_window(window.into(), cx);
+    context.update(|window, cx| window.draw(cx).clear(cx));
+    let view: gpui::Entity<gpui_shell::ScriptView> = window
+        .root(&mut context)
+        .unwrap()
+        .read_with(&context, |root, cx| root.0.read(cx).content().clone().downcast().unwrap());
+    let settle = |context: &mut VisualTestContext| {
+        context.run_until_parked();
+        context.update(|window, cx| window.draw(cx).clear(cx));
+        context.run_until_parked();
+    };
+    let press = |context: &mut VisualTestContext, x: f32, y: f32, click_count: usize| {
+        let position = point(px(x), px(y));
+        let modifiers = Modifiers::default();
+        context.simulate_event(MouseDownEvent { button: MouseButton::Left, position, modifiers, click_count, first_mouse: false });
+        context.simulate_event(MouseUpEvent { button: MouseButton::Left, position, modifiers, click_count });
+        settle(context);
+    };
+
+    let snapshot = |context: &VisualTestContext| {
+        view.read_with(context, |view, _| {
+            view.snapshot().map(gpui_shell::RenderSnapshot::debug_tree).unwrap_or_default()
+        })
+    };
+
+    // A drag reports on release, with offsets into the Markdown it came from.
+    context.simulate_mouse_down(point(px(1.), px(8.)), MouseButton::Left, Modifiers::default());
+    context.simulate_mouse_move(point(px(290.), px(8.)), MouseButton::Left, Modifiers::default());
+    settle(&mut context);
+    let tree = snapshot(&context);
+    assert!(tree.contains("log=\""), "{tree}");
+    context.simulate_mouse_up(point(px(290.), px(8.)), MouseButton::Left, Modifiers::default());
+    settle(&mut context);
+    let (copy, select_all) = if cfg!(target_os = "macos") {
+        ("cmd-c", "cmd-a")
+    } else {
+        ("ctrl-c", "ctrl-a")
+    };
+    let copied_text = |context: &mut VisualTestContext| {
+        context.simulate_keystrokes(copy);
+        context.update(|_, cx| cx.read_from_clipboard().unwrap().text().unwrap())
+    };
+    assert_eq!(copied_text(&mut context), "😀 héllo wörld");
+    context.simulate_keystrokes(select_all);
+    settle(&mut context);
+    assert_eq!(copied_text(&mut context), "😀 héllo wörld");
+    // Clicking away clears the selection once.
+    press(&mut context, 250., 150., 1);
+    press(&mut context, 250., 150., 1);
+    // The double-click reports a word. The handler replaces that TextView's
+    // source, which also clears its selection without a pointer event.
+    press(&mut context, 5., 48., 2);
+    settle(&mut context);
+    let tree = snapshot(&context);
+    // The source range ends at the last selected character, before the `**`.
+    assert!(
+        tree.contains("log=😀 héllo wörld:😀 héllo **wörld:at 😀 héllo wörld:😀 héllo **wörld**:- null wörld:wörld:at null\""),
+        "{tree}"
+    );
+}
+
+#[gpui::test]
+fn a_mod_highlights_a_markdown_source_range(cx: &mut TestAppContext) {
+    use gpui::{Modifiers, MouseButton, VisualTestContext, point, px};
+
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    std::fs::write(staged.0.join("main.js"), r##"
+import { View, div } from "gpui-kit";
+import { TextView, v_flex } from "gpui-base";
+export default class Demo extends View {
+  init() { this.step = 0; }
+  render() {
+    const match = "**café**";
+    const source = `${this.step ? "😀 prefix" : "😀"} ${match} tail`;
+    const start = source.indexOf(match);
+    const text = TextView.markdown("text", source);
+    if (this.step < 2) text.highlight_range(start, start + match.length, "#be3784");
+    return v_flex().w(400)
+      .child(div().h(40).child(text))
+      .child(div().h(40).child("Next").on_click((_, cx) => {
+        this.step++;
+        cx.notify();
+      }));
+  }
+}
+"##).unwrap();
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|window, cx| {
+        RootedView(runtime.try_load(&staged.0, window, cx).unwrap())
+    });
+    let mut context = VisualTestContext::from_window(window.into(), cx);
+    let painted = |context: &mut VisualTestContext| {
+        context.run_until_parked();
+        context.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            let color: gpui::Background = gpui::rgb(0xbe3784).into();
+            window.painted_quads().into_iter()
+                .filter_map(|quad| (quad.background == color).then_some(quad.bounds))
+                .collect::<Vec<_>>()
+        })
+    };
+    let next = |context: &mut VisualTestContext| {
+        let pos = point(px(8.), px(55.));
+        context.simulate_mouse_down(pos, MouseButton::Left, Modifiers::default());
+        context.simulate_mouse_up(pos, MouseButton::Left, Modifiers::default());
+    };
+
+    let initial = painted(&mut context);
+    let [initial] = initial.as_slice() else {
+        panic!("expected a highlight for café: {initial:?}");
+    };
+    next(&mut context);
+    let moved = painted(&mut context);
+    let [moved] = moved.as_slice() else {
+        panic!("expected the highlight to move with café: {moved:?}");
+    };
+    assert!(moved.left() > initial.left());
+    let width_delta = (moved.size.width - initial.size.width).as_f32().abs();
+    assert!(width_delta <= 1.0, "highlight width changed: {initial:?} → {moved:?}");
+    next(&mut context);
+    assert!(painted(&mut context).is_empty());
+}
+
+#[gpui::test]
+fn long_theme_names_stay_inside_their_card(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let long = "catppuccin-macchiato";
+    let mut p = props();
+    p["section"] = json!("look");
+    let mut values = fixture(true, p, updates("current", "current"));
+    let theme = values["theme"].clone();
+    values.insert("themes".into(), json!([{ "name": long, "light": false, "colors": theme }]));
+    let mut settings = values["settings"].clone();
+    settings["theme_dark"] = json!(long);
+    values.insert("settings".into(), settings);
+    let tree = describe_with_values(cx, &staged, "frame/settings", values, None).unwrap();
+    let lines: Vec<&str> = tree.lines().collect();
+    let card = lines.iter().position(|l| l.contains(&format!("st-t-{long}"))).unwrap();
+    let row = lines[card..].iter().find(|l| l.trim_start().starts_with("h_flex") && l.contains("min_w")).unwrap();
+    assert!(row.contains(".w_full"), "the name row must fill the card: {row}");
+    assert!(row.contains(".min_w[Number(0.0)]"), "the name row must be allowed to shrink: {row}");
+    let name = lines[card..].iter().find(|l| l.contains("truncate")).unwrap();
+    assert!(name.contains(":tooltip[Str(\"catppuccin macchiato\")]"), "a cut name needs its full text on hover: {name}");
+    let check = lines[card..].iter().find(|l| l.contains("check.svg")).unwrap();
+    assert!(check.contains(".flex_none"), "the selected check must not shrink: {check}");
+}
+
+#[gpui::test]
+fn confirm_dialog_background_follows_the_frame_corners(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut p = props();
+    p["title"] = json!("Close space?");
+    p["command"] = json!({"name": "space.close", "args": {"id": "s1"}});
+    let tree = describe(cx, &staged, "mods/confirm", true, p, updates("current", "current"), None).unwrap();
+    let root = tree.lines().find(|l| l.contains(":id[Str(\"confirm\")]")).unwrap();
+    assert!(root.contains(".rounded[Number(8.0)]"), "the dialog background must follow the frame's corners: {root}");
+}
+
+#[gpui::test]
+fn pane_header_divider_faces_the_terminal(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for (position, reveal) in [("bottom", "always"), ("top", "always"), ("", "always"), ("bottom", "hover"), ("top", "hover")] {
+        let mut values = fixture(true, props(), updates("current", "current"));
+        values.insert("layout".into(), json!({
+            "id": "root", "type": "column", "children": [
+                {"id": "hidden", "type": "block", "hidden": true,
+                 "content": {"tab": "active", "pane": {"header": {"position": "bottom"}}}},
+                {"id": "stack", "type": "stack", "active": "shown", "children": [
+                    {"id": "inactive", "type": "block",
+                     "content": {"tab": "active", "pane": {"header": {"position": "bottom"}}}},
+                    {"id": "shown", "type": "block",
+                     "content": {"tab": "active", "pane": {"header": {"position": position, "reveal": reveal}}}}
+                ]}
+            ]
+        }));
+        if position.is_empty() {
+            values.get_mut("layout").unwrap()["children"][1]["children"][1]["content"]["pane"]["header"].as_object_mut().unwrap().remove("position");
+        }
+        let tree = describe_with_values(cx, &staged, "mods/pane", values, None).unwrap();
+        let head = tree.lines().find(|l| l.contains("pane-head-")).unwrap();
+        let (edge, outside) = if position == "bottom" { ("t", "b") } else { ("b", "t") };
+        assert!(head.contains(&format!(".border_{edge}[Number(1.0)]")), "{position}: {head}");
+        assert!(!head.contains(&format!(".border_{outside}[")), "{position}: {head}");
+    }
+}
+
+#[gpui::test]
+fn layout_previews_stay_inside_their_cards(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let mut p = props();
+    p["section"] = json!("look");
+    let mut values = fixture(true, p, updates("current", "current"));
+    values.insert("layouts".into(), json!(["main"]));
+    let tree = describe_with_values(
+        cx, &staged, "frame/settings", values,
+        Some("this.previews = { main: 'layouts/portrait.png' }; this.previewsOf = 'main';"),
+    ).unwrap();
+    let lines: Vec<&str> = tree.lines().collect();
+    let image = lines.iter().position(|l| l.contains("layouts/portrait.png")).unwrap();
+    assert!(lines[image].contains(".h[Number(62.0)]"), "a preview keeps the card's height: {}", lines[image]);
+    assert!(lines[image - 1].contains(".overflow_hidden"), "a preview cannot spill out of its card: {}", lines[image - 1]);
+}
+
 #[gpui::test]
 fn check_materializes_retained_elements_in_a_rendered_view(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
@@ -382,6 +1018,37 @@ fn check_materializes_retained_elements_in_a_rendered_view(cx: &mut TestAppConte
         assert!(!description.is_empty(), "{body}");
         gpui::AnyWindowHandle::from(window).update(cx, |_, window, _| window.remove_window()).unwrap();
     }
+}
+
+#[gpui::test]
+fn long_space_names_use_the_sidebar_width(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let name = "quarterly infrastructure cost review";
+    let mut values = fixture(true, props(), updates("current", "current"));
+    let spaces = values.get_mut("spaces").unwrap().as_array_mut().unwrap();
+    spaces[0]["name"] = json!(name);
+    // A worktree of the first space's repo, drawn nested under it.
+    spaces.insert(1, json!({"id":"s3","index":2,"name":"portal rewrite","folder":"/fixture/portal","machine":null,"branch":null,"active":false,"status":"idle","tabs":[]}));
+    // The remote space is on main in a repo named after it: its tail has nothing to show.
+    let git = "this.git[JSON.stringify([null, '/fixture/project'])] = { name: 'herdr', branch: 'feature/rate-limiting', ahead: 0, behind: 0, repo: JSON.stringify([null, '/fixture/project/.git']), linked: false };
+        this.git[JSON.stringify([null, '/fixture/portal'])] = { name: 'herdr', branch: 'portal-rewrite', ahead: 0, behind: 0, repo: JSON.stringify([null, '/fixture/project/.git']), linked: true };
+        this.git[JSON.stringify(['remote', '/remote/project'])] = { name: 'remote', branch: 'main', ahead: 0, behind: 0, repo: JSON.stringify(['remote', '/remote/project/.git']), linked: false };";
+    let tree = describe_with_values(cx, &staged, "mods/spaces", values, Some(git)).unwrap();
+    let lines: Vec<&str> = tree.lines().collect();
+    let text = lines.iter().position(|l| l.contains(&format!("text {name:?}"))).unwrap();
+    let label = lines[text - 1];
+    assert!(!label.contains(".max_w"), "a wider sidebar must show more of the name: {label}");
+    assert!(!label.contains(".flex_shrink[Number(0.0)]"), "the name must give way when the row is full: {label}");
+    assert!(label.contains(".min_w[Number(48.0)]"), "the name shrinks, but a short one stays readable: {label}");
+    let tail = lines[text + 1..].iter().find(|l| l.contains(".justify_end")).unwrap();
+    assert!(tail.contains(".flex_auto") && !tail.contains(".flex_1"), "the git tail must start from its text's width, so both sides give way in proportion: {tail}");
+    assert!(tail.contains(".min_w[Number(48.0)]"), "the git tail shrinks, but a short one stays readable: {tail}");
+    let remote = lines.iter().position(|l| l.contains("text \"Remote\"")).unwrap();
+    let empty = lines[remote + 1..].iter().find(|l| l.contains(".justify_end")).unwrap();
+    assert!(empty.contains(".min_w[Number(0.0)]"), "an empty git tail must not take room from the name: {empty}");
+    let icon = lines.iter().find(|l| l.contains("branch.svg")).expect("the worktree space is nested");
+    assert!(icon.contains(".flex_none"), "a worktree's icon keeps its size while the name gives way: {icon}");
 }
 
 #[gpui::test]
@@ -407,6 +1074,22 @@ fn rebuilt_machine_offers_connect_only_for_identity_mismatch(cx: &mut TestAppCon
 }
 
 #[gpui::test]
+fn machine_logout_warning_tracks_current_remote_state(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    for state in ["false", "true", "null", "undefined"] {
+        let setup = format!("this.hosts = []; this.added = [{{name:'cloud', target:'host', keeps_running_after_logout:{state}, logout_linger_user:'-alice'}}];");
+        let tree = describe(cx, &staged, "mods/machine-add", false, props(), updates("current", "current"), Some(&setup)).unwrap();
+        assert_eq!(tree.contains("Agents on cloud stop when you disconnect"), state == "false", "{tree}");
+        assert_eq!(tree.contains("ma-logout-copy-cloud"), state == "false", "{tree}");
+        if state == "false" { assert!(tree.contains("sudo loginctl enable-linger -- -alice"), "{tree}"); }
+        let setup = format!("this.machines = [{{name:'cloud', target:'host', state:'connected', keeps_running_after_logout:{state}}}];");
+        let tree = describe(cx, &staged, "mods/spaces", false, props(), updates("current", "current"), Some(&setup)).unwrap();
+        assert_eq!(tree.contains("machine-logout-cloud"), state == "false", "{tree}");
+    }
+}
+
+#[gpui::test]
 fn machine_picker_keeps_long_lists_scrollable(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
@@ -422,27 +1105,59 @@ fn machine_picker_keeps_long_lists_scrollable(cx: &mut TestAppContext) {
 }
 
 #[gpui::test]
-fn machine_setup_prompt_stacks_above_the_picker(cx: &mut TestAppContext) {
+fn machine_add_needing_input_keeps_the_picker_and_shows_instructions(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
     let calls = Rc::new(RefCell::new(Calls::default()));
     let policy = Policy::new().with_host_module(module(fixture(false, props(), updates("current", "current")), calls.clone())).unwrap();
-    let root = staged.wrapper("mods/machine-add", "cx.spawn(async () => { await this.inTerminal('host'); });");
+    let root = staged.wrapper("mods/machine-add", "this.typed = 'host'; this.add('host', cx);");
     let window = cx.add_window(|_, _| Empty);
     let mut session = window.update(cx, |_, window, cx| {
         DescriptionSession::load(ShellRuntime::new_isolated().unwrap(), root, policy, window, cx).unwrap()
     }).unwrap();
     cx.run_until_parked();
     window.update(cx, |_, window, cx| {
-        session.describe(window, cx).unwrap();
+        let tree = session.describe(window, cx).unwrap();
+        assert!(tree.contains("machine-add"), "{tree}");
+        assert!(tree.contains("ma-message-host"), "{tree}");
+        assert!(tree.contains("hc machine add host"), "{tree}");
         window.remove_window();
     }).unwrap();
     let calls = calls.borrow();
     assert!(calls.unexpected.is_empty(), "{:?}", calls.unexpected);
-    let spec = &calls.effects.iter().find(|(name, _)| name == "openOverlay").unwrap().1[0];
-    assert_eq!(spec["kind"], "dialog");
-    assert_eq!(spec["layout"]["children"][1]["content"]["terminal"], "t-setup");
-    assert!(!calls.effects.iter().any(|(name, _)| name == "closeOverlay"), "the picker must keep monitoring setup");
+    assert!(!calls.effects.iter().any(|(name, _)| name == "openOverlay" || name == "closeOverlay"), "the picker stays open without a setup dialog");
+}
+
+#[gpui::test]
+fn palette_lists_the_entries_mods_declare_in_their_mod_json(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let probe = staged.0.join("mods/probe");
+    std::fs::create_dir_all(&probe).unwrap();
+    std::fs::write(probe.join("main.js"), "export default () => null;").unwrap();
+    std::fs::write(probe.join("mod.json"), r#"{"place":"none","palette":[{"title":"Probe entry","command":"mod.open","args":{"name":"probe"},"words":"zebra"}]}"#).unwrap();
+    let mut values = fixture(true, props(), updates("current", "current"));
+    values.insert("appHome".into(), json!(staged.0.to_string_lossy()));
+    let calls = Rc::new(RefCell::new(Calls::default()));
+    let home = staged.0.join("login-home");
+    std::fs::create_dir(&home).unwrap();
+    let policy = Policy::new()
+        .with_storage_path(staged.0.join("store-palette.json"))
+        .with_capabilities(capabilities_at(home, staged.0.clone(), true))
+        .with_host_module(module(values, calls.clone())).unwrap();
+    let root = staged.wrapper("frame/palette", "this.query = 'zebra';");
+    let window = cx.add_window(|_, _| Empty);
+    let mut session = window.update(cx, |_, window, cx| {
+        DescriptionSession::load(ShellRuntime::new_isolated().unwrap(), root, policy, window, cx).unwrap()
+    }).unwrap();
+    cx.run_until_parked();
+    window.update(cx, |_, window, cx| {
+        let tree = session.describe(window, cx).unwrap();
+        assert!(tree.contains("Probe entry"), "{tree}");
+        window.remove_window();
+    }).unwrap();
+    cx.run_until_parked();
+    assert!(calls.borrow().unexpected.is_empty(), "{:?}", calls.borrow().unexpected);
 }
 
 #[gpui::test]
@@ -511,7 +1226,7 @@ fn settings_sections_and_updates(cx: &mut TestAppContext) {
 
 #[gpui::test]
 fn animated_images_advance_with_explicit_and_implicit_ids(cx: &mut TestAppContext) {
-    use gpui::{IntoElement as _, http_client::{AsyncBody, FakeHttpClient, Response}};
+    use gpui::{Styled as _, http_client::{AsyncBody, FakeHttpClient, Response}};
     use image::{Delay, Frame, Rgba, RgbaImage, codecs::gif::GifEncoder};
     use std::{sync::Arc, time::Duration};
 
@@ -523,9 +1238,14 @@ fn animated_images_advance_with_explicit_and_implicit_ids(cx: &mut TestAppContex
             encoder.encode_frame(Frame::from_parts(RgbaImage::from_pixel(2, 2, Rgba(color)), 0, 0, Delay::from_numer_denom_ms(20, 1))).unwrap();
         }
     }
+    let (ready, waiting) = async_channel::unbounded::<()>();
     let client = FakeHttpClient::create(move |_| {
         let bytes = bytes.clone();
-        async move { Ok(Response::builder().status(200).body(AsyncBody::from(bytes)).unwrap()) }
+        let waiting = waiting.clone();
+        async move {
+            waiting.recv().await.unwrap();
+            Ok(Response::builder().status(200).body(AsyncBody::from(bytes)).unwrap())
+        }
     });
     cx.update(|cx| cx.set_http_client(client));
     let staged = Staged::new();
@@ -536,26 +1256,57 @@ fn animated_images_advance_with_explicit_and_implicit_ids(cx: &mut TestAppContex
         std::fs::write(staged.0.join("main.js"), source).unwrap();
         let context = cx.add_empty_window();
         let view = context.update(|window, cx| {
-            window.activate_window();
             let root = runtime.try_load(&staged.0, window, cx).unwrap();
             root.read(cx).content().clone()
         });
+        struct AnimationRoot(gpui::AnyView);
+        impl gpui::Render for AnimationRoot {
+            fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl gpui::IntoElement {
+                self.0.clone().cached(gpui::StyleRefinement::default().size_full())
+            }
+        }
+        // Load while inactive, then tick frames explicitly so the executor can park.
+        context.deactivate_window();
+        let root = context.update(|window, cx| window.replace_root(cx, |_, _| AnimationRoot(view.clone())));
+        context.run_until_parked();
+        // A cached subtree must keep its pending load across an unrelated parent draw.
+        context.update(|_, cx| root.update(cx, |_, cx| cx.notify()));
+        context.run_until_parked();
+        ready.try_send(()).unwrap();
+        context.run_until_parked();
+        let resource = gpui::Resource::Uri(url.into());
+        let still: Arc<gpui::RenderImage> = context.update(|_, cx| cx.fetch_asset::<gpui::ImgResourceLoader>(&resource).unwrap().unwrap());
+        assert_eq!(still.frame_count(), 1);
+        let data = context.update(|window, _| window.displayed_images().into_iter().find(|image| image.frame_count() == 2)).unwrap();
+        assert_eq!(data.as_bytes(0).unwrap().as_ptr(), still.as_bytes(0).unwrap().as_ptr());
+        context.update(|window, cx| {
+            window.replace_root(cx, |_, _| Empty);
+            window.activate_window();
+        });
+        context.run_until_parked();
+        context.update(|window, cx| { window.replace_root(cx, |_, _| AnimationRoot(view.clone())); });
         let draw = |context: &mut gpui::VisualTestContext| {
-            let view = view.clone();
-            context.draw(gpui::Point::default(), gpui::size(gpui::px(40.), gpui::px(40.)), move |_, _| view.into_any_element());
+            context.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                window.draw(cx).clear(cx);
+            });
         };
         draw(context);
-        context.run_until_parked();
-        draw(context);
         assert!(context.update(|window, _| window.is_window_active()));
-        let resource = gpui::Resource::Uri(url.into());
-        let data: Arc<gpui::RenderImage> = context.update(|_, cx| cx.fetch_asset::<gpui::ImgResourceLoader>(&resource).unwrap().unwrap());
         assert_eq!(data.frame_count(), 2);
-        assert!(!context.update(|window, _| window.has_image_atlas_entry(&data)));
+        assert!(context.update(|window, _| window.has_image_frame_atlas_entry(&data, 0)));
+        assert!(!context.update(|window, _| window.has_image_frame_atlas_entry(&data, 1)));
         // GPUI's image clock is wall time, not the test executor's clock.
         std::thread::sleep(Duration::from_millis(25));
         draw(context);
-        assert!(context.update(|window, _| window.has_image_atlas_entry(&data)), "both animation frames must have painted (explicit id: {explicit})");
+        assert!(context.update(|window, _| window.has_image_frame_atlas_entry(&data, 1)), "the next animation frame must paint (explicit id: {explicit})");
+        assert!(context.update(|window, _| window.has_image_frame_atlas_entry(&data, 0)));
+        std::thread::sleep(Duration::from_millis(25));
+        draw(context);
+        assert!(context.update(|window, _| window.has_image_frame_atlas_entry(&data, 0)));
+        assert!(context.update(|window, _| window.has_image_frame_atlas_entry(&data, 1)));
+        context.update(|window, cx| { window.replace_root(cx, |_, _| Empty); });
+        context.deactivate_window();
     }
 }
 
@@ -664,7 +1415,11 @@ fn local_state_and_overlay_initial_descriptions(cx: &mut TestAppContext) {
         assert!(entries.iter().any(|e| e == entry), "orphan scenario: {entry}");
         let mut p = props();
         p.as_object_mut().unwrap().extend(patch.as_object().unwrap().clone());
-        describe(cx, &staged, entry, true, p, updates("current", "current"), None).unwrap();
+        let tree = describe(cx, &staged, entry, true, p, updates("current", "current"), None).unwrap();
+        if patch["tab"] == "pane" {
+            let at = |label: &str| tree.find(label).unwrap_or_else(|| panic!("{label} missing: {tree}"));
+            assert!(at("Rename") < at("Split right"), "Rename leads the pane menu: {tree}");
+        }
     }
     eprintln!("18 local-state/overlay cases, each twice: {:?}", start.elapsed());
 }
@@ -787,4 +1542,23 @@ fn status_bar_shows_the_real_palette_key(cx: &mut TestAppContext) {
     let tree = describe_with_values(cx, &staged, "mods/workspace-status", unbound, None).unwrap();
     assert!(tree.contains("commands"), "unbound hint still offers commands: {tree}");
     assert!(!tree.contains("Shift P"), "unbound hint must not invent a key: {tree}");
+}
+
+#[gpui::test]
+fn status_bar_counts_agents_in_the_singular_and_the_plural(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let agent = |n: u32| json!({"address":format!("t{n}"),"pane":format!("p{n}"),"space":"s1","space_name":"Local","tab":"tab1","tab_index":1,"tab_name":"Build","status":"blocked","app":"pi","program":null,"title":"Build","seq":n,"focused":n==1});
+
+    let mut one = fixture(true, props(), updates("current", "current"));
+    one.insert("agents".into(), json!([agent(1)]));
+    let tree = describe_with_values(cx, &staged, "mods/workspace-status", one, None).unwrap();
+    assert!(tree.contains("1 agent") && !tree.contains("1 agents"), "one agent is singular: {tree}");
+    assert!(tree.contains("1 needs you"), "one blocked agent needs you: {tree}");
+
+    let mut two = fixture(true, props(), updates("current", "current"));
+    two.insert("agents".into(), json!([agent(1), agent(2)]));
+    let tree = describe_with_values(cx, &staged, "mods/workspace-status", two, None).unwrap();
+    assert!(tree.contains("2 agents"), "two agents are plural: {tree}");
+    assert!(tree.contains("2 need you") && !tree.contains("2 needs you"), "two blocked agents need you: {tree}");
 }

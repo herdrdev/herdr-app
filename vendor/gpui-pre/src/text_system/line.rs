@@ -50,6 +50,24 @@ pub struct ShapedLine {
 }
 
 impl ShapedLine {
+    /// HERDR: Place terminal clusters at explicit cell boundaries. UI shaping is unchanged.
+    pub fn with_cell_positions(mut self, positions: &[(usize, Pixels)], width: Pixels) -> Self {
+        let layout = Arc::make_mut(&mut self.layout);
+        let mut cluster = None;
+        for run in &mut layout.runs {
+            for glyph in &mut run.glyphs {
+                let offset = positions.partition_point(|(index, _)| *index <= glyph.index).saturating_sub(1);
+                if cluster.is_none_or(|(index, _)| index != offset) {
+                    let target = positions.get(offset).map_or(px(0.), |(_, x)| *x);
+                    cluster = Some((offset, target - glyph.position.x));
+                }
+                glyph.position.x += cluster.unwrap().1;
+            }
+        }
+        layout.width = width;
+        self
+    }
+
     /// Returns a forward-only cursor for this shaped line.
     pub fn cursor(&self) -> ShapedLineCursor<'_> {
         assert_eq!(

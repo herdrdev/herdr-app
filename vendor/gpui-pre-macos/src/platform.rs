@@ -224,6 +224,7 @@ fn native_activation_policy(policy: ActivationPolicy) -> NSApplicationActivation
     match policy {
         ActivationPolicy::Regular => NSApplicationActivationPolicyRegular,
         ActivationPolicy::Accessory => NSApplicationActivationPolicyAccessory,
+        ActivationPolicy::Prohibited => NSApplicationActivationPolicy::NSApplicationActivationPolicyProhibited,
     }
 }
 
@@ -562,16 +563,16 @@ impl Platform for MacPlatform {
 
         unsafe {
             let app: id = msg_send![APP_CLASS, sharedApplication];
-            // An accessory app must not register in the Dock during launch, so its
-            // policy has to precede the run loop. `Regular` is applied in
-            // `did_finish_launching` instead: setting it this early leaves the menu
-            // bar of an unbundled app launched from a terminal unclickable.
+            // Non-foreground policies must precede the run loop so CLI checks
+            // never launch as a foreground app. `Regular` is applied in
+            // `did_finish_launching`: setting it this early leaves the menu bar
+            // of an unbundled app launched from a terminal unclickable.
             let policy = {
                 let mut state = self.0.lock();
                 state.application_created = true;
                 state.activation_policy
             };
-            if policy == ActivationPolicy::Accessory {
+            if policy != ActivationPolicy::Regular {
                 app.setActivationPolicy_(native_activation_policy(policy));
             }
             let app_delegate: id = msg_send![APP_DELEGATE_CLASS, new];

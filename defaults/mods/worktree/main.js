@@ -3,7 +3,7 @@
 
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar } from "gpui-base";
-import { run, props, closeOverlay, theme, spaces, panes, exec, home } from "herdr";
+import { run, props, closeOverlay, theme, spaces, panes, exec, home, appHome, readTextFile, window } from "herdr";
 
 // Where a space is now: its first terminal's live folder, else where it was made.
 function place(s, all = panes()) {
@@ -12,14 +12,30 @@ function place(s, all = panes()) {
   return all.find((p) => tabs.has(p.tab) && p.cwd)?.cwd || s.folder || null;
 }
 
-// Checkouts go to <ROOT>/<repo>/<branch, slashes as dashes>.
-const ROOT = (home) => `${home}/.herdr/worktrees`;
+// The mod owns this preference; paths belong to the space's machine, not the app.
+async function root(userHome) {
+  const raw = await readTextFile(`${appHome()}/settings.json`);
+  const directory = (raw === null ? {} : JSON.parse(raw))?.worktrees?.directory ?? "~/.herdr/worktrees";
+  if (typeof directory !== "string" || !directory.trim()) throw new Error("worktrees.directory must be a non-empty path.");
+  let path = directory.replace(/\\/g, "/");
+  if (path === "~" || path.startsWith("~/")) path = userHome.replace(/\\/g, "/").replace(/\/$/, "") + path.slice(1);
+  if (!path.startsWith("/") && !/^[A-Za-z]:\//.test(path)) throw new Error("worktrees.directory must be an absolute path or start with ~/.");
+  return path.replace(/\/+$/, "");
+}
 // Home as ~ (git says C:/Users/x where Windows says C:\Users\x).
 const tilde = (path, userHome) => {
   const [p, h] = [path, userHome].map((s) => s.replace(/\\/g, "/"));
   return p.startsWith(h) ? `~${p.slice(h.length)}` : path;
 };
-const slug = (branch) => branch.replace(/[^A-Za-z0-9._-]+/g, "-").replace(/^-+|-+$/g, "");
+const slug = (branch) => {
+  const normalized = branch.normalize("NFC");
+  const name = normalized.replace(/[^\p{L}\p{M}\p{N}._-]+/gu, "-").replace(/^-+|-+$/g, "");
+  if (name) return name;
+  // Hash the original name so symbol-only branches do not share a folder.
+  let hash = 2166136261;
+  for (const char of normalized) hash = Math.imul(hash ^ char.codePointAt(0), 16777619);
+  return `branch-${(hash >>> 0).toString(16).padStart(8, "0")}`;
+};
 const ago = (s) => {
   const d = Date.now() / 1000 - s;
   return d < 3600 ? `${Math.max(1, Math.round(d / 60))}m` : d < 86400 ? `${Math.round(d / 3600)}h` : d < 86400 * 60 ? `${Math.round(d / 86400)}d` : `${Math.round(d / 86400 / 30)}mo`;
@@ -53,8 +69,8 @@ function spaceOf(path, all, on, spaceList, paneList) {
   })());
 }
 
-async function git(cwd, args, on) {
-  const r = await exec("git", args, { cwd, on });
+async function git(cwd, args, on, timeout) {
+  const r = await exec("git", args, { cwd, on, ...(timeout === undefined ? {} : { timeout }) });
   return { ok: r.code === 0, out: (r.stdout ?? "").trim(), err: (r.stderr ?? r.stdout ?? "").trim() };
 }
 
@@ -101,7 +117,9 @@ async function repoOf(folder, on) {
   const common = await git(folder, ["rev-parse", "--path-format=absolute", "--git-common-dir"], on);
   if (!top.ok || !common.ok) return null;
   const main = common.out.endsWith("/.git") ? common.out.slice(0, -5) : common.out;
-  return { top: top.out, main, name: main.split("/").pop(), linked: main !== top.out };
+  // A bare repo hidden beside its worktrees (<project>/.bare) is named after its project.
+  const parts = main.split("/"), name = parts.at(-1) === ".bare" ? parts.at(-2) : parts.at(-1);
+  return { top: top.out, main, name, linked: main !== top.out };
 }
 
 export default class Worktree extends View {
@@ -118,17 +136,14 @@ export default class Worktree extends View {
     this.inputFocused = true;
     this.input.on("focus", (_e, cx) => { this.inputFocused = true; cx.notify(); });
     this.input.on("blur", (_e, cx) => { this.inputFocused = false; cx.notify(); });
-    if (props()?.action !== "remove") {
-      this.input.focus();
-      cx.timer.after(600, () => this.input.focus());
-    }
+    this.handle = cx.focus_handle();
+    this.handle.focus(); // the root is mounted from the first frame: keep the keyboard here while loading
+    if (props()?.action !== "remove") this.input.focus();
     this.busy = false;
     this.error = "";
     this.repo = undefined; // undefined: looking, null: not in git
     this.dirty = false;
     this.unpushed = [];
-    this.handle = cx.focus_handle();
-    if (props()?.action === "remove") this.handle.focus();
     cx.spawn(async (cx) => {
       try {
         if (this.on) {
@@ -138,6 +153,7 @@ export default class Worktree extends View {
           if (result.code !== 0 || !result.stdout.trim()) throw new Error("Could not find the remote home folder.");
           this.userHome = result.stdout.trim().replace(/\\/g, "/");
         }
+        if (!this.opening && props()?.action !== "remove") this.root = await root(this.userHome);
         this.folder = props()?.folder || place(this.space()) || this.userHome;
         // The repo is set last: Enter does nothing until the warnings it consents to are known.
         const repo = await repoOf(this.folder, this.on);
@@ -148,6 +164,11 @@ export default class Worktree extends View {
         if (repo && this.opening) this.list = await checkouts(repo, this.on);
         this.repo = repo;
         cx.notify();
+        // The list (and with it the filter input) only mounts once loading is
+        // done, so the keyboard must move there now — a focus call made while
+        // loading lands on nothing and the dialog stays keyboard-dead.
+        this.handle.focus();
+        if (props().action !== "remove") cx.timer.after(100, () => this.input.focus());
         if (props().branch) await this.work(cx);
       } catch (error) { this.repo = null; this.error = String(error); cx.notify(); }
     });
@@ -168,11 +189,12 @@ export default class Worktree extends View {
   }
 
   async work(cx) {
-    if (this.busy || !this.repo) return;
+    const remove = props()?.action === "remove";
+    if (this.busy || !this.repo || (remove && !this.repo.linked)) return;
     this.busy = true;
     this.error = "";
     cx.notify();
-    try { this.error = props().action === "remove" ? await this.remove() : await this.create(); }
+    try { this.error = remove ? await this.remove() : await this.create(); }
     catch (error) { this.error = String(error); }
     this.busy = false;
     if (!this.error) this.close();
@@ -182,14 +204,14 @@ export default class Worktree extends View {
   async create() {
     const branch = this.text.trim();
     if (!branch) return "Type a branch name.";
-    const path = `${ROOT(this.userHome)}/${this.repo.name}/${slug(branch)}`;
+    const path = `${this.root}/${this.repo.name}/${slug(branch)}`;
     const exists = (await git(this.repo.main, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], this.on)).ok;
     const add = exists ? ["worktree", "add", path, branch] : ["worktree", "add", "-b", branch, path, "HEAD"];
-    const r = await git(this.repo.top, add, this.on);
+    const r = await git(this.repo.top, add, this.on, 600_000);
     if (!r.ok) return r.err || "git worktree add failed.";
     const p = props();
     // Leave spaces unnamed so they follow the checkout folder and nest under the repo.
-    run("space.new", { folder: path, machine: this.on, tab: p.tab, argv: p.argv });
+    run("space.new", { folder: path, machine: this.on ?? "", tab: p.tab, argv: p.argv });
     return "";
   }
 
@@ -203,7 +225,7 @@ export default class Worktree extends View {
     this.close();
     const s = spaceOf(c.path, this.list, this.on, spaces(), panes());
     if (s) run("space.select", { id: s.id });
-    else run("space.new", { folder: c.path, machine: this.on });
+    else run("space.new", { folder: c.path, machine: this.on ?? "" });
   }
 
   async remove() {
@@ -218,11 +240,23 @@ export default class Worktree extends View {
     this.dirty ||= status.out !== "";
     this.unpushed = [...new Set([...this.unpushed, ...unpushed])];
     if (changed) return "It changed since this opened. Enter again removes it anyway.";
-    // Terminals first: a shell sitting in the folder keeps it busy on Windows.
-    run("space.close", { id: s.id, confirmed: true });
+    const list = await git(this.repo.main, ["-c", "core.quotePath=false", "worktree", "list", "--porcelain"], this.on);
+    if (!list.ok) return list.err || "git worktree list failed.";
+    const checkout = list.out.split(/\n\n+/).map((record) => record.split("\n"))
+      .find(([path]) => path === `worktree ${this.repo.top}`);
+    const lock = checkout?.find((field) => field === "locked" || field.startsWith("locked "));
+    if (lock) return lock === "locked" ? "This worktree is locked." : `This worktree is locked: ${lock.slice(7)}`;
+
+    // Git on a remote Windows machine reports a drive-letter or UNC path.
+    const windows = this.on ? /^(?:[A-Za-z]:\/|\/\/)/.test(this.repo.top) : window().platform === "windows";
+    const closeSpace = () => { if (s?.id) run("space.close", { id: s.id, confirmed: true }); };
+    // A shell sitting in the folder can keep it busy on Windows.
+    if (windows) closeSpace();
     const force = this.dirty || mods.length > 0;
-    const r = await git(this.repo.main, ["worktree", "remove", ...(force ? ["--force"] : []), this.repo.top], this.on);
-    return r.ok ? "" : r.err || "git worktree remove failed.";
+    const r = await git(this.repo.main, ["worktree", "remove", ...(force ? ["--force"] : []), this.repo.top], this.on, 600_000);
+    if (!r.ok) return r.err || "git worktree remove failed.";
+    if (!windows) closeSpace();
+    return "";
   }
 
   key(e, cx) {
@@ -320,7 +354,7 @@ export default class Worktree extends View {
             ? !r.linked
               ? "This is the repository's main checkout, not a worktree."
               : `Closes the space and deletes ${tilde(r.top, this.userHome)}. The branch stays.`
-            : `A new space on a checkout in ${tilde(ROOT(this.userHome), this.userHome)}/${r.name}/. A branch that exists is checked out; a new one starts from here.`;
+            : `A new space on a checkout in ${tilde(this.root, this.userHome)}/${r.name}/. A branch that exists is checked out; a new one starts from here.`;
     const blocked = !r || (remove && !r.linked);
     return v_flex()
       .id("worktree")
@@ -355,6 +389,8 @@ export default class Worktree extends View {
           .justify_end()
           .text_size(11)
           .text_color(t.dim)
+          .gap(6)
+          .when(this.busy, (el) => el.child(div().frames(["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"], 90)))
           .child(this.busy ? "working…" : blocked ? "esc close" : remove ? "↵ remove · esc cancel" : "↵ create · esc cancel"),
       );
   }

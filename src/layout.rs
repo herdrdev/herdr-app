@@ -162,6 +162,21 @@ pub struct Look {
     pub font: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub font_size: Option<f32>,
+    /// The terminals' text weight, 100 to 900.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_weight: Option<u16>,
+    /// The terminals' bold text weight, 100 to 900.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub font_weight_bold: Option<u16>,
+    /// Cell height multiplier, 0.8..2 (1 keeps the font's natural rows).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_line_height: Option<f32>,
+    /// Cell width multiplier, 0.8..2 (1 keeps the font's natural columns).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_cell_width: Option<f32>,
+    /// Wheel and trackpad scroll multiplier, 0.1..5.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub terminal_scroll_speed: Option<f32>,
     /// The mods' font.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub ui_font: Option<String>,
@@ -259,6 +274,10 @@ pub struct PaneFrame {
     /// The border while the pane has focus.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub focus: Option<Line>,
+    /// How much a pane fades while another pane of its tab is selected, 0 to
+    /// 1: the terminal's background colour painted over it at that opacity.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub veil: Option<f32>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub radius: Option<f32>,
     /// Space between panes.
@@ -375,9 +394,19 @@ pub struct Node {
     /// Root only: the terminal right-click menu's mod (default: `menu`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_menu: Option<String>,
+    /// Root only: mods that can handle a terminal link, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub link_handlers: Vec<String>,
+    /// Root only: the mod that shows notifications (default: `toast`).
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub toast: Option<String>,
     /// Dragging this node moves the window; a double-click maximizes it.
     #[serde(default, skip_serializing_if = "is_false")]
     pub window_drag: bool,
+    /// Root only: blur what's behind the window where the system can, so
+    /// colors with alpha show the desktop through frosted glass.
+    #[serde(default, skip_serializing_if = "is_false")]
+    pub window_blur: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -414,7 +443,10 @@ impl Node {
             traffic_lights: None,
             preview: None,
             terminal_menu: None,
+            link_handlers: Vec::new(),
+            toast: None,
             window_drag: false,
+            window_blur: false,
         }
     }
 
@@ -567,6 +599,11 @@ impl Node {
         let removed = remove_inner(self, id)?;
         collapse(self);
         Some(removed)
+    }
+
+    /// Removes a composition slot without simplifying the authored layout.
+    pub fn remove_slot(&mut self, id: &str) -> Option<Node> {
+        remove_inner(self, id)
     }
 
     /// Puts `new` beside `target` along `axis` (after it). Reuses the parent
@@ -755,13 +792,14 @@ mod tests {
 
     #[test]
     fn nodes_carry_looks_backgrounds_padding_and_shadows() {
-        let json = r##"{ "id": "root", "type": "column", "theme": "ink", "font": "Berkeley Mono", "font_size": 13,
+        let json = r##"{ "id": "root", "type": "column", "theme": "ink", "font": "Berkeley Mono", "font_size": 13, "font_weight": 300, "font_weight_bold": 600,
           "terminal_opacity": 0.85, "padding": [16, 12], "shadow": "lg",
           "background": { "gradient": ["#123a6e", "#2a6db3"], "angle": 160 },
           "children": [ { "id": "a", "type": "block", "content": { "mod": "x" }, "background": "surface", "padding": 8 },
                         { "id": "b", "type": "block", "content": { "mod": "y" }, "background": { "image": "bg/sky.jpg" } } ] }"##;
         let n: Node = serde_json::from_str(json).unwrap();
         assert_eq!((n.look.theme.as_ref().map(|t| t.pick(true)), n.look.font_size, n.look.terminal_opacity), (Some("ink"), Some(13.0), Some(0.85)));
+        assert_eq!((n.look.font_weight, n.look.font_weight_bold), (Some(300), Some(600)));
         assert_eq!(n.padding.map(Padding::axes), Some((16.0, 12.0)));
         assert!(matches!(n.background, Some(Background::Gradient { angle, .. }) if angle == 160.0));
         assert_eq!(n.find("a").unwrap().background, Some(Background::Color("surface".into())));
@@ -774,19 +812,20 @@ mod tests {
     fn tab_blocks_say_how_their_panes_are_framed() {
         let json = r#"{ "id": "main", "type": "block", "content": { "tab": "active",
           "pane": { "header": { "content": { "mod": "pane" }, "height": 28, "reveal": "hover", "position": "bottom" },
-                    "radius": 10, "gap": 8, "lone": true, "border": { "width": 1, "color": "border" } } } }"#;
+                    "radius": 10, "gap": 8, "lone": true, "border": { "width": 1, "color": "border" }, "veil": 0.4 } } }"#;
         let n: Node = serde_json::from_str(json).unwrap();
         let Some(Content::Context { pane: Some(f), .. }) = n.content() else { panic!("no frame") };
         let h = f.header.as_ref().unwrap();
         assert!(h.hover() && h.bottom() && f.lone);
         assert_eq!((f.radius, f.gap, h.height), (Some(10.0), Some(8.0), Some(28.0)));
+        assert_eq!(f.veil, Some(0.4));
         let back: Node = serde_json::from_str(&serde_json::to_string(&n).unwrap()).unwrap();
         assert_eq!(back, n);
     }
 
     #[test]
     fn documents_parse_with_types_sizes_and_looks() {
-        let json = r#"{ "id": "root", "type": "row", "divider": {"width": 1, "color": "border"},
+        let json = r#"{ "id": "root", "type": "row", "divider": {"width": 1, "color": "border"}, "window_blur": true,
           "children": [
             { "id": "sidebar", "type": "column", "size": {"px": 260},
               "children": [ { "id": "spaces", "type": "block", "content": {"mod": "spaces"} },
@@ -794,6 +833,7 @@ mod tests {
             { "id": "main", "type": "block", "content": {"tab": "active"} } ] }"#;
         let n: Node = serde_json::from_str(json).unwrap();
         assert_eq!(n.find("sidebar").unwrap().size, Some(Size::Px { px: 260.0 }));
+        assert!(n.window_blur && !n.find("sidebar").unwrap().window_blur);
         assert_eq!(n.find("main").unwrap().content(), Some(&Content::Context { tab: "active".into(), pane: None }));
         let back: Node = serde_json::from_str(&serde_json::to_string(&n).unwrap()).unwrap();
         assert_eq!(back, n);
@@ -852,6 +892,18 @@ mod tests {
         let mut root = Node::container("ctx", Axis::Row, vec![term("x"), term("y")]);
         root.remove("y");
         assert_eq!((root.id.as_str(), root.children().len()), ("ctx", 1));
+    }
+
+    #[test]
+    fn removing_a_composition_slot_keeps_authored_containers() {
+        let mut panel = Node::container("panel", Axis::Column, vec![term("panel-body")]);
+        panel.hidden = true;
+        panel.size = Some(Size::Px { px: 368.0 });
+        let mut root = Node::container("work-body", Axis::Row, vec![term("coordinator"), term("main"), panel.clone()]);
+        assert!(root.remove_slot("coordinator").is_some());
+        assert!(root.find("coordinator").is_none());
+        assert_eq!(root.find("panel"), Some(&panel));
+        assert!(root.remove_slot("missing").is_none());
     }
 
     #[test]

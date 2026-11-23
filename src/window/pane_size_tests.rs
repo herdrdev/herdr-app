@@ -1,4 +1,86 @@
 #[test]
+fn a_pane_hidden_before_first_paint_still_attaches() {
+    in_own_process("unpainted_hidden_pane");
+}
+
+#[gpui::test]
+fn unpainted_hidden_pane(cx: &mut gpui::TestAppContext) {
+    if !running_alone("unpainted_hidden_pane") { return; }
+    let plain = serde_json::json!({"id": "context", "type": "block", "content": {"tab": "active"}});
+    let (view, cx) = open_window(cx, "size-probe", "export default () => null;", plain);
+    view.update_in(cx, |this, window, cx| {
+        this.folders.retain(|id, _| id == "size-probe");
+        this.model = crate::model::Model::default();
+        let mut tab = super::Tab::new("tab", "", "a", "probe-a");
+        tab.root.split("a", super::Axis::Row, crate::model::pane("b", "probe-b"), "split".into());
+        this.model.add_space("space", "test", "/", tab);
+        this.sync(window, cx);
+        assert!(!this.terms["b"].view.read(cx).lost);
+        this.model.tab_mut("tab").unwrap().zoomed = Some("a".into());
+        this.sync(window, cx);
+    });
+    cx.run_until_parked();
+    cx.executor().advance_clock(std::time::Duration::from_millis(100));
+    cx.run_until_parked();
+    assert!(view.update(cx, |this, cx| this.terms["b"].view.read(cx).lost),
+        "the hidden pane must attempt to attach without ever being painted");
+}
+
+#[test]
+fn a_covered_pane_attaches_without_painting() {
+    in_own_process("covered_pane_deadline");
+}
+
+#[gpui::test]
+fn covered_pane_deadline(cx: &mut gpui::TestAppContext) {
+    if !running_alone("covered_pane_deadline") { return; }
+    let plain = serde_json::json!({"id": "context", "type": "block", "content": {"tab": "active"}});
+    let (view, cx) = open_window(cx, "size-probe", "export default () => null;", plain);
+    view.update_in(cx, |this, window, cx| {
+        this.folders.retain(|id, _| id == "size-probe");
+        this.model = crate::model::Model::default();
+        this.model.add_space("space", "test", "/", super::Tab::new("tab", "", "a", "probe-a"));
+        this.sync(window, cx);
+        this.live.insert("replacement".into(), serde_json::json!({"state": "live"}));
+        this.swapped.insert("a".into(), "replacement".into());
+        this.sync(window, cx);
+    });
+    cx.run_until_parked();
+    cx.executor().advance_clock(std::time::Duration::from_millis(100));
+    cx.run_until_parked();
+    assert!(view.update(cx, |this, cx| this.terms["a"].view.read(cx).lost),
+        "a covered original pane must still attempt to attach");
+}
+
+#[test]
+fn an_agent_only_layout_fits_its_pane_before_attaching() {
+    in_own_process("agent_only_first_fit");
+}
+
+#[gpui::test]
+fn agent_only_first_fit(cx: &mut gpui::TestAppContext) {
+    if !running_alone("agent_only_first_fit") { return; }
+    let layout = serde_json::json!({"id": "agent", "type": "block", "content": {"agent": "focused"}});
+    let (view, cx) = open_window(cx, "size-probe", "export default () => null;", layout);
+    view.update_in(cx, |this, window, cx| {
+        this.folders.retain(|id, _| id == "size-probe");
+        this.model = crate::model::Model::default();
+        this.model.add_space("space", "test", "/", super::Tab::new("tab", "", "a", "probe-a"));
+        this.live.insert("probe-a".into(), serde_json::json!({"state": "live"}));
+        this.agent = Some("probe-a".into());
+        this.sync(window, cx);
+        assert!(!this.terms["a"].view.read(cx).lost);
+    });
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    cx.run_until_parked();
+    view.update(cx, |this, cx| {
+        let terminal = this.terms["a"].view.read(cx);
+        assert!(terminal.lost, "the drawn agent pane must attach before the deadline");
+        assert_ne!(terminal.dimensions(), (120, 40), "replay must use agent-block layout");
+    });
+}
+
+#[test]
 fn initial_pane_size_matches_the_rendered_terminal() {
     in_own_process("initial_pane_size");
 }

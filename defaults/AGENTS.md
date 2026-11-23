@@ -2,6 +2,10 @@
 
 <!-- Written by the Herdr app on every start. Edits here are overwritten. -->
 
+If `AGENTS.local.md` is in this folder, read it too: the person's own notes
+on their setup (what they changed and how they like it). Herdr never writes
+or replaces it; put lasting notes about this machine's setup there.
+
 This folder is **the Herdr app's whole interface, as files**. The Herdr app
 is a desktop app for terminals and coding agents, and it redraws itself from
 these files while it runs: change a layout, a key or a panel here and the
@@ -62,7 +66,7 @@ commands. They're rewritten on every start to match this version.
 
 ## Seeing the window
 
-`herdr-app shot [file.png]` saves the last rendered window frame as a PNG
+`herdr-app shot [file.png]` saves the current window frame as a PNG
 and prints its absolute path (default: `herdr-shot.png` in your current
 folder). Use it when debugging mod UIs: inspect spacing, colors, terminal
 images, overlays, popups and floats. It captures the app, not the desktop,
@@ -77,8 +81,9 @@ first frame or during GPU recovery it reports an error instead of a PNG.
 |---|---|---|
 | `layouts/<name>.json` | the window and its whole look: blocks, theme, fonts, backgrounds, pane frames; one file per layout (`main`, `terminals`, `win98`, any you add) | live |
 | `keys.json` | what every key does | live |
-| `settings.json` | the person: zoom, sounds, fonts for every layout | live |
+| `settings.json` | the person: zoom, sounds, fonts for every layout, worktree directory | live |
 | `mods/<name>/` | panels: small JavaScript programs | live (hot reload) |
+| `AGENTS.local.md` | the person's notes on their setup, for agents | never written by Herdr |
 | `programs.json` | how programs show (name, icon, tile), on top of the built-in table | live |
 | `icons/` | the shipped program icons | written by Herdr (put your own elsewhere) |
 | `frame/` | the app's own screens (welcome, ...) | rewritten by Herdr on every start: don't edit, it won't stick |
@@ -88,6 +93,7 @@ first frame or during GPU recovery it reports an error instead of a PNG.
 Shared state is saved atomically in the background, with the latest change winning.
 If `shared.json` is invalid, Herdr logs a warning and keeps it as
 `shared.json.corrupt-<time>` before starting empty.
+`herdr-app check` uses empty shared state in memory and leaves this file untouched.
 
 ## The model: spaces, tabs, terminals
 
@@ -113,6 +119,8 @@ the highlighted line shows where it will land.
   live folders (`panes()[i].cwd`), not the folder it was made in: new
   tabs start where its focused pane is, and the default mods take a
   space's repo from its first terminal.
+  If starting in an inherited folder fails, new spaces, tabs and splits retry in
+  that machine's home. Explicit invalid folders still fail.
 - A **tab** is a piece of work in a space: its terminals and how they're
   split right and down. One nobody named is called by its place (1, 2,
   ...), as in Herdr; `tab.rename` names it ("fix login"). A space
@@ -152,15 +160,22 @@ the highlighted line shows where it will land.
   looking (it becomes `idle` once they look). A space's and a tab's
   status is the most urgent of its agents: blocked > done > working > idle.
 - **Sub-agents** are terminals an agent started with `hc run`: the core
-  records the starter as `parent` (see `terminals()`). They belong to their
+  records the starter as `parent` (see `terminals()`). Parent addresses use
+  the app's machine names, or a bare ID for this computer, when they can be
+  mapped; otherwise they stay as the core reported them. They belong to their
   parent's tab without a pane; the `agents` mod shows them,
   `terminal.peek` opens one, `terminal.keep` gives one a pane.
+  When the shown space is on another machine, the peek's Keep button uses the
+  nearest ancestor's space on the terminal's machine, or the first space there
+  if no ancestor has a pane there. Keep is hidden if that machine has no space.
   Ctrl-click (Cmd-click on macOS) a live terminal address in terminal text to
   peek at it. Bare addresses refer to the machine of the terminal showing them;
   use `machine/address` for another machine. Names and non-live addresses aren't links.
 - **Agent navigation order** belongs to the mods. A mod displaying agents calls
-  `setAgentOrder(list.map(a => a.address))` on render so `agent.next` /
-  `agent.prev` follow its list.
+  `setAgentOrder(list.map(a => a.address))` on render so `agent.next`,
+  `agent.prev` and `agent.select {index}` (1 = first) use that order. Herdr
+  keeps the last published order until the next call or app restart,
+  skips agents that are gone, and appends unlisted agents in model order.
 
 ## Layouts: `layouts/<name>.json`
 
@@ -218,9 +233,10 @@ A layout is a tree of nodes. Four types:
 
 - `block`: shows content. `"content"` is `{ "mod": "<folder>", "props": {...} }`,
   `{ "terminal": "t7" }`, `{ "tab": "active" }` (the shown tab's
-  terminals as it arranges them), or `{ "agent": "focused" }` (one agent's
-  terminal, full size: the one chosen with `agent.focus` / `agent.next`, else
-  the focused pane's agent, else the first agent).
+  terminals as it arranges them), or `{ "agent": "focused" }`. An agent block
+  shows one terminal at full size. It shows the agent chosen by `agent.focus`,
+  `agent.select`, `agent.next` or `agent.prev`. Otherwise it shows the focused
+  pane's agent or the first agent in navigation order.
 - `row` / `column`: children side by side / stacked.
 - `stack`: shows one child (`"active": "<child id>"`), with an optional
   `"header"` (a mod that draws tabs, or `"tabs"` for a plain built-in strip).
@@ -255,6 +271,11 @@ Properties any node can have:
   Windows), the bar draws them with `window.minimize`, `window.maximize`, `window.close`.
   Windows' shipped tab bar and system strip use vector window icons, with a
   restore icon when maximized, rather than font glyphs.
+- Root only: `"window_blur": true` blurs what's behind the window where the
+  system can (macOS, Windows, some Wayland compositors). Colors with alpha
+  then show the desktop through frosted glass: make `background` and
+  `canvas` transparent and give the sidebar a translucent `chrome`
+  (`"#0b102466"`). Nodes with solid colors stay solid.
 - Root only: `"preview": "layouts/<name>.svg"` (or png): the picture the
   settings screen shows for this layout. Draw one when you make a layout;
   without it the person sees a plain frame. New layouts and `themes/*.json`
@@ -263,6 +284,16 @@ Properties any node can have:
   right-clicks (including Shift+right-click). Omit it for the shipped `menu`;
   an unknown mod logs a warning and falls back to `menu`. Clone a shipped
   layout before changing this field. Other menus are unchanged.
+- Root only: `"link_handlers": ["my-browser", "my-viewer"]` chooses which mods
+  handle Ctrl-clicks (Cmd-clicks on macOS) in terminals, in order. Clone a
+  shipped layout before adding link handlers.
+- Root only: `"toast": "my-toast"` chooses the mod that shows notifications
+  (Herdr's own and every `notify()`), in place of the shipped `toast`; an
+  unknown mod logs a warning and falls back to `toast`. It gets the same
+  `props()`: `{title, body, level, icon, action, timeout, overlay}` (`timeout`
+  is optional). A mod that hands them to the system instead
+  (`exec("notify-send", ...)`) closes itself at once
+  with `closeOverlay(props().overlay)`.
 - Colors are theme names (`border`, `accent`, `surface`, ...) or `#rrggbb[aa]`.
 
 A personal terminal menu replaces the whole menu; it doesn't merge items.
@@ -272,7 +303,10 @@ Create `mods/my-menu/main.js` and `mod.json` (e.g.
 its `mod.json` overlay width/height override those defaults. It gets
 `props()` = `{tab: "pane", target: {pane, terminal}, overlay}`. Always use
 `target.terminal` or `target.pane` in actions, not the focused terminal:
-right-clicking a different terminal must act on the one clicked. For example:
+right-clicking a different terminal must act on the one clicked. A terminal
+shown outside a tab (a layout terminal block, a window) has no pane:
+`target.pane` is its block's id, not in `panes()`, so leave out pane items
+there, as the shipped menu does. For example:
 
 ```js
 import { View, div } from "gpui-kit";
@@ -317,9 +351,17 @@ layout's look and a block can differ:
   are upgraded to readable terminal colors; edited theme files are kept.
   A theme named like a layout (`themes/win98.json`) is
   that layout's own: Settings offers it only there.
-- `font` / `font_size`: the terminals' (px at zoom 1); `ui_font`: the mods'
-  (their text sizes are their own, in px, and follow zoom). Optional: without
-  them a layout uses settings.json's, else Herdr's (JetBrains Mono 14, Geist).
+- `terminal_line_height`: row height multiplier (default 1, clamped to 0.8..2).
+  Text stays centred; joining characters, cursors and images follow the rows.
+- `terminal_cell_width`: column width multiplier (default 1, clamped to 0.8..2),
+  like Ghostty's `adjust-cell-width` as a percentage (`-5%` is 0.95). Glyphs
+  are placed in their cells as Ghostty places them.
+- `terminal_scroll_speed`: wheel and trackpad multiplier (default 1, clamped
+  to 0.1..5), including mouse reports to programs. Small moves accumulate.
+- `font` / `font_size`: the terminals', the Files preview's and the Changes
+  diff's (px at zoom 1); `ui_font`: the mods' (their text sizes are their own,
+  in px, and follow zoom). Optional: without them a layout uses settings.json's,
+  else Herdr's (JetBrains Mono 14, Geist).
   Herdr (main) leaves these unset; Terminals sets text size 15, and Herdr 98
   brings its own fonts.
   JetBrains Mono, Geist Mono and Geist ship with Herdr; any installed font
@@ -328,6 +370,9 @@ layout's look and a block can differ:
   folder (or the home's `fonts/`) load at start and on the next look change,
   so a layout and its mod folder travel together (Herdr 98's do: its pixel
   fonts are in `mods/win98/fonts/`).
+- `font_weight` (100..900): the terminals' text weight. Default 500
+  (Medium); 400 is Regular, 300 Light, using the family's nearest face.
+- `font_weight_bold` (100..900): bold terminal weight (default 700), using the nearest face.
 - `pane_scrollbars` in settings.json (default `true`): show terminal scrollback
   with a slim thumb and track. Drag the thumb or click the track to jump there.
   With little or no terminal padding, the hit lane overlays the last 8px;
@@ -352,13 +397,27 @@ The tab block says how each pane of the shown tab is wrapped:
 
 - The look applies to every pane; `focus` replaces the border while the
   pane has the keyboard; `gap` is the space between panes.
+- `veil`: 0 to 1 (`"veil": 0.4`). Panes other than the tab's selected one
+  fade by that much: the terminal's background colour (the theme's
+  `background`, ignoring its alpha) is drawn over them at that opacity, so
+  their text fades and the look follows the theme. With `terminal_opacity`
+  below 1 it also covers what shows through the terminal. A dialog or input
+  taking the keyboard doesn't veil the selected pane, and a zoomed tab isn't
+  veiled. Clicks go through it.
 - `header`: a mod drawn on each pane, one copy per pane, with
   `props().pane` and `props().terminal`. It reads its live facts from
-  `panes()` (title, folder, branch, agent status, focused, zoomed) and its
-  buttons run pane commands with that pane (`pane.split`, `pane.zoom`,
-  `pane.close`). `position`: `top` or `bottom`; `reveal: "hover"` shows it
-  only while the pointer is on the pane, drawn over the terminal so the
-  terminal never resizes. The shipped `pane` mod is an example header.
+  `panes()` (title, folder, branch, agent status, focused, zoomed, scroll)
+  and its buttons run pane commands with that pane (`pane.split`, `pane.zoom`,
+  `pane.close`). `scroll` is `{ total, offset, len, from_bottom }` for a
+  terminal pane's history viewport (`from_bottom` is 0 at the end; `scroll`
+  is null on the alternate screen). Reads get current numbers. Mods refresh
+  only on transitions between the end, history, and the alternate screen;
+  scrolling and output within one of those states do not refresh them just
+  because the numbers changed. `position`: `top` or
+  `bottom`; `reveal: "hover"` shows it only while the pointer is on the pane,
+  drawn over the terminal so the terminal never resizes. The shipped `pane`
+  mod keeps its divider on the terminal-facing edge and reads the frame
+  position from `layout()`.
 - `lone: true` frames a tab's only pane too (default: only when split).
 - Each layout has its own, so one can stay bare while another makes
   every pane a card.
@@ -495,7 +554,8 @@ shortcuts must then be added by hand.
   `command` names an app command; `args` is an object (optional, defaults to `{}`).
   It can pass several arguments, numbers, booleans, arrays or nested objects.
   String actions keep their literal first-argument shorthand, including numeric
-  indexes: `space.new:{work}` names a space `{work}`, and `space.new:{}` names it `{}`.
+  indexes. `agent.select:2` selects the second agent in navigation order.
+  `space.new:{work}` names a space `{work}`, and `space.new:{}` names it `{}`.
   Invalid binding objects or rejected arguments show an error toast when pressed;
   the key does not go to the terminal program.
 - Plain ctrl+letters go to the program unless bound. Programs rely on
@@ -510,6 +570,8 @@ shortcuts must then be added by hand.
 - On macOS, shifted punctuation shortcuts accept both spellings from the
   current layout: `cmd-shift-]` and `cmd-}` match the same US-layout keypress.
   Existing `keys.json` files don't need to change.
+- The macOS menu bar runs the same commands and shows the key that keys.json
+  binds to each (string actions only). Rebinding updates the menus live.
 - Terminal keys honor the program's negotiated Kitty mode, including on Windows.
 - Windows terminal Escape stays separate from the following key.
 - Search: `ctrl-shift-f` (Cmd-F on macOS) opens a find bar inside the focused terminal;
@@ -529,47 +591,67 @@ Target IDs (`id`, `pane`, `space`, `terminal`) must be strings. Other non-null
 types are rejected before a current-target default applies; null means omitted.
 The main ones:
 
-- Spaces: `space.new {name?, folder?, tab?, argv?, task?, machine?}`
+- Spaces: `space.new {name?, folder?, tab?, argv?, task?, machine?, focus?}`
   (machine: another machine from `hc machine ls`; omitted: the focused space's
   machine for keys and clicks, this computer for scripts; `""`: this computer.
-  The space lives there, its
-  terminals start in that machine's home unless folder, and its tabs and
-  splits stay there; `spaces()` gives each space's `machine`, null here),
+  The space lives there, its tabs and splits stay there, and `spaces()` gives
+  each space's `machine`, null here. Without folder, its terminals start in
+  the focused terminal's folder when that terminal is on the same machine,
+  else in that machine's home),
   `space.close {id?, confirmed?}`, `space.rename {id?, name}` ("": Herdr's name again),
   `space.move {id, index}`, `space.select {index | id}`, `space.next`, `space.prev`.
   With no `argv`, the target core chooses that machine's default shell (PowerShell 7 when available on Windows).
-- Tabs: `tab.new {name?, space?, folder?, argv?, task?}` (argv: an
+- Tabs: `tab.new {name?, space?, folder?, argv?, task?, focus?}` (argv: an
   agent to run, task: its first message). Agents run in your interactive
   shell (including fish), which stays open after the agent exits. A terminal
   that exits with a nonzero code within two seconds of launch shows an error
   toast with its exit code and last output lines. Or `tab.new {name?, space?, mod,
-  props?}` for a tab whose only pane is a mod (a file, a board; split a shell
+  props?, focus?}` for a tab whose only pane is a mod (a file, a board; split a shell
   in beside it like any tab), `tab.close {id?, confirmed?}` (closing the last tab
   closes its space and asks first unless confirmed),
-  `tab.rename {id?, name}` ("": its number again), `tab.move {id, index}`,
+  `tab.rename {id?, name}` ("": its number again), `tab.move {id?, index | by}` (by: places left (-) or right (+), skipping settled tabs as `tab.next` does, wrapping),
   `tab.select {index | id}`, `tab.next`, `tab.prev`,
   `tab.settle {id?}`, `tab.unsettle {id?}` (index, next and prev
   skip settled tabs).
+- New spaces and tabs are shown at once. `focus: false` on `space.new` or
+  `tab.new` keeps the shown space and the target space's selected tab (with no
+  space shown, the new space is shown), for work the person looks at later;
+  such tabs go last in their space, in the order made. `focus` is a boolean.
 - Panes: `pane.split {direction: "right" | "down", pane?, argv? | mod?, props?}` (a new
   terminal, or a mod pane), `pane.close {pane?}`,
-  `pane.zoom {pane?}`, `pane.focus {pane | terminal}`, `pane.go {direction}`, `pane.swap {direction}`.
+  `pane.zoom {pane?}`, `pane.focus {pane | terminal}`, `pane.go {direction}`,
+  `pane.swap {pane?, direction | target}`, `pane.rename {pane?, name}` ("": unnamed
+  again; `panes()[i].name`, kept with its tab), `pane.resize {direction, pane?, px?}` (moves
+  the nearest border along that axis by px, default 40, as a drag would; a keyboard
+  resize mode is a mod that runs it on h/j/k/l).
+  `pane.zoom` also makes the pane its tab's focused one (the tab isn't
+  selected); on the zoomed pane it unzooms and focus stays.
   `pane.go` prefers the most recently focused pane along the nearest edge in that
   direction; unvisited panes fall back to overlap, then top/left layout order.
   `pane.go` also reaches visible mods whose `mod.json` says `"focusable": true`, and
   starts from that mod while it holds the keyboard.
-  `pane.swap` uses geometry only. Focus history lasts until the window closes.
+  `pane.swap {direction}` uses geometry only. Focus history lasts until the window closes.
+  `pane.swap {target}` trades the places of `pane` (default: the focused one) and
+  `target`, another pane of the same tab; give `direction` or `target`, not both.
+  A swap moves panes, not focus: the focused pane stays focused in its new place.
   `pane.focus {terminal}` prefers the first visible layout terminal block showing that
   address, then its model pane. Clicking a terminal block focuses it too.
   While a layout terminal block is focused, implicit split/close/zoom/go/swap and
   `terminal.show` fail, as do `terminal.open`/`terminal.keep` with place right/down.
   They never act on the terminal's source pane. An explicit `pane` still targets that
   model pane; composition edits belong to the mod (edit its layout instead).
+  Closing panes, tabs or spaces ends the terminals in them. Core ends dependent
+  children and keeps children started with `--outlive-parent` running.
 - Terminals: `terminal.open {argv?, folder?, place?, name?}` (`folder` sets the
-  starting directory for tabs and right/down splits, with or without `argv`), `terminal.kill {terminal}`,
+  starting directory for tabs and right/down splits, with or without `argv`),
+  `terminal.kill {terminal}` (ends the sub-agent tree, stopping at children with a
+  pane or `herdr.space` label; core still applies parent-lifetime rules),
   `terminal.keep {terminal, place?}`, `terminal.park {terminal}`,
   `terminal.peek {terminal}` (peek over the tab, with keep-as-tab and close),
   `terminal.show {terminal?, pane?}`, `terminal.search` (screen and scrollback;
-  find bar state stays with that terminal), `terminal.copy`, `terminal.paste` (copied
+  find bar state stays with that terminal), `terminal.select_all {terminal?}` (selects the whole
+  screen and scrollback for copying; only the alternate screen in vim and similar apps;
+  Cmd+A on macOS, no default on Linux/Windows), `terminal.copy`, `terminal.paste` (copied
   files, such as Finder's or a clipboard manager's image, as if dropped; an image
   alone as `terminal.paste_image` pastes it), `terminal.paste_image` (Ctrl+V: an
   image, into a terminal on another machine: copied there, its path pasted; on
@@ -583,6 +665,19 @@ The main ones:
   history, not the program: negative lines or pages go up, toward history; pages may be
   fractional, one page is the terminal's rows; on the alternate screen, such as vim or less,
   there is no history, so nothing moves),
+  `terminal.select {terminal?, at?: {row, col} | "cursor", mode?: "cell" | "word" | "line"}`
+  (replaces the selection, at the program's cursor by default; word/line act like double/triple click),
+  `terminal.adjust_selection {terminal?, direction}` (left, right, up, down, page_up, page_down,
+  home, end, line_start, line_end; moves the selection's end and follows it in the view;
+  fails with no selection), `terminal.clear_selection {terminal?}`.
+  These default to the focused terminal, like scroll, and add no default keys or copy mode.
+  `terminal.copy` copies the focused terminal's selection. `terminals()` and `focused()` expose
+  `selection: {start: {row, col}, end: {row, col}} | null` when the selection changes.
+  Start at the cursor with `terminal.select`; use `selection.end` as a copy-mode cursor.
+  Cells are zero-based; rows count from the oldest retained history through the active screen,
+  so output doesn't move an existing position unless history is pruned or reflowed.
+  Selection endpoints are inclusive: start is the anchor, end is the moving end, even when reversed.
+  Selection is null when absent or when no terminal view is attached.
   `terminal.pin {terminal, pinned}` (pins an agent to the top of the agent lists;
   kept on the terminal as `herdr.pinned`, so every Herdr client shows it, and
   gone when the terminal ends; read it as `agents()` `pinned`). Copy, paste, paste-image and implicit
@@ -594,7 +689,7 @@ The main ones:
   started, including its release outside the pane; other panes don't receive it.
   Terminals display Kitty graphics, including Unicode placeholder images used by
   programs such as yazi; partial images and scrolling follow the placeholder cells.
-- Agents: `agent.next`, `agent.prev`, `agent.focus {terminal}`.
+- Agents: `agent.next`, `agent.prev`, `agent.select {index}`, `agent.focus {terminal}`.
 - Layout: `layout.switch {name?}`, `layout.toggle {id}`, `layout.show {id}`, `layout.hide {id}`,
   `layout.resize {id, px | weight}`, `layout.select {stack, child}`, `layout.set {layout}`
   (personal tree edits; on shipped layouts only click/look fields change),
@@ -606,9 +701,18 @@ The main ones:
   never one a package manager owns), `app.welcome`, `app.whats_new`, `app.feedback {message?, from?}` (from `"person"` or `"agent"`; opens a review window, where the person can paste up to 3 screenshots; never sends until the person clicks Send), `app.reset`,
   `app.theme {name}`, `app.zoom_in`, `app.zoom_out`, `app.zoom_reset`,
   `app.update` (restart into a downloaded update).
-  Add machine lists all named ssh-config hosts in a scrollable list. Setup
-  prompts open above the picker; close the setup terminal to return to the
-  updated list and any machine-specific guidance. If a remote machine was rebuilt
+  Add machine lists all named ssh-config hosts in a scrollable list. Machines
+  that need a password, a new host key or herdr-core installed show what to run
+  in your own terminal; the picker updates once it is added. Other machines are
+  added quietly. Update remote cores older than 0.1.13 from Settings → Machines so children started there end with their parent by default.
+  If a Linux server reports that programs stop at logout, its
+  added card warns that agents stop when you disconnect and offers the administrator's
+  `sudo loginctl enable-linger -- <user>` command with Copy. A warning mark in
+  Settings > Machines and the sidebar opens that card; it clears automatically
+  after the administrator enables lingering. Older cores show no warning.
+  Login guidance includes Copy. A machine that needs a login shows
+  `hc machine login <name>` with Copy in Settings > Machines, its sidebar group,
+  the welcome screen and the failed New space toast. If a remote machine was rebuilt
   or replaced and a different core answers there, its sidebar offers Connect:
   explicitly forget the old identity and pair again with the same name and target.
   Other unreachable machines don't offer this.
@@ -651,8 +755,21 @@ What's about the user, never a look:
 - `core`: the herdr-core binary to use, when it isn't where Herdr looks
   (PATH, the login shell's PATH, `~/.local/bin`, Homebrew, mise, Nix,
   cargo). Read at start.
-- `font`, `font_size`, `ui_font`: used where the layout doesn't set its
-  own. Herdr (main) leaves these unset. Bigger panels: `zoom`.
+- `worktrees`: `{ "directory": "~/Developer/worktrees" }` sets where the shipped
+  New worktree dialog creates checkouts: `<directory>/<repo>/<branch>` (branch
+  slashes become dashes). Default: `~/.herdr/worktrees`. Use an absolute path or
+  `~` / `~/...`; Windows paths work too. The setting lives in this app's
+  settings.json; the path and `~` refer to the space's machine, including remote
+  spaces. Read when New worktree opens; existing checkouts are not moved, and
+  Open / Remove worktree still use Git's checkout list. No mod clones needed.
+  The app does not read the TUI's config.toml; set its `[worktrees] directory`
+  to the same place if both should create checkouts together.
+- `terminal_line_height` (default 1, 0.8..2), `terminal_cell_width`
+  (default 1, 0.8..2) and `terminal_scroll_speed` (default 1, 0.1..5):
+  terminal row height, column width and wheel/trackpad speed, used where the
+  layout leaves them unset.
+- `font`, `font_size`, `font_weight`, `font_weight_bold`, `ui_font`: used where
+  the layout doesn't set its own. Herdr (main) leaves these unset. Bigger panels: `zoom`.
 - `font_ligatures`: programming ligatures are off by default; set `true` to
   enable them in terminal fonts such as JetBrains Mono and Fira Code. The cursor
   and background changes (including selections) break ligatures so individual cells stay clear.
@@ -667,6 +784,9 @@ What's about the user, never a look:
   waiting, the next launch installs it before opening a window. The first
   start after an app update also updates herdr-core
   to the latest release of the same generation, keeping terminals running.
+  Package-managed cores stay with their package manager; Settings shows available releases.
+  A core update error can be dismissed with its × or `overlay.close {id:"core-update-error"}`
+  until the error changes or the update recovers.
   Settings → Updates keeps app and core actions together;
   its What's new button opens the waiting update's release range, or this
   version's notes, in the What's new window. Reading never clears the waiting-update dot.
@@ -717,6 +837,14 @@ What's about the user, never a look:
   `p` writes Linux primary selection. `s` is ignored; cut buffers `0`–`7`
   are treated as the system clipboard.
   Clipboard reads (`?`) are never allowed.
+- `copy_on_select`: copy a mouse selection to the clipboard on release (default
+  `true`). Set `false` to leave the clipboard untouched while keeping the selection
+  visible; `terminal.copy` (Cmd+C/Ctrl+Shift+C) still copies it. Where Linux
+  supports PRIMARY, terminal selections set it independently of this setting
+  and middle-click pastes it. On Wayland without PRIMARY support, middle-click
+  pastes clipboard text. Middle-click pastes the clipboard on Windows and does
+  nothing on macOS. Programs that capture the mouse still receive middle-clicks.
+  Hold Shift while dragging in programs that capture the mouse.
 - `pane_scrollbars`: `false` hides the scroll position thumb at a terminal
   pane's right edge (default `true`). It shows only when the pane has
   scrollback — never on the alternate screen (editors, pagers) — and
@@ -733,11 +861,12 @@ What's about the user, never a look:
 ## Programs: `programs.json`
 
 Every pane, agent and terminal carries `program`: its name, icon and tile,
-from one table, so every mod shows the same. An agent's own report wins;
+from one table, so every mod shows the same, and the app's own toasts
+("Kiro finished") use the same names. An agent's own report wins;
 else the program the terminal runs (an interpreter shows what it runs:
 `node .../vite` is Vite, `npx vitest` is Vitest); shells are `shell`,
 anything unlisted is `program` with a color of its own. The built-in table
-has 120 programs (agents, editors, runtimes, tools, databases, infra);
+has 124 programs (agents, editors, runtimes, tools, databases, infra);
 `programs.json` here adds to it or changes entries field by field:
 
 ```json
@@ -751,14 +880,19 @@ has 120 programs (agents, editors, runtimes, tools, databases, infra);
 - `icon`: a path in the home folder. `tint: true` for a one-color glyph
   (drawn in `color` on a tile, or the text color), false for a picture.
 - `match`: other process names (or agents' `app` names) for the entry.
-- `run`: how to start it (`["cursor-agent"]`), for agents people start
+- `run`: how to start it (`["agent"]` for Cursor), for agents people start
   from a menu: `knownAgents()` lists the entries with one, and whether this
   machine (or another) has them installed. For example, override
   `"claude": { "run": ["my-claude"] }` or add
   `"claude-alt": { "name": "Claude (alt)", "icon": "icons/claude.svg", "run": ["my-claude-alt"] }`
   inside `programs`. Use programs or shell functions, not aliases (the launcher
-  does not expand them). On macOS the menu launcher loads login profiles before
+  does not expand them). On macOS both checks and the menu launcher load login profiles before
   running the agent and leaves an interactive login shell when it ends.
+  Codex starts as `codex --no-daemon`: a shared Codex daemon would make later
+  sessions use the first terminal's identity and stop with it.
+  An explicit key still wins over another entry's `match`, so a personal
+  `"python3": { "name": "…" }` keeps its name; only the generic `agent`
+  fallback yields to a `match` (Cursor's process is `agent`).
   On remote Unix machines, both the installed-agent check and launcher load
   that user's login/interactive shell for sh, bash, zsh, dash, ksh and fish, so
   its PATH includes shell-configured tools. Other shells keep the sh launcher.
@@ -773,8 +907,9 @@ has 120 programs (agents, editors, runtimes, tools, databases, infra);
 
 ```
 ~/.config/herdr-app/mods/<name>/
-  main.js       the mod (required)
-  mod.json    where it first appears: { "place": "right" | "left" | "top" | "bottom" | "none", "size": 320 }
+  main.js       the mod's view, if it has one
+  link.js       the terminal link handler, if it has one
+  mod.json      where it first appears: { "place": "right" | "left" | "top" | "bottom" | "none", "size": 320 }
   *.js, *.svg   more modules ("./ui.js"), its own icons
 ```
 
@@ -783,6 +918,15 @@ has 120 programs (agents, editors, runtimes, tools, databases, infra);
   (`this.handle.focus()`) and handle keys with `on_key_down`. The copy gets `"focus"`
   again after a popup over it closes. Leave with `run("pane.go", {direction})`.
   Without this opt-in, navigation and clicks stay unchanged.
+
+- `"palette"` in `mod.json` adds entries each time the command palette opens.
+  For example, `"palette": [{ "title": "TUI sessions", "command": "mod.open", "args": { "name": "tui-sessions" }, "words": "agents" }]`.
+  Use an app command with its required arguments in `args`, or this mod's own
+  `<mod>.<command>` with no arguments. A mod command needs a shown copy listening
+  with `nextCommand()`. Use `mod.open {name}` to open a mod as an overlay, or
+  `tab.new {mod, props}` to open one with props. `group` defaults to "Mod"
+  ("Recent" is reserved). `words` is an optional string of search terms.
+  Malformed entries and duplicate command and argument pairs are skipped.
 
 - The first time Herdr sees a folder, it docks one copy per `mod.json` into
   the shown layout (`"none"`: only where a layout or another mod puts it).
@@ -812,11 +956,44 @@ has 120 programs (agents, editors, runtimes, tools, databases, infra);
   action: "new" | "open" | "remove"}` (the repo: folder, else where the
   space's first terminal is), or with `{branch, tab?, argv?}` to make one at once with
   that first tab; checkouts go to
-  `~/.herdr/worktrees/<repo>/<branch>` on the space's machine, a constant
-  at its top; the
+  `<worktrees.directory>/<repo>/<branch>` on the space's machine (default
+  `~/.herdr/worktrees`; see settings.json above); the
   `spaces` sidebar nests worktree spaces under their repo's and shows each
   space's repo, branch, ahead/behind and uncommitted changes). Shipped mods
   are Herdr's; duplicate with `mod.clone` before editing.
+
+### Terminal link handlers
+
+In `mod.json`, declare what the mod can open:
+
+```json
+{"place":"none","link_handlers":[{"kind":"file","pattern":"(?i)\\.png$"}]}
+```
+
+Herdr offers the same URLs and paths it detects for native clicks, including
+recognized paths that are missing or remote. Rules use Rust regex search.
+File rules match decoded `file:` paths, and URL rules match the full URI.
+Each mod gets the link kind from its first matching rule. Plain paths use the
+native diagnostic suffix fallback. Bare filenames and backslash paths are skipped.
+The first time a mod has link rules on a personal layout, Herdr adds it to
+that layout. Edit `link_handlers` to reorder or remove it.
+
+Export `handleLink(click)` from `link.js` (it can be async). It receives
+`{link, source}` and can import the usual functions from `"herdr"`. The source
+names the clicked terminal and its machine, cwd, pane, tab and space.
+`link.raw` keeps the original text or the OSC 8 destination. `link.path` is
+null for remote, unresolved or non-UTF-8 paths. Plain paths can carry a
+`:line` or `:line:column` suffix, exposed as optional 1-based `link.line` and
+`link.column`. A column needs a valid line. Herdr keeps a verified literal
+filename intact and can report coordinates even when `link.path` is null.
+File URIs have no coordinates. Herdr can verify their local paths when the
+host is empty or `localhost`. A link handler starts without opening a view
+and shares `localStorage` with views of the same mod with null props.
+Return `"handled"` when done or `"pass"` to try the next matching mod.
+If all pass, a local terminal uses the usual opener target. A matched file
+from a remote terminal has no opener target. A handler has 30 seconds to
+answer. A load or handler error stops the click, shows a toast and appears in
+`herdr-app status`.
 
 ### Check before you finish
 
@@ -824,8 +1001,15 @@ has 120 programs (agents, editors, runtimes, tools, databases, infra);
 herdr-app check ~/.config/herdr-app/mods/<name>
 ```
 
-Loads the mod, renders it once, exits nonzero with the exact error. Run it
-after every change. Never call a mod done without a passing check.
+Loads and renders the mod's view if it has one. It validates link rules.
+For mods with link rules and standalone link mods, it verifies that `link.js`
+exports `handleLink` without running the module or its imports. It exits
+nonzero with the exact error. Run it after every change.
+
+`init()` runs for real during a check. Import `checking` from `"herdr"` and
+use `if (checking()) return;` before starting helpers or writing files.
+`checking()` is true throughout a check and false in a live window.
+`exec`, `hc` and `writeTextFile` still run during checks and warn when called.
 
 ### A mod
 
@@ -869,6 +1053,10 @@ Rules:
   once; `render(cx)` describes the UI and runs again after `cx.notify()` and
   whenever Herdr's live data changes (spaces, agents, terminals, focus,
   theme, shared state). Don't poll those.
+- Module code runs once per source version and is shared by copies, even after all
+  copies close. Keep instance state and host calls in constructor/init, not module
+  scope. Each copy gets its own instance and tasks. Views with the same mod
+  and props share live `localStorage` values.
 - **Never keep a `cx` and use it later.** Every callback gets its own:
   `on_click((event, cx) => …)`, `cx.spawn(async (cx) => …)`,
   `cx.timer.every(ms, (cx) => …)`.
@@ -899,7 +1087,11 @@ Rules:
   0.4, to: 1, period: 1200 })` (also width, height, left, top), and
   `.transition(...)` for changes: they run without your script and stop
   when not shown. Timers are for data (a clock, a fetch), and only as often
-  as what they show changes.
+  as what they show changes. Mod timers keep running while the window is
+  hidden. To pause a stream or poll, check `window()?.visible` in the timer
+  and stop when it turns false. Read it in `render` and restart when true.
+  `window()` is null when there is no window (`herdr-app check`), so use `?.`.
+  See `herdr.d.ts` for what each platform reports.
 
 ### UI
 
@@ -909,11 +1101,39 @@ Chained builders with GPUI's snake_case names: `div()`, `h_flex()`,
 `.overflow_y_scrollbar()`; `.child("text")`, `.text_size(n)`, `.font_semibold()`,
 `.truncate()`, `.text_color(c)`; `.bg(c)`, `.border(1)`, `.border_color(c)`,
 `.rounded(n)`; `.id("unique")` then `.on_click(...)`, `.on_mouse_down("right", ...)`,
-`.hover((s) => s.bg(c))`, `.on_scroll_wheel(...)`; keyboard: `this.h = cx.focus_handle()`
+`.hover((s) => s.bg(c))`, `.on_scroll_wheel(...)`, `.on_pinch(...)`; keyboard: `this.h = cx.focus_handle()`
 in init, `.track_focus(this.h).on_key_down((e, cx) => …)`, `this.h.focus()`.
+`ScrollHandle` from `gpui-base` scrolls a plain `overflow_*_scroll()` or
+`overflow_*_scrollbar()` area from code. Create `this.scroll = ScrollHandle.new()`
+in `init`, attach `.track_scroll(this.scroll)`, then call
+`this.scroll.scroll_to_item(index)` to reveal a zero-based direct child with
+only the movement needed. Requests run once after layout; visible children stay put.
+It also says where the area is, as does a virtual list's `VirtualListScrollHandle`:
+`offset()` (`{x, y}`, counted up from 0 at the start), `content_size()` and
+`viewport_size()` (`{width, height}`). They are in the px you write, whatever the
+zoom, and are the last layout's: all zero before the first frame, kept while the
+area is hidden, and a `scroll_to_*` request shows in them once it has run, not
+right away. `content_size()` includes padding and is never smaller than the viewport.
+The area is at the end when `offset().y + viewport_size().height >= content_size().height - 1`.
+Event positions and `on_size_change` sizes are window px: divide them by
+`settings().zoom` before mixing them with these. `list` and `uniform_list` take no handle.
+Lazy lists: `list` and `uniform_list` come from `gpui-kit`, where `div` is;
+`v_virtual_list` and `h_virtual_list` come from `gpui-base`. They need a
+definite height from their container: a `flex_1()` chain with no explicit
+`h(n)` anywhere lays out at zero and draws nothing. `track_scroll` works on a
+plain scroll area and the virtual-list pair; `list` and `uniform_list` keep
+their own position, so pair a `Scrollbar` of the same id instead.
 `.on_drop((event, cx) => …)` on a plain layout element receives external files as
 `event.paths` (absolute paths). The feedback form accepts dropped images with
 the same limits, previews and removal as picked images.
+`.id("file-row").drag_paths([absolutePath], { on: machine })` makes a plain layout
+element a file/folder drag source for terminals. Omit `on` (or use null)
+for local paths; remote paths retain their source machine. Ordinary clicks
+still work; dropping outside a terminal cancels without pasting.
+A terminal on the source machine receives quoted paths without Enter.
+Local files dropped onto a remote terminal are copied there like an OS file
+drop; local folders and remote paths dropped onto another machine are refused.
+Paths containing control characters are rejected, including clipboard files.
 `.on_hover((hovered, cx) => …)` reports pointer entry and exit on buttons
 and other interactive controls too.
 `.on_mouse_move` and `.on_mouse_up` fire only over the element. For a drag that
@@ -925,7 +1145,16 @@ including over terminals, with positions against the element's box. A move's
 the window can cancel.
 `.when(cond, (el) => …)`, `.children([...])`. Controls from `gpui-base`
 (`Button`, `Checkbox`, `Switch`, `InputState` + `Input`) are unstyled: style
-them. Text: `TextView.markdown(id, text)` renders markdown; `EditorState.new({
+them. Text: `TextView.markdown(id, text)` renders markdown; with
+`.selectable(true)`, `.on_selection_change((s, cx) => …)` gets a settled
+selection or `null` when it clears. `s.text` matches what copying the selected
+text in that view gives you. When `s.range` is present, use
+`markdown.slice(s.range.start, s.range.end)` to get the original Markdown.
+`.highlight_range(start, end, color)` paints behind the text rendered from any
+Markdown source range, including offsets found with `markdown.indexOf(query)`.
+When `s.position` is present, place a popup with
+`openOverlay({ mod: "selection-actions", kind: "popup", at: s.position })`.
+`EditorState.new({
 language, value, readonly, font_family: settings().font_family, syntax: {
 keyword: theme().ansi5, ... } })` + `Editor.new(state)` is a code view (readonly)
 or editor with syntax highlighting, line numbers and folding. A viewer opens
@@ -954,7 +1183,9 @@ All of it is in `herdr.d.ts`. In short:
   `focused().agent` is the agent an agent block shows.
   `focused().space`/`tab` describe the current window context. With a layout terminal
   block focused, `pane` and `shown` are null; `terminal` and `cwd` describe that block,
-  not its source pane. Check `focused()?.pane` before offering pane controls.
+  not its source pane. A terminal in a window (`openOverlay` with a `layout`) that has
+  the keyboard is reported the same way; pane commands without a `pane` still act on
+  the focused pane under the window. Check `focused()?.pane` before offering pane controls.
   `panes()` still lists only model panes; none is focused while a terminal block is.
   For composition navigation: `run("pane.focus", {terminal: nextAddress})`.
   Terminal copy/paste and implicit right-click routing follow the focused block.
@@ -964,7 +1195,8 @@ All of it is in `herdr.d.ts`. In short:
   returns an id; the mod gets `props().overlay` and closes itself with
   `closeOverlay(id)`; Esc closes the top dialog or popup. `frame: "none"`
   drops Herdr's border, corners and shadow so the mod draws its own.
-  `notify({ title, body, level, icon, timeout })` posts a notification, drawn by the `toast` mod.
+  `notify({ title, body, level, icon, timeout })` posts a notification, drawn
+  by the layout-chosen mod (default: `toast`).
 - Windows (`kind: "window"`): stay open until closed, over the layout and
   under dialogs; a press the mod doesn't stop drags it (stop it on your
   controls, like a title bar's buttons), it stays where dropped, and the one
@@ -975,17 +1207,21 @@ All of it is in `herdr.d.ts`. In short:
   A window can hold a layout, terminals too: a terminal keeps its presses
   (selecting text), so give it a mod block to drag by, a title bar:
   `openOverlay({ kind: "window", key: "t7", width: 600, height: 400, layout: { type: "column", children: [{ type: "block", size: { px: 28 }, content: { mod: "my-titlebar" } }, { type: "block", content: { terminal: "t7" } }] } })`.
-- Machine: `exec(cmd, args, { cwd, on })` (the user's real environment; use this,
+- Machine: `exec(cmd, args, { cwd, on, timeout })` (the user's real environment; use this,
   not `process.run`; `on: space.machine` runs there, omitted means local).
-  It rejects if the program cannot start or the machine cannot be reached.
+  `timeout` is milliseconds, defaults to 30,000 and is capped at 600,000 (10 minutes),
+  locally and remotely. It rejects on timeout, if the program cannot start or the machine cannot be reached.
   `hc(args)` (`hc read <t>` gives a terminal's text),
   `home()`, `appHome()`, `playSound("done" | "blocked" | file)`.
   `knownAgents({ on })`: the agents people can start (programs.json's
   `run`), most picked first, each `installed` or not there (asked of the
   shell agents start in; a remote Unix machine's login/interactive shell when supported);
-  start one with `argv: agent.run`.
+  rejects if the check fails (failed checks are not cached); start one with `argv: agent.run`.
   `pickFolder({ prompt })`: the system's folder picker (here only),
   resolves with the folder or null.
+  `pickFiles({ prompt, multiple })`: the system's file picker (here only),
+  resolves with the files' paths or null on cancel, and rejects if the picker fails
+  or a path cannot be represented as a string.
 - Files: `readTextFile(path, { on })` (here, or on that machine),
   `writeTextFile(path, text, expected)` (here only), and
   `watchFolder(dir)` (here only; poll a remote space's folder): resolves with the changed paths the next time anything
@@ -993,15 +1229,28 @@ All of it is in `herdr.d.ts`. In short:
   and trees above 4096 non-ignored directories reject the watch; use a timer fallback.
   macOS and Windows watch recursively, including ignored directories.
   A returned root path means refresh everything (the pending paths are bounded).
-  Files also refreshes on its 10-second timer:
+  At most 64 folders can have pending watches at once; further folders reject.
+  Idle watches can be reclaimed to make room, so reload when starting a watch.
+  The returned promise also has `cancel()`: keep it and cancel when you stop
+  showing the folder. Cancellation resolves with `[]` and releases this call
+  without stopping other callers: `const watch = watchFolder(dir); watch.cancel();`.
+  Closing a mod copy cancels its pending calls.
   `cx.spawn(async (cx) => { for (;;) { await watchFolder(dir); this.reload(); cx.notify(); } })`.
+  Files and Changes coalesce watch events and poll while the window is focused.
+  Polling starts at 10 seconds, and both kinds of refresh wait longer after slow Git scans.
+- Window title: `setWindowTitle(title)` sets the OS window's title, which window switchers,
+  taskbars and time trackers read. The last call wins; `null` restores `Herdr`. Call it when the
+  title changes, not on every render.
+- App icon badge: `setBadge(text)` puts `text` on the app's Dock icon (macOS; other platforms
+  ignore it), e.g. `setBadge(blocked ? String(blocked) : null)`. The last call wins; `null` or `""`
+  clears it.
 - `notify({ ..., action: { name, args } })`: the toast runs the command when clicked.
 - This copy: `props()`, `shared(key)` / `setShared(key, value)` (every mod
   sees it; setting re-renders all), `nextCommand()` (key commands for this
   mod: `cx.spawn(async (cx) => { for (;;) { const c = await nextCommand(); …; cx.notify(); } })`).
 
 Mods are trusted code: commands and network access (including `fetch`) are unrestricted.
-Other built-ins: `localStorage` (per mod copy), `console.log`, `fetch`,
+Other built-ins: `localStorage` (shared by mod and props), `console.log`, `fetch`,
 `import * as fs from "fs/promises"` (read in home, write under `~/.config/herdr-app`).
 
 ## herdr-core (`hc`)

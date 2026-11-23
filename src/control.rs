@@ -146,8 +146,12 @@ fn parse_args(rest: &[String]) -> Result<Value, String> {
 }
 
 /// Encode before opening the destination: GPU errors must not truncate a good shot.
-pub fn save_shot(window: &gpui::Window, path: &std::path::Path) -> anyhow::Result<()> {
-    let image = window.render_to_image()?;
+pub fn save_shot<C: gpui::AppContext>(
+    window: gpui::AnyWindowHandle,
+    cx: &mut C,
+    path: &std::path::Path,
+) -> anyhow::Result<()> {
+    let image = window.render_current_to_image(cx)?;
     let mut bytes = Vec::new();
     {
         let mut encoder = png::Encoder::new(&mut bytes, image.width(), image.height());
@@ -180,6 +184,12 @@ fn fail(message: &str) -> i32 {
 #[cfg(all(test, unix))]
 mod tests {
     use super::*;
+
+    #[test]
+    fn flag_values_that_parse_as_json_are_json() {
+        let args: Vec<String> = ["--name", "eng-123", "--focus", "false", "--argv", r#"["claude"]"#].map(String::from).into();
+        assert_eq!(parse_args(&args).unwrap(), json!({ "name": "eng-123", "focus": false, "argv": ["claude"] }));
+    }
 
     #[test]
     fn a_second_launch_raises_the_running_window() {

@@ -1196,6 +1196,17 @@ const CONTEXT_AND_VIEW: &str = r#"  /**
     context?: string;
   }
 
+  /** What an `on_pinch` handler receives. */
+  export interface PinchEvent {
+    /** The change in scale for this step: 0.1 is 10% larger, negative is smaller. */
+    delta: number;
+    touch_phase: "started" | "moved" | "ended" | "cancelled";
+    position: Point;
+    local_position?: Point;
+    bounds?: import("gpui-shell").ElementBounds;
+    modifiers: Modifiers;
+  }
+
   /** What an `on_scroll_wheel` handler receives. */
   export interface ScrollWheelEvent {
     /** The scroll distance in pixels, whichever unit the device reported. */
@@ -1469,6 +1480,12 @@ const ELEMENT_METHODS: &str = r#"    /**
      * for any button.
      */
     on_mouse_down_out<Self extends Element>(this: Self, handler: (event: MouseButtonEvent, cx: Context) => void): Self;
+    /**
+     * Makes a plain layout element a native file/folder drag source. Paths are
+     * absolute on `on` (a host-owned machine name); omitted/null means local.
+     * The payload keeps its source machine, and an ordinary click still works.
+     */
+    drag_paths<Self extends Element>(this: Self, paths: string[], options?: { on?: string | null }): Self;
     /** Files dropped from outside the app, as absolute paths. Use on a plain layout element. */
     on_drop<Self extends Element>(this: Self, handler: (event: { paths: string[] }, cx: Context) => void): Self;
     /**
@@ -1480,6 +1497,11 @@ const ELEMENT_METHODS: &str = r#"    /**
      * the gesture drives something else — a zoom, a value, a custom viewport.
      */
     on_scroll_wheel<Self extends Element>(this: Self, handler: (event: ScrollWheelEvent, cx: Context) => void): Self;
+    /**
+     * GPUI `InteractiveElement::on_pinch`: a two-finger trackpad pinch over
+     * this element, on platforms that report one.
+     */
+    on_pinch<Self extends Element>(this: Self, handler: (event: PinchEvent, cx: Context) => void): Self;
     /**
      * `handler(event, cx)` when the named action is dispatched to this element
      * or to something inside it.
@@ -1714,15 +1736,21 @@ const ELEMENT_METHODS: &str = r#"    /**
      */
     track_focus<Self extends Element>(this: Self, handle: FocusHandle): Self;
     /**
-     * Gives a virtual list the scroll position held by a
+     * Gives a plain overflow scroll area the position held by a `ScrollHandle`,
+     * or gives a virtual list the scroll position held by a
      * `VirtualListScrollHandle`, so the script can drive it with
      * `scroll_to_item` and `scroll_to_bottom`.
      *
      * Optional. Without one the list keeps a position of its own, filed under
      * the id it was built with — which is the same place a `Scrollbar` named
      * after that id looks, so the bar works either way.
+     *
+     * `list` and `uniform_list` always keep their own position: a handle
+     * passed to them is ignored (the app logs a warning), so pair a
+     * `Scrollbar` of the same name instead. `v_virtual_list` and
+     * `h_virtual_list` use the handle.
      */
-    track_scroll<Self extends Element>(this: Self, handle: import("gpui-base").VirtualListScrollHandle): Self;
+    track_scroll<Self extends Element>(this: Self, handle: import("gpui-base").VirtualListScrollHandle | import("gpui-base").ScrollHandle): Self;
     /**
      * Which item a virtual list measures to infer its size across the axis it
      * scrolls: a vertical list takes its width from this item, a horizontal
@@ -2112,6 +2140,11 @@ const ELEMENTS: &str = r#"
   /**
    * GPUI's own lazy list: rows of any height, measured as they are drawn.
    *
+   * Exported from `gpui-kit`, where `div` is — not from `gpui-base`. The
+   * `gpui-base` pair is `v_virtual_list` / `h_virtual_list`. Like every lazy
+   * list, it needs a definite height from its container: a `flex_1()` chain
+   * with no explicit height anywhere lays out at zero and draws nothing.
+   *
    * Where `v_virtual_list` places rows by the sizes the script states, `list`
    * asks nothing about size. `render(index, cx)` is called for each item that
    * is on screen, from inside layout as a virtual list's renderer is, and the
@@ -2160,6 +2193,10 @@ const ELEMENTS: &str = r#"
   /**
    * GPUI's own uniform list: one row is measured and every row takes its
    * height.
+   *
+   * Exported from `gpui-kit`, same as `list`; the `gpui-base` pair is
+   * `v_virtual_list` / `h_virtual_list`. It needs a definite height from its
+   * container too.
    *
    * The same contract as `v_virtual_list` with a single size, without the
    * size: the first row (or the one `with_item_to_measure_index` names) is
@@ -2427,10 +2464,35 @@ const BASE: &str = r#"  /** A row. */
   export const Checkbox: ComponentType;
   /** A controlled switch. No styling. */
   export const Switch: ComponentType;
+  /** HERDR: a settled selection in a TextView. */
+  export interface TextViewSelection {
+    /** The selected text in this view, trimmed as when copying it. */
+    text: string;
+    /**
+     * UTF-16 offsets into the Markdown source the selection came from, so
+     * `markdown.slice(range.start, range.end)` includes any markup inside it.
+     * Absent in HTML or when the selection doesn't map to the current source.
+     */
+    range?: InputRange;
+    /** Where the selection ended, in logical window pixels. Absent for select-all. */
+    position?: import("gpui-kit").Point;
+  }
   /** Rich HTML or Markdown text. CSS in HTML is not supported. */
   export interface TextViewElement extends NativeElement {
     /** Overrides TextView's default URL opening and reports the resolved URL. */
     on_link_click(handler: (url: string, cx: Context) => void): this;
+    /**
+     * HERDR: called when a selection settles (the pointer is released, a
+     * double or triple click, select-all), and with `null` when a reported
+     * selection is cleared. Whitespace alone reports as `null`.
+     */
+    on_selection_change(handler: (selection: TextViewSelection | null, cx: Context) => void): this;
+    /**
+     * HERDR: paints `color` behind the text rendered from `[start, end)`,
+     * UTF-16 offsets into the Markdown source, like `selection.range`. Chain once
+     * per range; later ones paint over earlier ones. Markdown only.
+     */
+    highlight_range(start: number, end: number, color: Color): this;
     selectable(value?: boolean): this;
     scrollable(value?: boolean): this;
   }
@@ -3021,18 +3083,57 @@ const BASE: &str = r#"  /** A row. */
   ): NativeElement;
 
   /**
+   * Where a scroll area is, read from its handle. Lengths are in the pixels a
+   * script writes, so a row written `.h(30)` moves `offset()` by 30 at any zoom.
+   * Values are the last layout's, kept while the area is hidden; a `scroll_to_*`
+   * request shows here once it has run. Event positions and `on_size_change` sizes
+   * are window px: divide them by `settings().zoom` before mixing them with these.
+   * Read in an event handler or a task after layout. All zero before the first frame.
+   */
+  export interface ScrollPosition {
+    /** How far the content has scrolled from its start: `{ x: 0, y: 0 }` there, never negative. */
+    offset(): import("gpui-kit").Point;
+    /** The scrollable extent, including padding and at least as large as the viewport. */
+    content_size(): import("gpui-kit").Size;
+    /**
+     * The size of the part on screen. The area is at its end when
+     * `offset().y + viewport_size().height >= content_size().height - 1`.
+     */
+    viewport_size(): import("gpui-kit").Size;
+  }
+
+  /** A plain scroll area's position. Create in init() and attach with track_scroll. */
+  export interface ScrollHandle extends ScrollPosition {
+    /** Reveal the zero-based direct child with the smallest scroll needed.
+     * Works on plain overflow_*_scroll and overflow_*_scrollbar elements.
+     * Requests are consumed once, after layout; already visible children stay put.
+     */
+    scroll_to_item(index: number): void;
+    /** Releases the handle. Using it afterwards throws. */
+    release(): boolean;
+  }
+
+  /** Create in init() and attach with track_scroll(handle). */
+  export const ScrollHandle: { new: () => ScrollHandle };
+
+  /**
    * A virtual list's scroll position, kept across frames so the script can move
    * it. Create it in `init()` and hand it to the list with `track_scroll`.
    *
    * A list without one still scrolls, and a `Scrollbar` named after the list
-   * still drives it; this is only needed to scroll it from code.
+   * still drives it; this is only needed to scroll it from code, or to read
+   * where it is.
    */
-  export interface VirtualListScrollHandle {
+  export interface VirtualListScrollHandle extends ScrollPosition {
     /**
      * Puts the item at `index` on screen before the next frame. `"top"` (the
      * default) brings it to the near edge, `"center"` to the middle.
      */
     scroll_to_item(index: number, strategy?: "top" | "center"): void;
+    /**
+     * Puts the last item on screen before the next frame: the last of the items
+     * that frame draws, so it can be called in `init()` or right after adding items.
+     */
     scroll_to_bottom(): void;
     /** Releases the handle. Using it afterwards throws. */
     release(): boolean;
@@ -3063,6 +3164,8 @@ const BASE: &str = r#"  /** A row. */
     replace_with_token(token: InlineToken): void;
     replace_range_with_token(range: InputRange, token: InlineToken): void;
     set_selected_range(range: InputRange): void;
+    /** The selection (UTF-16 offsets); start equals end at a plain cursor. */
+    selected_range(): InputRange;
     replace(text: string): void;
     value(): string;
     /** Plain text, or a content snapshot to restore its tokens as well. */
@@ -3132,6 +3235,8 @@ const BASE: &str = r#"  /** A row. */
     replace_with_token(token: InlineToken): void;
     replace_range_with_token(range: InputRange, token: InlineToken): void;
     set_selected_range(range: InputRange): void;
+    /** The selection (UTF-16 offsets); start equals end at a plain cursor. */
+    selected_range(): InputRange;
     replace(text: string): void;
     value(): string;
     /** Plain text, or a content snapshot to restore its tokens as well. */
@@ -3161,7 +3266,14 @@ const BASE: &str = r#"  /** A row. */
     value(): string;
     /** Programmatic replacement works even in readonly mode. */
     set_value(value: string): void;
+    /** The selection (UTF-16 offsets); start equals end at a plain cursor. */
+    selected_range(): InputRange;
+    set_selected_range(range: InputRange): void;
+    /** Replaces the selection with `text`, as typing would (one undo step). */
+    replace(text: string): void;
     on(event: "change" | "submit" | "focus" | "blur" | "paste_other", handler: (event: InputEvent, cx: Context) => void): boolean;
+    /** Moves the keyboard onto the editor. */
+    focus(): void;
     release(): boolean;
   }
   export const EditorState: {
@@ -4002,7 +4114,9 @@ mod tests {
         "on_window_mouse_up",
         "on_mouse_down_out",
         "on_drop",
+        "drag_paths",
         "on_scroll_wheel",
+        "on_pinch",
         "on_action",
         "key_context",
         "image",

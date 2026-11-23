@@ -1592,8 +1592,10 @@ fn successful_application_reload_purges_old_state_and_keeps_new_generation(
         format!(
             r#"
 import {{ ReloadState }} from "gpui-component";
-ReloadState();
-export default class Reloaded {{ render() {{ return "version {version}"; }} }}
+export default class Reloaded {{
+  constructor() {{ ReloadState(); }}
+  render() {{ return "version {version}"; }}
+}}
 "#
         )
     };
@@ -1612,7 +1614,7 @@ export default class Reloaded {{ render() {{ return "version {version}"; }} }}
             runtime.load_app(&directory, "main.js")
         })
         .unwrap();
-    std::fs::write(directory.join("main.js"), source(2)).unwrap();
+    std::fs::write(directory.join("main.js"), source(22)).unwrap();
     let second = context
         .update(|window, cx| {
             let (_scope, _) = crate::scope::enter_runtime(
@@ -5737,6 +5739,42 @@ export default class Code extends View {
         .update(|window, cx| runtime.render_to_spec(&object, None, window, cx))
         .expect("editor change event");
     assert!(tree.contains("changes=1"), "{tree}");
+}
+
+// HERDR: an editor reads and replaces its selection like a textarea, so a script can format it.
+#[gpui::test]
+fn a_script_editor_reads_and_replaces_its_selection(cx: &mut TestAppContext) {
+    cx.update(|cx| crate::init(cx));
+    let runtime = ShellRuntime::new_isolated().expect("runtime");
+    cx.update(|cx| runtime.set_global(cx));
+    let source = r#"
+import { View, div } from "gpui-kit";
+import { Editor, EditorState } from "gpui-base";
+export default class Notes extends View {
+  init() {
+    this.code = EditorState.new({ language: "markdown", value: "héllo world" });
+    this.code.set_selected_range({ start: 6, end: 11 });
+    const picked = this.code.selected_range();
+    this.code.replace("**world**");
+    const after = this.code.selected_range();
+    this.report = `picked=${picked.start}-${picked.end} after=${after.start}-${after.end}`;
+  }
+  render(cx) {
+    return div().child(Editor.new(this.code).h(120)).child(this.code.value()).child(this.report);
+  }
+}
+"#;
+    let view_type = runtime.load_source("selection", source).expect("load");
+    let window = cx.add_window(|_, _| Empty);
+    let mut context = VisualTestContext::from_window(*window.deref(), cx);
+    let object = context
+        .update(|window, cx| runtime.instantiate(&view_type, window, cx))
+        .expect("instantiate");
+    let tree = context
+        .update(|window, cx| runtime.render_to_spec(&object, None, window, cx))
+        .expect("editor render");
+    assert!(tree.contains("héllo **world**"), "{tree}");
+    assert!(tree.contains("picked=6-11 after=15-15"), "{tree}");
 }
 
 // HERDR: readonly rejects keyboard edits without disabling selection or programmatic refresh.

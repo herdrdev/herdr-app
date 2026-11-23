@@ -58,6 +58,29 @@ test("an unnamed tab's row reads its terminal's title, not the tab number", () =
   expect(title({ name: "3", named: false }, { ...claude, title: "claude" })).toBe("3");
 });
 
+test("an empty OSC title published as the terminal address keeps the tab name", () => {
+  const title = new Function("View", `${source}; return title;`)(class {});
+  for (const address of ["t2", "remote/t2"]) {
+    for (const identity of [{ terminal: address }, { address }]) {
+      const lead = { ...identity, program: { name: "Claude Code", key: "claude" }, title: address };
+      expect(title({ name: "2", named: false }, lead)).toBe("2");
+      expect(title({ name: "Claude Code", named: true }, lead)).toBe("Claude Code");
+      expect(title({ name: "fix login", named: true }, lead)).toBe("fix login");
+      expect(title({ name: "2", named: false }, { ...lead, title: "renamed-task" })).toBe("renamed-task");
+    }
+  }
+});
+
+test("a title that is a folder never replaces the tab's name", () => {
+  const title = new Function("View", "localStorage", "props", "run", `${source}; return title;`)(class {}, {}, () => ({}), () => {});
+  const claude = { program: { name: "claude", key: "claude" }, title: "Herdr session names" };
+  expect(title({ name: "3", named: false }, { ...claude, title: "~/src/api" })).toBe("3");
+  expect(title({ name: "3", named: false }, { ...claude, title: "/tmp" })).toBe("3");
+  expect(title({ name: "3", named: false }, { ...claude, title: "\u2733 ~/src/api" })).toBe("3");
+  expect(title({ name: "3", named: false }, { ...claude, title: "C:\\src\\api" })).toBe("3");
+  expect(title({ name: "3", named: false }, { ...claude, title: "\u2733 Herdr session names" })).toBe("Herdr session names");
+});
+
 test("tab labels prefer the first agent, then focused terminal, then first terminal", () => {
   const leadPanes = new Function("View", `${source}; return leadPanes;`)(class {});
   const pane = (tab: string, terminal: string, agent = false, focused = false) => ({ tab, terminal, program: { agent }, focused });
@@ -81,6 +104,8 @@ function element() {
     if (method === "node") return node;
     return (...args: any[]) => {
       if (method === "id") node.id = args[0];
+      if (method === "on_click") (node as any).click = args[0];
+      if (method === "bg") (node as any).bg = args[0];
       if (method === "child") node.children.push(args[0]?.node ?? args[0]);
       if (method === "children") node.children.push(...args[0].map((child: any) => child?.node ?? child));
       if (method === "when" && args[0]) args[1](el);
@@ -92,6 +117,35 @@ function element() {
 function textOf(node: any): string {
   return typeof node === "string" ? node : (node?.children ?? []).map(textOf).join(" ");
 }
+
+test("a failed agent check keeps cached launchable agents and shows an error instead of missing agents", async () => {
+  const menuSource = (await readFile(new URL("../defaults/mods/new-menu/main.js", import.meta.url), "utf8"))
+    .replace(/^import .*;\n/gm, "").replace("export default class NewMenu", "class NewMenu");
+  const cached = [
+    { key: "claude", name: "Claude Code", run: ["claude"], installed: true },
+    { key: "codex", name: "Codex", run: ["codex"], installed: false },
+  ];
+  for (const agents of [[], cached]) {
+    const writes: unknown[] = [];
+    const globals = {
+      View: class {}, spaces: () => [], shared: () => ({ "": agents }), setShared: (...args: unknown[]) => writes.push(args),
+      knownAgents: async () => { throw Error("shell failed"); },
+      theme: () => ({}), props: () => ({}), keys: () => [], window: () => ({ platform: "macos" }), panes: () => [],
+      div: element, svg: element, image: element, h_flex: element, v_flex: element,
+    };
+    const NewMenu = new Function(...Object.keys(globals), `${menuSource}; return NewMenu;`)(...Object.values(globals));
+    const menu = new NewMenu();
+    let task: Promise<void>;
+    menu.init({}, { focus_handle: () => ({ focus() {} }), spawn: (run: (cx: unknown) => Promise<void>) => { task = run({ notify() {} }); } });
+    await task!;
+    const text = textOf(menu.render().node);
+    expect(text).toContain("Could not check installed agents");
+    expect(text).not.toContain("not installed");
+    expect(text).not.toContain("Codex");
+    if (agents.length) expect(text).toContain("Claude Code");
+    expect(writes).toEqual([]);
+  }
+});
 
 for (const sort of ["priority", "grouped"]) test(`${sort} render reads panes once and refreshes labels on the next render`, () => {
   const list = Array.from({ length: 64 }, (_, i) => ({
@@ -119,4 +173,174 @@ for (const sort of ["priority", "grouped"]) test(`${sort} render reads panes onc
   expect(second).toContain("Updated task");
   expect(second).not.toContain("Task 63");
   expect(orders[1]).toEqual(orders[0]);
+});
+
+for (const sort of ["priority", "grouped"]) for (const named of [false, true]) test(`${sort}: agents sharing a ${named ? "named" : "numbered"} tab keep their own titles`, () => {
+  const program = { name: "Claude", key: "claude", agent: true };
+  let list = ["Alpha task", "Beta task", "Solo task"].map((title, i) => ({
+    address: `t${i}`, pane: `p${i}`, tab: i < 2 ? "shared" : "solo", space: "s1", space_name: "Project",
+    program, title, status: "idle", seq: i,
+  }));
+  const { agents } = harness([], {
+    agents: () => list, terminals: () => list.map(a => ({ ...a, state: "live" })),
+    panes: () => list.map(a => ({ ...a, terminal: a.address })), focused: () => null,
+    spaces: () => [{ tabs: [{ id: "shared", name: named ? "Named tab" : "1", named }, { id: "solo", name: "Solo tab", named: true }] }],
+    layout: () => ({ id: "sidebar", size: { px: 268 } }), shared: () => sort,
+    theme: () => ({}), setAgentOrder() {},
+    div: element, v_flex: element, h_flex: element, svg: element, image: element,
+  });
+  const rows = () => {
+    const result = new Map<string, string>();
+    const walk = (node: any) => {
+      if (node?.id?.startsWith("ag-t")) result.set(node.id, textOf(node));
+      (node?.children ?? []).forEach(walk);
+    };
+    walk(agents.render({}).node);
+    return result;
+  };
+  const shared = rows();
+  expect(shared.get("ag-t0")).toContain("Alpha task");
+  expect(shared.get("ag-t1")).toContain("Beta task");
+  expect(shared.get("ag-t1")).not.toContain("Alpha task");
+  expect(shared.get("ag-t0")).not.toContain("Named tab");
+  expect(shared.get("ag-t2")).toContain("Solo tab");
+  expect(shared.get("ag-t2")).not.toContain("Solo task");
+  list = list.filter(a => a.address !== "t1");
+  expect(rows().get("ag-t0")).toContain(named ? "Named tab" : "Alpha task");
+});
+
+// A kept sub-agent: started by t1 (`hc run`), then given a pane (`terminal.keep`).
+function keptRender(sort: string, { width = 268, kept = [{ address: "t3", parent: "t1" }], paneless = [] as { address: string; parent: string }[], pinned = [] as string[], statuses = {} as Record<string, string>, others = [] as string[] } = {}) {
+  const program = { name: "Claude", key: "claude", agent: true };
+  const status = (address: string) => statuses[address] ?? "working";
+  const row = (address: string, seq: number) => ({ address, pane: `p-${address}`, tab: "tab1", space: "s1", space_name: "Project", program, title: `Task ${address}`, status: status(address), seq, pinned: pinned.includes(address) });
+  const list = [row("t1", 1), ...kept.map((k, i) => row(k.address, i + 2)), ...others.map((a, i) => row(a, i + 10))];
+  const live = (address: string, parent: string | null) => ({ address, parent, state: "live", status: status(address), program, labels: {} });
+  const orders: string[][] = [];
+  const { agents, writes } = harness([], {
+    agents: () => list,
+    terminals: () => [live("t1", null), ...others.map(a => live(a, null)), ...paneless.map(k => live(k.address, k.parent)), ...kept.map(k => live(k.address, k.parent))],
+    panes: () => list.map(a => ({ tab: a.tab, terminal: a.address, program, title: a.title })), focused: () => null,
+    spaces: () => [{ tabs: [{ id: "tab1", name: "Project", named: true }] }],
+    layout: () => ({ id: "sidebar", size: { px: width } }), shared: () => sort,
+    theme: () => ({}), setAgentOrder: (order: string[]) => orders.push(order),
+    div: element, v_flex: element, h_flex: element, svg: element, image: element,
+  });
+  const ids: string[] = [];
+  const clicks = new Map<string, () => void>();
+  const texts = new Map<string, string>();
+  const walk = (node: any) => {
+    if (node?.id) { ids.push(node.id); texts.set(node.id, textOf(node)); if (node.click) clicks.set(node.id, node.click); }
+    (node?.children ?? []).forEach(walk);
+  };
+  walk(agents.render({}).node);
+  return { ids, clicks, writes, texts, order: orders[orders.length - 1] };
+}
+
+for (const sort of ["priority", "grouped"]) test(`${sort}: a kept sub-agent shows once, under its parent, and its row focuses its pane`, () => {
+  const { ids, clicks, writes, texts, order } = keptRender(sort);
+  expect(texts.get("ag-t1")).toContain("Project");
+  expect(texts.get("ag-t1")).not.toContain("t1");
+  expect(texts.get("sub-t3")).toContain("Claude");
+  expect(texts.get("sub-t3")).not.toContain("Project");
+  expect(ids).toContain("ag-t1");
+  expect(ids).toContain("sub-t3");
+  expect(ids).not.toContain("ag-t3");
+  expect(order).toEqual(["t1"]);
+  clicks.get("sub-t3")!();
+  expect(writes).toContainEqual(["pane.focus", { terminal: "t3" }]);
+});
+
+for (const sort of ["priority", "grouped"]) test(`${sort}: a kept sub-agent under a pane-less one shows once in the tree`, () => {
+  const { ids } = keptRender(sort, { paneless: [{ address: "t3", parent: "t1" }], kept: [{ address: "t4", parent: "t3" }] });
+  expect(ids).toContain("sub-t3");
+  expect(ids).toContain("sub-t4");
+  expect(ids).not.toContain("ag-t4");
+});
+
+for (const sort of ["priority", "grouped"]) test(`${sort}: a kept sub-agent keeps its own row where no tree shows it`, () => {
+  expect(keptRender(sort, { width: 44 }).ids).toContain("ag-t3"); // the rail draws no trees
+  const pinned = keptRender(sort, { pinned: ["t3"] });
+  expect(pinned.ids).toContain("ag-t3");
+  expect(pinned.texts.get("ag-t1")).toContain("Task t1");
+  expect(pinned.texts.get("ag-t3")).toContain("Task t3");
+  expect(keptRender(sort, { kept: [{ address: "t3", parent: "t9" }] }).ids).toContain("ag-t3"); // its parent ended
+});
+
+test("a kept sub-agent's done doesn't pull its working parent above other working agents", () => {
+  const { order, texts } = keptRender("priority", { statuses: { t3: "done" }, others: ["t5"] });
+  expect(order).toEqual(["t5", "t1"]);
+  expect(texts.get("sub-t3")).toBeDefined();
+});
+
+test("a kept sub-agent keeps its own done status; a pane-less one stays idle", () => {
+  const kidStatus = new Function("View", `${source}; return kidStatus;`)(class {});
+  const listed = new Map([["t3", "done"]]);
+  expect(kidStatus({ address: "t3", status: "done" }, listed)).toBe("done");
+  expect(kidStatus({ address: "t4", status: "done" }, listed)).toBe("idle");
+  expect(kidStatus({ address: "t4", status: "error" }, listed)).toBe("blocked");
+  expect(kidStatus({ address: "t4", status: "working" }, listed)).toBe("working");
+});
+
+for (const width of [268, 44]) test(`the focused agent's row is marked as selected ${width < 160 ? "in the rail" : "in the wide list"}`, () => {
+  const program = { name: "Claude", key: "claude", agent: true };
+  const list = ["t1", "t2"].map((address, i) => ({
+    address, pane: `p-${address}`, tab: address, space: "s1", space_name: "Project",
+    program, title: address, status: "idle", seq: i, focused: address === "t2",
+  }));
+  const { agents } = harness([], {
+    agents: () => list, terminals: () => list.map(a => ({ ...a, state: "live", labels: {} })),
+    panes: () => list.map(a => ({ ...a, terminal: a.address })), focused: () => ({ agent: "t2" }),
+    spaces: () => [{ tabs: list.map(a => ({ id: a.tab, name: a.address, named: true })) }],
+    layout: () => ({ id: "sidebar", size: { px: width } }), shared: () => "grouped",
+    theme: () => ({ selected: "selected", hover: "hover" }), setAgentOrder() {},
+    div: element, v_flex: element, h_flex: element, svg: element, image: element,
+  });
+  const fills = new Map<string, unknown>();
+  const walk = (node: any) => {
+    if (node?.id?.startsWith("ag-t")) fills.set(node.id, node.bg);
+    (node?.children ?? []).forEach(walk);
+  };
+  walk(agents.render({}).node);
+  expect([...fills]).toEqual([["ag-t1", undefined], ["ag-t2", "selected"]]);
+});
+
+test("a title that opens with a bracket keeps it; each agent's own prefix still goes", () => {
+  const title = new Function("View", "localStorage", "props", "run", `${source}; return title;`)(class {}, {}, () => ({}), () => {});
+  const clean = new Function("View", "localStorage", "props", "run", `${source}; return clean;`)(class {}, {}, () => ({}), () => {});
+  const claude = { program: { name: "claude", key: "claude" }, title: "" };
+  // The reported bug: a Claude Code session renamed "[herdr] config" showed as "herdr] config".
+  expect(title({ name: "3", named: false }, { ...claude, title: "[herdr] config" })).toBe("[herdr] config");
+  // Titles as each agent writes them (from its source).
+  const titles: [string, string][] = [
+    ["[herdr] config", "[herdr] config"], // Claude Code: the session name
+    ["⠋ [herdr] config | herdr-app", "[herdr] config | herdr-app"], // Codex working
+    ["[ ! ] Action Required | [herdr] config | herdr-app", "Action Required | [herdr] config | herdr-app"], // Codex needs you
+    ["[ . ] Action Required | [herdr] config | herdr-app", "Action Required | [herdr] config | herdr-app"], // ... its other blink phase
+    ["● [ ! ] Action Required | herdr-app", "Action Required | herdr-app"], // ... with the microphone on
+    ["✦  [herdr] config (herdr-app)", "[herdr] config (herdr-app)"], // Gemini working
+    ["◇  Ready (herdr-app)", "Ready (herdr-app)"], // Gemini idle
+    ["OC | [herdr] config", "OC | [herdr] config"], // OpenCode
+    ["π - [herdr] config - herdr-app", "π - [herdr] config - herdr-app"], // Pi
+    ["⠋ - Thinking - [herdr] config - grok", "Thinking - [herdr] config - grok"], // Grok: the spinner's " - " goes too
+  ];
+  for (const [raw, shown] of titles) expect(clean(raw)).toBe(shown);
+});
+
+test("a title's leading emoji stays, a status glyph before it goes", () => {
+  const title = new Function("View", "localStorage", "props", "run", `${source}; return title;`)(class {}, {}, () => ({}), () => {});
+  const row = (t: string) => title({ name: "3", named: false }, { program: { name: "claude", key: "claude" }, title: t });
+  for (const e of ["🔴", "🟦", "✅", "❌", "⭐", "🚀", "🧠", "⚪", "🇰🇷", "👍🏽", "👨\u200d💻", "❤️", "⚙️", "#️⃣", "✋🏽"]) expect(row(`${e} login`)).toBe(`${e} login`);
+  expect(row("\u2733 🟢 login")).toBe("🟢 login");
+  expect(row("[ ! ] 🔴 login")).toBe("🔴 login");
+  expect(row("\u25cf [ ! ] 🔴 login")).toBe("🔴 login");
+  expect(row("\u2733 login")).toBe("login");
+  expect(row("\u280b - Thinking")).toBe("Thinking");
+  expect(row("✋  Action Required (proj)")).toBe("Action Required (proj)");
+  expect(row("⏳  ❤️ deploy")).toBe("❤️ deploy");
+  // A folder is still a folder behind its emoji.
+  expect(row("🔴 ~/proj")).toBe("3");
+  // An emoji is a name a person chose: alone, or beside the program's name, it is the row's name.
+  expect(row("🔴")).toBe("🔴");
+  expect(row("🔴 claude")).toBe("🔴 claude");
 });
