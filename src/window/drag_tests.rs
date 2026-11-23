@@ -59,3 +59,51 @@ fn squeezed_layout_drag(cx: &mut gpui::TestAppContext) {
         });
     }
 }
+
+#[test]
+fn a_divider_moves_only_its_two_panes() {
+    use serde_json::json;
+    use std::collections::HashMap;
+    let row: super::Node = serde_json::from_value(json!({
+        "id": "row", "type": "row", "children": [
+            {"id": "w1", "type": "block", "content": {"mod": "probe"}},
+            {"id": "a", "type": "block", "content": {"mod": "probe"}, "size": {"px": 700}},
+            {"id": "b", "type": "block", "content": {"mod": "probe"}},
+            {"id": "w2", "type": "block", "content": {"mod": "probe"}}
+        ]
+    })).unwrap();
+    let current = HashMap::from([
+        ("w1".to_owned(), 300.0), ("a".to_owned(), 700.0),
+        ("b".to_owned(), 400.0), ("w2".to_owned(), 300.0),
+    ]);
+    let size = |children: &[super::Node], id: &str| children.iter().find(|n| n.id == id).unwrap().size;
+    let px = |px| Some(super::Span::Px { px });
+    let weight = |weight| Some(super::Span::Weight { weight });
+
+    // Fixed a on the left of the divider: b and the rest of the row keep their sizes.
+    let mut children: Vec<super::Node> = row.children().to_vec();
+    super::move_divider(&mut children, "a", "b", 750.0, 1100.0, &current);
+    assert_eq!(size(&children, "a"), px(750.0));
+    assert_eq!(size(&children, "b"), weight(350.0));
+    assert_eq!(size(&children, "w1"), weight(300.0));
+    assert_eq!(size(&children, "w2"), weight(300.0));
+
+    // Fixed b on the right: a takes the change, the rest stays put.
+    let mut children: Vec<super::Node> = row.children().to_vec();
+    children[1].size = weight(700.0);
+    children[2].size = px(400.0);
+    super::move_divider(&mut children, "a", "b", 450.0, 1100.0, &current);
+    assert_eq!(size(&children, "a"), weight(450.0));
+    assert_eq!(size(&children, "b"), px(650.0));
+    assert_eq!(size(&children, "w1"), weight(300.0));
+    assert_eq!(size(&children, "w2"), weight(300.0));
+
+    // Two fixed panes: the pair keeps its total, so nothing else moves either.
+    let mut children: Vec<super::Node> = row.children().to_vec();
+    children[2].size = px(400.0);
+    super::move_divider(&mut children, "a", "b", 750.0, 1100.0, &current);
+    assert_eq!(size(&children, "a"), px(750.0));
+    assert_eq!(size(&children, "b"), px(350.0));
+    assert_eq!(size(&children, "w1"), weight(300.0));
+    assert_eq!(size(&children, "w2"), weight(300.0));
+}
