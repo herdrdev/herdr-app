@@ -701,12 +701,15 @@ pub fn color_or_literal(v: &str) -> Hsla {
 
 /// Reads settings.json (writing the defaults if it's missing), or says why it can't be used.
 pub fn load_person() -> Result<Person, String> {
-    let p = path();
+    load_person_from(&path())
+}
+
+fn load_person_from(p: &std::path::Path) -> Result<Person, String> {
     if !p.exists() {
-        let _ = crate::persist::write_atomic(&p, serde_json::to_string_pretty(&Person::default()).unwrap() + "\n");
+        let _ = crate::persist::write_atomic(p, serde_json::to_string_pretty(&Person::default()).unwrap() + "\n");
     }
-    let text = std::fs::read_to_string(&p).map_err(|e| e.to_string())?;
-    let person: Person = serde_json::from_str(&text).map_err(|e| e.to_string())?;
+    let text = std::fs::read_to_string(p).map_err(|e| e.to_string())?;
+    let person: Person = serde_json::from_str(crate::persist::without_bom(&text)).map_err(|e| e.to_string())?;
     if !(ZOOM_MIN..=ZOOM_MAX).contains(&person.zoom) {
         return Err(format!("zoom {} is outside {ZOOM_MIN}..{ZOOM_MAX}", person.zoom));
     }
@@ -719,7 +722,7 @@ pub fn telemetry_setting(person: &Result<Person, String>) -> bool {
     match person {
         Ok(p) => p.telemetry,
         Err(_) => {
-            let raw = std::fs::read_to_string(path()).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(&t).ok());
+            let raw = std::fs::read_to_string(path()).ok().and_then(|t| serde_json::from_str::<serde_json::Value>(crate::persist::without_bom(&t)).ok());
             raw.and_then(|v| v.get("telemetry").and_then(serde_json::Value::as_bool)).unwrap_or(true)
         }
     }
@@ -728,7 +731,7 @@ pub fn telemetry_setting(person: &Result<Person, String>) -> bool {
 pub fn write_person(person: &Person) -> std::io::Result<()> {
     let path = path();
     let previous = match std::fs::read_to_string(&path) {
-        Ok(text) => text,
+        Ok(text) => crate::persist::without_bom(&text).to_owned(),
         Err(e) if e.kind() == std::io::ErrorKind::NotFound => "{}".into(),
         Err(e) => return Err(e),
     };
@@ -934,6 +937,20 @@ mod tests {
         for broken in ["{", "null", "[]", r#"{"zoom":"big"}"#] {
             assert!(person_text(&person, broken).is_err());
         }
+    }
+
+    #[test]
+    fn settings_with_a_bom_load() {
+        let dir = std::env::temp_dir().join(format!(
+            "herdr-settings-bom-{}-{}",
+            std::process::id(),
+            std::time::SystemTime::now().duration_since(std::time::UNIX_EPOCH).unwrap().as_nanos()
+        ));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("settings.json");
+        std::fs::write(&path, "\u{feff}{\"zoom\":1.25}").unwrap();
+        assert_eq!(super::load_person_from(&path).unwrap().zoom, 1.25);
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]

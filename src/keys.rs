@@ -89,7 +89,7 @@ fn defaults() -> Sections {
 /// Every binding as `(section, keys, action)`, for the keybind help.
 pub fn listing() -> Vec<(String, String, String)> {
     let text = std::fs::read_to_string(path()).unwrap_or_default();
-    let sections: Sections = serde_json::from_str(&text).unwrap_or_else(|_| defaults());
+    let sections: Sections = serde_json::from_str(crate::persist::without_bom(&text)).unwrap_or_else(|_| defaults());
     let mut out = Vec::new();
     for (s, keys) in sections {
         for (k, a) in keys {
@@ -182,6 +182,7 @@ fn load_text(path: &std::path::Path, defaults: &str, originals: &[&str]) -> Resu
         }
         Err(e) => return Err(e.to_string()),
     };
+    let text = crate::persist::without_bom(&text).to_owned();
     if text != defaults && originals.contains(&text.as_str()) {
         std::fs::write(path, defaults).map_err(|e| e.to_string())?;
         return Ok(defaults.to_owned());
@@ -297,6 +298,24 @@ mod tests {
             std::fs::remove_file(&path).unwrap();
             assert_eq!(super::load_text(&path, defaults, originals).unwrap(), defaults);
             assert_eq!(std::fs::read_to_string(&path).unwrap(), defaults);
+        }
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn a_bom_does_not_hide_personal_keys() {
+        let dir = std::env::temp_dir().join(format!("herdr-keys-bom-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let path = dir.join("keys.json");
+        let defaults = include_str!("../defaults/keys.json");
+        let edited = defaults.replace("tab.new", "pane.zoom");
+        for text in [format!("\u{feff}{defaults}"), format!("\u{feff}{edited}")] {
+            std::fs::write(&path, &text).unwrap();
+            let loaded = super::load_text(&path, defaults, super::SHIPPED_KEYS).unwrap();
+            assert!(super::parse(&loaded).is_ok(), "{loaded}");
+            if text.ends_with(&edited) {
+                assert_eq!(loaded, edited);
+            }
         }
         std::fs::remove_dir_all(dir).unwrap();
     }
