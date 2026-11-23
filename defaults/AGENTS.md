@@ -1150,9 +1150,11 @@ When `s.position` is present, place a popup with
 `EditorState.new({
 language, value, readonly, font_family: settings().font_family, syntax: {
 keyword: theme().ansi5, ... } })` + `Editor.new(state)` is a code view (readonly)
-or editor with syntax highlighting, line numbers and folding; `language:
-"markdown"` colors headings, lists, code, quotes and links (`syntax` keys
-`heading`, `strong`, `emphasis`, `code`, `quote`, `list`, `link`). A viewer opens
+or editor with syntax highlighting, line numbers and folding. For Markdown
+source, set `language: "markdown"` or `"md"`. The `syntax` keys are `heading`,
+`strong`, `emphasis`, `code`, `quote`, `list`, and `link` (the URL). Use
+`theme()` colors for light and dark layouts. Built-in syntax colors use a
+dark-editor palette. A viewer opens
 beside the shell as a pane: `pane.split {direction, mod, props: { file }}`.
 The full surface is in `gpui-kit.d.ts` next to this file.
 

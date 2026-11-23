@@ -3278,10 +3278,13 @@ const BASE: &str = r#"  /** A row. */
       soft_wrap?: boolean;
       /** Semantic colors: keyword, string, comment, function, type, number,
        * constant, variable, operator, punctuation, boolean, string.escape.
-       * Markdown adds heading, strong, emphasis, code, quote, list and link;
-       * unset, they take keyword, string, comment or function's color.
-       * Headings and strong text are bold, emphasis italic.
-       * Values are concrete hex colors; unspecified UI colors follow the theme. */
+       * Markdown ("markdown" or "md") adds heading, strong, emphasis, code,
+       * quote, list and link. Unset heading, strong and list use keyword's color,
+       * code uses string, quote uses comment, and link URLs use function.
+       * Headings and strong text are bold. Emphasis is italic and inherits
+       * the editor foreground unless given its own color.
+       * Values are concrete hex colors. Built-in syntax colors use a dark palette.
+       * Unspecified editor UI colors follow the theme. */
       syntax?: Record<string, string>;
     }) => EditorState;
   };
