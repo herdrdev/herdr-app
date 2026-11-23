@@ -305,26 +305,53 @@ test("remove shows a locked checkout's reason and keeps the space open on Window
   });
 });
 
-test("remove keeps the space open if Git refuses a removal on Unix after preflight", async () => {
-  await withLinkedCheckout(async (main, linked) => {
+test("remove lets Git resolve the checkout when its listed path is spelled differently", async () => {
+  await withLinkedCheckout(async (_main, linked) => {
+    const top = fixtureGit(linked, "rev-parse", "--show-toplevel");
+    const record = `worktree ${top}`;
+    const differentlySpelled = record.replace(/linked with spaces$/, "LINKED WITH SPACES");
+    expect(differentlySpelled).not.toBe(record);
     const dialog = removeDialog(linked, {
-      exec: (command, args, options) => {
-        if (args[0] === "worktree" && args[1] === "remove") {
-          fixtureGit(main, "worktree", "lock", "--reason", "locked just before removal", linked);
+      exec: async (command, args, options) => {
+        const result = await execute(command, args, options);
+        if (args.includes("worktree") && args.includes("list") && args.includes("--porcelain")) {
+          const records = result.stdout.split(/\r?\n/);
+          expect(records).toContain(record);
+          result.stdout = records.map(line => line === record ? differentlySpelled : line).join("\n");
         }
-        return execute(command, args, options);
+        return result;
       },
     });
     await dialog.ready;
     await dialog.enter();
-    expect(dialog.worktree.error).toContain("locked just before removal");
-    expect(dialog.closedSpaces).toEqual([]);
-    expect(dialog.closedOverlays).toEqual([]);
-    expect(existsSync(linked)).toBe(true);
+    expect(dialog.worktree.error).toBe("");
+    expect(dialog.closedSpaces).toEqual([{ id: "target", checkoutPresent: false }]);
+    expect(existsSync(linked)).toBe(false);
   });
 });
 
 for (const platform of ["linux", "windows"]) {
+  const closeBeforeGit = platform === "windows";
+  test(`remove reports a late Git refusal on ${platform}`, async () => {
+    await withLinkedCheckout(async (main, linked) => {
+      const dialog = removeDialog(linked, {
+        platform,
+        exec: (command, args, options) => {
+          if (args[0] === "worktree" && args[1] === "remove") {
+            fixtureGit(main, "worktree", "lock", "--reason", "locked just before removal", linked);
+          }
+          return execute(command, args, options);
+        },
+      });
+      await dialog.ready;
+      await dialog.enter();
+      expect(dialog.worktree.error).toContain("locked just before removal");
+      expect(dialog.closedSpaces).toEqual(closeBeforeGit ? [{ id: "target", checkoutPresent: true }] : []);
+      expect(dialog.closedOverlays).toEqual([]);
+      expect(existsSync(linked)).toBe(true);
+    });
+  });
+
   test(`remove warns about new changes and closes a successfully removed checkout on ${platform}`, async () => {
     await withLinkedCheckout(async (main, linked) => {
       const dialog = removeDialog(linked, { platform });
@@ -336,7 +363,7 @@ for (const platform of ["linux", "windows"]) {
       expect(existsSync(join(linked, "untracked.txt"))).toBe(true);
 
       await dialog.enter();
-      expect(dialog.closedSpaces).toEqual([{ id: "target", checkoutPresent: platform === "windows" }]);
+      expect(dialog.closedSpaces).toEqual([{ id: "target", checkoutPresent: closeBeforeGit }]);
       expect(dialog.closedOverlays).toEqual(["dialog"]);
       expect(existsSync(linked)).toBe(false);
       expect(fixtureGit(main, "branch", "--list", "linked")).toBe("linked");

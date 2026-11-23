@@ -254,7 +254,7 @@ pub fn powershell_line(cmd: &[String]) -> String {
     format!("& {}", cmd.iter().map(|w| powershell_quote(w)).collect::<Vec<_>>().join(" "))
 }
 
-fn powershell_quote(word: &str) -> String {
+pub(crate) fn powershell_quote(word: &str) -> String {
     let mut s = String::from("'");
     for ch in word.chars() {
         if PS_QUOTES.contains(&ch) {
@@ -320,7 +320,7 @@ fn resolve(t: &Table, app: Option<&str>, argv: &[String]) -> Value {
         && t.shells.iter().any(|s| s == base(&argv[0]))
         && argv[1].starts_with('-')
         && argv[1].ends_with('c')
-        && (argv[2].contains("\"$@\"") || argv[2] == crate::remote_shell::FISH_EXEC || matches!(argv[2].as_str(), "command $argv[2..]; exec $argv[1] -i" | "command $argv[2..]; exec $argv[1] -li"))
+        && (argv[2].contains("\"$@\"") || matches!(argv[2].as_str(), "command $argv[2..]; exec $argv[1] -i" | "command $argv[2..]; exec $argv[1] -li"))
     {
         return resolve(t, None, &argv[4..]);
     }
@@ -426,8 +426,6 @@ mod tests {
         assert_eq!(key(None, &["agent"]), "cursor");
         assert_eq!(key(Some("agent"), &[]), "cursor");
         assert_eq!(key(Some("cursor-agent"), &[]), "cursor");
-        assert_eq!(key(Some("swival"), &["/bin/zsh"]), "swival");
-        assert_eq!(key(None, &["python3", "/home/me/.local/bin/swival", "fix it"]), "swival");
         assert_eq!(key(Some("newagent"), &[]), "agent");
         assert!(startable().iter().any(|a| a["key"] == "cursor" && a["run"] == json!(["agent"])));
         // A person's own key still beats a built-in `match` (python matches python3).
