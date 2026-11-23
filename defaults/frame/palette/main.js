@@ -2,12 +2,14 @@
 // Places (spaces, tabs) stay in the picker. Fuzzy: your letters in
 // order, word starts and runs rank higher. Empty: recent first, then every
 // group. Choices are entries of their own ("Layout: Zen"); commands that need
-// a name ask for it. Enter runs, ↑/↓ move, Esc closes.
+// a name ask for it. Mods add entries of their own with `palette` in their
+// mod.json. Enter runs, ↑/↓ move, Esc closes.
 // The app's own mod: rewritten from the binary on every start.
 
 import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input } from "gpui-base";
-import { commands, layouts, keys, run, theme, themes, settings, props, closeOverlay, openOverlay, shared, window as win } from "herdr";
+import { exists, readdir, readFile } from "fs/promises";
+import { appHome, commands, layouts, keys, run, theme, themes, settings, props, closeOverlay, openOverlay, shared, window as win } from "herdr";
 
 // The list keeps one height while you move: rows and group titles have fixed
 // heights, and the window shows as many as fit in LIST_H.
@@ -17,7 +19,7 @@ const SHOWN = 10;
 const ROW_H = 32;
 const HEAD_H = 26;
 const LIST_H = SHOWN * ROW_H;
-const GROUPS = ["Recent", "Tab", "Pane", "Space", "Layout", "Terminal", "Agent", "Window", "App"];
+const GROUPS = ["Recent", "Tab", "Pane", "Space", "Layout", "Terminal", "Agent", "Window", "Mod", "App"];
 
 // The palette's names for commands: [command, args, group, title, keywords].
 const NAMED = [
@@ -75,9 +77,76 @@ function titleOf(name) {
   return { group: noun.charAt(0).toUpperCase() + noun.slice(1), title: `${verb.replace(/_/g, " ")} ${noun}`.replace(/^./, (c) => c.toUpperCase()) };
 }
 
+const isObject = (v) => v !== null && typeof v === "object" && !Array.isArray(v);
+
+// The `palette` list of each mods/<name>/mod.json; unreadable ones are skipped.
+export async function modPalettes(root) {
+  const dir = `${root}/mods`;
+  const found = [];
+  let names;
+  try {
+    names = new Set((await readdir(dir)).filter((n) => !n.startsWith(".")).sort());
+  } catch {
+    return found;
+  }
+  for (const mod of names) {
+    try {
+      const list = JSON.parse(await readFile(`${dir}/${mod}/mod.json`, "utf8")).palette;
+      if (!Array.isArray(list)) continue;
+      for (const p of list) {
+        if (!isObject(p)) continue;
+        if (p.command === "mod.open") {
+          const name = p.args?.name;
+          try {
+            if (!names.has(name) || !await exists(`${dir}/${name}/main.js`)) continue;
+          } catch {
+            continue;
+          }
+        }
+        found.push({ ...p, mod });
+      }
+    } catch {}
+  }
+  return found;
+}
+
+const TARGET_ARGS = new Set(["id", "pane", "space", "terminal", "target"]);
+
+// Check the manifest shape here; the command still checks its arguments and live targets.
+function modEntry(p, known) {
+  if (typeof p.title !== "string" || !p.title.trim() || typeof p.command !== "string") return null;
+  const args = p.args ?? {};
+  if (!isObject(args)) return null;
+  const c = known.get(p.command);
+  if (c) {
+    const names = c.args.map((a) => a.name);
+    for (const [k, v] of Object.entries(args)) {
+      if (!names.includes(k) || (TARGET_ARGS.has(k) && v != null && typeof v !== "string")) return null;
+    }
+    for (const { name, required } of c.args) {
+      if (!required || (name === "name" && p.command.endsWith(".rename") && args.name == null)) continue;
+      if (args[name] == null || (typeof args[name] === "string" && !args[name].trim())) return null;
+    }
+  } else {
+    const at = p.command.indexOf(".");
+    if (at < 1 || p.command.slice(0, at) !== p.mod || !p.command.slice(at + 1).trim() || Object.keys(args).length) return null;
+  }
+  const group = typeof p.group === "string" ? p.group.trim() : "";
+  return {
+    name: p.command, args, group: group && group !== "Recent" ? group : "Mod",
+    title: p.title, words: `${typeof p.words === "string" ? p.words : ""} ${p.mod}`,
+    modArgs: c?.args,
+  };
+}
+
+function entryId(name, args) {
+  return `${name}:${JSON.stringify(args, (_k, value) =>
+    isObject(value) ? Object.fromEntries(Object.keys(value).sort().map((k) => [k, value[k]])) : value)}`;
+}
+
 // Every entry for the state we're in now.
-function entries() {
-  const known = new Set(commands().map((c) => c.name));
+function entries(mods = []) {
+  const known = new Map(commands().map((c) => [c.name, c]));
   const mac = win()?.platform === "macos";
   const list = NAMED.filter(([n]) => known.has(n))
     .filter(([n]) => !(mac && n.startsWith("window.")))
@@ -97,19 +166,46 @@ function entries() {
   }
   // Anything new in the app shows up too, until it gets a better name here.
   const named = new Set(NAMED.map(([n]) => n));
-  for (const c of commands()) {
+  for (const c of known.values()) {
     if (named.has(c.name) || HIDDEN.has(c.name) || c.args.some((a) => a.required && a.name !== "name")) continue;
     list.push({ name: c.name, args: {}, ...titleOf(c.name), words: c.about });
   }
-  return list.map((e) => ({ ...e, id: `${e.name}:${JSON.stringify(e.args)}` }));
+  const all = list.map((e) => ({ ...e, id: `${e.name}:${JSON.stringify(e.args)}` }));
+  if (!mods.length) return all;
+  const have = new Set(all.map((e) => entryId(e.name, e.args)));
+  for (const p of mods) {
+    const e = modEntry(p, known);
+    const id = e && entryId(e.name, e.args);
+    if (!e || have.has(id)) continue;
+    have.add(id);
+    all.push({ ...e, id });
+  }
+  return all;
 }
 
-// The key bound to an entry: `name` or `name:value` in keys.json.
+// The global key whose action runs the same command and arguments.
 function keyOf(e, bound) {
-  const v = Object.values(e.args)[0];
-  const want = v === undefined ? e.name : `${e.name}:${v}`;
-  const k = bound.find((b) => b.section === "global" && b.action === want);
-  return k ? k.keys : null;
+  const [first, ...other] = Object.keys(e.args);
+  const value = e.args[first];
+  let want = first === undefined ? e.name : null;
+  if (typeof value === "string" || typeof value === "number") {
+    const numericIndex = e.modArgs?.some((a) => a.name === "index") && /^\+?\d+$/.test(String(value));
+    const shorthand = numericIndex
+      ? first === "index" && Number.isSafeInteger(value) && value >= 0
+      : first === e.modArgs?.[0]?.name && typeof value === "string";
+    if (!e.modArgs || (!other.length && shorthand)) want = `${e.name}:${value}`;
+  }
+  for (const { section, keys, action } of bound) {
+    if (section !== "global") continue;
+    if (action === want) return keys;
+    if (e.modArgs && action.startsWith("{")) {
+      try {
+        const { command, args = {} } = JSON.parse(action);
+        if (command === e.name && entryId(command, args) === e.id) return keys;
+      } catch {}
+    }
+  }
+  return null;
 }
 
 // "ctrl-shift-p" -> ["ctrl", "shift", "p"]; "ctrl--" -> ["ctrl", "-"].
@@ -149,6 +245,13 @@ export default class Palette extends View {
     this.scroll = 0;
     this.recent = JSON.parse(localStorage.getItem("recent") ?? "[]");
     this.handle = cx.focus_handle();
+    this.mods = [];
+    cx.spawn(async (cx) => {
+      const mods = await modPalettes(appHome());
+      if (!mods.length) return;
+      this.mods = mods;
+      cx.notify();
+    });
   }
 
   close() {
@@ -160,19 +263,19 @@ export default class Palette extends View {
     this.recent = [e.id, ...this.recent.filter((r) => r !== e.id)].slice(0, 20);
     localStorage.setItem("recent", JSON.stringify(this.recent));
     this.close();
-    if (e.name === "mod.clone") {
+    if (e.name === "mod.clone" && !e.args.name) {
       openOverlay({ mod: "prompt", kind: "dialog", width: 380, props: {
         title: "Duplicate mod", hint: "Mod to copy; creates <name>-copy",
         command: { name: "mod.clone", args: {} },
       } });
     } else {
-      run(e.name, e.name === "layout.clone" ? { name: shared("layout") ?? "main" } : e.args);
+      run(e.name, e.name === "layout.clone" && !e.args.name ? { name: shared("layout") ?? "main" } : e.args);
     }
   }
 
   // The rows to show: grouped when empty, ranked while typing.
   rows() {
-    const all = entries();
+    const all = entries(this.mods);
     const q = this.query.trim().toLowerCase().replace(/\s+/g, "");
     if (!q) {
       const recent = this.recent.map((id) => all.find((e) => e.id === id)).filter(Boolean).slice(0, 5);
