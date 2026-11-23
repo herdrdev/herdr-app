@@ -48,7 +48,8 @@ herdr-app do agent.focus --terminal t7
 herdr-app do agent.select --index 3
 ```
 
-`agent.select` uses the agents list's order, the same order `agent.next` follows.
+`agent.select` uses the same navigation order as `agent.next` (1 = first).
+In `keys.json`, `agent.select:3` selects the third agent in that order.
 
 For a remote space:
 

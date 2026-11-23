@@ -6892,25 +6892,40 @@ mod tests {
         if !running_alone("agent_select_position") {
             return;
         }
-        let (view, cx) = open_window(cx, "unused", "", json!({
-            "id": "root", "type": "block", "content": { "tab": "active" }
+        let (view, cx) = open_window(cx, "order", r#"
+            import { View, div } from "gpui-kit";
+            import { setAgentOrder } from "herdr";
+            export default class Order extends View {
+                render() {
+                    setAgentOrder(["t2", "t1"]);
+                    return div();
+                }
+            }
+        "#, json!({
+            "id": "root", "type": "block", "content": { "mod": "order" }
         }));
-        cx.update(|window, cx| view.update(cx, |this, cx| {
-            this.folders.retain(|id, _| id == "unused");
+        cx.update(|_, cx| view.update(cx, |this, _| {
+            this.folders.retain(|id, _| id == "order");
             this.model = crate::model::Model::default();
             let mut tab = crate::model::Tab::new("tb1", "", "p1", "t1");
             tab.root.split("p1", super::Axis::Row, crate::model::pane("p2", "t2"), "split".into());
             this.model.add_space("sp1", "", "/tmp", tab);
             this.model.set_word("t1", Some("idle".into()), Some("claude".into()), false);
             this.model.set_word("t2", Some("idle".into()), Some("codex".into()), false);
-            let reply = this.run_as("agent.select", json!({ "index": 2 }), true, window, cx);
-            assert!(reply.get("error").is_none(), "{reply}");
-            assert_eq!(this.model.focused_pane().as_deref(), Some("p2"));
-            this.run_as("agent.select", json!({ "index": 1 }), true, window, cx);
-            assert_eq!(this.model.focused_pane().as_deref(), Some("p1"));
-            let reply = this.run_as("agent.select", json!({ "index": 3 }), true, window, cx);
-            assert!(reply.get("error").is_some(), "{reply}");
-            assert_eq!(this.model.focused_pane().as_deref(), Some("p1"), "out of range leaves focus alone");
+        }));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            for (index, pane) in [(1, "p2"), (2, "p1")] {
+                let reply = this.run_as("agent.select", json!({ "index": index }), false, window, cx);
+                assert!(reply.get("error").is_none(), "{reply}");
+                assert_eq!(this.model.focused_pane().as_deref(), Some(pane));
+            }
+            for index in [json!(0), json!(3), json!(-1), json!(1.5)] {
+                let reply = this.run_as("agent.select", json!({ "index": index }), false, window, cx);
+                assert!(reply.get("error").is_some(), "{reply}");
+                assert_eq!(this.model.focused_pane().as_deref(), Some("p1"), "invalid index {index} leaves focus alone");
+            }
         }));
     }
 

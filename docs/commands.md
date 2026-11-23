@@ -396,7 +396,7 @@ No arguments.
 
 ## `agent.select`
 
-Show an agent by position in the agents list (1 = first), in the order `agent.next` follows.
+Show an agent by position (1 = first), in the same navigation order as `agent.next`.
 
 | Argument | Required |
 |---|---|
