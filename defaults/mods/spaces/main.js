@@ -161,7 +161,32 @@ export default class Spaces extends View {
 
   refreshMachines(cx) {
     cx.spawn(async cx => {
-      try { const r = await hc(["machine", "ls", "--json"]); if (r.code === 0) this.machines = (JSON.parse(r.stdout).machines ?? []).filter((m) => !m.temporary); } catch {}
+      try {
+        const r = await hc(["machine", "ls", "--json"]);
+        if (r.code === 0) {
+          const listed = JSON.parse(r.stdout).machines ?? [];
+          // Every machine decides, temporary ones too: they are only hidden
+          // from the list below, not gone from the core.
+          const known = new Set(listed.map((m) => m.name));
+          // A saved reconnect whose machine the core no longer knows (removed
+          // elsewhere) would draw its row forever: drop it. One the flow itself
+          // removed is a failed pairing, retryable until it connects or is
+          // forgotten; a busy one is between its own remove and add.
+          let dropped = false;
+          for (const [name, state] of Object.entries(this.reconnecting)) {
+            if (!state.busy && !state.removed && !known.has(name)) {
+              delete this.reconnecting[name];
+              this.folded.delete(name);
+              dropped = true;
+            }
+          }
+          if (dropped) {
+            localStorage.setItem("machines.reconnecting", JSON.stringify(this.reconnecting));
+            localStorage.setItem("machines.folded", JSON.stringify([...this.folded]));
+          }
+          this.machines = listed.filter((m) => !m.temporary);
+        }
+      } catch {}
       cx.notify();
     });
   }
@@ -211,6 +236,15 @@ export default class Spaces extends View {
       this.refreshMachines(cx);
       cx.notify();
     });
+  }
+
+  // Dismiss a saved reconnect: nothing retries, and a machine the core no
+  // longer knows loses its row (one still listed keeps its rebuilt row).
+  forget(name) {
+    delete this.reconnecting[name];
+    this.folded.delete(name);
+    localStorage.setItem("machines.reconnecting", JSON.stringify(this.reconnecting));
+    localStorage.setItem("machines.folded", JSON.stringify([...this.folded]));
   }
 
   // One look at a time, each place once however often it was asked for meanwhile.
@@ -395,7 +429,12 @@ export default class Spaces extends View {
               .hover(s => s.text_color(t.foreground))
               .tooltip(repair?.error || "This machine was rebuilt or replaced. Click to connect to the new one.")
               .on_click((_e, cx) => { cx.stop_propagation(); this.reconnect(machine, cx); })
-              .child(repair?.busy ? "Connecting…" : "Connect"))))
+              .child(repair?.busy ? "Connecting…" : "Connect"))
+            .when(repair && !repair.busy, el => el.child(div().id(`machine-forget-${m}`).flex_none().text_color(t.dim)
+              .hover(s => s.text_color(t.foreground))
+              .tooltip("Dismiss this failed reconnect")
+              .on_click((_e, cx) => { cx.stop_propagation(); this.forget(m); cx.notify(); })
+              .child("×")))))
           .when(connected, el => el.child(div().id(`machine-add-${m ?? "local"}`).flex_none().px(4).rounded(4).hover(s => s.bg(t.hover).text_color(t.foreground))
             .on_click((_e, cx) => { cx.stop_propagation(); run("space.new", { machine: m ?? "" }); }).child("+")))
           .child(div().size(6).rounded(3).flex_none().bg(connected ? t.ansi2 : t.dim))
