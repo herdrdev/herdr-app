@@ -464,7 +464,11 @@ impl Core {
     /// Starts a program in a new core terminal and returns its address (`tN`).
     /// Starts a terminal, here or on another machine (`on`: its name in `hc machine ls`).
     pub fn run(&self, argv: Vec<String>, cwd: Option<String>, labels: Value, on: Option<&str>, size: Option<(u16, u16)>, display: Value) -> Result<String> {
-        let env = json!({"TERM": "xterm-256color", "COLORTERM": "truecolor", "TERM_PROGRAM": "herdr"});
+        let mut env = json!({"TERM": "xterm-256color", "COLORTERM": "truecolor", "TERM_PROGRAM": "herdr"});
+        // A split's launch token, for its wrapper (`remote_shell::cannot_start`).
+        if let Some(token) = labels.get("herdr.launch") {
+            env["HERDR_LAUNCH"] = token.clone();
+        }
         let mut params = json!({"argv": argv, "cwd": cwd, "env": env, "labels": labels, "on": on, "keep": true, "display": display});
         // Released cores ignore unknown parameters, including when forwarding to another machine.
         if let Some((cols, rows)) = size {
@@ -578,6 +582,36 @@ pub fn offline() -> Arc<Core> {
         child: Mutex::new(child),
         lost,
     })
+}
+
+/// A core that answers every call at once: `terminal.run` with a new address,
+/// whose argv it passes on to `runs`; anything else with `{}`.
+#[cfg(test)]
+pub fn answering() -> (Arc<Core>, mpsc::Receiver<Value>) {
+    let (writer, frames) = mpsc::channel::<Vec<u8>>();
+    let (runs_tx, runs) = mpsc::channel();
+    let (lost_tx, lost) = async_channel::bounded(1);
+    std::mem::forget(lost_tx);
+    let routes = Arc::new(Mutex::new(Routes::default()));
+    let replies = routes.clone();
+    std::thread::spawn(move || {
+        for (n, frame) in frames.into_iter().enumerate() {
+            let Some(Ok(req)) = frame.get(HEADER..).map(serde_json::from_slice::<Value>) else { continue };
+            let result = if req["method"] == "terminal.run" {
+                let _ = runs_tx.send(req["params"]["argv"].clone());
+                json!({ "address": format!("t{}", 100 + n) })
+            } else {
+                json!({})
+            };
+            let id = req["id"].as_u64().unwrap_or_default();
+            if let Some(tx) = replies.lock().unwrap().replies.remove(&id) {
+                let _ = tx.send(Ok(result));
+            }
+        }
+    });
+    let child = std::process::Command::new(std::env::current_exe().unwrap()).arg("--help").stdout(Stdio::null()).stderr(Stdio::null()).spawn().unwrap();
+    let core = Arc::new(Core { hello: Value::Null, writer, routes, next_id: AtomicU64::new(1), child: Mutex::new(child), lost });
+    (core, runs)
 }
 
 #[cfg(test)]

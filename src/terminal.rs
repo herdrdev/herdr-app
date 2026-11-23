@@ -63,7 +63,7 @@ pub fn hsla(c: Rgb) -> Hsla {
 
 #[derive(Clone, Debug, PartialEq)]
 enum LinkTarget {
-    External(links::Target),
+    External(links::Click),
     Terminal(String),
 }
 
@@ -74,7 +74,7 @@ struct LinkQuery {
 }
 
 impl LinkQuery {
-    fn resolve(&self, current: impl Fn() -> bool) -> HashMap<String, Option<links::Target>> {
+    fn resolve(&self, current: impl Fn() -> bool) -> HashMap<String, links::Resolved> {
         self.paths.iter().take_while(|_| current()).map(|path| (path.clone(), links::resolve(path, self.cwd.as_deref()))).collect()
     }
 }
@@ -104,7 +104,7 @@ impl LinkClick {
 #[derive(Default)]
 struct LinkCache {
     query: Option<LinkQuery>,
-    resolved: Option<HashMap<String, Option<links::Target>>>,
+    resolved: Option<HashMap<String, links::Resolved>>,
 }
 
 impl LinkCache {
@@ -115,7 +115,7 @@ impl LinkCache {
         true
     }
 
-    fn complete(&mut self, query: &LinkQuery, resolved: HashMap<String, Option<links::Target>>) -> bool {
+    fn complete(&mut self, query: &LinkQuery, resolved: HashMap<String, links::Resolved>) -> bool {
         if self.query.as_ref() != Some(query) { return false; }
         self.resolved = Some(resolved);
         true
@@ -124,14 +124,42 @@ impl LinkCache {
 
 pub enum TerminalEvent {
     Peek(String),
+    Link(links::Click),
     TitleChanged,
     SelectionChanged,
+    /// History scroll position changed enough for mods that watch `panes().scroll`.
+    ScrollChanged,
     /// The program ended.
     Ended,
     /// Right-click where the program doesn't take the mouse: the pane menu.
     ContextMenu(Point<Pixels>),
     /// Something the person asked for failed: an error toast.
     Notice { title: String, body: String },
+}
+
+/// Rows of scrollback history as Ghostty's scrollbar reports them. `from_bottom`
+/// is 0 when the viewport is at (or past) the end; absent on the alternate screen.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct ScrollMetrics {
+    pub total: u64,
+    pub offset: u64,
+    pub len: u64,
+    pub from_bottom: u64,
+}
+
+impl ScrollMetrics {
+    pub fn json(self) -> Value {
+        json!({
+            "total": self.total,
+            "offset": self.offset,
+            "len": self.len,
+            "from_bottom": self.from_bottom,
+        })
+    }
+}
+
+fn scroll_state_changed(previous: Option<u64>, current: Option<u64>) -> bool {
+    previous.map(|n| n > 0) != current.map(|n| n > 0)
 }
 
 /// What the canvas closures need, shared outside the entity so prepaint can resize.
@@ -189,6 +217,7 @@ pub struct TerminalView {
     selection_scroll: Option<Task<()>>,
     /// The terminal's folder, for links to relative paths.
     pub cwd: Option<PathBuf>,
+    pub link_handlers: Rc<RefCell<links::Handlers>>,
     /// The link under the pointer while the link modifier is held.
     link: Option<LinkTarget>,
     link_cache: LinkCache,
@@ -198,6 +227,9 @@ pub struct TerminalView {
     link_click_resolver: Option<Task<()>>,
     /// Right-clicks go to the program when it takes the mouse (Shift: the menu).
     pub right_click_to_program: bool,
+    /// Files on their way to this terminal's machine for over a second: what
+    /// the pane says meanwhile, by send.
+    sending: Vec<(u64, &'static str)>,
     grid: Rc<RefCell<Grid>>,
     focus: FocusHandle,
     was_focused: bool,
@@ -217,6 +249,8 @@ pub struct TerminalView {
     pending_search_nav: Option<bool>,
     search_task: Option<Task<()>>,
     attach_deadline: Instant,
+    /// Last observed distance; output only publishes transitions to/from the end.
+    published_from_bottom: Option<u64>,
     _render_hold: Option<(Instant, Task<()>)>,
     _reader: Option<Task<()>>,
 }
@@ -231,6 +265,12 @@ static FRAME: AtomicU64 = AtomicU64::new(0);
 
 pub fn next_frame() {
     FRAME.fetch_add(1, Ordering::Relaxed);
+}
+
+pub fn flush_output_clock(cx: &mut gpui::App) {
+    for view in OUTPUT_CLOCK.with(|c| std::mem::take(&mut *c.borrow_mut())) {
+        let _ = view.update(cx, |_, cx| cx.notify());
+    }
 }
 
 impl EventEmitter<TerminalEvent> for TerminalView {}
@@ -335,6 +375,7 @@ impl TerminalView {
             selection_pointer: Point::default(),
             selection_scroll: None,
             cwd: None,
+            link_handlers: Rc::default(),
             link: None,
             link_cache: LinkCache::default(),
             link_generation: Arc::new(AtomicU64::new(0)),
@@ -342,6 +383,7 @@ impl TerminalView {
             link_click: LinkClick::default(),
             link_click_resolver: None,
             right_click_to_program: false,
+            sending: Vec::new(),
             grid: Rc::new(RefCell::new(Grid {
                 vt: Vt::new(size_hint.0.max(2), size_hint.1.max(1)),
                 core: core.clone(),
@@ -376,6 +418,7 @@ impl TerminalView {
             pending_search_nav: None,
             search_task: None,
             attach_deadline,
+            published_from_bottom: None,
             _render_hold: None,
             _reader: None,
         };
@@ -642,6 +685,7 @@ impl TerminalView {
                 });
             })));
         }
+        self.publish_scroll_if_changed(cx);
         // Output in a terminal nobody sees doesn't redraw the window; it's
         // drawn fresh when shown again. Nor does output that changed nothing
         // on screen (an agent spinning its title).
@@ -669,9 +713,7 @@ impl TerminalView {
         if start {
             cx.spawn(async |_, cx| {
                 cx.background_executor().timer(Duration::from_millis(33)).await;
-                for view in OUTPUT_CLOCK.with(|c| std::mem::take(&mut *c.borrow_mut())) {
-                    let _ = view.update(cx, |_, cx| cx.notify());
-                }
+                cx.update(flush_output_clock);
             })
             .detach();
         }
@@ -771,6 +813,25 @@ impl TerminalView {
             return drag_paths::unavailable(body);
         }
         let addr = self.address.clone();
+        static SENDS: AtomicU64 = AtomicU64::new(0);
+        let send = SENDS.fetch_add(1, Ordering::Relaxed);
+        let label = match (copies, paths.len()) {
+            (true, _) => "Sending image…",
+            (false, 1) => "Sending file…",
+            _ => "Sending files…",
+        };
+        let done = Rc::new(Cell::new(false));
+        let shown = done.clone();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(1)).await;
+            if !shown.get() {
+                let _ = this.update(cx, |this, cx| {
+                    this.sending.push((send, label));
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
         cx.spawn(async move |this, cx| {
             let (there, refused) = cx
                 .background_executor()
@@ -802,7 +863,11 @@ impl TerminalView {
                     (there, refused)
                 })
                 .await;
+            // A closed pane is gone here: its paths go nowhere.
             let _ = this.update(cx, |this, cx| {
+                done.set(true);
+                this.sending.retain(|(s, _)| *s != send);
+                cx.notify();
                 if !there.is_empty() {
                     this.paste_paths(there);
                 }
@@ -909,6 +974,7 @@ impl TerminalView {
         }
         drop(grid);
         self.selection_changed(cx);
+        self.publish_scroll_if_changed(cx);
         self.copy_primary(cx);
         cx.notify();
         Ok(())
@@ -991,6 +1057,7 @@ impl TerminalView {
         if self.grid.borrow().vt.search_progress().complete {
             self.pending_search_nav = None;
             if self.grid.borrow_mut().vt.search_navigate(previous) {
+                self.publish_scroll_if_changed(cx);
                 cx.notify();
             }
         } else {
@@ -1025,6 +1092,7 @@ impl TerminalView {
                 let busy = !grid.vt.search_progress().complete || this.pending_search_nav.is_some();
                 drop(grid);
                 if changed {
+                    this.publish_scroll_if_changed(cx);
                     cx.notify();
                 }
                 Some(if busy { Duration::from_millis(33) } else { Duration::from_millis(200) })
@@ -1086,6 +1154,8 @@ impl TerminalView {
         } else {
             g.vt.scroll_viewport(if up { -(n as isize) } else { n as isize });
         }
+        drop(g);
+        self.publish_scroll_if_changed(cx);
         cx.notify();
     }
 
@@ -1099,7 +1169,29 @@ impl TerminalView {
             ScrollTarget::Top => g.vt.scroll_to_top(),
             ScrollTarget::Bottom => g.vt.scroll_to_bottom(),
         }
+        drop(g);
+        self.publish_scroll_if_changed(cx);
         cx.notify();
+    }
+
+    /// History scroll metrics for mods (`panes().scroll`). None on the alternate screen.
+    pub fn scroll_metrics(&self) -> Option<ScrollMetrics> {
+        let g = self.grid.borrow();
+        if g.vt.alt_screen() {
+            return None;
+        }
+        let sb = g.vt.scrollbar();
+        let from_bottom = sb.total.saturating_sub(sb.offset.saturating_add(sb.len));
+        Some(ScrollMetrics { total: sb.total, offset: sb.offset, len: sb.len, from_bottom })
+    }
+
+    fn publish_scroll_if_changed(&mut self, cx: &mut Context<Self>) {
+        let from_bottom = self.scroll_metrics().map(|m| m.from_bottom);
+        let previous = self.published_from_bottom;
+        self.published_from_bottom = from_bottom;
+        if scroll_state_changed(previous, from_bottom) {
+            cx.emit(TerminalEvent::ScrollChanged);
+        }
     }
 
     /// The program tracks the mouse and Shift isn't held (Shift keeps the mouse Herdr's).
@@ -1151,7 +1243,7 @@ impl TerminalView {
     /// their own fresh resolution and never consume this display-only cache.
     fn link_at(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) -> Option<(LinkTarget, vt::Spans)> {
         if crate::wsl::active().is_none() {
-            return self.link_at_with(pos, |path| links::resolve(path, self.cwd.as_deref()));
+            return self.link_at_with(pos, |path| Some(links::resolve(path, self.cwd.as_deref())));
         }
         let (terminal, query) = self.link_query(pos);
         if query.paths.is_empty() { self.clear_link_query(); return terminal; }
@@ -1159,7 +1251,7 @@ impl TerminalView {
             self.link_generation.fetch_add(1, Ordering::Relaxed);
         }
         if let Some(resolved) = &self.link_cache.resolved {
-            return self.link_at_with(pos, |path| resolved.get(path).cloned().flatten());
+            return self.link_at_with(pos, |path| resolved.get(path).cloned());
         }
         if self.link_resolver.is_none() {
             let generation = self.link_generation.clone();
@@ -1188,7 +1280,7 @@ impl TerminalView {
 
     fn click_link(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) -> bool {
         if crate::wsl::active().is_none() {
-            if let Some((target, _)) = self.link_at_with(pos, |path| links::resolve(path, self.cwd.as_deref())) {
+            if let Some((target, _)) = self.link_at_with(pos, |path| Some(links::resolve(path, self.cwd.as_deref()))) {
                 Self::open_link(target, cx);
                 return true;
             }
@@ -1215,7 +1307,7 @@ impl TerminalView {
                 this.link_click_resolver = None;
                 let (terminal, current) = this.link_query(pos);
                 if this.link_click.complete(ticket, &query, &current, terminal.as_ref().map(|(target, _)| target))
-                    && let Some((target, _)) = this.link_at_with(pos, |path| resolved.get(path).cloned().flatten())
+                    && let Some((target, _)) = this.link_at_with(pos, |path| resolved.get(path).cloned())
                 { Self::open_link(target, cx); }
             });
         }));
@@ -1224,28 +1316,45 @@ impl TerminalView {
 
     fn open_link(target: LinkTarget, cx: &mut Context<Self>) {
         match target {
-            LinkTarget::External(target) => links::open(&target),
+            LinkTarget::External(click) if !click.handlers.is_empty() => cx.emit(TerminalEvent::Link(click)),
+            LinkTarget::External(click) => {
+                if let Some(target) = click.native {
+                    links::open(&target);
+                }
+            }
             LinkTarget::Terminal(address) => cx.emit(TerminalEvent::Peek(address)),
         }
     }
 
-    /// The link at a window position, and where it shows. `resolve` is either
-    /// immediate native resolution or a lookup in the completed WSL batch.
-    fn link_at_with(&self, pos: Point<Pixels>, mut resolve: impl FnMut(&str) -> Option<links::Target>) -> Option<(LinkTarget, vt::Spans)> {
+    /// The link at a window position, and where it shows. A `None` from
+    /// `resolve` means the candidate has not been checked yet; a resolved
+    /// candidate without a native opener may still have a mod handler.
+    fn link_at_with(&self, pos: Point<Pixels>, mut resolve: impl FnMut(&str) -> Option<links::Resolved>) -> Option<(LinkTarget, vt::Spans)> {
         let g = self.grid.borrow();
         let (x, y) = local(&g, pos);
         let (col, row) = (x / f32::from(g.cell.width), y / f32::from(g.cell.height));
+        let active = self.link_handlers.borrow();
+        let remote = self.address.contains('/');
         let mut target = None;
-        let hit = g.vt.link_at(col as u16, row as u16, |text, at, joined| {
-            // In lines joined back together only a file that exists proves the join right.
+        use vt::LinkScan;
+        let hit = g.vt.link_at(col as u16, row as u16, |text, at, scan| {
+            if scan == LinkScan::Unresolved && active.is_empty() {
+                return None;
+            }
             if let Some(range) = links::find(text, at)
                 && let Some(link) = resolve(&text[range.clone()])
-                && (!joined || matches!(link, links::Target::File(_)))
             {
-                target = Some(LinkTarget::External(link));
-                return Some(range);
+                let eligible = match scan {
+                    LinkScan::Plain => link.native.is_some(),
+                    LinkScan::Joined => matches!(link.native, Some(links::Target::File(_))),
+                    LinkScan::Unresolved => link.native.is_none(),
+                };
+                if eligible {
+                    target = Some(LinkTarget::External(link.click(remote, &active)?));
+                    return Some(range);
+                }
             }
-            if joined {
+            if scan != LinkScan::Plain {
                 return None;
             }
             let range = links::word(text, at)?;
@@ -1253,8 +1362,8 @@ impl TerminalView {
             target = Some(LinkTarget::Terminal(address));
             Some(range)
         })?;
-        // OSC 8 links bypass text detection.
-        let target = target.or_else(|| resolve(&hit.target).map(LinkTarget::External))?;
+        // OSC 8 bypasses text detection. The URI is already the full destination.
+        let target = target.or_else(|| resolve(&hit.target)?.click(remote, &active).map(LinkTarget::External))?;
         Some((target, hit.spans))
     }
 
@@ -1278,6 +1387,7 @@ impl TerminalView {
                         g.vt.scroll_viewport(lines);
                         drop(g);
                         this.select(Select::Drag, this.selection_pointer, cx);
+                        this.publish_scroll_if_changed(cx);
                     }
                     true
                 }).unwrap_or(false);
@@ -2518,6 +2628,7 @@ impl EntityInputHandler for TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.publish_scroll_if_changed(cx);
         crate::bench::count(&crate::bench::TERMINAL);
         let terminal_focused = self.focus.is_focused(window);
         if terminal_focused {
@@ -2628,6 +2739,7 @@ impl Render for TerminalView {
                         g.vt.scroll_to_row(scrollbar_row_at(sb.total, sb.len, f32::from(track.size.height), min, top));
                     }
                     drop(g);
+                    this.publish_scroll_if_changed(cx);
                     cx.notify();
                     cx.stop_propagation();
                     return;
@@ -2695,6 +2807,7 @@ impl Render for TerminalView {
                                         let top = f32::from(ev.position.y - g.origin.y) - this.scrollbar_grab.unwrap_or(0.0);
                                         g.vt.scroll_to_row(scrollbar_row_at(sb.total, sb.len, track, min, top));
                                         drop(g);
+                                        this.publish_scroll_if_changed(cx);
                                         cx.notify();
                                         return;
                                     }
@@ -2833,6 +2946,21 @@ impl Render for TerminalView {
                         .child(format!("[{why}]")),
                 )
             })
+            .when_some(self.sending.last(), |d, (_, label)| {
+                d.child(
+                    div()
+                        .absolute()
+                        .bottom_2()
+                        .left_3()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .bg(crate::settings::color("raised"))
+                        .text_color(hsla(vt::theme().fg))
+                        .text_xs()
+                        .child(*label),
+                )
+            })
     }
 }
 
@@ -2844,8 +2972,27 @@ impl Focusable for TerminalView {
 
 #[cfg(test)]
 mod tests {
-    use super::{ScrollTarget, pages_to_lines, scroll_target};
+    use super::{ScrollTarget, pages_to_lines, scroll_target, scroll_state_changed};
     use serde_json::{Value, json};
+
+    #[test]
+    fn scroll_refreshes_only_when_leaving_or_reaching_end_or_alternate_screen() {
+        for (previous, current, changed) in [
+            (Some(0), Some(10), true),
+            (Some(10), Some(0), true),
+            (Some(10), Some(20), false),
+            (Some(20), Some(10), false),
+            (Some(0), Some(0), false),
+            (Some(10), Some(10), false),
+            (Some(0), None, true),
+            (Some(10), None, true),
+            (None, Some(0), true),
+            (None, Some(10), true),
+            (None, None, false),
+        ] {
+            assert_eq!(scroll_state_changed(previous, current), changed, "{previous:?} -> {current:?}");
+        }
+    }
 
     #[test]
     fn output_turns_preserve_bytes_budget_and_close_order() {
@@ -2883,6 +3030,49 @@ mod tests {
         }
         assert!(ended);
         assert!(rx.is_closed() && rx.is_empty());
+    }
+
+    #[gpui::test]
+    fn terminal_link_scans_keep_peeks_and_verified_joins_ahead_of_missing_paths(cx: &mut gpui::TestAppContext) {
+        use super::{LinkTarget, TerminalView};
+        use crate::{links, mods};
+        use gpui::*;
+
+        let cwd = std::env::temp_dir().join(format!("herdr-terminal-link-scan-{}", std::process::id()));
+        let joined = cwd.join("./abc/defg/x.png");
+        std::fs::create_dir_all(joined.parent().unwrap()).unwrap();
+        std::fs::write(&joined, "").unwrap();
+        let view = cx.new(|cx| TerminalView::attach(crate::hc::offline(), "t1".into(), (18, 5), cx));
+        view.update(cx, |view, _| {
+            view.cwd = Some(cwd.clone());
+            view.grid.borrow_mut().vt.write(b"./gone.png\r\npeer.test/t7\r\n  see ./abc/de\r\n  fg/x.png ok");
+            let hit = |view: &TerminalView, col: f32, row: f32| {
+                view.link_at_with(point(px(9.0 * col + 1.0), px(18.0 * row + 1.0)), |path| Some(links::resolve(path, view.cwd.as_deref())))
+                    .map(|(target, _)| target)
+            };
+            assert!(hit(view, 6.0, 0.0).is_none());
+
+            let rules: Vec<links::Rule> = serde_json::from_value(json!([{"kind":"file","pattern":"."}])).unwrap();
+            view.link_handlers.borrow_mut().push(("viewer".into(), rules.into()));
+            let pos = point(px(9.0 * 6.0 + 1.0), px(1.0));
+            let (pending, query) = view.link_query(pos);
+            assert!(pending.is_none(), "unverified candidates are not yet actionable");
+            let resolved = query.resolve(|| true);
+            let Some((LinkTarget::External(missing), _)) = view.link_at_with(pos, |path| resolved.get(path).cloned()) else {
+                panic!("missing link handler after resolution");
+            };
+            assert_eq!(missing.handlers[0].1, json!({"kind":"file", "raw":"./gone.png", "path":null}));
+            assert!(missing.native.is_none());
+
+            mods::publish_terminals(json!([{"address":"peer.test/t7"}]));
+            assert!(matches!(hit(view, 7.0, 1.0), Some(LinkTarget::Terminal(address)) if address == "peer.test/t7"));
+            mods::publish_terminals(json!([]));
+
+            let Some(LinkTarget::External(file)) = hit(view, 5.0, 3.0) else { panic!("missing joined link") };
+            assert_eq!(file.handlers[0].1["raw"], "./abc/defg/x.png");
+            assert_eq!(file.native, Some(links::Target::File(joined)));
+        });
+        std::fs::remove_dir_all(cwd).unwrap();
     }
 
     #[gpui::test]
@@ -3704,8 +3894,8 @@ mod tests {
         let mut hover = LinkCache::default();
         hover.request(Some(query.clone()));
         let old = query.resolve(|| true);
-        assert_eq!(old[&query.paths[0]], Some(links::Target::File(plain.clone())));
-        assert_eq!(old[&query.paths[1]], None);
+        assert_eq!(old[&query.paths[0]].native, Some(links::Target::File(plain.clone())));
+        assert_eq!(old[&query.paths[1]].native, None);
         hover.complete(&query, old.clone());
 
         // An earlier hover can still complete after the click without being its result.
@@ -3728,12 +3918,12 @@ mod tests {
         hover.complete(&query, inflight.join().unwrap());
         assert_eq!(hover.resolved.as_ref().unwrap(), &old);
         assert!(click.complete(ticket, &query, &query, None));
-        assert_eq!(fresh[&query.paths[0]], Some(links::Target::File(dotted.clone())));
-        assert_eq!(fresh[&query.paths[1]], Some(links::Target::File(created.clone())));
+        assert_eq!(fresh[&query.paths[0]].native, Some(links::Target::File(dotted.clone())));
+        assert_eq!(fresh[&query.paths[1]].native, Some(links::Target::File(created.clone())));
 
         let ticket = click.start(query.clone(), None);
         for path in [&plain, &dotted, &created] { std::fs::remove_file(path).unwrap(); }
-        assert!(query.resolve(|| true).values().all(Option::is_none), "deleted files must not open from hover cache");
+        assert!(query.resolve(|| true).values().all(|link| link.native.is_none()), "deleted files must not open from hover cache");
         assert!(click.complete(ticket, &query, &query, None));
     }
 
@@ -5110,5 +5300,40 @@ mod tests {
         assert_eq!(pages_to_lines(-0.5, 24), -12);
         assert_eq!(pages_to_lines(-0.5, 25), -13, "half of an odd row count rounds away from zero");
         assert_eq!(pages_to_lines(0.02, 24), 0);
+    }
+
+    #[gpui::test]
+    fn flush_output_clock_notifies_pending_terminals_before_the_33ms_timer(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+        use std::cell::Cell;
+        use std::rc::Rc;
+        use std::time::Duration;
+
+        let terminal = cx.new(|cx| super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 5), cx));
+        let notifies = Rc::new(Cell::new(0usize));
+        let _sub = cx.update(|cx| {
+            cx.observe(&terminal, {
+                let notifies = notifies.clone();
+                move |_, _| {
+                    notifies.set(notifies.get() + 1);
+                }
+            })
+        });
+        cx.run_until_parked();
+        notifies.set(0);
+
+        terminal.update(cx, |terminal, cx| {
+            terminal.mark_shown();
+            assert!(terminal.ingest([crate::hc::Stream::Data(b"hello output\r\n".to_vec())], cx));
+        });
+        assert_eq!(notifies.get(), 0, "output clock batches notifications until 33ms elapses");
+
+        cx.update(super::flush_output_clock);
+        cx.run_until_parked();
+        assert_eq!(notifies.get(), 1, "flushing output clock must notify immediately before 33ms");
+
+        cx.executor().advance_clock(Duration::from_millis(33));
+        cx.run_until_parked();
+        assert_eq!(notifies.get(), 1, "subsequent 33ms tick must not emit a duplicate notification");
     }
 }

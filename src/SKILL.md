@@ -148,8 +148,10 @@ those files or the generated guide. The app rewrites them on start.
   branches become dashes). Use an absolute path or `~` / `~/...`, resolved on the
   space's machine. Read on dialog open; existing checkouts stay put. No clones
   needed, and the app does not read the TUI's config.toml.
-- Mods live in `mods/<name>/` with `main.js` and optional `mod.json`.
-  They are trusted JavaScript with command and network access.
+- Mods live in `mods/<name>/` with `main.js` for a view or `link.js` for
+  Ctrl/Cmd-clicked terminal links. They are trusted JavaScript with command
+  and network access. `mod.json` declares link rules. A personal layout's
+  root `link_handlers` array selects the mods and their order.
   `"focusable": true` in `mod.json` lets `pane.go` move onto a copy; it receives
   `"focus"` from `nextCommand()` and focuses its own keyboard handle.
 - A mod's `watchFolder(dir)` promise has `cancel()`; cancel it when the folder
@@ -176,13 +178,18 @@ herdr-app status
 herdr-app shot /tmp/mod.png   # then look at the picture
 ```
 
-`check` loads the mod and renders it once. It exits nonzero with the exact
-error. Its shared state starts empty and stays in memory; it leaves shared.json
-untouched. Never call a mod done without a passing check. Then confirm it is
-shown correctly in the running window with `shot`; don't claim a visual
+`check` loads and renders the mod's view if it has one. It validates link rules
+and checks the `handleLink` export in `link.js` without running the module.
+It exits nonzero with the exact error. Its shared state starts empty and stays
+in memory, leaving shared.json untouched. Its `init()` still runs: import
+`checking` from `"herdr"` and guard
+process side effects with `if (checking()) return;`. It is true throughout a
+check and false in a live window; `exec`, `hc` and `writeTextFile` still run
+and warn during checks. Never call a mod done without a passing check.
+Then confirm it is shown correctly in the running window with `shot`; don't claim a visual
 check you haven't made.
 
-`herdr-app shot [file.png]` saves the window's last frame and prints its
+`herdr-app shot [file.png]` saves the window's current frame and prints its
 absolute path (default: `herdr-shot.png` in your current folder). It is the
 app's own rendering at full pixel size: terminals, images, overlays and
 floats included, even when the window is covered or minimized. No screen
