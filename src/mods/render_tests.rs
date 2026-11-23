@@ -759,6 +759,106 @@ export default class Demo extends View {
 }
 
 #[gpui::test]
+fn a_mod_hears_mouse_back_and_forward_buttons(cx: &mut TestAppContext) {
+    use gpui::{Modifiers, MouseButton, NavigationDirection, VisualTestContext, point, px};
+
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    std::fs::write(staged.0.join("main.js"), r#"
+import { View, div } from "gpui-kit";
+import { v_flex, h_flex, Popover } from "gpui-base";
+export default class Demo extends View {
+  init() { this.log = []; }
+  render() {
+    return v_flex().w(300).h(200)
+      .child(
+        h_flex()
+          .child(
+            div().id("target").w(100).h(50)
+              .on_mouse_down("back", (event, cx) => {
+                this.log.push(`down:${event.button}`);
+                cx.notify();
+              })
+              .on_mouse_up("back", (event, cx) => {
+                this.log.push(`up:${event.button}`);
+                cx.notify();
+              })
+              .on_mouse_down("forward", (event, cx) => {
+                this.log.push(`down:${event.button}`);
+                cx.notify();
+              })
+              .on_mouse_up("forward", (event, cx) => {
+                this.log.push(`up:${event.button}`);
+                cx.notify();
+              })
+              .on_mouse_down_out((event, cx) => {
+                this.log.push(`out:${event.button}`);
+                cx.notify();
+              }),
+          )
+          .child(
+            Popover.new("nav-pop")
+              .mouse_button("back")
+              .on_open_change((open, cx) => {
+                this.log.push(`pop:${open}`);
+                cx.notify();
+              })
+              .trigger(div().id("pop-trigger").w(100).h(50).child("trigger"))
+              .content(div().child("pop-opened")),
+          ),
+      )
+      .child(div().child(`log=${this.log.join(" ")}`));
+  }
+}
+"#).unwrap();
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|window, cx| {
+        RootedView(runtime.try_load(&staged.0, window, cx).unwrap())
+    });
+    let mut context = VisualTestContext::from_window(window.into(), cx);
+    context.update(|window, cx| window.draw(cx).clear(cx));
+    let view: gpui::Entity<gpui_shell::ScriptView> = window
+        .root(&mut context)
+        .unwrap()
+        .read_with(&context, |root, cx| root.0.read(cx).content().clone().downcast().unwrap());
+
+    let inside = point(px(20.), px(20.));
+    let pop_trigger = point(px(140.), px(20.));
+    let outside = point(px(260.), px(20.));
+    let back = MouseButton::Navigate(NavigationDirection::Back);
+    let forward = MouseButton::Navigate(NavigationDirection::Forward);
+
+    context.simulate_mouse_move(inside, None, Modifiers::default());
+    context.simulate_mouse_down(inside, MouseButton::Left, Modifiers::default());
+    context.simulate_mouse_up(inside, MouseButton::Left, Modifiers::default());
+    context.simulate_mouse_down(inside, back, Modifiers::default());
+    context.simulate_mouse_up(inside, back, Modifiers::default());
+    context.simulate_mouse_down(inside, forward, Modifiers::default());
+    context.simulate_mouse_up(inside, forward, Modifiers::default());
+    context.simulate_mouse_down(outside, back, Modifiers::default());
+    context.simulate_mouse_up(outside, back, Modifiers::default());
+    context.simulate_mouse_down(outside, forward, Modifiers::default());
+    context.simulate_mouse_up(outside, forward, Modifiers::default());
+    // Left press on a back-button popover trigger must not open it; back press opens it.
+    context.simulate_mouse_down(pop_trigger, MouseButton::Left, Modifiers::default());
+    context.simulate_mouse_up(pop_trigger, MouseButton::Left, Modifiers::default());
+    context.simulate_mouse_down(pop_trigger, back, Modifiers::default());
+    context.simulate_mouse_up(pop_trigger, back, Modifiers::default());
+    context.run_until_parked();
+    context.update(|window, cx| window.draw(cx).clear(cx));
+
+    let tree = context.update(|_, cx| {
+        view.read(cx).snapshot().map(gpui_shell::RenderSnapshot::debug_tree).unwrap_or_default()
+    });
+    assert!(
+        tree.contains(
+            "log=down:back up:back down:forward up:forward out:back out:forward out:left out:back pop:true"
+        ),
+        "expected back/forward handlers, on_mouse_down_out buttons, and back-button popover: {tree}"
+    );
+}
+
+#[gpui::test]
 fn a_mod_reads_a_text_view_selection_once_it_settles(cx: &mut TestAppContext) {
     use gpui::{
         Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, VisualTestContext, point, px,
