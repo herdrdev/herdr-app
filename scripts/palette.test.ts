@@ -23,9 +23,10 @@ const element = () => new Element();
 let platform = "linux";
 const icons: string[] = [];
 let dark = true;
+let bound: { section: string; action: string; keys: string }[] = [];
 const shipped = [["graphite", false], ["ink", false], ["moss", false], ["paper", true], ["atom-one-dark", false], ["mine-light", true], ["win98", true]];
 const values = {
-  View: class {}, div: element, svg: (path: string) => { icons.push(path); return element(); }, v_flex: element, h_flex: element, Input: { new: element }, theme: () => ({}), keys: () => [], win: () => ({ platform }),
+  View: class {}, div: element, svg: (path: string) => { icons.push(path); return element(); }, v_flex: element, h_flex: element, Input: { new: element }, theme: () => ({}), keys: () => bound, win: () => ({ platform }),
   commands: () => [{ name: "app.theme", args: [{ name: "name", required: true }], about: "Use a theme." }], layouts: () => ["main", "win98"], shared: () => "main",
   themes: () => shipped.map(([name, light]) => ({ name, light })), settings: () => ({ dark }),
 };
@@ -88,4 +89,21 @@ test("palette offers only the themes that can show in the current appearance", (
   dark = false;
   // win98 is the Herdr 98 layout's own theme, so it isn't offered here.
   expect(offered()).toEqual(["paper", "mine-light"]);
+});
+
+test.each([
+  ["ctrl-shift-p", ["ctrl-shift-p"]],
+  ["ctrl--", ["ctrl--"]],
+  ["ctrl-b w", ["ctrl-b", "w"]],
+])("palette shows %p as one key per stroke", (keys, strokes) => {
+  bound = [{ section: "global", action: "test", keys }];
+  try {
+    const view = new Palette();
+    view.query = ""; view.at = 0; view.scroll = 0; view.input = {}; view.handle = {};
+    view.rows = () => [{ e: { name: "test", title: "Test", args: {} } }];
+    const key = find(view.render(), "pl-0")!.nodes.at(-1)!;
+    expect(key.nodes.map((s) => s.nodes[0])).toEqual(strokes);
+  } finally {
+    bound = [];
+  }
 });
