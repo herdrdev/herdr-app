@@ -93,12 +93,13 @@ Rename a tab (asks the person when no name; an empty name: called by its number 
 
 ## `tab.move`
 
-Move a tab to a position in its space (1 = first).
+Move a tab (the active one if no id) to a position in its space (1 = first), or `by` places left (-) or right (+), wrapping.
 
 | Argument | Required |
 |---|---|
-| `id` | yes |
-| `index` | yes |
+| `id` | no |
+| `index` | no |
+| `by` | no |
 
 ## `pane.split`
 
@@ -168,7 +169,7 @@ Pin an agent to the top of the agent lists (pinned true) or unpin it (false). Pi
 
 ## `terminal.kill`
 
-End a terminal and its sub-agents.
+End a terminal and its sub-agents. Spare branches whose first sub-agent has a pane or a herdr.space label. Core still applies parent-lifetime rules.
 
 | Argument | Required |
 |---|---|
@@ -240,6 +241,15 @@ Show only this pane of its tab, or all again.
 |---|---|
 | `pane` | no |
 
+## `pane.rename`
+
+Name a pane (default: the focused one; asks the person when no name; an empty name: unnamed again).
+
+| Argument | Required |
+|---|---|
+| `pane` | no |
+| `name` | no |
+
 ## `pane.focus`
 
 Focus a pane (or the pane showing a terminal).
@@ -256,6 +266,16 @@ Focus the pane or focusable mod to the "left", "right", "up" or "down".
 | Argument | Required |
 |---|---|
 | `direction` | yes |
+
+## `pane.resize`
+
+Move the border of a pane (default: the focused one) "left", "right", "up" or "down" by px (default 40), like dragging the divider.
+
+| Argument | Required |
+|---|---|
+| `direction` | yes |
+| `pane` | no |
+| `px` | no |
 
 ## `pane.swap`
 
@@ -373,6 +393,14 @@ No arguments.
 Show the previous agent.
 
 No arguments.
+
+## `agent.select`
+
+Show an agent by position (1 = first), in the same navigation order as `agent.next`.
+
+| Argument | Required |
+|---|---|
+| `index` | yes |
 
 ## `layout.switch`
 

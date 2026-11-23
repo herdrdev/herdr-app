@@ -116,17 +116,21 @@ pub fn path() -> std::path::PathBuf {
 /// not "no tab": GPUI ranks a binding without one above every other, so
 /// it would beat `layout:` (same depth, added earlier) and only lose to
 /// `terminal` and `mod:` by order.
-fn tab(section: &str) -> Result<String, String> {
+fn tab(section: &str) -> Result<KeyBindingContextPredicate, String> {
+    use KeyBindingContextPredicate::{Descendant, Equal, Identifier};
     match section {
-        "global" => Ok("Herdr".into()),
-        "terminal" => Ok("Terminal".into()),
+        "global" => Ok(Identifier("Herdr".into())),
+        "terminal" => Ok(Identifier("Terminal".into())),
         s => match (s.strip_prefix("mod:"), s.strip_prefix("layout:")) {
             // At the mod's ShellRoot, not its outer block: the kit binds tab and shift-tab
             // (focus traversal) on ShellRoot, a deeper context that would outrank `mod == p`.
             // At the same depth the section wins, bound after the kit's keys.
-            (Some(p), _) if !p.is_empty() => Ok(format!("mod == {p} > ShellRoot")),
+            (Some(p), _) if !p.is_empty() => Ok(Descendant(
+                Box::new(Equal("mod".into(), p.to_owned().into())),
+                Box::new(Identifier("ShellRoot".into())),
+            )),
             // While layouts/<name>.json is shown (the window's tab says which).
-            (_, Some(l)) if !l.is_empty() => Ok(format!("layout == {l}")),
+            (_, Some(l)) if !l.is_empty() => Ok(Equal("layout".into(), l.to_owned().into())),
             _ => Err(format!("unknown section {s:?}: use \"global\", \"terminal\", \"layout:<name>\" or \"mod:<name>\"")),
         },
     }
@@ -196,8 +200,8 @@ pub fn parse(text: &str) -> Result<Vec<KeyBinding>, String> {
     let mut out = Vec::new();
     let mut problems = Vec::new();
     for (section, keys) in &sections {
-        let ctx = match tab(section) {
-            Ok(c) => c,
+        let predicate = match tab(section) {
+            Ok(c) => Some(Rc::new(c)),
             Err(e) => {
                 problems.push(e);
                 continue;
@@ -221,13 +225,6 @@ pub fn parse(text: &str) -> Result<Vec<KeyBinding>, String> {
                 problems.push(format!("{ESCAPE_HATCH} is reserved for resetting Herdr"));
                 continue;
             }
-            let predicate = match KeyBindingContextPredicate::parse(&ctx) {
-                Ok(p) => Some(Rc::new(p)),
-                Err(e) => {
-                    problems.push(format!("{section}: {e}"));
-                    continue;
-                }
-            };
             let action: Box<dyn gpui::Action> = if let Binding::Object(value) = action {
                 Box::new(CommandBinding { value: value.clone() })
             } else if string.as_deref() == Some("terminal") {
@@ -244,7 +241,7 @@ pub fn parse(text: &str) -> Result<Vec<KeyBinding>, String> {
                 let native: Option<Box<dyn gpui::Action>> = None;
                 native.unwrap_or_else(|| Box::new(ShellAction::new(action.clone())))
             };
-            let binding = KeyBinding::load(keys, action, predicate, false, None, &gpui::DummyKeyboardMapper);
+            let binding = KeyBinding::load(keys, action, predicate.clone(), false, None, &gpui::DummyKeyboardMapper);
             match binding {
                 Ok(b) => out.push(b),
                 Err(e) => problems.push(format!("{section}.{keys}: {e}")),
