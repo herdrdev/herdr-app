@@ -4,13 +4,15 @@
 use fancy_regex::Regex;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::num::NonZeroU32;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
 
-/// Ghostty's default link pattern (`src/config/url.zig`), unchanged.
+/// Ghostty's default link pattern (`src/config/url.zig`), plus the editor
+/// remote schemes (`cursor://vscode-remote/...`, `vscode://vscode-remote/...`).
 static PATTERN: LazyLock<Regex> = LazyLock::new(|| {
-    let schemes = r"https?://|mailto:|ftp://|file:|ssh:|git://|ssh://|tel:|magnet:|ipfs://|ipns://|gemini://|gopher://|news:";
+    let schemes = r"https?://|mailto:|ftp://|file:|ssh:|git://|ssh://|tel:|magnet:|ipfs://|ipns://|gemini://|gopher://|news:|cursor://|vscode://";
     let ipv6 = r"(?:\[[:0-9a-fA-F]+(?:[:0-9a-fA-F]*)+\](?::[0-9]+)?)";
     let scheme_chars = r"[\w\-.~:/?#@!$&*+,;=%]";
     let path_chars = r"[\w\-.~:\/?#@!$&*+;=%]";
@@ -143,6 +145,16 @@ fn without_suffix(path: &str) -> &str {
         }
     }
     bare
+}
+
+/// The `:line[:column]` that `raw` adds after the path spelling `bare`.
+fn place(raw: &str, bare: &str) -> Option<(u32, Option<u32>)> {
+    let rest = raw.strip_prefix(bare)?.strip_prefix(':')?;
+    let rest = rest.strip_suffix('.').unwrap_or(rest);
+    let (line, column) = rest.split_once(':').unwrap_or((rest, ""));
+    let line = line.parse::<NonZeroU32>().ok()?.get();
+    let column = column.parse::<NonZeroU32>().ok().map(NonZeroU32::get);
+    Some((line, column))
 }
 
 fn is_number(text: &str) -> bool {
@@ -299,7 +311,16 @@ impl Resolved<'_> {
                             _ => None,
                         }
                     };
-                    json!({"kind": "file", "raw": raw, "path": path.and_then(Path::to_str)})
+                    let mut link = json!({"kind": "file", "raw": raw, "path": path.and_then(Path::to_str)});
+                    if uri.is_none()
+                        && let Some((line, column)) = file_spelling.and_then(|bare| place(raw, bare))
+                    {
+                        link["line"] = line.into();
+                        if let Some(column) = column {
+                            link["column"] = column.into();
+                        }
+                    }
+                    link
                 }),
             };
             handlers.push((id.clone(), link.clone()));
@@ -465,6 +486,8 @@ mod tests {
             (full_url, None, true, Some((Url, full_url)), u(full_url), u(full_url)),
             ("tel:12345", Some("12345"), false, Some((Url, "tel:12345")), u("tel:12345"), u("tel:12345")),
             ("src/main.rs:12:5: error", Some("main.rs"), false, Some((File, "src/main.rs:12:5")), f("src/main.rs"), f("src/main.rs")),
+            ("src/main.rs:0:5", Some("main.rs"), false, Some((File, "src/main.rs:0:5")), f("src/main.rs"), f("src/main.rs")),
+            ("src/main.rs:12:0", Some("main.rs"), false, Some((File, "src/main.rs:12:0")), f("src/main.rs"), f("src/main.rs")),
             ("./src/main.rs:7", Some("main.rs"), false, Some((File, "./src/main.rs:7")), f(literal), f(literal)),
             ("src/..", Some(".."), false, Some((File, "src/..")), f("src/.."), f("src/..")),
             ("./test folder/file.txt", Some("file.txt"), false, Some((File, "./test folder/file.txt")), f("./test folder/file.txt"), f("./test folder/file.txt")),
@@ -500,7 +523,21 @@ mod tests {
                     Url => json!({"kind":"url", "raw":expected_raw, "url":expected_raw}),
                     File => {
                         let path = match &expected_pass { Some(Target::File(path)) => Some(path.as_path()), _ => None };
-                        json!({"kind":"file", "raw":expected_raw, "path":path.map(Path::to_string_lossy)})
+                        let mut link = json!({"kind":"file", "raw":expected_raw, "path":path.map(Path::to_string_lossy)});
+                        let place = match expected_raw {
+                            "src/main.rs:12:5" => Some((12, Some(5))),
+                            "src/main.rs:12:0" => Some((12, None)),
+                            "./gone.rs:42:7" => Some((42, Some(7))),
+                            "./src/main.rs:7" if !cfg!(unix) => Some((7, None)),
+                            _ => None,
+                        };
+                        if let Some((line, column)) = place {
+                            link["line"] = json!(line);
+                            if let Some(column) = column {
+                                link["column"] = json!(column);
+                            }
+                        }
+                        link
                     }
                 }
             });
@@ -514,6 +551,22 @@ mod tests {
         let at = "peer/t7".len() - 1;
         assert_eq!(terminal_address(&"peer/t7"[word("peer/t7", at).unwrap()], "t1", ["peer/t7"]).as_deref(), Some("peer/t7"));
         std::fs::remove_dir_all(cwd).unwrap();
+    }
+
+    #[test]
+    fn places_come_from_the_suffix_after_the_path() {
+        assert_eq!(place("src/a.rs:12:5", "src/a.rs"), Some((12, Some(5))));
+        assert_eq!(place("src/a.rs:12", "src/a.rs"), Some((12, None)));
+        assert_eq!(place("src/a.rs:12.", "src/a.rs"), Some((12, None)));
+        assert_eq!(place("src/a.rs", "src/a.rs"), None);
+        assert_eq!(place("src/a.rs:7", "src/a.rs:7"), None);
+        assert_eq!(place("src/a.rs:x", "src/a.rs"), None);
+        assert_eq!(place("src/a.rs:4294967296:5", "src/a.rs"), None);
+        assert_eq!(place("src/a.rs:12:4294967296", "src/a.rs"), Some((12, None)));
+        assert_eq!(place("file:///a.rs", "/a.rs"), None);
+        assert_eq!(place("C:/src/a.rs:12:5", "C:/src/a.rs"), Some((12, Some(5))));
+        assert_eq!(place(r"C:\src\a.rs:12:5", r"C:\src\a.rs"), Some((12, Some(5))));
+        assert_eq!(place("C:/src/a.rs", "C:/src/a.rs"), None);
     }
 
     #[test]
@@ -748,6 +801,20 @@ mod tests {
                 _ => Target::Url(url.into()),
             };
             assert_eq!(native_target(&text[range], None), Some(expected));
+        }
+    }
+
+    #[test]
+    fn editor_remote_links_keep_their_whole_uri() {
+        for url in [
+            "cursor://vscode-remote/ssh-remote+dev_host/data/1/user/my_project",
+            "vscode://vscode-remote/ssh-remote+dev_host/data/1/user/my_project",
+        ] {
+            let text = format!("Open {url} to continue.");
+            let at = text.find(url).unwrap();
+            let range = find(&text, at).unwrap();
+            assert_eq!(&text[range.clone()], url);
+            assert_eq!(native_target(&text[range], None), Some(Target::Url(url.into())));
         }
     }
 

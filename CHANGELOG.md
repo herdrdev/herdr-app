@@ -1,5 +1,32 @@
 # Herdr changelog
 
+## [0.1.17] - 2026-11-22
+<!-- spotlight -->
+
+### New
+- **Choose what a Ctrl/Cmd-click does.** A mod can take over clicks on links and file paths in your terminals. Open localhost links through your SSH tunnel, jump to file.rs:42 in the Neovim you already have open, or show a screenshot in a pane. Ask your agent to write one for you. (#228, #1203)
+- **Resize panes from the keyboard.** Add pane.resize to keys.json, for example on Ctrl+Alt+arrows. (#1087, thanks @darkwebber)
+- **Name your panes.** Rename is at the top of the pane menu. (#1086, #1160, thanks @darkwebber and @abhijit-s)
+- Cursor and VS Code remote links open when you Ctrl/Cmd-click them. (#998, thanks @martintrifunov)
+- The file preview and the Changes diff use your terminal font size. (#648, thanks @carun)
+- For mod authors: a layout turns link mods on with link_handlers, scripts can name panes with pane.rename, and copies of a mod with the same props now share localStorage.
+
+### Fixed
+- **A mod or layout with a dot, colon or emoji in its name no longer crashes Herdr.** Before, it crashed every time that mod or layout opened, startup included.
+- **Remove worktree checks before it closes anything.** It refuses a main checkout and tells you when a worktree is locked. On macOS and Linux it also waits until git has removed the folder, so your terminals stay if git says no.
+- **The Changes panel keeps up when you switch spaces,** even if the last repository was slow or a file preview got stuck. (#1253)
+- **A mod waiting on a TCP connection no longer freezes the whole window.** Saving it reloads in a moment instead of several seconds. (#1234)
+- **Toasts show the whole message,** long errors included, and scroll if it doesn't fit. (#782, thanks @Danipulok)
+- Keeping a peeked agent from another machine puts it in a space on that machine. (#1165, thanks @DeevsDeevs)
+- In the agents list, a sub-agent you kept as a pane shows its own "done", names keep an emoji at the start, and the rail marks the agent you're on. (#1004, #1141, #969, thanks @martintrifunov, @eatnows and @jaklimoff)
+- The command palette only offers themes that fit your light or dark window. (#1120, thanks @Fiyxxx)
+- A text field in a dialog keeps the keyboard when you come back to it. (#1089, thanks @darkwebber)
+- A repository kept as project/.bare is named after the project. (#1001, thanks @mfassaie)
+- Agents start and show up under shells like nushell, and NixOS wrappers stay first on PATH. (#240, #686, thanks @gek0v)
+- Pasting an image or files into a terminal on another machine shows "Sending" while it's on the way.
+- After a mod reload, the app log says which of its tasks were cut off. (#1034, thanks @tjbtiller)
+- The status bar says "1 agent", and Split down has its own icon. (#982, #996, thanks @henrik and @nhat251)
+
 ## [0.1.16] - 2026-11-14
 
 ### New
