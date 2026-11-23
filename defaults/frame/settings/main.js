@@ -2,7 +2,7 @@
 
 import { View, div, svg, image } from "gpui-kit";
 import { v_flex, h_flex, Scrollbar, InputState, Input, Popup } from "gpui-base";
-import { hc, run, theme, themes, fonts, updates, telemetry, settings, layouts, shared, appHome, readTextFile, writeTextFile, playSound, props, closeOverlay, notify, window } from "herdr";
+import { hc, exec, run, theme, themes, fonts, updates, telemetry, settings, layouts, shared, appHome, readTextFile, writeTextFile, playSound, props, closeOverlay, notify, window } from "herdr";
 
 const I = (name) => `frame/settings/${name}.svg`;
 
@@ -30,7 +30,7 @@ export default class Settings extends View {
   init(_props, cx) {
     const asked = props()?.section;
     this.section = SECTIONS.some((s) => s.id === asked) ? asked : "look";
-    this.picking = null; // "font" | "ui_font" while its list is open
+    this.picking = null; // "font" | "ui_font" | "wsl" while its list is open
     this.filter = "";
     this.fontInput = InputState.new({ placeholder: "Type to search fonts" });
     this.fontInput.on("change", (_e, cx) => { this.filter = this.fontInput.value(); cx.notify(); });
@@ -54,6 +54,8 @@ export default class Settings extends View {
     this.machineResults = {};
     this.machineEdit = null;
     this.machineNotice = null;
+    this.wslDistros = [];
+    this.wslListError = null;
     this.handle = cx.focus_handle();
     this.handle.focus();
     cx.spawn(async (cx) => {
@@ -597,6 +599,19 @@ export default class Settings extends View {
   async loadMachines() {
     if (this.machineLoading) return;
     this.machineLoading = true;
+    if (window()?.platform === "windows") {
+      try {
+        const w = await exec("wsl.exe", ["--list", "--quiet"]);
+        if (w.code !== 0) throw new Error(w.stderr || w.stdout || `wsl.exe exited with ${w.code}`);
+        this.wslListError = null;
+        // Keep trimming, deduplication and Docker filtering in sync with
+        // src/wsl.rs::parse_distros; both test suites include Unicode names.
+        this.wslDistros = w.stdout
+          .split(/\r?\n/)
+          .map((s) => s.replace(/\0/g, "").trim())
+          .filter((s, i, all) => s && !["docker-desktop", "docker-desktop-data"].includes(s.toLowerCase()) && all.findIndex((d) => d.toLowerCase() === s.toLowerCase()) === i);
+      } catch (e) { this.wslListError = `Couldn't list WSL distros: ${String(e)}`; }
+    }
     try {
       const r = await hc(["machine", "ls", "--json"]);
       if (r.code !== 0) throw new Error(r.stderr || r.stdout || "Couldn't read machines.");
@@ -721,12 +736,119 @@ export default class Settings extends View {
     return row;
   }
 
+  selectWsl(value, cx) {
+    const now = this.person.wsl ?? null;
+    this.picking = null;
+    this.handle.focus();
+    if (now === value) {
+      cx.notify();
+      return;
+    }
+    // Saved at once: the next start applies it, and Setup installs hc or offers a retry there.
+    this.change((p) => {
+      if (value === null) delete p.wsl;
+      else p.wsl = value;
+    }, cx);
+  }
+
+  wslButton(t) {
+    const open = this.picking === "wsl";
+    const label = this.person.wsl ? `${this.person.wsl} (WSL)` : "Windows";
+    const trigger = h_flex()
+      .id("st-wsl-button")
+      .min_w(140)
+      .px(12)
+      .py(5)
+      .gap(8)
+      .items_center()
+      .justify_between()
+      .rounded(7)
+      .border_1()
+      .border_color(open ? t.accent : t.border)
+      .bg(t.raised)
+      .cursor_pointer()
+      .hover((s) => s.bg(t.hover))
+      .child(div().text_size(13).text_color(t.foreground).child(label))
+      .child(svg("mods/workspace-chrome/chevron-down.svg").size(12).text_color(t.muted));
+    trigger.on_click((_e, cx) => {
+      this.picking = open ? null : "wsl";
+      if (open) this.handle.focus();
+      cx.notify();
+    });
+    return Popup.new("st-wsl-popover", trigger)
+      .when(open, (el) => el.content(this.wslList(t)));
+  }
+
+  wslList(t) {
+    const now = this.person.wsl ?? null;
+    const distros = [...this.wslDistros];
+    if (now && !distros.includes(now)) distros.unshift(now);
+    const choices = [[null, "Windows"], ...distros.map((d) => [d, `${d} (WSL)`])];
+    return v_flex()
+      .id("st-wsl-list")
+      .min_w(140)
+      .mt(4)
+      .p(4)
+      .rounded(8)
+      .border_1()
+      .border_color(t.border)
+      .bg(t.popover)
+      .shadow_md()
+      .children(
+        choices.map(([value, label]) => {
+          const on = now === value;
+          return h_flex()
+            .id(`st-wsl-${value ?? "windows"}`)
+            .px(10)
+            .py(6)
+            .gap(12)
+            .items_center()
+            .justify_between()
+            .rounded(6)
+            .cursor_pointer()
+            .hover((s) => s.bg(t.hover))
+            .on_click((_e, cx) => this.selectWsl(value, cx))
+            .child(div().text_size(13).text_color(on ? t.foreground : t.muted).child(label))
+            .when(on, (el) => el.child(svg(I("check")).size(12).text_color(t.accent)));
+        }),
+      );
+  }
+
   machines(t) {
     const version = updates().core.version;
+    const activeWsl = settings()?.wsl ?? null;
+    const selectedWsl = this.person.wsl ?? null;
+    const hasWsl = window()?.platform === "windows" && (this.wslDistros.length > 0 || Boolean(selectedWsl) || Boolean(activeWsl));
+    const connected = Boolean(version);
+    const pendingRestart = hasWsl && selectedWsl !== activeWsl;
+    const localAbout = `${activeWsl ? `WSL (${activeWsl}) · ` : ""}${connected || !hasWsl ? "Connected · " : ""}${version ? `hc ${version}` : "hc version unknown"}${pendingRestart ? ` · Restart to switch to ${selectedWsl ?? "Windows"}` : ""}`;
+    const restartBtn = div()
+      .id("st-wsl-restart")
+      .px(12)
+      .py(5)
+      .rounded(7)
+      .cursor_pointer()
+      .bg(t.accent)
+      .text_color(t.accent_foreground)
+      .text_size(13)
+      .font_semibold()
+      .hover((s) => s.opacity(0.9))
+      .on_click(() => run("app.restart"))
+      .child("Restart");
+    const statusDot = div().w(7).h(7).rounded(4).bg(t.ansi2);
+    const localControl = hasWsl
+      ? h_flex()
+          .gap(8)
+          .items_center()
+          .child(this.wslButton(t))
+          .when(pendingRestart, (el) => el.child(restartBtn))
+          .when(connected, (el) => el.child(statusDot))
+      : statusDot;
     return v_flex().w_full()
       .child(this.heading(t, "Machines"))
-      .child(div().pb(8).text_size(12.5).line_height("18px").text_color(t.dim).child("Your computers, reached over ssh. Their terminals keep running when you disconnect."))
-      .child(this.row(t, "This computer", `Connected · ${version ? `hc ${version}` : "hc version unknown"}`, div().w(7).h(7).rounded(4).bg(t.ansi2)))
+      .child(div().pb(8).text_size(12.5).line_height("18px").text_color(t.dim).child("On Windows, This computer can use WSL. Other computers are reached over ssh. Their terminals keep running when you disconnect."))
+      .child(this.row(t, "This computer", localAbout, localControl).id("st-local-machine"))
+      .when(Boolean(this.wslListError), (el) => el.child(div().pt(8).pb(4).text_size(12.5).text_color(t.dim).child(this.wslListError)))
       .children((this.machineList ?? []).map((m) => this.machineRow(t, m, version)))
       .when(this.machineList === null && !this.machineError, (el) => el.child(h_flex().py(14).gap(8).items_center().child(svg("mods/workspace-chrome/spinner.svg").size(12).text_color(t.working).spin(900)).child(div().text_size(12.5).text_color(t.dim).child("Reading machines…"))))
       .when(this.machineList?.length === 0, (el) => el.child(div().py(14).text_size(12.5).text_color(t.dim).child("No other machines yet.")))

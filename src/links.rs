@@ -81,57 +81,76 @@ fn has_scheme(link: &str) -> bool {
     })
 }
 
-/// A spelling selected by the native detector or supplied by OSC 8.
-pub struct Resolved<'a> {
-    raw: &'a str,
-    spelling: &'a str,
+/// A spelling selected by the native detector or supplied by OSC 8. Owned so
+/// WSL can resolve it in the background before matching the current mod rules.
+#[derive(Clone, Debug, PartialEq)]
+pub struct Resolved {
+    raw: String,
+    spelling_end: usize,
     pub native: Option<Target>,
+    guest: bool,
+    guest_file: Option<PathBuf>,
 }
 
 /// What a link opens. File paths count only when they exist here; relative
 /// ones need the terminal's folder.
-pub fn resolve<'a>(link: &'a str, cwd: Option<&Path>) -> Resolved<'a> {
-    let (native, spelling) = if has_scheme(link) {
+pub fn resolve(link: &str, cwd: Option<&Path>) -> Resolved {
+    let guest = crate::wsl::active().is_some();
+    if guest && has_scheme(link) {
+        return resolve_guest_url(link, |path| crate::wsl::host_path_if_active(path));
+    }
+    let (native, spelling, guest_file) = if has_scheme(link) {
         let native = file_url_spelling(link)
             .as_deref()
             .map(file_url_path)
             .filter(|p| p.exists())
             .map_or_else(|| Target::Url(link.to_owned()), Target::File);
-        (Some(native), link)
-    } else if let Some((path, spelling)) = local_file(link, cwd) {
-        (Some(Target::File(path)), spelling)
+        (Some(native), link, None)
+    } else if let Some((host, path, spelling)) = local_file(link, cwd, guest) {
+        (Some(Target::File(host)), spelling, guest.then_some(path))
     } else {
-        (None, without_suffix(link))
+        (None, without_suffix(link), None)
     };
-    Resolved { raw: link, spelling, native }
+    Resolved { raw: link.to_owned(), spelling_end: spelling.len(), native, guest, guest_file }
 }
 
-fn local_file<'a>(link: &'a str, cwd: Option<&Path>) -> Option<(PathBuf, &'a str)> {
-    let full = expand_file(link, cwd)?;
+fn local_file<'a>(link: &'a str, cwd: Option<&Path>, guest: bool) -> Option<(PathBuf, PathBuf, &'a str)> {
+    let full = expand_file(link, cwd, guest)?;
+    let host = crate::wsl::host_path_if_active(&full);
     // Windows ignores a trailing period when checking whether a path exists.
-    if !(cfg!(windows) && full.extension().is_some_and(|ext| ext.is_empty())) && full.exists() {
-        return Some((full, link));
+    if let Ok(host) = &host
+        && !(cfg!(windows) && host.extension().is_some_and(|ext| ext.is_empty())) && host.exists()
+    {
+        return Some((host.clone(), full, link));
     }
-    let bare = without_suffix(full.to_str()?);
-    Path::new(bare).exists().then(|| (PathBuf::from(bare), without_suffix(link)))
+    let full = full.to_str()?;
+    // An actual guest `note.` must never open the separate host-visible `note`.
+    if host.is_err() && full.ends_with('.')
+        && crate::wsl::command("test", None).args(["-e", full]).status().ok()?.success()
+    {
+        return None;
+    }
+    // Strip punctuation in the original namespace, before converting to Windows.
+    let bare = without_suffix(full);
+    if bare == full { return None; }
+    let path = PathBuf::from(bare);
+    let host = crate::wsl::host_path_if_active(&path).ok()?;
+    host.exists().then(|| (host, path, without_suffix(link)))
 }
 
-fn expand_file(link: &str, cwd: Option<&Path>) -> Option<PathBuf> {
-    let home = std::env::home_dir();
+fn expand_file(link: &str, cwd: Option<&Path>, guest: bool) -> Option<PathBuf> {
+    let home = if guest { crate::wsl::home() } else { std::env::home_dir() };
     let expanded = if let Some(rest) = link.strip_prefix("~/") {
-        home?.join(rest)
+        join_file_path(&home?, rest, guest)
     } else if let Some(var) = link.strip_prefix('$') {
         let (name, rest) = var.split_once('/').unwrap_or((var, ""));
-        let base = match name {
-            "PWD" => cwd?.to_path_buf(),
-            "HOME" => home?,
-            _ => PathBuf::from(std::env::var_os(name)?),
-        };
-        base.join(rest)
+        let base = link_variable(name, cwd, home.as_deref(), guest)?;
+        join_file_path(&base, rest, guest)
     } else {
         PathBuf::from(link)
     };
-    Some(if expanded.is_absolute() { expanded } else { cwd?.join(expanded) })
+    let abs = expanded.is_absolute() || (guest && expanded.to_string_lossy().starts_with('/'));
+    Some(if abs { expanded } else if guest { join_file_path(cwd?, expanded.to_str()?, true) } else { cwd?.join(expanded) })
 }
 
 // The period ending a sentence, or `:42` / `:42:7` naming a place in the file.
@@ -144,6 +163,43 @@ fn without_suffix(path: &str) -> &str {
         }
     }
     bare
+}
+
+fn resolve_guest_url(link: &str, host_path: impl FnOnce(&Path) -> Result<PathBuf, String>) -> Resolved {
+    let mut resolved = Resolved {
+        raw: link.to_owned(), spelling_end: link.len(), native: None, guest: true, guest_file: None,
+    };
+    if let Some((_, spelling)) = handler_file_uri(link).filter(|(host, _)| host.is_empty() || host.eq_ignore_ascii_case("localhost")) {
+        // Decode before converting. Keep the guest path for mods and use the
+        // translated path for Windows. Never let Windows reinterpret a missing guest file.
+        if let Some(path) = decode_file_url_path(spelling).filter(|p| p.starts_with('/') && !p.starts_with("//")).map(PathBuf::from)
+            && let Ok(host) = host_path(&path)
+            && host.exists()
+        {
+            resolved.native = Some(Target::File(host));
+            resolved.guest_file = Some(path);
+        }
+    } else {
+        resolved.native = Some(Target::Url(link.to_owned()));
+    }
+    resolved
+}
+
+fn link_variable(name: &str, cwd: Option<&Path>, home: Option<&Path>, guest: bool) -> Option<PathBuf> {
+    match name {
+        "PWD" => cwd.map(Path::to_path_buf),
+        "HOME" => home.map(Path::to_path_buf),
+        _ if guest => None,
+        _ => std::env::var_os(name).map(PathBuf::from),
+    }
+}
+
+fn join_file_path(base: &Path, rest: &str, guest: bool) -> PathBuf {
+    if guest && base.to_string_lossy().starts_with('/') {
+        PathBuf::from(format!("{}/{}", base.to_string_lossy().trim_end_matches('/'), rest))
+    } else {
+        base.join(rest)
+    }
 }
 
 fn is_number(text: &str) -> bool {
@@ -253,9 +309,11 @@ pub struct Click {
     pub native: Option<Target>,
 }
 
-impl Resolved<'_> {
+impl Resolved {
     pub fn click(self, remote: bool, active: &Handlers) -> Option<Click> {
-        let Self { raw, spelling, native } = self;
+        let Self { raw, spelling_end, native, guest, guest_file } = self;
+        let raw = raw.as_str();
+        let spelling = &raw[..spelling_end];
         if active.is_empty() {
             return native.map(native_click);
         }
@@ -289,6 +347,9 @@ impl Resolved<'_> {
                     let url_file;
                     let path = if remote {
                         None
+                    } else if guest {
+                        // Guest filesystem checks already ran off the UI thread.
+                        guest_file.as_deref()
                     } else {
                         match &native {
                             Some(Target::File(path)) => Some(path.as_path()),
@@ -395,6 +456,51 @@ fn open_system(arg: &std::ffi::OsStr) {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn guest_file_urls_convert_decoded_paths_before_opening() {
+        let file = std::env::temp_dir().join(format!("herdr-guest-url-{}", std::process::id()));
+        std::fs::write(&file, "").unwrap();
+        let active = vec![("viewer".into(), rules(json!([{"kind":"file", "pattern":r"\.txt$"}])))];
+        let raw = "FiLe://LOCALHOST/home/test/a%20b%23.txt";
+        let resolve = |raw| resolve_guest_url(raw, |path| {
+            assert_eq!(path, Path::new("/home/test/a b#.txt"));
+            Ok(file.clone())
+        });
+        let hit = resolve(raw).click(false, &active).unwrap();
+        assert_eq!(hit.native, Some(Target::File(file.clone())));
+        assert_eq!(hit.handlers[0].1, json!({"kind":"file", "raw":raw, "path":"/home/test/a b#.txt"}));
+        std::fs::remove_file(&file).unwrap();
+        let hit = resolve(raw).click(false, &active).unwrap();
+        assert_eq!(hit.native, None);
+        assert_eq!(hit.handlers[0].1, json!({"kind":"file", "raw":raw, "path":null}));
+        let missing = resolve_guest_url("file:///C:/notes.txt", |path| {
+            assert_eq!(path.as_os_str(), "/C:/notes.txt");
+            Err("not in the guest".into())
+        });
+        assert_eq!(missing.native, None);
+        assert_eq!(resolve_guest_url("file:///home/test/missing", |_| Err("unavailable".into())).native, None);
+        assert_eq!(resolve_guest_url("https://example.com", |_| panic!("not a file")).native, Some(Target::Url("https://example.com".into())));
+    }
+
+    #[test]
+    fn guest_link_variables_never_read_host_environment() {
+        let home = Path::new("/home/guest");
+        let cwd = Path::new("/work");
+        assert_eq!(link_variable("HOME", Some(cwd), Some(home), true), Some(home.to_path_buf()));
+        assert_eq!(link_variable("PWD", Some(cwd), Some(home), true), Some(cwd.to_path_buf()));
+        assert_eq!(link_variable("HOME", Some(cwd), None, true), None);
+        assert_eq!(link_variable("PATH", Some(cwd), Some(home), true), None);
+        assert_eq!(link_variable("PATH", None, None, false), std::env::var_os("PATH").map(PathBuf::from));
+    }
+
+    #[test]
+    fn guest_file_joins_keep_posix_separators_on_every_host() {
+        assert_eq!(join_file_path(Path::new("/home/alice"), "src/main.rs", true), PathBuf::from("/home/alice/src/main.rs"));
+        assert_eq!(join_file_path(Path::new("/"), "src/main.rs", true), PathBuf::from("/src/main.rs"));
+        assert_eq!(join_file_path(Path::new(r"C:\Users\alice"), "src/main.rs", true), Path::new(r"C:\Users\alice").join("src/main.rs"));
+        assert_eq!(join_file_path(Path::new("/home/alice"), "src/main.rs", false), Path::new("/home/alice").join("src/main.rs"));
+    }
 
     fn rules(value: Value) -> std::rc::Rc<[Rule]> {
         serde_json::from_value::<Vec<Rule>>(value).unwrap().into()

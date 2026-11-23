@@ -244,14 +244,15 @@ async function withLinkedCheckout(runTest: (main: string, linked: string) => Pro
   }
 }
 
-function removeDialog(folder: string, { branch, platform = "linux", exec = execute }: {
-  branch?: string; platform?: string; exec?: typeof execute;
+function removeDialog(folder: string, { branch, platform = "linux", wsl, exec = execute }: {
+  branch?: string; platform?: string; wsl?: string; exec?: typeof execute;
 } = {}) {
   const closedSpaces: { id: string; checkoutPresent: boolean }[] = [];
   const closedOverlays: string[] = [];
   const { worktree, snapshot } = harness(null, null, {
     home: () => folder,
     window: () => ({ platform }),
+    settings: () => ({ wsl }),
     props: () => ({ space: "target", action: "remove", overlay: "dialog", branch }),
     InputState: { new: () => ({ on() {}, focus() {} }) },
     run: (command: string, args: { id: string }) => {
@@ -330,12 +331,12 @@ test("remove lets Git resolve the checkout when its listed path is spelled diffe
   });
 });
 
-for (const platform of ["linux", "windows"]) {
-  const closeBeforeGit = platform === "windows";
-  test(`remove reports a late Git refusal on ${platform}`, async () => {
+for (const [platform, wsl] of [["linux"], ["windows"], ["windows", "Ubuntu"]]) {
+  const closeBeforeGit = platform === "windows" && !wsl;
+  test(`remove reports a late Git refusal on ${wsl ?? platform}`, async () => {
     await withLinkedCheckout(async (main, linked) => {
       const dialog = removeDialog(linked, {
-        platform,
+        platform, wsl,
         exec: (command, args, options) => {
           if (args[0] === "worktree" && args[1] === "remove") {
             fixtureGit(main, "worktree", "lock", "--reason", "locked just before removal", linked);
@@ -352,9 +353,9 @@ for (const platform of ["linux", "windows"]) {
     });
   });
 
-  test(`remove warns about new changes and closes a successfully removed checkout on ${platform}`, async () => {
+  test(`remove warns about new changes and closes a successfully removed checkout on ${wsl ?? platform}`, async () => {
     await withLinkedCheckout(async (main, linked) => {
-      const dialog = removeDialog(linked, { platform });
+      const dialog = removeDialog(linked, { platform, wsl });
       await dialog.ready;
       await writeFile(join(linked, "untracked.txt"), "uncommitted");
       await dialog.enter();

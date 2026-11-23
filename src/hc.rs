@@ -323,7 +323,7 @@ fn connect_error(stderr: &str) -> Option<ConnectError> {
 impl Core {
     /// Connects to the user's core (starting it if needed) and switches to framed mode.
     pub fn connect() -> Result<Arc<Core>> {
-        let mut child = crate::spawn::command(crate::core_bin::path())
+        let mut child = crate::core_bin::command()
             .arg("connect")
             .stdin(Stdio::piped())
             .stdout(Stdio::piped())

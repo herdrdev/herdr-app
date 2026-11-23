@@ -102,7 +102,7 @@ pub fn installed(commands: &[String], on: Option<&str>) -> Result<Vec<String>, S
             };
             result.map(|(code, out, err)| (code, String::from_utf8_lossy(&out).into_owned(), String::from_utf8_lossy(&err).into_owned()))
         }
-        None if cfg!(windows) => {
+        None if cfg!(windows) && crate::wsl::active().is_none() => {
             // The core refreshes user/system PATH; the app may have inherited only the system PATH.
             let mut args = vec!["exec".into(), "--".into(), crate::window::shell()];
             args.extend(installed_powershell(commands));
@@ -115,10 +115,10 @@ pub fn installed(commands: &[String], on: Option<&str>) -> Result<Vec<String>, S
 
 fn installed_here(shell: &str, commands: &[String]) -> Result<Vec<String>, String> {
     let limit = std::time::Duration::from_secs(30);
-    let mode = if cfg!(target_os = "macos") { "-lic" } else { "-ic" };
+    let mode = if cfg!(target_os = "macos") || crate::wsl::active().is_some() { "-lic" } else { "-ic" };
     let line = installed_line(commands, base(shell) == "fish");
     installed_result(commands, crate::mods::run_blocking(shell, &[mode.into(), line], None, limit)).or_else(|err| {
-        // A shell that can't run the check (nushell): sh searches the app's PATH,
+        // A shell that can't run the check (nushell): sh searches the runtime PATH,
         // which is where agents for such shells start (`window::unix_agent_argv`).
         let sh = crate::mods::run_blocking("/bin/sh", &["-c".into(), installed_line(commands, false)], None, limit);
         installed_result(commands, sh).map_err(|_| err)

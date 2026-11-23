@@ -513,14 +513,22 @@ fn swap(root: &Path) -> std::io::Result<()> {
 }
 
 /// Opens the app again once this process has exited (after `apply`).
-pub fn relaunch() {
-    relaunch_expected(None);
+pub fn relaunch() -> bool {
+    relaunch_expected(None)
+}
+
+fn relaunch_exe(root: Option<PathBuf>, expected: Option<&str>) -> Option<PathBuf> {
+    match (root, expected) {
+        (Some(root), _) => Some(exe_in(&root)),
+        (None, None) => std::env::current_exe().ok(),
+        (None, Some(_)) => None,
+    }
 }
 
 #[cfg(windows)]
 fn relaunch_expected(expected: Option<&str>) -> bool {
-    let Some(root) = root() else { return false };
-    let exe = exe_in(&root).to_string_lossy().replace('\'', "''");
+    let Some(exe) = relaunch_exe(root(), expected) else { return false };
+    let exe = exe.to_string_lossy().replace('\'', "''");
     let script = format!("Wait-Process -Id {} -ErrorAction SilentlyContinue; Start-Process '{exe}'", std::process::id());
     let mut command = crate::spawn::command("powershell");
     if let Some(expected) = expected {
@@ -544,14 +552,9 @@ fn relaunch_expected(expected: Option<&str>) -> bool {
 /// Opens the app again once this process has exited (after `apply`).
 #[cfg(unix)]
 fn relaunch_expected(expected: Option<&str>) -> bool {
-    let Some(root) = root() else { return false };
-    // LaunchServices need not preserve the startup guard or an isolated home.
-    let open = if cfg!(target_os = "macos") {
-        if expected.is_some() { "exec \"$1/Contents/MacOS/Herdr\"" } else { "open \"$1\"" }
-    } else {
-        "exec \"$1/herdr-app\""
-    };
-    let script = format!("while kill -0 \"$0\" 2>/dev/null; do sleep 0.1; done; {open}");
+    let Some(exe) = relaunch_exe(root(), expected) else { return false };
+    // Execute the binary directly: LaunchServices need not preserve an isolated home.
+    let script = r#"while kill -0 "$0" 2>/dev/null; do sleep 0.1; done; exec "$1""#;
     let spawned = {
         use std::os::unix::process::CommandExt;
         let mut command = Command::new("sh");
@@ -562,7 +565,7 @@ fn relaunch_expected(expected: Option<&str>) -> bool {
             .arg("-c")
             .arg(script)
             .arg(std::process::id().to_string())
-            .arg(&root)
+            .arg(exe)
             .stdin(Stdio::null())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -637,6 +640,14 @@ fn after_update_managed(status: Result<serde_json::Value, String>) -> bool {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn plain_restart_reopens_source_build_but_update_requires_installation() {
+        assert_eq!(relaunch_exe(None, None), std::env::current_exe().ok());
+        assert_eq!(relaunch_exe(None, Some("1.0")), None);
+        let root = PathBuf::from("install");
+        assert_eq!(relaunch_exe(Some(root.clone()), None), Some(exe_in(&root)));
+    }
 
     #[cfg(unix)]
     #[test]
