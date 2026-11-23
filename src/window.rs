@@ -6151,7 +6151,7 @@ mod tests {
     #[test]
     fn other_shells_run_the_command_on_the_app_path_then_return_to_the_shell() {
         use std::os::unix::fs::PermissionsExt;
-        let temp = if cfg!(target_os = "linux") { std::path::PathBuf::from("/var/tmp") } else { std::env::temp_dir() };
+        let temp = if cfg!(target_os = "linux") { crate::test_tmp() } else { std::env::temp_dir() };
         let dir = temp.join(format!("herdr-other-shell-test-{}", std::process::id()));
         std::fs::create_dir_all(&dir).unwrap();
         // Stands in for nushell: it would fail on sh syntax, so it only records how it was started.
