@@ -287,13 +287,16 @@ export function layouts(): string[];
  *  Mods' own `<mod>.<command>`s aren't listed. */
 export function commands(): { name: string; args: { name: string; required: boolean }[]; about: string }[];
 
-/** The window, for layouts that draw their own title bar (`"titlebar": "none"`). `buttons`:
- *  the system draws no window buttons, so draw them (`window.minimize`, `window.maximize`,
- *  `window.close`); on macOS the traffic lights always stay. `visible`: the window is being shown.
- *  It turns false when the window is minimized or hidden, and on macOS also when it is fully
- *  covered, on another Space or the display sleeps. A hidden window draws nothing and doesn't run
- *  `render`, so check it from a timer and stop work nobody can see; `render` runs again when the
- *  window shows. Live. */
+/** Live state of the window. With `"titlebar": "none"`, layouts draw their own title bar.
+ *  When `buttons` is true, draw window controls using `window.minimize`, `window.maximize`
+ *  and `window.close`. On macOS the system traffic lights stay.
+ *
+ *  `visible` reports whether the platform is presenting the window. On macOS it is false
+ *  when minimized, hidden, fully covered, on another Space or on a sleeping display.
+ *  On Windows it is false when minimized or hidden. On X11 it is false when unmapped,
+ *  and may be false when fully covered, depending on the window manager. On Wayland it
+ *  stays true unless the compositor reports the xdg-shell `suspended` state (v6 or newer).
+ *  Check it from a timer to pause work when false and use `render` to restart when true. */
 export function window(): {
   platform: "linux" | "macos" | "windows";
   titlebar: "system" | "none";
