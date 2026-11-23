@@ -1,83 +1,45 @@
-# A release of the app: push a tag `v<version>` matching Cargo.toml. Each
-# platform builds and packs the app (scripts/package; no core inside, people
-# get the core's own release); then everything goes to the
-# releases bucket, versioned files first and app/latest.json last, so nobody
-# sees a version whose files aren't there yet.
-#
-# Caches: a tag's own cache is visible only to that tag, so tags restore
-# master's. Master keeps them warm by building (without publishing) when
-# what the build depends on changes: Cargo.lock, the vendored crates, the
-# toolchain, this workflow. Let that run finish before tagging.
-#
-# The cache is the whole target/, with scripts/ci-sources keeping unchanged
-# files fresh to Cargo: the vendored crates (gpui-kit, taffy, ghostty) are
-# the slow part, and a fresh checkout would otherwise rebuild them all.
-#
-# Tests (the native screenshot test too) run only in ci.yml: a tag publishes
-# once ci.yml has passed for its commit.
-name: build and release
-# Master pushes only build (to keep the cache warm); tags publish.
-run-name: ${{ github.ref_type == 'tag' && format('release {0}', github.ref_name) || format('build {0}', github.ref_name) }}
+# RHEL 8 x86_64 release build. This replaces the old multi-platform release
+# workflow: the app links the system's glibc, so building inside an AlmaLinux 8
+# container (glibc 2.28) sets the distro floor. No Windows, macOS, aarch64,
+# tests, signing, or publishing here. Pack with scripts/package, verify, upload.
+name: rhel8 release build
 
 on:
-  push:
-    tags: ["v*"]
-    branches: [master]
-    paths:
-      - Cargo.lock
-      - Cargo.toml
-      - vendor/**
-      - crates/**
-      - scripts/package
-      - scripts/notices.*
-      - tests/notices.rs
-      - about.toml
-      - licenses/**
-      - LICENSE
-      - THIRD-PARTY-NOTICES
-      - scripts/mac-sign
-      - scripts/macos-entitlements.plist
-      - scripts/mac-dmg
-      - distribution/macos/dmg/**
-      - scripts/ci-sources
-      - .github/workflows/release.yml
-  # Builds only; publishing needs a tag.
   workflow_dispatch:
 
 permissions:
   contents: read
 
-# Never cancel: a cancelled master build saves no cache, a cancelled tag no release.
 concurrency:
-  group: release-${{ github.ref }}
-  cancel-in-progress: false
+  group: rhel8-release-${{ github.ref }}
+  cancel-in-progress: true
 
 env:
   RUST_TOOLCHAIN: 1.95.0
-  # In the cache key: ghostty-sys can't tell when Zig changes.
+  # In the cache key and the build: ghostty-sys can't tell when Zig changes.
   ZIG_VERSION: 0.16.0
-  IS_TAG: ${{ github.ref_type == 'tag' }}
+  CARGO_INCREMENTAL: "0"
 
 jobs:
   build:
-    strategy:
-      fail-fast: true
-      matrix:
-        include:
-          # Linux on the oldest Ubuntu we can: the app links the system's
-          # glibc, so this sets how old a distro it runs on.
-          - { target: linux-x86_64, runner: ubuntu-22.04 }
-          - { target: linux-aarch64, runner: ubuntu-22.04-arm }
-          - { target: macos-aarch64, runner: macos-15 }
-          - { target: windows-x86_64, runner: windows-2022 }
-    runs-on: ${{ matrix.runner }}
-    # Only tags can access the release environment's Apple certificate.
-    environment: ${{ github.ref_type == 'tag' && 'release' || 'build' }}
-    timeout-minutes: 45
+    runs-on: ubuntu-24.04
+    container: quay.io/almalinux/almalinux:8@sha256:b068b59649ddecf7c95cea3d3f16941eaf1d8a77fcf6ce94c779abae7552e2ea
+    timeout-minutes: 60
     defaults:
       run:
         shell: bash
     steps:
+      # The image is minimal and actions/checkout needs git. A bounded retry
+      # keeps a stuck mirror from eating the whole job timeout.
+      - name: Bootstrap container tools
+        timeout-minutes: 10
+        run: |
+          set -euo pipefail
+          install() { dnf install -y --setopt=install_weak_deps=False "$@"; }
+          if ! install ca-certificates curl tar gzip git python3 binutils; then
+            dnf clean all
+            install ca-certificates curl tar gzip git python3 binutils
+          fi
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
         with:
           submodules: true
@@ -88,248 +50,42 @@ jobs:
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: ${{ env.ZIG_VERSION }}
-      - name: Restore build cache
-        uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: &cache-paths |
-            ~/.cargo/registry/index
-            ~/.cargo/registry/cache
-            ~/.cargo/git/db
-            target
-          key: release-v2-${{ matrix.target }}-${{ env.RUST_TOOLCHAIN }}-zig${{ env.ZIG_VERSION }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
-          restore-keys: |
-            release-v2-${{ matrix.target }}-${{ env.RUST_TOOLCHAIN }}-zig${{ env.ZIG_VERSION }}-${{ hashFiles('Cargo.lock') }}-
-            release-v2-${{ matrix.target }}-${{ env.RUST_TOOLCHAIN }}-zig${{ env.ZIG_VERSION }}-
       - name: Linux build dependencies
-        if: runner.os == 'Linux'
-        # A stuck package mirror fails here in minutes, not at the job's limit.
-        timeout-minutes: 10
+        timeout-minutes: 15
         run: |
-          scripts/ci-apt \
-            pkg-config clang libclang-dev \
-            libxcb1-dev libxkbcommon-dev libxkbcommon-x11-dev libwayland-dev \
-            libvulkan-dev libfontconfig-dev libfreetype-dev
-      # bindgen's libclang: the runner image's LLVM.
-      - name: Windows build dependencies
-        if: runner.os == 'Windows'
-        run: echo "LIBCLANG_PATH=C:\\Program Files\\LLVM\\bin" >> "$GITHUB_ENV"
-      - name: Version matches the tag
-        if: env.IS_TAG == 'true'
-        run: |
-          want="v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
-          [ "$want" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME but Cargo.toml says $want"; exit 1; }
+          set -euo pipefail
+          dnf install -y --setopt=install_weak_deps=False \
+            gcc gcc-c++ pkgconf-pkg-config clang clang-devel \
+            libxcb-devel libxkbcommon-devel libxkbcommon-x11 \
+            wayland-devel vulkan-devel fontconfig-devel freetype-devel
       - name: Keep unchanged sources fresh
         run: scripts/ci-sources restore
-      - name: Build and pack
-        env:
-          RELEASES_URL: ${{ vars.RELEASES_URL }}
-          APPLE_CERTIFICATE_P12: ${{ runner.os == 'macOS' && github.ref_type == 'tag' && secrets.APPLE_CERTIFICATE_P12 || '' }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ runner.os == 'macOS' && github.ref_type == 'tag' && secrets.APPLE_CERTIFICATE_PASSWORD || '' }}
-        run: scripts/package
-      - name: Verify release notices
+      - name: Build and pack for RHEL 8 x86_64
+        run: scripts/package x86_64-unknown-linux-gnu
+      - name: Check glibc floor
         run: |
-          archive="dist/herdr-app-${{ matrix.target }}.tar.gz"
-          if [[ '${{ runner.os }}' == macOS ]]; then
-            prefix=Herdr.app/Contents/Resources
-          else
-            prefix=herdr-app
-          fi
-          tar -xOf "$archive" "$prefix/THIRD-PARTY-NOTICES" | cmp - THIRD-PARTY-NOTICES
-          tar -xOf "$archive" "$prefix/LICENSE" | cmp - LICENSE
-      - name: Note the sources the cache was built from
-        if: github.ref == 'refs/heads/master'
-        run: scripts/ci-sources record
-      - name: Save build cache
-        if: github.ref == 'refs/heads/master'
-        uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
-        with:
-          path: *cache-paths
-          key: release-v2-${{ matrix.target }}-${{ env.RUST_TOOLCHAIN }}-zig${{ env.ZIG_VERSION }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          set -euo pipefail
+          ldd --version | head -1
+          bin=target/x86_64-unknown-linux-gnu/release/herdr-app
+          max=$(objdump -T "$bin" | grep -o 'GLIBC_[0-9][0-9.]*' | sort -Vu | tail -1 | cut -d_ -f2)
+          echo "highest GLIBC symbol version required: $max"
+          [ -n "$max" ] || { echo "no GLIBC symbols found; check objdump"; exit 1; }
+          [ "$(printf '%s\n' "$max" 2.28 | sort -V | head -1)" = "$max" ] || { echo "$bin needs glibc newer than 2.28"; exit 1; }
+      - name: Verify tarball and smoke test
+        run: |
+          set -euo pipefail
+          archive=dist/herdr-app-linux-x86_64.tar.gz
+          for f in herdr-app herdr-app.svg LICENSE THIRD-PARTY-NOTICES; do
+            tar -tzf "$archive" "herdr-app/$f" >/dev/null
+          done
+          tar -xOf "$archive" herdr-app/LICENSE | cmp - LICENSE
+          tar -xOf "$archive" herdr-app/THIRD-PARTY-NOTICES | cmp - THIRD-PARTY-NOTICES
+          work=$(mktemp -d)
+          tar -xzf "$archive" -C "$work"
+          HERDR_APP_HOME="$work/home" "$work/herdr-app/herdr-app" --help
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
-          name: herdr-app-${{ matrix.target }}
-          path: dist/herdr-app-${{ matrix.target }}.tar.gz
+          name: herdr-app-rhel8-x86_64
+          path: dist/herdr-app-linux-x86_64.tar.gz
           if-no-files-found: error
           retention-days: 7
-
-  # ci.yml runs when the tagged commit reaches master; wait for its result.
-  # A newer push cancels it: rerun it and this job carries on.
-  ci-passed:
-    if: github.event_name == 'push' && github.ref_type == 'tag'
-    runs-on: ubuntu-latest
-    timeout-minutes: 45
-    permissions:
-      actions: read
-    steps:
-      - name: Wait for ci on this commit
-        env:
-          GH_TOKEN: ${{ github.token }}
-        run: |
-          while :; do
-            run=$(gh api "repos/$GITHUB_REPOSITORY/actions/workflows/ci.yml/runs?head_sha=$GITHUB_SHA&event=push&per_page=1" \
-              --jq '.workflow_runs[0] | "\(.status) \(.conclusion) \(.id)"') || run="api error"
-            echo "ci for $GITHUB_SHA: $run"
-            case "$run" in
-              "completed success "*) exit 0 ;;
-              "completed cancelled "*) echo "cancelled by a newer push: rerun that ci run, this job keeps waiting" ;;
-              completed*) exit 1 ;;
-            esac
-            sleep 30
-          done
-
-  # Signs herdr-app.exe with Azure Artifact Signing and repacks it, on Can's
-  # tag pushes and manual runs (to test signing without publishing). Azure
-  # trusts only jobs in the signing environment (v* tags and master). The
-  # Azure IDs are signing environment variables; the certificate profile is a
-  # repository variable (job-level `if` can't see environment ones), and
-  # while it's unset this is skipped and releases go out unsigned.
-  sign-windows:
-    needs: build
-    if: >-
-      github.triggering_actor == 'ogulcancelik' && vars.AZURE_SIGNING_PROFILE != ''
-      && ((github.event_name == 'push' && github.ref_type == 'tag') || github.event_name == 'workflow_dispatch')
-    environment: signing
-    runs-on: windows-2022
-    timeout-minutes: 15
-    permissions:
-      contents: read
-      id-token: write
-    defaults:
-      run:
-        shell: bash
-    steps:
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: herdr-app-windows-x86_64
-          path: dist
-      - run: tar -xzf dist/herdr-app-windows-x86_64.tar.gz -C dist
-      - uses: azure/login@a641126d1b8aa4d1fa005f4f92df94a3a4c4c906 # v3.1.0
-        with:
-          client-id: ${{ vars.AZURE_CLIENT_ID }}
-          tenant-id: ${{ vars.AZURE_TENANT_ID }}
-          subscription-id: ${{ vars.AZURE_SUBSCRIPTION_ID }}
-      - uses: azure/artifact-signing-action@c7ab2a863ab5f9a846ddb8265964877ef296ee82 # v2.0.0
-        with:
-          endpoint: https://eus.codesigning.azure.net/
-          signing-account-name: herdrsigning
-          certificate-profile-name: ${{ vars.AZURE_SIGNING_PROFILE }}
-          files: ${{ github.workspace }}\dist\herdr-app\herdr-app.exe
-          description: Herdr
-          description-url: https://herdr.dev
-      - name: Check the signature
-        shell: pwsh
-        run: |
-          $sig = Get-AuthenticodeSignature dist\herdr-app\herdr-app.exe
-          $sig | Format-List Status, StatusMessage, SignerCertificate
-          if ($sig.Status -ne 'Valid') { exit 1 }
-      - run: tar -czf dist/herdr-app-windows-x86_64.tar.gz -C dist herdr-app
-      - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
-        with:
-          name: herdr-app-windows-x86_64
-          path: dist/herdr-app-windows-x86_64.tar.gz
-          if-no-files-found: error
-          overwrite: true
-          retention-days: 7
-
-  # A website download, never a dependency of update publishing below.
-  mac-dmg:
-    needs: [build, ci-passed]
-    if: github.event_name == 'push' && github.ref_type == 'tag' && github.triggering_actor == 'ogulcancelik'
-    environment: release
-    runs-on: macos-15
-    timeout-minutes: 40
-    continue-on-error: true
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          name: herdr-app-macos-aarch64
-          path: dist
-      - name: Install DMG tools
-        run: brew install create-dmg jq awscli
-      - name: Build, sign, notarize and verify DMG
-        env:
-          APPLE_CERTIFICATE_P12: ${{ secrets.APPLE_CERTIFICATE_P12 }}
-          APPLE_CERTIFICATE_PASSWORD: ${{ secrets.APPLE_CERTIFICATE_PASSWORD }}
-          APPLE_API_KEY: ${{ secrets.APPLE_API_KEY }}
-          APPLE_API_KEY_ID: ${{ secrets.APPLE_API_KEY_ID }}
-          APPLE_API_ISSUER: ${{ secrets.APPLE_API_ISSUER }}
-        run: |
-          tar -xzf dist/herdr-app-macos-aarch64.tar.gz -C dist
-          scripts/mac-dmg dist/Herdr.app dist/Herdr.dmg
-      - name: Upload website download
-        env:
-          AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-          AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-          AWS_DEFAULT_REGION: auto
-          ENDPOINT: https://${{ vars.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
-          BUCKET: ${{ vars.R2_BUCKET }}
-        run: |
-          version="${GITHUB_REF_NAME#v}"
-          aws s3 cp --endpoint-url "$ENDPOINT" dist/Herdr.dmg "s3://$BUCKET/app/$version/Herdr.dmg" --cache-control "public, max-age=31536000, immutable" --content-type application/x-apple-diskimage
-          aws s3 cp --endpoint-url "$ENDPOINT" dist/Herdr.dmg "s3://$BUCKET/app/Herdr.dmg" --cache-control "no-cache" --content-type application/x-apple-diskimage
-
-  publish:
-    needs: [build, sign-windows, ci-passed]
-    # Only a tag push by Can publishes: anyone with write access can re-run an
-    # old tag's run, which would point latest.json back at that version.
-    # sign-windows may be skipped, not failed.
-    if: >-
-      !cancelled() && needs.build.result == 'success' && needs.sign-windows.result != 'failure'
-      && needs.ci-passed.result == 'success'
-      && github.event_name == 'push' && github.ref_type == 'tag' && github.triggering_actor == 'ogulcancelik'
-    # The R2 keys live here, usable only from v* tags.
-    environment: release
-    runs-on: ubuntu-latest
-    timeout-minutes: 15
-    env:
-      AWS_ACCESS_KEY_ID: ${{ secrets.R2_ACCESS_KEY_ID }}
-      AWS_SECRET_ACCESS_KEY: ${{ secrets.R2_SECRET_ACCESS_KEY }}
-      AWS_DEFAULT_REGION: auto
-      ENDPOINT: https://${{ vars.CLOUDFLARE_ACCOUNT_ID }}.r2.cloudflarestorage.com
-      BUCKET: ${{ vars.R2_BUCKET }}
-      RELEASES_URL: ${{ vars.RELEASES_URL }}
-    steps:
-      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-        with:
-          persist-credentials: false
-      - uses: actions/download-artifact@9000827ccba6bdab643e8b6fd33ac0654aef8333 # v8.0.2
-        with:
-          path: dist
-          merge-multiple: true
-      - name: Install Bun for release media check
-        run: curl -fsSL https://bun.sh/install | bash -s "bun-v1.4.4"
-      - name: Check release media before publishing
-        run: ~/.bun/bin/bun scripts/notes-media.ts check "${GITHUB_REF_NAME#v}"
-      - name: Manifest
-        run: |
-          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          core=$(tr -d '[:space:]' < distribution/core-version)
-          python3 - "$version" "$core" <<'PY'
-          import hashlib, json, pathlib, sys, os
-          version, core = sys.argv[1], sys.argv[2]
-          base = os.environ["RELEASES_URL"]
-          targets = {}
-          for f in sorted(pathlib.Path("dist").glob("herdr-app-*.tar.gz")):
-              t = f.name.removeprefix("herdr-app-").removesuffix(".tar.gz")
-              targets[t] = {"url": f"{base}/app/{version}/{f.name}", "sha256": hashlib.sha256(f.read_bytes()).hexdigest()}
-          # core_min: the oldest core this app works with.
-          doc = {"version": version, "core_min": core, "notes": f"Herdr {version}", "targets": targets}
-          pathlib.Path("dist/manifest.json").write_text(json.dumps(doc, indent=2) + "\n")
-          print(json.dumps(doc, indent=2))
-          PY
-      - name: Upload
-        run: |
-          version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
-          s3() { aws s3 cp --endpoint-url "$ENDPOINT" "$@"; }
-          for f in dist/herdr-app-*.tar.gz dist/manifest.json; do
-            s3 "$f" "s3://$BUCKET/app/$version/$(basename "$f")" --cache-control "public, max-age=31536000, immutable"
-          done
-          s3 CHANGELOG.md "s3://$BUCKET/app/$version/changelog.md" --cache-control "public, max-age=31536000, immutable" --content-type text/markdown
-          s3 dist/manifest.json "s3://$BUCKET/app/latest.json" --cache-control "no-cache" --content-type application/json
-          # 0.1.0/0.1.1 set to the preview channel still ask here.
-          s3 dist/manifest.json "s3://$BUCKET/app/preview/latest.json" --cache-control "no-cache" --content-type application/json
-          s3 distribution/install.sh "s3://$BUCKET/app/install.sh" --cache-control "no-cache" --content-type text/x-shellscript
-          s3 distribution/install.ps1 "s3://$BUCKET/app/install.ps1" --cache-control "no-cache" --content-type text/plain
