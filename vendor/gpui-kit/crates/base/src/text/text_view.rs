@@ -103,7 +103,7 @@ pub(crate) type LinkClickHandlerFn =
 /// [`TextView::on_selection_change`] reports it.
 #[derive(Clone, Debug, PartialEq)]
 pub struct TextViewSelection {
-    /// The selected text, in the view's [`SelectionFormat`].
+    /// The view's contribution to clipboard text, trimmed at both ends.
     pub text: String,
     /// The Markdown source byte range the selection came from, when the view
     /// renders Markdown and the selection maps back to it.
@@ -741,6 +741,7 @@ impl Element for TextView {
                 state.set_motion(motion.clone());
             }
             state.selectable = self.selectable;
+            // HERDR: only track reports while a selection handler is attached.
             state.set_selection_reporting(self.selection_change_handler.is_some());
             state.selection_format = self.selection_format;
             state.scrollable = self.scrollable;

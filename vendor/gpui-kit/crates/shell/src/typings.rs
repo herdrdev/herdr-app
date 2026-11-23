@@ -2450,15 +2450,14 @@ const BASE: &str = r#"  /** A row. */
   export const Switch: ComponentType;
   /** HERDR: a settled selection in a TextView. */
   export interface TextViewSelection {
-    /** The selected text, before clipboard trimming. */
+    /** The selected text in this view, trimmed as when copying it. */
     text: string;
     /**
      * UTF-16 offsets into the Markdown source the selection came from, so
-     * `markdown.slice(start, end)` includes any markup inside it. Absent in
-     * HTML or when the selection doesn't map back to the current source.
+     * `markdown.slice(range.start, range.end)` includes any markup inside it.
+     * Absent in HTML or when the selection doesn't map to the current source.
      */
-    start?: number;
-    end?: number;
+    range?: InputRange;
     /** Where the selection ended, in logical window pixels. Absent for select-all. */
     position?: import("gpui-kit").Point;
   }
@@ -2474,7 +2473,7 @@ const BASE: &str = r#"  /** A row. */
     on_selection_change(handler: (selection: TextViewSelection | null, cx: Context) => void): this;
     /**
      * HERDR: paints `color` behind the text rendered from `[start, end)`,
-     * UTF-16 offsets into the Markdown source, like a selection's. Chain once
+     * UTF-16 offsets into the Markdown source, like `selection.range`. Chain once
      * per range; later ones paint over earlier ones. Markdown only.
      */
     highlight_range(start: number, end: number, color: Color): this;

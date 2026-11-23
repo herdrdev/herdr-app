@@ -117,6 +117,7 @@ pub struct TextViewState {
     pub(super) table_actions: Option<std::sync::Arc<TableActionsFn>>,
     pub(super) image_source: Option<std::sync::Arc<super::text_view::ImageSourceFn>>,
     pub(super) link_click_handler: Option<std::sync::Arc<LinkClickHandlerFn>>,
+    // HERDR: only views with a selection handler build reports.
     reports_selection: bool,
     /// HERDR: a selection settled or was cleared since the last paint.
     pub(super) selection_report_pending: bool,
@@ -889,6 +890,7 @@ impl TextViewState {
     }
 
     pub(super) fn reset_selection(&mut self) {
+        // HERDR: a programmatic reset clears any selection the handler saw.
         if self.reported_selection {
             self.mark_selection_for_report();
         }
@@ -929,6 +931,7 @@ impl TextViewState {
         self.selected_text_override = None;
         self.select_all = true;
         self.is_selecting = false;
+        // HERDR: select-all settles at once.
         self.mark_selection_for_report();
         self.auto_scroll.stop();
         self.selection_adapter.set_local_selection(true, cx);
@@ -953,6 +956,7 @@ impl TextViewState {
         self.selected_text_override = Some(selected_text);
         self.select_all = false;
         self.is_selecting = false;
+        // HERDR: report the word or paragraph once it has painted.
         self.mark_selection_for_report();
         self.auto_scroll.stop();
         self.selection_adapter.set_local_selection(true, cx);
@@ -1018,6 +1022,7 @@ impl TextViewState {
         self.select_all
     }
 
+    // HERDR: attach or detach selection reporting with the handler.
     pub(super) fn set_selection_reporting(&mut self, enabled: bool) {
         self.reports_selection = enabled;
         if !enabled {
@@ -1026,6 +1031,7 @@ impl TextViewState {
         }
     }
 
+    // HERDR: queue a report for this view's next paint.
     pub(super) fn mark_selection_for_report(&mut self) {
         self.selection_report_pending = self.reports_selection;
     }
@@ -1042,9 +1048,10 @@ impl TextViewState {
             return None;
         }
         let selection = if self.selectable && !self.is_selecting {
-            let text = self.selected_text();
-            (!text.trim().is_empty()).then(|| super::text_view::TextViewSelection {
-                text,
+            let copied = self.selection_adapter.selected_text(self);
+            let text = copied.trim();
+            (!text.is_empty()).then(|| super::text_view::TextViewSelection {
+                text: text.to_owned(),
                 // A large replacement can still be parsing while the old
                 // document is visible. Its offsets belong to the old source.
                 source_range: if self.committed_revision >= self.full_update_revision {

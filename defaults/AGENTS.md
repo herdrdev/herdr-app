@@ -1122,10 +1122,13 @@ and other interactive controls too.
 (`Button`, `Checkbox`, `Switch`, `InputState` + `Input`) are unstyled: style
 them. Text: `TextView.markdown(id, text)` renders markdown; with
 `.selectable(true)`, `.on_selection_change((s, cx) => …)` gets a settled
-selection or `null` when it clears. The selection has `text`, optional
-`position` in window pixels, and `start` and `end` when it maps to the
-Markdown source. Get that source with `markdown.slice(start, end)`. To paint
-behind the rendered text, pass the offsets to `.highlight_range(start, end, color)`.
+selection or `null` when it clears. `s.text` matches what copying the selected
+text in that view gives you. When `s.range` is present, use
+`markdown.slice(s.range.start, s.range.end)` to get the original Markdown.
+`.highlight_range(start, end, color)` paints behind the text rendered from any
+Markdown source range, including offsets found with `markdown.indexOf(query)`.
+When `s.position` is present, place a popup with
+`openOverlay({ mod: "selection-actions", kind: "popup", at: s.position })`.
 `EditorState.new({
 language, value, readonly, font_family: settings().font_family, syntax: {
 keyword: theme().ansi5, ... } })` + `Editor.new(state)` is a code view (readonly)

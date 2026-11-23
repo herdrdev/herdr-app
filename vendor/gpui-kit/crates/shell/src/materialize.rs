@@ -3982,8 +3982,13 @@ fn selection_value(source: &str, selection: &TextViewSelection) -> crate::HostVa
     let utf16 = |byte: usize| Number(source.get(..byte).map_or(0, |s| s.encode_utf16().count()) as f64);
     let mut fields = vec![("text".to_string(), Str(selection.text.clone()))];
     if let Some(range) = &selection.source_range {
-        fields.push(("start".into(), utf16(range.start)));
-        fields.push(("end".into(), utf16(range.end)));
+        fields.push((
+            "range".into(),
+            Object(vec![
+                ("start".into(), utf16(range.start)),
+                ("end".into(), utf16(range.end)),
+            ]),
+        ));
     }
     if let Some(position) = selection.position {
         fields.push((
