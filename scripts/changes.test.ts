@@ -396,4 +396,4 @@ test("Changes discovers native Git checkouts and commits only in the selected on
   } finally {
     await rm(folder, { recursive: true, force: true });
   }
-});
+}, 30_000); // Each grouped refresh on Windows starts PowerShell.
