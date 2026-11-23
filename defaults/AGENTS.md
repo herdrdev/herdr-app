@@ -1153,12 +1153,14 @@ When `s.position` is present, place a popup with
 `EditorState.new({
 language, value, readonly, font_family: settings().font_family, syntax: {
 keyword: theme().ansi5, ... } })` + `Editor.new(state)` is a code view (readonly)
-or editor with syntax highlighting, line numbers and folding. Tab indents by
-2 spaces: pass `tab_size: 4` or `hard_tabs: true` to change that, or call
-`state.set_tab_size(4, false)` once a file's indentation is known. A viewer opens
-beside the shell as a pane: `pane.split {direction, mod, props: { file }}`.
-Call `state.set_soft_wrap(wrap)` from a view callback to switch between wrapping
+or editor with syntax highlighting, line numbers and folding. Call
+`state.set_soft_wrap(wrap)` from a view callback to switch between wrapping
 long lines and scrolling sideways while keeping the editor's text and selection.
+Tab indents by 2 spaces. Set `tab_size` (1 to 16) for the number of spaces per
+indent and the spacing of the indent guides. Set `hard_tabs: true` to insert
+literal tabs. The text renderer chooses the displayed width of tab characters.
+Once a file's style is known, call `state.set_tab_size(4, false)`.
+A viewer opens beside the shell as a pane: `pane.split {direction, mod, props: { file }}`.
 The full surface is in `gpui-kit.d.ts` next to this file.
 
 ### The `herdr` module

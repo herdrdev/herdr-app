@@ -3267,7 +3267,7 @@ const BASE: &str = r#"  /** A row. */
     /** Replaces the selection with `text`, as typing would (one undo step). */
     replace(text: string): void;
     on(event: "change" | "submit" | "focus" | "blur" | "paste_other", handler: (event: InputEvent, cx: Context) => void): boolean;
-    /** Changes the indent once the file's style is known: see `tab_size` and `hard_tabs` on `new`. */
+    /** Changes the indent once the file's style is known. `hard_tabs` defaults to false. */
     set_tab_size(tab_size: number, hard_tabs?: boolean): void;
     /** Moves the keyboard onto the editor. */
     focus(): void;
@@ -3291,7 +3291,8 @@ const BASE: &str = r#"  /** A row. */
       readonly?: boolean;
       /** Defaults to false. */
       soft_wrap?: boolean;
-      /** Columns per tab, and spaces Tab inserts; a whole number from 1 to 16. Defaults to 2. */
+      /** Spaces per indent and spacing of the indent guides, from 1 to 16 whole columns.
+       * Defaults to 2. The text renderer chooses the displayed width of tab characters. */
       tab_size?: number;
       /** Tab inserts a `\t` instead of spaces. Defaults to false. */
       hard_tabs?: boolean;
