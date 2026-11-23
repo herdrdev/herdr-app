@@ -157,7 +157,7 @@ fn fixture(populated: bool, props: Value, update: Value) -> BTreeMap<String, Val
         ("themes".into(), json!([{"name":"graphite", "colors": &*crate::settings::theme()}])),  ("fonts".into(), json!(["Monospace", "Sans"])),
         ("updates".into(), update),
         ("telemetry".into(), json!({"enabled":true,"setting":true,"sends":true,"off_because":null,"endpoint":"https://invalid.example", "draft":{},"queued":[],"last_sent":null})),
-        ("window".into(), json!({"platform":"linux","titlebar":"none","buttons":true,"maximized":false,"fullscreen":false,"active":true})),
+        ("window".into(), json!({"platform":"linux","titlebar":"none","buttons":true,"maximized":false,"fullscreen":false,"active":true,"visible":true})),
         ("placement".into(), Value::Null),
         ("home".into(), json!("/fixture")), ("appHome".into(), json!("/fixture/app")),
         ("keys".into(), Value::Array(serde_json::from_str::<BTreeMap<String, BTreeMap<String, String>>>(include_str!("../../defaults/keys.json")).unwrap().into_iter().flat_map(|(section, bindings)| bindings.into_iter().map(move |(keys, action)| json!({"section":section,"keys":keys,"action":action}))).collect())),
@@ -224,6 +224,7 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
     module = module.async_function("feedbackPickImages", |_| Ok(async { Ok(HostValue::Array(vec![])) }));
     module = module.async_function("knownAgents", |_| Ok(async { Ok(HostValue::Array(vec![])) }));
     module = module.async_function("pickFolder", |_| Ok(async { Ok(HostValue::Null) }));
+    module = module.async_function("pickFiles", |_| Ok(async { Ok(HostValue::Null) }));
     module = module.async_function("nextCommand", |_| Ok(std::future::pending::<gpui_shell::HostResult>()));
     module = module.cancellable_async_function("watchFolder", HostValue::Array(vec![]), |_| Ok(std::future::pending::<gpui_shell::HostResult>()));
     for name in ["exec", "hc", "readTextFile", "writeTextFile", "sendFeedback"] {
@@ -345,6 +346,14 @@ fn changes_retries_when_the_files_copy_owning_its_git_scan_closes_or_reloads(cx:
         for reload in [false, true] {
             let staged = Staged::new();
             let runtime = ShellRuntime::new_isolated().unwrap();
+            let files_entry = staged.0.join("mods/files/main.js");
+            let files_source = std::fs::read_to_string(&files_entry).unwrap();
+            // GPUI advances the timers, so use the same clock for scan timestamps.
+            // Files loads first and sets Date.now() for both mods in this VM.
+            std::fs::write(
+                &files_entry,
+                format!("import {{ now }} from 'test-clock'; Date.now = now;\n{files_source}"),
+            ).unwrap();
             let revision = Rc::new(Cell::new(0));
             let source_revision = revision.clone();
             runtime.set_source_revision_provider(move |_| Some(source_revision.get()));
@@ -379,7 +388,15 @@ fn changes_retries_when_the_files_copy_owning_its_git_scan_closes_or_reloads(cx:
                     reads.set(reads.get() + 1);
                     Ok(std::future::ready(Ok("recovered diff".into())))
                 });
-            gpui_shell::policy::set_default(Policy::new().with_host_module(herdr).unwrap());
+            let executor = cx.executor();
+            let epoch = executor.now();
+            let clock = HostModule::new("test-clock").function("now", move |_| {
+                Ok((executor.now().duration_since(epoch).as_millis() as f64).into())
+            });
+            let policy = Policy::new()
+                .with_host_module(herdr).unwrap()
+                .with_host_module(clock).unwrap();
+            gpui_shell::policy::set_default(policy);
 
             let window = cx.add_window(|_, _| Empty);
             let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
@@ -402,7 +419,7 @@ fn changes_retries_when_the_files_copy_owning_its_git_scan_closes_or_reloads(cx:
 
             visual.update(|window, cx| {
                 if reload {
-                    std::fs::write(staged.0.join("mods/files/main.js"), r#"
+                    std::fs::write(&files_entry, r#"
                         import { View, div } from "gpui-kit";
                         export default class extends View { render() { return div(); } }
                     "#).unwrap();

@@ -164,6 +164,10 @@ those files or the generated guide. The app rewrites them on start.
 - Save to reload. A broken save keeps the old version running and reports
   an error in `status`; a still-working screen is not proof the edit worked.
 - Make only the requested change. Don't touch unrelated mods or settings.
+- To pause streaming or polling while the window is hidden, check
+  `window()?.visible` in the timer and stop when false (`window()` is null
+  during `herdr-app check`). Read it in `render` and restart when true. See
+  `herdr.d.ts` for platform differences.
 - Use theme colors. Do not retain a mod's `cx` across callbacks; each
   callback receives its own. Native animations, not redraw timers, keep
   the window cheap to run. Root `on_size_change((size, cx) => …)` reports
