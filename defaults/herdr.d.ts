@@ -296,7 +296,8 @@ export function commands(): { name: string; args: { name: string; required: bool
  *  On Windows it is false when minimized or hidden. On X11 it is false when unmapped,
  *  and may be false when fully covered, depending on the window manager. On Wayland it
  *  stays true unless the compositor reports the xdg-shell `suspended` state (v6 or newer).
- *  Check it from a timer to pause work when false and use `render` to restart when true. */
+ *  Check it from a timer to pause work when false and use `render` to restart when true.
+ *  Null when there is no window (during `herdr-app check`): read it as `window()?.visible`. */
 export function window(): {
   platform: "linux" | "macos" | "windows";
   titlebar: "system" | "none";
