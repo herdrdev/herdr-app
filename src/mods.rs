@@ -1401,9 +1401,17 @@ pub fn apply_theme(cx: &mut App) {
 }
 
 fn capabilities() -> Capabilities {
+    capabilities_at(home(), app_dir(), false)
+}
+
+fn capabilities_at(home: PathBuf, app: PathBuf, read_mods: bool) -> Capabilities {
+    let mut read_roots = vec![home];
+    if read_mods {
+        read_roots.push(app.join("mods"));
+    }
     Capabilities::new()
-        .read_roots([home()])
-        .write_roots([app_dir()])
+        .read_roots(read_roots)
+        .write_roots([app])
         .execute(ExecuteGrant::Unrestricted)
         .network(NetworkGrant::Unrestricted)
         .storage(true)
@@ -1460,7 +1468,8 @@ fn mod_policy(inst: &Instance) -> (u64, gpui_shell::policy::Policy) {
     };
     let policy = gpui_shell::policy::Policy::new()
         .with_application(inst.key())
-        .with_capabilities(capabilities())
+        // The shipped palette reads manifests even when the app home is outside the login home.
+        .with_capabilities(capabilities_at(home(), app_dir(), inst.name == "frame-palette"))
         .with_shared_storage_path(dir.join(file))
         .with_host_module(module(inst.clone(), copy))
         .expect("herdr module is valid");

@@ -974,6 +974,38 @@ fn machine_add_needing_input_keeps_the_picker_and_shows_instructions(cx: &mut Te
 }
 
 #[gpui::test]
+fn palette_lists_the_entries_mods_declare_in_their_mod_json(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let probe = staged.0.join("mods/probe");
+    std::fs::create_dir_all(&probe).unwrap();
+    std::fs::write(probe.join("main.js"), "export default () => null;").unwrap();
+    std::fs::write(probe.join("mod.json"), r#"{"place":"none","palette":[{"title":"Probe entry","command":"mod.open","args":{"name":"probe"},"words":"zebra"}]}"#).unwrap();
+    let mut values = fixture(true, props(), updates("current", "current"));
+    values.insert("appHome".into(), json!(staged.0.to_string_lossy()));
+    let calls = Rc::new(RefCell::new(Calls::default()));
+    let home = staged.0.join("login-home");
+    std::fs::create_dir(&home).unwrap();
+    let policy = Policy::new()
+        .with_storage_path(staged.0.join("store-palette.json"))
+        .with_capabilities(capabilities_at(home, staged.0.clone(), true))
+        .with_host_module(module(values, calls.clone())).unwrap();
+    let root = staged.wrapper("frame/palette", "this.query = 'zebra';");
+    let window = cx.add_window(|_, _| Empty);
+    let mut session = window.update(cx, |_, window, cx| {
+        DescriptionSession::load(ShellRuntime::new_isolated().unwrap(), root, policy, window, cx).unwrap()
+    }).unwrap();
+    cx.run_until_parked();
+    window.update(cx, |_, window, cx| {
+        let tree = session.describe(window, cx).unwrap();
+        assert!(tree.contains("Probe entry"), "{tree}");
+        window.remove_window();
+    }).unwrap();
+    cx.run_until_parked();
+    assert!(calls.borrow().unexpected.is_empty(), "{:?}", calls.borrow().unexpected);
+}
+
+#[gpui::test]
 fn option_key_settings_are_only_shown_on_macos(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();

@@ -919,6 +919,15 @@ has 124 programs (agents, editors, runtimes, tools, databases, infra);
   again after a popup over it closes. Leave with `run("pane.go", {direction})`.
   Without this opt-in, navigation and clicks stay unchanged.
 
+- `"palette"` in `mod.json` adds entries each time the command palette opens.
+  For example, `"palette": [{ "title": "TUI sessions", "command": "mod.open", "args": { "name": "tui-sessions" }, "words": "agents" }]`.
+  Use an app command with its required arguments in `args`, or this mod's own
+  `<mod>.<command>` with no arguments. A mod command needs a shown copy listening
+  with `nextCommand()`. Use `mod.open {name}` to open a mod as an overlay, or
+  `tab.new {mod, props}` to open one with props. `group` defaults to "Mod"
+  ("Recent" is reserved). `words` is an optional string of search terms.
+  Malformed entries and duplicate command and argument pairs are skipped.
+
 - The first time Herdr sees a folder, it docks one copy per `mod.json` into
   the shown layout (`"none"`: only where a layout or another mod puts it).
   After that, the layouts decide. Saving any file reloads every copy in place

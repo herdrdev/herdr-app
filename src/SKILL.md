@@ -152,7 +152,8 @@ those files or the generated guide. The app rewrites them on start.
 - Mods live in `mods/<name>/` with `main.js` for a view or `link.js` for
   Ctrl/Cmd-clicked terminal links. They are trusted JavaScript with command
   and network access. `mod.json` declares link rules. A personal layout's
-  root `link_handlers` array selects the mods and their order.
+  root `link_handlers` array selects the mods and their order. An optional
+  `palette` list in `mod.json` adds named actions to the command palette.
   `"focusable": true` in `mod.json` lets `pane.go` move onto a copy; it receives
   `"focus"` from `nextCommand()` and focuses its own keyboard handle.
 - A mod's `watchFolder(dir)` promise has `cancel()`; cancel it when the folder
