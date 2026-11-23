@@ -117,10 +117,14 @@ the exit code and last output lines.
 
 A terminal started with hc opts into the window with `herdr.space=<id>`.
 `herdr.tab=<id>` chooses its tab; without it, Herdr creates a tab in that space.
-Unlabeled workers stay hidden. Do not add labels just to run a background
-worker. Use app commands when the
-user wants to see a new tab or split, hc for orchestration that need not change
-the screen.
+Workers without a label or a pane stay hidden. Do not add labels just to run a
+background worker. Use app commands when the user wants to see a new tab or
+split, hc for orchestration that need not change the screen.
+
+Closing a pane, tab or space ends the terminals in it. Core ends their dependent
+children and keeps children started with `--outlive-parent` running. `terminal.kill`
+also follows the sub-agent tree, stopping at any child with a pane or a
+`herdr.space` label. Core still applies parent-lifetime rules to every exit.
 
 ## Customize layouts, keys, or mods
 
