@@ -1121,10 +1121,12 @@ and other interactive controls too.
 `.when(cond, (el) => …)`, `.children([...])`. Controls from `gpui-base`
 (`Button`, `Checkbox`, `Switch`, `InputState` + `Input`) are unstyled: style
 them. Text: `TextView.markdown(id, text)` renders markdown; with
-`.selectable(true)`, `.on_selection_change((s, cx) => …)` gets `{ text, start,
-end, position }` once a selection settles (`null` when cleared; `start` and
-`end` index the markdown as `slice` does), and `.highlight_range(start, end,
-color)` paints behind such a range; `EditorState.new({
+`.selectable(true)`, `.on_selection_change((s, cx) => …)` gets a settled
+selection or `null` when it clears. The selection has `text`, optional
+`position` in window pixels, and `start` and `end` when it maps to the
+Markdown source. Get that source with `markdown.slice(start, end)`. To paint
+behind the rendered text, pass the offsets to `.highlight_range(start, end, color)`.
+`EditorState.new({
 language, value, readonly, font_family: settings().font_family, syntax: {
 keyword: theme().ansi5, ... } })` + `Editor.new(state)` is a code view (readonly)
 or editor with syntax highlighting, line numbers and folding. A viewer opens

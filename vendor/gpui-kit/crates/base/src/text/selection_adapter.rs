@@ -124,7 +124,7 @@ impl TextViewSelectionAdapter {
                                 snapshot.is_some_and(|snapshot| snapshot.is_selecting());
                             // HERDR: report a drag once it ends, and a clear.
                             if (was_selecting && !state.is_selecting) || snapshot.is_none() {
-                                state.selection_report_pending = true;
+                                state.mark_selection_for_report();
                             }
                             cx.notify();
                         });
@@ -155,8 +155,6 @@ impl TextViewSelectionAdapter {
                 blocks_for_clear.replace(VirtualBlockSelection::default());
                 let _ = view_for_clear.update(cx, |state, cx| {
                     state.reset_selection();
-                    // HERDR: report the clear.
-                    state.selection_report_pending = true;
                     cx.notify();
                 });
             },

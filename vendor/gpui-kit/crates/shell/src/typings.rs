@@ -2450,16 +2450,16 @@ const BASE: &str = r#"  /** A row. */
   export const Switch: ComponentType;
   /** HERDR: a settled selection in a TextView. */
   export interface TextViewSelection {
-    /** The selected text, as copying it would give. */
+    /** The selected text, before clipboard trimming. */
     text: string;
     /**
      * UTF-16 offsets into the Markdown source the selection came from, so
      * `markdown.slice(start, end)` includes any markup inside it. Absent in
-     * HTML or when the selection doesn't map back to the source.
+     * HTML or when the selection doesn't map back to the current source.
      */
     start?: number;
     end?: number;
-    /** Where the selection ended, in window coordinates. Absent for select-all. */
+    /** Where the selection ended, in logical window pixels. Absent for select-all. */
     position?: import("gpui-kit").Point;
   }
   /** Rich HTML or Markdown text. CSS in HTML is not supported. */

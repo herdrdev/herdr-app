@@ -117,6 +117,7 @@ pub struct TextViewState {
     pub(super) table_actions: Option<std::sync::Arc<TableActionsFn>>,
     pub(super) image_source: Option<std::sync::Arc<super::text_view::ImageSourceFn>>,
     pub(super) link_click_handler: Option<std::sync::Arc<LinkClickHandlerFn>>,
+    reports_selection: bool,
     /// HERDR: a selection settled or was cleared since the last paint.
     pub(super) selection_report_pending: bool,
     /// HERDR: whether the last report was a selection, so clearing it is reported.
@@ -228,6 +229,7 @@ impl TextViewState {
             code_block_highlighter: None,
             table_actions: None,
             link_click_handler: None,
+            reports_selection: false,
             selection_report_pending: false,
             reported_selection: false,
             applied_source_highlights: None,
@@ -681,6 +683,9 @@ impl TextViewState {
         if self.format != TextViewFormat::Markdown {
             return;
         }
+        if !highlights.is_empty() && self.committed_revision < self.full_update_revision {
+            return;
+        }
         let revision = self.committed_revision;
         let unchanged = match &self.applied_source_highlights {
             Some((applied, list)) => *applied == revision && list.as_slice() == highlights,
@@ -884,6 +889,9 @@ impl TextViewState {
     }
 
     pub(super) fn reset_selection(&mut self) {
+        if self.reported_selection {
+            self.mark_selection_for_report();
+        }
         self.preserve_inline_selection = false;
         self.multi_click_selection = None;
         self.selected_text_override = None;
@@ -921,8 +929,7 @@ impl TextViewState {
         self.selected_text_override = None;
         self.select_all = true;
         self.is_selecting = false;
-        // HERDR: select-all settles at once.
-        self.selection_report_pending = true;
+        self.mark_selection_for_report();
         self.auto_scroll.stop();
         self.selection_adapter.set_local_selection(true, cx);
         cx.notify();
@@ -946,8 +953,7 @@ impl TextViewState {
         self.selected_text_override = Some(selected_text);
         self.select_all = false;
         self.is_selecting = false;
-        // HERDR: report the word or paragraph once it has painted.
-        self.selection_report_pending = true;
+        self.mark_selection_for_report();
         self.auto_scroll.stop();
         self.selection_adapter.set_local_selection(true, cx);
     }
@@ -1012,6 +1018,18 @@ impl TextViewState {
         self.select_all
     }
 
+    pub(super) fn set_selection_reporting(&mut self, enabled: bool) {
+        self.reports_selection = enabled;
+        if !enabled {
+            self.selection_report_pending = false;
+            self.reported_selection = false;
+        }
+    }
+
+    pub(super) fn mark_selection_for_report(&mut self) {
+        self.selection_report_pending = self.reports_selection;
+    }
+
     /// HERDR: the settled selection to report, once painting has resolved it
     /// (a double or triple click is only turned into a range while its text
     /// paints). `None` when there is nothing new to report, `Some(None)` when
@@ -1023,15 +1041,28 @@ impl TextViewState {
         if !std::mem::take(&mut self.selection_report_pending) {
             return None;
         }
-        let text = self.selected_text();
-        let selection = (!text.trim().is_empty()).then(|| super::text_view::TextViewSelection {
-            text,
-            source_range: self.selected_source_range(),
-            position: self
-                .selection_points(cx)
-                .map(|(_, cursor)| cursor)
-                .or_else(|| self.multi_click_selection().map(|click| click.pos)),
-        });
+        let selection = if self.selectable && !self.is_selecting {
+            let text = self.selected_text();
+            (!text.trim().is_empty()).then(|| super::text_view::TextViewSelection {
+                text,
+                // A large replacement can still be parsing while the old
+                // document is visible. Its offsets belong to the old source.
+                source_range: if self.committed_revision >= self.full_update_revision {
+                    self.selected_source_range()
+                } else {
+                    None
+                },
+                position: if self.select_all {
+                    None
+                } else {
+                    self.selection_points(cx)
+                        .map(|(_, cursor)| cursor)
+                        .or_else(|| self.multi_click_selection().map(|click| click.pos))
+                },
+            })
+        } else {
+            None
+        };
         if selection.is_none() && !self.reported_selection {
             return None;
         }

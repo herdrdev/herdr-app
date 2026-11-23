@@ -741,6 +741,7 @@ impl Element for TextView {
                 state.set_motion(motion.clone());
             }
             state.selectable = self.selectable;
+            state.set_selection_reporting(self.selection_change_handler.is_some());
             state.selection_format = self.selection_format;
             state.scrollable = self.scrollable;
             state.max_lines = max_lines;
@@ -903,14 +904,11 @@ impl Element for TextView {
 
         // HERDR: a multi-click becomes a range only as its text paints, so
         // the selection is read after the document has painted.
-        let report = state
-            .read(cx)
-            .selection_report_pending
-            .then(|| state.update(cx, |state, cx| state.take_selection_report(cx)))
-            .flatten();
-        if let Some(selection) = report
-            && let Some(handler) = self.selection_change_handler.clone()
+        if let Some(handler) = &self.selection_change_handler
+            && state.read(cx).selection_report_pending
+            && let Some(selection) = state.update(cx, |state, cx| state.take_selection_report(cx))
         {
+            let handler = handler.clone();
             window.defer(cx, move |window, cx| {
                 handler(selection.as_ref(), window, cx)
             });
