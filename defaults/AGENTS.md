@@ -901,7 +901,8 @@ has 124 programs (agents, editors, runtimes, tools, databases, infra);
   the shown layout (`"none"`: only where a layout or another mod puts it).
   After that, the layouts decide. Saving any file reloads every copy in place
   (not files the app writes: `jsconfig.json`, `.d.ts`, hidden ones,
-  `node_modules`). The old build's tasks and timers stop: a loop ends at its
+  `node_modules`), in a mod folder linked in from elsewhere (a symlink to a
+  checkout) too. The old build's tasks and timers stop: a loop ends at its
   next `cx` use. A broken save keeps the old version running and shows in
   `herdr-app status`; its top-level code has already run, so keep side effects
   on `globalThis` out of the module's top level.

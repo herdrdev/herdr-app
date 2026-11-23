@@ -4460,6 +4460,9 @@ impl AppWindow {
             return;
         }
         let found = mods::scan(&self.folders);
+        if let Some(events) = &self.file_events {
+            events.follow_links();
+        }
         let edited: BTreeSet<String> = found.iter().filter_map(|(id, f)| {
             self.folders.get(id).filter(|old| old.stamp != f.stamp || old.has_view != f.has_view).map(|_| id.clone())
         }).collect();

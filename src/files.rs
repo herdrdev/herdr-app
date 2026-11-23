@@ -15,7 +15,12 @@ pub struct FileEvents {
     pub changes: async_channel::Receiver<Changed>,
     root: PathBuf,
     revisions: Arc<Mutex<Revisions>>,
+    links: Arc<Mutex<Links>>,
 }
+
+/// Mod folders linked in from outside the home: each one's real folder, which
+/// the home's watch doesn't reach, and the mod its edits count for.
+type Links = std::collections::BTreeMap<PathBuf, String>;
 
 #[derive(Default)]
 struct Revisions {
@@ -41,7 +46,32 @@ impl FileEvents {
     #[cfg(test)]
     pub fn for_test(root: PathBuf) -> Self {
         let (_, changes) = async_channel::unbounded();
-        Self { changes, root, revisions: Arc::new(Mutex::new(Revisions::default())) }
+        Self { changes, root, revisions: Arc::new(Mutex::new(Revisions::default())), links: Default::default() }
+    }
+
+    /// Watches the real folders of mods linked in from outside the home too,
+    /// so editing one reloads it like any mod. Call when mod folders may have
+    /// come or gone.
+    pub fn follow_links(&self) {
+        let wanted = linked_mods(&self.root);
+        let current = self.links.lock().unwrap_or_else(std::sync::PoisonError::into_inner).clone();
+        if wanted == current {
+            return;
+        }
+        if let Some(watcher) = WATCHER.get() {
+            // Not under the links lock: a backend may wait for its event thread,
+            // which takes that lock to map paths.
+            let mut watcher = watcher.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
+            for target in current.keys().filter(|target| !wanted.contains_key(*target)) {
+                let _ = watcher.unwatch(target);
+            }
+            for (target, name) in wanted.iter().filter(|(target, _)| !current.contains_key(*target)) {
+                if let Err(e) = watcher.watch(target, RecursiveMode::Recursive) {
+                    tracing::warn!("cannot watch linked mod {name} at {} ({e}); it reloads on a layout switch", target.display());
+                }
+            }
+        }
+        *self.links.lock().unwrap_or_else(std::sync::PoisonError::into_inner) = wanted;
     }
 
     pub fn revision_provider(&self) -> impl Fn(&Path) -> Option<u64> + 'static {
@@ -57,6 +87,33 @@ impl FileEvents {
             Some((*revisions.roots.entry(relative.to_path_buf()).or_insert(all)).max(all))
         }
     }
+}
+
+/// `mods/<name>` folders whose real folder is outside the home (a symlink or a
+/// junction to a source checkout).
+fn linked_mods(root: &Path) -> Links {
+    let Ok(entries) = std::fs::read_dir(root.join("mods")) else { return Links::new() };
+    entries.flatten().filter_map(|entry| {
+        let name = entry.file_name().to_str().filter(|name| !name.starts_with('.'))?.to_owned();
+        let target = entry.path().canonicalize().ok().filter(|target| target.is_dir())?;
+        // Inside the home it is watched already; one holding the home would watch it twice.
+        (!target.starts_with(root) && !root.starts_with(&target)).then_some((target, name))
+    }).collect()
+}
+
+/// An edit in a linked mod's real folder, told as one in `mods/<name>`.
+fn relink(base: &Path, links: &Links, mut event: notify::Event) -> notify::Event {
+    for path in &mut event.paths {
+        if path.starts_with(base) {
+            continue;
+        }
+        if let Some((target, name)) = links.iter().find(|(target, _)| path.starts_with(target))
+            && let Ok(rest) = path.strip_prefix(target)
+        {
+            *path = base.join("mods").join(name).join(rest);
+        }
+    }
+    event
 }
 
 fn changes(base: &Path, event: notify::Result<notify::Event>) -> (Changed, bool) {
@@ -75,7 +132,6 @@ fn changes(base: &Path, event: notify::Result<notify::Event>) -> (Changed, bool)
 /// Starts watching `home`; None if the OS watcher can't start (the app then
 /// polls as before).
 pub fn watch(home: &Path, #[cfg(test)] executor: gpui::BackgroundExecutor) -> Option<FileEvents> {
-    static WATCHER: OnceLock<std::sync::Mutex<notify::RecommendedWatcher>> = OnceLock::new();
     let (tx, rx) = async_channel::unbounded();
     #[cfg(test)]
     let tx = test_notifications(tx, executor);
@@ -83,7 +139,10 @@ pub fn watch(home: &Path, #[cfg(test)] executor: gpui::BackgroundExecutor) -> Op
     let base = root.clone();
     let revisions = Arc::new(Mutex::new(Revisions::default()));
     let event_revisions = revisions.clone();
+    let links: Arc<Mutex<Links>> = Default::default();
+    let event_links = links.clone();
     let mut watcher = notify::recommended_watcher(move |event: notify::Result<notify::Event>| {
+        let event = event.map(|event| relink(&base, &event_links.lock().unwrap_or_else(std::sync::PoisonError::into_inner), event));
         let mut revisions = event_revisions.lock().unwrap_or_else(std::sync::PoisonError::into_inner);
         let (changed, rescan) = changes(&base, event);
         revisions.changed(&changed, rescan);
@@ -99,8 +158,10 @@ pub fn watch(home: &Path, #[cfg(test)] executor: gpui::BackgroundExecutor) -> Op
     .ok()?;
     watcher.watch(&root, RecursiveMode::Recursive).map_err(|e| tracing::warn!("cannot watch {} ({e}); polling instead", root.display())).ok()?;
     WATCHER.set(std::sync::Mutex::new(watcher)).ok()?;
-    Some(FileEvents { changes: rx, root, revisions })
+    Some(FileEvents { changes: rx, root, revisions, links })
 }
+
+static WATCHER: OnceLock<std::sync::Mutex<notify::RecommendedWatcher>> = OnceLock::new();
 
 // Native callbacks cannot wake GPUI's deterministic test scheduler directly.
 #[cfg(test)]
@@ -501,6 +562,7 @@ mod tests {
             changes,
             root: PathBuf::from("/home/probe"),
             revisions: Default::default(),
+            links: Default::default(),
         };
         let revision = events.revision_provider();
         let first = Path::new("/home/probe/mods/one");
@@ -519,6 +581,39 @@ mod tests {
         assert!(revision(other).unwrap() > 2);
         assert!(changed.is_empty(), "a rescan must not request mod hot reloads");
         assert_eq!(revision(Path::new("/outside")), None);
+    }
+
+    #[test]
+    fn edits_in_a_linked_mods_real_folder_reload_that_mod() {
+        let base = Path::new("/home/probe");
+        let links = Links::from([(PathBuf::from("/src/probe-mod"), "linked".to_owned())]);
+        let event = |path: &str| Ok(relink(base, &links, notify::Event::new(notify::EventKind::Any).add_path(path.into())));
+        assert_eq!(changes(base, event("/src/probe-mod/message.js")), (vec![PathBuf::from("mods/linked/message.js")], false));
+        assert_eq!(changes(base, event("/src/probe-mod/lib/util.js")), (vec![PathBuf::from("mods/linked/lib/util.js")], false));
+        // Its typings are the runtime's, not the mod's code; other folders aren't the mod.
+        assert_eq!(changes(base, event("/src/probe-mod/gpui-kit.d.ts")).0, Vec::<PathBuf>::new());
+        assert_eq!(changes(base, event("/src/probe-mod-old/main.js")).0, Vec::<PathBuf>::new());
+        assert_eq!(changes(base, event("/home/probe/mods/plain/main.js")).0, vec![PathBuf::from("mods/plain/main.js")]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn only_mods_linked_from_outside_the_home_are_followed() {
+        let temp = std::env::temp_dir().join(format!("herdr-linked-mods-{}", std::process::id()));
+        let _ = std::fs::remove_dir_all(&temp);
+        let (home, source) = (temp.join("home"), temp.join("source"));
+        for dir in [home.join("mods/plain"), home.join("other"), source.join("probe")] {
+            std::fs::create_dir_all(dir).unwrap();
+        }
+        let link = |target: &Path, name: &str| std::os::unix::fs::symlink(target, home.join("mods").join(name)).unwrap();
+        link(&source.join("probe"), "linked");
+        link(&home.join("other"), "inside");
+        link(&temp, "holds-home");
+        link(&source.join("gone"), "dangling");
+        link(&source.join("probe"), ".hidden");
+        let root = home.canonicalize().unwrap();
+        assert_eq!(linked_mods(&root), Links::from([(source.join("probe").canonicalize().unwrap(), "linked".to_owned())]));
+        std::fs::remove_dir_all(&temp).unwrap();
     }
 
     #[test]
@@ -570,6 +665,7 @@ mod tests {
             changes,
             root: PathBuf::from("/home/probe"),
             revisions: Default::default(),
+            links: Default::default(),
         };
         let revision = events.revision_provider();
         let state = events.revisions.clone();
