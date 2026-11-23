@@ -41,6 +41,13 @@ export function knownAgents(options?: { on?: string | null }): Promise<(Program 
  *  when the person cancels. `prompt`: the confirm button's text (default "Open"). */
 export function pickFolder(options?: { prompt?: string }): Promise<string | null>;
 
+/** Opens the system's file picker (this machine). Resolves with the chosen files' absolute
+ *  paths, in the order the picker gives them, or null when the person cancels.
+ *  Rejects if the picker fails or a selected file path cannot be represented as a string.
+ *  `prompt`: the confirm button's text (default "Open"). `multiple`: allow several files
+ *  (default false). */
+export function pickFiles(options?: { prompt?: string; multiple?: boolean }): Promise<string[] | null>;
+
 /** Plays "done" or "blocked" (the attention sounds, or the files settings.json names), or an MP3
  *  file (absolute, or relative to ~/.config/herdr-app). */
 export function playSound(sound: string): null;
