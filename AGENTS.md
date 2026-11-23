@@ -73,6 +73,9 @@ also use the app without `HERDR_APP_HOME` pointing at a scratch home: it
 opens a second window on your real setup. Subcommands and `--help` only
 talk.
 
+Tests put their scratch files under `crate::test_tmp()`: `HERDR_TEST_TMPDIR`
+when it is set, `/var/tmp` otherwise. Never hardcode `/var/tmp` in a test.
+
 On Linux, test UI changes in the sandbox: `scripts/sandbox up`, then `do
 <command> [json]`, `status`, `shot` (screenshot), `move|click|drag`
 (pointer input, window px), `type`, `key <keysym> [Control_L ...]`, `hc
