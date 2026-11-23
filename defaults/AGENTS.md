@@ -624,8 +624,12 @@ The main ones:
   `terminal.show` fail, as do `terminal.open`/`terminal.keep` with place right/down.
   They never act on the terminal's source pane. An explicit `pane` still targets that
   model pane; composition edits belong to the mod (edit its layout instead).
+  Closing panes, tabs or spaces ends the terminals in them. Core ends dependent
+  children and keeps children started with `--outlive-parent` running.
 - Terminals: `terminal.open {argv?, folder?, place?, name?}` (`folder` sets the
-  starting directory for tabs and right/down splits, with or without `argv`), `terminal.kill {terminal}`,
+  starting directory for tabs and right/down splits, with or without `argv`),
+  `terminal.kill {terminal}` (ends the sub-agent tree, stopping at children with a
+  pane or `herdr.space` label; core still applies parent-lifetime rules),
   `terminal.keep {terminal, place?}`, `terminal.park {terminal}`,
   `terminal.peek {terminal}` (peek over the tab, with keep-as-tab and close),
   `terminal.show {terminal?, pane?}`, `terminal.search` (screen and scrollback;
@@ -684,7 +688,8 @@ The main ones:
   Add machine lists all named ssh-config hosts in a scrollable list. Machines
   that need a password, a new host key or herdr-core installed show what to run
   in your own terminal; the picker updates once it is added. Other machines are
-  added quietly. If a Linux server reports that programs stop at logout, its
+  added quietly. Update remote cores older than 0.1.13 from Settings → Machines so children started there end with their parent by default.
+  If a Linux server reports that programs stop at logout, its
   added card warns that agents stop when you disconnect and offers the administrator's
   `sudo loginctl enable-linger -- <user>` command with Copy. A warning mark in
   Settings > Machines and the sidebar opens that card; it clears automatically

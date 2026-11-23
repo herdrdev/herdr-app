@@ -2934,28 +2934,33 @@ impl AppWindow {
         }
     }
 
-    /// Kills terminals and their sub-agents, all the way down. Core keeps a
-    /// sub-agent running when its parent dies; closing one here means done with
-    /// its whole tree. Kept sub-agents (given a tab) are the person's: spared.
-    fn kill(&mut self, addresses: &[String], cx: &mut Context<Self>) {
-        let mut doomed: Vec<String> = addresses.to_vec();
+    /// An explicit terminal.kill follows sub-agents until it reaches one placed in the window.
+    fn kill_tree(&mut self, address: &str, cx: &mut Context<Self>) {
+        let mut doomed = vec![address.to_owned()];
         let mut i = 0;
         while i < doomed.len() {
             let parent = doomed[i].clone();
             for (addr, rec) in &self.live {
                 let child = rec.get("parent").and_then(Value::as_str) == Some(parent.as_str());
-                let kept = rec.get("labels").and_then(|l| l.get("herdr.space")).and_then(Value::as_str).is_some_and(|w| !w.is_empty());
-                if child && !kept && !doomed.contains(addr) {
+                if child && !doomed.contains(addr)
+                    && self.model.pane_of(addr).is_none()
+                    && !rec.pointer("/labels/herdr.space").and_then(Value::as_str).is_some_and(|space| !space.is_empty())
+                {
                     doomed.push(addr.clone());
                 }
             }
             i += 1;
         }
-        self.closing_terminals.extend(doomed.iter().cloned().map(|a| (a, false)));
+        self.kill(doomed, cx);
+    }
+
+    /// Kill the selected terminals. Core handles their parent-lifetime rules.
+    fn kill(&mut self, addresses: Vec<String>, cx: &mut Context<Self>) {
+        self.closing_terminals.extend(addresses.iter().cloned().map(|a| (a, false)));
         // Off the UI thread: a kill waits for the program to go, and for slow machines.
         let core = self.core.clone();
         cx.spawn(async move |this, cx| {
-            for address in doomed {
+            for address in addresses {
                 let core = core.clone();
                 let addr = address.clone();
                 let result = cx.background_executor().spawn(async move {
@@ -3179,7 +3184,7 @@ impl AppWindow {
                     return;
                 }
                 let addrs = self.model.remove_space(&id);
-                self.kill(&addrs, cx);
+                self.kill(addrs, cx);
             }
             "space.rename" => {
                 let Some(id) = Self::owned(a, "id").or_else(|| self.model.active.clone()) else { return self.fail("no space to rename") };
@@ -3232,7 +3237,7 @@ impl AppWindow {
                     return self.dispatch("space.close", &args, person, window, cx);
                 }
                 let (addrs, _) = self.model.remove_tab(&id);
-                self.kill(&addrs, cx);
+                self.kill(addrs, cx);
             }
             "tab.rename" => {
                 let Some(id) = Self::owned(a, "id").or(active_ctx) else { return self.fail("no tab to rename") };
@@ -3312,7 +3317,7 @@ impl AppWindow {
                 }
                 let addr = self.model.address_of(&pane);
                 self.model.remove_pane(&pane);
-                self.kill(&addr.into_iter().collect::<Vec<_>>(), cx);
+                self.kill(addr.into_iter().collect(), cx);
             }
             "pane.zoom" => {
                 if let Some(pane) = Self::owned(a, "pane").or_else(|| self.model.focused_pane()) {
@@ -3441,7 +3446,7 @@ impl AppWindow {
                 if !self.live.contains_key(t) {
                     return self.fail(format!("no running terminal {t:?}"));
                 }
-                self.kill(&[t.to_owned()], cx);
+                self.kill_tree(t, cx);
             }
             "terminal.peek" => {
                 let t = Self::arg(a, "terminal").unwrap_or_default();
