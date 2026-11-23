@@ -51,7 +51,7 @@ const textOf = (node: Node | string): string => typeof node === "string" ? node 
 const ok = (stdout = ""): ExecResult => ({ code: 0, stdout, stderr: "" });
 const error = (stderr: string): ExecResult => ({ code: 128, stdout: "", stderr });
 const untracked = (files: string[]) => ok(files.map(f => `?? ${f}\0`).join(""));
-const modSource = source.replace(/^import .*;\n/gm, "").replace("export default class Changes", "class Changes");
+const modSource = source.replace(/^import .*;\r?\n/gm, "").replace("export default class Changes", "class Changes");
 
 async function mount(at: { cwd: string; on: string | null }, host: {
   exec: (command: string, args: string[], options: ExecOptions) => Promise<ExecResult>;
