@@ -3044,14 +3044,14 @@ const BASE: &str = r#"  /** A row. */
   /**
    * Where a scroll area is, read from its handle. Lengths are in the pixels a
    * script writes, so a row written `.h(30)` moves `offset()` by 30 at any zoom.
-   * Event positions are window pixels: divide them by the zoom to compare.
-   * They are the last frame's: read them in an event handler or a task, not to
-   * lay out the frame being built. All zero before the first frame.
+   * Sizes use the last layout's zoom, including while the area is hidden.
+   * Divide event positions by the current zoom after the area has laid out.
+   * Read in an event handler or a task after layout. All zero before the first frame.
    */
   export interface ScrollPosition {
     /** How far the content has scrolled from its start: `{ x: 0, y: 0 }` there, never negative. */
     offset(): import("gpui-kit").Point;
-    /** The size of everything the area scrolls through, on screen or not. */
+    /** The scrollable extent, including padding and at least as large as the viewport. */
     content_size(): import("gpui-kit").Size;
     /**
      * The size of the part on screen. The area is at its end when
