@@ -7,8 +7,12 @@ check() {
         case "$f" in */*) ;; *) f=$(command -v -- "$f") || continue ;; esac
         [ -f "$f" ] && [ -x "$f" ] || continue
         # Inspect the target bytes before executing it: interop also accepts renamed PE files.
-        magic=$(LC_ALL=C command -p od -An -N2 -tx1 < "$f") || continue
-        case "$magic" in *'4d 5a') continue ;; esac
+        magic=$(LC_ALL=C command -p od -An -N2 -tu1 < "$f") || continue
+        # BSD and GNU od pad byte values differently. Read MZ as decimal bytes.
+        IFS=' 	' read -r first second <<EOF
+$magic
+EOF
+        if [ "$first" = 77 ] && [ "$second" = 90 ]; then continue; fi
         v=$("$f" --version 2>/dev/null) || continue
         case "$v" in 'hc '*)
             if [ "$mode" = version ]; then printf '%s\n' "$v"; else printf '%s\n' "$f"; fi
