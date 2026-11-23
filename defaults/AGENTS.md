@@ -746,7 +746,8 @@ What's about the user, never a look:
   (`appHome()`) stay on Windows.
   If the distribution can't be reached, start it and choose Retry in Setup.
   If `hc` is missing, choose Install it for me to install it there. Choose
-  Continue without WSL to go back to Windows.
+  Continue without WSL to go back to Windows. `herdr-app check` stops before
+  loading a mod if the selected distribution is unreachable or lacks a guest `hc`.
   WSL file links expand only `$HOME` and `$PWD`, never Windows environment
   variables. Local `file://` links resolve in the selected distribution too.
   `HC_SESSION` is passed explicitly to guest commands, preserving the selected core session.

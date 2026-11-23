@@ -172,7 +172,7 @@ fn resolve_guest_url(link: &str, host_path: impl FnOnce(&Path) -> Result<PathBuf
     if let Some((_, spelling)) = handler_file_uri(link).filter(|(host, _)| host.is_empty() || host.eq_ignore_ascii_case("localhost")) {
         // Decode before converting. Keep the guest path for mods and use the
         // translated path for Windows. Never let Windows reinterpret a missing guest file.
-        if let Some(path) = decode_file_url_path(spelling).as_deref().map(file_url_path).filter(|p| can_verify_handler_path(p))
+        if let Some(path) = decode_file_url_path(spelling).filter(|p| p.starts_with('/') && !p.starts_with("//")).map(PathBuf::from)
             && let Ok(host) = host_path(&path)
             && host.exists()
         {
@@ -474,6 +474,11 @@ mod tests {
         let hit = resolve(raw).click(false, &active).unwrap();
         assert_eq!(hit.native, None);
         assert_eq!(hit.handlers[0].1, json!({"kind":"file", "raw":raw, "path":null}));
+        let missing = resolve_guest_url("file:///C:/notes.txt", |path| {
+            assert_eq!(path.as_os_str(), "/C:/notes.txt");
+            Err("not in the guest".into())
+        });
+        assert_eq!(missing.native, None);
         assert_eq!(resolve_guest_url("file:///home/test/missing", |_| Err("unavailable".into())).native, None);
         assert_eq!(resolve_guest_url("https://example.com", |_| panic!("not a file")).native, Some(Target::Url("https://example.com".into())));
     }

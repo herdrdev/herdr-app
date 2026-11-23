@@ -16,6 +16,20 @@ const directory = loadDirectory(
   process.platform === "win32" ? "windows" : process.platform,
 );
 
+test("Files previews guest files under / without constructing a UNC path", async () => {
+  const reads: string[] = [];
+  const Files = new Function("View", "readTextFile", `${source.replace(/^import .*;$/gm, "").replace("export default class", "class")}; return Files;`)(
+    class {}, async (path: string) => { reads.push(path); return null; },
+  );
+  const files = new Files();
+  files.root = "/";
+  files.current = () => true;
+  let pending: Promise<void> | undefined;
+  files.show("etc/hosts", { spawn: (f: (cx: { notify(): void }) => Promise<void>) => { pending = f({ notify() {} }); } });
+  await pending;
+  expect(reads).toEqual(["/etc/hosts"]);
+});
+
 test("Files retries a remote Windows directory with PowerShell on that machine", async () => {
   const calls: { command: string; args: string[]; on: string }[] = [];
   const list = loadDirectory(async (command: string, args: string[], options: { on: string }) => {

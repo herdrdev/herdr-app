@@ -573,7 +573,7 @@ impl Default for Settings {
             copy_on_select: true,
             minimum_contrast: 1.0,
             option_as_alt: OptionAsAlt::Auto,
-            wsl: None,
+            wsl: crate::wsl::active().map(str::to_owned),
             sounds: Sounds::default(),
         }
     }
@@ -618,7 +618,7 @@ impl Settings {
             copy_on_select: person.copy_on_select,
             minimum_contrast: person.minimum_contrast,
             option_as_alt: person.option_as_alt,
-            wsl: crate::wsl::active().map(str::to_owned),
+            wsl: d.wsl,
         }
     }
 }

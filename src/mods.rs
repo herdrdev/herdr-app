@@ -1008,7 +1008,7 @@ fn known_agents(on: Option<String>, list: Vec<Value>) -> Result<Value, String> {
 fn read_local(path: &str) -> Result<Option<String>, String> {
     if crate::wsl::active().is_some() && path.starts_with('/') {
         return read_wsl_with(path, crate::wsl::host_path_if_active(Path::new(path)), |path| {
-            read_guest_with(crate::wsl::command("env", None), path)
+            read_guest_with(guest_read_timeout(crate::wsl::command("timeout", None), 30), path)
         });
     }
     crate::mod_files::read(Path::new(path))
@@ -1025,12 +1025,19 @@ fn read_wsl_with(path: &str, host: Result<PathBuf, String>, guest: impl FnOnce(&
     guest(path)
 }
 
+// Limit the reader inside Linux, not just wsl.exe: the path may change before head opens it.
+fn guest_read_timeout(mut timeout: std::process::Command, seconds: u32) -> std::process::Command {
+    timeout.args(["-k", "1"]).arg(seconds.to_string()).arg("env");
+    timeout
+}
+
 // Keep raw bytes until UTF-8 validation; head bounds output even for a huge file.
 fn read_guest_with(mut command: std::process::Command, path: &str) -> Result<Option<String>, String> {
     let script = r#"if test -e "$1" && ! test -f "$1"; then echo 'Not a regular file' >&2; exit 1; fi; exec head -c "$2" -- "$1""#;
     let out = command.args(["LC_ALL=C", "sh", "-c", script, "sh", path, &(crate::mod_files::LIMIT + 1).to_string()])
         .stdin(std::process::Stdio::null()).output().map_err(|e| e.to_string())?;
     if !out.status.success() {
+        if matches!(out.status.code(), Some(124 | 137)) { return Err(format!("Timed out reading {path} in WSL")); }
         let error = String::from_utf8_lossy(&out.stderr);
         // Check head's errno, not `test -e`: an inaccessible parent is not absence.
         if out.status.code() == Some(1) && error.starts_with("head:") && error.trim_end().ends_with(": No such file or directory") {
@@ -1483,6 +1490,23 @@ mod tests {
             }).unwrap();
             assert_eq!(text.as_deref(), Some("guest text"));
         }
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn guest_text_read_times_out_in_the_guest() {
+        use std::os::unix::fs::PermissionsExt;
+        let root = crate::test_tmp().join(format!("herdr-guest-slow-read-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        // A slow reader fixture; no special files or timing-dependent replacement needed.
+        let head = root.join("head");
+        std::fs::write(&head, "#!/bin/sh\nexec sleep 10\n").unwrap();
+        std::fs::set_permissions(&head, std::fs::Permissions::from_mode(0o755)).unwrap();
+        let mut command = guest_read_timeout(std::process::Command::new("timeout"), 1);
+        command.env("PATH", format!("{}:/usr/bin:/bin", root.display()));
+        let error = read_guest_with(command, head.to_str().unwrap()).unwrap_err();
+        std::fs::remove_dir_all(root).unwrap();
+        assert!(error.contains("Timed out"), "{error}");
     }
 
     #[cfg(unix)]

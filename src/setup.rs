@@ -100,10 +100,7 @@ impl Setup {
         cx.notify();
         cx.spawn_in(window, async move |this, cx| {
             let result = cx.background_executor().spawn(async move {
-                work().map(|bin| {
-                    if let Some(bin) = bin { crate::core_bin::use_core(bin); }
-                    connect()
-                })
+                work().map(connect)
             }).await;
             let _ = this.update_in(cx, |this, window, cx| {
                 match result {
@@ -210,8 +207,10 @@ impl Setup {
 }
 
 /// Blocking setup work, shared by retry, install, update and file selection.
-fn connect() -> Result<Arc<Core>, Need> {
-    if crate::wsl::active().is_some() {
+fn connect(bin: Option<PathBuf>) -> Result<Arc<Core>, Need> {
+    if let Some(bin) = bin {
+        crate::core_bin::use_core(bin);
+    } else if crate::wsl::active().is_some() {
         let configured = settings::load_person().ok().and_then(|p| p.core);
         let bin = crate::core_bin::find(configured.as_deref())
             .map_err(Need::Connect)?.ok_or(Need::Install)?;

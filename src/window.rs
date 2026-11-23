@@ -3769,23 +3769,18 @@ impl AppWindow {
                 self.write_person(|p| p.zoom = zoom, window, cx);
             }
             "app.quit" => cx.quit(),
-            "app.update" => {
-                match crate::update::apply() {
-                    Ok(true) => {}
-                    Ok(false) => return self.fail("no update is ready yet"),
-                    Err(error) => {
-                        let reason = format!("Couldn't replace Herdr's files: {error}.");
-                        return self.fail(if cfg!(windows) { format!("Close Herdr's terminals (or restart Windows) and try again. {reason}") } else { reason });
+            "app.update" | "app.restart" => {
+                if name == "app.update" {
+                    match crate::update::apply() {
+                        Ok(true) => {}
+                        Ok(false) => return self.fail("no update is ready yet"),
+                        Err(error) => {
+                            let reason = format!("Couldn't replace Herdr's files: {error}.");
+                            return self.fail(if cfg!(windows) { format!("Close Herdr's terminals (or restart Windows) and try again. {reason}") } else { reason });
+                        }
                     }
                 }
-                self.drain_documents(window, cx);
-                if !crate::update::relaunch() {
-                    return self.fail("cannot restart Herdr; close and reopen it to switch");
-                }
-                cx.quit();
-            }
-            "app.restart" => {
-                self.drain_documents(window, cx);
+                // The quit hook drains documents. Keep saving if the relaunch can't start.
                 if !crate::update::relaunch() {
                     return self.fail("cannot restart Herdr; close and reopen it to switch");
                 }
@@ -6335,17 +6330,41 @@ mod tests {
     /// fresh app home: a window takes process-wide things (the app home, the
     /// mods' request channel) that tests beside it would otherwise share.
     fn in_own_process(name: &str) {
+        in_own_process_with(name, &[]);
+    }
+
+    fn in_own_process_with(name: &str, env: &[(&str, &str)]) {
         let home = crate::test_tmp().join(format!("herdr-window-test-{name}-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&home);
         let out = std::process::Command::new(std::env::current_exe().unwrap())
             .args(["--exact", &format!("window::tests::{name}"), "--nocapture", "--test-threads=1"])
             .env("HERDR_APP_HOME", &home)
             .env("HERDR_TEST_WINDOW", name)
+            .envs(env.iter().copied())
             .output()
             .unwrap();
         let _ = std::fs::remove_dir_all(&home);
         let log = format!("{}{}", String::from_utf8_lossy(&out.stdout), String::from_utf8_lossy(&out.stderr));
         assert!(out.status.success() && log.contains("1 passed"), "{log}");
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn a_failed_relaunch_does_not_stop_layout_saves() {
+        in_own_process_with("failed_relaunch", &[("PATH", "/no-relaunch-helper")]);
+    }
+
+    #[cfg(unix)]
+    #[gpui::test]
+    fn failed_relaunch(cx: &mut gpui::TestAppContext) {
+        if !running_alone("failed_relaunch") { return; }
+        let (view, cx) = open_heavy(cx, 0);
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            let reply = this.run_as("app.restart", serde_json::json!({}), false, window, cx);
+            assert!(reply["error"].as_str().unwrap().contains("cannot restart"));
+            assert!(!this.draining);
+            assert!(!super::QUITTING.load(std::sync::atomic::Ordering::SeqCst));
+        }));
     }
 
     /// In the process `in_own_process` started for `name`: whether to go on.

@@ -1,15 +1,28 @@
 #!/bin/sh
+mode=${2:-find}
 check() {
     for f do
         # WSL interop can run a Windows hc.exe; it is not a guest core.
         case "$f" in *.[eE][xX][eE]) continue ;; esac
+        case "$f" in */*) ;; *) f=$(command -v -- "$f") || continue ;; esac
         [ -f "$f" ] && [ -x "$f" ] || continue
+        # Inspect the target bytes before executing it: interop also accepts renamed PE files.
+        magic=$(LC_ALL=C command -p od -An -N2 -tx1 < "$f") || continue
+        case "$magic" in *'4d 5a') continue ;; esac
         v=$("$f" --version 2>/dev/null) || continue
-        case "$v" in 'hc '*) printf '%s\n' "$f"; exit 0 ;; esac
+        case "$v" in 'hc '*)
+            if [ "$mode" = version ]; then printf '%s\n' "$v"; else printf '%s\n' "$f"; fi
+            exit 0 ;;
+        esac
     done
 }
+if [ "$mode" = installed ]; then
+    check "${HC_INSTALL_DIR:-$HOME/.local/bin}/herdr-core"
+    exit 3
+fi
 case "$1" in [a-zA-Z]:*|\\\\*) set -- "$(wslpath -u "$1" 2>/dev/null)" ;; esac
 case "$1" in \~/*) check "$HOME/${1#\~/}" ;; ?*) check "$1" ;; esac
+[ "$mode" = version ] && exit 3
 s=${SHELL:-/bin/sh}
 # Split command-v output on newlines only, without expanding glob characters.
 set -f

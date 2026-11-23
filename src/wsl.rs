@@ -435,14 +435,18 @@ fn find_core_script() -> &'static str {
 
 /// Finds `herdr-core` (`hc`) inside the active WSL distribution.
 pub fn find_core(configured: Option<&str>) -> Result<Option<PathBuf>, String> {
+    probe_core(OsStr::new(configured.unwrap_or("")), "find").map(|bin| bin.map(PathBuf::from))
+}
+
+fn probe_core(candidate: &OsStr, mode: &str) -> Result<Option<String>, String> {
     environment()?;
     let mut cmd = command("sh", None);
-    cmd.args(["-c", find_core_script(), "sh", configured.unwrap_or("")]);
+    cmd.args(["-c", find_core_script(), "sh"]).arg(candidate).arg(mode);
     let out = run_wsl_timed(cmd, WSL_TIMEOUT)?;
     core_probe_result(&out)
 }
 
-fn core_probe_result(out: &Output) -> Result<Option<PathBuf>, String> {
+fn core_probe_result(out: &Output) -> Result<Option<String>, String> {
     if out.status.code() == Some(3) {
         return Ok(None);
     }
@@ -453,24 +457,12 @@ fn core_probe_result(out: &Output) -> Result<Option<PathBuf>, String> {
         .next()
         .filter(|s| !s.is_empty())
         .ok_or("WSL returned an empty herdr-core probe; check the selected distribution.")?;
-    Ok(Some(PathBuf::from(found)))
+    Ok(Some(found.to_owned()))
 }
 
 /// Checks a guest binary without allowing an unbounded WSL version probe.
 pub fn version(bin: &Path) -> Result<Option<String>, String> {
-    if bin
-        .extension()
-        .is_some_and(|ext| ext.eq_ignore_ascii_case("exe"))
-    {
-        return Ok(None);
-    }
-    environment()?;
-    let mut cmd = command(bin.as_os_str(), None);
-    cmd.arg("--version");
-    let out = run_wsl_timed(cmd, WSL_TIMEOUT)?;
-    require_success(&out, "Cannot check herdr-core in WSL")?;
-    let text = decode_output(&out.stdout).trim().to_owned();
-    Ok(text.starts_with("hc ").then_some(text))
+    probe_core(bin.as_os_str(), "version")
 }
 
 /// Installs the Linux `herdr-core` release inside the active WSL distribution.
@@ -492,7 +484,8 @@ pub fn install_core(releases: &str) -> Result<PathBuf, String> {
             err
         });
     }
-    find_core(None)?.ok_or_else(|| "installed in WSL, but herdr-core doesn't run".into())
+    probe_core(OsStr::new(""), "installed")?.map(PathBuf::from)
+        .ok_or_else(|| "installed in WSL, but herdr-core doesn't run".into())
 }
 
 /// Decodes output from `wsl.exe`, handling both UTF-8 and UTF-16LE.
@@ -1042,6 +1035,24 @@ mod tests {
             core.to_str().unwrap()
         );
         assert!(!marker.exists());
+        // An extensionless symlink must not execute PE bytes, in either probe mode.
+        std::fs::write(&windows, format!("MZ=1\nprintf ran > '{}'\necho 'hc 0.1.0'\n", marker.display())).unwrap();
+        let alias = root.join("renamed hc");
+        std::os::unix::fs::symlink(&windows, &alias).unwrap();
+        let out = probe(alias.to_str().unwrap(), Path::new("/bin/false"));
+        assert_eq!(String::from_utf8(out.stdout).unwrap().trim_end(), core.to_str().unwrap());
+        let version = |bin: &Path| Command::new("/bin/sh")
+            .args(["-c", find_core_script(), "sh"]).arg(bin).arg("version").output().unwrap();
+        assert_eq!(version(&alias).status.code(), Some(3));
+        assert!(!marker.exists());
+        assert!(version(&core).status.success(), "guest scripts are valid cores");
+        // Install must return the freshly installed binary, not the first hc on PATH.
+        let installed = root.join("herdr-core");
+        std::os::unix::fs::symlink(&core, &installed).unwrap();
+        let out = Command::new("/bin/sh").args(["-c", find_core_script(), "sh", "", "installed"])
+            .env("HC_INSTALL_DIR", &root).env("PATH", &bin).output().unwrap();
+        assert!(out.status.success());
+        assert_eq!(String::from_utf8(out.stdout).unwrap().trim_end(), installed.to_str().unwrap());
         std::fs::remove_dir_all(root).unwrap();
     }
 

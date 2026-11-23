@@ -3,7 +3,7 @@
 
 import { View, div } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar } from "gpui-base";
-import { run, props, closeOverlay, theme, spaces, panes, exec, home, appHome, readTextFile, window } from "herdr";
+import { run, props, closeOverlay, theme, spaces, panes, exec, home, appHome, readTextFile, window, settings } from "herdr";
 
 // Where a space is now: its first terminal's live folder, else where it was made.
 function place(s, all = panes()) {
@@ -248,7 +248,7 @@ export default class Worktree extends View {
     if (lock) return lock === "locked" ? "This worktree is locked." : `This worktree is locked: ${lock.slice(7)}`;
 
     // Git on a remote Windows machine reports a drive-letter or UNC path.
-    const windows = this.on ? /^(?:[A-Za-z]:\/|\/\/)/.test(this.repo.top) : window().platform === "windows";
+    const windows = this.on ? /^(?:[A-Za-z]:\/|\/\/)/.test(this.repo.top) : window().platform === "windows" && !settings().wsl;
     const closeSpace = () => { if (s?.id) run("space.close", { id: s.id, confirmed: true }); };
     // A shell sitting in the folder can keep it busy on Windows.
     if (windows) closeSpace();

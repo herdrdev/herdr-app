@@ -91,6 +91,18 @@ fn link_check_path(args: &[String]) -> Option<&std::path::Path> {
     (!path.starts_with('-') && paths.next().is_none()).then(|| std::path::Path::new(path))
 }
 
+fn prepare_wsl_check() -> Result<(), String> {
+    if !cfg!(windows) || !settings::path().try_exists().map_err(|e| e.to_string())? { return Ok(()); }
+    let person = settings::load_person()?;
+    wsl::init(person.wsl);
+    if let Some(distro) = wsl::active() {
+        // A check runs real mod operations. Never fall back to an unvalidated `hc`.
+        let bin = core_bin::find(person.core.as_deref())?.ok_or_else(|| format!("No guest herdr-core found in WSL ({distro}); install it in Setup before checking mods."))?;
+        core_bin::use_core(bin);
+    }
+    Ok(())
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     #[cfg(target_os = "macos")]
@@ -101,6 +113,10 @@ fn main() {
     }
     // `herdr-app check <mod>` / `herdr-app types <mod>`: gpui-shell's own checker, with Herdr's module installed.
     if matches!(args.get(1).map(String::as_str), Some("check" | "types")) {
+        if args[1] == "check" && let Err(error) = prepare_wsl_check() {
+            eprintln!("herdr-app check: {error}");
+            std::process::exit(1);
+        }
         mods::install_check_policy();
         if args[1] == "check" && let Some(path) = link_check_path(&args[2..]) {
             let dir = if path.is_file() { path.parent().unwrap_or(path) } else { path };
