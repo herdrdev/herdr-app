@@ -818,10 +818,11 @@ What's about the user, never a look:
   Clipboard reads (`?`) are never allowed.
 - `copy_on_select`: copy a mouse selection to the clipboard on release (default
   `true`). Set `false` to leave the clipboard untouched while keeping the selection
-  visible; `terminal.copy` (Cmd+C/Ctrl+Shift+C) still copies it. On Linux, terminal
-  selections always set PRIMARY, independently of this setting. Middle-click
-  pastes PRIMARY on Linux, does nothing on macOS, and pastes the clipboard on
-  Windows. Programs that capture the mouse still receive middle-clicks.
+  visible; `terminal.copy` (Cmd+C/Ctrl+Shift+C) still copies it. Where Linux
+  supports PRIMARY, terminal selections set it independently of this setting
+  and middle-click pastes it. On Wayland without PRIMARY support, middle-click
+  pastes clipboard text. Middle-click pastes the clipboard on Windows and does
+  nothing on macOS. Programs that capture the mouse still receive middle-clicks.
   Hold Shift while dragging in programs that capture the mouse.
 - `pane_scrollbars`: `false` hides the scroll position thumb at a terminal
   pane's right edge (default `true`). It shows only when the pane has
