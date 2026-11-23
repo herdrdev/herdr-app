@@ -169,7 +169,7 @@ Pin an agent to the top of the agent lists (pinned true) or unpin it (false). Pi
 
 ## `terminal.kill`
 
-End a terminal and its sub-agents.
+End a terminal and its sub-agents. Spare branches whose first sub-agent has a pane or a herdr.space label. Core still applies parent-lifetime rules.
 
 | Argument | Required |
 |---|---|

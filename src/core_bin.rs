@@ -8,7 +8,9 @@
 //! unrelated `hc`.
 
 use std::path::{Path, PathBuf};
-use std::process::{Command, Stdio};
+#[cfg(any(target_os = "macos", all(test, unix)))]
+use std::process::Command;
+use std::process::Stdio;
 use std::sync::Mutex;
 use std::time::Duration;
 
@@ -174,7 +176,7 @@ fn login_shell_path() -> Option<std::ffi::OsString> {
         return None;
     }
     let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".into());
-    let mut child = Command::new(shell)
+    let mut child = crate::spawn::detached_command(shell)
         .args(["-lc", "printf 'herdr-path[%s]herdr-path' \"$PATH\""])
         .stdin(Stdio::null())
         .stdout(Stdio::piped())
