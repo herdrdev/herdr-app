@@ -1,5 +1,4 @@
 #!/bin/sh
-# Shared by startup core discovery and the Settings preflight check.
 check() {
     for f do
         # WSL interop can run a Windows hc.exe; it is not a guest core.

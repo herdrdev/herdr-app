@@ -746,29 +746,21 @@ What's about the user, never a look:
   agents, shell and local mod commands (`home()`, `exec`, `files`). Absent
   uses Windows itself. Available in Settings → Machines on the This computer
   row. Choose Restart (or run `app.restart`) to apply a selection; no
-  downloaded update is needed. Until then the current environment stays
-  active. The app and its
-  configuration (`appHome()`) stay on Windows. Startup discovery distinguishes
-  an unreachable distribution (retry after it starts) from missing hc (install
-  it in that distribution). Environment probes retry after
-  a five-second failure backoff; WSL discovery, path conversion, installation
-  and version checks stop after 30 seconds instead of waiting indefinitely.
-  Setup retries and executable checks run in the background; while one is pending,
-  Setup shows progress and prevents duplicate actions without blocking the window.
-  Successful path conversions are cached (up to 512 entries per process);
-  restarting clears the cache. Guest paths still use the direct fast path.
+  downloaded update is needed. The selection is saved at once; until restart
+  the current environment stays active. The app and its configuration
+  (`appHome()`) stay on Windows.
+  If the distribution can't be reached, start it and choose Retry in Setup.
+  If `hc` is missing, choose Install it for me to install it there. Choose
+  Continue without WSL to go back to Windows.
   WSL file links expand only `$HOME` and `$PWD`, never Windows environment
   variables. Local `file://` links resolve in the selected distribution too.
   `HC_SESSION` is passed explicitly to guest commands, preserving the selected core session.
   Settings reports distro-list failures without clearing your selection.
   After three failed WSL reconnects, a Waiting for WSL notification appears;
   retries back off from one to at most five seconds between attempts.
-  Choosing a distribution saves it at once; the next start applies it, and
-  Setup then installs `hc` in it (Install it for me) or offers Retry, with
-  Continue without WSL on every screen. WSL stops an idle distribution after
-  15 seconds (`instanceIdleTimeout` in `.wslconfig`; set it to -1 to keep one
-  running), so closing the window ends that distribution's terminals, like
-  `wsl --shutdown`.
+  WSL stops an idle distribution after 15 seconds (`instanceIdleTimeout` in
+  `.wslconfig`; set it to -1 to keep one running), so closing the window ends
+  that distribution's terminals, like `wsl --shutdown`.
 - `worktrees`: `{ "directory": "~/Developer/worktrees" }` sets where the shipped
   New worktree dialog creates checkouts: `<directory>/<repo>/<branch>` (branch
   slashes become dashes). Default: `~/.herdr/worktrees`. Use an absolute path or

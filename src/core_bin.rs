@@ -36,10 +36,7 @@ pub fn path() -> PathBuf {
 
 /// A command that runs the active `herdr-core` (on the host or inside WSL).
 pub fn command() -> Command {
-    command_for(&path())
-}
-
-fn command_for(bin: &Path) -> Command {
+    let bin = path();
     if crate::wsl::active().is_some() {
         crate::wsl::command(bin, None)
     } else {
@@ -128,8 +125,8 @@ pub fn version(bin: &Path) -> Option<String> {
     if crate::wsl::active().is_some() {
         return crate::wsl::version(bin).ok().flatten();
     }
-    let out = command_for(bin).arg("--version").stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
-    let text = crate::wsl::decode_output(&out.stdout).trim().to_owned();
+    let out = crate::spawn::command(bin).arg("--version").stdin(Stdio::null()).stderr(Stdio::null()).output().ok()?;
+    let text = String::from_utf8_lossy(&out.stdout).trim().to_owned();
     (out.status.success() && text.starts_with("hc ")).then_some(text)
 }
 

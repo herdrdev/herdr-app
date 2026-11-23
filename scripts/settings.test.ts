@@ -11,7 +11,12 @@ function harness(raw: string | null = null, writeError?: string, readError?: str
   const Settings = new Function("View", "window", "appHome", "readTextFile", "writeTextFile", "exec", "notify", `${source}; return Settings;`)(
     class {}, () => ({ platform: "windows" }), () => "C:/fixture/app",
     async () => { if (readError) throw new Error(readError); return raw; },
-    async (...args: unknown[]) => { writes.push(args); if (writeError) throw new Error(writeError); raw = args[1] as string; },
+    async (path: string, text: string, expected: string | null) => {
+      writes.push([path, text, expected]);
+      if (writeError) throw new Error(writeError);
+      if (expected !== raw) throw new Error("changed since read");
+      raw = text;
+    },
     async (command: string, args: string[]) => { commands.push([command, args]); return { code: 0, stdout: '{"machines":[]}', stderr: "" }; },
     (toast: unknown) => { toasts.push(toast); },
   );
