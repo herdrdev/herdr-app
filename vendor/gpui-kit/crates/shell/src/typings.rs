@@ -3044,8 +3044,9 @@ const BASE: &str = r#"  /** A row. */
   /**
    * Where a scroll area is, read from its handle. Lengths are in the pixels a
    * script writes, so a row written `.h(30)` moves `offset()` by 30 at any zoom.
-   * Sizes use the last layout's zoom, including while the area is hidden.
-   * Divide event positions by the current zoom after the area has laid out.
+   * Values are the last layout's, kept while the area is hidden; a `scroll_to_*`
+   * request shows here once it has run. Event positions and `on_size_change` sizes
+   * are window px: divide them by `settings().zoom` before mixing them with these.
    * Read in an event handler or a task after layout. All zero before the first frame.
    */
   export interface ScrollPosition {
