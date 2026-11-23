@@ -45,7 +45,11 @@ herdr-app do space.new --name api --folder /path/to/api
 herdr-app do tab.new --name "fix login" --argv '["claude"]' --task "Look at the login bug"
 herdr-app do pane.split --direction right --pane p12
 herdr-app do agent.focus --terminal t7
+herdr-app do agent.select --index 3
 ```
+
+`agent.select` uses the same navigation order as `agent.next` (1 = first).
+In `keys.json`, `agent.select:3` selects the third agent in that order.
 
 For a remote space:
 
@@ -117,10 +121,14 @@ the exit code and last output lines.
 
 A terminal started with hc opts into the window with `herdr.space=<id>`.
 `herdr.tab=<id>` chooses its tab; without it, Herdr creates a tab in that space.
-Unlabeled workers stay hidden. Do not add labels just to run a background
-worker. Use app commands when the
-user wants to see a new tab or split, hc for orchestration that need not change
-the screen.
+Workers without a label or a pane stay hidden. Do not add labels just to run a
+background worker. Use app commands when the user wants to see a new tab or
+split, hc for orchestration that need not change the screen.
+
+Closing a pane, tab or space ends the terminals in it. Core ends their dependent
+children and keeps children started with `--outlive-parent` running. `terminal.kill`
+also follows the sub-agent tree, stopping at any child with a pane or a
+`herdr.space` label. Core still applies parent-lifetime rules to every exit.
 
 ## Customize layouts, keys, or mods
 
@@ -141,8 +149,10 @@ those files or the generated guide. The app rewrites them on start.
   branches become dashes). Use an absolute path or `~` / `~/...`, resolved on the
   space's machine. Read on dialog open; existing checkouts stay put. No clones
   needed, and the app does not read the TUI's config.toml.
-- Mods live in `mods/<name>/` with `main.js` and optional `mod.json`.
-  They are trusted JavaScript with command and network access.
+- Mods live in `mods/<name>/` with `main.js` for a view or `link.js` for
+  Ctrl/Cmd-clicked terminal links. They are trusted JavaScript with command
+  and network access. `mod.json` declares link rules. A personal layout's
+  root `link_handlers` array selects the mods and their order.
   `"focusable": true` in `mod.json` lets `pane.go` move onto a copy; it receives
   `"focus"` from `nextCommand()` and focuses its own keyboard handle.
 - A mod's `watchFolder(dir)` promise has `cancel()`; cancel it when the folder
@@ -169,9 +179,12 @@ herdr-app status
 herdr-app shot /tmp/mod.png   # then look at the picture
 ```
 
-`check` loads the mod and renders it once. It exits nonzero with the exact
-error. Its shared state starts empty and stays in memory; it leaves shared.json
-untouched. Its `init()` still runs: import `checking` from `"herdr"` and guard
+`check` loads and renders the mod's view if it has one. It validates link rules.
+For mods with link rules and standalone link mods, it checks the `handleLink`
+export in `link.js` without running the module.
+It exits nonzero with the exact error. Its shared state starts empty and stays
+in memory, leaving shared.json untouched. Its `init()` still runs: import
+`checking` from `"herdr"` and guard
 process side effects with `if (checking()) return;`. It is true throughout a
 check and false in a live window; `exec`, `hc` and `writeTextFile` still run
 and warn during checks. Never call a mod done without a passing check.

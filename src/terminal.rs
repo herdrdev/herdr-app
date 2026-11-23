@@ -63,12 +63,13 @@ pub fn hsla(c: Rgb) -> Hsla {
 
 #[derive(Clone, Debug, PartialEq)]
 enum LinkTarget {
-    External(links::Target),
+    External(links::Click),
     Terminal(String),
 }
 
 pub enum TerminalEvent {
     Peek(String),
+    Link(links::Click),
     TitleChanged,
     SelectionChanged,
     /// History scroll position changed enough for mods that watch `panes().scroll`.
@@ -100,6 +101,10 @@ impl ScrollMetrics {
             "from_bottom": self.from_bottom,
         })
     }
+}
+
+fn scroll_state_changed(previous: Option<u64>, current: Option<u64>) -> bool {
+    previous.map(|n| n > 0) != current.map(|n| n > 0)
 }
 
 /// What the canvas closures need, shared outside the entity so prepaint can resize.
@@ -138,8 +143,8 @@ struct Grid {
     track: Option<Bounds<Pixels>>,
     /// Each row's drawing by position, kept while the row is the same (`Rc`).
     painted: Vec<(Rc<Vec<vt::Cell>>, Vec<RowOp>, Option<usize>)>,
-    /// Font size, cell size, cell font, loaded fonts and ligature setting used to draw.
-    painted_with: (u32, Size<Pixels>, Font, u64, bool),
+    /// Font size, cell size, cell font, bold weight, loaded fonts and ligature setting used to draw.
+    painted_with: (u32, Size<Pixels>, Font, u16, u64, bool),
 }
 
 pub struct TerminalView {
@@ -157,10 +162,14 @@ pub struct TerminalView {
     selection_scroll: Option<Task<()>>,
     /// The terminal's folder, for links to relative paths.
     pub cwd: Option<PathBuf>,
+    pub link_handlers: Rc<RefCell<links::Handlers>>,
     /// The link under the pointer while the link modifier is held.
     link: Option<LinkTarget>,
     /// Right-clicks go to the program when it takes the mouse (Shift: the menu).
     pub right_click_to_program: bool,
+    /// Files on their way to this terminal's machine for over a second: what
+    /// the pane says meanwhile, by send.
+    sending: Vec<(u64, &'static str)>,
     grid: Rc<RefCell<Grid>>,
     focus: FocusHandle,
     was_focused: bool,
@@ -306,8 +315,10 @@ impl TerminalView {
             selection_pointer: Point::default(),
             selection_scroll: None,
             cwd: None,
+            link_handlers: Rc::default(),
             link: None,
             right_click_to_program: false,
+            sending: Vec::new(),
             grid: Rc::new(RefCell::new(Grid {
                 vt: Vt::new(size_hint.0.max(2), size_hint.1.max(1)),
                 core: core.clone(),
@@ -328,7 +339,7 @@ impl TerminalView {
                 thumb: None,
                 track: None,
                 painted: Vec::new(),
-                painted_with: (0, Size::default(), font(""), 0, false),
+                painted_with: (0, Size::default(), font(""), 0, 0, false),
             })),
             focus: cx.focus_handle(),
             was_focused: false,
@@ -609,7 +620,7 @@ impl TerminalView {
                 });
             })));
         }
-        self.publish_scroll_if_changed(false, cx);
+        self.publish_scroll_if_changed(cx);
         // Output in a terminal nobody sees doesn't redraw the window; it's
         // drawn fresh when shown again. Nor does output that changed nothing
         // on screen (an agent spinning its title).
@@ -721,6 +732,25 @@ impl TerminalView {
             return drag_paths::unavailable(body);
         }
         let addr = self.address.clone();
+        static SENDS: AtomicU64 = AtomicU64::new(0);
+        let send = SENDS.fetch_add(1, Ordering::Relaxed);
+        let label = match (copies, paths.len()) {
+            (true, _) => "Sending image…",
+            (false, 1) => "Sending file…",
+            _ => "Sending files…",
+        };
+        let done = Rc::new(Cell::new(false));
+        let shown = done.clone();
+        cx.spawn(async move |this, cx| {
+            cx.background_executor().timer(Duration::from_secs(1)).await;
+            if !shown.get() {
+                let _ = this.update(cx, |this, cx| {
+                    this.sending.push((send, label));
+                    cx.notify();
+                });
+            }
+        })
+        .detach();
         cx.spawn(async move |this, cx| {
             let (there, refused) = cx
                 .background_executor()
@@ -744,7 +774,11 @@ impl TerminalView {
                     (there, refused)
                 })
                 .await;
+            // A closed pane is gone here: its paths go nowhere.
             let _ = this.update(cx, |this, cx| {
+                done.set(true);
+                this.sending.retain(|(s, _)| *s != send);
+                cx.notify();
                 if !there.is_empty() {
                     this.paste_paths(there);
                 }
@@ -851,7 +885,7 @@ impl TerminalView {
         }
         drop(grid);
         self.selection_changed(cx);
-        self.publish_scroll_if_changed(true, cx);
+        self.publish_scroll_if_changed(cx);
         self.copy_primary(cx);
         cx.notify();
         Ok(())
@@ -934,6 +968,7 @@ impl TerminalView {
         if self.grid.borrow().vt.search_progress().complete {
             self.pending_search_nav = None;
             if self.grid.borrow_mut().vt.search_navigate(previous) {
+                self.publish_scroll_if_changed(cx);
                 cx.notify();
             }
         } else {
@@ -968,6 +1003,7 @@ impl TerminalView {
                 let busy = !grid.vt.search_progress().complete || this.pending_search_nav.is_some();
                 drop(grid);
                 if changed {
+                    this.publish_scroll_if_changed(cx);
                     cx.notify();
                 }
                 Some(if busy { Duration::from_millis(33) } else { Duration::from_millis(200) })
@@ -1030,7 +1066,7 @@ impl TerminalView {
             g.vt.scroll_viewport(if up { -(n as isize) } else { n as isize });
         }
         drop(g);
-        self.publish_scroll_if_changed(true, cx);
+        self.publish_scroll_if_changed(cx);
         cx.notify();
     }
 
@@ -1045,7 +1081,7 @@ impl TerminalView {
             ScrollTarget::Bottom => g.vt.scroll_to_bottom(),
         }
         drop(g);
-        self.publish_scroll_if_changed(true, cx);
+        self.publish_scroll_if_changed(cx);
         cx.notify();
     }
 
@@ -1060,16 +1096,11 @@ impl TerminalView {
         Some(ScrollMetrics { total: sb.total, offset: sb.offset, len: sb.len, from_bottom })
     }
 
-    fn publish_scroll_if_changed(&mut self, user_scroll: bool, cx: &mut Context<Self>) {
+    fn publish_scroll_if_changed(&mut self, cx: &mut Context<Self>) {
         let from_bottom = self.scroll_metrics().map(|m| m.from_bottom);
         let previous = self.published_from_bottom;
         self.published_from_bottom = from_bottom;
-        let changed = if user_scroll {
-            from_bottom != previous
-        } else {
-            from_bottom.map(|n| n > 0) != previous.map(|n| n > 0)
-        };
-        if changed {
+        if scroll_state_changed(previous, from_bottom) {
             cx.emit(TerminalEvent::ScrollChanged);
         }
     }
@@ -1114,17 +1145,28 @@ impl TerminalView {
         let g = self.grid.borrow();
         let (x, y) = local(&g, pos);
         let (col, row) = (x / f32::from(g.cell.width), y / f32::from(g.cell.height));
+        let active = self.link_handlers.borrow();
+        let cwd = self.cwd.as_deref();
+        let remote = self.address.contains('/');
         let mut target = None;
-        let hit = g.vt.link_at(col as u16, row as u16, |text, at, joined| {
-            // In lines joined back together only a file that exists proves the join right.
-            if let Some(range) = links::find(text, at)
-                && let Some(link) = links::resolve(&text[range.clone()], self.cwd.as_deref())
-                && (!joined || matches!(link, links::Target::File(_)))
-            {
-                target = Some(LinkTarget::External(link));
-                return Some(range);
+        use vt::LinkScan;
+        let hit = g.vt.link_at(col as u16, row as u16, |text, at, scan| {
+            if scan == LinkScan::Unresolved && active.is_empty() {
+                return None;
             }
-            if joined {
+            if let Some(range) = links::find(text, at) {
+                let link = links::resolve(&text[range.clone()], cwd);
+                let eligible = match scan {
+                    LinkScan::Plain => link.native.is_some(),
+                    LinkScan::Joined => matches!(link.native, Some(links::Target::File(_))),
+                    LinkScan::Unresolved => link.native.is_none(),
+                };
+                if eligible {
+                    target = Some(LinkTarget::External(link.click(remote, &active)?));
+                    return Some(range);
+                }
+            }
+            if scan != LinkScan::Plain {
                 return None;
             }
             let range = links::word(text, at)?;
@@ -1132,8 +1174,8 @@ impl TerminalView {
             target = Some(LinkTarget::Terminal(address));
             Some(range)
         })?;
-        // OSC 8 links bypass text detection.
-        let target = target.or_else(|| links::resolve(&hit.target, self.cwd.as_deref()).map(LinkTarget::External))?;
+        // OSC 8 bypasses text detection. The URI is already the full destination.
+        let target = target.or_else(|| links::resolve(&hit.target, cwd).click(remote, &active).map(LinkTarget::External))?;
         Some((target, hit.spans))
     }
 
@@ -1157,7 +1199,7 @@ impl TerminalView {
                         g.vt.scroll_viewport(lines);
                         drop(g);
                         this.select(Select::Drag, this.selection_pointer, cx);
-                        this.publish_scroll_if_changed(true, cx);
+                        this.publish_scroll_if_changed(cx);
                     }
                     true
                 }).unwrap_or(false);
@@ -1741,8 +1783,9 @@ fn ligature_features(enabled: bool) -> FontFeatures {
 fn cell_font(bold: bool, italic: bool) -> Font {
     let mut f = font(crate::settings::terminal_font());
     f.features = ligature_features(false);
-    let weight = crate::settings::get().font_weight.clamp(100, 900);
-    f.weight = if bold { FontWeight::BOLD } else { FontWeight(weight as f32) };
+    let s = crate::settings::get();
+    let weight = if bold { s.font_weight_bold } else { s.font_weight }.clamp(100, 900);
+    f.weight = FontWeight(weight as f32);
     f.style = if italic { FontStyle::Italic } else { FontStyle::Normal };
     f
 }
@@ -2128,8 +2171,8 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     // line rebuilds one row, not the whole screen.
     let ligatures = crate::settings::get().font_ligatures;
     let cursor = frame.cursor_cell.filter(|_| ligatures);
-    // The whole cell font, so a weight change redraws kept rows too.
-    let with = (crate::settings::font_size().to_bits(), cell, cell_font(false, false), crate::settings::fonts_added(), ligatures);
+    // The whole cell font and the bold weight, so a weight change redraws kept rows too.
+    let with = (crate::settings::font_size().to_bits(), cell, cell_font(false, false), crate::settings::get().font_weight_bold, crate::settings::fonts_added(), ligatures);
     // When every row changed (output scrolling), nothing is kept: the next
     // frame would find none of them the same.
     let mut painted = std::mem::take(&mut grid.borrow_mut().painted);
@@ -2397,7 +2440,7 @@ impl EntityInputHandler for TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
-        self.publish_scroll_if_changed(false, cx);
+        self.publish_scroll_if_changed(cx);
         crate::bench::count(&crate::bench::TERMINAL);
         let terminal_focused = self.focus.is_focused(window);
         if terminal_focused {
@@ -2494,7 +2537,12 @@ impl Render for TerminalView {
                     && let Some((target, _)) = this.link_at(ev.position)
                 {
                     match target {
-                        LinkTarget::External(target) => links::open(&target),
+                        LinkTarget::External(click) if !click.handlers.is_empty() => cx.emit(TerminalEvent::Link(click)),
+                        LinkTarget::External(click) => {
+                            if let Some(target) = click.native {
+                                links::open(&target);
+                            }
+                        }
                         LinkTarget::Terminal(address) => cx.emit(TerminalEvent::Peek(address)),
                     }
                     return;
@@ -2512,7 +2560,7 @@ impl Render for TerminalView {
                         g.vt.scroll_to_row(scrollbar_row_at(sb.total, sb.len, f32::from(track.size.height), min, top));
                     }
                     drop(g);
-                    this.publish_scroll_if_changed(true, cx);
+                    this.publish_scroll_if_changed(cx);
                     cx.notify();
                     cx.stop_propagation();
                     return;
@@ -2580,7 +2628,7 @@ impl Render for TerminalView {
                                         let top = f32::from(ev.position.y - g.origin.y) - this.scrollbar_grab.unwrap_or(0.0);
                                         g.vt.scroll_to_row(scrollbar_row_at(sb.total, sb.len, track, min, top));
                                         drop(g);
-                                        this.publish_scroll_if_changed(true, cx);
+                                        this.publish_scroll_if_changed(cx);
                                         cx.notify();
                                         return;
                                     }
@@ -2719,6 +2767,21 @@ impl Render for TerminalView {
                         .child(format!("[{why}]")),
                 )
             })
+            .when_some(self.sending.last(), |d, (_, label)| {
+                d.child(
+                    div()
+                        .absolute()
+                        .bottom_2()
+                        .left_3()
+                        .px_2()
+                        .py_1()
+                        .rounded_md()
+                        .bg(crate::settings::color("raised"))
+                        .text_color(hsla(vt::theme().fg))
+                        .text_xs()
+                        .child(*label),
+                )
+            })
     }
 }
 
@@ -2730,16 +2793,26 @@ impl Focusable for TerminalView {
 
 #[cfg(test)]
 mod tests {
-    use super::{ScrollTarget, pages_to_lines, scroll_target};
+    use super::{ScrollTarget, pages_to_lines, scroll_target, scroll_state_changed};
     use serde_json::{Value, json};
 
     #[test]
-    fn scroll_from_bottom_is_zero_at_end_and_grows_into_history() {
-        let at_end = |total: u64, offset: u64, len: u64| total.saturating_sub(offset.saturating_add(len));
-        assert_eq!(at_end(100, 80, 20), 0);
-        assert_eq!(at_end(100, 70, 20), 10);
-        assert_eq!(at_end(20, 0, 20), 0);
-        assert_eq!(at_end(100, 0, 20), 80);
+    fn scroll_refreshes_only_when_leaving_or_reaching_end_or_alternate_screen() {
+        for (previous, current, changed) in [
+            (Some(0), Some(10), true),
+            (Some(10), Some(0), true),
+            (Some(10), Some(20), false),
+            (Some(20), Some(10), false),
+            (Some(0), Some(0), false),
+            (Some(10), Some(10), false),
+            (Some(0), None, true),
+            (Some(10), None, true),
+            (None, Some(0), true),
+            (None, Some(10), true),
+            (None, None, false),
+        ] {
+            assert_eq!(scroll_state_changed(previous, current), changed, "{previous:?} -> {current:?}");
+        }
     }
 
     #[test]
@@ -2778,6 +2851,42 @@ mod tests {
         }
         assert!(ended);
         assert!(rx.is_closed() && rx.is_empty());
+    }
+
+    #[gpui::test]
+    fn terminal_link_scans_keep_peeks_and_verified_joins_ahead_of_missing_paths(cx: &mut gpui::TestAppContext) {
+        use super::{LinkTarget, TerminalView};
+        use crate::{links, mods};
+        use gpui::*;
+
+        let cwd = std::env::temp_dir().join(format!("herdr-terminal-link-scan-{}", std::process::id()));
+        let joined = cwd.join("./abc/defg/x.png");
+        std::fs::create_dir_all(joined.parent().unwrap()).unwrap();
+        std::fs::write(&joined, "").unwrap();
+        let view = cx.new(|cx| TerminalView::attach(crate::hc::offline(), "t1".into(), (18, 5), cx));
+        view.update(cx, |view, _| {
+            view.cwd = Some(cwd.clone());
+            view.grid.borrow_mut().vt.write(b"./gone.png\r\npeer.test/t7\r\n  see ./abc/de\r\n  fg/x.png ok");
+            let hit = |view: &TerminalView, col: f32, row: f32| {
+                view.link_at(point(px(9.0 * col + 1.0), px(18.0 * row + 1.0))).map(|(target, _)| target)
+            };
+            assert!(hit(view, 6.0, 0.0).is_none());
+
+            let rules: Vec<links::Rule> = serde_json::from_value(json!([{"kind":"file","pattern":"."}])).unwrap();
+            view.link_handlers.borrow_mut().push(("viewer".into(), rules.into()));
+            let Some(LinkTarget::External(missing)) = hit(view, 6.0, 0.0) else { panic!("missing link handler") };
+            assert_eq!(missing.handlers[0].1, json!({"kind":"file", "raw":"./gone.png", "path":null}));
+            assert!(missing.native.is_none());
+
+            mods::publish_terminals(json!([{"address":"peer.test/t7"}]));
+            assert!(matches!(hit(view, 7.0, 1.0), Some(LinkTarget::Terminal(address)) if address == "peer.test/t7"));
+            mods::publish_terminals(json!([]));
+
+            let Some(LinkTarget::External(file)) = hit(view, 5.0, 3.0) else { panic!("missing joined link") };
+            assert_eq!(file.handlers[0].1["raw"], "./abc/defg/x.png");
+            assert_eq!(file.native, Some(links::Target::File(joined)));
+        });
+        std::fs::remove_dir_all(cwd).unwrap();
     }
 
     #[gpui::test]
