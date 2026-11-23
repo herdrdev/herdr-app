@@ -76,7 +76,7 @@ export function playSound(sound: string): null;
  *   terminal.select_all {terminal?} (whole screen and scrollback, or only the alternate screen; Cmd+A on macOS).
  *   terminal.right_click {to: "program" | "menu", terminal?} (right-clicks to a program that takes the mouse; Shift: the menu).
  *   terminal.scroll {lines | pages | to: "top" | "bottom", terminal?} (Herdr's view of the history: negative goes up; pages may be fractional).
- * Agents: agent.next, agent.prev (the agents list's order), agent.focus {terminal} (sub-agents too).
+ * Agents: agent.next, agent.prev, agent.select {index} (1 = first), agent.focus {terminal} (sub-agents too).
  * Layout (the shown layout's nodes by id): layout.toggle|show|hide {id}, layout.resize {id, px | weight},
  *   layout.select {stack, child}, layout.set {layout} (personal trees; shipped layouts: click/look fields only), layout.switch {name?} (no name: the next one).
  *   layout.clone {name, as?} duplicates and switches; mod.clone {name, as?} duplicates a mod.
@@ -237,9 +237,10 @@ export interface PaneInfo {
  *  `panes().find((p) => p.pane === props().pane)`. Live. */
 export function panes(): PaneInfo[];
 
-/** Sets agent.next / agent.prev order to match the list a mod displays.
- *  Call when rendering the list. In memory only; missing agents are ignored, new agents
- *  are appended in model order. Without a supplied order, navigation uses model order. */
+/** Sets the navigation order for agent.next, agent.prev and agent.select.
+ *  Call when rendering the list. The last order stays in memory until another call or app restart.
+ *  Missing agents drop out of the order. Unlisted agents follow in model order.
+ *  Without a supplied order, navigation uses model order. */
 export function setAgentOrder(addresses: string[]): null;
 
 /** Every core terminal as `hc ls --json` describes it (address, argv, name, template, parent,
@@ -287,9 +288,17 @@ export function layouts(): string[];
  *  Mods' own `<mod>.<command>`s aren't listed. */
 export function commands(): { name: string; args: { name: string; required: boolean }[]; about: string }[];
 
-/** The window, for layouts that draw their own title bar (`"titlebar": "none"`). `buttons`:
- *  the system draws no window buttons, so draw them (`window.minimize`, `window.maximize`,
- *  `window.close`); on macOS the traffic lights always stay. Live. */
+/** Live state of the window. With `"titlebar": "none"`, layouts draw their own title bar.
+ *  When `buttons` is true, draw window controls using `window.minimize`, `window.maximize`
+ *  and `window.close`. On macOS the system traffic lights stay.
+ *
+ *  `visible` reports whether the platform is presenting the window. On macOS it is false
+ *  when minimized, hidden, fully covered, on another Space or on a sleeping display.
+ *  On Windows it is false when minimized or hidden. On X11 it is false when unmapped,
+ *  and may be false when fully covered, depending on the window manager. On Wayland it
+ *  stays true unless the compositor reports the xdg-shell `suspended` state (v6 or newer).
+ *  Check it from a timer to pause work when false and use `render` to restart when true.
+ *  Null when there is no window (during `herdr-app check`): read it as `window()?.visible`. */
 export function window(): {
   platform: "linux" | "macos" | "windows";
   titlebar: "system" | "none";
@@ -297,6 +306,7 @@ export function window(): {
   maximized: boolean;
   fullscreen: boolean;
   active: boolean;
+  visible: boolean;
 };
 
 /** Sets the OS window's title, which window switchers, taskbars and time trackers read. The last
@@ -444,7 +454,15 @@ export function notify(n: {
 export interface LinkClick {
   link:
     | { kind: "url"; raw: string; url: string }
-    | { kind: "file"; raw: string; path: string | null };
+    | {
+        kind: "file";
+        raw: string;
+        path: string | null;
+        /** 1-based line from a plain path suffix, if present and valid. */
+        line?: number;
+        /** 1-based column from a plain path suffix, if present and valid and the line is valid. */
+        column?: number;
+      };
   source: {
     terminal: string;
     machine: string | null;
@@ -491,7 +509,7 @@ export function nextCommand(): Promise<string>;
  * Idle watches may be reclaimed to make room; reload when starting a watch.
  * Call cancel() on the returned promise when you stop showing the folder.
  * It resolves with [] and releases this call; other callers keep watching.
- * Closing a mod copy cancels its pending calls. Files also refreshes on its 10-second timer.
+ * Closing a mod copy cancels its pending calls. Files and Changes also poll while focused.
  *   cx.spawn(async (cx) => { for (;;) { await watchFolder(dir); this.reload(); cx.notify(); } });
  * Watch what you show, not a whole home folder (node_modules is a lot of events).
  */
