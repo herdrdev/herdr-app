@@ -387,6 +387,7 @@ The tab block says how each pane of the shown tab is wrapped:
             "lone": false } }
 ```
 
+- `corner_cut`: optional cut in pixels for an angled decorative border. It takes precedence over `radius`; pane content and background stay rectangular, so use terminal padding to keep content away from corners.
 - The look applies to every pane; `focus` replaces the border while the
   pane has the keyboard; `gap` is the space between panes.
 - `header`: a mod drawn on each pane, one copy per pane, with

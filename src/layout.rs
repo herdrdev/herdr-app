@@ -273,6 +273,9 @@ pub struct PaneFrame {
     pub focus: Option<Line>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub radius: Option<f32>,
+    /// Decorative corner cut in logical pixels; terminal contents remain rectangular.
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub corner_cut: Option<f32>,
     /// Space between panes.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub gap: Option<f32>,
@@ -799,6 +802,15 @@ mod tests {
         assert!(matches!(&n.find("b").unwrap().background, Some(Background::Image { fit: Fit::Cover, .. })));
         let back: Node = serde_json::from_str(&serde_json::to_string(&n).unwrap()).unwrap();
         assert_eq!(back, n);
+    }
+
+    #[test]
+    fn pane_corner_cut_round_trips_and_defaults_to_absent() {
+        let original: PaneFrame = serde_json::from_str(r#"{"radius":10}"#).unwrap();
+        assert_eq!(original.corner_cut, None);
+        let frame: PaneFrame = serde_json::from_str(r#"{"corner_cut":8,"border":{"width":1,"color":"border"}}"#).unwrap();
+        assert_eq!(frame.corner_cut, Some(8.0));
+        assert_eq!(serde_json::from_str::<PaneFrame>(&serde_json::to_string(&frame).unwrap()).unwrap(), frame);
     }
 
     #[test]
