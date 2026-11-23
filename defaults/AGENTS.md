@@ -1108,6 +1108,15 @@ in init, `.track_focus(this.h).on_key_down((e, cx) => …)`, `this.h.focus()`.
 in `init`, attach `.track_scroll(this.scroll)`, then call
 `this.scroll.scroll_to_item(index)` to reveal a zero-based direct child with
 only the movement needed. Requests run once after layout; visible children stay put.
+It also says where the area is, as does a virtual list's `VirtualListScrollHandle`:
+`offset()` (`{x, y}`, counted up from 0 at the start), `content_size()` and
+`viewport_size()` (`{width, height}`). They are in the px you write, whatever the
+zoom, and are the last layout's: all zero before the first frame, kept while the
+area is hidden, and a `scroll_to_*` request shows in them once it has run, not
+right away. `content_size()` includes padding and is never smaller than the viewport.
+The area is at the end when `offset().y + viewport_size().height >= content_size().height - 1`.
+Event positions and `on_size_change` sizes are window px: divide them by
+`settings().zoom` before mixing them with these. `list` and `uniform_list` take no handle.
 Lazy lists: `list` and `uniform_list` come from `gpui-kit`, where `div` is;
 `v_virtual_list` and `h_virtual_list` come from `gpui-base`. They need a
 definite height from their container: a `flex_1()` chain with no explicit

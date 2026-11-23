@@ -2230,7 +2230,14 @@ fn flex_element(
         });
     }
     let stateful = components::tooltip::with_tooltip(stateful, &behavior, window);
-    let scroll_handle = behavior.virtual_scroll.and_then(|handle| runtime.entities().scroll(handle));
+    let scroll_handle = behavior.virtual_scroll.filter(|_| scroll_x || scroll_y).and_then(|handle| {
+        let entities = runtime.entities();
+        let scroll = entities.scroll(handle)?;
+        if !checking() {
+            entities.record_scroll_layout(handle);
+        }
+        Some(scroll)
+    });
     if behavior.scrollbar {
         let mut stateful = stateful;
         stateful.style().refine(&refinement);
