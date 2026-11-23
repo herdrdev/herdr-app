@@ -92,7 +92,15 @@ jobs:
           work=$(mktemp -d)
           tar -xzf dist/herdr-app-rhel8-x86_64.tar.gz -C "$work"
           for bin in "$work/herdr-app/herdr-app" "$work/herdr-app/herdr-core"; do
-            max=$(objdump -T "$bin" | grep -o 'GLIBC_[0-9][0-9.]*' | sort -Vu | tail -1 | cut -d_ -f2)
+            max=$(objdump -T "$bin" | awk '
+              match($0, /GLIBC_[0-9][0-9.]*/) {
+                v = substr($0, RSTART + 6, RLENGTH - 6)
+                n = split(v, a, ".")
+                cur = a[1] * 1000000 + (n > 1 ? a[2] : 0) * 1000 + (n > 2 ? a[3] : 0)
+                if (cur > best) { best = cur; max = v }
+              }
+              END { print max }
+            ')
             echo "$(basename "$bin"): highest GLIBC symbol version required: $max"
             [ -n "$max" ] || { echo "no GLIBC symbols found in $bin; check objdump"; exit 1; }
             [ "$(printf '%s\n' "$max" 2.28 | sort -V | head -1)" = "$max" ] || { echo "$bin needs glibc newer than 2.28"; exit 1; }

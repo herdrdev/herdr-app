@@ -125,7 +125,8 @@ Publishing and a real RHEL 8 desktop smoke test remain separate decisions.
 | 1 | `ffeaf41` | https://github.com/shawn111/herdr-app/actions/runs/45259164686 | failed in `Bootstrap container tools`: `GPG check FAILED` (pinned AlmaLinux 8 image has only the old `C21AD6EA` key; current packages use newer keys) | Refresh `/etc/pki/rpm-gpg/RPM-GPG-KEY-AlmaLinux` from `https://repo.almalinux.org/almalinux/RPM-GPG-KEY-AlmaLinux` over HTTPS and `rpm --import` it before `dnf install` (no `nogpgcheck`). |
 | 2 | `3756df7` | https://github.com/shawn111/herdr-app/actions/runs/45259697562 | failed in `Keep unchanged sources fresh`: `fatal: detected dubious ownership in repository at '/__w/herdr-app/herdr-app'` (container root vs runner-owned workspace) | Add `git config --global --add safe.directory "$GITHUB_WORKSPACE"` after checkout. |
 | 3 | `cb80aaf` | https://github.com/shawn111/herdr-app/actions/runs/45260188232 | **success** (11m43s), app only: `ldd (GNU libc) 2.28`, `highest GLIBC symbol version required: 2.28`, tarball/notices/`--help` checks passed, artifact uploaded | None needed; next step is adding herdr-core. |
-| 4 | — | — | pending (app + herdr-core) | — |
+| 4 | `e526642` | https://github.com/shawn111/herdr-app/actions/runs/45276478949 | failed in `Check glibc floor`: exit 141 (SIGPIPE) from `objdump | grep | sort -Vu | tail -1 | cut` after printing glibc 2.28 | Replace pipeline with awk that reads full objdump output and computes max GLIBC version. |
+| 5 | — | — | pending | — |
 
 ## Risks / fallbacks
 
