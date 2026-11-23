@@ -6772,6 +6772,10 @@ globalThis.__gpui = (() => {
       }
       __scroll_to_item(handle, index);
     },
+    // HERDR: distances scrolled from the start, not GPUI's negative content offset.
+    offset: () => { const [x, y] = __scroll_offset(handle); return { x, y }; },
+    max_offset: () => { const [x, y] = __scroll_max_offset(handle); return { x, y }; },
+    set_offset: ({ x = 0, y = 0 } = {}) => __scroll_set_offset(handle, Number(x), Number(y)),
     release: () => __scroll_release(handle),
   });
 
@@ -7463,6 +7467,7 @@ impl ShellRuntime {
                 "key_context",
                 "aria_level",
                 "keep_mounted",
+                "capture_pointer",
                 "on_item_click",
                 "on_item_secondary_click",
                 "on_change",
@@ -8521,6 +8526,7 @@ impl ShellRuntime {
             | "key_context"
             | "aria_level"
             | "keep_mounted"
+            | "capture_pointer"
             | "tab_index"
             | "tab_stop"
             | "href"
@@ -8578,6 +8584,7 @@ impl ShellRuntime {
                     "key_context" => "key_context",
                     "aria_level" => "aria_level",
                     "keep_mounted" => "keep_mounted",
+                    "capture_pointer" => "capture_pointer",
                     "tab_index" => "tab_index",
                     "tab_stop" => "tab_stop",
                     "id" => "id",
