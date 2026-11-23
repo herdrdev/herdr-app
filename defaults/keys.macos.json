@@ -57,7 +57,16 @@
     "ctrl-6": "space.select:6",
     "ctrl-7": "space.select:7",
     "ctrl-8": "space.select:8",
-    "ctrl-9": "space.select:9"
+    "ctrl-9": "space.select:9",
+    "ctrl-shift-1": "agent.select:1",
+    "ctrl-shift-2": "agent.select:2",
+    "ctrl-shift-3": "agent.select:3",
+    "ctrl-shift-4": "agent.select:4",
+    "ctrl-shift-5": "agent.select:5",
+    "ctrl-shift-6": "agent.select:6",
+    "ctrl-shift-7": "agent.select:7",
+    "ctrl-shift-8": "agent.select:8",
+    "ctrl-shift-9": "agent.select:9"
   },
   "terminal": {
     "cmd-f": "terminal.search",

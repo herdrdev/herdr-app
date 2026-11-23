@@ -3555,6 +3555,17 @@ impl AppWindow {
                 }
                 self.focus_agent(&t);
             }
+            "agent.select" => {
+                // By position in the order the agents list shows (1 = first).
+                let t = Self::owned(a, "terminal").or_else(|| {
+                    let i = a.get("index").and_then(Value::as_u64)? as usize;
+                    self.agent_order().get(i.checked_sub(1)?).cloned()
+                });
+                match t.filter(|t| self.live.contains_key(t)) {
+                    Some(t) => self.focus_agent(&t),
+                    None => return self.fail("no such agent"),
+                }
+            }
             "agent.next" | "agent.prev" => {
                 let order = self.agent_order();
                 if order.is_empty() {

@@ -76,7 +76,7 @@ export function playSound(sound: string): null;
  *   terminal.select_all {terminal?} (whole screen and scrollback, or only the alternate screen; Cmd+A on macOS).
  *   terminal.right_click {to: "program" | "menu", terminal?} (right-clicks to a program that takes the mouse; Shift: the menu).
  *   terminal.scroll {lines | pages | to: "top" | "bottom", terminal?} (Herdr's view of the history: negative goes up; pages may be fractional).
- * Agents: agent.next, agent.prev (the agents list's order), agent.focus {terminal} (sub-agents too).
+ * Agents: agent.next, agent.prev, agent.select {index | terminal} (the agents list's order), agent.focus {terminal} (sub-agents too).
  * Layout (the shown layout's nodes by id): layout.toggle|show|hide {id}, layout.resize {id, px | weight},
  *   layout.select {stack, child}, layout.set {layout} (personal trees; shipped layouts: click/look fields only), layout.switch {name?} (no name: the next one).
  *   layout.clone {name, as?} duplicates and switches; mod.clone {name, as?} duplicates a mod.
@@ -237,7 +237,7 @@ export interface PaneInfo {
  *  `panes().find((p) => p.pane === props().pane)`. Live. */
 export function panes(): PaneInfo[];
 
-/** Sets agent.next / agent.prev order to match the list a mod displays.
+/** Sets agent.next / agent.prev / agent.select order to match the list a mod displays.
  *  Call when rendering the list. In memory only; missing agents are ignored, new agents
  *  are appended in model order. Without a supplied order, navigation uses model order. */
 export function setAgentOrder(addresses: string[]): null;

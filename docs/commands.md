@@ -382,6 +382,15 @@ Show an agent (sub-agents too).
 |---|---|
 | `terminal` | yes |
 
+## `agent.select`
+
+Show an agent (by position in the agents list's order, or terminal).
+
+| Argument | Required |
+|---|---|
+| `index` | no |
+| `terminal` | no |
+
 ## `agent.next`
 
 Show the next agent, in the order the agents list shows them.
