@@ -832,4 +832,12 @@ mod tests {
         // 0.10 is newer than 0.9 (numbers, not text).
         assert!(semver("0.10.0") > semver("0.9.3"));
     }
+
+    #[test]
+    fn cores_without_the_new_child_lifetime_default_require_an_update() {
+        for have in ["0.1.11", "0.1.12"] {
+            assert!(matches!(check(&hello(GENERATION, have, USES)), Err(Mismatch::TooOld { .. })));
+        }
+        assert_eq!(check(&hello(GENERATION, core_min(), USES)), Ok(()));
+    }
 }

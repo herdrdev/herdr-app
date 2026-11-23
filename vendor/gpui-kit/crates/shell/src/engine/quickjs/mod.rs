@@ -1535,6 +1535,130 @@ impl ShellRuntime {
         *self.source_revision.borrow_mut() = Some(Box::new(provider));
     }
 
+    // HERDR: terminal links can be checked without running mod code.
+    /// Compiles a module and checks a named export without evaluating the module.
+    pub fn check_module(directory: &Path, entry: &str, export: &str) -> Result<()> {
+        let runtime = Self::new_isolated()?;
+        let (root, dependencies) = prepare_module(&runtime.dependency_store, directory, entry)?;
+        let lease = runtime.app_modules.register_with_dependencies(root.clone(), dependencies);
+        let name = module_name(&root, ".herdr-check.js", &lease);
+        let specifier = serde_json::to_string(&format!("./{entry}"))?;
+        let export = serde_json::to_string(export)?;
+        // QuickJS links every static import before evaluating the graph. This last
+        // import always fails to link, even after the requested export was found.
+        // Its name is fresh so an error from the mod cannot be mistaken for ours.
+        let nonce = std::hash::BuildHasher::hash_one(&std::hash::RandomState::new(), &name);
+        let stop = format!("__herdr_link_check_{nonce:016x}__");
+        let expected = format!("Could not find export '{stop}' in module 'gpui-shell'");
+        let source = format!("import {{ {export} as entry }} from {specifier};\n\
+            import {{ {stop} }} from 'gpui-shell';");
+        runtime.with_js(|ctx| {
+            match Module::declare(ctx.clone(), name, source)?.eval() {
+                Err(JsError::Exception) => {
+                    let error = ctx.catch();
+                    if error.as_exception().and_then(Exception::message).as_deref()
+                        == Some(expected.as_str())
+                    {
+                        Ok(())
+                    } else {
+                        Err(ctx.throw(error))
+                    }
+                }
+                Err(error) => Err(error),
+                Ok(_) => Err(Exception::throw_message(ctx, "module export check did not stop at linking")),
+            }
+        })
+    }
+
+    // HERDR: terminal link handlers run once per click, even without a view.
+    /// Invokes one export without mounting a view. The returned future owns the runtime
+    /// so dropping it on window close also cancels the script's pending host work.
+    pub fn call_module(
+        directory: &Path,
+        entry: &'static str,
+        export: &'static str,
+        argument: &serde_json::Value,
+        policy: Rc<Policy>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> impl std::future::Future<Output = Result<String>> + use<> {
+        let directory = directory.to_path_buf();
+        let prepare = cx.background_executor().spawn(async move {
+            prepare_module(&GitDependencyStore::for_user()?, &directory, entry)
+        });
+        let window = window.window_handle();
+        let mut app = cx.to_async();
+        let argument = argument.clone();
+        async move {
+            let (root, dependencies) = prepare.await?;
+            let call = window.update(&mut app, |_, window, cx| {
+                let runtime = Self::new_isolated()?;
+                let lease = runtime.app_modules.register_with_dependencies(root.clone(), dependencies);
+                runtime.invoke_module(&root, lease, entry, export, &argument, policy, window, cx)
+            })??;
+            call.await
+        }
+    }
+
+    fn invoke_module(
+        self: Rc<Self>,
+        root: &Path,
+        lease: ApplicationModuleLease,
+        entry: &str,
+        export: &str,
+        argument: &serde_json::Value,
+        policy: Rc<Policy>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<impl std::future::Future<Output = Result<String>> + use<>> {
+        let runtime = self;
+        let name = module_name(root, ".herdr-call.js", &lease);
+        let specifier = serde_json::to_string(&format!("./{entry}"))?;
+        let export = serde_json::to_string(export)?;
+        let source = format!(r#"
+            export async function invoke(arg, resolve, reject) {{
+                try {{
+                    const handler = (await import({specifier}))[{export}];
+                    if (typeof handler !== "function") throw new TypeError("Expected a function export " + {export});
+                    resolve(await handler(arg));
+                }} catch (error) {{
+                    reject(error);
+                }}
+            }}
+        "#);
+        let (tx, rx) = async_channel::bounded(1);
+        let reject = tx.clone();
+        let argument = serde_json::to_string(argument)?;
+        {
+            let (_scope, _) = scope::enter_with_application(
+                &runtime, window, cx, ScopePhase::Event, None, policy, None,
+            );
+            runtime.with_jit_suspended(|| runtime.with_js(|ctx| {
+                let (module, loaded) = Module::declare(ctx.clone(), name, source)?.eval()?;
+                loaded.finish::<()>()?;
+                let invoke: Function = module.get("invoke")?;
+                let resolve = Func::from(move |value: Value<'_>| {
+                    let result = value.as_string().and_then(|s| s.to_string().ok())
+                        .ok_or_else(|| "expected a string result".to_owned());
+                    let _ = tx.try_send(result);
+                });
+                let reject = Func::from(move |value: Value<'_>| {
+                    let ctx = value.ctx();
+                    let error = CodeError::capture(ctx, ctx.throw(value.clone()));
+                    let _ = reject.try_send(Err(error.to_string()));
+                });
+                invoke.call::<_, Value>((ctx.json_parse(argument)?, resolve, reject))?;
+                Ok(())
+            }))?;
+            scheduler::drain_jobs_transactionally(&runtime, window, cx)?;
+        }
+        Ok(async move {
+            let result = rx.recv().await.map_err(|_| anyhow!("module call ended without a result"))?;
+            drop((lease, runtime));
+            result.map_err(anyhow::Error::msg)
+        })
+    }
+
     /// Loads an application's JavaScript entry without exposing engine values.
     ///
     /// Reuses evaluated code for an unchanged revision, but returns a fresh
@@ -5382,6 +5506,26 @@ struct ApplicationModuleRegistration {
     sources: Rc<code_cache::SourceFiles>,
 }
 
+// HERDR: standalone entries use the same dependencies as views. Preparing
+// them needs no runtime, so a click can wait for Git off the UI thread.
+fn prepare_module(
+    store: &GitDependencyStore,
+    directory: &Path,
+    entry: &str,
+) -> Result<(std::path::PathBuf, BTreeMap<String, MaterializedDependency>)> {
+    let root = crate::runtime::resolve_app_root(directory, entry)?;
+    let dependencies = if root.join(crate::plugin::MANIFEST_FILE).is_file() {
+        store.materialize_all(&crate::plugin::PluginManifest::read(&root)?)?
+    } else {
+        BTreeMap::new()
+    };
+    Ok((root, dependencies))
+}
+
+fn module_name(root: &Path, file: &str, lease: &ApplicationModuleLease) -> String {
+    format!("{}?v={}", root.join(file).display(), lease.generation())
+}
+
 impl ApplicationModuleLease {
     fn generation(&self) -> u32 {
         self.0.generation
@@ -6620,6 +6764,22 @@ globalThis.__gpui = (() => {
     release: () => __dock_release(handle),
   });
 
+  // HERDR: where the area is, the same three readers on both kinds of handle.
+  const scrollPosition = (handle) => ({
+    offset: () => {
+      const [x, y] = __scroll_offset(handle);
+      return { x, y };
+    },
+    content_size: () => {
+      const [width, height] = __scroll_content_size(handle);
+      return { width, height };
+    },
+    viewport_size: () => {
+      const [width, height] = __scroll_viewport_size(handle);
+      return { width, height };
+    },
+  });
+
   const scrollHandle = (handle) => ({
     __handle: handle,
     scroll_to_item: (index) => {
@@ -6628,6 +6788,7 @@ globalThis.__gpui = (() => {
       }
       __scroll_to_item(handle, index);
     },
+    ...scrollPosition(handle),
     release: () => __scroll_release(handle),
   });
 
@@ -6642,6 +6803,7 @@ globalThis.__gpui = (() => {
       __virtual_scroll_to_item(handle, index, String(strategy ?? "top"));
     },
     scroll_to_bottom: () => __virtual_scroll_to_bottom(handle),
+    ...scrollPosition(handle),
     release: () => __virtual_scroll_release(handle),
   });
 
@@ -7304,6 +7466,7 @@ impl ShellRuntime {
             for (index, name) in [
                 "on_click",
                 "on_link_click",
+                "on_selection_change",
                 "on_mouse_move",
                 "on_hover",
                 "on_key_down",
@@ -7331,6 +7494,7 @@ impl ShellRuntime {
                 "on_step",
                 "disabled",
                 "selectable",
+                "highlight_range",
                 "scrollable",
                 "raw_html",
                 "selected",
@@ -8298,6 +8462,7 @@ impl ShellRuntime {
             }
             "on_click"
             | "on_link_click"
+            | "on_selection_change"
             | "on_resize"
             | "on_size_change"
             | "on_change"
@@ -8363,6 +8528,7 @@ impl ShellRuntime {
             }
             "disabled"
             | "selectable"
+            | "highlight_range"
             | "scrollable"
             | "raw_html"
             | "selected"
@@ -8422,6 +8588,7 @@ impl ShellRuntime {
                 let name = match method {
                     "disabled" => "disabled",
                     "selectable" => "selectable",
+                    "highlight_range" => "highlight_range",
                     "scrollable" => "scrollable",
                     "raw_html" => "raw_html",
                     "selected" => "selected",
@@ -10312,6 +10479,7 @@ fn callback_op_name(method: &str) -> Option<&'static str> {
     Some(match method {
         "on_click" => "on_click",
         "on_link_click" => "on_link_click",
+        "on_selection_change" => "on_selection_change",
         "on_mouse_move" => "on_mouse_move",
         "on_hover" => "on_hover",
         "on_key_down" => "on_key_down",

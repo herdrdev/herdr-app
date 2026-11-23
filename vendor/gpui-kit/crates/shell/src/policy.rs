@@ -43,13 +43,24 @@
 //! explicitly, because "under whose authority is this code being loaded" is a
 //! question the caller has to answer rather than inherit.
 
-use std::{cell::RefCell, path::PathBuf, rc::Rc};
+use std::{
+    cell::RefCell,
+    collections::BTreeMap,
+    path::PathBuf,
+    rc::{Rc, Weak},
+};
 
 use crate::{
     capability::Capabilities,
     host_modules::{HostModule, HostModules},
     storage::Storage,
 };
+
+type LocalStore = RefCell<Option<Storage>>;
+
+thread_local! {
+    static SHARED_STORES: RefCell<BTreeMap<PathBuf, Weak<LocalStore>>> = const { RefCell::new(BTreeMap::new()) };
+}
 
 /// The application name a policy carries when the host named none.
 const DEFAULT_APPLICATION: &str = "app";
@@ -91,7 +102,7 @@ pub struct Policy {
     /// Shared like `modules` and for a sharper reason: a store *is* its file, so
     /// two caches for one path is never a thing anyone wants. Two would answer
     /// `get` differently and run two write queues over the same temporary file.
-    store: Rc<RefCell<Option<Storage>>>,
+    store: Rc<LocalStore>,
     /// `sessionStorage`: the same store with no file behind it.
     ///
     /// Always present, unlike `store` — there is no placement for a host to
@@ -155,6 +166,20 @@ impl Policy {
         store.warm = Some(store.load());
         *self.store.borrow_mut() = Some(store);
         self
+    }
+
+    /// Shares the cache and write queue with other policies using this path.
+    pub fn with_shared_storage_path(mut self, path: PathBuf) -> Self {
+        SHARED_STORES.with_borrow_mut(|stores| {
+            if let Some(store) = stores.get(&path).and_then(Weak::upgrade) {
+                self.store = store;
+                return self;
+            }
+            stores.retain(|_, store| store.strong_count() > 0);
+            let policy = self.with_storage_path(path.clone());
+            stores.insert(path, Rc::downgrade(&policy.store));
+            policy
+        })
     }
 
     /// Adds a HostModule this application may import.

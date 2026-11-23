@@ -99,6 +99,23 @@ pub(crate) type ImageSourceFn = dyn Fn(&gpui::SharedUri) -> gpui::ImageSource + 
 pub(crate) type LinkClickHandlerFn =
     dyn Fn(&SharedString, &ClickEvent, &mut Window, &mut App) + Send + Sync;
 
+/// HERDR: a selection a person finished making in a [`TextView`], as
+/// [`TextView::on_selection_change`] reports it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextViewSelection {
+    /// The view's contribution to clipboard text, trimmed at both ends.
+    pub text: String,
+    /// The Markdown source byte range the selection came from, when the view
+    /// renders Markdown and the selection maps back to it.
+    pub source_range: Option<Range<usize>>,
+    /// Where the selection ended, in window coordinates: where the pointer
+    /// was released, or the point of a double or triple click.
+    pub position: Option<gpui::Point<Pixels>>,
+}
+
+pub(crate) type SelectionChangeHandlerFn =
+    dyn Fn(Option<&TextViewSelection>, &mut Window, &mut App);
+
 /// Kept by the element only, so unlike the handlers the state carries, it
 /// may hold a `ScrollHandle`.
 pub(crate) type RevealHandlerFn = dyn Fn(Bounds<Pixels>, &mut Window, &mut App);
@@ -159,6 +176,8 @@ pub struct TextView {
     reveal_handler: Option<Rc<RevealHandlerFn>>,
     markdown_extensions: Arc<MarkdownExtensions>,
     motion: Option<TextViewMotion>,
+    source_highlights: Vec<(Range<usize>, gpui::Hsla)>,
+    selection_change_handler: Option<Rc<SelectionChangeHandlerFn>>,
 }
 
 /// A plugin that can configure a [`TextView`].
@@ -206,6 +225,8 @@ impl TextView {
             reveal_handler: None,
             markdown_extensions: Arc::default(),
             motion: None,
+            source_highlights: Vec::new(),
+            selection_change_handler: None,
         }
     }
 
@@ -230,6 +251,8 @@ impl TextView {
             reveal_handler: None,
             markdown_extensions: Arc::default(),
             motion: None,
+            source_highlights: Vec::new(),
+            selection_change_handler: None,
         }
     }
 
@@ -254,6 +277,8 @@ impl TextView {
             reveal_handler: None,
             markdown_extensions: Arc::default(),
             motion: None,
+            source_highlights: Vec::new(),
+            selection_change_handler: None,
         }
     }
 
@@ -399,6 +424,31 @@ impl TextView {
         F: Fn(&SharedString, &ClickEvent, &mut Window, &mut App) + Send + Sync + 'static,
     {
         self.link_click_handler = Some(Arc::new(handler));
+        self
+    }
+
+    /// HERDR: paint `background` behind the text rendered from `range`, a
+    /// byte range of the Markdown source, through
+    /// [`TextViewState::set_range_highlights`]. Call once per range; later
+    /// ones paint over earlier ones. Ranges that render nothing are skipped.
+    /// HTML views ignore them.
+    pub fn highlight_source_range(
+        mut self,
+        range: Range<usize>,
+        background: impl Into<gpui::Hsla>,
+    ) -> Self {
+        self.source_highlights.push((range, background.into()));
+        self
+    }
+
+    /// HERDR: called when a selection settles (the pointer is released, or a
+    /// double or triple click selects a word or paragraph) with what was
+    /// selected, and with `None` when a reported selection is cleared.
+    pub fn on_selection_change<F>(mut self, handler: F) -> Self
+    where
+        F: Fn(Option<&TextViewSelection>, &mut Window, &mut App) + 'static,
+    {
+        self.selection_change_handler = Some(Rc::new(handler));
         self
     }
 
@@ -701,6 +751,8 @@ impl Element for TextView {
                 state.set_motion(motion.clone());
             }
             state.selectable = self.selectable;
+            // HERDR: only track reports while a selection handler is attached.
+            state.set_selection_reporting(self.selection_change_handler.is_some());
             state.selection_format = self.selection_format;
             state.scrollable = self.scrollable;
             state.max_lines = max_lines;
@@ -711,6 +763,7 @@ impl Element for TextView {
             if let Some(text) = &self.text {
                 state.set_element_text(text, cx);
             }
+            state.apply_source_highlights(&self.source_highlights, cx);
         });
 
         let focus_handle = state.read(cx).focus_handle.clone();
@@ -859,6 +912,18 @@ impl Element for TextView {
             request_layout.element.paint(window, cx);
         }
         GlobalState::global(cx).pop_text_view_state();
+
+        // HERDR: a multi-click becomes a range only as its text paints, so
+        // the selection is read after the document has painted.
+        if let Some(handler) = &self.selection_change_handler
+            && state.read(cx).selection_report_pending
+            && let Some(selection) = state.update(cx, |state, cx| state.take_selection_report(cx))
+        {
+            let handler = handler.clone();
+            window.defer(cx, move |window, cx| {
+                handler(selection.as_ref(), window, cx)
+            });
+        }
 
         // Every list has scrolled by now, so the line of a reveal is where
         // it ends up this frame.

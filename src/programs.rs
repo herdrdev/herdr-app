@@ -108,14 +108,21 @@ pub fn installed(commands: &[String], on: Option<&str>) -> Result<Vec<String>, S
             args.extend(installed_powershell(commands));
             crate::mods::run_blocking(&crate::core_bin::path().to_string_lossy(), &args, None, std::time::Duration::from_secs(30))
         }
-        None => {
-            let shell = crate::window::shell();
-            let line = installed_line(commands, base(&shell) == "fish");
-            let mode = if cfg!(target_os = "macos") { "-lic" } else { "-ic" };
-            crate::mods::run_blocking(&shell, &[mode.into(), line], None, std::time::Duration::from_secs(30))
-        }
+        None => return installed_here(&crate::window::shell(), commands),
     };
     installed_result(commands, result)
+}
+
+fn installed_here(shell: &str, commands: &[String]) -> Result<Vec<String>, String> {
+    let limit = std::time::Duration::from_secs(30);
+    let mode = if cfg!(target_os = "macos") { "-lic" } else { "-ic" };
+    let line = installed_line(commands, base(shell) == "fish");
+    installed_result(commands, crate::mods::run_blocking(shell, &[mode.into(), line], None, limit)).or_else(|err| {
+        // A shell that can't run the check (nushell): sh searches the app's PATH,
+        // which is where agents for such shells start (`window::unix_agent_argv`).
+        let sh = crate::mods::run_blocking("/bin/sh", &["-c".into(), installed_line(commands, false)], None, limit);
+        installed_result(commands, sh).map_err(|_| err)
+    })
 }
 
 fn installed_result(commands: &[String], result: Result<(i32, String, String), String>) -> Result<Vec<String>, String> {
@@ -247,7 +254,7 @@ pub fn powershell_line(cmd: &[String]) -> String {
     format!("& {}", cmd.iter().map(|w| powershell_quote(w)).collect::<Vec<_>>().join(" "))
 }
 
-fn powershell_quote(word: &str) -> String {
+pub(crate) fn powershell_quote(word: &str) -> String {
     let mut s = String::from("'");
     for ch in word.chars() {
         if PS_QUOTES.contains(&ch) {
@@ -462,6 +469,31 @@ mod tests {
             .unwrap();
         assert!(out.status.success());
         assert_eq!(installed_result(&commands, Ok((0, String::from_utf8(out.stdout).unwrap(), String::new()))).unwrap(), ["issue57_function", "printf"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_check_runs_in_the_persons_shell_and_falls_back_to_sh_only_when_it_cannot() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = if cfg!(target_os = "linux") { std::path::PathBuf::from("/var/tmp") } else { std::env::temp_dir() };
+        let dir = temp.join(format!("herdr-other-shell-check-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("rc")).unwrap();
+        let script = |name: &str, body: &str| {
+            let path = dir.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path.to_string_lossy().into_owned()
+        };
+        // Only the person's shell can find it: its rc adds `rc` to PATH.
+        script("rc/issue240-rc-agent", "");
+        // A sh-compatible shell under a name nothing knows; and nushell, which rejects sh syntax.
+        let posix = script("mksh-custom", &format!("PATH={}:$PATH exec /bin/sh \"$@\"", dir.join("rc").display()));
+        let nu = script("nu", "echo \"Error: nu::parser::shell_outerr\" >&2\nexit 1");
+        let commands = ["sh", "issue240-rc-agent", "issue240-missing-agent"].map(String::from);
+        let (posix, nu) = (installed_here(&posix, &commands), installed_here(&nu, &commands));
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(posix.unwrap(), ["sh", "issue240-rc-agent"]);
+        assert_eq!(nu.unwrap(), ["sh"]);
     }
 
     #[test]
