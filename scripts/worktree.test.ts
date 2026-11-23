@@ -80,6 +80,20 @@ test("open render reads spaces and panes once and refreshes both on the next ren
   expect(textOf(second[1])).toContain(" open ");
 });
 
+test("open render finds where each space is once, not once per row", () => {
+  // 124 checkouts × 75 spaces × 94 panes went past the 50 ms render budget when every row re-scanned the panes.
+  let scans = 0;
+  const list = Array.from({ length: 120 }, (_, i) => ({ path: `/repo/wt-${i}`, branch: `branch-${i}`, at: 0 }));
+  const spaces = list.map((_, i) => ({ id: `s${i}`, tabs: [{ id: `tab${i}` }] }));
+  const panes = list.map((c, i) => ({ get tab() { scans++; return `tab${i}`; }, cwd: `${c.path}/src` }));
+  const { worktree } = harness(null, null, { spaces: () => spaces, panes: () => panes });
+  worktree.list = list;
+  const rows = rowsOf(worktree.render({}).node);
+  expect(rows).toHaveLength(120);
+  for (const row of rows) expect(textOf(row)).toContain(" open ");
+  expect(scans).toBeLessThanOrEqual(spaces.length * panes.length);
+});
+
 test("open clicks read fresh snapshots once and select an existing space or create one", () => {
   const { worktree, reads, writes, snapshot } = harness();
   const checkout = { path: "/repo/worktree", branch: "branch", at: 0 };
