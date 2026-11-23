@@ -172,8 +172,10 @@ the highlighted line shows where it will land.
   peek at it. Bare addresses refer to the machine of the terminal showing them;
   use `machine/address` for another machine. Names and non-live addresses aren't links.
 - **Agent navigation order** belongs to the mods. A mod displaying agents calls
-  `setAgentOrder(list.map(a => a.address))` on render so `agent.next` /
-  `agent.prev` follow its list.
+  `setAgentOrder(list.map(a => a.address))` on render so `agent.next`,
+  `agent.prev` and `agent.select {index}` (1 = first) use that order. Herdr
+  keeps the last published order until the next call or app restart,
+  skips agents that are gone, and appends unlisted agents in model order.
 
 ## Layouts: `layouts/<name>.json`
 
@@ -231,9 +233,10 @@ A layout is a tree of nodes. Four types:
 
 - `block`: shows content. `"content"` is `{ "mod": "<folder>", "props": {...} }`,
   `{ "terminal": "t7" }`, `{ "tab": "active" }` (the shown tab's
-  terminals as it arranges them), or `{ "agent": "focused" }` (one agent's
-  terminal, full size: the one chosen with `agent.focus` / `agent.next`, else
-  the focused pane's agent, else the first agent).
+  terminals as it arranges them), or `{ "agent": "focused" }`. An agent block
+  shows one terminal at full size. It shows the agent chosen by `agent.focus`,
+  `agent.select`, `agent.next` or `agent.prev`. Otherwise it shows the focused
+  pane's agent or the first agent in navigation order.
 - `row` / `column`: children side by side / stacked.
 - `stack`: shows one child (`"active": "<child id>"`), with an optional
   `"header"` (a mod that draws tabs, or `"tabs"` for a plain built-in strip).
@@ -544,7 +547,8 @@ shortcuts must then be added by hand.
   `command` names an app command; `args` is an object (optional, defaults to `{}`).
   It can pass several arguments, numbers, booleans, arrays or nested objects.
   String actions keep their literal first-argument shorthand, including numeric
-  indexes: `space.new:{work}` names a space `{work}`, and `space.new:{}` names it `{}`.
+  indexes. `agent.select:2` selects the second agent in navigation order.
+  `space.new:{work}` names a space `{work}`, and `space.new:{}` names it `{}`.
   Invalid binding objects or rejected arguments show an error toast when pressed;
   the key does not go to the terminal program.
 - Plain ctrl+letters go to the program unless bound. Programs rely on
@@ -678,7 +682,7 @@ The main ones:
   started, including its release outside the pane; other panes don't receive it.
   Terminals display Kitty graphics, including Unicode placeholder images used by
   programs such as yazi; partial images and scrolling follow the placeholder cells.
-- Agents: `agent.next`, `agent.prev`, `agent.focus {terminal}`.
+- Agents: `agent.next`, `agent.prev`, `agent.select {index}`, `agent.focus {terminal}`.
 - Layout: `layout.switch {name?}`, `layout.toggle {id}`, `layout.show {id}`, `layout.hide {id}`,
   `layout.resize {id, px | weight}`, `layout.select {stack, child}`, `layout.set {layout}`
   (personal tree edits; on shipped layouts only click/look fields change),
