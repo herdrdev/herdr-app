@@ -114,3 +114,21 @@ test("Changes keeps the newer preview when one from an earlier visit to the repo
   await settled();
   expect(h.preview()).toEqual(["@@ -0,0 +1,1 @@", "new"]);
 });
+
+test("Changes loads a repo again once a load that never finishes is past its time", async () => {
+  const h = await panel({ "/repo-a": [{ files: ["a.txt"], wait: never }, { files: ["new.txt"] }] });
+  h.view.refresh(h.cx);
+  await settled();
+  expect(h.asked).toEqual(["/repo-a"]);
+  const now = Date.now;
+  Date.now = () => now() + 121000;
+  try {
+    h.view.refresh(h.cx);
+    await settled();
+  } finally {
+    Date.now = now;
+  }
+  expect(h.asked).toEqual(["/repo-a", "/repo-a"]);
+  expect(h.paths()).toEqual(["new.txt"]);
+  expect(h.view.loading).toBe(false);
+});

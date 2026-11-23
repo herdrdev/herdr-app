@@ -12,6 +12,10 @@ const key = () => JSON.stringify(location());
 // Reads write nothing under .git (no index refresh or lock, no fsmonitor cookie):
 // the folder watch would see it, and every refresh would start the next one.
 const READ = ["--no-optional-locks", "-c", "core.fsmonitor=false", "-c", "diff.autoRefreshIndex=false"];
+// A load Herdr cuts off at its time limit never finishes, not even its finally; after this
+// long one counts as gone and the next refresh may start another.
+const GIVE_UP = 120000;
+const running = (since) => Boolean(since) && Date.now() - since < GIVE_UP;
 const countLines = (text) => text ? text.split("\n").length - Number(text.endsWith("\n")) : 0;
 const wideGlyph = /[\p{Ideographic}\p{Emoji_Presentation}\p{Extended_Pictographic}\u1100-\u115f\u2e80-\ua4cf\uac00-\ud7a3\ufe10-\ufe19\ufe30-\ufe6f\uff01-\uff60\uffe0-\uffe6]/gu;
 
@@ -86,9 +90,8 @@ export default class Changes extends View {
       this.loading = false;
     }
     // A load left behind in another folder (a slow git, a read that never ends) must not hold this one.
-    if (!cwd || this.loading || this.busy) return;
-    const context = this.context;
-    this.loading = true;
+    if (!cwd || running(this.loading) || this.busy) return;
+    const context = this.context, started = this.loading = Date.now();
     cx.spawn(async (cx) => {
       try {
         const top = await exec("git", ["rev-parse", "--show-toplevel"], { cwd, on });
@@ -129,7 +132,7 @@ export default class Changes extends View {
           catch { if (this.current(context)) this.setLines(["Cannot preview this diff (too large or unreadable)"]); }
         }
       } catch (e) { if (this.current(context)) this.error = String(e); }
-      finally { if (this.context === context) this.loading = false; cx.notify(); }
+      finally { if (this.loading === started) this.loading = false; cx.notify(); }
     });
   }
 
