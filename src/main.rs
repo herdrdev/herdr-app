@@ -40,6 +40,8 @@ mod update_notes;
 mod vt;
 mod win32_keys;
 mod window;
+#[cfg(target_os = "linux")]
+mod wsl;
 
 use gpui::*;
 
@@ -137,6 +139,8 @@ fn main() {
 
     #[cfg(target_os = "macos")]
     core_bin::fill_path();
+    #[cfg(target_os = "linux")]
+    wsl::use_gpu();
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("HERDR_APP_LOG")
