@@ -391,6 +391,9 @@ pub struct Node {
     /// Root only: the terminal right-click menu's mod (default: `menu`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub terminal_menu: Option<String>,
+    /// Root only: mods that can handle a terminal link, in order.
+    #[serde(default, skip_serializing_if = "Vec::is_empty")]
+    pub link_handlers: Vec<String>,
     /// Root only: the mod that shows notifications (default: `toast`).
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub toast: Option<String>,
@@ -437,6 +440,7 @@ impl Node {
             traffic_lights: None,
             preview: None,
             terminal_menu: None,
+            link_handlers: Vec::new(),
             toast: None,
             window_drag: false,
             window_blur: false,

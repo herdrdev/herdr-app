@@ -61,7 +61,8 @@ export function playSound(sound: string): null;
  * New spaces and tabs take focus by default. Boolean focus: false keeps the shown
  * space, selected tab and keyboard focus; background tabs are appended in creation order.
  * With no space shown, a new space is shown even with focus: false.
- * Panes: pane.split {direction: "right" | "down", pane?}, pane.close {pane?}, pane.zoom {pane?}, pane.resize {direction, pane?, px?},
+ * Panes: pane.split {direction: "right" | "down", pane?}, pane.close {pane?}, pane.zoom {pane?}, pane.rename {pane?, name},
+ *   pane.resize {direction, pane?, px?},
  *   pane.focus {pane | terminal}, pane.go {direction}, pane.swap {pane?, direction | target}.
  *   Pane menus get target { pane, terminal }.
  * Terminals: terminal.open {argv?, folder?, place?: "tab" | "right" | "down"}, terminal.kill {terminal},
@@ -182,6 +183,8 @@ export interface AgentInfo {
   program: Program;
   /** The terminal's title. */
   title: string;
+  /** Its pane's name (`pane.rename`), or null. */
+  pane_name: string | null;
   /** Higher = changed more recently. */
   seq: number;
   /** Pinned with `terminal.pin`, on any Herdr client. */
@@ -207,12 +210,14 @@ export interface PaneScroll {
 export interface PaneInfo {
   pane: string;
   /** null for a mod pane (`pane.split {mod}`): then `mod` names it, and only
-   *  pane, mod, tab, title, focused and zoomed are set. */
+   *  pane, mod, tab, title, name, focused and zoomed are set. */
   terminal: string | null;
   mod?: string;
   tab: string;
   /** The terminal's title (what the program set), or the mod's name. */
   title: string;
+  /** The name someone gave it (`pane.rename`), or null. */
+  name: string | null;
   /** Its live folder, and the git branch there. */
   cwd: string | null;
   branch: string | null;
@@ -271,7 +276,8 @@ export function focused(): ({ space: string; tab: string; pane: string | null; t
 /** The shown layout (layouts/<name>.json). Its name is shared("layout").
  *  Root `terminal_menu?: string` chooses a terminal right-click menu mod (default: "menu").
  *  Unknown names warn and fall back to "menu". This replaces the menu, not its items.
- *  Opens a pointer popup with mod.json overlay width/height (default 220×260). */
+ *  Opens a pointer popup with mod.json overlay width/height (default 220×260).
+ *  Root `link_handlers?: string[]` selects terminal link mods in order. */
 export function layout(): unknown;
 
 /** The names of every layout in layouts/ (main first). */
@@ -434,6 +440,24 @@ export function notify(n: {
   action?: { name: string; args?: Record<string, unknown> };
 }): string;
 
+/** A Ctrl/Cmd-click on a terminal link, passed to the mod's link.js. */
+export interface LinkClick {
+  link:
+    | { kind: "url"; raw: string; url: string }
+    | { kind: "file"; raw: string; path: string | null };
+  source: {
+    terminal: string;
+    machine: string | null;
+    cwd: string | null;
+    pane: string | null;
+    tab: string | null;
+    space: string | null;
+  };
+}
+
+/** Signature of the named handleLink export from link.js. */
+export type HandleLink = (click: LinkClick) => "handled" | "pass" | Promise<"handled" | "pass">;
+
 /** The props this copy of the mod was given in the layout (or overlay).
  *  A layout's terminal_menu mod gets {tab: "pane", target: {pane: string, terminal: string}, overlay: string}.
  *  Target names the clicked pane/terminal, not necessarily the focused one; pass it to actions.
@@ -467,7 +491,7 @@ export function nextCommand(): Promise<string>;
  * Idle watches may be reclaimed to make room; reload when starting a watch.
  * Call cancel() on the returned promise when you stop showing the folder.
  * It resolves with [] and releases this call; other callers keep watching.
- * Closing a mod copy cancels its pending calls. Files also refreshes on its 10-second timer.
+ * Closing a mod copy cancels its pending calls. Files and Changes also poll while focused.
  *   cx.spawn(async (cx) => { for (;;) { await watchFolder(dir); this.reload(); cx.notify(); } });
  * Watch what you show, not a whole home folder (node_modules is a lot of events).
  */
