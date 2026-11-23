@@ -1174,8 +1174,9 @@ All of it is in `herdr.d.ts`. In short:
   showing the folder. Cancellation resolves with `[]` and releases this call
   without stopping other callers: `const watch = watchFolder(dir); watch.cancel();`.
   Closing a mod copy cancels its pending calls.
-  Files also refreshes on its 10-second timer:
   `cx.spawn(async (cx) => { for (;;) { await watchFolder(dir); this.reload(); cx.notify(); } })`.
+  Files and Changes coalesce watch events and poll while the window is focused.
+  Polling starts at 10 seconds, and both kinds of refresh wait longer after slow Git scans.
 - Window title: `setWindowTitle(title)` sets the OS window's title, which window switchers,
   taskbars and time trackers read. The last call wins; `null` restores `Herdr`. Call it when the
   title changes, not on every render.
