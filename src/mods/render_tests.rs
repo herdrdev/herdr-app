@@ -759,6 +759,161 @@ export default class Demo extends View {
 }
 
 #[gpui::test]
+fn a_mod_reads_a_text_view_selection_once_it_settles(cx: &mut TestAppContext) {
+    use gpui::{
+        Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, VisualTestContext, point, px,
+    };
+
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    std::fs::write(staged.0.join("main.js"), r#"
+import { View, div } from "gpui-kit";
+import { TextView, v_flex } from "gpui-base";
+export default class Demo extends View {
+  init() { this.log = []; this.word = "**wörld**"; }
+  render() {
+    const view = (id, text) => div().h(40).child(TextView.markdown(id, text).selectable(true)
+      .on_selection_change((s, cx) => {
+        this.log.push(s ? `${s.text}:${text.slice(s.range.start, s.range.end)}:${s.position ? "at" : "-"}` : "null");
+        if (s && id === "word") this.word = "replacement";
+        cx.notify();
+      }));
+    return v_flex().w(300).h(200)
+      .child(view("drag", "😀 héllo **wörld**"))
+      .child(view("word", this.word))
+      .child(div().child(`log=${this.log.join(" ")}`));
+  }
+}
+"#).unwrap();
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|window, cx| {
+        RootedView(runtime.try_load(&staged.0, window, cx).unwrap())
+    });
+    let mut context = VisualTestContext::from_window(window.into(), cx);
+    context.update(|window, cx| window.draw(cx).clear(cx));
+    let view: gpui::Entity<gpui_shell::ScriptView> = window
+        .root(&mut context)
+        .unwrap()
+        .read_with(&context, |root, cx| root.0.read(cx).content().clone().downcast().unwrap());
+    let settle = |context: &mut VisualTestContext| {
+        context.run_until_parked();
+        context.update(|window, cx| window.draw(cx).clear(cx));
+        context.run_until_parked();
+    };
+    let press = |context: &mut VisualTestContext, x: f32, y: f32, click_count: usize| {
+        let position = point(px(x), px(y));
+        let modifiers = Modifiers::default();
+        context.simulate_event(MouseDownEvent { button: MouseButton::Left, position, modifiers, click_count, first_mouse: false });
+        context.simulate_event(MouseUpEvent { button: MouseButton::Left, position, modifiers, click_count });
+        settle(context);
+    };
+
+    let snapshot = |context: &VisualTestContext| {
+        view.read_with(context, |view, _| {
+            view.snapshot().map(gpui_shell::RenderSnapshot::debug_tree).unwrap_or_default()
+        })
+    };
+
+    // A drag reports on release, with offsets into the Markdown it came from.
+    context.simulate_mouse_down(point(px(1.), px(8.)), MouseButton::Left, Modifiers::default());
+    context.simulate_mouse_move(point(px(290.), px(8.)), MouseButton::Left, Modifiers::default());
+    settle(&mut context);
+    let tree = snapshot(&context);
+    assert!(tree.contains("log=\""), "{tree}");
+    context.simulate_mouse_up(point(px(290.), px(8.)), MouseButton::Left, Modifiers::default());
+    settle(&mut context);
+    let (copy, select_all) = if cfg!(target_os = "macos") {
+        ("cmd-c", "cmd-a")
+    } else {
+        ("ctrl-c", "ctrl-a")
+    };
+    let copied_text = |context: &mut VisualTestContext| {
+        context.simulate_keystrokes(copy);
+        context.update(|_, cx| cx.read_from_clipboard().unwrap().text().unwrap())
+    };
+    assert_eq!(copied_text(&mut context), "😀 héllo wörld");
+    context.simulate_keystrokes(select_all);
+    settle(&mut context);
+    assert_eq!(copied_text(&mut context), "😀 héllo wörld");
+    // Clicking away clears the selection once.
+    press(&mut context, 250., 150., 1);
+    press(&mut context, 250., 150., 1);
+    // The double-click reports a word. The handler replaces that TextView's
+    // source, which also clears its selection without a pointer event.
+    press(&mut context, 5., 48., 2);
+    settle(&mut context);
+    let tree = snapshot(&context);
+    // The source range ends at the last selected character, before the `**`.
+    assert!(
+        tree.contains("log=😀 héllo wörld:😀 héllo **wörld:at 😀 héllo wörld:😀 héllo **wörld**:- null wörld:wörld:at null\""),
+        "{tree}"
+    );
+}
+
+#[gpui::test]
+fn a_mod_highlights_a_markdown_source_range(cx: &mut TestAppContext) {
+    use gpui::{Modifiers, MouseButton, VisualTestContext, point, px};
+
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    std::fs::write(staged.0.join("main.js"), r##"
+import { View, div } from "gpui-kit";
+import { TextView, v_flex } from "gpui-base";
+export default class Demo extends View {
+  init() { this.step = 0; }
+  render() {
+    const match = "**café**";
+    const source = `${this.step ? "😀 prefix" : "😀"} ${match} tail`;
+    const start = source.indexOf(match);
+    const text = TextView.markdown("text", source);
+    if (this.step < 2) text.highlight_range(start, start + match.length, "#be3784");
+    return v_flex().w(400)
+      .child(div().h(40).child(text))
+      .child(div().h(40).child("Next").on_click((_, cx) => {
+        this.step++;
+        cx.notify();
+      }));
+  }
+}
+"##).unwrap();
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|window, cx| {
+        RootedView(runtime.try_load(&staged.0, window, cx).unwrap())
+    });
+    let mut context = VisualTestContext::from_window(window.into(), cx);
+    let painted = |context: &mut VisualTestContext| {
+        context.run_until_parked();
+        context.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            let color: gpui::Background = gpui::rgb(0xbe3784).into();
+            window.painted_quads().into_iter()
+                .filter_map(|quad| (quad.background == color).then_some(quad.bounds))
+                .collect::<Vec<_>>()
+        })
+    };
+    let next = |context: &mut VisualTestContext| {
+        let pos = point(px(8.), px(55.));
+        context.simulate_mouse_down(pos, MouseButton::Left, Modifiers::default());
+        context.simulate_mouse_up(pos, MouseButton::Left, Modifiers::default());
+    };
+
+    let initial = painted(&mut context);
+    let [initial] = initial.as_slice() else {
+        panic!("expected a highlight for café: {initial:?}");
+    };
+    next(&mut context);
+    let moved = painted(&mut context);
+    let [moved] = moved.as_slice() else {
+        panic!("expected the highlight to move with café: {moved:?}");
+    };
+    assert!(moved.left() > initial.left());
+    let width_delta = (moved.size.width - initial.size.width).as_f32().abs();
+    assert!(width_delta <= 1.0, "highlight width changed: {initial:?} → {moved:?}");
+    next(&mut context);
+    assert!(painted(&mut context).is_empty());
+}
+
+#[gpui::test]
 fn long_theme_names_stay_inside_their_card(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();

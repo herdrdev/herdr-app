@@ -2448,10 +2448,35 @@ const BASE: &str = r#"  /** A row. */
   export const Checkbox: ComponentType;
   /** A controlled switch. No styling. */
   export const Switch: ComponentType;
+  /** HERDR: a settled selection in a TextView. */
+  export interface TextViewSelection {
+    /** The selected text in this view, trimmed as when copying it. */
+    text: string;
+    /**
+     * UTF-16 offsets into the Markdown source the selection came from, so
+     * `markdown.slice(range.start, range.end)` includes any markup inside it.
+     * Absent in HTML or when the selection doesn't map to the current source.
+     */
+    range?: InputRange;
+    /** Where the selection ended, in logical window pixels. Absent for select-all. */
+    position?: import("gpui-kit").Point;
+  }
   /** Rich HTML or Markdown text. CSS in HTML is not supported. */
   export interface TextViewElement extends NativeElement {
     /** Overrides TextView's default URL opening and reports the resolved URL. */
     on_link_click(handler: (url: string, cx: Context) => void): this;
+    /**
+     * HERDR: called when a selection settles (the pointer is released, a
+     * double or triple click, select-all), and with `null` when a reported
+     * selection is cleared. Whitespace alone reports as `null`.
+     */
+    on_selection_change(handler: (selection: TextViewSelection | null, cx: Context) => void): this;
+    /**
+     * HERDR: paints `color` behind the text rendered from `[start, end)`,
+     * UTF-16 offsets into the Markdown source, like `selection.range`. Chain once
+     * per range; later ones paint over earlier ones. Markdown only.
+     */
+    highlight_range(start: number, end: number, color: Color): this;
     selectable(value?: boolean): this;
     scrollable(value?: boolean): this;
   }

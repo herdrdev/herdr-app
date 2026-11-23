@@ -1138,7 +1138,16 @@ Paths containing control characters are rejected, including clipboard files.
 and other interactive controls too.
 `.when(cond, (el) => …)`, `.children([...])`. Controls from `gpui-base`
 (`Button`, `Checkbox`, `Switch`, `InputState` + `Input`) are unstyled: style
-them. Text: `TextView.markdown(id, text)` renders markdown; `EditorState.new({
+them. Text: `TextView.markdown(id, text)` renders markdown; with
+`.selectable(true)`, `.on_selection_change((s, cx) => …)` gets a settled
+selection or `null` when it clears. `s.text` matches what copying the selected
+text in that view gives you. When `s.range` is present, use
+`markdown.slice(s.range.start, s.range.end)` to get the original Markdown.
+`.highlight_range(start, end, color)` paints behind the text rendered from any
+Markdown source range, including offsets found with `markdown.indexOf(query)`.
+When `s.position` is present, place a popup with
+`openOverlay({ mod: "selection-actions", kind: "popup", at: s.position })`.
+`EditorState.new({
 language, value, readonly, font_family: settings().font_family, syntax: {
 keyword: theme().ansi5, ... } })` + `Editor.new(state)` is a code view (readonly)
 or editor with syntax highlighting, line numbers and folding. A viewer opens

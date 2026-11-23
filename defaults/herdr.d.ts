@@ -436,6 +436,7 @@ export interface OverlaySpec {
   /** px, or up to 1: a share of the window. */
   width?: number;
   height?: number;
+  /** Window-relative pixels, such as a TextView selection's `position`. */
   at?: "pointer" | { x: number; y: number };
 }
 
