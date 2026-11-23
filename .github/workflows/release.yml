@@ -35,6 +35,12 @@ jobs:
         timeout-minutes: 10
         run: |
           set -euo pipefail
+          # The pinned 8.x image ships an old RPM-GPG-KEY-AlmaLinux; current
+          # packages are signed with newer keys. Refresh from the official
+          # HTTPS keyring instead of disabling gpgcheck.
+          curl -fsSLo /etc/pki/rpm-gpg/RPM-GPG-KEY-AlmaLinux \
+            https://repo.almalinux.org/almalinux/RPM-GPG-KEY-AlmaLinux
+          rpm --import /etc/pki/rpm-gpg/RPM-GPG-KEY-AlmaLinux
           install() { dnf install -y --setopt=install_weak_deps=False "$@"; }
           if ! install ca-certificates curl tar gzip git python3 binutils; then
             dnf clean all

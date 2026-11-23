@@ -109,7 +109,8 @@ Publishing and a real RHEL 8 desktop smoke test remain separate decisions.
 
 | # | Commit | Run URL | Result | Fix |
 |---|---|---|---|---|
-| 1 | — | — | pending | — |
+| 1 | `ffeaf41` | https://github.com/shawn111/herdr-app/actions/runs/45259164686 | failed in `Bootstrap container tools`: `GPG check FAILED` (pinned AlmaLinux 8 image has only the old `C21AD6EA` key; current packages use newer keys) | Refresh `/etc/pki/rpm-gpg/RPM-GPG-KEY-AlmaLinux` from `https://repo.almalinux.org/almalinux/RPM-GPG-KEY-AlmaLinux` over HTTPS and `rpm --import` it before `dnf install` (no `nogpgcheck`). |
+| 2 | — | — | pending | — |
 
 ## Risks / fallbacks
 
