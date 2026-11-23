@@ -17,6 +17,7 @@ use std::collections::HashMap;
 use std::future::Future;
 use std::task::Poll;
 use crate::links;
+use crate::settings::LinkClick;
 use std::path::{Path, PathBuf};
 use std::rc::Rc;
 use std::sync::Arc;
@@ -160,6 +161,9 @@ pub struct TerminalView {
     scrollbar_grab: Option<f32>,
     selection_pointer: Point<Pixels>,
     selection_scroll: Option<Task<()>>,
+    /// The cell a press that may open a link on release went down in (`link_click`
+    /// "shift" or "none"); it opens if the button comes up in that cell with nothing selected.
+    link_press: Option<(u16, u16)>,
     /// The terminal's folder, for links to relative paths.
     pub cwd: Option<PathBuf>,
     pub link_handlers: Rc<RefCell<links::Handlers>>,
@@ -314,6 +318,7 @@ impl TerminalView {
             scrollbar_grab: None,
             selection_pointer: Point::default(),
             selection_scroll: None,
+            link_press: None,
             cwd: None,
             link_handlers: Rc::default(),
             link: None,
@@ -1140,6 +1145,41 @@ impl TerminalView {
         self.grid.borrow().hover.is_some()
     }
 
+    /// The grid cell (column, row) at a window position.
+    fn cell_at(&self, pos: Point<Pixels>) -> (u16, u16) {
+        let g = self.grid.borrow();
+        let (x, y) = local(&g, pos);
+        ((x / f32::from(g.cell.width)) as u16, (y / f32::from(g.cell.height)) as u16)
+    }
+
+    /// How a click with these modifiers would open a link, by the `link_click` setting.
+    fn link_gesture(&self, mods: &Modifiers) -> Option<LinkGesture> {
+        link_gesture(crate::settings::get().link_click, mods, self.grid.borrow().vt.mouse_tracking())
+    }
+
+    fn open_link(&mut self, target: LinkTarget, cx: &mut Context<Self>) {
+        match target {
+            LinkTarget::External(click) if !click.handlers.is_empty() => cx.emit(TerminalEvent::Link(click)),
+            LinkTarget::External(click) => {
+                if let Some(target) = click.native {
+                    links::open(&target);
+                }
+            }
+            LinkTarget::Terminal(address) => cx.emit(TerminalEvent::Peek(address)),
+        }
+    }
+
+    /// The button came up after a press that may open a link: it does when the
+    /// pointer is still in the cell it went down in and no text got selected.
+    fn finish_link_click(&mut self, pressed: (u16, u16), pos: Point<Pixels>, cx: &mut Context<Self>) {
+        if self.cell_at(pos) != pressed || self.grid.borrow().vt.selection_positions().is_some() {
+            return;
+        }
+        if let Some((target, _)) = self.link_at(pos) {
+            self.open_link(target, cx);
+        }
+    }
+
     /// The link at a window position, and where it shows.
     fn link_at(&self, pos: Point<Pixels>) -> Option<(LinkTarget, vt::Spans)> {
         let g = self.grid.borrow();
@@ -1497,9 +1537,38 @@ fn mouse_mods(m: Modifiers) -> GhosttyMods {
     mods
 }
 
-fn link_mods(m: &Modifiers) -> bool {
-    let key = if cfg!(target_os = "macos") { m.platform && !m.control } else { m.control && !m.platform };
-    key && !m.alt && !m.shift
+/// When a link opens: as the button goes down, or as it comes up (so a drag still selects).
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum LinkGesture {
+    Press,
+    Release,
+}
+
+/// Exactly one of the four modifiers is held, and it is `key`.
+fn only_modifier(m: &Modifiers, key: LinkClick) -> bool {
+    let held = [m.platform, m.control, m.alt, m.shift];
+    let wanted = match key {
+        LinkClick::Cmd => 0,
+        LinkClick::Ctrl => 1,
+        LinkClick::Alt => 2,
+        LinkClick::Shift => 3,
+        LinkClick::Auto | LinkClick::Plain => return held.iter().all(|h| !h),
+    };
+    held.iter().enumerate().all(|(i, h)| *h == (i == wanted))
+}
+
+/// The gesture that opens a link under the pointer, if this click is one.
+/// `tracked`: the program tracks the mouse, so a plain click belongs to it.
+fn link_gesture(setting: LinkClick, m: &Modifiers, tracked: bool) -> Option<LinkGesture> {
+    let platform = if cfg!(target_os = "macos") { LinkClick::Cmd } else { LinkClick::Ctrl };
+    match if setting == LinkClick::Auto { platform } else { setting } {
+        // Shift already takes the mouse from a tracking program, and Shift+drag selects.
+        LinkClick::Shift => only_modifier(m, LinkClick::Shift).then_some(LinkGesture::Release),
+        // A plain click opens only when the program doesn't want it. Cmd (Ctrl) still opens, always.
+        LinkClick::Plain if !tracked && only_modifier(m, LinkClick::Plain) => Some(LinkGesture::Release),
+        LinkClick::Plain => only_modifier(m, platform).then_some(LinkGesture::Press),
+        key => only_modifier(m, key).then_some(LinkGesture::Press),
+    }
 }
 
 fn local(g: &Grid, p: Point<Pixels>) -> (f32, f32) {
@@ -2460,7 +2529,7 @@ impl Render for TerminalView {
         }
         let cell = cell_size(window);
         let hover = self.grid.borrow().hover;
-        let found = hover.filter(|_| link_mods(&window.modifiers())).and_then(|pos| self.link_at(pos));
+        let found = hover.filter(|_| self.link_gesture(&window.modifiers()).is_some()).and_then(|pos| self.link_at(pos));
         let (link, spans) = found.unzip();
         self.link = link;
         self.grid.borrow_mut().link_spans = spans.unwrap_or_default();
@@ -2526,24 +2595,19 @@ impl Render for TerminalView {
                 }
             }))
             .on_mouse_down(MouseButton::Left, cx.listener(|this, ev: &MouseDownEvent, window, cx| {
+                let was_focused = this.focus.is_focused(window);
                 this.focus.focus(window, cx);
                 let g = this.grid.borrow();
                 if let Some(ch) = g.channel {
                     g.core.resize(ch, g.vt.cols, g.vt.rows);
                 }
                 drop(g);
-                if link_mods(&ev.modifiers)
+                this.link_press = None;
+                let gesture = this.link_gesture(&ev.modifiers);
+                if gesture == Some(LinkGesture::Press)
                     && let Some((target, _)) = this.link_at(ev.position)
                 {
-                    match target {
-                        LinkTarget::External(click) if !click.handlers.is_empty() => cx.emit(TerminalEvent::Link(click)),
-                        LinkTarget::External(click) => {
-                            if let Some(target) = click.native {
-                                links::open(&target);
-                            }
-                        }
-                        LinkTarget::Terminal(address) => cx.emit(TerminalEvent::Peek(address)),
-                    }
+                    this.open_link(target, cx);
                     return;
                 }
                 let mut g = this.grid.borrow_mut();
@@ -2569,6 +2633,10 @@ impl Render for TerminalView {
                     // The program took the click: Herdr's old selection ends, so a copy can't repeat it.
                     this.clear_selection(cx);
                 } else {
+                    // A single click that starts a selection may turn out to be a link click.
+                    // With no key to hold, the click that focuses a pane doesn't open a link in it.
+                    let deliberate = was_focused || crate::settings::get().link_click != LinkClick::Plain;
+                    this.link_press = (gesture == Some(LinkGesture::Release) && ev.click_count == 1 && deliberate).then(|| this.cell_at(ev.position));
                     this.start_selection(ev.position, cx);
                 }
             }))
@@ -2596,8 +2664,12 @@ impl Render for TerminalView {
                 }
             }))
             .on_mouse_move(cx.listener(|this, ev: &MouseMoveEvent, _, cx| {
-                this.grid.borrow_mut().hover = Some(ev.position);
-                if link_mods(&ev.modifiers) || this.link.is_some() {
+                let before = this.grid.borrow_mut().hover.replace(ev.position);
+                // While a link key is held, every move redraws. With no key to hold
+                // ("none"), only moving to another cell can show or hide a link.
+                let keyless = only_modifier(&ev.modifiers, LinkClick::Plain) && crate::settings::get().link_click == LinkClick::Plain;
+                let moved = before.is_none_or(|p| this.cell_at(p) != this.cell_at(ev.position));
+                if this.link.is_some() || (this.link_gesture(&ev.modifiers).is_some() && (!keyless || moved)) {
                     cx.notify();
                 }
                 if !this.selecting && ev.pressed_button.is_none() {
@@ -2662,6 +2734,9 @@ impl Render for TerminalView {
                                     if this.selecting && ev.button == MouseButton::Left {
                                         this.selection_scroll = None;
                                         this.finish_selection(Some(ev.position), cx);
+                                        if let Some(pressed) = this.link_press.take() {
+                                            this.finish_link_click(pressed, ev.position, cx);
+                                        }
                                         cx.stop_propagation();
                                     }
                                 });
@@ -4157,6 +4232,223 @@ mod tests {
         cx.simulate_mouse_down(point(px(50.), px(50.)), MouseButton::Left, Modifiers::default());
         cx.simulate_mouse_up(point(px(50.), px(50.)), MouseButton::Left, Modifiers::default());
         assert_eq!(terminal.read_with(cx, |t, _| t.grid.borrow().vt.selection_text()), None);
+    }
+
+    /// With no `link_click` setting, which clicks open links is what it always was.
+    #[test]
+    fn the_default_link_click_is_cmd_on_macos_and_ctrl_elsewhere() {
+        use super::*;
+        for bits in 0..16u8 {
+            let m = Modifiers { platform: bits & 1 != 0, control: bits & 2 != 0, alt: bits & 4 != 0, shift: bits & 8 != 0, ..Modifiers::default() };
+            let legacy = {
+                let key = if cfg!(target_os = "macos") { m.platform && !m.control } else { m.control && !m.platform };
+                key && !m.alt && !m.shift
+            };
+            for tracked in [false, true] {
+                assert_eq!(link_gesture(LinkClick::Auto, &m, tracked), legacy.then_some(LinkGesture::Press), "{m:?} tracked: {tracked}");
+            }
+        }
+    }
+
+    #[test]
+    fn a_link_click_needs_exactly_its_modifier() {
+        use super::*;
+        let held = |platform, control, alt, shift| Modifiers { platform, control, alt, shift, ..Modifiers::default() };
+        let (cmd, ctrl, alt, shift, none) = (held(true, false, false, false), held(false, true, false, false), held(false, false, true, false), held(false, false, false, true), held(false, false, false, false));
+        for (setting, key) in [(LinkClick::Cmd, cmd), (LinkClick::Ctrl, ctrl), (LinkClick::Alt, alt)] {
+            for m in [cmd, ctrl, alt, shift, none, held(true, true, false, false), held(false, false, true, true)] {
+                assert_eq!(link_gesture(setting, &m, false), (m == key).then_some(LinkGesture::Press), "{setting:?} {m:?}");
+            }
+        }
+        // Shift opens on release: Shift+drag still selects, and a tracking program never sees it.
+        for tracked in [false, true] {
+            assert_eq!(link_gesture(LinkClick::Shift, &shift, tracked), Some(LinkGesture::Release));
+            assert_eq!(link_gesture(LinkClick::Shift, &none, tracked), None);
+            assert_eq!(link_gesture(LinkClick::Shift, &held(false, false, true, true), tracked), None);
+        }
+        // A plain click opens on release, unless the program tracks the mouse.
+        assert_eq!(link_gesture(LinkClick::Plain, &none, false), Some(LinkGesture::Release));
+        assert_eq!(link_gesture(LinkClick::Plain, &none, true), None);
+        for m in [shift, alt, held(false, true, true, false)] {
+            assert_eq!(link_gesture(LinkClick::Plain, &m, false), None);
+        }
+        // Cmd (Ctrl) still opens on press, also in a program that tracks the mouse.
+        let platform = if cfg!(target_os = "macos") { cmd } else { ctrl };
+        for tracked in [false, true] {
+            assert_eq!(link_gesture(LinkClick::Plain, &platform, tracked), Some(LinkGesture::Press));
+        }
+    }
+
+    /// Clicks on `peer.test/t7` (a terminal address, so a peek) under each `link_click` setting.
+    #[gpui::test]
+    fn link_clicks_open_on_press_or_on_release_by_setting(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+        use crate::settings::LinkClick;
+
+        struct Root {
+            terminal: Entity<super::TerminalView>,
+            peeks: Vec<String>,
+        }
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().w(px(400.)).h(px(100.)).child(self.terminal.clone())
+            }
+        }
+        cx.update(gpui_base::init);
+        let original = crate::settings::get();
+        let (root, cx) = cx.add_window_view(|_, cx| {
+            let terminal = cx.new(|cx| super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 5), cx));
+            cx.subscribe(&terminal, |root: &mut Root, _, event: &super::TerminalEvent, _| {
+                if let super::TerminalEvent::Peek(address) = event {
+                    root.peeks.push(address.clone());
+                }
+            })
+            .detach();
+            Root { terminal, peeks: Vec::new() }
+        });
+        cx.run_until_parked();
+        crate::mods::publish_terminals(json!([{"address":"peer.test/t7"}]));
+        let terminal = root.read_with(cx, |root, _| root.terminal.clone());
+        terminal.update(cx, |t, _| t.grid.borrow_mut().vt.write(b"see peer.test/t7 and plain text"));
+        cx.run_until_parked();
+        // Two clicks in the same cell within half a second select a word, so each
+        // click gets its own cell: columns 4..16 are the link, 25.. is empty.
+        let cell_center = |cx: &mut VisualTestContext, col: usize| {
+            terminal.read_with(cx, |t, _| {
+                let g = t.grid.borrow();
+                point(g.origin.x + g.cell.width * (col as f32 + 0.5), g.origin.y + g.cell.height * 0.5)
+            })
+        };
+        let used = std::cell::Cell::new(0usize);
+        let on_link = |cx: &mut VisualTestContext| {
+            used.set(used.get() + 1);
+            cell_center(cx, 4 + used.get() % 11)
+        };
+        let off_link = |cx: &mut VisualTestContext| {
+            used.set(used.get() + 1);
+            cell_center(cx, 25 + used.get() % 11)
+        };
+        let neighbor = |cx: &mut VisualTestContext, pos: Point<Pixels>| {
+            let width = terminal.read_with(cx, |t, _| t.grid.borrow().cell.width);
+            pos + point(width, px(0.))
+        };
+        let none = Modifiers::default();
+        let platform = if cfg!(target_os = "macos") { Modifiers::command() } else { Modifiers::control() };
+        let peeks = |cx: &mut VisualTestContext| root.read_with(cx, |root, _| root.peeks.len());
+        let selection = |cx: &mut VisualTestContext| terminal.read_with(cx, |t, _| t.grid.borrow().vt.selection_text());
+        let set = |cx: &mut VisualTestContext, link_click| {
+            let mut settings = (*original).clone();
+            settings.link_click = link_click;
+            cx.update(|_, _| crate::settings::set(settings));
+        };
+        let click = |cx: &mut VisualTestContext, pos, mods| {
+            cx.simulate_mouse_down(pos, MouseButton::Left, mods);
+            cx.simulate_mouse_up(pos, MouseButton::Left, mods);
+        };
+
+        // With no key to hold, the click that focuses a pane doesn't open a link in it.
+        set(cx, LinkClick::Plain);
+        let pos = on_link(cx);
+        click(cx, pos, none);
+        assert_eq!(peeks(cx), 0, "that click focused the pane");
+        let pos = on_link(cx);
+        click(cx, pos, none);
+        assert_eq!(peeks(cx), 1);
+
+        // The default: the platform key opens on press; nothing else does.
+        set(cx, LinkClick::Auto);
+        let (pos, other) = (on_link(cx), on_link(cx));
+        click(cx, pos, none);
+        click(cx, other, Modifiers::shift());
+        assert_eq!(peeks(cx), 1);
+        let pos = on_link(cx);
+        cx.simulate_mouse_down(pos, MouseButton::Left, platform);
+        assert_eq!(peeks(cx), 2, "opens as the button goes down");
+        cx.simulate_mouse_up(pos, MouseButton::Left, platform);
+        assert_eq!(peeks(cx), 2);
+
+        // Shift: opens on release, only for a click that selected nothing.
+        set(cx, LinkClick::Shift);
+        let (pos, other) = (on_link(cx), on_link(cx));
+        click(cx, pos, platform);
+        click(cx, other, none);
+        assert_eq!(peeks(cx), 2);
+        let pos = on_link(cx);
+        cx.simulate_mouse_down(pos, MouseButton::Left, Modifiers::shift());
+        assert_eq!(peeks(cx), 2, "not yet");
+        cx.simulate_mouse_up(pos, MouseButton::Left, Modifiers::shift());
+        assert_eq!(peeks(cx), 3);
+        let (pos, next) = (on_link(cx), on_link(cx));
+        cx.simulate_mouse_down(pos, MouseButton::Left, Modifiers::shift());
+        cx.simulate_mouse_move(next, MouseButton::Left, Modifiers::shift());
+        cx.simulate_mouse_up(next, MouseButton::Left, Modifiers::shift());
+        assert_eq!(peeks(cx), 3, "a drag selects");
+        assert!(selection(cx).is_some());
+        let pos = off_link(cx);
+        click(cx, pos, Modifiers::shift());
+        assert_eq!(peeks(cx), 3, "no link there");
+
+        // Shift keeps the mouse from a program that tracks it, so the click opens the link.
+        terminal.update(cx, |t, _| t.grid.borrow_mut().vt.write(b"\x1b[?1000h"));
+        let pos = on_link(cx);
+        click(cx, pos, Modifiers::shift());
+        assert_eq!(peeks(cx), 4);
+        terminal.update(cx, |t, _| t.grid.borrow_mut().vt.write(b"\x1b[?1000l"));
+
+        // The underline follows the setting: Shift held, then no key at all.
+        let underlined = |cx: &mut VisualTestContext, pos, mods| {
+            cx.simulate_mouse_move(pos, None, mods);
+            cx.run_until_parked();
+            terminal.read_with(cx, |t, _| t.link.is_some())
+        };
+        set(cx, LinkClick::Shift);
+        let (pos, away) = (on_link(cx), off_link(cx));
+        assert!(!underlined(cx, pos, none));
+        assert!(underlined(cx, pos, Modifiers::shift()));
+        assert!(!underlined(cx, away, Modifiers::shift()));
+        set(cx, LinkClick::Plain);
+        assert!(underlined(cx, pos, none));
+        assert!(!underlined(cx, away, none));
+        assert!(!underlined(cx, pos, Modifiers::shift()));
+
+        // None: a plain click opens on release.
+        let pos = on_link(cx);
+        click(cx, pos, Modifiers::shift());
+        assert_eq!(peeks(cx), 4);
+        let pos = on_link(cx);
+        cx.simulate_mouse_down(pos, MouseButton::Left, none);
+        assert_eq!(peeks(cx), 4, "not yet");
+        cx.simulate_mouse_up(pos, MouseButton::Left, none);
+        assert_eq!(peeks(cx), 5);
+        assert!(selection(cx).is_none());
+        let pos = off_link(cx);
+        click(cx, pos, none);
+        assert_eq!(peeks(cx), 5, "no link there");
+        let pos = on_link(cx);
+        let next = neighbor(cx, pos);
+        cx.simulate_mouse_down(pos, MouseButton::Left, none);
+        cx.simulate_mouse_move(next, MouseButton::Left, none);
+        cx.simulate_mouse_up(next, MouseButton::Left, none);
+        assert_eq!(peeks(cx), 5, "a drag selects");
+        assert!(selection(cx).is_some());
+        let (pressed, released) = (off_link(cx), on_link(cx));
+        cx.simulate_mouse_down(pressed, MouseButton::Left, none);
+        cx.simulate_mouse_up(released, MouseButton::Left, none);
+        assert_eq!(peeks(cx), 5, "released in another cell");
+
+        // A program that tracks the mouse keeps plain clicks; Cmd (Ctrl) opens, once.
+        terminal.update(cx, |t, _| t.grid.borrow_mut().vt.write(b"\x1b[?1000h"));
+        let pos = on_link(cx);
+        assert!(!underlined(cx, pos, none), "a plain click there is the program's");
+        assert!(underlined(cx, pos, platform));
+        let pos = on_link(cx);
+        click(cx, pos, none);
+        assert_eq!(peeks(cx), 5);
+        let pos = on_link(cx);
+        cx.simulate_mouse_down(pos, MouseButton::Left, platform);
+        cx.simulate_mouse_up(pos, MouseButton::Left, platform);
+        assert_eq!(peeks(cx), 6);
+        crate::settings::set((*original).clone());
     }
 
     #[gpui::test]
