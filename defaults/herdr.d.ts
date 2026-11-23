@@ -454,7 +454,15 @@ export function notify(n: {
 export interface LinkClick {
   link:
     | { kind: "url"; raw: string; url: string }
-    | { kind: "file"; raw: string; path: string | null };
+    | {
+        kind: "file";
+        raw: string;
+        path: string | null;
+        /** 1-based line from a plain path suffix, if present and valid. */
+        line?: number;
+        /** 1-based column from a plain path suffix, if present and valid and the line is valid. */
+        column?: number;
+      };
   source: {
     terminal: string;
     machine: string | null;
