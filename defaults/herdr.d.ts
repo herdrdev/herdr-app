@@ -20,6 +20,9 @@ export function hc(args: string[]): Promise<ExecResult>;
 export function home(): string;
 /** The app's folder (`~/.config/herdr-app`, or `$HERDR_APP_HOME`): settings.json, keys.json, layouts/. */
 export function appHome(): string;
+/** True while `herdr-app check` loads this mod: `init()` runs for real there
+ *  (exec and writeTextFile included), so guard process side effects. */
+export function checking(): boolean;
 
 /** Reads UTF-8 text (up to 1 MiB), or null if absent. Runs off the UI thread.
  *  `on`: from that machine (a space's `machine`). */
@@ -49,13 +52,17 @@ export function playSound(sound: string): null;
  * the call returns; terminal.keep/park finish in the background and toast on failure.
  * A rename without a name is asked for;
  * "" gives the space or tab Herdr's automatic name again. The main ones:
- * Spaces: space.new {name?, folder?, tab?, argv?, task?, machine?}, space.close {id?}, space.rename {id?, name},
+ * Spaces: space.new {name?, folder?, tab?, argv?, task?, machine?, focus?}, space.close {id?}, space.rename {id?, name},
  *   space.move {id, index}, space.select {index | id}, space.next, space.prev.
- * Tabs: tab.new {name?, space?, folder?, argv?, task?} (argv: an agent, task: its first message)
- *   or {name?, space?, mod, props?} (a tab whose only pane is a mod),
- *   tab.close {id?}, tab.rename {id?, name}, tab.move {id, index}, tab.select {index | id},
+ * Tabs: tab.new {name?, space?, folder?, argv?, task?, focus?} (argv: an agent, task: its first message)
+ *   or {name?, space?, mod, props?, focus?} (a tab whose only pane is a mod),
+ *   tab.close {id?}, tab.rename {id?, name}, tab.move {id?, index | by} (by: -1 left, 1 right, wrapping), tab.select {index | id},
  *   tab.next, tab.prev.
- * Panes: pane.split {direction: "right" | "down", pane?}, pane.close {pane?}, pane.zoom {pane?},
+ * New spaces and tabs take focus by default. Boolean focus: false keeps the shown
+ * space, selected tab and keyboard focus; background tabs are appended in creation order.
+ * With no space shown, a new space is shown even with focus: false.
+ * Panes: pane.split {direction: "right" | "down", pane?}, pane.close {pane?}, pane.zoom {pane?}, pane.rename {pane?, name},
+ *   pane.resize {direction, pane?, px?},
  *   pane.focus {pane | terminal}, pane.go {direction}, pane.swap {pane?, direction | target}.
  *   Pane menus get target { pane, terminal }.
  * Terminals: terminal.open {argv?, folder?, place?: "tab" | "right" | "down"}, terminal.kill {terminal},
@@ -63,6 +70,9 @@ export function playSound(sound: string): null;
  *   terminal.park {terminal} (its pane goes, it keeps running; the menu's "Send back"),
  *   terminal.peek {terminal} (peek over the tab, with keep-as-tab and close),
  *   terminal.show {terminal?, pane?} (shown in the pane for now, in place of its own), terminal.copy, terminal.paste,
+ *   terminal.select {terminal?, at?: {row, col} | "cursor", mode?: "cell" | "word" | "line"} (replaces the selection; defaults to cursor and cell).
+ *   terminal.adjust_selection {terminal?, direction: "left" | "right" | "up" | "down" | "page_up" | "page_down" | "home" | "end" | "line_start" | "line_end"} (moves the inclusive moving end; view follows; fails without selection).
+ *   terminal.clear_selection {terminal?}. No default keys or built-in copy mode.
  *   terminal.select_all {terminal?} (whole screen and scrollback, or only the alternate screen; Cmd+A on macOS).
  *   terminal.right_click {to: "program" | "menu", terminal?} (right-clicks to a program that takes the mouse; Shift: the menu).
  *   terminal.scroll {lines | pages | to: "top" | "bottom", terminal?} (Herdr's view of the history: negative goes up; pages may be fractional).
@@ -173,6 +183,8 @@ export interface AgentInfo {
   program: Program;
   /** The terminal's title. */
   title: string;
+  /** Its pane's name (`pane.rename`), or null. */
+  pane_name: string | null;
   /** Higher = changed more recently. */
   seq: number;
   /** Pinned with `terminal.pin`, on any Herdr client. */
@@ -183,15 +195,29 @@ export interface AgentInfo {
 /** Terminals whose program reports a status (agents), in space, tab, pane order. Live. */
 export function agents(): AgentInfo[];
 
+/** History scroll as Ghostty reports it, read fresh by panes().
+ *  Rows from the top of retained history; `from_bottom` is 0 at the end.
+ *  PaneInfo.scroll is null on the alternate screen or with no view.
+ *  Mods refresh only on transitions between end/history/alternate screen,
+ *  not on scrolling or output within one of those states that only changes the numbers. */
+export interface PaneScroll {
+  total: number;
+  offset: number;
+  len: number;
+  from_bottom: number;
+}
+
 export interface PaneInfo {
   pane: string;
   /** null for a mod pane (`pane.split {mod}`): then `mod` names it, and only
-   *  pane, mod, tab, title, focused and zoomed are set. */
+   *  pane, mod, tab, title, name, focused and zoomed are set. */
   terminal: string | null;
   mod?: string;
   tab: string;
   /** The terminal's title (what the program set), or the mod's name. */
   title: string;
+  /** The name someone gave it (`pane.rename`), or null. */
+  name: string | null;
   /** Its live folder, and the git branch there. */
   cwd: string | null;
   branch: string | null;
@@ -203,6 +229,8 @@ export interface PaneInfo {
   zoomed: boolean;
   /** The app's top-center grip can rearrange this pane. False when zoomed or alone. */
   movable: boolean;
+  /** History scroll for a terminal pane's attached view; null for mod panes / alt-screen. Live. */
+  scroll?: PaneScroll | null;
 }
 
 /** Every pane in every tab. A pane header mod finds its own with
@@ -218,8 +246,18 @@ export function setAgentOrder(addresses: string[]): null;
  *  labels, state, ...), with `status` as a plain word, the agent's report in `report`, and
  *  `program` (see Program). Parent addresses use the same machine names as `address`;
  *  parents on this computer use bare terminal IDs. Parents that cannot be mapped
- *  stay as the core reported them. Live. */
-export function terminals(): any[];
+ *  stay as the core reported them. View-local selection uses TerminalCell positions;
+ *  selection is null when absent or without an attached view. Updates when selection changes,
+ *  not on cursor motion or output. Start at the cursor with terminal.select and read selection.end. Live. */
+export function terminals(): (Record<string, any> & TerminalSelectionState)[];
+
+/** Zero-based cells. Rows count from the oldest retained history through the active screen.
+ *  Output preserves positions until history is pruned or the grid reflows. */
+export interface TerminalCell { row: number; col: number; }
+export interface TerminalSelectionState {
+  /** Inclusive endpoints: start is the anchor, end is the moving end (may precede start). */
+  selection: { start: TerminalCell; end: TerminalCell } | null;
+}
 
 /** Actual terminal/pane focus. `space` and `tab` are the current window context.
  *  Clicking a visible layout terminal block, or pane.focus {terminal}, focuses that block:
@@ -231,13 +269,15 @@ export function terminals(): any[];
  *  focused pane under the window.
  *  pane.focus {terminal} prefers the first visible layout terminal block, then a model pane.
  *  `shown`: terminal.show replacement, if any. `agent`: the agent an agent block shows.
- *  `terminal` is null for mod panes. Live. */
-export function focused(): { space: string; tab: string; pane: string | null; terminal: string | null; shown: string | null; agent: string | null; cwd: string | null } | null;
+ *  `terminal` is null for mod panes. Selection describes the terminal that receives
+ *  terminal commands (including a shown replacement or peek). Live. */
+export function focused(): ({ space: string; tab: string; pane: string | null; terminal: string | null; shown: string | null; agent: string | null; cwd: string | null } & TerminalSelectionState) | null;
 
 /** The shown layout (layouts/<name>.json). Its name is shared("layout").
  *  Root `terminal_menu?: string` chooses a terminal right-click menu mod (default: "menu").
  *  Unknown names warn and fall back to "menu". This replaces the menu, not its items.
- *  Opens a pointer popup with mod.json overlay width/height (default 220×260). */
+ *  Opens a pointer popup with mod.json overlay width/height (default 220×260).
+ *  Root `link_handlers?: string[]` selects terminal link mods in order. */
 export function layout(): unknown;
 
 /** The names of every layout in layouts/ (main first), except settings.json's `hidden_layouts`. */
@@ -258,6 +298,17 @@ export function window(): {
   fullscreen: boolean;
   active: boolean;
 };
+
+/** Sets the OS window's title, which window switchers, taskbars and time trackers read. The last
+ *  call wins, whichever mod made it; null restores "Herdr". It doesn't outlive the app, so set it
+ *  again when your mod starts. Call it when the title changes, not on every render. */
+export function setWindowTitle(title: string | null): null;
+
+/** Sets the badge on the app's icon: the red label on the macOS Dock icon, e.g. how many agents
+ *  need you. The last call wins, whichever mod made it; null or "" clears it. Other platforms
+ *  ignore it for now. It doesn't outlive the app, so set it again when your mod starts. Call it
+ *  when the text changes, not on every render. */
+export function setBadge(text: string | null): null;
 
 /** For a floating mod: where it sits now. `vertical` on the left/right edges, horizontal on
  *  top/bottom; while dragged, where it would land. `hovered` is true while the pointer is on it
@@ -331,9 +382,10 @@ export function feedbackClearImages(): null;
 export function sendFeedback(body: import("gpui-kit").HostValue, images?: string[]): Promise<string | null>;
 
 /** What the app runs with: the shown layout's look (theme name, fonts, sizes, terminal
- *  padding and opacity, terminal_line_height and terminal_scroll_speed) with the person's zoom and sounds.
- *  terminal_line_height: number, default 1, clamped to 0.8..2; terminal_scroll_speed:
- *  number, default 1, clamped to 0.1..5. Layout values override settings.json. */
+ *  padding and opacity, terminal_line_height, terminal_cell_width and terminal_scroll_speed) with the
+ *  person's zoom and sounds. terminal_line_height and terminal_cell_width: number, default 1, clamped
+ *  to 0.8..2; terminal_scroll_speed: number, default 1, clamped to 0.1..5. Layout values override
+ *  settings.json. */
 export function settings(): Record<string, unknown>;
 
 /** Every key binding: { section, keys, action }. */
@@ -387,6 +439,24 @@ export function notify(n: {
   icon?: string;
   action?: { name: string; args?: Record<string, unknown> };
 }): string;
+
+/** A Ctrl/Cmd-click on a terminal link, passed to the mod's link.js. */
+export interface LinkClick {
+  link:
+    | { kind: "url"; raw: string; url: string }
+    | { kind: "file"; raw: string; path: string | null };
+  source: {
+    terminal: string;
+    machine: string | null;
+    cwd: string | null;
+    pane: string | null;
+    tab: string | null;
+    space: string | null;
+  };
+}
+
+/** Signature of the named handleLink export from link.js. */
+export type HandleLink = (click: LinkClick) => "handled" | "pass" | Promise<"handled" | "pass">;
 
 /** The props this copy of the mod was given in the layout (or overlay).
  *  A layout's terminal_menu mod gets {tab: "pane", target: {pane: string, terminal: string}, overlay: string}.

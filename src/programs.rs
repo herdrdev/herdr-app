@@ -108,14 +108,21 @@ pub fn installed(commands: &[String], on: Option<&str>) -> Result<Vec<String>, S
             args.extend(installed_powershell(commands));
             crate::mods::run_blocking(&crate::core_bin::path().to_string_lossy(), &args, None, std::time::Duration::from_secs(30))
         }
-        None => {
-            let shell = crate::window::shell();
-            let line = installed_line(commands, base(&shell) == "fish");
-            let mode = if cfg!(target_os = "macos") { "-lic" } else { "-ic" };
-            crate::mods::run_blocking(&shell, &[mode.into(), line], None, std::time::Duration::from_secs(30))
-        }
+        None => return installed_here(&crate::window::shell(), commands),
     };
     installed_result(commands, result)
+}
+
+fn installed_here(shell: &str, commands: &[String]) -> Result<Vec<String>, String> {
+    let limit = std::time::Duration::from_secs(30);
+    let mode = if cfg!(target_os = "macos") { "-lic" } else { "-ic" };
+    let line = installed_line(commands, base(shell) == "fish");
+    installed_result(commands, crate::mods::run_blocking(shell, &[mode.into(), line], None, limit)).or_else(|err| {
+        // A shell that can't run the check (nushell): sh searches the app's PATH,
+        // which is where agents for such shells start (`window::unix_agent_argv`).
+        let sh = crate::mods::run_blocking("/bin/sh", &["-c".into(), installed_line(commands, false)], None, limit);
+        installed_result(commands, sh).map_err(|_| err)
+    })
 }
 
 fn installed_result(commands: &[String], result: Result<(i32, String, String), String>) -> Result<Vec<String>, String> {
@@ -209,11 +216,17 @@ pub fn agent_name(app: Option<&str>) -> String {
     let names = NAMES.get_or_init(|| {
         let table: Table = serde_json::from_str(BUILT_IN).expect("defaults/programs.json");
         let mut names = BTreeMap::new();
-        for (key, e) in table.programs {
+        for (key, e) in &table.programs {
             for alias in &e.also {
                 names.insert(alias.to_lowercase(), key.clone());
             }
-            names.insert(key.to_lowercase(), key);
+            names.insert(key.to_lowercase(), key.clone());
+        }
+        // Cursor's CLI is `agent`; keep that alias over the generic `agent` key.
+        if let Some(cursor) = table.programs.get("cursor") {
+            for alias in &cursor.also {
+                names.insert(alias.to_lowercase(), "cursor".into());
+            }
         }
         names
     });
@@ -241,7 +254,7 @@ pub fn powershell_line(cmd: &[String]) -> String {
     format!("& {}", cmd.iter().map(|w| powershell_quote(w)).collect::<Vec<_>>().join(" "))
 }
 
-fn powershell_quote(word: &str) -> String {
+pub(crate) fn powershell_quote(word: &str) -> String {
     let mut s = String::from("'");
     for ch in word.chars() {
         if PS_QUOTES.contains(&ch) {
@@ -281,11 +294,17 @@ fn powershell_words(line: &str) -> Option<Vec<String>> {
 
 fn find<'a>(t: &'a Table, name: &str) -> Option<(&'a str, &'a Entry)> {
     let lower = name.to_lowercase();
-    t.programs
-        .iter()
-        .find(|(k, _)| k.as_str() == name || k.to_lowercase() == lower)
-        .or_else(|| t.programs.iter().find(|(_, e)| e.also.iter().any(|a| a == name || a.to_lowercase() == lower)))
-        .map(|(k, e)| (k.as_str(), e))
+    let by_key = t.programs.iter().find(|(k, _)| k.as_str() == name || k.to_lowercase() == lower);
+    let by_match = t.programs.iter().find(|(_, e)| e.also.iter().any(|a| a == name || a.to_lowercase() == lower));
+    // An explicit key wins — including a person's own `programs.json` entry —
+    // except the generic `agent` fallback, which yields to a `match` (Cursor's
+    // CLI process is named `agent`).
+    match (by_key, by_match) {
+        (Some((k, _)), Some((mk, me))) if k.as_str() == "agent" => Some((mk.as_str(), me)),
+        (Some((k, e)), _) => Some((k.as_str(), e)),
+        (None, Some((k, e))) => Some((k.as_str(), e)),
+        (None, None) => None,
+    }
 }
 
 fn resolve(t: &Table, app: Option<&str>, argv: &[String]) -> Value {
@@ -402,7 +421,21 @@ mod tests {
         assert_eq!(key(Some("grok-build"), &["/bin/zsh"]), "grok");
         assert_eq!(key(Some("dsh-tui"), &["/bin/zsh"]), "dsh-tui");
         assert_eq!(key(None, &["dsh-tui"]), "dsh-tui");
+        assert_eq!(key(Some("goose"), &["/bin/zsh"]), "goose");
+        assert_eq!(key(None, &["goose"]), "goose");
+        assert_eq!(key(None, &["agent"]), "cursor");
+        assert_eq!(key(Some("agent"), &[]), "cursor");
+        assert_eq!(key(Some("cursor-agent"), &[]), "cursor");
         assert_eq!(key(Some("newagent"), &[]), "agent");
+        assert!(startable().iter().any(|a| a["key"] == "cursor" && a["run"] == json!(["agent"])));
+        // A person's own key still beats a built-in `match` (python matches python3).
+        let mut personal = t();
+        personal.programs.insert(
+            "python3".into(),
+            Entry { name: Some("Project Python".into()), ..Entry::default() },
+        );
+        assert_eq!(resolve(&personal, None, &["python3".into()])["key"], "python3");
+        assert_eq!(resolve(&personal, None, &["python3".into()])["name"], "Project Python");
         assert_eq!(key(None, &["/bin/zsh"]), "shell");
         assert_eq!(key(None, &["-zsh"]), "shell");
         assert_eq!(key(None, &["nvim", "x.rs"]), "nvim");
@@ -420,6 +453,8 @@ mod tests {
         assert_eq!(key(None, &["/opt/homebrew/bin/fish", "-lic", "command $argv[2..]; exec $argv[1] -li", "/opt/homebrew/bin/fish", "cursor-agent"]), "cursor");
         let line = powershell_line(&["codex".into(), "fix it".into()]);
         assert_eq!(key(None, &["pwsh.exe", "-NoExit", "-Command", &line]), "codex");
+        assert_eq!(key(None, &[r"C:\Program Files\PowerShell\7\pwsh.exe", "-NoExit", "-Command", &line]), "codex");
+        assert_eq!(key(None, &[r"C:\Program Files\PowerShell\7\pwsh.exe"]), "shell");
         assert_eq!(key(None, &[r"C:\Windows\powershell.exe"]), "shell");
     }
 
@@ -434,6 +469,31 @@ mod tests {
             .unwrap();
         assert!(out.status.success());
         assert_eq!(installed_result(&commands, Ok((0, String::from_utf8(out.stdout).unwrap(), String::new()))).unwrap(), ["issue57_function", "printf"]);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn the_check_runs_in_the_persons_shell_and_falls_back_to_sh_only_when_it_cannot() {
+        use std::os::unix::fs::PermissionsExt;
+        let temp = if cfg!(target_os = "linux") { std::path::PathBuf::from("/var/tmp") } else { std::env::temp_dir() };
+        let dir = temp.join(format!("herdr-other-shell-check-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("rc")).unwrap();
+        let script = |name: &str, body: &str| {
+            let path = dir.join(name);
+            std::fs::write(&path, format!("#!/bin/sh\n{body}\n")).unwrap();
+            std::fs::set_permissions(&path, std::fs::Permissions::from_mode(0o755)).unwrap();
+            path.to_string_lossy().into_owned()
+        };
+        // Only the person's shell can find it: its rc adds `rc` to PATH.
+        script("rc/issue240-rc-agent", "");
+        // A sh-compatible shell under a name nothing knows; and nushell, which rejects sh syntax.
+        let posix = script("mksh-custom", &format!("PATH={}:$PATH exec /bin/sh \"$@\"", dir.join("rc").display()));
+        let nu = script("nu", "echo \"Error: nu::parser::shell_outerr\" >&2\nexit 1");
+        let commands = ["sh", "issue240-rc-agent", "issue240-missing-agent"].map(String::from);
+        let (posix, nu) = (installed_here(&posix, &commands), installed_here(&nu, &commands));
+        std::fs::remove_dir_all(&dir).unwrap();
+        assert_eq!(posix.unwrap(), ["sh", "issue240-rc-agent"]);
+        assert_eq!(nu.unwrap(), ["sh"]);
     }
 
     #[test]
