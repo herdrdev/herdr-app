@@ -276,7 +276,8 @@ export function focused(): ({ space: string; tab: string; pane: string | null; t
 /** The shown layout (layouts/<name>.json). Its name is shared("layout").
  *  Root `terminal_menu?: string` chooses a terminal right-click menu mod (default: "menu").
  *  Unknown names warn and fall back to "menu". This replaces the menu, not its items.
- *  Opens a pointer popup with mod.json overlay width/height (default 220×260). */
+ *  Opens a pointer popup with mod.json overlay width/height (default 220×260).
+ *  Root `link_handlers?: string[]` selects terminal link mods in order. */
 export function layout(): unknown;
 
 /** The names of every layout in layouts/ (main first). */
@@ -439,6 +440,24 @@ export function notify(n: {
   action?: { name: string; args?: Record<string, unknown> };
 }): string;
 
+/** A Ctrl/Cmd-click on a terminal link, passed to the mod's link.js. */
+export interface LinkClick {
+  link:
+    | { kind: "url"; raw: string; url: string }
+    | { kind: "file"; raw: string; path: string | null };
+  source: {
+    terminal: string;
+    machine: string | null;
+    cwd: string | null;
+    pane: string | null;
+    tab: string | null;
+    space: string | null;
+  };
+}
+
+/** Signature of the named handleLink export from link.js. */
+export type HandleLink = (click: LinkClick) => "handled" | "pass" | Promise<"handled" | "pass">;
+
 /** The props this copy of the mod was given in the layout (or overlay).
  *  A layout's terminal_menu mod gets {tab: "pane", target: {pane: string, terminal: string}, overlay: string}.
  *  Target names the clicked pane/terminal, not necessarily the focused one; pass it to actions.
@@ -472,7 +491,7 @@ export function nextCommand(): Promise<string>;
  * Idle watches may be reclaimed to make room; reload when starting a watch.
  * Call cancel() on the returned promise when you stop showing the folder.
  * It resolves with [] and releases this call; other callers keep watching.
- * Closing a mod copy cancels its pending calls. Files also refreshes on its 10-second timer.
+ * Closing a mod copy cancels its pending calls. Files and Changes also poll while focused.
  *   cx.spawn(async (cx) => { for (;;) { await watchFolder(dir); this.reload(); cx.notify(); } });
  * Watch what you show, not a whole home folder (node_modules is a lot of events).
  */

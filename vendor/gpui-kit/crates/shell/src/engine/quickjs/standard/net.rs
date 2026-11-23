@@ -1,7 +1,7 @@
 use std::{
-    io::{Read as _, Write as _},
+    future::Future,
     net::{Shutdown, TcpStream},
-    sync::{Arc, Mutex},
+    sync::Arc,
     time::Duration,
 };
 
@@ -9,6 +9,12 @@ use rquickjs::{
     Ctx, Exception, IntoJs, Object, Promise, Result, TypedArray, Value,
     function::{Func, Opt},
     module::{Declarations, Exports, ModuleDef},
+};
+
+use smol::{
+    Async, Timer, future,
+    io::{self, AsyncReadExt as _, AsyncWriteExt as _},
+    lock::Mutex,
 };
 
 use super::{
@@ -50,26 +56,41 @@ fn connect<'js>(ctx: Ctx<'js>, host_name: String, port: u16) -> Result<Promise<'
     scheduler::blocking(&ctx, "net.connect(host, port)", move || {
         let operation = format!("{host_name}:{port}");
         let (stream, _) = network_connect::connect_tcp(&host_name, port, TIMEOUT, &operation)?;
-        stream.set_read_timeout(Some(TIMEOUT)).ok();
-        stream.set_write_timeout(Some(TIMEOUT)).ok();
-        let reader = stream
-            .try_clone()
-            .map_err(|error| format!("cloning {host_name}:{port} for reads failed: {error}"))?;
-        let writer = stream
-            .try_clone()
-            .map_err(|error| format!("cloning {host_name}:{port} for writes failed: {error}"))?;
+        let stream = Async::new(stream)
+            .map_err(|error| format!("setting up socket I/O for {operation} failed: {error}"))?;
         Ok(Socket {
-            reader: Arc::new(Mutex::new(reader)),
-            writer: Arc::new(Mutex::new(writer)),
-            closer: stream,
+            stream,
+            read: Mutex::new(()),
+            write: Mutex::new(()),
         })
     })
 }
 
 struct Socket {
-    reader: Arc<Mutex<TcpStream>>,
-    writer: Arc<Mutex<TcpStream>>,
-    closer: TcpStream,
+    stream: Async<TcpStream>,
+    read: Mutex<()>,
+    write: Mutex<()>,
+}
+
+async fn socket_io<T>(work: impl Future<Output = io::Result<T>>) -> io::Result<T> {
+    future::or(work, async {
+        Timer::after(TIMEOUT).await;
+        Err(io::ErrorKind::TimedOut.into())
+    })
+    .await
+}
+
+async fn write_all(mut stream: &Async<TcpStream>, mut data: &[u8]) -> io::Result<()> {
+    // As with SO_SNDTIMEO, each write that makes progress gets a new timeout.
+    while !data.is_empty() {
+        match socket_io(stream.write(data)).await {
+            Ok(0) => return Err(io::ErrorKind::WriteZero.into()),
+            Ok(written) => data = &data[written..],
+            Err(error) if error.kind() == io::ErrorKind::Interrupted => {}
+            Err(error) => return Err(error),
+        }
+    }
+    Ok(())
 }
 
 struct ReadChunk(Option<Vec<u8>>);
@@ -86,7 +107,8 @@ impl<'js> IntoJs<'js> for ReadChunk {
 impl<'js> IntoJs<'js> for Socket {
     fn into_js(self, ctx: &Ctx<'js>) -> Result<Value<'js>> {
         let socket = Object::new(ctx.clone())?;
-        let writer = self.writer;
+        let connection = Arc::new(self);
+        let writer = connection.clone();
         socket.set(
             "write",
             Func::from(move |ctx: Ctx<'js>, data: String| -> Result<Promise<'js>> {
@@ -97,16 +119,15 @@ impl<'js> IntoJs<'js> for Socket {
                     ));
                 }
                 let stream = writer.clone();
-                scheduler::blocking(&ctx, "socket.write(data)", move || {
-                    stream
-                        .lock()
-                        .map_err(|_| "socket lock was poisoned".to_owned())?
-                        .write_all(data.as_bytes())
+                scheduler::awaiting(&ctx, "socket.write(data)", async move {
+                    let _write = stream.write.lock().await;
+                    write_all(&stream.stream, data.as_bytes())
+                        .await
                         .map_err(|error| format!("socket write failed: {error}"))
                 })
             }),
         )?;
-        let reader = self.reader;
+        let reader = connection.clone();
         socket.set(
             "read",
             Func::from(
@@ -119,12 +140,11 @@ impl<'js> IntoJs<'js> for Socket {
                         ));
                     }
                     let stream = reader.clone();
-                    scheduler::blocking(&ctx, "socket.read(size)", move || {
+                    scheduler::awaiting(&ctx, "socket.read(size)", async move {
+                        let _read = stream.read.lock().await;
                         let mut bytes = vec![0; size];
-                        let count = stream
-                            .lock()
-                            .map_err(|_| "socket lock was poisoned".to_owned())?
-                            .read(&mut bytes)
+                        let count = socket_io((&stream.stream).read(&mut bytes))
+                            .await
                             .map_err(|error| format!("socket read failed: {error}"))?;
                         if count == 0 {
                             return Ok(ReadChunk(None));
@@ -135,11 +155,10 @@ impl<'js> IntoJs<'js> for Socket {
                 },
             ),
         )?;
-        let closer = self.closer;
         socket.set(
             "close",
             Func::from(move || {
-                let _ = closer.shutdown(Shutdown::Both);
+                let _ = connection.stream.get_ref().shutdown(Shutdown::Both);
             }),
         )?;
         Ok(socket.into_value())
