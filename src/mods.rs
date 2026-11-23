@@ -414,7 +414,7 @@ fn scan_dir(root: &Path, prefix: &str, previous: &BTreeMap<String, Found>) -> BT
             let source = std::fs::read_to_string(manifest_path);
             let hint = source.as_ref().ok().and_then(|s| serde_json::from_str(s).ok()).unwrap_or_default();
             let previous_rules = previous.get(&id).filter(|old| old.dir == dir).map(|old| &old.link_rules);
-            let link_manifest = has_link || previous_rules.is_some_and(|rules| !rules.is_empty());
+            let link_manifest = (has_link && !has_view) || previous_rules.is_some_and(|rules| !rules.is_empty());
             let (link_rules, manifest_error) = match parse_link_rules(&source, link_manifest) {
                 Ok(rules) => {
                     let error = (!rules.is_empty() && !has_link).then(|| "mod.json declares link_handlers but link.js is missing".to_owned());
@@ -1027,7 +1027,8 @@ fn read_wsl_with(path: &str, host: Result<PathBuf, String>, guest: impl FnOnce(&
 
 // Keep raw bytes until UTF-8 validation; head bounds output even for a huge file.
 fn read_guest_with(mut command: std::process::Command, path: &str) -> Result<Option<String>, String> {
-    let out = command.args(["LC_ALL=C", "head", "-c", &(crate::mod_files::LIMIT + 1).to_string(), "--", path])
+    let script = r#"if test -e "$1" && ! test -f "$1"; then echo 'Not a regular file' >&2; exit 1; fi; exec head -c "$2" -- "$1""#;
+    let out = command.args(["LC_ALL=C", "sh", "-c", script, "sh", path, &(crate::mod_files::LIMIT + 1).to_string()])
         .stdin(std::process::Stdio::null()).output().map_err(|e| e.to_string())?;
     if !out.status.success() {
         let error = String::from_utf8_lossy(&out.stderr);
@@ -1041,10 +1042,20 @@ fn read_guest_with(mut command: std::process::Command, path: &str) -> Result<Opt
     String::from_utf8(out.stdout).map(Some).map_err(|e| e.to_string())
 }
 
-/// A text file on another machine: `cat`, or `type` where there is none (Windows).
+/// Only open regular files, and return at most one byte over the preview limit.
 fn read_remote(machine: &str, path: &str) -> Result<Option<String>, String> {
-    let (code, out, _) = match run_remote(machine, "cat", &["--".into(), path.into()], None) {
-        Err(e) if e.contains("cannot start") => run_remote(machine, "cmd", &["/d".into(), "/c".into(), "type".into(), path.replace('/', "\\")], None)?,
+    let max = crate::mod_files::LIMIT + 1;
+    let script = r#"test -f "$1" || exit 1; exec head -c "$2" -- "$1""#;
+    let (code, out, _) = match run_remote(machine, "sh", &["-c".into(), script.into(), "sh".into(), path.into(), max.to_string()], None) {
+        Err(e) if e.contains("cannot start") => {
+            let path = crate::programs::powershell_quote(&path.replace('/', "\\"));
+            let script = format!("$file = Get-Item -LiteralPath {path} -Force -ErrorAction SilentlyContinue; \
+                if ($file -isnot [IO.FileInfo]) {{ exit 1 }}; \
+                $reader = [IO.BinaryReader]::new($file.OpenRead()); \
+                try {{ $bytes = $reader.ReadBytes({max}); [Console]::OpenStandardOutput().Write($bytes, 0, $bytes.Length) }} \
+                finally {{ $reader.Dispose() }}");
+            run_remote(machine, "powershell.exe", &["-NoProfile".into(), "-Command".into(), script], None)?
+        }
         r => r?,
     };
     if code != 0 {
@@ -1102,10 +1113,14 @@ fn module(inst: Instance, copy: u64) -> HostModule {
         .async_function("readTextFile", |a| {
             let path = a.string(0)?.to_owned();
             let on = opt_str(a.get(1), "on");
-            Ok(crate::mod_files::read_with(move || match on {
-                Some(m) => read_remote(&m, &path),
-                None => read_local(&path),
-            }))
+            let read = crate::mod_files::read_with(on, path, |on, path| match on {
+                Some(m) => read_remote(m, path),
+                None => read_local(path),
+            });
+            Ok(async move {
+                let text = read.recv().await.map_err(|e| HostError::new(e.to_string()))?.map_err(HostError::new)?;
+                Ok(text.map(HostValue::from).unwrap_or(HostValue::Null))
+            })
         })
         .async_function("writeTextFile", |a| {
             let expected = a.get(2).and_then(|v| match v { HostValue::Str(s) => Some(s.clone()), _ => None });
@@ -1426,19 +1441,33 @@ pub fn handle_link(
     window: &mut gpui::Window,
     cx: &mut App,
 ) -> impl std::future::Future<Output = anyhow::Result<String>> + use<> {
+    use std::{future::{Future, poll_fn}, pin::pin, task::Poll};
     let (_, policy) = mod_policy(&Instance { name: name.to_owned(), props: Value::Null });
-    gpui_shell::ShellRuntime::call_module(dir, "link.js", "handleLink", click, Rc::new(policy), window, cx)
+    let call = gpui_shell::ShellRuntime::call_module(dir, "link.js", "handleLink", click, Rc::new(policy), window, cx);
+    let timeout = cx.background_executor().timer(Duration::from_secs(30));
+    async move {
+        let mut call = pin!(call);
+        let mut timeout = pin!(timeout);
+        poll_fn(|cx| {
+            if let Poll::Ready(result) = call.as_mut().poll(cx) {
+                return Poll::Ready(result);
+            }
+            timeout.as_mut().poll(cx).map(|()| Err(anyhow::anyhow!("The link handler did not answer within 30 seconds.")))
+        }).await
+    }
 }
 
 pub fn check_link_mod(dir: &Path) -> anyhow::Result<bool> {
     let has_link = dir.join("link.js").is_file();
+    let standalone = has_link && !dir.join("main.js").is_file();
     let source = std::fs::read_to_string(dir.join("mod.json"));
-    let rules = parse_link_rules(&source, has_link).map_err(anyhow::Error::msg)?;
+    let rules = parse_link_rules(&source, standalone).map_err(anyhow::Error::msg)?;
     anyhow::ensure!(rules.is_empty() || has_link, "mod.json declares link_handlers but link.js is missing");
-    if has_link {
+    let handles_links = standalone || !rules.is_empty();
+    if handles_links {
         gpui_shell::ShellRuntime::check_module(dir, "link.js", "handleLink")?;
     }
-    Ok(has_link)
+    Ok(handles_links)
 }
 
 #[cfg(test)]
@@ -1525,7 +1554,17 @@ mod tests {
         assert!(!check_link_mod(&dir).unwrap(), "a plain view still runs the normal view check");
         assert!(views["example"].manifest_error.is_none());
 
-        std::fs::write(dir.join("link.js"), r#"export function handleLink() { return "handled"; }"#).unwrap();
+        std::fs::write(dir.join("link.js"), "export function helper() {}").unwrap();
+        assert!(!check_link_mod(&dir).unwrap(), "a view with an ordinary helper still uses the view check");
+        let helpers = scan_dir(&root, "", &views);
+        assert!(helpers["example"].manifest_error.is_none());
+
+        let manifest = dir.join("mod.json");
+        std::fs::write(&manifest, r#"{"link_handlers":[{"kind":"url","pattern":"^http://localhost:"}]}"#).unwrap();
+        assert!(check_link_mod(&dir).unwrap_err().to_string().contains("handleLink"));
+
+        std::fs::remove_file(dir.join("main.js")).unwrap();
+        std::fs::write(&manifest, r#"{"place":"none",}"#).unwrap();
         let error = check_link_mod(&dir).unwrap_err().to_string();
         assert!(error.starts_with("mod.json:"), "{error}");
         let links = scan_dir(&root, "", &views);

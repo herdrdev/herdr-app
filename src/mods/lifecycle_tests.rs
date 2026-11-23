@@ -555,6 +555,64 @@ export default class extends View {
 }
 
 #[gpui::test]
+fn mod_socket_writes_reads_and_reports_eof(cx: &mut TestAppContext) {
+    use std::{io::{Read, Write}, net::{Shutdown, TcpListener}};
+
+    cx.executor().allow_parking();
+    cx.update(gpui_shell::init);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let source = r#"
+import { View, div } from "gpui-kit";
+import { connect } from "net";
+import { note } from "fixture";
+export default class extends View {
+  init(_, cx) {
+    cx.spawn(async () => {
+      const socket = await connect("127.0.0.1", __PORT__);
+      await socket.write("pingé");
+      const bytes = await socket.read(4);
+      const eof = await socket.read(4);
+      note(bytes instanceof Uint8Array, bytes?.length, bytes?.[0], eof === null);
+      socket.close();
+    });
+  }
+  render() { return div(); }
+}"#.replace("__PORT__", &listener.local_addr().unwrap().port().to_string());
+    let fixture = Fixture::new(&source);
+    let seen = Rc::new(RefCell::new(None));
+    let calls = seen.clone();
+    gpui_shell::policy::set_default(Policy::new().with_capabilities(capabilities())
+        .with_host_module(HostModule::new("fixture").function("note", move |a| {
+            calls.replace(Some((a.boolean(0)?, a.number(1)?, a.number(2)?, a.boolean(3)?)));
+            Ok(HostValue::Null)
+        })).unwrap());
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|window, cx| Mounted(runtime.try_load(&fixture.0, window, cx).unwrap()));
+    cx.run_until_parked();
+
+    let (mut peer, _) = listener.accept().unwrap();
+    peer.set_nonblocking(false).unwrap();
+    peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    peer.set_write_timeout(Some(Duration::from_secs(3))).unwrap();
+    let server = std::thread::spawn(move || {
+        let mut request = [0; 6];
+        peer.read_exact(&mut request).unwrap();
+        assert_eq!(&request, "pingé".as_bytes());
+        peer.write_all(&[0xfe]).unwrap();
+        peer.shutdown(Shutdown::Write).unwrap();
+    });
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while seen.borrow().is_none() && Instant::now() < deadline {
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    server.join().unwrap();
+    assert_eq!(*seen.borrow(), Some((true, 1.0, 254.0, true)));
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+}
+
+#[gpui::test]
 fn reload_releases_a_pending_tcp_read_without_a_close_hook(cx: &mut TestAppContext) {
     use std::io::Read as _;
     use std::net::TcpListener;
