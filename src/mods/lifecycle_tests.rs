@@ -68,6 +68,75 @@ export default class extends View {
 }
 
 
+/// Both kinds of scroll handle say where their area is: how far it has
+/// scrolled (counted up from the start), how big its content is and how much
+/// of it is on screen.
+#[gpui::test]
+fn scroll_handles_report_offset_content_and_viewport(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let fixture = Fixture::new(r#"
+import { View, div } from "gpui-kit";
+import { ScrollHandle, VirtualListScrollHandle, v_virtual_list } from "gpui-base";
+import { note } from "fixture";
+export default class extends View {
+  init(_, cx) {
+    this.plain = ScrollHandle.new();
+    this.rows = VirtualListScrollHandle.new();
+    this.focus = cx.focus_handle();
+    this.focus.focus();
+  }
+  render() {
+    return div().size_full().track_focus(this.focus)
+      .on_key_down((e, cx) => {
+        if (e.key === "e") {
+          this.plain.scroll_to_item(4);
+          this.rows.scroll_to_bottom();
+        }
+        if (e.key === "r") for (const handle of [this.plain, this.rows]) {
+          const offset = handle.offset(), content = handle.content_size(), viewport = handle.viewport_size();
+          note(offset.x, offset.y, content.width, content.height, viewport.width, viewport.height);
+        }
+        cx.notify();
+      })
+      .child(div().id("plain").flex().flex_col().w(40).h(120).overflow_y_scroll().track_scroll(this.plain)
+        .children([0, 1, 2, 3, 4].map(i => div().id("item-" + i).w(40).h(40).flex_none().child(String(i)))))
+      .child(div().w(40).h(100).child(v_virtual_list("rows", 50, 20, (i) => String(i),
+        (range) => Array.from({ length: range.end - range.start }, (_, i) => div().h(20).child(String(range.start + i))))
+        .track_scroll(this.rows)));
+  }
+}"#);
+    let notes = Rc::new(RefCell::new(Vec::new()));
+    let calls = notes.clone();
+    gpui_shell::policy::set_default(Policy::new().with_host_module(
+        HostModule::new("fixture").function("note", move |a| {
+            calls.borrow_mut().push([a.number(0)?, a.number(1)?, a.number(2)?, a.number(3)?, a.number(4)?, a.number(5)?]);
+            Ok(HostValue::Null)
+        })
+    ).unwrap());
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|window, cx| Mounted(runtime.try_load(&fixture.0, window, cx).unwrap()));
+    let mut visual = VisualTestContext::from_window(*window.deref(), cx);
+    let mut read = |keys: &str| {
+        notes.borrow_mut().clear();
+        visual.simulate_keystrokes(keys);
+        for _ in 0..3 {
+            visual.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                window.draw(cx).clear(cx);
+            });
+            visual.run_until_parked();
+        }
+        notes.borrow().clone()
+    };
+    read("");
+    // [offset.x, offset.y, content width, content height, viewport width, viewport height]
+    assert_eq!(read("r"), vec![[0., 0., 40., 200., 40., 120.], [0., 0., 40., 1000., 40., 100.]], "at the start");
+    read("e");
+    assert_eq!(read("r"), vec![[0., 80., 40., 200., 40., 120.], [0., 900., 40., 1000., 40., 100.]], "at the end");
+    visual.update(|window, _| window.remove_window());
+    visual.run_until_parked();
+}
+
 #[gpui::test]
 fn plain_mod_scroll_handles_reveal_children_once_without_moving_visible_items(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
@@ -551,6 +620,64 @@ export default class extends View {
     }).unwrap();
     cx.run_until_parked();
     assert_eq!(*seen.borrow(), ["start", "done"]);
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+}
+
+#[gpui::test]
+fn mod_socket_writes_reads_and_reports_eof(cx: &mut TestAppContext) {
+    use std::{io::{Read, Write}, net::{Shutdown, TcpListener}};
+
+    cx.executor().allow_parking();
+    cx.update(gpui_shell::init);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let source = r#"
+import { View, div } from "gpui-kit";
+import { connect } from "net";
+import { note } from "fixture";
+export default class extends View {
+  init(_, cx) {
+    cx.spawn(async () => {
+      const socket = await connect("127.0.0.1", __PORT__);
+      await socket.write("pingé");
+      const bytes = await socket.read(4);
+      const eof = await socket.read(4);
+      note(bytes instanceof Uint8Array, bytes?.length, bytes?.[0], eof === null);
+      socket.close();
+    });
+  }
+  render() { return div(); }
+}"#.replace("__PORT__", &listener.local_addr().unwrap().port().to_string());
+    let fixture = Fixture::new(&source);
+    let seen = Rc::new(RefCell::new(None));
+    let calls = seen.clone();
+    gpui_shell::policy::set_default(Policy::new().with_capabilities(capabilities())
+        .with_host_module(HostModule::new("fixture").function("note", move |a| {
+            calls.replace(Some((a.boolean(0)?, a.number(1)?, a.number(2)?, a.boolean(3)?)));
+            Ok(HostValue::Null)
+        })).unwrap());
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|window, cx| Mounted(runtime.try_load(&fixture.0, window, cx).unwrap()));
+    cx.run_until_parked();
+
+    let (mut peer, _) = listener.accept().unwrap();
+    peer.set_nonblocking(false).unwrap();
+    peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    peer.set_write_timeout(Some(Duration::from_secs(3))).unwrap();
+    let server = std::thread::spawn(move || {
+        let mut request = [0; 6];
+        peer.read_exact(&mut request).unwrap();
+        assert_eq!(&request, "pingé".as_bytes());
+        peer.write_all(&[0xfe]).unwrap();
+        peer.shutdown(Shutdown::Write).unwrap();
+    });
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while seen.borrow().is_none() && Instant::now() < deadline {
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    server.join().unwrap();
+    assert_eq!(*seen.borrow(), Some((true, 1.0, 254.0, true)));
     window.update(cx, |_, window, _| window.remove_window()).unwrap();
 }
 

@@ -15,3 +15,24 @@ pub fn command(program: impl AsRef<OsStr>) -> Command {
     }
     cmd
 }
+
+/// Shells can open /dev/tty even with stdin redirected. Keep captured
+/// commands from stopping the app's process group when it is a background job.
+pub fn detached_command(program: impl AsRef<OsStr>) -> Command {
+    #[allow(unused_mut)]
+    let mut cmd = command(program);
+    #[cfg(unix)]
+    {
+        use std::os::unix::process::CommandExt;
+        // SAFETY: setsid is async-signal-safe and runs only in the new child.
+        unsafe {
+            cmd.pre_exec(|| {
+                if libc::setsid() == -1 {
+                    return Err(std::io::Error::last_os_error());
+                }
+                Ok(())
+            });
+        }
+    }
+    cmd
+}
