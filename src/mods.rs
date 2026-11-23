@@ -1224,13 +1224,17 @@ fn module(inst: Instance, copy: u64) -> HostModule {
             })
         })
         .async_function("pickFiles", |a| {
-            let options = a.get(0).map(from_host).unwrap_or(Value::Null);
-            let prompt = options.get("prompt").and_then(Value::as_str).map(str::to_owned).unwrap_or_else(|| "Open".into());
-            let multiple = options.get("multiple").and_then(Value::as_bool).unwrap_or(false);
+            let options = a.get(0);
+            let prompt = opt_str(options, "prompt").unwrap_or_else(|| "Open".into());
+            let multiple = options.and_then(|o| o.get("multiple")).and_then(HostValue::as_bool).unwrap_or(false);
             let picked = gpui_shell::with_current_app(|cx| cx.prompt_for_paths(gpui::PathPromptOptions {
                 files: true, directories: false, multiple, prompt: Some(prompt.into()),
             })).ok_or_else(|| HostError::new("no window to pick from"))?;
-            Ok(async move { Ok(picked_files(picked.await.ok().and_then(Result::ok).flatten())) })
+            Ok(async move {
+                let paths = picked.await.map_err(|_| HostError::new("the file picker was lost"))?
+                    .map_err(|error| HostError::new(error.to_string()))?;
+                picked_files(paths)
+            })
         })
         .function("feedbackClearImages", move |_| {
             if feedback_frame { crate::feedback::clear_shots(); }
@@ -1499,12 +1503,14 @@ pub fn check_link_mod(dir: &Path) -> anyhow::Result<bool> {
     Ok(handles_links)
 }
 
-/// The paths a file picker returned, in its order; a cancel (or no file) is null, never [].
-fn picked_files(paths: Option<Vec<std::path::PathBuf>>) -> HostValue {
-    match paths {
-        Some(paths) if !paths.is_empty() => HostValue::Array(paths.into_iter().map(|p| HostValue::Str(p.to_string_lossy().into_owned())).collect()),
-        _ => HostValue::Null,
-    }
+fn picked_files(paths: Option<Vec<PathBuf>>) -> gpui_shell::HostResult {
+    let Some(paths) = paths.filter(|paths| !paths.is_empty()) else {
+        return Ok(HostValue::Null);
+    };
+    paths.into_iter().map(|path| {
+        path.into_os_string().into_string().map(HostValue::Str)
+            .map_err(|_| HostError::new("a selected file path is not valid UTF-8"))
+    }).collect::<Result<Vec<_>, _>>().map(HostValue::Array)
 }
 
 #[cfg(test)]
@@ -1704,10 +1710,22 @@ mod tests {
 
     #[test]
     fn picked_files_keep_the_pickers_order_and_cancel_is_null() {
-        let picked = picked_files(Some(vec!["/b/2.txt".into(), "/a/1.txt".into()]));
+        let picked = picked_files(Some(vec!["/b/2.txt".into(), "/a/1.txt".into()])).unwrap();
         assert_eq!(from_host(&picked), json!(["/b/2.txt", "/a/1.txt"]));
-        assert!(matches!(picked_files(None), HostValue::Null));
-        assert!(matches!(picked_files(Some(vec![])), HostValue::Null));
+        assert_eq!(picked_files(None).unwrap(), HostValue::Null);
+        assert_eq!(picked_files(Some(vec![])).unwrap(), HostValue::Null);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn picked_files_rejects_a_path_that_would_name_a_different_file_after_conversion() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let exact = "/a/bad-\u{fffd}.txt";
+        let invalid = std::ffi::OsString::from_vec(b"/a/bad-\xff.txt".to_vec());
+        let picked = picked_files(Some(vec![exact.into()])).unwrap();
+        assert_eq!(from_host(&picked), json!([exact]));
+        assert!(picked_files(Some(vec![exact.into(), invalid.into()])).is_err());
     }
 
     #[test]
