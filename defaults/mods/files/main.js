@@ -3,6 +3,50 @@ import { View, div, svg } from "gpui-kit";
 import { v_flex, h_flex, Editor, EditorState } from "gpui-base";
 import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings, window } from "herdr";
 
+// The panels share data in one VM, but their host tasks belong to separate copies.
+const scans = globalThis[Symbol.for("herdr.repoStatus.v2")] ??= new Map();
+
+async function repoStatus(root, on, { after, visiting, urgent, allowInactive }, cx, current) {
+  const repo = JSON.stringify([on, root]), now = Date.now();
+  for (const [key, scan] of scans) {
+    if (scan.pollAt <= now || (!scan.pollAt && scan.task.is_done())) scans.delete(key);
+  }
+  while (current()) {
+    let scan = scans.get(repo);
+    const pending = scan && !scan.pollAt && !scan.task.is_done();
+    const reusable = scan?.status?.code === 0 && Date.now() < scan.pollAt
+      && (scan.started >= after || (!urgent && Date.now() < scan.watchAt));
+    if (!reusable && (!pending || (visiting && scan.started !== undefined && scan.started < after))) {
+      if (!allowInactive && window()?.active === false) return null;
+      const next = {};
+      next.task = cx.spawn(async cx => {
+        await cx.sleep(25); // Let both listeners for a watch batch join before starting Git.
+        if (!allowInactive && window()?.active === false) return;
+        next.started = Date.now();
+        try {
+          next.status = await exec("git", ["--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"], { cwd: root, on });
+        } catch (error) {
+          next.error = error;
+        } finally {
+          const finished = Date.now(), duration = finished - next.started;
+          const delay = duration < 500 ? 0 : Math.min(60000, 5 * duration);
+          next.watchAt = finished + delay;
+          next.pollAt = finished + Math.max(10000, delay);
+          if (next.status?.code !== 0 && scans.get(repo) === next) scans.delete(repo);
+        }
+      });
+      scans.set(repo, next);
+      scan = next;
+    }
+    // Resume through our own host task, so another copy's close cannot cancel our follow-up work.
+    while (current() && !scan.pollAt && !scan.task.is_done()) await cx.sleep(50);
+    if (!current()) return null;
+    if (!scan.pollAt) continue; // The scanning copy closed or reloaded.
+    return scan;
+  }
+  return null;
+}
+
 function location() {
   const space = spaces().find(s => s.active), f = focused();
   const pane = f?.pane ? panes().find(p => p.pane === f.pane) : null;
@@ -43,16 +87,38 @@ export default class Files extends View {
     this.saved = new Map();
     this.entries = new Map(); this.folders = new Set(); this.pending = new Set(); this.marks = {};
     this.refresh(cx);
-    cx.timer.every(10000, cx => this.refresh(cx));
+    cx.timer.every(500, cx => this.refreshIfDue(cx));
   }
 
-  watch(root, cx) {
-    if (this.on || this.watched === root) return;
-    this.watched = root;
-    const context = this.context;
+  refreshIfDue(cx) {
+    const active = window()?.active !== false, context = this.context;
+    const refocused = active && this.windowActive === false;
+    this.windowActive = active;
+    if (!context) return;
+    if (refocused && (context.dirtyAt || !context.watch)) context.catchUp = true;
+    if (!active || this.loading) return;
+    const now = Date.now();
+    if (context.catchUp || (context.dirtyAt && now >= context.watchAt) || now >= context.pollAt) this.refresh(cx);
+  }
+
+  watch(root, context, cx) {
+    if (context.on || context.watch?.root === root) return;
+    context.watch?.pending?.cancel();
+    const watch = { root };
+    context.watch = watch;
     cx.spawn(async cx => {
-      try { while (this.context === context) { await watchFolder(root); if (this.current(context)) this.refresh(cx); } }
-      catch { if (this.context === context) this.watched = null; }
+      try {
+        while (this.context === context && context.watch === watch) {
+          watch.pending = watchFolder(root);
+          const paths = await watch.pending;
+          if (paths.length && context.watch === watch && this.current(context)) {
+            context.dirtyAt = Date.now() + 1;
+            this.refreshIfDue(cx);
+          }
+        }
+      } catch {
+        if (context.watch === watch) context.watch = null;
+      }
     });
   }
 
@@ -71,38 +137,75 @@ export default class Files extends View {
 
   refresh(cx) {
     const { cwd, on } = location(), next = key();
-    if (next !== this.context?.key) {
-      if (this.context) this.saved.set(this.context.key, { folders: this.folders, file: this.file });
+    const visiting = next !== this.context?.key;
+    if (visiting) {
+      if (this.context) {
+        this.saved.set(this.context.key, { folders: this.folders, file: this.file });
+        this.context.watch?.pending?.cancel();
+      }
       const saved = this.saved.get(next);
-      this.context = { key: next, cwd, on }; this.root = cwd; this.on = on; this.entries = new Map(); this.folders = new Set(saved?.folders);
-      this.pending = new Set(); this.marks = {}; this.show(null); this.watched = null; this.error = null; this.limited = false;
+      this.context = { key: next, cwd, on, dirtyAt: 0 }; this.root = cwd; this.on = on; this.entries = new Map(); this.folders = new Set(saved?.folders);
+      this.pending = new Set(); this.marks = {}; this.show(null); this.error = null; this.limited = false;
       this.loading = false;
       if (saved?.file) this.show(saved.file, cx);
     }
-    if (!cwd || this.loading) return;
     const context = this.context;
+    const now = Date.now();
+    if (!cwd) {
+      context.catchUp = false;
+      context.dirtyAt = 0;
+      context.pollAt = now + 10000;
+      return;
+    }
+    if (this.loading) return;
+    if (context.catchUp && !context.dirtyAt) context.dirtyAt = now + 1;
+    const request = {
+      after: visiting ? now + 1 : context.dirtyAt || (context.lastStatus ?? -1) + 1,
+      visiting,
+      urgent: visiting || context.catchUp,
+      allowInactive: visiting,
+    };
+    context.catchUp = false;
+    context.pollAt = context.watchAt = now + 10000;
     this.loading = true;
     this.limited = false;
     cx.spawn(async cx => {
       try {
+        this.watch(cwd, context, cx);
+        const dirtyAtListing = context.dirtyAt;
         for (const path of ["", ...this.folders]) {
           if (!this.current(context)) return;
           await this.loadFolder(path, context);
         }
         const top = await exec("git", ["rev-parse", "--show-toplevel"], { cwd, on }).catch(() => null);
+        if (!this.current(context)) return;
         const marks = {};
+        let covered = dirtyAtListing;
         if (top?.code === 0) {
-          // Writes nothing under .git (index lock, fsmonitor cookie): the folder watch would refresh again.
-          const status = await exec("git", ["--no-optional-locks", "-c", "core.fsmonitor=false", "status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"], { cwd, on }).catch(() => null);
+          const root = top.stdout.trim();
+          const scan = await repoStatus(root, on, request, cx, () => this.context === context);
+          if (!scan || !this.current(context)) return;
+          const { status, started, pollAt, watchAt } = scan;
+          context.lastStatus = started;
+          context.pollAt = pollAt;
+          context.watchAt = watchAt;
+          covered = Math.min(dirtyAtListing, started);
+          if (request.urgent && request.after > started) context.catchUp = true;
           if (status?.code === 0) for (const entry of status.stdout.split("\0").filter(Boolean).slice(0, TOTAL)) {
             const xy = entry.slice(0, 2);
-            marks[`${top.stdout.trim()}/${entry.slice(3)}`] = xy === "??" || xy.includes("A") ? "A" : xy.includes("U") ? "U" : xy.includes("D") ? "D" : "M";
+            marks[`${root}/${entry.slice(3)}`] = xy === "??" || xy.includes("A") ? "A" : xy.includes("U") ? "U" : xy.includes("D") ? "D" : "M";
           }
+        } else {
+          context.watchAt = Date.now();
         }
         if (!this.current(context)) return;
-        this.marks = marks; this.error = null; this.watch(cwd, cx);
+        if (context.dirtyAt <= covered) context.dirtyAt = 0;
+        this.marks = marks; this.error = null;
       } catch (e) { if (this.current(context)) this.error = String(e); }
-      finally { if (this.context === context) this.loading = false; cx.notify(); }
+      finally {
+        if (this.context === context) this.loading = false;
+        cx.notify();
+      }
     });
   }
 
@@ -140,7 +243,6 @@ export default class Files extends View {
         const t = theme(), ext = path.includes(".") ? path.split(".").pop() : "txt";
         this.code = EditorState.new({ language: LANG[ext] ?? ext, readonly: true,
           value: text.length > 400000 ? text.slice(0, 400000) + "\n… (file truncated)" : text,
-          font_family: settings().font_family, font_size: settings().font_size,
           syntax: { keyword: t.ansi5, string: t.ansi2, comment: t.dim, function: t.ansi4, type: t.ansi3, number: t.ansi1, constant: t.ansi6 } });
       } catch { if (this.file === path && this.current(context)) this.fileError = "Cannot preview this file (binary, too large, or unreadable)"; }
       finally { cx.notify(); }
@@ -165,7 +267,9 @@ export default class Files extends View {
 
   render(cx) {
     if (key() !== this.context?.key) this.refresh(cx);
+    else this.refreshIfDue(cx);
     const t = theme();
+    const font = this.code ? settings() : null;
     return v_flex().id("files").size_full().min_h(0).rounded(10).overflow_hidden().bg(t.background).border_1().border_color(t.border).text_color(t.foreground).text_size(13)
       .child(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
         .when(Boolean(this.file), el => el.child(div().id("files-back").w(20).cursor_pointer().text_color(t.muted).on_click((_e, cx) => { this.show(null); cx.notify(); }).child("←")))
@@ -174,6 +278,8 @@ export default class Files extends View {
       .when(!this.file, el => el.child(v_flex().id("files-tree").flex_1().min_h(0).overflow_y_scrollbar().p(6).children(this.rows("", 0, [], t))
         .when(Boolean(this.error) || !this.entries.get("")?.length, el => el.child(div().p(8).text_size(12).text_color(t.dim).child(this.error || (this.loading ? "Loading files…" : this.root ? "No files" : "No folder"))))
         .when(this.limited, el => el.child(div().p(8).text_size(11).text_color(t.dim).child("File list limited to 500 entries per folder and 5,000 total")))))
-      .when(Boolean(this.file), el => el.child(this.code ? Editor.new(this.code).flex_1().min_h(0) : div().p(12).text_color(t.dim).child(this.fileError || "Loading file…")));
+      .when(Boolean(this.file), el => el.child(this.code
+        ? Editor.new(this.code).font_family(font.font_family).text_size(font.font_size).flex_1().min_h(0)
+        : div().p(12).text_color(t.dim).child(this.fileError || "Loading file…")));
   }
 }

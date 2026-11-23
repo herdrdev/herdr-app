@@ -45,7 +45,11 @@ herdr-app do space.new --name api --folder /path/to/api
 herdr-app do tab.new --name "fix login" --argv '["claude"]' --task "Look at the login bug"
 herdr-app do pane.split --direction right --pane p12
 herdr-app do agent.focus --terminal t7
+herdr-app do agent.select --index 3
 ```
+
+`agent.select` uses the same navigation order as `agent.next` (1 = first).
+In `keys.json`, `agent.select:3` selects the third agent in that order.
 
 For a remote space:
 
@@ -117,10 +121,14 @@ the exit code and last output lines.
 
 A terminal started with hc opts into the window with `herdr.space=<id>`.
 `herdr.tab=<id>` chooses its tab; without it, Herdr creates a tab in that space.
-Unlabeled workers stay hidden. Do not add labels just to run a background
-worker. Use app commands when the
-user wants to see a new tab or split, hc for orchestration that need not change
-the screen.
+Workers without a label or a pane stay hidden. Do not add labels just to run a
+background worker. Use app commands when the user wants to see a new tab or
+split, hc for orchestration that need not change the screen.
+
+Closing a pane, tab or space ends the terminals in it. Core ends their dependent
+children and keeps children started with `--outlive-parent` running. `terminal.kill`
+also follows the sub-agent tree, stopping at any child with a pane or a
+`herdr.space` label. Core still applies parent-lifetime rules to every exit.
 
 ## Customize layouts, keys, or mods
 
@@ -171,8 +179,9 @@ herdr-app status
 herdr-app shot /tmp/mod.png   # then look at the picture
 ```
 
-`check` loads and renders the mod's view if it has one. It validates link rules
-and checks the `handleLink` export in `link.js` without running the module.
+`check` loads and renders the mod's view if it has one. It validates link rules.
+For mods with link rules and standalone link mods, it checks the `handleLink`
+export in `link.js` without running the module.
 It exits nonzero with the exact error. Its shared state starts empty and stays
 in memory, leaving shared.json untouched. Its `init()` still runs: import
 `checking` from `"herdr"` and guard

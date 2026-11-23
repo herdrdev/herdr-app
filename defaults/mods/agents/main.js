@@ -28,8 +28,8 @@ function toggleSidebar() {
 // Drops what an agent puts before its title: a status glyph or spinner and the separator
 // after it ("✦  Working", "⠋ - Thinking"), and Codex's blinking "[ ! ] " / "[ . ] " mark.
 // Stops at an opening bracket or quote, so a title that starts with one ("[web] login") keeps it,
-// and at an emoji ("🔴 login"): a person put it there, status glyphs are text-style symbols.
-const clean = (s) => (s ?? "").replace(/^[^\p{L}\p{N}\p{Ps}\p{Pi}\p{Emoji_Presentation}]+/u, "").replace(/^\[ [!.] \] /, "").trim();
+// and at an emoji ("🔴 login", "❤️ deploy"), except for known status marks.
+const clean = (s) => (s ?? "").replace(/^(?:\[ [!.] \] |[✋⏳]\uFE0F?(?=\s)|(?!(?:\p{Emoji}\uFE0F|[#*]\u20E3))[^\p{L}\p{N}\p{Ps}\p{Pi}\p{Emoji_Presentation}])+/u, "").trim();
 
 function leadPanes(all) {
   const leads = new Map();

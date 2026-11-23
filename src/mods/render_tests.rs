@@ -337,6 +337,100 @@ export default class Panel extends View {
 }
 
 #[gpui::test]
+fn changes_retries_when_the_files_copy_owning_its_git_scan_closes_or_reloads(cx: &mut TestAppContext) {
+    use std::time::Duration;
+
+    cx.update(gpui_shell::init);
+    for started in [false, true] {
+        for reload in [false, true] {
+            let staged = Staged::new();
+            let runtime = ShellRuntime::new_isolated().unwrap();
+            let revision = Rc::new(Cell::new(0));
+            let source_revision = revision.clone();
+            runtime.set_source_revision_provider(move |_| Some(source_revision.get()));
+            let git_calls = Rc::new(Cell::new(0));
+            let calls = git_calls.clone();
+            let preview_reads = Rc::new(Cell::new(0));
+            let reads = preview_reads.clone();
+            let mut values = fixture(true, Value::Null, updates("current", "current"));
+            values.insert("focused".into(), Value::Null);
+            let herdr = module(values, Rc::new(RefCell::new(Calls::default())))
+                .async_function("exec", move |a| {
+                    let args = strings(a.get(1));
+                    let (output, blocked) = if a.string(0)? == "sh" {
+                        ("f\0recovered.txt\0", false)
+                    } else if args.iter().any(|arg| arg == "--show-toplevel") {
+                        ("/fixture/project\n", false)
+                    } else {
+                        assert!(args.iter().any(|arg| arg == "status"), "{args:?}");
+                        calls.set(calls.get() + 1);
+                        ("?? recovered.txt\0", started && calls.get() == 1)
+                    };
+                    Ok(async move {
+                        if blocked {
+                            std::future::pending().await
+                        } else {
+                            Ok(to_host(&json!({"code":0,"stdout":output,"stderr":""})))
+                        }
+                    })
+                })
+                .async_function("readTextFile", move |a| {
+                    assert_eq!(a.string(0)?, "/fixture/project/recovered.txt");
+                    reads.set(reads.get() + 1);
+                    Ok(std::future::ready(Ok("recovered diff".into())))
+                });
+            gpui_shell::policy::set_default(Policy::new().with_host_module(herdr).unwrap());
+
+            let window = cx.add_window(|_, _| Empty);
+            let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+            let files = visual.update(|window, cx| {
+                runtime.try_load(staged.0.join("mods/files"), window, cx).unwrap()
+            });
+            visual.run_until_parked();
+            let changes = visual.update(|window, cx| {
+                let root = runtime.try_load(staged.0.join("mods/changes"), window, cx).unwrap();
+                let view: gpui::Entity<gpui_shell::ScriptView> = root.read(cx).content().clone().downcast().unwrap();
+                window.replace_root(cx, |_, _| RootedView(root));
+                view
+            });
+            visual.run_until_parked();
+            if started {
+                visual.executor().advance_clock(Duration::from_millis(25));
+                visual.run_until_parked();
+            }
+            assert_eq!(git_calls.get(), usize::from(started));
+
+            visual.update(|window, cx| {
+                if reload {
+                    std::fs::write(staged.0.join("mods/files/main.js"), r#"
+                        import { View, div } from "gpui-kit";
+                        export default class extends View { render() { return div(); } }
+                    "#).unwrap();
+                    revision.set(1);
+                    runtime.reload_now(&files, window, cx).unwrap();
+                } else {
+                    runtime.close_now(&files, Instant::now() + Duration::from_millis(250), window, cx);
+                }
+            });
+            drop(files);
+            visual.run_until_parked();
+            for _ in 0..4 {
+                visual.executor().advance_clock(Duration::from_millis(50));
+                visual.run_until_parked();
+            }
+            assert_eq!(git_calls.get(), 1 + usize::from(started), "started={started}, reload={reload}");
+            let tree = visual.update(|window, cx| {
+                window.draw(cx).clear(cx);
+                changes.read(cx).snapshot().unwrap().debug_tree()
+            });
+            assert!(tree.contains("recovered.txt"), "{tree}");
+            assert_eq!(preview_reads.get(), 1, "started={started}, reload={reload}");
+            visual.update(|window, _| window.remove_window());
+        }
+    }
+}
+
+#[gpui::test]
 fn mod_code_revisions_share_successes_and_failures_without_poisoning_old_copies(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
