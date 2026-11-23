@@ -4,6 +4,7 @@
 use fancy_regex::Regex;
 use serde::Deserialize;
 use serde_json::{Value, json};
+use std::num::NonZeroU32;
 use std::ops::Range;
 use std::path::{Path, PathBuf};
 use std::sync::LazyLock;
@@ -150,11 +151,10 @@ fn without_suffix(path: &str) -> &str {
 fn place(raw: &str, bare: &str) -> Option<(u32, Option<u32>)> {
     let rest = raw.strip_prefix(bare)?.strip_prefix(':')?;
     let rest = rest.strip_suffix('.').unwrap_or(rest);
-    let (line, column) = match rest.split_once(':') {
-        Some((line, column)) => (line, Some(column.parse().ok()?)),
-        None => (rest, None),
-    };
-    Some((line.parse().ok()?, column))
+    let (line, column) = rest.split_once(':').unwrap_or((rest, ""));
+    let line = line.parse::<NonZeroU32>().ok()?.get();
+    let column = column.parse::<NonZeroU32>().ok().map(NonZeroU32::get);
+    Some((line, column))
 }
 
 fn is_number(text: &str) -> bool {
@@ -312,7 +312,9 @@ impl Resolved<'_> {
                         }
                     };
                     let mut link = json!({"kind": "file", "raw": raw, "path": path.and_then(Path::to_str)});
-                    if let Some((line, column)) = file_spelling.and_then(|bare| place(raw, bare)) {
+                    if uri.is_none()
+                        && let Some((line, column)) = file_spelling.and_then(|bare| place(raw, bare))
+                    {
                         link["line"] = line.into();
                         if let Some(column) = column {
                             link["column"] = column.into();
@@ -484,6 +486,8 @@ mod tests {
             (full_url, None, true, Some((Url, full_url)), u(full_url), u(full_url)),
             ("tel:12345", Some("12345"), false, Some((Url, "tel:12345")), u("tel:12345"), u("tel:12345")),
             ("src/main.rs:12:5: error", Some("main.rs"), false, Some((File, "src/main.rs:12:5")), f("src/main.rs"), f("src/main.rs")),
+            ("src/main.rs:0:5", Some("main.rs"), false, Some((File, "src/main.rs:0:5")), f("src/main.rs"), f("src/main.rs")),
+            ("src/main.rs:12:0", Some("main.rs"), false, Some((File, "src/main.rs:12:0")), f("src/main.rs"), f("src/main.rs")),
             ("./src/main.rs:7", Some("main.rs"), false, Some((File, "./src/main.rs:7")), f(literal), f(literal)),
             ("src/..", Some(".."), false, Some((File, "src/..")), f("src/.."), f("src/..")),
             ("./test folder/file.txt", Some("file.txt"), false, Some((File, "./test folder/file.txt")), f("./test folder/file.txt"), f("./test folder/file.txt")),
@@ -522,6 +526,7 @@ mod tests {
                         let mut link = json!({"kind":"file", "raw":expected_raw, "path":path.map(Path::to_string_lossy)});
                         let place = match expected_raw {
                             "src/main.rs:12:5" => Some((12, Some(5))),
+                            "src/main.rs:12:0" => Some((12, None)),
                             "./gone.rs:42:7" => Some((42, Some(7))),
                             "./src/main.rs:7" if !cfg!(unix) => Some((7, None)),
                             _ => None,
@@ -556,7 +561,12 @@ mod tests {
         assert_eq!(place("src/a.rs", "src/a.rs"), None);
         assert_eq!(place("src/a.rs:7", "src/a.rs:7"), None);
         assert_eq!(place("src/a.rs:x", "src/a.rs"), None);
+        assert_eq!(place("src/a.rs:4294967296:5", "src/a.rs"), None);
+        assert_eq!(place("src/a.rs:12:4294967296", "src/a.rs"), Some((12, None)));
         assert_eq!(place("file:///a.rs", "/a.rs"), None);
+        assert_eq!(place("C:/src/a.rs:12:5", "C:/src/a.rs"), Some((12, Some(5))));
+        assert_eq!(place(r"C:\src\a.rs:12:5", r"C:\src\a.rs"), Some((12, Some(5))));
+        assert_eq!(place("C:/src/a.rs", "C:/src/a.rs"), None);
     }
 
     #[test]
