@@ -126,6 +126,7 @@ export default class Menu extends View {
       .w_full()
       .min_h(0)
       .p(5)
+      .rounded(8)
       .bg(t.popover)
       .text_size(12.8)
       .on_key_down((e, cx) => {
