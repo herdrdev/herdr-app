@@ -50,6 +50,10 @@ jobs:
         with:
           submodules: true
           persist-credentials: false
+      # The container runs as root while the mounted workspace is owned by
+      # the runner user; git otherwise refuses to look at the checkout.
+      - name: Mark workspace safe for git
+        run: git config --global --add safe.directory "$GITHUB_WORKSPACE"
       - uses: dtolnay/rust-toolchain@683b588c487a69d01f6c6ddf40f036ff682cc2c8 # master
         with:
           toolchain: ${{ env.RUST_TOOLCHAIN }}

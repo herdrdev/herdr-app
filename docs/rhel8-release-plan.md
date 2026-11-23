@@ -110,7 +110,8 @@ Publishing and a real RHEL 8 desktop smoke test remain separate decisions.
 | # | Commit | Run URL | Result | Fix |
 |---|---|---|---|---|
 | 1 | `ffeaf41` | https://github.com/shawn111/herdr-app/actions/runs/45259164686 | failed in `Bootstrap container tools`: `GPG check FAILED` (pinned AlmaLinux 8 image has only the old `C21AD6EA` key; current packages use newer keys) | Refresh `/etc/pki/rpm-gpg/RPM-GPG-KEY-AlmaLinux` from `https://repo.almalinux.org/almalinux/RPM-GPG-KEY-AlmaLinux` over HTTPS and `rpm --import` it before `dnf install` (no `nogpgcheck`). |
-| 2 | — | — | pending | — |
+| 2 | `3756df7` | https://github.com/shawn111/herdr-app/actions/runs/45259697562 | failed in `Keep unchanged sources fresh`: `fatal: detected dubious ownership in repository at '/__w/herdr-app/herdr-app'` (container root vs runner-owned workspace) | Add `git config --global --add safe.directory "$GITHUB_WORKSPACE"` after checkout. |
+| 3 | — | — | pending | — |
 
 ## Risks / fallbacks
 
