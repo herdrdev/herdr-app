@@ -1,4 +1,4 @@
-import { View, div } from "gpui-kit";
+import { View, div, list } from "gpui-kit";
 import { v_flex, h_flex, InputState, Input, Scrollbar, v_virtual_list } from "gpui-base";
 import { spaces, panes, focused, exec, readTextFile, watchFolder, theme, settings } from "herdr";
 
@@ -194,9 +194,10 @@ export default class Changes extends View {
   diffRow({ kind, number, text }, t, size) {
     const height = rowHeight(size);
     if (kind === "@") return div().w_full().px(12).h(height).flex_none().truncate().bg(t.raised).text_color(t.dim).child(text);
-    return h_flex().w_full().h(height).flex_none().gap(10).when(kind === "+", (e) => e.bg(t.ansi2 + "18")).when(kind === "-", (e) => e.bg(t.ansi1 + "18"))
+    // Wrapped, a row grows to its text; the gutter number stays on the first line.
+    return h_flex().w_full().when(this.wrap, (e) => e.min_h(height).items_start()).when(!this.wrap, (e) => e.h(height)).flex_none().gap(10).when(kind === "+", (e) => e.bg(t.ansi2 + "18")).when(kind === "-", (e) => e.bg(t.ansi1 + "18"))
       .child(div().w(this.gutter(size)).flex_none().text_right().text_color(t.dim).child(number === undefined ? "" : String(number)))
-      .child(div().flex_1().min_w(0).truncate().child(text));
+      .child(div().flex_1().min_w(0).when(!this.wrap, (e) => e.truncate()).child(text));
   }
 
   render(cx) {
@@ -210,7 +211,9 @@ export default class Changes extends View {
       .child(h_flex().h(42).flex_none().px(14).gap(8).items_center().border_b(1).border_color(t.border)
         .child(div().font_semibold().child("Changes"))
         .child(div().px(5).py(1).rounded(4).border_1().border_color(t.border).text_size(10).text_color(t.muted).child(`${this.files.length} files`))
-        .child(div().flex_1()).child(div().text_size(11).text_color(t.ansi2).child(`+${add}`)).child(div().text_size(11).text_color(t.ansi1).child(`−${del}`)))
+        .child(div().flex_1())
+        .child(div().id("changes-wrap").px(5).py(1).rounded(4).text_size(10).cursor_pointer().text_color(this.wrap ? t.accent : t.muted).hover((s) => s.bg(t.hover)).tooltip(this.wrap ? "Stop wrapping long lines" : "Wrap long lines").on_click((_e, cx) => { this.wrap = !this.wrap; cx.notify(); }).child("Wrap"))
+        .child(div().text_size(11).text_color(t.ansi2).child(`+${add}`)).child(div().text_size(11).text_color(t.ansi1).child(`−${del}`)))
       // overflow_y_scrollbar() wraps the list, so its flex sizing never reached the panel's layout.
       .child(div().flex_1().min_h(44).max_h(this.files.length * 28 + 12).relative().border_b(1).border_color(t.border)
         .child(v_flex().id("changes-list").absolute().inset_0().overflow_y_scroll().p(6).children(this.files.map((f) => {
@@ -223,12 +226,18 @@ export default class Changes extends View {
         .child(Scrollbar.vertical("changes-list").absolute().inset_0()))
       .when(this.limited, el => el.child(div().px(12).py(4).text_size(11).text_color(t.dim).child("Showing the first 1,000 changed files")))
       .child(div().flex_1().min_h(0).relative().font_family(settings().font_family ?? "JetBrains Mono").text_size(size)
-        .child(div().id("changes-diff-x").size_full().overflow_x_scroll()
-          .child(div().w_full().min_w(Math.max(300, this.longest * charWidth(size) + this.gutter(size) + 20)).h_full().child(v_virtual_list("changes-diff", this.rows.length, rowHeight(size), (i) => String(i),
-            (range) => this.rows.slice(range.start, range.end).map((row) => this.diffRow(row, t, size))).size_full())))
-        .child(Scrollbar.vertical("changes-diff").viewport_from_layout().absolute().inset_0())
-        // Shown whenever a line is wider than the panel, so clipped text has a cue (it hides when nothing overflows).
-        .child(Scrollbar.horizontal("changes-diff-x").mode("always").absolute().inset_0())
+        // Wrapped rows differ in height, so `list` measures them; unwrapped ones keep the cheaper fixed-height list.
+        // One list per file, built once its lines are in: a list that grows from empty keeps its scroll past the new rows.
+        .when(this.wrap && this.rows.length > 0, (e) => e
+          .child(list(`changes-diff-wrap:${this.open}`, this.rows.length, (i) => String(i), (i) => this.diffRow(this.rows[i], t, size)).size_full())
+          .child(Scrollbar.vertical(`changes-diff-wrap:${this.open}`).absolute().inset_0()))
+        .when(!this.wrap, (e) => e
+          .child(div().id("changes-diff-x").size_full().overflow_x_scroll()
+            .child(div().w_full().min_w(Math.max(300, this.longest * charWidth(size) + this.gutter(size) + 20)).h_full().child(v_virtual_list("changes-diff", this.rows.length, rowHeight(size), (i) => String(i),
+              (range) => this.rows.slice(range.start, range.end).map((row) => this.diffRow(row, t, size))).size_full())))
+          .child(Scrollbar.vertical("changes-diff").viewport_from_layout().absolute().inset_0())
+          // Shown whenever a line is wider than the panel, so clipped text has a cue (it hides when nothing overflows).
+          .child(Scrollbar.horizontal("changes-diff-x").mode("always").absolute().inset_0()))
         .when(!this.open && this.files.length > 0, (e) => e.child(div().absolute().top(6).px(12).text_size(11).text_color(t.dim).child("Select a file to view its changes"))))
       .when(Boolean(this.note), (e) => e.child(div().px(10).pb(8).text_size(11).text_color(t.ansi1).child(this.note)))
       .child(h_flex().flex_none().p(10).gap(8).border_t(1).border_color(t.border)
