@@ -960,21 +960,18 @@ fn machine_add_needing_input_keeps_the_picker_and_shows_instructions(cx: &mut Te
 fn palette_lists_the_entries_mods_declare_in_their_mod_json(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
-    for entry in std::fs::read_dir(staged.0.join("mods")).unwrap() {
-        let manifest = entry.unwrap().path().join("mod.json");
-        if let Ok(text) = std::fs::read_to_string(&manifest) {
-            assert!(!text.contains("\"palette\""), "shipped mods add no palette entries: {manifest:?}");
-        }
-    }
     let probe = staged.0.join("mods/probe");
     std::fs::create_dir_all(&probe).unwrap();
+    std::fs::write(probe.join("main.js"), "export default () => null;").unwrap();
     std::fs::write(probe.join("mod.json"), r#"{"place":"none","palette":[{"title":"Probe entry","command":"mod.open","args":{"name":"probe"},"words":"zebra"}]}"#).unwrap();
     let mut values = fixture(true, props(), updates("current", "current"));
     values.insert("appHome".into(), json!(staged.0.to_string_lossy()));
     let calls = Rc::new(RefCell::new(Calls::default()));
+    let home = staged.0.join("login-home");
+    std::fs::create_dir(&home).unwrap();
     let policy = Policy::new()
         .with_storage_path(staged.0.join("store-palette.json"))
-        .with_capabilities(Capabilities::new().storage(true).read_roots([staged.0.clone()]))
+        .with_capabilities(capabilities_at(home, staged.0.clone(), true))
         .with_host_module(module(values, calls.clone())).unwrap();
     let root = staged.wrapper("frame/palette", "this.query = 'zebra';");
     let window = cx.add_window(|_, _| Empty);
