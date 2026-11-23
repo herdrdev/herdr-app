@@ -1493,8 +1493,14 @@ fn materialize_component(
             warn_unhonoured_a11y(&behavior, "image", &[]);
             // HERDR: animated images need an identity to retain their frame state.
             let mut source = gpui::ImageSource::from(path);
+            let mut live = None;
             if let gpui::ImageSource::Resource(gpui::Resource::Embedded(path)) = &mut source {
                 *path = crate::AppAssets::cache_key(path);
+                live = crate::live_image::get(path);
+            }
+            // HERDR: a picture set from memory for this path replaces its file.
+            if let Some(image) = live {
+                source = gpui::ImageSource::Render(image);
             }
             let mut image = gpui::img(source).id(element_id(id, behavior.key.clone()));
             image.style().refine(&refinement);

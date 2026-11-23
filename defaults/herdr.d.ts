@@ -502,3 +502,23 @@ export interface FolderWatch extends Promise<string[]> {
   /** Resolves with [] and releases this call's watch. Safe to call again or after settlement. */
   cancel(): void;
 }
+
+/** Shows a picture from memory wherever this mod's views name `path` in `image(path)` (a path in
+ *  this mod's own folder, `mods/<name>/...`; no file needs to exist there), for live frames
+ *  without writing files. `bytes`: an encoded PNG or JPEG, or raw pixels with
+ *  `{ width, height, format }` (row-major, `"rgb"` or `"rgba"`, exactly width × height × 3 or 4
+ *  bytes, sides up to 4096). Converted or decoded off the UI thread. Resolves `true` once the
+ *  picture shows from the next frame on, or `false` if a newer call for the path, a clear or a
+ *  reload got there first; it doesn't redraw by itself, so call `cx.notify()` after. The last
+ *  picture keeps showing meanwhile, and after a failed call. `null` clears the picture this copy
+ *  set, showing the file again; a mod's pictures also go when it reloads or unloads. Pictures
+ *  from memory share 256 paths and 64 MiB of pixels across mods, so reuse one path per stream:
+ *    const bytes = await socket.read();
+ *    if (await setImage("mods/sim/screen", bytes, { width: 390, height: 844, format: "rgba" })) cx.notify();
+ *    // render: image("mods/sim/screen").w(195).h(422)
+ */
+export function setImage(
+  path: string,
+  bytes: Uint8Array | null,
+  options?: { width: number; height: number; format: "rgb" | "rgba" },
+): Promise<boolean>;

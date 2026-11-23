@@ -57,7 +57,7 @@ use std::fmt::Write as _;
 
 use rquickjs::{
     Array, Ctx, Error as JsError, Exception, FromJs, IntoJs, Module, Object, Promise,
-    Result as JsResult, Value,
+    Result as JsResult, TypedArray, Value,
     function::{Func, Rest},
     loader::{ImportAttributes, Loader, Resolver},
     module::Declared,
@@ -416,6 +416,17 @@ pub(super) fn from_js<'js>(ctx: &Ctx<'js>, value: Value<'js>, depth: usize) -> J
         ));
     }
     if let Some(object) = value.as_object() {
+        // HERDR: a Uint8Array argument crosses as one buffer, not a field per
+        // byte. Only a whole argument: inside other data it stays an object,
+        // as it always was.
+        if depth == 0
+            && let Ok(bytes) = TypedArray::<u8>::from_js(ctx, value.clone())
+        {
+            let bytes = bytes.as_bytes().ok_or_else(|| {
+                Exception::throw_type(ctx, "a host argument is a detached Uint8Array")
+            })?;
+            return Ok(HostValue::Bytes(bytes.to_vec()));
+        }
         let mut fields = Vec::new();
         for entry in object.props::<String, Value>() {
             let (key, value) = entry?;
@@ -460,6 +471,7 @@ pub(super) fn into_js<'js>(ctx: &Ctx<'js>, value: HostValue) -> JsResult<Value<'
             }
             object.into_value()
         }
+        HostValue::Bytes(bytes) => TypedArray::<u8>::new(ctx.clone(), bytes)?.into_value(),
     })
 }
 

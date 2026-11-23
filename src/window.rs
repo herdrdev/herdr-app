@@ -320,6 +320,15 @@ struct Copy {
     error: Option<String>,
 }
 
+impl Drop for Copy {
+    /// Pictures it set from memory (`setImage`) go with it.
+    fn drop(&mut self) {
+        if self.id != 0 {
+            crate::mod_images::forget(self.id);
+        }
+    }
+}
+
 #[derive(Clone, Copy, PartialEq)]
 enum OverlayKind {
     Dialog,
@@ -1399,9 +1408,9 @@ impl AppWindow {
 
     fn remove_copy(&mut self, slot: &str, window: &mut Window, cx: &mut Context<Self>) {
         if let Some(copy) = self.copies.remove(slot)
-            && let (Some(runtime), Some(root)) = (&self.runtime, copy.root)
+            && let (Some(runtime), Some(root)) = (&self.runtime, copy.root.as_ref())
         {
-            runtime.close(&root, std::time::Instant::now() + Duration::from_millis(250), window, cx).detach();
+            runtime.close(root, std::time::Instant::now() + Duration::from_millis(250), window, cx).detach();
         }
     }
 
@@ -6341,6 +6350,200 @@ mod tests {
             this.copies.values().filter(|c| c.root.is_some()).count(),
             this.copies.values().filter_map(|c| c.error.clone()).collect(),
         ))
+    }
+
+    #[test]
+    fn mods_show_pictures_from_memory() {
+        in_own_process("set_image_window");
+    }
+
+    /// setImage: raw and encoded pictures show where image(path) names the
+    /// path, a replaced one leaves the atlas, the newest call wins, bad calls
+    /// say why and change nothing, null and a reload show the file again, and
+    /// unloading the mod forgets them.
+    #[gpui::test]
+    fn set_image_window(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        use std::sync::Arc;
+        if !running_alone("set_image_window") {
+            return;
+        }
+        let mut png = Vec::new();
+        image::RgbaImage::from_pixel(2, 1, image::Rgba([10, 20, 30, 255]))
+            .write_to(&mut std::io::Cursor::new(&mut png), image::ImageFormat::Png)
+            .unwrap();
+        let probe = format!(r#"import {{ View, div, image }} from "gpui-kit";
+import {{ setImage, shared, setShared }} from "herdr";
+const path = "mods/live/frame";
+const raw = {{ width: 2, height: 1 }};
+const png = new Uint8Array({png:?});
+const steps = {{
+  1: () => setImage(path, new Uint8Array([7, 255, 0, 0, 0, 255, 0]).subarray(1), {{ ...raw, format: "rgb" }}),
+  2: () => setImage("./mods/live/frame", new Uint8Array([0, 0, 255, 128, 1, 2, 3, 4]), {{ ...raw, format: "rgba" }}),
+  3: async () => {{
+    const errors = [];
+    for (const call of [
+      () => setImage(path, new Uint8Array(5), {{ ...raw, format: "rgb" }}),
+      () => setImage(path, new Uint8Array(6), {{ width: 2, height: 1, format: "bgr" }}),
+      () => setImage(path, new Uint8Array(6), {{ width: 0, height: 1, format: "rgb" }}),
+      () => setImage("https://example.com/x.png", png),
+      () => setImage("mods/../x", png),
+      () => setImage(path, [1, 2, 3]),
+      () => setImage(path, new Uint8Array([1, 2, 3])),
+      () => setImage("mods/other/frame", png),
+      () => setImage(".", png),
+      () => setImage("mods/live", png),
+      () => setImage(path),
+      () => setImage(path, new Uint8Array(6), {{ ...raw, format: "rgb", stride: 6 }}),
+      () => setImage(path, new Uint8Array([71, 73, 70, 56, 57, 97, 1, 0, 1, 0, 0, 0, 0])),
+    ]) {{
+      try {{ await call(); errors.push(""); }} catch (e) {{ errors.push(String(e?.message ?? e)); }}
+    }}
+    setShared("probe.errors", errors);
+    setShared("probe.bytes", new Uint8Array([1, 2]));
+  }},
+  4: () => setImage(path, png),
+  5: () => Promise.all([setImage(path, png), setImage(path, new Uint8Array([9, 9, 9, 8, 8, 8]), {{ ...raw, format: "rgb" }})]),
+  6: () => setImage(path, null),
+  7: () => setImage(path, png),
+  8: () => setImage(path, png),
+  9: async () => {{
+    // 16 MiB each: four fill the 64 MiB budget (less the 8 bytes shown), a fifth doesn't fit.
+    const big = new Uint8Array(4096 * 1024 * 4);
+    const results = [];
+    for (const n of [1, 2, 3, 4]) {{
+      try {{ results.push(await setImage(`mods/live/big${{n}}`, big, {{ width: 4096, height: 1024, format: "rgba" }})); }}
+      catch (e) {{ results.push(String(e?.message ?? e)); }}
+    }}
+    await setImage(path, null);
+    results.push(await setImage("mods/live/big4", big, {{ width: 4096, height: 1024, format: "rgba" }}));
+    for (const n of [1, 2, 3, 4]) await setImage(`mods/live/big${{n}}`, null);
+    return results;
+  }},
+}};
+export default class Probe extends View {{
+  init(_props, cx) {{
+    this.done = 0;
+    cx.timer.every(50, (cx) => {{
+      const step = shared("probe.go") ?? 0;
+      if (step <= this.done || this.busy) return;
+      this.busy = true;
+      cx.spawn(async (cx) => {{
+        setShared("probe.result", (await steps[step]()) ?? null);
+        this.done = step;
+        this.busy = false;
+        setShared("probe.done", step);
+        cx.notify();
+      }});
+    }});
+  }}
+  render() {{
+    return div().size_full().child(image(path).w(2).h(1));
+  }}
+}}
+"#);
+        let (view, cx) = open_window(cx, "live", &probe, json!({ "id": "root", "type": "row", "children": [
+            { "id": "live", "type": "block", "content": { "mod": "live" } }
+        ] }));
+        std::fs::write(crate::mods::app_dir().join("layouts/empty.json"), json!({ "id": "root", "type": "row", "children": [] }).to_string()).unwrap();
+        let step = |n: u64, cx: &mut gpui::VisualTestContext| {
+            crate::mods::set_shared("probe.go".into(), json!(n));
+            for _ in 0..20 {
+                cx.executor().advance_clock(std::time::Duration::from_millis(100));
+                cx.run_until_parked();
+                if crate::mods::shared("probe.done") == Some(json!(n)) {
+                    break;
+                }
+            }
+            assert_eq!(crate::mods::shared("probe.done"), Some(json!(n)), "step {n}");
+            // Two frames: the one that shows the picture, and one after it.
+            for _ in 0..2 {
+                cx.update(|window, cx| {
+                    window.refresh();
+                    window.draw(cx).clear(cx);
+                });
+            }
+        };
+        let shown = |cx: &mut gpui::VisualTestContext| -> Option<Arc<gpui::RenderImage>> {
+            cx.update(|window, _| window.displayed_images().into_iter().find(|image| image.as_bytes(0).is_some_and(|b| b.len() == 8)))
+        };
+        let bgra = |image: &Arc<gpui::RenderImage>| image.as_bytes(0).unwrap().to_vec();
+
+        let result = || crate::mods::shared("probe.result");
+        step(1, cx);
+        assert_eq!(result(), Some(json!(true)), "it says the picture shows");
+        let first = shown(cx).expect("raw rgb shows");
+        assert_eq!(bgra(&first), [0, 0, 255, 255, 0, 255, 0, 255], "rgb to opaque bgra");
+        assert!(cx.update(|window, _| window.has_image_atlas_entry(&first)));
+
+        step(2, cx);
+        let second = shown(cx).expect("raw rgba shows");
+        assert_eq!(bgra(&second), [255, 0, 0, 128, 3, 2, 1, 4], "rgba to bgra, the same path spelled differently");
+        assert!(!cx.update(|window, _| window.has_image_atlas_entry(&first)), "the replaced picture left the atlas");
+        let weak = Arc::downgrade(&first);
+        drop(first);
+        assert!(weak.upgrade().is_none(), "and nothing keeps its pixels");
+
+        step(3, cx);
+        let errors: Vec<String> = serde_json::from_value(crate::mods::shared("probe.errors").unwrap()).unwrap();
+        let says = [
+            "got 5", "format", "width", "mod's folder", "mod's folder", "Uint8Array", "PNG or JPEG",
+            "mod's folder", "mod's folder", "mod's folder", "pass the bytes", "unknown option `stride`", "PNG or JPEG",
+        ];
+        for (error, says) in errors.iter().zip(says) {
+            assert!(error.contains(says), "{error:?} should say {says:?}: {errors:?}");
+        }
+        assert_eq!(errors.len(), says.len());
+        assert_eq!(crate::mods::shared("probe.bytes"), Some(json!({ "0": 1, "1": 2 })), "other APIs see a Uint8Array as before");
+        assert_eq!(bgra(&shown(cx).unwrap()), bgra(&second), "failed calls change nothing");
+
+        step(4, cx);
+        assert_eq!(bgra(&shown(cx).expect("png shows")), [30, 20, 10, 255, 30, 20, 10, 255]);
+
+        step(5, cx);
+        assert_eq!(bgra(&shown(cx).unwrap()), [9, 9, 9, 255, 8, 8, 8, 255], "the newest call wins");
+        assert_eq!(result(), Some(json!([false, true])), "and only it says it shows");
+
+        step(6, cx);
+        assert_eq!(gpui_shell::live_image::len(), 0);
+        // (Test windows load no app files, so the file at the path stays missing.)
+        assert!(shown(cx).is_none(), "null shows the file again");
+
+        step(7, cx);
+        assert_eq!(bgra(&shown(cx).unwrap()), [30, 20, 10, 255, 30, 20, 10, 255]);
+        // An edit reloads the mod into a new application, which hasn't set it.
+        crate::mods::set_shared("probe.go".into(), json!(0));
+        std::fs::write(crate::mods::app_dir().join("mods/live/main.js"), format!("{probe}\n// edited\n")).unwrap();
+        cx.update(|window, cx| view.update(cx, |this, cx| this.files_changed(vec!["mods/live/main.js".into()], window, cx)));
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        for _ in 0..2 {
+            cx.update(|window, cx| {
+                window.refresh();
+                window.draw(cx).clear(cx);
+            });
+        }
+        assert_eq!(gpui_shell::live_image::len(), 0, "a reload drops the old version's picture");
+        assert!(shown(cx).is_none(), "and its file shows again");
+
+        crate::mods::set_shared("probe.done".into(), json!(0));
+        step(8, cx);
+        assert_eq!(gpui_shell::live_image::len(), 1, "the new version sets its own");
+
+        step(9, cx);
+        let results = result().unwrap();
+        assert_eq!(results.as_array().unwrap()[..3], [json!(true), json!(true), json!(true)], "{results}");
+        assert!(results[3].as_str().is_some_and(|e| e.contains("64 MiB")), "the fourth is over the budget: {results}");
+        assert_eq!(results[4], json!(true), "and fits once a picture is cleared");
+        assert_eq!(gpui_shell::live_image::len(), 0);
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            let _ = this.run_as("layout.switch", json!({ "name": "empty" }), false, window, cx);
+        }));
+        // Closing gives the copy's close() up to 250 ms before it unloads.
+        cx.executor().advance_clock(std::time::Duration::from_secs(1));
+        cx.run_until_parked();
+        assert_eq!(view.update(cx, |this, _| this.copies.values().filter(|c| c.root.is_some()).count()), 0, "the mod unloaded");
+        assert_eq!(gpui_shell::live_image::len(), 0, "and its pictures went with it");
     }
 
     fn open_heavy(cx: &mut gpui::TestAppContext, mib: usize) -> (gpui::Entity<super::AppWindow>, &mut gpui::VisualTestContext) {

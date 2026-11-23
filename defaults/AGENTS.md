@@ -915,6 +915,10 @@ has 124 programs (agents, editors, runtimes, tools, databases, infra);
   `image("mods/<name>/logo.svg")` (full color), `svg("mods/<name>/icon.svg")`
   (tinted with the text color). Saving an asset under `mods/` updates every
   mod showing it, including images that were missing or invalid on first load.
+  For live frames (a stream, a preview), don't write files: `setImage(path,
+  bytes, options?)` shows PNG/JPEG bytes or raw RGB/RGBA pixels from memory
+  wherever the mod's `image(path)` names that path in its own folder; call
+  `cx.notify()` once it resolves `true`, and reuse one path per stream.
 - The defaults are mods too, read them as examples: `spaces`, `agents`,
   `tabs` (the tab bar), `menu`, `prompt`, `confirm`, `help`, `toast`,
   Terminals' `picker`, `peek`, and `pane` (an
