@@ -342,3 +342,31 @@ test("a title's leading emoji stays, a status glyph before it goes", () => {
   expect(row("🔴")).toBe("🔴");
   expect(row("🔴 claude")).toBe("🔴 claude");
 });
+
+test("priority: the focused agent that just went done→idle keeps its rank until unfocused", () => {
+  const program = { name: "Claude", key: "claude", agent: true };
+  const row = (address: string, status: string, seq: number) => ({
+    address, pane: `p-${address}`, tab: "tab1", space: "s1", space_name: "Project",
+    program, title: `Task ${address}`, status, seq,
+  });
+  const list = [row("t1", "working", 1), row("t2", "done", 2), row("t3", "idle", 3)];
+  const ctx: Record<string, unknown> = {
+    agents: () => list, terminals: () => list.map(a => ({ ...a, state: "live" })),
+    panes: () => list.map(a => ({ ...a, terminal: a.address })), focused: () => null,
+    spaces: () => [{ tabs: [{ id: "tab1", name: "Project", named: true }] }],
+    layout: () => ({ id: "sidebar", size: { px: 268 } }), shared: () => "priority",
+    theme: () => ({}), setAgentOrder: (order: string[]) => orders.push(order),
+    div: element, v_flex: element, h_flex: element, svg: element, image: element,
+  };
+  const orders: string[][] = [];
+  const { agents } = harness([], ctx);
+  agents.render({});
+  expect(orders.at(-1)![0]).toBe("t2");
+  (list[1] as any).status = "idle"; (list[1] as any).focused = true;
+  ctx.focused = () => ({ agent: "t2" });
+  agents.render({});
+  expect(orders.at(-1)![0]).toBe("t2");
+  (list[1] as any).focused = false; ctx.focused = () => null;
+  agents.render({});
+  expect(orders.at(-1)![0]).toBe("t1");
+});
