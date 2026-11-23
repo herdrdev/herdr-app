@@ -7,6 +7,9 @@ pub(crate) struct InlineFragment {
     pub(crate) x: Pixels,
     pub(crate) width: Pixels,
     pub(crate) text: Option<ShapedLine>,
+    /// HERDR: drawn for a fragment the caret steps over as one unit (a
+    /// replacement glyph); `text` stays `None` so hit-testing treats it whole.
+    pub(crate) glyph: Option<ShapedLine>,
 }
 
 pub(crate) struct InputLine {
@@ -139,7 +142,7 @@ impl InputLine {
                     _ => px(0.),
                 };
                 for f in fragments {
-                    if let Some(line) = &f.text {
+                    if let Some(line) = f.text.as_ref().or(f.glyph.as_ref()) {
                         paint(
                             line,
                             pos + point(offset + f.x, px(0.)),
