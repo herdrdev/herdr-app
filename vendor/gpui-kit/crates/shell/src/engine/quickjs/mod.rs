@@ -6946,6 +6946,8 @@ globalThis.__gpui = (() => {
     is_window_active: () => __window_is_active(),
     is_fullscreen: () => __window_is_fullscreen(),
     is_maximized: () => __window_is_maximized(),
+    selected_text: () => __window_selected_text(),
+    selection_bounds: () => __window_selection_bounds(),
 
     // What the window can be told. Refused from `render` for the reason
     // `cx.notify()` is: a frame that changes the window it is drawing into is
@@ -6954,6 +6956,7 @@ globalThis.__gpui = (() => {
     // path of *this* window. `cx.bind_keys` is the other half and is on `cx`
     // for the same reason: the keymap is `App`'s.
     dispatch_action: (action) => __dispatch_action(String(action)),
+    clear_selection: () => __window_clear_selection(),
 
     set_rem_size: (size) => __window_set_rem_size(Number(size)),
     refresh: () => __window_refresh(),
@@ -7448,6 +7451,7 @@ impl ShellRuntime {
             for (index, name) in [
                 "on_click",
                 "on_link_click",
+                "on_selection_change",
                 "on_mouse_move",
                 "on_hover",
                 "on_key_down",
@@ -8441,6 +8445,7 @@ impl ShellRuntime {
             }
             "on_click"
             | "on_link_click"
+            | "on_selection_change"
             | "on_resize"
             | "on_size_change"
             | "on_change"
@@ -10453,6 +10458,7 @@ fn callback_op_name(method: &str) -> Option<&'static str> {
     Some(match method {
         "on_click" => "on_click",
         "on_link_click" => "on_link_click",
+        "on_selection_change" => "on_selection_change",
         "on_mouse_move" => "on_mouse_move",
         "on_hover" => "on_hover",
         "on_key_down" => "on_key_down",

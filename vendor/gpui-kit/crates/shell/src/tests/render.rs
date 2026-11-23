@@ -7725,15 +7725,17 @@ export default class Surface extends View {
     for (const name of [
       "rem_size", "line_height", "viewport_size", "bounds", "mouse_position",
       "appearance", "is_window_active", "is_fullscreen", "is_maximized",
+      "selected_text", "selection_bounds",
       "set_rem_size", "refresh", "focus_next", "focus_prev",
       "activate_window", "minimize_window", "zoom_window", "toggle_fullscreen",
-      "dispatch_action",
+      "dispatch_action", "clear_selection",
     ]) {
       if (typeof window[name] !== "function") this.missing.push(`window.${name}`);
     }
     for (const read of [
       "rem_size", "line_height", "viewport_size", "bounds", "mouse_position",
       "appearance", "is_window_active", "is_fullscreen", "is_maximized",
+      "selected_text", "selection_bounds",
     ]) {
       if (window[read]() === undefined) this.missing.push(`window.${read}() answered nothing`);
     }

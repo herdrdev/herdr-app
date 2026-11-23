@@ -1090,7 +1090,14 @@ Paths containing control characters are rejected, including clipboard files.
 and other interactive controls too.
 `.when(cond, (el) => …)`, `.children([...])`. Controls from `gpui-base`
 (`Button`, `Checkbox`, `Switch`, `InputState` + `Input`) are unstyled: style
-them. Text: `TextView.markdown(id, text)` renders markdown; `EditorState.new({
+them. Text: `TextView.markdown(id, text)` renders markdown; with `.selectable(true)`,
+`.on_selection_change((s, cx) => …)` fires once a selection settles (`null`
+when cleared) with `{ text, start, end, bounds, local_bounds, element_bounds,
+position }` (`start` and `end` are UTF-16 offsets into Markdown as `slice` does;
+`bounds` and `local_bounds` give the visible selection rectangle in window and
+element coordinates), and `window.selected_text()`, `window.selection_bounds()`,
+`window.clear_selection()` read or clear any single or cross-`TextView`
+selection in the window; `EditorState.new({
 language, value, readonly, font_family: settings().font_family, syntax: {
 keyword: theme().ansi5, ... } })` + `Editor.new(state)` is a code view (readonly)
 or editor with syntax highlighting, line numbers and folding. A viewer opens

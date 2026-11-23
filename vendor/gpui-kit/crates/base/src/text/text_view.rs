@@ -99,6 +99,28 @@ pub(crate) type ImageSourceFn = dyn Fn(&gpui::SharedUri) -> gpui::ImageSource + 
 pub(crate) type LinkClickHandlerFn =
     dyn Fn(&SharedString, &ClickEvent, &mut Window, &mut App) + Send + Sync;
 
+/// HERDR: a selection a person finished making in a [`TextView`], as
+/// [`TextView::on_selection_change`] reports it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextViewSelection {
+    /// The selected text, in the view's [`SelectionFormat`].
+    pub text: String,
+    /// The Markdown source byte range the selection came from, when the view
+    /// renders Markdown and the selection maps back to it.
+    pub source_range: Option<Range<usize>>,
+    /// Tight union bounding rectangle of the visible painted selection in
+    /// window coordinates, or `None` when scrolled off-screen.
+    pub bounds: Option<Bounds<Pixels>>,
+    /// This `TextView` element's painted bounds in window coordinates.
+    pub element_bounds: Bounds<Pixels>,
+    /// Where the selection ended, in window coordinates: where the pointer
+    /// was released, or the point of a double or triple click.
+    pub position: Option<gpui::Point<Pixels>>,
+}
+
+pub(crate) type SelectionChangeHandlerFn =
+    dyn Fn(Option<&TextViewSelection>, &mut Window, &mut App);
+
 /// Kept by the element only, so unlike the handlers the state carries, it
 /// may hold a `ScrollHandle`.
 pub(crate) type RevealHandlerFn = dyn Fn(Bounds<Pixels>, &mut Window, &mut App);
@@ -159,6 +181,7 @@ pub struct TextView {
     reveal_handler: Option<Rc<RevealHandlerFn>>,
     markdown_extensions: Arc<MarkdownExtensions>,
     motion: Option<TextViewMotion>,
+    selection_change_handler: Option<Rc<SelectionChangeHandlerFn>>,
 }
 
 /// A plugin that can configure a [`TextView`].
@@ -206,6 +229,7 @@ impl TextView {
             reveal_handler: None,
             markdown_extensions: Arc::default(),
             motion: None,
+            selection_change_handler: None,
         }
     }
 
@@ -230,6 +254,7 @@ impl TextView {
             reveal_handler: None,
             markdown_extensions: Arc::default(),
             motion: None,
+            selection_change_handler: None,
         }
     }
 
@@ -254,6 +279,7 @@ impl TextView {
             reveal_handler: None,
             markdown_extensions: Arc::default(),
             motion: None,
+            selection_change_handler: None,
         }
     }
 
@@ -399,6 +425,17 @@ impl TextView {
         F: Fn(&SharedString, &ClickEvent, &mut Window, &mut App) + Send + Sync + 'static,
     {
         self.link_click_handler = Some(Arc::new(handler));
+        self
+    }
+
+    /// HERDR: called when a selection settles (pointer release, double/triple
+    /// click, or select-all) with the selection details, and with `None` when
+    /// a previously reported selection is cleared.
+    pub fn on_selection_change<F>(mut self, handler: F) -> Self
+    where
+        F: Fn(Option<&TextViewSelection>, &mut Window, &mut App) + 'static,
+    {
+        self.selection_change_handler = Some(Rc::new(handler));
         self
     }
 
@@ -893,6 +930,17 @@ impl Element for TextView {
             // The handles of a touch selection go over the text, and under
             // whatever is painted over the text after it.
             adapter.paint_touch_handles(&prepaint.touch_handles, handle_color, window, cx);
+        }
+
+        // HERDR: read after paint and registration so multi-click ranges and
+        // selection bounds reflect the painted frame.
+        if let Some(handler) = self.selection_change_handler.clone()
+            && state.read(cx).selection_report_pending
+            && let Some(selection) = state.update(cx, |state, cx| state.take_selection_report(bounds, cx))
+        {
+            window.defer(cx, move |window, cx| {
+                handler(selection.as_ref(), window, cx);
+            });
         }
     }
 }

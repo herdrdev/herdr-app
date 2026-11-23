@@ -14,7 +14,7 @@
 //! frame arguing with itself, so those take the same guard the overlays do.
 
 use gpui::{Window, WindowAppearance};
-use rquickjs::{Ctx, Exception, Object, Result as JsResult, function::Func};
+use rquickjs::{Ctx, Exception, Object, Result as JsResult, Value, function::Func};
 
 use crate::action::ShellAction;
 use crate::scope::{self, ScopePhase};
@@ -75,10 +75,27 @@ pub(super) fn install(ctx: &Ctx<'_>) -> JsResult<()> {
             read(&ctx, "window.is_maximized()", Window::is_maximized)
         }),
     )?;
+    globals.set(
+        "__window_selected_text",
+        Func::from(|ctx: Ctx<'_>| -> JsResult<String> {
+            read_with_app(&ctx, "window.selected_text()", |window, app| {
+                gpui_base::TextSelection::selected_text(window, app)
+            })
+        }),
+    )?;
+    globals.set("__window_selection_bounds", Func::from(selection_bounds))?;
 
     // The mutations. Refused from `render` for the reason `cx.notify()` is:
     // a frame that changes the window it is drawing into is a frame arguing
     // with itself.
+    globals.set(
+        "__window_clear_selection",
+        Func::from(|ctx: Ctx<'_>| -> JsResult<()> {
+            write(&ctx, "window.clear_selection()", |window, app| {
+                gpui_base::TextSelection::clear(window, app);
+            })
+        }),
+    )?;
     globals.set(
         "__window_set_rem_size",
         Func::from(|ctx: Ctx<'_>, size: f32| -> JsResult<()> {
@@ -267,7 +284,24 @@ fn viewport_size<'js>(ctx: Ctx<'js>) -> JsResult<Object<'js>> {
 
 fn bounds<'js>(ctx: Ctx<'js>) -> JsResult<Object<'js>> {
     let bounds = read(&ctx, "window.bounds()", |window| window.bounds())?;
-    let object = Object::new(ctx)?;
+    bounds_object(&ctx, bounds)
+}
+
+fn selection_bounds<'js>(ctx: Ctx<'js>) -> JsResult<Value<'js>> {
+    let bounds = read_with_app(&ctx, "window.selection_bounds()", |window, app| {
+        gpui_base::TextSelection::selection_bounds(window, app)
+    })?;
+    match bounds {
+        Some(bounds) => Ok(bounds_object(&ctx, bounds)?.into_value()),
+        None => Ok(Value::new_null(ctx)),
+    }
+}
+
+fn bounds_object<'js>(
+    ctx: &Ctx<'js>,
+    bounds: gpui::Bounds<gpui::Pixels>,
+) -> JsResult<Object<'js>> {
+    let object = Object::new(ctx.clone())?;
     object.set("x", f32::from(bounds.origin.x))?;
     object.set("y", f32::from(bounds.origin.y))?;
     object.set("width", f32::from(bounds.size.width))?;
@@ -305,6 +339,23 @@ fn appearance_name(appearance: WindowAppearance) -> &'static str {
 /// A measurement, legal from any host call including `render`.
 fn read<R>(ctx: &Ctx<'_>, api: &str, body: impl FnOnce(&Window) -> R) -> JsResult<R> {
     scope::with_current(|window, _| body(window)).ok_or_else(|| {
+        Exception::throw_type(
+            ctx,
+            &format!(
+                "{api} needs a live host call; call it from render(), init(), \
+                 an event handler or a task"
+            ),
+        )
+    })
+}
+
+/// A window + app measurement, legal from any host call including `render`.
+fn read_with_app<R>(
+    ctx: &Ctx<'_>,
+    api: &str,
+    body: impl FnOnce(&mut Window, &mut gpui::App) -> R,
+) -> JsResult<R> {
+    scope::with_current(body).ok_or_else(|| {
         Exception::throw_type(
             ctx,
             &format!(
