@@ -60,16 +60,24 @@ export default class Changes extends View {
     cx.timer.every(10000, (cx) => this.refresh(cx));
   }
 
+  // One watch, on the repo shown (null: none). The repo left behind is released:
+  // while it stays quiet its wait never ends, and would keep one of the 64 folders.
   watch(root, cx) {
-    if (this.on || this.watched === root) return;
+    if (this.watched === root) return;
+    this.watching?.cancel();
     this.watched = root;
+    let pending = this.watching = root ? watchFolder(root) : null;
+    if (!pending) return;
     cx.spawn(async (cx) => {
       try {
-        while (this.watched === root) {
-          await watchFolder(root);
-          if (this.watched === root) this.refresh(cx);
+        for (;;) {
+          await pending;
+          // Cancelled, or replaced by a new wait on the same repo.
+          if (this.watching !== pending) return;
+          pending = this.watching = watchFolder(root);
+          this.refresh(cx);
         }
-      } catch { this.watched = null; }
+      } catch { if (this.watching === pending) this.watched = this.watching = null; }
     });
   }
 
@@ -82,9 +90,12 @@ export default class Changes extends View {
     const { cwd, on } = location(), next = key();
     if (next !== this.context?.key) {
       this.context = { key: next }; this.root = null; this.files = []; this.open = null;
-      this.setLines([]); this.message = ""; this.input.set_value(""); this.error = null; this.note = null; this.watched = null; this.closed = false; this.limited = false;
+      this.setLines([]); this.message = ""; this.input.set_value(""); this.error = null; this.note = null; this.closed = false; this.limited = false;
       this.loading = false;
     }
+    // Nothing to watch here: no folder, or a remote space's, which the timer polls.
+    // Released before git runs, as a machine that is away fails the refresh.
+    if (!cwd || on) this.watch(null);
     // A load left behind in another folder (a slow git, a read that never ends) must not hold this one.
     if (!cwd || this.loading || this.busy) return;
     const context = this.context;
@@ -93,7 +104,7 @@ export default class Changes extends View {
       try {
         const top = await exec("git", ["rev-parse", "--show-toplevel"], { cwd, on });
         if (!this.current(context)) return;
-        if (top.code !== 0) { this.root = null; this.files = []; this.setLines([]); this.open = null; this.error = "Not a git repository"; return; }
+        if (top.code !== 0) { this.root = null; this.files = []; this.setLines([]); this.open = null; this.error = "Not a git repository"; this.watch(null); return; }
         const root = top.stdout.trim(), git = (args) => exec("git", [...READ, ...args], { cwd: root, on });
         const status = await git(["status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"]);
         if (status.code !== 0) throw new Error(status.stderr);
@@ -120,7 +131,7 @@ export default class Changes extends View {
         }
         if (!this.current(context)) return;
         this.root = root; this.on = on; this.hasHead = head.code === 0; this.files = files; this.limited = entries.length > 1000; this.error = null;
-        this.watch(root, cx);
+        if (!on) this.watch(root, cx);
         if (this.open && !files.some((f) => f.path === this.open)) { this.open = null; this.setLines([]); }
         // The first file's diff shows until you pick another.
         if (!this.open && !this.closed && files.length) this.open = files[0].path;
