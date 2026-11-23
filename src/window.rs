@@ -407,7 +407,9 @@ pub struct AppWindow {
     float_hover: HashSet<String>,
     /// Bumped on every hover change, so a delayed leave knows it's still current.
     float_leave: HashMap<String, u64>,
-    divider_hover: Option<(String, usize)>,
+    divider_hover: HashSet<(String, usize)>,
+    divider_hover_epoch: u64,
+    divider_window_hovered: bool,
     model: Model,
     /// Terminal views by block id (panes and chrome terminal blocks).
     terms: HashMap<String, Term>,
@@ -540,7 +542,9 @@ impl AppWindow {
             float_reveal: HashMap::new(),
             float_hover: HashSet::new(),
             float_leave: HashMap::new(),
-            divider_hover: None,
+            divider_hover: HashSet::new(),
+            divider_hover_epoch: 0,
+            divider_window_hovered: true,
             model: Model::default(),
             terms: HashMap::new(),
             copies: HashMap::new(),
@@ -1010,9 +1014,17 @@ impl AppWindow {
         }
     }
 
+    fn reset_divider_interaction(&mut self) {
+        self.drag = None;
+        self.divider_hover.clear();
+        // Recheck hover under a stationary pointer even if the new tree reuses node ids.
+        self.divider_hover_epoch += 1;
+    }
+
     /// Makes `name` the shown layout (its file, or its default if missing or
     /// broken), with the person's clicks on it.
     fn load_layout(&mut self, name: &str) {
+        self.reset_divider_interaction();
         self.layout_name = name.to_owned();
         self.failed_link_enrollments.clear();
         self.written_layout.clear();
@@ -1090,7 +1102,6 @@ impl AppWindow {
         self.float_anims.clear();
         self.float_reveal.clear();
         self.float_hover.clear();
-        self.divider_hover = None;
         let other = next != self.layout_name;
         if other {
             self.close_windows(window, cx);
@@ -1134,6 +1145,7 @@ impl AppWindow {
                     s.forget_edited(&self.file_chrome, &n);
                     s
                 };
+                self.reset_divider_interaction();
                 self.file_chrome = n.clone();
                 self.chrome = n;
                 self.picked_theme = state.theme.clone();
@@ -3617,6 +3629,7 @@ impl AppWindow {
                     }
                     self.written_layout = text;
                     self.layout_file_ok = true;
+                    self.reset_divider_interaction();
                     self.file_chrome = n.clone();
                     self.chrome = n;
                     self.picked_theme = None;
@@ -4806,10 +4819,11 @@ impl AppWindow {
     fn separator(&self, n: &Node, axis: Axis, gap: f32, index: usize, cx: &mut Context<Self>) -> AnyElement {
         let row = axis == Axis::Row;
         let zoom = settings::zoom();
-        let hovered = self.divider_hover.as_ref().is_some_and(|(id, i)| *id == n.id && *i == index);
-        let dragging = self.drag.as_ref().is_some_and(|d| d.container == n.id && d.index == index);
+        let resizable = n.resizable();
+        let hovered = resizable && self.divider_window_hovered && self.drag.is_none()
+            && self.divider_hover.iter().any(|(id, i)| *id == n.id && *i == index);
+        let dragging = resizable && self.drag.as_ref().is_some_and(|d| d.container == n.id && d.index == index && d.axis == axis);
         let line = n.divider.as_ref().map(|d| (d.width * zoom, c(d.color_for(hovered, dragging))));
-        let tracks_hover = n.divider.as_ref().is_some_and(|d| d.hover.is_some());
         let width = pane_size::separator_width(n, gap) * zoom;
         let mut sep = div().flex_none().relative().flex().items_center().justify_center();
         sep = if row { sep.w(px(width)).h_full() } else { sep.h(px(width)).w_full() };
@@ -4822,36 +4836,55 @@ impl AppWindow {
             }
             sep = sep.child(separator_line(row, w, color, top));
         }
-        if n.resizable() {
+        if resizable {
             let container = n.id.clone();
             let hit = HANDLE.max(width);
-            sep = sep.child(
-                div()
-                    .id(SharedString::from(format!("divider-{}-{index}", n.id)))
-                    .absolute()
-                    .when(row, |d| d.top_0().bottom_0().left(px((width - hit) / 2.0)).w(px(hit)).cursor_col_resize())
-                    .when(!row, |d| d.left_0().right_0().top(px((width - hit) / 2.0)).h(px(hit)).cursor_row_resize())
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                            if let Some(space) = this.model.space_of(&container)
-                                && this.require_document(space.machine.as_deref()).is_err() { return; }
-                            this.drag = Some(Drag { container: container.clone(), index, axis });
-                            cx.stop_propagation();
-                            cx.notify();
-                        }),
-                    )
-                    .when(tracks_hover, |d| {
-                        let container = n.id.clone();
-                        d.on_hover(cx.listener(move |this, over: &bool, _, cx| {
-                            let key = Some((container.clone(), index));
-                            if *over { this.divider_hover = key; } else if this.divider_hover == key { this.divider_hover = None; }
-                            cx.notify();
-                        }))
-                    }),
-            );
+            let tracks_drag_color = n.divider.as_ref().is_some_and(|d| d.hover.is_some() || d.active.is_some());
+            let handle = div()
+                .absolute()
+                .when(row, |d| d.top_0().bottom_0().left(px((width - hit) / 2.0)).w(px(hit)).cursor_col_resize())
+                .when(!row, |d| d.left_0().right_0().top(px((width - hit) / 2.0)).h(px(hit)).cursor_row_resize())
+                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+                    if let Some(space) = this.model.space_of(&container)
+                        && this.require_document(space.machine.as_deref()).is_err() { return; }
+                    this.drag = Some(Drag { container: container.clone(), index, axis });
+                    cx.stop_propagation();
+                    if tracks_drag_color {
+                        cx.notify();
+                    }
+                }));
+            if n.divider.as_ref().is_some_and(|d| d.hover.is_some()) {
+                let epoch = self.divider_hover_epoch;
+                let id = SharedString::from(format!("divider-{epoch}-{}-{index}", n.id));
+                let key = (n.id.clone(), index);
+                sep = sep.child(handle.id(id).on_hover(cx.listener(move |this, over: &bool, _, cx| {
+                    if this.divider_hover_epoch != epoch {
+                        return;
+                    }
+                    let changed = if *over {
+                        this.divider_hover.insert(key.clone())
+                    } else {
+                        this.divider_hover.remove(&key)
+                    };
+                    if changed {
+                        cx.notify();
+                    }
+                })));
+            } else {
+                sep = sep.child(handle);
+            }
         }
         sep.into_any_element()
+    }
+
+    fn finish_divider_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.drag.take().is_some() {
+            self.save();
+            // Mods see the new sizes (the sidebar picks its rail by width).
+            self.publish(cx);
+            self.flush_documents(false, window, cx);
+            cx.notify();
+        }
     }
 
     fn drag_to(&mut self, pos: Point<Pixels>) {
@@ -5614,6 +5647,10 @@ impl Render for AppWindow {
         if mods::publish_window(self.window_json(window)) {
             self.refresh_snapshot_mods(cx);
         }
+        // On these platforms GPUI keeps the last in-window position after pointer exit.
+        // On macOS is_window_hovered reports keyboard focus.
+        self.divider_window_hovered = !cfg!(any(target_os = "linux", target_os = "windows", target_os = "freebsd"))
+            || window.is_window_hovered();
         let focused = self.focused_path(window, cx);
         let tree = self.render_node(&self.chrome, &focused, None, cx);
         let tree = self.window_frame(tree, window, cx);
@@ -5695,13 +5732,10 @@ impl Render for AppWindow {
             }))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, window, cx| {
                 this.drag_from = None;
-                if this.drag.take().is_some() {
-                    cx.notify();
-                    this.save();
-                    // Mods see the new sizes (the sidebar picks its rail by width).
-                    this.publish(cx);
-                    this.flush_documents(false, window, cx);
-                }
+                this.finish_divider_drag(window, cx);
+            }))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, window, cx| {
+                this.finish_divider_drag(window, cx);
             }))
             .child(tree)
             .children(overlays)
