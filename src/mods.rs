@@ -885,7 +885,7 @@ pub(crate) fn run_blocking(command: &str, args: &[String], cwd: Option<String>, 
     use std::io::Read;
     // The core may have no `hc` link beside it (a Windows zip has only herdr-core.exe).
     let program = if command == "hc" { crate::core_bin::path() } else { PathBuf::from(command) };
-    let mut child = crate::spawn::command(program)
+    let mut child = crate::spawn::detached_command(program)
         .args(args)
         .current_dir(cwd.map(PathBuf::from).unwrap_or_else(home))
         .stdin(Stdio::null())
@@ -1763,6 +1763,49 @@ mod tests {
         assert!(error.contains("0.03 s"), "{error}");
         let (code, stdout, _) = run_blocking("sh", &args, None, Duration::from_secs(2)).unwrap();
         assert_eq!((code, stdout.as_str()), (0, "done"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn exec_keeps_a_background_job_running() {
+        const CHILD: &str = "HERDR_TEST_BACKGROUND_EXEC";
+        if std::env::var_os(CHILD).is_some() {
+            let args = ["--noprofile", "--norc", "-ic", "printf ready"].map(String::from);
+            let (code, stdout, stderr) = run_blocking("/bin/bash", &args, None, Duration::from_secs(2)).unwrap();
+            assert_eq!((code, stdout.as_str()), (0, "ready"), "{stderr}");
+            return;
+        }
+
+        // util-linux `script` gives Bash a real controlling PTY; some desktops don't have it.
+        if std::process::Command::new("script").arg("--version").output().is_err() {
+            eprintln!("skipped: util-linux script is not installed");
+            return;
+        }
+        // Give Bash a real controlling PTY and run the test in a background job.
+        let output = std::process::Command::new("timeout")
+            .args([
+                "15s",
+                "script",
+                "-qec",
+                r#"exec /bin/bash --noprofile --norc -mc '
+                    "$HERDR_TEST_BINARY" --exact mods::tests::exec_keeps_a_background_job_running &
+                    child=$!
+                    wait "$child"
+                    status=$?
+                    if [ "$status" -ne 0 ]; then
+                        jobs -l
+                        kill -KILL -- "-$child" 2>/dev/null || :
+                    fi
+                    exit "$status"
+                '"#,
+                "/dev/null",
+            ])
+            .env(CHILD, "1")
+            .env("HERDR_TEST_BINARY", std::env::current_exe().unwrap())
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "background job: {}\n{}{}", output.status, String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
     }
 
     #[cfg(unix)]

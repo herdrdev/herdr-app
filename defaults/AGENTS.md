@@ -2,6 +2,10 @@
 
 <!-- Written by the Herdr app on every start. Edits here are overwritten. -->
 
+If `AGENTS.local.md` is in this folder, read it too: the person's own notes
+on their setup (what they changed and how they like it). Herdr never writes
+or replaces it; put lasting notes about this machine's setup there.
+
 This folder is **the Herdr app's whole interface, as files**. The Herdr app
 is a desktop app for terminals and coding agents, and it redraws itself from
 these files while it runs: change a layout, a key or a panel here and the
@@ -79,6 +83,7 @@ first frame or during GPU recovery it reports an error instead of a PNG.
 | `keys.json` | what every key does | live |
 | `settings.json` | the person: zoom, sounds, fonts for every layout, worktree directory | live |
 | `mods/<name>/` | panels: small JavaScript programs | live (hot reload) |
+| `AGENTS.local.md` | the person's notes on their setup, for agents | never written by Herdr |
 | `programs.json` | how programs show (name, icon, tile), on top of the built-in table | live |
 | `icons/` | the shipped program icons | written by Herdr (put your own elsewhere) |
 | `frame/` | the app's own screens (welcome, ...) | rewritten by Herdr on every start: don't edit, it won't stick |
@@ -167,8 +172,10 @@ the highlighted line shows where it will land.
   peek at it. Bare addresses refer to the machine of the terminal showing them;
   use `machine/address` for another machine. Names and non-live addresses aren't links.
 - **Agent navigation order** belongs to the mods. A mod displaying agents calls
-  `setAgentOrder(list.map(a => a.address))` on render so `agent.next` /
-  `agent.prev` follow its list.
+  `setAgentOrder(list.map(a => a.address))` on render so `agent.next`,
+  `agent.prev` and `agent.select {index}` (1 = first) use that order. Herdr
+  keeps the last published order until the next call or app restart,
+  skips agents that are gone, and appends unlisted agents in model order.
 
 ## Layouts: `layouts/<name>.json`
 
@@ -226,9 +233,10 @@ A layout is a tree of nodes. Four types:
 
 - `block`: shows content. `"content"` is `{ "mod": "<folder>", "props": {...} }`,
   `{ "terminal": "t7" }`, `{ "tab": "active" }` (the shown tab's
-  terminals as it arranges them), or `{ "agent": "focused" }` (one agent's
-  terminal, full size: the one chosen with `agent.focus` / `agent.next`, else
-  the focused pane's agent, else the first agent).
+  terminals as it arranges them), or `{ "agent": "focused" }`. An agent block
+  shows one terminal at full size. It shows the agent chosen by `agent.focus`,
+  `agent.select`, `agent.next` or `agent.prev`. Otherwise it shows the focused
+  pane's agent or the first agent in navigation order.
 - `row` / `column`: children side by side / stacked.
 - `stack`: shows one child (`"active": "<child id>"`), with an optional
   `"header"` (a mod that draws tabs, or `"tabs"` for a plain built-in strip).
@@ -364,7 +372,7 @@ layout's look and a block can differ:
   fonts are in `mods/win98/fonts/`).
 - `font_weight` (100..900): the terminals' text weight. Default 500
   (Medium); 400 is Regular, 300 Light, using the family's nearest face.
-  Bold text stays at 700.
+- `font_weight_bold` (100..900): bold terminal weight (default 700), using the nearest face.
 - `pane_scrollbars` in settings.json (default `true`): show terminal scrollback
   with a slim thumb and track. Drag the thumb or click the track to jump there.
   With little or no terminal padding, the hit lane overlays the last 8px;
@@ -389,6 +397,13 @@ The tab block says how each pane of the shown tab is wrapped:
 
 - The look applies to every pane; `focus` replaces the border while the
   pane has the keyboard; `gap` is the space between panes.
+- `veil`: 0 to 1 (`"veil": 0.4`). Panes other than the tab's selected one
+  fade by that much: the terminal's background colour (the theme's
+  `background`, ignoring its alpha) is drawn over them at that opacity, so
+  their text fades and the look follows the theme. With `terminal_opacity`
+  below 1 it also covers what shows through the terminal. A dialog or input
+  taking the keyboard doesn't veil the selected pane, and a zoomed tab isn't
+  veiled. Clicks go through it.
 - `header`: a mod drawn on each pane, one copy per pane, with
   `props().pane` and `props().terminal`. It reads its live facts from
   `panes()` (title, folder, branch, agent status, focused, zoomed, scroll)
@@ -539,7 +554,8 @@ shortcuts must then be added by hand.
   `command` names an app command; `args` is an object (optional, defaults to `{}`).
   It can pass several arguments, numbers, booleans, arrays or nested objects.
   String actions keep their literal first-argument shorthand, including numeric
-  indexes: `space.new:{work}` names a space `{work}`, and `space.new:{}` names it `{}`.
+  indexes. `agent.select:2` selects the second agent in navigation order.
+  `space.new:{work}` names a space `{work}`, and `space.new:{}` names it `{}`.
   Invalid binding objects or rejected arguments show an error toast when pressed;
   the key does not go to the terminal program.
 - Plain ctrl+letters go to the program unless bound. Programs rely on
@@ -624,8 +640,12 @@ The main ones:
   `terminal.show` fail, as do `terminal.open`/`terminal.keep` with place right/down.
   They never act on the terminal's source pane. An explicit `pane` still targets that
   model pane; composition edits belong to the mod (edit its layout instead).
+  Closing panes, tabs or spaces ends the terminals in them. Core ends dependent
+  children and keeps children started with `--outlive-parent` running.
 - Terminals: `terminal.open {argv?, folder?, place?, name?}` (`folder` sets the
-  starting directory for tabs and right/down splits, with or without `argv`), `terminal.kill {terminal}`,
+  starting directory for tabs and right/down splits, with or without `argv`),
+  `terminal.kill {terminal}` (ends the sub-agent tree, stopping at children with a
+  pane or `herdr.space` label; core still applies parent-lifetime rules),
   `terminal.keep {terminal, place?}`, `terminal.park {terminal}`,
   `terminal.peek {terminal}` (peek over the tab, with keep-as-tab and close),
   `terminal.show {terminal?, pane?}`, `terminal.search` (screen and scrollback;
@@ -669,7 +689,7 @@ The main ones:
   started, including its release outside the pane; other panes don't receive it.
   Terminals display Kitty graphics, including Unicode placeholder images used by
   programs such as yazi; partial images and scrolling follow the placeholder cells.
-- Agents: `agent.next`, `agent.prev`, `agent.focus {terminal}`.
+- Agents: `agent.next`, `agent.prev`, `agent.select {index}`, `agent.focus {terminal}`.
 - Layout: `layout.switch {name?}`, `layout.toggle {id}`, `layout.show {id}`, `layout.hide {id}`,
   `layout.resize {id, px | weight}`, `layout.select {stack, child}`, `layout.set {layout}`
   (personal tree edits; on shipped layouts only click/look fields change),
@@ -684,7 +704,8 @@ The main ones:
   Add machine lists all named ssh-config hosts in a scrollable list. Machines
   that need a password, a new host key or herdr-core installed show what to run
   in your own terminal; the picker updates once it is added. Other machines are
-  added quietly. If a Linux server reports that programs stop at logout, its
+  added quietly. Update remote cores older than 0.1.13 from Settings → Machines so children started there end with their parent by default.
+  If a Linux server reports that programs stop at logout, its
   added card warns that agents stop when you disconnect and offers the administrator's
   `sudo loginctl enable-linger -- <user>` command with Copy. A warning mark in
   Settings > Machines and the sidebar opens that card; it clears automatically
@@ -747,8 +768,8 @@ What's about the user, never a look:
   (default 1, 0.8..2) and `terminal_scroll_speed` (default 1, 0.1..5):
   terminal row height, column width and wheel/trackpad speed, used where the
   layout leaves them unset.
-- `font`, `font_size`, `font_weight`, `ui_font`: used where the layout doesn't set its
-  own. Herdr (main) leaves these unset. Bigger panels: `zoom`.
+- `font`, `font_size`, `font_weight`, `font_weight_bold`, `ui_font`: used where
+  the layout doesn't set its own. Herdr (main) leaves these unset. Bigger panels: `zoom`.
 - `font_ligatures`: programming ligatures are off by default; set `true` to
   enable them in terminal fonts such as JetBrains Mono and Fira Code. The cursor
   and background changes (including selections) break ligatures so individual cells stay clear.
@@ -1171,8 +1192,9 @@ All of it is in `herdr.d.ts`. In short:
   showing the folder. Cancellation resolves with `[]` and releases this call
   without stopping other callers: `const watch = watchFolder(dir); watch.cancel();`.
   Closing a mod copy cancels its pending calls.
-  Files also refreshes on its 10-second timer:
   `cx.spawn(async (cx) => { for (;;) { await watchFolder(dir); this.reload(); cx.notify(); } })`.
+  Files and Changes coalesce watch events and poll while the window is focused.
+  Polling starts at 10 seconds, and both kinds of refresh wait longer after slow Git scans.
 - Window title: `setWindowTitle(title)` sets the OS window's title, which window switchers,
   taskbars and time trackers read. The last call wins; `null` restores `Herdr`. Call it when the
   title changes, not on every render.
