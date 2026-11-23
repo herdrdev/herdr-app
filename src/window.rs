@@ -1744,6 +1744,10 @@ impl AppWindow {
         if dialog.as_ref().is_some_and(|d| d.contains_focused(window, cx)) {
             return;
         }
+        // An explicit handoff ends the mod block's turn with the keyboard.
+        if dialog.is_none() && window.focus_was_yielded() {
+            self.focused_block = None;
+        }
         // A mod block holding the keyboard gets it back (a popup over it closed).
         if dialog.is_none() && self.focused_block.as_ref().is_some_and(|b| self.mod_block_shown(b)) {
             self.focus.focus(window, cx);
@@ -7266,6 +7270,82 @@ mod tests {
         cx.run_until_parked();
         assert_eq!(root.read_with(cx, |r, _| r.toast_count()), 0, "the toast timed out and left");
         assert_eq!(running(cx), 0, "and the clock stopped with it");
+    }
+
+    #[test]
+    fn text_blur_gives_the_keyboard_back_to_the_terminal() {
+        in_own_process("text_blur_handoff");
+    }
+
+    #[gpui::test]
+    fn text_blur_handoff(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("text_blur_handoff") {
+            return;
+        }
+        let probe = r#"import { View, div } from "gpui-kit";
+import { Input, InputState } from "gpui-base";
+import { nextCommand, setShared } from "herdr";
+
+export default class Probe extends View {
+  init(_, cx) {
+    this.field = InputState.new({ value: "search" });
+    this.field.on("focus", () => setShared("probe.focused", true));
+    this.field.on("blur", () => setShared("probe.blurred", this.field.value()));
+    cx.spawn(async () => {
+      for (;;) {
+        if (await nextCommand() === "focus") this.field.focus();
+      }
+    });
+  }
+  render() {
+    return div().size_full()
+      .on_key_down((event, cx) => {
+        if (event.key === "escape") {
+          this.field.blur();
+          cx.stop_propagation();
+        }
+      })
+      .child(Input.new(this.field));
+  }
+}
+"#;
+        let (view, cx) = open_window(cx, "probe", probe, json!({
+            "id": "root", "type": "row", "children": [
+                { "id": "main", "type": "block", "content": { "tab": "active" } },
+                { "id": "probe", "type": "block", "content": { "mod": "probe" } }
+            ]
+        }));
+        cx.update(|window, cx| {
+            window.activate_window();
+            view.update(cx, |this, cx| {
+                this.model.add_space("s1", "one", "", crate::model::Tab::new("a", "a", "pa", "t1"));
+                this.live.insert("t1".into(), json!({ "address": "t1" }));
+                this.sync(window, cx);
+            });
+        });
+        let settle = |cx: &mut gpui::VisualTestContext| {
+            for _ in 0..3 {
+                cx.update(|window, cx| {
+                    window.simulate_next_frame(cx);
+                    window.draw(cx).clear(cx);
+                });
+                cx.run_until_parked();
+            }
+        };
+        settle(cx);
+        cx.update(|window, cx| view.update(cx, |this, cx| this.focus_block("probe", window, cx)));
+        settle(cx);
+        assert_eq!(crate::mods::shared("probe.focused"), Some(json!(true)));
+
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+
+        assert_eq!(crate::mods::shared("probe.blurred"), Some(json!("search")));
+        cx.update(|window, cx| {
+            let this = view.read(cx);
+            assert!(this.terms["pa"].focus.is_focused(window));
+        });
     }
 
     /// Mods see window().active follow the focus, losing it too: a probe mod

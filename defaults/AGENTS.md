@@ -1140,7 +1140,8 @@ and other interactive controls too.
 `.when(cond, (el) => …)`, `.children([...])`. Controls from `gpui-base`
 (`Button`, `Checkbox`, `Switch`, `InputState` + `Input`) are unstyled: style
 them. Text states (`InputState`, `TextareaState`, `EditorState`) take the
-keyboard with `focus()` and give it back with `blur()`. `release()` frees
+keyboard with `focus()` and give it back with `blur()`. Herdr then hands the
+keyboard to the dialog or pane, and the field stays usable. `release()` frees
 the state. Text: `TextView.markdown(id, text)` renders Markdown.
 `.raw_html(false)` shows embedded HTML tags and blocks as literal text.
 Markdown autolinks stay clickable. With

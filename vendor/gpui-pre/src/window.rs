@@ -1212,6 +1212,8 @@ pub struct Window {
     focus_listeners: SubscriberSet<(), AnyWindowFocusListener>,
     pub(crate) focus_lost_listeners: SubscriberSet<(), AnyObserver>,
     focus_lost_path: SmallVec<[FocusId; 8]>,
+    focus_lost_yielded: bool,
+    yielded_focus: Option<FocusId>,
     default_prevented: bool,
     mouse_position: Point<Pixels>,
     mouse_hit_test: HitTest,
@@ -2108,6 +2110,8 @@ impl Window {
             focus_listeners: SubscriberSet::new(),
             focus_lost_listeners: SubscriberSet::new(),
             focus_lost_path: SmallVec::new(),
+            focus_lost_yielded: false,
+            yielded_focus: None,
             default_prevented: true,
             mouse_position,
             mouse_hit_test: HitTest::default(),
@@ -2353,6 +2357,12 @@ impl Window {
         })
     }
 
+    /// Whether the focus-lost notification came from an explicit keyboard handoff.
+    /// Available while focus-lost listeners are running.
+    pub fn focus_was_yielded(&self) -> bool {
+        self.focus_lost_yielded
+    }
+
     /// Move focus to the element associated with the given [`FocusHandle`].
     pub fn focus(&mut self, handle: &FocusHandle, cx: &mut App) {
         if !self.focus_enabled || self.focus == Some(handle.id) {
@@ -2360,6 +2370,7 @@ impl Window {
         }
 
         self.focus = Some(handle.id);
+        self.yielded_focus = None;
         self.focus_generation = self.focus_generation.wrapping_add(1);
         self.clear_pending_keystrokes(cx);
 
@@ -2379,6 +2390,15 @@ impl Window {
         }
         self.focus = None;
         self.refresh();
+    }
+
+    /// Clear focus and tell focus-lost listeners that the control gave up the keyboard.
+    pub fn yield_focus(&mut self, cx: &mut App) {
+        let focused = self.focus;
+        self.blur(cx);
+        if self.focus.is_none() && focused.is_some() {
+            self.yielded_focus = focused;
+        }
     }
 
     /// Blur the window and don't allow anything in it to be focused again.
@@ -3460,16 +3480,19 @@ impl Window {
         let current_focus_path = self.rendered_frame.focus_path();
         let current_window_active = self.rendered_frame.window_active;
         let mut focus_before_listeners = self.focus;
+        let yielded_focus = self.yielded_focus.take();
 
         if previous_focus_path != current_focus_path
             || previous_window_active != current_window_active
         {
             if !previous_focus_path.is_empty() && current_focus_path.is_empty() {
+                self.focus_lost_yielded = yielded_focus.as_ref() == previous_focus_path.last();
                 self.focus_lost_path = previous_focus_path.clone();
                 self.focus_lost_listeners
                     .clone()
                     .retain(&(), |listener| listener(self, cx));
                 self.focus_lost_path = SmallVec::new();
+                self.focus_lost_yielded = false;
                 // The focus-lost fallback (e.g. a workspace refocusing itself) may target
                 // an element that isn't part of the element tree, in which case scheduling
                 // a redraw below would dispatch focus-lost again, looping forever. Only

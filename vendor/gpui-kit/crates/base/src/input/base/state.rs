@@ -1411,12 +1411,14 @@ impl<M: InputModeKind> InputBaseState<M> {
         });
     }
 
-    /// Take keyboard focus off the input field, leaving nothing in the window
-    /// focused. Does nothing when the field (or something inside it, such as
-    /// its context menu) does not have focus, so it never takes focus from
-    /// another element. The `Blur` event follows as it does for any focus loss.
+    /// Give up the keyboard when the field or one of its descendants has focus.
+    /// The state remains usable and receives the usual focus-loss notification.
     pub fn blur(&self, window: &mut Window, cx: &mut Context<Self>) {
         if self.focus_handle.contains_focused(window, cx) {
+            // HERDR: let the embedding app distinguish a handoff from disappearing focus.
+            #[cfg(not(feature = "gpui-fast"))]
+            window.yield_focus(cx);
+            #[cfg(feature = "gpui-fast")]
             window.blur(cx);
         }
     }

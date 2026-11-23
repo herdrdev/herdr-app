@@ -161,6 +161,8 @@ those files or the generated guide. The app rewrites them on start.
 - Shipped mods belong to Herdr: duplicate with `mod.clone` before editing.
   Shipped layouts likewise use `layout.clone` for a personal copy.
   Discover required arguments with `herdr-app commands`.
+- `InputState`, `TextareaState` and `EditorState` use `focus()` to take the
+  keyboard and `blur()` to hand it back to Herdr. `release()` frees the state.
 - Save to reload. A broken save keeps the old version running and reports
   an error in `status`; a still-working screen is not proof the edit worked.
 - Make only the requested change. Don't touch unrelated mods or settings.
