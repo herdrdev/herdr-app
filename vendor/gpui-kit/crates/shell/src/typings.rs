@@ -2480,9 +2480,9 @@ const BASE: &str = r#"  /** A row. */
     selectable(value?: boolean): this;
     scrollable(value?: boolean): this;
     /**
-     * Whether raw HTML in Markdown is drawn as HTML (the default). `false`
-     * shows a tag such as `<b>` as the text it is written as, and loads
-     * nothing from it; autolinks stay links. No effect on `TextView.html`.
+     * Whether raw HTML in Markdown renders as HTML (the default). `false`
+     * shows HTML tags and blocks as literal text. Markdown autolinks outside
+     * the HTML stay clickable. Applies to `TextView.markdown`.
      */
     raw_html(value?: boolean): this;
   }
@@ -4799,7 +4799,14 @@ mod tests {
         assert!(!element.contains("selectable("));
         assert!(!element.contains("scrollable("));
         assert!(!element.contains("raw_html("));
-        assert!(declarations.contains("export interface TextViewElement extends NativeElement"));
+        let text_view = declarations
+            .split_once("export interface TextViewElement extends NativeElement")
+            .expect("TextViewElement declaration")
+            .1
+            .split_once("\n  }")
+            .expect("end of TextViewElement declaration")
+            .0;
+        assert!(text_view.contains("raw_html(value?: boolean): this;"));
         assert!(declarations.contains("html(id: string, html: string): TextViewElement;"));
     }
 

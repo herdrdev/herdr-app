@@ -1127,6 +1127,9 @@ fn materialize_component(
             if let Some(scrollable) = behavior.text_scrollable {
                 view = view.scrollable(scrollable);
             }
+            if let Some(raw_html) = behavior.raw_html {
+                view = view.markdown_raw_html(raw_html);
+            }
             // HERDR: highlights and selection reports, in UTF-16 offsets of
             // the Markdown source, the way a script indexes its strings.
             for &(start, end, color) in &behavior.text_highlights {

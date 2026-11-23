@@ -494,7 +494,7 @@ impl TextView {
     /// Set whether raw HTML in Markdown renders as HTML (the default) or
     /// shows as the text it is written as. See [`MarkdownExtensions::raw_html`].
     ///
-    /// HERDR: offered upstream.
+    /// HERDR: backported API from gpui-kit #3979.
     pub fn markdown_raw_html(mut self, enabled: bool) -> Self {
         let extensions = Arc::make_mut(&mut self.markdown_extensions);
         *extensions = extensions.clone().raw_html(enabled);

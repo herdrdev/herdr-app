@@ -222,7 +222,6 @@ export default class RichText extends View {
     return TextView.html("message", "<p>Hello <strong>world</strong></p>")
       .selectable(true)
       .scrollable(false)
-      .raw_html(false)
       .on_link_click((_url, _cx) => {});
   }
 }
@@ -239,7 +238,6 @@ export default class RichText extends View {
     assert!(tree.contains("TextView html \"message\""), "{tree}");
     assert!(tree.contains("<strong>world</strong>"), "{tree}");
     assert!(tree.contains(":selectable"), "{tree}");
-    assert!(tree.contains(":raw_html"), "{tree}");
     assert!(tree.contains(":on_link_click(fn)"), "{tree}");
 }
 
