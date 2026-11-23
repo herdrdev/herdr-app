@@ -280,7 +280,7 @@ export function focused(): ({ space: string; tab: string; pane: string | null; t
  *  Root `link_handlers?: string[]` selects terminal link mods in order. */
 export function layout(): unknown;
 
-/** The names of every layout in layouts/ (main first). */
+/** The names of every layout in layouts/ (main first), except settings.json's `hidden_layouts`. */
 export function layouts(): string[];
 
 /** Every command the app runs: its name, arguments and what it does (as `herdr-app commands`).
