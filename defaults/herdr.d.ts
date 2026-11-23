@@ -496,7 +496,7 @@ export function nextCommand(): Promise<string>;
  * Idle watches may be reclaimed to make room; reload when starting a watch.
  * Call cancel() on the returned promise when you stop showing the folder.
  * It resolves with [] and releases this call; other callers keep watching.
- * Closing a mod copy cancels its pending calls. Files also refreshes on its 10-second timer.
+ * Closing a mod copy cancels its pending calls. Files and Changes also poll while focused.
  *   cx.spawn(async (cx) => { for (;;) { await watchFolder(dir); this.reload(); cx.notify(); } });
  * Watch what you show, not a whole home folder (node_modules is a lot of events).
  */
