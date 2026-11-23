@@ -11,6 +11,10 @@ function location() {
 }
 const key = () => JSON.stringify(location());
 const LANG = { ts: "js", tsx: "js", mts: "js", cts: "js", jsx: "js", mjs: "js", toml: "yaml", jsonc: "json", svelte: "html", vue: "html" };
+// Files known by their whole name, for the grammars the editor bundles.
+const NAMED = { Makefile: "make", makefile: "make", GNUmakefile: "make", Gemfile: "rb", Rakefile: "rb", Podfile: "rb", Vagrantfile: "rb", Brewfile: "rb", PKGBUILD: "bash", ".bashrc": "bash", ".bash_profile": "bash", ".bash_aliases": "bash", ".profile": "bash", ".zshrc": "bash", ".zshenv": "bash", ".zprofile": "bash" };
+// A dotfile's name is not an extension: ".env" has none.
+const language = (name) => NAMED[name] ?? (name.lastIndexOf(".") > 0 ? (ext => LANG[ext] ?? ext)(name.slice(name.lastIndexOf(".") + 1)) : "txt");
 const PER_FOLDER = 500, TOTAL = 5000;
 
 async function directory(path, on) {
@@ -137,8 +141,8 @@ export default class Files extends View {
         if (this.file !== path || !this.current(context)) return;
         if (text === null) { this.fileError = "This file is no longer available"; return; }
         if (text.includes("\0")) { this.fileError = "Binary file · no text preview"; return; }
-        const t = theme(), ext = path.includes(".") ? path.split(".").pop() : "txt";
-        this.code = EditorState.new({ language: LANG[ext] ?? ext, readonly: true,
+        const t = theme();
+        this.code = EditorState.new({ language: language(path.split("/").pop()), readonly: true,
           value: text.length > 400000 ? text.slice(0, 400000) + "\n… (file truncated)" : text,
           syntax: { keyword: t.ansi5, string: t.ansi2, comment: t.dim, function: t.ansi4, type: t.ansi3, number: t.ansi1, constant: t.ansi6 } });
       } catch { if (this.file === path && this.current(context)) this.fileError = "Cannot preview this file (binary, too large, or unreadable)"; }
