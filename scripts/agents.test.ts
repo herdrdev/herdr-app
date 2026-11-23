@@ -330,12 +330,14 @@ test("a title that opens with a bracket keeps it; each agent's own prefix still 
 test("a title's leading emoji stays, a status glyph before it goes", () => {
   const title = new Function("View", "localStorage", "props", "run", `${source}; return title;`)(class {}, {}, () => ({}), () => {});
   const row = (t: string) => title({ name: "3", named: false }, { program: { name: "claude", key: "claude" }, title: t });
-  for (const e of ["🔴", "🟦", "✅", "❌", "⭐", "🚀", "🧠", "⚪", "🇰🇷", "👍🏽", "👨\u200d💻"]) expect(row(`${e} login`)).toBe(`${e} login`);
+  for (const e of ["🔴", "🟦", "✅", "❌", "⭐", "🚀", "🧠", "⚪", "🇰🇷", "👍🏽", "👨\u200d💻", "❤️", "⚙️", "#️⃣", "✋🏽"]) expect(row(`${e} login`)).toBe(`${e} login`);
   expect(row("\u2733 🟢 login")).toBe("🟢 login");
   expect(row("[ ! ] 🔴 login")).toBe("🔴 login");
   expect(row("\u25cf [ ! ] 🔴 login")).toBe("🔴 login");
   expect(row("\u2733 login")).toBe("login");
   expect(row("\u280b - Thinking")).toBe("Thinking");
+  expect(row("✋  Action Required (proj)")).toBe("Action Required (proj)");
+  expect(row("⏳  ❤️ deploy")).toBe("❤️ deploy");
   // A folder is still a folder behind its emoji.
   expect(row("🔴 ~/proj")).toBe("3");
   // An emoji is a name a person chose: alone, or beside the program's name, it is the row's name.

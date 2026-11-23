@@ -117,10 +117,7 @@ fn installed_here(shell: &str, commands: &[String]) -> Result<Vec<String>, Strin
     let limit = std::time::Duration::from_secs(30);
     let mode = if cfg!(target_os = "macos") { "-lic" } else { "-ic" };
     let line = installed_line(commands, base(shell) == "fish");
-    let mut probe = crate::spawn::command(shell);
-    #[cfg(unix)]
-    crate::spawn::detach_terminal(&mut probe);
-    installed_result(commands, crate::mods::run_blocking_command(probe.arg(mode).arg(line), shell, None, limit)).or_else(|err| {
+    installed_result(commands, crate::mods::run_blocking(shell, &[mode.into(), line], None, limit)).or_else(|err| {
         // A shell that can't run the check (nushell): sh searches the app's PATH,
         // which is where agents for such shells start (`window::unix_agent_argv`).
         let sh = crate::mods::run_blocking("/bin/sh", &["-c".into(), installed_line(commands, false)], None, limit);
@@ -257,7 +254,7 @@ pub fn powershell_line(cmd: &[String]) -> String {
     format!("& {}", cmd.iter().map(|w| powershell_quote(w)).collect::<Vec<_>>().join(" "))
 }
 
-fn powershell_quote(word: &str) -> String {
+pub(crate) fn powershell_quote(word: &str) -> String {
     let mut s = String::from("'");
     for ch in word.chars() {
         if PS_QUOTES.contains(&ch) {
@@ -323,7 +320,7 @@ fn resolve(t: &Table, app: Option<&str>, argv: &[String]) -> Value {
         && t.shells.iter().any(|s| s == base(&argv[0]))
         && argv[1].starts_with('-')
         && argv[1].ends_with('c')
-        && (argv[2].contains("\"$@\"") || argv[2] == crate::remote_shell::FISH_EXEC || matches!(argv[2].as_str(), "command $argv[2..]; exec $argv[1] -i" | "command $argv[2..]; exec $argv[1] -li"))
+        && (argv[2].contains("\"$@\"") || matches!(argv[2].as_str(), "command $argv[2..]; exec $argv[1] -i" | "command $argv[2..]; exec $argv[1] -li"))
     {
         return resolve(t, None, &argv[4..]);
     }
@@ -429,8 +426,6 @@ mod tests {
         assert_eq!(key(None, &["agent"]), "cursor");
         assert_eq!(key(Some("agent"), &[]), "cursor");
         assert_eq!(key(Some("cursor-agent"), &[]), "cursor");
-        assert_eq!(key(Some("swival"), &["/bin/zsh"]), "swival");
-        assert_eq!(key(None, &["python3", "/home/me/.local/bin/swival", "fix it"]), "swival");
         assert_eq!(key(Some("newagent"), &[]), "agent");
         assert!(startable().iter().any(|a| a["key"] == "cursor" && a["run"] == json!(["agent"])));
         // A person's own key still beats a built-in `match` (python matches python3).
@@ -499,24 +494,6 @@ mod tests {
         std::fs::remove_dir_all(&dir).unwrap();
         assert_eq!(posix.unwrap(), ["sh", "issue240-rc-agent"]);
         assert_eq!(nu.unwrap(), ["sh"]);
-    }
-
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn agent_check_runs_in_its_own_session() {
-        use std::os::unix::fs::PermissionsExt;
-        let dir = crate::test_tmp().join(format!("herdr-agent-check-session-{}", std::process::id()));
-        std::fs::create_dir_all(&dir).unwrap();
-        let shell = dir.join("check-session");
-        std::fs::write(
-            &shell,
-            "#!/bin/sh\n[ \"$(ps -o sid= -p $$ | tr -d ' ')\" = \"$$\" ] || exit 1\nprobe_in_own_session() { :; }\neval \"$2\"\n",
-        ).unwrap();
-        std::fs::set_permissions(&shell, std::fs::Permissions::from_mode(0o755)).unwrap();
-        let commands = ["probe_in_own_session".to_owned()];
-        let found = installed_here(shell.to_str().unwrap(), &commands);
-        std::fs::remove_dir_all(dir).unwrap();
-        assert_eq!(found.unwrap(), commands);
     }
 
     #[test]

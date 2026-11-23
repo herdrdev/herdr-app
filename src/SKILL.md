@@ -171,8 +171,9 @@ herdr-app status
 herdr-app shot /tmp/mod.png   # then look at the picture
 ```
 
-`check` loads and renders the mod's view if it has one. It validates link rules
-and checks the `handleLink` export in `link.js` without running the module.
+`check` loads and renders the mod's view if it has one. It validates link rules.
+For mods with link rules and standalone link mods, it checks the `handleLink`
+export in `link.js` without running the module.
 It exits nonzero with the exact error. Its shared state starts empty and stays
 in memory, leaving shared.json untouched. Its `init()` still runs: import
 `checking` from `"herdr"` and guard
