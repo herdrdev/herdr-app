@@ -1139,10 +1139,12 @@ and other interactive controls too.
 `.on_mouse_move` and `.on_mouse_up` fire only over the element. For a drag that
 should keep following the pointer once it leaves (dragging a tab off the bar),
 use `.on_window_mouse_move((e, cx) => …)` and `.on_window_mouse_up("left", (e, cx) => …)`
-on a plain layout element: they hear every move and release in the window,
-including over terminals, with positions against the element's box. A move's
-`pressed_button` is missing once the button is up, so a drag released outside
-the window can cancel.
+on a plain layout element. They observe moves and matching releases in the
+window, including over terminals, without affecting normal event handling.
+Positions are in window pixels, with `local_position` relative to the
+element's box. Track a left drag while `pressed_button === "left"`. If it
+ends outside the window without a release event, cancel on the next move
+that reports no left button.
 `.when(cond, (el) => …)`, `.children([...])`. Controls from `gpui-base`
 (`Button`, `Checkbox`, `Switch`, `InputState` + `Input`) are unstyled: style
 them. Text: `TextView.markdown(id, text)` renders markdown; with

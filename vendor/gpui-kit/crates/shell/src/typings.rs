@@ -1153,7 +1153,7 @@ const CONTEXT_AND_VIEW: &str = r#"  /**
     local_position: Point;
     bounds: import("gpui-shell").ElementBounds;
     modifiers: Modifiers;
-    /** The button held during the move; absent when none is, so a drag that stops seeing it was released elsewhere. */
+    /** Left, right, or middle when the move reports one of those buttons as held. */
     pressed_button?: MouseButton;
   }
 
@@ -1410,7 +1410,8 @@ const ELEMENT_METHODS: &str = r#"    /**
     /**
      * Every pointer move in the window, wherever the pointer is, with positions
      * against this element's box. For a drag that should keep following the
-     * pointer after it leaves the element it started on. Use on a plain layout element.
+     * pointer after it leaves the element it started on. Passive observer.
+     * Use on div, h_flex, or v_flex.
      */
     on_window_mouse_move<Self extends Element>(this: Self, handler: (event: MouseMoveEvent, cx: Context) => void): Self;
     /** div/h_flex/v_flex: initial size and changed layout size, in logical pixels.
@@ -1464,8 +1465,8 @@ const ELEMENT_METHODS: &str = r#"    /**
       handler: (event: MouseButtonEvent, cx: Context) => void,
     ): Self;
     /**
-     * A release of `button` anywhere in the window, delivered during the capture
-     * phase: where a drag that left this element is let go. Use on a plain layout element.
+     * Passively observes releases of `button` anywhere in the window, including
+     * releases handled by terminals. Use on div, h_flex, or v_flex.
      */
     on_window_mouse_up<Self extends Element>(this: Self,
       button: MouseButton,

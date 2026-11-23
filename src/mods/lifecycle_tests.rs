@@ -503,24 +503,61 @@ export default class extends View {
 
 #[gpui::test]
 fn window_mouse_events_follow_a_drag_off_the_element(cx: &mut TestAppContext) {
-    use gpui::{Modifiers, MouseButton, point, px};
+    use gpui::{DispatchPhase, Modifiers, MouseButton, MouseMoveEvent, MouseUpEvent, ParentElement as _, Styled as _, point, px};
+
+    struct MountedWithCapture(gpui::Entity<ShellRoot>);
+
+    impl Render for MountedWithCapture {
+        fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+            gpui::div().size_full()
+                // Like terminal selection, these listeners can stop events in capture.
+                // Register before the mod so an ordinary capture listener there would miss them.
+                .child(gpui::canvas(|_, _, _| {}, |_, _, window, _| {
+                    window.on_mouse_event(|e: &MouseMoveEvent, phase, _, cx| {
+                        if phase == DispatchPhase::Capture && e.position.y >= px(30.) {
+                            cx.stop_propagation();
+                        }
+                    });
+                    window.on_mouse_event(|e: &MouseUpEvent, phase, _, cx| {
+                        if phase == DispatchPhase::Capture && e.position.y >= px(30.) {
+                            cx.stop_propagation();
+                        }
+                    });
+                }).absolute())
+                .child(self.0.clone())
+        }
+    }
+
     cx.update(gpui_shell::init);
-    // A 100x30 bar 40px in from the left, above a pane that stops every move
-    // and release it gets, the way a terminal would.
     let fixture = Fixture::new(r#"
 import { View, div } from "gpui-kit";
 import { v_flex } from "gpui-base";
 import { note } from "fixture";
 export default class extends View {
   render() {
-    const bar = div().id("bar").w(100).h(30).on_mouse_up("left", () => note("bar-up"));
+    const bar = div().id("bar").w(100).h(30).border(3).p(5).flex_none()
+      .on_mouse_down("left", () => { this.dragging = true; })
+      .on_mouse_up("left", () => { this.dragging = false; note("bar-up"); });
     return v_flex().size_full().pl(40)
       .child(this.done ? bar : bar
-        .on_window_mouse_move((e) => note(`move ${e.local_position.x},${e.local_position.y} ${e.pressed_button ?? "none"}`))
-        .on_window_mouse_up("left", (e, cx) => { note(`up ${e.button}`); this.done = true; cx.notify(); }))
-      .child(div().id("pane").size_full()
-        .on_mouse_move((_e, cx) => cx.stop_propagation())
-        .on_mouse_up("left", (_e, cx) => cx.stop_propagation()));
+        .on_window_mouse_move((e) => {
+          note(`move ${e.local_position.x},${e.local_position.y} ${e.pressed_button ?? "none"}`);
+          if (this.dragging && e.pressed_button !== "left") {
+            this.dragging = false;
+            note("cancelled");
+          }
+        })
+        .on_window_mouse_up("left", (e, cx) => {
+          note(`up ${e.button} ${e.local_position.x},${e.local_position.y} ${e.bounds.width}x${e.bounds.height}`);
+          if (e.local_position.y < 30) {
+            cx.stop_propagation();
+          } else {
+            this.done = true;
+            cx.propagate();
+            cx.notify();
+          }
+        }))
+      .child(div().id("pane").flex_1().on_mouse_up("left", () => note("pane-up")));
   }
 }"#);
     let log = Rc::new(RefCell::new(Vec::<String>::new()));
@@ -532,7 +569,7 @@ export default class extends View {
         })
     ).unwrap());
     let runtime = ShellRuntime::new_isolated().unwrap();
-    let window = cx.add_window(|window, cx| Mounted(runtime.try_load(&fixture.0, window, cx).unwrap()));
+    let window = cx.add_window(|window, cx| MountedWithCapture(runtime.try_load(&fixture.0, window, cx).unwrap()));
     let mut visual = VisualTestContext::from_window(*window.deref(), cx);
     visual.simulate_resize(gpui::size(px(400.), px(400.)));
     let draw = |visual: &mut VisualTestContext| {
@@ -542,18 +579,28 @@ export default class extends View {
     draw(&mut visual);
 
     let none = Modifiers::default();
+    let over_bar = point(px(60.), px(20.));
     let over_pane = point(px(90.), px(300.));
-    visual.simulate_mouse_move(point(px(60.), px(20.)), None, none);
+
+    visual.simulate_mouse_down(over_bar, MouseButton::Left, none);
+    visual.simulate_mouse_up(over_bar, MouseButton::Left, none);
+    visual.simulate_mouse_down(over_bar, MouseButton::Left, none);
     visual.simulate_mouse_move(over_pane, MouseButton::Left, none);
+    // A release outside the window can leave the next move as the only signal.
+    visual.simulate_mouse_move(over_pane, None, none);
+    visual.simulate_mouse_down(over_bar, MouseButton::Left, none);
     visual.simulate_mouse_up(over_pane, MouseButton::Right, none);
     visual.simulate_mouse_up(over_pane, MouseButton::Left, none);
     draw(&mut visual);
-    // The listeners went with the handlers: nothing more is heard.
-    visual.simulate_mouse_move(point(px(60.), px(20.)), MouseButton::Left, none);
-    visual.simulate_mouse_up(point(px(300.), px(300.)), MouseButton::Left, none);
+    visual.simulate_mouse_move(over_bar, None, none);
+    visual.simulate_mouse_up(over_pane, MouseButton::Left, none);
     draw(&mut visual);
 
-    assert_eq!(*log.borrow(), ["move 20,20 none", "move 50,300 left", "up left"]);
+    assert_eq!(*log.borrow(), [
+        "up left 20,20 100x30", "bar-up",
+        "move 50,300 left", "move 50,300 none", "cancelled",
+        "up left 50,300 100x30",
+    ]);
 }
 
 #[gpui::test]
