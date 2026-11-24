@@ -39,6 +39,8 @@ herdr-app do space.new --name eng-123 --folder ~/code/app/eng-123 --argv '["clau
 Pick an explicit, useful name for every new space and tab; don't rely on
 default names. Use IDs from `ls` rather than guessing or acting on the wrong
 focused pane.
+Tabs opened from the + agent menu are unnamed. `ls` lists their position
+even when the tab bar shows the program or its session title.
 
 ```sh
 herdr-app do space.new --name api --folder /path/to/api
