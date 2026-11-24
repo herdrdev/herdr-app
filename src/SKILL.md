@@ -81,6 +81,12 @@ Use `commands` to confirm the command's exact shape:
 herdr-app do pane.split '{"direction":"right","pane":"p12"}'
 ```
 
+An existing core terminal without a pane can be placed beside an explicit
+anchor using `terminal.keep {terminal, place, pane, focus:false}`. The reply
+may be pending: wait for `herdr-app ls` to show the returned pane before sizing
+it. `pane.size_managed {main, agents, direction, main_percent}` accepts only
+the exact main-plus-agent-stack shape and leaves focus and other tabs alone.
+
 `pane.swap {pane?, direction | target}` trades the places of `pane` (default:
 the focused one) and its neighbor in a direction, or `target`, another pane of
 the same tab. Give `direction` or `target`, not both. Focus stays with the same pane:

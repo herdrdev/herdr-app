@@ -287,7 +287,7 @@ struct Term {
 }
 
 enum TerminalChange {
-    Keep { space: String, tab: String, pane: String, name: String, target: Option<String>, axis: Axis },
+    Keep { space: String, tab: String, pane: String, name: String, target: Option<String>, explicit_target: bool, focus: bool, axis: Axis },
     Park,
 }
 
@@ -460,6 +460,8 @@ pub struct AppWindow {
     documents_watching: bool,
     draining: bool,
     changing_terminals: HashSet<String>,
+    /// Explicit keep failures stay out of label-based adoption until labels clear or the terminal ends.
+    blocked_adoptions: HashSet<String>,
     /// Closed terminals stay excluded until kill completes and a listing drops them.
     closing_terminals: HashMap<String, bool>,
     pending_terminals: std::collections::BTreeMap<String, PendingTerminalChange>,
@@ -575,6 +577,7 @@ impl AppWindow {
             documents_watching: false,
             draining: false,
             changing_terminals: HashSet::new(),
+            blocked_adoptions: HashSet::new(),
             closing_terminals: HashMap::new(),
             pending_terminals: Default::default(),
             documents: {
@@ -2296,6 +2299,7 @@ impl AppWindow {
             }
         }
         self.live = live;
+        self.blocked_adoptions.retain(|address| !should_clear_blocked_adoption(self.live.get(address)));
         self.closing_terminals.retain(|addr, completed| !*completed || self.live.contains_key(addr));
         // A new sub-agent changes only this list; mods that show teams need to redraw.
         let terminals_changed = mods::publish_terminals(list);
@@ -2408,7 +2412,7 @@ impl AppWindow {
             self.check_closed(missing, window, cx);
         }
         let mut orphans = self.live.iter()
-            .filter(|(a, _)| self.model.pane_of(a).is_none() && !self.changing_terminals.contains(*a) && !self.closing_terminals.contains_key(*a))
+            .filter(|(a, _)| self.model.pane_of(a).is_none() && !self.changing_terminals.contains(*a) && !self.closing_terminals.contains_key(*a) && !self.blocked_adoptions.contains(*a))
             .filter_map(|(a, r)| {
                 let machine = a.split_once('/').map(|(m, _)| m);
                 if !self.documents.get(machine.unwrap_or("")).is_some_and(|s| s.available) { return None; }
@@ -2837,23 +2841,30 @@ impl AppWindow {
         born.get(addr).is_some_and(|t| t.elapsed() < Duration::from_secs(5))
     }
 
-    /// Gives a running terminal without a pane (a sub-agent, say) one in the
-    /// shown space and focuses it; already in a pane: focuses that.
-    fn keep_terminal(&mut self, addr: &str, place: &str, window: &mut Window, cx: &mut Context<Self>) -> Result<Value, String> {
+    /// Gives a running terminal without a pane one, then applies the requested focus behavior.
+    fn keep_terminal(&mut self, addr: &str, place: &str, anchor: Option<&str>, focus: bool, window: &mut Window, cx: &mut Context<Self>) -> Result<Value, String> {
         if let Some(p) = self.model.pane_of(addr) {
-            self.model.focus_pane(&p);
+            if anchor.is_some() { return Err("terminal.keep pane cannot target a terminal that already has a pane".into()); }
+            if focus { self.model.focus_pane(&p); }
             return Ok(json!({ "pane": p }));
         }
         if !self.live.contains_key(addr) { return Err(format!("no running terminal {addr:?}")); }
         if self.changing_terminals.contains(addr) { return Err("This terminal already has a pane change in progress.".into()); }
-        let space = self.model.active_space().map(|p| p.id.clone()).ok_or("no space to keep it in")?;
+        let explicit_target = anchor.is_some();
+        let resolved = terminal_keep_target(&self.model, place, anchor)?;
+        let space = resolved.as_ref().map(|r| r.0.clone())
+            .or_else(|| self.model.active_space().map(|p| p.id.clone())).ok_or("no space to keep it in")?;
         let machine = self.machine_of(&space);
+        if explicit_target {
+            let record = self.live.get(addr).expect("live terminal was checked above");
+            explicit_keep_allowed(record, addr, machine.as_deref())?;
+        }
         if addr.split_once('/').map(|(m, _)| m) != machine.as_deref() {
             return Err("A terminal's pane must stay on its own machine.".into());
         }
         self.require_document(machine.as_deref())?;
-        let target = matches!(place, "right" | "down").then(|| self.model.focused_pane()).flatten();
-        let ctx = target.as_deref().and_then(|p| self.model.tab_of(p)).map(|t| t.id.clone())
+        let target = resolved.as_ref().map(|r| r.2.clone());
+        let ctx = resolved.as_ref().map(|r| r.1.clone()).or_else(|| target.as_deref().and_then(|p| self.model.tab_of(p)).map(|t| t.id.clone()))
             .unwrap_or_else(|| self.model.fresh_id_on("tb", machine.as_deref()));
         let pane = self.model.fresh_id_on("p", machine.as_deref());
         let name = self.live.get(addr).and_then(|r| r["name"].as_str()).filter(|s| !s.is_empty()).map(str::to_owned)
@@ -2861,7 +2872,7 @@ impl AppWindow {
         let (address, place) = (addr.to_owned(), place.to_owned());
         let reply = json!({"pending":true,"terminal":addr,"pane":pane,"tab":ctx});
         self.start_terminal_change(address, TerminalChange::Keep {
-            space, tab: ctx, pane, name, target, axis: if place == "right" { Axis::Row } else { Axis::Column },
+            space, tab: ctx, pane, name, target, explicit_target, focus, axis: if place == "right" { Axis::Row } else { Axis::Column },
         }, window, cx);
         Ok(reply)
     }
@@ -2911,12 +2922,39 @@ impl AppWindow {
         self.changing_terminals.remove(&address);
         if let Err(error) = result {
             tracing::error!("terminal change for {address} failed: {error}");
+            if matches!(&change, TerminalChange::Keep { explicit_target: true, .. }) {
+                self.blocked_adoptions.insert(address.clone());
+                if !self.draining {
+                    self.layout_notice("Terminal placement failed", "Herdr could not complete the requested pane placement. It will not place the terminal in another pane.", window, cx);
+                }
+                if self.live.contains_key(&address)
+                    && let Err(park_error) = self.park_terminal(&address, window, cx)
+                {
+                    tracing::error!("cannot clear labels after failed explicit pane placement: {park_error}");
+                }
+                return;
+            }
             if !self.draining { self.layout_notice("Could not change terminal pane", &error, window, cx); }
             return;
         }
         match change {
-            TerminalChange::Keep { space, tab, pane, name, target, axis } => {
+            TerminalChange::Keep { space, tab, pane, name, target, explicit_target, focus, axis } => {
                 if !self.live.contains_key(&address) { return; }
+                let stale_explicit_target = explicit_target && target.as_deref().is_none_or(|target| {
+                    self.model.tab_of(target).is_none_or(|found| found.id != tab || !found.root.find(target).is_some_and(crate::layout::Node::is_pane))
+                        || self.model.space_of(target).is_none_or(|found| found.id != space || found.machine != address.split_once('/').map(|(machine, _)| machine.to_owned()))
+                });
+                if stale_explicit_target {
+                    self.blocked_adoptions.insert(address.clone());
+                    tracing::warn!("explicit pane target for {address} changed before placement completed");
+                    if !self.draining {
+                        self.layout_notice("Terminal placement cancelled", "The requested pane changed before placement finished. Herdr will not place the terminal in another pane.", window, cx);
+                    }
+                    if let Err(error) = self.park_terminal(&address, window, cx) {
+                        tracing::error!("cannot cancel stale pane placement: {error}");
+                    }
+                    return;
+                }
                 if self.model.space(&space).is_none() {
                     if let Err(error) = self.park_terminal(&address, window, cx) {
                         tracing::error!("cannot undo pane placement into closed space: {error}");
@@ -2927,12 +2965,27 @@ impl AppWindow {
                     let destination = target.filter(|p| self.model.tab_of(p).is_some_and(|t| t.id == tab))
                         .or_else(|| self.model.tab(&tab).and_then(|t| t.root.panes().first().map(|p| p.id.clone())));
                     if let Some(target) = destination {
-                        self.model.split(&target, axis, &pane, &address);
+                        if focus { self.model.split(&target, axis, &pane, &address); }
+                        else { self.model.split_without_focus(&target, axis, &pane, &address); }
                     } else {
-                        self.model.add_tab(&space, Tab::new(&tab, &name, &pane, &address));
+                        let new_tab = Tab::new(&tab, &name, &pane, &address);
+                        if focus { self.model.add_tab(&space, new_tab); }
+                        else { self.model.add_tab_unselected(&space, new_tab); }
                     }
                 }
-                if let Some(pane) = self.model.pane_of(&address) { self.model.focus_pane(&pane); }
+                if focus && let Some(pane) = self.model.pane_of(&address) { self.model.focus_pane(&pane); }
+                if explicit_target && self.model.pane_of(&address).is_none() {
+                    self.blocked_adoptions.insert(address.clone());
+                    tracing::warn!("explicit pane placement for {address} was acknowledged but not mounted");
+                    if !self.draining {
+                        self.layout_notice("Terminal placement cancelled", "Herdr could not mount the terminal in the requested pane. It will not choose another pane.", window, cx);
+                    }
+                    if let Err(error) = self.park_terminal(&address, window, cx) {
+                        tracing::error!("cannot clear labels after rejected explicit pane placement: {error}");
+                    }
+                    return;
+                }
+                if explicit_target { self.blocked_adoptions.remove(&address); }
             }
             TerminalChange::Park => {
                 if let Some(pane) = self.model.pane_of(&address) { self.model.remove_pane(&pane); }
@@ -3376,6 +3429,32 @@ impl AppWindow {
                 }
                 self.save();
             }
+            "pane.size_managed" => {
+                let Some(main) = Self::arg(a, "main") else { return self.fail("pane.size_managed needs a main pane id") };
+                let Some(agents) = a.get("agents").and_then(Value::as_array)
+                    .and_then(|ids| ids.iter().map(|id| id.as_str().map(str::to_owned)).collect::<Option<Vec<_>>>())
+                    else { return self.fail("pane.size_managed agents must be an array of pane ids") };
+                let axis = match Self::arg(a, "direction") {
+                    Some("right") => Axis::Row,
+                    Some("down") => Axis::Column,
+                    _ => return self.fail("pane.size_managed direction must be right or down"),
+                };
+                let Some(percent) = a.get("main_percent").and_then(Value::as_u64).filter(|p| (1..100).contains(p))
+                    else { return self.fail("pane.size_managed main_percent must be an integer from 1 to 99") };
+                let Some(space) = self.model.space_of(main) else { return self.fail(format!("no pane {main:?}")) };
+                if let Err(e) = self.require_document(space.machine.as_deref()) { return self.fail(e); }
+                let Some(tab_id) = self.model.tab_of(main).map(|t| t.id.clone())
+                    else { return self.fail(format!("no tab for pane {main:?}")) };
+                let Some(tab) = self.model.tab_mut(&tab_id) else { return self.fail(format!("no tab {tab_id:?}")) };
+                if tab.zoomed.is_some() {
+                    self.answer(Ok(json!({"changed":false,"skipped":"zoomed"})));
+                    return;
+                }
+                match tab.root.size_managed_split(main, &agents, axis, percent as u8) {
+                    Ok(changed) => self.answer(Ok(json!({"changed":changed}))),
+                    Err(e) => return self.fail(e),
+                }
+            }
             "pane.swap" => {
                 let by = match swap_by(a) {
                     Ok(by) => by,
@@ -3409,7 +3488,17 @@ impl AppWindow {
                 self.answer(r);
             }
             "terminal.keep" => {
-                let r = self.keep_terminal(Self::arg(a, "terminal").unwrap_or_default(), Self::arg(a, "place").unwrap_or("tab"), window, cx);
+                let focus = match a.get("focus") {
+                    None => true,
+                    Some(Value::Bool(value)) => *value,
+                    _ => return self.fail("terminal.keep focus is true or false"),
+                };
+                let pane = match a.get("pane") {
+                    None | Some(Value::Null) => None,
+                    Some(Value::String(value)) => Some(value.as_str()),
+                    _ => return self.fail("terminal.keep pane must be a pane id"),
+                };
+                let r = self.keep_terminal(Self::arg(a, "terminal").unwrap_or_default(), Self::arg(a, "place").unwrap_or("tab"), pane, focus, window, cx);
                 self.answer(r);
             }
             "terminal.park" => {
@@ -5360,6 +5449,50 @@ fn needs_model_pane(name: &str, args: &Value) -> bool {
         "terminal.open" | "terminal.keep" => matches!(AppWindow::arg(args, "place"), Some("right" | "down")),
         _ => false,
     }
+}
+
+fn terminal_keep_target(model: &Model, place: &str, anchor: Option<&str>) -> Result<Option<(String, String, String)>, String> {
+    if let Some(pane) = anchor {
+        if !matches!(place, "right" | "down") {
+            return Err("terminal.keep pane requires place \"right\" or \"down\"".into());
+        }
+        let tab = model.tab_of(pane).filter(|tab| tab.root.find(pane).is_some_and(crate::layout::Node::is_pane))
+            .ok_or_else(|| format!("no target pane {pane:?}"))?;
+        let space = model.space_of(pane).ok_or_else(|| format!("no space for target pane {pane:?}"))?;
+        return Ok(Some((space.id.clone(), tab.id.clone(), pane.to_owned())));
+    }
+    if matches!(place, "right" | "down") {
+        if let Some(pane) = model.focused_pane()
+            && let (Some(tab), Some(space)) = (model.tab_of(&pane), model.space_of(&pane))
+        {
+            return Ok(Some((space.id.clone(), tab.id.clone(), pane)));
+        }
+    }
+    Ok(None)
+}
+
+fn has_terminal_placement_labels(record: &Value) -> bool {
+    ["herdr.space", "herdr.tab"].into_iter().any(|label| {
+        record.pointer(&format!("/labels/{label}")).and_then(Value::as_str).is_some_and(|value| !value.is_empty())
+    })
+}
+
+fn explicit_keep_allowed(record: &Value, address: &str, machine: Option<&str>) -> Result<(), String> {
+    if address.contains('/') || machine.is_some() {
+        return Err("terminal.keep with pane is limited to terminals in the local machine".into());
+    }
+    if has_terminal_placement_labels(record) {
+        return Err("terminal.keep with pane requires a terminal without herdr.space or herdr.tab labels".into());
+    }
+    Ok(())
+}
+
+fn should_clear_blocked_adoption(record: Option<&Value>) -> bool {
+    record.is_none_or(|record| {
+        ["herdr.space", "herdr.tab"].into_iter().all(|label| {
+            record.pointer(&format!("/labels/{label}")).and_then(Value::as_str) == Some("")
+        })
+    })
 }
 
 /// A failed implicit folder gets one retry in the machine's home, without local probes.
@@ -8104,6 +8237,43 @@ export default class Probe extends View { render() { return div().child("probe")
         for name in ["pane.focus", "terminal.copy", "terminal.paste", "terminal.paste_image", "terminal.right_click"] {
             assert!(!super::needs_model_pane(name, &json!({})), "{name}");
         }
+    }
+
+    #[test]
+    fn terminal_keep_uses_the_explicit_pane_and_rejects_bad_targets() {
+        let model = super::model::Model::default();
+        let mut model = model;
+        model.add_space("s1", "", "/", super::model::Tab::new("t1", "", "p1", "local/a"));
+        model.add_tab("s1", super::model::Tab::new("t2", "", "p2", "local/b"));
+        model.focus_pane("p1");
+
+        assert_eq!(super::terminal_keep_target(&model, "right", Some("p2")), Ok(Some(("s1".into(), "t2".into(), "p2".into()))));
+        assert_eq!(super::terminal_keep_target(&model, "right", None), Ok(Some(("s1".into(), "t1".into(), "p1".into()))));
+        assert_eq!(super::terminal_keep_target(&model, "tab", Some("p2")), Err("terminal.keep pane requires place \"right\" or \"down\"".into()));
+        assert_eq!(super::terminal_keep_target(&model, "down", Some("missing")), Err("no target pane \"missing\"".into()));
+        let container = model.tab("t2").unwrap().root.id.clone();
+        assert_eq!(super::terminal_keep_target(&model, "down", Some(&container)), Err(format!("no target pane {container:?}")));
+    }
+
+    #[test]
+    fn explicit_terminal_keep_is_local_and_requires_unplaced_labels() {
+        use serde_json::json;
+        assert_eq!(super::explicit_keep_allowed(&json!({}), "term-1", None), Ok(()));
+        assert_eq!(super::explicit_keep_allowed(&json!({}), "remote/term-1", None), Err("terminal.keep with pane is limited to terminals in the local machine".into()));
+        assert_eq!(super::explicit_keep_allowed(&json!({}), "term-1", Some("remote")), Err("terminal.keep with pane is limited to terminals in the local machine".into()));
+        assert_eq!(super::explicit_keep_allowed(&json!({"labels":{"herdr.space":"s1"}}), "term-1", None), Err("terminal.keep with pane requires a terminal without herdr.space or herdr.tab labels".into()));
+        assert_eq!(super::explicit_keep_allowed(&json!({"labels":{"herdr.tab":"t1"}}), "term-1", None), Err("terminal.keep with pane requires a terminal without herdr.space or herdr.tab labels".into()));
+    }
+
+    #[test]
+    fn blocked_adoption_clears_only_after_labels_are_empty_or_terminal_is_gone() {
+        use serde_json::json;
+        assert!(!super::should_clear_blocked_adoption(Some(&json!({"labels":{"herdr.space":"s1"}}))));
+        assert!(!super::should_clear_blocked_adoption(Some(&json!({"labels":{"herdr.tab":"t1"}}))));
+        assert!(!super::should_clear_blocked_adoption(Some(&json!({}))));
+        assert!(!super::should_clear_blocked_adoption(Some(&json!({"labels":{"herdr.space":"","herdr.tab":null}}))));
+        assert!(super::should_clear_blocked_adoption(Some(&json!({"labels":{"herdr.space":"","herdr.tab":""}}))));
+        assert!(super::should_clear_blocked_adoption(None));
     }
 
     #[test]

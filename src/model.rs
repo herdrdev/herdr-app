@@ -333,6 +333,22 @@ impl Model {
         self.split_with(target, axis, pane(new_pane, address))
     }
 
+    /// Splits a pane while preserving the selected space, tab, focus history, and zoom.
+    pub fn split_without_focus(&mut self, target: &str, axis: Axis, new_pane: &str, address: &str) -> bool {
+        let Some(tab_id) = self.tab_of(target).map(|tab| tab.id.clone()) else { return false };
+        let (focused, before, zoomed) = {
+            let tab = self.tab(&tab_id).unwrap();
+            (tab.focused.clone(), tab.before.clone(), tab.zoomed.clone())
+        };
+        if !self.split(target, axis, new_pane, address) { return false; }
+        if let Some(tab) = self.tab_mut(&tab_id) {
+            tab.focused = focused;
+            tab.before = before;
+            tab.zoomed = zoomed;
+        }
+        true
+    }
+
     /// Splits a pane with any block: a terminal, or a mod (a viewer beside the shell).
     pub fn split_with(&mut self, target: &str, axis: Axis, block: Node) -> bool {
         let machine = self.space_of(target).and_then(|s| s.machine.clone());
@@ -1018,6 +1034,30 @@ mod tests {
         assert_eq!(m.focused_pane().as_deref(), Some("x1"));
         // The arrangement keeps the tab's id with one pane left.
         assert_eq!(m.active_tab().unwrap().root.id, "c1");
+    }
+
+    #[test]
+    fn split_without_focus_preserves_tab_selection_focus_history_and_zoom() {
+        let mut m = model_with_one();
+        m.split("x1", Axis::Row, "x2", "t2");
+        m.focus_pane("x1");
+        m.toggle_zoom("x1");
+        let selected_space = m.active.clone();
+        let selected_tab = m.space("p1").unwrap().active.clone();
+        let tab = m.tab("c1").unwrap();
+        let focused = tab.focused.clone();
+        let before = tab.before.clone();
+        let zoomed = tab.zoomed.clone();
+
+        assert!(m.split_without_focus("x1", Axis::Column, "x3", "t3"));
+
+        assert_eq!(m.active, selected_space);
+        assert_eq!(m.space("p1").unwrap().active, selected_tab);
+        let tab = m.tab("c1").unwrap();
+        assert_eq!(tab.focused, focused);
+        assert_eq!(tab.before, before);
+        assert_eq!(tab.zoomed, zoomed);
+        assert!(tab.root.find("x3").is_some());
     }
 
     #[test]

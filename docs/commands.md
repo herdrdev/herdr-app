@@ -134,12 +134,14 @@ Start a terminal: as a new tab (place "tab", default), or "right"/"down" of the 
 
 ## `terminal.keep`
 
-Give a running terminal without a pane (a sub-agent) a pane: a new tab, or "right"/"down".
+Give a running terminal without a pane (a sub-agent) a pane: a new tab, or "right"/"down" of `pane`. An explicit pane target requires a local, unplaced terminal with no `herdr.space` or `herdr.tab` label; it cannot target a terminal that already has a pane. Without `pane`, right/down uses the focused pane. `focus: false` keeps the selected space and tab, pane focus, and zoom unchanged. A pane target requires `place` to be "right" or "down".
 
 | Argument | Required |
 |---|---|
 | `terminal` | yes |
 | `place` | no |
+| `pane` | no |
+| `focus` | no |
 
 ## `terminal.park`
 
@@ -276,6 +278,17 @@ Move the border of a pane (default: the focused one) "left", "right", "up" or "d
 | `direction` | yes |
 | `pane` | no |
 | `px` | no |
+
+## `pane.size_managed`
+
+Set a main pane's percentage and evenly size the listed agent panes. The tab must match exactly: main first, agents stacked beside it (right or down), and no other panes. A zoomed tab is not changed.
+
+| Argument | Required |
+|---|---|
+| `main` | yes |
+| `agents` | yes |
+| `direction` | yes |
+| `main_percent` | yes |
 
 ## `pane.swap`
 

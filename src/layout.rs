@@ -606,6 +606,54 @@ impl Node {
         remove_inner(self, id)
     }
 
+    /// Size a tab with the main terminal first and an orthogonal stack of
+    /// managed terminals second. Validate the entire shape before changing it.
+    pub(crate) fn size_managed_split(&mut self, main: &str, agents: &[String], axis: Axis, main_percent: u8) -> Result<bool, &'static str> {
+        let usable = |node: &Node| !node.hidden && !matches!(node.size, Some(Size::Px { .. }));
+        let matches_terminal = |node: &Node, id: &str| {
+            usable(node) && node.id == id && matches!(node.content(), Some(Content::Terminal { .. }))
+        };
+        if agents.is_empty() || !(1..100).contains(&main_percent) {
+            return Err("expected agent panes and a main percentage between 1 and 99");
+        }
+        if self.axis() != Some(axis) || self.hidden || !self.resizable() {
+            return Err("tab does not have the expected managed split");
+        }
+        let Some([primary, area]) = self.children_mut().map(Vec::as_mut_slice) else {
+            return Err("tab does not have the expected managed split");
+        };
+        if !matches_terminal(primary, main) || !usable(area) {
+            return Err("tab does not have the expected managed split");
+        }
+        let mut changed = false;
+        let mut set_weight = |node: &mut Node, weight| {
+            let size = Some(Size::Weight { weight });
+            changed |= node.size != size;
+            node.size = size;
+        };
+        if agents.len() == 1 {
+            if !matches_terminal(area, &agents[0]) || main == agents[0] {
+                return Err("tab does not contain exactly the expected agent panes");
+            }
+        } else {
+            if !area.axis().is_some_and(|stack| stack != axis) || !area.resizable() {
+                return Err("agent panes are not stacked on the expected axis");
+            }
+            let stack = area.children_mut().unwrap();
+            if stack.len() != agents.len() || !agents.iter().all(|id| id != main && stack.iter().any(|node| matches_terminal(node, id)))
+                || !stack.iter().all(|node| agents.contains(&node.id))
+            {
+                return Err("tab does not contain exactly the expected agent panes");
+            }
+            let weight = 1.0 / stack.len() as f32;
+            for node in stack { set_weight(node, weight); }
+        }
+        let share = f32::from(main_percent) / 100.0;
+        set_weight(primary, share);
+        set_weight(area, 1.0 - share);
+        Ok(changed)
+    }
+
     /// Puts `new` beside `target` along `axis` (after it). Reuses the parent
     /// if it already runs along that axis, else wraps the target.
     pub fn split(&mut self, target: &str, axis: Axis, new: Node, container_id: String) -> bool {
@@ -788,6 +836,37 @@ mod tests {
 
     fn term(id: &str) -> Node {
         Node::block(id, Content::Terminal { terminal: format!("t-{id}") })
+    }
+
+    #[test]
+    fn managed_split_sets_main_share_and_equal_stack_weights() {
+        for (outer, inner) in [(Axis::Row, Axis::Column), (Axis::Column, Axis::Row)] {
+            let mut root = Node::container("root", outer, vec![term("main"), term("a")]);
+            assert!(root.split("a", inner, term("b"), "agents".into()));
+            assert!(root.split("b", inner, term("c"), "unused".into()));
+            let agents = ["a".into(), "b".into(), "c".into()];
+            assert_eq!(root.size_managed_split("main", &agents, outer, 60), Ok(true));
+            assert_eq!(root.find("main").unwrap().size, Some(Size::Weight { weight: 0.6 }));
+            assert_eq!(root.find("agents").unwrap().size, Some(Size::Weight { weight: 1.0 - 0.6 }));
+            for id in &agents {
+                assert_eq!(root.find(id).unwrap().size, Some(Size::Weight { weight: 1.0 / 3.0 }));
+            }
+            assert_eq!(root.size_managed_split("main", &agents, outer, 60), Ok(false));
+            root.remove("b").unwrap();
+            root.remove("c").unwrap();
+            assert_eq!(root.size_managed_split("main", &agents[..1], outer, 55), Ok(true));
+            assert_eq!(root.find("main").unwrap().size, Some(Size::Weight { weight: 0.55 }));
+        }
+    }
+
+    #[test]
+    fn managed_split_rejects_an_unrelated_or_missing_pane_without_resizing() {
+        let stack = Node::container("stack", Axis::Column, vec![term("a"), term("other")]);
+        let mut root = Node::container("root", Axis::Row, vec![term("main"), stack]);
+        let before = root.clone();
+        assert!(root.size_managed_split("main", &["a".into(), "b".into()], Axis::Row, 60).is_err());
+        assert!(root.size_managed_split("main", &["a".into(), "a".into()], Axis::Row, 60).is_err());
+        assert_eq!(root, before);
     }
 
     #[test]

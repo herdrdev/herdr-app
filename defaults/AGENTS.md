@@ -624,6 +624,10 @@ The main ones:
   again; `panes()[i].name`, kept with its tab), `pane.resize {direction, pane?, px?}` (moves
   the nearest border along that axis by px, default 40, as a drag would; a keyboard
   resize mode is a mod that runs it on h/j/k/l).
+  `pane.size_managed {main, agents, direction: "right" | "down", main_percent}`
+  sizes the main pane and an equal stack of agent panes without changing focus.
+  Give every agent pane id; the tab must contain exactly that split. Zoomed tabs
+  are skipped.
   `pane.zoom` also makes the pane its tab's focused one (the tab isn't
   selected); on the zoomed pane it unzooms and focus stays.
   `pane.go` prefers the most recently focused pane along the nearest edge in that
@@ -646,7 +650,10 @@ The main ones:
   starting directory for tabs and right/down splits, with or without `argv`),
   `terminal.kill {terminal}` (ends the sub-agent tree, stopping at children with a
   pane or `herdr.space` label; core still applies parent-lifetime rules),
-  `terminal.keep {terminal, place?}`, `terminal.park {terminal}`,
+  `terminal.keep {terminal, place?, pane?, focus?}` (right/down can name a pane
+  for a local, unplaced terminal with no herdr.space or herdr.tab label;
+  focus false preserves the selected space, tab, pane focus, and zoom),
+  `terminal.park {terminal}`,
   `terminal.peek {terminal}` (peek over the tab, with keep-as-tab and close),
   `terminal.show {terminal?, pane?}`, `terminal.search` (screen and scrollback;
   find bar state stays with that terminal), `terminal.select_all {terminal?}` (selects the whole
