@@ -7340,6 +7340,8 @@ globalThis.__gpui = (() => {
           value: () => __editor_value(handle),
           set_value: (value) => __editor_set_value(handle, String(value)),
           on: (event, handler) => __editor_on(handle, String(event), handler),
+          set_tab_size: (tab_size, hard_tabs = false) =>
+            __editor_set_tab_size(handle, Number(tab_size), Boolean(hard_tabs)),
           focus: () => __editor_focus(handle),
           blur: () => __editor_blur(handle),
           set_soft_wrap: (wrap) => __editor_set_soft_wrap(handle, Boolean(wrap)),
