@@ -23,11 +23,13 @@ const source = await readFile(new URL("../defaults/mods/picker/main.js", import.
 const element = () => new Element();
 const commands: unknown[][] = [];
 let testSpaces: any[] = [];
+let testPanes: any[] = [];
+let testAgents: any[] = [];
 let closed = 0;
 const values: Record<string, any> = {
   View: class {}, div: element, svg: element, v_flex: element, h_flex: element,
   Input: { new: element }, InputState: { new: () => ({ handlers: {} as Record<string, any>, on(name: string, handler: any) { this.handlers[name] = handler; }, focus() {} }) },
-  agents: () => [], spaces: () => testSpaces, terminals: () => [], theme: () => ({ hover: "hover" }),
+  agents: () => testAgents, panes: () => testPanes, spaces: () => testSpaces, terminals: () => [], theme: () => ({ hover: "hover" }),
   settings: () => ({ zoom: 1.2 }), props: () => ({}), shared: () => ({}),
   setShared() {}, closeOverlay() { closed++; }, openOverlay() {}, run(...args: unknown[]) { commands.push(args); }, hc() {},
 };
@@ -35,6 +37,8 @@ const Picker = new Function(...Object.keys(values), source.replace(/^import .*;\
 const cx = { notify() {}, stop_propagation() {}, timer: { after() {} }, focus_handle() {}, spawn() {} };
 function picker(machines = 12) {
   testSpaces = [];
+  testPanes = [];
+  testAgents = [];
   closed = 0;
   const view = new Picker();
   view.init({}, cx);
@@ -215,4 +219,61 @@ test("picker heads use the complete emoji in the colored avatar and keep the spa
   const plain = head("plain")!;
   expect(plain.nodes[0].nodes).toEqual(["P"]);
   expect(plain.nodes[0].calls.bg).toBeDefined();
+});
+
+function textOf(node: any): string {
+  if (typeof node === "string") return node;
+  return (node?.nodes ?? []).map(textOf).join(" ");
+}
+
+test("picker shows agent session titles and program names for unnamed tabs, while keeping manual tab names", () => {
+  const view = picker(0);
+  const opencode = { key: "opencode", name: "OpenCode", agent: true };
+  const bash = { key: "shell", name: "bash", agent: false };
+  testSpaces = [
+    {
+      id: "infra",
+      name: "infra",
+      status: "idle",
+      active: true,
+      tabs: [
+        { id: "t-shell", name: "4", named: false },
+        { id: "t-oc", name: "13", named: false, active: true, status: "idle" },
+        { id: "t-prog", name: "OpenCode", named: true, status: "idle" },
+        { id: "t-named", name: "custom tab", named: true, status: "idle" },
+        { id: "t-folder", name: "7", named: false, status: "idle" },
+      ],
+    },
+  ];
+  testPanes = [
+    { pane: "p1", terminal: "t1", tab: "t-shell", title: "~/infra", program: bash },
+    { pane: "p2", terminal: "t2", tab: "t-oc", title: "OC | ssv2 oc51", program: opencode },
+    { pane: "p3", terminal: "t3", tab: "t-prog", title: "✦ [web] login", program: opencode },
+    { pane: "p4", terminal: "t4", tab: "t-named", title: "OC | ignored", program: opencode },
+    { pane: "p5", terminal: "t5", tab: "t-folder", title: "~/infra", program: opencode },
+  ];
+  testAgents = [
+    { address: "t2", pane: "p2", tab: "t-oc", title: "OC | ssv2 oc51", program: opencode },
+    { address: "t3", pane: "p3", tab: "t-prog", title: "✦ [web] login", program: opencode },
+    { address: "t4", pane: "p4", tab: "t-named", title: "OC | ignored", program: opencode },
+    { address: "t5", pane: "p5", tab: "t-folder", title: "~/infra", program: opencode },
+  ];
+
+  const tree = view.render();
+  expect(textOf(find(tree, "pk-t-shell"))).toContain("bash");
+  expect(textOf(find(tree, "pk-t-oc"))).toContain("OC | ssv2 oc51");
+  expect(textOf(find(tree, "pk-t-prog"))).toContain("[web] login");
+  expect(textOf(find(tree, "pk-t-named"))).toContain("custom tab");
+  expect(textOf(find(tree, "pk-t-folder"))).toContain("OpenCode");
+
+  // Filtering matches the live session title as well as the raw tab number.
+  view.input.value = () => "oc51";
+  view.input.handlers.change({}, cx);
+  const filtered = view.render();
+  expect(find(filtered, "pk-t-oc")).toBeDefined();
+  expect(find(filtered, "pk-t-shell")).toBeUndefined();
+
+  view.input.value = () => "13";
+  view.input.handlers.change({}, cx);
+  expect(find(view.render(), "pk-t-oc")).toBeDefined();
 });
