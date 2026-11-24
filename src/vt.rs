@@ -1116,6 +1116,21 @@ impl Vt {
         Ok(())
     }
 
+    /// Moves the selection's end to a viewport cell, keeping its start (Shift+click).
+    /// Returns false when there is no selection to extend.
+    pub fn extend_selection(&mut self, col: u16, row: u16) -> bool {
+        let Some(mut selection) = self.selection() else { return false };
+        let mut p = GhosttyPoint { tag: GHOSTTY_POINT_TAG_VIEWPORT, ..Default::default() };
+        p.value.coordinate = GhosttyPointCoordinate { x: col.min(self.cols.saturating_sub(1)), y: row.min(self.rows.saturating_sub(1)) as u32 };
+        let mut end = GhosttyGridRef { size: std::mem::size_of::<GhosttyGridRef>(), ..Default::default() };
+        if unsafe { ghostty_terminal_grid_ref(self.term, p, &mut end) } != GHOSTTY_SUCCESS {
+            return false;
+        }
+        selection.end = end;
+        unsafe { ghostty_terminal_set(self.term, GHOSTTY_TERMINAL_OPT_SELECTION, &selection as *const _ as *const c_void) };
+        true
+    }
+
     pub fn adjust_selection(&mut self, direction: &str) -> Result<(), String> {
         let adjustment = match direction {
             "left" => GHOSTTY_SELECTION_ADJUST_LEFT,
@@ -2025,6 +2040,25 @@ mod tests {
         vt.clear_selection();
         assert_eq!(vt.selection_positions(), None);
         assert!(vt.adjust_selection("left").unwrap_err().contains("needs a selection"));
+    }
+
+    #[test]
+    fn shift_click_extends_the_selection_from_its_start() {
+        let mut vt = Vt::new(20, 3);
+        vt.write(b"first line\r\nsecond line\r\nthird");
+        assert!(!vt.extend_selection(3, 1), "nothing to extend without a selection");
+        vt.select_at(Some(CellPosition { row: 0, col: 6 }), "cell").unwrap();
+        assert!(vt.extend_selection(5, 1));
+        assert_eq!(vt.selection_positions().unwrap(), SelectionPositions {
+            start: CellPosition { row: 0, col: 6 }, end: CellPosition { row: 1, col: 5 },
+        });
+        assert_eq!(vt.selection_text().as_deref(), Some("line\nsecond"));
+        // Clicking before the start reverses it; the start stays put.
+        assert!(vt.extend_selection(0, 0));
+        assert_eq!(vt.selection_text().as_deref(), Some("first l"));
+        // Past the grid, the end clamps to the last cell.
+        assert!(vt.extend_selection(99, 99));
+        assert_eq!(vt.selection_positions().unwrap().end, CellPosition { row: 2, col: 19 });
     }
 
     #[test]

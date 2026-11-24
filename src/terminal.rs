@@ -155,6 +155,8 @@ pub struct TerminalView {
     pub lost: bool,
     /// A left-button selection drag is in progress.
     selecting: bool,
+    /// That drag began with Shift+click on a selection: it moves the selection's end.
+    extending: bool,
     published_selection: Option<vt::SelectionPositions>,
     /// A scroll thumb drag is: the px into the thumb it was grabbed at.
     scrollbar_grab: Option<f32>,
@@ -310,6 +312,7 @@ impl TerminalView {
             ended: None,
             lost: false,
             selecting: false,
+            extending: false,
             published_selection: None,
             scrollbar_grab: None,
             selection_pointer: Point::default(),
@@ -1179,9 +1182,12 @@ impl TerminalView {
         Some((target, hit.spans))
     }
 
-    fn start_selection(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
+    /// Starts a mouse selection. With `extend` (Shift held) and a selection on
+    /// screen, the press moves that selection's end instead, as in Terminal.app.
+    fn start_selection(&mut self, pos: Point<Pixels>, extend: bool, cx: &mut Context<Self>) {
         self.selecting = true;
         self.selection_pointer = pos;
+        self.extending = extend && self.selection().is_some();
         self.select(Select::Press, pos, cx);
         self.selection_scroll = Some(cx.spawn(async move |this, cx| {
             loop {
@@ -1215,7 +1221,9 @@ impl TerminalView {
         if let Some(pos) = pos {
             drop(g);
             self.select(Select::Release, pos, cx);
+            self.extending = false;
         } else {
+            self.extending = false;
             g.vt.clear_selection();
             drop(g);
             self.selection_changed(cx);
@@ -1230,7 +1238,11 @@ impl TerminalView {
         let (cw, ch) = (f32::from(g.cell.width), f32::from(g.cell.height));
         let (col, row) = ((x / cw) as u16, (y / ch) as u16);
         let height = ch * g.vt.rows as f32;
-        g.vt.select(step, col, row, x, y, cw, height);
+        if self.extending {
+            g.vt.extend_selection(col, row);
+        } else {
+            g.vt.select(step, col, row, x, y, cw, height);
+        }
         drop(g);
         self.selection_changed(cx);
         if matches!(step, Select::Release) {
@@ -2570,7 +2582,7 @@ impl Render for TerminalView {
                     // The program took the click: Herdr's old selection ends, so a copy can't repeat it.
                     this.clear_selection(cx);
                 } else {
-                    this.start_selection(ev.position, cx);
+                    this.start_selection(ev.position, ev.modifiers.shift, cx);
                 }
             }))
             // Right-click is Herdr's menu, even when the program tracks the mouse
@@ -3010,6 +3022,58 @@ mod tests {
             cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
             assert!(!root.read_with(cx, |root, cx| root.text.read(cx).selected_text()).is_empty());
         }
+    }
+
+    #[gpui::test]
+    fn shift_click_extends_a_mouse_selection(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        struct Root(Entity<super::TerminalView>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(self.0.clone())
+            }
+        }
+        cx.update(gpui_base::init);
+        let (root, cx) = cx.add_window_view(|_, cx| Root(cx.new(|cx| {
+            let terminal = super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 5), cx);
+            terminal.grid.borrow_mut().vt.write(b"alpha beta gamma\r\nsecond row here\r\nthird row");
+            terminal
+        })));
+        cx.run_until_parked();
+        let at = |cx: &mut gpui::VisualTestContext, col: f32, row: f32| root.read_with(cx, |root, cx| {
+            let g = root.0.read(cx).grid.borrow();
+            point(g.origin.x + g.cell.width * (col + 0.25), g.origin.y + g.cell.height * (row + 0.5))
+        });
+        let selected = |cx: &mut gpui::VisualTestContext| root.read_with(cx, |root, cx| {
+            root.0.read(cx).grid.borrow().vt.selection_text()
+        });
+        let shift = Modifiers { shift: true, ..Default::default() };
+
+        // A drag takes a cell once the pointer passes its middle.
+        let (from, to) = (at(cx, 6., 0.), at(cx, 9.5, 0.));
+        cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(to, Some(MouseButton::Left), Modifiers::default());
+        cx.simulate_mouse_up(to, MouseButton::Left, Modifiers::default());
+        assert_eq!(selected(cx).as_deref(), Some("beta"));
+
+        let far = at(cx, 5., 1.);
+        cx.simulate_mouse_down(far, MouseButton::Left, shift);
+        cx.simulate_mouse_up(far, MouseButton::Left, shift);
+        assert_eq!(selected(cx).as_deref(), Some("beta gamma\nsecond"), "Shift+click keeps the start and moves the end");
+
+        // In a program that tracks the mouse, Shift keeps the click Herdr's and still extends.
+        root.update(cx, |root, cx| root.0.update(cx, |t, _| t.grid.borrow_mut().vt.write(b"\x1b[?1000h\x1b[?1006h")));
+        let back = at(cx, 0., 0.);
+        cx.simulate_mouse_down(back, MouseButton::Left, shift);
+        cx.simulate_mouse_up(back, MouseButton::Left, shift);
+        assert_eq!(selected(cx).as_deref(), Some("alpha b"), "clicking before the start reverses it");
+
+        // A plain click still starts over.
+        root.update(cx, |root, cx| root.0.update(cx, |t, _| t.grid.borrow_mut().vt.write(b"\x1b[?1000l\x1b[?1006l")));
+        cx.simulate_mouse_down(far, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(far, MouseButton::Left, Modifiers::default());
+        assert_eq!(selected(cx), None);
     }
 
     #[gpui::test]
