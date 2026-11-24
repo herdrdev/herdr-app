@@ -1490,10 +1490,16 @@ const ELEMENT_METHODS: &str = r#"    /**
      * Makes a plain layout element a native file/folder drag source. Paths are
      * absolute on `on` (a host-owned machine name); omitted/null means local.
      * The payload keeps its source machine, and an ordinary click still works.
+     * Terminals and `on_drop` targets accept the drag; local paths can also be
+     * dropped onto the Finder on macOS.
      */
     drag_paths<Self extends Element>(this: Self, paths: string[], options?: { on?: string | null }): Self;
-    /** Files dropped from outside the app, as absolute paths. Use on a plain layout element. */
-    on_drop<Self extends Element>(this: Self, handler: (event: { paths: string[] }, cx: Context) => void): Self;
+    /**
+     * Files dropped from outside the app or from a `drag_paths` source, as
+     * absolute paths. `on` is the source machine of a `drag_paths` drop, null
+     * for this computer and for drops from outside. Use on a plain layout element.
+     */
+    on_drop<Self extends Element>(this: Self, handler: (event: { paths: string[]; on?: string | null }, cx: Context) => void): Self;
     /**
      * GPUI `InteractiveElement::on_scroll_wheel`: wheel and trackpad scrolling
      * over this element.

@@ -4356,10 +4356,12 @@ impl ShellRuntime {
         self: &Rc<Self>,
         id: CallbackId,
         paths: &[std::path::PathBuf],
+        on: Option<&str>,
         window: &mut Window,
         cx: &mut App,
     ) {
         let paths: Vec<String> = paths.iter().map(|p| p.to_string_lossy().into_owned()).collect();
+        let on = on.map(str::to_owned);
         self.dispatch_simple_event(id, "file drop", window, cx, move |ctx| {
             let payload = Object::new(ctx.clone())?;
             let files = rquickjs::Array::new(ctx.clone())?;
@@ -4367,6 +4369,11 @@ impl ShellRuntime {
                 files.set(index, path)?;
             }
             payload.set("paths", files)?;
+            // HERDR: `on` is the source machine of an in-app `drag_paths` drag; null for this computer and external drops.
+            match on {
+                Some(on) => payload.set("on", on)?,
+                None => payload.set("on", rquickjs::Value::new_null(ctx.clone()))?,
+            }
             Ok(payload)
         });
     }

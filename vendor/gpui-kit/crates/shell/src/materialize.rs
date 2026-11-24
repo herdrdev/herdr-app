@@ -1835,12 +1835,30 @@ where
             cx.stop_propagation();
             cx.new(|_| crate::drag_paths::DraggedPathsPreview { paths: paths.clone(), cursor_offset })
         });
+        // HERDR: local files can also be dragged out to the OS (Finder on macOS); remote paths are no local files.
+        if paths.on.is_none() {
+            element = element.external_drag_payload(|paths: &crate::DraggedPaths, _, _| {
+                let entries = paths.paths.iter().map(|p| {
+                    let path = std::path::PathBuf::from(p);
+                    let is_dir = path.is_dir();
+                    (path, is_dir)
+                });
+                Some(gpui::ExternalDragPayload::Files(gpui::FileDragPaths::new(entries)))
+            });
+        }
     }
     if let Some(callback) = behavior.on_drop {
         let runtime = Rc::downgrade(runtime);
+        let dragged_runtime = runtime.clone();
         element = element.on_drop(move |paths: &gpui::ExternalPaths, window, cx| {
             if let Some(runtime) = runtime.upgrade() {
-                runtime.dispatch_file_drop(callback, paths.paths(), window, cx);
+                runtime.dispatch_file_drop(callback, paths.paths(), None, window, cx);
+            }
+        });
+        element = element.on_drop(move |paths: &crate::DraggedPaths, window, cx| {
+            if let Some(runtime) = dragged_runtime.upgrade() {
+                let files: Vec<std::path::PathBuf> = paths.paths.iter().map(std::path::PathBuf::from).collect();
+                runtime.dispatch_file_drop(callback, &files, paths.on.as_deref(), window, cx);
             }
         });
     }
