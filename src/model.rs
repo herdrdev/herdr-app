@@ -492,7 +492,7 @@ impl Model {
     /// the pane that has the keyboard. Returns whether the pane is now zoomed.
     pub fn toggle_zoom(&mut self, pane_id: &str) -> bool {
         let Some(c) = self.tab_of_mut(pane_id) else { return false };
-        if c.root.panes().len() < 2 {
+        if c.root.shown_panes().len() < 2 {
             return false;
         }
         if c.zoomed.as_deref() == Some(pane_id) {
@@ -1113,6 +1113,20 @@ mod tests {
         assert!(!m.toggle_zoom("x1"));
         assert_eq!(m.tab("c1").unwrap().zoomed, None);
         assert_eq!(m.focused_pane().as_deref(), Some("x1"));
+    }
+
+    #[test]
+    fn a_hidden_pane_leaves_its_tab_unsplit() {
+        let mut m = model_with_one();
+        // A mod's helper terminal beside its pane, hidden in the layout (#1251).
+        assert!(m.split("x1", Axis::Row, "x2", "t2"));
+        m.tab_mut("c1").unwrap().root.find_mut("x2").unwrap().hidden = true;
+        let c = m.tab("c1").unwrap();
+        assert_eq!(c.root.panes().len(), 2);
+        assert_eq!(c.root.shown_panes().iter().map(|n| n.id.as_str()).collect::<Vec<_>>(), ["x1"]);
+        // It zooms no more than a one-pane tab.
+        assert!(!m.toggle_zoom("x1"));
+        assert_eq!(m.tab("c1").unwrap().zoomed, None);
     }
 
     #[test]

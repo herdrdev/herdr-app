@@ -4577,7 +4577,7 @@ impl AppWindow {
             _ => None,
         })?;
         let ctx = self.model.active_tab()?;
-        (frame.lone || ctx.root.panes().len() > 1).then_some(frame)
+        (frame.lone || ctx.root.shown_panes().len() > 1).then_some(frame)
     }
 
     /// A pane in its frame: the look, and the header mod above or below it
