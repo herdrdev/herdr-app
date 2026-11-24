@@ -246,6 +246,8 @@ impl PartialEq for MarkdownNode {
 pub struct MarkdownExtensions {
     enable_mdx: bool,
     enable_frontmatter: bool,
+    /// HERDR: `raw_html(false)` keeps raw HTML as text.
+    disable_raw_html: bool,
     block_parsers: Vec<Arc<MarkdownBlockParserFn>>,
     block_renderers: HashMap<SharedString, Arc<MarkdownBlockRenderFn>>,
     inline_parsers: Vec<Arc<MarkdownInlineParserFn>>,
@@ -283,6 +285,21 @@ impl MarkdownExtensions {
         self.enable_mdx = true;
         self.bump_revision();
         self
+    }
+
+    /// Set whether raw HTML in Markdown is parsed as HTML (the default).
+    ///
+    /// When `false`, render raw HTML tags and blocks as literal text.
+    /// Markdown outside those fragments, including autolinks, still renders.
+    pub fn raw_html(mut self, enabled: bool) -> Self {
+        self.disable_raw_html = !enabled;
+        self.bump_revision();
+        self
+    }
+
+    // HERDR: keep HTML in the AST so its contents never become Markdown.
+    pub(super) fn renders_raw_html(&self) -> bool {
+        !self.disable_raw_html
     }
 
     /// Register a parser for block-level Markdown AST nodes.
@@ -352,6 +369,7 @@ impl MarkdownExtensions {
         self.parser_revision == other.parser_revision
             && self.enable_mdx == other.enable_mdx
             && self.enable_frontmatter == other.enable_frontmatter
+            && self.disable_raw_html == other.disable_raw_html
             && self.block_parsers.len() == other.block_parsers.len()
             && self.block_renderers.len() == other.block_renderers.len()
             && self.inline_parsers.len() == other.inline_parsers.len()
