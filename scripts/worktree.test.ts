@@ -1,5 +1,8 @@
 import { test, expect } from "bun:test";
-import { readFile } from "node:fs/promises";
+import { existsSync } from "node:fs";
+import { mkdtemp, readFile, realpath, rm, writeFile } from "node:fs/promises";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 const source = (await readFile(new URL("../defaults/mods/worktree/main.js", import.meta.url), "utf8"))
   .replace(/^import .*;\n/gm, "").replace("export default class Worktree", "class Worktree");
@@ -26,7 +29,7 @@ function rowsOf(node: any): any[] {
   return node?.id?.match(/^wt-\d+$/) ? [node] : (node?.children ?? []).flatMap(rowsOf);
 }
 
-function harness(focusedMachine: string | null = null, raw: string | null = null) {
+function harness(focusedMachine: string | null = null, raw: string | null = null, overrides: Record<string, unknown> = {}) {
   let spaceList: any[] = [];
   let paneList: any[] = [];
   const reads = { spaces: 0, panes: 0 };
@@ -48,6 +51,7 @@ function harness(focusedMachine: string | null = null, raw: string | null = null
       executions.push({ command, args, ...options });
       return { code: 0, stdout: "", stderr: "" };
     },
+    ...overrides,
   };
   const { Worktree, root } = new Function(...Object.keys(globals), `${source}; return { Worktree, root };`)(...Object.values(globals));
   const worktree = new Worktree();
@@ -172,6 +176,19 @@ test("space matching keeps deepest checkout, machine, live-folder and fallback r
   expect(reads).toEqual({ spaces: 5, panes: 5 });
 });
 
+test("a bare repo hidden beside its worktrees is named after its project", async () => {
+  const replies: Record<string, string> = {
+    "--show-toplevel": "/home/user/project/topic",
+    "--git-common-dir": "/home/user/project/.bare",
+  };
+  const exec = async (_command: string, args: string[]) => ({ code: 0, stdout: replies[args.at(-1)!] + "\n", stderr: "" });
+  const globals = { View: class {}, div: element, v_flex: element, h_flex: element, Input: { new: element }, Scrollbar: { vertical: element }, theme: () => ({}), exec };
+  const repoOf = new Function(...Object.keys(globals), `${source}; return repoOf;`)(...Object.values(globals));
+  expect(await repoOf("/home/user/project/topic", null)).toEqual({
+    top: "/home/user/project/topic", main: "/home/user/project/.bare", name: "project", linked: true,
+  });
+});
+
 test("configured roots drive both the checkout and its space, expanding the target home", async () => {
   for (const [directory, userHome, on, expected] of [
     [undefined, "/home/user", null, "/home/user/.herdr/worktrees"],
@@ -200,4 +217,165 @@ test("missing settings keep the old location, while invalid directories cannot c
     await expect(root("/home/user")).rejects.toThrow("worktrees.directory");
   }
   await expect(harness(null, "{").root("/home/user")).rejects.toThrow();
+});
+
+function execute(command: string, args: string[], { cwd }: { cwd: string }) {
+  const result = Bun.spawnSync([command, ...args], { cwd, stdout: "pipe", stderr: "pipe" });
+  return { code: result.exitCode, stdout: result.stdout.toString(), stderr: result.stderr.toString() };
+}
+
+function fixtureGit(cwd: string, ...args: string[]) {
+  const result = execute("git", args, { cwd });
+  if (result.code !== 0) throw new Error(result.stderr);
+  return result.stdout.trim();
+}
+
+async function withLinkedCheckout(runTest: (main: string, linked: string) => Promise<void>) {
+  const folder = await mkdtemp(join(process.platform === "linux" ? "/var/tmp" : tmpdir(), "herdr-worktree-"));
+  try {
+    const root = await realpath(folder);
+    const main = join(root, "main"), linked = join(root, "linked with spaces");
+    fixtureGit(root, "init", "--initial-branch=main", main);
+    fixtureGit(main, "-c", "user.name=Test", "-c", "user.email=test@example.com", "commit", "--no-gpg-sign", "--allow-empty", "-m", "fixture");
+    fixtureGit(main, "worktree", "add", "-b", "linked", linked);
+    await runTest(main, linked);
+  } finally {
+    await rm(folder, { recursive: true, force: true });
+  }
+}
+
+function removeDialog(folder: string, { branch, exec = execute, terminals = () => [], sleep = async () => {} }: {
+  branch?: string; exec?: typeof execute; terminals?: () => { address: string; state: string }[]; sleep?: () => Promise<void>;
+} = {}) {
+  const closedSpaces: { id: string; checkoutPresent: boolean }[] = [];
+  const closedOverlays: string[] = [];
+  const { worktree, snapshot } = harness(null, null, {
+    home: () => folder,
+    props: () => ({ space: "target", action: "remove", overlay: "dialog", branch }),
+    InputState: { new: () => ({ on() {}, focus() {} }) },
+    run: (command: string, args: { id: string }) => {
+      if (command === "space.close") closedSpaces.push({ id: args.id, checkoutPresent: existsSync(folder) });
+    },
+    closeOverlay: (id: string) => closedOverlays.push(id),
+    terminals,
+    exec,
+  });
+  snapshot([{ id: "target", name: "Worktree", folder, tabs: [{ id: "tab" }] }], [{ tab: "tab", terminal: "t1", cwd: folder }]);
+  let pending = Promise.resolve();
+  const cx = {
+    notify() {},
+    sleep,
+    focus_handle: () => ({ focus() {} }),
+    spawn: (task: (context: { notify(): void }) => Promise<void>) => { pending = task(cx); },
+  };
+  worktree.init({}, cx);
+  return {
+    worktree, closedSpaces, closedOverlays, ready: pending,
+    enter: async () => { worktree.key({ key: "enter" }, cx); await pending; },
+  };
+}
+
+test("remove leaves the main checkout and its space alone on Enter and with a branch prop", async () => {
+  await withLinkedCheckout(async (main) => {
+    for (const branch of [undefined, "main"]) {
+      const dialog = removeDialog(main, { branch });
+      await dialog.ready;
+      if (!branch) await dialog.enter();
+      expect(dialog.closedSpaces).toEqual([]);
+      expect(dialog.closedOverlays).toEqual([]);
+      expect(textOf(dialog.worktree.render({}).node)).toContain("This is the repository's main checkout");
+      expect(dialog.worktree.error).toBe("");
+      expect(existsSync(main)).toBe(true);
+    }
+  });
+});
+
+test("remove shows a locked checkout's reason and keeps the space open", async () => {
+  await withLinkedCheckout(async (main, linked) => {
+    fixtureGit(main, "worktree", "lock", "--reason", "Réservé for another machine\nLeave this checkout in place", linked);
+    const dialog = removeDialog(linked);
+    await dialog.ready;
+    await dialog.enter();
+    const message = textOf(dialog.worktree.render({}).node);
+    expect(message).toContain("This worktree is locked:");
+    expect(message).toContain("Réservé for another machine");
+    expect(message).toContain("Leave this checkout in place");
+    expect(dialog.closedSpaces).toEqual([]);
+    expect(dialog.closedOverlays).toEqual([]);
+    expect(existsSync(linked)).toBe(true);
+  });
+});
+
+test("remove lets Git resolve the checkout when its listed path is spelled differently", async () => {
+  await withLinkedCheckout(async (_main, linked) => {
+    const top = fixtureGit(linked, "rev-parse", "--show-toplevel");
+    const record = `worktree ${top}`;
+    const differentlySpelled = record.replace(/linked with spaces$/, "LINKED WITH SPACES");
+    expect(differentlySpelled).not.toBe(record);
+    const dialog = removeDialog(linked, {
+      exec: async (command, args, options) => {
+        const result = await execute(command, args, options);
+        if (args.includes("worktree") && args.includes("list") && args.includes("--porcelain")) {
+          const records = result.stdout.split(/\r?\n/);
+          expect(records).toContain(record);
+          result.stdout = records.map(line => line === record ? differentlySpelled : line).join("\n");
+        }
+        return result;
+      },
+    });
+    await dialog.ready;
+    await dialog.enter();
+    expect(dialog.worktree.error).toBe("");
+    expect(dialog.closedSpaces).toEqual([{ id: "target", checkoutPresent: true }]);
+    expect(existsSync(linked)).toBe(false);
+  });
+});
+
+test("remove reports a late Git refusal after closing the space", async () => {
+  await withLinkedCheckout(async (main, linked) => {
+    const dialog = removeDialog(linked, {
+      exec: (command, args, options) => {
+        if (args[0] === "worktree" && args[1] === "remove") {
+          fixtureGit(main, "worktree", "lock", "--reason", "locked just before removal", linked);
+        }
+        return execute(command, args, options);
+      },
+    });
+    await dialog.ready;
+    await dialog.enter();
+    expect(dialog.worktree.error).toContain("locked just before removal");
+    expect(dialog.closedSpaces).toEqual([{ id: "target", checkoutPresent: true }]);
+    expect(dialog.closedOverlays).toEqual([]);
+    expect(existsSync(linked)).toBe(true);
+  });
+});
+
+test("remove warns about new changes and waits for the space's terminal before running Git", async () => {
+  await withLinkedCheckout(async (main, linked) => {
+    let state = "live";
+    const dialog = removeDialog(linked, {
+      terminals: () => [{ address: "t1", state }, { address: "t2", state: "live" }],
+      sleep: async () => {
+        expect(dialog.closedSpaces).toEqual([{ id: "target", checkoutPresent: true }]);
+        expect(existsSync(linked)).toBe(true);
+        state = "finished";
+      },
+      exec: (command, args, options) => {
+        if (args[0] === "worktree" && args[1] === "remove") expect(state).toBe("finished");
+        return execute(command, args, options);
+      },
+    });
+    await dialog.ready;
+    await writeFile(join(linked, "untracked.txt"), "uncommitted");
+    await dialog.enter();
+    expect(textOf(dialog.worktree.render({}).node)).toContain("It has uncommitted changes");
+    expect(dialog.closedSpaces).toEqual([]);
+    expect(existsSync(join(linked, "untracked.txt"))).toBe(true);
+
+    await dialog.enter();
+    expect(dialog.closedSpaces).toEqual([{ id: "target", checkoutPresent: true }]);
+    expect(dialog.closedOverlays).toEqual(["dialog"]);
+    expect(existsSync(linked)).toBe(false);
+    expect(fixtureGit(main, "branch", "--list", "linked")).toBe("linked");
+  });
 });

@@ -199,9 +199,12 @@ fn scroll_position(
     cx: &mut App,
 ) -> VirtualListScrollHandle {
     let owned = behavior.virtual_scroll.and_then(|handle| {
-        let scroll = runtime.entities().virtual_scroll(handle);
+        let entities = runtime.entities();
+        let scroll = entities.virtual_scroll(handle);
         if scroll.is_none() {
             tracing::error!("virtual list scroll handle {handle} is no longer live");
+        } else {
+            entities.record_scroll_layout(handle);
         }
         scroll
     });
