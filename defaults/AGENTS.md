@@ -1101,7 +1101,8 @@ Chained builders with GPUI's snake_case names: `div()`, `h_flex()`,
 `.overflow_y_scrollbar()`; `.child("text")`, `.text_size(n)`, `.font_semibold()`,
 `.truncate()`, `.text_color(c)`; `.bg(c)`, `.border(1)`, `.border_color(c)`,
 `.rounded(n)`; `.id("unique")` then `.on_click(...)`, `.on_mouse_down("right", ...)`,
-`.hover((s) => s.bg(c))`, `.on_scroll_wheel(...)`, `.on_pinch(...)`; keyboard: `this.h = cx.focus_handle()`
+`.hover((s) => s.bg(c))`, `.on_scroll_wheel(...)`, `.on_pinch(...)`. Mouse buttons are `left`,
+`right`, `middle`, `back` and `forward`; the last two are the mouse's side buttons. Keyboard: `this.h = cx.focus_handle()`
 in init, `.track_focus(this.h).on_key_down((e, cx) => …)`, `this.h.focus()`.
 `ScrollHandle` from `gpui-base` scrolls a plain `overflow_*_scroll()` or
 `overflow_*_scrollbar()` area from code. Create `this.scroll = ScrollHandle.new()`
@@ -1138,7 +1139,9 @@ Paths containing control characters are rejected, including clipboard files.
 and other interactive controls too.
 `.when(cond, (el) => …)`, `.children([...])`. Controls from `gpui-base`
 (`Button`, `Checkbox`, `Switch`, `InputState` + `Input`) are unstyled: style
-them. Text: `TextView.markdown(id, text)` renders markdown; with
+them. Text: `TextView.markdown(id, text)` renders Markdown.
+`.raw_html(false)` shows embedded HTML tags and blocks as literal text.
+Markdown autolinks stay clickable. With
 `.selectable(true)`, `.on_selection_change((s, cx) => …)` gets a settled
 selection or `null` when it clears. `s.text` matches what copying the selected
 text in that view gives you. When `s.range` is present, use
@@ -1150,12 +1153,19 @@ When `s.position` is present, place a popup with
 `EditorState.new({
 language, value, readonly, font_family: settings().font_family, syntax: {
 keyword: theme().ansi5, ... } })` + `Editor.new(state)` is a code view (readonly)
+<<<<<<< HEAD
 or editor with syntax highlighting, line numbers and folding. For Markdown
 source, set `language: "markdown"` or `"md"`. The `syntax` keys are `heading`,
 `strong`, `emphasis`, `code`, `quote`, `list`, and `link` (the URL). Use
 `theme()` colors for light and dark layouts. Built-in syntax colors use a
 dark-editor palette. A viewer opens
 beside the shell as a pane: `pane.split {direction, mod, props: { file }}`.
+=======
+or editor with syntax highlighting, line numbers and folding. Call
+`state.set_soft_wrap(wrap)` from a view callback to switch between wrapping
+long lines and scrolling sideways while keeping the editor's text and selection.
+A viewer opens beside the shell as a pane: `pane.split {direction, mod, props: { file }}`.
+>>>>>>> origin/master
 The full surface is in `gpui-kit.d.ts` next to this file.
 
 ### The `herdr` module

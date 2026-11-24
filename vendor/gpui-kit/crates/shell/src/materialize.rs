@@ -122,7 +122,7 @@ use smallvec::SmallVec;
 
 use gpui::{
     AbsoluteLength, AnyElement, App, AppContext, Bounds, DefiniteLength, InteractiveElement, IntoElement,
-    Length, MouseButton, ParentElement, Pixels, Refineable as _, SharedString,
+    Length, MouseButton, NavigationDirection, ParentElement, Pixels, Refineable as _, SharedString,
     StatefulInteractiveElement, StyleRefinement, Styled, Window, div,
 };
 use gpui_base::{
@@ -316,6 +316,8 @@ struct Behavior {
     disabled: bool,
     selectable: Option<bool>,
     text_scrollable: Option<bool>,
+    /// HERDR: `raw_html(false)` keeps a TextView's Markdown HTML as text.
+    raw_html: Option<bool>,
     on_link_click: Option<CallbackId>,
     /// HERDR: `on_selection_change(handler)` on a TextView.
     on_selection_change: Option<CallbackId>,
@@ -1124,6 +1126,9 @@ fn materialize_component(
             }
             if let Some(scrollable) = behavior.text_scrollable {
                 view = view.scrollable(scrollable);
+            }
+            if let Some(raw_html) = behavior.raw_html {
+                view = view.markdown_raw_html(raw_html);
             }
             // HERDR: highlights and selection reports, in UTF-16 offsets of
             // the Markdown source, the way a script indexes its strings.
@@ -2781,6 +2786,11 @@ pub(in crate::materialize) fn resolve_ops(
                 "on_mouse_up_left" => behavior.on_mouse_up.push((MouseButton::Left, *id)),
                 "on_mouse_up_right" => behavior.on_mouse_up.push((MouseButton::Right, *id)),
                 "on_mouse_up_middle" => behavior.on_mouse_up.push((MouseButton::Middle, *id)),
+                // HERDR: the mouse's side buttons.
+                "on_mouse_down_back" => behavior.on_mouse_down.push((MouseButton::Navigate(NavigationDirection::Back), *id)),
+                "on_mouse_down_forward" => behavior.on_mouse_down.push((MouseButton::Navigate(NavigationDirection::Forward), *id)),
+                "on_mouse_up_back" => behavior.on_mouse_up.push((MouseButton::Navigate(NavigationDirection::Back), *id)),
+                "on_mouse_up_forward" => behavior.on_mouse_up.push((MouseButton::Navigate(NavigationDirection::Forward), *id)),
                 "on_mouse_down_out" => behavior.on_mouse_down_out = Some(*id),
                 "on_drop" => behavior.on_drop = Some(*id),
                 "on_scroll_wheel" => behavior.on_scroll_wheel = Some(*id),
@@ -3508,6 +3518,7 @@ fn apply_behavior(behavior: &mut Behavior, name: &str, args: &[Bridged]) {
             _ => tracing::warn!("highlight_range(start, end, color) ignored: bad offsets"),
         },
         "scrollable" => behavior.text_scrollable = Some(flag.unwrap_or(true)),
+        "raw_html" => behavior.raw_html = Some(flag.unwrap_or(true)),
         "selected" => behavior.selected = flag.unwrap_or(true),
         "checked" => behavior.checked = flag.unwrap_or(true),
         "value" => behavior.value = args.first().and_then(|value| value.as_f32().ok()),
@@ -3674,6 +3685,8 @@ fn apply_behavior(behavior: &mut Behavior, name: &str, args: &[Bridged]) {
                         "left" => Some(MouseButton::Left),
                         "right" => Some(MouseButton::Right),
                         "middle" => Some(MouseButton::Middle),
+                        "back" => Some(MouseButton::Navigate(NavigationDirection::Back)),
+                        "forward" => Some(MouseButton::Navigate(NavigationDirection::Forward)),
                         _ => None,
                     });
         }

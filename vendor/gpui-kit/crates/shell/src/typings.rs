@@ -802,8 +802,13 @@ fn anchor_type() -> String {
         let _ = writeln!(out, "    | \"{name}\"");
     }
     out.push_str("    ;\n\n");
-    out.push_str("  /** Which pointer button opens a `Popover`. */\n");
-    out.push_str("  export type MouseButton = \"left\" | \"right\" | \"middle\";\n\n");
+    out.push_str("  /**\n");
+    out.push_str("   * A pointer button, for `on_mouse_down`, `on_mouse_up` and which one opens\n");
+    out.push_str("   * a `Popover`. HERDR: `back` and `forward` are the mouse's side buttons.\n");
+    out.push_str("   */\n");
+    out.push_str(
+        "  export type MouseButton = \"left\" | \"right\" | \"middle\" | \"back\" | \"forward\";\n\n",
+    );
     out
 }
 
@@ -2479,6 +2484,12 @@ const BASE: &str = r#"  /** A row. */
     highlight_range(start: number, end: number, color: Color): this;
     selectable(value?: boolean): this;
     scrollable(value?: boolean): this;
+    /**
+     * Whether raw HTML in Markdown renders as HTML (the default). `false`
+     * shows HTML tags and blocks as literal text. Markdown autolinks outside
+     * the HTML stay clickable. Applies to `TextView.markdown`.
+     */
+    raw_html(value?: boolean): this;
   }
   export const TextView: {
     html(id: string, html: string): TextViewElement;
@@ -3258,6 +3269,8 @@ const BASE: &str = r#"  /** A row. */
     on(event: "change" | "submit" | "focus" | "blur" | "paste_other", handler: (event: InputEvent, cx: Context) => void): boolean;
     /** Moves the keyboard onto the editor. */
     focus(): void;
+    /** Wraps long lines instead of scrolling sideways, keeping the text and selection. */
+    set_soft_wrap(wrap: boolean): void;
     release(): boolean;
   }
   export const EditorState: {
@@ -4798,7 +4811,15 @@ mod tests {
         assert!(!element.contains("on_link_click("));
         assert!(!element.contains("selectable("));
         assert!(!element.contains("scrollable("));
-        assert!(declarations.contains("export interface TextViewElement extends NativeElement"));
+        assert!(!element.contains("raw_html("));
+        let text_view = declarations
+            .split_once("export interface TextViewElement extends NativeElement")
+            .expect("TextViewElement declaration")
+            .1
+            .split_once("\n  }")
+            .expect("end of TextViewElement declaration")
+            .0;
+        assert!(text_view.contains("raw_html(value?: boolean): this;"));
         assert!(declarations.contains("html(id: string, html: string): TextViewElement;"));
     }
 
