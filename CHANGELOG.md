@@ -13,7 +13,7 @@
 
 ### Fixed
 - **A mod or layout with a dot, colon or emoji in its name no longer crashes Herdr.** Before, it crashed every time that mod or layout opened, startup included.
-- **Remove worktree checks before it closes anything.** It refuses a main checkout and tells you when a worktree is locked. On macOS and Linux it also waits until git has removed the folder, so your terminals stay if git says no.
+- **Remove worktree checks before it closes anything.** It refuses a main checkout and tells you when a worktree is locked.
 - **The Changes panel keeps up when you switch spaces,** even if the last repository was slow or a file preview got stuck. (#1253)
 - **A mod waiting on a TCP connection no longer freezes the whole window.** Saving it reloads in a moment instead of several seconds. (#1234)
 - **Toasts show the whole message,** long errors included, and scroll if it doesn't fit. (#782, thanks @Danipulok)
