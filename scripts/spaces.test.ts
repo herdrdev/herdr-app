@@ -551,28 +551,25 @@ test("the list reveals the active space again when a machine header shifts its p
   expect(h.view.scroll.calls).toEqual([1, 2]);
 });
 
-test("a name that starts with a whole emoji shows it as the avatar and the rest as the name", () => {
-  const leadEmoji = new Function("View", `${source}; return leadEmoji;`)(class {});
-  const cases: [string, string | null, string][] = [
-    ["🐼 notes", "🐼", "notes"],
-    // The variation selector stays with ⚙, or it draws as a thin text glyph.
-    ["⚙️ops", "⚙️", "ops"],
-    // Skin tone and ZWJ parts belong to one emoji.
-    ["🧑🏻‍🦳Old", "🧑🏻‍🦳", "Old"],
-    ["🖥️ server", "🖥️", "server"],
-    // From U+1F000 on a symbol draws as an emoji even without VS16.
-    ["🖥 desk", "🖥", "desk"],
-    ["🇦🇹 trip", "🇦🇹", "trip"],
-    ["🏳️‍🌈 Pride", "🏳️‍🌈", "Pride"],
-    ["Plain", null, "Plain"],
-    // Only an emoji: nothing would be left to name the space, so the tile stays.
-    ["🧠", null, "🧠"],
-    ["🧠  ", null, "🧠  "],
-    // A keycap starts with a digit, and a symbol without VS16 draws as text.
-    ["1️⃣ eins", null, "1️⃣ eins"],
-    ["© Corp", null, "© Corp"],
-    ["⚙ops", null, "⚙ops"],
-    ["", null, ""],
+test("space avatars keep complete emoji sequences", () => {
+  const spaceAvatar = new Function("View", `${source}; return spaceAvatar;`)(class {});
+  const england = "🏴\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}";
+  const cases = [
+    ["🐼 notes", "🐼"],
+    ["⚙️ops", "⚙️"],
+    ["🧑🏻‍🦳Old", "🧑🏻‍🦳"],
+    ["🧑🏻‍🦳", "🧑🏻‍🦳"],
+    ["🖥️ server", "🖥️"],
+    ["🖥 desk", "🖥"],
+    ["🇦🇹 trip", "🇦🇹"],
+    [`${england} trip`, england],
+    ["🏳️‍🌈 Pride", "🏳️‍🌈"],
+    ["1️⃣ eins", "1️⃣"],
+    ["© Corp", "©"],
+    ["⚙ops", "⚙"],
+    ["☕︎ cafe", "☕"],
+    ["plain", "P"],
+    ["", "?"],
   ];
-  for (const [name, emoji, text] of cases) expect(leadEmoji(name)).toEqual({ emoji, text });
+  for (const [name, avatar] of cases) expect(spaceAvatar(name)).toBe(avatar);
 });

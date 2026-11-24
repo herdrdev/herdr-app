@@ -34,17 +34,12 @@ function spaceColor(t, p) {
   return c.startsWith("#") ? c : (MARK[c] ?? t[c]);
 }
 
-// A name that starts with a whole emoji ("🐼 notes", "⚙️ ops", "🇦🇹 trip") shows it as
-// its avatar, without the tile, and the rest as the name (the same in every mod
-// that draws space avatars). One emoji is its base plus skin tone, variation
-// selector, tags and ZWJ parts, or a flag. An older symbol (©, ⚙) counts only with
-// VS16, else it draws as text; one from U+1F000 on (🖥) counts without it. A name
-// that is only an emoji keeps the letter tile.
-const EMOJI = /^(?:\p{Regional_Indicator}{2}|(?:\p{Emoji_Presentation}\uFE0F?|(?=[\u{1F000}-\u{1FFFF}])\p{Extended_Pictographic}\uFE0F?|\p{Extended_Pictographic}\uFE0F)[\u{1F3FB}-\u{1F3FF}\u{E0020}-\u{E007F}]*(?:\u200D\p{Extended_Pictographic}[\uFE0F\u{1F3FB}-\u{1F3FF}]*)*)/u;
-function leadEmoji(name) {
-  const emoji = EMOJI.exec(name ?? "")?.[0];
-  const text = emoji ? name.slice(emoji.length).trim() : "";
-  return emoji && text ? { emoji, text } : { emoji: null, text: name };
+// Keep the whole leading emoji in the avatar (same rule in spaces and picker).
+// Newer pictographs such as 🖥 may be drawn as emoji without VS16. A trailing
+// selector, modifier or joiner can signal that we matched only part of a glyph.
+const EMOJI = /^(?:[#*0-9]\uFE0F?\u20E3|\p{Regional_Indicator}{2}|(?:\p{Emoji_Presentation}|(?=[\u{1F000}-\u{1FFFF}])\p{Extended_Pictographic}|\p{Extended_Pictographic}(?=\uFE0F))\uFE0F?[\p{Emoji_Modifier}\u{E0020}-\u{E007F}]*(?:\u200D\p{Extended_Pictographic}\uFE0F?\p{Emoji_Modifier}?)*)(?![\p{Grapheme_Extend}\p{Emoji_Modifier}\u200D])/u;
+function spaceAvatar(name) {
+  return EMOJI.exec(name)?.[0] ?? ([...name][0]?.toUpperCase() ?? "?");
 }
 
 export default class Picker extends View {
@@ -168,7 +163,6 @@ export default class Picker extends View {
 
     const row = (r) => {
       if (r.kind === "head") {
-        const lead = leadEmoji(r.w.name);
         return h_flex()
           .px(10)
           .pt(10)
@@ -178,10 +172,8 @@ export default class Picker extends View {
           .text_size(11)
           .font_semibold()
           .text_color(t.dim)
-          .child(lead.emoji
-            ? h_flex().size(18).items_center().justify_center().text_size(15).child(lead.emoji)
-            : h_flex().size(18).rounded(5).bg(spaceColor(t, r.w)).items_center().justify_center().text_size(10.5).font_bold().text_color("#ffffff").child([...r.w.name][0]?.toUpperCase() ?? "?"))
-          .child(lead.text);
+          .child(h_flex().size(18).rounded(5).bg(spaceColor(t, r.w)).items_center().justify_center().text_size(10.5).font_bold().text_color("#ffffff").child(spaceAvatar(r.w.name)))
+          .child(r.w.name);
       }
       if (r.kind === "earlier") {
         return h_flex()

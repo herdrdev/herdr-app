@@ -60,17 +60,12 @@ async function both(a, b) {
 // that draws space avatars): one strong color per hue, light and dark alike.
 const MARK = { ansi6: "#22a99a", ansi3: "#e3814f", ansi4: "#5b8def", ansi5: "#8b7cf6", ansi2: "#3fae6a", ansi1: "#d9649a" };
 
-// A name that starts with a whole emoji ("🐼 notes", "⚙️ ops", "🇦🇹 trip") shows it as
-// its avatar, without the tile, and the rest as the name (the same in every mod
-// that draws space avatars). One emoji is its base plus skin tone, variation
-// selector, tags and ZWJ parts, or a flag. An older symbol (©, ⚙) counts only with
-// VS16, else it draws as text; one from U+1F000 on (🖥) counts without it. A name
-// that is only an emoji keeps the letter tile.
-const EMOJI = /^(?:\p{Regional_Indicator}{2}|(?:\p{Emoji_Presentation}\uFE0F?|(?=[\u{1F000}-\u{1FFFF}])\p{Extended_Pictographic}\uFE0F?|\p{Extended_Pictographic}\uFE0F)[\u{1F3FB}-\u{1F3FF}\u{E0020}-\u{E007F}]*(?:\u200D\p{Extended_Pictographic}[\uFE0F\u{1F3FB}-\u{1F3FF}]*)*)/u;
-function leadEmoji(name) {
-  const emoji = EMOJI.exec(name ?? "")?.[0];
-  const text = emoji ? name.slice(emoji.length).trim() : "";
-  return emoji && text ? { emoji, text } : { emoji: null, text: name };
+// Keep the whole leading emoji in the avatar (same rule in spaces and picker).
+// Newer pictographs such as 🖥 may be drawn as emoji without VS16. A trailing
+// selector, modifier or joiner can signal that we matched only part of a glyph.
+const EMOJI = /^(?:[#*0-9]\uFE0F?\u20E3|\p{Regional_Indicator}{2}|(?:\p{Emoji_Presentation}|(?=[\u{1F000}-\u{1FFFF}])\p{Extended_Pictographic}|\p{Extended_Pictographic}(?=\uFE0F))\uFE0F?[\p{Emoji_Modifier}\u{E0020}-\u{E007F}]*(?:\u200D\p{Extended_Pictographic}\uFE0F?\p{Emoji_Modifier}?)*)(?![\p{Grapheme_Extend}\p{Emoji_Modifier}\u200D])/u;
+function spaceAvatar(name) {
+  return EMOJI.exec(name)?.[0] ?? ([...name][0]?.toUpperCase() ?? "?");
 }
 
 // A space speaks up only when something in it needs you.
@@ -467,8 +462,6 @@ export default class Spaces extends View {
     const colors = shared("space.colors") ?? {};
     const color = colors[w.id] ?? "ansi6";
     const fill = color.startsWith("#") ? color : (MARK[color] ?? t[color]);
-    // A worktree row draws its branch icon, not an avatar: its name stays whole.
-    const lead = tree ? { emoji: null, text: w.name } : leadEmoji(w.name);
     return v_flex()
       .relative()
       .id(`space-${w.id}`)
@@ -514,9 +507,8 @@ export default class Spaces extends View {
           .gap(9)
           .items_center()
           .when(Boolean(tree), el => el.pl(22).child(svg("mods/workspace-chrome/branch.svg").size(13).flex_none().text_color(t.dim)))
-          .when(Boolean(lead.emoji), el => el.child(h_flex().size(18).flex_none().items_center().justify_center().text_size(15).child(lead.emoji)))
-          .when(!tree && !lead.emoji, el => el.child(h_flex().size(18).flex_none().rounded(5).bg(fill).items_center().justify_center().text_size(10.5).font_bold().text_color("#ffffff").child([...w.name][0]?.toUpperCase() ?? "?")))
-          .child(div().flex_initial().min_w(SIDE_MIN).truncate().text_color(t.foreground).child(lead.text))
+          .when(!tree, el => el.child(h_flex().size(18).flex_none().rounded(5).bg(fill).items_center().justify_center().text_size(10.5).font_bold().text_color("#ffffff").child(spaceAvatar(w.name))))
+          .child(div().flex_initial().min_w(SIDE_MIN).truncate().text_color(t.foreground).child(w.name))
           .child(g ? this.gitTail(g, tree, w.name, t) : div().flex_1()),
       );
   }
