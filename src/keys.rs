@@ -45,6 +45,7 @@ const SHIPPED_MACOS_KEYS: &[&str] = &[
     include_str!("keys/shipped/v0.1.4-keys.macos.json"),
     include_str!("keys/shipped/v0.1.5-keys.macos.json"),
     include_str!("keys/shipped/v0.1.15-keys.macos.json"),
+    include_str!("keys/shipped/v0.1.17-keys.macos.json"),
 ];
 
 #[derive(serde::Deserialize)]

@@ -636,4 +636,10 @@ Maximize the window, or back.
 
 No arguments.
 
+## `window.emoji`
+
+Open the Emoji & Symbols picker over the focused terminal (macOS).
+
+No arguments.
+
 [Back to Herdr](../README.md)

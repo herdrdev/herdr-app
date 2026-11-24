@@ -720,6 +720,7 @@ The main ones:
   explicitly forget the old identity and pair again with the same name and target.
   Other unreachable machines don't offer this.
 - Window: `window.minimize`, `window.maximize` (or back), `window.close`.
+  On macOS, `window.emoji` opens the Emoji & Symbols picker (ctrl-cmd-space).
 - macOS: `app.quit`, `app.hide`, `app.hide_others`, `app.show_all`.
 
 When the user runs a command without a required name (a key, a click), Herdr

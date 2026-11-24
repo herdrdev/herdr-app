@@ -219,6 +219,8 @@ impl AppWindow {
             "window.maximize" => win::toggle_maximize(window),
             #[cfg(not(windows))]
             "window.maximize" => window.zoom_window(),
+            // Only macOS has a system picker; elsewhere GPUI does nothing.
+            "window.emoji" => window.show_character_palette(),
             _ => {}
         }
     }

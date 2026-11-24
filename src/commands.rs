@@ -111,6 +111,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("window.close", &[], "Close the window (on Linux, quits)."),
     cmd("window.minimize", &[], "Minimize the window."),
     cmd("window.maximize", &[], "Maximize the window, or back."),
+    cmd("window.emoji", &[], "Open the Emoji & Symbols picker over the focused terminal (macOS)."),
 ];
 
 pub fn find(name: &str) -> Option<&'static Command> {

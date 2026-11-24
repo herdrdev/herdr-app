@@ -102,6 +102,8 @@ pub(crate) fn menus(layouts: &[String], shown: Option<&str>) -> Vec<Menu> {
             MenuItem::os_action("Paste", ShellAction::new("terminal.paste"), OsAction::Paste),
             MenuItem::separator(),
             command("Find…", "terminal.search"),
+            MenuItem::separator(),
+            command("Emoji & Symbols", "window.emoji"),
         ]),
         Menu::new("View").items([
             MenuItem::submenu(Menu::new("Layout").items(layout_items)),
@@ -192,6 +194,7 @@ mod tests {
         assert_eq!(key("Copy").as_deref(), Some("cmd-c"));
         assert_eq!(key("Toggle Sidebar").as_deref(), Some("cmd-b"));
         assert_eq!(key("Minimize").as_deref(), Some("cmd-m"));
+        assert_eq!(key("Emoji & Symbols").as_deref(), Some("ctrl-cmd-space"));
     }
 
     #[test]
