@@ -54,11 +54,19 @@ fn divider_interaction(cx: &mut gpui::TestAppContext) {
     switch("test", cx);
     assert!(hovered(cx), "reselecting the layout must keep hover under the stationary pointer");
 
+    view.update_in(cx, |this, window, cx| this.run("layout.hide", json!({ "id": "right" }), window, cx));
+    draw(cx);
+    let elsewhere = point(px(200.0), px(90.0));
+    cx.simulate_mouse_move(elsewhere, None, Modifiers::default());
+    view.update_in(cx, |this, window, cx| this.run("layout.show", json!({ "id": "right" }), window, cx));
+    assert!(!hovered(cx), "showing the divider again away from the pointer must clear its highlight");
+    cx.simulate_mouse_move(edge, None, Modifiers::default());
+    assert!(hovered(cx), "the shown divider still responds to hover");
+
     cx.simulate_mouse_down(edge, MouseButton::Left, Modifiers::default());
     assert!(active_line(cx), "the active color appears before the first drag motion");
     switch("other", cx);
     assert!(!active_line(cx), "the new layout's divider cannot inherit the old drag");
-    let elsewhere = point(px(200.0), px(90.0));
     cx.simulate_mouse_move(elsewhere, MouseButton::Left, Modifiers::default());
     cx.simulate_mouse_up(elsewhere, MouseButton::Left, Modifiers::default());
     assert_eq!(

@@ -3611,6 +3611,7 @@ impl AppWindow {
                 if n.look.theme == self.chrome.look.theme {
                     state.theme = self.picked_theme.clone();
                 }
+                self.reset_divider_interaction();
                 self.chrome = self.file_chrome.clone();
                 state.apply(&mut self.chrome);
                 self.picked_theme = state.theme;
@@ -4622,7 +4623,7 @@ impl AppWindow {
     }
 
     /// `frame`: how panes are wrapped here (inside a framed tab), else None.
-    fn render_node(&self, n: &Node, focused: &HashSet<String>, frame: Option<&PaneFrame>, cx: &mut Context<Self>) -> AnyElement {
+    fn render_node(&self, n: &Node, focused: &HashSet<String>, frame: Option<&PaneFrame>, rendered_dividers: &mut HashSet<(String, usize)>, cx: &mut Context<Self>) -> AnyElement {
         let mut el = div().relative().overflow_hidden().size_full().flex();
         let bounds_map = self.bounds.clone();
         let id = n.id.clone();
@@ -4633,7 +4634,7 @@ impl AppWindow {
         }
         let el = match &n.kind {
             Kind::Block { content } => {
-                let inner = self.render_block(n, content, focused, cx);
+                let inner = self.render_block(n, content, focused, rendered_dividers, cx);
                 match frame.filter(|_| n.is_pane()) {
                     Some(f) => el.child(self.frame_pane(n, f, focused.contains(&n.id), inner, cx)),
                     None => el.child(inner),
@@ -4652,12 +4653,12 @@ impl AppWindow {
                     .max(f32::EPSILON);
                 for (i, child) in shown.iter().enumerate() {
                     if i > 0 {
-                        el = el.child(self.separator(n, axis, gap, i - 1, cx));
+                        el = el.child(self.separator(n, axis, gap, i - 1, rendered_dividers, cx));
                     }
                     // No clipping here: a child's shadow may fall outside it (the child clips itself).
                     let mut slot = div().relative().flex().min_w_0().min_h_0();
                     slot = sized(slot, child, axis, total);
-                    el = el.child(slot.child(self.render_node(child, focused, frame, cx)));
+                    el = el.child(slot.child(self.render_node(child, focused, frame, rendered_dividers, cx)));
                 }
                 el
             }
@@ -4672,7 +4673,7 @@ impl AppWindow {
                     (h.bottom(), div().flex_none().h(settings::z(height)).w_full().flex().child(head))
                 });
                 let body = match n.active_child() {
-                    Some(child) => self.render_node(child, focused, frame, cx),
+                    Some(child) => self.render_node(child, focused, frame, rendered_dividers, cx),
                     None => div().into_any_element(),
                 };
                 let body = div().flex_1().min_h_0().flex().child(body);
@@ -4687,7 +4688,7 @@ impl AppWindow {
         el.children(self.render_floats(n, cx)).children(self.pane_grip(&n.id, row, cx)).into_any_element()
     }
 
-    fn render_block(&self, n: &Node, content: &Content, focused: &HashSet<String>, cx: &mut Context<Self>) -> AnyElement {
+    fn render_block(&self, n: &Node, content: &Content, focused: &HashSet<String>, rendered_dividers: &mut HashSet<(String, usize)>, cx: &mut Context<Self>) -> AnyElement {
         match content {
             Content::Terminal { .. } => match self.pane_term(&n.id) {
                 Some(t) => {
@@ -4728,7 +4729,7 @@ impl AppWindow {
                     .into_any_element(),
             },
             Content::Context { .. } => match self.model.active_tab() {
-                Some(c) => self.render_node(c.shown(), focused, self.pane_frame(), cx),
+                Some(c) => self.render_node(c.shown(), focused, self.pane_frame(), rendered_dividers, cx),
                 None if self.documents.get("").is_some_and(|s| s.layout() == "loading") => div().size_full().into_any_element(),
                 None => {
                     let key = crate::keys::listing().into_iter().find(|(_, _, a)| a == "space.new").map(|(_, k, _)| format!(" ({k})"));
@@ -4816,12 +4817,14 @@ impl AppWindow {
         row.into_any_element()
     }
 
-    fn separator(&self, n: &Node, axis: Axis, gap: f32, index: usize, cx: &mut Context<Self>) -> AnyElement {
+    fn separator(&self, n: &Node, axis: Axis, gap: f32, index: usize, rendered_dividers: &mut HashSet<(String, usize)>, cx: &mut Context<Self>) -> AnyElement {
         let row = axis == Axis::Row;
         let zoom = settings::zoom();
         let resizable = n.resizable();
-        let hovered = resizable && self.divider_window_hovered && self.drag.is_none()
-            && self.divider_hover.iter().any(|(id, i)| *id == n.id && *i == index);
+        let hover_key = (resizable && n.divider.as_ref().is_some_and(|d| d.hover.is_some()))
+            .then(|| (n.id.clone(), index));
+        let hovered = self.divider_window_hovered && self.drag.is_none()
+            && hover_key.as_ref().is_some_and(|key| self.divider_hover.contains(key));
         let dragging = resizable && self.drag.as_ref().is_some_and(|d| d.container == n.id && d.index == index && d.axis == axis);
         let line = n.divider.as_ref().map(|d| (d.width * zoom, c(d.color_for(hovered, dragging))));
         let width = pane_size::separator_width(n, gap) * zoom;
@@ -4853,10 +4856,10 @@ impl AppWindow {
                         cx.notify();
                     }
                 }));
-            if n.divider.as_ref().is_some_and(|d| d.hover.is_some()) {
+            if let Some(key) = hover_key {
                 let epoch = self.divider_hover_epoch;
                 let id = SharedString::from(format!("divider-{epoch}-{}-{index}", n.id));
-                let key = (n.id.clone(), index);
+                rendered_dividers.insert(key.clone());
                 sep = sep.child(handle.id(id).on_hover(cx.listener(move |this, over: &bool, _, cx| {
                     if this.divider_hover_epoch != epoch {
                         return;
@@ -4941,7 +4944,7 @@ impl AppWindow {
         }
     }
 
-    fn render_overlays(&self, viewport: Size<Pixels>, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn render_overlays(&self, viewport: Size<Pixels>, rendered_dividers: &mut HashSet<(String, usize)>, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut windows = Vec::new();
         let mut overlays = Vec::new();
         let mut toasts = Vec::new();
@@ -4954,7 +4957,7 @@ impl AppWindow {
             let (w, h) = (span(o.size.width, viewport.width), span(o.size.height, viewport.height));
             let sized = |v: f32| v > 0.0 || o.kind != OverlayKind::Window;
             let content = match &o.layout {
-                Some(l) => self.render_node(l, &HashSet::new(), None, cx),
+                Some(l) => self.render_node(l, &HashSet::new(), None, rendered_dividers, cx),
                 None => self.render_slot(&o.slot, cx),
             };
             let fit_toast = o.kind == OverlayKind::Toast && o.fit;
@@ -5652,9 +5655,12 @@ impl Render for AppWindow {
         self.divider_window_hovered = !cfg!(any(target_os = "linux", target_os = "windows", target_os = "freebsd"))
             || window.is_window_hovered();
         let focused = self.focused_path(window, cx);
-        let tree = self.render_node(&self.chrome, &focused, None, cx);
+        let mut rendered_dividers = HashSet::new();
+        let tree = self.render_node(&self.chrome, &focused, None, &mut rendered_dividers, cx);
         let tree = self.window_frame(tree, window, cx);
-        let overlays = self.render_overlays(window.viewport_size(), cx);
+        let overlays = self.render_overlays(window.viewport_size(), &mut rendered_dividers, cx);
+        // GPUI drops a removed handle without sending its hover-leave callback.
+        self.divider_hover.retain(|key| rendered_dividers.contains(key));
         let tracker = self.float_tracker(cx);
         let win_tracker = self.window_tracker(cx);
         let pane_drag = self.pane_drag_layer(cx);
@@ -5721,10 +5727,7 @@ impl Render for AppWindow {
                     return;
                 }
                 if ev.pressed_button != Some(MouseButton::Left) {
-                    this.drag = None;
-                    this.save();
-                    this.publish(cx);
-                    cx.notify();
+                    this.finish_divider_drag(window, cx);
                     return;
                 }
                 this.drag_to(ev.position);
