@@ -10,5 +10,13 @@ if [ -z "${GPUI_X11_SCALE_FACTOR:-}" ]; then
   export GPUI_X11_SCALE_FACTOR
 fi
 
+# Mesa's CPU rasterizer (llvmpipe/lavapipe) starts one thread per core. On the
+# small VMs this build targets, that competes with the compositor and the core;
+# one thread keeps typing responsive. Raise it on a machine with cores to spare.
+if [ -z "${LP_NUM_THREADS:-}" ]; then
+  LP_NUM_THREADS=1
+  export LP_NUM_THREADS
+fi
+
 dir=$(dirname "$0")
 exec "$dir/herdr-app" "$@"
