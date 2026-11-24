@@ -1176,7 +1176,12 @@ When `s.position` is present, place a popup with
 `EditorState.new({
 language, value, readonly, font_family: settings().font_family, syntax: {
 keyword: theme().ansi5, ... } })` + `Editor.new(state)` is a code view (readonly)
-or editor with syntax highlighting, line numbers and folding. For Markdown
+or editor with syntax highlighting, line numbers and folding. Its state has
+`scroll_top()` / `set_scroll_top(line)`, an `on("scroll")` event and
+`set_line_decorations([{line, kind: "added" | "removed" | "changed", color?}])`
+(a line tint and gutter marker, e.g. for diffs). A viewer opens
+beside the shell as a pane: `pane.split {direction, mod, props: { file }}`.
+For Markdown
 source, set `language: "markdown"` or `"md"`. The `syntax` keys are `heading`,
 `strong`, `emphasis`, `code`, `quote`, `list`, and `link` (the URL). Use
 `theme()` colors for light and dark layouts. Built-in syntax colors use a

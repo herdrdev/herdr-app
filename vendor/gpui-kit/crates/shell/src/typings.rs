@@ -3295,7 +3295,18 @@ const BASE: &str = r#"  /** A row. */
     set_selected_range(range: InputRange): void;
     /** Replaces the selection with `text`, as typing would (one undo step). */
     replace(text: string): void;
-    on(event: "change" | "submit" | "focus" | "blur" | "paste_other", handler: (event: InputEvent, cx: Context) => void): boolean;
+    /** HERDR: the first visible row (fractional, 0-based); equals the line when soft_wrap is off. */
+    scroll_top(): number;
+    /** HERDR: scrolls so row `line` is at the top, clamped to the content. Fires `scroll`. */
+    set_scroll_top(line: number): void;
+    /**
+     * HERDR: whole-line highlights: a background tint and a gutter marker.
+     * Replaces the previous set; pass `[]` to clear. `line` is 0-based;
+     * `color` (#rgb, #rrggbb, #rrggbbaa) overrides the kind's default.
+     */
+    set_line_decorations(decorations: { line: number; kind: "added" | "removed" | "changed"; color?: string }[]): void;
+    /** `scroll` fires after the vertical scroll position changes; read `scroll_top()`. */
+    on(event: "change" | "submit" | "focus" | "blur" | "paste_other" | "scroll", handler: (event: InputEvent, cx: Context) => void): boolean;
     /** Changes the indent once the file's style is known. `hard_tabs` defaults to false. */
     set_tab_size(tab_size: number, hard_tabs?: boolean): void;
     /** Moves the keyboard onto the editor. */

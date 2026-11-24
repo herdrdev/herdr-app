@@ -12,6 +12,68 @@ use std::{
 
 
 #[gpui::test]
+fn editor_scrolls_by_row_reports_scrolls_and_keeps_line_decorations(cx: &mut TestAppContext) {
+    use gpui::*;
+    use gpui_base::input::{Editor, EditorState, InputEvent, LineDecoration};
+
+    struct Host(Entity<EditorState>);
+    impl Render for Host {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().h(px(240.)).w(px(400.)).child(Editor::new(&self.0))
+        }
+    }
+    cx.update(gpui_shell::init);
+    let text = (0..200).map(|i| format!("line {i}")).collect::<Vec<_>>().join("\n");
+    let mut editor = None;
+    let (_, cx) = cx.add_window_view(|window, cx| {
+        let state = cx.new(|cx| {
+            let mut state = EditorState::new(window, cx);
+            state.set_value(text, window, cx);
+            state
+        });
+        editor = Some(state.clone());
+        Host(state)
+    });
+    let editor = editor.unwrap();
+    let scrolls = Rc::new(Cell::new(0));
+    let seen = scrolls.clone();
+    let _subscription = cx.update(|_, cx| {
+        cx.subscribe(&editor, move |_, event: &InputEvent, _| {
+            if matches!(event, InputEvent::Scroll) {
+                seen.set(seen.get() + 1);
+            }
+        })
+    });
+    // Before the first layout the row waits for the line height.
+    cx.update(|_, cx| editor.update(cx, |state, cx| state.set_scroll_top_rows(50., cx)));
+    assert_eq!(cx.update(|_, cx| editor.read(cx).scroll_top_rows()), 50.);
+    for _ in 0..3 {
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.run_until_parked();
+    }
+    let top = cx.update(|_, cx| editor.read(cx).scroll_top_rows());
+    assert!((top - 50.).abs() < 0.01, "top {top}");
+    assert!(scrolls.get() >= 1);
+
+    let before = scrolls.get();
+    cx.update(|_, cx| editor.update(cx, |state, cx| state.set_scroll_top_rows(10., cx)));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    cx.run_until_parked();
+    let top = cx.update(|_, cx| editor.read(cx).scroll_top_rows());
+    assert!((top - 10.).abs() < 0.01, "top {top}");
+    assert_eq!(scrolls.get(), before + 1);
+    // A paint that doesn't move reports nothing.
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert_eq!(scrolls.get(), before + 1);
+
+    let red = gpui::hsla(0., 1., 0.5, 1.);
+    let decorations = vec![LineDecoration { line: 12, background: red.opacity(0.2), marker: red }];
+    cx.update(|_, cx| editor.update(cx, |state, cx| state.set_line_decorations(decorations.clone(), cx)));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    assert_eq!(cx.update(|_, cx| editor.read(cx).line_decorations().to_vec()), decorations);
+}
+
+#[gpui::test]
 fn mod_text_selection_stays_in_its_shell_root(cx: &mut TestAppContext) {
     use gpui::*;
     use gpui_base::{SelectableText, TextSelection, TextView, TextViewState};

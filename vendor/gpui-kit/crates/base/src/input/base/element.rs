@@ -3010,7 +3010,7 @@ impl<M: InputModeKind> Element for TextElement<M> {
         window: &mut Window,
         cx: &mut App,
     ) {
-        let (focus_handle, show_cursor, disabled, selected_range, editor_style, editor_paddings) = {
+        let (focus_handle, show_cursor, disabled, selected_range, editor_style, editor_paddings, line_decorations) = {
             let state = self.state.read(cx);
             (
                 state.focus_handle.clone(),
@@ -3019,6 +3019,7 @@ impl<M: InputModeKind> Element for TextElement<M> {
                 *state.active_selection(),
                 state.editor_style.clone(),
                 state.editor_paddings,
+                state.line_decorations.clone(),
             )
         };
         let focused = focus_handle.is_focused(window);
@@ -3058,6 +3059,13 @@ impl<M: InputModeKind> Element for TextElement<M> {
                 let is_active = prepaint.current_row == Some(buffer_line);
                 let p = point(input_bounds.origin.x, origin.y + offset_y);
                 let height = line_height * lines.len() as f32;
+                // HERDR: whole-line decorations sit under the active line.
+                if let Some(decoration) = line_decorations.iter().find(|d| d.line == buffer_line) {
+                    window.paint_quad(fill(
+                        Bounds::new(p, size(input_bounds.size.width, height)),
+                        decoration.background,
+                    ));
+                }
                 // Paint the current line background
                 if is_active {
                     if let Some(bg_color) = active_line_color {
@@ -3266,6 +3274,16 @@ impl<M: InputModeKind> Element for TextElement<M> {
                 let is_active = prepaint.current_row == Some(buffer_line);
 
                 let height = line_height * lines.len() as f32;
+                // HERDR: a line decoration's marker is a bar at the gutter's left edge.
+                if let Some(decoration) = line_decorations.iter().find(|d| d.line == buffer_line) {
+                    window.paint_quad(fill(
+                        Bounds::new(
+                            point(gutter_bounds.origin.x, p.y),
+                            size(px(3.), height),
+                        ),
+                        decoration.marker,
+                    ));
+                }
                 // paint active line number background
                 if is_active {
                     if let Some(bg_color) = active_line_color {
@@ -3315,6 +3333,14 @@ impl<M: InputModeKind> Element for TextElement<M> {
             state.scroll_size = prepaint.scroll_size;
             state.update_scroll_offset(Some(prepaint.cursor_scroll_offset), cx);
             state.deferred_scroll_offset = None;
+            if let Some(rows) = state.pending_scroll_rows.take() {
+                state.set_scroll_top_rows(rows, cx);
+            }
+            let scroll_y = state.scroll_handle.offset().y;
+            if scroll_y != state.reported_scroll_y {
+                state.reported_scroll_y = scroll_y;
+                cx.emit(crate::input::InputEvent::Scroll);
+            }
 
             // Layout consumers need changed geometry, not another notification
             // for every paint of an unchanged input.
