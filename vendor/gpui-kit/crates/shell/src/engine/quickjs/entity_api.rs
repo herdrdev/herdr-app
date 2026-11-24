@@ -518,6 +518,21 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
         }),
     )?;
 
+    // HERDR: toggle wrapping on a live editor; it re-wraps lines without re-highlighting.
+    let wrap_editor = runtime.clone();
+    globals.set(
+        "__editor_set_soft_wrap",
+        Func::from(
+            move |ctx: Ctx<'_>, handle: EntityHandle, wrap: bool| -> JsResult<()> {
+                let state = live_editor(&ctx, &wrap_editor, handle)?;
+                scope::with_current(|window, cx| {
+                    state.update(cx, |state, cx| state.set_soft_wrap(wrap, window, cx));
+                })
+                .ok_or_else(|| needs_call(&ctx, "set_soft_wrap()"))
+            },
+        ),
+    )?;
+
     let read_editor = runtime.clone();
     globals.set(
         "__editor_value",
