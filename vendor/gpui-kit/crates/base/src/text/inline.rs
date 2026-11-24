@@ -964,9 +964,6 @@ impl Element for Inline {
         if !self.range_backgrounds.is_empty() {
             self.paint_range_highlights(&text_layout, window);
         }
-        self.styled_text
-            .paint(global_id, None, bounds, &mut (), &mut (), window, cx);
-
         // layout selections
         let (is_selectable, is_selection, selection) =
             self.layout_selections(&text_layout, &bounds, window, cx);
@@ -1014,6 +1011,9 @@ impl Element for Inline {
                     .register_selection_edges(start, end);
             }
         }
+
+        self.styled_text
+            .paint(global_id, None, bounds, &mut (), &mut (), window, cx);
 
         if is_selectable {
             if let Some(text_view_state) = GlobalState::global(cx).text_view_state() {

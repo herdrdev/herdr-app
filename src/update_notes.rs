@@ -117,6 +117,8 @@ fn save(record: &Record) {
 
 /// Called once the live window has connected and synchronized successfully.
 pub fn started(first_install: bool) {
+    // Test windows aren't launches: a spotlight release would open What's new over every one.
+    if cfg!(test) { return; }
     let mut launch = LAUNCH.lock().unwrap();
     if launch.is_some() { return; }
     let record = std::fs::read(path("update-notes.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
@@ -358,7 +360,7 @@ mod tests {
     }
     #[test]
     fn cached_media_reads_dimensions_from_extensionless_files() {
-        let root = std::path::PathBuf::from(format!("/var/tmp/herdr-media-test-{}", std::process::id()));
+        let root = crate::test_tmp().join(format!("herdr-media-test-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let file = root.join("hashed-image");
         image::RgbaImage::new(12, 7).save_with_format(&file, image::ImageFormat::Png).unwrap();
@@ -370,7 +372,7 @@ mod tests {
     }
     #[test]
     fn media_cache_reads_once_and_retries_after_download() {
-        let root = std::path::PathBuf::from(format!("/var/tmp/herdr-media-cache-test-{}", std::process::id()));
+        let root = crate::test_tmp().join(format!("herdr-media-cache-test-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let file = root.join("hashed-image");
         let mut cache = MediaCache::default();

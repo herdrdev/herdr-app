@@ -419,6 +419,7 @@ pub struct HostModule {
     /// synchronous or asynchronous, never both.
     async_functions: BTreeMap<String, HostAsyncFunction>,
     components: BTreeMap<String, ComponentFactory>,
+    cancellation_values: BTreeMap<String, HostValue>,
     /// The module's TypeScript face, if the host wrote one. See
     /// [`HostModule::declarations`].
     declarations: Option<String>,
@@ -437,6 +438,7 @@ impl HostModule {
             functions: BTreeMap::new(),
             async_functions: BTreeMap::new(),
             components: BTreeMap::new(),
+            cancellation_values: BTreeMap::new(),
             declarations: None,
         }
     }
@@ -455,6 +457,7 @@ impl HostModule {
         let name = name.into();
         self.functions.remove(&name);
         self.async_functions.remove(&name);
+        self.cancellation_values.remove(&name);
         self.components.insert(name, ComponentFactory::new(build));
         self
     }
@@ -489,6 +492,7 @@ impl HostModule {
         let name = name.into();
         self.components.remove(&name);
         self.async_functions.remove(&name);
+        self.cancellation_values.remove(&name);
         self.functions.insert(name, Rc::new(body));
         self
     }
@@ -554,6 +558,7 @@ impl HostModule {
     {
         let name = name.into();
         self.components.remove(&name);
+        self.cancellation_values.remove(&name);
         // One name, one kind. Registering over the other table rather than
         // beside it keeps `function_names` a single list and stops a call
         // having to decide which of two entries it meant.
@@ -566,6 +571,28 @@ impl HostModule {
             }),
         );
         self
+    }
+
+    /// Registers an async function whose returned promise has `cancel()`.
+    /// Explicit cancellation drops its future and resolves with `cancelled`.
+    /// Closing its owning view still leaves the promise pending.
+    pub fn cancellable_async_function<F>(
+        self,
+        name: impl Into<String>,
+        cancelled: HostValue,
+        body: impl Fn(&HostArguments) -> Result<F, HostError> + 'static,
+    ) -> Self
+    where
+        F: Future<Output = HostResult> + Send + 'static,
+    {
+        let name = name.into();
+        let mut module = self.async_function(name.clone(), body);
+        module.cancellation_values.insert(name, cancelled);
+        module
+    }
+
+    pub(crate) fn cancellation_value(&self, name: &str) -> Option<HostValue> {
+        self.cancellation_values.get(name).cloned()
     }
 
     /// Describes this module in TypeScript, for the generated declarations.
@@ -777,18 +804,6 @@ pub const RESERVED_SPECIFIERS: &[&str] = &[
     "zlib",
 ];
 
-/// Allocates the identity of one registry. See [`HostModules::generation`].
-fn next_generation() -> u64 {
-    thread_local! {
-        static NEXT: Cell<u64> = const { Cell::new(1) };
-    }
-    NEXT.with(|next| {
-        let generation = next.get();
-        next.set(generation.wrapping_add(1));
-        generation
-    })
-}
-
 /// Every HostModule a host has granted.
 ///
 /// Crate-internal: a host builds [`HostModule`]s and hands them over one at a
@@ -797,19 +812,9 @@ fn next_generation() -> u64 {
 /// would cost more than it saved.
 ///
 /// Empty by default, which denies everything.
-#[derive(Clone)]
+#[derive(Clone, Default)]
 pub(crate) struct HostModules {
     modules: BTreeMap<String, HostModule>,
-    generation: u64,
-}
-
-impl Default for HostModules {
-    fn default() -> Self {
-        Self {
-            modules: BTreeMap::new(),
-            generation: next_generation(),
-        }
-    }
 }
 
 impl HostModules {
@@ -817,31 +822,13 @@ impl HostModules {
         Self::default()
     }
 
-    /// What distinguishes this registry from every other one built on this
-    /// thread.
-    ///
-    /// The engine caches a linked module by its resolved name, for the lifetime
-    /// of the runtime — so two plugins importing `workspace`, or one host adding
-    /// a module after another was linked, would otherwise share whichever module
-    /// was linked first, exports and all. Tagging the resolved name with this
-    /// makes each version of the registry a distinct module as far as that cache
-    /// is concerned, the same trick a reload uses to re-read an application's
-    /// own files.
-    pub(crate) fn generation(&self) -> u64 {
-        self.generation
-    }
-
-    /// Adds one module, and takes a new identity.
-    ///
-    /// The identity changes because the set of importable names just did: a
-    /// module linked against the old set must not be served for the new one.
+    /// Adds one module. Engines distinguish linked modules by export surface.
     ///
     /// Registering the same name twice replaces the earlier module rather than
     /// merging into it: two registrations of one name are a mistake, and
     /// merging would hide it behind a module that half works.
     pub(crate) fn insert(&mut self, module: HostModule) {
         self.modules.insert(module.name.clone(), module);
-        self.generation = next_generation();
     }
 
     /// Whether this host has granted anything at all. Read by the tests that
@@ -1192,15 +1179,6 @@ mod tests {
         assert!(error.message().contains("websocket"), "{}", error.message());
     }
 
-    /// Two registries are two modules to the engine's module cache, which is
-    /// what keeps one plugin's `workspace` from being served to another.
-    #[test]
-    fn every_registry_has_its_own_generation() {
-        let first = HostModules::new();
-        let second = HostModules::new();
-        assert_ne!(first.generation(), second.generation());
-    }
-
     #[test]
     fn exporting_a_reserved_name_fails_rather_than_silently_dropping_it() {
         assert!(
@@ -1277,17 +1255,6 @@ mod tests {
             modules.get("workspace").unwrap().function_names(),
             vec!["second"]
         );
-    }
-
-    /// Adding a module changes which names are importable, so the registry has
-    /// to become a different one as far as the engine's module cache is
-    /// concerned.
-    #[test]
-    fn adding_a_module_takes_a_new_generation() {
-        let mut modules = HostModules::new();
-        let before = modules.generation();
-        modules.insert(HostModule::new("workspace"));
-        assert_ne!(modules.generation(), before);
     }
 
     #[test]

@@ -143,6 +143,13 @@
       ]
     },
     {
+      "name": "oh-my-pi agent icon",
+      "source": "https://github.com/can1357/oh-my-pi",
+      "files": [
+        "defaults/icons/LICENSE-oh-my-pi.txt"
+      ]
+    },
+    {
       "name": "Simple Icons brand icons",
       "source": "https://simpleicons.org; brands remain their owners' trademarks.",
       "files": [

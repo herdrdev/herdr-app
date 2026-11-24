@@ -14,7 +14,7 @@ use std::rc::Weak;
 
 use gpui::ScrollStrategy;
 use gpui_base::NumberStep;
-use gpui_base::VirtualListScrollHandle;
+use gpui_base::{ScrollbarHandle, VirtualListScrollHandle};
 use gpui_base::input::{InputBaseState, InputModeKind};
 use gpui_base::slider::{SliderScale, SliderValue};
 use rquickjs::{
@@ -219,6 +219,18 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
         }),
     )?;
 
+    let blur_input = runtime.clone();
+    globals.set(
+        "__input_blur",
+        Func::from(move |ctx: Ctx<'_>, handle: EntityHandle| -> JsResult<()> {
+            let state = live(&ctx, &blur_input, handle)?;
+            scope::with_current(|window, cx| {
+                state.update(cx, |state, cx| state.blur(window, cx));
+            })
+            .ok_or_else(|| needs_call(&ctx, "blur()"))
+        }),
+    )?;
+
     let masked_runtime = runtime.clone();
     globals.set(
         "__input_set_masked",
@@ -386,6 +398,18 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
         }),
     )?;
 
+    let blur_textarea = runtime.clone();
+    globals.set(
+        "__textarea_blur",
+        Func::from(move |ctx: Ctx<'_>, handle: EntityHandle| -> JsResult<()> {
+            let state = live_textarea(&ctx, &blur_textarea, handle)?;
+            scope::with_current(|window, cx| {
+                state.update(cx, |state, cx| state.blur(window, cx));
+            })
+            .ok_or_else(|| needs_call(&ctx, "blur()"))
+        }),
+    )?;
+
     let wrap_runtime = runtime.clone();
     globals.set(
         "__textarea_set_soft_wrap",
@@ -448,6 +472,12 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
                         "EditorState font_size must be positive and finite",
                     ));
                 }
+                let tab = editor_tab_size(
+                    &ctx,
+                    "EditorState tab_size",
+                    options.tab_size,
+                    options.hard_tabs,
+                )?;
                 let mut colors = std::collections::HashMap::new();
                 for (name, value) in &options.syntax {
                     let color = crate::value::Bridged::Str(value.clone())
@@ -465,6 +495,7 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
                         .entities()
                         .create_editor(
                             options,
+                            tab,
                             style,
                             scope::current_application_generation(),
                             window,
@@ -473,6 +504,93 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
                         .map_err(|_| entity_limit_reached(&ctx))
                 })
                 .ok_or_else(|| needs_call(&ctx, "EditorState.new(...)"))?
+            },
+        ),
+    )?;
+
+    // HERDR: a textarea's selection operations (read, set, replace).
+    let token_editor = runtime.clone();
+    globals.set(
+        "__editor_text_call",
+        Func::from(
+            move |ctx: Ctx<'_>,
+                  handle: EntityHandle,
+                  method: String,
+                  args: super::PlainDataArguments|
+                  -> JsResult<super::DataResult> {
+                if !crate::input_tokens::EDITOR_METHODS
+                    .iter()
+                    .any(|(name, readonly)| *name == method && *readonly)
+                {
+                    refuse_mutation_in_render(&ctx, &method)?;
+                }
+                let state = live_editor(&ctx, &token_editor, handle)?;
+                scope::with_current(|window, cx| {
+                    crate::input_tokens::invoke_editor(&state, &method, &args.0, window, cx)
+                })
+                .ok_or_else(|| {
+                    Exception::throw_type(&ctx, "editor operation requires a live host call")
+                })?
+                .map(super::DataResult)
+                .map_err(|e| super::state_operation_error(&ctx, e))
+            },
+        ),
+    )?;
+
+    let focus_editor = runtime.clone();
+    globals.set(
+        "__editor_focus",
+        Func::from(move |ctx: Ctx<'_>, handle: EntityHandle| -> JsResult<()> {
+            let state = live_editor(&ctx, &focus_editor, handle)?;
+            scope::with_current(|window, cx| {
+                state.update(cx, |state, cx| state.focus(window, cx));
+            })
+            .ok_or_else(|| needs_call(&ctx, "focus()"))
+        }),
+    )?;
+
+    let blur_editor = runtime.clone();
+    globals.set(
+        "__editor_blur",
+        Func::from(move |ctx: Ctx<'_>, handle: EntityHandle| -> JsResult<()> {
+            let state = live_editor(&ctx, &blur_editor, handle)?;
+            scope::with_current(|window, cx| {
+                state.update(cx, |state, cx| state.blur(window, cx));
+            })
+            .ok_or_else(|| needs_call(&ctx, "blur()"))
+        }),
+    )?;
+
+    let tab_editor = runtime.clone();
+    globals.set(
+        "__editor_set_tab_size",
+        Func::from(
+            move |ctx: Ctx<'_>,
+                  handle: EntityHandle,
+                  tab_size: f64,
+                  hard_tabs: bool|
+                  -> JsResult<()> {
+                let tab = editor_tab_size(&ctx, "set_tab_size(tab_size)", tab_size, hard_tabs)?;
+                let state = live_editor(&ctx, &tab_editor, handle)?;
+                scope::with_current(|_, cx| {
+                    state.update(cx, |state, cx| state.set_tab_size(tab, cx));
+                })
+                .ok_or_else(|| needs_call(&ctx, "set_tab_size()"))
+            },
+        ),
+    )?;
+
+    // HERDR: toggle wrapping on a live editor; it re-wraps lines without re-highlighting.
+    let wrap_editor = runtime.clone();
+    globals.set(
+        "__editor_set_soft_wrap",
+        Func::from(
+            move |ctx: Ctx<'_>, handle: EntityHandle, wrap: bool| -> JsResult<()> {
+                let state = live_editor(&ctx, &wrap_editor, handle)?;
+                scope::with_current(|window, cx| {
+                    state.update(cx, |state, cx| state.set_soft_wrap(wrap, window, cx));
+                })
+                .ok_or_else(|| needs_call(&ctx, "set_soft_wrap()"))
             },
         ),
     )?;
@@ -1157,6 +1275,36 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
     // `scroll_to_item` records an index the list consumes during its next
     // prepaint, so a handle rebuilt each frame would drop every request made
     // between two frames — which is every request a script can make.
+    let create_scroll = runtime.clone();
+    globals.set(
+        "__scroll_new",
+        Func::from(move |ctx: Ctx<'_>| -> JsResult<EntityHandle> {
+            refuse_creation_in_render(&ctx, "ScrollHandle.new()")?;
+            alive(&ctx, &create_scroll)?
+                .entities()
+                .create_scroll(scope::current_application_generation())
+                .map_err(|_| entity_limit_reached(&ctx))
+        }),
+    )?;
+    let scroll_to_item = runtime.clone();
+    globals.set(
+        "__scroll_to_item",
+        Func::from(move |ctx: Ctx<'_>, handle: EntityHandle, index: usize| -> JsResult<()> {
+            let scroll = alive(&ctx, &scroll_to_item)?
+                .entities().scroll(handle)
+                .ok_or_else(|| Exception::throw_type(&ctx, "this scroll handle has been released"))?;
+            scroll.pending.set(Some(index));
+            Ok(())
+        }),
+    )?;
+    let discard_scroll = runtime.clone();
+    globals.set(
+        "__scroll_release",
+        Func::from(move |handle: EntityHandle| {
+            discard_scroll.upgrade().is_some_and(|runtime| runtime.entities().release(handle))
+        }),
+    )?;
+
     let create_virtual_scroll = runtime.clone();
     globals.set(
         "__virtual_scroll_new",
@@ -1202,6 +1350,47 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
         Func::from(move |ctx: Ctx<'_>, handle: EntityHandle| -> JsResult<()> {
             live_virtual_scroll(&ctx, &scroll_to_bottom, handle)?.scroll_to_bottom();
             Ok(())
+        }),
+    )?;
+
+    // HERDR: where a scroll area is, read back by the script. Either kind of
+    // handle; pairs of scalars, shaped into objects by the prelude. Offsets
+    // count up from the start (GPUI's count down), in the pixels a script
+    // writes, so they compare with its own row heights at any zoom.
+    let offset = runtime.clone();
+    globals.set(
+        "__scroll_offset",
+        Func::from(move |ctx: Ctx<'_>, handle: EntityHandle| -> JsResult<Vec<f64>> {
+            read_scroll(&ctx, &offset, handle, |scroll, scale| {
+                let offset = scroll.offset();
+                vec![scrolled(offset.x, scale), scrolled(offset.y, scale)]
+            })
+        }),
+    )?;
+    let content_size = runtime.clone();
+    globals.set(
+        "__scroll_content_size",
+        Func::from(move |ctx: Ctx<'_>, handle: EntityHandle| -> JsResult<Vec<f64>> {
+            read_scroll(&ctx, &content_size, handle, |scroll, scale| {
+                let size = scroll.content_size();
+                vec![
+                    crate::value::script_px(size.width, scale),
+                    crate::value::script_px(size.height, scale),
+                ]
+            })
+        }),
+    )?;
+    let viewport_size = runtime.clone();
+    globals.set(
+        "__scroll_viewport_size",
+        Func::from(move |ctx: Ctx<'_>, handle: EntityHandle| -> JsResult<Vec<f64>> {
+            read_scroll(&ctx, &viewport_size, handle, |scroll, scale| {
+                let size = scroll.viewport_bounds().size;
+                vec![
+                    crate::value::script_px(size.width, scale),
+                    crate::value::script_px(size.height, scale),
+                ]
+            })
         }),
     )?;
 
@@ -1270,6 +1459,27 @@ fn live(
         .entities()
         .input(handle)
         .ok_or_else(|| Exception::throw_type(ctx, "this input state has been released"))
+}
+
+// HERDR: an editor's indent width: a whole number of columns, at most 16.
+const MAX_TAB_SIZE: f64 = 16.;
+
+fn editor_tab_size(
+    ctx: &Ctx<'_>,
+    what: &str,
+    tab_size: f64,
+    hard_tabs: bool,
+) -> JsResult<gpui_base::input::TabSize> {
+    if tab_size.fract() != 0. || !(1. ..=MAX_TAB_SIZE).contains(&tab_size) {
+        return Err(Exception::throw_type(
+            ctx,
+            &format!("{what} must be a whole number from 1 to {MAX_TAB_SIZE}"),
+        ));
+    }
+    Ok(gpui_base::input::TabSize {
+        tab_size: tab_size as usize,
+        hard_tabs,
+    })
 }
 
 // HERDR: a distinct resolver prevents mixing code-editor and textarea handles.
@@ -1648,6 +1858,26 @@ fn live_virtual_scroll(
         .entities()
         .virtual_scroll(handle)
         .ok_or_else(|| Exception::throw_type(ctx, "this scroll handle has been released"))
+}
+
+// HERDR: reads the position behind a `ScrollHandle` or a `VirtualListScrollHandle`.
+fn read_scroll<R>(
+    ctx: &Ctx<'_>,
+    runtime: &Weak<ShellRuntime>,
+    handle: EntityHandle,
+    read: impl FnOnce(&dyn ScrollbarHandle, f32) -> R,
+) -> JsResult<R> {
+    let runtime = alive(ctx, runtime)?;
+    let entities = runtime.entities();
+    let (scroll, scale) = entities.scroll_geometry(handle)
+        .ok_or_else(|| Exception::throw_type(ctx, "this scroll handle has been released"))?;
+    Ok(read(scroll, scale.get()))
+}
+
+// HERDR: GPUI's offset falls below zero as the content scrolls; a script reads
+// how far it has scrolled. Never negative, an overscroll included.
+fn scrolled(offset: gpui::Pixels, scale: f32) -> f64 {
+    (0. - crate::value::script_px(offset, scale)).max(0.)
 }
 
 fn live_focus(

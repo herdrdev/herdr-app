@@ -670,7 +670,6 @@ struct MacWindowState {
     wake_source: Option<dispatch2::DispatchRetained<dispatch2::DispatchSource>>,
     woken: bool,
     idle_frames: u32,
-    parked: bool,
     renderer: renderer::Renderer,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     event_callback: Option<Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>>,
@@ -1107,7 +1106,6 @@ impl MacWindow {
                 wake_source: None,
                 woken: false,
                 idle_frames: 0,
-                parked: false,
                 renderer: renderer::new_renderer(
                     renderer_context,
                     native_window as *mut _,
@@ -1885,7 +1883,21 @@ impl PlatformWindow for MacWindow {
             };
             this.native_window.setBackgroundColor_(background_color);
 
-            if background_appearance != WindowBackgroundAppearance::Blurred {
+            // From macOS 26 Liquid Glass rebuilt the layers under NSVisualEffectView, so the
+            // view below no longer blurs: the window turns see-through without frost. Ask the
+            // window server for the blur directly there instead.
+            if is_macos_version_at_least(NSOperatingSystemVersion::new(26, 0, 0)) {
+                let blurred = background_appearance == WindowBackgroundAppearance::Blurred;
+                let window_number: NSInteger = msg_send![this.native_window, windowNumber];
+                CGSSetWindowBackgroundBlurRadius(
+                    CGSMainConnectionID(),
+                    window_number,
+                    if blurred { WINDOW_SERVER_BLUR_RADIUS } else { 0 },
+                );
+                if let Some(blur_view) = this.blurred_view.take() {
+                    NSView::removeFromSuperview(blur_view);
+                }
+            } else if background_appearance != WindowBackgroundAppearance::Blurred {
                 if let Some(blur_view) = this.blurred_view {
                     NSView::removeFromSuperview(blur_view);
                     this.blurred_view = None;
@@ -3361,7 +3373,6 @@ extern "C" fn step(view: *mut c_void) {
             lock.idle_frames += 1;
             if lock.idle_frames >= 3 && lock.frame_source.as_ref().is_some_and(|f| f.is_running()) {
                 lock.stop_display_link();
-                lock.parked = true;
             }
         }
     }
@@ -3374,7 +3385,9 @@ extern "C" fn wake_frames(view: *mut c_void) {
     let mut lock = window_state.lock();
     lock.woken = true;
     lock.idle_frames = 0;
-    if std::mem::take(&mut lock.parked) {
+    if lock.request_frame_callback.is_some()
+        && !lock.frame_source.as_ref().is_some_and(|f| f.is_running())
+    {
         lock.start_display_link();
     }
 }
@@ -3817,6 +3830,15 @@ fn display_id_for_screen(screen: id) -> Option<CGDirectDisplayID> {
         let screen_number: NSUInteger = msg_send![screen_number, unsignedIntegerValue];
         Some(screen_number as CGDirectDisplayID)
     }
+}
+
+/// How far the window server blurs the desktop behind a blurred window (macOS 26+).
+const WINDOW_SERVER_BLUR_RADIUS: i64 = 50;
+
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn CGSMainConnectionID() -> id;
+    fn CGSSetWindowBackgroundBlurRadius(connection_id: id, window_id: NSInteger, radius: i64) -> i32;
 }
 
 extern "C" fn blurred_view_init_with_frame(this: &Object, _: Sel, frame: NSRect) -> id {

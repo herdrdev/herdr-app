@@ -1,4 +1,4 @@
-//! Startup geometry for panes that do not have a terminal view yet.
+//! Geometry for panes that aren't drawn: programs starting, and tabs that are hidden.
 //! Layout metrics are shared with the renderer; normal resize still handles pixel rounding.
 
 use super::*;
@@ -84,52 +84,143 @@ fn shares(children: &[&Node], available: f32, zoom: f32) -> Vec<f32> {
     sizes
 }
 
-fn pane_size(n: &Node, size: Size<Pixels>, target: &str, frame: Option<&PaneFrame>, focused: &HashSet<String>, zoom: f32) -> Option<Size<Pixels>> {
+fn block_bounds(n: &Node, bounds: Bounds<Pixels>, target: &str, frame: Option<&PaneFrame>, focused: &HashSet<String>, zoom: f32) -> Option<Bounds<Pixels>> {
     if n.hidden { return None; }
-    let mut size = content_size(n, size, focused.contains(&n.id), zoom);
+    let border = node_border(n, focused.contains(&n.id)).map_or(0.0, |line| line.width) * zoom;
+    let mut origin = bounds.origin + point(px(border), px(border));
+    let size = inset(bounds.size, 2.0 * border, 2.0 * border);
+    if n.content().is_some() {
+        return (n.id == target).then_some(Bounds::new(origin, size));
+    }
+    let (y, x) = padding(n);
+    origin += point(px(x * zoom), px(y * zoom));
+    let size = content_size(n, bounds.size, focused.contains(&n.id), zoom);
     match &n.kind {
-        Kind::Block { .. } if n.id == target => {
-            if let Some(frame) = frame.filter(|_| n.is_pane()) {
-                let border = frame_border(frame, focused.contains(&n.id)).map_or(0.0, |line| line.width) * zoom;
-                let header = frame.header.as_ref().filter(|h| !h.hover()).map_or(0.0, header_height) * zoom;
-                size = inset(size, 2.0 * border, 2.0 * border + header);
-            }
-            Some(size)
-        }
         Kind::Row { children } | Kind::Column { children } => {
             let row = n.axis() == Some(Axis::Row);
             let children: Vec<_> = children.iter().filter(|n| !n.hidden).collect();
-            let separators = separator_width(n, gap(n, frame)) * zoom * children.len().saturating_sub(1) as f32;
-            let available = f32::from(if row { size.width } else { size.height }) - separators;
+            let separator = separator_width(n, gap(n, frame)) * zoom;
+            let available = f32::from(if row { size.width } else { size.height }) - separator * children.len().saturating_sub(1) as f32;
             for (child, span) in children.iter().zip(shares(&children, available, zoom)) {
                 let size = if row { gpui::size(px(span), size.height) } else { gpui::size(size.width, px(span)) };
-                if let Some(size) = pane_size(child, size, target, frame, focused, zoom) { return Some(size); }
+                if let Some(bounds) = block_bounds(child, Bounds::new(origin, size), target, frame, focused, zoom) { return Some(bounds); }
+                if row { origin.x += px(span + separator); } else { origin.y += px(span + separator); }
             }
             None
         }
         Kind::Stack { header, .. } => {
             let height = header.as_ref().map_or(0.0, header_height) * zoom;
-            pane_size(n.active_child()?, inset(size, 0.0, height), target, frame, focused, zoom)
+            if header.as_ref().is_some_and(|h| !h.bottom()) { origin.y += px(height); }
+            block_bounds(n.active_child()?, Bounds::new(origin, inset(size, 0.0, height)), target, frame, focused, zoom)
         }
         _ => None,
     }
 }
 
+fn pane_size(n: &Node, size: Size<Pixels>, target: &str, frame: Option<&PaneFrame>, focused: &HashSet<String>, zoom: f32) -> Option<Size<Pixels>> {
+    let bounds = block_bounds(n, Bounds::new(Point::default(), size), target, frame, focused, zoom)?;
+    let n = n.find(target)?;
+    let (y, x) = padding(n);
+    let mut size = inset(bounds.size, 2.0 * x * zoom, 2.0 * y * zoom);
+    if let Some(frame) = frame.filter(|_| n.is_pane()) {
+        let border = frame_border(frame, focused.contains(&n.id)).map_or(0.0, |line| line.width) * zoom;
+        let header = frame.header.as_ref().filter(|h| !h.hover()).map_or(0.0, header_height) * zoom;
+        size = inset(size, 2.0 * border, 2.0 * border + header);
+    }
+    Some(size)
+}
+
+/// The tab area and the cell size.
+type Geometry = (Size<Pixels>, Size<Pixels>);
+
+/// Whether hidden tabs fit the window: the geometry seen at the last tick, and
+/// whether they were sized for it.
+#[derive(Default)]
+pub(super) enum HiddenFit {
+    #[default]
+    Unknown,
+    Seen(Geometry),
+    Done(Geometry),
+}
+
 impl AppWindow {
     pub(super) fn initial_size(&self, root: &Node, pane: &str, window: &Window) -> Option<(u16, u16)> {
-        let context = self.chrome.visible_blocks().into_iter().find(|n| matches!(n.content(), Some(Content::Context { .. })))?;
-        let bounds = *self.bounds.borrow().get(&context.id)?;
-        if bounds.size.width <= px(0.0) || bounds.size.height <= px(0.0) { return None; }
+        let focused = root.path_to(pane)?.into_iter().collect();
+        self.displayed_size(root, root.panes().len(), pane, &focused, window)
+    }
+
+    /// The grid `pane` gets when `tab` is the one shown.
+    pub(super) fn shown_size(&self, tab: &Tab, pane: &str, window: &Window) -> Option<(u16, u16)> {
+        let focused = tab.focused_pane().and_then(|f| tab.root.path_to(&f)).unwrap_or_default().into_iter().collect();
+        self.displayed_size(tab.shown(), tab.root.panes().len(), pane, &focused, window)
+    }
+
+    /// `shown`: the tree on screen; `panes`: how many the tab has (its frame needs more than one, or `lone`).
+    fn displayed_size(&self, shown: &Node, panes: usize, pane: &str, focused: &HashSet<String>, window: &Window) -> Option<(u16, u16)> {
+        let (context, area) = self.context_area()?;
         let frame = match context.content() {
-            Some(Content::Context { pane: Some(frame), .. }) if frame.lone || root.panes().len() > 1 => Some(frame),
+            Some(Content::Context { pane: Some(frame), .. }) if frame.lone || panes > 1 => Some(frame),
             _ => None,
         };
         let zoom = settings::zoom();
-        let focused = root.path_to(pane)?.into_iter().collect();
         // The absolute bounds canvas already excludes the context border (padding box).
         let (y, x) = padding(context);
-        let size = inset(bounds.size, 2.0 * x * zoom, 2.0 * y * zoom);
-        let size = pane_size(root, size, pane, frame, &focused, zoom)?;
+        let size = inset(area, 2.0 * x * zoom, 2.0 * y * zoom);
+        let size = pane_size(shown, size, pane, frame, focused, zoom)?;
         Some(crate::terminal::grid_size(size, crate::terminal::cell_size(window)))
+    }
+
+    /// Use the full split layout even if it has never been drawn unzoomed.
+    pub(super) fn unzoomed_neighbor(&self, tab: &Tab, from: &str, dir: &str) -> Option<String> {
+        let (context, area) = self.context_area()?;
+        let frame = match context.content() {
+            Some(Content::Context { pane: Some(frame), .. }) if frame.lone || tab.root.panes().len() > 1 => Some(frame),
+            _ => None,
+        };
+        let zoom = settings::zoom();
+        let (y, x) = padding(context);
+        let origin = self.bounds.borrow().get(&context.id)?.origin + point(px(x * zoom), px(y * zoom));
+        let bounds = Bounds::new(origin, inset(area, 2.0 * x * zoom, 2.0 * y * zoom));
+        let focused = tab.root.path_to(from)?.into_iter().collect();
+        let geometry = |id: &str| block_bounds(&tab.root, bounds, id, frame, &focused, zoom);
+        let candidates = tab.root.visible_blocks().into_iter().filter(|n| n.is_pane() && n.id != from)
+            .filter_map(|n| Some((n.id.clone(), geometry(&n.id)?)));
+        nearest(geometry(from)?, dir, candidates, &self.pane_history)
+    }
+
+    /// The block tabs show in, and the area it was last drawn with.
+    fn context_area(&self) -> Option<(&Node, Size<Pixels>)> {
+        let context = self.chrome.visible_blocks().into_iter().find(|n| matches!(n.content(), Some(Content::Context { .. })))?;
+        let size = self.bounds.borrow().get(&context.id)?.size;
+        (size.width > px(0.0) && size.height > px(0.0)).then_some((context, size))
+    }
+
+    /// Terminals in hidden tabs keep the size they last had on screen, so a tab shown
+    /// after the window changed size draws its old screens, then jumps once the programs
+    /// redraw. Once the window settles (the same at two ticks), they are sized as their
+    /// panes would be, so the programs redraw out of sight.
+    pub(super) fn fit_hidden_tabs(&mut self, window: &Window, cx: &App) {
+        let Some((_, area)) = self.context_area() else { return };
+        let cell = crate::terminal::cell_size(window);
+        let now = (area, cell);
+        match self.hidden_fit {
+            HiddenFit::Done(g) if g == now => return,
+            HiddenFit::Seen(g) if g == now => self.hidden_fit = HiddenFit::Done(now),
+            _ => {
+                self.hidden_fit = HiddenFit::Seen(now);
+                return;
+            }
+        }
+        let scale = window.scale_factor();
+        let active = self.model.active_tab().map(|t| t.id.clone());
+        for tab in self.model.tabs().filter(|t| Some(&t.id) != active.as_ref()) {
+            for pane in tab.shown().panes() {
+                if let Some(t) = self.terms.get(&pane.id)
+                    && let Some((cols, rows)) = self.shown_size(tab, &pane.id, window)
+                {
+                    t.view.read(cx).fit(cols, rows, cell, scale);
+                }
+            }
+        }
     }
 }

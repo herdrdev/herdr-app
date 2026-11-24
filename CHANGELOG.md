@@ -1,5 +1,200 @@
 # Herdr changelog
 
+## [0.1.17] - 2026-11-22
+<!-- spotlight -->
+
+### New
+- **Choose what a Ctrl/Cmd-click does.** A mod can take over clicks on links and file paths in your terminals. Open localhost links through your SSH tunnel, jump to file.rs:42 in the Neovim you already have open, or show a screenshot in a pane. Ask your agent to write one for you. (#228, #1203)
+- **Resize panes from the keyboard.** Add pane.resize to keys.json, for example on Ctrl+Alt+arrows. (#1087, thanks @darkwebber)
+- **Name your panes.** Rename is at the top of the pane menu. (#1086, #1160, thanks @darkwebber and @abhijit-s)
+- Cursor and VS Code remote links open when you Ctrl/Cmd-click them. (#998, thanks @martintrifunov)
+- The file preview and the Changes diff use your terminal font size. (#648, thanks @carun)
+- For mod authors: a layout turns link mods on with link_handlers, scripts can name panes with pane.rename, and copies of a mod with the same props now share localStorage.
+
+### Fixed
+- **A mod or layout with a dot, colon or emoji in its name no longer crashes Herdr.** Before, it crashed every time that mod or layout opened, startup included.
+- **Remove worktree checks before it closes anything.** It refuses a main checkout and tells you when a worktree is locked. On macOS and Linux it also waits until git has removed the folder, so your terminals stay if git says no.
+- **The Changes panel keeps up when you switch spaces,** even if the last repository was slow or a file preview got stuck. (#1253)
+- **A mod waiting on a TCP connection no longer freezes the whole window.** Saving it reloads in a moment instead of several seconds. (#1234)
+- **Toasts show the whole message,** long errors included, and scroll if it doesn't fit. (#782, thanks @Danipulok)
+- Keeping a peeked agent from another machine puts it in a space on that machine. (#1165, thanks @DeevsDeevs)
+- In the agents list, a sub-agent you kept as a pane shows its own "done", names keep an emoji at the start, and the rail marks the agent you're on. (#1004, #1141, #969, thanks @martintrifunov, @eatnows and @jaklimoff)
+- The command palette only offers themes that fit your light or dark window. (#1120, thanks @Fiyxxx)
+- A text field in a dialog keeps the keyboard when you come back to it. (#1089, thanks @darkwebber)
+- A repository kept as project/.bare is named after the project. (#1001, thanks @mfassaie)
+- Agents start and show up under shells like nushell, and NixOS wrappers stay first on PATH. (#240, #686, thanks @gek0v)
+- Pasting an image or files into a terminal on another machine shows "Sending" while it's on the way.
+- After a mod reload, the app log says which of its tasks were cut off. (#1034, thanks @tjbtiller)
+- The status bar says "1 agent", and Split down has its own icon. (#982, #996, thanks @henrik and @nhat251)
+
+## [0.1.16] - 2026-11-14
+
+### New
+- **On macOS, Herdr has a full menu bar.** File, Edit, View, Window and Help, each item running the same command as its key, and showing your own shortcut when you changed it in keys.json. Cmd+M minimizes the window (if you edited keys.json, add `"cmd-m": "window.minimize"` yourself). (#783, #902, thanks @franklintra and @Zihao-Qi)
+- **On macOS, Cmd+A selects all text in a terminal,** as in Terminal.app and Ghostty (if you edited keys.json, add `"cmd-a": "terminal.select_all"`). Elsewhere `terminal.select_all` can be bound in keys.json. (#871)
+- **Terminal text weight is a setting:** `font_weight`, also in Settings and in a layout. Text looks as before unless you change it; lighter weights look closer to Ghostty. Bold stays bold. (#332, #134, thanks @abhijit-s)
+- **Line height, letter spacing and scroll speed are settings,** also in the Settings window: `terminal_line_height`, `terminal_cell_width` and `terminal_scroll_speed`. (#962, thanks @glappen)
+- **Copy on select can be turned off:** `"copy_on_select": false` in settings.json. (#656, thanks @martintrifunov)
+- **New worktree can put checkouts in a folder you choose:** `worktrees.directory` in settings.json. The default stays `~/.herdr/worktrees`. (#1011, #855, thanks @SabotageAndi)
+- **A layout can blur the desktop behind a see-through window** with `window_blur`. (#702, thanks @jaklimoff)
+- Mods can make files and folders draggable into a terminal (`drag_paths`), which types their paths there. (#320, thanks @youpele52)
+- **Goose, oh-my-pi (omp) and Cursor's agent** show with their own icon and name and start from the new agent menu. (#544, #730, #728, thanks @jespada, @fang2hou and @yankewei)
+- When a remote Linux machine would stop your agents once you disconnect, Add machine and Settings > Machines say so, with the one command that fixes it (needs herdr-core 0.1.21).
+- Mods can select terminal text from the keyboard, for a copy mode: `terminal.select`, `terminal.adjust_selection` and the selection in `focused()` and `terminals()`. (#360, thanks @guillaume86)
+- Mods can set the window title, hear a trackpad pinch (`on_pinch`), and read and replace a script editor's selection. (#681, #788, #923, thanks @emma-campbell, @c3nx and @BernardMora)
+- Mods can stop a folder watch they no longer need. (#878)
+- Mods can read how far each terminal pane is scrolled (`panes()` `scroll`), for example to draw their own "jump to bottom" button. (#1015, thanks @enesbala5)
+- Mods can tell when `herdr-app check` is loading them (`checking()`), to skip starting helpers or writing files during a check. (#1033, #927, thanks @tjbtiller)
+- On macOS, mods can put a badge on Herdr's Dock icon with `setBadge`, for example how many agents need you. Herdr sets none by default. (#1027, thanks @danicrg)
+- `space.new` and `tab.new` can open without taking the focus. (#602, thanks @claytonfaria)
+- `tab.move` can step a tab left or right (`by: -1` / `by: 1`), so keys.json can bind it directly. (#1040, #1003, thanks @sundarshahi)
+
+### Fixed
+- **Editing a mod many times no longer breaks every mod.** The mod engine used to run out of memory after a few hundred reloads, and mods that failed to load then stayed broken until Herdr restarted. (#760, #1020, thanks @chanyang721 and @tjbtiller)
+- **Underlines draw in their style and color:** curly, dotted, dashed and double, as editors use for diagnostics. (#984, thanks @CptnKirk)
+- **Images drawn by Neovim no longer show a thin line at every row.** (#985, thanks @Brusdeylins)
+- **A tab Herdr named itself follows its agent's session title,** like the agents list, so a renamed Claude Code or omp session shows in the tab bar. A name you gave the tab stays. (#737, #618, #1031, thanks @chasereyn)
+- **Pane navigation keys work while a pane is zoomed;** the zoom follows you to the next pane. (#968)
+- **Zooming a pane gives it the keyboard.** Zooming a pane from its header or `pane.zoom` used to leave the keyboard on the pane it hid, so closing a pane could close the hidden one. (#1058, #1057, thanks @jaklimoff)
+- **On Windows, agents and terminals start when PowerShell 7 isn't on PATH,** together with herdr-core 0.1.21 or newer (Herdr updates the core for you). (#967)
+- **Middle-click no longer pastes the clipboard by accident on macOS:** it does nothing there, like Ghostty. On Linux it pastes your last selection, as other Linux terminals do, even with copy on select off. (#1025)
+- **Scrolling over the tab bar moves one tab at a time.** A trackpad flick used to jump several tabs, so you could end up typing to the wrong agent. (#812, thanks @iyansr)
+- Letters sit centered in their cells as in Ghostty. (#881, thanks @abhijit-s)
+- Many folder watches no longer get stuck at the 64-folder limit after mods close or layouts switch. (#878)
+- New worktree gives branches with non-Latin names (Korean, Chinese, Hindi, emoji) their own folder, instead of checking out into the repository's folder. (#1044)
+- The Spaces sidebar stays responsive with many repositories, and one failed git check no longer makes a repository's worktrees lose their grouping. (#856, #857, thanks @Soph and @ibarsi)
+- Selecting text in one mod no longer extends into the mods around it.
+- A damaged saved value no longer makes the sidebar, tab bar or agents list disappear. (#1028)
+- Agents started from + work when your shell is one Herdr doesn't know, like nushell.
+- On macOS, agents started from + in fish show their name and icon. (#786, thanks @zztalker)
+- When an update can't be put in place, Herdr says why (on Windows: close Herdr's terminals or restart) instead of "no update is ready yet".
+- A core installed by a package manager is no longer updated by Herdr; Settings says a newer version is available so you can update it there. A core update error can be dismissed.
+- Zooming no longer drops settings Herdr doesn't know (like mods' own keys) from settings.json.
+- Add machine lists the machines you already added in their own section.
+- The Settings window never overwrites a settings.json it can't read. (#411, thanks @abhijit-s)
+- An unnamed tab is named after its program. (#892, thanks @akijakya)
+- The spaces list keeps the active space in view, and long space names use the sidebar's width. (#977, #865, thanks @w4rc0n and @SiliconKaiser)
+- A dropped file on another machine's terminal says why it wasn't sent, and mods asking for hc use the core Herdr found. (#811, #825, thanks @sundarshahi)
+- `herdr-app shot` shows the current frame even when the window isn't being drawn, instead of an old one. (#1047, thanks @minatoaquaMK2)
+- Text fields paint their selection in the theme's selection color. (#768, thanks @martintrifunov)
+- An agent title starting with a bracket keeps it. (#935, thanks @fryorcraken)
+- The Herdr 98 date and time dialog works. (#940, thanks @renny-ren)
+- Mods: `tab.move` with a pane id fails instead of crashing Herdr, and a list's `scroll_to_bottom` lands on the last row. (#752, #973, thanks @abhijit-s and @jaklimoff)
+
+## [0.1.15] - 2026-11-10
+
+### New
+- **Terminal rows are as tall as in Ghostty.** Herdr used to add about 15% extra space to every line, so the same font looked looser than in other terminals. Rows are now sized from the font itself, at every zoom and font size, and more lines fit on screen. (#66)
+- **A layout can choose the mod that shows notifications:** `"toast": "<mod>"` in the layout. The shipped toast is unchanged. (#364, thanks @ngotchac)
+- Mods can scroll a normal scroll area to one of its children: `ScrollHandle.new()`, `.track_scroll(handle)` and `handle.scroll_to_item(index)`.
+- Mods: `knownAgents()` now rejects when the check itself fails, instead of reporting every agent as not installed.
+
+### Fixed
+- **On macOS, files and screenshots can be dragged into a terminal.** Dropping a file from Finder works right after typing, and the floating screenshot thumbnail (Cmd+Shift+4) attaches to Claude Code and other programs. (#654, #709, thanks @EliaTogni and @rqres)
+- **On macOS, the + menu no longer shows every agent as "not installed" right after login or a restart,** and `herdr-app check` works then too. When Herdr can't check, it says so instead of calling agents missing.
+- **On macOS, reopen older terminals once.** Terminals opened before herdr-core 0.1.20 can still end when Herdr quits, and this update quits Herdr once. Once herdr-core is 0.1.20 or newer (Settings > Updates shows it), close and reopen those terminals, or restart your Mac, and they are safe from then on.
+- **On Linux, Herdr opens on a fresh Ubuntu 26.04 or Fedora 45.** It no longer needs the X11 keyboard library on Wayland. (#839)
+- **A terminal printing a lot of output no longer freezes the whole window.** (#748)
+- **An agent you come back to leaves "done"** in the agents list.
+- With many tabs, the tab bar scrolls to the active tab. (#802)
+- Coming back to a terminal that another device (your phone) resized takes its size back when you click it or switch to its tab or space, not only when you type.
+- The Spaces sidebar groups worktrees right away in large repositories (seconds before).
+- The Open worktree dialog takes the keyboard after a slow first load. (#798, thanks @ilstar)
+- Creating a worktree on this machine while a terminal on another machine is focused no longer fails and leaves the space out of the sidebar.
+- Playing a GIF or other animated image in a terminal uses far less memory, and gives it back when the image leaves the screen. (#560)
+- Settings: the font list stays inside the window, and Add machine shows login instructions you can copy.
+- Layout terminal blocks stay in place when the connection to their terminal drops. (#761)
+- Dragging a block that is squeezed very small no longer crashes Herdr.
+- On Windows, clicking into an ssh or tmux terminal no longer sends a stray drag that changes its selection. (#759)
+- Ctrl and Alt held during a mouse click or scroll, and Shift during a scroll, reach programs that track the mouse. Shift+click still selects text.
+- The picker's earlier rows can be reached with the keyboard.
+- The wide CJK space (U+3000) is drawn when the font has a glyph for it. (#777)
+- A sub-agent on another machine shows under its parent in the agents list.
+- A bottom pane header draws its divider above the header. (#712, thanks @Zihao-Qi)
+- An agent's spinner after a title prefix no longer shows in its name. (#626, thanks @namastex888)
+- An agent title that is a folder no longer replaces the tab's name. (#740, thanks @chasereyn)
+- Clicking the "Esc" hint in a dialog closes it. (#690, thanks @VinhLe1410)
+- Mod icons load when the mod folder is a link. (#427, thanks @ngotchac)
+- The Changes diff keeps tab indentation. (#366, thanks @sundarshahi)
+- From this version on, Herdr keeps space and tab details that a newer Herdr saved on the same machine, and saved files keep their permissions. (#729, #722, thanks @abhijit-s)
+- On Windows, updates apply when Herdr was started from its install folder, file links with encoded characters open, and Add machine lists every host from a wildcard `Include`. (#673, #663, #672, thanks @sundarshahi)
+- On KDE Plasma, the Herdr icon shows right after install. (#703, thanks @okurmustafa)
+
+
+## [0.1.14] - 2026-11-08
+
+### New
+- Settings > Add machine tells you what to run when a machine needs a password, a new host key or herdr-core installed there, instead of opening a setup terminal. Once you've added it yourself, the list shows it as added.
+- Mods can swap two panes by id with `pane.swap`. (#665, thanks @sQVe)
+- Kimi Code gets its own icon. (#647, thanks @SuTang-vain)
+- Mods can give `exec` a timeout: `exec(cmd, args, { timeout })` in milliseconds, up to 10 minutes (30 seconds by default). Opening a worktree in a large repository uses it.
+
+### Fixed
+- **Mods no longer all break at once after a while.** Opening Settings, the palette or a picker, or switching layouts, slowly filled up the mods' memory until every mod showed "This view could not be re-rendered". Mods also open faster now. For mod authors: the top of a mod's file now runs once and is shared by all its copies; keep per-copy state in the class.
+- **On macOS, `herdr-app check` no longer leaves a second Herdr icon in the Dock.** Quitting that icon, or switching Herdr off under Background App Activity in Settings, ended every terminal. (#398, thanks @revofusion)
+- Cmd+W and Cmd+Shift+W with Settings, the palette or a picker open close that window, not the terminal behind it.
+- A pane that opens while the window is still laying out shows all of its output: a long line could lose its end, on screen and when copied.
+- Layouts you've edited by hand keep all their pieces when a terminal in them ends or can't be reached.
+- Two agents in one tab show their own names in the agents list.
+- Codex started from the + menu keeps its own session, so closing one Codex no longer ends the others. This needs Codex 0.156 or newer. (#657, thanks @martintrifunov)
+- On Windows, the + menu no longer marks installed agents as not installed.
+- When Herdr can't reach a running core, it says why and how to fix it, instead of showing the install screen.
+- On Linux with fcitx4, Chinese and other input methods keep working. (#558, thanks @SailorMoonQ)
+- On Linux, the input method keeps working after switching windows.
+- On KDE, the window no longer opens tiny. (#601, thanks @zdziejowski)
+- New terminals start in the right folder when you open several at once, and start in your home folder when the folder they'd inherit is gone. (#511, thanks @JJLiebig)
+- Zooming into a pane while moving between agents shows the right pane. (#568, thanks @martintrifunov)
+- A kept sub-agent shows once in the agents list, under its parent. (#539, thanks @mertkaradayi)
+- Toasts name agents by their proper name. (#530, thanks @thuanlm215)
+- Find highlights all of a wide character. (#587, thanks @chanyang721)
+- Clicking in a program that takes the mouse clears your selection. (#369, thanks @sundarshahi)
+- The Changes list fills its panel and scrolls to every changed file. (#474, thanks @shadownrx)
+- The palette scrolls past group titles, and shows ⌘ only on macOS. (#531, thanks @patrick-xin; #478, thanks @JJLiebig)
+- Dialogs, the confirm dialog and Settings look right: sized to their content, rounded corners, layout previews and long theme names stay in their cards. (#593, thanks @karlAlnebratt; #570, #437, #621, thanks @martintrifunov; #457, thanks @yankewei)
+- The sidebar rail's items line up. (#453, thanks @log4b)
+- Pressing rename again closes the rename prompt. (#569, thanks @martintrifunov)
+- Idle windows no longer wake every mod 20 times a second. (#548, thanks @abhijit-s)
+- `herdr-app check` no longer touches the running app's shared mod state. (#516, thanks @JJLiebig)
+- The terminal menu leaves out pane items where there's no pane, and mods see which terminal has the keyboard. (#553, #554, thanks @thuanlm215)
+
+## [0.1.13] - 2026-11-04
+<!-- spotlight macos -->
+
+### New
+- **On macOS, programs in your terminals can reach your local network and use the microphone.** Herdr's core is now its own app, Herdr Core: macOS asks once for each (the network prompt may say herdr-core), click Allow. Terminals opened before this update need to be reopened once. Node, Copilot or a model server on another machine connect; voice input works. (herdr-core#100)
+- **Find in a terminal.** Cmd+F on macOS, Ctrl+Shift+F on Linux and Windows searches the screen and its history. If you've edited your keys.json, add "cmd-f": "terminal.search" (or "ctrl-shift-f") to its terminal section yourself. (#436, thanks @SOUMITRO-SAHA)
+- Terminal panes show a scroll thumb you can drag. (#428, thanks @msly)
+- Programming ligatures, off by default: set font_ligatures to true in settings. (#244, thanks @ruilopesm)
+- Mods and agents can scroll a terminal's history with terminal.scroll, and keys.json can bind a command with arguments. (#455, thanks @sQVe)
+- dsh-tui agents have their own icon and start from the new agent menu. (#335, thanks @tsonglew)
+
+### Fixed
+- Programs start at the size of their pane, so the first screen of an agent isn't drawn at the wrong width.
+- On Windows, Nerd Font icons show again.
+- On Windows, links with an = in them open in the browser.
+- On Windows, agents and the Files panel work on remote Windows machines.
+- On Windows without a GPU, Herdr uses far less CPU. (#424, thanks @kiote)
+- On Windows, OneDrive folders and paths with curly quotes open in Files. (#354, thanks @chanyang721)
+- Ctrl+[, Ctrl+I, Ctrl+M, Ctrl+_ and Ctrl+- reach programs as they do in other terminals.
+- Cmd+C reaches the program when nothing is selected. (#319, thanks @sllrs)
+- The agents list no longer breaks with "This view could not be re-rendered" on busy setups. (#485, thanks @mike-north)
+- Open worktree no longer breaks in repos with many worktrees. (#486, thanks @martin-ro)
+- Switching back to the tab from a home page gives the terminal the keyboard again. (#484, thanks @ngotchac)
+- Cmd+1 to 9 follow the order of spaces in the sidebar.
+- The pane focus ring shows only where the keyboard really is.
+- Shortcut keys work right after start, even with no space open.
+- The shortcuts overlay closes with the same key, and Ctrl+? opens it on Linux.
+- Wide fallback symbols like 🕹 fit their cell instead of covering the next one. (#468)
+- Braille dots are spaced evenly. (#351, thanks @leoscricca)
+- On Linux, no light flash when Herdr starts on a dark desktop. (#225, thanks @claytonfaria)
+- On Wayland with several seats, the mouse and keyboard work. (#123)
+- Tabs you're not looking at resize with the window. (#340, thanks @imakil195)
+- Mods see when the window loses and gets focus. (#350, thanks @ngotchac)
+- The font picker no longer crashes on some fonts. (#316, thanks @ruilopesm)
+- The command palette scrolls smoothly. (#348, thanks @patrick-xin)
+- Add machine lists hosts from Include files in ~/.ssh/config. (#328, thanks @ashrodan)
+- Selected text in mod text views stays readable.
+
 ## [0.1.12] - 2026-11-02
 <!-- spotlight macos -->
 

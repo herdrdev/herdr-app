@@ -731,6 +731,7 @@ type FrameCallback = Box<dyn FnOnce(&mut Window, &mut App)>;
 
 pub(crate) type AnyMouseListener =
     Box<dyn FnMut(&dyn Any, DispatchPhase, &mut Window, &mut App) + 'static>;
+type AnyMouseObserver = Box<dyn FnMut(&dyn Any, &mut Window, &mut App) + 'static>;
 
 #[derive(Clone)]
 pub(crate) struct CursorStyleRequest {
@@ -990,6 +991,7 @@ pub(crate) struct Frame {
     pub(crate) element_states: FxHashMap<(GlobalElementId, TypeId), ElementStateBox>,
     accessed_element_states: Vec<(GlobalElementId, TypeId)>,
     pub(crate) mouse_listeners: Vec<Option<AnyMouseListener>>,
+    mouse_observers: Vec<Option<AnyMouseObserver>>,
     pub(crate) dispatch_tree: DispatchTree,
     pub(crate) scene: Scene,
     pub(crate) hitboxes: Vec<Hitbox>,
@@ -1025,6 +1027,7 @@ pub(crate) struct PaintIndex {
     #[cfg(any(test, feature = "test-support"))]
     debug_bounds_index: usize,
     mouse_listeners_index: usize,
+    mouse_observers_index: usize,
     input_handlers_index: usize,
     cursor_styles_index: usize,
     accessed_element_states_index: usize,
@@ -1046,6 +1049,7 @@ impl Frame {
             element_states: FxHashMap::default(),
             accessed_element_states: Vec::new(),
             mouse_listeners: Vec::new(),
+            mouse_observers: Vec::new(),
             dispatch_tree,
             scene: Scene::default(),
             hitboxes: Vec::new(),
@@ -1073,6 +1077,7 @@ impl Frame {
         self.element_states.clear();
         self.accessed_element_states.clear();
         self.mouse_listeners.clear();
+        self.mouse_observers.clear();
         self.dispatch_tree.clear();
         self.scene.clear();
         self.input_handlers.clear();
@@ -1173,6 +1178,9 @@ pub struct Window {
     is_minimizable: bool,
     sprite_atlas: Arc<dyn PlatformAtlas>,
     foreground_glyph_tiles: FxHashMap<RenderGlyphParams, (AtlasTile, Bounds<DevicePixels>)>,
+    image_tiles: FxHashMap<RenderImageParams, (AtlasTile, Option<Arc<RenderImage>>)>,
+    image_assets: FxHashMap<(TypeId, u64), crate::ImageLoad>,
+    accessed_image_assets: FxHashSet<(TypeId, u64)>,
     text_system: Arc<WindowTextSystem>,
     text_rendering_mode: Rc<Cell<TextRenderingMode>>,
     rem_size: Pixels,
@@ -1209,6 +1217,8 @@ pub struct Window {
     focus_listeners: SubscriberSet<(), AnyWindowFocusListener>,
     pub(crate) focus_lost_listeners: SubscriberSet<(), AnyObserver>,
     focus_lost_path: SmallVec<[FocusId; 8]>,
+    focus_lost_yielded: bool,
+    yielded_focus: Option<FocusId>,
     default_prevented: bool,
     mouse_position: Point<Pixels>,
     mouse_hit_test: HitTest,
@@ -2075,6 +2085,9 @@ impl Window {
             is_minimizable,
             sprite_atlas,
             foreground_glyph_tiles: FxHashMap::default(),
+            image_tiles: FxHashMap::default(),
+            image_assets: FxHashMap::default(),
+            accessed_image_assets: FxHashSet::default(),
             text_system,
             text_rendering_mode: cx.text_rendering_mode.clone(),
             rem_size: px(16.),
@@ -2102,6 +2115,8 @@ impl Window {
             focus_listeners: SubscriberSet::new(),
             focus_lost_listeners: SubscriberSet::new(),
             focus_lost_path: SmallVec::new(),
+            focus_lost_yielded: false,
+            yielded_focus: None,
             default_prevented: true,
             mouse_position,
             mouse_hit_test: HitTest::default(),
@@ -2347,6 +2362,12 @@ impl Window {
         })
     }
 
+    /// Whether the focus-lost notification came from an explicit keyboard handoff.
+    /// Available while focus-lost listeners are running.
+    pub fn focus_was_yielded(&self) -> bool {
+        self.focus_lost_yielded
+    }
+
     /// Move focus to the element associated with the given [`FocusHandle`].
     pub fn focus(&mut self, handle: &FocusHandle, cx: &mut App) {
         if !self.focus_enabled || self.focus == Some(handle.id) {
@@ -2354,6 +2375,7 @@ impl Window {
         }
 
         self.focus = Some(handle.id);
+        self.yielded_focus = None;
         self.focus_generation = self.focus_generation.wrapping_add(1);
         self.clear_pending_keystrokes(cx);
 
@@ -2373,6 +2395,15 @@ impl Window {
         }
         self.focus = None;
         self.refresh();
+    }
+
+    /// Clear focus and tell focus-lost listeners that the control gave up the keyboard.
+    pub fn yield_focus(&mut self, cx: &mut App) {
+        let focused = self.focus;
+        self.blur(cx);
+        if self.focus.is_none() && focused.is_some() {
+            self.yielded_focus = focused;
+        }
     }
 
     /// Blur the window and don't allow anything in it to be focused again.
@@ -3334,6 +3365,7 @@ impl Window {
         debug_assert!(self.rendered_entity_stack.is_empty());
         self.invalidator.set_dirty(false);
         self.requested_autoscroll = None;
+        self.accessed_image_assets.clear();
 
         // Restore the previously-used input handler.
         // Place it back into a None slot (left by a previous .take()) so that
@@ -3400,6 +3432,29 @@ impl Window {
         self.layout_engine.as_mut().unwrap().clear();
         self.text_system().finish_frame();
         self.next_frame.finish(&mut self.rendered_frame);
+        // Cached paint ranges can reuse image sprites without calling paint_image.
+        let current_image_tiles: FxHashSet<_> = self.next_frame.scene.polychrome_sprites.iter()
+            .map(|sprite| (sprite.tile.texture_id, sprite.tile.tile_id.0)).collect();
+        let mut live_image_tiles = current_image_tiles.clone();
+        live_image_tiles.extend(self.rendered_frame.scene.polychrome_sprites.iter()
+            .map(|sprite| (sprite.tile.texture_id, sprite.tile.tile_id.0)));
+        self.image_tiles.retain(|params, (tile, image)| {
+            let key = (tile.texture_id, tile.tile_id.0);
+            // An uploaded tile needs no CPU pixels while only the previous scene uses it.
+            if !current_image_tiles.contains(&key) { *image = None; }
+            if live_image_tiles.contains(&key) { true }
+            else { self.sprite_atlas.remove(&params.clone().into()); false }
+        });
+        let rendered_entities = cx.entities.accessed_entities.borrow();
+        self.image_assets.retain(|key, load| {
+            self.accessed_image_assets.contains(key) || load.loading_for(&rendered_entities) || load.get().is_some_and(|result| {
+                result.is_ok_and(|image| self.image_tiles.iter().any(|(params, (tile, _))| {
+                    params.image_id == image.id && current_image_tiles.contains(&(tile.texture_id, tile.tile_id.0))
+                }))
+            })
+        });
+        drop(rendered_entities);
+        cx.prune_image_assets();
         if !self.foreground_glyph_tiles.is_empty() {
             // Cached paint ranges can reuse sprites without calling paint_emoji.
             // Keep both live scenes; retire only variants neither scene references.
@@ -3430,16 +3485,19 @@ impl Window {
         let current_focus_path = self.rendered_frame.focus_path();
         let current_window_active = self.rendered_frame.window_active;
         let mut focus_before_listeners = self.focus;
+        let yielded_focus = self.yielded_focus.take();
 
         if previous_focus_path != current_focus_path
             || previous_window_active != current_window_active
         {
             if !previous_focus_path.is_empty() && current_focus_path.is_empty() {
+                self.focus_lost_yielded = yielded_focus.as_ref() == previous_focus_path.last();
                 self.focus_lost_path = previous_focus_path.clone();
                 self.focus_lost_listeners
                     .clone()
                     .retain(&(), |listener| listener(self, cx));
                 self.focus_lost_path = SmallVec::new();
+                self.focus_lost_yielded = false;
                 // The focus-lost fallback (e.g. a workspace refocusing itself) may target
                 // an element that isn't part of the element tree, in which case scheduling
                 // a redraw below would dispatch focus-lost again, looping forever. Only
@@ -3949,6 +4007,7 @@ impl Window {
             #[cfg(any(test, feature = "test-support"))]
             debug_bounds_index: self.next_frame.debug_bounds_records.len(),
             mouse_listeners_index: self.next_frame.mouse_listeners.len(),
+            mouse_observers_index: self.next_frame.mouse_observers.len(),
             input_handlers_index: self.next_frame.input_handlers.len(),
             cursor_styles_index: self.next_frame.cursor_styles.len(),
             accessed_element_states_index: self.next_frame.accessed_element_states.len(),
@@ -3983,6 +4042,12 @@ impl Window {
                 [range.start.mouse_listeners_index..range.end.mouse_listeners_index]
                 .iter_mut()
                 .map(|listener| listener.take()),
+        );
+        self.next_frame.mouse_observers.extend(
+            self.rendered_frame.mouse_observers
+                [range.start.mouse_observers_index..range.end.mouse_observers_index]
+                .iter_mut()
+                .map(|observer| observer.take()),
         );
         self.next_frame.accessed_element_states.extend(
             self.rendered_frame.accessed_element_states[range.start.accessed_element_states_index
@@ -4188,6 +4253,23 @@ impl Window {
     pub fn get_asset<A: Asset>(&mut self, source: &A::Source, cx: &mut App) -> Option<A::Output> {
         cx.fetch_asset::<A>(source)
     }
+    pub(crate) fn image_asset<A: Asset<Output = Result<Arc<RenderImage>, crate::ImageCacheError>>>(
+        &mut self,
+        source: &A::Source,
+        subscribe: bool,
+        cx: &mut App,
+    ) -> Option<Result<Arc<RenderImage>, crate::ImageCacheError>> {
+        let key = (TypeId::of::<A>(), A::cache_key(source, cx));
+        let entry = cx.asset_entry::<A>(source);
+        self.image_assets.insert(key, entry.clone());
+        self.accessed_image_assets.insert(key);
+        if subscribe && let Some(view) = self.rendered_entity_stack.last().copied() {
+            entry.use_by(view)
+        } else {
+            entry.get()
+        }
+    }
+
     /// Obtain the current element offset. This method should only be called during the
     /// prepaint phase of element drawing.
     pub fn element_offset(&self) -> Point<Pixels> {
@@ -5000,6 +5082,11 @@ impl Window {
             return Ok(());
         }
 
+        let visible_bounds_snapped = self.snap_bounds(visible_bounds);
+        let content_mask = self.snapped_content_mask();
+        if visible_bounds_snapped.intersect(&content_mask.bounds).is_empty() {
+            return Ok(());
+        }
         let params = RenderImageParams {
             image_id: data.id,
             frame_index,
@@ -5007,7 +5094,7 @@ impl Window {
 
         let tile = self
             .sprite_atlas
-            .get_or_insert_with(params.into(), &mut || {
+            .get_or_insert_with(params.clone().into(), &mut || {
                 Ok(Some((
                     data.size(frame_index),
                     Cow::Borrowed(
@@ -5017,8 +5104,7 @@ impl Window {
                 )))
             })?
             .expect("Callback above only returns Some");
-
-        let visible_bounds_snapped = self.snap_bounds(visible_bounds);
+        self.image_tiles.insert(params, (tile, Some(data)));
 
         let sub_tile = if visible_bounds == image_bounds {
             tile
@@ -5107,9 +5193,22 @@ impl Window {
             };
 
             self.sprite_atlas.remove(&params.clone().into());
+            self.image_tiles.remove(&params);
         }
 
         Ok(())
+    }
+
+    /// Images referenced by the window's current image tiles.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn displayed_images(&self) -> Vec<Arc<RenderImage>> {
+        self.image_tiles.values().filter_map(|(_, image)| image.clone()).collect()
+    }
+
+    /// Returns whether a particular frame is present in the sprite atlas.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn has_image_frame_atlas_entry(&self, data: &RenderImage, frame_index: usize) -> bool {
+        self.sprite_atlas.contains(&RenderImageParams { image_id: data.id, frame_index }.into())
     }
 
     /// Returns whether every frame of an image is present in the sprite atlas.
@@ -5371,6 +5470,23 @@ impl Window {
         )));
     }
 
+    /// Observe matching mouse events after capture and before bubbling, even when
+    /// capture stops propagation. Observers cannot change event propagation.
+    /// Register during paint. The observer is cleared when the element is no longer painted.
+    pub fn observe_mouse_event<Event: MouseEvent>(
+        &mut self,
+        mut observer: impl FnMut(&Event, &mut Window, &mut App) + 'static,
+    ) {
+        self.invalidator.debug_assert_paint();
+        self.next_frame.mouse_observers.push(Some(Box::new(
+            move |event: &dyn Any, window, cx| {
+                if let Some(event) = event.downcast_ref() {
+                    observer(event, window, cx);
+                }
+            },
+        )));
+    }
+
     /// Register a key event listener on this node for the next frame. The type of event
     /// is determined by the first parameter of the given listener. When the next frame is rendered
     /// the listener will be cleared.
@@ -5528,6 +5644,8 @@ impl Window {
         self.last_input_modality = match &event {
             PlatformInput::KeyDown(_) => InputModality::Keyboard,
             PlatformInput::MouseMove(_) | PlatformInput::MouseDown(_) => InputModality::Mouse,
+            // A drag from another app moves the pointer without sending mouse moves.
+            PlatformInput::FileDrop(_) => InputModality::Mouse,
             PlatformInput::Touch(_) => InputModality::Touch,
             _ => self.last_input_modality,
         };
@@ -5879,6 +5997,14 @@ impl Window {
                 break;
             }
         }
+
+        let mut mouse_observers = mem::take(&mut self.rendered_frame.mouse_observers);
+        let propagate_event = cx.propagate_event;
+        for observer in &mut mouse_observers {
+            observer.as_mut().unwrap()(event, self, cx);
+            cx.propagate_event = propagate_event;
+        }
+        self.rendered_frame.mouse_observers = mouse_observers;
 
         // Bubble phase, where most normal handlers do their work.
         if cx.propagate_event {
@@ -7405,6 +7531,15 @@ impl<V: 'static + Render> WindowHandle<V> {
         cx.update_window(self.any_handle, |_, window, _| window.is_window_active())
             .ok()
     }
+
+    /// Synchronizes pending updates for this window and captures its current frame as an RGBA image.
+    #[cfg(any(test, feature = "test-support", feature = "render-to-image"))]
+    pub fn render_current_to_image<C: crate::AppContext>(
+        &self,
+        cx: &mut C,
+    ) -> anyhow::Result<image::RgbaImage> {
+        self.any_handle.render_current_to_image(cx)
+    }
 }
 
 impl<V> Copy for WindowHandle<V> {}
@@ -7494,6 +7629,68 @@ impl AnyWindowHandle {
             .context("the type of the window's root view has changed")?;
 
         cx.read_window(&view, read)
+    }
+
+    /// Synchronizes pending updates for this window and captures its current frame as an RGBA image.
+    #[cfg(any(test, feature = "test-support", feature = "render-to-image"))]
+    pub fn render_current_to_image<C: crate::AppContext>(
+        self,
+        cx: &mut C,
+    ) -> anyhow::Result<image::RgbaImage> {
+        anyhow::ensure!(!draw_in_progress(), "cannot capture window image during draw");
+
+        // HERDR: separate update closures flush App effects between phases;
+        // two passes bound animation cascades; schedule/wake re-arms presentation
+        // because draw() sets needs_present without calling present().
+        for _ in 0..2 {
+            self.update(cx, |_, window, cx| -> anyhow::Result<()> {
+                anyhow::ensure!(
+                    window.rendered_frame_size.is_some(),
+                    "no window frame has been rendered yet"
+                );
+                let size = window.platform_window.content_size();
+                let scale = window.platform_window.scale_factor();
+                if size.width > px(0.) && size.height > px(0.) && scale > 0.0 {
+                    if window.viewport_size != size || window.scale_factor != scale {
+                        window.bounds_changed(cx);
+                    } else if window.rendered_frame_size != Some((size, scale)) {
+                        window.refresh();
+                    }
+                }
+                for callback in window.next_frame_callbacks.take() {
+                    callback(window, cx);
+                }
+                Ok(())
+            })??;
+
+            let drew = self.update(cx, |_, window, cx| -> bool {
+                if !window.invalidator.is_dirty() && window.dirty_views.is_empty() {
+                    return false;
+                }
+                window.draw(cx).clear(cx);
+                true
+            })?;
+
+            if !drew
+                && self.update(cx, |_, window, _| {
+                    window.next_frame_callbacks.borrow().is_empty()
+                })?
+            {
+                break;
+            }
+        }
+
+        self.update(cx, |_, window, _| {
+            if window.invalidator.is_dirty()
+                || !window.dirty_views.is_empty()
+                || !window.next_frame_callbacks.borrow().is_empty()
+                || window.needs_present.get()
+            {
+                window.platform_window.schedule_frame();
+                window.invalidator.wake_platform();
+            }
+            window.render_to_image()
+        })?
     }
 }
 
