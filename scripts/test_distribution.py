@@ -453,7 +453,7 @@ exec /bin/mv "$@"''')
     def package_checkout(self):
         checkout = Path(tempfile.mkdtemp(prefix="checkout-", dir=self.bin))
         for path in [
-            "Cargo.toml", "LICENSE", "THIRD-PARTY-NOTICES", "scripts/package",
+            "Cargo.toml", "LICENSE", "THIRD-PARTY-NOTICES", "scripts/package", "scripts/package_output.py",
             ".cargo/config.toml",
             "assets/icons/herdr-ui-icon-clean.svg", "assets/icons/Herdr.icns",
         ]:
@@ -578,6 +578,26 @@ PY''')
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Cargo did not report exactly one", result.stderr)
         self.assertFalse((checkout / "sign-called").exists())
+
+    def test_unfinished_publication_keeps_its_lock_and_blocks_a_new_build(self):
+        checkout = self.package_checkout()
+        binary = checkout / "fixture/herdr-app"
+        self.program(binary)
+        self.cargo_report(binary)
+        self.stub("lipo", "echo x86_64")
+        self.stub("otool", f'printf "cmd LC_BUILD_VERSION\\nminos {MIN_MACOS}\\n"')
+        helper = checkout / "scripts/package_output.py"
+        helper.write_text('import pathlib,sys\n(pathlib.Path(sys.argv[4])/"transaction.json").write_text("interrupted fixture")\nsys.exit(86)\n')
+        failed = self.run_script(checkout / "scripts/package", "Darwin", "x86_64")
+        self.assertNotEqual(failed.returncode, 0)
+        lock = checkout / "dist/.herdr-app-macos-x86_64.lock"
+        self.assertTrue((lock / "transaction.json").is_file())
+        self.assertIn("unfinished publication", failed.stderr)
+        self.stub("cargo", 'echo "must not build" >&2; exit 97')
+        retry = self.run_script(checkout / "scripts/package", "Darwin", "x86_64")
+        self.assertNotEqual(retry.returncode, 0)
+        self.assertIn("target is locked", retry.stderr)
+        self.assertNotIn("must not build", retry.stderr)
 
     def test_package_rejects_shared_cached_or_other_package_artifacts_before_signing(self):
         for option in ("external", "fresh", "wrong_package"):

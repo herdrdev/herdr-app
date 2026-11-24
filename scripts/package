@@ -67,10 +67,30 @@ if command -v python3 >/dev/null; then python=python3; else python=python; fi
 command -v "$python" >/dev/null || { echo 'package: needs Python 3 to read Cargo artifacts' >&2; exit 1; }
 if [[ $os == linux ]]; then export TMPDIR=${TMPDIR:-/var/tmp}; fi
 work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
+lock=
+cleanup() {
+  result=$?
+  trap - EXIT HUP INT TERM
+  rm -rf "$work"
+  if [[ -n $lock ]]; then
+    if [[ -e $lock/transaction.json ]]; then
+      echo "package: unfinished publication; inspect $lock/transaction.json and its backup directory before removing the lock or retrying" >&2
+      result=1
+    else
+      rmdir "$lock" || result=1
+    fi
+  fi
+  exit "$result"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+mkdir -p "$PWD/dist"
+candidate_lock="dist/.herdr-app-$target.lock"
+mkdir "$candidate_lock" 2>/dev/null || { echo "package: target is locked at $candidate_lock; wait for its packager, or inspect an interrupted run before retrying" >&2; exit 1; }
+lock=$candidate_lock
 # Never let another worktree/build replace the executable between Cargo,
 # inspection and copying. This private target starts empty, independent of
-# CARGO_TARGET_DIR and build.target-dir. The final payload is staged before
+# CARGO_TARGET_DIR, build.target-dir and build.build-dir. The final payload is staged before
 # any inspection and is the same file subsequently signed and archived.
 if [[ $os == macos ]]; then
   app="$work/Herdr.app"
@@ -80,7 +100,12 @@ else
   binary="$dir/herdr-app"
   [[ $os != windows ]] || binary+=.exe
 fi
-mkdir -p "$(dirname "$binary")" "$work/target"
+mkdir -p "$(dirname "$binary")" "$work/target" "$work/build"
+# Cargo 1.95 separates intermediate outputs from target-dir. Override both,
+# including config/env values shared by worktrees. Python renders a native
+# path for Cargo on Windows rather than exporting a Git Bash /tmp path.
+build_dir=$("$python" -c 'import pathlib,sys; print((pathlib.Path(sys.argv[1])/"build").resolve())' "$work")
+export CARGO_BUILD_BUILD_DIR="$build_dir"
 cargo metadata --no-deps --locked --format-version=1 > "$work/metadata.json"
 # Only release builds update themselves (src/update.rs).
 HERDR_APP_RELEASE=1 cargo build --release --locked --bin herdr-app --target-dir "$work/target" --message-format=json-render-diagnostics ${triple:+--target "$triple"} > "$work/cargo.jsonl"
@@ -113,6 +138,7 @@ shutil.copy2(source, staged)
     'package_id': package['id'], 'source_manifest': str(manifest), 'version': version,
     'source_manifest_sha256': hashlib.sha256(manifest.read_bytes()).hexdigest(),
     'cargo_executable': str(source), 'private_target': str(work / 'target'),
+    'private_build_dir': str((work / 'build').resolve()),
     'staged_executable_sha256': hashlib.sha256(staged.read_bytes()).hexdigest(),
     'fresh': True,
 }, indent=2) + '\n')
@@ -151,18 +177,19 @@ PY
 )
 [[ $actual_version == "herdr-app $version" ]] || { echo "package: expected herdr-app $version, found $actual_version" >&2; exit 1; }
 fi
-mkdir -p dist
-out="dist/herdr-app-$target.tar.gz"
+out="$work/herdr-app-$target.tar.gz"
 if [[ $os == linux || $os == windows ]]; then
   cp assets/icons/herdr-ui-icon-clean.svg "$dir/herdr-app.svg"
   cp LICENSE THIRD-PARTY-NOTICES "$dir/"
   notices_path=herdr-app/THIRD-PARTY-NOTICES
+  archive_member="herdr-app/${binary##*/}"
   tar -czf "$out" -C "$work" herdr-app
 else
   mkdir -p "$app/Contents/Resources"
   cp assets/icons/Herdr.icns "$app/Contents/Resources/Herdr.icns"
   cp LICENSE THIRD-PARTY-NOTICES "$app/Contents/Resources/"
   notices_path=Herdr.app/Contents/Resources/THIRD-PARTY-NOTICES
+  archive_member=Herdr.app/Contents/MacOS/Herdr
   cat > "$app/Contents/Info.plist" <<PLIST
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
@@ -189,11 +216,12 @@ fi
 tar -xOf "$out" "$notices_path" | cmp - THIRD-PARTY-NOTICES
 license_path="${notices_path%/*}/LICENSE"
 tar -xOf "$out" "$license_path" | cmp - LICENSE
-"$python" - "$work/build.json" "$binary" "$out" "$verify_version" <<'PY'
+"$python" - "$work/build.json" "$binary" "$out" "$verify_version" "$archive_member" <<'PY'
 import hashlib, json, pathlib, sys
 receipt, binary, archive = map(pathlib.Path, sys.argv[1:4])
 data = json.loads(receipt.read_text())
-data.update(version_verification=sys.argv[4], packaged_executable_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(), archive_sha256=hashlib.sha256(archive.read_bytes()).hexdigest())
+data.update(version_verification=sys.argv[4], archive_member=sys.argv[5], packaged_executable_sha256=hashlib.sha256(binary.read_bytes()).hexdigest(), archive_sha256=hashlib.sha256(archive.read_bytes()).hexdigest())
 archive.with_suffix('').with_suffix('.build.json').write_text(json.dumps(data, indent=2) + '\n')
 PY
-echo "package: $out ($(sha256 "$out"))"
+"$python" scripts/package_output.py "$out" "$work/herdr-app-$target.build.json" dist "$lock"
+echo "package: dist/herdr-app-$target.tar.gz ($(sha256 "dist/herdr-app-$target.tar.gz"))"

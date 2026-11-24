@@ -45,6 +45,19 @@ class WorkflowTests(unittest.TestCase):
     def test_actual_workflows_keep_all_required_platforms(self):
         check_matrices(*self.workflows())
 
+    def test_release_cache_only_retains_sources_and_keeps_pair_artifacts(self):
+        _, release = self.workflows()
+        build = job(release, "build")
+        cache = build.split("path: &cache-paths |\n", 1)[1].split("          key:", 1)[0]
+        self.assertEqual({line.strip() for line in cache.splitlines() if line.strip()},
+                         {"~/.cargo/registry/index", "~/.cargo/registry/cache", "~/.cargo/git/db"})
+        self.assertNotIn("ci-sources", build)
+        self.assertNotIn("release-v2-", build)
+        self.assertIn("timeout-minutes: 45", build)
+        artifact = build.split("name: herdr-app-${{ matrix.target }}\n", 1)[1]
+        self.assertIn("dist/herdr-app-${{ matrix.target }}.tar.gz", artifact)
+        self.assertIn("dist/herdr-app-${{ matrix.target }}.build.json", artifact)
+
     def test_removing_intel_from_each_of_the_three_matrices_is_rejected(self):
         ci, release = self.workflows()
         for name, which in (("platform-tests", "ci"), ("build", "release"), ("mac-dmg", "release")):

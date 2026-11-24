@@ -4,19 +4,15 @@
 # releases bucket, versioned files first and app/latest.json last, so nobody
 # sees a version whose files aren't there yet.
 #
-# Caches: a tag's own cache is visible only to that tag, so tags restore
-# master's. Master keeps them warm by building (without publishing) when
-# what the build depends on changes: Cargo.lock, the vendored crates, the
-# toolchain, this workflow. Let that run finish before tagging.
-#
-# The cache is the whole target/, with scripts/ci-sources keeping unchanged
-# files fresh to Cargo: the vendored crates (gpui-kit, taffy, ghostty) are
-# the slow part, and a fresh checkout would otherwise rebuild them all.
+# Cache downloaded Cargo sources only. Packaging uses private target/build
+# directories, so a restored compiled target cannot warm a tag's build.
+# Tags can restore master's source cache; every platform still compiles its
+# release in isolation. Hosted cold-build time/disk must fit the job budget.
 #
 # Tests (the native screenshot test too) run only in ci.yml: a tag publishes
 # once ci.yml has passed for its commit.
 name: build and release
-# Master pushes only build (to keep the cache warm); tags publish.
+# Master pushes only build (validating and caching sources); tags publish.
 run-name: ${{ github.ref_type == 'tag' && format('release {0}', github.ref_name) || format('build {0}', github.ref_name) }}
 
 on:
@@ -31,6 +27,7 @@ on:
       - vendor/**
       - crates/**
       - scripts/package
+      - scripts/package_output.py
       - scripts/notices.*
       - tests/notices.rs
       - about.toml
@@ -44,7 +41,6 @@ on:
       - scripts/publish_dmg.py
       - scripts/release_manifest.py
       - distribution/macos/dmg/**
-      - scripts/ci-sources
       - .github/workflows/release.yml
   # Builds only; publishing needs a tag.
   workflow_dispatch:
@@ -59,7 +55,7 @@ concurrency:
 
 env:
   RUST_TOOLCHAIN: 1.95.0
-  # In the cache key: ghostty-sys can't tell when Zig changes.
+  # Pinned for each isolated build; compiled outputs are not restored.
   ZIG_VERSION: 0.16.0
   IS_TAG: ${{ github.ref_type == 'tag' }}
 
@@ -94,18 +90,17 @@ jobs:
       - uses: mlugg/setup-zig@d1434d08867e3ee9daa34448df10607b98908d29 # v2.2.1
         with:
           version: ${{ env.ZIG_VERSION }}
-      - name: Restore build cache
+      - name: Restore Cargo source cache
         uses: actions/cache/restore@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: &cache-paths |
             ~/.cargo/registry/index
             ~/.cargo/registry/cache
             ~/.cargo/git/db
-            target
-          key: release-v2-${{ matrix.target }}-${{ env.RUST_TOOLCHAIN }}-zig${{ env.ZIG_VERSION }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          key: release-sources-v1-${{ matrix.target }}-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
           restore-keys: |
-            release-v2-${{ matrix.target }}-${{ env.RUST_TOOLCHAIN }}-zig${{ env.ZIG_VERSION }}-${{ hashFiles('Cargo.lock') }}-
-            release-v2-${{ matrix.target }}-${{ env.RUST_TOOLCHAIN }}-zig${{ env.ZIG_VERSION }}-
+            release-sources-v1-${{ matrix.target }}-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}-
+            release-sources-v1-${{ matrix.target }}-${{ env.RUST_TOOLCHAIN }}-
       - name: Linux build dependencies
         if: runner.os == 'Linux'
         # A stuck package mirror fails here in minutes, not at the job's limit.
@@ -124,8 +119,6 @@ jobs:
         run: |
           want="v$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)"
           [ "$want" = "$GITHUB_REF_NAME" ] || { echo "tag $GITHUB_REF_NAME but Cargo.toml says $want"; exit 1; }
-      - name: Keep unchanged sources fresh
-        run: scripts/ci-sources restore
       - name: Build and pack
         env:
           RELEASES_URL: ${{ vars.RELEASES_URL }}
@@ -142,19 +135,18 @@ jobs:
           fi
           tar -xOf "$archive" "$prefix/THIRD-PARTY-NOTICES" | cmp - THIRD-PARTY-NOTICES
           tar -xOf "$archive" "$prefix/LICENSE" | cmp - LICENSE
-      - name: Note the sources the cache was built from
-        if: github.ref == 'refs/heads/master'
-        run: scripts/ci-sources record
-      - name: Save build cache
+      - name: Save Cargo source cache
         if: github.ref == 'refs/heads/master'
         uses: actions/cache/save@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: *cache-paths
-          key: release-v2-${{ matrix.target }}-${{ env.RUST_TOOLCHAIN }}-zig${{ env.ZIG_VERSION }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
+          key: release-sources-v1-${{ matrix.target }}-${{ env.RUST_TOOLCHAIN }}-${{ hashFiles('Cargo.lock') }}-${{ github.sha }}
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
         with:
           name: herdr-app-${{ matrix.target }}
-          path: dist/herdr-app-${{ matrix.target }}.tar.gz
+          path: |
+            dist/herdr-app-${{ matrix.target }}.tar.gz
+            dist/herdr-app-${{ matrix.target }}.build.json
           if-no-files-found: error
           retention-days: 7
 
