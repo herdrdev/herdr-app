@@ -219,6 +219,18 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
         }),
     )?;
 
+    let blur_input = runtime.clone();
+    globals.set(
+        "__input_blur",
+        Func::from(move |ctx: Ctx<'_>, handle: EntityHandle| -> JsResult<()> {
+            let state = live(&ctx, &blur_input, handle)?;
+            scope::with_current(|window, cx| {
+                state.update(cx, |state, cx| state.blur(window, cx));
+            })
+            .ok_or_else(|| needs_call(&ctx, "blur()"))
+        }),
+    )?;
+
     let masked_runtime = runtime.clone();
     globals.set(
         "__input_set_masked",
@@ -386,6 +398,18 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
         }),
     )?;
 
+    let blur_textarea = runtime.clone();
+    globals.set(
+        "__textarea_blur",
+        Func::from(move |ctx: Ctx<'_>, handle: EntityHandle| -> JsResult<()> {
+            let state = live_textarea(&ctx, &blur_textarea, handle)?;
+            scope::with_current(|window, cx| {
+                state.update(cx, |state, cx| state.blur(window, cx));
+            })
+            .ok_or_else(|| needs_call(&ctx, "blur()"))
+        }),
+    )?;
+
     let wrap_runtime = runtime.clone();
     globals.set(
         "__textarea_set_soft_wrap",
@@ -448,6 +472,12 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
                         "EditorState font_size must be positive and finite",
                     ));
                 }
+                let tab = editor_tab_size(
+                    &ctx,
+                    "EditorState tab_size",
+                    options.tab_size,
+                    options.hard_tabs,
+                )?;
                 let mut colors = std::collections::HashMap::new();
                 for (name, value) in &options.syntax {
                     let color = crate::value::Bridged::Str(value.clone())
@@ -465,6 +495,7 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
                         .entities()
                         .create_editor(
                             options,
+                            tab,
                             style,
                             scope::current_application_generation(),
                             window,
@@ -516,6 +547,52 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
             })
             .ok_or_else(|| needs_call(&ctx, "focus()"))
         }),
+    )?;
+
+    let blur_editor = runtime.clone();
+    globals.set(
+        "__editor_blur",
+        Func::from(move |ctx: Ctx<'_>, handle: EntityHandle| -> JsResult<()> {
+            let state = live_editor(&ctx, &blur_editor, handle)?;
+            scope::with_current(|window, cx| {
+                state.update(cx, |state, cx| state.blur(window, cx));
+            })
+            .ok_or_else(|| needs_call(&ctx, "blur()"))
+        }),
+    )?;
+
+    let tab_editor = runtime.clone();
+    globals.set(
+        "__editor_set_tab_size",
+        Func::from(
+            move |ctx: Ctx<'_>,
+                  handle: EntityHandle,
+                  tab_size: f64,
+                  hard_tabs: bool|
+                  -> JsResult<()> {
+                let tab = editor_tab_size(&ctx, "set_tab_size(tab_size)", tab_size, hard_tabs)?;
+                let state = live_editor(&ctx, &tab_editor, handle)?;
+                scope::with_current(|_, cx| {
+                    state.update(cx, |state, cx| state.set_tab_size(tab, cx));
+                })
+                .ok_or_else(|| needs_call(&ctx, "set_tab_size()"))
+            },
+        ),
+    )?;
+
+    // HERDR: toggle wrapping on a live editor; it re-wraps lines without re-highlighting.
+    let wrap_editor = runtime.clone();
+    globals.set(
+        "__editor_set_soft_wrap",
+        Func::from(
+            move |ctx: Ctx<'_>, handle: EntityHandle, wrap: bool| -> JsResult<()> {
+                let state = live_editor(&ctx, &wrap_editor, handle)?;
+                scope::with_current(|window, cx| {
+                    state.update(cx, |state, cx| state.set_soft_wrap(wrap, window, cx));
+                })
+                .ok_or_else(|| needs_call(&ctx, "set_soft_wrap()"))
+            },
+        ),
     )?;
 
     let read_editor = runtime.clone();
@@ -1382,6 +1459,27 @@ fn live(
         .entities()
         .input(handle)
         .ok_or_else(|| Exception::throw_type(ctx, "this input state has been released"))
+}
+
+// HERDR: an editor's indent width: a whole number of columns, at most 16.
+const MAX_TAB_SIZE: f64 = 16.;
+
+fn editor_tab_size(
+    ctx: &Ctx<'_>,
+    what: &str,
+    tab_size: f64,
+    hard_tabs: bool,
+) -> JsResult<gpui_base::input::TabSize> {
+    if tab_size.fract() != 0. || !(1. ..=MAX_TAB_SIZE).contains(&tab_size) {
+        return Err(Exception::throw_type(
+            ctx,
+            &format!("{what} must be a whole number from 1 to {MAX_TAB_SIZE}"),
+        ));
+    }
+    Ok(gpui_base::input::TabSize {
+        tab_size: tab_size as usize,
+        hard_tabs,
+    })
 }
 
 // HERDR: a distinct resolver prevents mixing code-editor and textarea handles.

@@ -461,6 +461,154 @@ export default class extends View {
 }
 
 #[gpui::test]
+fn file_drags_from_other_apps_report_the_held_button(cx: &mut TestAppContext) {
+    use gpui::{ExternalPaths, FileDropEvent, InputEvent};
+    cx.update(gpui_shell::init);
+    let fixture = Fixture::new(r#"
+import { View, div } from "gpui-kit";
+import { note } from "fixture";
+export default class extends View {
+  render() {
+    return div().id("row").size_full().on_mouse_move((e) => note(e.pressed_button ?? "none"));
+  }
+}"#);
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let calls = log.clone();
+    gpui_shell::policy::set_default(Policy::new().with_host_module(
+        HostModule::new("fixture").function("note", move |a| {
+            calls.borrow_mut().push(from_host(a.value(0)?));
+            Ok(HostValue::Null)
+        })
+    ).unwrap());
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|window, cx| Mounted(runtime.try_load(&fixture.0, window, cx).unwrap()));
+    let mut visual = VisualTestContext::from_window(*window.deref(), cx);
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    visual.run_until_parked();
+    visual.update(|window, cx| {
+        window.dispatch_event(FileDropEvent::Entered {
+            position: gpui::point(gpui::px(20.), gpui::px(20.)),
+            paths: ExternalPaths([PathBuf::from("/var/tmp/notes.md")].into_iter().collect()),
+        }.to_platform_input(), cx);
+        window.draw(cx).clear(cx);
+        window.dispatch_event(FileDropEvent::Pending { position: gpui::point(gpui::px(30.), gpui::px(25.)) }.to_platform_input(), cx);
+        window.draw(cx).clear(cx);
+        window.dispatch_event(FileDropEvent::Exited.to_platform_input(), cx);
+    });
+    visual.run_until_parked();
+    let seen = log.borrow().clone();
+    assert!(!seen.is_empty(), "the drag's moves should reach the element");
+    assert!(seen.iter().all(|b| *b == json!("left")), "every move of a file drag should carry the held button: {seen:?}");
+}
+
+#[gpui::test]
+fn window_mouse_events_follow_a_drag_off_the_element(cx: &mut TestAppContext) {
+    use gpui::{DispatchPhase, Modifiers, MouseButton, MouseMoveEvent, MouseUpEvent, NavigationDirection, ParentElement as _, Styled as _, point, px};
+
+    struct MountedWithCapture(gpui::Entity<ShellRoot>);
+
+    impl Render for MountedWithCapture {
+        fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+            gpui::div().size_full()
+                // Like terminal selection, these listeners can stop events in capture.
+                // Register before the mod so an ordinary capture listener there would miss them.
+                .child(gpui::canvas(|_, _, _| {}, |_, _, window, _| {
+                    window.on_mouse_event(|e: &MouseMoveEvent, phase, _, cx| {
+                        if phase == DispatchPhase::Capture && e.position.y >= px(30.) {
+                            cx.stop_propagation();
+                        }
+                    });
+                    window.on_mouse_event(|e: &MouseUpEvent, phase, _, cx| {
+                        if phase == DispatchPhase::Capture && e.position.y >= px(30.) {
+                            cx.stop_propagation();
+                        }
+                    });
+                }).absolute())
+                .child(self.0.clone())
+        }
+    }
+
+    cx.update(gpui_shell::init);
+    let fixture = Fixture::new(r#"
+import { View, div } from "gpui-kit";
+import { v_flex } from "gpui-base";
+import { note } from "fixture";
+export default class extends View {
+  render() {
+    const bar = div().id("bar").w(100).h(30).border(3).p(5).flex_none()
+      .on_mouse_down("left", () => { this.dragging = true; })
+      .on_mouse_up("left", () => { this.dragging = false; note("bar-up"); });
+    return v_flex().size_full().pl(40)
+      .child(this.done ? bar : bar
+        .on_window_mouse_move((e) => {
+          note(`move ${e.local_position.x},${e.local_position.y} ${e.pressed_button ?? "none"}`);
+          if (this.dragging && e.pressed_button !== "left") {
+            this.dragging = false;
+            note("cancelled");
+          }
+        })
+        .on_window_mouse_up("left", (e, cx) => {
+          note(`up ${e.button} ${e.local_position.x},${e.local_position.y} ${e.bounds.width}x${e.bounds.height}`);
+          if (e.local_position.y < 30) {
+            cx.stop_propagation();
+          } else {
+            this.done = true;
+            cx.propagate();
+            cx.notify();
+          }
+        })
+        .on_window_mouse_up("back", (e) => note(`up ${e.button}`))
+        .on_window_mouse_up("forward", (e) => note(`up ${e.button}`)))
+      .child(div().id("pane").flex_1().on_mouse_up("left", () => note("pane-up")));
+  }
+}"#);
+    let log = Rc::new(RefCell::new(Vec::<String>::new()));
+    let calls = log.clone();
+    gpui_shell::policy::set_default(Policy::new().with_host_module(
+        HostModule::new("fixture").function("note", move |a| {
+            calls.borrow_mut().push(a.string(0)?.to_owned());
+            Ok(HostValue::Null)
+        })
+    ).unwrap());
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|window, cx| MountedWithCapture(runtime.try_load(&fixture.0, window, cx).unwrap()));
+    let mut visual = VisualTestContext::from_window(*window.deref(), cx);
+    visual.simulate_resize(gpui::size(px(400.), px(400.)));
+    let draw = |visual: &mut VisualTestContext| {
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        visual.run_until_parked();
+    };
+    draw(&mut visual);
+
+    let none = Modifiers::default();
+    let over_bar = point(px(60.), px(20.));
+    let over_pane = point(px(90.), px(300.));
+
+    visual.simulate_mouse_down(over_bar, MouseButton::Left, none);
+    visual.simulate_mouse_up(over_bar, MouseButton::Left, none);
+    visual.simulate_mouse_down(over_bar, MouseButton::Left, none);
+    visual.simulate_mouse_move(over_pane, MouseButton::Left, none);
+    // A release outside the window can leave the next move as the only signal.
+    visual.simulate_mouse_move(over_pane, None, none);
+    visual.simulate_mouse_down(over_bar, MouseButton::Left, none);
+    visual.simulate_mouse_up(over_pane, MouseButton::Right, none);
+    visual.simulate_mouse_up(over_pane, MouseButton::Navigate(NavigationDirection::Back), none);
+    visual.simulate_mouse_up(over_pane, MouseButton::Navigate(NavigationDirection::Forward), none);
+    visual.simulate_mouse_up(over_pane, MouseButton::Left, none);
+    draw(&mut visual);
+    visual.simulate_mouse_move(over_bar, None, none);
+    visual.simulate_mouse_up(over_pane, MouseButton::Left, none);
+    draw(&mut visual);
+
+    assert_eq!(*log.borrow(), [
+        "up left 20,20 100x30", "bar-up",
+        "move 50,300 left", "move 50,300 none", "cancelled",
+        "up back", "up forward",
+        "up left 50,300 100x30",
+    ]);
+}
+
+#[gpui::test]
 fn mod_run_rejects_unknown_arguments_before_queueing_a_command(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let fixture = Fixture::new(r#"

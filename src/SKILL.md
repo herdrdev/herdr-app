@@ -132,8 +132,9 @@ background worker. Use app commands when the user wants to see a new tab or
 split, hc for orchestration that need not change the screen.
 
 Closing a pane, tab or space ends the terminals in it. Core ends their dependent
-children and keeps children started with `--outlive-parent` running. `terminal.kill`
-also follows the sub-agent tree, stopping at any child with a pane or a
+children and keeps children started with `--outlive-parent` running. On cores
+older than 0.1.13, Herdr also ends hidden children when closing. `terminal.kill`
+always follows the sub-agent tree. Both walks stop at children with a pane or a
 `herdr.space` label. Core still applies parent-lifetime rules to every exit.
 
 ## Customize layouts, keys, or mods
@@ -167,6 +168,8 @@ those files or the generated guide. The app rewrites them on start.
 - Shipped mods belong to Herdr: duplicate with `mod.clone` before editing.
   Shipped layouts likewise use `layout.clone` for a personal copy.
   Discover required arguments with `herdr-app commands`.
+- `InputState`, `TextareaState` and `EditorState` use `focus()` to take the
+  keyboard and `blur()` to hand it back to Herdr. `release()` frees the state.
 - Save to reload. A broken save keeps the old version running and reports
   an error in `status`; a still-working screen is not proof the edit worked.
 - Make only the requested change. Don't touch unrelated mods or settings.
@@ -178,6 +181,9 @@ those files or the generated guide. The app rewrites them on start.
   callback receives its own. Native animations, not redraw timers, keep
   the window cheap to run. Root `on_size_change((size, cx) => …)` reports
   logical pixels after layout, including resizes without pointer movement.
+  For a drag that leaves its element, use `on_window_mouse_move` and
+  `on_window_mouse_up` on a plain layout element. The installed guide covers
+  cancellation when the pointer returns without the held button.
   Optional `View.close(cx)` gets one bounded final call; start cleanup there,
   not in an earlier task. The installed guide explains its 250 ms quit budget
   and which cleanup commands go out before shutdown.
