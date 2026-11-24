@@ -1655,6 +1655,16 @@ fn key_bytes(vt: &mut vt::Vt, ev: &KeyDownEvent) -> Option<Vec<u8>> {
             let text = if shifted { "_" } else { "-" };
             return Some(control_alias_bytes(vt, GHOSTTY_KEY_MINUS, text, shifted, vec![0x1f]));
         }
+        // Ctrl+^ and Ctrl+@ come as the symbol with no control text. Not Shift+6/2:
+        // which digit gives the symbol depends on the layout (JIS Shift+2 is ").
+        let symbol = match k.key.as_str() {
+            "^" => Some((GHOSTTY_KEY_DIGIT_6, "^", 0x1e)),
+            "@" => Some((GHOSTTY_KEY_DIGIT_2, "@", 0x00)),
+            _ => None,
+        };
+        if let Some((key, text, byte)) = symbol {
+            return Some(control_alias_bytes(vt, key, text, true, vec![byte]));
+        }
     }
     if vt.win32.on && vt.kitty_keyboard_flags() == 0 {
         if k.key == "enter" && (m.shift || m.control || m.alt) {
@@ -4758,6 +4768,8 @@ mod tests {
             // Also accept backends that retain the physical minus and Shift.
             ("ctrl-shift--", None, b"\x1f", b"\x1b[45;6u", b"\x1b[45;6u"),
             ("ctrl-/", None, b"\x1f", b"\x1b[47;5u", b"\x1b[47;5u"),
+            ("ctrl-^", None, b"\x1e", b"\x1b[54;6u", b"\x1b[54;6u"),
+            ("ctrl-@", None, b"\x00", b"\x1b[50;6u", b"\x1b[50;6u"),
             ("ctrl-i", None, b"\t", b"\x1b[105;5u", b"\x1b[105;5u"),
             ("ctrl-m", None, b"\r", b"\x1b[109;5u", b"\x1b[109;5u"),
             ("ctrl-]", None, b"\x1d", b"\x1b[93;5u", b"\x1b[93;5u"),
@@ -4791,6 +4803,20 @@ mod tests {
             }
         }
         assert!(wrong.is_empty(), "\n{}", wrong.join("\n"));
+    }
+
+    #[test]
+    fn caret_and_at_control_aliases_respect_modify_other_keys() {
+        for (spec, legacy, modified) in [
+            ("ctrl-^", b"\x1e".as_slice(), b"\x1b[27;6;94~".as_slice()),
+            ("ctrl-@", b"\x00", b"\x1b[27;6;64~"),
+        ] {
+            for (setup, expected) in [(b"".as_slice(), legacy), (b"\x1b[>4;1m", legacy), (b"\x1b[>4;2m", modified)] {
+                let mut vt = Vt::new(20, 3);
+                vt.write(setup);
+                assert_eq!(key_bytes(&mut vt, &press(spec, None)).as_deref(), Some(expected), "{spec}, setup={setup:?}");
+            }
+        }
     }
 
     #[test]
