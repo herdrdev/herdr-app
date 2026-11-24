@@ -122,7 +122,7 @@ use smallvec::SmallVec;
 
 use gpui::{
     AbsoluteLength, AnyElement, App, AppContext, Bounds, DefiniteLength, InteractiveElement, IntoElement,
-    Length, MouseButton, ParentElement, Pixels, Refineable as _, SharedString,
+    Length, MouseButton, NavigationDirection, ParentElement, Pixels, Refineable as _, SharedString,
     StatefulInteractiveElement, StyleRefinement, Styled, Window, div,
 };
 use gpui_base::{
@@ -2781,6 +2781,11 @@ pub(in crate::materialize) fn resolve_ops(
                 "on_mouse_up_left" => behavior.on_mouse_up.push((MouseButton::Left, *id)),
                 "on_mouse_up_right" => behavior.on_mouse_up.push((MouseButton::Right, *id)),
                 "on_mouse_up_middle" => behavior.on_mouse_up.push((MouseButton::Middle, *id)),
+                // HERDR: the mouse's side buttons.
+                "on_mouse_down_back" => behavior.on_mouse_down.push((MouseButton::Navigate(NavigationDirection::Back), *id)),
+                "on_mouse_down_forward" => behavior.on_mouse_down.push((MouseButton::Navigate(NavigationDirection::Forward), *id)),
+                "on_mouse_up_back" => behavior.on_mouse_up.push((MouseButton::Navigate(NavigationDirection::Back), *id)),
+                "on_mouse_up_forward" => behavior.on_mouse_up.push((MouseButton::Navigate(NavigationDirection::Forward), *id)),
                 "on_mouse_down_out" => behavior.on_mouse_down_out = Some(*id),
                 "on_drop" => behavior.on_drop = Some(*id),
                 "on_scroll_wheel" => behavior.on_scroll_wheel = Some(*id),
@@ -3674,6 +3679,8 @@ fn apply_behavior(behavior: &mut Behavior, name: &str, args: &[Bridged]) {
                         "left" => Some(MouseButton::Left),
                         "right" => Some(MouseButton::Right),
                         "middle" => Some(MouseButton::Middle),
+                        "back" => Some(MouseButton::Navigate(NavigationDirection::Back)),
+                        "forward" => Some(MouseButton::Navigate(NavigationDirection::Forward)),
                         _ => None,
                     });
         }

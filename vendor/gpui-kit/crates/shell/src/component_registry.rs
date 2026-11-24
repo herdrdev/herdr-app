@@ -1839,7 +1839,7 @@ const PRELUDE_CHECKED_VOCABULARIES: &[(&str, &[&str])] = &[
     ("anchor", &crate::materialize::ANCHOR_NAMES),
     ("axis", &["horizontal", "vertical"]),
     ("mode", &["scrolling", "hover", "always"]),
-    ("mouse_button", &["left", "right", "middle"]),
+    ("mouse_button", &["left", "right", "middle", "back", "forward"]),
 ];
 
 impl fmt::Display for RegistryError {

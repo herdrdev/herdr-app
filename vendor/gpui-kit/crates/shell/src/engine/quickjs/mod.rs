@@ -6222,9 +6222,11 @@ globalThis.__gpui = (() => {
   // an unknown button name is refused rather than falling back to the left one.
   methods.mouse_button = function (value) {
     value = String(value);
-    if (!["left", "right", "middle"].includes(value)) {
+    // HERDR: back and forward are the mouse's side buttons.
+    if (!["left", "right", "middle", "back", "forward"].includes(value)) {
       throw new TypeError(
-        "mouse_button(value) must be left, right or middle; got " + JSON.stringify(value),
+        "mouse_button(value) must be left, right, middle, back or forward; got " +
+          JSON.stringify(value),
       );
     }
     __apply(this.__id, "mouse_button", [value]);
@@ -8425,7 +8427,7 @@ impl ShellRuntime {
                             ctx,
                             &format!(
                                 "{method}(button, handler) expects a button first: \
-                                 \"left\", \"right\" or \"middle\""
+                                 \"left\", \"right\", \"middle\", \"back\" or \"forward\""
                             ),
                         )
                     })?;
@@ -8442,12 +8444,17 @@ impl ShellRuntime {
                     ("on_mouse_up", "left") => "on_mouse_up_left",
                     ("on_mouse_up", "right") => "on_mouse_up_right",
                     ("on_mouse_up", "middle") => "on_mouse_up_middle",
+                    // HERDR: the mouse's side buttons.
+                    ("on_mouse_down", "back") => "on_mouse_down_back",
+                    ("on_mouse_down", "forward") => "on_mouse_down_forward",
+                    ("on_mouse_up", "back") => "on_mouse_up_back",
+                    ("on_mouse_up", "forward") => "on_mouse_up_forward",
                     (_, other) => {
                         return Err(Exception::throw_type(
                             ctx,
                             &format!(
-                                "`{other}` is not a mouse button; \
-                                 expected \"left\", \"right\" or \"middle\""
+                                "`{other}` is not a mouse button; expected \
+                                 \"left\", \"right\", \"middle\", \"back\" or \"forward\""
                             ),
                         ));
                     }
@@ -9921,6 +9928,9 @@ fn mouse_button_payload<'js>(
         match button {
             gpui::MouseButton::Right => "right",
             gpui::MouseButton::Middle => "middle",
+            // HERDR: the mouse's side buttons.
+            gpui::MouseButton::Navigate(gpui::NavigationDirection::Back) => "back",
+            gpui::MouseButton::Navigate(gpui::NavigationDirection::Forward) => "forward",
             _ => "left",
         },
     )?;

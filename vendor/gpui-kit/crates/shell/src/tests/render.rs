@@ -8362,6 +8362,90 @@ export default class Surface extends View {
     );
 }
 
+// HERDR: the mouse's side buttons reach a script by name, each only its own handler.
+#[gpui::test]
+fn a_script_hears_the_back_and_forward_buttons(cx: &mut TestAppContext) {
+    use gpui::{MouseButton, NavigationDirection};
+
+    cx.update(|cx| crate::init(cx));
+
+    let runtime = ShellRuntime::new_isolated().expect("runtime");
+    cx.update(|cx| runtime.set_global(cx));
+    let source = r#"
+import { View, div } from "gpui-kit";
+import { v_flex } from "gpui-base";
+
+export default class Surface extends View {
+  init(_props, _cx) {
+    this.log = [];
+  }
+
+  render(_cx) {
+    return v_flex()
+      .w(300)
+      .h(200)
+      .child(
+        div()
+          .id("target")
+          .w(100)
+          .h(50)
+          .on_mouse_down("back", (event, cx) => {
+            this.log.push(`down:${event.button}`);
+            cx.notify();
+          })
+          .on_mouse_down("forward", (event, cx) => {
+            this.log.push(`down:${event.button}`);
+            cx.notify();
+          })
+          .on_mouse_up("back", (event, cx) => {
+            this.log.push(`up:${event.button}`);
+            cx.notify();
+          }),
+      )
+      .child(div().child(`log=${this.log.join(" ")}`));
+  }
+}
+"#;
+    let view_type = runtime.load_source("navigate", source).expect("load");
+    let runtime_for_view = Rc::clone(&runtime);
+    let window = cx.add_window(move |window, cx| {
+        let view = runtime_for_view
+            .instantiate_view(&view_type, window, cx)
+            .expect("instantiate");
+        RootedScriptView(view)
+    });
+    let mut context = VisualTestContext::from_window(*window.deref(), cx);
+    context.update(|window, cx| window.draw(cx).clear(cx));
+    let view = window
+        .root(&mut context)
+        .expect("root view")
+        .read_with(&context, |root, _| root.0.clone());
+
+    let inside = point(px(20.), px(20.));
+    let back = MouseButton::Navigate(NavigationDirection::Back);
+    let forward = MouseButton::Navigate(NavigationDirection::Forward);
+    context.simulate_mouse_move(inside, None, Modifiers::default());
+    context.simulate_mouse_down(inside, MouseButton::Left, Modifiers::default());
+    context.simulate_mouse_up(inside, MouseButton::Left, Modifiers::default());
+    context.simulate_mouse_down(inside, back, Modifiers::default());
+    context.simulate_mouse_up(inside, back, Modifiers::default());
+    context.simulate_mouse_down(inside, forward, Modifiers::default());
+    context.simulate_mouse_up(inside, forward, Modifiers::default());
+    context.run_until_parked();
+    context.update(|window, cx| window.draw(cx).clear(cx));
+
+    let tree = context.update(|_, cx| {
+        view.read(cx)
+            .snapshot()
+            .map(crate::RenderSnapshot::debug_tree)
+            .unwrap_or_default()
+    });
+    assert!(
+        tree.contains("log=down:back up:back down:forward"),
+        "back and forward each reach their own handlers, and a left press neither: {tree}"
+    );
+}
+
 /// Input reaches base's own controls, not just a plain element.
 ///
 /// `Button.new("save").on_key_down(...)` is a reasonable thing to write and for
