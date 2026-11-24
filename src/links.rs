@@ -86,34 +86,34 @@ fn has_scheme(link: &str) -> bool {
 pub struct Resolved<'a> {
     raw: &'a str,
     spelling: &'a str,
+    remote: bool,
     pub native: Option<Target>,
 }
 
 /// What a link opens. File paths count only when they exist here; relative
 /// ones need the terminal's folder.
-pub fn resolve<'a>(link: &'a str, cwd: Option<&Path>) -> Resolved<'a> {
+pub fn resolve<'a>(link: &'a str, cwd: Option<&Path>, remote: bool) -> Resolved<'a> {
     let (native, spelling) = if has_scheme(link) {
-        let native = file_url_spelling(link)
-            .as_deref()
-            .and_then(|path| [path, without_suffix(path)].into_iter().map(file_url_path).find(|p| p.exists()))
+        let native = existing_file_url(link, remote)
             .map_or_else(|| Target::Url(link.to_owned()), Target::File);
         (Some(native), link)
-    } else if let Some((path, spelling)) = local_file(link, cwd) {
+    } else if let Some((path, spelling)) = local_file(link, cwd, remote) {
         (Some(Target::File(path)), spelling)
     } else {
-        (None, without_suffix(link))
+        (None, without_suffix(link, true))
     };
-    Resolved { raw: link, spelling, native }
+    Resolved { raw: link, spelling, remote, native }
 }
 
-fn local_file<'a>(link: &'a str, cwd: Option<&Path>) -> Option<(PathBuf, &'a str)> {
+fn local_file<'a>(link: &'a str, cwd: Option<&Path>, remote: bool) -> Option<(PathBuf, &'a str)> {
     let full = expand_file(link, cwd)?;
     // Windows ignores a trailing period when checking whether a path exists.
     if !(cfg!(windows) && full.extension().is_some_and(|ext| ext.is_empty())) && full.exists() {
         return Some((full, link));
     }
-    let bare = without_suffix(full.to_str()?);
-    Path::new(bare).exists().then(|| (PathBuf::from(bare), without_suffix(link)))
+    // A range in a remote terminal cannot be resolved against a desktop file.
+    let bare = without_suffix(full.to_str()?, !remote);
+    Path::new(bare).exists().then(|| (PathBuf::from(bare), without_suffix(link, !remote)))
 }
 
 fn expand_file(link: &str, cwd: Option<&Path>) -> Option<PathBuf> {
@@ -134,21 +134,31 @@ fn expand_file(link: &str, cwd: Option<&Path>) -> Option<PathBuf> {
     Some(if expanded.is_absolute() { expanded } else { cwd?.join(expanded) })
 }
 
-// The period ending a sentence, or `:42` / `:42:7` naming a place in the file.
-fn without_suffix(path: &str) -> &str {
-    let mut bare = path.strip_suffix('.').unwrap_or(path);
-    // A line range: `#L5`, `#L5-L12` and `#L5-12` (as on GitHub), or `:5-12`.
-    if let Some((head, lines)) = bare.rsplit_once("#L")
-        && line_range(lines).is_some()
-    {
-        return head;
+// Plain paths may end in a period, diagnostic coordinates or a line range.
+fn without_suffix(path: &str, ranges: bool) -> &str {
+    let bare = path.strip_suffix('.').unwrap_or(path);
+    if ranges {
+        if let Some((head, lines)) = bare.rsplit_once("#L")
+            && line_range(lines).is_some()
+        {
+            return head;
+        }
+        return without_colon_suffix(bare);
     }
-    if let Some((head, lines)) = bare.rsplit_once(':')
+    without_coordinates(bare)
+}
+
+fn without_colon_suffix(path: &str) -> &str {
+    if let Some((head, lines)) = path.rsplit_once(':')
         && lines.contains('-')
         && line_range(lines).is_some()
     {
         return head;
     }
+    without_coordinates(path)
+}
+
+fn without_coordinates(mut bare: &str) -> &str {
     for _ in 0..2 {
         match bare.rsplit_once(':') {
             Some((head, n)) if is_number(n) => bare = head,
@@ -188,15 +198,28 @@ fn is_number(text: &str) -> bool {
     !text.is_empty() && text.bytes().all(|b| b.is_ascii_digit())
 }
 
-/// The path spelling in a local `file:` URL, percent-decoded.
-fn file_url_spelling(link: &str) -> Option<String> {
+fn existing_file_url(link: &str, remote: bool) -> Option<PathBuf> {
     let rest = link.strip_prefix("file://")?;
     let rest = rest.strip_prefix("localhost").unwrap_or(rest);
     // Another host's file, or no path.
     if !rest.starts_with('/') {
         return None;
     }
-    decode_file_url_path(rest)
+    let path = rest.split(['?', '#']).next()?;
+    let exact = file_url_path(&decode_file_url_path(path)?);
+    if exact.exists() {
+        return Some(exact);
+    }
+    if remote {
+        return None;
+    }
+    // Escaped suffix characters belong to the filename.
+    let bare = without_colon_suffix(path);
+    if bare == path {
+        return None;
+    }
+    let file = file_url_path(&decode_file_url_path(bare)?);
+    file.exists().then_some(file)
 }
 
 /// File rules see all file URIs. Only an empty authority or localhost
@@ -215,15 +238,14 @@ fn handler_file_uri(link: &str) -> Option<(&str, &str)> {
 }
 
 fn decode_file_url_path(path: &str) -> Option<String> {
-    let rest = path.split(['?', '#']).next()?;
-    let mut bytes = Vec::with_capacity(rest.len());
+    let mut bytes = Vec::with_capacity(path.len());
     let mut i = 0;
-    while i < rest.len() {
-        if rest.as_bytes()[i] == b'%' {
-            bytes.push(u8::from_str_radix(rest.get(i + 1..i + 3)?, 16).ok()?);
+    while i < path.len() {
+        if path.as_bytes()[i] == b'%' {
+            bytes.push(u8::from_str_radix(path.get(i + 1..i + 3)?, 16).ok()?);
             i += 3;
         } else {
-            bytes.push(rest.as_bytes()[i]);
+            bytes.push(path.as_bytes()[i]);
             i += 1;
         }
     }
@@ -292,8 +314,8 @@ pub struct Click {
 }
 
 impl Resolved<'_> {
-    pub fn click(self, remote: bool, active: &Handlers) -> Option<Click> {
-        let Self { raw, spelling, native } = self;
+    pub fn click(self, active: &Handlers) -> Option<Click> {
+        let Self { raw, spelling, remote, native } = self;
         if active.is_empty() {
             return native.map(native_click);
         }
@@ -305,7 +327,7 @@ impl Resolved<'_> {
             Some(decoded.as_deref().unwrap_or(path))
         } else if !is_url {
             // The desktop's files cannot tell us whether a remote suffix is literal.
-            Some(if remote { without_suffix(raw) } else { spelling })
+            Some(if remote { without_suffix(raw, true) } else { spelling })
         } else {
             None
         };
@@ -460,15 +482,15 @@ mod tests {
             ("specialist".into(), localhost),
         ].to_vec();
         let url = "http://localhost:8123/view.png?a=1#anchor";
-        let hit = resolve(url, None).click(true, &active).unwrap();
+        let hit = resolve(url, None, true).click(&active).unwrap();
         let payload = json!({"kind":"url", "raw":url, "url":url});
         assert_eq!(hit.handlers, [("specialist".to_owned(), payload.clone()), ("browser".to_owned(), payload)]);
         assert_eq!(hit.native, Some(Target::Url(url.into())));
 
-        let other = resolve("http://localhost.example.com", None).click(false, &active).unwrap();
+        let other = resolve("http://localhost.example.com", None, false).click(&active).unwrap();
         assert_eq!(other.handlers.iter().map(|(id, _)| id.as_str()).collect::<Vec<_>>(), ["browser"]);
         let foreign = "file://server/plot.png";
-        let hit = resolve(foreign, None).click(false, &active).unwrap();
+        let hit = resolve(foreign, None, false).click(&active).unwrap();
         assert_eq!(hit.handlers, [("viewer".to_owned(), json!({"kind":"file", "raw":foreign, "path":null}))]);
         assert_eq!(hit.native, Some(Target::Url(foreign.into())));
     }
@@ -543,7 +565,7 @@ mod tests {
                 }
                 None => Some(text),
             };
-            let click = |rules: &Handlers| raw.and_then(|raw| resolve(raw, Some(&cwd)).click(remote, rules));
+            let click = |rules: &Handlers| raw.and_then(|raw| resolve(raw, Some(&cwd), remote).click(rules));
             let expected_payload = handled.map(|(kind, expected_raw)| {
                 assert_eq!(raw, Some(expected_raw), "{text}");
                 match kind {
@@ -611,14 +633,20 @@ mod tests {
         for link in ["src/main.rs:5-12", "src/main.rs#L42", "src/main.rs#L5-L12", "src/main.rs#L5-12", "src/main.rs#L5-12."] {
             assert_eq!(first(&format!("see {link} now")), Some(link), "{link}");
             assert_eq!(native_target(link, Some(&dir)), file, "{link}");
+            assert_eq!(resolve(link, Some(&dir), true).native, None, "{link}");
         }
         for link in ["src/main.rs:5-x", "src/main.rs#Lx", "src/main.rs#5"] {
             assert_eq!(native_target(link, Some(&dir)), None, "{link}");
         }
         let slashed = dir.join("src/main.rs").to_string_lossy().replace('\\', "/");
         let root = if cfg!(windows) { "/" } else { "" };
-        for suffix in ["#L5-L12", ":5-12", ":42"] {
-            assert_eq!(native_target(&format!("file://{root}{slashed}{suffix}"), None), file, "{suffix}");
+        let anchored_uri = format!("file://{root}{slashed}#L5-L12");
+        assert_eq!(native_target(&anchored_uri, None), file);
+        assert_eq!(resolve(&anchored_uri, None, true).native, file);
+        for suffix in [":5-12", ":42"] {
+            let uri = format!("file://{root}{slashed}{suffix}");
+            assert_eq!(native_target(&uri, None), file, "{suffix}");
+            assert_eq!(resolve(&uri, None, true).native, Some(Target::Url(uri.clone())), "{suffix}");
         }
         std::fs::remove_dir_all(dir).unwrap();
     }
@@ -639,7 +667,7 @@ mod tests {
         ];
         let urls_only = vec![active[1].clone()];
         let drive_uri = "file:C:/Windows/win.ini";
-        assert_eq!(resolve(drive_uri, None).click(true, &urls_only).unwrap().native, None);
+        assert_eq!(resolve(drive_uri, None, true).click(&urls_only).unwrap().native, None);
         let unmatched = vec![("unused".into(), rules(json!([{"kind":"url", "pattern":"^https:"}])))];
         let existing = file_url_path(&format!("{root}{slashed}/plot.png"));
         for (name, exists) in [("plot.png", true), ("missing.png", false)] {
@@ -669,7 +697,7 @@ mod tests {
                 let original = native_target(&raw, None);
                 for remote in [false, true] {
                     let verified = exists && !remote && can_verify_local;
-                    let hit = resolve(&raw, None).click(remote, &active).unwrap();
+                    let hit = resolve(&raw, None, remote).click(&active).unwrap();
                     let path = verified.then(|| existing.to_str().unwrap());
                     let url = json!({"kind":"url", "raw":raw, "url":raw});
                     let file = json!({"kind":"file", "raw":raw, "path":path});
@@ -677,11 +705,11 @@ mod tests {
                     assert_eq!(hit.handlers, [("files".to_owned(), file), ("urls".to_owned(), url.clone())], "{raw}");
                     assert_eq!(hit.native, native, "{raw}");
 
-                    let hit = resolve(&raw, None).click(remote, &urls_only).unwrap();
+                    let hit = resolve(&raw, None, remote).click(&urls_only).unwrap();
                     assert_eq!(hit.handlers, [("urls".to_owned(), url)], "{raw}");
                     assert_eq!(hit.native, native, "{raw}");
                     assert_eq!(
-                        resolve(&raw, None).click(remote, &unmatched),
+                        resolve(&raw, None, remote).click(&unmatched),
                         original.clone().map(native_click),
                         "{raw}"
                     );
@@ -702,12 +730,12 @@ mod tests {
         std::fs::write(cwd.join("plot.png"), "").unwrap();
         let active = vec![("files".into(), rules(json!([{"kind":"file", "pattern":r"\.png$"}])))];
         let raw = "./plot.png";
-        let hit = resolve(raw, Some(&cwd)).click(false, &active).unwrap();
+        let hit = resolve(raw, Some(&cwd), false).click(&active).unwrap();
         assert_eq!(hit.handlers[0].1, json!({"kind":"file", "raw":raw, "path":null}));
         assert_eq!(hit.native, Some(Target::File(cwd.join(raw))));
 
         let uri = format!("file://{}/assets-%FF/plot.png", dir.display());
-        let hit = resolve(&uri, None).click(false, &active).unwrap();
+        let hit = resolve(&uri, None, false).click(&active).unwrap();
         assert_eq!(hit.handlers[0].1, json!({"kind":"file", "raw":uri, "path":null}));
         assert_eq!(hit.native, Some(Target::Url(uri)));
         std::fs::remove_dir_all(dir).unwrap();
@@ -737,7 +765,7 @@ mod tests {
     }
 
     fn native_target(link: &str, cwd: Option<&Path>) -> Option<Target> {
-        resolve(link, cwd).native
+        resolve(link, cwd, false).native
     }
 
     fn first(text: &str) -> Option<&str> {
@@ -976,7 +1004,14 @@ mod tests {
         assert_eq!(native_target(&format!("file://{root}{encoded}"), None), file);
         assert_eq!(native_target(&format!("file://localhost{root}{encoded}"), None), file);
         assert_eq!(native_target(&format!("file://{root}{}", slashed.replace('#', "%23")), None), file);
-        for url in [format!("file://{root}{encoded}.gone"), format!("file://{root}{encoded}%ZZ"), format!("file://box{root}{encoded}")] {
+        for url in [
+            format!("file://{root}{encoded}.gone"),
+            format!("file://{root}{encoded}%ZZ"),
+            format!("file://{root}{encoded}%23L5"),
+            format!("file://{root}{encoded}%3A5-12"),
+            format!("file://{root}{encoded}:5%2D12"),
+            format!("file://box{root}{encoded}"),
+        ] {
             assert_eq!(native_target(&url, None), Some(Target::Url(url.clone())), "{url}");
         }
         std::fs::remove_dir_all(dir).unwrap();
