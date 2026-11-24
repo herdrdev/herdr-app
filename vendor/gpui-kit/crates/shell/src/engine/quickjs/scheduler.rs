@@ -398,6 +398,24 @@ pub(crate) fn cancel_policy(policy: &Rc<Policy>) {
 /// Cancels work owned by exactly one evaluated application incarnation.
 pub(crate) fn cancel_application_generation(generation: &Rc<ApplicationGeneration>) {
     generation.retire();
+    // A pending sleep or awaited task of this generation will never settle
+    // now. Naming them before the drop turns a silent starvation into a log
+    // line; the application re-registers its background work from init().
+    let mut stranded = std::collections::BTreeMap::<&'static str, usize>::new();
+    TASKS.with_borrow(|tasks| {
+        for task in tasks.values() {
+            if task.application.as_ref().is_some_and(|candidate| Rc::ptr_eq(candidate, generation))
+                && !task.done.get()
+                && task.callback.borrow().is_some()
+            {
+                *stranded.entry(task.api).or_default() += 1;
+            }
+        }
+    });
+    if !stranded.is_empty() {
+        let summary = stranded.iter().map(|(api, n)| format!("{n} {api}")).collect::<Vec<_>>().join(", ");
+        tracing::warn!("a reload stranded script tasks that will never settle ({summary}); re-register background work from init()");
+    }
     cancel_where(|task| {
         task.application
             .as_ref()

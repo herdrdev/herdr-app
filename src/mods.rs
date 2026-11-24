@@ -1,13 +1,13 @@
 //! Mods: folders of JavaScript under ~/.config/herdr-app/mods that agents write and
 //! Herdr runs live (gpui-shell), plus the `herdr` module they import.
 
-use crate::layout::Node;
+use crate::{layout::Node, links};
 use gpui::App;
 use gpui_shell::{Capabilities, ExecuteGrant, HostError, HostModule, HostObject, HostValue, NetworkGrant};
 use serde::Deserialize;
 use serde_json::{Value, json};
-use std::cell::RefCell;
-use std::collections::HashMap;
+use std::cell::{Cell, RefCell};
+use std::collections::{BTreeMap, HashMap};
 use std::path::{Path, PathBuf};
 use std::process::Stdio;
 use std::rc::{Rc, Weak};
@@ -32,6 +32,17 @@ pub fn frame_dir() -> PathBuf {
 pub fn home() -> PathBuf {
     // HOME, or the profile folder on Windows.
     std::env::home_dir().unwrap_or_else(|| "/".into())
+}
+
+thread_local! {
+    static CHECKING: Cell<bool> = const { Cell::new(false) };
+}
+
+/// True while `herdr-app check` loads a mod: `init()` runs there with live
+/// exec and write capabilities, so mods can see it (`herdr.checking()`) and
+/// those side effects warn.
+fn checking() -> bool {
+    CHECKING.with(|c| c.get())
 }
 
 /// The fonts on this machine (`fonts()`): read when the window opens and
@@ -345,34 +356,71 @@ pub struct Hint {
     pub focusable: bool,
 }
 
-#[derive(Clone)]
-pub struct Found {
-    pub id: String,
-    pub dir: PathBuf,
-    pub hint: Hint,
-    pub stamp: SystemTime,
+fn parse_link_rules(source: &std::io::Result<String>, link_manifest: bool) -> Result<Vec<links::Rule>, String> {
+    let manifest: Value = match source {
+        Ok(source) => match serde_json::from_str(source) {
+            Ok(manifest) => manifest,
+            Err(e) if link_manifest => return Err(format!("mod.json: {e}")),
+            Err(_) => return Ok(Vec::new()),
+        },
+        Err(e) if link_manifest && e.kind() != std::io::ErrorKind::NotFound => return Err(format!("mod.json: {e}")),
+        Err(_) => return Ok(Vec::new()),
+    };
+    if link_manifest && !manifest.is_object() {
+        return Err("mod.json: expected a top-level object".into());
+    }
+    match manifest.get("link_handlers") {
+        Some(rules) => serde_json::from_value(rules.clone()).map_err(|e| format!("mod.json link_handlers: {e}")),
+        None => Ok(Vec::new()),
+    }
 }
 
-/// Every mod folder that has a main.js.
-pub fn scan() -> Vec<Found> {
-    let mut found = scan_dir(&mods_dir(), "");
-    found.extend(scan_dir(&frame_dir(), "frame-"));
-    found.sort_by(|a, b| a.id.cmp(&b.id));
+#[derive(Clone)]
+pub struct Found {
+    pub dir: PathBuf,
+    pub hint: Hint,
+    pub has_view: bool,
+    pub link_rules: Rc<[links::Rule]>,
+    pub stamp: SystemTime,
+    pub manifest_error: Option<String>,
+}
+
+pub fn scan(previous: &BTreeMap<String, Found>) -> BTreeMap<String, Found> {
+    let mut found = scan_dir(&mods_dir(), "", previous);
+    found.extend(scan_dir(&frame_dir(), "frame-", previous));
     found
 }
 
-fn scan_dir(root: &Path, prefix: &str) -> Vec<Found> {
-    let Ok(entries) = std::fs::read_dir(root) else { return Vec::new() };
+fn scan_dir(root: &Path, prefix: &str, previous: &BTreeMap<String, Found>) -> BTreeMap<String, Found> {
+    let Ok(entries) = std::fs::read_dir(root) else { return BTreeMap::new() };
     entries
         .flatten()
-        .filter(|e| e.path().join("main.js").is_file())
         .filter_map(|e| {
             let id = format!("{prefix}{}", e.file_name().to_str()?);
             if id.starts_with('.') {
                 return None;
             }
             let dir = e.path();
-            let hint = std::fs::read_to_string(dir.join("mod.json")).ok().and_then(|s| serde_json::from_str(&s).ok()).unwrap_or_default();
+            let has_view = dir.join("main.js").is_file();
+            let has_link = dir.join("link.js").is_file();
+            let manifest_path = dir.join("mod.json");
+            if !has_view && !has_link && !manifest_path.is_file() {
+                return None;
+            }
+            let source = std::fs::read_to_string(manifest_path);
+            let hint = source.as_ref().ok().and_then(|s| serde_json::from_str(s).ok()).unwrap_or_default();
+            let previous_rules = previous.get(&id).filter(|old| old.dir == dir).map(|old| &old.link_rules);
+            let link_manifest = (has_link && !has_view) || previous_rules.is_some_and(|rules| !rules.is_empty());
+            let (link_rules, manifest_error) = match parse_link_rules(&source, link_manifest) {
+                Ok(rules) => {
+                    let error = (!rules.is_empty() && !has_link).then(|| "mod.json declares link_handlers but link.js is missing".to_owned());
+                    (rules.into(), error)
+                }
+                Err(error) => (previous_rules.cloned().unwrap_or_default(), Some(error)),
+            };
+            if !has_view && !has_link && link_rules.is_empty() && manifest_error.is_none() {
+                return None;
+            }
             let stamp = std::fs::read_dir(&dir)
                 .into_iter()
                 .flatten()
@@ -380,7 +428,7 @@ fn scan_dir(root: &Path, prefix: &str) -> Vec<Found> {
                 .filter_map(|f| f.metadata().ok()?.modified().ok())
                 .max()
                 .unwrap_or(SystemTime::UNIX_EPOCH);
-            Some(Found { id, dir, hint, stamp })
+            Some((id, Found { dir, hint, has_view, link_rules, stamp, manifest_error }))
         })
         .collect()
 }
@@ -392,6 +440,8 @@ pub enum Request {
     CloseOverlay { id: String },
     /// The OS window's title; `None` restores the default.
     SetWindowTitle(Option<String>),
+    /// The app icon's badge (the Dock on macOS); `None` clears it.
+    SetBadge(Option<String>),
     Refresh,
     /// From `herdr-app do` / `herdr-app status` (control.rs); answer on `reply`.
     Control { cmd: Value, reply: std::sync::mpsc::Sender<Value> },
@@ -545,6 +595,7 @@ thread_local! {
     /// Snapshots the window publishes; mods read them synchronously and
     /// re-render when they change.
     static SNAPSHOT: RefCell<Snapshot> = RefCell::new(Snapshot::default());
+    static PANE_VIEWS: RefCell<HashMap<String, gpui::WeakEntity<crate::terminal::TerminalView>>> = RefCell::new(HashMap::new());
     static AGENT_ORDER: RefCell<Vec<String>> = const { RefCell::new(Vec::new()) };
     static SHARED: RefCell<Option<SharedStore>> = const { RefCell::new(None) };
     /// Where key commands for each loaded copy go: (copy, mod, sender).
@@ -569,7 +620,7 @@ pub struct Snapshot {
     pub focused: Value,
     /// Floating blocks by id: { edge, align, vertical }.
     pub floats: Value,
-    /// { platform, titlebar, buttons, maximized, fullscreen, active }.
+    /// { platform, titlebar, buttons, maximized, fullscreen, active, visible }.
     pub window: Value,
 }
 
@@ -605,7 +656,18 @@ pub fn publish_spaces(v: Value) -> bool {
 pub fn publish_agents(v: Value) -> bool {
     publish("agents", |s| (std::mem::replace(&mut s.agents, v.clone()), v))
 }
+pub fn panes_scrolled() {
+    REVISIONS.with_borrow_mut(|r| *r.entry("panes").or_default() += 1);
+}
+
+pub fn track_pane_view(pane: String, view: &gpui::Entity<crate::terminal::TerminalView>) {
+    PANE_VIEWS.with_borrow_mut(|views| { views.insert(pane, view.downgrade()); });
+}
+
 pub fn publish_panes(v: Value) -> bool {
+    PANE_VIEWS.with_borrow_mut(|views| views.retain(|pane, _| {
+        v.as_array().into_iter().flatten().any(|p| p["pane"].as_str() == Some(pane.strip_suffix("#swap").unwrap_or(pane)))
+    }));
     publish("panes", |s| (std::mem::replace(&mut s.panes, v.clone()), v))
 }
 pub fn publish_terminals(mut v: Value) -> bool {
@@ -620,25 +682,23 @@ pub fn publish_terminals(mut v: Value) -> bool {
 }
 /// Only selection changes refresh readers; output and cursor motion do not.
 pub fn publish_selection(address: &str, selection: Value) -> bool {
-    let mut changed = publish("terminals", |s| {
+    publish("terminals", |s| {
         let old = s.terminals.clone();
         if let Some(terminal) = s.terminals.as_array_mut().and_then(|list| list.iter_mut().find(|t| t["address"] == address)) {
             terminal["selection"] = selection.clone();
         }
         (old, s.terminals.clone())
-    });
-    changed |= publish("focused", |s| {
-        let old = s.focused.clone();
-        if focused_address(&s.focused) == Some(address) {
-            s.focused["selection"] = selection.clone();
-        }
-        (old, s.focused.clone())
-    });
-    changed
+    })
 }
 
-fn focused_address(focused: &Value) -> Option<&str> {
-    focused["shown"].as_str().or_else(|| focused["terminal"].as_str())
+pub fn publish_focused_selection(selection: Value) -> bool {
+    publish("focused", |s| {
+        let old = s.focused.clone();
+        if s.focused.is_object() {
+            s.focused["selection"] = selection;
+        }
+        (old, s.focused.clone())
+    })
 }
 
 pub fn terminal_address(word: &str, source: &str) -> Option<String> {
@@ -658,8 +718,7 @@ pub fn publish_window(v: Value) -> bool {
 pub fn publish_focused(mut v: Value) -> bool {
     publish("focused", |s| {
         if v.is_object() {
-            v["selection"] = focused_address(&v).and_then(|address| s.terminals.as_array()?.iter().find(|t| t["address"] == address))
-                .map_or(Value::Null, |terminal| terminal["selection"].clone());
+            v["selection"] = s.focused["selection"].clone();
         }
         (std::mem::replace(&mut s.focused, v.clone()), v)
     })
@@ -686,7 +745,27 @@ impl LiveReads {
 
 fn read(reads: &RefCell<LiveReads>, key: &'static str, f: impl FnOnce(&Snapshot) -> &Value) -> HostValue {
     REVISIONS.with_borrow(|r| reads.borrow_mut().record(key, r));
-    SNAPSHOT.with(|s| to_host(f(&s.borrow())))
+    SNAPSHOT.with(|s| {
+        let snapshot = s.borrow();
+        if key != "panes" {
+            return to_host(f(&snapshot));
+        }
+        // Output and resizing change these numbers without invalidating mods.
+        let mut panes = snapshot.panes.clone();
+        gpui_shell::with_current_app(|cx| {
+            PANE_VIEWS.with_borrow(|views| {
+                for pane in panes.as_array_mut().into_iter().flatten() {
+                    if let Some(view) = pane["pane"].as_str().and_then(|id| {
+                        views.get(&format!("{id}#swap")).and_then(|v| v.upgrade())
+                            .or_else(|| views.get(id).and_then(|v| v.upgrade()))
+                    }) {
+                        pane["scroll"] = view.read(cx).scroll_metrics().map(|m| m.json()).unwrap_or(Value::Null);
+                    }
+                }
+            });
+        });
+        to_host(&panes)
+    })
 }
 
 fn reader(reads: Rc<RefCell<LiveReads>>, key: &'static str, f: fn(&Snapshot) -> &Value) -> impl Fn(&gpui_shell::HostArguments) -> gpui_shell::HostResult {
@@ -806,7 +885,7 @@ pub(crate) fn run_blocking(command: &str, args: &[String], cwd: Option<String>, 
     use std::io::Read;
     // The core may have no `hc` link beside it (a Windows zip has only herdr-core.exe).
     let program = if command == "hc" { crate::core_bin::path() } else { PathBuf::from(command) };
-    let mut child = crate::spawn::command(program)
+    let mut child = crate::spawn::detached_command(program)
         .args(args)
         .current_dir(cwd.map(PathBuf::from).unwrap_or_else(home))
         .stdin(Stdio::null())
@@ -894,11 +973,114 @@ fn known_agents(on: Option<String>, list: Vec<Value>) -> Result<Value, String> {
     ))
 }
 
-/// A text file on another machine: `cat`, or `type` where there is none (Windows).
+/// Only open regular files, and return at most one byte over the preview limit.
 fn read_remote(machine: &str, path: &str) -> Result<Option<String>, String> {
-    let (code, out, _) = match run_remote(machine, "cat", &["--".into(), path.into()], None) {
-        Err(e) if e.contains("cannot start") => run_remote(machine, "cmd", &["/d".into(), "/c".into(), "type".into(), path.replace('/', "\\")], None)?,
-        r => r?,
+    read_remote_with(path, |command, args| run_remote(machine, command, args, None))
+}
+
+fn windows_preview_path_allowed(path: &str) -> bool {
+    if path.starts_with(r"\??\") {
+        return false;
+    }
+    let Some(unc) = path.strip_prefix(r"\\") else { return true };
+    let mut parts = unc.split('\\').filter(|part| !part.is_empty());
+    let dot_alias = |part: &str| part.trim_end_matches([' ', '.']).is_empty();
+    let Some(server) = parts.next() else { return false };
+    let share = if matches!(server, "." | "?") {
+        let Some(device) = parts.next() else { return false };
+        if device.eq_ignore_ascii_case("UNC") {
+            if parts.next().is_none_or(dot_alias) {
+                return false;
+            }
+            parts.next()
+        } else {
+            let file_device = matches!(device.as_bytes(), [b'a'..=b'z' | b'A'..=b'Z', b':'])
+                || device.get(..7).is_some_and(|prefix| prefix.eq_ignore_ascii_case("Volume{"))
+                    && device.ends_with('}')
+                    && device[7..device.len() - 1].bytes().all(|b| b.is_ascii_hexdigit() || b == b'-');
+            if !file_device {
+                return false;
+            }
+            None
+        }
+    } else {
+        if dot_alias(server) {
+            return false;
+        }
+        parts.next()
+    };
+    if let Some(share) = share {
+        let share = share.trim_end_matches([' ', '.']);
+        if share.is_empty() || share.eq_ignore_ascii_case("pipe") || share.eq_ignore_ascii_case("IPC$") {
+            return false;
+        }
+    }
+    // MSYS can resolve .. above the share or device root before checking the file.
+    let mut depth = 0;
+    for part in parts {
+        match part.trim_end_matches(' ') {
+            "" | "." => {}
+            ".." if depth == 0 => return false,
+            ".." => depth -= 1,
+            _ => depth += 1,
+        }
+    }
+    true
+}
+
+fn read_remote_with(
+    path: &str,
+    mut run: impl FnMut(&str, &[String]) -> Result<(i32, Vec<u8>, Vec<u8>), String>,
+) -> Result<Option<String>, String> {
+    let max = crate::mod_files::LIMIT + 1;
+    let windows_path = path.replace('/', "\\");
+    let mut native = windows_path.as_str();
+    while let Some((_, tail)) = native.split_once("::")
+        .filter(|(provider, _)| provider.eq_ignore_ascii_case("FileSystem")
+            || provider.eq_ignore_ascii_case(r"Microsoft.PowerShell.Core\FileSystem"))
+    {
+        native = tail;
+    }
+    let windows_path_allowed = windows_preview_path_allowed(native);
+    // Git's sh can expand path arguments before the script runs.
+    if !windows_path_allowed {
+        let probe = run("sh", &["-c".into(), r#"[ "${OS-}" != Windows_NT ]"#.into()]);
+        match probe {
+            Ok((0, _, _)) => {}
+            Ok(_) => return Ok(None),
+            Err(e) if e.starts_with("cannot start sh:") => return Ok(None),
+            Err(e) => return Err(e),
+        }
+    }
+    let script = r#"test -f "$1" || { [ "${OS-}" = Windows_NT ] && exit 127; exit 1; }
+        exec head -c "$2" -- "$1""#;
+    let read = run("sh", &["-c".into(), script.into(), "sh".into(), path.into(), max.to_string()]);
+    let use_powershell = match &read {
+        Ok((126 | 127, _, _)) => true,
+        Err(e) => e.starts_with("cannot start sh:"),
+        _ => false,
+    };
+    let (code, out, _) = if use_powershell {
+        if !windows_path_allowed {
+            return Ok(None);
+        }
+        let path = crate::programs::powershell_quote(native);
+        let script = format!(r#"
+            $path = {path}
+            if ($path -match '^[a-z]:\\' -or $path.StartsWith('\\')) {{
+                try {{ $full = [IO.Path]::GetFullPath($path) }} catch {{ exit 1 }}
+                if ($full -match '^[a-z]:\\') {{ $path = '\\?\' + $full }}
+                elseif ($full.StartsWith('\\') -and $full -notmatch '^\\\\[?.]\\') {{ $path = '\\?\UNC\' + $full.Substring(2) }}
+            }}
+            $file = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+            if ($file -isnot [IO.FileInfo]) {{ exit 1 }}
+            $reader = [IO.BinaryReader]::new($file.OpenRead())
+            try {{ $bytes = $reader.ReadBytes({max}); [Console]::OpenStandardOutput().Write($bytes, 0, $bytes.Length) }}
+            finally {{ $reader.Dispose() }}
+        "#);
+        run("powershell.exe", &["-NoProfile".into(), "-Command".into(), script])?
+    } else {
+        read?
     };
     if code != 0 {
         return Ok(None);
@@ -949,21 +1131,32 @@ fn module(inst: Instance, copy: u64) -> HostModule {
         .declarations(DECLARATIONS)
         .async_function("exec", |a| {
             let command = a.string(0)?.to_owned();
+            if checking() { tracing::warn!("check: mod exec'd `{command}`; the child runs for real"); }
             Ok(exec_future(command, strings(a.get(1)), opt_str(a.get(2), "cwd"), opt_str(a.get(2), "on"), exec_limit(a.get(2))?))
         })
         .async_function("readTextFile", |a| {
             let path = a.string(0)?.to_owned();
             let on = opt_str(a.get(1), "on");
-            Ok(crate::mod_files::read_with(move || match on {
-                Some(m) => read_remote(&m, &path),
-                None => crate::mod_files::read(Path::new(&path)),
-            }))
+            let read = crate::mod_files::read_with(on, path, |on, path| match on {
+                Some(m) => read_remote(m, path),
+                None => crate::mod_files::read(Path::new(path)),
+            });
+            Ok(async move {
+                let text = read.recv().await.map_err(|e| HostError::new(e.to_string()))?.map_err(HostError::new)?;
+                Ok(text.map(HostValue::from).unwrap_or(HostValue::Null))
+            })
         })
         .async_function("writeTextFile", |a| {
             let expected = a.get(2).and_then(|v| match v { HostValue::Str(s) => Some(s.clone()), _ => None });
-            Ok(crate::mod_files::write_text(a.string(0)?.to_owned(), a.string(1)?.to_owned(), expected))
+            let path = a.string(0)?.to_owned();
+            if checking() { tracing::warn!("check: mod wrote `{path}`; the write lands for real"); }
+            Ok(crate::mod_files::write_text(path, a.string(1)?.to_owned(), expected))
         })
-        .async_function("hc", |a| Ok(exec_future("hc".into(), strings(a.get(0)), None, None, EXEC_LIMIT)))
+        .async_function("hc", |a| {
+            if checking() { tracing::warn!("check: mod called hc; it runs for real"); }
+            Ok(exec_future("hc".into(), strings(a.get(0)), None, None, EXEC_LIMIT))
+        })
+        .function("checking", |_| Ok(HostValue::Bool(checking())))
         .function("home", |_| Ok(home().to_string_lossy().into_owned().into()))
         .function("appHome", |_| Ok(app_dir().to_string_lossy().into_owned().into()))
         .function("fonts", |_| Ok(to_host(&json!(*FONTS.lock().unwrap()))))
@@ -1030,6 +1223,19 @@ fn module(inst: Instance, copy: u64) -> HostModule {
                 Ok(path.map(|p| HostValue::Str(p.to_string_lossy().into_owned())).unwrap_or(HostValue::Null))
             })
         })
+        .async_function("pickFiles", |a| {
+            let options = a.get(0);
+            let prompt = opt_str(options, "prompt").unwrap_or_else(|| "Open".into());
+            let multiple = options.and_then(|o| o.get("multiple")).and_then(HostValue::as_bool).unwrap_or(false);
+            let picked = gpui_shell::with_current_app(|cx| cx.prompt_for_paths(gpui::PathPromptOptions {
+                files: true, directories: false, multiple, prompt: Some(prompt.into()),
+            })).ok_or_else(|| HostError::new("no window to pick from"))?;
+            Ok(async move {
+                let paths = picked.await.map_err(|_| HostError::new("the file picker was lost"))?
+                    .map_err(|error| HostError::new(error.to_string()))?;
+                picked_files(paths)
+            })
+        })
         .function("feedbackClearImages", move |_| {
             if feedback_frame { crate::feedback::clear_shots(); }
             Ok(HostValue::Null)
@@ -1084,6 +1290,14 @@ fn module(inst: Instance, copy: u64) -> HostModule {
                 _ => None,
             };
             request(Request::SetWindowTitle(title));
+            Ok(HostValue::Null)
+        })
+        .function("setBadge", |a| {
+            let text = match a.get(0) {
+                Some(v) if !v.is_null() => Some(a.string(0)?.to_owned()),
+                _ => None,
+            };
+            request(Request::SetBadge(text));
             Ok(HostValue::Null)
         })
         .function("terminals", reader(reads.clone(), "terminals", |s| &s.terminals))
@@ -1187,9 +1401,17 @@ pub fn apply_theme(cx: &mut App) {
 }
 
 fn capabilities() -> Capabilities {
+    capabilities_at(home(), app_dir(), false)
+}
+
+fn capabilities_at(home: PathBuf, app: PathBuf, read_mods: bool) -> Capabilities {
+    let mut read_roots = vec![home];
+    if read_mods {
+        read_roots.push(app.join("mods"));
+    }
     Capabilities::new()
-        .read_roots([home()])
-        .write_roots([app_dir()])
+        .read_roots(read_roots)
+        .write_roots([app])
         .execute(ExecuteGrant::Unrestricted)
         .network(NetworkGrant::Unrestricted)
         .storage(true)
@@ -1197,8 +1419,11 @@ fn capabilities() -> Capabilities {
         .clipboard_write(true)
 }
 
-/// Checks exercise shared state in memory, without reading or writing the person's file.
+/// Checks exercise shared state in memory, without reading or writing the person's
+/// file. A check still loads the mod for real, so mods are told (`herdr.checking()`)
+/// and its exec and write side effects warn.
 pub fn install_check_policy() {
+    CHECKING.with(|c| c.set(true));
     SHARED.with_borrow_mut(|slot| *slot = Some(SharedStore { values: Default::default(), path: app_dir().join("shared.json"), writable: false, writer: None }));
     install_policy();
 }
@@ -1217,10 +1442,16 @@ pub fn install_policy() -> async_channel::Receiver<Request> {
 
 /// Gives the next mod copy to load a policy of its own: its `herdr` module
 /// (its props, its identity) and its localStorage file. The shell hands every
-/// view a copy of the default that *shares* modules and storage, so each copy
-/// needs a fresh default rather than an edit of the old one.
+/// view a copy of the default, so each copy needs a fresh policy for its host
+/// module. Persistent storage is shared by path.
 /// Readies the next load of `inst`; returns the copy's number (for commands).
 pub fn prepare_load(inst: &Instance) -> u64 {
+    let (copy, policy) = mod_policy(inst);
+    gpui_shell::policy::set_default(policy);
+    copy
+}
+
+fn mod_policy(inst: &Instance) -> (u64, gpui_shell::policy::Policy) {
     let copy = COPY_SEQ.with(|s| {
         s.set(s.get() + 1);
         s.get()
@@ -1237,17 +1468,142 @@ pub fn prepare_load(inst: &Instance) -> u64 {
     };
     let policy = gpui_shell::policy::Policy::new()
         .with_application(inst.key())
-        .with_capabilities(capabilities())
-        .with_storage_path(dir.join(file))
+        // The shipped palette reads manifests even when the app home is outside the login home.
+        .with_capabilities(capabilities_at(home(), app_dir(), inst.name == "frame-palette"))
+        .with_shared_storage_path(dir.join(file))
         .with_host_module(module(inst.clone(), copy))
         .expect("herdr module is valid");
-    gpui_shell::policy::set_default(policy);
-    copy
+    (copy, policy)
+}
+
+pub fn handle_link(
+    name: &str,
+    dir: &Path,
+    click: &Value,
+    window: &mut gpui::Window,
+    cx: &mut App,
+) -> impl std::future::Future<Output = anyhow::Result<String>> + use<> {
+    use std::{future::{Future, poll_fn}, pin::pin, task::Poll};
+    let (_, policy) = mod_policy(&Instance { name: name.to_owned(), props: Value::Null });
+    let call = gpui_shell::ShellRuntime::call_module(dir, "link.js", "handleLink", click, Rc::new(policy), window, cx);
+    let timeout = cx.background_executor().timer(Duration::from_secs(30));
+    async move {
+        let mut call = pin!(call);
+        let mut timeout = pin!(timeout);
+        poll_fn(|cx| {
+            if let Poll::Ready(result) = call.as_mut().poll(cx) {
+                return Poll::Ready(result);
+            }
+            timeout.as_mut().poll(cx).map(|()| Err(anyhow::anyhow!("The link handler did not answer within 30 seconds.")))
+        }).await
+    }
+}
+
+pub fn check_link_mod(dir: &Path) -> anyhow::Result<bool> {
+    let has_link = dir.join("link.js").is_file();
+    let standalone = has_link && !dir.join("main.js").is_file();
+    let source = std::fs::read_to_string(dir.join("mod.json"));
+    let rules = parse_link_rules(&source, standalone).map_err(anyhow::Error::msg)?;
+    anyhow::ensure!(rules.is_empty() || has_link, "mod.json declares link_handlers but link.js is missing");
+    let handles_links = standalone || !rules.is_empty();
+    if handles_links {
+        gpui_shell::ShellRuntime::check_module(dir, "link.js", "handleLink")?;
+    }
+    Ok(handles_links)
+}
+
+fn picked_files(paths: Option<Vec<PathBuf>>) -> gpui_shell::HostResult {
+    let Some(paths) = paths.filter(|paths| !paths.is_empty()) else {
+        return Ok(HostValue::Null);
+    };
+    paths.into_iter().map(|path| {
+        path.into_os_string().into_string().map(HostValue::Str)
+            .map_err(|_| HostError::new("a selected file path is not valid UTF-8"))
+    }).collect::<Result<Vec<_>, _>>().map(HostValue::Array)
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn link_check_requires_the_named_export_without_running_the_module() {
+        let dir = crate::test_tmp().join(format!("herdr-link-export-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        let entry = dir.join("link.js");
+        std::fs::write(&entry, "export default function handleLink() {}").unwrap();
+        let error = check_link_mod(&dir).unwrap_err().to_string();
+        assert!(error.contains("handleLink"), "{error}");
+
+        std::fs::write(dir.join("implementation.js"), r#"
+            throw new Error("dependency ran");
+            export function open() { throw new Error("handler ran"); }
+        "#).unwrap();
+        std::fs::write(&entry, r#"
+            throw new Error("module ran");
+            export { open as handleLink } from "./implementation.js";
+        "#).unwrap();
+        assert!(check_link_mod(&dir).unwrap());
+        std::fs::remove_dir_all(dir).unwrap();
+    }
+
+    #[test]
+    fn scan_and_check_reject_a_broken_manifest_when_the_mod_handles_links() {
+        let root = std::env::temp_dir().join(format!("herdr-link-manifest-{}", std::process::id()));
+        let dir = root.join("example");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("main.js"), "export default class {}").unwrap();
+        std::fs::write(dir.join("mod.json"), r#"{"place":"none",}"#).unwrap();
+
+        let views = scan_dir(&root, "", &BTreeMap::new());
+        assert!(!check_link_mod(&dir).unwrap(), "a plain view still runs the normal view check");
+        assert!(views["example"].manifest_error.is_none());
+
+        std::fs::write(dir.join("link.js"), "export function helper() {}").unwrap();
+        assert!(!check_link_mod(&dir).unwrap(), "a view with an ordinary helper still uses the view check");
+        let helpers = scan_dir(&root, "", &views);
+        assert!(helpers["example"].manifest_error.is_none());
+
+        let manifest = dir.join("mod.json");
+        std::fs::write(&manifest, r#"{"link_handlers":[{"kind":"url","pattern":"^http://localhost:"}]}"#).unwrap();
+        assert!(check_link_mod(&dir).unwrap_err().to_string().contains("handleLink"));
+
+        std::fs::remove_file(dir.join("main.js")).unwrap();
+        std::fs::write(&manifest, r#"{"place":"none",}"#).unwrap();
+        let error = check_link_mod(&dir).unwrap_err().to_string();
+        assert!(error.starts_with("mod.json:"), "{error}");
+        let links = scan_dir(&root, "", &views);
+        assert_eq!(links["example"].manifest_error.as_deref(), Some(error.as_str()));
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[test]
+    fn a_nonobject_link_manifest_is_rejected_and_keeps_working_rules() {
+        let root = std::env::temp_dir().join(format!("herdr-link-manifest-object-{}", std::process::id()));
+        let dir = root.join("example");
+        std::fs::create_dir_all(&dir).unwrap();
+        std::fs::write(dir.join("link.js"), "export function handleLink() {}").unwrap();
+        let manifest = dir.join("mod.json");
+        std::fs::write(&manifest, r#"{"link_handlers":[{"kind":"url","pattern":"^http://localhost:"}]}"#).unwrap();
+        let original = scan_dir(&root, "", &BTreeMap::new());
+        assert_eq!(original["example"].link_rules.len(), 1);
+
+        for invalid in ["[]", "null", "\"rules\"", "7", "false"] {
+            std::fs::write(&manifest, invalid).unwrap();
+            let error = "mod.json: expected a top-level object";
+            assert_eq!(check_link_mod(&dir).unwrap_err().to_string(), error);
+            let found = scan_dir(&root, "", &original);
+            assert_eq!(found["example"].manifest_error.as_deref(), Some(error));
+            assert!(Rc::ptr_eq(&found["example"].link_rules, &original["example"].link_rules));
+        }
+
+        std::fs::write(&manifest, "{}").unwrap();
+        assert!(check_link_mod(&dir).unwrap());
+        let found = scan_dir(&root, "", &original);
+        assert!(found["example"].link_rules.is_empty());
+        assert!(found["example"].manifest_error.is_none());
+        std::fs::remove_dir_all(root).unwrap();
+    }
 
     #[test]
     fn an_input_selection_uses_the_theme_selection_colour() {
@@ -1258,6 +1614,127 @@ mod tests {
         let style = gpui_base::input::InputEditorStyle::default().resolved(&tokens);
 
         assert_eq!(style.selection, tokens.colors.selection);
+    }
+
+    #[test]
+    fn remote_preview_falls_back_when_the_shell_reader_is_unavailable() {
+        let path = r"C:\test/a [b]'é.txt";
+        for shell in [
+            Ok((126, vec![], vec![])),
+            Ok((127, vec![], vec![])),
+            Err("cannot start sh: program not found".into()),
+        ] {
+            let mut commands = [
+                ("sh", shell),
+                ("powershell.exe", Ok((0, b"preview".to_vec(), vec![]))),
+            ].into_iter();
+            let text = read_remote_with(path, |command, args| {
+                let (expected, result) = commands.next().expect("unexpected remote command");
+                assert_eq!(command, expected);
+                match command {
+                    "sh" => assert_eq!(args[3], path),
+                    "powershell.exe" => {
+                        assert_eq!(&args[..2], ["-NoProfile", "-Command"]);
+                        assert!(args[2].contains(r"$path = 'C:\test\a [b]''é.txt'"));
+                    }
+                    _ => unreachable!(),
+                }
+                result
+            }).unwrap();
+            assert_eq!(text.as_deref(), Some("preview"));
+            assert!(commands.next().is_none());
+        }
+    }
+
+    #[test]
+    fn remote_preview_returns_shell_reads_misses_and_transport_errors() {
+        let long_path = format!("C:/test/{}/{}/README.md", "a".repeat(150), "b".repeat(150));
+        for (path, shell, expected) in [
+            ("/c/test/README.md", Ok((0, b"preview".to_vec(), vec![])), Ok(Some("preview".into()))),
+            (&long_path, Ok((0, b"preview".to_vec(), vec![])), Ok(Some("preview".into()))),
+            ("/test/README.md", Ok((1, vec![], vec![])), Ok(None)),
+            ("/test/README.md", Err("sh took longer than 30 s".into()), Err("sh took longer than 30 s".into())),
+        ] {
+            let mut reply = Some(shell);
+            let actual = read_remote_with(path, |command, args| {
+                assert_eq!(command, "sh");
+                assert_eq!(args[3], path);
+                reply.take().expect("unexpected retry")
+            });
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn remote_preview_confirms_only_windows_shell_misses() {
+        for (os, expected) in [("Windows_NT", Some("preview")), ("Linux", None)] {
+            let path = r"C:\test\don't.md";
+            let actual = read_remote_with(path, |command, args| {
+                if command == "sh" {
+                    let output = std::process::Command::new("sh")
+                        .args(args)
+                        .env("OS", os)
+                        .output()
+                        .unwrap();
+                    return Ok((output.status.code().unwrap(), output.stdout, output.stderr));
+                }
+                assert_eq!(command, "powershell.exe");
+                assert!(args[2].contains(r"$path = 'C:\test\don''t.md'"));
+                Ok((0, b"preview".to_vec(), vec![]))
+            }).unwrap();
+            assert_eq!(actual.as_deref(), expected);
+        }
+    }
+
+    #[test]
+    fn remote_preview_guards_windows_pipe_paths_before_metadata_checks() {
+        for path in [
+            r"\\.\pipe\preview",
+            r"//localhost/pipe/preview",
+            r"\\..\localhost\pipe\preview",
+            r"//../localhost/pipe/preview",
+            r"\\localhost\\IPC$\preview",
+            r"\\localhost\c$\..\pipe\preview",
+            r"\\.\C:\..\pipe\preview",
+            r"\\.\UNC\localhost\c$\..\pipe\preview",
+            r"\\?\UNC\localhost\.\pipe\preview",
+            r"FileSystem::\\?\GLOBALROOT\Device\NamedPipe\preview",
+            r"FileSystem::FileSystem::\\.\pipe\preview",
+            r"Microsoft.PowerShell.Core\FileSystem::FileSystem::\\.\pipe\preview",
+            r"\\localhost\pipe\{preview,preview}",
+            r"\??\pipe\preview",
+        ] {
+            let actual = read_remote_with(path, |command, args| {
+                assert_eq!(command, "sh");
+                assert_eq!(args.len(), 2);
+                Ok((1, vec![], vec![]))
+            });
+            assert_eq!(actual, Ok(None), "{path}");
+        }
+        for path in [r"C:\pipe\file", r"\\server\share\folder\..\pipe\file", r"\\?\C:\pipe\file", r"\\?\UNC\server\share\file"] {
+            assert!(windows_preview_path_allowed(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn picked_files_keep_the_pickers_order_and_cancel_is_null() {
+        let picked = picked_files(Some(vec!["/b/2.txt".into(), "/a/1.txt".into()])).unwrap();
+        assert_eq!(from_host(&picked), json!(["/b/2.txt", "/a/1.txt"]));
+        assert_eq!(picked_files(None).unwrap(), HostValue::Null);
+        assert_eq!(picked_files(Some(vec![])).unwrap(), HostValue::Null);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn picked_files_rejects_a_path_that_would_name_a_different_file_after_conversion() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let exact = "/a/bad-\u{fffd}.txt";
+        let invalid = std::ffi::OsString::from_vec(b"/a/bad-\xff.txt".to_vec());
+        let picked = picked_files(Some(vec![exact.into()])).unwrap();
+        assert_eq!(from_host(&picked), json!([exact]));
+        assert!(picked_files(Some(vec![exact.into(), invalid.into()])).is_err());
     }
 
     #[test]
@@ -1315,6 +1792,49 @@ mod tests {
         assert_eq!((code, stdout.as_str()), (0, "done"));
     }
 
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn exec_keeps_a_background_job_running() {
+        const CHILD: &str = "HERDR_TEST_BACKGROUND_EXEC";
+        if std::env::var_os(CHILD).is_some() {
+            let args = ["--noprofile", "--norc", "-ic", "printf ready"].map(String::from);
+            let (code, stdout, stderr) = run_blocking("/bin/bash", &args, None, Duration::from_secs(2)).unwrap();
+            assert_eq!((code, stdout.as_str()), (0, "ready"), "{stderr}");
+            return;
+        }
+
+        // util-linux `script` gives Bash a real controlling PTY; some desktops don't have it.
+        if std::process::Command::new("script").arg("--version").output().is_err() {
+            eprintln!("skipped: util-linux script is not installed");
+            return;
+        }
+        // Give Bash a real controlling PTY and run the test in a background job.
+        let output = std::process::Command::new("timeout")
+            .args([
+                "15s",
+                "script",
+                "-qec",
+                r#"exec /bin/bash --noprofile --norc -mc '
+                    "$HERDR_TEST_BINARY" --exact mods::tests::exec_keeps_a_background_job_running &
+                    child=$!
+                    wait "$child"
+                    status=$?
+                    if [ "$status" -ne 0 ]; then
+                        jobs -l
+                        kill -KILL -- "-$child" 2>/dev/null || :
+                    fi
+                    exit "$status"
+                '"#,
+                "/dev/null",
+            ])
+            .env(CHILD, "1")
+            .env("HERDR_TEST_BINARY", std::env::current_exe().unwrap())
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "background job: {}\n{}{}", output.status, String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
+    }
+
     #[cfg(unix)]
     #[gpui::test]
     async fn exec_returns_real_output_and_errors_under_the_test_scheduler(_cx: &mut gpui::TestAppContext) {
@@ -1350,28 +1870,19 @@ mod tests {
     }
 
     #[test]
-    fn selection_snapshots_survive_core_refresh_and_follow_focus() {
+    fn selection_snapshots_survive_core_refresh() {
         std::thread::spawn(|| {
             let list = json!([{"address":"t1"}, {"address":"t2"}]);
             publish_terminals(list.clone());
-            publish_focused(json!({"terminal":"t1"}));
             let selection = json!({"start":{"row":5,"col":2},"end":{"row":1,"col":8}});
             publish_selection("t1", selection.clone());
             publish_terminals(list);
-            publish_focused(json!({"terminal":"t1"}));
             SNAPSHOT.with_borrow(|s| {
                 assert_eq!(s.terminals[0]["selection"], selection);
-                assert_eq!(s.focused["selection"], selection);
+                assert_eq!(s.terminals[1]["selection"], Value::Null);
             });
-            publish_focused(json!({"terminal":"t2"}));
-            SNAPSHOT.with_borrow(|s| assert_eq!(s.focused["selection"], Value::Null));
-            publish_focused(json!({"terminal":"t2","shown":"t1"}));
-            SNAPSHOT.with_borrow(|s| assert_eq!(s.focused["selection"], selection));
             publish_selection("t1", Value::Null);
-            SNAPSHOT.with_borrow(|s| {
-                assert_eq!(s.terminals[0]["selection"], Value::Null);
-                assert_eq!(s.focused["selection"], Value::Null);
-            });
+            SNAPSHOT.with_borrow(|s| assert_eq!(s.terminals[0]["selection"], Value::Null));
         }).join().unwrap();
     }
 

@@ -1535,6 +1535,130 @@ impl ShellRuntime {
         *self.source_revision.borrow_mut() = Some(Box::new(provider));
     }
 
+    // HERDR: terminal links can be checked without running mod code.
+    /// Compiles a module and checks a named export without evaluating the module.
+    pub fn check_module(directory: &Path, entry: &str, export: &str) -> Result<()> {
+        let runtime = Self::new_isolated()?;
+        let (root, dependencies) = prepare_module(&runtime.dependency_store, directory, entry)?;
+        let lease = runtime.app_modules.register_with_dependencies(root.clone(), dependencies);
+        let name = module_name(&root, ".herdr-check.js", &lease);
+        let specifier = serde_json::to_string(&format!("./{entry}"))?;
+        let export = serde_json::to_string(export)?;
+        // QuickJS links every static import before evaluating the graph. This last
+        // import always fails to link, even after the requested export was found.
+        // Its name is fresh so an error from the mod cannot be mistaken for ours.
+        let nonce = std::hash::BuildHasher::hash_one(&std::hash::RandomState::new(), &name);
+        let stop = format!("__herdr_link_check_{nonce:016x}__");
+        let expected = format!("Could not find export '{stop}' in module 'gpui-shell'");
+        let source = format!("import {{ {export} as entry }} from {specifier};\n\
+            import {{ {stop} }} from 'gpui-shell';");
+        runtime.with_js(|ctx| {
+            match Module::declare(ctx.clone(), name, source)?.eval() {
+                Err(JsError::Exception) => {
+                    let error = ctx.catch();
+                    if error.as_exception().and_then(Exception::message).as_deref()
+                        == Some(expected.as_str())
+                    {
+                        Ok(())
+                    } else {
+                        Err(ctx.throw(error))
+                    }
+                }
+                Err(error) => Err(error),
+                Ok(_) => Err(Exception::throw_message(ctx, "module export check did not stop at linking")),
+            }
+        })
+    }
+
+    // HERDR: terminal link handlers run once per click, even without a view.
+    /// Invokes one export without mounting a view. The returned future owns the runtime
+    /// so dropping it on window close also cancels the script's pending host work.
+    pub fn call_module(
+        directory: &Path,
+        entry: &'static str,
+        export: &'static str,
+        argument: &serde_json::Value,
+        policy: Rc<Policy>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> impl std::future::Future<Output = Result<String>> + use<> {
+        let directory = directory.to_path_buf();
+        let prepare = cx.background_executor().spawn(async move {
+            prepare_module(&GitDependencyStore::for_user()?, &directory, entry)
+        });
+        let window = window.window_handle();
+        let mut app = cx.to_async();
+        let argument = argument.clone();
+        async move {
+            let (root, dependencies) = prepare.await?;
+            let call = window.update(&mut app, |_, window, cx| {
+                let runtime = Self::new_isolated()?;
+                let lease = runtime.app_modules.register_with_dependencies(root.clone(), dependencies);
+                runtime.invoke_module(&root, lease, entry, export, &argument, policy, window, cx)
+            })??;
+            call.await
+        }
+    }
+
+    fn invoke_module(
+        self: Rc<Self>,
+        root: &Path,
+        lease: ApplicationModuleLease,
+        entry: &str,
+        export: &str,
+        argument: &serde_json::Value,
+        policy: Rc<Policy>,
+        window: &mut Window,
+        cx: &mut App,
+    ) -> Result<impl std::future::Future<Output = Result<String>> + use<>> {
+        let runtime = self;
+        let name = module_name(root, ".herdr-call.js", &lease);
+        let specifier = serde_json::to_string(&format!("./{entry}"))?;
+        let export = serde_json::to_string(export)?;
+        let source = format!(r#"
+            export async function invoke(arg, resolve, reject) {{
+                try {{
+                    const handler = (await import({specifier}))[{export}];
+                    if (typeof handler !== "function") throw new TypeError("Expected a function export " + {export});
+                    resolve(await handler(arg));
+                }} catch (error) {{
+                    reject(error);
+                }}
+            }}
+        "#);
+        let (tx, rx) = async_channel::bounded(1);
+        let reject = tx.clone();
+        let argument = serde_json::to_string(argument)?;
+        {
+            let (_scope, _) = scope::enter_with_application(
+                &runtime, window, cx, ScopePhase::Event, None, policy, None,
+            );
+            runtime.with_jit_suspended(|| runtime.with_js(|ctx| {
+                let (module, loaded) = Module::declare(ctx.clone(), name, source)?.eval()?;
+                loaded.finish::<()>()?;
+                let invoke: Function = module.get("invoke")?;
+                let resolve = Func::from(move |value: Value<'_>| {
+                    let result = value.as_string().and_then(|s| s.to_string().ok())
+                        .ok_or_else(|| "expected a string result".to_owned());
+                    let _ = tx.try_send(result);
+                });
+                let reject = Func::from(move |value: Value<'_>| {
+                    let ctx = value.ctx();
+                    let error = CodeError::capture(ctx, ctx.throw(value.clone()));
+                    let _ = reject.try_send(Err(error.to_string()));
+                });
+                invoke.call::<_, Value>((ctx.json_parse(argument)?, resolve, reject))?;
+                Ok(())
+            }))?;
+            scheduler::drain_jobs_transactionally(&runtime, window, cx)?;
+        }
+        Ok(async move {
+            let result = rx.recv().await.map_err(|_| anyhow!("module call ended without a result"))?;
+            drop((lease, runtime));
+            result.map_err(anyhow::Error::msg)
+        })
+    }
+
     /// Loads an application's JavaScript entry without exposing engine values.
     ///
     /// Reuses evaluated code for an unchanged revision, but returns a fresh
@@ -2018,6 +2142,27 @@ impl ShellRuntime {
 
     pub(crate) fn set_global(self: &Rc<Self>, cx: &mut App) {
         cx.set_global(RuntimeGlobal(Rc::downgrade(self)));
+    }
+
+    /// HERDR: a new VM that becomes the application's default runtime, for a
+    /// host replacing one whose copies are still closing. [`Self::new`] refuses
+    /// while the previous runtime is alive. Its copies keep it until they finish
+    /// closing, and it is freed when the last of them drops it.
+    pub fn replace_default(cx: &mut App) -> Result<Rc<Self>> {
+        let runtime = Self::new_isolated_with_components(FrozenComponentRegistry::default())?;
+        runtime.set_global(cx);
+        Ok(runtime)
+    }
+
+    /// HERDR: how much of its heap ceiling this VM holds, from 0 to 1.
+    ///
+    /// Each reload evaluates the application again in the same context, and
+    /// QuickJS frees evaluated modules only with the context, so this grows
+    /// with every reload. A host can start a new runtime before reaching the
+    /// limit.
+    pub fn memory_share(&self) -> f64 {
+        let used = self.js_runtime.memory_usage().malloc_size.max(0) as f64;
+        used / sandbox::memory_limit_bytes() as f64
     }
 
     pub(crate) fn global(cx: &App) -> Option<Rc<Self>> {
@@ -4185,6 +4330,17 @@ impl ShellRuntime {
             event_bounds.set("height", f32::from(bounds.size.height))?;
             payload.set("bounds", event_bounds)?;
             payload.set("modifiers", modifiers_object(&ctx, event.modifiers)?)?;
+            // Absent when no button is held, so a drag can tell it was
+            // released somewhere this element never heard about.
+            let pressed = match event.pressed_button {
+                Some(gpui::MouseButton::Left) => Some("left"),
+                Some(gpui::MouseButton::Right) => Some("right"),
+                Some(gpui::MouseButton::Middle) => Some("middle"),
+                _ => None,
+            };
+            if let Some(pressed) = pressed {
+                payload.set("pressed_button", pressed)?;
+            }
             handler.call::<_, ()>((
                 payload,
                 context_object(ctx, ContextBinding::Call(generation))?,
@@ -5361,6 +5517,26 @@ struct ApplicationModuleRegistration {
     sources: Rc<code_cache::SourceFiles>,
 }
 
+// HERDR: standalone entries use the same dependencies as views. Preparing
+// them needs no runtime, so a click can wait for Git off the UI thread.
+fn prepare_module(
+    store: &GitDependencyStore,
+    directory: &Path,
+    entry: &str,
+) -> Result<(std::path::PathBuf, BTreeMap<String, MaterializedDependency>)> {
+    let root = crate::runtime::resolve_app_root(directory, entry)?;
+    let dependencies = if root.join(crate::plugin::MANIFEST_FILE).is_file() {
+        store.materialize_all(&crate::plugin::PluginManifest::read(&root)?)?
+    } else {
+        BTreeMap::new()
+    };
+    Ok((root, dependencies))
+}
+
+fn module_name(root: &Path, file: &str, lease: &ApplicationModuleLease) -> String {
+    format!("{}?v={}", root.join(file).display(), lease.generation())
+}
+
 impl ApplicationModuleLease {
     fn generation(&self) -> u32 {
         self.0.generation
@@ -6057,9 +6233,11 @@ globalThis.__gpui = (() => {
   // an unknown button name is refused rather than falling back to the left one.
   methods.mouse_button = function (value) {
     value = String(value);
-    if (!["left", "right", "middle"].includes(value)) {
+    // HERDR: back and forward are the mouse's side buttons.
+    if (!["left", "right", "middle", "back", "forward"].includes(value)) {
       throw new TypeError(
-        "mouse_button(value) must be left, right or middle; got " + JSON.stringify(value),
+        "mouse_button(value) must be left, right, middle, back or forward; got " +
+          JSON.stringify(value),
       );
     }
     __apply(this.__id, "mouse_button", [value]);
@@ -6246,6 +6424,7 @@ globalThis.__gpui = (() => {
     set_masked: (masked) => __input_set_masked(handle, Boolean(masked)),
     set_loading: (loading) => __input_set_loading(handle, Boolean(loading)),
     focus: () => __input_focus(handle),
+    blur: () => __input_blur(handle),
     release: () => __input_release(handle),
   });
 
@@ -6266,6 +6445,7 @@ globalThis.__gpui = (() => {
       ),
     set_soft_wrap: (wrap) => __textarea_set_soft_wrap(handle, Boolean(wrap)),
     focus: () => __textarea_focus(handle),
+    blur: () => __textarea_blur(handle),
     release: () => __textarea_release(handle),
   });
 
@@ -6599,6 +6779,22 @@ globalThis.__gpui = (() => {
     release: () => __dock_release(handle),
   });
 
+  // HERDR: where the area is, the same three readers on both kinds of handle.
+  const scrollPosition = (handle) => ({
+    offset: () => {
+      const [x, y] = __scroll_offset(handle);
+      return { x, y };
+    },
+    content_size: () => {
+      const [width, height] = __scroll_content_size(handle);
+      return { width, height };
+    },
+    viewport_size: () => {
+      const [width, height] = __scroll_viewport_size(handle);
+      return { width, height };
+    },
+  });
+
   const scrollHandle = (handle) => ({
     __handle: handle,
     scroll_to_item: (index) => {
@@ -6607,6 +6803,7 @@ globalThis.__gpui = (() => {
       }
       __scroll_to_item(handle, index);
     },
+    ...scrollPosition(handle),
     release: () => __scroll_release(handle),
   });
 
@@ -6621,6 +6818,7 @@ globalThis.__gpui = (() => {
       __virtual_scroll_to_item(handle, index, String(strategy ?? "top"));
     },
     scroll_to_bottom: () => __virtual_scroll_to_bottom(handle),
+    ...scrollPosition(handle),
     release: () => __virtual_scroll_release(handle),
   });
 
@@ -7142,7 +7340,11 @@ globalThis.__gpui = (() => {
           value: () => __editor_value(handle),
           set_value: (value) => __editor_set_value(handle, String(value)),
           on: (event, handler) => __editor_on(handle, String(event), handler),
+          set_tab_size: (tab_size, hard_tabs = false) =>
+            __editor_set_tab_size(handle, Number(tab_size), Boolean(hard_tabs)),
           focus: () => __editor_focus(handle),
+          blur: () => __editor_blur(handle),
+          set_soft_wrap: (wrap) => __editor_set_soft_wrap(handle, Boolean(wrap)),
           release: () => __editor_release(handle),
         };
       },
@@ -7283,13 +7485,16 @@ impl ShellRuntime {
             for (index, name) in [
                 "on_click",
                 "on_link_click",
+                "on_selection_change",
                 "on_mouse_move",
+                "on_window_mouse_move",
                 "on_hover",
                 "on_key_down",
                 "on_key_up",
                 "on_modifiers_changed",
                 "on_mouse_down",
                 "on_mouse_up",
+                "on_window_mouse_up",
                 "on_mouse_down_out",
                 "on_drop",
                 "on_scroll_wheel",
@@ -7310,7 +7515,9 @@ impl ShellRuntime {
                 "on_step",
                 "disabled",
                 "selectable",
+                "highlight_range",
                 "scrollable",
+                "raw_html",
                 "selected",
                 "checked",
                 "accessibility_label",
@@ -8218,7 +8425,7 @@ impl ShellRuntime {
             // handler. The button is folded into the recorded op name — three
             // fixed names GPUI's own `MouseButton` maps onto — so the op stays
             // the `(&'static str, CallbackId)` pair every other callback uses.
-            "on_mouse_down" | "on_mouse_up" => {
+            "on_mouse_down" | "on_mouse_up" | "on_window_mouse_up" => {
                 if scope::current_phase() == Some(ScopePhase::Layout)
                     && !self.interactive_inline_layout.get()
                 {
@@ -8239,7 +8446,7 @@ impl ShellRuntime {
                             ctx,
                             &format!(
                                 "{method}(button, handler) expects a button first: \
-                                 \"left\", \"right\" or \"middle\""
+                                 \"left\", \"right\", \"middle\", \"back\" or \"forward\""
                             ),
                         )
                     })?;
@@ -8256,12 +8463,20 @@ impl ShellRuntime {
                     ("on_mouse_up", "left") => "on_mouse_up_left",
                     ("on_mouse_up", "right") => "on_mouse_up_right",
                     ("on_mouse_up", "middle") => "on_mouse_up_middle",
+                    ("on_window_mouse_up", "left") => "on_window_mouse_up_left",
+                    ("on_window_mouse_up", "right") => "on_window_mouse_up_right",
+                    ("on_window_mouse_up", "middle") => "on_window_mouse_up_middle",
+                    // HERDR: the mouse's side buttons.
+                    ("on_mouse_down", "back") => "on_mouse_down_back",
+                    ("on_mouse_down", "forward") => "on_mouse_down_forward",
+                    ("on_mouse_up", "back") => "on_mouse_up_back",
+                    ("on_mouse_up", "forward") => "on_mouse_up_forward",
                     (_, other) => {
                         return Err(Exception::throw_type(
                             ctx,
                             &format!(
-                                "`{other}` is not a mouse button; \
-                                 expected \"left\", \"right\" or \"middle\""
+                                "`{other}` is not a mouse button; expected \
+                                 \"left\", \"right\", \"middle\", \"back\" or \"forward\""
                             ),
                         ));
                     }
@@ -8276,6 +8491,7 @@ impl ShellRuntime {
             }
             "on_click"
             | "on_link_click"
+            | "on_selection_change"
             | "on_resize"
             | "on_size_change"
             | "on_change"
@@ -8289,6 +8505,7 @@ impl ShellRuntime {
             | "on_item_click"
             | "on_item_secondary_click"
             | "on_mouse_move"
+            | "on_window_mouse_move"
             | "on_hover"
             | "on_key_down"
             | "on_key_up"
@@ -8341,7 +8558,9 @@ impl ShellRuntime {
             }
             "disabled"
             | "selectable"
+            | "highlight_range"
             | "scrollable"
+            | "raw_html"
             | "selected"
             | "checked"
             | "accessibility_label"
@@ -8399,7 +8618,9 @@ impl ShellRuntime {
                 let name = match method {
                     "disabled" => "disabled",
                     "selectable" => "selectable",
+                    "highlight_range" => "highlight_range",
                     "scrollable" => "scrollable",
+                    "raw_html" => "raw_html",
                     "selected" => "selected",
                     "checked" => "checked",
                     "tooltip" => "tooltip",
@@ -9732,6 +9953,9 @@ fn mouse_button_payload<'js>(
         match button {
             gpui::MouseButton::Right => "right",
             gpui::MouseButton::Middle => "middle",
+            // HERDR: the mouse's side buttons.
+            gpui::MouseButton::Navigate(gpui::NavigationDirection::Back) => "back",
+            gpui::MouseButton::Navigate(gpui::NavigationDirection::Forward) => "forward",
             _ => "left",
         },
     )?;
@@ -10288,7 +10512,9 @@ fn callback_op_name(method: &str) -> Option<&'static str> {
     Some(match method {
         "on_click" => "on_click",
         "on_link_click" => "on_link_click",
+        "on_selection_change" => "on_selection_change",
         "on_mouse_move" => "on_mouse_move",
+        "on_window_mouse_move" => "on_window_mouse_move",
         "on_hover" => "on_hover",
         "on_key_down" => "on_key_down",
         "on_key_up" => "on_key_up",
