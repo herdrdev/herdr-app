@@ -128,7 +128,7 @@ Publishing and a real RHEL 8 desktop smoke test remain separate decisions.
 | 3 | `cb80aaf` | https://github.com/shawn111/herdr-app/actions/runs/45260188232 | **success** (11m43s), app only: `ldd (GNU libc) 2.28`, `highest GLIBC symbol version required: 2.28`, tarball/notices/`--help` checks passed, artifact uploaded | None needed; next step is adding herdr-core. |
 | 4 | `e526642` | https://github.com/shawn111/herdr-app/actions/runs/45276478949 | failed in `Check glibc floor`: exit 141 (SIGPIPE) from `objdump | grep | sort -Vu | tail -1 | cut` after printing glibc 2.28 | Replace pipeline with awk that reads full objdump output and computes max GLIBC version. |
 | 5 | `83d0c6c` | https://github.com/shawn111/herdr-app/actions/runs/45280201963 | **success**: `ldd (GNU libc) 2.28`, `herdr-app` and `herdr-core` both at 2.28, artifact 38.5 MB | None needed; app+core green. |
-| 6 | pending | — | pending | Launcher `herdr-app-rhel8` (X11 scale 1) and `README-rhel8.md` added to the tarball. |
+| 6 | `2d2a367` | https://github.com/shawn111/herdr-app/actions/runs/45320328933 | **success**: launcher `herdr-app-rhel8` and `README-rhel8.md` in the tarball; both binaries at glibc 2.28; artifact 38.5 MB | None needed. |
 
 ## Risks / fallbacks
 
