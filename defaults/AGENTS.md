@@ -628,7 +628,8 @@ The main ones:
   the nearest border along that axis by px, default 40, as a drag would; a keyboard
   resize mode is a mod that runs it on h/j/k/l).
   `pane.zoom` also makes the pane its tab's focused one (the tab isn't
-  selected); on the zoomed pane it unzooms and focus stays.
+  selected); on the zoomed pane it unzooms and focus stays. A tab with one
+  pane doesn't zoom, and a zoom ends when its tab is back to one pane.
   `pane.go` prefers the most recently focused pane along the nearest edge in that
   direction; unvisited panes fall back to overlap, then top/left layout order.
   `pane.go` also reaches visible mods whose `mod.json` says `"focusable": true`, and
