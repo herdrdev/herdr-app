@@ -988,8 +988,10 @@ names the clicked terminal and its machine, cwd, pane, tab and space.
 `link.raw` keeps the original text or the OSC 8 destination. `link.path` is
 null for remote, unresolved or non-UTF-8 paths. Plain paths can carry a
 `:line` or `:line:column` suffix, exposed as optional 1-based `link.line` and
-`link.column`. A column needs a valid line. Herdr keeps a verified literal
-filename intact and can report coordinates even when `link.path` is null.
+`link.column`. Line ranges (`:5-12`, `#L5-L12`, `#L5-12`) and anchors (`#L5`)
+set `link.line` to the first line. A column needs a valid line. Herdr keeps a
+verified literal filename intact and can report coordinates even when
+`link.path` is null.
 File URIs have no coordinates. Herdr can verify their local paths when the
 host is empty or `localhost`. A link handler starts without opening a view
 and shares `localStorage` with views of the same mod with null props.

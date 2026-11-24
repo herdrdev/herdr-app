@@ -1155,14 +1155,14 @@ impl TerminalView {
                 return None;
             }
             if let Some(range) = links::find(text, at) {
-                let link = links::resolve(&text[range.clone()], cwd);
+                let link = links::resolve(&text[range.clone()], cwd, remote);
                 let eligible = match scan {
                     LinkScan::Plain => link.native.is_some(),
                     LinkScan::Joined => matches!(link.native, Some(links::Target::File(_))),
                     LinkScan::Unresolved => link.native.is_none(),
                 };
                 if eligible {
-                    target = Some(LinkTarget::External(link.click(remote, &active)?));
+                    target = Some(LinkTarget::External(link.click(&active)?));
                     return Some(range);
                 }
             }
@@ -1175,7 +1175,7 @@ impl TerminalView {
             Some(range)
         })?;
         // OSC 8 bypasses text detection. The URI is already the full destination.
-        let target = target.or_else(|| links::resolve(&hit.target, cwd).click(remote, &active).map(LinkTarget::External))?;
+        let target = target.or_else(|| links::resolve(&hit.target, cwd, remote).click(&active).map(LinkTarget::External))?;
         Some((target, hit.spans))
     }
 
