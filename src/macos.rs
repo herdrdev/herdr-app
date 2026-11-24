@@ -1,15 +1,23 @@
 use gpui::*;
+use gpui_base::input::ShowCharacterPalette;
 use gpui_shell::action::ShellAction;
 
 actions!(herdr, [Quit, Hide, HideOthers, ShowAll, Settings]);
 
 pub fn init(cx: &mut App) {
+    // Install with the UI kit's keys, before user bindings, so reloads keep
+    // this fallback and even a personal global binding can override it.
+    cx.bind_keys([character_palette_binding()]);
     cx.on_action(|_: &Quit, cx| cx.quit());
     cx.on_action(|_: &Hide, cx| cx.hide());
     cx.on_action(|_: &HideOthers, cx| cx.hide_other_apps());
     cx.on_action(|_: &ShowAll, cx| cx.unhide_other_apps());
     cx.on_action(|_: &Settings, _| crate::mods::request(crate::mods::Request::Run { name: "app.settings".into(), args: serde_json::Value::Null }));
     refresh_menus(cx);
+}
+
+fn character_palette_binding() -> KeyBinding {
+    KeyBinding::new("ctrl-cmd-space", ShowCharacterPalette, Some("Herdr"))
 }
 
 pub fn action(name: &str) -> Option<Box<dyn Action>> {
@@ -192,6 +200,33 @@ mod tests {
         assert_eq!(key("Copy").as_deref(), Some("cmd-c"));
         assert_eq!(key("Toggle Sidebar").as_deref(), Some("cmd-b"));
         assert_eq!(key("Minimize").as_deref(), Some("cmd-m"));
+    }
+
+    #[test]
+    fn character_palette_shortcut_respects_personal_keys() {
+        use super::{ShowCharacterPalette, character_palette_binding};
+        use gpui::{KeyContext, Keystroke};
+
+        let key = [Keystroke::parse("ctrl-cmd-space").unwrap()];
+        let context = [KeyContext::parse("Herdr layout=main").unwrap(), KeyContext::parse("Terminal").unwrap()];
+        let mut keymap = Keymap::new(vec![character_palette_binding()]);
+        let (bindings, pending) = keymap.bindings_for_input(&key, &context);
+        assert!(!pending);
+        assert_eq!(bindings.len(), 1);
+        assert!(bindings[0].action().as_any().is::<ShowCharacterPalette>());
+        assert!(keymap.bindings_for_input(&[Keystroke::parse("ctrl-space").unwrap()], &context).0.is_empty());
+
+        for section in ["global", "layout:main", "terminal"] {
+            let personal = serde_json::json!({ (section): { "ctrl-cmd-space": "tab.next" } });
+            let mut keymap = Keymap::new(vec![character_palette_binding()]);
+            keymap.add_bindings(crate::keys::parse(&personal.to_string()).unwrap());
+            let (bindings, _) = keymap.bindings_for_input(&key, &context);
+            let action = bindings[0].action().as_any().downcast_ref::<ShellAction>().unwrap();
+            assert_eq!(action.id(), "tab.next", "{section}");
+        }
+
+        keymap.add_bindings(crate::keys::parse(r#"{"terminal":{"ctrl-cmd-space":"terminal"}}"#).unwrap());
+        assert!(keymap.bindings_for_input(&key, &context).0.is_empty());
     }
 
     #[test]

@@ -112,6 +112,8 @@ when the selection changes, without refreshing readers on ordinary terminal outp
 terminal's screen and scrollback; Enter and Shift-Enter move between matches,
 Escape closes the bar while its find field has focus, and each terminal keeps its own query (reopening selects it, so typing replaces it).
 Clicking the terminal while the bar is open puts typing, including Escape, back in the program; the bar and its matches stay.
+On macOS, Ctrl+Cmd+Space opens the system Emoji & Symbols picker in the
+focused terminal unless the person has overridden that shortcut.
 
 It prints the created IDs (for example `{ "pane": "...", "terminal": "..." }`)
 or `{ "error": "..." }` and exits 1. Read the result, then inspect `ls` or
