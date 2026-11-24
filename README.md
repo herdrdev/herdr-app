@@ -119,7 +119,7 @@ See the [command reference](docs/commands.md) for arguments.
 
 For bugs, mod API requests and code contributions, see [Contributing](CONTRIBUTING.md).
 
-Clone this repo with its submodules. Use Rust 1.95.0 and Zig 0.16.0, the versions used in [CI](.github/workflows/ci.yml).
+Clone this repo with its submodules. Use Rust 1.95.0 and Zig 0.17.0, the versions used in [CI](.github/workflows/ci.yml).
 Linux needs the development packages listed in that workflow.
 
 ```sh

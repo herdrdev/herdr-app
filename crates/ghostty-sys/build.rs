@@ -43,7 +43,7 @@ fn main() {
         .arg("--cache-dir")
         .arg(out.join("zig-cache"))
         .status()
-        .unwrap_or_else(|e| panic!("cannot run {zig:?} (Zig 0.16 required): {e}"));
+        .unwrap_or_else(|e| panic!("cannot run {zig:?} (Zig 0.17 required): {e}"));
     assert!(status.success(), "zig build of libghostty-vt failed: {status}");
 
     // Only the static archive in the search path, so the linker can't pick the shared one.

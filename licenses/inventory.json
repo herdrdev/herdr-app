@@ -75,7 +75,7 @@
     },
     {
       "name": "uucode and its Unicode data / UTF-8 decoder",
-      "source": "https://github.com/jacobsandlund/uucode/tree/9d55524551411b493cca41ca06363625d90aff1e",
+      "source": "https://github.com/jacobsandlund/uucode/tree/ea62149739404a73c202b48a33bf6dd2af4bd9b0",
       "files": [
         "licenses/uucode.txt",
         "licenses/uucode-LICENSE_Bjoern_Hoehrmann.txt",
@@ -108,15 +108,15 @@
       ]
     },
     {
-      "name": "Zig 0.16.0 standard library and compiler runtime",
-      "source": "https://github.com/ziglang/zig/tree/0.16.0",
+      "name": "Zig 0.17.0 standard library and compiler runtime",
+      "source": "https://github.com/ziglang/zig/tree/0.17.0",
       "files": [
         "licenses/Zig.txt"
       ]
     },
     {
       "name": "musl (where statically included by the toolchain)",
-      "source": "Zig 0.16.0 lib/libc/musl/COPYRIGHT; official Linux app builds use system glibc, not musl.",
+      "source": "Zig 0.17.0 lib/libc/musl/COPYRIGHT; official Linux app builds use system glibc, not musl.",
       "files": [
         "licenses/musl.txt"
       ]
