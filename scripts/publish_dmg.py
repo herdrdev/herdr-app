@@ -204,6 +204,23 @@ class Publisher:
                     raise RuntimeError(f"remote DMG checksum mismatch: {key}")
                 if item.metadata.get("source", self.source) != self.source:
                     raise RuntimeError(f"remote source commit mismatch: {key}")
+            # The manifest command is also a public entry point. A failed
+            # image/website-alias upload must not be advertised as complete
+            # just because both immutable images already exist. Newer aliases
+            # are fine when retrying an older release: never roll them back.
+            names = [f"Herdr-{target}.dmg"]
+            if target == "macos-aarch64":
+                names.append("Herdr.dmg")
+            for name in names:
+                key = f"app/{name}"
+                alias = self.store.get(key)
+                if alias is None:
+                    raise RuntimeError(f"website alias not published: {key}; retry image publication first")
+                version = self.alias_version(key, alias)
+                if version_key(version) < version_key(self.version):
+                    raise RuntimeError(f"website alias still at {version}: {key}; retry image publication first")
+                if version_key(version) == version_key(self.version) and sha(alias.body) != value["sha256"]:
+                    raise RuntimeError(f"website alias checksum mismatch: {key}")
         body = (json.dumps(doc, indent=2) + "\n").encode()
         info = self.info(body, "manifest")
         self.immutable(f"app/{self.version}/dmg.json", body, info, "application/json")

@@ -113,6 +113,33 @@ class PublicationTests(unittest.TestCase):
         self.assertEqual((retry / "Herdr-macos-aarch64.dmg").read_bytes(), committed)
         self.assert_manifest()
 
+    def test_each_failed_website_alias_blocks_even_a_complete_versioned_pair(self):
+        for index, alias in enumerate(("app/Herdr-macos-aarch64.dmg", "app/Herdr.dmg", "app/Herdr-macos-x86_64.dmg")):
+            with self.subTest(alias=alias):
+                self.store = Store()
+                self.publish(self.files(f"old-{index}", "1.2.2"), "1.2.2")
+                previous = self.store.get("app/dmg/latest.json")
+                files = self.files(f"new-{index}")
+                publisher = Publisher(self.store, "1.2.3", SOURCE)
+                self.store.fail.add(alias)
+                failed = 0
+                for target in ("macos-aarch64", "macos-x86_64"):
+                    try:
+                        publisher.image(target, files / f"Herdr-{target}.dmg")
+                    except RuntimeError as error:
+                        self.assertIn("injected", str(error))
+                        failed += 1
+                self.assertEqual(failed, 1)
+                for target in ("macos-aarch64", "macos-x86_64"):
+                    self.assertIsNotNone(self.store.get(f"app/1.2.3/Herdr-{target}.dmg"))
+                with self.assertRaisesRegex(RuntimeError, "website alias"):
+                    publisher.release(files, "https://releases.example")
+                self.assertIsNone(self.store.get("app/1.2.3/dmg.json"))
+                self.assertEqual(self.store.get("app/dmg/latest.json"), previous)
+                self.store.fail.clear()
+                self.publish(files)
+                self.assertEqual(self.assert_manifest()["version"], "1.2.3")
+
     def test_concurrent_same_commit_candidates_choose_one_canonical_image(self):
         a, b = self.files("a", extra="A"), self.files("b", extra="B")
         self.store.barrier_key = "app/1.2.3/Herdr-macos-aarch64.dmg"
@@ -374,6 +401,14 @@ else:fail('NotImplemented')
             r = image("macos-aarch64", "1.2.4", FAIL_KEY="app/Herdr-macos-aarch64.dmg")
             self.assertNotEqual(r.returncode, 0)
             canonical = rows()["app/1.2.4/Herdr-macos-aarch64.dmg"]
+            # Even bypassing the failed job's needs gate and calling the real
+            # manifest CLI directly must not advertise incomplete website links.
+            r = image("macos-x86_64", "1.2.4");self.assertEqual(r.returncode, 0, r.stderr)
+            r = run(block("Publish complete DMG release last"), "1.2.4")
+            self.assertNotEqual(r.returncode, 0)
+            self.assertIn("website alias", r.stderr)
+            self.assertNotIn("app/1.2.4/dmg.json", rows())
+            self.assertEqual(json.loads(rows()["app/dmg/latest.json"])["version"], "1.2.3")
             (work / "dist/Herdr-macos-aarch64.dmg").write_bytes(b"rebuilt after partial upload")
             for target in ("macos-aarch64", "macos-x86_64"):
                 r = image(target, "1.2.4");self.assertEqual(r.returncode, 0, r.stderr)

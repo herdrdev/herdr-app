@@ -42,6 +42,7 @@ on:
       - scripts/mac-dmg
       - scripts/dmg_manifest.py
       - scripts/publish_dmg.py
+      - scripts/release_manifest.py
       - distribution/macos/dmg/**
       - scripts/ci-sources
       - .github/workflows/release.yml
@@ -363,19 +364,8 @@ jobs:
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
           core=$(tr -d '[:space:]' < distribution/core-version)
-          python3 - "$version" "$core" <<'PY'
-          import hashlib, json, pathlib, sys, os
-          version, core = sys.argv[1], sys.argv[2]
-          base = os.environ["RELEASES_URL"]
-          targets = {}
-          for f in sorted(pathlib.Path("dist").glob("herdr-app-*.tar.gz")):
-              t = f.name.removeprefix("herdr-app-").removesuffix(".tar.gz")
-              targets[t] = {"url": f"{base}/app/{version}/{f.name}", "sha256": hashlib.sha256(f.read_bytes()).hexdigest()}
-          # core_min: the oldest core this app works with.
-          doc = {"version": version, "core_min": core, "notes": f"Herdr {version}", "targets": targets}
-          pathlib.Path("dist/manifest.json").write_text(json.dumps(doc, indent=2) + "\n")
-          print(json.dumps(doc, indent=2))
-          PY
+          python3 scripts/release_manifest.py "$version" "$core" dist "$RELEASES_URL" > dist/manifest.json
+          cat dist/manifest.json
       - name: Upload
         run: |
           version=$(sed -n 's/^version = "\(.*\)"/\1/p' Cargo.toml | head -1)
