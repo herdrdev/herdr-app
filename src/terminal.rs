@@ -1182,7 +1182,7 @@ impl TerminalView {
         Some((target, hit.spans))
     }
 
-    /// Starts a mouse selection. With `extend` (Shift held) and a selection on
+    /// Starts a mouse selection. With `extend` (a single Shift+click) and a selection on
     /// screen, the press moves that selection's end instead, as in Terminal.app.
     fn start_selection(&mut self, pos: Point<Pixels>, extend: bool, cx: &mut Context<Self>) {
         self.selecting = true;
@@ -2586,7 +2586,7 @@ impl Render for TerminalView {
                     // The program took the click: Herdr's old selection ends, so a copy can't repeat it.
                     this.clear_selection(cx);
                 } else {
-                    this.start_selection(ev.position, ev.modifiers.shift, cx);
+                    this.start_selection(ev.position, ev.modifiers.shift && ev.click_count <= 1, cx);
                 }
             }))
             // Right-click is Herdr's menu, even when the program tracks the mouse
@@ -3090,6 +3090,14 @@ mod tests {
         assert_eq!(selected(cx).as_deref(), Some("beta gamma\nsecond"));
         click(cx, from, Modifiers::default());
         assert_eq!(selected(cx), None, "the Shift+click ended the earlier click sequence");
+
+        root.update(cx, |root, cx| root.0.update(cx, |t, _| t.grid.borrow_mut().vt.write(b"\x1b[?1000h\x1b[?1006h")));
+        for (click_count, expected) in [(1, None), (2, Some("gamma")), (3, Some("alpha beta gamma"))] {
+            let position = at(cx, 13., 0.);
+            cx.simulate_event(MouseDownEvent { button: MouseButton::Left, position, modifiers: shift, click_count, first_mouse: false });
+            cx.simulate_event(MouseUpEvent { button: MouseButton::Left, position, modifiers: shift, click_count });
+            assert_eq!(selected(cx).as_deref(), expected, "Shift+click count {click_count} with mouse tracking");
+        }
     }
 
     #[gpui::test]
