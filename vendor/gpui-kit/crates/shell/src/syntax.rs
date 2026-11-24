@@ -19,6 +19,7 @@ static SYNTAX_SET: LazyLock<SyntaxSet> = LazyLock::new(SyntaxSet::load_defaults_
 /// supplies all colors and font styles.
 pub(crate) struct SyntectHighlighter {
     language: SharedString,
+    syntax: &'static SyntaxReference,
     /// Non-overlapping highlights, ordered by start offset.
     highlights: Vec<(Range<usize>, &'static str)>,
     fold_ranges: Vec<FoldRange>,
@@ -29,10 +30,11 @@ pub(crate) struct SyntectHighlighter {
 
 impl SyntectHighlighter {
     pub(crate) fn new(language: &str) -> Option<Self> {
-        find_syntax(language)?;
+        let syntax = find_syntax(language)?;
 
         Some(Self {
             language: language.to_owned().into(),
+            syntax,
             highlights: Vec::new(),
             fold_ranges: Vec::new(),
             semantic_names: HashMap::new(),
@@ -48,10 +50,30 @@ impl SyntectHighlighter {
             *self
                 .semantic_names
                 .entry(*scope)
-                .or_insert_with(|| semantic_name(*scope))
+                .or_insert_with(|| semantic_name(*scope, self.syntax.name == "Markdown"))
         });
         if let Some(name) = name {
             self.highlights.push((range, name));
+        }
+    }
+
+    fn reparse(&mut self, text: &str) {
+        let mut parser = ParseState::new(self.syntax);
+        let mut scopes = ScopeStack::new();
+        let mut offset = 0;
+        self.highlights.clear();
+
+        for line in LinesWithEndings::from(text) {
+            if let Ok(operations) = parser.parse_line(line, &SYNTAX_SET) {
+                let mut cursor = 0;
+                for (index, operation) in operations {
+                    self.push_highlight(offset + cursor..offset + index, &scopes);
+                    let _ = scopes.apply(&operation);
+                    cursor = index;
+                }
+                self.push_highlight(offset + cursor..offset + line.len(), &scopes);
+            }
+            offset += line.len();
         }
     }
 }
@@ -78,26 +100,7 @@ impl InputHighlighter for SyntectHighlighter {
         // `syntect` has no incremental mode, so the whole document is reparsed.
         // Read the rope once and reuse that string for folding too.
         let text = text.to_string();
-        let syntax = find_syntax(self.language.as_ref())
-            .unwrap_or_else(|| SYNTAX_SET.find_syntax_plain_text());
-        let mut parser = ParseState::new(syntax);
-        let mut scopes = ScopeStack::new();
-        let mut offset = 0;
-        self.highlights.clear();
-
-        for line in LinesWithEndings::from(&text) {
-            if let Ok(operations) = parser.parse_line(line, &SYNTAX_SET) {
-                let mut cursor = 0;
-                for (index, operation) in operations {
-                    self.push_highlight(offset + cursor..offset + index, &scopes);
-                    let _ = scopes.apply(&operation);
-                    cursor = index;
-                }
-                self.push_highlight(offset + cursor..offset + line.len(), &scopes);
-            }
-            offset += line.len();
-        }
-
+        self.reparse(&text);
         self.fold_ranges = if folding {
             brace_fold_ranges(&text)
         } else {
@@ -190,8 +193,12 @@ fn resolve_styles(
     runs
 }
 
-fn semantic_name(scope: Scope) -> Option<&'static str> {
+fn semantic_name(scope: Scope, markdown: bool) -> Option<&'static str> {
     let scope = scope.build_string();
+    // Other grammars, including reStructuredText, use the same markup prefixes.
+    if markdown && let Some(name) = markup_name(&scope) {
+        return Some(name);
+    }
     let name = if scope.starts_with("comment") {
         "comment"
     } else if scope.starts_with("constant.character.escape") {
@@ -223,6 +230,54 @@ fn semantic_name(scope: Scope) -> Option<&'static str> {
         return None;
     };
     Some(name)
+}
+
+/// HERDR: Markdown's scopes, so a Markdown editor shows its structure. A marker
+/// (`#`, `**`, a list bullet) takes its construct's name rather than
+/// `punctuation`, the way VS Code colors it. Lists and links name only their
+/// marker and URL: the list item's own text stays plain.
+fn markup_name(scope: &str) -> Option<&'static str> {
+    const NAMES: &[(&[&str], &str)] = &[
+        (
+            &["markup.heading", "punctuation.definition.heading"],
+            "heading",
+        ),
+        (&["markup.bold", "punctuation.definition.bold"], "strong"),
+        (
+            &["markup.italic", "punctuation.definition.italic"],
+            "emphasis",
+        ),
+        (&["markup.raw", "punctuation.definition.raw"], "code"),
+        (
+            &["markup.quote", "punctuation.definition.blockquote"],
+            "quote",
+        ),
+        (
+            &[
+                "markup.list.numbered.bullet",
+                "markup.list.unnumbered.bullet",
+                "punctuation.definition.list_item",
+            ],
+            "list",
+        ),
+        (&["markup.underline.link"], "link"),
+    ];
+    NAMES
+        .iter()
+        .find(|(prefixes, _)| prefixes.iter().any(|prefix| scope.starts_with(prefix)))
+        .map(|(_, name)| *name)
+}
+
+/// HERDR: a Markdown name a mod gave no color takes the color of a code name,
+/// so a mod that themes `keyword`, `string` and `comment` themes Markdown too.
+fn markup_fallback(root: &str) -> Option<&'static str> {
+    Some(match root {
+        "heading" | "strong" | "list" => "keyword",
+        "code" => "string",
+        "quote" => "comment",
+        "link" => "function",
+        _ => return None,
+    })
 }
 
 fn brace_fold_ranges(text: &str) -> Vec<FoldRange> {
@@ -264,13 +319,15 @@ pub(crate) struct SyntaxStyles(pub std::collections::HashMap<String, gpui::Hsla>
 impl HighlightStyleResolver for SyntaxStyles {
     fn style(&self, name: &str) -> Option<HighlightStyle> {
         let root = name.split('.').next()?;
+        let fallback = markup_fallback(root);
         let color = self
             .0
             .get(name)
             .or_else(|| self.0.get(root))
+            .or_else(|| fallback.and_then(|fallback| self.0.get(fallback)))
             .copied()
             .or_else(|| {
-                let rgb = match root {
+                let rgb = match fallback.unwrap_or(root) {
                     "comment" => 0x7f848e,
                     "string" => 0x98c379,
                     "number" => 0xd19a66,
@@ -284,8 +341,12 @@ impl HighlightStyleResolver for SyntaxStyles {
                 };
                 Some(gpui::rgb(rgb).into())
             });
-        color.map(|color| HighlightStyle {
-            color: Some(color),
+        let font_weight = matches!(root, "heading" | "strong").then_some(gpui::FontWeight::BOLD);
+        let font_style = (root == "emphasis").then_some(gpui::FontStyle::Italic);
+        (color.is_some() || font_weight.is_some() || font_style.is_some()).then(|| HighlightStyle {
+            color,
+            font_weight,
+            font_style,
             ..Default::default()
         })
     }
@@ -326,5 +387,72 @@ mod tests {
         assert!(find_syntax("rust").is_some());
         assert!(find_syntax("rs").is_some());
         assert!(find_syntax("unknown-language").is_none());
+    }
+
+    fn highlight_names<'a>(language: &str, text: &'a str) -> Vec<(&'a str, &'static str)> {
+        let mut highlighter = SyntectHighlighter::new(language).unwrap();
+        highlighter.reparse(text);
+        highlighter
+            .highlights
+            .into_iter()
+            .map(|(range, name)| (text[range].trim(), name))
+            .filter(|(text, _)| !text.is_empty())
+            .collect()
+    }
+
+    #[test]
+    fn markdown_shows_its_structure() {
+        let text =
+            "# Title\n\n- item with `code` and **bold** and *it*\n\n> quote\n\n[x](http://x)\n";
+        let names = highlight_names("markdown", text);
+        assert_eq!(highlight_names("md", text), names);
+        for expected in [
+            ("#", "heading"),
+            ("Title", "heading"),
+            ("-", "list"),
+            ("`", "code"),
+            ("code", "code"),
+            ("**", "strong"),
+            ("bold", "strong"),
+            ("it", "emphasis"),
+            ("quote", "quote"),
+            ("http://x", "link"),
+        ] {
+            assert!(names.contains(&expected), "{expected:?} not in {names:?}");
+        }
+        assert!(!names.iter().any(|(text, _)| text.contains("item with")));
+    }
+
+    #[test]
+    fn restructuredtext_keeps_its_existing_syntax() {
+        let names = highlight_names("rst", "**strong** and *emphasis* and ``literal``.\n");
+        assert!(names.contains(&("**", "punctuation")), "{names:?}");
+        assert!(
+            !names
+                .iter()
+                .any(|(text, _)| matches!(*text, "strong" | "emphasis" | "literal")),
+            "{names:?}"
+        );
+    }
+
+    #[test]
+    fn markdown_names_follow_code_colors_and_set_weight() {
+        let keyword = gpui::rgb(0x112233).into();
+        let heading = gpui::rgb(0x445566).into();
+        let styles = SyntaxStyles(HashMap::from([("keyword".into(), keyword)]));
+        let style = styles.style("heading").unwrap();
+        assert_eq!(style.color, Some(keyword));
+        assert_eq!(style.font_weight, Some(gpui::FontWeight::BOLD));
+        assert_eq!(
+            styles.style("emphasis").unwrap().font_style,
+            Some(gpui::FontStyle::Italic)
+        );
+        assert!(styles.style("code").unwrap().color.is_some());
+
+        let styles = SyntaxStyles(HashMap::from([
+            ("keyword".into(), keyword),
+            ("heading".into(), heading),
+        ]));
+        assert_eq!(styles.style("heading").unwrap().color, Some(heading));
     }
 }

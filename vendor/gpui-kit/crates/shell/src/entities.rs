@@ -25,10 +25,10 @@ use std::{
 };
 
 use gpui::{App, AppContext as _, Entity, EntityId, FocusHandle, Subscription, Window};
-use gpui_base::VirtualListScrollHandle;
+use gpui_base::{ScrollbarHandle, VirtualListScrollHandle};
 use gpui_base::dock::{DockArea, DockEvent};
 use gpui_base::input::{
-    EditorState, InputBaseState, InputEditorStyle, InputEvent, InputModeKind, InputState,
+    EditorState, InputBaseState, InputEditorStyle, InputEvent, InputModeKind, InputState, TabSize,
     TextareaState,
 };
 use gpui_base::slider::{SliderEvent, SliderScale, SliderState, SliderValue};
@@ -159,6 +159,11 @@ enum Record {
         application: Option<Rc<ApplicationGeneration>>,
         subscriptions: Vec<Subscription>,
     },
+    Scroll {
+        handle: PlainScrollHandle,
+        layout_scale: Cell<f32>,
+        application: Option<Rc<ApplicationGeneration>>,
+    },
     /// The scroll position of a virtualized list, and the item it has been
     /// asked to scroll to.
     ///
@@ -169,8 +174,16 @@ enum Record {
     /// between two frames — which is every request a script can make.
     VirtualScroll {
         handle: VirtualListScrollHandle,
+        layout_scale: Cell<f32>,
         application: Option<Rc<ApplicationGeneration>>,
     },
+}
+
+/// A plain scroll area's position and a request consumed during its next layout.
+#[derive(Clone, Default)]
+pub(crate) struct PlainScrollHandle {
+    pub(crate) handle: gpui::ScrollHandle,
+    pub(crate) pending: Rc<Cell<Option<usize>>>,
 }
 
 // HERDR: script editor construction options, decoded before retaining any state.
@@ -183,6 +196,9 @@ pub(crate) struct EditorOptions {
     pub folding: bool,
     pub readonly: bool,
     pub soft_wrap: bool,
+    /// Columns per tab and spaces per indent; checked before it reaches the state.
+    pub tab_size: f64,
+    pub hard_tabs: bool,
     pub syntax: HashMap<String, String>,
     pub font_family: Option<String>,
     pub font_size: Option<f32>,
@@ -197,6 +213,8 @@ impl Default for EditorOptions {
             folding: true,
             readonly: false,
             soft_wrap: false,
+            tab_size: TabSize::default().tab_size as f64,
+            hard_tabs: TabSize::default().hard_tabs,
             syntax: HashMap::new(),
             font_family: None,
             font_size: None,
@@ -310,6 +328,7 @@ impl EntityStore {
             Record::Otp { .. } => Some("OtpState"),
             Record::Focus { .. } => Some("FocusHandle"),
             Record::Dock { .. } => Some("DockArea"),
+            Record::Scroll { .. } => Some("ScrollHandle"),
             Record::VirtualScroll { .. } => Some("VirtualListScrollHandle"),
         }
     }
@@ -451,6 +470,7 @@ impl EntityStore {
     pub(crate) fn create_editor(
         &mut self,
         options: EditorOptions,
+        tab: TabSize,
         style: InputEditorStyle,
         application: Option<Rc<ApplicationGeneration>>,
         window: &mut Window,
@@ -462,7 +482,8 @@ impl EntityStore {
                 .language(options.language)
                 .line_number(options.line_numbers)
                 .folding(options.folding)
-                .soft_wrap(options.soft_wrap);
+                .soft_wrap(options.soft_wrap)
+                .tab_size(tab);
             state.set_readonly(options.readonly, cx);
             state.set_editor_style(style);
             state.set_highlighter_factory(
@@ -846,6 +867,24 @@ impl EntityStore {
         }
     }
 
+    pub(crate) fn create_scroll(
+        &mut self,
+        application: Option<Rc<ApplicationGeneration>>,
+    ) -> Result<EntityHandle, EntityLimitError> {
+        self.push(Record::Scroll {
+            handle: PlainScrollHandle::default(),
+            layout_scale: Cell::new(1.0),
+            application,
+        })
+    }
+
+    pub(crate) fn scroll(&self, handle: EntityHandle) -> Option<PlainScrollHandle> {
+        match self.record(handle) {
+            Some(Record::Scroll { handle, .. }) => Some(handle.clone()),
+            _ => None,
+        }
+    }
+
     /// Creates a virtualized list's scroll position and returns its handle.
     ///
     /// Refused during render for the same reason the rest are: a handle created
@@ -858,6 +897,7 @@ impl EntityStore {
     ) -> Result<EntityHandle, EntityLimitError> {
         self.push(Record::VirtualScroll {
             handle: VirtualListScrollHandle::new(),
+            layout_scale: Cell::new(1.0),
             application,
         })
     }
@@ -867,6 +907,25 @@ impl EntityStore {
     pub fn virtual_scroll(&self, handle: EntityHandle) -> Option<VirtualListScrollHandle> {
         match self.record(handle) {
             Some(Record::VirtualScroll { handle, .. }) => Some(handle.clone()),
+            _ => None,
+        }
+    }
+
+    /// Update the conversion when the element is built, so a hidden area keeps
+    /// the scale of the geometry it last laid out.
+    pub(crate) fn record_scroll_layout(&self, handle: EntityHandle) {
+        if let Some((_, scale)) = self.scroll_geometry(handle) {
+            scale.set(crate::value::pixel_scale());
+        }
+    }
+
+    pub(crate) fn scroll_geometry(
+        &self,
+        handle: EntityHandle,
+    ) -> Option<(&dyn ScrollbarHandle, &Cell<f32>)> {
+        match self.record(handle)? {
+            Record::Scroll { handle, layout_scale, .. } => Some((&handle.handle, layout_scale)),
+            Record::VirtualScroll { handle, layout_scale, .. } => Some((handle, layout_scale)),
             _ => None,
         }
     }
@@ -1098,6 +1157,9 @@ impl EntityStore {
                     application: owner, ..
                 }
                 | Record::Focus {
+                    application: owner, ..
+                }
+                | Record::Scroll {
                     application: owner, ..
                 }
                 | Record::VirtualScroll {
@@ -1518,17 +1580,11 @@ mod tests {
         let mut store = EntityStore::try_new().expect("store id");
         for _ in 0..MAX_LIVE_ENTITIES {
             store
-                .push(Record::VirtualScroll {
-                    handle: VirtualListScrollHandle::new(),
-                    application: None,
-                })
+                .create_virtual_scroll(None)
                 .expect("the advertised live-entity capacity");
         }
 
-        let overflow = store.push(Record::VirtualScroll {
-            handle: VirtualListScrollHandle::new(),
-            application: None,
-        });
+        let overflow = store.create_virtual_scroll(None);
         assert_eq!(overflow, Err(EntityLimitError));
         assert_eq!(store.len(), MAX_LIVE_ENTITIES);
     }

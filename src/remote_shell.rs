@@ -1,8 +1,8 @@
 //! The shell used to check and launch agents on another machine.
 
 pub fn check(commands: &[String]) -> Vec<String> {
-    let posix = "for c; do unalias -- \"$c\" 2>/dev/null; command -v \"$c\" >/dev/null 2>&1 && printf 'herdr-has:%s\\n' \"$c\"; done";
-    in_shell(posix, "for c in $argv[2..]; command -v $c >/dev/null 2>&1; and printf 'herdr-has:%s\\n' $c; end", posix, commands.to_vec())
+    let posix = "for c; do unalias -- \"$c\" 2>/dev/null; command -v \"$c\" >/dev/null 2>&1 && printf 'herdr-has:%s\\n' \"$c\"; done; printf '\\nherdr-check-complete\\n'";
+    in_shell(posix, "for c in $argv[2..]; command -v $c >/dev/null 2>&1; and printf 'herdr-has:%s\\n' $c; end; printf '\\nherdr-check-complete\\n'", posix, commands.to_vec())
 }
 
 pub fn launch(command: Vec<String>) -> Vec<String> {
