@@ -189,3 +189,27 @@ test("picker preserves small pixel touchpad deltas", () => {
     expect(view.scroll).toBe(-delta);
   }
 });
+
+test("picker heads show a leading emoji as the avatar, without the tile, and the rest as the name", () => {
+  const view = picker(0);
+  testSpaces = [
+    { id: "panda", name: "🐼 research", status: "working", tabs: [{ id: "panda-tab", name: "notes" }] },
+    { id: "plain", name: "plain", status: "working", tabs: [{ id: "plain-tab", name: "build" }] },
+  ];
+  const tree = view.render();
+  const head = (text: string, root: Element = tree): Element | undefined => {
+    if (root?.nodes?.includes(text as any)) return root;
+    for (const child of root?.nodes ?? []) {
+      const found = head(text, child);
+      if (found) return found;
+    }
+  };
+  const panda = head("research")!;
+  expect(panda).toBeDefined();
+  expect(head("🐼 research")).toBeUndefined();
+  expect(panda.nodes[0].nodes).toEqual(["🐼"]);
+  expect(panda.nodes[0].calls.bg).toBeUndefined();
+  const plain = head("plain")!;
+  expect(plain.nodes[0].nodes).toEqual(["P"]);
+  expect(plain.nodes[0].calls.bg).toBeDefined();
+});

@@ -34,6 +34,19 @@ function spaceColor(t, p) {
   return c.startsWith("#") ? c : (MARK[c] ?? t[c]);
 }
 
+// A name that starts with a whole emoji ("🐼 notes", "⚙️ ops", "🇦🇹 trip") shows it as
+// its avatar, without the tile, and the rest as the name (the same in every mod
+// that draws space avatars). One emoji is its base plus skin tone, variation
+// selector, tags and ZWJ parts, or a flag. An older symbol (©, ⚙) counts only with
+// VS16, else it draws as text; one from U+1F000 on (🖥) counts without it. A name
+// that is only an emoji keeps the letter tile.
+const EMOJI = /^(?:\p{Regional_Indicator}{2}|(?:\p{Emoji_Presentation}\uFE0F?|(?=[\u{1F000}-\u{1FFFF}])\p{Extended_Pictographic}\uFE0F?|\p{Extended_Pictographic}\uFE0F)[\u{1F3FB}-\u{1F3FF}\u{E0020}-\u{E007F}]*(?:\u200D\p{Extended_Pictographic}[\uFE0F\u{1F3FB}-\u{1F3FF}]*)*)/u;
+function leadEmoji(name) {
+  const emoji = EMOJI.exec(name ?? "")?.[0];
+  const text = emoji ? name.slice(emoji.length).trim() : "";
+  return emoji && text ? { emoji, text } : { emoji: null, text: name };
+}
+
 export default class Picker extends View {
   init(_props, cx) {
     this.filter = "";
@@ -155,6 +168,7 @@ export default class Picker extends View {
 
     const row = (r) => {
       if (r.kind === "head") {
+        const lead = leadEmoji(r.w.name);
         return h_flex()
           .px(10)
           .pt(10)
@@ -164,8 +178,10 @@ export default class Picker extends View {
           .text_size(11)
           .font_semibold()
           .text_color(t.dim)
-          .child(h_flex().size(18).rounded(5).bg(spaceColor(t, r.w)).items_center().justify_center().text_size(10.5).font_bold().text_color("#ffffff").child([...r.w.name][0]?.toUpperCase() ?? "?"))
-          .child(r.w.name);
+          .child(lead.emoji
+            ? h_flex().size(18).items_center().justify_center().text_size(15).child(lead.emoji)
+            : h_flex().size(18).rounded(5).bg(spaceColor(t, r.w)).items_center().justify_center().text_size(10.5).font_bold().text_color("#ffffff").child([...r.w.name][0]?.toUpperCase() ?? "?"))
+          .child(lead.text);
       }
       if (r.kind === "earlier") {
         return h_flex()
