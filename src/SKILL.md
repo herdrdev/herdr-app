@@ -45,7 +45,11 @@ herdr-app do space.new --name api --folder /path/to/api
 herdr-app do tab.new --name "fix login" --argv '["claude"]' --task "Look at the login bug"
 herdr-app do pane.split --direction right --pane p12
 herdr-app do agent.focus --terminal t7
+herdr-app do agent.select --index 3
 ```
+
+`agent.select` uses the same navigation order as `agent.next` (1 = first).
+In `keys.json`, `agent.select:3` selects the third agent in that order.
 
 For a remote space:
 
@@ -117,10 +121,15 @@ the exit code and last output lines.
 
 A terminal started with hc opts into the window with `herdr.space=<id>`.
 `herdr.tab=<id>` chooses its tab; without it, Herdr creates a tab in that space.
-Unlabeled workers stay hidden. Do not add labels just to run a background
-worker. Use app commands when the
-user wants to see a new tab or split, hc for orchestration that need not change
-the screen.
+Workers without a label or a pane stay hidden. Do not add labels just to run a
+background worker. Use app commands when the user wants to see a new tab or
+split, hc for orchestration that need not change the screen.
+
+Closing a pane, tab or space ends the terminals in it. Core ends their dependent
+children and keeps children started with `--outlive-parent` running. On cores
+older than 0.1.13, Herdr also ends hidden children when closing. `terminal.kill`
+always follows the sub-agent tree. Both walks stop at children with a pane or a
+`herdr.space` label. Core still applies parent-lifetime rules to every exit.
 
 ## Customize layouts, keys, or mods
 
@@ -144,7 +153,8 @@ those files or the generated guide. The app rewrites them on start.
 - Mods live in `mods/<name>/` with `main.js` for a view or `link.js` for
   Ctrl/Cmd-clicked terminal links. They are trusted JavaScript with command
   and network access. `mod.json` declares link rules. A personal layout's
-  root `link_handlers` array selects the mods and their order.
+  root `link_handlers` array selects the mods and their order. An optional
+  `palette` list in `mod.json` adds named actions to the command palette.
   `"focusable": true` in `mod.json` lets `pane.go` move onto a copy; it receives
   `"focus"` from `nextCommand()` and focuses its own keyboard handle.
 - A mod's `watchFolder(dir)` promise has `cancel()`; cancel it when the folder
@@ -152,13 +162,22 @@ those files or the generated guide. The app rewrites them on start.
 - Shipped mods belong to Herdr: duplicate with `mod.clone` before editing.
   Shipped layouts likewise use `layout.clone` for a personal copy.
   Discover required arguments with `herdr-app commands`.
+- `InputState`, `TextareaState` and `EditorState` use `focus()` to take the
+  keyboard and `blur()` to hand it back to Herdr. `release()` frees the state.
 - Save to reload. A broken save keeps the old version running and reports
   an error in `status`; a still-working screen is not proof the edit worked.
 - Make only the requested change. Don't touch unrelated mods or settings.
+- To pause streaming or polling while the window is hidden, check
+  `window()?.visible` in the timer and stop when false (`window()` is null
+  during `herdr-app check`). Read it in `render` and restart when true. See
+  `herdr.d.ts` for platform differences.
 - Use theme colors. Do not retain a mod's `cx` across callbacks; each
   callback receives its own. Native animations, not redraw timers, keep
   the window cheap to run. Root `on_size_change((size, cx) => …)` reports
   logical pixels after layout, including resizes without pointer movement.
+  For a drag that leaves its element, use `on_window_mouse_move` and
+  `on_window_mouse_up` on a plain layout element. The installed guide covers
+  cancellation when the pointer returns without the held button.
   Optional `View.close(cx)` gets one bounded final call; start cleanup there,
   not in an earlier task. The installed guide explains its 250 ms quit budget
   and which cleanup commands go out before shutdown.
@@ -171,8 +190,9 @@ herdr-app status
 herdr-app shot /tmp/mod.png   # then look at the picture
 ```
 
-`check` loads and renders the mod's view if it has one. It validates link rules
-and checks the `handleLink` export in `link.js` without running the module.
+`check` loads and renders the mod's view if it has one. It validates link rules.
+For mods with link rules and standalone link mods, it checks the `handleLink`
+export in `link.js` without running the module.
 It exits nonzero with the exact error. Its shared state starts empty and stays
 in memory, leaving shared.json untouched. Its `init()` still runs: import
 `checking` from `"herdr"` and guard
