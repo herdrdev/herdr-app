@@ -7,6 +7,7 @@ import hashlib
 import os
 import plistlib
 import re
+import shlex
 import shutil
 import sys
 import tarfile
@@ -200,7 +201,7 @@ exit 22''')
         local = "http://127.0.0.1:8000/e2e"
         self.assertEqual(self.download_url(f"{local}/app/1.0.0/a.tar.gz", releases=local), f"{local}/app/1.0.0/a.tar.gz?src=install")
 
-    def mac_installer(self, signature, status, verify_status=0, arch="arm64", *, package_arch=None, move_failure=None, core="existing", different_device=False):
+    def mac_installer(self, signature, status, verify_status=0, arch="arm64", *, package_arch=None, move_failure=None, core="existing", different_device=False, package_description=None, native_binary=None, extra_env=None):
         home = self.bin / "home"
         (home / ".local/bin").mkdir(parents=True)
         existing_core = home / ".local/bin/herdr-core"
@@ -212,6 +213,9 @@ exit 22''')
         source.mkdir(parents=True)
         plist = b"signed release plist must stay unchanged"
         (source / "Info.plist").write_bytes(plist)
+        if native_binary is not None:
+            (source / "MacOS").mkdir()
+            shutil.copy2(native_binary, source / "MacOS/Herdr")
         archive = self.bin / "release.tar.gz"
         with tarfile.open(archive, "w:gz") as tar:
             tar.add(source.parent, arcname="Herdr.app")
@@ -247,7 +251,8 @@ esac''')
         plist_log = self.bin / "plist.log"
         self.stub("PlistBuddy", f'''echo "$*" >> "{plist_log}"
 printf 'dev PATH added' >> "$3"''')
-        self.stub("lipo", f'echo "{package_arch or ("x86_64" if arch == "x86_64" else "arm64")}"')
+        description = package_description or "Mach-O 64-bit executable " + (package_arch or ("x86_64" if arch == "x86_64" else "arm64"))
+        self.stub("file", "printf '%s\\n' " + shlex.quote(description))
         self.stub("ditto", 'cp -R "$1" "$2"')
         self.stub("mac-stat", f'''exec "{sys.executable}" - "{home}/Applications/Herdr.app" "{int(different_device)}" "$@" <<'PY'
 import os, sys
@@ -271,10 +276,12 @@ exec /bin/mv "$@"''')
         self.assertNotIn("\n    codesign ", script)
         script = script.replace("/usr/bin/codesign", str(self.bin / "codesign"))
         script = script.replace("/usr/libexec/PlistBuddy", str(self.bin / "PlistBuddy"))
-        for absolute, stub in (("/usr/sbin/sysctl", self.system / "sysctl"),
-                               ("/usr/bin/lipo", self.bin / "lipo"),
-                               ("/usr/bin/ditto", self.bin / "ditto"),
-                               ("/usr/bin/stat", self.bin / "mac-stat")):
+        tools = [("/usr/sbin/sysctl", self.system / "sysctl"),
+                 ("/usr/bin/ditto", self.bin / "ditto"),
+                 ("/usr/bin/stat", self.bin / "mac-stat")]
+        if native_binary is None:
+            tools.append(("/usr/bin/file", self.bin / "file"))
+        for absolute, stub in tools:
             script = script.replace(absolute, str(stub))
         self.stub("lsregister", "exit 0")
         script = script.replace("/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister",
@@ -283,6 +290,7 @@ exec /bin/mv "$@"''')
         installer.write_text(script)
         env = dict(os.environ, PATH=f"{self.bin}:{Path(sys.executable).parent}:/usr/bin:/bin:/usr/sbin:/sbin", TEST_OS="Darwin",
                    TEST_ARCH=arch, HOME=str(home))
+        env.update(extra_env or {})
         result = subprocess.run(["sh", str(installer)], cwd=ROOT, env=env,
                                 capture_output=True, text=True, check=False)
         self.installed = installed
@@ -328,6 +336,27 @@ exec /bin/mv "$@"''')
         self.assertEqual(installed, b"previous installed app")
         self.assertIn("expected x86_64 app, found arm64", result.stderr)
         self.assertEqual(calls, [])
+
+    def test_universal_payload_is_not_mistaken_for_either_thin_architecture(self):
+        signature = (ROOT / "scripts/fixtures/codesign/developer-id.txt").read_text()
+        result, installed, calls, *_ = self.mac_installer(signature, 0, arch="x86_64",
+            package_description="Mach-O universal binary with 2 architectures: x86_64 arm64")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("unsupported app binary", result.stderr)
+        self.assertEqual(installed, b"previous installed app")
+        self.assertEqual(calls, [])
+
+    @unittest.skipUnless(NATIVE_MAC, "requires Xcode only to create the test fixture")
+    def test_installer_binary_inspection_needs_no_selected_developer_tools(self):
+        source, binary = self.bin / "tiny.c", self.bin / "tiny"
+        source.write_text("int main(void) { return 0; }\n")
+        subprocess.run(["xcrun", "clang", "-target", "x86_64-apple-macos13", str(source), "-o", str(binary)],
+                       capture_output=True, text=True, check=True)
+        signature = (ROOT / "scripts/fixtures/codesign/developer-id.txt").read_text()
+        result, installed, _, _, plist = self.mac_installer(signature, 0, arch="x86_64", native_binary=binary,
+            extra_env={"DEVELOPER_DIR": str(self.bin / "nonexistent-sdk")})
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertEqual(installed, plist)
 
     def test_core_download_failure_is_actionable_and_never_executes_partial_script(self):
         signature = (ROOT / "scripts/fixtures/codesign/developer-id.txt").read_text()

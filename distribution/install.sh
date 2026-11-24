@@ -188,7 +188,14 @@ else
   # signing identity. Only unsigned/ad-hoc development builds need this PATH.
   expected_arch=$arch
   [ "$arch" != aarch64 ] || expected_arch=arm64
-  actual_arch=$(/usr/bin/lipo -archs "$tmp/Herdr.app/Contents/MacOS/Herdr") || fail "cannot read app architecture"
+  # /usr/bin/lipo is an Xcode shim. Binary-only installs need no developer
+  # tools: the OS file utility identifies a thin executable without xcrun.
+  binary_info=$(LC_ALL=C /usr/bin/file -b "$tmp/Herdr.app/Contents/MacOS/Herdr") || fail "cannot read app architecture"
+  case $binary_info in
+    'Mach-O 64-bit executable x86_64' | 'Mach-O 64-bit executable x86_64 '*) actual_arch=x86_64 ;;
+    'Mach-O 64-bit executable arm64' | 'Mach-O 64-bit executable arm64 '*) actual_arch=arm64 ;;
+    *) fail "unsupported app binary: $binary_info; previous app was not replaced" ;;
+  esac
   [ "$actual_arch" = "$expected_arch" ] || fail "expected $expected_arch app, found $actual_arch; previous app was not replaced"
   signed=false
   if signature=$(/usr/bin/codesign -dvv "$tmp/Herdr.app" 2>&1); then
