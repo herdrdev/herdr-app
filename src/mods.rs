@@ -401,6 +401,13 @@ fn scan_dir(root: &Path, prefix: &str, previous: &BTreeMap<String, Found>) -> BT
                 return None;
             }
             let dir = e.path();
+            // Reading a file iCloud has offloaded waits for the download, maybe for
+            // minutes, and this runs on the window's thread: leave the mod out (#339).
+            if let Some(name) = offloaded(&dir) {
+                let error = format!("{name} is in iCloud and not downloaded; download the folder (Finder: Download Now) to load this mod");
+                let found = Found { dir, hint: Hint::default(), has_view: false, link_rules: Vec::new().into(), stamp: SystemTime::UNIX_EPOCH, manifest_error: Some(error) };
+                return Some((id, found));
+            }
             let has_view = dir.join("main.js").is_file();
             let has_link = dir.join("link.js").is_file();
             let manifest_path = dir.join("mod.json");
@@ -431,6 +438,26 @@ fn scan_dir(root: &Path, prefix: &str, previous: &BTreeMap<String, Found>) -> BT
             Some((id, Found { dir, hint, has_view, link_rules, stamp, manifest_error }))
         })
         .collect()
+}
+
+/// The mod folder, or the first file in it, that iCloud has offloaded (macOS
+/// marks it "dataless"). `stat` reads the flag without starting a download.
+fn offloaded(dir: &Path) -> Option<String> {
+    #[cfg(target_os = "macos")]
+    {
+        use std::os::macos::fs::MetadataExt;
+        const SF_DATALESS: u32 = 0x4000_0000;
+        let dataless = |path: &Path| std::fs::metadata(path).is_ok_and(|m| m.st_flags() & SF_DATALESS != 0);
+        if dataless(dir) {
+            return Some("the folder".into());
+        }
+        std::fs::read_dir(dir).ok()?.flatten().find(|e| dataless(&e.path())).map(|e| e.file_name().to_string_lossy().into_owned())
+    }
+    #[cfg(not(target_os = "macos"))]
+    {
+        let _ = dir;
+        None
+    }
 }
 
 /// What mods ask of the window.
