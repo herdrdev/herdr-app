@@ -14,7 +14,7 @@ use std::rc::Weak;
 
 use gpui::ScrollStrategy;
 use gpui_base::NumberStep;
-use gpui_base::VirtualListScrollHandle;
+use gpui_base::{ScrollbarHandle, VirtualListScrollHandle};
 use gpui_base::input::{InputBaseState, InputModeKind};
 use gpui_base::slider::{SliderScale, SliderValue};
 use rquickjs::{
@@ -552,6 +552,21 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
             })
             .ok_or_else(|| needs_call(&ctx, "blur()"))
         }),
+    )?;
+
+    // HERDR: toggle wrapping on a live editor; it re-wraps lines without re-highlighting.
+    let wrap_editor = runtime.clone();
+    globals.set(
+        "__editor_set_soft_wrap",
+        Func::from(
+            move |ctx: Ctx<'_>, handle: EntityHandle, wrap: bool| -> JsResult<()> {
+                let state = live_editor(&ctx, &wrap_editor, handle)?;
+                scope::with_current(|window, cx| {
+                    state.update(cx, |state, cx| state.set_soft_wrap(wrap, window, cx));
+                })
+                .ok_or_else(|| needs_call(&ctx, "set_soft_wrap()"))
+            },
+        ),
     )?;
 
     let read_editor = runtime.clone();
@@ -1312,6 +1327,47 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
         }),
     )?;
 
+    // HERDR: where a scroll area is, read back by the script. Either kind of
+    // handle; pairs of scalars, shaped into objects by the prelude. Offsets
+    // count up from the start (GPUI's count down), in the pixels a script
+    // writes, so they compare with its own row heights at any zoom.
+    let offset = runtime.clone();
+    globals.set(
+        "__scroll_offset",
+        Func::from(move |ctx: Ctx<'_>, handle: EntityHandle| -> JsResult<Vec<f64>> {
+            read_scroll(&ctx, &offset, handle, |scroll, scale| {
+                let offset = scroll.offset();
+                vec![scrolled(offset.x, scale), scrolled(offset.y, scale)]
+            })
+        }),
+    )?;
+    let content_size = runtime.clone();
+    globals.set(
+        "__scroll_content_size",
+        Func::from(move |ctx: Ctx<'_>, handle: EntityHandle| -> JsResult<Vec<f64>> {
+            read_scroll(&ctx, &content_size, handle, |scroll, scale| {
+                let size = scroll.content_size();
+                vec![
+                    crate::value::script_px(size.width, scale),
+                    crate::value::script_px(size.height, scale),
+                ]
+            })
+        }),
+    )?;
+    let viewport_size = runtime.clone();
+    globals.set(
+        "__scroll_viewport_size",
+        Func::from(move |ctx: Ctx<'_>, handle: EntityHandle| -> JsResult<Vec<f64>> {
+            read_scroll(&ctx, &viewport_size, handle, |scroll, scale| {
+                let size = scroll.viewport_bounds().size;
+                vec![
+                    crate::value::script_px(size.width, scale),
+                    crate::value::script_px(size.height, scale),
+                ]
+            })
+        }),
+    )?;
+
     let discard_virtual_scroll = runtime.clone();
     globals.set(
         "__virtual_scroll_release",
@@ -1755,6 +1811,26 @@ fn live_virtual_scroll(
         .entities()
         .virtual_scroll(handle)
         .ok_or_else(|| Exception::throw_type(ctx, "this scroll handle has been released"))
+}
+
+// HERDR: reads the position behind a `ScrollHandle` or a `VirtualListScrollHandle`.
+fn read_scroll<R>(
+    ctx: &Ctx<'_>,
+    runtime: &Weak<ShellRuntime>,
+    handle: EntityHandle,
+    read: impl FnOnce(&dyn ScrollbarHandle, f32) -> R,
+) -> JsResult<R> {
+    let runtime = alive(ctx, runtime)?;
+    let entities = runtime.entities();
+    let (scroll, scale) = entities.scroll_geometry(handle)
+        .ok_or_else(|| Exception::throw_type(ctx, "this scroll handle has been released"))?;
+    Ok(read(scroll, scale.get()))
+}
+
+// HERDR: GPUI's offset falls below zero as the content scrolls; a script reads
+// how far it has scrolled. Never negative, an overscroll included.
+fn scrolled(offset: gpui::Pixels, scale: f32) -> f64 {
+    (0. - crate::value::script_px(offset, scale)).max(0.)
 }
 
 fn live_focus(

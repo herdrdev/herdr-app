@@ -802,8 +802,13 @@ fn anchor_type() -> String {
         let _ = writeln!(out, "    | \"{name}\"");
     }
     out.push_str("    ;\n\n");
-    out.push_str("  /** Which pointer button opens a `Popover`. */\n");
-    out.push_str("  export type MouseButton = \"left\" | \"right\" | \"middle\";\n\n");
+    out.push_str("  /**\n");
+    out.push_str("   * A pointer button, for `on_mouse_down`, `on_mouse_up` and which one opens\n");
+    out.push_str("   * a `Popover`. HERDR: `back` and `forward` are the mouse's side buttons.\n");
+    out.push_str("   */\n");
+    out.push_str(
+        "  export type MouseButton = \"left\" | \"right\" | \"middle\" | \"back\" | \"forward\";\n\n",
+    );
     out
 }
 
@@ -2448,12 +2453,43 @@ const BASE: &str = r#"  /** A row. */
   export const Checkbox: ComponentType;
   /** A controlled switch. No styling. */
   export const Switch: ComponentType;
+  /** HERDR: a settled selection in a TextView. */
+  export interface TextViewSelection {
+    /** The selected text in this view, trimmed as when copying it. */
+    text: string;
+    /**
+     * UTF-16 offsets into the Markdown source the selection came from, so
+     * `markdown.slice(range.start, range.end)` includes any markup inside it.
+     * Absent in HTML or when the selection doesn't map to the current source.
+     */
+    range?: InputRange;
+    /** Where the selection ended, in logical window pixels. Absent for select-all. */
+    position?: import("gpui-kit").Point;
+  }
   /** Rich HTML or Markdown text. CSS in HTML is not supported. */
   export interface TextViewElement extends NativeElement {
     /** Overrides TextView's default URL opening and reports the resolved URL. */
     on_link_click(handler: (url: string, cx: Context) => void): this;
+    /**
+     * HERDR: called when a selection settles (the pointer is released, a
+     * double or triple click, select-all), and with `null` when a reported
+     * selection is cleared. Whitespace alone reports as `null`.
+     */
+    on_selection_change(handler: (selection: TextViewSelection | null, cx: Context) => void): this;
+    /**
+     * HERDR: paints `color` behind the text rendered from `[start, end)`,
+     * UTF-16 offsets into the Markdown source, like `selection.range`. Chain once
+     * per range; later ones paint over earlier ones. Markdown only.
+     */
+    highlight_range(start: number, end: number, color: Color): this;
     selectable(value?: boolean): this;
     scrollable(value?: boolean): this;
+    /**
+     * Whether raw HTML in Markdown renders as HTML (the default). `false`
+     * shows HTML tags and blocks as literal text. Markdown autolinks outside
+     * the HTML stay clickable. Applies to `TextView.markdown`.
+     */
+    raw_html(value?: boolean): this;
   }
   export const TextView: {
     html(id: string, html: string): TextViewElement;
@@ -3041,8 +3077,28 @@ const BASE: &str = r#"  /** A row. */
     render: (range: ItemRange, cx: Context) => Element[],
   ): NativeElement;
 
+  /**
+   * Where a scroll area is, read from its handle. Lengths are in the pixels a
+   * script writes, so a row written `.h(30)` moves `offset()` by 30 at any zoom.
+   * Values are the last layout's, kept while the area is hidden; a `scroll_to_*`
+   * request shows here once it has run. Event positions and `on_size_change` sizes
+   * are window px: divide them by `settings().zoom` before mixing them with these.
+   * Read in an event handler or a task after layout. All zero before the first frame.
+   */
+  export interface ScrollPosition {
+    /** How far the content has scrolled from its start: `{ x: 0, y: 0 }` there, never negative. */
+    offset(): import("gpui-kit").Point;
+    /** The scrollable extent, including padding and at least as large as the viewport. */
+    content_size(): import("gpui-kit").Size;
+    /**
+     * The size of the part on screen. The area is at its end when
+     * `offset().y + viewport_size().height >= content_size().height - 1`.
+     */
+    viewport_size(): import("gpui-kit").Size;
+  }
+
   /** A plain scroll area's position. Create in init() and attach with track_scroll. */
-  export interface ScrollHandle {
+  export interface ScrollHandle extends ScrollPosition {
     /** Reveal the zero-based direct child with the smallest scroll needed.
      * Works on plain overflow_*_scroll and overflow_*_scrollbar elements.
      * Requests are consumed once, after layout; already visible children stay put.
@@ -3060,9 +3116,10 @@ const BASE: &str = r#"  /** A row. */
    * it. Create it in `init()` and hand it to the list with `track_scroll`.
    *
    * A list without one still scrolls, and a `Scrollbar` named after the list
-   * still drives it; this is only needed to scroll it from code.
+   * still drives it; this is only needed to scroll it from code, or to read
+   * where it is.
    */
-  export interface VirtualListScrollHandle {
+  export interface VirtualListScrollHandle extends ScrollPosition {
     /**
      * Puts the item at `index` on screen before the next frame. `"top"` (the
      * default) brings it to the near edge, `"center"` to the middle.
@@ -3229,6 +3286,8 @@ const BASE: &str = r#"  /** A row. */
      * The state stays usable; `blur` fires as it does when focus moves away.
      */
     blur(): void;
+    /** Wraps long lines instead of scrolling sideways, keeping the text and selection. */
+    set_soft_wrap(wrap: boolean): void;
     /** Frees the state; it can't be read or drawn afterwards. Not a blur. */
     release(): boolean;
   }
@@ -4764,7 +4823,15 @@ mod tests {
         assert!(!element.contains("on_link_click("));
         assert!(!element.contains("selectable("));
         assert!(!element.contains("scrollable("));
-        assert!(declarations.contains("export interface TextViewElement extends NativeElement"));
+        assert!(!element.contains("raw_html("));
+        let text_view = declarations
+            .split_once("export interface TextViewElement extends NativeElement")
+            .expect("TextViewElement declaration")
+            .1
+            .split_once("\n  }")
+            .expect("end of TextViewElement declaration")
+            .0;
+        assert!(text_view.contains("raw_html(value?: boolean): this;"));
         assert!(declarations.contains("html(id: string, html: string): TextViewElement;"));
     }
 
