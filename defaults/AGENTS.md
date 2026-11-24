@@ -1151,7 +1151,10 @@ ends outside the window without a release event, cancel on the next move
 that reports no left button.
 `.when(cond, (el) => …)`, `.children([...])`. Controls from `gpui-base`
 (`Button`, `Checkbox`, `Switch`, `InputState` + `Input`) are unstyled: style
-them. Text: `TextView.markdown(id, text)` renders Markdown.
+them. Text states (`InputState`, `TextareaState`, `EditorState`) take the
+keyboard with `focus()` and give it back with `blur()`. Herdr then hands the
+keyboard to the dialog or pane, and the field stays usable. `release()` frees
+the state. Text: `TextView.markdown(id, text)` renders Markdown.
 `.raw_html(false)` shows embedded HTML tags and blocks as literal text.
 Markdown autolinks stay clickable. With
 `.selectable(true)`, `.on_selection_change((s, cx) => …)` gets a settled
@@ -1172,6 +1175,10 @@ source, set `language: "markdown"` or `"md"`. The `syntax` keys are `heading`,
 dark-editor palette. Call
 `state.set_soft_wrap(wrap)` from a view callback to switch between wrapping
 long lines and scrolling sideways while keeping the editor's text and selection.
+Tab indents by 2 spaces. Set `tab_size` (1 to 16) for the number of spaces per
+indent and the spacing of the indent guides. Set `hard_tabs: true` to insert
+literal tabs. The text renderer chooses the displayed width of tab characters.
+Once a file's style is known, call `state.set_tab_size(4, false)`.
 A viewer opens beside the shell as a pane: `pane.split {direction, mod, props: { file }}`.
 The full surface is in `gpui-kit.d.ts` next to this file.
 
