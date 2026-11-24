@@ -1153,19 +1153,14 @@ When `s.position` is present, place a popup with
 `EditorState.new({
 language, value, readonly, font_family: settings().font_family, syntax: {
 keyword: theme().ansi5, ... } })` + `Editor.new(state)` is a code view (readonly)
-<<<<<<< HEAD
 or editor with syntax highlighting, line numbers and folding. For Markdown
 source, set `language: "markdown"` or `"md"`. The `syntax` keys are `heading`,
 `strong`, `emphasis`, `code`, `quote`, `list`, and `link` (the URL). Use
 `theme()` colors for light and dark layouts. Built-in syntax colors use a
-dark-editor palette. A viewer opens
-beside the shell as a pane: `pane.split {direction, mod, props: { file }}`.
-=======
-or editor with syntax highlighting, line numbers and folding. Call
+dark-editor palette. Call
 `state.set_soft_wrap(wrap)` from a view callback to switch between wrapping
 long lines and scrolling sideways while keeping the editor's text and selection.
 A viewer opens beside the shell as a pane: `pane.split {direction, mod, props: { file }}`.
->>>>>>> origin/master
 The full surface is in `gpui-kit.d.ts` next to this file.
 
 ### The `herdr` module
