@@ -30,6 +30,9 @@ pub struct TextViewStyle {
     /// show that surface.
     table_background: Option<Hsla>,
     is_dark: bool,
+    /// HERDR: the zoom for the code block's fixed sizes (its text, padding and
+    /// language label), which take no size from the surrounding text.
+    scale: f32,
 }
 
 impl PartialEq for TextViewStyle {
@@ -49,6 +52,7 @@ impl PartialEq for TextViewStyle {
             && self.inline_code == other.inline_code
             && self.table_background == other.table_background
             && self.is_dark == other.is_dark
+            && self.scale == other.scale
     }
 }
 
@@ -92,6 +96,7 @@ impl TextViewStyle {
             },
             table_background: None,
             is_dark,
+            scale: 1.0,
         }
     }
 
@@ -202,6 +207,17 @@ impl TextViewStyle {
     pub fn with_dark(mut self, is_dark: bool) -> Self {
         self.is_dark = is_dark;
         self
+    }
+
+    /// HERDR: sets the zoom for the code block's fixed sizes (default 1).
+    pub fn with_scale(mut self, scale: f32) -> Self {
+        self.scale = scale;
+        self
+    }
+
+    /// HERDR: the zoom for the code block's fixed sizes.
+    pub fn scale(&self) -> f32 {
+        self.scale
     }
 
     /// The default body-text color.

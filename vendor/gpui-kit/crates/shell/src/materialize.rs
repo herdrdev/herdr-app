@@ -1124,7 +1124,11 @@ fn materialize_component(
                 crate::spec::TextViewFormat::Html => TextView::html(spec.id, spec.text),
                 crate::spec::TextViewFormat::Markdown => TextView::markdown(spec.id, spec.text),
             }
-            .style(TextViewStyle::from_theme(&Theme::global(cx)));
+            // HERDR: the code block's fixed sizes follow the zoom like the px a mod writes.
+            .style(
+                TextViewStyle::from_theme(&Theme::global(cx))
+                    .with_scale(crate::value::pixel_scale()),
+            );
             if let Some(selectable) = behavior.selectable {
                 view = view.selectable(selectable);
             }

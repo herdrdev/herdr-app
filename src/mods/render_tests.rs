@@ -951,6 +951,37 @@ export default class Demo extends View {
 }
 
 #[gpui::test]
+fn a_markdown_code_block_grows_with_the_zoom(cx: &mut TestAppContext) {
+    use gpui::*;
+    use gpui_base::{TextView, TextViewState, TextViewStyle};
+
+    struct Blocks(Vec<(f32, Entity<TextViewState>)>);
+    impl Render for Blocks {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().flex().items_start().size_full().children(self.0.iter().map(|(scale, text)| {
+                div().w(px(400.)).child(
+                    TextView::new(text).scrollable(false).style(TextViewStyle::default().with_scale(*scale)),
+                )
+            }))
+        }
+    }
+    cx.update(gpui_shell::init);
+    let mut blocks = Vec::new();
+    let (_, cx) = cx.add_window_view(|_, cx| {
+        blocks = [1.0, 1.25]
+            .into_iter()
+            .map(|scale| (scale, cx.new(|cx| TextViewState::markdown("```rust\nlet x = 1;\n```", cx))))
+            .collect();
+        Blocks(blocks.clone())
+    });
+    cx.run_until_parked();
+    let height = |i: usize, cx: &mut VisualTestContext| blocks[i].1.read_with(cx, |text, _| text.bounds().size.height);
+    let ratio = height(1, cx) / height(0, cx);
+    // Text, padding and the language label scale; only the 1px border does not.
+    assert!((1.2..=1.25).contains(&ratio), "code block height ratio at zoom 1.25: {ratio}");
+}
+
+#[gpui::test]
 fn a_mod_can_show_literal_html_in_a_markdown_text_view(cx: &mut TestAppContext) {
     use gpui::{Modifiers, MouseButton, VisualTestContext, point, px};
     use gpui_base::TextSelection;
