@@ -1139,7 +1139,9 @@ Paths containing control characters are rejected, including clipboard files.
 and other interactive controls too.
 `.when(cond, (el) => …)`, `.children([...])`. Controls from `gpui-base`
 (`Button`, `Checkbox`, `Switch`, `InputState` + `Input`) are unstyled: style
-them. Text: `TextView.markdown(id, text)` renders markdown; with
+them. Text: `TextView.markdown(id, text)` renders Markdown.
+`.raw_html(false)` shows embedded HTML tags and blocks as literal text.
+Markdown autolinks stay clickable. With
 `.selectable(true)`, `.on_selection_change((s, cx) => …)` gets a settled
 selection or `null` when it clears. `s.text` matches what copying the selected
 text in that view gives you. When `s.range` is present, use

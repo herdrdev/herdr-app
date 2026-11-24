@@ -7499,6 +7499,7 @@ impl ShellRuntime {
                 "selectable",
                 "highlight_range",
                 "scrollable",
+                "raw_html",
                 "selected",
                 "checked",
                 "accessibility_label",
@@ -8537,6 +8538,7 @@ impl ShellRuntime {
             | "selectable"
             | "highlight_range"
             | "scrollable"
+            | "raw_html"
             | "selected"
             | "checked"
             | "accessibility_label"
@@ -8596,6 +8598,7 @@ impl ShellRuntime {
                     "selectable" => "selectable",
                     "highlight_range" => "highlight_range",
                     "scrollable" => "scrollable",
+                    "raw_html" => "raw_html",
                     "selected" => "selected",
                     "checked" => "checked",
                     "tooltip" => "tooltip",

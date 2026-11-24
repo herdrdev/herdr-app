@@ -2484,6 +2484,12 @@ const BASE: &str = r#"  /** A row. */
     highlight_range(start: number, end: number, color: Color): this;
     selectable(value?: boolean): this;
     scrollable(value?: boolean): this;
+    /**
+     * Whether raw HTML in Markdown renders as HTML (the default). `false`
+     * shows HTML tags and blocks as literal text. Markdown autolinks outside
+     * the HTML stay clickable. Applies to `TextView.markdown`.
+     */
+    raw_html(value?: boolean): this;
   }
   export const TextView: {
     html(id: string, html: string): TextViewElement;
@@ -4799,7 +4805,15 @@ mod tests {
         assert!(!element.contains("on_link_click("));
         assert!(!element.contains("selectable("));
         assert!(!element.contains("scrollable("));
-        assert!(declarations.contains("export interface TextViewElement extends NativeElement"));
+        assert!(!element.contains("raw_html("));
+        let text_view = declarations
+            .split_once("export interface TextViewElement extends NativeElement")
+            .expect("TextViewElement declaration")
+            .1
+            .split_once("\n  }")
+            .expect("end of TextViewElement declaration")
+            .0;
+        assert!(text_view.contains("raw_html(value?: boolean): this;"));
         assert!(declarations.contains("html(id: string, html: string): TextViewElement;"));
     }
 

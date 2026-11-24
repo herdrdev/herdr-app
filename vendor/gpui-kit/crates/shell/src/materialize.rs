@@ -316,6 +316,8 @@ struct Behavior {
     disabled: bool,
     selectable: Option<bool>,
     text_scrollable: Option<bool>,
+    /// HERDR: `raw_html(false)` keeps a TextView's Markdown HTML as text.
+    raw_html: Option<bool>,
     on_link_click: Option<CallbackId>,
     /// HERDR: `on_selection_change(handler)` on a TextView.
     on_selection_change: Option<CallbackId>,
@@ -1124,6 +1126,9 @@ fn materialize_component(
             }
             if let Some(scrollable) = behavior.text_scrollable {
                 view = view.scrollable(scrollable);
+            }
+            if let Some(raw_html) = behavior.raw_html {
+                view = view.markdown_raw_html(raw_html);
             }
             // HERDR: highlights and selection reports, in UTF-16 offsets of
             // the Markdown source, the way a script indexes its strings.
@@ -3513,6 +3518,7 @@ fn apply_behavior(behavior: &mut Behavior, name: &str, args: &[Bridged]) {
             _ => tracing::warn!("highlight_range(start, end, color) ignored: bad offsets"),
         },
         "scrollable" => behavior.text_scrollable = Some(flag.unwrap_or(true)),
+        "raw_html" => behavior.raw_html = Some(flag.unwrap_or(true)),
         "selected" => behavior.selected = flag.unwrap_or(true),
         "checked" => behavior.checked = flag.unwrap_or(true),
         "value" => behavior.value = args.first().and_then(|value| value.as_f32().ok()),

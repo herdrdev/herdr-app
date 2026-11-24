@@ -951,6 +951,60 @@ export default class Demo extends View {
 }
 
 #[gpui::test]
+fn a_mod_can_show_literal_html_in_a_markdown_text_view(cx: &mut TestAppContext) {
+    use gpui::{Modifiers, MouseButton, VisualTestContext, point, px};
+    use gpui_base::TextSelection;
+
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    std::fs::write(staged.0.join("main.js"), r#"
+import { View, div } from "gpui-kit";
+import { TextView, v_flex } from "gpui-base";
+export default class Demo extends View {
+  init() { this.mode = 0; }
+  render() {
+    const source = 'hello <b>bold</b> <span title="*a* &amp;">text</span>\n\n<div>\n*b* &amp;\n</div>';
+    const text = TextView.markdown("text", source).selectable(true);
+    if (this.mode !== 2) text.raw_html(this.mode === 1);
+    return v_flex().w(600)
+      .child(div().h(40).child("Next").on_click((_, cx) => {
+        this.mode = (this.mode + 1) % 3;
+        cx.notify();
+      }))
+      .child(text);
+  }
+}
+"#).unwrap();
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|window, cx| {
+        RootedView(runtime.try_load(&staged.0, window, cx).unwrap())
+    });
+    let mut context = VisualTestContext::from_window(window.into(), cx);
+    let click = |context: &mut VisualTestContext, y| {
+        let position = point(px(8.), px(y));
+        context.simulate_mouse_down(position, MouseButton::Left, Modifiers::default());
+        context.simulate_mouse_up(position, MouseButton::Left, Modifiers::default());
+    };
+    let select_all = if cfg!(target_os = "macos") { "cmd-a" } else { "ctrl-a" };
+
+    for literal in [true, false, false, true] {
+        context.run_until_parked();
+        context.update(|window, cx| window.draw(cx).clear(cx));
+        click(&mut context, 48.);
+        context.simulate_keystrokes(select_all);
+        let text = context.update(|window, cx| TextSelection::selected_text(window, cx));
+        if literal {
+            assert!(text.contains(r#"hello <b>bold</b> <span title="*a* &amp;">text</span>"#), "{text:?}");
+            assert!(text.contains("<div>\n*b* &amp;\n</div>"), "{text:?}");
+        } else {
+            assert!(text.contains("hello bold text"), "{text:?}");
+            assert!(!text.contains("<div>"), "{text:?}");
+        }
+        click(&mut context, 20.);
+    }
+}
+
+#[gpui::test]
 fn a_mod_highlights_a_markdown_source_range(cx: &mut TestAppContext) {
     use gpui::{Modifiers, MouseButton, VisualTestContext, point, px};
 
