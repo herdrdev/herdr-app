@@ -2658,6 +2658,17 @@ unsafe fn is_ime_input_source_active() -> bool {
     }
 }
 
+thread_local! {
+    static KEY_TO_INPUT_METHOD: Cell<bool> = const { Cell::new(false) };
+    static GIVING_KEY_TO_INPUT_METHOD: Cell<bool> = const { Cell::new(false) };
+}
+
+/// HERDR: called while a key is dispatched: the app doesn't act on it, and AppKit's
+/// input method gets it instead (an SKK input method's Ctrl+J, for example).
+pub fn give_key_to_input_method() {
+    KEY_TO_INPUT_METHOD.set(true);
+}
+
 extern "C" fn handle_key_event(this: &Object, native_event: id, key_equivalent: bool) -> BOOL {
     let window_state = unsafe { get_window_state(this) };
     let mut lock = window_state.as_ref().lock();
@@ -2693,6 +2704,7 @@ extern "C" fn handle_key_event(this: &Object, native_event: id, key_equivalent: 
             }
 
             drop(lock);
+            KEY_TO_INPUT_METHOD.set(false);
 
             // Alt shortcuts must never enter AppKit's Option/dead-key composition.
             if key_down_event.keystroke.modifiers.alt
@@ -2767,6 +2779,17 @@ extern "C" fn handle_key_event(this: &Object, native_event: id, key_equivalent: 
             }
 
             let handled = run_callback(PlatformInput::KeyDown(key_down_event.clone()));
+            // HERDR: not on the paths above: the composing and IME-first ones showed the
+            // input method the key already, and Option as Alt keeps it from AppKit.
+            if KEY_TO_INPUT_METHOD.take() {
+                GIVING_KEY_TO_INPUT_METHOD.set(true);
+                let _: BOOL = unsafe {
+                    let input_context: id = msg_send![this, inputContext];
+                    msg_send![input_context, handleEvent: native_event]
+                };
+                GIVING_KEY_TO_INPUT_METHOD.set(false);
+                return YES;
+            }
             if handled == YES {
                 return YES;
             }
@@ -3474,6 +3497,11 @@ extern "C" fn insert_text(this: &Object, _: Sel, text: id, replacement_range: NS
         };
 
         let text = text.to_str();
+        // HERDR: text the ignored key types without an input method taking it (a bound
+        // `j` on ABC) must not reach the app, as with Ghostty's `ignore`.
+        if GIVING_KEY_TO_INPUT_METHOD.get() {
+            return;
+        }
         let replacement_range = replacement_range.to_range();
         with_input_handler(this, |input_handler| {
             input_handler.replace_text_in_range(replacement_range, text)

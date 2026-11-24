@@ -58,6 +58,7 @@ pub(crate) use text_system::*;
 
 pub use platform::MacPlatform;
 pub use events::{OptionAsAlt, option_as_alt, set_option_as_alt};
+pub use window::give_key_to_input_method;
 
 trait BoolExt {
     fn to_objc(self) -> BOOL;

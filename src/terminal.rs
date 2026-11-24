@@ -3690,6 +3690,45 @@ mod tests {
     }
 
     #[gpui::test]
+    fn ignored_keys_reach_neither_the_program_nor_a_command(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        struct Root(Entity<super::TerminalView>, Vec<String>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .key_context("Herdr")
+                    .size_full()
+                    .on_action(cx.listener(|this, action: &gpui_shell::action::ShellAction, _, _| {
+                        this.1.push(action.id().to_owned());
+                    }))
+                    .child(self.0.clone())
+            }
+        }
+
+        cx.update(gpui_base::init);
+        let bindings = crate::keys::parse(r#"{"global":{"ctrl-j":"tab.new"},"terminal":{"ctrl-j":"ignore"}}"#)
+            .expect("ignore parses");
+        cx.update(|app| crate::keys::install(bindings, app));
+        let (root, cx) = cx.add_window_view(|_, cx| {
+            Root(cx.new(|cx| super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 6), cx)), vec![])
+        });
+        cx.run_until_parked();
+        cx.update(|window, app| {
+            root.update(app, |root, app| {
+                root.0.update(app, |terminal, cx| terminal.focus.focus(window, cx));
+            });
+        });
+
+        cx.simulate_keystrokes("ctrl-j");
+        cx.run_until_parked();
+        root.read_with(cx, |root, cx| {
+            assert!(root.0.read(cx).typed_at.get().is_none(), "ctrl-j reached the program");
+            assert!(root.1.is_empty(), "ctrl-j ran {:?}", root.1);
+        });
+    }
+
+    #[gpui::test]
     fn shipped_find_binding_opens_search_but_ctrl_f_reaches_the_program(cx: &mut gpui::TestAppContext) {
         use gpui::*;
 

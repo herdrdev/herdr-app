@@ -12,9 +12,10 @@
 //! An action is a command (`pane.split:right`: the value fills its first
 //! argument), an object (`{"command":"layout.resize","args":{"id":"sidebar","px":240}}`),
 //! `send:<text>` (types into the focused terminal),
-//! `<mod>.<command>` (delivered to that mod's `nextCommand()`), or `terminal`
+//! `<mod>.<command>` (delivered to that mod's `nextCommand()`), `terminal`
 //! (the program gets the key: the binding is switched off where this section
-//! applies).
+//! applies), or `ignore` (neither Herdr nor the program gets the key; on
+//! macOS the input method does).
 
 use gpui::{App, KeyBinding, KeyBindingContextPredicate, NoAction};
 use std::rc::Rc;
@@ -46,6 +47,8 @@ const SHIPPED_MACOS_KEYS: &[&str] = &[
     include_str!("keys/shipped/v0.1.5-keys.macos.json"),
     include_str!("keys/shipped/v0.1.15-keys.macos.json"),
 ];
+
+gpui::actions!(herdr, [IgnoreKey]);
 
 #[derive(serde::Deserialize)]
 #[serde(untagged)]
@@ -160,6 +163,7 @@ fn valid_action(action: &str) -> bool {
     let name = action.split_once(':').map_or(action, |(n, _)| n);
     crate::commands::find(name).is_some()
         || action == "terminal"
+        || action == "ignore"
         || action.starts_with("send:")
         || name.split_once('.').is_some_and(|(m, c)| !m.is_empty() && !c.is_empty())
 }
@@ -227,6 +231,8 @@ pub fn parse(text: &str) -> Result<Vec<KeyBinding>, String> {
                     continue;
                 }
                 Box::new(NoAction)
+            } else if string.as_deref() == Some("ignore") {
+                Box::new(IgnoreKey)
             } else {
                 let action = string.as_ref().expect("string binding");
                 #[cfg(target_os = "macos")]
@@ -255,6 +261,11 @@ pub fn install(bindings: Vec<KeyBinding>, cx: &mut App) {
     if !cx.has_global::<KitKeys>() {
         let kit = cx.key_bindings().borrow().bindings().cloned().collect();
         cx.set_global(KitKeys(kit));
+        // Handling the action is what keeps the key from the focused view.
+        cx.on_action(|_: &IgnoreKey, _| {
+            #[cfg(target_os = "macos")]
+            gpui_macos::give_key_to_input_method();
+        });
     }
     let kit = cx.global::<KitKeys>().0.clone();
     cx.clear_key_bindings();
