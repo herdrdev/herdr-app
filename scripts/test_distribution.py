@@ -555,17 +555,22 @@ PY''')
 
     def test_package_rejects_a_reported_old_version_before_signing(self):
         checkout = self.package_checkout()
-        stale = checkout / "target/x86_64-apple-darwin/release/herdr-app"
+        hardware_arm = sys.platform == "darwin" and subprocess.run(
+            ["/usr/sbin/sysctl", "-n", "hw.optional.arm64"], capture_output=True, text=True,
+        ).stdout.strip() == "1"
+        arch = "arm64" if hardware_arm else "x86_64"
+        rust_arch = "aarch64" if hardware_arm else "x86_64"
+        stale = checkout / f"target/{rust_arch}-apple-darwin/release/herdr-app"
         self.program(stale, "0.0.1")
         self.cargo_report(stale)
-        self.stub("lipo", "echo x86_64")
+        self.stub("lipo", f"echo {arch}")
         self.stub("otool", f'printf "cmd LC_BUILD_VERSION\\nminos {MIN_MACOS}\\n"')
-        result = self.run_script(checkout / "scripts/package", "Darwin", "x86_64")
+        result = self.run_script(checkout / "scripts/package", "Darwin", arch)
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("expected herdr-app", result.stderr)
         self.assertIn("found herdr-app 0.0.1", result.stderr)
         self.assertFalse((checkout / "sign-called").exists())
-        self.assertFalse((checkout / "dist/herdr-app-macos-x86_64.tar.gz").exists())
+        self.assertFalse((checkout / f"dist/herdr-app-macos-{rust_arch}.tar.gz").exists())
 
     def test_package_requires_a_current_cargo_executable_event(self):
         checkout = self.package_checkout()

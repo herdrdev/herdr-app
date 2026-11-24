@@ -15,6 +15,22 @@ ROOT = Path(__file__).resolve().parent.parent
 TOOLS = all(shutil.which(tool) for tool in ("cargo", "rustc", "git", "bash"))
 
 
+def checked_run(argv, *, cwd, env):
+    result = subprocess.run(argv, cwd=cwd, env=env, text=True, capture_output=True)
+    if result.returncode:
+        raise AssertionError(f"{argv!r} exited {result.returncode}\nstdout:\n{result.stdout}\nstderr:\n{result.stderr}")
+    return result
+
+
+def toolchain_environment():
+    # HOME/CARGO_HOME below are private, but rustup shims still need the
+    # parent's installed toolchains and explicit selection. Never install one.
+    env = {key: os.environ[key] for key in ("RUSTC", "RUSTUP_TOOLCHAIN") if key in os.environ}
+    env["RUSTUP_HOME"] = str(Path(os.environ.get("RUSTUP_HOME", Path.home() / ".rustup")).resolve())
+    env["RUSTUP_AUTO_INSTALL"] = "0"
+    return env
+
+
 def dependency_worktrees(work, script):
     """Same versions, different path dependency contents and shared build-dir."""
     work = Path(work)
@@ -24,9 +40,7 @@ def dependency_worktrees(work, script):
            "CARGO_HOME":str(work / "home/cargo"), "CARGO_NET_OFFLINE":"true",
            "CARGO_TARGET_DIR":str(work / "shared-target"), "GIT_CONFIG_GLOBAL":"/dev/null",
            "GIT_CONFIG_NOSYSTEM":"1", "LC_ALL":"C"}
-    for key in ("RUSTC", "RUSTUP_HOME"):
-        if key in os.environ:
-            env[key] = os.environ[key]
+    env.update(toolchain_environment())
     a, b = work / "source-a", work / "source-b"
     (a / "src").mkdir(parents=True)
     (a / "origin/src").mkdir(parents=True)
@@ -44,7 +58,7 @@ def dependency_worktrees(work, script):
         file.write('\n[build]\nbuild-dir=' + json.dumps(str(work / "shared-build")) + '\n')
     (a / ".gitignore").write_text("dist/\ntarget/\n")
     def run(argv, cwd=a):
-        return subprocess.run(argv, cwd=cwd, env=env, text=True, capture_output=True, check=True)
+        return checked_run(argv, cwd=cwd, env=env)
     run(["cargo", "generate-lockfile", "--offline"])
     run(["git", "init", "-q"]); run(["git", "add", "."])
     commit = ["git", "-c", "user.name=Fixture", "-c", "user.email=fixture@example.invalid", "-c", "commit.gpgsign=false", "-c", f"core.hooksPath={work / 'hooks'}", "commit", "-qm"]
@@ -79,6 +93,7 @@ def race(work, script, *, independent_other=False):
     env = dict(os.environ, HOME=str(work / "home"), TMPDIR=str(work / "tmp"),
                CARGO_HOME=str(work / "home/cargo"), CARGO_TARGET_DIR=str(work / "shared"),
                CARGO_NET_OFFLINE="true", SYNC=str(work))
+    env.update(toolchain_environment())
     a, b = work / "source-a", work / "source-b"
     (a / "src").mkdir(parents=True)
     (a / "Cargo.toml").write_text('[workspace]\n[package]\nname="herdr-app"\nversion = "0.1.17"\nedition="2024"\n')
@@ -98,7 +113,7 @@ def race(work, script, *, independent_other=False):
     sign.write_text('#!/bin/sh\n"$1/Contents/MacOS/Herdr" --source > sign-source\n')
     sign.chmod(0o755)
     def run(argv, cwd=a):
-        return subprocess.run(argv, cwd=cwd, env=env, capture_output=True, text=True, check=True)
+        return checked_run(argv, cwd=cwd, env=env)
     run(["cargo", "generate-lockfile", "--offline"])
     run(["git", "init", "-q"])
     run(["git", "add", "."])
