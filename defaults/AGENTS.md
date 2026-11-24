@@ -976,6 +976,7 @@ In `mod.json`, declare what the mod can open:
 Herdr offers the same URLs and paths it detects for native clicks, including
 recognized paths that are missing or remote. Rules use Rust regex search.
 File rules match decoded `file:` paths, and URL rules match the full URI.
+Trailing commas, periods and colons sit outside URLs detected in plain text.
 Each mod gets the link kind from its first matching rule. Plain paths use the
 native diagnostic suffix fallback. Bare filenames and backslash paths are skipped.
 The first time a mod has link rules on a personal layout, Herdr adds it to
@@ -984,7 +985,7 @@ that layout. Edit `link_handlers` to reorder or remove it.
 Export `handleLink(click)` from `link.js` (it can be async). It receives
 `{link, source}` and can import the usual functions from `"herdr"`. The source
 names the clicked terminal and its machine, cwd, pane, tab and space.
-`link.raw` keeps the original text or the OSC 8 destination. `link.path` is
+`link.raw` keeps the matched text or the OSC 8 destination. `link.path` is
 null for remote, unresolved or non-UTF-8 paths. Plain paths can carry a
 `:line` or `:line:column` suffix, exposed as optional 1-based `link.line` and
 `link.column`. A column needs a valid line. Herdr keeps a verified literal
