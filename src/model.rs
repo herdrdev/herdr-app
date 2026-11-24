@@ -335,32 +335,28 @@ impl Model {
 
     /// Splits a pane while preserving the selected space, tab, focus history, and zoom.
     pub fn split_without_focus(&mut self, target: &str, axis: Axis, new_pane: &str, address: &str) -> bool {
-        let Some(tab_id) = self.tab_of(target).map(|tab| tab.id.clone()) else { return false };
-        let (focused, before, zoomed) = {
-            let tab = self.tab(&tab_id).unwrap();
-            (tab.focused.clone(), tab.before.clone(), tab.zoomed.clone())
-        };
-        if !self.split(target, axis, new_pane, address) { return false; }
-        if let Some(tab) = self.tab_mut(&tab_id) {
-            tab.focused = focused;
-            tab.before = before;
-            tab.zoomed = zoomed;
+        self.split_with_focus(target, axis, pane(new_pane, address), false)
+    }
+
+    /// Splits a pane with any block, optionally preserving selection, focus history, and zoom.
+    pub fn split_with_focus(&mut self, target: &str, axis: Axis, block: Node, focus: bool) -> bool {
+        let machine = self.space_of(target).and_then(|space| space.machine.clone());
+        let container = self.fresh_id_on("s", machine.as_deref());
+        let new_pane = block.id.clone();
+        let Some(tab) = self.tab_of_mut(target) else { return false };
+        if !tab.root.split(target, axis, block, container) {
+            return false;
+        }
+        if focus {
+            tab.zoomed = None;
+            tab.focus(&new_pane);
         }
         true
     }
 
     /// Splits a pane with any block: a terminal, or a mod (a viewer beside the shell).
     pub fn split_with(&mut self, target: &str, axis: Axis, block: Node) -> bool {
-        let machine = self.space_of(target).and_then(|s| s.machine.clone());
-        let container = self.fresh_id_on("s", machine.as_deref());
-        let new_pane = block.id.clone();
-        let Some(c) = self.tab_of_mut(target) else { return false };
-        if !c.root.split(target, axis, block, container) {
-            return false;
-        }
-        c.zoomed = None;
-        c.focus(&new_pane);
-        true
+        self.split_with_focus(target, axis, block, true)
     }
 
     /// Rearranges existing panes in one tab without changing their terminal addresses.
@@ -1059,6 +1055,39 @@ mod tests {
         assert_eq!(tab.before, before);
         assert_eq!(tab.zoomed, zoomed);
         assert!(tab.root.find("x3").is_some());
+    }
+
+    #[test]
+    fn mod_split_without_focus_preserves_selection_focus_history_and_zoom() {
+        let mut m = model_with_one();
+        m.split("x1", Axis::Row, "x2", "t2");
+        m.focus_pane("x1");
+        m.toggle_zoom("x1");
+        let selected_space = m.active.clone();
+        let selected_tab = m.space("p1").unwrap().active.clone();
+        let before = {
+            let tab = m.tab("c1").unwrap();
+            (tab.focused.clone(), tab.before.clone(), tab.zoomed.clone())
+        };
+
+        assert!(m.split_with_focus(
+            "x1",
+            Axis::Column,
+            Node::block(
+                "mod-pane",
+                Content::Mod {
+                    name: "viewer".into(),
+                    props: serde_json::json!({}),
+                }
+            ),
+            false
+        ));
+
+        assert_eq!(m.active, selected_space);
+        assert_eq!(m.space("p1").unwrap().active, selected_tab);
+        let tab = m.tab("c1").unwrap();
+        assert_eq!((tab.focused.clone(), tab.before.clone(), tab.zoomed.clone()), before);
+        assert!(tab.root.find("mod-pane").is_some());
     }
 
     #[test]

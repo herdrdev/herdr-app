@@ -68,6 +68,9 @@ including when `--argv` supplies a program. Without `--folder`, it follows the
 focused terminal's folder. If an inherited local folder was deleted, new spaces,
 tabs and splits retry in that machine's home. An explicit invalid folder
 still fails.
+`focus: false` on `pane.split` or `terminal.open` creates a split or tab without
+changing the selected space, tab, pane focus, or zoom. It defaults to true and
+must be a boolean.
 `hc machine ls` lists machines. Use `hc run --on vps ...`, `hc exec --on vps ...`
 and `hc file ... --on vps ...` for remote work, not your local file tools.
 

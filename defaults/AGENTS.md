@@ -620,8 +620,8 @@ The main ones:
   `tab.new` keeps the shown space and the target space's selected tab (with no
   space shown, the new space is shown), for work the person looks at later;
   such tabs go last in their space, in the order made. `focus` is a boolean.
-- Panes: `pane.split {direction: "right" | "down", pane?, argv? | mod?, props?}` (a new
-  terminal, or a mod pane), `pane.close {pane?}`,
+- Panes: `pane.split {direction: "right" | "down", pane?, argv? | mod?, props?, focus?}` (a new
+  terminal, or a mod pane; `focus: false` keeps the selected space, tab, pane focus, and zoom unchanged), `pane.close {pane?}`,
   `pane.zoom {pane?}`, `pane.focus {pane | terminal}`, `pane.go {direction}`,
   `pane.swap {pane?, direction | target}`, `pane.rename {pane?, name}` ("": unnamed
   again; `panes()[i].name`, kept with its tab), `pane.resize {direction, pane?, px?}` (moves
@@ -652,8 +652,8 @@ The main ones:
   children and keeps children started with `--outlive-parent` running.
   On cores older than 0.1.13, Herdr ends hidden children too, stopping at
   children with a pane or `herdr.space` label.
-- Terminals: `terminal.open {argv?, folder?, place?, name?}` (`folder` sets the
-  starting directory for tabs and right/down splits, with or without `argv`),
+- Terminals: `terminal.open {argv?, folder?, place?, name?, focus?}` (`folder` sets the
+  starting directory for tabs and right/down splits, with or without `argv`; `focus: false` keeps the selected space, tab, pane focus, and zoom unchanged),
   `terminal.kill {terminal}` (ends the sub-agent tree, stopping at children with a
   pane or `herdr.space` label; core still applies parent-lifetime rules),
   `terminal.keep {terminal, place?, pane?, focus?}` (right/down can name a pane

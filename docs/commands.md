@@ -103,7 +103,7 @@ Move a tab (the active one if no id) to a position in its space (1 = first), or 
 
 ## `pane.split`
 
-Split a pane (default: the focused one) "right" or "down" with a new terminal, or with a mod (`mod`, its `props`) beside it.
+Split a pane (default: the focused one) "right" or "down" with a new terminal, or with a mod (`mod`, its `props`) beside it. focus false keeps the selected space, tab, pane focus, and zoom unchanged.
 
 | Argument | Required |
 |---|---|
@@ -112,6 +112,7 @@ Split a pane (default: the focused one) "right" or "down" with a new terminal, o
 | `argv` | no |
 | `mod` | no |
 | `props` | no |
+| `focus` | no |
 
 ## `pane.close`
 
@@ -123,7 +124,7 @@ Close a pane and end its terminal.
 
 ## `terminal.open`
 
-Start a terminal: as a new tab (place "tab", default), or "right"/"down" of the focused pane.
+Start a terminal: as a new tab (place "tab", default), or "right"/"down" of the focused pane. focus false keeps the selected space, tab, pane focus, and zoom unchanged.
 
 | Argument | Required |
 |---|---|
@@ -131,6 +132,7 @@ Start a terminal: as a new tab (place "tab", default), or "right"/"down" of the 
 | `folder` | no |
 | `place` | no |
 | `name` | no |
+| `focus` | no |
 
 ## `terminal.keep`
 

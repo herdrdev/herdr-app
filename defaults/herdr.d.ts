@@ -68,12 +68,13 @@ export function playSound(sound: string): null;
  * New spaces and tabs take focus by default. Boolean focus: false keeps the shown
  * space, selected tab and keyboard focus; background tabs are appended in creation order.
  * With no space shown, a new space is shown even with focus: false.
- * Panes: pane.split {direction: "right" | "down", pane?}, pane.close {pane?}, pane.zoom {pane?}, pane.rename {pane?, name},
+ * Panes: pane.split {direction: "right" | "down", pane?, focus?}, pane.close {pane?}, pane.zoom {pane?}, pane.rename {pane?, name},
  *   pane.resize {direction, pane?, px?},
  *   pane.size_managed {main, agents, direction: "right" | "down", main_percent},
  *   pane.focus {pane | terminal}, pane.go {direction}, pane.swap {pane?, direction | target}.
  *   Pane menus get target { pane, terminal }.
- * Terminals: terminal.open {argv?, folder?, place?: "tab" | "right" | "down"}, terminal.kill {terminal},
+ * Terminals: terminal.open {argv?, folder?, place?: "tab" | "right" | "down", focus?}, terminal.kill {terminal},
+ *   pane.split and terminal.open take focus by default; focus: false keeps the selected space, tab, pane focus and zoom unchanged.
  *   terminal.keep {terminal, place?, pane?, focus?} (a running one without a pane, e.g. a sub-agent, gets one; explicit pane requires a local terminal without herdr.space or herdr.tab labels; right/down uses pane when given, else the focused pane; focus false keeps the selected space, tab, pane focus and zoom),
  *   terminal.park {terminal} (its pane goes, it keeps running; the menu's "Send back"),
  *   terminal.peek {terminal} (peek over the tab, with keep-as-tab and close),

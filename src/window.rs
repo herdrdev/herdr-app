@@ -2778,7 +2778,7 @@ impl AppWindow {
         Ok(json!({ "space": space, "tab": ctx, "pane": pane }))
     }
 
-    fn split(&mut self, pane: Option<String>, axis: Axis, argv: Option<Vec<String>>, folder: Option<String>, window: &Window) -> Result<Value, String> {
+    fn split(&mut self, pane: Option<String>, axis: Axis, argv: Option<Vec<String>>, folder: Option<String>, focus: bool, window: &Window) -> Result<Value, String> {
         let target = pane.or_else(|| self.model.focused_pane()).ok_or("no pane to split")?;
         let (Some(p), Some(c)) = (self.model.space_of(&target), self.model.tab_of(&target)) else { return Err(format!("no pane {target:?}")) };
         let (space, ctx, fallback) = (p.id.clone(), c.id.clone(), p.folder.clone());
@@ -2793,12 +2793,12 @@ impl AppWindow {
         let size = self.model.active_tab().filter(|tab| tab.id == ctx)
             .and_then(|_| self.initial_size(&root, &new, window));
         let (addr, _) = self.spawn(argv, cwd, follow, &space, &ctx, on.as_deref(), size, window)?;
-        self.model.split(&target, axis, &new, &addr);
+        self.model.split_with_focus(&target, axis, Node::block(new.clone(), Content::Terminal { terminal: addr.clone() }), focus);
         Ok(json!({ "pane": new, "terminal": addr }))
     }
 
     /// A mod as a pane beside the target (a viewer next to the shell).
-    fn split_mod(&mut self, pane: Option<String>, axis: Axis, name: String, props: Value) -> Result<Value, String> {
+    fn split_mod(&mut self, pane: Option<String>, axis: Axis, name: String, props: Value, focus: bool) -> Result<Value, String> {
         let target = pane.or_else(|| self.model.focused_pane()).ok_or("no pane to split")?;
         if self.model.tab_of(&target).is_none() {
             return Err(format!("no pane {target:?}"));
@@ -2809,7 +2809,7 @@ impl AppWindow {
         let machine = self.model.space_of(&target).and_then(|s| s.machine.clone());
         self.require_document(machine.as_deref())?;
         let new = self.model.fresh_id_on("p", machine.as_deref());
-        self.model.split_with(&target, axis, Node::block(new.clone(), Content::Mod { name, props }));
+        self.model.split_with_focus(&target, axis, Node::block(new.clone(), Content::Mod { name, props }), focus);
         Ok(json!({ "pane": new }))
     }
 
@@ -3374,9 +3374,10 @@ impl AppWindow {
                     Some("down") => Axis::Column,
                     other => return self.fail(format!("pane.split direction is \"right\" or \"down\", not {other:?}")),
                 };
+                let Some(focus) = Self::focus(a) else { return self.fail("pane.split focus is true or false") };
                 let r = match Self::owned(a, "mod") {
-                    Some(name) => self.split_mod(Self::owned(a, "pane"), axis, name, a.get("props").cloned().unwrap_or(Value::Null)),
-                    None => self.split(Self::owned(a, "pane"), axis, Self::argv(a), None, window),
+                    Some(name) => self.split_mod(Self::owned(a, "pane"), axis, name, a.get("props").cloned().unwrap_or(Value::Null), focus),
+                    None => self.split(Self::owned(a, "pane"), axis, Self::argv(a), None, focus, window),
                 };
                 self.answer(r);
             }
@@ -3486,15 +3487,16 @@ impl AppWindow {
             }
             // ---- terminals
             "terminal.open" => {
+                let Some(focus) = Self::focus(a) else { return self.fail("terminal.open focus is true or false") };
                 let argv = Self::argv(a);
                 let r = match Self::arg(a, "place").unwrap_or("tab") {
-                    "right" => self.split(None, Axis::Row, argv, Self::owned(a, "folder"), window),
-                    "down" => self.split(None, Axis::Column, argv, Self::owned(a, "folder"), window),
+                    "right" => self.split(None, Axis::Row, argv, Self::owned(a, "folder"), focus, window),
+                    "down" => self.split(None, Axis::Column, argv, Self::owned(a, "folder"), focus, window),
                     _ => {
                         let name = Self::owned(a, "name")
                             .or_else(|| argv.as_ref().and_then(|v| v.first()).map(|p| p.rsplit('/').next().unwrap_or(p).to_owned()))
                             .unwrap_or_else(|| "shell".into());
-                        self.new_tab(None, &name, Self::owned(a, "folder"), argv, None, true, window)
+                        self.new_tab(None, &name, Self::owned(a, "folder"), argv, None, focus, window)
                     }
                 };
                 self.answer(r);
@@ -5959,6 +5961,20 @@ fn reconcile_core_update_error(dismissed: &mut Option<String>, core: &crate::upd
 mod tests {
     use gpui::{div, point, px, size, Context, IntoElement, Render, TestAppContext, Window};
     use gpui::prelude::*;
+
+    #[test]
+    fn split_and_terminal_open_focus_accept_only_booleans() {
+        use serde_json::json;
+        for command in ["pane.split", "terminal.open"] {
+            assert_eq!(super::AppWindow::focus(&json!({})), Some(true), "{command}");
+            assert_eq!(super::AppWindow::focus(&json!({"focus": null})), Some(true), "{command}");
+            assert_eq!(super::AppWindow::focus(&json!({"focus": true})), Some(true), "{command}");
+            assert_eq!(super::AppWindow::focus(&json!({"focus": false})), Some(false), "{command}");
+            for invalid in [json!({"focus": "false"}), json!({"focus": 0}), json!({"focus": []})] {
+                assert_eq!(super::AppWindow::focus(&invalid), None, "{command}: {invalid}");
+            }
+        }
+    }
 
     #[test]
     fn close_only_walks_hidden_children_on_older_cores() {
