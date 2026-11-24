@@ -123,7 +123,7 @@ Close a pane and end its terminal.
 
 ## `pane.move`
 
-Move a pane (default: the focused one) into another tab, keeping its terminal: `tab` appends after that tab's focused pane, `target` puts it beside a pane in any tab at `edge` ("left", "right", "up", "down"; default right). One of `tab` or `target`.
+Move a pane (default: the focused one) within a tab or across tabs or spaces on the same machine. Give either `tab` to place it beside that tab's focused pane or `target` to name the pane it goes beside. `edge` is "left", "right", "up", or "down" (default: "right"). The terminal keeps running, and the source tab closes if it becomes empty.
 
 | Argument | Required |
 |---|---|

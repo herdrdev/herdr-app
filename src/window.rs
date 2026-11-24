@@ -290,6 +290,7 @@ enum TerminalChange {
     Keep { space: String, tab: String, pane: String, name: String, target: Option<String>, axis: Axis },
     /// A pane moving to another tab keeps its terminal; only the labels change.
     Move { pane: String, space: String, tab: String, target: String, edge: Edge },
+    RestoreMoveLabels { space: String, tab: String },
     Park,
 }
 
@@ -2895,53 +2896,48 @@ impl AppWindow {
         Ok(json!({"pending":true,"terminal":addr}))
     }
 
-    /// Moves a pane, terminal and all: into another tab (`tab`: after its
-    /// focused pane, or at `edge` of it), or beside `target` in any tab at
-    /// `edge` (right when none; the same tab swaps, like a drag). A
-    /// cross-tab move relabels the terminal first so every Herdr agrees, and
-    /// a source tab left empty closes with it — the terminal keeps running.
-    fn move_pane(&mut self, pane: Option<String>, tab: Option<String>, target: Option<String>, edge: Option<Edge>, window: &mut Window, cx: &mut Context<Self>) -> Result<Value, String> {
+    /// Places a pane at an edge of a target pane or of a tab's focused pane.
+    /// Cross-tab moves relabel the terminal before changing the layout.
+    fn move_pane(&mut self, pane: Option<String>, tab: Option<String>, target: Option<String>, edge: Edge, window: &mut Window, cx: &mut Context<Self>) -> Result<Value, String> {
         if tab.is_some() == target.is_some() {
             return Err("pane.move needs one of tab or target".into());
         }
         let pane = pane.or_else(|| self.model.focused_pane()).ok_or("no pane to move")?;
-        let Some(from) = self.model.tab_of(&pane).map(|c| c.id.clone()) else { return Err(format!("no pane {pane:?}")) };
-        let destination = match target {
-            Some(target) => {
-                if target == pane { return Err("pane.move needs a pane other than itself".into()); }
-                target
-            }
-            None => {
-                let Some((to, focused, other)) = tab.and_then(|ctx| {
-                    self.model.tab(&ctx).map(|c| (c.id.clone(), c.focused_pane(), c.root.panes().into_iter().find(|n| n.id != pane).map(|n| n.id.clone())))
-                }) else { return Err("no such tab".into()) };
-                let beside = focused.filter(|p| *p != pane).or(other).ok_or("that tab has no pane to move it beside")?;
-                if to == from {
-                    return if self.model.move_pane(&pane, &beside, edge.or(Some(Edge::Right))) { Ok(json!({ "pane": pane, "tab": to })) } else { Err("could not move the pane".into()) };
-                }
-                beside
-            }
+        let from = self.model.tab_of(&pane).filter(|t| t.root.find(&pane).is_some_and(Node::is_pane))
+            .ok_or_else(|| format!("no pane {pane:?}"))?;
+        let destination = if let Some(target) = target {
+            target
+        } else {
+            let tab = tab.as_deref().and_then(|id| self.model.tab(id)).ok_or("no such tab")?;
+            tab.focused_pane().filter(|p| p != &pane)
+                .or_else(|| tab.root.panes().into_iter().find(|n| n.id != pane).map(|n| n.id.clone()))
+                .ok_or("that tab has no pane to move it beside")?
         };
-        let Some(to) = self.model.tab_of(&destination).map(|c| c.id.clone()) else { return Err(format!("no pane {destination:?}")) };
-        if to == from {
-            return if self.model.move_pane(&pane, &destination, edge) { Ok(json!({ "pane": pane, "tab": to })) } else { Err("could not move the pane".into()) };
+        if destination == pane { return Err("pane.move needs a pane other than itself".into()); }
+        let to = self.model.tab_of(&destination).filter(|t| t.root.find(&destination).is_some_and(Node::is_pane))
+            .ok_or_else(|| format!("no pane {destination:?}"))?;
+        let same_tab = to.id == from.id;
+        let to = to.id.clone();
+        let address = self.model.address_of(&pane);
+        if address.as_ref().is_some_and(|a| self.changing_terminals.contains(a)) {
+            return Err("This terminal already has a pane change in progress.".into());
+        }
+        if same_tab {
+            return if self.model.move_pane(&pane, &destination, Some(edge)) { Ok(json!({ "pane": pane, "tab": to })) } else { Err("could not move the pane".into()) };
         }
         // A pane stays on the machine it started on: its id (mods too) and,
         // for terminals, its address carry it.
         let space = self.model.space_of(&to).map(|p| p.id.clone()).ok_or("no space holding that tab")?;
         let machine = self.machine_of(&space);
-        let address = self.model.address_of(&pane);
         let owns = pane.split_once('/').map(|(m, _)| m).or_else(|| address.as_deref().and_then(|a| a.split_once('/').map(|(m, _)| m)));
         if owns != machine.as_deref() {
             return Err("A pane must stay on its own machine.".into());
         }
         self.require_document(machine.as_deref())?;
-        let edge = edge.unwrap_or(Edge::Right);
         let Some(address) = address else {
             // A mod pane has no terminal to relabel: move it now.
-            return if self.model.move_pane_to(&pane, &destination, Some(edge)) { Ok(json!({ "pane": pane, "tab": to })) } else { Err("could not move the pane".into()) };
+            return if self.model.move_pane_to(&pane, &destination, edge) { Ok(json!({ "pane": pane, "tab": to })) } else { Err("could not move the pane".into()) };
         };
-        if self.changing_terminals.contains(&address) { return Err("This terminal already has a pane change in progress.".into()); }
         let reply = json!({"pending":true,"terminal":address,"pane":pane,"tab":to});
         self.start_terminal_change(address, TerminalChange::Move { pane, space, tab: to, target: destination, edge }, window, cx);
         Ok(reply)
@@ -2949,11 +2945,16 @@ impl AppWindow {
 
     fn start_terminal_change(&mut self, address: String, change: TerminalChange, window: &mut Window, cx: &mut Context<Self>) {
         let machine = address.split_once('/').map(|(m, _)| m);
-        let (keep, labels) = match &change {
-            TerminalChange::Keep { space, tab, .. } | TerminalChange::Move { space, tab, .. } => (true, json!({
+        let keep = match &change {
+            TerminalChange::Keep { .. } => Some(true),
+            TerminalChange::Park => Some(false),
+            TerminalChange::Move { .. } | TerminalChange::RestoreMoveLabels { .. } => None,
+        };
+        let labels = match &change {
+            TerminalChange::Keep { space, tab, .. } | TerminalChange::Move { space, tab, .. } | TerminalChange::RestoreMoveLabels { space, tab } => json!({
                 "herdr.space":crate::mirror::local(space, machine), "herdr.tab":crate::mirror::local(tab, machine),
-            })),
-            TerminalChange::Park => (false, json!({"herdr.space":"","herdr.tab":""})),
+            }),
+            TerminalChange::Park => json!({"herdr.space":"","herdr.tab":""}),
         };
         let (tx, rx) = std::sync::mpsc::channel();
         self.changing_terminals.insert(address.clone());
@@ -2964,7 +2965,9 @@ impl AppWindow {
         let job = cx.background_executor().spawn(async move {
             let result = (|| {
                 core.call("terminal.label", json!({"terminal":addr,"labels":labels}))?;
-                core.call("terminal.keep", json!({"terminal":addr,"keep":keep}))?;
+                if let Some(keep) = keep {
+                    core.call("terminal.keep", json!({"terminal":addr,"keep":keep}))?;
+                }
                 anyhow::Ok(())
             })().map_err(|e| format!("{e:#}"));
             let _ = tx.send(result);
@@ -3008,31 +3011,23 @@ impl AppWindow {
                 if let Some(pane) = self.model.pane_of(&address) { self.model.focus_pane(&pane); }
             }
             TerminalChange::Move { pane, space, tab, target, edge } => {
-                if self.model.space(&space).is_none() {
-                    // Its space went away mid-move: undo like a failed Keep.
-                    if let Err(error) = self.park_terminal(&address, window, cx) {
-                        tracing::error!("cannot undo pane move into closed space: {error}");
+                if self.model.address_of(&pane).as_deref() != Some(address.as_str()) { return; }
+                let destination = self.model.space(&space).and_then(|s| s.tab(&tab)).and_then(|t| {
+                    if t.root.find(&target).is_some_and(Node::is_pane) { Some(target) } else { t.focused_pane() }
+                });
+                if !destination.is_some_and(|target| self.model.move_pane_to(&pane, &target, edge)) {
+                    let source_tab = self.model.tab_of(&pane).unwrap().id.clone();
+                    let source_space = self.model.space_of(&pane).unwrap().id.clone();
+                    self.start_terminal_change(address, TerminalChange::RestoreMoveLabels {
+                        space: source_space, tab: source_tab,
+                    }, window, cx);
+                    if !self.draining {
+                        self.layout_notice("Could not move pane", "The destination changed before the move finished.", window, cx);
                     }
                     return;
                 }
-                if self.model.tab_of(&pane).is_none() {
-                    // Closed during the move: its labels place it on reconcile.
-                    return;
-                }
-                let destination = self.model.tab_of(&target).is_some_and(|t| t.id == tab).then(|| target.clone())
-                    .or_else(|| self.model.tab(&tab).and_then(|t| t.focused_pane()));
-                let moved = match destination {
-                    Some(target) => self.model.move_pane_to(&pane, &target, Some(edge)),
-                    // The tab is gone too: the pane becomes one, labels already right.
-                    None => self.model.detach_pane(&pane).map(|(node, _, _)| {
-                        let ctx = Tab::with_pane(&tab, "", node);
-                        self.model.add_tab(&space, ctx)
-                    }).unwrap_or(false),
-                };
-                if !moved && let Err(error) = self.park_terminal(&address, window, cx) {
-                    tracing::error!("cannot undo pane move: {error}");
-                }
             }
+            TerminalChange::RestoreMoveLabels { .. } => return,
             TerminalChange::Park => {
                 if let Some(pane) = self.model.pane_of(&address) { self.model.remove_pane(&pane); }
             }
@@ -3430,11 +3425,10 @@ impl AppWindow {
             }
             "pane.move" => {
                 let edge = match Self::arg(a, "edge") {
-                    Some("left") => Some(Edge::Left),
-                    Some("right") => Some(Edge::Right),
-                    Some("up") => Some(Edge::Top),
-                    Some("down") => Some(Edge::Bottom),
-                    None => None,
+                    Some("left") => Edge::Left,
+                    Some("right") | None => Edge::Right,
+                    Some("up") => Edge::Top,
+                    Some("down") => Edge::Bottom,
                     Some(other) => return self.fail(format!("pane.move edge is left, right, up or down, not {other:?}")),
                 };
                 let r = self.move_pane(Self::owned(a, "pane"), Self::owned(a, "tab"), Self::owned(a, "target"), edge, window, cx);
@@ -8355,7 +8349,7 @@ export default class Probe extends View { render() { return div().child("probe")
             this.model.add_space("p2", "web", "/src", super::Tab::new("c3", "", "x3", "t3"));
             this.model.select_tab("c1");
         });
-        view.update_in(cx, |this, window, cx| {
+        let change = view.update_in(cx, |this, window, cx| {
             // One of tab or target; a real one, not the pane itself.
             for args in [
                 json!({}),
@@ -8379,54 +8373,58 @@ export default class Probe extends View { render() { return div().child("probe")
             // Until it replies, nothing has moved and the pane is busy.
             assert_eq!(this.model.tab_of("x1").unwrap().id, "c1");
             assert!(this.run_as("pane.move", json!({"pane": "x1", "tab": "c2"}), false, window, cx).get("error").is_some());
-            this.changing_terminals.clear();
-            this.pending_terminals.clear();
+            this.pending_terminals.remove("t1").unwrap().change
         });
         view.update_in(cx, |this, window, cx| {
             // What the relabel's reply does: the pane lands beside the
             // destination's focused pane; its emptied tab closes, the
             // terminal untouched.
-            this.apply_terminal_change("t1".into(), super::TerminalChange::Move {
-                pane: "x1".into(), space: "p1".into(), tab: "c2".into(), target: "x2".into(), edge: super::Edge::Left,
-            }, Ok(()), window, cx);
+            this.apply_terminal_change("t1".into(), change, Ok(()), window, cx);
             assert_eq!(this.model.tab_of("x1").unwrap().id, "c2");
             assert!(this.model.tab("c1").is_none());
             assert_eq!(this.model.address_of("x1").as_deref(), Some("t1"));
             let c = this.model.tab("c2").unwrap();
             let ids: Vec<&str> = c.root.panes().iter().map(|n| n.id.as_str()).collect();
-            assert_eq!(ids, ["x1", "x2"]);
+            assert_eq!(ids, ["x2", "x1"]);
         });
         view.update_in(cx, |this, window, cx| {
             // Moving a space's last pane closes the space; the pane survives.
             this.apply_terminal_change("t3".into(), super::TerminalChange::Move {
-                pane: "x3".into(), space: "p1".into(), tab: "c2".into(), target: "x2".into(), edge: super::Edge::Right,
+                pane: "x3".into(), space: "p1".into(), tab: "c2".into(), target: "x2".into(), edge: super::Edge::Left,
             }, Ok(()), window, cx);
             assert!(this.model.space("p2").is_none());
             assert_eq!(this.model.tab_of("x3").unwrap().id, "c2");
             let ids: Vec<&str> = this.model.tab("c2").unwrap().root.panes().iter().map(|n| n.id.as_str()).collect();
-            assert_eq!(ids, ["x1", "x2", "x3"]);
-            // A destination tab gone mid-move makes the pane its own tab.
+            assert_eq!(ids, ["x3", "x2", "x1"]);
+
+            // A closed destination leaves the source pane in place and restores its labels.
             this.apply_terminal_change("t3".into(), super::TerminalChange::Move {
                 pane: "x3".into(), space: "p1".into(), tab: "gone".into(), target: "gone".into(), edge: super::Edge::Right,
             }, Ok(()), window, cx);
-            assert_eq!(this.model.tab_of("x3").unwrap().id, "gone");
+            assert_eq!(this.model.tab_of("x3").unwrap().id, "c2");
+            let restore = this.pending_terminals.remove("t3").unwrap().change;
+            assert!(matches!(&restore, super::TerminalChange::RestoreMoveLabels { space, tab } if space == "p1" && tab == "c2"));
+            this.apply_terminal_change("t3".into(), restore, Ok(()), window, cx);
+            assert_eq!(this.model.address_of("x3").as_deref(), Some("t3"));
         });
         view.update_in(cx, |this, window, cx| {
             // A mod pane has no terminal to relabel: it moves right away.
+            this.model.add_tab("p1", super::Tab::new("c4", "", "x4", "t4"));
             this.model.split_with("x2", super::Axis::Row, super::Node::block("x9", super::Content::Mod { name: "viewer".into(), props: json!({}) }));
-            let reply = this.run_as("pane.move", json!({"pane": "x9", "tab": "gone"}), false, window, cx);
-            assert_eq!(reply, json!({ "pane": "x9", "tab": "gone" }), "{reply}");
-            assert_eq!(this.model.tab_of("x9").unwrap().id, "gone");
-            // Same tab at an edge of its focused pane: left of it.
-            let reply = this.run_as("pane.move", json!({"pane": "x9", "tab": "gone", "edge": "left"}), false, window, cx);
-            assert_eq!(reply, json!({ "pane": "x9", "tab": "gone" }), "{reply}");
-            let ids: Vec<&str> = this.model.tab("gone").unwrap().root.panes().iter().map(|n| n.id.as_str()).collect();
-            assert_eq!(ids, ["x9", "x3"]);
-            // Beside an explicit target in its own tab, no edge swaps.
-            let reply = this.run_as("pane.move", json!({"pane": "x9", "target": "x3"}), false, window, cx);
-            assert_eq!(reply, json!({ "pane": "x9", "tab": "gone" }), "{reply}");
-            let ids: Vec<&str> = this.model.tab("gone").unwrap().root.panes().iter().map(|n| n.id.as_str()).collect();
-            assert_eq!(ids, ["x3", "x9"]);
+            let reply = this.run_as("pane.move", json!({"pane": "x9", "tab": "c4"}), false, window, cx);
+            assert_eq!(reply, json!({ "pane": "x9", "tab": "c4" }), "{reply}");
+            let reply = this.run_as("pane.move", json!({"pane": "x9", "tab": "c4", "edge": "left"}), false, window, cx);
+            assert_eq!(reply, json!({ "pane": "x9", "tab": "c4" }), "{reply}");
+            let ids: Vec<&str> = this.model.tab("c4").unwrap().root.panes().iter().map(|n| n.id.as_str()).collect();
+            assert_eq!(ids, ["x9", "x4"]);
+
+            // The default places x9 to the right of x4 inside its existing column.
+            this.model.split("x4", super::Axis::Column, "x5", "t5");
+            let reply = this.run_as("pane.move", json!({"pane": "x9", "target": "x4"}), false, window, cx);
+            assert_eq!(reply, json!({ "pane": "x9", "tab": "c4" }), "{reply}");
+            let row = this.model.tab("c4").unwrap().root.parent_of("x9").unwrap();
+            assert_eq!(row.axis(), Some(super::Axis::Row));
+            assert_eq!(row.children().iter().map(|n| n.id.as_str()).collect::<Vec<_>>(), ["x4", "x9"]);
         });
     }
 

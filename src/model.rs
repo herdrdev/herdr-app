@@ -429,15 +429,11 @@ impl Model {
         Some((pane, true, space_closed))
     }
 
-    /// Moves a pane into another tab (never `move_pane`'s same-tab swap):
-    /// beside `target`, or at the edge of it when `edge` says so (left/right
-    /// is a row, up/down a column; an empty edge means after `target`). The
-    /// moved pane keeps its id and terminal and is focused; a source tab left
-    /// empty closes, its space too when that was its last tab.
-    pub fn move_pane_to(&mut self, source: &str, target: &str, edge: Option<crate::layout::Edge>) -> bool {
-        if source == target {
-            return false;
-        }
+    /// Moves a pane beside a pane in another tab, preserving its id and terminal.
+    /// The destination is selected and the pane is focused. An emptied source
+    /// tab closes, along with its space if that was the last tab.
+    pub fn move_pane_to(&mut self, source: &str, target: &str, edge: crate::layout::Edge) -> bool {
+        use crate::layout::Edge;
         let (Some(from), Some(to)) = (self.tab_of(source), self.tab_of(target)) else { return false };
         if from.id == to.id
             || !from.root.find(source).is_some_and(Node::is_pane)
@@ -445,29 +441,16 @@ impl Model {
         {
             return false;
         }
-        let mut root = to.root.clone();
+        let tab = to.id.clone();
         let Some((mut pane, _, _)) = self.detach_pane(source) else { return false };
-        if let Some(edge) = edge {
-            use crate::layout::Edge;
-            let axis = if matches!(edge, Edge::Left | Edge::Right) { Axis::Row } else { Axis::Column };
-            let machine = self.space_of(target).and_then(|s| s.machine.clone());
-            let container = self.fresh_id_on("s", machine.as_deref());
-            pane.size = None;
-            if !root.split(target, axis, pane, container) {
-                return false;
-            }
-            if matches!(edge, Edge::Left | Edge::Top) {
-                root.swap(source, target);
-            }
-        } else if !root.split(target, Axis::Row, pane, String::new()) {
-            return false;
+        pane.size = None;
+        let axis = if edge.vertical() { Axis::Row } else { Axis::Column };
+        // The validated target is in a different tab, so detaching cannot remove it.
+        assert!(self.split_with(target, axis, pane));
+        if matches!(edge, Edge::Left | Edge::Top) {
+            self.tab_mut(&tab).unwrap().root.swap(source, target);
         }
-        let tab = self.tab_of_mut(target).unwrap();
-        tab.root = root;
-        tab.zoomed = None;
-        tab.focus(source);
-        let ctx = tab.id.clone();
-        self.select_tab(&ctx)
+        self.select_tab(&tab)
     }
 
     /// Removes a tab. Returns its terminal addresses and whether its space closed.
@@ -1001,8 +984,8 @@ mod tests {
         let mut m = model_with_one();
         m.add_tab("p1", Tab::new("c2", "docs", "x2", "t2"));
         m.add_tab("p1", Tab::new("c3", "last", "x3", "t3"));
-        // No edge: after the target, terminal kept, focused, tab selected.
-        assert!(m.move_pane_to("x1", "x2", None));
+        // The pane lands to the right of the target and keeps its terminal.
+        assert!(m.move_pane_to("x1", "x2", Edge::Right));
         assert_eq!(m.tab_of("x1").unwrap().id, "c2");
         assert!(m.tab("c1").is_none());
         assert_eq!(m.address_of("x1").as_deref(), Some("t1"));
@@ -1012,7 +995,7 @@ mod tests {
         // An edge places it there; a mod pane moves like a terminal's.
         let viewer = Node::block("x4", Content::Mod { name: "markdown".into(), props: json!({}) });
         assert!(m.split_with("x3", Axis::Row, viewer));
-        assert!(m.move_pane_to("x4", "x1", Some(Edge::Left)));
+        assert!(m.move_pane_to("x4", "x1", Edge::Left));
         let c = m.tab("c2").unwrap();
         assert_eq!(c.root.parent_of("x4").unwrap().axis(), Some(Axis::Row));
         let ids: Vec<&str> = c.root.panes().iter().map(|n| n.id.as_str()).collect();
@@ -1023,7 +1006,7 @@ mod tests {
     fn moving_a_tabs_last_pane_closes_it_and_then_its_space() {
         let mut m = model_with_one();
         m.add_space("p2", "web", "/src/web", Tab::new("c2", "deploy", "x2", "t2"));
-        assert!(m.move_pane_to("x2", "x1", Some(crate::layout::Edge::Bottom)));
+        assert!(m.move_pane_to("x2", "x1", crate::layout::Edge::Bottom));
         assert!(m.tab("c2").is_none());
         assert!(m.space("p2").is_none());
         assert_eq!(m.recent, [Recent { name: "web".into(), folder: "/src/web".into() }]);
@@ -1037,7 +1020,7 @@ mod tests {
         m.split("x1", Axis::Row, "x9", "t9");
         let before = format!("{:?}", m.spaces);
         for (source, target) in [("x1", "x9"), ("x1", "x1"), ("x1", "missing"), ("missing", "x9"), ("c1", "x9")] {
-            assert!(!m.move_pane_to(source, target, None), "{source} -> {target}");
+            assert!(!m.move_pane_to(source, target, crate::layout::Edge::Right), "{source} -> {target}");
             assert_eq!(format!("{:?}", m.spaces), before);
         }
     }

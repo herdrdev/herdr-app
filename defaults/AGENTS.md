@@ -622,9 +622,9 @@ The main ones:
   such tabs go last in their space, in the order made. `focus` is a boolean.
 - Panes: `pane.split {direction: "right" | "down", pane?, argv? | mod?, props?}` (a new
   terminal, or a mod pane), `pane.close {pane?}`,
-  `pane.move {pane?, tab}` or `{pane?, target, edge?}` (into a tab — after its
-  focused pane — or beside a pane in any tab at edge `"left" | "right" | "up" |
-  "down"`, default right; a pane stays on its own machine, its terminal running),
+  `pane.move {pane?, tab | target, edge?}` places a pane beside the focused pane
+  of `tab` or beside `target`. Edge is `"left"`, `"right"` (default), `"up"`, or
+  `"down"`. Moves stay on one machine and keep the terminal running.
   `pane.zoom {pane?}`, `pane.focus {pane | terminal}`, `pane.go {direction}`,
   `pane.swap {pane?, direction | target}`, `pane.rename {pane?, name}` ("": unnamed
   again; `panes()[i].name`, kept with its tab), `pane.resize {direction, pane?, px?}` (moves
@@ -642,7 +642,7 @@ The main ones:
   A swap moves panes, not focus: the focused pane stays focused in its new place.
   `pane.focus {terminal}` prefers the first visible layout terminal block showing that
   address, then its model pane. Clicking a terminal block focuses it too.
-  While a layout terminal block is focused, implicit split/close/zoom/go/swap and
+  While a layout terminal block is focused, implicit split/close/move/zoom/go/swap and
   `terminal.show` fail, as do `terminal.open`/`terminal.keep` with place right/down.
   They never act on the terminal's source pane. An explicit `pane` still targets that
   model pane; composition edits belong to the mod (edit its layout instead).
