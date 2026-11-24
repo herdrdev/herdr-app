@@ -736,6 +736,9 @@ herdr-app status      # what's on screen: layout, focus, overlays, zoom, errors 
 herdr-app commands    # every command and its arguments
 ```
 
+`herdr-app ls` reports the pane ID as `pane` and its custom name as `pane_name`
+(null when unnamed), alongside the core terminal name (`name`).
+
 `herdr-app do` prints what the command made (`{ "space", "tab",
 "terminal" }`, `{ "pane", "terminal" }`) or `{ "error": "..." }` and exits 1.
 

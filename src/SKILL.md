@@ -20,6 +20,10 @@ prints the built-in command list even without an open window. Do not launch bare
 signal or restart the person's app or core. A window closing does not kill
 its terminals.
 
+Each terminal entry includes its pane ID (`pane`) and custom pane name
+(`pane_name`, null when unnamed). `name` is the core terminal name. Use the
+pane ID to target `pane.*` commands.
+
 `app.check_updates` checks for newer releases. Settings reports "Up to date"
 only after a successful check; on failure, check the connection and retry.
 Package-managed cores are checked but updated through their package manager.
