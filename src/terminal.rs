@@ -1208,6 +1208,32 @@ impl TerminalView {
         }));
     }
 
+    /// Shift+click: the selection now ends at the click, as in other terminals.
+    /// False when there is nothing to extend.
+    fn extend_selection(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) -> bool {
+        let mut g = self.grid.borrow_mut();
+        let (x, y) = local(&g, pos);
+        let (col, row) = ((x / f32::from(g.cell.width)) as u16, (y / f32::from(g.cell.height)) as u16);
+        if !g.vt.extend_selection(col, row) {
+            return false;
+        }
+        drop(g);
+        self.selection_changed(cx);
+        self.selection_settled(cx);
+        cx.notify();
+        true
+    }
+
+    /// A finished selection goes to the clipboard (copy on select) or the primary selection.
+    fn selection_settled(&mut self, cx: &mut Context<Self>) {
+        if crate::settings::get().copy_on_select {
+            // Copy on select, as in Herdr.
+            self.copy(cx);
+        } else {
+            self.copy_primary(cx);
+        }
+    }
+
     fn finish_selection(&mut self, pos: Option<Point<Pixels>>, cx: &mut Context<Self>) {
         self.selecting = false;
         let mut g = self.grid.borrow_mut();
@@ -1234,12 +1260,7 @@ impl TerminalView {
         drop(g);
         self.selection_changed(cx);
         if matches!(step, Select::Release) {
-            if crate::settings::get().copy_on_select {
-                // Copy on select, as in Herdr.
-                self.copy(cx);
-            } else {
-                self.copy_primary(cx);
-            }
+            self.selection_settled(cx);
         }
         cx.notify();
     }
@@ -2566,6 +2587,9 @@ impl Render for TerminalView {
                     return;
                 }
                 drop(g);
+                if ev.modifiers.shift && this.extend_selection(ev.position, cx) {
+                    return;
+                }
                 if this.mouse(GHOSTTY_MOUSE_ACTION_PRESS, Some(ev.button), ev.position, ev.modifiers) {
                     // The program took the click: Herdr's old selection ends, so a copy can't repeat it.
                     this.clear_selection(cx);

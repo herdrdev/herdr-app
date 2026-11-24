@@ -687,7 +687,8 @@ The main ones:
   right-click targeting follow keyboard focus, including peek and floating terminals;
   with no terminal holding keyboard focus, they use the focused pane or block.
   Dragging a text selection past the terminal's top or bottom scrolls while held;
-  releasing stops it. Programs that track the mouse still get their mouse events
+  releasing stops it. Shift+click moves the end of the current selection to the
+  click (scroll first to reach history). Programs that track the mouse still get their mouse events
   (hold Shift to select text instead). A drag stays with the terminal where it
   started, including its release outside the pane; other panes don't receive it.
   Terminals display Kitty graphics, including Unicode placeholder images used by

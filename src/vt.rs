@@ -1078,6 +1078,17 @@ impl Vt {
             .then_some(selection)
     }
 
+    /// Moves the selection's end to a viewport cell and keeps where it started
+    /// (Shift+click). False when there is no selection.
+    pub fn extend_selection(&mut self, col: u16, row: u16) -> bool {
+        let Some(mut selection) = self.selection() else { return false };
+        let at = (col.min(self.cols.saturating_sub(1)), u32::from(row.min(self.rows.saturating_sub(1))));
+        let Some(end) = self.grid_ref(GHOSTTY_POINT_TAG_VIEWPORT, at.0, at.1) else { return false };
+        selection.end = end;
+        unsafe { ghostty_terminal_set(self.term, GHOSTTY_TERMINAL_OPT_SELECTION, &selection as *const _ as *const c_void) };
+        true
+    }
+
     pub fn selection_positions(&self) -> Option<SelectionPositions> {
         let selection = self.selection()?;
         Some(SelectionPositions { start: self.cell_position(&selection.start)?, end: self.cell_position(&selection.end)? })
@@ -2074,6 +2085,22 @@ mod tests {
             vt.progress_search();
         }
         panic!("terminal search did not finish incrementally");
+    }
+
+    #[test]
+    fn shift_click_moves_the_selection_end_and_keeps_its_start() {
+        let mut vt = Vt::new(10, 4);
+        vt.write(b"aaaa\r\nbbbb\r\ncccc\r\ndddd");
+        assert!(!vt.extend_selection(1, 1), "nothing to extend");
+        vt.select(Select::Press, 1, 2, 11.0, 45.0, 10.0, 80.0);
+        vt.select(Select::Drag, 2, 2, 29.0, 45.0, 10.0, 80.0);
+        vt.select(Select::Release, 2, 2, 29.0, 45.0, 10.0, 80.0);
+        assert_eq!(vt.selection_text().as_deref(), Some("cc"));
+        assert!(vt.extend_selection(3, 3));
+        assert_eq!(vt.selection_text().as_deref(), Some("ccc\ndddd"));
+        // Back past the start: the start stays, the selection now runs upward.
+        assert!(vt.extend_selection(0, 0));
+        assert_eq!(vt.selection_text().as_deref(), Some("aaaa\nbbbb\ncc"));
     }
 
     #[test]
