@@ -252,6 +252,9 @@ Properties any node can have:
 - `padding`: space inside the node's edge, px: `16` or `[vertical, horizontal]`.
 - row/column: `gap` (px between children), `divider` (`{ "width": 1, "color": "border" }`),
   `resizable` (default true: drag the boundary). This applies to that row/column only.
+  On a resizable boundary, the divider's optional `hover` color shows while the pointer
+  is over it and `active` while dragging (default: `hover`), e.g.
+  `{ "width": 1, "color": "#00000000", "hover": "accent" }` shows a line only then.
 - `movable` (default true): panes can be dragged by the app's top-center grip within a split tab.
   Unlike `resizable`, it inherits: the nearest explicit ancestor wins, through the
   tab tree and then the layout's tab block and its ancestors. Root `"movable": false`
@@ -1137,6 +1140,15 @@ drop; local folders and remote paths dropped onto another machine are refused.
 Paths containing control characters are rejected, including clipboard files.
 `.on_hover((hovered, cx) => …)` reports pointer entry and exit on buttons
 and other interactive controls too.
+`.on_mouse_move` and `.on_mouse_up` fire only over the element. For a drag that
+should keep following the pointer once it leaves (dragging a tab off the bar),
+use `.on_window_mouse_move((e, cx) => …)` and `.on_window_mouse_up("left", (e, cx) => …)`
+on a plain layout element. They observe moves and matching releases in the
+window, including over terminals, without affecting normal event handling.
+Positions are in window pixels, with `local_position` relative to the
+element's box. Track a left drag while `pressed_button === "left"`. If it
+ends outside the window without a release event, cancel on the next move
+that reports no left button.
 `.when(cond, (el) => …)`, `.children([...])`. Controls from `gpui-base`
 (`Button`, `Checkbox`, `Switch`, `InputState` + `Input`) are unstyled: style
 them. Text: `TextView.markdown(id, text)` renders Markdown.
@@ -1153,7 +1165,11 @@ When `s.position` is present, place a popup with
 `EditorState.new({
 language, value, readonly, font_family: settings().font_family, syntax: {
 keyword: theme().ansi5, ... } })` + `Editor.new(state)` is a code view (readonly)
-or editor with syntax highlighting, line numbers and folding. Call
+or editor with syntax highlighting, line numbers and folding. For Markdown
+source, set `language: "markdown"` or `"md"`. The `syntax` keys are `heading`,
+`strong`, `emphasis`, `code`, `quote`, `list`, and `link` (the URL). Use
+`theme()` colors for light and dark layouts. Built-in syntax colors use a
+dark-editor palette. Call
 `state.set_soft_wrap(wrap)` from a view callback to switch between wrapping
 long lines and scrolling sideways while keeping the editor's text and selection.
 Tab indents by 2 spaces. Set `tab_size` (1 to 16) for the number of spaces per

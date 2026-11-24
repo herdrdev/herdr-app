@@ -1158,6 +1158,8 @@ const CONTEXT_AND_VIEW: &str = r#"  /**
     local_position: Point;
     bounds: import("gpui-shell").ElementBounds;
     modifiers: Modifiers;
+    /** Left, right, or middle when the move reports one of those buttons as held. */
+    pressed_button?: MouseButton;
   }
 
   /**
@@ -1410,6 +1412,13 @@ const ELEMENT_METHODS: &str = r#"    /**
     on_click<Self extends Element>(this: Self, handler: (event: ClickEvent, cx: Context) => void): Self;
     /** GPUI `InteractiveElement::on_mouse_move`, delivered while this element is hovered. */
     on_mouse_move<Self extends Element>(this: Self, handler: (event: MouseMoveEvent, cx: Context) => void): Self;
+    /**
+     * Every pointer move in the window, wherever the pointer is, with positions
+     * against this element's box. For a drag that should keep following the
+     * pointer after it leaves the element it started on. Passive observer.
+     * Use on div, h_flex, or v_flex.
+     */
+    on_window_mouse_move<Self extends Element>(this: Self, handler: (event: MouseMoveEvent, cx: Context) => void): Self;
     /** div/h_flex/v_flex: initial size and changed layout size, in logical pixels.
      * Runs after layout, even without pointer movement. Use a stable id. */
     on_size_change<Self extends Element>(this: Self, handler: (size: { width: number; height: number }, cx: Context) => void): Self;
@@ -1457,6 +1466,14 @@ const ELEMENT_METHODS: &str = r#"    /**
     ): Self;
     /** GPUI `InteractiveElement::on_mouse_up`, for one button. */
     on_mouse_up<Self extends Element>(this: Self,
+      button: MouseButton,
+      handler: (event: MouseButtonEvent, cx: Context) => void,
+    ): Self;
+    /**
+     * Passively observes releases of `button` anywhere in the window, including
+     * releases handled by terminals. Use on div, h_flex, or v_flex.
+     */
+    on_window_mouse_up<Self extends Element>(this: Self,
       button: MouseButton,
       handler: (event: MouseButtonEvent, cx: Context) => void,
     ): Self;
@@ -3298,7 +3315,13 @@ const BASE: &str = r#"  /** A row. */
       hard_tabs?: boolean;
       /** Semantic colors: keyword, string, comment, function, type, number,
        * constant, variable, operator, punctuation, boolean, string.escape.
-       * Values are concrete hex colors; unspecified UI colors follow the theme. */
+       * Markdown ("markdown" or "md") adds heading, strong, emphasis, code,
+       * quote, list and link. Unset heading, strong and list use keyword's color,
+       * code uses string, quote uses comment, and link URLs use function.
+       * Headings and strong text are bold. Emphasis is italic and inherits
+       * the editor foreground unless given its own color.
+       * Values are concrete hex colors. Built-in syntax colors use a dark palette.
+       * Unspecified editor UI colors follow the theme. */
       syntax?: Record<string, string>;
     }) => EditorState;
   };
@@ -4108,12 +4131,14 @@ mod tests {
         "on_token_click",
         "on_token_hover",
         "on_mouse_move",
+        "on_window_mouse_move",
         "on_hover",
         "on_key_down",
         "on_key_up",
         "on_modifiers_changed",
         "on_mouse_down",
         "on_mouse_up",
+        "on_window_mouse_up",
         "on_mouse_down_out",
         "on_drop",
         "drag_paths",

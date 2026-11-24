@@ -353,6 +353,8 @@ struct Behavior {
     on_token_click: Option<CallbackId>,
     on_token_hover: Option<CallbackId>,
     on_mouse_move: Option<CallbackId>,
+    /// Observes moves anywhere in the window.
+    on_window_mouse_move: Option<CallbackId>,
     on_hover: Option<CallbackId>,
     /// Reports a key press that reached this element.
     ///
@@ -375,6 +377,8 @@ struct Behavior {
     on_mouse_down: SmallVec<[(MouseButton, CallbackId); 1]>,
     /// Releases on this element, listed the same way.
     on_mouse_up: SmallVec<[(MouseButton, CallbackId); 1]>,
+    /// Observes releases anywhere in the window.
+    on_window_mouse_up: SmallVec<[(MouseButton, CallbackId); 1]>,
     /// A press anywhere outside this element, delivered during the capture
     /// phase.
     ///
@@ -1992,6 +1996,41 @@ where
     element
 }
 
+fn with_window_mouse(element: gpui::Div, behavior: &Behavior, runtime: &Rc<ShellRuntime>) -> gpui::Div {
+    let moves = behavior.on_window_mouse_move;
+    let ups = &behavior.on_window_mouse_up;
+    if moves.is_none() && ups.is_empty() {
+        return element;
+    }
+    let ups = ups.clone();
+    let runtime = Rc::downgrade(runtime);
+    element.on_paint(move |bounds, window, _| {
+        if let Some(callback) = moves {
+            let runtime = runtime.clone();
+            window.observe_mouse_event(move |event: &gpui::MouseMoveEvent, window, cx| {
+                if let Some(runtime) = runtime.upgrade() {
+                    runtime.dispatch_mouse_move(
+                        callback,
+                        event,
+                        event.position - bounds.origin,
+                        bounds,
+                        window,
+                        cx,
+                    );
+                }
+            });
+        }
+        for (button, callback) in ups {
+            let runtime = runtime.clone();
+            window.observe_mouse_event(move |event: &gpui::MouseUpEvent, window, cx| {
+                if event.button == button {
+                    dispatch_mouse_button(&runtime, callback, event, Some(bounds), window, cx);
+                }
+            });
+        }
+    })
+}
+
 /// One dispatch for the three press-and-release builders.
 ///
 /// `MouseDownEvent` and `MouseUpEvent` are different types carrying the same
@@ -2194,7 +2233,7 @@ fn flex_element(
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let element = with_hover(element, &states);
+    let element = with_window_mouse(with_hover(element, &states), &behavior, runtime);
     if behavior.key.is_none()
         && !states.needs_identity()
         && !behavior.needs_identity()
@@ -2772,6 +2811,16 @@ pub(in crate::materialize) fn resolve_ops(
                 "on_link_click" => behavior.on_link_click = Some(*id),
                 "on_selection_change" => behavior.on_selection_change = Some(*id),
                 "on_mouse_move" => behavior.on_mouse_move = Some(*id),
+                "on_window_mouse_move" => behavior.on_window_mouse_move = Some(*id),
+                "on_window_mouse_up_left" => {
+                    behavior.on_window_mouse_up.push((MouseButton::Left, *id))
+                }
+                "on_window_mouse_up_right" => {
+                    behavior.on_window_mouse_up.push((MouseButton::Right, *id))
+                }
+                "on_window_mouse_up_middle" => {
+                    behavior.on_window_mouse_up.push((MouseButton::Middle, *id))
+                }
                 "on_hover" => behavior.on_hover = Some(*id),
                 "on_key_down" => behavior.on_key_down = Some(*id),
                 "on_key_up" => behavior.on_key_up = Some(*id),
