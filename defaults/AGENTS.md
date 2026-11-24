@@ -646,6 +646,8 @@ The main ones:
   model pane; composition edits belong to the mod (edit its layout instead).
   Closing panes, tabs or spaces ends the terminals in them. Core ends dependent
   children and keeps children started with `--outlive-parent` running.
+  On cores older than 0.1.13, Herdr ends hidden children too, stopping at
+  children with a pane or `herdr.space` label.
 - Terminals: `terminal.open {argv?, folder?, place?, name?}` (`folder` sets the
   starting directory for tabs and right/down splits, with or without `argv`),
   `terminal.kill {terminal}` (ends the sub-agent tree, stopping at children with a

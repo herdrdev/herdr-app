@@ -2209,7 +2209,9 @@ impl AppWindow {
                     "needs_login" => format!("{name} needs login; run hc machine login {name}"),
                     _ => format!("{name} is {state}"),
                 }));
-                self.documents.entry(name.to_owned()).or_default().connection(state == "connected", machine["since_ms"].as_u64(), reason);
+                let slot = self.documents.entry(name.to_owned()).or_default();
+                slot.connection(state == "connected", machine["since_ms"].as_u64(), reason);
+                slot.legacy_child_lifetime = crate::hc::legacy_child_lifetime(&machine["version"]);
             }
             if self.model.spaces.iter().any(|s| s.machine.as_deref().is_some_and(|m| !states.contains_key(m))) {
                 let mut view = crate::mirror::View::capture(&self.model);
@@ -2965,25 +2967,16 @@ impl AppWindow {
 
     /// An explicit terminal.kill follows sub-agents until it reaches one placed in the window.
     fn kill_tree(&mut self, address: &str, cx: &mut Context<Self>) {
-        let mut doomed = vec![address.to_owned()];
-        let mut i = 0;
-        while i < doomed.len() {
-            let parent = doomed[i].clone();
-            for (addr, rec) in &self.live {
-                let child = rec.get("parent").and_then(Value::as_str) == Some(parent.as_str());
-                if child && !doomed.contains(addr)
-                    && self.model.pane_of(addr).is_none()
-                    && !rec.pointer("/labels/herdr.space").and_then(Value::as_str).is_some_and(|space| !space.is_empty())
-                {
-                    doomed.push(addr.clone());
-                }
-            }
-            i += 1;
-        }
+        let doomed = kill_targets(vec![address.to_owned()], &self.model, &self.live, |_| true);
         self.kill(doomed, cx);
     }
 
-    /// Kill the selected terminals. Core handles their parent-lifetime rules.
+    fn close_terminals(&mut self, addresses: Vec<String>, cx: &mut Context<Self>) {
+        let legacy = |address: &str| legacy_terminal_core(address, &self.core.hello, &self.documents);
+        let doomed = kill_targets(addresses, &self.model, &self.live, legacy);
+        self.kill(doomed, cx);
+    }
+
     fn kill(&mut self, addresses: Vec<String>, cx: &mut Context<Self>) {
         self.closing_terminals.extend(addresses.iter().cloned().map(|a| (a, false)));
         // Off the UI thread: a kill waits for the program to go, and for slow machines.
@@ -3213,7 +3206,7 @@ impl AppWindow {
                     return;
                 }
                 let addrs = self.model.remove_space(&id);
-                self.kill(addrs, cx);
+                self.close_terminals(addrs, cx);
             }
             "space.rename" => {
                 let Some(id) = Self::owned(a, "id").or_else(|| self.model.active.clone()) else { return self.fail("no space to rename") };
@@ -3266,7 +3259,7 @@ impl AppWindow {
                     return self.dispatch("space.close", &args, person, window, cx);
                 }
                 let (addrs, _) = self.model.remove_tab(&id);
-                self.kill(addrs, cx);
+                self.close_terminals(addrs, cx);
             }
             "tab.rename" => {
                 let Some(id) = Self::owned(a, "id").or(active_ctx) else { return self.fail("no tab to rename") };
@@ -3346,7 +3339,7 @@ impl AppWindow {
                 }
                 let addr = self.model.address_of(&pane);
                 self.model.remove_pane(&pane);
-                self.kill(addr.into_iter().collect(), cx);
+                self.close_terminals(addr.into_iter().collect(), cx);
             }
             "pane.zoom" => {
                 if let Some(pane) = Self::owned(a, "pane").or_else(|| self.model.focused_pane()) {
@@ -5549,6 +5542,33 @@ fn sized(slot: Div, n: &Node, axis: Axis, total_weight: f32) -> Div {
 }
 
 /// What a terminal runs now (core's `foreground`), else what it started with.
+fn legacy_terminal_core(address: &str, hello: &Value, documents: &BTreeMap<String, crate::mirror_sync::Slot>) -> bool {
+    match address.split_once('/') {
+        Some((machine, _)) => documents.get(machine).is_some_and(|slot| slot.legacy_child_lifetime),
+        None => crate::hc::legacy_child_lifetime(&hello["version"]),
+    }
+}
+
+fn kill_targets(mut doomed: Vec<String>, model: &Model, live: &HashMap<String, Value>, walk: impl Fn(&str) -> bool) -> Vec<String> {
+    let mut i = 0;
+    while i < doomed.len() {
+        let parent = doomed[i].clone();
+        i += 1;
+        if !walk(&parent) { continue; }
+        for (addr, rec) in live {
+            if rec["parent"].as_str() == Some(parent.as_str())
+                && walk(addr)
+                && !doomed.contains(addr)
+                && model.pane_of(addr).is_none()
+                && !rec.pointer("/labels/herdr.space").and_then(Value::as_str).is_some_and(|space| !space.is_empty())
+            {
+                doomed.push(addr.clone());
+            }
+        }
+    }
+    doomed
+}
+
 fn running_argv(rec: &serde_json::Map<String, Value>) -> Option<&Value> {
     rec.get("foreground").and_then(|f| f.get("argv")).filter(|a| a.as_array().is_some_and(|a| !a.is_empty())).or_else(|| rec.get("argv"))
 }
@@ -5806,6 +5826,39 @@ fn reconcile_core_update_error(dismissed: &mut Option<String>, core: &crate::upd
 mod tests {
     use gpui::{div, point, px, size, Context, IntoElement, Render, TestAppContext, Window};
     use gpui::prelude::*;
+
+    #[test]
+    fn close_only_walks_hidden_children_on_older_cores() {
+        use super::{Model, Tab, kill_targets, legacy_terminal_core};
+        use serde_json::json;
+
+        let mut model = Model::default();
+        model.add_space("s", "", "", Tab::new("tab", "", "pane", "old/t4"));
+        let live = [
+            ("t2", json!({"parent": "t1", "die_with_parent": false})),
+            ("old/t2", json!({"parent": "old/t1", "die_with_parent": false})),
+            ("old/t3", json!({"parent": "old/t2"})),
+            ("old/t4", json!({"parent": "old/t1"})),
+            ("old/t5", json!({"parent": "old/t4"})),
+            ("old/t6", json!({"parent": "old/t1", "labels": {"herdr.space": "other"}})),
+            ("new/t2", json!({"parent": "new/t1", "die_with_parent": false})),
+            ("new/t3", json!({"parent": "old/t1", "die_with_parent": false})),
+        ].into_iter().map(|(address, record)| (address.to_owned(), record)).collect();
+        let documents = [("old", "0.1.11"), ("new", "0.1.13")].into_iter().map(|(name, version)| {
+            let mut slot = crate::mirror_sync::Slot::default();
+            slot.legacy_child_lifetime = crate::hc::legacy_child_lifetime(&json!(version));
+            (name.to_owned(), slot)
+        }).collect();
+        let close = |version| {
+            let hello = json!({"version": version});
+            let roots = ["t1", "old/t1", "new/t1"].map(str::to_owned).to_vec();
+            let mut targets = kill_targets(roots, &model, &live, |address| legacy_terminal_core(address, &hello, &documents));
+            targets.sort();
+            targets
+        };
+        assert_eq!(close("hc 0.1.12"), ["new/t1", "old/t1", "old/t2", "old/t3", "t1", "t2"]);
+        assert_eq!(close("hc 0.1.13"), ["new/t1", "old/t1", "old/t2", "old/t3", "t1"]);
+    }
 
     #[test]
     fn core_error_dismissal_survives_failed_retries_but_resets_after_recovery() {
