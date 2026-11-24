@@ -591,5 +591,5 @@ test("space rows keep the full label and omit matching git details after an emoj
   };
   expect(rowLabels("🐼 Herdr-App")).toEqual(["🐼", "🐼 Herdr-App", "topic", "↑2"]);
   expect(rowLabels("✌🏻 topic")).toEqual(["✌🏻", "✌🏻 topic", "herdr-app", "↑2"]);
-  expect(rowLabels("🐼 topic", "└─")).toEqual(["🐼 topic", "topic", "↑2"]);
+  expect(rowLabels("🐼 topic", "└─")).toEqual(["🐼 topic", "↑2"]);
 });

@@ -440,7 +440,7 @@ export default class Spaces extends View {
   gitTail(g, tree, name, t) {
     const raw = g.branch ?? "detached";
     const fullName = name.toLowerCase();
-    const emoji = tree ? null : EMOJI.exec(name)?.[0];
+    const emoji = EMOJI.exec(name)?.[0];
     const label = emoji ? name.slice(emoji.length).trim().toLowerCase() : fullName;
     const same = (a) => {
       const text = a.toLowerCase();
