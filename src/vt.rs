@@ -1116,6 +1116,10 @@ impl Vt {
         Ok(())
     }
 
+    pub fn reset_selection_gesture(&mut self) {
+        unsafe { ghostty_selection_gesture_reset(self.gesture, self.term) };
+    }
+
     /// Moves the selection's end to a viewport cell, keeping its start (Shift+click).
     /// Returns false when there is no selection to extend.
     pub fn extend_selection(&mut self, col: u16, row: u16) -> bool {

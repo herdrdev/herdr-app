@@ -1188,6 +1188,10 @@ impl TerminalView {
         self.selecting = true;
         self.selection_pointer = pos;
         self.extending = extend && self.selection().is_some();
+        if self.extending {
+            // This press bypasses the normal gesture, so end its click sequence.
+            self.grid.borrow_mut().vt.reset_selection_gesture();
+        }
         self.select(Select::Press, pos, cx);
         self.selection_scroll = Some(cx.spawn(async move |this, cx| {
             loop {
@@ -3074,6 +3078,18 @@ mod tests {
         cx.simulate_mouse_down(far, MouseButton::Left, Modifiers::default());
         cx.simulate_mouse_up(far, MouseButton::Left, Modifiers::default());
         assert_eq!(selected(cx), None);
+
+        let click = |cx: &mut gpui::VisualTestContext, pos, modifiers| {
+            cx.simulate_mouse_down(pos, MouseButton::Left, modifiers);
+            cx.simulate_mouse_up(pos, MouseButton::Left, modifiers);
+        };
+        click(cx, from, Modifiers::default());
+        click(cx, from, Modifiers::default());
+        assert_eq!(selected(cx).as_deref(), Some("beta"));
+        click(cx, far, shift);
+        assert_eq!(selected(cx).as_deref(), Some("beta gamma\nsecond"));
+        click(cx, from, Modifiers::default());
+        assert_eq!(selected(cx), None, "the Shift+click ended the earlier click sequence");
     }
 
     #[gpui::test]
