@@ -604,6 +604,145 @@ fn a_failed_first_render_is_not_retried_every_frame(cx: &mut TestAppContext) {
     assert_eq!(runtime.metrics().read().script_renders(), after_failure + 1);
 }
 
+/// HERDR: a native deadline interrupt is not a permanent script error. No
+/// input or file change should be needed to replace the retained snapshot.
+#[gpui::test]
+fn an_interrupted_render_recovers_without_external_invalidation(cx: &mut TestAppContext) {
+    let source = TOGGLE.replace(
+        "return v_flex()",
+        r#"
+    if (this.count === 1 && !this.interrupted) {
+      this.interrupted = true;
+      while (true) {}
+    }
+    return v_flex()"#,
+    );
+    let (runtime, mut context, view) = script_view(cx, &source);
+    render_once(&mut context, &view);
+    let callback = click_target(&mut context, &view);
+    context.update(|window, cx| runtime.dispatch_change(callback, true, window, cx));
+    render_once(&mut context, &view);
+    assert!(snapshot_text(&mut context, &view).contains("count: 0"));
+    assert!(view.read_with(&context, |view, _| view.build_error().is_some()));
+    let renders = runtime.metrics().read().script_renders();
+    for _ in 0..8 {
+        render_once(&mut context, &view);
+    }
+    assert_eq!(runtime.metrics().read().script_renders(), renders);
+
+    context.run_until_parked();
+    context.executor().advance_clock(std::time::Duration::from_millis(250));
+    context.run_until_parked();
+    render_once(&mut context, &view);
+    assert!(snapshot_text(&mut context, &view).contains("count: 1"));
+    assert!(view.read_with(&context, |view, _| view.build_error().is_none()));
+    let callback = click_target(&mut context, &view);
+    context.update(|window, cx| runtime.dispatch_change(callback, true, window, cx));
+    render_once(&mut context, &view);
+    assert!(snapshot_text(&mut context, &view).contains("count: 2"));
+}
+
+#[gpui::test]
+fn an_interrupted_first_render_recovers_without_a_previous_snapshot(cx: &mut TestAppContext) {
+    let source = r#"
+import { div, View } from "gpui-kit";
+export default class Interrupted extends View {
+  render() {
+    if (!this.attempted) {
+      this.attempted = true;
+      try { while (true) {} } finally { this.cleaned = true; }
+    }
+    return div().child(this.cleaned ? "finally ran" : "recovered without finally");
+  }
+}
+"#;
+    let (_runtime, mut context, view) = script_view(cx, source);
+    render_once(&mut context, &view);
+    assert!(view.read_with(&context, |view, _| view.snapshot().is_none()));
+    assert!(view.read_with(&context, |view, _| view.build_error().is_some()));
+    context.run_until_parked();
+    context.executor().advance_clock(std::time::Duration::from_millis(250));
+    context.run_until_parked();
+    render_once(&mut context, &view);
+    assert!(snapshot_text(&mut context, &view).contains("recovered without finally"));
+    assert!(view.read_with(&context, |view, _| view.build_error().is_none()));
+}
+
+#[gpui::test]
+fn persistent_interrupts_back_off_even_when_the_host_keeps_invalidating(cx: &mut TestAppContext) {
+    let source = r#"
+import { View } from "gpui-kit";
+export default class Interrupted extends View {
+  render() { while (true) {} }
+}
+"#;
+    let (runtime, mut context, view) = script_view(cx, source);
+    render_once(&mut context, &view);
+    for delay in [250, 500, 1000, 2000, 4000, 4000] {
+        let renders = runtime.metrics().read().script_renders();
+        context.run_until_parked();
+        context.executor().advance_clock(std::time::Duration::from_millis(delay - 1));
+        context.run_until_parked();
+        view.update(&mut context, |view, cx| view.refresh(cx));
+        render_once(&mut context, &view);
+        assert_eq!(runtime.metrics().read().script_renders(), renders);
+        context.executor().advance_clock(std::time::Duration::from_millis(1));
+        context.run_until_parked();
+        render_once(&mut context, &view);
+        assert_eq!(runtime.metrics().read().script_renders(), renders + 1);
+        assert!(view.read_with(&context, |view, _| view.build_error().is_some()));
+    }
+
+    let view_type = runtime.load_source("repaired.js", TOGGLE).expect("load");
+    let object = context
+        .update(|window, cx| runtime.instantiate(&view_type, window, cx))
+        .expect("instantiate");
+    view.update(&mut context, |view, _| view.replace_object(object));
+    render_once(&mut context, &view);
+    assert!(snapshot_text(&mut context, &view).contains("count: 0"));
+    assert!(view.read_with(&context, |view, _| view.build_error().is_none()));
+    let renders = runtime.metrics().read().script_renders();
+    context.run_until_parked();
+    context.executor().advance_clock(std::time::Duration::from_secs(5));
+    context.run_until_parked();
+    render_once(&mut context, &view);
+    assert_eq!(runtime.metrics().read().script_renders(), renders);
+}
+
+#[gpui::test]
+fn a_script_error_named_interrupted_is_not_automatically_retried(cx: &mut TestAppContext) {
+    let source = ALWAYS_FAILS.replace("first render failed on purpose", "interrupted");
+    let (runtime, mut context, view) = script_view(cx, &source);
+    render_once(&mut context, &view);
+    let renders = runtime.metrics().read().script_renders();
+    context.run_until_parked();
+    context.executor().advance_clock(std::time::Duration::from_secs(10));
+    context.run_until_parked();
+    render_once(&mut context, &view);
+    assert_eq!(runtime.metrics().read().script_renders(), renders);
+    assert!(view.read_with(&context, |view, _| view.build_error().is_some()));
+}
+
+#[gpui::test]
+fn retiring_an_interrupted_view_cancels_its_retry(cx: &mut TestAppContext) {
+    let source = r#"
+import { View } from "gpui-kit";
+export default class Interrupted extends View {
+  render() { while (true) {} }
+}
+"#;
+    let (runtime, mut context, view) = script_view(cx, source);
+    render_once(&mut context, &view);
+    let renders = runtime.metrics().read().script_renders();
+    context.run_until_parked();
+    view.update(&mut context, |view, _| view.retire());
+    context.executor().advance_clock(std::time::Duration::from_secs(5));
+    context.run_until_parked();
+    render_once(&mut context, &view);
+    assert_eq!(runtime.metrics().read().script_renders(), renders);
+    assert!(view.read_with(&context, |view, _| view.snapshot().is_none()));
+}
+
 #[gpui::test]
 fn a_failed_render_continuation_keeps_its_original_view(cx: &mut TestAppContext) {
     let (runtime, mut context, failed) = script_view(cx, ASYNC_FAILURE);
