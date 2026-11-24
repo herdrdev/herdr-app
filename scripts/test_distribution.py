@@ -471,15 +471,27 @@ exec /bin/mv "$@"''')
         path.write_text(f'#!/bin/sh\nprintf "%s\\n" "herdr-app {version}"\n')
         path.chmod(0o755)
 
-    def cargo_report(self, path=None):
+    def cargo_report(self, path=None, *, report=True, external=False, fresh=False, wrong_package=False):
         fixed = repr(str(path)) if path else "None"
         self.stub("cargo", f'''exec "{sys.executable}" - "$@" <<'PY'
-import json, os, pathlib, sys
+import json, os, pathlib, re, shutil, sys
 a = sys.argv[1:]
+manifest = pathlib.Path('Cargo.toml').resolve()
+version = re.search(r'^version = "([^"]+)"', manifest.read_text(), re.M).group(1)
+package = {{'id':'fixture-herdr-app@'+version,'name':'herdr-app','version':version,'manifest_path':str(manifest)}}
+if a[0] == 'metadata':
+    print(json.dumps({{'packages':[package]}}))
+    sys.exit(0)
+pathlib.Path('cargo-args').write_text('\\n'.join(a))
+pathlib.Path('cargo-min').write_text(os.environ.get('MACOSX_DEPLOYMENT_TARGET',''))
 triple = a[a.index('--target')+1] if '--target' in a else None
 windows = 'windows' in (triple or '') or os.environ['TEST_OS'].startswith(('MINGW', 'MSYS', 'CYGWIN'))
-path = pathlib.Path({fixed}) if {fixed} else pathlib.Path('target') / (triple or '') / 'release' / ('herdr-app.exe' if windows else 'herdr-app')
-print(json.dumps({{'reason':'compiler-artifact','target':{{'name':'herdr-app','kind':['bin']}},'profile':{{'test':False}},'executable':str(path.resolve())}}))
+template = pathlib.Path({fixed}) if {fixed} else pathlib.Path('target') / (triple or '') / 'release' / ('herdr-app.exe' if windows else 'herdr-app')
+path = template if {external!r} or '--target-dir' not in a else pathlib.Path(a[a.index('--target-dir')+1]) / (triple or '') / 'release' / template.name
+path.parent.mkdir(parents=True,exist_ok=True)
+if path != template: shutil.copy2(template,path)
+if {report!r}:
+    print(json.dumps({{'reason':'compiler-artifact','package_id':'wrong-package' if {wrong_package!r} else package['id'],'manifest_path':str(manifest),'fresh':{fresh!r},'target':{{'name':'herdr-app','kind':['bin']}},'profile':{{'test':False}},'executable':str(path.resolve())}}))
 PY''')
 
     def test_packages_keep_full_notices_on_every_platform(self):
@@ -559,13 +571,27 @@ PY''')
         checkout = self.package_checkout()
         stale = checkout / "target/x86_64-apple-darwin/release/herdr-app"
         self.program(stale)
-        self.stub("cargo", "exit 0")
+        self.cargo_report(stale, report=False)
         self.stub("lipo", "echo x86_64")
         self.stub("otool", f'printf "cmd LC_BUILD_VERSION\\nminos {MIN_MACOS}\\n"')
         result = self.run_script(checkout / "scripts/package", "Darwin", "x86_64")
         self.assertNotEqual(result.returncode, 0)
         self.assertIn("Cargo did not report exactly one", result.stderr)
         self.assertFalse((checkout / "sign-called").exists())
+
+    def test_package_rejects_shared_cached_or_other_package_artifacts_before_signing(self):
+        for option in ("external", "fresh", "wrong_package"):
+            with self.subTest(option=option):
+                checkout = self.package_checkout()
+                binary = checkout / "shared/herdr-app"
+                self.program(binary)
+                self.cargo_report(binary, **{option: True})
+                self.stub("lipo", "echo x86_64")
+                self.stub("otool", f'printf "cmd LC_BUILD_VERSION\\nminos {MIN_MACOS}\\n"')
+                result = self.run_script(checkout / "scripts/package", "Darwin", "x86_64")
+                self.assertNotEqual(result.returncode, 0)
+                self.assertIn("freshly compiled executable from this package", result.stderr)
+                self.assertFalse((checkout / "sign-called").exists())
 
     def native_mac_package(self, rust_host, binary_arch, *args, deployment=MIN_MACOS, shell_arch="x86_64"):
         checkout = self.package_checkout()
@@ -580,20 +606,7 @@ PY''')
         # signing step. Apple Silicon requires at least an ad-hoc code signature.
         subprocess.run(["/usr/bin/codesign", "--force", "--sign", "-", str(binary)],
                        capture_output=True, text=True, check=True)
-        self.stub("cargo", f'''printf '%s\\n' "$@" > "{checkout}/cargo-args"
-printf '%s' "$MACOSX_DEPLOYMENT_TARGET" > "{checkout}/cargo-min"
-target=
-while [ "$#" -gt 0 ]; do
-  if [ "$1" = --target ]; then target=$2; shift; fi
-  shift
-done
-destination="target/${{target:+$target/}}release"
-mkdir -p "$destination"
-cp "{binary}" "$destination/herdr-app"
-exec "{sys.executable}" - "$destination/herdr-app" <<'PY'
-import json, pathlib, sys
-print(json.dumps({{'reason':'compiler-artifact','target':{{'name':'herdr-app','kind':['bin']}},'profile':{{'test':False}},'executable':str(pathlib.Path(sys.argv[1]).resolve())}}))
-PY''')
+        self.cargo_report(binary)
         result = self.run_script(checkout / "scripts/package", "Darwin", shell_arch, *args, rust_host=rust_host)
         return checkout, result
 
@@ -610,15 +623,15 @@ PY''')
                 checkout, result = self.native_mac_package(host, actual_arch, *args, shell_arch=shell_arch)
                 hardware_arm = subprocess.run(["/usr/sbin/sysctl", "-n", "hw.optional.arm64"], capture_output=True, text=True).stdout.strip() == "1"
                 native_arch = "arm64" if hardware_arm else "x86_64"
-                if actual_arch != native_arch and result.returncode:
-                    # Cross-target execution requires OS emulation support.
-                    # Native release runners need none; otherwise fail closed.
-                    self.assertNotEqual(result.returncode, 0)
-                    self.assertIn("cannot verify executable version", result.stderr)
-                    self.assertFalse((checkout / "sign-called").exists())
-                    self.assertIn("for macos-aarch64", result.stdout)
-                    continue
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+                self.assertIn(f"for {target}", result.stdout)
+                if actual_arch != native_arch:
+                    self.assertIn(f"not executing {actual_arch} on {native_arch}", result.stdout)
+                else:
+                    self.assertNotIn("not executing", result.stdout)
+                import json
+                receipt = json.loads((checkout / f"dist/herdr-app-{target}.build.json").read_text())
+                self.assertEqual(receipt["version_verification"], "isolated-cargo-metadata" if actual_arch != native_arch else "execute")
                 triple = "x86_64-apple-darwin" if target == "macos-x86_64" else "aarch64-apple-darwin"
                 self.assertEqual((checkout / "cargo-args").read_text().splitlines()[-2:], ["--target", triple])
                 self.assertEqual((checkout / "cargo-min").read_text(), MIN_MACOS)

@@ -126,8 +126,12 @@ Linux needs the development packages listed in that workflow.
 The pinned libghostty-vt dependency sets the macOS deployment floor to 13.0.
 On macOS, `scripts/package` defaults to the Rust compiler's host architecture;
 pass an explicit Rust target triple to package for the other architecture.
-Packaging also requires Python 3 and a host that can run the target executable:
-the script uses Cargo's reported output path and verifies its version before signing or packing.
+Packaging requires Python 3. Each invocation builds in a fresh private Cargo target
+directory, stages that build's executable and verifies its source package and version
+before signing or packing; configured shared target directories are not reused.
+Native binaries also answer `--version`. A cross-architecture macOS binary is not
+executed: its version comes from the matching Cargo package metadata and fresh build.
+A `dist/herdr-app-<target>.build.json` receipt records this check and the artifact hashes.
 
 ```sh
 git clone --recurse-submodules https://github.com/herdrdev/herdr-app.git

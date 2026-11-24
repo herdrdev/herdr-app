@@ -206,6 +206,12 @@ fn login_path_answer(out: &str) -> Option<std::ffi::OsString> {
     (!path.is_empty() && path != "$PATH").then(|| path.into())
 }
 
+const CORE_INSTALL_SCRIPT: &str = r#"
+installer=$(curl -fsSL "$1/core/install.sh") || exit $?
+[ -n "$installer" ] || { echo 'the installer download was empty' >&2; exit 1; }
+printf '%s\n' "$installer" | sh
+"#;
+
 /// Installs the core's latest release with its own installer (into
 /// ~/.local/bin, or HC_INSTALL_DIR), then finds it. Err: what went wrong.
 pub fn install() -> Result<PathBuf, String> {
@@ -216,7 +222,9 @@ pub fn install() -> Result<PathBuf, String> {
         c
     } else {
         let mut c = crate::spawn::command("sh");
-        c.args(["-c", &format!("curl -fsSL {releases}/core/install.sh | sh")]);
+        // POSIX sh has no pipefail. A failed/partial transfer must never run,
+        // even if it contains a valid first command or a Core already exists.
+        c.args(["-c", CORE_INSTALL_SCRIPT, "sh", &releases]);
         c
     };
     let out = cmd.stdin(Stdio::null()).output().map_err(|e| format!("cannot run the installer: {e}"))?;
@@ -381,6 +389,61 @@ mod tests {
             let core = crate::hc::Core::connect().unwrap_or_else(|e| panic!("{replacement}: {e:#}"));
             assert_eq!(path(), good);
             assert_eq!(core.hello["selected"], replacement);
+        }
+        std::fs::remove_dir_all(root).unwrap();
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn core_install_requires_a_complete_nonempty_download_before_execution() {
+        use std::os::unix::fs::PermissionsExt;
+        const CASE: &str = "HERDR_TEST_CORE_INSTALL_TRANSFER";
+        if let Ok(case) = std::env::var(CASE) {
+            let dir = PathBuf::from(std::env::var_os("HC_INSTALL_DIR").unwrap());
+            let core = dir.join("herdr-core");
+            let before = std::fs::read(&core).ok();
+            let result = install();
+            if let Some(before) = before {
+                assert_eq!(std::fs::read(&core).unwrap(), before, "existing Core changed");
+            }
+            if case == "complete" || case == "fresh" {
+                assert_eq!(result.unwrap(), core);
+                assert!(dir.join("executed").is_file());
+            } else {
+                let error = result.expect_err("a failed/empty download must be an installation error");
+                assert!(!dir.join("executed").exists(), "partial installer ran");
+                assert!(error.contains(if case == "empty" { "empty" } else { "simulated transfer failure" }), "{error}");
+            }
+            return;
+        }
+        let root = std::env::temp_dir().join(format!("herdr-core-install-transfer-{}", std::process::id()));
+        std::fs::create_dir_all(&root).unwrap();
+        for case in ["empty", "truncated", "failed", "complete", "fresh"] {
+            let dir = root.join(case);
+            std::fs::create_dir(&dir).unwrap();
+            let core = dir.join("herdr-core");
+            let fixture = dir.join("core-fixture");
+            std::fs::write(&fixture, "#!/bin/sh\nprintf 'hc 0.1.22\\n'\n").unwrap();
+            std::fs::set_permissions(&fixture, std::fs::Permissions::from_mode(0o755)).unwrap();
+            if case != "fresh" { std::fs::copy(&fixture, &core).unwrap(); }
+            let curl = dir.join("curl");
+            std::fs::write(&curl, r#"#!/bin/sh
+[ "$1" = -fsSL ] && [ "$2" = 'https://transfer.invalid/core/install.sh' ] || exit 97
+case "$HERDR_TEST_CORE_INSTALL_TRANSFER" in
+  empty) exit 0 ;;
+  failed) echo 'simulated transfer failure' >&2; exit 22 ;;
+  truncated) printf 'touch "$HC_INSTALL_DIR/executed"\n'; echo 'simulated transfer failure' >&2; exit 18 ;;
+  complete | fresh) printf '[ -e "$HC_INSTALL_DIR/herdr-core" ] || cp "$HC_INSTALL_DIR/core-fixture" "$HC_INSTALL_DIR/herdr-core"\ntouch "$HC_INSTALL_DIR/executed"\n' ;;
+esac
+"#).unwrap();
+            std::fs::set_permissions(&curl, std::fs::Permissions::from_mode(0o755)).unwrap();
+            let output = Command::new(std::env::current_exe().unwrap())
+                .args(["--exact", "core_bin::tests::core_install_requires_a_complete_nonempty_download_before_execution", "--nocapture"])
+                .env(CASE, case).env("HC_INSTALL_DIR", &dir)
+                .env("HERDR_RELEASES_URL", "https://transfer.invalid")
+                .env("PATH", std::env::join_paths([dir.as_path(), Path::new("/usr/bin"), Path::new("/bin")]).unwrap())
+                .output().unwrap();
+            assert!(output.status.success(), "{case}: {}\n{}", String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
         }
         std::fs::remove_dir_all(root).unwrap();
     }
