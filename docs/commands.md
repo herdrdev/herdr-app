@@ -341,9 +341,11 @@ Clear a terminal's selection (default: the focused one).
 
 ## `terminal.copy`
 
-Copy the focused terminal's selection. With nothing selected, that key goes to the program.
+Copy a terminal's selection (default: the focused one). With nothing selected, that key goes to the program.
 
-No arguments.
+| Argument | Required |
+|---|---|
+| `terminal` | no |
 
 ## `terminal.scroll`
 

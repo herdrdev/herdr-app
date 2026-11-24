@@ -3503,13 +3503,27 @@ impl AppWindow {
                 t.view.update(cx, |view, cx| view.open_search(window, cx));
                 return;
             }
-            "terminal.copy" | "terminal.paste" | "terminal.paste_image" => {
+            "terminal.copy" => {
+                // A terminal menu names the right-clicked terminal, which need not have focus.
+                let view = match Self::owned(a, "terminal") {
+                    Some(address) => self.shown_terminal_view(&address, window, cx),
+                    None => match self.focused_terminal(window, cx) {
+                        Some(t) => Ok(t.view.clone()),
+                        None => return,
+                    },
+                };
+                match view {
+                    // A command, not a key: copy and leave the selection.
+                    Ok(view) => view.update(cx, |v, cx| { let _ = v.copy(cx); }),
+                    Err(error) => self.fail(error),
+                }
+                return;
+            }
+            "terminal.paste" | "terminal.paste_image" => {
                 if let Some(t) = self.focused_terminal(window, cx) {
                     t.view.update(cx, |v, cx| match name {
                         "terminal.paste" => v.paste(cx),
-                        "terminal.paste_image" => v.paste_image(cx),
-                        // A command, not a key: copy and leave the selection.
-                        _ => { let _ = v.copy(cx); }
+                        _ => v.paste_image(cx),
                     });
                 }
                 return;
@@ -7607,6 +7621,54 @@ export default class Probe extends View {
             let focused = crate::mods::shared("probe.focused").unwrap();
             assert_eq!(focused["selection"]["end"], json!({"row": 0, "col": col}), "{slot}: {focused}");
         }
+    }
+
+    #[test]
+    fn copy_takes_the_terminal_a_menu_names() {
+        in_own_process("copy_named_terminal");
+    }
+
+    /// A terminal menu passes the right-clicked terminal, which need not have focus (#949).
+    #[gpui::test]
+    fn copy_named_terminal(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("copy_named_terminal") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "unused", "", json!({
+            "id": "main", "type": "block", "content": { "tab": "active" },
+            "floating": [{"id": "float", "content": {"terminal": "t2"}}]
+        }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.model.add_space("s1", "one", "", crate::model::Tab::new("a", "a", "pa", "t1"));
+            for address in ["t1", "t2"] {
+                this.live.insert(address.into(), json!({"address": address}));
+            }
+            this.sync(window, cx);
+        }));
+        cx.run_until_parked();
+        let clipboard = |cx: &mut gpui::VisualTestContext| cx.update(|_, cx| cx.read_from_clipboard().and_then(|c| c.text()));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            for (slot, text) in [("pa", "focused text"), ("float:float", "clicked text")] {
+                this.terms[slot].view.update(cx, |v, cx| {
+                    v.write_output(text.as_bytes());
+                    v.selection_command("terminal.select", &json!({"at": {"row": 0, "col": 0}, "mode": "line"}), cx).unwrap();
+                });
+            }
+            this.terms["pa"].focus.focus(window, cx);
+            let result = this.run_as("terminal.copy", json!({"terminal": "t2"}), false, window, cx);
+            assert!(result.get("error").is_none(), "{result}");
+        }));
+        assert_eq!(clipboard(cx).as_deref(), Some("clicked text"));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            let result = this.run_as("terminal.copy", json!({}), false, window, cx);
+            assert!(result.get("error").is_none(), "{result}");
+        }));
+        assert_eq!(clipboard(cx).as_deref(), Some("focused text"), "without a terminal, keys keep copying the focused one");
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            let result = this.run_as("terminal.copy", json!({"terminal": "t9"}), false, window, cx);
+            assert!(result["error"].as_str().is_some_and(|e| e.contains("t9")), "{result}");
+        }));
     }
 
     #[test]
