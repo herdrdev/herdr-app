@@ -117,6 +117,8 @@ fn save(record: &Record) {
 
 /// Called once the live window has connected and synchronized successfully.
 pub fn started(first_install: bool) {
+    // Test windows aren't launches: a spotlight release would open What's new over every one.
+    if cfg!(test) { return; }
     let mut launch = LAUNCH.lock().unwrap();
     if launch.is_some() { return; }
     let record = std::fs::read(path("update-notes.json")).ok().and_then(|b| serde_json::from_slice(&b).ok()).unwrap_or_default();
