@@ -13,15 +13,86 @@ function place(s, all = panes()) {
 }
 
 // The mod owns this preference; paths belong to the space's machine, not the app.
-async function root(userHome) {
+async function personal() {
   const raw = await readTextFile(`${appHome()}/settings.json`);
-  const directory = (raw === null ? {} : JSON.parse(raw))?.worktrees?.directory ?? "~/.herdr/worktrees";
-  if (typeof directory !== "string" || !directory.trim()) throw new Error("worktrees.directory must be a non-empty path.");
-  let path = directory.replace(/\\/g, "/");
-  if (path === "~" || path.startsWith("~/")) path = userHome.replace(/\\/g, "/").replace(/\/$/, "") + path.slice(1);
-  if (!path.startsWith("/") && !/^[A-Za-z]:\//.test(path)) throw new Error("worktrees.directory must be an absolute path or start with ~/.");
-  return path.replace(/\/+$/, "");
+  return (raw === null ? {} : JSON.parse(raw))?.worktrees ?? {};
 }
+
+const absolute = (path) => path.startsWith("/") || /^[A-Za-z]:\//.test(path);
+const tidy = (path) => {
+  const [head, ...rest] = path.replace(/\/+$/, "").split("/");
+  const out = [];
+  for (const part of rest) {
+    if (part === "..") out.pop();
+    else if (part && part !== ".") out.push(part);
+  }
+  return [head, ...out].join("/");
+};
+function expand(raw, userHome, name, base) {
+  if (typeof raw !== "string" || !raw.trim()) throw new Error(`${name} must be a non-empty path.`);
+  let path = raw.replace(/\\/g, "/");
+  if (path === "~" || path.startsWith("~/")) path = userHome.replace(/\\/g, "/").replace(/\/$/, "") + path.slice(1);
+  else if (!absolute(path) && base) path = `${base.replace(/\\/g, "/")}/${path}`;
+  if (!absolute(path)) throw new Error(`${name} must be an absolute path or start with ~/.`);
+  return tidy(path);
+}
+
+async function root(userHome) {
+  return expand((await personal()).directory ?? "~/.herdr/worktrees", userHome, "worktrees.directory");
+}
+
+const command = (value, name) => {
+  if (value === undefined || value === null || value === "") return [];
+  if (typeof value !== "string") throw new Error(`${name} must be a command.`);
+  return value.trim() ? [value] : [];
+};
+
+const object = (value) => value !== null && typeof value === "object" && !Array.isArray(value);
+
+async function repoSettings(repo, userHome, on) {
+  const mine = await personal();
+  const raw = await readTextFile(`${repo.main}/.herdr/worktree.json`, { on });
+  let shared = {};
+  if (raw !== null) {
+    try { shared = JSON.parse(raw); } catch (error) { throw new Error(`.herdr/worktree.json: ${error.message}`); }
+    if (!object(shared)) throw new Error(".herdr/worktree.json must be a JSON object.");
+  }
+  const repos = mine.repos ?? {};
+  if (!object(repos)) throw new Error("worktrees.repos must be an object.");
+  const main = tidy(repo.main.replace(/\\/g, "/"));
+  const key = Object.keys(repos).find((k) => expand(k, userHome, `worktrees.repos key ${k}`) === main);
+  if (key && !object(repos[key])) throw new Error(`worktrees.repos["${key}"] must be an object.`);
+  const from = (name) => `${name in shared || !key ? ".herdr/worktree.json" : `worktrees.repos["${key}"]`} ${name}`;
+  return { mine, here: { ...(key ? repos[key] : {}), ...shared }, from };
+}
+
+async function plan(repo, userHome, on, creating) {
+  const { mine, here, from } = await repoSettings(repo, userHome, on);
+  const parent = !creating ? null : here.directory === undefined
+    ? `${await root(userHome)}/${repo.name}`
+    : expand(here.directory, userHome, from("directory"), repo.main);
+  return {
+    parent,
+    setup: [...command(mine.setup, "worktrees.setup"), ...command(here.setup, from("setup"))],
+    teardown: [...command(here.teardown, from("teardown")), ...command(mine.teardown, "worktrees.teardown")],
+  };
+}
+
+const quote = (s) => `'${s.replace(/'/g, `'\\''`)}'`;
+const EXPORTS = 'export HERDR_WORKTREE_REPO="$1" HERDR_WORKTREE_PATH="$2" HERDR_WORKTREE_BRANCH="$3"; shift 3';
+const windows = (userHome) => /^[A-Za-z]:\//.test((userHome ?? "").replace(/\\/g, "/"));
+
+function withSetup(commands, env, argv) {
+  const steps = commands.map((c) => `{\n${c}\n} || printf '\\nherdr: setup step failed (exit %s): %s\\n' "$?" ${quote(c.split("\n")[0])}`);
+  const script = [EXPORTS, ...steps, '[ $# -eq 0 ] || exec "$@"'].join("\n");
+  return ["/bin/sh", "-c", script, "sh", env.repo, env.path, env.branch, ...(argv ?? [])];
+}
+
+async function teardown(commands, env, on) {
+  const script = [EXPORTS, ...commands.map((c) => `{\n${c}\n} || exit $?`)].join("\n");
+  return exec("/bin/sh", ["-c", script, "sh", env.repo, env.path, env.branch], { cwd: env.path, on, timeout: 600_000 });
+}
+
 // Home as ~ (git says C:/Users/x where Windows says C:\Users\x).
 const tilde = (path, userHome) => {
   const [p, h] = [path, userHome].map((s) => s.replace(/\\/g, "/"));
@@ -162,6 +233,7 @@ export default class Worktree extends View {
           this.unpushed = (await submodules(repo.top, this.on)).unpushed;
         }
         if (repo && this.opening) this.list = await checkouts(repo, this.on);
+        if (repo && !this.opening) this.plan = await plan(repo, this.userHome, this.on, props().action !== "remove");
         this.repo = repo;
         cx.notify();
         // The list (and with it the filter input) only mounts once loading is
@@ -201,17 +273,27 @@ export default class Worktree extends View {
     cx.notify();
   }
 
+  parentDir() {
+    return this.plan?.parent ?? `${this.root}/${this.repo.name}`;
+  }
+
+  scripts(kind) {
+    return windows(this.userHome) ? [] : this.plan?.[kind] ?? [];
+  }
+
   async create() {
     const branch = this.text.trim();
     if (!branch) return "Type a branch name.";
-    const path = `${this.root}/${this.repo.name}/${slug(branch)}`;
+    const path = `${this.parentDir()}/${slug(branch)}`;
     const exists = (await git(this.repo.main, ["show-ref", "--verify", "--quiet", `refs/heads/${branch}`], this.on)).ok;
     const add = exists ? ["worktree", "add", path, branch] : ["worktree", "add", "-b", branch, path, "HEAD"];
     const r = await git(this.repo.top, add, this.on, 600_000);
     if (!r.ok) return r.err || "git worktree add failed.";
     const p = props();
+    const setup = this.scripts("setup");
+    const argv = setup.length ? withSetup(setup, { repo: this.repo.main, path, branch }, p.argv) : p.argv;
     // Leave spaces unnamed so they follow the checkout folder and nest under the repo.
-    run("space.new", { folder: path, machine: this.on ?? "", tab: p.tab, argv: p.argv });
+    run("space.new", { folder: path, machine: this.on ?? "", tab: p.tab, argv });
     return "";
   }
 
@@ -246,6 +328,18 @@ export default class Worktree extends View {
       .find(([path]) => path === `worktree ${this.repo.top}`);
     const lock = checkout?.find((field) => field === "locked" || field.startsWith("locked "));
     if (lock) return lock === "locked" ? "This worktree is locked." : `This worktree is locked: ${lock.slice(7)}`;
+
+    const steps = this.skipTeardown ? [] : this.scripts("teardown");
+    if (steps.length) {
+      const branch = (await git(this.repo.top, ["branch", "--show-current"], this.on)).out;
+      const r = await teardown(steps, { repo: this.repo.main, path: this.repo.top, branch }, this.on)
+        .catch((error) => ({ code: null, stdout: "", stderr: String(error?.message ?? error) }));
+      if (r.code !== 0) {
+        this.skipTeardown = true;
+        const tail = `${r.stdout ?? ""}\n${r.stderr ?? ""}`.trim().split("\n").slice(-6).join("\n");
+        return `Teardown failed${r.code === null ? "" : ` (exit ${r.code})`}, nothing was removed.${tail ? `\n${tail}` : ""}\nEnter again removes it without the teardown.`;
+      }
+    }
 
     // Git on a remote Windows machine reports a drive-letter or UNC path.
     const windows = this.on ? /^(?:[A-Za-z]:\/|\/\/)/.test(this.repo.top) : window().platform === "windows";
@@ -354,8 +448,12 @@ export default class Worktree extends View {
             ? !r.linked
               ? "This is the repository's main checkout, not a worktree."
               : `Closes the space and deletes ${tilde(r.top, this.userHome)}. The branch stays.`
-            : `A new space on a checkout in ${tilde(this.root, this.userHome)}/${r.name}/. A branch that exists is checked out; a new one starts from here.`;
+            : `A new space on a checkout in ${tilde(this.parentDir(), this.userHome)}/. A branch that exists is checked out; a new one starts from here.`;
     const blocked = !r || (remove && !r.linked);
+    const steps = this.plan?.[remove ? "teardown" : "setup"] ?? [];
+    const runs = !r || blocked || !steps.length ? ""
+      : windows(this.userHome) ? `${remove ? "Teardown" : "Setup"} scripts need sh, so they don't run on Windows.`
+        : `${remove ? "First runs" : "Then runs"} ${steps.map((c) => c.split("\n")[0]).join(", then ")} in the checkout.`;
     return v_flex()
       .id("worktree")
       .track_focus(this.handle)
@@ -367,6 +465,7 @@ export default class Worktree extends View {
       .text_size(13)
       .child(div().font_semibold().text_color(t.foreground).child(title))
       .child(div().text_color(t.muted).child(detail))
+      .when(Boolean(runs), (el) => el.child(div().text_size(12).text_color(t.dim).child(runs)))
       .when(remove && this.dirty, (el) => el.child(div().text_color(t.blocked).child("It has uncommitted changes: they will be lost.")))
       .when(remove && this.unpushed.length > 0, (el) => el.child(div().text_color(t.blocked).child(`Submodule ${this.unpushed.join(", ")} has commits that aren't pushed anywhere: they will be lost.`)))
       .when(!remove && !blocked, (el) =>
