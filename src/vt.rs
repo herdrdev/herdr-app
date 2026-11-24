@@ -612,6 +612,8 @@ pub enum LinkScan {
 #[derive(Clone, Debug, PartialEq)]
 pub struct LinkHit {
     pub target: String,
+    /// What the link shows on screen: an OSC 8 link's label, else the target.
+    pub text: String,
     pub spans: Spans,
 }
 
@@ -1356,16 +1358,19 @@ impl Vt {
 
     /// The link `find` sees in `text` at spot `at`.
     fn link_in(&self, text: &str, spots: &[Spot], top: u32, at: usize, find: &mut impl FnMut(&str, usize, LinkScan) -> Option<std::ops::Range<usize>>, scan: LinkScan) -> Option<LinkHit> {
-        let (target, chosen): (String, Vec<&Spot>) = match spots[at].uri.clone() {
+        let (target, shown, chosen): (String, String, Vec<&Spot>) = match spots[at].uri.clone() {
             Some(uri) => {
                 let same = |s: &&Spot| s.uri.as_deref() == Some(uri.as_str());
                 let start = spots[..at].iter().rposition(|s| !same(&s)).map_or(0, |i| i + 1);
                 let end = spots[at..].iter().position(|s| !same(&s)).map_or(spots.len(), |i| at + i);
-                (uri, spots[start..end].iter().collect())
+                let bytes = spots[start].byte..spots.get(end).map_or(text.len(), |s| s.byte);
+                let shown = text[bytes].trim().to_owned();
+                (uri, shown, spots[start..end].iter().collect())
             }
             None => {
                 let range = find(text, spots[at].byte, scan)?;
-                (text[range.clone()].to_owned(), spots.iter().filter(|s| range.contains(&s.byte)).collect())
+                let target = text[range.clone()].to_owned();
+                (target.clone(), target, spots.iter().filter(|s| range.contains(&s.byte)).collect())
             }
         };
         let mut spans = Spans::new();
@@ -1377,7 +1382,7 @@ impl Vt {
                 _ => spans.push((vy as u16, s.x, end)),
             }
         }
-        Some(LinkHit { target, spans })
+        Some(LinkHit { target, text: shown, spans })
     }
 
     pub fn clear_selection(&mut self) {
@@ -2906,8 +2911,22 @@ mod tests {
         vt.write(b"see \x1b]8;;https://herdr.dev\x1b\\the docs\x1b]8;;\x1b\\ now");
         let hit = vt.link_at(6, 0, found).unwrap();
         assert_eq!(hit.target, "https://herdr.dev");
+        assert_eq!(hit.text, "the docs");
         assert_eq!(hit.spans, vec![(0, 4, 11)]);
         assert_eq!(vt.link_at(13, 0, found), None);
+    }
+
+    #[test]
+    fn marked_links_keep_their_whole_label_across_wrapped_rows() {
+        let mut vt = Vt::new(10, 3);
+        vt.write(b"\x1b]8;;file:///tmp/report.pdf\x1b\\the report.pdf\x1b]8;;\x1b\\");
+        let hit = vt.link_at(1, 1, found).unwrap();
+        assert_eq!(hit.target, "file:///tmp/report.pdf");
+        assert_eq!(hit.text, "the report.pdf");
+        // Plain text shows its own target.
+        let mut vt = Vt::new(30, 2);
+        vt.write(b"open https://herdr.dev now");
+        assert_eq!(vt.link_at(6, 0, found).unwrap().text, "https://herdr.dev");
     }
 
     #[test]
