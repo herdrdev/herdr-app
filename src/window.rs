@@ -5700,7 +5700,7 @@ impl Render for AppWindow {
             .font_family(settings::get().ui_font_family.clone())
             .on_action(cx.listener(|this, a: &ShellAction, w, cx| {
                 #[cfg(any(target_os = "macos", test))]
-                if matches!(a.id(), "terminal.copy" | "terminal.paste")
+                if matches!(a.id(), "terminal.copy" | "terminal.paste" | "terminal.search")
                     && crate::macos::dispatch_edit(a, this.terms.values().any(|t| t.view.read(cx).owns_keyboard_focus(w, cx)), w, cx) {
                     return;
                 }

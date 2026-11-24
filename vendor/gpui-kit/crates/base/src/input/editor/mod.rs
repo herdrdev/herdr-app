@@ -1,4 +1,7 @@
-use gpui::{App, Div, Entity, InteractiveElement as _, IntoElement, RenderOnce, Stateful, Window};
+use gpui::{
+    App, Div, Entity, InteractiveElement as _, IntoElement, ParentElement as _, RenderOnce,
+    Stateful, Styled as _, Window,
+};
 
 use super::{EditorMode, InputBaseState, InputModeKind};
 
@@ -55,6 +58,14 @@ impl InputModeKind for EditorMode {
             .extras
             .range_decorations
             .adjust_for_edit(range, new_len);
+    }
+
+    fn search_opened(
+        state: &mut InputBaseState<Self>,
+        window: &mut Window,
+        cx: &mut gpui::Context<InputBaseState<Self>>,
+    ) {
+        state.show_search_bar(window, cx);
     }
 
     fn refresh_language_features(
@@ -228,8 +239,19 @@ impl Editor {
 }
 
 impl RenderOnce for Editor {
-    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
-        self.state
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        // The find bar is the text's sibling, not its child: keys in the bar's
+        // fields that the fields don't handle (Enter, Undo) must not reach the editor.
+        let bar = super::search_bar::render(&self.state, window, cx);
+        gpui::div()
+            .relative()
+            .flex()
+            .flex_1()
+            .h_full()
+            .min_w_0()
+            .min_h_0()
+            .child(self.state)
+            .children(bar)
     }
 }
 

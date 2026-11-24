@@ -220,6 +220,15 @@ pub trait InputModeKind: sealed::Sealed + Sized + 'static {
     ) {
     }
 
+    /// The search shortcut opened (or re-invoked) the search session.
+    /// The code editor answers with its find bar.
+    fn search_opened(
+        _state: &mut InputBaseState<Self>,
+        _window: &mut Window,
+        _cx: &mut gpui::Context<InputBaseState<Self>>,
+    ) {
+    }
+
     /// Refreshes language-server state after the text changed.
     fn refresh_language_features(
         _state: &mut InputBaseState<Self>,
@@ -359,6 +368,7 @@ pub struct EditorExtras {
     pub(crate) hover_popover: Option<HoverPopoverState>,
     pub(crate) hover_definition: HoverDefinition,
     pub(crate) context_menu_task: Task<anyhow::Result<()>>,
+    pub(crate) search_bar: Option<super::search_bar::SearchBar>,
 }
 
 impl Default for EditorExtras {
@@ -372,6 +382,7 @@ impl Default for EditorExtras {
             hover_popover: None,
             hover_definition: HoverDefinition::default(),
             context_menu_task: Task::ready(Ok(())),
+            search_bar: None,
         }
     }
 }

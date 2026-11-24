@@ -1174,7 +1174,11 @@ When `s.position` is present, place a popup with
 `EditorState.new({
 language, value, readonly, font_family: settings().font_family, syntax: {
 keyword: theme().ansi5, ... } })` + `Editor.new(state)` is a code view (readonly)
-or editor with syntax highlighting, line numbers and folding. For Markdown
+or editor with syntax highlighting, line numbers and folding. Cmd-F (Ctrl-F
+elsewhere) opens its find bar: Enter/Shift-Enter steps through matches, `Aa`
+matches case, Escape closes it with the match selected. Cmd-Shift-F (Ctrl-H)
+also shows Replace (Enter replaces one, Cmd/Ctrl-Enter all); a readonly editor
+only finds. For Markdown
 source, set `language: "markdown"` or `"md"`. The `syntax` keys are `heading`,
 `strong`, `emphasis`, `code`, `quote`, `list`, and `link` (the URL). Use
 `theme()` colors for light and dark layouts. Built-in syntax colors use a

@@ -2217,6 +2217,11 @@ impl<M: InputModeKind> InputBaseState<M> {
             return self.clean(window, cx);
         }
 
+        if self.search_session.open {
+            self.close_search(cx);
+            return;
+        }
+
         cx.propagate();
     }
 

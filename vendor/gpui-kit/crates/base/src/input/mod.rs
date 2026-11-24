@@ -65,6 +65,8 @@ mod native;
 mod rope_ext;
 #[path = "editor/search.rs"]
 mod search;
+#[path = "editor/search_bar.rs"]
+mod search_bar;
 #[path = "base/selection.rs"]
 mod selection;
 #[path = "base/state.rs"]
