@@ -76,6 +76,23 @@ test("picker reveals keyboard selection in its measured, constrained list", () =
   }
 });
 
+test("picker opens a tab with agents on its focused agent, else the one that needs you most", () => {
+  const view = picker();
+  commands.length = 0;
+  const ctx = { id: "t1" };
+  const agent = (address: string, status: string, focused = false) => ({ address, status, focused });
+  view.go({ kind: "ctx", ctx, mine: [] });
+  view.go({ kind: "ctx", ctx, mine: [agent("a", "idle")] });
+  view.go({ kind: "ctx", ctx, mine: [agent("a", "idle"), agent("b", "blocked"), agent("c", "working")] });
+  view.go({ kind: "ctx", ctx, mine: [agent("a", "idle", true), agent("b", "blocked")] });
+  expect(commands).toEqual([
+    ["tab.select", { id: "t1" }],
+    ["agent.focus", { terminal: "a" }],
+    ["agent.focus", { terminal: "b" }],
+    ["agent.focus", { terminal: "a" }],
+  ]);
+});
+
 test("picker space choices explicitly target this computer or the selected machine", () => {
   const view = picker();
   commands.length = 0;
