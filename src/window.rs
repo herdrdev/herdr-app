@@ -11,7 +11,7 @@ mod pane_drag;
 mod pane_size;
 mod titlebar;
 
-use crate::layout::{Axis, Background as Paint, Content, Fit, HeaderContent, Kind, Line, Node, PaneFrame, Size as Span};
+use crate::layout::{Axis, Background as Paint, Content, Divider, Fit, HeaderContent, Kind, Line, Node, PaneFrame, Size as Span};
 use crate::model::{self, Tab, Model};
 use crate::mods::{self, Found, Instance, Request};
 use crate::settings;
@@ -407,6 +407,9 @@ pub struct AppWindow {
     float_hover: HashSet<String>,
     /// Bumped on every hover change, so a delayed leave knows it's still current.
     float_leave: HashMap<String, u64>,
+    divider_hover: HashSet<(String, usize)>,
+    divider_hover_epoch: u64,
+    divider_window_hovered: bool,
     model: Model,
     /// Terminal views by block id (panes and chrome terminal blocks).
     terms: HashMap<String, Term>,
@@ -539,6 +542,9 @@ impl AppWindow {
             float_reveal: HashMap::new(),
             float_hover: HashSet::new(),
             float_leave: HashMap::new(),
+            divider_hover: HashSet::new(),
+            divider_hover_epoch: 0,
+            divider_window_hovered: true,
             model: Model::default(),
             terms: HashMap::new(),
             copies: HashMap::new(),
@@ -1008,9 +1014,17 @@ impl AppWindow {
         }
     }
 
+    fn reset_divider_interaction(&mut self) {
+        self.drag = None;
+        self.divider_hover.clear();
+        // Recheck hover under a stationary pointer even if the new tree reuses node ids.
+        self.divider_hover_epoch += 1;
+    }
+
     /// Makes `name` the shown layout (its file, or its default if missing or
     /// broken), with the person's clicks on it.
     fn load_layout(&mut self, name: &str) {
+        self.reset_divider_interaction();
         self.layout_name = name.to_owned();
         self.failed_link_enrollments.clear();
         self.written_layout.clear();
@@ -1131,6 +1145,7 @@ impl AppWindow {
                     s.forget_edited(&self.file_chrome, &n);
                     s
                 };
+                self.reset_divider_interaction();
                 self.file_chrome = n.clone();
                 self.chrome = n;
                 self.picked_theme = state.theme.clone();
@@ -3600,6 +3615,7 @@ impl AppWindow {
                 if n.look.theme == self.chrome.look.theme {
                     state.theme = self.picked_theme.clone();
                 }
+                self.reset_divider_interaction();
                 self.chrome = self.file_chrome.clone();
                 state.apply(&mut self.chrome);
                 self.picked_theme = state.theme;
@@ -3618,6 +3634,7 @@ impl AppWindow {
                     }
                     self.written_layout = text;
                     self.layout_file_ok = true;
+                    self.reset_divider_interaction();
                     self.file_chrome = n.clone();
                     self.chrome = n;
                     self.picked_theme = None;
@@ -4610,7 +4627,7 @@ impl AppWindow {
     }
 
     /// `frame`: how panes are wrapped here (inside a framed tab), else None.
-    fn render_node(&self, n: &Node, focused: &HashSet<String>, frame: Option<&PaneFrame>, cx: &mut Context<Self>) -> AnyElement {
+    fn render_node(&self, n: &Node, focused: &HashSet<String>, frame: Option<&PaneFrame>, rendered_dividers: &mut HashSet<(String, usize)>, cx: &mut Context<Self>) -> AnyElement {
         let mut el = div().relative().overflow_hidden().size_full().flex();
         let bounds_map = self.bounds.clone();
         let id = n.id.clone();
@@ -4621,7 +4638,7 @@ impl AppWindow {
         }
         let el = match &n.kind {
             Kind::Block { content } => {
-                let inner = self.render_block(n, content, focused, cx);
+                let inner = self.render_block(n, content, focused, rendered_dividers, cx);
                 match frame.filter(|_| n.is_pane()) {
                     Some(f) => el.child(self.frame_pane(n, f, focused.contains(&n.id), inner, cx)),
                     None => el.child(inner),
@@ -4640,12 +4657,12 @@ impl AppWindow {
                     .max(f32::EPSILON);
                 for (i, child) in shown.iter().enumerate() {
                     if i > 0 {
-                        el = el.child(self.separator(n, axis, gap, i - 1, cx));
+                        el = el.child(self.separator(n, axis, gap, i - 1, rendered_dividers, cx));
                     }
                     // No clipping here: a child's shadow may fall outside it (the child clips itself).
                     let mut slot = div().relative().flex().min_w_0().min_h_0();
                     slot = sized(slot, child, axis, total);
-                    el = el.child(slot.child(self.render_node(child, focused, frame, cx)));
+                    el = el.child(slot.child(self.render_node(child, focused, frame, rendered_dividers, cx)));
                 }
                 el
             }
@@ -4660,7 +4677,7 @@ impl AppWindow {
                     (h.bottom(), div().flex_none().h(settings::z(height)).w_full().flex().child(head))
                 });
                 let body = match n.active_child() {
-                    Some(child) => self.render_node(child, focused, frame, cx),
+                    Some(child) => self.render_node(child, focused, frame, rendered_dividers, cx),
                     None => div().into_any_element(),
                 };
                 let body = div().flex_1().min_h_0().flex().child(body);
@@ -4675,7 +4692,7 @@ impl AppWindow {
         el.children(self.render_floats(n, cx)).children(self.pane_grip(&n.id, row, cx)).into_any_element()
     }
 
-    fn render_block(&self, n: &Node, content: &Content, focused: &HashSet<String>, cx: &mut Context<Self>) -> AnyElement {
+    fn render_block(&self, n: &Node, content: &Content, focused: &HashSet<String>, rendered_dividers: &mut HashSet<(String, usize)>, cx: &mut Context<Self>) -> AnyElement {
         match content {
             Content::Terminal { .. } => match self.pane_term(&n.id) {
                 Some(t) => {
@@ -4716,7 +4733,7 @@ impl AppWindow {
                     .into_any_element(),
             },
             Content::Context { .. } => match self.model.active_tab() {
-                Some(c) => self.render_node(c.shown(), focused, self.pane_frame(), cx),
+                Some(c) => self.render_node(c.shown(), focused, self.pane_frame(), rendered_dividers, cx),
                 None if self.documents.get("").is_some_and(|s| s.layout() == "loading") => div().size_full().into_any_element(),
                 None => {
                     let key = crate::keys::listing().into_iter().find(|(_, _, a)| a == "space.new").map(|(_, k, _)| format!(" ({k})"));
@@ -4804,10 +4821,16 @@ impl AppWindow {
         row.into_any_element()
     }
 
-    fn separator(&self, n: &Node, axis: Axis, gap: f32, index: usize, cx: &mut Context<Self>) -> AnyElement {
+    fn separator(&self, n: &Node, axis: Axis, gap: f32, index: usize, rendered_dividers: &mut HashSet<(String, usize)>, cx: &mut Context<Self>) -> AnyElement {
         let row = axis == Axis::Row;
         let zoom = settings::zoom();
-        let line = n.divider.as_ref().map(|d| (d.width * zoom, c(&d.color)));
+        let resizable = n.resizable();
+        let hover_key = (resizable && n.divider.as_ref().is_some_and(|d| d.hover.is_some()))
+            .then(|| (n.id.clone(), index));
+        let hovered = self.divider_window_hovered && self.drag.is_none()
+            && hover_key.as_ref().is_some_and(|key| self.divider_hover.contains(key));
+        let dragging = resizable && self.drag.as_ref().is_some_and(|d| d.container == n.id && d.index == index && d.axis == axis);
+        let line = n.divider.as_ref().map(|d| (d.width * zoom, c(d.color_for(hovered, dragging))));
         let width = pane_size::separator_width(n, gap) * zoom;
         let mut sep = div().flex_none().relative().flex().items_center().justify_center();
         sep = if row { sep.w(px(width)).h_full() } else { sep.h(px(width)).w_full() };
@@ -4820,26 +4843,55 @@ impl AppWindow {
             }
             sep = sep.child(separator_line(row, w, color, top));
         }
-        if n.resizable() {
+        if resizable {
             let container = n.id.clone();
             let hit = HANDLE.max(width);
-            sep = sep.child(
-                div()
-                    .absolute()
-                    .when(row, |d| d.top_0().bottom_0().left(px((width - hit) / 2.0)).w(px(hit)).cursor_col_resize())
-                    .when(!row, |d| d.left_0().right_0().top(px((width - hit) / 2.0)).h(px(hit)).cursor_row_resize())
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                            if let Some(space) = this.model.space_of(&container)
-                                && this.require_document(space.machine.as_deref()).is_err() { return; }
-                            this.drag = Some(Drag { container: container.clone(), index, axis });
-                            cx.stop_propagation();
-                        }),
-                    ),
-            );
+            let tracks_drag_color = n.divider.as_ref().is_some_and(|d| d.hover.is_some() || d.active.is_some());
+            let handle = div()
+                .absolute()
+                .when(row, |d| d.top_0().bottom_0().left(px((width - hit) / 2.0)).w(px(hit)).cursor_col_resize())
+                .when(!row, |d| d.left_0().right_0().top(px((width - hit) / 2.0)).h(px(hit)).cursor_row_resize())
+                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+                    if let Some(space) = this.model.space_of(&container)
+                        && this.require_document(space.machine.as_deref()).is_err() { return; }
+                    this.drag = Some(Drag { container: container.clone(), index, axis });
+                    cx.stop_propagation();
+                    if tracks_drag_color {
+                        cx.notify();
+                    }
+                }));
+            if let Some(key) = hover_key {
+                let epoch = self.divider_hover_epoch;
+                let id = SharedString::from(format!("divider-{epoch}-{}-{index}", n.id));
+                rendered_dividers.insert(key.clone());
+                sep = sep.child(handle.id(id).on_hover(cx.listener(move |this, over: &bool, _, cx| {
+                    if this.divider_hover_epoch != epoch {
+                        return;
+                    }
+                    let changed = if *over {
+                        this.divider_hover.insert(key.clone())
+                    } else {
+                        this.divider_hover.remove(&key)
+                    };
+                    if changed {
+                        cx.notify();
+                    }
+                })));
+            } else {
+                sep = sep.child(handle);
+            }
         }
         sep.into_any_element()
+    }
+
+    fn finish_divider_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.drag.take().is_some() {
+            self.save();
+            // Mods see the new sizes (the sidebar picks its rail by width).
+            self.publish(cx);
+            self.flush_documents(false, window, cx);
+            cx.notify();
+        }
     }
 
     fn drag_to(&mut self, pos: Point<Pixels>) {
@@ -4896,7 +4948,7 @@ impl AppWindow {
         }
     }
 
-    fn render_overlays(&self, viewport: Size<Pixels>, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn render_overlays(&self, viewport: Size<Pixels>, rendered_dividers: &mut HashSet<(String, usize)>, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut windows = Vec::new();
         let mut overlays = Vec::new();
         let mut toasts = Vec::new();
@@ -4909,7 +4961,7 @@ impl AppWindow {
             let (w, h) = (span(o.size.width, viewport.width), span(o.size.height, viewport.height));
             let sized = |v: f32| v > 0.0 || o.kind != OverlayKind::Window;
             let content = match &o.layout {
-                Some(l) => self.render_node(l, &HashSet::new(), None, cx),
+                Some(l) => self.render_node(l, &HashSet::new(), None, rendered_dividers, cx),
                 None => self.render_slot(&o.slot, cx),
             };
             let fit_toast = o.kind == OverlayKind::Toast && o.fit;
@@ -5466,7 +5518,7 @@ fn dock(root: &mut Node, block: Node, place: &str, wrapper_id: String) {
     wrapper.toast = toast;
     wrapper.terminal_menu = terminal_menu;
     wrapper.link_handlers = link_handlers;
-    wrapper.divider = Some(Line { width: 1.0, color: "border".into() });
+    wrapper.divider = Some(Divider { width: 1.0, color: "border".into(), hover: None, active: None });
     *root = wrapper;
 }
 
@@ -5602,10 +5654,17 @@ impl Render for AppWindow {
         if mods::publish_window(self.window_json(window)) {
             self.refresh_snapshot_mods(cx);
         }
+        // On these platforms GPUI keeps the last in-window position after pointer exit.
+        // On macOS is_window_hovered reports keyboard focus.
+        self.divider_window_hovered = !cfg!(any(target_os = "linux", target_os = "windows", target_os = "freebsd"))
+            || window.is_window_hovered();
         let focused = self.focused_path(window, cx);
-        let tree = self.render_node(&self.chrome, &focused, None, cx);
+        let mut rendered_dividers = HashSet::new();
+        let tree = self.render_node(&self.chrome, &focused, None, &mut rendered_dividers, cx);
         let tree = self.window_frame(tree, window, cx);
-        let overlays = self.render_overlays(window.viewport_size(), cx);
+        let overlays = self.render_overlays(window.viewport_size(), &mut rendered_dividers, cx);
+        // GPUI drops a removed handle without sending its hover-leave callback.
+        self.divider_hover.retain(|key| rendered_dividers.contains(key));
         let tracker = self.float_tracker(cx);
         let win_tracker = self.window_tracker(cx);
         let pane_drag = self.pane_drag_layer(cx);
@@ -5672,9 +5731,7 @@ impl Render for AppWindow {
                     return;
                 }
                 if ev.pressed_button != Some(MouseButton::Left) {
-                    this.drag = None;
-                    this.save();
-                    this.publish(cx);
+                    this.finish_divider_drag(window, cx);
                     return;
                 }
                 this.drag_to(ev.position);
@@ -5682,12 +5739,10 @@ impl Render for AppWindow {
             }))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, window, cx| {
                 this.drag_from = None;
-                if this.drag.take().is_some() {
-                    this.save();
-                    // Mods see the new sizes (the sidebar picks its rail by width).
-                    this.publish(cx);
-                    this.flush_documents(false, window, cx);
-                }
+                this.finish_divider_drag(window, cx);
+            }))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, window, cx| {
+                this.finish_divider_drag(window, cx);
             }))
             .child(tree)
             .children(overlays)
