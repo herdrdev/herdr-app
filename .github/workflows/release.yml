@@ -55,7 +55,7 @@ concurrency:
 env:
   RUST_TOOLCHAIN: 1.95.0
   # In the cache key: ghostty-sys can't tell when Zig changes.
-  ZIG_VERSION: 0.16.0
+  ZIG_VERSION: 0.17.0
   IS_TAG: ${{ github.ref_type == 'tag' }}
 
 jobs:

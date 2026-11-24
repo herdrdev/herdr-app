@@ -2558,6 +2558,21 @@ mod tests {
         assert!(reply.contains("i=7") && reply.contains("OK"), "{reply:?}");
     }
 
+    #[test]
+    fn kitty_images_in_erased_scrollback_stay_erased() {
+        // `clear` sends ED2 then ED3. An image that scrolled into history must
+        // go with it, not come back at the top-left of the screen (#956).
+        let mut vt = Vt::new(20, 5);
+        vt.resize(20, 5, 8, 16);
+        vt.write(b"\x1b_Ga=T,f=100,i=7,q=2;iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/iZk9HQAAAABJRU5ErkJggg==\x1b\\\r\n");
+        for _ in 0..20 {
+            vt.write(b"filler\r\n");
+        }
+        assert!(vt.placements().is_empty(), "{:?}", vt.placements());
+        vt.write(b"\x1b[H\x1b[2J\x1b[3J");
+        assert!(vt.placements().is_empty(), "{:?}", vt.placements());
+    }
+
     fn virtual_image(vt: &mut Vt, id: u32, placement: u32) {
         use base64::Engine;
         let pixels = base64::engine::general_purpose::STANDARD.encode([255u8, 0, 0].repeat(32));
