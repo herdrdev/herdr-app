@@ -126,6 +126,8 @@ the highlighted line shows where it will land.
   ...), as in Herdr; `tab.rename` names it ("fix login"). A space
   has one or more; closing the last one closes the space (it stays in
   `recent`).
+  The + menu opens agents in unnamed tabs. The tab bar follows the
+  agent and shows the shell again after exit. Double-click a tab to set its name.
 - A tab can be **settled** (`tab.settle`): put away on this screen, still running;
   `settled` on each tab. The shipped layouts don't use it (they list every
   tab); a mod that does can hide or fold settled tabs. Showing one, or an
