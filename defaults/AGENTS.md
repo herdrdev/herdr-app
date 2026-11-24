@@ -1134,12 +1134,14 @@ definite height from their container: a `flex_1()` chain with no explicit
 plain scroll area and the virtual-list pair; `list` and `uniform_list` keep
 their own position, so pair a `Scrollbar` of the same id instead.
 `.on_drop((event, cx) => …)` on a plain layout element receives external files as
-`event.paths` (absolute paths). The feedback form accepts dropped images with
+`event.paths` (absolute paths) and `event.on` (null for external files). The feedback form accepts dropped images with
 the same limits, previews and removal as picked images.
 `.id("file-row").drag_paths([absolutePath], { on: machine })` makes a plain layout
 element a file/folder drag source for terminals. Omit `on` (or use null)
 for local paths; remote paths retain their source machine. Ordinary clicks
-still work; dropping outside a terminal cancels without pasting.
+still work. Terminals and `.on_drop` targets accept the drag; a mod target gets
+`{ paths, on }` with the source machine in `on`. Local paths can also be dropped
+onto the Finder on macOS (remote paths cannot). Dropping elsewhere cancels.
 A terminal on the source machine receives quoted paths without Enter.
 Local files dropped onto a remote terminal are copied there like an OS file
 drop; local folders and remote paths dropped onto another machine are refused.

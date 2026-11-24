@@ -299,7 +299,7 @@ import { View, div } from "gpui-kit";
 import { note } from "fixture";
 export default class extends View {
   render() {
-    return div().size_full().on_drop((event, cx) => { note(event.paths); cx.stop_propagation(); });
+    return div().size_full().on_drop((event, cx) => { note({paths: event.paths, on: event.on}); cx.stop_propagation(); });
   }
 }"#);
     let paths = Rc::new(RefCell::new(Vec::new()));
@@ -331,7 +331,7 @@ export default class extends View {
         window.dispatch_event(FileDropEvent::Submit { position }.to_platform_input(), cx);
     });
     visual.run_until_parked();
-    assert_eq!(*paths.borrow(), vec![json!(["/var/tmp/screenshot.png", "/var/tmp/a file.jpg"])]);
+    assert_eq!(*paths.borrow(), vec![json!({"paths": ["/var/tmp/screenshot.png", "/var/tmp/a file.jpg"], "on": null})]);
 }
 
 struct PathDropTarget {
@@ -457,6 +457,44 @@ export default class extends View {
             paths: vec!["/work/中文 O'Brien/file name.txt".into(), "/work/a folder".into()],
             on: source.map(str::to_owned),
         }], "only the completed drop delivers the original snapshot");
+    }
+}
+
+#[gpui::test]
+fn drag_paths_drops_reach_mod_targets_with_their_source_machine(cx: &mut TestAppContext) {
+    use gpui::{MouseButton, point, px};
+    cx.update(gpui_shell::init);
+    let script = r#"
+import { View, div } from "gpui-kit";
+import { note } from "fixture";
+export default class extends View {
+  render() {
+    return div().size_full().flex_col()
+      .child(div().id("source").w(180).h(80).drag_paths(["/work/a b.txt"], {on: "ON"}))
+      .child(div().id("target").w(180).h(80).on_drop((event, cx) => note({paths: event.paths, on: event.on})));
+  }
+}"#;
+    for source in [None, Some("server")] {
+        let fixture = Fixture::new(&script.replace("\"ON\"", &source.map_or("null".into(), |m| format!("\"{m}\""))));
+        let log = Rc::new(RefCell::new(Vec::new()));
+        let calls = log.clone();
+        gpui_shell::policy::set_default(Policy::new().with_host_module(
+            HostModule::new("fixture").function("note", move |a| {
+                calls.borrow_mut().push(from_host(a.value(0)?));
+                Ok(HostValue::Null)
+            })
+        ).unwrap());
+        let runtime = ShellRuntime::new_isolated().unwrap();
+        let window = cx.add_window(|window, cx| Mounted(runtime.try_load(&fixture.0, window, cx).unwrap()));
+        let mut visual = VisualTestContext::from_window(*window.deref(), cx);
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        visual.run_until_parked();
+        visual.simulate_mouse_down(point(px(20.), px(20.)), MouseButton::Left, Default::default());
+        visual.simulate_mouse_move(point(px(35.), px(35.)), MouseButton::Left, Default::default());
+        visual.simulate_mouse_move(point(px(40.), px(120.)), MouseButton::Left, Default::default());
+        visual.simulate_mouse_up(point(px(40.), px(120.)), MouseButton::Left, Default::default());
+        visual.run_until_parked();
+        assert_eq!(*log.borrow(), vec![json!({"paths": ["/work/a b.txt"], "on": source})]);
     }
 }
 
