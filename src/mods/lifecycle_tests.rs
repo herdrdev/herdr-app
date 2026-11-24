@@ -503,7 +503,7 @@ export default class extends View {
 
 #[gpui::test]
 fn window_mouse_events_follow_a_drag_off_the_element(cx: &mut TestAppContext) {
-    use gpui::{DispatchPhase, Modifiers, MouseButton, MouseMoveEvent, MouseUpEvent, ParentElement as _, Styled as _, point, px};
+    use gpui::{DispatchPhase, Modifiers, MouseButton, MouseMoveEvent, MouseUpEvent, NavigationDirection, ParentElement as _, Styled as _, point, px};
 
     struct MountedWithCapture(gpui::Entity<ShellRoot>);
 
@@ -556,7 +556,9 @@ export default class extends View {
             cx.propagate();
             cx.notify();
           }
-        }))
+        })
+        .on_window_mouse_up("back", (e) => note(`up ${e.button}`))
+        .on_window_mouse_up("forward", (e) => note(`up ${e.button}`)))
       .child(div().id("pane").flex_1().on_mouse_up("left", () => note("pane-up")));
   }
 }"#);
@@ -590,6 +592,8 @@ export default class extends View {
     visual.simulate_mouse_move(over_pane, None, none);
     visual.simulate_mouse_down(over_bar, MouseButton::Left, none);
     visual.simulate_mouse_up(over_pane, MouseButton::Right, none);
+    visual.simulate_mouse_up(over_pane, MouseButton::Navigate(NavigationDirection::Back), none);
+    visual.simulate_mouse_up(over_pane, MouseButton::Navigate(NavigationDirection::Forward), none);
     visual.simulate_mouse_up(over_pane, MouseButton::Left, none);
     draw(&mut visual);
     visual.simulate_mouse_move(over_bar, None, none);
@@ -599,6 +603,7 @@ export default class extends View {
     assert_eq!(*log.borrow(), [
         "up left 20,20 100x30", "bar-up",
         "move 50,300 left", "move 50,300 none", "cancelled",
+        "up back", "up forward",
         "up left 50,300 100x30",
     ]);
 }
