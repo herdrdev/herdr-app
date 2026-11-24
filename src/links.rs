@@ -95,8 +95,7 @@ pub fn resolve<'a>(link: &'a str, cwd: Option<&Path>) -> Resolved<'a> {
     let (native, spelling) = if has_scheme(link) {
         let native = file_url_spelling(link)
             .as_deref()
-            .map(file_url_path)
-            .filter(|p| p.exists())
+            .and_then(|path| [path, without_suffix(path)].into_iter().map(file_url_path).find(|p| p.exists()))
             .map_or_else(|| Target::Url(link.to_owned()), Target::File);
         (Some(native), link)
     } else if let Some((path, spelling)) = local_file(link, cwd) {
@@ -138,6 +137,18 @@ fn expand_file(link: &str, cwd: Option<&Path>) -> Option<PathBuf> {
 // The period ending a sentence, or `:42` / `:42:7` naming a place in the file.
 fn without_suffix(path: &str) -> &str {
     let mut bare = path.strip_suffix('.').unwrap_or(path);
+    // A line range: `#L5`, `#L5-L12` and `#L5-12` (as on GitHub), or `:5-12`.
+    if let Some((head, lines)) = bare.rsplit_once("#L")
+        && line_range(lines).is_some()
+    {
+        return head;
+    }
+    if let Some((head, lines)) = bare.rsplit_once(':')
+        && lines.contains('-')
+        && line_range(lines).is_some()
+    {
+        return head;
+    }
     for _ in 0..2 {
         match bare.rsplit_once(':') {
             Some((head, n)) if is_number(n) => bare = head,
@@ -147,10 +158,26 @@ fn without_suffix(path: &str) -> &str {
     bare
 }
 
-/// The `:line[:column]` that `raw` adds after the path spelling `bare`.
+/// `5`, `5-12` or `5-L12`: the first line of a range.
+fn line_range(text: &str) -> Option<u32> {
+    let (start, end) = text.split_once('-').unwrap_or((text, "1"));
+    let end = end.strip_prefix('L').unwrap_or(end);
+    is_number(end).then_some(())?;
+    start.parse::<NonZeroU32>().ok().map(NonZeroU32::get)
+}
+
+/// The `:line[:column]`, `:start-end` or `#Lstart[-end]` that `raw` adds after
+/// the path spelling `bare`. A range gives its first line.
 fn place(raw: &str, bare: &str) -> Option<(u32, Option<u32>)> {
-    let rest = raw.strip_prefix(bare)?.strip_prefix(':')?;
+    let rest = raw.strip_prefix(bare)?;
     let rest = rest.strip_suffix('.').unwrap_or(rest);
+    if let Some(lines) = rest.strip_prefix("#L") {
+        return line_range(lines).map(|line| (line, None));
+    }
+    let rest = rest.strip_prefix(':')?;
+    if rest.contains('-') {
+        return line_range(rest).map(|line| (line, None));
+    }
     let (line, column) = rest.split_once(':').unwrap_or((rest, ""));
     let line = line.parse::<NonZeroU32>().ok()?.get();
     let column = column.parse::<NonZeroU32>().ok().map(NonZeroU32::get);
@@ -567,6 +594,33 @@ mod tests {
         assert_eq!(place("C:/src/a.rs:12:5", "C:/src/a.rs"), Some((12, Some(5))));
         assert_eq!(place(r"C:\src\a.rs:12:5", r"C:\src\a.rs"), Some((12, Some(5))));
         assert_eq!(place("C:/src/a.rs", "C:/src/a.rs"), None);
+        assert_eq!(place("src/a.rs:5-12", "src/a.rs"), Some((5, None)));
+        assert_eq!(place("src/a.rs#L42", "src/a.rs"), Some((42, None)));
+        assert_eq!(place("src/a.rs#L5-L12", "src/a.rs"), Some((5, None)));
+        assert_eq!(place("src/a.rs#L5-12.", "src/a.rs"), Some((5, None)));
+        assert_eq!(place("src/a.rs:5-x", "src/a.rs"), None);
+        assert_eq!(place("src/a.rs#Lx", "src/a.rs"), None);
+    }
+
+    #[test]
+    fn line_ranges_and_anchors_after_a_path_are_not_part_of_it() {
+        let dir = std::env::temp_dir().join(format!("herdr-link-ranges-{}", std::process::id()));
+        std::fs::create_dir_all(dir.join("src")).unwrap();
+        std::fs::write(dir.join("src/main.rs"), "").unwrap();
+        let file = Some(Target::File(dir.join("src/main.rs")));
+        for link in ["src/main.rs:5-12", "src/main.rs#L42", "src/main.rs#L5-L12", "src/main.rs#L5-12", "src/main.rs#L5-12."] {
+            assert_eq!(first(&format!("see {link} now")), Some(link), "{link}");
+            assert_eq!(native_target(link, Some(&dir)), file, "{link}");
+        }
+        for link in ["src/main.rs:5-x", "src/main.rs#Lx", "src/main.rs#5"] {
+            assert_eq!(native_target(link, Some(&dir)), None, "{link}");
+        }
+        let slashed = dir.join("src/main.rs").to_string_lossy().replace('\\', "/");
+        let root = if cfg!(windows) { "/" } else { "" };
+        for suffix in ["#L5-L12", ":5-12", ":42"] {
+            assert_eq!(native_target(&format!("file://{root}{slashed}{suffix}"), None), file, "{suffix}");
+        }
+        std::fs::remove_dir_all(dir).unwrap();
     }
 
     #[test]
