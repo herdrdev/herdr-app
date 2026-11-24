@@ -16,10 +16,15 @@ const C = {
   dim: "#8b8f95",
 };
 
+// Windows paths show with forward slashes (some UI fonts draw a backslash as a yen or won sign),
+// and a drive path matches the home folder ignoring case, as the file system does.
 function folder(cwd) {
   if (!cwd) return "";
-  const h = home();
-  return cwd === h ? "~" : cwd.startsWith(h + "/") ? "~" + cwd.slice(h.length) : cwd;
+  const path = cwd.replace(/\\/g, "/");
+  const h = (home() ?? "").replace(/\\/g, "/");
+  const key = /^[a-z]:\//i.test(path) ? (s) => s.toLowerCase() : (s) => s;
+  if (h && key(path) === key(h)) return "~";
+  return h && key(path).startsWith(key(h) + "/") ? "~" + path.slice(h.length) : path;
 }
 
 // The pane a tab's tab speaks for: the focused one, else its agent, else the first.
