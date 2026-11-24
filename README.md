@@ -86,6 +86,8 @@ On macOS, Cmd+A selects the terminal's whole screen and scrollback, ready for Cm
 In vim and other alternate-screen apps, it selects only that screen.
 Linux and Windows keep Ctrl+A for the shell; bind `terminal.select_all` in `keys.json` if desired.
 
+To show or hide Herdr from any app with one key, add `"hotkey": true` to `settings.json`: Cmd+` on macOS, Ctrl+` on Windows, or name your own key (`"hotkey": "ctrl-alt-space"`). On Linux, bind `herdr-app do app.toggle` in your desktop's keyboard settings.
+
 [Layouts and mods](docs/mods.md) · [Commands](docs/commands.md)
 
 ## Updates and privacy
