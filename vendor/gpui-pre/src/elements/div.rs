@@ -1796,6 +1796,7 @@ pub fn div() -> Div {
         interactivity: Interactivity::new(),
         children: SmallVec::default(),
         prepaint_listener: None,
+        paint_listener: None,
         image_cache: None,
         prepaint_order_fn: None,
     }
@@ -1806,6 +1807,7 @@ pub struct Div {
     interactivity: Interactivity,
     children: SmallVec<[StackSafe<AnyElement>; 2]>,
     prepaint_listener: Option<Box<dyn Fn(Vec<Bounds<Pixels>>, &mut Window, &mut App) + 'static>>,
+    paint_listener: Option<Box<dyn FnOnce(Bounds<Pixels>, &mut Window, &mut App) + 'static>>,
     image_cache: Option<Box<dyn ImageCacheProvider>>,
     prepaint_order_fn: Option<Box<dyn Fn(&mut Window, &mut App) -> SmallVec<[usize; 8]>>>,
 }
@@ -1818,6 +1820,15 @@ impl Div {
         listener: impl Fn(Vec<Bounds<Pixels>>, &mut Window, &mut App) + 'static,
     ) -> Self {
         self.prepaint_listener = Some(Box::new(listener));
+        self
+    }
+
+    /// Call a listener with this div's bounds when it is painted.
+    pub fn on_paint(
+        mut self,
+        listener: impl FnOnce(Bounds<Pixels>, &mut Window, &mut App) + 'static,
+    ) -> Self {
+        self.paint_listener = Some(Box::new(listener));
         self
     }
 
@@ -2085,6 +2096,9 @@ impl Element for Div {
                         return;
                     }
 
+                    if let Some(listener) = self.paint_listener.take() {
+                        listener(bounds, window, cx);
+                    }
                     for child in &mut self.children {
                         child.paint(window, cx);
                     }
