@@ -401,8 +401,16 @@ impl Model {
 
     /// Removes a pane. Returns what else closed: the tab, and the space if it was its last.
     pub fn remove_pane(&mut self, pane_id: &str) -> (bool, bool) {
-        let Some(c) = self.tab_of_mut(pane_id) else { return (false, false) };
-        c.root.remove(pane_id);
+        let Some((_, closed, space_closed)) = self.detach_pane(pane_id) else { return (false, false) };
+        (closed, space_closed)
+    }
+
+    /// Takes a pane out of its tab and returns it, for a move elsewhere. The
+    /// tab (and its space, if it was the last) closes when it empties, like
+    /// `remove_pane`.
+    pub fn detach_pane(&mut self, pane_id: &str) -> Option<(Node, bool, bool)> {
+        let Some(c) = self.tab_of_mut(pane_id) else { return None };
+        let pane = c.root.remove(pane_id)?;
         if c.zoomed.as_deref() == Some(pane_id) {
             c.zoomed = None;
         }
@@ -414,11 +422,35 @@ impl Model {
                 c.before.retain(|p| here.contains(p));
                 c.focused = c.before.pop().or_else(|| here.first().cloned());
             }
-            return (false, false);
+            return Some((pane, false, false));
         }
         let id = c.id.clone();
         let (_, space_closed) = self.remove_tab(&id);
-        (true, space_closed)
+        Some((pane, true, space_closed))
+    }
+
+    /// Moves a pane beside a pane in another tab, preserving its id and terminal.
+    /// The destination is selected and the pane is focused. An emptied source
+    /// tab closes, along with its space if that was the last tab.
+    pub fn move_pane_to(&mut self, source: &str, target: &str, edge: crate::layout::Edge) -> bool {
+        use crate::layout::Edge;
+        let (Some(from), Some(to)) = (self.tab_of(source), self.tab_of(target)) else { return false };
+        if from.id == to.id
+            || !from.root.find(source).is_some_and(Node::is_pane)
+            || !to.root.find(target).is_some_and(Node::is_pane)
+        {
+            return false;
+        }
+        let tab = to.id.clone();
+        let Some((mut pane, _, _)) = self.detach_pane(source) else { return false };
+        pane.size = None;
+        let axis = if edge.vertical() { Axis::Row } else { Axis::Column };
+        // The validated target is in a different tab, so detaching cannot remove it.
+        assert!(self.split_with(target, axis, pane));
+        if matches!(edge, Edge::Left | Edge::Top) {
+            self.tab_mut(&tab).unwrap().root.swap(source, target);
+        }
+        self.select_tab(&tab)
     }
 
     /// Removes a tab. Returns its terminal addresses and whether its space closed.
@@ -942,6 +974,53 @@ mod tests {
         let before = format!("{:?}", m.spaces);
         for (source, target) in [("x1", "x1"), ("x1", "missing"), ("missing", "x1"), ("x1", "x2"), ("c1", "x1")] {
             assert!(!m.move_pane(source, target, None));
+            assert_eq!(format!("{:?}", m.spaces), before);
+        }
+    }
+
+    #[test]
+    fn a_pane_moves_to_another_tab_and_its_emptied_tab_closes() {
+        use crate::layout::Edge;
+        let mut m = model_with_one();
+        m.add_tab("p1", Tab::new("c2", "docs", "x2", "t2"));
+        m.add_tab("p1", Tab::new("c3", "last", "x3", "t3"));
+        // The pane lands to the right of the target and keeps its terminal.
+        assert!(m.move_pane_to("x1", "x2", Edge::Right));
+        assert_eq!(m.tab_of("x1").unwrap().id, "c2");
+        assert!(m.tab("c1").is_none());
+        assert_eq!(m.address_of("x1").as_deref(), Some("t1"));
+        assert_eq!(m.focused_pane().as_deref(), Some("x1"));
+        let ids: Vec<&str> = m.tab("c2").unwrap().root.panes().iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(ids, ["x2", "x1"]);
+        // An edge places it there; a mod pane moves like a terminal's.
+        let viewer = Node::block("x4", Content::Mod { name: "markdown".into(), props: json!({}) });
+        assert!(m.split_with("x3", Axis::Row, viewer));
+        assert!(m.move_pane_to("x4", "x1", Edge::Left));
+        let c = m.tab("c2").unwrap();
+        assert_eq!(c.root.parent_of("x4").unwrap().axis(), Some(Axis::Row));
+        let ids: Vec<&str> = c.root.panes().iter().map(|n| n.id.as_str()).collect();
+        assert_eq!(ids, ["x2", "x4", "x1"]);
+    }
+
+    #[test]
+    fn moving_a_tabs_last_pane_closes_it_and_then_its_space() {
+        let mut m = model_with_one();
+        m.add_space("p2", "web", "/src/web", Tab::new("c2", "deploy", "x2", "t2"));
+        assert!(m.move_pane_to("x2", "x1", crate::layout::Edge::Bottom));
+        assert!(m.tab("c2").is_none());
+        assert!(m.space("p2").is_none());
+        assert_eq!(m.recent, [Recent { name: "web".into(), folder: "/src/web".into() }]);
+        assert_eq!(m.tab("c1").unwrap().root.parent_of("x2").unwrap().axis(), Some(Axis::Column));
+        assert_eq!(m.address_of("x2").as_deref(), Some("t2"));
+    }
+
+    #[test]
+    fn a_pane_cannot_move_to_its_own_tab_or_nowhere() {
+        let mut m = model_with_one();
+        m.split("x1", Axis::Row, "x9", "t9");
+        let before = format!("{:?}", m.spaces);
+        for (source, target) in [("x1", "x9"), ("x1", "x1"), ("x1", "missing"), ("missing", "x9"), ("c1", "x9")] {
+            assert!(!m.move_pane_to(source, target, crate::layout::Edge::Right), "{source} -> {target}");
             assert_eq!(format!("{:?}", m.spaces), before);
         }
     }

@@ -81,6 +81,15 @@ Use `commands` to confirm the command's exact shape:
 herdr-app do pane.split '{"direction":"right","pane":"p12"}'
 ```
 
+`pane.move {pane?, tab | target, edge?}` moves a pane while keeping its terminal
+running. Use `tab` to place it beside that tab's focused pane, or `target` for a
+specific pane. The edge defaults to `right`. Moves across spaces stay on the
+same machine. A `pending: true` reply means the move is still in progress.
+
+```sh
+herdr-app do pane.move --pane p12 --tab tb4
+```
+
 `pane.swap {pane?, direction | target}` trades the places of `pane` (default:
 the focused one) and its neighbor in a direction, or `target`, another pane of
 the same tab. Give `direction` or `target`, not both. Focus stays with the same pane:
