@@ -1,0 +1,14 @@
+#!/bin/sh
+# Herdr's RHEL 8 build.
+#
+# RHEL 8 X11 desktops often report a HiDPI scale (Xft.dpi=192) on a 1080p
+# screen, so GPUI lays the window out at 2x and renders more pixels than the
+# screen. This build defaults to 1x; set GPUI_X11_SCALE_FACTOR yourself (in
+# the environment or in front of this script) to use another value.
+if [ -z "${GPUI_X11_SCALE_FACTOR:-}" ]; then
+  GPUI_X11_SCALE_FACTOR=1
+  export GPUI_X11_SCALE_FACTOR
+fi
+
+dir=$(dirname "$0")
+exec "$dir/herdr-app" "$@"

@@ -1,7 +1,7 @@
 # Plan: RHEL 8-only release build in `release.yml`
 
-Status: the app-only RHEL 8 build is **green** (run 3). The herdr-core step
-below is **planned but not yet implemented** in the workflow.
+Status: the app+core RHEL 8 build is **green** (run 5). A launcher that
+defaults the X11 scale to 1 is added to the tarball for run 6.
 
 ## Goal
 
@@ -39,7 +39,8 @@ and publishing to the release bucket. `ci.yml` stays untouched.
 | Trigger | `workflow_dispatch` so `gh workflow run release.yml --ref <branch>` starts it directly. No tag/publish trigger. |
 | App build | `scripts/package x86_64-unknown-linux-gnu` → `dist/herdr-app-linux-x86_64.tar.gz`. |
 | Core build | Clone upstream `https://github.com/herdrdev/herdr-core` (shallow), checkout the tag matching `distribution/core-version` (currently `0.1.11`, tag `v0.1.11`), init its submodules, and build `cargo build --locked --release -p herdr-core` with the same Rust/Zig toolchains in the same container. Upstream master is acceptable if that tag is not buildable; no changes to herdr-core itself. |
-| Output | One tarball, `dist/herdr-app-rhel8-x86_64.tar.gz`: the `scripts/package` app tree plus `herdr-core` and an `hc` symlink in `herdr-app/`. Upload as artifact `herdr-app-rhel8-x86_64`. Nothing goes to the release bucket or manifest. |
+| Output | One tarball, `dist/herdr-app-rhel8-x86_64.tar.gz`: the `scripts/package` app tree plus `herdr-core`, an `hc` symlink, the `herdr-app-rhel8` launcher and `README-rhel8.md` in `herdr-app/`. Upload as artifact `herdr-app-rhel8-x86_64`. Nothing goes to the release bucket or manifest. |
+| X11 scale | This build ships a launcher, `herdr-app-rhel8`, that defaults `GPUI_X11_SCALE_FACTOR=1` when unset (an explicit value still wins). RHEL 8 X11 desktops often report `Xft.dpi: 192` on a 1080p screen, which makes GPUI lay the window out at 2x and render more pixels than the screen. The app's own code keeps its normal scale detection. |
 | Where to work | Branch `build/rhel8-release-gha` on fork `shawn111/herdr-app`; no pushes to `upstream`. |
 | Repo docs | `defaults/AGENTS.md`, `src/SKILL.md`, and `CHANGELOG.md` unchanged: no user-facing app behavior, and changelog entries are written at release time. |
 
@@ -126,7 +127,8 @@ Publishing and a real RHEL 8 desktop smoke test remain separate decisions.
 | 2 | `3756df7` | https://github.com/shawn111/herdr-app/actions/runs/45259697562 | failed in `Keep unchanged sources fresh`: `fatal: detected dubious ownership in repository at '/__w/herdr-app/herdr-app'` (container root vs runner-owned workspace) | Add `git config --global --add safe.directory "$GITHUB_WORKSPACE"` after checkout. |
 | 3 | `cb80aaf` | https://github.com/shawn111/herdr-app/actions/runs/45260188232 | **success** (11m43s), app only: `ldd (GNU libc) 2.28`, `highest GLIBC symbol version required: 2.28`, tarball/notices/`--help` checks passed, artifact uploaded | None needed; next step is adding herdr-core. |
 | 4 | `e526642` | https://github.com/shawn111/herdr-app/actions/runs/45276478949 | failed in `Check glibc floor`: exit 141 (SIGPIPE) from `objdump | grep | sort -Vu | tail -1 | cut` after printing glibc 2.28 | Replace pipeline with awk that reads full objdump output and computes max GLIBC version. |
-| 5 | — | — | pending | — |
+| 5 | `83d0c6c` | https://github.com/shawn111/herdr-app/actions/runs/45280201963 | **success**: `ldd (GNU libc) 2.28`, `herdr-app` and `herdr-core` both at 2.28, artifact 38.5 MB | None needed; app+core green. |
+| 6 | pending | — | pending | Launcher `herdr-app-rhel8` (X11 scale 1) and `README-rhel8.md` added to the tarball. |
 
 ## Risks / fallbacks
 

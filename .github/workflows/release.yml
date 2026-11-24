@@ -84,6 +84,9 @@ jobs:
           tar -xzf dist/herdr-app-linux-x86_64.tar.gz -C "$work"
           cp "$core_src/target/release/herdr-core" "$work/herdr-app/herdr-core"
           ln -s herdr-core "$work/herdr-app/hc"
+          # This build's launcher defaults the X11 scale to 1 (see its header).
+          install -m 755 distribution/rhel8/herdr-app-rhel8 "$work/herdr-app/herdr-app-rhel8"
+          install -m 644 distribution/rhel8/README.md "$work/herdr-app/README-rhel8.md"
           tar -czf dist/herdr-app-rhel8-x86_64.tar.gz -C "$work" herdr-app
       - name: Check glibc floor
         run: |
@@ -109,7 +112,7 @@ jobs:
         run: |
           set -euo pipefail
           archive=dist/herdr-app-rhel8-x86_64.tar.gz
-          for f in herdr-app herdr-core hc herdr-app.svg LICENSE THIRD-PARTY-NOTICES; do
+          for f in herdr-app herdr-app-rhel8 herdr-core hc herdr-app.svg README-rhel8.md LICENSE THIRD-PARTY-NOTICES; do
             tar -tzf "$archive" "herdr-app/$f" >/dev/null
           done
           tar -xOf "$archive" herdr-app/LICENSE | cmp - LICENSE
@@ -117,6 +120,7 @@ jobs:
           work=$(mktemp -d)
           tar -xzf "$archive" -C "$work"
           HERDR_APP_HOME="$work/home" "$work/herdr-app/herdr-app" --help
+          HERDR_APP_HOME="$work/home" "$work/herdr-app/herdr-app-rhel8" --help
           "$work/herdr-app/herdr-core" --version
           "$work/herdr-app/hc" --version
       - uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
