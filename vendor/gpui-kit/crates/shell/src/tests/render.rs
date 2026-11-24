@@ -8944,6 +8944,147 @@ export default class Panel extends View {
     );
 }
 
+/// `blur()` takes the keyboard off a text state without freeing it, and only
+/// when the field has the keyboard.
+///
+/// Each of the three text states is focused and then blurred by a click, so
+/// the calls run in a live host call as a mod's handler would. After a blur
+/// nothing in the window holds focus, the state's own `blur` event has fired
+/// once, and the state still renders. A blur on a field that does not have
+/// focus must leave another element's focus alone.
+#[gpui::test]
+fn a_text_state_blurs_without_being_released(cx: &mut TestAppContext) {
+    cx.update(|cx| crate::init(cx));
+
+    let runtime = ShellRuntime::new_isolated().expect("runtime");
+    cx.update(|cx| runtime.set_global(cx));
+    let source = r#"
+import { View, div } from "gpui-kit";
+import { v_flex, Input, InputState, Textarea, TextareaState, Editor, EditorState } from "gpui-base";
+
+export default class Fields extends View {
+  init(_props, cx) {
+    this.blurs = { input: 0, textarea: 0, editor: 0 };
+    this.states = {
+      input: InputState.new({ value: "kept input" }),
+      textarea: TextareaState.new({ value: "kept textarea", rows: 2 }),
+      editor: EditorState.new({ value: "kept editor" }),
+    };
+    for (const [name, state] of Object.entries(this.states)) {
+      state.on("blur", (_event, cx) => { this.blurs[name] += 1; cx.notify(); });
+    }
+    this.other = cx.focus_handle();
+  }
+
+  render(cx) {
+    const row = (id, act) =>
+      div().id(id).w(300).h(20).on_click((_event, cx) => { act(); cx.notify(); }).child(id);
+    const { input, textarea, editor } = this.states;
+    return v_flex()
+      .w(300)
+      .child(row("focus-input", () => input.focus()))
+      .child(row("blur-input", () => input.blur()))
+      .child(row("focus-textarea", () => textarea.focus()))
+      .child(row("blur-textarea", () => textarea.blur()))
+      .child(row("focus-editor", () => editor.focus()))
+      .child(row("blur-editor", () => editor.blur()))
+      .child(row("focus-other", () => this.other.focus()))
+      .child(div().id("other").w(300).h(20).track_focus(this.other).child("other"))
+      .child(Input.new(input).w(300).h(20))
+      .child(Textarea.new(textarea).w(300).h(40))
+      .child(Editor.new(editor).w(300).h(40))
+      .child(`blurs=${this.blurs.input},${this.blurs.textarea},${this.blurs.editor}`)
+      .child(`${input.value()}|${textarea.value()}|${editor.value()}`);
+  }
+}
+"#;
+    let view_type = runtime.load_source("blur-fields", source).expect("load");
+    let runtime_for_view = Rc::clone(&runtime);
+    // Instantiated as a view, so the handlers subscribed in `init` know the
+    // view their `cx.notify()` wakes.
+    let window = cx.add_window(move |window, cx| {
+        let view = runtime_for_view
+            .instantiate_view(&view_type, window, cx)
+            .expect("instantiate");
+        RootedScriptView(view)
+    });
+    let mut context = VisualTestContext::from_window(*window.deref(), cx);
+    let view = window
+        .root(&mut context)
+        .expect("view")
+        .read_with(&context, |root, _| root.0.clone());
+    // GPUI reports focus and blur only in an active window.
+    context.update(|window, _| window.activate_window());
+    context.run_until_parked();
+    // One frame delivers the focus change and its events; the next draws what
+    // the handlers counted.
+    let settle = |context: &mut VisualTestContext| {
+        context.update(|window, cx| window.draw(cx).clear(cx));
+        context.update(|window, cx| window.draw(cx).clear(cx));
+    };
+    let click = |context: &mut VisualTestContext, row: f32| {
+        context.simulate_click(point(px(10.), px(row * 20. + 10.)), Modifiers::default());
+        settle(context);
+    };
+    let described = |context: &mut VisualTestContext| {
+        context.update(|_, cx| {
+            view.read(cx)
+                .snapshot()
+                .map(crate::RenderSnapshot::debug_tree)
+                .unwrap_or_default()
+        })
+    };
+    let focused = |context: &mut VisualTestContext| context.update(|window, cx| window.focused(cx));
+    settle(&mut context);
+
+    for (index, (name, expected)) in [
+        ("input", "blurs=1,0,0"),
+        ("textarea", "blurs=1,1,0"),
+        ("editor", "blurs=1,1,1"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let focus_row = (index * 2) as f32;
+        click(&mut context, focus_row);
+        assert!(
+            focused(&mut context).is_some(),
+            "focus() must give the {name} the keyboard first"
+        );
+
+        click(&mut context, focus_row + 1.);
+        assert_eq!(
+            focused(&mut context),
+            None,
+            "blur() must leave nothing in the window focused ({name})"
+        );
+        let tree = described(&mut context);
+        assert!(
+            tree.contains(&format!("text \"{expected}\"")),
+            "the {name}'s blur event must fire once: {tree}"
+        );
+        assert!(
+            tree.contains("text \"kept input|kept textarea|kept editor\""),
+            "a blurred state must still be usable: {tree}"
+        );
+    }
+
+    // A blur on a field without the keyboard leaves another element's focus.
+    click(&mut context, 6.);
+    let other = focused(&mut context).expect("the script's own handle takes focus");
+    click(&mut context, 1.);
+    assert_eq!(
+        focused(&mut context),
+        Some(other),
+        "blur() on an unfocused input must not take focus from another element"
+    );
+    let tree = described(&mut context);
+    assert!(
+        tree.contains("text \"blurs=1,1,1\""),
+        "and must fire no blur event: {tree}"
+    );
+}
+
 /// A role and a selected state reach the description, and a name that is not a
 /// role fails where it was written rather than turning into silence.
 #[gpui::test]

@@ -1151,7 +1151,10 @@ ends outside the window without a release event, cancel on the next move
 that reports no left button.
 `.when(cond, (el) => …)`, `.children([...])`. Controls from `gpui-base`
 (`Button`, `Checkbox`, `Switch`, `InputState` + `Input`) are unstyled: style
-them. Text: `TextView.markdown(id, text)` renders Markdown.
+them. Text states (`InputState`, `TextareaState`, `EditorState`) take the
+keyboard with `focus()` and give it back with `blur()`. Herdr then hands the
+keyboard to the dialog or pane, and the field stays usable. `release()` frees
+the state. Text: `TextView.markdown(id, text)` renders Markdown.
 `.raw_html(false)` shows embedded HTML tags and blocks as literal text.
 Markdown autolinks stay clickable. With
 `.selectable(true)`, `.on_selection_change((s, cx) => …)` gets a settled

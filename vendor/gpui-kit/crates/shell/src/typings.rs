@@ -3203,6 +3203,12 @@ const BASE: &str = r#"  /** A row. */
     set_loading(loading: boolean): void;
     /** Moves the keyboard onto the input. */
     focus(): void;
+    /**
+     * Gives up the keyboard if the input has focus. The state stays usable
+     * and receives its usual `blur` event as focus moves away.
+     */
+    blur(): void;
+    /** Frees the state; it can't be read or drawn afterwards. Not a blur. */
     release(): boolean;
   }
 
@@ -3263,6 +3269,12 @@ const BASE: &str = r#"  /** A row. */
     set_soft_wrap(wrap: boolean): void;
     /** Moves the keyboard onto the textarea. */
     focus(): void;
+    /**
+     * Gives up the keyboard if the textarea has focus. The state stays usable
+     * and receives its usual `blur` event as focus moves away.
+     */
+    blur(): void;
+    /** Frees the state; it can't be read or drawn afterwards. Not a blur. */
     release(): boolean;
   }
 
@@ -3288,8 +3300,14 @@ const BASE: &str = r#"  /** A row. */
     set_tab_size(tab_size: number, hard_tabs?: boolean): void;
     /** Moves the keyboard onto the editor. */
     focus(): void;
+    /**
+     * Gives up the keyboard if the editor has focus. The state stays usable
+     * and receives its usual `blur` event as focus moves away.
+     */
+    blur(): void;
     /** Wraps long lines instead of scrolling sideways, keeping the text and selection. */
     set_soft_wrap(wrap: boolean): void;
+    /** Frees the state; it can't be read or drawn afterwards. Not a blur. */
     release(): boolean;
   }
   export const EditorState: {
