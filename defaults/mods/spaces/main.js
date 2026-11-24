@@ -63,7 +63,7 @@ const MARK = { ansi6: "#22a99a", ansi3: "#e3814f", ansi4: "#5b8def", ansi5: "#8b
 // Keep the whole leading emoji in the avatar (same rule in spaces and picker).
 // Newer pictographs such as 🖥 may be drawn as emoji without VS16. A trailing
 // selector, modifier or joiner can signal that we matched only part of a glyph.
-const EMOJI = /^(?:[#*0-9]\uFE0F?\u20E3|\p{Regional_Indicator}{2}|(?:\p{Emoji_Presentation}|(?=[\u{1F000}-\u{1FFFF}])\p{Extended_Pictographic}|\p{Extended_Pictographic}(?=\uFE0F))\uFE0F?[\p{Emoji_Modifier}\u{E0020}-\u{E007F}]*(?:\u200D\p{Extended_Pictographic}\uFE0F?\p{Emoji_Modifier}?)*)(?![\p{Grapheme_Extend}\p{Emoji_Modifier}\u200D])/u;
+const EMOJI = /^(?:[#*0-9]\uFE0F?\u20E3|\p{Regional_Indicator}{2}|(?:\p{Emoji_Presentation}|(?=[\u{1F000}-\u{1FFFF}])\p{Extended_Pictographic}|\p{Extended_Pictographic}(?=\uFE0F)|\p{Emoji_Modifier_Base}(?=\p{Emoji_Modifier}))\uFE0F?[\p{Emoji_Modifier}\u{E0020}-\u{E007F}]*(?:\u200D\p{Extended_Pictographic}\uFE0F?\p{Emoji_Modifier}?)*)(?![\p{Grapheme_Extend}\p{Emoji_Modifier}\u200D])/u;
 function spaceAvatar(name) {
   return EMOJI.exec(name)?.[0] ?? ([...name][0]?.toUpperCase() ?? "?");
 }
@@ -439,7 +439,13 @@ export default class Spaces extends View {
   // and the name both start from their text's width and give way in proportion.
   gitTail(g, tree, name, t) {
     const raw = g.branch ?? "detached";
-    const same = (a) => a.toLowerCase() === name.toLowerCase();
+    const fullName = name.toLowerCase();
+    const emoji = tree ? null : EMOJI.exec(name)?.[0];
+    const label = emoji ? name.slice(emoji.length).trim().toLowerCase() : fullName;
+    const same = (a) => {
+      const text = a.toLowerCase();
+      return text === fullName || text === label;
+    };
     const branch = same(raw) || raw === "master" || raw === "main" ? "" : raw;
     const repo = tree || same(g.name) ? "" : g.name;
     const where = [repo, branch].filter(Boolean).join(" \u00b7 ");

@@ -194,6 +194,7 @@ test("picker heads use the complete emoji in the colored avatar and keep the spa
   const view = picker(0);
   testSpaces = [
     { id: "gear", name: "⚙️ ops", status: "working", tabs: [{ id: "gear-tab", name: "notes" }] },
+    { id: "peace", name: "✌🏻 peace", status: "working", tabs: [{ id: "peace-tab", name: "notes" }] },
     { id: "plain", name: "plain", status: "working", tabs: [{ id: "plain-tab", name: "build" }] },
   ];
   const tree = view.render();
@@ -208,6 +209,9 @@ test("picker heads use the complete emoji in the colored avatar and keep the spa
   expect(gear).toBeDefined();
   expect(gear.nodes[0].nodes).toEqual(["⚙️"]);
   expect(gear.nodes[0].calls.bg).toBeDefined();
+  const peace = head("✌🏻 peace")!;
+  expect(peace.nodes[0].nodes).toEqual(["✌🏻"]);
+  expect(peace.nodes[0].calls.bg).toBeDefined();
   const plain = head("plain")!;
   expect(plain.nodes[0].nodes).toEqual(["P"]);
   expect(plain.nodes[0].calls.bg).toBeDefined();
