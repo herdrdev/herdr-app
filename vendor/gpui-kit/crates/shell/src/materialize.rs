@@ -122,12 +122,12 @@ use smallvec::SmallVec;
 
 use gpui::{
     AbsoluteLength, AnyElement, App, AppContext, Bounds, DefiniteLength, InteractiveElement, IntoElement,
-    Length, MouseButton, ParentElement, Pixels, Refineable as _, SharedString,
+    Length, MouseButton, NavigationDirection, ParentElement, Pixels, Refineable as _, SharedString,
     StatefulInteractiveElement, StyleRefinement, Styled, Window, div,
 };
 use gpui_base::{
     Button, Checkbox, CheckboxState, ElementExt as _, Link, ScrollbarAxis, Switch, TextView,
-    TextViewStyle, Theme,
+    TextViewSelection, TextViewStyle, Theme,
     animation::{ease_in_cubic, ease_in_out_cubic, ease_out_cubic},
     h_flex,
     input::{Input, InputBase},
@@ -316,7 +316,14 @@ struct Behavior {
     disabled: bool,
     selectable: Option<bool>,
     text_scrollable: Option<bool>,
+    /// HERDR: `raw_html(false)` keeps a TextView's Markdown HTML as text.
+    raw_html: Option<bool>,
     on_link_click: Option<CallbackId>,
+    /// HERDR: `on_selection_change(handler)` on a TextView.
+    on_selection_change: Option<CallbackId>,
+    /// HERDR: `highlight_range(start, end, color)` on a TextView, in UTF-16
+    /// offsets of its Markdown source.
+    text_highlights: Vec<(usize, usize, gpui::Hsla)>,
 
     /// Whether a `NumberInput` stacks both step buttons to the right of the
     /// text, rather than putting one on each side of it.
@@ -346,6 +353,8 @@ struct Behavior {
     on_token_click: Option<CallbackId>,
     on_token_hover: Option<CallbackId>,
     on_mouse_move: Option<CallbackId>,
+    /// Observes moves anywhere in the window.
+    on_window_mouse_move: Option<CallbackId>,
     on_hover: Option<CallbackId>,
     /// Reports a key press that reached this element.
     ///
@@ -368,6 +377,8 @@ struct Behavior {
     on_mouse_down: SmallVec<[(MouseButton, CallbackId); 1]>,
     /// Releases on this element, listed the same way.
     on_mouse_up: SmallVec<[(MouseButton, CallbackId); 1]>,
+    /// Observes releases anywhere in the window.
+    on_window_mouse_up: SmallVec<[(MouseButton, CallbackId); 1]>,
     /// A press anywhere outside this element, delivered during the capture
     /// phase.
     ///
@@ -1107,6 +1118,8 @@ fn materialize_component(
             )
         }
         Component::TextView(spec) => {
+            // HERDR: a cheap clone, for the offsets below.
+            let source_text = spec.text.clone();
             let mut view = match spec.format {
                 crate::spec::TextViewFormat::Html => TextView::html(spec.id, spec.text),
                 crate::spec::TextViewFormat::Markdown => TextView::markdown(spec.id, spec.text),
@@ -1117,6 +1130,28 @@ fn materialize_component(
             }
             if let Some(scrollable) = behavior.text_scrollable {
                 view = view.scrollable(scrollable);
+            }
+            if let Some(raw_html) = behavior.raw_html {
+                view = view.markdown_raw_html(raw_html);
+            }
+            // HERDR: highlights and selection reports, in UTF-16 offsets of
+            // the Markdown source, the way a script indexes its strings.
+            for &(start, end, color) in &behavior.text_highlights {
+                if let Some(range) = utf16_range_to_bytes(&source_text, start..end) {
+                    view = view.highlight_source_range(range, color);
+                }
+            }
+            if let Some(callback) = behavior.on_selection_change {
+                let route = crate::script_callback::ScriptCallbackRoute::new(
+                    Rc::downgrade(runtime),
+                    callback,
+                );
+                view = view.on_selection_change(move |selection, window, cx| {
+                    let value = selection.map_or(crate::HostValue::Null, |selection| {
+                        selection_value(&source_text, selection)
+                    });
+                    route.emit(value, window, cx);
+                });
             }
             if let Some(callback) = behavior.on_link_click {
                 let route = crate::script_callback::ScriptCallbackRoute::new(
@@ -1961,6 +1996,41 @@ where
     element
 }
 
+fn with_window_mouse(element: gpui::Div, behavior: &Behavior, runtime: &Rc<ShellRuntime>) -> gpui::Div {
+    let moves = behavior.on_window_mouse_move;
+    let ups = &behavior.on_window_mouse_up;
+    if moves.is_none() && ups.is_empty() {
+        return element;
+    }
+    let ups = ups.clone();
+    let runtime = Rc::downgrade(runtime);
+    element.on_paint(move |bounds, window, _| {
+        if let Some(callback) = moves {
+            let runtime = runtime.clone();
+            window.observe_mouse_event(move |event: &gpui::MouseMoveEvent, window, cx| {
+                if let Some(runtime) = runtime.upgrade() {
+                    runtime.dispatch_mouse_move(
+                        callback,
+                        event,
+                        event.position - bounds.origin,
+                        bounds,
+                        window,
+                        cx,
+                    );
+                }
+            });
+        }
+        for (button, callback) in ups {
+            let runtime = runtime.clone();
+            window.observe_mouse_event(move |event: &gpui::MouseUpEvent, window, cx| {
+                if event.button == button {
+                    dispatch_mouse_button(&runtime, callback, event, Some(bounds), window, cx);
+                }
+            });
+        }
+    })
+}
+
 /// One dispatch for the three press-and-release builders.
 ///
 /// `MouseDownEvent` and `MouseUpEvent` are different types carrying the same
@@ -2163,7 +2233,7 @@ fn flex_element(
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let element = with_hover(element, &states);
+    let element = with_window_mouse(with_hover(element, &states), &behavior, runtime);
     if behavior.key.is_none()
         && !states.needs_identity()
         && !behavior.needs_identity()
@@ -2230,7 +2300,14 @@ fn flex_element(
         });
     }
     let stateful = components::tooltip::with_tooltip(stateful, &behavior, window);
-    let scroll_handle = behavior.virtual_scroll.and_then(|handle| runtime.entities().scroll(handle));
+    let scroll_handle = behavior.virtual_scroll.filter(|_| scroll_x || scroll_y).and_then(|handle| {
+        let entities = runtime.entities();
+        let scroll = entities.scroll(handle)?;
+        if !checking() {
+            entities.record_scroll_layout(handle);
+        }
+        Some(scroll)
+    });
     if behavior.scrollbar {
         let mut stateful = stateful;
         stateful.style().refine(&refinement);
@@ -2732,7 +2809,18 @@ pub(in crate::materialize) fn resolve_ops(
             SpecOp::Callback(name, id) => match *name {
                 "on_click" => behavior.on_click = Some(*id),
                 "on_link_click" => behavior.on_link_click = Some(*id),
+                "on_selection_change" => behavior.on_selection_change = Some(*id),
                 "on_mouse_move" => behavior.on_mouse_move = Some(*id),
+                "on_window_mouse_move" => behavior.on_window_mouse_move = Some(*id),
+                "on_window_mouse_up_left" => {
+                    behavior.on_window_mouse_up.push((MouseButton::Left, *id))
+                }
+                "on_window_mouse_up_right" => {
+                    behavior.on_window_mouse_up.push((MouseButton::Right, *id))
+                }
+                "on_window_mouse_up_middle" => {
+                    behavior.on_window_mouse_up.push((MouseButton::Middle, *id))
+                }
                 "on_hover" => behavior.on_hover = Some(*id),
                 "on_key_down" => behavior.on_key_down = Some(*id),
                 "on_key_up" => behavior.on_key_up = Some(*id),
@@ -2747,6 +2835,11 @@ pub(in crate::materialize) fn resolve_ops(
                 "on_mouse_up_left" => behavior.on_mouse_up.push((MouseButton::Left, *id)),
                 "on_mouse_up_right" => behavior.on_mouse_up.push((MouseButton::Right, *id)),
                 "on_mouse_up_middle" => behavior.on_mouse_up.push((MouseButton::Middle, *id)),
+                // HERDR: the mouse's side buttons.
+                "on_mouse_down_back" => behavior.on_mouse_down.push((MouseButton::Navigate(NavigationDirection::Back), *id)),
+                "on_mouse_down_forward" => behavior.on_mouse_down.push((MouseButton::Navigate(NavigationDirection::Forward), *id)),
+                "on_mouse_up_back" => behavior.on_mouse_up.push((MouseButton::Navigate(NavigationDirection::Back), *id)),
+                "on_mouse_up_forward" => behavior.on_mouse_up.push((MouseButton::Navigate(NavigationDirection::Forward), *id)),
                 "on_mouse_down_out" => behavior.on_mouse_down_out = Some(*id),
                 "on_drop" => behavior.on_drop = Some(*id),
                 "on_scroll_wheel" => behavior.on_scroll_wheel = Some(*id),
@@ -3460,7 +3553,21 @@ fn apply_behavior(behavior: &mut Behavior, name: &str, args: &[Bridged]) {
         }
         "disabled" => behavior.disabled = flag.unwrap_or(true),
         "selectable" => behavior.selectable = Some(flag.unwrap_or(true)),
+        "highlight_range" => match (args.first(), args.get(1), args.get(2)) {
+            (Some(Bridged::Number(start)), Some(Bridged::Number(end)), Some(color))
+                if *start >= 0.0 && start <= end =>
+            {
+                match color.as_color() {
+                    Ok(color) => behavior
+                        .text_highlights
+                        .push((*start as usize, *end as usize, color)),
+                    Err(error) => tracing::warn!("highlight_range ignored: {error}"),
+                }
+            }
+            _ => tracing::warn!("highlight_range(start, end, color) ignored: bad offsets"),
+        },
         "scrollable" => behavior.text_scrollable = Some(flag.unwrap_or(true)),
+        "raw_html" => behavior.raw_html = Some(flag.unwrap_or(true)),
         "selected" => behavior.selected = flag.unwrap_or(true),
         "checked" => behavior.checked = flag.unwrap_or(true),
         "value" => behavior.value = args.first().and_then(|value| value.as_f32().ok()),
@@ -3627,6 +3734,8 @@ fn apply_behavior(behavior: &mut Behavior, name: &str, args: &[Bridged]) {
                         "left" => Some(MouseButton::Left),
                         "right" => Some(MouseButton::Right),
                         "middle" => Some(MouseButton::Middle),
+                        "back" => Some(MouseButton::Navigate(NavigationDirection::Back)),
+                        "forward" => Some(MouseButton::Navigate(NavigationDirection::Forward)),
                         _ => None,
                     });
         }
@@ -3916,4 +4025,48 @@ fn dispatch_click(
         return;
     };
     runtime.dispatch_click(callback, event, window, cx);
+}
+
+/// HERDR: `range`, UTF-16 offsets into `text`, as byte offsets; `None` when
+/// it runs past the end. An offset inside a surrogate pair moves to the end
+/// of its character.
+fn utf16_range_to_bytes(text: &str, range: std::ops::Range<usize>) -> Option<std::ops::Range<usize>> {
+    let mut start = None;
+    let mut units = 0;
+    for (byte, ch) in text.char_indices() {
+        if start.is_none() && units >= range.start {
+            start = Some(byte);
+        }
+        if units >= range.end {
+            return Some(start?..byte);
+        }
+        units += ch.len_utf16();
+    }
+    (units >= range.end).then(|| start.unwrap_or(text.len())..text.len())
+}
+
+/// HERDR: what `on_selection_change` hands a script.
+fn selection_value(source: &str, selection: &TextViewSelection) -> crate::HostValue {
+    use crate::HostValue::{Number, Object, Str};
+    let utf16 = |byte: usize| Number(source.get(..byte).map_or(0, |s| s.encode_utf16().count()) as f64);
+    let mut fields = vec![("text".to_string(), Str(selection.text.clone()))];
+    if let Some(range) = &selection.source_range {
+        fields.push((
+            "range".into(),
+            Object(vec![
+                ("start".into(), utf16(range.start)),
+                ("end".into(), utf16(range.end)),
+            ]),
+        ));
+    }
+    if let Some(position) = selection.position {
+        fields.push((
+            "position".into(),
+            Object(vec![
+                ("x".into(), Number(f32::from(position.x) as f64)),
+                ("y".into(), Number(f32::from(position.y) as f64)),
+            ]),
+        ));
+    }
+    Object(fields)
 }

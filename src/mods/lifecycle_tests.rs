@@ -68,6 +68,75 @@ export default class extends View {
 }
 
 
+/// Both kinds of scroll handle say where their area is: how far it has
+/// scrolled (counted up from the start), how big its content is and how much
+/// of it is on screen.
+#[gpui::test]
+fn scroll_handles_report_offset_content_and_viewport(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let fixture = Fixture::new(r#"
+import { View, div } from "gpui-kit";
+import { ScrollHandle, VirtualListScrollHandle, v_virtual_list } from "gpui-base";
+import { note } from "fixture";
+export default class extends View {
+  init(_, cx) {
+    this.plain = ScrollHandle.new();
+    this.rows = VirtualListScrollHandle.new();
+    this.focus = cx.focus_handle();
+    this.focus.focus();
+  }
+  render() {
+    return div().size_full().track_focus(this.focus)
+      .on_key_down((e, cx) => {
+        if (e.key === "e") {
+          this.plain.scroll_to_item(4);
+          this.rows.scroll_to_bottom();
+        }
+        if (e.key === "r") for (const handle of [this.plain, this.rows]) {
+          const offset = handle.offset(), content = handle.content_size(), viewport = handle.viewport_size();
+          note(offset.x, offset.y, content.width, content.height, viewport.width, viewport.height);
+        }
+        cx.notify();
+      })
+      .child(div().id("plain").flex().flex_col().w(40).h(120).overflow_y_scroll().track_scroll(this.plain)
+        .children([0, 1, 2, 3, 4].map(i => div().id("item-" + i).w(40).h(40).flex_none().child(String(i)))))
+      .child(div().w(40).h(100).child(v_virtual_list("rows", 50, 20, (i) => String(i),
+        (range) => Array.from({ length: range.end - range.start }, (_, i) => div().h(20).child(String(range.start + i))))
+        .track_scroll(this.rows)));
+  }
+}"#);
+    let notes = Rc::new(RefCell::new(Vec::new()));
+    let calls = notes.clone();
+    gpui_shell::policy::set_default(Policy::new().with_host_module(
+        HostModule::new("fixture").function("note", move |a| {
+            calls.borrow_mut().push([a.number(0)?, a.number(1)?, a.number(2)?, a.number(3)?, a.number(4)?, a.number(5)?]);
+            Ok(HostValue::Null)
+        })
+    ).unwrap());
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|window, cx| Mounted(runtime.try_load(&fixture.0, window, cx).unwrap()));
+    let mut visual = VisualTestContext::from_window(*window.deref(), cx);
+    let mut read = |keys: &str| {
+        notes.borrow_mut().clear();
+        visual.simulate_keystrokes(keys);
+        for _ in 0..3 {
+            visual.update(|window, cx| {
+                window.simulate_next_frame(cx);
+                window.draw(cx).clear(cx);
+            });
+            visual.run_until_parked();
+        }
+        notes.borrow().clone()
+    };
+    read("");
+    // [offset.x, offset.y, content width, content height, viewport width, viewport height]
+    assert_eq!(read("r"), vec![[0., 0., 40., 200., 40., 120.], [0., 0., 40., 1000., 40., 100.]], "at the start");
+    read("e");
+    assert_eq!(read("r"), vec![[0., 80., 40., 200., 40., 120.], [0., 900., 40., 1000., 40., 100.]], "at the end");
+    visual.update(|window, _| window.remove_window());
+    visual.run_until_parked();
+}
+
 #[gpui::test]
 fn plain_mod_scroll_handles_reveal_children_once_without_moving_visible_items(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
@@ -392,6 +461,149 @@ export default class extends View {
 }
 
 #[gpui::test]
+fn file_drags_from_other_apps_report_the_held_button(cx: &mut TestAppContext) {
+    use gpui::{ExternalPaths, FileDropEvent, InputEvent};
+    cx.update(gpui_shell::init);
+    let fixture = Fixture::new(r#"
+import { View, div } from "gpui-kit";
+import { note } from "fixture";
+export default class extends View {
+  render() {
+    return div().id("row").size_full().on_mouse_move((e) => note(e.pressed_button ?? "none"));
+  }
+}"#);
+    let log = Rc::new(RefCell::new(Vec::new()));
+    let calls = log.clone();
+    gpui_shell::policy::set_default(Policy::new().with_host_module(
+        HostModule::new("fixture").function("note", move |a| {
+            calls.borrow_mut().push(from_host(a.value(0)?));
+            Ok(HostValue::Null)
+        })
+    ).unwrap());
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|window, cx| Mounted(runtime.try_load(&fixture.0, window, cx).unwrap()));
+    let mut visual = VisualTestContext::from_window(*window.deref(), cx);
+    visual.update(|window, cx| window.draw(cx).clear(cx));
+    visual.run_until_parked();
+    visual.update(|window, cx| {
+        window.dispatch_event(FileDropEvent::Entered {
+            position: gpui::point(gpui::px(20.), gpui::px(20.)),
+            paths: ExternalPaths([PathBuf::from("/var/tmp/notes.md")].into_iter().collect()),
+        }.to_platform_input(), cx);
+        window.draw(cx).clear(cx);
+        window.dispatch_event(FileDropEvent::Pending { position: gpui::point(gpui::px(30.), gpui::px(25.)) }.to_platform_input(), cx);
+        window.draw(cx).clear(cx);
+        window.dispatch_event(FileDropEvent::Exited.to_platform_input(), cx);
+    });
+    visual.run_until_parked();
+    let seen = log.borrow().clone();
+    assert!(!seen.is_empty(), "the drag's moves should reach the element");
+    assert!(seen.iter().all(|b| *b == json!("left")), "every move of a file drag should carry the held button: {seen:?}");
+}
+
+#[gpui::test]
+fn window_mouse_events_follow_a_drag_off_the_element(cx: &mut TestAppContext) {
+    use gpui::{DispatchPhase, Modifiers, MouseButton, MouseMoveEvent, MouseUpEvent, ParentElement as _, Styled as _, point, px};
+
+    struct MountedWithCapture(gpui::Entity<ShellRoot>);
+
+    impl Render for MountedWithCapture {
+        fn render(&mut self, _: &mut gpui::Window, _: &mut gpui::Context<Self>) -> impl IntoElement {
+            gpui::div().size_full()
+                // Like terminal selection, these listeners can stop events in capture.
+                // Register before the mod so an ordinary capture listener there would miss them.
+                .child(gpui::canvas(|_, _, _| {}, |_, _, window, _| {
+                    window.on_mouse_event(|e: &MouseMoveEvent, phase, _, cx| {
+                        if phase == DispatchPhase::Capture && e.position.y >= px(30.) {
+                            cx.stop_propagation();
+                        }
+                    });
+                    window.on_mouse_event(|e: &MouseUpEvent, phase, _, cx| {
+                        if phase == DispatchPhase::Capture && e.position.y >= px(30.) {
+                            cx.stop_propagation();
+                        }
+                    });
+                }).absolute())
+                .child(self.0.clone())
+        }
+    }
+
+    cx.update(gpui_shell::init);
+    let fixture = Fixture::new(r#"
+import { View, div } from "gpui-kit";
+import { v_flex } from "gpui-base";
+import { note } from "fixture";
+export default class extends View {
+  render() {
+    const bar = div().id("bar").w(100).h(30).border(3).p(5).flex_none()
+      .on_mouse_down("left", () => { this.dragging = true; })
+      .on_mouse_up("left", () => { this.dragging = false; note("bar-up"); });
+    return v_flex().size_full().pl(40)
+      .child(this.done ? bar : bar
+        .on_window_mouse_move((e) => {
+          note(`move ${e.local_position.x},${e.local_position.y} ${e.pressed_button ?? "none"}`);
+          if (this.dragging && e.pressed_button !== "left") {
+            this.dragging = false;
+            note("cancelled");
+          }
+        })
+        .on_window_mouse_up("left", (e, cx) => {
+          note(`up ${e.button} ${e.local_position.x},${e.local_position.y} ${e.bounds.width}x${e.bounds.height}`);
+          if (e.local_position.y < 30) {
+            cx.stop_propagation();
+          } else {
+            this.done = true;
+            cx.propagate();
+            cx.notify();
+          }
+        }))
+      .child(div().id("pane").flex_1().on_mouse_up("left", () => note("pane-up")));
+  }
+}"#);
+    let log = Rc::new(RefCell::new(Vec::<String>::new()));
+    let calls = log.clone();
+    gpui_shell::policy::set_default(Policy::new().with_host_module(
+        HostModule::new("fixture").function("note", move |a| {
+            calls.borrow_mut().push(a.string(0)?.to_owned());
+            Ok(HostValue::Null)
+        })
+    ).unwrap());
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|window, cx| MountedWithCapture(runtime.try_load(&fixture.0, window, cx).unwrap()));
+    let mut visual = VisualTestContext::from_window(*window.deref(), cx);
+    visual.simulate_resize(gpui::size(px(400.), px(400.)));
+    let draw = |visual: &mut VisualTestContext| {
+        visual.update(|window, cx| window.draw(cx).clear(cx));
+        visual.run_until_parked();
+    };
+    draw(&mut visual);
+
+    let none = Modifiers::default();
+    let over_bar = point(px(60.), px(20.));
+    let over_pane = point(px(90.), px(300.));
+
+    visual.simulate_mouse_down(over_bar, MouseButton::Left, none);
+    visual.simulate_mouse_up(over_bar, MouseButton::Left, none);
+    visual.simulate_mouse_down(over_bar, MouseButton::Left, none);
+    visual.simulate_mouse_move(over_pane, MouseButton::Left, none);
+    // A release outside the window can leave the next move as the only signal.
+    visual.simulate_mouse_move(over_pane, None, none);
+    visual.simulate_mouse_down(over_bar, MouseButton::Left, none);
+    visual.simulate_mouse_up(over_pane, MouseButton::Right, none);
+    visual.simulate_mouse_up(over_pane, MouseButton::Left, none);
+    draw(&mut visual);
+    visual.simulate_mouse_move(over_bar, None, none);
+    visual.simulate_mouse_up(over_pane, MouseButton::Left, none);
+    draw(&mut visual);
+
+    assert_eq!(*log.borrow(), [
+        "up left 20,20 100x30", "bar-up",
+        "move 50,300 left", "move 50,300 none", "cancelled",
+        "up left 50,300 100x30",
+    ]);
+}
+
+#[gpui::test]
 fn mod_run_rejects_unknown_arguments_before_queueing_a_command(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let fixture = Fixture::new(r#"
@@ -551,6 +763,64 @@ export default class extends View {
     }).unwrap();
     cx.run_until_parked();
     assert_eq!(*seen.borrow(), ["start", "done"]);
+    window.update(cx, |_, window, _| window.remove_window()).unwrap();
+}
+
+#[gpui::test]
+fn mod_socket_writes_reads_and_reports_eof(cx: &mut TestAppContext) {
+    use std::{io::{Read, Write}, net::{Shutdown, TcpListener}};
+
+    cx.executor().allow_parking();
+    cx.update(gpui_shell::init);
+    let listener = TcpListener::bind("127.0.0.1:0").unwrap();
+    listener.set_nonblocking(true).unwrap();
+    let source = r#"
+import { View, div } from "gpui-kit";
+import { connect } from "net";
+import { note } from "fixture";
+export default class extends View {
+  init(_, cx) {
+    cx.spawn(async () => {
+      const socket = await connect("127.0.0.1", __PORT__);
+      await socket.write("pingé");
+      const bytes = await socket.read(4);
+      const eof = await socket.read(4);
+      note(bytes instanceof Uint8Array, bytes?.length, bytes?.[0], eof === null);
+      socket.close();
+    });
+  }
+  render() { return div(); }
+}"#.replace("__PORT__", &listener.local_addr().unwrap().port().to_string());
+    let fixture = Fixture::new(&source);
+    let seen = Rc::new(RefCell::new(None));
+    let calls = seen.clone();
+    gpui_shell::policy::set_default(Policy::new().with_capabilities(capabilities())
+        .with_host_module(HostModule::new("fixture").function("note", move |a| {
+            calls.replace(Some((a.boolean(0)?, a.number(1)?, a.number(2)?, a.boolean(3)?)));
+            Ok(HostValue::Null)
+        })).unwrap());
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|window, cx| Mounted(runtime.try_load(&fixture.0, window, cx).unwrap()));
+    cx.run_until_parked();
+
+    let (mut peer, _) = listener.accept().unwrap();
+    peer.set_nonblocking(false).unwrap();
+    peer.set_read_timeout(Some(Duration::from_secs(3))).unwrap();
+    peer.set_write_timeout(Some(Duration::from_secs(3))).unwrap();
+    let server = std::thread::spawn(move || {
+        let mut request = [0; 6];
+        peer.read_exact(&mut request).unwrap();
+        assert_eq!(&request, "pingé".as_bytes());
+        peer.write_all(&[0xfe]).unwrap();
+        peer.shutdown(Shutdown::Write).unwrap();
+    });
+    let deadline = Instant::now() + Duration::from_secs(3);
+    while seen.borrow().is_none() && Instant::now() < deadline {
+        cx.run_until_parked();
+        std::thread::sleep(Duration::from_millis(1));
+    }
+    server.join().unwrap();
+    assert_eq!(*seen.borrow(), Some((true, 1.0, 254.0, true)));
     window.update(cx, |_, window, _| window.remove_window()).unwrap();
 }
 
