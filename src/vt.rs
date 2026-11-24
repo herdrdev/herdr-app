@@ -626,6 +626,23 @@ fn hyperlink_uri(r: &GhosttyGridRef) -> Option<String> {
     (res == GHOSTTY_SUCCESS && len > 0).then(|| String::from_utf8_lossy(&buf[..len]).into_owned())
 }
 
+/// Text not in the grid yet (what an input method is composing), split as the
+/// terminal would lay it out: each grapheme cluster's byte range and its width
+/// in cells (0, 1 or 2).
+pub fn cell_clusters(text: &str) -> Vec<(std::ops::Range<usize>, u8)> {
+    let (starts, cps): (Vec<usize>, Vec<u32>) = text.char_indices().map(|(i, c)| (i, c as u32)).unzip();
+    let mut out = Vec::new();
+    let mut i = 0;
+    while i < cps.len() {
+        let mut width = 0u8;
+        let n = unsafe { ghostty_unicode_grapheme_width(cps[i..].as_ptr(), cps.len() - i, &mut width) }.max(1);
+        let end = starts.get(i + n).copied().unwrap_or(text.len());
+        out.push((starts[i]..end, width));
+        i += n;
+    }
+    out
+}
+
 fn is_wide(r: &GhosttyGridRef) -> bool {
     let mut cell: GhosttyCell = Default::default();
     let mut wide: GhosttyCellWide = GHOSTTY_CELL_WIDE_NARROW;
@@ -1989,6 +2006,18 @@ impl Drop for Vt {
 
 #[cfg(test)]
 mod tests {
+    #[test]
+    fn composing_text_is_split_into_cells_like_printed_text() {
+        let widths = |text: &str| cell_clusters(text).into_iter().map(|(r, w)| (text[r].to_owned(), w)).collect::<Vec<_>>();
+        assert_eq!(widths("ab"), [("a".into(), 1), ("b".into(), 1)]);
+        assert_eq!(widths("你好"), [("你".into(), 2), ("好".into(), 2)]);
+        assert_eq!(widths("かなa"), [("か".into(), 2), ("な".into(), 2), ("a".into(), 1)]);
+        // A combining mark and an emoji with VS16 are one cluster each.
+        assert_eq!(widths("e\u{301}x"), [("e\u{301}".into(), 1), ("x".into(), 1)]);
+        assert_eq!(widths("\u{2764}\u{fe0f}"), [("\u{2764}\u{fe0f}".into(), 2)]);
+        assert!(cell_clusters("").is_empty());
+    }
+
     use super::*;
 
     #[test]
