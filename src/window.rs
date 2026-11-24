@@ -279,8 +279,22 @@ fn clone_layout(name: &str, to: &str) -> std::io::Result<()> {
     result
 }
 
+// The agent block can reuse the terminal entity outside its pane. Cache the framed
+// presentation separately so changing its corners never changes that other view.
+struct PaneSurface {
+    view: Entity<TerminalView>,
+    corners: Corners<Pixels>,
+}
+
+impl Render for PaneSurface {
+    fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.view.update(cx, |v, cx| v.render_surface(self.corners, window, cx))
+    }
+}
+
 struct Term {
     view: Entity<TerminalView>,
+    surface: RefCell<Option<Entity<PaneSurface>>>,
     address: String,
     focus: FocusHandle,
     _sub: Subscription,
@@ -1615,7 +1629,7 @@ impl AppWindow {
                 TerminalEvent::Notice { title, body } => this.error_notice(title, body, window, cx),
             });
             let focus = view.read(cx).focus_handle().clone();
-            if let Some(previous) = self.terms.insert(id, Term { view, address, focus, _sub: sub }) {
+            if let Some(previous) = self.terms.insert(id, Term { view, surface: Default::default(), address, focus, _sub: sub }) {
                 self.publish_selection(&previous.address, window, cx);
             }
         }
@@ -4638,8 +4652,9 @@ impl AppWindow {
         }
         let el = match &n.kind {
             Kind::Block { content } => {
-                let inner = self.render_block(n, content, focused, rendered_dividers, cx);
-                match frame.filter(|_| n.is_pane()) {
+                let frame = frame.filter(|_| n.is_pane());
+                let inner = self.render_block(n, content, focused, frame, rendered_dividers, cx);
+                match frame {
                     Some(f) => el.child(self.frame_pane(n, f, focused.contains(&n.id), inner, cx)),
                     None => el.child(inner),
                 }
@@ -4692,7 +4707,7 @@ impl AppWindow {
         el.children(self.render_floats(n, cx)).children(self.pane_grip(&n.id, row, cx)).into_any_element()
     }
 
-    fn render_block(&self, n: &Node, content: &Content, focused: &HashSet<String>, rendered_dividers: &mut HashSet<(String, usize)>, cx: &mut Context<Self>) -> AnyElement {
+    fn render_block(&self, n: &Node, content: &Content, focused: &HashSet<String>, frame: Option<&PaneFrame>, rendered_dividers: &mut HashSet<(String, usize)>, cx: &mut Context<Self>) -> AnyElement {
         match content {
             Content::Terminal { .. } => match self.pane_term(&n.id) {
                 Some(t) => {
@@ -4712,7 +4727,9 @@ impl AppWindow {
                                 cx.notify();
                             }
                         }))
-                        .child(shown_terminal(&t.view, cx))
+                        .child(t.in_pane(frame.map_or_else(Corners::default, |f| {
+                            pane_size::body_corners(f, focused.contains(&n.id)).map(|r| settings::z(*r))
+                        }), cx))
                         .into_any_element()
                 }
                 None => div().into_any_element(),
@@ -5244,6 +5261,25 @@ impl AppWindow {
 /// redraws that terminal, not every mod and pane in the window.
 pub(crate) fn cached<V: Render>(view: &Entity<V>) -> AnyElement {
     view.clone().cached(StyleRefinement::default().size_full()).into_any_element()
+}
+
+impl Term {
+    fn in_pane(&self, corners: Corners<Pixels>, cx: &mut App) -> AnyElement {
+        let mut surface = self.surface.borrow_mut();
+        if corners == Corners::default() {
+            surface.take();
+            return shown_terminal(&self.view, cx);
+        }
+        let surface = surface.get_or_insert_with(|| cx.new(|cx| {
+            cx.observe(&self.view, |_, _, cx| cx.notify()).detach();
+            PaneSurface { view: self.view.clone(), corners }
+        }));
+        if surface.read(cx).corners != corners {
+            surface.update(cx, |s, cx| { s.corners = corners; cx.notify(); });
+        }
+        self.view.read(cx).mark_shown();
+        cached(surface)
+    }
 }
 
 pub(crate) fn shown_terminal(view: &Entity<TerminalView>, cx: &App) -> AnyElement {

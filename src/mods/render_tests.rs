@@ -1118,7 +1118,7 @@ fn pane_header_divider_faces_the_terminal(cx: &mut TestAppContext) {
                     {"id": "inactive", "type": "block",
                      "content": {"tab": "active", "pane": {"header": {"position": "bottom"}}}},
                     {"id": "shown", "type": "block",
-                     "content": {"tab": "active", "pane": {"header": {"position": position, "reveal": reveal}}}}
+                     "content": {"tab": "active", "pane": {"radius": 10, "header": {"position": position, "reveal": reveal}}}}
                 ]}
             ]
         }));
@@ -1130,6 +1130,8 @@ fn pane_header_divider_faces_the_terminal(cx: &mut TestAppContext) {
         let (edge, outside) = if position == "bottom" { ("t", "b") } else { ("b", "t") };
         assert!(head.contains(&format!(".border_{edge}[Number(1.0)]")), "{position}: {head}");
         assert!(!head.contains(&format!(".border_{outside}[")), "{position}: {head}");
+        assert!(head.contains(&format!(".rounded_{outside}[Number(10.0)]")), "{position}: {head}");
+        assert!(!head.contains(&format!(".rounded_{edge}[")), "{position}: {head}");
     }
 }
 
