@@ -9,6 +9,8 @@
 # otherwise ad hoc. The notarized DMG is a separate, non-blocking CI job.
 # Windows (Git Bash): a folder holding herdr-app.exe and the icon.
 # Windows has curl and tar too, so the app updates the same way.
+# Python 3 reads Cargo's artifact result. The target must run on this host
+# so its version can be verified before signing/packing (CI uses native runners).
 # No core inside: the installer and the app install the core's own release
 # (distribution/core-version is the oldest core this app works with).
 set -euo pipefail
@@ -31,7 +33,6 @@ if [[ -n $triple ]]; then
     *) echo "package: unsupported target $triple" >&2; exit 1 ;;
   esac
   arch=${triple%%-*}
-  bin=target/$triple/release
 else
   case "$(uname -s)" in
     Linux) os=linux ;;
@@ -40,7 +41,6 @@ else
     *) echo "package: unsupported OS $(uname -s)" >&2; exit 1 ;;
   esac
   arch=$(uname -m)
-  bin=target/release
 fi
 case "$arch" in
   x86_64 | amd64) arch=x86_64 ;;
@@ -62,30 +62,57 @@ echo "package: herdr-app $version for $target"
 for notice in LICENSE THIRD-PARTY-NOTICES; do
   [[ -s $notice ]] || { echo "package: $notice is missing or empty" >&2; exit 1; }
 done
+if command -v python3 >/dev/null; then python=python3; else python=python; fi
+command -v "$python" >/dev/null || { echo 'package: needs Python 3 to read Cargo artifacts' >&2; exit 1; }
+if [[ $os == linux ]]; then export TMPDIR=${TMPDIR:-/var/tmp}; fi
+work=$(mktemp -d)
+trap 'rm -rf "$work"' EXIT
 # Only release builds update themselves (src/update.rs).
-HERDR_APP_RELEASE=1 cargo build --release --locked ${triple:+--target "$triple"}
+HERDR_APP_RELEASE=1 cargo build --release --locked --message-format=json-render-diagnostics ${triple:+--target "$triple"} > "$work/cargo.jsonl"
+# Cargo resolves CARGO_TARGET_DIR, build.target-dir and platform suffixes.
+# Never infer an output path: a previous build there may be another version.
+binary=$("$python" - "$work/cargo.jsonl" <<'PY'
+import json, pathlib, sys
+paths = []
+for line in pathlib.Path(sys.argv[1]).read_text().splitlines():
+    item = json.loads(line)
+    if (item.get("reason") == "compiler-artifact" and item["target"]["name"] == "herdr-app"
+            and "bin" in item["target"]["kind"] and not item["profile"]["test"] and item.get("executable")):
+        paths.append(item["executable"])
+if len(paths) != 1 or not pathlib.Path(paths[0]).is_file():
+    sys.exit("package: Cargo did not report exactly one herdr-app executable")
+print(paths[0])
+PY
+)
 
 if [[ $os == macos ]]; then
   expected_arch=$arch
   [[ $arch != aarch64 ]] || expected_arch=arm64
-  actual_arch=$(lipo -archs "$bin/herdr-app")
+  actual_arch=$(lipo -archs "$binary")
   [[ $actual_arch == "$expected_arch" ]] || { echo "package: expected $expected_arch Mach-O, found $actual_arch" >&2; exit 1; }
-  actual_min=$(otool -l "$bin/herdr-app" | awk '
+  actual_min=$(otool -l "$binary" | awk '
     $1 == "cmd" { build = ($2 == "LC_BUILD_VERSION" || $2 == "LC_VERSION_MIN_MACOSX") }
     build && ($1 == "minos" || $1 == "version") && !minimum { minimum = $2 }
     END { print minimum }')
   [[ $actual_min == "$min_macos" ]] || { echo "package: expected macOS $min_macos deployment target, found ${actual_min:-unknown}" >&2; exit 1; }
 fi
-
-if [[ $os == linux ]]; then export TMPDIR=${TMPDIR:-/var/tmp}; fi
-work=$(mktemp -d)
-trap 'rm -rf "$work"' EXIT
+actual_version=$("$python" - "$binary" <<'PY'
+import subprocess, sys
+try:
+    result = subprocess.run([sys.argv[1], "--version"], stdin=subprocess.DEVNULL,
+                            capture_output=True, text=True, timeout=30, check=True)
+except (OSError, subprocess.SubprocessError):
+    sys.exit("package: cannot verify executable version; build on a host that can run this target")
+print(result.stdout.rstrip("\r\n"))
+PY
+)
+[[ $actual_version == "herdr-app $version" ]] || { echo "package: expected herdr-app $version, found $actual_version" >&2; exit 1; }
 mkdir -p dist
 out="dist/herdr-app-$target.tar.gz"
 if [[ $os == linux || $os == windows ]]; then
   dir="$work/herdr-app"
   mkdir -p "$dir"
-  if [[ $os == windows ]]; then cp "$bin/herdr-app.exe" "$dir/"; else cp "$bin/herdr-app" "$dir/"; fi
+  if [[ $os == windows ]]; then cp "$binary" "$dir/herdr-app.exe"; else cp "$binary" "$dir/herdr-app"; fi
   cp assets/icons/herdr-ui-icon-clean.svg "$dir/herdr-app.svg"
   cp LICENSE THIRD-PARTY-NOTICES "$dir/"
   notices_path=herdr-app/THIRD-PARTY-NOTICES
@@ -93,7 +120,7 @@ if [[ $os == linux || $os == windows ]]; then
 else
   app="$work/Herdr.app"
   mkdir -p "$app/Contents/MacOS" "$app/Contents/Resources"
-  cp "$bin/herdr-app" "$app/Contents/MacOS/Herdr"
+  cp "$binary" "$app/Contents/MacOS/Herdr"
   cp assets/icons/Herdr.icns "$app/Contents/Resources/Herdr.icns"
   cp LICENSE THIRD-PARTY-NOTICES "$app/Contents/Resources/"
   notices_path=Herdr.app/Contents/Resources/THIRD-PARTY-NOTICES

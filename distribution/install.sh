@@ -52,8 +52,8 @@ case "$(uname -m)" in
 esac
 if [ "$os" = macos ] && [ "$arch" = x86_64 ]; then
   # Rosetta reports x86_64 even on Apple Silicon.
-  if [ "$(sysctl -n hw.optional.arm64 2>/dev/null || true)" = 1 ] ||
-     [ "$(sysctl -n sysctl.proc_translated 2>/dev/null || true)" = 1 ]; then
+  if [ "$(/usr/sbin/sysctl -n hw.optional.arm64 2>/dev/null || true)" = 1 ] ||
+     [ "$(/usr/sbin/sysctl -n sysctl.proc_translated 2>/dev/null || true)" = 1 ]; then
     arch=aarch64
   fi
 fi
@@ -65,7 +65,65 @@ sha256() {
 }
 
 tmp=$(mktemp -d)
-trap 'rm -rf "$tmp"' EXIT
+stage= lock= install_dest= old_id= new_id=
+complete=false
+tree_id() {
+  if [ "$os" = macos ]; then /usr/bin/stat -f '%d:%i' "$1"
+  else stat -c '%d:%i' "$1"; fi
+}
+cleanup() {
+  result=$?
+  trap - EXIT HUP INT TERM
+  set +e
+  keep=false
+  if [ "$complete" != true ] && [ -n "$stage" ] && { [ -e "$stage/previous" ] || [ -L "$stage/previous" ]; }; then
+    # Move aside only the exact new directory we placed, never a concurrent
+    # replacement. The previous app stays recoverable if restoration fails.
+    if [ -e "$install_dest" ] || [ -L "$install_dest" ]; then
+      if [ "$(tree_id "$install_dest")" = "$new_id" ]; then
+        mv "$install_dest" "$stage/failed-new"
+      fi
+    fi
+    if [ ! -e "$install_dest" ] && [ ! -L "$install_dest" ] &&
+       mv "$stage/previous" "$install_dest" && [ "$(tree_id "$install_dest")" = "$old_id" ]; then
+      say "herdr: previous app restored at $install_dest" >&2
+    else
+      say "herdr: cannot verify restoration; inspect $install_dest and $stage/previous. Recovery lock: $lock. Do not retry before recovering the previous app." >&2
+      keep=true
+      result=1
+    fi
+  fi
+  if [ "$keep" != true ]; then
+    [ -z "$stage" ] || rm -rf "$stage"
+    [ -z "$lock" ] || rmdir "$lock"
+  fi
+  rm -rf "$tmp"
+  exit "$result"
+}
+trap cleanup EXIT
+trap 'exit 1' HUP INT TERM
+
+install_tree() {
+  source=$1
+  install_dest=$2
+  parent=$(dirname "$install_dest")
+  # The lock and staging directory live beside the destination: all swaps
+  # are same-filesystem renames, even when TMPDIR is on another volume.
+  candidate_lock="$parent/.herdr-app-install.lock"
+  mkdir "$candidate_lock" 2>/dev/null || fail "installation locked at $candidate_lock; check for another installer or unfinished recovery"
+  lock=$candidate_lock
+  stage=$(mktemp -d "$parent/.herdr-install.XXXXXXXX")
+  if [ "$os" = macos ]; then /usr/bin/ditto "$source" "$stage/new"
+  else cp -R "$source" "$stage/new"; fi
+  new_id=$(tree_id "$stage/new")
+  if [ -e "$install_dest" ] || [ -L "$install_dest" ]; then
+    old_id=$(tree_id "$install_dest")
+    [ "${old_id%%:*}" = "${new_id%%:*}" ] || fail "previous app is on another filesystem; it was not replaced"
+    mv "$install_dest" "$stage/previous" || fail "cannot move previous app aside; it was not replaced"
+  fi
+  mv "$stage/new" "$install_dest" || fail "cannot put the new app in place"
+  [ "$(tree_id "$install_dest")" = "$new_id" ] || fail "cannot verify installed app directory"
+}
 
 curl -fsSL "$releases/app/latest.json" -o "$tmp/latest.json" || fail "cannot reach $releases"
 # Read without jq: the manifest is flat enough for sed once spaces are gone.
@@ -99,10 +157,7 @@ if [ "$os" = linux ]; then
   data=${XDG_DATA_HOME:-$HOME/.local/share}
   home="$data/herdr-app"
   mkdir -p "$data"
-  rm -rf "$home.new"
-  mv "$tmp/herdr-app" "$home.new"
-  rm -rf "$home"
-  mv "$home.new" "$home"
+  install_tree "$tmp/herdr-app" "$home"
   ln -sfn "$home/herdr-app" "$bin/herdr-app"
   mkdir -p "$data/applications" "$data/icons/hicolor/scalable/apps"
   cp "$home/herdr-app.svg" "$data/icons/hicolor/scalable/apps/herdr-app.svg"
@@ -131,6 +186,10 @@ else
   # bundle under a temporary name in Applications.
   # Never change a certificate-signed bundle: macOS permissions follow its
   # signing identity. Only unsigned/ad-hoc development builds need this PATH.
+  expected_arch=$arch
+  [ "$arch" != aarch64 ] || expected_arch=arm64
+  actual_arch=$(/usr/bin/lipo -archs "$tmp/Herdr.app/Contents/MacOS/Herdr") || fail "cannot read app architecture"
+  [ "$actual_arch" = "$expected_arch" ] || fail "expected $expected_arch app, found $actual_arch; previous app was not replaced"
   signed=false
   if signature=$(/usr/bin/codesign -dvv "$tmp/Herdr.app" 2>&1); then
     if printf '%s\n' "$signature" | grep -q '^Authority=Developer ID Application:'; then
@@ -147,18 +206,25 @@ else
     /usr/libexec/PlistBuddy -c "Add :LSEnvironment:PATH string $bin:/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin" "$tmp/Herdr.app/Contents/Info.plist"
     /usr/bin/codesign --force --sign - "$tmp/Herdr.app" >/dev/null 2>&1
   fi
-  rm -rf "$app"
-  mv "$tmp/Herdr.app" "$app"
+  install_tree "$tmp/Herdr.app" "$app"
   ln -sfn "$app/Contents/MacOS/Herdr" "$bin/herdr-app"
   /System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister -f "$app" 2>/dev/null || true
 fi
 
 # The core: installed only if there's none yet. One that's already there
 # (yours, or from a package manager) is left alone; the app updates it.
-if [ ! -e "$bin/herdr-core" ] && ! command -v herdr-core >/dev/null 2>&1; then
-  curl -fsSL "$releases/core/install.sh" | HC_INSTALL_DIR="$bin" HERDR_RELEASES_URL="$releases" sh || say "herdr-core didn't install; Herdr will offer it when it opens."
+if [ ! -e "$bin/herdr-core" ] && [ ! -L "$bin/herdr-core" ] && ! command -v herdr-core >/dev/null 2>&1; then
+  # POSIX sh has no pipefail: never execute an empty or partial download.
+  if ! curl -fsSL "$releases/core/install.sh" -o "$tmp/install-core.sh"; then
+    say "herdr: herdr-core download failed; the app is installed. Open Herdr to install Core, or retry this installer when the download is available." >&2
+  elif ! HC_INSTALL_DIR="$bin" HERDR_RELEASES_URL="$releases" sh "$tmp/install-core.sh"; then
+    say "herdr: herdr-core didn't install; open Herdr to retry its Core setup." >&2
+  elif [ ! -e "$bin/herdr-core" ] && ! command -v herdr-core >/dev/null 2>&1; then
+    say "herdr: herdr-core is still missing; open Herdr to retry its Core setup." >&2
+  fi
 fi
 
+complete=true
 say "Herdr is installed. Open it from your apps, or run: herdr-app"
 case ":$PATH:" in
   *":$bin:"*) ;;

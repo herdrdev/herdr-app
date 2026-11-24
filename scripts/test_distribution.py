@@ -27,10 +27,13 @@ class DistributionTests(unittest.TestCase):
         self.work = tempfile.TemporaryDirectory(prefix="herdr-distribution-")
         self.addCleanup(self.work.cleanup)
         self.bin = Path(self.work.name)
+        self.system = self.bin / "system"
+        self.system.mkdir()
         self.stub("uname", 'case "$1" in -s) echo "$TEST_OS";; -m) echo "$TEST_ARCH";; esac')
         self.stub("curl", 'echo "unexpected download" >&2; exit 97')
         self.stub("cargo", 'echo "unexpected build" >&2; exit 97')
         self.stub("sysctl", 'exit 1')
+        self.system_sysctl('exit 1')
         self.stub("sw_vers", 'echo "${TEST_MACOS_VERSION:-15.0}"')
         self.stub("rustc", 'printf "host: %s\\n" "$TEST_RUST_HOST"')
 
@@ -39,13 +42,25 @@ class DistributionTests(unittest.TestCase):
         path.write_text("#!/bin/sh\n" + body + "\n")
         path.chmod(0o755)
 
-    def run_script(self, script, os_name, arch, *args, macos_version="15.0", rust_host=None):
+    def system_sysctl(self, body):
+        path = self.system / "sysctl"
+        path.write_text("#!/bin/sh\n" + body + "\n")
+        path.chmod(0o755)
+
+    def run_script(self, script, os_name, arch, *args, macos_version="15.0", rust_host=None, extra_env=None):
         rust_arch = "aarch64" if arch in ("arm64", "aarch64") else "x86_64"
         env = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}", TEST_OS=os_name, TEST_ARCH=arch,
                    TEST_MACOS_VERSION=macos_version, TEST_RUST_HOST=rust_host or f"{rust_arch}-apple-darwin",
                    RUSTC=str(self.bin / "rustc"), HOME=str(self.bin / "home"), TMPDIR=str(self.bin))
+        env.update(extra_env or {})
+        entry = ROOT / script
+        if entry == ROOT / "distribution/install.sh":
+            # Model the OS's absolute sysctl independently of the caller PATH.
+            entry = self.bin / "install-entry.sh"
+            entry.write_text((ROOT / script).read_text().replace("/usr/sbin/sysctl", str(self.system / "sysctl")))
+            entry.chmod(0o755)
         return subprocess.run(
-            [str(ROOT / script), *args], cwd=ROOT, env=env,
+            [str(entry), *args], cwd=ROOT, env=env,
             capture_output=True, text=True, check=False,
         )
 
@@ -127,8 +142,18 @@ exit 97''')
         for key in ("hw.optional.arm64", "sysctl.proc_translated"):
             for arch in ("x86_64", "amd64"):
                 with self.subTest(key=key, arch=arch):
-                    self.stub("sysctl", f'[ "$2" = "{key}" ] && echo 1')
+                    self.system_sysctl(f'[ "$2" = "{key}" ] && echo 1')
                     self.check_mac_installer_target(arch, "macos-aarch64")
+
+    def test_rosetta_detection_does_not_use_caller_path(self):
+        self.system_sysctl('[ "$2" = sysctl.proc_translated ] && echo 1')
+        (self.bin / "sysctl").unlink()
+        self.check_mac_installer_target("x86_64", "macos-aarch64")
+        self.stub("sysctl", "echo 0")
+        self.check_mac_installer_target("x86_64", "macos-aarch64")
+        self.system_sysctl("echo 0")
+        self.stub("sysctl", "echo 1")
+        self.check_mac_installer_target("x86_64", "macos-x86_64")
 
     def test_native_arm_mac_installer_uses_arm64(self):
         for arch in ("arm64", "aarch64"):
@@ -175,10 +200,14 @@ exit 22''')
         local = "http://127.0.0.1:8000/e2e"
         self.assertEqual(self.download_url(f"{local}/app/1.0.0/a.tar.gz", releases=local), f"{local}/app/1.0.0/a.tar.gz?src=install")
 
-    def mac_installer(self, signature, status, verify_status=0, arch="arm64"):
+    def mac_installer(self, signature, status, verify_status=0, arch="arm64", *, package_arch=None, move_failure=None, core="existing", different_device=False):
         home = self.bin / "home"
         (home / ".local/bin").mkdir(parents=True)
-        (home / ".local/bin/herdr-core").touch()
+        existing_core = home / ".local/bin/herdr-core"
+        if core == "existing":
+            existing_core.write_bytes(b"user's existing Core")
+        elif core == "dangling":
+            existing_core.symlink_to("user-selected-missing-core")
         source = self.bin / "source/Herdr.app/Contents"
         source.mkdir(parents=True)
         plist = b"signed release plist must stay unchanged"
@@ -195,10 +224,16 @@ for a; do
   if [ "$prev" = -o ]; then out=$a; else case $a in -*) ;; *) url=$a ;; esac; fi
   prev=$a
 done
-case $url in */latest.json) cp "{manifest}" "$out" ;; release) cp "{archive}" "$out" ;; *) exit 97 ;; esac''')
+case $url in
+  */latest.json) cp "{manifest}" "$out" ;;
+  release) cp "{archive}" "$out" ;;
+  */core/install.sh) echo "core download attempted" >> "{self.bin}/core-attempt"; printf 'touch "{self.bin}/partial-core-executed"\\n' > "$out"; exit 22 ;;
+  *) exit 97 ;;
+esac''')
         installed = home / "Applications/Herdr.app/Contents/Info.plist"
         installed.parent.mkdir(parents=True)
         installed.write_bytes(b"previous installed app")
+        self.previous_inode = installed.parent.parent.stat().st_ino
         fixture = self.bin / "signature.txt"
         fixture.write_text(signature)
         log = self.bin / "codesign.log"
@@ -212,21 +247,110 @@ esac''')
         plist_log = self.bin / "plist.log"
         self.stub("PlistBuddy", f'''echo "$*" >> "{plist_log}"
 printf 'dev PATH added' >> "$3"''')
+        self.stub("lipo", f'echo "{package_arch or ("x86_64" if arch == "x86_64" else "arm64")}"')
+        self.stub("ditto", 'cp -R "$1" "$2"')
+        self.stub("mac-stat", f'''exec "{sys.executable}" - "{home}/Applications/Herdr.app" "{int(different_device)}" "$@" <<'PY'
+import os, sys
+path = sys.argv[-1]
+value = os.lstat(path)
+device = value.st_dev + (int(sys.argv[2]) if path == sys.argv[1] else 0)
+print(str(device) + ":" + str(value.st_ino))
+PY''')
+        if move_failure:
+            self.stub("mv", f'''echo "$1 -> $2" >> "{self.bin}/moves"
+case "$2" in
+  "{home}/Applications/Herdr.app")
+    case "$1" in
+      */previous) {"exit 74" if move_failure == "restore" else ":"} ;;
+      *) exit 73 ;;
+    esac ;;
+esac
+exec /bin/mv "$@"''')
         # Remap only the system tools in a scratch copy; production uses absolute paths.
         script = (ROOT / "distribution/install.sh").read_text()
         self.assertNotIn("\n    codesign ", script)
         script = script.replace("/usr/bin/codesign", str(self.bin / "codesign"))
         script = script.replace("/usr/libexec/PlistBuddy", str(self.bin / "PlistBuddy"))
+        for absolute, stub in (("/usr/sbin/sysctl", self.system / "sysctl"),
+                               ("/usr/bin/lipo", self.bin / "lipo"),
+                               ("/usr/bin/ditto", self.bin / "ditto"),
+                               ("/usr/bin/stat", self.bin / "mac-stat")):
+            script = script.replace(absolute, str(stub))
         self.stub("lsregister", "exit 0")
         script = script.replace("/System/Library/Frameworks/CoreServices.framework/Frameworks/LaunchServices.framework/Support/lsregister",
                                 str(self.bin / "lsregister"))
         installer = self.bin / "install.sh"
         installer.write_text(script)
-        env = dict(os.environ, PATH=f"{self.bin}:{os.environ['PATH']}", TEST_OS="Darwin",
+        env = dict(os.environ, PATH=f"{self.bin}:{Path(sys.executable).parent}:/usr/bin:/bin:/usr/sbin:/sbin", TEST_OS="Darwin",
                    TEST_ARCH=arch, HOME=str(home))
         result = subprocess.run(["sh", str(installer)], cwd=ROOT, env=env,
                                 capture_output=True, text=True, check=False)
-        return result, installed.read_bytes(), log.read_text().splitlines(), plist_log.exists(), plist
+        self.installed = installed
+        self.installer_home = home
+        return result, installed.read_bytes() if installed.exists() else None, log.read_text().splitlines() if log.exists() else [], plist_log.exists(), plist
+
+    def test_final_move_failure_restores_the_exact_previous_app(self):
+        signature = (ROOT / "scripts/fixtures/codesign/developer-id.txt").read_text()
+        result, installed, *_ = self.mac_installer(signature, 0, arch="x86_64", move_failure="final")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(installed, b"previous installed app")
+        self.assertEqual(self.installed.parent.parent.stat().st_ino, self.previous_inode)
+        self.assertIn("previous app restored", result.stderr)
+        moves = (self.bin / "moves").read_text().splitlines()
+        self.assertTrue(any("/.herdr-install." in line and "/new -> " in line for line in moves))
+        self.assertTrue(any("/previous -> " in line for line in moves))
+        self.assertFalse((self.installer_home / "Applications/.herdr-app-install.lock").exists())
+
+    def test_restore_failure_preserves_backup_and_blocks_another_install(self):
+        signature = (ROOT / "scripts/fixtures/codesign/developer-id.txt").read_text()
+        result, *_ = self.mac_installer(signature, 0, arch="x86_64", move_failure="restore")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Do not retry before recovering", result.stderr)
+        backups = list((self.installer_home / "Applications").glob(".herdr-install.*/previous/Contents/Info.plist"))
+        self.assertEqual(len(backups), 1)
+        self.assertEqual(backups[0].read_bytes(), b"previous installed app")
+        self.assertEqual(backups[0].parent.parent.stat().st_ino, self.previous_inode)
+        self.assertTrue((self.installer_home / "Applications/.herdr-app-install.lock").is_dir())
+
+    def test_app_on_another_device_is_not_moved(self):
+        signature = (ROOT / "scripts/fixtures/codesign/developer-id.txt").read_text()
+        result, installed, *_ = self.mac_installer(signature, 0, arch="x86_64", different_device=True)
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("another filesystem", result.stderr)
+        self.assertEqual(installed, b"previous installed app")
+        self.assertEqual(self.installed.parent.parent.stat().st_ino, self.previous_inode)
+        self.assertFalse((self.installer_home / "Applications/.herdr-app-install.lock").exists())
+
+    def test_wrong_package_architecture_preserves_previous_app_before_signing(self):
+        signature = (ROOT / "scripts/fixtures/codesign/developer-id.txt").read_text()
+        result, installed, calls, *_ = self.mac_installer(signature, 0, arch="x86_64", package_arch="arm64")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertEqual(installed, b"previous installed app")
+        self.assertIn("expected x86_64 app, found arm64", result.stderr)
+        self.assertEqual(calls, [])
+
+    def test_core_download_failure_is_actionable_and_never_executes_partial_script(self):
+        signature = (ROOT / "scripts/fixtures/codesign/developer-id.txt").read_text()
+        result, *_ = self.mac_installer(signature, 0, arch="x86_64", core="missing")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertTrue((self.bin / "core-attempt").exists())
+        self.assertIn("herdr-core download failed", result.stderr)
+        self.assertIn("Open Herdr", result.stderr)
+        self.assertFalse((self.bin / "partial-core-executed").exists())
+
+    def test_existing_or_dangling_core_is_never_reinstalled(self):
+        signature = (ROOT / "scripts/fixtures/codesign/developer-id.txt").read_text()
+        result, *_ = self.mac_installer(signature, 0, core="dangling")
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.bin / "core-attempt").exists())
+        self.assertEqual(os.readlink(self.installer_home / ".local/bin/herdr-core"), "user-selected-missing-core")
+
+    def test_existing_core_bytes_are_preserved(self):
+        signature = (ROOT / "scripts/fixtures/codesign/developer-id.txt").read_text()
+        result, *_ = self.mac_installer(signature, 0)
+        self.assertEqual(result.returncode, 0, result.stderr)
+        self.assertFalse((self.bin / "core-attempt").exists())
+        self.assertEqual((self.installer_home / ".local/bin/herdr-core").read_bytes(), b"user's existing Core")
 
     def test_mac_installer_preserves_certificate_signed_bundle(self):
         fixture = (ROOT / "scripts/fixtures/codesign/developer-id.txt").read_text()
@@ -312,17 +436,34 @@ printf 'dev PATH added' >> "$3"''')
         sign.chmod(0o755)
         return checkout
 
+    def program(self, path, version=None):
+        version = version or re.search(r'^version = "([^"]+)"', (ROOT / "Cargo.toml").read_text(), re.M).group(1)
+        path.parent.mkdir(parents=True, exist_ok=True)
+        path.write_text(f'#!/bin/sh\nprintf "%s\\n" "herdr-app {version}"\n')
+        path.chmod(0o755)
+
+    def cargo_report(self, path=None):
+        fixed = repr(str(path)) if path else "None"
+        self.stub("cargo", f'''exec "{sys.executable}" - "$@" <<'PY'
+import json, os, pathlib, sys
+a = sys.argv[1:]
+triple = a[a.index('--target')+1] if '--target' in a else None
+windows = 'windows' in (triple or '') or os.environ['TEST_OS'].startswith(('MINGW', 'MSYS', 'CYGWIN'))
+path = pathlib.Path({fixed}) if {fixed} else pathlib.Path('target') / (triple or '') / 'release' / ('herdr-app.exe' if windows else 'herdr-app')
+print(json.dumps({{'reason':'compiler-artifact','target':{{'name':'herdr-app','kind':['bin']}},'profile':{{'test':False}},'executable':str(path.resolve())}}))
+PY''')
+
     def test_packages_keep_full_notices_on_every_platform(self):
         checkout = self.package_checkout()
         release = checkout / "target/release"
         release.mkdir(parents=True)
         for name in ("herdr-app", "herdr-app.exe"):
-            (release / name).write_bytes(b"test binary")
+            self.program(release / name)
         for triple in ("x86_64-apple-darwin", "aarch64-apple-darwin"):
             mac_release = checkout / f"target/{triple}/release"
             mac_release.mkdir(parents=True)
-            (mac_release / "herdr-app").write_bytes(b"test binary")
-        self.stub("cargo", "exit 0")
+            self.program(mac_release / "herdr-app")
+        self.cargo_report()
         self.stub("lipo", 'case "$TEST_ARCH" in arm64 | aarch64) echo arm64 ;; *) echo x86_64 ;; esac')
         self.stub("otool", f'printf "cmd LC_BUILD_VERSION\\nminos {MIN_MACOS}\\n"')
         for os_name, arch, target, prefix in (
@@ -356,13 +497,59 @@ printf 'dev PATH added' >> "$3"''')
                     self.assertNotIn("unexpected build", result.stderr)
             notice.write_bytes(original)
 
+    def test_package_uses_the_cargo_artifact_instead_of_a_stale_default_target(self):
+        checkout = self.package_checkout()
+        stale = checkout / "target/x86_64-apple-darwin/release/herdr-app"
+        fresh = checkout / "custom target with spaces/x86_64-apple-darwin/release/herdr-app"
+        self.program(stale, "0.0.1")
+        self.program(fresh)
+        self.cargo_report(fresh)
+        self.stub("lipo", "echo x86_64")
+        self.stub("otool", f'printf "cmd LC_BUILD_VERSION\\nminos {MIN_MACOS}\\n"')
+        result = self.run_script(checkout / "scripts/package", "Darwin", "x86_64", extra_env={"CARGO_TARGET_DIR":str(fresh.parent.parent.parent)})
+        self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
+        with tarfile.open(checkout / "dist/herdr-app-macos-x86_64.tar.gz") as archive:
+            self.assertEqual(archive.extractfile("Herdr.app/Contents/MacOS/Herdr").read(), fresh.read_bytes())
+        self.assertIn("0.0.1", stale.read_text())
+
+    def test_package_rejects_a_reported_old_version_before_signing(self):
+        checkout = self.package_checkout()
+        stale = checkout / "target/x86_64-apple-darwin/release/herdr-app"
+        self.program(stale, "0.0.1")
+        self.cargo_report(stale)
+        self.stub("lipo", "echo x86_64")
+        self.stub("otool", f'printf "cmd LC_BUILD_VERSION\\nminos {MIN_MACOS}\\n"')
+        result = self.run_script(checkout / "scripts/package", "Darwin", "x86_64")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("expected herdr-app", result.stderr)
+        self.assertIn("found herdr-app 0.0.1", result.stderr)
+        self.assertFalse((checkout / "sign-called").exists())
+        self.assertFalse((checkout / "dist/herdr-app-macos-x86_64.tar.gz").exists())
+
+    def test_package_requires_a_current_cargo_executable_event(self):
+        checkout = self.package_checkout()
+        stale = checkout / "target/x86_64-apple-darwin/release/herdr-app"
+        self.program(stale)
+        self.stub("cargo", "exit 0")
+        self.stub("lipo", "echo x86_64")
+        self.stub("otool", f'printf "cmd LC_BUILD_VERSION\\nminos {MIN_MACOS}\\n"')
+        result = self.run_script(checkout / "scripts/package", "Darwin", "x86_64")
+        self.assertNotEqual(result.returncode, 0)
+        self.assertIn("Cargo did not report exactly one", result.stderr)
+        self.assertFalse((checkout / "sign-called").exists())
+
     def native_mac_package(self, rust_host, binary_arch, *args, deployment=MIN_MACOS, shell_arch="x86_64"):
         checkout = self.package_checkout()
         source = checkout / "tiny.c"
-        source.write_text("int main(void) { return 0; }\n")
+        version = re.search(r'^version = "([^"]+)"', (ROOT / "Cargo.toml").read_text(), re.M).group(1)
+        source.write_text(f'#include <stdio.h>\nint main(void) {{ puts("herdr-app {version}"); return 0; }}\n')
         binary = checkout / "tiny"
         subprocess.run(["xcrun", "clang", "-arch", binary_arch, f"-mmacosx-version-min={deployment}",
                         "-Wl,-no_adhoc_codesign", str(source), "-o", str(binary)],
+                       capture_output=True, text=True, check=True)
+        # Like rustc's linked executable, it must be runnable before the bundle
+        # signing step. Apple Silicon requires at least an ad-hoc code signature.
+        subprocess.run(["/usr/bin/codesign", "--force", "--sign", "-", str(binary)],
                        capture_output=True, text=True, check=True)
         self.stub("cargo", f'''printf '%s\\n' "$@" > "{checkout}/cargo-args"
 printf '%s' "$MACOSX_DEPLOYMENT_TARGET" > "{checkout}/cargo-min"
@@ -373,7 +560,11 @@ while [ "$#" -gt 0 ]; do
 done
 destination="target/${{target:+$target/}}release"
 mkdir -p "$destination"
-cp "{binary}" "$destination/herdr-app"''')
+cp "{binary}" "$destination/herdr-app"
+exec "{sys.executable}" - "$destination/herdr-app" <<'PY'
+import json, pathlib, sys
+print(json.dumps({{'reason':'compiler-artifact','target':{{'name':'herdr-app','kind':['bin']}},'profile':{{'test':False}},'executable':str(pathlib.Path(sys.argv[1]).resolve())}}))
+PY''')
         result = self.run_script(checkout / "scripts/package", "Darwin", shell_arch, *args, rust_host=rust_host)
         return checkout, result
 
@@ -388,6 +579,16 @@ cp "{binary}" "$destination/herdr-app"''')
         ):
             with self.subTest(host=host, shell_arch=shell_arch, args=args):
                 checkout, result = self.native_mac_package(host, actual_arch, *args, shell_arch=shell_arch)
+                hardware_arm = subprocess.run(["/usr/sbin/sysctl", "-n", "hw.optional.arm64"], capture_output=True, text=True).stdout.strip() == "1"
+                native_arch = "arm64" if hardware_arm else "x86_64"
+                if actual_arch != native_arch and result.returncode:
+                    # Cross-target execution requires OS emulation support.
+                    # Native release runners need none; otherwise fail closed.
+                    self.assertNotEqual(result.returncode, 0)
+                    self.assertIn("cannot verify executable version", result.stderr)
+                    self.assertFalse((checkout / "sign-called").exists())
+                    self.assertIn("for macos-aarch64", result.stdout)
+                    continue
                 self.assertEqual(result.returncode, 0, result.stdout + result.stderr)
                 triple = "x86_64-apple-darwin" if target == "macos-x86_64" else "aarch64-apple-darwin"
                 self.assertEqual((checkout / "cargo-args").read_text().splitlines()[-2:], ["--target", triple])
