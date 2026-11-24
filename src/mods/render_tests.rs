@@ -219,7 +219,7 @@ fn fixture(populated: bool, props: Value, update: Value) -> BTreeMap<String, Val
         ("themes".into(), json!([{"name":"graphite", "colors": &*crate::settings::theme()}])),  ("fonts".into(), json!(["Monospace", "Sans"])),
         ("updates".into(), update),
         ("telemetry".into(), json!({"enabled":true,"setting":true,"sends":true,"off_because":null,"endpoint":"https://invalid.example", "draft":{},"queued":[],"last_sent":null})),
-        ("window".into(), json!({"platform":"linux","titlebar":"none","buttons":true,"maximized":false,"fullscreen":false,"active":true})),
+        ("window".into(), json!({"platform":"linux","titlebar":"none","buttons":true,"maximized":false,"fullscreen":false,"active":true,"visible":true})),
         ("placement".into(), Value::Null),
         ("home".into(), json!("/fixture")), ("appHome".into(), json!("/fixture/app")),
         ("keys".into(), Value::Array(serde_json::from_str::<BTreeMap<String, BTreeMap<String, String>>>(include_str!("../../defaults/keys.json")).unwrap().into_iter().flat_map(|(section, bindings)| bindings.into_iter().map(move |(keys, action)| json!({"section":section,"keys":keys,"action":action}))).collect())),
@@ -286,6 +286,7 @@ fn module(values: BTreeMap<String, Value>, calls: Rc<RefCell<Calls>>) -> HostMod
     module = module.async_function("feedbackPickImages", |_| Ok(async { Ok(HostValue::Array(vec![])) }));
     module = module.async_function("knownAgents", |_| Ok(async { Ok(HostValue::Array(vec![])) }));
     module = module.async_function("pickFolder", |_| Ok(async { Ok(HostValue::Null) }));
+    module = module.async_function("pickFiles", |_| Ok(async { Ok(HostValue::Null) }));
     module = module.async_function("nextCommand", |_| Ok(std::future::pending::<gpui_shell::HostResult>()));
     module = module.cancellable_async_function("watchFolder", HostValue::Array(vec![]), |_| Ok(std::future::pending::<gpui_shell::HostResult>()));
     for name in ["exec", "hc", "readTextFile", "writeTextFile", "sendFeedback"] {
@@ -396,6 +397,116 @@ export default class Panel extends View {
     assert_eq!(marks.get(), 1, "reopening and failed init must reuse evaluated code");
     window.update(cx, |_, window, _| window.remove_window()).unwrap();
     cx.run_until_parked();
+}
+
+#[gpui::test]
+fn changes_retries_when_the_files_copy_owning_its_git_scan_closes_or_reloads(cx: &mut TestAppContext) {
+    use std::time::Duration;
+
+    cx.update(gpui_shell::init);
+    for started in [false, true] {
+        for reload in [false, true] {
+            let staged = Staged::new();
+            let runtime = ShellRuntime::new_isolated().unwrap();
+            let files_entry = staged.0.join("mods/files/main.js");
+            let files_source = std::fs::read_to_string(&files_entry).unwrap();
+            // GPUI advances the timers, so use the same clock for scan timestamps.
+            // Files loads first and sets Date.now() for both mods in this VM.
+            std::fs::write(
+                &files_entry,
+                format!("import {{ now }} from 'test-clock'; Date.now = now;\n{files_source}"),
+            ).unwrap();
+            let revision = Rc::new(Cell::new(0));
+            let source_revision = revision.clone();
+            runtime.set_source_revision_provider(move |_| Some(source_revision.get()));
+            let git_calls = Rc::new(Cell::new(0));
+            let calls = git_calls.clone();
+            let preview_reads = Rc::new(Cell::new(0));
+            let reads = preview_reads.clone();
+            let mut values = fixture(true, Value::Null, updates("current", "current"));
+            values.insert("focused".into(), Value::Null);
+            let herdr = module(values, Rc::new(RefCell::new(Calls::default())))
+                .async_function("exec", move |a| {
+                    let args = strings(a.get(1));
+                    let (output, blocked) = if a.string(0)? == "sh" {
+                        ("f\0recovered.txt\0", false)
+                    } else if args.iter().any(|arg| arg == "--show-toplevel") {
+                        ("/fixture/project\n", false)
+                    } else {
+                        assert!(args.iter().any(|arg| arg == "status"), "{args:?}");
+                        calls.set(calls.get() + 1);
+                        ("?? recovered.txt\0", started && calls.get() == 1)
+                    };
+                    Ok(async move {
+                        if blocked {
+                            std::future::pending().await
+                        } else {
+                            Ok(to_host(&json!({"code":0,"stdout":output,"stderr":""})))
+                        }
+                    })
+                })
+                .async_function("readTextFile", move |a| {
+                    assert_eq!(a.string(0)?, "/fixture/project/recovered.txt");
+                    reads.set(reads.get() + 1);
+                    Ok(std::future::ready(Ok("recovered diff".into())))
+                });
+            let executor = cx.executor();
+            let epoch = executor.now();
+            let clock = HostModule::new("test-clock").function("now", move |_| {
+                Ok((executor.now().duration_since(epoch).as_millis() as f64).into())
+            });
+            let policy = Policy::new()
+                .with_host_module(herdr).unwrap()
+                .with_host_module(clock).unwrap();
+            gpui_shell::policy::set_default(policy);
+
+            let window = cx.add_window(|_, _| Empty);
+            let mut visual = gpui::VisualTestContext::from_window(window.into(), cx);
+            let files = visual.update(|window, cx| {
+                runtime.try_load(staged.0.join("mods/files"), window, cx).unwrap()
+            });
+            visual.run_until_parked();
+            let changes = visual.update(|window, cx| {
+                let root = runtime.try_load(staged.0.join("mods/changes"), window, cx).unwrap();
+                let view: gpui::Entity<gpui_shell::ScriptView> = root.read(cx).content().clone().downcast().unwrap();
+                window.replace_root(cx, |_, _| RootedView(root));
+                view
+            });
+            visual.run_until_parked();
+            if started {
+                visual.executor().advance_clock(Duration::from_millis(25));
+                visual.run_until_parked();
+            }
+            assert_eq!(git_calls.get(), usize::from(started));
+
+            visual.update(|window, cx| {
+                if reload {
+                    std::fs::write(&files_entry, r#"
+                        import { View, div } from "gpui-kit";
+                        export default class extends View { render() { return div(); } }
+                    "#).unwrap();
+                    revision.set(1);
+                    runtime.reload_now(&files, window, cx).unwrap();
+                } else {
+                    runtime.close_now(&files, Instant::now() + Duration::from_millis(250), window, cx);
+                }
+            });
+            drop(files);
+            visual.run_until_parked();
+            for _ in 0..4 {
+                visual.executor().advance_clock(Duration::from_millis(50));
+                visual.run_until_parked();
+            }
+            assert_eq!(git_calls.get(), 1 + usize::from(started), "started={started}, reload={reload}");
+            let tree = visual.update(|window, cx| {
+                window.draw(cx).clear(cx);
+                changes.read(cx).snapshot().unwrap().debug_tree()
+            });
+            assert!(tree.contains("recovered.txt"), "{tree}");
+            assert_eq!(preview_reads.get(), 1, "started={started}, reload={reload}");
+            visual.update(|window, _| window.remove_window());
+        }
+    }
 }
 
 #[gpui::test]
@@ -710,6 +821,315 @@ export default class Demo extends View {
 }
 
 #[gpui::test]
+fn a_mod_hears_mouse_back_and_forward_buttons(cx: &mut TestAppContext) {
+    use gpui::{Modifiers, MouseButton, NavigationDirection, VisualTestContext, point, px};
+
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    std::fs::write(staged.0.join("main.js"), r#"
+import { View, div } from "gpui-kit";
+import { v_flex, h_flex, Popover } from "gpui-base";
+export default class Demo extends View {
+  init() { this.log = []; }
+  render() {
+    return v_flex().w(300).h(200)
+      .child(
+        h_flex()
+          .child(
+            div().id("target").w(100).h(50)
+              .on_mouse_down("back", (event, cx) => {
+                this.log.push(`down:${event.button}`);
+                cx.notify();
+              })
+              .on_mouse_up("back", (event, cx) => {
+                this.log.push(`up:${event.button}`);
+                cx.notify();
+              })
+              .on_mouse_down("forward", (event, cx) => {
+                this.log.push(`down:${event.button}`);
+                cx.notify();
+              })
+              .on_mouse_up("forward", (event, cx) => {
+                this.log.push(`up:${event.button}`);
+                cx.notify();
+              })
+              .on_mouse_down_out((event, cx) => {
+                this.log.push(`out:${event.button}`);
+                cx.notify();
+              }),
+          )
+          .child(
+            Popover.new("nav-pop")
+              .mouse_button("back")
+              .on_open_change((open, cx) => {
+                this.log.push(`pop:${open}`);
+                cx.notify();
+              })
+              .trigger(div().id("pop-trigger").w(100).h(50).child("trigger"))
+              .content(div().child("pop-opened")),
+          ),
+      )
+      .child(div().child(`log=${this.log.join(" ")}`));
+  }
+}
+"#).unwrap();
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|window, cx| {
+        RootedView(runtime.try_load(&staged.0, window, cx).unwrap())
+    });
+    let mut context = VisualTestContext::from_window(window.into(), cx);
+    context.update(|window, cx| window.draw(cx).clear(cx));
+    let view: gpui::Entity<gpui_shell::ScriptView> = window
+        .root(&mut context)
+        .unwrap()
+        .read_with(&context, |root, cx| root.0.read(cx).content().clone().downcast().unwrap());
+
+    let inside = point(px(20.), px(20.));
+    let pop_trigger = point(px(140.), px(20.));
+    let outside = point(px(260.), px(20.));
+    let back = MouseButton::Navigate(NavigationDirection::Back);
+    let forward = MouseButton::Navigate(NavigationDirection::Forward);
+
+    context.simulate_mouse_move(inside, None, Modifiers::default());
+    context.simulate_mouse_down(inside, MouseButton::Left, Modifiers::default());
+    context.simulate_mouse_up(inside, MouseButton::Left, Modifiers::default());
+    context.simulate_mouse_down(inside, back, Modifiers::default());
+    context.simulate_mouse_up(inside, back, Modifiers::default());
+    context.simulate_mouse_down(inside, forward, Modifiers::default());
+    context.simulate_mouse_up(inside, forward, Modifiers::default());
+    context.simulate_mouse_down(outside, back, Modifiers::default());
+    context.simulate_mouse_up(outside, back, Modifiers::default());
+    context.simulate_mouse_down(outside, forward, Modifiers::default());
+    context.simulate_mouse_up(outside, forward, Modifiers::default());
+    // Left press on a back-button popover trigger must not open it; back press opens it.
+    context.simulate_mouse_down(pop_trigger, MouseButton::Left, Modifiers::default());
+    context.simulate_mouse_up(pop_trigger, MouseButton::Left, Modifiers::default());
+    context.simulate_mouse_down(pop_trigger, back, Modifiers::default());
+    context.simulate_mouse_up(pop_trigger, back, Modifiers::default());
+    context.run_until_parked();
+    context.update(|window, cx| window.draw(cx).clear(cx));
+
+    let tree = context.update(|_, cx| {
+        view.read(cx).snapshot().map(gpui_shell::RenderSnapshot::debug_tree).unwrap_or_default()
+    });
+    assert!(
+        tree.contains(
+            "log=down:back up:back down:forward up:forward out:back out:forward out:left out:back pop:true"
+        ),
+        "expected back/forward handlers, on_mouse_down_out buttons, and back-button popover: {tree}"
+    );
+}
+
+#[gpui::test]
+fn a_mod_reads_a_text_view_selection_once_it_settles(cx: &mut TestAppContext) {
+    use gpui::{
+        Modifiers, MouseButton, MouseDownEvent, MouseUpEvent, VisualTestContext, point, px,
+    };
+
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    std::fs::write(staged.0.join("main.js"), r#"
+import { View, div } from "gpui-kit";
+import { TextView, v_flex } from "gpui-base";
+export default class Demo extends View {
+  init() { this.log = []; this.word = "**wörld**"; }
+  render() {
+    const view = (id, text) => div().h(40).child(TextView.markdown(id, text).selectable(true)
+      .on_selection_change((s, cx) => {
+        this.log.push(s ? `${s.text}:${text.slice(s.range.start, s.range.end)}:${s.position ? "at" : "-"}` : "null");
+        if (s && id === "word") this.word = "replacement";
+        cx.notify();
+      }));
+    return v_flex().w(300).h(200)
+      .child(view("drag", "😀 héllo **wörld**"))
+      .child(view("word", this.word))
+      .child(div().child(`log=${this.log.join(" ")}`));
+  }
+}
+"#).unwrap();
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|window, cx| {
+        RootedView(runtime.try_load(&staged.0, window, cx).unwrap())
+    });
+    let mut context = VisualTestContext::from_window(window.into(), cx);
+    context.update(|window, cx| window.draw(cx).clear(cx));
+    let view: gpui::Entity<gpui_shell::ScriptView> = window
+        .root(&mut context)
+        .unwrap()
+        .read_with(&context, |root, cx| root.0.read(cx).content().clone().downcast().unwrap());
+    let settle = |context: &mut VisualTestContext| {
+        context.run_until_parked();
+        context.update(|window, cx| window.draw(cx).clear(cx));
+        context.run_until_parked();
+    };
+    let press = |context: &mut VisualTestContext, x: f32, y: f32, click_count: usize| {
+        let position = point(px(x), px(y));
+        let modifiers = Modifiers::default();
+        context.simulate_event(MouseDownEvent { button: MouseButton::Left, position, modifiers, click_count, first_mouse: false });
+        context.simulate_event(MouseUpEvent { button: MouseButton::Left, position, modifiers, click_count });
+        settle(context);
+    };
+
+    let snapshot = |context: &VisualTestContext| {
+        view.read_with(context, |view, _| {
+            view.snapshot().map(gpui_shell::RenderSnapshot::debug_tree).unwrap_or_default()
+        })
+    };
+
+    // A drag reports on release, with offsets into the Markdown it came from.
+    context.simulate_mouse_down(point(px(1.), px(8.)), MouseButton::Left, Modifiers::default());
+    context.simulate_mouse_move(point(px(290.), px(8.)), MouseButton::Left, Modifiers::default());
+    settle(&mut context);
+    let tree = snapshot(&context);
+    assert!(tree.contains("log=\""), "{tree}");
+    context.simulate_mouse_up(point(px(290.), px(8.)), MouseButton::Left, Modifiers::default());
+    settle(&mut context);
+    let (copy, select_all) = if cfg!(target_os = "macos") {
+        ("cmd-c", "cmd-a")
+    } else {
+        ("ctrl-c", "ctrl-a")
+    };
+    let copied_text = |context: &mut VisualTestContext| {
+        context.simulate_keystrokes(copy);
+        context.update(|_, cx| cx.read_from_clipboard().unwrap().text().unwrap())
+    };
+    assert_eq!(copied_text(&mut context), "😀 héllo wörld");
+    context.simulate_keystrokes(select_all);
+    settle(&mut context);
+    assert_eq!(copied_text(&mut context), "😀 héllo wörld");
+    // Clicking away clears the selection once.
+    press(&mut context, 250., 150., 1);
+    press(&mut context, 250., 150., 1);
+    // The double-click reports a word. The handler replaces that TextView's
+    // source, which also clears its selection without a pointer event.
+    press(&mut context, 5., 48., 2);
+    settle(&mut context);
+    let tree = snapshot(&context);
+    // The source range ends at the last selected character, before the `**`.
+    assert!(
+        tree.contains("log=😀 héllo wörld:😀 héllo **wörld:at 😀 héllo wörld:😀 héllo **wörld**:- null wörld:wörld:at null\""),
+        "{tree}"
+    );
+}
+
+#[gpui::test]
+fn a_mod_can_show_literal_html_in_a_markdown_text_view(cx: &mut TestAppContext) {
+    use gpui::{Modifiers, MouseButton, VisualTestContext, point, px};
+    use gpui_base::TextSelection;
+
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    std::fs::write(staged.0.join("main.js"), r#"
+import { View, div } from "gpui-kit";
+import { TextView, v_flex } from "gpui-base";
+export default class Demo extends View {
+  init() { this.mode = 0; }
+  render() {
+    const source = 'hello <b>bold</b> <span title="*a* &amp;">text</span>\n\n<div>\n*b* &amp;\n</div>';
+    const text = TextView.markdown("text", source).selectable(true);
+    if (this.mode !== 2) text.raw_html(this.mode === 1);
+    return v_flex().w(600)
+      .child(div().h(40).child("Next").on_click((_, cx) => {
+        this.mode = (this.mode + 1) % 3;
+        cx.notify();
+      }))
+      .child(text);
+  }
+}
+"#).unwrap();
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|window, cx| {
+        RootedView(runtime.try_load(&staged.0, window, cx).unwrap())
+    });
+    let mut context = VisualTestContext::from_window(window.into(), cx);
+    let click = |context: &mut VisualTestContext, y| {
+        let position = point(px(8.), px(y));
+        context.simulate_mouse_down(position, MouseButton::Left, Modifiers::default());
+        context.simulate_mouse_up(position, MouseButton::Left, Modifiers::default());
+    };
+    let select_all = if cfg!(target_os = "macos") { "cmd-a" } else { "ctrl-a" };
+
+    for literal in [true, false, false, true] {
+        context.run_until_parked();
+        context.update(|window, cx| window.draw(cx).clear(cx));
+        click(&mut context, 48.);
+        context.simulate_keystrokes(select_all);
+        let text = context.update(|window, cx| TextSelection::selected_text(window, cx));
+        if literal {
+            assert!(text.contains(r#"hello <b>bold</b> <span title="*a* &amp;">text</span>"#), "{text:?}");
+            assert!(text.contains("<div>\n*b* &amp;\n</div>"), "{text:?}");
+        } else {
+            assert!(text.contains("hello bold text"), "{text:?}");
+            assert!(!text.contains("<div>"), "{text:?}");
+        }
+        click(&mut context, 20.);
+    }
+}
+
+#[gpui::test]
+fn a_mod_highlights_a_markdown_source_range(cx: &mut TestAppContext) {
+    use gpui::{Modifiers, MouseButton, VisualTestContext, point, px};
+
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    std::fs::write(staged.0.join("main.js"), r##"
+import { View, div } from "gpui-kit";
+import { TextView, v_flex } from "gpui-base";
+export default class Demo extends View {
+  init() { this.step = 0; }
+  render() {
+    const match = "**café**";
+    const source = `${this.step ? "😀 prefix" : "😀"} ${match} tail`;
+    const start = source.indexOf(match);
+    const text = TextView.markdown("text", source);
+    if (this.step < 2) text.highlight_range(start, start + match.length, "#be3784");
+    return v_flex().w(400)
+      .child(div().h(40).child(text))
+      .child(div().h(40).child("Next").on_click((_, cx) => {
+        this.step++;
+        cx.notify();
+      }));
+  }
+}
+"##).unwrap();
+    let runtime = ShellRuntime::new_isolated().unwrap();
+    let window = cx.add_window(|window, cx| {
+        RootedView(runtime.try_load(&staged.0, window, cx).unwrap())
+    });
+    let mut context = VisualTestContext::from_window(window.into(), cx);
+    let painted = |context: &mut VisualTestContext| {
+        context.run_until_parked();
+        context.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            let color: gpui::Background = gpui::rgb(0xbe3784).into();
+            window.painted_quads().into_iter()
+                .filter_map(|quad| (quad.background == color).then_some(quad.bounds))
+                .collect::<Vec<_>>()
+        })
+    };
+    let next = |context: &mut VisualTestContext| {
+        let pos = point(px(8.), px(55.));
+        context.simulate_mouse_down(pos, MouseButton::Left, Modifiers::default());
+        context.simulate_mouse_up(pos, MouseButton::Left, Modifiers::default());
+    };
+
+    let initial = painted(&mut context);
+    let [initial] = initial.as_slice() else {
+        panic!("expected a highlight for café: {initial:?}");
+    };
+    next(&mut context);
+    let moved = painted(&mut context);
+    let [moved] = moved.as_slice() else {
+        panic!("expected the highlight to move with café: {moved:?}");
+    };
+    assert!(moved.left() > initial.left());
+    let width_delta = (moved.size.width - initial.size.width).as_f32().abs();
+    assert!(width_delta <= 1.0, "highlight width changed: {initial:?} → {moved:?}");
+    next(&mut context);
+    assert!(painted(&mut context).is_empty());
+}
+
+#[gpui::test]
 fn long_theme_names_stay_inside_their_card(cx: &mut TestAppContext) {
     cx.update(gpui_shell::init);
     let staged = Staged::new();
@@ -922,6 +1342,38 @@ fn machine_add_needing_input_keeps_the_picker_and_shows_instructions(cx: &mut Te
     let calls = calls.borrow();
     assert!(calls.unexpected.is_empty(), "{:?}", calls.unexpected);
     assert!(!calls.effects.iter().any(|(name, _)| name == "openOverlay" || name == "closeOverlay"), "the picker stays open without a setup dialog");
+}
+
+#[gpui::test]
+fn palette_lists_the_entries_mods_declare_in_their_mod_json(cx: &mut TestAppContext) {
+    cx.update(gpui_shell::init);
+    let staged = Staged::new();
+    let probe = staged.0.join("mods/probe");
+    std::fs::create_dir_all(&probe).unwrap();
+    std::fs::write(probe.join("main.js"), "export default () => null;").unwrap();
+    std::fs::write(probe.join("mod.json"), r#"{"place":"none","palette":[{"title":"Probe entry","command":"mod.open","args":{"name":"probe"},"words":"zebra"}]}"#).unwrap();
+    let mut values = fixture(true, props(), updates("current", "current"));
+    values.insert("appHome".into(), json!(staged.0.to_string_lossy()));
+    let calls = Rc::new(RefCell::new(Calls::default()));
+    let home = staged.0.join("login-home");
+    std::fs::create_dir(&home).unwrap();
+    let policy = Policy::new()
+        .with_storage_path(staged.0.join("store-palette.json"))
+        .with_capabilities(capabilities_at(home, staged.0.clone(), true))
+        .with_host_module(module(values, calls.clone())).unwrap();
+    let root = staged.wrapper("frame/palette", "this.query = 'zebra';");
+    let window = cx.add_window(|_, _| Empty);
+    let mut session = window.update(cx, |_, window, cx| {
+        DescriptionSession::load(ShellRuntime::new_isolated().unwrap(), root, policy, window, cx).unwrap()
+    }).unwrap();
+    cx.run_until_parked();
+    window.update(cx, |_, window, cx| {
+        let tree = session.describe(window, cx).unwrap();
+        assert!(tree.contains("Probe entry"), "{tree}");
+        window.remove_window();
+    }).unwrap();
+    cx.run_until_parked();
+    assert!(calls.borrow().unexpected.is_empty(), "{:?}", calls.borrow().unexpected);
 }
 
 #[gpui::test]

@@ -18,8 +18,19 @@ pub fn set_pixel_scale(scale: f32) {
     PIXEL_SCALE.store(scale.to_bits(), Ordering::Relaxed);
 }
 
+pub(crate) fn pixel_scale() -> f32 {
+    f32::from_bits(PIXEL_SCALE.load(Ordering::Relaxed))
+}
+
 pub(crate) fn scaled_px(value: f32) -> Pixels {
-    px(value * f32::from_bits(PIXEL_SCALE.load(Ordering::Relaxed)))
+    px(value * pixel_scale())
+}
+
+// HERDR: the reverse, for a length handed back to a script: what it would have
+// written to get this many pixels on screen. To a hundredth, so dividing by
+// the zoom leaves no float dust (1200 at zoom 1.2 reads 1000, not 999.99994).
+pub(crate) fn script_px(value: Pixels, scale: f32) -> f64 {
+    (f64::from(f32::from(value)) / f64::from(scale) * 100.).round() / 100.
 }
 
 /// A script argument after bridging, stored in the spec arena.
