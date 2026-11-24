@@ -134,7 +134,7 @@ Start a terminal: as a new tab (place "tab", default), or "right"/"down" of the 
 
 ## `terminal.keep`
 
-Give a running terminal without a pane (a sub-agent) a pane: a new tab, or "right"/"down" of `pane`. An explicit pane target requires a local, unplaced terminal with no `herdr.space` or `herdr.tab` label; it cannot target a terminal that already has a pane. Without `pane`, right/down uses the focused pane. `focus: false` keeps the selected space and tab, pane focus, and zoom unchanged. A pane target requires `place` to be "right" or "down".
+Give a running terminal without a pane (a sub-agent) a pane: a new tab, or "right"/"down" of pane. An explicit pane target requires a local, unplaced terminal with no herdr.space or herdr.tab label; it cannot target a terminal that already has a pane. Without pane, right/down uses the focused pane. focus false keeps the selected space, tab, pane focus, and zoom unchanged.
 
 | Argument | Required |
 |---|---|
