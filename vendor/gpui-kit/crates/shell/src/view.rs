@@ -22,9 +22,9 @@
 //! materialization cost proportional to application activity rather than frame
 //! rate.
 
-use std::rc::Rc;
+use std::{rc::Rc, time::Duration};
 
-use gpui::{AnyElement, Context, EntityId, IntoElement, ParentElement as _, Render, Styled as _, Window, div};
+use gpui::{AnyElement, Context, EntityId, IntoElement, ParentElement as _, Render, Styled as _, Task, Window, div};
 
 use crate::{
     engine::{ShellRuntime, ViewObject},
@@ -33,6 +33,9 @@ use crate::{
     runtime::{error_banner, error_overlay},
     snapshot::RenderSnapshot,
 };
+
+const INTERRUPT_RETRY_DELAY: Duration = Duration::from_millis(250);
+const INTERRUPT_RETRY_MAX_DELAY: Duration = Duration::from_secs(4);
 
 pub struct ScriptView {
     /// Declared before `runtime` because fields drop in declaration order, and
@@ -68,6 +71,10 @@ pub struct ScriptView {
     /// every frame: a broken render is exactly as frame-coupled as a working one
     /// if the failure re-triggers the build.
     error: Option<String>,
+    // HERDR: an interrupt may be transient even when no new state arrives.
+    // Keep one cancellable retry, never a rebuild on every paint.
+    interrupt_retry: Option<Task<()>>,
+    interrupt_retry_delay: Duration,
     /// Whose authority this view's script runs under.
     ///
     /// Captured when the view is constructed rather than read when it is used:
@@ -126,6 +133,8 @@ impl ScriptView {
             policy,
             theme: None,
             error: None,
+            interrupt_retry: None,
+            interrupt_retry_delay: INTERRUPT_RETRY_DELAY,
             ownership,
             runtime,
         }
@@ -168,6 +177,8 @@ impl ScriptView {
     /// description that the old instance built is now meaningless, so the view
     /// is invalidated with it.
     pub(crate) fn replace_object(&mut self, object: ViewObject) {
+        self.interrupt_retry = None;
+        self.interrupt_retry_delay = INTERRUPT_RETRY_DELAY;
         self.object = object;
         self.dirty = true;
     }
@@ -209,13 +220,14 @@ impl ScriptView {
     }
 
     pub fn is_dirty(&self) -> bool {
-        !self.retired && self.dirty
+        !self.retired && self.dirty && self.interrupt_retry.is_none()
     }
 
     /// Makes a retained entity inert before its store handle is removed.
     /// A rendered GPUI frame may still retain the entity after script release.
     pub(crate) fn retire(&mut self) {
         self.retired = true;
+        self.interrupt_retry = None;
         self.dirty = false;
         self.error = None;
         self.previous = None;
@@ -259,9 +271,33 @@ impl ScriptView {
                 // before last: dropping it releases its callbacks.
                 self.previous = self.current.replace(snapshot);
                 self.error = None;
+                self.interrupt_retry_delay = INTERRUPT_RETRY_DELAY;
             }
-            Err(error) => self.error = Some(error.to_string()),
+            Err(error) => {
+                self.error = Some(error.to_string());
+                if crate::engine::is_interrupted(&error) {
+                    self.retry_interrupted_render(window, cx);
+                } else {
+                    self.interrupt_retry_delay = INTERRUPT_RETRY_DELAY;
+                }
+            }
         }
+    }
+
+    fn retry_interrupted_render(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        let delay = self.interrupt_retry_delay;
+        self.interrupt_retry_delay = (delay * 2).min(INTERRUPT_RETRY_MAX_DELAY);
+        self.interrupt_retry = Some(cx.spawn_in(window, async move |view, cx| {
+            cx.background_executor().timer(delay).await;
+            let _ = view.update(cx, |view, cx| {
+                view.interrupt_retry = None;
+                if !view.retired
+                    && view.application_generation().is_none_or(|generation| generation.is_active())
+                {
+                    view.refresh(cx);
+                }
+            });
+        }));
     }
 }
 

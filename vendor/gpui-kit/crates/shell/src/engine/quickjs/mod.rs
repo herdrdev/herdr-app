@@ -5785,6 +5785,7 @@ fn read_module_source(path: &Path) -> Result<String> {
     };
     read().map_err(|error| CodeError {
         cacheable: !error.downcast_ref::<std::io::Error>().is_some_and(transient_source_io),
+        interrupted: false,
         message: format!("{error:#}"),
     }.into())
 }
@@ -10664,6 +10665,7 @@ fn upgrade(runtime: &Weak<ShellRuntime>, ctx: &Ctx<'_>) -> JsResult<Rc<ShellRunt
 struct CodeError {
     message: String,
     cacheable: bool,
+    interrupted: bool,
 }
 
 impl std::fmt::Display for CodeError {
@@ -10679,6 +10681,7 @@ impl CodeError {
         if !matches!(error, JsError::Exception) {
             return Self {
                 cacheable: matches!(error, JsError::Resolving { .. } | JsError::DuplicateExports | JsError::InvalidExport),
+                interrupted: false,
                 message: error.to_string(),
             };
         }
@@ -10691,8 +10694,13 @@ impl CodeError {
                 && error.as_object().get::<_, String>("name").is_ok_and(|name| name == "InternalError")
         });
         let cacheable = !value.is_null() && !interrupted && !out_of_memory;
-        Self { message: describe_exception(&value), cacheable }
+        Self { message: describe_exception(&value), cacheable, interrupted }
     }
+}
+
+// HERDR: preserve the VM's classification, not a script-controlled message.
+pub(crate) fn is_interrupted(error: &anyhow::Error) -> bool {
+    error.downcast_ref::<CodeError>().is_some_and(|error| error.interrupted)
 }
 
 fn describe(ctx: &Ctx<'_>, error: JsError) -> String {
