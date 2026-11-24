@@ -3284,6 +3284,8 @@ const BASE: &str = r#"  /** A row. */
     /** Replaces the selection with `text`, as typing would (one undo step). */
     replace(text: string): void;
     on(event: "change" | "submit" | "focus" | "blur" | "paste_other", handler: (event: InputEvent, cx: Context) => void): boolean;
+    /** Changes the indent once the file's style is known. `hard_tabs` defaults to false. */
+    set_tab_size(tab_size: number, hard_tabs?: boolean): void;
     /** Moves the keyboard onto the editor. */
     focus(): void;
     /** Wraps long lines instead of scrolling sideways, keeping the text and selection. */
@@ -3306,6 +3308,11 @@ const BASE: &str = r#"  /** A row. */
       readonly?: boolean;
       /** Defaults to false. */
       soft_wrap?: boolean;
+      /** Spaces per indent and spacing of the indent guides, from 1 to 16 whole columns.
+       * Defaults to 2. The text renderer chooses the displayed width of tab characters. */
+      tab_size?: number;
+      /** Tab inserts a `\t` instead of spaces. Defaults to false. */
+      hard_tabs?: boolean;
       /** Semantic colors: keyword, string, comment, function, type, number,
        * constant, variable, operator, punctuation, boolean, string.escape.
        * Markdown ("markdown" or "md") adds heading, strong, emphasis, code,
