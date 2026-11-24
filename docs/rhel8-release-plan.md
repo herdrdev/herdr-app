@@ -130,6 +130,8 @@ Publishing and a real RHEL 8 desktop smoke test remain separate decisions.
 | 4 | `e526642` | https://github.com/shawn111/herdr-app/actions/runs/45276478949 | failed in `Check glibc floor`: exit 141 (SIGPIPE) from `objdump | grep | sort -Vu | tail -1 | cut` after printing glibc 2.28 | Replace pipeline with awk that reads full objdump output and computes max GLIBC version. |
 | 5 | `83d0c6c` | https://github.com/shawn111/herdr-app/actions/runs/45280201963 | **success**: `ldd (GNU libc) 2.28`, `herdr-app` and `herdr-core` both at 2.28, artifact 38.5 MB | None needed; app+core green. |
 | 6 | `2d2a367` | https://github.com/shawn111/herdr-app/actions/runs/45320328933 | **success**: launcher `herdr-app-rhel8` and `README-rhel8.md` in the tarball; both binaries at glibc 2.28; artifact 38.5 MB | None needed. |
+| 7 | `9291769` | https://github.com/shawn111/herdr-app/actions/runs/45324805105 | failed in `Check glibc floor` with exit 141 right after `ldd --version \| head -1`; `head` closed the pipe and `pipefail` turned the producer's SIGPIPE into a failure (the same race the `objdump` step was fixed for) | Replace `head -1` with `sed -n '1p'` in that line and in the `sort -V` comparison; both read all input, so no SIGPIPE. |
+| 8 | pending | — | pending | SIGPIPE fix; launcher now also defaults `LP_NUM_THREADS=1`. |
 
 ## Risks / fallbacks
 

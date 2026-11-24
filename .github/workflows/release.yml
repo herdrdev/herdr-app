@@ -84,14 +84,17 @@ jobs:
           tar -xzf dist/herdr-app-linux-x86_64.tar.gz -C "$work"
           cp "$core_src/target/release/herdr-core" "$work/herdr-app/herdr-core"
           ln -s herdr-core "$work/herdr-app/hc"
-          # This build's launcher defaults the X11 scale to 1 (see its header).
+          # This build's launcher defaults the X11 scale to 1 and one Mesa
+          # rasterizer thread (see its header).
           install -m 755 distribution/rhel8/herdr-app-rhel8 "$work/herdr-app/herdr-app-rhel8"
           install -m 644 distribution/rhel8/README.md "$work/herdr-app/README-rhel8.md"
           tar -czf dist/herdr-app-rhel8-x86_64.tar.gz -C "$work" herdr-app
       - name: Check glibc floor
         run: |
           set -euo pipefail
-          ldd --version | head -1
+          # sed, not head: under pipefail, head closing the pipe early can
+          # make the producer die of SIGPIPE and fail the step with 141.
+          ldd --version | sed -n '1p'
           work=$(mktemp -d)
           tar -xzf dist/herdr-app-rhel8-x86_64.tar.gz -C "$work"
           for bin in "$work/herdr-app/herdr-app" "$work/herdr-app/herdr-core"; do
@@ -106,7 +109,7 @@ jobs:
             ')
             echo "$(basename "$bin"): highest GLIBC symbol version required: $max"
             [ -n "$max" ] || { echo "no GLIBC symbols found in $bin; check objdump"; exit 1; }
-            [ "$(printf '%s\n' "$max" 2.28 | sort -V | head -1)" = "$max" ] || { echo "$bin needs glibc newer than 2.28"; exit 1; }
+            [ "$(printf '%s\n' "$max" 2.28 | sort -V | sed -n '1p')" = "$max" ] || { echo "$bin needs glibc newer than 2.28"; exit 1; }
           done
       - name: Verify tarball and smoke test
         run: |
