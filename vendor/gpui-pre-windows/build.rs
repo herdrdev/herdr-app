@@ -33,6 +33,8 @@ mod shader_compilation {
         // Define all modules
         let modules = [
             "quad",
+            // HERDR: tiny 2-instruction shader for translucent plain quads on WARP.
+            "plain_quad",
             "opaque_quad",
             "shadow",
             "path_tile",

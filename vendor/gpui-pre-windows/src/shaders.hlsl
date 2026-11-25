@@ -870,6 +870,32 @@ float4 opaque_quad_fragment(OpaqueQuadFragmentInput input): SV_Target {
     return input.color;
 }
 
+// HERDR: Solid unrounded borderless translucent quads (opaque rectangles are
+// already drawn by opaque_quad_pipeline and culled here identically to quad_vertex).
+OpaqueQuadFragmentInput plain_quad_vertex(uint vertex_id: SV_VertexID, uint instance_id: SV_InstanceID) {
+    uint quad_id = batch_start_index + instance_id;
+    Quad quad = quads[quad_id];
+
+    OpaqueQuadFragmentInput output;
+    if (is_opaque_rectangle(quad)) {
+        output.position = CULLED_POSITION;
+        output.color = float4(0.0, 0.0, 0.0, 0.0);
+        return output;
+    }
+
+    float2 unit_vertex = float2(float(vertex_id & 1u), 0.5 * float(vertex_id & 2u));
+    ClippedVertex vertex = clip_to_mask(unit_vertex, quad.bounds, quad.content_mask);
+
+    output.position = to_device_position_impl(vertex.position);
+    output.position.z = quad_depth(quad_id);
+    output.color = hsla_to_rgba(quad.background.solid);
+    return output;
+}
+
+float4 plain_quad_fragment(OpaqueQuadFragmentInput input): SV_Target {
+    return input.color;
+}
+
 /*
 **
 **              Shadows
