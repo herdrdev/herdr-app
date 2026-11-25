@@ -378,12 +378,22 @@ impl Element for ScrollBounce {
         if self.scroll_wheel {
             let hitbox = prepaint.hitbox.id;
             let handle = self.handle.clone();
-            window.on_mouse_event(move |_: &ScrollEvent, phase, window, cx| {
-                if phase == DispatchPhase::Capture
-                    && hitbox.should_handle_scroll(window)
-                    && max_scroll_extent(handle.as_ref()) > px(0.)
-                {
-                    claim_scroll(hitbox, cx);
+            let enabled = self.enabled;
+            window.on_mouse_event(move |event: &ScrollEvent, phase, window, cx| {
+                if phase == DispatchPhase::Capture && hitbox.should_handle_scroll(window) {
+                    let max = max_scroll_extent(handle.as_ref());
+                    if max > px(0.) {
+                        let delta = event.delta.pixel_delta(window.line_height());
+                        // HERDR: only claim scroll when bounce is enabled or the handle
+                        // still has room to move in the wheel's direction.
+                        let can_scroll = (enabled && !cx.reduce_motion())
+                            || (delta.y.abs() >= delta.x.abs()
+                                && ((delta.y < px(0.) && handle.offset().y > -max)
+                                    || (delta.y > px(0.) && handle.offset().y < px(0.))));
+                        if can_scroll {
+                            claim_scroll(hitbox, cx);
+                        }
+                    }
                 }
             });
         }
@@ -602,8 +612,10 @@ impl Element for ScrollBounce {
                 };
                 let scrolled = handle.offset() != before;
                 drop(state);
-                cx.stop_propagation();
+                // HERDR: only stop propagation when ScrollBounce actually scrolled or bounced,
+                // so reaching the edge chains the wheel to enclosing scroll containers.
                 if changed || scrolled {
+                    cx.stop_propagation();
                     cx.notify(view);
                 }
                 if scrolled && let Some(handler) = &on_scroll {
@@ -1550,4 +1562,5 @@ mod tests {
         scroll.begin(600.);
         assert!(!scroll.suppress_momentum);
     }
+
 }

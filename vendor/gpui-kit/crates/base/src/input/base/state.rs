@@ -3091,9 +3091,10 @@ impl<M: InputModeKind> InputBaseState<M> {
             && !cx.reduce_motion()
             && delta.y.abs() >= delta.x.abs()
             && self.overflows_vertically();
+        let mut stretched = false;
         if bounces {
             let mut overscroll = std::mem::take(&mut self.overscroll);
-            let stretched = overscroll.packet(
+            stretched = overscroll.packet(
                 delta.y.as_f32(),
                 event.touch_phase,
                 self.input_bounds.size.height.as_f32(),
@@ -3138,13 +3139,12 @@ impl<M: InputModeKind> InputBaseState<M> {
             );
         }
 
-        // Text that has room to scroll keeps a scroll over it even where the
-        // text ends, so reaching the end does not scroll the region around the
-        // input; text that fits leaves the scroll to that region.
-        if self.scroll_handle.offset() != old_offset
-            || (self.scroll_y_f64 - old_y_f64).abs() > f64::EPSILON
-            || self.overflows_along(delta)
-        {
+        // HERDR: only stop propagation when the scroll offset (or active bounce)
+        // actually changed, so an input at its scroll edge lets the wheel chain
+        // to its parent scroll container (matching 1ccf011).
+        let offset_changed = self.scroll_handle.offset() != old_offset
+            || (self.scroll_y_f64 - old_y_f64).abs() > f64::EPSILON;
+        if offset_changed || (bounces && (self.overscroll.offset() != 0. || stretched)) {
             cx.stop_propagation();
         }
 
@@ -3162,16 +3162,46 @@ impl<M: InputModeKind> InputBaseState<M> {
     /// moves on neither axis, such as a gesture's start or end, goes to text
     /// that can scroll vertically.
     pub(super) fn takes_scroll(&self, delta: Point<Pixels>) -> bool {
+        // HERDR: only claim scroll from enclosing ScrollBounce areas when the
+        // input can still move in delta's direction (or bounce is enabled/active).
         if delta.y.abs() >= delta.x.abs() {
-            self.overflows_vertically()
+            if !self.overflows_vertically() {
+                return false;
+            }
+            if self.scroll_bounce || self.overscroll.offset() != 0. {
+                return true;
+            }
+            let min_y = f64::from(f32::from(
+                (-self.scroll_size.height + self.input_bounds.size.height).min(px(0.)),
+            ));
+            let y = self.effective_scroll_y_f64();
+            if delta.y < px(0.) {
+                y > min_y + f64::EPSILON
+            } else if delta.y > px(0.) {
+                y < -f64::EPSILON
+            } else {
+                false
+            }
         } else {
-            self.scroll_size.width > self.input_bounds.size.width
+            let max_x = (self.scroll_size.width - self.input_bounds.size.width).max(px(0.));
+            if max_x <= px(0.) {
+                return false;
+            }
+            let x = self.scroll_handle.offset().x;
+            if delta.x < px(0.) {
+                x > -max_x
+            } else if delta.x > px(0.) {
+                x < px(0.)
+            } else {
+                false
+            }
         }
     }
 
     /// Whether the text has room to scroll along the axis `delta` mostly
     /// moves on. A trackpad swipe drifts a little off its axis, so the drift
     /// alone does not claim the scroll.
+    #[allow(dead_code)]
     fn overflows_along(&self, delta: Point<Pixels>) -> bool {
         if delta.y.abs() >= delta.x.abs() {
             delta.y != px(0.) && self.overflows_vertically()
