@@ -1142,7 +1142,7 @@ impl TerminalView {
         true
     }
 
-    /// Option+click (Alt+click) moves the caret: the program gets the arrow
+    /// Option+click (Alt+click) moves the caret along its row: the program gets the arrow
     /// keys that would take its caret to the clicked cell, as in iTerm2. Any
     /// program that moves a caret with arrows — a shell's prompt, an agent's
     /// input, an editor — gets click positioning without taking the mouse.
@@ -1151,12 +1151,21 @@ impl TerminalView {
             return false;
         }
         let mut g = self.grid.borrow_mut();
+        // A program that tracks the mouse gets the click itself, as it did before.
+        if g.vt.mouse_tracking() {
+            return false;
+        }
         let Some(from) = g.cursor_cell else { return false };
         let (x, y) = local(&g, pos);
         let to = (
             ((x / f32::from(g.cell.width)) as u16).min(g.vt.cols.saturating_sub(1)),
             ((y / f32::from(g.cell.height)) as u16).min(g.vt.rows.saturating_sub(1)),
         );
+        // Only the caret's own row: an up or down arrow would recall shell history
+        // (and an Enter after it run it). Elsewhere the click is a plain click.
+        if to.1 != from.1 {
+            return false;
+        }
         let rows: Vec<Rc<Vec<vt::Cell>>> = g.painted.iter().map(|(row, _, _)| row.clone()).collect();
         let bytes = caret_keys(&mut g.vt, &rows, from, to);
         drop(g);
@@ -3880,26 +3889,61 @@ mod tests {
             }
         }
         cx.update(gpui_base::init);
+        let (core, frames) = crate::hc::offline_tapped();
         let (root, cx) = cx.add_window_view(|_, cx| Root {
-            terminal: cx.new(|cx| super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 5), cx)),
+            terminal: cx.new(|cx| super::TerminalView::attach(core, "t1".into(), (40, 5), cx)),
         });
         cx.run_until_parked();
-        // A caret on screen at (10, 0); clicks land left of it and on it.
+        // Attach a channel so input reaches the tapped core, and drop what attaching sent.
+        root.read_with(cx, |root, cx| root.terminal.read(cx).grid.borrow_mut().channel = Some(7));
+        while frames.try_recv().is_ok() {}
+        let sent = || frames.try_iter().filter(|f| f[4] == crate::hc::DATA).flat_map(|f| f[9..].to_vec()).collect::<Vec<u8>>();
+        // Ten characters typed, the caret at (10, 0) after them; clicks land left of it and on it.
+        root.read_with(cx, |root, cx| root.terminal.read(cx).grid.borrow_mut().vt.write(b"0123456789"));
+        cx.update(|window, _| window.refresh());
+        cx.run_until_parked();
         let (pos, on_caret, alt) = root.read_with(cx, |root, cx| {
             let t = root.terminal.read(cx);
-            t.grid.borrow_mut().cursor_cell = Some((10, 0));
+            assert_eq!(t.grid.borrow().cursor_cell, Some((10, 0)), "painted caret");
             let g = t.grid.borrow();
             let at = |x: f32| point(g.origin.x + g.cell.width * x + px(1.0), g.origin.y + px(1.0));
             (at(8.0), at(10.0),
              Modifiers { control: false, alt: true, shift: false, platform: false, function: false })
         });
+        let typed = |cx: &mut gpui::VisualTestContext| root.read_with(cx, |root, cx| root.terminal.read(cx).typed_at.take().is_some());
         cx.simulate_mouse_down(pos, MouseButton::Left, alt);
         assert!(root.read_with(cx, |root, cx| !root.terminal.read(cx).selecting));
+        // The click took the caret path: two cells left of the caret, so two left arrows.
+        assert!(typed(cx));
+        assert_eq!(sent(), b"\x1b[D\x1b[D".to_vec());
         cx.simulate_mouse_up(pos, MouseButton::Left, alt);
         // A click on the caret itself is still a caret gesture, not a selection.
         cx.simulate_mouse_down(on_caret, MouseButton::Left, alt);
         assert!(root.read_with(cx, |root, cx| !root.terminal.read(cx).selecting));
+        assert!(typed(cx));
+        assert!(sent().is_empty(), "a click on the caret itself moves nothing");
         cx.simulate_mouse_up(on_caret, MouseButton::Left, alt);
+        // A plain click sends nothing.
+        cx.simulate_mouse_down(pos, MouseButton::Left, Modifiers::default());
+        assert!(!typed(cx));
+        cx.simulate_mouse_up(pos, MouseButton::Left, Modifiers::default());
+        // A program that tracks the mouse keeps its alt+click: no caret keys.
+        root.read_with(cx, |root, cx| root.terminal.read(cx).grid.borrow_mut().vt.write(b"\x1b[?1000h"));
+        cx.simulate_mouse_down(pos, MouseButton::Left, alt);
+        assert!(!typed(cx), "alt+click was taken from a mouse-tracking program");
+        assert!(!sent().windows(3).any(|w| w == b"\x1b[D"), "caret keys went to a mouse-tracking program");
+        cx.simulate_mouse_up(pos, MouseButton::Left, alt);
+        root.read_with(cx, |root, cx| root.terminal.read(cx).grid.borrow_mut().vt.write(b"\x1b[?1000l"));
+        // A click on another row is a plain click: no arrows, and the selection starts.
+        let below = root.read_with(cx, |root, cx| {
+            let g = root.terminal.read(cx).grid.borrow();
+            point(g.origin.x + g.cell.width * 2.0 + px(1.0), g.origin.y + g.cell.height + px(1.0))
+        });
+        let _ = (typed(cx), sent());
+        cx.simulate_mouse_down(below, MouseButton::Left, alt);
+        assert!(!typed(cx) && sent().is_empty(), "alt+click on another row sent arrows");
+        assert!(root.read_with(cx, |root, cx| root.terminal.read(cx).selecting));
+        cx.simulate_mouse_up(below, MouseButton::Left, alt);
         // A plain click on the same spot still starts a selection.
         cx.simulate_mouse_down(pos, MouseButton::Left, Modifiers::default());
         assert!(root.read_with(cx, |root, cx| root.terminal.read(cx).selecting));

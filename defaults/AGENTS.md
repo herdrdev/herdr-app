@@ -694,8 +694,9 @@ The main ones:
   Dragging a text selection past the terminal's top or bottom scrolls while held;
   releasing stops it. Programs that track the mouse still get their mouse events
   (hold Shift to select text instead). Option+click (Alt+click) moves the
-  program's caret toward the clicked cell by sending the arrow keys for it, as
-  in iTerm2 — a shell's prompt, an agent's input, an editor. A drag stays with the terminal where it
+  program's caret along its row to the clicked cell by sending left or right
+  arrows, as in iTerm2 (a click on another row is a plain click, and programs
+  that track the mouse get the click themselves). A drag stays with the terminal where it
   started, including its release outside the pane; other panes don't receive it.
   Shift+click with a selection moves its end to the clicked cell, keeping its start.
   Terminals display Kitty graphics, including Unicode placeholder images used by
