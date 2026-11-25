@@ -1,6 +1,6 @@
 [workspace]
 members = ["crates/ghostty-sys", "crates/herdr-shell"]
-exclude = ["crates/herdr-shell/rquickjs-compat", "vendor/gpui-kit", "vendor/gpui-pre", "vendor/gpui-pre-wgpu", "vendor/gpui-pre-apple", "vendor/gpui-pre-linux", "vendor/gpui-pre-macos", "vendor/gpui-pre-windows", "vendor/taffy", "vendor/quickjs-jit-runtime", "vendor/zed-xim", "vendor/xim-ctext"]
+exclude = ["crates/herdr-shell/rquickjs-compat", "vendor/gpui-kit", "vendor/gpui-pre", "vendor/gpui-pre-wgpu", "vendor/gpui-pre-apple", "vendor/gpui-pre-linux", "vendor/gpui-pre-macos", "vendor/gpui-pre-windows", "vendor/quickjs-jit-runtime", "vendor/zed-xim", "vendor/xim-ctext"]
 resolver = "2"
 
 [workspace.package]
@@ -90,8 +90,6 @@ zed-xim = { path = "vendor/zed-xim" }
 xim-ctext = { path = "vendor/xim-ctext" }
 # Our copy: Windows completes dead keys through native text input (HERDR:).
 gpui-pre-windows = { path = "vendor/gpui-pre-windows" }
-# Our copy: a flex item's min-content was measured even when unused (HERDR:).
-taffy = { path = "vendor/taffy" }
 
 # Our copy: the JIT copied all its call feedback on every refresh scan and
 # threw it away, ~40% of the main thread with a mod of many small
