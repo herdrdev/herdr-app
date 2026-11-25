@@ -179,6 +179,13 @@ impl PlatformTextSystem for AppleTextSystem {
         }
     }
 
+    // HERDR: expose raw OpenType tables for terminal cell metrics (moved from gpui-pre-macos in 0.3.14).
+    fn font_table(&self, font_id: FontId, tag: [u8; 4]) -> Option<Vec<u8>> {
+        self.0.read().fonts[font_id.0]
+            .load_font_table(u32::from_be_bytes(tag))
+            .map(Vec::from)
+    }
+
     fn font_metrics(&self, font_id: FontId) -> FontMetrics {
         font_kit_metrics_to_metrics(self.0.read().fonts[font_id.0].metrics())
     }
