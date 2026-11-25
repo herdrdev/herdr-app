@@ -2,7 +2,7 @@
 //!
 //! This replaces the macOS-only `HeadlessMetalAppContext` with a platform-neutral
 //! implementation backed by `TestPlatform`. Tests supply a real `PlatformTextSystem`
-//! (e.g. `DirectWriteTextSystem` on Windows, `MacTextSystem` on macOS) to get
+//! (e.g. `DirectWriteTextSystem` on Windows, `AppleTextSystem` on macOS) to get
 //! accurate glyph measurements while keeping everything else deterministic.
 //!
 //! Optionally, a renderer factory can be provided to enable real GPU rendering
@@ -13,7 +13,7 @@ use crate::{
     Context, Entity, EntityId, ForegroundExecutor, Global, Pixels, PlatformHeadlessRenderer,
     PlatformTextSystem, Render, Reservation, Size, Task, TestDispatcher, TestPlatform, TextSystem,
     Window, WindowBounds, WindowHandle, WindowOptions,
-    app::{GpuiBorrow, GpuiMode},
+    app::{GpuiBorrow, GpuiMode, test_context::test_window},
 };
 use anyhow::Result;
 use image::RgbaImage;
@@ -128,6 +128,15 @@ impl HeadlessAppContext {
     /// Runs all pending tasks until parked.
     pub fn run_until_parked(&self) {
         self.dispatcher.run_until_parked();
+    }
+
+    /// Simulates the window moving to a display with a different scale factor.
+    pub fn simulate_window_scale_factor_change(
+        &mut self,
+        window: AnyWindowHandle,
+        scale_factor: f32,
+    ) {
+        test_window(&self.app, window).simulate_scale_factor_change(scale_factor);
     }
 
     /// Advances the simulated clock.

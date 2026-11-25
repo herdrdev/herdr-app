@@ -6,21 +6,13 @@ use std::{
     borrow::Cow,
     fmt,
     hash::Hash,
-    sync::{
-        Arc,
-        atomic::{AtomicUsize, Ordering::SeqCst},
-    },
+    sync::atomic::{AtomicUsize, Ordering::SeqCst},
 };
 
 /// A source of assets for this app to use.
 pub trait AssetSource: 'static + Send + Sync {
     /// Load the given asset from the source path.
     fn load(&self, path: &str) -> Result<Option<Cow<'static, [u8]>>>;
-
-    /// Normalize a resource's identity without changing how it is read.
-    fn image_resource(&self, resource: &crate::Resource) -> crate::Resource {
-        resource.clone()
-    }
 
     /// List the assets at the given path.
     fn list(&self, path: &str) -> Result<Vec<SharedString>>;
@@ -53,14 +45,7 @@ pub struct RenderImage {
     pub id: ImageId,
     /// The scale factor of this image on render.
     pub(crate) scale_factor: f32,
-    data: SmallVec<[Arc<Frame>; 1]>,
-    animation: Option<Animation>,
-    _animation_source: Option<Arc<RenderImage>>,
-}
-
-struct Animation {
-    bytes: Vec<u8>,
-    format: image::ImageFormat,
+    data: SmallVec<[Frame; 1]>,
 }
 
 impl PartialEq for RenderImage {
@@ -79,85 +64,21 @@ impl RenderImage {
         Self {
             id: ImageId(NEXT_ID.fetch_add(1, SeqCst)),
             scale_factor: 1.0,
-            data: data.into().into_iter().map(Arc::new).collect(),
-            animation: None,
-            _animation_source: None,
+            data: data.into(),
         }
-    }
-
-    pub(crate) fn with_animation(mut self, bytes: Vec<u8>, format: image::ImageFormat) -> Self {
-        self.animation = Some(Animation { bytes, format });
-        self
-    }
-
-    pub(crate) fn cache_bytes(&self) -> usize {
-        self.data.iter().map(|frame| frame.buffer().as_raw().len()).sum::<usize>()
-            + self.animation.as_ref().map_or(0, |animation| animation.bytes.len())
-    }
-
-    pub(crate) fn has_animation(&self) -> bool {
-        self.animation.is_some()
-    }
-
-    pub(crate) fn prepare_animation(self: &Arc<Self>) -> Self {
-        use image::AnimationDecoder;
-        use std::io::Cursor;
-        let mut image = Self::new(SmallVec::new());
-        image.data.extend(self.data.first().cloned());
-        // A cached animated scene must keep its encoded source alive too.
-        image._animation_source = Some(self.clone());
-        let Some(animation) = &self.animation else {
-            return image;
-        };
-        let frames = match animation.format {
-            image::ImageFormat::Gif => {
-                image::codecs::gif::GifDecoder::new(Cursor::new(&animation.bytes))
-                    .map(|decoder| decoder.into_frames())
-            }
-            image::ImageFormat::WebP => image::codecs::webp::WebPDecoder::new(Cursor::new(
-                &animation.bytes,
-            ))
-            .map(|mut decoder| {
-                let _ = decoder.set_background_color(image::Rgba([0, 0, 0, 0]));
-                decoder.into_frames()
-            }),
-            _ => unreachable!(),
-        };
-        if let Ok(frames) = frames {
-            image.data.extend(
-                frames
-                    .filter_map(|frame| match frame {
-                        Ok(frame) => Some(frame),
-                        Err(error) => {
-                            log::debug!("Skipping animation frame: {error}");
-                            None
-                        }
-                    })
-                    .skip(1)
-                    .map(|mut frame| {
-                        for pixel in frame.buffer_mut().chunks_exact_mut(4) {
-                            pixel.swap(0, 2);
-                        }
-                        Arc::new(frame)
-                    }),
-            );
-        }
-        image
-    }
-
-    fn frame(&self, index: usize) -> Option<&Frame> {
-        self.data.get(index).map(|frame| frame.as_ref())
     }
 
     /// Convert this image into a byte slice.
     pub fn as_bytes(&self, frame_index: usize) -> Option<&[u8]> {
-        self.frame(frame_index)
+        self.data
+            .get(frame_index)
             .map(|frame| frame.buffer().as_raw().as_slice())
     }
 
     /// Get the size of this image, in pixels.
     pub fn size(&self, frame_index: usize) -> Size<DevicePixels> {
-        self.frame(frame_index)
+        self.data
+            .get(frame_index)
             .map(|frame| {
                 let (width, height) = frame.buffer().dimensions();
                 size(width.into(), height.into())
@@ -173,7 +94,8 @@ impl RenderImage {
 
     /// Get the delay of this frame from the previous
     pub fn delay(&self, frame_index: usize) -> Delay {
-        self.frame(frame_index)
+        self.data
+            .get(frame_index)
             .map(|frame| frame.delay())
             .unwrap_or(Delay::from_numer_denom_ms(100, 1))
     }
