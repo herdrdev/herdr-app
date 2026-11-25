@@ -1,6 +1,5 @@
 use anyhow::Result;
 use collections::HashMap;
-use std::cell::{Cell, RefCell};
 use windows::Win32::UI::{
     Input::KeyboardAndMouse::{
         GetKeyboardLayoutNameW, MAPVK_VK_TO_CHAR, MAPVK_VK_TO_VSC, MapVirtualKeyW, ToUnicode,
@@ -8,111 +7,12 @@ use windows::Win32::UI::{
         VK_CONTROL, VK_MENU, VK_OEM_1, VK_OEM_2, VK_OEM_3, VK_OEM_4, VK_OEM_5, VK_OEM_6, VK_OEM_7,
         VK_OEM_8, VK_OEM_102, VK_OEM_COMMA, VK_OEM_MINUS, VK_OEM_PERIOD, VK_OEM_PLUS, VK_SHIFT,
     },
-    WindowsAndMessaging::{KL_NAMELENGTH, MSG, WM_CHAR, WM_DEADCHAR, WM_SYSCHAR, WM_SYSDEADCHAR},
+    WindowsAndMessaging::KL_NAMELENGTH,
 };
 
 use gpui::{
-    KeyDownEvent, KeybindingKeystroke, Keystroke, Modifiers, PlatformInput, PlatformKeyboardLayout,
-    PlatformKeyboardMapper,
+    KeybindingKeystroke, Keystroke, Modifiers, PlatformKeyboardLayout, PlatformKeyboardMapper,
 };
-
-thread_local! {
-    // HERDR: Native dead-key state belongs to the UI thread, across windows and input handlers.
-    pub(crate) static DEAD_KEYS: DeadKeyState = const { DeadKeyState(Cell::new(false)) };
-    static NATIVE_CHARACTER_INPUT: RefCell<Option<Keystroke>> = const { RefCell::new(None) };
-}
-
-/// Whether this native keydown will commit text through Windows messages.
-/// GPUI also marks replayed shortcut prefixes as preferring character input.
-pub fn is_native_character_input(event: &KeyDownEvent) -> bool {
-    NATIVE_CHARACTER_INPUT.with_borrow(|native| native.as_ref() == Some(&event.keystroke))
-}
-
-pub(crate) fn with_native_character_input<R>(
-    input: PlatformInput,
-    dispatch: impl FnOnce(PlatformInput) -> R,
-) -> R {
-    struct Restore(Option<Keystroke>);
-    impl Drop for Restore {
-        fn drop(&mut self) {
-            NATIVE_CHARACTER_INPUT.replace(self.0.take());
-        }
-    }
-    // GPUI may replay a pending shortcut synchronously during this dispatch;
-    // only the native keystroke, not that prefix, should defer to native text.
-    let keystroke = match &input {
-        PlatformInput::KeyDown(event) if event.prefer_character_input => {
-            Some(event.keystroke.clone())
-        }
-        _ => None,
-    };
-    let _restore = Restore(NATIVE_CHARACTER_INPUT.replace(keystroke));
-    dispatch(input)
-}
-
-#[cfg(test)]
-mod native_character_input_tests {
-    use super::{is_native_character_input, with_native_character_input};
-    use gpui::{KeyDownEvent, Keystroke, PlatformInput};
-
-    #[test]
-    fn native_text_dispatch_does_not_mark_replayed_prefixes() {
-        let event = KeyDownEvent {
-            keystroke: Keystroke::parse("ctrl-alt-q").unwrap(),
-            is_held: false,
-            prefer_character_input: true,
-        };
-        let original = event.clone();
-        let mut prefix = event.clone();
-        prefix.keystroke = Keystroke::parse("ctrl-k").unwrap();
-        assert!(!is_native_character_input(&event));
-        with_native_character_input(PlatformInput::KeyDown(event), |input| {
-            let PlatformInput::KeyDown(event) = input else { unreachable!() };
-            assert!(is_native_character_input(&event));
-            assert!(!is_native_character_input(&prefix));
-            assert!(is_native_character_input(&event.clone()));
-            with_native_character_input(PlatformInput::KeyDown(prefix.clone()), |_| {
-                assert!(!is_native_character_input(&event));
-            });
-            assert!(is_native_character_input(&event));
-        });
-        assert!(!is_native_character_input(&original));
-        assert!(!is_native_character_input(&prefix));
-    }
-}
-
-#[derive(Default)]
-pub(crate) struct DeadKeyState(Cell<bool>);
-
-impl DeadKeyState {
-    pub(crate) fn observe(&self, message: &MSG) {
-        match message.message {
-            WM_DEADCHAR | WM_SYSDEADCHAR => self.0.set(true),
-            // Control characters can leave Windows' pending accent unchanged.
-            WM_CHAR | WM_SYSCHAR
-                if !char::from_u32(message.wParam.0 as u32).is_some_and(char::is_control) =>
-            {
-                self.clear()
-            }
-            _ => {}
-        }
-    }
-
-    pub(crate) fn clear(&self) {
-        self.0.set(false);
-    }
-
-    pub(crate) fn prefers_text(&self, keystroke: &Keystroke) -> bool {
-        self.0.get()
-            && keystroke
-                .key_char
-                .as_ref()
-                .is_some_and(|text| !text.chars().any(char::is_control))
-            && !keystroke.modifiers.control
-            && !keystroke.modifiers.alt
-            && !keystroke.modifiers.platform
-    }
-}
 
 pub(crate) struct WindowsKeyboardLayout {
     id: String,

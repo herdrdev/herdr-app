@@ -1,10 +1,10 @@
 [package]
 name = "gpui-pre-windows"
-version = "0.3.8"
+version = "0.3.14"
 edition = { workspace = true }
 publish = true
 license = "Apache-2.0"
-description = "Zed's `gpui_windows` crate (gpui-pre snapshot of zed@279fe07)"
+description = "Zed's `gpui_windows` crate (gpui-pre snapshot of zed@f126950)"
 repository = "https://github.com/zed-industries/zed"
 
 [package.metadata.cargo-shear]
@@ -13,7 +13,7 @@ ignored = ["scap"]
 [package.metadata.gpui-pre]
 zed-crate = "gpui_windows"
 zed-version = "0.1.0"
-zed-rev = "279fe070bb389b79652e52065b2f001edcc0b11b"
+zed-rev = "f126950f9d3b62666f97437ae5d4ccac2272c4db"
 
 [lib]
 path = "src/gpui_windows.rs"
@@ -25,9 +25,6 @@ default = ["gpui/default"]
 test-support = ["gpui/test-support"]
 screen-capture = ["gpui/screen-capture", "scap"]
 
-[dependencies]
-gpui = { workspace = true }
-
 [target.'cfg(target_os = "windows")'.dependencies]
 accesskit = { workspace = true }
 accesskit_windows = { workspace = true }
@@ -36,6 +33,7 @@ collections = { workspace = true }
 dunce = { workspace = true }
 etagere = { workspace = true }
 futures = { workspace = true }
+gpui = { workspace = true }
 gpui_util = { workspace = true }
 image = { workspace = true }
 itertools = { workspace = true }
@@ -45,8 +43,35 @@ rand = { workspace = true }
 raw-window-handle = { workspace = true }
 scheduler = { workspace = true }
 smallvec = { workspace = true }
-uuid = { workspace = true }
-windows = { workspace = true, features = ["Win32_System_StationsAndDesktops"] }
+uuid = { workspace = true, features = ["v5"] }
+windows = { workspace = true, features = [
+    "Data_Xml_Dom",
+    "UI_Notifications",
+    "UI_ViewManagement",
+    "Wdk_System_SystemServices",
+    "Win32_Graphics_Direct3D11",
+    "Win32_Graphics_Direct3D_Fxc",
+    "Win32_Graphics_DirectComposition",
+    "Win32_Graphics_DirectManipulation",
+    "Win32_Graphics_DirectWrite",
+    "Win32_Graphics_Dwm",
+    "Win32_Graphics_Dxgi_Common",
+    "Win32_Graphics_Hlsl",
+    "Win32_Media",
+    "Win32_Security_Credentials",
+    "Win32_Storage_Packaging_Appx",
+    "Win32_System_DataExchange",
+    "Win32_System_Diagnostics_Debug",
+    "Win32_System_Memory",
+    "Win32_System_Performance",
+    "Win32_System_StationsAndDesktops",
+    "Win32_System_SystemInformation",
+    "Win32_System_SystemServices",
+    "Win32_UI_Controls",
+    "Win32_UI_HiDpi",
+    "Win32_UI_Input_Ime",
+    "Win32_UI_Input_Pointer",
+] }
 windows-core = { workspace = true }
 windows-numerics = "0.3"
 windows-registry = { workspace = true }
