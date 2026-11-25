@@ -42,6 +42,7 @@ pub(crate) use keyboard::*;
 pub(crate) use platform::*;
 pub(crate) use window::*;
 
+pub use events::{OptionAsAlt, option_as_alt, set_option_as_alt};
 pub use platform::MacPlatform;
 
 trait BoolExt {

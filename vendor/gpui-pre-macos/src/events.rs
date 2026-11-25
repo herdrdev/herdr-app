@@ -6,8 +6,9 @@ use gpui::{
 };
 
 use crate::{
-    LMGetKbdType, NSStringExt, TISCopyCurrentKeyboardLayoutInputSource, TISGetInputSourceProperty,
-    UCKeyTranslate, kTISPropertyUnicodeKeyLayoutData,
+    LMGetKbdType, NSStringExt, TISCopyCurrentKeyboardInputSource,
+    TISCopyCurrentKeyboardLayoutInputSource, TISGetInputSourceProperty, UCKeyTranslate,
+    kTISPropertyInputSourceID, kTISPropertyUnicodeKeyLayoutData,
 };
 use core_foundation::data::{CFDataGetBytePtr, CFDataRef};
 use core_graphics::event::CGKeyCode;
@@ -25,7 +26,77 @@ use objc2_app_kit::{
     NSModeSwitchFunctionKey, NSPageDownFunctionKey, NSPageUpFunctionKey, NSRightArrowFunctionKey,
     NSUpArrowFunctionKey,
 };
-use std::{borrow::Cow, ffi::c_void};
+use std::{borrow::Cow, cell::Cell, ffi::c_void};
+
+thread_local! {
+    // HERDR: Other GPUI consumers retain native Option behavior unless they opt in.
+    static OPTION_AS_ALT: Cell<Option<OptionAsAlt>> = const { Cell::new(Some(OptionAsAlt::None)) };
+}
+
+/// HERDR: Which Option keys act as terminal Alt rather than native text input.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum OptionAsAlt {
+    None,
+    Both,
+    Left,
+    Right,
+}
+
+impl OptionAsAlt {
+    pub fn uses_alt(self, side: Option<gpui::OptionSide>) -> bool {
+        match self {
+            Self::None => false,
+            Self::Both => true,
+            Self::Left => matches!(side, Some(gpui::OptionSide::Left | gpui::OptionSide::Both)),
+            Self::Right => matches!(side, Some(gpui::OptionSide::Right | gpui::OptionSide::Both)),
+        }
+    }
+}
+
+/// HERDR: `None` follows the keyboard layout; `Some` selects the Option keys to use as Alt.
+pub fn set_option_as_alt(value: Option<OptionAsAlt>) {
+    OPTION_AS_ALT.set(value);
+}
+
+fn layout_uses_option_as_alt(id: &str) -> bool {
+    matches!(
+        id,
+        "com.apple.keylayout.US"
+            | "com.apple.keylayout.USInternational"
+            | "com.apple.keylayout.ABC"
+            | "com.apple.keylayout.ABC-India"
+    )
+}
+
+/// HERDR: Resolved against the current layout so input-source switches take effect immediately.
+pub fn option_as_alt() -> OptionAsAlt {
+    OPTION_AS_ALT.get().unwrap_or_else(|| unsafe {
+        // The active source, not an IME's underlying ASCII keyboard layout.
+        let source = TISCopyCurrentKeyboardInputSource();
+        if source.is_null() {
+            return OptionAsAlt::None;
+        }
+        let id = TISGetInputSourceProperty(source, kTISPropertyInputSourceID as *const c_void)
+            as *mut AnyObject;
+        let enabled = !id.is_null() && layout_uses_option_as_alt(id.to_str());
+        let _: () = msg_send![source, release];
+        if enabled {
+            OptionAsAlt::Both
+        } else {
+            OptionAsAlt::None
+        }
+    })
+}
+
+fn option_side(modifiers: NSEventModifierFlags) -> Option<gpui::OptionSide> {
+    // NX_DEVICELALTKEYMASK and NX_DEVICERALTKEYMASK from IOLLEvent.h.
+    match (modifiers.bits() & 0x20 != 0, modifiers.bits() & 0x40 != 0) {
+        (true, true) => Some(gpui::OptionSide::Both),
+        (true, false) => Some(gpui::OptionSide::Left),
+        (false, true) => Some(gpui::OptionSide::Right),
+        (false, false) => None,
+    }
+}
 
 pub(crate) const ESCAPE_KEY: u16 = 0x1b;
 
@@ -351,6 +422,7 @@ fn parse_keystroke(native_event: &NSEvent) -> Keystroke {
         characters.to_str().to_string()
     };
     let mut key_char = None;
+    let mut unshifted_key = None;
     let first_char = characters.chars().next().map(|ch| u32::from(ch as u16));
     let modifiers = native_event.modifierFlags();
 
@@ -461,16 +533,27 @@ fn parse_keystroke(native_event: &NSEvent) -> Keystroke {
                 chars_ignoring_modifiers = chars_with_cmd;
             }
 
-            if !control && !command && !function {
-                let mut mods = NO_MOD;
-                if shift {
-                    mods |= SHIFT_MOD;
-                }
-                if alt {
-                    mods |= OPTION_MOD;
-                }
+            // HERDR: Fn can accompany printable keys from programmable keyboards;
+            // Caps Lock affects text; Option-as-Alt strips Option; dead keys stay unresolved
+            // for NSTextInputClient; IME-posted text on mismatched keycodes leaves key_char None.
+            if !control && !command {
+                let caps_lock = modifiers.contains(NSEventModifierFlags::CapsLock);
+                let mods = text_modifiers(
+                    shift,
+                    alt && !option_as_alt().uses_alt(option_side(modifiers)),
+                    caps_lock,
+                );
 
-                key_char = Some(chars_for_modified_key(native_event.keyCode(), mods));
+                // Keep dead keys for NSTextInputClient instead of sending their
+                // spacing accent to key-down listeners before composition starts.
+                let text = translate_key(native_event.keyCode(), mods, false);
+                // Input methods post finished text on a key code that types
+                // something else; NSTextInputClient types the event's own text.
+                // Option is left out: as Alt it leaves mods but not the event's text.
+                let event_text: *mut AnyObject = unsafe { msg_send![native_event, characters] };
+                let event_text = unsafe { event_text.to_str() };
+                let posted = !alt && !event_text.is_empty() && event_text != text;
+                key_char = (!text.is_empty() && !posted).then_some(text);
             }
 
             if shift
@@ -481,6 +564,9 @@ fn parse_keystroke(native_event: &NSEvent) -> Keystroke {
                 chars_ignoring_modifiers
             } else if shift {
                 shift = false;
+                if !chars_ignoring_modifiers.is_empty() {
+                    unshifted_key = Some(chars_ignoring_modifiers);
+                }
                 chars_with_shift
             } else {
                 chars_ignoring_modifiers
@@ -498,6 +584,8 @@ fn parse_keystroke(native_event: &NSEvent) -> Keystroke {
         },
         key,
         key_char,
+        unshifted_key,
+        option_side: option_side(modifiers),
     }
 }
 
@@ -513,8 +601,29 @@ const NO_MOD: u32 = 0;
 const CMD_MOD: u32 = 1;
 const SHIFT_MOD: u32 = 2;
 const OPTION_MOD: u32 = 8;
+const CAPS_LOCK_MOD: u32 = 4;
+
+/// HERDR: The modifiers that change the text a key types. Caps Lock changes the
+/// text, though not the key.
+fn text_modifiers(shift: bool, alt: bool, caps_lock: bool) -> u32 {
+    let mut mods = NO_MOD;
+    if shift {
+        mods |= SHIFT_MOD;
+    }
+    if alt {
+        mods |= OPTION_MOD;
+    }
+    if caps_lock {
+        mods |= CAPS_LOCK_MOD;
+    }
+    mods
+}
 
 fn chars_for_modified_key(code: CGKeyCode, modifiers: u32) -> String {
+    translate_key(code, modifiers, true)
+}
+
+fn translate_key(code: CGKeyCode, modifiers: u32, resolve_dead_keys: bool) -> String {
     // Values from: https://github.com/phracker/MacOSX-SDKs/blob/master/MacOSX10.6.sdk/System/Library/Frameworks/Carbon.framework/Versions/A/Frameworks/HIToolbox.framework/Versions/A/Headers/Events.h#L126
     // shifted >> 8 for UCKeyTranslate
     const CG_SPACE_KEY: u16 = 49;
@@ -559,7 +668,7 @@ fn chars_for_modified_key(code: CGKeyCode, modifiers: u32) -> String {
             &mut buffer_size as *mut usize,
             &mut buffer as *mut u16,
         );
-        if dead_key_state != 0 {
+        if resolve_dead_keys && dead_key_state != 0 {
             UCKeyTranslate(
                 keyboard_layout as *const c_void,
                 CG_SPACE_KEY,
@@ -576,4 +685,284 @@ fn chars_for_modified_key(code: CGKeyCode, modifiers: u32) -> String {
         let _: () = msg_send![keyboard, release];
     }
     String::from_utf16(&buffer[..buffer_size]).unwrap_or_default()
+}
+
+// HERDR: macOS keyboard/Option-as-Alt/Caps Lock/posted-IME unit tests (ported to objc2).
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use gpui::OperatingSystem;
+
+    // AppKit's synthetic event creation must not race between tests.
+    static NATIVE_KEY_TEST: std::sync::Mutex<()> = std::sync::Mutex::new(());
+
+    fn native_key(code: u16, modifiers: NSEventModifierFlags) -> Keystroke {
+        native_key_with_text(code, modifiers, &chars_for_modified_key(code, SHIFT_MOD))
+    }
+
+    fn native_key_with_text(code: u16, modifiers: NSEventModifierFlags, text: &str) -> Keystroke {
+        use objc2::{class, rc::autoreleasepool, runtime::Bool};
+        use objc2_foundation::{NSInteger, NSPoint, NSString};
+
+        autoreleasepool(|_| {
+            let chars = NSString::from_str(text);
+            let event: *mut NSEvent = unsafe {
+                msg_send![
+                    class!(NSEvent),
+                    keyEventWithType: NSEventType::KeyDown,
+                    location: NSPoint::new(0., 0.),
+                    modifierFlags: modifiers,
+                    timestamp: 0f64,
+                    windowNumber: 0 as NSInteger,
+                    context: std::ptr::null_mut::<AnyObject>(),
+                    characters: &*chars,
+                    charactersIgnoringModifiers: &*chars,
+                    isARepeat: Bool::NO,
+                    keyCode: code
+                ]
+            };
+            let event = unsafe { event.as_ref().expect("synthetic NSEvent") };
+            parse_keystroke(event)
+        })
+    }
+
+    #[test]
+    fn shifted_punctuation_matches_base_key_and_shifted_symbol() {
+        use gpui::KeybindingKeystroke;
+        let _guard = NATIVE_KEY_TEST.lock().unwrap();
+        let mut checked = 0;
+        // Brackets, equals, minus, and semicolon on a US keyboard. Translation
+        // follows the active layout without changing the user's input source.
+        for code in [30, 33, 24, 27, 41] {
+            let base = chars_for_modified_key(code, CMD_MOD);
+            let mut shifted = chars_for_modified_key(code, CMD_MOD | SHIFT_MOD);
+            if shifted == base {
+                shifted = chars_for_modified_key(code, SHIFT_MOD);
+            }
+            if base.is_empty()
+                || base == shifted
+                || base.chars().all(|c| c.is_ascii_lowercase())
+            {
+                continue;
+            }
+            let event = native_key(
+                code,
+                NSEventModifierFlags::Command | NSEventModifierFlags::Shift,
+            );
+            assert_eq!(event.key, shifted);
+            assert!(!event.modifiers.shift);
+            assert_eq!(event.key_char, None);
+            for binding in [format!("cmd-shift-{base}"), format!("cmd-{shifted}")] {
+                let target = KeybindingKeystroke::from_keystroke(
+                    Keystroke::parse_with_os(&binding, OperatingSystem::Mac).unwrap(),
+                );
+                assert!(
+                    event.should_match(&target),
+                    "{event:?} should match {binding}"
+                );
+            }
+            let unshifted = KeybindingKeystroke::from_keystroke(
+                Keystroke::parse_with_os(&format!("cmd-{base}"), OperatingSystem::Mac).unwrap(),
+            );
+            assert!(!event.should_match(&unshifted));
+            checked += 1;
+        }
+        assert!(
+            checked > 0,
+            "active layout must have a shifted punctuation key"
+        );
+    }
+
+    #[test]
+    fn shifted_alias_preserves_text_and_other_modifiers() {
+        use gpui::KeybindingKeystroke;
+        let _guard = NATIVE_KEY_TEST.lock().unwrap();
+        set_option_as_alt(Some(OptionAsAlt::None));
+        for code in [30, 33, 24, 27] {
+            let event = native_key(code, NSEventModifierFlags::Shift);
+            let text = translate_key(code, SHIFT_MOD, false);
+            assert_eq!(event.key_char, (!text.is_empty()).then_some(text));
+
+            let event = native_key(
+                code,
+                NSEventModifierFlags::Shift
+                    | NSEventModifierFlags::Option
+                    | NSEventModifierFlags::Function,
+            );
+            assert!(event.modifiers.alt);
+            assert!(event.modifiers.function);
+            let text = translate_key(code, SHIFT_MOD | OPTION_MOD, false);
+            assert_eq!(event.key_char, (!text.is_empty()).then_some(text));
+            if let Some(base) = &event.unshifted_key {
+                let binding = format!("alt-fn-shift-{base}");
+                let target = KeybindingKeystroke::from_keystroke(
+                    Keystroke::parse_with_os(&binding, OperatingSystem::Mac).unwrap(),
+                );
+                assert!(event.should_match(&target));
+                let target = KeybindingKeystroke::from_keystroke(
+                    Keystroke::parse_with_os(&format!("shift-{base}"), OperatingSystem::Mac)
+                        .unwrap(),
+                );
+                assert!(!event.should_match(&target));
+            }
+        }
+        let event = native_key(30, NSEventModifierFlags::Command);
+        assert_eq!(event.unshifted_key, None);
+    }
+
+    #[test]
+    fn automatic_option_as_alt_follows_us_layouts() {
+        for id in ["US", "USInternational", "ABC", "ABC-India"] {
+            assert!(layout_uses_option_as_alt(&format!(
+                "com.apple.keylayout.{id}"
+            )));
+        }
+        for id in [
+            "Turkish-Q-PC",
+            "German",
+            "ABC-QWERTZ",
+            "ABC-AZERTY",
+            "ABC-other",
+            "ABCother",
+            "",
+        ] {
+            assert!(!layout_uses_option_as_alt(&format!(
+                "com.apple.keylayout.{id}"
+            )));
+        }
+        assert!(!layout_uses_option_as_alt(
+            "com.apple.inputmethod.Kotoeri.RomajiTyping.Japanese"
+        ));
+    }
+
+    #[test]
+    fn explicit_option_as_alt_overrides_layout_detection() {
+        for value in [
+            OptionAsAlt::None,
+            OptionAsAlt::Both,
+            OptionAsAlt::Left,
+            OptionAsAlt::Right,
+        ] {
+            set_option_as_alt(Some(value));
+            assert_eq!(option_as_alt(), value);
+        }
+        set_option_as_alt(Some(OptionAsAlt::None));
+    }
+
+    #[test]
+    fn option_sides_control_text_without_changing_shortcuts() {
+        use gpui::{KeybindingKeystroke, OptionSide};
+        let _guard = NATIVE_KEY_TEST.lock().unwrap();
+        let alt = NSEventModifierFlags::Option;
+        for (bits, side) in [
+            (0, None),
+            (0x20, Some(OptionSide::Left)),
+            (0x40, Some(OptionSide::Right)),
+            (0x60, Some(OptionSide::Both)),
+        ] {
+            let flags = alt | NSEventModifierFlags::from_bits_retain(bits);
+            assert_eq!(option_side(flags), side);
+            for setting in [
+                OptionAsAlt::None,
+                OptionAsAlt::Both,
+                OptionAsAlt::Left,
+                OptionAsAlt::Right,
+            ] {
+                set_option_as_alt(Some(setting));
+                let as_alt = match setting {
+                    OptionAsAlt::None => false,
+                    OptionAsAlt::Both => true,
+                    OptionAsAlt::Left => bits & 0x20 != 0,
+                    OptionAsAlt::Right => bits & 0x40 != 0,
+                };
+                assert_eq!(setting.uses_alt(side), as_alt);
+                for code in [0x23, 0x0e] {
+                    // P and the E dead key on US layouts.
+                    let event = native_key(code, flags);
+                    assert_eq!(event.option_side, side);
+                    let text =
+                        translate_key(code, if as_alt { NO_MOD } else { OPTION_MOD }, false);
+                    assert_eq!(event.key_char, (!text.is_empty()).then_some(text));
+                    let target = KeybindingKeystroke::from_keystroke(
+                        Keystroke::parse_with_os(
+                            &format!("alt-{}", event.key),
+                            OperatingSystem::Mac,
+                        )
+                        .unwrap(),
+                    );
+                    assert!(event.should_match(&target));
+                    let mut other = event.clone();
+                    other.option_side = None;
+                    assert_eq!(event, other);
+                    assert_eq!(gpui::hash(&event), gpui::hash(&other));
+                }
+            }
+        }
+        set_option_as_alt(Some(OptionAsAlt::None));
+    }
+
+    #[test]
+    fn caps_lock_goes_into_the_typed_text() {
+        assert_eq!(text_modifiers(false, false, false), NO_MOD);
+        assert_eq!(text_modifiers(false, false, true), CAPS_LOCK_MOD);
+        assert_eq!(text_modifiers(true, false, true), SHIFT_MOD | CAPS_LOCK_MOD);
+        assert_eq!(
+            text_modifiers(false, true, true),
+            OPTION_MOD | CAPS_LOCK_MOD
+        );
+    }
+
+    #[test]
+    fn posted_text_is_left_to_text_input() {
+        let _guard = NATIVE_KEY_TEST.lock().unwrap();
+        let none = NSEventModifierFlags::empty();
+        // Input methods post finished text on a key code that types something else.
+        assert_eq!(native_key_with_text(0x00, none, "ê").key_char, None);
+        // A key code no keyboard sends.
+        assert_eq!(native_key_with_text(0x6C, none, "ê").key_char, None);
+        // The space bar.
+        assert_eq!(native_key_with_text(0x31, none, "ê").key_char, None);
+        assert_eq!(
+            native_key_with_text(0x00, NSEventModifierFlags::Shift, "Ê").key_char,
+            None
+        );
+        assert_eq!(native_key_with_text(0x00, none, "ường").key_char, None);
+    }
+
+    #[test]
+    fn typed_text_keeps_its_key_char() {
+        let _guard = NATIVE_KEY_TEST.lock().unwrap();
+        set_option_as_alt(Some(OptionAsAlt::None));
+        for (flags, mods) in [
+            (NSEventModifierFlags::empty(), NO_MOD),
+            (NSEventModifierFlags::Shift, SHIFT_MOD),
+            (NSEventModifierFlags::CapsLock, CAPS_LOCK_MOD),
+        ] {
+            for code in 0..=50 {
+                let text = translate_key(code, mods, false);
+                // Return and other control keys take the named-key branch.
+                if text.is_empty() || text.chars().any(char::is_control) {
+                    continue;
+                }
+                assert_eq!(
+                    native_key_with_text(code, flags, &text).key_char,
+                    Some(text),
+                    "code {code}"
+                );
+            }
+        }
+        // An event without text keeps what its key types.
+        let own = translate_key(0x00, NO_MOD, false);
+        assert_eq!(
+            native_key_with_text(0x00, NSEventModifierFlags::empty(), "").key_char,
+            Some(own.clone())
+        );
+        // Option as Alt drops Option from the key's text but not from the event's characters.
+        set_option_as_alt(Some(OptionAsAlt::Both));
+        assert_eq!(
+            native_key_with_text(0x00, NSEventModifierFlags::Option, "å").key_char,
+            Some(own)
+        );
+        set_option_as_alt(Some(OptionAsAlt::None));
+    }
 }

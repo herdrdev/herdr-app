@@ -2,7 +2,8 @@ use crate::{
     BoolExt, MacDisplay, MetalFrames, NSRange, NSStringExt, TISCopyCurrentKeyboardInputSource,
     TISGetInputSourceProperty, WindowFrameSource, events::platform_input_from_native,
     main_queue_source,
-    kTISPropertyInputSourceIsASCIICapable, kTISPropertyInputSourceType, kTISTypeKeyboardInputMode,
+    kTISPropertyInputSourceType, kTISTypeKeyboardInputMethodModeEnabled,
+    kTISTypeKeyboardInputMethodWithoutModes, kTISTypeKeyboardInputMode,
     ns_string, renderer,
 };
 use anyhow::Result;
@@ -22,7 +23,6 @@ use image::RgbaImage;
 
 use core_foundation::base::{CFRelease, CFTypeRef};
 use core_foundation_sys::base::CFEqual;
-use core_foundation_sys::number::{CFBooleanGetValue, CFBooleanRef};
 use core_graphics::display::CGDirectDisplayID;
 use ctor::ctor;
 use futures::channel::oneshot;
@@ -2885,15 +2885,8 @@ extern "C" fn handle_key_up(this: &AnyObject, _: Sel, native_event: *mut AnyObje
 //   - In vim mode with `jj` bound to `vim::NormalBefore` in insert mode, typing 'j i' with
 //     Japanese IME should produce "じ" (ji), not "jい"
 
-/// Returns true if the current keyboard input source is a composition-based IME
-/// (e.g. Japanese Hiragana, Korean, Chinese Pinyin) that produces non-ASCII output.
-///
-/// This checks two properties:
-/// 1. The source type is `kTISTypeKeyboardInputMode` (an IME input mode, not a plain
-///    keyboard layout). This excludes non-ASCII layouts like Armenian and Ukrainian
-///    that map keys directly without composition.
-/// 2. The source is not ASCII-capable, which excludes modes like Japanese Romaji that
-///    produce ASCII characters and should allow multi-stroke keybindings like `jj`.
+/// HERDR: IMEs can compose even when ASCII-capable (e.g. Vietnamese Telex). Plain
+/// keyboard layouts, including non-ASCII ones, don't need composition routing.
 unsafe fn is_ime_input_source_active() -> bool {
     unsafe {
         let source = TISCopyCurrentKeyboardInputSource();
@@ -2903,21 +2896,18 @@ unsafe fn is_ime_input_source_active() -> bool {
 
         let source_type =
             TISGetInputSourceProperty(source, kTISPropertyInputSourceType as *const c_void);
-        let is_input_mode = !source_type.is_null()
-            && CFEqual(
-                source_type as CFTypeRef,
-                kTISTypeKeyboardInputMode as CFTypeRef,
-            ) != 0;
-
-        let is_ascii = TISGetInputSourceProperty(
-            source,
-            kTISPropertyInputSourceIsASCIICapable as *const c_void,
-        );
-        let is_ascii_capable = !is_ascii.is_null() && CFBooleanGetValue(is_ascii as CFBooleanRef);
+        let is_input_method = !source_type.is_null()
+            && [
+                kTISTypeKeyboardInputMode,
+                kTISTypeKeyboardInputMethodWithoutModes,
+                kTISTypeKeyboardInputMethodModeEnabled,
+            ]
+            .iter()
+            .any(|kind| CFEqual(source_type as CFTypeRef, *kind as CFTypeRef) != 0);
 
         CFRelease(source as CFTypeRef);
 
-        is_input_mode && !is_ascii_capable
+        is_input_method
     }
 }
 
@@ -2960,6 +2950,14 @@ extern "C" fn handle_key_event(
             }
 
             drop(lock);
+
+            // HERDR: Alt shortcuts must never enter AppKit's Option/dead-key composition.
+            if key_down_event.keystroke.modifiers.alt
+                && !key_down_event.keystroke.modifiers.platform
+                && crate::events::option_as_alt().uses_alt(key_down_event.keystroke.option_side)
+            {
+                return run_callback(PlatformInput::KeyDown(key_down_event));
+            }
 
             let is_composing =
                 with_input_handler(this, |input_handler| input_handler.marked_text_range())
