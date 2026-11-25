@@ -4,7 +4,7 @@ extern crate gpui_fast as gpui;
 use std::sync::Arc;
 
 use gpui::{AnyElement, IntoElement as _, div};
-use gpui_shell::{
+use herdr_shell::{
     COMPONENT_REGISTRY_API_VERSION, ComponentDescriptor, ComponentMaterializer, ComponentRegistry,
     ConstructorDescriptor, MaterializeRequest, RegistryError,
 };
@@ -43,7 +43,7 @@ impl ComponentMaterializer for EmptyMaterializer {
 fn descriptor(name: &'static str, export: &'static str) -> ComponentDescriptor {
     ComponentDescriptor::new(name, Arc::new(EmptyMaterializer))
         .with_constructors(vec![ConstructorDescriptor::new(export, Vec::new(), |_| {
-            Ok(gpui_shell::ComponentPayload::new(()))
+            Ok(herdr_shell::ComponentPayload::new(()))
         })])
         .with_methods(Vec::new())
 }
@@ -52,7 +52,7 @@ fn descriptor(name: &'static str, export: &'static str) -> ComponentDescriptor {
 fn registry_assigns_stable_ids_and_preserves_registration_order() {
     let mut registry = ComponentRegistry::new(
         COMPONENT_REGISTRY_API_VERSION,
-        gpui_shell::DEFAULT_COMPONENT_MODULE,
+        herdr_shell::DEFAULT_COMPONENT_MODULE,
     )
     .unwrap();
 
@@ -76,7 +76,7 @@ fn registry_assigns_stable_ids_and_preserves_registration_order() {
 fn registry_rejects_duplicate_component_and_export_names() {
     let mut registry = ComponentRegistry::new(
         COMPONENT_REGISTRY_API_VERSION,
-        gpui_shell::DEFAULT_COMPONENT_MODULE,
+        herdr_shell::DEFAULT_COMPONENT_MODULE,
     )
     .unwrap();
     registry.register(descriptor("Button", "Button")).unwrap();
@@ -95,8 +95,8 @@ fn registry_rejects_duplicate_component_and_export_names() {
 /// consumes the builder, so the compiler rejects the call.
 ///
 /// ```compile_fail
-/// # use gpui_shell::{COMPONENT_REGISTRY_API_VERSION, ComponentRegistry};
-/// let mut registry = ComponentRegistry::new(COMPONENT_REGISTRY_API_VERSION, gpui_shell::DEFAULT_COMPONENT_MODULE).unwrap();
+/// # use herdr_shell::{COMPONENT_REGISTRY_API_VERSION, ComponentRegistry};
+/// let mut registry = ComponentRegistry::new(COMPONENT_REGISTRY_API_VERSION, herdr_shell::DEFAULT_COMPONENT_MODULE).unwrap();
 /// let _frozen = registry.freeze().unwrap();
 /// registry.register(todo!());
 /// ```
@@ -105,7 +105,7 @@ const _FREEZE_IS_FINAL: () = ();
 #[test]
 fn registry_rejects_an_incompatible_api_version() {
     assert!(matches!(
-        ComponentRegistry::new(COMPONENT_REGISTRY_API_VERSION + 1, gpui_shell::DEFAULT_COMPONENT_MODULE),
+        ComponentRegistry::new(COMPONENT_REGISTRY_API_VERSION + 1, herdr_shell::DEFAULT_COMPONENT_MODULE),
         Err(RegistryError::IncompatibleApiVersion { expected, actual })
             if expected == COMPONENT_REGISTRY_API_VERSION
                 && actual == COMPONENT_REGISTRY_API_VERSION + 1

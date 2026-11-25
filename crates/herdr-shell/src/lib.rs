@@ -222,8 +222,8 @@ pub fn set_capabilities(capabilities: Capabilities) {
 /// survives a move.
 ///
 /// ```rust,ignore
-/// let data = gpui_shell::set_bundle_id("com.example.notes")?;
-/// gpui_shell::set_capabilities(Capabilities::new().write_roots([data]));
+/// let data = herdr_shell::set_bundle_id("com.example.notes")?;
+/// herdr_shell::set_capabilities(Capabilities::new().write_roots([data]));
 /// ```
 ///
 /// A host running a directory it was pointed at — a command line, a dev
@@ -354,9 +354,9 @@ mod init_tests {
 /// the modules registered here, and nothing else (design doc §17.6).
 ///
 /// ```no_run
-/// use gpui_shell::{HostModule, HostValue};
+/// use herdr_shell::{HostModule, HostValue};
 ///
-/// gpui_shell::export_module(
+/// herdr_shell::export_module(
 ///     HostModule::new("workspace")
 ///         .declarations(
 ///             r#"
@@ -367,7 +367,7 @@ mod init_tests {
 ///         .function("project_name", |_| Ok(HostValue::from("gpui-component")))
 ///         .function("version", |_| Ok(HostValue::from("0.1.0"))),
 /// )?;
-/// # Ok::<(), gpui_shell::HostError>(())
+/// # Ok::<(), herdr_shell::HostError>(())
 /// ```
 ///
 /// A script imports that by name, the way it imports `gpui-kit` or `path`:

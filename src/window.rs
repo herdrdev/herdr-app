@@ -19,8 +19,8 @@ use crate::layout_sync;
 use crate::terminal::{TerminalEvent, TerminalView, scroll_target};
 use gpui::prelude::FluentBuilder as _;
 use gpui::*;
-use gpui_shell::action::ShellAction;
-use gpui_shell::{ShellRoot, ShellRuntime, Watcher};
+use herdr_shell::action::ShellAction;
+use herdr_shell::{ShellRoot, ShellRuntime, Watcher};
 use serde_json::{Value, json};
 use std::cell::RefCell;
 use std::collections::{BTreeMap, BTreeSet, HashMap, HashSet};
@@ -5774,7 +5774,7 @@ impl Render for AppWindow {
 }
 
 fn invalidate_asset(path: &std::path::Path, window: &mut Window, cx: &mut gpui::App) {
-    let key = gpui_shell::AppAssets::cache_key(&path.to_string_lossy());
+    let key = herdr_shell::AppAssets::cache_key(&path.to_string_lossy());
     invalidate_image(&gpui::Resource::Embedded(key.clone()), window, cx);
     window.invalidate_svg(&key);
 }
@@ -6165,7 +6165,7 @@ mod tests {
         }
         drop(encoder);
         image::RgbaImage::from_pixel(2, 2, image::Rgba([255, 0, 0, 255])).save(&png).unwrap();
-        let assets = gpui_shell::AppAssets::new(home.clone());
+        let assets = herdr_shell::AppAssets::new(home.clone());
         assert_eq!(
             assets.image_resource(&Resource::Path(gif.clone().into())),
             Resource::Path(gif.clone().into())
@@ -6243,7 +6243,7 @@ mod tests {
 
     #[test]
     fn asset_cache_keys_match_file_events_without_requiring_the_file() {
-        use gpui_shell::AppAssets;
+        use herdr_shell::AppAssets;
         let expected = AppAssets::cache_key("mods/probe/icon.svg");
         for alias in ["./mods/probe/icon.svg", "/mods/probe/icon.svg", "mods//probe/./icon.svg"] {
             assert_eq!(AppAssets::cache_key(alias), expected);
@@ -7369,12 +7369,12 @@ mod tests {
         let running = |cx: &mut gpui::VisualTestContext| roots.iter().filter(|r| r.read_with(cx, |r, _| r.toast_clock_running())).count();
         assert_eq!(running(cx), 0, "no toasts, no clock");
         let root = roots[0].clone();
-        cx.update(|window, cx| root.update(cx, |r, cx| r.push_toast(gpui_shell::ToastRequest::new("Saved"), window, cx)));
+        cx.update(|window, cx| root.update(cx, |r, cx| r.push_toast(herdr_shell::ToastRequest::new("Saved"), window, cx)));
         assert_eq!(running(cx), 1, "a toast starts its root's clock, and only its");
-        cx.executor().advance_clock(gpui_shell::ToastRequest::DEFAULT_TIMEOUT / 2);
+        cx.executor().advance_clock(herdr_shell::ToastRequest::DEFAULT_TIMEOUT / 2);
         cx.run_until_parked();
         assert_eq!((running(cx), root.read_with(cx, |r, _| r.toast_count())), (1, 1), "still up, still ticking");
-        cx.executor().advance_clock(gpui_shell::ToastRequest::DEFAULT_TIMEOUT * 2);
+        cx.executor().advance_clock(herdr_shell::ToastRequest::DEFAULT_TIMEOUT * 2);
         cx.run_until_parked();
         assert_eq!(root.read_with(cx, |r, _| r.toast_count()), 0, "the toast timed out and left");
         assert_eq!(running(cx), 0, "and the clock stopped with it");

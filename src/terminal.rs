@@ -703,7 +703,7 @@ impl TerminalView {
         }
     }
 
-    fn dropped_from_mod(&mut self, paths: &gpui_shell::DraggedPaths, window: &mut Window, cx: &mut Context<Self>) {
+    fn dropped_from_mod(&mut self, paths: &herdr_shell::DraggedPaths, window: &mut Window, cx: &mut Context<Self>) {
         match drag_paths::same_machine(paths, &self.address) {
             Ok(same) => {
                 self.focus.focus(window, cx);
@@ -2509,7 +2509,7 @@ impl Render for TerminalView {
             .relative()
             // Below 1, the layout's background shows through (cells a program colors stay solid).
             .bg(hsla(vt::theme().bg).opacity(crate::settings::get().terminal_opacity))
-            .on_action(cx.listener(|this, a: &gpui_shell::action::ShellAction, window, cx| {
+            .on_action(cx.listener(|this, a: &herdr_shell::action::ShellAction, window, cx| {
                 if this.find_field_focused(window, cx) {
                     let action: Option<Box<dyn gpui::Action>> = match a.id() {
                         "terminal.copy" => Some(Box::new(gpui_base::input::Copy)),
@@ -3289,7 +3289,7 @@ mod tests {
     fn macos_edit_menu_follows_keyboard_focus(cx: &mut gpui::TestAppContext) {
         use gpui::*;
         use gpui_base::input::{Input, InputState};
-        use gpui_shell::action::ShellAction;
+        use herdr_shell::action::ShellAction;
 
         struct Root {
             terminal: Entity<super::TerminalView>,
@@ -3429,7 +3429,7 @@ mod tests {
         impl Render for Root {
             fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
                 div().key_context("Herdr").size_full()
-                    .on_action(cx.listener(|this, action: &gpui_shell::action::ShellAction, _, cx| {
+                    .on_action(cx.listener(|this, action: &herdr_shell::action::ShellAction, _, cx| {
                         match action.id() {
                             "terminal.paste" => this.0.update(cx, |terminal, cx| terminal.paste(cx)),
                             "terminal.copy" => { this.0.update(cx, |terminal, cx| terminal.copy(cx)); }
@@ -3699,7 +3699,7 @@ mod tests {
                 div()
                     .key_context("Herdr")
                     .size_full()
-                    .on_action(cx.listener(|this, action: &gpui_shell::action::ShellAction, window, cx| {
+                    .on_action(cx.listener(|this, action: &herdr_shell::action::ShellAction, window, cx| {
                         if action.id() == "terminal.search" {
                             this.0.update(cx, |terminal, cx| terminal.open_search(window, cx));
                         } else {

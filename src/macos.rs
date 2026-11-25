@@ -1,5 +1,5 @@
 use gpui::*;
-use gpui_shell::action::ShellAction;
+use herdr_shell::action::ShellAction;
 
 actions!(herdr, [Quit, Hide, HideOthers, ShowAll, Settings]);
 
