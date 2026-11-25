@@ -47,6 +47,28 @@ impl KeyBinding {
         .unwrap()
     }
 
+    /// HERDR (G11): Load a keybinding using `DummyKeyboardMapper` and an explicit
+    /// `OperatingSystem` so Windows bindings keep master's unmapped behavior instead
+    /// of going through `WindowsKeyboardMapper`.
+    pub fn load_with_dummy_mapper(
+        keystrokes: &str,
+        action: Box<dyn Action>,
+        context_predicate: Option<Rc<KeyBindingContextPredicate>>,
+        use_key_equivalents: bool,
+        action_input: Option<SharedString>,
+        os: crate::OperatingSystem,
+    ) -> std::result::Result<Self, InvalidKeystrokeError> {
+        Self::load_internal(
+            keystrokes,
+            action,
+            context_predicate,
+            use_key_equivalents,
+            action_input,
+            &DummyKeyboardMapper,
+            |source| Keystroke::parse_with_os(source, os),
+        )
+    }
+
     /// Load a keybinding from the given raw data.
     pub fn load(
         keystrokes: &str,
