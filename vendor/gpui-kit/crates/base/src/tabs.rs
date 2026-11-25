@@ -171,8 +171,6 @@ impl RenderOnce for Tab {
             handle
         });
 
-        let pointer_focus = focus_handle.clone();
-
         self.base
             .id(self.id)
             .test_support()
@@ -193,16 +191,9 @@ impl RenderOnce for Tab {
                 this.aria_position_in_set(position)
             })
             .when_some(self.size_of_set, |this, size| this.aria_size_of_set(size))
-            .on_mouse_down(MouseButton::Left, move |_, window, cx| {
-                // Stopping propagation skips Div's automatic focus handler.
-                // A nested control may already have claimed the pointer focus.
-                if !disabled
-                    && !window.default_prevented()
-                    && let Some(handle) = pointer_focus.as_ref()
-                {
-                    window.focus(handle, cx);
-                    window.prevent_default();
-                }
+            .on_mouse_down(MouseButton::Left, |_, _, cx| {
+                // HERDR: clicking a tab must not steal keyboard focus from a sibling input
+                // (reverts upstream #4002 pointer-down focus while keeping keyboard roving).
                 cx.stop_propagation();
             })
             .when_some(
@@ -561,6 +552,52 @@ mod tests {
         let (cx, clicks) = harness(cx, true);
         cx.simulate_click(point(px(10.), px(10.)), Modifiers::default());
         assert_eq!(clicks.get(), 0);
+    }
+
+    #[gpui::test]
+    fn clicking_a_tab_does_not_steal_sibling_focus(cx: &mut gpui::TestAppContext) {
+        struct SiblingFocusHarness {
+            sibling: gpui::FocusHandle,
+            clicks: Rc<Cell<usize>>,
+        }
+
+        impl Render for SiblingFocusHarness {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let clicks = self.clicks.clone();
+                div()
+                    .flex()
+                    .child(div().track_focus(&self.sibling).size(px(100.)))
+                    .child(
+                        Tabs::new("sibling-tabs")
+                            .child(
+                                Tab::new("tab-0")
+                                    .size(px(100.))
+                                    .on_click(move |_, _, _| clicks.set(clicks.get() + 1)),
+                            ),
+                    )
+            }
+        }
+
+        let clicks = Rc::new(Cell::new(0));
+        let (view, vcx) = cx.add_window_view({
+            let clicks = clicks.clone();
+            move |window, cx| {
+                let sibling = cx.focus_handle();
+                window.activate_window();
+                window.focus(&sibling, cx);
+                SiblingFocusHarness { sibling, clicks }
+            }
+        });
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(vcx.update(|window, cx| view.read(cx).sibling.is_focused(window)));
+
+        vcx.simulate_click(point(px(120.), px(20.)), Modifiers::default());
+        vcx.run_until_parked();
+        assert_eq!(clicks.get(), 1);
+        assert!(
+            vcx.update(|window, cx| view.read(cx).sibling.is_focused(window)),
+            "clicking a tab must leave the sibling input focused"
+        );
     }
 
     #[gpui::test]
