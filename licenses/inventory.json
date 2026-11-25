@@ -72,6 +72,13 @@
       ]
     },
     {
+      "name": "Taffy",
+      "source": "https://github.com/DioxusLabs/taffy/tree/v0.15.1",
+      "files": [
+        "licenses/Taffy-LICENSE.txt"
+      ]
+    },
+    {
       "name": "uucode and its Unicode data / UTF-8 decoder",
       "source": "https://github.com/jacobsandlund/uucode/tree/9d55524551411b493cca41ca06363625d90aff1e",
       "files": [
