@@ -782,7 +782,7 @@ impl Platform for LinuxPlatform {
                     .multiple(options.multiple)
                     .directory(options.directories);
                 // HERDR: open where the caller asked, as the save dialog does.
-                let request_builder = match request_builder.current_folder(options.directory.as_deref()) {
+                let request_builder = match request_builder.current_folder::<&std::path::Path>(options.directory.as_deref()) {
                     Ok(builder) => builder,
                     Err(err) => {
                         done_tx.send(Err(err.into())).ok();
