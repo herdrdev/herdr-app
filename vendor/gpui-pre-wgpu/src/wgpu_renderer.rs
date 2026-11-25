@@ -15,6 +15,7 @@ use std::num::NonZeroU64;
 use std::ops::Range;
 use std::rc::Rc;
 use std::sync::Arc;
+use std::time::Instant;
 
 const MAX_INSTANCE_BUFFER_SIZE: u64 = 256 * 1024 * 1024;
 
@@ -53,6 +54,124 @@ fn least_common_multiple(left: u64, right: u64) -> u64 {
         second = remainder;
     }
     left / first * right
+}
+
+/// HERDR: pick a present mode, letting a CPU-only machine skip vblank waits.
+///
+/// `HERDR_APP_PRESENT_MODE=fifo|mailbox|immediate` forces one mode (falling
+/// back to `Fifo` when the surface cannot do it). Unset keeps the surface's
+/// preference, except that software adapters (llvmpipe/lavapipe) get
+/// `Immediate`: a frame that finishes late should not wait for the next
+/// vblank on a machine that is already too slow.
+fn choose_present_mode(
+    preferred: Option<wgpu::PresentMode>,
+    cpu_adapter: bool,
+    supported: &[wgpu::PresentMode],
+) -> wgpu::PresentMode {
+    let requested = match std::env::var("HERDR_APP_PRESENT_MODE") {
+        Ok(raw) => match raw.trim().to_ascii_lowercase().as_str() {
+            "" | "auto" => None,
+            "fifo" | "vsync" => Some(wgpu::PresentMode::Fifo),
+            "mailbox" => Some(wgpu::PresentMode::Mailbox),
+            "immediate" | "no-vsync" | "novsync" => Some(wgpu::PresentMode::Immediate),
+            other => {
+                log::warn!("HERDR_APP_PRESENT_MODE: unknown mode {other:?}; using auto");
+                None
+            }
+        },
+        Err(_) => None,
+    };
+
+    let wanted = requested
+        .or(preferred)
+        .or_else(|| cpu_adapter.then_some(wgpu::PresentMode::Immediate));
+    let Some(mode) = wanted else {
+        return wgpu::PresentMode::Fifo;
+    };
+    if supported.contains(&mode) {
+        mode
+    } else {
+        log::warn!("wgpu: present mode {mode:?} is not supported by this surface; using Fifo");
+        wgpu::PresentMode::Fifo
+    }
+}
+
+/// HERDR: how many frames the driver may queue. `Immediate` has nothing to
+/// wait for, so keep one; otherwise the previous default of two.
+fn frame_latency(present_mode: wgpu::PresentMode) -> u32 {
+    if let Ok(raw) = std::env::var("HERDR_APP_FRAME_LATENCY") {
+        match raw.trim().parse::<u32>() {
+            Ok(latency) => return latency.clamp(1, 4),
+            Err(_) => log::warn!("HERDR_APP_FRAME_LATENCY: expected 1-4, got {raw:?}; using auto"),
+        }
+    }
+    if matches!(present_mode, wgpu::PresentMode::Immediate) {
+        1
+    } else {
+        2
+    }
+}
+
+/// HERDR: per-second frame timings for slow machines, where the app's
+/// `HERDR_APP_BENCH` stops before the renderer. `GPUI_WGPU_FRAME_LOG=1` logs
+/// acquire/render/present averages once a second; it is off by default so
+/// normal frames pay nothing. `present` includes the driver's swap (and any
+/// vblank wait), not necessarily the GPU finishing the frame.
+mod frame_log {
+    use std::sync::Mutex;
+    use std::sync::atomic::{AtomicU64, Ordering::Relaxed};
+    use std::time::{Duration, Instant};
+
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    static FRAMES: AtomicU64 = AtomicU64::new(0);
+    static ACQUIRE_US: AtomicU64 = AtomicU64::new(0);
+    static RENDER_US: AtomicU64 = AtomicU64::new(0);
+    static PRESENT_US: AtomicU64 = AtomicU64::new(0);
+    static MAX_FRAME_US: AtomicU64 = AtomicU64::new(0);
+    static LAST: Mutex<Option<Instant>> = Mutex::new(None);
+
+    pub fn enabled() -> bool {
+        *ENABLED.get_or_init(|| {
+            std::env::var_os("GPUI_WGPU_FRAME_LOG").is_some_and(|value| value != "0")
+        })
+    }
+
+    pub struct Frame {
+        pub acquire: Duration,
+        pub render: Duration,
+        pub present: Duration,
+    }
+
+    pub fn record(frame: Frame) {
+        FRAMES.fetch_add(1, Relaxed);
+        ACQUIRE_US.fetch_add(frame.acquire.as_micros() as u64, Relaxed);
+        RENDER_US.fetch_add(frame.render.as_micros() as u64, Relaxed);
+        PRESENT_US.fetch_add(frame.present.as_micros() as u64, Relaxed);
+        MAX_FRAME_US.fetch_max(
+            (frame.acquire + frame.render + frame.present).as_micros() as u64,
+            Relaxed,
+        );
+
+        let now = Instant::now();
+        let mut last = LAST.lock().unwrap_or_else(|poisoned| poisoned.into_inner());
+        if last.is_some_and(|last| now.duration_since(last) < Duration::from_secs(1)) {
+            return;
+        }
+        *last = Some(now);
+
+        let frames = FRAMES.swap(0, Relaxed);
+        if frames == 0 {
+            return;
+        }
+        let per_frame = |total: &AtomicU64| total.swap(0, Relaxed) as f64 / frames as f64 / 1000.0;
+        log::info!(
+            "wgpu frames/s={frames} acquire={:.2}ms render={:.2}ms present={:.2}ms max_frame={:.2}ms",
+            per_frame(&ACQUIRE_US),
+            per_frame(&RENDER_US),
+            per_frame(&PRESENT_US),
+            MAX_FRAME_US.swap(0, Relaxed) as f64 / 1000.0,
+        );
+    }
 }
 
 #[repr(C)]
@@ -116,7 +235,8 @@ pub struct WgpuSurfaceConfig {
     pub transparent: bool,
     /// Preferred presentation mode. When `Some`, the renderer will use this
     /// mode if supported by the surface, falling back to `Fifo`.
-    /// When `None`, defaults to `Fifo` (VSync).
+    /// When `None`, uses `Immediate` on a software adapter (HERDR: CPU-only
+    /// machines should not wait for vblank) and `Fifo` (VSync) otherwise.
     ///
     /// Mobile platforms may prefer `Mailbox` (triple-buffering) to avoid
     /// blocking in `get_current_texture()` during lifecycle transitions.
@@ -452,16 +572,22 @@ impl WgpuRenderer {
             );
         }
 
+        let adapter_info = context.adapter.get_info();
+        let cpu_adapter = adapter_info.device_type == wgpu::DeviceType::Cpu;
+        let present_mode = choose_present_mode(
+            config.preferred_present_mode,
+            cpu_adapter,
+            &surface_caps.present_modes,
+        );
+        let frame_latency = frame_latency(present_mode);
+
         let surface_config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
             format: surface_format,
             width: clamped_width.max(1),
             height: clamped_height.max(1),
-            present_mode: config
-                .preferred_present_mode
-                .filter(|mode| surface_caps.present_modes.contains(mode))
-                .unwrap_or(wgpu::PresentMode::Fifo),
-            desired_maximum_frame_latency: 2,
+            present_mode,
+            desired_maximum_frame_latency: frame_latency,
             alpha_mode,
             view_formats: vec![],
         };
@@ -469,7 +595,19 @@ impl WgpuRenderer {
         // that this adapter can successfully configure this surface.
         surface.configure(&context.device, &surface_config);
 
-        let core = WgpuRendererCore::new(context, atlas.clone(), surface_format, alpha_mode);
+        let core = WgpuRendererCore::new(context, atlas.clone(), surface_format, alpha_mode, true);
+        // HERDR: one line that answers "what is this machine rendering with?"
+        log::info!(
+            "wgpu window: adapter={:?} backend={:?} type={:?}; present={:?} latency={}; \
+             path MSAA={}; subpixel text={}",
+            adapter_info.name,
+            adapter_info.backend,
+            adapter_info.device_type,
+            present_mode,
+            frame_latency,
+            core.rendering_params.path_sample_count,
+            core.dual_source_blending,
+        );
 
         Ok(Self {
             context: gpu_context,
@@ -1224,6 +1362,7 @@ impl WgpuRenderer {
             self.failed_frame_count = 0;
         }
 
+        let timing = frame_log::enabled().then(Instant::now);
         let frame = match surface.get_current_texture() {
             wgpu::CurrentSurfaceTexture::Success(frame) => frame,
             wgpu::CurrentSurfaceTexture::Suboptimal(frame) => {
@@ -1247,6 +1386,7 @@ impl WgpuRenderer {
 
         // The acquired texture is the authority on frame dimensions; the surface
         // configuration is only a request.
+        let acquire = timing.map(|start| start.elapsed()).unwrap_or_default();
         let size = Size {
             width: DevicePixels(frame.texture.width() as i32),
             height: DevicePixels(frame.texture.height() as i32),
@@ -1256,6 +1396,7 @@ impl WgpuRenderer {
             .create_view(&wgpu::TextureViewDescriptor::default());
         let premultiplied_alpha =
             self.surface_config.alpha_mode == wgpu::CompositeAlphaMode::PreMultiplied;
+        let render_start = timing.map(|_| Instant::now());
         if let Err(error) = core.render_frame(
             scene,
             &frame_view,
@@ -1266,9 +1407,20 @@ impl WgpuRenderer {
             log::error!("{error:#}");
             return false;
         }
+        let render = render_start
+            .map(|start| start.elapsed())
+            .unwrap_or_default();
 
         self.scene_valid = true;
+        let present_start = timing.map(|_| Instant::now());
         frame.present();
+        if let (Some(_), Some(present_start)) = (timing, present_start) {
+            frame_log::record(frame_log::Frame {
+                acquire,
+                render,
+                present: present_start.elapsed(),
+            });
+        }
         true
     }
 }
@@ -1396,10 +1548,12 @@ impl WgpuRendererCore {
         atlas: Arc<WgpuAtlas>,
         target_format: wgpu::TextureFormat,
         alpha_mode: wgpu::CompositeAlphaMode,
+        tune_for_cpu: bool,
     ) -> Self {
         let device = Arc::clone(&context.device);
         let queue = Arc::clone(&context.queue);
-        let rendering_params = RenderingParameters::new(&context.adapter, target_format);
+        let rendering_params =
+            RenderingParameters::new(&context.adapter, target_format, tune_for_cpu);
         let uses_webgl_instance_data = context.uses_webgl_instance_data();
         let dual_source_blending =
             context.supports_dual_source_blending() && !uses_webgl_instance_data;
@@ -2508,6 +2662,7 @@ impl WgpuHeadlessRenderer {
             atlas,
             target_format,
             wgpu::CompositeAlphaMode::Opaque,
+            false,
         );
 
         Ok(Self {
@@ -2651,14 +2806,46 @@ struct RenderingParameters {
 }
 
 impl RenderingParameters {
-    fn new(adapter: &wgpu::Adapter, surface_format: wgpu::TextureFormat) -> Self {
+    fn new(
+        adapter: &wgpu::Adapter,
+        surface_format: wgpu::TextureFormat,
+        tune_for_cpu: bool,
+    ) -> Self {
         use std::env;
 
         let format_features = adapter.get_texture_format_features(surface_format);
-        let path_sample_count = [4, 2, 1]
-            .into_iter()
-            .find(|&n| format_features.flags.sample_count_supported(n))
+        let cpu_adapter = tune_for_cpu && adapter.get_info().device_type == wgpu::DeviceType::Cpu;
+
+        // HERDR: paths rasterize into a full-window intermediate texture, and
+        // a software adapter pays for 4x MSAA on every pixel of it. One sample
+        // there keeps the (already software-drawn) paths from costing more
+        // than the rest of the frame; a real GPU keeps the usual 4x. Set
+        // HERDR_APP_PATH_MSAA=1|2|4 to choose another count.
+        let requested_msaa = match env::var("HERDR_APP_PATH_MSAA") {
+            Ok(raw) => match raw.trim().parse::<u32>() {
+                Ok(n @ (1 | 2 | 4)) => Some(n),
+                _ => {
+                    log::warn!("HERDR_APP_PATH_MSAA: expected 1, 2 or 4, got {raw:?}; using auto");
+                    None
+                }
+            },
+            Err(_) => None,
+        };
+        let path_sample_count = requested_msaa
+            .or_else(|| cpu_adapter.then_some(1))
+            .filter(|&n| format_features.flags.sample_count_supported(n))
+            .or_else(|| {
+                [4, 2, 1]
+                    .into_iter()
+                    .find(|&n| format_features.flags.sample_count_supported(n))
+            })
             .unwrap_or(1);
+        if tune_for_cpu {
+            log::info!(
+                "wgpu path MSAA: {path_sample_count} sample(s){}",
+                if cpu_adapter { " (CPU adapter)" } else { "" }
+            );
+        }
 
         let gamma = env::var("ZED_FONTS_GAMMA")
             .ok()

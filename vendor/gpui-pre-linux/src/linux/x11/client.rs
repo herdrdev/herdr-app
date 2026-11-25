@@ -2050,6 +2050,10 @@ impl X11ClientState {
                         Duration::from_micros(1_000_000 / 60)
                     }
                 };
+                log::info!(
+                    "x11: refresh loop at {:.2} Hz",
+                    1_000_000.0 / refresh_rate.as_micros().max(1) as f64
+                );
 
                 let event_loop_token = self.start_refresh_loop(x_window, refresh_rate);
                 let Some(window_ref) = self.windows.get_mut(&x_window) else {

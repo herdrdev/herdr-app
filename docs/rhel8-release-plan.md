@@ -1,7 +1,8 @@
 # Plan: RHEL 8-only release build in `release.yml`
 
-Status: the app+core RHEL 8 build is **green** (run 5). A launcher that
-defaults the X11 scale to 1 is added to the tarball for run 6.
+Status: the app+core RHEL 8 build is **green** (run 8). Run 9 adds CPU
+rendering tuning for issue #1 (present mode, path MSAA, backend override,
+frame logging).
 
 ## Goal
 
@@ -120,6 +121,25 @@ work around a failure.
 Report the final green run URL, artifact name, glibc check output, and branch.
 Publishing and a real RHEL 8 desktop smoke test remain separate decisions.
 
+### 5. CPU rendering tuning (issue #1)
+
+The app is unchanged; the tuning lives in the vendored renderer and is
+selected from the environment, so a GPU machine keeps its old behavior.
+
+| Change | Default | Override |
+|---|---|---|
+| Present mode | `Immediate` on a software adapter (`DeviceType::Cpu`); otherwise the surface's preference, else `Fifo` | `HERDR_APP_PRESENT_MODE=fifo\|mailbox\|immediate` |
+| Frame latency | `1` with `Immediate`, else `2` | `HERDR_APP_FRAME_LATENCY=1..4` |
+| Path MSAA | `1` on a software adapter (the path pass writes a full-window intermediate texture); otherwise 4x/2x/1x as before | `HERDR_APP_PATH_MSAA=1\|2\|4` |
+| wGPU backends | Vulkan + GL | `GPUI_WGPU_BACKEND=vulkan\|gl` (comma-separated) |
+| Frame timings | off | `GPUI_WGPU_FRAME_LOG=1` logs frames/s and acquire/render/present ms once a second |
+| Startup line | always at info | `HERDR_APP_LOG=info` shows adapter/backend/type, present mode, latency, path MSAA, subpixel text |
+
+Headless renderers and screenshot tests do not get the CPU tuning
+(`tune_for_cpu = false`), so `shot_pixels` stays pixel-identical. `Immediate`
+can tear on X11; that is the accepted "faster, less pretty" trade for this
+build, and `HERDR_APP_PRESENT_MODE=fifo` restores vsync.
+
 ## Run log
 
 | # | Commit | Run URL | Result | Fix |
@@ -132,6 +152,7 @@ Publishing and a real RHEL 8 desktop smoke test remain separate decisions.
 | 6 | `2d2a367` | https://github.com/shawn111/herdr-app/actions/runs/45320328933 | **success**: launcher `herdr-app-rhel8` and `README-rhel8.md` in the tarball; both binaries at glibc 2.28; artifact 38.5 MB | None needed. |
 | 7 | `9291769` | https://github.com/shawn111/herdr-app/actions/runs/45324805105 | failed in `Check glibc floor` with exit 141 right after `ldd --version \| head -1`; `head` closed the pipe and `pipefail` turned the producer's SIGPIPE into a failure (the same race the `objdump` step was fixed for) | Replace `head -1` with `sed -n '1p'` in that line and in the `sort -V` comparison; both read all input, so no SIGPIPE. |
 | 8 | `1236459` | https://github.com/shawn111/herdr-app/actions/runs/45326453930 | **success**: SIGPIPE fix; launcher defaults `LP_NUM_THREADS=1`; both binaries at glibc 2.28; artifact 38.5 MB | None needed. |
+| 9 | pending | — | pending | CPU rendering tuning: `Immediate` present + latency 1 and 1x path MSAA on software adapters, `GPUI_WGPU_BACKEND`, `HERDR_APP_*` overrides, frame log, X11 refresh-rate line. |
 
 ## Risks / fallbacks
 
