@@ -1213,6 +1213,14 @@ pub struct Window {
     pub(crate) next_tooltip_id: TooltipId,
     pub(crate) tooltip_bounds: Option<TooltipBounds>,
     pub(crate) next_frame_callbacks: Rc<RefCell<Vec<FrameCallback>>>,
+    // HERDR: views waiting to be drawn again at a time (request_frame_after).
+    frame_schedule: RefCell<crate::frame_schedule::FrameSchedule>,
+    // One timer per deadline still ahead: the platform can't take back a timer
+    // it was handed, so a deadline that is moved earlier keeps its timer for
+    // when it comes round again instead of arming a second one.
+    frame_schedule_timers: RefCell<FxHashMap<Instant, Task<()>>>,
+    #[cfg(any(test, feature = "test-support"))]
+    frame_schedule_arms: Cell<usize>,
     pub(crate) dirty_views: FxHashSet<EntityId>,
     focus_listeners: SubscriberSet<(), AnyWindowFocusListener>,
     pub(crate) focus_lost_listeners: SubscriberSet<(), AnyObserver>,
@@ -2108,6 +2116,10 @@ impl Window {
             rendered_frame_size: None,
             next_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             next_frame_callbacks,
+            frame_schedule: Default::default(),
+            frame_schedule_timers: Default::default(),
+            #[cfg(any(test, feature = "test-support"))]
+            frame_schedule_arms: Cell::new(0),
             next_hitbox_id: HitboxId(0),
             next_tooltip_id: TooltipId::default(),
             tooltip_bounds: None,
@@ -2706,6 +2718,78 @@ impl Window {
     pub fn request_animation_frame(&self) {
         let entity = self.current_view();
         self.on_next_frame(move |_, cx| cx.notify(entity));
+    }
+
+    /// HERDR: Draw the view being rendered again after `delay`, instead of on
+    /// the next display frame.
+    ///
+    /// For anything that changes at its own pace (an animated image's next
+    /// frame, a spinner's next step): [`Self::request_animation_frame`] redraws
+    /// the whole window on every vsync until then. The window times these
+    /// requests together and may serve a request up to `tolerance` late on
+    /// purpose, so every request that is due by then shares one draw; timer
+    /// granularity and the frame clock can add more. Served views draw on the
+    /// next frame, with the same throttling as `request_animation_frame`. A view
+    /// keeps its earliest request.
+    ///
+    /// The window arms one timer per deadline, never two for the same one: a
+    /// request earlier than the armed deadline adds a timer for itself, and
+    /// the later deadline keeps its own timer for when it comes round.
+    pub fn request_frame_after(&self, delay: Duration, tolerance: Duration, cx: &App) {
+        let view = self.current_view();
+        // The executor's clock, which tests control, for both arming and firing.
+        let due = cx.background_executor().now() + delay;
+        let fire = self.frame_schedule.borrow_mut().request(view, due, tolerance);
+        if let Some(fire) = fire {
+            self.arm_frame_schedule(fire, cx);
+        }
+    }
+
+    /// Arms a timer for `fire`, measured from now rather than from when its
+    /// task first runs, unless one is already set for that time.
+    fn arm_frame_schedule(&self, fire: Instant, cx: &App) {
+        if self.frame_schedule_timers.borrow().contains_key(&fire) {
+            return;
+        }
+        #[cfg(any(test, feature = "test-support"))]
+        self.frame_schedule_arms.set(self.frame_schedule_arms.get() + 1);
+        let timer = cx
+            .background_executor()
+            .timer(fire.saturating_duration_since(cx.background_executor().now()));
+        let task = self.spawn(cx, async move |cx| {
+            timer.await;
+            cx.update(|window, cx| window.serve_frame_schedule(fire, cx)).ok();
+        });
+        self.frame_schedule_timers.borrow_mut().insert(fire, task);
+    }
+
+    fn serve_frame_schedule(&mut self, fired: Instant, cx: &mut App) {
+        // This timer is done; the task that runs this finishes on its own.
+        let finished = self.frame_schedule_timers.borrow_mut().remove(&fired);
+        let now = cx.background_executor().now();
+        let served = self.frame_schedule.borrow_mut().fire(fired, now);
+        if let Some((due, next)) = served {
+            if !due.is_empty() {
+                self.on_next_frame(move |window, cx| {
+                    for view in due {
+                        // This window drew the view, so it invalidates it itself:
+                        // `cx.notify` only reaches windows that read the view on
+                        // their last draw, which misses a cached view reused
+                        // since. A released view is left alone.
+                        if cx.entities.is_alive(view)
+                            && window.rendered_frame.dispatch_tree.contains_view(view)
+                        {
+                            window.invalidator.invalidate_view(view, cx);
+                        }
+                    }
+                });
+            }
+            if let Some(next) = next {
+                self.arm_frame_schedule(next, cx);
+            }
+        }
+        // Dropped last: the task running this is the one being dropped.
+        drop(finished);
     }
 
     /// Runs all callbacks scheduled via [`Self::on_next_frame`], returning how many ran.
@@ -5203,6 +5287,26 @@ impl Window {
     #[cfg(any(test, feature = "test-support"))]
     pub fn displayed_images(&self) -> Vec<Arc<RenderImage>> {
         self.image_tiles.values().filter_map(|(_, image)| image.clone()).collect()
+    }
+
+    /// HERDR: How many timers the window's frame schedule holds, and how many
+    /// it has asked the executor for in all.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn frame_schedule_timers(&self) -> (usize, usize) {
+        (self.frame_schedule_timers.borrow().len(), self.frame_schedule_arms.get())
+    }
+
+    /// HERDR: Which frames of an image the last drawn scene shows.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn painted_image_frames(&self, data: &RenderImage) -> Vec<usize> {
+        let painted: FxHashSet<_> = self.rendered_frame.scene.polychrome_sprites.iter()
+            .map(|sprite| (sprite.tile.texture_id, sprite.tile.tile_id.0)).collect();
+        let mut frames: Vec<usize> = self.image_tiles.iter()
+            .filter(|(params, (tile, _))| params.image_id == data.id
+                && painted.contains(&(tile.texture_id, tile.tile_id.0)))
+            .map(|(params, _)| params.frame_index).collect();
+        frames.sort_unstable();
+        frames
     }
 
     /// Returns whether a particular frame is present in the sprite atlas.

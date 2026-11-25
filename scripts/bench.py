@@ -82,6 +82,82 @@ while True:
     time.sleep(0.1)
 """
 
+# Mods for --set motion: animated images (a 16 px clip, 8 frames at 100 ms each, like
+# a status icon) and a dot that slides along a line (a mod `transition`).
+CLIPS_MOD = r"""
+import { View, div, image } from "gpui-kit";
+import { props } from "herdr";
+export default class Clips extends View {
+  render() {
+    const n = props()?.count ?? 8;
+    return div().flex().gap(4).p(8).children(
+      Array.from({ length: n }, (_, i) => image("mods/bench-clips/clip.gif").id(`clip-${i}`).w(16).h(16)));
+  }
+}
+"""
+SLIDE_MOD = r"""
+import { View, div } from "gpui-kit";
+export default class Slide extends View {
+  init(_props, cx) {
+    this.right = false;
+    cx.timer.every(2000, cx => { this.right = !this.right; cx.notify(); });
+  }
+  render() {
+    return div().relative().w(240).h(16).child(
+      div().absolute().top(4).left(this.right ? 228 : 0).w(8).h(8).rounded_full().bg("#4aa3ff")
+        .transition("left", { duration: 1600, easing: "ease-in-out" }));
+  }
+}
+"""
+
+
+def clip_gif(frames=8, size=16, delay_cs=10):
+    """An animated GIF: one moving bar, `frames` frames of `delay_cs` hundredths of a second."""
+    import struct
+    out = bytearray(b"GIF89a" + struct.pack("<HH", size, size) + bytes([0xF0, 0, 0]))
+    out += bytes([0, 0, 0, 0x4A, 0xA3, 0xFF])  # palette: black, blue
+    out += b"\x21\xFF\x0BNETSCAPE2.0\x03\x01\x00\x00\x00"  # loop for ever
+    for f in range(frames):
+        out += bytes([0x21, 0xF9, 4, 0]) + struct.pack("<H", delay_cs) + bytes([0, 0])
+        out += b"\x2C" + struct.pack("<HHHH", 0, 0, size, size) + bytes([0])
+        pixels = bytes(1 if x // 2 == f else 0 for y in range(size) for x in range(size))
+        # Uncompressed LZW (min code size 2): a clear code before every 2 pixels keeps codes 3 bits.
+        bits, nbits = 0, 0
+        data = bytearray()
+        def put(code):
+            nonlocal bits, nbits
+            bits |= code << nbits
+            nbits += 3
+            while nbits >= 8:
+                data.append(bits & 0xFF)
+                bits >>= 8
+                nbits -= 8
+        for i, px in enumerate(pixels):
+            if i % 2 == 0:
+                put(4)  # clear
+            put(px)
+        put(5)  # end
+        if nbits:
+            data.append(bits & 0xFF)
+        out += bytes([2])
+        for i in range(0, len(data), 255):
+            chunk = data[i:i + 255]
+            out += bytes([len(chunk)]) + chunk
+        out += bytes([0])
+    out += b"\x3B"
+    return bytes(out)
+
+
+def write_motion_mods():
+    for name, source in (("bench-clips", CLIPS_MOD), ("bench-slide", SLIDE_MOD)):
+        os.makedirs(f"{ROOT}/home/mods/{name}", exist_ok=True)
+        with open(f"{ROOT}/home/mods/{name}/mod.json", "w") as f:
+            json.dump({"place": "none", "title": name, "overlay": {"kind": "window", "width": 300, "height": 60}}, f)
+        with open(f"{ROOT}/home/mods/{name}/main.js", "w") as f:
+            f.write(source)
+    with open(f"{ROOT}/home/mods/bench-clips/clip.gif", "wb") as f:
+        f.write(clip_gif())
+
 
 def env():
     e = dict(os.environ)
@@ -325,9 +401,10 @@ def main():
     ap.add_argument("--seconds", type=int, default=20)
     ap.add_argument("--sample", action="store_true")
     ap.add_argument("--zoom", type=float, default=1.0)
-    ap.add_argument("--set", choices=["all", "spinners", "titles"], default="all",
+    ap.add_argument("--set", choices=["all", "spinners", "titles", "motion"], default="all",
                     help="spinners: many spaces of idle agents, one agent working on screen; "
-                    "titles: eight agents whose titles spin after a prefix")
+                    "titles: eight agents whose titles spin after a prefix; "
+                    "motion: mods with animated images, then a sliding dot")
     ap.add_argument("--only", help="measure only this scenario, e.g. spinners+stream")
     a = ap.parse_args()
     if a.seconds <= 0:
@@ -352,6 +429,8 @@ def main():
         f.write(REPORTS)
     with open(f"{ROOT}/tui.py", "w") as f:
         f.write(TUI)
+    if a.set == "motion":  # before the app starts, so its first scan finds them
+        write_motion_mods()
     agent = [sys.executable, "-u", f"{ROOT}/agent.py"]
     tui = [sys.executable, "-u", f"{ROOT}/tui.py"]
     reports = lambda state: [sys.executable, "-u", f"{ROOT}/reports.py", state]
@@ -392,6 +471,15 @@ def main():
             rows.append(measure("spinners+stream", app.pid, a.seconds, a.sample))
             do(bin, "tab.new", {"name": "title", "argv": reports("title")})
             rows.append(measure("spinners+title", app.pid, a.seconds, a.sample))
+            return
+        if a.set == "motion":
+            do(bin, "space.new", {"name": "bench", "folder": ROOT})
+            rows.append(measure("motion-idle", app.pid, a.seconds, a.sample))
+            do(bin, "mod.open", {"name": "bench-clips"})
+            rows.append(measure("eight-clips", app.pid, a.seconds, a.sample))
+            do(bin, "mod.open", {"name": "bench-clips"})  # toggles it closed
+            do(bin, "mod.open", {"name": "bench-slide"})
+            rows.append(measure("slide", app.pid, a.seconds, a.sample))
             return
         if a.set == "titles":
             do(bin, "space.new", {"name": "bench", "folder": ROOT, "argv": reports("prefixed")})

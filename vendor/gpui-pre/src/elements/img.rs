@@ -299,6 +299,8 @@ impl Element for Img {
             });
 
             let mut frame_index = state.as_ref().map(|state| state.frame_index).unwrap_or(0);
+            // HERDR: when the shown frame ends, to draw the next one then.
+            let mut next_frame_at = None;
 
             let layout_id = self.interactivity.request_layout(
                 global_id,
@@ -329,7 +331,9 @@ impl Element for Img {
                                 state.frame_index = state.frame_index.min(max_frame_index);
                                 if frame_count > 1 && !cx.reduce_motion() {
                                     if window.is_window_active() {
-                                        let current_time = Instant::now();
+                                        // HERDR: the executor's clock, the one the frame
+                                        // schedule uses (and tests control).
+                                        let current_time = cx.background_executor().now();
                                         if let Some(last_frame_time) = state.last_frame_time {
                                             let elapsed = current_time - last_frame_time;
                                             let frame_duration =
@@ -344,6 +348,11 @@ impl Element for Img {
                                         } else {
                                             state.last_frame_time = Some(current_time);
                                         }
+                                        // How long the shown frame has left.
+                                        next_frame_at = state.last_frame_time.map(|shown| {
+                                            let delay = Duration::from(data.delay(state.frame_index));
+                                            ((shown + delay).saturating_duration_since(current_time), delay)
+                                        });
                                     } else {
                                         state.last_frame_time = None;
                                     }
@@ -388,12 +397,21 @@ impl Element for Img {
                                 };
                             }
 
+                            // HERDR: wake when the next frame is due, not on every vsync: a
+                            // 10 fps clip redrew the whole window 120 times a second on a
+                            // 120 Hz display. A quarter of the frame's time is tolerance,
+                            // so clips (and other timed views) share draws.
                             if global_id.is_some()
                                 && data.frame_count() > 1
                                 && window.is_window_active()
                                 && !cx.reduce_motion()
                             {
-                                window.request_animation_frame();
+                                match next_frame_at {
+                                    Some((left, delay)) if !delay.is_zero() => {
+                                        window.request_frame_after(left, delay / 4, cx)
+                                    }
+                                    _ => window.request_animation_frame(),
+                                }
                             }
                         }
                         Some(_err) => {
