@@ -2179,9 +2179,8 @@ mod tests {
         );
     }
 
-    /// A drag that starts in a table cell selects only in that cell, also when
-    /// the pointer leaves the cell. A drag that starts outside the table still
-    /// selects through it.
+    /// HERDR (B19): a drag that starts in a table cell extends across
+    /// neighboring cells and rows (matching 1ccf011).
     #[gpui::test]
     fn table_drag_from_a_cell_extends_across_cells(cx: &mut TestAppContext) {
         cx.update(crate::init);
@@ -2383,7 +2382,7 @@ mod tests {
         cx.simulate_mouse_down(start, MouseButton::Left, Modifiers::default());
         cx.simulate_mouse_move(inside, MouseButton::Left, Modifiers::default());
         cx.update(|window, cx| window.draw(cx).clear(cx));
-        // The copy callback must constrain the logical block range even before paint.
+        // HERDR (B19): dragging past the table cell leaves the logical block range unconstrained.
         cx.simulate_mouse_move(end, MouseButton::Left, Modifiers::default());
         cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
         // HERDR (B19): dragging past a table cell in a scrollable TextView copies

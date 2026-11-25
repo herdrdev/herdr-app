@@ -1102,9 +1102,9 @@ impl TextViewState {
         self.selection_adapter.selection_points(cx)
     }
 
-    /// [`Self::selection_points`] for the text that paints now: a drag that
-    /// started in a table cell selects only in that cell. Call it only while
-    /// painting, so the cell the text is in is known.
+    /// [`Self::selection_points`] for the text that paints now (HERDR B19
+    /// disables table-cell confinement so drags starting in a cell still paint
+    /// across cells).
     pub(crate) fn painted_selection_points(
         &self,
         cx: &App,

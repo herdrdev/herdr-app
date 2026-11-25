@@ -1005,10 +1005,9 @@ impl TextSelectionHandle {
         *self.0.read(cx).runs.borrow_mut() = runs.to_vec();
     }
 
-    /// Lets a drag from a double or triple click that this participant
-    /// selected for itself, from the caret `start` to the caret `end` in
-    /// window coordinates, extend the selection by the same unit through the
-    /// window selection, as a shift-click after it does.
+    /// HERDR (B20): delegates to `hold_unit`, which is a no-op so dragging
+    /// after a double or triple click leaves the selection unchanged (matching
+    /// 1ccf011).
     pub(crate) fn hold_multi_click(
         &self,
         start: Bounds<Pixels>,
@@ -2301,9 +2300,9 @@ impl WindowSelectionState {
         })
     }
 
-    /// Keeps the gesture of the click that selected `unit` going: a drag
-    /// from it, until the button is released, and a shift-click after it
-    /// extend the selection by the same unit.
+    /// HERDR (B20): no-op so `is_selecting` stays `false` and moving the mouse
+    /// before releasing a double or triple click leaves the selection unchanged
+    /// (matching 1ccf011).
     fn hold_unit(&mut self, _unit: SelectionUnit, _cx: &mut App) {
         // HERDR (B20): exact 1ccf011 behavior — after a double/triple-click,
         // `is_selecting` stays `false` so moving the mouse before release does
