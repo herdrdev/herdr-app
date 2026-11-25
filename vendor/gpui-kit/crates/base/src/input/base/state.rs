@@ -144,6 +144,8 @@ pub enum InputEvent {
     PressEnter { secondary: bool, shift: bool },
     Focus,
     Blur,
+    /// HERDR: a paste found no text on the clipboard (an image, say): the owner may read it.
+    PasteWithoutText,
 }
 
 /// An immutable batch of text edits emitted for one input change.
@@ -3464,6 +3466,8 @@ impl<M: InputModeKind> InputBaseState<M> {
         cx: &mut Context<Self>,
     ) {
         let Some(mut new_text) = clipboard.text().filter(|text| !text.is_empty()) else {
+            // HERDR: let the host inspect non-text clipboard items (e.g. images).
+            cx.emit(InputEvent::PasteWithoutText);
             return;
         };
         // A paste is one atomic edit, never part of a typing run.
@@ -14266,5 +14270,39 @@ impl InputBaseState<crate::input::EditorMode> {
     pub fn set_smart_indent(&mut self, smart_indent: bool, _: &mut Window, cx: &mut Context<Self>) {
         self.mode.set_smart_indent(smart_indent);
         cx.notify();
+    }
+}
+
+#[cfg(test)]
+mod herdr_input_tests {
+    use std::{cell::Cell, rc::Rc};
+
+    use gpui::{ClipboardItem, TestAppContext};
+
+    use super::*;
+
+    #[gpui::test]
+    fn paste_without_text_emits_event_without_mutating_text(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let fired = Rc::new(Cell::new(0usize));
+        let fired_cb = fired.clone();
+        let (state, vcx) = cx.add_window_view(|window, cx| {
+            let state = crate::input::InputState::new(window, cx).default_value("keep");
+            cx.subscribe(&cx.entity(), move |_, _, event: &InputEvent, _| {
+                if matches!(event, InputEvent::PasteWithoutText) {
+                    fired_cb.set(fired_cb.get() + 1);
+                }
+            })
+            .detach();
+            state
+        });
+        vcx.update(|window, cx| {
+            state.update(cx, |state, cx| {
+                state.insert_clipboard(ClipboardItem::new_string(String::new()), window, cx);
+            });
+        });
+        vcx.run_until_parked();
+        assert_eq!(fired.get(), 1);
+        assert_eq!(state.read_with(vcx, |s, _| s.value()), "keep");
     }
 }
