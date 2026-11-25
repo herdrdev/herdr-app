@@ -1,6 +1,6 @@
 //! Routing and pasting paths without treating another machine's files as local.
 
-use gpui_shell::DraggedPaths;
+use herdr_shell::DraggedPaths;
 use std::path::PathBuf;
 
 fn validate_paths(paths: impl IntoIterator<Item = impl AsRef<str>>) -> Result<(), &'static str> {

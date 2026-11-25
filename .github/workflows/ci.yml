@@ -86,8 +86,21 @@ jobs:
         run: scripts/ci-sources restore
       # Compile the screenshot harness everywhere, even without a desktop.
       # Disable optimized dev dependencies in CI to reduce test compile time.
+      # herdr-shell's own tests run on Linux only until their macOS and
+      # Windows failures (which predate running them anywhere) are sorted out.
+      - name: Pick packages
+        run: |
+          if [ "$RUNNER_OS" = Linux ]; then
+            echo "PKGS=-p herdr-app -p herdr-shell" >>"$GITHUB_ENV"
+          else
+            echo "PKGS=-p herdr-app" >>"$GITHUB_ENV"
+          fi
       - name: Build tests
-        run: cargo test --locked --config 'profile.dev.package."*".opt-level=0' --no-run
+        run: |
+          cargo test --locked $PKGS \
+            --config 'profile.dev.package."*".opt-level=0' \
+            --config 'profile.dev.package.herdr-shell.opt-level=0' \
+            --no-run
       - name: Note the sources the cache was built from
         if: env.SAVE_CACHES == 'true' && steps.cache.outputs.cache-hit != 'true'
         run: scripts/ci-sources record
@@ -111,7 +124,10 @@ jobs:
           if [ "$RUNNER_OS" = Linux ]; then
             threads=(-- --test-threads 4)
           fi
-          cargo test --locked --config 'profile.dev.package."*".opt-level=0' "${only[@]}" "${threads[@]}"
+          cargo test --locked $PKGS \
+            --config 'profile.dev.package."*".opt-level=0' \
+            --config 'profile.dev.package.herdr-shell.opt-level=0' \
+            "${only[@]}" "${threads[@]}"
       # Windows runners lack an interactive desktop. Linux uses headless Vulkan
       # in the suite above; macOS exercises the native window renderer here.
       - name: Screenshot pixels
@@ -119,7 +135,11 @@ jobs:
         timeout-minutes: 5
         env:
           HERDR_SHOT_NATIVE_TEST: "1"
-        run: cargo test --locked --config 'profile.dev.package."*".opt-level=0' --test shot_pixels
+        run: |
+          cargo test --locked $PKGS \
+            --config 'profile.dev.package."*".opt-level=0' \
+            --config 'profile.dev.package.herdr-shell.opt-level=0' \
+            --test shot_pixels
       - name: Check release packaging
         if: matrix.platform == 'linux-x86_64'
         run: python3 -m unittest discover -s scripts -p test_distribution.py

@@ -46,7 +46,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("terminal.park", &[req("terminal")], "Take a terminal's pane away and disable core keep; it keeps running (a sub-agent shows under its parent again)."),
     cmd("terminal.right_click", &[req("to"), opt("terminal")], "Where right-clicks in a terminal (default: the focused one) go when its program takes the mouse: \"program\" or \"menu\" (Herdr's, the default). Shift+right-click is always the menu."),
     cmd("terminal.pin", &[req("terminal"), req("pinned")], "Pin an agent to the top of the agent lists (pinned true) or unpin it (false). Pins are kept with the terminal, so every Herdr client shows them, and end with it."),
-    cmd("terminal.kill", &[req("terminal")], "End a terminal and its sub-agents."),
+    cmd("terminal.kill", &[req("terminal")], "End a terminal and its sub-agents. Spare branches whose first sub-agent has a pane or a herdr.space label. Core still applies parent-lifetime rules."),
     // What you see.
     cmd("space.select", &[opt("index"), opt("id")], "Show a space (by position or id)."),
     cmd("space.next", &[], "Show the next space."),
@@ -57,8 +57,10 @@ pub const COMMANDS: &[Command] = &[
     cmd("tab.next", &[], "Show the next tab."),
     cmd("tab.prev", &[], "Show the previous tab."),
     cmd("pane.zoom", &[opt("pane")], "Show only this pane of its tab, or all again."),
+    cmd("pane.rename", &[opt("pane"), opt("name")], "Name a pane (default: the focused one; asks the person when no name; an empty name: unnamed again)."),
     cmd("pane.focus", &[opt("pane"), opt("terminal")], "Focus a pane (or the pane showing a terminal)."),
     cmd("pane.go", &[req("direction")], "Focus the pane or focusable mod to the \"left\", \"right\", \"up\" or \"down\"."),
+    cmd("pane.resize", &[req("direction"), opt("pane"), opt("px")], "Move the border of a pane (default: the focused one) \"left\", \"right\", \"up\" or \"down\" by px (default 40), like dragging the divider."),
     cmd("pane.swap", &[opt("direction"), opt("pane"), opt("target")], "Swap a pane (default: the focused one) with its neighbor in a direction, or with another pane of its tab (target). Give exactly one of direction or target."),
     cmd("terminal.peek", &[req("terminal")], "Peek at a running terminal over the tab, with keep-as-tab and close controls."),
     cmd("terminal.show", &[opt("terminal"), opt("pane")], "Show a terminal in a pane for now, in place of its own (no terminal: back)."),
@@ -74,6 +76,7 @@ pub const COMMANDS: &[Command] = &[
     cmd("agent.focus", &[req("terminal")], "Show an agent (sub-agents too)."),
     cmd("agent.next", &[], "Show the next agent, in the order the agents list shows them."),
     cmd("agent.prev", &[], "Show the previous agent."),
+    cmd("agent.select", &[req("index")], "Show an agent by position (1 = first), in the same navigation order as `agent.next`."),
     cmd("layout.switch", &[opt("name")], "Show a layout (layouts/<name>.json), or the next one."),
     cmd("layout.clone", &[req("name"), opt("as")], "Duplicate a layout as <name>-copy (or as), then show it."),
     cmd("mod.clone", &[req("name"), opt("as")], "Duplicate a mod as <name>-copy (or as)."),
@@ -222,6 +225,7 @@ mod tests {
         names.dedup();
         assert_eq!(names.len(), COMMANDS.len());
         assert_eq!(shorthand(find("tab.select").unwrap(), "3"), json!({ "index": 3 }));
+        assert_eq!(shorthand(find("agent.select").unwrap(), "3"), json!({ "index": 3 }));
         assert_eq!(shorthand(find("pane.split").unwrap(), "right"), json!({ "direction": "right" }));
         let move_ = find("space.move").unwrap();
         assert_eq!(missing(move_, &json!({ "id": " ", "index": 1 })), Some("id"));
