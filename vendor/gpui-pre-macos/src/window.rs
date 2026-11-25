@@ -1,6 +1,7 @@
 use crate::{
     BoolExt, MacDisplay, MetalFrames, NSRange, NSStringExt, TISCopyCurrentKeyboardInputSource,
     TISGetInputSourceProperty, WindowFrameSource, events::platform_input_from_native,
+    main_queue_source,
     kTISPropertyInputSourceIsASCIICapable, kTISPropertyInputSourceType, kTISTypeKeyboardInputMode,
     ns_string, renderer,
 };
@@ -666,6 +667,11 @@ struct MacWindowState {
     cursor_style: CursorStyle,
     cursor_visible: Arc<AtomicBool>,
     frame_source: FrameSource,
+    // HERDR: on macOS <= 13 (CVDisplayLink), an idle window parks its display link
+    // in `step` and restarts via `wake_source`. macOS 14+ uses upstream `MetalFrames`.
+    wake_source: Option<dispatch2::DispatchRetained<dispatch2::DispatchSource>>,
+    woken: bool,
+    idle_frames: u32,
     renderer: renderer::Renderer,
     request_frame_callback: Option<Box<dyn FnMut(RequestFrameOptions)>>,
     event_callback: Option<Box<dyn FnMut(PlatformInput) -> gpui::DispatchEventResult>>,
@@ -1177,6 +1183,9 @@ impl MacWindow {
                     Some(metal_frames) => FrameSource::Metal(metal_frames.clone()),
                     None => FrameSource::DisplayLink(None),
                 },
+                wake_source: None,
+                woken: false,
+                idle_frames: 0,
                 renderer,
                 request_frame_callback: None,
                 event_callback: None,
@@ -1471,6 +1480,10 @@ impl Drop for MacWindow {
         match &mut this.frame_source {
             FrameSource::Metal(metal_frames) => metal_frames.replace(None),
             FrameSource::DisplayLink(frame_source) => drop(frame_source.take()),
+        }
+        // HERDR: wake_source context points at native_view, which goes with the window.
+        if let Some(source) = this.wake_source.take() {
+            source.cancel();
         }
         unsafe {
             let _: () = msg_send![this.native_window, setDelegate: ptr::null_mut::<AnyObject>()];
@@ -2224,20 +2237,32 @@ impl PlatformWindow for MacWindow {
     }
 
     // GPUI calls this without waking the frame waker when a window only needs
-    // a present, so a paused Metal link must resume here too.
+    // a present, so a paused Metal link (or parked legacy CVDisplayLink) must resume here too.
     fn schedule_frame(&self) {
         if let Some(metal_frames) = &self.2 {
             metal_frames.wake();
+        } else if let Some(source) = self.0.as_ref().lock().wake_source.as_ref() {
+            source.merge_data(1);
         }
     }
 
     fn frame_waker(&self) -> Option<Rc<dyn Fn()>> {
-        let metal_frames = Rc::downgrade(self.2.as_ref()?);
-        Some(Rc::new(move || {
-            if let Some(metal_frames) = metal_frames.upgrade() {
-                metal_frames.wake();
-            }
-        }))
+        if let Some(metal_frames) = self.2.as_ref() {
+            let metal_frames = Rc::downgrade(metal_frames);
+            return Some(Rc::new(move || {
+                if let Some(metal_frames) = metal_frames.upgrade() {
+                    metal_frames.wake();
+                }
+            }));
+        }
+        // HERDR: wake parked CVDisplayLink on macOS <= 13 from the main queue.
+        let mut lock = self.0.as_ref().lock();
+        let data = lock.native_view.as_ptr() as *mut c_void;
+        let source = lock
+            .wake_source
+            .get_or_insert_with(|| main_queue_source(data, wake_frames))
+            .clone();
+        Some(Rc::new(move || source.merge_data(1)))
     }
 
     fn sprite_atlas(&self) -> Arc<dyn PlatformAtlas> {
@@ -3618,8 +3643,39 @@ extern "C" fn step(view: *mut c_void) {
             signal_source,
             ..Default::default()
         });
-        window_state.lock().request_frame_callback = Some(callback);
+        let mut lock = window_state.lock();
+        lock.request_frame_callback = Some(callback);
+        // HERDR: park legacy CVDisplayLink after 3 idle vsyncs without a wake.
+        if std::mem::take(&mut lock.woken) {
+            lock.idle_frames = 0;
+        } else {
+            lock.idle_frames += 1;
+            let running = matches!(
+                &lock.frame_source,
+                FrameSource::DisplayLink(Some(source)) if source.is_running()
+            );
+            if lock.idle_frames >= 3 && running {
+                lock.stop_display_link();
+            }
+        }
+        drop(lock);
         native_views::check_pointer_after_frame(&window_state);
+    }
+}
+
+// HERDR: wake a parked legacy CVDisplayLink window on macOS <= 13.
+extern "C" fn wake_frames(view: *mut c_void) {
+    let view = view as *mut AnyObject;
+    let window_state = unsafe { get_window_state(&*view) };
+    let mut lock = window_state.lock();
+    lock.woken = true;
+    lock.idle_frames = 0;
+    let running = matches!(
+        &lock.frame_source,
+        FrameSource::DisplayLink(Some(source)) if source.is_running()
+    );
+    if lock.request_frame_callback.is_some() && !running {
+        lock.start_display_link(&window_state);
     }
 }
 

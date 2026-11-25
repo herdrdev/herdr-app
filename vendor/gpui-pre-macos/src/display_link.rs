@@ -356,6 +356,28 @@ impl MetalFrames {
     }
 }
 
+/// HERDR: A coalescing source that calls `callback(data)` on the main queue for
+/// each `merge_data` (used to wake parked legacy CVDisplayLink windows on macOS <= 13).
+pub fn main_queue_source(
+    data: *mut c_void,
+    callback: extern "C" fn(*mut c_void),
+) -> DispatchRetained<DispatchSource> {
+    unsafe {
+        let source = DispatchSource::new(
+            &raw const _dispatch_source_type_data_add as *mut _,
+            0,
+            0,
+            Some(DispatchQueue::main()),
+        );
+        source.set_context(data);
+        source.set_event_handler_f(callback);
+        // Resume before this source can ever be dropped: destroying a
+        // suspended dispatch source is undefined behavior (#50875).
+        source.resume();
+        source
+    }
+}
+
 /// A per-window source of frame requests, paced by the display the window is
 /// on. The wrapped dispatch source coalesces vsync ticks from the display's
 /// io thread and invokes `callback(data)` on the main queue.
@@ -367,22 +389,8 @@ pub struct WindowFrameSource {
 
 impl WindowFrameSource {
     pub fn new(data: *mut c_void, callback: extern "C" fn(*mut c_void)) -> Self {
-        let frame_requests = unsafe {
-            let frame_requests = DispatchSource::new(
-                &raw const _dispatch_source_type_data_add as *mut _,
-                0,
-                0,
-                Some(DispatchQueue::main()),
-            );
-            frame_requests.set_context(data);
-            frame_requests.set_event_handler_f(callback);
-            // Resume before this source can ever be dropped: destroying a
-            // suspended dispatch source is undefined behavior (#50875).
-            frame_requests.resume();
-            frame_requests
-        };
         Self {
-            frame_requests,
+            frame_requests: main_queue_source(data, callback),
             registration: None,
             signal: Arc::new(PlatformFrameSignal::new()),
         }
@@ -402,6 +410,11 @@ impl WindowFrameSource {
             "attached": self.registration.is_some(),
             "display_id": self.registration.map(|(display_id, _)| display_id),
         })
+    }
+
+    // HERDR: lets an idle legacy CVDisplayLink window park its frames (window.rs `step`).
+    pub fn is_running(&self) -> bool {
+        self.registration.is_some()
     }
 
     pub fn take_signal(&self) -> Option<(Instant, FrameRequestSource)> {
