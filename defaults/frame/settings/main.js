@@ -748,13 +748,38 @@ export default class Settings extends View {
         this.row(
           t,
           "Play sounds",
-          "When an agent needs you, and when one finishes while you're not looking. A note shows in the corner either way.",
+          "When an agent needs you, and when one finishes while you're not looking. A note shows either way.",
           this.toggle(t, "st-sounds", on, (_e, cx) => this.change((p) => (p.sounds = { ...(p.sounds ?? {}), enabled: !on }), cx)),
         ),
       )
       .child(this.row(t, "An agent needs you", file(sounds.blocked), this.button(t, "st-play-blocked", "Play", () => playSound("blocked"))))
       .child(this.row(t, "An agent finished", file(sounds.done), this.button(t, "st-play-done", "Play", () => playSound("done"))))
-      .child(div().pt(12).text_size(12.5).line_height("18px").text_color(t.dim).child("Want your own sounds? Ask your agent to set sounds.done and sounds.blocked in settings.json to an MP3."));
+      .child(div().pt(12).text_size(12.5).line_height("18px").text_color(t.dim).child("Want your own sounds? Ask your agent to set sounds.done and sounds.blocked in settings.json to an MP3."))
+      .child(div().pt(24).child(this.heading(t, "Notes")))
+      .child(div().pb(12).text_size(13).text_color(t.dim).child("The corner where notes about agents and updates show."))
+      .children([
+        ["bottom-right", "Bottom right"],
+        ["bottom-left", "Bottom left"],
+        ["top-right", "Top right"],
+        ["top-left", "Top left"],
+      ].map(([value, label]) => {
+        const on = (this.person.toast_position ?? "bottom-right") === value;
+        return h_flex()
+          .id(`st-toast-${value}`)
+          .gap(10)
+          .px(12)
+          .py(10)
+          .rounded(7)
+          .items_center()
+          .cursor_pointer()
+          .hover((s) => s.bg(t.hover))
+          .on_click((_e, cx) => this.change((p) => {
+            if (value === "bottom-right") delete p.toast_position;
+            else p.toast_position = value;
+          }, cx))
+          .child(div().text_color(on ? t.accent : t.muted).child(on ? "◉" : "○"))
+          .child(div().text_size(14).text_color(t.foreground).child(label));
+      }));
   }
 
   // Updates --------------------------------------------------------------
