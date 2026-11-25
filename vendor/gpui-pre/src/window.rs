@@ -1240,6 +1240,10 @@ pub struct Window {
     is_minimizable: bool,
     last_window_bounds: WindowBounds,
     sprite_atlas: Arc<dyn PlatformAtlas>,
+    // HERDR: track per-window image tiles and asset loads for retirement and LRU pruning.
+    image_tiles: FxHashMap<RenderImageParams, (AtlasTile, Option<Arc<RenderImage>>)>,
+    image_assets: FxHashMap<(TypeId, u64), crate::ImageLoad>,
+    accessed_image_assets: FxHashSet<(TypeId, u64)>,
     text_system: Rc<WindowTextSystem>,
     text_rendering_mode: Rc<Cell<TextRenderingMode>>,
     rem_size: Pixels,
@@ -2441,6 +2445,9 @@ impl Window {
             is_minimizable,
             last_window_bounds: window_bounds,
             sprite_atlas,
+            image_tiles: FxHashMap::default(),
+            image_assets: FxHashMap::default(),
+            accessed_image_assets: FxHashSet::default(),
             text_system,
             text_rendering_mode: cx.text_rendering_mode.clone(),
             rem_size: px(16.),
@@ -3870,6 +3877,7 @@ impl Window {
         debug_assert!(self.rendered_entity_stack.is_empty());
         self.invalidator.set_dirty(false);
         self.requested_autoscroll = None;
+        self.accessed_image_assets.clear();
 
         // Restore the previously-used input handler.
         // Place it back into a None slot (left by a previous .take()) so that
@@ -3936,6 +3944,51 @@ impl Window {
         self.layout_engine.as_mut().unwrap().clear();
         self.text_system().finish_frame();
         self.next_frame.finish(&mut self.rendered_frame);
+        // HERDR: Cached paint ranges can reuse image sprites without calling paint_image.
+        // Retire atlas tiles only after neither live scene references them, and prune idle assets.
+        let current_image_tiles: FxHashSet<_> = self
+            .next_frame
+            .scene
+            .polychrome_sprites
+            .iter()
+            .map(|sprite| (sprite.tile.texture_id, sprite.tile.tile_id.0))
+            .collect();
+        let mut live_image_tiles = current_image_tiles.clone();
+        live_image_tiles.extend(
+            self.rendered_frame
+                .scene
+                .polychrome_sprites
+                .iter()
+                .map(|sprite| (sprite.tile.texture_id, sprite.tile.tile_id.0)),
+        );
+        self.image_tiles.retain(|params, (tile, image)| {
+            let key = (tile.texture_id, tile.tile_id.0);
+            // An uploaded tile needs no CPU pixels while only the previous scene uses it.
+            if !current_image_tiles.contains(&key) {
+                *image = None;
+            }
+            if live_image_tiles.contains(&key) {
+                true
+            } else {
+                self.sprite_atlas.remove(&params.clone().into());
+                false
+            }
+        });
+        let rendered_entities = cx.entities.take_accessed();
+        self.image_assets.retain(|key, load| {
+            self.accessed_image_assets.contains(key)
+                || load.loading_for(&rendered_entities)
+                || load.get().is_some_and(|result| {
+                    result.is_ok_and(|image| {
+                        self.image_tiles.iter().any(|(params, (tile, _))| {
+                            params.image_id == image.id
+                                && current_image_tiles.contains(&(tile.texture_id, tile.tile_id.0))
+                        })
+                    })
+                })
+        });
+        cx.entities.restore_accessed(rendered_entities);
+        cx.prune_image_assets();
 
         self.invalidator.set_phase(DrawPhase::Focus);
         let previous_focus_path = self.rendered_frame.focus_path();
@@ -4733,6 +4786,23 @@ impl Window {
     /// time.
     pub fn get_asset<A: Asset>(&mut self, source: &A::Source, cx: &mut App) -> Option<A::Output> {
         cx.fetch_asset::<A>(source)
+    }
+
+    pub(crate) fn image_asset<A: Asset<Output = Result<Arc<RenderImage>, crate::ImageCacheError>>>(
+        &mut self,
+        source: &A::Source,
+        subscribe: bool,
+        cx: &mut App,
+    ) -> Option<Result<Arc<RenderImage>, crate::ImageCacheError>> {
+        let key = (TypeId::of::<A>(), A::cache_key(source, cx));
+        let entry = cx.asset_entry::<A>(source);
+        self.image_assets.insert(key, entry.clone());
+        self.accessed_image_assets.insert(key);
+        if subscribe && let Some(view) = self.rendered_entity_stack.last().copied() {
+            entry.use_by(view)
+        } else {
+            entry.get()
+        }
     }
     /// Obtain the current element offset. This method should only be called during the
     /// prepaint phase of element drawing.
@@ -5580,6 +5650,12 @@ impl Window {
             return Ok(());
         }
 
+        // HERDR: skip uploading off-screen/clipped images to the sprite atlas.
+        let visible_bounds_snapped = self.snap_bounds(visible_bounds);
+        let content_mask = self.snapped_content_mask();
+        if visible_bounds_snapped.intersect(&content_mask.bounds).is_empty() {
+            return Ok(());
+        }
         let params = RenderImageParams {
             image_id: data.id,
             frame_index,
@@ -5587,7 +5663,7 @@ impl Window {
 
         let tile = self
             .sprite_atlas
-            .get_or_insert_with(params.into(), &mut || {
+            .get_or_insert_with(params.clone().into(), &mut || {
                 Ok(Some((
                     data.size(frame_index),
                     Cow::Borrowed(
@@ -5597,8 +5673,7 @@ impl Window {
                 )))
             })?
             .expect("Callback above only returns Some");
-
-        let visible_bounds_snapped = self.snap_bounds(visible_bounds);
+        self.image_tiles.insert(params, (tile, Some(data)));
 
         let sub_tile = if visible_bounds == image_bounds {
             tile
@@ -5690,10 +5765,27 @@ impl Window {
                 frame_index,
             };
 
-            self.sprite_atlas.remove(&params.into());
+            self.sprite_atlas.remove(&params.clone().into());
+            self.image_tiles.remove(&params);
         }
 
         Ok(())
+    }
+
+    /// HERDR: Images referenced by the window's current image tiles.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn displayed_images(&self) -> Vec<Arc<RenderImage>> {
+        self.image_tiles
+            .values()
+            .filter_map(|(_, image)| image.clone())
+            .collect()
+    }
+
+    /// HERDR: Returns whether a particular frame is present in the sprite atlas.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn has_image_frame_atlas_entry(&self, data: &RenderImage, frame_index: usize) -> bool {
+        self.sprite_atlas
+            .contains(&RenderImageParams { image_id: data.id, frame_index }.into())
     }
 
     /// Returns whether every frame of an image is present in the sprite atlas.

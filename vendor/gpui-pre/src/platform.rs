@@ -3485,6 +3485,7 @@ pub(crate) fn decode_static_image_from_decoder(
 fn decode_animated_frames<'a>(
     decoder: impl image::AnimationDecoder<'a>,
     format_name: &str,
+    first_only: bool,
 ) -> Result<SmallVec<[Frame; 1]>> {
     let mut frames = SmallVec::new();
 
@@ -3496,6 +3497,9 @@ fn decode_animated_frames<'a>(
                     pixel.swap(0, 2);
                 }
                 frames.push(frame);
+                if first_only {
+                    break;
+                }
             }
             Err(err) => {
                 log::debug!("Skipping {format_name} frame due to decode error: {err}");
@@ -3512,7 +3516,13 @@ fn decode_animated_frames<'a>(
 
 pub(crate) fn decode_gif_image(bytes: &[u8]) -> Result<SmallVec<[Frame; 1]>> {
     let decoder = GifDecoder::new(Cursor::new(bytes))?;
-    decode_animated_frames(decoder, "GIF")
+    decode_animated_frames(decoder, "GIF", false)
+}
+
+// HERDR: decode only frame 0 eagerly for ImageAssetLoader; remaining frames decode lazily on display.
+pub(crate) fn decode_gif_first_frame(bytes: &[u8]) -> Result<SmallVec<[Frame; 1]>> {
+    let decoder = GifDecoder::new(Cursor::new(bytes))?;
+    decode_animated_frames(decoder, "GIF", true)
 }
 
 pub(crate) fn decode_webp_image(bytes: &[u8]) -> Result<SmallVec<[Frame; 1]>> {
@@ -3520,9 +3530,21 @@ pub(crate) fn decode_webp_image(bytes: &[u8]) -> Result<SmallVec<[Frame; 1]>> {
 
     if decoder.has_animation() {
         let _ = decoder.set_background_color(Rgba([0, 0, 0, 0]));
-        decode_animated_frames(decoder, "WebP")
+        decode_animated_frames(decoder, "WebP", false)
     } else {
         decode_static_image_from_decoder(decoder)
+    }
+}
+
+// HERDR: decode only frame 0 eagerly for animated WebP; return whether animation frames exist.
+pub(crate) fn decode_webp_first_frame(bytes: &[u8]) -> Result<(SmallVec<[Frame; 1]>, bool)> {
+    let mut decoder = WebPDecoder::new(Cursor::new(bytes))?;
+
+    if decoder.has_animation() {
+        let _ = decoder.set_background_color(Rgba([0, 0, 0, 0]));
+        Ok((decode_animated_frames(decoder, "WebP", true)?, true))
+    } else {
+        Ok((decode_static_image_from_decoder(decoder)?, false))
     }
 }
 
