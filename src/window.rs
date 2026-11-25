@@ -7868,6 +7868,40 @@ export default class Fixture extends View {
         assert_eq!(scroll_y, gpui::px(-120.0), "the visible card scrolls the stack over the dialog");
     }
 
+    #[gpui::test]
+    fn a_scroll_box_keeps_the_wheel_until_it_reaches_its_end(cx: &mut TestAppContext) {
+        struct Nested { outer: gpui::ScrollHandle, inner: gpui::ScrollHandle, side: gpui::ScrollHandle }
+        impl Render for Nested {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(
+                    div().id("outer").h(px(300.0)).w(px(300.0)).overflow_y_scroll().track_scroll(&self.outer)
+                        .child(div().h(px(50.0)))
+                        // A box that scrolls up and down, 200 px of it past its height.
+                        .child(div().id("inner").h(px(100.0)).overflow_y_scroll().track_scroll(&self.inner).child(div().h(px(300.0))))
+                        // A box that only scrolls sideways.
+                        .child(div().id("side").h(px(50.0)).w(px(300.0)).overflow_x_scroll().track_scroll(&self.side).child(div().w(px(900.0)).h(px(50.0))))
+                        .child(div().h(px(1000.0))),
+                )
+            }
+        }
+        let (view, cx) = cx.add_window_view(|_, _| Nested { outer: Default::default(), inner: Default::default(), side: Default::default() });
+        let offsets = |cx: &mut gpui::VisualTestContext| view.update(cx, |v, _| (v.outer.offset().y, v.inner.offset().y, v.side.offset().x));
+        let swipe = |cx: &mut gpui::VisualTestContext, y: f32, dy: f32| {
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+            cx.simulate_event(gpui::ScrollWheelEvent {
+                position: point(px(100.0), px(y)),
+                delta: gpui::ScrollDelta::Pixels(point(px(0.0), px(dy))),
+                ..Default::default()
+            });
+        };
+        swipe(cx, 100.0, -50.0);
+        assert_eq!(offsets(cx), (px(0.0), px(-50.0), px(0.0)), "the box under the pointer scrolls alone");
+        swipe(cx, 100.0, -500.0);
+        assert_eq!(offsets(cx), (px(0.0), px(-200.0), px(0.0)), "it stops at its end and still keeps the event");
+        swipe(cx, 100.0, -50.0);
+        assert_eq!(offsets(cx), (px(-50.0), px(-200.0), px(0.0)), "at its end it passes the wheel on");
+    }
+
     #[test]
     fn link_runtimes_and_the_live_view_share_one_store() {
         in_own_process("link_calls_share_view_storage");
