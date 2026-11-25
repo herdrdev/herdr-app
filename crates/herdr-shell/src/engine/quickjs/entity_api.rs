@@ -1936,11 +1936,11 @@ pub(super) fn date_to_parts(date: gpui_base::Date) -> Vec<Option<String>> {
 
 /// The same slots, read back. Two of them means a range was meant.
 fn date_from_parts(ctx: &Ctx<'_>, parts: &[Option<String>]) -> JsResult<gpui_base::Date> {
-    let day = |slot: Option<&String>| -> JsResult<Option<chrono::NaiveDate>> {
+    let day = |slot: Option<&String>| -> JsResult<Option<jiff::civil::Date>> {
         let Some(text) = slot else {
             return Ok(None);
         };
-        chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d")
+        jiff::civil::Date::strptime("%Y-%m-%d", text)
             .map(Some)
             .map_err(|error| {
                 Exception::throw_type(
