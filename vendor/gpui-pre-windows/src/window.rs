@@ -1416,7 +1416,9 @@ enum WindowOpenState {
     Windowed,
 }
 
-const WINDOW_CLASS_NAME: PCWSTR = w!("Zed::Window");
+// HERDR: our own class name, so Spy++ and UI Automation tell
+// Herdr's windows apart from Zed's.
+const WINDOW_CLASS_NAME: PCWSTR = w!("Herdr::Window");
 
 fn register_window_class(icon_handle: HICON) {
     static ONCE: Once = Once::new();
