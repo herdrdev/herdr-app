@@ -27,8 +27,7 @@ impl SidebarDrag {
     }
 
     pub(super) fn snap(&mut self, requested: f32, previous: f32, min: f32, available: f32) -> (f32, bool) {
-        // Use the layout's ordinary drag minimum (44 in main), not the wider
-        // macOS toggle preset. `requested` already respects the divider limits.
+        // `requested` already respects the divider limits.
         let compact = previous < COMPACT_BELOW;
         let anchor = self.anchor.get_or_insert(previous.min(self.wide));
         let width = if min >= COMPACT_BELOW || min > available {
@@ -40,8 +39,8 @@ impl SidebarDrag {
             if requested - *anchor >= PULL {
                 requested.max(self.wide)
             } else if requested >= previous {
-                // A button-folded macOS rail can start at 76. Don't shrink it
-                // under a rightward drag before there's enough pull to open.
+                // An older saved rail can start at 76. Don't shrink it under
+                // a rightward drag before there's enough pull to open.
                 previous.clamp(min, available)
             } else {
                 min
@@ -80,7 +79,7 @@ mod tests {
         let mut s = SidebarDrag { wide: 210., anchor: None };
         assert_eq!(s.snap(172., 171., 44., 480.), (210., false), "restored width below header fit");
         let mut s = SidebarDrag { wide: 210., anchor: None };
-        assert_eq!(s.snap(77., 76., 44., 480.), (76., false), "button-folded macOS rail");
+        assert_eq!(s.snap(77., 76., 44., 480.), (76., false), "legacy macOS rail");
         assert_eq!(s.snap(116., 76., 44., 480.), (210., true));
         assert_eq!(s.snap(150., 210., 44., 150.), (44., true));
         assert_eq!(s.snap(30., 44., 44., 30.), (30., false));

@@ -473,9 +473,10 @@ The default window:
 
 Sidebar on the right: swap the two children of `root`. No sidebar: set
 `"hidden": true` on `sidebar` (the user can toggle it: `ctrl-shift-b`).
-Narrower than 160px, the sidebar mods draw a compact rail; folding resizes
-`sidebar` to 44 (76 on macOS, room for the traffic lights). On macOS,
-the tabs also leave room for the window buttons when the sidebar is narrower.
+Narrower than 160px, the sidebar mods draw a compact rail. In `main` the
+button beside Search folds it to 44px immediately; expanding restores the
+previous width. Personal layouts using the shipped toggle still fold to 76px
+on macOS and 44px elsewhere. The macOS tabs leave room for the window buttons.
 In the shipped `main` layout, dragging the divider left first stops the sidebar
 at the width its header needs. Pull another 40px left to snap to the layout's
 44px minimum; pull 40px right from that rail to reopen. Personal layouts still resize freely.
