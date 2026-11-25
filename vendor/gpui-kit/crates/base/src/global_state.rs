@@ -183,14 +183,23 @@ impl GlobalState {
     }
 }
 
-/// HERDR (B19): keep drags starting in a Markdown/HTML table cell able to extend
-/// across neighboring cells and rows (matching 1ccf011).
+/// Confines a selection to its anchor cell and excludes text in other cells.
 pub(crate) fn confine_to_cell(
-    _anchor_cell: Option<(Point<Pixels>, Bounds<Pixels>)>,
-    _painting: Option<Bounds<Pixels>>,
+    anchor_cell: Option<(Point<Pixels>, Bounds<Pixels>)>,
+    painting: Option<Bounds<Pixels>>,
     anchor: Point<Pixels>,
     cursor: Point<Pixels>,
 ) -> Option<(Point<Pixels>, Point<Pixels>)> {
+    let Some((_, cell)) = anchor_cell.filter(|(cell_anchor, _)| *cell_anchor == anchor) else {
+        return Some((anchor, cursor));
+    };
+    if painting != Some(cell) {
+        return None;
+    }
+    let cursor = gpui::point(
+        cursor.x.clamp(cell.left(), cell.right()),
+        cursor.y.clamp(cell.top(), cell.bottom()),
+    );
     Some((anchor, cursor))
 }
 
@@ -223,23 +232,43 @@ mod tests {
         }
 
         #[test]
-        fn a_drag_from_a_cell_extends_across_cells_and_blocks() {
-            // HERDR (B19): drags starting inside a table cell are not confined to it.
+        fn a_drag_from_a_cell_selects_nothing_outside_it() {
             let anchor = point(px(10.), px(10.));
             let anchor_cell = Some((anchor, cell(0.)));
             let cursor = point(px(150.), px(20.));
             assert_eq!(
                 confine_to_cell(anchor_cell, Some(cell(100.)), anchor, cursor),
-                Some((anchor, cursor))
+                None
+            );
+            assert_eq!(confine_to_cell(anchor_cell, None, anchor, cursor), None);
+        }
+
+        #[test]
+        fn a_drag_from_a_cell_is_clamped_to_it() {
+            let anchor = point(px(10.), px(10.));
+            let anchor_cell = Some((anchor, cell(0.)));
+            assert_eq!(
+                confine_to_cell(
+                    anchor_cell,
+                    Some(cell(0.)),
+                    anchor,
+                    point(px(250.), px(80.))
+                ),
+                Some((anchor, point(px(100.), px(30.))))
             );
             assert_eq!(
-                confine_to_cell(anchor_cell, None, anchor, cursor),
-                Some((anchor, cursor))
+                confine_to_cell(
+                    anchor_cell,
+                    Some(cell(0.)),
+                    anchor,
+                    point(px(-20.), px(-5.))
+                ),
+                Some((anchor, point(px(0.), px(0.))))
             );
-            let far = point(px(250.), px(80.));
+            let inside = point(px(60.), px(12.));
             assert_eq!(
-                confine_to_cell(anchor_cell, Some(cell(0.)), anchor, far),
-                Some((anchor, far))
+                confine_to_cell(anchor_cell, Some(cell(0.)), anchor, inside),
+                Some((anchor, inside))
             );
         }
     }

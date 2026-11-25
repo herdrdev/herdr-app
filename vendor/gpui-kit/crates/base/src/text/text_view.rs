@@ -2183,7 +2183,7 @@ mod tests {
     /// the pointer leaves the cell. A drag that starts outside the table still
     /// selects through it.
     #[gpui::test]
-    fn table_drag_from_a_cell_stays_in_that_cell(cx: &mut TestAppContext) {
+    fn table_drag_from_a_cell_extends_across_cells(cx: &mut TestAppContext) {
         cx.update(crate::init);
         let (root, cx) = cx.add_window_view(|_, cx| TableSelectionTestRoot {
             text_view: cx.new(|cx| {
@@ -2364,7 +2364,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn table_cell_copy_excludes_following_blocks_in_a_scrollable_view(cx: &mut TestAppContext) {
+    fn table_cell_copy_includes_following_blocks_in_a_scrollable_view(cx: &mut TestAppContext) {
         cx.update(crate::init);
         let (root, cx) = cx.add_window_view(|_, cx| CellSelectionTestRoot {
             text_view: cx.new(|cx| TextViewState::markdown(
@@ -2386,22 +2386,31 @@ mod tests {
         // The copy callback must constrain the logical block range even before paint.
         cx.simulate_mouse_move(end, MouseButton::Left, Modifiers::default());
         cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
-        // HERDR (B19): dragging past a table cell includes following blocks in copy and selection.
-        for format in [SelectionFormat::Plain, SelectionFormat::Source] {
+        // HERDR (B19): dragging past a table cell in a scrollable TextView copies
+        // the exact highlighted text across the table and following paragraphs, matching 1ccf011.
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let selected = root.read_with(cx, |root, cx| root.text_view.read(cx).selected_text());
+        assert_eq!(
+            selected.trim(),
+            "Cell A Cell B\n\nMiddle paragraph\nLast paragraph"
+        );
+        for (format, expected) in [
+            (
+                SelectionFormat::Plain,
+                "Cell A Cell B\n\nMiddle paragraph\nLast paragraph",
+            ),
+            (
+                SelectionFormat::Source,
+                "Cell A Cell B\n\nMiddle paragraph\nLast paragraph",
+            ),
+        ] {
             root.update(cx, |root, cx| {
                 root.text_view
                     .update(cx, |state, cx| state.set_selection_format(format, cx))
             });
             let copied = cx.update(|window, cx| crate::TextSelection::selected_text(window, cx));
-            assert!(copied.contains("Cell A"), "{format:?}: {copied:?}");
-            assert!(
-                copied.trim() != "Cell A",
-                "{format:?}: drag past table cell must extend beyond Cell A, got {copied:?}"
-            );
+            assert_eq!(copied.trim(), expected, "{format:?}");
         }
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        let selected = root.read_with(cx, |root, cx| root.text_view.read(cx).selected_text());
-        assert!(selected.contains("Cell A") && selected.trim() != "Cell A");
     }
 
     #[gpui::test]

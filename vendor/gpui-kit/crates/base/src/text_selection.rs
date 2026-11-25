@@ -899,38 +899,15 @@ impl TextSelectionHandle {
         self.0.read(cx).snapshot()
     }
 
-    /// Records the anchor cell during prepaint, before any participant paints.
-    pub(crate) fn record_table_cell(&self, bounds: Bounds<Pixels>, cx: &App) {
-        let Some(state) = self.window_selection(cx) else {
-            return;
-        };
-        let state = state.read(cx);
-        if state.touch_select_all {
-            return;
-        }
-        let Some(snapshot) = self.snapshot(cx) else {
-            return;
-        };
-        if snapshot.anchor().entity_id() == Some(self.entity_id())
-            && snapshot
-                .window_points()
-                .is_some_and(|points| bounds.contains(&points.anchor()))
-        {
-            state
-                .table_cell_anchor
-                .set(Some((snapshot.anchor(), bounds)));
-        }
-    }
+    /// HERDR (B19): keep drags starting in a Markdown/HTML table cell unconfined
+    /// so both highlighting and Copy extend across cells and following blocks
+    /// (matching 1ccf011).
+    pub(crate) fn record_table_cell(&self, _bounds: Bounds<Pixels>, _cx: &App) {}
 
-    /// The current gesture's anchor cell, shared only by participants in its window.
-    pub(crate) fn table_cell_selection(&self, cx: &App) -> Option<Bounds<Pixels>> {
-        let state = self.window_selection(cx)?;
-        let state = state.read(cx);
-        if state.touch_select_all {
-            return None;
-        }
-        let (anchor, bounds) = state.table_cell_anchor.get()?;
-        (self.snapshot(cx)?.anchor() == anchor).then_some(bounds)
+    /// HERDR (B19): always returns `None` so table drags are not confined to one
+    /// cell or narrowed to a single block during scrollable Copy (matching 1ccf011).
+    pub(crate) fn table_cell_selection(&self, _cx: &App) -> Option<Bounds<Pixels>> {
+        None
     }
 
     /// Retires an anchor projection when its participant replaces its content.
