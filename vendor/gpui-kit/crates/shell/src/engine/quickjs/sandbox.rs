@@ -443,6 +443,42 @@ impl Default for Budgets {
     }
 }
 
+impl Budgets {
+    fn limit(&self, phase: Option<ScopePhase>) -> Duration {
+        match phase {
+            Some(ScopePhase::Render | ScopePhase::Layout) => self.render,
+            Some(ScopePhase::Event | ScopePhase::Task) => self.event,
+            None => self.detached,
+        }
+    }
+}
+
+// HERDR: the handler records what it cut off, so the error can say it (as
+// gpui-kit's own fix does); the wording about finally and settling is Herdr's.
+thread_local! {
+    /// What the handler last cut off and at which limit. QuickJS reports a cut
+    /// as a bare `interrupted`; only the handler knows the rest.
+    static INTERRUPTION: Cell<Option<(Option<ScopePhase>, Duration)>> = const { Cell::new(None) };
+}
+
+/// Says what the handler stopped, at which limit, and what that leaves
+/// behind. `None` when the handler did not cause the last `interrupted`.
+pub(super) fn explain_interruption() -> Option<String> {
+    let (phase, limit) = INTERRUPTION.with(Cell::take)?;
+    let what = match phase {
+        Some(ScopePhase::Render) => "render()",
+        Some(ScopePhase::Layout) => "a list item or layout callback",
+        Some(ScopePhase::Event) => "an event handler",
+        Some(ScopePhase::Task) => "a task",
+        None => "loading the script",
+    };
+    Some(format!(
+        "{what} was stopped at its {} ms limit: nothing after that point ran, not even \
+         finally, and an async function stopped there never settles",
+        limit.as_millis()
+    ))
+}
+
 /// A deadline-based interrupt handler for `Runtime::set_interrupt_handler`.
 ///
 /// QuickJS calls this periodically while interpreting; returning `true` unwinds
@@ -499,6 +535,8 @@ fn deadline(budgets: Budgets) -> impl FnMut() -> bool + 'static {
             .and_then(|application| application.close_deadline.get())
             .is_some_and(|deadline| Instant::now() >= deadline)
         {
+            // HERDR: the close deadline is not a budget: leave no record to mislabel it.
+            INTERRUPTION.with(Cell::take);
             return true;
         }
         let current = match scope::current_generation() {
@@ -508,15 +546,18 @@ fn deadline(budgets: Budgets) -> impl FnMut() -> bool + 'static {
         if window != Some(current) {
             window = Some(current);
             started = Instant::now();
+            // A cut nobody reported belongs to a call that is over.
+            INTERRUPTION.with(Cell::take);
         }
 
-        let budget = match scope::current_phase() {
-            Some(ScopePhase::Render | ScopePhase::Layout) => budgets.render,
-            Some(ScopePhase::Event | ScopePhase::Task) => budgets.event,
-            None => budgets.detached,
-        };
-
-        started.elapsed() > budget
+        let phase = scope::current_phase();
+        let budget = budgets.limit(phase);
+        let expired = started.elapsed() > budget;
+        if expired {
+            // HERDR: see INTERRUPTION.
+            INTERRUPTION.with(|cut| cut.set(Some((phase, budget))));
+        }
+        expired
     }
 }
 

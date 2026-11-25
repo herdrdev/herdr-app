@@ -260,7 +260,17 @@ impl ScriptView {
                 self.previous = self.current.replace(snapshot);
                 self.error = None;
             }
-            Err(error) => self.error = Some(error.to_string()),
+            Err(error) => {
+                let error = error.to_string();
+                // HERDR: the banner goes with the next good render, so the failure is
+                // logged too: once, until the view renders again or fails with a
+                // different message (its first line; the stack below it varies).
+                let first_line = |message: &str| message.lines().next().map(str::to_owned);
+                if self.error.as_deref().and_then(first_line) != first_line(&error) {
+                    tracing::warn!("a view's render failed: {error}");
+                }
+                self.error = Some(error);
+            }
         }
     }
 }
