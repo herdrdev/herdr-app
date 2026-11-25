@@ -172,6 +172,14 @@ impl AppWindow {
 
     /// Use the full split layout even if it has never been drawn unzoomed.
     pub(super) fn unzoomed_neighbor(&self, tab: &Tab, from: &str, dir: &str) -> Option<String> {
+        let mut panes = self.laid_out(tab, &tab.root)?;
+        let cur = panes.remove(panes.iter().position(|(id, _)| id == from)?).1;
+        nearest(cur, dir, panes, &self.pane_history)
+    }
+
+    /// Where `root`'s panes go, from the layout. Painted bounds are a frame behind the
+    /// model: a pane just split has none, and the pane it split still has its old ones.
+    pub(super) fn laid_out(&self, tab: &Tab, root: &Node) -> Option<Vec<(String, Bounds<Pixels>)>> {
         let (context, area) = self.context_area()?;
         let frame = match context.content() {
             Some(Content::Context { pane: Some(frame), .. }) if frame.lone || tab.root.panes().len() > 1 => Some(frame),
@@ -181,11 +189,10 @@ impl AppWindow {
         let (y, x) = padding(context);
         let origin = self.bounds.borrow().get(&context.id)?.origin + point(px(x * zoom), px(y * zoom));
         let bounds = Bounds::new(origin, inset(area, 2.0 * x * zoom, 2.0 * y * zoom));
-        let focused = tab.root.path_to(from)?.into_iter().collect();
-        let geometry = |id: &str| block_bounds(&tab.root, bounds, id, frame, &focused, zoom);
-        let candidates = tab.root.visible_blocks().into_iter().filter(|n| n.is_pane() && n.id != from)
-            .filter_map(|n| Some((n.id.clone(), geometry(&n.id)?)));
-        nearest(geometry(from)?, dir, candidates, &self.pane_history)
+        let focused = tab.focused_pane().and_then(|f| tab.root.path_to(&f)).unwrap_or_default().into_iter().collect();
+        Some(root.visible_blocks().into_iter().filter(|n| n.is_pane())
+            .filter_map(|n| Some((n.id.clone(), block_bounds(root, bounds, &n.id, frame, &focused, zoom)?)))
+            .collect())
     }
 
     /// The block tabs show in, and the area it was last drawn with.
