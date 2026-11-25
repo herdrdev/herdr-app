@@ -2392,7 +2392,10 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.delete_selections(
             false,
             EditIntent::Backspace,
-            |s, offset| s.previous_boundary(offset)..offset,
+            // HERDR (B30): Backspace deletes one Unicode code point back (matching 1ccf011)
+            // so combining accents and Indic/Thai vowel signs can be edited without erasing
+            // the base character; arrows and forward Delete remain grapheme-cluster aware.
+            |s, offset| s.previous_codepoint_boundary(offset)..offset,
             window,
             cx,
         );
@@ -4268,6 +4271,12 @@ impl<M: InputModeKind> InputBaseState<M> {
     pub(super) fn previous_boundary(&self, offset: usize) -> usize {
         let offset =
             self.cursor_boundary(previous_grapheme_boundary(&self.text, offset), Bias::Left);
+        self.clamp_offset_to_visible_backward(offset)
+    }
+
+    /// HERDR (B30): step one Unicode code point back (matching 1ccf011) for Backspace.
+    pub(super) fn previous_codepoint_boundary(&self, offset: usize) -> usize {
+        let offset = self.cursor_boundary(offset.saturating_sub(1), Bias::Left);
         self.clamp_offset_to_visible_backward(offset)
     }
 
@@ -9663,6 +9672,39 @@ mod tests {
         });
     }
 
+    #[gpui::test]
+    fn backspace_deletes_one_code_point_while_arrows_and_delete_stay_grapheme(
+        cx: &mut TestAppContext,
+    ) {
+        let input_view = InputView::build(cx, |state| state);
+        let mut cx = VisualTestContext::from_window(input_view.window_handle.into(), cx);
+        let input = input_view.input;
+
+        cx.update(|window, cx| {
+            input.update(cx, |state, cx| {
+                // Decomposed accent: 'e' + U+0301 -> Backspace removes only U+0301.
+                state.set_value("e\u{0301}", window, cx);
+                state.set_selection(state.text.len(), state.text.len());
+                state.backspace(&Backspace, window, cx);
+                assert_eq!(state.value(), "e");
+
+                // Devanagari consonant + vowel sign: U+0915 + U+093E -> Backspace removes only U+093E.
+                state.set_value("\u{0915}\u{093E}", window, cx);
+                state.set_selection(state.text.len(), state.text.len());
+                state.backspace(&Backspace, window, cx);
+                assert_eq!(state.value(), "\u{0915}");
+
+                // Arrow Left and forward Delete still move/delete by whole grapheme cluster.
+                state.set_value("e\u{0301}", window, cx);
+                state.set_selection(state.text.len(), state.text.len());
+                state.left(&MoveLeft, window, cx);
+                assert_eq!(state.cursor(), 0, "Left crosses the whole grapheme cluster");
+                state.delete(&Delete, window, cx);
+                assert_eq!(state.value(), "", "Delete removes the whole grapheme cluster");
+            });
+        });
+    }
+
     /// `replace_all` on a multi-line (non-code-editor) input clears the
     /// selection to `0..0` and resets the scroll offset, but does not set a
     /// deferred scroll offset (single-line only).
@@ -11834,16 +11876,20 @@ mod tests {
                     assert_eq!(state.cursor(), end);
                 }
 
+                // HERDR (B30): arrow keys and forward Delete operate on whole grapheme
+                // clusters, while Backspace deletes one code point back (matching 1ccf011).
                 state.set_selected_range(ends[3]..ends[3], cx);
                 state.backspace(&Backspace, window, cx);
                 assert_eq!(
                     state.value(),
-                    ["a", graphemes[1], graphemes[2]].concat() + &graphemes[4..].concat()
+                    ["a", graphemes[1], graphemes[2], "👨\u{200d}👩\u{200d}"].concat()
+                        + &graphemes[4..].concat()
                 );
                 state.delete(&Delete, window, cx);
                 assert_eq!(
                     state.value(),
-                    ["a", graphemes[1], graphemes[2]].concat() + &graphemes[5..].concat()
+                    ["a", graphemes[1], graphemes[2], "👨\u{200d}👩\u{200d}"].concat()
+                        + &graphemes[5..].concat()
                 );
             });
         });
