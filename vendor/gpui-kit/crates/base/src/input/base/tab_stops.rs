@@ -10,13 +10,24 @@ use std::sync::Arc;
 
 use gpui::{Font, LineLayout, Pixels, ShapedGlyph, ShapedLine, ShapedRun, WindowTextSystem, px};
 
+/// HERDR (B28): Whether editor tab-stop expansion runs on this OS.
+/// Keep macOS CoreText's native tab stops (matching 1ccf011) while keeping
+/// the Windows DirectWrite zero-width fix (and Linux tab stops).
+pub(crate) const fn expands_tabs_for_os(is_macos: bool) -> bool {
+    !is_macos
+}
+
 /// The distance between two tab stops: `tab_size` spaces of `font`.
+/// Returns `0px` on macOS so CoreText keeps its native tab stops.
 pub(crate) fn tab_stop_width(
     text_system: &WindowTextSystem,
     font: &Font,
     font_size: Pixels,
     tab_size: usize,
 ) -> Pixels {
+    if !expands_tabs_for_os(cfg!(target_os = "macos")) {
+        return px(0.);
+    }
     let font_id = text_system.resolve_font(font);
     text_system.layout_width(font_id, font_size, ' ') * tab_size as f32
 }
@@ -307,5 +318,13 @@ mod tests {
             assert_eq!(glyphs[0].position.x, px(tab_start));
             assert_eq!(glyphs[1].position.x, px((ix + 1) as f32 * 40.));
         }
+    }
+
+    #[test]
+    fn tab_expansion_is_disabled_on_macos_and_enabled_on_windows_and_linux() {
+        // HERDR (B28): keep macOS CoreText native tab stops while retaining
+        // Windows DirectWrite zero-width fix (and Linux tab stops).
+        assert!(!expands_tabs_for_os(true));
+        assert!(expands_tabs_for_os(false));
     }
 }
