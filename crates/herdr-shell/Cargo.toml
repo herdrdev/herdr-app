@@ -11,14 +11,9 @@ edition.workspace = true
 name = "herdr_shell"
 path = "src/lib.rs"
 
-[[bin]]
-name = "herdr-shell"
-path = "src/bin/gpui-shell.rs"
-
 [features]
 # HERDR: retained, description-only checks for embedded applications.
 render-test-support = []
-gpui-fast = ["dep:gpui-fast", "dep:gpui-fast-platform", "gpui-base/gpui-fast", "gpui-fps/gpui-fast"]
 default = ["quickjs"]
 # The scripting engine. See `src/engine/mod.rs` for the surface an engine has
 # to provide; QuickJS is the only implementation today, and the feature exists
@@ -33,9 +28,7 @@ quickjs = [
 
 [dependencies]
 gpui = { package = "gpui-pre", version = "=0.3.8" }
-gpui-fast = { package = "gpui-fast", version = "0.1.3", features = ["windows-manifest-provided-by-host"], optional = true }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
-gpui-fast-platform = { package = "gpui-fast-platform", version = "0.1.3", features = ["font-kit", "x11", "wayland", "runtime_shaders"], optional = true }
 gpui-base = { path = "../../vendor/gpui-kit/crates/base", version = "0.7.1", features = ["inspector"] }
 gpui-fps = { path = "../../vendor/gpui-kit/crates/fps", version = "0.7.1" }
 

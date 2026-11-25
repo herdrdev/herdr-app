@@ -1,6 +1,3 @@
-#[cfg(feature = "gpui-fast")]
-extern crate gpui_fast as gpui;
-
 use std::sync::Arc;
 
 use gpui::{AnyElement, IntoElement as _, div};

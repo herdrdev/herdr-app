@@ -2,7 +2,7 @@ Herdr third-party notices
 =========================
 Regenerate with just notices. See licenses/README.md.
 
-Input-SHA256: 79e6f84433bb261938752043b00c67515ebcdf42ab4eddb0d1ae59228403ee36 Cargo.lock
+Input-SHA256: 4feac2839121c2e88d4313e313de8ac1b55c240d43df86d8b0889970c52fcf8b Cargo.lock
 Input-SHA256: 26d779ba9ae8b6dcd4a5ca62e3d66f7385711ac0b06777a124ccdda71aa5aa83 Cargo.toml
 Input-SHA256: c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4 LICENSE
 Input-SHA256: e58cb0de2dde300bcda769ca993fde2737f42c0274082f038621ab22975a49e2 about.toml
@@ -11,7 +11,7 @@ Input-SHA256: 30f0c136e3c88e422d0791acd97238870f9054a9729bc34cf2ff0d4ed8cac4ad a
 Input-SHA256: e5e56b793839774266243b8dd89c618f2962f098a2076757a5f2839c27eaaabd assets/fonts/OFL.txt
 Input-SHA256: 9ccb6b1a96db08162bbeea238747fcf1e6d08537260f92529ae2eebe74d0f1b3 crates/ghostty-sys/Cargo.toml
 Input-SHA256: fbc6bf4ca768aadc8a6fed045721777034e8d4e2679af7cac7facac54dbce432 crates/ghostty-sys/build.rs
-Input-SHA256: 2b012adb78e81e600bfe190dee0c1c9065d71c285758e8d6276cde3f558aa27e crates/herdr-shell/Cargo.toml
+Input-SHA256: 366190a5c42d31ed1e26df653d2c5f1b0abfa793eeb0fe53cf39461a50ec68fd crates/herdr-shell/Cargo.toml
 Input-SHA256: d1b0449e5478c574ba4f686c2656df7fe77d66821a61f8b6ed3378a58ed9a811 crates/herdr-shell/LICENSE-APACHE
 Input-SHA256: cd6a0e1b53913eb4f2559b79aae3b7877b41e9c559c56a0231501cbd0fe2ad3a crates/herdr-shell/rquickjs-compat/Cargo.toml
 Input-SHA256: add9d7531d1b21646317a8958e38fc727506fa39d24bdecb44154d943c82753a defaults/icons/LICENSE-LobeHub.txt

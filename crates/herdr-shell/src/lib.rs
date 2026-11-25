@@ -52,11 +52,6 @@
 //
 // **Not reachable at all.** `value` and `entities`: a `Bridged` and an entity
 // handle are the runtime talking to itself.
-#[cfg(feature = "gpui-fast")]
-pub extern crate gpui_fast as gpui;
-#[cfg(feature = "gpui-fast")]
-extern crate gpui_fast_platform as gpui_platform;
-
 pub(crate) mod a11y;
 pub mod action;
 pub(crate) mod assets;
@@ -121,7 +116,6 @@ pub use component_registry::{
 pub(crate) use component_registry::{ComponentCallbackValue, ComponentId, RecordedComponentMethod};
 pub use engine::{LoadedApplication, ShellRuntime};
 pub use error::ShellError;
-#[cfg(not(feature = "gpui-fast"))]
 pub use gpui;
 pub use host_modules::{
     HostArguments, HostError, HostModule, HostObject, HostResult, HostValue, RESERVED_SPECIFIERS,

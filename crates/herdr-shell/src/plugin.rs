@@ -1639,7 +1639,7 @@ fn plugin_roots(directory: &Path) -> Vec<PathBuf> {
 
 /// The platform's per-user data directory.
 ///
-/// Duplicated from `src/bin/gpui-shell.rs` on purpose rather than shared: this
+/// Kept local here rather than shared: this
 /// module owns no file but itself. It belongs in `runtime.rs` so the binary and
 /// the plugin manager cannot disagree about where a user's data is — see the
 /// report accompanying this module.
