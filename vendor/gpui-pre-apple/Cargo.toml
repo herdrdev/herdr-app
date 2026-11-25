@@ -32,6 +32,8 @@ zed-version = "0.1.0"
 zed-rev = "f126950f9d3b62666f97437ae5d4ccac2272c4db"
 
 [features]
+# HERDR: frame capture is a production API, independent of test infrastructure.
+render-to-image = ["gpui/render-to-image"]
 bench-support = ["gpui/bench-support"]
 default = []
 font-kit = [
