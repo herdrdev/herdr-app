@@ -317,17 +317,22 @@ fn parse_inline_children(
     children: &[Node],
     cx: &mut NodeContext,
 ) -> String {
+    // HERDR: keep markdown whitespace unfolded (matching 1ccf011) instead of
+    // running upstream #3949/#3962 inline-boundary whitespace trimming.
+    let mut text = String::new();
     for group in inline_groups(children, cx.markdown_extensions.renders_raw_html()) {
         match group {
             InlineGroup::Node(child) => {
-                parse_paragraph(source, paragraph, child, cx);
+                text.push_str(&parse_paragraph(source, paragraph, child, cx));
             }
             InlineGroup::Marked(mark, nodes) => {
-                merge_children_with_mark(source, paragraph, nodes, mark, cx);
+                text.push_str(&merge_children_with_mark(
+                    source, paragraph, nodes, mark, cx,
+                ));
             }
         }
     }
-    normalize_inline_boundaries(paragraph)
+    text
 }
 
 /// Drops a text node's leading white space when the previous rendered
@@ -339,6 +344,7 @@ fn parse_inline_children(
 /// The source mapping shifts with the trim: the removed white space's
 /// segments and marks drop or shrink with it, so selection and copy still
 /// land on the source the surviving characters were drawn from.
+#[allow(dead_code)]
 fn normalize_inline_boundaries(paragraph: &mut Paragraph) -> String {
     let mut at_line_start = true;
     let mut previous_white_space = false;
@@ -389,6 +395,7 @@ fn normalize_inline_boundaries(paragraph: &mut Paragraph) -> String {
 
 /// Removes the first `count` bytes of white space from the node's text,
 /// shifting its marks and source segments over the removed range.
+#[allow(dead_code)]
 fn trim_leading_white_space(node: &mut InlineNode, count: usize) {
     let old_text = std::mem::take(&mut node.text);
     node.text = old_text[count..].into();
@@ -432,6 +439,7 @@ fn trim_leading_white_space(node: &mut InlineNode, count: usize) {
 /// become spaces here; white space inside inline code never reaches this
 /// path, and runs at a line break are dropped by
 /// `normalize_inline_boundaries`.
+#[allow(dead_code)]
 fn collapse_white_space(text: &str) -> String {
     let mut collapsed = String::with_capacity(text.len());
     let mut in_white_space = false;
@@ -968,7 +976,8 @@ fn parse_paragraph(
             // re-aligns over the folded bytes on its own. Leading runs at a
             // line break — after `<br>` or a hard break — are dropped by
             // `normalize_inline_boundaries`, which sees the nodes whole.
-            text = collapse_white_space(&val.value.replace("\r\n", " ").replace(['\n', '\r'], " "));
+            // HERDR: preserve repeated spaces and tabs in Markdown text (matching 1ccf011).
+            text = val.value.replace("\r\n", " ").replace(['\n', '\r'], " ");
             paragraph.push(mapped_inline(source, text.clone(), node, cx))
         }
         Node::Emphasis(val) => {
@@ -2208,6 +2217,28 @@ mod tests {
     /// leaves one, and nothing follows a `<br>` indented by the space its
     /// line ending became.
     #[test]
+    fn markdown_preserves_repeated_spaces_and_tabs() {
+        let mut cx = NodeContext::default();
+        let document = parse("left    right\n\na\t\tb", &mut cx).unwrap();
+        let paragraphs: Vec<String> = document
+            .blocks
+            .iter()
+            .filter_map(|block| match block {
+                BlockNode::Paragraph(paragraph) => Some(
+                    paragraph
+                        .children
+                        .iter()
+                        .map(|node| node.text.as_ref())
+                        .collect(),
+                ),
+                _ => None,
+            })
+            .collect();
+        assert_eq!(paragraphs, ["left    right", "a\t\tb"]);
+    }
+
+    #[test]
+    #[ignore = "HERDR: preserves repeated spaces/tabs in Markdown text (B16)"]
     fn white_space_folds_like_html() {
         let mut cx = NodeContext::default();
         let document = parse(
@@ -2260,6 +2291,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "HERDR: preserves repeated spaces/tabs in Markdown text (B16)"]
     fn selected_source_range_survives_a_folded_space_run() {
         let source = "two  spaces";
         // Rendered "two spaces" is ten bytes: the second source space folds
@@ -2272,6 +2304,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "HERDR: preserves repeated spaces/tabs in Markdown text (B16)"]
     fn selected_source_range_survives_a_dropped_comment() {
         let source = "Text <!-- note --> after.";
         // Rendered "Text after.": the comment drops out and the space after
@@ -2281,6 +2314,7 @@ mod tests {
     }
 
     #[test]
+    #[ignore = "HERDR: preserves repeated spaces/tabs in Markdown text (B16)"]
     fn selected_source_range_drops_the_space_after_a_break() {
         let source = "line one<br>\nline two";
         // Rendered "line one\nline two" is seventeen bytes: "line two"
@@ -2986,9 +3020,8 @@ mod tests {
         let source = "a <strong>b *c* <em>d</em></strong> e <b>f</b> <i>g</i> <del>h</del> <br> <strong>unclosed";
         let mut cx = NodeContext::default();
         let document = parse(source, &mut cx).unwrap();
-        // The space between the break and the next run is at a line start, so
-        // it folds away (#3710).
-        assert_eq!(document.text(), "a b c d e f g h \nunclosed\n");
+        // HERDR (B16): whitespace after <br> stays unfolded.
+        assert_eq!(document.text(), "a b c d e f g h \n unclosed\n");
         let BlockNode::Paragraph(paragraph) = &document.blocks[0] else {
             panic!()
         };
