@@ -126,6 +126,41 @@ test("Changes follows a space switch while the last repo's preview never finishe
   expect(h.view.error).toBe("Not a git repository");
 });
 
+test("Changes comes back to a folder showing the file you picked, before its rescan ends (#1464)", async () => {
+  const rescan = held();
+  const h = await panel({
+    "/repo-a": [{ files: ["a.txt", "z.txt"] }, { files: ["a.txt", "z.txt"], wait: rescan.wait }],
+  }, { "/repo-a/z.txt": [{ text: "picked\n" }, { text: "picked\n" }] });
+  expect(h.paths()).toEqual(["a.txt", "z.txt"]);
+  h.view.pick("z.txt", h.cx);
+  await settled();
+  expect(h.preview()).toEqual(["@@ -0,0 +1,1 @@", "picked"]);
+  await h.show("/repo-b");
+  expect(h.paths()).toEqual(["b.txt"]);
+  await h.show("/repo-a");
+  // The rescan is still running: what you left is already there.
+  expect(h.view.loading).toBe(true);
+  expect(h.paths()).toEqual(["a.txt", "z.txt"]);
+  expect(h.view.open).toBe("z.txt");
+  expect(h.preview()).toEqual(["@@ -0,0 +1,1 @@", "picked"]);
+  rescan.release();
+  await settled();
+  await h.wait(50);
+  expect(h.view.loading).toBe(false);
+  expect(h.view.open).toBe("z.txt");
+  expect(h.preview()).toEqual(["@@ -0,0 +1,1 @@", "picked"]);
+});
+
+test("Changes drops a remembered file that is gone when it comes back", async () => {
+  const h = await panel({ "/repo-a": [{ files: ["a.txt", "z.txt"] }, { files: ["a.txt"] }] });
+  h.view.pick("z.txt", h.cx);
+  await settled();
+  await h.show("/repo-b");
+  await h.show("/repo-a");
+  expect(h.paths()).toEqual(["a.txt"]);
+  expect(h.view.open).toBe("a.txt");
+});
+
 test("Changes runs one load at a time in a repo, even when the one it left finishes late", async () => {
   const preview = held(), status = held();
   const h = await panel({ "/repo-b": [{ files: ["b.txt"], wait: status.wait }] }, { "/repo-a/a.txt": [{ text: "text\n", wait: preview.wait }] });
