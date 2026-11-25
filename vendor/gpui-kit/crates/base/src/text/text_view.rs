@@ -4986,29 +4986,41 @@ mod tests {
         }
 
         #[gpui::test]
-        fn multi_click_drag_and_shift_click_extend_per_character(cx: &mut TestAppContext) {
-            // HERDR (B20): dragging or shift-clicking after double/triple-click
-            // extends per character rather than snapping by word/paragraph.
+        fn multi_click_drag_leaves_selection_unchanged_and_shift_click_matches_master(
+            cx: &mut TestAppContext,
+        ) {
+            // HERDR (B20): measured 1ccf011 behavior in TextView — dragging before
+            // releasing a double/triple-click leaves the word/paragraph selected,
+            // and Shift-click afterwards clears the local multi-click selection.
             let first = "alpha beta gamma";
             let (state, cx) = setup(first, cx);
 
             let word = position(&state, first, 7, cx);
             press(word, 2, false, cx);
             assert_eq!(selected(&state, cx), "beta");
+            let wiggle = position(&state, first, 8, cx);
+            drag(wiggle, cx);
+            assert_eq!(selected(&state, cx), "beta");
             let mid_next = position(&state, first, 13, cx);
             drag(mid_next, cx);
-            let dragged = selected(&state, cx);
-            assert_ne!(dragged, "beta gamma", "drag must not snap to whole next word");
-            assert!(dragged.starts_with("beta "), "got: {dragged:?}");
+            assert_eq!(selected(&state, cx), "beta");
             release(mid_next, 2, cx);
+            assert_eq!(selected(&state, cx), "beta");
 
-            press(word, 2, false, cx);
-            release(word, 2, cx);
             press(mid_next, 1, true, cx);
             release(mid_next, 1, cx);
-            let shifted = selected(&state, cx);
-            assert_ne!(shifted, "beta gamma", "shift-click must not snap to whole next word");
-            assert!(shifted.starts_with("beta "), "got: {shifted:?}");
+            assert_eq!(selected(&state, cx), "");
+
+            // Triple-click drag also leaves the paragraph selected.
+            let (p_state, p_cx) = setup("first one\n\nsecond one\n\nthird one", cx);
+            let p2 = position(&p_state, "second one", 2, p_cx);
+            let p3 = position(&p_state, "third one", 2, p_cx);
+            press(p2, 3, false, p_cx);
+            assert_eq!(selected(&p_state, p_cx), "second one");
+            drag(p3, p_cx);
+            assert_eq!(selected(&p_state, p_cx), "second one");
+            release(p3, 3, p_cx);
+            assert_eq!(selected(&p_state, p_cx), "second one");
         }
     }
 

@@ -2304,15 +2304,11 @@ impl WindowSelectionState {
     /// Keeps the gesture of the click that selected `unit` going: a drag
     /// from it, until the button is released, and a shift-click after it
     /// extend the selection by the same unit.
-    fn hold_unit(&mut self, unit: SelectionUnit, cx: &mut App) {
-        // HERDR (B20): keep extending a double/triple-click selection per character
-        // rather than snapping to words/lines/paragraphs (matching 1ccf011).
-        self.anchor = Some(unit.start);
-        self.cursor = Some(unit.end);
-        self.did_hit_text = true;
+    fn hold_unit(&mut self, _unit: SelectionUnit, _cx: &mut App) {
+        // HERDR (B20): exact 1ccf011 behavior — after a double/triple-click,
+        // `is_selecting` stays `false` so moving the mouse before release does
+        // not alter the selection, while Shift-click keeps master's behavior.
         self.unit = None;
-        self.is_selecting = true;
-        self.publish_snapshots(cx);
     }
 
     /// Moves the cursor to the edge of the unit at `position`, which
@@ -6166,8 +6162,9 @@ mod tests {
     }
 
     #[gpui::test]
-    fn double_click_drag_extends_per_character(cx: &mut TestAppContext) {
-        // HERDR (B20): dragging after a double-click extends per character.
+    fn double_click_drag_leaves_selection_unchanged(cx: &mut TestAppContext) {
+        // HERDR (B20): measured 1ccf011 behavior — moving the mouse before releasing
+        // a double-click does not change the selected word.
         let (_, cx) = cx.add_window_view(|_, _| SelectableTextsView {
             texts: vec!["one two three", "four five six"],
         });
@@ -6175,10 +6172,10 @@ mod tests {
 
         press_at("one two three", 5, 2, false, cx);
         assert_eq!(painted_selection(cx), "two");
-        let extended = drag_to("one two three", 9, cx);
-        assert_ne!(extended, "two three", "must not snap to the whole next word");
-        assert!(extended.starts_with("two "), "got: {extended:?}");
+        assert_eq!(drag_to("one two three", 9, cx), "two");
+        assert_eq!(drag_to("one two three", 1, cx), "two");
         release(2, cx);
+        assert_eq!(painted_selection(cx), "two");
     }
 
     #[gpui::test]
@@ -6197,26 +6194,25 @@ mod tests {
     }
 
     #[gpui::test]
-    fn triple_click_drag_extends_per_character(cx: &mut TestAppContext) {
-        // HERDR (B20): dragging after a triple-click extends per character.
+    fn triple_click_drag_leaves_selection_unchanged(cx: &mut TestAppContext) {
+        // HERDR (B20): measured 1ccf011 behavior — moving the mouse before releasing
+        // a triple-click does not change the selected line.
         let text = "first line\nsecond line\nthird line";
         let (_, cx) = cx.add_window_view(|_, _| SelectableTextsView { texts: vec![text] });
         painted_selection(cx);
 
         press_at(text, 13, 3, false, cx);
         assert_eq!(painted_selection(cx), "second line");
-        let extended = drag_to(text, 25, cx);
-        assert_ne!(
-            extended, "second line\nthird line",
-            "must not snap to the entire next line"
-        );
-        assert!(extended.starts_with("second line\n"), "got: {extended:?}");
+        assert_eq!(drag_to(text, 25, cx), "second line");
+        assert_eq!(drag_to(text, 2, cx), "second line");
         release(3, cx);
+        assert_eq!(painted_selection(cx), "second line");
     }
 
     #[gpui::test]
     fn shift_click_after_a_double_click_extends_per_character(cx: &mut TestAppContext) {
-        // HERDR (B20): shift-click after a double-click extends per character.
+        // HERDR (B20): measured 1ccf011 behavior — Shift-click after double-click
+        // extends per character from the word's start anchor.
         let text = "one two three";
         let (_, cx) = cx.add_window_view(|_, _| SelectableTextsView { texts: vec![text] });
         painted_selection(cx);
@@ -6225,9 +6221,10 @@ mod tests {
         release(2, cx);
         press_at(text, 9, 1, true, cx);
         release(1, cx);
-        let extended = painted_selection(cx);
-        assert_ne!(extended, "two three", "must not snap to the whole next word");
-        assert!(extended.starts_with("two "), "got: {extended:?}");
+        assert_eq!(painted_selection(cx), "two t");
+        press_at(text, 1, 1, true, cx);
+        release(1, cx);
+        assert_eq!(painted_selection(cx), "ne ");
 
         // A plain click drag is also by characters.
         press_at(text, 5, 1, false, cx);
