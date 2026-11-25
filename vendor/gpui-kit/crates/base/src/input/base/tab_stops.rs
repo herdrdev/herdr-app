@@ -10,22 +10,30 @@ use std::sync::Arc;
 
 use gpui::{Font, LineLayout, Pixels, ShapedGlyph, ShapedLine, ShapedRun, WindowTextSystem, px};
 
-/// HERDR (B28): Whether editor tab-stop expansion runs on this OS.
-/// Keep macOS CoreText's native tab stops (matching 1ccf011) while keeping
-/// the Windows DirectWrite zero-width fix (and Linux tab stops).
-pub(crate) const fn expands_tabs_for_os(is_macos: bool) -> bool {
-    !is_macos
+/// HERDR (B28): Whether input/editor tab-stop expansion runs on this OS.
+/// Only Windows DirectWrite shapes `\t` at zero width and needs expansion;
+/// macOS keeps CoreText's native stops and Linux keeps cosmic-text's 4-space
+/// stops (matching 1ccf011).
+pub(crate) const fn expands_tabs_for_os(os: gpui::OperatingSystem) -> bool {
+    matches!(os, gpui::OperatingSystem::Windows)
 }
 
 /// The distance between two tab stops: `tab_size` spaces of `font`.
-/// Returns `0px` on macOS so CoreText keeps its native tab stops.
+/// Returns `0px` on macOS and Linux so platform shapers keep master's stops.
 pub(crate) fn tab_stop_width(
     text_system: &WindowTextSystem,
     font: &Font,
     font_size: Pixels,
     tab_size: usize,
 ) -> Pixels {
-    if !expands_tabs_for_os(cfg!(target_os = "macos")) {
+    let os = if cfg!(target_os = "windows") {
+        gpui::OperatingSystem::Windows
+    } else if cfg!(target_os = "macos") {
+        gpui::OperatingSystem::Mac
+    } else {
+        gpui::OperatingSystem::Linux
+    };
+    if !expands_tabs_for_os(os) {
         return px(0.);
     }
     let font_id = text_system.resolve_font(font);
@@ -321,10 +329,49 @@ mod tests {
     }
 
     #[test]
-    fn tab_expansion_is_disabled_on_macos_and_enabled_on_windows_and_linux() {
-        // HERDR (B28): keep macOS CoreText native tab stops while retaining
-        // Windows DirectWrite zero-width fix (and Linux tab stops).
-        assert!(!expands_tabs_for_os(true));
-        assert!(expands_tabs_for_os(false));
+    fn tab_expansion_runs_only_on_windows() {
+        // HERDR (B28): keep macOS CoreText and Linux cosmic-text native tab stops
+        // while retaining the Windows DirectWrite zero-width fix.
+        assert!(expands_tabs_for_os(gpui::OperatingSystem::Windows));
+        assert!(!expands_tabs_for_os(gpui::OperatingSystem::Mac));
+        assert!(!expands_tabs_for_os(gpui::OperatingSystem::Linux));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn linux_keeps_native_cosmic_text_four_space_tab_width() {
+        let platform = gpui_platform::current_platform(true);
+        let ts = gpui::WindowTextSystem::new(std::sync::Arc::new(gpui::TextSystem::new(
+            platform.text_system(),
+        )));
+        let font = gpui::font("monospace");
+        let font_size = px(14.);
+
+        // Input/Textarea default tab_size is 2; Linux must NOT shrink cosmic-text's 4-space stop.
+        let stop = tab_stop_width(&ts, &font, font_size, 2);
+        assert_eq!(stop, px(0.), "Linux must skip custom tab expansion");
+
+        let space_w = ts.layout_width(ts.resolve_font(&font), font_size, ' ');
+        let run = gpui::TextRun {
+            len: 2,
+            font: font.clone(),
+            ..Default::default()
+        };
+        let mut shaped = ts.shape_line("\tb".into(), font_size, &[run], None);
+        let native_b_x = shaped.x_for_index(1);
+        let mut expanded_two = shaped.clone();
+        expand_tabs(&mut expanded_two, space_w * 2.0);
+        expand_tabs(&mut shaped, stop);
+
+        assert_eq!(
+            shaped.x_for_index(1),
+            native_b_x,
+            "Linux tab position must match cosmic-text native stop"
+        );
+        assert!(
+            native_b_x > expanded_two.x_for_index(1) * 1.5,
+            "cosmic-text native tab stop ({native_b_x:?}) must stay near 4 spaces, not 2 ({:?})",
+            expanded_two.x_for_index(1)
+        );
     }
 }

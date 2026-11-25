@@ -6965,7 +6965,9 @@ mod tests {
     use crate::theme::Theme;
     use gpui::{TestAppContext, VisualTestContext, size};
 
-    use crate::input::{EditorMode, EditorState, InputMode, LanguageConfig, TabSize, TextareaMode};
+    use crate::input::{EditorMode, EditorState, InputMode, LanguageConfig, TextareaMode};
+    #[cfg(target_os = "windows")]
+    use crate::input::TabSize;
 
     fn set_test_syntax_provider(
         provider: Rc<dyn crate::input::SyntaxContextProvider>,
@@ -10895,6 +10897,9 @@ mod tests {
         }
     }
 
+    // HERDR (B28): custom tab-stop expansion runs only on Windows; macOS and Linux
+    // keep their native platform tab stops.
+    #[cfg(target_os = "windows")]
     #[gpui::test]
     fn test_prewrap_uses_the_configured_tab_stops(cx: &mut TestAppContext) {
         cx.update(crate::init);
