@@ -9635,13 +9635,20 @@ mod tests {
         cx.update(|_window, cx| {
             input.update(cx, |state, cx| {
                 // Reproduce Astra's exact fractional line-height case: 50 rows * 19.2px
-                // inside a 120px viewport.
+                // inside a 120px viewport, where f64 height (960.0000381469727) differs
+                // from rounded f32 scroll_size.height (960.0000610351562).
                 let line_height = px(19.2);
                 state.input_bounds = Bounds::new(point(px(0.), px(0.)), size(px(300.), px(120.)));
                 if let Some(layout) = state.last_layout.as_mut() {
                     layout.line_height = line_height;
                 }
+                state.scroll_height_f64 = f64::from(f32::from(line_height)) * 50.0;
                 state.scroll_size = size(px(300.), line_height * 50.0);
+                assert_ne!(
+                    f64::from(f32::from(state.scroll_size.height)),
+                    state.content_height_f64(),
+                    "test requires f32 scroll_size.height and f64 content_height_f64 to differ"
+                );
                 // Scroll all the way to the clamped bottom using the real clamp.
                 state.update_scroll_offset_parts(px(0.), -10_000.0, cx);
                 assert!(
