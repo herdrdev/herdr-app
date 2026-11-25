@@ -3422,8 +3422,8 @@ impl<M: InputModeKind> InputBaseState<M> {
 
     pub(super) fn copy(&mut self, _: &Copy, _: &mut Window, cx: &mut Context<Self>) {
         if self.selections.iter().all(|sel| sel.is_empty()) {
-            // Nothing selected here: let Root copy the window's text selection.
-            cx.propagate();
+            // HERDR (B21): empty selection in a focused input leaves Copy a no-op
+            // without propagating to window text selection (matching 1ccf011).
             return;
         }
         if !self.is_copyable() {
@@ -9569,6 +9569,64 @@ mod tests {
                 assert_eq!(state.value(), "cde");
             });
         });
+    }
+    #[gpui::test]
+    fn copy_with_empty_selection_does_not_propagate_or_change_clipboard(cx: &mut TestAppContext) {
+        let input_view = InputView::build(cx, |state| state.default_value("hello"));
+        let mut cx = VisualTestContext::from_window(input_view.window_handle.into(), cx);
+        let input = input_view.input;
+        let propagated = std::rc::Rc::new(std::cell::Cell::new(false));
+        cx.update(|window, cx| {
+            cx.write_to_clipboard(ClipboardItem::new_string("keep-me".to_string()));
+            input.update(cx, |state, cx| {
+                state.focus(window, cx);
+                state.set_selection(2, 2);
+                state.copy(&Copy, window, cx);
+            });
+            assert_eq!(
+                cx.read_from_clipboard().and_then(|c| c.text()),
+                Some("keep-me".to_string())
+            );
+            // Verify Copy action does not bubble out of InputBaseState when selection is empty.
+            let _ = propagated.get();
+        });
+
+        // Also verify propagation stops at the focused input when a parent listens for Copy.
+        struct ParentCopyHarness {
+            input: Entity<crate::input::InputState>,
+            parent_saw_copy: std::rc::Rc<std::cell::Cell<bool>>,
+        }
+        impl Render for ParentCopyHarness {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                let flag = self.parent_saw_copy.clone();
+                div()
+                    .on_action(move |_: &Copy, _, _| flag.set(true))
+                    .child(crate::input::Input::new(&self.input))
+            }
+        }
+        let parent_saw_copy = std::rc::Rc::new(std::cell::Cell::new(false));
+        let (view, vcx) = cx.add_window_view({
+            let parent_saw_copy = parent_saw_copy.clone();
+            move |window, cx| {
+                let input = cx.new(|cx| crate::input::InputState::new(window, cx).default_value("hello"));
+                window.activate_window();
+                input.update(cx, |s, cx| {
+                    s.focus(window, cx);
+                    s.set_selection(2, 2);
+                });
+                ParentCopyHarness {
+                    input,
+                    parent_saw_copy,
+                }
+            }
+        });
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        vcx.dispatch_action(Copy);
+        let _ = view;
+        assert!(
+            !parent_saw_copy.get(),
+            "HERDR (B21): empty-selection Copy in a focused input must not propagate to ancestors"
+        );
     }
 
     /// `replace_all` on a multi-line (non-code-editor) input clears the
