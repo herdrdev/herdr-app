@@ -93,6 +93,7 @@ else
     <key>NSAppleEventsUsageDescription</key><string>Terminal programs running in Herdr can use AppleScript to control other apps.</string>
     <key>NSPrincipalClass</key><string>NSApplication</string>
     <key>NSHighResolutionCapable</key><true/>
+    <key>NSAutoFillRequiresTextContentTypeForOneTimeCodeOnMac</key><true/>
     <key>LSEnvironment</key><dict/></dict></plist>
 PLIST
   scripts/mac-sign "$app"
