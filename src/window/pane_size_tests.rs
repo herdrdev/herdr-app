@@ -1,4 +1,21 @@
 #[test]
+fn body_rounding_stops_at_the_header_and_inside_the_border() {
+    use super::pane_size::body_corners;
+    use crate::layout::PaneFrame;
+    let mut f: PaneFrame = serde_json::from_value(serde_json::json!({
+        "radius": 10, "border": {"width": 1}, "focus": {"width": 3}
+    })).unwrap();
+    assert_eq!(body_corners(&f, false), gpui::Corners::all(9.0));
+    for (position, reveal, top, bottom) in [("top", "always", 0., 7.), ("bottom", "always", 7., 0.), ("top", "hover", 7., 7.)] {
+        f.header = Some(serde_json::from_value(serde_json::json!({"content":{"mod":"pane"}, "position":position, "reveal":reveal})).unwrap());
+        let c = body_corners(&f, true);
+        assert_eq!((c.top_left, c.top_right, c.bottom_left, c.bottom_right), (top, top, bottom, bottom));
+    }
+    f.radius = Some(1.0);
+    assert_eq!(body_corners(&f, true), gpui::Corners::default());
+}
+
+#[test]
 fn a_pane_hidden_before_first_paint_still_attaches() {
     in_own_process("unpainted_hidden_pane");
 }

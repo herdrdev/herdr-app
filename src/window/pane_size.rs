@@ -16,6 +16,15 @@ pub(super) fn frame_border(frame: &PaneFrame, focused: bool) -> Option<&Line> {
     if focused { frame.focus.as_ref().or(frame.border.as_ref()) } else { frame.border.as_ref() }
 }
 
+/// Only the ends without an in-flow header touch the terminal background.
+pub(super) fn body_corners(frame: &PaneFrame, focused: bool) -> Corners<f32> {
+    let r = (frame.radius.unwrap_or_default() - frame_border(frame, focused).map_or(0.0, |l| l.width)).max(0.0);
+    let header = frame.header.as_ref().filter(|h| !h.hover());
+    let top = if header.is_some_and(|h| !h.bottom()) { 0.0 } else { r };
+    let bottom = if header.is_some_and(|h| h.bottom()) { 0.0 } else { r };
+    Corners { top_left: top, top_right: top, bottom_left: bottom, bottom_right: bottom }
+}
+
 pub(super) fn header_height(header: &Header) -> f32 {
     header.height.unwrap_or(HEADER_HEIGHT)
 }

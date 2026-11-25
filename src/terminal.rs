@@ -2121,7 +2121,7 @@ fn find_input_style() -> InputEditorStyle {
     }
 }
 
-fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, window: &mut Window, cx: &mut App) {
+fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, corners: Corners<Pixels>, focused: bool, window: &mut Window, cx: &mut App) {
     crate::bench::count(&crate::bench::GRID);
     let mut g = grid.borrow_mut();
     let cell = g.cell;
@@ -2165,7 +2165,7 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     let marked = g.marked.clone();
     drop(g);
 
-    window.paint_quad(fill(bounds, hsla(frame.bg).opacity(crate::settings::get().terminal_opacity)));
+    window.paint_quad(fill(bounds, hsla(frame.bg).opacity(crate::settings::get().terminal_opacity)).corner_radii(corners));
     let at = |x: usize, y: usize| origin + point(cell.width * x as f32, cell.height * y as f32);
     // Edges round to device pixels, so cells side by side meet without seams.
     let snap_box = |b: Bounds<Pixels>| {
@@ -2456,6 +2456,12 @@ impl EntityInputHandler for TerminalView {
 
 impl Render for TerminalView {
     fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+        self.render_surface(Corners::default(), window, cx)
+    }
+}
+
+impl TerminalView {
+    pub(crate) fn render_surface(&mut self, corners: Corners<Pixels>, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement + use<> {
         self.publish_scroll_if_changed(cx);
         crate::bench::count(&crate::bench::TERMINAL);
         let terminal_focused = self.focus.is_focused(window);
@@ -2507,6 +2513,8 @@ impl Render for TerminalView {
             .key_context("Terminal")
             .size_full()
             .relative()
+            .rounded_tl(corners.top_left).rounded_tr(corners.top_right)
+            .rounded_bl(corners.bottom_left).rounded_br(corners.bottom_right)
             // Below 1, the layout's background shows through (cells a program colors stay solid).
             .bg(hsla(vt::theme().bg).opacity(crate::settings::get().terminal_opacity))
             .on_action(cx.listener(|this, a: &herdr_shell::action::ShellAction, window, cx| {
@@ -2628,7 +2636,7 @@ impl Render for TerminalView {
                         grid.borrow_mut().fit(cols, rows, cell, window.scale_factor());
                     },
                     move |bounds, _, window, cx| {
-                        paint_grid(bounds, &grid_paint, focused, window, cx);
+                        paint_grid(bounds, &grid_paint, corners, focused, window, cx);
                         let view = selection_view.clone();
                         window.on_mouse_event(move |ev: &MouseMoveEvent, phase, _, cx| {
                             if phase == DispatchPhase::Capture {

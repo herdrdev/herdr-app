@@ -64,7 +64,11 @@ export default class Pane extends View {
     const pic = icon(p.program, 14, t.dim);
     const st = p.status;
     const pane = p.pane;
-    const bottom = paneFrame(layout())?.header?.position === "bottom";
+    const frame = paneFrame(layout());
+    const bottom = frame?.header?.position === "bottom";
+    // The header sits inside the border. Using the outer radius keeps its fill
+    // inside the curve even when a dialog takes focus and the border changes.
+    const radius = Math.max(0, frame?.radius ?? 0);
     return h_flex()
       .id(`pane-head-${pane}`)
       .size_full()
@@ -72,8 +76,8 @@ export default class Pane extends View {
       .gap(8)
       .items_center()
       .bg(t.background)
-      .when(bottom, el => el.border_t(1))
-      .when(!bottom, el => el.border_b(1))
+      .when(bottom, el => el.rounded_b(radius).border_t(1))
+      .when(!bottom, el => el.rounded_t(radius).border_b(1))
       .border_color(t.border)
       .text_size(12)
       .on_hover((hovered, cx) => { this.hovered = hovered; cx.notify(); })
