@@ -5049,16 +5049,20 @@ impl AppWindow {
         let (update_pill_slot, update_pill) = self.render_update_pill(cx).map(|body| OverlaySlot::new(body, None)).unzip();
         // The padding gives the cards' shadows room while keeping their positions.
         let shadow = px(16.0);
+        // Notes stack in the corner settings.json names (#419).
+        let corner = settings::get().toast_position;
         windows.push(
-            div().absolute().right(inset).bottom(inset)
+            div().absolute()
+                .map(|d| if corner.left() { d.left(inset) } else { d.right(inset) })
+                .map(|d| if corner.top() { d.top(inset) } else { d.bottom(inset) })
                 .max_h((viewport.height - inset * 2.0).max(px(0.0)))
-                .flex().flex_col().items_end().gap(gap)
+                .flex().flex_col().map(|d| if corner.left() { d.items_start() } else { d.items_end() }).gap(gap)
                 .children(update_error_slot)
                 .when(!toasts.is_empty(), |layer| layer.child(
-                    div().id(TOAST_STACK_ID).p(shadow).m(-shadow)
+                    div().id(TOAST_STACK_ID).debug_selector(|| TOAST_STACK_ID.into()).p(shadow).m(-shadow)
                         .min_h_0().overflow_y_scroll().track_scroll(&self.toast_scroll)
                         .on_scroll_wheel(|_, _, cx| cx.stop_propagation())
-                        .flex().flex_col().items_end().gap(gap)
+                        .flex().flex_col().map(|d| if corner.left() { d.items_start() } else { d.items_end() }).gap(gap)
                         .children(toasts.into_iter().rev()),
                 ))
                 .children(update_pill_slot)
@@ -7796,6 +7800,42 @@ export default class SystemToast extends View {
         let (id, name) = notify(cx);
         assert_eq!(name, "toast");
         assert!(shown(&id, cx), "an unknown mod falls back to the shipped toast, which stays");
+    }
+
+    #[test]
+    fn toasts_stack_in_the_corner_settings_names() {
+        in_own_process("toast_corner");
+    }
+
+    #[gpui::test]
+    fn toast_corner(cx: &mut gpui::TestAppContext) {
+        use crate::settings::ToastPosition;
+        use serde_json::json;
+        if !running_alone("toast_corner") {
+            return;
+        }
+        let card = r#"import { View, div } from "gpui-kit";
+export default class Card extends View { render() { return div().w(200).h(60); } }
+"#;
+        let layout = json!({ "id": "root", "type": "row", "toast": "card-toast", "children": [] });
+        let (view, cx) = open_window(cx, "card-toast", card, layout);
+        view.update_in(cx, |this, window, cx| {
+            this.sync_folders(window, cx);
+            let note = json!({ "kind": "toast", "notification": { "title": "Done", "body": "", "level": "info" } });
+            this.open_overlay(crate::mods::new_overlay_id(), note, window, cx);
+        });
+        let original = crate::settings::get();
+        for corner in [ToastPosition::BottomRight, ToastPosition::BottomLeft, ToastPosition::TopRight, ToastPosition::TopLeft] {
+            crate::settings::set(crate::settings::Settings { toast_position: corner, ..(*original).clone() });
+            cx.update(|window, _| window.refresh());
+            cx.run_until_parked();
+            let stack = cx.debug_bounds(super::TOAST_STACK_ID).expect("the toast stack laid out");
+            let viewport = cx.update(|window, _| window.viewport_size());
+            let center = stack.center();
+            assert_eq!(center.x < viewport.width / 2.0, corner.left(), "{corner:?}: {stack:?} in {viewport:?}");
+            assert_eq!(center.y < viewport.height / 2.0, corner.top(), "{corner:?}: {stack:?} in {viewport:?}");
+        }
+        crate::settings::set((*original).clone());
     }
 
     #[test]
