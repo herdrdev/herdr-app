@@ -235,7 +235,7 @@ pub fn parse(text: &str, cx: &App) -> Result<Vec<KeyBinding>, String> {
                 let native: Option<Box<dyn gpui::Action>> = None;
                 native.unwrap_or_else(|| Box::new(ShellAction::new(action.clone())))
             };
-            let binding = KeyBinding::load(keys, action, predicate.clone(), false, None, cx);
+            let binding = KeyBinding::load_with_dummy_mapper(keys, action, predicate.clone(), false, None, cx.platform_info().os);
             match binding {
                 Ok(b) => out.push(b),
                 Err(e) => problems.push(format!("{section}.{keys}: {e}")),
@@ -427,5 +427,26 @@ mod tests {
         for keys in [include_str!("../defaults/keys.json"), include_str!("../defaults/keys.macos.json")] {
             assert_eq!(cx.read(|cx| super::parse(keys, cx)).err(), None);
         }
+    }
+
+    #[gpui::test]
+    fn load_with_dummy_mapper_keeps_shifted_punctuation_unmapped(cx: &mut gpui::TestAppContext) {
+        // HERDR (G11): keys.json loads with DummyKeyboardMapper on every OS so Windows
+        // shifted digit/punctuation bindings do not get rewritten by WindowsKeyboardMapper.
+        let binding = cx.update(|_cx| {
+            gpui::KeyBinding::load_with_dummy_mapper(
+                "ctrl-shift-/",
+                Box::new(gpui::NoAction),
+                None,
+                false,
+                None,
+                gpui::OperatingSystem::Windows,
+            )
+            .expect("valid binding")
+        });
+        let stroke = binding.keystrokes()[0].inner();
+        assert_eq!(stroke.key, "/");
+        assert!(stroke.modifiers.control);
+        assert!(stroke.modifiers.shift);
     }
 }

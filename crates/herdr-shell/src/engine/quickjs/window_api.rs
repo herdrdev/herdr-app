@@ -251,13 +251,13 @@ fn bind_keys(ctx: Ctx<'_>, bindings: Vec<Object<'_>>) -> JsResult<u32> {
                         .expect("binding contexts were validated before installation")
                         .into()
                 });
-                gpui::KeyBinding::load(
+                gpui::KeyBinding::load_with_dummy_mapper(
                     &keystroke,
                     Box::new(ShellAction::new(action)),
                     context,
                     false,
                     None,
-                    app,
+                    app.platform_info().os,
                 )
             })
             .collect::<std::result::Result<Vec<_>, _>>()?;
