@@ -9,6 +9,7 @@ extern crate gpui_fast as gpui;
 #[cfg(all(feature = "gpui-fast", test))]
 extern crate gpui_fast_platform as gpui_platform;
 
+mod a11y_disabled;
 mod accordion;
 pub mod actions;
 mod alert_dialog;
@@ -32,10 +33,12 @@ mod event;
 mod focus_trap;
 mod geometry;
 mod global_state;
+pub mod grid_layout;
 mod history;
 mod hover_card;
 mod index_path;
 pub mod input;
+mod layout_direction;
 mod link;
 mod list_settings;
 #[cfg(all(target_os = "macos", not(test)))]
@@ -46,6 +49,7 @@ mod nav_stack;
 mod number_input;
 mod observe;
 mod otp_input;
+mod overscroll;
 mod pagination;
 pub mod plot;
 mod popover;
@@ -118,10 +122,14 @@ pub use focus_trap::FocusTrapElement;
 pub use focus_trap::active_focus_trap;
 pub use geometry::*;
 pub use global_state::{DeferredPopover, GlobalState};
+pub use grid_layout::{
+    GridArea, GridItem, GridLayout, GridLayoutEvent, GridLayoutState, grid_drag_handle,
+};
 pub use history::History;
 pub use hover_card::{HoverCard, HoverCardState};
 pub use index_path::IndexPath;
 pub use input::{Editor, Input, InputBase, InputStyles, Textarea};
+pub use layout_direction::{LayoutDirection, LogicalStyledExt};
 pub use link::{Link, LinkStyles};
 pub use list_settings::ListSettings;
 #[cfg(all(target_os = "macos", not(test)))]
@@ -133,27 +141,29 @@ pub use measure::{Measure, measure, measure_if};
 pub use motion::{
     Discrete, DiscreteError, Easing, EasingError, Interpolate, IterationCount, Keyframe,
     KeyframeError, Keyframes, LinearStop, MotionPhase, MotionReveal, MotionStatus, MotionTransform,
-    MotionValue, PlaybackDirection, Presence, PresencePhase, PresenceSample, Sequence,
-    SequenceSample, SequenceStep, SignedDuration, Spring, SpringError, Stagger, StaggerOrigin,
-    StepPosition, Timing, TimingSample, Transition, TransitionId, animate_keyframes, spring,
-    transition, transition_with_status,
+    MotionValue, PlaybackDirection, Presence, PresencePhase, PresenceSample, ReducedMotion,
+    Sequence, SequenceSample, SequenceStep, SignedDuration, Spring, SpringError, Stagger,
+    StaggerOrigin, StepPosition, Timing, TimingSample, Transition, TransitionId, TransitionState,
+    animate_keyframes, spring, transition, transition_with_status,
 };
 pub use nav_stack::{NavMotion, NavOperation, NavPage, NavStack, NavStackEvent, NavStackState};
 pub use number_input::{
     Decrement, Increment, NumberInput, NumberInputEvent, NumberInputText, NumberStep, StepAction,
     step_value,
 };
-pub use observe::{ObservedElement, TestSupportExt};
+pub use observe::{ObservedElement, ObservedTextElement, TestSupportExt, TestTextExt};
 pub use otp_input::{OtpEvent, OtpInput, OtpState};
 pub use pagination::{Pagination, PaginationItem, PaginationState};
 pub use plot::PlotMotion;
 pub use popover::{Popover, PopoverState};
-pub use popup::{POPUP_PRIORITY, Popup};
+pub use popup::{POPUP_PRIORITY, Popup, logical_anchor};
 pub use positioner::{Align, Positioner, ResolvedPosition};
 pub use progress::{Progress, ProgressIndicator, ProgressTrack};
 pub use radio::{Radio, RadioStyles};
 pub use radio_group::RadioGroup;
-pub use reduce_motion::apply_system_reduce_motion;
+pub use reduce_motion::{
+    ReduceMotionPreference, apply_system_reduce_motion, set_reduce_motion_preference,
+};
 #[doc(hidden)]
 pub use resizable::PANEL_MIN_SIZE;
 pub use resizable::{
@@ -163,10 +173,12 @@ pub use resizable::{
 };
 pub use root::{Root, RootPlugin};
 pub use scroll_bounce::{ScrollBounce, ScrollBounceMotion};
-pub use scrollable_mask::{RoundedFrameCover, ScrollableMask};
+pub use scrollable_mask::{
+    HorizontalScrollClaim, RoundedFrameCover, ScrollableMask, last_horizontal_scroll_claim,
+};
 pub use scrollbar::{
     Scrollbar, ScrollbarAxis, ScrollbarEntrance, ScrollbarHandle, ScrollbarMode, ScrollbarMotion,
-    ScrollbarStyles, ScrollbarThumbStyle, ScrollbarTrackStyle,
+    ScrollbarPlacement, ScrollbarStyles, ScrollbarThumbStyle, ScrollbarTrackStyle,
 };
 pub use select::Select;
 pub use selectable_text::SelectableText;
@@ -184,9 +196,8 @@ pub use tabs::{Tab, TabStyles, Tabs};
 pub use text::{
     InlineElement, InlineRenderContext, MarkdownExtensions, MarkdownNode, MarkdownParseContext,
     MarkdownPlugin, RangeHighlight, RangeHighlightError, RenderedText, SelectionFormat, TableData,
-    Text, TextView, TextViewDefaults, TextViewMotion, TextViewPlugin, TextViewSelection,
-    TextViewState, TextViewStyle,
-    html, markdown, markdown_ast,
+    TaskToggleEvent, Text, TextView, TextViewDefaults, TextViewMotion, TextViewPlugin,
+    TextViewState, TextViewStyle, html, markdown, markdown_ast,
 };
 pub use text_selection::{
     TextSelection, TextSelectionContentKey, TextSelectionCoverage, TextSelectionEndpoint,
@@ -237,6 +248,7 @@ pub fn init(cx: &mut App) {
     let _ = Theme::global_mut(cx);
     GlobalState::init(cx);
     reduce_motion::init(cx);
+    layout_direction::init(cx);
     dialog::init(cx);
     focus_trap::init(cx);
     popover::init(cx);
@@ -248,6 +260,7 @@ pub fn init(cx: &mut App) {
     time_field::init(cx);
     input::init(cx);
     tree::init(cx);
+    grid_layout::init(cx);
     text::init(cx);
     root::init(cx);
 }

@@ -17,6 +17,9 @@ pub(crate) struct HighlighterUpdate<'a> {
     pub(super) old_text: &'a Rope,
     pub(super) new_text: &'a Rope,
     pub(super) change_text: &'a str,
+    /// An edit already computed for this replacement. When absent, the
+    /// highlighter derives one from the fields above.
+    pub(super) input_edit: Option<InputEdit>,
     pub(super) force: bool,
 }
 
@@ -44,6 +47,7 @@ pub(crate) enum LayoutMode {
         language: Box<EditorLanguage>,
         indent_guides: bool,
         folding: bool,
+        active_line_only_when_focused: bool,
         highlighter: Rc<RefCell<Option<Box<dyn InputHighlighter>>>>,
         highlighter_factory: Option<InputHighlighterFactory>,
         diagnostics: DiagnosticSet,
@@ -83,6 +87,7 @@ impl LayoutMode {
             line_number: true,
             indent_guides: true,
             folding: true,
+            active_line_only_when_focused: false,
             diagnostics: DiagnosticSet::new(&Rope::new()),
             auto_closed_pairs: Default::default(),
             auto_close: true,
@@ -142,6 +147,16 @@ impl LayoutMode {
             self,
             Self::CodeEditor {
                 smart_indent: true,
+                ..
+            }
+        )
+    }
+
+    pub(super) fn is_active_line_only_when_focused(&self) -> bool {
+        matches!(
+            self,
+            Self::CodeEditor {
+                active_line_only_when_focused: true,
                 ..
             }
         )
@@ -292,12 +307,14 @@ impl LayoutMode {
                     return;
                 }
 
-                let edit = replacement_input_edit(
-                    update.old_text,
-                    update.new_text,
-                    update.selected_range,
-                    update.change_text,
-                );
+                let edit = update.input_edit.unwrap_or_else(|| {
+                    replacement_input_edit(
+                        update.old_text,
+                        update.new_text,
+                        update.selected_range,
+                        update.change_text,
+                    )
+                });
                 M::drive_highlighter(highlighter, edit, update.new_text, *folding, window, cx);
             }
             _ => {}
@@ -445,11 +462,13 @@ mod tests {
         assert_eq!(mode.max_rows(), usize::MAX);
         assert_eq!(mode.min_rows(), 1);
         assert_eq!(mode.is_folding(), true);
+        assert_eq!(mode.is_active_line_only_when_focused(), false);
 
         let mode = LayoutMode::CodeEditor {
             line_number: false,
             indent_guides: false,
             folding: false,
+            active_line_only_when_focused: true,
             rows: 0,
             tab: Default::default(),
             language: Box::default(),
@@ -464,6 +483,7 @@ mod tests {
         assert_eq!(mode.has_indent_guides(), false);
         assert_eq!(mode.min_rows(), 1);
         assert_eq!(mode.is_folding(), false);
+        assert_eq!(mode.is_active_line_only_when_focused(), true);
         assert_eq!(mode.is_auto_close(), false);
         assert_eq!(mode.is_smart_indent(), false);
     }

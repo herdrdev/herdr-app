@@ -6,7 +6,7 @@ use gpui::{
     StyleRefinement, Styled, Window, canvas, deferred, div, point, px,
 };
 
-use crate::{Positioner, ResolvedPosition, StyledExt as _};
+use crate::{LayoutDirection, Positioner, ResolvedPosition, StyledExt as _};
 
 /// Distance kept between a popup and the window edge.
 const WINDOW_MARGIN: Pixels = px(8.);
@@ -99,6 +99,26 @@ impl Popup {
     }
 }
 
+/// The physical anchor for `anchor` in `direction`.
+///
+/// Anchors are written for left-to-right layout; in RTL the horizontal side
+/// is mirrored, so a `TopLeft` popover that hangs from the trigger's start
+/// edge hangs from its right edge instead.
+pub fn logical_anchor(anchor: Anchor, direction: LayoutDirection) -> Anchor {
+    if !direction.is_rtl() {
+        return anchor;
+    }
+    match anchor {
+        Anchor::TopLeft => Anchor::TopRight,
+        Anchor::TopRight => Anchor::TopLeft,
+        Anchor::BottomLeft => Anchor::BottomRight,
+        Anchor::BottomRight => Anchor::BottomLeft,
+        Anchor::LeftCenter => Anchor::RightCenter,
+        Anchor::RightCenter => Anchor::LeftCenter,
+        Anchor::TopCenter | Anchor::BottomCenter => anchor,
+    }
+}
+
 /// Match the popup's anchor to the opposite edge of the measured trigger.
 fn anchor_position(anchor: Anchor, trigger: Bounds<Pixels>, offset: Pixels) -> Point<Pixels> {
     match anchor {
@@ -131,7 +151,7 @@ impl RenderOnce for Popup {
     fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
         let state =
             window.use_keyed_state((self.id, "anchor"), cx, |_, _| PopupAnchorState::default());
-        let anchor = self.anchor;
+        let anchor = logical_anchor(self.anchor, LayoutDirection::global(cx));
         let trigger_bounds = Rc::new(Cell::new(state.read(cx).bounds));
         let offset = self.offset;
         let position = Rc::new(Cell::new(anchor_position(
@@ -140,6 +160,9 @@ impl RenderOnce for Popup {
             offset,
         )));
 
+        // A closed popup places nothing: it notes its trigger's bounds, for when
+        // it opens, without asking for another frame.
+        let has_content = self.content.is_some();
         let root = self
             .base
             .child(self.trigger)
@@ -158,7 +181,7 @@ impl RenderOnce for Popup {
                                 state.captured = true;
                                 first
                             });
-                            if first {
+                            if first && has_content {
                                 window.request_animation_frame();
                             }
                         }
@@ -218,6 +241,19 @@ mod tests {
         assert_eq!(
             Popup::resolved_corner(Anchor::BottomRight, bounds),
             Point::new(px(300.), px(50.))
+        );
+    }
+
+    #[test]
+    fn rtl_mirrors_the_horizontal_side_of_the_anchor() {
+        let rtl = LayoutDirection::Rtl;
+        assert_eq!(logical_anchor(Anchor::TopLeft, rtl), Anchor::TopRight);
+        assert_eq!(logical_anchor(Anchor::BottomRight, rtl), Anchor::BottomLeft);
+        assert_eq!(logical_anchor(Anchor::LeftCenter, rtl), Anchor::RightCenter);
+        assert_eq!(logical_anchor(Anchor::TopCenter, rtl), Anchor::TopCenter);
+        assert_eq!(
+            logical_anchor(Anchor::TopLeft, LayoutDirection::Ltr),
+            Anchor::TopLeft
         );
     }
 
@@ -305,6 +341,53 @@ mod tests {
             gpui::Modifiers::default(),
         );
         assert!(background_hovered.get());
+    }
+
+    /// A popup that may open later.
+    struct ClosedHarness {
+        open: bool,
+    }
+
+    impl Render for ClosedHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let popup = Popup::new(
+                "popup",
+                div()
+                    .debug_selector(|| "popup-trigger".into())
+                    .size(px(100.)),
+            );
+            if self.open {
+                popup.content(
+                    div()
+                        .debug_selector(|| "popup-content".into())
+                        .size(px(20.)),
+                )
+            } else {
+                popup
+            }
+        }
+    }
+
+    /// A closed popup notes its trigger's bounds without asking for another
+    /// frame: a list of rows holding closed popups is not drawn again for
+    /// each row that shows. Opened, it places its content at once.
+    #[gpui::test]
+    fn a_closed_popup_asks_for_no_frame_and_opens_at_once(cx: &mut gpui::TestAppContext) {
+        let (view, window) = cx.add_window_view(|_, _| ClosedHarness { open: false });
+        window.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            assert_eq!(window.simulate_next_frame(cx), 0, "no frame was asked for");
+        });
+
+        view.update(window, |harness, cx| {
+            harness.open = true;
+            cx.notify();
+        });
+        window.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(
+            window.debug_bounds("popup-content").unwrap().size,
+            gpui::Size::new(px(20.), px(20.))
+        );
     }
 
     #[gpui::test]

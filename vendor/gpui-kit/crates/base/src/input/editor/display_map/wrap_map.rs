@@ -108,6 +108,11 @@ impl WrapMap {
         cx: &mut App,
     ) {
         self.wrapper.adjust_inline_metrics(range, new_text.len());
+        // Before the first layout the font is still the window default; layout shapes it all.
+        if !self.wrapper.is_prepared() {
+            self.wrapper.set_default_text(changed_text);
+            return;
+        }
         self.wrapper.update(changed_text, range, new_text, cx);
     }
 
@@ -127,6 +132,16 @@ impl WrapMap {
     /// Set the wrapping indent mode for continuation lines.
     pub(super) fn set_wrapping_indent(&mut self, wrapping_indent: WrappingIndent, cx: &mut App) {
         self.wrapper.set_wrapping_indent(wrapping_indent, cx);
+    }
+
+    /// Set the number of spaces per tab stop. Returns whether it changed.
+    pub(super) fn set_tab_size(&mut self, tab_size: usize, cx: &mut App) -> bool {
+        self.wrapper.set_tab_size(tab_size, cx)
+    }
+
+    /// See [`super::DisplayMap::prepare_wrap_width`].
+    pub(super) fn prepare_wrap_width(&mut self, wrap_width: Pixels) {
+        self.wrapper.prepare_wrap_width(wrap_width);
     }
 
     /// Set font parameters

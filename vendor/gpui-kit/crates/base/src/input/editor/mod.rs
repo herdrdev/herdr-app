@@ -1,6 +1,100 @@
-use gpui::{App, Div, Entity, InteractiveElement as _, IntoElement, RenderOnce, Stateful, Window};
+use gpui::{
+    App, Div, Entity, EntityId, InteractiveElement as _, IntoElement, Pixels, ShapedLine,
+    SharedString, Stateful, TextRun, TextStyle, View, ViewElement, Window, px,
+};
 
-use super::{EditorMode, InputBaseState, InputModeKind};
+use super::{EditorMode, InputBaseState, InputModeKind, element::LINE_NUMBER_RIGHT_MARGIN};
+
+/// Supplies computed line-number geometry and glyphs for a single rendered frame.
+///
+/// The element owns this renderer, never the editing state: application styling
+/// must not become retained Base data. Measurement runs before wrapping; shaping
+/// runs only for visible buffer lines after wrapping and folding are resolved.
+#[doc(hidden)]
+pub trait EditorLineNumberRenderer: 'static {
+    /// Returns the number lane width (excluding the gap) and resolved gap.
+    /// A zero digit count requests only the gap when line numbers are hidden.
+    fn measure_line_numbers(
+        &self,
+        digit_count: usize,
+        body_style: &TextStyle,
+        window: &Window,
+    ) -> (Pixels, Pixels);
+
+    /// Resolves a shared vertical offset from the configured fonts before shaping rows.
+    /// Renderers using body typography need no vertical correction.
+    fn resolve_line_number_baseline_offset(
+        &self,
+        _body_style: &TextStyle,
+        _window: &Window,
+    ) -> Pixels {
+        px(0.)
+    }
+
+    /// Shapes one supported, one-based line number, without padding characters.
+    fn shape_line_number(
+        &self,
+        number: usize,
+        is_active: bool,
+        body_style: &TextStyle,
+        window: &Window,
+        cx: &App,
+    ) -> ShapedLine;
+}
+
+impl EditorLineNumberRenderer for () {
+    fn measure_line_numbers(
+        &self,
+        digit_count: usize,
+        body_style: &TextStyle,
+        window: &Window,
+    ) -> (Pixels, Pixels) {
+        if digit_count == 0 {
+            return (px(0.), LINE_NUMBER_RIGHT_MARGIN);
+        }
+        let font_size = body_style.font_size.to_pixels(window.rem_size());
+        let font_id = window.text_system().resolve_font(&body_style.font());
+        // Proportional digits can differ in width; every supported digit must fit.
+        let width = "0123456789"
+            .chars()
+            .map(|digit| window.text_system().layout_width(font_id, font_size, digit))
+            .fold(px(0.), Pixels::max)
+            * digit_count;
+        (width, LINE_NUMBER_RIGHT_MARGIN)
+    }
+
+    fn resolve_line_number_baseline_offset(&self, _: &TextStyle, _: &Window) -> Pixels {
+        // The default renderer uses the body's own font and size.
+        px(0.)
+    }
+
+    fn shape_line_number(
+        &self,
+        number: usize,
+        _: bool,
+        body_style: &TextStyle,
+        window: &Window,
+        _: &App,
+    ) -> ShapedLine {
+        let label: SharedString = number.to_string().into();
+        // Right alignment uses the shaped advance, so padding characters would
+        // change the label's measured width rather than provide layout spacing.
+        let run = TextRun {
+            len: label.len(),
+            font: body_style.font(),
+            color: body_style.color,
+            background_color: None,
+            underline: None,
+            strikethrough: None,
+        };
+        window.text_system().shape_line(
+            label,
+            body_style.font_size.to_pixels(window.rem_size()),
+            &[run],
+            None,
+        )
+    }
+}
 
 /// State for source-code editing.
 ///
@@ -39,6 +133,8 @@ impl InputModeKind for EditorMode {
         state.extras.hover_popover = None;
         state.extras.decorations.clear();
         state.extras.range_decorations.clear();
+        state.extras.gutter_decorations.clear();
+        state.extras.overview_ruler_decorations.clear();
     }
 
     fn editing_syntax_context(state: &InputBaseState<Self>, offset: usize) -> super::SyntaxContext {
@@ -54,6 +150,14 @@ impl InputModeKind for EditorMode {
         state
             .extras
             .range_decorations
+            .adjust_for_edit(range, new_len);
+        state
+            .extras
+            .gutter_decorations
+            .adjust_for_edit(range, new_len);
+        state
+            .extras
+            .overview_ruler_decorations
             .adjust_for_edit(range, new_len);
     }
 
@@ -214,22 +318,51 @@ impl EditorState {
 }
 
 /// An unstyled source-code editor.
-#[derive(IntoElement)]
-pub struct Editor {
+pub struct Editor<R = ()> {
     state: Entity<EditorState>,
+    line_number_renderer: R,
 }
 
 impl Editor {
     pub fn new(state: &Entity<EditorState>) -> Self {
         Self {
             state: state.clone(),
+            line_number_renderer: (),
         }
     }
 }
 
-impl RenderOnce for Editor {
-    fn render(self, _: &mut Window, _: &mut App) -> impl IntoElement {
-        self.state
+impl<R: EditorLineNumberRenderer> Editor<R> {
+    /// Supplies presentation for this element's frame without changing editor state.
+    #[doc(hidden)]
+    pub fn with_line_number_renderer<T: EditorLineNumberRenderer>(self, renderer: T) -> Editor<T> {
+        Editor {
+            state: self.state,
+            line_number_renderer: renderer,
+        }
+    }
+}
+
+impl<R: EditorLineNumberRenderer> IntoElement for Editor<R> {
+    type Element = ViewElement<Self>;
+
+    fn into_element(self) -> Self::Element {
+        ViewElement::new(self)
+    }
+}
+
+impl<R: EditorLineNumberRenderer> View for Editor<R> {
+    fn entity_id(&self) -> Option<EntityId> {
+        Some(self.state.entity_id())
+    }
+
+    fn render(self, window: &mut Window, cx: &mut App) -> impl IntoElement {
+        // Preserve the entity's identity for invalidation and element-state scoping.
+        self.state.update(cx, |state, cx| {
+            state
+                .render_with_line_numbers(self.line_number_renderer, window, cx)
+                .into_any_element()
+        })
     }
 }
 
@@ -241,6 +374,40 @@ impl crate::input::InputExtras for super::EditorExtras {
 
     fn range_decorations(&self, ranges: &[std::ops::Range<usize>]) -> Vec<&super::RangeDecoration> {
         self.range_decorations.intersecting(ranges)
+    }
+
+    fn gutter_decorations_width(&self) -> Option<gpui::Pixels> {
+        self.gutter_decorations
+            .has_collections()
+            .then_some(self.gutter_decorations_width)
+    }
+
+    fn gutter_decorations(&self, range: std::ops::Range<usize>) -> Vec<&super::GutterDecoration> {
+        self.gutter_decorations.intersecting(&[range])
+    }
+
+    fn overview_ruler_decorations(&self) -> Vec<&super::OverviewRulerDecoration> {
+        self.overview_ruler_decorations.iter().flatten().collect()
+    }
+
+    fn overview_ruler_revision(&self) -> u64 {
+        self.overview_ruler_decorations.revision()
+    }
+
+    fn line_decorations(
+        &self,
+        rows: std::ops::Range<usize>,
+        cx: &App,
+    ) -> Vec<super::LineDecoration> {
+        self.line_decorations.query(rows, cx)
+    }
+
+    fn has_line_decorations(&self) -> bool {
+        self.line_decorations.has_any_provider()
+    }
+
+    fn spacer_provider(&self) -> Option<std::rc::Rc<dyn super::SpacerProvider>> {
+        self.spacer_provider.clone()
     }
 
     fn semantic_token_styles(

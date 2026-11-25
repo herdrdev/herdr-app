@@ -10,6 +10,7 @@ use gpui::{
 };
 
 use crate::{
+    LayoutDirection,
     actions::{Confirm, SelectDown, SelectLeft, SelectRight, SelectUp},
     styled::StyledExt as _,
 };
@@ -390,24 +391,24 @@ impl TreeState {
         }
     }
 
+    // The arrow toward the end edge expands and the one toward the start
+    // collapses: Right and Left in LTR, Left and Right in RTL.
     fn on_action_left(&mut self, _: &SelectLeft, _: &mut Window, cx: &mut Context<Self>) {
-        if let Some(ix) = self.selected_ix
-            && self
-                .entries
-                .get(ix)
-                .is_some_and(|entry| entry.is_folder() && entry.is_expanded())
-        {
-            self.toggle_expand(ix, cx);
-            cx.notify();
-        }
+        let expand = LayoutDirection::global(cx).is_rtl();
+        self.set_selected_expanded(expand, cx);
     }
 
     fn on_action_right(&mut self, _: &SelectRight, _: &mut Window, cx: &mut Context<Self>) {
+        let expand = !LayoutDirection::global(cx).is_rtl();
+        self.set_selected_expanded(expand, cx);
+    }
+
+    fn set_selected_expanded(&mut self, expanded: bool, cx: &mut Context<Self>) {
         if let Some(ix) = self.selected_ix
             && self
                 .entries
                 .get(ix)
-                .is_some_and(|entry| entry.is_folder() && !entry.is_expanded())
+                .is_some_and(|entry| entry.is_folder() && entry.is_expanded() != expanded)
         {
             self.toggle_expand(ix, cx);
             cx.notify();
@@ -468,12 +469,11 @@ impl Render for TreeState {
                             })
                             .child((render_item)(ix, entry, entry_state, window, cx))
                             .when(!entry.is_disabled(), |this| {
-                                this.on_mouse_down(
-                                    MouseButton::Left,
-                                    cx.listener(move |state, _, _, cx| {
-                                        state.on_entry_click(ix, cx);
-                                    }),
-                                )
+                                // Select and toggle on a full click, like `List` and `Table`
+                                // rows, so a press that is dragged away leaves the entry alone.
+                                this.on_click(cx.listener(move |state, _, _, cx| {
+                                    state.on_entry_click(ix, cx);
+                                }))
                                 .on_mouse_down(
                                     MouseButton::Right,
                                     cx.listener(move |state, _, _, cx| {
@@ -492,6 +492,12 @@ impl Render for TreeState {
 }
 
 /// An unstyled, virtualized tree element.
+///
+/// A click on an entry, a press and release on that same entry, selects it
+/// and expands or collapses it when it is a folder. Click handlers in the
+/// content from [`Tree::item`] run first, so they still see the previous
+/// selection. To drag entries, use `on_drag` on that content: a press that
+/// starts a drag is not a click.
 #[derive(IntoElement)]
 pub struct Tree {
     id: ElementId,
@@ -561,7 +567,10 @@ impl RenderOnce for Tree {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use gpui::{AppContext as _, Subscription};
+    use gpui::{
+        AppContext as _, Modifiers, MouseUpEvent, Pixels, Point, Subscription, TestAppContext,
+        VisualTestContext, point, px,
+    };
 
     struct EventCollector {
         events: Rc<RefCell<Vec<TreeEvent>>>,
@@ -592,7 +601,7 @@ mod tests {
     fn clones_share_state_and_ancestors_keep_nearest_first_order() {
         let leaf = TreeItem::new("leaf", "Leaf");
         let branch = TreeItem::new("branch", "Branch").child(leaf.clone());
-        let root = TreeItem::new("root", "Root").child(branch.clone());
+        let root = TreeItem::new("root", "Root").child(branch);
 
         leaf.clone().disabled(true).expanded(true);
         assert!(leaf.is_disabled());
@@ -675,6 +684,177 @@ mod tests {
 
             state.toggle_expand(1, cx);
             assert_eq!(state.index_of(&"docs/guide/a".into()), Some(2));
+        });
+    }
+
+    #[gpui::test]
+    fn arrow_keys_expand_toward_the_end_edge(cx: &mut gpui::TestAppContext) {
+        let (state, cx) = cx.add_window_view(|_, cx| TreeState::new(cx));
+        for (direction, expand, collapse) in [
+            (LayoutDirection::Ltr, "right", "left"),
+            (LayoutDirection::Rtl, "left", "right"),
+        ] {
+            let press = |key: &str, cx: &mut VisualTestContext| {
+                cx.update(|window, cx| {
+                    state.update(cx, |s, cx| match key {
+                        "left" => s.on_action_left(&SelectLeft, window, cx),
+                        _ => s.on_action_right(&SelectRight, window, cx),
+                    })
+                });
+                state.read_with(cx, |s, _| s.entries.len() > 1)
+            };
+            cx.update(|_, cx| {
+                direction.set_global(cx);
+                state.update(cx, |s, cx| {
+                    s.set_items(
+                        vec![TreeItem::new("src", "src").child(TreeItem::new("lib.rs", "lib.rs"))],
+                        cx,
+                    );
+                    s.set_selected_index(Some(0), cx);
+                });
+            });
+            assert!(
+                !press(collapse, cx),
+                "{direction:?}: {collapse} keeps it collapsed"
+            );
+            assert!(press(expand, cx), "{direction:?}: {expand} expands");
+            assert!(
+                press(expand, cx),
+                "{direction:?}: {expand} keeps it expanded"
+            );
+            assert!(!press(collapse, cx), "{direction:?}: {collapse} collapses");
+        }
+    }
+
+    struct TreeHarness {
+        state: Entity<TreeState>,
+        draggable: bool,
+    }
+
+    struct DraggedEntry;
+
+    impl Render for DraggedEntry {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+        }
+    }
+
+    impl Render for TreeHarness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let draggable = self.draggable;
+            div().size_full().child(
+                Tree::new(&self.state)
+                    .size_full()
+                    .list_style(StyleRefinement::default().size_full())
+                    .item(move |ix, _, _, _, _| {
+                        div()
+                            .id(("tree-entry", ix))
+                            .debug_selector(move || format!("tree-entry-{ix}"))
+                            .h(px(20.))
+                            .w_full()
+                            .when(draggable, |this| {
+                                this.on_drag(ix, |_, _, _, cx| cx.new(|_| DraggedEntry))
+                            })
+                            .into_any_element()
+                    }),
+            )
+        }
+    }
+
+    /// Paints a tree of `items` in a test window and returns the center of
+    /// its first entry.
+    fn open_tree(
+        cx: &mut TestAppContext,
+        items: Vec<TreeItem>,
+        draggable: bool,
+    ) -> (Entity<TreeState>, &mut VisualTestContext, Point<Pixels>) {
+        let state = cx.new(|cx| TreeState::new(cx).items(items));
+        let (_, cx) = cx.add_window_view({
+            let state = state.clone();
+            move |_, _| TreeHarness { state, draggable }
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let entry = cx
+            .debug_bounds("tree-entry-0")
+            .expect("the first entry is painted")
+            .center();
+        (state, cx, entry)
+    }
+
+    fn folder() -> TreeItem {
+        TreeItem::new("src", "src").child(TreeItem::new("src/lib.rs", "lib.rs"))
+    }
+
+    #[gpui::test]
+    fn entries_select_and_toggle_on_click_not_mouse_down(cx: &mut TestAppContext) {
+        let (state, cx, entry) = open_tree(cx, vec![folder()], false);
+
+        // A press alone (e.g. the start of a drag) must not select or expand.
+        cx.simulate_mouse_down(entry, MouseButton::Left, Modifiers::default());
+        state.read_with(cx, |state, _| {
+            assert_eq!(state.selected_index(), None);
+            assert_eq!(state.entries.len(), 1);
+        });
+        // Releasing away from the entry cancels the click.
+        cx.simulate_event(MouseUpEvent {
+            position: point(px(10.), px(500.)),
+            button: MouseButton::Left,
+            modifiers: Modifiers::default(),
+            click_count: 1,
+        });
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        state.read_with(cx, |state, _| assert_eq!(state.selected_index(), None));
+
+        cx.simulate_click(entry, Modifiers::default());
+        state.read_with(cx, |state, _| {
+            assert_eq!(state.selected_index(), Some(0));
+            assert_eq!(state.entries.len(), 2);
+        });
+    }
+
+    #[gpui::test]
+    fn dragging_an_entry_with_on_drag_does_not_select_or_toggle_it(cx: &mut TestAppContext) {
+        let (state, cx, entry) = open_tree(cx, vec![folder()], true);
+
+        // Start a drag, then drop it back on the entry it started from.
+        cx.simulate_mouse_down(entry, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(
+            entry + point(px(8.), px(0.)),
+            MouseButton::Left,
+            Modifiers::default(),
+        );
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.simulate_mouse_up(entry, MouseButton::Left, Modifiers::default());
+
+        state.read_with(cx, |state, _| {
+            assert_eq!(state.selected_index(), None);
+            assert_eq!(state.entries.len(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn right_click_neither_selects_nor_toggles(cx: &mut TestAppContext) {
+        let (state, cx, entry) = open_tree(cx, vec![folder()], false);
+
+        cx.simulate_mouse_down(entry, MouseButton::Right, Modifiers::default());
+        cx.simulate_mouse_up(entry, MouseButton::Right, Modifiers::default());
+
+        state.read_with(cx, |state, _| {
+            assert_eq!(state.right_clicked_ix, Some(0));
+            assert_eq!(state.selected_index(), None);
+            assert_eq!(state.entries.len(), 1);
+        });
+    }
+
+    #[gpui::test]
+    fn clicking_a_disabled_entry_does_nothing(cx: &mut TestAppContext) {
+        let (state, cx, entry) = open_tree(cx, vec![folder().disabled(true)], false);
+
+        cx.simulate_click(entry, Modifiers::default());
+
+        state.read_with(cx, |state, _| {
+            assert_eq!(state.selected_index(), None);
+            assert_eq!(state.entries.len(), 1);
         });
     }
 

@@ -9,7 +9,7 @@ exclude = ["examples/"]
 repository = "https://github.com/longbridge/gpui-kit"
 homepage = "https://gpui-kit.com"
 documentation = "https://docs.rs/gpui-base"
-version = "0.7.1"
+version = "0.11.0"
 publish = true
 edition.workspace = true
 
@@ -27,20 +27,23 @@ harness = false
 [features]
 gpui-fast = ["dep:gpui-fast"]
 decimal = ["dep:rust_decimal"]
-test-support = ["gpui/test-support", "gpui-fast?/test-support"]
+test-support = ["gpui/test-support", "gpui-fast?/test-support", "dep:image"]
 inspector = ["gpui_macros/inspector", "gpui/inspector", "gpui-fast?/inspector"]
 
 [dependencies]
 anyhow.workspace = true
 aho-corasick = "1.1.3"
-chrono = "0.4.38"
 data-url = "0.3"
 futures = "0.3"
 gpui.workspace = true
 gpui-fast = { workspace = true, optional = true }
+# test_support uses only image buffers (RgbaImage, Frame), which need no codec. The
+# default formats would add an AV1 encoder (rav1e) to every test-support build.
+image = { version = "0.25", default-features = false, optional = true }
 gpui_macros.workspace = true
 instant.workspace = true
 itertools = "0.13.0"
+jiff = "1.0"
 lsp-types.workspace = true
 markdown = { version = "1.0.0", features = ["serde"] }
 html5ever = "0.27"
@@ -55,6 +58,8 @@ serde_json.workspace = true
 smallvec.workspace = true
 sum-tree.workspace = true
 tracing.workspace = true
+sys-locale = "0.3"
+unicode-bidi = "0.3.18"
 unicode-linebreak = "0.1.5"
 unicode-segmentation = "1.12.0"
 web-time = "1"
@@ -64,6 +69,8 @@ smol.workspace = true
 
 [target.'cfg(target_family = "wasm")'.dependencies]
 async-channel = "2.3.1"
+# Read the current date from the browser, as `CalendarState::new` does.
+jiff = { version = "1.0", features = ["js"] }
 
 [target.'cfg(target_os = "macos")'.dependencies]
 raw-window-handle.workspace = true
@@ -82,10 +89,14 @@ ashpd = { version = "0.13", default-features = false, features = ["async-io", "s
 
 [dev-dependencies]
 criterion = "0.8"
+gpui-base = { path = ".", features = ["test-support"] }
 gpui = { workspace = true, features = ["test-support", "bench-support"] }
 gpui-fast = { workspace = true, features = ["test-support", "bench-support"] }
-gpui_platform = { workspace = true, features = ["bench-support"] }
-gpui-fast-platform = { workspace = true, features = ["bench-support"] }
+gpui_platform = { workspace = true, features = ["bench-support", "x11"] }
+gpui-fast-platform = { workspace = true, features = ["bench-support", "x11"] }
+# Same minor version as `gpui`'s own, so the crate is shared instead of
+# compiled twice: the test-support image helpers build `Frame`s.
+image = "0.25"
 indoc = "2"
 reqwest_client.workspace = true
 

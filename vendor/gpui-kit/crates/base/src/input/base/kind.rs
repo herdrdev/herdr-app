@@ -27,10 +27,12 @@ use gpui::{Div, Entity, Stateful, Window};
 use ropey::Rope;
 
 use super::decorations::DecorationCollections;
+use super::line_decorations::LineDecorationProviders;
 use super::lsp::{ContextMenuContent, HoverDefinition, InlineCompletion};
+use super::spacers::SpacerProvider;
 use crate::input::{
-    HighlightStyleResolver, InputEdit, InputHighlighter, RangeDecoration, SyntaxContext,
-    TextDecoration,
+    GutterDecoration, HighlightStyleResolver, InputEdit, InputHighlighter, LineDecoration,
+    OverviewRulerDecoration, RangeDecoration, SyntaxContext, TextDecoration,
 };
 use crate::input::{HoverPopoverState, Lsp};
 use gpui::Task;
@@ -72,7 +74,7 @@ impl MultiLineMode for EditorMode {}
 /// renderer is generic over the mode, so it cannot name `EditorExtras` and
 /// reach its fields directly, and these are the accessors it goes through
 /// instead. Every one of them has an empty answer, which is what a plain input
-/// and a textarea give.
+/// gives; a textarea answers only [`Self::decoration_layers`].
 ///
 /// [`InputModeKind`] is *behavior*: points where the engine hands control back
 /// during an edit. Adding a field an editor renders belongs here and leaves
@@ -86,6 +88,48 @@ pub trait InputExtras: Default + 'static {
     /// Geometric decorations intersecting visible, non-folded buffer spans.
     fn range_decorations(&self, _ranges: &[std::ops::Range<usize>]) -> Vec<&RangeDecoration> {
         Vec::new()
+    }
+
+    /// Return the gutter decoration strip width, or `None` when no gutter
+    /// collection exists.
+    fn gutter_decorations_width(&self) -> Option<gpui::Pixels> {
+        None
+    }
+
+    /// Return the gutter decorations that touch a UTF-8 byte range, in paint
+    /// order. An empty decoration touches the range when it lies inside it.
+    fn gutter_decorations(&self, _range: std::ops::Range<usize>) -> Vec<&GutterDecoration> {
+        Vec::new()
+    }
+
+    /// Return all overview ruler decorations in paint order.
+    fn overview_ruler_decorations(&self) -> Vec<&OverviewRulerDecoration> {
+        Vec::new()
+    }
+
+    /// A number that changes whenever an overview ruler collection is created,
+    /// replaced, extended, cleared or released.
+    fn overview_ruler_revision(&self) -> u64 {
+        0
+    }
+
+    /// Line decorations for the visible buffer rows, in collection order.
+    fn line_decorations(
+        &self,
+        _rows: std::ops::Range<usize>,
+        _cx: &gpui::App,
+    ) -> Vec<LineDecoration> {
+        Vec::new()
+    }
+
+    /// Whether any line decoration collection has a provider.
+    fn has_line_decorations(&self) -> bool {
+        false
+    }
+
+    /// The provider of the spacers, if one is set.
+    fn spacer_provider(&self) -> Option<Rc<dyn SpacerProvider>> {
+        None
     }
 
     /// Semantic-token styles for a visible range, when an LSP supplies them.
@@ -343,8 +387,37 @@ impl InputModeKind for InputMode {
 impl InputModeKind for TextareaMode {
     const MULTI_LINE: bool = true;
 
-    /// Ordinary multi-line text needs nothing beyond the shared engine.
-    type Extras = ();
+    /// Ordinary multi-line text, with decorations its owner sets.
+    type Extras = TextareaExtras;
+
+    fn reset_annotations(state: &mut InputBaseState<Self>) {
+        state.extras.decorations.clear();
+    }
+
+    fn adjust_annotations(
+        state: &mut InputBaseState<Self>,
+        range: &std::ops::Range<usize>,
+        new_len: usize,
+    ) {
+        state.extras.adjust_for_edit(range, new_len);
+    }
+}
+
+/// What a textarea adds: one layer of text decorations, such as inline marks.
+/// Their ranges follow edits like an editor's decoration collections.
+#[derive(Default)]
+pub struct TextareaExtras {
+    pub(crate) decorations: Vec<TextDecoration>,
+}
+
+impl InputExtras for TextareaExtras {
+    fn decoration_layers(&self) -> Vec<&[TextDecoration]> {
+        if self.decorations.is_empty() {
+            Vec::new()
+        } else {
+            vec![&self.decorations[..]]
+        }
+    }
 }
 // `EditorMode`'s implementation lives with the editor code, next to the
 // language features it dispatches to.
@@ -354,6 +427,11 @@ pub struct EditorExtras {
     pub(crate) lsp: Lsp,
     pub(crate) decorations: DecorationCollections,
     pub(crate) range_decorations: DecorationCollections<RangeDecoration>,
+    pub(crate) gutter_decorations: DecorationCollections<GutterDecoration>,
+    pub(crate) gutter_decorations_width: gpui::Pixels,
+    pub(crate) overview_ruler_decorations: DecorationCollections<OverviewRulerDecoration>,
+    pub(crate) line_decorations: LineDecorationProviders,
+    pub(crate) spacer_provider: Option<Rc<dyn SpacerProvider>>,
     pub(crate) inline_completion: InlineCompletion,
     pub(crate) context_menu_content: ContextMenuContent,
     pub(crate) hover_popover: Option<HoverPopoverState>,
@@ -367,6 +445,11 @@ impl Default for EditorExtras {
             lsp: Lsp::default(),
             decorations: DecorationCollections::default(),
             range_decorations: DecorationCollections::default(),
+            gutter_decorations: DecorationCollections::default(),
+            gutter_decorations_width: gpui::px(3.),
+            overview_ruler_decorations: DecorationCollections::default(),
+            line_decorations: LineDecorationProviders::default(),
+            spacer_provider: None,
             inline_completion: InlineCompletion::default(),
             context_menu_content: ContextMenuContent::default(),
             hover_popover: None,
