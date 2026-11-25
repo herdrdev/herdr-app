@@ -624,15 +624,18 @@ mod tests {
 
         impl Render for TabOrderHarness {
             fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                // Default tab_index (0) on every stop puts Tabs directly between
+                // `before` and `after` in traversal order, so removing `.tab_stop(false)`
+                // immediately causes forward, wrap, and backward steps to hit the tab.
                 div()
-                    .child(div().tab_index(1).track_focus(&self.before).size(px(40.)))
+                    .child(div().track_focus(&self.before).size(px(40.)))
                     .child(
                         Tabs::new("no-stop-tabs")
                             .tab_stop(false)
                             .child(Tab::new("t-0").selected(true).size(px(40.)))
                             .child(Tab::new("t-1").size(px(40.))),
                     )
-                    .child(div().tab_index(2).track_focus(&self.after).size(px(40.)))
+                    .child(div().track_focus(&self.after).size(px(40.)))
             }
         }
 
@@ -643,13 +646,31 @@ mod tests {
             window.focus(&before, cx);
             TabOrderHarness { before, after }
         });
+        // Two draws let sync_tab_stops's refresh settle if a tab ever became a stop.
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        vcx.run_until_parked();
         vcx.update(|window, cx| window.draw(cx).clear(cx));
         assert!(vcx.update(|window, cx| view.read(cx).before.is_focused(window)));
 
         vcx.update(|window, cx| window.focus_next(cx));
         assert!(
             vcx.update(|window, cx| view.read(cx).after.is_focused(window)),
-            "Tab must skip Tabs::tab_stop(false) and move directly to the next focus stop"
+            "forward Tab must skip Tabs::tab_stop(false)"
+        );
+        vcx.update(|window, cx| window.focus_next(cx));
+        assert!(
+            vcx.update(|window, cx| view.read(cx).before.is_focused(window)),
+            "wrapped forward Tab must return to before without landing on Tabs"
+        );
+        vcx.update(|window, cx| window.focus_prev(cx));
+        assert!(
+            vcx.update(|window, cx| view.read(cx).after.is_focused(window)),
+            "wrapped Shift-Tab must land on after without landing on Tabs"
+        );
+        vcx.update(|window, cx| window.focus_prev(cx));
+        assert!(
+            vcx.update(|window, cx| view.read(cx).before.is_focused(window)),
+            "backward Shift-Tab must skip Tabs::tab_stop(false)"
         );
     }
 
