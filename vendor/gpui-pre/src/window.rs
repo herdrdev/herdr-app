@@ -1246,6 +1246,8 @@ pub struct Window {
     is_minimizable: bool,
     last_window_bounds: WindowBounds,
     sprite_atlas: Arc<dyn PlatformAtlas>,
+    // HERDR: track per-window foreground-colored glyph tiles so unused variants retire.
+    foreground_glyph_tiles: FxHashMap<RenderGlyphParams, (AtlasTile, Bounds<DevicePixels>)>,
     // HERDR: track per-window image tiles and asset loads for retirement and LRU pruning.
     image_tiles: FxHashMap<RenderImageParams, (AtlasTile, Option<Arc<RenderImage>>)>,
     image_assets: FxHashMap<(TypeId, u64), crate::ImageLoad>,
@@ -2454,6 +2456,7 @@ impl Window {
             is_minimizable,
             last_window_bounds: window_bounds,
             sprite_atlas,
+            foreground_glyph_tiles: FxHashMap::default(),
             image_tiles: FxHashMap::default(),
             image_assets: FxHashMap::default(),
             accessed_image_assets: FxHashSet::default(),
@@ -4016,6 +4019,26 @@ impl Window {
         });
         cx.entities.restore_accessed(rendered_entities);
         cx.prune_image_assets();
+        if !self.foreground_glyph_tiles.is_empty() {
+            // HERDR: Cached paint ranges can reuse sprites without calling paint_emoji.
+            // Keep both live scenes; retire only variants neither scene references.
+            let live: FxHashSet<_> = self
+                .next_frame
+                .scene
+                .polychrome_sprites
+                .iter()
+                .chain(&self.rendered_frame.scene.polychrome_sprites)
+                .map(|sprite| (sprite.tile.texture_id, sprite.tile.tile_id.0))
+                .collect();
+            self.foreground_glyph_tiles.retain(|params, (tile, _)| {
+                if live.contains(&(tile.texture_id, tile.tile_id.0)) {
+                    true
+                } else {
+                    self.sprite_atlas.remove(&params.clone().into());
+                    false
+                }
+            });
+        }
 
         self.invalidator.set_phase(DrawPhase::Focus);
         let previous_focus_path = self.rendered_frame.focus_path();
@@ -5448,6 +5471,7 @@ impl Window {
             is_emoji: false,
             subpixel_rendering,
             dilation,
+            foreground: [0, 0, 0, 255],
         };
 
         let raster_bounds = self.text_system().raster_bounds(&params)?;
@@ -5455,7 +5479,7 @@ impl Window {
             let tile = self
                 .sprite_atlas
                 .get_or_insert_with(params.clone().into(), &mut || {
-                    let (size, bytes) = self.text_system().rasterize_glyph(&params)?;
+                    let (size, bytes) = self.text_system().rasterize_glyph(&params, raster_bounds)?;
                     Ok(Some((size, Cow::Owned(bytes))))
                 })?
                 .expect("Callback above only errors or returns Some");
@@ -5526,6 +5550,18 @@ impl Window {
         glyph_id: GlyphId,
         font_size: Pixels,
     ) -> Result<()> {
+        self.paint_emoji_with_color(origin, font_id, glyph_id, font_size, Hsla::black())
+    }
+
+    /// HERDR: Paints a color glyph using the run color for foreground palette entries.
+    pub fn paint_emoji_with_color(
+        &mut self,
+        origin: Point<Pixels>,
+        font_id: FontId,
+        glyph_id: GlyphId,
+        font_size: Pixels,
+        color: Hsla,
+    ) -> Result<()> {
         self.invalidator.debug_assert_paint();
 
         let scale_factor = self.scale_factor();
@@ -5540,22 +5576,35 @@ impl Window {
             is_emoji: true,
             subpixel_rendering: false,
             dilation: 0,
+            foreground: u32::from(color.to_rgb()).to_be_bytes(),
         };
+        let uses_foreground = self.text_system().glyph_uses_foreground(&params);
+        let mut params = params;
+        if !uses_foreground {
+            params.foreground = [0, 0, 0, 255];
+        }
 
-        let raster_bounds = self.text_system().raster_bounds(&params)?;
+        let raster_bounds = match self.foreground_glyph_tiles.get(&params) {
+            Some((_, bounds)) => *bounds,
+            None => self.text_system().raster_bounds(&params)?,
+        };
         if !raster_bounds.is_zero() {
             let tile = self
                 .sprite_atlas
                 .get_or_insert_with(params.clone().into(), &mut || {
-                    let (size, bytes) = self.text_system().rasterize_glyph(&params)?;
+                    let (size, bytes) = self.text_system().rasterize_glyph(&params, raster_bounds)?;
                     Ok(Some((size, Cow::Owned(bytes))))
                 })?
-                .expect("Callback above only errors or returns Some");
+                .expect("Callback above only returns Some");
 
             let bounds = Bounds {
                 origin: integer_origin + raster_bounds.origin.map(Into::into),
                 size: tile.bounds.size.map(Into::into),
             };
+            if uses_foreground {
+                self.foreground_glyph_tiles
+                    .insert(params, (tile, raster_bounds));
+            }
             let content_mask = self.snapped_content_mask();
             let opacity = self.element_opacity();
 
