@@ -16,7 +16,8 @@ use std::{
 use super::LineWrapper;
 
 /// A laid out and styled line of text
-#[derive(Default, Debug)]
+// HERDR: Clone allows Arc::make_mut in ShapedLine::with_cell_positions.
+#[derive(Clone, Default, Debug)]
 pub struct LineLayout {
     /// The font size for this line
     pub font_size: Pixels,
