@@ -137,3 +137,55 @@ fn squeezed_layout_drag(cx: &mut gpui::TestAppContext) {
         });
     }
 }
+
+#[test]
+fn double_clicking_a_divider_evens_out_its_row() {
+    in_own_process("divider_double_click");
+}
+
+#[gpui::test]
+fn divider_double_click(cx: &mut gpui::TestAppContext) {
+    use gpui::{point, px, size, Modifiers, MouseButton, MouseDownEvent, MouseUpEvent};
+    use serde_json::json;
+    if !running_alone("divider_double_click") { return; }
+
+    let block = |id: &str, size: serde_json::Value| json!({ "id": id, "type": "block", "size": size, "content": { "mod": "even-probe" } });
+    let layout = json!({
+        "id": "row", "type": "row", "titlebar": "none",
+        "children": [
+            block("fixed", json!({ "px": 40 })),
+            block("a", json!({ "weight": 2 })),
+            block("b", json!({ "weight": 1 })),
+            block("c", json!({ "weight": 1 }))
+        ]
+    });
+    let (view, cx) = open_window(cx, "even-probe", "export default () => null;", layout);
+    cx.simulate_resize(size(px(440.0), px(200.0)));
+    cx.update(|window, cx| window.draw(cx).clear(cx));
+    cx.run_until_parked();
+
+    let sizes = |cx: &mut gpui::VisualTestContext| view.read_with(cx, |this, _| {
+        this.chrome.children().iter().map(|n| n.size).collect::<Vec<_>>()
+    });
+    let before = sizes(cx);
+
+    // The divider between a (200px) and b (100px) sits at x = 40 + 200.
+    let at = point(px(240.0), px(100.0));
+    let click = |click_count: usize, cx: &mut gpui::VisualTestContext| {
+        cx.simulate_event(MouseDownEvent { button: MouseButton::Left, position: at, modifiers: Modifiers::default(), click_count, first_mouse: false });
+        cx.simulate_event(MouseUpEvent { button: MouseButton::Left, position: at, modifiers: Modifiers::default(), click_count });
+        cx.run_until_parked();
+    };
+    click(1, cx);
+    assert_eq!(sizes(cx), before, "a single click without moving must not resize");
+
+    // The second press of a double-click is what evens out the row.
+    click(2, cx);
+    assert!(view.read_with(cx, |this, _| this.drag.is_none()), "a double-click does not leave a drag behind");
+    let sizes = sizes(cx);
+    assert_eq!(sizes[0], Some(super::Span::Px { px: 40.0 }), "fixed blocks keep their size");
+    let w = 4.0 / 3.0;
+    for s in &sizes[1..] {
+        assert!(matches!(s, Some(super::Span::Weight { weight }) if (weight - w).abs() < 1e-5), "{s:?}");
+    }
+}

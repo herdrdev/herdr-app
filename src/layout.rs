@@ -496,6 +496,32 @@ impl Node {
         }
     }
 
+    /// Gives a row's or column's shown weighted children the same share, keeping their
+    /// total so the container's place among its own siblings doesn't move. Fixed-size
+    /// (px) children keep their size. False when nothing could change.
+    pub fn equalize(&mut self) -> bool {
+        if self.axis().is_none() {
+            return false;
+        }
+        let Some(children) = self.children_mut() else { return false };
+        let weighted: Vec<&mut Node> = children
+            .iter_mut()
+            .filter(|n| !n.hidden && !matches!(n.size, Some(Size::Px { .. })))
+            .collect();
+        if weighted.len() < 2 {
+            return false;
+        }
+        let weight = |n: &Node| match n.size {
+            Some(Size::Weight { weight }) => weight,
+            _ => 1.0,
+        };
+        let share = weighted.iter().map(|n| weight(n)).sum::<f32>() / weighted.len() as f32;
+        for n in weighted {
+            n.size = Some(Size::Weight { weight: share });
+        }
+        true
+    }
+
     pub fn axis(&self) -> Option<Axis> {
         match self.kind {
             Kind::Row { .. } => Some(Axis::Row),
@@ -809,6 +835,48 @@ mod tests {
 
     fn term(id: &str) -> Node {
         Node::block(id, Content::Terminal { terminal: format!("t-{id}") })
+    }
+
+    #[test]
+    fn equalize_gives_shown_weighted_children_the_same_share() {
+        let mut row = term("a");
+        row.split("a", Axis::Row, term("b"), "s1".into());
+        row.split("b", Axis::Row, term("c"), "s2".into());
+        // Splitting b halves its share: a keeps 1, b and c get 0.5 each.
+        let weights = |n: &Node| n.children().iter().map(|c| match c.size {
+            Some(Size::Weight { weight }) => weight,
+            _ => 1.0,
+        }).collect::<Vec<_>>();
+        let before = weights(&row);
+        assert_ne!(before[0], before[1]);
+        assert!(row.equalize());
+        let w = weights(&row);
+        assert!(w.iter().all(|x| (x - w[0]).abs() < 1e-6));
+        // The total share is kept, so the row's place among its own siblings doesn't move.
+        assert!((w.iter().sum::<f32>() - before.iter().sum::<f32>()).abs() < 1e-6);
+
+        // Fixed and hidden children are left alone.
+        let mut fixed = term("d");
+        fixed.size = Some(Size::Px { px: 240.0 });
+        let mut hidden = term("e");
+        hidden.hidden = true;
+        hidden.size = Some(Size::Weight { weight: 5.0 });
+        let mut b = term("b");
+        b.size = Some(Size::Weight { weight: 3.0 });
+        let mut n = Node::container("r", Axis::Row, vec![fixed, term("a"), b, hidden]);
+        assert!(n.equalize());
+        let sizes: Vec<_> = n.children().iter().map(|c| c.size).collect();
+        assert_eq!(sizes, vec![
+            Some(Size::Px { px: 240.0 }),
+            Some(Size::Weight { weight: 2.0 }),
+            Some(Size::Weight { weight: 2.0 }),
+            Some(Size::Weight { weight: 5.0 }),
+        ]);
+
+        // A block, or a container with one weighted child, has nothing to share.
+        assert!(!term("x").equalize());
+        let mut lone = Node::container("r", Axis::Column, vec![term("a")]);
+        assert!(!lone.equalize());
     }
 
     #[test]

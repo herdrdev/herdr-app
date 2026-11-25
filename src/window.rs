@@ -4844,9 +4844,16 @@ impl AppWindow {
                 .absolute()
                 .when(row, |d| d.top_0().bottom_0().left(px((width - hit) / 2.0)).w(px(hit)).cursor_col_resize())
                 .when(!row, |d| d.left_0().right_0().top(px((width - hit) / 2.0)).h(px(hit)).cursor_row_resize())
-                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+                .on_mouse_down(MouseButton::Left, cx.listener(move |this, ev: &MouseDownEvent, window, cx| {
                     if let Some(space) = this.model.space_of(&container)
                         && this.require_document(space.machine.as_deref()).is_err() { return; }
+                    // A double-click gives the panes on either side of this divider, and
+                    // their siblings along it, the same size.
+                    if ev.click_count == 2 {
+                        cx.stop_propagation();
+                        this.equalize_divider(&container, window, cx);
+                        return;
+                    }
                     this.drag = Some(Drag { container: container.clone(), index, axis });
                     cx.stop_propagation();
                     if tracks_drag_color {
@@ -4875,6 +4882,17 @@ impl AppWindow {
             }
         }
         sep.into_any_element()
+    }
+
+    fn equalize_divider(&mut self, container: &str, window: &mut Window, cx: &mut Context<Self>) {
+        self.drag = None;
+        if !self.find_node_mut(container).is_some_and(Node::equalize) {
+            return;
+        }
+        self.save();
+        self.publish(cx);
+        self.flush_documents(false, window, cx);
+        cx.notify();
     }
 
     fn finish_divider_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
