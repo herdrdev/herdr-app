@@ -1,4 +1,4 @@
-use std::{io::Read as _, time::Duration};
+use std::{io::Read as _, sync::OnceLock, time::Duration};
 
 use rquickjs::{
     Ctx, Exception, FromJs, Function, IntoJs, Object, Promise, Result, TypedArray, Value,
@@ -231,9 +231,7 @@ fn request(
 ) -> std::result::Result<FetchResponse, String> {
     let client = match injected_client {
         Some(client) => client,
-        None => client_builder()
-            .build()
-            .map_err(|error| format!("creating HTTP client failed: {error}"))?,
+        None => shared_client()?,
     };
 
     let mut method = options.method;
@@ -316,6 +314,22 @@ fn client_builder() -> reqwest::blocking::ClientBuilder {
     reqwest::blocking::Client::builder()
         .timeout(TIMEOUT)
         .redirect(reqwest::redirect::Policy::none())
+}
+
+/// The client every `fetch()` shares. Building one loads the platform's root
+/// certificates and starts a runtime thread, around 100 ms of CPU on macOS, so
+/// it happens once; clones share its connection pool. Proxy settings
+/// are read when it is built. A failed build isn't kept: the next request
+/// tries again.
+fn shared_client() -> std::result::Result<reqwest::blocking::Client, String> {
+    static CLIENT: OnceLock<reqwest::blocking::Client> = OnceLock::new();
+    if let Some(client) = CLIENT.get() {
+        return Ok(client.clone());
+    }
+    let client = client_builder()
+        .build()
+        .map_err(|error| format!("creating HTTP client failed: {error}"))?;
+    Ok(CLIENT.get_or_init(|| client).clone())
 }
 
 #[cfg(test)]
@@ -612,6 +626,61 @@ mod tests {
                 "{candidate}"
             );
         }
+    }
+
+    #[test]
+    fn fetches_without_a_test_client_reuse_one_connection() {
+        use std::io::{BufRead as _, Write as _};
+
+        // A client built per request takes its connection pool with it, so
+        // every fetch would open a new connection.
+        let listener = std::net::TcpListener::bind("127.0.0.1:0").expect("HTTP listener");
+        let address = listener.local_addr().expect("listener address");
+        let server = std::thread::spawn(move || {
+            let (stream, _) = listener.accept().expect("HTTP connection");
+            stream
+                .set_read_timeout(Some(Duration::from_secs(5)))
+                .expect("read timeout");
+            let mut reader = std::io::BufReader::new(stream);
+            for _ in 0..2 {
+                let mut line = String::new();
+                loop {
+                    line.clear();
+                    match reader.read_line(&mut line) {
+                        Ok(0) | Err(_) => return false,
+                        Ok(_) if line == "\r\n" => break,
+                        Ok(_) => {}
+                    }
+                }
+                reader
+                    .get_mut()
+                    .write_all(b"HTTP/1.1 200 OK\r\nContent-Length: 2\r\n\r\nok")
+                    .expect("HTTP response");
+            }
+            true
+        });
+
+        let capabilities = crate::Capabilities::new().network_hosts(["127.0.0.1".to_owned()]);
+        let url = reqwest::Url::parse(&format!("http://{address}/")).expect("URL");
+        let bodies: Vec<_> = (0..2)
+            .map(|_| {
+                request(
+                    capabilities.clone(),
+                    url.clone(),
+                    FetchOptions::default(),
+                    None,
+                )
+                .map(|response| response.body)
+            })
+            .collect();
+        assert!(
+            server.join().expect("HTTP server"),
+            "the second fetch did not reuse the first one's connection: {bodies:?}"
+        );
+        assert!(
+            bodies.iter().all(|body| body.as_deref() == Ok("ok")),
+            "{bodies:?}"
+        );
     }
 }
 
