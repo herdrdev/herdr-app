@@ -1494,7 +1494,7 @@ fn materialize_component(
                 let turn = (loop_clock_ms() % ms) / ms;
                 image = image.with_transformation(gpui::Transformation::rotate(gpui::radians((turn * std::f64::consts::TAU) as f32)));
                 // ~10 fps: a small spinner looks the same, and each step redraws its whole view.
-                wake_view_after(Duration::from_millis(100), window, cx);
+                wake_view_after(next_spin_step(), window, cx);
             }
             image.into_any_element()
         }
@@ -2903,11 +2903,6 @@ fn loop_clock_ms() -> f64 {
     EPOCH.get_or_init(std::time::Instant::now).elapsed().as_secs_f64() * 1000.0
 }
 
-thread_local! {
-    static LOOP_WAKES: RefCell<std::collections::HashMap<gpui::EntityId, std::time::Instant>> =
-        RefCell::new(std::collections::HashMap::new());
-}
-
 // HERDR: a spinner in a view a ShellRoot shows is drawn by that ShellRoot.
 // The view lays out an empty slot that says where it is; ShellRoot paints it
 // turned, on top of its cached content, and wakes only itself. A step then
@@ -3038,7 +3033,7 @@ pub(crate) fn spin_layer(view: gpui::EntityId) -> AnyElement {
                     let _ = window.paint_svg(s.bounds, s.path, None, matrix, s.color, cx);
                 });
             }
-            wake_view_after(Duration::from_millis(100), window, cx);
+            wake_view_after(next_spin_step(), window, cx);
         },
     )
     .absolute()
@@ -3046,39 +3041,24 @@ pub(crate) fn spin_layer(view: gpui::EntityId) -> AnyElement {
     .into_any_element()
 }
 
+// HERDR: spinners step every 100 ms (~10 fps) on the loop clock's grid rather
+// than 100 ms after each draw: every spinner in every view steps at the same
+// moments, so they share draws, and a late wake doesn't push the next step back.
+fn next_spin_step() -> Duration {
+    const STEP_MS: f64 = 100.0;
+    Duration::from_secs_f64((STEP_MS - loop_clock_ms() % STEP_MS).max(1.0) / 1000.0)
+}
+
 /// Draws the view being rendered again after `delay`, once, however many of
 /// its elements ask.
+// HERDR: through the window's frame schedule, with a quarter of `delay` as
+// tolerance, so spinners, frames and loops in different views that step at
+// different phases share one draw instead of each redrawing the window.
 fn wake_view_after(delay: Duration, window: &Window, cx: &mut App) {
     if checking() {
         return;
     }
-    let view = window.current_view();
-    let now = std::time::Instant::now();
-    let at = now + delay;
-    let schedule = LOOP_WAKES.with(|wakes| {
-        let mut wakes = wakes.borrow_mut();
-        match wakes.get(&view) {
-            Some(pending) if *pending > now && *pending <= at => false,
-            _ => {
-                wakes.insert(view, at);
-                true
-            }
-        }
-    });
-    if !schedule {
-        return;
-    }
-    cx.spawn(async move |cx| {
-        cx.background_executor().timer(delay).await;
-        LOOP_WAKES.with(|wakes| {
-            let mut wakes = wakes.borrow_mut();
-            if wakes.get(&view) == Some(&at) {
-                wakes.remove(&view);
-            }
-        });
-        cx.update(|cx| cx.notify(view));
-    })
-    .detach();
+    window.request_frame_after(delay, delay / 4, cx);
 }
 
 /// Applies `loop`s to the refinement; with `frames`, returns the frames and
@@ -3111,7 +3091,9 @@ fn apply_loops<'a>(behavior: &'a Behavior, refinement: &mut StyleRefinement, win
             MotionProperty::Left => refinement.inset.left = Some(gpui::px(value).into()),
             MotionProperty::Top => refinement.inset.top = Some(gpui::px(value).into()),
         }
-        next = next.min(1000.0 / 30.0);
+        // HERDR: the next 30 Hz step on the loop clock's grid, as `spin` does.
+        const STEP_MS: f64 = 1000.0 / 30.0;
+        next = next.min(STEP_MS - now % STEP_MS);
     }
     wake_view_after(Duration::from_secs_f64(next.max(1.0) / 1000.0), window, cx);
     text

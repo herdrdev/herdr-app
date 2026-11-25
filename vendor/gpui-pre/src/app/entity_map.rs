@@ -183,6 +183,15 @@ impl EntityMap {
             .extend(entities.iter().copied());
     }
 
+    /// HERDR: whether the entity still has a handle (it hasn't been released).
+    pub(crate) fn is_alive(&self, entity_id: EntityId) -> bool {
+        self.ref_counts
+            .read()
+            .counts
+            .get(entity_id)
+            .is_some_and(|count| count.load(SeqCst) > 0)
+    }
+
     pub fn clear_accessed(&mut self) {
         self.accessed_entities.get_mut().clear();
     }

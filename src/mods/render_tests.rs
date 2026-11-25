@@ -1450,13 +1450,22 @@ fn animated_images_advance_with_explicit_and_implicit_ids(cx: &mut TestAppContex
         assert_eq!(data.frame_count(), 2);
         assert!(context.update(|window, _| window.has_image_frame_atlas_entry(&data, 0)));
         assert!(!context.update(|window, _| window.has_image_frame_atlas_entry(&data, 1)));
-        // GPUI's image clock is wall time, not the test executor's clock.
-        std::thread::sleep(Duration::from_millis(25));
-        draw(context);
-        assert!(context.update(|window, _| window.has_image_frame_atlas_entry(&data, 1)), "the next animation frame must paint (explicit id: {explicit})");
+        assert_eq!(context.update(|window, _| window.painted_image_frames(&data)), vec![0]);
+        // The image clock is the executor's: the frame ends 20 ms in, and its
+        // wake (a timer) asks for the next display frame. Deliver only that
+        // frame: the image's own wake must make the window draw.
+        let wait_a_frame = |context: &mut gpui::VisualTestContext| {
+            context.executor().advance_clock(Duration::from_millis(25));
+            context.run_until_parked();
+            context.update(|window, cx| {
+                window.simulate_next_frame(cx);
+            });
+        };
+        wait_a_frame(context);
+        assert_eq!(context.update(|window, _| window.painted_image_frames(&data)), vec![1], "the next animation frame must paint (explicit id: {explicit})");
         assert!(context.update(|window, _| window.has_image_frame_atlas_entry(&data, 0)));
-        std::thread::sleep(Duration::from_millis(25));
-        draw(context);
+        wait_a_frame(context);
+        assert_eq!(context.update(|window, _| window.painted_image_frames(&data)), vec![0], "and the one after (explicit id: {explicit})");
         assert!(context.update(|window, _| window.has_image_frame_atlas_entry(&data, 0)));
         assert!(context.update(|window, _| window.has_image_frame_atlas_entry(&data, 1)));
         context.update(|window, cx| { window.replace_root(cx, |_, _| Empty); });
@@ -1715,4 +1724,141 @@ fn status_bar_counts_agents_in_the_singular_and_the_plural(cx: &mut TestAppConte
     let tree = describe_with_values(cx, &staged, "mods/workspace-status", two, None).unwrap();
     assert!(tree.contains("2 agents"), "two agents are plural: {tree}");
     assert!(tree.contains("2 need you") && !tree.contains("2 needs you"), "two blocked agents need you: {tree}");
+}
+
+/// A view that steps on its own clock asks to be drawn when its next step is
+/// due, not on every display frame; steps whose tolerances overlap share a draw.
+#[gpui::test]
+fn timed_frame_requests_draw_when_due_and_share_draws(cx: &mut TestAppContext) {
+    use gpui::*;
+    struct Stepper {
+        delay: Duration,
+        draws: Rc<Cell<usize>>,
+        drawn_in: Rc<Cell<Option<usize>>>,
+    }
+    impl Render for Stepper {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.drawn_in.set(Some(self.draws.get()));
+            window.request_frame_after(self.delay, self.delay / 4, cx);
+            div().size(px(10.))
+        }
+    }
+    struct Pair(Rc<Cell<usize>>, AnyView, AnyView);
+    impl Render for Pair {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            self.0.set(self.0.get() + 1);
+            let cached = || StyleRefinement::default().size(px(10.));
+            div().child(self.1.clone().cached(cached())).child(self.2.clone().cached(cached()))
+        }
+    }
+    let draws = Rc::new(Cell::new(0));
+    let (a, b) = (Rc::new(Cell::new(None)), Rc::new(Cell::new(None)));
+    let (_, cx) = cx.add_window_view(|_, cx| {
+        let mut step = |ms, drawn_in: &Rc<Cell<Option<usize>>>| -> AnyView {
+            cx.new(|_| Stepper { delay: Duration::from_millis(ms), draws: draws.clone(), drawn_in: drawn_in.clone() }).into()
+        };
+        Pair(draws.clone(), step(100, &a), step(110, &b))
+    });
+    // Deliver the next display frame: what a timed request asks for once due.
+    let next_frame = |cx: &mut VisualTestContext| {
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+        });
+    };
+    next_frame(cx);
+    let first = (a.get(), b.get());
+    assert!(first.0.is_some() && first.1.is_some());
+
+    cx.executor().advance_clock(Duration::from_millis(90));
+    next_frame(cx);
+    assert_eq!((a.get(), b.get()), first, "nothing is due yet, so nothing redraws");
+
+    cx.executor().advance_clock(Duration::from_millis(40));
+    next_frame(cx);
+    let (sa, sb) = (a.get(), b.get());
+    assert_ne!(sa, first.0, "the 100 ms step drew");
+    assert_eq!(sa, sb, "both steps came due within their tolerance: one draw for both");
+}
+
+/// A deadline moved earlier keeps its timer for later instead of arming a
+/// second one when it comes round again: platforms can't take a timer back.
+#[gpui::test]
+fn timed_frame_requests_keep_one_timer_per_deadline(cx: &mut TestAppContext) {
+    use gpui::*;
+    struct Once(Duration, bool);
+    impl Render for Once {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            if !std::mem::replace(&mut self.1, true) {
+                window.request_frame_after(self.0, Duration::ZERO, cx);
+            }
+            div().size(px(10.))
+        }
+    }
+    struct Two(AnyView, Option<AnyView>);
+    impl Render for Two {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div().child(self.0.clone()).children(self.1.clone())
+        }
+    }
+    let (root, cx) = cx.add_window_view(|_, cx| Two(cx.new(|_| Once(Duration::from_secs(1), false)).into(), None));
+    cx.run_until_parked();
+    // (timers held, timers handed to the platform in all)
+    let timers = |cx: &mut VisualTestContext| cx.update(|window, _| window.frame_schedule_timers());
+    assert_eq!(timers(cx), (1, 1));
+    cx.update(|_, cx| root.update(cx, |two, cx| {
+        two.1 = Some(cx.new(|_| Once(Duration::from_millis(100), false)).into());
+        cx.notify();
+    }));
+    cx.run_until_parked();
+    assert_eq!(timers(cx), (2, 2), "the 1 s timer stays; the earlier deadline gets its own");
+    cx.executor().advance_clock(Duration::from_millis(100));
+    cx.run_until_parked();
+    assert_eq!(timers(cx), (1, 2), "the 1 s deadline reuses its timer rather than arming another");
+    cx.executor().advance_clock(Duration::from_secs(1));
+    cx.run_until_parked();
+    assert_eq!(timers(cx), (0, 2));
+}
+
+/// A timed request from a view whose parent read it once and since reuses its
+/// cached drawing still draws it: the window serves it, not `notify`'s guess
+/// of which windows show the view.
+#[gpui::test]
+fn timed_frame_requests_reach_a_cached_child_the_parent_read_once(cx: &mut TestAppContext) {
+    use gpui::*;
+    struct Child(Rc<Cell<usize>>);
+    impl Render for Child {
+        fn render(&mut self, window: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            self.0.set(self.0.get() + 1);
+            window.request_frame_after(Duration::from_millis(100), Duration::ZERO, cx);
+            div().size(px(10.))
+        }
+    }
+    struct Parent(Entity<Child>, bool);
+    impl Render for Parent {
+        fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+            if !std::mem::replace(&mut self.1, true) {
+                let _ = self.0.read(cx).0.get();
+            }
+            div().child(AnyView::from(self.0.clone()).cached(StyleRefinement::default().size(px(10.))))
+        }
+    }
+    let renders = Rc::new(Cell::new(0));
+    let (parent, cx) = cx.add_window_view(|_, cx| Parent(cx.new(|_| Child(renders.clone())), false));
+    let next_frame = |cx: &mut VisualTestContext| {
+        cx.run_until_parked();
+        cx.update(|window, cx| {
+            window.simulate_next_frame(cx);
+        });
+    };
+    next_frame(cx);
+    // The parent draws again without reading the child: the child is reused.
+    cx.update(|_, cx| parent.update(cx, |_, cx| cx.notify()));
+    next_frame(cx);
+    let before = renders.get();
+    for _ in 0..3 {
+        cx.executor().advance_clock(Duration::from_millis(100));
+        next_frame(cx);
+    }
+    assert_eq!(renders.get(), before + 3, "each 100 ms step draws the child");
 }
