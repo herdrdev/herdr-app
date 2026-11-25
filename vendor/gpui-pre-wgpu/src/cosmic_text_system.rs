@@ -625,6 +625,17 @@ impl CosmicTextSystemState {
         let loaded_font = &self.loaded_fonts[params.font_id.0];
         let font_ref = loaded_font.font.as_swash();
         let pixel_size = f32::from(params.font_size);
+        let glyph_id: u16 = params.glyph_id.0.try_into()?;
+        let pixels_per_em = (pixel_size * params.scale_factor) as u16;
+
+        // HERDR: Swash panics decoding alpha bitmaps with zero width or height.
+        if !params.is_emoji
+            && alpha_bitmap(font_ref, glyph_id, pixels_per_em).is_some_and(|bitmap| {
+                bitmap.pixels_per_em == pixels_per_em && (bitmap.width == 0 || bitmap.height == 0)
+            })
+        {
+            return Ok(swash::scale::image::Image::new());
+        }
 
         // HERDR: rasterize COLRv1 vector color glyphs with foreground palette support.
         if params.is_emoji
@@ -674,7 +685,6 @@ impl CosmicTextSystemState {
             renderer.format(Format::Alpha).offset(subpixel_offset);
         }
 
-        let glyph_id: u16 = params.glyph_id.0.try_into()?;
         renderer
             .render(&mut scaler, glyph_id)
             .with_context(|| format!("unable to render glyph via swash for {params:?}"))
@@ -1317,6 +1327,19 @@ impl CosmicTextSystemState {
             FallbackFontClass::Proportional
         }
     }
+}
+
+// HERDR: inspect EBLC/EBDT bitmap strike dimensions before calling swash.
+fn alpha_bitmap<'a>(
+    font: swash::FontRef<'a>,
+    glyph_id: u16,
+    pixels_per_em: u16,
+) -> Option<ttf_parser::RasterGlyphImage<'a>> {
+    let locations = font.table(swash::tag_from_bytes(b"EBLC"))?;
+    let data = font.table(swash::tag_from_bytes(b"EBDT"))?;
+    let locations = ttf_parser::cblc::Table::parse(locations)?;
+    ttf_parser::cbdt::Table::parse(locations, data)?
+        .get(ttf_parser::GlyphId(glyph_id), pixels_per_em)
 }
 
 #[inline(always)]
