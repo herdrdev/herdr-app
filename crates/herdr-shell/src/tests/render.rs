@@ -7666,6 +7666,58 @@ export default class Picker extends View {
     );
 }
 
+/// Negative calendar years round-trip through set_value(), value(), and month_days().
+#[gpui::test]
+fn a_negative_calendar_year_survives_the_round_trip(cx: &mut TestAppContext) {
+    cx.update(|cx| crate::init(cx));
+
+    let runtime = ShellRuntime::new_isolated().expect("runtime");
+    cx.update(|cx| runtime.set_global(cx));
+    let source = r#"
+import { View } from "gpui-kit";
+import { v_flex, CalendarState } from "gpui-base";
+
+export default class Picker extends View {
+  init(_props, _cx) {
+    this.calendar = CalendarState.new();
+    this.calendar.set_value("-0001-01-01");
+    this.first = this.calendar.value();
+    this.calendar.set_value(this.first);
+    this.second = this.calendar.value();
+    const grid = this.calendar.month_days();
+    const negDay = grid.flat().flat().find((d) => d.startsWith("-0001-"));
+    this.gridDay = negDay ?? "";
+    this.calendar.set_value(this.gridDay);
+    this.afterGrid = this.calendar.value();
+  }
+  render(_cx) {
+    return v_flex()
+      .child(`first=${this.first}`)
+      .child(`second=${this.second}`)
+      .child(`grid=${this.gridDay}`)
+      .child(`afterGrid=${this.afterGrid}`);
+  }
+}
+"#;
+    let view_type = runtime.load_source("negative-date", source).expect("load");
+    let window = cx.add_window(|_, _| Empty);
+    let mut context = VisualTestContext::from_window(*window.deref(), cx);
+    let view = context
+        .update(|window, cx| runtime.instantiate_view(&view_type, window, cx))
+        .expect("instantiate");
+    draw(&mut context, &view);
+    let rendered = context.update(|_, cx| {
+        view.read(cx)
+            .snapshot()
+            .map(crate::RenderSnapshot::debug_tree)
+            .unwrap_or_default()
+    });
+    assert!(rendered.contains("first=-0001-01-01"), "got: {rendered}");
+    assert!(rendered.contains("second=-0001-01-01"), "got: {rendered}");
+    assert!(rendered.contains("grid=-0001-"), "got: {rendered}");
+    assert!(rendered.contains("afterGrid=-0001-"), "got: {rendered}");
+}
+
 /// A mod Tab list built by herdr-shell does not insert a Tab key focus stop.
 #[gpui::test]
 fn a_mod_tab_list_is_not_a_tab_stop(cx: &mut TestAppContext) {

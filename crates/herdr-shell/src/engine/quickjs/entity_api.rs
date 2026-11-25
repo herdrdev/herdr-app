@@ -851,7 +851,7 @@ pub fn install(ctx: &Ctx<'_>, module: &Object<'_>, runtime: Weak<ShellRuntime>) 
                         .map(|weeks| {
                             weeks
                                 .into_iter()
-                                .map(|days| days.into_iter().map(|day| day.to_string()).collect())
+                                .map(|days| days.into_iter().map(format_civil_date).collect())
                                 .collect()
                         })
                         .collect()
@@ -1924,12 +1924,24 @@ fn calendar_state(
 /// The prelude narrows this to `null`, a string or a pair before a script sees
 /// it, and widens it back the same way. Shared with the event dispatch so the
 /// two directions cannot drift.
+/// Explicit calendar wire format matching Chrono's `NaiveDate::to_string()`:
+/// `YYYY-MM-DD` for non-negative years and `-YYYY-MM-DD` for negative years,
+/// so every date round-trips cleanly through `jiff::civil::Date::strptime("%Y-%m-%d", ...)`.
+fn format_civil_date(day: jiff::civil::Date) -> String {
+    let year = day.year();
+    if year < 0 {
+        format!("-{:04}-{:02}-{:02}", year.unsigned_abs(), day.month(), day.day())
+    } else {
+        format!("{:04}-{:02}-{:02}", year, day.month(), day.day())
+    }
+}
+
 pub(super) fn date_to_parts(date: gpui_base::Date) -> Vec<Option<String>> {
     match date {
-        gpui_base::Date::Single(day) => vec![day.map(|day| day.to_string())],
+        gpui_base::Date::Single(day) => vec![day.map(format_civil_date)],
         gpui_base::Date::Range(start, end) => vec![
-            start.map(|day| day.to_string()),
-            end.map(|day| day.to_string()),
+            start.map(format_civil_date),
+            end.map(format_civil_date),
         ],
     }
 }
