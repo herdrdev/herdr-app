@@ -73,6 +73,7 @@ impl PopoverState {
 
     /// Whether a popup opened from inside this popover, such as a select's
     /// menu, is open.
+    #[allow(dead_code)]
     fn has_nested_popup(&self, cx: &App) -> bool {
         self.deferred_context
             .as_ref()
@@ -432,22 +433,10 @@ impl RenderOnce for Popover {
                 this.on_mouse_down_out({
                     let state = state.clone();
                     move |_, window, cx| {
-                        if !state.read(cx).has_nested_popup(cx) {
-                            state.update(cx, |state, cx| state.dismiss(window, cx));
-                            cx.notify(parent_view_id);
-                            return;
-                        }
-                        // A popup opened from inside is drawn outside these
-                        // bounds. A press outside it too closes it during this
-                        // event; one inside it leaves it open, and is not a
-                        // press outside the popover.
-                        let state = state.clone();
-                        window.defer(cx, move |window, cx| {
-                            if !state.read(cx).has_nested_popup(cx) {
-                                state.update(cx, |state, cx| state.dismiss(window, cx));
-                                cx.notify(parent_view_id);
-                            }
-                        });
+                        // HERDR (B29): dismiss immediately on outside mouse-down, including
+                        // clicks in a nested popup (matching 1ccf011).
+                        state.update(cx, |state, cx| state.dismiss(window, cx));
+                        cx.notify(parent_view_id);
                     }
                 })
             });
@@ -626,20 +615,13 @@ mod tests {
             !outer.contains(&in_inner_only),
             "the press must land outside the outer popover's bounds"
         );
+        // HERDR (B29): a press outside the outer popover (including in a nested popup)
+        // dismisses the parent popover immediately (matching 1ccf011).
         cx.simulate_click(in_inner_only, Default::default());
         cx.update(|window, cx| window.draw(cx).clear(cx));
-        assert!(cx.debug_bounds("inner-popover-content").is_some());
-        assert!(
-            cx.debug_bounds("outer-popover-content").is_some(),
-            "a press in the nested popup must not dismiss the popover"
-        );
-
-        cx.simulate_click(point(px(300.), px(300.)), Default::default());
-        cx.update(|window, cx| window.draw(cx).clear(cx));
-        assert!(cx.debug_bounds("inner-popover-content").is_none());
         assert!(
             cx.debug_bounds("outer-popover-content").is_none(),
-            "a press outside both closes both"
+            "a press outside the outer popover must dismiss it as on master"
         );
     }
 
