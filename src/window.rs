@@ -7900,6 +7900,8 @@ export default class Fixture extends View {
         assert_eq!(offsets(cx), (px(0.0), px(-200.0), px(0.0)), "it stops at its end and still keeps the event");
         swipe(cx, 100.0, -50.0);
         assert_eq!(offsets(cx), (px(-50.0), px(-200.0), px(0.0)), "at its end it passes the wheel on");
+        swipe(cx, 125.0, -30.0);
+        assert_eq!(offsets(cx), (px(-80.0), px(-200.0), px(0.0)), "a sideways box leaves an up-and-down swipe to the page");
     }
 
     #[test]

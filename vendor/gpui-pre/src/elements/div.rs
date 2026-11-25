@@ -3370,7 +3370,11 @@ impl Interactivity {
                             .filter(&mut delta, event.touch_phase);
                     }
 
-                    let turn = !restrict_scroll_to_axis;
+                    // HERDR: a touchpad swipe stays on its axis, as in a browser: a
+                    // box that only scrolls sideways leaves an up-and-down swipe to
+                    // what's around it. A mouse wheel, which has one axis, still
+                    // turns it (#1157).
+                    let turn = !restrict_scroll_to_axis && !event.delta.precise();
                     let mut delta_x = match overflow.x {
                         Overflow::Scroll if !delta.x.is_zero() => delta.x,
                         Overflow::Scroll if turn && overflow.y != Overflow::Scroll => delta.y,
