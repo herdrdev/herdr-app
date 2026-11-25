@@ -5,7 +5,11 @@ use web_time::Instant;
 static INTERVAL: Duration = Duration::from_millis(500);
 static PAUSE_DELAY: Duration = Duration::from_millis(300);
 
-pub(super) const CURSOR_WIDTH: Pixels = px(1.);
+// HERDR: keep per-OS caret widths (2px on Linux/Windows, 1.5px on macOS; matching 1ccf011).
+#[cfg(not(target_os = "macos"))]
+pub(super) const CURSOR_WIDTH: Pixels = px(2.);
+#[cfg(target_os = "macos")]
+pub(super) const CURSOR_WIDTH: Pixels = px(1.5);
 
 /// Application-wide caret visibility policy.
 ///
