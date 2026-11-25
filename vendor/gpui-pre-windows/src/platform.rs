@@ -1271,8 +1271,41 @@ impl WindowsPlatformInner {
                     if peek_msg(&mut msg, PM_QS_PAINT) {
                         process_message(&msg);
                     }
-                    while peek_msg(&mut msg, PM_QS_INPUT) {
-                        process_message(&msg);
+                    // HERDR: handle a queued IME commit before taking the next key,
+                    // or the commit reads back empty (see foreground_input.rs).
+                    use crate::foreground_input::{ForegroundMessageKind, drain_foreground_input};
+                    let mut quit_pending = false;
+                    drain_foreground_input(
+                        |kind| {
+                            if quit_pending {
+                                return None;
+                            }
+                            let found = match kind {
+                                ForegroundMessageKind::Ime => unsafe {
+                                    PeekMessageW(
+                                        &mut msg,
+                                        None,
+                                        WM_IME_STARTCOMPOSITION,
+                                        WM_IME_COMPOSITION,
+                                        PM_REMOVE,
+                                    )
+                                    .as_bool()
+                                },
+                                ForegroundMessageKind::Input => peek_msg(&mut msg, PM_QS_INPUT),
+                            };
+                            if found && msg.message == WM_QUIT {
+                                // PeekMessage can return WM_QUIT despite a filter.
+                                // Leave it for the outer GetMessage loop.
+                                unsafe { PostQuitMessage(msg.wParam.0 as i32) };
+                                quit_pending = true;
+                                return None;
+                            }
+                            found.then_some(msg)
+                        },
+                        |message| process_message(&message),
+                    );
+                    if quit_pending {
+                        return Some(0);
                     }
                     // Allow the main loop to process other gpui events before going back into `run_foreground_task`
                     unsafe {
