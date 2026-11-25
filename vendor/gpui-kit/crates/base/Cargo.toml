@@ -29,8 +29,6 @@ gpui-fast = ["dep:gpui-fast"]
 decimal = ["dep:rust_decimal"]
 test-support = ["gpui/test-support", "gpui-fast?/test-support", "dep:image"]
 inspector = ["gpui_macros/inspector", "gpui/inspector", "gpui-fast?/inspector"]
-# HERDR: use Window::yield_focus from Herdr's patched gpui-pre when enabled.
-yield-focus = []
 
 [dependencies]
 anyhow.workspace = true

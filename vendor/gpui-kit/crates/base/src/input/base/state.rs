@@ -1802,9 +1802,9 @@ impl<M: InputModeKind> InputBaseState<M> {
     pub fn blur(&self, window: &mut Window, cx: &mut Context<Self>) {
         if self.focus_handle.contains_focused(window, cx) {
             // HERDR: let the embedding app distinguish a handoff from disappearing focus.
-            #[cfg(all(feature = "yield-focus", not(feature = "gpui-fast")))]
+            #[cfg(not(feature = "gpui-fast"))]
             window.yield_focus(cx);
-            #[cfg(not(all(feature = "yield-focus", not(feature = "gpui-fast"))))]
+            #[cfg(feature = "gpui-fast")]
             window.blur(cx);
         }
     }
