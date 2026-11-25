@@ -476,7 +476,7 @@ impl Element for VirtualList {
             |style, window, cx| {
                 size_layout = window.with_element_state(
                     global_id.unwrap(),
-                    |state: Option<ItemSizeLayout>, _window| {
+                    |state: Option<ItemSizeLayout>, window| {
                         let mut state = state.unwrap_or(ItemSizeLayout::default());
 
                         // Including the gap between items for calculate the item size
@@ -496,7 +496,8 @@ impl Element for VirtualList {
                                 .iter()
                                 .enumerate()
                                 .map(|(i, size)| {
-                                    let size = size.along(self.axis);
+                                    // HERDR: pixel-snap item sizes so rows align cleanly under zoom.
+                                    let size = window.pixel_snap(size.along(self.axis));
                                     if i + 1 == self.items_count {
                                         size
                                     } else {
@@ -1078,5 +1079,40 @@ mod tests {
             "expected newly appended last row (29) visible, got {:?}",
             visible_ranges.borrow()
         );
+    }
+
+    #[gpui::test]
+    fn item_sizes_are_pixel_snapped(cx: &mut TestAppContext) {
+        struct SnapHarness;
+        impl Render for SnapHarness {
+            fn render(&mut self, _: &mut Window, cx: &mut Context<Self>) -> impl IntoElement {
+                virtual_list(
+                    cx.entity(),
+                    "virtual-list-snap",
+                    Axis::Vertical,
+                    Rc::new(vec![size(px(100.), px(10.3)); 3]),
+                    |_, visible_range, _, _| {
+                        visible_range
+                            .map(|ix| {
+                                div()
+                                    .w(px(100.))
+                                    .h(px(10.3))
+                                    .debug_selector(move || format!("snap-item-{ix}"))
+                            })
+                            .collect::<Vec<_>>()
+                    },
+                )
+                .w(px(100.))
+                .h(px(100.))
+            }
+        }
+        let (_, cx) = cx.add_window_view(|_, _| SnapHarness);
+        let expected = cx.update(|window, cx| {
+            window.draw(cx).clear(cx);
+            window.pixel_snap(px(10.3))
+        });
+        let first = cx.debug_bounds("snap-item-0").unwrap().origin;
+        let second = cx.debug_bounds("snap-item-1").unwrap().origin;
+        assert_eq!(second.y - first.y, expected);
     }
 }
