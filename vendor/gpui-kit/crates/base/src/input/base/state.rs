@@ -2521,13 +2521,10 @@ impl<M: InputModeKind> InputBaseState<M> {
             M::clear_inline_completion(self, cx);
         }
 
-        // In multi-line mode with `submit_on_enter` enabled, a plain `Enter`
-        // (without Shift) is treated as submit: propagate the action and emit
-        // PressEnter without inserting a newline. `Shift+Enter` still inserts
-        // a newline. A secondary `Enter` (Cmd/Ctrl+Enter) is always a submit
-        // gesture and never inserts a newline.
-        let insert_newline =
-            self.is_multi_line() && !action.secondary && (!self.submit_on_enter || action.shift);
+        // HERDR (B22): keep secondary Enter (Cmd/Ctrl+Enter) inserting a newline
+        // in multi-line inputs when `submit_on_enter` is off (matching 1ccf011),
+        // while still emitting `InputEvent::PressEnter`.
+        let insert_newline = self.is_multi_line() && (!self.submit_on_enter || action.shift);
 
         if insert_newline {
             if !self.selections.is_single() {
@@ -8813,10 +8810,19 @@ mod tests {
     }
 
     #[gpui::test]
-    fn test_textarea_secondary_enter_does_not_insert_newline(cx: &mut TestAppContext) {
+    fn test_textarea_secondary_enter_inserts_newline_and_emits_press_enter(cx: &mut TestAppContext) {
         let input_view = InputView::build_textarea(cx, |state| state);
         let mut cx = VisualTestContext::from_window(input_view.window_handle.into(), cx);
         let input = input_view.input;
+        let events = std::rc::Rc::new(std::cell::RefCell::new(Vec::new()));
+        let _sub = cx.update(|_, cx| {
+            let events = events.clone();
+            cx.subscribe(&input, move |_, event: &InputEvent, _| {
+                if let InputEvent::PressEnter { secondary, shift } = *event {
+                    events.borrow_mut().push((secondary, shift));
+                }
+            })
+        });
 
         cx.update(|window, cx| {
             input.update(cx, |state, cx| {
@@ -8830,9 +8836,10 @@ mod tests {
                     window,
                     cx,
                 );
-                assert_eq!(state.value(), "hello");
+                assert_eq!(state.value(), "\nhello");
             });
         });
+        assert_eq!(*events.borrow(), vec![(true, false)]);
     }
 
     #[gpui::test]
