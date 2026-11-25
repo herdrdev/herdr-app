@@ -169,9 +169,14 @@ impl ScrollBounce {
 
     /// Whether scroll areas bounce on this platform unless told otherwise:
     /// on iOS, Android and macOS, whose own scroll views do.
-    pub const fn enabled_by_default() -> bool {
-        // HERDR: keep scroll bounce off by default on every platform (including macOS).
+    /// HERDR (B15): keep scroll bounce off by default on desktop platforms (including macOS).
+    pub const fn enabled_by_default_for_os(is_macos: bool) -> bool {
+        let _ = is_macos;
         false
+    }
+
+    pub const fn enabled_by_default() -> bool {
+        Self::enabled_by_default_for_os(cfg!(target_os = "macos"))
     }
 
     /// Turn the bounce on or off. Defaults to [`Self::enabled_by_default`].
@@ -1563,5 +1568,10 @@ mod tests {
     #[test]
     fn scroll_bounce_is_off_by_default() {
         assert!(!ScrollBounce::enabled_by_default());
+        assert!(
+            !ScrollBounce::enabled_by_default_for_os(true),
+            "macOS scroll bounce must stay off by default"
+        );
+        assert!(!ScrollBounce::enabled_by_default_for_os(false));
     }
 }
