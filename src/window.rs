@@ -110,6 +110,12 @@ pub fn shell() -> String {
     std::env::var("SHELL").ok().filter(|s| !s.is_empty()).unwrap_or_else(|| "/bin/sh".into())
 }
 
+/// Agents start before the shell's first prompt, so prompt hooks never run.
+/// direnv loads `.envrc` from one: run its hook first, when the person's shell
+/// set it up, so an agent gets the environment a new terminal there has.
+pub const DIRENV_POSIX: &str = "command -v _direnv_hook >/dev/null 2>&1 && _direnv_hook; ";
+pub const DIRENV_FISH: &str = "functions -q __direnv_export_eval; and __direnv_export_eval; ";
+
 fn unix_agent_argv(sh: String, cmd: Vec<String>, login: bool) -> Vec<String> {
     let name = std::path::Path::new(&sh).file_name().and_then(|s| s.to_str());
     if !matches!(name, Some("sh" | "bash" | "zsh" | "dash" | "ksh" | "fish")) {
@@ -128,7 +134,8 @@ fn unix_agent_argv(sh: String, cmd: Vec<String>, login: bool) -> Vec<String> {
         (false, true) => "\"$@\"; exec \"$0\" -li",
         (false, false) => "\"$@\"; exec \"$0\" -i",
     };
-    let mut run = vec![sh.clone(), if login { "-lic" } else { "-ic" }.into(), script.into(), sh];
+    let script = format!("{}{script}", if fish { DIRENV_FISH } else { DIRENV_POSIX });
+    let mut run = vec![sh.clone(), if login { "-lic" } else { "-ic" }.into(), script, sh];
     run.extend(cmd);
     run
 }
@@ -2788,6 +2795,8 @@ impl AppWindow {
         root.split(&target, axis, Node::block(new.clone(), Content::Terminal { terminal: String::new() }), "initial-size".into());
         let size = self.model.active_tab().filter(|tab| tab.id == ctx)
             .and_then(|_| self.initial_size(&root, &new, window));
+        // A program starts in the person's shell, as in a new tab.
+        let argv = Self::agent_argv(argv.clone(), None, on.as_deref()).or(argv);
         let (addr, _) = self.spawn(argv, cwd, follow, &space, &ctx, on.as_deref(), size, window)?;
         self.model.split(&target, axis, &new, &addr);
         Ok(json!({ "pane": new, "terminal": addr }))
@@ -6284,10 +6293,10 @@ mod tests {
                 assert_eq!(run[3], sh);
                 assert_eq!(run[4..], cmd);
                 let expected = match (sh.ends_with("/fish"), login) {
-                    (true, true) => "command $argv[2..]; exec $argv[1] -li",
-                    (true, false) => "command $argv[2..]; exec $argv[1] -i",
-                    (false, true) => "\"$@\"; exec \"$0\" -li",
-                    (false, false) => "\"$@\"; exec \"$0\" -i",
+                    (true, true) => "functions -q __direnv_export_eval; and __direnv_export_eval; command $argv[2..]; exec $argv[1] -li",
+                    (true, false) => "functions -q __direnv_export_eval; and __direnv_export_eval; command $argv[2..]; exec $argv[1] -i",
+                    (false, true) => "command -v _direnv_hook >/dev/null 2>&1 && _direnv_hook; \"$@\"; exec \"$0\" -li",
+                    (false, false) => "command -v _direnv_hook >/dev/null 2>&1 && _direnv_hook; \"$@\"; exec \"$0\" -i",
                 };
                 assert_eq!(run[2], expected);
                 // Whatever the wrapper, a pane shows the agent it runs, not the shell.

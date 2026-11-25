@@ -6,7 +6,10 @@ pub fn check(commands: &[String]) -> Vec<String> {
 }
 
 pub fn launch(command: Vec<String>) -> Vec<String> {
-    in_shell("\"$@\"; exec \"$0\" -li", "command $argv[2..]; exec $argv[1] -li", "\"$@\"; exec \"${SHELL:-sh}\" -i", command)
+    use crate::window::{DIRENV_FISH, DIRENV_POSIX};
+    let posix = format!("{DIRENV_POSIX}\"$@\"; exec \"$0\" -li");
+    let fish = format!("{DIRENV_FISH}command $argv[2..]; exec $argv[1] -li");
+    in_shell(&posix, &fish, "\"$@\"; exec \"${SHELL:-sh}\" -i", command)
 }
 
 /// Select the shell there, not the viewer's shell. The core may have started
@@ -157,6 +160,50 @@ mod tests {
         let out = home.run(launch(vec!["fixture_agent".into(), "a 'quoted' task; $(not-a-command)".into(), "".into()]), Some(shell));
         let stdout = String::from_utf8(out.stdout).unwrap();
         assert!(stdout.contains("<a 'quoted' task; $(not-a-command)>\n<>\n"), "{stdout:?}");
+    }
+
+    fn loads_direnv_before_the_agent(shell: &str, rc: &str) {
+        let home = Home::new();
+        let hook = "_direnv_hook() { export HERDR_TEST_DIRENV=loaded; }\n";
+        let text = std::fs::read_to_string(home.0.join(rc)).unwrap();
+        std::fs::write(home.0.join(rc), format!("{text}{hook}")).unwrap();
+        let out = home.run(launch(vec!["sh".into(), "-c".into(), "printf '<%s>\\n' \"$HERDR_TEST_DIRENV\"".into()]), Some(shell));
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        assert!(stdout.contains("<loaded>\n"), "{stdout:?}: {}", String::from_utf8_lossy(&out.stderr));
+    }
+
+    #[test]
+    fn bash_runs_the_direnv_hook_before_the_agent() {
+        loads_direnv_before_the_agent("/bin/bash", ".bashrc");
+    }
+
+    #[test]
+    fn zsh_runs_the_direnv_hook_before_the_agent() {
+        if std::path::Path::new("/bin/zsh").exists() {
+            loads_direnv_before_the_agent("/bin/zsh", ".zshrc");
+        }
+    }
+
+    #[test]
+    fn fish_runs_the_direnv_hook_before_the_agent() {
+        let shell = "/usr/bin/fish";
+        if !std::path::Path::new(shell).exists() {
+            return;
+        }
+        let home = Home::new();
+        let config = home.0.join(".config/fish");
+        std::fs::create_dir_all(&config).unwrap();
+        std::fs::write(config.join("config.fish"), "function __direnv_export_eval --on-event fish_prompt\nset -gx HERDR_TEST_DIRENV loaded\nend\n").unwrap();
+        let out = home.run(launch(vec!["sh".into(), "-c".into(), "printf '<%s>\\n' \"$HERDR_TEST_DIRENV\"".into()]), Some(shell));
+        let stdout = String::from_utf8(out.stdout).unwrap();
+        assert!(stdout.contains("<loaded>\n"), "{stdout:?}");
+    }
+
+    #[test]
+    fn shells_without_direnv_launch_as_before() {
+        let home = Home::new();
+        let out = home.run(launch(vec!["sh".into(), "-c".into(), "printf '<%s>\\n' \"${HERDR_TEST_DIRENV-unset}\"".into()]), Some("/bin/bash"));
+        assert!(String::from_utf8(out.stdout).unwrap().contains("<unset>\n"));
     }
 
     #[test]

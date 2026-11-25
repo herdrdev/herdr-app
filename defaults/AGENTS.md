@@ -623,7 +623,8 @@ The main ones:
   space shown, the new space is shown), for work the person looks at later;
   such tabs go last in their space, in the order made. `focus` is a boolean.
 - Panes: `pane.split {direction: "right" | "down", pane?, argv? | mod?, props?}` (a new
-  terminal, or a mod pane), `pane.close {pane?}`,
+  terminal, or a mod pane; `argv` runs in your interactive shell, which stays
+  open after it exits, as in `tab.new`), `pane.close {pane?}`,
   `pane.zoom {pane?}`, `pane.focus {pane | terminal}`, `pane.go {direction}`,
   `pane.swap {pane?, direction | target}`, `pane.rename {pane?, name}` ("": unnamed
   again; `panes()[i].name`, kept with its tab), `pane.resize {direction, pane?, px?}` (moves
@@ -905,7 +906,10 @@ has 124 programs (agents, editors, runtimes, tools, databases, infra);
   On remote Unix machines, both the installed-agent check and launcher load
   that user's login/interactive shell for sh, bash, zsh, dash, ksh and fish, so
   its PATH includes shell-configured tools. Other shells keep the sh launcher.
-  Local Linux launches keep interactive non-login shells. Local and remote checks
+  Local Linux launches keep interactive non-login shells. Agents start before
+  the shell's first prompt, so when the shell set up direnv's hook (bash, zsh,
+  fish), the launcher runs it first: the agent gets the folder's `.envrc`
+  like a new terminal there. Local and remote checks
   include functions in bash and zsh; fish checks find executables only. Installation
   checks are cached for up to a minute; changing the commands checks again.
   Invalid JSON is reported in `programs.error` (a valid file has no error).

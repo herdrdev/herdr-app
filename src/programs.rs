@@ -316,11 +316,12 @@ fn resolve(t: &Table, app: Option<&str>, argv: &[String]) -> Value {
     }
     // The app starts commands in the person's shell: `zsh -ic '"$@"; exec "$0" -i' zsh <cmd>...`,
     // or fish's `command $argv[2..]; exec $argv[1] -i`; on macOS both as login shells (`-lic`, `-li`).
+    // The script may first run direnv's hook (`window::DIRENV_POSIX`, `DIRENV_FISH`); older launches did not.
     if argv.len() > 4
         && t.shells.iter().any(|s| s == base(&argv[0]))
         && argv[1].starts_with('-')
         && argv[1].ends_with('c')
-        && (argv[2].contains("\"$@\"") || matches!(argv[2].as_str(), "command $argv[2..]; exec $argv[1] -i" | "command $argv[2..]; exec $argv[1] -li"))
+        && (argv[2].contains("\"$@\"") || ["command $argv[2..]; exec $argv[1] -i", "command $argv[2..]; exec $argv[1] -li"].iter().any(|s| argv[2].ends_with(s)))
     {
         return resolve(t, None, &argv[4..]);
     }
