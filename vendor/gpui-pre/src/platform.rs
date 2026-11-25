@@ -2781,6 +2781,9 @@ pub struct PathPromptOptions {
     pub multiple: bool,
     /// The prompt to show to a user when selecting a path
     pub prompt: Option<SharedString>,
+    /// HERDR: the folder the picker opens in; None keeps the platform's choice
+    /// (usually the last one picked).
+    pub directory: Option<PathBuf>,
 }
 
 /// What kind of prompt styling to show

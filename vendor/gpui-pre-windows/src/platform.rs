@@ -1515,6 +1515,18 @@ fn file_open_dialog(
             folder_dialog.SetOkButtonLabel(&HSTRING::from(prompt))?;
         }
 
+        // HERDR: open where the caller asked, as the save dialog does.
+        if let Some(full_path) = options.directory.as_deref().and_then(|d| {
+            d.canonicalize().context("failed to canonicalize directory").log_err()
+        }) {
+            let full_path_string = dunce::simplified(&full_path).display().to_string();
+            // A folder the shell can't open leaves the picker where it was, not failed.
+            let path_item: Result<IShellItem, windows::core::Error> = SHCreateItemFromParsingName(&HSTRING::from(full_path_string), None);
+            if let Some(path_item) = path_item.context("failed to open dialog folder").log_err() {
+                folder_dialog.SetFolder(&path_item).context("failed to set dialog folder").log_err();
+            }
+        }
+
         if let Err(error) = folder_dialog.Show(window) {
             if error.code() == HRESULT::from_win32(ERROR_CANCELLED.0) {
                 return Ok(None);

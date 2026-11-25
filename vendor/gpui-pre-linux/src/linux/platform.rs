@@ -774,15 +774,22 @@ impl Platform for LinuxPlatform {
                     "Open File"
                 };
 
-                let request = match ashpd::desktop::file_chooser::OpenFileRequest::default()
+                let request_builder = ashpd::desktop::file_chooser::OpenFileRequest::default()
                     .identifier(identifier.await)
                     .modal(true)
                     .title(title)
                     .accept_label(options.prompt.as_ref().map(gpui::SharedString::as_str))
                     .multiple(options.multiple)
-                    .directory(options.directories)
-                    .send()
-                    .await
+                    .directory(options.directories);
+                // HERDR: open where the caller asked, as the save dialog does.
+                let request_builder = match request_builder.current_folder(options.directory.as_deref()) {
+                    Ok(builder) => builder,
+                    Err(err) => {
+                        done_tx.send(Err(err.into())).ok();
+                        return;
+                    }
+                };
+                let request = match request_builder.send().await
                 {
                     Ok(request) => request,
                     Err(err) => {

@@ -910,6 +910,10 @@ impl Platform for MacPlatform {
 
                 panel.setCanCreateDirectories(true);
                 panel.setResolvesAliases(false);
+                // HERDR: open where the caller asked, as the save panel does.
+                if let Some(directory) = &options.directory {
+                    panel.setDirectoryURL(objc2_foundation::NSURL::from_directory_path(directory).as_deref());
+                }
 
                 let done_tx = Cell::new(Some(done_tx));
                 let handler = RcBlock::new({

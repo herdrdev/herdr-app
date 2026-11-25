@@ -1192,7 +1192,7 @@ fn module(inst: Instance, copy: u64) -> HostModule {
         .async_function("feedbackPickImages", move |_| {
             if !feedback_frame { return Err(HostError::new("feedback screenshots are frame-only")); }
             let picked = gpui_shell::with_current_app(|cx| cx.prompt_for_paths(gpui::PathPromptOptions {
-                files: true, directories: false, multiple: true, prompt: Some("Add".into()),
+                files: true, directories: false, multiple: true, prompt: Some("Add".into()), directory: None,
             })).ok_or_else(|| HostError::new("no window to pick from"))?;
             Ok(async move {
                 let paths = picked.await.ok().and_then(Result::ok).flatten().unwrap_or_default();
@@ -1216,7 +1216,7 @@ fn module(inst: Instance, copy: u64) -> HostModule {
         .async_function("pickFolder", |a| {
             let prompt = a.get(0).map(from_host).and_then(|v| v.get("prompt").and_then(Value::as_str).map(str::to_owned)).unwrap_or_else(|| "Open".into());
             let picked = gpui_shell::with_current_app(|cx| cx.prompt_for_paths(gpui::PathPromptOptions {
-                files: false, directories: true, multiple: false, prompt: Some(prompt.into()),
+                files: false, directories: true, multiple: false, prompt: Some(prompt.into()), directory: None,
             })).ok_or_else(|| HostError::new("no window to pick from"))?;
             Ok(async move {
                 let path = picked.await.ok().and_then(Result::ok).flatten().and_then(|p| p.into_iter().next());
@@ -1228,7 +1228,7 @@ fn module(inst: Instance, copy: u64) -> HostModule {
             let prompt = opt_str(options, "prompt").unwrap_or_else(|| "Open".into());
             let multiple = options.and_then(|o| o.get("multiple")).and_then(HostValue::as_bool).unwrap_or(false);
             let picked = gpui_shell::with_current_app(|cx| cx.prompt_for_paths(gpui::PathPromptOptions {
-                files: true, directories: false, multiple, prompt: Some(prompt.into()),
+                files: true, directories: false, multiple, prompt: Some(prompt.into()), directory: None,
             })).ok_or_else(|| HostError::new("no window to pick from"))?;
             Ok(async move {
                 let paths = picked.await.map_err(|_| HostError::new("the file picker was lost"))?
