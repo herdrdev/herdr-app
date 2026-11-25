@@ -2049,6 +2049,16 @@ impl PlatformWindow for WaylandWindow {
         self.0.callbacks.borrow_mut().button_layout_changed = Some(callback);
     }
 
+    // HERDR: capture uses the window's atlas, without acquiring a display surface.
+    #[cfg(feature = "render-to-image")]
+    fn render_to_image(&self, scene: &Scene) -> anyhow::Result<image::RgbaImage> {
+        self.borrow_mut()
+            .renderer
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("window renderer is unavailable"))?
+            .render_to_image(scene)
+    }
+
     fn draw(&self, scene: &Scene) {
         let mut state = self.borrow_mut();
         let state = &mut *state;

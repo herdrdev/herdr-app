@@ -1779,6 +1779,18 @@ impl PlatformWindow for X11Window {
         self.0.callbacks.borrow_mut().button_layout_changed = Some(callback);
     }
 
+    // HERDR: capture uses the window's atlas, without acquiring a display surface.
+    #[cfg(feature = "render-to-image")]
+    fn render_to_image(&self, scene: &Scene) -> anyhow::Result<image::RgbaImage> {
+        self.0
+            .state
+            .borrow_mut()
+            .renderer
+            .as_mut()
+            .ok_or_else(|| anyhow::anyhow!("window renderer is unavailable"))?
+            .render_to_image(scene)
+    }
+
     fn draw(&self, scene: &Scene) {
         let mut inner = self.0.state.borrow_mut();
         let inner = &mut *inner;
