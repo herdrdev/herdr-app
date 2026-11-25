@@ -3706,7 +3706,8 @@ fn paint_text_selection(state: &Entity<WindowSelectionState>, window: &mut Windo
 
     let mouse_up_state = state.downgrade();
     window.on_mouse_event(move |_: &MouseUpEvent, phase, _, cx| {
-        if phase.bubble()
+        // HERDR: a control can consume the release during bubble after selection began.
+        if phase.capture()
             && let Some(state) = mouse_up_state.upgrade()
         {
             state.update(cx, |state, cx| state.end(cx));
@@ -6347,5 +6348,81 @@ mod herdr_boundary_tests {
             !selected.contains("gamma"),
             "boundary B must not join boundary A's drag: {selected:?}"
         );
+    }
+}
+
+// HERDR: verify capture-phase mouse-up ends shared text selection even when a control stops propagation.
+#[cfg(test)]
+mod herdr_mouse_up_tests {
+    use gpui::{
+        Context, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
+        MouseUpEvent, ParentElement as _, Render, Styled as _, TestAppContext, Window, div, point,
+        px,
+    };
+
+    use super::*;
+    use crate::SelectableText;
+
+    struct ConsumingTarget;
+
+    impl Render for ConsumingTarget {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .flex()
+                .flex_col()
+                .w(px(300.))
+                .child(TextSelectionLayer)
+                .child(
+                    div()
+                        .debug_selector(|| "src".into())
+                        .child(SelectableText::new("src", "hello world")),
+                )
+                .child(
+                    div()
+                        .h(px(40.))
+                        .debug_selector(|| "sink".into())
+                        .on_mouse_up(MouseButton::Left, |_, _, cx| {
+                            cx.stop_propagation();
+                        }),
+                )
+        }
+    }
+
+    #[gpui::test]
+    fn consumed_mouse_up_still_ends_text_selection(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let (_, vcx) = cx.add_window_view(|_, _| ConsumingTarget);
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+
+        let src = vcx.debug_bounds("src").unwrap();
+        let sink = vcx.debug_bounds("sink").unwrap();
+        let start = point(src.left() + px(1.), src.center().y);
+        let release = sink.center();
+
+        vcx.simulate_event(MouseDownEvent {
+            position: start,
+            modifiers: gpui::Modifiers::default(),
+            button: MouseButton::Left,
+            click_count: 1,
+            first_mouse: false,
+        });
+        vcx.simulate_event(MouseMoveEvent {
+            position: release,
+            pressed_button: Some(MouseButton::Left),
+            modifiers: gpui::Modifiers::default(),
+        });
+        vcx.simulate_event(MouseUpEvent {
+            position: release,
+            button: MouseButton::Left,
+            modifiers: gpui::Modifiers::default(),
+            click_count: 1,
+        });
+
+        let still_selecting = vcx.update(|window, cx| {
+            WindowSelectionState::existing(window, cx)
+                .map(|s| s.read(cx).is_selecting)
+                .unwrap_or(false)
+        });
+        assert!(!still_selecting, "mouse-up consumed by a child left selection dragging");
     }
 }
