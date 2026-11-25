@@ -1265,6 +1265,8 @@ pub struct Window {
     focused_text_input: Option<FocusId>,
     pub(crate) image_cache_stack: Vec<AnyImageCache>,
     pub(crate) rendered_frame: Frame,
+    // HERDR: distinguish an empty scene from a window that has not drawn yet.
+    rendered_frame_size: Option<(Size<Pixels>, f32)>,
     pub(crate) next_frame: Frame,
     next_hitbox_id: HitboxId,
     native_views: Vec<std::rc::Weak<NativeViewState>>,
@@ -2456,6 +2458,7 @@ impl Window {
             last_text_input_configuration: None,
             focused_text_input: None,
             rendered_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
+            rendered_frame_size: None,
             next_frame: Frame::new(DispatchTree::new(cx.keymap.clone(), cx.actions.clone())),
             next_frame_callbacks,
             next_hitbox_id: HitboxId(0),
@@ -3252,8 +3255,21 @@ impl Window {
     /// Renders the current frame's scene to a texture and returns the pixel data as an RGBA image.
     /// This does not present the frame to screen - useful for visual testing where we want
     /// to capture what would be rendered without displaying it or requiring the window to be visible.
-    #[cfg(any(test, feature = "test-support"))]
+    // HERDR: guard capture against unrendered or stale-sized frames.
+    #[cfg(any(test, feature = "test-support", feature = "render-to-image"))]
     pub fn render_to_image(&self) -> anyhow::Result<image::RgbaImage> {
+        anyhow::ensure!(
+            self.rendered_frame_size.is_some(),
+            "no window frame has been rendered yet"
+        );
+        anyhow::ensure!(
+            self.rendered_frame_size
+                == Some((
+                    self.platform_window.content_size(),
+                    self.platform_window.scale_factor()
+                )),
+            "window size or scale changed; wait for the next frame"
+        );
         self.platform_window
             .render_to_image(&self.rendered_frame.scene)
     }
@@ -3925,6 +3941,7 @@ impl Window {
         let previous_focus_path = self.rendered_frame.focus_path();
         let previous_window_active = self.rendered_frame.window_active;
         mem::swap(&mut self.rendered_frame, &mut self.next_frame);
+        self.rendered_frame_size = Some((self.viewport_size, self.scale_factor));
         self.scene_animation_interval
             .set(self.rendered_frame.scene.animation_frame_interval());
         self.next_frame.clear();
@@ -8016,6 +8033,15 @@ impl<V: 'static + Render> WindowHandle<V> {
         cx.update_window(self.any_handle, |_, window, _| window.is_window_active())
             .ok()
     }
+
+    /// HERDR: Synchronizes pending updates for this window and captures its current frame as an RGBA image.
+    #[cfg(any(test, feature = "test-support", feature = "render-to-image"))]
+    pub fn render_current_to_image<C: crate::AppContext>(
+        &self,
+        cx: &mut C,
+    ) -> anyhow::Result<image::RgbaImage> {
+        self.any_handle.render_current_to_image(cx)
+    }
 }
 
 impl<V> Copy for WindowHandle<V> {}
@@ -8106,6 +8132,68 @@ impl AnyWindowHandle {
             .context("the type of the window's root view has changed")?;
 
         cx.read_window(&view, read)
+    }
+
+    /// Synchronizes pending updates for this window and captures its current frame as an RGBA image.
+    #[cfg(any(test, feature = "test-support", feature = "render-to-image"))]
+    pub fn render_current_to_image<C: crate::AppContext>(
+        self,
+        cx: &mut C,
+    ) -> anyhow::Result<image::RgbaImage> {
+        anyhow::ensure!(!draw_in_progress(), "cannot capture window image during draw");
+
+        // HERDR: separate update closures flush App effects between phases;
+        // two passes bound animation cascades; schedule/wake re-arms presentation
+        // because draw() sets needs_present without calling present().
+        for _ in 0..2 {
+            self.update(cx, |_, window, cx| -> anyhow::Result<()> {
+                anyhow::ensure!(
+                    window.rendered_frame_size.is_some(),
+                    "no window frame has been rendered yet"
+                );
+                let size = window.platform_window.content_size();
+                let scale = window.platform_window.scale_factor();
+                if size.width > px(0.) && size.height > px(0.) && scale > 0.0 {
+                    if window.viewport_size != size || window.scale_factor != scale {
+                        window.bounds_changed(cx);
+                    } else if window.rendered_frame_size != Some((size, scale)) {
+                        window.refresh();
+                    }
+                }
+                for callback in window.next_frame_callbacks.take() {
+                    callback(window, cx);
+                }
+                Ok(())
+            })??;
+
+            let drew = self.update(cx, |_, window, cx| -> bool {
+                if !window.invalidator.is_dirty() && window.dirty_views.is_empty() {
+                    return false;
+                }
+                window.draw(cx).clear(cx);
+                true
+            })?;
+
+            if !drew
+                && self.update(cx, |_, window, _| {
+                    window.next_frame_callbacks.borrow().is_empty()
+                })?
+            {
+                break;
+            }
+        }
+
+        self.update(cx, |_, window, _| {
+            if window.invalidator.is_dirty()
+                || !window.dirty_views.is_empty()
+                || !window.next_frame_callbacks.borrow().is_empty()
+                || window.needs_present.get()
+            {
+                window.platform_window.schedule_frame();
+                window.invalidator.wake_platform();
+            }
+            window.render_to_image()
+        })?
     }
 }
 

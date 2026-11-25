@@ -51,6 +51,8 @@ zed-version = "0.2.2"
 zed-rev = "f126950f9d3b62666f97437ae5d4ccac2272c4db"
 
 [features]
+# HERDR: frame capture is a production API, independent of test infrastructure.
+render-to-image = []
 bench = ["bench-support"]
 bench-support = [
     "profiler",
