@@ -818,7 +818,8 @@ impl DirectWriteState {
                 .GetGlyphIndices(&raw const codepoints, 1, &raw mut glyph_indices)
                 .log_err()
         }
-        .map(|_| GlyphId(glyph_indices as u32))
+        // HERDR: GetGlyphIndices returns 0 (.notdef) for missing codepoints.
+        .and_then(|_| (glyph_indices != 0).then_some(GlyphId(glyph_indices as u32)))
     }
 
     fn rasterize_glyph(
@@ -2033,6 +2034,22 @@ mod tests {
                     }
                 }
             }
+        }
+        Ok(())
+    }
+
+    // HERDR: verify missing codepoints map to None rather than GlyphId(0).
+    #[test]
+    fn missing_characters_have_no_glyph() -> Result<()> {
+        let text_system = DirectWriteTextSystem::new()?;
+        let font_id = text_system.font_id(&Font {
+            family: "Consolas".into(),
+            ..Default::default()
+        })?;
+
+        assert!(text_system.glyph_for_char(font_id, 'M').is_some());
+        for ch in ['\u{f115}', '\u{f090}', '\u{f08b}', '\u{10ffff}'] {
+            assert_eq!(text_system.glyph_for_char(font_id, ch), None);
         }
         Ok(())
     }
