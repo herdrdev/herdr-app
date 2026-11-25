@@ -1913,17 +1913,6 @@ fn calendar_state(
         })
 }
 
-/// A `Date` on the wire: one slot for a single day, two for a range.
-///
-/// The slot *count* is what carries the variant, and it has to. A single day
-/// and a range whose end is not chosen yet hold the same one date, and both
-/// render as the same string — but base branches on the difference in
-/// `is_single`, `is_complete` and `is_in_range`, so a wire that dropped it
-/// would quietly turn every `set_value("2026-08-15")` into a half-open range.
-///
-/// The prelude narrows this to `null`, a string or a pair before a script sees
-/// it, and widens it back the same way. Shared with the event dispatch so the
-/// two directions cannot drift.
 /// Explicit calendar wire format matching Chrono's `NaiveDate::to_string()`:
 /// `YYYY-MM-DD` for non-negative years and `-YYYY-MM-DD` for negative years,
 /// so every date round-trips cleanly through `jiff::civil::Date::strptime("%Y-%m-%d", ...)`.
@@ -1936,6 +1925,17 @@ fn format_civil_date(day: jiff::civil::Date) -> String {
     }
 }
 
+/// A `Date` on the wire: one slot for a single day, two for a range.
+///
+/// The slot *count* is what carries the variant, and it has to. A single day
+/// and a range whose end is not chosen yet hold the same one date, and both
+/// render as the same string — but base branches on the difference in
+/// `is_single`, `is_complete` and `is_in_range`, so a wire that dropped it
+/// would quietly turn every `set_value("2026-08-15")` into a half-open range.
+///
+/// The prelude narrows this to `null`, a string or a pair before a script sees
+/// it, and widens it back the same way. Shared with the event dispatch so the
+/// two directions cannot drift.
 pub(super) fn date_to_parts(date: gpui_base::Date) -> Vec<Option<String>> {
     match date {
         gpui_base::Date::Single(day) => vec![day.map(format_civil_date)],
