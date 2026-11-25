@@ -1797,6 +1797,18 @@ impl<M: InputModeKind> InputBaseState<M> {
         });
     }
 
+    /// HERDR: Give up the keyboard when the field or one of its descendants has focus.
+    /// The state remains usable and receives the usual focus-loss notification.
+    pub fn blur(&self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.focus_handle.contains_focused(window, cx) {
+            // HERDR: let the embedding app distinguish a handoff from disappearing focus.
+            #[cfg(all(feature = "yield-focus", not(feature = "gpui-fast")))]
+            window.yield_focus(cx);
+            #[cfg(not(all(feature = "yield-focus", not(feature = "gpui-fast"))))]
+            window.blur(cx);
+        }
+    }
+
     /// Refresh the input, so the next render re-runs syntax highlighting and
     /// the LSP providers, not just a redraw.
     ///
@@ -14304,5 +14316,54 @@ mod herdr_input_tests {
         vcx.run_until_parked();
         assert_eq!(fired.get(), 1);
         assert_eq!(state.read_with(vcx, |s, _| s.value()), "keep");
+    }
+
+    #[gpui::test]
+    fn blur_releases_focus_when_focused(cx: &mut TestAppContext) {
+        struct BlurHarness(Entity<crate::input::InputState>);
+        impl Render for BlurHarness {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                crate::input::Input::new(&self.0)
+            }
+        }
+
+        cx.update(crate::init);
+        let blurred = Rc::new(Cell::new(0usize));
+        let blurred_cb = blurred.clone();
+        let (view, vcx) = cx.add_window_view(|window, cx| {
+            let state = cx.new(|cx| crate::input::InputState::new(window, cx));
+            cx.subscribe(&state, move |_, _, event: &InputEvent, _| {
+                if matches!(event, InputEvent::Blur) {
+                    blurred_cb.set(blurred_cb.get() + 1);
+                }
+            })
+            .detach();
+            BlurHarness(state)
+        });
+        let state = view.read_with(vcx, |h, _| h.0.clone());
+        let other_focus = vcx.update(|window, cx| {
+            window.activate_window();
+            let other = cx.focus_handle();
+            window.draw(cx).clear(cx);
+            state.update(cx, |state, cx| state.focus(window, cx));
+            window.draw(cx).clear(cx);
+            assert!(state.read(cx).focus_handle(cx).is_focused(window));
+            other
+        });
+        vcx.run_until_parked();
+        vcx.update(|window, cx| {
+            state.update(cx, |state, cx| state.blur(window, cx));
+            window.draw(cx).clear(cx);
+            assert!(!state.read(cx).focus_handle(cx).is_focused(window));
+        });
+        vcx.run_until_parked();
+        assert_eq!(blurred.get(), 1);
+        // Calling blur() while another handle is focused must leave that handle focused.
+        vcx.update(|window, cx| {
+            other_focus.focus(window, cx);
+            window.draw(cx).clear(cx);
+            state.update(cx, |state, cx| state.blur(window, cx));
+            assert!(other_focus.is_focused(window));
+        });
     }
 }
