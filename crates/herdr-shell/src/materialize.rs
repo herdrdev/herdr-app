@@ -122,7 +122,7 @@ use smallvec::SmallVec;
 
 use gpui::{
     AbsoluteLength, AnyElement, App, AppContext, Bounds, DefiniteLength, InteractiveElement, IntoElement,
-    Length, MouseButton, ParentElement, Pixels, Refineable as _, SharedString,
+    Length, MouseButton, NavigationDirection, ParentElement, Pixels, Refineable as _, SharedString,
     StatefulInteractiveElement, StyleRefinement, Styled, Window, div,
 };
 use gpui_base::{
@@ -316,6 +316,8 @@ struct Behavior {
     disabled: bool,
     selectable: Option<bool>,
     text_scrollable: Option<bool>,
+    /// HERDR: `raw_html(false)` keeps a TextView's Markdown HTML as text.
+    raw_html: Option<bool>,
     on_link_click: Option<CallbackId>,
     /// HERDR: `on_selection_change(handler)` on a TextView.
     on_selection_change: Option<CallbackId>,
@@ -351,6 +353,8 @@ struct Behavior {
     on_token_click: Option<CallbackId>,
     on_token_hover: Option<CallbackId>,
     on_mouse_move: Option<CallbackId>,
+    /// Observes moves anywhere in the window.
+    on_window_mouse_move: Option<CallbackId>,
     on_hover: Option<CallbackId>,
     /// Reports a key press that reached this element.
     ///
@@ -373,6 +377,8 @@ struct Behavior {
     on_mouse_down: SmallVec<[(MouseButton, CallbackId); 1]>,
     /// Releases on this element, listed the same way.
     on_mouse_up: SmallVec<[(MouseButton, CallbackId); 1]>,
+    /// Observes releases anywhere in the window.
+    on_window_mouse_up: SmallVec<[(MouseButton, CallbackId); 1]>,
     /// A press anywhere outside this element, delivered during the capture
     /// phase.
     ///
@@ -1124,6 +1130,9 @@ fn materialize_component(
             }
             if let Some(scrollable) = behavior.text_scrollable {
                 view = view.scrollable(scrollable);
+            }
+            if let Some(raw_html) = behavior.raw_html {
+                view = view.markdown_raw_html(raw_html);
             }
             // HERDR: highlights and selection reports, in UTF-16 offsets of
             // the Markdown source, the way a script indexes its strings.
@@ -1987,6 +1996,41 @@ where
     element
 }
 
+fn with_window_mouse(element: gpui::Div, behavior: &Behavior, runtime: &Rc<ShellRuntime>) -> gpui::Div {
+    let moves = behavior.on_window_mouse_move;
+    let ups = &behavior.on_window_mouse_up;
+    if moves.is_none() && ups.is_empty() {
+        return element;
+    }
+    let ups = ups.clone();
+    let runtime = Rc::downgrade(runtime);
+    element.on_paint(move |bounds, window, _| {
+        if let Some(callback) = moves {
+            let runtime = runtime.clone();
+            window.observe_mouse_event(move |event: &gpui::MouseMoveEvent, window, cx| {
+                if let Some(runtime) = runtime.upgrade() {
+                    runtime.dispatch_mouse_move(
+                        callback,
+                        event,
+                        event.position - bounds.origin,
+                        bounds,
+                        window,
+                        cx,
+                    );
+                }
+            });
+        }
+        for (button, callback) in ups {
+            let runtime = runtime.clone();
+            window.observe_mouse_event(move |event: &gpui::MouseUpEvent, window, cx| {
+                if event.button == button {
+                    dispatch_mouse_button(&runtime, callback, event, Some(bounds), window, cx);
+                }
+            });
+        }
+    })
+}
+
 /// One dispatch for the three press-and-release builders.
 ///
 /// `MouseDownEvent` and `MouseUpEvent` are different types carrying the same
@@ -2189,7 +2233,7 @@ fn flex_element(
     window: &mut Window,
     cx: &mut App,
 ) -> AnyElement {
-    let element = with_hover(element, &states);
+    let element = with_window_mouse(with_hover(element, &states), &behavior, runtime);
     if behavior.key.is_none()
         && !states.needs_identity()
         && !behavior.needs_identity()
@@ -2767,6 +2811,22 @@ pub(in crate::materialize) fn resolve_ops(
                 "on_link_click" => behavior.on_link_click = Some(*id),
                 "on_selection_change" => behavior.on_selection_change = Some(*id),
                 "on_mouse_move" => behavior.on_mouse_move = Some(*id),
+                "on_window_mouse_move" => behavior.on_window_mouse_move = Some(*id),
+                "on_window_mouse_up_left" => {
+                    behavior.on_window_mouse_up.push((MouseButton::Left, *id))
+                }
+                "on_window_mouse_up_right" => {
+                    behavior.on_window_mouse_up.push((MouseButton::Right, *id))
+                }
+                "on_window_mouse_up_middle" => {
+                    behavior.on_window_mouse_up.push((MouseButton::Middle, *id))
+                }
+                "on_window_mouse_up_back" => behavior
+                    .on_window_mouse_up
+                    .push((MouseButton::Navigate(NavigationDirection::Back), *id)),
+                "on_window_mouse_up_forward" => behavior
+                    .on_window_mouse_up
+                    .push((MouseButton::Navigate(NavigationDirection::Forward), *id)),
                 "on_hover" => behavior.on_hover = Some(*id),
                 "on_key_down" => behavior.on_key_down = Some(*id),
                 "on_key_up" => behavior.on_key_up = Some(*id),
@@ -2781,6 +2841,11 @@ pub(in crate::materialize) fn resolve_ops(
                 "on_mouse_up_left" => behavior.on_mouse_up.push((MouseButton::Left, *id)),
                 "on_mouse_up_right" => behavior.on_mouse_up.push((MouseButton::Right, *id)),
                 "on_mouse_up_middle" => behavior.on_mouse_up.push((MouseButton::Middle, *id)),
+                // HERDR: the mouse's side buttons.
+                "on_mouse_down_back" => behavior.on_mouse_down.push((MouseButton::Navigate(NavigationDirection::Back), *id)),
+                "on_mouse_down_forward" => behavior.on_mouse_down.push((MouseButton::Navigate(NavigationDirection::Forward), *id)),
+                "on_mouse_up_back" => behavior.on_mouse_up.push((MouseButton::Navigate(NavigationDirection::Back), *id)),
+                "on_mouse_up_forward" => behavior.on_mouse_up.push((MouseButton::Navigate(NavigationDirection::Forward), *id)),
                 "on_mouse_down_out" => behavior.on_mouse_down_out = Some(*id),
                 "on_drop" => behavior.on_drop = Some(*id),
                 "on_scroll_wheel" => behavior.on_scroll_wheel = Some(*id),
@@ -3508,6 +3573,7 @@ fn apply_behavior(behavior: &mut Behavior, name: &str, args: &[Bridged]) {
             _ => tracing::warn!("highlight_range(start, end, color) ignored: bad offsets"),
         },
         "scrollable" => behavior.text_scrollable = Some(flag.unwrap_or(true)),
+        "raw_html" => behavior.raw_html = Some(flag.unwrap_or(true)),
         "selected" => behavior.selected = flag.unwrap_or(true),
         "checked" => behavior.checked = flag.unwrap_or(true),
         "value" => behavior.value = args.first().and_then(|value| value.as_f32().ok()),
@@ -3674,6 +3740,8 @@ fn apply_behavior(behavior: &mut Behavior, name: &str, args: &[Bridged]) {
                         "left" => Some(MouseButton::Left),
                         "right" => Some(MouseButton::Right),
                         "middle" => Some(MouseButton::Middle),
+                        "back" => Some(MouseButton::Navigate(NavigationDirection::Back)),
+                        "forward" => Some(MouseButton::Navigate(NavigationDirection::Forward)),
                         _ => None,
                     });
         }

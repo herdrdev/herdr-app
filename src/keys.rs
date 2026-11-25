@@ -18,7 +18,7 @@
 
 use gpui::{App, KeyBinding, KeyBindingContextPredicate, NoAction};
 use std::rc::Rc;
-use gpui_shell::action::ShellAction;
+use herdr_shell::action::ShellAction;
 use std::collections::BTreeMap;
 
 /// The reserved shortcut that restores the default layout and keys.
@@ -420,7 +420,7 @@ mod tests {
             "hello:world", "", "3", "-1", "true", "null", "[]", "[broken", r#""name""#] {
             let action = format!("space.new:{value}");
             let bindings = super::parse(&json!({"global":{"f6":action}}).to_string()).unwrap();
-            let bound = bindings[0].action().as_any().downcast_ref::<gpui_shell::action::ShellAction>().unwrap();
+            let bound = bindings[0].action().as_any().downcast_ref::<herdr_shell::action::ShellAction>().unwrap();
             assert_eq!(bound.id(), action);
             let (name, payload) = bound.id().split_once(':').unwrap();
             assert_eq!(crate::commands::shorthand(crate::commands::find(name).unwrap(), payload), json!({"name":value}));

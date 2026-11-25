@@ -802,8 +802,13 @@ fn anchor_type() -> String {
         let _ = writeln!(out, "    | \"{name}\"");
     }
     out.push_str("    ;\n\n");
-    out.push_str("  /** Which pointer button opens a `Popover`. */\n");
-    out.push_str("  export type MouseButton = \"left\" | \"right\" | \"middle\";\n\n");
+    out.push_str("  /**\n");
+    out.push_str("   * A pointer button, for `on_mouse_down`, `on_mouse_up` and which one opens\n");
+    out.push_str("   * a `Popover`. HERDR: `back` and `forward` are the mouse's side buttons.\n");
+    out.push_str("   */\n");
+    out.push_str(
+        "  export type MouseButton = \"left\" | \"right\" | \"middle\" | \"back\" | \"forward\";\n\n",
+    );
     out
 }
 
@@ -1153,6 +1158,8 @@ const CONTEXT_AND_VIEW: &str = r#"  /**
     local_position: Point;
     bounds: import("gpui-shell").ElementBounds;
     modifiers: Modifiers;
+    /** Left, right, or middle when the move reports one of those buttons as held. */
+    pressed_button?: MouseButton;
   }
 
   /**
@@ -1405,6 +1412,13 @@ const ELEMENT_METHODS: &str = r#"    /**
     on_click<Self extends Element>(this: Self, handler: (event: ClickEvent, cx: Context) => void): Self;
     /** GPUI `InteractiveElement::on_mouse_move`, delivered while this element is hovered. */
     on_mouse_move<Self extends Element>(this: Self, handler: (event: MouseMoveEvent, cx: Context) => void): Self;
+    /**
+     * Every pointer move in the window, wherever the pointer is, with positions
+     * against this element's box. For a drag that should keep following the
+     * pointer after it leaves the element it started on. Passive observer.
+     * Use on div, h_flex, or v_flex.
+     */
+    on_window_mouse_move<Self extends Element>(this: Self, handler: (event: MouseMoveEvent, cx: Context) => void): Self;
     /** div/h_flex/v_flex: initial size and changed layout size, in logical pixels.
      * Runs after layout, even without pointer movement. Use a stable id. */
     on_size_change<Self extends Element>(this: Self, handler: (size: { width: number; height: number }, cx: Context) => void): Self;
@@ -1452,6 +1466,14 @@ const ELEMENT_METHODS: &str = r#"    /**
     ): Self;
     /** GPUI `InteractiveElement::on_mouse_up`, for one button. */
     on_mouse_up<Self extends Element>(this: Self,
+      button: MouseButton,
+      handler: (event: MouseButtonEvent, cx: Context) => void,
+    ): Self;
+    /**
+     * Passively observes releases of `button` anywhere in the window, including
+     * releases handled by terminals. Use on div, h_flex, or v_flex.
+     */
+    on_window_mouse_up<Self extends Element>(this: Self,
       button: MouseButton,
       handler: (event: MouseButtonEvent, cx: Context) => void,
     ): Self;
@@ -2479,6 +2501,12 @@ const BASE: &str = r#"  /** A row. */
     highlight_range(start: number, end: number, color: Color): this;
     selectable(value?: boolean): this;
     scrollable(value?: boolean): this;
+    /**
+     * Whether raw HTML in Markdown renders as HTML (the default). `false`
+     * shows HTML tags and blocks as literal text. Markdown autolinks outside
+     * the HTML stay clickable. Applies to `TextView.markdown`.
+     */
+    raw_html(value?: boolean): this;
   }
   export const TextView: {
     html(id: string, html: string): TextViewElement;
@@ -3175,6 +3203,12 @@ const BASE: &str = r#"  /** A row. */
     set_loading(loading: boolean): void;
     /** Moves the keyboard onto the input. */
     focus(): void;
+    /**
+     * Gives up the keyboard if the input has focus. The state stays usable
+     * and receives its usual `blur` event as focus moves away.
+     */
+    blur(): void;
+    /** Frees the state; it can't be read or drawn afterwards. Not a blur. */
     release(): boolean;
   }
 
@@ -3235,6 +3269,12 @@ const BASE: &str = r#"  /** A row. */
     set_soft_wrap(wrap: boolean): void;
     /** Moves the keyboard onto the textarea. */
     focus(): void;
+    /**
+     * Gives up the keyboard if the textarea has focus. The state stays usable
+     * and receives its usual `blur` event as focus moves away.
+     */
+    blur(): void;
+    /** Frees the state; it can't be read or drawn afterwards. Not a blur. */
     release(): boolean;
   }
 
@@ -3256,8 +3296,18 @@ const BASE: &str = r#"  /** A row. */
     /** Replaces the selection with `text`, as typing would (one undo step). */
     replace(text: string): void;
     on(event: "change" | "submit" | "focus" | "blur" | "paste_other", handler: (event: InputEvent, cx: Context) => void): boolean;
+    /** Changes the indent once the file's style is known. `hard_tabs` defaults to false. */
+    set_tab_size(tab_size: number, hard_tabs?: boolean): void;
     /** Moves the keyboard onto the editor. */
     focus(): void;
+    /**
+     * Gives up the keyboard if the editor has focus. The state stays usable
+     * and receives its usual `blur` event as focus moves away.
+     */
+    blur(): void;
+    /** Wraps long lines instead of scrolling sideways, keeping the text and selection. */
+    set_soft_wrap(wrap: boolean): void;
+    /** Frees the state; it can't be read or drawn afterwards. Not a blur. */
     release(): boolean;
   }
   export const EditorState: {
@@ -3276,9 +3326,20 @@ const BASE: &str = r#"  /** A row. */
       readonly?: boolean;
       /** Defaults to false. */
       soft_wrap?: boolean;
+      /** Spaces per indent and spacing of the indent guides, from 1 to 16 whole columns.
+       * Defaults to 2. The text renderer chooses the displayed width of tab characters. */
+      tab_size?: number;
+      /** Tab inserts a `\t` instead of spaces. Defaults to false. */
+      hard_tabs?: boolean;
       /** Semantic colors: keyword, string, comment, function, type, number,
        * constant, variable, operator, punctuation, boolean, string.escape.
-       * Values are concrete hex colors; unspecified UI colors follow the theme. */
+       * Markdown ("markdown" or "md") adds heading, strong, emphasis, code,
+       * quote, list and link. Unset heading, strong and list use keyword's color,
+       * code uses string, quote uses comment, and link URLs use function.
+       * Headings and strong text are bold. Emphasis is italic and inherits
+       * the editor foreground unless given its own color.
+       * Values are concrete hex colors. Built-in syntax colors use a dark palette.
+       * Unspecified editor UI colors follow the theme. */
       syntax?: Record<string, string>;
     }) => EditorState;
   };
@@ -4088,14 +4149,17 @@ mod tests {
         "on_token_click",
         "on_token_hover",
         "on_mouse_move",
+        "on_window_mouse_move",
         "on_hover",
         "on_key_down",
         "on_key_up",
         "on_modifiers_changed",
         "on_mouse_down",
         "on_mouse_up",
+        "on_window_mouse_up",
         "on_mouse_down_out",
         "on_drop",
+        "on_size_change",
         "drag_paths",
         "on_scroll_wheel",
         "on_pinch",
@@ -4792,7 +4856,15 @@ mod tests {
         assert!(!element.contains("on_link_click("));
         assert!(!element.contains("selectable("));
         assert!(!element.contains("scrollable("));
-        assert!(declarations.contains("export interface TextViewElement extends NativeElement"));
+        assert!(!element.contains("raw_html("));
+        let text_view = declarations
+            .split_once("export interface TextViewElement extends NativeElement")
+            .expect("TextViewElement declaration")
+            .1
+            .split_once("\n  }")
+            .expect("end of TextViewElement declaration")
+            .0;
+        assert!(text_view.contains("raw_html(value?: boolean): this;"));
         assert!(declarations.contains("html(id: string, html: string): TextViewElement;"));
     }
 

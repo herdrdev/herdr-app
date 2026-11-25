@@ -126,6 +126,8 @@ the highlighted line shows where it will land.
   ...), as in Herdr; `tab.rename` names it ("fix login"). A space
   has one or more; closing the last one closes the space (it stays in
   `recent`).
+  The + menu opens agents in unnamed tabs. The tab bar follows the
+  agent and shows the shell again after exit. Double-click a tab to set its name.
 - A tab can be **settled** (`tab.settle`): put away on this screen, still running;
   `settled` on each tab. The shipped layouts don't use it (they list every
   tab); a mod that does can hide or fold settled tabs. Showing one, or an
@@ -252,6 +254,9 @@ Properties any node can have:
 - `padding`: space inside the node's edge, px: `16` or `[vertical, horizontal]`.
 - row/column: `gap` (px between children), `divider` (`{ "width": 1, "color": "border" }`),
   `resizable` (default true: drag the boundary). This applies to that row/column only.
+  On a resizable boundary, the divider's optional `hover` color shows while the pointer
+  is over it and `active` while dragging (default: `hover`), e.g.
+  `{ "width": 1, "color": "#00000000", "hover": "accent" }` shows a line only then.
 - `movable` (default true): panes can be dragged by the app's top-center grip within a split tab.
   Unlike `resizable`, it inherits: the nearest explicit ancestor wins, through the
   tab tree and then the layout's tab block and its ancestors. Root `"movable": false`
@@ -625,7 +630,8 @@ The main ones:
   the nearest border along that axis by px, default 40, as a drag would; a keyboard
   resize mode is a mod that runs it on h/j/k/l).
   `pane.zoom` also makes the pane its tab's focused one (the tab isn't
-  selected); on the zoomed pane it unzooms and focus stays.
+  selected); on the zoomed pane it unzooms and focus stays. A tab with one
+  pane doesn't zoom, and a zoom ends when its tab is back to one pane.
   `pane.go` prefers the most recently focused pane along the nearest edge in that
   direction; unvisited panes fall back to overlap, then top/left layout order.
   `pane.go` also reaches visible mods whose `mod.json` says `"focusable": true`, and
@@ -642,6 +648,8 @@ The main ones:
   model pane; composition edits belong to the mod (edit its layout instead).
   Closing panes, tabs or spaces ends the terminals in them. Core ends dependent
   children and keeps children started with `--outlive-parent` running.
+  On cores older than 0.1.13, Herdr ends hidden children too, stopping at
+  children with a pane or `herdr.space` label.
 - Terminals: `terminal.open {argv?, folder?, place?, name?}` (`folder` sets the
   starting directory for tabs and right/down splits, with or without `argv`),
   `terminal.kill {terminal}` (ends the sub-agent tree, stopping at children with a
@@ -687,6 +695,7 @@ The main ones:
   releasing stops it. Programs that track the mouse still get their mouse events
   (hold Shift to select text instead). A drag stays with the terminal where it
   started, including its release outside the pane; other panes don't receive it.
+  Shift+click with a selection moves its end to the clicked cell, keeping its start.
   Terminals display Kitty graphics, including Unicode placeholder images used by
   programs such as yazi; partial images and scrolling follow the placeholder cells.
 - Agents: `agent.next`, `agent.prev`, `agent.select {index}`, `agent.focus {terminal}`.
@@ -984,8 +993,10 @@ names the clicked terminal and its machine, cwd, pane, tab and space.
 `link.raw` keeps the original text or the OSC 8 destination. `link.path` is
 null for remote, unresolved or non-UTF-8 paths. Plain paths can carry a
 `:line` or `:line:column` suffix, exposed as optional 1-based `link.line` and
-`link.column`. A column needs a valid line. Herdr keeps a verified literal
-filename intact and can report coordinates even when `link.path` is null.
+`link.column`. Line ranges (`:5-12`, `#L5-L12`, `#L5-12`) and anchors (`#L5`)
+set `link.line` to the first line. A column needs a valid line. Herdr keeps a
+verified literal filename intact and can report coordinates even when
+`link.path` is null.
 File URIs have no coordinates. Herdr can verify their local paths when the
 host is empty or `localhost`. A link handler starts without opening a view
 and shares `localStorage` with views of the same mod with null props.
@@ -1101,7 +1112,8 @@ Chained builders with GPUI's snake_case names: `div()`, `h_flex()`,
 `.overflow_y_scrollbar()`; `.child("text")`, `.text_size(n)`, `.font_semibold()`,
 `.truncate()`, `.text_color(c)`; `.bg(c)`, `.border(1)`, `.border_color(c)`,
 `.rounded(n)`; `.id("unique")` then `.on_click(...)`, `.on_mouse_down("right", ...)`,
-`.hover((s) => s.bg(c))`, `.on_scroll_wheel(...)`, `.on_pinch(...)`; keyboard: `this.h = cx.focus_handle()`
+`.hover((s) => s.bg(c))`, `.on_scroll_wheel(...)`, `.on_pinch(...)`. Mouse buttons are `left`,
+`right`, `middle`, `back` and `forward`; the last two are the mouse's side buttons. Keyboard: `this.h = cx.focus_handle()`
 in init, `.track_focus(this.h).on_key_down((e, cx) => …)`, `this.h.focus()`.
 `ScrollHandle` from `gpui-base` scrolls a plain `overflow_*_scroll()` or
 `overflow_*_scrollbar()` area from code. Create `this.scroll = ScrollHandle.new()`
@@ -1136,9 +1148,23 @@ drop; local folders and remote paths dropped onto another machine are refused.
 Paths containing control characters are rejected, including clipboard files.
 `.on_hover((hovered, cx) => …)` reports pointer entry and exit on buttons
 and other interactive controls too.
+`.on_mouse_move` and `.on_mouse_up` fire only over the element. For a drag that
+should keep following the pointer once it leaves (dragging a tab off the bar),
+use `.on_window_mouse_move((e, cx) => …)` and `.on_window_mouse_up("left", (e, cx) => …)`
+on a plain layout element. They observe moves and matching releases in the
+window, including over terminals, without affecting normal event handling.
+Positions are in window pixels, with `local_position` relative to the
+element's box. Track a left drag while `pressed_button === "left"`. If it
+ends outside the window without a release event, cancel on the next move
+that reports no left button.
 `.when(cond, (el) => …)`, `.children([...])`. Controls from `gpui-base`
 (`Button`, `Checkbox`, `Switch`, `InputState` + `Input`) are unstyled: style
-them. Text: `TextView.markdown(id, text)` renders markdown; with
+them. Text states (`InputState`, `TextareaState`, `EditorState`) take the
+keyboard with `focus()` and give it back with `blur()`. Herdr then hands the
+keyboard to the dialog or pane, and the field stays usable. `release()` frees
+the state. Text: `TextView.markdown(id, text)` renders Markdown.
+`.raw_html(false)` shows embedded HTML tags and blocks as literal text.
+Markdown autolinks stay clickable. With
 `.selectable(true)`, `.on_selection_change((s, cx) => …)` gets a settled
 selection or `null` when it clears. `s.text` matches what copying the selected
 text in that view gives you. When `s.range` is present, use
@@ -1150,8 +1176,18 @@ When `s.position` is present, place a popup with
 `EditorState.new({
 language, value, readonly, font_family: settings().font_family, syntax: {
 keyword: theme().ansi5, ... } })` + `Editor.new(state)` is a code view (readonly)
-or editor with syntax highlighting, line numbers and folding. A viewer opens
-beside the shell as a pane: `pane.split {direction, mod, props: { file }}`.
+or editor with syntax highlighting, line numbers and folding. For Markdown
+source, set `language: "markdown"` or `"md"`. The `syntax` keys are `heading`,
+`strong`, `emphasis`, `code`, `quote`, `list`, and `link` (the URL). Use
+`theme()` colors for light and dark layouts. Built-in syntax colors use a
+dark-editor palette. Call
+`state.set_soft_wrap(wrap)` from a view callback to switch between wrapping
+long lines and scrolling sideways while keeping the editor's text and selection.
+Tab indents by 2 spaces. Set `tab_size` (1 to 16) for the number of spaces per
+indent and the spacing of the indent guides. Set `hard_tabs: true` to insert
+literal tabs. The text renderer chooses the displayed width of tab characters.
+Once a file's style is known, call `state.set_tab_size(4, false)`.
+A viewer opens beside the shell as a pane: `pane.split {direction, mod, props: { file }}`.
 The full surface is in `gpui-kit.d.ts` next to this file.
 
 ### The `herdr` module
