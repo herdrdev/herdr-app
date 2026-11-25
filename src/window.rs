@@ -724,6 +724,8 @@ impl AppWindow {
             let mut event_lines = crate::hc::EventLines::default();
             let mut known_machines = Value::Null;
             let (mut tick, mut relist) = (0u64, false);
+            // Stream items the wait below took while watching for a doc event.
+            let mut early: Vec<crate::hc::Stream> = Vec::new();
             loop {
                 let Ok((core, generation)) = this.update(cx, |this, _| {
                     (this.core.clone(), this.core_generation)
@@ -753,8 +755,8 @@ impl AppWindow {
                     }).is_err() { break; }
                 }
                 let ask_machines = tick.is_multiple_of(5);
-                tick += 1;
                 let relisting = std::mem::take(&mut relist);
+                let taken = std::mem::take(&mut early);
                 let (sub, machines, refresh, listed, lines, machine_names) = cx.background_executor().spawn(async move {
                     // The local stream forwards remote doc events too.
                     let mut sub = subscription;
@@ -766,7 +768,7 @@ impl AppWindow {
                     }
                     let mut closed = false;
                     if let Some((channel, events)) = &sub {
-                        while let Ok(event) = events.try_recv() {
+                        for event in taken.into_iter().chain(std::iter::from_fn(|| events.try_recv().ok())) {
                             if let crate::hc::Stream::Data(bytes) = event {
                                 let pushed = event_lines.push(&bytes);
                                 refresh |= pushed.docs;
@@ -808,7 +810,14 @@ impl AppWindow {
                     this.fit_hidden_tabs(window, cx);
                     this.flush_documents(refresh, window, cx);
                 }).is_err() { break; }
-                cx.background_executor().timer(Duration::from_millis(500)).await;
+                // A doc event (a mod or another client changed a layout)
+                // applies now, not on the next tick (#1301).
+                let timer = cx.background_executor().timer(Duration::from_millis(500));
+                let ticked = match subscription.as_ref().map(|(_, events)| events.clone()) {
+                    Some(events) => crate::hc::wait_for_doc(timer, events, &mut early).await,
+                    None => { timer.await; true }
+                };
+                if ticked { tick += 1; }
             }
         }));
         w._tasks.push(cx.spawn_in(window, async move |this, cx| {

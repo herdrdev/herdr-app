@@ -29,6 +29,40 @@ pub enum Stream {
     Lost,
 }
 
+/// Waits for `timer`, or until `events` brings a doc event, whichever is
+/// first; every item it takes goes to `taken` for the caller to process.
+/// Returns whether the timer fired. A doc event split across two reads is
+/// only noticed on the timer, as before.
+pub async fn wait_for_doc(timer: impl std::future::Future<Output = ()>, events: async_channel::Receiver<Stream>, taken: &mut Vec<Stream>) -> bool {
+    use std::task::Poll;
+    const DOC: &[u8] = br#""type":"doc""#;
+    let is_doc = |item: &Stream| matches!(item, Stream::Data(bytes) if bytes.windows(DOC.len()).any(|w| w == DOC));
+    let mut timer = std::pin::pin!(timer);
+    // None once the stream ended: the caller sees that on its next round.
+    let mut next = Some(Box::pin(events.recv()));
+    std::future::poll_fn(|cx| {
+        if timer.as_mut().poll(cx).is_ready() {
+            return Poll::Ready(true);
+        }
+        while let Some(recv) = next.as_mut() {
+            match recv.as_mut().poll(cx) {
+                Poll::Ready(Ok(item)) => {
+                    let doc = is_doc(&item);
+                    taken.push(item);
+                    next = Some(Box::pin(events.recv()));
+                    if doc {
+                        return Poll::Ready(false);
+                    }
+                }
+                Poll::Ready(Err(_)) => next = None,
+                Poll::Pending => break,
+            }
+        }
+        Poll::Pending
+    })
+    .await
+}
+
 /// Event streams are lines; DATA frame boundaries can fall anywhere in a line.
 #[derive(Default)]
 pub struct EventLines {
@@ -587,6 +621,35 @@ pub fn offline() -> Arc<Core> {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[gpui::test]
+    fn a_doc_event_ends_the_wait_and_other_events_do_not(cx: &mut gpui::TestAppContext) {
+        use std::{cell::RefCell, rc::Rc};
+        let event = |kind: &str| Stream::Data(format!("{}\n", json!({"method": "event", "params": {"seq": 1, "type": kind}})).into_bytes());
+        let (tx, rx) = async_channel::unbounded();
+        let done: Rc<RefCell<Option<(bool, usize)>>> = Rc::default();
+        let out = done.clone();
+        cx.foreground_executor().spawn(async move {
+            let mut taken = Vec::new();
+            let ticked = wait_for_doc(std::future::pending(), rx, &mut taken).await;
+            *out.borrow_mut() = Some((ticked, taken.len()));
+        }).detach();
+        tx.try_send(event("status")).unwrap();
+        cx.run_until_parked();
+        assert_eq!(*done.borrow(), None, "a terminal event waits for the tick");
+        tx.try_send(event("doc")).unwrap();
+        cx.run_until_parked();
+        assert_eq!(*done.borrow(), Some((false, 2)), "a doc event ends the wait, keeping what it took");
+    }
+
+    #[gpui::test]
+    fn the_tick_still_ends_the_wait(cx: &mut gpui::TestAppContext) {
+        let (_tx, rx) = async_channel::unbounded::<Stream>();
+        let mut taken = Vec::new();
+        let ticked = cx.foreground_executor().block_test(wait_for_doc(std::future::ready(()), rx, &mut taken));
+        assert!(ticked);
+        assert!(taken.is_empty());
+    }
 
     #[test]
     fn startup_errors_keep_the_cores_message_and_recovery_hint() {
