@@ -393,21 +393,22 @@ impl SliderState {
         };
 
         let value = self.percentage_to_value(percentage);
-        // HERDR (B26): keep dragged slider values on multiples of `step` (matching 1ccf011)
-        // instead of rebasing the grid onto `min + k * step`.
-        let value = if is_step(step) {
-            ((value / step).round() * step).clamp(self.min, self.max)
+        // HERDR (B26): keep exact 1ccf011 drag math (unclamped multiples of `step`
+        // and continuous pointer percentage for thumb position); guard non-positive/non-finite
+        // steps so step <= 0 drags continuously instead of producing NaN.
+        let value = if step.is_finite() && step > 0.0 {
+            (value / step).round() * step
         } else {
-            value.clamp(self.min, self.max)
+            value
         };
 
         if is_start {
+            self.percentage.start = percentage;
             self.value.set_start(value);
         } else {
+            self.percentage.end = percentage;
             self.value.set_end(value);
         }
-        // The thumb stands at the value, on its step, not at the pointer.
-        self.update_thumb_pos();
         cx.emit(SliderEvent::Change(self.value));
         cx.notify();
     }
@@ -1416,13 +1417,28 @@ mod tests {
 
     #[gpui::test]
     fn a_drag_snaps_to_multiples_of_step(cx: &mut gpui::TestAppContext) {
-        // HERDR (B26): keep dragged slider values on multiples of step (matching 1ccf011).
+        // HERDR (B26): exact 1ccf011 drag grid and thumb positioning across interior and endpoints.
         let (state, cx) = sized(SliderState::new().min(3.).max(103.).step(5.), cx);
-        // 6% of [3, 103] is 9.0 -> nearest multiple of 5 is 10.0 (not 8.0 = 3 + 5).
+
+        // Left endpoint (0% -> 3.0 -> nearest multiple of 5 is 5.0), thumb stays at 0.0.
+        drag(&state, 0., false, cx);
+        assert_eq!(
+            state.read_with(cx, |state, _| (state.value(), state.percentage.end)),
+            (SliderValue::Single(5.), 0.0)
+        );
+
+        // Interior (6% -> 9.0 -> nearest multiple of 5 is 10.0), thumb stays under pointer at 0.06.
         drag(&state, 6., false, cx);
         assert_eq!(
-            state.read_with(cx, |state, _| state.value()),
-            SliderValue::Single(10.)
+            state.read_with(cx, |state, _| (state.value(), state.percentage.end)),
+            (SliderValue::Single(10.), 0.06)
+        );
+
+        // Right endpoint (100% -> 103.0 -> nearest multiple of 5 is 105.0), thumb stays at 1.0.
+        drag(&state, 100., false, cx);
+        assert_eq!(
+            state.read_with(cx, |state, _| (state.value(), state.percentage.end)),
+            (SliderValue::Single(105.), 1.0)
         );
     }
 
@@ -1448,12 +1464,14 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_dropped_thumb_stands_at_its_value(cx: &mut gpui::TestAppContext) {
+    fn a_dropped_thumb_follows_the_pointer(cx: &mut gpui::TestAppContext) {
+        // HERDR (B26): thumb tracks the pointer percentage while emitted value snaps to `step`,
+        // matching 1ccf011.
         let (state, cx) = sized(SliderState::new().step(25.), cx);
         drag(&state, 30., false, cx);
         state.read_with(cx, |state, _| {
             assert_eq!(state.value(), SliderValue::Single(25.));
-            assert_eq!(state.percentage(), 0.0..0.25);
+            assert_eq!(state.percentage(), 0.0..0.3);
         });
 
         state.update_in(cx, |state, window, cx| {
@@ -1463,7 +1481,7 @@ mod tests {
         drag(&state, 60., false, cx);
         state.read_with(cx, |state, _| {
             assert_eq!(state.value(), SliderValue::Range(50., 50.));
-            assert_eq!(state.percentage(), 0.5..0.5);
+            assert_eq!(state.percentage(), 0.4..0.6);
         });
     }
 
