@@ -601,6 +601,13 @@ fn word_range(text: &str, at: usize) -> std::ops::Range<usize> {
     start..end
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum LinkScan {
+    Plain,
+    Joined,
+    Unresolved,
+}
+
 /// A link found in the terminal: what it says, and where it shows.
 #[derive(Clone, Debug, PartialEq)]
 pub struct LinkHit {
@@ -1109,6 +1116,25 @@ impl Vt {
         Ok(())
     }
 
+    pub fn reset_selection_gesture(&mut self) {
+        unsafe { ghostty_selection_gesture_reset(self.gesture, self.term) };
+    }
+
+    /// Moves the selection's end to a viewport cell, keeping its start (Shift+click).
+    /// Returns false when there is no selection to extend.
+    pub fn extend_selection(&mut self, col: u16, row: u16) -> bool {
+        let Some(mut selection) = self.selection() else { return false };
+        let mut p = GhosttyPoint { tag: GHOSTTY_POINT_TAG_VIEWPORT, ..Default::default() };
+        p.value.coordinate = GhosttyPointCoordinate { x: col.min(self.cols.saturating_sub(1)), y: row.min(self.rows.saturating_sub(1)) as u32 };
+        let mut end = GhosttyGridRef { size: std::mem::size_of::<GhosttyGridRef>(), ..Default::default() };
+        if unsafe { ghostty_terminal_grid_ref(self.term, p, &mut end) } != GHOSTTY_SUCCESS {
+            return false;
+        }
+        selection.end = end;
+        unsafe { ghostty_terminal_set(self.term, GHOSTTY_TERMINAL_OPT_SELECTION, &selection as *const _ as *const c_void) };
+        true
+    }
+
     pub fn adjust_selection(&mut self, direction: &str) -> Result<(), String> {
         let adjustment = match direction {
             "left" => GHOSTTY_SELECTION_ADJUST_LEFT,
@@ -1188,8 +1214,9 @@ impl Vt {
     /// rows scrolled out of view. Then tries the lines around joined, their
     /// indentation dropped: programs like Claude Code break long paths onto
     /// new lines themselves. `find` is told when its text holds lines joined; a
-    /// link found there wins when it's longer.
-    pub fn link_at(&self, col: u16, row: u16, mut find: impl FnMut(&str, usize, bool) -> Option<std::ops::Range<usize>>) -> Option<LinkHit> {
+    /// link found there wins when it's longer. A matched unresolved path is
+    /// considered only after those normal link and peek decisions.
+    pub fn link_at(&self, col: u16, row: u16, mut find: impl FnMut(&str, usize, LinkScan) -> Option<std::ops::Range<usize>>) -> Option<LinkHit> {
         if col >= self.cols || row >= self.rows {
             return None;
         }
@@ -1216,7 +1243,7 @@ impl Vt {
         let mut rows: Vec<Row> = (first..=last).map_while(|y| self.link_row(y)).collect();
         let (text, spots) = link_text(&rows);
         let at = spots.iter().position(|s| s.y == hovered && s.x <= col && col < s.x + s.width)?;
-        let hit = self.link_in(&text, &spots, top, at, &mut find, false);
+        let hit = self.link_in(&text, &spots, top, at, &mut find, LinkScan::Plain);
         if spots[at].uri.is_some() {
             return hit;
         }
@@ -1265,7 +1292,7 @@ impl Vt {
                     continue;
                 }
                 tried.push(word.to_owned());
-                let Some(found) = self.link_in(&text, &spots, top, at, &mut find, true) else { continue };
+                let Some(found) = self.link_in(&text, &spots, top, at, &mut find, LinkScan::Joined) else { continue };
                 let longest = best.as_ref().map(|b| &b.0).or(hit.as_ref()).map_or(0, |h| h.target.len());
                 fresh = found.target.len() > longest;
                 if fresh {
@@ -1275,10 +1302,10 @@ impl Vt {
         }
         match best {
             Some((found, ..)) if fresh => Some(found),
-            Some((_, text, spots, at)) => self.link_in(&text, &spots, top, at, &mut find, true),
+            Some((_, text, spots, at)) => self.link_in(&text, &spots, top, at, &mut find, LinkScan::Joined),
             None if fresh => hit,
-            None => self.link_in(&text, &spots, top, at, &mut find, false),
-        }
+            None => self.link_in(&text, &spots, top, at, &mut find, LinkScan::Plain),
+        }.or_else(|| self.link_in(&text, &spots, top, at, &mut find, LinkScan::Unresolved))
     }
 
     /// Whether the terminal wrapped screen row `y` onto the next.
@@ -1328,7 +1355,7 @@ impl Vt {
     }
 
     /// The link `find` sees in `text` at spot `at`.
-    fn link_in(&self, text: &str, spots: &[Spot], top: u32, at: usize, find: &mut impl FnMut(&str, usize, bool) -> Option<std::ops::Range<usize>>, joined: bool) -> Option<LinkHit> {
+    fn link_in(&self, text: &str, spots: &[Spot], top: u32, at: usize, find: &mut impl FnMut(&str, usize, LinkScan) -> Option<std::ops::Range<usize>>, scan: LinkScan) -> Option<LinkHit> {
         let (target, chosen): (String, Vec<&Spot>) = match spots[at].uri.clone() {
             Some(uri) => {
                 let same = |s: &&Spot| s.uri.as_deref() == Some(uri.as_str());
@@ -1337,7 +1364,7 @@ impl Vt {
                 (uri, spots[start..end].iter().collect())
             }
             None => {
-                let range = find(text, spots[at].byte, joined)?;
+                let range = find(text, spots[at].byte, scan)?;
                 (text[range.clone()].to_owned(), spots.iter().filter(|s| range.contains(&s.byte)).collect())
             }
         };
@@ -2017,6 +2044,25 @@ mod tests {
         vt.clear_selection();
         assert_eq!(vt.selection_positions(), None);
         assert!(vt.adjust_selection("left").unwrap_err().contains("needs a selection"));
+    }
+
+    #[test]
+    fn shift_click_extends_the_selection_from_its_start() {
+        let mut vt = Vt::new(20, 3);
+        vt.write(b"first line\r\nsecond line\r\nthird");
+        assert!(!vt.extend_selection(3, 1), "nothing to extend without a selection");
+        vt.select_at(Some(CellPosition { row: 0, col: 6 }), "cell").unwrap();
+        assert!(vt.extend_selection(5, 1));
+        assert_eq!(vt.selection_positions().unwrap(), SelectionPositions {
+            start: CellPosition { row: 0, col: 6 }, end: CellPosition { row: 1, col: 5 },
+        });
+        assert_eq!(vt.selection_text().as_deref(), Some("line\nsecond"));
+        // Clicking before the start reverses it; the start stays put.
+        assert!(vt.extend_selection(0, 0));
+        assert_eq!(vt.selection_text().as_deref(), Some("first l"));
+        // Past the grid, the end clamps to the last cell.
+        assert!(vt.extend_selection(99, 99));
+        assert_eq!(vt.selection_positions().unwrap().end, CellPosition { row: 2, col: 19 });
     }
 
     #[test]
@@ -2768,9 +2814,20 @@ mod tests {
         let mut vt = Vt::new(20, 4);
         vt.write(b"  see /tmp/abc/de\r\n  fg/x.png ok");
         // What reads as a link on its own line keeps it unless the join is one.
-        let unjoined = |text: &str, at: usize, joined: bool| crate::links::find(text, at).filter(|_| !joined);
+        let unjoined = |text: &str, at: usize, scan| crate::links::find(text, at).filter(|_| scan == LinkScan::Plain);
         assert_eq!(vt.link_at(8, 0, unjoined).unwrap().target, "/tmp/abc/de");
         assert_eq!(vt.link_at(13, 1, whole), None);
+    }
+
+    #[test]
+    fn a_resolved_join_wins_over_an_unresolved_match() {
+        let mut vt = Vt::new(20, 4);
+        vt.write(b"  see /tmp/abc/de\r\n  fg/x.png ok");
+        let find = |text: &str, at, scan| {
+            let range = crate::links::find(text, at)?;
+            (scan == LinkScan::Unresolved || &text[range.clone()] == "/tmp/abc/defg/x.png").then_some(range)
+        };
+        assert_eq!(vt.link_at(8, 0, find).unwrap().target, "/tmp/abc/defg/x.png");
     }
 
     #[test]
@@ -2810,7 +2867,7 @@ mod tests {
         vt.write(b"Visit https://example.com\r\n  and then run it");
         // Glued, the URL would take in the word below it.
         assert_eq!(vt.link_at(3, 1, found).unwrap().target, "https://example.comand");
-        let unjoined = |text: &str, at: usize, joined: bool| crate::links::find(text, at).filter(|_| !joined);
+        let unjoined = |text: &str, at: usize, scan| crate::links::find(text, at).filter(|_| scan == LinkScan::Plain);
         assert_eq!(vt.link_at(3, 1, unjoined), None);
         assert_eq!(vt.link_at(8, 0, unjoined).unwrap().target, "https://example.com");
     }
@@ -2821,8 +2878,8 @@ mod tests {
         vt.write(b"  xx/a\r\n  b");
         let seen = std::cell::RefCell::new(String::new());
         // Joined, a shorter link than the row's own: the row's wins.
-        let find = |text: &str, at: usize, joined: bool| {
-            let range = if joined { at..at + 1 } else { crate::links::word(text, at)? };
+        let find = |text: &str, at: usize, scan| {
+            let range = if scan == LinkScan::Joined { at..at + 1 } else { crate::links::word(text, at)? };
             *seen.borrow_mut() = text[range.clone()].to_owned();
             Some(range)
         };
@@ -2834,12 +2891,12 @@ mod tests {
     fn joins_that_leave_the_word_alone_skip_find() {
         let mut vt = Vt::new(13, 4);
         vt.write(b"one two three\r\nfour five six\r\nseven");
-        let mut calls = 0;
-        assert_eq!(vt.link_at(6, 1, |_: &str, _, _| { calls += 1; None }), None);
-        assert_eq!(calls, 1);
+        let mut calls = Vec::new();
+        assert_eq!(vt.link_at(6, 1, |_: &str, _, scan| { calls.push(scan); None }), None);
+        assert_eq!(calls, [LinkScan::Plain, LinkScan::Unresolved]);
     }
 
-    fn found(text: &str, at: usize, _: bool) -> Option<std::ops::Range<usize>> {
+    fn found(text: &str, at: usize, _: LinkScan) -> Option<std::ops::Range<usize>> {
         crate::links::find(text, at)
     }
 

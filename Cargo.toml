@@ -1,6 +1,6 @@
 [workspace]
-members = ["crates/ghostty-sys"]
-exclude = ["vendor/gpui-kit", "vendor/gpui-pre", "vendor/gpui-pre-wgpu", "vendor/gpui-pre-apple", "vendor/gpui-pre-linux", "vendor/gpui-pre-macos", "vendor/gpui-pre-windows", "vendor/taffy", "vendor/quickjs-jit-runtime", "vendor/zed-xim", "vendor/xim-ctext"]
+members = ["crates/ghostty-sys", "crates/herdr-shell"]
+exclude = ["crates/herdr-shell/rquickjs-compat", "vendor/gpui-kit", "vendor/gpui-pre", "vendor/gpui-pre-wgpu", "vendor/gpui-pre-apple", "vendor/gpui-pre-linux", "vendor/gpui-pre-macos", "vendor/gpui-pre-windows", "vendor/taffy", "vendor/quickjs-jit-runtime", "vendor/zed-xim", "vendor/xim-ctext"]
 resolver = "2"
 
 [workspace.package]
@@ -10,7 +10,7 @@ publish = false
 
 [package]
 name = "herdr-app"
-version = "0.1.15"
+version = "0.1.18"
 edition.workspace = true
 license.workspace = true
 publish.workspace = true
@@ -19,7 +19,7 @@ publish.workspace = true
 ghostty-sys = { path = "crates/ghostty-sys" }
 gpui = { package = "gpui-pre", version = "=0.3.8", features = ["render-to-image"] }
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
-gpui-shell = { path = "vendor/gpui-kit/crates/shell" }
+herdr-shell = { path = "crates/herdr-shell" }
 gpui-base = { path = "vendor/gpui-kit/crates/base" }
 anyhow = "1"
 async-channel = "2"
@@ -33,6 +33,7 @@ serde_json = "1"
 tracing = "0.1"
 tracing-subscriber = { version = "0.3", features = ["env-filter"] }
 fancy-regex = "0.19"
+regex = "1"
 notify = "7"
 sha2 = "0.10"
 
@@ -44,7 +45,7 @@ harness = false
 [dev-dependencies]
 gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8", features = ["test-support"] }
 gpui = { package = "gpui-pre", version = "=0.3.8", features = ["test-support"] }
-gpui-shell = { path = "vendor/gpui-kit/crates/shell", features = ["render-test-support"] }
+herdr-shell = { path = "crates/herdr-shell", features = ["render-test-support"] }
 
 [target.'cfg(target_os = "linux")'.dev-dependencies]
 gpui_wgpu = { package = "gpui-pre-wgpu", path = "vendor/gpui-pre-wgpu", features = ["test-support"] }
@@ -55,9 +56,11 @@ tiny-skia = { version = "=0.11.4", default-features = false, features = ["std", 
 [target.'cfg(target_os = "linux")'.dependencies]
 gpui_linux = { package = "gpui-pre-linux", version = "=0.3.8", features = ["render-to-image"] }
 
+[target.'cfg(unix)'.dependencies]
+libc = "0.2"
+
 [target.'cfg(target_os = "macos")'.dependencies]
 gpui_macos = { package = "gpui-pre-macos", version = "=0.3.8", features = ["render-to-image"] }
-libc = "0.2"
 objc2 = "0.6"
 objc2-app-kit = { version = "0.3.2", default-features = false, features = ["NSApplication", "NSDockTile", "NSResponder"] }
 objc2-foundation = { version = "0.3.2", default-features = false, features = ["NSString"] }
@@ -71,13 +74,13 @@ windows-sys = { version = "0.61", features = ["Win32_Foundation", "Win32_UI_Wind
 [target.'cfg(windows)'.build-dependencies]
 winresource = "0.1"
 
-# gpui-shell's LLRT modules must share its quickjs-jit VM; gpui-kit's own workspace does the same.
+# herdr-shell's LLRT modules must share its quickjs-jit VM.
 [patch.crates-io]
 # HERDR: production frame capture without test-support dependencies.
 gpui-pre = { path = "vendor/gpui-pre" }
 gpui-pre-wgpu = { path = "vendor/gpui-pre-wgpu" }
 gpui-pre-apple = { path = "vendor/gpui-pre-apple" }
-rquickjs = { path = "vendor/gpui-kit/crates/shell/rquickjs-compat" }
+rquickjs = { path = "crates/herdr-shell/rquickjs-compat" }
 # Our copy: an idle window stops waking every vsync (patches marked HERDR:).
 gpui-pre-macos = { path = "vendor/gpui-pre-macos" }
 # Our copy: snapping a maximized window to a half kept its old size (HERDR:).
@@ -103,4 +106,8 @@ quickjs-jit-runtime = { path = "vendor/quickjs-jit-runtime" }
 strip = "none"
 
 [profile.dev.package."*"]
+opt-level = 2
+
+# Workspace members are excluded from `"*"`; keep the mod runtime optimized in dev/sandbox builds.
+[profile.dev.package.herdr-shell]
 opt-level = 2

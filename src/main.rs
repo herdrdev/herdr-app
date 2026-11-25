@@ -85,6 +85,12 @@ fn attach_console() {
     }
 }
 
+fn link_check_path(args: &[String]) -> Option<&std::path::Path> {
+    let mut paths = args.iter().filter(|arg| !matches!(arg.as_str(), "--print-spec" | "--watch" | "--dev"));
+    let path = paths.next()?;
+    (!path.starts_with('-') && paths.next().is_none()).then(|| std::path::Path::new(path))
+}
+
 fn main() {
     let args: Vec<String> = std::env::args().collect();
     #[cfg(target_os = "macos")]
@@ -96,7 +102,21 @@ fn main() {
     // `herdr-app check <mod>` / `herdr-app types <mod>`: gpui-shell's own checker, with Herdr's module installed.
     if matches!(args.get(1).map(String::as_str), Some("check" | "types")) {
         mods::install_check_policy();
-        gpui_shell::host::main_with_components(gpui_shell::FrozenComponentRegistry::default());
+        if args[1] == "check" && let Some(path) = link_check_path(&args[2..]) {
+            let dir = if path.is_file() { path.parent().unwrap_or(path) } else { path };
+            match mods::check_link_mod(dir) {
+                Ok(true) if dir.join("link.js").is_file() && !dir.join("main.js").is_file() => {
+                    println!("check passed: {}", dir.display());
+                    return;
+                }
+                Ok(_) => {}
+                Err(error) => {
+                    eprintln!("herdr-app check: {error:#}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        herdr_shell::host::main_with_components(herdr_shell::FrozenComponentRegistry::default());
         return;
     }
     if matches!(args.get(1).map(String::as_str), Some("do" | "status" | "ls" | "commands" | "feedback" | "shot")) {
@@ -121,7 +141,8 @@ fn main() {
     tracing_subscriber::fmt()
         .with_env_filter(
             tracing_subscriber::EnvFilter::try_from_env("HERDR_APP_LOG")
-                .unwrap_or_else(|_| "warn,herdr_app=info,gpui_shell=info".into()),
+                // Keep gpui_shell=info for JS console logs (SCRIPT_TARGET = "gpui_shell::script").
+                .unwrap_or_else(|_| "warn,herdr_app=info,herdr_shell=info,gpui_shell=info".into()),
         )
         .init();
 
@@ -164,7 +185,7 @@ fn main() {
 
     gpui_platform::application()
         // Mods run programs already; the user's own links (dotfiles, Nix) may point out.
-        .with_assets(gpui_shell::AppAssets::new(mods::app_dir()).following_links())
+        .with_assets(herdr_shell::AppAssets::new(mods::app_dir()).following_links())
         .run(move |cx| {
             let fonts = settings::BUNDLED_FONTS.iter().map(|f| std::borrow::Cow::Borrowed(*f)).collect();
             if let Err(e) = cx.text_system().add_fonts(fonts) {
