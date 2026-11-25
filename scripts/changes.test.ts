@@ -249,6 +249,32 @@ test("Changes lets a slow preview of the same selected file finish across refres
   expect(h.preview().at(-1)).toBe("slow preview");
 });
 
+test("Changes replaces a pending whole-file preview when the selected file becomes tracked", async () => {
+  const slow = held();
+  let tracked = false;
+  const h = await mount({ cwd: "/repo-a", on: null }, {
+    async exec(_command, args) {
+      if (args.includes("--show-toplevel")) return ok("true\n\n/repo-a\n");
+      if (args.includes("status")) return tracked ? ok(" M a.txt\0") : untracked(["a.txt"]);
+      if (args.includes("--verify")) return tracked ? ok("head\n") : error("no HEAD");
+      if (args.includes("--numstat")) return ok(tracked ? "1\t1\ta.txt\0" : "");
+      if (args.includes("diff")) return ok("@@ -1 +1 @@\n-before\n+after\n");
+      return error("Unexpected Git command");
+    },
+    async readTextFile() { await slow.wait; return "old\nanother old line\n"; },
+  });
+  tracked = true;
+  await h.refresh();
+  const whileReading = h.preview();
+  slow.release();
+  await settled();
+
+  const diff = ["@@ -1 +1 @@", "before", "after"];
+  expect(whileReading).toEqual(diff);
+  expect(h.preview()).toEqual(diff);
+  expect(textParts(h.fileRow("/repo-a", "a.txt"))).toContain("+1");
+});
+
 test("Changes shows both checkouts and switches between same-named files", async () => {
   const first = held();
   const h = await panel({}, {
@@ -365,6 +391,39 @@ test("Changes keeps healthy checkouts when a child probe cannot start", async ()
   expect(h.repoNames()).toEqual(["repo-b"]);
   expect(textOf(h.byId("commit"))).toBe("Commit to repo-b");
   expect(h.paths()).toEqual(["same.txt"]);
+});
+
+test("Changes keeps a draft through a transient checkout probe failure", async () => {
+  const status = held(), on = "remote";
+  let unavailable = false;
+  const h = await panel({
+    "/repo-a": [{ files: ["same.txt"] }, { files: ["same.txt"], wait: status.wait }],
+  }, {}, {
+    cwd: "/", on,
+    async probeChild(repo) { if (unavailable && repo === "/repo-a") throw new Error("Checkout probe timed out"); },
+  });
+  h.type("draft A");
+  await h.refresh();
+  unavailable = true;
+  await h.refresh();
+  status.release();
+  await settled();
+
+  expect(h.repoNames()).toEqual(["repo-a", "repo-b"]);
+  expect(textOf(h.byId("changes-list"))).toContain("Checkout probe timed out");
+  expect(h.message()).toBe("draft A");
+  await h.submit();
+  await h.click(h.byId("commit"));
+  expect(h.commands.some(c => c.args[0] === "add")).toBe(false);
+
+  unavailable = false;
+  await h.refresh();
+  expect(textOf(h.byId("changes-list"))).not.toContain("Checkout probe timed out");
+  expect(h.message()).toBe("draft A");
+  await h.click(h.byId("commit"));
+  expect(h.commands.filter(c => c.args[0] === "commit").map(c => [c.cwd, c.on, c.args])).toEqual([
+    ["/repo-a", on, ["commit", "-m", "draft A"]],
+  ]);
 });
 
 test("Changes abandons pending reads when switching machines at the same path", async () => {

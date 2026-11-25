@@ -64,17 +64,25 @@ async function candidates(cwd, on, current) {
   return result.stdout.split("\0").filter(Boolean);
 }
 
-async function discover(cwd, on, current) {
+async function discover(cwd, on, previous, current) {
   const top = await worktree(cwd, on);
   if (!current()) return null;
   if (top) return { grouped: false, roots: [{ root: top, name: top.slice(top.lastIndexOf("/") + 1) || top }] };
+  const known = new Map();
+  for (const repo of previous) known.set(repo.name, repo.root);
   const roots = [], seen = new Set();
   for (const name of (await candidates(cwd, on, current)).sort()) {
     if (!current()) return null;
-    const root = await worktree(cwd, on, name).catch(() => null);
+    let root, probeError;
+    try { root = await worktree(cwd, on, name); }
+    catch (e) {
+      // A probe that failed to run does not mean a listed checkout vanished.
+      root = known.get(name);
+      probeError = String(e);
+    }
     if (!root || seen.has(root)) continue;
     seen.add(root);
-    roots.push({ root, name });
+    roots.push({ root, name, probeError });
   }
   return { grouped: true, roots };
 }
@@ -173,9 +181,10 @@ export default class Changes extends View {
 
   setRepos(roots, context, cx) {
     const repos = new Map();
-    for (const { root, name } of roots) {
+    for (const { root, name, probeError } of roots) {
       const repo = context.repos.get(root) ?? { root, files: [], expanded: true, open: null, closed: false, message: "" };
       repo.name = name;
+      repo.probeError = probeError;
       repos.set(root, repo);
     }
     context.repos = repos;
@@ -197,7 +206,8 @@ export default class Changes extends View {
     cx.spawn(async (cx) => {
       context.discovering = true;
       try {
-        const found = await discover(cwd, on, () => this.current(context));
+        const previous = context.grouped ? context.repos.values() : [];
+        const found = await discover(cwd, on, previous, () => this.current(context));
         if (!found || !this.current(context)) return;
         const { grouped, roots } = found;
         context.grouped = grouped;
@@ -205,7 +215,7 @@ export default class Changes extends View {
         this.error = roots.length ? null : "Not a git repository";
         this.watch(grouped || on ? null : this.active, cx);
         for (const repo of context.repos.values()) {
-          if (repo.loading || this.busy === repo) continue;
+          if (repo.probeError || repo.loading || this.busy === repo) continue;
           repo.loading = true;
           context.pending.add(repo);
         }
@@ -238,6 +248,7 @@ export default class Changes extends View {
   async status(repo, context, cx) {
     const git = (args) => exec("git", [...READ, ...args], { cwd: repo.root, on: context.on });
     try {
+      if (repo.probeError) return;
       const status = await git(["status", "--porcelain=v1", "-z", "--no-renames", "--untracked-files=all"]);
       if (status.code !== 0) throw new Error(status.stderr);
       if (!this.currentRepo(repo, context)) return;
@@ -281,19 +292,33 @@ export default class Changes extends View {
 
   preview(repo, cx) {
     const path = repo?.open, context = this.context;
-    // Keep an in-flight read for this selection across status refreshes.
-    if (!path || this.previewRequest) return;
-    cx.spawn(async (cx) => { if (await this.load(repo, path, context)) cx.notify(); });
+    if (!path) return;
+    const file = repo.files.find(f => f.path === path);
+    if (!file) return;
+    const { hasHead } = repo;
+    const source = file.fresh || (!hasHead && file.status === "A") ? "file" : hasHead ? "HEAD" : "index";
+    // Keep a slow preview only while status still calls for the same source.
+    if (this.previewRequest?.source === source) return;
+    if (this.previewRequest) this.clearPreview();
+    const request = this.previewRequest = { source };
+    try {
+      cx.spawn(async (cx) => { if (await this.load(repo, file, context, request)) cx.notify(); });
+    } catch (e) {
+      this.previewRequest = null;
+      throw e;
+    }
   }
 
-  async load(repo, path, context) {
-    const file = repo.files.find(f => f.path === path);
-    if (!file) return false;
-    const { root, hasHead } = repo, { on } = context;
-    const request = this.previewRequest = {};
+  async load(repo, file, context, request) {
+    if (this.previewRequest !== request) return false;
+    if (!this.currentRepo(repo, context)) {
+      this.previewRequest = null;
+      return false;
+    }
+    const { root } = repo, { on } = context, { path } = file, { source } = request;
     let lines, add;
     try {
-      if (file.fresh || (!hasHead && file.status === "A")) {
+      if (source === "file") {
         const text = await readTextFile(`${root}/${path}`, { on }).catch(() => null);
         if (text === null) lines = ["Cannot preview this file (binary, too large, or unreadable)"];
         else if (text.includes("\0")) lines = ["Binary file · no text diff"];
@@ -302,7 +327,7 @@ export default class Changes extends View {
           lines = [`@@ -0,0 +1,${add} @@`, ...text.slice(0, 400000).replace(/\n$/, "").split("\n").slice(0, 1500).map(l => `+${l}`)];
         }
       } else {
-        const r = await exec("git", [...READ, "diff", ...(hasHead ? ["HEAD"] : []), "--no-ext-diff", "--no-textconv", "--no-color", "--", path], { cwd: root, on });
+        const r = await exec("git", [...READ, "diff", ...(source === "HEAD" ? ["HEAD"] : []), "--no-ext-diff", "--no-textconv", "--no-color", "--", path], { cwd: root, on });
         if (r.code !== 0) throw new Error(r.stderr);
         const all = r.stdout.replace(/\n$/, "").split("\n"), first = all.findIndex(l => l.startsWith("@@"));
         lines = first < 0 ? [file.binary ? "Binary file changed" : "No text diff available"] : all.slice(first);
@@ -333,7 +358,7 @@ export default class Changes extends View {
   }
 
   canCommit(repo) {
-    return Boolean(repo && repo === this.active && !this.busy && !this.context.discovering && !this.error && !repo.loading && !repo.error && repo.message.trim());
+    return Boolean(repo && repo === this.active && !this.busy && !this.context.discovering && !this.error && !repo.loading && !repo.probeError && !repo.error && repo.message.trim());
   }
 
   commit(repo, cx) {
@@ -397,7 +422,8 @@ export default class Changes extends View {
           .child(div().flex_none().text_size(11).text_color(t.muted).child(`${repo.count ?? 0} files`)));
       }
       if (expanded) {
-        if (repo.error) notice(repo.error, t.ansi1);
+        const error = repo.probeError ?? repo.error;
+        if (error) notice(error, t.ansi1);
         else if (!repo.files.length) notice(repo.loading ? "Loading changes…" : "No uncommitted changes");
         if (grouped && repo.files.length < repo.count) notice("Showing the first 1,000 changed files");
       }

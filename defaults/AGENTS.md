@@ -192,8 +192,10 @@ Changes follows the focused folder on its machine. Inside a Git checkout it
 shows only that checkout. Otherwise it groups the checkouts directly inside
 the folder, including linked worktrees; it does not search deeper. Click a
 group's heading to activate it and expand or collapse it. Each group keeps
-its own file selection and commit draft until the focused folder changes.
-`Commit to <name>` stages all changes and commits only in that checkout.
+its own file selection and commit draft while it stays in the focused folder
+on the same machine. If Changes cannot run the Git check for a known child,
+it keeps that draft but disables committing until it verifies the checkout
+again. `Commit to <name>` stages all changes and commits only in that checkout.
 
 **Herdr's own layouts and mods are read-only.** They are replaced whole
 on every start. Use settings.json for look (fonts, sizes, theme, colors,
