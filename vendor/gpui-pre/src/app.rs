@@ -262,6 +262,13 @@ impl Application {
         this
     }
 
+    /// HERDR: Sets the activation policy before the native application starts.
+    /// Has no effect outside macOS.
+    pub fn with_activation_policy(self, policy: ActivationPolicy) -> Self {
+        self.0.borrow().platform.set_activation_policy(policy);
+        self
+    }
+
     /// Assigns the source of assets for the application.
     pub fn with_assets(self, asset_source: impl AssetSource) -> Self {
         let mut context_lock = self.0.borrow_mut();

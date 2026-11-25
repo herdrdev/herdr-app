@@ -169,6 +169,8 @@ pub enum ActivationPolicy {
     Regular,
     /// Run without foreground application UI while retaining the ability to open windows.
     Accessory,
+    /// HERDR: Never activate or show foreground application UI (for command-line checks).
+    Prohibited,
 }
 
 #[cfg(any(test, feature = "test-support", feature = "bench-support"))]
