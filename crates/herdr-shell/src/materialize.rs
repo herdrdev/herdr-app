@@ -1922,7 +1922,7 @@ where
         if let Some(callback) = behavior.on_scroll_wheel {
             let runtime = Rc::downgrade(runtime);
             let bounds = Rc::clone(&bounds);
-            element = element.on_scroll_wheel(move |event, window, cx| {
+            element = element.on_scroll(move |event, window, cx| {
                 let Some(runtime) = runtime.upgrade() else {
                     return;
                 };
@@ -2377,11 +2377,6 @@ struct SizeObserver {
     application: Option<u64>,
     callback: CallbackId,
     runtime: Weak<ShellRuntime>,
-}
-
-impl IntoElement for SizeObserver {
-    type Element = Self;
-    fn into_element(self) -> Self { self }
 }
 
 impl gpui::Element for SizeObserver {
