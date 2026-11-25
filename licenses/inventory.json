@@ -11,8 +11,6 @@
     "vendor/gpui-kit/LICENSE-APACHE",
     "vendor/gpui-kit/crates/base/Cargo.toml",
     "vendor/gpui-kit/crates/base/LICENSE-APACHE",
-    "vendor/gpui-kit/crates/base/examples/native/Cargo.toml",
-    "vendor/gpui-kit/crates/base/examples/wasm/Cargo.toml",
     "vendor/gpui-kit/crates/fps/Cargo.toml",
     "vendor/gpui-pre-apple/Cargo.toml",
     "vendor/gpui-pre-apple/LICENSE-APACHE",
@@ -28,7 +26,6 @@
     "vendor/gpui-pre/LICENSE-APACHE",
     "vendor/quickjs-jit-runtime/Cargo.toml",
     "vendor/quickjs-jit-runtime/LICENSE",
-    "vendor/taffy/Cargo.toml",
     "about.toml",
     "scripts/notices.ts",
     "scripts/notices.hbs",
@@ -72,13 +69,6 @@
       "source": "https://github.com/longbridge/quickjs-jit",
       "files": [
         "vendor/quickjs-jit-runtime/LICENSE"
-      ]
-    },
-    {
-      "name": "Taffy",
-      "source": "https://github.com/DioxusLabs/taffy/tree/v0.13.0",
-      "files": [
-        "vendor/taffy/LICENSE"
       ]
     },
     {
