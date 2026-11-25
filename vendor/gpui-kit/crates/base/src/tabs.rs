@@ -232,6 +232,7 @@ pub struct Tabs {
     base: gpui::Stateful<Div>,
     style: StyleRefinement,
     axis: Axis,
+    tab_stop: bool,
     children: SmallVec<[AnyElement; 2]>,
 }
 
@@ -242,6 +243,7 @@ impl Tabs {
             base: div().id(id.clone()),
             style: StyleRefinement::default(),
             axis: Axis::Horizontal,
+            tab_stop: true,
             children: SmallVec::new(),
             id,
         }
@@ -251,6 +253,13 @@ impl Tabs {
     /// vertical (Up/Down). Assistive technology hears the same orientation.
     pub fn axis(mut self, axis: Axis) -> Self {
         self.axis = axis;
+        self
+    }
+
+    /// HERDR: Whether this tab list participates in the window's Tab key order
+    /// as a roving tab stop. Defaults to `true` (upstream ARIA tabs pattern).
+    pub fn tab_stop(mut self, tab_stop: bool) -> Self {
+        self.tab_stop = tab_stop;
         self
     }
 }
@@ -280,6 +289,7 @@ thread_local! {
 /// matches what was rendered last.
 struct TabListScope {
     registry: TabRegistry,
+    tab_stop: bool,
     inner: AnyElement,
 }
 
@@ -324,7 +334,7 @@ impl Element for TabListScope {
         window: &mut Window,
         cx: &mut App,
     ) {
-        sync_tab_stops(&self.registry.borrow(), window, cx);
+        sync_tab_stops(&self.registry.borrow(), self.tab_stop, window, cx);
         self.inner.prepaint(window, cx);
     }
 
@@ -344,15 +354,17 @@ impl Element for TabListScope {
 
 /// Make exactly one enabled tab the list's tab stop: the focused tab while
 /// the list has focus, otherwise the selected tab, otherwise the first.
-fn sync_tab_stops(entries: &[TabEntry], window: &mut Window, cx: &mut App) {
+fn sync_tab_stops(entries: &[TabEntry], tab_stop: bool, window: &mut Window, cx: &mut App) {
     let enabled = |entry: &&TabEntry| !entry.disabled;
-    let stop = entries
-        .iter()
-        .filter(enabled)
-        .find(|entry| entry.focus_handle.is_focused(window))
-        .or_else(|| entries.iter().filter(enabled).find(|entry| entry.selected))
-        .or_else(|| entries.iter().find(|entry| !entry.disabled))
-        .map(|entry| entry.focus_handle.clone());
+    let stop = tab_stop.then(|| {
+        entries
+            .iter()
+            .filter(enabled)
+            .find(|entry| entry.focus_handle.is_focused(window))
+            .or_else(|| entries.iter().filter(enabled).find(|entry| entry.selected))
+            .or_else(|| entries.iter().find(|entry| !entry.disabled))
+            .map(|entry| entry.focus_handle.clone())
+    }).flatten();
 
     let mut changed = false;
     for entry in entries {
@@ -379,6 +391,7 @@ enum Step {
 
 fn handle_key_down(
     axis: Axis,
+    tab_stop: bool,
     registry: &TabRegistry,
     event: &KeyDownEvent,
     window: &mut Window,
@@ -434,7 +447,7 @@ fn handle_key_down(
     };
 
     window.focus(&target, cx);
-    sync_tab_stops(&registry.borrow(), window, cx);
+    sync_tab_stops(&registry.borrow(), tab_stop, window, cx);
     cx.stop_propagation();
 }
 
@@ -465,6 +478,7 @@ impl RenderOnce for Tabs {
             base,
             style,
             axis,
+            tab_stop,
             children,
         } = self;
 
@@ -477,12 +491,13 @@ impl RenderOnce for Tabs {
         let key_handler = {
             let registry = registry.clone();
             move |event: &KeyDownEvent, window: &mut Window, cx: &mut App| {
-                handle_key_down(axis, &registry, event, window, cx);
+                handle_key_down(axis, tab_stop, &registry, event, window, cx);
             }
         };
 
         TabListScope {
             registry,
+            tab_stop,
             inner: tab_list(base, axis)
                 .on_key_down(key_handler)
                 .children(children)
@@ -597,6 +612,44 @@ mod tests {
         assert!(
             vcx.update(|window, cx| view.read(cx).sibling.is_focused(window)),
             "clicking a tab must leave the sibling input focused"
+        );
+    }
+
+    #[gpui::test]
+    fn tab_stop_false_keeps_tabs_out_of_tab_order(cx: &mut gpui::TestAppContext) {
+        struct TabOrderHarness {
+            before: gpui::FocusHandle,
+            after: gpui::FocusHandle,
+        }
+
+        impl Render for TabOrderHarness {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div()
+                    .child(div().tab_index(1).track_focus(&self.before).size(px(40.)))
+                    .child(
+                        Tabs::new("no-stop-tabs")
+                            .tab_stop(false)
+                            .child(Tab::new("t-0").selected(true).size(px(40.)))
+                            .child(Tab::new("t-1").size(px(40.))),
+                    )
+                    .child(div().tab_index(2).track_focus(&self.after).size(px(40.)))
+            }
+        }
+
+        let (view, vcx) = cx.add_window_view(|window, cx| {
+            let before = cx.focus_handle().tab_stop(true);
+            let after = cx.focus_handle().tab_stop(true);
+            window.activate_window();
+            window.focus(&before, cx);
+            TabOrderHarness { before, after }
+        });
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        assert!(vcx.update(|window, cx| view.read(cx).before.is_focused(window)));
+
+        vcx.update(|window, cx| window.focus_next(cx));
+        assert!(
+            vcx.update(|window, cx| view.read(cx).after.is_focused(window)),
+            "Tab must skip Tabs::tab_stop(false) and move directly to the next focus stop"
         );
     }
 
