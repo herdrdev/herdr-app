@@ -9,6 +9,7 @@ mod floats;
 mod movable;
 mod pane_drag;
 mod pane_size;
+mod sidebar_drag;
 mod titlebar;
 
 use crate::layout::{Axis, Background as Paint, Content, Divider, Fit, HeaderContent, Kind, Line, Node, PaneFrame, Size as Span};
@@ -364,10 +365,14 @@ struct Overlay {
     frame: bool,
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum DragChange { Unchanged, Resized, SidebarMode }
+
 struct Drag {
     container: String,
     index: usize,
     axis: Axis,
+    sidebar: Option<sidebar_drag::SidebarDrag>,
 }
 
 #[derive(Default)]
@@ -3934,7 +3939,7 @@ impl AppWindow {
             Axis::Row => point(b.right() + delta, b.top()),
             Axis::Column => point(b.left(), b.bottom() + delta),
         };
-        self.drag = Some(Drag { container, index, axis });
+        self.drag = Some(Drag { container, index, axis, sidebar: None });
         self.drag_to(pos);
         self.drag = None;
         Ok(())
@@ -4839,15 +4844,18 @@ impl AppWindow {
         if resizable {
             let container = n.id.clone();
             let hit = HANDLE.max(width);
+            let main_sidebar = self.layout_name == "main" && n.id == self.chrome.id && row && index == 0
+                && n.children().iter().find(|c| !c.hidden).is_some_and(|c| c.id == "sidebar" && matches!(c.size, Some(Span::Px { .. })));
             let tracks_drag_color = n.divider.as_ref().is_some_and(|d| d.hover.is_some() || d.active.is_some());
             let handle = div()
                 .absolute()
                 .when(row, |d| d.top_0().bottom_0().left(px((width - hit) / 2.0)).w(px(hit)).cursor_col_resize())
                 .when(!row, |d| d.left_0().right_0().top(px((width - hit) / 2.0)).h(px(hit)).cursor_row_resize())
-                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, window, cx| {
                     if let Some(space) = this.model.space_of(&container)
                         && this.require_document(space.machine.as_deref()).is_err() { return; }
-                    this.drag = Some(Drag { container: container.clone(), index, axis });
+                    let sidebar = main_sidebar.then(|| sidebar_drag::SidebarDrag::for_header(window));
+                    this.drag = Some(Drag { container: container.clone(), index, axis, sidebar });
                     cx.stop_propagation();
                     if tracks_drag_color {
                         cx.notify();
@@ -4887,15 +4895,16 @@ impl AppWindow {
         }
     }
 
-    fn drag_to(&mut self, pos: Point<Pixels>) {
-        let Some(d) = &self.drag else { return };
+    fn drag_to(&mut self, pos: Point<Pixels>) -> DragChange {
+        let Some(d) = &self.drag else { return DragChange::Unchanged };
         let (container, index, axis) = (d.container.clone(), d.index, d.axis);
-        let Some(node) = self.find_node_mut(&container).map(|n| n.clone()) else { return };
-        if !node.resizable() { return; }
-        let shown: Vec<&Node> = node.children().iter().filter(|c| !c.hidden).collect();
-        let (Some(a), Some(b)) = (shown.get(index), shown.get(index + 1)) else { return };
+        let Some(node) = self.find_node_mut(&container) else { return DragChange::Unchanged };
+        if !node.resizable() { return DragChange::Unchanged; }
+        let mut shown = node.children().iter().filter(|c| !c.hidden).skip(index);
+        let (Some(a), Some(b)) = (shown.next(), shown.next()) else { return DragChange::Unchanged };
+        let (a_id, b_id, sa, sb, min, max) = (a.id.clone(), b.id.clone(), a.size, b.size, a.min, a.max);
         let bounds = self.bounds.borrow();
-        let (Some(ba), Some(bb)) = (bounds.get(&a.id).copied(), bounds.get(&b.id).copied()) else { return };
+        let (Some(ba), Some(bb)) = (bounds.get(&a_id).copied(), bounds.get(&b_id).copied()) else { return DragChange::Unchanged };
         drop(bounds);
         let (start, p) = match axis {
             Axis::Row => (f32::from(ba.left()), f32::from(pos.x)),
@@ -4910,19 +4919,27 @@ impl AppWindow {
         let (la, lb, start, p) = (la / zoom, lb / zoom, start / zoom, p / zoom);
         let total = la + lb;
         // Squeezed and zero-size siblings cannot both keep the drag minimum.
-        if total <= 48.0 { return; }
+        if total <= 48.0 { return DragChange::Unchanged; }
         let mut new_a = (p - start).clamp(24.0, total - 24.0);
-        if let Some(min) = a.min {
+        if let Some(min) = min {
             new_a = new_a.max(min);
         }
-        if let Some(max) = a.max {
+        if let Some(max) = max {
             new_a = new_a.min(max);
         }
         let new_a = new_a.min(total - 24.0);
-        let (a_id, b_id) = (a.id.clone(), b.id.clone());
-        let (sa, sb) = (a.size, b.size);
-        let Some(parent) = self.find_node_mut(&container) else { return };
-        let Some(children) = parent.children_mut() else { return };
+        let (new_a, switched) = match (self.drag.as_mut().and_then(|d| d.sidebar.as_mut()), sa) {
+            (Some(snap), Some(Span::Px { px })) => {
+                let (w, switched) = snap.snap(new_a, px, min.unwrap_or(24.), max.unwrap_or(total).min(total - 24.));
+                // The pointer can keep moving while the sidebar stays put. Track
+                // the gesture, but don't redraw the window for the same width.
+                if w.round() == px { return DragChange::Unchanged; }
+                (w, switched)
+            }
+            _ => (new_a, false),
+        };
+        let Some(parent) = self.find_node_mut(&container) else { return DragChange::Unchanged };
+        let Some(children) = parent.children_mut() else { return DragChange::Unchanged };
         let set = |children: &mut Vec<Node>, id: &str, s: Span| {
             if let Some(n) = children.iter_mut().find(|n| n.id == id) {
                 n.size = Some(s);
@@ -4939,6 +4956,7 @@ impl AppWindow {
                 set(children, &b_id, Span::Weight { weight: sum * (total - new_a) / total });
             }
         }
+        if switched { DragChange::SidebarMode } else { DragChange::Resized }
     }
 
     fn render_overlays(&self, viewport: Size<Pixels>, rendered_dividers: &mut HashSet<(String, usize)>, cx: &mut Context<Self>) -> Vec<AnyElement> {
@@ -5754,8 +5772,11 @@ impl Render for AppWindow {
                     this.finish_divider_drag(window, cx);
                     return;
                 }
-                this.drag_to(ev.position);
-                cx.notify();
+                let change = this.drag_to(ev.position);
+                if change == DragChange::SidebarMode && mods::publish_layout(&this.chrome) {
+                    this.refresh_snapshot_mods(cx);
+                }
+                if change != DragChange::Unchanged { cx.notify(); }
             }))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, window, cx| {
                 this.drag_from = None;

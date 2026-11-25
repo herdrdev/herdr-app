@@ -476,6 +476,9 @@ Sidebar on the right: swap the two children of `root`. No sidebar: set
 Narrower than 160px, the sidebar mods draw a compact rail; folding resizes
 `sidebar` to 44 (76 on macOS, room for the traffic lights). On macOS,
 the tabs also leave room for the window buttons when the sidebar is narrower.
+In the shipped `main` layout, dragging the divider left first stops the sidebar
+at the width its header needs. Pull another 40px left to snap to the layout's
+44px minimum; pull 40px right from that rail to reopen. Personal layouts still resize freely.
 
 ### Layouts and mods other people made
 

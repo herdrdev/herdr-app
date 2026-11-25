@@ -77,6 +77,79 @@ fn divider_interaction(cx: &mut gpui::TestAppContext) {
 }
 
 #[test]
+fn main_sidebar_snaps_while_the_button_is_still_down() {
+    in_own_process("sidebar_snap_gesture");
+}
+
+#[gpui::test]
+fn sidebar_snap_gesture(cx: &mut gpui::TestAppContext) {
+    use gpui::{Modifiers, MouseButton, VisualTestContext, point, px, size};
+    use serde_json::json;
+    if !running_alone("sidebar_snap_gesture") { return; }
+    let probe = r#"import { View, div } from 'gpui-kit'; import { layout, setShared } from 'herdr';
+    export default class Probe extends View { render() {
+        const width = layout()?.children?.[0]?.size?.px;
+        if (width != null && width !== this.last) { this.last = width; setShared('probe.sidebar', width); }
+        return div();
+    } }"#;
+    let layout = json!({"id":"root", "type":"row", "divider":{"width":1,"color":"border"}, "children":[
+        {"id":"sidebar","type":"column","size":{"px":268},"min":44,"max":480,"children":[
+            {"id":"brand","type":"block","content":{"mod":"workspace-chrome"}}]},
+        {"id":"work","type":"column","children":[]}]});
+    let (view, cx) = open_window(cx, "workspace-chrome", probe, layout);
+    cx.simulate_resize(size(px(900.), px(480.)));
+    let draw = |cx: &mut VisualTestContext| { cx.update(|w,cx| w.draw(cx).clear(cx)); cx.run_until_parked(); };
+    draw(cx);
+    let pos = |x| point(px(x), px(120.));
+    let drag = |x, cx: &mut VisualTestContext| { cx.simulate_mouse_move(pos(x), MouseButton::Left, Modifiers::default()); draw(cx); };
+    let width = |cx: &mut VisualTestContext| view.read_with(cx, |v,_| match v.chrome.children()[0].size {
+        Some(super::Span::Px { px }) => px, _ => panic!("expected a pixel sidebar"),
+    });
+    let seen = || crate::mods::shared("probe.sidebar").and_then(|n| n.as_f64()).unwrap() as f32;
+    let rail = 44.;
+    // Same IDs in a personal layout: ordinary continuous resizing, no snapping.
+    cx.simulate_mouse_down(pos(268.), MouseButton::Left, Modifiers::default());
+    drag(150., cx);
+    assert_eq!(width(cx), 150.);
+    drag(268., cx);
+    cx.simulate_mouse_up(pos(268.), MouseButton::Left, Modifiers::default());
+    view.update(cx, |v,_| v.layout_name = "main".into());
+    draw(cx);
+    cx.simulate_mouse_down(pos(268.), MouseButton::Left, Modifiers::default());
+    drag(250., cx);
+    assert_eq!(width(cx), 250.);
+    let wide = (151..250).rev().step_by(6).find_map(|x| {
+        drag(x as f32, cx);
+        let w = width(cx);
+        (w > x as f32).then_some(w)
+    }).expect("the sidebar stops shrinking when its header fits");
+    drag(wide - 39., cx);
+    assert_eq!(width(cx), wide);
+    cx.simulate_mouse_up(pos(wide - 39.), MouseButton::Left, Modifiers::default());
+    draw(cx);
+    assert_eq!(seen(), wide, "release on the plateau keeps wide mode");
+    cx.simulate_mouse_down(pos(wide), MouseButton::Left, Modifiers::default());
+    drag(wide - 40., cx);
+    assert_eq!((width(cx), seen()), (rail, rail), "collapse before release");
+    drag(wide - 39., cx);
+    assert_eq!(width(cx), rail, "a one-pixel reversal must not bounce back");
+    cx.simulate_mouse_up(pos(wide - 39.), MouseButton::Left, Modifiers::default());
+    draw(cx);
+    cx.simulate_mouse_down(pos(rail), MouseButton::Left, Modifiers::default());
+    drag(rail + 39., cx);
+    assert_eq!((width(cx), seen()), (rail, rail), "same pull distance in both directions");
+    drag(rail + 40., cx);
+    assert_eq!((width(cx), seen()), (wide, wide), "reopen before release");
+    drag(rail + 41., cx);
+    assert_eq!(width(cx), wide, "the pointer doesn't jump when the divider does");
+    drag(245., cx);
+    assert_eq!((width(cx), seen()), (245., wide), "follow the pointer, but don't publish every pixel");
+    cx.simulate_mouse_up(pos(245.), MouseButton::Left, Modifiers::default());
+    draw(cx);
+    assert_eq!(seen(), 245.);
+}
+
+#[test]
 fn dragging_squeezed_layout_blocks_never_crashes() {
     in_own_process("squeezed_layout_drag");
 }
@@ -118,7 +191,7 @@ fn squeezed_layout_drag(cx: &mut gpui::TestAppContext) {
                         let total = f32::from(bounds[&a.id].size.height + bounds[&b.id].size.height) / super::settings::zoom();
                         drop(bounds);
                         let before = serde_json::to_value(parent).unwrap();
-                        this.drag = Some(super::Drag { container: container.into(), index, axis: super::Axis::Column });
+                        this.drag = Some(super::Drag { container: container.into(), index, axis: super::Axis::Column, sidebar: None });
                         this.drag_to(point(px(100.0), px(y)));
                         let after = this.chrome.find(container).unwrap();
                         if container == "sidebar" || total <= 48.0 {
