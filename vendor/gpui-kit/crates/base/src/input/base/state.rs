@@ -2474,7 +2474,9 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.delete_selections(
             true,
             EditIntent::Atomic,
-            |s, offset| offset..s.next_word_delete_end_at(offset, !cfg!(target_os = "macos")),
+            // HERDR (B24): keep Ctrl+Delete deleting whitespace plus the next word
+            // on Linux/Windows (matching 1ccf011).
+            |s, offset| offset..s.next_word_delete_end_at(offset, false),
             window,
             cx,
         );
@@ -9158,12 +9160,10 @@ mod tests {
                 state.set_value("one  \ntwo", window, cx);
                 assert_eq!(state.next_word_delete_end_at(3, true), 5);
 
+                // HERDR (B24): Ctrl+Delete deletes whitespace plus the next word on all OSes.
                 state.set_value("    four leading spaces", window, cx);
                 state.set_selected_range(0..0, cx);
                 state.delete_next_word(&DeleteToNextWordEnd, window, cx);
-                #[cfg(not(target_os = "macos"))]
-                assert_eq!(state.value(), "four leading spaces");
-                #[cfg(target_os = "macos")]
                 assert_eq!(state.value(), " leading spaces");
             });
         });
