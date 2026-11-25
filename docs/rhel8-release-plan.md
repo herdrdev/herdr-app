@@ -1,6 +1,6 @@
 # Plan: RHEL 8-only release build in `release.yml`
 
-Status: the app+core RHEL 8 build is **green** (run 8). Run 9 adds CPU
+Status: the app+core RHEL 8 build is **green** (run 9). Run 9 adds CPU
 rendering tuning for issue #1 (present mode, path MSAA, backend override,
 frame logging).
 
@@ -152,7 +152,7 @@ build, and `HERDR_APP_PRESENT_MODE=fifo` restores vsync.
 | 6 | `2d2a367` | https://github.com/shawn111/herdr-app/actions/runs/45320328933 | **success**: launcher `herdr-app-rhel8` and `README-rhel8.md` in the tarball; both binaries at glibc 2.28; artifact 38.5 MB | None needed. |
 | 7 | `9291769` | https://github.com/shawn111/herdr-app/actions/runs/45324805105 | failed in `Check glibc floor` with exit 141 right after `ldd --version \| head -1`; `head` closed the pipe and `pipefail` turned the producer's SIGPIPE into a failure (the same race the `objdump` step was fixed for) | Replace `head -1` with `sed -n '1p'` in that line and in the `sort -V` comparison; both read all input, so no SIGPIPE. |
 | 8 | `1236459` | https://github.com/shawn111/herdr-app/actions/runs/45326453930 | **success**: SIGPIPE fix; launcher defaults `LP_NUM_THREADS=1`; both binaries at glibc 2.28; artifact 38.5 MB | None needed. |
-| 9 | pending | — | pending | CPU rendering tuning: `Immediate` present + latency 1 and 1x path MSAA on software adapters, `GPUI_WGPU_BACKEND`, `HERDR_APP_*` overrides, frame log, X11 refresh-rate line. |
+| 9 | `aa094e8` | https://github.com/shawn111/herdr-app/actions/runs/45564766416 | **success**: CPU rendering tuning built; both binaries at glibc 2.28; artifact 38.6 MB | None needed. |
 
 ## Risks / fallbacks
 
