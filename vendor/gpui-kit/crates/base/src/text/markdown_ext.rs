@@ -292,15 +292,18 @@ impl MarkdownExtensions {
 
     /// Set whether raw HTML in Markdown is parsed as HTML (the default).
     ///
-    /// When `false`, CommonMark's HTML blocks and inline tags are not
-    /// recognized, so a `<b>` or an `<img>` in the source shows as the text
-    /// it is written as, and nothing is loaded from it. Use this for Markdown
-    /// from a source that must not render HTML. Autolinks such as
-    /// `<https://example.com>` are not HTML and still render as links.
+    /// HERDR: When `false`, render raw HTML tags and blocks as literal text
+    /// without parsing Markdown/entities/images inside them. Markdown outside
+    /// those fragments, including autolinks, still renders.
     pub fn raw_html(mut self, enabled: bool) -> Self {
         self.disable_raw_html = !enabled;
         self.bump_revision();
         self
+    }
+
+    // HERDR: keep HTML in the AST so its contents never become Markdown.
+    pub(super) fn renders_raw_html(&self) -> bool {
+        !self.disable_raw_html
     }
 
     /// Register a parser for block-level Markdown AST nodes.
@@ -477,10 +480,10 @@ impl MarkdownExtensions {
         // construct swallows a `$$` block, so a block plugin matching
         // `Node::Math` never fires and the formula renders inline.
         options.constructs.math_flow = true;
-        if self.disable_raw_html {
-            options.constructs.html_flow = false;
-            options.constructs.html_text = false;
-        }
+        // HERDR: keep `html_flow` and `html_text` enabled when `disable_raw_html`
+        // is set so raw HTML stays `Node::Html` in the AST and inner text like
+        // `*literal*`, `&amp;`, or `![image](...)` is never parsed as Markdown.
+        // The renderer emits `Node::Html` as literal text when `!renders_raw_html()`.
         if self.enable_mdx {
             options.constructs.html_flow = false;
             options.constructs.html_text = false;

@@ -197,11 +197,13 @@ enum InlineGroup<'a> {
 /// text. Pair the formatting tags this renderer knows with their closing tag
 /// among the siblings and treat what lies between as a marked run, the same
 /// way `**x**` is handled.
-fn inline_groups(children: &[Node]) -> Vec<InlineGroup<'_>> {
+fn inline_groups(children: &[Node], render_html: bool) -> Vec<InlineGroup<'_>> {
     let mut groups = Vec::with_capacity(children.len());
     let mut ix = 0;
     while ix < children.len() {
-        if let Some((false, name, attrs)) = inline_html_tag(&children[ix])
+        // HERDR: do not pair inline HTML tags when raw HTML rendering is disabled.
+        if render_html
+            && let Some((false, name, attrs)) = inline_html_tag(&children[ix])
             && let Some(mark) = inline_html_mark(&name, attrs)
             && let Some(close) = matching_close_tag(children, ix, &name)
         {
@@ -315,7 +317,7 @@ fn parse_inline_children(
     children: &[Node],
     cx: &mut NodeContext,
 ) -> String {
-    for group in inline_groups(children) {
+    for group in inline_groups(children, cx.markdown_extensions.renders_raw_html()) {
         match group {
             InlineGroup::Node(child) => {
                 parse_paragraph(source, paragraph, child, cx);
@@ -528,7 +530,7 @@ fn merge_children_with_mark(
     let mut merged_marks = Vec::new();
     let mut merged_source_segments = Vec::new();
 
-    for group in inline_groups(children) {
+    for group in inline_groups(children, cx.markdown_extensions.renders_raw_html()) {
         let mut child_paragraph = Paragraph::default();
         let child_text = match group {
             InlineGroup::Node(child) => parse_paragraph(source, &mut child_paragraph, child, cx),
@@ -605,7 +607,7 @@ fn source_segments(
     rendered: &str,
     span: Option<Span>,
     source_offset: usize,
-    include_preceding_escape: bool,
+    node: &Node,
 ) -> Vec<SourceSegment> {
     let Some(span) = span else {
         return Vec::new();
@@ -616,12 +618,15 @@ fn source_segments(
         return Vec::new();
     };
 
-    let mut segments = aligned_source_segments(raw, rendered, span.start, true, true);
+    // HERDR: literal HTML nodes are not entity- or escape-decoded.
+    let decode_markdown = !matches!(node, Node::Html(_));
+    let mut segments =
+        aligned_source_segments(raw, rendered, span.start, decode_markdown, decode_markdown);
 
     // The text node of an escaped character starts after its backslash. The
     // backslash and the character map as a whole; the rest of the run stays
     // linear.
-    if include_preceding_escape
+    if matches!(node, Node::Text(_))
         && let Some(previous) = local_start.checked_sub(1)
         && source.as_bytes().get(previous) == Some(&b'\\')
         && let Some(first) = segments.first_mut()
@@ -887,13 +892,7 @@ fn mapped_inline(
         start: cx.offset + position.start.offset,
         end: cx.offset + position.end.offset,
     });
-    let segments = source_segments(
-        source,
-        &text,
-        span,
-        cx.offset,
-        matches!(node, Node::Text(_)),
-    );
+    let segments = source_segments(source, &text, span, cx.offset, node);
     InlineNode::new(text).source_segments(segments)
 }
 
@@ -1083,6 +1082,11 @@ fn parse_paragraph(
                     .source_segments(code_source_segments(source, &text, span, cx.offset))
                     .marks(vec![(0..text.len(), TextMark::default())]),
             );
+        }
+        // HERDR: render inline HTML tags as literal text when raw_html is false.
+        Node::Html(val) if !cx.markdown_extensions.renders_raw_html() => {
+            text = val.value.clone();
+            paragraph.push(mapped_inline(source, text.clone(), node, cx));
         }
         Node::Html(val) => match super::html::parse(&val.value, cx) {
             Ok(el) => {
@@ -1405,6 +1409,14 @@ fn ast_to_node(source: &str, value: mdast::Node, cx: &mut NodeContext) -> BlockN
             BlockNode::CodeBlock(
                 CodeBlock::new(val.value.into(), None, span).source_segments(segments),
             )
+        }
+        // HERDR: render HTML blocks as literal text when raw_html is false.
+        Node::Html(ref val) if !cx.markdown_extensions.renders_raw_html() => {
+            let span = new_span(val.position.clone(), cx);
+            let mut paragraph = Paragraph::default();
+            paragraph.push(mapped_inline(source, val.value.as_str(), &value, cx));
+            paragraph.span = span;
+            BlockNode::Paragraph(paragraph)
         }
         Node::Html(val) => match super::html::parse(&val.value, cx) {
             Ok(el) => BlockNode::Root {
@@ -2919,10 +2931,15 @@ mod tests {
 
     #[test]
     fn raw_html_off_keeps_html_as_text() {
-        let source = "a <b>bold</b> <img src=\"https://example.com/x.png\"> <https://example.com>\n\n<div>block</div>";
+        // HERDR: content inside raw HTML blocks and tag attributes stays literal
+        // rather than being parsed as Markdown emphasis, entities, or images.
+        let block = "<div>\n*literal* &amp;\n![image](https://example.com/x.png)\n</div>";
+        let source = format!(
+            "a <b>bold</b> <img src=\"https://example.com/x.png\" alt=\"*literal* &amp;\"> <https://example.com>\n\n{block}"
+        );
 
         let mut cx = NodeContext::default();
-        let document = parse(source, &mut cx).unwrap();
+        let document = parse(&source, &mut cx).unwrap();
         let BlockNode::Paragraph(paragraph) = &document.blocks[0] else {
             panic!("expected paragraph");
         };
@@ -2932,13 +2949,15 @@ mod tests {
             markdown_extensions: Arc::new(MarkdownExtensions::default().raw_html(false)),
             ..Default::default()
         };
-        let document = parse(source, &mut cx).unwrap();
+        let document = parse(&source, &mut cx).unwrap();
         let BlockNode::Paragraph(paragraph) = &document.blocks[0] else {
             panic!("expected paragraph");
         };
         let text = paragraph.text();
         assert!(
-            text.starts_with(r#"a <b>bold</b> <img src="https://example.com/x.png"> "#),
+            text.starts_with(
+                r#"a <b>bold</b> <img src="https://example.com/x.png" alt="*literal* &amp;"> "#
+            ),
             "{text}"
         );
         assert!(bold_runs(paragraph).is_empty());
@@ -2950,10 +2969,16 @@ mod tests {
                 .any(|child| child.marks.iter().any(|(_, mark)| mark.link.is_some())),
             "an autolink is not HTML and stays a link"
         );
-        let BlockNode::Paragraph(block) = &document.blocks[1] else {
+        let BlockNode::Paragraph(literal_block) = &document.blocks[1] else {
             panic!("expected the HTML block as a paragraph");
         };
-        assert_eq!(block.text(), "<div>block</div>");
+        assert_eq!(literal_block.text(), block);
+        assert!(
+            literal_block
+                .children
+                .iter()
+                .all(|child| child.image.is_none())
+        );
     }
 
     #[test]
