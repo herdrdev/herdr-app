@@ -10,7 +10,7 @@ use crate::{
 use gpui::{
     Anchor, App, Axis, Background, BorderStyle, Bounds, ContentMask, CursorStyle, Edges, Element,
     ElementId, EntityId, GlobalElementId, Hitbox, HitboxBehavior, Hsla, InspectorElementId, IsZero,
-    LayoutId, ListState, MouseButton, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
+    LayoutId, ListState, MouseDownEvent, MouseMoveEvent, MouseUpEvent, PaintQuad,
     Pixels, Point, Position, ScrollEvent, ScrollHandle, Size, Style, TouchDragEvent, TouchPhase,
     UniformListScrollHandle, Window, fill, point, prelude::FluentBuilder, px, relative, size,
 };
@@ -1828,10 +1828,9 @@ impl Element for Scrollbar {
                             let scroll_handle = self.scroll_handle.clone();
 
                             move |event: &MouseDownEvent, phase, window, cx| {
-                                if phase.bubble()
-                                    && event.button == MouseButton::Left
-                                    && bar_hitbox.is_hovered(window)
-                                {
+                                // HERDR (B27): keep non-primary mouse buttons working on Scrollbar
+                                // (matching 1ccf011) while retaining the hitbox occlusion check.
+                                if phase.bubble() && bar_hitbox.is_hovered(window) {
                                     cx.stop_propagation();
 
                                     if thumb_bounds.contains(&event.position) {
@@ -1944,10 +1943,8 @@ impl Element for Scrollbar {
                         let scroll_handle = self.scroll_handle.clone();
 
                         move |event: &MouseUpEvent, phase, _, cx| {
-                            if phase.bubble()
-                                && event.button == MouseButton::Left
-                                && state.get().dragged_axis == Some(axis)
-                            {
+                            // HERDR (B27): end drag for any mouse button (matching 1ccf011).
+                            if phase.bubble() && state.get().dragged_axis == Some(axis) {
                                 scroll_handle.set_offset(active_geometry.drag_offset(
                                     axis,
                                     event.position,
@@ -3358,40 +3355,23 @@ mod tests {
     }
 
     #[gpui::test]
-    fn only_the_primary_button_drags_or_jumps(cx: &mut TestAppContext) {
+    fn non_primary_buttons_still_drag_and_jump_scrollbar(cx: &mut TestAppContext) {
+        // HERDR (B27): keep right/middle clicks working on Scrollbar (matching 1ccf011)
+        // while retaining hitbox occlusion.
         let (cx, handle) = harness(
             cx,
             ScrollbarAxis::Vertical,
             ScrollbarMode::Always,
             size(px(100.), px(500.)),
         );
-        for button in [MouseButton::Right, MouseButton::Middle] {
-            // Thumb press, then the track.
-            for y in [px(20.), px(80.)] {
-                cx.simulate_mouse_down(point(px(95.), y), button, Modifiers::default());
-                cx.simulate_mouse_up(point(px(95.), y), button, Modifiers::default());
-            }
-        }
-        assert_eq!(handle.drag_starts.get(), 0);
-        assert_eq!(handle.offset(), Point::default());
-
-        // A secondary release does not end a primary drag.
-        cx.simulate_mouse_down(
-            point(px(95.), px(20.)),
-            MouseButton::Left,
-            Modifiers::default(),
-        );
-        cx.simulate_mouse_up(
-            point(px(95.), px(20.)),
-            MouseButton::Right,
-            Modifiers::default(),
-        );
-        assert_eq!(handle.drag_ends.get(), 0);
-        cx.simulate_mouse_up(
-            point(px(95.), px(20.)),
-            MouseButton::Left,
-            Modifiers::default(),
-        );
+        // Right-click on thumb starts and ends a drag.
+        cx.simulate_mouse_down(point(px(95.), px(20.)), MouseButton::Right, Modifiers::default());
+        cx.simulate_mouse_up(point(px(95.), px(20.)), MouseButton::Right, Modifiers::default());
+        assert_eq!(handle.drag_starts.get(), 1);
         assert_eq!(handle.drag_ends.get(), 1);
+        // Right-click on track jumps the scroll offset.
+        cx.simulate_mouse_down(point(px(95.), px(80.)), MouseButton::Right, Modifiers::default());
+        cx.simulate_mouse_up(point(px(95.), px(80.)), MouseButton::Right, Modifiers::default());
+        assert!(handle.offset().y < px(0.), "right click on track jumps scroll offset");
     }
 }
