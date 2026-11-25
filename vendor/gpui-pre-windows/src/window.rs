@@ -1043,7 +1043,8 @@ impl PlatformWindow for WindowsWindow {
             .log_err();
     }
 
-    #[cfg(feature = "test-support")]
+    // HERDR: expose offscreen frame capture under render-to-image.
+    #[cfg(any(test, feature = "test-support", feature = "render-to-image"))]
     fn render_to_image(&self, scene: &Scene) -> anyhow::Result<image::RgbaImage> {
         self.state
             .renderer
