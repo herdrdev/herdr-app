@@ -212,6 +212,8 @@ fn native_activation_policy(policy: ActivationPolicy) -> NSApplicationActivation
     match policy {
         ActivationPolicy::Regular => NSApplicationActivationPolicy::Regular,
         ActivationPolicy::Accessory => NSApplicationActivationPolicy::Accessory,
+        // HERDR: keep CLI check subcommands out of the macOS Dock and foreground coalition.
+        ActivationPolicy::Prohibited => NSApplicationActivationPolicy::Prohibited,
     }
 }
 
@@ -549,7 +551,8 @@ impl Platform for MacPlatform {
                 state.application_created = true;
                 state.activation_policy
             };
-            if policy == ActivationPolicy::Accessory {
+            // HERDR: apply any non-foreground policy (Accessory or Prohibited) before the run loop.
+            if policy != ActivationPolicy::Regular {
                 let _: Bool = msg_send![app, setActivationPolicy: native_activation_policy(policy)];
             }
             let app_delegate: *mut AnyObject = msg_send![APP_DELEGATE_CLASS, new];
