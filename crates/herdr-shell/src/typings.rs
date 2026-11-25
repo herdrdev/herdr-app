@@ -4159,6 +4159,7 @@ mod tests {
         "on_window_mouse_up",
         "on_mouse_down_out",
         "on_drop",
+        "on_size_change",
         "drag_paths",
         "on_scroll_wheel",
         "on_pinch",

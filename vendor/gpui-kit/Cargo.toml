@@ -4,8 +4,6 @@
 members = [
     "crates/base",
     "crates/fps",
-    "crates/shell",
-    "crates/shell/rquickjs-compat",
 ]
 resolver = "2"
 
@@ -20,7 +18,6 @@ gpui-base = { path = "crates/base", version = "0.7.1" }
 gpui-component-macros = { path = "crates/component-macros", version = "0.7.1" }
 gpui-kit-assets = { path = "crates/assets", version = "0.7.1" }
 gpui-fps = { path = "crates/fps", version = "0.7.1" }
-gpui-shell = { path = "crates/shell", version = "0.7.1" }
 gpui-webview = { path = "crates/webview", version = "0.7.1" }
 gpui-component-shell = { path = "crates/component-shell", version = "0.7.1" }
 story = { path = "crates/story" }
@@ -140,12 +137,6 @@ quickjs-jit-runtime = { opt-level = 3 }
 quickjs-jit-sys = { opt-level = 3 }
 quickjs-jit-core = { opt-level = 3 }
 cap-std = { opt-level = 3 }
-
-[patch.crates-io]
-# LLRT's public modules still name their compatible binding dependency
-# `rquickjs`. Route those dependencies through a source-compatible facade so
-# the shell and LLRT share the exact same quickjs-jit types and VM.
-rquickjs = { path = "crates/shell/rquickjs-compat" }
 
 [workspace.metadata.typos]
 files.extend-exclude = ["**/fixtures/*"]
