@@ -1130,7 +1130,9 @@ impl WaylandWindowStatePtr {
                             state.resize_throttle = true;
                         }
                         if !configure.fullscreen && !configure.maximized {
-                            configure.size = if got_unmaximized {
+                            // HERDR: restore the windowed size only when the compositor leaves
+                            // it to us; a size it sends (e.g. tiling a maximized window) wins.
+                            configure.size = if got_unmaximized && configure.size.is_none() {
                                 Some(state.window_bounds.size)
                             } else {
                                 compute_outer_size(state.inset(), configure.size, state.tiling)
