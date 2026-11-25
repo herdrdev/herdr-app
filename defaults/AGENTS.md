@@ -761,6 +761,9 @@ What's about the user, never a look:
   goes there when clicked. `done` / `blocked` replace the bundled MP3s
   (path absolute or relative to `~/.config/herdr-app`). Changes apply live,
   including the Play buttons in Settings > Alerts.
+- `toast_position`: the window corner notes stack in: `"bottom-right"`
+  (default), `"bottom-left"`, `"top-right"` or `"top-left"`. Applies live;
+  also in Settings > Alerts.
 - `core`: the herdr-core binary to use, when it isn't where Herdr looks
   (PATH, the login shell's PATH, `~/.local/bin`, Homebrew, mise, Nix,
   cargo). Read at start.

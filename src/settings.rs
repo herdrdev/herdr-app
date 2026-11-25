@@ -412,6 +412,9 @@ pub struct Person {
     /// macOS Option sends Alt shortcuts, or follows the keyboard layout.
     #[serde(skip_serializing_if = "OptionAsAlt::is_auto")]
     pub option_as_alt: OptionAsAlt,
+    /// The window corner notes stack in.
+    #[serde(skip_serializing_if = "ToastPosition::is_default")]
+    pub toast_position: ToastPosition,
     /// Light or dark: the system's, or one always.
     #[serde(skip_serializing_if = "Appearance::is_system")]
     pub appearance: Appearance,
@@ -447,6 +450,31 @@ pub enum OptionAsAlt {
     Right,
 }
 
+/// Which corner of the window notes (toasts) stack in.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Serialize, Deserialize)]
+#[serde(rename_all = "kebab-case")]
+pub enum ToastPosition {
+    #[default]
+    BottomRight,
+    BottomLeft,
+    TopRight,
+    TopLeft,
+}
+
+impl ToastPosition {
+    fn is_default(&self) -> bool {
+        *self == Self::BottomRight
+    }
+
+    pub fn top(self) -> bool {
+        matches!(self, Self::TopRight | Self::TopLeft)
+    }
+
+    pub fn left(self) -> bool {
+        matches!(self, Self::BottomLeft | Self::TopLeft)
+    }
+}
+
 impl OptionAsAlt {
     fn is_auto(&self) -> bool {
         *self == Self::Auto
@@ -478,6 +506,7 @@ impl Default for Person {
             pane_scrollbars: true,
             minimum_contrast: 1.0,
             option_as_alt: OptionAsAlt::Auto,
+            toast_position: ToastPosition::BottomRight,
             appearance: Appearance::System,
             theme: None,
             colors: BTreeMap::new(),
@@ -526,6 +555,7 @@ pub struct Settings {
     pub copy_on_select: bool,
     pub minimum_contrast: f32,
     pub option_as_alt: OptionAsAlt,
+    pub toast_position: ToastPosition,
     pub sounds: Sounds,
 }
 
@@ -574,6 +604,7 @@ impl Default for Settings {
             copy_on_select: true,
             minimum_contrast: 1.0,
             option_as_alt: OptionAsAlt::Auto,
+            toast_position: ToastPosition::BottomRight,
             sounds: Sounds::default(),
         }
     }
@@ -619,6 +650,7 @@ impl Settings {
             copy_on_select: person.copy_on_select,
             minimum_contrast: person.minimum_contrast,
             option_as_alt: person.option_as_alt,
+            toast_position: person.toast_position,
         }
     }
 }
@@ -1014,6 +1046,26 @@ mod tests {
             assert_eq!(serde_json::to_value(settings).unwrap()["option_as_alt"], value);
         }
         assert!(serde_json::from_value::<Person>(serde_json::json!({"option_as_alt": "invalid"})).is_err());
+    }
+
+    #[test]
+    fn toast_position_defaults_to_bottom_right_and_round_trips() {
+        let default: Person = serde_json::from_str("{}").unwrap();
+        assert_eq!(default.toast_position, ToastPosition::BottomRight);
+        assert!(serde_json::to_value(&default).unwrap().get("toast_position").is_none(), "the default stays out of settings.json");
+        for (value, expected, top, left) in [
+            ("bottom-right", ToastPosition::BottomRight, false, false),
+            ("bottom-left", ToastPosition::BottomLeft, false, true),
+            ("top-right", ToastPosition::TopRight, true, false),
+            ("top-left", ToastPosition::TopLeft, true, true),
+        ] {
+            let person: Person = serde_json::from_value(serde_json::json!({"toast_position": value})).unwrap();
+            let settings = Settings::compose(&person, &crate::layout::Look::default(), true);
+            assert_eq!(settings.toast_position, expected);
+            assert_eq!((expected.top(), expected.left()), (top, left));
+            assert_eq!(serde_json::to_value(settings).unwrap()["toast_position"], value);
+        }
+        assert!(serde_json::from_value::<Person>(serde_json::json!({"toast_position": "middle"})).is_err());
     }
 
     #[test]
