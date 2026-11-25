@@ -11,7 +11,7 @@ mod pane_drag;
 mod pane_size;
 mod titlebar;
 
-use crate::layout::{Axis, Background as Paint, Content, Fit, HeaderContent, Kind, Line, Node, PaneFrame, Size as Span};
+use crate::layout::{Axis, Background as Paint, Content, Divider, Fit, HeaderContent, Kind, Line, Node, PaneFrame, Size as Span};
 use crate::model::{self, Tab, Model};
 use crate::mods::{self, Found, Instance, Request};
 use crate::settings;
@@ -407,6 +407,9 @@ pub struct AppWindow {
     float_hover: HashSet<String>,
     /// Bumped on every hover change, so a delayed leave knows it's still current.
     float_leave: HashMap<String, u64>,
+    divider_hover: HashSet<(String, usize)>,
+    divider_hover_epoch: u64,
+    divider_window_hovered: bool,
     model: Model,
     /// Terminal views by block id (panes and chrome terminal blocks).
     terms: HashMap<String, Term>,
@@ -501,6 +504,8 @@ pub struct AppWindow {
     /// Remembers where the window is (`place.rs`); the write waiting to settle.
     _place: Option<Subscription>,
     place_write: Option<Task<()>>,
+    /// Tells mods when the window stops or starts being shown (`window().visible`).
+    _visibility: Option<Subscription>,
 }
 
 impl AppWindow {
@@ -537,6 +542,9 @@ impl AppWindow {
             float_reveal: HashMap::new(),
             float_hover: HashSet::new(),
             float_leave: HashMap::new(),
+            divider_hover: HashSet::new(),
+            divider_hover_epoch: 0,
+            divider_window_hovered: true,
             model: Model::default(),
             terms: HashMap::new(),
             copies: HashMap::new(),
@@ -606,11 +614,19 @@ impl AppWindow {
             _focus_lost: None,
             _place: None,
             place_write: None,
+            _visibility: None,
         };
         w._focus_lost = Some(cx.on_focus_lost(window, |this, window, cx| this.restore_focus(window, cx)));
         w._place = Some(cx.observe_window_bounds(window, |this, window, cx| {
             if let Some(t) = crate::place::changed(window, cx) {
                 this.place_write = Some(t);
+            }
+        }));
+        // A hidden window draws no frames, so publish here rather than in render:
+        // a mod's timer can see it and stop work nobody can see.
+        w._visibility = Some(cx.observe_window_visibility(window, |this, _, window, cx| {
+            if mods::publish_window(this.window_json(window)) {
+                this.refresh_snapshot_mods(cx);
             }
         }));
         let closing = cx.weak_entity();
@@ -998,9 +1014,17 @@ impl AppWindow {
         }
     }
 
+    fn reset_divider_interaction(&mut self) {
+        self.drag = None;
+        self.divider_hover.clear();
+        // Recheck hover under a stationary pointer even if the new tree reuses node ids.
+        self.divider_hover_epoch += 1;
+    }
+
     /// Makes `name` the shown layout (its file, or its default if missing or
     /// broken), with the person's clicks on it.
     fn load_layout(&mut self, name: &str) {
+        self.reset_divider_interaction();
         self.layout_name = name.to_owned();
         self.failed_link_enrollments.clear();
         self.written_layout.clear();
@@ -1121,6 +1145,7 @@ impl AppWindow {
                     s.forget_edited(&self.file_chrome, &n);
                     s
                 };
+                self.reset_divider_interaction();
                 self.file_chrome = n.clone();
                 self.chrome = n;
                 self.picked_theme = state.theme.clone();
@@ -1734,6 +1759,10 @@ impl AppWindow {
         if dialog.as_ref().is_some_and(|d| d.contains_focused(window, cx)) {
             return;
         }
+        // An explicit handoff ends the mod block's turn with the keyboard.
+        if dialog.is_none() && window.focus_was_yielded() {
+            self.focused_block = None;
+        }
         // A mod block holding the keyboard gets it back (a popup over it closed).
         if dialog.is_none() && self.focused_block.as_ref().is_some_and(|b| self.mod_block_shown(b)) {
             self.focus.focus(window, cx);
@@ -2180,7 +2209,9 @@ impl AppWindow {
                     "needs_login" => format!("{name} needs login; run hc machine login {name}"),
                     _ => format!("{name} is {state}"),
                 }));
-                self.documents.entry(name.to_owned()).or_default().connection(state == "connected", machine["since_ms"].as_u64(), reason);
+                let slot = self.documents.entry(name.to_owned()).or_default();
+                slot.connection(state == "connected", machine["since_ms"].as_u64(), reason);
+                slot.legacy_child_lifetime = crate::hc::legacy_child_lifetime(&machine["version"]);
             }
             if self.model.spaces.iter().any(|s| s.machine.as_deref().is_some_and(|m| !states.contains_key(m))) {
                 let mut view = crate::mirror::View::capture(&self.model);
@@ -2934,28 +2965,24 @@ impl AppWindow {
         }
     }
 
-    /// Kills terminals and their sub-agents, all the way down. Core keeps a
-    /// sub-agent running when its parent dies; closing one here means done with
-    /// its whole tree. Kept sub-agents (given a tab) are the person's: spared.
-    fn kill(&mut self, addresses: &[String], cx: &mut Context<Self>) {
-        let mut doomed: Vec<String> = addresses.to_vec();
-        let mut i = 0;
-        while i < doomed.len() {
-            let parent = doomed[i].clone();
-            for (addr, rec) in &self.live {
-                let child = rec.get("parent").and_then(Value::as_str) == Some(parent.as_str());
-                let kept = rec.get("labels").and_then(|l| l.get("herdr.space")).and_then(Value::as_str).is_some_and(|w| !w.is_empty());
-                if child && !kept && !doomed.contains(addr) {
-                    doomed.push(addr.clone());
-                }
-            }
-            i += 1;
-        }
-        self.closing_terminals.extend(doomed.iter().cloned().map(|a| (a, false)));
+    /// An explicit terminal.kill follows sub-agents until it reaches one placed in the window.
+    fn kill_tree(&mut self, address: &str, cx: &mut Context<Self>) {
+        let doomed = kill_targets(vec![address.to_owned()], &self.model, &self.live, |_| true);
+        self.kill(doomed, cx);
+    }
+
+    fn close_terminals(&mut self, addresses: Vec<String>, cx: &mut Context<Self>) {
+        let legacy = |address: &str| legacy_terminal_core(address, &self.core.hello, &self.documents);
+        let doomed = kill_targets(addresses, &self.model, &self.live, legacy);
+        self.kill(doomed, cx);
+    }
+
+    fn kill(&mut self, addresses: Vec<String>, cx: &mut Context<Self>) {
+        self.closing_terminals.extend(addresses.iter().cloned().map(|a| (a, false)));
         // Off the UI thread: a kill waits for the program to go, and for slow machines.
         let core = self.core.clone();
         cx.spawn(async move |this, cx| {
-            for address in doomed {
+            for address in addresses {
                 let core = core.clone();
                 let addr = address.clone();
                 let result = cx.background_executor().spawn(async move {
@@ -3179,7 +3206,7 @@ impl AppWindow {
                     return;
                 }
                 let addrs = self.model.remove_space(&id);
-                self.kill(&addrs, cx);
+                self.close_terminals(addrs, cx);
             }
             "space.rename" => {
                 let Some(id) = Self::owned(a, "id").or_else(|| self.model.active.clone()) else { return self.fail("no space to rename") };
@@ -3232,7 +3259,7 @@ impl AppWindow {
                     return self.dispatch("space.close", &args, person, window, cx);
                 }
                 let (addrs, _) = self.model.remove_tab(&id);
-                self.kill(&addrs, cx);
+                self.close_terminals(addrs, cx);
             }
             "tab.rename" => {
                 let Some(id) = Self::owned(a, "id").or(active_ctx) else { return self.fail("no tab to rename") };
@@ -3312,7 +3339,7 @@ impl AppWindow {
                 }
                 let addr = self.model.address_of(&pane);
                 self.model.remove_pane(&pane);
-                self.kill(&addr.into_iter().collect::<Vec<_>>(), cx);
+                self.close_terminals(addr.into_iter().collect(), cx);
             }
             "pane.zoom" => {
                 if let Some(pane) = Self::owned(a, "pane").or_else(|| self.model.focused_pane()) {
@@ -3441,7 +3468,7 @@ impl AppWindow {
                 if !self.live.contains_key(t) {
                     return self.fail(format!("no running terminal {t:?}"));
                 }
-                self.kill(&[t.to_owned()], cx);
+                self.kill_tree(t, cx);
             }
             "terminal.peek" => {
                 let t = Self::arg(a, "terminal").unwrap_or_default();
@@ -3537,6 +3564,15 @@ impl AppWindow {
                 let addr = order[next].clone();
                 self.focus_agent(&addr);
             }
+            "agent.select" => {
+                let Some(index) = a.get("index").and_then(Value::as_u64).and_then(|i| i.checked_sub(1)) else {
+                    return self.fail("agent.select needs an index (1 = first)");
+                };
+                let Some(addr) = usize::try_from(index).ok().and_then(|i| self.agent_order().into_iter().nth(i)) else {
+                    return self.fail("no such agent");
+                };
+                self.focus_agent(&addr);
+            }
             // ---- layout
             "layout.switch" => {
                 self.switch_layout(Self::arg(a, "name"), window, cx);
@@ -3572,6 +3608,7 @@ impl AppWindow {
                 if n.look.theme == self.chrome.look.theme {
                     state.theme = self.picked_theme.clone();
                 }
+                self.reset_divider_interaction();
                 self.chrome = self.file_chrome.clone();
                 state.apply(&mut self.chrome);
                 self.picked_theme = state.theme;
@@ -3590,6 +3627,7 @@ impl AppWindow {
                     }
                     self.written_layout = text;
                     self.layout_file_ok = true;
+                    self.reset_divider_interaction();
                     self.file_chrome = n.clone();
                     self.chrome = n;
                     self.picked_theme = None;
@@ -4555,7 +4593,13 @@ impl AppWindow {
             el = el.border(settings::z(l.width)).border_color(c(&l.color));
         }
         el = shadow(el, f.shadow.as_deref());
-        let body = div().flex_1().min_h_0().flex().child(inner);
+        let mut body = div().flex_1().min_h_0().flex().relative().child(inner);
+        // No listeners, so no hitbox: clicks still reach the terminal below.
+        if let Some(v) = self.veil(f.veil, &n.id) {
+            // The terminal's own background, solid as the terminal paints it: a
+            // glass layout's transparent `background` would make the veil vanish.
+            body = body.child(div().absolute().inset_0().bg(crate::terminal::hsla(crate::vt::theme().bg).opacity(v)));
+        }
         let Some(h) = &f.header else { return el.child(body).into_any_element() };
         let head = div().flex_none().h(settings::z(pane_size::header_height(h))).w_full().flex()
             .child(self.render_slot(&format!("{}#frame", n.id), cx));
@@ -4567,8 +4611,16 @@ impl AppWindow {
         if h.bottom() { el.child(body).child(head) } else { el.child(head).child(body) }.into_any_element()
     }
 
+    /// How much a frame's `veil` fades this pane: the shown tab's panes but
+    /// its selected one, none while it is zoomed.
+    fn veil(&self, veil: Option<f32>, pane: &str) -> Option<f32> {
+        let v = veil?;
+        let tab = self.model.active_tab()?;
+        (tab.zoomed.is_none() && tab.focused_pane().as_deref() != Some(pane)).then_some(v.clamp(0., 1.))
+    }
+
     /// `frame`: how panes are wrapped here (inside a framed tab), else None.
-    fn render_node(&self, n: &Node, focused: &HashSet<String>, frame: Option<&PaneFrame>, cx: &mut Context<Self>) -> AnyElement {
+    fn render_node(&self, n: &Node, focused: &HashSet<String>, frame: Option<&PaneFrame>, rendered_dividers: &mut HashSet<(String, usize)>, cx: &mut Context<Self>) -> AnyElement {
         let mut el = div().relative().overflow_hidden().size_full().flex();
         let bounds_map = self.bounds.clone();
         let id = n.id.clone();
@@ -4579,7 +4631,7 @@ impl AppWindow {
         }
         let el = match &n.kind {
             Kind::Block { content } => {
-                let inner = self.render_block(n, content, focused, cx);
+                let inner = self.render_block(n, content, focused, rendered_dividers, cx);
                 match frame.filter(|_| n.is_pane()) {
                     Some(f) => el.child(self.frame_pane(n, f, focused.contains(&n.id), inner, cx)),
                     None => el.child(inner),
@@ -4598,12 +4650,12 @@ impl AppWindow {
                     .max(f32::EPSILON);
                 for (i, child) in shown.iter().enumerate() {
                     if i > 0 {
-                        el = el.child(self.separator(n, axis, gap, i - 1, cx));
+                        el = el.child(self.separator(n, axis, gap, i - 1, rendered_dividers, cx));
                     }
                     // No clipping here: a child's shadow may fall outside it (the child clips itself).
                     let mut slot = div().relative().flex().min_w_0().min_h_0();
                     slot = sized(slot, child, axis, total);
-                    el = el.child(slot.child(self.render_node(child, focused, frame, cx)));
+                    el = el.child(slot.child(self.render_node(child, focused, frame, rendered_dividers, cx)));
                 }
                 el
             }
@@ -4618,7 +4670,7 @@ impl AppWindow {
                     (h.bottom(), div().flex_none().h(settings::z(height)).w_full().flex().child(head))
                 });
                 let body = match n.active_child() {
-                    Some(child) => self.render_node(child, focused, frame, cx),
+                    Some(child) => self.render_node(child, focused, frame, rendered_dividers, cx),
                     None => div().into_any_element(),
                 };
                 let body = div().flex_1().min_h_0().flex().child(body);
@@ -4633,7 +4685,7 @@ impl AppWindow {
         el.children(self.render_floats(n, cx)).children(self.pane_grip(&n.id, row, cx)).into_any_element()
     }
 
-    fn render_block(&self, n: &Node, content: &Content, focused: &HashSet<String>, cx: &mut Context<Self>) -> AnyElement {
+    fn render_block(&self, n: &Node, content: &Content, focused: &HashSet<String>, rendered_dividers: &mut HashSet<(String, usize)>, cx: &mut Context<Self>) -> AnyElement {
         match content {
             Content::Terminal { .. } => match self.pane_term(&n.id) {
                 Some(t) => {
@@ -4674,7 +4726,7 @@ impl AppWindow {
                     .into_any_element(),
             },
             Content::Context { .. } => match self.model.active_tab() {
-                Some(c) => self.render_node(c.shown(), focused, self.pane_frame(), cx),
+                Some(c) => self.render_node(c.shown(), focused, self.pane_frame(), rendered_dividers, cx),
                 None if self.documents.get("").is_some_and(|s| s.layout() == "loading") => div().size_full().into_any_element(),
                 None => {
                     let key = crate::keys::listing().into_iter().find(|(_, _, a)| a == "space.new").map(|(_, k, _)| format!(" ({k})"));
@@ -4762,10 +4814,16 @@ impl AppWindow {
         row.into_any_element()
     }
 
-    fn separator(&self, n: &Node, axis: Axis, gap: f32, index: usize, cx: &mut Context<Self>) -> AnyElement {
+    fn separator(&self, n: &Node, axis: Axis, gap: f32, index: usize, rendered_dividers: &mut HashSet<(String, usize)>, cx: &mut Context<Self>) -> AnyElement {
         let row = axis == Axis::Row;
         let zoom = settings::zoom();
-        let line = n.divider.as_ref().map(|d| (d.width * zoom, c(&d.color)));
+        let resizable = n.resizable();
+        let hover_key = (resizable && n.divider.as_ref().is_some_and(|d| d.hover.is_some()))
+            .then(|| (n.id.clone(), index));
+        let hovered = self.divider_window_hovered && self.drag.is_none()
+            && hover_key.as_ref().is_some_and(|key| self.divider_hover.contains(key));
+        let dragging = resizable && self.drag.as_ref().is_some_and(|d| d.container == n.id && d.index == index && d.axis == axis);
+        let line = n.divider.as_ref().map(|d| (d.width * zoom, c(d.color_for(hovered, dragging))));
         let width = pane_size::separator_width(n, gap) * zoom;
         let mut sep = div().flex_none().relative().flex().items_center().justify_center();
         sep = if row { sep.w(px(width)).h_full() } else { sep.h(px(width)).w_full() };
@@ -4778,26 +4836,55 @@ impl AppWindow {
             }
             sep = sep.child(separator_line(row, w, color, top));
         }
-        if n.resizable() {
+        if resizable {
             let container = n.id.clone();
             let hit = HANDLE.max(width);
-            sep = sep.child(
-                div()
-                    .absolute()
-                    .when(row, |d| d.top_0().bottom_0().left(px((width - hit) / 2.0)).w(px(hit)).cursor_col_resize())
-                    .when(!row, |d| d.left_0().right_0().top(px((width - hit) / 2.0)).h(px(hit)).cursor_row_resize())
-                    .on_mouse_down(
-                        MouseButton::Left,
-                        cx.listener(move |this, _: &MouseDownEvent, _, cx| {
-                            if let Some(space) = this.model.space_of(&container)
-                                && this.require_document(space.machine.as_deref()).is_err() { return; }
-                            this.drag = Some(Drag { container: container.clone(), index, axis });
-                            cx.stop_propagation();
-                        }),
-                    ),
-            );
+            let tracks_drag_color = n.divider.as_ref().is_some_and(|d| d.hover.is_some() || d.active.is_some());
+            let handle = div()
+                .absolute()
+                .when(row, |d| d.top_0().bottom_0().left(px((width - hit) / 2.0)).w(px(hit)).cursor_col_resize())
+                .when(!row, |d| d.left_0().right_0().top(px((width - hit) / 2.0)).h(px(hit)).cursor_row_resize())
+                .on_mouse_down(MouseButton::Left, cx.listener(move |this, _, _, cx| {
+                    if let Some(space) = this.model.space_of(&container)
+                        && this.require_document(space.machine.as_deref()).is_err() { return; }
+                    this.drag = Some(Drag { container: container.clone(), index, axis });
+                    cx.stop_propagation();
+                    if tracks_drag_color {
+                        cx.notify();
+                    }
+                }));
+            if let Some(key) = hover_key {
+                let epoch = self.divider_hover_epoch;
+                let id = SharedString::from(format!("divider-{epoch}-{}-{index}", n.id));
+                rendered_dividers.insert(key.clone());
+                sep = sep.child(handle.id(id).on_hover(cx.listener(move |this, over: &bool, _, cx| {
+                    if this.divider_hover_epoch != epoch {
+                        return;
+                    }
+                    let changed = if *over {
+                        this.divider_hover.insert(key.clone())
+                    } else {
+                        this.divider_hover.remove(&key)
+                    };
+                    if changed {
+                        cx.notify();
+                    }
+                })));
+            } else {
+                sep = sep.child(handle);
+            }
         }
         sep.into_any_element()
+    }
+
+    fn finish_divider_drag(&mut self, window: &mut Window, cx: &mut Context<Self>) {
+        if self.drag.take().is_some() {
+            self.save();
+            // Mods see the new sizes (the sidebar picks its rail by width).
+            self.publish(cx);
+            self.flush_documents(false, window, cx);
+            cx.notify();
+        }
     }
 
     fn drag_to(&mut self, pos: Point<Pixels>) {
@@ -4854,7 +4941,7 @@ impl AppWindow {
         }
     }
 
-    fn render_overlays(&self, viewport: Size<Pixels>, cx: &mut Context<Self>) -> Vec<AnyElement> {
+    fn render_overlays(&self, viewport: Size<Pixels>, rendered_dividers: &mut HashSet<(String, usize)>, cx: &mut Context<Self>) -> Vec<AnyElement> {
         let mut windows = Vec::new();
         let mut overlays = Vec::new();
         let mut toasts = Vec::new();
@@ -4867,7 +4954,7 @@ impl AppWindow {
             let (w, h) = (span(o.size.width, viewport.width), span(o.size.height, viewport.height));
             let sized = |v: f32| v > 0.0 || o.kind != OverlayKind::Window;
             let content = match &o.layout {
-                Some(l) => self.render_node(l, &HashSet::new(), None, cx),
+                Some(l) => self.render_node(l, &HashSet::new(), None, rendered_dividers, cx),
                 None => self.render_slot(&o.slot, cx),
             };
             let fit_toast = o.kind == OverlayKind::Toast && o.fit;
@@ -5424,7 +5511,7 @@ fn dock(root: &mut Node, block: Node, place: &str, wrapper_id: String) {
     wrapper.toast = toast;
     wrapper.terminal_menu = terminal_menu;
     wrapper.link_handlers = link_handlers;
-    wrapper.divider = Some(Line { width: 1.0, color: "border".into() });
+    wrapper.divider = Some(Divider { width: 1.0, color: "border".into(), hover: None, active: None });
     *root = wrapper;
 }
 
@@ -5455,6 +5542,33 @@ fn sized(slot: Div, n: &Node, axis: Axis, total_weight: f32) -> Div {
 }
 
 /// What a terminal runs now (core's `foreground`), else what it started with.
+fn legacy_terminal_core(address: &str, hello: &Value, documents: &BTreeMap<String, crate::mirror_sync::Slot>) -> bool {
+    match address.split_once('/') {
+        Some((machine, _)) => documents.get(machine).is_some_and(|slot| slot.legacy_child_lifetime),
+        None => crate::hc::legacy_child_lifetime(&hello["version"]),
+    }
+}
+
+fn kill_targets(mut doomed: Vec<String>, model: &Model, live: &HashMap<String, Value>, walk: impl Fn(&str) -> bool) -> Vec<String> {
+    let mut i = 0;
+    while i < doomed.len() {
+        let parent = doomed[i].clone();
+        i += 1;
+        if !walk(&parent) { continue; }
+        for (addr, rec) in live {
+            if rec["parent"].as_str() == Some(parent.as_str())
+                && walk(addr)
+                && !doomed.contains(addr)
+                && model.pane_of(addr).is_none()
+                && !rec.pointer("/labels/herdr.space").and_then(Value::as_str).is_some_and(|space| !space.is_empty())
+            {
+                doomed.push(addr.clone());
+            }
+        }
+    }
+    doomed
+}
+
 fn running_argv(rec: &serde_json::Map<String, Value>) -> Option<&Value> {
     rec.get("foreground").and_then(|f| f.get("argv")).filter(|a| a.as_array().is_some_and(|a| !a.is_empty())).or_else(|| rec.get("argv"))
 }
@@ -5560,10 +5674,17 @@ impl Render for AppWindow {
         if mods::publish_window(self.window_json(window)) {
             self.refresh_snapshot_mods(cx);
         }
+        // On these platforms GPUI keeps the last in-window position after pointer exit.
+        // On macOS is_window_hovered reports keyboard focus.
+        self.divider_window_hovered = !cfg!(any(target_os = "linux", target_os = "windows", target_os = "freebsd"))
+            || window.is_window_hovered();
         let focused = self.focused_path(window, cx);
-        let tree = self.render_node(&self.chrome, &focused, None, cx);
+        let mut rendered_dividers = HashSet::new();
+        let tree = self.render_node(&self.chrome, &focused, None, &mut rendered_dividers, cx);
         let tree = self.window_frame(tree, window, cx);
-        let overlays = self.render_overlays(window.viewport_size(), cx);
+        let overlays = self.render_overlays(window.viewport_size(), &mut rendered_dividers, cx);
+        // GPUI drops a removed handle without sending its hover-leave callback.
+        self.divider_hover.retain(|key| rendered_dividers.contains(key));
         let tracker = self.float_tracker(cx);
         let win_tracker = self.window_tracker(cx);
         let pane_drag = self.pane_drag_layer(cx);
@@ -5630,9 +5751,7 @@ impl Render for AppWindow {
                     return;
                 }
                 if ev.pressed_button != Some(MouseButton::Left) {
-                    this.drag = None;
-                    this.save();
-                    this.publish(cx);
+                    this.finish_divider_drag(window, cx);
                     return;
                 }
                 this.drag_to(ev.position);
@@ -5640,12 +5759,10 @@ impl Render for AppWindow {
             }))
             .on_mouse_up(MouseButton::Left, cx.listener(|this, _, window, cx| {
                 this.drag_from = None;
-                if this.drag.take().is_some() {
-                    this.save();
-                    // Mods see the new sizes (the sidebar picks its rail by width).
-                    this.publish(cx);
-                    this.flush_documents(false, window, cx);
-                }
+                this.finish_divider_drag(window, cx);
+            }))
+            .on_mouse_up_out(MouseButton::Left, cx.listener(|this, _, window, cx| {
+                this.finish_divider_drag(window, cx);
             }))
             .child(tree)
             .children(overlays)
@@ -5709,6 +5826,39 @@ fn reconcile_core_update_error(dismissed: &mut Option<String>, core: &crate::upd
 mod tests {
     use gpui::{div, point, px, size, Context, IntoElement, Render, TestAppContext, Window};
     use gpui::prelude::*;
+
+    #[test]
+    fn close_only_walks_hidden_children_on_older_cores() {
+        use super::{Model, Tab, kill_targets, legacy_terminal_core};
+        use serde_json::json;
+
+        let mut model = Model::default();
+        model.add_space("s", "", "", Tab::new("tab", "", "pane", "old/t4"));
+        let live = [
+            ("t2", json!({"parent": "t1", "die_with_parent": false})),
+            ("old/t2", json!({"parent": "old/t1", "die_with_parent": false})),
+            ("old/t3", json!({"parent": "old/t2"})),
+            ("old/t4", json!({"parent": "old/t1"})),
+            ("old/t5", json!({"parent": "old/t4"})),
+            ("old/t6", json!({"parent": "old/t1", "labels": {"herdr.space": "other"}})),
+            ("new/t2", json!({"parent": "new/t1", "die_with_parent": false})),
+            ("new/t3", json!({"parent": "old/t1", "die_with_parent": false})),
+        ].into_iter().map(|(address, record)| (address.to_owned(), record)).collect();
+        let documents = [("old", "0.1.11"), ("new", "0.1.13")].into_iter().map(|(name, version)| {
+            let mut slot = crate::mirror_sync::Slot::default();
+            slot.legacy_child_lifetime = crate::hc::legacy_child_lifetime(&json!(version));
+            (name.to_owned(), slot)
+        }).collect();
+        let close = |version| {
+            let hello = json!({"version": version});
+            let roots = ["t1", "old/t1", "new/t1"].map(str::to_owned).to_vec();
+            let mut targets = kill_targets(roots, &model, &live, |address| legacy_terminal_core(address, &hello, &documents));
+            targets.sort();
+            targets
+        };
+        assert_eq!(close("hc 0.1.12"), ["new/t1", "old/t1", "old/t2", "old/t3", "t1", "t2"]);
+        assert_eq!(close("hc 0.1.13"), ["new/t1", "old/t1", "old/t2", "old/t3", "t1"]);
+    }
 
     #[test]
     fn core_error_dismissal_survives_failed_retries_but_resets_after_recovery() {
@@ -6868,6 +7018,54 @@ mod tests {
     }
 
     #[test]
+    fn agent_select_uses_the_list_order() {
+        in_own_process("agent_select_position");
+    }
+
+    #[gpui::test]
+    fn agent_select_position(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("agent_select_position") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "order", r#"
+            import { View, div } from "gpui-kit";
+            import { setAgentOrder } from "herdr";
+            export default class Order extends View {
+                render() {
+                    setAgentOrder(["t2", "t1"]);
+                    return div();
+                }
+            }
+        "#, json!({
+            "id": "root", "type": "block", "content": { "mod": "order" }
+        }));
+        cx.update(|_, cx| view.update(cx, |this, _| {
+            this.folders.retain(|id, _| id == "order");
+            this.model = crate::model::Model::default();
+            let mut tab = crate::model::Tab::new("tb1", "", "p1", "t1");
+            tab.root.split("p1", super::Axis::Row, crate::model::pane("p2", "t2"), "split".into());
+            this.model.add_space("sp1", "", "/tmp", tab);
+            this.model.set_word("t1", Some("idle".into()), Some("claude".into()), false);
+            this.model.set_word("t2", Some("idle".into()), Some("codex".into()), false);
+        }));
+        cx.run_until_parked();
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            for (index, pane) in [(1, "p2"), (2, "p1")] {
+                let reply = this.run_as("agent.select", json!({ "index": index }), false, window, cx);
+                assert!(reply.get("error").is_none(), "{reply}");
+                assert_eq!(this.model.focused_pane().as_deref(), Some(pane));
+            }
+            for index in [json!(0), json!(3), json!(-1), json!(1.5)] {
+                let reply = this.run_as("agent.select", json!({ "index": index }), false, window, cx);
+                assert!(reply.get("error").is_some(), "{reply}");
+                assert_eq!(this.model.focused_pane().as_deref(), Some("p1"), "invalid index {index} leaves focus alone");
+            }
+        }));
+    }
+
+    #[test]
     fn panes_resize_from_the_keyboard() {
         in_own_process("pane_resize_checks_direction");
     }
@@ -6997,6 +7195,54 @@ mod tests {
         cx.deactivate_window();
         cx.update(|window, cx| view.update(cx, |this, cx| {
             assert!(this.focused_path(window, cx).contains("pane"));
+        }));
+    }
+
+    #[test]
+    fn the_veil_covers_the_panes_that_are_not_selected() {
+        in_own_process("pane_veil");
+    }
+
+    /// A frame's `veil` fades every pane but the tab's selected one. It
+    /// follows the selection, not the keyboard: a dialog or input taking the
+    /// keyboard veils nothing more. A zoomed tab shows one pane, unveiled.
+    #[gpui::test]
+    fn pane_veil(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("pane_veil") {
+            return;
+        }
+        let (view, cx) = open_window(cx, "unused", "", json!({
+            "id": "main", "type": "block", "content": { "tab": "active", "pane": { "veil": 0.5 } }
+        }));
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            this.model.add_space("s1", "one", "", crate::model::Tab::new("a", "a", "pa", "t1"));
+            assert!(this.model.split("pa", crate::layout::Axis::Row, "pb", "t2"));
+            this.model.select_tab("a");
+            assert!(this.model.focus_pane("pa"));
+            this.sync(window, cx);
+            let veils = |this: &super::AppWindow| {
+                let v = this.pane_frame().and_then(|f| f.veil);
+                (this.veil(v, "pa"), this.veil(v, "pb"))
+            };
+            assert_eq!(veils(this), (None, Some(0.5)));
+            let input = cx.focus_handle();
+            input.focus(window, cx);
+            assert_eq!(veils(this), (None, Some(0.5)), "the keyboard elsewhere veils nothing more");
+            assert!(this.model.focus_pane("pb"));
+            this.sync(window, cx);
+            assert_eq!(veils(this), (Some(0.5), None));
+        }));
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let veiled = cx.update(|_, cx| view.read_with(cx, |this, _| this.bounds.borrow().get("pa").copied())).expect("pa was painted");
+        cx.simulate_click(veiled.center(), Default::default());
+        cx.update(|window, cx| view.update(cx, |this, cx| {
+            assert_eq!(this.model.focused_pane().as_deref(), Some("pa"), "a click goes through the veil");
+            assert_eq!((this.veil(Some(0.5), "pa"), this.veil(Some(0.5), "pb")), (None, Some(0.5)));
+            // Zooming the other pane selects it: it's the one drawn.
+            this.run("pane.zoom", json!({ "pane": "pb" }), window, cx);
+            assert_eq!(this.model.focused_pane().as_deref(), Some("pb"));
+            assert_eq!((this.veil(Some(0.5), "pa"), this.veil(Some(0.5), "pb")), (None, None), "a zoomed tab isn't veiled");
         }));
     }
 
@@ -7134,6 +7380,82 @@ mod tests {
         assert_eq!(running(cx), 0, "and the clock stopped with it");
     }
 
+    #[test]
+    fn text_blur_gives_the_keyboard_back_to_the_terminal() {
+        in_own_process("text_blur_handoff");
+    }
+
+    #[gpui::test]
+    fn text_blur_handoff(cx: &mut gpui::TestAppContext) {
+        use serde_json::json;
+        if !running_alone("text_blur_handoff") {
+            return;
+        }
+        let probe = r#"import { View, div } from "gpui-kit";
+import { Input, InputState } from "gpui-base";
+import { nextCommand, setShared } from "herdr";
+
+export default class Probe extends View {
+  init(_, cx) {
+    this.field = InputState.new({ value: "search" });
+    this.field.on("focus", () => setShared("probe.focused", true));
+    this.field.on("blur", () => setShared("probe.blurred", this.field.value()));
+    cx.spawn(async () => {
+      for (;;) {
+        if (await nextCommand() === "focus") this.field.focus();
+      }
+    });
+  }
+  render() {
+    return div().size_full()
+      .on_key_down((event, cx) => {
+        if (event.key === "escape") {
+          this.field.blur();
+          cx.stop_propagation();
+        }
+      })
+      .child(Input.new(this.field));
+  }
+}
+"#;
+        let (view, cx) = open_window(cx, "probe", probe, json!({
+            "id": "root", "type": "row", "children": [
+                { "id": "main", "type": "block", "content": { "tab": "active" } },
+                { "id": "probe", "type": "block", "content": { "mod": "probe" } }
+            ]
+        }));
+        cx.update(|window, cx| {
+            window.activate_window();
+            view.update(cx, |this, cx| {
+                this.model.add_space("s1", "one", "", crate::model::Tab::new("a", "a", "pa", "t1"));
+                this.live.insert("t1".into(), json!({ "address": "t1" }));
+                this.sync(window, cx);
+            });
+        });
+        let settle = |cx: &mut gpui::VisualTestContext| {
+            for _ in 0..3 {
+                cx.update(|window, cx| {
+                    window.simulate_next_frame(cx);
+                    window.draw(cx).clear(cx);
+                });
+                cx.run_until_parked();
+            }
+        };
+        settle(cx);
+        cx.update(|window, cx| view.update(cx, |this, cx| this.focus_block("probe", window, cx)));
+        settle(cx);
+        assert_eq!(crate::mods::shared("probe.focused"), Some(json!(true)));
+
+        cx.simulate_keystrokes("escape");
+        settle(cx);
+
+        assert_eq!(crate::mods::shared("probe.blurred"), Some(json!("search")));
+        cx.update(|window, cx| {
+            let this = view.read(cx);
+            assert!(this.terms["pa"].focus.is_focused(window));
+        });
+    }
+
     /// Mods see window().active follow the focus, losing it too: a probe mod
     /// notes every value it renders with while the window is focused and
     /// blurred, and the poll that checks the focus runs in between.
@@ -7177,6 +7499,50 @@ export default class Probe extends View {
             assert_eq!(seen(cx), Some(json!(true)), "focused: {:?}", crate::mods::shared("probe.seen"));
             cx.deactivate_window();
             assert_eq!(seen(cx), Some(json!(false)), "blurred: {:?}", crate::mods::shared("probe.seen"));
+        }
+    }
+
+    /// Mods see window().visible follow the platform from a timer, which is
+    /// all a hidden window runs: it draws no frame to publish it in.
+    #[test]
+    fn mods_see_the_window_hide_and_show_without_a_frame() {
+        in_own_process("visible_window");
+    }
+
+    #[gpui::test]
+    fn visible_window(cx: &mut gpui::TestAppContext) {
+        use gpui::WindowVisibility::{Hidden, Visible};
+        use serde_json::json;
+        if !running_alone("visible_window") {
+            return;
+        }
+        let probe = r#"import { View, div } from "gpui-kit";
+import { window, setShared } from "herdr";
+
+export default class Probe extends View {
+  init(_props, cx) {
+    cx.timer.every(100, () => setShared("probe.visible", window()?.visible ?? null));
+  }
+  render() {
+    return div();
+  }
+}
+"#;
+        let layout = json!({ "id": "root", "type": "row", "children": [
+            { "id": "probe", "type": "block", "content": { "mod": "visible-probe" } }
+        ] });
+        let (_view, cx) = open_window(cx, "visible-probe", probe, layout);
+        let seen = |cx: &mut gpui::VisualTestContext| {
+            cx.executor().advance_clock(std::time::Duration::from_millis(300));
+            cx.run_until_parked();
+            crate::mods::shared("probe.visible")
+        };
+        assert_eq!(seen(cx), Some(json!(true)), "a shown window is visible");
+        for _ in 0..2 {
+            cx.simulate_visibility_change(Hidden);
+            assert_eq!(seen(cx), Some(json!(false)), "hidden");
+            cx.simulate_visibility_change(Visible);
+            assert_eq!(seen(cx), Some(json!(true)), "shown again");
         }
     }
 

@@ -143,8 +143,8 @@ struct Grid {
     track: Option<Bounds<Pixels>>,
     /// Each row's drawing by position, kept while the row is the same (`Rc`).
     painted: Vec<(Rc<Vec<vt::Cell>>, Vec<RowOp>, Option<usize>)>,
-    /// Font size, cell size, cell font, loaded fonts and ligature setting used to draw.
-    painted_with: (u32, Size<Pixels>, Font, u64, bool),
+    /// Font size, cell size, cell font, bold weight, loaded fonts and ligature setting used to draw.
+    painted_with: (u32, Size<Pixels>, Font, u16, u64, bool),
 }
 
 pub struct TerminalView {
@@ -155,6 +155,8 @@ pub struct TerminalView {
     pub lost: bool,
     /// A left-button selection drag is in progress.
     selecting: bool,
+    /// That drag began with Shift+click on a selection: it moves the selection's end.
+    extending: bool,
     published_selection: Option<vt::SelectionPositions>,
     /// A scroll thumb drag is: the px into the thumb it was grabbed at.
     scrollbar_grab: Option<f32>,
@@ -310,6 +312,7 @@ impl TerminalView {
             ended: None,
             lost: false,
             selecting: false,
+            extending: false,
             published_selection: None,
             scrollbar_grab: None,
             selection_pointer: Point::default(),
@@ -339,7 +342,7 @@ impl TerminalView {
                 thumb: None,
                 track: None,
                 painted: Vec::new(),
-                painted_with: (0, Size::default(), font(""), 0, false),
+                painted_with: (0, Size::default(), font(""), 0, 0, false),
             })),
             focus: cx.focus_handle(),
             was_focused: false,
@@ -1155,14 +1158,14 @@ impl TerminalView {
                 return None;
             }
             if let Some(range) = links::find(text, at) {
-                let link = links::resolve(&text[range.clone()], cwd);
+                let link = links::resolve(&text[range.clone()], cwd, remote);
                 let eligible = match scan {
                     LinkScan::Plain => link.native.is_some(),
                     LinkScan::Joined => matches!(link.native, Some(links::Target::File(_))),
                     LinkScan::Unresolved => link.native.is_none(),
                 };
                 if eligible {
-                    target = Some(LinkTarget::External(link.click(remote, &active)?));
+                    target = Some(LinkTarget::External(link.click(&active)?));
                     return Some(range);
                 }
             }
@@ -1175,13 +1178,20 @@ impl TerminalView {
             Some(range)
         })?;
         // OSC 8 bypasses text detection. The URI is already the full destination.
-        let target = target.or_else(|| links::resolve(&hit.target, cwd).click(remote, &active).map(LinkTarget::External))?;
+        let target = target.or_else(|| links::resolve(&hit.target, cwd, remote).click(&active).map(LinkTarget::External))?;
         Some((target, hit.spans))
     }
 
-    fn start_selection(&mut self, pos: Point<Pixels>, cx: &mut Context<Self>) {
+    /// Starts a mouse selection. With `extend` (a single Shift+click) and a selection on
+    /// screen, the press moves that selection's end instead, as in Terminal.app.
+    fn start_selection(&mut self, pos: Point<Pixels>, extend: bool, cx: &mut Context<Self>) {
         self.selecting = true;
         self.selection_pointer = pos;
+        self.extending = extend && self.selection().is_some();
+        if self.extending {
+            // This press bypasses the normal gesture, so end its click sequence.
+            self.grid.borrow_mut().vt.reset_selection_gesture();
+        }
         self.select(Select::Press, pos, cx);
         self.selection_scroll = Some(cx.spawn(async move |this, cx| {
             loop {
@@ -1215,7 +1225,9 @@ impl TerminalView {
         if let Some(pos) = pos {
             drop(g);
             self.select(Select::Release, pos, cx);
+            self.extending = false;
         } else {
+            self.extending = false;
             g.vt.clear_selection();
             drop(g);
             self.selection_changed(cx);
@@ -1230,7 +1242,11 @@ impl TerminalView {
         let (cw, ch) = (f32::from(g.cell.width), f32::from(g.cell.height));
         let (col, row) = ((x / cw) as u16, (y / ch) as u16);
         let height = ch * g.vt.rows as f32;
-        g.vt.select(step, col, row, x, y, cw, height);
+        if self.extending {
+            g.vt.extend_selection(col, row);
+        } else {
+            g.vt.select(step, col, row, x, y, cw, height);
+        }
         drop(g);
         self.selection_changed(cx);
         if matches!(step, Select::Release) {
@@ -1783,8 +1799,9 @@ fn ligature_features(enabled: bool) -> FontFeatures {
 fn cell_font(bold: bool, italic: bool) -> Font {
     let mut f = font(crate::settings::terminal_font());
     f.features = ligature_features(false);
-    let weight = crate::settings::get().font_weight.clamp(100, 900);
-    f.weight = if bold { FontWeight::BOLD } else { FontWeight(weight as f32) };
+    let s = crate::settings::get();
+    let weight = if bold { s.font_weight_bold } else { s.font_weight }.clamp(100, 900);
+    f.weight = FontWeight(weight as f32);
     f.style = if italic { FontStyle::Italic } else { FontStyle::Normal };
     f
 }
@@ -2170,8 +2187,8 @@ fn paint_grid(bounds: Bounds<Pixels>, grid: &Rc<RefCell<Grid>>, focused: bool, w
     // line rebuilds one row, not the whole screen.
     let ligatures = crate::settings::get().font_ligatures;
     let cursor = frame.cursor_cell.filter(|_| ligatures);
-    // The whole cell font, so a weight change redraws kept rows too.
-    let with = (crate::settings::font_size().to_bits(), cell, cell_font(false, false), crate::settings::fonts_added(), ligatures);
+    // The whole cell font and the bold weight, so a weight change redraws kept rows too.
+    let with = (crate::settings::font_size().to_bits(), cell, cell_font(false, false), crate::settings::get().font_weight_bold, crate::settings::fonts_added(), ligatures);
     // When every row changed (output scrolling), nothing is kept: the next
     // frame would find none of them the same.
     let mut painted = std::mem::take(&mut grid.borrow_mut().painted);
@@ -2569,7 +2586,7 @@ impl Render for TerminalView {
                     // The program took the click: Herdr's old selection ends, so a copy can't repeat it.
                     this.clear_selection(cx);
                 } else {
-                    this.start_selection(ev.position, cx);
+                    this.start_selection(ev.position, ev.modifiers.shift && ev.click_count <= 1, cx);
                 }
             }))
             // Right-click is Herdr's menu, even when the program tracks the mouse
@@ -3008,6 +3025,78 @@ mod tests {
             cx.simulate_mouse_move(end, Some(MouseButton::Left), Modifiers::default());
             cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
             assert!(!root.read_with(cx, |root, cx| root.text.read(cx).selected_text()).is_empty());
+        }
+    }
+
+    #[gpui::test]
+    fn shift_click_extends_a_mouse_selection(cx: &mut gpui::TestAppContext) {
+        use gpui::*;
+
+        struct Root(Entity<super::TerminalView>);
+        impl Render for Root {
+            fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+                div().size_full().child(self.0.clone())
+            }
+        }
+        cx.update(gpui_base::init);
+        let (root, cx) = cx.add_window_view(|_, cx| Root(cx.new(|cx| {
+            let terminal = super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 5), cx);
+            terminal.grid.borrow_mut().vt.write(b"alpha beta gamma\r\nsecond row here\r\nthird row");
+            terminal
+        })));
+        cx.run_until_parked();
+        let at = |cx: &mut gpui::VisualTestContext, col: f32, row: f32| root.read_with(cx, |root, cx| {
+            let g = root.0.read(cx).grid.borrow();
+            point(g.origin.x + g.cell.width * (col + 0.25), g.origin.y + g.cell.height * (row + 0.5))
+        });
+        let selected = |cx: &mut gpui::VisualTestContext| root.read_with(cx, |root, cx| {
+            root.0.read(cx).grid.borrow().vt.selection_text()
+        });
+        let shift = Modifiers { shift: true, ..Default::default() };
+
+        // A drag takes a cell once the pointer passes its middle.
+        let (from, to) = (at(cx, 6., 0.), at(cx, 9.5, 0.));
+        cx.simulate_mouse_down(from, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_move(to, Some(MouseButton::Left), Modifiers::default());
+        cx.simulate_mouse_up(to, MouseButton::Left, Modifiers::default());
+        assert_eq!(selected(cx).as_deref(), Some("beta"));
+
+        let far = at(cx, 5., 1.);
+        cx.simulate_mouse_down(far, MouseButton::Left, shift);
+        cx.simulate_mouse_up(far, MouseButton::Left, shift);
+        assert_eq!(selected(cx).as_deref(), Some("beta gamma\nsecond"), "Shift+click keeps the start and moves the end");
+
+        // In a program that tracks the mouse, Shift keeps the click Herdr's and still extends.
+        root.update(cx, |root, cx| root.0.update(cx, |t, _| t.grid.borrow_mut().vt.write(b"\x1b[?1000h\x1b[?1006h")));
+        let back = at(cx, 0., 0.);
+        cx.simulate_mouse_down(back, MouseButton::Left, shift);
+        cx.simulate_mouse_up(back, MouseButton::Left, shift);
+        assert_eq!(selected(cx).as_deref(), Some("alpha b"), "clicking before the start reverses it");
+
+        // A plain click still starts over.
+        root.update(cx, |root, cx| root.0.update(cx, |t, _| t.grid.borrow_mut().vt.write(b"\x1b[?1000l\x1b[?1006l")));
+        cx.simulate_mouse_down(far, MouseButton::Left, Modifiers::default());
+        cx.simulate_mouse_up(far, MouseButton::Left, Modifiers::default());
+        assert_eq!(selected(cx), None);
+
+        let click = |cx: &mut gpui::VisualTestContext, pos, modifiers| {
+            cx.simulate_mouse_down(pos, MouseButton::Left, modifiers);
+            cx.simulate_mouse_up(pos, MouseButton::Left, modifiers);
+        };
+        click(cx, from, Modifiers::default());
+        click(cx, from, Modifiers::default());
+        assert_eq!(selected(cx).as_deref(), Some("beta"));
+        click(cx, far, shift);
+        assert_eq!(selected(cx).as_deref(), Some("beta gamma\nsecond"));
+        click(cx, from, Modifiers::default());
+        assert_eq!(selected(cx), None, "the Shift+click ended the earlier click sequence");
+
+        root.update(cx, |root, cx| root.0.update(cx, |t, _| t.grid.borrow_mut().vt.write(b"\x1b[?1000h\x1b[?1006h")));
+        for (click_count, expected) in [(1, None), (2, Some("gamma")), (3, Some("alpha beta gamma"))] {
+            let position = at(cx, 13., 0.);
+            cx.simulate_event(MouseDownEvent { button: MouseButton::Left, position, modifiers: shift, click_count, first_mouse: false });
+            cx.simulate_event(MouseUpEvent { button: MouseButton::Left, position, modifiers: shift, click_count });
+            assert_eq!(selected(cx).as_deref(), expected, "Shift+click count {click_count} with mouse tracking");
         }
     }
 

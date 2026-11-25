@@ -620,7 +620,7 @@ pub struct Snapshot {
     pub focused: Value,
     /// Floating blocks by id: { edge, align, vertical }.
     pub floats: Value,
-    /// { platform, titlebar, buttons, maximized, fullscreen, active }.
+    /// { platform, titlebar, buttons, maximized, fullscreen, active, visible }.
     pub window: Value,
 }
 
@@ -885,7 +885,7 @@ pub(crate) fn run_blocking(command: &str, args: &[String], cwd: Option<String>, 
     use std::io::Read;
     // The core may have no `hc` link beside it (a Windows zip has only herdr-core.exe).
     let program = if command == "hc" { crate::core_bin::path() } else { PathBuf::from(command) };
-    let mut child = crate::spawn::command(program)
+    let mut child = crate::spawn::detached_command(program)
         .args(args)
         .current_dir(cwd.map(PathBuf::from).unwrap_or_else(home))
         .stdin(Stdio::null())
@@ -975,19 +975,112 @@ fn known_agents(on: Option<String>, list: Vec<Value>) -> Result<Value, String> {
 
 /// Only open regular files, and return at most one byte over the preview limit.
 fn read_remote(machine: &str, path: &str) -> Result<Option<String>, String> {
-    let max = crate::mod_files::LIMIT + 1;
-    let script = r#"test -f "$1" || exit 1; exec head -c "$2" -- "$1""#;
-    let (code, out, _) = match run_remote(machine, "sh", &["-c".into(), script.into(), "sh".into(), path.into(), max.to_string()], None) {
-        Err(e) if e.contains("cannot start") => {
-            let path = crate::programs::powershell_quote(&path.replace('/', "\\"));
-            let script = format!("$file = Get-Item -LiteralPath {path} -Force -ErrorAction SilentlyContinue; \
-                if ($file -isnot [IO.FileInfo]) {{ exit 1 }}; \
-                $reader = [IO.BinaryReader]::new($file.OpenRead()); \
-                try {{ $bytes = $reader.ReadBytes({max}); [Console]::OpenStandardOutput().Write($bytes, 0, $bytes.Length) }} \
-                finally {{ $reader.Dispose() }}");
-            run_remote(machine, "powershell.exe", &["-NoProfile".into(), "-Command".into(), script], None)?
+    read_remote_with(path, |command, args| run_remote(machine, command, args, None))
+}
+
+fn windows_preview_path_allowed(path: &str) -> bool {
+    if path.starts_with(r"\??\") {
+        return false;
+    }
+    let Some(unc) = path.strip_prefix(r"\\") else { return true };
+    let mut parts = unc.split('\\').filter(|part| !part.is_empty());
+    let dot_alias = |part: &str| part.trim_end_matches([' ', '.']).is_empty();
+    let Some(server) = parts.next() else { return false };
+    let share = if matches!(server, "." | "?") {
+        let Some(device) = parts.next() else { return false };
+        if device.eq_ignore_ascii_case("UNC") {
+            if parts.next().is_none_or(dot_alias) {
+                return false;
+            }
+            parts.next()
+        } else {
+            let file_device = matches!(device.as_bytes(), [b'a'..=b'z' | b'A'..=b'Z', b':'])
+                || device.get(..7).is_some_and(|prefix| prefix.eq_ignore_ascii_case("Volume{"))
+                    && device.ends_with('}')
+                    && device[7..device.len() - 1].bytes().all(|b| b.is_ascii_hexdigit() || b == b'-');
+            if !file_device {
+                return false;
+            }
+            None
         }
-        r => r?,
+    } else {
+        if dot_alias(server) {
+            return false;
+        }
+        parts.next()
+    };
+    if let Some(share) = share {
+        let share = share.trim_end_matches([' ', '.']);
+        if share.is_empty() || share.eq_ignore_ascii_case("pipe") || share.eq_ignore_ascii_case("IPC$") {
+            return false;
+        }
+    }
+    // MSYS can resolve .. above the share or device root before checking the file.
+    let mut depth = 0;
+    for part in parts {
+        match part.trim_end_matches(' ') {
+            "" | "." => {}
+            ".." if depth == 0 => return false,
+            ".." => depth -= 1,
+            _ => depth += 1,
+        }
+    }
+    true
+}
+
+fn read_remote_with(
+    path: &str,
+    mut run: impl FnMut(&str, &[String]) -> Result<(i32, Vec<u8>, Vec<u8>), String>,
+) -> Result<Option<String>, String> {
+    let max = crate::mod_files::LIMIT + 1;
+    let windows_path = path.replace('/', "\\");
+    let mut native = windows_path.as_str();
+    while let Some((_, tail)) = native.split_once("::")
+        .filter(|(provider, _)| provider.eq_ignore_ascii_case("FileSystem")
+            || provider.eq_ignore_ascii_case(r"Microsoft.PowerShell.Core\FileSystem"))
+    {
+        native = tail;
+    }
+    let windows_path_allowed = windows_preview_path_allowed(native);
+    // Git's sh can expand path arguments before the script runs.
+    if !windows_path_allowed {
+        let probe = run("sh", &["-c".into(), r#"[ "${OS-}" != Windows_NT ]"#.into()]);
+        match probe {
+            Ok((0, _, _)) => {}
+            Ok(_) => return Ok(None),
+            Err(e) if e.starts_with("cannot start sh:") => return Ok(None),
+            Err(e) => return Err(e),
+        }
+    }
+    let script = r#"test -f "$1" || { [ "${OS-}" = Windows_NT ] && exit 127; exit 1; }
+        exec head -c "$2" -- "$1""#;
+    let read = run("sh", &["-c".into(), script.into(), "sh".into(), path.into(), max.to_string()]);
+    let use_powershell = match &read {
+        Ok((126 | 127, _, _)) => true,
+        Err(e) => e.starts_with("cannot start sh:"),
+        _ => false,
+    };
+    let (code, out, _) = if use_powershell {
+        if !windows_path_allowed {
+            return Ok(None);
+        }
+        let path = crate::programs::powershell_quote(native);
+        let script = format!(r#"
+            $path = {path}
+            if ($path -match '^[a-z]:\\' -or $path.StartsWith('\\')) {{
+                try {{ $full = [IO.Path]::GetFullPath($path) }} catch {{ exit 1 }}
+                if ($full -match '^[a-z]:\\') {{ $path = '\\?\' + $full }}
+                elseif ($full.StartsWith('\\') -and $full -notmatch '^\\\\[?.]\\') {{ $path = '\\?\UNC\' + $full.Substring(2) }}
+            }}
+            $file = Get-Item -LiteralPath $path -Force -ErrorAction SilentlyContinue
+            if ($file -isnot [IO.FileInfo]) {{ exit 1 }}
+            $reader = [IO.BinaryReader]::new($file.OpenRead())
+            try {{ $bytes = $reader.ReadBytes({max}); [Console]::OpenStandardOutput().Write($bytes, 0, $bytes.Length) }}
+            finally {{ $reader.Dispose() }}
+        "#);
+        run("powershell.exe", &["-NoProfile".into(), "-Command".into(), script])?
+    } else {
+        read?
     };
     if code != 0 {
         return Ok(None);
@@ -1128,6 +1221,19 @@ fn module(inst: Instance, copy: u64) -> HostModule {
             Ok(async move {
                 let path = picked.await.ok().and_then(Result::ok).flatten().and_then(|p| p.into_iter().next());
                 Ok(path.map(|p| HostValue::Str(p.to_string_lossy().into_owned())).unwrap_or(HostValue::Null))
+            })
+        })
+        .async_function("pickFiles", |a| {
+            let options = a.get(0);
+            let prompt = opt_str(options, "prompt").unwrap_or_else(|| "Open".into());
+            let multiple = options.and_then(|o| o.get("multiple")).and_then(HostValue::as_bool).unwrap_or(false);
+            let picked = gpui_shell::with_current_app(|cx| cx.prompt_for_paths(gpui::PathPromptOptions {
+                files: true, directories: false, multiple, prompt: Some(prompt.into()),
+            })).ok_or_else(|| HostError::new("no window to pick from"))?;
+            Ok(async move {
+                let paths = picked.await.map_err(|_| HostError::new("the file picker was lost"))?
+                    .map_err(|error| HostError::new(error.to_string()))?;
+                picked_files(paths)
             })
         })
         .function("feedbackClearImages", move |_| {
@@ -1295,9 +1401,17 @@ pub fn apply_theme(cx: &mut App) {
 }
 
 fn capabilities() -> Capabilities {
+    capabilities_at(home(), app_dir(), false)
+}
+
+fn capabilities_at(home: PathBuf, app: PathBuf, read_mods: bool) -> Capabilities {
+    let mut read_roots = vec![home];
+    if read_mods {
+        read_roots.push(app.join("mods"));
+    }
     Capabilities::new()
-        .read_roots([home()])
-        .write_roots([app_dir()])
+        .read_roots(read_roots)
+        .write_roots([app])
         .execute(ExecuteGrant::Unrestricted)
         .network(NetworkGrant::Unrestricted)
         .storage(true)
@@ -1354,7 +1468,8 @@ fn mod_policy(inst: &Instance) -> (u64, gpui_shell::policy::Policy) {
     };
     let policy = gpui_shell::policy::Policy::new()
         .with_application(inst.key())
-        .with_capabilities(capabilities())
+        // The shipped palette reads manifests even when the app home is outside the login home.
+        .with_capabilities(capabilities_at(home(), app_dir(), inst.name == "frame-palette"))
         .with_shared_storage_path(dir.join(file))
         .with_host_module(module(inst.clone(), copy))
         .expect("herdr module is valid");
@@ -1395,6 +1510,16 @@ pub fn check_link_mod(dir: &Path) -> anyhow::Result<bool> {
         gpui_shell::ShellRuntime::check_module(dir, "link.js", "handleLink")?;
     }
     Ok(handles_links)
+}
+
+fn picked_files(paths: Option<Vec<PathBuf>>) -> gpui_shell::HostResult {
+    let Some(paths) = paths.filter(|paths| !paths.is_empty()) else {
+        return Ok(HostValue::Null);
+    };
+    paths.into_iter().map(|path| {
+        path.into_os_string().into_string().map(HostValue::Str)
+            .map_err(|_| HostError::new("a selected file path is not valid UTF-8"))
+    }).collect::<Result<Vec<_>, _>>().map(HostValue::Array)
 }
 
 #[cfg(test)]
@@ -1492,6 +1617,127 @@ mod tests {
     }
 
     #[test]
+    fn remote_preview_falls_back_when_the_shell_reader_is_unavailable() {
+        let path = r"C:\test/a [b]'é.txt";
+        for shell in [
+            Ok((126, vec![], vec![])),
+            Ok((127, vec![], vec![])),
+            Err("cannot start sh: program not found".into()),
+        ] {
+            let mut commands = [
+                ("sh", shell),
+                ("powershell.exe", Ok((0, b"preview".to_vec(), vec![]))),
+            ].into_iter();
+            let text = read_remote_with(path, |command, args| {
+                let (expected, result) = commands.next().expect("unexpected remote command");
+                assert_eq!(command, expected);
+                match command {
+                    "sh" => assert_eq!(args[3], path),
+                    "powershell.exe" => {
+                        assert_eq!(&args[..2], ["-NoProfile", "-Command"]);
+                        assert!(args[2].contains(r"$path = 'C:\test\a [b]''é.txt'"));
+                    }
+                    _ => unreachable!(),
+                }
+                result
+            }).unwrap();
+            assert_eq!(text.as_deref(), Some("preview"));
+            assert!(commands.next().is_none());
+        }
+    }
+
+    #[test]
+    fn remote_preview_returns_shell_reads_misses_and_transport_errors() {
+        let long_path = format!("C:/test/{}/{}/README.md", "a".repeat(150), "b".repeat(150));
+        for (path, shell, expected) in [
+            ("/c/test/README.md", Ok((0, b"preview".to_vec(), vec![])), Ok(Some("preview".into()))),
+            (&long_path, Ok((0, b"preview".to_vec(), vec![])), Ok(Some("preview".into()))),
+            ("/test/README.md", Ok((1, vec![], vec![])), Ok(None)),
+            ("/test/README.md", Err("sh took longer than 30 s".into()), Err("sh took longer than 30 s".into())),
+        ] {
+            let mut reply = Some(shell);
+            let actual = read_remote_with(path, |command, args| {
+                assert_eq!(command, "sh");
+                assert_eq!(args[3], path);
+                reply.take().expect("unexpected retry")
+            });
+            assert_eq!(actual, expected);
+        }
+    }
+
+    #[test]
+    #[cfg(unix)]
+    fn remote_preview_confirms_only_windows_shell_misses() {
+        for (os, expected) in [("Windows_NT", Some("preview")), ("Linux", None)] {
+            let path = r"C:\test\don't.md";
+            let actual = read_remote_with(path, |command, args| {
+                if command == "sh" {
+                    let output = std::process::Command::new("sh")
+                        .args(args)
+                        .env("OS", os)
+                        .output()
+                        .unwrap();
+                    return Ok((output.status.code().unwrap(), output.stdout, output.stderr));
+                }
+                assert_eq!(command, "powershell.exe");
+                assert!(args[2].contains(r"$path = 'C:\test\don''t.md'"));
+                Ok((0, b"preview".to_vec(), vec![]))
+            }).unwrap();
+            assert_eq!(actual.as_deref(), expected);
+        }
+    }
+
+    #[test]
+    fn remote_preview_guards_windows_pipe_paths_before_metadata_checks() {
+        for path in [
+            r"\\.\pipe\preview",
+            r"//localhost/pipe/preview",
+            r"\\..\localhost\pipe\preview",
+            r"//../localhost/pipe/preview",
+            r"\\localhost\\IPC$\preview",
+            r"\\localhost\c$\..\pipe\preview",
+            r"\\.\C:\..\pipe\preview",
+            r"\\.\UNC\localhost\c$\..\pipe\preview",
+            r"\\?\UNC\localhost\.\pipe\preview",
+            r"FileSystem::\\?\GLOBALROOT\Device\NamedPipe\preview",
+            r"FileSystem::FileSystem::\\.\pipe\preview",
+            r"Microsoft.PowerShell.Core\FileSystem::FileSystem::\\.\pipe\preview",
+            r"\\localhost\pipe\{preview,preview}",
+            r"\??\pipe\preview",
+        ] {
+            let actual = read_remote_with(path, |command, args| {
+                assert_eq!(command, "sh");
+                assert_eq!(args.len(), 2);
+                Ok((1, vec![], vec![]))
+            });
+            assert_eq!(actual, Ok(None), "{path}");
+        }
+        for path in [r"C:\pipe\file", r"\\server\share\folder\..\pipe\file", r"\\?\C:\pipe\file", r"\\?\UNC\server\share\file"] {
+            assert!(windows_preview_path_allowed(path), "{path}");
+        }
+    }
+
+    #[test]
+    fn picked_files_keep_the_pickers_order_and_cancel_is_null() {
+        let picked = picked_files(Some(vec!["/b/2.txt".into(), "/a/1.txt".into()])).unwrap();
+        assert_eq!(from_host(&picked), json!(["/b/2.txt", "/a/1.txt"]));
+        assert_eq!(picked_files(None).unwrap(), HostValue::Null);
+        assert_eq!(picked_files(Some(vec![])).unwrap(), HostValue::Null);
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn picked_files_rejects_a_path_that_would_name_a_different_file_after_conversion() {
+        use std::os::unix::ffi::OsStringExt;
+
+        let exact = "/a/bad-\u{fffd}.txt";
+        let invalid = std::ffi::OsString::from_vec(b"/a/bad-\xff.txt".to_vec());
+        let picked = picked_files(Some(vec![exact.into()])).unwrap();
+        assert_eq!(from_host(&picked), json!([exact]));
+        assert!(picked_files(Some(vec![exact.into(), invalid.into()])).is_err());
+    }
+
+    #[test]
     fn exec_timeout_defaults_caps_and_rejects_invalid_values() {
         assert_eq!(exec_limit(None).unwrap(), EXEC_LIMIT);
         assert_eq!(exec_limit(Some(&HostObject::new().field("timeout", HostValue::Null).into())).unwrap(), EXEC_LIMIT);
@@ -1544,6 +1790,49 @@ mod tests {
         assert!(error.contains("0.03 s"), "{error}");
         let (code, stdout, _) = run_blocking("sh", &args, None, Duration::from_secs(2)).unwrap();
         assert_eq!((code, stdout.as_str()), (0, "done"));
+    }
+
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn exec_keeps_a_background_job_running() {
+        const CHILD: &str = "HERDR_TEST_BACKGROUND_EXEC";
+        if std::env::var_os(CHILD).is_some() {
+            let args = ["--noprofile", "--norc", "-ic", "printf ready"].map(String::from);
+            let (code, stdout, stderr) = run_blocking("/bin/bash", &args, None, Duration::from_secs(2)).unwrap();
+            assert_eq!((code, stdout.as_str()), (0, "ready"), "{stderr}");
+            return;
+        }
+
+        // util-linux `script` gives Bash a real controlling PTY; some desktops don't have it.
+        if std::process::Command::new("script").arg("--version").output().is_err() {
+            eprintln!("skipped: util-linux script is not installed");
+            return;
+        }
+        // Give Bash a real controlling PTY and run the test in a background job.
+        let output = std::process::Command::new("timeout")
+            .args([
+                "15s",
+                "script",
+                "-qec",
+                r#"exec /bin/bash --noprofile --norc -mc '
+                    "$HERDR_TEST_BINARY" --exact mods::tests::exec_keeps_a_background_job_running &
+                    child=$!
+                    wait "$child"
+                    status=$?
+                    if [ "$status" -ne 0 ]; then
+                        jobs -l
+                        kill -KILL -- "-$child" 2>/dev/null || :
+                    fi
+                    exit "$status"
+                '"#,
+                "/dev/null",
+            ])
+            .env(CHILD, "1")
+            .env("HERDR_TEST_BINARY", std::env::current_exe().unwrap())
+            .stdin(Stdio::null())
+            .output()
+            .unwrap();
+        assert!(output.status.success(), "background job: {}\n{}{}", output.status, String::from_utf8_lossy(&output.stdout), String::from_utf8_lossy(&output.stderr));
     }
 
     #[cfg(unix)]

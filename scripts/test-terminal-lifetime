@@ -1,0 +1,107 @@
+#!/usr/bin/env bash
+# Linux regression using the app and a real core in an isolated sandbox.
+set -euo pipefail
+cd "$(dirname "$0")/.."
+export HERDR_APP_SANDBOX="${HERDR_APP_SANDBOX:-lifetime-$$}"
+root="/var/tmp/herdr-app-$HERDR_APP_SANDBOX"
+export HERDR_APP_HOME="$root/home" XDG_CONFIG_HOME="$root/config"
+unset HC_SOCKET HC_TERMINAL_ID HC_TERMINAL_SOCKET HC_SCOPE
+app=${HERDR_APP_BIN:-./target/debug/herdr-app}
+sandbox() { scripts/sandbox "$@"; }
+trap 'sandbox down' EXIT
+sandbox up
+
+wait_for() {
+  local description=$1
+  shift
+  for _ in {1..100}; do
+    if "$@"; then return; fi
+    sleep 0.1
+  done
+  echo "timed out waiting for $description" >&2
+  sandbox hc ls --all >&2
+  "$app" ls >&2
+  return 1
+}
+
+child() {
+  local parent=$1 name=$2
+  shift 2
+  sandbox hc run --json --bg --no-notify --parent "$parent" --name "$name" "$@" sleep infinity | jq -er .address
+}
+
+placed_children() {
+  "$app" ls | jq -e --arg scenario "$scenario" --arg pane "$pane" --arg labeled "$labeled" '
+    def contains_terminal($space; $terminal):
+      any(.spaces[] | select(.id == $space) | .tabs[].terminals[]; .terminal == $terminal);
+    contains_terminal($scenario + "-pane"; $pane) and contains_terminal($scenario + "-label"; $labeled)
+  ' >/dev/null
+}
+
+app_saw_dependent() {
+  "$app" ls | jq -e --arg parent "$parent" --arg dependent "$dependent" '
+    any(.spaces[].tabs[].terminals[]; .terminal == $parent and (.sub_agents | index($dependent) != null))
+  ' >/dev/null
+}
+
+finished() {
+  sandbox hc get "$1" | jq -e '.state == "finished"' >/dev/null
+}
+
+assert_live() {
+  local record
+  record=$(sandbox hc get "$1")
+  jq -e '.state == "live"' <<<"$record" >/dev/null || {
+    echo "expected $1 to stay live: $record" >&2
+    return 1
+  }
+}
+
+for scenario in close kill; do
+  space=$(sandbox do space.new --name "$scenario" --argv '["sleep","infinity"]' | jq -er .space)
+  source=$(sandbox do tab.new --space "$space" --name parent --argv '["sleep","infinity"]')
+  parent=$(jq -er .terminal <<<"$source")
+  tab=$(jq -er .tab <<<"$source")
+
+  pane=$(child "$parent" "$scenario-pane" --outlive-parent --label "herdr.space=$scenario-pane")
+  labeled=$(child "$parent" "$scenario-label" --outlive-parent --label "herdr.space=$scenario-label")
+  hidden=$(child "$parent" "$scenario-hidden" --outlive-parent)
+  nested=$(child "$hidden" "$scenario-nested" --outlive-parent)
+  kept_nested=$(child "$pane" "$scenario-kept-nested" --outlive-parent)
+  wait_for 'both placed children' placed_children
+
+  # Reproduce a child whose pane stays in the layout after its label is removed.
+  sandbox hc label "$pane" herdr.space= >/dev/null
+  sandbox hc get "$pane" | jq -e --arg parent "$parent" '
+    .parent == $parent and .die_with_parent == false and .labels["herdr.space"] == null
+  ' >/dev/null
+  # Seeing this later event confirms the app received the label removal too.
+  dependent=$(child "$parent" "$scenario-dependent")
+  wait_for 'app to see the dependent child' app_saw_dependent
+  placed_children
+
+  if [[ $scenario == close ]]; then
+    sandbox do tab.close --id "$tab" --confirmed true
+  else
+    sandbox do terminal.kill --terminal "$parent"
+    wait_for 'explicit kill to reach the unplaced child' finished "$hidden"
+    wait_for 'explicit kill to reach the grandchild' finished "$nested"
+  fi
+  wait_for 'the parent to finish' finished "$parent"
+  wait_for 'the dependent child to finish' finished "$dependent"
+  # The app dispatches kills in the background. Check survivors after the core
+  # and window have had time to apply any remaining kills and remove panes.
+  sleep 1
+  for survivor in "$pane" "$labeled" "$kept_nested"; do
+    assert_live "$survivor"
+  done
+  if [[ $scenario == close ]]; then
+    assert_live "$hidden"
+    assert_live "$nested"
+  fi
+  placed_children
+  "$app" ls | jq -e --arg space "$space" --arg tab "$tab" '
+    any(.spaces[]; .id == $space and all(.tabs[]; .id != $tab))
+  ' >/dev/null
+  echo "PASS $scenario"
+done

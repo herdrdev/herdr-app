@@ -4330,6 +4330,17 @@ impl ShellRuntime {
             event_bounds.set("height", f32::from(bounds.size.height))?;
             payload.set("bounds", event_bounds)?;
             payload.set("modifiers", modifiers_object(&ctx, event.modifiers)?)?;
+            // Absent when no button is held, so a drag can tell it was
+            // released somewhere this element never heard about.
+            let pressed = match event.pressed_button {
+                Some(gpui::MouseButton::Left) => Some("left"),
+                Some(gpui::MouseButton::Right) => Some("right"),
+                Some(gpui::MouseButton::Middle) => Some("middle"),
+                _ => None,
+            };
+            if let Some(pressed) = pressed {
+                payload.set("pressed_button", pressed)?;
+            }
             handler.call::<_, ()>((
                 payload,
                 context_object(ctx, ContextBinding::Call(generation))?,
@@ -6222,9 +6233,11 @@ globalThis.__gpui = (() => {
   // an unknown button name is refused rather than falling back to the left one.
   methods.mouse_button = function (value) {
     value = String(value);
-    if (!["left", "right", "middle"].includes(value)) {
+    // HERDR: back and forward are the mouse's side buttons.
+    if (!["left", "right", "middle", "back", "forward"].includes(value)) {
       throw new TypeError(
-        "mouse_button(value) must be left, right or middle; got " + JSON.stringify(value),
+        "mouse_button(value) must be left, right, middle, back or forward; got " +
+          JSON.stringify(value),
       );
     }
     __apply(this.__id, "mouse_button", [value]);
@@ -6411,6 +6424,7 @@ globalThis.__gpui = (() => {
     set_masked: (masked) => __input_set_masked(handle, Boolean(masked)),
     set_loading: (loading) => __input_set_loading(handle, Boolean(loading)),
     focus: () => __input_focus(handle),
+    blur: () => __input_blur(handle),
     release: () => __input_release(handle),
   });
 
@@ -6431,6 +6445,7 @@ globalThis.__gpui = (() => {
       ),
     set_soft_wrap: (wrap) => __textarea_set_soft_wrap(handle, Boolean(wrap)),
     focus: () => __textarea_focus(handle),
+    blur: () => __textarea_blur(handle),
     release: () => __textarea_release(handle),
   });
 
@@ -6764,6 +6779,22 @@ globalThis.__gpui = (() => {
     release: () => __dock_release(handle),
   });
 
+  // HERDR: where the area is, the same three readers on both kinds of handle.
+  const scrollPosition = (handle) => ({
+    offset: () => {
+      const [x, y] = __scroll_offset(handle);
+      return { x, y };
+    },
+    content_size: () => {
+      const [width, height] = __scroll_content_size(handle);
+      return { width, height };
+    },
+    viewport_size: () => {
+      const [width, height] = __scroll_viewport_size(handle);
+      return { width, height };
+    },
+  });
+
   const scrollHandle = (handle) => ({
     __handle: handle,
     scroll_to_item: (index) => {
@@ -6772,6 +6803,7 @@ globalThis.__gpui = (() => {
       }
       __scroll_to_item(handle, index);
     },
+    ...scrollPosition(handle),
     release: () => __scroll_release(handle),
   });
 
@@ -6786,6 +6818,7 @@ globalThis.__gpui = (() => {
       __virtual_scroll_to_item(handle, index, String(strategy ?? "top"));
     },
     scroll_to_bottom: () => __virtual_scroll_to_bottom(handle),
+    ...scrollPosition(handle),
     release: () => __virtual_scroll_release(handle),
   });
 
@@ -7307,7 +7340,11 @@ globalThis.__gpui = (() => {
           value: () => __editor_value(handle),
           set_value: (value) => __editor_set_value(handle, String(value)),
           on: (event, handler) => __editor_on(handle, String(event), handler),
+          set_tab_size: (tab_size, hard_tabs = false) =>
+            __editor_set_tab_size(handle, Number(tab_size), Boolean(hard_tabs)),
           focus: () => __editor_focus(handle),
+          blur: () => __editor_blur(handle),
+          set_soft_wrap: (wrap) => __editor_set_soft_wrap(handle, Boolean(wrap)),
           release: () => __editor_release(handle),
         };
       },
@@ -7448,13 +7485,16 @@ impl ShellRuntime {
             for (index, name) in [
                 "on_click",
                 "on_link_click",
+                "on_selection_change",
                 "on_mouse_move",
+                "on_window_mouse_move",
                 "on_hover",
                 "on_key_down",
                 "on_key_up",
                 "on_modifiers_changed",
                 "on_mouse_down",
                 "on_mouse_up",
+                "on_window_mouse_up",
                 "on_mouse_down_out",
                 "on_drop",
                 "on_scroll_wheel",
@@ -7475,7 +7515,9 @@ impl ShellRuntime {
                 "on_step",
                 "disabled",
                 "selectable",
+                "highlight_range",
                 "scrollable",
+                "raw_html",
                 "selected",
                 "checked",
                 "accessibility_label",
@@ -8383,7 +8425,7 @@ impl ShellRuntime {
             // handler. The button is folded into the recorded op name — three
             // fixed names GPUI's own `MouseButton` maps onto — so the op stays
             // the `(&'static str, CallbackId)` pair every other callback uses.
-            "on_mouse_down" | "on_mouse_up" => {
+            "on_mouse_down" | "on_mouse_up" | "on_window_mouse_up" => {
                 if scope::current_phase() == Some(ScopePhase::Layout)
                     && !self.interactive_inline_layout.get()
                 {
@@ -8404,7 +8446,7 @@ impl ShellRuntime {
                             ctx,
                             &format!(
                                 "{method}(button, handler) expects a button first: \
-                                 \"left\", \"right\" or \"middle\""
+                                 \"left\", \"right\", \"middle\", \"back\" or \"forward\""
                             ),
                         )
                     })?;
@@ -8421,12 +8463,22 @@ impl ShellRuntime {
                     ("on_mouse_up", "left") => "on_mouse_up_left",
                     ("on_mouse_up", "right") => "on_mouse_up_right",
                     ("on_mouse_up", "middle") => "on_mouse_up_middle",
+                    ("on_window_mouse_up", "left") => "on_window_mouse_up_left",
+                    ("on_window_mouse_up", "right") => "on_window_mouse_up_right",
+                    ("on_window_mouse_up", "middle") => "on_window_mouse_up_middle",
+                    // HERDR: the mouse's side buttons.
+                    ("on_mouse_down", "back") => "on_mouse_down_back",
+                    ("on_mouse_down", "forward") => "on_mouse_down_forward",
+                    ("on_mouse_up", "back") => "on_mouse_up_back",
+                    ("on_mouse_up", "forward") => "on_mouse_up_forward",
+                    ("on_window_mouse_up", "back") => "on_window_mouse_up_back",
+                    ("on_window_mouse_up", "forward") => "on_window_mouse_up_forward",
                     (_, other) => {
                         return Err(Exception::throw_type(
                             ctx,
                             &format!(
-                                "`{other}` is not a mouse button; \
-                                 expected \"left\", \"right\" or \"middle\""
+                                "`{other}` is not a mouse button; expected \
+                                 \"left\", \"right\", \"middle\", \"back\" or \"forward\""
                             ),
                         ));
                     }
@@ -8441,6 +8493,7 @@ impl ShellRuntime {
             }
             "on_click"
             | "on_link_click"
+            | "on_selection_change"
             | "on_resize"
             | "on_size_change"
             | "on_change"
@@ -8454,6 +8507,7 @@ impl ShellRuntime {
             | "on_item_click"
             | "on_item_secondary_click"
             | "on_mouse_move"
+            | "on_window_mouse_move"
             | "on_hover"
             | "on_key_down"
             | "on_key_up"
@@ -8506,7 +8560,9 @@ impl ShellRuntime {
             }
             "disabled"
             | "selectable"
+            | "highlight_range"
             | "scrollable"
+            | "raw_html"
             | "selected"
             | "checked"
             | "accessibility_label"
@@ -8564,7 +8620,9 @@ impl ShellRuntime {
                 let name = match method {
                     "disabled" => "disabled",
                     "selectable" => "selectable",
+                    "highlight_range" => "highlight_range",
                     "scrollable" => "scrollable",
+                    "raw_html" => "raw_html",
                     "selected" => "selected",
                     "checked" => "checked",
                     "tooltip" => "tooltip",
@@ -9897,6 +9955,9 @@ fn mouse_button_payload<'js>(
         match button {
             gpui::MouseButton::Right => "right",
             gpui::MouseButton::Middle => "middle",
+            // HERDR: the mouse's side buttons.
+            gpui::MouseButton::Navigate(gpui::NavigationDirection::Back) => "back",
+            gpui::MouseButton::Navigate(gpui::NavigationDirection::Forward) => "forward",
             _ => "left",
         },
     )?;
@@ -10453,7 +10514,9 @@ fn callback_op_name(method: &str) -> Option<&'static str> {
     Some(match method {
         "on_click" => "on_click",
         "on_link_click" => "on_link_click",
+        "on_selection_change" => "on_selection_change",
         "on_mouse_move" => "on_mouse_move",
+        "on_window_mouse_move" => "on_window_mouse_move",
         "on_hover" => "on_hover",
         "on_key_down" => "on_key_down",
         "on_key_up" => "on_key_up",
