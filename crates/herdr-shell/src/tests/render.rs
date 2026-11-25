@@ -7807,6 +7807,71 @@ export default class FormWithTabs extends View {
     let _ = root;
 }
 
+/// Mod `cx.bind_keys` loads with `DummyKeyboardMapper` so Windows platform key
+/// remapping cannot rewrite shifted punctuation bindings.
+#[gpui::test]
+fn mod_bind_keys_uses_dummy_mapper_even_when_platform_mapper_rewrites_shifted_keys(
+    cx: &mut TestAppContext,
+) {
+    cx.update(|cx| {
+        crate::init(cx);
+        cx.set_key_equivalent_mapper(|mut keystroke, _use_key_equivalents| {
+            if keystroke.modifiers.shift && keystroke.key == "/" {
+                keystroke.modifiers.shift = false;
+                keystroke.key = "?".into();
+            }
+            gpui::KeybindingKeystroke::from_keystroke(keystroke)
+        });
+        // Sanity check: KeyBinding::load WOULD rewrite ctrl-shift-/ under this mapper.
+        let mapped = gpui::KeyBinding::load(
+            "ctrl-shift-/",
+            Box::new(gpui::NoAction),
+            None,
+            false,
+            None,
+            cx,
+        )
+        .unwrap();
+        assert_eq!(mapped.keystrokes()[0].inner().key, "?");
+        assert!(!mapped.keystrokes()[0].inner().modifiers.shift);
+    });
+
+    let runtime = ShellRuntime::new_isolated().expect("runtime");
+    cx.update(|cx| runtime.set_global(cx));
+    let source = r#"
+import { View } from "gpui-kit";
+import { v_flex } from "gpui-base";
+
+export default class Keys extends View {
+  init(_props, cx) {
+    cx.bind_keys([{ keystroke: "ctrl-shift-/", action: "r4_dummy_mapper_guard" }]);
+  }
+  render(_cx) {
+    return v_flex();
+  }
+}
+"#;
+    let view_type = runtime.load_source("dummy-mapper-keys", source).expect("load");
+    let window = cx.add_window(|_, _| Empty);
+    let mut context = VisualTestContext::from_window(*window.deref(), cx);
+    let _view = context
+        .update(|window, cx| runtime.instantiate_view(&view_type, window, cx))
+        .expect("instantiate");
+
+    let bindings = context.update(|_, cx| {
+        cx.key_bindings()
+            .borrow()
+            .bindings_for_action(&crate::action::ShellAction::new("r4_dummy_mapper_guard"))
+            .cloned()
+            .collect::<Vec<_>>()
+    });
+    assert_eq!(bindings.len(), 1);
+    let stroke = bindings[0].keystrokes()[0].inner();
+    assert_eq!(stroke.key, "/");
+    assert!(stroke.modifiers.control);
+    assert!(stroke.modifiers.shift);
+}
+
 /// A range is stored as one, and reads back as a pair.
 ///
 /// The other half of the same wire question. A pair going in has to arrive as

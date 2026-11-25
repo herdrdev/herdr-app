@@ -1346,6 +1346,31 @@ impl App {
         &self.keyboard_mapper
     }
 
+    /// HERDR (G11): override the test keyboard mapper so host callers can verify
+    /// they bypass platform key-equivalent remapping.
+    #[cfg(any(test, feature = "test-support"))]
+    pub fn set_key_equivalent_mapper(
+        &mut self,
+        map: impl Fn(Keystroke, bool) -> crate::KeybindingKeystroke + 'static,
+    ) {
+        struct ClosureKeyboardMapper<F>(F);
+        impl<F: Fn(Keystroke, bool) -> crate::KeybindingKeystroke> PlatformKeyboardMapper
+            for ClosureKeyboardMapper<F>
+        {
+            fn map_key_equivalent(
+                &self,
+                keystroke: Keystroke,
+                use_key_equivalents: bool,
+            ) -> crate::KeybindingKeystroke {
+                (self.0)(keystroke, use_key_equivalents)
+            }
+            fn get_key_equivalents(&self) -> Option<&collections::HashMap<char, char>> {
+                None
+            }
+        }
+        self.keyboard_mapper = Rc::new(ClosureKeyboardMapper(map));
+    }
+
     /// Invokes a handler when the current keyboard layout changes
     pub fn on_keyboard_layout_change<F>(&self, mut callback: F) -> Subscription
     where

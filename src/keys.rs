@@ -430,21 +430,36 @@ mod tests {
     }
 
     #[gpui::test]
-    fn load_with_dummy_mapper_keeps_shifted_punctuation_unmapped(cx: &mut gpui::TestAppContext) {
-        // HERDR (G11): keys.json loads with DummyKeyboardMapper on every OS so Windows
-        // shifted digit/punctuation bindings do not get rewritten by WindowsKeyboardMapper.
-        let binding = cx.update(|_cx| {
-            gpui::KeyBinding::load_with_dummy_mapper(
+    fn keys_parse_uses_dummy_mapper_even_when_platform_mapper_rewrites_shifted_keys(
+        cx: &mut gpui::TestAppContext,
+    ) {
+        // Simulates WindowsKeyboardMapper rewriting `ctrl-shift-/` -> `ctrl-?`.
+        let bindings = cx.update(|cx| {
+            cx.set_key_equivalent_mapper(|mut keystroke, _use_key_equivalents| {
+                if keystroke.modifiers.shift && keystroke.key == "/" {
+                    keystroke.modifiers.shift = false;
+                    keystroke.key = "?".into();
+                }
+                gpui::KeybindingKeystroke::from_keystroke(keystroke)
+            });
+            // Sanity check: KeyBinding::load WOULD rewrite ctrl-shift-/ under this mapper.
+            let mapped = gpui::KeyBinding::load(
                 "ctrl-shift-/",
                 Box::new(gpui::NoAction),
                 None,
                 false,
                 None,
-                gpui::OperatingSystem::Windows,
+                cx,
             )
-            .expect("valid binding")
+            .unwrap();
+            assert_eq!(mapped.keystrokes()[0].inner().key, "?");
+            assert!(!mapped.keystrokes()[0].inner().modifiers.shift);
+
+            // Real caller under test: keys::parse must bypass the rewriting mapper.
+            super::parse(r#"{"global":{"ctrl-shift-/":"app.help"}}"#, cx).unwrap()
         });
-        let stroke = binding.keystrokes()[0].inner();
+        assert_eq!(bindings.len(), 1);
+        let stroke = bindings[0].keystrokes()[0].inner();
         assert_eq!(stroke.key, "/");
         assert!(stroke.modifiers.control);
         assert!(stroke.modifiers.shift);
