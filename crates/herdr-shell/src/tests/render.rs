@@ -7666,6 +7666,57 @@ export default class Picker extends View {
     );
 }
 
+/// A mod Tab list built by herdr-shell does not insert a Tab key focus stop.
+#[gpui::test]
+fn a_mod_tab_list_is_not_a_tab_stop(cx: &mut TestAppContext) {
+    cx.update(|cx| crate::init(cx));
+
+    let runtime = ShellRuntime::new_isolated().expect("runtime");
+    cx.update(|cx| runtime.set_global(cx));
+    let source = r#"
+import { View } from "gpui-kit";
+import { v_flex, Button, Tabs, Tab } from "gpui-base";
+
+export default class FormWithTabs extends View {
+  init(_props, cx) {
+    this.handles = [cx.focus_handle(), cx.focus_handle()];
+  }
+  render(_cx) {
+    return v_flex()
+      .w(300)
+      .h(200)
+      .child(Button.new("before").w(120).h(32).tab_index(1).track_focus(this.handles[0]).child("Before"))
+      .child(
+        Tabs.new("mod-tabs")
+          .child(Tab.new("tab-a").selected(true).child("A"))
+          .child(Tab.new("tab-b").child("B"))
+      )
+      .child(Button.new("after").w(120).h(32).tab_index(2).track_focus(this.handles[1]).child("After"));
+  }
+}
+"#;
+    let view_type = runtime.load_source("tabs-not-tab-stop", source).expect("load");
+    let runtime_for_view = Rc::clone(&runtime);
+    let (_root, context) = cx.add_window_view(move |window, cx| {
+        let object = runtime_for_view
+            .instantiate(&view_type, window, cx)
+            .expect("instantiate");
+        let view = cx.new(|_| ScriptView::new(runtime_for_view, object));
+        crate::root::ShellRoot::new(view.into(), window, cx)
+    });
+    context.update(|window, cx| window.draw(cx).clear(cx));
+
+    let handles = runtime.entities().focus_handles();
+    assert_eq!(handles.len(), 2);
+    context.update(|window, cx| window.focus(&handles[0], cx));
+    context.simulate_keystrokes("tab");
+    assert_eq!(
+        context.update(|window, cx| window.focused(cx)).as_ref(),
+        Some(&handles[1]),
+        "Tab must skip herdr-shell Tabs and land directly on the next control"
+    );
+}
+
 /// A range is stored as one, and reads back as a pair.
 ///
 /// The other half of the same wire question. A pair going in has to arrive as
