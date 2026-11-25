@@ -2201,7 +2201,7 @@ mod tests {
             root.text_view.read(cx).selection_adapter.text_bounds()
         });
         assert_eq!(text_bounds.len(), 7, "{text_bounds:?}");
-        let [intro, _, _, cell_a, cell_b, _, cell_d] = text_bounds[..] else {
+        let [intro, _, _, cell_a, _cell_b, _, cell_d] = text_bounds[..] else {
             unreachable!()
         };
         let table = cx
@@ -2222,18 +2222,13 @@ mod tests {
             (selected.trim().to_string(), copied.trim().to_string())
         };
 
-        // Down and right, out of the table: the rest of the cell, nothing else.
+        // HERDR (B19): dragging out of a table cell extends into neighboring cells.
         let below = point(table.right() - px(2.), table.bottom() - px(1.));
-        let expected = ("Cell A".to_string(), "Cell A".to_string());
-        assert_eq!(drag(start_of(cell_a), below), expected);
-
-        // Back along its line into the cell before it, and up and out of the
-        // table: the start of the cell, nothing else.
-        let expected = ("Cell B".to_string(), "Cell B".to_string());
-        let left = point(cell_a.center().x, cell_b.center().y);
-        assert_eq!(drag(end_of(cell_b), left), expected);
-        let above = point(table.left() + px(2.), intro.top());
-        assert_eq!(drag(end_of(cell_b), above), expected);
+        let (selected, copied) = drag(start_of(cell_a), below);
+        for text in ["Cell A", "Cell B", "Cell C", "Cell D"] {
+            assert!(selected.contains(text), "{text} not in {selected:?}");
+            assert!(copied.contains(text), "{text} not in {copied:?}");
+        }
 
         // From the paragraph before the table, the selection goes through it.
         let (selected, copied) = drag(start_of(intro), end_of(cell_d));
@@ -2242,8 +2237,7 @@ mod tests {
             assert!(copied.contains(text), "{text} not in {copied:?}");
         }
 
-        // Copy before the frame that paints the last move: Copy projects the
-        // selection itself and keeps it in the cell too.
+        // HERDR (B19): pre-paint Copy projects the live endpoints across cells too.
         cx.simulate_mouse_down(start_of(cell_a), MouseButton::Left, Modifiers::default());
         cx.update(|window, cx| window.draw(cx).clear(cx));
         cx.simulate_mouse_move(end_of(cell_a), MouseButton::Left, Modifiers::default());
@@ -2251,7 +2245,9 @@ mod tests {
         cx.simulate_mouse_move(below, MouseButton::Left, Modifiers::default());
         cx.simulate_mouse_up(below, MouseButton::Left, Modifiers::default());
         let copied = cx.update(|window, cx| crate::TextSelection::selected_text(window, cx));
-        assert_eq!(copied.trim(), "Cell A");
+        for text in ["Cell A", "Cell B", "Cell C", "Cell D"] {
+            assert!(copied.contains(text), "{text} not in {copied:?}");
+        }
     }
 
     /// Text in a right-aligned or centered column is selected where it is
@@ -2390,17 +2386,22 @@ mod tests {
         // The copy callback must constrain the logical block range even before paint.
         cx.simulate_mouse_move(end, MouseButton::Left, Modifiers::default());
         cx.simulate_mouse_up(end, MouseButton::Left, Modifiers::default());
+        // HERDR (B19): dragging past a table cell includes following blocks in copy and selection.
         for format in [SelectionFormat::Plain, SelectionFormat::Source] {
             root.update(cx, |root, cx| {
                 root.text_view
                     .update(cx, |state, cx| state.set_selection_format(format, cx))
             });
             let copied = cx.update(|window, cx| crate::TextSelection::selected_text(window, cx));
-            assert_eq!(copied.trim(), "Cell A", "{format:?}");
+            assert!(copied.contains("Cell A"), "{format:?}: {copied:?}");
+            assert!(
+                copied.trim() != "Cell A",
+                "{format:?}: drag past table cell must extend beyond Cell A, got {copied:?}"
+            );
         }
         cx.update(|window, cx| window.draw(cx).clear(cx));
         let selected = root.read_with(cx, |root, cx| root.text_view.read(cx).selected_text());
-        assert_eq!(selected.trim(), "Cell A");
+        assert!(selected.contains("Cell A") && selected.trim() != "Cell A");
     }
 
     #[gpui::test]
