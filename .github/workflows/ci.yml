@@ -101,6 +101,9 @@ jobs:
             --config 'profile.dev.package."*".opt-level=0' \
             --config 'profile.dev.package.herdr-shell.opt-level=0' \
             --no-run
+          if [ "$RUNNER_OS" = Linux ]; then
+            bash scripts/test-base --no-opt --no-run
+          fi
       - name: Note the sources the cache was built from
         if: env.SAVE_CACHES == 'true' && steps.cache.outputs.cache-hit != 'true'
         run: scripts/ci-sources record

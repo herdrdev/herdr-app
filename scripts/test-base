@@ -1,6 +1,7 @@
 #!/usr/bin/env bash
 # Run vendored gpui-base unit tests against Herdr's patched vendored GPUI crates
 # without dirtying vendor/gpui-kit/ with a nested Cargo.lock or target/.
+# Supported on Linux (where CI runs gpui-base and herdr-shell tests).
 set -euo pipefail
 
 root=$(cd "$(dirname "$0")/.." && pwd)
@@ -36,6 +37,14 @@ if [ ! -f "$manifest" ] || ! cmp -s "$manifest_tmp" "$manifest"; then
   mv "$manifest_tmp" "$manifest"
 else
   rm -f "$manifest_tmp"
+fi
+
+# Seed Cargo.lock from the repo root Cargo.lock whenever the root lockfile changes,
+# so shared crates stay pinned to Herdr's exact resolved versions.
+lock_stamp="$ws/.root-cargo-lock"
+if [ ! -f "$ws/Cargo.lock" ] || [ ! -f "$lock_stamp" ] || ! cmp -s "$root/Cargo.lock" "$lock_stamp"; then
+  cp "$root/Cargo.lock" "$ws/Cargo.lock"
+  cp "$root/Cargo.lock" "$lock_stamp"
 fi
 
 exec cargo test \
