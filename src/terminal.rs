@@ -867,17 +867,28 @@ impl TerminalView {
         let mut grid = self.grid.borrow_mut();
         match name {
             "terminal.select" => {
-                let at = match args.get("at") {
-                    None => None,
-                    Some(value) if value.as_str() == Some("cursor") => None,
-                    Some(value) => Some(serde_json::from_value::<vt::CellPosition>(value.clone())
-                        .map_err(|_| "terminal.select at is cursor or {row, col} with nonnegative whole numbers")?),
-                };
+                let (has_at, has_prompts) = (is_given(args, "at"), is_given(args, "prompts"));
+                if has_at && has_prompts {
+                    return Err("terminal.select takes at or prompts, not both".into());
+                }
                 let mode = match args.get("mode") {
-                    None => "cell",
-                    Some(value) => value.as_str().ok_or("terminal.select mode is cell, word or line")?,
+                    None | Some(serde_json::Value::Null) => if has_prompts { "output" } else { "cell" },
+                    Some(value) => value.as_str().ok_or("terminal.select mode is cell, word, line or output")?,
                 };
-                grid.vt.select_at(at, mode)?;
+                if has_prompts {
+                    if mode != "output" {
+                        return Err("terminal.select prompts requires mode \"output\"".into());
+                    }
+                    grid.vt.select_output_prompts(whole_number_arg("terminal.select", args, "prompts")?)?;
+                } else {
+                    let at = match args.get("at") {
+                        None | Some(serde_json::Value::Null) => None,
+                        Some(value) if value.as_str() == Some("cursor") => None,
+                        Some(value) => Some(serde_json::from_value::<vt::CellPosition>(value.clone())
+                            .map_err(|_| "terminal.select at is cursor or {row, col} with nonnegative whole numbers")?),
+                    };
+                    grid.vt.select_at(at, mode)?;
+                }
             }
             "terminal.adjust_selection" => {
                 let direction = args.get("direction").and_then(serde_json::Value::as_str).ok_or("terminal.adjust_selection needs a direction")?;
@@ -1080,6 +1091,7 @@ impl TerminalView {
         match target {
             ScrollTarget::Lines(lines) => g.vt.scroll_viewport(lines),
             ScrollTarget::Pages(pages) => g.vt.scroll_viewport(pages_to_lines(pages, rows)),
+            ScrollTarget::Prompts(prompts) => g.vt.scroll_prompts(prompts),
             ScrollTarget::Top => g.vt.scroll_to_top(),
             ScrollTarget::Bottom => g.vt.scroll_to_bottom(),
         }
@@ -1265,18 +1277,20 @@ impl TerminalView {
 pub enum ScrollTarget {
     Lines(isize),
     Pages(f64),
+    Prompts(isize),
     Top,
     Bottom,
 }
 
 pub fn scroll_target(args: &Value) -> Result<ScrollTarget, String> {
-    let given: Vec<&str> = ["lines", "pages", "to"].into_iter().filter(|key| is_given(args, key)).collect();
+    let given: Vec<&str> = ["lines", "pages", "prompts", "to"].into_iter().filter(|key| is_given(args, key)).collect();
     match given.as_slice() {
-        [] => Err("terminal.scroll needs one of lines, pages, to".into()),
-        ["lines"] => whole_lines_arg(args).map(ScrollTarget::Lines),
+        [] => Err("terminal.scroll needs one of lines, pages, prompts, to".into()),
+        ["lines"] => whole_number_arg("terminal.scroll", args, "lines").map(ScrollTarget::Lines),
         ["pages"] => pages_arg(args).map(ScrollTarget::Pages),
+        ["prompts"] => whole_number_arg("terminal.scroll", args, "prompts").map(ScrollTarget::Prompts),
         ["to"] => edge_arg(args),
-        _ => Err(format!("terminal.scroll takes one of lines, pages, to, not {}", given.join(" and "))),
+        _ => Err(format!("terminal.scroll takes one of lines, pages, prompts, to, not {}", given.join(" and "))),
     }
 }
 
@@ -1284,9 +1298,9 @@ fn is_given(args: &Value, key: &str) -> bool {
     args.get(key).is_some_and(|value| !value.is_null())
 }
 
-fn whole_lines_arg(args: &Value) -> Result<isize, String> {
-    let value = &args["lines"];
-    value.as_i64().and_then(|lines| isize::try_from(lines).ok()).ok_or_else(|| format!("terminal.scroll lines is not a whole number: {value}"))
+fn whole_number_arg(command: &str, args: &Value, key: &str) -> Result<isize, String> {
+    let value = &args[key];
+    value.as_i64().and_then(|n| isize::try_from(n).ok()).ok_or_else(|| format!("{command} {key} is not a whole number: {value}"))
 }
 
 fn pages_arg(args: &Value) -> Result<f64, String> {
@@ -5060,6 +5074,7 @@ mod tests {
     fn scroll_takes_exactly_one_of_lines_pages_or_to() {
         assert_eq!(scroll_target(&json!({ "lines": -5 })), Ok(ScrollTarget::Lines(-5)));
         assert_eq!(scroll_target(&json!({ "pages": -0.5 })), Ok(ScrollTarget::Pages(-0.5)));
+        assert_eq!(scroll_target(&json!({ "prompts": -1 })), Ok(ScrollTarget::Prompts(-1)));
         assert_eq!(scroll_target(&json!({ "to": "top" })), Ok(ScrollTarget::Top));
         assert_eq!(scroll_target(&json!({ "to": "bottom", "terminal": "t1" })), Ok(ScrollTarget::Bottom));
         assert_eq!(scroll_target(&json!({ "lines": null, "to": "top" })), Ok(ScrollTarget::Top), "null is omitted");
@@ -5067,11 +5082,11 @@ mod tests {
 
     #[test]
     fn scroll_names_missing_and_repeated_targets() {
-        let needs_one = "terminal.scroll needs one of lines, pages, to";
+        let needs_one = "terminal.scroll needs one of lines, pages, prompts, to";
         assert_eq!(scroll_target(&json!({})), Err(needs_one.into()));
         assert_eq!(scroll_target(&json!({ "terminal": "t1", "lines": null })), Err(needs_one.into()));
-        assert_eq!(scroll_target(&json!({ "lines": 1, "to": "top" })), Err("terminal.scroll takes one of lines, pages, to, not lines and to".into()));
-        assert_eq!(scroll_target(&json!({ "lines": 1, "pages": 1, "to": "top" })), Err("terminal.scroll takes one of lines, pages, to, not lines and pages and to".into()));
+        assert_eq!(scroll_target(&json!({ "lines": 1, "to": "top" })), Err("terminal.scroll takes one of lines, pages, prompts, to, not lines and to".into()));
+        assert_eq!(scroll_target(&json!({ "lines": 1, "pages": 1, "to": "top" })), Err("terminal.scroll takes one of lines, pages, prompts, to, not lines and pages and to".into()));
     }
 
     #[test]
@@ -5079,6 +5094,7 @@ mod tests {
         let error = |args: Value| scroll_target(&args).unwrap_err();
         assert_eq!(error(json!({ "lines": 1.5 })), "terminal.scroll lines is not a whole number: 1.5");
         assert_eq!(error(json!({ "lines": "5" })), "terminal.scroll lines is not a whole number: \"5\"");
+        assert_eq!(error(json!({ "prompts": 1.5 })), "terminal.scroll prompts is not a whole number: 1.5");
         assert_eq!(error(json!({ "pages": "half" })), "terminal.scroll pages is not a finite number: \"half\"");
         assert_eq!(error(json!({ "to": "middle" })), "terminal.scroll to is \"top\" or \"bottom\", not \"middle\"");
         assert_eq!(error(json!({ "to": 5 })), "terminal.scroll to is \"top\" or \"bottom\", not 5");
