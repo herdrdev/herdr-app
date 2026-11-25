@@ -513,6 +513,18 @@ impl Model {
         self.select_tab(&ctx)
     }
 
+    /// The live folder a new tab in `space` should open in: the focused
+    /// terminal's, else (a mod pane has focus) another terminal's in that tab,
+    /// else the space's first terminal's, the one its name follows (#1455).
+    pub fn live_folder(&self, space: &str, cwds: &HashMap<String, String>) -> Option<String> {
+        let p = self.space(space)?;
+        let tab = p.active_tab();
+        let cwd = |n: &Node| n.terminal().and_then(|a| cwds.get(a)).cloned();
+        tab.and_then(|c| c.focused_pane()).and_then(|f| self.address_of(&f)).and_then(|a| cwds.get(&a).cloned())
+            .or_else(|| tab.into_iter().flat_map(|c| c.root.terminals()).find_map(cwd))
+            .or_else(|| p.tabs.iter().flat_map(|c| c.root.terminals()).find_map(cwd))
+    }
+
     /// The address shown in a pane block.
     pub fn address_of(&self, pane_id: &str) -> Option<String> {
         self.tabs().find_map(|c| c.root.find(pane_id)).and_then(|n| n.terminal()).map(str::to_owned)
@@ -735,6 +747,30 @@ mod tests {
         assert_eq!(names.iter().map(String::as_str).collect::<Vec<_>>(), ["1", "review", "3"]);
         m.space_mut("p1").unwrap().name = "api".into();
         assert_eq!(m.space_name(m.space("p1").unwrap(), "/home/me"), "api");
+    }
+
+    #[test]
+    fn new_tabs_open_where_the_space_is_now() {
+        let mut m = Model::default();
+        m.add_space("p1", "", "/repo-a", Tab::new("c1", "", "x1", "t1"));
+        let mut tab = Tab::new("c2", "", "x2", "t2");
+        tab.root = Node::container("c2", Axis::Row, vec![pane("x2", "t2"), Node::block("x3", Content::Mod { name: "chat".into(), props: json!({}) })]);
+        tab.focused = Some("x3".into());
+        m.add_tab("p1", tab);
+        let mut cwds = HashMap::new();
+        // Nothing reported yet: the caller falls back to where the space was made.
+        assert_eq!(m.live_folder("p1", &cwds), None);
+        cwds.insert("t1".to_owned(), "/repo-b".to_owned());
+        // A mod pane has focus and its tab's terminal hasn't reported: the space's first terminal.
+        assert_eq!(m.live_folder("p1", &cwds).as_deref(), Some("/repo-b"));
+        cwds.insert("t2".to_owned(), "/repo-c".to_owned());
+        // The terminal beside the focused mod pane wins over the rest of the space.
+        assert_eq!(m.live_folder("p1", &cwds).as_deref(), Some("/repo-c"));
+        // A focused terminal wins over everything.
+        m.space_mut("p1").unwrap().tabs[1].focused = Some("x2".into());
+        cwds.insert("t2".to_owned(), "/repo-d".to_owned());
+        assert_eq!(m.live_folder("p1", &cwds).as_deref(), Some("/repo-d"));
+        assert_eq!(m.live_folder("nope", &cwds), None);
     }
 
     #[test]
