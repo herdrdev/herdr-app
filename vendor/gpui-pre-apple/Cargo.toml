@@ -12,7 +12,7 @@
 [package]
 edition = "2024"
 name = "gpui-pre-apple"
-version = "0.3.8"
+version = "0.3.14"
 build = "build.rs"
 publish = true
 autolib = false
@@ -20,7 +20,7 @@ autobins = false
 autoexamples = false
 autotests = false
 autobenches = false
-description = "Zed's `gpui_apple` crate (gpui-pre snapshot of zed@279fe07)"
+description = "Zed's `gpui_apple` crate (gpui-pre snapshot of zed@f126950)"
 readme = false
 license = "Apache-2.0"
 repository = "https://github.com/zed-industries/zed"
@@ -29,13 +29,17 @@ resolver = "2"
 [package.metadata.gpui-pre]
 zed-crate = "gpui_apple"
 zed-version = "0.1.0"
-zed-rev = "279fe070bb389b79652e52065b2f001edcc0b11b"
+zed-rev = "f126950f9d3b62666f97437ae5d4ccac2272c4db"
 
 [features]
-# HERDR: frame capture is a production API, independent of test infrastructure.
-render-to-image = ["gpui/render-to-image"]
 bench-support = ["gpui/bench-support"]
 default = []
+font-kit = [
+    "dep:font-kit",
+    "dep:core-text",
+    "dep:objc2-core-text",
+    "dep:pathfinder_geometry",
+]
 runtime_shaders = []
 test-support = ["gpui/test-support"]
 
@@ -45,7 +49,7 @@ path = "src/gpui_apple.rs"
 doctest = false
 
 [dependencies.gpui]
-version = "=0.3.8"
+version = "=0.3.14"
 default-features = false
 package = "gpui-pre"
 
@@ -58,42 +62,46 @@ version = "4.7"
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.block2]
 version = "0.6"
 
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.collections]
+version = "=0.3.14"
+package = "gpui-pre-collections"
+
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.core-foundation]
 version = "0.10"
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.core-foundation-sys]
+version = "0.8.6"
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.core-graphics]
 version = "0.24"
 
-[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.core-video]
-version = "0.5.2"
-features = ["metal"]
-
-[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.derive_more]
-version = "2.1.1"
-features = [
-    "add",
-    "add_assign",
-    "deref",
-    "deref_mut",
-    "display",
-    "from",
-    "from_str",
-    "mul",
-    "mul_assign",
-    "not",
-]
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.core-text]
+version = "21"
+optional = true
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.dispatch2]
-version = "0.3.1"
+version = "0.3"
+features = [
+    "std",
+    "block2",
+]
+default-features = false
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.etagere]
 version = "0.2"
 
-[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.foreign-types]
-version = "0.5"
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.font-kit]
+version = "0.14.1-zed"
+features = ["source"]
+optional = true
+default-features = false
+package = "zed-font-kit"
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.futures]
+version = "0.3.34"
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.gpui_util]
-version = "=0.3.8"
+version = "=0.3.14"
 package = "gpui-pre-util"
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.image]
@@ -121,20 +129,60 @@ default-features = false
 version = "0.2"
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.log]
-version = "0.4.16"
-features = [
-    "kv_unstable_serde",
-    "serde",
-]
+version = "0.4"
+features = ["std"]
+default-features = false
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.mach2]
-version = "0.5"
-
-[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.metal]
-version = "0.33"
+version = "0.6"
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.objc2]
 version = "0.6"
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.objc2-core-foundation]
+version = "0.3.2"
+features = [
+    "std",
+    "CFData",
+    "CFDictionary",
+    "CFString",
+    "CFNumber",
+    "CFBase",
+    "CFCGTypes",
+]
+default-features = false
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.objc2-core-graphics]
+version = "0.3.2"
+features = [
+    "CGDirectDisplay",
+    "CGColorSpace",
+]
+default-features = false
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.objc2-core-text]
+version = "0.3.2"
+features = [
+    "std",
+    "CTFont",
+    "CTFontDescriptor",
+]
+optional = true
+default-features = false
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.objc2-core-video]
+version = "0.3.2"
+features = [
+    "CVBuffer",
+    "CVImageBuffer",
+    "CVPixelBuffer",
+    "CVMetalTexture",
+    "CVMetalTextureCache",
+    "CVReturn",
+    "objc2",
+    "objc2-metal",
+]
+default-features = false
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.objc2-foundation]
 version = "0.3.2"
@@ -149,7 +197,6 @@ features = [
     "NSEnumerator",
     "NSError",
     "NSGeometry",
-    "NSNotification",
     "NSNull",
     "NSObjCRuntime",
     "NSObject",
@@ -159,11 +206,40 @@ features = [
     "NSSet",
     "NSString",
     "NSURL",
-    "NSUndoManager",
     "NSValue",
     "objc2-core-foundation",
     "std",
     "NSThread",
+    "NSNotification",
+    "NSOperation",
+    "NSProcessInfo",
+    "block2",
+]
+default-features = false
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.objc2-metal]
+version = "0.3.2"
+features = [
+    "std",
+    "block2",
+    "dispatch2",
+    "MTLAllocation",
+    "MTLBlitCommandEncoder",
+    "MTLBuffer",
+    "MTLCommandBuffer",
+    "MTLCommandEncoder",
+    "MTLCommandQueue",
+    "MTLDepthStencil",
+    "MTLDevice",
+    "MTLDrawable",
+    "MTLLibrary",
+    "MTLPixelFormat",
+    "MTLRenderCommandEncoder",
+    "MTLRenderPass",
+    "MTLRenderPipeline",
+    "MTLResource",
+    "MTLTexture",
+    "MTLTypes",
 ]
 default-features = false
 
@@ -172,12 +248,40 @@ version = "0.3.2"
 features = [
     "std",
     "CALayer",
+    "CAMetalDisplayLink",
     "CAMetalLayer",
+    "objc2-metal",
+    "objc2-core-foundation",
+    "objc2-core-graphics",
+    "objc2-metal",
+]
+default-features = false
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.objc2-security]
+version = "0.3.2"
+features = [
+    "std",
+    "SecBase",
+    "SecItem",
 ]
 default-features = false
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.parking_lot]
 version = "0.12.1"
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.pathfinder_geometry]
+version = "0.5"
+optional = true
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.smallvec]
+version = "1.6"
+features = [
+    "union",
+    "const_new",
+]
+
+[target.'cfg(any(target_os = "macos", target_os = "ios"))'.dependencies.thiserror]
+version = "2.0.12"
 
 [target.'cfg(any(target_os = "macos", target_os = "ios"))'.build-dependencies.cbindgen]
 version = "0.28.0"
