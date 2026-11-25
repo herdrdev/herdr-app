@@ -12,7 +12,7 @@
 [package]
 edition = "2024"
 name = "gpui-pre-wgpu"
-version = "0.3.8"
+version = "0.3.14"
 build = false
 publish = true
 autolib = false
@@ -20,7 +20,7 @@ autobins = false
 autoexamples = false
 autotests = false
 autobenches = false
-description = "Zed's `gpui_wgpu` crate (gpui-pre snapshot of zed@279fe07)"
+description = "Zed's `gpui_wgpu` crate (gpui-pre snapshot of zed@f126950)"
 readme = false
 license = "Apache-2.0"
 repository = "https://github.com/zed-industries/zed"
@@ -29,11 +29,9 @@ resolver = "2"
 [package.metadata.gpui-pre]
 zed-crate = "gpui_wgpu"
 zed-version = "0.1.0"
-zed-rev = "279fe070bb389b79652e52065b2f001edcc0b11b"
+zed-rev = "f126950f9d3b62666f97437ae5d4ccac2272c4db"
 
 [features]
-# HERDR: frame capture is a production API, independent of test infrastructure.
-render-to-image = ["gpui/render-to-image", "dep:image"]
 bench-support = [
     "gpui/bench-support",
     "dep:image",
@@ -62,7 +60,7 @@ version = "1.0.86"
 version = "1"
 
 [dependencies.collections]
-version = "=0.3.8"
+version = "=0.3.14"
 package = "gpui-pre-collections"
 
 [dependencies.cosmic-text]
@@ -74,15 +72,16 @@ version = "0.2"
 [dependencies.font-kit]
 version = "0.14.1-zed"
 optional = true
+default-features = false
 package = "zed-font-kit"
 
 [dependencies.gpui]
-version = "=0.3.8"
+version = "=0.3.14"
 default-features = false
 package = "gpui-pre"
 
 [dependencies.gpui_util]
-version = "=0.3.8"
+version = "=0.3.14"
 package = "gpui-pre-util"
 
 [dependencies.image]
@@ -111,11 +110,9 @@ default-features = false
 version = "0.14.0"
 
 [dependencies.log]
-version = "0.4.16"
-features = [
-    "kv_unstable_serde",
-    "serde",
-]
+version = "0.4"
+features = ["std"]
+default-features = false
 
 [dependencies.parking_lot]
 version = "0.12.1"
@@ -136,17 +133,6 @@ features = [
 [dependencies.swash]
 version = "0.2.6"
 
-[dependencies.skrifa]
-version = "0.44.0"
-
-[dependencies.tiny-skia]
-version = "0.11.4"
-default-features = false
-features = ["std", "simd"]
-
-[dependencies.ttf-parser]
-version = "0.25"
-
 [dependencies.unicode-bidi]
 version = "0.3.18"
 features = ["hardcoded-data"]
@@ -155,16 +141,36 @@ default-features = false
 [dependencies.unicode-segmentation]
 version = "1.10"
 
-[dependencies.wgpu]
-version = "29.0.4"
+[target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.wgpu]
+version = "30.0.1"
+features = [
+    "std",
+    "metal",
+    "gles",
+    "vulkan",
+    "wgsl",
+    "webgpu",
+]
+default-features = false
+package = "wgpu"
+
+[target.'cfg(not(any(target_os = "linux", target_os = "freebsd")))'.dependencies.wgpu]
+version = "30.0.1"
+default-features = true
+package = "wgpu"
+
+[target.'cfg(target_family = "wasm")'.dependencies.js-sys]
+version = "0.3"
 
 [target.'cfg(target_family = "wasm")'.dependencies.web-sys]
 version = "0.3"
 features = ["HtmlCanvasElement"]
 
 [target.'cfg(target_family = "wasm")'.dependencies.wgpu]
-version = "29.0.4"
+version = "30.0.1"
 features = ["webgl"]
+default-features = false
+package = "wgpu"
 
 [lints.clippy]
 dbg_macro = "deny"
