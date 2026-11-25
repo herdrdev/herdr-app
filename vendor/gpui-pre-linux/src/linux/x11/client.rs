@@ -37,9 +37,8 @@ use x11rb::{
     xcb_ffi::XCBConnection,
 };
 use xim::{AttributeName, Client, InputStyle, x11rb::X11rbClient};
+use xkbc::x11::ffi::{XKB_X11_MIN_MAJOR_XKB_VERSION, XKB_X11_MIN_MINOR_XKB_VERSION};
 use xkbcommon::xkb::{self as xkbc, STATE_LAYOUT_EFFECTIVE};
-
-use super::xkb::XkbX11;
 
 use super::{
     ButtonOrScroll, ScrollDirection, X11Display, X11WindowStatePtr, XcbAtoms, XimCallbackEvent,
@@ -201,7 +200,6 @@ pub struct X11ClientState {
 
     pub(crate) scale_factor: f32,
 
-    xkb_x11: XkbX11,
     xkb_context: xkbc::Context,
     pub(crate) xcb_connection: Rc<XCBConnection>,
     xkb_device_id: i32,
@@ -430,7 +428,8 @@ impl X11Connection {
 
         let xkb = get_reply(
             || "Failed to initialize XKB extension",
-            xcb_connection.xkb_use_extension(1, 0),
+            xcb_connection
+                .xkb_use_extension(XKB_X11_MIN_MAJOR_XKB_VERSION, XKB_X11_MIN_MINOR_XKB_VERSION),
         )?;
         anyhow::ensure!(xkb.supported, "X server does not support XKB");
 
@@ -458,9 +457,16 @@ impl X11Connection {
         )?;
 
         let xkb_context = new_xkb_context()?;
-        let xkb_x11 = XkbX11::load()?;
-        let xkb_device_id = xkb_x11.device_id(&xcb_connection)?;
-        let xkb_state = xkb_x11.state(&xkb_context, &xcb_connection, xkb_device_id)?;
+        let xkb_device_id = xkbc::x11::get_core_keyboard_device_id(&xcb_connection);
+        let xkb_state = {
+            let xkb_keymap = xkbc::x11::keymap_new_from_device(
+                &xkb_context,
+                &xcb_connection,
+                xkb_device_id,
+                xkbc::KEYMAP_COMPILE_NO_FLAGS,
+            );
+            xkbc::x11::state_new_from_device(&xkb_keymap, &xcb_connection, xkb_device_id)
+        };
         let compose_state = get_xkb_compose_state(&xkb_context);
         let layout_idx = xkb_state.serialize_layout(STATE_LAYOUT_EFFECTIVE);
         let layout_name = xkb_state
@@ -515,7 +521,6 @@ impl X11Connection {
                 compositor_gpu,
                 scale_factor,
 
-                xkb_x11,
                 xkb_context,
                 xcb_connection,
                 xkb_device_id,
@@ -811,9 +816,7 @@ impl X11Client {
 
     pub fn enable_ime(&self) {
         let mut state = self.0.borrow_mut();
-        if !state.has_xim()
-            || !state.xim_handler.as_ref().is_some_and(|handler| handler.connected)
-        {
+        if !state.has_xim() {
             return;
         }
 
@@ -849,9 +852,8 @@ impl X11Client {
                     });
             }
         }
-        ximc.set_ic_values(xim_handler.im_id, xim_handler.ic_id, ic_attributes.build())
-            .log_err();
-        ximc.set_focus(xim_handler.im_id, xim_handler.ic_id).log_err();
+        ximc.create_ic(xim_handler.im_id, ic_attributes.build())
+            .ok();
         let mut state = self.0.borrow_mut();
         state.restore_xim(ximc, xim_handler);
     }
@@ -1062,7 +1064,6 @@ impl X11Client {
                 state.keyboard_focused_window = Some(event.event);
                 if let Some(handler) = state.xim_handler.as_mut() {
                     handler.window = event.event;
-                    handler.focused = true;
                 }
                 drop(state);
                 self.enable_ime();
@@ -1074,15 +1075,6 @@ impl X11Client {
                 // Set last scroll values to `None` so that a large delta isn't created if scrolling is done outside the window (the valuator is global)
                 reset_all_pointer_device_scroll_positions(&mut state.pointer_device_states);
                 state.keyboard_focused_window = None;
-                if state.has_xim()
-                    && let Some((mut ximc, mut handler)) = state.take_xim()
-                {
-                    handler.focused = false;
-                    if handler.connected {
-                        ximc.unset_focus(handler.im_id, handler.ic_id).log_err();
-                    }
-                    state.restore_xim(ximc, handler);
-                }
                 if let Some(compose_state) = state.compose_state.as_mut() {
                     compose_state.reset();
                 }
@@ -1094,17 +1086,20 @@ impl X11Client {
             }
             Event::XkbNewKeyboardNotify(_) | Event::XkbMapNotify(_) => {
                 let mut state = self.0.borrow_mut();
-                match state.xkb_x11.state(
-                    &state.xkb_context,
-                    &state.xcb_connection,
-                    state.xkb_device_id,
-                ) {
-                    Ok(xkb_state) => state.xkb = xkb_state,
-                    Err(error) => {
-                        log::error!("Failed to update X11 keyboard: {error:#}");
-                        return None;
-                    }
-                }
+                let xkb_state = {
+                    let xkb_keymap = xkbc::x11::keymap_new_from_device(
+                        &state.xkb_context,
+                        &state.xcb_connection,
+                        state.xkb_device_id,
+                        xkbc::KEYMAP_COMPILE_NO_FLAGS,
+                    );
+                    xkbc::x11::state_new_from_device(
+                        &xkb_keymap,
+                        &state.xcb_connection,
+                        state.xkb_device_id,
+                    )
+                };
+                state.xkb = xkb_state;
                 drop(state);
                 self.handle_keyboard_layout_change();
             }
@@ -1156,7 +1151,6 @@ impl X11Client {
                 state.pre_key_char_down.take();
                 let key_event_state = xkb_state_for_key_event(&state.xkb, event.state);
 
-                let mut composed_text = None;
                 let keystroke = {
                     let code = event.detail.into();
                     let mut keystroke = keystroke_from_xkb(&key_event_state, modifiers, code);
@@ -1175,7 +1169,6 @@ impl X11Client {
                                 if let Some(keysym) = compose_state.keysym() {
                                     keystroke.key = xkbc::keysym_get_name(keysym);
                                 }
-                                composed_text = keystroke.key_char.clone();
                             }
                             xkbc::Status::Composing => {
                                 keystroke.key_char = None;
@@ -1190,13 +1183,11 @@ impl X11Client {
                             }
                             xkbc::Status::Cancelled => {
                                 let pre_edit = state.pre_edit_text.take();
-                                let new_pre_edit = keystroke_underlying_dead_key(keysym);
-                                state.pre_edit_text = new_pre_edit.clone();
                                 drop(state);
                                 if let Some(pre_edit) = pre_edit {
                                     window.handle_ime_commit(pre_edit);
                                 }
-                                if let Some(current_key) = new_pre_edit {
+                                if let Some(current_key) = keystroke_underlying_dead_key(keysym) {
                                     window.handle_ime_preedit(current_key);
                                 }
                                 state = self.0.borrow_mut();
@@ -1204,26 +1195,16 @@ impl X11Client {
                             }
                             _ => {}
                         }
-                        let composing = compose_state.status() == xkbc::Status::Composing;
                         state.compose_state = Some(compose_state);
-                        // HERDR: a dead key's physical US key must not reach Kitty input.
-                        if composing {
-                            return Some(());
-                        }
                     }
                     keystroke
                 };
                 drop(state);
-                if let Some(text) = composed_text {
-                    // Commit through IME so the marked accent is replaced and cleared.
-                    window.handle_ime_commit(text);
-                } else {
-                    window.handle_input(PlatformInput::KeyDown(gpui::KeyDownEvent {
-                        keystroke,
-                        is_held: false,
-                        prefer_character_input: false,
-                    }));
-                }
+                window.handle_input(PlatformInput::KeyDown(gpui::KeyDownEvent {
+                    keystroke,
+                    is_held: false,
+                    prefer_character_input: false,
+                }));
             }
             Event::KeyRelease(event) => {
                 let window = self.get_window(event.event)?;
@@ -1314,9 +1295,11 @@ impl X11Client {
                                 ScrollDirection::Left => Point::new(SCROLL_LINES, 0.0),
                                 ScrollDirection::Right => Point::new(-SCROLL_LINES, 0.0),
                             };
-                            window.handle_input(PlatformInput::ScrollWheel(
-                                make_scroll_wheel_event(position, scroll_delta, modifiers),
-                            ));
+                            window.handle_input(PlatformInput::Scroll(make_scroll_wheel_event(
+                                position,
+                                scroll_delta,
+                                modifiers,
+                            )));
                         }
                     }
                     None => {
@@ -1402,7 +1385,7 @@ impl X11Client {
                     let scroll_delta = get_scroll_delta_and_update_state(pointer, &event);
                     drop(state);
                     if let Some(scroll_delta) = scroll_delta {
-                        window.handle_input(PlatformInput::ScrollWheel(make_scroll_wheel_event(
+                        window.handle_input(PlatformInput::Scroll(make_scroll_wheel_event(
                             position,
                             scroll_delta,
                             modifiers,
@@ -2591,7 +2574,7 @@ fn make_scroll_wheel_event(
     position: Point<Pixels>,
     scroll_delta: Point<f32>,
     modifiers: Modifiers,
-) -> gpui::ScrollWheelEvent {
+) -> gpui::ScrollEvent {
     // When shift is held down, vertical scrolling turns into horizontal scrolling.
     let delta = if modifiers.shift {
         Point {
@@ -2601,11 +2584,12 @@ fn make_scroll_wheel_event(
     } else {
         scroll_delta
     };
-    gpui::ScrollWheelEvent {
+    gpui::ScrollEvent {
         position,
         delta: ScrollDelta::Lines(delta),
         modifiers,
         touch_phase: TouchPhase::default(),
+        source: gpui::ScrollSource::Pointer,
     }
 }
 

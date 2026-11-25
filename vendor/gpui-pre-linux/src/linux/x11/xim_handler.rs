@@ -13,7 +13,6 @@ pub struct XimHandler {
     pub im_id: u16,
     pub ic_id: u16,
     pub connected: bool,
-    pub focused: bool,
     pub window: xproto::Window,
     pub last_callback_event: Option<XimCallbackEvent>,
 }
@@ -24,7 +23,6 @@ impl XimHandler {
             im_id: Default::default(),
             ic_id: Default::default(),
             connected: false,
-            focused: false,
             window: Default::default(),
             last_callback_event: None,
         }
@@ -59,21 +57,12 @@ impl<C: Client<XEvent = xproto::KeyPressEvent>> ClientHandler<C> for XimHandler 
 
     fn handle_create_ic(
         &mut self,
-        client: &mut C,
+        _client: &mut C,
         _input_method_id: u16,
         input_context_id: u16,
     ) -> Result<(), ClientError> {
         self.connected = true;
         self.ic_id = input_context_id;
-        if self.focused {
-            let attributes = client
-                .build_ic_attributes()
-                .push(AttributeName::ClientWindow, self.window)
-                .push(AttributeName::FocusWindow, self.window)
-                .build();
-            client.set_ic_values(self.im_id, self.ic_id, attributes)?;
-            client.set_focus(self.im_id, self.ic_id)?;
-        }
         Ok(())
     }
 

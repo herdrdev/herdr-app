@@ -12,7 +12,7 @@
 [package]
 edition = "2024"
 name = "gpui-pre-linux"
-version = "0.3.8"
+version = "0.3.14"
 build = false
 publish = true
 autolib = false
@@ -20,7 +20,7 @@ autobins = false
 autoexamples = false
 autotests = false
 autobenches = false
-description = "Zed's `gpui_linux` crate (gpui-pre snapshot of zed@279fe07)"
+description = "Zed's `gpui_linux` crate (gpui-pre snapshot of zed@f126950)"
 readme = false
 license = "Apache-2.0"
 repository = "https://github.com/zed-industries/zed"
@@ -32,11 +32,9 @@ ignored = ["scap"]
 [package.metadata.gpui-pre]
 zed-crate = "gpui_linux"
 zed-version = "0.1.0"
-zed-rev = "279fe070bb389b79652e52065b2f001edcc0b11b"
+zed-rev = "f126950f9d3b62666f97437ae5d4ccac2272c4db"
 
 [features]
-# HERDR: frame capture is a production API, independent of test infrastructure.
-render-to-image = ["gpui/render-to-image", "gpui_wgpu/render-to-image"]
 default = [
     "wayland",
     "x11",
@@ -47,6 +45,7 @@ screen-capture = [
 ]
 test-support = ["gpui/test-support"]
 wayland = [
+    "dep:accesskit_unix",
     "gpui_wgpu",
     "ashpd/wayland",
     "calloop-wayland-source",
@@ -60,22 +59,20 @@ wayland = [
     "xkbcommon/wayland",
     "open",
     "gpui/wayland",
+    "uuid/v5",
 ]
 x11 = [
+    "dep:accesskit_unix",
     "gpui_wgpu",
     "ashpd",
     "as-raw-xcb-connection",
     "x11rb",
-    "xkbcommon",
+    "xkbcommon/x11",
     "xim",
     "filedescriptor",
     "open",
     "scap?/x11",
 ]
-
-[dependencies.image]
-version = "0.25.1"
-default-features = false
 
 [lib]
 name = "gpui_linux"
@@ -88,6 +85,7 @@ features = ["enumn"]
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.accesskit_unix]
 version = "0.22"
+optional = true
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.anyhow]
 version = "1.0.86"
@@ -101,11 +99,9 @@ version = "0.13"
 features = [
     "async-io",
     "inhibit",
-    "notification",
     "open_uri",
     "file_chooser",
     "settings",
-    "trash",
 ]
 optional = true
 default-features = false
@@ -121,7 +117,7 @@ version = "0.4.1"
 optional = true
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.collections]
-version = "=0.3.8"
+version = "=0.3.14"
 package = "gpui-pre-collections"
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.filedescriptor]
@@ -132,33 +128,31 @@ optional = true
 version = "0.3.34"
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.gpui]
-version = "=0.3.8"
+version = "=0.3.14"
 default-features = false
 package = "gpui-pre"
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.gpui_util]
-version = "=0.3.8"
+version = "=0.3.14"
 package = "gpui-pre-util"
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.gpui_wgpu]
-version = "=0.3.8"
+version = "=0.3.14"
 features = ["font-kit"]
 optional = true
 package = "gpui-pre-wgpu"
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.http_client]
-version = "=0.3.8"
+version = "=0.3.14"
 package = "gpui-pre-http-client"
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.libc]
 version = "0.2"
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.log]
-version = "0.4.16"
-features = [
-    "kv_unstable_serde",
-    "serde",
-]
+version = "0.4"
+features = ["std"]
+default-features = false
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.notify-rust]
 version = "4"
@@ -205,13 +199,8 @@ features = ["derive"]
 version = "2.2"
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.uuid]
-version = "1.1.2"
-features = [
-    "v4",
-    "v5",
-    "v7",
-    "serde",
-]
+version = "1.1"
+features = ["serde"]
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.wayland-backend]
 version = "0.3.15"
@@ -273,7 +262,7 @@ optional = true
 package = "zed-xim"
 
 [target.'cfg(any(target_os = "linux", target_os = "freebsd"))'.dependencies.xkbcommon]
-version = "0.8.0"
+version = "0.8"
 optional = true
 default-features = false
 
