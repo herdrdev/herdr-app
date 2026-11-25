@@ -86,6 +86,8 @@ impl VirtualBlockSelection {
 #[derive(Clone)]
 pub(super) struct TextViewSelectionAdapter {
     selection: TextSelectionHandle,
+    // HERDR: selection endpoints shared with the clipboard callback and selection reports.
+    virtual_blocks: Rc<RefCell<VirtualBlockSelection>>,
     /// What the view's text painted this frame, shared by the adapter's
     /// clones. Inlines report it as they paint, through a read of the view's
     /// state: reporting it is not a change of the view.
@@ -157,10 +159,15 @@ impl TextViewSelectionAdapter {
                             if snapshot.is_none() || changed {
                                 state.preserve_inline_selection = false;
                             }
+                            let was_selecting = state.is_selecting;
                             state.is_selecting =
                                 snapshot.is_some_and(|snapshot| snapshot.is_selecting());
                             if state.is_selecting {
                                 state.end_multi_click_selection(cx);
+                            }
+                            // HERDR: report a drag once it ends, and a clear.
+                            if (was_selecting && !state.is_selecting) || snapshot.is_none() {
+                                state.mark_selection_for_report();
                             }
                             cx.notify();
                         });
@@ -198,66 +205,14 @@ impl TextViewSelectionAdapter {
         );
 
         let view_for_copy = view.clone();
-        let blocks_for_copy = virtual_blocks;
-        let frame_for_copy = frame.clone();
         selection.copy_with(
             move |cx| {
                 let Some(view) = view_for_copy.upgrade() else {
                     return String::new();
                 };
                 let state = view.read(cx);
-                if !state.has_current_copy_document() {
-                    return String::new();
-                }
-                // Read the handle itself: event subscribers may not have run
-                // yet when input and Copy arrive in the same App update.
-                let mut current = VirtualBlockSelection::default();
-                current.update(state.selection_adapter.selection.snapshot(cx), selection_id);
-                let previous = blocks_for_copy.borrow();
-                let range_changed = current.anchor != previous.anchor
-                    || current.cursor != previous.cursor
-                    || current.coverage != previous.coverage;
-                drop(previous);
-                let anchor_cell = state.selection_adapter.selection.table_cell_selection(cx);
-                // Gesture snapshots are current before paint. Refresh the rich
-                // document's byte ranges from its retained native layouts
-                // before its existing Plain/Source serializer reads them.
-                if !state.has_view_selection()
-                    && (!state.preserve_inline_selection || range_changed)
-                {
-                    if let Some((start, end)) = state.selection_points(cx) {
-                        // Only represented source states are refreshed.
-                        // Offscreen AST selections retain their logical ends.
-                        let frame = frame_for_copy.borrow();
-                        for (projection, _) in &frame.copy_projections {
-                            projection.reset();
-                        }
-                        for (projection, cell) in &frame.copy_projections {
-                            match crate::global_state::confine_to_cell(
-                                anchor_cell.map(|bounds| (start, bounds)),
-                                *cell,
-                                start,
-                                end,
-                            ) {
-                                Some((start, end)) => projection.project(start, end),
-                                None => projection.deselect(),
-                            }
-                        }
-                    }
-                }
-                let last = state.parsed_content.document.blocks.len().saturating_sub(1);
-                let blocks = if anchor_cell.is_some() {
-                    let Some(anchor) = current
-                        .anchor
-                        .filter(|anchor| anchor.endpoint.entity_id() == Some(selection_id))
-                    else {
-                        return String::new();
-                    };
-                    anchor.block_ix.map(|ix| ix..=ix)
-                } else {
-                    current.block_range(selection_id, last)
-                };
-                state.selected_text_in(blocks)
+                // HERDR: use the same block bounds and projection refresh for selection reports and copy.
+                state.selection_adapter.selected_text(state, cx)
             },
             cx,
         );
@@ -287,6 +242,7 @@ impl TextViewSelectionAdapter {
 
         Self {
             selection,
+            virtual_blocks,
             frame,
             layout_revision: None,
         }
@@ -411,6 +367,61 @@ impl TextViewSelectionAdapter {
     pub(super) fn selection_points(&self, cx: &App) -> Option<(Point<Pixels>, Point<Pixels>)> {
         let points = self.selection.snapshot(cx)?.window_points()?;
         Some((points.anchor(), points.cursor()))
+    }
+
+    // HERDR: the text this view contributes to a copy or selection report.
+    pub(super) fn selected_text(&self, state: &TextViewState, cx: &App) -> String {
+        if !state.has_current_copy_document() {
+            return String::new();
+        }
+        let selection_id = self.selection.entity_id();
+        // Read the handle itself: event subscribers may not have run
+        // yet when input and Copy arrive in the same App update.
+        let mut current = VirtualBlockSelection::default();
+        current.update(self.selection.snapshot(cx), selection_id);
+        let previous = self.virtual_blocks.borrow();
+        let range_changed = current.anchor != previous.anchor
+            || current.cursor != previous.cursor
+            || current.coverage != previous.coverage;
+        drop(previous);
+        let anchor_cell = self.selection.table_cell_selection(cx);
+        // Gesture snapshots are current before paint. Refresh the rich
+        // document's byte ranges from its retained native layouts
+        // before its existing Plain/Source serializer reads them.
+        if !state.has_view_selection() && (!state.preserve_inline_selection || range_changed) {
+            if let Some((start, end)) = state.selection_points(cx) {
+                // Only represented source states are refreshed.
+                // Offscreen AST selections retain their logical ends.
+                let frame = self.frame.borrow();
+                for (projection, _) in &frame.copy_projections {
+                    projection.reset();
+                }
+                for (projection, cell) in &frame.copy_projections {
+                    match crate::global_state::confine_to_cell(
+                        anchor_cell.map(|bounds| (start, bounds)),
+                        *cell,
+                        start,
+                        end,
+                    ) {
+                        Some((start, end)) => projection.project(start, end),
+                        None => projection.deselect(),
+                    }
+                }
+            }
+        }
+        let last = state.parsed_content.document.blocks.len().saturating_sub(1);
+        let blocks = if anchor_cell.is_some() {
+            let Some(anchor) = current
+                .anchor
+                .filter(|anchor| anchor.endpoint.entity_id() == Some(selection_id))
+            else {
+                return String::new();
+            };
+            anchor.block_ix.map(|ix| ix..=ix)
+        } else {
+            current.block_range(selection_id, last)
+        };
+        state.selected_text_in(blocks)
     }
 
     pub(super) fn set_local_selection(&self, active: bool, cx: &mut App) {

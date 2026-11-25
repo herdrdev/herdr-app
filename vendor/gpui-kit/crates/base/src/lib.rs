@@ -197,7 +197,7 @@ pub use text::{
     InlineElement, InlineRenderContext, MarkdownExtensions, MarkdownNode, MarkdownParseContext,
     MarkdownPlugin, RangeHighlight, RangeHighlightError, RenderedText, SelectionFormat, TableData,
     TaskToggleEvent, Text, TextView, TextViewDefaults, TextViewMotion, TextViewPlugin,
-    TextViewState, TextViewStyle, html, markdown, markdown_ast,
+    TextViewSelection, TextViewState, TextViewStyle, html, markdown, markdown_ast,
 };
 pub use text_selection::{
     TextSelection, TextSelectionContentKey, TextSelectionCoverage, TextSelectionEndpoint,

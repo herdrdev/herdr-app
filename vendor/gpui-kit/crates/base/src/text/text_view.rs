@@ -149,6 +149,23 @@ impl Link {
 pub(crate) type LinkClickHandlerFn =
     dyn Fn(&SharedString, &ClickEvent, &mut Window, &mut App) + Send + Sync;
 
+/// HERDR: a selection a person finished making in a [`TextView`], as
+/// [`TextView::on_selection_change`] reports it.
+#[derive(Clone, Debug, PartialEq)]
+pub struct TextViewSelection {
+    /// The view's contribution to clipboard text, trimmed at both ends.
+    pub text: String,
+    /// The Markdown source byte range the selection came from, when the view
+    /// renders Markdown and the selection maps back to it.
+    pub source_range: Option<std::ops::Range<usize>>,
+    /// Where the selection ended, in window coordinates: where the pointer
+    /// was released, or the point of a double or triple click.
+    pub position: Option<gpui::Point<Pixels>>,
+}
+
+pub(crate) type SelectionChangeHandlerFn =
+    dyn Fn(Option<&TextViewSelection>, &mut Window, &mut App);
+
 pub(crate) type LinkTooltipFn =
     dyn Fn(&SharedString, &mut Window, &mut App) -> AnyView + Send + Sync;
 pub(crate) type TaskToggleHandlerFn = dyn Fn(&TaskToggleEvent, &mut Window, &mut App) + Send + Sync;
@@ -279,6 +296,9 @@ pub struct TextView {
     reveal_handler: Option<Rc<RevealHandlerFn>>,
     markdown_extensions: Arc<MarkdownExtensions>,
     motion: Option<TextViewMotion>,
+    // HERDR: source-range highlights and settled selection reporting.
+    source_highlights: Vec<(std::ops::Range<usize>, gpui::Hsla)>,
+    selection_change_handler: Option<Rc<SelectionChangeHandlerFn>>,
 }
 
 /// A plugin that can configure a [`TextView`].
@@ -332,6 +352,8 @@ impl TextView {
             reveal_handler: None,
             markdown_extensions: Arc::default(),
             motion: None,
+            source_highlights: Vec::new(),
+            selection_change_handler: None,
         }
     }
 
@@ -362,6 +384,8 @@ impl TextView {
             reveal_handler: None,
             markdown_extensions: Arc::default(),
             motion: None,
+            source_highlights: Vec::new(),
+            selection_change_handler: None,
         }
     }
 
@@ -392,6 +416,8 @@ impl TextView {
             reveal_handler: None,
             markdown_extensions: Arc::default(),
             motion: None,
+            source_highlights: Vec::new(),
+            selection_change_handler: None,
         }
     }
 
@@ -455,6 +481,31 @@ impl TextView {
     /// `**bold**` (the Markdown source) rather than `bold`.
     pub fn selection_format(mut self, selection_format: SelectionFormat) -> Self {
         self.selection_format = selection_format;
+        self
+    }
+
+    /// HERDR: paint `background` behind the text rendered from `range`, a
+    /// byte range of the Markdown source, through
+    /// [`TextViewState::set_range_highlights`]. Call once per range; later
+    /// ones paint over earlier ones. Ranges that render nothing are skipped.
+    /// HTML views ignore them.
+    pub fn highlight_source_range(
+        mut self,
+        range: std::ops::Range<usize>,
+        background: impl Into<gpui::Hsla>,
+    ) -> Self {
+        self.source_highlights.push((range, background.into()));
+        self
+    }
+
+    /// HERDR: called when a selection settles (the pointer is released, or a
+    /// double or triple click selects a word or paragraph) with what was
+    /// selected, and with `None` when a reported selection is cleared.
+    pub fn on_selection_change<F>(mut self, handler: F) -> Self
+    where
+        F: Fn(Option<&TextViewSelection>, &mut Window, &mut App) + 'static,
+    {
+        self.selection_change_handler = Some(Rc::new(handler));
         self
     }
 
@@ -957,6 +1008,8 @@ impl Element for TextView {
                 state.set_motion(motion.clone());
             }
             state.selectable = self.selectable;
+            // HERDR: only track reports while a selection handler is attached.
+            state.set_selection_reporting(self.selection_change_handler.is_some());
             state.hover_cursor = self.style.mouse_cursor;
             state.selection_format = self.selection_format;
             state.scrollable = self.scrollable;
@@ -968,6 +1021,8 @@ impl Element for TextView {
             if let Some(text) = &self.text {
                 state.set_element_text(text, cx);
             }
+            // HERDR: apply Markdown source-range highlights.
+            state.apply_source_highlights(&self.source_highlights, cx);
         });
 
         let focus_handle = state.read(cx).focus_handle.clone();
@@ -1139,6 +1194,18 @@ impl Element for TextView {
             request_layout.element.paint(window, cx);
         }
         GlobalState::global(cx).pop_text_view_state();
+
+        // HERDR: a multi-click becomes a range only as its text paints, so
+        // the selection is read after the document has painted.
+        if let Some(handler) = &self.selection_change_handler
+            && state.read(cx).selection_report_pending
+            && let Some(selection) = state.update(cx, |state, cx| state.take_selection_report(cx))
+        {
+            let handler = handler.clone();
+            window.defer(cx, move |window, cx| {
+                handler(selection.as_ref(), window, cx)
+            });
+        }
 
         // Every list has scrolled by now, so the line of a reveal is where
         // it ends up this frame.
@@ -5537,5 +5604,106 @@ mod tests {
             (max - min) < 2.0,
             "list content total jittered while scrolling: min={min} max={max} totals={totals:?}"
         );
+    }
+}
+
+// HERDR: verify settled selection reporting and Markdown source-range highlights.
+#[cfg(test)]
+mod herdr_selection_and_highlights {
+    use std::{cell::RefCell, rc::Rc};
+
+    use gpui::{
+        AppContext as _, Context, IntoElement, Render, Styled as _, TestAppContext, Window, div,
+        hsla, px,
+    };
+
+    use super::*;
+
+    struct Harness {
+        state: Entity<TextViewState>,
+        highlights: Vec<(std::ops::Range<usize>, gpui::Hsla)>,
+        reports: Rc<RefCell<Vec<Option<TextViewSelection>>>>,
+    }
+
+    impl Render for Harness {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            let reports = self.reports.clone();
+            let mut view = TextView::new(&self.state).on_selection_change(move |sel, _, _| {
+                reports.borrow_mut().push(sel.cloned());
+            });
+            for (range, color) in &self.highlights {
+                view = view.highlight_source_range(range.clone(), *color);
+            }
+            div()
+                .w(px(400.))
+                .child(crate::TextSelectionLayer)
+                .child(view)
+        }
+    }
+
+    #[gpui::test]
+    fn selection_change_reports_select_all_and_clear(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let reports = Rc::new(RefCell::new(Vec::new()));
+        let (view, vcx) = cx.add_window_view({
+            let reports = reports.clone();
+            move |_, cx| Harness {
+                state: cx.new(|cx| TextViewState::markdown("hello **world**", cx)),
+                highlights: Vec::new(),
+                reports,
+            }
+        });
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        vcx.run_until_parked();
+        assert!(reports.borrow().is_empty());
+
+        let state = view.read_with(vcx, |h, _| h.state.clone());
+        vcx.update(|window, cx| {
+            state.update(cx, |s, cx| s.select_all(cx));
+            window.draw(cx).clear(cx);
+        });
+        vcx.run_until_parked();
+        let reported = reports.borrow().clone();
+        assert_eq!(reported.len(), 1);
+        let sel = reported[0].as_ref().expect("expected settled selection");
+        assert_eq!(sel.text, "hello world");
+        assert_eq!(sel.source_range, Some(0.."hello **world**".len()));
+        assert_eq!(sel.position, None);
+
+        vcx.update(|window, cx| {
+            crate::TextSelection::clear(window, cx);
+            window.draw(cx).clear(cx);
+        });
+        vcx.run_until_parked();
+        let reported = reports.borrow().clone();
+        assert_eq!(reported.len(), 2);
+        assert_eq!(reported[1], None);
+    }
+
+    #[gpui::test]
+    fn highlight_source_range_maps_markdown_bytes_and_clears(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let source = "hello **world**";
+        let world_range = 6..15;
+        let color = hsla(0.15, 0.8, 0.5, 0.4);
+        let (view, vcx) = cx.add_window_view(|_, cx| Harness {
+            state: cx.new(|cx| TextViewState::markdown(source, cx)),
+            highlights: vec![(world_range, color)],
+            reports: Rc::new(RefCell::new(Vec::new())),
+        });
+        vcx.run_until_parked();
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+        let state = view.read_with(vcx, |h, _| h.state.clone());
+        assert!(state.read_with(vcx, |s, _| s.has_range_highlights()));
+
+        vcx.update(|window, cx| {
+            view.update(cx, |h, cx| {
+                h.highlights.clear();
+                cx.notify();
+            });
+            window.draw(cx).clear(cx);
+        });
+        assert!(!state.read_with(vcx, |s, _| s.has_range_highlights()));
     }
 }
