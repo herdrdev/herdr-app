@@ -284,7 +284,7 @@ impl View {
             for t in &mut s.tabs {
                 if let Some(v) = self.tabs.get(&t.id) {
                     t.focused = v.focused.clone().filter(|id| t.root.find(id).is_some());
-                    t.zoomed = v.zoomed.clone().filter(|id| t.root.find(id).is_some());
+                    t.zoomed = v.zoomed.as_ref().filter(|id| t.root.panes().len() >= 2 && t.root.find(id).is_some()).cloned();
                     t.before = v.before.iter().filter(|id| t.root.find(id).is_some()).cloned().collect();
                     t.settled = v.settled;
                 }
@@ -501,7 +501,8 @@ mod tests {
         m.dismiss_space("mac/s2");
         Document::capture(&model(), None).replace(&mut m, None);
         m.select_tab("t");
-        m.tab_mut("t").unwrap().zoomed = Some("p".into());
+        m.split("p", Axis::Row, "p2", "t2");
+        assert!(m.toggle_zoom("p"));
         doc.spaces[0].tabs[0].name = "latest".into();
         assert!(doc.restore(&mut m, "mac", "mac/t", true));
         assert_eq!(m.tab("mac/t").unwrap().name, "latest");
@@ -600,8 +601,9 @@ mod tests {
     #[test]
     fn focus_zoom_and_settle_are_private() {
         let mut m = model();
+        m.split("p", Axis::Row, "p2", "t2");
         let before = Document::capture(&m, None);
-        m.tab_mut("t").unwrap().zoomed = Some("p".into());
+        assert!(m.toggle_zoom("p"));
         m.settle("t", 12);
         assert_eq!(before, Document::capture(&m, None));
         let view = View::capture(&m);
@@ -611,6 +613,19 @@ mod tests {
         view.apply(&mut other);
         assert_eq!(other.tab("t").unwrap().zoomed.as_deref(), Some("p"));
         assert_eq!(other.tab("t").unwrap().settled, Some(12));
+    }
+    #[test]
+    fn a_single_pane_does_not_restore_zoom() {
+        let mut m = model();
+        m.split("p", Axis::Row, "p2", "t2");
+        assert!(m.toggle_zoom("p"));
+        let saved = View::capture(&m);
+
+        Document::capture(&model(), None).replace(&mut m, None);
+        assert_eq!(m.tab("t").unwrap().zoomed, None);
+
+        saved.apply_machine(&mut m, None);
+        assert_eq!(m.tab("t").unwrap().zoomed, None);
     }
     #[test]
     fn remote_roundtrip_qualifies_only_identity_not_mod_props() {
@@ -640,7 +655,8 @@ mod tests {
     fn late_remote_load_restores_only_that_machines_view() {
         let mut m = model();
         Document::capture(&m, None).replace(&mut m, Some("mac"));
-        m.tab_mut("mac/t").unwrap().zoomed = Some("mac/p".into());
+        m.split("mac/p", Axis::Row, "mac/p2", "mac/t2");
+        assert!(m.toggle_zoom("mac/p"));
         m.active = Some("mac/s".into());
         let saved = View::capture(&m);
         let doc = Document::capture(&m, Some("mac"));

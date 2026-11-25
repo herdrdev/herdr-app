@@ -6,7 +6,7 @@ import { join } from "node:path";
 const source = (await readFile(new URL("../defaults/mods/spaces/main.js", import.meta.url), "utf8"))
   .replace(/^import .*;\n/gm, "").replace("export default class Spaces", "class Spaces").replace(/^export /gm, "");
 
-type Space = { id: string; folder: string; machine?: string | null; active?: boolean };
+type Space = { id: string; name: string; folder: string; machine?: string | null; active?: boolean };
 function harness(replies: unknown[] = [], storage = new Map<string, string>(), snapshot: Space[] = [], execGit?: (...args: any[]) => Promise<unknown>, watch?: (repo: string) => Promise<string[]>) {
   const calls: string[][] = [];
   const tasks: Promise<unknown>[] = [];
@@ -18,9 +18,12 @@ function harness(replies: unknown[] = [], storage = new Map<string, string>(), s
   const ScrollHandle = { new: () => ({ calls: [] as number[], scroll_to_item(index: number) { this.calls.push(index); } }) };
   const theme = () => new Proxy({}, { get: () => "#000000" });
   const tracked: unknown[] = [];
+  const labels: string[] = [];
   const element: any = new Proxy({}, { get: (_, method) => (...args: any[]) => {
     if (String(method).startsWith("on_")) handlers[String(method)] = args.at(-1);
     if (method === "track_scroll") tracked.push(args[0]);
+    if (method === "when" && args[0]) args[1](element);
+    if (method === "child" && typeof args[0] === "string") labels.push(args[0]);
     return element;
   } });
   const Spaces = new Function("View", "hc", "localStorage", "spaces", "panes", "run", "v_flex", "h_flex", "div", "svg", "shared", "machines", "exec", "window", "watchFolder", "ScrollHandle", "theme", "layout", "setShared", `${source}; return Spaces;`)(
@@ -45,7 +48,7 @@ function harness(replies: unknown[] = [], storage = new Map<string, string>(), s
   view.folded = new Set(["cloud"]);
   view.refreshMachines = () => {};
   const cx = { timer: { every() {} }, notify() {}, spawn(fn: (cx: unknown) => Promise<unknown>) { tasks.push(fn(cx)); } };
-  return { view, calls, tasks, cx, storage, moves, handlers, snapshot, availability, env, tracked };
+  return { view, calls, tasks, cx, storage, moves, handlers, snapshot, availability, env, tracked, labels };
 }
 
 test("git grouping reads refs for normal, detached, unborn and bare worktrees", async () => {
@@ -94,6 +97,11 @@ test("git grouping reads refs for normal, detached, unborn and bare worktrees", 
     expect(await check(bare)).toBeNull();
     git(bare, "worktree", "add", "-b", "bare-topic", bareTree);
     expect(await check(bareTree)).toMatchObject({ name: "bare", branch: "bare-topic", linked: true, repo: JSON.stringify([null, bare]) });
+    // A bare repo hidden beside its worktrees (<project>/.bare) is named after its project.
+    const project = join(root, "project"), hidden = join(project, ".bare"), projectTree = join(project, "topic");
+    git(root, "clone", "--bare", repo, hidden);
+    git(hidden, "worktree", "add", "-b", "project-topic", projectTree);
+    expect(await check(projectTree)).toMatchObject({ name: "project", branch: "project-topic", linked: true, repo: JSON.stringify([null, hidden]) });
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -101,7 +109,7 @@ test("git grouping reads refs for normal, detached, unborn and bare worktrees", 
 
 test.each(["--show-toplevel", "--git-common-dir"])("a failed %s keeps worktrees nested until git can answer again", async (failedRead) => {
   let failure: string | null = null;
-  const snapshot = [{ id: "main", folder: "/repo" }, { id: "tree", folder: "/tree" }];
+  const snapshot = [{ id: "main", name: "main", folder: "/repo" }, { id: "tree", name: "tree", folder: "/tree" }];
   const h = harness([], new Map(), snapshot, async (_command: string, args: string[], { cwd }: { cwd: string }) => {
     if (cwd === "/repo" && args.includes(failedRead) && failure) return { code: 128, stdout: "", stderr: failure };
     const stdout = args.includes("--show-toplevel") ? cwd + "\n"
@@ -280,7 +288,7 @@ test("unexpected transport failures clear the busy state", async () => {
 });
 
 function orderedHarness(ids: string[]) {
-  const h = harness([], new Map(), ids.map(id => ({ id, folder: "/" + id })));
+  const h = harness([], new Map(), ids.map(id => ({ id, name: id, folder: "/" + id })));
   h.view.git = {};
   h.view.shown = new Set(ids);
   h.view.born = {};
@@ -474,7 +482,7 @@ function scrollHarness(spaces: Space[]) {
 }
 const withHandle = (h: ReturnType<typeof harness>) => { h.view.scroll = { calls: [] as number[], scroll_to_item(i: number) { this.calls.push(i); } }; return h; };
 const spaceList = (ids: string[], active: string, remote: string[] = []): Space[] =>
-  ids.map(id => ({ id, folder: "/" + id, active: id === active, ...(remote.includes(id) ? { machine: "cloud" } : {}) }));
+  ids.map(id => ({ id, name: id, folder: "/" + id, active: id === active, ...(remote.includes(id) ? { machine: "cloud" } : {}) }));
 
 test("the active space is brought into view once, and left alone while it stays put", () => {
   const h = withHandle(scrollHarness(spaceList(["a", "b", "c", "d"], "c")));
@@ -538,10 +546,50 @@ test("the list reveals the active space again when a machine header shifts its p
   expect(h.view.scroll.calls).toEqual([1]);
   // A machine joins: its header and rows come after this computer's, and now this computer gets a header too,
   // so the same active space sits one child further down.
-  h.snapshot.push({ id: "r1", folder: "/r1", machine: "cloud", active: false });
+  h.snapshot.push({ id: "r1", name: "r1", folder: "/r1", machine: "cloud", active: false });
   h.view.shown.add("r1");
   h.view.render();
   expect(h.view.scroll.calls).toEqual([1, 2]);
   h.view.render();
   expect(h.view.scroll.calls).toEqual([1, 2]);
+});
+
+test("space avatars keep complete emoji sequences", () => {
+  const spaceAvatar = new Function("View", `${source}; return spaceAvatar;`)(class {});
+  const england = "🏴\u{E0067}\u{E0062}\u{E0065}\u{E006E}\u{E0067}\u{E007F}";
+  const cases = [
+    ["🐼 notes", "🐼"],
+    ["⚙️ops", "⚙️"],
+    ["🧑🏻‍🦳Old", "🧑🏻‍🦳"],
+    ["🧑🏻‍🦳", "🧑🏻‍🦳"],
+    ["✌🏻 peace", "✌🏻"],
+    ["☝🏻 up", "☝🏻"],
+    ["⛹🏻‍♀️ play", "⛹🏻‍♀️"],
+    ["🖥️ server", "🖥️"],
+    ["🖥 desk", "🖥"],
+    ["🇦🇹 trip", "🇦🇹"],
+    [`${england} trip`, england],
+    ["🏳️‍🌈 Pride", "🏳️‍🌈"],
+    ["1️⃣ eins", "1️⃣"],
+    ["© Corp", "©"],
+    ["⚙ops", "⚙"],
+    ["☕︎ cafe", "☕"],
+    ["plain", "P"],
+    ["", "?"],
+  ];
+  for (const [name, avatar] of cases) expect(spaceAvatar(name)).toBe(avatar);
+});
+
+test("space rows keep the full label and omit matching git details after an emoji", () => {
+  const h = harness();
+  const t = new Proxy({}, { get: () => "#000000" });
+  const g = { name: "herdr-app", branch: "topic", ahead: 2, behind: 0 };
+  const rowLabels = (name: string, tree: string | null = null) => {
+    h.labels.length = 0;
+    h.view.row({ w: { id: "s1", name }, i: 0, g, tree }, t);
+    return h.labels;
+  };
+  expect(rowLabels("🐼 Herdr-App")).toEqual(["🐼", "🐼 Herdr-App", "topic", "↑2"]);
+  expect(rowLabels("✌🏻 topic")).toEqual(["✌🏻", "✌🏻 topic", "herdr-app", "↑2"]);
+  expect(rowLabels("🐼 topic", "└─")).toEqual(["🐼 topic", "↑2"]);
 });

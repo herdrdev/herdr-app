@@ -5777,6 +5777,64 @@ export default class Notes extends View {
     assert!(tree.contains("picked=6-11 after=15-15"), "{tree}");
 }
 
+// HERDR: a live editor switches wrapping both ways and keeps its text and selection.
+#[gpui::test]
+fn a_script_editor_toggles_soft_wrap_in_place(cx: &mut TestAppContext) {
+    cx.update(|cx| crate::init(cx));
+    let runtime = ShellRuntime::new_isolated().expect("runtime");
+    cx.update(|cx| runtime.set_global(cx));
+    let source = r#"
+import { View } from "gpui-kit";
+import { v_flex, Button, Editor, EditorState } from "gpui-base";
+export default class Code extends View {
+  init() {
+    this.wrap = false;
+    this.code = EditorState.new({ language: "rust", value: "word ".repeat(200), readonly: true });
+    this.code.set_selected_range({ start: 5, end: 9 });
+  }
+  render(cx) {
+    return v_flex().w(300).h(240)
+      .child(Button.new("wrap").h(40).on_click((_event, cx) => {
+        this.wrap = !this.wrap;
+        this.code.set_soft_wrap(this.wrap);
+        cx.notify();
+      }))
+      .child(Editor.new(this.code).h(200));
+  }
+}
+"#;
+    let view_type = runtime.load_source("wrap-code", source).expect("load");
+    let runtime_for_view = runtime.clone();
+    let (_root, context) = cx.add_window_view(move |window, cx| {
+        let object = runtime_for_view
+            .instantiate(&view_type, window, cx)
+            .expect("instantiate");
+        let view = cx.new(|_| ScriptView::new(runtime_for_view, object));
+        crate::root::ShellRoot::new(view.into(), window, cx)
+    });
+    context.update(|window, cx| window.draw(cx).clear(cx));
+    let editor = runtime.entities().first_editor().expect("editor");
+    let text = editor.read_with(context, |state, _| state.value());
+    // Whether the one line wrapped: its end sits on a lower row than its start.
+    let rows_below = |context: &mut VisualTestContext| {
+        editor.read_with(context, |state, _| {
+            assert_eq!(state.value(), text);
+            assert_eq!(state.selected_range(), 5..9);
+            let top = |offset: usize| state.range_to_bounds(&(offset..offset)).map(|b| b.top());
+            top(text.len() - 1)
+                .zip(top(0))
+                .is_some_and(|(end, start)| end > start)
+        })
+    };
+    assert!(!rows_below(context), "starts on one row");
+    for wrapped in [true, false, true] {
+        context.simulate_click(point(px(20.), px(20.)), Modifiers::default());
+        context.run_until_parked();
+        context.update(|window, cx| window.draw(cx).clear(cx));
+        assert_eq!(rows_below(context), wrapped, "wrapped = {wrapped}");
+    }
+}
+
 // HERDR: readonly rejects keyboard edits without disabling selection or programmatic refresh.
 #[gpui::test]
 fn a_readonly_script_editor_remains_selectable(cx: &mut TestAppContext) {
@@ -5828,6 +5886,101 @@ export default class Code extends View {
         assert_eq!(editor.read(cx).value().as_ref(), "fn main() {}");
         assert_eq!(editor.read(cx).selected_value().as_ref(), "fn");
     });
+}
+
+// HERDR: what Tab inserts in a script editor made from `init`, which may set
+// the indent with `EditorState.new` options or `set_tab_size`.
+fn editor_tab_inserts(cx: &mut TestAppContext, init: &str) -> String {
+    cx.update(|cx| crate::init(cx));
+    let runtime = ShellRuntime::new_isolated().expect("runtime");
+    cx.update(|cx| runtime.set_global(cx));
+    let source = format!(
+        r#"
+import {{ View }} from "gpui-kit";
+import {{ Editor, EditorState }} from "gpui-base";
+export default class Code extends View {{
+  init() {{ {init} }}
+  render(cx) {{ return Editor.new(this.code).h(240); }}
+}}
+"#
+    );
+    let view_type = runtime.load_source("tab-code", &source).expect("load");
+    let runtime_for_view = runtime.clone();
+    let (_root, context) = cx.add_window_view(move |window, cx| {
+        let object = runtime_for_view
+            .instantiate(&view_type, window, cx)
+            .expect("instantiate");
+        let view = cx.new(|_| ScriptView::new(runtime_for_view, object));
+        crate::root::ShellRoot::new(view.into(), window, cx)
+    });
+    context.update(|window, cx| window.draw(cx).clear(cx));
+    let editor = runtime.entities().first_editor().expect("editor");
+    context.update(|window, cx| {
+        editor.update(cx, |state, cx| {
+            state.focus(window, cx);
+            state.set_selected_range(0..0, cx);
+        })
+    });
+    context.update(|window, cx| window.draw(cx).clear(cx));
+    context.simulate_keystrokes("tab");
+    context.update(|_, cx| editor.read(cx).value().to_string())
+}
+
+// HERDR: `tab_size` and `hard_tabs` decide what Tab inserts; omitted, it stays 2 spaces.
+#[gpui::test]
+fn a_script_editor_indents_by_its_tab_size(cx: &mut TestAppContext) {
+    let new = |options: &str| {
+        format!("this.code = EditorState.new({{ language: \"python\", value: \"x\", {options} }});")
+    };
+    assert_eq!(editor_tab_inserts(cx, &new("")), "  x");
+    assert_eq!(editor_tab_inserts(cx, &new("tab_size: 4")), "    x");
+    assert_eq!(editor_tab_inserts(cx, &new("hard_tabs: true")), "\tx");
+    assert_eq!(
+        editor_tab_inserts(
+            cx,
+            &format!("{} this.code.set_tab_size(3);", new("hard_tabs: true"))
+        ),
+        "   x"
+    );
+    assert_eq!(
+        editor_tab_inserts(cx, &format!("{} this.code.set_tab_size(8, true);", new(""))),
+        "\tx"
+    );
+}
+
+// HERDR: a tab size that is not a whole number of columns from 1 to 16 is refused.
+#[gpui::test]
+fn a_script_editor_refuses_a_bad_tab_size(cx: &mut TestAppContext) {
+    cx.update(|cx| crate::init(cx));
+    let runtime = ShellRuntime::new_isolated().expect("runtime");
+    cx.update(|cx| runtime.set_global(cx));
+    let window = cx.add_window(|_, _| Empty);
+    let mut context = VisualTestContext::from_window(*window.deref(), cx);
+    for (name, init) in [
+        ("zero", "EditorState.new({ tab_size: 0 })"),
+        ("huge", "EditorState.new({ tab_size: 17 })"),
+        ("fraction", "EditorState.new({ tab_size: 2.5 })"),
+        ("setter", "EditorState.new({}).set_tab_size(0)"),
+    ] {
+        let source = format!(
+            r#"
+import {{ View, div }} from "gpui-kit";
+import {{ EditorState }} from "gpui-base";
+export default class Bad extends View {{
+  init() {{ this.code = {init}; }}
+  render(cx) {{ return div(); }}
+}}
+"#
+        );
+        let view_type = runtime.load_source(name, &source).expect("load");
+        let error = context
+            .update(|window, cx| runtime.instantiate(&view_type, window, cx))
+            .expect_err(name);
+        assert!(
+            error.to_string().contains("a whole number from 1 to 16"),
+            "{name}: {error}"
+        );
+    }
 }
 
 #[gpui::test]
@@ -8304,6 +8457,90 @@ export default class Surface extends View {
     );
 }
 
+// HERDR: the mouse's side buttons reach a script by name, each only its own handler.
+#[gpui::test]
+fn a_script_hears_the_back_and_forward_buttons(cx: &mut TestAppContext) {
+    use gpui::{MouseButton, NavigationDirection};
+
+    cx.update(|cx| crate::init(cx));
+
+    let runtime = ShellRuntime::new_isolated().expect("runtime");
+    cx.update(|cx| runtime.set_global(cx));
+    let source = r#"
+import { View, div } from "gpui-kit";
+import { v_flex } from "gpui-base";
+
+export default class Surface extends View {
+  init(_props, _cx) {
+    this.log = [];
+  }
+
+  render(_cx) {
+    return v_flex()
+      .w(300)
+      .h(200)
+      .child(
+        div()
+          .id("target")
+          .w(100)
+          .h(50)
+          .on_mouse_down("back", (event, cx) => {
+            this.log.push(`down:${event.button}`);
+            cx.notify();
+          })
+          .on_mouse_down("forward", (event, cx) => {
+            this.log.push(`down:${event.button}`);
+            cx.notify();
+          })
+          .on_mouse_up("back", (event, cx) => {
+            this.log.push(`up:${event.button}`);
+            cx.notify();
+          }),
+      )
+      .child(div().child(`log=${this.log.join(" ")}`));
+  }
+}
+"#;
+    let view_type = runtime.load_source("navigate", source).expect("load");
+    let runtime_for_view = Rc::clone(&runtime);
+    let window = cx.add_window(move |window, cx| {
+        let view = runtime_for_view
+            .instantiate_view(&view_type, window, cx)
+            .expect("instantiate");
+        RootedScriptView(view)
+    });
+    let mut context = VisualTestContext::from_window(*window.deref(), cx);
+    context.update(|window, cx| window.draw(cx).clear(cx));
+    let view = window
+        .root(&mut context)
+        .expect("root view")
+        .read_with(&context, |root, _| root.0.clone());
+
+    let inside = point(px(20.), px(20.));
+    let back = MouseButton::Navigate(NavigationDirection::Back);
+    let forward = MouseButton::Navigate(NavigationDirection::Forward);
+    context.simulate_mouse_move(inside, None, Modifiers::default());
+    context.simulate_mouse_down(inside, MouseButton::Left, Modifiers::default());
+    context.simulate_mouse_up(inside, MouseButton::Left, Modifiers::default());
+    context.simulate_mouse_down(inside, back, Modifiers::default());
+    context.simulate_mouse_up(inside, back, Modifiers::default());
+    context.simulate_mouse_down(inside, forward, Modifiers::default());
+    context.simulate_mouse_up(inside, forward, Modifiers::default());
+    context.run_until_parked();
+    context.update(|window, cx| window.draw(cx).clear(cx));
+
+    let tree = context.update(|_, cx| {
+        view.read(cx)
+            .snapshot()
+            .map(crate::RenderSnapshot::debug_tree)
+            .unwrap_or_default()
+    });
+    assert!(
+        tree.contains("log=down:back up:back down:forward"),
+        "back and forward each reach their own handlers, and a left press neither: {tree}"
+    );
+}
+
 /// Input reaches base's own controls, not just a plain element.
 ///
 /// `Button.new("save").on_key_down(...)` is a reasonable thing to write and for
@@ -8704,6 +8941,147 @@ export default class Panel extends View {
         described(&mut context).contains("text \"focused: true\""),
         "and the next render must read it back: {}",
         described(&mut context)
+    );
+}
+
+/// `blur()` takes the keyboard off a text state without freeing it, and only
+/// when the field has the keyboard.
+///
+/// Each of the three text states is focused and then blurred by a click, so
+/// the calls run in a live host call as a mod's handler would. After a blur
+/// nothing in the window holds focus, the state's own `blur` event has fired
+/// once, and the state still renders. A blur on a field that does not have
+/// focus must leave another element's focus alone.
+#[gpui::test]
+fn a_text_state_blurs_without_being_released(cx: &mut TestAppContext) {
+    cx.update(|cx| crate::init(cx));
+
+    let runtime = ShellRuntime::new_isolated().expect("runtime");
+    cx.update(|cx| runtime.set_global(cx));
+    let source = r#"
+import { View, div } from "gpui-kit";
+import { v_flex, Input, InputState, Textarea, TextareaState, Editor, EditorState } from "gpui-base";
+
+export default class Fields extends View {
+  init(_props, cx) {
+    this.blurs = { input: 0, textarea: 0, editor: 0 };
+    this.states = {
+      input: InputState.new({ value: "kept input" }),
+      textarea: TextareaState.new({ value: "kept textarea", rows: 2 }),
+      editor: EditorState.new({ value: "kept editor" }),
+    };
+    for (const [name, state] of Object.entries(this.states)) {
+      state.on("blur", (_event, cx) => { this.blurs[name] += 1; cx.notify(); });
+    }
+    this.other = cx.focus_handle();
+  }
+
+  render(cx) {
+    const row = (id, act) =>
+      div().id(id).w(300).h(20).on_click((_event, cx) => { act(); cx.notify(); }).child(id);
+    const { input, textarea, editor } = this.states;
+    return v_flex()
+      .w(300)
+      .child(row("focus-input", () => input.focus()))
+      .child(row("blur-input", () => input.blur()))
+      .child(row("focus-textarea", () => textarea.focus()))
+      .child(row("blur-textarea", () => textarea.blur()))
+      .child(row("focus-editor", () => editor.focus()))
+      .child(row("blur-editor", () => editor.blur()))
+      .child(row("focus-other", () => this.other.focus()))
+      .child(div().id("other").w(300).h(20).track_focus(this.other).child("other"))
+      .child(Input.new(input).w(300).h(20))
+      .child(Textarea.new(textarea).w(300).h(40))
+      .child(Editor.new(editor).w(300).h(40))
+      .child(`blurs=${this.blurs.input},${this.blurs.textarea},${this.blurs.editor}`)
+      .child(`${input.value()}|${textarea.value()}|${editor.value()}`);
+  }
+}
+"#;
+    let view_type = runtime.load_source("blur-fields", source).expect("load");
+    let runtime_for_view = Rc::clone(&runtime);
+    // Instantiated as a view, so the handlers subscribed in `init` know the
+    // view their `cx.notify()` wakes.
+    let window = cx.add_window(move |window, cx| {
+        let view = runtime_for_view
+            .instantiate_view(&view_type, window, cx)
+            .expect("instantiate");
+        RootedScriptView(view)
+    });
+    let mut context = VisualTestContext::from_window(*window.deref(), cx);
+    let view = window
+        .root(&mut context)
+        .expect("view")
+        .read_with(&context, |root, _| root.0.clone());
+    // GPUI reports focus and blur only in an active window.
+    context.update(|window, _| window.activate_window());
+    context.run_until_parked();
+    // One frame delivers the focus change and its events; the next draws what
+    // the handlers counted.
+    let settle = |context: &mut VisualTestContext| {
+        context.update(|window, cx| window.draw(cx).clear(cx));
+        context.update(|window, cx| window.draw(cx).clear(cx));
+    };
+    let click = |context: &mut VisualTestContext, row: f32| {
+        context.simulate_click(point(px(10.), px(row * 20. + 10.)), Modifiers::default());
+        settle(context);
+    };
+    let described = |context: &mut VisualTestContext| {
+        context.update(|_, cx| {
+            view.read(cx)
+                .snapshot()
+                .map(crate::RenderSnapshot::debug_tree)
+                .unwrap_or_default()
+        })
+    };
+    let focused = |context: &mut VisualTestContext| context.update(|window, cx| window.focused(cx));
+    settle(&mut context);
+
+    for (index, (name, expected)) in [
+        ("input", "blurs=1,0,0"),
+        ("textarea", "blurs=1,1,0"),
+        ("editor", "blurs=1,1,1"),
+    ]
+    .into_iter()
+    .enumerate()
+    {
+        let focus_row = (index * 2) as f32;
+        click(&mut context, focus_row);
+        assert!(
+            focused(&mut context).is_some(),
+            "focus() must give the {name} the keyboard first"
+        );
+
+        click(&mut context, focus_row + 1.);
+        assert_eq!(
+            focused(&mut context),
+            None,
+            "blur() must leave nothing in the window focused ({name})"
+        );
+        let tree = described(&mut context);
+        assert!(
+            tree.contains(&format!("text \"{expected}\"")),
+            "the {name}'s blur event must fire once: {tree}"
+        );
+        assert!(
+            tree.contains("text \"kept input|kept textarea|kept editor\""),
+            "a blurred state must still be usable: {tree}"
+        );
+    }
+
+    // A blur on a field without the keyboard leaves another element's focus.
+    click(&mut context, 6.);
+    let other = focused(&mut context).expect("the script's own handle takes focus");
+    click(&mut context, 1.);
+    assert_eq!(
+        focused(&mut context),
+        Some(other),
+        "blur() on an unfocused input must not take focus from another element"
+    );
+    let tree = described(&mut context);
+    assert!(
+        tree.contains("text \"blurs=1,1,1\""),
+        "and must fire no blur event: {tree}"
     );
 }
 

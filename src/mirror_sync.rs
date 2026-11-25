@@ -16,6 +16,7 @@ pub struct Slot {
     pub available: bool,
     pub read_attempted: bool,
     pub connected: bool,
+    pub legacy_child_lifetime: bool,
     connected_since: Option<u64>,
     pub pending: Option<mpsc::Receiver<Outcome>>,
     pub dirty: bool,
