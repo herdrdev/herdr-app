@@ -2931,6 +2931,7 @@ impl<M: InputModeKind, R: EditorLineNumberRenderer> TextElement<M, R> {
     ///
     /// A single-line input asks for all of itself. A taller one asks for the
     /// line with the caret, or its top part when it has no caret.
+    #[allow(dead_code)]
     fn request_reveal(
         &self,
         input_bounds: Bounds<Pixels>,
@@ -4246,14 +4247,9 @@ impl<M: InputModeKind, R: EditorLineNumberRenderer> Element for TextElement<M, R
         );
         let line_decoration_layout = self.layout_line_decorations(&last_layout, cx);
         let hitbox = window.insert_hitbox(input_bounds, HitboxBehavior::Normal);
-        self.request_reveal(
-            input_bounds,
-            &cursor_infos,
-            cursor_scroll_offset,
-            line_height,
-            window,
-            cx,
-        );
+        // HERDR (B25): focusing an input must not auto-scroll ancestor containers
+        // (matching 1ccf011).
+        let _ = (&cursor_infos, cursor_scroll_offset, line_height);
 
         let token_elements = self.prepaint_tokens(&last_layout, bounds, token_elements, window, cx);
 
@@ -5025,7 +5021,7 @@ mod tests {
     };
     use crate::{ScrollbarMode, ScrollbarStyles, ScrollbarTheme, Theme};
     use gpui::{
-        AppContext as _, Context, EntityInputHandler as _, ListAlignment, ListOffset, ListState,
+        AppContext as _, Context, EntityInputHandler as _, ListAlignment, ListState,
         Render, TestAppContext, VisualTestContext, div, list,
     };
 
@@ -6296,53 +6292,13 @@ mod tests {
         assert!(at_top());
         assert!(!revealed(&mut cx));
 
-        // Gaining focus reveals the input.
+        // HERDR (B25): gaining focus must not auto-scroll ancestor scroll containers.
         cx.update(|window, cx| input.update(cx, |state, cx| state.focus(window, cx)));
         draw(&mut cx);
         draw(&mut cx);
-        assert!(!at_top());
-        assert!(revealed(&mut cx));
-
-        // Scrolling away while focused is left alone.
-        list_state.scroll_to(ListOffset::default());
-        draw(&mut cx);
-        draw(&mut cx);
-        assert!(at_top());
-
-        // A temporarily unmounted input does not prepaint while unfocused.
-        // Its blur event must still reset the reveal cache before remounting.
-        cx.update(|window, cx| {
-            view.update(cx, |view, cx| {
-                view.show_input = false;
-                window.blur(cx);
-                cx.notify();
-            });
-        });
-        draw(&mut cx);
-        input.read_with(&cx, |state, _| assert!(state.revealed_viewport.is_none()));
-        cx.update(|window, cx| {
-            view.update(cx, |view, cx| {
-                view.show_input = true;
-                input.update(cx, |state, cx| state.focus(window, cx));
-                cx.notify();
-            });
-        });
-        draw(&mut cx);
-        draw(&mut cx);
-        assert!(!at_top());
-        assert!(revealed(&mut cx));
-
-        list_state.scroll_to(ListOffset::default());
-        draw(&mut cx);
-        draw(&mut cx);
-        assert!(at_top());
-
-        // A smaller visible area (an on-screen keyboard) reveals it again.
-        cx.simulate_resize(size(px(240.), px(195.)));
-        draw(&mut cx);
-        draw(&mut cx);
-        assert!(!at_top());
-        assert!(revealed(&mut cx));
+        assert!(at_top(), "focusing an offscreen input must leave ancestor scroll position unchanged");
+        assert!(!revealed(&mut cx));
+        let _ = &view;
     }
 
     struct TextareaHarness(Entity<crate::input::TextareaState>);
