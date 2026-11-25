@@ -1182,6 +1182,8 @@ impl WindowsPlatformInner {
     }
 
     fn translate_accelerator(&self, msg: &MSG) -> bool {
+        // HERDR: track pending Windows dead-key state on the UI thread.
+        DEAD_KEYS.with(|state| state.observe(msg));
         if msg.message != WM_KEYDOWN && msg.message != WM_SYSKEYDOWN {
             return false;
         }
@@ -1392,6 +1394,7 @@ impl WindowsPlatformInner {
     }
 
     fn handle_keyboard_layout_change(&self) -> Option<isize> {
+        DEAD_KEYS.with(DeadKeyState::clear);
         self.with_callback(
             |callbacks| &callbacks.keyboard_layout_change,
             |callback| callback(),
