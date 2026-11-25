@@ -971,12 +971,9 @@ fn parse_paragraph(
             // the CR with the newline: dropping only the newline would strand
             // the CR in the middle of the reflowed line.
             //
-            // Runs of spaces and tabs then fold to one space, the way
-            // `white-space: normal` draws them (#3710); the source mapping
-            // re-aligns over the folded bytes on its own. Leading runs at a
-            // line break — after `<br>` or a hard break — are dropped by
-            // `normalize_inline_boundaries`, which sees the nodes whole.
-            // HERDR: preserve repeated spaces and tabs in Markdown text (matching 1ccf011).
+            // HERDR (B16): preserve repeated spaces and tabs in Markdown text
+            // (matching 1ccf011) instead of collapsing runs or stripping spaces
+            // after breaks/comments.
             text = val.value.replace("\r\n", " ").replace(['\n', '\r'], " ");
             paragraph.push(mapped_inline(source, text.clone(), node, cx))
         }
@@ -2212,37 +2209,14 @@ mod tests {
         assert_eq!(select_rendered_range(source, 1..3), 1..6);
     }
 
-    /// The three shapes of #3710, drawn the way a browser draws
-    /// CommonMark's HTML: a run of spaces folds to one, a dropped comment
-    /// leaves one, and nothing follows a `<br>` indented by the space its
-    /// line ending became.
+    /// HERDR (B16): Markdown text keeps repeated spaces, tabs, spaces across a
+    /// dropped HTML comment, and the space produced by a line ending after `<br>`
+    /// (matching 1ccf011).
     #[test]
-    fn markdown_preserves_repeated_spaces_and_tabs() {
-        let mut cx = NodeContext::default();
-        let document = parse("left    right\n\na\t\tb", &mut cx).unwrap();
-        let paragraphs: Vec<String> = document
-            .blocks
-            .iter()
-            .filter_map(|block| match block {
-                BlockNode::Paragraph(paragraph) => Some(
-                    paragraph
-                        .children
-                        .iter()
-                        .map(|node| node.text.as_ref())
-                        .collect(),
-                ),
-                _ => None,
-            })
-            .collect();
-        assert_eq!(paragraphs, ["left    right", "a\t\tb"]);
-    }
-
-    #[test]
-    #[ignore = "HERDR: preserves repeated spaces/tabs in Markdown text (B16)"]
-    fn white_space_folds_like_html() {
+    fn markdown_preserves_whitespace_across_runs_comments_and_breaks() {
         let mut cx = NodeContext::default();
         let document = parse(
-            "two  spaces\n\nText <!-- note --> after.\n\nline one<br>\nline two",
+            "left    right\n\na\t\tb\n\ntwo  spaces\n\nText <!-- note --> after.\n\nline one<br>\nline two",
             &mut cx,
         )
         .unwrap();
@@ -2262,15 +2236,19 @@ mod tests {
             .collect();
         assert_eq!(
             paragraphs,
-            ["two spaces", "Text after.", "line one\nline two"]
+            [
+                "left    right",
+                "a\t\tb",
+                "two  spaces",
+                "Text  after.",
+                "line one\n line two",
+            ]
         );
     }
 
-    /// A code span keeps its white space, so a fold that starts when the run
-    /// before the span ends with a space must not reach into the span
-    /// (follow-up to #3710, from the review of #3949).
+    /// A code span keeps its white space alongside unfolded surrounding text.
     #[test]
-    fn white_space_folds_do_not_reach_into_a_code_span() {
+    fn white_space_in_code_spans_stays_intact() {
         for (source, expected) in [
             ("x `  y`", "x   y"),
             ("`  y` x", "  y x"),
@@ -2291,36 +2269,28 @@ mod tests {
     }
 
     #[test]
-    #[ignore = "HERDR: preserves repeated spaces/tabs in Markdown text (B16)"]
-    fn selected_source_range_survives_a_folded_space_run() {
+    fn selected_source_range_maps_unfolded_space_runs() {
         let source = "two  spaces";
-        // Rendered "two spaces" is ten bytes: the second source space folds
-        // away, so the drawn space maps to the first source space, and the
-        // run after it maps to the run after it.
-        assert_eq!(select_rendered_range(source, 0..4), 0..4);
-        assert_eq!(select_rendered_range(source, 3..4), 3..4);
-        assert_eq!(select_rendered_range(source, 4..5), 5..6);
-        assert_eq!(select_rendered_range(source, 4..10), 5..11);
+        // Rendered "two  spaces" maps 1:1 with source bytes.
+        assert_eq!(select_rendered_range(source, 0..5), 0..5);
+        assert_eq!(select_rendered_range(source, 3..5), 3..5);
+        assert_eq!(select_rendered_range(source, 5..11), 5..11);
     }
 
     #[test]
-    #[ignore = "HERDR: preserves repeated spaces/tabs in Markdown text (B16)"]
-    fn selected_source_range_survives_a_dropped_comment() {
+    fn selected_source_range_maps_across_a_dropped_comment() {
         let source = "Text <!-- note --> after.";
-        // Rendered "Text after.": the comment drops out and the space after
-        // it folds, so "after." maps past the whole comment.
+        // Rendered "Text  after." keeps both spaces around the dropped comment.
         assert_eq!(select_rendered_range(source, 0..4), 0..4);
-        assert_eq!(select_rendered_range(source, 5..11), 19..25);
+        assert_eq!(select_rendered_range(source, 6..12), 19..25);
     }
 
     #[test]
-    #[ignore = "HERDR: preserves repeated spaces/tabs in Markdown text (B16)"]
-    fn selected_source_range_drops_the_space_after_a_break() {
+    fn selected_source_range_maps_after_a_br_newline() {
         let source = "line one<br>\nline two";
-        // Rendered "line one\nline two" is seventeen bytes: "line two"
-        // starts at ten, flush against the break.
-        assert_eq!(selected_rendered_range(source, 9..17), Some(13..21));
-        assert_eq!(selected_rendered_range(source, 10..17), Some(14..21));
+        // Rendered "line one\n line two" (18 bytes): "line two" starts at 10,
+        // mapping to source bytes 13..21 ("line one<br>\n" is 13 bytes).
+        assert_eq!(selected_rendered_range(source, 10..18), Some(13..21));
     }
 
     #[test]
