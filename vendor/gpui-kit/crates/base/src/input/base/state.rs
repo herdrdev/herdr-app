@@ -4449,8 +4449,9 @@ impl<M: InputModeKind> InputBaseState<M> {
             Cow::Borrowed(new_text)
         };
 
-        if self.is_single_line() && normalized.contains(['\n', '\r', '\t']) {
-            Cow::Owned(normalized.replace(['\n', '\r', '\t'], ""))
+        // HERDR (B23): keep literal tabs in single-line inputs (matching 1ccf011).
+        if self.is_single_line() && normalized.contains(['\n', '\r']) {
+            Cow::Owned(normalized.replace(['\n', '\r'], ""))
         } else {
             normalized
         }
@@ -9555,25 +9556,20 @@ mod tests {
     /// Unhandled, the keystroke reaches the input as text, so the field
     /// drops the tab as it drops a newline. See issue #4069.
     #[gpui::test]
-    fn test_single_line_removes_tabs(cx: &mut TestAppContext) {
-        let input_view = InputView::build(cx, |state| state);
+    fn test_single_line_keeps_tabs(cx: &mut TestAppContext) {
+        let input_view = InputView::build(cx, |state| state.default_value("default\tvalue"));
         let mut cx = VisualTestContext::from_window(input_view.window_handle.into(), cx);
         let input = input_view.input;
 
         cx.update(|window, cx| {
-            input.update(cx, |state, cx| state.focus(window, cx));
-        });
-        cx.run_until_parked();
-
-        cx.simulate_input("a");
-        cx.simulate_keystrokes("tab");
-        cx.simulate_input("b");
-        input.read_with(&cx, |state, _| assert_eq!(state.value(), "ab"));
-
-        cx.update(|window, cx| {
             input.update(cx, |state, cx| {
+                assert_eq!(state.value(), "default\tvalue");
+                cx.write_to_clipboard(ClipboardItem::new_string("a\tb\nc".to_string()));
+                state.set_value("", window, cx);
+                state.paste(&Paste, window, cx);
+                assert_eq!(state.value(), "a\tbc");
                 state.set_value("c\td\ne", window, cx);
-                assert_eq!(state.value(), "cde");
+                assert_eq!(state.value(), "c\tde");
             });
         });
     }
