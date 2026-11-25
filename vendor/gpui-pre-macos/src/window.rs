@@ -1953,7 +1953,25 @@ impl PlatformWindow for MacWindow {
             let _: () = msg_send![this.native_window, setBackgroundColor: &*background_color];
             this.native_views.background = None;
 
-            if background_appearance != WindowBackgroundAppearance::Blurred {
+            // HERDR: On macOS 26 Liquid Glass, NSVisualEffectView lost desktop frost;
+            // keep the CoreGraphics window-server blur until real macOS 26 hardware
+            // verifies 0.3.14's UnderWindowBackground material.
+            if is_macos_version_at_least(NSOperatingSystemVersion {
+                majorVersion: 26,
+                minorVersion: 0,
+                patchVersion: 0,
+            }) {
+                let blurred = background_appearance == WindowBackgroundAppearance::Blurred;
+                let window_number: NSInteger = msg_send![this.native_window, windowNumber];
+                CGSSetWindowBackgroundBlurRadius(
+                    CGSMainConnectionID(),
+                    window_number,
+                    if blurred { WINDOW_SERVER_BLUR_RADIUS } else { 0 },
+                );
+                if let Some(blur_view) = this.blurred_view.take() {
+                    let _: () = msg_send![blur_view, removeFromSuperview];
+                }
+            } else if background_appearance != WindowBackgroundAppearance::Blurred {
                 if let Some(blur_view) = this.blurred_view {
                     let _: () = msg_send![blur_view, removeFromSuperview];
                     this.blurred_view = None;
@@ -4178,6 +4196,19 @@ fn display_id_for_screen(screen: *mut AnyObject) -> Option<CGDirectDisplayID> {
         let screen_number: NSUInteger = msg_send![screen_number, unsignedIntegerValue];
         Some(screen_number as CGDirectDisplayID)
     }
+}
+
+/// HERDR: How far the window server blurs the desktop behind a blurred window (macOS 26+).
+const WINDOW_SERVER_BLUR_RADIUS: i64 = 50;
+
+#[link(name = "CoreGraphics", kind = "framework")]
+unsafe extern "C" {
+    fn CGSMainConnectionID() -> *mut c_void;
+    fn CGSSetWindowBackgroundBlurRadius(
+        connection_id: *mut c_void,
+        window_id: NSInteger,
+        radius: i64,
+    ) -> i32;
 }
 
 extern "C" fn blurred_view_init_with_frame(
