@@ -3432,8 +3432,9 @@ impl PrepaintState {
 /// thin. Rounding its edges to the device grid keeps every caret crisp.
 fn snap_caret_to_device_pixels(bounds: Bounds<Pixels>, scale_factor: f32) -> Bounds<Pixels> {
     let x = (bounds.origin.x * scale_factor).round() / scale_factor;
-    let width = (bounds.size.width * scale_factor).round().max(px(1.)) / scale_factor;
-    Bounds::new(point(x, bounds.origin.y), size(width, bounds.size.height))
+    // HERDR (B17): snap caret x to device pixels, but preserve exact logical caret
+    // width across scales (1.5px macOS, 2px Linux/Windows; matching 1ccf011).
+    Bounds::new(point(x, bounds.origin.y), bounds.size)
 }
 
 /// A debug function to print points as SVG path.
@@ -6491,6 +6492,28 @@ mod tests {
         assert_eq!(outer.offset().y, px(0.), "the area around it does not");
         swipe(&mut cx, 40.);
         assert_eq!(outer.offset().y, px(-40.), "outside the textarea it does");
+    }
+    #[test]
+    fn caret_snapping_preserves_logical_width_across_scales() {
+        for width in [px(1.5), px(2.0)] {
+            let bounds = Bounds::new(point(px(10.3), px(4.0)), size(width, px(18.0)));
+            for scale in [1.0_f32, 1.25_f32, 2.0_f32] {
+                let snapped = snap_caret_to_device_pixels(bounds, scale);
+                assert_eq!(
+                    snapped.size.width, width,
+                    "logical caret width {width:?} must stay unchanged at {scale}x"
+                );
+                assert_eq!(snapped.size.height, px(18.0));
+                assert_eq!(snapped.origin.y, px(4.0));
+            }
+        }
+        // Position x still snaps to device pixels.
+        let snapped_1x =
+            snap_caret_to_device_pixels(Bounds::new(point(px(10.3), px(0.)), size(px(2.), px(10.))), 1.0);
+        assert_eq!(snapped_1x.origin.x, px(10.0));
+        let snapped_125x =
+            snap_caret_to_device_pixels(Bounds::new(point(px(10.3), px(0.)), size(px(2.), px(10.))), 1.25);
+        assert_eq!(snapped_125x.origin.x, px(10.4));
     }
 
     #[gpui::test]
