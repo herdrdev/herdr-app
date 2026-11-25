@@ -140,6 +140,9 @@ jobs:
             --config 'profile.dev.package."*".opt-level=0' \
             --config 'profile.dev.package.herdr-shell.opt-level=0' \
             --test shot_pixels
+      - name: Test vendored gpui-base
+        if: matrix.platform == 'linux-x86_64'
+        run: bash scripts/test-base --no-opt -- --test-threads 4
       - name: Check release packaging
         if: matrix.platform == 'linux-x86_64'
         run: python3 -m unittest discover -s scripts -p test_distribution.py

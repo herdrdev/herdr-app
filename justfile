@@ -42,9 +42,13 @@ pre-release: test docs-check
 build:
     cargo build --locked
 
+test-base *args:
+    bash scripts/test-base {{args}}
+
 test:
     bun test scripts/changes.test.ts scripts/files.test.ts scripts/machine-add.test.ts scripts/picker.test.ts scripts/palette.test.ts scripts/agents.test.ts scripts/spaces.test.ts scripts/mod-storage.test.ts scripts/worktree.test.ts scripts/settings.test.ts scripts/tabs.test.ts
     cargo test --locked -p herdr-app -p herdr-shell
+    bash scripts/test-base
 
 docs-generate: build
     bun scripts/docs.ts generate

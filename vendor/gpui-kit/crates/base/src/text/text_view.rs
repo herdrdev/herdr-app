@@ -1912,7 +1912,7 @@ mod tests {
         fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
             self.renders.fetch_add(1, Ordering::Relaxed);
             div().child(
-                TextView::markdown("stateless-markdown", include_str!("../../../../README.md"))
+                TextView::markdown("stateless-markdown", include_str!("../../README.md"))
                     .markdown_block_parser(|_, _| None),
             )
         }
