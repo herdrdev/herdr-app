@@ -3425,11 +3425,11 @@ impl PrepaintState {
     }
 }
 
-/// Align a caret to whole device pixels.
+/// Align a caret's x origin to whole device pixels while preserving its logical width.
 ///
-/// Text positions are fractional, and a one-pixel caret at a fractional x is
-/// spread over two device pixels by antialiasing, which draws it faint and
-/// thin. Rounding its edges to the device grid keeps every caret crisp.
+/// HERDR (B17): snapping `origin.x` keeps the caret sharp, while preserving
+/// `bounds.size.width` keeps master's per-OS thickness (1.5px macOS, 2px
+/// Linux/Windows) unchanged across display scales.
 fn snap_caret_to_device_pixels(bounds: Bounds<Pixels>, scale_factor: f32) -> Bounds<Pixels> {
     let x = (bounds.origin.x * scale_factor).round() / scale_factor;
     // HERDR (B17): snap caret x to device pixels, but preserve exact logical caret
@@ -6254,7 +6254,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn focused_input_asks_its_scroll_container_to_reveal_it(cx: &mut TestAppContext) {
+    fn focused_input_does_not_auto_scroll_its_container(cx: &mut TestAppContext) {
         cx.update(crate::init);
         let list_state = ListState::new(2, ListAlignment::Top, px(0.));
         let mut input = None;

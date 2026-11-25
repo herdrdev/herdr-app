@@ -9134,7 +9134,7 @@ mod tests {
     }
 
     #[gpui::test]
-    fn test_ctrl_delete_stops_at_whitespace(cx: &mut TestAppContext) {
+    fn test_ctrl_delete_deletes_through_next_word(cx: &mut TestAppContext) {
         let input_view = InputView::build_textarea(cx, |state| state);
         let mut cx = VisualTestContext::from_window(input_view.window_handle.into(), cx);
         let input = input_view.input;
