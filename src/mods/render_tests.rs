@@ -707,7 +707,7 @@ impl gpui::Render for RootedView {
 
 #[gpui::test]
 fn a_mod_hears_a_pinch_only_over_its_element(cx: &mut TestAppContext) {
-    use gpui::{AppContext as _, Modifiers, PinchEvent, TouchPhase, VisualTestContext, point, px};
+    use gpui::{Modifiers, PinchEvent, TouchPhase, VisualTestContext, point, px};
 
     cx.update(herdr_shell::init);
     let staged = Staged::new();
@@ -1589,8 +1589,8 @@ fn duplicate_element_negative_control(cx: &mut TestAppContext) {
     assert!(format!("{error:#}").contains("already added to a parent"), "{error:#}");
 }
 
-#[test]
-fn shipped_layouts_and_keys() {
+#[gpui::test]
+fn shipped_layouts_and_keys(cx: &mut gpui::TestAppContext) {
     let staged = Staged::new();
     let mods: BTreeSet<_> = staged
         .entries()
@@ -1633,7 +1633,7 @@ fn shipped_layouts_and_keys() {
         include_str!("../../defaults/keys.json"),
         include_str!("../../defaults/keys.macos.json"),
     ] {
-        crate::keys::parse(text).unwrap();
+        cx.read(|cx| crate::keys::parse(text, cx)).unwrap();
         let sections: BTreeMap<String, BTreeMap<String, String>> = serde_json::from_str(text).unwrap();
         for bindings in sections.values() {
             for action in bindings.values() {

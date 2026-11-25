@@ -1039,7 +1039,7 @@ impl TerminalView {
         }
     }
 
-    fn scroll(&mut self, ev: &ScrollWheelEvent, _w: &mut Window, cx: &mut Context<Self>) {
+    fn scroll(&mut self, ev: &ScrollEvent, _w: &mut Window, cx: &mut Context<Self>) {
         cx.stop_propagation();
         let mut g = self.grid.borrow_mut();
         let steps = scroll_delta_steps(&mut self.scrolled, ev.delta, ev.touch_phase, g.cell, g.vt.cols, g.vt.rows, crate::settings::get().terminal_scroll_speed);
@@ -2532,7 +2532,7 @@ impl Render for TerminalView {
             .on_key_down(cx.listener(Self::key_down))
             .on_drop(cx.listener(|this, paths: &ExternalPaths, _, cx| this.dropped(paths.paths().to_vec(), cx)))
             .on_drop(cx.listener(Self::dropped_from_mod))
-            .on_scroll_wheel(cx.listener(Self::scroll))
+            .on_scroll(cx.listener(Self::scroll))
             .when(self.link.is_some(), |d| d.cursor_pointer())
             .on_hover(cx.listener(|this, hovered: &bool, _, cx| {
                 if !hovered {
@@ -3441,7 +3441,7 @@ mod tests {
         }
 
         cx.update(gpui_base::init);
-        let bindings = crate::keys::parse(crate::keys::DEFAULTS).expect("shipped keys parse");
+        let bindings = cx.read(|app| crate::keys::parse(crate::keys::DEFAULTS, app)).expect("shipped keys parse");
         cx.update(|app| crate::keys::install(bindings, app));
         let (root, cx) = cx.add_window_view(|_, cx| {
             Root(cx.new(|cx| super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 6), cx)))
@@ -3711,7 +3711,7 @@ mod tests {
         }
 
         cx.update(gpui_base::init);
-        let bindings = crate::keys::parse(crate::keys::DEFAULTS).expect("shipped keys parse");
+        let bindings = cx.read(|app| crate::keys::parse(crate::keys::DEFAULTS, app)).expect("shipped keys parse");
         cx.update(|app| crate::keys::install(bindings, app));
         let (root, cx) = cx.add_window_view(|_, cx| {
             Root(cx.new(|cx| super::TerminalView::attach(crate::hc::offline(), "t1".into(), (40, 6), cx)))
