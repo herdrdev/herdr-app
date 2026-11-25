@@ -5633,4 +5633,67 @@ mod herdr_selection_and_highlights {
         });
         assert!(!state.read_with(vcx, |s, _| s.has_range_highlights()));
     }
+
+    struct NestedScrollableTextView(Entity<TextViewState>, gpui::ScrollHandle);
+
+    impl Render for NestedScrollableTextView {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .id("outer-viewport")
+                .w(px(240.))
+                .h(px(300.))
+                .overflow_y_scroll()
+                .track_scroll(&self.1)
+                .child(div().h(px(100.)))
+                .child(div().h(px(150.)).child(TextView::new(&self.0).scrollable(true)))
+                .child(div().h(px(600.)))
+        }
+    }
+
+    #[gpui::test]
+    fn scrollable_text_view_at_its_end_chains_to_outer(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let markdown = "Paragraph line.\n\n".repeat(40);
+        let outer = gpui::ScrollHandle::new();
+        let (root, cx) = cx.add_window_view(|_, cx| {
+            NestedScrollableTextView(
+                cx.new(|cx| TextViewState::markdown(&markdown, cx)),
+                outer.clone(),
+            )
+        });
+        let cx: &mut gpui::VisualTestContext = cx;
+        let draw = |cx: &mut gpui::VisualTestContext| {
+            cx.run_until_parked();
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        };
+        draw(cx);
+        let wheel = |cx: &mut gpui::VisualTestContext| {
+            cx.simulate_event(gpui::ScrollEvent {
+                position: point(px(20.), px(170.)),
+                delta: gpui::ScrollDelta::Pixels(point(px(0.), px(-40.))),
+                ..Default::default()
+            });
+        };
+        let list_offset = |cx: &mut gpui::VisualTestContext| {
+            root.read_with(cx, |root, cx| {
+                use crate::ScrollbarHandle as _;
+                root.0.read(cx).list_state.offset().y
+            })
+        };
+        let top0 = list_offset(cx);
+        wheel(cx);
+        draw(cx);
+        let after = list_offset(cx);
+        assert!(after < top0, "text view scrolls first");
+        assert_eq!(outer.offset().y, px(0.), "outer stays while text view scrolls");
+        for _ in 0..80 {
+            wheel(cx);
+            draw(cx);
+        }
+        assert!(
+            outer.offset().y < px(0.),
+            "outer scrolls once text view hits its end: {:?}",
+            outer.offset().y
+        );
+    }
 }

@@ -3155,14 +3155,12 @@ impl<M: InputModeKind> InputBaseState<M> {
         self.edit_menu_on_scroll(event.touch_phase, cx);
     }
 
-    /// Whether the text takes a wheel event moving by `delta` from the
-    /// scroll areas around it: it has room to scroll along the axis the
-    /// event mostly moves on. Unlike [`Self::overflows_along`], an event that
-    /// moves on neither axis, such as a gesture's start or end, goes to text
-    /// that can scroll vertically.
+    /// HERDR (B14): Whether the text claims a wheel event moving by `delta`
+    /// from enclosing scroll areas: true only while bounce is enabled/active or
+    /// the offset still has room to move in `delta`'s direction (matching
+    /// `clamp_vertical_scroll_offset_f64` in `f64`). A zero-delta event does
+    /// not claim scroll unless bounce is enabled/active.
     pub(super) fn takes_scroll(&self, delta: Point<Pixels>) -> bool {
-        // HERDR: only claim scroll from enclosing ScrollBounce areas when the
-        // input can still move in delta's direction (or bounce is enabled/active).
         if delta.y.abs() >= delta.x.abs() {
             if !self.overflows_vertically() {
                 return false;
@@ -3170,9 +3168,11 @@ impl<M: InputModeKind> InputBaseState<M> {
             if self.scroll_bounce || self.overscroll.offset() != 0. {
                 return true;
             }
-            let min_y = f64::from(f32::from(
-                (-self.scroll_size.height + self.input_bounds.size.height).min(px(0.)),
-            ));
+            let min_y = super::element::clamp_vertical_scroll_offset_f64(
+                f64::NEG_INFINITY,
+                self.content_height_f64(),
+                f64::from(f32::from(self.input_bounds.size.height)),
+            );
             let y = self.effective_scroll_y_f64();
             if delta.y < px(0.) {
                 y > min_y + f64::EPSILON
@@ -3194,18 +3194,6 @@ impl<M: InputModeKind> InputBaseState<M> {
             } else {
                 false
             }
-        }
-    }
-
-    /// Whether the text has room to scroll along the axis `delta` mostly
-    /// moves on. A trackpad swipe drifts a little off its axis, so the drift
-    /// alone does not claim the scroll.
-    #[allow(dead_code)]
-    fn overflows_along(&self, delta: Point<Pixels>) -> bool {
-        if delta.y.abs() >= delta.x.abs() {
-            delta.y != px(0.) && self.overflows_vertically()
-        } else {
-            self.scroll_size.width > self.input_bounds.size.width
         }
     }
 
@@ -9573,6 +9561,7 @@ mod tests {
             });
         });
     }
+
     #[gpui::test]
     fn copy_with_empty_selection_does_not_propagate_or_change_clipboard(cx: &mut TestAppContext) {
         let input_view = InputView::build(cx, |state| state.default_value("hello"));
@@ -9630,6 +9619,39 @@ mod tests {
             !parent_saw_copy.get(),
             "HERDR (B21): empty-selection Copy in a focused input must not propagate to ancestors"
         );
+    }
+
+    #[gpui::test]
+    fn takes_scroll_matches_clamp_at_fractional_line_height(cx: &mut TestAppContext) {
+        let text = (1..=50)
+            .map(|i| format!("row {i}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let input_view = InputView::build_textarea(cx, |state| state.default_value(text));
+        let mut cx = VisualTestContext::from_window(input_view.window_handle.into(), cx);
+        let input = input_view.input;
+        cx.update(|_window, cx| {
+            input.update(cx, |state, cx| {
+                // Reproduce Astra's exact fractional line-height case: 50 rows * 19.2px
+                // inside a 120px viewport.
+                let line_height = px(19.2);
+                state.input_bounds = Bounds::new(point(px(0.), px(0.)), size(px(300.), px(120.)));
+                if let Some(layout) = state.last_layout.as_mut() {
+                    layout.line_height = line_height;
+                }
+                state.scroll_size = size(px(300.), line_height * 50.0);
+                // Scroll all the way to the clamped bottom using the real clamp.
+                state.update_scroll_offset_parts(px(0.), -10_000.0, cx);
+                assert!(
+                    !state.takes_scroll(point(px(0.), px(-10.))),
+                    "at the real f64 clamped bottom, downward takes_scroll must be false"
+                );
+                assert!(
+                    state.takes_scroll(point(px(0.), px(10.))),
+                    "upward takes_scroll must still be true at the bottom"
+                );
+            });
+        });
     }
 
     /// `replace_all` on a multi-line (non-code-editor) input clears the

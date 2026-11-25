@@ -6493,6 +6493,95 @@ mod tests {
         swipe(&mut cx, 40.);
         assert_eq!(outer.offset().y, px(-40.), "outside the textarea it does");
     }
+
+    struct PlainNestedTextarea(Entity<crate::input::TextareaState>, gpui::ScrollHandle);
+
+    impl Render for PlainNestedTextarea {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .id("outer-viewport")
+                .w(px(240.))
+                .h(px(300.))
+                .overflow_y_scroll()
+                .track_scroll(&self.1)
+                .child(div().h(px(100.)))
+                .child(div().h(px(120.)).child(self.0.clone()))
+                .child(div().h(px(600.)))
+        }
+    }
+
+    #[gpui::test]
+    fn textarea_at_its_end_chains_to_a_plain_outer_scroll(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let text = (1..=40)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let outer = gpui::ScrollHandle::new();
+        let mut textarea = None;
+        let window = cx.open_window(size(px(240.), px(400.)), |window, cx| {
+            let state =
+                cx.new(|cx| crate::input::TextareaState::new(window, cx).default_value(text));
+            textarea = Some(state.clone());
+            PlainNestedTextarea(state, outer.clone())
+        });
+        let textarea = textarea.unwrap();
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        let swipe = |cx: &mut VisualTestContext, dy: f32| {
+            cx.simulate_event(gpui::ScrollEvent {
+                position: point(px(100.), px(160.)),
+                delta: gpui::ScrollDelta::Pixels(point(px(0.), px(dy))),
+                touch_phase: gpui::TouchPhase::Moved,
+                ..Default::default()
+            });
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        };
+        swipe(&mut cx, -40.);
+        let first_outer = outer.offset().y;
+        let first_inner = cx.update(|_, cx| textarea.read(cx).scroll_handle.offset().y);
+        for _ in 0..40 {
+            swipe(&mut cx, -40.);
+        }
+        assert!(first_inner < px(0.), "textarea scrolls first");
+        assert_eq!(first_outer, px(0.), "outer stays while textarea scrolls");
+        assert!(
+            outer.offset().y < px(0.),
+            "outer scrolls once textarea is at its end: {:?}",
+            outer.offset().y
+        );
+    }
+
+    #[gpui::test]
+    fn textarea_at_its_end_chains_to_a_bounce_outer(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let text = (1..=40)
+            .map(|line| format!("line {line}"))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let outer = gpui::ScrollHandle::new();
+        let window = cx.open_window(size(px(240.), px(400.)), |window, cx| {
+            let state =
+                cx.new(|cx| crate::input::TextareaState::new(window, cx).default_value(text));
+            NestedTextarea(state, outer.clone())
+        });
+        let mut cx = VisualTestContext::from_window(window.into(), cx);
+        cx.update(|window, cx| window.draw(cx).clear(cx));
+        for _ in 0..40 {
+            cx.simulate_event(gpui::ScrollEvent {
+                position: point(px(100.), px(160.)),
+                delta: gpui::ScrollDelta::Lines(point(0., -3.)),
+                ..Default::default()
+            });
+            cx.update(|window, cx| window.draw(cx).clear(cx));
+        }
+        assert!(
+            outer.offset().y < px(0.),
+            "bounce outer scrolls once textarea hits its end: {:?}",
+            outer.offset().y
+        );
+    }
+
     #[test]
     fn caret_snapping_preserves_logical_width_across_scales() {
         for width in [px(1.5), px(2.0)] {
