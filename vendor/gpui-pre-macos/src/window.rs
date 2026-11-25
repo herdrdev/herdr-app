@@ -4222,11 +4222,19 @@ extern "C" fn blurred_view_init_with_frame(
     unsafe {
         let view: *mut AnyObject =
             msg_send![super(this, class!(NSVisualEffectView)), initWithFrame: frame];
-        // A window-background material, whose tint and extra saturation
-        // `blurred_view_update_layer` strips, leaving only the blur. `Selection`, used before,
-        // has no `CABackdropLayer` on macOS 27, so nothing behind the window was blurred. (Setting
-        // a material also avoids the deprecated default, `AppearanceBased`.)
-        let _: () = msg_send![view, setMaterial: NSVisualEffectMaterial::UnderWindowBackground];
+        // HERDR: Keep `Selection` below macOS 26 so macOS 13-15 window blur looks unchanged;
+        // only macOS 26+ (where M7 also gates the CGS blur decision) uses upstream's
+        // `UnderWindowBackground` material.
+        let material = if is_macos_version_at_least(NSOperatingSystemVersion {
+            majorVersion: 26,
+            minorVersion: 0,
+            patchVersion: 0,
+        }) {
+            NSVisualEffectMaterial::UnderWindowBackground
+        } else {
+            NSVisualEffectMaterial::Selection
+        };
+        let _: () = msg_send![view, setMaterial: material];
         // The default, but blurring what's behind the window is this view's whole purpose.
         let _: () = msg_send![view, setBlendingMode: NSVisualEffectBlendingMode::BehindWindow];
         let _: () = msg_send![view, setState: NSVisualEffectState::Active];
