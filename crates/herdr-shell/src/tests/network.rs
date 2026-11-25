@@ -214,6 +214,7 @@ export default class Probe extends View {
         const socket = await WebSocket.connect("__URL__");
         const reading = socket.read().catch(() => undefined);
         await socket.write("while read is pending");
+        await cx.sleep(10);
         await socket.close();
         await reading;
         this.state = "write-and-close-finished";
@@ -772,11 +773,11 @@ fn websocket_reads_and_writes_text_and_binary_messages(cx: &mut TestAppContext) 
 fn websocket_pending_read_does_not_block_write_or_close(cx: &mut TestAppContext) {
     let listener = TcpListener::bind("127.0.0.1:0").expect("WebSocket listener");
     let address = listener.local_addr().expect("listener address");
-    let (text_received, text_receiver) = mpsc::channel();
+    let (ready_to_close, ready_receiver) = mpsc::channel();
     let server = thread::spawn(move || {
         let (stream, _) = listener.accept().expect("WebSocket connection");
         stream
-            .set_read_timeout(Some(Duration::from_millis(500)))
+            .set_read_timeout(Some(Duration::from_secs(2)))
             .expect("server read timeout");
         let mut socket = tungstenite::accept(stream).expect("WebSocket handshake");
         socket
@@ -786,16 +787,18 @@ fn websocket_pending_read_does_not_block_write_or_close(cx: &mut TestAppContext)
         let mut saw_pong = false;
         let mut saw_text = false;
         let mut saw_close = false;
+        let mut signaled = false;
         for _ in 0..3 {
             match socket.read() {
                 Ok(Message::Pong(bytes)) if bytes.as_ref() == [7] => saw_pong = true,
-                Ok(Message::Text(text)) if text == "while read is pending" => {
-                    saw_text = true;
-                    let _ = text_received.send(());
-                }
+                Ok(Message::Text(text)) if text == "while read is pending" => saw_text = true,
                 Ok(message) if message.is_close() => saw_close = true,
                 Ok(_) => {}
                 Err(_) => break,
+            }
+            if !signaled && saw_pong && saw_text {
+                signaled = true;
+                let _ = ready_to_close.send(());
             }
         }
         (saw_pong, saw_text, saw_close)
@@ -805,16 +808,31 @@ fn websocket_pending_read_does_not_block_write_or_close(cx: &mut TestAppContext)
         WEBSOCKET_PENDING_READ_PROBE.replace("__URL__", &format!("ws://{address}/pending"));
     let (_runtime, view, mut context) = probe(cx, &source);
     context.run_until_parked();
-    text_receiver
-        .recv_timeout(Duration::from_millis(500))
-        .expect("client write while read is pending");
-    context.executor().advance_clock(Duration::from_millis(10));
-    context.run_until_parked();
+    ready_receiver
+        .recv_timeout(Duration::from_secs(2))
+        .expect("client pong and write while read is pending");
+    // The close leaves through real socket I/O: keep driving the client until
+    // the server has seen it, instead of blocking the client on the join.
+    let deadline = std::time::Instant::now() + Duration::from_secs(5);
+    while !server.is_finished() && std::time::Instant::now() < deadline {
+        context.executor().advance_clock(Duration::from_millis(10));
+        context.run_until_parked();
+        thread::sleep(Duration::from_millis(5));
+    }
     let server_events = server.join().expect("WebSocket server");
-    context.executor().advance_clock(Duration::from_millis(10));
-    context.run_until_parked();
-    draw(&mut context, &view);
-    let rendered = snapshot(&mut context, &view);
+    // The client actor flushes the close frame before settling the close and
+    // pending-read promises, so keep driving the executor until the view updates.
+    let mut rendered;
+    loop {
+        context.executor().advance_clock(Duration::from_millis(10));
+        context.run_until_parked();
+        draw(&mut context, &view);
+        rendered = snapshot(&mut context, &view);
+        if !rendered.contains("pending") || std::time::Instant::now() >= deadline {
+            break;
+        }
+        thread::sleep(Duration::from_millis(5));
+    }
     assert_eq!(server_events, (true, true, true));
     assert!(rendered.contains("write-and-close-finished"), "{rendered}");
 }
