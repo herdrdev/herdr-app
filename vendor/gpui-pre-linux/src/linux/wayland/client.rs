@@ -1486,7 +1486,13 @@ impl WaylandConnection {
     }
 
     pub(crate) fn read_from_primary(&self) -> Option<gpui::ClipboardItem> {
-        self.0.borrow_mut().clipboard.read_primary()
+        let mut state = self.0.borrow_mut();
+        if state.globals.primary_selection_manager.is_none() {
+            // HERDR: Some compositors, including WSLg, only offer the regular clipboard.
+            state.clipboard.read()
+        } else {
+            state.clipboard.read_primary()
+        }
     }
 
     pub(crate) fn read_from_clipboard(&self) -> Option<gpui::ClipboardItem> {
