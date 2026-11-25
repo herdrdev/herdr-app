@@ -69,7 +69,8 @@ x11 = [
     "ashpd",
     "as-raw-xcb-connection",
     "x11rb",
-    "xkbcommon/x11",
+    # HERDR: load libxkbcommon-x11 at runtime so Wayland-only distros can launch.
+    "xkbcommon",
     "xim",
     "filedescriptor",
     "open",
