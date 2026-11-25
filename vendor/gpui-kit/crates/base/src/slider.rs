@@ -393,7 +393,13 @@ impl SliderState {
         };
 
         let value = self.percentage_to_value(percentage);
-        let value = snap_to_step(value, self.min, self.max, step);
+        // HERDR (B26): keep dragged slider values on multiples of `step` (matching 1ccf011)
+        // instead of rebasing the grid onto `min + k * step`.
+        let value = if is_step(step) {
+            ((value / step).round() * step).clamp(self.min, self.max)
+        } else {
+            value.clamp(self.min, self.max)
+        };
 
         if is_start {
             self.value.set_start(value);
@@ -1409,13 +1415,14 @@ mod tests {
     }
 
     #[gpui::test]
-    fn a_drag_snaps_to_steps_counted_from_min(cx: &mut gpui::TestAppContext) {
+    fn a_drag_snaps_to_multiples_of_step(cx: &mut gpui::TestAppContext) {
+        // HERDR (B26): keep dragged slider values on multiples of step (matching 1ccf011).
         let (state, cx) = sized(SliderState::new().min(3.).max(103.).step(5.), cx);
-        // 9 is between the steps 8 and 13, not next to 10.
+        // 6% of [3, 103] is 9.0 -> nearest multiple of 5 is 10.0 (not 8.0 = 3 + 5).
         drag(&state, 6., false, cx);
         assert_eq!(
             state.read_with(cx, |state, _| state.value()),
-            SliderValue::Single(8.)
+            SliderValue::Single(10.)
         );
     }
 
