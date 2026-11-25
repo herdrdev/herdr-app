@@ -248,6 +248,10 @@ fn semver(v: &str) -> (u64, u64, u64) {
     (p.next().unwrap_or(0), p.next().unwrap_or(0), p.next().unwrap_or(0))
 }
 
+pub fn legacy_child_lifetime(version: &Value) -> bool {
+    version.as_str().is_some_and(|v| semver(v) < (0, 1, 13))
+}
+
 /// Whether a core's hello says it can serve this app.
 pub fn check(hello: &Value) -> Result<(), Mismatch> {
     let generation = hello.get("generation").and_then(Value::as_u64).unwrap_or(0);
@@ -834,10 +838,10 @@ mod tests {
     }
 
     #[test]
-    fn cores_without_the_new_child_lifetime_default_require_an_update() {
+    fn cores_without_the_new_child_lifetime_default_can_still_serve_the_app() {
         for have in ["0.1.11", "0.1.12"] {
-            assert!(matches!(check(&hello(GENERATION, have, USES)), Err(Mismatch::TooOld { .. })));
+            assert_eq!(check(&hello(GENERATION, have, USES)), Ok(()));
         }
-        assert_eq!(check(&hello(GENERATION, core_min(), USES)), Ok(()));
+        assert!(matches!(check(&hello(GENERATION, "0.1.10", USES)), Err(Mismatch::TooOld { .. })));
     }
 }

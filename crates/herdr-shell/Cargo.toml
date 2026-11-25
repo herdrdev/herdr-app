@@ -1,26 +1,19 @@
 [package]
-name = "gpui-shell"
-description = "A scriptable application runtime for GPUI, built on gpui-base."
+name = "herdr-shell"
+description = "Herdr's scriptable mod runtime for GPUI, built on gpui-base."
 version = "0.7.1"
 keywords = ["desktop", "gpui", "javascript", "runtime"]
-license = "Apache-2.0"
-publish = false
+license.workspace = true
+publish.workspace = true
 edition.workspace = true
-repository = "https://github.com/longbridge/gpui-kit"
-homepage = "https://gpui-kit.com"
 
 [lib]
-name = "gpui_shell"
+name = "herdr_shell"
 path = "src/lib.rs"
-
-[[bin]]
-name = "gpui-shell"
-path = "src/bin/gpui-shell.rs"
 
 [features]
 # HERDR: retained, description-only checks for embedded applications.
 render-test-support = []
-gpui-fast = ["dep:gpui-fast", "dep:gpui-fast-platform", "gpui-base/gpui-fast", "gpui-fps/gpui-fast"]
 default = ["quickjs"]
 # The scripting engine. See `src/engine/mod.rs` for the surface an engine has
 # to provide; QuickJS is the only implementation today, and the feature exists
@@ -34,12 +27,10 @@ quickjs = [
 ]
 
 [dependencies]
-gpui.workspace = true
-gpui-fast = { workspace = true, optional = true }
-gpui_platform.workspace = true
-gpui-fast-platform = { workspace = true, optional = true }
-gpui-base = { workspace = true, features = ["inspector"] }
-gpui-fps.workspace = true
+gpui = { package = "gpui-pre", version = "=0.3.8" }
+gpui_platform = { package = "gpui-pre-platform", version = "=0.3.8", features = ["font-kit", "x11", "wayland", "runtime_shaders"] }
+gpui-base = { path = "../../vendor/gpui-kit/crates/base", version = "0.7.1", features = ["inspector"] }
+gpui-fps = { path = "../../vendor/gpui-kit/crates/fps", version = "0.7.1" }
 
 # Keep the bindings, runtime, and LLRT compatibility facade on the same release.
 rquickjs = { package = "quickjs-jit", version = "0.12.11", git = "https://github.com/longbridge/quickjs-jit", rev = "96593cd7a54440ac060a391b8baea7e9a3cf1393", features = [
@@ -58,36 +49,51 @@ async-channel = "2.5"
 fs2 = "0.4"
 sha2 = "0.10"
 wait-timeout = "0.2"
-reqwest = { workspace = true, features = ["blocking"], optional = true }
+reqwest = { package = "gpui-pre-reqwest", version = "=0.12.15", default-features = false, features = [
+    "charset",
+    "http2",
+    "macos-system-configuration",
+    "multipart",
+    "rustls-tls-native-roots",
+    "socks",
+    "stream",
+    "blocking",
+], optional = true }
 tungstenite = { version = "0.29", features = ["rustls-tls-webpki-roots", "url"], optional = true }
 
-anyhow.workspace = true
-instant.workspace = true
+anyhow = "1"
+instant = { version = "0.1", features = ["wasm-bindgen"] }
 # Decode only bytes fetched through the document's network grant. Codec features
 # are shared with GPUI, whose image loader previously decoded these documents.
 image = { version = "0.25", default-features = false }
-schemars.workspace = true
-semver.workspace = true
-serde.workspace = true
-serde_json.workspace = true
-smallvec.workspace = true
+schemars = "1"
+semver = "1"
+serde = { version = "1.0.219", features = ["derive"] }
+serde_json = "1"
+smallvec = "1"
 # HERDR: pure-Rust syntax engine (workspace uses regex-fancy, including Windows).
-syntect.workspace = true
-smol.workspace = true
+syntect = { version = "5.3.0", default-features = false, features = [
+    "parsing",
+    "default-syntaxes",
+    "regex-fancy",
+] }
+smol = "2"
 # Only to find the files an SVG image references; GPUI's version, which renders it.
 usvg = { version = "0.46", default-features = false }
-tracing.workspace = true
+tracing = "0.1.41"
 
 [dev-dependencies]
 tempfile = "3"
-gpui = { workspace = true, features = ["test-support"] }
-gpui-fast = { workspace = true, features = ["test-support"] }
+gpui = { package = "gpui-pre", version = "=0.3.8", features = ["test-support"] }
 
 [target.'cfg(unix)'.dependencies]
 libc = "0.2"
 
 [target.'cfg(target_os = "windows")'.dependencies]
-windows = { workspace = true, features = [
+windows = { version = "0.58.0", features = [
+    "Wdk",
+    "Wdk_System",
+    "Wdk_System_SystemServices",
     "Win32_Foundation",
     "Win32_Security",
     "Win32_Storage_FileSystem",
@@ -96,5 +102,23 @@ windows = { workspace = true, features = [
     "Win32_System_Threading",
 ] }
 
-[lints]
-workspace = true
+[lints.clippy]
+almost_complete_range = "allow"
+arc_with_non_send_sync = "allow"
+borrowed_box = "allow"
+dbg_macro = "deny"
+let_underscore_future = "allow"
+manual_is_multiple_of = "allow"
+map_entry = "allow"
+module_inception = "allow"
+non_canonical_partial_ord_impl = "allow"
+reversed_empty_ranges = "allow"
+single_range_in_vec_init = "allow"
+style = { level = "allow", priority = -1 }
+todo = "deny"
+nonminimal_bool = "allow"
+too_many_arguments = "allow"
+type_complexity = "allow"
+# Temporarily allow this until we can migrate to the new APIs.
+# https://github.com/longbridge/gpui-kit/pull/2149
+useless_conversion = "allow"

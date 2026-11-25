@@ -1,5 +1,5 @@
 //! Asynchronous text files for mods. Writes reject a stale editor snapshot.
-use gpui_shell::{HostError, HostValue};
+use herdr_shell::{HostError, HostValue};
 use std::collections::{HashMap, hash_map::Entry};
 use std::io::{Read, Write};
 use std::path::Path;

@@ -28,7 +28,7 @@ use gpui::{App, AppContext as _, Entity, EntityId, FocusHandle, Subscription, Wi
 use gpui_base::{ScrollbarHandle, VirtualListScrollHandle};
 use gpui_base::dock::{DockArea, DockEvent};
 use gpui_base::input::{
-    EditorState, InputBaseState, InputEditorStyle, InputEvent, InputModeKind, InputState,
+    EditorState, InputBaseState, InputEditorStyle, InputEvent, InputModeKind, InputState, TabSize,
     TextareaState,
 };
 use gpui_base::slider::{SliderEvent, SliderScale, SliderState, SliderValue};
@@ -194,6 +194,9 @@ pub(crate) struct EditorOptions {
     pub folding: bool,
     pub readonly: bool,
     pub soft_wrap: bool,
+    /// Columns per tab and spaces per indent; checked before it reaches the state.
+    pub tab_size: f64,
+    pub hard_tabs: bool,
     pub syntax: HashMap<String, String>,
     pub font_family: Option<String>,
     pub font_size: Option<f32>,
@@ -208,6 +211,8 @@ impl Default for EditorOptions {
             folding: true,
             readonly: false,
             soft_wrap: false,
+            tab_size: TabSize::default().tab_size as f64,
+            hard_tabs: TabSize::default().hard_tabs,
             syntax: HashMap::new(),
             font_family: None,
             font_size: None,
@@ -463,6 +468,7 @@ impl EntityStore {
     pub(crate) fn create_editor(
         &mut self,
         options: EditorOptions,
+        tab: TabSize,
         style: InputEditorStyle,
         application: Option<Rc<ApplicationGeneration>>,
         window: &mut Window,
@@ -474,7 +480,8 @@ impl EntityStore {
                 .language(options.language)
                 .line_number(options.line_numbers)
                 .folding(options.folding)
-                .soft_wrap(options.soft_wrap);
+                .soft_wrap(options.soft_wrap)
+                .tab_size(tab);
             state.set_readonly(options.readonly, cx);
             state.set_editor_style(style);
             state.set_highlighter_factory(
