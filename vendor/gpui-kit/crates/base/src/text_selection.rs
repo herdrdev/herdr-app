@@ -220,6 +220,8 @@ pub struct TextSelectionRegistration {
     bounds: Bounds<Pixels>,
     scroll_offset: Point<Pixels>,
     scope: TextSelectionScopeId,
+    // HERDR: confines drags to one host surface (e.g. a single mod's ShellRoot).
+    boundary: Option<EntityId>,
     document_order: u64,
     paint_order: bool,
     text_bounds: Vec<Bounds<Pixels>>,
@@ -236,6 +238,7 @@ impl TextSelectionRegistration {
             bounds,
             scroll_offset: Point::default(),
             scope: TextSelectionScopeId::default(),
+            boundary: None,
             document_order: 0,
             paint_order: false,
             text_bounds: Vec::new(),
@@ -980,6 +983,9 @@ impl TextSelectionHandle {
         if let Some(scope) = current_text_selection_scope(window.window_handle().window_id(), cx) {
             registration.scope = scope;
         }
+        // HERDR: inherit the enclosing host surface boundary, if any.
+        registration.boundary =
+            current_text_selection_boundary(window.window_handle().window_id(), cx);
         let Some(state) = WindowSelectionState::existing(window, cx) else {
             return;
         };
@@ -2168,7 +2174,15 @@ impl WindowSelectionState {
         };
         let anchor = self.endpoint(anchor_point, None, cx);
         let drag = EdgeDrag::begin(edge, snapshot.edge(edge), finger);
-        let cursor = self.endpoint(drag.text_position(finger), Some(window), cx);
+        // HERDR: confine edge drags to the anchor's host surface boundary.
+        let boundary = anchor.entity_id().and_then(|id| {
+            self.participants
+                .borrow()
+                .get(&id)
+                .map(|r| r.registration.boundary)
+        });
+        let cursor =
+            self.endpoint_in_boundary(drag.text_position(finger), Some(window), boundary, cx);
         self.did_hit_text = anchor.inside_text || cursor.inside_text;
         self.anchor = Some(anchor);
         self.cursor = Some(cursor);
@@ -2439,7 +2453,18 @@ impl WindowSelectionState {
             .inside
             .then(|| endpoint.participant.clone())
             .flatten();
-        let anchor = previous_anchor.unwrap_or_else(|| endpoint.clone());
+        // HERDR: shift-click only extends an anchor within the same host surface boundary.
+        let boundary_of = |endpoint: &SelectionEndpoint| {
+            endpoint.entity_id().and_then(|id| {
+                self.participants
+                    .borrow()
+                    .get(&id)
+                    .map(|r| r.registration.boundary)
+            })
+        };
+        let anchor = previous_anchor
+            .filter(|anchor| boundary_of(anchor) == boundary_of(&endpoint))
+            .unwrap_or_else(|| endpoint.clone());
         self.anchor = Some(anchor.clone());
         self.cursor = Some(endpoint.clone());
         self.did_hit_text = anchor.inside_text || endpoint.inside_text;
@@ -2460,7 +2485,11 @@ impl WindowSelectionState {
         if !self.is_selecting {
             return;
         }
-        let endpoint = self.endpoint(position, window, cx);
+        // HERDR: keep drags inside the anchor's host surface boundary.
+        let boundary = self
+            .anchor_registration()
+            .map(|(_, registration)| registration.boundary);
+        let endpoint = self.endpoint_in_boundary(position, window, boundary, cx);
         match self.unit.clone() {
             Some(unit) => self.extend_unit(&unit, position, endpoint, cx),
             None => {
@@ -2480,6 +2509,17 @@ impl WindowSelectionState {
         window: Option<&Window>,
         cx: &App,
     ) -> SelectionEndpoint {
+        self.endpoint_in_boundary(position, window, None, cx)
+    }
+
+    // HERDR: resolve selection endpoints restricted to `boundary` when set.
+    fn endpoint_in_boundary(
+        &mut self,
+        position: Point<Pixels>,
+        window: Option<&Window>,
+        boundary: Option<Option<EntityId>>,
+        cx: &App,
+    ) -> SelectionEndpoint {
         self.prune_dead_participants();
         let mut hit: Option<(ParticipantRegistration, f32)> = None;
         let mut predecessor: Option<ParticipantRegistration> = None;
@@ -2487,6 +2527,7 @@ impl WindowSelectionState {
 
         for registration in self.participants.borrow().values() {
             if registration.registration.scope != self.active_scope
+                || boundary.is_some_and(|boundary| registration.registration.boundary != boundary)
                 || registration.participant.upgrade().is_none()
             {
                 continue;
@@ -2645,6 +2686,10 @@ impl WindowSelectionState {
         let Some(cursor_registration) = self.participants.borrow().get(&cursor).cloned() else {
             return false;
         };
+        // HERDR: participants in another host surface boundary never join the selection.
+        if registration.registration.boundary != anchor_registration.registration.boundary {
+            return false;
+        }
         let start = anchor_registration
             .document_order
             .min(cursor_registration.document_order);
@@ -2753,7 +2798,8 @@ impl WindowSelectionState {
         let mut bottom = None::<Pixels>;
         for participant in self.participants.borrow().values() {
             let registration = &participant.registration;
-            if registration.scope != self.active_scope {
+            // HERDR: ignore clipped text in other host surface boundaries.
+            if registration.scope != self.active_scope || registration.boundary != anchor.boundary {
                 continue;
             }
             let mask = registration.hitbox.content_mask.bounds;
@@ -2842,11 +2888,22 @@ struct PendingTextSelectionScopes(HashMap<gpui::WindowId, TextSelectionScopeId>)
 impl Global for PendingTextSelectionScopes {}
 
 #[derive(Default)]
-struct TextSelectionScopeStacks(HashMap<gpui::WindowId, Vec<TextSelectionScopeId>>);
+// HERDR: stack carries both selection scopes and host surface boundaries.
+struct TextSelectionScopeStacks(HashMap<gpui::WindowId, Vec<TextSelectionContext>>);
+
+#[derive(Clone, Copy, Default)]
+struct TextSelectionContext {
+    scope: Option<TextSelectionScopeId>,
+    boundary: Option<EntityId>,
+}
 
 impl Global for TextSelectionScopeStacks {}
 
-fn push_text_selection_scope(window_id: gpui::WindowId, scope: TextSelectionScopeId, cx: &mut App) {
+fn push_text_selection_context(
+    window_id: gpui::WindowId,
+    context: TextSelectionContext,
+    cx: &mut App,
+) {
     if !cx.has_global::<TextSelectionScopeStacks>() {
         cx.set_global(TextSelectionScopeStacks::default());
     }
@@ -2854,7 +2911,7 @@ fn push_text_selection_scope(window_id: gpui::WindowId, scope: TextSelectionScop
         .0
         .entry(window_id)
         .or_default()
-        .push(scope);
+        .push(context);
 }
 
 fn pop_text_selection_scope(window_id: gpui::WindowId, cx: &mut App) {
@@ -2877,18 +2934,47 @@ fn current_text_selection_scope(
             cx.global::<TextSelectionScopeStacks>()
                 .0
                 .get(&window_id)
-                .and_then(|stack| stack.last().copied())
+                .and_then(|stack| stack.iter().rev().find_map(|context| context.scope))
         })
         .flatten()
 }
 
+#[cfg(test)]
 fn with_text_selection_scope<T>(
     window_id: gpui::WindowId,
     scope: TextSelectionScopeId,
     cx: &mut App,
     callback: impl FnOnce(&mut App) -> T,
 ) -> T {
-    push_text_selection_scope(window_id, scope, cx);
+    with_text_selection_context(
+        window_id,
+        TextSelectionContext {
+            scope: Some(scope),
+            boundary: None,
+        },
+        cx,
+        callback,
+    )
+}
+
+fn current_text_selection_boundary(window_id: gpui::WindowId, cx: &App) -> Option<EntityId> {
+    cx.has_global::<TextSelectionScopeStacks>()
+        .then(|| {
+            cx.global::<TextSelectionScopeStacks>()
+                .0
+                .get(&window_id)
+                .and_then(|stack| stack.iter().rev().find_map(|context| context.boundary))
+        })
+        .flatten()
+}
+
+fn with_text_selection_context<T>(
+    window_id: gpui::WindowId,
+    context: TextSelectionContext,
+    cx: &mut App,
+    callback: impl FnOnce(&mut App) -> T,
+) -> T {
+    push_text_selection_context(window_id, context, cx);
     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| callback(cx)));
     pop_text_selection_scope(window_id, cx);
     match result {
@@ -2901,6 +2987,18 @@ fn with_text_selection_scope<T>(
 pub struct TextSelection;
 
 impl TextSelection {
+    /// HERDR: keeps a drag within one host surface while allowing its text blocks to join.
+    #[doc(hidden)]
+    pub fn boundary(id: EntityId, element: impl IntoElement) -> impl IntoElement {
+        TextSelectionScopeMarker {
+            context: TextSelectionContext {
+                scope: None,
+                boundary: Some(id),
+            },
+            element: element.into_element(),
+        }
+    }
+
     /// Returns whether `position` hits selectable text in the active scope.
     ///
     /// Uses the current frame's registered text geometry and hitboxes without
@@ -3132,13 +3230,16 @@ pub(crate) fn text_selection_scope(
     element: impl IntoElement,
 ) -> impl IntoElement {
     TextSelectionScopeMarker {
-        scope,
+        context: TextSelectionContext {
+            scope: Some(scope),
+            boundary: None,
+        },
         element: element.into_element(),
     }
 }
 
 struct TextSelectionScopeMarker<E> {
-    scope: TextSelectionScopeId,
+    context: TextSelectionContext,
     element: E,
 }
 
@@ -3162,7 +3263,7 @@ impl<E: Element> Element for TextSelectionScopeMarker<E> {
         cx: &mut App,
     ) -> (LayoutId, Self::RequestLayoutState) {
         let window_id = window.window_handle().window_id();
-        with_text_selection_scope(window_id, self.scope, cx, |cx| {
+        with_text_selection_context(window_id, self.context, cx, |cx| {
             self.element.request_layout(id, inspector_id, window, cx)
         })
     }
@@ -3177,7 +3278,7 @@ impl<E: Element> Element for TextSelectionScopeMarker<E> {
         cx: &mut App,
     ) -> Self::PrepaintState {
         let window_id = window.window_handle().window_id();
-        with_text_selection_scope(window_id, self.scope, cx, |cx| {
+        with_text_selection_context(window_id, self.context, cx, |cx| {
             self.element
                 .prepaint(id, inspector_id, bounds, request_layout, window, cx)
         })
@@ -3194,7 +3295,7 @@ impl<E: Element> Element for TextSelectionScopeMarker<E> {
         cx: &mut App,
     ) {
         let window_id = window.window_handle().window_id();
-        with_text_selection_scope(window_id, self.scope, cx, |cx| {
+        with_text_selection_context(window_id, self.context, cx, |cx| {
             self.element.paint(
                 id,
                 inspector_id,
@@ -6149,5 +6250,102 @@ mod tests {
         press_at(text, 5, 1, false, cx);
         assert_eq!(drag_to(text, 9, cx), "wo t");
         release(1, cx);
+    }
+}
+
+// HERDR: verify host-surface selection boundary containment.
+#[cfg(test)]
+mod herdr_boundary_tests {
+    use gpui::{
+        Context, InteractiveElement as _, IntoElement, MouseButton, MouseDownEvent, MouseMoveEvent,
+        MouseUpEvent, ParentElement as _, Render, Styled as _, TestAppContext, Window, div, point,
+        px,
+    };
+
+    use super::*;
+    use crate::SelectableText;
+
+    struct Marker;
+
+    struct TwoSurfaces {
+        a: Entity<Marker>,
+        b: Entity<Marker>,
+    }
+
+    impl Render for TwoSurfaces {
+        fn render(&mut self, _: &mut Window, _: &mut Context<Self>) -> impl IntoElement {
+            div()
+                .flex()
+                .flex_col()
+                .w(px(300.))
+                .child(TextSelectionLayer)
+                .child(TextSelection::boundary(
+                    self.a.entity_id(),
+                    div()
+                        .flex()
+                        .flex_col()
+                        .child(
+                            div()
+                                .debug_selector(|| "a1".into())
+                                .child(SelectableText::new("a1", "alpha")),
+                        )
+                        .child(
+                            div()
+                                .debug_selector(|| "a2".into())
+                                .child(SelectableText::new("a2", "beta")),
+                        ),
+                ))
+                .child(TextSelection::boundary(
+                    self.b.entity_id(),
+                    div()
+                        .debug_selector(|| "b1".into())
+                        .child(SelectableText::new("b1", "gamma")),
+                ))
+        }
+    }
+
+    #[gpui::test]
+    fn boundary_confines_drag_to_one_host_surface(cx: &mut TestAppContext) {
+        cx.update(crate::init);
+        let (_, vcx) = cx.add_window_view(|_, cx| TwoSurfaces {
+            a: cx.new(|_| Marker),
+            b: cx.new(|_| Marker),
+        });
+        vcx.update(|window, cx| window.draw(cx).clear(cx));
+
+        let a1 = vcx.debug_bounds("a1").unwrap();
+        let b1 = vcx.debug_bounds("b1").unwrap();
+        let start = point(a1.left() + px(1.), a1.center().y);
+        let end = point(b1.right() - px(1.), b1.center().y);
+
+        vcx.simulate_event(MouseDownEvent {
+            position: start,
+            modifiers: gpui::Modifiers::default(),
+            button: MouseButton::Left,
+            click_count: 1,
+            first_mouse: false,
+        });
+        vcx.simulate_event(MouseMoveEvent {
+            position: end,
+            pressed_button: Some(MouseButton::Left),
+            modifiers: gpui::Modifiers::default(),
+        });
+        vcx.simulate_event(MouseUpEvent {
+            position: end,
+            button: MouseButton::Left,
+            modifiers: gpui::Modifiers::default(),
+            click_count: 1,
+        });
+
+        let selected = vcx.update(|window, cx| {
+            let _ = window.draw(cx);
+            TextSelection::selected_text(window, cx)
+        });
+        assert!(selected.contains("alpha"), "expected a1 in {selected:?}");
+        assert!(selected.contains("beta"), "expected a2 in {selected:?}");
+        assert!(
+            !selected.contains("gamma"),
+            "boundary B must not join boundary A's drag: {selected:?}"
+        );
     }
 }
