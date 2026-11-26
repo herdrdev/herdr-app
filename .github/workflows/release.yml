@@ -76,10 +76,10 @@ jobs:
         run: |
           set -euo pipefail
           core_src=$(mktemp -d)
+          # Master already carries the RHEL 8 systemd fix. The patch file in
+          # distribution/rhel8 is kept for pinned-tag builds; applying it to
+          # master would conflict.
           git clone --depth 1 --branch master https://github.com/herdrdev/herdr-core.git "$core_src"
-          # Keep the RHEL 8 patch here instead of in a core fork. Re-derive it
-          # against master when the core's systemd code changes.
-          git -C "$core_src" apply "$GITHUB_WORKSPACE/distribution/rhel8/herdr-core-rhel8.patch"
           git -C "$core_src" submodule update --init --depth 1
           cargo build --manifest-path "$core_src/Cargo.toml" --locked --release -p herdr-core
           work=$(mktemp -d)
