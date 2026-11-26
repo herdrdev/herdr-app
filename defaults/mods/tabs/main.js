@@ -2,6 +2,8 @@ import { View, div, svg, image } from "gpui-kit";
 import { h_flex, ScrollHandle } from "gpui-base";
 import { spaces, panes, run, openOverlay, theme, window, shared, layout, settings } from "herdr";
 
+const TAB_GAP = 3;
+
 function find(node, id) {
   if (node?.id === id) return node;
   for (const child of node?.children ?? []) {
@@ -29,11 +31,57 @@ function label(tab, lead) {
 
 export default class Tabs extends View {
   init() {
-    this.pressed = null;
+    this.drag = null;
+    this.widths = new Map();
     this.scroll = ScrollHandle.new();
     try { this.panels = JSON.parse(localStorage.getItem("panels") ?? "{}"); } catch { this.panels = {}; }
     if (!this.panels || typeof this.panels !== "object" || Array.isArray(this.panels)) this.panels = {};
     this.swipe = { acc: 0, steps: 0, at: 0, last: 0 };
+  }
+
+  dragTab(e, cx, shown, zoom, released = false) {
+    const drag = this.drag;
+    if (!drag) return;
+    if (released || e.pressed_button !== "left") {
+      this.drag = null;
+      cx.notify();
+      if (!released) return;
+    }
+    const { local_position: p, bounds } = e;
+    if (!p || !bounds) return;
+    const inside = p.x >= 0 && p.x < bounds.width && p.y >= 0 && p.y < bounds.height;
+    const { x, y } = e.position;
+    const down = drag.down;
+    if (!drag.preview && Math.max(Math.abs(x - down.x), Math.abs(y - down.y)) < 4 * zoom) {
+      const b = drag.bounds;
+      if (released && inside && x >= b.x && x < b.x + b.width && y >= b.y && y < b.y + b.height) {
+        run("tab.select", { id: drag.id });
+      }
+      return;
+    }
+
+    const from = shown.findIndex(tab => tab.id === drag.id);
+    if (from < 0) return;
+    let to = from;
+    if (inside) {
+      const pointer = p.x / zoom + this.scroll.offset().x;
+      let left = 0;
+      to = 0;
+      // Compare with the resting tab centers so the preview cannot move its own thresholds.
+      for (const tab of shown) {
+        const width = this.widths.get(tab.id) / zoom;
+        if (!Number.isFinite(width)) { to = from; break; }
+        if (tab.id !== drag.id && pointer >= left + width / 2) to++;
+        left += width + TAB_GAP;
+      }
+    }
+    if (released) {
+      if (to !== from) run("tab.move", { id: drag.id, index: to + 1 });
+    } else {
+      const wasInside = drag.preview?.inside;
+      drag.preview = { inside, to, x: (p.x - drag.grab.x) / zoom, y: (p.y - drag.grab.y) / zoom };
+      if (inside || wasInside) cx.notify();
+    }
   }
 
   // One tab per wheel notch. A touchpad or smooth-scrolling mouse sends many
@@ -91,6 +139,14 @@ export default class Tabs extends View {
     const t = theme();
     const space = spaces().find(p => p.active);
     const shown = space?.tabs ?? [];
+    const zoom = settings().zoom;
+    const ids = new Set(shown.map(tab => tab.id));
+    if (this.drag && (this.drag.space !== space?.id || !ids.has(this.drag.id))) this.drag = null;
+    const drag = this.drag, preview = drag?.preview;
+    const held = preview?.inside ? shown.find(tab => tab.id === drag.id) : null;
+    const order = held ? shown.filter(tab => tab !== held) : shown;
+    if (held) order.splice(preview.to, 0, held);
+    for (const id of this.widths.keys()) if (!ids.has(id)) this.widths.delete(id);
     const active = shown.findIndex(tab => tab.active);
     const selected = shown[active]?.id;
     if (selected !== this.selected || active !== this.selectedIndex) {
@@ -101,32 +157,40 @@ export default class Tabs extends View {
     const stop = (_e, cx) => cx.stop_propagation();
     const button = (id, label, action) => div().id(id).size(26).flex_none().flex().items_center().justify_center().rounded(6).text_color(t.dim).hover(s => s.bg(t.hover).text_color(t.foreground))
       .on_mouse_down("left", stop).on_click(action).child(label);
-    const item = (c, i) => {
+    const item = (c, i, floating = false) => {
       const lead = panes().find(p => p.tab === c.id && p.program?.agent) ?? panes().find(p => p.tab === c.id);
       const program = lead?.program;
       const name = label(c, lead);
-      return h_flex().id(`tab-${c.id}`).h(29).px(10).gap(7).rounded(7).items_center().flex_none().text_size(12.8)
-        // A rename or status dot on this or an earlier tab can push the active one out.
-        .when(i <= active, el => el.on_size_change((_size, cx) => { this.scroll.scroll_to_item(active); cx.notify(); }))
-        .border(1).border_color(c.active ? t.border : t.chrome).bg(c.active ? t.raised : t.chrome).text_color(c.active ? t.foreground : t.muted)
-        .hover(s => s.bg(t.hover))
-        .on_mouse_down("left", (e, cx) => { cx.stop_propagation(); this.pressed = i; if (e.click_count === 2) run("tab.rename", { id: c.id }); })
-        .on_mouse_up("left", () => {
-          const from = this.pressed; this.pressed = null;
-          if (from !== null && from !== i) run("tab.move", { id: shown[from].id, index: space.tabs.findIndex(x => x.id === c.id) + 1 });
-          else run("tab.select", { id: c.id });
-        })
-        .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); openOverlay({ mod: "menu", kind: "popup", width: 200, props: { tab: "tab", target: { id: c.id, space: space.id } } }); })
+      return h_flex().id(floating ? "tab-drag" : `tab-${c.id}`).h(29).px(10).gap(7).rounded(7).items_center().flex_none().text_size(12.8)
+        .border(1).border_color(c.active || floating ? t.border : t.chrome).bg(floating ? t.hover : c.active ? t.raised : t.chrome).text_color(c.active ? t.foreground : t.muted)
+        .when(!floating, el => el
+          .on_size_change((size, cx) => {
+            this.widths.set(c.id, size.width);
+            // A rename or status dot on this or an earlier tab can push the active one out.
+            if (!this.drag && i <= active) { this.scroll.scroll_to_item(active); cx.notify(); }
+          })
+          .when(!held, tab => tab.hover(s => s.bg(t.hover)))
+          .on_mouse_down("left", (e, cx) => {
+            cx.stop_propagation();
+            if (!e.bounds || !e.local_position) return;
+            this.drag = { id: c.id, space: space.id, down: e.position, grab: e.local_position, bounds: e.bounds, preview: null };
+            this.widths.set(c.id, e.bounds.width);
+            if (e.click_count === 2) run("tab.rename", { id: c.id });
+            cx.notify();
+          })
+          .on_mouse_down("right", (_e, cx) => { cx.stop_propagation(); openOverlay({ mod: "menu", kind: "popup", width: 200, props: { tab: "tab", target: { id: c.id, space: space.id } } }); }))
         .when(Boolean(program?.icon), el => el.child(program.tint ? svg(program.icon).size(14).text_color(t.muted) : image(program.icon).size(14)))
         .child(div().max_w(170).truncate().child(c.zoomed ? `${name} Z` : name))
         .when(c.status === "working", el => el.child(svg("mods/workspace-chrome/spinner.svg").size(12).flex_none().text_color(t.working).spin(900)))
         .when(c.status === "blocked" || c.status === "done", el => el.child(div().size(6).rounded(3).bg(t[c.status])))
-        .when(c.active, el => el.child(div().id(`close-${c.id}`).text_color(t.dim).on_mouse_down("left", stop).on_click((_e, cx) => { cx.stop_propagation(); run("tab.close", { id: c.id }); }).child(svg("mods/pane/close.svg").size(12))));
+        .when(c.active, el => el.child(div().id(`close-${c.id}`).text_color(t.dim)
+          .when(!floating, close => close.on_mouse_down("left", stop).on_click((_e, cx) => { cx.stop_propagation(); run("tab.close", { id: c.id }); }))
+          .child(svg("mods/pane/close.svg").size(12))));
     };
     const root = layout(), sidebar = find(root, "sidebar"), w = window();
     // Old saved rails and a dragged-narrow sidebar can be smaller than the window buttons.
     const lightsPadding = w?.platform === "macos" && w.titlebar === "none" && !w.fullscreen && root?.traffic_lights
-      ? Math.max(10, (root.traffic_lights[0] + 64) / settings().zoom - (sidebar?.hidden ? 0 : sidebar?.size?.px ?? 0))
+      ? Math.max(10, (root.traffic_lights[0] + 64) / zoom - (sidebar?.hidden ? 0 : sidebar?.size?.px ?? 0))
       : 10;
     const panel = find(root, "panel"), body = find(root, "panel-body");
     const enabled = shared("workspace.panels") ?? ["files", "changes"];
@@ -142,11 +206,16 @@ export default class Tabs extends View {
         }).child(svg(icon).size(14)).child(label);
     };
     return h_flex().size_full().min_w(0).px(10).pl(lightsPadding).gap(3).items_center().bg(t.chrome).border_b(1).border_color(t.border)
-      .on_mouse_up("left", () => { this.pressed = null; })
       .on_scroll_wheel(e => this.wheel(e))
-      .child(h_flex().id("tab-scroll").flex_1().min_w(0).h_full().items_center().gap(3).overflow_x_scrollbar().track_scroll(this.scroll)
-        .on_size_change((_size, cx) => { if (active >= 0) { this.scroll.scroll_to_item(active); cx.notify(); } })
-        .children(shown.map(item)))
+      .child(div().id("tab-strip").relative().flex_1().min_w(0).h_full().overflow_hidden()
+        .when(drag, el => el.on_window_mouse_move((e, cx) => this.dragTab(e, cx, shown, zoom)))
+        .on_window_mouse_up("left", (e, cx) => this.dragTab(e, cx, shown, zoom, true))
+        .child(h_flex().id("tab-scroll").size_full().items_center().gap(TAB_GAP).overflow_x_scrollbar().track_scroll(this.scroll)
+          .on_size_change((_size, cx) => { if (!this.drag && active >= 0) { this.scroll.scroll_to_item(active); cx.notify(); } })
+          .children(order.map((tab, i) => tab === held
+            ? div().id("tab-drop").h(29).w(drag.bounds.width / zoom).flex_none().rounded(7).border_1().border_color(t.accent)
+            : item(tab, i))))
+        .when(held, el => el.child(item(held, preview.to, true).absolute().left(preview.x).top(preview.y).w(drag.bounds.width / zoom))))
       .child(button("tab-new", "+", () => openOverlay({ mod: "new-menu", kind: "popup", width: 250, height: 512 })))
       .when(enabled.includes("files"), el => el.child(panelButton("files", "Files", "mods/files/file.svg")))
       .when(enabled.includes("changes"), el => el.child(panelButton("changes", "Changes", "mods/changes/changes.svg")))

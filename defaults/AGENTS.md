@@ -128,6 +128,8 @@ the highlighted line shows where it will land.
   `recent`).
   The + menu opens agents in unnamed tabs. The tab bar follows the
   agent and shows the shell again after exit. Double-click a tab to set its name.
+  Drag a tab within the bar to reorder it. The held tab follows the pointer
+  and the outline shows where it will land.
 - A tab can be **settled** (`tab.settle`): put away on this screen, still running;
   `settled` on each tab. The shipped layouts don't use it (they list every
   tab); a mod that does can hide or fold settled tabs. Showing one, or an
