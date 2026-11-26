@@ -122,13 +122,9 @@ fn unix_agent_argv(sh: String, cmd: Vec<String>, login: bool) -> Vec<String> {
         return run;
     }
     let fish = name == Some("fish");
-    let script = match (fish, login) {
-        (true, true) => "command $argv[2..]; exec $argv[1] -li",
-        (true, false) => "command $argv[2..]; exec $argv[1] -i",
-        (false, true) => "\"$@\"; exec \"$0\" -li",
-        (false, false) => "\"$@\"; exec \"$0\" -i",
-    };
-    let mut run = vec![sh.clone(), if login { "-lic" } else { "-ic" }.into(), script.into(), sh];
+    let flags = if login { "-li" } else { "-i" };
+    let script = if fish { crate::remote_shell::fish_agent(flags) } else { crate::remote_shell::posix_agent(flags) };
+    let mut run = vec![sh.clone(), if login { "-lic" } else { "-ic" }.into(), script, sh];
     run.extend(cmd);
     run
 }
@@ -6283,12 +6279,8 @@ mod tests {
                 assert_eq!(run[1], if login { "-lic" } else { "-ic" });
                 assert_eq!(run[3], sh);
                 assert_eq!(run[4..], cmd);
-                let expected = match (sh.ends_with("/fish"), login) {
-                    (true, true) => "command $argv[2..]; exec $argv[1] -li",
-                    (true, false) => "command $argv[2..]; exec $argv[1] -i",
-                    (false, true) => "\"$@\"; exec \"$0\" -li",
-                    (false, false) => "\"$@\"; exec \"$0\" -i",
-                };
+                let flags = if login { "-li" } else { "-i" };
+                let expected = if sh.ends_with("/fish") { crate::remote_shell::fish_agent(flags) } else { crate::remote_shell::posix_agent(flags) };
                 assert_eq!(run[2], expected);
                 // Whatever the wrapper, a pane shows the agent it runs, not the shell.
                 let agent = super::unix_agent_argv(sh.into(), vec!["cursor-agent".into()], login);
