@@ -1575,10 +1575,7 @@ fn caret_keys(vt: &mut Vt, rows: &[Rc<Vec<vt::Cell>>], from: (u16, u16), to: (u1
     // next line: a right arrow past the last character wraps in some editors.
     let tx = rows.get(ty as usize).map_or(tx, |row| {
         let end = row.iter().rposition(|c| !c.text.is_empty()).map_or(0, |x| x + if row[x].wide { 2 } else { 1 });
-        // The caret's own cell stays a position even past the printed text (a program
-        // can move its cursor there without writing), so a click on it moves nothing.
-        let end = if ty == fy { (end as u16).max(fx) } else { end as u16 };
-        tx.min(end)
+        tx.min(end as u16)
     });
     let positions = |lo: u16, hi: u16| (lo..hi).filter(|&x| !tail(x as usize, ty as usize)).count() as u16;
     let mut out = Vec::new();
@@ -3865,20 +3862,6 @@ mod tests {
         // Application cursor keys mode: arrows come out in the program's mode.
         vt.write(b"\x1b[?1h");
         assert_eq!(caret_keys(&mut vt, &rows, (5, 2), (5, 0)), b"\x1bOA\x1bOA\x1bOD\x1bOD".to_vec());
-    }
-
-    #[test]
-    fn option_click_on_the_caret_moves_nothing_even_past_the_text() {
-        use super::caret_keys;
-        let mut vt = Vt::new(20, 3);
-        // A program puts its cursor at column 10 without writing anything after "abc".
-        vt.write(b"abc\x1b[1;11H");
-        let frame = vt.frame();
-        assert_eq!(frame.cursor_cell, Some((10, 0)));
-        let rows = frame.rows;
-        assert!(caret_keys(&mut vt, &rows, (10, 0), (10, 0)).is_empty());
-        // Clicks left of the caret still count from it.
-        assert_eq!(caret_keys(&mut vt, &rows, (10, 0), (8, 0)), b"\x1b[D\x1b[D".to_vec());
     }
 
     #[test]
