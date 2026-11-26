@@ -320,6 +320,25 @@ fn clamp_auto_grow_vertical_scroll_offset(
     }
 }
 
+/// HERDR: the least height that shows `rows` lines, in whole device pixels.
+///
+/// The window snaps every box's edges to device pixels. `rows × line_height`
+/// is a fraction of a pixel at most text sizes and scales (14px text is about
+/// 22.65px a line), so a box that asked for exactly that could come out a
+/// sliver short of its lines: it then had that sliver to scroll, showed a
+/// scrollbar, and its cursor-follow scrolled the sliver on one cursor move and
+/// back on the next (the text moved a pixel on every arrow key). A height of
+/// whole device pixels keeps the snapped box at least as tall as its lines.
+pub(super) fn rows_min_height(rows: usize, line_height: Pixels, scale_factor: f32) -> Pixels {
+    let height = rows as f32 * f32::from(line_height);
+    if !(scale_factor > 0.) {
+        return px(height);
+    }
+    // Leave float noise alone: an exact whole number of device pixels stays as it is.
+    let device = (height * scale_factor - 1e-3).ceil().max(0.);
+    px(device / scale_factor)
+}
+
 fn editor_gutter_bounds(
     input_bounds: Bounds<Pixels>,
     line_number_width: Pixels,
@@ -2497,7 +2516,9 @@ impl<M: InputModeKind> Element for TextElement<M> {
             // At least `rows` tall (auto grow: the content's rows, capped at
             // `max_rows`); a taller parent still fills it.
             let rows = state.mode.max_rows().min(state.mode.rows());
-            style.min_size.height = (rows * line_height).into();
+            // HERDR: whole device pixels (rows_min_height), not `rows * line_height`.
+            style.min_size.height =
+                rows_min_height(rows, line_height, window.scale_factor()).into();
         } else {
             // For single-line inputs, the minimum height should be the line height
             style.size.height = line_height.into();
@@ -4755,6 +4776,37 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn test_rows_min_height_is_whole_device_pixels_and_holds_the_rows() {
+        // 14px text at the default line height, and an exact one.
+        for line_height in [px(14. * 1.618034), px(20.), px(24.)] {
+            for scale in [1., 1.25, 1.5, 1.6666666, 1.75, 2., 0.9 * 2.] {
+                for rows in [1_usize, 2, 3, 7, 10] {
+                    let min = rows_min_height(rows, line_height, scale);
+                    let lines = rows as f32 * f32::from(line_height);
+                    let device = f32::from(min) * scale;
+                    assert!(
+                        (device - device.round()).abs() < 1e-3,
+                        "{rows} rows of {line_height:?} at {scale}x: {device} device px"
+                    );
+                    assert!(f32::from(min) >= lines - 1e-3, "short of its lines");
+                    assert!(
+                        device - lines * scale < 1. + 1e-3,
+                        "more than a device pixel over its lines"
+                    );
+                    // Snapped at any position, the box still holds its lines.
+                    for top in [0., 0.25, 0.5, 0.75, 10.4] {
+                        let snapped = (top * scale + device).round() - (top * scale).round();
+                        assert!(snapped + 1e-3 >= lines * scale, "snapped short at {top}");
+                    }
+                }
+            }
+        }
+        // An exact whole number of device pixels stays as it is.
+        assert_eq!(rows_min_height(2, px(24.), 1.5), px(48.));
+        assert_eq!(rows_min_height(3, px(20.), 1.), px(60.));
     }
 
     #[test]
